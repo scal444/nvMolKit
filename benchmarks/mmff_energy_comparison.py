@@ -24,7 +24,6 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 
 from nvmolkit.mmffOptimization import MMFFOptimizeMoleculesConfs
-from nvmolkit.types import OptimizerOptions, OptimizerBackend
 import numpy as np
 
 SMILES_PATH = Path("/home/kboyd/data/chembl_size_splits/chembl_40-60.smi")
@@ -113,7 +112,12 @@ def minimize_rdkit(mols: list[Chem.Mol]) -> list[float]:
 
 
 def minimize_nvmolkit(mols: list[Chem.Mol]) -> list[float]:
-    energies_nested = MMFFOptimizeMoleculesConfs(mols, maxIters=1000, optimizerOptions=OptimizerOptions(OptimizerBackend.FIRE))
+    energies_nested = MMFFOptimizeMoleculesConfs(
+        mols,
+        maxIters=1000,
+        optimizer_backend="FIRE",
+        optimizer_options={"use_masses": True},
+    )
     energies = [energy for mol_energies in energies_nested for energy in mol_energies if energy is not None]
     return np.array(energies)
 

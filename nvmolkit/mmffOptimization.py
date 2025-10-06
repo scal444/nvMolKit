@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from rdkit.Chem import Mol
 
-from nvmolkit.types import HardwareOptions, OptimizerOptions, OptimizerBackend
+from nvmolkit.types import HardwareOptions
 from nvmolkit import _mmffOptimization
 
 
@@ -33,7 +33,8 @@ def MMFFOptimizeMoleculesConfs(
     maxIters: int = 200,
     nonBondedThreshold: float = 100.0,
     hardwareOptions: HardwareOptions | None = None,
-    optimizerOptions: OptimizerOptions | None = None,
+    optimizer_backend: str | None = None,
+    optimizer_options: dict[str, object] | None = None,
 ) -> list[list[float]]:
     """Optimize conformers for multiple molecules using MMFF force field with selectable minimization backend.
 
@@ -46,10 +47,9 @@ def MMFFOptimizeMoleculesConfs(
                   conformers already generated.
         maxIters: Maximum number of BFGS optimization iterations (default: 200)
         nonBondedThreshold: Radius threshold for non-bonded interactions in Ångströms (default: 100.0)
-        numThreads: Number of OpenMP threads for parallel processing (default: 1)
-        batchSize: Batch size for processing conformers, 0 for no batching (default: 0)
         hardwareOptions: Hardware tuning options for GPU execution (default: auto)
-        optimizerOptions: Numerical optimizer selection and configuration (default: BFGS backend)
+        optimizer_backend: Minimizer backend to run, e.g. ``"BFGS"`` or ``"FIRE"`` (default: ``"BFGS"``)
+        optimizer_options: Backend-specific configuration dictionary. Only FIRE options are currently supported.
 
     Returns:
         List of lists of energies, where each inner list contains the optimized energies
@@ -98,15 +98,51 @@ def MMFFOptimizeMoleculesConfs(
         hardwareOptions = HardwareOptions()
     native_options = hardwareOptions._as_native()
 
-    if optimizerOptions is None:
-        optimizerOptions = OptimizerOptions()
-    native_optimizer_options = optimizerOptions._as_native()
+    backend_value = "BFGS" if optimizer_backend is None else optimizer_backend
+    if not isinstance(backend_value, str):
+        raise TypeError("optimizer_backend must be a string if provided")
+
+    if optimizer_options is None:
+        options_dict: dict[str, object] = {}
+    else:
+        if not isinstance(optimizer_options, dict):
+            raise TypeError("optimizer_options must be a dictionary if provided")
+        options_dict = dict(optimizer_options)
+        for key in options_dict:
+            if not isinstance(key, str):
+                raise TypeError("optimizer_options keys must be strings")
+
+    backend_lc = backend_value.lower()
+    if backend_lc not in {"bfgs", "fire"}:
+        raise ValueError(f"Unsupported optimizer backend '{backend_value}'")
+
+    if backend_lc == "bfgs" and options_dict:
+        raise ValueError("BFGS backend does not accept optimizer_options")
+
+    if backend_lc == "fire":
+        valid_fire_keys = {
+            "use_masses",
+            "dt_init",
+            "dt_min",
+            "dt_max",
+            "max_step",
+            "time_step_increment",
+            "time_step_decrement",
+            "n_min_for_increase",
+            "alpha_init",
+            "alpha_decrement",
+        }
+        unknown = set(options_dict) - valid_fire_keys
+        if unknown:
+            unknown_str = ", ".join(sorted(unknown))
+            raise ValueError(f"Unknown FIRE optimizer option(s): {unknown_str}")
 
     return _mmffOptimization.MMFFOptimizeMoleculesConfs(
         molecules,
         maxIters,
         nonBondedThreshold,
         native_options,
-        native_optimizer_options,
+        backend_value,
+        options_dict,
     )
 

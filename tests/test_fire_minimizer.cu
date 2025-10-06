@@ -108,6 +108,10 @@ class FireMinimizerQuarticTest : public ::testing::Test {
     };
   }
 
+  std::vector<double> uniformMasses(const double massValue) const {
+    return std::vector<double>(totalAtoms_, massValue);
+  }
+
   std::vector<double> copyPositionsFromDevice() const {
     std::vector<double> positions(totalCoords_);
     positionsDevice_.copyToHost(positions);
@@ -208,6 +212,41 @@ TEST_F(FireMinimizerQuarticTest, QuarticPotentialConvergesToTargets) {
   EXPECT_LT(std::abs(maxAbsGrad), 1e-6);
 }
 
+TEST_F(FireMinimizerQuarticTest, MassScalingInfluencesDisplacement) {
+  setUpSystems();
+
+  const auto gradFunc       = gradientFunctor();
+  const int  numWarmupSteps = 50;
+
+  auto runWithMasses = [&](double massValue) {
+    nvMolKit::FireBatchMinimizer minimizer(kDim);
+    std::vector<double>          masses = uniformMasses(massValue);
+    minimizer.initialize(atomStarts_, masses.data());
+    for (int i = 0; i < numWarmupSteps; ++i) {
+      minimizer.step(1e-6, atomStartsDevice_, positionsDevice_, gradDevice_, gradFunc);
+    }
+    return copyPositionsFromDevice();
+  };
+
+  const std::vector<double> baselinePositions = copyPositionsFromDevice();
+
+  positionsDevice_.setFromVector(baselinePositions);
+  const auto lightPositions = runWithMasses(1.0);
+
+  positionsDevice_.setFromVector(baselinePositions);
+  const auto heavyPositions = runWithMasses(5.0);
+
+  double lightDistance = 0.0;
+  double heavyDistance = 0.0;
+  for (int i = 0; i < totalCoords_; ++i) {
+    const double target = expectedCoordinateValue(i);
+    lightDistance += std::abs(lightPositions[i] - target);
+    heavyDistance += std::abs(heavyPositions[i] - target);
+  }
+
+  EXPECT_LT(lightDistance, heavyDistance);
+}
+
 TEST_F(FireMinimizerQuarticTest, RespectsActiveSystemMask) {
   setUpSystems();
   const std::vector<double> initialPositions = copyPositionsFromDevice();
@@ -220,7 +259,7 @@ TEST_F(FireMinimizerQuarticTest, RespectsActiveSystemMask) {
   ASSERT_EQ(static_cast<int>(activeMask.size()), numSystems_);
 
   nvMolKit::FireBatchMinimizer minimizer(kDim);
-  minimizer.initialize(atomStarts_, activeMask.data());
+  minimizer.initialize(atomStarts_, nullptr, activeMask.data());
 
   auto gradFunc = gradientFunctor();
   for (int iter = 0; iter < 2000; ++iter) {

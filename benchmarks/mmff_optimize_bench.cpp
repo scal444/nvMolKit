@@ -86,23 +86,20 @@ std::vector<double> benchRDKit(const std::vector<RDKit::ROMol*>& mols,
   return energies;
 }
 
-std::optional<nvMolKit::MMFF::OptimizerOptions::Backend> parseMinimizerArg(const std::string& arg) {
-  std::string s = arg;
-  std::transform(s.begin(), s.end(), s.begin(), ::tolower);
-  if (s == "bfgs") {
-    return nvMolKit::MMFF::OptimizerOptions::Backend::BFGS;
-  }
-  if (s == "fire") {
-    return nvMolKit::MMFF::OptimizerOptions::Backend::FIRE;
+std::optional<std::string> parseMinimizerArg(const std::string& arg) {
+  std::string upper = arg;
+  std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+  if (upper == "BFGS" || upper == "FIRE") {
+    return upper;
   }
   return std::nullopt;
 }
 
-std::vector<double> benchNvMolKit(const std::vector<RDKit::ROMol*>&         mols,
-                                  const int                                 size,
-                                  const int                                 numConfs,
-                                  const int                                 maxIters,
-                                  nvMolKit::MMFF::OptimizerOptions::Backend minimizer) {
+std::vector<double> benchNvMolKit(const std::vector<RDKit::ROMol*>& mols,
+                                  const int                         size,
+                                  const int                         numConfs,
+                                  const int                         maxIters,
+                                  const std::string&                minimizer) {
   std::vector<RDKit::ROMol> molsToBench;
   for (const auto& mol : mols) {
     if (static_cast<int>(mol->getNumAtoms()) == size) {
@@ -115,16 +112,16 @@ std::vector<double> benchNvMolKit(const std::vector<RDKit::ROMol*>&         mols
     throw std::runtime_error("No molecules found with the specified size");
   }
 
-  std::string benchName = "nvMolKit, minimizer=" +
-                          std::string(minimizer == nvMolKit::MMFF::OptimizerOptions::Backend::BFGS ? "BFGS" : "FIRE") +
-                          ", mol_size=" + std::to_string(size) + ", num_confs=" + std::to_string(numConfs);
+  std::string benchName = "nvMolKit, minimizer=" + minimizer + ", mol_size=" + std::to_string(size) +
+                          ", num_confs=" + std::to_string(numConfs);
 
   genNConformers(molsToBench[0], numConfs);
   std::vector<double>        energies;
   std::vector<RDKit::ROMol*> molsToBenchPtrs = {&molsToBench[0]};
   ankerl::nanobench::Bench().epochIterations(1).epochs(1).run(benchName, [&]() {
     nvMolKit::MMFF::OptimizerOptions optimizerOptions;
-    optimizerOptions.backend = minimizer;
+    optimizerOptions.backend = (minimizer == "FIRE") ? nvMolKit::MMFF::OptimizerOptions::Backend::FIRE :
+                                                       nvMolKit::MMFF::OptimizerOptions::Backend::BFGS;
     energies                 = nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molsToBenchPtrs,
                                                               maxIters,
                                                               100.0,
@@ -139,7 +136,7 @@ enum class datasets {
   chembl
 };
 
-void runMMFFBench(int s, int n, nvMolKit::MMFF::OptimizerOptions::Backend minimizer) {
+void runMMFFBench(int s, int n, const std::string& minimizer) {
   const std::string                          fileName = getTestDataFolderPath() + "/MMFF94_hypervalent.sdf";
   std::vector<std::unique_ptr<RDKit::ROMol>> mols;
   getMols(fileName, mols);
@@ -267,23 +264,41 @@ void benchChembl(int                                       size,
   // Validate:
 }
 
-void runChemblBench(int s, int n, nvMolKit::MMFF::OptimizerOptions::Backend minimizer) {
+void runChemblBench(int s, int n, const std::string& minimizer) {
   const std::string       folder   = "/home/kevin/omg/datasets/chembl/discrete_sizes";
   constexpr int           maxIters = 200;
   static std::vector<int> molSizes = {60, 70, 80, 90, 100};
   static std::vector<int> numConfs = {20, 40, 60, 80, 100, 120, 140, 160, 180, 200, 220, 240, 260, 280, 300};
   printf("Warming up\n");
 
-  benchChembl(60, 20, folder, maxIters, minimizer);
+  benchChembl(60,
+              20,
+              folder,
+              maxIters,
+              minimizer == nvMolKit::MMFF::OptimizerOptions::Backend::BFGS ?
+                nvMolKit::MMFF::OptimizerOptions::Backend::BFGS :
+                nvMolKit::MMFF::OptimizerOptions::Backend::FIRE);
   printf("Warmed up\n");
   if (s != -1 && n != -1) {
-    benchChembl(s, n, folder, maxIters, minimizer);
+    benchChembl(s,
+                n,
+                folder,
+                maxIters,
+                minimizer == nvMolKit::MMFF::OptimizerOptions::Backend::BFGS ?
+                  nvMolKit::MMFF::OptimizerOptions::Backend::BFGS :
+                  nvMolKit::MMFF::OptimizerOptions::Backend::FIRE);
     return;
   }
 
   for (const auto size : molSizes) {
     for (const auto numConf : numConfs) {
-      benchChembl(size, numConf, folder, maxIters, minimizer);
+      benchChembl(size,
+                  numConf,
+                  folder,
+                  maxIters,
+                  minimizer == nvMolKit::MMFF::OptimizerOptions::Backend::BFGS ?
+                    nvMolKit::MMFF::OptimizerOptions::Backend::BFGS :
+                    nvMolKit::MMFF::OptimizerOptions::Backend::FIRE);
     }
   }
 }
@@ -295,9 +310,9 @@ int main(int argc, char* argv[]) {
   }
   auto dataset_selected = dataset == "chembl" ? datasets::chembl : datasets::mmff_validation;
 
-  int                                       size      = -1;
-  int                                       numConfs  = -1;
-  nvMolKit::MMFF::OptimizerOptions::Backend minimizer = nvMolKit::MMFF::OptimizerOptions::Backend::BFGS;
+  int         size      = -1;
+  int         numConfs  = -1;
+  std::string minimizer = "BFGS";
   if (argc >= 4) {
     printf("Using size %s and numConfs %s\n", argv[2], argv[3]);
     size     = std::stoi(argv[2]);
@@ -319,8 +334,7 @@ int main(int argc, char* argv[]) {
     minimizer = *minimizerParsed;
   }
 
-  std::cout << "Minimizer: " << (minimizer == nvMolKit::MMFF::OptimizerOptions::Backend::BFGS ? "BFGS" : "FIRE")
-            << std::endl;
+  std::cout << "Minimizer: " << minimizer << std::endl;
 
   if (dataset_selected == datasets::mmff_validation) {
     std::cout << "Running MMFF validation benchmarks" << std::endl;

@@ -66,7 +66,21 @@ BOOST_PYTHON_MODULE(_types) {
     .value("BFGS", mmff::OptimizerOptions::Backend::BFGS)
     .value("FIRE", mmff::OptimizerOptions::Backend::FIRE);
 
+  boost::python::class_<nvMolKit::FireOptions>("FireOptions")
+    .def(boost::python::init<>())
+    .def_readwrite("dtInit", &nvMolKit::FireOptions::dtInit)
+    .def_readwrite("dtMin", &nvMolKit::FireOptions::dtMin)
+    .def_readwrite("dtMax", &nvMolKit::FireOptions::dtMax)
+    .def_readwrite("maxStep", &nvMolKit::FireOptions::maxStep)
+    .def_readwrite("timeStepIncrement", &nvMolKit::FireOptions::timeStepIncrement)
+    .def_readwrite("timeStepDecrement", &nvMolKit::FireOptions::timeStepDecrement)
+    .def_readwrite("nMinForIncrease", &nvMolKit::FireOptions::nMinForIncrease)
+    .def_readwrite("alphaInit", &nvMolKit::FireOptions::alphaInit)
+    .def_readwrite("alphaDecrement", &nvMolKit::FireOptions::alphaDecrement)
+    .def_readwrite("useMass", &nvMolKit::FireOptions::useMass);
+
   boost::python::class_<mmff::OptimizerOptions>("OptimizerOptions")
     .def(boost::python::init<>())
-    .def_readwrite("backend", &mmff::OptimizerOptions::backend);
+    .def_readwrite("backend", &mmff::OptimizerOptions::backend)
+    .def_readwrite("fireOptions", &mmff::OptimizerOptions::fireOptions);
 }

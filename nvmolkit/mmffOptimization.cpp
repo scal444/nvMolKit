@@ -38,11 +38,12 @@ template <typename T> boost::python::list vectorOfVectorsToList(const std::vecto
 BOOST_PYTHON_MODULE(_mmffOptimization) {
   boost::python::def(
     "MMFFOptimizeMoleculesConfs",
-    +[](const boost::python::list&              molecules,
-        int                                     maxIters,
-        double                                  nonBondedThreshold,
-        const nvMolKit::BatchHardwareOptions&   hardwareOptions,
-        const nvMolKit::MMFF::OptimizerOptions& optimizerOptions) -> boost::python::list {
+    +[](const boost::python::list&            molecules,
+        int                                   maxIters,
+        double                                nonBondedThreshold,
+        const nvMolKit::BatchHardwareOptions& hardwareOptions,
+        const std::string&                    optimizerBackend,
+        const boost::python::dict&            optimizerOptionsDict) -> boost::python::list {
       // Convert Python list to std::vector<RDKit::ROMol*>
       std::vector<RDKit::ROMol*> molsVec;
       molsVec.reserve(len(molecules));
@@ -55,12 +56,51 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
         molsVec.push_back(mol);
       }
 
+      nvMolKit::MMFF::OptimizerOptions optOptions;
+      if (optimizerBackend.empty() || optimizerBackend == "BFGS" || optimizerBackend == "bfgs") {
+        optOptions.backend = nvMolKit::MMFF::OptimizerOptions::Backend::BFGS;
+        if (boost::python::len(optimizerOptionsDict) != 0) {
+          throw std::invalid_argument("BFGS backend does not accept optimizer options");
+        }
+      } else if (optimizerBackend == "FIRE" || optimizerBackend == "fire") {
+        optOptions.backend = nvMolKit::MMFF::OptimizerOptions::Backend::FIRE;
+        const auto keys    = optimizerOptionsDict.keys();
+        for (int i = 0; i < boost::python::len(keys); ++i) {
+          const std::string key = boost::python::extract<std::string>(keys[i]);
+          if (key == "use_masses") {
+            optOptions.fireOptions.useMass = boost::python::extract<bool>(optimizerOptionsDict[key]);
+          } else if (key == "dt_init") {
+            optOptions.fireOptions.dtInit = boost::python::extract<double>(optimizerOptionsDict[key]);
+          } else if (key == "dt_min") {
+            optOptions.fireOptions.dtMin = boost::python::extract<double>(optimizerOptionsDict[key]);
+          } else if (key == "dt_max") {
+            optOptions.fireOptions.dtMax = boost::python::extract<double>(optimizerOptionsDict[key]);
+          } else if (key == "max_step") {
+            optOptions.fireOptions.maxStep = boost::python::extract<double>(optimizerOptionsDict[key]);
+          } else if (key == "time_step_increment") {
+            optOptions.fireOptions.timeStepIncrement = boost::python::extract<double>(optimizerOptionsDict[key]);
+          } else if (key == "time_step_decrement") {
+            optOptions.fireOptions.timeStepDecrement = boost::python::extract<double>(optimizerOptionsDict[key]);
+          } else if (key == "n_min_for_increase") {
+            optOptions.fireOptions.nMinForIncrease = boost::python::extract<int>(optimizerOptionsDict[key]);
+          } else if (key == "alpha_init") {
+            optOptions.fireOptions.alphaInit = boost::python::extract<double>(optimizerOptionsDict[key]);
+          } else if (key == "alpha_decrement") {
+            optOptions.fireOptions.alphaDecrement = boost::python::extract<double>(optimizerOptionsDict[key]);
+          } else {
+            throw std::invalid_argument("Unknown FIRE optimizer option: " + key);
+          }
+        }
+      } else {
+        throw std::invalid_argument("Unsupported optimizer backend: " + optimizerBackend);
+      }
+
       // Call the C++ function
       auto result = nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molsVec,
                                                                    maxIters,
                                                                    nonBondedThreshold,
                                                                    hardwareOptions,
-                                                                   optimizerOptions);
+                                                                   optOptions);
 
       // Convert result back to Python list of lists
       return vectorOfVectorsToList(result);
@@ -69,7 +109,8 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
      boost::python::arg("maxIters")           = 200,
      boost::python::arg("nonBondedThreshold") = 100.0,
      boost::python::arg("hardwareOptions")    = nvMolKit::BatchHardwareOptions(),
-     boost::python::arg("optimizerOptions")   = nvMolKit::MMFF::OptimizerOptions()),
+     boost::python::arg("optimizerBackend")   = std::string("BFGS"),
+     boost::python::arg("optimizerOptions")   = boost::python::dict()),
     "Optimize conformers for multiple molecules using MMFF force field.\n"
     "\n"
     "Args:\n"

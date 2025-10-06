@@ -41,14 +41,11 @@ bool parseBoolArg(const std::string& arg) {
   return (s == "1" || s == "true" || s == "yes" || s == "on");
 }
 
-std::optional<nvMolKit::MMFF::OptimizerOptions::Backend> parseMinimizerArg(const std::string& arg) {
-  std::string s = arg;
-  std::transform(s.begin(), s.end(), s.begin(), ::tolower);
-  if (s == "bfgs") {
-    return nvMolKit::MMFF::OptimizerOptions::Backend::BFGS;
-  }
-  if (s == "fire") {
-    return nvMolKit::MMFF::OptimizerOptions::Backend::FIRE;
+std::optional<std::string> parseMinimizerArg(const std::string& arg) {
+  std::string upper = arg;
+  std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+  if (upper == "BFGS" || upper == "FIRE") {
+    return upper;
   }
   return std::nullopt;
 }
@@ -100,12 +97,12 @@ std::vector<std::vector<double>> runRDKit(std::vector<RDKit::ROMol*>& molsPtrs, 
   return allEnergies;
 }
 
-std::vector<std::vector<double>> runNvMolKit(std::vector<RDKit::ROMol*>&               molsPtrs,
-                                             int                                       maxIters,
-                                             int                                       batchSize,
-                                             int                                       batchesPerGpu,
-                                             int                                       numGpus,
-                                             nvMolKit::MMFF::OptimizerOptions::Backend minimizer) {
+std::vector<std::vector<double>> runNvMolKit(std::vector<RDKit::ROMol*>& molsPtrs,
+                                             int                         maxIters,
+                                             int                         batchSize,
+                                             int                         batchesPerGpu,
+                                             int                         numGpus,
+                                             const std::string&          minimizer) {
   nvMolKit::BatchHardwareOptions perfOptions;
   perfOptions.batchesPerGpu = batchesPerGpu;
   perfOptions.batchSize     = batchSize;
@@ -117,11 +114,10 @@ std::vector<std::vector<double>> runNvMolKit(std::vector<RDKit::ROMol*>&        
     }
   }
   nvMolKit::MMFF::OptimizerOptions optimizerOptions;
-  optimizerOptions.backend = minimizer;
+  optimizerOptions.backend = (minimizer == "FIRE") ? nvMolKit::MMFF::OptimizerOptions::Backend::FIRE :
+                                                     nvMolKit::MMFF::OptimizerOptions::Backend::BFGS;
   std::vector<std::vector<double>> energies;
-  std::string                      benchName = "nvMolKit MMFF, minimizer=" +
-                          std::string(minimizer == nvMolKit::MMFF::OptimizerOptions::Backend::BFGS ? "BFGS" : "FIRE") +
-                          ", num_mols=" + std::to_string(molsPtrs.size()) +
+  std::string benchName = "nvMolKit MMFF, minimizer=" + minimizer + ", num_mols=" + std::to_string(molsPtrs.size()) +
                           ", batch_size=" + std::to_string(batchSize) +
                           ", num_concurrent_batches=" + std::to_string(batchesPerGpu);
   ankerl::nanobench::Bench().epochIterations(1).epochs(1).run(benchName, [&]() {
@@ -133,19 +129,19 @@ std::vector<std::vector<double>> runNvMolKit(std::vector<RDKit::ROMol*>&        
 }  // namespace
 
 int main(int argc, char* argv[]) {
-  std::string                               filePath           = "benchmarks/data/MMFF94_hypervalent.sdf";
-  int                                       numMols            = 20;
-  int                                       confsPerMol        = 20;
-  bool                                      doRdkit            = true;
-  bool                                      doWarmup           = true;
-  bool                                      doEnergyCheck      = true;
-  int                                       batchSize          = 1000;
-  int                                       batchesPerGpu      = 10;
-  int                                       maxIters           = 1000;
-  int                                       numGpus            = -1;  // If <0, use all GPUs
-  float                                     perturbationFactor = 0.5f;
-  int                                       rdkitThreads       = -1;  // If <0, use OMP max
-  nvMolKit::MMFF::OptimizerOptions::Backend minimizer          = nvMolKit::MMFF::OptimizerOptions::Backend::BFGS;
+  std::string filePath           = "benchmarks/data/MMFF94_hypervalent.sdf";
+  int         numMols            = 20;
+  int         confsPerMol        = 20;
+  bool        doRdkit            = true;
+  bool        doWarmup           = true;
+  bool        doEnergyCheck      = true;
+  int         batchSize          = 1000;
+  int         batchesPerGpu      = 10;
+  int         maxIters           = 1000;
+  int         numGpus            = -1;  // If <0, use all GPUs
+  float       perturbationFactor = 0.5f;
+  int         rdkitThreads       = -1;  // If <0, use OMP max
+  std::string minimizer          = "BFGS";
 
   static struct option long_options[] = {
     {             "file_path", required_argument, 0, 'f'},
@@ -265,12 +261,12 @@ int main(int argc, char* argv[]) {
         }
         break;
       case 'm': {
-        const auto minimizerParsed = parseMinimizerArg(optarg);
-        if (!minimizerParsed) {
-          std::cerr << "Error: Invalid value for minimizer: " << optarg << " (expected BFGS or FIRE)\n";
+        auto parsed = parseMinimizerArg(optarg);
+        if (!parsed) {
+          std::cerr << "Error: Invalid minimizer: " << optarg << "\n";
           return 1;
         }
-        minimizer = *minimizerParsed;
+        minimizer = *parsed;
         break;
       }
       case 'h':
@@ -312,8 +308,7 @@ int main(int argc, char* argv[]) {
   std::cout << "  RDKit MMFF threads: " << (rdkitThreads > 0 ? std::to_string(rdkitThreads) : std::string("OMP max"))
             << "\n";
   std::cout << "  Perturbation factor: " << perturbationFactor << "\n\n";
-  std::cout << "  Minimizer: " << (minimizer == nvMolKit::MMFF::OptimizerOptions::Backend::BFGS ? "BFGS" : "FIRE")
-            << "\n\n";
+  std::cout << "  Minimizer: " << minimizer << "\n\n";
 
   const std::string ext          = BenchUtils::getFileExtensionLower(filePath);
   const bool        isSmilesLike = (ext == ".smi" || ext == ".smiles" || ext == ".cxsmiles");
@@ -351,7 +346,34 @@ int main(int argc, char* argv[]) {
 
     BenchUtils::perturbAllConformers(warmupPtrs, perturbationFactor, 123);
 
-    (void)runNvMolKit(warmupPtrs, maxIters, batchSize, batchesPerGpu, numGpus, minimizer);
+    auto runNvMolKitWithConfig = [&](std::vector<RDKit::ROMol*>& mols, bool useWarmup) {
+      if (useWarmup && doWarmup) {
+        std::cout << "Running nvMolKit warmup...\n";
+        runNvMolKit(mols, maxIters, batchSize, batchesPerGpu, numGpus, minimizer);
+      }
+      std::cout << "Running nvMolKit benchmark...\n";
+      auto energiesNv = runNvMolKit(mols, maxIters, batchSize, batchesPerGpu, numGpus, minimizer);
+      if (doEnergyCheck) {
+        int totalDiffs = 0;
+        int totalConfs = 0;
+        for (size_t i = 0; i < energiesNv.size(); ++i) {
+          const auto&  a = energiesNv[i];
+          const auto&  b = rdkitRes[i];
+          const size_t n = std::min(a.size(), b.size());
+          for (size_t j = 0; j < n; ++j) {
+            totalConfs++;
+            if (std::abs(a[j] - b[j]) > 1e-2)
+              totalDiffs++;
+          }
+        }
+        if (totalDiffs > 0) {
+          std::cout << "Differences found: " << totalDiffs << "/" << totalConfs << " conformers differ" << std::endl;
+        } else {
+          std::cout << "Perfect match (" << totalConfs << " conformers)" << std::endl;
+        }
+      }
+    };
+    runNvMolKitWithConfig(warmupPtrs, true);
     if (doRdkit) {
       (void)runRDKit(warmupPtrs, maxIters, rdkitThreadsResolved);
     }

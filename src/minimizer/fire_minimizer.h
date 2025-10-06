@@ -26,7 +26,9 @@ namespace nvMolKit {
 //! (https://gitlab.com/ase/ase/-/blob/master/ase/optimize/fire.py)
 struct FireOptions {
   double dtInit = 0.1;  //!< Initial time step
-  double dtMax  = 1.0;  //!< Maximum time step
+
+  double dtMin = 0.02;
+  double dtMax = 1.0;  //!< Maximum time step
 
   double maxStep = 0.2;  //!< Maximum total distance a system can move per step.
 
@@ -37,6 +39,8 @@ struct FireOptions {
 
   double alphaInit      = 0.25;  //!< Initial value of alpha
   double alphaDecrement = 0.99;  //!< Factor to decrease alpha when conditions are met
+
+  bool useMass = true;  //!< Whether to use per-atom masses if provided, or unit masses otherwise.
 };
 
 class FireBatchMinimizer final : public BatchMinimizer {
@@ -46,7 +50,17 @@ class FireBatchMinimizer final : public BatchMinimizer {
                               cudaStream_t       stream  = nullptr);
   ~FireBatchMinimizer() override = default;
 
-  void initialize(const std::vector<int>& atomStartsHost, const uint8_t* activeSystems = nullptr);
+  //! Initialize internal buffers for a new batch.
+  //! @param atomStartsHost Offsets for the first atom of each system on the host.
+  //! @param masses Optional pointer to per-atom masses; nullptr indicates unit masses.
+  //! @param activeSystems Optional mask for active systems.
+  void initialize(const std::vector<int>& atomStartsHost,
+                  const double*           masses        = nullptr,
+                  const uint8_t*          activeSystems = nullptr);
+
+  //! Provide per-atom masses to be used on the next initialization when explicit masses are not supplied.
+  //! Passing an empty vector clears previously stored masses.
+  void setMasses(const std::vector<double>& masses);
 
   bool step(double                        gradTol,
             const AsyncDeviceVector<int>& atomStarts,
@@ -80,6 +94,7 @@ class FireBatchMinimizer final : public BatchMinimizer {
   // Per atom * dim quantities
   AsyncDeviceVector<double> velocities_;
   AsyncDeviceVector<double> prevVelocities_;
+  AsyncDeviceVector<double> masses_;
 
   // Per system quantities.
   AsyncDeviceVector<double>  powers_;
@@ -95,6 +110,8 @@ class FireBatchMinimizer final : public BatchMinimizer {
   PinnedHostVector<int>      loopStatusHost_;
   AsyncDeviceVector<int>     activeSystemIndices_;
   AsyncDeviceVector<int>     allSystemIndices_;
+
+  std::vector<double> hostMasses_;
 };
 
 }  // namespace nvMolKit

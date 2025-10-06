@@ -19,10 +19,11 @@
 #include <vector>
 
 #include "../hardware_options.h"
+#include "fire_minimizer.h"
 
 namespace RDKit {
 class ROMol;
-}
+}  // namespace RDKit
 
 namespace nvMolKit::MMFF {
 
@@ -32,6 +33,8 @@ struct OptimizerOptions {
     FIRE
   };
   Backend backend = Backend::BFGS;
+
+  FireOptions fireOptions;
 };
 
 //! \brief Optimize conformers for multiple molecules using MMFF force field

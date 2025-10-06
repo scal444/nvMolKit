@@ -124,6 +124,7 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
       BatchedMolecularSystemHost    systemHost;
       BatchedMolecularDeviceBuffers systemDevice;
       std::vector<double>           pos;
+      std::vector<double>           masses;
 
       // Track conformer atom start positions for molecules with different sizes
       std::vector<uint32_t> conformerAtomStarts;
@@ -139,6 +140,7 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
         atomNumbers.reserve(numAtoms);
         for (uint32_t i = 0; i < numAtoms; ++i) {
           atomNumbers.push_back(mol->getAtomWithIdx(i)->getAtomicNum());
+          masses.push_back(mol->getAtomWithIdx(i)->getMass());
         }
 
         // Add this conformer to the batch
@@ -162,7 +164,15 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
 
       std::unique_ptr<nvMolKit::BatchMinimizer> minimizer;
       if (optimizerOptions.backend == OptimizerOptions::Backend::FIRE) {
-        minimizer = std::make_unique<nvMolKit::FireBatchMinimizer>(/*dataDim=*/3, nvMolKit::FireOptions{}, streamPtr);
+        minimizer = std::make_unique<nvMolKit::FireBatchMinimizer>(
+          /*dataDim=*/3,
+          optimizerOptions.fireOptions,
+          streamPtr);
+        auto* minimizerPtr = dynamic_cast<FireBatchMinimizer*>(minimizer.get());
+        assert(minimizerPtr != nullptr);
+        if (optimizerOptions.fireOptions.useMass) {
+          minimizerPtr->setMasses(masses);
+        }
       } else {
         minimizer = std::make_unique<nvMolKit::BfgsBatchMinimizer>(/*dataDim=*/3,
                                                                    nvMolKit::DebugLevel::NONE,

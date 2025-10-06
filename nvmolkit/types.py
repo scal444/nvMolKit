@@ -90,43 +90,6 @@ class HardwareOptions:
         return self._native
 
 
-class OptimizerBackend(enum.Enum):
-    """Enumeration of supported MMFF optimizer backends."""
-
-    BFGS = _types.OptimizerBackend.BFGS
-    FIRE = _types.OptimizerBackend.FIRE
-
-
-class OptimizerOptions:
-    """Configures the MMFF minimizer backend.
-
-    Parameters:
-        backend: Choice of numerical optimizer. Use ``OptimizerBackend.BFGS`` for
-            BFGS (default) or ``OptimizerBackend.FIRE`` for the
-            Fast Inertial Relaxation Engine.
-    """
-
-    def __init__(self, backend: OptimizerBackend | None = None) -> None:
-        self._native = _types.OptimizerOptions()
-        if backend is not None:
-            self._native.backend = backend.value
-
-    @property
-    def backend(self) -> OptimizerBackend:
-        """Selected optimizer backend."""
-        return OptimizerBackend(self._native.backend)
-
-    @backend.setter
-    def backend(self, value: OptimizerBackend | int) -> None:
-        backend = OptimizerBackend(value) if not isinstance(value, OptimizerBackend) else value
-        self._native.backend = backend.value
-
-
-    def _as_native(self):
-        """Internal: return the underlying OptimizerOptions object."""
-        return self._native
-
-
 class AsyncGpuResult:
     """Handle to a GPU result.
 

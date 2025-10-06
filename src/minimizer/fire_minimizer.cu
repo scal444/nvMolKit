@@ -52,23 +52,24 @@ __device__ __forceinline__ cuda::std::span<T> getSystemSpan(const cuda::std::spa
 }
 
 constexpr int   updatePowerBlockSize = 256;
-__global__ void fireV1Kernel(const cuda::std::span<const int> atomStarts,
-                             const cuda::std::span<double>    x,
-                             const cuda::std::span<double>    v,
-                             const cuda::std::span<double>    f,
-                             const int                        dataDim,
-                             const cuda::std::span<double>    alphas,
-                             const cuda::std::span<double>    dt,
-                             const cuda::std::span<int>       numStepsWithPositivePower,
-                             const int                        positiveStepIncrementDelay,
-                             const double                     dtIncrementFactor,
-                             const double                     dtDecrementFactor,
-                             const double                     maxDt,
-                             const double                     alphaStart,
-                             const double                     alphaDecrementFactor,
-                             const double                     maxStep,
-                             const double                     gradTol,
-                             uint8_t*                         activeSystems) {
+__global__ void fireV1Kernel(const cuda::std::span<const int>    atomStarts,
+                             const cuda::std::span<double>       x,
+                             const cuda::std::span<double>       v,
+                             const cuda::std::span<double>       f,
+                             const cuda::std::span<const double> masses,
+                             const int                           dataDim,
+                             const cuda::std::span<double>       alphas,
+                             const cuda::std::span<double>       dt,
+                             const cuda::std::span<int>          numStepsWithPositivePower,
+                             const int                           positiveStepIncrementDelay,
+                             const double                        dtIncrementFactor,
+                             const double                        dtDecrementFactor,
+                             const double                        maxDt,
+                             const double                        alphaStart,
+                             const double                        alphaDecrementFactor,
+                             const double                        maxStep,
+                             const double                        gradTol,
+                             uint8_t*                            activeSystems) {
   namespace cg     = cooperative_groups;
   auto      block  = cg::this_thread_block();
   const int sysIdx = blockIdx.x;
@@ -85,8 +86,15 @@ __global__ void fireV1Kernel(const cuda::std::span<const int> atomStarts,
   }
 
   // Compute v * F power.
-  const auto   vSys  = getSystemSpan(v, atomStarts, sysIdx, dataDim);
-  const auto   fSys  = getSystemSpan(f, atomStarts, sysIdx, dataDim);
+  const auto                    vSys        = getSystemSpan(v, atomStarts, sysIdx, dataDim);
+  const auto                    fSys        = getSystemSpan(f, atomStarts, sysIdx, dataDim);
+  const bool                    massEnabled = !masses.empty();
+  cuda::std::span<const double> massesSys;
+  if (massEnabled) {
+    const int atomStart = atomStarts[sysIdx];
+    const int atomCount = atomStarts[sysIdx + 1] - atomStart;
+    massesSys           = masses.subspan(atomStart, atomCount);
+  }
   const double alpha = alphas[sysIdx];
 
   // TODO consolidate dot product implementations.
@@ -172,7 +180,13 @@ __global__ void fireV1Kernel(const cuda::std::span<const int> atomStarts,
   // Update V with force/dt with or without above mixing
   const double dtVal = dt[sysIdx];
   for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
-    vSys[i] += -fSys[i] * dtVal;
+    double accelerationScale = dtVal;
+    if (massEnabled) {
+      const int    coordIdx = i / dataDim;
+      const double mass     = massesSys[coordIdx];
+      accelerationScale     = dtVal / mass;
+    }
+    vSys[i] += -fSys[i] * accelerationScale;
   }
 
   block.sync();  // Ensure velocities have been updated before computing displacement norms.
@@ -225,15 +239,24 @@ FireBatchMinimizer::FireBatchMinimizer(const int dataDim, const FireOptions& opt
   loopStatusHost_[0] = 0;
 }
 
+void FireBatchMinimizer::setMasses(const std::vector<double>& masses) {
+  hostMasses_ = masses;
+}
+
 void FireBatchMinimizer::fireV1(const double                  gradTol,
                                 const AsyncDeviceVector<int>& atomStarts,
                                 AsyncDeviceVector<double>&    positions,
                                 AsyncDeviceVector<double>&    grad) {
-  const int numSystems = atomStarts.size() - 1;
+  const int                     numSystems = atomStarts.size() - 1;
+  cuda::std::span<const double> massesSpan;
+  if (masses_.size() > 0) {
+    massesSpan = cuda::std::span<const double>(masses_.data(), masses_.size());
+  }
   fireV1Kernel<<<numSystems, updatePowerBlockSize, 0, stream_>>>(toSpan(atomStarts),
                                                                  toSpan(positions),
                                                                  toSpan(velocities_),
                                                                  toSpan(grad),
+                                                                 massesSpan,
                                                                  dataDim_,
                                                                  toSpan(alpha_),
                                                                  toSpan(dt_),
@@ -250,7 +273,9 @@ void FireBatchMinimizer::fireV1(const double                  gradTol,
   cudaCheckError(cudaGetLastError());
 }
 
-void FireBatchMinimizer::initialize(const std::vector<int>& atomStartsHost, const uint8_t* activeSystems) {
+void FireBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
+                                    const double*           masses,
+                                    const uint8_t*          activeSystems) {
   const int totalAtoms = atomStartsHost.back();
   const int numSystems = atomStartsHost.size() - 1;
 
@@ -259,6 +284,16 @@ void FireBatchMinimizer::initialize(const std::vector<int>& atomStartsHost, cons
   prevVelocities_.resize(totalAtoms * dataDim_);
   velocities_.zero();
   prevVelocities_.zero();
+
+  if (fireOptions_.useMass && masses != nullptr) {
+    masses_.resize(totalAtoms);
+    cudaMemcpyAsync(masses_.data(), masses, totalAtoms * sizeof(double), cudaMemcpyDefault, stream_);
+  } else if (fireOptions_.useMass && !hostMasses_.empty()) {
+    if (hostMasses_.size() != static_cast<size_t>(totalAtoms)) {
+      throw std::runtime_error("Stored masses size does not match atom count");
+    }
+    masses_.setFromVector(hostMasses_);
+  }
 
   // Resize and set per-system buffers.
   statuses_.resize(numSystems);
@@ -335,7 +370,7 @@ bool FireBatchMinimizer::minimize(const int                                   nu
                                   [[maybe_unused]] EnergyFunctor              eFunc,
                                   const GradFunctor                           gFunc,
                                   const uint8_t*                              activeThisStage) {
-  initialize(atomStartsHost, activeThisStage);
+  initialize(atomStartsHost, nullptr, activeThisStage);
 
   for (int i = 0; i < numIters; ++i) {
     if (step(gradTol, atomStarts, positions, grad, gFunc)) {
