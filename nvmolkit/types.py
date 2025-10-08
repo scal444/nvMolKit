@@ -17,8 +17,7 @@
 import enum
 import torch
 from typing import Iterable, List
-from nvmolkit import _embedMolecules  # type: ignore
-from nvmolkit import _mmffOptimization  # type: ignore
+from nvmolkit import _types  # type: ignore
 
 
 class HardwareOptions:
@@ -41,9 +40,9 @@ class HardwareOptions:
         batchesPerGpu: int = -1,
         gpuIds: Iterable[int] | None = None,
     ) -> None:
-        if _embedMolecules is None:  # propagate real import failure early
-            raise ImportError("nvmolkit._embedMolecules is not available; build native extensions")
-        native = _embedMolecules.BatchHardwareOptions()
+        if _types is None:  # propagate real import failure early
+            raise ImportError("nvmolkit._types is not available; build native extensions")
+        native = _types.BatchHardwareOptions()
         native.preprocessingThreads = int(preprocessingThreads)
         native.batchSize = int(batchSize)
         native.batchesPerGpu = int(batchesPerGpu)
@@ -94,8 +93,8 @@ class HardwareOptions:
 class OptimizerBackend(enum.Enum):
     """Enumeration of supported MMFF optimizer backends."""
 
-    BFGS = _mmffOptimization.OptimizerBackend.BFGS
-    FIRE = _mmffOptimization.OptimizerBackend.FIRE
+    BFGS = _types.OptimizerBackend.BFGS
+    FIRE = _types.OptimizerBackend.FIRE
 
 
 class OptimizerOptions:
@@ -108,7 +107,7 @@ class OptimizerOptions:
     """
 
     def __init__(self, backend: OptimizerBackend | None = None) -> None:
-        self._native = _mmffOptimization.OptimizerOptions()
+        self._native = _types.OptimizerOptions()
         if backend is not None:
             self._native.backend = backend.value
 

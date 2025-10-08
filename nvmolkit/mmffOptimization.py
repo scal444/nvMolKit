@@ -24,8 +24,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from rdkit.Chem import Mol
 
-from nvmolkit import _mmffOptimization
 from nvmolkit.types import HardwareOptions, OptimizerOptions, OptimizerBackend
+from nvmolkit import _mmffOptimization
 
 
 def MMFFOptimizeMoleculesConfs(

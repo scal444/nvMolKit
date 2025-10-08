@@ -26,8 +26,8 @@ if TYPE_CHECKING:
 
 __all__ = ["EmbedMolecules"]
 
-from nvmolkit import _embedMolecules  # type: ignore
 from nvmolkit.types import HardwareOptions
+from nvmolkit import _embedMolecules  # type: ignore
 
 
 def EmbedMolecules(

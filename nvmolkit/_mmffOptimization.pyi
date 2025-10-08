@@ -1,7 +1,7 @@
 from typing import Any, List
 from rdkit.Chem import Mol
 
-from nvmolkit.types import OptimizerOptions, OptimizerBackend
+from nvmolkit._types import OptimizerOptions, OptimizerBackend
 
 
 def MMFFOptimizeMoleculesConfs(

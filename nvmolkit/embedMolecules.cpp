@@ -17,7 +17,6 @@
 #include <GraphMol/ROMol.h>
 
 #include <boost/python.hpp>
-#include <boost/python/stl_iterator.hpp>
 
 #include "etkdg.h"
 
@@ -30,41 +29,7 @@ template <typename T> boost::python::list vectorToList(const std::vector<T>& vec
   return list;
 }
 
-// Provide getter/setter so Python lists/iterables can be assigned to gpuIds
-static boost::python::list getGpuIdsPy(nvMolKit::BatchHardwareOptions& opts) {
-  return vectorToList(opts.gpuIds);
-}
-
-static void setGpuIds(nvMolKit::BatchHardwareOptions& opts, const boost::python::object& iterable) {
-  std::vector<int> converted;
-  using namespace boost::python;
-  // Prefer fast sequence path
-  if (PySequence_Check(iterable.ptr())) {
-    Py_ssize_t n = PySequence_Size(iterable.ptr());
-    converted.reserve(static_cast<size_t>(n));
-    for (Py_ssize_t i = 0; i < n; ++i) {
-      object item(handle<>(borrowed(PySequence_GetItem(iterable.ptr(), i))));
-      converted.push_back(extract<int>(item));
-    }
-  } else {
-    // Fallback: try generic iterable
-    stl_input_iterator<int> it(iterable), end;
-    for (; it != end; ++it) {
-      converted.push_back(*it);
-    }
-  }
-  opts.gpuIds.swap(converted);
-}
-
 BOOST_PYTHON_MODULE(_embedMolecules) {
-  // Expose BatchHardwareOptions struct to Python
-  boost::python::class_<nvMolKit::BatchHardwareOptions>("BatchHardwareOptions")
-    .def(boost::python::init<>())
-    .def_readwrite("preprocessingThreads", &nvMolKit::BatchHardwareOptions::preprocessingThreads)
-    .def_readwrite("batchSize", &nvMolKit::BatchHardwareOptions::batchSize)
-    .def_readwrite("batchesPerGpu", &nvMolKit::BatchHardwareOptions::batchesPerGpu)
-    .add_property("gpuIds", &getGpuIdsPy, &setGpuIds);
-
   boost::python::def(
     "EmbedMolecules",
     +[](const boost::python::list&                  molecules,

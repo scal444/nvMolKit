@@ -15,7 +15,6 @@
 
 """Compare RDKit and nvmolkit MMFF energy minimization over sampled molecules."""
 
-from __future__ import annotations
 
 import random
 from pathlib import Path
