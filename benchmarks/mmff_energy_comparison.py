@@ -24,7 +24,8 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 
 from nvmolkit.mmffOptimization import MMFFOptimizeMoleculesConfs
-
+from nvmolkit.types import OptimizerOptions, OptimizerBackend
+import numpy as np
 
 SMILES_PATH = Path("/home/kboyd/data/chembl_size_splits/chembl_40-60.smi")
 NUM_MOLECULES = 100
@@ -98,7 +99,7 @@ def minimize_rdkit(mols: list[Chem.Mol]) -> list[float]:
     energies: list[float] = []
     failures = 0
     for mol in mols:
-        results = AllChem.MMFFOptimizeMoleculeConfs(mol, maxIters=MAX_ITERS)
+        results = AllChem.MMFFOptimizeMoleculeConfs(mol, maxIters=1000, numThreads=10)
         for status, energy in results:
             if energy is None:
                 failures += 1
@@ -108,19 +109,16 @@ def minimize_rdkit(mols: list[Chem.Mol]) -> list[float]:
                 failures += 1
     if failures:
         print(f"RDKit MMFF encountered {failures} non-converged conformers.")
-    return energies
+    return np.array(energies)
 
 
 def minimize_nvmolkit(mols: list[Chem.Mol]) -> list[float]:
-    energies_nested = MMFFOptimizeMoleculesConfs(mols, maxIters=MAX_ITERS)
+    energies_nested = MMFFOptimizeMoleculesConfs(mols, maxIters=1000, optimizerOptions=OptimizerOptions(OptimizerBackend.FIRE))
     energies = [energy for mol_energies in energies_nested for energy in mol_energies if energy is not None]
-    missing = sum(1 for mol_energies in energies_nested for energy in mol_energies if energy is None)
-    if missing:
-        print(f"nvmolkit MMFF reported {missing} conformers with missing energies.")
-    return energies
+    return np.array(energies)
 
 
-def plot_histogram(rdkit_energies: list[float], nvmolkit_energies: list[float]) -> None:
+def plot_histogram(rdkit_energies: np.ndarray, nvmolkit_energies: np.ndarray) -> None:
     plt.figure(figsize=(12, 6))
     plt.hist(rdkit_energies, bins=50, alpha=0.6, label="RDKit MMFF")
     plt.hist(nvmolkit_energies, bins=50, alpha=0.6, label="nvmolkit MMFF")
@@ -131,10 +129,48 @@ def plot_histogram(rdkit_energies: list[float], nvmolkit_energies: list[float]) 
     plt.tight_layout()
     plt.show()
 
+def plot_delta_histogram(rdkit_energies: np.ndarray, nvmolkit_energies: np.ndarray) -> None:
+    plt.figure(figsize=(12, 6))
+    plt.hist(rdkit_energies - nvmolkit_energies, bins=50, alpha=0.6, label="RDKit - nvmolkit")
+    plt.xlabel("Energy Difference (kcal/mol)")
+    plt.ylabel("Count")
+    plt.title("MMFF Minimized Energy Difference Distribution")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+def compute_mmff_energies(mols: list[Chem.Mol]) -> list[float]:
+    """
+    Compute MMFF energies for all conformers of the given molecules without optimization.
+
+    Args:
+        mols (list[Chem.Mol]): List of RDKit molecules with conformers.
+
+    Returns:
+        np.ndarray: Flattened array of MMFF energies (kcal/mol) for all conformers.
+    """
+    energies = []
+    for mol in mols:
+        props = AllChem.MMFFGetMoleculeProperties(mol, mmffVariant="MMFF94")
+        if props is None:
+            # Skip molecules that cannot be parameterized
+            continue
+        for conf in mol.GetConformers():
+            ff = AllChem.MMFFGetMoleculeForceField(mol, props, confId=conf.GetId())
+            if ff is not None:
+                energy = ff.CalcEnergy()
+                energies.append(energy)
+            else:
+                energies.append(None)
+    return np.array([e for e in energies if e is not None])
+
+
 
 def main() -> None:
     smiles = load_smiles(SMILES_PATH)
     rdkit_mols, nvmolkit_mols = prepare_molecules(smiles)
+
+    orig_energies = compute_mmff_energies(rdkit_mols)
 
     rdkit_energies = minimize_rdkit(rdkit_mols)
     nvmolkit_energies = minimize_nvmolkit(nvmolkit_mols)
