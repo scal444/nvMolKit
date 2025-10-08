@@ -36,11 +36,11 @@ def MMFFOptimizeMoleculesConfs(
     optimizerOptions: OptimizerOptions | None = None,
 ) -> list[list[float]]:
     """Optimize conformers for multiple molecules using MMFF force field with selectable minimization backend.
-    
+
     This function performs GPU-accelerated MMFF optimization on multiple molecules with
     multiple conformers each. It uses CUDA for GPU acceleration and OpenMP for CPU
     parallelization to achieve high performance.
-    
+
     Args:
         molecules: List of RDKit molecules to optimize. Each molecule should have
                   conformers already generated.
@@ -50,49 +50,49 @@ def MMFFOptimizeMoleculesConfs(
         batchSize: Batch size for processing conformers, 0 for no batching (default: 0)
         hardwareOptions: Hardware tuning options for GPU execution (default: auto)
         optimizerOptions: Numerical optimizer selection and configuration (default: BFGS backend)
-    
+
     Returns:
         List of lists of energies, where each inner list contains the optimized energies
         for all conformers of the corresponding molecule. The order matches the input
         molecule order and conformer iteration order.
-        
+
     Raises:
         ValueError: If any molecule in the input list is invalid
         RuntimeError: If CUDA operations fail or optimization encounters errors
-        
+
     Example:
         >>> from rdkit import Chem
         >>> from rdkit.Chem import rdDistGeom
         >>> import nvmolkit.mmff as mmff
-        >>> 
+        >>>
         >>> # Load molecules and generate conformers
         >>> mol1 = Chem.MolFromSmiles('CCO')
         >>> mol2 = Chem.MolFromSmiles('CCC')
         >>> rdDistGeom.EmbedMultipleConfs(mol1, numConfs=5)
         >>> rdDistGeom.EmbedMultipleConfs(mol2, numConfs=3)
-        >>> 
+        >>>
         >>> # Optimize with custom settings
         >>> energies = mmff.MMFFOptimizeMoleculesConfs(
-        ...     [mol1, mol2], 
+        ...     [mol1, mol2],
         ...     maxIters=500,
         ...     numThreads=4,
         ...     batchSize=32
         ... )
-        >>> 
+        >>>
         >>> # energies[0] contains 5 energies for mol1's conformers
         >>> # energies[1] contains 3 energies for mol2's conformers
-    
+
     Note:
         - Input molecules are modified in-place with optimized conformer coordinates
     """
     # Validate input
     if not molecules:
         return []
-    
+
     for i, mol in enumerate(molecules):
         if mol is None:
             raise ValueError(f"Molecule at index {i} is None")
-    
+
     # Call the C++ implementation
     if hardwareOptions is None:
         hardwareOptions = HardwareOptions()
@@ -109,3 +109,4 @@ def MMFFOptimizeMoleculesConfs(
         native_options,
         native_optimizer_options,
     )
+
