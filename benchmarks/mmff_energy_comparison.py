@@ -80,7 +80,6 @@ def prepare_molecules(smiles: list[str]) -> tuple[list[Chem.Mol], list[Chem.Mol]
             continue
 
         rdkit_mols.append(mol)
-        nvmolkit_mols.append(duplicate_conformers(mol))
 
         if len(rdkit_mols) == NUM_MOLECULES:
             break
@@ -91,7 +90,10 @@ def prepare_molecules(smiles: list[str]) -> tuple[list[Chem.Mol], list[Chem.Mol]
             f"only {len(rdkit_mols)} succeeded."
         )
 
-    return rdkit_mols, nvmolkit_mols
+    return rdkit_mols
+
+def duplicate_mols_with_conformers(mols: list[Chem.Mol]) -> list[Chem.Mol]:
+    return [duplicate_conformers(mol) for mol in mols]
 
 
 def minimize_rdkit(mols: list[Chem.Mol]) -> list[float]:
@@ -111,21 +113,21 @@ def minimize_rdkit(mols: list[Chem.Mol]) -> list[float]:
     return np.array(energies)
 
 
-def minimize_nvmolkit(mols: list[Chem.Mol]) -> list[float]:
+def minimize_nvmolkit(mols: list[Chem.Mol], mass_weighting: bool = False) -> list[float]:
     energies_nested = MMFFOptimizeMoleculesConfs(
         mols,
         maxIters=1000,
         optimizer_backend="FIRE",
-        optimizer_options={"use_masses": True},
+        optimizer_options={"use_masses": mass_weighting},
     )
     energies = [energy for mol_energies in energies_nested for energy in mol_energies if energy is not None]
     return np.array(energies)
 
 
-def plot_histogram(rdkit_energies: np.ndarray, nvmolkit_energies: np.ndarray) -> None:
+def plot_histogram(energies_list: list[np.ndarray], labels: list[str]) -> None:
     plt.figure(figsize=(12, 6))
-    plt.hist(rdkit_energies, bins=50, alpha=0.6, label="RDKit MMFF")
-    plt.hist(nvmolkit_energies, bins=50, alpha=0.6, label="nvmolkit MMFF")
+    for energies, label in zip(energies_list, labels):
+        plt.hist(energies, bins=50, alpha=0.6, label=label)
     plt.xlabel("Energy (kcal/mol)")
     plt.ylabel("Count")
     plt.title("MMFF Minimized Energy Distribution")
@@ -172,16 +174,22 @@ def compute_mmff_energies(mols: list[Chem.Mol]) -> list[float]:
 
 def main() -> None:
     smiles = load_smiles(SMILES_PATH)
-    rdkit_mols, nvmolkit_mols = prepare_molecules(smiles)
+    rdkit_mols = prepare_molecules(smiles)
+    nvmolkit_mols = duplicate_mols_with_conformers(rdkit_mols)
+    nvmolkit_mols_mass_weighted = duplicate_mols_with_conformers(rdkit_mols)
 
     orig_energies = compute_mmff_energies(rdkit_mols)
 
     rdkit_energies = minimize_rdkit(rdkit_mols)
     nvmolkit_energies = minimize_nvmolkit(nvmolkit_mols)
+    nvmolkit_energies_mass_weighted = minimize_nvmolkit(nvmolkit_mols_mass_weighted, mass_weighting=True)
 
     print(f"Collected {len(rdkit_energies)} RDKit energies and {len(nvmolkit_energies)} nvmolkit energies.")
 
-    plot_histogram(rdkit_energies, nvmolkit_energies)
+    plot_histogram([rdkit_energies, nvmolkit_energies, nvmolkit_energies_mass_weighted], ["RDKit", "nvmolkit", "nvmolkit (mass weighted)"])
+
+    deltas = [nvmolkit_energies - rdkit_energies, nvmolkit_energies_mass_weighted - rdkit_energies]
+    plot_histogram(deltas, ["nvmolkit", "nvmolkit (mass weighted)"])
 
 
 if __name__ == "__main__":

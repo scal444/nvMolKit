@@ -160,14 +160,12 @@ def test_mmff_optimization_serial_vs_rdkit(mmff_test_mols):
                 f"abs_diff={energy_diff:.6f}, rel_error={rel_error:.6f}"
 
 
-@pytest.mark.parametrize("optimizer_backend", ["BFGS", "FIRE"])
-@pytest.mark.parametrize("fire_use_mass", [True, False])
+@pytest.mark.parametrize("optimizer_backend_options", [("BFGS", {}), ("FIRE", {"use_masses": True}), ("FIRE", {"use_masses": False})])
 @pytest.mark.parametrize("gpu_ids", [[0, 1], [0], [1]])
 @pytest.mark.parametrize("batchesize", [0, 2, 5])
 @pytest.mark.parametrize("batches_per_gpu", [1, 3])
 def test_mmff_optimization_batch_vs_rdkit(mmff_test_mols,
-                                          optimizer_backend,
-                                          fire_use_mass,
+                                          optimizer_backend_options,
                                           gpu_ids,
                                           batchesize,
                                           batches_per_gpu):
@@ -188,7 +186,7 @@ def test_mmff_optimization_batch_vs_rdkit(mmff_test_mols,
 
     tolerance = 1e-2
 
-    optimizer_options = {} if optimizer_backend == "BFGS" else {"use_masses": fire_use_mass}
+    backend, optimizer_options = optimizer_backend_options
 
     hardware_options = HardwareOptions(
         gpuIds=gpu_ids,
@@ -202,7 +200,7 @@ def test_mmff_optimization_batch_vs_rdkit(mmff_test_mols,
         maxIters=200,
         nonBondedThreshold=100.0,
         hardwareOptions=hardware_options,
-        optimizer_backend=optimizer_backend,
+        optimizer_backend=backend,
         optimizer_options=optimizer_options,
     )
     
