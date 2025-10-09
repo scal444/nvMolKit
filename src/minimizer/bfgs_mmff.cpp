@@ -163,6 +163,8 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
       auto gFunc = [&]() { nvMolKit::MMFF::computeGradients(systemDevice, streamPtr); };
 
       std::unique_ptr<nvMolKit::BatchMinimizer> minimizer;
+      const double gradTol = optimizerOptions.backend == OptimizerOptions::Backend::FIRE ? optimizerOptions.fireOptions.gradTol
+                                                                                        : 1e-4;
       if (optimizerOptions.backend == OptimizerOptions::Backend::FIRE) {
         minimizer = std::make_unique<nvMolKit::FireBatchMinimizer>(
           /*dataDim=*/3,
@@ -179,7 +181,6 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
                                                                    /*scaleGrads=*/true,
                                                                    streamPtr);
       }
-      constexpr double gradTol = 1e-4;  // hard-coded in RDKit.
       minimizer->minimize(maxIters,
                           gradTol,
                           systemHost.indices.atomStarts,

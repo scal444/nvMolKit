@@ -87,6 +87,8 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
             optOptions.fireOptions.alphaInit = boost::python::extract<double>(optimizerOptionsDict[key]);
           } else if (key == "alpha_decrement") {
             optOptions.fireOptions.alphaDecrement = boost::python::extract<double>(optimizerOptionsDict[key]);
+          } else if (key == "grad_tol") {
+            optOptions.fireOptions.gradTol = boost::python::extract<double>(optimizerOptionsDict[key]);
           } else {
             throw std::invalid_argument("Unknown FIRE optimizer option: " + key);
           }

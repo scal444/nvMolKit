@@ -175,7 +175,9 @@ TEST_F(FireMinimizerQuarticTest, QuarticPotentialConvergesToTargets) {
     EXPECT_GT(initialSystemEnergies[sysIdx], 1e-6) << "System " << sysIdx << " unexpectedly minimized";
   }
 
-  nvMolKit::FireBatchMinimizer minimizer(kDim);
+  nvMolKit::FireOptions fireOptions;
+  fireOptions.gradTol = 1e-6;
+  nvMolKit::FireBatchMinimizer minimizer(kDim, fireOptions);
   auto                         gradFunc   = gradientFunctor();
   auto                         energyFunc = [](const double*) {};
 
@@ -219,7 +221,9 @@ TEST_F(FireMinimizerQuarticTest, MassScalingInfluencesDisplacement) {
   const int  numWarmupSteps = 50;
 
   auto runWithMasses = [&](double massValue) {
-    nvMolKit::FireBatchMinimizer minimizer(kDim);
+    nvMolKit::FireOptions fireOptions;
+    fireOptions.gradTol = 1e-6;
+    nvMolKit::FireBatchMinimizer minimizer(kDim, fireOptions);
     std::vector<double>          masses = uniformMasses(massValue);
     minimizer.initialize(atomStarts_, masses.data());
     for (int i = 0; i < numWarmupSteps; ++i) {
@@ -258,7 +262,9 @@ TEST_F(FireMinimizerQuarticTest, RespectsActiveSystemMask) {
   std::vector<uint8_t> activeMask = {1, 0, 1};
   ASSERT_EQ(static_cast<int>(activeMask.size()), numSystems_);
 
-  nvMolKit::FireBatchMinimizer minimizer(kDim);
+  nvMolKit::FireOptions fireOptions;
+  fireOptions.gradTol = 1e-6;
+  nvMolKit::FireBatchMinimizer minimizer(kDim, fireOptions);
   minimizer.initialize(atomStarts_, nullptr, activeMask.data());
 
   auto gradFunc = gradientFunctor();

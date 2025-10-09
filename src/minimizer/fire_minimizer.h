@@ -41,6 +41,8 @@ struct FireOptions {
   double alphaDecrement = 0.99;  //!< Factor to decrease alpha when conditions are met
 
   bool useMass = true;  //!< Whether to use per-atom masses if provided, or unit masses otherwise.
+
+  double gradTol = 1e-4;  //!< Gradient tolerance for convergence checks.
 };
 
 class FireBatchMinimizer final : public BatchMinimizer {
