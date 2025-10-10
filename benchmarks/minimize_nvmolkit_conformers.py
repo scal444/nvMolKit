@@ -33,10 +33,10 @@ def parse_args() -> argparse.Namespace:
         help="Maximum MMFF iterations per conformer (default: 1000).",
     )
     parser.add_argument(
-        "--optimizer-backend",
-        type=str,
-        default="FIRE",
-        help="Optimizer backend to use (default: FIRE).",
+        "--gradtol",
+        type=float,
+        default=1e-4,
+        help="Gradient convergence tolerance for the FIRE optimizer (default: 1e-4).",
     )
     parser.add_argument(
         "--mass-weighting",
@@ -75,14 +75,17 @@ def compute_initial_energies(mol: Chem.Mol) -> np.ndarray:
 def minimize_molecules(
     mols: list[Chem.Mol],
     max_iters: int,
-    optimizer_backend: str,
+    grad_tol: float,
     mass_weighting: bool,
 ) -> list[np.ndarray]:
-    options: dict[str, object] = {"use_masses": mass_weighting}
+    options: dict[str, object] = {
+        "use_masses": mass_weighting,
+        "grad_tol": grad_tol,
+    }
     energies_nested = MMFFOptimizeMoleculesConfs(
         mols,
         maxIters=max_iters,
-        optimizer_backend=optimizer_backend,
+        optimizer_backend="FIRE",
         optimizer_options=options,
     )
     per_mol: list[np.ndarray] = []
@@ -122,15 +125,13 @@ def main() -> None:
 
     initial_per_mol: list[np.ndarray] = []
     if args.save_initial:
-        from rdkit.Chem import AllChem as _AllChem
-
         for mol in mols:
             initial_per_mol.append(compute_initial_energies(mol))
 
     minimized_per_mol = minimize_molecules(
         mols,
         args.max_iters,
-        args.optimizer_backend,
+        args.gradtol,
         args.mass_weighting,
     )
 
