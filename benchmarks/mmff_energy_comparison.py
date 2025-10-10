@@ -13,183 +13,211 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Compare RDKit and nvmolkit MMFF energy minimization over sampled molecules."""
+"""Analyze precomputed MMFF minimization results for RDKit reference and comparisons."""
 
+from __future__ import annotations
 
-import random
+import argparse
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
-from rdkit import Chem
-from rdkit.Chem import AllChem
-
-from nvmolkit.mmffOptimization import MMFFOptimizeMoleculesConfs
 import numpy as np
 
-SMILES_PATH = Path("/home/kboyd/data/chembl_size_splits/chembl_40-60.smi")
-NUM_MOLECULES = 100
-NUM_CONFORMERS = 10
-MAX_ITERS = 10_000
-RNG_SEED = 42
 
-
-def load_smiles(smiles_path: Path) -> list[str]:
-    with smiles_path.open("r", encoding="utf-8") as handle:
-        smiles = [line.strip() for line in handle if line.strip()]
-    if len(smiles) < NUM_MOLECULES:
-        raise ValueError(
-            f"Requested {NUM_MOLECULES} molecules but only found {len(smiles)} entries in {smiles_path}."
-        )
-    random.seed(RNG_SEED)
-    random.shuffle(smiles)
-    return smiles
-
-
-def duplicate_conformers(mol: Chem.Mol) -> Chem.Mol:
-    copy = Chem.Mol(mol)
-    for conf_idx in range(mol.GetNumConformers()):
-        source_conf = mol.GetConformer(conf_idx)
-        target_conf = copy.GetConformer(conf_idx)
-        for atom_idx in range(source_conf.GetNumAtoms()):
-            target_conf.SetAtomPosition(atom_idx, source_conf.GetAtomPosition(atom_idx))
-    return copy
-
-
-def prepare_molecules(smiles: list[str]) -> tuple[list[Chem.Mol], list[Chem.Mol]]:
-    rdkit_mols: list[Chem.Mol] = []
-    nvmolkit_mols: list[Chem.Mol] = []
-
-    params = AllChem.ETKDGv3()
-    params.randomSeed = RNG_SEED
-    params.numThreads = 0
-    params.maxAttempts = 1000
-    params.pruneRmsThresh = 0.1
-    params.useSmallRingTorsions = True
-    params.useMacrocycleTorsions = True
-    params.useBasicKnowledge = True
-    params.enforceChirality = True
-
-    for smi in smiles:
-        mol = Chem.MolFromSmiles(smi)
-        if mol is None:
-            continue
-        mol = Chem.AddHs(mol)
-
-        conf_ids = AllChem.EmbedMultipleConfs(mol, numConfs=NUM_CONFORMERS, params=params)
-        if len(conf_ids) < NUM_CONFORMERS:
-            continue
-
-        rdkit_mols.append(mol)
-
-        if len(rdkit_mols) == NUM_MOLECULES:
-            break
-
-    if len(rdkit_mols) < NUM_MOLECULES:
-        raise RuntimeError(
-            f"Unable to embed {NUM_MOLECULES} molecules with {NUM_CONFORMERS} conformers each; "
-            f"only {len(rdkit_mols)} succeeded."
-        )
-
-    return rdkit_mols
-
-def duplicate_mols_with_conformers(mols: list[Chem.Mol]) -> list[Chem.Mol]:
-    return [duplicate_conformers(mol) for mol in mols]
-
-
-def minimize_rdkit(mols: list[Chem.Mol]) -> list[float]:
-    energies: list[float] = []
-    failures = 0
-    for mol in mols:
-        results = AllChem.MMFFOptimizeMoleculeConfs(mol, maxIters=1000, numThreads=10)
-        for status, energy in results:
-            if energy is None:
-                failures += 1
-                continue
-            energies.append(energy)
-            if status != 0:
-                failures += 1
-    if failures:
-        print(f"RDKit MMFF encountered {failures} non-converged conformers.")
-    return np.array(energies)
-
-
-def minimize_nvmolkit(mols: list[Chem.Mol], mass_weighting: bool = False) -> list[float]:
-    energies_nested = MMFFOptimizeMoleculesConfs(
-        mols,
-        maxIters=1000,
-        optimizer_backend="FIRE",
-        optimizer_options={"use_masses": mass_weighting},
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Plot histograms comparing a reference RDKit run against one or more comparison runs.",
     )
-    energies = [energy for mol_energies in energies_nested for energy in mol_energies if energy is not None]
-    return np.array(energies)
+    parser.add_argument(
+        "reference_prefix",
+        type=Path,
+        help="Path prefix for the RDKit reference outputs (e.g., /path/to/rdkit).",
+    )
+    parser.add_argument(
+        "comparison_prefixes",
+        type=Path,
+        nargs="+",
+        help="One or more path prefixes for comparison runs (e.g., /path/to/nvm).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Optional output directory to save plots (default: display interactively).",
+    )
+    parser.add_argument(
+        "--bins",
+        type=int,
+        default=50,
+        help="Number of histogram bins (default: 50).",
+    )
+    return parser.parse_args()
 
 
-def plot_histogram(energies_list: list[np.ndarray], labels: list[str]) -> None:
+def load_array(path: Path) -> np.ndarray:
+    array = np.load(path)
+    if array.ndim != 1:
+        array = array.reshape(-1)
+    return array
+
+
+@dataclass
+class EnergySet:
+    name: str
+    prefix: Path
+    final: np.ndarray
+    initial: np.ndarray | None
+
+
+INITIAL_SUFFIXES = [
+    "_initial_energies.npy",
+    "_initial_energies_rdkit.npy",
+    "_initial_energies_nvm.npy",
+]
+
+FINAL_SUFFIXES = [
+    "_final_energies.npy",
+    "_final_energies_rdkit.npy",
+    "_final_energies_nvm.npy",
+]
+
+
+def find_file(prefix: Path, suffixes: list[str]) -> Path | None:
+    for suffix in suffixes:
+        candidate = prefix.parent / f"{prefix.name}{suffix}"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def load_energies(prefix: Path, label: str | None = None) -> EnergySet:
+    final_path = find_file(prefix, FINAL_SUFFIXES)
+    if final_path is None:
+        raise FileNotFoundError(
+            f"Could not locate final energies file for prefix {prefix}. Expected one of: {FINAL_SUFFIXES}."
+        )
+    final = load_array(final_path)
+
+    initial_path = find_file(prefix, INITIAL_SUFFIXES)
+    initial = load_array(initial_path) if initial_path is not None else None
+
+    name = label or prefix.name
+    return EnergySet(name=name, prefix=prefix, final=final, initial=initial)
+
+
+def safe_label(name: str) -> str:
+    return name.replace(" ", "_").replace("/", "_")
+
+
+def plot_histogram(
+    energies_list: list[np.ndarray],
+    labels: list[str],
+    bins: int,
+    title: str,
+    output_path: Path | None,
+    show: bool = False,
+) -> None:
     plt.figure(figsize=(12, 6))
     for energies, label in zip(energies_list, labels):
-        plt.hist(energies, bins=50, alpha=0.6, label=label)
+        plt.hist(energies, bins=bins, alpha=0.6, label=label)
     plt.xlabel("Energy (kcal/mol)")
     plt.ylabel("Count")
-    plt.title("MMFF Minimized Energy Distribution")
+    plt.title(title)
     plt.legend()
     plt.tight_layout()
-    plt.show()
-
-def plot_delta_histogram(rdkit_energies: np.ndarray, nvmolkit_energies: np.ndarray) -> None:
-    plt.figure(figsize=(12, 6))
-    plt.hist(rdkit_energies - nvmolkit_energies, bins=50, alpha=0.6, label="RDKit - nvmolkit")
-    plt.xlabel("Energy Difference (kcal/mol)")
-    plt.ylabel("Count")
-    plt.title("MMFF Minimized Energy Difference Distribution")
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-
-def compute_mmff_energies(mols: list[Chem.Mol]) -> list[float]:
-    """
-    Compute MMFF energies for all conformers of the given molecules without optimization.
-
-    Args:
-        mols (list[Chem.Mol]): List of RDKit molecules with conformers.
-
-    Returns:
-        np.ndarray: Flattened array of MMFF energies (kcal/mol) for all conformers.
-    """
-    energies = []
-    for mol in mols:
-        props = AllChem.MMFFGetMoleculeProperties(mol, mmffVariant="MMFF94")
-        if props is None:
-            # Skip molecules that cannot be parameterized
-            continue
-        for conf in mol.GetConformers():
-            ff = AllChem.MMFFGetMoleculeForceField(mol, props, confId=conf.GetId())
-            if ff is not None:
-                energy = ff.CalcEnergy()
-                energies.append(energy)
-            else:
-                energies.append(None)
-    return np.array([e for e in energies if e is not None])
-
+    if not show and output_path is None:
+        plt.close()
+        return
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(output_path)
+    if show:
+        plt.show()
+    plt.close()
 
 
 def main() -> None:
-    smiles = load_smiles(SMILES_PATH)
-    rdkit_mols = prepare_molecules(smiles)
-    nvmolkit_mols = duplicate_mols_with_conformers(rdkit_mols)
-    nvmolkit_mols_mass_weighted = duplicate_mols_with_conformers(rdkit_mols)
+    args = parse_args()
 
-    orig_energies = compute_mmff_energies(rdkit_mols)
+    reference = load_energies(args.reference_prefix, label="RDKit")
+    comparisons = [load_energies(prefix) for prefix in args.comparison_prefixes]
 
-    rdkit_energies = minimize_rdkit(rdkit_mols)
-    nvmolkit_energies = minimize_nvmolkit(nvmolkit_mols)
-    nvmolkit_energies_mass_weighted = minimize_nvmolkit(nvmolkit_mols_mass_weighted, mass_weighting=True)
+    output_dir = args.output_dir
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Collected {len(rdkit_energies)} RDKit energies and {len(nvmolkit_energies)} nvmolkit energies.")
+    if reference.initial is not None:
+        plot_histogram(
+            [reference.initial, reference.final],
+            ["RDKit initial", "RDKit final"],
+            args.bins,
+            "RDKit MMFF energy distribution",
+            output_dir / "rdkit_hist.png" if output_dir is not None else None,
+            show=False,
+        )
 
-    plot_histogram([rdkit_energies, nvmolkit_energies, nvmolkit_energies_mass_weighted], ["RDKit", "nvmolkit", "nvmolkit (mass weighted)"])
+    # Combined final comparison plot
+    combined_arrays = [reference.final] + [comp.final for comp in comparisons]
+    combined_labels = ["RDKit final"] + [f"{comp.name} final" for comp in comparisons]
+    plot_histogram(
+        combined_arrays,
+        combined_labels,
+        args.bins,
+        "Final energy comparison",
+        output_dir / "final_comparison.png" if output_dir is not None else None,
+        show=True,
+    )
 
-    deltas = [nvmolkit_energies - rdkit_energies, nvmolkit_energies_mass_weighted - rdkit_energies]
-    plot_histogram(deltas, ["nvmolkit", "nvmolkit (mass weighted)"])
+    combined_deltas: list[np.ndarray] = []
+    combined_delta_labels: list[str] = []
+
+    for comp in comparisons:
+        labels = ["RDKit final", f"{comp.name} final"]
+        arrays = [reference.final, comp.final]
+        if comp.initial is not None:
+            labels.append(f"{comp.name} initial")
+            arrays.append(comp.initial)
+
+        comp_hist_path = None
+        delta_hist_path = None
+        if output_dir is not None:
+            base = safe_label(comp.name)
+            comp_hist_path = output_dir / f"comparison_{base}.png"
+            delta_hist_path = output_dir / f"delta_{base}.png"
+
+        plot_histogram(
+            arrays,
+            labels,
+            args.bins,
+            f"RDKit vs {comp.name} energy distribution",
+            comp_hist_path,
+            show=False,
+        )
+
+        if reference.final.size and comp.final.size:
+            min_len = min(reference.final.size, comp.final.size)
+            delta = comp.final[:min_len] - reference.final[:min_len]
+            combined_deltas.append(delta)
+            combined_delta_labels.append(f"{comp.name} - RDKit")
+            plot_histogram(
+                [delta],
+                [f"{comp.name} - RDKit"],
+                args.bins,
+                f"Energy difference: {comp.name} - RDKit",
+                delta_hist_path,
+                show=False,
+            )
+
+    if combined_deltas:
+        plot_histogram(
+            combined_deltas,
+            combined_delta_labels,
+            args.bins,
+            "Energy difference comparison",
+            output_dir / "delta_combined.png" if output_dir is not None else None,
+            show=True,
+        )
 
 
 if __name__ == "__main__":
