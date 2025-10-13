@@ -81,7 +81,8 @@ BOOST_PYTHON_MODULE(_types) {
     .def_readwrite("alphaInit", &nvMolKit::FireOptions::alphaInit)
     .def_readwrite("alphaDecrement", &nvMolKit::FireOptions::alphaDecrement)
     .def_readwrite("useMass", &nvMolKit::FireOptions::useMass)
-    .def_readwrite("integrationScheme", &nvMolKit::FireOptions::integrationScheme);
+    .def_readwrite("integrationScheme", &nvMolKit::FireOptions::integrationScheme)
+    .def_readwrite("takeHalfStepBack", &nvMolKit::FireOptions::takeHalfStepBack);
 
   boost::python::class_<mmff::OptimizerOptions>("OptimizerOptions")
     .def(boost::python::init<>())

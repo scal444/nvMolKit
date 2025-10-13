@@ -48,6 +48,8 @@ struct FireOptions {
   double gradTol = 1e-4;  //!< Gradient tolerance for convergence checks.
 
   FireIntegrationScheme integrationScheme = FireIntegrationScheme::SemiImplicitEuler;
+
+  bool takeHalfStepBack = false;  //!< Whether to take a half step back when power is negative. Turned on for FIRE 2.0.
 };
 
 class FireBatchMinimizer final : public BatchMinimizer {

@@ -20,6 +20,7 @@
 #include <cmath>
 #include <functional>
 #include <random>
+#include <tuple>
 #include <vector>
 
 #include "cuda_error_check.h"
@@ -62,8 +63,16 @@ double quarticEnergyAtIndex(const double value, const double wantVal) {
   return diff * diff * diff * diff;
 }
 
-class FireMinimizerQuarticTest : public ::testing::TestWithParam<nvMolKit::FireIntegrationScheme> {
+using FireTestParams = std::tuple<nvMolKit::FireIntegrationScheme, bool>;
+
+class FireMinimizerQuarticTest : public ::testing::TestWithParam<FireTestParams> {
  protected:
+  nvMolKit::FireIntegrationScheme integrationScheme() const {
+    return std::get<0>(GetParam());
+  }
+
+  bool takeHalfStepBack() const { return std::get<1>(GetParam()); }
+
   void setUpSystems(const int seed = 1337) {
     atomStarts_  = {0, 3, 10, 12};
     numSystems_  = static_cast<int>(atomStarts_.size()) - 1;
@@ -177,7 +186,8 @@ TEST_P(FireMinimizerQuarticTest, QuarticPotentialConvergesToTargets) {
 
   nvMolKit::FireOptions fireOptions;
   fireOptions.gradTol = 1e-6;
-  fireOptions.integrationScheme = GetParam();
+  fireOptions.integrationScheme = integrationScheme();
+  fireOptions.takeHalfStepBack   = takeHalfStepBack();
   nvMolKit::FireBatchMinimizer minimizer(kDim, fireOptions);
   auto                         gradFunc   = gradientFunctor();
   auto                         energyFunc = [](const double*) {};
@@ -220,12 +230,14 @@ TEST_P(FireMinimizerQuarticTest, MassScalingInfluencesDisplacement) {
 
   const auto gradFunc       = gradientFunctor();
   const int  numWarmupSteps = 50;
-  const auto integrationScheme = GetParam();
+  const auto integrationScheme = this->integrationScheme();
+  const bool takeHalf          = takeHalfStepBack();
 
   auto runWithMasses = [&](double massValue) {
     nvMolKit::FireOptions fireOptions;
     fireOptions.gradTol = 1e-6;
     fireOptions.integrationScheme = integrationScheme;
+    fireOptions.takeHalfStepBack   = takeHalf;
     nvMolKit::FireBatchMinimizer minimizer(kDim, fireOptions);
     std::vector<double>          masses = uniformMasses(massValue);
     minimizer.initialize(atomStarts_, masses.data());
@@ -267,7 +279,8 @@ TEST_P(FireMinimizerQuarticTest, RespectsActiveSystemMask) {
 
   nvMolKit::FireOptions fireOptions;
   fireOptions.gradTol = 1e-6;
-  fireOptions.integrationScheme = GetParam();
+  fireOptions.integrationScheme = integrationScheme();
+  fireOptions.takeHalfStepBack   = takeHalfStepBack();
   nvMolKit::FireBatchMinimizer minimizer(kDim, fireOptions);
   minimizer.initialize(atomStarts_, nullptr, activeMask.data());
 
@@ -308,5 +321,6 @@ TEST_P(FireMinimizerQuarticTest, RespectsActiveSystemMask) {
 
 INSTANTIATE_TEST_SUITE_P(FireIntegrationSchemes,
                          FireMinimizerQuarticTest,
-                         ::testing::Values(nvMolKit::FireIntegrationScheme::ExplicitEuler,
-                                           nvMolKit::FireIntegrationScheme::SemiImplicitEuler));
+                         ::testing::Combine(::testing::Values(nvMolKit::FireIntegrationScheme::ExplicitEuler,
+                                                             nvMolKit::FireIntegrationScheme::SemiImplicitEuler),
+                                            ::testing::Bool()));

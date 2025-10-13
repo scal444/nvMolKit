@@ -114,6 +114,7 @@ def MMFFOptimizeMoleculesConfs(
     if backend_lc == "fire":
         normalized_options: dict[str, object] = {}
         integration_scheme = None
+        take_half_step_back: bool | None = None
         for key, value in optimizer_options.items():
             if not isinstance(key, str):
                 raise TypeError("optimizer_options keys must be strings")
@@ -122,6 +123,10 @@ def MMFFOptimizeMoleculesConfs(
                 if not isinstance(value, str):
                     raise TypeError("integration_scheme must be a string")
                 integration_scheme = value.lower()
+            elif key_lc == "take_half_step_back":
+                if not isinstance(value, bool):
+                    raise TypeError("take_half_step_back must be a boolean")
+                take_half_step_back = value
             else:
                 normalized_options[key_lc] = value
 
@@ -131,6 +136,9 @@ def MMFFOptimizeMoleculesConfs(
                     "integration_scheme must be either 'explicit_euler' or 'semi_implicit_euler'"
                 )
             normalized_options["integration_scheme"] = integration_scheme
+
+        if take_half_step_back is not None:
+            normalized_options["take_half_step_back"] = take_half_step_back
 
         optimizer_options = normalized_options
 

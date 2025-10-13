@@ -50,6 +50,11 @@ def parse_args() -> argparse.Namespace:
         help="FIRE integration scheme to use (default: semi_implicit_euler).",
     )
     parser.add_argument(
+        "--take-half-step-back",
+        action="store_true",
+        help="Enable FIRE half-step back behavior when power becomes negative.",
+    )
+    parser.add_argument(
         "--save-initial",
         action="store_true",
         help="Also compute and save initial MMFF energies before minimization.",
@@ -84,11 +89,13 @@ def minimize_molecules(
     grad_tol: float,
     mass_weighting: bool,
     integration_scheme: str,
+    take_half_step_back: bool,
 ) -> list[np.ndarray]:
     options: dict[str, object] = {
         "use_masses": mass_weighting,
         "grad_tol": grad_tol,
         "integration_scheme": integration_scheme,
+        "take_half_step_back": take_half_step_back,
     }
     energies_nested = MMFFOptimizeMoleculesConfs(
         mols,
@@ -142,6 +149,7 @@ def main() -> None:
         args.gradtol,
         args.mass_weighting,
         args.integration_scheme,
+        args.take_half_step_back,
     )
 
     minimized_array = np.concatenate(minimized_per_mol)

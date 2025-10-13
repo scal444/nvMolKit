@@ -102,6 +102,8 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
             } else {
               throw std::invalid_argument("Unknown integration_scheme value: " + integrationScheme);
             }
+          } else if (key == "take_half_step_back") {
+            optOptions.fireOptions.takeHalfStepBack = boost::python::extract<bool>(optimizerOptionsDict[key]);
           } else {
             throw std::invalid_argument("Unknown FIRE optimizer option: " + key);
           }

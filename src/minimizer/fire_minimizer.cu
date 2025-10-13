@@ -177,7 +177,8 @@ __device__ __forceinline__ void semiImplicitEuler(
 }
 
 template <FireIntegrationScheme integratorType>
-__global__ void fireKernel(const cuda::std::span<const int>    atomStarts,
+__global__ void fireKernel(  const bool takeHalfStepBack,
+                             const cuda::std::span<const int>    atomStarts,
                              const cuda::std::span<double>       x,
                              const cuda::std::span<double>       v,
                              const cuda::std::span<double>       f,
@@ -211,6 +212,7 @@ __global__ void fireKernel(const cuda::std::span<const int>    atomStarts,
   // Compute v * F power.
   const auto                    vSys        = getSystemSpan(v, atomStarts, sysIdx, dataDim);
   const auto                    fSys        = getSystemSpan(f, atomStarts, sysIdx, dataDim);
+  const auto                    xSys        = getSystemSpan(x, atomStarts, sysIdx, dataDim);
   const bool                    massEnabled = !masses.empty();
   cuda::std::span<const double> massesSys;
   if (massEnabled) {
@@ -239,6 +241,7 @@ __global__ void fireKernel(const cuda::std::span<const int>    atomStarts,
   // Update counting vars, alphas and dt based on powerSum.
   // This set of operations is per system, so only do it on one thread.
   // -----------------------------------------------------------------
+  const double dtBeforeAdjustment = dt[sysIdx];
   if (block.thread_rank() == 0) {
     if (maxGradReduced <= gradTol) {
       //  printf("Converged system %d with maxGrad %f <= %f\n", sysIdx, maxGradReduced, gradTol);
@@ -279,13 +282,16 @@ __global__ void fireKernel(const cuda::std::span<const int>    atomStarts,
   if (*hadNegativePowerShared) {
     // Reset case.
     for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
+      if (takeHalfStepBack) {
+        xSys[i] -= vSys[i] * dtBeforeAdjustment * 0.5;
+      }
       vSys[i] = 0.0;
     }
   } else {
     if constexpr (integratorType == FireIntegrationScheme::ExplicitEuler) {
-      explicitEuler(block, tempStorage, dt[sysIdx], vSys, fSys, getSystemSpan(x, atomStarts, sysIdx, dataDim), massesSys, alpha, dataDim);
+      explicitEuler(block, tempStorage, dt[sysIdx], vSys, fSys, xSys, massesSys, alpha, dataDim);
     } else if constexpr (integratorType == FireIntegrationScheme::SemiImplicitEuler) {
-      semiImplicitEuler(block, tempStorage, dt[sysIdx], vSys, fSys, getSystemSpan(x, atomStarts, sysIdx, dataDim), massesSys, alpha, dataDim);
+      semiImplicitEuler(block, tempStorage, dt[sysIdx], vSys, fSys, xSys, massesSys, alpha, dataDim);
     } else {
       assert(false);
     }
@@ -330,7 +336,9 @@ void FireBatchMinimizer::fireUpdate(const double                  gradTol,
   const double minDt = fireOptions_.dtInit * fireOptions_.dtMinFactor;
   const double maxDt = fireOptions_.dtInit * fireOptions_.dtMaxFactor;
   if (fireOptions_.integrationScheme == FireIntegrationScheme::ExplicitEuler) {
-    fireKernel<FireIntegrationScheme::ExplicitEuler><<<numSystems, updatePowerBlockSize, 0, stream_>>>(toSpan(atomStarts),
+    fireKernel<FireIntegrationScheme::ExplicitEuler><<<numSystems, updatePowerBlockSize, 0, stream_>>>(
+    fireOptions_.takeHalfStepBack,
+    toSpan(atomStarts),
                                                                toSpan(positions),
                                                                toSpan(velocities_),
                                                                toSpan(grad),
@@ -349,7 +357,9 @@ void FireBatchMinimizer::fireUpdate(const double                  gradTol,
                                                                gradTol,
                                                                statuses_.data());
   } else if (fireOptions_.integrationScheme == FireIntegrationScheme::SemiImplicitEuler) {
-      fireKernel<FireIntegrationScheme::SemiImplicitEuler><<<numSystems, updatePowerBlockSize, 0, stream_>>>(toSpan(atomStarts),
+      fireKernel<FireIntegrationScheme::SemiImplicitEuler><<<numSystems, updatePowerBlockSize, 0, stream_>>>(
+      fireOptions_.takeHalfStepBack,
+      toSpan(atomStarts),
                                                                  toSpan(positions),
                                                                  toSpan(velocities_),
                                                                  toSpan(grad),
