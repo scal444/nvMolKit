@@ -137,6 +137,29 @@ def plot_histogram(
     plt.close()
 
 
+def plot_boxplot(
+    data_list: list[np.ndarray],
+    labels: list[str],
+    title: str,
+    output_path: Path | None,
+    show: bool = False,
+) -> None:
+    cleaned = [data[np.isfinite(data)] for data in data_list]
+    if all(len(arr) == 0 for arr in cleaned):
+        return
+    plt.figure(figsize=(10, 6))
+    plt.boxplot(cleaned, labels=labels, vert=True, showfliers=False)
+    plt.ylabel("Energy difference (kcal/mol)")
+    plt.title(title)
+    plt.tight_layout()
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(output_path)
+    if show:
+        plt.show()
+    plt.close()
+
+
 def main() -> None:
     args = parse_args()
 
@@ -218,6 +241,14 @@ def main() -> None:
             output_dir / "delta_combined.png" if output_dir is not None else None,
             show=True,
         )
+        if output_dir is not None:
+            plot_boxplot(
+                combined_deltas,
+                combined_delta_labels,
+                "Energy difference comparison (boxplot)",
+                output_dir / "delta_box_combined.png",
+                show=True,
+            )
 
 
 if __name__ == "__main__":

@@ -25,6 +25,9 @@ import nvmolkit.mmffOptimization as nvmolkit_mmff
 from nvmolkit.types import HardwareOptions
 
 
+FIRE_INTEGRATION_SCHEMES = ("explicit_euler", "semi_implicit_euler")
+
+
 @pytest.fixture
 def mmff_test_mols(num_mols=5):
     """Load molecules from MMFF94_dative.sdf for testing.
@@ -112,7 +115,17 @@ def calculate_rdkit_mmff_energies(molecules, maxIters=200, nonBondedThreshold=10
     return all_energies
 
 
-def test_mmff_optimization_serial_vs_rdkit(mmff_test_mols):
+@pytest.mark.parametrize(
+    "optimizer_backend, optimizer_options",
+    [
+        ("BFGS", {}),
+        *[
+            ("FIRE", {"integration_scheme": scheme})
+            for scheme in FIRE_INTEGRATION_SCHEMES
+        ],
+    ],
+)
+def test_mmff_optimization_serial_vs_rdkit(mmff_test_mols, optimizer_backend, optimizer_options):
     """Test nvMolKit MMFF optimization one molecule at a time against RDKit reference.
     
     This test compares the energy results when optimizing molecules individually
@@ -137,6 +150,8 @@ def test_mmff_optimization_serial_vs_rdkit(mmff_test_mols):
             [mol],
             maxIters=200,
             nonBondedThreshold=100.0,
+            optimizer_backend=optimizer_backend,
+            optimizer_options=optimizer_options,
         )
         nvmolkit_energies.extend(mol_energies)
     
@@ -160,7 +175,15 @@ def test_mmff_optimization_serial_vs_rdkit(mmff_test_mols):
                 f"abs_diff={energy_diff:.6f}, rel_error={rel_error:.6f}"
 
 
-@pytest.mark.parametrize("optimizer_backend_options", [("BFGS", {}), ("FIRE", {"use_masses": True}), ("FIRE", {"use_masses": False})])
+@pytest.mark.parametrize(
+    "optimizer_backend_options",
+    [("BFGS", {})]
+    + [
+        ("FIRE", {"use_masses": use_masses, "integration_scheme": scheme})
+        for use_masses in (True, False)
+        for scheme in FIRE_INTEGRATION_SCHEMES
+    ],
+)
 @pytest.mark.parametrize("gpu_ids", [[0, 1], [0], [1]])
 @pytest.mark.parametrize("batchesize", [0, 2, 5])
 @pytest.mark.parametrize("batches_per_gpu", [1, 3])
@@ -219,7 +242,7 @@ def test_mmff_optimization_batch_vs_rdkit(mmff_test_mols,
             rel_error = energy_diff / abs(rdkit_energy) if abs(rdkit_energy) > 1e-10 else energy_diff
             
             assert rel_error < tolerance, \
-                f"Backend {optimizer_backend}: Molecule {mol_idx}, Conformer {conf_idx}: energy mismatch: " \
+                f"Backend {backend}: Molecule {mol_idx}, Conformer {conf_idx}: energy mismatch: " \
                 f"RDKit={rdkit_energy:.6f}, nvMolKit={nvmolkit_energy:.6f}, " \
                 f"abs_diff={energy_diff:.6f}, rel_error={rel_error:.6f}"
 

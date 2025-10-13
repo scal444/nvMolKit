@@ -62,7 +62,7 @@ double quarticEnergyAtIndex(const double value, const double wantVal) {
   return diff * diff * diff * diff;
 }
 
-class FireMinimizerQuarticTest : public ::testing::Test {
+class FireMinimizerQuarticTest : public ::testing::TestWithParam<nvMolKit::FireIntegrationScheme> {
  protected:
   void setUpSystems(const int seed = 1337) {
     atomStarts_  = {0, 3, 10, 12};
@@ -167,7 +167,7 @@ class FireMinimizerQuarticTest : public ::testing::Test {
 
 }  // namespace
 
-TEST_F(FireMinimizerQuarticTest, QuarticPotentialConvergesToTargets) {
+TEST_P(FireMinimizerQuarticTest, QuarticPotentialConvergesToTargets) {
   setUpSystems();
   std::vector<double> initialSystemEnergies(numSystems_);
   for (int sysIdx = 0; sysIdx < numSystems_; ++sysIdx) {
@@ -177,6 +177,7 @@ TEST_F(FireMinimizerQuarticTest, QuarticPotentialConvergesToTargets) {
 
   nvMolKit::FireOptions fireOptions;
   fireOptions.gradTol = 1e-6;
+  fireOptions.integrationScheme = GetParam();
   nvMolKit::FireBatchMinimizer minimizer(kDim, fireOptions);
   auto                         gradFunc   = gradientFunctor();
   auto                         energyFunc = [](const double*) {};
@@ -214,15 +215,17 @@ TEST_F(FireMinimizerQuarticTest, QuarticPotentialConvergesToTargets) {
   EXPECT_LT(std::abs(maxAbsGrad), 1e-6);
 }
 
-TEST_F(FireMinimizerQuarticTest, MassScalingInfluencesDisplacement) {
+TEST_P(FireMinimizerQuarticTest, MassScalingInfluencesDisplacement) {
   setUpSystems();
 
   const auto gradFunc       = gradientFunctor();
   const int  numWarmupSteps = 50;
+  const auto integrationScheme = GetParam();
 
   auto runWithMasses = [&](double massValue) {
     nvMolKit::FireOptions fireOptions;
     fireOptions.gradTol = 1e-6;
+    fireOptions.integrationScheme = integrationScheme;
     nvMolKit::FireBatchMinimizer minimizer(kDim, fireOptions);
     std::vector<double>          masses = uniformMasses(massValue);
     minimizer.initialize(atomStarts_, masses.data());
@@ -251,7 +254,7 @@ TEST_F(FireMinimizerQuarticTest, MassScalingInfluencesDisplacement) {
   EXPECT_LT(lightDistance, heavyDistance);
 }
 
-TEST_F(FireMinimizerQuarticTest, RespectsActiveSystemMask) {
+TEST_P(FireMinimizerQuarticTest, RespectsActiveSystemMask) {
   setUpSystems();
   const std::vector<double> initialPositions = copyPositionsFromDevice();
   std::vector<double>       initialSystemEnergies(numSystems_);
@@ -264,6 +267,7 @@ TEST_F(FireMinimizerQuarticTest, RespectsActiveSystemMask) {
 
   nvMolKit::FireOptions fireOptions;
   fireOptions.gradTol = 1e-6;
+  fireOptions.integrationScheme = GetParam();
   nvMolKit::FireBatchMinimizer minimizer(kDim, fireOptions);
   minimizer.initialize(atomStarts_, nullptr, activeMask.data());
 
@@ -301,3 +305,8 @@ TEST_F(FireMinimizerQuarticTest, RespectsActiveSystemMask) {
   EXPECT_NEAR(inactiveEnergy, initialSystemEnergies[inactiveSystemIdx], 1e-6);
   EXPECT_GT(inactiveEnergy, 1.0);
 }
+
+INSTANTIATE_TEST_SUITE_P(FireIntegrationSchemes,
+                         FireMinimizerQuarticTest,
+                         ::testing::Values(nvMolKit::FireIntegrationScheme::ExplicitEuler,
+                                           nvMolKit::FireIntegrationScheme::SemiImplicitEuler));

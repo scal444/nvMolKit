@@ -104,10 +104,35 @@ def MMFFOptimizeMoleculesConfs(
 
     if optimizer_options is None:
         optimizer_options = dict()
+    elif not isinstance(optimizer_options, dict):
+        raise TypeError("optimizer_options must be a dictionary if provided")
 
     backend_lc = backend_value.lower()
     if backend_lc not in {"bfgs", "fire"}:
         raise ValueError(f"Unsupported optimizer backend '{backend_value}'")
+
+    if backend_lc == "fire":
+        normalized_options: dict[str, object] = {}
+        integration_scheme = None
+        for key, value in optimizer_options.items():
+            if not isinstance(key, str):
+                raise TypeError("optimizer_options keys must be strings")
+            key_lc = key.lower()
+            if key_lc == "integration_scheme":
+                if not isinstance(value, str):
+                    raise TypeError("integration_scheme must be a string")
+                integration_scheme = value.lower()
+            else:
+                normalized_options[key_lc] = value
+
+        if integration_scheme is not None:
+            if integration_scheme not in {"explicit_euler", "semi_implicit_euler"}:
+                raise ValueError(
+                    "integration_scheme must be either 'explicit_euler' or 'semi_implicit_euler'"
+                )
+            normalized_options["integration_scheme"] = integration_scheme
+
+        optimizer_options = normalized_options
 
     return _mmffOptimization.MMFFOptimizeMoleculesConfs(
         molecules,

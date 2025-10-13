@@ -44,6 +44,12 @@ def parse_args() -> argparse.Namespace:
         help="Enable mass weighting during minimization.",
     )
     parser.add_argument(
+        "--integration-scheme",
+        choices=("explicit_euler", "semi_implicit_euler"),
+        default="semi_implicit_euler",
+        help="FIRE integration scheme to use (default: semi_implicit_euler).",
+    )
+    parser.add_argument(
         "--save-initial",
         action="store_true",
         help="Also compute and save initial MMFF energies before minimization.",
@@ -77,10 +83,12 @@ def minimize_molecules(
     max_iters: int,
     grad_tol: float,
     mass_weighting: bool,
+    integration_scheme: str,
 ) -> list[np.ndarray]:
     options: dict[str, object] = {
         "use_masses": mass_weighting,
         "grad_tol": grad_tol,
+        "integration_scheme": integration_scheme,
     }
     energies_nested = MMFFOptimizeMoleculesConfs(
         mols,
@@ -133,6 +141,7 @@ def main() -> None:
         args.max_iters,
         args.gradtol,
         args.mass_weighting,
+        args.integration_scheme,
     )
 
     minimized_array = np.concatenate(minimized_per_mol)

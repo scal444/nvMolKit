@@ -22,6 +22,12 @@
 
 namespace nvMolKit {
 
+//! Integration schemes supported by the FIRE minimizer.
+enum class FireIntegrationScheme {
+  ExplicitEuler, //! Corresponds to FIRE v1.0. Not recommended
+  SemiImplicitEuler //! Default FIRE 2.0 option in LAMMPs.
+};
+
 //! Algorithm parameters for the FIRE minimizer. Defaults taken from ASE
 //! (https://gitlab.com/ase/ase/-/blob/master/ase/optimize/fire.py)
 struct FireOptions {
@@ -40,6 +46,8 @@ struct FireOptions {
   bool useMass = true;  //!< Whether to use per-atom masses if provided, or unit masses otherwise.
 
   double gradTol = 1e-4;  //!< Gradient tolerance for convergence checks.
+
+  FireIntegrationScheme integrationScheme = FireIntegrationScheme::SemiImplicitEuler;
 };
 
 class FireBatchMinimizer final : public BatchMinimizer {
@@ -80,7 +88,7 @@ class FireBatchMinimizer final : public BatchMinimizer {
                 const uint8_t*                activeThisStage = nullptr) override;
 
  private:
-  void fireV1(double                        gradTol,
+  void fireUpdate(double                        gradTol,
               const AsyncDeviceVector<int>& atomStarts,
               AsyncDeviceVector<double>&    positions,
               AsyncDeviceVector<double>&    grad);

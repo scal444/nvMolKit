@@ -15,7 +15,9 @@
 
 #include <GraphMol/ROMol.h>
 
+#include <algorithm>
 #include <boost/python.hpp>
+#include <cctype>
 
 #include "bfgs_mmff.h"
 
@@ -87,6 +89,19 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
             optOptions.fireOptions.alphaDecrement = boost::python::extract<double>(optimizerOptionsDict[key]);
           } else if (key == "grad_tol") {
             optOptions.fireOptions.gradTol = boost::python::extract<double>(optimizerOptionsDict[key]);
+          } else if (key == "integration_scheme") {
+            std::string integrationScheme = boost::python::extract<std::string>(optimizerOptionsDict[key]);
+            std::transform(integrationScheme.begin(),
+                           integrationScheme.end(),
+                           integrationScheme.begin(),
+                           [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (integrationScheme == "explicit_euler") {
+              optOptions.fireOptions.integrationScheme = nvMolKit::FireIntegrationScheme::ExplicitEuler;
+            } else if (integrationScheme == "semi_implicit_euler") {
+              optOptions.fireOptions.integrationScheme = nvMolKit::FireIntegrationScheme::SemiImplicitEuler;
+            } else {
+              throw std::invalid_argument("Unknown integration_scheme value: " + integrationScheme);
+            }
           } else {
             throw std::invalid_argument("Unknown FIRE optimizer option: " + key);
           }

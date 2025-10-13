@@ -66,6 +66,10 @@ BOOST_PYTHON_MODULE(_types) {
     .value("BFGS", mmff::OptimizerOptions::Backend::BFGS)
     .value("FIRE", mmff::OptimizerOptions::Backend::FIRE);
 
+  boost::python::enum_<nvMolKit::FireIntegrationScheme>("FireIntegrationScheme")
+    .value("ExplicitEuler", nvMolKit::FireIntegrationScheme::ExplicitEuler)
+    .value("SemiImplicitEuler", nvMolKit::FireIntegrationScheme::SemiImplicitEuler);
+
   boost::python::class_<nvMolKit::FireOptions>("FireOptions")
     .def(boost::python::init<>())
     .def_readwrite("dtInit", &nvMolKit::FireOptions::dtInit)
@@ -76,7 +80,8 @@ BOOST_PYTHON_MODULE(_types) {
     .def_readwrite("nMinForIncrease", &nvMolKit::FireOptions::nMinForIncrease)
     .def_readwrite("alphaInit", &nvMolKit::FireOptions::alphaInit)
     .def_readwrite("alphaDecrement", &nvMolKit::FireOptions::alphaDecrement)
-    .def_readwrite("useMass", &nvMolKit::FireOptions::useMass);
+    .def_readwrite("useMass", &nvMolKit::FireOptions::useMass)
+    .def_readwrite("integrationScheme", &nvMolKit::FireOptions::integrationScheme);
 
   boost::python::class_<mmff::OptimizerOptions>("OptimizerOptions")
     .def(boost::python::init<>())

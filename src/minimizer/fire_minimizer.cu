@@ -27,7 +27,7 @@ namespace nvMolKit {
 namespace {
 // TODO - consolidate this
 template <typename T> __global__ void setAllKernel(const int numElements, T value, T* dst) {
-  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int idx = (blockIdx.x * blockDim.x) + threadIdx.x;
   if (idx < numElements) {
     dst[idx] = value;
   }
@@ -53,7 +53,131 @@ __device__ __forceinline__ cuda::std::span<T> getSystemSpan(const cuda::std::spa
 }
 
 constexpr int   updatePowerBlockSize = 256;
-__global__ void fireV1Kernel(const cuda::std::span<const int>    atomStarts,
+
+// Explicit Euler integration step with FIRE velocity modification.
+// See:
+// https://www.sciencedirect.com/science/article/pii/S0927025620300756#s0125
+// Appendix A. V is updated with the mixer before x update, then v updated again by force.
+__device__ __forceinline__ void explicitEuler(
+  cooperative_groups::thread_group& block,
+  typename cub::BlockReduce<double, updatePowerBlockSize>::TempStorage& tempStorage,
+  const double dt,
+  const cuda::std::span<double> vSys,
+  const cuda::std::span<double> fSys,
+  const cuda::std::span<double> xSys,
+  const cuda::std::span<const double> massesSys,
+  const double alpha,
+  const int dataDim) {
+  using BlockReduce = cub::BlockReduce<double, updatePowerBlockSize>;
+
+  double vDot = 0.0;
+  for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
+    vDot += vSys[i] * vSys[i];
+  }
+  const double vDotSum = BlockReduce(tempStorage).Sum(vDot);
+  block.sync();  // To reuse the temp storage.
+  double fDot = 0.0;
+  for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
+    fDot += fSys[i] * fSys[i];
+  }
+  // FIRE 1.0
+  // https://www.sciencedirect.com/science/article/pii/S0927025620300756#s0125
+  // Appendix A. V is updated with the mixer before x update, then v updated again by force.
+  const double fDotSum      = BlockReduce(tempStorage).Sum(fDot);
+  const double constFactor1 = (1.0 - alpha);
+  const double constFactor2 = alpha * sqrt(vDotSum) / sqrt(fDotSum);
+  for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
+    // v = (1-alpha)*v + alpha* v_norm * F_unitvec
+    vSys[i] = constFactor1 * vSys[i] + constFactor2 * -fSys[i];
+  }
+
+  // Now integrate positions using the constrained displacement length if needed.
+  for (int i = block.thread_rank(); i < xSys.size(); i += updatePowerBlockSize) {
+    xSys[i] += vSys[i] * dt;
+  }
+  constexpr double kNewtonConversionFactor                = 6.9477e-11;  // kcal/mol A -> N
+  constexpr double kDaltonToKg                            = 1.66054e-27;
+  constexpr double kMetersPerSecond2ToAngstromsPerPs2      = 1e-14;
+
+  // Delta v is F * dt / m. We need it in A/ps, so:
+  // F is in kcal/(mol A), dt is in ps, m is in dalton
+
+  for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
+    // FIXME: Pull out the constants.
+    const double forceInNewtons = -fSys[i] * kNewtonConversionFactor;
+    const int    coordIdx     = i / dataDim;
+    const double massInDalton = massesSys.empty() ? 1.0: massesSys[coordIdx];
+    const double accelInMps2  = forceInNewtons / (massInDalton * kDaltonToKg);
+    const double accelInAps2  = accelInMps2 * kMetersPerSecond2ToAngstromsPerPs2;
+    vSys[i] += accelInAps2 * dt;
+  }
+}
+
+// Semi-implicit Euler integration step with FIRE velocity modification.
+// See:
+// https://www.sciencedirect.com/science/article/pii/S0927025620300756#s0125
+// Appendix A. V is updated with acceleration, then the mixer, then x update.
+// Note a small typo in Algorithm 4 of above reference, part 2. V(t +dt) is a function of V(t + dt) from step 1,
+// not the initial v(t).
+__device__ __forceinline__ void semiImplicitEuler(
+  cooperative_groups::thread_group& block,
+  typename cub::BlockReduce<double, updatePowerBlockSize>::TempStorage& tempStorage,
+  const double dt,
+  const cuda::std::span<double> vSys,
+  const cuda::std::span<double> fSys,
+  const cuda::std::span<double> xSys,
+  const cuda::std::span<const double> massesSys,
+  const double alpha,
+  const int dataDim) {
+  using BlockReduce = cub::BlockReduce<double, updatePowerBlockSize>;
+
+  constexpr double kNewtonConversionFactor                = 6.9477e-11;  // kcal/mol A -> N
+  constexpr double kDaltonToKg                            = 1.66054e-27;
+  constexpr double kMetersPerSecond2ToAngstromsPerPs2      = 1e-14;
+
+  // Delta v is F * dt / m. We need it in A/ps, so:
+  // F is in kcal/(mol A), dt is in ps, m is in dalton
+
+  for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
+    // FIXME: Pull out the constants.
+    const double forceInNewtons = -fSys[i] * kNewtonConversionFactor;
+    const int    coordIdx     = i / dataDim;
+    const double massInDalton = massesSys.empty() ? 1.0: massesSys[coordIdx];
+    const double accelInMps2  = forceInNewtons / (massInDalton * kDaltonToKg);
+    const double accelInAps2  = accelInMps2 * kMetersPerSecond2ToAngstromsPerPs2;
+    vSys[i] += accelInAps2 * dt;
+  }
+
+  double vDot = 0.0;
+  for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
+    vDot += vSys[i] * vSys[i];
+  }
+  const double vDotSum = BlockReduce(tempStorage).Sum(vDot);
+  block.sync();  // To reuse the temp storage.
+  double fDot = 0.0;
+  for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
+    fDot += fSys[i] * fSys[i];
+  }
+  // FIRE 1.0
+  // https://www.sciencedirect.com/science/article/pii/S0927025620300756#s0125
+  // Appendix A. V is updated with the mixer before x update, then v updated again by force.
+  const double fDotSum      = BlockReduce(tempStorage).Sum(fDot);
+  const double constFactor1 = (1.0 - alpha);
+  const double constFactor2 = alpha * sqrt(vDotSum) / sqrt(fDotSum);
+  for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
+    // v = (1-alpha)*v + alpha* v_norm * F_unitvec
+    vSys[i] = constFactor1 * vSys[i] + constFactor2 * -fSys[i];
+  }
+
+  // Now integrate positions using the constrained displacement length if needed.
+  for (int i = block.thread_rank(); i < xSys.size(); i += updatePowerBlockSize) {
+    xSys[i] += vSys[i] * dt;
+  }
+
+}
+
+template <FireIntegrationScheme integratorType>
+__global__ void fireKernel(const cuda::std::span<const int>    atomStarts,
                              const cuda::std::span<double>       x,
                              const cuda::std::span<double>       v,
                              const cuda::std::span<double>       f,
@@ -131,6 +255,7 @@ __global__ void fireV1Kernel(const cuda::std::span<const int>    atomStarts,
     } else {
       *hadNegativePowerShared           = true;
       numStepsWithPositivePower[sysIdx] = 0;
+      // FIXME: Figure out alpha treatment in lammps, inconsistent between paper and code?
       alphas[sysIdx]                    = alphaStart;
       dt[sysIdx] *= dtDecrementFactor;
     }
@@ -157,49 +282,13 @@ __global__ void fireV1Kernel(const cuda::std::span<const int>    atomStarts,
       vSys[i] = 0.0;
     }
   } else {
-    // Note we're using the non-updated alpha that was taken before the increment.
-    double vDot = 0.0;
-    for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
-      vDot += vSys[i] * vSys[i];
+    if constexpr (integratorType == FireIntegrationScheme::ExplicitEuler) {
+      explicitEuler(block, tempStorage, dt[sysIdx], vSys, fSys, getSystemSpan(x, atomStarts, sysIdx, dataDim), massesSys, alpha, dataDim);
+    } else if constexpr (integratorType == FireIntegrationScheme::SemiImplicitEuler) {
+      semiImplicitEuler(block, tempStorage, dt[sysIdx], vSys, fSys, getSystemSpan(x, atomStarts, sysIdx, dataDim), massesSys, alpha, dataDim);
+    } else {
+      assert(false);
     }
-    const double vDotSum = BlockReduce(tempStorage).Sum(vDot);
-    block.sync();  // To reuse the temp storage.
-    double fDot = 0.0;
-    for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
-      fDot += fSys[i] * fSys[i];
-    }
-    const double fDotSum      = BlockReduce(tempStorage).Sum(fDot);
-    const double constFactor1 = (1.0 - alpha);
-    const double constFactor2 = alpha * sqrt(vDotSum) / sqrt(fDotSum);
-    for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
-      // v = (1-alpha)*v + alpha* v_norm * F_unitvec
-      vSys[i] = constFactor1 * vSys[i] + constFactor2 * -fSys[i];
-    }
-  }
-
-  // Update V with force/dt with or without above mixing
-  const double dtVal      = dt[sysIdx];
-  constexpr double kNewtonConversionFactor                = 6.9477e-11;  // kcal/mol A -> N
-  constexpr double kDaltonToKg                            = 1.66054e-27;
-  constexpr double kMetersPerSecond2ToAngstromsPerPs2      = 1e-14;
-
-  // Delta v is F * dt / m. We need it in A/ps, so:
-  // F is in kcal/(mol A), dt is in ps, m is in dalton
-
-  for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
-    // FIXME: Pull out the constants.
-    const double forceInNewtons = -fSys[i] * kNewtonConversionFactor;
-    const int    coordIdx     = i / dataDim;
-    const double massInDalton = massEnabled ? massesSys[coordIdx]: 1.0;
-    const double accelInMps2  = forceInNewtons / (massInDalton * kDaltonToKg);
-    const double accelInAps2  = accelInMps2 * kMetersPerSecond2ToAngstromsPerPs2;
-    vSys[i] += accelInAps2 * dtVal;
-  }
-
-  // Now integrate positions using the constrained displacement length if needed.
-  const auto   xSys              = getSystemSpan(x, atomStarts, sysIdx, dataDim);
-  for (int i = block.thread_rank(); i < xSys.size(); i += updatePowerBlockSize) {
-    xSys[i] += vSys[i] * dtVal;
   }
 }
 
@@ -229,7 +318,7 @@ void FireBatchMinimizer::setMasses(const std::vector<double>& masses) {
   hostMasses_ = masses;
 }
 
-void FireBatchMinimizer::fireV1(const double                  gradTol,
+void FireBatchMinimizer::fireUpdate(const double                  gradTol,
                                 const AsyncDeviceVector<int>& atomStarts,
                                 AsyncDeviceVector<double>&    positions,
                                 AsyncDeviceVector<double>&    grad) {
@@ -240,7 +329,27 @@ void FireBatchMinimizer::fireV1(const double                  gradTol,
   }
   const double minDt = fireOptions_.dtInit * fireOptions_.dtMinFactor;
   const double maxDt = fireOptions_.dtInit * fireOptions_.dtMaxFactor;
-  fireV1Kernel<<<numSystems, updatePowerBlockSize, 0, stream_>>>(toSpan(atomStarts),
+  if (fireOptions_.integrationScheme == FireIntegrationScheme::ExplicitEuler) {
+    fireKernel<FireIntegrationScheme::ExplicitEuler><<<numSystems, updatePowerBlockSize, 0, stream_>>>(toSpan(atomStarts),
+                                                               toSpan(positions),
+                                                               toSpan(velocities_),
+                                                               toSpan(grad),
+                                                               massesSpan,
+                                                               dataDim_,
+                                                               toSpan(alpha_),
+                                                               toSpan(dt_),
+                                                               toSpan(numStepsWithPositivePower_),
+                                                               fireOptions_.nMinForIncrease,
+                                                               fireOptions_.timeStepIncrement,
+                                                               fireOptions_.timeStepDecrement,
+                                                               minDt,
+                                                               maxDt,
+                                                               fireOptions_.alphaInit,
+                                                               fireOptions_.alphaDecrement,
+                                                               gradTol,
+                                                               statuses_.data());
+  } else if (fireOptions_.integrationScheme == FireIntegrationScheme::SemiImplicitEuler) {
+      fireKernel<FireIntegrationScheme::SemiImplicitEuler><<<numSystems, updatePowerBlockSize, 0, stream_>>>(toSpan(atomStarts),
                                                                  toSpan(positions),
                                                                  toSpan(velocities_),
                                                                  toSpan(grad),
@@ -258,6 +367,8 @@ void FireBatchMinimizer::fireV1(const double                  gradTol,
                                                                  fireOptions_.alphaDecrement,
                                                                  gradTol,
                                                                  statuses_.data());
+  }
+
   cudaCheckError(cudaGetLastError());
 }
 
@@ -342,7 +453,7 @@ bool FireBatchMinimizer::step(const double                  gradTol,
   const int numSystems = atomStarts.size() - 1;
   grad.zero();
   gFunc();
-  fireV1(gradTol, atomStarts, positions, grad);
+  fireUpdate(gradTol, atomStarts, positions, grad);
   const int numFinished = compactAndCountConverged();
   return numFinished == numSystems;
 }
