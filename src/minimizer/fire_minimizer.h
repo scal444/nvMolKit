@@ -25,12 +25,9 @@ namespace nvMolKit {
 //! Algorithm parameters for the FIRE minimizer. Defaults taken from ASE
 //! (https://gitlab.com/ase/ase/-/blob/master/ase/optimize/fire.py)
 struct FireOptions {
-  double dtInit = 0.1;  //!< Initial time step
-
-  double dtMin = 0.02;
-  double dtMax = 1.0;  //!< Maximum time step
-
-  double maxStep = 0.2;  //!< Maximum total distance a system can move per step.
+  double dtInit      = 0.001;  //!< Initial time step in picoseconds (1 fs).
+  double dtMinFactor = 0.02;    //!< Lower bound relative to dtInit (dt >= dtInit * dtMinFactor).
+  double dtMaxFactor = 10.0;   //!< Upper bound relative to dtInit (dt <= dtInit * dtMaxFactor).
 
   double timeStepIncrement = 1.1;  //!< Factor to increase time step when conditions are met
   double timeStepDecrement = 0.5;  //!< Factor to decrease time step when conditions are not met

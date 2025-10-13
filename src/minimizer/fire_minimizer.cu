@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <algorithm>
 #include <cooperative_groups.h>
 
 #include <cub/cub.cuh>
@@ -64,10 +65,10 @@ __global__ void fireV1Kernel(const cuda::std::span<const int>    atomStarts,
                              const int                           positiveStepIncrementDelay,
                              const double                        dtIncrementFactor,
                              const double                        dtDecrementFactor,
+                             const double                        minDt,
                              const double                        maxDt,
                              const double                        alphaStart,
                              const double                        alphaDecrementFactor,
-                             const double                        maxStep,
                              const double                        gradTol,
                              uint8_t*                            activeSystems) {
   namespace cg     = cooperative_groups;
@@ -78,11 +79,9 @@ __global__ void fireV1Kernel(const cuda::std::span<const int>    atomStarts,
   }
   __shared__ bool   hadNegativePowerShared[1];
   __shared__ bool   metConvergenceCriteria[1];
-  __shared__ double displacementScaleShared[1];
   if (block.thread_rank() == 0) {
     *hadNegativePowerShared  = false;
     *metConvergenceCriteria  = false;
-    *displacementScaleShared = 1.0;
   }
 
   // Compute v * F power.
@@ -127,7 +126,7 @@ __global__ void fireV1Kernel(const cuda::std::span<const int>    atomStarts,
       numStepsWithPositivePower[sysIdx] = numStepsPositive;
       if (numStepsPositive > positiveStepIncrementDelay) {
         alphas[sysIdx] = alpha * alphaDecrementFactor;
-        dt[sysIdx]     = fmin(dtIncrementFactor * dt[sysIdx], maxDt);
+        dt[sysIdx]     = dtIncrementFactor * dt[sysIdx];
       }
     } else {
       *hadNegativePowerShared           = true;
@@ -135,6 +134,7 @@ __global__ void fireV1Kernel(const cuda::std::span<const int>    atomStarts,
       alphas[sysIdx]                    = alphaStart;
       dt[sysIdx] *= dtDecrementFactor;
     }
+    dt[sysIdx] = fmin(fmax(dt[sysIdx], minDt), maxDt);
     // printf("System %d: power=%f, alpha=%f, dt=%f, numPosSteps=%d maxGrad=%f\n",
     //        sysIdx,
     //        powerSum,
@@ -178,42 +178,28 @@ __global__ void fireV1Kernel(const cuda::std::span<const int>    atomStarts,
   }
 
   // Update V with force/dt with or without above mixing
-  const double dtVal = dt[sysIdx];
-  for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
-    double accelerationScale = dtVal;
-    if (massEnabled) {
-      const int    coordIdx = i / dataDim;
-      const double mass     = massesSys[coordIdx];
-      accelerationScale     = dtVal / mass;
-    }
-    vSys[i] += -fSys[i] * accelerationScale;
-  }
+  const double dtVal      = dt[sysIdx];
+  constexpr double kNewtonConversionFactor                = 6.9477e-11;  // kcal/mol A -> N
+  constexpr double kDaltonToKg                            = 1.66054e-27;
+  constexpr double kMetersPerSecond2ToAngstromsPerPs2      = 1e-14;
 
-  block.sync();  // Ensure velocities have been updated before computing displacement norms.
-  double displacementNormSquared = 0.0;
+  // Delta v is F * dt / m. We need it in A/ps, so:
+  // F is in kcal/(mol A), dt is in ps, m is in dalton
+
   for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
-    const double dr = vSys[i] * dtVal;
-    displacementNormSquared += dr * dr;
+    // FIXME: Pull out the constants.
+    const double forceInNewtons = -fSys[i] * kNewtonConversionFactor;
+    const int    coordIdx     = i / dataDim;
+    const double massInDalton = massEnabled ? massesSys[coordIdx]: 1.0;
+    const double accelInMps2  = forceInNewtons / (massInDalton * kDaltonToKg);
+    const double accelInAps2  = accelInMps2 * kMetersPerSecond2ToAngstromsPerPs2;
+    vSys[i] += accelInAps2 * dtVal;
   }
-  const double displacementNormSquaredSum = BlockReduce(tempStorage).Sum(displacementNormSquared);
-  block.sync();
-  if (block.thread_rank() == 0) {
-    double scale = 1.0;
-    if (displacementNormSquaredSum > 0.0) {
-      const double norm = sqrt(displacementNormSquaredSum);
-      if (norm > maxStep) {
-        scale = maxStep / norm;
-      }
-    }
-    *displacementScaleShared = scale;
-  }
-  block.sync();
 
   // Now integrate positions using the constrained displacement length if needed.
   const auto   xSys              = getSystemSpan(x, atomStarts, sysIdx, dataDim);
-  const double displacementScale = *displacementScaleShared;
   for (int i = block.thread_rank(); i < xSys.size(); i += updatePowerBlockSize) {
-    xSys[i] += vSys[i] * dtVal * displacementScale;
+    xSys[i] += vSys[i] * dtVal;
   }
 }
 
@@ -252,6 +238,8 @@ void FireBatchMinimizer::fireV1(const double                  gradTol,
   if (masses_.size() > 0) {
     massesSpan = cuda::std::span<const double>(masses_.data(), masses_.size());
   }
+  const double minDt = fireOptions_.dtInit * fireOptions_.dtMinFactor;
+  const double maxDt = fireOptions_.dtInit * fireOptions_.dtMaxFactor;
   fireV1Kernel<<<numSystems, updatePowerBlockSize, 0, stream_>>>(toSpan(atomStarts),
                                                                  toSpan(positions),
                                                                  toSpan(velocities_),
@@ -264,10 +252,10 @@ void FireBatchMinimizer::fireV1(const double                  gradTol,
                                                                  fireOptions_.nMinForIncrease,
                                                                  fireOptions_.timeStepIncrement,
                                                                  fireOptions_.timeStepDecrement,
-                                                                 fireOptions_.dtMax,
+                                                                 minDt,
+                                                                 maxDt,
                                                                  fireOptions_.alphaInit,
                                                                  fireOptions_.alphaDecrement,
-                                                                 fireOptions_.maxStep,
                                                                  gradTol,
                                                                  statuses_.data());
   cudaCheckError(cudaGetLastError());
@@ -379,6 +367,8 @@ bool FireBatchMinimizer::minimize(const int                                   nu
   }
   return false;
 }
+
+
 
 int FireBatchMinimizer::compactAndCountConverged() {
   const ScopedNvtxRange fireCompact("FireBatchMinimizer::compactAndCountConverged");

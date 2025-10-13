@@ -71,13 +71,11 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
             optOptions.fireOptions.useMass = boost::python::extract<bool>(optimizerOptionsDict[key]);
           } else if (key == "dt_init") {
             optOptions.fireOptions.dtInit = boost::python::extract<double>(optimizerOptionsDict[key]);
-          } else if (key == "dt_min") {
-            optOptions.fireOptions.dtMin = boost::python::extract<double>(optimizerOptionsDict[key]);
-          } else if (key == "dt_max") {
-            optOptions.fireOptions.dtMax = boost::python::extract<double>(optimizerOptionsDict[key]);
-          } else if (key == "max_step") {
-            optOptions.fireOptions.maxStep = boost::python::extract<double>(optimizerOptionsDict[key]);
-          } else if (key == "time_step_increment") {
+          } else if (key == "dt_min_factor") {
+            optOptions.fireOptions.dtMinFactor = boost::python::extract<double>(optimizerOptionsDict[key]);
+          } else if (key == "dt_max_factor") {
+            optOptions.fireOptions.dtMaxFactor = boost::python::extract<double>(optimizerOptionsDict[key]);
+          }  else if (key == "time_step_increment") {
             optOptions.fireOptions.timeStepIncrement = boost::python::extract<double>(optimizerOptionsDict[key]);
           } else if (key == "time_step_decrement") {
             optOptions.fireOptions.timeStepDecrement = boost::python::extract<double>(optimizerOptionsDict[key]);

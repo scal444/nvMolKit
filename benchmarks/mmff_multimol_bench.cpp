@@ -330,6 +330,8 @@ int main(int argc, char* argv[]) {
 
   // Warmup (use fewer conformers to avoid large allocations during warmup)
   const int warmupConfs = std::min(confsPerMol, 10);
+  std::vector<std::vector<double>> rdkitRes;
+
   if (doWarmup) {
     std::cout << "Warming up..." << std::endl;
     auto                       warmupMolsOwning = isSmilesLike ? BenchUtils::readMoleculesForEmbedding(filePath, 1) :
@@ -353,7 +355,7 @@ int main(int argc, char* argv[]) {
       }
       std::cout << "Running nvMolKit benchmark...\n";
       auto energiesNv = runNvMolKit(mols, maxIters, batchSize, batchesPerGpu, numGpus, minimizer);
-      if (doEnergyCheck) {
+      if (doEnergyCheck && !rdkitRes.empty()) {
         int totalDiffs = 0;
         int totalConfs = 0;
         for (size_t i = 0; i < energiesNv.size(); ++i) {
@@ -454,12 +456,11 @@ int main(int argc, char* argv[]) {
 
   // Run benchmarks
   auto nvmolkitRes = runNvMolKit(nvmolkitPtrs, maxIters, batchSize, batchesPerGpu, numGpus, minimizer);
-  std::vector<std::vector<double>> rdkitRes;
   if (doRdkit) {
     rdkitRes = runRDKit(rdkitPtrs, maxIters, rdkitThreadsResolved);
   }
 
-  if (doEnergyCheck && doRdkit) {
+  if (doEnergyCheck && doRdkit && !rdkitRes.empty()) {
     int totalDiffs = 0;
     int totalConfs = 0;
     for (size_t i = 0; i < nvmolkitRes.size(); ++i) {

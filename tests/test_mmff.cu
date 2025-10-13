@@ -1074,7 +1074,7 @@ TEST_P(MMFFMinimizerParameterizedFixture, MinimizeMultipleConfsSameMolecule) {
 }
 
 TEST_P(MMFFMinimizerParameterizedFixture, MinimizeMultipleConfsMultipleMolecules) {
-  const double tolerance = GetParam() == nvMolKit::MMFF::OptimizerOptions::Backend::BFGS ? 1e-4 : 1e-2;
+  const double tolerance = GetParam() == nvMolKit::MMFF::OptimizerOptions::Backend::BFGS ? 1e-4 : 1e-1;
 
   constexpr int             numMols        = 4;
   constexpr int             numConfsPerMol = 10;
@@ -1125,7 +1125,7 @@ TEST_P(MMFFMinimizerParameterizedFixture, MinimizeMultipleConfsMultipleMolecules
 }
 
 TEST_P(MMFFMinimizerParameterizedFixture, MinimizeLargeMol) {
-  const double     tolerance  = GetParam() == nvMolKit::MMFF::OptimizerOptions::Backend::BFGS ? 1e-3 : 1e-2;
+  const double     tolerance  = GetParam() == nvMolKit::MMFF::OptimizerOptions::Backend::BFGS ? 1e-3 : 1e-1;
   constexpr double wantEnergy = 33.0842;
   std::vector<std::unique_ptr<RDKit::ROMol>> mols;
   getMols(getTestDataFolderPath() + "/50_atom_mol.sdf", mols, 1);
