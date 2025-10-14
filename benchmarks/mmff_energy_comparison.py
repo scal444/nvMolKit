@@ -160,6 +160,40 @@ def plot_boxplot(
     plt.close()
 
 
+def plot_scatter(
+    reference_energies: np.ndarray,
+    comparison_energies: np.ndarray,
+    comparison_label: str,
+    output_path: Path | None,
+    show: bool = False,
+) -> None:
+    if reference_energies.size == 0 or comparison_energies.size == 0:
+        return
+    min_len = min(reference_energies.size, comparison_energies.size)
+    x_vals = reference_energies[:min_len]
+    y_vals = comparison_energies[:min_len]
+    mask = np.isfinite(x_vals) & np.isfinite(y_vals)
+    if not np.any(mask):
+        return
+    x_vals = x_vals[mask]
+    y_vals = y_vals[mask]
+    min_val = min(np.min(x_vals), np.min(y_vals))
+    max_val = max(np.max(x_vals), np.max(y_vals))
+    plt.figure(figsize=(6, 6))
+    plt.scatter(x_vals, y_vals, alpha=0.6, edgecolor="none")
+    plt.plot([min_val, max_val], [min_val, max_val], linestyle="--", color="black", linewidth=1.0)
+    plt.xlabel("RDKit final energy (kcal/mol)")
+    plt.ylabel(f"{comparison_label} final energy (kcal/mol)")
+    plt.title(f"RDKit vs {comparison_label} final energies")
+    plt.tight_layout()
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        plt.savefig(output_path)
+    if show:
+        plt.show()
+    plt.close()
+
+
 def main() -> None:
     args = parse_args()
 
@@ -208,6 +242,9 @@ def main() -> None:
             base = safe_label(comp.name)
             comp_hist_path = output_dir / f"comparison_{base}.png"
             delta_hist_path = output_dir / f"delta_{base}.png"
+            scatter_path = output_dir / f"scatter_{base}.png"
+        else:
+            scatter_path = None
 
         plot_histogram(
             arrays,
@@ -230,6 +267,13 @@ def main() -> None:
                 f"Energy difference: {comp.name} - RDKit",
                 delta_hist_path,
                 show=False,
+            )
+            plot_scatter(
+                reference.final,
+                comp.final,
+                comp.name,
+                scatter_path,
+                show=True,
             )
 
     if combined_deltas:

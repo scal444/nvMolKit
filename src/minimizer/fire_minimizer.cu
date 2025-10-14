@@ -67,15 +67,21 @@ __device__ __forceinline__ void explicitEuler(
   const cuda::std::span<double> xSys,
   const cuda::std::span<const double> massesSys,
   const double alpha,
-  const int dataDim) {
+  const int dataDim,
+  double* sharedVDotSum,
+  double* sharedFDotSum) {
   using BlockReduce = cub::BlockReduce<double, updatePowerBlockSize>;
 
   double vDot = 0.0;
   for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
     vDot += vSys[i] * vSys[i];
   }
-  const double vDotSum = BlockReduce(tempStorage).Sum(vDot);
-  block.sync();  // To reuse the temp storage.
+  const double vDotSumThread0 = BlockReduce(tempStorage).Sum(vDot);
+  if (block.thread_rank() == 0) {
+    *sharedVDotSum = vDotSumThread0;
+  }
+  block.sync();  // To reuse the temp storage and publish shared sum.
+  const double vDotSum = *sharedVDotSum;
   double fDot = 0.0;
   for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
     fDot += fSys[i] * fSys[i];
@@ -83,7 +89,12 @@ __device__ __forceinline__ void explicitEuler(
   // FIRE 1.0
   // https://www.sciencedirect.com/science/article/pii/S0927025620300756#s0125
   // Appendix A. V is updated with the mixer before x update, then v updated again by force.
-  const double fDotSum      = BlockReduce(tempStorage).Sum(fDot);
+  const double fDotSumThread0 = BlockReduce(tempStorage).Sum(fDot);
+  if (block.thread_rank() == 0) {
+    *sharedFDotSum = fDotSumThread0;
+  }
+  block.sync();
+  const double fDotSum      = *sharedFDotSum;
   const double constFactor1 = (1.0 - alpha);
   const double constFactor2 = alpha * sqrt(vDotSum) / sqrt(fDotSum);
   for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
@@ -128,7 +139,9 @@ __device__ __forceinline__ void semiImplicitEuler(
   const cuda::std::span<double> xSys,
   const cuda::std::span<const double> massesSys,
   const double alpha,
-  const int dataDim) {
+  const int dataDim,
+  double* sharedVDotSum,
+  double* sharedFDotSum) {
   using BlockReduce = cub::BlockReduce<double, updatePowerBlockSize>;
 
   constexpr double kNewtonConversionFactor                = 6.9477e-11;  // kcal/mol A -> N
@@ -152,8 +165,12 @@ __device__ __forceinline__ void semiImplicitEuler(
   for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
     vDot += vSys[i] * vSys[i];
   }
-  const double vDotSum = BlockReduce(tempStorage).Sum(vDot);
-  block.sync();  // To reuse the temp storage.
+  const double vDotSumThread0 = BlockReduce(tempStorage).Sum(vDot);
+  if (block.thread_rank() == 0) {
+    *sharedVDotSum = vDotSumThread0;
+  }
+  block.sync();  // To publish shared sum.
+  const double vDotSum = *sharedVDotSum;
   double fDot = 0.0;
   for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
     fDot += fSys[i] * fSys[i];
@@ -161,9 +178,15 @@ __device__ __forceinline__ void semiImplicitEuler(
   // FIRE 1.0
   // https://www.sciencedirect.com/science/article/pii/S0927025620300756#s0125
   // Appendix A. V is updated with the mixer before x update, then v updated again by force.
-  const double fDotSum      = BlockReduce(tempStorage).Sum(fDot);
+  const double fDotSumThread0 = BlockReduce(tempStorage).Sum(fDot);
+  if (block.thread_rank() == 0) {
+    *sharedFDotSum = fDotSumThread0;
+  }
+  block.sync();
+  const double fDotSum      = *sharedFDotSum;
   const double constFactor1 = (1.0 - alpha);
-  const double constFactor2 = alpha * sqrt(vDotSum) / sqrt(fDotSum);
+  // Handle div by 0.
+  const double constFactor2 = fDotSum > 1e-10 ?  alpha * sqrt(vDotSum) / sqrt(fDotSum) : 0.0;
   for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
     // v = (1-alpha)*v + alpha* v_norm * F_unitvec
     vSys[i] = constFactor1 * vSys[i] + constFactor2 * -fSys[i];
@@ -192,6 +215,7 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
                              const double                        dtDecrementFactor,
                              const double                        minDt,
                              const double                        maxDt,
+                             const double dMax,
                              const double                        alphaStart,
                              const double                        alphaDecrementFactor,
                              const double                        gradTol,
@@ -205,6 +229,9 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
   }
   __shared__ bool   hadNegativePowerShared[1];
   __shared__ bool   metConvergenceCriteria[1];
+  __shared__ double maxDisplacement[1];
+  __shared__ double sharedVDotSum[1];
+  __shared__ double sharedFDotSum[1];
   if (block.thread_rank() == 0) {
     *hadNegativePowerShared  = false;
     *metConvergenceCriteria  = false;
@@ -294,10 +321,30 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
       vSys[i] = 0.0;
     }
   } else {
+    double dtScaled = dt[sysIdx];
+    // Do dmax check, if > 0
+    if (dMax > 0.0) {
+      // Compute max displacement this step.
+      double maxDisp = 0.0;
+      for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
+        const double disp = std::abs(vSys[i] * dtScaled);
+        maxDisp           = fmax(disp, maxDisp);
+      }
+      const double maxDispReduced = BlockReduce(tempStorage).Reduce(maxDisp, cub::Max());
+      if (threadIdx.x == 0) {
+        *maxDisplacement = maxDispReduced;
+      }
+      block.sync();
+      const double summedMaxDisplacement = *maxDisplacement;
+      if (summedMaxDisplacement > dMax) {
+        dtScaled = dMax / summedMaxDisplacement;
+      }
+    }
+
     if constexpr (integratorType == FireIntegrationScheme::ExplicitEuler) {
-      explicitEuler(block, tempStorage, dt[sysIdx], vSys, fSys, xSys, massesSys, alpha, dataDim);
+      explicitEuler(block, tempStorage, dtScaled, vSys, fSys, xSys, massesSys, alpha, dataDim, sharedVDotSum, sharedFDotSum);
     } else if constexpr (integratorType == FireIntegrationScheme::SemiImplicitEuler) {
-      semiImplicitEuler(block, tempStorage, dt[sysIdx], vSys, fSys, xSys, massesSys, alpha, dataDim);
+      semiImplicitEuler(block, tempStorage, dtScaled, vSys, fSys, xSys, massesSys, alpha, dataDim, sharedVDotSum, sharedFDotSum);
     } else {
       assert(false);
     }
@@ -363,6 +410,7 @@ void FireBatchMinimizer::fireUpdate(const double                  gradTol,
                                                                fireOptions_.timeStepDecrement,
                                                                minDt,
                                                                maxDt,
+                                                               fireOptions_.dMax,
                                                                fireOptions_.alphaInit,
                                                                fireOptions_.alphaDecrement,
                                                                gradTol,
@@ -385,6 +433,7 @@ void FireBatchMinimizer::fireUpdate(const double                  gradTol,
                                                                  fireOptions_.timeStepDecrement,
                                                                  minDt,
                                                                  maxDt,
+                                                                 fireOptions_.dMax,
                                                                  fireOptions_.alphaInit,
                                                                  fireOptions_.alphaDecrement,
                                                                  gradTol,

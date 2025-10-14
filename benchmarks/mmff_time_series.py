@@ -2,7 +2,7 @@ import json
 import matplotlib.pyplot as plt
 import numpy as np
 
-with open('rdkit_with_debinfo_1013.json', 'r') as f:
+with open('/home/kboyd/data/fire/rdkit_with_debinfo_1013.json', 'r') as f:
     rdk = json.load(f)
 with open('nvmolkit_test.json', 'r') as f:
     nvmol = json.load(f)
@@ -23,6 +23,7 @@ plt.legend()
 plt.title('Energies for first molecule')
 plt.xlabel('Step')
 plt.ylabel('Energy (kcal/mol)')
+plt.xlim(0, 160)
 plt.show()
 
 plt.figure()
@@ -91,22 +92,25 @@ def single_minimization(scheme, half_step, mass_weighting, n_min_for_increase=5,
     fire_debug = []
     suppl = Chem.SDMolSupplier('/home/kboyd/data/fire/inital_confs.sdf', removeHs = False)
     mol = suppl[0]
-    MMFFOptimizeMoleculesConfs([mol], maxIters=10000, optimizer_backend="FIRE", optimizer_options={"time_step_increment": dt_increment, "integration_scheme": scheme, "take_half_step_back": half_step, "use_masses": mass_weighting, "n_min_for_increase": n_min_for_increase, "dt_init": dt_init, "alpha_init": alpha_init}, fire_debug_output=fire_debug)
+    MMFFOptimizeMoleculesConfs([mol], maxIters=1000, optimizer_backend="FIRE", optimizer_options={"time_step_increment": dt_increment, "integration_scheme": scheme, "take_half_step_back": half_step, "use_masses": mass_weighting, "n_min_for_increase": n_min_for_increase, "dt_init": dt_init, "alpha_init": alpha_init}, fire_debug_output=fire_debug)
     return fire_debug
 
-fire_debug_explicit_euler = single_minimization("explicit_euler", True, True)
-fire_debug_semi_implicit_euler = single_minimization("semi_implicit_euler", True, True)
-fire_debug_explicit_euler_no_half_step = single_minimization("explicit_euler", False, True)
-fire_debug_semi_implicit_euler_no_half_step = single_minimization("semi_implicit_euler", False, True)
+params = {"dt_init": 0.0001, "dt_increment": 1.1, "alpha_init": 0.25}
+fire_debug_explicit_euler = single_minimization("explicit_euler", True, True, **params)
+fire_debug_semi_implicit_euler = single_minimization("semi_implicit_euler", True, True, **params)
+fire_debug_explicit_euler_no_half_step = single_minimization("explicit_euler", False, True, **params)
+fire_debug_semi_implicit_euler_no_half_step = single_minimization("semi_implicit_euler", False, True, **params)
 
 import matplotlib.pyplot as plt
 import numpy as np
 
 
+rdk_ref = 86.9133025616466
 plt.plot(fire_debug_explicit_euler[0][0]['energies'], label='Explicit Euler + half step')
 plt.plot(fire_debug_semi_implicit_euler[0][0]['energies'], label='Semi-Implicit Euler + half step')
 plt.plot(fire_debug_explicit_euler_no_half_step[0][0]['energies'], label='Explicit Euler (no half step)')
 plt.plot(fire_debug_semi_implicit_euler_no_half_step[0][0]['energies'], label='Semi-Implicit Euler (no half step)')
+plt.plot(rdk_ref * np.ones(len(fire_debug_explicit_euler[0][0]['energies'])), 'k--', label='Reference')
 plt.xlabel('Step')
 plt.ylabel('Energy (kcal/mol)')
 plt.title('Per-step MMFF energies for single minimization')
@@ -125,7 +129,7 @@ for dt_init in [0.0001, 0.001, 0.002]:
 plt.legend()
 plt.show()
 
-for dt_increment in [1.001, 1.01, 1.05, 1.1, 1.2]:
+for dt_increment in [1.001, 1.01, 1.05, 1.1]:
     fire_debug = single_minimization("explicit_euler", True, True, dt_increment=dt_increment)
     plt.plot(fire_debug[0][0]['energies'], label='Explicit Euler + half step + dt_increment = ' + str(dt_increment))
     plt.xlabel('Step')
