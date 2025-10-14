@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import json
 
 import numpy as np
 from rdkit import Chem
@@ -59,6 +60,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also compute and save initial MMFF energies before minimization.",
     )
+    parser.add_argument(
+        "--fire-debug-output",
+        type=Path,
+        default=None,
+        help=(
+            "Optional path to write FIRE debug information as JSON. "
+            "Only valid when using the FIRE optimizer backend."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -90,18 +100,21 @@ def minimize_molecules(
     mass_weighting: bool,
     integration_scheme: str,
     take_half_step_back: bool,
-) -> list[np.ndarray]:
+    collect_fire_debug: bool,
+) -> tuple[list[np.ndarray], list[list[dict[str, list[float]]]] | None]:
     options: dict[str, object] = {
         "use_masses": mass_weighting,
         "grad_tol": grad_tol,
         "integration_scheme": integration_scheme,
         "take_half_step_back": take_half_step_back,
     }
+    fire_debug: list[list[dict[str, list[float]]]] | None = [] if collect_fire_debug else None
     energies_nested = MMFFOptimizeMoleculesConfs(
         mols,
         maxIters=max_iters,
         optimizer_backend="FIRE",
         optimizer_options=options,
+        fire_debug_output=fire_debug,
     )
     per_mol: list[np.ndarray] = []
     for mol, energies in zip(mols, energies_nested):
@@ -113,7 +126,7 @@ def minimize_molecules(
             if energy is not None:
                 arr[idx] = energy
         per_mol.append(arr)
-    return per_mol
+    return per_mol, fire_debug
 
 
 def write_minimized_sdf(mols: list[Chem.Mol], output_path: Path) -> None:
@@ -143,14 +156,24 @@ def main() -> None:
         for mol in mols:
             initial_per_mol.append(compute_initial_energies(mol))
 
-    minimized_per_mol = minimize_molecules(
+    collect_fire_debug = args.fire_debug_output is not None
+
+    minimized_per_mol, fire_debug = minimize_molecules(
         mols,
         args.max_iters,
         args.gradtol,
         args.mass_weighting,
         args.integration_scheme,
         args.take_half_step_back,
+        collect_fire_debug,
     )
+
+    if args.fire_debug_output is not None:
+        if fire_debug is None:
+            raise RuntimeError("FIRE debug output was not collected despite request.")
+        args.fire_debug_output.parent.mkdir(parents=True, exist_ok=True)
+        with args.fire_debug_output.open("w", encoding="utf-8") as handle:
+            json.dump(fire_debug, handle)
 
     minimized_array = np.concatenate(minimized_per_mol)
     final_path = output_prefix.parent / f"{output_prefix.name}_final_energies_nvm.npy"

@@ -195,7 +195,8 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
                              const double                        alphaStart,
                              const double                        alphaDecrementFactor,
                              const double                        gradTol,
-                             uint8_t*                            activeSystems) {
+                             uint8_t*                            activeSystems,
+                             const cuda::std::span<double> debugPowers) {
   namespace cg     = cooperative_groups;
   auto      block  = cg::this_thread_block();
   const int sysIdx = blockIdx.x;
@@ -243,6 +244,9 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
   // -----------------------------------------------------------------
   const double dtBeforeAdjustment = dt[sysIdx];
   if (block.thread_rank() == 0) {
+    if (!debugPowers.empty()) {
+      debugPowers[sysIdx] = powerSum;
+    }
     if (maxGradReduced <= gradTol) {
       //  printf("Converged system %d with maxGrad %f <= %f\n", sysIdx, maxGradReduced, gradTol);
       *metConvergenceCriteria = true;
@@ -253,6 +257,7 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
       numStepsWithPositivePower[sysIdx] = numStepsPositive;
       if (numStepsPositive > positiveStepIncrementDelay) {
         alphas[sysIdx] = alpha * alphaDecrementFactor;
+        // printf("Decreasing alpha from %f to %f\n", alpha, alphas[sysIdx]);
         dt[sysIdx]     = dtIncrementFactor * dt[sysIdx];
       }
     } else {
@@ -260,6 +265,7 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
       numStepsWithPositivePower[sysIdx] = 0;
       // FIXME: Figure out alpha treatment in lammps, inconsistent between paper and code?
       alphas[sysIdx]                    = alphaStart;
+      // printf("Resetting alpha to %f\n", alphas[sysIdx]);
       dt[sysIdx] *= dtDecrementFactor;
     }
     dt[sysIdx] = fmin(fmax(dt[sysIdx], minDt), maxDt);
@@ -300,10 +306,11 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
 
 }  // namespace
 
-FireBatchMinimizer::FireBatchMinimizer(const int dataDim, const FireOptions& options, cudaStream_t stream)
+FireBatchMinimizer::FireBatchMinimizer(const int dataDim, const FireOptions& options, cudaStream_t stream, const bool debugMode)
     : dataDim_(dataDim),
       fireOptions_(options),
-      stream_(stream) {
+      stream_(stream),
+     debugMode_(debugMode) {
   velocities_.setStream(stream_);
   prevVelocities_.setStream(stream_);
   statuses_.setStream(stream_);
@@ -315,9 +322,9 @@ FireBatchMinimizer::FireBatchMinimizer(const int dataDim, const FireOptions& opt
   numStepsWithPositivePower_.setStream(stream_);
   countUnfinished_.setStream(stream_);
   countTempStorage_.setStream(stream_);
-  powers_.setStream(stream_);
   loopStatusHost_.resize(1);
   loopStatusHost_[0] = 0;
+  debugPowers_.setStream(stream_);
 }
 
 void FireBatchMinimizer::setMasses(const std::vector<double>& masses) {
@@ -335,6 +342,10 @@ void FireBatchMinimizer::fireUpdate(const double                  gradTol,
   }
   const double minDt = fireOptions_.dtInit * fireOptions_.dtMinFactor;
   const double maxDt = fireOptions_.dtInit * fireOptions_.dtMaxFactor;
+  cuda::std::span<double> debugPowers;
+  if (debugMode_) {
+    debugPowers = toSpan(debugPowers_);
+  }
   if (fireOptions_.integrationScheme == FireIntegrationScheme::ExplicitEuler) {
     fireKernel<FireIntegrationScheme::ExplicitEuler><<<numSystems, updatePowerBlockSize, 0, stream_>>>(
     fireOptions_.takeHalfStepBack,
@@ -355,7 +366,8 @@ void FireBatchMinimizer::fireUpdate(const double                  gradTol,
                                                                fireOptions_.alphaInit,
                                                                fireOptions_.alphaDecrement,
                                                                gradTol,
-                                                               statuses_.data());
+                                                               statuses_.data(),
+                                                               debugPowers);
   } else if (fireOptions_.integrationScheme == FireIntegrationScheme::SemiImplicitEuler) {
       fireKernel<FireIntegrationScheme::SemiImplicitEuler><<<numSystems, updatePowerBlockSize, 0, stream_>>>(
       fireOptions_.takeHalfStepBack,
@@ -376,7 +388,8 @@ void FireBatchMinimizer::fireUpdate(const double                  gradTol,
                                                                  fireOptions_.alphaInit,
                                                                  fireOptions_.alphaDecrement,
                                                                  gradTol,
-                                                                 statuses_.data());
+                                                                 statuses_.data(),
+                                                                 debugPowers);
   }
 
   cudaCheckError(cudaGetLastError());
@@ -421,8 +434,6 @@ void FireBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
   std::iota(activeSystemIndicesHost.begin(), activeSystemIndicesHost.end(), 0);
   allSystemIndices_.setFromVector(activeSystemIndicesHost);
   activeSystemIndices_.setFromVector(activeSystemIndicesHost);
-  powers_.resize(numSystems);
-  powers_.zero();
   numStepsWithNegativePower_.resize(numSystems);
   numStepsWithNegativePower_.zero();
   numStepsWithPositivePower_.resize(numSystems);
@@ -445,6 +456,12 @@ void FireBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
 
   if (tempStorageBytes > countTempStorage_.size()) {
     countTempStorage_.resize(tempStorageBytes);
+  }
+
+  if (debugMode_) {
+    debugPowers_.resize(numSystems);
+    debugPowers_.zero();
+    debugOutputs_.resize(numSystems);
   }
 }
 
@@ -482,6 +499,23 @@ bool FireBatchMinimizer::minimize(const int                                   nu
   initialize(atomStartsHost, nullptr, activeThisStage);
 
   for (int i = 0; i < numIters; ++i) {
+    if (debugMode_) {
+      energyBuffer.zero();
+      energyOuts.zero();
+      eFunc(positions.data());
+
+      const std::vector<double> energies = debugDump(energyOuts);
+      const std::vector<double> powers   = debugDump(debugPowers_);
+      const std::vector<double> alphas   = debugDump(alpha_);
+      const std::vector<double> dts      = debugDump(dt_);
+
+      for (int sysIdx = 0; sysIdx < energies.size(); ++sysIdx) {
+        debugOutputs_[sysIdx].energies.push_back(energies[sysIdx]);
+        debugOutputs_[sysIdx].powers.push_back(powers[sysIdx]);
+        debugOutputs_[sysIdx].alphas.push_back(alphas[sysIdx]);
+        debugOutputs_[sysIdx].dt.push_back(dts[sysIdx]);
+      }
+    }
     if (step(gradTol, atomStarts, positions, grad, gFunc)) {
       return true;
     }

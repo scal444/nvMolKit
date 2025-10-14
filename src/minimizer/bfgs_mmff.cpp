@@ -33,7 +33,8 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
                                                                 const int                   maxIters,
                                                                 const double                nonBondedThreshold,
                                                                 const BatchHardwareOptions& perfOptions,
-                                                                const OptimizerOptions&     optimizerOptions) {
+                                                                const OptimizerOptions&     optimizerOptions,
+                                                                std::vector<std::vector<FireDebugOutput>>* _fireDebugOutput) {
   // Extract values from performance options
   const size_t batchSize = perfOptions.batchSize == -1 ? 500 : perfOptions.batchSize;
 
@@ -68,10 +69,23 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
     size_t            confIdx;
   };
 
+  // debugOutput[molIdx][ConfIdx]
+  std::vector<std::vector<FireDebugOutput>> debugOutputs;
+  if (_fireDebugOutput) {
+    if (optimizerOptions.backend != OptimizerOptions::Backend::FIRE) {
+      throw std::invalid_argument("FIRE debug output requested but optimizer backend is not FIRE");
+    }
+    debugOutputs.resize(mols.size());
+  }
+
   std::vector<ConformerInfo> allConformers;
   for (size_t molIdx = 0; molIdx < mols.size(); ++molIdx) {
     auto* mol = mols[molIdx];
     moleculeEnergies[molIdx].resize(mol->getNumConformers());
+
+    if (_fireDebugOutput) {
+      debugOutputs[molIdx].resize(mol->getNumConformers());
+    }
 
     size_t confIdx = 0;
     for (auto confIter = mol->beginConformers(); confIter != mol->endConformers(); ++confIter, ++confIdx) {
@@ -97,6 +111,9 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
     streamPool.emplace_back();
     devicesPerThread[i] = gpuId;  // Round-robin assignment of devices
   }
+
+
+
   detail::OpenMPExceptionRegistry exceptionHandler;
 #pragma omp parallel for num_threads(numThreads) schedule(dynamic) default(none) shared(allConformers,        \
                                                                                           moleculeEnergies,   \
@@ -107,6 +124,8 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
                                                                                           streamPool,         \
                                                                                           devicesPerThread,   \
                                                                                           optimizerOptions,   \
+                                                                                          _fireDebugOutput,   \
+                                                                                          debugOutputs,       \
                                                                                           exceptionHandler)
   for (size_t batchStart = 0; batchStart < totalConformers; batchStart += effectiveBatchSize) {
     try {
@@ -165,15 +184,18 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
       std::unique_ptr<nvMolKit::BatchMinimizer> minimizer;
       const double gradTol = optimizerOptions.backend == OptimizerOptions::Backend::FIRE ? optimizerOptions.fireOptions.gradTol
                                                                                         : 1e-4;
+      FireBatchMinimizer* fireMinimizerPtr = nullptr;
+
       if (optimizerOptions.backend == OptimizerOptions::Backend::FIRE) {
         minimizer = std::make_unique<nvMolKit::FireBatchMinimizer>(
           /*dataDim=*/3,
           optimizerOptions.fireOptions,
-          streamPtr);
-        auto* minimizerPtr = dynamic_cast<FireBatchMinimizer*>(minimizer.get());
-        assert(minimizerPtr != nullptr);
+          streamPtr,
+          /*debugMode=*/_fireDebugOutput != nullptr);
+       fireMinimizerPtr = dynamic_cast<FireBatchMinimizer*>(minimizer.get());
+        assert(fireMinimizerPtr != nullptr);
         if (optimizerOptions.fireOptions.useMass) {
-          minimizerPtr->setMasses(masses);
+          fireMinimizerPtr->setMasses(masses);
         }
       } else {
         minimizer = std::make_unique<nvMolKit::BfgsBatchMinimizer>(/*dataDim=*/3,
@@ -203,11 +225,18 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
       systemDevice.energyOuts.copyToHost(gotEnergies);
       cudaStreamSynchronize(streamPtr);
 
+
+
       // Update conformer positions and store energies
       for (size_t i = 0; i < batchConformers.size(); ++i) {
         const auto&    confInfo     = batchConformers[i];
         const uint32_t numAtoms     = confInfo.mol->getNumAtoms();
         const uint32_t atomStartIdx = conformerAtomStarts[i];
+
+        if (_fireDebugOutput) {
+          const auto& debugOutputsLocal = fireMinimizerPtr->debugOutputs();
+          debugOutputs[confInfo.molIdx][confInfo.confIdx] = debugOutputsLocal[i];
+        }
 
         // Update conformer positions
         for (uint32_t j = 0; j < numAtoms; ++j) {
@@ -225,6 +254,9 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
     }
   }
   exceptionHandler.rethrow();
+  if (_fireDebugOutput) {
+    *_fireDebugOutput = debugOutputs;
+  }
   return moleculeEnergies;
 }
 

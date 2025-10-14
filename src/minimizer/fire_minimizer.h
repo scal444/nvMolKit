@@ -16,6 +16,7 @@
 #ifndef NVMOLKIT_FIRE_MINIMIZER_H
 #define NVMOLKIT_FIRE_MINIMIZER_H
 
+#include <vector>
 #include "device_vector.h"
 #include "host_vector.h"
 #include "minimizer_api.h"
@@ -52,11 +53,20 @@ struct FireOptions {
   bool takeHalfStepBack = false;  //!< Whether to take a half step back when power is negative. Turned on for FIRE 2.0.
 };
 
+//! Per-system debug output for the FIRE minimizer.
+struct FireDebugOutput {
+  std::vector<double> alphas;
+  std::vector<double> dt;
+  std::vector<double> powers;
+  std::vector<double> energies;
+};
+
 class FireBatchMinimizer final : public BatchMinimizer {
  public:
   explicit FireBatchMinimizer(int                dataDim = 3,
                               const FireOptions& options = FireOptions(),
-                              cudaStream_t       stream  = nullptr);
+                              cudaStream_t       stream  = nullptr,
+                              bool debugMode = false);
   ~FireBatchMinimizer() override = default;
 
   //! Initialize internal buffers for a new batch.
@@ -89,6 +99,8 @@ class FireBatchMinimizer final : public BatchMinimizer {
                 GradFunctor                   gFunc,
                 const uint8_t*                activeThisStage = nullptr) override;
 
+  const std::vector<FireDebugOutput>& debugOutputs() const { return debugOutputs_; }
+
  private:
   void fireUpdate(double                        gradTol,
               const AsyncDeviceVector<int>& atomStarts,
@@ -99,6 +111,7 @@ class FireBatchMinimizer final : public BatchMinimizer {
   int          dataDim_;
   FireOptions  fireOptions_;
   cudaStream_t stream_;
+  bool        debugMode_ = false;
 
   // Per atom * dim quantities
   AsyncDeviceVector<double> velocities_;
@@ -106,7 +119,6 @@ class FireBatchMinimizer final : public BatchMinimizer {
   AsyncDeviceVector<double> masses_;
 
   // Per system quantities.
-  AsyncDeviceVector<double>  powers_;
   AsyncDeviceVector<double>  dt_;
   AsyncDeviceVector<double>  alpha_;
   AsyncDeviceVector<int>     numStepsWithPositivePower_;
@@ -121,6 +133,10 @@ class FireBatchMinimizer final : public BatchMinimizer {
   AsyncDeviceVector<int>     allSystemIndices_;
 
   std::vector<double> hostMasses_;
+
+  // Only allocated in debug mode when we need extra write buffers.
+  AsyncDeviceVector<double> debugPowers_;
+  std::vector<FireDebugOutput> debugOutputs_;
 };
 
 }  // namespace nvMolKit

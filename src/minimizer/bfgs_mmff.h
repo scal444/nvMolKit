@@ -43,12 +43,14 @@ struct OptimizerOptions {
 //! \param nonBondedThreshold The radius threshold for non-bonded interactions
 //! \param perfOptions Performance tuning options (threading, batching)
 //! \param optimizerOptions Selection of the numerical optimizer backend
+//! \param _fireDebugOutput If using FIRE optimizer, this optional pointer can be used to get detailed debug output
 //! \return A vector of vectors of energies, where each inner vector contains energies for conformers of one molecule
 std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKit::ROMol*>& mols,
                                                                 int                         maxIters           = 200,
                                                                 double                      nonBondedThreshold = 100.0,
                                                                 const BatchHardwareOptions& perfOptions        = {},
-                                                                const OptimizerOptions&     optimizerOptions   = {});
+                                                                const OptimizerOptions&     optimizerOptions   = {},
+                                                                std::vector<std::vector<FireDebugOutput>>* _fireDebugOutput = nullptr);
 
 }  // namespace nvMolKit::MMFF
 #endif  // NVMOLKIT_BFGS_MMFF_H

@@ -35,6 +35,7 @@ def MMFFOptimizeMoleculesConfs(
     hardwareOptions: HardwareOptions | None = None,
     optimizer_backend: str | None = None,
     optimizer_options: dict[str, object] | None = None,
+    fire_debug_output: list[dict[str, list[float]]] | None = None,
 ) -> list[list[float]]:
     """Optimize conformers for multiple molecules using MMFF force field with selectable minimization backend.
 
@@ -50,6 +51,9 @@ def MMFFOptimizeMoleculesConfs(
         hardwareOptions: Hardware tuning options for GPU execution (default: auto)
         optimizer_backend: Minimizer backend to run, e.g. ``"BFGS"`` or ``"FIRE"`` (default: ``"BFGS"``)
         optimizer_options: Backend-specific configuration dictionary. Only FIRE options are currently supported.
+        fire_debug_output: Optional list that will be populated with FIRE debug information when using the FIRE backend.
+            The populated structure is ``List[List[Dict[str, List[float]]]]`` keyed by ``"alphas"``, ``"dt"``,
+            ``"powers"``, and ``"energies"``.
 
     Returns:
         List of lists of energies, where each inner list contains the optimized energies
@@ -141,6 +145,21 @@ def MMFFOptimizeMoleculesConfs(
             normalized_options["take_half_step_back"] = take_half_step_back
 
         optimizer_options = normalized_options
+    elif fire_debug_output is not None:
+        raise ValueError("fire_debug_output can only be used with the FIRE optimizer backend")
+
+    if fire_debug_output is None:
+        return _mmffOptimization.MMFFOptimizeMoleculesConfs(
+            molecules,
+            maxIters,
+            nonBondedThreshold,
+            native_options,
+            backend_value,
+            optimizer_options,
+        )
+
+    if not isinstance(fire_debug_output, list):
+        raise TypeError("fire_debug_output must be a list when provided")
 
     return _mmffOptimization.MMFFOptimizeMoleculesConfs(
         molecules,
@@ -149,5 +168,6 @@ def MMFFOptimizeMoleculesConfs(
         native_options,
         backend_value,
         optimizer_options,
+        fire_debug_output,
     )
 

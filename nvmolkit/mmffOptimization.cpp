@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <boost/python.hpp>
 #include <cctype>
+#include <boost/python/stl_iterator.hpp>
 
 #include "bfgs_mmff.h"
 
@@ -37,6 +38,27 @@ template <typename T> boost::python::list vectorOfVectorsToList(const std::vecto
   return outerList;
 }
 
+boost::python::dict fireDebugOutputToDict(const nvMolKit::FireDebugOutput& debugOutput) {
+  boost::python::dict dict;
+  dict["alphas"]   = vectorToList(debugOutput.alphas);
+  dict["dt"]       = vectorToList(debugOutput.dt);
+  dict["powers"]   = vectorToList(debugOutput.powers);
+  dict["energies"] = vectorToList(debugOutput.energies);
+  return dict;
+}
+
+boost::python::list fireDebugOutputsToList(const std::vector<std::vector<nvMolKit::FireDebugOutput>>& debugOutputs) {
+  boost::python::list outerList;
+  for (const auto& moleculeOutputs : debugOutputs) {
+    boost::python::list moleculeList;
+    for (const auto& output : moleculeOutputs) {
+      moleculeList.append(fireDebugOutputToDict(output));
+    }
+    outerList.append(moleculeList);
+  }
+  return outerList;
+}
+
 BOOST_PYTHON_MODULE(_mmffOptimization) {
   boost::python::def(
     "MMFFOptimizeMoleculesConfs",
@@ -45,7 +67,8 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
         double                                nonBondedThreshold,
         const nvMolKit::BatchHardwareOptions& hardwareOptions,
         const std::string&                    optimizerBackend,
-        const boost::python::dict&            optimizerOptionsDict) -> boost::python::list {
+        const boost::python::dict&            optimizerOptionsDict,
+        const boost::python::object&          fireDebugOutput) -> boost::python::list {
       // Convert Python list to std::vector<RDKit::ROMol*>
       std::vector<RDKit::ROMol*> molsVec;
       molsVec.reserve(len(molecules));
@@ -63,6 +86,9 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
         optOptions.backend = nvMolKit::MMFF::OptimizerOptions::Backend::BFGS;
         if (boost::python::len(optimizerOptionsDict) != 0) {
           throw std::invalid_argument("BFGS backend does not accept optimizer options");
+        }
+        if (fireDebugOutput.ptr() != Py_None) {
+          throw std::invalid_argument("fireDebugOutput can only be used with the FIRE optimizer backend");
         }
       } else if (optimizerBackend == "FIRE" || optimizerBackend == "fire") {
         optOptions.backend = nvMolKit::MMFF::OptimizerOptions::Backend::FIRE;
@@ -112,12 +138,33 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
         throw std::invalid_argument("Unsupported optimizer backend: " + optimizerBackend);
       }
 
+      std::vector<std::vector<nvMolKit::FireDebugOutput>> fireDebugStorage;
+      std::vector<std::vector<nvMolKit::FireDebugOutput>>* fireDebugPtr = nullptr;
+      if (fireDebugOutput.ptr() != Py_None) {
+        if (!PyList_Check(fireDebugOutput.ptr())) {
+          throw std::invalid_argument("fireDebugOutput must be a list when provided");
+        }
+        boost::python::stl_input_iterator<boost::python::object> itBegin(fireDebugOutput), itEnd;
+        if (itBegin != itEnd) {
+          throw std::invalid_argument("fireDebugOutput list must be empty when passed in");
+        }
+        fireDebugStorage.resize(molsVec.size());
+        fireDebugPtr = &fireDebugStorage;
+      }
+
       // Call the C++ function
       auto result = nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molsVec,
                                                                    maxIters,
                                                                    nonBondedThreshold,
                                                                    hardwareOptions,
-                                                                   optOptions);
+                                                                   optOptions,
+                                                                   fireDebugPtr);
+
+      if (fireDebugPtr != nullptr) {
+        boost::python::list debugList = fireDebugOutputsToList(*fireDebugPtr);
+        fireDebugOutput.attr("clear")();
+        fireDebugOutput.attr("extend")(debugList);
+      }
 
       // Convert result back to Python list of lists
       return vectorOfVectorsToList(result);
@@ -127,7 +174,8 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
      boost::python::arg("nonBondedThreshold") = 100.0,
      boost::python::arg("hardwareOptions")    = nvMolKit::BatchHardwareOptions(),
      boost::python::arg("optimizerBackend")   = std::string("BFGS"),
-     boost::python::arg("optimizerOptions")   = boost::python::dict()),
+     boost::python::arg("optimizerOptions")   = boost::python::dict(),
+     boost::python::arg("fireDebugOutput")    = boost::python::object()),
     "Optimize conformers for multiple molecules using MMFF force field.\n"
     "\n"
     "Args:\n"
@@ -135,6 +183,7 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
     "    maxIters: Maximum number of optimization iterations (default: 200)\n"
     "    nonBondedThreshold: Radius threshold for non-bonded interactions (default: 100.0)\n"
     "    hardwareOptions: BatchHardwareOptions object with hardware settings (default: default options)\n"
+    "    fireDebugOutput: Optional list to populate with FIRE debug data when using the FIRE optimizer\n"
     "\n"
     "Returns:\n"
     "    List of lists of energies, where each inner list contains energies for conformers of one molecule");
