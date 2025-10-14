@@ -36,7 +36,7 @@ struct FireOptions {
   double dtMinFactor = 0.02;    //!< Lower bound relative to dtInit (dt >= dtInit * dtMinFactor).
   double dtMaxFactor = 10.0;   //!< Upper bound relative to dtInit (dt <= dtInit * dtMaxFactor).
 
-  double dMax = 0.1;  //!< Maximum displacement in Angstroms per time step. If any dimension exceeds this, dt is reduced for that one step.
+  double dMax = 0.2;  //!< Maximum displacement in Angstroms per time step. If any dimension exceeds this, dt is reduced for that one step.
 
   double timeStepIncrement = 1.1;  //!< Factor to increase time step when conditions are met
   double timeStepDecrement = 0.5;  //!< Factor to decrease time step when conditions are not met

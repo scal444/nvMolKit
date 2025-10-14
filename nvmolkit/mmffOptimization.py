@@ -131,6 +131,8 @@ def MMFFOptimizeMoleculesConfs(
                 if not isinstance(value, bool):
                     raise TypeError("take_half_step_back must be a boolean")
                 take_half_step_back = value
+            elif key_lc in {"max_step", "maxstep"}:
+                normalized_options["max_step"] = value
             else:
                 normalized_options[key_lc] = value
 

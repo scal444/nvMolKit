@@ -115,6 +115,8 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
             optOptions.fireOptions.alphaDecrement = boost::python::extract<double>(optimizerOptionsDict[key]);
           } else if (key == "grad_tol") {
             optOptions.fireOptions.gradTol = boost::python::extract<double>(optimizerOptionsDict[key]);
+          } else if (key == "max_step") {
+            optOptions.fireOptions.dMax = boost::python::extract<double>(optimizerOptionsDict[key]);
           } else if (key == "integration_scheme") {
             std::string integrationScheme = boost::python::extract<std::string>(optimizerOptionsDict[key]);
             std::transform(integrationScheme.begin(),

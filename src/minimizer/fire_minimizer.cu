@@ -253,17 +253,18 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
   // TODO consolidate dot product implementations.
   // TODO this is just zero on step 0, so could be skipped.
   double power   = 0.0;
-  double maxGrad = 0.0;
+  double gradSquaredAccum = 0.0;
   for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
-    power += vSys[i] * -fSys[i];
-    maxGrad = fmax(maxGrad, std::abs(fSys[i]));
+    const double fElement = fSys[i];
+    power += vSys[i] * -fElement;
+    gradSquaredAccum += fElement * fElement;
   }
 
   using BlockReduce = cub::BlockReduce<double, updatePowerBlockSize>;
   __shared__ BlockReduce::TempStorage tempStorage;
   const double                        powerSum = BlockReduce(tempStorage).Sum(power);
   block.sync();  // To reuse the temp storage.
-  const double maxGradReduced = BlockReduce(tempStorage).Reduce(maxGrad, cub::Max());
+  const double gradSquaredReduced = BlockReduce(tempStorage).Reduce(gradSquaredAccum, cub::Sum());
 
   // -----------------------------------------------------------------
   // Update counting vars, alphas and dt based on powerSum.
@@ -274,8 +275,8 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
     if (!debugPowers.empty()) {
       debugPowers[sysIdx] = powerSum;
     }
-    if (maxGradReduced <= gradTol) {
-      //  printf("Converged system %d with maxGrad %f <= %f\n", sysIdx, maxGradReduced, gradTol);
+    if (sqrt(gradSquaredReduced) <= gradTol) {
+      //  printf("Converged system %d with maxGrad %f <= %f\n", sysIdx, sqrt(gradSquaredReduced), gradTol);
       *metConvergenceCriteria = true;
     }
     if (powerSum >= 0.0) {
@@ -296,13 +297,13 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
       dt[sysIdx] *= dtDecrementFactor;
     }
     dt[sysIdx] = fmin(fmax(dt[sysIdx], minDt), maxDt);
-    // printf("System %d: power=%f, alpha=%f, dt=%f, numPosSteps=%d maxGrad=%f\n",
+    // printf("System %d: power=%f, alpha=%f, dt=%f, numPosSteps=%d gradSquared=%f\n",
     //        sysIdx,
     //        powerSum,
     //        alphas[sysIdx],
     //        dt[sysIdx],
     //        numStepsWithPositivePower[sysIdx],
-    //        maxGradReduced);
+    //        gradSquaredReduced);
   }
   // END per system compute ^^^, all threads now active again (if they were before).
   block.sync();
@@ -337,6 +338,7 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
       block.sync();
       const double summedMaxDisplacement = *maxDisplacement;
       if (summedMaxDisplacement > dMax) {
+        // printf("Reducing dt from %f to %f due to max displacement %f > %f\n", dtScaled, dMax / summedMaxDisplacement, summedMaxDisplacement, dMax);
         dtScaled = dMax / summedMaxDisplacement;
       }
     }
