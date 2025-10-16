@@ -117,6 +117,8 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
             optOptions.fireOptions.gradTol = boost::python::extract<double>(optimizerOptionsDict[key]);
           } else if (key == "max_step") {
             optOptions.fireOptions.dMax = boost::python::extract<double>(optimizerOptionsDict[key]);
+          } else if (key == "use_abc") {
+            optOptions.fireOptions.abcCorrection = boost::python::extract<bool>(optimizerOptionsDict[key]);
           } else if (key == "integration_scheme") {
             std::string integrationScheme = boost::python::extract<std::string>(optimizerOptionsDict[key]);
             std::transform(integrationScheme.begin(),
@@ -146,7 +148,8 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
         if (!PyList_Check(fireDebugOutput.ptr())) {
           throw std::invalid_argument("fireDebugOutput must be a list when provided");
         }
-        boost::python::stl_input_iterator<boost::python::object> itBegin(fireDebugOutput), itEnd;
+        boost::python::stl_input_iterator<boost::python::object> const itBegin(fireDebugOutput);
+        boost::python::stl_input_iterator<boost::python::object> const itEnd;
         if (itBegin != itEnd) {
           throw std::invalid_argument("fireDebugOutput list must be empty when passed in");
         }
@@ -155,7 +158,7 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
       }
 
       // Call the C++ function
-      auto result = nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molsVec,
+      const auto result = nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molsVec,
                                                                    maxIters,
                                                                    nonBondedThreshold,
                                                                    hardwareOptions,

@@ -53,6 +53,7 @@ struct FireOptions {
   FireIntegrationScheme integrationScheme = FireIntegrationScheme::SemiImplicitEuler;
 
   bool takeHalfStepBack = false;  //!< Whether to take a half step back when power is negative. Turned on for FIRE 2.0.
+  bool abcCorrection = false; //!< Whether to apply Accelerated-Bias Correction to mixer.
 };
 
 //! Per-system debug output for the FIRE minimizer.
@@ -113,6 +114,7 @@ class FireBatchMinimizer final : public BatchMinimizer {
   int          dataDim_;
   FireOptions  fireOptions_;
   cudaStream_t stream_;
+  int step_ = 0;
   bool        debugMode_ = false;
 
   // Per atom * dim quantities

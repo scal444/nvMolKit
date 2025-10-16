@@ -53,6 +53,7 @@ __device__ __forceinline__ cuda::std::span<T> getSystemSpan(const cuda::std::spa
 }
 
 constexpr int   updatePowerBlockSize = 256;
+constexpr double kCalMolToEV = 0.04336410390059322;
 
 // Explicit Euler integration step with FIRE velocity modification.
 // See:
@@ -68,6 +69,8 @@ __device__ __forceinline__ void explicitEuler(
   const cuda::std::span<const double> massesSys,
   const double alpha,
   const int dataDim,
+  const bool useAbc,
+  const int numStepsWithPositivePower,
   double* sharedVDotSum,
   double* sharedFDotSum) {
   using BlockReduce = cub::BlockReduce<double, updatePowerBlockSize>;
@@ -97,30 +100,27 @@ __device__ __forceinline__ void explicitEuler(
   const double fDotSum      = *sharedFDotSum;
   const double constFactor1 = (1.0 - alpha);
   const double constFactor2 = alpha * sqrt(vDotSum) / sqrt(fDotSum);
+  const double abcFactor = useAbc? 1.0 / (1 - pow(max(alpha, 1e-10), static_cast<double>(numStepsWithPositivePower)) ) : 1.0;
+
   for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
     // v = (1-alpha)*v + alpha* v_norm * F_unitvec
-    vSys[i] = constFactor1 * vSys[i] + constFactor2 * -fSys[i];
+    vSys[i] = abcFactor * (constFactor1 * vSys[i] + constFactor2 * -fSys[i]);
   }
 
   // Now integrate positions using the constrained displacement length if needed.
   for (int i = block.thread_rank(); i < xSys.size(); i += updatePowerBlockSize) {
     xSys[i] += vSys[i] * dt;
   }
-  constexpr double kNewtonConversionFactor                = 6.9477e-11;  // kcal/mol A -> N
-  constexpr double kDaltonToKg                            = 1.66054e-27;
-  constexpr double kMetersPerSecond2ToAngstromsPerPs2      = 1e-14;
 
   // Delta v is F * dt / m. We need it in A/ps, so:
   // F is in kcal/(mol A), dt is in ps, m is in dalton
 
   for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
     // FIXME: Pull out the constants.
-    const double forceInNewtons = -fSys[i] * kNewtonConversionFactor;
+    const double force = -fSys[i] * kCalMolToEV;
     const int    coordIdx     = i / dataDim;
-    const double massInDalton = massesSys.empty() ? 1.0: massesSys[coordIdx];
-    const double accelInMps2  = forceInNewtons / (massInDalton * kDaltonToKg);
-    const double accelInAps2  = accelInMps2 * kMetersPerSecond2ToAngstromsPerPs2;
-    vSys[i] += accelInAps2 * dt;
+    const double mass = massesSys.empty() ? 1.0: massesSys[coordIdx];
+    vSys[i] += force * dt / mass;
   }
 }
 
@@ -140,25 +140,30 @@ __device__ __forceinline__ void semiImplicitEuler(
   const cuda::std::span<const double> massesSys,
   const double alpha,
   const int dataDim,
+  const bool useAbc,
+  const int numStepsWithPositivePower,
   double* sharedVDotSum,
   double* sharedFDotSum) {
   using BlockReduce = cub::BlockReduce<double, updatePowerBlockSize>;
 
-  constexpr double kNewtonConversionFactor                = 6.9477e-11;  // kcal/mol A -> N
-  constexpr double kDaltonToKg                            = 1.66054e-27;
-  constexpr double kMetersPerSecond2ToAngstromsPerPs2      = 1e-14;
 
   // Delta v is F * dt / m. We need it in A/ps, so:
   // F is in kcal/(mol A), dt is in ps, m is in dalton
 
   for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
     // FIXME: Pull out the constants.
-    const double forceInNewtons = -fSys[i] * kNewtonConversionFactor;
+    const double force = -fSys[i] * kCalMolToEV;
     const int    coordIdx     = i / dataDim;
-    const double massInDalton = massesSys.empty() ? 1.0: massesSys[coordIdx];
-    const double accelInMps2  = forceInNewtons / (massInDalton * kDaltonToKg);
-    const double accelInAps2  = accelInMps2 * kMetersPerSecond2ToAngstromsPerPs2;
-    vSys[i] += accelInAps2 * dt;
+    const double mass = massesSys.empty() ? 1.0: massesSys[coordIdx];
+    if (i == 1) {
+      printf("Initial v change:\n");
+      printf("  V before force: %f\n", vSys[i]);
+      printf("  Grad 1 mass 1 dt 1 %f %f %f\n", force, mass, dt);
+    }
+    vSys[i] += force * dt / mass;
+    if (i == 1) {
+      printf("  V after force: %f\n", vSys[i]);
+    }
   }
 
   double vDot = 0.0;
@@ -173,7 +178,7 @@ __device__ __forceinline__ void semiImplicitEuler(
   const double vDotSum = *sharedVDotSum;
   double fDot = 0.0;
   for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
-    fDot += fSys[i] * fSys[i];
+    fDot += fSys[i] * fSys[i] * kCalMolToEV * kCalMolToEV;
   }
   // FIRE 1.0
   // https://www.sciencedirect.com/science/article/pii/S0927025620300756#s0125
@@ -183,18 +188,41 @@ __device__ __forceinline__ void semiImplicitEuler(
     *sharedFDotSum = fDotSumThread0;
   }
   block.sync();
+  if (block.thread_rank() == 1) {
+    printf("VDotsum: %f, FDotSum: %f\n", *sharedVDotSum, *sharedFDotSum);
+  }
   const double fDotSum      = *sharedFDotSum;
   const double constFactor1 = (1.0 - alpha);
+  const double abcFactor = useAbc? 1.0 / (1 - pow(max(alpha, 1e-10), static_cast<double>(numStepsWithPositivePower)) ) : 1.0;
   // Handle div by 0.
   const double constFactor2 = fDotSum > 1e-10 ?  alpha * sqrt(vDotSum) / sqrt(fDotSum) : 0.0;
+  if (threadIdx.x == 1) {
+    // printf("Const factor 2: %f, ABC factor: %f\n", constFactor2, abcFactor);
+  }
   for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
     // v = (1-alpha)*v + alpha* v_norm * F_unitvec
-    vSys[i] = constFactor1 * vSys[i] + constFactor2 * -fSys[i];
+    if (i == 1) {
+     printf("Mixing update\n");
+      printf("  V before mixing: %f\n", vSys[i]);
+      printf("  Const factors: %f, %f\n", constFactor1, constFactor2);
+    }
+    vSys[i] = abcFactor * (constFactor1 * vSys[i] + constFactor2 * -fSys[i] * kCalMolToEV);
+    if (i == 1) {
+      printf("  V after mixing: %f\n", vSys[i]);
+    }
   }
 
   // Now integrate positions using the constrained displacement length if needed.
   for (int i = block.thread_rank(); i < xSys.size(); i += updatePowerBlockSize) {
+    if (i == 1) {
+      printf("X update:\n");
+      printf("  IDX 1 xsys before %f\n", xSys[i]);
+      printf("  vsys[i] = %f, dt=%f\n", vSys[i], dt);
+    }
     xSys[i] += vSys[i] * dt;
+    if (i == 1) {
+      printf("  IDX 1 xsys after %f\n", xSys[i]);
+    }
   }
 
 }
@@ -219,7 +247,9 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
                              const double                        alphaStart,
                              const double                        alphaDecrementFactor,
                              const double                        gradTol,
+                             const bool abcCorrection,
                              uint8_t*                            activeSystems,
+                             bool firstStep,
                              const cuda::std::span<double> debugPowers) {
   namespace cg     = cooperative_groups;
   auto      block  = cg::this_thread_block();
@@ -249,36 +279,60 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
     massesSys           = masses.subspan(atomStart, atomCount);
   }
   const double alpha = alphas[sysIdx];
+  using BlockReduce = cub::BlockReduce<double, updatePowerBlockSize>;
+  __shared__ BlockReduce::TempStorage tempStorage;
 
   // TODO consolidate dot product implementations.
-  // TODO this is just zero on step 0, so could be skipped.
-  double power   = 0.0;
+  double powerSum = 0.0;
+
+  if (!firstStep) {
+    double power   = 0.0;
+    for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
+      const double fElement = fSys[i];
+      power += vSys[i] * -fElement;
+    }
+
+    powerSum = BlockReduce(tempStorage).Sum(power) * kCalMolToEV;
+    block.sync();  // To reuse the temp storage.
+
+  }
+
   double gradSquaredAccum = 0.0;
   for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
     const double fElement = fSys[i];
-    power += vSys[i] * -fElement;
     gradSquaredAccum += fElement * fElement;
   }
-
-  using BlockReduce = cub::BlockReduce<double, updatePowerBlockSize>;
-  __shared__ BlockReduce::TempStorage tempStorage;
-  const double                        powerSum = BlockReduce(tempStorage).Sum(power);
-  block.sync();  // To reuse the temp storage.
   const double gradSquaredReduced = BlockReduce(tempStorage).Reduce(gradSquaredAccum, cub::Sum());
-
+  block.sync();  // To reuse the temp storage.
+  // ---------------------------
+  // Check convergence criteria.
+  // ---------------------------
+  const double dtBeforeAdjustment = dt[sysIdx];
+  if (block.thread_rank() == 0) {
+    if (sqrt(gradSquaredReduced) <= gradTol) {
+      //  printf("Converged system %d with maxGrad %f <= %f\n", sysIdx, sqrt(gradSquaredReduced), gradTol);
+      *metConvergenceCriteria = true;
+      if (activeSystems != nullptr) {
+        activeSystems[sysIdx] = 0;
+      }
+    }
+  }
+  block.sync();
+  if (*metConvergenceCriteria) {
+    return;
+  }
   // -----------------------------------------------------------------
   // Update counting vars, alphas and dt based on powerSum.
   // This set of operations is per system, so only do it on one thread.
   // -----------------------------------------------------------------
-  const double dtBeforeAdjustment = dt[sysIdx];
-  if (block.thread_rank() == 0) {
+
+
+  if (block.thread_rank() == 0 && !firstStep) {
     if (!debugPowers.empty()) {
       debugPowers[sysIdx] = powerSum;
     }
-    if (sqrt(gradSquaredReduced) <= gradTol) {
-      //  printf("Converged system %d with maxGrad %f <= %f\n", sysIdx, sqrt(gradSquaredReduced), gradTol);
-      *metConvergenceCriteria = true;
-    }
+    printf("VF: %f\n", powerSum);
+
     if (powerSum >= 0.0) {
       const int numStepsPositive        = numStepsWithPositivePower[sysIdx] + 1;
       // Equivalent to numStepsPositive++ but we saved the new value locally too.
@@ -306,18 +360,20 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
     //        gradSquaredReduced);
   }
   // END per system compute ^^^, all threads now active again (if they were before).
-  block.sync();
-  if (*metConvergenceCriteria) {
-    if (block.thread_rank() == 0 && activeSystems != nullptr) {
-      activeSystems[sysIdx] = 0;
-    }
-    return;
-  }
+  block.sync(); // For hadNegativeSharedPower
   if (*hadNegativePowerShared) {
     // Reset case.
     for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
       if (takeHalfStepBack) {
+        if (threadIdx.x == 1) {
+          printf("Taking half step back\n");
+          printf("  X was %f\n", xSys[0]);
+        }
+        // TODO: Is this what ASE and Lampps do? NOt ASE, I think. They use the new one.
         xSys[i] -= vSys[i] * dtBeforeAdjustment * 0.5;
+        if (threadIdx.x == 1) {
+          printf("  X now %f\n", xSys[0]);
+        }
       }
       vSys[i] = 0.0;
     }
@@ -338,15 +394,15 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
       block.sync();
       const double summedMaxDisplacement = *maxDisplacement;
       if (summedMaxDisplacement > dMax) {
-        // printf("Reducing dt from %f to %f due to max displacement %f > %f\n", dtScaled, dMax / summedMaxDisplacement, summedMaxDisplacement, dMax);
+        printf("Reducing dt from %f to %f due to max displacement %f > %f\n", dtScaled, dMax / summedMaxDisplacement, summedMaxDisplacement, dMax);
         dtScaled = dMax / summedMaxDisplacement;
       }
     }
 
     if constexpr (integratorType == FireIntegrationScheme::ExplicitEuler) {
-      explicitEuler(block, tempStorage, dtScaled, vSys, fSys, xSys, massesSys, alpha, dataDim, sharedVDotSum, sharedFDotSum);
+      explicitEuler(block, tempStorage, dtScaled, vSys, fSys, xSys, massesSys, alpha, dataDim, abcCorrection, numStepsWithPositivePower[sysIdx], sharedVDotSum, sharedFDotSum);
     } else if constexpr (integratorType == FireIntegrationScheme::SemiImplicitEuler) {
-      semiImplicitEuler(block, tempStorage, dtScaled, vSys, fSys, xSys, massesSys, alpha, dataDim, sharedVDotSum, sharedFDotSum);
+      semiImplicitEuler(block, tempStorage, dtScaled, vSys, fSys, xSys, massesSys, alpha, dataDim, abcCorrection, numStepsWithPositivePower[sysIdx], sharedVDotSum, sharedFDotSum);
     } else {
       assert(false);
     }
@@ -416,7 +472,9 @@ void FireBatchMinimizer::fireUpdate(const double                  gradTol,
                                                                fireOptions_.alphaInit,
                                                                fireOptions_.alphaDecrement,
                                                                gradTol,
+                                                               fireOptions_.abcCorrection,
                                                                statuses_.data(),
+                                                               step_ == 0,
                                                                debugPowers);
   } else if (fireOptions_.integrationScheme == FireIntegrationScheme::SemiImplicitEuler) {
       fireKernel<FireIntegrationScheme::SemiImplicitEuler><<<numSystems, updatePowerBlockSize, 0, stream_>>>(
@@ -439,7 +497,9 @@ void FireBatchMinimizer::fireUpdate(const double                  gradTol,
                                                                  fireOptions_.alphaInit,
                                                                  fireOptions_.alphaDecrement,
                                                                  gradTol,
+                                                                 fireOptions_.abcCorrection,
                                                                  statuses_.data(),
+                                                                  step_ == 0,
                                                                  debugPowers);
   }
 
@@ -449,6 +509,7 @@ void FireBatchMinimizer::fireUpdate(const double                  gradTol,
 void FireBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
                                     const double*           masses,
                                     const uint8_t*          activeSystems) {
+  step_ = 0;
   const int totalAtoms = atomStartsHost.back();
   const int numSystems = atomStartsHost.size() - 1;
 
@@ -533,6 +594,7 @@ bool FireBatchMinimizer::step(const double                  gradTol,
   gFunc();
   fireUpdate(gradTol, atomStarts, positions, grad);
   const int numFinished = compactAndCountConverged();
+  step_++;
   return numFinished == numSystems;
 }
 
@@ -551,6 +613,7 @@ bool FireBatchMinimizer::minimize(const int                                   nu
 
   for (int i = 0; i < numIters; ++i) {
     if (debugMode_) {
+      printf("\nStep\n\n");
       energyBuffer.zero();
       energyOuts.zero();
       eFunc(positions.data());

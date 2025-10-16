@@ -25,6 +25,27 @@ if pyroot:
         f"-DCMAKE_PREFIX_PATH={pyroot}"
     )
 
+# Handle CUDA architecture settings
+# If NVMOLKIT_CUDA_TARGET_MODE is set, use that. If set to default, also search for CMAKE_CUDA_ARCHITECTURES
+# If not set, search for CMAKE_CUDA_ARCHITECTURES, and if not found, set to full mode.
+cuda_target_mode = os.getenv("NVMOLKIT_CUDA_TARGET_MODE")
+custom_arch = os.getenv("CMAKE_CUDA_ARCHITECTURES")
+if cuda_target_mode:
+    print("CUDA target mode is set via env var to ", cuda_target_mode)
+    cmake_extra_args.append(f"-DNVMOLKIT_CUDA_TARGET_MODE={cuda_target_mode}")
+    if cuda_target_mode == "default" and custom_arch is not None:
+        print("With default mode, also setting custom arch from CMAKE_CUDA_ARCHITECTURES to ", custom_arch)
+        cmake_extra_args.append(f"-DCMAKE_CUDA_ARCHITECTURES={custom_arch}")
+else:
+    if custom_arch is not None:
+        print("CUDA target mode not set, but CMAKE_CUDA_ARCHITECTURES is set to ", custom_arch)
+        cmake_extra_args.append(f"-DCMAKE_CUDA_ARCHITECTURES={custom_arch}")
+        cmake_extra_args.append("-DNVMOLKIT_CUDA_TARGET_MODE=default")
+    else:
+        print("CUDA target mode and CMAKE_CUDA_ARCHITECTURES not set, defaulting to full mode")
+        cmake_extra_args.append("-DNVMOLKIT_CUDA_TARGET_MODE=full")
+
+
 # Detect if we're doing an install against pip rdkit
 nvmolkit_build_against_pip = os.getenv("NVMOLKIT_BUILD_AGAINST_PIP_RDKIT")
 if nvmolkit_build_against_pip:
@@ -54,7 +75,6 @@ if __name__ == "__main__":
             "-DNVMOLKIT_BUILD_PYTHON_BINDINGS=ON",
             "-DNVMOLKIT_BUILD_TESTS=OFF",
             "-DNVMOLKIT_BUILD_BENCHMARKS=OFF",
-            f"-DNVMOLKIT_CUDA_TARGET_MODE={os.getenv('NVMOLKIT_CUDA_TARGET_MODE', 'full')}",
             #"-DBoost_NO_BOOST_CMAKE=TRUE"
         ] + cmake_extra_args,
         packages=["nvmolkit"],
