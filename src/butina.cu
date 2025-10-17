@@ -16,6 +16,7 @@
 #include <cub/cub.cuh>
 
 #include "butina.h"
+#include "data_structures/flat_bit_vect.h"
 #include "host_vector.h"
 #include "nvtx.h"
 namespace nvMolKit {
@@ -24,9 +25,11 @@ namespace {
 constexpr int blockSizeCount               = 256;
 constexpr int kAssignedAsSingletonSentinel = std::numeric_limits<int>::max() - 1;
 constexpr int kMinLoopSizeForAssignment    = 3;
+constexpr int kBitVectWidth = 32;
+
 
 // TODO can we do some dynamic assignment as lower numbers of rows execute due to being done.
-__global__ void butinaKernelCountClusterSize(const cuda::std::span<const uint8_t> hitMatrix,
+__global__ void butinaKernelCountClusterSize(const cuda::std::span<const FlatBitVect<kBitVectWidth>> hitMatrix,
                                              const cuda::std::span<int>           clusters,
                                              const cuda::std::span<int>           clusterSizes) {
   const auto tid       = static_cast<int>(threadIdx.x);
@@ -38,15 +41,29 @@ __global__ void butinaKernelCountClusterSize(const cuda::std::span<const uint8_t
     return;
   }
 
-  const cuda::std::span<const uint8_t> hits       = hitMatrix.subspan(pointIdx * numPoints, numPoints);
+  const int hitMatDim = (clusters.size() - 1) / kBitVectWidth + 1;
+
+  const auto hits       = hitMatrix.subspan(pointIdx * hitMatDim, numPoints);
   int                                  localCount = 0;
-  for (int i = tid; i < numPoints; i += blockSizeCount) {
-    const bool isNeighbor = hits[i];
-    if (isNeighbor) {
-      const int cluster = clusters[i];
-      if (cluster < 0) {
-        localCount++;
+
+  constexpr int kLoadsPerLoop = 4;
+  using BlockLoad = cub::BlockLoad<int, kLoadsPerLoop * blockSizeCount, kLoadsPerLoop, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
+  __shared__ BlockLoad::TempStorage temp_storage;
+  int blockClusterData[kLoadsPerLoop];
+  for (int i = tid; i < hitMatDim; i += blockSizeCount) {
+    const FlatBitVect<kBitVectWidth> bitVect = hits[i];
+    const int count = min(numPoints - i * kBitVectWidth, kBitVectWidth);
+
+    for (int j = 0; j < count; j+= kLoadsPerLoop) {
+      BlockLoad(temp_storage).Load(clusters.data() + i * kBitVectWidth + j * kLoadsPerLoop, blockClusterData, count);
+      const bool isNeighbor = bitVect[j];
+      if (isNeighbor) {
+        const int cluster = blockClusterData[j % kLoadsPerLoop];
+        if (cluster < 0) {
+          localCount++;
+        }
       }
+      __syncthreads(); // To reuse BlockLoad shared memory.
     }
   }
 
@@ -64,7 +81,7 @@ __global__ void butinaKernelCountClusterSize(const cuda::std::span<const uint8_t
   }
 }
 
-__global__ void butinaWriteClusterValue(const cuda::std::span<const uint8_t> hitMatrix,
+__global__ void butinaWriteClusterValue(const cuda::std::span<const FlatBitVect<kBitVectWidth>> hitMatrix,
                                         const cuda::std::span<int>           clusters,
                                         const int*                           centralIdx,
                                         const int*                           clusterIdx,
@@ -84,9 +101,11 @@ __global__ void butinaWriteClusterValue(const cuda::std::span<const uint8_t> hit
     // printf("Cluster %d centroid is element %d\n", clusterVal, pointIdx);
   }
 
-  const cuda::std::span<const uint8_t> hits = hitMatrix.subspan(pointIdx * numPoints, numPoints);
+  const int hitMatDim = (clusters.size() - 1) / kBitVectWidth + 1;
+
+  const cuda::std::span<const FlatBitVect<kBitVectWidth>> hits = hitMatrix.subspan(pointIdx * hitMatDim, hitMatDim);
   if (tid < numPoints) {
-    if (const bool isNeighbor = hits[tid]; isNeighbor > 0) {
+    if (const bool isNeighbor = hits[tid / kBitVectWidth][tid % kBitVectWidth]; isNeighbor > 0) {
       if (const int cluster = clusters[tid]; cluster < 0) {
         // printf("CLUSTER: %d to item %d total size %d\n", clusterVal, tid, clusterSz);
         clusters[tid] = clusterVal;
@@ -103,21 +122,21 @@ __global__ void bumpClusterIdxKernel(int* clusterIdx, const int* lastClusterSize
   }
 }
 
-__global__ void pairDoubletKernels(const cuda::std::span<const uint8_t> hitMatrix,
+__global__ void pairDoubletKernels(const cuda::std::span<const FlatBitVect<kBitVectWidth>> hitMatrix,
                                    const cuda::std::span<int>           clusters,
                                    const cuda::std::span<const int>     clusterSizes) {
   const auto tid       = static_cast<int>(threadIdx.x);
   const auto pointIdx  = static_cast<int>(blockIdx.x);
-  const auto numPoints = static_cast<int>(clusters.size());
 
   if (clusterSizes[pointIdx] != 2) {
     return;
   }
+  const int hitMatDim = (clusters.size() - 1) / kBitVectWidth + 1;
 
-  const cuda::std::span<const uint8_t> hits = hitMatrix.subspan(pointIdx * numPoints, numPoints);
+  const cuda::std::span<const FlatBitVect<kBitVectWidth>> hits = hitMatrix.subspan(pointIdx * hitMatDim, hitMatDim);
   // Loop up to point IDX so that only one of the pairs does the write. The followup kernel will set both values
   for (int i = tid; i < pointIdx; i += blockSizeCount) {
-    const bool isNeighbor = hits[i];
+    const bool isNeighbor = hits[i / kBitVectWidth][i % kBitVectWidth];
     if (i != pointIdx && isNeighbor && clusterSizes[i] == 2) {
       clusters[pointIdx] = kAssignedAsSingletonSentinel - 1 - i;  // Mark as paired with i
       // printf("Pairing point %d with %d\n", pointIdx, i);
@@ -157,6 +176,7 @@ __global__ void assignSingletonIdsKernel(const cuda::std::span<int> clusters, co
 }
 
 constexpr int   argMaxBlockSize = 512;
+
 __global__ void lastArgMax(const cuda::std::span<const int> values, int* outVal, int* outIdx) {
   int            maxVal = cuda::std::numeric_limits<int>::min();
   int            maxID  = -1;
@@ -206,8 +226,9 @@ template <typename T> void setAll(const cuda::std::span<T>& vec, const T& value,
 }
 
 void innerButinaLoop(const int                            numPoints,
-                     const cuda::std::span<const uint8_t> hitMatrix,
+                     const cuda::std::span<const FlatBitVect<kBitVectWidth>> hitMatrix,
                      const cuda::std::span<int>           clusters,
+                      const cuda::std::span<FlatBitVect<32>> clusterIsSet,
                      const cuda::std::span<int>           clusterSizesSpan,
                      const AsyncDevicePtr<int>&           maxIndex,
                      const AsyncDevicePtr<int>&           maxValue,
@@ -242,8 +263,9 @@ void innerButinaLoop(const int                            numPoints,
   // printf("End of loop max cluster size: %d\n", maxV);
 }
 
+
 }  // namespace
-void butinaGpu(const cuda::std::span<const uint8_t> hitMatrix,
+void butinaGpu(const cuda::std::span<const FlatBitVect<kBitVectWidth>> hitMatrix,
                const cuda::std::span<int>           clusters,
                cudaStream_t                         stream,
                const bool                           useGraph) {
@@ -260,6 +282,11 @@ void butinaGpu(const cuda::std::span<const uint8_t> hitMatrix,
   const AsyncDevicePtr<int> maxIndex(-1, stream);
   const AsyncDevicePtr<int> maxValue(std::numeric_limits<int>::max(), stream);
   const AsyncDevicePtr<int> clusterIdx(0, stream);
+
+  const int numBitFieldClusterIsSet = (clusters.size() -1) / kBitVectWidth + 1;
+  AsyncDeviceVector<FlatBitVect<32>> clusterIsSet(numBitFieldClusterIsSet, stream);
+  auto clusterIsSetSpan = toSpan(clusterIsSet);
+  clusterIsSet.zero();
   PinnedHostVector<int>     maxCluster(1);
   maxCluster[0] = std::numeric_limits<int>::max();
   // size_t tempStorageBytes = 0;
@@ -279,6 +306,7 @@ void butinaGpu(const cuda::std::span<const uint8_t> hitMatrix,
     innerButinaLoop(numPoints,
                     hitMatrix,
                     clusters,
+                    clusterIsSetSpan,
                     clusterSizesSpan,
                     maxIndex,
                     maxValue,
@@ -294,15 +322,42 @@ void butinaGpu(const cuda::std::span<const uint8_t> hitMatrix,
 }
 
 namespace {
+constexpr int kBlockSizeHitAssign = 128;
+constexpr int kLoadsPerLoop = 4;
+__global__ void assignHitsMatrixFromDoubleMatrix(const cuda::std::span<const double> distanceMatrix,
+                                                  const cuda::std::span<FlatBitVect<kBitVectWidth>>  hitMatrix,
+                                                  const double                    cutoff,
+                                                  const int hitMatrixDim,
+                                                  const int distMatrixDim) {
+  using BlockLoad = cub::BlockLoad<double, kLoadsPerLoop * kBlockSizeHitAssign, kLoadsPerLoop, cub::BLOCK_LOAD_WARP_TRANSPOSE>;
+  __shared__ BlockLoad::TempStorage temp_storage;
 
-struct ThresholdOp {
-  const double* matrix;
-  uint8_t*      hits;
-  double        cutoff;
-  ThresholdOp(const double* m, uint8_t* h, double c) : matrix(m), hits(h), cutoff(c) {}
+  const auto tid       = static_cast<int>(blockDim.x * blockIdx.x + threadIdx.x);
+  const int row = tid / hitMatrixDim;
+  const int col = tid % hitMatrixDim;
 
-  __device__ void operator()(const std::size_t idx) const { hits[idx] = (matrix[idx] < cutoff); }
-};
+  const int startIdx = row * distMatrixDim + col * kBitVectWidth;
+  const int count = min(distMatrixDim - col * kBitVectWidth, kBitVectWidth);
+  const auto distanceSpan = distanceMatrix.subspan(startIdx, count);
+
+
+  FlatBitVect<kBitVectWidth> bitVect(false);
+  double blockData[kLoadsPerLoop];
+  for (int loadLoop = 0; loadLoop < kBitVectWidth/ kLoadsPerLoop; ++loadLoop) {
+    BlockLoad(temp_storage).Load(distanceSpan.data() + loadLoop * kLoadsPerLoop, blockData, count);
+    for (int i = 0; i < kLoadsPerLoop; i++) {
+      if (blockData[i] < cutoff) {
+        bitVect.setBit(i, true);
+      }
+    }
+    __syncthreads(); // for BlockLoad shared memory reuse
+  }
+
+
+  hitMatrix[tid] = bitVect;
+
+}
+
 
 }  // namespace
 
@@ -311,24 +366,12 @@ void butinaGpu(const cuda::std::span<const double> distanceMatrix,
                const double                        cutoff,
                cudaStream_t                        stream,
                const bool                          useGraph) {
-  AsyncDeviceVector<uint8_t> hitMatrix(distanceMatrix.size(), stream);
-  std::size_t                tempStorageBytes = 0;
-  AsyncDeviceVector<uint8_t> tempStorage(0, stream);
-
-  ThresholdOp op{distanceMatrix.data(), hitMatrix.data(), cutoff};
-  cub::DeviceFor::Bulk(nullptr,
-                       tempStorageBytes,
-
-                       distanceMatrix.size(),
-                       op,
-                       stream);
-  tempStorage.resize(tempStorageBytes);
-  cub::DeviceFor::Bulk(tempStorage.data(),
-                       tempStorageBytes,
-
-                       distanceMatrix.size(),
-                       op,
-                       stream);
+  // Pad the matrix out to bitvect size
+  const int bitVectDim = (clusters.size() - 1) / kBitVectWidth + 1;
+  AsyncDeviceVector<FlatBitVect<kBitVectWidth>> hitMatrix(bitVectDim * bitVectDim , stream);
+  const int numBlocks = hitMatrix.size();
+  assignHitsMatrixFromDoubleMatrix<<<numBlocks, kBlockSizeHitAssign, 0, stream>>>(distanceMatrix, toSpan(hitMatrix), cutoff, bitVectDim, clusters.size());
+  cudaCheckError(cudaGetLastError());
   butinaGpu(toSpan(hitMatrix), clusters, stream, useGraph);
 }
 
