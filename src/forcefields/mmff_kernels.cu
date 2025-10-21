@@ -246,6 +246,456 @@ __device__ __forceinline__ void vDWGrad(const double* pos,
 
 }  // namespace rdkit_ports
 
+namespace {
+
+__device__ double bondStretchEnergy(const double* pos,
+                                    const int     idx1,
+                                    const int     idx2,
+                                    const double  r0,
+                                    const double  kb) {
+  constexpr double prefactor           = 143.9325 / 2.0;
+  constexpr double csFactorDist        = -2.0;
+  constexpr double csFactorDistSquared = 7.0 / 12.0 * csFactorDist * csFactorDist;
+
+  const double distSquared = distanceSquared(pos, idx1, idx2);
+  const double distance    = sqrt(distSquared);
+
+  const double deltaR  = distance - r0;
+  const double deltaR2 = deltaR * deltaR;
+  return prefactor * kb * deltaR2 * (1.0 + csFactorDist * deltaR + csFactorDistSquared * deltaR2);
+}
+
+__device__ void bondStretchGrad(const double* pos,
+                                const int     idx1,
+                                const int     idx2,
+                                const double  r0,
+                                const double  kb,
+                                double*       grad) {
+  constexpr double c1                          = 143.9325;
+  constexpr double cs                          = -2.0;
+  constexpr double csFactorTimesSecondConstant = cs * 1.5;
+  constexpr double lastFactor                  = 2.0 * 7.0 / 12.0 * cs * cs;  // 7/12 * cs * cs
+
+  double       dx, dy, dz;
+  const double distanceSquared = distanceSquaredWithComponents(pos, idx1, idx2, dx, dy, dz);
+  const double distance        = sqrt(distanceSquared);
+  const double deltaR          = distance - r0;
+
+  const double de_dr = c1 * kb * deltaR * (1.0 + csFactorTimesSecondConstant * deltaR + lastFactor * deltaR * deltaR);
+
+  // Compute dx gradients;
+  const double invDist = 1.0 / distance;
+  double       dE_dx, dE_dy, dE_dz;
+  if (distance > 0.0) {
+    dE_dx = de_dr * dx * invDist;
+    dE_dy = de_dr * dy * invDist;
+    dE_dz = de_dr * dz * invDist;
+  } else {
+    // Taken from RDKit implementation for 1:1 parity
+    dE_dx = kb * 0.01;
+    dE_dy = kb * 0.01;
+    dE_dz = kb * 0.01;
+  }
+
+  atomicAdd(&grad[3 * idx1 + 0], dE_dx);
+  atomicAdd(&grad[3 * idx1 + 1], dE_dy);
+  atomicAdd(&grad[3 * idx1 + 2], dE_dz);
+
+  atomicAdd(&grad[3 * idx2 + 0], -dE_dx);
+  atomicAdd(&grad[3 * idx2 + 1], -dE_dy);
+  atomicAdd(&grad[3 * idx2 + 2], -dE_dz);
+}
+
+__device__ double angleBendEnergy(const double* pos,
+                                  const int     idx1,
+                                  const int     idx2,
+                                  const int     idx3,
+                                  const double  theta0,
+                                  const double  ka,
+                                  const bool    isLinear) {
+  constexpr double prefactor = 0.5 * 143.9325 * degreeToRadian * degreeToRadian;
+  constexpr double cb        = -0.4 * degreeToRadian;
+
+  // Calculate angle between two points
+  double       dx1, dy1, dz1, dx2, dy2, dz2;
+  const double dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
+  const double dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
+  const double dist1        = sqrt(dist1Squared);
+  const double dist2        = sqrt(dist2Squared);
+
+  const double dot         = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
+  const double cosTheta    = clamp(dot / (dist1 * dist2), -1.0, 1.0);
+  const double theta       = radianToDegree * acos(cosTheta);
+  const double deltaTheta  = theta - theta0;
+  const double deltaTheta2 = deltaTheta * deltaTheta;
+
+  if (isLinear) {
+    constexpr double linearPrefactor = 143.9325;
+    return linearPrefactor * ka * (1.0 + cosTheta);
+  }
+  return prefactor * ka * deltaTheta2 * (1.0 + cb * deltaTheta);
+}
+
+__device__ void angleBendGrad(const int     idx1,
+                              const int     idx2,
+                              const int     idx3,
+                              const double  theta0,
+                              const double  ka,
+                              const bool    isLinear,
+                              const double* pos,
+                              double*       grad) {
+  constexpr double c1       = 143.9325 * degreeToRadian;
+  constexpr double cbFactor = -0.006981317 * 1.5;
+
+  // Calculate angle between two points
+  double       dx1, dy1, dz1, dx2, dy2, dz2;
+  const double dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
+  const double dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
+  const double dist1        = sqrt(dist1Squared);
+  const double dist2        = sqrt(dist2Squared);
+
+  const double dot         = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
+  const double cosTheta    = clamp(dot / (dist1 * dist2), -1.0, 1.0);
+  const double sinThetaSq  = 1.0 - cosTheta * cosTheta;
+  const double negSinTheta = -(fmax(((sinThetaSq > 0.0) ? sqrt(sinThetaSq) : 0.0), 1.0e-8));
+  const double theta       = radianToDegree * acos(cosTheta);
+  const double deltaTheta  = theta - theta0;
+
+  double de_dDeltaTheta;
+
+  if (isLinear) {
+    // Linear term is c1 * k * sin(theta), which we get from the cosine
+    constexpr double linearPrefactor = 143.9325;
+    de_dDeltaTheta                   = -linearPrefactor * ka * sqrt(1.0 - (cosTheta * cosTheta));
+  } else {
+    de_dDeltaTheta = c1 * ka * deltaTheta * (1.0 + cbFactor * deltaTheta);
+  }
+
+  // Now do dDeltaTheta/dx for all 3 atoms. Taken from RDKit;
+  if (isDoubleZero(dist1) || isDoubleZero(dist2)) {
+    return;
+  }
+
+  const double invDist1 = 1.0 / dist1;
+  const double invDist2 = 1.0 / dist2;
+
+  const double dxnorm1 = dx1 * invDist1;  // From 1 to 2
+  const double dynorm1 = dy1 * invDist1;
+  const double dznorm1 = dz1 * invDist1;
+  const double dxnorm2 = dx2 * invDist2;  // From 3 to 2
+  const double dynorm2 = dy2 * invDist2;
+  const double dznorm2 = dz2 * invDist2;
+
+  const double intermediate1 = invDist1 * (dxnorm2 - cosTheta * dxnorm1);
+  const double intermediate2 = invDist1 * (dynorm2 - cosTheta * dynorm1);
+  const double intermediate3 = invDist1 * (dznorm2 - cosTheta * dznorm1);
+  const double intermediate4 = invDist2 * (dxnorm1 - cosTheta * dxnorm2);
+  const double intermediate5 = invDist2 * (dynorm1 - cosTheta * dynorm2);
+  const double intermediate6 = invDist2 * (dznorm1 - cosTheta * dznorm2);
+
+  if (isDoubleZero(negSinTheta)) {
+    return;
+  }
+  const double constantFactor = de_dDeltaTheta / negSinTheta;
+
+  atomicAdd(&grad[3 * idx1 + 0], constantFactor * intermediate1);
+  atomicAdd(&grad[3 * idx1 + 1], constantFactor * intermediate2);
+  atomicAdd(&grad[3 * idx1 + 2], constantFactor * intermediate3);
+
+  atomicAdd(&grad[3 * idx2 + 0], constantFactor * (-intermediate1 - intermediate4));
+  atomicAdd(&grad[3 * idx2 + 1], constantFactor * (-intermediate2 - intermediate5));
+  atomicAdd(&grad[3 * idx2 + 2], constantFactor * (-intermediate3 - intermediate6));
+
+  atomicAdd(&grad[3 * idx3 + 0], constantFactor * intermediate4);
+  atomicAdd(&grad[3 * idx3 + 1], constantFactor * intermediate5);
+  atomicAdd(&grad[3 * idx3 + 2], constantFactor * intermediate6);
+}
+
+__device__ double bendStretchEnergy(const double* pos,
+                                    const int     idx1,
+                                    const int     idx2,
+                                    const int     idx3,
+                                    const double  theta0,
+                                    const double  restLen1,
+                                    const double  restLen2,
+                                    const double  forceConst1,
+                                    const double  forceConst2) {
+  constexpr double prefactor = 2.51210;
+  // Functional form:
+  // https://docs.eyesopen.com/toolkits/python/oefftk/fftheory.html#stretch-bend-interaction
+
+  // Calculate angle between two points
+  double       dx1, dy1, dz1, dx2, dy2, dz2;
+  const double dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
+  const double dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
+  const double dist1        = sqrt(dist1Squared);
+  const double dist2        = sqrt(dist2Squared);
+
+  const double dot      = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
+  const double cosTheta = clamp(dot / (dist1 * dist2), -1.0, 1.0);
+  const double theta    = 180 / M_PI * acos(cosTheta);
+
+  const double deltaTheta = theta - theta0;
+  const double deltaR1    = dist1 - restLen1;
+  const double deltaR2    = dist2 - restLen2;
+
+  return prefactor * deltaTheta * (deltaR1 * forceConst1 + deltaR2 * forceConst2);
+}
+
+__device__ void bendStretchGrad(const double* pos,
+                                const int     idx1,
+                                const int     idx2,
+                                const int     idx3,
+                                const double  theta0,
+                                const double  restLen1,
+                                const double  restLen2,
+                                const double  forceConst1,
+                                const double  forceConst2,
+                                double*       grad) {
+  constexpr double prefactor = 143.9325 * M_PI / 180.0;
+  // Functional form:
+  // https://docs.eyesopen.com/toolkits/python/oefftk/fftheory.html#stretch-bend-interaction
+
+  // Calculate angle between two points
+  double       dx1, dy1, dz1, dx2, dy2, dz2;
+  const double dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
+  const double dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
+  const double dist1        = sqrt(dist1Squared);
+  const double dist2        = sqrt(dist2Squared);
+
+  const double dot      = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
+  const double cosTheta = clamp(dot / (dist1 * dist2), -1.0, 1.0);
+  const double sinTheta = fmax(sqrt(1.0 - cosTheta * cosTheta), 1.0e-8);
+
+  const double theta = 180 / M_PI * acos(cosTheta);
+
+  const double deltaTheta = theta - theta0;
+  const double deltaR1    = dist1 - restLen1;
+  const double deltaR2    = dist2 - restLen2;
+
+  const double bondEnergyTerm = 180.0 / M_PI * (forceConst1 * deltaR1 + forceConst2 * deltaR2);
+
+  const double invDist1 = 1.0 / dist1;
+  const double invDist2 = 1.0 / dist2;
+
+  const double scaledDx1 = dx1 * invDist1;
+  const double scaledDy1 = dy1 * invDist1;
+  const double scaledDz1 = dz1 * invDist1;
+  const double scaledDx2 = dx2 * invDist2;
+  const double scaledDy2 = dy2 * invDist2;
+  const double scaledDz2 = dz2 * invDist2;
+
+  const double intermediate1 = invDist1 * (scaledDx2 - cosTheta * scaledDx1);
+  const double intermediate2 = invDist1 * (scaledDy2 - cosTheta * scaledDy1);
+  const double intermediate3 = invDist1 * (scaledDz2 - cosTheta * scaledDz1);
+  const double intermediate4 = invDist2 * (scaledDx1 - cosTheta * scaledDx2);
+  const double intermediate5 = invDist2 * (scaledDy1 - cosTheta * scaledDy2);
+  const double intermediate6 = invDist2 * (scaledDz1 - cosTheta * scaledDz2);
+
+  const double gradx1 = prefactor * (deltaTheta * scaledDx1 * forceConst1 - intermediate1 * bondEnergyTerm / sinTheta);
+  const double grady1 = prefactor * (deltaTheta * scaledDy1 * forceConst1 - intermediate2 * bondEnergyTerm / sinTheta);
+  const double gradz1 = prefactor * (deltaTheta * scaledDz1 * forceConst1 - intermediate3 * bondEnergyTerm / sinTheta);
+
+  const double gradx2 = prefactor * (-deltaTheta * (scaledDx1 * forceConst1 + scaledDx2 * forceConst2) +
+                                     (intermediate1 + intermediate4) * bondEnergyTerm / sinTheta);
+  const double grady2 = prefactor * (-deltaTheta * (scaledDy1 * forceConst1 + scaledDy2 * forceConst2) +
+                                     (intermediate2 + intermediate5) * bondEnergyTerm / sinTheta);
+  const double gradz2 = prefactor * (-deltaTheta * (scaledDz1 * forceConst1 + scaledDz2 * forceConst2) +
+                                     (intermediate3 + intermediate6) * bondEnergyTerm / sinTheta);
+
+  const double gradx3 = prefactor * (deltaTheta * scaledDx2 * forceConst2 - intermediate4 * bondEnergyTerm / sinTheta);
+  const double grady3 = prefactor * (deltaTheta * scaledDy2 * forceConst2 - intermediate5 * bondEnergyTerm / sinTheta);
+  const double gradz3 = prefactor * (deltaTheta * scaledDz2 * forceConst2 - intermediate6 * bondEnergyTerm / sinTheta);
+
+  atomicAdd(&grad[3 * idx1 + 0], gradx1);
+  atomicAdd(&grad[3 * idx1 + 1], grady1);
+  atomicAdd(&grad[3 * idx1 + 2], gradz1);
+
+  atomicAdd(&grad[3 * idx3 + 0], gradx3);
+  atomicAdd(&grad[3 * idx3 + 1], grady3);
+  atomicAdd(&grad[3 * idx3 + 2], gradz3);
+
+  atomicAdd(&grad[3 * idx2 + 0], gradx2);
+  atomicAdd(&grad[3 * idx2 + 1], grady2);
+  atomicAdd(&grad[3 * idx2 + 2], gradz2);
+}
+
+__device__ double oopBendEnergy(const double* pos,
+                                const int     idx1,
+                                const int     idx2,
+                                const int     idx3,
+                                const int     idx4,
+                                const double  koop) {
+  constexpr double prefactor = 0.5 * 143.9325 * degreeToRadian * degreeToRadian;
+  // Using I, J, K, L notation
+
+  double       dxji, dyji, dzji, dxjk, dyjk, dzjk, dxjl, dyjl, dzjl;
+  const double distSquaredJI = distanceSquaredWithComponents(pos, idx1, idx2, dxji, dyji, dzji);
+  const double distSquaredJK = distanceSquaredWithComponents(pos, idx3, idx2, dxjk, dyjk, dzjk);
+  const double distSquaredJL = distanceSquaredWithComponents(pos, idx4, idx2, dxjl, dyjl, dzjl);
+
+  const double distJI = sqrt(distSquaredJI);
+  const double distJK = sqrt(distSquaredJK);
+  const double distJL = sqrt(distSquaredJL);
+
+  const double scaledDxJI = dxji / distJI;
+  const double scaledDyJI = dyji / distJI;
+  const double scaledDzJI = dzji / distJI;
+
+  const double scaledDxJK = dxjk / distJK;
+  const double scaledDyJK = dyjk / distJK;
+  const double scaledDzJK = dzjk / distJK;
+
+  const double scaledDxJL = dxjl / distJL;
+  const double scaledDyJL = dyjl / distJL;
+  const double scaledDzJL = dzjl / distJL;
+
+  // Cross product between JI and JK
+  double crossX, crossY, crossZ;
+  crossProduct(scaledDxJI, scaledDyJI, scaledDzJI, scaledDxJK, scaledDyJK, scaledDzJK, crossX, crossY, crossZ);
+  const double distCross = sqrt(crossX * crossX + crossY * crossY + crossZ * crossZ);
+
+  const double scaledCrossX = crossX / distCross;
+  const double scaledCrossY = crossY / distCross;
+  const double scaledCrossZ = crossZ / distCross;
+
+  // Dot product between cross product and JL
+  const double dotProduct = scaledCrossX * scaledDxJL + scaledCrossY * scaledDyJL + scaledCrossZ * scaledDzJL;
+  const double chi        = radianToDegree * asin(clamp(dotProduct, -1.0, 1.0));
+
+  return prefactor * koop * chi * chi;
+}
+
+__device__ double torsionEnergy(const double* pos,
+                                const int     idx1,
+                                const int     idx2,
+                                const int     idx3,
+                                const int     idx4,
+                                const double  V1,
+                                const double  V2,
+                                const double  V3) {
+  // Compute dihedral angle.
+  const double dxIJ = pos[3 * idx1 + 0] - pos[3 * idx2 + 0];
+  const double dyIJ = pos[3 * idx1 + 1] - pos[3 * idx2 + 1];
+  const double dzIJ = pos[3 * idx1 + 2] - pos[3 * idx2 + 2];
+
+  const double dxKJ = pos[3 * idx3 + 0] - pos[3 * idx2 + 0];
+  const double dyKJ = pos[3 * idx3 + 1] - pos[3 * idx2 + 1];
+  const double dzKJ = pos[3 * idx3 + 2] - pos[3 * idx2 + 2];
+
+  const double dxLK = pos[3 * idx4 + 0] - pos[3 * idx3 + 0];
+  const double dyLK = pos[3 * idx4 + 1] - pos[3 * idx3 + 1];
+  const double dzLK = pos[3 * idx4 + 2] - pos[3 * idx3 + 2];
+
+  const double crossIJKJx = dyIJ * dzKJ - dzIJ * dyKJ;
+  const double crossIJKJy = dzIJ * dxKJ - dxIJ * dzKJ;
+  const double crossIJKJz = dxIJ * dyKJ - dyIJ * dxKJ;
+
+  // Second product JK -> LK. Note the inversion of KJ, we switch the negatives
+  const double crossJKLKx = -dyKJ * dzLK + dzKJ * dyLK;
+  const double crossJKLKy = -dzKJ * dxLK + dxKJ * dzLK;
+  const double crossJKLKz = -dxKJ * dyLK + dyKJ * dxLK;
+
+  const double cross1Norm = sqrt(crossIJKJx * crossIJKJx + crossIJKJy * crossIJKJy + crossIJKJz * crossIJKJz);
+  const double cross2Norm = sqrt(crossJKLKx * crossJKLKx + crossJKLKy * crossJKLKy + crossJKLKz * crossJKLKz);
+
+  const double dotProduct = crossIJKJx * crossJKLKx + crossIJKJy * crossJKLKy + crossIJKJz * crossJKLKz;
+  const double cosPhi     = dotProduct / (cross1Norm * cross2Norm);
+  const double phi        = acos(clamp(cosPhi, -1.0, 1.0));
+
+  return 0.5 * (V1 * (1.0 + cosPhi) + V2 * (1.0 - cos(2.0 * phi)) + V3 * (1.0 + cos(3.0 * phi)));
+}
+
+__device__ double vdwEnergy(const double* pos,
+                            const int     idxs1,
+                            const int     idx2s,
+                            const double  R_ij_stars,
+                            const double  wellDepths) {
+  const int    idx1       = idxs1;
+  const int    idx2       = idx2s;
+  const double R_ij_star  = R_ij_stars;
+  double       R_ij_star2 = R_ij_star * R_ij_star;
+  double       R_ij_star7 = R_ij_star2 * R_ij_star2 * R_ij_star2 * R_ij_star;
+
+  const double epsilon = wellDepths;
+
+  const double distSquared = distanceSquared(pos, idx1, idx2);
+  const double dist        = sqrt(distSquared);
+  const double dist7       = distSquared * distSquared * distSquared * dist;
+
+  const double term1        = 1.07 * R_ij_star / (dist + 0.07 * R_ij_star);
+  const double term1Squared = term1 * term1;
+  const double term1_7th    = term1Squared * term1Squared * term1Squared * term1;
+
+  const double term2Fraction = 1.12 * R_ij_star7 / (dist7 + 0.12 * R_ij_star7);
+
+  return epsilon * term1_7th * (term2Fraction - 2.0);
+}
+
+__device__ double eleEnergy(const double* pos,
+                            const int     idx1,
+                            const int     idx2,
+                            const double  chargeTerm,
+                            const int     dielModel,
+                            const bool    is1_4) {
+  constexpr double prefactor         = 332.0716;
+  constexpr double bufferingConstant = 0.05;
+  const double     distSquared       = distanceSquared(pos, idx1, idx2);
+  double           distTerm          = sqrt(distSquared) + bufferingConstant;
+  if (dielModel == 2) {
+    distTerm *= distTerm;
+  }
+  double energy = prefactor * chargeTerm / (distTerm);
+  if (is1_4) {
+    energy *= 0.75;
+  }
+  return energy;
+}
+
+__device__ void eleGrad(const double* pos,
+                        const int     idx1,
+                        const int     idx2,
+                        const double  chargeTerm,
+                        const int     dielModel,
+                        const bool    is1_4,
+                        double*       grad) {
+  constexpr double prefactor         = 332.0716;
+  constexpr double bufferingConstant = 0.05;
+
+  const double distSquared = distanceSquared(pos, idx1, idx2);
+  const double distance    = sqrt(distSquared);
+  double       distTerm    = distance + bufferingConstant;
+  double       numerator   = -prefactor * chargeTerm;
+
+  // If it's diel model 2, the distance term is squared in the energy, so the derivative has another factor of 2.
+  // Note we're further squaring the distance term regardless. If it's diel model = 1, it's a typical 1/r E -> 1/r^2
+  // F.
+  if (dielModel == 2) {
+    distTerm *= distTerm;
+    numerator *= 2;
+  }
+
+  double dE_dr = numerator / (distTerm * distTerm);
+  if (is1_4) {
+    dE_dr *= 0.75;
+  }
+
+  // Be careful here to use the actual distance, not the offset one.
+  const double dE_dx = dE_dr * (pos[3 * idx1 + 0] - pos[3 * idx2 + 0]) / distance;
+  const double dE_dy = dE_dr * (pos[3 * idx1 + 1] - pos[3 * idx2 + 1]) / distance;
+  const double dE_dz = dE_dr * (pos[3 * idx1 + 2] - pos[3 * idx2 + 2]) / distance;
+
+  atomicAdd(&grad[3 * idx1 + 0], dE_dx);
+  atomicAdd(&grad[3 * idx1 + 1], dE_dy);
+  atomicAdd(&grad[3 * idx1 + 2], dE_dz);
+
+  atomicAdd(&grad[3 * idx2 + 0], -dE_dx);
+  atomicAdd(&grad[3 * idx2 + 1], -dE_dy);
+  atomicAdd(&grad[3 * idx2 + 2], -dE_dz);
+}
+
+}  // namespace
+
 __global__ void bondStretchEnergyKernel(const int     numBonds,
                                         const int*    idx1,
                                         const int*    idx2,
@@ -258,23 +708,11 @@ __global__ void bondStretchEnergyKernel(const int     numBonds,
                                         const int*    termBatchStarts) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-  // The bond stretch potential is not simple harmonic for MMFF. See
-  // https://docs.eyesopen.com/toolkits/python/oefftk/fftheory.html#bond-stretching
-
-  constexpr double prefactor           = 143.9325 / 2.0;
-  constexpr double csFactorDist        = -2.0;
-  constexpr double csFactorDistSquared = 7.0 / 12.0 * csFactorDist * csFactorDist;
   if (idx < numBonds) {
-    // First compute distance between atoms
-    const double distSquared = distanceSquared(pos, idx1[idx], idx2[idx]);
-    const double distance    = sqrt(distSquared);
-
-    const double deltaR    = distance - r0[idx];
-    const double deltaR2   = deltaR * deltaR;
+    const double energy    = bondStretchEnergy(pos, idx1[idx], idx2[idx], r0[idx], kb[idx]);
     const int    batchIdx  = atomBatchMap[idx1[idx]];
     const int    outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, termBatchStarts);
-    energyBuffer[outputIdx] +=
-      prefactor * kb[idx] * deltaR2 * (1.0 + csFactorDist * deltaR + csFactorDistSquared * deltaR2);
+    energyBuffer[outputIdx] += energy;
   }
 }
 
@@ -287,49 +725,8 @@ __global__ void bondStretchGradKernel(const int     numBonds,
                                       double*       grad) {
   const int bondIdx = blockIdx.x * blockDim.x + threadIdx.x;
 
-  // Functional form of potential here:
-  // https://docs.eyesopen.com/toolkits/python/oefftk/fftheory.html#bond-stretching
-  // Gradient equation:
-  // DE/DdeltaR = c1 * kb * deltaR * (1 + cs * deltaR + 2.0 * 7.0 / 12.0 * cs * cs * deltaR^2)
-
-  constexpr double c1                          = 143.9325;
-  constexpr double cs                          = -2.0;
-  constexpr double csFactorTimesSecondConstant = cs * 1.5;
-  constexpr double lastFactor                  = 2.0 * 7.0 / 12.0 * cs * cs;  // 7/12 * cs * cs
-
   if (bondIdx < numBonds) {
-    const int idx1 = idx1s[bondIdx];
-    const int idx2 = idx2s[bondIdx];
-
-    double       dx, dy, dz;
-    const double distanceSquared = distanceSquaredWithComponents(pos, idx1, idx2, dx, dy, dz);
-    const double distance        = sqrt(distanceSquared);
-    const double deltaR          = distance - r0[bondIdx];
-
-    const double de_dr =
-      c1 * kb[bondIdx] * deltaR * (1.0 + csFactorTimesSecondConstant * deltaR + lastFactor * deltaR * deltaR);
-
-    // Compute dx gradients;
-    const double invDist = 1.0 / distance;
-    double       dE_dx, dE_dy, dE_dz;
-    if (distance > 0.0) {
-      dE_dx = de_dr * dx * invDist;
-      dE_dy = de_dr * dy * invDist;
-      dE_dz = de_dr * dz * invDist;
-    } else {
-      // Taken from RDKit implementation for 1:1 parity
-      dE_dx = kb[bondIdx] * 0.01;
-      dE_dy = kb[bondIdx] * 0.01;
-      dE_dz = kb[bondIdx] * 0.01;
-    }
-
-    atomicAdd(&grad[3 * idx1 + 0], dE_dx);
-    atomicAdd(&grad[3 * idx1 + 1], dE_dy);
-    atomicAdd(&grad[3 * idx1 + 2], dE_dz);
-
-    atomicAdd(&grad[3 * idx2 + 0], -dE_dx);
-    atomicAdd(&grad[3 * idx2 + 1], -dE_dy);
-    atomicAdd(&grad[3 * idx2 + 2], -dE_dz);
+    bondStretchGrad(pos, idx1s[bondIdx], idx2s[bondIdx], r0[bondIdx], kb[bondIdx], grad);
   }
 }
 
@@ -345,41 +742,13 @@ __global__ void angleBendEnergyKernel(const int      numAngles,
                                       const int*     energyBufferStarts,
                                       const int*     atomBatchMap,
                                       const int*     termBatchStarts) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-  // Angle terms are not simple harmonic
-  // https://docs.eyesopen.com/toolkits/python/oefftk/fftheory.html#angle-bending
-
-  // Prefactor converted to inv radian^2
-  constexpr double prefactor = 0.5 * 143.9325 * degreeToRadian * degreeToRadian;
-  constexpr double cb        = -0.4 * degreeToRadian;
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < numAngles) {
-    const int idx1 = idx1s[idx];
-    const int idx2 = idx2s[idx];
-    const int idx3 = idx3s[idx];
+    const double energy = angleBendEnergy(pos, idx1s[idx], idx2s[idx], idx3s[idx], theta0[idx], ka[idx], isLinear[idx]);
 
-    // Calculate angle between two points
-    double       dx1, dy1, dz1, dx2, dy2, dz2;
-    const double dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
-    const double dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
-    const double dist1        = sqrt(dist1Squared);
-    const double dist2        = sqrt(dist2Squared);
-
-    const double dot         = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
-    const double cosTheta    = clamp(dot / (dist1 * dist2), -1.0, 1.0);
-    const double theta       = radianToDegree * acos(cosTheta);
-    const double deltaTheta  = theta - theta0[idx];
-    const double deltaTheta2 = deltaTheta * deltaTheta;
-
-    const int batchIdx  = atomBatchMap[idx1];
+    const int batchIdx  = atomBatchMap[idx1s[idx]];
     const int outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, termBatchStarts);
-
-    if (isLinear[idx]) {
-      constexpr double linearPrefactor = 143.9325;
-      energyBuffer[outputIdx] += linearPrefactor * ka[idx] * (1.0 + cosTheta);
-    } else {
-      energyBuffer[outputIdx] += prefactor * ka[idx] * deltaTheta2 * (1.0 + cb * deltaTheta);
-    }
+    energyBuffer[outputIdx] += energy;
   }
 }
 
@@ -392,84 +761,9 @@ __global__ void angleBendGradientKernel(const int      numAngles,
                                         const uint8_t* isLinear,
                                         const double*  pos,
                                         double*        grad) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-  // Angle terms are not simple harmonic
-  // https://docs.eyesopen.com/toolkits/python/oefftk/fftheory.html#angle-bending
-  // Grad equation:
-  // DE/DdeltaTheta = c1 * ka * deltaTheta( 1 + 3/2 cb * deltaTheata)
-  // Derivatives can be found from https://grigoryanlab.org/docs/dynamics_derivatives.pdf
-
-  // Prefactor converted to inv radian^2
-  constexpr double c1       = 143.9325 * degreeToRadian;
-  constexpr double cbFactor = -0.006981317 * 1.5;
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < numAngles) {
-    const int idx1 = idx1s[idx];
-    const int idx2 = idx2s[idx];
-    const int idx3 = idx3s[idx];
-
-    // Calculate angle between two points
-    double       dx1, dy1, dz1, dx2, dy2, dz2;
-    const double dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
-    const double dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
-    const double dist1        = sqrt(dist1Squared);
-    const double dist2        = sqrt(dist2Squared);
-
-    const double dot         = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
-    const double cosTheta    = clamp(dot / (dist1 * dist2), -1.0, 1.0);
-    const double sinThetaSq  = 1.0 - cosTheta * cosTheta;
-    const double negSinTheta = -(fmax(((sinThetaSq > 0.0) ? sqrt(sinThetaSq) : 0.0), 1.0e-8));
-    const double theta       = radianToDegree * acos(cosTheta);
-    const double deltaTheta  = theta - theta0[idx];
-
-    double de_dDeltaTheta;
-
-    if (isLinear[idx]) {
-      // Linear term is c1 * k * sin(theta), which we get from the cosine
-      constexpr double linearPrefactor = 143.9325;
-      de_dDeltaTheta                   = -linearPrefactor * ka[idx] * sqrt(1.0 - cosTheta * cosTheta);
-    } else {
-      de_dDeltaTheta = c1 * ka[idx] * deltaTheta * (1.0 + cbFactor * deltaTheta);
-    }
-
-    // Now do dDeltaTheta/dx for all 3 atoms. Taken from RDKit;
-    if (isDoubleZero(dist1) || isDoubleZero(dist2)) {
-      return;
-    }
-
-    const double invDist1 = 1.0 / dist1;
-    const double invDist2 = 1.0 / dist2;
-
-    const double dxnorm1 = dx1 * invDist1;  // From 1 to 2
-    const double dynorm1 = dy1 * invDist1;
-    const double dznorm1 = dz1 * invDist1;
-    const double dxnorm2 = dx2 * invDist2;  // From 3 to 2
-    const double dynorm2 = dy2 * invDist2;
-    const double dznorm2 = dz2 * invDist2;
-
-    const double intermediate1 = invDist1 * (dxnorm2 - cosTheta * dxnorm1);
-    const double intermediate2 = invDist1 * (dynorm2 - cosTheta * dynorm1);
-    const double intermediate3 = invDist1 * (dznorm2 - cosTheta * dznorm1);
-    const double intermediate4 = invDist2 * (dxnorm1 - cosTheta * dxnorm2);
-    const double intermediate5 = invDist2 * (dynorm1 - cosTheta * dynorm2);
-    const double intermediate6 = invDist2 * (dznorm1 - cosTheta * dznorm2);
-
-    if (isDoubleZero(negSinTheta)) {
-      return;
-    }
-    const double constantFactor = de_dDeltaTheta / negSinTheta;
-
-    atomicAdd(&grad[3 * idx1 + 0], constantFactor * intermediate1);
-    atomicAdd(&grad[3 * idx1 + 1], constantFactor * intermediate2);
-    atomicAdd(&grad[3 * idx1 + 2], constantFactor * intermediate3);
-
-    atomicAdd(&grad[3 * idx2 + 0], constantFactor * (-intermediate1 - intermediate4));
-    atomicAdd(&grad[3 * idx2 + 1], constantFactor * (-intermediate2 - intermediate5));
-    atomicAdd(&grad[3 * idx2 + 2], constantFactor * (-intermediate3 - intermediate6));
-
-    atomicAdd(&grad[3 * idx3 + 0], constantFactor * intermediate4);
-    atomicAdd(&grad[3 * idx3 + 1], constantFactor * intermediate5);
-    atomicAdd(&grad[3 * idx3 + 2], constantFactor * intermediate6);
+    angleBendGrad(idx1s[idx], idx2s[idx], idx3s[idx], theta0[idx], ka[idx], isLinear[idx], pos, grad);
   }
 }
 
@@ -489,32 +783,17 @@ __global__ void bendStretchEnergyKernel(const int     numAngles,
                                         const int*    termBatchStarts) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-  constexpr double prefactor = 2.51210;
-  // Functional form:
-  // https://docs.eyesopen.com/toolkits/python/oefftk/fftheory.html#stretch-bend-interaction
-
   if (idx < numAngles) {
-    const int idx1 = idx1s[idx];
-    const int idx2 = idx2s[idx];
-    const int idx3 = idx3s[idx];
-
-    // Calculate angle between two points
-    double       dx1, dy1, dz1, dx2, dy2, dz2;
-    const double dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
-    const double dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
-    const double dist1        = sqrt(dist1Squared);
-    const double dist2        = sqrt(dist2Squared);
-
-    const double dot      = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
-    const double cosTheta = clamp(dot / (dist1 * dist2), -1.0, 1.0);
-    const double theta    = 180 / M_PI * acos(cosTheta);
-
-    const double deltaTheta = theta - theta0[idx];
-    const double deltaR1    = dist1 - restLen1[idx];
-    const double deltaR2    = dist2 - restLen2[idx];
-
-    const double energy    = prefactor * deltaTheta * (deltaR1 * forceConst1[idx] + deltaR2 * forceConst2[idx]);
-    const int    batchIdx  = atomBatchMap[idx1];
+    const double energy    = bendStretchEnergy(pos,
+                                            idx1s[idx],
+                                            idx2s[idx],
+                                            idx3s[idx],
+                                            theta0[idx],
+                                            restLen1[idx],
+                                            restLen2[idx],
+                                            forceConst1[idx],
+                                            forceConst2[idx]);
+    const int    batchIdx  = atomBatchMap[idx1s[idx]];
     const int    outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, termBatchStarts);
     energyBuffer[outputIdx] += energy;
   }
@@ -532,83 +811,17 @@ __global__ void bendStretchGradKernel(const int     numAngles,
                                       double*       grad) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-  constexpr double prefactor = 143.9325 * M_PI / 180.0;
-  // Functional form:
-  // https://docs.eyesopen.com/toolkits/python/oefftk/fftheory.html#stretch-bend-interaction
-
   if (idx < numAngles) {
-    const int idx1 = idx1s[idx];
-    const int idx2 = idx2s[idx];
-    const int idx3 = idx3s[idx];
-
-    // Calculate angle between two points
-    double       dx1, dy1, dz1, dx2, dy2, dz2;
-    const double dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
-    const double dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
-    const double dist1        = sqrt(dist1Squared);
-    const double dist2        = sqrt(dist2Squared);
-
-    const double dot      = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
-    const double cosTheta = clamp(dot / (dist1 * dist2), -1.0, 1.0);
-    const double sinTheta = fmax(sqrt(1.0 - cosTheta * cosTheta), 1.0e-8);
-
-    const double theta = 180 / M_PI * acos(cosTheta);
-
-    const double deltaTheta = theta - theta0[idx];
-    const double deltaR1    = dist1 - restLen1[idx];
-    const double deltaR2    = dist2 - restLen2[idx];
-
-    const double bondEnergyTerm = 180.0 / M_PI * (forceConst1[idx] * deltaR1 + forceConst2[idx] * deltaR2);
-
-    const double invDist1 = 1.0 / dist1;
-    const double invDist2 = 1.0 / dist2;
-
-    const double scaledDx1 = dx1 * invDist1;
-    const double scaledDy1 = dy1 * invDist1;
-    const double scaledDz1 = dz1 * invDist1;
-    const double scaledDx2 = dx2 * invDist2;
-    const double scaledDy2 = dy2 * invDist2;
-    const double scaledDz2 = dz2 * invDist2;
-
-    const double intermediate1 = invDist1 * (scaledDx2 - cosTheta * scaledDx1);
-    const double intermediate2 = invDist1 * (scaledDy2 - cosTheta * scaledDy1);
-    const double intermediate3 = invDist1 * (scaledDz2 - cosTheta * scaledDz1);
-    const double intermediate4 = invDist2 * (scaledDx1 - cosTheta * scaledDx2);
-    const double intermediate5 = invDist2 * (scaledDy1 - cosTheta * scaledDy2);
-    const double intermediate6 = invDist2 * (scaledDz1 - cosTheta * scaledDz2);
-
-    const double gradx1 =
-      prefactor * (deltaTheta * scaledDx1 * forceConst1[idx] - intermediate1 * bondEnergyTerm / sinTheta);
-    const double grady1 =
-      prefactor * (deltaTheta * scaledDy1 * forceConst1[idx] - intermediate2 * bondEnergyTerm / sinTheta);
-    const double gradz1 =
-      prefactor * (deltaTheta * scaledDz1 * forceConst1[idx] - intermediate3 * bondEnergyTerm / sinTheta);
-
-    const double gradx2 = prefactor * (-deltaTheta * (scaledDx1 * forceConst1[idx] + scaledDx2 * forceConst2[idx]) +
-                                       (intermediate1 + intermediate4) * bondEnergyTerm / sinTheta);
-    const double grady2 = prefactor * (-deltaTheta * (scaledDy1 * forceConst1[idx] + scaledDy2 * forceConst2[idx]) +
-                                       (intermediate2 + intermediate5) * bondEnergyTerm / sinTheta);
-    const double gradz2 = prefactor * (-deltaTheta * (scaledDz1 * forceConst1[idx] + scaledDz2 * forceConst2[idx]) +
-                                       (intermediate3 + intermediate6) * bondEnergyTerm / sinTheta);
-
-    const double gradx3 =
-      prefactor * (deltaTheta * scaledDx2 * forceConst2[idx] - intermediate4 * bondEnergyTerm / sinTheta);
-    const double grady3 =
-      prefactor * (deltaTheta * scaledDy2 * forceConst2[idx] - intermediate5 * bondEnergyTerm / sinTheta);
-    const double gradz3 =
-      prefactor * (deltaTheta * scaledDz2 * forceConst2[idx] - intermediate6 * bondEnergyTerm / sinTheta);
-
-    atomicAdd(&grad[3 * idx1 + 0], gradx1);
-    atomicAdd(&grad[3 * idx1 + 1], grady1);
-    atomicAdd(&grad[3 * idx1 + 2], gradz1);
-
-    atomicAdd(&grad[3 * idx3 + 0], gradx3);
-    atomicAdd(&grad[3 * idx3 + 1], grady3);
-    atomicAdd(&grad[3 * idx3 + 2], gradz3);
-
-    atomicAdd(&grad[3 * idx2 + 0], gradx2);
-    atomicAdd(&grad[3 * idx2 + 1], grady2);
-    atomicAdd(&grad[3 * idx2 + 2], gradz2);
+    bendStretchGrad(pos,
+                    idx1s[idx],
+                    idx2s[idx],
+                    idx3s[idx],
+                    theta0[idx],
+                    restLen1[idx],
+                    restLen2[idx],
+                    forceConst1[idx],
+                    forceConst2[idx],
+                    grad);
   }
 }
 
@@ -624,48 +837,13 @@ __global__ void oopBendEnergyKernel(const int     numOopBends,
                                     const int*    atomBatchMap,
                                     const int*    termBatchStarts) {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-  constexpr double prefactor = 0.5 * 143.9325 * degreeToRadian * degreeToRadian;
   if (idx < numOopBends) {
     // Using I, J, K, L notation
 
-    double       dxji, dyji, dzji, dxjk, dyjk, dzjk, dxjl, dyjl, dzjl;
-    const double distSquaredJI = distanceSquaredWithComponents(pos, idx1s[idx], idx2s[idx], dxji, dyji, dzji);
-    const double distSquaredJK = distanceSquaredWithComponents(pos, idx3s[idx], idx2s[idx], dxjk, dyjk, dzjk);
-    const double distSquaredJL = distanceSquaredWithComponents(pos, idx4s[idx], idx2s[idx], dxjl, dyjl, dzjl);
-
-    const double distJI = sqrt(distSquaredJI);
-    const double distJK = sqrt(distSquaredJK);
-    const double distJL = sqrt(distSquaredJL);
-
-    const double scaledDxJI = dxji / distJI;
-    const double scaledDyJI = dyji / distJI;
-    const double scaledDzJI = dzji / distJI;
-
-    const double scaledDxJK = dxjk / distJK;
-    const double scaledDyJK = dyjk / distJK;
-    const double scaledDzJK = dzjk / distJK;
-
-    const double scaledDxJL = dxjl / distJL;
-    const double scaledDyJL = dyjl / distJL;
-    const double scaledDzJL = dzjl / distJL;
-
-    // Cross product between JI and JK
-    double crossX, crossY, crossZ;
-    crossProduct(scaledDxJI, scaledDyJI, scaledDzJI, scaledDxJK, scaledDyJK, scaledDzJK, crossX, crossY, crossZ);
-    const double distCross = sqrt(crossX * crossX + crossY * crossY + crossZ * crossZ);
-
-    const double scaledCrossX = crossX / distCross;
-    const double scaledCrossY = crossY / distCross;
-    const double scaledCrossZ = crossZ / distCross;
-
-    // Dot product between cross product and JL
-    const double dotProduct = scaledCrossX * scaledDxJL + scaledCrossY * scaledDyJL + scaledCrossZ * scaledDzJL;
-    const double chi        = radianToDegree * asin(clamp(dotProduct, -1.0, 1.0));
-
-    const int batchIdx  = atomBatchMap[idx1s[idx]];
-    const int outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, termBatchStarts);
-    energyBuffer[outputIdx] += prefactor * koop[idx] * chi * chi;
+    const double energy    = oopBendEnergy(pos, idx1s[idx], idx2s[idx], idx3s[idx], idx4s[idx], koop[idx]);
+    const int    batchIdx  = atomBatchMap[idx1s[idx]];
+    const int    outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, termBatchStarts);
+    energyBuffer[outputIdx] += energy;
   }
 }
 __global__ void oopBendGradKernel(const int     numOopBends,
@@ -698,47 +876,10 @@ __global__ void torsionEnergyKernel(const int     numTorsions,
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
   if (idx < numTorsions) {
-    const int idx1 = idx1s[idx];
-    const int idx2 = idx2s[idx];
-    const int idx3 = idx3s[idx];
-    const int idx4 = idx4s[idx];
-
-    const double V1 = V1s[idx];
-    const double V2 = V2s[idx];
-    const double V3 = V3s[idx];
-
-    // Compute dihedral angle.
-    const double dxIJ = pos[3 * idx1 + 0] - pos[3 * idx2 + 0];
-    const double dyIJ = pos[3 * idx1 + 1] - pos[3 * idx2 + 1];
-    const double dzIJ = pos[3 * idx1 + 2] - pos[3 * idx2 + 2];
-
-    const double dxKJ = pos[3 * idx3 + 0] - pos[3 * idx2 + 0];
-    const double dyKJ = pos[3 * idx3 + 1] - pos[3 * idx2 + 1];
-    const double dzKJ = pos[3 * idx3 + 2] - pos[3 * idx2 + 2];
-
-    const double dxLK = pos[3 * idx4 + 0] - pos[3 * idx3 + 0];
-    const double dyLK = pos[3 * idx4 + 1] - pos[3 * idx3 + 1];
-    const double dzLK = pos[3 * idx4 + 2] - pos[3 * idx3 + 2];
-
-    const double crossIJKJx = dyIJ * dzKJ - dzIJ * dyKJ;
-    const double crossIJKJy = dzIJ * dxKJ - dxIJ * dzKJ;
-    const double crossIJKJz = dxIJ * dyKJ - dyIJ * dxKJ;
-
-    // Second product JK -> LK. Note the inversion of KJ, we switch the negatives
-    const double crossJKLKx = -dyKJ * dzLK + dzKJ * dyLK;
-    const double crossJKLKy = -dzKJ * dxLK + dxKJ * dzLK;
-    const double crossJKLKz = -dxKJ * dyLK + dyKJ * dxLK;
-
-    const double cross1Norm = sqrt(crossIJKJx * crossIJKJx + crossIJKJy * crossIJKJy + crossIJKJz * crossIJKJz);
-    const double cross2Norm = sqrt(crossJKLKx * crossJKLKx + crossJKLKy * crossJKLKy + crossJKLKz * crossJKLKz);
-
-    const double dotProduct = crossIJKJx * crossJKLKx + crossIJKJy * crossJKLKy + crossIJKJz * crossJKLKz;
-    const double cosPhi     = dotProduct / (cross1Norm * cross2Norm);
-    const double phi        = acos(clamp(cosPhi, -1.0, 1.0));
-
-    const double energy    = 0.5 * (V1 * (1.0 + cosPhi) + V2 * (1.0 - cos(2.0 * phi)) + V3 * (1.0 + cos(3.0 * phi)));
-    const int    batchIdx  = atomBatchMap[idx1];
-    const int    outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, termBatchStarts);
+    const double energy =
+      torsionEnergy(pos, idx1s[idx], idx2s[idx], idx3s[idx], idx4s[idx], V1s[idx], V2s[idx], V3s[idx]);
+    const int batchIdx  = atomBatchMap[idx1s[idx]];
+    const int outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, termBatchStarts);
     energyBuffer[outputIdx] += energy;
   }
 }
@@ -771,27 +912,11 @@ __global__ void vdwEnergyKernel(const int     numVdws,
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
   if (idx < numVdws) {
-    const int    idx1       = idxs1[idx];
-    const int    idx2       = idx2s[idx];
-    const double R_ij_star  = R_ij_stars[idx];
-    double       R_ij_star2 = R_ij_star * R_ij_star;
-    double       R_ij_star7 = R_ij_star2 * R_ij_star2 * R_ij_star2 * R_ij_star;
+    const double energy = vdwEnergy(pos, idxs1[idx], idx2s[idx], R_ij_stars[idx], wellDepths[idx]);
 
-    const double epsilon = wellDepths[idx];
-
-    const double distSquared = distanceSquared(pos, idx1, idx2);
-    const double dist        = sqrt(distSquared);
-    const double dist7       = distSquared * distSquared * distSquared * dist;
-
-    const double term1        = 1.07 * R_ij_star / (dist + 0.07 * R_ij_star);
-    const double term1Squared = term1 * term1;
-    const double term1_7th    = term1Squared * term1Squared * term1Squared * term1;
-
-    const double term2Fraction = 1.12 * R_ij_star7 / (dist7 + 0.12 * R_ij_star7);
-
-    const int batchIdx  = atomBatchMap[idx1];
+    const int batchIdx  = atomBatchMap[idxs1[idx]];
     const int outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, termBatchStarts);
-    energyBuffer[outputIdx] += epsilon * term1_7th * (term2Fraction - 2.0);
+    energyBuffer[outputIdx] += energy;
   }
 }
 __global__ void vdwGradKernel(const int     numVdws,
@@ -818,27 +943,11 @@ __global__ void eleEnergyKernel(const int      numEles,
                                 const int*     energyBufferStarts,
                                 const int*     atomBatchMap,
                                 const int*     termBatchStarts) {
-  int              idx               = blockIdx.x * blockDim.x + threadIdx.x;
-  constexpr double prefactor         = 332.0716;
-  constexpr double bufferingConstant = 0.05;
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < numEles) {
-    const int     idx1       = idx1s[idx];
-    const int     idx2       = idx2s[idx];
-    const double  chargeTerm = chargeTerms[idx];
-    const uint8_t dielModel  = dielModels[idx];
-    const bool    is1_4      = is1_4s[idx];
+    const double energy = eleEnergy(pos, idx1s[idx], idx2s[idx], chargeTerms[idx], dielModels[idx], is1_4s[idx]);
 
-    const double distSquared = distanceSquared(pos, idx1, idx2);
-    double       distTerm    = sqrt(distSquared) + bufferingConstant;
-    if (dielModel == 2) {
-      distTerm *= distTerm;
-    }
-    double energy = prefactor * chargeTerm / (distTerm);
-    if (is1_4) {
-      energy *= 0.75;
-    }
-
-    const int batchIdx  = atomBatchMap[idx1];
+    const int batchIdx  = atomBatchMap[idx1s[idx]];
     const int outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, termBatchStarts);
     energyBuffer[outputIdx] += energy;
   }
@@ -851,46 +960,10 @@ __global__ void eleGradKernel(const int      numEles,
                               const uint8_t* is1_4s,
                               const double*  pos,
                               double*        grad) {
-  int              idx               = blockIdx.x * blockDim.x + threadIdx.x;
-  constexpr double prefactor         = 332.0716;
-  constexpr double bufferingConstant = 0.05;
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
   if (idx < numEles) {
-    const int     idx1       = idx1s[idx];
-    const int     idx2       = idx2s[idx];
-    const double  chargeTerm = chargeTerms[idx];
-    const uint8_t dielModel  = dielModels[idx];
-    const bool    is1_4      = is1_4s[idx];
-
-    const double distSquared = distanceSquared(pos, idx1, idx2);
-    const double distance    = sqrt(distSquared);
-    double       distTerm    = distance + bufferingConstant;
-    double       numerator   = -prefactor * chargeTerm;
-
-    // If it's diel model 2, the distance term is squared in the energy, so the derivative has another factor of 2.
-    // Note we're further squaring the distance term regardless. If it's diel model = 1, it's a typical 1/r E -> 1/r^2
-    // F.
-    if (dielModel == 2) {
-      distTerm *= distTerm;
-      numerator *= 2;
-    }
-
-    double dE_dr = numerator / (distTerm * distTerm);
-    if (is1_4) {
-      dE_dr *= 0.75;
-    }
-
-    // Be careful here to use the actual distance, not the offset one.
-    const double dE_dx = dE_dr * (pos[3 * idx1 + 0] - pos[3 * idx2 + 0]) / distance;
-    const double dE_dy = dE_dr * (pos[3 * idx1 + 1] - pos[3 * idx2 + 1]) / distance;
-    const double dE_dz = dE_dr * (pos[3 * idx1 + 2] - pos[3 * idx2 + 2]) / distance;
-
-    atomicAdd(&grad[3 * idx1 + 0], dE_dx);
-    atomicAdd(&grad[3 * idx1 + 1], dE_dy);
-    atomicAdd(&grad[3 * idx1 + 2], dE_dz);
-
-    atomicAdd(&grad[3 * idx2 + 0], -dE_dx);
-    atomicAdd(&grad[3 * idx2 + 1], -dE_dy);
-    atomicAdd(&grad[3 * idx2 + 2], -dE_dz);
+    eleGrad(pos, idx1s[idx], idx2s[idx], chargeTerms[idx], dielModels[idx], is1_4s[idx], grad);
   }
 }
 
