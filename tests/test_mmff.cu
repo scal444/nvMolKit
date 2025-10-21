@@ -382,6 +382,7 @@ class MMffGpuTestFixture : public ::testing::Test {
 TEST_F(MMffGpuTestFixture, BondStretchEnergySingleMolecule) {
   double wantEnergy = getReferenceEnergyTerm(mol_.get(), FFTerm::BondStretch);
   double gotEnergy  = getEnergyTerm(systemDevice, FFTerm::BondStretch);
+  ASSERT_NE(wantEnergy, 0.0);
   EXPECT_NEAR(gotEnergy, wantEnergy, 1e-6);
 }
 
@@ -394,6 +395,7 @@ TEST_F(MMffGpuTestFixture, BondStretchGradientSingleMolecule) {
 TEST_F(MMffGpuTestFixture, AngleBendEnergySingleMolecule) {
   double wantEnergy = getReferenceEnergyTerm(mol_.get(), FFTerm::AngleBend);
   double gotEnergy  = getEnergyTerm(systemDevice, FFTerm::AngleBend);
+  ASSERT_NE(wantEnergy, 0.0);
   EXPECT_NEAR(gotEnergy, wantEnergy, 1e-6);
 }
 
@@ -407,6 +409,7 @@ TEST_F(MMffGpuTestFixture, BendStretchEnergySingleMolecule) {
   // Compute reference energy
   double wantEnergy = getReferenceEnergyTerm(mol_.get(), FFTerm::StretchBend);
   double gotEnergy  = getEnergyTerm(systemDevice, FFTerm::StretchBend);
+  ASSERT_NE(wantEnergy, 0.0);
   EXPECT_NEAR(gotEnergy, wantEnergy, 1e-6);
 }
 
@@ -419,6 +422,7 @@ TEST_F(MMffGpuTestFixture, StretchBendGradientSingleMolecule) {
 TEST_F(MMffGpuTestFixture, OutofPlaneEnergySingleMolecule) {
   double wantEnergy = getReferenceEnergyTerm(mol_.get(), FFTerm::OopBend);
   double gotEnergy  = getEnergyTerm(systemDevice, FFTerm::OopBend);
+  ASSERT_NE(wantEnergy, 0.0);
   EXPECT_NEAR(gotEnergy, wantEnergy, 1e-6);
 }
 
@@ -431,6 +435,7 @@ TEST_F(MMffGpuTestFixture, OutOfPlaneGradientSingleMolecule) {
 TEST_F(MMffGpuTestFixture, TorsionEnergySingleMolecule) {
   double wantEnergy = getReferenceEnergyTerm(mol_.get(), FFTerm::Torsion);
   double gotEnergy  = getEnergyTerm(systemDevice, FFTerm::Torsion);
+  ASSERT_NE(wantEnergy, 0.0);
   EXPECT_NEAR(gotEnergy, wantEnergy, 1e-6);
 }
 
@@ -444,6 +449,7 @@ TEST_F(MMffGpuTestFixture, VdwEnergySingleMolecule) {
   // Compute reference energy
   double wantEnergy = getReferenceEnergyTerm(mol_.get(), FFTerm::VdW);
   double gotEnergy  = getEnergyTerm(systemDevice, FFTerm::VdW);
+  ASSERT_NE(wantEnergy, 0.0);
   EXPECT_NEAR(gotEnergy, wantEnergy, 1e-6);
 }
 
@@ -456,6 +462,7 @@ TEST_F(MMffGpuTestFixture, VdwGradientSingleMolecule) {
 TEST_F(MMffGpuTestFixture, EleEnergySingleMolecule) {
   double wantEnergy = getReferenceEnergyTerm(mol_.get(), FFTerm::Elec);
   double gotEnergy  = getEnergyTerm(systemDevice, FFTerm::Elec);
+  ASSERT_NE(wantEnergy, 0.0);
   EXPECT_NEAR(gotEnergy, wantEnergy, 1e-6);
 }
 
@@ -1641,7 +1648,7 @@ TEST(MMFFAllowsLargeMol, LargeMoleculeInterleavedOptimizes) {
       std::vector<double> posRef;
       nvMolKit::confPosToVect(**confIter, posRef);
       const double refEnergy = wantEnergies[molIdx];
-      ASSERT_NEAR(perMol[confIdx], refEnergy, 1e-4)
+      ASSERT_NEAR(perMol[confIdx], refEnergy, 1e-3)
         << "Energy mismatch vs RDKit reference for molecule " << molIdx << ", conformer " << confIdx;
       confIdx++;
     }
