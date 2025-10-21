@@ -25,10 +25,10 @@ namespace MMFF {
 
 inline EnergyForceContribsDevicePtr toPointerStruct(const EnergyForceContribsDevice& src) {
   EnergyForceContribsDevicePtr dst;
-  dst.bondTerms.idx1    = src.bondTerms.idx1.data();
-  dst.bondTerms.idx2    = src.bondTerms.idx2.data();
-  dst.bondTerms.r0      = src.bondTerms.r0.data();
-  dst.bondTerms.kb      = src.bondTerms.kb.data();
+  dst.bondTerms.idx1 = src.bondTerms.idx1.data();
+  dst.bondTerms.idx2 = src.bondTerms.idx2.data();
+  dst.bondTerms.r0   = src.bondTerms.r0.data();
+  dst.bondTerms.kb   = src.bondTerms.kb.data();
 
   dst.angleTerms.idx1     = src.angleTerms.idx1.data();
   dst.angleTerms.idx2     = src.angleTerms.idx2.data();
@@ -46,11 +46,11 @@ inline EnergyForceContribsDevicePtr toPointerStruct(const EnergyForceContribsDev
   dst.bendTerms.forceConst1 = src.bendTerms.forceConst1.data();
   dst.bendTerms.forceConst2 = src.bendTerms.forceConst2.data();
 
-  dst.oopTerms.idx1  = src.oopTerms.idx1.data();
-  dst.oopTerms.idx2  = src.oopTerms.idx2.data();
-  dst.oopTerms.idx3  = src.oopTerms.idx3.data();
-  dst.oopTerms.idx4  = src.oopTerms.idx4.data();
-  dst.oopTerms.koop  = src.oopTerms.koop.data();
+  dst.oopTerms.idx1 = src.oopTerms.idx1.data();
+  dst.oopTerms.idx2 = src.oopTerms.idx2.data();
+  dst.oopTerms.idx3 = src.oopTerms.idx3.data();
+  dst.oopTerms.idx4 = src.oopTerms.idx4.data();
+  dst.oopTerms.koop = src.oopTerms.koop.data();
 
   dst.torsionTerms.idx1 = src.torsionTerms.idx1.data();
   dst.torsionTerms.idx2 = src.torsionTerms.idx2.data();
@@ -65,11 +65,11 @@ inline EnergyForceContribsDevicePtr toPointerStruct(const EnergyForceContribsDev
   dst.vdwTerms.R_ij_star = src.vdwTerms.R_ij_star.data();
   dst.vdwTerms.wellDepth = src.vdwTerms.wellDepth.data();
 
-  dst.eleTerms.idx1      = src.eleTerms.idx1.data();
-  dst.eleTerms.idx2      = src.eleTerms.idx2.data();
-  dst.eleTerms.chargeTerm= src.eleTerms.chargeTerm.data();
-  dst.eleTerms.dielModel = src.eleTerms.dielModel.data();
-  dst.eleTerms.is1_4     = src.eleTerms.is1_4.data();
+  dst.eleTerms.idx1       = src.eleTerms.idx1.data();
+  dst.eleTerms.idx2       = src.eleTerms.idx2.data();
+  dst.eleTerms.chargeTerm = src.eleTerms.chargeTerm.data();
+  dst.eleTerms.dielModel  = src.eleTerms.dielModel.data();
+  dst.eleTerms.is1_4      = src.eleTerms.is1_4.data();
 
   return dst;
 }
@@ -77,14 +77,14 @@ inline EnergyForceContribsDevicePtr toPointerStruct(const EnergyForceContribsDev
 // Conversion function
 inline BatchedIndicesDevicePtr toPointerStruct(const BatchedIndicesDevice& src) {
   BatchedIndicesDevicePtr dst;
-  dst.atomStarts = src.atomStarts.data();
-  dst.bondTermStarts = src.bondTermStarts.data();
-  dst.angleTermStarts = src.angleTermStarts.data();
-  dst.bendTermStarts = src.bendTermStarts.data();
-  dst.oopTermStarts = src.oopTermStarts.data();
+  dst.atomStarts        = src.atomStarts.data();
+  dst.bondTermStarts    = src.bondTermStarts.data();
+  dst.angleTermStarts   = src.angleTermStarts.data();
+  dst.bendTermStarts    = src.bendTermStarts.data();
+  dst.oopTermStarts     = src.oopTermStarts.data();
   dst.torsionTermStarts = src.torsionTermStarts.data();
-  dst.vdwTermStarts = src.vdwTermStarts.data();
-  dst.eleTermStarts = src.eleTermStarts.data();
+  dst.vdwTermStarts     = src.vdwTermStarts.data();
+  dst.eleTermStarts     = src.eleTermStarts.data();
 
   return dst;
 }
@@ -575,5 +575,28 @@ cudaError_t computeGradients(BatchedMolecularDeviceBuffers& molSystemDevice, cud
   return err;
 }
 
+cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDevice,
+                                     const double*                  coords,
+                                     cudaStream_t                   stream) {
+  const auto pointers = toPointerStruct(molSystemDevice.contribs);
+  const auto indices  = toPointerStruct(molSystemDevice.indices);
+  return launchBlockPerMolEnergyKernel(molSystemDevice.indices.atomStarts.size() - 1,
+                                       pointers,
+                                       indices,
+                                       coords != nullptr ? coords : molSystemDevice.positions.data(),
+                                       molSystemDevice.energyOuts.data(),
+                                       stream);
+}
+
+cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDevice, cudaStream_t stream) {
+  const auto pointers = toPointerStruct(molSystemDevice.contribs);
+  const auto indices  = toPointerStruct(molSystemDevice.indices);
+  return launchBlockPerMolGradKernel(molSystemDevice.indices.atomStarts.size() - 1,
+                                     pointers,
+                                     indices,
+                                     molSystemDevice.positions.data(),
+                                     molSystemDevice.grad.data(),
+                                     stream);
+}
 }  // namespace MMFF
 }  // namespace nvMolKit

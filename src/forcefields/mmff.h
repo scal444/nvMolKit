@@ -294,9 +294,8 @@ struct BatchedMolecularDeviceBuffers {
   Dim4PaddedInterfaceBuffers          dataFormatInterchangeBuffers;
 };
 
-
 // Conversion function
-EnergyForceContribsDevicePtr toPointerStruct(const EnergyForceContribsDevice& src);
+EnergyForceContribsDevicePtr   toPointerStruct(const EnergyForceContribsDevice& src);
 struct BatchedIndicesDevicePtr toPointerStruct(const BatchedIndicesDevice& src);
 
 //! Add a molecule to the batched molecular system.
@@ -332,13 +331,13 @@ cudaError_t computeEnergy(BatchedMolecularDeviceBuffers& molSystemDevice,
                           cudaStream_t                   stream = nullptr);
 
 cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDevice,
-                              const double*                  coords = nullptr,
-                              cudaStream_t                   stream = nullptr);
+                                     const double*                  coords = nullptr,
+                                     cudaStream_t                   stream = nullptr);
 //! Compute the gradients of the batched molecular system. This will populate the grad buffer on device.
 //! grad must be zeroed before calling this function.
 cudaError_t computeGradients(BatchedMolecularDeviceBuffers& molSystemDevice, cudaStream_t stream = nullptr);
 
-cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDevice, cudaStream_t stream = nullptr);
+cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDevice, cudaStream_t stream = nullptr);
 
 }  // namespace MMFF
 }  // namespace nvMolKit
