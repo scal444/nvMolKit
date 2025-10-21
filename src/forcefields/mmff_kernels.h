@@ -16,12 +16,10 @@
 #ifndef NVMOLKIT_MMFF_KERNELS_H
 #define NVMOLKIT_MMFF_KERNELS_H
 
-#include <cuda_runtime.h>
-
 namespace nvMolKit {
 namespace MMFF {
 
-cudaError_t launchBondStretchEnergyKernel(const int     numBonds,
+cudaError_t launchBondStretchEnergyKernel(int     numBonds,
                                           const int*    idx1,
                                           const int*    idx2,
                                           const double* r0,
@@ -33,7 +31,7 @@ cudaError_t launchBondStretchEnergyKernel(const int     numBonds,
                                           const int*    termBatchStarts,
                                           cudaStream_t  stream = 0);
 
-cudaError_t launchBondStretchGradientKernel(const int     numBonds,
+cudaError_t launchBondStretchGradientKernel(int     numBonds,
                                             const int*    idx1,
                                             const int*    idx2,
                                             const double* r0,
@@ -42,7 +40,7 @@ cudaError_t launchBondStretchGradientKernel(const int     numBonds,
                                             double*       grad,
                                             cudaStream_t  stream = 0);
 
-cudaError_t launchAngleBendEnergyKernel(const int      numAngles,
+cudaError_t launchAngleBendEnergyKernel(int      numAngles,
                                         const int*     idx1,
                                         const int*     idx2,
                                         const int*     idx3,
@@ -56,7 +54,7 @@ cudaError_t launchAngleBendEnergyKernel(const int      numAngles,
                                         const int*     termBatchStarts,
                                         cudaStream_t   stream = 0);
 
-cudaError_t launchAngleBendGradientKernel(const int      numAngles,
+cudaError_t launchAngleBendGradientKernel(int      numAngles,
                                           const int*     idx1,
                                           const int*     idx2,
                                           const int*     idx3,
@@ -67,7 +65,7 @@ cudaError_t launchAngleBendGradientKernel(const int      numAngles,
                                           double*        grad,
                                           cudaStream_t   stream = 0);
 
-cudaError_t launchBendStretchEnergyKernel(const int     numAngles,
+cudaError_t launchBendStretchEnergyKernel(int     numAngles,
                                           const int*    idx1,
                                           const int*    idx2,
                                           const int*    idx3,
@@ -83,7 +81,7 @@ cudaError_t launchBendStretchEnergyKernel(const int     numAngles,
                                           const int*    termBatchStarts,
                                           cudaStream_t  stream = 0);
 
-cudaError_t launchBendStretchGradientKernel(const int     numAngles,
+cudaError_t launchBendStretchGradientKernel(int     numAngles,
                                             const int*    idx1,
                                             const int*    idx2,
                                             const int*    idx3,
@@ -96,7 +94,7 @@ cudaError_t launchBendStretchGradientKernel(const int     numAngles,
                                             double*       grad,
                                             cudaStream_t  stream = 0);
 
-cudaError_t launchOopBendEnergyKernel(const int     numOopBends,
+cudaError_t launchOopBendEnergyKernel(int     numOopBends,
                                       const int*    idx1,
                                       const int*    idx2,
                                       const int*    idx3,
@@ -109,7 +107,7 @@ cudaError_t launchOopBendEnergyKernel(const int     numOopBends,
                                       const int*    termBatchStarts,
                                       cudaStream_t  stream = 0);
 
-cudaError_t launchOopBendGradientKernel(const int     numOopBends,
+cudaError_t launchOopBendGradientKernel(int     numOopBends,
                                         const int*    idx1,
                                         const int*    idx2,
                                         const int*    idx3,
@@ -119,7 +117,7 @@ cudaError_t launchOopBendGradientKernel(const int     numOopBends,
                                         double*       grad,
                                         cudaStream_t  stream = 0);
 
-cudaError_t launchTorsionEnergyKernel(const int     numTorsions,
+cudaError_t launchTorsionEnergyKernel(int     numTorsions,
                                       const int*    idx1,
                                       const int*    idx2,
                                       const int*    idx3,
@@ -134,7 +132,7 @@ cudaError_t launchTorsionEnergyKernel(const int     numTorsions,
                                       const int*    termBatchStarts,
                                       cudaStream_t  stream = 0);
 
-cudaError_t launchTorsionGradientKernel(const int     numTorsions,
+cudaError_t launchTorsionGradientKernel(int     numTorsions,
                                         const int*    idx1,
                                         const int*    idx2,
                                         const int*    idx3,
@@ -146,7 +144,7 @@ cudaError_t launchTorsionGradientKernel(const int     numTorsions,
                                         double*       grad,
                                         cudaStream_t  stream = 0);
 
-cudaError_t launchVdwEnergyKernel(const int     numVdws,
+cudaError_t launchVdwEnergyKernel(int     numVdws,
                                   const int*    idx1,
                                   const int*    idx2,
                                   const double* R_ij_star,
@@ -158,7 +156,7 @@ cudaError_t launchVdwEnergyKernel(const int     numVdws,
                                   const int*    termBatchStarts,
                                   cudaStream_t  stream = 0);
 
-cudaError_t launchVdwGradientKernel(const int     numVdws,
+cudaError_t launchVdwGradientKernel(int     numVdws,
                                     const int*    idx1,
                                     const int*    idx2,
                                     const double* R_ij_star,
@@ -167,7 +165,7 @@ cudaError_t launchVdwGradientKernel(const int     numVdws,
                                     double*       grad,
                                     cudaStream_t  stream = 0);
 
-cudaError_t launchEleEnergyKernel(const int      numEles,
+cudaError_t launchEleEnergyKernel(int      numEles,
                                   const int*     idx1,
                                   const int*     idx2,
                                   const double*  chargeTerm,
@@ -180,7 +178,7 @@ cudaError_t launchEleEnergyKernel(const int      numEles,
                                   const int*     termBatchStarts,
                                   cudaStream_t   stream = 0);
 
-cudaError_t launchEleGradientKernel(const int      numEles,
+cudaError_t launchEleGradientKernel(int      numEles,
                                     const int*     idx1,
                                     const int*     idx2,
                                     const double*  chargeTerm,
@@ -206,6 +204,106 @@ cudaError_t launchReduceEnergiesKernel(int           numBlocks,
                                        const int*    energyBufferBlockIdxToBatchIdx,
                                        double*       outs,
                                        cudaStream_t  stream = 0);
+
+
+//! Pointer versions of above structs for kernel launches.
+struct BondStretchContribTermsDevicePtr {
+  int*    idx1 = nullptr;
+  int*    idx2= nullptr;
+  double* r0= nullptr;
+  double* kb= nullptr;
+};
+
+struct AngleBendTermsDevicePtr {
+  int*          idx1= nullptr;
+  int*          idx2= nullptr;
+  int*          idx3= nullptr;
+  double*       theta0= nullptr;
+  double*       ka= nullptr;
+  std::uint8_t* isLinear= nullptr;
+};
+
+struct BendStretchTermsDevicePtr {
+  int*    idx1= nullptr;
+  int*    idx2= nullptr;
+  int*    idx3= nullptr;
+  double* theta0= nullptr;
+  double* restLen1= nullptr;
+  double* restLen2= nullptr;
+  double* forceConst1= nullptr;
+  double* forceConst2= nullptr;
+};
+
+struct OutOfPlaneTermsDevicePtr {
+  int*    idx1= nullptr;
+  int*    idx2= nullptr;
+  int*    idx3= nullptr;
+  int*    idx4= nullptr;
+  double* koop= nullptr;
+};
+
+struct TorsionContribTermsDevicePtr {
+  int*    idx1= nullptr;
+  int*    idx2= nullptr;
+  int*    idx3= nullptr;
+  int*    idx4= nullptr;
+  double* V1= nullptr;
+  double* V2= nullptr;
+  double* V3= nullptr;
+};
+
+struct VdwTermsDevicePtr {
+  int*    idx1= nullptr;
+  int*    idx2= nullptr;
+  double*R_ij_star = nullptr;
+  double* wellDepth = nullptr;
+};
+
+struct EleTermsDevicePtr {
+  int*     idx1= nullptr;
+  int*     idx2= nullptr;
+  double*  chargeTerm= nullptr;
+  uint8_t* dielModel= nullptr;
+  uint8_t* is1_4= nullptr;
+};
+
+struct EnergyForceContribsDevicePtr {
+  BondStretchContribTermsDevicePtr bondTerms;
+  AngleBendTermsDevicePtr          angleTerms;
+  BendStretchTermsDevicePtr        bendTerms;
+  OutOfPlaneTermsDevicePtr         oopTerms;
+  TorsionContribTermsDevicePtr     torsionTerms;
+  VdwTermsDevicePtr                vdwTerms;
+  EleTermsDevicePtr                eleTerms;
+};
+
+
+struct BatchedIndicesDevicePtr {
+  int* atomStarts = nullptr;
+  int* bondTermStarts = nullptr;
+  int* angleTermStarts = nullptr;
+  int* bendTermStarts = nullptr;
+  int* oopTermStarts = nullptr;
+  int* torsionTermStarts = nullptr;
+  int* vdwTermStarts = nullptr;
+  int* eleTermStarts = nullptr;
+};
+
+cudaError_t launchBlockPerMolEnergyKernel(int numMols,
+                                        const EnergyForceContribsDevicePtr& terms,
+                                          const BatchedIndicesDevicePtr& sytemIndices,
+                                            const double*                  coords,
+                                          double* energies,
+                                            cudaStream_t                   stream = nullptr);
+
+cudaError_t launchBlockPerMolGradKernel(int numMols,
+                                        const EnergyForceContribsDevicePtr& terms,
+                                          const BatchedIndicesDevicePtr& sytemIndices,
+                                            const double*                  coords,
+                                          double* grad,
+                                            cudaStream_t                   stream = nullptr);
+
+
 }  // namespace MMFF
 }  // namespace nvMolKit
 

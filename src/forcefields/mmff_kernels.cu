@@ -1328,5 +1328,193 @@ cudaError_t launchReduceEnergiesKernel(const int     numBlocks,
     outs);
   return cudaGetLastError();
 }
+
+namespace {
+__device__ double molEnergy(const EnergyForceContribsDevicePtr& terms, const BatchedIndicesDevicePtr& sytemIndices, const double* localCoords, const int molIdx, const int tid) {
+  double energy = 0.0;
+  // Bond Stretching
+  const auto& [idx1s, idx2s, r0s, kbs] = terms.bondTerms;
+  for (int i = sytemIndices.bondTermStarts[molIdx] + tid; i < sytemIndices.bondTermStarts[molIdx + 1];
+       i += tid) {
+    energy += bondStretchEnergy(localCoords, idx1s[i], idx2s[i], r0s[i], kbs[i]);
+  }
+
+  const auto& [a_idx1s, a_idx2s, a_idx3s, theta0s, kas, isLinears] = terms.angleTerms;
+  for (int i = sytemIndices.angleTermStarts[molIdx] + tid; i < sytemIndices.angleTermStarts[molIdx + 1];
+       i += tid) {
+    energy += angleBendEnergy(localCoords, a_idx1s[i], a_idx2s[i], a_idx3s[i], theta0s[i], kas[i], isLinears[i]);
+  }
+
+  const auto& [bs_idx1s, bs_idx2s, bs_idx3s, bs_theta0s, restLen1s, restLen2s, forceConst1s, forceConst2s] =
+    terms.bendTerms;
+  for (int i = sytemIndices.bendTermStarts[molIdx] + tid; i < sytemIndices.bendTermStarts[molIdx + 1];
+       i += tid) {
+    energy += bendStretchEnergy(localCoords,
+                                bs_idx1s[i],
+                                bs_idx2s[i],
+                                bs_idx3s[i],
+                                bs_theta0s[i],
+                                restLen1s[i],
+                                restLen2s[i],
+                                forceConst1s[i],
+                                forceConst2s[i]);
+  }
+
+  const auto& [o_idx1s, o_idx2s, o_idx3s, o_idx4s, koops] = terms.oopTerms;
+  for (int i = sytemIndices.oopTermStarts[molIdx] + tid; i < sytemIndices.oopTermStarts[molIdx + 1];
+       i += tid) {
+    energy += oopBendEnergy(localCoords, o_idx1s[i], o_idx2s[i], o_idx3s[i], o_idx4s[i], koops[i]);
+  }
+
+  const auto& [t_idx1s, t_idx2s, t_idx3s, t_idx4s, V1s, V2s, V3s] = terms.torsionTerms;
+  for (int i = sytemIndices.torsionTermStarts[molIdx] + tid; i < sytemIndices.torsionTermStarts[molIdx + 1];
+       i += tid) {
+    energy += torsionEnergy(localCoords, t_idx1s[i], t_idx2s[i], t_idx3s[i], t_idx4s[i], V1s[i], V2s[i], V3s[i]);
+  }
+
+  const auto& [v_idx1s, v_idx2s, R_ij_stars, wellDepths] = terms.vdwTerms;
+  for (int i = sytemIndices.vdwTermStarts[molIdx] + tid; i < sytemIndices.vdwTermStarts[molIdx + 1];
+       i += tid) {
+    energy += vdwEnergy(localCoords, v_idx1s[i], v_idx2s[i], R_ij_stars[i], wellDepths[i]);
+  }
+
+  const auto& [e_idx1s, e_idx2s, chargeTerms, dielModels, is1_4s] = terms.eleTerms;
+  for (int i = sytemIndices.eleTermStarts[molIdx] + tid; i < sytemIndices.eleTermStarts[molIdx + 1];
+       i += tid) {
+    energy += eleEnergy(localCoords, e_idx1s[i], e_idx2s[i], chargeTerms[i], dielModels[i], is1_4s[i] > 0);
+  }
+
+  return energy;
+}
+constexpr int blockSizePerMol = 128;
+
+__device__ void molGrad(const EnergyForceContribsDevicePtr& terms, const BatchedIndicesDevicePtr& sytemIndices, const double* localCoords, double* localGrad, const int molIdx, const int tid) {
+  // Bond Stretching
+  const auto& [idx1s, idx2s, r0s, kbs] = terms.bondTerms;
+  for (int i = sytemIndices.bondTermStarts[molIdx] + tid; i < sytemIndices.bondTermStarts[molIdx + 1];
+       i += tid) {
+    bondStretchGrad(localCoords, idx1s[i], idx2s[i], r0s[i], kbs[i], localGrad);
+  }
+
+  const auto& [a_idx1s, a_idx2s, a_idx3s, theta0s, kas, isLinears] = terms.angleTerms;
+  for (int i = sytemIndices.angleTermStarts[molIdx] + tid; i < sytemIndices.angleTermStarts[molIdx + 1];
+       i += tid) {
+    angleBendGrad( a_idx1s[i], a_idx2s[i], a_idx3s[i], theta0s[i], kas[i], isLinears[i], localCoords, localGrad);
+  }
+
+
+  const auto& [bs_idx1s, bs_idx2s, bs_idx3s, bs_theta0s, restLen1s, restLen2s, forceConst1s, forceConst2s] =
+    terms.bendTerms;
+  for (int i = sytemIndices.bendTermStarts[molIdx] + tid; i < sytemIndices.bendTermStarts[molIdx + 1];
+       i += tid) {
+    bendStretchGrad( localCoords,
+                     bs_idx1s[i],
+                     bs_idx2s[i],
+                     bs_idx3s[i],
+                     bs_theta0s[i],
+                     restLen1s[i],
+                     restLen2s[i],
+                     forceConst1s[i],
+                     forceConst2s[i],
+                     localGrad);
+  }
+
+  const auto& [o_idx1s, o_idx2s, o_idx3s, o_idx4s, koops] = terms.oopTerms;
+  for (int i = sytemIndices.oopTermStarts[molIdx] + tid; i < sytemIndices.oopTermStarts[molIdx + 1];
+       i += tid) {
+    rdkit_ports::oopGrad(localCoords, o_idx1s[i], o_idx2s[i], o_idx3s[i], o_idx4s[i], koops[i], localGrad);
+  }
+
+  const auto& [t_idx1s, t_idx2s, t_idx3s, t_idx4s, V1s, V2s, V3s] = terms.torsionTerms;
+  for (int i = sytemIndices.torsionTermStarts[molIdx] + tid; i < sytemIndices.torsionTermStarts[molIdx + 1];
+       i += tid) {
+    rdkit_ports::torsionGrad( localCoords,
+                              t_idx1s[i],
+                              t_idx2s[i],
+                              t_idx3s[i],
+                              t_idx4s[i],
+                              V1s[i],
+                              V2s[i],
+                              V3s[i],
+                              localGrad);
+  }
+
+
+  const auto& [v_idx1s, v_idx2s, R_ij_stars, wellDepths] = terms.vdwTerms;
+  for (int i = sytemIndices.vdwTermStarts[molIdx] + tid; i < sytemIndices.vdwTermStarts[molIdx + 1];
+       i += tid) {
+    rdkit_ports::vDWGrad( localCoords, v_idx1s[i], v_idx2s[i], R_ij_stars[i], wellDepths[i], localGrad);
+  }
+
+
+  const auto& [e_idx1s, e_idx2s, chargeTerms, dielModels, is1_4s] = terms.eleTerms;
+  for (int i = sytemIndices.eleTermStarts[molIdx] + tid; i < sytemIndices.eleTermStarts[molIdx + 1];
+       i += tid) {
+    eleGrad( localCoords,
+              e_idx1s[i],
+              e_idx2s[i],
+              chargeTerms[i],
+              dielModels[i],
+              is1_4s[i],
+              localGrad);
+  }
+}
+
+__global__ void combinedEnergiesKernel(
+                                         const EnergyForceContribsDevicePtr& terms,
+                                          const BatchedIndicesDevicePtr& sytemIndices,
+                                          const double* coords,
+                                          double* energies) {
+  const int molIdx = blockIdx.x;
+  const int tid    = threadIdx.x;
+  const double* localCoords = coords + (sytemIndices.atomStarts[molIdx] * 3);
+  energies[molIdx] = molEnergy(terms, sytemIndices, localCoords, molIdx, tid);
+}
+
+__global__ void combinedGradKernel(
+                                         const EnergyForceContribsDevicePtr& terms,
+                                          const BatchedIndicesDevicePtr& sytemIndices,
+                                          const double* coords,
+                                          double* grad) {
+  const int molIdx = blockIdx.x;
+  const int tid    = threadIdx.x;
+  const double* localCoords = coords + (sytemIndices.atomStarts[molIdx] * 3);
+  constexpr int maxAtomSize = 256;
+  __shared__ double accumGrad[maxAtomSize * 3];
+
+  // Fall back to direct global atomic adds if the molecule is too large.
+  const int numAtoms = sytemIndices.atomStarts[molIdx + 1] - sytemIndices.atomStarts[molIdx];
+  const bool useSharedMem = (numAtoms) <= (maxAtomSize);
+  double* localGrad = useSharedMem ? accumGrad : (grad + (sytemIndices.atomStarts[molIdx] * 3));
+
+  for (int i = tid; i < numAtoms * 3; i += blockDim.x) {
+    localGrad[i] = 0.0;
+  }
+  __syncthreads();
+  molGrad(terms, sytemIndices, localCoords, localGrad, molIdx, tid);
+
+
+}
+
+} // namespace
+cudaError_t launchBlockPerMolEnergyKernel(int numMols,
+                                        const EnergyForceContribsDevicePtr& terms,
+                                          const BatchedIndicesDevicePtr& sytemIndices,
+                                            const double*                  coords,
+                                          double* energies,
+                                            cudaStream_t                   stream) {
+  combinedEnergiesKernel<<<numMols, blockSizePerMol, 0, stream>>>(terms, sytemIndices, coords, energies);
+  return cudaGetLastError();
+}
+
+cudaError_t launchBlockPerMolGradKernel(int numMols,
+                                        const EnergyForceContribsDevicePtr& terms,
+                                          const BatchedIndicesDevicePtr& sytemIndices,
+                                            const double*                  coords,
+                                          double* grad,
+                                            cudaStream_t                   stream) {
+  combinedGradKernel<<<numMols, blockSizePerMol, 0, stream>>>(terms, sytemIndices, coords, grad);
+  return cudaGetLastError();
+}
 }  // namespace MMFF
 }  // namespace nvMolKit
