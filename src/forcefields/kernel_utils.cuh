@@ -68,12 +68,13 @@ __device__ __forceinline__ floatType distanceSquaredPosIdx(const double* pos, co
   return dist;
 }
 
-__device__ __forceinline__ double distanceSquaredWithComponents(const double* pos,
-                                                                const int     idx1,
-                                                                const int     idx2,
-                                                                double&       dx,
-                                                                double&       dy,
-                                                                double&       dz) {
+template <typename floatTypeIn = double, typename floatTypeOut = double>
+__device__ __forceinline__ double distanceSquaredWithComponents(const floatTypeIn* pos,
+                                                                const int          idx1,
+                                                                const int          idx2,
+                                                                floatTypeOut&      dx,
+                                                                floatTypeOut&      dy,
+                                                                floatTypeOut&      dz) {
   dx = pos[3 * idx1 + 0] - pos[3 * idx2 + 0];
   dy = pos[3 * idx1 + 1] - pos[3 * idx2 + 1];
   dz = pos[3 * idx1 + 2] - pos[3 * idx2 + 2];

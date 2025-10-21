@@ -317,13 +317,13 @@ __device__ double angleBendEnergy(const double* pos,
   constexpr double cb        = -0.4 * degreeToRadian;
 
   // Calculate angle between two points
-  double       dx1, dy1, dz1, dx2, dy2, dz2;
-  const double dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
-  const double dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
-  const double dist1        = sqrt(dist1Squared);
-  const double dist2        = sqrt(dist2Squared);
+  float       dx1, dy1, dz1, dx2, dy2, dz2;
+  const float dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
+  const float dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
+  const float dist1        = sqrtf(dist1Squared);
+  const float dist2        = sqrtf(dist2Squared);
 
-  const double dot         = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
+  const float  dot         = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
   const double cosTheta    = clamp(dot / (dist1 * dist2), -1.0, 1.0);
   const double theta       = radianToDegree * acos(cosTheta);
   const double deltaTheta  = theta - theta0;
@@ -425,13 +425,13 @@ __device__ double bendStretchEnergy(const double* pos,
   // https://docs.eyesopen.com/toolkits/python/oefftk/fftheory.html#stretch-bend-interaction
 
   // Calculate angle between two points
-  double       dx1, dy1, dz1, dx2, dy2, dz2;
-  const double dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
-  const double dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
-  const double dist1        = sqrt(dist1Squared);
-  const double dist2        = sqrt(dist2Squared);
+  float       dx1, dy1, dz1, dx2, dy2, dz2;
+  const float dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
+  const float dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
+  const float dist1        = sqrtf(dist1Squared);
+  const float dist2        = sqrtf(dist2Squared);
 
-  const double dot      = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
+  const float  dot      = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
   const double cosTheta = clamp(dot / (dist1 * dist2), -1.0, 1.0);
   const double theta    = 180 / M_PI * acos(cosTheta);
 
