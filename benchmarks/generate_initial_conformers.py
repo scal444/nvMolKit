@@ -11,6 +11,7 @@ from pathlib import Path
 
 from rdkit import Chem
 from rdkit.Chem import AllChem
+from tqdm import tqdm
 
 
 def parse_args() -> argparse.Namespace:
@@ -64,7 +65,7 @@ def embed_conformers(
 ) -> list[Chem.Mol]:
     params = AllChem.ETKDGv3()
     params.randomSeed = seed
-    params.numThreads = 0
+    params.numThreads = 10
     params.maxAttempts = max_attempts
     params.pruneRmsThresh = 0.1
     params.useSmallRingTorsions = True
@@ -76,7 +77,7 @@ def embed_conformers(
     partial = 0
     failures = 0
 
-    for idx, smi in enumerate(smiles_list):
+    for idx, smi in enumerate(tqdm(smiles_list)):
         mol = Chem.MolFromSmiles(smi)
         if mol is None:
             failures += 1

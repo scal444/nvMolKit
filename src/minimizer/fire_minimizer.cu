@@ -156,13 +156,13 @@ __device__ __forceinline__ void semiImplicitEuler(
     const int    coordIdx     = i / dataDim;
     const double mass = massesSys.empty() ? 1.0: massesSys[coordIdx];
     if (i == 1) {
-      printf("Initial v change:\n");
-      printf("  V before force: %f\n", vSys[i]);
-      printf("  Grad 1 mass 1 dt 1 %f %f %f\n", force, mass, dt);
+      // printf("Initial v change:\n");
+      // printf("  V before force: %f\n", vSys[i]);
+      // printf("  Grad 1 mass 1 dt 1 %f %f %f\n", force, mass, dt);
     }
     vSys[i] += force * dt / mass;
     if (i == 1) {
-      printf("  V after force: %f\n", vSys[i]);
+      // printf("  V after force: %f\n", vSys[i]);
     }
   }
 
@@ -189,7 +189,7 @@ __device__ __forceinline__ void semiImplicitEuler(
   }
   block.sync();
   if (block.thread_rank() == 1) {
-    printf("VDotsum: %f, FDotSum: %f\n", *sharedVDotSum, *sharedFDotSum);
+    // printf("VDotsum: %f, FDotSum: %f\n", *sharedVDotSum, *sharedFDotSum);
   }
   const double fDotSum      = *sharedFDotSum;
   const double constFactor1 = (1.0 - alpha);
@@ -202,26 +202,26 @@ __device__ __forceinline__ void semiImplicitEuler(
   for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
     // v = (1-alpha)*v + alpha* v_norm * F_unitvec
     if (i == 1) {
-     printf("Mixing update\n");
-      printf("  V before mixing: %f\n", vSys[i]);
-      printf("  Const factors: %f, %f\n", constFactor1, constFactor2);
+     // printf("Mixing update\n");
+      // printf("  V before mixing: %f\n", vSys[i]);
+      // printf("  Const factors: %f, %f\n", constFactor1, constFactor2);
     }
     vSys[i] = abcFactor * (constFactor1 * vSys[i] + constFactor2 * -fSys[i] * kCalMolToEV);
     if (i == 1) {
-      printf("  V after mixing: %f\n", vSys[i]);
+      // printf("  V after mixing: %f\n", vSys[i]);
     }
   }
 
   // Now integrate positions using the constrained displacement length if needed.
   for (int i = block.thread_rank(); i < xSys.size(); i += updatePowerBlockSize) {
     if (i == 1) {
-      printf("X update:\n");
-      printf("  IDX 1 xsys before %f\n", xSys[i]);
-      printf("  vsys[i] = %f, dt=%f\n", vSys[i], dt);
+      // printf("X update:\n");
+      // printf("  IDX 1 xsys before %f\n", xSys[i]);
+      // printf("  vsys[i] = %f, dt=%f\n", vSys[i], dt);
     }
     xSys[i] += vSys[i] * dt;
     if (i == 1) {
-      printf("  IDX 1 xsys after %f\n", xSys[i]);
+      // printf("  IDX 1 xsys after %f\n", xSys[i]);
     }
   }
 
@@ -310,7 +310,7 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
   const double dtBeforeAdjustment = dt[sysIdx];
   if (block.thread_rank() == 0) {
     if (sqrt(gradSquaredReduced) <= gradTol) {
-      //  printf("Converged system %d with maxGrad %f <= %f\n", sysIdx, sqrt(gradSquaredReduced), gradTol);
+      printf("Converged system %d with maxGrad %f <= %f\n", sysIdx, sqrt(gradSquaredReduced), gradTol);
       *metConvergenceCriteria = true;
       if (activeSystems != nullptr) {
         activeSystems[sysIdx] = 0;
@@ -331,7 +331,7 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
     if (!debugPowers.empty()) {
       debugPowers[sysIdx] = powerSum;
     }
-    printf("VF: %f\n", powerSum);
+    // printf("VF: %f\n", powerSum);
 
     if (powerSum >= 0.0) {
       const int numStepsPositive        = numStepsWithPositivePower[sysIdx] + 1;
@@ -366,13 +366,13 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
     for (int i = block.thread_rank(); i < vSys.size(); i += updatePowerBlockSize) {
       if (takeHalfStepBack) {
         if (threadIdx.x == 1) {
-          printf("Taking half step back\n");
-          printf("  X was %f\n", xSys[0]);
+          // printf("Taking half step back\n");
+          // printf("  X was %f\n", xSys[0]);
         }
         // TODO: Is this what ASE and Lampps do? NOt ASE, I think. They use the new one.
         xSys[i] -= vSys[i] * dtBeforeAdjustment * 0.5;
         if (threadIdx.x == 1) {
-          printf("  X now %f\n", xSys[0]);
+          // printf("  X now %f\n", xSys[0]);
         }
       }
       vSys[i] = 0.0;
@@ -394,7 +394,7 @@ __global__ void fireKernel(  const bool takeHalfStepBack,
       block.sync();
       const double summedMaxDisplacement = *maxDisplacement;
       if (summedMaxDisplacement > dMax) {
-        printf("Reducing dt from %f to %f due to max displacement %f > %f\n", dtScaled, dMax / summedMaxDisplacement, summedMaxDisplacement, dMax);
+        // printf("Reducing dt from %f to %f due to max displacement %f > %f\n", dtScaled, dMax / summedMaxDisplacement, summedMaxDisplacement, dMax);
         dtScaled = dMax / summedMaxDisplacement;
       }
     }
@@ -613,7 +613,7 @@ bool FireBatchMinimizer::minimize(const int                                   nu
 
   for (int i = 0; i < numIters; ++i) {
     if (debugMode_) {
-      printf("\nStep\n\n");
+      // printf("\nStep\n\n");
       energyBuffer.zero();
       energyOuts.zero();
       eFunc(positions.data());
