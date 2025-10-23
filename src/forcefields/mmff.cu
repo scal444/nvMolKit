@@ -598,5 +598,13 @@ cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDevic
                                      molSystemDevice.grad.data(),
                                      stream);
 }
+
+EnergyForceContribsDevicePtr toEnergyForceContribsDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice) {
+  return toPointerStruct(molSystemDevice.contribs);
+}
+
+BatchedIndicesDevicePtr toBatchedIndicesDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice) {
+  return toPointerStruct(molSystemDevice.indices);
+}
 }  // namespace MMFF
 }  // namespace nvMolKit

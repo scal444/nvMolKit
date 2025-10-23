@@ -236,6 +236,8 @@ __global__ void updateInverseHessianBFGSBatchKernelShared(const int16_t* statuse
       cg::reduce_store_async(warp, &localXi[row], dotProduct, cg::plus<double>{});
     }
   }
+  
+  block.sync();
 }
 
 // Global-memory variant that avoids fixed-size shared arrays; safe for large molecules

@@ -20,7 +20,10 @@
 
 #include "bfgs_hessian.h"
 #include "bfgs_minimize.h"
+#include "bfgs_minimize_permol_kernels.h"
 #include "device_vector.h"
+#include "mmff.h"
+#include "mmff_kernels.h"
 #include "nvtx.h"
 namespace nvMolKit {
 constexpr double FUNCTOL = 1e-4;  //!< Default tolerance for function convergence in the minimizer
@@ -352,11 +355,12 @@ struct EqualsZeroFunctor {
   __host__ __device__ int operator()(const int16_t& x) const { return x == 0; }
 };
 
-BfgsBatchMinimizer::BfgsBatchMinimizer(const int dataDim, DebugLevel debugLevel, bool scaleGrads, cudaStream_t stream) {
+BfgsBatchMinimizer::BfgsBatchMinimizer(const int dataDim, DebugLevel debugLevel, bool scaleGrads, cudaStream_t stream, BfgsBackend backend) {
   debugLevel_ = debugLevel;
   dataDim_    = dataDim;
   scaleGrads_ = scaleGrads;
   stream_     = stream;
+  backend_    = backend;
   loopStatusHost_.resize(1);
 
   if (stream_ != nullptr) {
@@ -775,6 +779,7 @@ __global__ void updateDGradKernel(const double  gradTol,
       localMax = temp;
     }
   }
+  
   __shared__ typename cub::BlockReduce<double, 128>::TempStorage tempStorage;
   double blockMax = cub::BlockReduce<double, 128>(tempStorage).Reduce(localMax, cub::Max());
 
@@ -861,6 +866,13 @@ bool BfgsBatchMinimizer::minimize(const int                     numIters,
   const int totalNumAtoms = atomStartsHost.back();
   const int numSystems    = atomStartsHost.size() - 1;
 
+  // Note: PER_MOLECULE backend currently only supports MMFF with specific data structures
+  // For generic functors, must use BATCHED backend
+  if (backend_ == BfgsBackend::PER_MOLECULE) {
+    throw std::runtime_error("PER_MOLECULE backend not yet integrated with generic functor interface. "
+                             "Use minimizeWithMMFF() or switch to BATCHED backend.");
+  }
+
   {
     const ScopedNvtxRange bfgsFullInitialize("BfgsBatchMinimizer::fullInitialize");
     if (totalNumAtoms != numAtomsTotal_ || numSystems != numSystems_) {
@@ -885,6 +897,7 @@ bool BfgsBatchMinimizer::minimize(const int                     numIters,
     {
       const ScopedNvtxRange bfgsLineSearch("BfgsBatchMinimizer::lineSearch");
       doLineSearchSetup(energyOuts.data());
+      
       int              lineSearchIter         = 0;
       constexpr double MAX_ITER_LINEAR_SEARCH = 1000;
       while (lineSearchIter < MAX_ITER_LINEAR_SEARCH && lineSearchCountFinished() < numSystems) {
@@ -922,6 +935,46 @@ bool BfgsBatchMinimizer::minimize(const int                     numIters,
   }
 
   return compactAndCountConverged() == numSystems ? 0 : 1;
+}
+
+bool BfgsBatchMinimizer::minimizeWithMMFF(const int                                     numIters,
+                                          const double                                  gradTol,
+                                          const std::vector<int>&                       atomStartsHost,
+                                          const AsyncDeviceVector<int>&                 atomStarts,
+                                          AsyncDeviceVector<double>&                    positions,
+                                          AsyncDeviceVector<double>&                    grad,
+                                          AsyncDeviceVector<double>&                    energyOuts,
+                                          AsyncDeviceVector<double>&                    energyBuffer,
+                                          const MMFF::EnergyForceContribsDevicePtr&     terms,
+                                          const MMFF::BatchedIndicesDevicePtr&          systemIndices,
+                                          const uint8_t*                                activeThisStage) {
+  const int numSystems = atomStartsHost.size() - 1;
+
+  if (backend_ != BfgsBackend::PER_MOLECULE) {
+    throw std::runtime_error("minimizeWithMMFF currently only supports PER_MOLECULE backend. "
+                             "Use minimize() with MMFF functors for BATCHED backend.");
+  }
+
+  // Use per-molecule kernel
+  const ScopedNvtxRange bfgsPerMolecule("BfgsBatchMinimizer::perMoleculeMinimize");
+  
+  cudaError_t err = launchBfgsMinimizePerMolKernel(numSystems,
+                                                   numIters,
+                                                   gradTol,
+                                                   scaleGrads_,
+                                                   terms,
+                                                   systemIndices,
+                                                   positions.data(),
+                                                   energyOuts.data(),
+                                                   dataDim_,
+                                                   stream_);
+  
+  if (err != cudaSuccess) {
+    throw std::runtime_error(std::string("Per-molecule BFGS kernel failed: ") + cudaGetErrorString(err));
+  }
+  
+  // Per-molecule kernel doesn't have detailed convergence tracking yet, assume not all converged
+  return 1;
 }
 
 void copyAndInvert(const AsyncDeviceVector<double>& src, AsyncDeviceVector<double>& dst) {

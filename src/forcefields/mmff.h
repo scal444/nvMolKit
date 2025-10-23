@@ -339,6 +339,12 @@ cudaError_t computeGradients(BatchedMolecularDeviceBuffers& molSystemDevice, cud
 
 cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDevice, cudaStream_t stream = nullptr);
 
+//! Create pointer struct from device buffers for use in per-molecule kernels
+EnergyForceContribsDevicePtr toEnergyForceContribsDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice);
+
+//! Create pointer struct from device indices for use in per-molecule kernels
+BatchedIndicesDevicePtr toBatchedIndicesDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice);
+
 }  // namespace MMFF
 }  // namespace nvMolKit
 

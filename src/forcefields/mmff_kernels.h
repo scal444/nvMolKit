@@ -16,6 +16,8 @@
 #ifndef NVMOLKIT_MMFF_KERNELS_H
 #define NVMOLKIT_MMFF_KERNELS_H
 
+#include <cstdint>
+
 namespace nvMolKit {
 namespace MMFF {
 

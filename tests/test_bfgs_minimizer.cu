@@ -28,6 +28,7 @@
 #include "../rdkit_extensions/mmff_flattened_builder.h"
 #include "bfgs_minimize.h"
 #include "device.h"
+#include "mmff.h"
 #include "test_utils.h"
 
 using ::nvMolKit::MMFF::BatchedMolecularDeviceBuffers;
@@ -1112,3 +1113,75 @@ TEST_F(BFGSMinimizerHarmonicTestFixture, MultipleMinimizeCallsEquivalentToSingle
 }
 
 INSTANTIATE_TEST_SUITE_P(BFGSMinimizer4DTest, BFGSMinimizerTest4DTest, ::testing::Values(false, true));
+
+// Parameterized test for both BFGS backends
+class BFGSMinimizerBackendTest : public BFGSMinimizerTestFixture,
+                                  public ::testing::WithParamInterface<nvMolKit::BfgsBackend> {};
+
+TEST_P(BFGSMinimizerBackendTest, E2EMinimizationSingleSystemConvergedMatches) {
+  const nvMolKit::BfgsBackend backend   = GetParam();
+  const int                   numMols   = 1;
+  const int                   maxIters  = 50;
+  setUpMMFFSystems(numMols);
+  
+  if (backend == nvMolKit::BfgsBackend::BATCHED) {
+    // Use original batched backend
+    auto eFunc = [&](const double* positions) { nvMolKit::MMFF::computeEnergy(systemDevice, positions); };
+    auto gFunc = [&]() { nvMolKit::MMFF::computeGradients(systemDevice); };
+    
+    nvMolKit::BfgsBatchMinimizer bfgsMinimizer(/*dim=*/3, nvMolKit::DebugLevel::STEPWISE, true, nullptr, backend);
+    bfgsMinimizer.minimize(maxIters,
+                          1e-4,
+                          systemHost.indices.atomStarts,
+                          systemDevice.indices.atomStarts,
+                          systemDevice.positions,
+                          systemDevice.grad,
+                          systemDevice.energyOuts,
+                          systemDevice.energyBuffer,
+                          eFunc,
+                          gFunc);
+  } else {
+    // Use per-molecule backend
+    nvMolKit::BfgsBatchMinimizer bfgsMinimizer(/*dim=*/3, nvMolKit::DebugLevel::NONE, true, nullptr, backend);
+    
+    auto terms        = nvMolKit::MMFF::toEnergyForceContribsDevicePtr(systemDevice);
+    auto systemIndices = nvMolKit::MMFF::toBatchedIndicesDevicePtr(systemDevice);
+    
+    bfgsMinimizer.minimizeWithMMFF(maxIters,
+                                  1e-4,
+                                  systemHost.indices.atomStarts,
+                                  systemDevice.indices.atomStarts,
+                                  systemDevice.positions,
+                                  systemDevice.grad,
+                                  systemDevice.energyOuts,
+                                  systemDevice.energyBuffer,
+                                  terms,
+                                  systemIndices);
+  }
+  
+  // Get reference results from RDKit
+  std::vector<double> refEnergies;
+  for (auto& mol : mols) {
+    RDKit::MMFF::MMFFOptimizeMolecule(*mol, maxIters, "MMFF94", 100.0);
+    auto                                     molProps = std::make_unique<RDKit::MMFF::MMFFMolProperties>(*mol);
+    std::unique_ptr<ForceFields::ForceField> molFF(RDKit::MMFF::constructForceField(*mol, molProps.get()));
+    refEnergies.push_back(molFF->calcEnergy());
+  }
+  
+  // Compare results
+  std::vector<double> gotEnergies(systemDevice.energyOuts.size());
+  ASSERT_EQ(0,
+            cudaMemcpy(gotEnergies.data(),
+                      systemDevice.energyOuts.data(),
+                      gotEnergies.size() * sizeof(double),
+                      cudaMemcpyDeviceToHost));
+  
+  EXPECT_THAT(gotEnergies, ::testing::Pointwise(::testing::DoubleNear(1e-4), refEnergies));
+}
+
+INSTANTIATE_TEST_SUITE_P(BFGSBackends,
+                        BFGSMinimizerBackendTest,
+                        ::testing::Values(nvMolKit::BfgsBackend::BATCHED, nvMolKit::BfgsBackend::PER_MOLECULE),
+                        [](const ::testing::TestParamInfo<nvMolKit::BfgsBackend>& info) {
+                          return info.param == nvMolKit::BfgsBackend::BATCHED ? "Batched" : "PerMolecule";
+                        });
