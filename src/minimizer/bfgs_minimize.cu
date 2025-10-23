@@ -973,6 +973,9 @@ bool BfgsBatchMinimizer::minimizeWithMMFF(const int                             
     throw std::runtime_error(std::string("Per-molecule BFGS kernel failed: ") + cudaGetErrorString(err));
   }
   
+  // Synchronize stream before returning to ensure kernel completion
+  cudaCheckError(cudaStreamSynchronize(stream_));
+  
   // Per-molecule kernel doesn't have detailed convergence tracking yet, assume not all converged
   return 1;
 }
