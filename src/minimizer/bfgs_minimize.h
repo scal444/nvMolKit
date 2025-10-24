@@ -180,6 +180,10 @@ struct BfgsBatchMinimizer {
   std::vector<std::vector<int16_t>> stepwiseStatuses;
   std::vector<std::vector<double>>  stepwiseEnergies;
 
+  // Per-molecule kernel binning data (used when backend_ == PER_MOLECULE)
+  std::vector<std::vector<int>> perMolBinLists_;      // Molecule IDs for each bin
+  std::vector<AsyncDeviceVector<int>> perMolBinListsDevice_;  // Device copies of bin lists
+
   cudaStream_t stream_ = nullptr;
 };
 

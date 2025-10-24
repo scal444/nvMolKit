@@ -359,33 +359,65 @@ __device__ void updateInverseHessian(const int numTerms,
 
 }  // namespace
 
+template <int MaxAtoms, bool UseSharedMem>
 __global__ void bfgsMinimizeKernel(const int numIters,
                                    const double gradTol,
                                    const bool scaleGrads,
                                    const MMFF::EnergyForceContribsDevicePtr* terms,
                                    const MMFF::BatchedIndicesDevicePtr* systemIndices,
+                                   const int* molIdList,
+                                   const int* atomStarts,
+                                   const int* hessianStarts,
                                    double* positions,
+                                   double* grad,
+                                   double* inverseHessian,
+                                   double** scratchBuffers,
                                    double* energyOuts,
-                                   double* invHessians,
                                    const int DIM) {
-  const int molIdx = blockIdx.x;
+  const int molIdx = molIdList[blockIdx.x];
   const int tid = threadIdx.x;
   const int stride = blockDim.x;
   
-  const int atomStart = systemIndices->atomStarts[molIdx];
-  const int atomEnd = systemIndices->atomStarts[molIdx + 1];
+  const int atomStart = atomStarts[molIdx];
+  const int atomEnd = atomStarts[molIdx + 1];
   const int numAtoms = atomEnd - atomStart;
   const int numTerms = DIM * numAtoms;
   
-  // Shared memory for local molecule data (for small molecules)
-  constexpr int maxAtomSize = 256;
-  constexpr int maxTerms = maxAtomSize * 3;
-  __shared__ double localPos[maxTerms];
-  __shared__ double localGrad[maxTerms];
-  __shared__ double localDir[maxTerms];
-  __shared__ double scratchPos[maxTerms];  // Also reused as hessDGrad after line search
-  __shared__ double dGrad[maxTerms];
-  __shared__ double oldPos[maxTerms];
+  constexpr int maxTerms = MaxAtoms * 3;
+  
+  // Pointers to working memory (either shared or global)
+  double* localPos;
+  double* localGrad;
+  double* localDir;
+  double* scratchPos;
+  double* dGrad;
+  double* oldPos;
+  
+  if constexpr (UseSharedMem) {
+    // Shared memory for small molecules (≤64 atoms)
+    __shared__ double sharedLocalPos[maxTerms];
+    __shared__ double sharedLocalGrad[maxTerms];
+    __shared__ double sharedLocalDir[maxTerms];
+    __shared__ double sharedScratchPos[maxTerms];
+    __shared__ double sharedDGrad[maxTerms];
+    __shared__ double sharedOldPos[maxTerms];
+    
+    localPos = sharedLocalPos;
+    localGrad = sharedLocalGrad;
+    localDir = sharedLocalDir;
+    scratchPos = sharedScratchPos;
+    dGrad = sharedDGrad;
+    oldPos = sharedOldPos;
+  } else {
+    // Global memory for large molecules (>64 atoms) - index into pre-allocated buffers
+    const int termStart = atomStart * DIM;
+    localPos = scratchBuffers[0] + termStart;    // Reuse grad buffer as scratch
+    localGrad = grad + termStart;                 // Use main gradient buffer
+    localDir = scratchBuffers[1] + termStart;     // lineSearchDir
+    scratchPos = scratchBuffers[2] + termStart;   // scratchPositions
+    dGrad = scratchBuffers[3] + termStart;        // hessDGrad
+    oldPos = scratchBuffers[4] + termStart;       // scratchGrad (repurposed)
+  }
 
   // Shared scalars
   __shared__ double maxStep;
@@ -400,16 +432,9 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   __shared__ bool converged;
   __shared__ bool lineSearchConverged;
   
-  if (numTerms > maxTerms) {
-    // Molecule too large for this kernel
-    if (tid == 0) {
-      energyOuts[molIdx] = -1.0;  // Error flag
-    }
-    return;
-  }
-  
   // Inverse Hessian in global memory (O(n^2), too large for shared)
-  double* invHessian = invHessians + molIdx * maxTerms * maxTerms;
+  // Indexed by hessianStarts which stores cumulative (numTerms * numTerms) offsets
+  double* invHessian = inverseHessian + hessianStarts[molIdx];
   
   // Initialize positions from global memory
   double* globalPos = positions + atomStart * DIM;
@@ -583,45 +608,107 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   }
 }
 
-cudaError_t launchBfgsMinimizePerMolKernel(int numMols,
+namespace {
+
+template <int MaxAtoms, bool UseSharedMem>
+cudaError_t launchBinnedKernel(int numMolsInBin,
+                                const int* molIdList,
+                                int numIters,
+                                double gradTol,
+                                bool scaleGrads,
+                                const MMFF::EnergyForceContribsDevicePtr* devTerms,
+                                const MMFF::BatchedIndicesDevicePtr* devSysIdx,
+                                const int* atomStarts,
+                                const int* hessianStarts,
+                                double* positions,
+                                double* grad,
+                                double* inverseHessian,
+                                double** scratchBuffers,
+                                double* energyOuts,
+                                int dataDim,
+                                cudaStream_t stream) {
+  if (numMolsInBin == 0) {
+    return cudaSuccess;
+  }
+  
+  bfgsMinimizeKernel<MaxAtoms, UseSharedMem><<<numMolsInBin, BLOCK_SIZE, 0, stream>>>(
+    numIters,
+    gradTol,
+    scaleGrads,
+    devTerms,
+    devSysIdx,
+    molIdList,
+    atomStarts,
+    hessianStarts,
+    positions,
+    grad,
+    inverseHessian,
+    scratchBuffers,
+    energyOuts,
+    dataDim);
+  
+  return cudaGetLastError();
+}
+
+}  // namespace
+
+cudaError_t launchBfgsMinimizePerMolKernel(const int* binCounts,
+                                           const int** binMolIds,
+                                           const int* atomStarts,
+                                           const int* hessianStarts,
                                            int numIters,
                                            double gradTol,
                                            bool scaleGrads,
                                            const MMFF::EnergyForceContribsDevicePtr& terms,
                                            const MMFF::BatchedIndicesDevicePtr& systemIndices,
                                            double* positions,
+                                           double* grad,
+                                           double* inverseHessian,
+                                           double** scratchBuffers,
                                            double* energyOuts,
                                            int dataDim,
                                            cudaStream_t stream) {
-  constexpr int maxAtoms = 256;
-  constexpr int maxTerms = maxAtoms * 3;
-  
-  // Allocate global memory for inverse Hessians (one per molecule, size maxTerms x maxTerms)
-  const size_t hessianSize = static_cast<size_t>(numMols) * maxTerms * maxTerms * sizeof(double);
-  double* invHessians = nullptr;
-  cudaError_t err = cudaMallocAsync(&invHessians, hessianSize, stream);
-  if (err != cudaSuccess) {
-    return err;
-  }
-  
+  // Prepare device pointers for terms and indices
   const AsyncDevicePtr<MMFF::EnergyForceContribsDevicePtr> devTerms(terms, stream);
   const AsyncDevicePtr<MMFF::BatchedIndicesDevicePtr> devSysIdx(systemIndices, stream);
   
-  bfgsMinimizeKernel<<<numMols, BLOCK_SIZE, 0, stream>>>(
-    numIters,
-    gradTol,
-    scaleGrads,
-    devTerms.data(),
-    devSysIdx.data(),
-    positions,
-    energyOuts,
-    invHessians,
-    dataDim);
+  cudaError_t err = cudaSuccess;
+  // TODO: Run these concurrently, large to small?
   
-  err = cudaGetLastError();
+  // Launch kernels for each size bin
+  // Bin 0: 32 atoms, use shared memory
+  err = launchBinnedKernel<32, true>(
+    binCounts[0], binMolIds[0], numIters, gradTol, scaleGrads,
+    devTerms.data(), devSysIdx.data(), atomStarts, hessianStarts,
+    positions, grad, inverseHessian, scratchBuffers, energyOuts, dataDim, stream);
+  if (err != cudaSuccess) return err;
   
-  // Free the inverse Hessian memory
-  cudaFreeAsync(invHessians, stream);
+  // Bin 1: 64 atoms, use shared memory
+  err = launchBinnedKernel<64, true>(
+    binCounts[1], binMolIds[1], numIters, gradTol, scaleGrads,
+    devTerms.data(), devSysIdx.data(), atomStarts, hessianStarts,
+    positions, grad, inverseHessian, scratchBuffers, energyOuts, dataDim, stream);
+  if (err != cudaSuccess) return err;
+  
+  // Bin 2: 128 atoms, use global memory
+  err = launchBinnedKernel<128, false>(
+    binCounts[2], binMolIds[2], numIters, gradTol, scaleGrads,
+    devTerms.data(), devSysIdx.data(), atomStarts, hessianStarts,
+    positions, grad, inverseHessian, scratchBuffers, energyOuts, dataDim, stream);
+  if (err != cudaSuccess) return err;
+  
+  // Bin 3: 256 atoms, use global memory
+  err = launchBinnedKernel<256, false>(
+    binCounts[3], binMolIds[3], numIters, gradTol, scaleGrads,
+    devTerms.data(), devSysIdx.data(), atomStarts, hessianStarts,
+    positions, grad, inverseHessian, scratchBuffers, energyOuts, dataDim, stream);
+  if (err != cudaSuccess) return err;
+  
+  // Bin 4: 2048 atoms, use global memory
+  err = launchBinnedKernel<2048, false>(
+    binCounts[4], binMolIds[4], numIters, gradTol, scaleGrads,
+    devTerms.data(), devSysIdx.data(), atomStarts, hessianStarts,
+    positions, grad, inverseHessian, scratchBuffers, energyOuts, dataDim, stream);
   
   return err;
 }

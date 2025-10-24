@@ -362,6 +362,18 @@ BfgsBatchMinimizer::BfgsBatchMinimizer(const int dataDim, DebugLevel debugLevel,
   stream_     = stream;
   backend_    = backend;
   loopStatusHost_.resize(1);
+  
+  // Initialize per-molecule binning structures if using that backend
+  if (backend_ == BfgsBackend::PER_MOLECULE) {
+    constexpr int NUM_SIZE_BINS = 5;  // 32, 64, 128, 256, 2048
+    perMolBinLists_.resize(NUM_SIZE_BINS);
+    perMolBinListsDevice_.resize(NUM_SIZE_BINS);
+    for (int i = 0; i < NUM_SIZE_BINS; ++i) {
+      if (stream_) {
+        perMolBinListsDevice_[i].setStream(stream_);
+      }
+    }
+  }
 
   if (stream_ != nullptr) {
     activeSystemIndices_.setStream(stream_);
@@ -421,11 +433,55 @@ void BfgsBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
   numSystems_     = numSystems;
   numAtomsTotal_  = atomStartsHost.back();
   hasLargeSystem_ = false;
-  for (int i = 0; i < numSystems_; ++i) {
-    const int numAtoms = atomStartsHost[i + 1] - atomStartsHost[i];
-    if (numAtoms > 256) {
-      hasLargeSystem_ = true;
-      break;
+  
+  // Bin molecules by size if using per-molecule backend
+  if (backend_ == BfgsBackend::PER_MOLECULE) {
+    constexpr int NUM_SIZE_BINS = 5;
+    constexpr int SIZE_BINS[NUM_SIZE_BINS] = {32, 64, 128, 256, 2048};
+    
+    // Clear previous binning
+    for (int i = 0; i < NUM_SIZE_BINS; ++i) {
+      perMolBinLists_[i].clear();
+    }
+    
+    // Bin each molecule
+    for (int i = 0; i < numSystems_; ++i) {
+      const int numAtoms = atomStartsHost[i + 1] - atomStartsHost[i];
+      
+      // Find appropriate bin
+      int binIdx = -1;
+      for (int j = 0; j < NUM_SIZE_BINS; ++j) {
+        if (numAtoms <= SIZE_BINS[j]) {
+          binIdx = j;
+          break;
+        }
+      }
+      
+      if (binIdx >= 0) {
+        perMolBinLists_[binIdx].push_back(i);
+      }
+      // Molecules larger than 2048 atoms are skipped
+      
+      if (numAtoms > 256) {
+        hasLargeSystem_ = true;
+      }
+    }
+    
+    // Transfer bin lists to device
+    for (int i = 0; i < NUM_SIZE_BINS; ++i) {
+      if (!perMolBinLists_[i].empty()) {
+        perMolBinListsDevice_[i].resize(perMolBinLists_[i].size());
+        perMolBinListsDevice_[i].setFromVector(perMolBinLists_[i]);
+      }
+    }
+  } else {
+    // Original logic for batched backend
+    for (int i = 0; i < numSystems_; ++i) {
+      const int numAtoms = atomStartsHost[i + 1] - atomStartsHost[i];
+      if (numAtoms > 256) {
+        hasLargeSystem_ = true;
+        break;
+      }
     }
   }
 
@@ -955,16 +1011,45 @@ bool BfgsBatchMinimizer::minimizeWithMMFF(const int                             
                              "Use minimize() with MMFF functors for BATCHED backend.");
   }
 
+  // Initialize buffers and binning if needed
+  initialize(atomStartsHost, atomStarts.data(), positions.data(), grad.data(), energyOuts.data(), activeThisStage);
+  
+  // Initialize Hessian to identity
+  setHessianToIdentity();
+
   // Use per-molecule kernel
   const ScopedNvtxRange bfgsPerMolecule("BfgsBatchMinimizer::perMoleculeMinimize");
   
-  cudaError_t err = launchBfgsMinimizePerMolKernel(numSystems,
+  // Prepare scratch buffer pointers array
+  double* scratchBuffers[5] = {
+    grad.data(),              // Used as localPos in global memory mode
+    lineSearchDir_.data(),    // localDir
+    scratchPositions_.data(), // scratchPos
+    hessDGrad_.data(),        // dGrad
+    scratchGrad_.data()       // oldPos
+  };
+  
+  // Prepare binning data pointers and counts
+  int binCounts[5];
+  const int* binMolIds[5];
+  for (int i = 0; i < 5; ++i) {
+    binCounts[i] = static_cast<int>(perMolBinLists_[i].size());
+    binMolIds[i] = perMolBinListsDevice_[i].data();
+  }
+  
+  cudaError_t err = launchBfgsMinimizePerMolKernel(binCounts,
+                                                   binMolIds,
+                                                   atomStarts.data(),
+                                                   hessianStarts_.data(),
                                                    numIters,
                                                    gradTol,
                                                    scaleGrads_,
                                                    terms,
                                                    systemIndices,
                                                    positions.data(),
+                                                   grad.data(),
+                                                   inverseHessian_.data(),
+                                                   scratchBuffers,
                                                    energyOuts.data(),
                                                    dataDim_,
                                                    stream_);
