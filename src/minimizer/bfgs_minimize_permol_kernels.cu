@@ -8,19 +8,20 @@
 namespace nvMolKit {
 
 namespace {
+constexpr int BLOCK_SIZE = 128;
 constexpr int MAX_LINESEARCH_ITERS = 1000;
 constexpr double FUNCTOL = 1e-4;
 constexpr double MOVETOL = 1e-7;
 constexpr double TOLX = 4. * 3e-8;
 
-__device__ void setMaxStep(const double* pos, const int numTerms, double* maxStepOut) {
+__device__ void setMaxStep(const double* pos, const int numTerms, double* maxStepOut,
+                           typename cub::BlockReduce<double, BLOCK_SIZE>::TempStorage& tempStorage) {
   double sumSquaredPos = 0.0;
   for (int i = threadIdx.x; i < numTerms; i += blockDim.x) {
     double dx2 = pos[i] * pos[i];
     sumSquaredPos += dx2;
   }
-  using BlockReduce = cub::BlockReduce<double, 128>;
-  __shared__ typename BlockReduce::TempStorage tempStorage;
+  using BlockReduce = cub::BlockReduce<double, BLOCK_SIZE>;
 
   const double squaredSum = BlockReduce(tempStorage).Sum(sumSquaredPos);
   if (threadIdx.x == 0) {
@@ -29,12 +30,12 @@ __device__ void setMaxStep(const double* pos, const int numTerms, double* maxSte
   }
 }
 
-__device__ void lineSearchSetup(const int numTerms, const double* posStart, const double* gradStart, const double maxStep, double* dirStart, double& slope,  double& lambdaMin) {
+__device__ void lineSearchSetup(const int numTerms, const double* posStart, const double* gradStart, const double maxStep, double* dirStart, double& slope,  double& lambdaMin,
+                                typename cub::BlockReduce<double, BLOCK_SIZE>::TempStorage& tempStorage) {
 
   const int idxInSys = threadIdx.x;
-  using BlockReduce = cub::BlockReduce<double, 128>;
-  __shared__ typename BlockReduce::TempStorage tempStorage;
-  __shared__ double                            dirSum[1];
+  using BlockReduce = cub::BlockReduce<double, BLOCK_SIZE>;
+  __shared__ double dirSum[1];
 
   // ---------------------------------
   //  Scale direction vector if needed
@@ -54,6 +55,7 @@ __device__ void lineSearchSetup(const int numTerms, const double* posStart, cons
       dirStart[i] *= maxStep / dirSum[0];
     }
   }
+  __syncthreads();
 
   // -------------------------
   // Set slope, check validity
@@ -76,6 +78,7 @@ __device__ void lineSearchSetup(const int numTerms, const double* posStart, cons
   if (idxInSys == 0) {
     slope = blockSum;
   }
+  __syncthreads();
 
   // ----------------------
   // Compute initial lambda
@@ -167,7 +170,8 @@ __device__ void setDirection(const int numTerms,
                              double* xi,
                              double* dGrad,
                              const double* grad,
-                             bool& converged) {
+                             bool& converged,
+                             typename cub::BlockReduce<double, BLOCK_SIZE>::TempStorage& tempStorage) {
   double localMax = 0.0;
   for (int i = threadIdx.x; i < numTerms; i += blockDim.x) {
     xi[i] = posFromLineSearch[i] - pos[i];
@@ -179,8 +183,7 @@ __device__ void setDirection(const int numTerms,
     }
   }
   
-  __shared__ typename cub::BlockReduce<double, 128>::TempStorage tempStorage;
-  double blockMax = cub::BlockReduce<double, 128>(tempStorage).Reduce(localMax, cub::Max());
+  double blockMax = cub::BlockReduce<double, BLOCK_SIZE>(tempStorage).Reduce(localMax, cub::Max());
   
   if (threadIdx.x == 0 && blockMax < TOLX) {
     converged = true;
@@ -189,7 +192,8 @@ __device__ void setDirection(const int numTerms,
 }
 
 template <bool scaleGrads>
-__device__ void scaleGrad(const int numTerms, double* grad, double& gradScale) {
+__device__ void scaleGrad(const int numTerms, double* grad, double& gradScale,
+                          typename cub::BlockReduce<double, BLOCK_SIZE>::TempStorage& tempStorage) {
   gradScale = scaleGrads ? 0.1 : 1.0;
   
   double maxGrad = -1e8;
@@ -200,8 +204,7 @@ __device__ void scaleGrad(const int numTerms, double* grad, double& gradScale) {
     }
   }
   
-  __shared__ typename cub::BlockReduce<double, 128>::TempStorage tempStorage;
-  double blockMax = cub::BlockReduce<double, 128>(tempStorage).Reduce(maxGrad, cub::Max());
+  double blockMax = cub::BlockReduce<double, BLOCK_SIZE>(tempStorage).Reduce(maxGrad, cub::Max());
   
   __shared__ double distributedMax[1];
   if (threadIdx.x == 0) {
@@ -229,7 +232,8 @@ __device__ void updateDGrad(const int numTerms,
                            const double* grad,
                            const double* pos,
                            double* dGrad,
-                           bool& converged) {
+                           bool& converged,
+                           typename cub::BlockReduce<double, BLOCK_SIZE>::TempStorage& tempStorage) {
   double localMax = 0.0;
   for (int i = threadIdx.x; i < numTerms; i += blockDim.x) {
     dGrad[i] = grad[i] - dGrad[i];
@@ -239,8 +243,7 @@ __device__ void updateDGrad(const int numTerms,
     }
   }
   
-  __shared__ typename cub::BlockReduce<double, 128>::TempStorage tempStorage;
-  double blockMax = cub::BlockReduce<double, 128>(tempStorage).Reduce(localMax, cub::Max());
+  double blockMax = cub::BlockReduce<double, BLOCK_SIZE>(tempStorage).Reduce(localMax, cub::Max());
   
   if (threadIdx.x == 0) {
     const double term = max(energy * gradScale, 1.0);
@@ -257,9 +260,9 @@ __device__ void updateInverseHessian(const int numTerms,
                                      double* dGrad,
                                      double* xi,
                                      double* hessDGrad,
-                                     double* grad) {
-  using BlockReduce = cub::BlockReduce<double, 128>;
-  __shared__ typename BlockReduce::TempStorage tempStorage;
+                                     double* grad,
+                                     typename cub::BlockReduce<double, BLOCK_SIZE>::TempStorage& tempStorage) {
+  using BlockReduce = cub::BlockReduce<double, BLOCK_SIZE>;
   
   // Compute hessDGrad = invHessian * dGrad
   for (int row = threadIdx.x; row < numTerms; row += blockDim.x) {
@@ -383,7 +386,8 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   __shared__ double scratchPos[maxTerms];
   __shared__ double dGrad[maxTerms];
   __shared__ double hessDGrad[maxTerms];
-  
+  __shared__ double oldPos[maxTerms];
+
   // Shared scalars
   __shared__ double maxStep;
   __shared__ double prevE;
@@ -428,12 +432,13 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   }
   __syncthreads();
   
-  // Compute initial energy
-  using BlockReduce = cub::BlockReduce<double, 128>;
-  __shared__ typename BlockReduce::TempStorage tempStorageEnergy;
+  // Shared temp storage for all BlockReduce operations
+  using BlockReduce = cub::BlockReduce<double, BLOCK_SIZE>;
+  __shared__ typename BlockReduce::TempStorage tempStorage;
   
+  // Compute initial energy
   const double threadEnergy = MMFF::molEnergy(*terms, *systemIndices, positions, molIdx, tid, stride);
-  const double blockEnergy = BlockReduce(tempStorageEnergy).Sum(threadEnergy);
+  const double blockEnergy = BlockReduce(tempStorage).Sum(threadEnergy);
   
   if (tid == 0) {
     prevE = blockEnergy;
@@ -452,9 +457,9 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   
   // Scale gradients
   if (scaleGrads) {
-    scaleGrad<true>(numTerms, localGrad, gradScale);
+    scaleGrad<true>(numTerms, localGrad, gradScale, tempStorage);
   } else {
-    scaleGrad<false>(numTerms, localGrad, gradScale);
+    scaleGrad<false>(numTerms, localGrad, gradScale, tempStorage);
   }
   
   // Set initial direction as negative gradient
@@ -464,7 +469,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   __syncthreads();
   
   // Set max step
-  setMaxStep(localPos, numTerms, &maxStep);
+  setMaxStep(localPos, numTerms, &maxStep, tempStorage);
   __syncthreads();
   
   // Main BFGS loop
@@ -476,7 +481,6 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   
   while (!converged && currIter < numIters) {
     // Save current position before line search
-    __shared__ double oldPos[maxTerms];
     for (int i = tid; i < numTerms; i += stride) {
       oldPos[i] = localPos[i];
     }
@@ -489,7 +493,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
     }
     __syncthreads();
     
-    lineSearchSetup(numTerms, localPos, localGrad, maxStep, localDir, slope, lambdaMin);
+    lineSearchSetup(numTerms, localPos, localGrad, maxStep, localDir, slope, lambdaMin, tempStorage);
     __syncthreads();
     
     // Line search loop
@@ -511,7 +515,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
       
       // Compute energy at perturbed position
       const double lsThreadEnergy = MMFF::molEnergy(*terms, *systemIndices, positions, molIdx, tid, stride);
-      const double lsBlockEnergy = BlockReduce(tempStorageEnergy).Sum(lsThreadEnergy);
+      const double lsBlockEnergy = BlockReduce(tempStorage).Sum(lsThreadEnergy);
       
       if (tid == 0) {
         currE = lsBlockEnergy;
@@ -536,7 +540,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
     __syncthreads();
     
     // Set direction (compute xi = new - old)
-    setDirection(numTerms, scratchPos, oldPos, localDir, dGrad, localGrad, converged);
+    setDirection(numTerms, scratchPos, oldPos, localDir, dGrad, localGrad, converged, tempStorage);
     if (converged) break;
     
     // Update stored energy for next iteration
@@ -556,17 +560,17 @@ __global__ void bfgsMinimizeKernel(const int numIters,
     
     // Scale gradients
     if (scaleGrads) {
-      scaleGrad<true>(numTerms, localGrad, gradScale);
+      scaleGrad<true>(numTerms, localGrad, gradScale, tempStorage);
     } else {
-      scaleGrad<false>(numTerms, localGrad, gradScale);
+      scaleGrad<false>(numTerms, localGrad, gradScale, tempStorage);
     }
     
     // Update dGrad and check convergence
-    updateDGrad(numTerms, gradTol, currE, gradScale, localGrad, localPos, dGrad, converged);
+    updateDGrad(numTerms, gradTol, currE, gradScale, localGrad, localPos, dGrad, converged, tempStorage);
     if (converged) break;
     
     // Update Hessian and compute new direction
-    updateInverseHessian(numTerms, invHessian, dGrad, localDir, hessDGrad, localGrad);
+    updateInverseHessian(numTerms, invHessian, dGrad, localDir, hessDGrad, localGrad, tempStorage);
     
     if (tid == 0) {
       currIter++;
@@ -590,7 +594,6 @@ cudaError_t launchBfgsMinimizePerMolKernel(int numMols,
                                            double* energyOuts,
                                            int dataDim,
                                            cudaStream_t stream) {
-  constexpr int blockSize = 128;
   constexpr int maxAtoms = 256;
   constexpr int maxTerms = maxAtoms * 3;
   
@@ -605,7 +608,7 @@ cudaError_t launchBfgsMinimizePerMolKernel(int numMols,
   const AsyncDevicePtr<MMFF::EnergyForceContribsDevicePtr> devTerms(terms, stream);
   const AsyncDevicePtr<MMFF::BatchedIndicesDevicePtr> devSysIdx(systemIndices, stream);
   
-  bfgsMinimizeKernel<<<numMols, blockSize, 0, stream>>>(
+  bfgsMinimizeKernel<<<numMols, BLOCK_SIZE, 0, stream>>>(
     numIters,
     gradTol,
     scaleGrads,
