@@ -360,7 +360,7 @@ __device__ void updateInverseHessian(const int numTerms,
 }  // namespace
 
 template <int MaxAtoms, bool UseSharedMem>
-__global__ void bfgsMinimizeKernel(const int numIters,
+__global__ __launch_bounds__(BLOCK_SIZE, 12) void bfgsMinimizeKernel(const int numIters,
                                    const double gradTol,
                                    const bool scaleGrads,
                                    const MMFF::EnergyForceContribsDevicePtr* terms,
@@ -395,19 +395,21 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   
   if constexpr (UseSharedMem) {
     // Shared memory for small molecules (≤64 atoms)
+    // Note: oldPos moved to global memory to reduce shared memory pressure
     __shared__ double sharedLocalPos[maxTerms];
     __shared__ double sharedLocalGrad[maxTerms];
     __shared__ double sharedLocalDir[maxTerms];
     __shared__ double sharedScratchPos[maxTerms];
     __shared__ double sharedDGrad[maxTerms];
-    __shared__ double sharedOldPos[maxTerms];
     
+    const int termStart = atomStart * DIM;
     localPos = sharedLocalPos;
     localGrad = sharedLocalGrad;
     localDir = sharedLocalDir;
     scratchPos = sharedScratchPos;
     dGrad = sharedDGrad;
-    oldPos = sharedOldPos;
+    // For small molecules, grad buffer is unused (using sharedLocalGrad), so reuse it for oldPos
+    oldPos = scratchBuffers[0] + termStart;       // Reuse grad buffer for oldPos
   } else {
     // Global memory for large molecules (>64 atoms) - index into pre-allocated buffers
     const int termStart = atomStart * DIM;

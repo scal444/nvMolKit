@@ -43,6 +43,9 @@ namespace nvMolKit {
 /// \param grad Pre-allocated gradient buffer (size: total atoms * dataDim)
 /// \param inverseHessian Pre-allocated Hessian buffer (see hessianStarts for indexing)
 /// \param scratchBuffers Pre-allocated scratch buffers (size: total atoms * dataDim each, 5 buffers)
+///                       [0]=localPos(large)/oldPos(small), [1]=localDir, [2]=scratchPos, 
+///                       [3]=dGrad(large mols), [4]=oldPos(large mols)
+///                       Note: Buffer [0] is reused for oldPos in small molecules (shared mem mode)
 /// \param energyOuts Output energies for each molecule
 /// \param dataDim Dimensionality of coordinates (typically 3)
 /// \param stream CUDA stream for asynchronous execution
