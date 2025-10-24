@@ -383,9 +383,8 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   __shared__ double localPos[maxTerms];
   __shared__ double localGrad[maxTerms];
   __shared__ double localDir[maxTerms];
-  __shared__ double scratchPos[maxTerms];
+  __shared__ double scratchPos[maxTerms];  // Also reused as hessDGrad after line search
   __shared__ double dGrad[maxTerms];
-  __shared__ double hessDGrad[maxTerms];
   __shared__ double oldPos[maxTerms];
 
   // Shared scalars
@@ -569,8 +568,8 @@ __global__ void bfgsMinimizeKernel(const int numIters,
     updateDGrad(numTerms, gradTol, currE, gradScale, localGrad, localPos, dGrad, converged, tempStorage);
     if (converged) break;
     
-    // Update Hessian and compute new direction
-    updateInverseHessian(numTerms, invHessian, dGrad, localDir, hessDGrad, localGrad, tempStorage);
+    // Update Hessian and compute new direction (reuses scratchPos as hessDGrad)
+    updateInverseHessian(numTerms, invHessian, dGrad, localDir, scratchPos, localGrad, tempStorage);
     
     if (tid == 0) {
       currIter++;
