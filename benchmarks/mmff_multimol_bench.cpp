@@ -57,6 +57,7 @@ void printHelp(const char* progName) {
     << "  -t, --num_threads <int>             RDKit MMFF optimize threads (per-molecule conformer threads) [default: OMP max]\n";
   std::cout
     << "  -p, --perturbation_factor <float>    Random displacement magnitude for starting structures [default: 0.5]\n";
+  std::cout << "  -k, --backend <batched|permol>      BFGS backend: 'batched' or 'permol' [default: batched]\n";
   std::cout << "  -h, --help                          Show this help message\n\n";
   std::cout << "Boolean values can be: true/false, 1/0, yes/no, on/off (case insensitive)\n";
 }
@@ -89,7 +90,8 @@ std::vector<std::vector<double>> runNvMolKit(std::vector<RDKit::ROMol*>& molsPtr
                                              int                         maxIters,
                                              int                         batchSize,
                                              int                         batchesPerGpu,
-                                             int                         numGpus) {
+                                             int                         numGpus,
+                                             nvMolKit::BfgsBackend       backend) {
   nvMolKit::BatchHardwareOptions perfOptions;
   perfOptions.batchesPerGpu = batchesPerGpu;
   perfOptions.batchSize     = batchSize;
@@ -101,11 +103,13 @@ std::vector<std::vector<double>> runNvMolKit(std::vector<RDKit::ROMol*>& molsPtr
     }
   }
   std::vector<std::vector<double>> energies;
+  const char*                      backendStr  = (backend == nvMolKit::BfgsBackend::BATCHED) ? "batched" : "permol";
   std::string                      benchName = "nvMolKit MMFF, num_mols=" + std::to_string(molsPtrs.size()) +
                           ", batch_size=" + std::to_string(batchSize) +
-                          ", num_concurrent_batches=" + std::to_string(batchesPerGpu);
+                          ", num_concurrent_batches=" + std::to_string(batchesPerGpu) +
+                          ", backend=" + backendStr;
   ankerl::nanobench::Bench().epochIterations(1).epochs(1).run(benchName, [&]() {
-    energies = nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molsPtrs, maxIters, 100.0, perfOptions);
+    energies = nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molsPtrs, maxIters, 100.0, perfOptions, backend);
   });
   return energies;
 }
@@ -113,18 +117,19 @@ std::vector<std::vector<double>> runNvMolKit(std::vector<RDKit::ROMol*>& molsPtr
 }  // namespace
 
 int main(int argc, char* argv[]) {
-  std::string filePath           = "benchmarks/data/MMFF94_hypervalent.sdf";
-  int         numMols            = 20;
-  int         confsPerMol        = 20;
-  bool        doRdkit            = true;
-  bool        doWarmup           = true;
-  bool        doEnergyCheck      = true;
-  int         batchSize          = 1000;
-  int         batchesPerGpu      = 10;
-  int         maxIters           = 1000;
-  int         numGpus            = -1;  // If <0, use all GPUs
-  float       perturbationFactor = 0.5f;
-  int         rdkitThreads       = -1;  // If <0, use OMP max
+  std::string           filePath           = "benchmarks/data/MMFF94_hypervalent.sdf";
+  int                   numMols            = 20;
+  int                   confsPerMol        = 20;
+  bool                  doRdkit            = true;
+  bool                  doWarmup           = true;
+  bool                  doEnergyCheck      = true;
+  int                   batchSize          = 1000;
+  int                   batchesPerGpu      = 10;
+  int                   maxIters           = 1000;
+  int                   numGpus            = -1;  // If <0, use all GPUs
+  float                 perturbationFactor = 0.5f;
+  int                   rdkitThreads       = -1;  // If <0, use OMP max
+  nvMolKit::BfgsBackend backend            = nvMolKit::BfgsBackend::BATCHED;
 
   static struct option long_options[] = {
     {             "file_path", required_argument, 0, 'f'},
@@ -138,13 +143,14 @@ int main(int argc, char* argv[]) {
     {              "num_gpus", required_argument, 0, 'g'},
     {           "num_threads", required_argument, 0, 't'},
     {   "perturbation_factor", required_argument, 0, 'p'},
+    {               "backend", required_argument, 0, 'k'},
     {                  "help",       no_argument, 0, 'h'},
     {                       0,                 0, 0,   0}
   };
 
   int option_index = 0;
   int c;
-  while ((c = getopt_long(argc, argv, "f:n:c:r:w:e:B:b:g:t:p:h", long_options, &option_index)) != -1) {
+  while ((c = getopt_long(argc, argv, "f:n:c:r:w:e:B:b:g:t:p:k:h", long_options, &option_index)) != -1) {
     switch (c) {
       case 'f':
         filePath = optarg;
@@ -242,6 +248,19 @@ int main(int argc, char* argv[]) {
           return 1;
         }
         break;
+      case 'k': {
+        std::string backendStr = optarg;
+        std::transform(backendStr.begin(), backendStr.end(), backendStr.begin(), ::tolower);
+        if (backendStr == "batched") {
+          backend = nvMolKit::BfgsBackend::BATCHED;
+        } else if (backendStr == "permol" || backendStr == "per_molecule") {
+          backend = nvMolKit::BfgsBackend::PER_MOLECULE;
+        } else {
+          std::cerr << "Error: Invalid backend. Must be 'batched' or 'permol'\n";
+          return 1;
+        }
+        break;
+      }
       case 'h':
         printHelp(argv[0]);
         return 0;
@@ -280,7 +299,8 @@ int main(int argc, char* argv[]) {
   std::cout << "  Number of GPUs: " << (numGpus > 0 ? std::to_string(numGpus) : std::string("all")) << "\n";
   std::cout << "  RDKit MMFF threads: " << (rdkitThreads > 0 ? std::to_string(rdkitThreads) : std::string("OMP max"))
             << "\n";
-  std::cout << "  Perturbation factor: " << perturbationFactor << "\n\n";
+  std::cout << "  Perturbation factor: " << perturbationFactor << "\n";
+  std::cout << "  BFGS backend: " << (backend == nvMolKit::BfgsBackend::BATCHED ? "batched" : "permol") << "\n\n";
 
   const std::string ext          = BenchUtils::getFileExtensionLower(filePath);
   const bool        isSmilesLike = (ext == ".smi" || ext == ".smiles" || ext == ".cxsmiles");
@@ -318,7 +338,7 @@ int main(int argc, char* argv[]) {
 
     BenchUtils::perturbAllConformers(warmupPtrs, perturbationFactor, 123);
 
-    (void)runNvMolKit(warmupPtrs, maxIters, batchSize, batchesPerGpu, numGpus);
+    (void)runNvMolKit(warmupPtrs, maxIters, batchSize, batchesPerGpu, numGpus, backend);
     if (doRdkit) {
       (void)runRDKit(warmupPtrs, maxIters, rdkitThreadsResolved);
     }
@@ -398,7 +418,7 @@ int main(int argc, char* argv[]) {
     nvmolkitPtrs.push_back(m.get());
 
   // Run benchmarks
-  auto                             nvmolkitRes = runNvMolKit(nvmolkitPtrs, maxIters, batchSize, batchesPerGpu, numGpus);
+  auto                             nvmolkitRes = runNvMolKit(nvmolkitPtrs, maxIters, batchSize, batchesPerGpu, numGpus, backend);
   std::vector<std::vector<double>> rdkitRes;
   if (doRdkit) {
     rdkitRes = runRDKit(rdkitPtrs, maxIters, rdkitThreadsResolved);

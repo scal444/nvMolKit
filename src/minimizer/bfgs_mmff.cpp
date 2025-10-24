@@ -29,7 +29,8 @@ namespace nvMolKit::MMFF {
 std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKit::ROMol*>& mols,
                                                                 const int                   maxIters,
                                                                 const double                nonBondedThreshold,
-                                                                const BatchHardwareOptions& perfOptions) {
+                                                                const BatchHardwareOptions& perfOptions,
+                                                                const BfgsBackend           backend) {
   // Extract values from performance options
   const size_t batchSize = perfOptions.batchSize == -1 ? 500 : perfOptions.batchSize;
 
@@ -102,6 +103,7 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
                                                                                           nonBondedThreshold, \
                                                                                           streamPool,         \
                                                                                           devicesPerThread,   \
+                                                                                          backend,            \
                                                                                           exceptionHandler)
   for (size_t batchStart = 0; batchStart < totalConformers; batchStart += effectiveBatchSize) {
     try {
@@ -152,21 +154,36 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
       systemDevice.grad.resize(systemHost.positions.size());
       systemDevice.grad.zero();
 
-      auto eFunc = [&](const double* positions) { nvMolKit::MMFF::computeEnergy(systemDevice, positions, streamPtr); };
-      auto gFunc = [&]() { nvMolKit::MMFF::computeGradients(systemDevice, streamPtr); };
-
-      nvMolKit::BfgsBatchMinimizer bfgsMinimizer(/*dataDim=*/3, nvMolKit::DebugLevel::NONE, true, streamPtr);
+      nvMolKit::BfgsBatchMinimizer bfgsMinimizer(/*dataDim=*/3, nvMolKit::DebugLevel::NONE, true, streamPtr, backend);
       constexpr double             gradTol = 1e-4;  // hard-coded in RDKit.
-      bfgsMinimizer.minimize(maxIters,
-                             gradTol,
-                             systemHost.indices.atomStarts,
-                             systemDevice.indices.atomStarts,
-                             systemDevice.positions,
-                             systemDevice.grad,
-                             systemDevice.energyOuts,
-                             systemDevice.energyBuffer,
-                             eFunc,
-                             gFunc);
+      
+      if (backend == BfgsBackend::BATCHED) {
+        auto eFunc = [&](const double* positions) { nvMolKit::MMFF::computeEnergy(systemDevice, positions, streamPtr); };
+        auto gFunc = [&]() { nvMolKit::MMFF::computeGradients(systemDevice, streamPtr); };
+        bfgsMinimizer.minimize(maxIters,
+                               gradTol,
+                               systemHost.indices.atomStarts,
+                               systemDevice.indices.atomStarts,
+                               systemDevice.positions,
+                               systemDevice.grad,
+                               systemDevice.energyOuts,
+                               systemDevice.energyBuffer,
+                               eFunc,
+                               gFunc);
+      } else {
+        auto terms         = nvMolKit::MMFF::toEnergyForceContribsDevicePtr(systemDevice);
+        auto systemIndices = nvMolKit::MMFF::toBatchedIndicesDevicePtr(systemDevice);
+        bfgsMinimizer.minimizeWithMMFF(maxIters,
+                                       gradTol,
+                                       systemHost.indices.atomStarts,
+                                       systemDevice.indices.atomStarts,
+                                       systemDevice.positions,
+                                       systemDevice.grad,
+                                       systemDevice.energyOuts,
+                                       systemDevice.energyBuffer,
+                                       terms,
+                                       systemIndices);
+      }
 
       std::vector<double> finalPos(systemHost.positions.size());
       systemDevice.positions.copyToHost(finalPos);
