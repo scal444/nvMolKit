@@ -1,9 +1,10 @@
+#include <cub/cub.cuh>
+
 #include "bfgs_minimize_permol_kernels.h"
+#include "cub_helpers.cuh"
+#include "device_vector.h"
 #include "mmff_kernels.h"
 #include "mmff_kernels_device.cuh"
-#include "device_vector.h"
-
-#include <cub/cub.cuh>
 
 namespace nvMolKit {
 
@@ -92,7 +93,7 @@ __device__ void lineSearchSetup(const int numTerms, const double* posStart, cons
     }
   }
   // Perform block-wide reduction to find the maximum
-  double blockMax = BlockReduce(tempStorage).Reduce(localMax, cub::Max());
+  double blockMax = BlockReduce(tempStorage).Reduce(localMax, cubMax());
 
   // The first thread in the block writes the result
   if (threadIdx.x == 0) {
@@ -183,7 +184,7 @@ __device__ void setDirection(const int numTerms,
     }
   }
   
-  double blockMax = cub::BlockReduce<double, BLOCK_SIZE>(tempStorage).Reduce(localMax, cub::Max());
+  double blockMax = cub::BlockReduce<double, BLOCK_SIZE>(tempStorage).Reduce(localMax, cubMax());
   
   if (threadIdx.x == 0 && blockMax < TOLX) {
     converged = true;
@@ -204,7 +205,7 @@ __device__ void scaleGrad(const int numTerms, double* grad, double& gradScale,
     }
   }
   
-  double blockMax = cub::BlockReduce<double, BLOCK_SIZE>(tempStorage).Reduce(maxGrad, cub::Max());
+  double blockMax = cub::BlockReduce<double, BLOCK_SIZE>(tempStorage).Reduce(maxGrad, cubMax());
   
   __shared__ double distributedMax[1];
   if (threadIdx.x == 0) {
@@ -243,7 +244,7 @@ __device__ void updateDGrad(const int numTerms,
     }
   }
   
-  double blockMax = cub::BlockReduce<double, BLOCK_SIZE>(tempStorage).Reduce(localMax, cub::Max());
+  double blockMax = cub::BlockReduce<double, BLOCK_SIZE>(tempStorage).Reduce(localMax, cubMax());
   
   if (threadIdx.x == 0) {
     const double term = max(energy * gradScale, 1.0);
