@@ -435,57 +435,61 @@ static __device__ __forceinline__ void bendStretchGrad(const double* pos,
                                                        const double  forceConst1,
                                                        const double  forceConst2,
                                                        double*       grad) {
-  constexpr double prefactor = 143.9325 * M_PI / 180.0;
+  constexpr float prefactor = 143.9325 * M_PI / 180.0;
 
-  double       dx1, dy1, dz1, dx2, dy2, dz2;
-  const double dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
-  const double dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
-  const double dist1        = sqrt(dist1Squared);
-  const double dist2        = sqrt(dist2Squared);
+  float       dx1, dy1, dz1, dx2, dy2, dz2;
+  const float dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
+  const float dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
+  // Note that doing the inverse sqrt would be better here, but it causes drift in some edge case tests.
+  const float dist1        = sqrtf(dist1Squared);
+  const float dist2        = sqrtf(dist2Squared);
+  const float invDist1 = 1.0f / dist1;
+  const float invDist2 = 1.0f / dist2;
+  const float dot      = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
+  const float cosTheta = clamp(dot  * invDist1 * invDist2, -1.0f, 1.0f);
+  const float invSinTheta = fmin(rsqrtf(1.0f - cosTheta * cosTheta), 1.0e8f);
 
-  const double dot      = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
-  const double cosTheta = clamp(dot / (dist1 * dist2), -1.0, 1.0);
-  const double sinTheta = fmax(sqrt(1.0 - cosTheta * cosTheta), 1.0e-8);
+  constexpr float bondFactor = 180.f / M_PI;
+  const float theta = bondFactor * acos(cosTheta);
 
-  const double theta = 180 / M_PI * acos(cosTheta);
+  const float deltaTheta = theta - theta0;
+  const float deltaR1    = dist1 - restLen1;
+  const float deltaR2    = dist2 - restLen2;
 
-  const double deltaTheta = theta - theta0;
-  const double deltaR1    = dist1 - restLen1;
-  const double deltaR2    = dist2 - restLen2;
+  const float bondEnergyTerm = bondFactor * (forceConst1 * deltaR1 + forceConst2 * deltaR2);
 
-  const double bondEnergyTerm = 180.0 / M_PI * (forceConst1 * deltaR1 + forceConst2 * deltaR2);
 
-  const double invDist1 = 1.0 / dist1;
-  const double invDist2 = 1.0 / dist2;
 
-  const double scaledDx1 = dx1 * invDist1;
-  const double scaledDy1 = dy1 * invDist1;
-  const double scaledDz1 = dz1 * invDist1;
-  const double scaledDx2 = dx2 * invDist2;
-  const double scaledDy2 = dy2 * invDist2;
-  const double scaledDz2 = dz2 * invDist2;
+  const float scaledDx1 = dx1 * invDist1;
+  const float scaledDy1 = dy1 * invDist1;
+  const float scaledDz1 = dz1 * invDist1;
+  const float scaledDx2 = dx2 * invDist2;
+  const float scaledDy2 = dy2 * invDist2;
+  const float scaledDz2 = dz2 * invDist2;
 
-  const double intermediate1 = invDist1 * (scaledDx2 - cosTheta * scaledDx1);
-  const double intermediate2 = invDist1 * (scaledDy2 - cosTheta * scaledDy1);
-  const double intermediate3 = invDist1 * (scaledDz2 - cosTheta * scaledDz1);
-  const double intermediate4 = invDist2 * (scaledDx1 - cosTheta * scaledDx2);
-  const double intermediate5 = invDist2 * (scaledDy1 - cosTheta * scaledDy2);
-  const double intermediate6 = invDist2 * (scaledDz1 - cosTheta * scaledDz2);
+  const float intermediate1 = invDist1 * (scaledDx2 - cosTheta * scaledDx1);
+  const float intermediate2 = invDist1 * (scaledDy2 - cosTheta * scaledDy1);
+  const float intermediate3 = invDist1 * (scaledDz2 - cosTheta * scaledDz1);
+  const float intermediate4 = invDist2 * (scaledDx1 - cosTheta * scaledDx2);
+  const float intermediate5 = invDist2 * (scaledDy1 - cosTheta * scaledDy2);
+  const float intermediate6 = invDist2 * (scaledDz1 - cosTheta * scaledDz2);
 
-  const double gradx1 = prefactor * (deltaTheta * scaledDx1 * forceConst1 - intermediate1 * bondEnergyTerm / sinTheta);
-  const double grady1 = prefactor * (deltaTheta * scaledDy1 * forceConst1 - intermediate2 * bondEnergyTerm / sinTheta);
-  const double gradz1 = prefactor * (deltaTheta * scaledDz1 * forceConst1 - intermediate3 * bondEnergyTerm / sinTheta);
+  const float bondEnergyTimesInvSinTheta = bondEnergyTerm * invSinTheta;
 
-  const double gradx2 = prefactor * (-deltaTheta * (scaledDx1 * forceConst1 + scaledDx2 * forceConst2) +
-                                     (intermediate1 + intermediate4) * bondEnergyTerm / sinTheta);
-  const double grady2 = prefactor * (-deltaTheta * (scaledDy1 * forceConst1 + scaledDy2 * forceConst2) +
-                                     (intermediate2 + intermediate5) * bondEnergyTerm / sinTheta);
-  const double gradz2 = prefactor * (-deltaTheta * (scaledDz1 * forceConst1 + scaledDz2 * forceConst2) +
-                                     (intermediate3 + intermediate6) * bondEnergyTerm / sinTheta);
+  const float gradx1 = prefactor * (deltaTheta * scaledDx1 * forceConst1 - intermediate1 * bondEnergyTimesInvSinTheta);
+  const float grady1 = prefactor * (deltaTheta * scaledDy1 * forceConst1 - intermediate2 * bondEnergyTimesInvSinTheta);
+  const float gradz1 = prefactor * (deltaTheta * scaledDz1 * forceConst1 - intermediate3 * bondEnergyTimesInvSinTheta);
 
-  const double gradx3 = prefactor * (deltaTheta * scaledDx2 * forceConst2 - intermediate4 * bondEnergyTerm / sinTheta);
-  const double grady3 = prefactor * (deltaTheta * scaledDy2 * forceConst2 - intermediate5 * bondEnergyTerm / sinTheta);
-  const double gradz3 = prefactor * (deltaTheta * scaledDz2 * forceConst2 - intermediate6 * bondEnergyTerm / sinTheta);
+  const float gradx2 = prefactor * (-deltaTheta * (scaledDx1 * forceConst1 + scaledDx2 * forceConst2) +
+                                     (intermediate1 + intermediate4) * bondEnergyTimesInvSinTheta);
+  const float grady2 = prefactor * (-deltaTheta * (scaledDy1 * forceConst1 + scaledDy2 * forceConst2) +
+                                     (intermediate2 + intermediate5) * bondEnergyTimesInvSinTheta);
+  const float gradz2 = prefactor * (-deltaTheta * (scaledDz1 * forceConst1 + scaledDz2 * forceConst2) +
+                                     (intermediate3 + intermediate6) * bondEnergyTimesInvSinTheta);
+
+  const float gradx3 = prefactor * (deltaTheta * scaledDx2 * forceConst2 - intermediate4 * bondEnergyTimesInvSinTheta);
+  const float grady3 = prefactor * (deltaTheta * scaledDy2 * forceConst2 - intermediate5 * bondEnergyTimesInvSinTheta);
+  const float gradz3 = prefactor * (deltaTheta * scaledDz2 * forceConst2 - intermediate6 * bondEnergyTimesInvSinTheta);
 
   atomicAdd(&grad[3 * idx1 + 0], gradx1);
   atomicAdd(&grad[3 * idx1 + 1], grady1);
