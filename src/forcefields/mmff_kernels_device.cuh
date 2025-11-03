@@ -117,24 +117,24 @@ static __device__ __forceinline__ void torsionGrad(const double* pos,
                                                    const int     idx2,
                                                    const int     idx3,
                                                    const int     idx4,
-                                                   const double  V1,
-                                                   const double  V2,
-                                                   const double  V3,
+                                                   const float  V1,
+                                                   const float  V2,
+                                                   const float  V3,
                                                    double*       grad) {
   // P1 - P2
-  const double dx1 = pos[3 * idx1 + 0] - pos[3 * idx2 + 0];
-  const double dy1 = pos[3 * idx1 + 1] - pos[3 * idx2 + 1];
-  const double dz1 = pos[3 * idx1 + 2] - pos[3 * idx2 + 2];
+  const float dx1 = pos[3 * idx1 + 0] - pos[3 * idx2 + 0];
+  const float dy1 = pos[3 * idx1 + 1] - pos[3 * idx2 + 1];
+  const float dz1 = pos[3 * idx1 + 2] - pos[3 * idx2 + 2];
 
   // P3 - P2
-  const double dx2 = pos[3 * idx3 + 0] - pos[3 * idx2 + 0];
-  const double dy2 = pos[3 * idx3 + 1] - pos[3 * idx2 + 1];
-  const double dz2 = pos[3 * idx3 + 2] - pos[3 * idx2 + 2];
+  const float dx2 = pos[3 * idx3 + 0] - pos[3 * idx2 + 0];
+  const float dy2 = pos[3 * idx3 + 1] - pos[3 * idx2 + 1];
+  const float dz2 = pos[3 * idx3 + 2] - pos[3 * idx2 + 2];
 
   // P4 - P3
-  const double dx4 = pos[3 * idx4 + 0] - pos[3 * idx3 + 0];
-  const double dy4 = pos[3 * idx4 + 1] - pos[3 * idx3 + 1];
-  const double dz4 = pos[3 * idx4 + 2] - pos[3 * idx3 + 2];
+  const float dx4 = pos[3 * idx4 + 0] - pos[3 * idx3 + 0];
+  const float dy4 = pos[3 * idx4 + 1] - pos[3 * idx3 + 1];
+  const float dz4 = pos[3 * idx4 + 2] - pos[3 * idx3 + 2];
 
   double cross1x, cross1y, cross1z;
   crossProduct(dx1, dy1, dz1, dx2, dy2, dz2, cross1x, cross1y, cross1z);
@@ -153,29 +153,25 @@ static __device__ __forceinline__ void torsionGrad(const double* pos,
 
   const double cosPhi = clamp(dotProduct(cross1x, cross1y, cross1z, cross2x, cross2y, cross2z), -1.0, 1.0);
 
-  const double sinPhiSq = 1.0 - cosPhi * cosPhi;
-  const double sinPhi   = (sinPhiSq > 0.0) ? sqrt(sinPhiSq) : 0.0;
-  const double sin2Phi  = 2.0 * sinPhi * cosPhi;
-  const double sin3Phi  = 3.0 * sinPhi - 4.0 * sinPhi * sinPhiSq;
-  const double dE_dPhi  = 0.5 * (-V1 * sinPhi + 2.0 * V2 * sin2Phi - 3.0 * V3 * sin3Phi);
-  const double sinTerm  = -dE_dPhi * (isDoubleZero(sinPhi) ? (1.0 / cosPhi) : (1.0 / sinPhi));
+  const float sinPhiSq = 1.0f - cosPhi * cosPhi;
+  const float sinPhi   = (sinPhiSq > 0.0f) ? sqrtf(sinPhiSq) : 0.0f;
+  const float sin2Phi  = 2.0f * sinPhi * cosPhi;
+  const float sin3Phi  = 3.0f * sinPhi - 4.0f * sinPhi * sinPhiSq;
+  const float dE_dPhi  = 0.5f * (-V1 * sinPhi + 2.0f * V2 * sin2Phi - 3.0f * V3 * sin3Phi);
+  const float sinTerm  = -dE_dPhi * (isDoubleZero(sinPhi) ? (1.0f / cosPhi) : (1.0f / sinPhi));
 
-  // Compute and use dCos_dT values inline instead of storing in array
-  // This saves 6 registers
-
-  // idx1 gradients
-  double dCos_dT0 = invNorm1 * (cross2x - cosPhi * cross1x);
-  double dCos_dT1 = invNorm1 * (cross2y - cosPhi * cross1y);
-  double dCos_dT2 = invNorm1 * (cross2z - cosPhi * cross1z);
+  float dCos_dT0 = invNorm1 * (cross2x - cosPhi * cross1x);
+  float dCos_dT1 = invNorm1 * (cross2y - cosPhi * cross1y);
+  float dCos_dT2 = invNorm1 * (cross2z - cosPhi * cross1z);
 
   atomicAdd(&grad[3 * idx1 + 0], sinTerm * (dCos_dT2 * dy2 - dCos_dT1 * dz2));
   atomicAdd(&grad[3 * idx1 + 1], sinTerm * (dCos_dT0 * dz2 - dCos_dT2 * dx2));
   atomicAdd(&grad[3 * idx1 + 2], sinTerm * (dCos_dT1 * dx2 - dCos_dT0 * dy2));
 
   // idx3 and idx4 gradients - reuse variables dCos_dT0-2 for dCos_dT3-5
-  const double dCos_dT3 = invNorm2 * (cross1x - cosPhi * cross2x);
-  const double dCos_dT4 = invNorm2 * (cross1y - cosPhi * cross2y);
-  const double dCos_dT5 = invNorm2 * (cross1z - cosPhi * cross2z);
+  const float dCos_dT3 = invNorm2 * (cross1x - cosPhi * cross2x);
+  const float dCos_dT4 = invNorm2 * (cross1y - cosPhi * cross2y);
+  const float dCos_dT5 = invNorm2 * (cross1z - cosPhi * cross2z);
 
   atomicAdd(&grad[3 * idx2 + 0],
             sinTerm * (dCos_dT1 * (dz2 - dz1) + dCos_dT2 * (dy1 - dy2) + dCos_dT4 * (-dz4) + dCos_dT5 * (dy4)));

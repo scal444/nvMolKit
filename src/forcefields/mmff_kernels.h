@@ -124,9 +124,9 @@ cudaError_t launchTorsionEnergyKernel(int           numTorsions,
                                       const int*    idx2,
                                       const int*    idx3,
                                       const int*    idx4,
-                                      const double* V1,
-                                      const double* V2,
-                                      const double* V3,
+                                      const float* V1,
+                                      const float* V2,
+                                      const float* V3,
                                       const double* pos,
                                       double*       energyBuffer,
                                       const int*    energyBufferStarts,
@@ -139,9 +139,9 @@ cudaError_t launchTorsionGradientKernel(int           numTorsions,
                                         const int*    idx2,
                                         const int*    idx3,
                                         const int*    idx4,
-                                        const double* V1,
-                                        const double* V2,
-                                        const double* V3,
+                                        const float* V1,
+                                        const float* V2,
+                                        const float* V3,
                                         const double* pos,
                                         double*       grad,
                                         cudaStream_t  stream = 0);
@@ -248,9 +248,9 @@ struct TorsionContribTermsDevicePtr {
   int*    idx2 = nullptr;
   int*    idx3 = nullptr;
   int*    idx4 = nullptr;
-  double* V1   = nullptr;
-  double* V2   = nullptr;
-  double* V3   = nullptr;
+  float* V1   = nullptr;
+  float* V2   = nullptr;
+  float* V3   = nullptr;
 };
 
 struct VdwTermsDevicePtr {

@@ -104,6 +104,31 @@ __device__ __forceinline__ void crossProduct(const TIn& x1,
   z = x1 * y2 - y1 * x2;
 }
 
+template <typename TIn, typename TOut>
+__device__ __forceinline__ TOut crossProductNormSq(const TIn& x1,
+                                             const TIn& y1,
+                                             const TIn& z1,
+                                             const TIn& x2,
+                                             const TIn& y2,
+                                             const TIn& z2,
+                                             TOut& x,
+                                             TOut& y,
+                                             TOut& z)  {
+  TOut norm = 0.0;
+  // X
+  x = y1 * z2 - z1 * y2;
+  norm += x * x;
+  // Y
+  y = z1 * x2 - x1 * z2;
+  norm += y * y;
+  // Z
+  z = x1 * y2 - y1 * x2;
+  norm += z * z;
+  return norm;
+
+}
+
+
 template <typename T>
 __device__ __forceinline__ T dotProduct(const T& x1, const T& y1, const T& z1, const T& x2, const T& y2, const T& z2) {
   return x1 * x2 + y1 * y2 + z1 * z2;
