@@ -121,84 +121,80 @@ static __device__ __forceinline__ void torsionGrad(const double* pos,
                                                    const double  V2,
                                                    const double  V3,
                                                    double*       grad) {
-  double dx1, dy1, dz1, dx2, dy2, dz2, dx3, dy3, dz3, dx4, dy4, dz4;
-
   // P1 - P2
-  dx1 = pos[3 * idx1 + 0] - pos[3 * idx2 + 0];
-  dy1 = pos[3 * idx1 + 1] - pos[3 * idx2 + 1];
-  dz1 = pos[3 * idx1 + 2] - pos[3 * idx2 + 2];
+  const double dx1 = pos[3 * idx1 + 0] - pos[3 * idx2 + 0];
+  const double dy1 = pos[3 * idx1 + 1] - pos[3 * idx2 + 1];
+  const double dz1 = pos[3 * idx1 + 2] - pos[3 * idx2 + 2];
 
   // P3 - P2
-  dx2 = pos[3 * idx3 + 0] - pos[3 * idx2 + 0];
-  dy2 = pos[3 * idx3 + 1] - pos[3 * idx2 + 1];
-  dz2 = pos[3 * idx3 + 2] - pos[3 * idx2 + 2];
-
-  // P2 - P3
-  dx3 = -dx2;
-  dy3 = -dy2;
-  dz3 = -dz2;
+  const double dx2 = pos[3 * idx3 + 0] - pos[3 * idx2 + 0];
+  const double dy2 = pos[3 * idx3 + 1] - pos[3 * idx2 + 1];
+  const double dz2 = pos[3 * idx3 + 2] - pos[3 * idx2 + 2];
 
   // P4 - P3
-  dx4 = pos[3 * idx4 + 0] - pos[3 * idx3 + 0];
-  dy4 = pos[3 * idx4 + 1] - pos[3 * idx3 + 1];
-  dz4 = pos[3 * idx4 + 2] - pos[3 * idx3 + 2];
+  const double dx4 = pos[3 * idx4 + 0] - pos[3 * idx3 + 0];
+  const double dy4 = pos[3 * idx4 + 1] - pos[3 * idx3 + 1];
+  const double dz4 = pos[3 * idx4 + 2] - pos[3 * idx3 + 2];
 
-  double cross1x, cross1y, cross1z, cross2x, cross2y, cross2z;
+  double cross1x, cross1y, cross1z;
   crossProduct(dx1, dy1, dz1, dx2, dy2, dz2, cross1x, cross1y, cross1z);
-  const double norm1 = fmax(sqrt(cross1x * cross1x + cross1y * cross1y + cross1z * cross1z), 1.0e-5);
-  cross1x /= norm1;
-  cross1y /= norm1;
-  cross1z /= norm1;
+  const double invNorm1 = fmin(rsqrt(cross1x * cross1x + cross1y * cross1y + cross1z * cross1z), 1.0e5);
+  cross1x *= invNorm1;
+  cross1y *= invNorm1;
+  cross1z *= invNorm1;
 
-  crossProduct(dx3, dy3, dz3, dx4, dy4, dz4, cross2x, cross2y, cross2z);
-  const double norm2 = fmax(sqrt(cross2x * cross2x + cross2y * cross2y + cross2z * cross2z), 1.0e-5);
-  cross2x /= norm2;
-  cross2y /= norm2;
-  cross2z /= norm2;
+  double cross2x, cross2y, cross2z;
+  // Use -dx2, -dy2, -dz2 directly instead of storing dx3, dy3, dz3
+  crossProduct(-dx2, -dy2, -dz2, dx4, dy4, dz4, cross2x, cross2y, cross2z);
+  const double invNorm2 = fmin(rsqrt(cross2x * cross2x + cross2y * cross2y + cross2z * cross2z), 1.0e5);
+  cross2x *= invNorm2;
+  cross2y *= invNorm2;
+  cross2z *= invNorm2;
 
-  const double dot    = dotProduct(cross1x, cross1y, cross1z, cross2x, cross2y, cross2z);
-  const double cosPhi = clamp(dot, -1.0, 1.0);
-
-  double cross3x, cross3y, cross3z;
-  crossProduct(cross1x, cross1y, cross1z, dx2, dy2, dz2, cross3x, cross3y, cross3z);
+  const double cosPhi = clamp(dotProduct(cross1x, cross1y, cross1z, cross2x, cross2y, cross2z), -1.0, 1.0);
 
   const double sinPhiSq = 1.0 - cosPhi * cosPhi;
-  const double sinPhi   = ((sinPhiSq > 0.0) ? sqrt(sinPhiSq) : 0.0);
+  const double sinPhi   = (sinPhiSq > 0.0) ? sqrt(sinPhiSq) : 0.0;
   const double sin2Phi  = 2.0 * sinPhi * cosPhi;
   const double sin3Phi  = 3.0 * sinPhi - 4.0 * sinPhi * sinPhiSq;
   const double dE_dPhi  = 0.5 * (-V1 * sinPhi + 2.0 * V2 * sin2Phi - 3.0 * V3 * sin3Phi);
   const double sinTerm  = -dE_dPhi * (isDoubleZero(sinPhi) ? (1.0 / cosPhi) : (1.0 / sinPhi));
 
-  double dCos_dT[6] = {1.0 / norm1 * (cross2x - cosPhi * cross1x),
-                       1.0 / norm1 * (cross2y - cosPhi * cross1y),
-                       1.0 / norm1 * (cross2z - cosPhi * cross1z),
-                       1.0 / norm2 * (cross1x - cosPhi * cross2x),
-                       1.0 / norm2 * (cross1y - cosPhi * cross2y),
-                       1.0 / norm2 * (cross1z - cosPhi * cross2z)};
+  // Compute and use dCos_dT values inline instead of storing in array
+  // This saves 6 registers
 
-  atomicAdd(&grad[3 * idx1 + 0], sinTerm * (dCos_dT[2] * dy2 - dCos_dT[1] * dz2));
-  atomicAdd(&grad[3 * idx1 + 1], sinTerm * (dCos_dT[0] * dz2 - dCos_dT[2] * dx2));
-  atomicAdd(&grad[3 * idx1 + 2], sinTerm * (dCos_dT[1] * dx2 - dCos_dT[0] * dy2));
+  // idx1 gradients
+  double dCos_dT0 = invNorm1 * (cross2x - cosPhi * cross1x);
+  double dCos_dT1 = invNorm1 * (cross2y - cosPhi * cross1y);
+  double dCos_dT2 = invNorm1 * (cross2z - cosPhi * cross1z);
+
+  atomicAdd(&grad[3 * idx1 + 0], sinTerm * (dCos_dT2 * dy2 - dCos_dT1 * dz2));
+  atomicAdd(&grad[3 * idx1 + 1], sinTerm * (dCos_dT0 * dz2 - dCos_dT2 * dx2));
+  atomicAdd(&grad[3 * idx1 + 2], sinTerm * (dCos_dT1 * dx2 - dCos_dT0 * dy2));
+
+  // idx3 and idx4 gradients - reuse variables dCos_dT0-2 for dCos_dT3-5
+  const double dCos_dT3 = invNorm2 * (cross1x - cosPhi * cross2x);
+  const double dCos_dT4 = invNorm2 * (cross1y - cosPhi * cross2y);
+  const double dCos_dT5 = invNorm2 * (cross1z - cosPhi * cross2z);
 
   atomicAdd(&grad[3 * idx2 + 0],
-            sinTerm * (dCos_dT[1] * (dz2 - dz1) + dCos_dT[2] * (dy1 - dy2) + dCos_dT[4] * (-dz4) + dCos_dT[5] * (dy4)));
+            sinTerm * (dCos_dT1 * (dz2 - dz1) + dCos_dT2 * (dy1 - dy2) + dCos_dT4 * (-dz4) + dCos_dT5 * (dy4)));
   atomicAdd(&grad[3 * idx2 + 1],
-            sinTerm * (dCos_dT[0] * (dz1 - dz2) + dCos_dT[2] * (dx2 - dx1) + dCos_dT[3] * (dz4) + dCos_dT[5] * (-dx4)));
+            sinTerm * (dCos_dT0 * (dz1 - dz2) + dCos_dT2 * (dx2 - dx1) + dCos_dT3 * (dz4) + dCos_dT5 * (-dx4)));
   atomicAdd(&grad[3 * idx2 + 2],
-            sinTerm * (dCos_dT[0] * (dy2 - dy1) + dCos_dT[1] * (dx1 - dx2) + dCos_dT[3] * (-dy4) + dCos_dT[4] * (dx4)));
+            sinTerm * (dCos_dT0 * (dy2 - dy1) + dCos_dT1 * (dx1 - dx2) + dCos_dT3 * (-dy4) + dCos_dT4 * (dx4)));
 
   atomicAdd(&grad[3 * idx3 + 0],
-            sinTerm * (dCos_dT[1] * (dz1) + dCos_dT[2] * (-dy1) + dCos_dT[4] * (dz4 - dz3) + dCos_dT[5] * (dy3 - dy4)));
+            sinTerm * (dCos_dT1 * (dz1) + dCos_dT2 * (-dy1) + dCos_dT4 * (dz4 + dz2) + dCos_dT5 * (-dy4 - dy2)));
   atomicAdd(&grad[3 * idx3 + 1],
-            sinTerm * (dCos_dT[0] * (-dz1) + dCos_dT[2] * (dx1) + dCos_dT[3] * (dz3 - dz4) + dCos_dT[5] * (dx4 - dx3)));
+            sinTerm * (dCos_dT0 * (-dz1) + dCos_dT2 * (dx1) + dCos_dT3 * (-dz4 - dz2) + dCos_dT5 * (dx4 + dx2)));
   atomicAdd(&grad[3 * idx3 + 2],
-            sinTerm * (dCos_dT[0] * (dy1) + dCos_dT[1] * (-dx1) + dCos_dT[3] * (dy4 - dy3) + dCos_dT[4] * (dx3 - dx4)));
+            sinTerm * (dCos_dT0 * (dy1) + dCos_dT1 * (-dx1) + dCos_dT3 * (dy4 + dy2) + dCos_dT4 * (-dx4 - dx2)));
 
-  atomicAdd(&grad[3 * idx4 + 0], sinTerm * (dCos_dT[4] * dz3 - dCos_dT[5] * dy3));
-  atomicAdd(&grad[3 * idx4 + 1], sinTerm * (dCos_dT[5] * dx3 - dCos_dT[3] * dz3));
-  atomicAdd(&grad[3 * idx4 + 2], sinTerm * (dCos_dT[3] * dy3 - dCos_dT[4] * dx3));
+  atomicAdd(&grad[3 * idx4 + 0], sinTerm * (dCos_dT4 * (-dz2) - dCos_dT5 * (-dy2)));
+  atomicAdd(&grad[3 * idx4 + 1], sinTerm * (dCos_dT5 * (-dx2) - dCos_dT3 * (-dz2)));
+  atomicAdd(&grad[3 * idx4 + 2], sinTerm * (dCos_dT3 * (-dy2) - dCos_dT4 * (-dx2)));
 }
-
 static __device__ __forceinline__ void vDWGrad(const double* pos,
                                                const int     idx1,
                                                const int     idx2,

@@ -38,6 +38,8 @@
 #include "test_utils.h"
 using namespace nvMolKit::MMFF;
 
+constexpr double GRAD_TOL = 1e-4;
+
 enum class FFTerm {
   BondStretch,
   AngleBend,
@@ -389,7 +391,7 @@ TEST_F(MMffGpuTestFixture, BondStretchEnergySingleMolecule) {
 TEST_F(MMffGpuTestFixture, BondStretchGradientSingleMolecule) {
   std::vector<double> wantGradients = getReferenceGradientTerm(mol_.get(), FFTerm::BondStretch);
   std::vector<double> gotGrad       = getGradientTerm(systemDevice, FFTerm::BondStretch);
-  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(1e-4), wantGradients));
+  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(GRAD_TOL), wantGradients));
 }
 
 TEST_F(MMffGpuTestFixture, AngleBendEnergySingleMolecule) {
@@ -402,7 +404,7 @@ TEST_F(MMffGpuTestFixture, AngleBendEnergySingleMolecule) {
 TEST_F(MMffGpuTestFixture, AngleBendGradientSingleMolecule) {
   std::vector<double> wantGradients = getReferenceGradientTerm(mol_.get(), FFTerm::AngleBend);
   std::vector<double> gotGrad       = getGradientTerm(systemDevice, FFTerm::AngleBend);
-  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(1e-4), wantGradients));
+  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(GRAD_TOL), wantGradients));
 }
 
 TEST_F(MMffGpuTestFixture, BendStretchEnergySingleMolecule) {
@@ -416,7 +418,7 @@ TEST_F(MMffGpuTestFixture, BendStretchEnergySingleMolecule) {
 TEST_F(MMffGpuTestFixture, StretchBendGradientSingleMolecule) {
   std::vector<double> wantGradients = getReferenceGradientTerm(mol_.get(), FFTerm::StretchBend);
   std::vector<double> gotGrad       = getGradientTerm(systemDevice, FFTerm::StretchBend);
-  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(1e-4), wantGradients));
+  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(GRAD_TOL), wantGradients));
 }
 
 TEST_F(MMffGpuTestFixture, OutofPlaneEnergySingleMolecule) {
@@ -429,7 +431,7 @@ TEST_F(MMffGpuTestFixture, OutofPlaneEnergySingleMolecule) {
 TEST_F(MMffGpuTestFixture, OutOfPlaneGradientSingleMolecule) {
   std::vector<double> wantGradients = getReferenceGradientTerm(mol_.get(), FFTerm::OopBend);
   std::vector<double> gotGrad       = getGradientTerm(systemDevice, FFTerm::OopBend);
-  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(1e-4), wantGradients));
+  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(GRAD_TOL), wantGradients));
 }
 
 TEST_F(MMffGpuTestFixture, TorsionEnergySingleMolecule) {
@@ -442,7 +444,7 @@ TEST_F(MMffGpuTestFixture, TorsionEnergySingleMolecule) {
 TEST_F(MMffGpuTestFixture, TorsionGradientSingleMolecule) {
   std::vector<double> wantGradients = getReferenceGradientTerm(mol_.get(), FFTerm::Torsion);
   std::vector<double> gotGrad       = getGradientTerm(systemDevice, FFTerm::Torsion);
-  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(1e-4), wantGradients));
+  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(GRAD_TOL), wantGradients));
 }
 
 TEST_F(MMffGpuTestFixture, VdwEnergySingleMolecule) {
@@ -456,7 +458,7 @@ TEST_F(MMffGpuTestFixture, VdwEnergySingleMolecule) {
 TEST_F(MMffGpuTestFixture, VdwGradientSingleMolecule) {
   std::vector<double> wantGradients = getReferenceGradientTerm(mol_.get(), FFTerm::VdW);
   std::vector<double> gotGrad       = getGradientTerm(systemDevice, FFTerm::VdW);
-  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(1e-4), wantGradients));
+  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(GRAD_TOL), wantGradients));
 }
 
 TEST_F(MMffGpuTestFixture, EleEnergySingleMolecule) {
@@ -469,7 +471,7 @@ TEST_F(MMffGpuTestFixture, EleEnergySingleMolecule) {
 TEST_F(MMffGpuTestFixture, EleGradientSingleMolecule) {
   std::vector<double> wantGradients = getReferenceGradientTerm(mol_.get(), FFTerm::Elec);
   std::vector<double> gotGrad       = getGradientTerm(systemDevice, FFTerm::Elec);
-  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(1e-4), wantGradients));
+  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(GRAD_TOL), wantGradients));
 }
 
 TEST_F(MMffGpuTestFixture, CombinedEnergies) {
@@ -495,7 +497,7 @@ TEST_F(MMffGpuTestFixture, CombinedGradients) {
   systemDevice.grad.copyToHost(gotGrad);
   cudaDeviceSynchronize();
   // Test up to default force tolerance.
-  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(1e-4), wantGradients));
+  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(GRAD_TOL), wantGradients));
 }
 
 TEST_F(MMffGpuTestFixture, CombinedEnergiesPerMolKernels) {
@@ -521,7 +523,7 @@ TEST_F(MMffGpuTestFixture, CombinedGradientsPerMolKernels) {
   systemDevice.grad.copyToHost(gotGrad);
   cudaDeviceSynchronize();
   // Test up to default force tolerance.
-  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(1e-4), wantGradients));
+  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(GRAD_TOL), wantGradients));
 }
 
 class MMffGpuEdgeCasesBase : public ::testing::Test {
@@ -635,7 +637,7 @@ TEST_F(MMffGpuEdgeCases2Atoms, ZeroBondLength) {
   std::vector<double> wantGradients(3 * mol_->getNumAtoms(), 0.0);
   referenceForceField_->calcGrad(positions.data(), wantGradients.data());
   std::vector<double> gotGrad = getGradientTerm(systemDevice, FFTerm::BondStretch);
-  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(1e-4), wantGradients));
+  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(GRAD_TOL), wantGradients));
 }
 
 TEST_F(MMffGpuEdgeCases2Atoms, ZeroEnergyBond) {
@@ -648,7 +650,7 @@ TEST_F(MMffGpuEdgeCases2Atoms, ZeroEnergyBond) {
 
   std::vector<double> wantGradients(3 * mol_->getNumAtoms(), 0.0);
   std::vector<double> gotGrad = getGradientTerm(systemDevice, FFTerm::BondStretch);
-  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(1e-4), wantGradients));
+  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(GRAD_TOL), wantGradients));
 }
 
 TEST_F(MMffGpuEdgeCases3Atoms, ZeroThetaAngle) {
@@ -662,7 +664,7 @@ TEST_F(MMffGpuEdgeCases3Atoms, ZeroThetaAngle) {
   std::vector<double> wantGradients(3 * mol_->getNumAtoms(), 0.0);
   referenceForceField_->calcGrad(positions.data(), wantGradients.data());
   std::vector<double> gotGrad = getGradientTerm(systemDevice, FFTerm::AngleBend);
-  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(1e-4), wantGradients));
+  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(GRAD_TOL), wantGradients));
 }
 
 TEST_F(MMffGpuEdgeCases3Atoms, OneEightyThetaAngle) {
@@ -676,7 +678,7 @@ TEST_F(MMffGpuEdgeCases3Atoms, OneEightyThetaAngle) {
   std::vector<double> wantGradients(3 * mol_->getNumAtoms(), 0.0);
   referenceForceField_->calcGrad(positions.data(), wantGradients.data());
   std::vector<double> gotGrad = getGradientTerm(systemDevice, FFTerm::AngleBend);
-  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(1e-4), wantGradients));
+  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(GRAD_TOL), wantGradients));
 }
 
 TEST_F(MMffGpuEdgeCases3Atoms, ZeroThetaAngleStretchBend) {
@@ -690,7 +692,7 @@ TEST_F(MMffGpuEdgeCases3Atoms, ZeroThetaAngleStretchBend) {
   std::vector<double> wantGradients(3 * mol_->getNumAtoms(), 0.0);
   referenceForceField_->calcGrad(positions.data(), wantGradients.data());
   std::vector<double> gotGrad = getGradientTerm(systemDevice, FFTerm::StretchBend);
-  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(1e-3), wantGradients));
+  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(GRAD_TOL), wantGradients));
 }
 
 TEST_F(MMffGpuEdgeCases3Atoms, OneEightyThetaAngleStretchBend) {
@@ -704,7 +706,7 @@ TEST_F(MMffGpuEdgeCases3Atoms, OneEightyThetaAngleStretchBend) {
   std::vector<double> wantGradients(3 * mol_->getNumAtoms(), 0.0);
   referenceForceField_->calcGrad(positions.data(), wantGradients.data());
   std::vector<double> gotGrad = getGradientTerm(systemDevice, FFTerm::StretchBend);
-  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(1e-3), wantGradients));
+  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::FloatNear(GRAD_TOL), wantGradients));
 }
 
 class MMFFValidationSuiteFixture : public ::testing::Test {
@@ -883,7 +885,7 @@ void MMFFValidationSuiteFixture::runTestInBatch(const std::string& fileName) {
 
     bool foundFailure = false;
     for (size_t j = 0; j < wantGrad.size(); j++) {
-      if (std::abs(wantGrad[j] - gotGrad[j]) > 1e-4) {
+      if (std::abs(wantGrad[j] - gotGrad[j]) > GRAD_TOL) {
         auto& failure = gradFailures.emplace_back();
         failure.name  = mols[i]->getProp<std::string>("_Name");
         failure.delta = std::abs(wantGrad[j] - gotGrad[j]);
@@ -957,7 +959,7 @@ void MMFFValidationSuiteFixture::runTestInSerial(const std::string& fileName) {
 
     bool foundFailure = false;
     for (size_t i = 0; i < wantGrad.size(); i++) {
-      if (std::abs(wantGrad[i] - gotGrad[i]) > 1e-4) {
+      if (std::abs(wantGrad[i] - gotGrad[i]) > GRAD_TOL) {
         auto& failure = gradFailures.emplace_back();
         failure.name  = mol->getProp<std::string>("_Name");
         failure.delta = std::abs(wantGrad[i] - gotGrad[i]);
@@ -1293,7 +1295,7 @@ TEST_F(MMffGpuWrapperTestFixture, MMffConstructorGrad) {
   ffReference->calcGrad(gradRef.data());
   ffTest->calcGrad(gradTest.data());
 
-  EXPECT_THAT(gradTest, ::testing::Pointwise(::testing::FloatNear(1e-4), gradRef));
+  EXPECT_THAT(gradTest, ::testing::Pointwise(::testing::FloatNear(GRAD_TOL), gradRef));
 }
 
 class MMffGpuWrapperNonDefaultTestFixture : public ::testing::Test {
@@ -1385,7 +1387,7 @@ TEST_F(MMffGpuWrapperNonDefaultTestFixture, MMffConstructorGrad) {
   ffReference->calcGrad(gradRef.data());
   ffTest->calcGrad(gradTest.data());
 
-  EXPECT_THAT(gradTest, ::testing::Pointwise(::testing::FloatNear(1e-4), gradRef));
+  EXPECT_THAT(gradTest, ::testing::Pointwise(::testing::FloatNear(GRAD_TOL), gradRef));
 }
 
 TEST(MMFFMultiGPU, SpecificGpuIds) {
