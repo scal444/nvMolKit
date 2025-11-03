@@ -142,6 +142,10 @@ __device__ __forceinline__ bool isDoubleZero(const double val) {
   return ((val < 1.0e-10) && (val > -1.0e-10));
 }
 
+__device__ __forceinline__ bool isFloatZero(const float val) {
+  return ((val < 1.0e-10f) && (val > -1.0e-10f));
+}
+
 __device__ __forceinline__ int getEnergyAccumulatorIndex(const int  absoluteIdx,
                                                          const int  batchIdx,
                                                          const int* energyBufferStarts,

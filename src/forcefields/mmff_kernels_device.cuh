@@ -154,11 +154,12 @@ static __device__ __forceinline__ void torsionGrad(const double* pos,
   const double cosPhi = clamp(dotProduct(cross1x, cross1y, cross1z, cross2x, cross2y, cross2z), -1.0, 1.0);
 
   const float sinPhiSq = 1.0f - cosPhi * cosPhi;
-  const float sinPhi   = (sinPhiSq > 0.0f) ? sqrtf(sinPhiSq) : 0.0f;
-  const float sin2Phi  = 2.0f * sinPhi * cosPhi;
-  const float sin3Phi  = 3.0f * sinPhi - 4.0f * sinPhi * sinPhiSq;
-  const float dE_dPhi  = 0.5f * (-V1 * sinPhi + 2.0f * V2 * sin2Phi - 3.0f * V3 * sin3Phi);
-  const float sinTerm  = -dE_dPhi * (isDoubleZero(sinPhi) ? (1.0f / cosPhi) : (1.0f / sinPhi));
+  float sinTerm = 0.0;
+  if (sinPhiSq > 0.0) {
+    const float sin2Phi  = 2.0f  * cosPhi;
+    const float sin3Phi  = 3.0f  - 4.0f  * sinPhiSq;
+    sinTerm  = 0.5f * (V1 - 2.0f * V2 * sin2Phi + 3.0f * V3 * sin3Phi);
+  }
 
   float dCos_dT0 = invNorm1 * (cross2x - cosPhi * cross1x);
   float dCos_dT1 = invNorm1 * (cross2y - cosPhi * cross1y);
