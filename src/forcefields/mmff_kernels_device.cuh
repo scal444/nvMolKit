@@ -16,8 +16,8 @@
 #ifndef NVMOLKIT_MMFF_KERNELS_DEVICE_CUH
 #define NVMOLKIT_MMFF_KERNELS_DEVICE_CUH
 
-#include "mmff_kernels.h"
 #include "kernel_utils.cuh"
+#include "mmff_kernels.h"
 
 // Constants used by MMFF energy/gradient functions
 namespace {
@@ -31,29 +31,29 @@ using namespace nvMolKit::FFKernelUtils;
 namespace rdkit_ports {
 
 static __device__ __forceinline__ void oopGrad(const double* pos,
-                                        const int     idx1,
-                                        const int     idx2,
-                                        const int     idx3,
-                                        const int     idx4,
-                                        const double  koop,
-                                        double*       grad) {
+                                               const int     idx1,
+                                               const int     idx2,
+                                               const int     idx3,
+                                               const int     idx4,
+                                               const double  koop,
+                                               double*       grad) {
   constexpr double prefactor = 143.9325 * degreeToRadian;
 
-  double dJIx = pos[3 * idx1 + 0] - pos[3 * idx2 + 0];
-  double dJIy = pos[3 * idx1 + 1] - pos[3 * idx2 + 1];
-  double dJIz = pos[3 * idx1 + 2] - pos[3 * idx2 + 2];
+  float dJIx = pos[3 * idx1 + 0] - pos[3 * idx2 + 0];
+  float dJIy = pos[3 * idx1 + 1] - pos[3 * idx2 + 1];
+  float dJIz = pos[3 * idx1 + 2] - pos[3 * idx2 + 2];
 
-  double dJKx = pos[3 * idx3 + 0] - pos[3 * idx2 + 0];
-  double dJKy = pos[3 * idx3 + 1] - pos[3 * idx2 + 1];
-  double dJKz = pos[3 * idx3 + 2] - pos[3 * idx2 + 2];
+  float dJKx = pos[3 * idx3 + 0] - pos[3 * idx2 + 0];
+  float dJKy = pos[3 * idx3 + 1] - pos[3 * idx2 + 1];
+  float dJKz = pos[3 * idx3 + 2] - pos[3 * idx2 + 2];
 
-  double dJLx = pos[3 * idx4 + 0] - pos[3 * idx2 + 0];
-  double dJLy = pos[3 * idx4 + 1] - pos[3 * idx2 + 1];
-  double dJLz = pos[3 * idx4 + 2] - pos[3 * idx2 + 2];
+  float dJLx = pos[3 * idx4 + 0] - pos[3 * idx2 + 0];
+  float dJLy = pos[3 * idx4 + 1] - pos[3 * idx2 + 1];
+  float dJLz = pos[3 * idx4 + 2] - pos[3 * idx2 + 2];
 
-  const double invdJI = rsqrtf(dJIx * dJIx + dJIy * dJIy + dJIz * dJIz);
-  const double invdJK = rsqrtf(dJKx * dJKx + dJKy * dJKy + dJKz * dJKz);
-  const double invdJL = rsqrtf(dJLx * dJLx + dJLy * dJLy + dJLz * dJLz);
+  const float invdJI = rsqrtf(dJIx * dJIx + dJIy * dJIy + dJIz * dJIz);
+  const float invdJK = rsqrtf(dJKx * dJKx + dJKy * dJKy + dJKz * dJKz);
+  const float invdJL = rsqrtf(dJLx * dJLx + dJLy * dJLy + dJLz * dJLz);
 
   dJIx *= invdJI;
   dJIy *= invdJI;
@@ -65,38 +65,38 @@ static __device__ __forceinline__ void oopGrad(const double* pos,
   dJLy *= invdJL;
   dJLz *= invdJL;
 
-  double normalJIKx, normalJIKy, normalJIKz;
+  float normalJIKx, normalJIKy, normalJIKz;
   crossProduct(-dJIx, -dJIy, -dJIz, dJKx, dJKy, dJKz, normalJIKx, normalJIKy, normalJIKz);
-  const double invNormLength = rsqrtf(normalJIKx * normalJIKx + normalJIKy * normalJIKy + normalJIKz * normalJIKz);
+  const float invNormLength = rsqrtf(normalJIKx * normalJIKx + normalJIKy * normalJIKy + normalJIKz * normalJIKz);
   normalJIKx *= invNormLength;
   normalJIKy *= invNormLength;
   normalJIKz *= invNormLength;
 
-  const double sinChi   = clamp(dotProduct(dJLx, dJLy, dJLz, normalJIKx, normalJIKy, normalJIKz), -1.0, 1.0);
-  const double cosChiSq = 1.0 - sinChi * sinChi;
-  const double invCosChi = cosChiSq > 0 ? rsqrtf(cosChiSq) : 1.0e8;
-  const double chi      = radianToDegree * asin(sinChi);
-  const double cosTheta = clamp(dotProduct(dJIx, dJIy, dJIz, dJKx, dJKy, dJKz), -1.0, 1.0);
+  const float sinChi    = clamp(dotProduct(dJLx, dJLy, dJLz, normalJIKx, normalJIKy, normalJIKz), -1.0f, 1.0f);
+  const float cosChiSq  = 1.0 - sinChi * sinChi;
+  const float invCosChi = cosChiSq > 0 ? rsqrtf(cosChiSq) : 1.0e8;
+  const float chi       = radianToDegree * asin(sinChi);
+  const float cosTheta  = clamp(dotProduct(dJIx, dJIy, dJIz, dJKx, dJKy, dJKz), -1.0f, 1.0f);
 
-  double invSinTheta = rsqrtf(fmax(1.0 - cosTheta * cosTheta, 1.0e-8));
+  float invSinTheta = rsqrtf(fmax(1.0 - cosTheta * cosTheta, 1.0e-8));
 
-  double dE_dChi = prefactor * koop * chi;
-  double t1x, t1y, t1z, t2x, t2y, t2z, t3x, t3y, t3z;
+  float dE_dChi = prefactor * koop * chi;
+  float t1x, t1y, t1z, t2x, t2y, t2z, t3x, t3y, t3z;
   crossProduct(dJLx, dJLy, dJLz, dJKx, dJKy, dJKz, t1x, t1y, t1z);
   crossProduct(dJIx, dJIy, dJIz, dJLx, dJLy, dJLz, t2x, t2y, t2z);
   crossProduct(dJKx, dJKy, dJKz, dJIx, dJIy, dJIz, t3x, t3y, t3z);
 
-  double term1  = invCosChi * invSinTheta;
-  double term2  = sinChi * invCosChi *  (invSinTheta * invSinTheta);
-  double tg1[3] = {(t1x * term1 - (dJIx - dJKx * cosTheta) * term2) * invdJI,
-                   (t1y * term1 - (dJIy - dJKy * cosTheta) * term2) * invdJI,
-                   (t1z * term1 - (dJIz - dJKz * cosTheta) * term2) * invdJI};
-  double tg3[3] = {(t2x * term1 - (dJKx - dJIx * cosTheta) * term2) * invdJK,
-                   (t2y * term1 - (dJKy - dJIy * cosTheta) * term2) * invdJK,
-                   (t2z * term1 - (dJKz - dJIz * cosTheta) * term2) * invdJK};
-  double tg4[3] = {(t3x * term1 - dJLx * sinChi * invCosChi) * invdJL,
-                   (t3y * term1 - dJLy * sinChi * invCosChi) * invdJL,
-                   (t3z * term1 - dJLz * sinChi * invCosChi) * invdJL};
+  float term1  = invCosChi * invSinTheta;
+  float term2  = sinChi * invCosChi * (invSinTheta * invSinTheta);
+  float tg1[3] = {(t1x * term1 - (dJIx - dJKx * cosTheta) * term2) * invdJI,
+                  (t1y * term1 - (dJIy - dJKy * cosTheta) * term2) * invdJI,
+                  (t1z * term1 - (dJIz - dJKz * cosTheta) * term2) * invdJI};
+  float tg3[3] = {(t2x * term1 - (dJKx - dJIx * cosTheta) * term2) * invdJK,
+                  (t2y * term1 - (dJKy - dJIy * cosTheta) * term2) * invdJK,
+                  (t2z * term1 - (dJKz - dJIz * cosTheta) * term2) * invdJK};
+  float tg4[3] = {(t3x * term1 - dJLx * sinChi * invCosChi) * invdJL,
+                  (t3y * term1 - dJLy * sinChi * invCosChi) * invdJL,
+                  (t3z * term1 - dJLz * sinChi * invCosChi) * invdJL};
 
   atomicAdd(&grad[3 * idx1 + 0], dE_dChi * tg1[0]);
   atomicAdd(&grad[3 * idx1 + 1], dE_dChi * tg1[1]);
@@ -113,14 +113,14 @@ static __device__ __forceinline__ void oopGrad(const double* pos,
 }
 
 static __device__ __forceinline__ void torsionGrad(const double* pos,
-                                            const int     idx1,
-                                            const int     idx2,
-                                            const int     idx3,
-                                            const int     idx4,
-                                            const double  V1,
-                                            const double  V2,
-                                            const double  V3,
-                                            double*       grad) {
+                                                   const int     idx1,
+                                                   const int     idx2,
+                                                   const int     idx3,
+                                                   const int     idx4,
+                                                   const double  V1,
+                                                   const double  V2,
+                                                   const double  V3,
+                                                   double*       grad) {
   double dx1, dy1, dz1, dx2, dy2, dz2, dx3, dy3, dz3, dx4, dy4, dz4;
 
   // P1 - P2
@@ -200,11 +200,11 @@ static __device__ __forceinline__ void torsionGrad(const double* pos,
 }
 
 static __device__ __forceinline__ void vDWGrad(const double* pos,
-                                        const int     idx1,
-                                        const int     idx2,
-                                        const double  R_ij_star,
-                                        const double  wellDepth,
-                                        double*       grad) {
+                                               const int     idx1,
+                                               const int     idx2,
+                                               const double  R_ij_star,
+                                               const double  wellDepth,
+                                               double*       grad) {
   constexpr double vdw1   = 1.07;
   constexpr double vdw1m1 = vdw1 - 1.0;
   constexpr double vdw2   = 1.12;
@@ -320,7 +320,7 @@ static __device__ __forceinline__ double angleBendEnergy(const double* pos,
   const float dist2        = sqrtf(dist2Squared);
 
   const float  dot         = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
-  const double cosTheta    = clamp(dot / (dist1 * dist2), -1.0, 1.0);
+  const double cosTheta    = clamp(dot / (dist1 * dist2), -1.0f, 1.0f);
   const double theta       = radianToDegree * acos(cosTheta);
   const double deltaTheta  = theta - theta0;
   const double deltaTheta2 = deltaTheta * deltaTheta;
@@ -422,7 +422,7 @@ static __device__ __forceinline__ double bendStretchEnergy(const double* pos,
   const float dist2        = sqrtf(dist2Squared);
 
   const float  dot      = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
-  const double cosTheta = clamp(dot / (dist1 * dist2), -1.0, 1.0);
+  const double cosTheta = clamp(dot / (dist1 * dist2), -1.0f, 1.0f);
   const double theta    = 180 / M_PI * acos(cosTheta);
 
   const double deltaTheta = theta - theta0;
@@ -673,11 +673,11 @@ namespace nvMolKit {
 namespace MMFF {
 
 static __device__ __inline__ double molEnergy(const EnergyForceContribsDevicePtr& terms,
-                                               const BatchedIndicesDevicePtr&      systemIndices,
-                                               const double*                       coords,
-                                               const int                           molIdx,
-                                               const int                           tid,
-                                               const int                           stride) {
+                                              const BatchedIndicesDevicePtr&      systemIndices,
+                                              const double*                       coords,
+                                              const int                           molIdx,
+                                              const int                           tid,
+                                              const int                           stride) {
   const int     atomStart = systemIndices.atomStarts[molIdx];
   const double* molCoords = coords + atomStart * 3;
 
