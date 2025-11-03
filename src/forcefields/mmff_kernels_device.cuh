@@ -51,30 +51,30 @@ static __device__ __forceinline__ void oopGrad(const double* pos,
   double dJLy = pos[3 * idx4 + 1] - pos[3 * idx2 + 1];
   double dJLz = pos[3 * idx4 + 2] - pos[3 * idx2 + 2];
 
-  const double dJI = sqrt(dJIx * dJIx + dJIy * dJIy + dJIz * dJIz);
-  const double dJK = sqrt(dJKx * dJKx + dJKy * dJKy + dJKz * dJKz);
-  const double dJL = sqrt(dJLx * dJLx + dJLy * dJLy + dJLz * dJLz);
+  const double invdJI = rsqrt(dJIx * dJIx + dJIy * dJIy + dJIz * dJIz);
+  const double invdJK = rsqrt(dJKx * dJKx + dJKy * dJKy + dJKz * dJKz);
+  const double invdJL = rsqrt(dJLx * dJLx + dJLy * dJLy + dJLz * dJLz);
 
-  dJIx /= dJI;
-  dJIy /= dJI;
-  dJIz /= dJI;
-  dJKx /= dJK;
-  dJKy /= dJK;
-  dJKz /= dJK;
-  dJLx /= dJL;
-  dJLy /= dJL;
-  dJLz /= dJL;
+  dJIx *= invdJI;
+  dJIy *= invdJI;
+  dJIz *= invdJI;
+  dJKx *= invdJK;
+  dJKy *= invdJK;
+  dJKz *= invdJK;
+  dJLx *= invdJL;
+  dJLy *= invdJL;
+  dJLz *= invdJL;
 
   double normalJIKx, normalJIKy, normalJIKz;
   crossProduct(-dJIx, -dJIy, -dJIz, dJKx, dJKy, dJKz, normalJIKx, normalJIKy, normalJIKz);
-  const double normLength = sqrt(normalJIKx * normalJIKx + normalJIKy * normalJIKy + normalJIKz * normalJIKz);
-  normalJIKx /= normLength;
-  normalJIKy /= normLength;
-  normalJIKz /= normLength;
+  const double invNormLength = rsqrt(normalJIKx * normalJIKx + normalJIKy * normalJIKy + normalJIKz * normalJIKz);
+  normalJIKx *= invNormLength;
+  normalJIKy *= invNormLength;
+  normalJIKz *= invNormLength;
 
   const double sinChi   = clamp(dotProduct(dJLx, dJLy, dJLz, normalJIKx, normalJIKy, normalJIKz), -1.0, 1.0);
   const double cosChiSq = 1.0 - sinChi * sinChi;
-  const double cosChi   = fmax(((cosChiSq > 0.0) ? sqrt(cosChiSq) : 0.0), 1.0e-8);
+  const double invCosChi = cosChiSq > 0 ? rsqrt(cosChiSq) : 1.0e8;
   const double chi      = radianToDegree * asin(sinChi);
   const double cosTheta = clamp(dotProduct(dJIx, dJIy, dJIz, dJKx, dJKy, dJKz), -1.0, 1.0);
   ;
@@ -87,17 +87,17 @@ static __device__ __forceinline__ void oopGrad(const double* pos,
   crossProduct(dJIx, dJIy, dJIz, dJLx, dJLy, dJLz, t2x, t2y, t2z);
   crossProduct(dJKx, dJKy, dJKz, dJIx, dJIy, dJIz, t3x, t3y, t3z);
 
-  double term1  = cosChi * sinTheta;
-  double term2  = sinChi / (cosChi * sinThetaSq);
-  double tg1[3] = {(t1x / term1 - (dJIx - dJKx * cosTheta) * term2) / dJI,
-                   (t1y / term1 - (dJIy - dJKy * cosTheta) * term2) / dJI,
-                   (t1z / term1 - (dJIz - dJKz * cosTheta) * term2) / dJI};
-  double tg3[3] = {(t2x / term1 - (dJKx - dJIx * cosTheta) * term2) / dJK,
-                   (t2y / term1 - (dJKy - dJIy * cosTheta) * term2) / dJK,
-                   (t2z / term1 - (dJKz - dJIz * cosTheta) * term2) / dJK};
-  double tg4[3] = {(t3x / term1 - dJLx * sinChi / cosChi) / dJL,
-                   (t3y / term1 - dJLy * sinChi / cosChi) / dJL,
-                   (t3z / term1 - dJLz * sinChi / cosChi) / dJL};
+  double term1  = invCosChi / sinTheta;
+  double term2  = sinChi * invCosChi /  sinThetaSq;
+  double tg1[3] = {(t1x * term1 - (dJIx - dJKx * cosTheta) * term2) * invdJI,
+                   (t1y * term1 - (dJIy - dJKy * cosTheta) * term2) * invdJI,
+                   (t1z * term1 - (dJIz - dJKz * cosTheta) * term2) * invdJI};
+  double tg3[3] = {(t2x * term1 - (dJKx - dJIx * cosTheta) * term2) * invdJK,
+                   (t2y * term1 - (dJKy - dJIy * cosTheta) * term2) * invdJK,
+                   (t2z * term1 - (dJKz - dJIz * cosTheta) * term2) * invdJK};
+  double tg4[3] = {(t3x * term1 - dJLx * sinChi * invCosChi) * invdJL,
+                   (t3y * term1 - dJLy * sinChi * invCosChi) * invdJL,
+                   (t3z * term1 - dJLz * sinChi * invCosChi) * invdJL};
 
   atomicAdd(&grad[3 * idx1 + 0], dE_dChi * tg1[0]);
   atomicAdd(&grad[3 * idx1 + 1], dE_dChi * tg1[1]);
