@@ -335,54 +335,48 @@ static __device__ __forceinline__ void angleBendGrad(const int     idx1,
                                                      double*       grad) {
   constexpr double c1       = 143.9325 * degreeToRadian;
   constexpr double cbFactor = -0.006981317 * 1.5;
-
+  // These values are sensitive to double precision.
   double       dx1, dy1, dz1, dx2, dy2, dz2;
   const double dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
   const double dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
-  const double dist1        = sqrt(dist1Squared);
-  const double dist2        = sqrt(dist2Squared);
+  const double invDist1        = rsqrt(dist1Squared);
+  const double invDist2       = rsqrt(dist2Squared);
 
   const double dot         = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
-  const double cosTheta    = clamp(dot / (dist1 * dist2), -1.0, 1.0);
+  const double cosTheta    = clamp(dot *invDist1 * invDist2, -1.0, 1.0);
   const double sinThetaSq  = 1.0 - cosTheta * cosTheta;
-  const double negSinTheta = -(fmax(((sinThetaSq > 0.0) ? sqrt(sinThetaSq) : 0.0), 1.0e-8));
-  const double theta       = radianToDegree * acos(cosTheta);
-  const double deltaTheta  = theta - theta0;
+  if (isDoubleZero(sinThetaSq) || isDoubleZero(dist1Squared) || isDoubleZero(dist2Squared)) {
+    return;
+  }
 
-  double de_dDeltaTheta;
+  const double invNegSinTheta = -rsqrt(sinThetaSq);
+  const float theta       = radianToDegree * acos(cosTheta);
+  const float deltaTheta  = theta - theta0;
+
+  float de_dDeltaTheta;
 
   if (isLinear) {
-    constexpr double linearPrefactor = 143.9325;
+    constexpr float linearPrefactor = 143.9325;
     de_dDeltaTheta                   = -linearPrefactor * ka * sqrt(1.0 - (cosTheta * cosTheta));
   } else {
     de_dDeltaTheta = c1 * ka * deltaTheta * (1.0 + cbFactor * deltaTheta);
   }
 
-  if (isDoubleZero(dist1) || isDoubleZero(dist2)) {
-    return;
-  }
+  const float dxnorm1 = dx1 * invDist1;
+  const float dynorm1 = dy1 * invDist1;
+  const float dznorm1 = dz1 * invDist1;
+  const float dxnorm2 = dx2 * invDist2;
+  const float dynorm2 = dy2 * invDist2;
+  const float dznorm2 = dz2 * invDist2;
 
-  const double invDist1 = 1.0 / dist1;
-  const double invDist2 = 1.0 / dist2;
+  const float intermediate1 = invDist1 * (dxnorm2 - cosTheta * dxnorm1);
+  const float intermediate2 = invDist1 * (dynorm2 - cosTheta * dynorm1);
+  const float intermediate3 = invDist1 * (dznorm2 - cosTheta * dznorm1);
+  const float intermediate4 = invDist2 * (dxnorm1 - cosTheta * dxnorm2);
+  const float intermediate5 = invDist2 * (dynorm1 - cosTheta * dynorm2);
+  const float intermediate6 = invDist2 * (dznorm1 - cosTheta * dznorm2);
 
-  const double dxnorm1 = dx1 * invDist1;
-  const double dynorm1 = dy1 * invDist1;
-  const double dznorm1 = dz1 * invDist1;
-  const double dxnorm2 = dx2 * invDist2;
-  const double dynorm2 = dy2 * invDist2;
-  const double dznorm2 = dz2 * invDist2;
-
-  const double intermediate1 = invDist1 * (dxnorm2 - cosTheta * dxnorm1);
-  const double intermediate2 = invDist1 * (dynorm2 - cosTheta * dynorm1);
-  const double intermediate3 = invDist1 * (dznorm2 - cosTheta * dznorm1);
-  const double intermediate4 = invDist2 * (dxnorm1 - cosTheta * dxnorm2);
-  const double intermediate5 = invDist2 * (dynorm1 - cosTheta * dynorm2);
-  const double intermediate6 = invDist2 * (dznorm1 - cosTheta * dznorm2);
-
-  if (isDoubleZero(negSinTheta)) {
-    return;
-  }
-  const double constantFactor = de_dDeltaTheta / negSinTheta;
+  const float constantFactor = de_dDeltaTheta * invNegSinTheta;
 
   atomicAdd(&grad[3 * idx1 + 0], constantFactor * intermediate1);
   atomicAdd(&grad[3 * idx1 + 1], constantFactor * intermediate2);
