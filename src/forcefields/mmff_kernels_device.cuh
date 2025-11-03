@@ -51,9 +51,9 @@ static __device__ __forceinline__ void oopGrad(const double* pos,
   double dJLy = pos[3 * idx4 + 1] - pos[3 * idx2 + 1];
   double dJLz = pos[3 * idx4 + 2] - pos[3 * idx2 + 2];
 
-  const double invdJI = rsqrt(dJIx * dJIx + dJIy * dJIy + dJIz * dJIz);
-  const double invdJK = rsqrt(dJKx * dJKx + dJKy * dJKy + dJKz * dJKz);
-  const double invdJL = rsqrt(dJLx * dJLx + dJLy * dJLy + dJLz * dJLz);
+  const double invdJI = rsqrtf(dJIx * dJIx + dJIy * dJIy + dJIz * dJIz);
+  const double invdJK = rsqrtf(dJKx * dJKx + dJKy * dJKy + dJKz * dJKz);
+  const double invdJL = rsqrtf(dJLx * dJLx + dJLy * dJLy + dJLz * dJLz);
 
   dJIx *= invdJI;
   dJIy *= invdJI;
@@ -67,19 +67,18 @@ static __device__ __forceinline__ void oopGrad(const double* pos,
 
   double normalJIKx, normalJIKy, normalJIKz;
   crossProduct(-dJIx, -dJIy, -dJIz, dJKx, dJKy, dJKz, normalJIKx, normalJIKy, normalJIKz);
-  const double invNormLength = rsqrt(normalJIKx * normalJIKx + normalJIKy * normalJIKy + normalJIKz * normalJIKz);
+  const double invNormLength = rsqrtf(normalJIKx * normalJIKx + normalJIKy * normalJIKy + normalJIKz * normalJIKz);
   normalJIKx *= invNormLength;
   normalJIKy *= invNormLength;
   normalJIKz *= invNormLength;
 
   const double sinChi   = clamp(dotProduct(dJLx, dJLy, dJLz, normalJIKx, normalJIKy, normalJIKz), -1.0, 1.0);
   const double cosChiSq = 1.0 - sinChi * sinChi;
-  const double invCosChi = cosChiSq > 0 ? rsqrt(cosChiSq) : 1.0e8;
+  const double invCosChi = cosChiSq > 0 ? rsqrtf(cosChiSq) : 1.0e8;
   const double chi      = radianToDegree * asin(sinChi);
   const double cosTheta = clamp(dotProduct(dJIx, dJIy, dJIz, dJKx, dJKy, dJKz), -1.0, 1.0);
-  ;
-  double sinThetaSq = fmax(1.0 - cosTheta * cosTheta, 1.0e-8);
-  double sinTheta   = fmax(((sinThetaSq > 0.0) ? sqrt(sinThetaSq) : 0.0), 1.0e-8);
+
+  double invSinTheta = rsqrtf(fmax(1.0 - cosTheta * cosTheta, 1.0e-8));
 
   double dE_dChi = prefactor * koop * chi;
   double t1x, t1y, t1z, t2x, t2y, t2z, t3x, t3y, t3z;
@@ -87,8 +86,8 @@ static __device__ __forceinline__ void oopGrad(const double* pos,
   crossProduct(dJIx, dJIy, dJIz, dJLx, dJLy, dJLz, t2x, t2y, t2z);
   crossProduct(dJKx, dJKy, dJKz, dJIx, dJIy, dJIz, t3x, t3y, t3z);
 
-  double term1  = invCosChi / sinTheta;
-  double term2  = sinChi * invCosChi /  sinThetaSq;
+  double term1  = invCosChi * invSinTheta;
+  double term2  = sinChi * invCosChi *  (invSinTheta * invSinTheta);
   double tg1[3] = {(t1x * term1 - (dJIx - dJKx * cosTheta) * term2) * invdJI,
                    (t1y * term1 - (dJIy - dJKy * cosTheta) * term2) * invdJI,
                    (t1z * term1 - (dJIz - dJKz * cosTheta) * term2) * invdJI};
