@@ -510,39 +510,39 @@ static __device__ __forceinline__ double oopBendEnergy(const double* pos,
                                                        const int     idx3,
                                                        const int     idx4,
                                                        const double  koop) {
-  constexpr double prefactor = 0.5 * 143.9325 * degreeToRadian * degreeToRadian;
+  constexpr float prefactor = 0.5 * 143.9325 * degreeToRadian * degreeToRadian;
 
-  double       dxji, dyji, dzji, dxjk, dyjk, dzjk, dxjl, dyjl, dzjl;
-  const double distSquaredJI = distanceSquaredWithComponents(pos, idx1, idx2, dxji, dyji, dzji);
-  const double distSquaredJK = distanceSquaredWithComponents(pos, idx3, idx2, dxjk, dyjk, dzjk);
-  const double distSquaredJL = distanceSquaredWithComponents(pos, idx4, idx2, dxjl, dyjl, dzjl);
+  float       dxji, dyji, dzji, dxjk, dyjk, dzjk, dxjl, dyjl, dzjl;
+  const float distSquaredJI = distanceSquaredWithComponents(pos, idx1, idx2, dxji, dyji, dzji);
+  const float distSquaredJK = distanceSquaredWithComponents(pos, idx3, idx2, dxjk, dyjk, dzjk);
+  const float distSquaredJL = distanceSquaredWithComponents(pos, idx4, idx2, dxjl, dyjl, dzjl);
 
-  const double distJI = sqrt(distSquaredJI);
-  const double distJK = sqrt(distSquaredJK);
-  const double distJL = sqrt(distSquaredJL);
+  const float invDistJI = rsqrtf(distSquaredJI);
+  const float invDistJK = rsqrtf(distSquaredJK);
+  const float invDistJL = rsqrtf(distSquaredJL);
 
-  const double scaledDxJI = dxji / distJI;
-  const double scaledDyJI = dyji / distJI;
-  const double scaledDzJI = dzji / distJI;
+  const float scaledDxJI = dxji * invDistJI;
+  const float scaledDyJI = dyji * invDistJI;
+  const float scaledDzJI = dzji * invDistJI;
 
-  const double scaledDxJK = dxjk / distJK;
-  const double scaledDyJK = dyjk / distJK;
-  const double scaledDzJK = dzjk / distJK;
+  const float scaledDxJK = dxjk * invDistJK;
+  const float scaledDyJK = dyjk * invDistJK;
+  const float scaledDzJK = dzjk * invDistJK;
 
-  const double scaledDxJL = dxjl / distJL;
-  const double scaledDyJL = dyjl / distJL;
-  const double scaledDzJL = dzjl / distJL;
+  const float scaledDxJL = dxjl * invDistJL;
+  const float scaledDyJL = dyjl * invDistJL;
+  const float scaledDzJL = dzjl * invDistJL;
 
-  double crossX, crossY, crossZ;
+  float crossX, crossY, crossZ;
   crossProduct(scaledDxJI, scaledDyJI, scaledDzJI, scaledDxJK, scaledDyJK, scaledDzJK, crossX, crossY, crossZ);
-  const double distCross = sqrt(crossX * crossX + crossY * crossY + crossZ * crossZ);
+  const float invDistCross = rsqrtf(crossX * crossX + crossY * crossY + crossZ * crossZ);
 
-  const double scaledCrossX = crossX / distCross;
-  const double scaledCrossY = crossY / distCross;
-  const double scaledCrossZ = crossZ / distCross;
+  const float scaledCrossX = crossX * invDistCross;
+  const float scaledCrossY = crossY * invDistCross;
+  const float scaledCrossZ = crossZ * invDistCross;
 
-  const double dotProduct = scaledCrossX * scaledDxJL + scaledCrossY * scaledDyJL + scaledCrossZ * scaledDzJL;
-  const double chi        = radianToDegree * asin(clamp(dotProduct, -1.0, 1.0));
+  const float dotProduct = scaledCrossX * scaledDxJL + scaledCrossY * scaledDyJL + scaledCrossZ * scaledDzJL;
+  const float chi        = radianToDegree * asinf(clamp(dotProduct, -1.0f, 1.0f));
 
   return prefactor * koop * chi * chi;
 }
