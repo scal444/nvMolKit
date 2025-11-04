@@ -274,12 +274,12 @@ static __device__ __forceinline__ void bondStretchGrad(const double* pos,
 
   double       dx, dy, dz;
   const double distanceSquared = distanceSquaredWithComponents(pos, idx1, idx2, dx, dy, dz);
-  const double distance        = sqrt(distanceSquared);
+  const double invDist        = rsqrt(distanceSquared);
+  const double distance = 1.0 / invDist;
   const double deltaR          = distance - r0;
 
   const double de_dr = c1 * kb * deltaR * (1.0 + csFactorTimesSecondConstant * deltaR + lastFactor * deltaR * deltaR);
 
-  const double invDist = 1.0 / distance;
   double       dE_dx, dE_dy, dE_dz;
   if (distance > 0.0) {
     dE_dx = de_dr * dx * invDist;
@@ -313,11 +313,11 @@ static __device__ __forceinline__ double angleBendEnergy(const double* pos,
   float       dx1, dy1, dz1, dx2, dy2, dz2;
   const float dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
   const float dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
-  const float dist1        = sqrtf(dist1Squared);
-  const float dist2        = sqrtf(dist2Squared);
+  const float dist1        = rsqrtf(dist1Squared);
+  const float dist2        = rsqrtf(dist2Squared);
 
   const float  dot         = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
-  const double cosTheta    = clamp(dot / (dist1 * dist2), -1.0f, 1.0f);
+  const double cosTheta    = clamp(dot * (dist1 * dist2), -1.0f, 1.0f);
   const double theta       = radianToDegree * acos(cosTheta);
   const double deltaTheta  = theta - theta0;
   const double deltaTheta2 = deltaTheta * deltaTheta;
@@ -361,7 +361,7 @@ static __device__ __forceinline__ void angleBendGrad(const int     idx1,
 
   if (isLinear) {
     constexpr float linearPrefactor = 143.9325;
-    de_dDeltaTheta                   = -linearPrefactor * ka * sqrt(1.0 - (cosTheta * cosTheta));
+    de_dDeltaTheta                   = -linearPrefactor * ka * sqrtf(1.0 - (cosTheta * cosTheta));
   } else {
     de_dDeltaTheta = c1 * ka * deltaTheta * (1.0 + cbFactor * deltaTheta);
   }
@@ -553,34 +553,34 @@ static __device__ __forceinline__ double torsionEnergy(const double* pos,
                                                        const double  V1,
                                                        const double  V2,
                                                        const double  V3) {
-  const double dxIJ = pos[3 * idx1 + 0] - pos[3 * idx2 + 0];
-  const double dyIJ = pos[3 * idx1 + 1] - pos[3 * idx2 + 1];
-  const double dzIJ = pos[3 * idx1 + 2] - pos[3 * idx2 + 2];
+  const float dxIJ = pos[3 * idx1 + 0] - pos[3 * idx2 + 0];
+  const float dyIJ = pos[3 * idx1 + 1] - pos[3 * idx2 + 1];
+  const float dzIJ = pos[3 * idx1 + 2] - pos[3 * idx2 + 2];
 
-  const double dxKJ = pos[3 * idx3 + 0] - pos[3 * idx2 + 0];
-  const double dyKJ = pos[3 * idx3 + 1] - pos[3 * idx2 + 1];
-  const double dzKJ = pos[3 * idx3 + 2] - pos[3 * idx2 + 2];
+  const float dxKJ = pos[3 * idx3 + 0] - pos[3 * idx2 + 0];
+  const float dyKJ = pos[3 * idx3 + 1] - pos[3 * idx2 + 1];
+  const float dzKJ = pos[3 * idx3 + 2] - pos[3 * idx2 + 2];
 
-  const double dxLK = pos[3 * idx4 + 0] - pos[3 * idx3 + 0];
-  const double dyLK = pos[3 * idx4 + 1] - pos[3 * idx3 + 1];
-  const double dzLK = pos[3 * idx4 + 2] - pos[3 * idx3 + 2];
+  const float dxLK = pos[3 * idx4 + 0] - pos[3 * idx3 + 0];
+  const float dyLK = pos[3 * idx4 + 1] - pos[3 * idx3 + 1];
+  const float dzLK = pos[3 * idx4 + 2] - pos[3 * idx3 + 2];
 
-  const double crossIJKJx = dyIJ * dzKJ - dzIJ * dyKJ;
-  const double crossIJKJy = dzIJ * dxKJ - dxIJ * dzKJ;
-  const double crossIJKJz = dxIJ * dyKJ - dyIJ * dxKJ;
+  const float crossIJKJx = dyIJ * dzKJ - dzIJ * dyKJ;
+  const float crossIJKJy = dzIJ * dxKJ - dxIJ * dzKJ;
+  const float crossIJKJz = dxIJ * dyKJ - dyIJ * dxKJ;
 
-  const double crossJKLKx = -dyKJ * dzLK + dzKJ * dyLK;
-  const double crossJKLKy = -dzKJ * dxLK + dxKJ * dzLK;
-  const double crossJKLKz = -dxKJ * dyLK + dyKJ * dxLK;
+  const float crossJKLKx = -dyKJ * dzLK + dzKJ * dyLK;
+  const float crossJKLKy = -dzKJ * dxLK + dxKJ * dzLK;
+  const float crossJKLKz = -dxKJ * dyLK + dyKJ * dxLK;
 
   const float invCross1Norm = rsqrtf(crossIJKJx * crossIJKJx + crossIJKJy * crossIJKJy + crossIJKJz * crossIJKJz);
   const float invCross2Norm = rsqrtf(crossJKLKx * crossJKLKx + crossJKLKy * crossJKLKy + crossJKLKz * crossJKLKz);
 
-  const double dotProduct = crossIJKJx * crossJKLKx + crossIJKJy * crossJKLKy + crossIJKJz * crossJKLKz;
-  const double cosPhi     = dotProduct * invCross1Norm * invCross2Norm;
-  const double phi        = acos(clamp(cosPhi, -1.0, 1.0));
+  const float dotProduct = crossIJKJx * crossJKLKx + crossIJKJy * crossJKLKy + crossIJKJz * crossJKLKz;
+  const float cosPhi     = dotProduct * invCross1Norm * invCross2Norm;
+  const double phi        = acosf(clamp(cosPhi, -1.0f, 1.0f));
 
-  return 0.5 * (V1 * (1.0 + cosPhi) + V2 * (1.0 - cos(2.0 * phi)) + V3 * (1.0 + cos(3.0 * phi)));
+  return 0.5 * (V1 * (1.0 + cosPhi) + V2 * (1.0 - cosf(2.0 * phi)) + V3 * (1.0 + cosf(3.0 * phi)));
 }
 
 static __device__ __forceinline__ double vdwEnergy(const double* pos,
@@ -595,7 +595,7 @@ static __device__ __forceinline__ double vdwEnergy(const double* pos,
   const double epsilon = wellDepth;
 
   const double distSquared = distanceSquared(pos, idx1, idx2);
-  const double dist        = sqrt(distSquared);
+  const double dist        = sqrtf(distSquared);
   const double dist7       = distSquared * distSquared * distSquared * dist;
 
   const double term1        = 1.07 * R_ij_star / (dist + 0.07 * R_ij_star);
@@ -683,6 +683,7 @@ static __device__ __inline__ double molEnergy(const EnergyForceContribsDevicePtr
   const auto& [idx1s, idx2s, r0s, kbs] = terms.bondTerms;
   const int bondStart                  = systemIndices.bondTermStarts[molIdx];
   const int bondEnd                    = systemIndices.bondTermStarts[molIdx + 1];
+#pragma unroll 1
   for (int i = bondStart + tid; i < bondEnd; i += stride) {
     const int localIdx1 = idx1s[i] - atomStart;
     const int localIdx2 = idx2s[i] - atomStart;
@@ -692,6 +693,7 @@ static __device__ __inline__ double molEnergy(const EnergyForceContribsDevicePtr
   const auto& [a_idx1s, a_idx2s, a_idx3s, theta0s, kas, isLinears] = terms.angleTerms;
   const int angleStart                                             = systemIndices.angleTermStarts[molIdx];
   const int angleEnd                                               = systemIndices.angleTermStarts[molIdx + 1];
+#pragma unroll 1
   for (int i = angleStart + tid; i < angleEnd; i += stride) {
     const int  localIdx1 = a_idx1s[i] - atomStart;
     const int  localIdx2 = a_idx2s[i] - atomStart;
@@ -704,6 +706,7 @@ static __device__ __inline__ double molEnergy(const EnergyForceContribsDevicePtr
     terms.bendTerms;
   const int bendStart = systemIndices.bendTermStarts[molIdx];
   const int bendEnd   = systemIndices.bendTermStarts[molIdx + 1];
+#pragma unroll 1
   for (int i = bendStart + tid; i < bendEnd; i += stride) {
     const int localIdx1 = bs_idx1s[i] - atomStart;
     const int localIdx2 = bs_idx2s[i] - atomStart;
@@ -722,6 +725,7 @@ static __device__ __inline__ double molEnergy(const EnergyForceContribsDevicePtr
   const auto& [o_idx1s, o_idx2s, o_idx3s, o_idx4s, koops] = terms.oopTerms;
   const int oopStart                                      = systemIndices.oopTermStarts[molIdx];
   const int oopEnd                                        = systemIndices.oopTermStarts[molIdx + 1];
+#pragma unroll 1
   for (int i = oopStart + tid; i < oopEnd; i += stride) {
     const int localIdx1 = o_idx1s[i] - atomStart;
     const int localIdx2 = o_idx2s[i] - atomStart;
@@ -733,6 +737,7 @@ static __device__ __inline__ double molEnergy(const EnergyForceContribsDevicePtr
   const auto& [t_idx1s, t_idx2s, t_idx3s, t_idx4s, V1s, V2s, V3s] = terms.torsionTerms;
   const int torsionStart                                          = systemIndices.torsionTermStarts[molIdx];
   const int torsionEnd                                            = systemIndices.torsionTermStarts[molIdx + 1];
+#pragma unroll 1
   for (int i = torsionStart + tid; i < torsionEnd; i += stride) {
     const int localIdx1 = t_idx1s[i] - atomStart;
     const int localIdx2 = t_idx2s[i] - atomStart;
@@ -744,6 +749,7 @@ static __device__ __inline__ double molEnergy(const EnergyForceContribsDevicePtr
   const auto& [v_idx1s, v_idx2s, R_ij_stars, wellDepths] = terms.vdwTerms;
   const int vdwStart                                     = systemIndices.vdwTermStarts[molIdx];
   const int vdwEnd                                       = systemIndices.vdwTermStarts[molIdx + 1];
+#pragma unroll 1
   for (int i = vdwStart + tid; i < vdwEnd; i += stride) {
     const int localIdx1 = v_idx1s[i] - atomStart;
     const int localIdx2 = v_idx2s[i] - atomStart;
@@ -753,6 +759,7 @@ static __device__ __inline__ double molEnergy(const EnergyForceContribsDevicePtr
   const auto& [e_idx1s, e_idx2s, chargeTerms, dielModels, is1_4s] = terms.eleTerms;
   const int eleStart                                              = systemIndices.eleTermStarts[molIdx];
   const int eleEnd                                                = systemIndices.eleTermStarts[molIdx + 1];
+#pragma unroll 1
   for (int i = eleStart + tid; i < eleEnd; i += stride) {
     const int  localIdx1 = e_idx1s[i] - atomStart;
     const int  localIdx2 = e_idx2s[i] - atomStart;
@@ -777,6 +784,7 @@ static __device__ __inline__ void molGrad(const EnergyForceContribsDevicePtr& te
   const auto& [idx1s, idx2s, r0s, kbs] = terms.bondTerms;
   const int bondStart                  = systemIndices.bondTermStarts[molIdx];
   const int bondEnd                    = systemIndices.bondTermStarts[molIdx + 1];
+#pragma unroll 1
   for (int i = bondStart + tid; i < bondEnd; i += stride) {
     const int localIdx1 = idx1s[i] - atomStart;
     const int localIdx2 = idx2s[i] - atomStart;
@@ -786,6 +794,7 @@ static __device__ __inline__ void molGrad(const EnergyForceContribsDevicePtr& te
   const auto& [a_idx1s, a_idx2s, a_idx3s, theta0s, kas, isLinears] = terms.angleTerms;
   const int angleStart                                             = systemIndices.angleTermStarts[molIdx];
   const int angleEnd                                               = systemIndices.angleTermStarts[molIdx + 1];
+#pragma unroll 1
   for (int i = angleStart + tid; i < angleEnd; i += stride) {
     const int  localIdx1 = a_idx1s[i] - atomStart;
     const int  localIdx2 = a_idx2s[i] - atomStart;
@@ -798,6 +807,7 @@ static __device__ __inline__ void molGrad(const EnergyForceContribsDevicePtr& te
     terms.bendTerms;
   const int bendStart = systemIndices.bendTermStarts[molIdx];
   const int bendEnd   = systemIndices.bendTermStarts[molIdx + 1];
+#pragma unroll 1
   for (int i = bendStart + tid; i < bendEnd; i += stride) {
     const int localIdx1 = bs_idx1s[i] - atomStart;
     const int localIdx2 = bs_idx2s[i] - atomStart;
@@ -817,6 +827,7 @@ static __device__ __inline__ void molGrad(const EnergyForceContribsDevicePtr& te
   const auto& [o_idx1s, o_idx2s, o_idx3s, o_idx4s, koops] = terms.oopTerms;
   const int oopStart                                      = systemIndices.oopTermStarts[molIdx];
   const int oopEnd                                        = systemIndices.oopTermStarts[molIdx + 1];
+#pragma unroll 1
   for (int i = oopStart + tid; i < oopEnd; i += stride) {
     const int localIdx1 = o_idx1s[i] - atomStart;
     const int localIdx2 = o_idx2s[i] - atomStart;
@@ -828,6 +839,7 @@ static __device__ __inline__ void molGrad(const EnergyForceContribsDevicePtr& te
   const auto& [t_idx1s, t_idx2s, t_idx3s, t_idx4s, V1s, V2s, V3s] = terms.torsionTerms;
   const int torsionStart                                          = systemIndices.torsionTermStarts[molIdx];
   const int torsionEnd                                            = systemIndices.torsionTermStarts[molIdx + 1];
+#pragma unroll 1
   for (int i = torsionStart + tid; i < torsionEnd; i += stride) {
     const int localIdx1 = t_idx1s[i] - atomStart;
     const int localIdx2 = t_idx2s[i] - atomStart;
@@ -839,6 +851,7 @@ static __device__ __inline__ void molGrad(const EnergyForceContribsDevicePtr& te
   const auto& [v_idx1s, v_idx2s, R_ij_stars, wellDepths] = terms.vdwTerms;
   const int vdwStart                                     = systemIndices.vdwTermStarts[molIdx];
   const int vdwEnd                                       = systemIndices.vdwTermStarts[molIdx + 1];
+#pragma unroll 1
   for (int i = vdwStart + tid; i < vdwEnd; i += stride) {
     const int localIdx1 = v_idx1s[i] - atomStart;
     const int localIdx2 = v_idx2s[i] - atomStart;
@@ -848,6 +861,7 @@ static __device__ __inline__ void molGrad(const EnergyForceContribsDevicePtr& te
   const auto& [e_idx1s, e_idx2s, chargeTerms, dielModels, is1_4s] = terms.eleTerms;
   const int eleStart                                              = systemIndices.eleTermStarts[molIdx];
   const int eleEnd                                                = systemIndices.eleTermStarts[molIdx + 1];
+#pragma unroll 1
   for (int i = eleStart + tid; i < eleEnd; i += stride) {
     const int  localIdx1 = e_idx1s[i] - atomStart;
     const int  localIdx2 = e_idx2s[i] - atomStart;
