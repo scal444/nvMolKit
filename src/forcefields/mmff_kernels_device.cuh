@@ -204,8 +204,8 @@ static __device__ __forceinline__ void vDWGrad(const double* pos,
   constexpr float vdw2m1 = vdw2 - 1.0;
   constexpr float vdw2t7 = vdw2 * 7.0;
 
-  const double invDistance = rsqrtf(distanceSquared(pos, idx1, idx2));
-  const double distance = 1.0f / invDistance;
+  const float invDistance = rsqrtf(distanceSquared(pos, idx1, idx2));
+  const float distance = 1.0f / invDistance;
 
   const float invRIJStar = 1.0f / R_ij_star;
 
@@ -254,10 +254,10 @@ static __device__ __forceinline__ double bondStretchEnergy(const double* pos,
   constexpr double csFactorDistSquared = 7.0 / 12.0 * csFactorDist * csFactorDist;
 
   const double distSquared = distanceSquared(pos, idx1, idx2);
-  const double distance    = sqrtf(static_cast<float>(distSquared));
+  const float distance    = sqrtf(static_cast<float>(distSquared));
 
-  const double deltaR  = distance - r0;
-  const double deltaR2 = deltaR * deltaR;
+  const float deltaR  = distance - r0;
+  const float deltaR2 = deltaR * deltaR;
   return prefactor * kb * deltaR2 * (1.0 + csFactorDist * deltaR + csFactorDistSquared * deltaR2);
 }
 
@@ -573,11 +573,11 @@ static __device__ __forceinline__ double torsionEnergy(const double* pos,
   const double crossJKLKy = -dzKJ * dxLK + dxKJ * dzLK;
   const double crossJKLKz = -dxKJ * dyLK + dyKJ * dxLK;
 
-  const double cross1Norm = sqrt(crossIJKJx * crossIJKJx + crossIJKJy * crossIJKJy + crossIJKJz * crossIJKJz);
-  const double cross2Norm = sqrt(crossJKLKx * crossJKLKx + crossJKLKy * crossJKLKy + crossJKLKz * crossJKLKz);
+  const float invCross1Norm = rsqrtf(crossIJKJx * crossIJKJx + crossIJKJy * crossIJKJy + crossIJKJz * crossIJKJz);
+  const float invCross2Norm = rsqrtf(crossJKLKx * crossJKLKx + crossJKLKy * crossJKLKy + crossJKLKz * crossJKLKz);
 
   const double dotProduct = crossIJKJx * crossJKLKx + crossIJKJy * crossJKLKy + crossIJKJz * crossJKLKz;
-  const double cosPhi     = dotProduct / (cross1Norm * cross2Norm);
+  const double cosPhi     = dotProduct * invCross1Norm * invCross2Norm;
   const double phi        = acos(clamp(cosPhi, -1.0, 1.0));
 
   return 0.5 * (V1 * (1.0 + cosPhi) + V2 * (1.0 - cos(2.0 * phi)) + V3 * (1.0 + cos(3.0 * phi)));
@@ -588,6 +588,7 @@ static __device__ __forceinline__ double vdwEnergy(const double* pos,
                                                    const int     idx2,
                                                    const double  R_ij_star,
                                                    const double  wellDepth) {
+  // Note, this kernel is quite sensitive, any downcasting to fp32 causes significant drift.
   double R_ij_star2 = R_ij_star * R_ij_star;
   double R_ij_star7 = R_ij_star2 * R_ij_star2 * R_ij_star2 * R_ij_star;
 
@@ -612,16 +613,16 @@ static __device__ __forceinline__ double eleEnergy(const double* pos,
                                                    const double  chargeTerm,
                                                    const int     dielModel,
                                                    const bool    is1_4) {
-  constexpr double prefactor         = 332.0716;
-  constexpr double bufferingConstant = 0.05;
-  const double     distSquared       = distanceSquared(pos, idx1, idx2);
-  double           distTerm          = sqrt(distSquared) + bufferingConstant;
+  constexpr float prefactor         = 332.0716;
+  constexpr float bufferingConstant = 0.05;
+  const float     distSquared       = distanceSquared(pos, idx1, idx2);
+  float           distTerm          = sqrtf(distSquared) + bufferingConstant;
   if (dielModel == 2) {
     distTerm *= distTerm;
   }
-  double energy = prefactor * chargeTerm / (distTerm);
+  float energy = prefactor * chargeTerm / (distTerm);
   if (is1_4) {
-    energy *= 0.75;
+    energy *= 0.75f;
   }
   return energy;
 }
@@ -629,31 +630,32 @@ static __device__ __forceinline__ double eleEnergy(const double* pos,
 static __device__ __forceinline__ void eleGrad(const double* pos,
                                                const int     idx1,
                                                const int     idx2,
-                                               const double  chargeTerm,
+                                               const float  chargeTerm,
                                                const int     dielModel,
                                                const bool    is1_4,
                                                double*       grad) {
-  constexpr double prefactor         = 332.0716;
-  constexpr double bufferingConstant = 0.05;
+  constexpr float prefactor         = 332.0716;
+  constexpr float bufferingConstant = 0.05;
 
-  const double distSquared = distanceSquared(pos, idx1, idx2);
-  const double distance    = sqrt(distSquared);
-  double       distTerm    = distance + bufferingConstant;
-  double       numerator   = -prefactor * chargeTerm;
+  const float distSquared = distanceSquared(pos, idx1, idx2);
+  const float invDistance    = rsqrtf(distSquared);
+  const float distance = 1.0f / invDistance;
+  float       distTerm    = distance + bufferingConstant;
+  float       numerator   = -prefactor * chargeTerm;
 
   if (dielModel == 2) {
     distTerm *= distTerm;
     numerator *= 2;
   }
 
-  double dE_dr = numerator / (distTerm * distTerm);
+  float dE_dr = numerator / (distTerm * distTerm);
   if (is1_4) {
     dE_dr *= 0.75;
   }
 
-  const double dE_dx = dE_dr * (pos[3 * idx1 + 0] - pos[3 * idx2 + 0]) / distance;
-  const double dE_dy = dE_dr * (pos[3 * idx1 + 1] - pos[3 * idx2 + 1]) / distance;
-  const double dE_dz = dE_dr * (pos[3 * idx1 + 2] - pos[3 * idx2 + 2]) / distance;
+  const float dE_dx = dE_dr * (pos[3 * idx1 + 0] - pos[3 * idx2 + 0]) * invDistance;
+  const float dE_dy = dE_dr * (pos[3 * idx1 + 1] - pos[3 * idx2 + 1]) * invDistance;
+  const float dE_dz = dE_dr * (pos[3 * idx1 + 2] - pos[3 * idx2 + 2]) * invDistance;
 
   atomicAdd(&grad[3 * idx1 + 0], dE_dx);
   atomicAdd(&grad[3 * idx1 + 1], dE_dy);

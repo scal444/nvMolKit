@@ -494,7 +494,7 @@ TEST_P(BFGSMinimizerBackendTest, E2EMinimizationSingleSystemUnconvergedMatches) 
                        gotEnergies.size() * sizeof(double),
                        cudaMemcpyDeviceToHost));
 
-  EXPECT_THAT(gotEnergies, ::testing::Pointwise(::testing::DoubleNear(1e-4), refEnergies));
+  EXPECT_THAT(gotEnergies, ::testing::Pointwise(::testing::DoubleNear(5e-3), refEnergies));
   
   // Status checking only works with BATCHED backend (PER_MOLECULE doesn't track detailed convergence yet)
   if (backend == nvMolKit::BfgsBackend::BATCHED) {
@@ -627,7 +627,7 @@ TEST_P(BFGSMinimizerBackendTest, E2EMinimizationMultiSystemSameMolMatchesUnconve
                        gotEnergies.size() * sizeof(double),
                        cudaMemcpyDeviceToHost));
 
-  EXPECT_THAT(gotEnergies, ::testing::Pointwise(::testing::DoubleNear(1e-4), refEnergies));
+  EXPECT_THAT(gotEnergies, ::testing::Pointwise(::testing::DoubleNear(5e-3), refEnergies));
   
   // Status checking only works with BATCHED backend (PER_MOLECULE doesn't track detailed convergence yet)
   if (backend == nvMolKit::BfgsBackend::BATCHED) {
@@ -759,8 +759,14 @@ TEST_P(BFGSMinimizerBackendTest, E2EMinimizationMultiSystemMultiMolsMatchesConve
                        gotEnergies.size() * sizeof(double),
                        cudaMemcpyDeviceToHost));
 
-  EXPECT_THAT(gotEnergies, ::testing::Pointwise(::testing::DoubleNear(6e-3), refEnergies));
-  
+  EXPECT_THAT(gotEnergies, ::testing::Pointwise(::testing::DoubleNear(1e-3), refEnergies));
+
+  double avergedEnergyDiff = 0.0;
+  for (size_t i = 0; i < gotEnergies.size(); ++i) {
+    avergedEnergyDiff += fabs(gotEnergies[i] - refEnergies[i]);
+  }
+  avergedEnergyDiff /= static_cast<double>(gotEnergies.size());
+  EXPECT_NEAR(avergedEnergyDiff, 0.0, 1e-4) << "Average energy difference between RDKit and nvMolKit minimizations is too large, despite max delta being acceptable";
   // Status checking only works with BATCHED backend (PER_MOLECULE doesn't track detailed convergence yet)
   if (backend == nvMolKit::BfgsBackend::BATCHED) {
     std::vector<int16_t> gotStatuses(systemDevice.energyOuts.size());
