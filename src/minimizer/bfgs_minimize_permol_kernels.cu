@@ -15,7 +15,7 @@ constexpr double FUNCTOL = 1e-4;
 constexpr double MOVETOL = 1e-7;
 constexpr double TOLX = 4. * 3e-8;
 
-__device__ void setMaxStep(const double* pos, const int numTerms, double* maxStepOut,
+__device__ void setMaxStep(const double* pos, const int numTerms, double* maxStepOutSquared,
                            typename cub::BlockReduce<double, BLOCK_SIZE>::TempStorage& tempStorage) {
   double sumSquaredPos = 0.0;
   for (int i = threadIdx.x; i < numTerms; i += blockDim.x) {
@@ -26,17 +26,17 @@ __device__ void setMaxStep(const double* pos, const int numTerms, double* maxSte
 
   const double squaredSum = BlockReduce(tempStorage).Sum(sumSquaredPos);
   if (threadIdx.x == 0) {
-    constexpr double maxStepFactor = 100.0;
-    *maxStepOut               = maxStepFactor * max(sqrt(squaredSum), static_cast<double>(numTerms));
+    constexpr double maxStepFactorSquared = 100.0 * 100.0;
+    *maxStepOutSquared = maxStepFactorSquared * max(squaredSum, static_cast<double>(numTerms) * static_cast<double>(numTerms));
   }
 }
 
-__device__ void lineSearchSetup(const int numTerms, const double* posStart, const double* gradStart, const double maxStep, double* dirStart, double& slope,  double& lambdaMin,
+__device__ void lineSearchSetup(const int numTerms, const double* posStart, const double* gradStart, const double maxStepSquared, double* dirStart, double& slope,  double& lambdaMin,
                                 typename cub::BlockReduce<double, BLOCK_SIZE>::TempStorage& tempStorage) {
 
   const int idxInSys = threadIdx.x;
   using BlockReduce = cub::BlockReduce<double, BLOCK_SIZE>;
-  __shared__ double dirSum[1];
+  __shared__ double dirSumSquared;
 
   // ---------------------------------
   //  Scale direction vector if needed
@@ -48,12 +48,13 @@ __device__ void lineSearchSetup(const int numTerms, const double* posStart, cons
   }
   double blockSum = BlockReduce(tempStorage).Sum(sumSquaredLocal);
   if (idxInSys == 0) {
-    dirSum[0] = sqrt(blockSum);
+      dirSumSquared = blockSum;
   }
   __syncthreads();
-  if (dirSum[0] > maxStep) {
+  if (dirSumSquared > maxStepSquared) {
+    double scale = sqrt(maxStepSquared) * rsqrt(dirSumSquared);
     for (int i = idxInSys; i < numTerms; i += blockDim.x) {
-      dirStart[i] *= maxStep / dirSum[0];
+      dirStart[i] *= scale;
     }
   }
   __syncthreads();
@@ -73,7 +74,6 @@ __device__ void lineSearchSetup(const int numTerms, const double* posStart, cons
 
   // Perform block-wide reduction to compute the total sum
   blockSum = BlockReduce(tempStorage).Sum(localSum);
-  __syncthreads();
   
   // The first thread in the block writes the result
   if (idxInSys == 0) {
@@ -84,14 +84,23 @@ __device__ void lineSearchSetup(const int numTerms, const double* posStart, cons
   // ----------------------
   // Compute initial lambda
   // ----------------------
-  double localMax = 0.0;
+  double localMax_numerator = 0.0;
+  double localMax_denominator = 1.0;
   // Each thread computes its local maximum
   for (int i = idxInSys; i < numTerms; i += blockDim.x) {
-    double temp = fabs(dirStart[i]) / fmax(fabs(posStart[i]), 1.0);
-    if (temp > localMax) {
-      localMax = temp;
+    double temp_numerator = fabs(dirStart[i]);
+    double temp_denominator = fmax(fabs(posStart[i]), 1.0);
+    // temp_numerator / temp_denominator > localMax_numerator / localMax_denominator
+    // <=>
+    // temp_numerator * localMax_denominator > localMax_numerator * temp_denominator
+    if (temp_numerator * localMax_denominator > localMax_numerator * temp_denominator) {
+        localMax_numerator = temp_numerator;
+        localMax_denominator = temp_denominator;
     }
+
   }
+  
+  double localMax = localMax_numerator / localMax_denominator;
   // Perform block-wide reduction to find the maximum
   double blockMax = BlockReduce(tempStorage).Reduce(localMax, cubMax());
 
@@ -138,8 +147,13 @@ __device__ bool lineSearchPostEnergy(const bool isFirstIter,
       } else {
         double rhs1 = newE - prevE - lambda * slope;
         double rhs2 = eScratch - prevE - lambda2 * slope;
-        double a = (rhs1 / (lambda * lambda) - rhs2 / (lambda2 * lambda2)) / (lambda - lambda2);
-        double b = (-lambda2 * rhs1 / (lambda * lambda) + lambda * rhs2 / (lambda2 * lambda2)) / (lambda - lambda2);
+        double rLambdaSquared = 1.0 / (lambda * lambda);
+        double rLambda2Squared = 1.0 / (lambda2 * lambda2);
+        double unscaled_a = rhs1 * rLambdaSquared - rhs2 * rLambda2Squared;
+        double unscaled_b = -lambda2 * rhs1 * rLambdaSquared + lambda * rhs2 * rLambda2Squared;
+        double scale = lambda - lambda2;
+        double a = unscaled_a / scale;
+        double b = unscaled_b / scale;
         if (a == 0.0) {
           tmpLambda = -slope / (2.0 * b);
         } else {
@@ -173,17 +187,24 @@ __device__ void setDirection(const int numTerms,
                              const double* grad,
                              bool& converged,
                              typename cub::BlockReduce<double, BLOCK_SIZE>::TempStorage& tempStorage) {
-  double localMax = 0.0;
+  double localMax_numerator = 0.0;
+  double localMax_denominator = 1.0;
   for (int i = threadIdx.x; i < numTerms; i += blockDim.x) {
     xi[i] = posFromLineSearch[i] - pos[i];
     dGrad[i] = grad[i];
     
-    double temp = fabs(xi[i]) / fmax(fabs(posFromLineSearch[i]), 1.0);
-    if (temp > localMax) {
-      localMax = temp;
+    double temp_numerator = fabs(xi[i]);
+    double temp_denominator = fmax(fabs(posFromLineSearch[i]), 1.0);
+    // temp_numerator / temp_denominator > localMax_numerator / localMax_denominator
+    // <=>
+    // temp_numerator * localMax_denominator > localMax_numerator * temp_denominator
+    if (temp_numerator * localMax_denominator > localMax_numerator * temp_denominator) {
+      localMax_numerator = temp_numerator;
+      localMax_denominator = temp_denominator;
     }
   }
   
+  double localMax = localMax_numerator / localMax_denominator;
   double blockMax = cub::BlockReduce<double, BLOCK_SIZE>(tempStorage).Reduce(localMax, cubMax());
   
   if (threadIdx.x == 0 && blockMax < TOLX) {
@@ -199,7 +220,9 @@ __device__ void scaleGrad(const int numTerms, double* grad, double& gradScale,
   
   double maxGrad = -1e8;
   for (int i = threadIdx.x; i < numTerms; i += blockDim.x) {
-    grad[i] *= gradScale;
+    if constexpr (scaleGrads) {
+      grad[i] *= gradScale;
+    }
     if (grad[i] > maxGrad) {
       maxGrad = grad[i];
     }
