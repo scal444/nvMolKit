@@ -15,44 +15,45 @@ constexpr double FUNCTOL = 1e-4;
 constexpr double MOVETOL = 1e-7;
 constexpr double TOLX = 4. * 3e-8;
 
-__device__ void setMaxStep(const double* pos, const int numTerms, double* maxStepOutSquared,
+__device__ void setMaxStep(const double* pos, const int numTerms, float* maxStepOutSquared,
                            typename cub::BlockReduce<double, BLOCK_SIZE>::TempStorage& tempStorage) {
-  double sumSquaredPos = 0.0;
+  float sumSquaredPos = 0.0;
   for (int i = threadIdx.x; i < numTerms; i += blockDim.x) {
-    double dx2 = pos[i] * pos[i];
+    float dx2 = pos[i] * pos[i];
     sumSquaredPos += dx2;
   }
   using BlockReduce = cub::BlockReduce<double, BLOCK_SIZE>;
 
-  const double squaredSum = BlockReduce(tempStorage).Sum(sumSquaredPos);
+  const float squaredSum = BlockReduce(tempStorage).Sum(sumSquaredPos);
   if (threadIdx.x == 0) {
-    constexpr double maxStepFactorSquared = 100.0 * 100.0;
-    *maxStepOutSquared = maxStepFactorSquared * max(squaredSum, static_cast<double>(numTerms) * static_cast<double>(numTerms));
+    constexpr float maxStepFactorSquared = 100.0 * 100.0;
+    *maxStepOutSquared = maxStepFactorSquared * max(squaredSum, static_cast<float>(numTerms) * static_cast<float>(numTerms));
   }
 }
 
-__device__ void lineSearchSetup(const int numTerms, const double* posStart, const double* gradStart, const double maxStepSquared, double* dirStart, double& slope,  double& lambdaMin,
+__device__ void lineSearchSetup(const int numTerms, const double* posStart, const double* gradStart, const float maxStepSquared, double* dirStart, double& slope,  double& lambdaMin,
                                 typename cub::BlockReduce<double, BLOCK_SIZE>::TempStorage& tempStorage) {
 
   const int idxInSys = threadIdx.x;
   using BlockReduce = cub::BlockReduce<double, BLOCK_SIZE>;
-  __shared__ double dirSumSquared;
+  __shared__ float dirSumSquared;
 
   // ---------------------------------
   //  Scale direction vector if needed
   // ---------------------------------
-  double sumSquaredLocal = 0.0;
+  float sumSquaredLocal = 0.0;
   for (int i = idxInSys; i < numTerms; i += blockDim.x) {
-    double dx2 = dirStart[i] * dirStart[i];
+    float dx2 = dirStart[i] * dirStart[i];
     sumSquaredLocal += dx2;
   }
-  double blockSum = BlockReduce(tempStorage).Sum(sumSquaredLocal);
+  float blockSum = BlockReduce(tempStorage).Sum(sumSquaredLocal);
   if (idxInSys == 0) {
       dirSumSquared = blockSum;
   }
   __syncthreads();
   if (dirSumSquared > maxStepSquared) {
-    double scale = sqrt(maxStepSquared) * rsqrt(dirSumSquared);
+    const float inverseScaleSquared = dirSumSquared / maxStepSquared;
+    const float scale = rsqrtf(inverseScaleSquared);
     for (int i = idxInSys; i < numTerms; i += blockDim.x) {
       dirStart[i] *= scale;
     }
@@ -62,9 +63,9 @@ __device__ void lineSearchSetup(const int numTerms, const double* posStart, cons
   // -------------------------
   // Set slope, check validity
   // -------------------------
-  double localSum = 0.0;
-  double localGradSum = 0.0;
-  double localDirSum = 0.0;
+  float localSum = 0.0;
+  float localGradSum = 0.0;
+  float localDirSum = 0.0;
   // Each thread computes its partial sum
   for (int i = idxInSys; i < numTerms; i += blockDim.x) {
     localSum += dirStart[i] * gradStart[i];
@@ -84,12 +85,12 @@ __device__ void lineSearchSetup(const int numTerms, const double* posStart, cons
   // ----------------------
   // Compute initial lambda
   // ----------------------
-  double localMax_numerator = 0.0;
-  double localMax_denominator = 1.0;
+  float localMax_numerator = 0.0;
+  float localMax_denominator = 1.0;
   // Each thread computes its local maximum
   for (int i = idxInSys; i < numTerms; i += blockDim.x) {
-    double temp_numerator = fabs(dirStart[i]);
-    double temp_denominator = fmax(fabs(posStart[i]), 1.0);
+    float temp_numerator = fabs(dirStart[i]);
+    float temp_denominator = fmax(fabs(posStart[i]), 1.0);
     // temp_numerator / temp_denominator > localMax_numerator / localMax_denominator
     // <=>
     // temp_numerator * localMax_denominator > localMax_numerator * temp_denominator
@@ -100,20 +101,20 @@ __device__ void lineSearchSetup(const int numTerms, const double* posStart, cons
 
   }
   
-  double localMax = localMax_numerator / localMax_denominator;
+  float localInvMax = localMax_denominator / (localMax_numerator > 0.0f ? localMax_numerator : 1.0e-20f);
   // Perform block-wide reduction to find the maximum
-  double blockMax = BlockReduce(tempStorage).Reduce(localMax, cubMax());
+  float blockInvMax = BlockReduce(tempStorage).Reduce(static_cast<double>(localInvMax), cubMin());
 
   // The first thread in the block writes the result
   if (threadIdx.x == 0) {
-    lambdaMin = MOVETOL / blockMax;
+    lambdaMin = static_cast<float>(MOVETOL) * blockInvMax;
   }
 }
 
 __device__ void lineSearchPerturb(const int numTerms, 
                                   const double* refPos,
                                   const double* dirStart,
-                                  const double lambda,
+                                  const float lambda,
                                   double* scratchPos) {
   for (int i = threadIdx.x; i < numTerms; i += blockDim.x) {
     scratchPos[i] = refPos[i] + lambda * dirStart[i];
@@ -122,57 +123,48 @@ __device__ void lineSearchPerturb(const int numTerms,
 }
 
 __device__ bool lineSearchPostEnergy(const bool isFirstIter,
-                                     const double prevE,
-                                     const double newE,
-                                     const double slope,
-                                     const double lambda,
-                                     const double lambdaMin,
+                                     const float prevE,
+                                     const float newE,
+                                     const float slope,
+                                     const float lambda,
+                                     const float lambdaMin,
                                      double& lambda2,
                                      double& eScratch,
                                      double& lambdaOut) {
   bool converged = false;
   
   if (threadIdx.x == 0) {
-    double eDiff = newE - prevE;
-    double threshold = FUNCTOL * lambda * slope;
-    if (lambda < lambdaMin) {
-      converged = true;
-    } else if (eDiff <= threshold) {
+    const float eDiff = newE - prevE;
+    if (lambda < lambdaMin || eDiff <= FUNCTOL * lambda * slope) {
       converged = true;
     } else {
-      // Need to backtrack
-      double tmpLambda;
+      float tmpLambda;
       if (isFirstIter) {
-        tmpLambda = -slope / (2.0 * (newE - prevE - slope));
+        tmpLambda = -slope / (2.0 * (eDiff - slope));
       } else {
-        double rhs1 = newE - prevE - lambda * slope;
-        double rhs2 = eScratch - prevE - lambda2 * slope;
-        double rLambdaSquared = 1.0 / (lambda * lambda);
-        double rLambda2Squared = 1.0 / (lambda2 * lambda2);
-        double unscaled_a = rhs1 * rLambdaSquared - rhs2 * rLambda2Squared;
-        double unscaled_b = -lambda2 * rhs1 * rLambdaSquared + lambda * rhs2 * rLambda2Squared;
-        double scale = lambda - lambda2;
-        double a = unscaled_a / scale;
-        double b = unscaled_b / scale;
-        if (a == 0.0) {
+        const float rhs1 = eDiff - lambda * slope;
+        const float rhs2 = eScratch - prevE - lambda2 * slope;
+        const float rLambda = 1.0f / static_cast<float>(lambda);
+        const float rLambda2 = 1.0f / static_cast<float>(lambda2);
+        const float rScale = 1.0f / (lambda - lambda2);
+        const float a = (rhs1 * rLambda * rLambda - rhs2 * rLambda2 * rLambda2) * rScale;
+        const float b = (-lambda2 * rhs1 * rLambda * rLambda + lambda * rhs2 * rLambda2 * rLambda2) * rScale;
+        if (a == 0.0f) {
           tmpLambda = -slope / (2.0 * b);
         } else {
-          double disc = b * b - 3 * a * slope;
-          if (disc < 0.0) {
+          const float disc = b * b - 3.0f * a * slope;
+          if (disc < 0.0f) {
             tmpLambda = 0.5 * lambda;
-          } else if (b <= 0.0) {
-            tmpLambda = (-b + sqrt(disc)) / (3.0 * a);
           } else {
-            tmpLambda = -slope / (b + sqrt(disc));
+            const float sqrtDisc = sqrtf(disc);
+            tmpLambda = (b <= 0.0f) ? (-b + sqrtDisc) / (3.0f * a) : -slope / (b + sqrtDisc);
           }
         }
-        if (tmpLambda > 0.5 * lambda) {
-          tmpLambda = 0.5 * lambda;
-        }
+        tmpLambda = fminf(tmpLambda, 0.5 * lambda);
       }
       lambda2 = lambda;
       eScratch = newE;
-      lambdaOut = max(tmpLambda, 0.1 * lambda);
+      lambdaOut = fmaxf(tmpLambda, 0.1 * lambda);
     }
   }
   __syncthreads();
@@ -187,14 +179,14 @@ __device__ void setDirection(const int numTerms,
                              const double* grad,
                              bool& converged,
                              typename cub::BlockReduce<double, BLOCK_SIZE>::TempStorage& tempStorage) {
-  double localMax_numerator = 0.0;
-  double localMax_denominator = 1.0;
+  float localMax_numerator = 0.0;
+  float localMax_denominator = 1.0;
   for (int i = threadIdx.x; i < numTerms; i += blockDim.x) {
     xi[i] = posFromLineSearch[i] - pos[i];
     dGrad[i] = grad[i];
     
-    double temp_numerator = fabs(xi[i]);
-    double temp_denominator = fmax(fabs(posFromLineSearch[i]), 1.0);
+    float temp_numerator = fabs(xi[i]);
+    float temp_denominator = fmax(fabs(posFromLineSearch[i]), 1.0);
     // temp_numerator / temp_denominator > localMax_numerator / localMax_denominator
     // <=>
     // temp_numerator * localMax_denominator > localMax_numerator * temp_denominator
@@ -204,8 +196,8 @@ __device__ void setDirection(const int numTerms,
     }
   }
   
-  double localMax = localMax_numerator / localMax_denominator;
-  double blockMax = cub::BlockReduce<double, BLOCK_SIZE>(tempStorage).Reduce(localMax, cubMax());
+  float localMax = localMax_numerator / localMax_denominator;
+  float blockMax = cub::BlockReduce<double, BLOCK_SIZE>(tempStorage).Reduce(localMax, cubMax());
   
   if (threadIdx.x == 0 && blockMax < TOLX) {
     converged = true;
@@ -384,7 +376,7 @@ __device__ void updateInverseHessian(const int numTerms,
 }  // namespace
 
 template <int MaxAtoms, bool UseSharedMem>
-__global__ __launch_bounds__(BLOCK_SIZE, 12) void bfgsMinimizeKernel(const int numIters,
+__global__ void bfgsMinimizeKernel(const int numIters,
                                    const double gradTol,
                                    const bool scaleGrads,
                                    const MMFF::EnergyForceContribsDevicePtr* terms,
@@ -446,7 +438,7 @@ __global__ __launch_bounds__(BLOCK_SIZE, 12) void bfgsMinimizeKernel(const int n
   }
 
   // Shared scalars
-  __shared__ double maxStep;
+  __shared__ float maxStep;
   __shared__ double prevE;
   __shared__ double currE;
   __shared__ double slope;

@@ -20,9 +20,11 @@
 
 #if CUDART_VERSION >= 12090
 using cubMax = cuda::maximum<>;
+using cubMin = cuda::minimum<>;
 using cubSum = cuda::std::plus<>;
 #else
 using cubMax = cub::Max;
+using cubMin = cub::Min;
 using cubSum = cub::Sum;
 #endif
 #endif  // NVMOLKIT_CUB_HELPERS_H

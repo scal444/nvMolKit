@@ -198,34 +198,38 @@ static __device__ __forceinline__ void vDWGrad(const double* pos,
                                                const double  R_ij_star,
                                                const double  wellDepth,
                                                double*       grad) {
-  constexpr double vdw1   = 1.07;
-  constexpr double vdw1m1 = vdw1 - 1.0;
-  constexpr double vdw2   = 1.12;
-  constexpr double vdw2m1 = vdw2 - 1.0;
-  constexpr double vdw2t7 = vdw2 * 7.0;
+  constexpr float vdw1   = 1.07;
+  constexpr float vdw1m1 = vdw1 - 1.0;
+  constexpr float vdw2   = 1.12;
+  constexpr float vdw2m1 = vdw2 - 1.0;
+  constexpr float vdw2t7 = vdw2 * 7.0;
 
-  const double distance = sqrt(distanceSquared(pos, idx1, idx2));
+  const double invDistance = rsqrtf(distanceSquared(pos, idx1, idx2));
+  const double distance = 1.0f / invDistance;
 
-  const double q         = distance / R_ij_star;
-  const double q2        = q * q;
-  const double q6        = q2 * q2 * q2;
-  const double q7        = q6 * q;
-  const double q7pvdw2m1 = q7 + vdw2m1;
-  const double t         = vdw1 / (q + vdw1 - 1.0);
-  const double t2        = t * t;
-  const double t7        = t2 * t2 * t2 * t;
-  const double dE_dr     = wellDepth / R_ij_star * t7 *
-                       (-vdw2t7 * q6 / (q7pvdw2m1 * q7pvdw2m1) + ((-vdw2t7 / q7pvdw2m1 + 14.0) / (q + vdw1m1)));
+  const float invRIJStar = 1.0f / R_ij_star;
 
-  double term1x, term1y, term1z;
+  const float q         = distance * invRIJStar;
+  const float q2        = q * q;
+  const float q6        = q2 * q2 * q2;
+  const float q7        = q6 * q;
+  const float q7pvdw2m1 = q7 + vdw2m1;
+  const float invQ7Term = 1.0f / q7pvdw2m1;
+  const float t         = vdw1 / (q + vdw1 - 1.0);
+  const float t2        = t * t;
+  const float t7        = t2 * t2 * t2 * t;
+  const float dE_dr     = wellDepth * invRIJStar * t7 *
+                       (-vdw2t7 * q6 * invQ7Term * invQ7Term + ((-vdw2t7 * invQ7Term + 14.0) / (q + vdw1m1)));
+
+  float term1x, term1y, term1z;
   if (distance <= 0.0) {
-    term1x = R_ij_star * 0.01;
-    term1y = R_ij_star * 0.01;
-    term1z = R_ij_star * 0.01;
+    term1x = R_ij_star * 0.01f;
+    term1y = R_ij_star * 0.01f;
+    term1z = R_ij_star * 0.01f;
   } else {
-    term1x = dE_dr * (pos[3 * idx1 + 0] - pos[3 * idx2 + 0]) / distance;
-    term1y = dE_dr * (pos[3 * idx1 + 1] - pos[3 * idx2 + 1]) / distance;
-    term1z = dE_dr * (pos[3 * idx1 + 2] - pos[3 * idx2 + 2]) / distance;
+    term1x = dE_dr * (pos[3 * idx1 + 0] - pos[3 * idx2 + 0]) * invDistance;
+    term1y = dE_dr * (pos[3 * idx1 + 1] - pos[3 * idx2 + 1]) * invDistance;
+    term1z = dE_dr * (pos[3 * idx1 + 2] - pos[3 * idx2 + 2]) * invDistance;
   }
 
   atomicAdd(&grad[3 * idx1 + 0], term1x);
@@ -250,7 +254,7 @@ static __device__ __forceinline__ double bondStretchEnergy(const double* pos,
   constexpr double csFactorDistSquared = 7.0 / 12.0 * csFactorDist * csFactorDist;
 
   const double distSquared = distanceSquared(pos, idx1, idx2);
-  const double distance    = sqrt(distSquared);
+  const double distance    = sqrtf(static_cast<float>(distSquared));
 
   const double deltaR  = distance - r0;
   const double deltaR2 = deltaR * deltaR;
