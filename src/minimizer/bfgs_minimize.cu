@@ -373,6 +373,12 @@ BfgsBatchMinimizer::BfgsBatchMinimizer(const int dataDim, DebugLevel debugLevel,
         perMolBinListsDevice_[i].setStream(stream_);
       }
     }
+    
+    // Allocate device array to hold scratch buffer pointers (5 buffers)
+    if (stream_) {
+      scratchBuffersDevice_.setStream(stream_);
+    }
+    scratchBuffersDevice_.resize(5);
   }
 
   if (stream_ != nullptr) {
@@ -1020,14 +1026,18 @@ bool BfgsBatchMinimizer::minimizeWithMMFF(const int                             
   // Use per-molecule kernel
   const ScopedNvtxRange bfgsPerMolecule("BfgsBatchMinimizer::perMoleculeMinimize");
   
-  // Prepare scratch buffer pointers array
-  double* scratchBuffers[5] = {
+  // Prepare scratch buffer pointers array on host
+  double* scratchBuffersHost[5] = {
     grad.data(),              // Used as localPos in global memory mode
     lineSearchDir_.data(),    // localDir
     scratchPositions_.data(), // scratchPos
     hessDGrad_.data(),        // dGrad
     scratchGrad_.data()       // oldPos
   };
+  
+  // Copy pointer array to device
+  cudaCheckError(cudaMemcpyAsync(scratchBuffersDevice_.data(), scratchBuffersHost, 
+                                  5 * sizeof(double*), cudaMemcpyHostToDevice, stream_));
   
   // Prepare binning data pointers and counts
   int binCounts[5];
@@ -1049,7 +1059,7 @@ bool BfgsBatchMinimizer::minimizeWithMMFF(const int                             
                                                    positions.data(),
                                                    grad.data(),
                                                    inverseHessian_.data(),
-                                                   scratchBuffers,
+                                                   scratchBuffersDevice_.data(),
                                                    energyOuts.data(),
                                                    dataDim_,
                                                    stream_);

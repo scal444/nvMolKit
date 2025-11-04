@@ -183,6 +183,9 @@ struct BfgsBatchMinimizer {
   // Per-molecule kernel binning data (used when backend_ == PER_MOLECULE)
   std::vector<std::vector<int>> perMolBinLists_;      // Molecule IDs for each bin
   std::vector<AsyncDeviceVector<int>> perMolBinListsDevice_;  // Device copies of bin lists
+  
+  // Device-side array of scratch buffer pointers (used by per-molecule kernel)
+  AsyncDeviceVector<double*> scratchBuffersDevice_;
 
   cudaStream_t stream_ = nullptr;
 };

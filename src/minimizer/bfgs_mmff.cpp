@@ -22,6 +22,7 @@
 #include "device.h"
 #include "ff_utils.h"
 #include "mmff_flattened_builder.h"
+#include "nvtx.h"
 #include "openmp_helpers.h"
 
 namespace nvMolKit::MMFF {
@@ -31,6 +32,9 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
                                                                 const double                nonBondedThreshold,
                                                                 const BatchHardwareOptions& perfOptions,
                                                                 const BfgsBackend           backend) {
+  ScopedNvtxRange fullMinimizeRange("BFGS MMFF Optimize Molecules Confs");
+  ScopedNvtxRange setupRange("BFGS MMFF Optimize Molecules Confs");
+
   // Extract values from performance options
   const size_t batchSize = perfOptions.batchSize == -1 ? 500 : perfOptions.batchSize;
 
@@ -95,6 +99,7 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
     devicesPerThread[i] = gpuId;  // Round-robin assignment of devices
   }
   detail::OpenMPExceptionRegistry exceptionHandler;
+  setupRange.pop();
 #pragma omp parallel for num_threads(numThreads) schedule(dynamic) default(none) shared(allConformers,        \
                                                                                           moleculeEnergies,   \
                                                                                           totalConformers,    \
@@ -107,6 +112,8 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
                                                                                           exceptionHandler)
   for (size_t batchStart = 0; batchStart < totalConformers; batchStart += effectiveBatchSize) {
     try {
+      ScopedNvtxRange singleBatchRange("OpenMP loop thread");
+      ScopedNvtxRange setupBatchRange("OpenMP loop preprocessing");
       const int        threadId = omp_get_thread_num();
       const WithDevice dev(devicesPerThread[threadId]);
       const size_t     batchEnd = std::min(batchStart + effectiveBatchSize, totalConformers);
@@ -156,7 +163,7 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
 
       nvMolKit::BfgsBatchMinimizer bfgsMinimizer(/*dataDim=*/3, nvMolKit::DebugLevel::NONE, true, streamPtr, backend);
       constexpr double             gradTol = 1e-4;  // hard-coded in RDKit.
-      
+      setupBatchRange.pop();
       if (backend == BfgsBackend::BATCHED) {
         auto eFunc = [&](const double* positions) { nvMolKit::MMFF::computeEnergy(systemDevice, positions, streamPtr); };
         auto gFunc = [&]() { nvMolKit::MMFF::computeGradients(systemDevice, streamPtr); };
@@ -184,7 +191,7 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
                                        terms,
                                        systemIndices);
       }
-
+      ScopedNvtxRange finalizeBatchRange("OpenMP loop finalizing batch");
       std::vector<double> finalPos(systemHost.positions.size());
       systemDevice.positions.copyToHost(finalPos);
 

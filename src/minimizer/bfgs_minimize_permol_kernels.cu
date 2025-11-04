@@ -376,6 +376,7 @@ __device__ void updateInverseHessian(const int numTerms,
 }  // namespace
 
 template <int MaxAtoms, bool UseSharedMem>
+__maxnreg__(40)
 __global__ void bfgsMinimizeKernel(const int numIters,
                                    const double gradTol,
                                    const bool scaleGrads,
