@@ -361,8 +361,10 @@ BfgsBatchMinimizer::BfgsBatchMinimizer(const int dataDim, DebugLevel debugLevel,
   scaleGrads_ = scaleGrads;
   stream_     = stream;
   backend_    = backend;
-  loopStatusHost_.resize(1);
-  
+  if (backend_ == BfgsBackend::BATCHED) {
+    loopStatusHost_.resize(1);
+  }
+
   // Initialize per-molecule binning structures if using that backend
   if (backend_ == BfgsBackend::PER_MOLECULE) {
     constexpr int NUM_SIZE_BINS = 5;  // 32, 64, 128, 256, 2048
