@@ -17,6 +17,7 @@
 
 #include <GraphMol/ROMol.h>
 #include <omp.h>
+#include <unordered_map>
 
 #include "bfgs_minimize.h"
 #include "device.h"
@@ -28,6 +29,12 @@
 
 namespace nvMolKit::MMFF {
 
+//! Cached molecule-specific preprocessing
+struct CachedMoleculeData {
+  EnergyForceContribsHost ffParams;
+  std::vector<int>        atomNumbers;
+};
+
 //! Thread-local pinned memory buffers for async transfers
 struct ThreadLocalBuffers {
   PinnedHostVector<double> positions;
@@ -35,14 +42,16 @@ struct ThreadLocalBuffers {
   PinnedHostVector<double> initialPositions;
 
   void ensureCapacity(const size_t positionsSize, const size_t energiesSize) {
+    constexpr double extraCapacityFactor = 1.3;
+    const auto newSize = static_cast<size_t>(static_cast<double>(positionsSize) * extraCapacityFactor);
     if (positions.size() < positionsSize) {
-      positions.resize(positionsSize);
+      positions.resize(newSize);
     }
     if (energies.size() < energiesSize) {
-      energies.resize(energiesSize);
+      energies.resize(newSize);
     }
     if (initialPositions.size() < positionsSize) {
-      initialPositions.resize(positionsSize);
+      initialPositions.resize(newSize);
     }
   }
 };
@@ -121,7 +130,6 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
 
   // Create thread-local pinned memory buffers for async transfers
   std::vector<ThreadLocalBuffers> threadBuffers(numThreads);
-
   detail::OpenMPExceptionRegistry exceptionHandler;
   setupRange.pop();
 #pragma omp parallel for num_threads(numThreads) schedule(dynamic) default(none) shared(allConformers,        \
@@ -137,6 +145,7 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
                                                                                           exceptionHandler)
   for (size_t batchStart = 0; batchStart < totalConformers; batchStart += effectiveBatchSize) {
     try {
+      std::unordered_map<RDKit::ROMol*, CachedMoleculeData> moleculeCache;
       ScopedNvtxRange singleBatchRange("OpenMP loop thread");
       ScopedNvtxRange setupBatchRange("OpenMP loop preprocessing");
       const int        threadId = omp_get_thread_num();
@@ -163,13 +172,20 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
         auto*          mol      = confInfo.mol;
         const uint32_t numAtoms = mol->getNumAtoms();
 
-        auto             ffParams = constructForcefieldContribs(*mol, nonBondedThreshold);
-        std::vector<int> atomNumbers;
-        atomNumbers.reserve(numAtoms);
-        for (uint32_t i = 0; i < numAtoms; ++i) {
-          atomNumbers.push_back(mol->getAtomWithIdx(i)->getAtomicNum());
+        // Look up or compute cached forcefield parameters and atom numbers
+        auto it = moleculeCache.find(mol);
+        if (it == moleculeCache.end()) {
+          ScopedNvtxRange computeCacheRange("Preprocess single molecule");
+          CachedMoleculeData cached;
+          cached.ffParams = constructForcefieldContribs(*mol, nonBondedThreshold);
+          cached.atomNumbers.reserve(numAtoms);
+          for (uint32_t i = 0; i < numAtoms; ++i) {
+            cached.atomNumbers.push_back(mol->getAtomWithIdx(i)->getAtomicNum());
+          }
+          it = moleculeCache.insert({mol, std::move(cached)}).first;
         }
-
+        auto& [ffParams, atomNumbers] = it->second;
+        ScopedNvtxRange addToBatchRange("Add conformer to batch data");
         // Add this conformer to the batch
         conformerAtomStarts.push_back(currentAtomOffset);
         currentAtomOffset += numAtoms;

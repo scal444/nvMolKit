@@ -40,9 +40,10 @@ void confPosToVect(const RDKit::Conformer& conf, std::vector<double>& positions)
 
   // Fill positions vector with conformer coordinates
   for (unsigned int i = 0; i < numAtoms; ++i) {
-    positions[3 * i]     = conf.getAtomPos(i).x;
-    positions[3 * i + 1] = conf.getAtomPos(i).y;
-    positions[3 * i + 2] = conf.getAtomPos(i).z;
+    const auto& rdkitPos = conf.getAtomPos(i);
+    positions[3 * i]     = rdkitPos.x;
+    positions[3 * i + 1] = rdkitPos.y;
+    positions[3 * i + 2] = rdkitPos.z;
   }
 }
 
