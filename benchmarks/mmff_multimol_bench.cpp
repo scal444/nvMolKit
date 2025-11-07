@@ -50,6 +50,8 @@ void printHelp(const char* progName) {
   std::cout << "  -w, --do_warmup <bool>              Run warmup before benchmarking [default: true]\n";
   std::cout
     << "  -e, --do_energy_check <bool>        Compare energies between RDKit and nvMolKit results [default: true]\n";
+  std::cout
+    << "  -v, --validate <bool>               Validate nvMolKit energies using RDKit energy calculator (requires -r and -e) [default: true]\n";
   std::cout << "  -B, --num_concurrent_batches <int>  Number of concurrent batches per GPU [default: 10]\n";
   std::cout << "  -b, --batch_size <int>              Batch size for processing [default: 1000]\n";
   std::cout << "  -g, --num_gpus <int>                Number of GPUs to use (IDs 0..n-1). If omitted, use all GPUs.\n";
@@ -114,6 +116,31 @@ std::vector<std::vector<double>> runNvMolKit(std::vector<RDKit::ROMol*>& molsPtr
   return energies;
 }
 
+std::vector<std::vector<double>> calculateRDKitEnergies(std::vector<RDKit::ROMol*>& molsPtrs) {
+  std::vector<std::vector<double>> allEnergies;
+  allEnergies.reserve(molsPtrs.size());
+  for (auto* mol : molsPtrs) {
+    std::vector<double> energies;
+    energies.reserve(mol->getNumConformers());
+    try {
+      RDKit::MMFF::MMFFMolProperties mmffProps(*mol);
+      for (auto confIt = mol->beginConformers(); confIt != mol->endConformers(); ++confIt) {
+        const RDKit::Conformer* conf   = &(**confIt);
+        const int confId = conf->getId();
+        auto      ff     = RDKit::MMFF::constructForceField(*mol, &mmffProps, 100.0, confId);
+        if (ff) {
+          const double energy = ff->calcEnergy();
+          energies.push_back(energy);
+        }
+      }
+    } catch (const std::exception& e) {
+      std::cerr << "Warning: RDKit energy calculation failed for a molecule: " << e.what() << std::endl;
+    }
+    allEnergies.push_back(std::move(energies));
+  }
+  return allEnergies;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -123,6 +150,7 @@ int main(int argc, char* argv[]) {
   bool                  doRdkit            = true;
   bool                  doWarmup           = true;
   bool                  doEnergyCheck      = true;
+  bool                  doValidate         = true;
   int                   batchSize          = 1000;
   int                   batchesPerGpu      = 10;
   int                   maxIters           = 1000;
@@ -138,6 +166,7 @@ int main(int argc, char* argv[]) {
     {              "do_rdkit", required_argument, 0, 'r'},
     {             "do_warmup", required_argument, 0, 'w'},
     {       "do_energy_check", required_argument, 0, 'e'},
+    {              "validate", required_argument, 0, 'v'},
     {"num_concurrent_batches", required_argument, 0, 'B'},
     {            "batch_size", required_argument, 0, 'b'},
     {              "num_gpus", required_argument, 0, 'g'},
@@ -150,7 +179,7 @@ int main(int argc, char* argv[]) {
 
   int option_index = 0;
   int c;
-  while ((c = getopt_long(argc, argv, "f:n:c:r:w:e:B:b:g:t:p:k:h", long_options, &option_index)) != -1) {
+  while ((c = getopt_long(argc, argv, "f:n:c:r:w:e:v:B:b:g:t:p:k:h", long_options, &option_index)) != -1) {
     switch (c) {
       case 'f':
         filePath = optarg;
@@ -187,6 +216,9 @@ int main(int argc, char* argv[]) {
         break;
       case 'e':
         doEnergyCheck = parseBoolArg(optarg);
+        break;
+      case 'v':
+        doValidate = parseBoolArg(optarg);
         break;
       case 'B':
         try {
@@ -294,6 +326,7 @@ int main(int argc, char* argv[]) {
   std::cout << "  Run RDKit comparison: " << (doRdkit ? "yes" : "no") << "\n";
   std::cout << "  Run warmup: " << (doWarmup ? "yes" : "no") << "\n";
   std::cout << "  Compare energies: " << (doEnergyCheck ? "yes" : "no") << "\n";
+  std::cout << "  Validate energies: " << (doValidate ? "yes" : "no") << "\n";
   std::cout << "  Batch size: " << batchSize << "\n";
   std::cout << "  Number of concurrent batches: " << batchesPerGpu << "\n";
   std::cout << "  Number of GPUs: " << (numGpus > 0 ? std::to_string(numGpus) : std::string("all")) << "\n";
@@ -418,29 +451,88 @@ int main(int argc, char* argv[]) {
     nvmolkitPtrs.push_back(m.get());
 
   // Run benchmarks
+  auto rdkitCalculatedEnergiesPre = calculateRDKitEnergies(nvmolkitPtrs);
   auto                             nvmolkitRes = runNvMolKit(nvmolkitPtrs, maxIters, batchSize, batchesPerGpu, numGpus, backend);
+  auto rdkitCalculatedEnergiesPost = calculateRDKitEnergies(nvmolkitPtrs);
   std::vector<std::vector<double>> rdkitRes;
   if (doRdkit) {
     rdkitRes = runRDKit(rdkitPtrs, maxIters, rdkitThreadsResolved);
   }
+  auto rdkitAfter = calculateRDKitEnergies(rdkitPtrs);
 
   if (doEnergyCheck && doRdkit) {
+    std::vector<double> diffs;
     int totalDiffs = 0;
     int totalConfs = 0;
+    int maxIdx = 0;
+    int minIdx = 0;
     for (size_t i = 0; i < nvmolkitRes.size(); ++i) {
       const auto&  a = nvmolkitRes[i];
       const auto&  b = rdkitRes[i];
       const size_t n = std::min(a.size(), b.size());
       for (size_t j = 0; j < n; ++j) {
         totalConfs++;
-        if (std::abs(a[j] - b[j]) > 1e-2)
+        if (std::abs(a[j] - b[j]) > 1e-2) {
           totalDiffs++;
+        }
+        diffs.push_back(b[j] - a[j]);
+        if (diffs.back() > diffs[maxIdx]) {
+          maxIdx = static_cast<int>(diffs.size()) - 1;
+        }
+        if (diffs.back() < diffs[minIdx]) {
+          minIdx = static_cast<int>(diffs.size()) - 1;
+        }
       }
     }
     if (totalDiffs > 0) {
       std::cout << "Differences found: " << totalDiffs << "/" << totalConfs << " conformers differ" << std::endl;
+      const double averageDiff = std::accumulate(diffs.begin(), diffs.end(), 0.0) / static_cast<double>(diffs.size());
+      std::cout << "Average absolute energy difference (nvmolkit - rdkit): " << averageDiff << " kcal/mol" << std::endl;
+      std::cout << "Max delta: " << diffs[maxIdx] << " kcal/mol at index " << maxIdx << std::endl;
+      std::cout << "Min delta: " << diffs[minIdx] << " kcal/mol at index " << minIdx << std::endl;
+      std::sort(diffs.begin(), diffs.end());
+      std::cout << "Median diff (nvmolkit - rdkit) " << diffs[diffs.size() / 2] << " kcal/mol" << std::endl;
+
     } else {
       std::cout << "Perfect match (" << totalConfs << " conformers)" << std::endl;
+    }
+  }
+
+  if (doValidate && doRdkit && doEnergyCheck) {
+    std::cout << "\nValidating nvMolKit energies using RDKit energy calculator..." << std::endl;
+    auto rdkitCalculatedEnergies = calculateRDKitEnergies(nvmolkitPtrs);
+    
+    int    totalValidationConfs  = 0;
+    int    totalValidationFailed = 0;
+    double maxDiff               = 0.0;
+    int    maxDiffIdx            = 0;
+    
+    for (size_t i = 0; i < nvmolkitRes.size(); ++i) {
+      const auto&  nvmolkitEnergies = nvmolkitRes[i];
+      const auto&  calculatedEnergies = rdkitCalculatedEnergies[i];
+      const size_t n = std::min(nvmolkitEnergies.size(), calculatedEnergies.size());
+      
+      for (size_t j = 0; j < n; ++j) {
+        totalValidationConfs++;
+        const double diff = std::abs(nvmolkitEnergies[j] - calculatedEnergies[j]);
+        if (diff > maxDiff) {
+          maxDiff    = diff;
+          maxDiffIdx = totalValidationConfs - 1;
+        }
+        if (diff > 1e-4) {
+          totalValidationFailed++;
+        }
+      }
+    }
+    
+    if (totalValidationFailed > 0) {
+      std::cout << "Validation FAILED: " << totalValidationFailed << "/" << totalValidationConfs 
+                << " conformers differ by more than 1e-4 kcal/mol" << std::endl;
+      std::cout << "Maximum difference: " << maxDiff << " kcal/mol at conformer index " << maxDiffIdx << std::endl;
+    } else {
+      std::cout << "Validation PASSED: All " << totalValidationConfs 
+                << " conformers match within 1e-4 kcal/mol" << std::endl;
+      std::cout << "Maximum difference: " << maxDiff << " kcal/mol" << std::endl;
     }
   }
 

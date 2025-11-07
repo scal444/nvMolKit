@@ -22,7 +22,7 @@ target_link_libraries(ff_utils PRIVATE ${RDKit_LIBS})
 target_include_directories(ff_utils PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_library(mmff mmff.cu mmff_kernels.cu)
-target_link_libraries(mmff PRIVATE device_vector ff_kernel_utils)
+target_link_libraries(mmff PUBLIC device_vector PRIVATE ff_kernel_utils)
 target_include_directories(mmff PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_library(dist_geom dist_geom.cu dist_geom_kernels.cu coord_gen.cu)

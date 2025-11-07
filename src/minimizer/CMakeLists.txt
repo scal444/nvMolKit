@@ -14,18 +14,30 @@
 # the License.
 
 add_library(bfgs bfgs_minimize.cu bfgs_hessian.cu bfgs_minimize_permol_kernels.cu)
-target_link_libraries(bfgs PRIVATE ${RDKit_LIBS} rdkit_mmff_flattened
-                                   device_vector)
+target_link_libraries(bfgs PUBLIC host_vector device_vector PRIVATE ${RDKit_LIBS} rdkit_mmff_flattened
+                                   cub_helpers  cccl_interface)
 target_include_directories(bfgs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_library(bfgs_mmff bfgs_mmff.cpp)
 target_link_libraries(
-  bfgs_mmff PRIVATE ${RDKit_LIBS} rdkit_mmff_flattened device device_vector
-                    bfgs OpenMP::OpenMP_CXX openmp_helpers)
+  bfgs_mmff
+  PUBLIC bfgs
+  PRIVATE ${RDKit_LIBS}
+          rdkit_mmff_flattened
+          device
+          OpenMP::OpenMP_CXX
+          openmp_helpers
+          CUDA::cudart)
 target_include_directories(bfgs_mmff PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_library(bfgs_distgeom bfgs_distgeom.cpp)
 target_link_libraries(
-  bfgs_distgeom PRIVATE ${RDKit_LIBS} dist_geom rdkit_dist_geom_flattened
-                        device_vector etkdg bfgs)
+  bfgs_distgeom
+  PRIVATE ${RDKit_LIBS}
+          dist_geom
+          rdkit_dist_geom_flattened
+          device_vector
+          etkdg
+          bfgs
+          cccl_interface)
 target_include_directories(bfgs_distgeom PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

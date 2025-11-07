@@ -24,7 +24,8 @@ target_include_directories(cuda_error_check
                            INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_library(device_vector INTERFACE)
-target_link_libraries(device_vector INTERFACE CUDA::cudart cuda_error_check)
+target_link_libraries(device_vector INTERFACE CUDA::cudart cuda_error_check
+                                              cccl_interface)
 target_include_directories(device_vector INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_library(host_vector INTERFACE)
@@ -50,5 +51,5 @@ target_link_libraries(openmp_helpers PRIVATE OpenMP::OpenMP_CXX)
 target_include_directories(openmp_helpers INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_library(cub_helpers INTERFACE)
-target_link_libraries(host_vector INTERFACE CUDA::cudart)
+target_link_libraries(cub_helpers INTERFACE CUDA::cudart cccl_interface)
 target_include_directories(cub_helpers INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
