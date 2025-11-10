@@ -430,12 +430,12 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   } else {
     // Global memory for large molecules (>64 atoms) - index into pre-allocated buffers
     const int termStart = atomStart * DIM;
-    localPos = scratchBuffers[0] + termStart;    // Reuse grad buffer as scratch
+    localPos = positions + atomStart * DIM;       // Use main positions array directly (no separate copy)
     localGrad = grad + termStart;                 // Use main gradient buffer
     localDir = scratchBuffers[1] + termStart;     // lineSearchDir
     scratchPos = scratchBuffers[2] + termStart;   // scratchPositions
     dGrad = scratchBuffers[3] + termStart;        // hessDGrad
-    oldPos = scratchBuffers[4] + termStart;       // scratchGrad (repurposed)
+    oldPos = scratchBuffers[4] + termStart;       // scratchGrad (used as oldPos)
   }
 
   // Shared scalars
@@ -457,10 +457,14 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   
   // Initialize positions from global memory
   double* globalPos = positions + atomStart * DIM;
-  for (int i = tid; i < numTerms; i += stride) {
-    localPos[i] = globalPos[i];
+  // For shared memory case, copy to local shared buffer
+  // For non-shared case, localPos already points to globalPos, so no copy needed
+  if constexpr (UseSharedMem) {
+    for (int i = tid; i < numTerms; i += stride) {
+      localPos[i] = globalPos[i];
+    }
+    __syncthreads();
   }
-  __syncthreads();
   
   // Initialize inverse Hessian to identity
   const int hessianSize = numTerms * numTerms;
@@ -486,6 +490,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   if (tid == 0) {
     prevE = blockEnergy;
     energyOuts[molIdx] = blockEnergy;
+    //printf("Initial energy for mol %d: %f\n", static_cast<int>(blockIdx.x), blockEnergy);
   }
   __syncthreads();
   
@@ -497,12 +502,20 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   
   MMFF::molGrad(*terms, *systemIndices, positions, localGrad, molIdx, tid, stride);
   __syncthreads();
-  
+  if (tid == 0) {
+    //printf("Initial grad values 0 and end for mol %d: %f %f\n", static_cast<int>(blockIdx.x), localGrad[0], localGrad[numTerms - 1]);
+
+  }
+
   // Scale gradients
   if (scaleGrads) {
+
     scaleGrad<true>(numTerms, localGrad, gradScale, tempStorage);
   } else {
     scaleGrad<false>(numTerms, localGrad, gradScale, tempStorage);
+  }
+  if (tid == 0) {
+      //printf("Scale grad? : %d, gradScale: %f\n", scaleGrads ? 1 : 0, gradScale);
   }
   
   // Set initial direction as negative gradient
@@ -513,6 +526,9 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   
   // Set max step
   setMaxStep(localPos, numTerms, &maxStep, tempStorage);
+  if (tid == 0) {
+    //printf("Max step squared: %f\n", maxStep);
+  }
   __syncthreads();
   
   // Main BFGS loop
@@ -523,6 +539,10 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   __syncthreads();
   
   while (!converged && currIter < numIters) {
+    if (tid == 0) {
+      //printf("Iter %d", currIter);
+
+    }
     // Save current position before line search
     for (int i = tid; i < numTerms; i += stride) {
       oldPos[i] = localPos[i];
@@ -543,12 +563,15 @@ __global__ void bfgsMinimizeKernel(const int numIters,
     __shared__ int lineSearchIter;
     if (tid == 0) {
       lineSearchIter = 0;
+      //printf("  Line search start: slope=%f, lambdaMin=%f, lambda=%f\n", slope, lambdaMin, lambda);
     }
     __syncthreads();
     
     while (!lineSearchConverged && lineSearchIter < MAX_LINESEARCH_ITERS) {
-      // Perturb positions
-      lineSearchPerturb(numTerms, localPos, localDir, lambda, scratchPos);
+      // Perturb positions from saved oldPos (not localPos, which may have been modified)
+      ////printf("Pre perturb x[0] and x[end]: %f %f\n", localPos[0], localPos[numTerms - 1]);
+      lineSearchPerturb(numTerms, oldPos, localDir, lambda, scratchPos);
+      ////printf("Post perturb x[0] and x[end]: %f %f\n", scratchPos[0], scratchPos[numTerms - 1]);
       
       // Copy to global for energy calculation
       for (int i = tid; i < numTerms; i += stride) {
@@ -562,6 +585,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
       
       if (tid == 0) {
         currE = lsBlockEnergy;
+        //printf("  Line search iter %d, lambda=%f, energy=%f\n", lineSearchIter, lambda, lsBlockEnergy);
       }
       __syncthreads();
       
@@ -589,6 +613,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
     // Update stored energy for next iteration
     if (tid == 0) {
       prevE = currE;
+      //printf("Line search result energy: %f\n", currE);
     }
     __syncthreads();
     

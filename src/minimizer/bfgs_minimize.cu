@@ -140,6 +140,7 @@ __global__ void initializeLineSearchKernel(const int16_t* statuses,
   // The first thread in the block writes the result
   if (isFirstThread) {
     lambdaMins[sysIdx] = MOVETOL / blockMax;
+    //("  LS lambdamin=%f, slope=%f\n", lambdaMins[sysIdx], slopes[sysIdx]);
   }
 }
 
@@ -205,6 +206,7 @@ __global__ void lineSearchPerturbKernel(const int*    atomStarts,
   }
   const double lambda    = lambdas[sysIdx];
   const double lambdaMin = lambdaMins[sysIdx];
+
 
   if (lambda < lambdaMin) {
     if (isFirstThread) {
@@ -915,6 +917,17 @@ void BfgsBatchMinimizer::collectDebugData() {
   stepwiseEnergies.push_back(std::move(energiesHost));
 }
 
+std::vector<double> debugDump(const AsyncDeviceVector<double>& deviceVec) {
+  cudaDeviceSynchronize();
+  std::vector<double> hostVec(deviceVec.size());
+  cudaCheckError(cudaMemcpy(hostVec.data(),
+                             deviceVec.data(),
+                             deviceVec.size() * sizeof(double),
+                             cudaMemcpyDeviceToHost));
+  cudaCheckError(cudaDeviceSynchronize());
+  return hostVec;
+}
+
 bool BfgsBatchMinimizer::minimize(const int                     numIters,
                                   const double                  gradTol,
                                   const std::vector<int>&       atomStartsHost,
@@ -948,8 +961,15 @@ bool BfgsBatchMinimizer::minimize(const int                     numIters,
 
     // Initial E and F
     eFunc(nullptr);
+    std::vector<double> dump = debugDump(energyOuts);
+    //("Initial energy for mol 0: %f\n", dump[0]);
     gFunc();
+    auto graddump  = debugDump(grad);
+    //("Initial grad values 0 and end for mol %d: %f %f\n", 0, graddump[0], graddump.back());
     scaleGrad(/*preLoop=*/true);
+    auto gradscaleddump  = debugDump(gradScales_);
+    //("Scale grad? : %d, gradScale: %f\n", scaleGrads_ ? 1 : 0, gradscaleddump[0]);
+
     collectDebugData();
     // Set up xi as negative grad.
     copyAndInvert(grad, lineSearchDir_);
@@ -958,6 +978,11 @@ bool BfgsBatchMinimizer::minimize(const int                     numIters,
   }
 
   for (int currIter = 0; currIter < numIters && compactAndCountConverged() < numSystems; currIter++) {
+    //("Iter %d\n, ", currIter);
+    {
+      const ScopedNvtxRange bfgsLineSearchSetup("BfgsBatchMinimizer::lineSearchSetup");
+      doLineSearchSetup(energyOuts.data());
+    }
     {
       const ScopedNvtxRange bfgsLineSearch("BfgsBatchMinimizer::lineSearch");
       doLineSearchSetup(energyOuts.data());
@@ -975,7 +1000,8 @@ bool BfgsBatchMinimizer::minimize(const int                     numIters,
         energyBuffer.zero();
         energyOuts.zero();
         eFunc(scratchPositions_.data());
-
+        auto dump2 = debugDump(energyOuts);
+        //("  Line search iter %d, energy for mol 0: %f\n", lineSearchIter, dump2[0]);
         doLineSearchPostEnergy(lineSearchIter);
         lineSearchIter++;
       }
@@ -1030,11 +1056,11 @@ bool BfgsBatchMinimizer::minimizeWithMMFF(const int                             
   
   // Prepare scratch buffer pointers array on host
   double* scratchBuffersHost[5] = {
-    grad.data(),              // Used as localPos in global memory mode
+    grad.data(),              // oldPos for shared memory mode (grad buffer unused for gradients in shared mode)
     lineSearchDir_.data(),    // localDir
     scratchPositions_.data(), // scratchPos
     hessDGrad_.data(),        // dGrad
-    scratchGrad_.data()       // oldPos
+    scratchGrad_.data()       // oldPos for non-shared mode (localPos uses positions array directly in non-shared)
   };
   
   // Copy pointer array to device

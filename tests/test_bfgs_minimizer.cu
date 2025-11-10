@@ -109,7 +109,6 @@ void perturbConformer(RDKit::Conformer& conf, const float delta = 0.1, const int
 class BFGSMinimizerTestFixture : public ::testing::Test {
  protected:
   void setUpMMFFSystems(int numMols, bool duplicateFirstMol = false) {
-    int runningIdx = 0;
     getMols(getTestDataFolderPath() + "/MMFF94_dative.sdf", mols, duplicateFirstMol ? 1 : numMols);
     if (duplicateFirstMol) {
       mols.resize(1);
@@ -118,6 +117,11 @@ class BFGSMinimizerTestFixture : public ::testing::Test {
       }
     }
 
+    setUpCommon();
+  }
+
+  void setUpCommon() {
+    int runningIdx = 0;
     for (const auto& mol : mols) {
       perturbConformer(mol->getConformer(), 0.3, runningIdx++);
       std::vector<double> positions(3 * mol->getNumAtoms());
@@ -779,6 +783,72 @@ TEST_P(BFGSMinimizerBackendTest, E2EMinimizationMultiSystemMultiMolsMatchesConve
                 ::testing::Pointwise(::testing::Eq(), std::vector<int16_t>(numMols, 0)));
   }
 }
+
+TEST_P(BFGSMinimizerBackendTest, E2EMinimizationLargePathMatches) {
+  const nvMolKit::BfgsBackend backend  = GetParam();
+  getMols(getTestDataFolderPath() + "/60plus_atom_mols.sdf", mols, 1);
+  setUpCommon();
+  const int maxIters = 400;
+  nvMolKit::BfgsBatchMinimizer bfgsMinimizer(/*dim=*/3, nvMolKit::DebugLevel::STEPWISE, true, nullptr, backend);
+  
+  if (backend == nvMolKit::BfgsBackend::BATCHED) {
+    auto eFunc = [&](const double* positions) { nvMolKit::MMFF::computeEnergy(systemDevice, positions); };
+    auto gFunc = [&]() { nvMolKit::MMFF::computeGradients(systemDevice); };
+    bfgsMinimizer.minimize(maxIters,
+                          1e-4,
+                          systemHost.indices.atomStarts,
+                          systemDevice.indices.atomStarts,
+                          systemDevice.positions,
+                          systemDevice.grad,
+                          systemDevice.energyOuts,
+                          systemDevice.energyBuffer,
+                          eFunc,
+                          gFunc);
+  } else {
+    auto terms         = nvMolKit::MMFF::toEnergyForceContribsDevicePtr(systemDevice);
+    auto systemIndices = nvMolKit::MMFF::toBatchedIndicesDevicePtr(systemDevice);
+    bfgsMinimizer.minimizeWithMMFF(maxIters,
+                                  1e-4,
+                                  systemHost.indices.atomStarts,
+                                  systemDevice.indices.atomStarts,
+                                  systemDevice.positions,
+                                  systemDevice.grad,
+                                  systemDevice.energyOuts,
+                                  systemDevice.energyBuffer,
+                                  terms,
+                                  systemIndices);
+  }
+
+  std::vector<double> refEnergies;
+  for (auto& mol : mols) {
+    RDKit::MMFF::MMFFOptimizeMolecule(*mol, maxIters, "MMFF94", 100.0);
+    auto                                     molProps = std::make_unique<RDKit::MMFF::MMFFMolProperties>(*mol);
+    std::unique_ptr<ForceFields::ForceField> molFF(RDKit::MMFF::constructForceField(*mol, molProps.get()));
+    refEnergies.push_back(molFF->calcEnergy());
+  }
+
+  std::vector<double> gotEnergies(systemDevice.energyOuts.size());
+  ASSERT_EQ(0,
+            cudaMemcpy(gotEnergies.data(),
+                       systemDevice.energyOuts.data(),
+                       gotEnergies.size() * sizeof(double),
+                       cudaMemcpyDeviceToHost));
+
+  EXPECT_THAT(gotEnergies, ::testing::Pointwise(::testing::DoubleNear(1e-4), refEnergies));
+  
+  // Status checking only works with BATCHED backend (PER_MOLECULE doesn't track detailed convergence yet)
+  if (backend == nvMolKit::BfgsBackend::BATCHED) {
+    std::vector<int16_t> gotStatuses(systemDevice.energyOuts.size());
+    ASSERT_EQ(0,
+              cudaMemcpy(gotStatuses.data(),
+                         bfgsMinimizer.statuses_.data(),
+                         gotStatuses.size() * sizeof(int16_t),
+                         cudaMemcpyDeviceToHost));
+    EXPECT_THAT(gotStatuses,
+                ::testing::Pointwise(::testing::Eq(), std::vector<int16_t>(1, 0)));
+  }
+}
+
 
 template <bool computeLastDim>
 __global__ void quarticEFunc(const int numTerms, const int* outIdx, const double* positions, double* energies) {
