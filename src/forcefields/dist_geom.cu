@@ -19,6 +19,7 @@
 #include "device_vector.h"
 #include "dist_geom.h"
 #include "dist_geom_kernels.h"
+#include "dist_geom_kernels_device.cuh"
 #include "kernel_utils.cuh"
 
 namespace nvMolKit {
@@ -1009,6 +1010,229 @@ cudaError_t computePlanarEnergy(BatchedMolecular3DDeviceBuffers&           molSy
                                       stream);
   }
   return err;
+}
+
+// Conversion function for EnergyForceContribs
+inline EnergyForceContribsDevicePtr toPointerStruct(const EnergyForceContribsDevice& src) {
+  EnergyForceContribsDevicePtr dst;
+  dst.distTerms.idx1   = src.distTerms.idx1.data();
+  dst.distTerms.idx2   = src.distTerms.idx2.data();
+  dst.distTerms.ub2    = src.distTerms.ub2.data();
+  dst.distTerms.lb2    = src.distTerms.lb2.data();
+  dst.distTerms.weight = src.distTerms.weight.data();
+
+  dst.chiralTerms.idx1      = src.chiralTerms.idx1.data();
+  dst.chiralTerms.idx2      = src.chiralTerms.idx2.data();
+  dst.chiralTerms.idx3      = src.chiralTerms.idx3.data();
+  dst.chiralTerms.idx4      = src.chiralTerms.idx4.data();
+  dst.chiralTerms.volUpper  = src.chiralTerms.volUpper.data();
+  dst.chiralTerms.volLower  = src.chiralTerms.volLower.data();
+  dst.chiralTerms.weight    = src.chiralTerms.weight.data();
+
+  dst.fourthTerms.idx    = src.fourthTerms.idx.data();
+  dst.fourthTerms.weight = src.fourthTerms.weight.data();
+
+  return dst;
+}
+
+// Conversion function for BatchedIndices
+// Note: atomStarts is passed separately via ctxAtomStartsDevice parameter, not part of this struct
+inline BatchedIndicesDevicePtr toPointerStruct(const BatchedIndicesDevice& src) {
+  BatchedIndicesDevicePtr dst;
+  dst.atomStarts        = nullptr;  // Set by caller from ctxAtomStartsDevice
+  dst.distTermStarts    = src.distTermStarts.data();
+  dst.chiralTermStarts  = src.chiralTermStarts.data();
+  dst.fourthTermStarts  = src.fourthTermStarts.data();
+
+  return dst;
+}
+
+cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffers&             molSystemDevice,
+                                     const nvMolKit::AsyncDeviceVector<int>&    ctxAtomStartsDevice,
+                                     const nvMolKit::AsyncDeviceVector<double>& ctxPositionsDevice,
+                                     const uint8_t*                             activeThisStage,
+                                     const double*                              positions,
+                                     cudaStream_t                               stream) {
+  const auto pointers = toPointerStruct(molSystemDevice.contribs);
+  BatchedIndicesDevicePtr indices;
+  indices.atomStarts       = ctxAtomStartsDevice.data();
+  indices.distTermStarts   = molSystemDevice.indices.distTermStarts.data();
+  indices.chiralTermStarts = molSystemDevice.indices.chiralTermStarts.data();
+  indices.fourthTermStarts = molSystemDevice.indices.fourthTermStarts.data();
+
+  return launchBlockPerMolEnergyKernel(ctxAtomStartsDevice.size() - 1,
+                                       pointers,
+                                       indices,
+                                       positions != nullptr ? positions : ctxPositionsDevice.data(),
+                                       molSystemDevice.energyOuts.data(),
+                                       molSystemDevice.dimension,
+                                       activeThisStage,
+                                       stream);
+}
+
+cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffers&             molSystemDevice,
+                                   const nvMolKit::AsyncDeviceVector<int>&    ctxAtomStartsDevice,
+                                   const nvMolKit::AsyncDeviceVector<double>& ctxPositionsDevice,
+                                   const uint8_t*                             activeThisStage,
+                                   cudaStream_t                               stream) {
+  const auto pointers = toPointerStruct(molSystemDevice.contribs);
+  BatchedIndicesDevicePtr indices;
+  indices.atomStarts       = ctxAtomStartsDevice.data();
+  indices.distTermStarts   = molSystemDevice.indices.distTermStarts.data();
+  indices.chiralTermStarts = molSystemDevice.indices.chiralTermStarts.data();
+  indices.fourthTermStarts = molSystemDevice.indices.fourthTermStarts.data();
+
+  return launchBlockPerMolGradKernel(ctxAtomStartsDevice.size() - 1,
+                                     pointers,
+                                     indices,
+                                     ctxPositionsDevice.data(),
+                                     molSystemDevice.grad.data(),
+                                     molSystemDevice.dimension,
+                                     activeThisStage,
+                                     stream);
+}
+
+// Conversion function for ETK Energy3DForceContribs
+inline Energy3DForceContribsDevicePtr toPointerStruct(const Energy3DForceContribsDevice& src) {
+  Energy3DForceContribsDevicePtr dst;
+  
+  dst.experimentalTorsionTerms.idx1           = src.experimentalTorsionTerms.idx1.data();
+  dst.experimentalTorsionTerms.idx2           = src.experimentalTorsionTerms.idx2.data();
+  dst.experimentalTorsionTerms.idx3           = src.experimentalTorsionTerms.idx3.data();
+  dst.experimentalTorsionTerms.idx4           = src.experimentalTorsionTerms.idx4.data();
+  dst.experimentalTorsionTerms.forceConstants = src.experimentalTorsionTerms.forceConstants.data();
+  dst.experimentalTorsionTerms.signs          = src.experimentalTorsionTerms.signs.data();
+
+  dst.improperTorsionTerms.idx1          = src.improperTorsionTerms.idx1.data();
+  dst.improperTorsionTerms.idx2          = src.improperTorsionTerms.idx2.data();
+  dst.improperTorsionTerms.idx3          = src.improperTorsionTerms.idx3.data();
+  dst.improperTorsionTerms.idx4          = src.improperTorsionTerms.idx4.data();
+  dst.improperTorsionTerms.at2AtomicNum  = src.improperTorsionTerms.at2AtomicNum.data();
+  dst.improperTorsionTerms.isCBoundToO   = src.improperTorsionTerms.isCBoundToO.data();
+  dst.improperTorsionTerms.C0            = src.improperTorsionTerms.C0.data();
+  dst.improperTorsionTerms.C1            = src.improperTorsionTerms.C1.data();
+  dst.improperTorsionTerms.C2            = src.improperTorsionTerms.C2.data();
+  dst.improperTorsionTerms.forceConstant = src.improperTorsionTerms.forceConstant.data();
+
+  dst.dist12Terms.idx1          = src.dist12Terms.idx1.data();
+  dst.dist12Terms.idx2          = src.dist12Terms.idx2.data();
+  dst.dist12Terms.minLen        = src.dist12Terms.minLen.data();
+  dst.dist12Terms.maxLen        = src.dist12Terms.maxLen.data();
+  dst.dist12Terms.forceConstant = src.dist12Terms.forceConstant.data();
+
+  dst.dist13Terms.idx1          = src.dist13Terms.idx1.data();
+  dst.dist13Terms.idx2          = src.dist13Terms.idx2.data();
+  dst.dist13Terms.minLen        = src.dist13Terms.minLen.data();
+  dst.dist13Terms.maxLen        = src.dist13Terms.maxLen.data();
+  dst.dist13Terms.forceConstant = src.dist13Terms.forceConstant.data();
+
+  dst.angle13Terms.idx1     = src.angle13Terms.idx1.data();
+  dst.angle13Terms.idx2     = src.angle13Terms.idx2.data();
+  dst.angle13Terms.idx3     = src.angle13Terms.idx3.data();
+  dst.angle13Terms.minAngle = src.angle13Terms.minAngle.data();
+  dst.angle13Terms.maxAngle = src.angle13Terms.maxAngle.data();
+
+  dst.longRangeDistTerms.idx1          = src.longRangeDistTerms.idx1.data();
+  dst.longRangeDistTerms.idx2          = src.longRangeDistTerms.idx2.data();
+  dst.longRangeDistTerms.minLen        = src.longRangeDistTerms.minLen.data();
+  dst.longRangeDistTerms.maxLen        = src.longRangeDistTerms.maxLen.data();
+  dst.longRangeDistTerms.forceConstant = src.longRangeDistTerms.forceConstant.data();
+
+  return dst;
+}
+
+// Conversion function for ETK BatchedIndices3D
+inline BatchedIndices3DDevicePtr toPointerStruct(const BatchedIndices3DDevice& src, const int* atomStarts) {
+  BatchedIndices3DDevicePtr dst;
+  dst.atomStarts                    = atomStarts;
+  dst.experimentalTorsionTermStarts = src.experimentalTorsionTermStarts.data();
+  dst.improperTorsionTermStarts     = src.improperTorsionTermStarts.data();
+  dst.dist12TermStarts              = src.dist12TermStarts.data();
+  dst.dist13TermStarts              = src.dist13TermStarts.data();
+  dst.angle13TermStarts             = src.angle13TermStarts.data();
+  dst.longRangeDistTermStarts       = src.longRangeDistTermStarts.data();
+
+  return dst;
+}
+
+cudaError_t computeEnergyBlockPerMolETK(BatchedMolecular3DDeviceBuffers&           molSystemDevice,
+                                        const nvMolKit::AsyncDeviceVector<int>&    ctxAtomStartsDevice,
+                                        const nvMolKit::AsyncDeviceVector<double>& ctxPositionsDevice,
+                                        const uint8_t*                             activeThisStage,
+                                        const double*                              positions,
+                                        cudaStream_t                               stream) {
+  const auto pointers = toPointerStruct(molSystemDevice.contribs);
+  const auto indices  = toPointerStruct(molSystemDevice.indices, ctxAtomStartsDevice.data());
+
+  return launchBlockPerMolEnergyKernelETK(ctxAtomStartsDevice.size() - 1,
+                                          pointers,
+                                          indices,
+                                          positions != nullptr ? positions : ctxPositionsDevice.data(),
+                                          molSystemDevice.energyOuts.data(),
+                                          activeThisStage,
+                                          stream);
+}
+
+cudaError_t computeGradBlockPerMolETK(BatchedMolecular3DDeviceBuffers&           molSystemDevice,
+                                      const nvMolKit::AsyncDeviceVector<int>&    ctxAtomStartsDevice,
+                                      const nvMolKit::AsyncDeviceVector<double>& ctxPositionsDevice,
+                                      const uint8_t*                             activeThisStage,
+                                      cudaStream_t                               stream) {
+  const auto pointers = toPointerStruct(molSystemDevice.contribs);
+  const auto indices  = toPointerStruct(molSystemDevice.indices, ctxAtomStartsDevice.data());
+
+  return launchBlockPerMolGradKernelETK(ctxAtomStartsDevice.size() - 1,
+                                        pointers,
+                                        indices,
+                                        ctxPositionsDevice.data(),
+                                        molSystemDevice.grad.data(),
+                                        activeThisStage,
+                                        stream);
+}
+
+// Helper functions to convert device buffers to device pointer structures
+EnergyForceContribsDevicePtr toEnergyForceContribsDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice) {
+  EnergyForceContribsDevicePtr ptr;
+  
+  ptr.distTerms.idx1   = molSystemDevice.contribs.distTerms.idx1.data();
+  ptr.distTerms.idx2   = molSystemDevice.contribs.distTerms.idx2.data();
+  ptr.distTerms.ub2    = molSystemDevice.contribs.distTerms.ub2.data();
+  ptr.distTerms.lb2    = molSystemDevice.contribs.distTerms.lb2.data();
+  ptr.distTerms.weight = molSystemDevice.contribs.distTerms.weight.data();
+  
+  ptr.chiralTerms.idx1      = molSystemDevice.contribs.chiralTerms.idx1.data();
+  ptr.chiralTerms.idx2      = molSystemDevice.contribs.chiralTerms.idx2.data();
+  ptr.chiralTerms.idx3      = molSystemDevice.contribs.chiralTerms.idx3.data();
+  ptr.chiralTerms.idx4      = molSystemDevice.contribs.chiralTerms.idx4.data();
+  ptr.chiralTerms.volUpper  = molSystemDevice.contribs.chiralTerms.volUpper.data();
+  ptr.chiralTerms.volLower  = molSystemDevice.contribs.chiralTerms.volLower.data();
+  ptr.chiralTerms.weight    = molSystemDevice.contribs.chiralTerms.weight.data();
+  
+  ptr.fourthTerms.idx    = molSystemDevice.contribs.fourthTerms.idx.data();
+  ptr.fourthTerms.weight = molSystemDevice.contribs.fourthTerms.weight.data();
+  
+  return ptr;
+}
+
+BatchedIndicesDevicePtr toBatchedIndicesDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice, 
+                                                   const int* atomStarts) {
+  BatchedIndicesDevicePtr ptr;
+  
+  ptr.atomStarts         = atomStarts;
+  ptr.distTermStarts     = molSystemDevice.indices.distTermStarts.data();
+  ptr.chiralTermStarts   = molSystemDevice.indices.chiralTermStarts.data();
+  ptr.fourthTermStarts   = molSystemDevice.indices.fourthTermStarts.data();
+  
+  return ptr;
+}
+
+Energy3DForceContribsDevicePtr toEnergy3DForceContribsDevicePtr(const BatchedMolecular3DDeviceBuffers& molSystemDevice) {
+  return toPointerStruct(molSystemDevice.contribs);
+}
+
+BatchedIndices3DDevicePtr toBatchedIndices3DDevicePtr(const BatchedMolecular3DDeviceBuffers& molSystemDevice,
+                                                      const int* atomStarts) {
+  return toPointerStruct(molSystemDevice.indices, atomStarts);
 }
 
 }  // namespace DistGeom

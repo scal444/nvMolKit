@@ -245,6 +245,69 @@ cudaError_t launchReduceEnergiesKernel(int            numBlocks,
                                        double*        outs,
                                        const uint8_t* activeThisStage = nullptr,
                                        cudaStream_t   stream          = 0);
+
+// Forward declarations for pointer structs
+struct EnergyForceContribsDevicePtr;
+struct BatchedIndicesDevicePtr;
+struct Energy3DForceContribsDevicePtr;
+struct BatchedIndices3DDevicePtr;
+
+// Block-per-molecule kernel launchers (consolidated energy/force kernels)
+cudaError_t launchBlockPerMolEnergyKernel(int                                 numMols,
+                                          const EnergyForceContribsDevicePtr& terms,
+                                          const BatchedIndicesDevicePtr&      systemIndices,
+                                          const double*                       coords,
+                                          double*                             energies,
+                                          const int                           dimension,
+                                          const uint8_t*                      activeThisStage = nullptr,
+                                          cudaStream_t                        stream          = 0);
+
+cudaError_t launchBlockPerMolGradKernel(int                                 numMols,
+                                        const EnergyForceContribsDevicePtr& terms,
+                                        const BatchedIndicesDevicePtr&      systemIndices,
+                                        const double*                       coords,
+                                        double*                             grad,
+                                        const int                           dimension,
+                                        const uint8_t*                      activeThisStage = nullptr,
+                                        cudaStream_t                        stream          = 0);
+
+// Block-per-molecule kernel launchers for ETK (3D) terms
+cudaError_t launchBlockPerMolEnergyKernelETK(int                                   numMols,
+                                             const Energy3DForceContribsDevicePtr& terms,
+                                             const BatchedIndices3DDevicePtr&      systemIndices,
+                                             const double*                         coords,
+                                             double*                               energies,
+                                             const uint8_t*                        activeThisStage = nullptr,
+                                             cudaStream_t                          stream          = 0);
+
+cudaError_t launchBlockPerMolGradKernelETK(int                                   numMols,
+                                           const Energy3DForceContribsDevicePtr& terms,
+                                           const BatchedIndices3DDevicePtr&      systemIndices,
+                                           const double*                         coords,
+                                           double*                               grad,
+                                           const uint8_t*                        activeThisStage = nullptr,
+                                           cudaStream_t                          stream          = 0);
+
+// Forward declarations for device buffer structures (defined in dist_geom.h)
+struct BatchedMolecularDeviceBuffers;
+struct BatchedMolecular3DDeviceBuffers;
+
+//! Helper functions to convert device buffers to device pointer structures
+//! for use with per-molecule BFGS kernels
+EnergyForceContribsDevicePtr toEnergyForceContribsDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice);
+
+//! Convert BatchedMolecularDeviceBuffers indices to device pointer structure
+BatchedIndicesDevicePtr toBatchedIndicesDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice,
+                                                   const int* atomStarts);
+
+//! Helper functions to convert 3D device buffers to device pointer structures
+//! for use with per-molecule BFGS ETK kernels
+Energy3DForceContribsDevicePtr toEnergy3DForceContribsDevicePtr(const BatchedMolecular3DDeviceBuffers& molSystemDevice);
+
+//! Convert BatchedMolecular3DDeviceBuffers indices to device pointer structure
+BatchedIndices3DDevicePtr toBatchedIndices3DDevicePtr(const BatchedMolecular3DDeviceBuffers& molSystemDevice,
+                                                      const int* atomStarts);
+
 }  // namespace DistGeom
 }  // namespace nvMolKit
 
