@@ -29,41 +29,7 @@ using namespace nvMolKit::FFKernelUtils;
 namespace nvMolKit {
 namespace DistGeom {
 
-struct DistViolationContribTermsDevicePtr {
-  const int*    idx1;
-  const int*    idx2;
-  const double* ub2;
-  const double* lb2;
-  const double* weight;
-};
-
-struct ChiralViolationContribTermsDevicePtr {
-  const int*    idx1;
-  const int*    idx2;
-  const int*    idx3;
-  const int*    idx4;
-  const double* volUpper;
-  const double* volLower;
-  const double* weight;
-};
-
-struct FourthDimContribTermsDevicePtr {
-  const int*    idx;
-  const double* weight;
-};
-
-struct EnergyForceContribsDevicePtr {
-  DistViolationContribTermsDevicePtr   distTerms;
-  ChiralViolationContribTermsDevicePtr chiralTerms;
-  FourthDimContribTermsDevicePtr       fourthTerms;
-};
-
-struct BatchedIndicesDevicePtr {
-  const int* atomStarts;
-  const int* distTermStarts;
-  const int* chiralTermStarts;
-  const int* fourthTermStarts;
-};
+// Device pointer structs are now defined in dist_geom_kernels.h
 
 // Device helper functions for energy calculations
 static __device__ __forceinline__ double distViolationEnergy(const double* pos,
@@ -364,62 +330,7 @@ static __device__ __inline__ void molGrad(const EnergyForceContribsDevicePtr& te
 }
 
 // ETK (Experimental Torsion Knowledge) pointer structs
-struct TorsionAngleContribTermsDevicePtr {
-  const int*    idx1;
-  const int*    idx2;
-  const int*    idx3;
-  const int*    idx4;
-  const double* forceConstants;
-  const int*    signs;
-};
-
-struct InversionContribTermsDevicePtr {
-  const int*     idx1;
-  const int*     idx2;
-  const int*     idx3;
-  const int*     idx4;
-  const int*     at2AtomicNum;
-  const uint8_t* isCBoundToO;
-  const double*  C0;
-  const double*  C1;
-  const double*  C2;
-  const double*  forceConstant;
-};
-
-struct DistanceConstraintContribTermsDevicePtr {
-  const int*    idx1;
-  const int*    idx2;
-  const double* minLen;
-  const double* maxLen;
-  const double* forceConstant;
-};
-
-struct AngleConstraintContribTermsDevicePtr {
-  const int*    idx1;
-  const int*    idx2;
-  const int*    idx3;
-  const double* minAngle;
-  const double* maxAngle;
-};
-
-struct Energy3DForceContribsDevicePtr {
-  TorsionAngleContribTermsDevicePtr    experimentalTorsionTerms;
-  InversionContribTermsDevicePtr       improperTorsionTerms;
-  DistanceConstraintContribTermsDevicePtr dist12Terms;
-  DistanceConstraintContribTermsDevicePtr dist13Terms;
-  AngleConstraintContribTermsDevicePtr    angle13Terms;
-  DistanceConstraintContribTermsDevicePtr longRangeDistTerms;
-};
-
-struct BatchedIndices3DDevicePtr {
-  const int* atomStarts;
-  const int* experimentalTorsionTermStarts;
-  const int* improperTorsionTermStarts;
-  const int* dist12TermStarts;
-  const int* dist13TermStarts;
-  const int* angle13TermStarts;
-  const int* longRangeDistTermStarts;
-};
+// Device pointer structs are now defined in dist_geom_kernels.h
 
 // Helper device functions for ETK energy calculations
 static __device__ __forceinline__ double calcTorsionEnergyM6(const double* forceConstants,

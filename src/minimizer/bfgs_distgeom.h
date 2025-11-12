@@ -41,6 +41,40 @@ void DistGeomMinimizeBFGS(BatchedMolecularSystemHost&    molSystemHost,
                           bool                           repeatUntilConverged = false,
                           cudaStream_t                   stream               = nullptr);
 
+//! Minimize the distance geometry system using per-molecule BFGS kernels
+//! This version uses the per-molecule BFGS implementation which is more efficient
+//! for ETKDG multi-stage minimization with active/inactive molecule filtering.
+//! @param molSystemHost The host-side molecular system (4D or 3D)
+//! @param molSystemDevice The device-side molecular system  
+//! @param context The ETKDG context containing positions and other data
+//! @param maxIters Maximum number of iterations for minimization (default: 200)
+//! @param gradTol Gradient tolerance for convergence (default: 1e-4)
+//! @param repeatUntilConverged If true, will repeat minimization until all systems converge (default: false)
+//! @param stream CUDA stream to use for operations (default: nullptr, uses default stream)
+void DistGeomMinimizeBFGSPerMol(BatchedMolecularSystemHost&    molSystemHost,
+                                BatchedMolecularDeviceBuffers& molSystemDevice,
+                                detail::ETKDGContext&          context,
+                                int                            maxIters             = 200,
+                                double                         gradTol              = 1e-4,
+                                bool                           repeatUntilConverged = false,
+                                cudaStream_t                   stream               = nullptr);
+
+//! Minimize the 3D ETK system using per-molecule BFGS kernels
+//! @param molSystemHost The host-side 3D molecular system
+//! @param molSystemDevice The device-side 3D molecular system
+//! @param context The ETKDG context containing positions and other data
+//! @param maxIters Maximum number of iterations for minimization (default: 200)
+//! @param gradTol Gradient tolerance for convergence (default: 1e-4)
+//! @param repeatUntilConverged If true, will repeat minimization until all systems converge (default: false)
+//! @param stream CUDA stream to use for operations (default: nullptr, uses default stream)
+void ETKMinimizeBFGSPerMol(BatchedMolecularSystem3DHost&    molSystemHost,
+                           BatchedMolecular3DDeviceBuffers& molSystemDevice,
+                           detail::ETKDGContext&            context,
+                           int                              maxIters             = 200,
+                           double                           gradTol              = 1e-4,
+                           bool                             repeatUntilConverged = false,
+                           cudaStream_t                     stream               = nullptr);
+
 }  // namespace nvMolKit::DistGeom
 
 #endif  // NVMOLKIT_BFGS_DISTGEOM_H

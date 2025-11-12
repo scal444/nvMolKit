@@ -1091,6 +1091,7 @@ bool BfgsBatchMinimizer::minimizeWithMMFF(const int                             
                                                    inverseHessian_.data(),
                                                    scratchBuffersDevice_.data(),
                                                    energyOuts.data(),
+                                                   nullptr,  // convergenceStatus
                                                    stream_);
   
   if (err != cudaSuccess) {
@@ -1166,6 +1167,7 @@ bool BfgsBatchMinimizer::minimizeWithETK(const int                              
                                                        inverseHessian_.data(),
                                                        scratchBuffersDevice_.data(),
                                                        energyOuts.data(),
+                                                       nullptr,  // convergenceStatus
                                                        stream_);
   
   if (err != cudaSuccess) {
@@ -1246,6 +1248,7 @@ bool BfgsBatchMinimizer::minimizeWithDG(const int                               
                                                       inverseHessian_.data(),
                                                       scratchBuffersDevice_.data(),
                                                       energyOuts.data(),
+                                                      nullptr,  // convergenceStatus
                                                       stream_);
   
   if (err != cudaSuccess) {

@@ -1190,40 +1190,16 @@ cudaError_t computeGradBlockPerMolETK(BatchedMolecular3DDeviceBuffers&          
                                         stream);
 }
 
-// Helper functions to convert device buffers to device pointer structures
+// Public wrapper functions for pointer struct conversion (can be called from C++ files)
 EnergyForceContribsDevicePtr toEnergyForceContribsDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice) {
-  EnergyForceContribsDevicePtr ptr;
-  
-  ptr.distTerms.idx1   = molSystemDevice.contribs.distTerms.idx1.data();
-  ptr.distTerms.idx2   = molSystemDevice.contribs.distTerms.idx2.data();
-  ptr.distTerms.ub2    = molSystemDevice.contribs.distTerms.ub2.data();
-  ptr.distTerms.lb2    = molSystemDevice.contribs.distTerms.lb2.data();
-  ptr.distTerms.weight = molSystemDevice.contribs.distTerms.weight.data();
-  
-  ptr.chiralTerms.idx1      = molSystemDevice.contribs.chiralTerms.idx1.data();
-  ptr.chiralTerms.idx2      = molSystemDevice.contribs.chiralTerms.idx2.data();
-  ptr.chiralTerms.idx3      = molSystemDevice.contribs.chiralTerms.idx3.data();
-  ptr.chiralTerms.idx4      = molSystemDevice.contribs.chiralTerms.idx4.data();
-  ptr.chiralTerms.volUpper  = molSystemDevice.contribs.chiralTerms.volUpper.data();
-  ptr.chiralTerms.volLower  = molSystemDevice.contribs.chiralTerms.volLower.data();
-  ptr.chiralTerms.weight    = molSystemDevice.contribs.chiralTerms.weight.data();
-  
-  ptr.fourthTerms.idx    = molSystemDevice.contribs.fourthTerms.idx.data();
-  ptr.fourthTerms.weight = molSystemDevice.contribs.fourthTerms.weight.data();
-  
-  return ptr;
+  return toPointerStruct(molSystemDevice.contribs);
 }
 
-BatchedIndicesDevicePtr toBatchedIndicesDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice, 
-                                                   const int* atomStarts) {
-  BatchedIndicesDevicePtr ptr;
-  
-  ptr.atomStarts         = atomStarts;
-  ptr.distTermStarts     = molSystemDevice.indices.distTermStarts.data();
-  ptr.chiralTermStarts   = molSystemDevice.indices.chiralTermStarts.data();
-  ptr.fourthTermStarts   = molSystemDevice.indices.fourthTermStarts.data();
-  
-  return ptr;
+BatchedIndicesDevicePtr toBatchedIndicesDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice,
+                                                   const int*                           atomStarts) {
+  auto dst = toPointerStruct(molSystemDevice.indices);
+  dst.atomStarts = atomStarts;
+  return dst;
 }
 
 Energy3DForceContribsDevicePtr toEnergy3DForceContribsDevicePtr(const BatchedMolecular3DDeviceBuffers& molSystemDevice) {
@@ -1231,7 +1207,7 @@ Energy3DForceContribsDevicePtr toEnergy3DForceContribsDevicePtr(const BatchedMol
 }
 
 BatchedIndices3DDevicePtr toBatchedIndices3DDevicePtr(const BatchedMolecular3DDeviceBuffers& molSystemDevice,
-                                                      const int* atomStarts) {
+                                                       const int*                             atomStarts) {
   return toPointerStruct(molSystemDevice.indices, atomStarts);
 }
 

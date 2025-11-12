@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "device_vector.h"
+#include "dist_geom_kernels.h"
 
 namespace nvMolKit {
 namespace DistGeom {
@@ -447,6 +448,20 @@ void setupDeviceBuffers3D(BatchedMolecularSystem3DHost&    molSystemHost,
                           BatchedMolecular3DDeviceBuffers& molSystemDevice,
                           const std::vector<double>&       ctxPositionsHost,
                           const int                        numMols);
+
+//! Create pointer struct from device buffers for use in per-molecule kernels (4D DG)
+EnergyForceContribsDevicePtr toEnergyForceContribsDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice);
+
+//! Create pointer struct from device buffers for use in per-molecule kernels (4D DG)
+BatchedIndicesDevicePtr toBatchedIndicesDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice,
+                                                   const int*                           atomStarts);
+
+//! Create pointer struct from device buffers for use in per-molecule kernels (3D ETK)
+Energy3DForceContribsDevicePtr toEnergy3DForceContribsDevicePtr(const BatchedMolecular3DDeviceBuffers& molSystemDevice);
+
+//! Create pointer struct from device buffers for use in per-molecule kernels (3D ETK)
+BatchedIndices3DDevicePtr toBatchedIndices3DDevicePtr(const BatchedMolecular3DDeviceBuffers& molSystemDevice,
+                                                       const int*                             atomStarts);
 
 //! Allocate intermediate buffers on the device for the batched molecular system.
 //! These include the gradients, energy buffer, and energy outs.

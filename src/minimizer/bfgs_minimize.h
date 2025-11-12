@@ -141,6 +141,11 @@ struct BfgsBatchMinimizer {
                   double*                 energyOuts,
                   const uint8_t*          activeThisStage = nullptr);
 
+  // Getters for internal buffers (needed for per-molecule kernel dispatch)
+  const int* getHessianStarts() const { return hessianStarts_.data(); }
+  double* getInverseHessian() { return inverseHessian_.data(); }
+  double** getScratchBuffersDevice() { return scratchBuffersDevice_.data(); }
+
   //! Set Initial Hessian
   void setHessianToIdentity();
   //! Determine max steps for each system.

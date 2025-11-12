@@ -39,6 +39,7 @@ cudaError_t launchBfgsMinimizePerMolKernel(const int* binCounts,
                                            double* inverseHessian,
                                            double** scratchBuffers,
                                            double* energyOuts,
+                                           uint8_t* convergenceStatus = nullptr,
                                            cudaStream_t stream = nullptr);
 
 /// Launch per-molecule BFGS minimization kernel - ETK (3D) specialization
@@ -56,6 +57,7 @@ cudaError_t launchBfgsMinimizePerMolKernelETK(const int* binCounts,
                                                double* inverseHessian,
                                                double** scratchBuffers,
                                                double* energyOuts,
+                                               uint8_t* convergenceStatus = nullptr,
                                                cudaStream_t stream = nullptr);
 
 /// Launch per-molecule BFGS minimization kernel - DG (4D) specialization
@@ -73,6 +75,7 @@ cudaError_t launchBfgsMinimizePerMolKernelDG(const int* binCounts,
                                               double* inverseHessian,
                                               double** scratchBuffers,
                                               double* energyOuts,
+                                              uint8_t* convergenceStatus = nullptr,
                                               cudaStream_t stream = nullptr);
 
 }  // namespace nvMolKit

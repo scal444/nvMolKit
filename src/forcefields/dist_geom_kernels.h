@@ -246,11 +246,99 @@ cudaError_t launchReduceEnergiesKernel(int            numBlocks,
                                        const uint8_t* activeThisStage = nullptr,
                                        cudaStream_t   stream          = 0);
 
-// Forward declarations for pointer structs
-struct EnergyForceContribsDevicePtr;
-struct BatchedIndicesDevicePtr;
-struct Energy3DForceContribsDevicePtr;
-struct BatchedIndices3DDevicePtr;
+// Device pointer structs (POD types safe for C++ and CUDA)
+struct DistViolationContribTermsDevicePtr {
+  const int*    idx1;
+  const int*    idx2;
+  const double* ub2;
+  const double* lb2;
+  const double* weight;
+};
+
+struct ChiralViolationContribTermsDevicePtr {
+  const int*    idx1;
+  const int*    idx2;
+  const int*    idx3;
+  const int*    idx4;
+  const double* volUpper;
+  const double* volLower;
+  const double* weight;
+};
+
+struct FourthDimContribTermsDevicePtr {
+  const int*    idx;
+  const double* weight;
+};
+
+struct EnergyForceContribsDevicePtr {
+  DistViolationContribTermsDevicePtr   distTerms;
+  ChiralViolationContribTermsDevicePtr chiralTerms;
+  FourthDimContribTermsDevicePtr       fourthTerms;
+};
+
+struct BatchedIndicesDevicePtr {
+  const int* atomStarts;
+  const int* distTermStarts;
+  const int* chiralTermStarts;
+  const int* fourthTermStarts;
+};
+
+struct TorsionAngleContribTermsDevicePtr {
+  const int*    idx1;
+  const int*    idx2;
+  const int*    idx3;
+  const int*    idx4;
+  const double* forceConstants;
+  const int*    signs;
+};
+
+struct InversionContribTermsDevicePtr {
+  const int*     idx1;
+  const int*     idx2;
+  const int*     idx3;
+  const int*     idx4;
+  const int*     at2AtomicNum;
+  const uint8_t* isCBoundToO;
+  const double*  C0;
+  const double*  C1;
+  const double*  C2;
+  const double*  forceConstant;
+};
+
+struct DistanceConstraintContribTermsDevicePtr {
+  const int*    idx1;
+  const int*    idx2;
+  const double* minLen;
+  const double* maxLen;
+  const double* forceConstant;
+};
+
+struct AngleConstraintContribTermsDevicePtr {
+  const int*    idx1;
+  const int*    idx2;
+  const int*    idx3;
+  const double* minAngle;
+  const double* maxAngle;
+};
+
+struct Energy3DForceContribsDevicePtr {
+  TorsionAngleContribTermsDevicePtr    experimentalTorsionTerms;
+  InversionContribTermsDevicePtr       improperTorsionTerms;
+  DistanceConstraintContribTermsDevicePtr dist12Terms;
+  DistanceConstraintContribTermsDevicePtr dist13Terms;
+  AngleConstraintContribTermsDevicePtr    angle13Terms;
+  DistanceConstraintContribTermsDevicePtr longRangeDistTerms;
+};
+
+struct BatchedIndices3DDevicePtr {
+  const int* atomStarts;
+  const int* experimentalTorsionTermStarts;
+  const int* improperTorsionTermStarts;
+  const int* dist12TermStarts;
+  const int* dist13TermStarts;
+  const int* angle13TermStarts;
+  const int* longRangeDistTermStarts;
+};
 
 // Block-per-molecule kernel launchers (consolidated energy/force kernels)
 cudaError_t launchBlockPerMolEnergyKernel(int                                 numMols,
@@ -291,22 +379,6 @@ cudaError_t launchBlockPerMolGradKernelETK(int                                  
 // Forward declarations for device buffer structures (defined in dist_geom.h)
 struct BatchedMolecularDeviceBuffers;
 struct BatchedMolecular3DDeviceBuffers;
-
-//! Helper functions to convert device buffers to device pointer structures
-//! for use with per-molecule BFGS kernels
-EnergyForceContribsDevicePtr toEnergyForceContribsDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice);
-
-//! Convert BatchedMolecularDeviceBuffers indices to device pointer structure
-BatchedIndicesDevicePtr toBatchedIndicesDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice,
-                                                   const int* atomStarts);
-
-//! Helper functions to convert 3D device buffers to device pointer structures
-//! for use with per-molecule BFGS ETK kernels
-Energy3DForceContribsDevicePtr toEnergy3DForceContribsDevicePtr(const BatchedMolecular3DDeviceBuffers& molSystemDevice);
-
-//! Convert BatchedMolecular3DDeviceBuffers indices to device pointer structure
-BatchedIndices3DDevicePtr toBatchedIndices3DDevicePtr(const BatchedMolecular3DDeviceBuffers& molSystemDevice,
-                                                      const int* atomStarts);
 
 }  // namespace DistGeom
 }  // namespace nvMolKit
