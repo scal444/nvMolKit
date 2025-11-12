@@ -25,11 +25,24 @@
 
 namespace nvMolKit {
 
-// Forward declarations for MMFF types
+// Forward declarations for forcefield types
 namespace MMFF {
 struct EnergyForceContribsDevicePtr;
 struct BatchedIndicesDevicePtr;
 }  // namespace MMFF
+
+namespace DistGeom {
+struct Energy3DForceContribsDevicePtr;
+struct BatchedIndices3DDevicePtr;
+struct EnergyForceContribsDevicePtr;  // 4D version
+struct BatchedIndicesDevicePtr;        // 4D version
+}  // namespace DistGeom
+
+enum class ForceFieldType {
+  MMFF = 0,
+  ETK = 1,   // Experimental Torsion Knowledge (3D)
+  DG = 2     // Distance Geometry (4D)
+};
 
 //! Compute energies, optionally on an external set of positions. If nullptr, expect to find in internal coordinates.
 using EnergyFunctor = std::function<void(const double*)>;
@@ -91,6 +104,34 @@ struct BfgsBatchMinimizer {
                         const MMFF::EnergyForceContribsDevicePtr&         terms,
                         const MMFF::BatchedIndicesDevicePtr&              systemIndices,
                         const uint8_t*                                    activeThisStage = nullptr);
+
+  //! Run BFGS minimization with ETK (3D) interface
+  //! Returns 0 if all systems converged, 1 if some systems did not converge.
+  bool minimizeWithETK(int                                                  numIters,
+                       double                                               gradTol,
+                       const std::vector<int>&                              atomStartsHost,
+                       const AsyncDeviceVector<int>&                        atomStarts,
+                       AsyncDeviceVector<double>&                           positions,
+                       AsyncDeviceVector<double>&                           grad,
+                       AsyncDeviceVector<double>&                           energyOuts,
+                       AsyncDeviceVector<double>&                           energyBuffer,
+                       const DistGeom::Energy3DForceContribsDevicePtr&      terms,
+                       const DistGeom::BatchedIndices3DDevicePtr&           systemIndices,
+                       const uint8_t*                                       activeThisStage = nullptr);
+
+  //! Run BFGS minimization with DG (4D) interface
+  //! Returns 0 if all systems converged, 1 if some systems did not converge.
+  bool minimizeWithDG(int                                                  numIters,
+                      double                                               gradTol,
+                      const std::vector<int>&                              atomStartsHost,
+                      const AsyncDeviceVector<int>&                        atomStarts,
+                      AsyncDeviceVector<double>&                           positions,
+                      AsyncDeviceVector<double>&                           grad,
+                      AsyncDeviceVector<double>&                           energyOuts,
+                      AsyncDeviceVector<double>&                           energyBuffer,
+                      const DistGeom::EnergyForceContribsDevicePtr&        terms,
+                      const DistGeom::BatchedIndicesDevicePtr&             systemIndices,
+                      const uint8_t*                                       activeThisStage = nullptr);
 
   // Set up the minimizer for a new system.
   void initialize(const std::vector<int>& atomStartsHost,
