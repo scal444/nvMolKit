@@ -86,31 +86,6 @@ void DistGeomMinimizeBFGS(BatchedMolecularSystemHost&    molSystemHost,
   }
 }
 
-namespace {
-// Helper to bin molecules by size for optimal kernel dispatch
-void binMoleculesBySize(const std::vector<int>& atomStartsHost,
-                        const std::vector<int>& activeMolIndices,
-                        std::vector<std::vector<int>>& bins) {
-  bins.resize(5);  // 5 bins to match BFGS kernel bins
-  
-  for (int molIdx : activeMolIndices) {
-    const int numAtoms = atomStartsHost[molIdx + 1] - atomStartsHost[molIdx];
-    
-    if (numAtoms <= 32) {
-      bins[0].push_back(molIdx);
-    } else if (numAtoms <= 64) {
-      bins[1].push_back(molIdx);
-    } else if (numAtoms <= 128) {
-      bins[2].push_back(molIdx);
-    } else if (numAtoms <= 256) {
-      bins[3].push_back(molIdx);
-    } else {
-      bins[4].push_back(molIdx);
-    }
-  }
-}
-}  // namespace
-
 void DistGeomMinimizeBFGSPerMol(BatchedMolecularSystemHost&    molSystemHost,
                                 BatchedMolecularDeviceBuffers& molSystemDevice,
                                 detail::ETKDGContext&          context,
@@ -118,6 +93,7 @@ void DistGeomMinimizeBFGSPerMol(BatchedMolecularSystemHost&    molSystemHost,
                                 const double                   gradTol,
                                 const bool                     repeatUntilConverged,
                                 cudaStream_t                   stream) {
+  printf("\nCall DistGeomMinimizeBFGSPerMol\n\n");
   // Setup device buffers
   setupDeviceBuffers(molSystemHost,
                      molSystemDevice,
@@ -127,106 +103,41 @@ void DistGeomMinimizeBFGSPerMol(BatchedMolecularSystemHost&    molSystemHost,
   const size_t numAtoms = context.systemHost.atomStarts.back();
   const size_t numPos   = context.systemHost.positions.size();
   const int    dim      = (numPos == numAtoms * 3) ? 3 : 4;
-  const int    numMols  = static_cast<int>(context.systemHost.atomStarts.size() - 1);
 
   // Create BFGS minimizer
   nvMolKit::BfgsBatchMinimizer bfgsMinimizer(dim, nvMolKit::DebugLevel::NONE, true, stream, 
                                                nvMolKit::BfgsBackend::PER_MOLECULE);
 
-  // Filter active molecules
-  std::vector<uint8_t> activeHost(numMols);
-  cudaMemcpyAsync(activeHost.data(), context.activeThisStage.data(), numMols * sizeof(uint8_t),
-                  cudaMemcpyDeviceToHost, stream);
-  cudaStreamSynchronize(stream);
-  
-  std::vector<int> activeMolIndices;
-  for (int i = 0; i < numMols; ++i) {
-    if (activeHost[i] == 1) {
-      activeMolIndices.push_back(i);
-    }
-  }
-  
-  // If no active molecules, return early
-  if (activeMolIndices.empty()) {
-    return;
-  }
-  
-  // Bin active molecules by size
-  std::vector<std::vector<int>> bins;
-  binMoleculesBySize(context.systemHost.atomStarts, activeMolIndices, bins);
-  
-  // Copy bins to device
-  std::vector<nvMolKit::AsyncDeviceVector<int>> binListsDevice;
-  binListsDevice.reserve(5);
-  for (int i = 0; i < 5; ++i) {
-    binListsDevice.emplace_back(0, stream);  // size 0, will be resized below
-    if (!bins[i].empty()) {
-      binListsDevice[i].resize(bins[i].size());
-      binListsDevice[i].copyFromHost(bins[i]);
-    }
-  }
-  
-  // Prepare pointers for launcher
-  int binCounts[5];
-  const int* binMolIds[5];
-  for (int i = 0; i < 5; ++i) {
-    binCounts[i] = static_cast<int>(bins[i].size());
-    binMolIds[i] = binListsDevice[i].data();
-  }
-  
-  // Allocate convergence status buffer
-  nvMolKit::AsyncDeviceVector<uint8_t> convergenceStatus(numMols, stream);
-  
-  // Initialize minimizer
-  bfgsMinimizer.initialize(context.systemHost.atomStarts,
-                          context.systemDevice.atomStarts.data(),
-                          context.systemDevice.positions.data(),
-                          molSystemDevice.grad.data(),
-                          molSystemDevice.energyOuts.data(),
-                          context.activeThisStage.data());
+  // Allocate energy buffer (not used for DG but required by interface)
+  nvMolKit::AsyncDeviceVector<double> energyBuffer(0, stream);
 
-  // Run minimization loop
-  bool needsMore = true;
-  while (needsMore) {
-    convergenceStatus.zero();
-    
-    cudaError_t err = launchBfgsMinimizePerMolKernelDG(binCounts,
-                                                        binMolIds,
-                                                        context.systemDevice.atomStarts.data(),
-                                                        bfgsMinimizer.getHessianStarts(),
-                                                        maxIters,
-                                                        gradTol,
-                                                        true,  // scaleGrads
-                                                        toEnergyForceContribsDevicePtr(molSystemDevice),
-                                                        toBatchedIndicesDevicePtr(molSystemDevice, context.systemDevice.atomStarts.data()),
-                                                        context.systemDevice.positions.data(),
-                                                        molSystemDevice.grad.data(),
-                                                        bfgsMinimizer.getInverseHessian(),
-                                                        bfgsMinimizer.getScratchBuffersDevice(),
-                                                        molSystemDevice.energyOuts.data(),
-                                                        convergenceStatus.data(),
-                                                        stream);
-    
-    if (err != cudaSuccess) {
-      throw std::runtime_error(std::string("Per-molecule BFGS DG kernel failed: ") + cudaGetErrorString(err));
-    }
-    
-    // Check if all active molecules converged
-    if (!repeatUntilConverged) {
-      break;
-    }
-    
-    std::vector<uint8_t> convergenceHost(numMols);
-    convergenceStatus.copyToHost(convergenceHost);
-    cudaStreamSynchronize(stream);
-    
-    needsMore = false;
-    for (int molIdx : activeMolIndices) {
-      if (convergenceHost[molIdx] == 0) {
-        needsMore = true;
-        break;
-      }
-    }
+  // Run minimization (with optional repeat-until-converged)
+  bool needsMore = bfgsMinimizer.minimizeWithDG(maxIters,
+                                                 gradTol,
+                                                 context.systemHost.atomStarts,
+                                                 context.systemDevice.atomStarts,
+                                                 context.systemDevice.positions,
+                                                 molSystemDevice.grad,
+                                                 molSystemDevice.energyOuts,
+                                                 energyBuffer,
+                                                 toEnergyForceContribsDevicePtr(molSystemDevice),
+                                                 toBatchedIndicesDevicePtr(molSystemDevice, context.systemDevice.atomStarts.data()),
+                                                 context.activeThisStage.data());
+  printf("Needs more ? %d\n", needsMore);
+
+  while (needsMore && repeatUntilConverged) {
+    printf("Repeating DG minimization\n");
+    needsMore = bfgsMinimizer.minimizeWithDG(maxIters,
+                                              gradTol,
+                                              context.systemHost.atomStarts,
+                                              context.systemDevice.atomStarts,
+                                              context.systemDevice.positions,
+                                              molSystemDevice.grad,
+                                              molSystemDevice.energyOuts,
+                                              energyBuffer,
+                                              toEnergyForceContribsDevicePtr(molSystemDevice),
+                                              toBatchedIndicesDevicePtr(molSystemDevice, context.systemDevice.atomStarts.data()),
+                                              context.activeThisStage.data());
   }
 }
 
@@ -243,106 +154,38 @@ void ETKMinimizeBFGSPerMol(BatchedMolecularSystem3DHost&    molSystemHost,
                        context.systemHost.positions,
                        static_cast<int>(context.systemHost.atomStarts.size() - 1));
 
-  const int numMols = static_cast<int>(context.systemHost.atomStarts.size() - 1);
-
   // Create BFGS minimizer (3D for ETK)
   nvMolKit::BfgsBatchMinimizer bfgsMinimizer(3, nvMolKit::DebugLevel::NONE, true, stream,
                                                nvMolKit::BfgsBackend::PER_MOLECULE);
 
-  // Filter active molecules
-  std::vector<uint8_t> activeHost(numMols);
-  cudaMemcpyAsync(activeHost.data(), context.activeThisStage.data(), numMols * sizeof(uint8_t),
-                  cudaMemcpyDeviceToHost, stream);
-  cudaStreamSynchronize(stream);
-  
-  std::vector<int> activeMolIndices;
-  for (int i = 0; i < numMols; ++i) {
-    if (activeHost[i] == 1) {
-      activeMolIndices.push_back(i);
-    }
-  }
-  
-  // If no active molecules, return early
-  if (activeMolIndices.empty()) {
-    return;
-  }
-  
-  // Bin active molecules by size
-  std::vector<std::vector<int>> bins;
-  binMoleculesBySize(context.systemHost.atomStarts, activeMolIndices, bins);
-  
-  // Copy bins to device
-  std::vector<nvMolKit::AsyncDeviceVector<int>> binListsDevice;
-  binListsDevice.reserve(5);
-  for (int i = 0; i < 5; ++i) {
-    binListsDevice.emplace_back(0, stream);  // size 0, will be resized below
-    if (!bins[i].empty()) {
-      binListsDevice[i].resize(bins[i].size());
-      binListsDevice[i].copyFromHost(bins[i]);
-    }
-  }
-  
-  // Prepare pointers for launcher
-  int binCounts[5];
-  const int* binMolIds[5];
-  for (int i = 0; i < 5; ++i) {
-    binCounts[i] = static_cast<int>(bins[i].size());
-    binMolIds[i] = binListsDevice[i].data();
-  }
-  
-  // Allocate convergence status buffer
-  nvMolKit::AsyncDeviceVector<uint8_t> convergenceStatus(numMols, stream);
-  
-  // Initialize minimizer
-  bfgsMinimizer.initialize(context.systemHost.atomStarts,
-                          context.systemDevice.atomStarts.data(),
-                          context.systemDevice.positions.data(),
-                          molSystemDevice.grad.data(),
-                          molSystemDevice.energyOuts.data(),
-                          context.activeThisStage.data());
+  // Allocate energy buffer (not used for ETK but required by interface)
+  nvMolKit::AsyncDeviceVector<double> energyBuffer(0, stream);
 
-  // Run minimization loop
-  bool needsMore = true;
-  while (needsMore) {
-    convergenceStatus.zero();
-    
-    cudaError_t err = launchBfgsMinimizePerMolKernelETK(binCounts,
-                                                         binMolIds,
-                                                         context.systemDevice.atomStarts.data(),
-                                                         bfgsMinimizer.getHessianStarts(),
-                                                         maxIters,
-                                                         gradTol,
-                                                         true,  // scaleGrads
-                                                         toEnergy3DForceContribsDevicePtr(molSystemDevice),
-                                                         toBatchedIndices3DDevicePtr(molSystemDevice, context.systemDevice.atomStarts.data()),
-                                                         context.systemDevice.positions.data(),
-                                                         molSystemDevice.grad.data(),
-                                                         bfgsMinimizer.getInverseHessian(),
-                                                         bfgsMinimizer.getScratchBuffersDevice(),
-                                                         molSystemDevice.energyOuts.data(),
-                                                         convergenceStatus.data(),
-                                                         stream);
-    
-    if (err != cudaSuccess) {
-      throw std::runtime_error(std::string("Per-molecule BFGS ETK kernel failed: ") + cudaGetErrorString(err));
-    }
-    
-    // Check if all active molecules converged
-    if (!repeatUntilConverged) {
-      break;
-    }
-    
-    std::vector<uint8_t> convergenceHost(numMols);
-    convergenceStatus.copyToHost(convergenceHost);
-    cudaStreamSynchronize(stream);
-    
-    needsMore = false;
-    for (int molIdx : activeMolIndices) {
-      if (convergenceHost[molIdx] == 0) {
-        needsMore = true;
-        break;
-      }
-    }
+  // Run minimization (with optional repeat-until-converged)
+  bool needsMore = bfgsMinimizer.minimizeWithETK(maxIters,
+                                                  gradTol,
+                                                  context.systemHost.atomStarts,
+                                                  context.systemDevice.atomStarts,
+                                                  context.systemDevice.positions,
+                                                  molSystemDevice.grad,
+                                                  molSystemDevice.energyOuts,
+                                                  energyBuffer,
+                                                  toEnergy3DForceContribsDevicePtr(molSystemDevice),
+                                                  toBatchedIndices3DDevicePtr(molSystemDevice, context.systemDevice.atomStarts.data()),
+                                                  context.activeThisStage.data());
+  
+  while (needsMore && repeatUntilConverged) {
+    needsMore = bfgsMinimizer.minimizeWithETK(maxIters,
+                                               gradTol,
+                                               context.systemHost.atomStarts,
+                                               context.systemDevice.atomStarts,
+                                               context.systemDevice.positions,
+                                               molSystemDevice.grad,
+                                               molSystemDevice.energyOuts,
+                                               energyBuffer,
+                                               toEnergy3DForceContribsDevicePtr(molSystemDevice),
+                                               toBatchedIndices3DDevicePtr(molSystemDevice, context.systemDevice.atomStarts.data()),
+                                               context.activeThisStage.data());
   }
 }
 

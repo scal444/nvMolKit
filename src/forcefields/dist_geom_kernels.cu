@@ -45,23 +45,15 @@ __global__ void DistViolationEnergyKernel(const int      numDist,
 
     // Check if activeThisStage is nullptr or if this molecule/conformer is active in this stage
     if (activeThisStage == nullptr || activeThisStage[batchIdx] == 1) {
-      const int    idx2    = idx2s[idx];
-      const double lb2     = lb2s[idx];
-      const double ub2     = ub2s[idx];
-      const double weight  = weights[idx];
-      const int    posIdx1 = idx1 * dimension;
-      const int    posIdx2 = idx2 * dimension;
+      const int    idx2   = idx2s[idx];
+      const double lb2    = lb2s[idx];
+      const double ub2    = ub2s[idx];
+      const double weight = weights[idx];
 
-      const double distance2 = distanceSquaredPosIdx(pos, posIdx1, posIdx2, dimension);
-      double       val       = 0.0;
-      if (distance2 > ub2) {
-        val = (distance2 / ub2) - 1.0;
-      } else if (distance2 < lb2) {
-        val = ((2 * lb2) / (lb2 + distance2)) - 1.0;
-      }
-      if (val > 0.0) {
+      const double energy = distViolationEnergy(pos, idx1, idx2, lb2, ub2, weight, dimension);
+      if (energy > 0.0) {
         const int outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, distTermStarts);
-        energyBuffer[outputIdx] += weight * val * val;
+        energyBuffer[outputIdx] += energy;
       }
     }
   }
@@ -86,40 +78,12 @@ __global__ void DistViolationGradientKernel(const int      numDist,
 
     // Check if activeThisStage is nullptr or if this molecule/conformer is active in this stage
     if (activeThisStage == nullptr || activeThisStage[batchIdx] == 1) {
-      const int   idx2    = idx2s[idx];
-      const float lb2     = lb2s[idx];
-      const float ub2     = ub2s[idx];
-      const float weight  = weights[idx];
-      const int   posIdx1 = idx1 * dimension;
-      const int   posIdx2 = idx2 * dimension;
-
-      const float distance2 = distanceSquaredPosIdx<dimension, float>(pos, posIdx1, posIdx2);
-      float       preFactor = 0.0;
-      if (distance2 > ub2) {
-        preFactor = 4.f * ((distance2 / ub2) - 1.0f) / ub2;
-      } else if (distance2 < lb2) {
-        const float l2d2 = distance2 + lb2;
-        preFactor        = 8.f * lb2 * (1.f - 2.0f * lb2 / l2d2) / (l2d2 * l2d2);
-      } else {
-        return;
-      }
-      const float dGradx = weight * preFactor * (pos[posIdx1 + 0] - pos[posIdx2 + 0]);
-      const float dGrady = weight * preFactor * (pos[posIdx1 + 1] - pos[posIdx2 + 1]);
-      const float dGradz = weight * preFactor * (pos[posIdx1 + 2] - pos[posIdx2 + 2]);
-      float       dGradw;
-      if constexpr (dimension == 4) {
-        dGradw = weight * preFactor * (pos[posIdx1 + 3] - pos[posIdx2 + 3]);
-      }
-      atomicAdd(&grad[posIdx1 + 0], dGradx);
-      atomicAdd(&grad[posIdx1 + 1], dGrady);
-      atomicAdd(&grad[posIdx1 + 2], dGradz);
-      atomicAdd(&grad[posIdx2 + 0], -dGradx);
-      atomicAdd(&grad[posIdx2 + 1], -dGrady);
-      atomicAdd(&grad[posIdx2 + 2], -dGradz);
-      if constexpr (dimension == 4) {
-        atomicAdd(&grad[posIdx1 + 3], dGradw);
-        atomicAdd(&grad[posIdx2 + 3], -dGradw);
-      }
+      const int idx2   = idx2s[idx];
+      const double lb2    = lb2s[idx];
+      const double ub2    = ub2s[idx];
+      const double weight = weights[idx];
+      
+      distViolationGrad(pos, idx1, idx2, lb2, ub2, weight, dimension, grad);
     }
   }
 }
@@ -147,27 +111,16 @@ __global__ void ChiralViolationEnergyKernel(const int      numChiral,
 
     // Check if activeThisStage is nullptr or if this molecule/conformer is active in this stage
     if (activeThisStage == nullptr || activeThisStage[batchIdx] == 1) {
-      const int    idx2    = idx2s[idx];
-      const int    idx3    = idx3s[idx];
-      const int    idx4    = idx4s[idx];
-      const double lb      = volLower[idx];
-      const double ub      = volUpper[idx];
-      const double weight  = weights[idx];
-      const int    posIdx1 = idx1 * dimension;
-      const int    posIdx2 = idx2 * dimension;
-      const int    posIdx3 = idx3 * dimension;
-      const int    posIdx4 = idx4 * dimension;
+      const int    idx2   = idx2s[idx];
+      const int    idx3   = idx3s[idx];
+      const int    idx4   = idx4s[idx];
+      const double lb     = volLower[idx];
+      const double ub     = volUpper[idx];
+      const double weight = weights[idx];
 
-      double v1x, v1y, v1z, v2x, v2y, v2z, v3x, v3y, v3z;
-      double vol =
-        calcChiralVolume(posIdx1, posIdx2, posIdx3, posIdx4, pos, v1x, v1y, v1z, v2x, v2y, v2z, v3x, v3y, v3z);
-
+      const double energy  = chiralViolationEnergy(pos, idx1, idx2, idx3, idx4, lb, ub, weight, dimension);
       const int outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, chiralTermStarts);
-      if (vol < lb) {
-        energyBuffer[outputIdx] += weight * (vol - lb) * (vol - lb);
-      } else if (vol > ub) {
-        energyBuffer[outputIdx] += weight * (vol - ub) * (vol - ub);
-      }
+      energyBuffer[outputIdx] += energy;
     }
   }
 }
@@ -193,54 +146,14 @@ __global__ void ChiralViolationGradientKernel(const int      numChiral,
 
     // Check if activeThisStage is nullptr or if this molecule/conformer is active in this stage
     if (activeThisStage == nullptr || activeThisStage[batchIdx] == 1) {
-      const int    idx2    = idx2s[idx];
-      const int    idx3    = idx3s[idx];
-      const int    idx4    = idx4s[idx];
-      const double lb      = volLower[idx];
-      const double ub      = volUpper[idx];
-      const double weight  = weights[idx];
-      const int    posIdx1 = idx1 * dimension;
-      const int    posIdx2 = idx2 * dimension;
-      const int    posIdx3 = idx3 * dimension;
-      const int    posIdx4 = idx4 * dimension;
-
-      double v1x, v1y, v1z, v2x, v2y, v2z, v3x, v3y, v3z;
-      double vol =
-        calcChiralVolume(posIdx1, posIdx2, posIdx3, posIdx4, pos, v1x, v1y, v1z, v2x, v2y, v2z, v3x, v3y, v3z);
-
-      if (vol < lb || vol > ub) {
-        double preFactor;
-        if (vol < lb) {
-          preFactor = weight * (vol - lb);
-        } else {  // guaranteed != with outer conditional.
-          preFactor = weight * (vol - ub);
-        }
-
-        atomicAdd(&grad[posIdx1 + 0], preFactor * (v2y * v3z - v2z * v3y));
-        atomicAdd(&grad[posIdx1 + 1], preFactor * (v2z * v3x - v2x * v3z));
-        atomicAdd(&grad[posIdx1 + 2], preFactor * (v2x * v3y - v2y * v3x));
-
-        atomicAdd(&grad[posIdx2 + 0], preFactor * (v3y * v1z - v3z * v1y));
-        atomicAdd(&grad[posIdx2 + 1], preFactor * (v3z * v1x - v3x * v1z));
-        atomicAdd(&grad[posIdx2 + 2], preFactor * (v3x * v1y - v3y * v1x));
-
-        atomicAdd(&grad[posIdx3 + 0], preFactor * (v2z * v1y - v2y * v1z));
-        atomicAdd(&grad[posIdx3 + 1], preFactor * (v2x * v1z - v2z * v1x));
-        atomicAdd(&grad[posIdx3 + 2], preFactor * (v2y * v1x - v2x * v1y));
-
-        double x1 = pos[posIdx1 + 0];
-        double y1 = pos[posIdx1 + 1];
-        double z1 = pos[posIdx1 + 2];
-        double x2 = pos[posIdx2 + 0];
-        double y2 = pos[posIdx2 + 1];
-        double z2 = pos[posIdx2 + 2];
-        double x3 = pos[posIdx3 + 0];
-        double y3 = pos[posIdx3 + 1];
-        double z3 = pos[posIdx3 + 2];
-        atomicAdd(&grad[posIdx4 + 0], preFactor * (z1 * (y2 - y3) + z2 * (y3 - y1) + z3 * (y1 - y2)));
-        atomicAdd(&grad[posIdx4 + 1], preFactor * (x1 * (z2 - z3) + x2 * (z3 - z1) + x3 * (z1 - z2)));
-        atomicAdd(&grad[posIdx4 + 2], preFactor * (y1 * (x2 - x3) + y2 * (x3 - x1) + y3 * (x1 - x2)));
-      }
+      const int idx2   = idx2s[idx];
+      const int idx3   = idx3s[idx];
+      const int idx4   = idx4s[idx];
+      const double lb     = volLower[idx];
+      const double ub     = volUpper[idx];
+      const double weight = weights[idx];
+      
+      chiralViolationGrad(pos, idx1, idx2, idx3, idx4, lb, ub, weight, dimension, grad);
     }
   }
 }
@@ -263,10 +176,10 @@ __global__ void fourthDimEnergyKernel(const int      numFD,
 
     // Check if activeThisStage is nullptr or if this molecule/conformer is active in this stage
     if (activeThisStage == nullptr || activeThisStage[batchIdx] == 1) {
-      const double weight    = weights[idx];
-      unsigned     pid       = idx1 * dimension + 3;
-      const int    outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, fourthTermStarts);
-      energyBuffer[outputIdx] += weight * pos[pid] * pos[pid];
+      const double weight = weights[idx];
+      const double energy = fourthDimEnergy(pos, idx1, weight, dimension);
+      const int outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, fourthTermStarts);
+      energyBuffer[outputIdx] += energy;
     }
   }
 }
@@ -288,8 +201,7 @@ __global__ void fourthDimGradientKernel(const int      numFD,
     // Check if activeThisStage is nullptr or if this molecule/conformer is active in this stage
     if (activeThisStage == nullptr || activeThisStage[batchIdx] == 1) {
       const double weight = weights[idx];
-      int          pid    = idx1 * dimension + 3;
-      grad[pid] += weight * pos[pid];
+      fourthDimGrad(pos, idx1, weight, dimension, grad);
     }
   }
 }
@@ -319,19 +231,10 @@ __global__ void TorsionAngleEnergyKernel(const int      numTorsion,
       const int idx3 = idx3s[idx];
       const int idx4 = idx4s[idx];
 
-      // Get positions for all four atoms
-      const int posIdx1 = idx1 * 4;
-      const int posIdx2 = idx2 * 4;
-      const int posIdx3 = idx3 * 4;
-      const int posIdx4 = idx4 * 4;
-
-      // Calculate cosine of torsion angle
-      double cosPhi = calcTorsionCosPhi(pos, posIdx1, posIdx2, posIdx3, posIdx4);
-
-      // Calculate energy using the M6 formula
-      const double* fc     = &forceConstants[idx * 6];  // 6 force constants per torsion
-      const int*    s      = &signs[idx * 6];           // 6 signs per torsion
-      double        energy = calcTorsionEnergyM6(fc, s, cosPhi);
+      const double* fc = &forceConstants[idx * 6];
+      const int*    s  = &signs[idx * 6];
+      
+      const double energy = torsionAngleEnergy(pos, idx1, idx2, idx3, idx4, fc, s);
 
       // Accumulate energy in the appropriate buffer
       const int outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, torsionTermStarts);
@@ -393,24 +296,7 @@ __global__ void InversionEnergyKernel(const int      numInversion,
       const int idx3 = idx3s[idx];
       const int idx4 = idx4s[idx];
 
-      // Get positions for all four atoms
-      const int posIdx1 = idx1 * 4;
-      const int posIdx2 = idx2 * 4;
-      const int posIdx3 = idx3 * 4;
-      const int posIdx4 = idx4 * 4;
-
-      // Calculate cosine of inversion angle
-      double cosY = calcInversionCosY(pos, posIdx1, posIdx2, posIdx3, posIdx4);
-
-      // Calculate sinY
-      const double sinYSq = 1.0 - cosY * cosY;
-      const double sinY   = ((sinYSq > 0.0) ? sqrt(sinYSq) : 0.0);
-
-      // Calculate cos(2W)
-      const double cos2W = 2.0 * sinY * sinY - 1.0;
-
-      // Calculate energy
-      double energy = forceConstants[idx] * (C0[idx] + C1[idx] * sinY + C2[idx] * cos2W);
+      const double energy = inversionEnergy(pos, idx1, idx2, idx3, idx4, C0[idx], C1[idx], C2[idx], forceConstants[idx]);
 
       // Accumulate energy in the appropriate buffer
       const int outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, inversionTermStarts);
@@ -468,27 +354,9 @@ __global__ void DistanceConstraintEnergyKernel(const int      numDist,
     // Check if activeThisStage is nullptr or if this molecule/conformer is active in this stage
     if (activeThisStage == nullptr || activeThisStage[batchIdx] == 1) {
       const int    idx2          = idx2s[idx];
-      const double minLen2       = minLen[idx] * minLen[idx];  // Square min length
-      const double maxLen2       = maxLen[idx] * maxLen[idx];  // Square max length
       const double forceConstant = forceConstants[idx];
-      const int    posIdx1       = idx1 * 4;
-      const int    posIdx2       = idx2 * 4;
 
-      // Calculate squared distance - always first 3 dimensions.
-      const double distance2 = distanceSquaredPosIdx(pos, posIdx1, posIdx2, 3);
-
-      // Check if distance is outside bounds
-      double difference = 0.0;
-      if (distance2 < minLen2) {
-        difference = minLen[idx] - sqrt(distance2);
-      } else if (distance2 > maxLen2) {
-        difference = sqrt(distance2) - maxLen[idx];
-      } else {
-        return;  // Distance within bounds, no energy contribution
-      }
-
-      // Calculate energy contribution
-      const double energy = 0.5 * forceConstant * difference * difference;
+      const double energy = distanceConstraintEnergy(pos, idx1, idx2, minLen[idx], maxLen[idx], forceConstant);
 
       // Accumulate energy in the appropriate buffer
       const int outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, distTermStarts);
@@ -546,37 +414,7 @@ __global__ void AngleConstraintEnergyKernel(const int      numAngle,
       const double minAng = minAngle[idx];
       const double maxAng = maxAngle[idx];
 
-      // Get positions for all three atoms
-      const int posIdx1 = idx1 * 4;
-      const int posIdx2 = idx2 * 4;
-      const int posIdx3 = idx3 * 4;
-
-      // Calculate vectors r1 = p1 - p2 and r2 = p3 - p2
-      double r1x = pos[posIdx1 + 0] - pos[posIdx2 + 0];
-      double r1y = pos[posIdx1 + 1] - pos[posIdx2 + 1];
-      double r1z = pos[posIdx1 + 2] - pos[posIdx2 + 2];
-
-      double r2x = pos[posIdx3 + 0] - pos[posIdx2 + 0];
-      double r2y = pos[posIdx3 + 1] - pos[posIdx2 + 1];
-      double r2z = pos[posIdx3 + 2] - pos[posIdx2 + 2];
-
-      // Calculate squared lengths and take max with 1.0e-5 as in RDKit
-      const double r1LengthSq = fmax(1.0e-5, r1x * r1x + r1y * r1y + r1z * r1z);
-      const double r2LengthSq = fmax(1.0e-5, r2x * r2x + r2y * r2y + r2z * r2z);
-
-      // Calculate cosine of angle using dot product
-      double cosTheta = dotProduct(r1x, r1y, r1z, r2x, r2y, r2z) / sqrt(r1LengthSq * r2LengthSq);
-
-      // Clamp cosTheta to [-1, 1]
-      clipToOne(cosTheta);
-
-      // Convert to degrees using RDKit's RAD2DEG constant
-      const double angle = RAD2DEG * acos(cosTheta);
-
-      // Calculate angle term using the separate device function
-      const double angleTerm = computeAngleTerm(angle, minAng, maxAng);
-
-      const double energy = forceConstant * angleTerm * angleTerm;
+      const double energy = angleConstraintEnergy(pos, idx1, idx2, idx3, minAng, maxAng, forceConstant);
 
       // Accumulate energy in the appropriate buffer
       const int outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, angleTermStarts);

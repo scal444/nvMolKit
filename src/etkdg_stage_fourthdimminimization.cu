@@ -32,8 +32,10 @@ FourthDimMinimizeStage::FourthDimMinimizeStage(const std::vector<const RDKit::RO
                                                const std::vector<EmbedArgs>&               eargs,
                                                const RDKit::DGeomHelpers::EmbedParameters& embedParam,
                                                ETKDGContext&                               ctx,
+                                               const BfgsBackend&                          bfgsBackend,
                                                const cudaStream_t                          stream)
     : embedParam_(embedParam),
+      backend_(bfgsBackend),
       stream_(stream) {
   if (mols.size() != eargs.size()) {
     throw std::runtime_error("Number of molecules and embed args must be the same");
@@ -75,13 +77,23 @@ FourthDimMinimizeStage::FourthDimMinimizeStage(const std::vector<const RDKit::RO
 }
 
 void FourthDimMinimizeStage::execute([[maybe_unused]] ETKDGContext& ctx) {
-  nvMolKit::DistGeom::DistGeomMinimizeBFGS(molSystemHost,
-                                           molSystemDevice,
-                                           ctx,
-                                           200,
-                                           embedParam_.optimizerForceTol,
-                                           true,
-                                           stream_);
+  if (backend_ == BfgsBackend::BATCHED) {
+    nvMolKit::DistGeom::DistGeomMinimizeBFGS(molSystemHost,
+                                             molSystemDevice,
+                                             ctx,
+                                             200,
+                                             embedParam_.optimizerForceTol,
+                                             true,
+                                             stream_);
+  } else {
+    nvMolKit::DistGeom::DistGeomMinimizeBFGSPerMol(molSystemHost,
+                                                    molSystemDevice,
+                                                    ctx,
+                                                    200,
+                                                    embedParam_.optimizerForceTol,
+                                                    true,
+                                                    stream_);
+  }
 }
 
 }  // namespace detail

@@ -519,7 +519,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   if (tid == 0) {
     prevE = blockEnergy;
     energyOuts[molIdx] = blockEnergy;
-    //printf("Initial energy for mol %d: %f\n", static_cast<int>(blockIdx.x), blockEnergy);
+    printf("Initial energy for mol %d: %f\n", static_cast<int>(blockIdx.x), blockEnergy);
   }
   __syncthreads();
   
@@ -538,8 +538,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   }
   __syncthreads();
   if (tid == 0) {
-    //printf("Initial grad values 0 and end for mol %d: %f %f\n", static_cast<int>(blockIdx.x), localGrad[0], localGrad[numTerms - 1]);
-
+    printf("Initial grad[0]=%f, grad[%d]=%f\n", localGrad[0], numTerms-1, localGrad[numTerms-1]);
   }
 
   // Scale gradients
@@ -550,7 +549,8 @@ __global__ void bfgsMinimizeKernel(const int numIters,
     scaleGrad<false>(numTerms, localGrad, gradScale, tempStorage);
   }
   if (tid == 0) {
-      //printf("Scale grad? : %d, gradScale: %f\n", scaleGrads ? 1 : 0, gradScale);
+    printf("After scaling: gradScale=%f, grad[0]=%f, grad[%d]=%f\n", 
+           gradScale, localGrad[0], numTerms-1, localGrad[numTerms-1]);
   }
   
   // Set initial direction as negative gradient
@@ -558,11 +558,14 @@ __global__ void bfgsMinimizeKernel(const int numIters,
     localDir[i] = -localGrad[i];
   }
   __syncthreads();
+  if (tid == 0) {
+    printf("Initial dir[0]=%f, dir[%d]=%f\n", localDir[0], numTerms-1, localDir[numTerms-1]);
+  }
   
   // Set max step
   setMaxStep(localPos, numTerms, &maxStep, tempStorage);
   if (tid == 0) {
-    //printf("Max step squared: %f\n", maxStep);
+    printf("maxStep=%f\n", maxStep);
   }
   __syncthreads();
   
@@ -575,7 +578,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   
   while (!converged && currIter < numIters) {
     if (tid == 0) {
-      //printf("Iter %d", currIter);
+      printf("Iter %d", currIter);
 
     }
     // Save current position before line search
@@ -598,7 +601,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
     __shared__ int lineSearchIter;
     if (tid == 0) {
       lineSearchIter = 0;
-      //printf("  Line search start: slope=%f, lambdaMin=%f, lambda=%f\n", slope, lambdaMin, lambda);
+      printf("  Line search setup: slope=%f, lambdaMin=%f, lambda=%f\n", slope, lambdaMin, lambda);
     }
     __syncthreads();
     
@@ -627,7 +630,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
       
       if (tid == 0) {
         currE = lsBlockEnergy;
-        //printf("  Line search iter %d, lambda=%f, energy=%f\n", lineSearchIter, lambda, lsBlockEnergy);
+        printf("  Line search iter %d, lambda=%f, energy=%f\n", lineSearchIter, lambda, lsBlockEnergy);
       }
       __syncthreads();
       
@@ -650,12 +653,17 @@ __global__ void bfgsMinimizeKernel(const int numIters,
     
     // Set direction (compute xi = new - old)
     setDirection(numTerms, scratchPos, oldPos, localDir, dGrad, localGrad, converged, tempStorage);
-    if (converged) break;
+    if (converged) {
+      if (tid == 0) {
+        printf("Converged due to small position change.\n");
+      }
+      break;
+    }
     
     // Update stored energy for next iteration
     if (tid == 0) {
       prevE = currE;
-      //printf("Line search result energy: %f\n", currE);
+      printf("Line search result energy: %f\n", currE);
     }
     __syncthreads();
     
@@ -683,7 +691,12 @@ __global__ void bfgsMinimizeKernel(const int numIters,
     
     // Update dGrad and check convergence
     updateDGrad(numTerms, gradTol, currE, gradScale, localGrad, localPos, dGrad, converged, tempStorage);
-    if (converged) break;
+    if (converged) {
+      if (tid == 0) {
+        printf("Converged due to gradient tolerance.\n");
+      }
+      break;
+    }
     
     // Update Hessian and compute new direction (reuses scratchPos as hessDGrad)
     updateInverseHessian(numTerms, invHessian, dGrad, localDir, scratchPos, localGrad, tempStorage);
@@ -696,10 +709,14 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   
   // Write final energy and convergence status
   if (tid == 0) {
+    printf("Writing final energy for mol %d: %f\n", static_cast<int>(blockIdx.x), prevE);
     energyOuts[molIdx] = prevE;
     // Write convergence status if requested (1 = converged, 0 = not converged)
     if (convergenceStatus != nullptr) {
+      printf("Writing converged value: %d\n", converged ? 1 : 0);
       convergenceStatus[molIdx] = converged ? 1 : 0;
+    } else {
+      printf("Skipping status write\n");
     }
   }
 }
@@ -891,38 +908,37 @@ cudaError_t launchBfgsMinimizePerMolKernelDG(const int* binCounts,
   
   cudaError_t err = cudaSuccess;
   
-  // Launch kernels for each size bin (4D uses 4/3 more memory than 3D)
-  // Adjust bin sizes accordingly
-  // Bin 0: 24 atoms (32 * 3/4), use shared memory
-  err = launchBinnedKernel<24, true, ForceFieldType::DG>(
+  // Launch kernels for each size bin
+  // Bin 0: 32 atoms, use shared memory
+  err = launchBinnedKernel<32, true, ForceFieldType::DG>(
     binCounts[0], binMolIds[0], numIters, gradTol, scaleGrads,
     devTerms.data(), devSysIdx.data(), atomStarts, hessianStarts,
     positions, grad, inverseHessian, scratchBuffers, energyOuts, convergenceStatus, stream);
   if (err != cudaSuccess) return err;
   
-  // Bin 1: 48 atoms (64 * 3/4), use shared memory
-  err = launchBinnedKernel<48, true, ForceFieldType::DG>(
+  // Bin 1: 64 atoms, use shared memory
+  err = launchBinnedKernel<64, true, ForceFieldType::DG>(
     binCounts[1], binMolIds[1], numIters, gradTol, scaleGrads,
     devTerms.data(), devSysIdx.data(), atomStarts, hessianStarts,
     positions, grad, inverseHessian, scratchBuffers, energyOuts, convergenceStatus, stream);
   if (err != cudaSuccess) return err;
   
-  // Bin 2: 96 atoms (128 * 3/4), use global memory
-  err = launchBinnedKernel<96, false, ForceFieldType::DG>(
+  // Bin 2: 128 atoms, use global memory
+  err = launchBinnedKernel<128, false, ForceFieldType::DG>(
     binCounts[2], binMolIds[2], numIters, gradTol, scaleGrads,
     devTerms.data(), devSysIdx.data(), atomStarts, hessianStarts,
     positions, grad, inverseHessian, scratchBuffers, energyOuts, convergenceStatus, stream);
   if (err != cudaSuccess) return err;
   
-  // Bin 3: 192 atoms (256 * 3/4), use global memory
-  err = launchBinnedKernel<192, false, ForceFieldType::DG>(
+  // Bin 3: 256 atoms, use global memory
+  err = launchBinnedKernel<256, false, ForceFieldType::DG>(
     binCounts[3], binMolIds[3], numIters, gradTol, scaleGrads,
     devTerms.data(), devSysIdx.data(), atomStarts, hessianStarts,
     positions, grad, inverseHessian, scratchBuffers, energyOuts, convergenceStatus, stream);
   if (err != cudaSuccess) return err;
   
-  // Bin 4: 1536 atoms (2048 * 3/4), use global memory
-  err = launchBinnedKernel<1536, false, ForceFieldType::DG>(
+  // Bin 4: 2048 atoms, use global memory
+  err = launchBinnedKernel<2048, false, ForceFieldType::DG>(
     binCounts[4], binMolIds[4], numIters, gradTol, scaleGrads,
     devTerms.data(), devSysIdx.data(), atomStarts, hessianStarts,
     positions, grad, inverseHessian, scratchBuffers, energyOuts, convergenceStatus, stream);

@@ -41,7 +41,16 @@ __global__ void checkMinimizedEnergiesKernel(const int     molNum,
   const double energyPerAtom = energyOuts[idx] / numAtoms;
 
   if (energyPerAtom >= nvMolKit::detail::MAX_MINIMIZED_E_PER_ATOM) {
+    printf("Energy per atom too high after first minimization: %f kcal/mol/atom (threshold %f) for molecule %d with %d atoms.\n",
+           energyPerAtom,
+           nvMolKit::detail::MAX_MINIMIZED_E_PER_ATOM,
+           idx,
+           numAtoms);
     failedThisStage[idx] = 1;
+  } else {
+    printf(" Molecule %d minimized energy per atom: %f kcal/mol/atom\n",
+           idx,
+           energyPerAtom);
   }
 }
 }  // namespace
@@ -52,8 +61,10 @@ FirstMinimizeStage::FirstMinimizeStage(const std::vector<const RDKit::ROMol*>&  
                                        const std::vector<EmbedArgs>&               eargs,
                                        const RDKit::DGeomHelpers::EmbedParameters& embedParam,
                                        ETKDGContext&                               ctx,
+                                       const BfgsBackend&                          bfgsBackend,
                                        cudaStream_t                                stream)
     : embedParam_(embedParam),
+      backend_(bfgsBackend),
       stream_(stream) {
   // Check that all vectors have the same size
   if (mols.size() != eargs.size()) {
@@ -96,13 +107,23 @@ FirstMinimizeStage::FirstMinimizeStage(const std::vector<const RDKit::ROMol*>&  
 }
 
 void FirstMinimizeStage::execute(ETKDGContext& ctx) {
-  nvMolKit::DistGeom::DistGeomMinimizeBFGS(molSystemHost,
-                                           molSystemDevice,
-                                           ctx,
-                                           400,
-                                           embedParam_.optimizerForceTol,
-                                           true,
-                                           stream_);
+  if (backend_ == BfgsBackend::BATCHED) {
+    nvMolKit::DistGeom::DistGeomMinimizeBFGS(molSystemHost,
+                                             molSystemDevice,
+                                             ctx,
+                                             400,
+                                             embedParam_.optimizerForceTol,
+                                             true,
+                                             stream_);
+  } else {
+    nvMolKit::DistGeom::DistGeomMinimizeBFGSPerMol(molSystemHost,
+                                                    molSystemDevice,
+                                                    ctx,
+                                                    400,
+                                                    embedParam_.optimizerForceTol,
+                                                    true,
+                                                    stream_);
+  }
 
   nvMolKit::DistGeom::allocateIntermediateBuffers(molSystemHost, molSystemDevice);
   nvMolKit::DistGeom::computeEnergy(molSystemDevice,

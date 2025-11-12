@@ -236,7 +236,7 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
 
         // First minimize, then first round of chiral checks.
         stages.push_back(
-          std::make_unique<detail::FirstMinimizeStage>(constMolPtrs, batchEargs, paramsCopy, context, streamPtr));
+          std::make_unique<detail::FirstMinimizeStage>(constMolPtrs, batchEargs, paramsCopy, context, BfgsBackend::BATCHED, streamPtr));
         stages.push_back(std::make_unique<detail::ETKDGTetrahedralCheckStage>(context, batchEargs, dim, streamPtr));
 
         // Only add first chiral check if enforceChirality is enabled
@@ -250,7 +250,7 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
 
         // Second + 3rd minimize, then double bond checks.
         stages.push_back(
-          std::make_unique<detail::FourthDimMinimizeStage>(constMolPtrs, batchEargs, paramsCopy, context, streamPtr));
+          std::make_unique<detail::FourthDimMinimizeStage>(constMolPtrs, batchEargs, paramsCopy, context, BfgsBackend::BATCHED, streamPtr));
 
         // (ET)(K)DG: Add experimental torsion minimization stage only if needed to match RDKit's logic.
         if (paramsCopy.useExpTorsionAnglePrefs || paramsCopy.useBasicKnowledge) {

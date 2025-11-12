@@ -64,7 +64,7 @@ static __device__ __forceinline__ void distViolationGrad(const double* pos,
                                                          double*       grad) {
   const int   posIdx1   = idx1 * dimension;
   const int   posIdx2   = idx2 * dimension;
-  const float distance2 = distanceSquaredPosIdx<3, float>(pos, posIdx1, posIdx2);
+  const float distance2 = distanceSquaredPosIdx(pos, posIdx1, posIdx2, dimension);
   float       preFactor = 0.0;
   if (distance2 > ub2) {
     preFactor = 4.f * ((distance2 / ub2) - 1.0f) / ub2;

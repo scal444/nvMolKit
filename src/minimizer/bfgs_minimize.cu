@@ -964,19 +964,24 @@ bool BfgsBatchMinimizer::minimize(const int                     numIters,
     // Initial E and F
     eFunc(nullptr);
     std::vector<double> dump = debugDump(energyOuts);
-    //("Initial energy for mol 0: %f\n", dump[0]);
+    printf("Initial energy for mol 0: %f\n", dump[0]);
     gFunc();
     auto graddump  = debugDump(grad);
-    //("Initial grad values 0 and end for mol %d: %f %f\n", 0, graddump[0], graddump.back());
+    printf("Initial grad[0]=%f, grad[%d]=%f\n", graddump[0], static_cast<int>(graddump.size()-1), graddump.back());
     scaleGrad(/*preLoop=*/true);
     auto gradscaleddump  = debugDump(gradScales_);
-    //("Scale grad? : %d, gradScale: %f\n", scaleGrads_ ? 1 : 0, gradscaleddump[0]);
+    auto graddump2  = debugDump(grad);
+    printf("After scaling: gradScale=%f, grad[0]=%f, grad[%d]=%f\n", gradscaleddump[0], graddump2[0], static_cast<int>(graddump2.size()-1), graddump2.back());
 
     collectDebugData();
     // Set up xi as negative grad.
     copyAndInvert(grad, lineSearchDir_);
+    auto dirdump = debugDump(lineSearchDir_);
+    printf("Initial dir[0]=%f, dir[%d]=%f\n", dirdump[0], static_cast<int>(dirdump.size()-1), dirdump.back());
 
     setMaxStep();
+    auto maxstepdump = debugDump(lineSearchMaxSteps_);
+    printf("maxStep=%f\n", maxstepdump[0]);
   }
 
   for (int currIter = 0; currIter < numIters && compactAndCountConverged() < numSystems; currIter++) {
@@ -984,6 +989,10 @@ bool BfgsBatchMinimizer::minimize(const int                     numIters,
     {
       const ScopedNvtxRange bfgsLineSearchSetup("BfgsBatchMinimizer::lineSearchSetup");
       doLineSearchSetup(energyOuts.data());
+      auto slopedump = debugDump(lineSearchSlope_);
+      auto lambdamindump = debugDump(lineSearchLambdaMins_);
+      auto lambdadump = debugDump(lineSearchLambdas_);
+      printf("  Line search setup: slope=%f, lambdaMin=%f, lambda=%f\n", slopedump[0], lambdamindump[0], lambdadump[0]);
     }
     {
       const ScopedNvtxRange bfgsLineSearch("BfgsBatchMinimizer::lineSearch");
@@ -1003,13 +1012,13 @@ bool BfgsBatchMinimizer::minimize(const int                     numIters,
         energyOuts.zero();
         eFunc(scratchPositions_.data());
         auto dump2 = debugDump(energyOuts);
-        //("  Line search iter %d, energy for mol 0: %f\n", lineSearchIter, dump2[0]);
+        printf("  Line search iter %d, energy for mol 0: %f\n", lineSearchIter, dump2[0]);
         doLineSearchPostEnergy(lineSearchIter);
         lineSearchIter++;
       }
       doLineSearchPostLoop();
     }
-
+    printf("Post line search, energies for mol 0: %f\n", debugDump(energyOuts)[0]);
     setDirection();
 
     {
@@ -1077,6 +1086,10 @@ bool BfgsBatchMinimizer::minimizeWithMMFF(const int                             
     binMolIds[i] = perMolBinListsDevice_[i].data();
   }
   
+  // Allocate convergence status buffer
+  AsyncDeviceVector<uint8_t> convergenceStatus(numSystems, stream_);
+  convergenceStatus.zero();
+  
   cudaError_t err = launchBfgsMinimizePerMolKernel(binCounts,
                                                    binMolIds,
                                                    atomStarts.data(),
@@ -1091,18 +1104,28 @@ bool BfgsBatchMinimizer::minimizeWithMMFF(const int                             
                                                    inverseHessian_.data(),
                                                    scratchBuffersDevice_.data(),
                                                    energyOuts.data(),
-                                                   nullptr,  // convergenceStatus
+                                                   convergenceStatus.data(),
                                                    stream_);
   
   if (err != cudaSuccess) {
     throw std::runtime_error(std::string("Per-molecule BFGS kernel failed: ") + cudaGetErrorString(err));
   }
   
-  // Synchronize stream before returning to ensure kernel completion
+  // Check convergence status to determine if more iterations are needed
+  std::vector<uint8_t> convergenceHost(numSystems);
+  convergenceStatus.copyToHost(convergenceHost);
   cudaCheckError(cudaStreamSynchronize(stream_));
   
-  // Per-molecule kernel doesn't have detailed convergence tracking yet, assume not all converged
-  return 1;
+  // Check if any molecule in the binning lists (i.e., active molecules) needs more iterations
+  for (int bin = 0; bin < 5; ++bin) {
+    for (int molIdx : perMolBinLists_[bin]) {
+      if (convergenceHost[molIdx] == 0) {
+        return 1;  // true = needs more iterations
+      }
+    }
+  }
+  
+  return 0;  // false = all active molecules converged
 }
 
 bool BfgsBatchMinimizer::minimizeWithETK(const int                                          numIters,
@@ -1153,6 +1176,10 @@ bool BfgsBatchMinimizer::minimizeWithETK(const int                              
     binMolIds[i] = perMolBinListsDevice_[i].data();
   }
   
+  // Allocate convergence status buffer
+  AsyncDeviceVector<uint8_t> convergenceStatus(numSystems, stream_);
+  convergenceStatus.zero();
+  
   cudaError_t err = launchBfgsMinimizePerMolKernelETK(binCounts,
                                                        binMolIds,
                                                        atomStarts.data(),
@@ -1167,18 +1194,28 @@ bool BfgsBatchMinimizer::minimizeWithETK(const int                              
                                                        inverseHessian_.data(),
                                                        scratchBuffersDevice_.data(),
                                                        energyOuts.data(),
-                                                       nullptr,  // convergenceStatus
+                                                       convergenceStatus.data(),
                                                        stream_);
   
   if (err != cudaSuccess) {
     throw std::runtime_error(std::string("Per-molecule BFGS ETK kernel failed: ") + cudaGetErrorString(err));
   }
   
-  // Synchronize stream before returning to ensure kernel completion
+  // Check convergence status to determine if more iterations are needed
+  std::vector<uint8_t> convergenceHost(numSystems);
+  convergenceStatus.copyToHost(convergenceHost);
   cudaCheckError(cudaStreamSynchronize(stream_));
   
-  // Per-molecule kernel doesn't have detailed convergence tracking yet, assume not all converged
-  return 1;
+  // Check if any molecule in the binning lists (i.e., active molecules) needs more iterations
+  for (int bin = 0; bin < 5; ++bin) {
+    for (int molIdx : perMolBinLists_[bin]) {
+      if (convergenceHost[molIdx] == 0) {
+        return 1;  // true = needs more iterations
+      }
+    }
+  }
+  
+  return 0;  // false = all active molecules converged
 }
 
 bool BfgsBatchMinimizer::minimizeWithDG(const int                                          numIters,
@@ -1234,6 +1271,10 @@ bool BfgsBatchMinimizer::minimizeWithDG(const int                               
     binMolIds[i] = perMolBinListsDevice_[i].data();
   }
   
+  // Allocate convergence status buffer
+  AsyncDeviceVector<uint8_t> convergenceStatus(numSystems, stream_);
+  convergenceStatus.zero();
+  
   cudaError_t err = launchBfgsMinimizePerMolKernelDG(binCounts,
                                                       binMolIds,
                                                       atomStarts.data(),
@@ -1248,18 +1289,31 @@ bool BfgsBatchMinimizer::minimizeWithDG(const int                               
                                                       inverseHessian_.data(),
                                                       scratchBuffersDevice_.data(),
                                                       energyOuts.data(),
-                                                      nullptr,  // convergenceStatus
+                                                      convergenceStatus.data(),
                                                       stream_);
   
   if (err != cudaSuccess) {
     throw std::runtime_error(std::string("Per-molecule BFGS DG kernel failed: ") + cudaGetErrorString(err));
   }
   
-  // Synchronize stream before returning to ensure kernel completion
+  // Check convergence status to determine if more iterations are needed
+  std::vector<uint8_t> convergenceHost(numSystems);
+  convergenceStatus.copyToHost(convergenceHost);
   cudaCheckError(cudaStreamSynchronize(stream_));
   
-  // Per-molecule kernel doesn't have detailed convergence tracking yet, assume not all converged
-  return 1;
+  // Check if any molecule in the binning lists (i.e., active molecules) needs more iterations
+  for (int bin = 0; bin < 5; ++bin) {
+    for (int molIdx : perMolBinLists_[bin]) {
+      if (convergenceHost[molIdx] == 0) {
+        printf("Mol %d in bin %d needs more iterations\n", molIdx, bin);
+        return true;  // true = needs more iterations
+      } else {
+        printf("Mol %d in bin %d converged\n", molIdx, bin);
+      }
+    }
+  }
+  
+  return false;  // false = all active molecules converged
 }
 
 void copyAndInvert(const AsyncDeviceVector<double>& src, AsyncDeviceVector<double>& dst) {

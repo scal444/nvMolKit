@@ -145,6 +145,10 @@ struct BfgsBatchMinimizer {
   const int* getHessianStarts() const { return hessianStarts_.data(); }
   double* getInverseHessian() { return inverseHessian_.data(); }
   double** getScratchBuffersDevice() { return scratchBuffersDevice_.data(); }
+  double* getLineSearchDir() { return lineSearchDir_.data(); }
+  double* getScratchPositions() { return scratchPositions_.data(); }
+  double* getHessDGrad() { return hessDGrad_.data(); }
+  double* getScratchGrad() { return scratchGrad_.data(); }
 
   //! Set Initial Hessian
   void setHessianToIdentity();

@@ -18,6 +18,7 @@
 
 #include <GraphMol/DistGeomHelpers/Embedder.h>
 
+#include "bfgs_minimize.h"
 #include "dist_geom.h"
 #include "etkdg_impl.h"
 
@@ -35,13 +36,15 @@ class FirstMinimizeStage : public ETKDGStage {
                      const std::vector<EmbedArgs>&               eargs,
                      const RDKit::DGeomHelpers::EmbedParameters& embedParam,
                      ETKDGContext&                               ctx,
-                     cudaStream_t                                stream = nullptr);
+                     const BfgsBackend&                          bfgsBackend = BfgsBackend::BATCHED,
+                     cudaStream_t                                stream      = nullptr);
   void        execute(ETKDGContext& ctx) override;
   std::string name() const override { return "First Minimization"; }
 
   nvMolKit::DistGeom::BatchedMolecularDeviceBuffers molSystemDevice;
   nvMolKit::DistGeom::BatchedMolecularSystemHost    molSystemHost;
   const RDKit::DGeomHelpers::EmbedParameters&       embedParam_;
+  BfgsBackend                                       backend_;
   cudaStream_t                                      stream_;
 };
 
