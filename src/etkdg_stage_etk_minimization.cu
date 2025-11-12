@@ -88,8 +88,10 @@ ETKMinimizationStage::ETKMinimizationStage(const std::vector<const RDKit::ROMol*
                                            const std::vector<EmbedArgs>&               eargs,
                                            const RDKit::DGeomHelpers::EmbedParameters& embedParam,
                                            const ETKDGContext&                         ctx,
+                                           const BfgsBackend&                          bfgsBackend,
                                            cudaStream_t                                stream)
     : embedParam_(embedParam),
+      backend_(bfgsBackend),
       stream_(stream) {
   setStreams(molSystemDevice, stream);
 
@@ -174,21 +176,37 @@ void ETKMinimizationStage::execute(ETKDGContext& ctx) {
 
   // Create and configure BFGS minimizer
   // TODO: Reuse between iterations.
-  BfgsBatchMinimizer bfgsMinimizer(/*dataDim=*/dim, nvMolKit::DebugLevel::NONE, true, stream_);
-
-  // Run minimization
+  BfgsBatchMinimizer bfgsMinimizer(/*dataDim=*/dim, nvMolKit::DebugLevel::NONE, true, stream_, backend_);
   constexpr int maxIters = 300;  // Taken from hard-coded RDKit value.
-  bfgsMinimizer.minimize(maxIters,
-                         embedParam_.optimizerForceTol,
-                         ctx.systemHost.atomStarts,
-                         ctx.systemDevice.atomStarts,
-                         ctx.systemDevice.positions,
-                         molSystemDevice.grad,
-                         molSystemDevice.energyOuts,
-                         molSystemDevice.energyBuffer,
-                         eFunc,
-                         gFunc,
-                         ctx.activeThisStage.data());
+  if (backend_ == BfgsBackend::BATCHED) {
+    // Run minimization
+    bfgsMinimizer.minimize(maxIters,
+                           embedParam_.optimizerForceTol,
+                           ctx.systemHost.atomStarts,
+                           ctx.systemDevice.atomStarts,
+                           ctx.systemDevice.positions,
+                           molSystemDevice.grad,
+                           molSystemDevice.energyOuts,
+                           molSystemDevice.energyBuffer,
+                           eFunc,
+                           gFunc,
+                           ctx.activeThisStage.data());
+  } else {
+    auto terms         = nvMolKit::DistGeom::toEnergy3DForceContribsDevicePtr(molSystemDevice);
+    auto systemIndices = nvMolKit::DistGeom::toBatchedIndices3DDevicePtr(molSystemDevice, ctx.systemDevice.atomStarts.data());
+    bfgsMinimizer.minimizeWithETK(maxIters,
+                                  embedParam_.optimizerForceTol,
+                                  ctx.systemHost.atomStarts,
+                                  ctx.systemDevice.atomStarts,
+                                  ctx.systemDevice.positions,
+                                  molSystemDevice.grad,
+                                  molSystemDevice.energyOuts,
+                                  molSystemDevice.energyBuffer,
+                                  terms,
+                                  systemIndices,
+                                  ctx.activeThisStage.data());
+  }
+
 
   // 3. Check planar tolerance (only if useBasicKnowledge is true - ETKDG/KDG variants)
   if (embedParam_.useBasicKnowledge) {

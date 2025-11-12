@@ -29,6 +29,7 @@
 #include "etkdg_stage_fourthdimminimization.h"
 #include "etkdg_stage_stereochem_checks.h"
 #include "etkdg_stage_update_conformers.h"
+#include "minimizer/bfgs_minimize.h"
 #include "nvtx.h"
 #include "openmp_helpers.h"
 
@@ -254,7 +255,7 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
         // (ET)(K)DG: Add experimental torsion minimization stage only if needed to match RDKit's logic.
         if (paramsCopy.useExpTorsionAnglePrefs || paramsCopy.useBasicKnowledge) {
           stages.push_back(
-            std::make_unique<detail::ETKMinimizationStage>(constMolPtrs, batchEargs, paramsCopy, context, streamPtr));
+            std::make_unique<detail::ETKMinimizationStage>(constMolPtrs, batchEargs, paramsCopy, context, BfgsBackend::BATCHED, streamPtr));
         }
 
         // Final chiral and stereochem checks

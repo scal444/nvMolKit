@@ -95,6 +95,8 @@ add_library(
 
 target_link_libraries(
   etkdg_stages
+        PUBLIC
+        bfgs
   PRIVATE device_vector
           ${RDKit_LIBS}
           ff_kernel_utils

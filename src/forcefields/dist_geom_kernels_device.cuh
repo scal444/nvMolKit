@@ -1047,12 +1047,19 @@ static __device__ __inline__ void molGradETK(const Energy3DForceContribsDevicePt
                                               const int                             molIdx,
                                               const int                             tid,
                                               const int                             stride) {
+  const int     atomStart = systemIndices.atomStarts[molIdx];
+  const double* molCoords = coords + atomStart * 4;  // ETK uses 4D coordinates
+
   // Experimental torsion terms
   const auto& [t_idx1s, t_idx2s, t_idx3s, t_idx4s, t_forceConstants, t_signs] = terms.experimentalTorsionTerms;
   const int torsionStart = systemIndices.experimentalTorsionTermStarts[molIdx];
   const int torsionEnd   = systemIndices.experimentalTorsionTermStarts[molIdx + 1];
   for (int i = torsionStart + tid; i < torsionEnd; i += stride) {
-    torsionAngleGrad(coords, t_idx1s[i], t_idx2s[i], t_idx3s[i], t_idx4s[i], &t_forceConstants[i * 6], &t_signs[i * 6], grad);
+    const int localIdx1 = t_idx1s[i] - atomStart;
+    const int localIdx2 = t_idx2s[i] - atomStart;
+    const int localIdx3 = t_idx3s[i] - atomStart;
+    const int localIdx4 = t_idx4s[i] - atomStart;
+    torsionAngleGrad(molCoords, localIdx1, localIdx2, localIdx3, localIdx4, &t_forceConstants[i * 6], &t_signs[i * 6], grad);
   }
 
   // Improper torsion (inversion) terms
@@ -1061,7 +1068,11 @@ static __device__ __inline__ void molGradETK(const Energy3DForceContribsDevicePt
   const int improperStart = systemIndices.improperTorsionTermStarts[molIdx];
   const int improperEnd   = systemIndices.improperTorsionTermStarts[molIdx + 1];
   for (int i = improperStart + tid; i < improperEnd; i += stride) {
-    inversionGrad(coords, i_idx1s[i], i_idx2s[i], i_idx3s[i], i_idx4s[i], i_C0[i], i_C1[i], i_C2[i], i_forceConstant[i], grad);
+    const int localIdx1 = i_idx1s[i] - atomStart;
+    const int localIdx2 = i_idx2s[i] - atomStart;
+    const int localIdx3 = i_idx3s[i] - atomStart;
+    const int localIdx4 = i_idx4s[i] - atomStart;
+    inversionGrad(molCoords, localIdx1, localIdx2, localIdx3, localIdx4, i_C0[i], i_C1[i], i_C2[i], i_forceConstant[i], grad);
   }
 
   // 1-2 distance terms
@@ -1069,7 +1080,9 @@ static __device__ __inline__ void molGradETK(const Energy3DForceContribsDevicePt
   const int dist12Start                                                         = systemIndices.dist12TermStarts[molIdx];
   const int dist12End                                                           = systemIndices.dist12TermStarts[molIdx + 1];
   for (int i = dist12Start + tid; i < dist12End; i += stride) {
-    distanceConstraintGrad(coords, d12_idx1s[i], d12_idx2s[i], d12_minLen[i], d12_maxLen[i], d12_forceConstant[i], grad);
+    const int localIdx1 = d12_idx1s[i] - atomStart;
+    const int localIdx2 = d12_idx2s[i] - atomStart;
+    distanceConstraintGrad(molCoords, localIdx1, localIdx2, d12_minLen[i], d12_maxLen[i], d12_forceConstant[i], grad);
   }
 
   // 1-3 distance terms
@@ -1077,7 +1090,9 @@ static __device__ __inline__ void molGradETK(const Energy3DForceContribsDevicePt
   const int dist13Start                                                         = systemIndices.dist13TermStarts[molIdx];
   const int dist13End                                                           = systemIndices.dist13TermStarts[molIdx + 1];
   for (int i = dist13Start + tid; i < dist13End; i += stride) {
-    distanceConstraintGrad(coords, d13_idx1s[i], d13_idx2s[i], d13_minLen[i], d13_maxLen[i], d13_forceConstant[i], grad);
+    const int localIdx1 = d13_idx1s[i] - atomStart;
+    const int localIdx2 = d13_idx2s[i] - atomStart;
+    distanceConstraintGrad(molCoords, localIdx1, localIdx2, d13_minLen[i], d13_maxLen[i], d13_forceConstant[i], grad);
   }
 
   // 1-3 angle terms
@@ -1086,7 +1101,10 @@ static __device__ __inline__ void molGradETK(const Energy3DForceContribsDevicePt
   const int angle13End                                                      = systemIndices.angle13TermStarts[molIdx + 1];
   constexpr double defaultAngleForceConstant = 1.0;
   for (int i = angle13Start + tid; i < angle13End; i += stride) {
-    angleConstraintGrad(coords, a13_idx1s[i], a13_idx2s[i], a13_idx3s[i], a13_minAngle[i], a13_maxAngle[i], defaultAngleForceConstant, grad);
+    const int localIdx1 = a13_idx1s[i] - atomStart;
+    const int localIdx2 = a13_idx2s[i] - atomStart;
+    const int localIdx3 = a13_idx3s[i] - atomStart;
+    angleConstraintGrad(molCoords, localIdx1, localIdx2, localIdx3, a13_minAngle[i], a13_maxAngle[i], defaultAngleForceConstant, grad);
   }
 
   // Long range distance terms
@@ -1094,7 +1112,9 @@ static __device__ __inline__ void molGradETK(const Energy3DForceContribsDevicePt
   const int distLRStart                                                         = systemIndices.longRangeDistTermStarts[molIdx];
   const int distLREnd                                                           = systemIndices.longRangeDistTermStarts[molIdx + 1];
   for (int i = distLRStart + tid; i < distLREnd; i += stride) {
-    distanceConstraintGrad(coords, dlr_idx1s[i], dlr_idx2s[i], dlr_minLen[i], dlr_maxLen[i], dlr_forceConstant[i], grad);
+    const int localIdx1 = dlr_idx1s[i] - atomStart;
+    const int localIdx2 = dlr_idx2s[i] - atomStart;
+    distanceConstraintGrad(molCoords, localIdx1, localIdx2, dlr_minLen[i], dlr_maxLen[i], dlr_forceConstant[i], grad);
   }
 }
 

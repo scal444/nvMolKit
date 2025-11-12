@@ -385,7 +385,7 @@ struct DataDimTraits<ForceFieldType::MMFF> {
 
 template <>
 struct DataDimTraits<ForceFieldType::ETK> {
-  static constexpr int value = 3;
+  static constexpr int value = 4;
 };
 
 template <>
