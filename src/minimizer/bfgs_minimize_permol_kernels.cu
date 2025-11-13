@@ -396,7 +396,6 @@ struct DataDimTraits<ForceFieldType::DG> {
 }  // namespace
 
 template <int MaxAtoms, bool UseSharedMem, ForceFieldType FFType, typename TermsType, typename IndicesType>
-__maxnreg__(40)
 __global__ void bfgsMinimizeKernel(const int numIters,
                                    const double gradTol,
                                    const bool scaleGrads,
