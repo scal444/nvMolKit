@@ -1141,7 +1141,10 @@ __global__ void combinedGradKernelETK(const Energy3DForceContribsDevicePtr* term
     return;
   }
 
-  molGradETK(*terms, *systemIndices, coords, grad, molIdx, tid, stride);
+  const int atomStart = systemIndices->atomStarts[molIdx];
+  double*   molGrad   = grad + atomStart * 4;  // Offset to molecule start for ETK (4D)
+
+  molGradETK(*terms, *systemIndices, coords, molGrad, molIdx, tid, stride);
 }
 
 cudaError_t launchBlockPerMolGradKernelETK(int                                     numMols,

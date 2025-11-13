@@ -41,16 +41,16 @@ __global__ void checkMinimizedEnergiesKernel(const int     molNum,
   const double energyPerAtom = energyOuts[idx] / numAtoms;
 
   if (energyPerAtom >= nvMolKit::detail::MAX_MINIMIZED_E_PER_ATOM) {
-    printf("Energy per atom too high after first minimization: %f kcal/mol/atom (threshold %f) for molecule %d with %d atoms.\n",
-           energyPerAtom,
-           nvMolKit::detail::MAX_MINIMIZED_E_PER_ATOM,
-           idx,
-           numAtoms);
+    // printf("Energy per atom too high after first minimization: %f kcal/mol/atom (threshold %f) for molecule %d with %d atoms.\n",
+    //        energyPerAtom,
+    //        nvMolKit::detail::MAX_MINIMIZED_E_PER_ATOM,
+    //        idx,
+    //        numAtoms);
     failedThisStage[idx] = 1;
   } else {
-    printf(" Molecule %d minimized energy per atom: %f kcal/mol/atom\n",
-           idx,
-           energyPerAtom);
+    // printf(" Molecule %d minimized energy per atom: %f kcal/mol/atom\n",
+    //        idx,
+    //        energyPerAtom);
   }
 }
 }  // namespace

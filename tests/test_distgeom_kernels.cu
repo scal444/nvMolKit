@@ -699,6 +699,9 @@ std::vector<double> getGradientTerm(nvMolKit::DistGeom::BatchedMolecularDeviceBu
                                     const int*                                         atomStarts,
                                     const FFTerm&                                      term,
                                     const int                                          dim) {
+  // Zero out gradients first
+  deviceFF.grad.zero();
+
   switch (term) {
     case FFTerm::DistanceViolation:
       if (deviceFF.contribs.distTerms.idx1.size() == 0) {

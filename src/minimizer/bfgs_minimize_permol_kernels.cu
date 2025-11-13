@@ -519,7 +519,10 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   if (tid == 0) {
     prevE = blockEnergy;
     energyOuts[molIdx] = blockEnergy;
-    printf("Initial energy for mol %d: %f\n", static_cast<int>(blockIdx.x), blockEnergy);
+    if (blockIdx.x == 0) {
+      //printf("Initial energy for mol %d: %f\n", static_cast<int>(blockIdx.x), blockEnergy);
+
+    }
   }
   __syncthreads();
   
@@ -538,7 +541,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   }
   __syncthreads();
   if (tid == 0) {
-    printf("Initial grad[0]=%f, grad[%d]=%f\n", localGrad[0], numTerms-1, localGrad[numTerms-1]);
+    //printf("Initial grad[0]=%f, grad[%d]=%f\n", localGrad[0], numTerms-1, localGrad[numTerms-1]);
   }
 
   // Scale gradients
@@ -549,8 +552,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
     scaleGrad<false>(numTerms, localGrad, gradScale, tempStorage);
   }
   if (tid == 0) {
-    printf("After scaling: gradScale=%f, grad[0]=%f, grad[%d]=%f\n", 
-           gradScale, localGrad[0], numTerms-1, localGrad[numTerms-1]);
+    //printf("After scaling: gradScale=%f, grad[0]=%f, grad[%d]=%f\n",  gradScale, localGrad[0], numTerms-1, localGrad[numTerms-1]);
   }
   
   // Set initial direction as negative gradient
@@ -559,13 +561,13 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   }
   __syncthreads();
   if (tid == 0) {
-    printf("Initial dir[0]=%f, dir[%d]=%f\n", localDir[0], numTerms-1, localDir[numTerms-1]);
+    //printf("Initial dir[0]=%f, dir[%d]=%f\n", localDir[0], numTerms-1, localDir[numTerms-1]);
   }
   
   // Set max step
   setMaxStep(localPos, numTerms, &maxStep, tempStorage);
   if (tid == 0) {
-    printf("maxStep=%f\n", maxStep);
+    //printf("maxStep=%f\n", maxStep);
   }
   __syncthreads();
   
@@ -578,7 +580,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   
   while (!converged && currIter < numIters) {
     if (tid == 0) {
-      printf("Iter %d", currIter);
+      //printf("Iter %d", currIter);
 
     }
     // Save current position before line search
@@ -601,15 +603,15 @@ __global__ void bfgsMinimizeKernel(const int numIters,
     __shared__ int lineSearchIter;
     if (tid == 0) {
       lineSearchIter = 0;
-      printf("  Line search setup: slope=%f, lambdaMin=%f, lambda=%f\n", slope, lambdaMin, lambda);
+      //printf("  Line search setup: slope=%f, lambdaMin=%f, lambda=%f\n", slope, lambdaMin, lambda);
     }
     __syncthreads();
     
     while (!lineSearchConverged && lineSearchIter < MAX_LINESEARCH_ITERS) {
       // Perturb positions from saved oldPos (not localPos, which may have been modified)
-      ////printf("Pre perturb x[0] and x[end]: %f %f\n", localPos[0], localPos[numTerms - 1]);
+      //////printf("Pre perturb x[0] and x[end]: %f %f\n", localPos[0], localPos[numTerms - 1]);
       lineSearchPerturb(numTerms, oldPos, localDir, lambda, scratchPos);
-      ////printf("Post perturb x[0] and x[end]: %f %f\n", scratchPos[0], scratchPos[numTerms - 1]);
+      //////printf("Post perturb x[0] and x[end]: %f %f\n", scratchPos[0], scratchPos[numTerms - 1]);
       
       // Copy to global for energy calculation
       for (int i = tid; i < numTerms; i += stride) {
@@ -630,7 +632,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
       
       if (tid == 0) {
         currE = lsBlockEnergy;
-        printf("  Line search iter %d, lambda=%f, energy=%f\n", lineSearchIter, lambda, lsBlockEnergy);
+        //printf("  Line search iter %d, lambda=%f, energy=%f\n", lineSearchIter, lambda, lsBlockEnergy);
       }
       __syncthreads();
       
@@ -655,7 +657,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
     setDirection(numTerms, scratchPos, oldPos, localDir, dGrad, localGrad, converged, tempStorage);
     if (converged) {
       if (tid == 0) {
-        printf("Converged due to small position change.\n");
+        //printf("Converged due to small position change.\n");
       }
       break;
     }
@@ -663,7 +665,10 @@ __global__ void bfgsMinimizeKernel(const int numIters,
     // Update stored energy for next iteration
     if (tid == 0) {
       prevE = currE;
-      printf("Line search result energy: %f\n", currE);
+      if (blockIdx.x == 0) {
+        //printf("Line search result energy: %f\n", currE);
+
+      }
     }
     __syncthreads();
     
@@ -693,7 +698,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
     updateDGrad(numTerms, gradTol, currE, gradScale, localGrad, localPos, dGrad, converged, tempStorage);
     if (converged) {
       if (tid == 0) {
-        printf("Converged due to gradient tolerance.\n");
+        //printf("Converged due to gradient tolerance.\n");
       }
       break;
     }
@@ -709,14 +714,14 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   
   // Write final energy and convergence status
   if (tid == 0) {
-    printf("Writing final energy for mol %d: %f\n", static_cast<int>(blockIdx.x), prevE);
+    //printf("Writing final energy for mol %d: %f\n", static_cast<int>(blockIdx.x), prevE);
     energyOuts[molIdx] = prevE;
     // Write convergence status if requested (1 = converged, 0 = not converged)
     if (convergenceStatus != nullptr) {
-      printf("Writing converged value: %d\n", converged ? 1 : 0);
+      //printf("Writing converged value: %d\n", converged ? 1 : 0);
       convergenceStatus[molIdx] = converged ? 1 : 0;
     } else {
-      printf("Skipping status write\n");
+      //printf("Skipping status write\n");
     }
   }
 }

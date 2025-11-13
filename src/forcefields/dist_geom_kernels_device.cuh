@@ -224,7 +224,7 @@ static __device__ __forceinline__ void fourthDimGrad(const double* pos,
   }
   const int    posIdx    = idx * dimension;
   const double fourthVal = pos[posIdx + 3];
-  atomicAdd(&grad[posIdx + 3], 2.0 * weight * fourthVal);
+  atomicAdd(&grad[posIdx + 3], weight * fourthVal);
 }
 
 // Consolidated per-molecule energy calculation
@@ -290,6 +290,7 @@ static __device__ __inline__ void molGrad(const EnergyForceContribsDevicePtr& te
                                           const int                           stride) {
   const int     atomStart = systemIndices.atomStarts[molIdx];
   const double* molCoords = coords + atomStart * dimension;
+  double*       molGrad   = grad;  // grad is already offset by caller (see combinedGradKernel)
 
   const auto& [d_idx1s, d_idx2s, d_ub2s, d_lb2s, d_weights] = terms.distTerms;
   const int distStart                                       = systemIndices.distTermStarts[molIdx];
@@ -297,7 +298,7 @@ static __device__ __inline__ void molGrad(const EnergyForceContribsDevicePtr& te
   for (int i = distStart + tid; i < distEnd; i += stride) {
     const int localIdx1 = d_idx1s[i] - atomStart;
     const int localIdx2 = d_idx2s[i] - atomStart;
-    distViolationGrad(molCoords, localIdx1, localIdx2, d_lb2s[i], d_ub2s[i], d_weights[i], dimension, grad);
+    distViolationGrad(molCoords, localIdx1, localIdx2, d_lb2s[i], d_ub2s[i], d_weights[i], dimension, molGrad);
   }
 
   const auto& [c_idx1s, c_idx2s, c_idx3s, c_idx4s, c_volUppers, c_volLowers, c_weights] = terms.chiralTerms;
@@ -317,7 +318,7 @@ static __device__ __inline__ void molGrad(const EnergyForceContribsDevicePtr& te
                         c_volUppers[i],
                         c_weights[i],
                         dimension,
-                        grad);
+                        molGrad);
   }
 
   const auto& [f_idxs, f_weights] = terms.fourthTerms;
@@ -325,7 +326,7 @@ static __device__ __inline__ void molGrad(const EnergyForceContribsDevicePtr& te
   const int fourthEnd            = systemIndices.fourthTermStarts[molIdx + 1];
   for (int i = fourthStart + tid; i < fourthEnd; i += stride) {
     const int localIdx = f_idxs[i] - atomStart;
-    fourthDimGrad(molCoords, localIdx, f_weights[i], dimension, grad);
+    fourthDimGrad(molCoords, localIdx, f_weights[i], dimension, molGrad);
   }
 }
 
@@ -1039,7 +1040,7 @@ static __device__ __forceinline__ void angleConstraintGrad(const double* pos,
 }
 
 // Consolidated per-molecule ETK gradient calculation
-// Note: This function uses atomic adds to accumulate gradients into the global grad array
+// Note: grad pointer should already be offset to molecule start by caller
 static __device__ __inline__ void molGradETK(const Energy3DForceContribsDevicePtr& terms,
                                               const BatchedIndices3DDevicePtr&      systemIndices,
                                               const double*                         coords,

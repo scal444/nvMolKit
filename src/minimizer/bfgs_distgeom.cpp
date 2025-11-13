@@ -93,7 +93,7 @@ void DistGeomMinimizeBFGSPerMol(BatchedMolecularSystemHost&    molSystemHost,
                                 const double                   gradTol,
                                 const bool                     repeatUntilConverged,
                                 cudaStream_t                   stream) {
-  printf("\nCall DistGeomMinimizeBFGSPerMol\n\n");
+  //printf("\nCall DistGeomMinimizeBFGSPerMol\n\n");
   // Setup device buffers
   setupDeviceBuffers(molSystemHost,
                      molSystemDevice,
@@ -123,10 +123,10 @@ void DistGeomMinimizeBFGSPerMol(BatchedMolecularSystemHost&    molSystemHost,
                                                  toEnergyForceContribsDevicePtr(molSystemDevice),
                                                  toBatchedIndicesDevicePtr(molSystemDevice, context.systemDevice.atomStarts.data()),
                                                  context.activeThisStage.data());
-  printf("Needs more ? %d\n", needsMore);
+  //printf("Needs more ? %d\n", needsMore);
 
   while (needsMore && repeatUntilConverged) {
-    printf("Repeating DG minimization\n");
+    //printf("Repeating DG minimization\n");
     needsMore = bfgsMinimizer.minimizeWithDG(maxIters,
                                               gradTol,
                                               context.systemHost.atomStarts,

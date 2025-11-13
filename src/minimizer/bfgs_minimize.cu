@@ -451,13 +451,26 @@ void BfgsBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
     constexpr int NUM_SIZE_BINS = 5;
     constexpr int SIZE_BINS[NUM_SIZE_BINS] = {32, 64, 128, 256, 2048};
     
+    // Copy activeThisStage to host for CPU-side filtering
+    std::vector<uint8_t> activeHost(numSystems, 1);  // Default all active
+    if (activeThisStage) {
+      cudaCheckError(cudaMemcpyAsync(activeHost.data(), activeThisStage, numSystems * sizeof(uint8_t), 
+                                     cudaMemcpyDeviceToHost, stream_));
+      cudaCheckError(cudaStreamSynchronize(stream_));
+    }
+    
     // Clear previous binning
     for (int i = 0; i < NUM_SIZE_BINS; ++i) {
       perMolBinLists_[i].clear();
     }
     
-    // Bin each molecule
+    // Bin each active molecule
     for (int i = 0; i < numSystems_; ++i) {
+      // Skip inactive molecules
+      if (activeHost[i] == 0) {
+        continue;
+      }
+      
       const int numAtoms = atomStartsHost[i + 1] - atomStartsHost[i];
       
       // Find appropriate bin
@@ -963,25 +976,25 @@ bool BfgsBatchMinimizer::minimize(const int                     numIters,
 
     // Initial E and F
     eFunc(nullptr);
-    std::vector<double> dump = debugDump(energyOuts);
-    printf("Initial energy for mol 0: %f\n", dump[0]);
+    // std::vector<double> dump = debugDump(energyOuts);
+    // printf("Initial energy for mol 0: %f\n", dump[0]);
     gFunc();
-    auto graddump  = debugDump(grad);
-    printf("Initial grad[0]=%f, grad[%d]=%f\n", graddump[0], static_cast<int>(graddump.size()-1), graddump.back());
+    // auto graddump  = debugDump(grad);
+    //printf("Initial grad[0]=%f, grad[%d]=%f\n", graddump[0], static_cast<int>(graddump.size()-1), graddump.back());
     scaleGrad(/*preLoop=*/true);
-    auto gradscaleddump  = debugDump(gradScales_);
-    auto graddump2  = debugDump(grad);
-    printf("After scaling: gradScale=%f, grad[0]=%f, grad[%d]=%f\n", gradscaleddump[0], graddump2[0], static_cast<int>(graddump2.size()-1), graddump2.back());
+    //auto gradscaleddump  = debugDump(gradScales_);
+    //auto graddump2  = debugDump(grad);
+    //printf("After scaling: gradScale=%f, grad[0]=%f, grad[%d]=%f\n", gradscaleddump[0], graddump2[0], static_cast<int>(graddump2.size()-1), graddump2.back());
 
     collectDebugData();
     // Set up xi as negative grad.
     copyAndInvert(grad, lineSearchDir_);
-    auto dirdump = debugDump(lineSearchDir_);
-    printf("Initial dir[0]=%f, dir[%d]=%f\n", dirdump[0], static_cast<int>(dirdump.size()-1), dirdump.back());
+    //auto dirdump = debugDump(lineSearchDir_);
+    //printf("Initial dir[0]=%f, dir[%d]=%f\n", dirdump[0], static_cast<int>(dirdump.size()-1), dirdump.back());
 
     setMaxStep();
-    auto maxstepdump = debugDump(lineSearchMaxSteps_);
-    printf("maxStep=%f\n", maxstepdump[0]);
+    //auto maxstepdump = debugDump(lineSearchMaxSteps_);
+    //printf("maxStep=%f\n", maxstepdump[0]);
   }
 
   for (int currIter = 0; currIter < numIters && compactAndCountConverged() < numSystems; currIter++) {
@@ -989,10 +1002,10 @@ bool BfgsBatchMinimizer::minimize(const int                     numIters,
     {
       const ScopedNvtxRange bfgsLineSearchSetup("BfgsBatchMinimizer::lineSearchSetup");
       doLineSearchSetup(energyOuts.data());
-      auto slopedump = debugDump(lineSearchSlope_);
-      auto lambdamindump = debugDump(lineSearchLambdaMins_);
-      auto lambdadump = debugDump(lineSearchLambdas_);
-      printf("  Line search setup: slope=%f, lambdaMin=%f, lambda=%f\n", slopedump[0], lambdamindump[0], lambdadump[0]);
+      //auto slopedump = debugDump(lineSearchSlope_);
+      //auto lambdamindump = debugDump(lineSearchLambdaMins_);
+      //auto lambdadump = debugDump(lineSearchLambdas_);
+      //printf("  Line search setup: slope=%f, lambdaMin=%f, lambda=%f\n", slopedump[0], lambdamindump[0], lambdadump[0]);
     }
     {
       const ScopedNvtxRange bfgsLineSearch("BfgsBatchMinimizer::lineSearch");
@@ -1011,14 +1024,14 @@ bool BfgsBatchMinimizer::minimize(const int                     numIters,
         energyBuffer.zero();
         energyOuts.zero();
         eFunc(scratchPositions_.data());
-        auto dump2 = debugDump(energyOuts);
-        printf("  Line search iter %d, energy for mol 0: %f\n", lineSearchIter, dump2[0]);
+        //auto dump2 = debugDump(energyOuts);
+        //printf("  Line search iter %d, energy for mol 0: %f\n", lineSearchIter, dump2[0]);
         doLineSearchPostEnergy(lineSearchIter);
         lineSearchIter++;
       }
       doLineSearchPostLoop();
     }
-    printf("Post line search, energies for mol 0: %f\n", debugDump(energyOuts)[0]);
+    // printf("Post line search, energies for mol 0: %f\n", debugDump(energyOuts)[0]);
     setDirection();
 
     {
@@ -1305,10 +1318,10 @@ bool BfgsBatchMinimizer::minimizeWithDG(const int                               
   for (int bin = 0; bin < 5; ++bin) {
     for (int molIdx : perMolBinLists_[bin]) {
       if (convergenceHost[molIdx] == 0) {
-        printf("Mol %d in bin %d needs more iterations\n", molIdx, bin);
+        //printf("Mol %d in bin %d needs more iterations\n", molIdx, bin);
         return true;  // true = needs more iterations
       } else {
-        printf("Mol %d in bin %d converged\n", molIdx, bin);
+        //printf("Mol %d in bin %d converged\n", molIdx, bin);
       }
     }
   }
