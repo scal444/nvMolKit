@@ -26,18 +26,12 @@
 
 #include "device_vector.h"
 #include "dist_geom_flattened_builder.h"
-#include "minimizer/bfgs_minimize.h"
 #include "nvtx.h"
 #include "triangle_smooth.h"
 
 namespace nvMolKit {
 
 namespace detail {
-
-// Define destructor and move operations where BfgsBatchMinimizer is complete
-ETKDGContext::~ETKDGContext() = default;
-ETKDGContext::ETKDGContext(ETKDGContext&&) noexcept = default;
-ETKDGContext& ETKDGContext::operator=(ETKDGContext&&) noexcept = default;
 
 void setStreams(ETKDGContext& ctx, cudaStream_t stream) {
   ctx.systemDevice.atomStarts.setStream(stream);
@@ -203,7 +197,7 @@ std::vector<int16_t> ETKDGDriver::completedConformers() const {
   return res;
 }
 
-void initETKDGContext(const std::vector<RDKit::ROMol*>& mols, ETKDGContext& context, const int confsPerMol, cudaStream_t stream) {
+void initETKDGContext(const std::vector<RDKit::ROMol*>& mols, ETKDGContext& context, const int confsPerMol) {
   // Handle atom offsets.
   for (const auto* mol : mols) {
     // Add to
@@ -222,14 +216,6 @@ void initETKDGContext(const std::vector<RDKit::ROMol*>& mols, ETKDGContext& cont
                                           context.systemDevice.positions,
                                           context.systemHost.atomStarts,
                                           context.systemDevice.atomStarts);
-  
-  // Create shared minimizer for all stages (reused to avoid reallocating pinned memory)
-  context.minimizer = std::make_unique<BfgsBatchMinimizer>(
-      4,                      // dataDim for ETKDG (4D distance geometry)
-      DebugLevel::NONE,
-      true,                   // scaleGrads
-      stream,
-      BfgsBackend::PER_MOLECULE);
 }
 
 Scheduler::Scheduler(const int numUniqueMols, const int numConfsPerMol, const int maxIterations)

@@ -84,7 +84,7 @@ add_library(etkdg_impl etkdg_impl.cpp etkdg_kernels.cu)
 target_link_libraries(
   etkdg_impl
   PRIVATE embedder_utils rdkit_dist_geom_flattened OpenMP::OpenMP_CXX
-  PUBLIC dist_geom ${RDKit_LIBS} device_vector bfgs)
+  PUBLIC dist_geom ${RDKit_LIBS} device_vector)
 target_include_directories(etkdg_impl PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_library(

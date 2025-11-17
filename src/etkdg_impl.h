@@ -35,9 +35,6 @@
 
 // forward declarations
 
-namespace nvMolKit {
-struct BfgsBatchMinimizer;
-}
 
 namespace RDKit {
 class ROMol;
@@ -84,20 +81,6 @@ struct ETKDGContext {
   AsyncDevicePtr<int>                     countFinishedThisIteration;
   //! Molecules * confs per molecule, typically.
   int                                     nTotalSystems = 0;
-  //! Shared minimizer for all stages (reused to avoid reallocating pinned memory)
-  std::unique_ptr<BfgsBatchMinimizer>     minimizer;
-  
-  // Explicitly declare special member functions
-  ETKDGContext() = default;  // Default constructor
-  ~ETKDGContext();           // Destructor (defined in .cpp where BfgsBatchMinimizer is complete)
-  
-  // Move operations (declared here, defined in .cpp where BfgsBatchMinimizer is complete)
-  ETKDGContext(ETKDGContext&&) noexcept;
-  ETKDGContext& operator=(ETKDGContext&&) noexcept;
-  
-  // Delete copy operations (not allowed due to non-copyable members)
-  ETKDGContext(const ETKDGContext&) = delete;
-  ETKDGContext& operator=(const ETKDGContext&) = delete;
 };
 
 void setStreams(ETKDGContext& ctx, cudaStream_t stream);
@@ -197,7 +180,7 @@ class ETKDGDriver {
   void printTimingStatistics() const;
 };
 
-void initETKDGContext(const std::vector<RDKit::ROMol*>& mols, ETKDGContext& context, int confsPerMol = 1, cudaStream_t stream = nullptr);
+void initETKDGContext(const std::vector<RDKit::ROMol*>& mols, ETKDGContext& context, int confsPerMol = 1);
 
 /**
  * @brief Tracks conformer generation results and dispatches molecule IDs for processing

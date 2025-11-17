@@ -162,11 +162,20 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
 
   // Assign streams to the specified GPU devices
   const int numThreadsGpuBatching = effectivebatchesPerGpu * static_cast<int>(gpuIdsToUse.size());
+  std::vector<std::unique_ptr<BfgsBatchMinimizer>> minimizersPerThread;
+  minimizersPerThread.reserve(numThreadsGpuBatching);
   for (int i = 0; i < numThreadsGpuBatching; ++i) {
     const int        deviceId = gpuIdsToUse[i % gpuIdsToUse.size()];
     const WithDevice dev(deviceId);
     streamsPerThread.emplace_back();
     devicesPerThread.push_back(deviceId);
+    // Create minimizer for this thread (reused across all ETKDG batches)
+    minimizersPerThread.push_back(std::make_unique<BfgsBatchMinimizer>(
+        4,                           // dataDim for ETKDG (4D distance geometry)
+        DebugLevel::NONE,
+        true,                        // scaleGrads
+        streamsPerThread.back().stream(),
+        BfgsBackend::PER_MOLECULE));
   }
 
   // Work with original unique molecules, not the duplicated ones
@@ -220,9 +229,14 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
         detail::ETKDGContext context;
         detail::setStreams(context, streamPtr);
         // Treat each conformer attempt as an individual molecule (confsPerMolecule = 1)
-        detail::initETKDGContext(batchMolsWithConfs, context, 1, streamPtr);
+        detail::initETKDGContext(batchMolsWithConfs, context, 1);
 
         ScopedNvtxRange                                  stageSetupRange("Setup ETKDG Stages");
+        
+        // Get the minimizer for this thread (reused across all ETKDG batches)
+        const int           threadId = omp_get_thread_num();
+        BfgsBatchMinimizer& minimizer = *minimizersPerThread[threadId];
+        
         // Create stages in order
         std::vector<std::unique_ptr<detail::ETKDGStage>> stages;
 
@@ -236,7 +250,7 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
 
         // First minimize, then first round of chiral checks.
         stages.push_back(
-          std::make_unique<detail::FirstMinimizeStage>(constMolPtrs, batchEargs, paramsCopy, context, *context.minimizer, streamPtr));
+          std::make_unique<detail::FirstMinimizeStage>(constMolPtrs, batchEargs, paramsCopy, context, minimizer, streamPtr));
         stages.push_back(std::make_unique<detail::ETKDGTetrahedralCheckStage>(context, batchEargs, dim, streamPtr));
 
         // Only add first chiral check if enforceChirality is enabled
@@ -250,12 +264,12 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
 
         // Second + 3rd minimize, then double bond checks.
         stages.push_back(
-          std::make_unique<detail::FourthDimMinimizeStage>(constMolPtrs, batchEargs, paramsCopy, context, *context.minimizer, streamPtr));
+          std::make_unique<detail::FourthDimMinimizeStage>(constMolPtrs, batchEargs, paramsCopy, context, minimizer, streamPtr));
 
         // (ET)(K)DG: Add experimental torsion minimization stage only if needed to match RDKit's logic.
         if (paramsCopy.useExpTorsionAnglePrefs || paramsCopy.useBasicKnowledge) {
           stages.push_back(
-            std::make_unique<detail::ETKMinimizationStage>(constMolPtrs, batchEargs, paramsCopy, context, *context.minimizer, streamPtr));
+            std::make_unique<detail::ETKMinimizationStage>(constMolPtrs, batchEargs, paramsCopy, context, minimizer, streamPtr));
         }
 
         // Final chiral and stereochem checks
