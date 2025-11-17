@@ -32,6 +32,7 @@
 #include "etkdg_stage_update_conformers.h"
 #include "minimizer/bfgs_minimize.h"
 #include "test_utils.h"
+#include "utils/host_vector.h"
 
 using ::nvMolKit::detail::ETKDGContext;
 using ::nvMolKit::detail::ETKDGDriver;
@@ -390,7 +391,12 @@ TEST_F(ETKDGPipelineUpdateConformersTestFixture, UpdateConformersStage) {
 
   // Create and execute the stage
   std::unordered_map<const RDKit::ROMol*, std::vector<std::unique_ptr<Conformer>>> conformers;
-  nvMolKit::detail::ETKDGUpdateConformersStage stage(mols_, eargs, conformers, nullptr, nullptr, -1);
+  
+  // Create scratch buffers for the stage
+  nvMolKit::PinnedHostVector<double> positionsScratch(totalAtoms * 3);
+  nvMolKit::PinnedHostVector<uint8_t> activeScratch(mols_.size());
+  
+  nvMolKit::detail::ETKDGUpdateConformersStage stage(mols_, eargs, conformers, positionsScratch, activeScratch, nullptr, nullptr, -1);
   stage.execute(context);
   for (size_t i = 0; i < mols_.size(); ++i) {
     auto it = conformers.find(mols_[i]);
@@ -452,7 +458,12 @@ TEST_F(ETKDGPipelineUpdateConformersTestFixture, UpdateConformersStageWithInacti
   // Create and execute the stage
   auto                                                                             params = DGeomHelpers::ETKDGv3;
   std::unordered_map<const RDKit::ROMol*, std::vector<std::unique_ptr<Conformer>>> conformers;
-  nvMolKit::detail::ETKDGUpdateConformersStage stage(mols_, eargs, conformers, nullptr, nullptr, -1);
+  
+  // Create scratch buffers for the stage
+  nvMolKit::PinnedHostVector<double> positionsScratch(totalAtoms * 3);
+  nvMolKit::PinnedHostVector<uint8_t> activeScratch(mols_.size());
+  
+  nvMolKit::detail::ETKDGUpdateConformersStage stage(mols_, eargs, conformers, positionsScratch, activeScratch, nullptr, nullptr, -1);
   stage.execute(context);
   for (size_t i = 0; i < mols_.size(); ++i) {
     if (i == 1) {

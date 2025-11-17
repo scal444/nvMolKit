@@ -30,6 +30,7 @@
 #include "etkdg_stage_firstminimization.h"
 #include "etkdg_stage_fourthdimminimization.h"
 #include "test_utils.h"
+#include "utils/host_vector.h"
 
 using namespace ::nvMolKit::detail;
 
@@ -160,6 +161,11 @@ class ETKDGMinimizeSingleMolTestFixture : public ::testing::TestWithParam<ETKDGS
     
     // Create minimizer after context is initialized
     minimizer_ = std::make_unique<nvMolKit::BfgsBatchMinimizer>(4, nvMolKit::DebugLevel::NONE, true, nullptr, backend_);
+    
+    // Pre-allocate scratch buffers for stages
+    const size_t totalAtoms = context_.systemHost.atomStarts.back();
+    positionsScratch_.resize(totalAtoms * 4);  // 4D for ETKDG
+    activeScratch_.resize(mols_.size());
   }
 
   void initTestComponents() { initTestComponentsCommon(mols_, molsPtrs_, context_, eargs_, embedParam_); }
@@ -174,6 +180,8 @@ class ETKDGMinimizeSingleMolTestFixture : public ::testing::TestWithParam<ETKDGS
   RDKit::DGeomHelpers::EmbedParameters       embedParam_;
   nvMolKit::BfgsBackend                      backend_;
   std::unique_ptr<nvMolKit::BfgsBatchMinimizer> minimizer_;
+  nvMolKit::PinnedHostVector<double>         positionsScratch_;
+  nvMolKit::PinnedHostVector<uint8_t>        activeScratch_;
 };
 
 // BFGS Stage Tests
@@ -276,7 +284,7 @@ TEST_P(ETKDGMinimizeSingleMolTestFixture, FirstPartETKDGPipelineBFGSTest) {
 
   // Create stages in order: coordgen -> first minimize BFGS -> fourthdim BFGS
   std::vector<std::unique_ptr<ETKDGStage>> stages;
-  stages.push_back(std::make_unique<nvMolKit::detail::ETKDGCoordGenRDKitStage>(embedParam_, mols_, eargs_));
+  stages.push_back(std::make_unique<nvMolKit::detail::ETKDGCoordGenRDKitStage>(embedParam_, mols_, eargs_, positionsScratch_, activeScratch_));
   auto  firstStage    = std::make_unique<nvMolKit::detail::FirstMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_);
   auto* firstStagePtr = firstStage.get();  // Store pointer before moving
   stages.push_back(std::move(firstStage));
@@ -339,6 +347,11 @@ class ETKDGMinimizeMultiMolDiverseTestFixture : public ::testing::TestWithParam<
     
     // Create minimizer after context is initialized
     minimizer_ = std::make_unique<nvMolKit::BfgsBatchMinimizer>(4, nvMolKit::DebugLevel::NONE, true, nullptr, backend_);
+    
+    // Pre-allocate scratch buffers for stages
+    const size_t totalAtoms = context_.systemHost.atomStarts.back();
+    positionsScratch_.resize(totalAtoms * 4);  // 4D for ETKDG
+    activeScratch_.resize(mols_.size());
   }
 
   void initTestComponents() { initTestComponentsCommon(mols_, molsPtrs_, context_, eargs_, embedParam_); }
@@ -352,6 +365,8 @@ class ETKDGMinimizeMultiMolDiverseTestFixture : public ::testing::TestWithParam<
   RDKit::DGeomHelpers::EmbedParameters       embedParam_;
   nvMolKit::BfgsBackend                      backend_;
   std::unique_ptr<nvMolKit::BfgsBatchMinimizer> minimizer_;
+  nvMolKit::PinnedHostVector<double>         positionsScratch_;
+  nvMolKit::PinnedHostVector<uint8_t>        activeScratch_;
 };
 
 // BFGS Stage Tests for diverse molecules
@@ -462,7 +477,7 @@ TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, FirstPartETKDGPipelineBFGSTest) 
 
   // Create stages in order: coordgen -> first minimize BFGS -> fourthdim BFGS
   std::vector<std::unique_ptr<ETKDGStage>> stages;
-  stages.push_back(std::make_unique<nvMolKit::detail::ETKDGCoordGenRDKitStage>(embedParam_, mols_, eargs_));
+  stages.push_back(std::make_unique<nvMolKit::detail::ETKDGCoordGenRDKitStage>(embedParam_, mols_, eargs_, positionsScratch_, activeScratch_));
   auto firstStage = std::make_unique<nvMolKit::detail::FirstMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_);
   stages.push_back(std::move(firstStage));
   auto  secondStage = std::make_unique<nvMolKit::detail::FourthDimMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_);

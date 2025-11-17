@@ -29,6 +29,7 @@
 #include "etkdg_stage_fourthdimminimization.h"
 #include "etkdg_stage_stereochem_checks.h"
 #include "etkdg_stage_update_conformers.h"
+#include "utils/host_vector.h"
 #include "minimizer/bfgs_minimize.h"
 #include "nvtx.h"
 #include "openmp_helpers.h"
@@ -52,6 +53,14 @@ unsigned int calculateMaxIterations(const std::vector<RDKit::ROMol*>& mols, unsi
   }
   return maxIterations;
 }
+
+// Struct to hold per-thread reusable resources
+struct PerThreadData {
+  std::unique_ptr<BfgsBatchMinimizer> minimizer;
+  PinnedHostVector<double>            positionsScratch;
+  PinnedHostVector<uint8_t>           activeScratch;
+};
+
 }  // anonymous namespace
 
 // TODO: The useRDKitCoordGen parameter will be removed once ETKDGCoordGenStage is optimized, after which we will
@@ -160,22 +169,43 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
     }
   }
 
-  // Assign streams to the specified GPU devices
+  // Estimate buffer sizes: use batch size with 50% buffer and estimate max atoms
+  // Calculate average atoms per molecule for estimation
+  size_t totalAtoms = 0;
+  for (const auto& mol : sortedMols) {
+    totalAtoms += mol->getNumAtoms();
+  }
+  const size_t avgAtomsPerMol            = (sortedMols.empty()) ? 50 : (totalAtoms / sortedMols.size());
+  const size_t estimatedBatchSize        = (batchSize <= 0) ? sortedMols.size() : static_cast<size_t>(batchSize);
+  const size_t estimatedMaxAtomsPerBatch = estimatedBatchSize * confsPerMolecule * avgAtomsPerMol;
+  const size_t estimatedPositionsSize    = static_cast<size_t>(estimatedMaxAtomsPerBatch * dim * 1.5);  // 50% buffer
+  const size_t estimatedActiveSize       = static_cast<size_t>((estimatedBatchSize * confsPerMolecule) * 1.5);  // 50% buffer
+
+  // Assign streams and per-thread data to the specified GPU devices
   const int numThreadsGpuBatching = effectivebatchesPerGpu * static_cast<int>(gpuIdsToUse.size());
-  std::vector<std::unique_ptr<BfgsBatchMinimizer>> minimizersPerThread;
-  minimizersPerThread.reserve(numThreadsGpuBatching);
+  std::vector<PerThreadData> perThreadData;
+  perThreadData.reserve(numThreadsGpuBatching);
+  
   for (int i = 0; i < numThreadsGpuBatching; ++i) {
     const int        deviceId = gpuIdsToUse[i % gpuIdsToUse.size()];
     const WithDevice dev(deviceId);
     streamsPerThread.emplace_back();
     devicesPerThread.push_back(deviceId);
+    
+    PerThreadData threadData;
     // Create minimizer for this thread (reused across all ETKDG batches)
-    minimizersPerThread.push_back(std::make_unique<BfgsBatchMinimizer>(
+    threadData.minimizer = std::make_unique<BfgsBatchMinimizer>(
         4,                           // dataDim for ETKDG (4D distance geometry)
         DebugLevel::NONE,
         true,                        // scaleGrads
         streamsPerThread.back().stream(),
-        BfgsBackend::PER_MOLECULE));
+        BfgsBackend::PER_MOLECULE);
+    
+    // Pre-allocate pinned memory scratch buffers with estimated sizes
+    threadData.positionsScratch.resize(estimatedPositionsSize);
+    threadData.activeScratch.resize(estimatedActiveSize);
+    
+    perThreadData.push_back(std::move(threadData));
   }
 
   // Work with original unique molecules, not the duplicated ones
@@ -233,9 +263,10 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
 
         ScopedNvtxRange                                  stageSetupRange("Setup ETKDG Stages");
         
-        // Get the minimizer for this thread (reused across all ETKDG batches)
+        // Get the per-thread data for this thread (reused across all ETKDG batches)
         const int           threadId = omp_get_thread_num();
-        BfgsBatchMinimizer& minimizer = *minimizersPerThread[threadId];
+        PerThreadData&      threadData = perThreadData[threadId];
+        BfgsBatchMinimizer& minimizer = *threadData.minimizer;
         
         // Create stages in order
         std::vector<std::unique_ptr<detail::ETKDGStage>> stages;
@@ -246,7 +277,10 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
         // Create coordinate generation stage based on parameter
         // FIXME: arguments still involve useRDKitcoordgen.
         stages.push_back(
-          std::make_unique<detail::ETKDGCoordGenRDKitStage>(paramsCopy, constMolPtrs, batchEargs, streamPtr));
+          std::make_unique<detail::ETKDGCoordGenRDKitStage>(paramsCopy, constMolPtrs, batchEargs, 
+                                                           threadData.positionsScratch, 
+                                                           threadData.activeScratch, 
+                                                           streamPtr));
 
         // First minimize, then first round of chiral checks.
         stages.push_back(
@@ -291,6 +325,8 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
         stages.push_back(std::make_unique<detail::ETKDGUpdateConformersStage>(batchMolsWithConfs,
                                                                               batchEargs,
                                                                               conformers,
+                                                                              threadData.positionsScratch,
+                                                                              threadData.activeScratch,
                                                                               streamPtr,
                                                                               &conformer_mutex,
                                                                               confsPerMolecule));
