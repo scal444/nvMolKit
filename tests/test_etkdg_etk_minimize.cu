@@ -248,11 +248,14 @@ TEST_P(ETKStageSingleMolTestFixture, MinimizeCompare) {
   // Determine useBasicKnowledge from embedParam_
   const bool useBasicKnowledge = embedParam_.useBasicKnowledge;
 
+  // Create minimizer for the test
+  nvMolKit::BfgsBatchMinimizer minimizer(4, nvMolKit::DebugLevel::NONE, true, nullptr, backend);
+
   // Create FirstMinimizeStage
   std::vector<std::unique_ptr<ETKDGStage>> stages;
   std::vector<const RDKit::ROMol*>         molsPtrs;
   molsPtrs.push_back(molPtr_.get());
-  auto        stage = std::make_unique<nvMolKit::detail::ETKMinimizationStage>(molsPtrs, eargs_, embedParam_, context_, backend, nullptr);
+  auto        stage = std::make_unique<nvMolKit::detail::ETKMinimizationStage>(molsPtrs, eargs_, embedParam_, context_, minimizer, nullptr);
   const auto* stagePtr = stage.get();  // Store pointer before moving
   stages.push_back(std::move(stage));
 
@@ -345,6 +348,9 @@ TEST_P(ETKStageMultiMolTestFixture, MinimizeCompare) {
   // Determine useBasicKnowledge from embedParam_
   const bool useBasicKnowledge = embedParam_.useBasicKnowledge;
 
+  // Create minimizer for the test
+  nvMolKit::BfgsBatchMinimizer minimizer(4, nvMolKit::DebugLevel::NONE, true, nullptr, backend);
+
   // Create FirstMinimizeStage
   std::vector<std::unique_ptr<ETKDGStage>> stages;
   std::vector<const RDKit::ROMol*>         molsPtrs;
@@ -353,7 +359,7 @@ TEST_P(ETKStageMultiMolTestFixture, MinimizeCompare) {
   }
   const int count = molsPtrs.size();
 
-  auto        stage = std::make_unique<nvMolKit::detail::ETKMinimizationStage>(molsPtrs, eargs_, embedParam_, context_, backend, nullptr);
+  auto        stage = std::make_unique<nvMolKit::detail::ETKMinimizationStage>(molsPtrs, eargs_, embedParam_, context_, minimizer, nullptr);
   const auto* stagePtr = stage.get();  // Store pointer before moving
   stages.push_back(std::move(stage));
 

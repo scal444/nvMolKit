@@ -157,6 +157,9 @@ class ETKDGMinimizeSingleMolTestFixture : public ::testing::TestWithParam<ETKDGS
     backend_                    = std::get<1>(GetParam());
     embedParam_.useRandomCoords = true;
     initTestComponents();
+    
+    // Create minimizer after context is initialized
+    minimizer_ = std::make_unique<nvMolKit::BfgsBatchMinimizer>(4, nvMolKit::DebugLevel::NONE, true, nullptr, backend_);
   }
 
   void initTestComponents() { initTestComponentsCommon(mols_, molsPtrs_, context_, eargs_, embedParam_); }
@@ -170,6 +173,7 @@ class ETKDGMinimizeSingleMolTestFixture : public ::testing::TestWithParam<ETKDGS
   std::vector<nvMolKit::detail::EmbedArgs>   eargs_;
   RDKit::DGeomHelpers::EmbedParameters       embedParam_;
   nvMolKit::BfgsBackend                      backend_;
+  std::unique_ptr<nvMolKit::BfgsBatchMinimizer> minimizer_;
 };
 
 // BFGS Stage Tests
@@ -179,7 +183,7 @@ TEST_P(ETKDGMinimizeSingleMolTestFixture, FirstMinimizeStageBFGSTest) {
 
   // Create FirstMinimizeStage
   std::vector<std::unique_ptr<ETKDGStage>> stages;
-  auto  stage    = std::make_unique<nvMolKit::detail::FirstMinimizeStage>(mols_, eargs_, embedParam_, context_, backend_);
+  auto  stage    = std::make_unique<nvMolKit::detail::FirstMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_);
   auto* stagePtr = stage.get();  // Store pointer before moving
   stages.push_back(std::move(stage));
 
@@ -209,7 +213,7 @@ TEST_P(ETKDGMinimizeSingleMolTestFixture, FirstMinimizeStageBFGSTest) {
 TEST_P(ETKDGMinimizeSingleMolTestFixture, FourthDimMinimizeStageBFGSTest) {
   // Create FourthDimMinimizeStage
   std::vector<std::unique_ptr<ETKDGStage>> stages;
-  stages.push_back(std::make_unique<nvMolKit::detail::FourthDimMinimizeStage>(mols_, eargs_, embedParam_, context_, backend_));
+  stages.push_back(std::make_unique<nvMolKit::detail::FourthDimMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_));
 
   // Create and run driver
   ETKDGDriver driver(std::make_unique<ETKDGContext>(std::move(context_)), std::move(stages));
@@ -233,10 +237,10 @@ TEST_P(ETKDGMinimizeSingleMolTestFixture, FullMinimizationPipelineBFGSTest) {
 
   // Create stages
   std::vector<std::unique_ptr<ETKDGStage>> stages;
-  auto  firstStage    = std::make_unique<nvMolKit::detail::FirstMinimizeStage>(mols_, eargs_, embedParam_, context_, backend_);
+  auto  firstStage    = std::make_unique<nvMolKit::detail::FirstMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_);
   auto* firstStagePtr = firstStage.get();  // Store pointer before moving
   stages.push_back(std::move(firstStage));
-  stages.push_back(std::make_unique<nvMolKit::detail::FourthDimMinimizeStage>(mols_, eargs_, embedParam_, context_, backend_));
+  stages.push_back(std::make_unique<nvMolKit::detail::FourthDimMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_));
 
   // Create and run driver
   ETKDGDriver driver(std::make_unique<ETKDGContext>(std::move(context_)), std::move(stages));
@@ -273,10 +277,10 @@ TEST_P(ETKDGMinimizeSingleMolTestFixture, FirstPartETKDGPipelineBFGSTest) {
   // Create stages in order: coordgen -> first minimize BFGS -> fourthdim BFGS
   std::vector<std::unique_ptr<ETKDGStage>> stages;
   stages.push_back(std::make_unique<nvMolKit::detail::ETKDGCoordGenRDKitStage>(embedParam_, mols_, eargs_));
-  auto  firstStage    = std::make_unique<nvMolKit::detail::FirstMinimizeStage>(mols_, eargs_, embedParam_, context_, backend_);
+  auto  firstStage    = std::make_unique<nvMolKit::detail::FirstMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_);
   auto* firstStagePtr = firstStage.get();  // Store pointer before moving
   stages.push_back(std::move(firstStage));
-  stages.push_back(std::make_unique<nvMolKit::detail::FourthDimMinimizeStage>(mols_, eargs_, embedParam_, context_, backend_));
+  stages.push_back(std::make_unique<nvMolKit::detail::FourthDimMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_));
 
   // Create and run driver
   ETKDGDriver driver(std::make_unique<ETKDGContext>(std::move(context_)), std::move(stages));
@@ -332,6 +336,9 @@ class ETKDGMinimizeMultiMolDiverseTestFixture : public ::testing::TestWithParam<
     backend_                    = std::get<1>(GetParam());
     embedParam_.useRandomCoords = true;
     initTestComponents();
+    
+    // Create minimizer after context is initialized
+    minimizer_ = std::make_unique<nvMolKit::BfgsBatchMinimizer>(4, nvMolKit::DebugLevel::NONE, true, nullptr, backend_);
   }
 
   void initTestComponents() { initTestComponentsCommon(mols_, molsPtrs_, context_, eargs_, embedParam_); }
@@ -344,6 +351,7 @@ class ETKDGMinimizeMultiMolDiverseTestFixture : public ::testing::TestWithParam<
   std::vector<nvMolKit::detail::EmbedArgs>   eargs_;
   RDKit::DGeomHelpers::EmbedParameters       embedParam_;
   nvMolKit::BfgsBackend                      backend_;
+  std::unique_ptr<nvMolKit::BfgsBatchMinimizer> minimizer_;
 };
 
 // BFGS Stage Tests for diverse molecules
@@ -355,7 +363,7 @@ TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, FirstMinimizeStageBFGSTest) {
 
   // Create FirstMinimizeStage
   std::vector<std::unique_ptr<ETKDGStage>> stages;
-  auto  stage    = std::make_unique<nvMolKit::detail::FirstMinimizeStage>(mols_, eargs_, embedParam_, context_, backend_);
+  auto  stage    = std::make_unique<nvMolKit::detail::FirstMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_);
   auto* stagePtr = stage.get();  // Store pointer before moving
   stages.push_back(std::move(stage));
 
@@ -386,7 +394,7 @@ TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, FirstMinimizeStageBFGSTest) {
 TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, FourthDimMinimizeStageBFGSTest) {
   // Create FourthDimMinimizeStage
   std::vector<std::unique_ptr<ETKDGStage>> stages;
-  stages.push_back(std::make_unique<nvMolKit::detail::FourthDimMinimizeStage>(mols_, eargs_, embedParam_, context_, backend_));
+  stages.push_back(std::make_unique<nvMolKit::detail::FourthDimMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_));
 
   // Create and run driver
   ETKDGDriver driver(std::make_unique<ETKDGContext>(std::move(context_)), std::move(stages));
@@ -412,10 +420,10 @@ TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, FullMinimizationPipelineBFGSTest
 
   // Create stages
   std::vector<std::unique_ptr<ETKDGStage>> stages;
-  auto  firstStage    = std::make_unique<nvMolKit::detail::FirstMinimizeStage>(mols_, eargs_, embedParam_, context_, backend_);
+  auto  firstStage    = std::make_unique<nvMolKit::detail::FirstMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_);
   auto* firstStagePtr = firstStage.get();  // Store pointer before moving
   stages.push_back(std::move(firstStage));
-  auto secondStage = std::make_unique<nvMolKit::detail::FourthDimMinimizeStage>(mols_, eargs_, embedParam_, context_, backend_);
+  auto secondStage = std::make_unique<nvMolKit::detail::FourthDimMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_);
   auto secondStagePtr = secondStage.get();
   stages.push_back(std::move(secondStage));
 
@@ -455,9 +463,9 @@ TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, FirstPartETKDGPipelineBFGSTest) 
   // Create stages in order: coordgen -> first minimize BFGS -> fourthdim BFGS
   std::vector<std::unique_ptr<ETKDGStage>> stages;
   stages.push_back(std::make_unique<nvMolKit::detail::ETKDGCoordGenRDKitStage>(embedParam_, mols_, eargs_));
-  auto firstStage = std::make_unique<nvMolKit::detail::FirstMinimizeStage>(mols_, eargs_, embedParam_, context_, backend_);
+  auto firstStage = std::make_unique<nvMolKit::detail::FirstMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_);
   stages.push_back(std::move(firstStage));
-  auto  secondStage = std::make_unique<nvMolKit::detail::FourthDimMinimizeStage>(mols_, eargs_, embedParam_, context_, backend_);
+  auto  secondStage = std::make_unique<nvMolKit::detail::FourthDimMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_);
   auto* secondStagePtr = secondStage.get();  // Store pointer before moving
   stages.push_back(std::move(secondStage));
   // Create and run driver
@@ -486,7 +494,7 @@ TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, FirstPartETKDGPipelineBFGSTest) 
 
 TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, FirstMinimizeStageBFGSWithInactiveMolecules) {
   // Create FirstMinimizeStage
-  auto stage = std::make_unique<nvMolKit::detail::FirstMinimizeStage>(mols_, eargs_, embedParam_, context_, backend_);
+  auto stage = std::make_unique<nvMolKit::detail::FirstMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_);
 
   // Set some molecules as inactive (let's say molecules 1 and 3)
   std::vector<uint8_t> activeRef(context_.nTotalSystems, 1);

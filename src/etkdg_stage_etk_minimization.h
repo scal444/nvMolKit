@@ -35,7 +35,7 @@ class ETKMinimizationStage final : public ETKDGStage {
                        const std::vector<EmbedArgs>&               eargs,
                        const RDKit::DGeomHelpers::EmbedParameters& embedParam,
                        const ETKDGContext&                         ctx,
-                       const BfgsBackend& bfgsBackend = BfgsBackend::BATCHED,
+                       BfgsBatchMinimizer&                         minimizer,
                        cudaStream_t                                stream = nullptr);
 
   void        execute(ETKDGContext& ctx) override;
@@ -49,7 +49,7 @@ class ETKMinimizationStage final : public ETKDGStage {
   nvMolKit::DistGeom::BatchedMolecularSystem3DHost    molSystemHost;
   const RDKit::DGeomHelpers::EmbedParameters&         embedParam_;
   cudaStream_t                                        stream_;
-  BfgsBackend backend_;
+  BfgsBatchMinimizer&                                 minimizer_;
 };
 
 }  // namespace detail

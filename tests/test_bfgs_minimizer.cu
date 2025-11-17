@@ -1282,6 +1282,243 @@ TEST_F(BFGSMinimizerHarmonicTestFixture, MultipleMinimizeCallsEquivalentToSingle
   EXPECT_THAT(doubleCallEnergies, ::testing::Pointwise(::testing::DoubleNear(1e-3), singleCallEnergies));
 }
 
+TEST_P(BFGSMinimizerBackendTest, ReuseMinimizer_VariedSizes) {
+  const nvMolKit::BfgsBackend backend = GetParam();
+  
+  // System 1: Small (1 molecule)
+  setUpMMFFSystems(1, false);
+  BatchedMolecularSystemHost    system1Host   = systemHost;
+  BatchedMolecularDeviceBuffers system1Device = std::move(systemDevice);
+  
+  // System 2: Medium (5 molecules) - clear fixture state first
+  mols.clear();
+  systemHost = BatchedMolecularSystemHost();
+  systemDevice = BatchedMolecularDeviceBuffers();
+  setUpMMFFSystems(5, true);
+  BatchedMolecularSystemHost    system2Host   = systemHost;
+  BatchedMolecularDeviceBuffers system2Device = std::move(systemDevice);
+  
+  // System 3: Large (20 molecules) - clear fixture state first
+  mols.clear();
+  systemHost = BatchedMolecularSystemHost();
+  systemDevice = BatchedMolecularDeviceBuffers();
+  setUpMMFFSystems(20, true);
+  BatchedMolecularSystemHost    system3Host   = systemHost;
+  BatchedMolecularDeviceBuffers system3Device = std::move(systemDevice);
+  
+  constexpr int maxIters = 50;
+  
+  // Get reference results with fresh minimizers
+  std::vector<std::vector<double>> referenceEnergies(3);
+  std::vector<std::vector<double>> referencePositions(3);
+  
+  // Reference for system 1
+  {
+    nvMolKit::BfgsBatchMinimizer minimizer(3, nvMolKit::DebugLevel::NONE, true, nullptr, backend);
+    if (backend == nvMolKit::BfgsBackend::BATCHED) {
+      auto eFunc = [&](const double* positions) { nvMolKit::MMFF::computeEnergy(system1Device, positions); };
+      auto gFunc = [&]() { nvMolKit::MMFF::computeGradients(system1Device); };
+      minimizer.minimize(maxIters, 1e-4, system1Host.indices.atomStarts, system1Device.indices.atomStarts,
+                        system1Device.positions, system1Device.grad, system1Device.energyOuts,
+                        system1Device.energyBuffer, eFunc, gFunc);
+    } else {
+      auto terms = nvMolKit::MMFF::toEnergyForceContribsDevicePtr(system1Device);
+      auto idx   = nvMolKit::MMFF::toBatchedIndicesDevicePtr(system1Device);
+      minimizer.minimizeWithMMFF(maxIters, 1e-4, system1Host.indices.atomStarts, system1Device.indices.atomStarts,
+                                system1Device.positions, system1Device.grad, system1Device.energyOuts,
+                                system1Device.energyBuffer, terms, idx);
+    }
+    referenceEnergies[0].resize(system1Device.energyOuts.size());
+    system1Device.energyOuts.copyToHost(referenceEnergies[0]);
+    referencePositions[0].resize(system1Device.positions.size());
+    system1Device.positions.copyToHost(referencePositions[0]);
+  }
+  
+  // Reference for system 2
+  {
+    nvMolKit::BfgsBatchMinimizer minimizer(3, nvMolKit::DebugLevel::NONE, true, nullptr, backend);
+    if (backend == nvMolKit::BfgsBackend::BATCHED) {
+      auto eFunc = [&](const double* positions) { nvMolKit::MMFF::computeEnergy(system2Device, positions); };
+      auto gFunc = [&]() { nvMolKit::MMFF::computeGradients(system2Device); };
+      minimizer.minimize(maxIters, 1e-4, system2Host.indices.atomStarts, system2Device.indices.atomStarts,
+                        system2Device.positions, system2Device.grad, system2Device.energyOuts,
+                        system2Device.energyBuffer, eFunc, gFunc);
+    } else {
+      auto terms = nvMolKit::MMFF::toEnergyForceContribsDevicePtr(system2Device);
+      auto idx   = nvMolKit::MMFF::toBatchedIndicesDevicePtr(system2Device);
+      minimizer.minimizeWithMMFF(maxIters, 1e-4, system2Host.indices.atomStarts, system2Device.indices.atomStarts,
+                                system2Device.positions, system2Device.grad, system2Device.energyOuts,
+                                system2Device.energyBuffer, terms, idx);
+    }
+    referenceEnergies[1].resize(system2Device.energyOuts.size());
+    system2Device.energyOuts.copyToHost(referenceEnergies[1]);
+    referencePositions[1].resize(system2Device.positions.size());
+    system2Device.positions.copyToHost(referencePositions[1]);
+  }
+  
+  // Reference for system 3
+  {
+    nvMolKit::BfgsBatchMinimizer minimizer(3, nvMolKit::DebugLevel::NONE, true, nullptr, backend);
+    if (backend == nvMolKit::BfgsBackend::BATCHED) {
+      auto eFunc = [&](const double* positions) { nvMolKit::MMFF::computeEnergy(system3Device, positions); };
+      auto gFunc = [&]() { nvMolKit::MMFF::computeGradients(system3Device); };
+      minimizer.minimize(maxIters, 1e-4, system3Host.indices.atomStarts, system3Device.indices.atomStarts,
+                        system3Device.positions, system3Device.grad, system3Device.energyOuts,
+                        system3Device.energyBuffer, eFunc, gFunc);
+    } else {
+      auto terms = nvMolKit::MMFF::toEnergyForceContribsDevicePtr(system3Device);
+      auto idx   = nvMolKit::MMFF::toBatchedIndicesDevicePtr(system3Device);
+      minimizer.minimizeWithMMFF(maxIters, 1e-4, system3Host.indices.atomStarts, system3Device.indices.atomStarts,
+                                system3Device.positions, system3Device.grad, system3Device.energyOuts,
+                                system3Device.energyBuffer, terms, idx);
+    }
+    referenceEnergies[2].resize(system3Device.energyOuts.size());
+    system3Device.energyOuts.copyToHost(referenceEnergies[2]);
+    referencePositions[2].resize(system3Device.positions.size());
+    system3Device.positions.copyToHost(referencePositions[2]);
+  }
+  
+  // Reset all systems to initial state (clear fixture state first)
+  mols.clear();
+  systemHost = BatchedMolecularSystemHost();
+  systemDevice = BatchedMolecularDeviceBuffers();
+  
+  setUpMMFFSystems(1, false);
+  system1Host   = systemHost;
+  system1Device = std::move(systemDevice);
+  
+  mols.clear();
+  systemHost = BatchedMolecularSystemHost();
+  systemDevice = BatchedMolecularDeviceBuffers();
+  
+  setUpMMFFSystems(5, true);
+  system2Host   = systemHost;
+  system2Device = std::move(systemDevice);
+  
+  mols.clear();
+  systemHost = BatchedMolecularSystemHost();
+  systemDevice = BatchedMolecularDeviceBuffers();
+  
+  setUpMMFFSystems(20, true);
+  system3Host   = systemHost;
+  system3Device = std::move(systemDevice);
+  
+  // Reused minimizer: small -> medium -> large -> medium -> small
+  nvMolKit::BfgsBatchMinimizer reusedMinimizer(3, nvMolKit::DebugLevel::NONE, true, nullptr, backend);
+  
+  // Minimize system 1 (small)
+  if (backend == nvMolKit::BfgsBackend::BATCHED) {
+    auto eFunc = [&](const double* positions) { nvMolKit::MMFF::computeEnergy(system1Device, positions); };
+    auto gFunc = [&]() { nvMolKit::MMFF::computeGradients(system1Device); };
+    reusedMinimizer.minimize(maxIters, 1e-4, system1Host.indices.atomStarts, system1Device.indices.atomStarts,
+                            system1Device.positions, system1Device.grad, system1Device.energyOuts,
+                            system1Device.energyBuffer, eFunc, gFunc);
+  } else {
+    auto terms = nvMolKit::MMFF::toEnergyForceContribsDevicePtr(system1Device);
+    auto idx   = nvMolKit::MMFF::toBatchedIndicesDevicePtr(system1Device);
+    reusedMinimizer.minimizeWithMMFF(maxIters, 1e-4, system1Host.indices.atomStarts, system1Device.indices.atomStarts,
+                                    system1Device.positions, system1Device.grad, system1Device.energyOuts,
+                                    system1Device.energyBuffer, terms, idx);
+  }
+  std::vector<double> energy1(system1Device.energyOuts.size());
+  system1Device.energyOuts.copyToHost(energy1);
+  EXPECT_THAT(energy1, ::testing::Pointwise(::testing::DoubleNear(1e-5), referenceEnergies[0]))
+    << "System 1 (first run) energies should match reference";
+  
+  // Minimize system 2 (medium)
+  if (backend == nvMolKit::BfgsBackend::BATCHED) {
+    auto eFunc = [&](const double* positions) { nvMolKit::MMFF::computeEnergy(system2Device, positions); };
+    auto gFunc = [&]() { nvMolKit::MMFF::computeGradients(system2Device); };
+    reusedMinimizer.minimize(maxIters, 1e-4, system2Host.indices.atomStarts, system2Device.indices.atomStarts,
+                            system2Device.positions, system2Device.grad, system2Device.energyOuts,
+                            system2Device.energyBuffer, eFunc, gFunc);
+  } else {
+    auto terms = nvMolKit::MMFF::toEnergyForceContribsDevicePtr(system2Device);
+    auto idx   = nvMolKit::MMFF::toBatchedIndicesDevicePtr(system2Device);
+    reusedMinimizer.minimizeWithMMFF(maxIters, 1e-4, system2Host.indices.atomStarts, system2Device.indices.atomStarts,
+                                    system2Device.positions, system2Device.grad, system2Device.energyOuts,
+                                    system2Device.energyBuffer, terms, idx);
+  }
+  std::vector<double> energy2(system2Device.energyOuts.size());
+  system2Device.energyOuts.copyToHost(energy2);
+  EXPECT_THAT(energy2, ::testing::Pointwise(::testing::DoubleNear(1e-5), referenceEnergies[1]))
+    << "System 2 (first run) energies should match reference";
+  
+  // Minimize system 3 (large)
+  if (backend == nvMolKit::BfgsBackend::BATCHED) {
+    auto eFunc = [&](const double* positions) { nvMolKit::MMFF::computeEnergy(system3Device, positions); };
+    auto gFunc = [&]() { nvMolKit::MMFF::computeGradients(system3Device); };
+    reusedMinimizer.minimize(maxIters, 1e-4, system3Host.indices.atomStarts, system3Device.indices.atomStarts,
+                            system3Device.positions, system3Device.grad, system3Device.energyOuts,
+                            system3Device.energyBuffer, eFunc, gFunc);
+  } else {
+    auto terms = nvMolKit::MMFF::toEnergyForceContribsDevicePtr(system3Device);
+    auto idx   = nvMolKit::MMFF::toBatchedIndicesDevicePtr(system3Device);
+    reusedMinimizer.minimizeWithMMFF(maxIters, 1e-4, system3Host.indices.atomStarts, system3Device.indices.atomStarts,
+                                    system3Device.positions, system3Device.grad, system3Device.energyOuts,
+                                    system3Device.energyBuffer, terms, idx);
+  }
+  std::vector<double> energy3(system3Device.energyOuts.size());
+  system3Device.energyOuts.copyToHost(energy3);
+  EXPECT_THAT(energy3, ::testing::Pointwise(::testing::DoubleNear(1e-5), referenceEnergies[2]))
+    << "System 3 (first run) energies should match reference";
+  
+  // Reset systems and minimize again in reverse order to test going from large back to small
+  mols.clear();
+  systemHost = BatchedMolecularSystemHost();
+  systemDevice = BatchedMolecularDeviceBuffers();
+  
+  setUpMMFFSystems(5, true);
+  system2Host   = systemHost;
+  system2Device = std::move(systemDevice);
+  
+  mols.clear();
+  systemHost = BatchedMolecularSystemHost();
+  systemDevice = BatchedMolecularDeviceBuffers();
+  
+  setUpMMFFSystems(1, false);
+  system1Host   = systemHost;
+  system1Device = std::move(systemDevice);
+  
+  // Minimize system 2 again (after system 3)
+  if (backend == nvMolKit::BfgsBackend::BATCHED) {
+    auto eFunc = [&](const double* positions) { nvMolKit::MMFF::computeEnergy(system2Device, positions); };
+    auto gFunc = [&]() { nvMolKit::MMFF::computeGradients(system2Device); };
+    reusedMinimizer.minimize(maxIters, 1e-4, system2Host.indices.atomStarts, system2Device.indices.atomStarts,
+                            system2Device.positions, system2Device.grad, system2Device.energyOuts,
+                            system2Device.energyBuffer, eFunc, gFunc);
+  } else {
+    auto terms = nvMolKit::MMFF::toEnergyForceContribsDevicePtr(system2Device);
+    auto idx   = nvMolKit::MMFF::toBatchedIndicesDevicePtr(system2Device);
+    reusedMinimizer.minimizeWithMMFF(maxIters, 1e-4, system2Host.indices.atomStarts, system2Device.indices.atomStarts,
+                                    system2Device.positions, system2Device.grad, system2Device.energyOuts,
+                                    system2Device.energyBuffer, terms, idx);
+  }
+  std::vector<double> energy2Second(system2Device.energyOuts.size());
+  system2Device.energyOuts.copyToHost(energy2Second);
+  EXPECT_THAT(energy2Second, ::testing::Pointwise(::testing::DoubleNear(1e-5), referenceEnergies[1]))
+    << "System 2 (second run) energies should match reference";
+  
+  // Minimize system 1 again (after system 2)
+  if (backend == nvMolKit::BfgsBackend::BATCHED) {
+    auto eFunc = [&](const double* positions) { nvMolKit::MMFF::computeEnergy(system1Device, positions); };
+    auto gFunc = [&]() { nvMolKit::MMFF::computeGradients(system1Device); };
+    reusedMinimizer.minimize(maxIters, 1e-4, system1Host.indices.atomStarts, system1Device.indices.atomStarts,
+                            system1Device.positions, system1Device.grad, system1Device.energyOuts,
+                            system1Device.energyBuffer, eFunc, gFunc);
+  } else {
+    auto terms = nvMolKit::MMFF::toEnergyForceContribsDevicePtr(system1Device);
+    auto idx   = nvMolKit::MMFF::toBatchedIndicesDevicePtr(system1Device);
+    reusedMinimizer.minimizeWithMMFF(maxIters, 1e-4, system1Host.indices.atomStarts, system1Device.indices.atomStarts,
+                                    system1Device.positions, system1Device.grad, system1Device.energyOuts,
+                                    system1Device.energyBuffer, terms, idx);
+  }
+  std::vector<double> energy1Second(system1Device.energyOuts.size());
+  system1Device.energyOuts.copyToHost(energy1Second);
+  EXPECT_THAT(energy1Second, ::testing::Pointwise(::testing::DoubleNear(1e-5), referenceEnergies[0]))
+    << "System 1 (second run) energies should match reference";
+}
+
 INSTANTIATE_TEST_SUITE_P(BFGSMinimizer4DTest, BFGSMinimizerTest4DTest, ::testing::Values(false, true));
 
 INSTANTIATE_TEST_SUITE_P(BFGSBackends,

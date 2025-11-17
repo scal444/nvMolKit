@@ -88,10 +88,10 @@ ETKMinimizationStage::ETKMinimizationStage(const std::vector<const RDKit::ROMol*
                                            const std::vector<EmbedArgs>&               eargs,
                                            const RDKit::DGeomHelpers::EmbedParameters& embedParam,
                                            const ETKDGContext&                         ctx,
-                                           const BfgsBackend&                          bfgsBackend,
+                                           BfgsBatchMinimizer&                         minimizer,
                                            cudaStream_t                                stream)
     : embedParam_(embedParam),
-      backend_(bfgsBackend),
+      minimizer_(minimizer),
       stream_(stream) {
   setStreams(molSystemDevice, stream);
 
@@ -155,56 +155,58 @@ void ETKMinimizationStage::execute(ETKDGContext& ctx) {
   // Use PLAIN mode for ETDG (useBasicKnowledge=false), ALL mode for ETKDG/KDG (useBasicKnowledge=true)
   const auto etkTerm = embedParam_.useBasicKnowledge ? DistGeom::ETKTerm::ALL : DistGeom::ETKTerm::PLAIN;
 
-  auto eFunc = [&](const double* pos) {
-    computeEnergyETK(molSystemDevice,
-                     ctx.systemDevice.atomStarts,
-                     ctx.systemDevice.positions,
-                     ctx.activeThisStage.data(),
-                     pos,
-                     etkTerm,
-                     stream_);
-  };
+  if (minimizer_.backend() == BfgsBackend::BATCHED) {
+    // BATCHED backend: use generic minimize() with energy/gradient functors
+    // Allocate intermediate buffers before minimization
+    DistGeom::allocateIntermediateBuffers3D(molSystemHost, molSystemDevice);
+    
+    auto eFunc = [&](const double* pos) {
+      computeEnergyETK(molSystemDevice,
+                       ctx.systemDevice.atomStarts,
+                       ctx.systemDevice.positions,
+                       ctx.activeThisStage.data(),
+                       pos,
+                       etkTerm,
+                       stream_);
+    };
 
-  auto gFunc = [&]() {
-    computeGradientsETK(molSystemDevice,
-                        ctx.systemDevice.atomStarts,
-                        ctx.systemDevice.positions,
-                        ctx.activeThisStage.data(),
-                        etkTerm,
-                        stream_);
-  };
+    auto gFunc = [&]() {
+      computeGradientsETK(molSystemDevice,
+                          ctx.systemDevice.atomStarts,
+                          ctx.systemDevice.positions,
+                          ctx.activeThisStage.data(),
+                          etkTerm,
+                          stream_);
+    };
 
-  // Create and configure BFGS minimizer
-  // TODO: Reuse between iterations.
-  BfgsBatchMinimizer bfgsMinimizer(/*dataDim=*/dim, nvMolKit::DebugLevel::NONE, true, stream_, backend_);
-  constexpr int maxIters = 300;  // Taken from hard-coded RDKit value.
-  if (backend_ == BfgsBackend::BATCHED) {
-    // Run minimization
-    bfgsMinimizer.minimize(maxIters,
-                           embedParam_.optimizerForceTol,
-                           ctx.systemHost.atomStarts,
-                           ctx.systemDevice.atomStarts,
-                           ctx.systemDevice.positions,
-                           molSystemDevice.grad,
-                           molSystemDevice.energyOuts,
-                           molSystemDevice.energyBuffer,
-                           eFunc,
-                           gFunc,
-                           ctx.activeThisStage.data());
+    constexpr int maxIters = 300;  // Taken from hard-coded RDKit value.
+    minimizer_.minimize(maxIters,
+                       embedParam_.optimizerForceTol,
+                       ctx.systemHost.atomStarts,
+                       ctx.systemDevice.atomStarts,
+                       ctx.systemDevice.positions,
+                       molSystemDevice.grad,
+                       molSystemDevice.energyOuts,
+                       molSystemDevice.energyBuffer,
+                       eFunc,
+                       gFunc,
+                       ctx.activeThisStage.data());
   } else {
+    // PER_MOLECULE backend: use specialized minimizeWithETK()
+    constexpr int maxIters = 300;  // Taken from hard-coded RDKit value.
     auto terms         = nvMolKit::DistGeom::toEnergy3DForceContribsDevicePtr(molSystemDevice);
     auto systemIndices = nvMolKit::DistGeom::toBatchedIndices3DDevicePtr(molSystemDevice, ctx.systemDevice.atomStarts.data());
-    bfgsMinimizer.minimizeWithETK(maxIters,
-                                  embedParam_.optimizerForceTol,
-                                  ctx.systemHost.atomStarts,
-                                  ctx.systemDevice.atomStarts,
-                                  ctx.systemDevice.positions,
-                                  molSystemDevice.grad,
-                                  molSystemDevice.energyOuts,
-                                  molSystemDevice.energyBuffer,
-                                  terms,
-                                  systemIndices,
-                                  ctx.activeThisStage.data());
+    minimizer_.minimizeWithETK(maxIters,
+                              embedParam_.optimizerForceTol,
+                              ctx.systemHost.atomStarts,
+                              ctx.systemDevice.atomStarts,
+                              ctx.systemDevice.positions,
+                              molSystemDevice.grad,
+                              molSystemDevice.energyOuts,
+                              molSystemDevice.energyBuffer,
+                              terms,
+                              systemIndices,
+                              ctx.activeThisStage.data());
   }
 
 

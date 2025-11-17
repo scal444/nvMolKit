@@ -145,10 +145,7 @@ struct BfgsBatchMinimizer {
   const int* getHessianStarts() const { return hessianStarts_.data(); }
   double* getInverseHessian() { return inverseHessian_.data(); }
   double** getScratchBuffersDevice() { return scratchBuffersDevice_.data(); }
-  double* getLineSearchDir() { return lineSearchDir_.data(); }
-  double* getScratchPositions() { return scratchPositions_.data(); }
-  double* getHessDGrad() { return hessDGrad_.data(); }
-  double* getScratchGrad() { return scratchGrad_.data(); }
+  BfgsBackend backend() const { return backend_; }
 
   //! Set Initial Hessian
   void setHessianToIdentity();
@@ -236,6 +233,11 @@ struct BfgsBatchMinimizer {
   
   // Device-side array of scratch buffer pointers (used by per-molecule kernel)
   AsyncDeviceVector<double*> scratchBuffersDevice_;
+
+  // Pinned host buffers for async transfers (allocated lazily in initialize())
+  PinnedHostVector<uint8_t> activeHost_;
+  PinnedHostVector<uint8_t> convergenceHost_;
+  PinnedHostVector<double*> scratchBufferPointersHost_;
 
   cudaStream_t stream_ = nullptr;
 };

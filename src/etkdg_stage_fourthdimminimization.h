@@ -35,15 +35,15 @@ class FourthDimMinimizeStage : public ETKDGStage {
                          const std::vector<EmbedArgs>&               eargs,
                          const RDKit::DGeomHelpers::EmbedParameters& embedParam,
                          ETKDGContext&                               ctx,
-                         const BfgsBackend&                          bfgsBackend = BfgsBackend::BATCHED,
-                         cudaStream_t                                stream      = nullptr);
+                         BfgsBatchMinimizer&                         minimizer,
+                         cudaStream_t                                stream = nullptr);
   void        execute(ETKDGContext& ctx) override;
   std::string name() const override { return "Fourth Dimension Minimization"; }
 
   nvMolKit::DistGeom::BatchedMolecularDeviceBuffers molSystemDevice;
   nvMolKit::DistGeom::BatchedMolecularSystemHost    molSystemHost;
   const RDKit::DGeomHelpers::EmbedParameters&       embedParam_;
-  BfgsBackend                                       backend_;
+  BfgsBatchMinimizer&                               minimizer_;
   cudaStream_t                                      stream_;
 };
 

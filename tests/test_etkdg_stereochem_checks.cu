@@ -29,6 +29,7 @@
 #include "embedder_utils.h"
 #include "etkdg_impl.h"
 #include "etkdg_stage_stereochem_checks.h"
+#include "minimizer/bfgs_minimize.h"
 #include "test_utils.h"
 
 using namespace ::nvMolKit::detail;
