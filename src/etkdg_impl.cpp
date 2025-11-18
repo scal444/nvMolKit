@@ -55,6 +55,29 @@ ETKDGDriver::ETKDGDriver(std::unique_ptr<ETKDGContext>&&            context,
       stream_(stream),
       earlyExit_(earlyExitToggle),
       debugMode_(debugMode) {
+  initialize();
+}
+
+void ETKDGDriver::reset(std::unique_ptr<ETKDGContext>&&            context,
+                        std::vector<std::unique_ptr<ETKDGStage>>&& stages,
+                        bool                                       debugMode,
+                        cudaStream_t                               stream,
+                        const std::atomic<bool>*                   earlyExitToggle) {
+  context_    = std::move(context);
+  stages_     = std::move(stages);
+  stream_     = stream;
+  earlyExit_  = earlyExitToggle;
+  debugMode_  = debugMode;
+  
+  // Reset counters
+  numFinished_ = 0;
+  iteration_   = 0;
+  stageTimings_.clear();
+  
+  initialize();
+}
+
+void ETKDGDriver::initialize() {
   if (context_->nTotalSystems == 0) {
     throw std::runtime_error("No conformers to process.");
   }
@@ -119,7 +142,7 @@ void ETKDGDriver::iterate() {
     launchCollectAndFilterFailuresKernel(*context_, static_cast<int>(i), stream_);
   }
 
-  numFinished_ += launchGetFinishedKernels(*context_, iteration_, stream_);
+  numFinished_ += launchGetFinishedKernels(*context_, iteration_, finishedCountHost_.data(), stream_);
   iteration_++;
 }
 
@@ -175,12 +198,34 @@ void ETKDGDriver::printTimingStatistics() const {
   std::cout << std::string(kTableWidth, '=') << "\n";
 }
 
-std::vector<std::vector<int16_t>> ETKDGDriver::getFailures() const {
-  std::vector<std::vector<int16_t>> res;
-  for (const auto& failures : context_->totalFailures) {
-    auto& stageRes = res.emplace_back(failures.size());
-    failures.copyToHost(stageRes);
+std::vector<std::vector<int16_t>> ETKDGDriver::getFailures(std::vector<PinnedHostVector<int16_t>>& failuresScratch) const {
+  // Resize pinned scratch buffer outer vector if needed
+  if (failuresScratch.size() != context_->totalFailures.size()) {
+    failuresScratch.resize(context_->totalFailures.size());
   }
+  
+  // Copy device -> pinned memory
+  for (size_t i = 0; i < context_->totalFailures.size(); ++i) {
+    const size_t requiredSize = context_->totalFailures[i].size();
+    
+    // Resize inner pinned vector only if needed
+    if (failuresScratch[i].size() < requiredSize) {
+      failuresScratch[i].resize(requiredSize);
+    }
+    
+    // Use sized copy to pinned memory
+    context_->totalFailures[i].copyToHost(failuresScratch[i].data(), requiredSize);
+  }
+  
+  cudaStreamSynchronize(stream_);
+  
+  // Copy pinned memory -> std::vector
+  std::vector<std::vector<int16_t>> res;
+  res.reserve(failuresScratch.size());
+  for (const auto& pinnedVec : failuresScratch) {
+    res.emplace_back(pinnedVec.begin(), pinnedVec.end());
+  }
+  
   return res;
 }
 

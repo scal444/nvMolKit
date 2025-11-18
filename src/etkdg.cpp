@@ -56,9 +56,11 @@ unsigned int calculateMaxIterations(const std::vector<RDKit::ROMol*>& mols, unsi
 
 // Struct to hold per-thread reusable resources
 struct PerThreadData {
-  std::unique_ptr<BfgsBatchMinimizer> minimizer;
-  PinnedHostVector<double>            positionsScratch;
-  PinnedHostVector<uint8_t>           activeScratch;
+  std::unique_ptr<BfgsBatchMinimizer>     minimizer;
+  PinnedHostVector<double>                positionsScratch;
+  PinnedHostVector<uint8_t>               activeScratch;
+  std::vector<PinnedHostVector<int16_t>>  failuresScratch;
+  detail::ETKDGDriver                     driver;
 };
 
 }  // anonymous namespace
@@ -180,6 +182,13 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
   const size_t estimatedMaxAtomsPerBatch = estimatedBatchSize * confsPerMolecule * avgAtomsPerMol;
   const size_t estimatedPositionsSize    = static_cast<size_t>(estimatedMaxAtomsPerBatch * dim * 1.5);  // 50% buffer
   const size_t estimatedActiveSize       = static_cast<size_t>((estimatedBatchSize * confsPerMolecule) * 1.5);  // 50% buffer
+  const size_t estimatedFailuresSize     = estimatedActiveSize;  // Same as active size (one per conformer per stage)
+  
+  // Calculate exact number of ETKDG stages based on parameters
+  // Base stages: CoordGen, FirstMinimize, TetrahedralCheck, FourthDimMinimize, DoubleBondGeometryCheck, UpdateConformers
+  const size_t numStages = 6 
+                         + static_cast<int>(paramsCopy.enforceChirality) * 5  // FirstChiralCheck + 4 final chiral checks
+                         + static_cast<int>(paramsCopy.useExpTorsionAnglePrefs || paramsCopy.useBasicKnowledge);  // ETKMinimization
 
   // Assign streams and per-thread data to the specified GPU devices
   const int numThreadsGpuBatching = effectivebatchesPerGpu * static_cast<int>(gpuIdsToUse.size());
@@ -205,6 +214,12 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
     threadData.positionsScratch.resize(estimatedPositionsSize);
     threadData.activeScratch.resize(estimatedActiveSize);
     
+    // Pre-allocate failure tracking scratch buffers (outer vector = stages, inner = conformers per stage)
+    threadData.failuresScratch.resize(numStages);
+    for (auto& stageFailures : threadData.failuresScratch) {
+      stageFailures.resize(estimatedFailuresSize);
+    }
+    
     perThreadData.push_back(std::move(threadData));
   }
 
@@ -228,6 +243,7 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
     try {
       while (!workComplete.load()) {
         // Dispatch work for this thread
+        ScopedNvtxRange getIdsToWorkOnRange("Get IDs from dispatch");
         std::vector<int> molIds = Scheduler.dispatch(effectiveBatchSize);
 
         if (molIds.empty()) {
@@ -239,6 +255,8 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
           }
           break;
         }
+        getIdsToWorkOnRange.pop();
+        ScopedNvtxRange setupContextRange("Setup ETKDG Batch Context");
         cudaStream_t     streamPtr = streamsPerThread[omp_get_thread_num()].stream();
         const int        deviceId  = devicesPerThread[omp_get_thread_num()];
         const WithDevice dev(deviceId);
@@ -260,7 +278,7 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
         detail::setStreams(context, streamPtr);
         // Treat each conformer attempt as an individual molecule (confsPerMolecule = 1)
         detail::initETKDGContext(batchMolsWithConfs, context, 1);
-
+        setupContextRange.pop();
         ScopedNvtxRange                                  stageSetupRange("Setup ETKDG Stages");
         
         // Get the per-thread data for this thread (reused across all ETKDG batches)
@@ -331,21 +349,25 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
                                                                               &conformer_mutex,
                                                                               confsPerMolecule));
 
-        // Create and run driver
-        auto                context_ptr = std::make_unique<detail::ETKDGContext>(std::move(context));
-        detail::ETKDGDriver driver(std::move(context_ptr), std::move(stages), debugMode, streamPtr, &allFinished);
+        // Reset and run driver (reuses pinned memory and other resources)
+        auto context_ptr = std::make_unique<detail::ETKDGContext>(std::move(context));
+        threadData.driver.reset(std::move(context_ptr), std::move(stages), debugMode, streamPtr, &allFinished);
         stageSetupRange.pop();
 
         ScopedNvtxRange runRange("ETKDG execute");
-        driver.run(1);
+        threadData.driver.run(1);
         runRange.pop();
         // Get results and record them back to Scheduler
-        const std::vector<int16_t> finishedOnIteration = driver.getFinishedOnIterations();
+        ScopedNvtxRange recordRange("Record ETKDG results");
+        const std::vector<int16_t> finishedOnIteration = threadData.driver.getFinishedOnIterations();
         Scheduler.record(molIds, finishedOnIteration);
+        recordRange.pop();
+        ScopedNvtxRange handleFailsRange("Handle failures");
 
         // Handle failures if requested
         if (failures != nullptr) {
-          auto batchFailures = driver.getFailures();
+          // Get failures using pinned memory scratch buffer
+          auto batchFailures = threadData.driver.getFailures(threadData.failuresScratch);
 
           const std::lock_guard<std::mutex> failureLock(failure_mutex);
           // Initialize failures structure on first batch (outer vector is per stage, inner per conformer)
