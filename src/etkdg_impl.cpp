@@ -198,32 +198,41 @@ void ETKDGDriver::printTimingStatistics() const {
   std::cout << std::string(kTableWidth, '=') << "\n";
 }
 
-std::vector<std::vector<int16_t>> ETKDGDriver::getFailures(std::vector<PinnedHostVector<int16_t>>& failuresScratch) const {
-  // Resize pinned scratch buffer outer vector if needed
-  if (failuresScratch.size() != context_->totalFailures.size()) {
-    failuresScratch.resize(context_->totalFailures.size());
+std::vector<std::vector<int16_t>> ETKDGDriver::getFailures(PinnedHostVector<int16_t>& failuresScratch) const {
+  const size_t numStages = context_->totalFailures.size();
+  
+  // Calculate total required size for all stages
+  size_t totalSize = 0;
+  std::vector<size_t> stageSizes;
+  stageSizes.reserve(numStages);
+  for (const auto& stageFailures : context_->totalFailures) {
+    const size_t stageSize = stageFailures.size();
+    stageSizes.push_back(stageSize);
+    totalSize += stageSize;
   }
   
-  // Copy device -> pinned memory
-  for (size_t i = 0; i < context_->totalFailures.size(); ++i) {
-    const size_t requiredSize = context_->totalFailures[i].size();
-    
-    // Resize inner pinned vector only if needed
-    if (failuresScratch[i].size() < requiredSize) {
-      failuresScratch[i].resize(requiredSize);
-    }
-    
-    // Use sized copy to pinned memory
-    context_->totalFailures[i].copyToHost(failuresScratch[i].data(), requiredSize);
+  // Resize pinned scratch buffer only if needed
+  if (failuresScratch.size() < totalSize) {
+    failuresScratch.resize(totalSize);
   }
   
+  // Dispatch all device -> pinned memory copies at once (asynchronously)
+  size_t offset = 0;
+  for (size_t i = 0; i < numStages; ++i) {
+    context_->totalFailures[i].copyToHost(failuresScratch.data() + offset, stageSizes[i]);
+    offset += stageSizes[i];
+  }
+  
+  // Single synchronization point for all copies
   cudaStreamSynchronize(stream_);
   
-  // Copy pinned memory -> std::vector
+  // Split pinned memory into individual std::vectors
   std::vector<std::vector<int16_t>> res;
-  res.reserve(failuresScratch.size());
-  for (const auto& pinnedVec : failuresScratch) {
-    res.emplace_back(pinnedVec.begin(), pinnedVec.end());
+  res.reserve(numStages);
+  offset = 0;
+  for (size_t i = 0; i < numStages; ++i) {
+    res.emplace_back(failuresScratch.begin() + offset, failuresScratch.begin() + offset + stageSizes[i]);
+    offset += stageSizes[i];
   }
   
   return res;

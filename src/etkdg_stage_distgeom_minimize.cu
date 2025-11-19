@@ -18,7 +18,7 @@
 #include "dist_geom.h"
 #include "dist_geom_flattened_builder.h"
 #include "etkdg_impl.h"
-#include "etkdg_stage_fourthdimminimization.h"
+#include "etkdg_stage_distgeom_minimize.h"
 #include "forcefields/kernel_utils.cuh"
 #include "minimizer/bfgs_distgeom.h"
 
@@ -27,33 +27,63 @@ using ::nvMolKit::detail::ETKDGStage;
 
 namespace nvMolKit {
 
+namespace {
+constexpr int kBlockSize = 256;
+
+__global__ void checkMinimizedEnergiesKernel(const int     molNum,
+                                             const double* energyOuts,
+                                             const int*    atomStarts,
+                                             uint8_t*      failedThisStage) {
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= molNum) {
+    return;
+  }
+
+  const int    numAtoms      = atomStarts[idx + 1] - atomStarts[idx];
+  const double energyPerAtom = energyOuts[idx] / numAtoms;
+
+  if (energyPerAtom >= nvMolKit::detail::MAX_MINIMIZED_E_PER_ATOM) {
+    failedThisStage[idx] = 1;
+  }
+}
+}  // namespace
+
 namespace detail {
-FourthDimMinimizeStage::FourthDimMinimizeStage(const std::vector<const RDKit::ROMol*>&     mols,
-                                               const std::vector<EmbedArgs>&               eargs,
-                                               const RDKit::DGeomHelpers::EmbedParameters& embedParam,
-                                               ETKDGContext&                               ctx,
-                                               BfgsBatchMinimizer&                         minimizer,
-                                               const cudaStream_t                          stream)
+
+DistGeomMinimizeStage::DistGeomMinimizeStage(const std::vector<const RDKit::ROMol*>&     mols,
+                                             const std::vector<EmbedArgs>&               eargs,
+                                             const RDKit::DGeomHelpers::EmbedParameters& embedParam,
+                                             ETKDGContext&                               ctx,
+                                             BfgsBatchMinimizer&                         minimizer,
+                                             const double                                chiralWeight,
+                                             const double                                fourthDimWeight,
+                                             const int                                   maxIters,
+                                             const bool                                  checkEnergy,
+                                             const std::string&                          stageName,
+                                             cudaStream_t                                stream)
     : embedParam_(embedParam),
       minimizer_(minimizer),
+      maxIters_(maxIters),
+      checkEnergy_(checkEnergy),
+      stageName_(stageName),
       stream_(stream) {
+  // Check that all vectors have the same size
   if (mols.size() != eargs.size()) {
     throw std::runtime_error("Number of molecules and embed args must be the same");
   }
-  setStreams(molSystemDevice, stream_);
 
   // Process each molecule
   for (size_t i = 0; i < mols.size(); ++i) {
     const auto&      mol      = mols[i];
     const auto&      embedArg = eargs[i];
     const auto&      numAtoms = mol->getNumAtoms();
-    auto             ffParams = nvMolKit::DistGeom::constructForceFieldContribs(embedArg.dim,
-                                                                    *embedArg.mmat,
-                                                                    embedArg.chiralCenters,
-                                                                    0.2,
-                                                                    1.0,
-                                                                    nullptr,
-                                                                    embedParam_.basinThresh);
+    auto             ffParams = DistGeom::constructForceFieldContribs(embedArg.dim,
+                                                                      *embedArg.mmat,
+                                                                      embedArg.chiralCenters,
+                                                                      chiralWeight,
+                                                                      fourthDimWeight,
+                                                                      nullptr,
+                                                                      embedParam.basinThresh);
     // Get atom numbers
     std::vector<int> atomNumbers;
     atomNumbers.reserve(numAtoms);
@@ -69,6 +99,7 @@ FourthDimMinimizeStage::FourthDimMinimizeStage(const std::vector<const RDKit::RO
                                                      molSystemHost,
                                                      &atomNumbers);
   }
+  DistGeom::setStreams(molSystemDevice, stream_);
   nvMolKit::DistGeom::sendContribsAndIndicesToDevice(molSystemHost, molSystemDevice);
   nvMolKit::DistGeom::setupDeviceBuffers(molSystemHost,
                                          molSystemDevice,
@@ -76,7 +107,7 @@ FourthDimMinimizeStage::FourthDimMinimizeStage(const std::vector<const RDKit::RO
                                          ctx.systemHost.atomStarts.size() - 1);
 }
 
-void FourthDimMinimizeStage::execute(ETKDGContext& ctx) {
+void DistGeomMinimizeStage::execute(ETKDGContext& ctx) {
   // Setup device buffers for minimization
   DistGeom::setupDeviceBuffers(molSystemHost,
                                molSystemDevice,
@@ -91,7 +122,6 @@ void FourthDimMinimizeStage::execute(ETKDGContext& ctx) {
   AsyncDeviceVector<double> energyBuffer(0, stream_);
 
   // Use shared minimizer with repeat-until-converged
-  constexpr int maxIters = 200;
   if (minimizer_.backend() == BfgsBackend::BATCHED) {
     // BATCHED backend: use generic minimize() with energy/gradient functors
     // Allocate intermediate buffers before minimization
@@ -114,7 +144,7 @@ void FourthDimMinimizeStage::execute(ETKDGContext& ctx) {
                                  stream_);
     };
 
-    bool needsMore = minimizer_.minimize(maxIters,
+    bool needsMore = minimizer_.minimize(maxIters_,
                                         embedParam_.optimizerForceTol,
                                         ctx.systemHost.atomStarts,
                                         ctx.systemDevice.atomStarts,
@@ -128,7 +158,7 @@ void FourthDimMinimizeStage::execute(ETKDGContext& ctx) {
 
     // Repeat until converged
     while (needsMore) {
-      needsMore = minimizer_.minimize(maxIters,
+      needsMore = minimizer_.minimize(maxIters_,
                                      embedParam_.optimizerForceTol,
                                      ctx.systemHost.atomStarts,
                                      ctx.systemDevice.atomStarts,
@@ -145,7 +175,7 @@ void FourthDimMinimizeStage::execute(ETKDGContext& ctx) {
     auto terms         = DistGeom::toEnergyForceContribsDevicePtr(molSystemDevice);
     auto systemIndices = DistGeom::toBatchedIndicesDevicePtr(molSystemDevice, ctx.systemDevice.atomStarts.data());
 
-    bool needsMore = minimizer_.minimizeWithDG(maxIters,
+    bool needsMore = minimizer_.minimizeWithDG(maxIters_,
                                                embedParam_.optimizerForceTol,
                                                ctx.systemHost.atomStarts,
                                                ctx.systemDevice.atomStarts,
@@ -159,7 +189,7 @@ void FourthDimMinimizeStage::execute(ETKDGContext& ctx) {
 
     // Repeat until converged
     while (needsMore) {
-      needsMore = minimizer_.minimizeWithDG(maxIters,
+      needsMore = minimizer_.minimizeWithDG(maxIters_,
                                             embedParam_.optimizerForceTol,
                                             ctx.systemHost.atomStarts,
                                             ctx.systemDevice.atomStarts,
@@ -172,7 +202,27 @@ void FourthDimMinimizeStage::execute(ETKDGContext& ctx) {
                                             ctx.activeThisStage.data());
     }
   }
+
+  // Check energy per atom if requested
+  if (checkEnergy_) {
+    nvMolKit::DistGeom::allocateIntermediateBuffers(molSystemHost, molSystemDevice);
+    nvMolKit::DistGeom::computeEnergy(molSystemDevice,
+                                      ctx.systemDevice.atomStarts,
+                                      ctx.systemDevice.positions,
+                                      nullptr,
+                                      nullptr,
+                                      stream_);
+    const int molNum   = molSystemDevice.energyOuts.size();
+    const int gridSize = (molNum + kBlockSize - 1) / kBlockSize;
+
+    checkMinimizedEnergiesKernel<<<gridSize, kBlockSize, 0, stream_>>>(molNum,
+                                                                       molSystemDevice.energyOuts.data(),
+                                                                       ctx.systemDevice.atomStarts.data(),
+                                                                       ctx.failedThisStage.data());
+  }
 }
 
 }  // namespace detail
+
 }  // namespace nvMolKit
+

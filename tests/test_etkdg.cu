@@ -95,7 +95,7 @@ TEST(ETKDGDriverEdgeCaseTest, SingleConformer) {
   EXPECT_EQ(driver.numConfsFinished(), 1);
   EXPECT_EQ(driver.iterationsComplete(), 3);
 
-  std::vector<nvMolKit::PinnedHostVector<int16_t>> failuresScratch;
+  nvMolKit::PinnedHostVector<int16_t> failuresScratch;
   auto failureCounts = driver.getFailures(failuresScratch);
   EXPECT_EQ(failureCounts.size(), 2);
   EXPECT_THAT(failureCounts[0], testing::ElementsAre(1));
@@ -140,7 +140,7 @@ TEST_F(ETKDGDriverTest, SingleStageAllPassFirstIteration) {
   EXPECT_EQ(driver.numConfsFinished(), 4);
   EXPECT_EQ(driver.iterationsComplete(), 1);
 
-  std::vector<nvMolKit::PinnedHostVector<int16_t>> failuresScratch;
+  nvMolKit::PinnedHostVector<int16_t> failuresScratch;
   auto failureCounts = driver.getFailures(failuresScratch);
   EXPECT_EQ(failureCounts.size(), 1);
   EXPECT_THAT(failureCounts[0], testing::ElementsAre(0, 0, 0, 0));
@@ -168,7 +168,7 @@ TEST_F(ETKDGDriverTest, SingleStageAllPassSecondIteration) {
   EXPECT_EQ(driver.numConfsFinished(), 4);
   EXPECT_EQ(driver.iterationsComplete(), 2);
 
-  std::vector<nvMolKit::PinnedHostVector<int16_t>> failuresScratch;
+  nvMolKit::PinnedHostVector<int16_t> failuresScratch;
   auto failureCounts = driver.getFailures(failuresScratch);
   EXPECT_EQ(failureCounts.size(), 1);
   EXPECT_THAT(failureCounts[0], testing::ElementsAre(1, 1, 1, 1));
@@ -198,7 +198,7 @@ TEST_F(ETKDGDriverTest, SingleStageVariablePass) {
   EXPECT_EQ(driver.numConfsFinished(), 4);
   EXPECT_EQ(driver.iterationsComplete(), 4);
 
-  std::vector<nvMolKit::PinnedHostVector<int16_t>> failuresScratch;
+  nvMolKit::PinnedHostVector<int16_t> failuresScratch;
   auto failureCounts = driver.getFailures(failuresScratch);
   EXPECT_EQ(failureCounts.size(), 1);
   EXPECT_THAT(failureCounts[0], testing::ElementsAre(0, 1, 2, 3));
@@ -228,7 +228,7 @@ TEST_F(ETKDGDriverTest, SingleStageSomeNotPassed) {
   EXPECT_EQ(driver.numConfsFinished(), 2);
   EXPECT_EQ(driver.iterationsComplete(), 5);
 
-  std::vector<nvMolKit::PinnedHostVector<int16_t>> failuresScratch;
+  nvMolKit::PinnedHostVector<int16_t> failuresScratch;
   auto failureCounts = driver.getFailures(failuresScratch);
   EXPECT_EQ(failureCounts.size(), 1);
   EXPECT_THAT(failureCounts[0], testing::ElementsAre(0, 1, 5, 5));
@@ -274,7 +274,7 @@ TEST_F(ETKDGDriverTest, MultiStageAllFail) {
   EXPECT_EQ(driver.numConfsFinished(), 0);
   EXPECT_EQ(driver.iterationsComplete(), 5);
 
-  std::vector<nvMolKit::PinnedHostVector<int16_t>> failuresScratch;
+  nvMolKit::PinnedHostVector<int16_t> failuresScratch;
   auto failureCounts = driver.getFailures(failuresScratch);
   EXPECT_EQ(failureCounts.size(), 3);
   EXPECT_THAT(failureCounts[0], testing::ElementsAre(0, 0, 0, 0));
@@ -330,7 +330,7 @@ TEST_F(ETKDGDriverTest, MultiStageMixed) {
   EXPECT_EQ(driver.numConfsFinished(), 2);
   EXPECT_EQ(driver.iterationsComplete(), 5);
 
-  std::vector<nvMolKit::PinnedHostVector<int16_t>> failuresScratch;
+  nvMolKit::PinnedHostVector<int16_t> failuresScratch;
   auto failureCounts = driver.getFailures(failuresScratch);
   EXPECT_EQ(failureCounts.size(), 3);
   EXPECT_THAT(failureCounts[0], testing::ElementsAre(0, 0, 2, 1));

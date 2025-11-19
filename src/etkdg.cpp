@@ -25,8 +25,7 @@
 #include "device.h"
 #include "etkdg_stage_coordgen.h"
 #include "etkdg_stage_etk_minimization.h"
-#include "etkdg_stage_firstminimization.h"
-#include "etkdg_stage_fourthdimminimization.h"
+#include "etkdg_stage_distgeom_minimize.h"
 #include "etkdg_stage_stereochem_checks.h"
 #include "etkdg_stage_update_conformers.h"
 #include "utils/host_vector.h"
@@ -59,7 +58,7 @@ struct PerThreadData {
   std::unique_ptr<BfgsBatchMinimizer>     minimizer;
   PinnedHostVector<double>                positionsScratch;
   PinnedHostVector<uint8_t>               activeScratch;
-  std::vector<PinnedHostVector<int16_t>>  failuresScratch;
+  PinnedHostVector<int16_t>               failuresScratch;  // Single buffer for all stages
   detail::ETKDGDriver                     driver;
 };
 
@@ -214,11 +213,8 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
     threadData.positionsScratch.resize(estimatedPositionsSize);
     threadData.activeScratch.resize(estimatedActiveSize);
     
-    // Pre-allocate failure tracking scratch buffers (outer vector = stages, inner = conformers per stage)
-    threadData.failuresScratch.resize(numStages);
-    for (auto& stageFailures : threadData.failuresScratch) {
-      stageFailures.resize(estimatedFailuresSize);
-    }
+    // Pre-allocate failure tracking scratch buffer (single buffer for all stages concatenated)
+    threadData.failuresScratch.resize(numStages * estimatedFailuresSize);
     
     perThreadData.push_back(std::move(threadData));
   }
@@ -302,7 +298,8 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
 
         // First minimize, then first round of chiral checks.
         stages.push_back(
-          std::make_unique<detail::FirstMinimizeStage>(constMolPtrs, batchEargs, paramsCopy, context, minimizer, streamPtr));
+          std::make_unique<detail::DistGeomMinimizeStage>(constMolPtrs, batchEargs, paramsCopy, context, minimizer,
+                                                          1.0, 0.1, 400, true, "First Minimization", streamPtr));
         stages.push_back(std::make_unique<detail::ETKDGTetrahedralCheckStage>(context, batchEargs, dim, streamPtr));
 
         // Only add first chiral check if enforceChirality is enabled
@@ -316,7 +313,8 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
 
         // Second + 3rd minimize, then double bond checks.
         stages.push_back(
-          std::make_unique<detail::FourthDimMinimizeStage>(constMolPtrs, batchEargs, paramsCopy, context, minimizer, streamPtr));
+          std::make_unique<detail::DistGeomMinimizeStage>(constMolPtrs, batchEargs, paramsCopy, context, minimizer,
+                                                          0.2, 1.0, 200, false, "Fourth Dimension Minimization", streamPtr));
 
         // (ET)(K)DG: Add experimental torsion minimization stage only if needed to match RDKit's logic.
         if (paramsCopy.useExpTorsionAnglePrefs || paramsCopy.useBasicKnowledge) {
