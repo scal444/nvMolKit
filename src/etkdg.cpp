@@ -60,6 +60,8 @@ struct PerThreadData {
   PinnedHostVector<uint8_t>               activeScratch;
   PinnedHostVector<int16_t>               failuresScratch;  // Single buffer for all stages
   detail::ETKDGDriver                     driver;
+  std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::EnergyForceContribsHost> dgCache;
+  std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::Energy3DForceContribsHost> etkCache;
 };
 
 }  // anonymous namespace
@@ -290,20 +292,26 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
 
         // Create coordinate generation stage based on parameter
         // FIXME: arguments still involve useRDKitcoordgen.
+        ScopedNvtxRange                                  stageSetupCGen("Setup Coordgen Stage");
+
         stages.push_back(
           std::make_unique<detail::ETKDGCoordGenRDKitStage>(paramsCopy, constMolPtrs, batchEargs, 
                                                            threadData.positionsScratch, 
                                                            threadData.activeScratch, 
                                                            streamPtr));
-
+        stageSetupCGen.pop();
         // First minimize, then first round of chiral checks.
+        ScopedNvtxRange                                 stageSetupMin("Setup First dim");
         auto firstMinStage = std::make_unique<detail::DistGeomMinimizeStage>(
-          constMolPtrs, batchEargs, paramsCopy, context, minimizer, 1.0, 0.1, 400, true, "First Minimization", streamPtr);
+          constMolPtrs, batchEargs, paramsCopy, context, minimizer, 1.0, 0.1, 400, true, "First Minimization", streamPtr, &threadData.dgCache);
         detail::DistGeomMinimizeStage* firstMinStagePtr = firstMinStage.get();
         stages.push_back(std::move(firstMinStage));
+        stageSetupMin.pop();
+        ScopedNvtxRange                                stageSetupChiral("Setup tetrahedral check");
         stages.push_back(std::make_unique<detail::ETKDGTetrahedralCheckStage>(context, batchEargs, dim, streamPtr));
-
+        stageSetupChiral.pop();
         // Only add first chiral check if enforceChirality is enabled
+        ScopedNvtxRange                               stageSetupFirstChiral("Setup first chiral check");
         detail::ETKDGFirstChiralCenterCheckStage* chiralStagePtr = nullptr;
         if (paramsCopy.enforceChirality) {
           auto chiralStage =
@@ -311,33 +319,53 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
           chiralStagePtr = chiralStage.get();
           stages.push_back(std::move(chiralStage));
         }
-
+        stageSetupFirstChiral.pop();
+        ScopedNvtxRange                               stageSetupFourthDim("Setup fourth dim minimize");
         // Second + 3rd minimize (wrapper with different weights)
         stages.push_back(
           std::make_unique<detail::DistGeomMinimizeWrapperStage>(*firstMinStagePtr, 0.2, 1.0, 200, false, "Fourth Dimension Minimization"));
-
+        stageSetupFourthDim.pop();
+        ScopedNvtxRange                              stageSetupETKMin("Setup ETK Minimization");
         // (ET)(K)DG: Add experimental torsion minimization stage only if needed to match RDKit's logic.
         if (paramsCopy.useExpTorsionAnglePrefs || paramsCopy.useBasicKnowledge) {
           stages.push_back(
-            std::make_unique<detail::ETKMinimizationStage>(constMolPtrs, batchEargs, paramsCopy, context, minimizer, streamPtr));
+            std::make_unique<detail::ETKMinimizationStage>(constMolPtrs, batchEargs, paramsCopy, context, minimizer, streamPtr, &threadData.etkCache));
         }
-
+        stageSetupETKMin.pop();
+        ScopedNvtxRange                             stageSetupDoubleBondGeom("Setup double bond geometry check");
         // Final chiral and stereochem checks
         stages.push_back(
           std::make_unique<detail::ETKDGDoubleBondGeometryCheckStage>(context, batchEargs, dim, streamPtr));
-
+        stageSetupDoubleBondGeom.pop();
         if (paramsCopy.enforceChirality) {
-          // This is a pass-through, don't need to set the stream
-          stages.push_back(std::make_unique<detail::ETKDGFinalChiralCenterCheckStage>(*chiralStagePtr));
-          stages.push_back(
-            std::make_unique<detail::ETKDGChiralDistMatrixCheckStage>(context, batchEargs, dim, streamPtr));
-          stages.push_back(
-            std::make_unique<detail::ETKDGChiralCenterVolumeCheckStage>(context, batchEargs, dim, streamPtr));
-          stages.push_back(
-            std::make_unique<detail::ETKDGDoubleBondStereoCheckStage>(context, batchEargs, dim, streamPtr));
+          // Final chiral and stereochem checks
+          {
+            ScopedNvtxRange stageSetupFinalChiral("Setup final chiral check");
+            // This is a pass-through, don't need to set the stream
+            stages.push_back(std::make_unique<detail::ETKDGFinalChiralCenterCheckStage>(*chiralStagePtr));
+          }
+
+          {
+            ScopedNvtxRange stageSetupChiralDistMatrix("Setup chiral dist matrix check");
+            stages.push_back(
+              std::make_unique<detail::ETKDGChiralDistMatrixCheckStage>(context, batchEargs, dim, streamPtr));
+          }
+
+          {
+            ScopedNvtxRange stageSetupChiralVolume("Setup chiral center volume check");
+            stages.push_back(
+              std::make_unique<detail::ETKDGChiralCenterVolumeCheckStage>(context, batchEargs, dim, streamPtr));
+          }
+
+          {
+            ScopedNvtxRange stageSetupDoubleBondStereo("Setup double bond stereo check");
+            stages.push_back(
+              std::make_unique<detail::ETKDGDoubleBondStereoCheckStage>(context, batchEargs, dim, streamPtr));
+          }
         }
 
         // Writeback
+        ScopedNvtxRange                                stageSetupUpdate("Setup update conformers");
         stages.push_back(std::make_unique<detail::ETKDGUpdateConformersStage>(batchMolsWithConfs,
                                                                               batchEargs,
                                                                               conformers,
@@ -346,10 +374,12 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
                                                                               streamPtr,
                                                                               &conformer_mutex,
                                                                               confsPerMolecule));
-
+        stageSetupUpdate.pop();
         // Reset and run driver (reuses pinned memory and other resources)
+        ScopedNvtxRange stageSetupDriver("Setup ETKDG Driver");
         auto context_ptr = std::make_unique<detail::ETKDGContext>(std::move(context));
         threadData.driver.reset(std::move(context_ptr), std::move(stages), debugMode, streamPtr, &allFinished);
+        stageSetupDriver.pop();
         stageSetupRange.pop();
 
         ScopedNvtxRange runRange("ETKDG execute");

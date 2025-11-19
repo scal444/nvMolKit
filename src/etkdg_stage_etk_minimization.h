@@ -18,6 +18,8 @@
 
 #include <GraphMol/DistGeomHelpers/Embedder.h>
 
+#include <unordered_map>
+
 #include "dist_geom.h"
 #include "etkdg_impl.h"
 #include "bfgs_minimize.h"
@@ -36,7 +38,8 @@ class ETKMinimizationStage final : public ETKDGStage {
                        const RDKit::DGeomHelpers::EmbedParameters& embedParam,
                        const ETKDGContext&                         ctx,
                        BfgsBatchMinimizer&                         minimizer,
-                       cudaStream_t                                stream = nullptr);
+                       cudaStream_t                                stream = nullptr,
+                       std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::Energy3DForceContribsHost>* cache = nullptr);
 
   void        execute(ETKDGContext& ctx) override;
   std::string name() const override { return "ETK 3D Minimization"; }

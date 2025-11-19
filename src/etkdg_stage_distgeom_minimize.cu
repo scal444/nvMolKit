@@ -21,6 +21,7 @@
 #include "etkdg_stage_distgeom_minimize.h"
 #include "forcefields/kernel_utils.cuh"
 #include "minimizer/bfgs_distgeom.h"
+#include "nvtx.h"
 
 using ::nvMolKit::detail::ETKDGContext;
 using ::nvMolKit::detail::ETKDGStage;
@@ -60,7 +61,8 @@ DistGeomMinimizeStage::DistGeomMinimizeStage(const std::vector<const RDKit::ROMo
                                              int                                         maxIters,
                                              bool                                        checkEnergy,
                                              const std::string&                          stageName,
-                                             cudaStream_t                                stream)
+                                             cudaStream_t                                stream,
+                                             std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::EnergyForceContribsHost>* cache)
     : embedParam_(embedParam),
       minimizer_(minimizer),
       chiralWeight_(chiralWeight),
@@ -79,13 +81,38 @@ DistGeomMinimizeStage::DistGeomMinimizeStage(const std::vector<const RDKit::ROMo
     const auto&      mol      = mols[i];
     const auto&      embedArg = eargs[i];
     const auto&      numAtoms = mol->getNumAtoms();
-    auto             ffParams = DistGeom::constructForceFieldContribs(embedArg.dim,
-                                                                      *embedArg.mmat,
-                                                                      embedArg.chiralCenters,
-                                                                      1.0,  // Default weight (actual weights passed to executeImpl)
-                                                                      0.1,  // Default weight (actual weights passed to executeImpl)
-                                                                      nullptr,
-                                                                      embedParam.basinThresh);
+    
+    // Get or construct force field parameters
+    const nvMolKit::DistGeom::EnergyForceContribsHost* ffParams = nullptr;
+    nvMolKit::DistGeom::EnergyForceContribsHost uncachedParams;
+    
+    if (cache != nullptr) {
+      auto it = cache->find(mol);
+      if (it != cache->end()) {
+        ffParams = &it->second;
+      } else {
+        // Construct directly into cache
+        auto [fst, snd] = cache->emplace(mol, DistGeom::constructForceFieldContribs(embedArg.dim,
+                                                                                 *embedArg.mmat,
+                                                                                 embedArg.chiralCenters,
+                                                                                 1.0,  // Default weight (actual weights passed to executeImpl)
+                                                                                 0.1,  // Default weight (actual weights passed to executeImpl)
+                                                                                 nullptr,
+                                                                                 embedParam.basinThresh));
+        ffParams = &fst->second;
+      }
+    } else {
+      // No cache, construct locally
+      uncachedParams = DistGeom::constructForceFieldContribs(embedArg.dim,
+                                                             *embedArg.mmat,
+                                                             embedArg.chiralCenters,
+                                                             1.0,  // Default weight (actual weights passed to executeImpl)
+                                                             0.1,  // Default weight (actual weights passed to executeImpl)
+                                                             nullptr,
+                                                             embedParam.basinThresh);
+      ffParams = &uncachedParams;
+    }
+    
     // Get atom numbers
     std::vector<int> atomNumbers;
     atomNumbers.reserve(numAtoms);
@@ -94,13 +121,14 @@ DistGeomMinimizeStage::DistGeomMinimizeStage(const std::vector<const RDKit::ROMo
     }
 
     // Add to molecular system
-    nvMolKit::DistGeom::addMoleculeToMolecularSystem(ffParams,
+    nvMolKit::DistGeom::addMoleculeToMolecularSystem(*ffParams,
                                                      numAtoms,
                                                      embedArg.dim,
                                                      ctx.systemHost.atomStarts,
                                                      molSystemHost,
                                                      &atomNumbers);
   }
+  ScopedNvtxRange buffersRange("Setup buffers");
   DistGeom::setStreams(molSystemDevice, stream_);
   nvMolKit::DistGeom::sendContribsAndIndicesToDevice(molSystemHost, molSystemDevice);
   nvMolKit::DistGeom::setupDeviceBuffers(molSystemHost,

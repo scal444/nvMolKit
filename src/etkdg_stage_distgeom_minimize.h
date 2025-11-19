@@ -18,6 +18,8 @@
 
 #include <GraphMol/DistGeomHelpers/Embedder.h>
 
+#include <unordered_map>
+
 #include "bfgs_minimize.h"
 #include "dist_geom.h"
 #include "etkdg_impl.h"
@@ -45,6 +47,7 @@ class DistGeomMinimizeStage : public ETKDGStage {
    * @param maxIters Maximum number of iterations per minimization cycle
    * @param checkEnergy Whether to check energy per atom after minimization
    * @param stream CUDA stream
+   * @param cache Optional cache for force field parameters
    */
   DistGeomMinimizeStage(const std::vector<const RDKit::ROMol*>&     mols,
                         const std::vector<EmbedArgs>&               eargs,
@@ -56,7 +59,8 @@ class DistGeomMinimizeStage : public ETKDGStage {
                         int                                         maxIters,
                         bool                                        checkEnergy,
                         const std::string&                          stageName,
-                        cudaStream_t                                stream = nullptr);
+                        cudaStream_t                                stream = nullptr,
+                        std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::EnergyForceContribsHost>* cache = nullptr);
   
   void executeImpl(ETKDGContext& ctx, 
                    double chiralWeight, 

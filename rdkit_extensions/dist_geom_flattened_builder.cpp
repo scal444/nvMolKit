@@ -9,6 +9,8 @@
 #include <map>
 #include <sstream>
 
+#include "nvtx.h"
+
 // No clang-tidy for 1:1 RDKit ports.
 // NOLINTBEGIN
 
@@ -479,6 +481,7 @@ nvMolKit::DistGeom::EnergyForceContribsHost constructForceFieldContribs(
   double                                 weightFourthDim,
   std::map<std::pair<int, int>, double>* extraWeights,
   double                                 basinSizeTol) {
+  ScopedNvtxRange range("constructForceFieldContribs");
   nvMolKit::DistGeom::EnergyForceContribsHost contribs;
   const unsigned int                          numAtoms = mmat.numRows();
 
