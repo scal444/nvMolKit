@@ -980,25 +980,25 @@ static __device__ __forceinline__ void inversionGrad(const double* pos,
   crossProduct(rJKx, rJKy, rJKz, rJIx, rJIy, rJIz, t3x, t3y, t3z);
 
   // Calculate terms for gradient
-  const double inv_term1 = sinY * sinTheta;
+  const double inverseTerm1 = 1.0 / (sinY * sinTheta);
   const double term2 = cosY / (sinY * sinThetaSq);
   const double cosY_over_sinY = cosY / sinY;
 
   // Compute gradient components on-the-fly and apply directly
   // Atom 1 gradient components
-  const double tg1x = (t1x / inv_term1 - (rJIx - rJKx * cosTheta) * term2) * invdJI;
-  const double tg1y = (t1y / inv_term1 - (rJIy - rJKy * cosTheta) * term2) * invdJI;
-  const double tg1z = (t1z / inv_term1 - (rJIz - rJKz * cosTheta) * term2) * invdJI;
+  const double tg1x = (t1x * inverseTerm1 - (rJIx - rJKx * cosTheta) * term2) * invdJI;
+  const double tg1y = (t1y * inverseTerm1 - (rJIy - rJKy * cosTheta) * term2) * invdJI;
+  const double tg1z = (t1z * inverseTerm1 - (rJIz - rJKz * cosTheta) * term2) * invdJI;
 
   // Atom 3 gradient components
-  const double tg3x = (t2x / inv_term1 - (rJKx - rJIx * cosTheta) * term2) * invdJK;
-  const double tg3y = (t2y / inv_term1 - (rJKy - rJIy * cosTheta) * term2) * invdJK;
-  const double tg3z = (t2z / inv_term1 - (rJKz - rJIz * cosTheta) * term2) * invdJK;
+  const double tg3x = (t2x * inverseTerm1 - (rJKx - rJIx * cosTheta) * term2) * invdJK;
+  const double tg3y = (t2y * inverseTerm1 - (rJKy - rJIy * cosTheta) * term2) * invdJK;
+  const double tg3z = (t2z * inverseTerm1 - (rJKz - rJIz * cosTheta) * term2) * invdJK;
 
   // Atom 4 gradient components
-  const double tg4x = (t3x / inv_term1 - rJLx * cosY_over_sinY) * invdJL;
-  const double tg4y = (t3y / inv_term1 - rJLy * cosY_over_sinY) * invdJL;
-  const double tg4z = (t3z / inv_term1 - rJLz * cosY_over_sinY) * invdJL;
+  const double tg4x = (t3x * inverseTerm1 - rJLx * cosY_over_sinY) * invdJL;
+  const double tg4y = (t3y * inverseTerm1 - rJLy * cosY_over_sinY) * invdJL;
+  const double tg4z = (t3z * inverseTerm1 - rJLz * cosY_over_sinY) * invdJL;
 
   // Add gradients using atomic operations
   atomicAdd(&grad[posIdx1 + 0], dE_dW * tg1x);

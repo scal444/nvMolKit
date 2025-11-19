@@ -90,7 +90,6 @@ inline BatchedIndicesDevicePtr toPointerStruct(const BatchedIndicesDevice& src) 
 }
 
 void setStreams(BatchedMolecularDeviceBuffers& molSystemDevice, cudaStream_t stream) {
-  molSystemDevice.atomNumbers.setStream(stream);
   molSystemDevice.positions.setStream(stream);
   molSystemDevice.grad.setStream(stream);
   molSystemDevice.energyOuts.setStream(stream);
@@ -238,17 +237,12 @@ void sendContribsAndIndicesToDevice(const BatchedMolecularSystemHost& molSystemH
 
 void addMoleculeToBatch(const EnergyForceContribsHost& contribs,
                         const std::vector<double>&     positions,
-                        BatchedMolecularSystemHost&    molSystem,
-                        std::vector<int>*              atomNumbers) {
+                        BatchedMolecularSystemHost&    molSystem) {
   const int previousLastAtomIndex = molSystem.indices.atomStarts.back();
   const int numBatches            = molSystem.indices.atomStarts.size() - 1;
   const int newNumAtoms           = positions.size() / 3;
   molSystem.indices.atomStarts.push_back(molSystem.indices.atomStarts.back() + newNumAtoms);
   molSystem.maxNumAtoms = std::max(molSystem.maxNumAtoms, newNumAtoms);
-
-  if (atomNumbers) {
-    molSystem.atomNumbers.insert(molSystem.atomNumbers.end(), atomNumbers->begin(), atomNumbers->end());
-  }
 
   auto& indexHolder   = molSystem.indices;
   auto& contribHolder = molSystem.contribs;

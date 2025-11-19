@@ -204,11 +204,6 @@ void allocateDim4ConversionBuffers(const BatchedMolecularSystemHost& molSystemHo
   // TODO: kernel for setting nonzero int values
   std::vector<int> copyBuffer(dim4PaddedSize, -1);
   molSystemDevice.dataFormatInterchangeBuffers.writeBackIndices.setFromVector(copyBuffer);
-
-  if (molSystemHost.atomNumbers.size() > 0) {
-    molSystemDevice.dataFormatInterchangeBuffers.atomNumbers.resize(maxSystemNumAtoms * numMolecules);
-    molSystemDevice.dataFormatInterchangeBuffers.atomNumbers.zero();
-  }
 }
 
 template <typename T, int fromDim, int toDim>
@@ -300,14 +295,6 @@ cudaError_t launchPaddedDim4ToUnpaddedDim3Kernel(const int     numMolecules,
                                                  double*       unpaddedOutput,
                                                  cudaStream_t  stream = 0);
 
-//! Converts per-atom dense atom number arrays to padded arrays.
-cudaError_t launchPadAtomNumbersKernel(const int    numAtomsTotal,
-                                       const int    maxNumAtomsPerMolecule,
-                                       const int*   atomStarts,
-                                       const int*   atomIndexToMoleculeIndex,
-                                       const int*   unpaddedInput,
-                                       int*         paddedOutput,
-                                       cudaStream_t stream = 0);
 
 }  // namespace FFKernelUtils
 }  // namespace nvMolKit

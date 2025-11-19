@@ -134,8 +134,6 @@ struct BatchedMolecularSystemHost {
   //! Size total num atoms * 3
   std::vector<double>     positions;
 
-  //! Size total num atoms
-  std::vector<int> atomNumbers;
   //! Largest system size in the batch
   int              maxNumAtoms = 0;
 };
@@ -253,8 +251,6 @@ struct Dim4PaddedInterfaceBuffers {
   nvMolKit::AsyncDeviceVector<double> gradD3Padded;
   //! Size n_molecules * (max atoms in batch) * 4, will be -1 for padded or 4th dims.
   nvMolKit::AsyncDeviceVector<int>    writeBackIndices;
-  //! Size n_molecules * (max atoms in batch)
-  nvMolKit::AsyncDeviceVector<int>    atomNumbers;
 };
 
 //! Device buffers for the batched molecular system.
@@ -281,8 +277,6 @@ struct BatchedMolecularDeviceBuffers {
   BatchedIndicesDevice                indices;
   //! Size total num atoms * 3
   nvMolKit::AsyncDeviceVector<double> positions;
-  //! Size total num atoms
-  nvMolKit::AsyncDeviceVector<int>    atomNumbers;
   //! Size total num atoms * 3
   nvMolKit::AsyncDeviceVector<double> grad;
   //! Variable size - max terms in each molecule concatenated.
@@ -302,8 +296,7 @@ struct BatchedIndicesDevicePtr toPointerStruct(const BatchedIndicesDevice& src);
 //! Populates the molSystem with the molecule's energy force contribs, and adds the current positions.
 void addMoleculeToBatch(const EnergyForceContribsHost& contribs,
                         const std::vector<double>&     positions,
-                        BatchedMolecularSystemHost&    molSystem,
-                        std::vector<int>*              atomNumbers = nullptr);
+                        BatchedMolecularSystemHost&    molSystem);
 
 //! Send the batched molecular system to the device.
 void sendContribsAndIndicesToDevice(const BatchedMolecularSystemHost& molSystemHost,

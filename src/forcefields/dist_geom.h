@@ -163,8 +163,6 @@ struct BatchedIndices3DHost {
 struct BatchedMolecularSystemHost {
   EnergyForceContribsHost contribs;
   BatchedIndicesHost      indices;
-  //! Size total num atoms
-  std::vector<int>        atomNumbers;
   //! Largest system size in the batch
   int                     maxNumAtoms = 0;
   //! Dimension of all molecules in the batch (3 or 4)
@@ -321,8 +319,6 @@ struct PaddedInterfaceBuffers {
   nvMolKit::AsyncDeviceVector<double> gradD3Padded;
   //! Size n_molecules * (max atoms in batch) * 4, will be -1 for padded or 4th dims.
   nvMolKit::AsyncDeviceVector<int>    writeBackIndices;
-  //! Size n_molecules * (max atoms in batch)
-  nvMolKit::AsyncDeviceVector<int>    atomNumbers;
 };
 
 //! Device buffers for the batched molecular system.
@@ -347,8 +343,6 @@ struct BatchedMolecularDeviceBuffers {
   EnergyForceContribsDevice           contribs;
   //! Size n_molecules
   BatchedIndicesDevice                indices;
-  //! Size total num atoms
-  nvMolKit::AsyncDeviceVector<int>    atomNumbers;
   //! Size total num positions of all molecules
   nvMolKit::AsyncDeviceVector<double> grad;
   //! Variable size - max terms in each molecule concatenated.
@@ -392,13 +386,24 @@ void addMoleculeToContextWithPositions(const std::vector<double>& positions,
                                        std::vector<int>&          ctxAtomStarts,
                                        std::vector<double>&       ctxPositions);
 
+//! Preallocate memory for estimated batch size (4D DG).
+//! Call this after creating the first EnergyForceContribsHost to optimize memory allocation.
+void preallocateEstimatedBatch(const EnergyForceContribsHost& templateContribs,
+                               BatchedMolecularSystemHost&    molSystem,
+                               int                            estimatedBatchSize);
+
+//! Preallocate memory for estimated batch size (3D ETK).
+//! Call this after creating the first Energy3DForceContribsHost to optimize memory allocation.
+void preallocateEstimatedBatch3D(const Energy3DForceContribsHost& templateContribs,
+                                 BatchedMolecularSystem3DHost&    molSystem,
+                                 int                              estimatedBatchSize);
+
 //! Add a molecule to the molecular system.
 void addMoleculeToMolecularSystem(const EnergyForceContribsHost& contribs,
                                   const int                      numAtoms,
                                   const int                      dimension,
                                   const std::vector<int>&        ctxAtomStarts,
-                                  BatchedMolecularSystemHost&    molSystem,
-                                  std::vector<int>*              atomNumbers = nullptr);
+                                  BatchedMolecularSystemHost&    molSystem);
 
 //! Add a molecule to the molecular system.
 void addMoleculeToMolecularSystem3D(const Energy3DForceContribsHost& contribs,
@@ -412,8 +417,7 @@ void addMoleculeToBatch(const EnergyForceContribsHost& contribs,
                         BatchedMolecularSystemHost&    molSystem,
                         const int                      dimension,
                         std::vector<int>&              ctxAtomStarts,
-                        std::vector<double>&           ctxPositions,
-                        std::vector<int>*              atomNumbers = nullptr);
+                        std::vector<double>&           ctxPositions);
 
 //! Add a molecule to the batched molecular system.
 //! Populates the molSystem with the molecule's energy force contribs, and adds the current positions.

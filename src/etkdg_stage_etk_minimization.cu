@@ -99,6 +99,10 @@ ETKMinimizationStage::ETKMinimizationStage(const std::vector<const RDKit::ROMol*
   const int totalNumAtoms = ctx.systemHost.atomStarts.back();
 
   std::vector<double> positions(totalNumAtoms * dim, 0.0);
+  
+  // Preallocate memory based on first molecule (if available)
+  bool preallocated = false;
+  
   for (size_t i = 0; i < mols.size(); ++i) {
     if (eargs[i].dim != 4) {
       throw std::runtime_error("ETKDG minimization stage only supports 4D coordinates");
@@ -132,6 +136,12 @@ ETKMinimizationStage::ETKMinimizationStage(const std::vector<const RDKit::ROMol*
                                                                           /*dim=*/3,
                                                                           embedParam.useBasicKnowledge);
       ffParams = &uncachedParams;
+    }
+    
+    // Preallocate once using the first molecule's parameters
+    if (!preallocated) {
+      nvMolKit::DistGeom::preallocateEstimatedBatch3D(*ffParams, molSystemHost, static_cast<int>(mols.size()));
+      preallocated = true;
     }
     
     addMoleculeToMolecularSystem3D(*ffParams, ctx.systemHost.atomStarts, molSystemHost);

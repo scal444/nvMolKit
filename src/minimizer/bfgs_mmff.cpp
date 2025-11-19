@@ -32,7 +32,6 @@ namespace nvMolKit::MMFF {
 //! Cached molecule-specific preprocessing
 struct CachedMoleculeData {
   EnergyForceContribsHost ffParams;
-  std::vector<int>        atomNumbers;
 };
 
 //! Thread-local pinned memory buffers for async transfers
@@ -178,20 +177,16 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
           ScopedNvtxRange computeCacheRange("Preprocess single molecule");
           CachedMoleculeData cached;
           cached.ffParams = constructForcefieldContribs(*mol, nonBondedThreshold);
-          cached.atomNumbers.reserve(numAtoms);
-          for (uint32_t i = 0; i < numAtoms; ++i) {
-            cached.atomNumbers.push_back(mol->getAtomWithIdx(i)->getAtomicNum());
-          }
           it = moleculeCache.insert({mol, std::move(cached)}).first;
         }
-        auto& [ffParams, atomNumbers] = it->second;
+        auto& ffParams = it->second.ffParams;
         ScopedNvtxRange addToBatchRange("Add conformer to batch data");
         // Add this conformer to the batch
         conformerAtomStarts.push_back(currentAtomOffset);
         currentAtomOffset += numAtoms;
 
         nvMolKit::confPosToVect(*confInfo.conformer, pos);
-        nvMolKit::MMFF::addMoleculeToBatch(ffParams, pos, systemHost, &atomNumbers);
+        nvMolKit::MMFF::addMoleculeToBatch(ffParams, pos, systemHost);
       }
 
       // Send to device and set up streams

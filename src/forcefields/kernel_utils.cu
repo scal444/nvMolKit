@@ -180,22 +180,5 @@ cudaError_t launchPaddedDim4ToUnpaddedDim3Kernel(const int     numMolecules,
   return cudaGetLastError();
 }
 
-cudaError_t launchPadAtomNumbersKernel(const int    numAtomsTotal,
-                                       const int    maxNumAtomsPerMolecule,
-                                       const int*   atomStarts,
-                                       const int*   atomIndexToMoleculeIndex,
-                                       const int*   unpaddedInput,
-                                       int*         paddedOutput,
-                                       cudaStream_t stream) {
-  return launchUnpaddedToPaddedKernel<int, 1, 1>(numAtomsTotal,
-                                                 maxNumAtomsPerMolecule,
-                                                 atomStarts,
-                                                 atomIndexToMoleculeIndex,
-                                                 unpaddedInput,
-                                                 paddedOutput,
-                                                 /*writeBackIndices=*/nullptr,
-                                                 stream);
-}
-
 }  // namespace FFKernelUtils
 }  // namespace nvMolKit

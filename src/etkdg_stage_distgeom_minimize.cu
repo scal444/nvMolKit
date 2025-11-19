@@ -76,6 +76,9 @@ DistGeomMinimizeStage::DistGeomMinimizeStage(const std::vector<const RDKit::ROMo
     throw std::runtime_error("Number of molecules and embed args must be the same");
   }
 
+  // Preallocate memory based on first molecule (if available)
+  bool preallocated = false;
+  
   // Process each molecule
   for (size_t i = 0; i < mols.size(); ++i) {
     const auto&      mol      = mols[i];
@@ -112,12 +115,11 @@ DistGeomMinimizeStage::DistGeomMinimizeStage(const std::vector<const RDKit::ROMo
                                                              embedParam.basinThresh);
       ffParams = &uncachedParams;
     }
-    
-    // Get atom numbers
-    std::vector<int> atomNumbers;
-    atomNumbers.reserve(numAtoms);
-    for (const auto& atom : mol->atoms()) {
-      atomNumbers.push_back(atom->getAtomicNum());
+
+    // Preallocate once using the first molecule's parameters
+    if (!preallocated) {
+      nvMolKit::DistGeom::preallocateEstimatedBatch(*ffParams, molSystemHost, static_cast<int>(mols.size()));
+      preallocated = true;
     }
 
     // Add to molecular system
@@ -125,8 +127,7 @@ DistGeomMinimizeStage::DistGeomMinimizeStage(const std::vector<const RDKit::ROMo
                                                      numAtoms,
                                                      embedArg.dim,
                                                      ctx.systemHost.atomStarts,
-                                                     molSystemHost,
-                                                     &atomNumbers);
+                                                     molSystemHost);
   }
   ScopedNvtxRange buffersRange("Setup buffers");
   DistGeom::setStreams(molSystemDevice, stream_);
