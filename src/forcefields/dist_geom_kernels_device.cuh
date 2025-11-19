@@ -242,40 +242,78 @@ static __device__ __inline__ double molEnergy(const EnergyForceContribsDevicePtr
 
   double energy = 0.0;
 
+  constexpr int WARP_SIZE = 32;
+  const int numWarps = (stride + WARP_SIZE - 1) / WARP_SIZE;
+  const int warpId = tid / WARP_SIZE;
+  const int laneId = tid % WARP_SIZE;
+
+  // Get term ranges
+  const int distStart   = systemIndices.distTermStarts[molIdx];
+  const int distEnd     = systemIndices.distTermStarts[molIdx + 1];
+  const int chiralStart = systemIndices.chiralTermStarts[molIdx];
+  const int chiralEnd   = systemIndices.chiralTermStarts[molIdx + 1];
+  const int fourthStart = systemIndices.fourthTermStarts[molIdx];
+  const int fourthEnd   = systemIndices.fourthTermStarts[molIdx + 1];
+
+  const int totalTerms = (distEnd - distStart) + (chiralEnd - chiralStart) + (fourthEnd - fourthStart);
+
+  // Get term data
   const auto& [d_idx1s, d_idx2s, d_ub2s, d_lb2s, d_weights] = terms.distTerms;
-  const int distStart                                       = systemIndices.distTermStarts[molIdx];
-  const int distEnd                                         = systemIndices.distTermStarts[molIdx + 1];
-  for (int i = distStart + tid; i < distEnd; i += stride) {
-    const int localIdx1 = d_idx1s[i] - atomStart;
-    const int localIdx2 = d_idx2s[i] - atomStart;
-    energy += distViolationEnergy(molCoords, localIdx1, localIdx2, d_lb2s[i], d_ub2s[i], d_weights[i], dimension);
-  }
-
   const auto& [c_idx1s, c_idx2s, c_idx3s, c_idx4s, c_volUppers, c_volLowers, c_weights] = terms.chiralTerms;
-  const int chiralStart                                                                 = systemIndices.chiralTermStarts[molIdx];
-  const int chiralEnd = systemIndices.chiralTermStarts[molIdx + 1];
-  for (int i = chiralStart + tid; i < chiralEnd; i += stride) {
-    const int localIdx1 = c_idx1s[i] - atomStart;
-    const int localIdx2 = c_idx2s[i] - atomStart;
-    const int localIdx3 = c_idx3s[i] - atomStart;
-    const int localIdx4 = c_idx4s[i] - atomStart;
-    energy += chiralViolationEnergy(molCoords,
-                                    localIdx1,
-                                    localIdx2,
-                                    localIdx3,
-                                    localIdx4,
-                                    c_volLowers[i],
-                                    c_volUppers[i],
-                                    c_weights[i],
-                                    dimension);
-  }
-
   const auto& [f_idxs, f_weights] = terms.fourthTerms;
-  const int fourthStart          = systemIndices.fourthTermStarts[molIdx];
-  const int fourthEnd            = systemIndices.fourthTermStarts[molIdx + 1];
-  for (int i = fourthStart + tid; i < fourthEnd; i += stride) {
-    const int localIdx = f_idxs[i] - atomStart;
-    energy += fourthDimEnergy(molCoords, localIdx, f_weights[i], dimension);
+
+  const int numDist   = distEnd - distStart;
+  const int numChiral = chiralEnd - chiralStart;
+  const int numFourth = fourthEnd - fourthStart;
+
+  // Calculate number of warps needed for each term type
+  const int warpsForDist   = (numDist + WARP_SIZE - 1) / WARP_SIZE;
+  const int warpsForChiral = (numChiral + WARP_SIZE - 1) / WARP_SIZE;
+  const int warpsForFourth = (numFourth + WARP_SIZE - 1) / WARP_SIZE;
+  const int totalWarpsNeeded = warpsForDist + warpsForChiral + warpsForFourth;
+
+  // Each warp processes chunks in round-robin fashion
+  for (int chunkIdx = warpId; chunkIdx < totalWarpsNeeded; chunkIdx += numWarps) {
+    // Determine which term type this chunk belongs to
+    if (chunkIdx < warpsForDist) {
+      // Distance terms
+      const int baseIdx = chunkIdx * WARP_SIZE;
+      const int termIdx = distStart + baseIdx + laneId;
+      if (baseIdx + laneId < numDist) {
+        const int localIdx1 = d_idx1s[termIdx] - atomStart;
+        const int localIdx2 = d_idx2s[termIdx] - atomStart;
+        energy += distViolationEnergy(molCoords, localIdx1, localIdx2, d_lb2s[termIdx], d_ub2s[termIdx], d_weights[termIdx], dimension);
+      }
+    } else if (chunkIdx < warpsForDist + warpsForChiral) {
+      // Chiral terms
+      const int warpOffset = chunkIdx - warpsForDist;
+      const int baseIdx = warpOffset * WARP_SIZE;
+      const int termIdx = chiralStart + baseIdx + laneId;
+      if (baseIdx + laneId < numChiral) {
+        const int localIdx1 = c_idx1s[termIdx] - atomStart;
+        const int localIdx2 = c_idx2s[termIdx] - atomStart;
+        const int localIdx3 = c_idx3s[termIdx] - atomStart;
+        const int localIdx4 = c_idx4s[termIdx] - atomStart;
+        energy += chiralViolationEnergy(molCoords,
+                                        localIdx1,
+                                        localIdx2,
+                                        localIdx3,
+                                        localIdx4,
+                                        c_volLowers[termIdx],
+                                        c_volUppers[termIdx],
+                                        c_weights[termIdx],
+                                        dimension);
+      }
+    } else {
+      // Fourth dimension terms
+      const int warpOffset = chunkIdx - warpsForDist - warpsForChiral;
+      const int baseIdx = warpOffset * WARP_SIZE;
+      const int termIdx = fourthStart + baseIdx + laneId;
+      if (baseIdx + laneId < numFourth) {
+        const int localIdx = f_idxs[termIdx] - atomStart;
+        energy += fourthDimEnergy(molCoords, localIdx, f_weights[termIdx], dimension);
+      }
+    }
   }
 
   return energy;
@@ -294,41 +332,79 @@ static __device__ __inline__ void molGrad(const EnergyForceContribsDevicePtr& te
   const double* molCoords = coords + atomStart * dimension;
   double*       molGrad   = grad;  // grad is already offset by caller (see combinedGradKernel)
 
-  const auto& [d_idx1s, d_idx2s, d_ub2s, d_lb2s, d_weights] = terms.distTerms;
-  const int distStart                                       = systemIndices.distTermStarts[molIdx];
-  const int distEnd                                         = systemIndices.distTermStarts[molIdx + 1];
-  for (int i = distStart + tid; i < distEnd; i += stride) {
-    const int localIdx1 = d_idx1s[i] - atomStart;
-    const int localIdx2 = d_idx2s[i] - atomStart;
-    distViolationGrad(molCoords, localIdx1, localIdx2, d_lb2s[i], d_ub2s[i], d_weights[i], dimension, molGrad);
-  }
+  constexpr int WARP_SIZE = 32;
+  const int numWarps = (stride + WARP_SIZE - 1) / WARP_SIZE;
+  const int warpId = tid / WARP_SIZE;
+  const int laneId = tid % WARP_SIZE;
 
-  const auto& [c_idx1s, c_idx2s, c_idx3s, c_idx4s, c_volUppers, c_volLowers, c_weights] = terms.chiralTerms;
+  // Get term ranges
+  const int distStart   = systemIndices.distTermStarts[molIdx];
+  const int distEnd     = systemIndices.distTermStarts[molIdx + 1];
   const int chiralStart = systemIndices.chiralTermStarts[molIdx];
   const int chiralEnd   = systemIndices.chiralTermStarts[molIdx + 1];
-  for (int i = chiralStart + tid; i < chiralEnd; i += stride) {
-    const int localIdx1 = c_idx1s[i] - atomStart;
-    const int localIdx2 = c_idx2s[i] - atomStart;
-    const int localIdx3 = c_idx3s[i] - atomStart;
-    const int localIdx4 = c_idx4s[i] - atomStart;
-    chiralViolationGrad(molCoords,
-                        localIdx1,
-                        localIdx2,
-                        localIdx3,
-                        localIdx4,
-                        c_volLowers[i],
-                        c_volUppers[i],
-                        c_weights[i],
-                        dimension,
-                        molGrad);
-  }
+  const int fourthStart = systemIndices.fourthTermStarts[molIdx];
+  const int fourthEnd   = systemIndices.fourthTermStarts[molIdx + 1];
 
+  const int totalTerms = (distEnd - distStart) + (chiralEnd - chiralStart) + (fourthEnd - fourthStart);
+
+  // Get term data
+  const auto& [d_idx1s, d_idx2s, d_ub2s, d_lb2s, d_weights] = terms.distTerms;
+  const auto& [c_idx1s, c_idx2s, c_idx3s, c_idx4s, c_volUppers, c_volLowers, c_weights] = terms.chiralTerms;
   const auto& [f_idxs, f_weights] = terms.fourthTerms;
-  const int fourthStart          = systemIndices.fourthTermStarts[molIdx];
-  const int fourthEnd            = systemIndices.fourthTermStarts[molIdx + 1];
-  for (int i = fourthStart + tid; i < fourthEnd; i += stride) {
-    const int localIdx = f_idxs[i] - atomStart;
-    fourthDimGrad(molCoords, localIdx, f_weights[i], dimension, molGrad);
+
+  const int numDist   = distEnd - distStart;
+  const int numChiral = chiralEnd - chiralStart;
+  const int numFourth = fourthEnd - fourthStart;
+
+  // Calculate number of warps needed for each term type
+  const int warpsForDist   = (numDist + WARP_SIZE - 1) / WARP_SIZE;
+  const int warpsForChiral = (numChiral + WARP_SIZE - 1) / WARP_SIZE;
+  const int warpsForFourth = (numFourth + WARP_SIZE - 1) / WARP_SIZE;
+  const int totalWarpsNeeded = warpsForDist + warpsForChiral + warpsForFourth;
+
+  // Each warp processes chunks in round-robin fashion
+  for (int chunkIdx = warpId; chunkIdx < totalWarpsNeeded; chunkIdx += numWarps) {
+    // Determine which term type this chunk belongs to
+    if (chunkIdx < warpsForDist) {
+      // Distance terms
+      const int baseIdx = chunkIdx * WARP_SIZE;
+      const int termIdx = distStart + baseIdx + laneId;
+      if (baseIdx + laneId < numDist) {
+        const int localIdx1 = d_idx1s[termIdx] - atomStart;
+        const int localIdx2 = d_idx2s[termIdx] - atomStart;
+        distViolationGrad(molCoords, localIdx1, localIdx2, d_lb2s[termIdx], d_ub2s[termIdx], d_weights[termIdx], dimension, molGrad);
+      }
+    } else if (chunkIdx < warpsForDist + warpsForChiral) {
+      // Chiral terms
+      const int warpOffset = chunkIdx - warpsForDist;
+      const int baseIdx = warpOffset * WARP_SIZE;
+      const int termIdx = chiralStart + baseIdx + laneId;
+      if (baseIdx + laneId < numChiral) {
+        const int localIdx1 = c_idx1s[termIdx] - atomStart;
+        const int localIdx2 = c_idx2s[termIdx] - atomStart;
+        const int localIdx3 = c_idx3s[termIdx] - atomStart;
+        const int localIdx4 = c_idx4s[termIdx] - atomStart;
+        chiralViolationGrad(molCoords,
+                            localIdx1,
+                            localIdx2,
+                            localIdx3,
+                            localIdx4,
+                            c_volLowers[termIdx],
+                            c_volUppers[termIdx],
+                            c_weights[termIdx],
+                            dimension,
+                            molGrad);
+      }
+    } else {
+      // Fourth dimension terms
+      const int warpOffset = chunkIdx - warpsForDist - warpsForChiral;
+      const int baseIdx = warpOffset * WARP_SIZE;
+      const int termIdx = fourthStart + baseIdx + laneId;
+      if (baseIdx + laneId < numFourth) {
+        const int localIdx = f_idxs[termIdx] - atomStart;
+        fourthDimGrad(molCoords, localIdx, f_weights[termIdx], dimension, molGrad);
+      }
+    }
   }
 }
 
@@ -562,77 +638,126 @@ static __device__ __inline__ double molEnergyETK(const Energy3DForceContribsDevi
 
   double energy = 0.0;
 
-  // Experimental torsion terms
-  const auto& [t_idx1s, t_idx2s, t_idx3s, t_idx4s, t_forceConstants, t_signs] = terms.experimentalTorsionTerms;
-  const int torsionStart                                                      = systemIndices.experimentalTorsionTermStarts[molIdx];
-  const int torsionEnd = systemIndices.experimentalTorsionTermStarts[molIdx + 1];
-  for (int i = torsionStart + tid; i < torsionEnd; i += stride) {
-    const int localIdx1 = t_idx1s[i] - atomStart;
-    const int localIdx2 = t_idx2s[i] - atomStart;
-    const int localIdx3 = t_idx3s[i] - atomStart;
-    const int localIdx4 = t_idx4s[i] - atomStart;
-    energy += torsionAngleEnergy(molCoords, localIdx1, localIdx2, localIdx3, localIdx4, &t_forceConstants[i * 6], &t_signs[i * 6]);
-  }
+  constexpr int WARP_SIZE = 32;
+  const int numWarps = (stride + WARP_SIZE - 1) / WARP_SIZE;
+  const int warpId = tid / WARP_SIZE;
+  const int laneId = tid % WARP_SIZE;
 
-  // Improper torsion terms
-  const auto& [i_idx1s, i_idx2s, i_idx3s, i_idx4s, i_at2AtomicNum, i_isCBoundToO, i_C0, i_C1, i_C2, i_forceConstant] =
-    terms.improperTorsionTerms;
+  // Get term ranges
+  const int torsionStart  = systemIndices.experimentalTorsionTermStarts[molIdx];
+  const int torsionEnd    = systemIndices.experimentalTorsionTermStarts[molIdx + 1];
   const int improperStart = systemIndices.improperTorsionTermStarts[molIdx];
   const int improperEnd   = systemIndices.improperTorsionTermStarts[molIdx + 1];
-  for (int i = improperStart + tid; i < improperEnd; i += stride) {
-    const int localIdx1 = i_idx1s[i] - atomStart;
-    const int localIdx2 = i_idx2s[i] - atomStart;
-    const int localIdx3 = i_idx3s[i] - atomStart;
-    const int localIdx4 = i_idx4s[i] - atomStart;
-    energy += inversionEnergy(molCoords, localIdx1, localIdx2, localIdx3, localIdx4, i_C0[i], i_C1[i], i_C2[i], i_forceConstant[i]);
-  }
+  const int dist12Start   = systemIndices.dist12TermStarts[molIdx];
+  const int dist12End     = systemIndices.dist12TermStarts[molIdx + 1];
+  const int dist13Start   = systemIndices.dist13TermStarts[molIdx];
+  const int dist13End     = systemIndices.dist13TermStarts[molIdx + 1];
+  const int angle13Start  = systemIndices.angle13TermStarts[molIdx];
+  const int angle13End    = systemIndices.angle13TermStarts[molIdx + 1];
+  const int distLRStart   = systemIndices.longRangeDistTermStarts[molIdx];
+  const int distLREnd     = systemIndices.longRangeDistTermStarts[molIdx + 1];
 
-  // 1-2 distance terms
+  const int numTorsion  = torsionEnd - torsionStart;
+  const int numImproper = improperEnd - improperStart;
+  const int numDist12   = dist12End - dist12Start;
+  const int numDist13   = dist13End - dist13Start;
+  const int numAngle13  = angle13End - angle13Start;
+  const int numDistLR   = distLREnd - distLRStart;
+
+  // Get term data
+  const auto& [t_idx1s, t_idx2s, t_idx3s, t_idx4s, t_forceConstants, t_signs] = terms.experimentalTorsionTerms;
+  const auto& [i_idx1s, i_idx2s, i_idx3s, i_idx4s, i_at2AtomicNum, i_isCBoundToO, i_C0, i_C1, i_C2, i_forceConstant] =
+    terms.improperTorsionTerms;
   const auto& [d12_idx1s, d12_idx2s, d12_minLen, d12_maxLen, d12_forceConstant] = terms.dist12Terms;
-  const int dist12Start                                                         = systemIndices.dist12TermStarts[molIdx];
-  const int dist12End                                                           = systemIndices.dist12TermStarts[molIdx + 1];
-  for (int i = dist12Start + tid; i < dist12End; i += stride) {
-    const int localIdx1 = d12_idx1s[i] - atomStart;
-    const int localIdx2 = d12_idx2s[i] - atomStart;
-    energy += distanceConstraintEnergy(molCoords, localIdx1, localIdx2, d12_minLen[i], d12_maxLen[i], d12_forceConstant[i]);
-  }
-
-  // 1-3 distance terms
   const auto& [d13_idx1s, d13_idx2s, d13_minLen, d13_maxLen, d13_forceConstant] = terms.dist13Terms;
-  const int dist13Start                                                         = systemIndices.dist13TermStarts[molIdx];
-  const int dist13End                                                           = systemIndices.dist13TermStarts[molIdx + 1];
-  for (int i = dist13Start + tid; i < dist13End; i += stride) {
-    const int localIdx1 = d13_idx1s[i] - atomStart;
-    const int localIdx2 = d13_idx2s[i] - atomStart;
-    energy += distanceConstraintEnergy(molCoords, localIdx1, localIdx2, d13_minLen[i], d13_maxLen[i], d13_forceConstant[i]);
-  }
-
-  // 1-3 angle terms
   const auto& [a13_idx1s, a13_idx2s, a13_idx3s, a13_minAngle, a13_maxAngle] = terms.angle13Terms;
-  const int angle13Start                                                    = systemIndices.angle13TermStarts[molIdx];
-  const int angle13End                                                      = systemIndices.angle13TermStarts[molIdx + 1];
-  constexpr double defaultAngleForceConstant = 1.0;
-  for (int i = angle13Start + tid; i < angle13End; i += stride) {
-    const int localIdx1 = a13_idx1s[i] - atomStart;
-    const int localIdx2 = a13_idx2s[i] - atomStart;
-    const int localIdx3 = a13_idx3s[i] - atomStart;
-    energy += angleConstraintEnergy(molCoords,
-                                    localIdx1,
-                                    localIdx2,
-                                    localIdx3,
-                                    a13_minAngle[i],
-                                    a13_maxAngle[i],
-                                    defaultAngleForceConstant);
-  }
-
-  // Long range distance terms
   const auto& [dlr_idx1s, dlr_idx2s, dlr_minLen, dlr_maxLen, dlr_forceConstant] = terms.longRangeDistTerms;
-  const int distLRStart                                                         = systemIndices.longRangeDistTermStarts[molIdx];
-  const int distLREnd                                                           = systemIndices.longRangeDistTermStarts[molIdx + 1];
-  for (int i = distLRStart + tid; i < distLREnd; i += stride) {
-    const int localIdx1 = dlr_idx1s[i] - atomStart;
-    const int localIdx2 = dlr_idx2s[i] - atomStart;
-    energy += distanceConstraintEnergy(molCoords, localIdx1, localIdx2, dlr_minLen[i], dlr_maxLen[i], dlr_forceConstant[i]);
+
+  constexpr double defaultAngleForceConstant = 1.0;
+
+  // Calculate number of warps needed for each term type
+  const int warpsForTorsion  = (numTorsion + WARP_SIZE - 1) / WARP_SIZE;
+  const int warpsForImproper = (numImproper + WARP_SIZE - 1) / WARP_SIZE;
+  const int warpsForDist12   = (numDist12 + WARP_SIZE - 1) / WARP_SIZE;
+  const int warpsForDist13   = (numDist13 + WARP_SIZE - 1) / WARP_SIZE;
+  const int warpsForAngle13  = (numAngle13 + WARP_SIZE - 1) / WARP_SIZE;
+  const int warpsForDistLR   = (numDistLR + WARP_SIZE - 1) / WARP_SIZE;
+  const int totalWarpsNeeded = warpsForTorsion + warpsForImproper + warpsForDist12 + warpsForDist13 + warpsForAngle13 + warpsForDistLR;
+
+  // Each warp processes chunks in round-robin fashion
+  for (int chunkIdx = warpId; chunkIdx < totalWarpsNeeded; chunkIdx += numWarps) {
+    // Determine which term type this chunk belongs to
+    if (chunkIdx < warpsForTorsion) {
+      // Torsion terms
+      const int baseIdx = chunkIdx * WARP_SIZE;
+      const int termIdx = torsionStart + baseIdx + laneId;
+      if (baseIdx + laneId < numTorsion) {
+        const int localIdx1 = t_idx1s[termIdx] - atomStart;
+        const int localIdx2 = t_idx2s[termIdx] - atomStart;
+        const int localIdx3 = t_idx3s[termIdx] - atomStart;
+        const int localIdx4 = t_idx4s[termIdx] - atomStart;
+        energy += torsionAngleEnergy(molCoords, localIdx1, localIdx2, localIdx3, localIdx4, &t_forceConstants[termIdx * 6], &t_signs[termIdx * 6]);
+      }
+    } else if (chunkIdx < warpsForTorsion + warpsForImproper) {
+      // Improper torsion terms
+      const int warpOffset = chunkIdx - warpsForTorsion;
+      const int baseIdx = warpOffset * WARP_SIZE;
+      const int termIdx = improperStart + baseIdx + laneId;
+      if (baseIdx + laneId < numImproper) {
+        const int localIdx1 = i_idx1s[termIdx] - atomStart;
+        const int localIdx2 = i_idx2s[termIdx] - atomStart;
+        const int localIdx3 = i_idx3s[termIdx] - atomStart;
+        const int localIdx4 = i_idx4s[termIdx] - atomStart;
+        energy += inversionEnergy(molCoords, localIdx1, localIdx2, localIdx3, localIdx4, i_C0[termIdx], i_C1[termIdx], i_C2[termIdx], i_forceConstant[termIdx]);
+      }
+    } else if (chunkIdx < warpsForTorsion + warpsForImproper + warpsForDist12) {
+      // 1-2 distance terms
+      const int warpOffset = chunkIdx - warpsForTorsion - warpsForImproper;
+      const int baseIdx = warpOffset * WARP_SIZE;
+      const int termIdx = dist12Start + baseIdx + laneId;
+      if (baseIdx + laneId < numDist12) {
+        const int localIdx1 = d12_idx1s[termIdx] - atomStart;
+        const int localIdx2 = d12_idx2s[termIdx] - atomStart;
+        energy += distanceConstraintEnergy(molCoords, localIdx1, localIdx2, d12_minLen[termIdx], d12_maxLen[termIdx], d12_forceConstant[termIdx]);
+      }
+    } else if (chunkIdx < warpsForTorsion + warpsForImproper + warpsForDist12 + warpsForDist13) {
+      // 1-3 distance terms
+      const int warpOffset = chunkIdx - warpsForTorsion - warpsForImproper - warpsForDist12;
+      const int baseIdx = warpOffset * WARP_SIZE;
+      const int termIdx = dist13Start + baseIdx + laneId;
+      if (baseIdx + laneId < numDist13) {
+        const int localIdx1 = d13_idx1s[termIdx] - atomStart;
+        const int localIdx2 = d13_idx2s[termIdx] - atomStart;
+        energy += distanceConstraintEnergy(molCoords, localIdx1, localIdx2, d13_minLen[termIdx], d13_maxLen[termIdx], d13_forceConstant[termIdx]);
+      }
+    } else if (chunkIdx < warpsForTorsion + warpsForImproper + warpsForDist12 + warpsForDist13 + warpsForAngle13) {
+      // 1-3 angle terms
+      const int warpOffset = chunkIdx - warpsForTorsion - warpsForImproper - warpsForDist12 - warpsForDist13;
+      const int baseIdx = warpOffset * WARP_SIZE;
+      const int termIdx = angle13Start + baseIdx + laneId;
+      if (baseIdx + laneId < numAngle13) {
+        const int localIdx1 = a13_idx1s[termIdx] - atomStart;
+        const int localIdx2 = a13_idx2s[termIdx] - atomStart;
+        const int localIdx3 = a13_idx3s[termIdx] - atomStart;
+        energy += angleConstraintEnergy(molCoords,
+                                        localIdx1,
+                                        localIdx2,
+                                        localIdx3,
+                                        a13_minAngle[termIdx],
+                                        a13_maxAngle[termIdx],
+                                        defaultAngleForceConstant);
+      }
+    } else {
+      // Long-range distance terms
+      const int warpOffset = chunkIdx - warpsForTorsion - warpsForImproper - warpsForDist12 - warpsForDist13 - warpsForAngle13;
+      const int baseIdx = warpOffset * WARP_SIZE;
+      const int termIdx = distLRStart + baseIdx + laneId;
+      if (baseIdx + laneId < numDistLR) {
+        const int localIdx1 = dlr_idx1s[termIdx] - atomStart;
+        const int localIdx2 = dlr_idx2s[termIdx] - atomStart;
+        energy += distanceConstraintEnergy(molCoords, localIdx1, localIdx2, dlr_minLen[termIdx], dlr_maxLen[termIdx], dlr_forceConstant[termIdx]);
+      }
+    }
   }
 
   return energy;
@@ -1036,71 +1161,120 @@ static __device__ __inline__ void molGradETK(const Energy3DForceContribsDevicePt
   const int     atomStart = systemIndices.atomStarts[molIdx];
   const double* molCoords = coords + atomStart * 4;  // ETK uses 4D coordinates
 
-  // Experimental torsion terms
-  const auto& [t_idx1s, t_idx2s, t_idx3s, t_idx4s, t_forceConstants, t_signs] = terms.experimentalTorsionTerms;
-  const int torsionStart = systemIndices.experimentalTorsionTermStarts[molIdx];
-  const int torsionEnd   = systemIndices.experimentalTorsionTermStarts[molIdx + 1];
-  for (int i = torsionStart + tid; i < torsionEnd; i += stride) {
-    const int localIdx1 = t_idx1s[i] - atomStart;
-    const int localIdx2 = t_idx2s[i] - atomStart;
-    const int localIdx3 = t_idx3s[i] - atomStart;
-    const int localIdx4 = t_idx4s[i] - atomStart;
-    torsionAngleGrad(molCoords, localIdx1, localIdx2, localIdx3, localIdx4, &t_forceConstants[i * 6], &t_signs[i * 6], grad);
-  }
+  constexpr int WARP_SIZE = 32;
+  const int numWarps = (stride + WARP_SIZE - 1) / WARP_SIZE;
+  const int warpId = tid / WARP_SIZE;
+  const int laneId = tid % WARP_SIZE;
 
-  // Improper torsion (inversion) terms
-  const auto& [i_idx1s, i_idx2s, i_idx3s, i_idx4s, i_at2AtomicNum, i_isCBoundToO, i_C0, i_C1, i_C2, i_forceConstant] =
-    terms.improperTorsionTerms;
+  // Get term ranges
+  const int torsionStart  = systemIndices.experimentalTorsionTermStarts[molIdx];
+  const int torsionEnd    = systemIndices.experimentalTorsionTermStarts[molIdx + 1];
   const int improperStart = systemIndices.improperTorsionTermStarts[molIdx];
   const int improperEnd   = systemIndices.improperTorsionTermStarts[molIdx + 1];
-  for (int i = improperStart + tid; i < improperEnd; i += stride) {
-    const int localIdx1 = i_idx1s[i] - atomStart;
-    const int localIdx2 = i_idx2s[i] - atomStart;
-    const int localIdx3 = i_idx3s[i] - atomStart;
-    const int localIdx4 = i_idx4s[i] - atomStart;
-    inversionGrad(molCoords, localIdx1, localIdx2, localIdx3, localIdx4, i_C0[i], i_C1[i], i_C2[i], i_forceConstant[i], grad);
-  }
+  const int dist12Start   = systemIndices.dist12TermStarts[molIdx];
+  const int dist12End     = systemIndices.dist12TermStarts[molIdx + 1];
+  const int dist13Start   = systemIndices.dist13TermStarts[molIdx];
+  const int dist13End     = systemIndices.dist13TermStarts[molIdx + 1];
+  const int angle13Start  = systemIndices.angle13TermStarts[molIdx];
+  const int angle13End    = systemIndices.angle13TermStarts[molIdx + 1];
+  const int distLRStart   = systemIndices.longRangeDistTermStarts[molIdx];
+  const int distLREnd     = systemIndices.longRangeDistTermStarts[molIdx + 1];
 
-  // 1-2 distance terms
+  const int numTorsion  = torsionEnd - torsionStart;
+  const int numImproper = improperEnd - improperStart;
+  const int numDist12   = dist12End - dist12Start;
+  const int numDist13   = dist13End - dist13Start;
+  const int numAngle13  = angle13End - angle13Start;
+  const int numDistLR   = distLREnd - distLRStart;
+
+  // Get term data
+  const auto& [t_idx1s, t_idx2s, t_idx3s, t_idx4s, t_forceConstants, t_signs] = terms.experimentalTorsionTerms;
+  const auto& [i_idx1s, i_idx2s, i_idx3s, i_idx4s, i_at2AtomicNum, i_isCBoundToO, i_C0, i_C1, i_C2, i_forceConstant] =
+    terms.improperTorsionTerms;
   const auto& [d12_idx1s, d12_idx2s, d12_minLen, d12_maxLen, d12_forceConstant] = terms.dist12Terms;
-  const int dist12Start                                                         = systemIndices.dist12TermStarts[molIdx];
-  const int dist12End                                                           = systemIndices.dist12TermStarts[molIdx + 1];
-  for (int i = dist12Start + tid; i < dist12End; i += stride) {
-    const int localIdx1 = d12_idx1s[i] - atomStart;
-    const int localIdx2 = d12_idx2s[i] - atomStart;
-    distanceConstraintGrad(molCoords, localIdx1, localIdx2, d12_minLen[i], d12_maxLen[i], d12_forceConstant[i], grad);
-  }
-
-  // 1-3 distance terms
   const auto& [d13_idx1s, d13_idx2s, d13_minLen, d13_maxLen, d13_forceConstant] = terms.dist13Terms;
-  const int dist13Start                                                         = systemIndices.dist13TermStarts[molIdx];
-  const int dist13End                                                           = systemIndices.dist13TermStarts[molIdx + 1];
-  for (int i = dist13Start + tid; i < dist13End; i += stride) {
-    const int localIdx1 = d13_idx1s[i] - atomStart;
-    const int localIdx2 = d13_idx2s[i] - atomStart;
-    distanceConstraintGrad(molCoords, localIdx1, localIdx2, d13_minLen[i], d13_maxLen[i], d13_forceConstant[i], grad);
-  }
-
-  // 1-3 angle terms
   const auto& [a13_idx1s, a13_idx2s, a13_idx3s, a13_minAngle, a13_maxAngle] = terms.angle13Terms;
-  const int angle13Start                                                    = systemIndices.angle13TermStarts[molIdx];
-  const int angle13End                                                      = systemIndices.angle13TermStarts[molIdx + 1];
-  constexpr double defaultAngleForceConstant = 1.0;
-  for (int i = angle13Start + tid; i < angle13End; i += stride) {
-    const int localIdx1 = a13_idx1s[i] - atomStart;
-    const int localIdx2 = a13_idx2s[i] - atomStart;
-    const int localIdx3 = a13_idx3s[i] - atomStart;
-    angleConstraintGrad(molCoords, localIdx1, localIdx2, localIdx3, a13_minAngle[i], a13_maxAngle[i], defaultAngleForceConstant, grad);
-  }
-
-  // Long range distance terms
   const auto& [dlr_idx1s, dlr_idx2s, dlr_minLen, dlr_maxLen, dlr_forceConstant] = terms.longRangeDistTerms;
-  const int distLRStart                                                         = systemIndices.longRangeDistTermStarts[molIdx];
-  const int distLREnd                                                           = systemIndices.longRangeDistTermStarts[molIdx + 1];
-  for (int i = distLRStart + tid; i < distLREnd; i += stride) {
-    const int localIdx1 = dlr_idx1s[i] - atomStart;
-    const int localIdx2 = dlr_idx2s[i] - atomStart;
-    distanceConstraintGrad(molCoords, localIdx1, localIdx2, dlr_minLen[i], dlr_maxLen[i], dlr_forceConstant[i], grad);
+
+  constexpr double defaultAngleForceConstant = 1.0;
+
+  // Calculate number of warps needed for each term type
+  const int warpsForTorsion  = (numTorsion + WARP_SIZE - 1) / WARP_SIZE;
+  const int warpsForImproper = (numImproper + WARP_SIZE - 1) / WARP_SIZE;
+  const int warpsForDist12   = (numDist12 + WARP_SIZE - 1) / WARP_SIZE;
+  const int warpsForDist13   = (numDist13 + WARP_SIZE - 1) / WARP_SIZE;
+  const int warpsForAngle13  = (numAngle13 + WARP_SIZE - 1) / WARP_SIZE;
+  const int warpsForDistLR   = (numDistLR + WARP_SIZE - 1) / WARP_SIZE;
+  const int totalWarpsNeeded = warpsForTorsion + warpsForImproper + warpsForDist12 + warpsForDist13 + warpsForAngle13 + warpsForDistLR;
+
+  // Each warp processes chunks in round-robin fashion
+  for (int chunkIdx = warpId; chunkIdx < totalWarpsNeeded; chunkIdx += numWarps) {
+    // Determine which term type this chunk belongs to
+    if (chunkIdx < warpsForTorsion) {
+      // Torsion terms
+      const int baseIdx = chunkIdx * WARP_SIZE;
+      const int termIdx = torsionStart + baseIdx + laneId;
+      if (baseIdx + laneId < numTorsion) {
+        const int localIdx1 = t_idx1s[termIdx] - atomStart;
+        const int localIdx2 = t_idx2s[termIdx] - atomStart;
+        const int localIdx3 = t_idx3s[termIdx] - atomStart;
+        const int localIdx4 = t_idx4s[termIdx] - atomStart;
+        torsionAngleGrad(molCoords, localIdx1, localIdx2, localIdx3, localIdx4, &t_forceConstants[termIdx * 6], &t_signs[termIdx * 6], grad);
+      }
+    } else if (chunkIdx < warpsForTorsion + warpsForImproper) {
+      // Improper torsion terms
+      const int warpOffset = chunkIdx - warpsForTorsion;
+      const int baseIdx = warpOffset * WARP_SIZE;
+      const int termIdx = improperStart + baseIdx + laneId;
+      if (baseIdx + laneId < numImproper) {
+        const int localIdx1 = i_idx1s[termIdx] - atomStart;
+        const int localIdx2 = i_idx2s[termIdx] - atomStart;
+        const int localIdx3 = i_idx3s[termIdx] - atomStart;
+        const int localIdx4 = i_idx4s[termIdx] - atomStart;
+        inversionGrad(molCoords, localIdx1, localIdx2, localIdx3, localIdx4, i_C0[termIdx], i_C1[termIdx], i_C2[termIdx], i_forceConstant[termIdx], grad);
+      }
+    } else if (chunkIdx < warpsForTorsion + warpsForImproper + warpsForDist12) {
+      // 1-2 distance terms
+      const int warpOffset = chunkIdx - warpsForTorsion - warpsForImproper;
+      const int baseIdx = warpOffset * WARP_SIZE;
+      const int termIdx = dist12Start + baseIdx + laneId;
+      if (baseIdx + laneId < numDist12) {
+        const int localIdx1 = d12_idx1s[termIdx] - atomStart;
+        const int localIdx2 = d12_idx2s[termIdx] - atomStart;
+        distanceConstraintGrad(molCoords, localIdx1, localIdx2, d12_minLen[termIdx], d12_maxLen[termIdx], d12_forceConstant[termIdx], grad);
+      }
+    } else if (chunkIdx < warpsForTorsion + warpsForImproper + warpsForDist12 + warpsForDist13) {
+      // 1-3 distance terms
+      const int warpOffset = chunkIdx - warpsForTorsion - warpsForImproper - warpsForDist12;
+      const int baseIdx = warpOffset * WARP_SIZE;
+      const int termIdx = dist13Start + baseIdx + laneId;
+      if (baseIdx + laneId < numDist13) {
+        const int localIdx1 = d13_idx1s[termIdx] - atomStart;
+        const int localIdx2 = d13_idx2s[termIdx] - atomStart;
+        distanceConstraintGrad(molCoords, localIdx1, localIdx2, d13_minLen[termIdx], d13_maxLen[termIdx], d13_forceConstant[termIdx], grad);
+      }
+    } else if (chunkIdx < warpsForTorsion + warpsForImproper + warpsForDist12 + warpsForDist13 + warpsForAngle13) {
+      // 1-3 angle terms
+      const int warpOffset = chunkIdx - warpsForTorsion - warpsForImproper - warpsForDist12 - warpsForDist13;
+      const int baseIdx = warpOffset * WARP_SIZE;
+      const int termIdx = angle13Start + baseIdx + laneId;
+      if (baseIdx + laneId < numAngle13) {
+        const int localIdx1 = a13_idx1s[termIdx] - atomStart;
+        const int localIdx2 = a13_idx2s[termIdx] - atomStart;
+        const int localIdx3 = a13_idx3s[termIdx] - atomStart;
+        angleConstraintGrad(molCoords, localIdx1, localIdx2, localIdx3, a13_minAngle[termIdx], a13_maxAngle[termIdx], defaultAngleForceConstant, grad);
+      }
+    } else {
+      // Long-range distance terms
+      const int warpOffset = chunkIdx - warpsForTorsion - warpsForImproper - warpsForDist12 - warpsForDist13 - warpsForAngle13;
+      const int baseIdx = warpOffset * WARP_SIZE;
+      const int termIdx = distLRStart + baseIdx + laneId;
+      if (baseIdx + laneId < numDistLR) {
+        const int localIdx1 = dlr_idx1s[termIdx] - atomStart;
+        const int localIdx2 = dlr_idx2s[termIdx] - atomStart;
+        distanceConstraintGrad(molCoords, localIdx1, localIdx2, dlr_minLen[termIdx], dlr_maxLen[termIdx], dlr_forceConstant[termIdx], grad);
+      }
+    }
   }
 }
 
