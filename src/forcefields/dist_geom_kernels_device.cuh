@@ -18,6 +18,7 @@
 
 #include "dist_geom_kernels.h"
 #include "kernel_utils.cuh"
+#include <cooperative_groups.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -244,10 +245,12 @@ static __device__ __inline__ double molEnergy(const EnergyForceContribsDevicePtr
 
   double energy = 0.0;
 
+  namespace cg = cooperative_groups;
   constexpr int WARP_SIZE = 32;
-  const int numWarps = (stride + WARP_SIZE - 1) / WARP_SIZE;
-  const int warpId = tid / WARP_SIZE;
-  const int laneId = tid % WARP_SIZE;
+  auto tile32 = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
+  const int laneId = tile32.thread_rank();
+  const int warpId = tile32.meta_group_rank();
+  const int numWarps = tile32.meta_group_size();
 
   // Get term ranges
   const int distStart   = systemIndices.distTermStarts[molIdx];
@@ -328,10 +331,12 @@ static __device__ __inline__ void molGrad(const EnergyForceContribsDevicePtr& te
   const double* molCoords = coords + atomStart * dimension;
   double*       molGrad   = grad;  // grad is already offset by caller (see combinedGradKernel)
 
+  namespace cg = cooperative_groups;
   constexpr int WARP_SIZE = 32;
-  const int numWarps = (stride + WARP_SIZE - 1) / WARP_SIZE;
-  const int warpId = tid / WARP_SIZE;
-  const int laneId = tid % WARP_SIZE;
+  auto tile32 = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
+  const int laneId = tile32.thread_rank();
+  const int warpId = tile32.meta_group_rank();
+  const int numWarps = tile32.meta_group_size();
 
   // Get term ranges
   const int distStart   = systemIndices.distTermStarts[molIdx];
@@ -634,10 +639,12 @@ static __device__ __inline__ double molEnergyETK(const Energy3DForceContribsDevi
 
   double energy = 0.0;
 
+  namespace cg = cooperative_groups;
   constexpr int WARP_SIZE = 32;
-  const int numWarps = (stride + WARP_SIZE - 1) / WARP_SIZE;
-  const int warpId = tid / WARP_SIZE;
-  const int laneId = tid % WARP_SIZE;
+  auto tile32 = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
+  const int laneId = tile32.thread_rank();
+  const int warpId = tile32.meta_group_rank();
+  const int numWarps = tile32.meta_group_size();
 
   // Get term ranges
   const int torsionStart  = systemIndices.experimentalTorsionTermStarts[molIdx];
@@ -803,16 +810,14 @@ static __device__ __forceinline__ void torsionAngleGrad(const double* pos,
   crossProduct(r3x, r3y, r3z, r4x, r4y, r4z, t1x, t1y, t1z);
 
   // Calculate lengths and check for degeneracy
-  const double d0 = sqrt(t0x * t0x + t0y * t0y + t0z * t0z);
-  const double d1 = sqrt(t1x * t1x + t1y * t1y + t1z * t1z);
-
-  if (isDoubleZero(d0) || isDoubleZero(d1)) {
+  const double d02 = t0x * t0x + t0y * t0y + t0z * t0z;
+  const double d12 = t1x * t1x + t1y * t1y + t1z * t1z;
+  if (isDoubleZero(d02) || isDoubleZero(d12)) {
     return;
   }
+  const double inv_d0 = rsqrt(t0x * t0x + t0y * t0y + t0z * t0z);
+  const double inv_d1 = rsqrt(t1x * t1x + t1y * t1y + t1z * t1z);
 
-  // Normalize plane normals
-  const double inv_d0 = 1.0 / d0;
-  const double inv_d1 = 1.0 / d1;
   t0x *= inv_d0;
   t0y *= inv_d0;
   t0z *= inv_d0;
@@ -1157,10 +1162,12 @@ static __device__ __inline__ void molGradETK(const Energy3DForceContribsDevicePt
   const int     atomStart = systemIndices.atomStarts[molIdx];
   const double* molCoords = coords + atomStart * 4;  // ETK uses 4D coordinates
 
+  namespace cg = cooperative_groups;
   constexpr int WARP_SIZE = 32;
-  const int numWarps = (stride + WARP_SIZE - 1) / WARP_SIZE;
-  const int warpId = tid / WARP_SIZE;
-  const int laneId = tid % WARP_SIZE;
+  auto tile32 = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
+  const int laneId = tile32.thread_rank();
+  const int warpId = tile32.meta_group_rank();
+  const int numWarps = tile32.meta_group_size();
 
   // Get term ranges
   const int torsionStart  = systemIndices.experimentalTorsionTermStarts[molIdx];
