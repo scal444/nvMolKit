@@ -75,6 +75,8 @@ cudaError_t launchBfgsMinimizePerMolKernelDG(const int* binCounts,
                                               double* inverseHessian,
                                               double** scratchBuffers,
                                               double* energyOuts,
+                                              double chiralWeight,
+                                              double fourthDimWeight,
                                               uint8_t* convergenceStatus = nullptr,
                                               cudaStream_t stream = nullptr);
 

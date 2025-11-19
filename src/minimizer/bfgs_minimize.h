@@ -131,6 +131,8 @@ struct BfgsBatchMinimizer {
                       AsyncDeviceVector<double>&                           energyBuffer,
                       const DistGeom::EnergyForceContribsDevicePtr&        terms,
                       const DistGeom::BatchedIndicesDevicePtr&             systemIndices,
+                      double                                               chiralWeight,
+                      double                                               fourthDimWeight,
                       const uint8_t*                                       activeThisStage = nullptr);
 
   // Set up the minimizer for a new system.

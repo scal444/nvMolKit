@@ -235,6 +235,8 @@ static __device__ __inline__ double molEnergy(const EnergyForceContribsDevicePtr
                                               const double*                       coords,
                                               const int                           molIdx,
                                               const int                           dimension,
+                                              const double                        chiralWeight,
+                                              const double                        fourthDimWeight,
                                               const int                           tid,
                                               const int                           stride) {
   const int     atomStart = systemIndices.atomStarts[molIdx];
@@ -259,8 +261,8 @@ static __device__ __inline__ double molEnergy(const EnergyForceContribsDevicePtr
 
   // Get term data
   const auto& [d_idx1s, d_idx2s, d_ub2s, d_lb2s, d_weights] = terms.distTerms;
-  const auto& [c_idx1s, c_idx2s, c_idx3s, c_idx4s, c_volUppers, c_volLowers, c_weights] = terms.chiralTerms;
-  const auto& [f_idxs, f_weights] = terms.fourthTerms;
+  const auto& [c_idx1s, c_idx2s, c_idx3s, c_idx4s, c_volUppers, c_volLowers] = terms.chiralTerms;
+  const auto& [f_idxs] = terms.fourthTerms;
 
   const int numDist   = distEnd - distStart;
   const int numChiral = chiralEnd - chiralStart;
@@ -294,15 +296,7 @@ static __device__ __inline__ double molEnergy(const EnergyForceContribsDevicePtr
         const int localIdx2 = c_idx2s[termIdx] - atomStart;
         const int localIdx3 = c_idx3s[termIdx] - atomStart;
         const int localIdx4 = c_idx4s[termIdx] - atomStart;
-        energy += chiralViolationEnergy(molCoords,
-                                        localIdx1,
-                                        localIdx2,
-                                        localIdx3,
-                                        localIdx4,
-                                        c_volLowers[termIdx],
-                                        c_volUppers[termIdx],
-                                        c_weights[termIdx],
-                                        dimension);
+        energy += chiralViolationEnergy(molCoords, localIdx1, localIdx2, localIdx3, localIdx4, c_volLowers[termIdx], c_volUppers[termIdx], chiralWeight, dimension);
       }
     } else {
       // Fourth dimension terms
@@ -311,7 +305,7 @@ static __device__ __inline__ double molEnergy(const EnergyForceContribsDevicePtr
       const int termIdx = fourthStart + baseIdx + laneId;
       if (baseIdx + laneId < numFourth) {
         const int localIdx = f_idxs[termIdx] - atomStart;
-        energy += fourthDimEnergy(molCoords, localIdx, f_weights[termIdx], dimension);
+        energy += fourthDimEnergy(molCoords, localIdx, fourthDimWeight, dimension);
       }
     }
   }
@@ -326,6 +320,8 @@ static __device__ __inline__ void molGrad(const EnergyForceContribsDevicePtr& te
                                           double*                             grad,
                                           const int                           molIdx,
                                           const int                           dimension,
+                                          const double                        chiralWeight,
+                                          const double                        fourthDimWeight,
                                           const int                           tid,
                                           const int                           stride) {
   const int     atomStart = systemIndices.atomStarts[molIdx];
@@ -349,8 +345,8 @@ static __device__ __inline__ void molGrad(const EnergyForceContribsDevicePtr& te
 
   // Get term data
   const auto& [d_idx1s, d_idx2s, d_ub2s, d_lb2s, d_weights] = terms.distTerms;
-  const auto& [c_idx1s, c_idx2s, c_idx3s, c_idx4s, c_volUppers, c_volLowers, c_weights] = terms.chiralTerms;
-  const auto& [f_idxs, f_weights] = terms.fourthTerms;
+  const auto& [c_idx1s, c_idx2s, c_idx3s, c_idx4s, c_volUppers, c_volLowers] = terms.chiralTerms;
+  const auto& [f_idxs] = terms.fourthTerms;
 
   const int numDist   = distEnd - distStart;
   const int numChiral = chiralEnd - chiralStart;
@@ -391,7 +387,7 @@ static __device__ __inline__ void molGrad(const EnergyForceContribsDevicePtr& te
                             localIdx4,
                             c_volLowers[termIdx],
                             c_volUppers[termIdx],
-                            c_weights[termIdx],
+                            chiralWeight,
                             dimension,
                             molGrad);
       }
@@ -402,7 +398,7 @@ static __device__ __inline__ void molGrad(const EnergyForceContribsDevicePtr& te
       const int termIdx = fourthStart + baseIdx + laneId;
       if (baseIdx + laneId < numFourth) {
         const int localIdx = f_idxs[termIdx] - atomStart;
-        fourthDimGrad(molCoords, localIdx, f_weights[termIdx], dimension, molGrad);
+        fourthDimGrad(molCoords, localIdx, fourthDimWeight, dimension, molGrad);
       }
     }
   }

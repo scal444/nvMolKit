@@ -42,11 +42,8 @@ class DistGeomMinimizeStage : public ETKDGStage {
    * @param embedParam Embedding parameters
    * @param ctx ETKDG context
    * @param minimizer BFGS minimizer
-   * @param chiralWeight Weight for chiral constraints
-   * @param fourthDimWeight Weight for fourth dimension constraints
    * @param maxIters Maximum number of iterations per minimization cycle
    * @param checkEnergy Whether to check energy per atom after minimization
-   * @param stageName Name of this stage for logging/debugging
    * @param stream CUDA stream
    */
   DistGeomMinimizeStage(const std::vector<const RDKit::ROMol*>&     mols,
@@ -61,17 +58,58 @@ class DistGeomMinimizeStage : public ETKDGStage {
                         const std::string&                          stageName,
                         cudaStream_t                                stream = nullptr);
   
-  void        execute(ETKDGContext& ctx) override;
+  void executeImpl(ETKDGContext& ctx, 
+                   double chiralWeight, 
+                   double fourthDimWeight, 
+                   int maxIters, 
+                   bool checkEnergy);
+  
   std::string name() const override { return stageName_; }
+  
+  void execute(ETKDGContext& ctx) override { 
+    executeImpl(ctx, chiralWeight_, fourthDimWeight_, maxIters_, checkEnergy_); 
+  }
 
   nvMolKit::DistGeom::BatchedMolecularDeviceBuffers molSystemDevice;
   nvMolKit::DistGeom::BatchedMolecularSystemHost    molSystemHost;
   const RDKit::DGeomHelpers::EmbedParameters&       embedParam_;
   BfgsBatchMinimizer&                               minimizer_;
+  double                                            chiralWeight_;
+  double                                            fourthDimWeight_;
   int                                               maxIters_;
   bool                                              checkEnergy_;
   std::string                                       stageName_;
   cudaStream_t                                      stream_;
+};
+
+/// Wrapper stage for distance geometry minimization with configurable weights and parameters
+class DistGeomMinimizeWrapperStage final : public ETKDGStage {
+ public:
+  DistGeomMinimizeWrapperStage(DistGeomMinimizeStage& baseStage, 
+                               double chiralWeight, 
+                               double fourthDimWeight,
+                               int maxIters,
+                               bool checkEnergy,
+                               const std::string& stageName)
+      : baseStage_(baseStage), 
+        chiralWeight_(chiralWeight), 
+        fourthDimWeight_(fourthDimWeight),
+        maxIters_(maxIters),
+        checkEnergy_(checkEnergy),
+        stageName_(stageName) {}
+
+  void        execute(ETKDGContext& ctx) override { 
+    baseStage_.executeImpl(ctx, chiralWeight_, fourthDimWeight_, maxIters_, checkEnergy_); 
+  }
+  std::string name() const override { return stageName_; }
+
+ private:
+  DistGeomMinimizeStage& baseStage_;
+  double                 chiralWeight_;
+  double                 fourthDimWeight_;
+  int                    maxIters_;
+  bool                   checkEnergy_;
+  std::string            stageName_;
 };
 
 }  // namespace detail

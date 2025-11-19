@@ -95,7 +95,7 @@ __global__ void ChiralViolationEnergyKernel(const int      numChiral,
                                             const int*     idx4s,
                                             const double*  volLower,
                                             const double*  volUpper,
-                                            const double*  weights,
+                                            const double   weight,
                                             const double*  pos,
                                             double*        energyBuffer,
                                             const int*     energyBufferStarts,
@@ -111,12 +111,11 @@ __global__ void ChiralViolationEnergyKernel(const int      numChiral,
 
     // Check if activeThisStage is nullptr or if this molecule/conformer is active in this stage
     if (activeThisStage == nullptr || activeThisStage[batchIdx] == 1) {
-      const int    idx2   = idx2s[idx];
-      const int    idx3   = idx3s[idx];
-      const int    idx4   = idx4s[idx];
-      const double lb     = volLower[idx];
-      const double ub     = volUpper[idx];
-      const double weight = weights[idx];
+      const int    idx2 = idx2s[idx];
+      const int    idx3 = idx3s[idx];
+      const int    idx4 = idx4s[idx];
+      const double lb   = volLower[idx];
+      const double ub   = volUpper[idx];
 
       const double energy  = chiralViolationEnergy(pos, idx1, idx2, idx3, idx4, lb, ub, weight, dimension);
       const int outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, chiralTermStarts);
@@ -132,7 +131,7 @@ __global__ void ChiralViolationGradientKernel(const int      numChiral,
                                               const int*     idx4s,
                                               const double*  volLower,
                                               const double*  volUpper,
-                                              const double*  weights,
+                                              const double   weight,
                                               const double*  pos,
                                               double*        grad,
                                               const int*     atomIdxToBatchIdx,
@@ -146,12 +145,11 @@ __global__ void ChiralViolationGradientKernel(const int      numChiral,
 
     // Check if activeThisStage is nullptr or if this molecule/conformer is active in this stage
     if (activeThisStage == nullptr || activeThisStage[batchIdx] == 1) {
-      const int idx2   = idx2s[idx];
-      const int idx3   = idx3s[idx];
-      const int idx4   = idx4s[idx];
-      const double lb     = volLower[idx];
-      const double ub     = volUpper[idx];
-      const double weight = weights[idx];
+      const int    idx2 = idx2s[idx];
+      const int    idx3 = idx3s[idx];
+      const int    idx4 = idx4s[idx];
+      const double lb   = volLower[idx];
+      const double ub   = volUpper[idx];
       
       chiralViolationGrad(pos, idx1, idx2, idx3, idx4, lb, ub, weight, dimension, grad);
     }
@@ -160,7 +158,7 @@ __global__ void ChiralViolationGradientKernel(const int      numChiral,
 
 __global__ void fourthDimEnergyKernel(const int      numFD,
                                       const int*     idxs,
-                                      const double*  weights,
+                                      const double   weight,
                                       const double*  pos,
                                       double*        energyBuffer,
                                       const int*     energyBufferStarts,
@@ -176,7 +174,6 @@ __global__ void fourthDimEnergyKernel(const int      numFD,
 
     // Check if activeThisStage is nullptr or if this molecule/conformer is active in this stage
     if (activeThisStage == nullptr || activeThisStage[batchIdx] == 1) {
-      const double weight = weights[idx];
       const double energy = fourthDimEnergy(pos, idx1, weight, dimension);
       const int outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, fourthTermStarts);
       energyBuffer[outputIdx] += energy;
@@ -186,7 +183,7 @@ __global__ void fourthDimEnergyKernel(const int      numFD,
 
 __global__ void fourthDimGradientKernel(const int      numFD,
                                         const int*     idxs,
-                                        const double*  weights,
+                                        const double   weight,
                                         const double*  pos,
                                         double*        grad,
                                         const int*     atomIdxToBatchIdx,
@@ -200,7 +197,6 @@ __global__ void fourthDimGradientKernel(const int      numFD,
 
     // Check if activeThisStage is nullptr or if this molecule/conformer is active in this stage
     if (activeThisStage == nullptr || activeThisStage[batchIdx] == 1) {
-      const double weight = weights[idx];
       fourthDimGrad(pos, idx1, weight, dimension, grad);
     }
   }
@@ -540,7 +536,7 @@ cudaError_t launchChiralViolationEnergyKernel(const int      numChiral,
                                               const int*     idx4,
                                               const double*  volLower,
                                               const double*  volUpper,
-                                              const double*  weight,
+                                              const double   weight,
                                               const double*  pos,
                                               double*        energyBuffer,
                                               const int*     energyBufferStarts,
@@ -581,7 +577,7 @@ cudaError_t launchChiralViolationGradientKernel(const int      numChiral,
                                                 const int*     idx4,
                                                 const double*  volLower,
                                                 const double*  volUpper,
-                                                const double*  weight,
+                                                const double   weight,
                                                 const double*  pos,
                                                 double*        grad,
                                                 const int*     atomIdxToBatchIdx,
@@ -613,7 +609,7 @@ cudaError_t launchChiralViolationGradientKernel(const int      numChiral,
 
 cudaError_t launchFourthDimEnergyKernel(const int      numFD,
                                         const int*     idx,
-                                        const double*  weight,
+                                        const double   weight,
                                         const double*  pos,
                                         double*        energyBuffer,
                                         const int*     energyBufferStarts,
@@ -644,7 +640,7 @@ cudaError_t launchFourthDimEnergyKernel(const int      numFD,
 
 cudaError_t launchFourthDimGradientKernel(const int      numFD,
                                           const int*     idx,
-                                          const double*  weight,
+                                          const double   weight,
                                           const double*  pos,
                                           double*        grad,
                                           const int*     atomIdxToBatchIdx,
@@ -981,6 +977,8 @@ __global__ void combinedEnergiesKernel(const EnergyForceContribsDevicePtr* terms
                                        const double*                       coords,
                                        double*                             energies,
                                        const int                           dimension,
+                                       const double                        chiralWeight,
+                                       const double                        fourthDimWeight,
                                        const uint8_t*                      activeThisStage) {
   const int molIdx = blockIdx.x;
   const int tid    = threadIdx.x;
@@ -996,7 +994,7 @@ __global__ void combinedEnergiesKernel(const EnergyForceContribsDevicePtr* terms
   using BlockReduce = cub::BlockReduce<double, blockSizePerMol>;
   __shared__ typename BlockReduce::TempStorage tempStorage;
 
-  const double threadEnergy = molEnergy(*terms, *systemIndices, coords, molIdx, dimension, tid, stride);
+  const double threadEnergy = molEnergy(*terms, *systemIndices, coords, molIdx, dimension, chiralWeight, fourthDimWeight, tid, stride);
   const double blockEnergy  = BlockReduce(tempStorage).Sum(threadEnergy);
 
   if (tid == 0) {
@@ -1009,6 +1007,8 @@ __global__ void combinedGradKernel(const EnergyForceContribsDevicePtr* terms,
                                    const double*                       coords,
                                    double*                             grad,
                                    const int                           dimension,
+                                   const double                        chiralWeight,
+                                   const double                        fourthDimWeight,
                                    const uint8_t*                      activeThisStage) {
   const int molIdx = blockIdx.x;
   const int tid    = threadIdx.x;
@@ -1033,7 +1033,7 @@ __global__ void combinedGradKernel(const EnergyForceContribsDevicePtr* terms,
   }
   __syncthreads();
 
-  molGrad(*terms, *systemIndices, coords, molGradBase, molIdx, dimension, tid, stride);
+  molGrad(*terms, *systemIndices, coords, molGradBase, molIdx, dimension, chiralWeight, fourthDimWeight, tid, stride);
   __syncthreads();
 
   if (useSharedMem) {
@@ -1050,6 +1050,8 @@ cudaError_t launchBlockPerMolEnergyKernel(int                                   
                                           const double*                          coords,
                                           double*                                energies,
                                           const int                              dimension,
+                                          const double                           chiralWeight,
+                                          const double                           fourthDimWeight,
                                           const uint8_t*                         activeThisStage,
                                           cudaStream_t                           stream) {
   const AsyncDevicePtr<EnergyForceContribsDevicePtr> devTerms(terms, stream);
@@ -1059,6 +1061,8 @@ cudaError_t launchBlockPerMolEnergyKernel(int                                   
                                                                    coords,
                                                                    energies,
                                                                    dimension,
+                                                                   chiralWeight,
+                                                                   fourthDimWeight,
                                                                    activeThisStage);
   return cudaGetLastError();
 }
@@ -1069,6 +1073,8 @@ cudaError_t launchBlockPerMolGradKernel(int                                 numM
                                         const double*                       coords,
                                         double*                             grad,
                                         const int                           dimension,
+                                        const double                        chiralWeight,
+                                        const double                        fourthDimWeight,
                                         const uint8_t*                      activeThisStage,
                                         cudaStream_t                        stream) {
   const AsyncDevicePtr<EnergyForceContribsDevicePtr> devTerms(terms, stream);
@@ -1078,6 +1084,8 @@ cudaError_t launchBlockPerMolGradKernel(int                                 numM
                                                                coords,
                                                                grad,
                                                                dimension,
+                                                               chiralWeight,
+                                                               fourthDimWeight,
                                                                activeThisStage);
   return cudaGetLastError();
 }

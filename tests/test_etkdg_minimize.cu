@@ -246,14 +246,13 @@ TEST_P(ETKDGMinimizeSingleMolTestFixture, FullMinimizationPipelineBFGSTest) {
   // Calculate initial energy
   const std::vector<double> initialEnergies = calculateInitialEnergies(molsPtrs_);
 
-  // Create stages
+  // Create stages - first is base DistGeomMinimizeStage, second is wrapper with different weights
   std::vector<std::unique_ptr<ETKDGStage>> stages;
   auto  firstStage    = std::make_unique<nvMolKit::detail::DistGeomMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_,
                                                                                    1.0, 0.1, 400, true, "First Minimization");
   auto* firstStagePtr = firstStage.get();  // Store pointer before moving
   stages.push_back(std::move(firstStage));
-  stages.push_back(std::make_unique<nvMolKit::detail::DistGeomMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_,
-                                                                              0.2, 1.0, 200, false, "Fourth Dimension Minimization"));
+  stages.push_back(std::make_unique<nvMolKit::detail::DistGeomMinimizeWrapperStage>(*firstStagePtr, 0.2, 1.0, 200, false, "Fourth Dimension Minimization"));
 
   // Create and run driver
   ETKDGDriver driver(std::make_unique<ETKDGContext>(std::move(context_)), std::move(stages));
@@ -295,8 +294,7 @@ TEST_P(ETKDGMinimizeSingleMolTestFixture, FirstPartETKDGPipelineBFGSTest) {
                                                                                    1.0, 0.1, 400, true, "First Minimization");
   auto* firstStagePtr = firstStage.get();  // Store pointer before moving
   stages.push_back(std::move(firstStage));
-  stages.push_back(std::make_unique<nvMolKit::detail::DistGeomMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_,
-                                                                              0.2, 1.0, 200, false, "Fourth Dimension Minimization"));
+  stages.push_back(std::make_unique<nvMolKit::detail::DistGeomMinimizeWrapperStage>(*firstStagePtr, 0.2, 1.0, 200, false, "Fourth Dimension Minimization"));
 
   // Create and run driver
   ETKDGDriver driver(std::make_unique<ETKDGContext>(std::move(context_)), std::move(stages));
@@ -446,24 +444,21 @@ TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, FullMinimizationPipelineBFGSTest
   // Calculate initial energies for all molecules
   const std::vector<double> initialEnergies = calculateInitialEnergies(molsPtrs_);
 
-  // Create stages
+  // Create stages - first is base DistGeomMinimizeStage, second is wrapper with different weights
   std::vector<std::unique_ptr<ETKDGStage>> stages;
   auto  firstStage    = std::make_unique<nvMolKit::detail::DistGeomMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_,
                                                                                    1.0, 0.1, 400, true, "First Minimization");
   auto* firstStagePtr = firstStage.get();  // Store pointer before moving
   stages.push_back(std::move(firstStage));
-  auto secondStage = std::make_unique<nvMolKit::detail::DistGeomMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_,
-                                                                                0.2, 1.0, 200, false, "Fourth Dimension Minimization");
-  auto secondStagePtr = secondStage.get();
-  stages.push_back(std::move(secondStage));
+  stages.push_back(std::make_unique<nvMolKit::detail::DistGeomMinimizeWrapperStage>(*firstStagePtr, 0.2, 1.0, 200, false, "Fourth Dimension Minimization"));
 
   // Create and run driver
   ETKDGDriver driver(std::make_unique<ETKDGContext>(std::move(context_)), std::move(stages));
   driver.run(2);
 
   // Get final energies from the first stage
-  std::vector<double> finalEnergies(secondStagePtr->molSystemDevice.energyOuts.size());
-  secondStagePtr->molSystemDevice.energyOuts.copyToHost(finalEnergies);
+  std::vector<double> finalEnergies(firstStagePtr->molSystemDevice.energyOuts.size());
+  firstStagePtr->molSystemDevice.energyOuts.copyToHost(finalEnergies);
 
   // Get failure counts
   nvMolKit::PinnedHostVector<int16_t> failuresScratch;
@@ -494,13 +489,11 @@ TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, FirstPartETKDGPipelineBFGSTest) 
   // Create stages in order: coordgen -> first minimize BFGS -> fourthdim BFGS
   std::vector<std::unique_ptr<ETKDGStage>> stages;
   stages.push_back(std::make_unique<nvMolKit::detail::ETKDGCoordGenRDKitStage>(embedParam_, mols_, eargs_, positionsScratch_, activeScratch_));
-  auto firstStage = std::make_unique<nvMolKit::detail::DistGeomMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_,
-                                                                               1.0, 0.1, 400, true, "First Minimization");
+  auto  firstStage    = std::make_unique<nvMolKit::detail::DistGeomMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_,
+                                                                                   1.0, 0.1, 400, true, "First Minimization");
+  auto* firstStagePtr = firstStage.get();  // Store pointer before moving
   stages.push_back(std::move(firstStage));
-  auto  secondStage = std::make_unique<nvMolKit::detail::DistGeomMinimizeStage>(mols_, eargs_, embedParam_, context_, *minimizer_,
-                                                                                 0.2, 1.0, 200, false, "Fourth Dimension Minimization");
-  auto* secondStagePtr = secondStage.get();  // Store pointer before moving
-  stages.push_back(std::move(secondStage));
+  stages.push_back(std::make_unique<nvMolKit::detail::DistGeomMinimizeWrapperStage>(*firstStagePtr, 0.2, 1.0, 200, false, "Fourth Dimension Minimization"));
   // Create and run driver
   ETKDGDriver driver(std::make_unique<ETKDGContext>(std::move(context_)), std::move(stages));
   driver.run(3);
@@ -508,8 +501,8 @@ TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, FirstPartETKDGPipelineBFGSTest) 
   auto failureCounts = driver.getFailures(failuresScratch);
 
   // Get final energies from the first stage
-  std::vector<double> finalEnergies(secondStagePtr->molSystemDevice.energyOuts.size());
-  secondStagePtr->molSystemDevice.energyOuts.copyToHost(finalEnergies);
+  std::vector<double> finalEnergies(firstStagePtr->molSystemDevice.energyOuts.size());
+  firstStagePtr->molSystemDevice.energyOuts.copyToHost(finalEnergies);
   cudaDeviceSynchronize();
 
   // Get failure counts

@@ -57,7 +57,7 @@ cudaError_t launchChiralViolationEnergyKernel(const int      numChiral,
                                               const int*     idx4,
                                               const double*  volLower,
                                               const double*  volUpper,
-                                              const double*  weight,
+                                              const double   weight,
                                               const double*  pos,
                                               double*        energyBuffer,
                                               const int*     energyBufferStarts,
@@ -75,7 +75,7 @@ cudaError_t launchChiralViolationGradientKernel(const int      numChiral,
                                                 const int*     idx4,
                                                 const double*  volLower,
                                                 const double*  volUpper,
-                                                const double*  weight,
+                                                const double   weight,
                                                 const double*  pos,
                                                 double*        grad,
                                                 const int*     atomIdxToBatchIdx,
@@ -86,7 +86,7 @@ cudaError_t launchChiralViolationGradientKernel(const int      numChiral,
 
 cudaError_t launchFourthDimEnergyKernel(const int      numFD,
                                         const int*     idx,
-                                        const double*  weight,
+                                        const double   weight,
                                         const double*  pos,
                                         double*        energyBuffer,
                                         const int*     energyBufferStarts,
@@ -99,7 +99,7 @@ cudaError_t launchFourthDimEnergyKernel(const int      numFD,
 
 cudaError_t launchFourthDimGradientKernel(const int      numFD,
                                           const int*     idx,
-                                          const double*  weight,
+                                          const double   weight,
                                           const double*  pos,
                                           double*        grad,
                                           const int*     atomIdxToBatchIdx,
@@ -262,12 +262,12 @@ struct ChiralViolationContribTermsDevicePtr {
   const int*    idx4;
   const double* volUpper;
   const double* volLower;
-  const double* weight;
+  // Note: weight removed - now passed as kernel parameter
 };
 
 struct FourthDimContribTermsDevicePtr {
-  const int*    idx;
-  const double* weight;
+  const int* idx;
+  // Note: weight removed - now passed as kernel parameter
 };
 
 struct EnergyForceContribsDevicePtr {
@@ -347,6 +347,8 @@ cudaError_t launchBlockPerMolEnergyKernel(int                                 nu
                                           const double*                       coords,
                                           double*                             energies,
                                           const int                           dimension,
+                                          double                              chiralWeight,
+                                          double                              fourthDimWeight,
                                           const uint8_t*                      activeThisStage = nullptr,
                                           cudaStream_t                        stream          = 0);
 
@@ -356,6 +358,8 @@ cudaError_t launchBlockPerMolGradKernel(int                                 numM
                                         const double*                       coords,
                                         double*                             grad,
                                         const int                           dimension,
+                                        double                              chiralWeight,
+                                        double                              fourthDimWeight,
                                         const uint8_t*                      activeThisStage = nullptr,
                                         cudaStream_t                        stream          = 0);
 

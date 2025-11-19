@@ -1248,6 +1248,8 @@ bool BfgsBatchMinimizer::minimizeWithDG(const int                               
                                         AsyncDeviceVector<double>&                         energyBuffer,
                                         const DistGeom::EnergyForceContribsDevicePtr&      terms,
                                         const DistGeom::BatchedIndicesDevicePtr&           systemIndices,
+                                        double                                             chiralWeight,
+                                        double                                             fourthDimWeight,
                                         const uint8_t*                                     activeThisStage) {
   const int numSystems = atomStartsHost.size() - 1;
 
@@ -1307,6 +1309,8 @@ bool BfgsBatchMinimizer::minimizeWithDG(const int                               
                                                       inverseHessian_.data(),
                                                       scratchBuffersDevice_.data(),
                                                       energyOuts.data(),
+                                                      chiralWeight,
+                                                      fourthDimWeight,
                                                       convergenceStatus.data(),
                                                       stream_);
   

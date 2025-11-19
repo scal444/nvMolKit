@@ -297,9 +297,10 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
                                                            streamPtr));
 
         // First minimize, then first round of chiral checks.
-        stages.push_back(
-          std::make_unique<detail::DistGeomMinimizeStage>(constMolPtrs, batchEargs, paramsCopy, context, minimizer,
-                                                          1.0, 0.1, 400, true, "First Minimization", streamPtr));
+        auto firstMinStage = std::make_unique<detail::DistGeomMinimizeStage>(
+          constMolPtrs, batchEargs, paramsCopy, context, minimizer, 1.0, 0.1, 400, true, "First Minimization", streamPtr);
+        detail::DistGeomMinimizeStage* firstMinStagePtr = firstMinStage.get();
+        stages.push_back(std::move(firstMinStage));
         stages.push_back(std::make_unique<detail::ETKDGTetrahedralCheckStage>(context, batchEargs, dim, streamPtr));
 
         // Only add first chiral check if enforceChirality is enabled
@@ -311,10 +312,9 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
           stages.push_back(std::move(chiralStage));
         }
 
-        // Second + 3rd minimize, then double bond checks.
+        // Second + 3rd minimize (wrapper with different weights)
         stages.push_back(
-          std::make_unique<detail::DistGeomMinimizeStage>(constMolPtrs, batchEargs, paramsCopy, context, minimizer,
-                                                          0.2, 1.0, 200, false, "Fourth Dimension Minimization", streamPtr));
+          std::make_unique<detail::DistGeomMinimizeWrapperStage>(*firstMinStagePtr, 0.2, 1.0, 200, false, "Fourth Dimension Minimization"));
 
         // (ET)(K)DG: Add experimental torsion minimization stage only if needed to match RDKit's logic.
         if (paramsCopy.useExpTorsionAnglePrefs || paramsCopy.useBasicKnowledge) {

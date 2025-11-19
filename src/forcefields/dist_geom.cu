@@ -113,13 +113,13 @@ void addMoleculeToMolecularSystem(const EnergyForceContribsHost& contribs,
     contribHolder.chiralTerms.idx4.push_back(contribs.chiralTerms.idx4[i] + previousLastAtomIndex);
     contribHolder.chiralTerms.volLower.push_back(contribs.chiralTerms.volLower[i]);
     contribHolder.chiralTerms.volUpper.push_back(contribs.chiralTerms.volUpper[i]);
-    contribHolder.chiralTerms.weight.push_back(contribs.chiralTerms.weight[i]);
+      // Note: weight no longer stored in structure
   }
 
   // FourthDim term
   for (size_t i = 0; i < contribs.fourthTerms.idx.size(); i++) {
     contribHolder.fourthTerms.idx.push_back(contribs.fourthTerms.idx[i] + previousLastAtomIndex);
-    contribHolder.fourthTerms.weight.push_back(contribs.fourthTerms.weight[i]);
+      // Note: weight no longer stored in structure
   }
 }
 
@@ -293,11 +293,11 @@ void sendContribsAndIndicesToDevice(const BatchedMolecularSystemHost& molSystemH
   deviceContribs.chiralTerms.idx4.setFromVector(hostContribs.chiralTerms.idx4);
   deviceContribs.chiralTerms.volLower.setFromVector(hostContribs.chiralTerms.volLower);
   deviceContribs.chiralTerms.volUpper.setFromVector(hostContribs.chiralTerms.volUpper);
-  deviceContribs.chiralTerms.weight.setFromVector(hostContribs.chiralTerms.weight);
+    // Note: weight no longer stored in device structure
 
   // FourthDim term
   deviceContribs.fourthTerms.idx.setFromVector(hostContribs.fourthTerms.idx);
-  deviceContribs.fourthTerms.weight.setFromVector(hostContribs.fourthTerms.weight);
+    // Note: weight no longer stored in device structure
 
   // Indices
   auto&       deviceIndices = molSystemDevice.indices;
@@ -414,9 +414,9 @@ void setStreams(BatchedMolecularDeviceBuffers& devBuffers, cudaStream_t stream) 
   devBuffers.contribs.chiralTerms.idx4.setStream(stream);
   devBuffers.contribs.chiralTerms.volLower.setStream(stream);
   devBuffers.contribs.chiralTerms.volUpper.setStream(stream);
-  devBuffers.contribs.chiralTerms.weight.setStream(stream);
+    // Note: weight no longer stored in device structure
   devBuffers.contribs.fourthTerms.idx.setStream(stream);
-  devBuffers.contribs.fourthTerms.weight.setStream(stream);
+    // Note: weight no longer stored in device structure
 }
 //! Set all DeviceVector streams for the batched 3D molecular device buffers.
 void setStreams(BatchedMolecular3DDeviceBuffers& devBuffers, cudaStream_t stream) {
@@ -534,7 +534,9 @@ cudaError_t computeEnergy(BatchedMolecularDeviceBuffers&             molSystemDe
                           const nvMolKit::AsyncDeviceVector<double>& ctxPositionsDevice,
                           const uint8_t*                             activeThisStage,
                           const double*                              positions,
-                          cudaStream_t                               stream) {
+                          cudaStream_t                               stream,
+                          double                                     chiralWeight,
+                          double                                     fourthDimWeight) {
   // Prechecks - tempstorage allocated, energybuffer allocated
   assert(molSystemDevice.energyBuffer.size() > 0);
   assert(molSystemDevice.energyOuts.data() != nullptr);
@@ -571,7 +573,7 @@ cudaError_t computeEnergy(BatchedMolecularDeviceBuffers&             molSystemDe
                                             contribs.chiralTerms.idx4.data(),
                                             contribs.chiralTerms.volLower.data(),
                                             contribs.chiralTerms.volUpper.data(),
-                                            contribs.chiralTerms.weight.data(),
+                                                chiralWeight,
                                             posData,
                                             molSystemDevice.energyBuffer.data(),
                                             molSystemDevice.indices.energyBufferStarts.data(),
@@ -585,7 +587,7 @@ cudaError_t computeEnergy(BatchedMolecularDeviceBuffers&             molSystemDe
   if (err == cudaSuccess && contribs.fourthTerms.idx.size() > 0) {
     err = launchFourthDimEnergyKernel(contribs.fourthTerms.idx.size(),
                                       contribs.fourthTerms.idx.data(),
-                                      contribs.fourthTerms.weight.data(),
+                                          fourthDimWeight,
                                       posData,
                                       molSystemDevice.energyBuffer.data(),
                                       molSystemDevice.indices.energyBufferStarts.data(),
@@ -612,7 +614,9 @@ cudaError_t computeGradients(BatchedMolecularDeviceBuffers&             molSyste
                              const nvMolKit::AsyncDeviceVector<int>&    ctxAtomStartsDevice,
                              const nvMolKit::AsyncDeviceVector<double>& ctxPositionsDevice,
                              const uint8_t*                             activeThisStage,
-                             cudaStream_t                               stream) {
+                             cudaStream_t                               stream,
+                             double                                     chiralWeight,
+                             double                                     fourthDimWeight) {
   // Dispatch each term if there is a contrib for it.
   const auto& contribs = molSystemDevice.contribs;
 
@@ -640,7 +644,7 @@ cudaError_t computeGradients(BatchedMolecularDeviceBuffers&             molSyste
                                               contribs.chiralTerms.idx4.data(),
                                               contribs.chiralTerms.volLower.data(),
                                               contribs.chiralTerms.volUpper.data(),
-                                              contribs.chiralTerms.weight.data(),
+                                              chiralWeight,
                                               ctxPositionsDevice.data(),
                                               molSystemDevice.grad.data(),
                                               molSystemDevice.indices.atomIdxToBatchIdx.data(),
@@ -652,7 +656,7 @@ cudaError_t computeGradients(BatchedMolecularDeviceBuffers&             molSyste
   if (err == cudaSuccess && contribs.fourthTerms.idx.size() > 0) {
     err = launchFourthDimGradientKernel(contribs.fourthTerms.idx.size(),
                                         contribs.fourthTerms.idx.data(),
-                                        contribs.fourthTerms.weight.data(),
+                                        fourthDimWeight,
                                         ctxPositionsDevice.data(),
                                         molSystemDevice.grad.data(),
                                         molSystemDevice.indices.atomIdxToBatchIdx.data(),
@@ -1027,10 +1031,10 @@ inline EnergyForceContribsDevicePtr toPointerStruct(const EnergyForceContribsDev
   dst.chiralTerms.idx4      = src.chiralTerms.idx4.data();
   dst.chiralTerms.volUpper  = src.chiralTerms.volUpper.data();
   dst.chiralTerms.volLower  = src.chiralTerms.volLower.data();
-  dst.chiralTerms.weight    = src.chiralTerms.weight.data();
+  // Note: weight no longer stored in pointer structure
 
-  dst.fourthTerms.idx    = src.fourthTerms.idx.data();
-  dst.fourthTerms.weight = src.fourthTerms.weight.data();
+  dst.fourthTerms.idx = src.fourthTerms.idx.data();
+  // Note: weight no longer stored in pointer structure
 
   return dst;
 }
@@ -1066,6 +1070,8 @@ cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffers&             
                                        positions != nullptr ? positions : ctxPositionsDevice.data(),
                                        molSystemDevice.energyOuts.data(),
                                        molSystemDevice.dimension,
+                                       1.0,  // chiralWeight
+                                       1.0,  // fourthDimWeight
                                        activeThisStage,
                                        stream);
 }
@@ -1088,6 +1094,8 @@ cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffers&             mo
                                      ctxPositionsDevice.data(),
                                      molSystemDevice.grad.data(),
                                      molSystemDevice.dimension,
+                                     1.0,  // chiralWeight
+                                     1.0,  // fourthDimWeight
                                      activeThisStage,
                                      stream);
 }

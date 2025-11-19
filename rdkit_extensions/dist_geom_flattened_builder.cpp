@@ -105,7 +105,7 @@ void addChiralViolationContribs(nvMolKit::DistGeom::EnergyForceContribsHost& con
     contribs.chiralTerms.idx4.push_back(static_cast<int>(cset->d_idx4));
     contribs.chiralTerms.volLower.push_back(cset->d_volumeLowerBound);
     contribs.chiralTerms.volUpper.push_back(cset->d_volumeUpperBound);
-    contribs.chiralTerms.weight.push_back(weightChiral);
+    // Note: weight no longer stored - passed as kernel parameter
   }
 }
 
@@ -119,7 +119,7 @@ void addFourthDimContribs(nvMolKit::DistGeom::EnergyForceContribsHost& contribs,
   }
   for (unsigned int i = 0; i < numAtoms; i++) {
     contribs.fourthTerms.idx.push_back(static_cast<int>(i));
-    contribs.fourthTerms.weight.push_back(weightFourthDim);
+    // Note: weight no longer stored - passed as kernel parameter
   }
 }
 

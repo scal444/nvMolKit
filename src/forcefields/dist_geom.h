@@ -42,12 +42,12 @@ struct ChiralViolationContribTerms {
   std::vector<int>    idx4;
   std::vector<double> volUpper;
   std::vector<double> volLower;
-  std::vector<double> weight;
+  // Note: weight removed - now passed as kernel parameter
 };
 
 struct FourthDimContribTerms {
-  std::vector<int>    idx;
-  std::vector<double> weight;
+  std::vector<int> idx;
+  // Note: weight removed - now passed as kernel parameter
 };
 
 struct EnergyForceContribsHost {
@@ -191,12 +191,12 @@ struct ChiralViolationContribTermsDevice {
   nvMolKit::AsyncDeviceVector<int>    idx4;
   nvMolKit::AsyncDeviceVector<double> volUpper;
   nvMolKit::AsyncDeviceVector<double> volLower;
-  nvMolKit::AsyncDeviceVector<double> weight;
+  // Note: weight removed - now passed as kernel parameter
 };
 
 struct FourthDimContribTermsDevice {
-  nvMolKit::AsyncDeviceVector<int>    idx;
-  nvMolKit::AsyncDeviceVector<double> weight;
+  nvMolKit::AsyncDeviceVector<int> idx;
+  // Note: weight removed - now passed as kernel parameter
 };
 
 struct TorsionAngleContribTermsDevice {
@@ -482,9 +482,11 @@ void allocateDim4ConversionBuffers(const BatchedMolecularSystemHost& molSystemHo
 cudaError_t computeEnergy(BatchedMolecularDeviceBuffers&             molSystemDevice,
                           const nvMolKit::AsyncDeviceVector<int>&    ctxAtomStartsDevice,
                           const nvMolKit::AsyncDeviceVector<double>& ctxPositionsDevice,
-                          const uint8_t*                             activeThisStage = nullptr,
-                          const double*                              positions       = nullptr,
-                          cudaStream_t                               stream          = nullptr);
+                          const uint8_t*                             activeThisStage,
+                          const double*                              positions,
+                          cudaStream_t                               stream,
+                          double                                     chiralWeight,
+                          double                                     fourthDimWeight);
 
 //! Compute the energy of the batched molecular system. This will populate the energyOuts buffer on device.
 //! energyOuts and energyBuffer must be zeroed before calling this function.
@@ -501,8 +503,10 @@ cudaError_t computeEnergyETK(BatchedMolecular3DDeviceBuffers&           molSyste
 cudaError_t computeGradients(BatchedMolecularDeviceBuffers&             molSystemDevice,
                              const nvMolKit::AsyncDeviceVector<int>&    ctxAtomStartsDevice,
                              const nvMolKit::AsyncDeviceVector<double>& ctxPositionsDevice,
-                             const uint8_t*                             activeThisStage = nullptr,
-                             cudaStream_t                               stream          = nullptr);
+                             const uint8_t*                             activeThisStage,
+                             cudaStream_t                               stream,
+                             double                                     chiralWeight,
+                             double                                     fourthDimWeight);
 
 //! Compute the gradients of the batched molecular system. This will populate the grad buffer on device.
 //! grad must be zeroed before calling this function.

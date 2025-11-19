@@ -197,7 +197,7 @@ TEST_F(FlattenedBuilderTestFixture, TestETKDGFlattenedBuilderMol1) {
   EXPECT_EQ(ffParams.chiralTerms.idx4.size(), wantNumChiralViolationTerms);
   EXPECT_EQ(ffParams.chiralTerms.volLower.size(), wantNumChiralViolationTerms);
   EXPECT_EQ(ffParams.chiralTerms.volUpper.size(), wantNumChiralViolationTerms);
-  EXPECT_EQ(ffParams.chiralTerms.weight.size(), wantNumChiralViolationTerms);
+  // Note: weights are no longer stored in the structure, they are passed as parameters
 
   EXPECT_EQ(ffParams.chiralTerms.idx1[0], 1);
   EXPECT_EQ(ffParams.chiralTerms.idx2[0], 6);
@@ -205,13 +205,13 @@ TEST_F(FlattenedBuilderTestFixture, TestETKDGFlattenedBuilderMol1) {
   EXPECT_EQ(ffParams.chiralTerms.idx4[0], 8);
   EXPECT_EQ(ffParams.chiralTerms.volLower[0], 5);
   EXPECT_EQ(ffParams.chiralTerms.volUpper[0], 100);
-  EXPECT_EQ(ffParams.chiralTerms.weight[0], 1);
+  // EXPECT_EQ(ffParams.chiralTerms.weight[0], 1);  // Weight no longer stored
 
   // FourthDim
   const int wantNumFourthDimTerms = 9;
   EXPECT_EQ(ffParams.fourthTerms.idx.size(), wantNumFourthDimTerms);
-  EXPECT_EQ(ffParams.fourthTerms.weight.size(), wantNumFourthDimTerms);
+  // EXPECT_EQ(ffParams.fourthTerms.weight.size(), wantNumFourthDimTerms);  // Weight no longer stored
 
   EXPECT_EQ(ffParams.fourthTerms.idx[0], 0);
-  EXPECT_EQ(ffParams.fourthTerms.weight[0], 0.1);
+  // EXPECT_EQ(ffParams.fourthTerms.weight[0], 0.1);  // Weight no longer stored
 }

@@ -24,6 +24,8 @@ namespace nvMolKit::DistGeom {
 void DistGeomMinimizeBFGS(BatchedMolecularSystemHost&    molSystemHost,
                           BatchedMolecularDeviceBuffers& molSystemDevice,
                           detail::ETKDGContext&          context,
+                          double                         chiralWeight,
+                          double                         fourthDimWeight,
                           const int                      maxIters,
                           const double                   gradTol,
                           const bool                     repeatUntilConverged,
@@ -45,7 +47,9 @@ void DistGeomMinimizeBFGS(BatchedMolecularSystemHost&    molSystemHost,
                   context.systemDevice.positions,
                   context.activeThisStage.data(),
                   positions,
-                  stream);
+                  stream,
+                  chiralWeight,
+                  fourthDimWeight);
   };
 
   auto gFunc = [&]() {
@@ -53,7 +57,9 @@ void DistGeomMinimizeBFGS(BatchedMolecularSystemHost&    molSystemHost,
                      context.systemDevice.atomStarts,
                      context.systemDevice.positions,
                      context.activeThisStage.data(),
-                     stream);
+                     stream,
+                     chiralWeight,
+                     fourthDimWeight);
   };
 
   // Create and configure BFGS minimizer
@@ -89,6 +95,8 @@ void DistGeomMinimizeBFGS(BatchedMolecularSystemHost&    molSystemHost,
 void DistGeomMinimizeBFGSPerMol(BatchedMolecularSystemHost&    molSystemHost,
                                 BatchedMolecularDeviceBuffers& molSystemDevice,
                                 detail::ETKDGContext&          context,
+                                double                         chiralWeight,
+                                double                         fourthDimWeight,
                                 const int                      maxIters,
                                 const double                   gradTol,
                                 const bool                     repeatUntilConverged,
@@ -122,6 +130,8 @@ void DistGeomMinimizeBFGSPerMol(BatchedMolecularSystemHost&    molSystemHost,
                                                  energyBuffer,
                                                  toEnergyForceContribsDevicePtr(molSystemDevice),
                                                  toBatchedIndicesDevicePtr(molSystemDevice, context.systemDevice.atomStarts.data()),
+                                                 chiralWeight,
+                                                 fourthDimWeight,
                                                  context.activeThisStage.data());
   //printf("Needs more ? %d\n", needsMore);
 
@@ -137,6 +147,8 @@ void DistGeomMinimizeBFGSPerMol(BatchedMolecularSystemHost&    molSystemHost,
                                               energyBuffer,
                                               toEnergyForceContribsDevicePtr(molSystemDevice),
                                               toBatchedIndicesDevicePtr(molSystemDevice, context.systemDevice.atomStarts.data()),
+                                              chiralWeight,
+                                              fourthDimWeight,
                                               context.activeThisStage.data());
   }
 }
