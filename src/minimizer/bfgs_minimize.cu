@@ -254,7 +254,7 @@ __global__ void lineSearchPostEnergyKernel(const int     numSystems,
     return;
   }
 
-  const float slope  = slopes[sysIdx];
+  const double slope  = slopes[sysIdx];
   const double newVal = newE[sysIdx];
   const double oldVal = prevE[sysIdx];
   const double lambda = lambdas[sysIdx];
@@ -267,8 +267,7 @@ __global__ void lineSearchPostEnergyKernel(const int     numSystems,
   double tmpLambda;
   if (isFirstIter) {
     // it's the first step:
-    const float denom = 2.0f * (newVal - oldVal - slope);
-    tmpLambda = -slope / denom;;
+    tmpLambda = -slope / ( 2.0 * (newVal - oldVal - slope));
   } else {
     const double val2    = eScratch[sysIdx];
     const double lambda2 = lambda2s[sysIdx];

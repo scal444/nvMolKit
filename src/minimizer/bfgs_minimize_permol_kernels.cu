@@ -141,31 +141,31 @@ __device__ bool lineSearchPostEnergy(const bool isFirstIter,
     } else {
       float tmpLambda;
       if (isFirstIter) {
-        tmpLambda = -slope / (2.0 * (eDiff - slope));
+        tmpLambda = -slope / (2.0f * (eDiff - slope));
       } else {
         const float rhs1 = eDiff - lambda * slope;
         const float rhs2 = eScratch - prevE - lambda2 * slope;
         const float rLambda = 1.0f / static_cast<float>(lambda);
         const float rLambda2 = 1.0f / static_cast<float>(lambda2);
-        const float rScale = 1.0f / (lambda - lambda2);
+        const float rScale = 1.0f / (lambda - static_cast<float>(lambda2));
         const float a = (rhs1 * rLambda * rLambda - rhs2 * rLambda2 * rLambda2) * rScale;
         const float b = (-lambda2 * rhs1 * rLambda * rLambda + lambda * rhs2 * rLambda2 * rLambda2) * rScale;
         if (a == 0.0f) {
-          tmpLambda = -slope / (2.0 * b);
+          tmpLambda = -slope / (2.0f * b);
         } else {
           const float disc = b * b - 3.0f * a * slope;
           if (disc < 0.0f) {
-            tmpLambda = 0.5 * lambda;
+            tmpLambda = 0.5f * lambda;
           } else {
             const float sqrtDisc = sqrtf(disc);
             tmpLambda = (b <= 0.0f) ? (-b + sqrtDisc) / (3.0f * a) : -slope / (b + sqrtDisc);
           }
         }
-        tmpLambda = fminf(tmpLambda, 0.5 * lambda);
+        tmpLambda = fminf(tmpLambda, 0.5f * lambda);
       }
       lambda2 = lambda;
       eScratch = newE;
-      lambdaOut = fmaxf(tmpLambda, 0.1 * lambda);
+      lambdaOut = fmaxf(tmpLambda, 0.1f * lambda);
     }
   }
   __syncthreads();
@@ -260,10 +260,10 @@ __device__ void updateDGrad(const int numTerms,
     }
   }
   
-  double blockMax = cub::BlockReduce<double, BLOCK_SIZE>(tempStorage).Reduce(localMax, cubMax());
+  float blockMax = cub::BlockReduce<double, BLOCK_SIZE>(tempStorage).Reduce(localMax, cubMax());
   
   if (threadIdx.x == 0) {
-    const double term = max(energy * gradScale, 1.0);
+    const float term = max(energy * gradScale, 1.0);
     blockMax /= term;
     if (blockMax < gradTol) {
       converged = true;
@@ -329,7 +329,7 @@ __device__ void updateInverseHessian(const int numTerms,
   
   if (threadIdx.x == 0) {
     constexpr double EPS = 3e-8;
-    needUpdate = fac > sqrt(EPS * sumDGrad * sumXi);
+    needUpdate = (fac > 0) && ((fac * fac) > (EPS * sumDGrad * sumXi));
     
     if (needUpdate) {
       fac = 1.0 / fac;
