@@ -10,8 +10,8 @@
 namespace nvMolKit {
 
 namespace {
-constexpr int BLOCK_SIZE = 128;
-constexpr int MAX_LINESEARCH_ITERS = 1000;
+constexpr int16_t BLOCK_SIZE = 128;
+constexpr int16_t MAX_LINESEARCH_ITERS = 1000;
 constexpr double FUNCTOL = 1e-4;
 constexpr double MOVETOL = 1e-7;
 constexpr double TOLX = 4. * 3e-8;
@@ -396,7 +396,6 @@ struct DataDimTraits<ForceFieldType::DG> {
 }  // namespace
 
 template <int MaxAtoms, bool UseSharedMem, ForceFieldType FFType, typename TermsType, typename IndicesType>
-__launch_bounds__(256, 6)
 __global__ void bfgsMinimizeKernel(const int numIters,
                                    const double gradTol,
                                    const bool scaleGrads,
@@ -414,17 +413,17 @@ __global__ void bfgsMinimizeKernel(const int numIters,
                                    double chiralWeight,
                                    double fourthDimWeight) {
   const int molIdx = molIdList[blockIdx.x];
-  const int tid = threadIdx.x;
+  const int16_t tid = threadIdx.x;
   const int stride = blockDim.x;
   
   const int atomStart = atomStarts[molIdx];
   const int atomEnd = atomStarts[molIdx + 1];
-  const int numAtoms = atomEnd - atomStart;
+  const int16_t numAtoms = atomEnd - atomStart;
   
   // Use compile-time dimension for correctness
-  constexpr int dataDim = DataDimTraits<FFType>::value;
-  constexpr int maxTerms = MaxAtoms * dataDim;
-  const int numTerms = dataDim * numAtoms;
+  constexpr int16_t dataDim = DataDimTraits<FFType>::value;
+  constexpr int16_t maxTerms = MaxAtoms * dataDim;
+  const int16_t numTerms = dataDim * numAtoms;
   
   // Pointers to working memory (either shared or global)
   double* localPos;
@@ -484,7 +483,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   // For shared memory case, copy to local shared buffer
   // For non-shared case, localPos already points to globalPos, so no copy needed
   if constexpr (UseSharedMem) {
-    for (int i = tid; i < numTerms; i += stride) {
+    for (int16_t i = tid; i < numTerms; i += stride) {
       localPos[i] = globalPos[i];
     }
     __syncthreads();
@@ -492,11 +491,13 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   
   // Initialize inverse Hessian to identity
   const int hessianSize = numTerms * numTerms;
-  for (int i = tid; i < hessianSize; i += stride) {
-    const int row = i / numTerms;
-    const int col = i % numTerms;
-    invHessian[i] = (row == col) ? 1.0 : 0.0;
-  }
+    for (int i = tid; i < hessianSize; i += stride) {
+      invHessian[i] = 0.0;
+    }
+    __syncthreads();
+    for (int i = tid; i < numTerms; i += stride) {
+      invHessian[i * numTerms + i] = 1.0;
+    }
   
   if (tid == 0) {
     converged = false;
@@ -529,7 +530,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
   __syncthreads();
   
   // Compute initial gradient  
-  for (int i = tid; i < numTerms; i += stride) {
+  for (int16_t i = tid; i < numTerms; i += stride) {
     localGrad[i] = 0.0;
   }
   __syncthreads();
@@ -586,7 +587,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
 
     }
     // Save current position before line search
-    for (int i = tid; i < numTerms; i += stride) {
+    for (int16_t i = tid; i < numTerms; i += stride) {
       oldPos[i] = localPos[i];
     }
     __syncthreads();
@@ -602,7 +603,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
     __syncthreads();
     
     // Line search loop
-    __shared__ int lineSearchIter;
+    __shared__ int16_t lineSearchIter;
     if (tid == 0) {
       lineSearchIter = 0;
       //printf("  Line search setup: slope=%f, lambdaMin=%f, lambda=%f\n", slope, lambdaMin, lambda);
@@ -675,7 +676,7 @@ __global__ void bfgsMinimizeKernel(const int numIters,
     __syncthreads();
     
     // Compute gradients at new position
-    for (int i = tid; i < numTerms; i += stride) {
+    for (int16_t i = tid; i < numTerms; i += stride) {
       localGrad[i] = 0.0;
     }
     __syncthreads();
