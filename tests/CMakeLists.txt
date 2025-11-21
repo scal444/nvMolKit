@@ -176,6 +176,17 @@ target_link_libraries(test_etkdg_result_tracker PRIVATE etkdg_impl)
 add_executable(test_butina test_butina.cpp)
 target_link_libraries(test_butina PRIVATE butina device)
 
+add_executable(count_ff_terms count_ff_terms.cpp)
+target_link_libraries(
+  count_ff_terms
+  PRIVATE ${RDKit_LIBS}
+          rdkit_dist_geom_flattened
+          dist_geom
+          device_vector
+          embedder_utils
+          test_utils
+          cuda_error_check)
+
 set(TEST_LIST
     test_butina
     test_bfgs_hessian

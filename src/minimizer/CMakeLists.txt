@@ -17,6 +17,7 @@ add_library(bfgs bfgs_minimize.cu bfgs_hessian.cu bfgs_minimize_permol_kernels.c
 target_link_libraries(bfgs PUBLIC host_vector device_vector PRIVATE ${RDKit_LIBS} rdkit_mmff_flattened
                                    cub_helpers  cccl_interface)
 target_include_directories(bfgs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(bfgs PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--ptxas-options=-v>)
 
 add_library(bfgs_mmff bfgs_mmff.cpp)
 target_link_libraries(
