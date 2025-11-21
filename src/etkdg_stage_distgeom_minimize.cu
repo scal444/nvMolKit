@@ -132,10 +132,6 @@ DistGeomMinimizeStage::DistGeomMinimizeStage(const std::vector<const RDKit::ROMo
   ScopedNvtxRange buffersRange("Setup buffers");
   DistGeom::setStreams(molSystemDevice, stream_);
   nvMolKit::DistGeom::sendContribsAndIndicesToDevice(molSystemHost, molSystemDevice);
-  nvMolKit::DistGeom::setupDeviceBuffers(molSystemHost,
-                                         molSystemDevice,
-                                         ctx.systemHost.positions,
-                                         ctx.systemHost.atomStarts.size() - 1);
 }
 
 void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx, 
@@ -159,9 +155,6 @@ void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
   // Use shared minimizer with repeat-until-converged
   if (minimizer_.backend() == BfgsBackend::BATCHED) {
     // BATCHED backend: use generic minimize() with energy/gradient functors
-    // Allocate intermediate buffers before minimization
-    DistGeom::allocateIntermediateBuffers(molSystemHost, molSystemDevice);
-    
     auto eFunc = [&](const double* positions) {
             DistGeom::computeEnergy(molSystemDevice,
                               ctx.systemDevice.atomStarts,
@@ -182,7 +175,6 @@ void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
                                  chiralWeight,
                                  fourthDimWeight);
     };
-
             bool needsMore = minimizer_.minimize(maxIters,
                                         embedParam_.optimizerForceTol,
                                         ctx.systemHost.atomStarts,
@@ -248,7 +240,6 @@ void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
 
   // Check energy per atom if requested
   if (checkEnergy) {
-    nvMolKit::DistGeom::allocateIntermediateBuffers(molSystemHost, molSystemDevice);
             nvMolKit::DistGeom::computeEnergy(molSystemDevice,
                                               ctx.systemDevice.atomStarts,
                                               ctx.systemDevice.positions,

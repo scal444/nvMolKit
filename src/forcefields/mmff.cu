@@ -347,13 +347,6 @@ void allocateIntermediateBuffers(const BatchedMolecularSystemHost& molSystemHost
                                                        molSystemHost.indices.atomStarts.size() - 1);
 }
 
-void allocateDim4ConversionBuffers(const BatchedMolecularSystemHost& molSystemHost,
-                                   BatchedMolecularDeviceBuffers&    molSystemDevice) {
-  nvMolKit::FFKernelUtils::allocateDim4ConversionBuffers(molSystemHost,
-                                                         molSystemDevice,
-                                                         molSystemHost.indices.atomStarts.size() - 1);
-}
-
 // TODO: More sophisticated error handling for energy and gradient.
 cudaError_t computeEnergy(BatchedMolecularDeviceBuffers& molSystemDevice, const double* coords, cudaStream_t stream) {
   // Prechecks - tempstorage allocated, energybuffer allocated

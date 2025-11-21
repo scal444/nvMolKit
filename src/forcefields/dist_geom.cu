@@ -739,12 +739,6 @@ void setupDeviceBuffers3D(BatchedMolecularSystem3DHost&    molSystemHost,
   molSystemDevice.grad.zero();
 }
 
-void allocateDim4ConversionBuffers(const BatchedMolecularSystemHost& molSystemHost,
-                                   BatchedMolecularDeviceBuffers&    molSystemDevice) {
-  nvMolKit::FFKernelUtils::allocateDim4ConversionBuffers(molSystemHost,
-                                                         molSystemDevice,
-                                                         molSystemHost.indices.distTermStarts.size() - 1);
-}
 
 // TODO: More sophisticated error handling for energy and gradient.
 cudaError_t computeEnergy(BatchedMolecularDeviceBuffers&             molSystemDevice,

@@ -20,6 +20,7 @@
 
 #include "etkdg_impl.h"
 #include "hardware_options.h"
+#include "minimizer/bfgs_minimize.h"
 
 namespace RDKit {
 class ROMol;
@@ -37,7 +38,8 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
                     int                                         maxIterations    = -1,
                     bool                                        debugMode        = false,
                     std::vector<std::vector<int16_t>>*          failures         = nullptr,
-                    const BatchHardwareOptions&                 hardwareOptions  = {});
+                    const BatchHardwareOptions&                 hardwareOptions  = {},
+                    BfgsBackend                                 backend          = BfgsBackend::PER_MOLECULE);
 
 }  // namespace nvMolKit
 

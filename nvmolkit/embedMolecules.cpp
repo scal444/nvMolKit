@@ -20,6 +20,7 @@
 #include <boost/python/stl_iterator.hpp>
 
 #include "etkdg.h"
+#include "minimizer/bfgs_minimize.h"
 
 // Utility: convert std::vector<T> to Python list
 template <typename T> boost::python::list vectorToList(const std::vector<T>& vec) {
@@ -57,6 +58,11 @@ static void setGpuIds(nvMolKit::BatchHardwareOptions& opts, const boost::python:
 }
 
 BOOST_PYTHON_MODULE(_embedMolecules) {
+  // Expose BfgsBackend enum to Python
+  boost::python::enum_<nvMolKit::BfgsBackend>("BfgsBackend")
+    .value("BATCHED", nvMolKit::BfgsBackend::BATCHED)
+    .value("PER_MOLECULE", nvMolKit::BfgsBackend::PER_MOLECULE);
+
   // Expose BatchHardwareOptions struct to Python
   boost::python::class_<nvMolKit::BatchHardwareOptions>("BatchHardwareOptions")
     .def(boost::python::init<>())
@@ -71,7 +77,8 @@ BOOST_PYTHON_MODULE(_embedMolecules) {
         const RDKit::DGeomHelpers::EmbedParameters& params,
         int                                         confsPerMolecule,
         int                                         maxIterations,
-        const nvMolKit::BatchHardwareOptions&       hardwareOptions) {
+        const nvMolKit::BatchHardwareOptions&       hardwareOptions,
+        nvMolKit::BfgsBackend                       backend) {
       // Convert Python list to std::vector<RDKit::ROMol*>
       std::vector<RDKit::ROMol*> molsVec;
       molsVec.reserve(len(molecules));
@@ -91,13 +98,15 @@ BOOST_PYTHON_MODULE(_embedMolecules) {
                                maxIterations,
                                false,    // debugMode = false
                                nullptr,  // failures = nullptr
-                               hardwareOptions);
+                               hardwareOptions,
+                               backend);
     },
     (boost::python::arg("molecules"),
      boost::python::arg("params"),
      boost::python::arg("confsPerMolecule") = 1,
      boost::python::arg("maxIterations")    = -1,
-     boost::python::arg("hardwareOptions")  = nvMolKit::BatchHardwareOptions()),
+     boost::python::arg("hardwareOptions")  = nvMolKit::BatchHardwareOptions(),
+     boost::python::arg("backend")          = nvMolKit::BfgsBackend::PER_MOLECULE),
     "Embed multiple molecules with multiple conformers using ETKDG.\n"
     "\n"
     "Args:\n"
@@ -106,6 +115,7 @@ BOOST_PYTHON_MODULE(_embedMolecules) {
     "    confsPerMolecule: Number of conformers to generate per molecule (default: 1)\n"
     "    maxIterations: Maximum iterations, -1 for auto (default: -1)\n"
     "    hardwareOptions: BatchHardwareOptions object with hardware settings (default: default options)\n"
+    "    backend: BfgsBackend enum value for minimizer backend (default: PER_MOLECULE)\n"
     "\n"
     "Returns:\n"
     "    None (molecules are modified in-place with generated conformers)");

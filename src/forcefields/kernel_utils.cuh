@@ -186,26 +186,6 @@ void allocateIntermediateBuffers(const BatchedMolecularSystemHost& molSystemHost
   molSystemDevice.energyOuts.zero();
 }
 
-template <typename BatchedMolecularSystemHost, typename BatchedMolecularDeviceBuffers>
-void allocateDim4ConversionBuffers(const BatchedMolecularSystemHost& molSystemHost,
-                                   BatchedMolecularDeviceBuffers&    molSystemDevice,
-                                   const int                         numMolecules) {
-  // Compute maximum system size
-  const int maxSystemNumAtoms = molSystemHost.maxNumAtoms;
-
-  const int dim4PaddedSize = 4 * maxSystemNumAtoms * numMolecules;
-  const int dim3PaddedSize = 3 * maxSystemNumAtoms * numMolecules;
-  molSystemDevice.dataFormatInterchangeBuffers.gradD3Padded.resize(dim3PaddedSize);
-  molSystemDevice.dataFormatInterchangeBuffers.gradD3Padded.zero();
-  molSystemDevice.dataFormatInterchangeBuffers.positionsD4Padded.resize(dim4PaddedSize);
-  molSystemDevice.dataFormatInterchangeBuffers.positionsD4Padded.zero();
-
-  molSystemDevice.dataFormatInterchangeBuffers.writeBackIndices.resize(dim4PaddedSize);
-  // TODO: kernel for setting nonzero int values
-  std::vector<int> copyBuffer(dim4PaddedSize, -1);
-  molSystemDevice.dataFormatInterchangeBuffers.writeBackIndices.setFromVector(copyBuffer);
-}
-
 template <typename T, int fromDim, int toDim>
 cudaError_t launchUnpaddedToPaddedKernel(const int    numAtomsTotal,
                                          const int    maxNumAtomsPerMolecule,

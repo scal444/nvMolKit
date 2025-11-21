@@ -74,7 +74,8 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
                     int                                         maxIterations,
                     bool                                        debugMode,
                     std::vector<std::vector<int16_t>>*          failures,
-                    const BatchHardwareOptions&                 hardwareOptions) {
+                    const BatchHardwareOptions&                 hardwareOptions,
+                    BfgsBackend                                 backend) {
   const ScopedNvtxRange fullRange("EmbedMolecules");
   if (!params.useRandomCoords) {
     throw std::runtime_error("ETKDG requires useRandomCoords to be true. Please set it in the EmbedParameters.");
@@ -209,7 +210,7 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
         DebugLevel::NONE,
         true,                        // scaleGrads
         streamsPerThread.back().stream(),
-        BfgsBackend::PER_MOLECULE);
+        backend);
     
     // Pre-allocate pinned memory scratch buffers with estimated sizes
     threadData.positionsScratch.resize(estimatedPositionsSize);

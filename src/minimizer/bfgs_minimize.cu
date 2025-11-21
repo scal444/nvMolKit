@@ -430,17 +430,10 @@ void BfgsBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
   energyOutsDevice = energyOuts;
 
   const int numSystems = atomStartsHost.size() - 1;
-  
-  // Ensure pinned host buffers are sized (only allocates on first call or growth)
-  if (activeHost_.size() < static_cast<size_t>(numSystems)) {
-    activeHost_.resize(numSystems);
-  }
-  if (convergenceHost_.size() < static_cast<size_t>(numSystems)) {
-    convergenceHost_.resize(numSystems);
-  }
-  if (scratchBufferPointersHost_.size() < 5) {
-    scratchBufferPointersHost_.resize(5);
-  }
+  activeHost_.resize(numSystems);
+  convergenceHost_.resize(numSystems);
+  scratchBufferPointersHost_.resize(5);
+
   
   statuses_.resize(numSystems);
   if (activeThisStage) {
@@ -980,9 +973,7 @@ bool BfgsBatchMinimizer::minimize(const int                     numIters,
 
   {
     const ScopedNvtxRange bfgsFullInitialize("BfgsBatchMinimizer::fullInitialize");
-    if (totalNumAtoms != numAtomsTotal_ || numSystems != numSystems_) {
-      initialize(atomStartsHost, atomStarts.data(), positions.data(), grad.data(), energyOuts.data(), activeThisStage);
-    }
+    initialize(atomStartsHost, atomStarts.data(), positions.data(), grad.data(), energyOuts.data(), activeThisStage);
 
     // Set up Hessian. Offsets are n X n, where atomstarts were n.
     setHessianToIdentity();

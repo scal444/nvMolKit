@@ -188,9 +188,6 @@ void ETKMinimizationStage::execute(ETKDGContext& ctx) {
 
   if (minimizer_.backend() == BfgsBackend::BATCHED) {
     // BATCHED backend: use generic minimize() with energy/gradient functors
-    // Allocate intermediate buffers before minimization
-    DistGeom::allocateIntermediateBuffers3D(molSystemHost, molSystemDevice);
-    
     auto eFunc = [&](const double* pos) {
       computeEnergyETK(molSystemDevice,
                        ctx.systemDevice.atomStarts,

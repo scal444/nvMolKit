@@ -350,8 +350,6 @@ struct BatchedMolecularDeviceBuffers {
   nvMolKit::AsyncDeviceVector<double> energyBuffer;
   //! Size n_molecules
   nvMolKit::AsyncDeviceVector<double> energyOuts;
-  //! Dimension change and padding buffers
-  PaddedInterfaceBuffers              dataFormatInterchangeBuffers;
   //! Dimension of all molecules in the batch (3 or 4)
   int                                 dimension = 3;
 };
