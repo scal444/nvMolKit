@@ -1,0 +1,2 @@
+add_library(molecule_graph_labels molecule_graph_labels.cu)
+
