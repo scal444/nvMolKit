@@ -23,14 +23,42 @@ __host__ __device__
 struct AtomBaseInfo {
   //! Only takes up 128, could reuse
   uint8_t atomicNumber;
+  //! C, CC, and the other specification (cn, need to figure that out)
   uint8_t chiralType;
 
+  bool aromatic;
+
+  uint8_t implicitConnections;
+  uint8_t explicitConections;
+  uint8_t charge;
+  uint8_t numCycles;
+  uint8_t cycleSize;
 };
 
 __host__ __device__
 struct BondBaseInfo {
-
+  uint8_t bondType;
 };
+
+enum class AtomQueryType: uint8_t {
+  ATOM_NUMBER = 0,
+  CHIRAL_TYPE = 1,
+  AROMATICITY = 2,
+  IMPLICIT_CONNECTIONS = 3,
+  EXPLICIT_CONNECTIONS = 4,
+  CHARGE = 5,
+  NUM_CYCLES = 6,
+  CYCLE_SIZE = 7,
+  ANY = 8
+};
+
+struct AtomQueryBase {
+  AtomQueryType type;
+  uint8_t matchValue;
+};
+
+
+struct BondQuery {};
 
 } // namespace nvMolKit
 
