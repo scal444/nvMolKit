@@ -59,7 +59,7 @@ void printHelp(const char* progName) {
     << "  -t, --num_threads <int>             RDKit MMFF optimize threads (per-molecule conformer threads) [default: OMP max]\n";
   std::cout
     << "  -p, --perturbation_factor <float>    Random displacement magnitude for starting structures [default: 0.5]\n";
-  std::cout << "  -k, --backend <batched|permol>      BFGS backend: 'batched' or 'permol' [default: batched]\n";
+  std::cout << "  -k, --backend <batched|permol|hybrid> BFGS backend: 'batched', 'permol', or 'hybrid' [default: hybrid]\n";
   std::cout << "  -h, --help                          Show this help message\n\n";
   std::cout << "Boolean values can be: true/false, 1/0, yes/no, on/off (case insensitive)\n";
 }
@@ -105,7 +105,9 @@ std::vector<std::vector<double>> runNvMolKit(std::vector<RDKit::ROMol*>& molsPtr
     }
   }
   std::vector<std::vector<double>> energies;
-  const char*                      backendStr = (backend == nvMolKit::BfgsBackend::BATCHED) ? "batched" : "permol";
+  const char* backendStr = (backend == nvMolKit::BfgsBackend::BATCHED)      ? "batched" :
+                           (backend == nvMolKit::BfgsBackend::PER_MOLECULE) ? "permol" :
+                                                                              "hybrid";
   std::string                      benchName  = "nvMolKit MMFF, num_mols=" + std::to_string(molsPtrs.size()) +
                           ", batch_size=" + std::to_string(batchSize) +
                           ", num_concurrent_batches=" + std::to_string(batchesPerGpu) + ", backend=" + backendStr;
@@ -156,7 +158,7 @@ int main(int argc, char* argv[]) {
   int                   numGpus            = -1;  // If <0, use all GPUs
   float                 perturbationFactor = 0.5f;
   int                   rdkitThreads       = -1;  // If <0, use OMP max
-  nvMolKit::BfgsBackend backend            = nvMolKit::BfgsBackend::BATCHED;
+  nvMolKit::BfgsBackend backend            = nvMolKit::BfgsBackend::HYBRID;
 
   static struct option long_options[] = {
     {             "file_path", required_argument, 0, 'f'},
@@ -286,8 +288,10 @@ int main(int argc, char* argv[]) {
           backend = nvMolKit::BfgsBackend::BATCHED;
         } else if (backendStr == "permol" || backendStr == "per_molecule") {
           backend = nvMolKit::BfgsBackend::PER_MOLECULE;
+        } else if (backendStr == "hybrid") {
+          backend = nvMolKit::BfgsBackend::HYBRID;
         } else {
-          std::cerr << "Error: Invalid backend. Must be 'batched' or 'permol'\n";
+          std::cerr << "Error: Invalid backend. Must be 'batched', 'permol', or 'hybrid'\n";
           return 1;
         }
         break;
@@ -332,7 +336,9 @@ int main(int argc, char* argv[]) {
   std::cout << "  RDKit MMFF threads: " << (rdkitThreads > 0 ? std::to_string(rdkitThreads) : std::string("OMP max"))
             << "\n";
   std::cout << "  Perturbation factor: " << perturbationFactor << "\n";
-  std::cout << "  BFGS backend: " << (backend == nvMolKit::BfgsBackend::BATCHED ? "batched" : "permol") << "\n\n";
+  std::cout << "  BFGS backend: " << (backend == nvMolKit::BfgsBackend::BATCHED      ? "batched" :
+                                      backend == nvMolKit::BfgsBackend::PER_MOLECULE ? "permol" :
+                                                                                       "hybrid") << "\n\n";
 
   const std::string ext          = BenchUtils::getFileExtensionLower(filePath);
   const bool        isSmilesLike = (ext == ".smi" || ext == ".smiles" || ext == ".cxsmiles");
