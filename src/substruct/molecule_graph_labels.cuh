@@ -19,20 +19,22 @@
 
 namespace nvMolKit {
 
-__host__ __device__
-struct AtomBaseInfo {
-  //! Only takes up 128, could reuse
-  uint8_t atomicNumber;
-  //! C, CC, and the other specification (cn, need to figure that out)
-  uint8_t chiralType;
+struct AtomData {
+  static constexpr uint8_t unsetValenceVal =
+      std::numeric_limits<uint8_t>::max();
 
-  bool aromatic;
+  uint8_t atomicNum = 0;
+  uint8_t numExplicitHs = 0;
+  uint8_t explicitValence = unsetValenceVal;
+  uint8_t implicitValence = unsetValenceVal;
 
-  uint8_t implicitConnections;
-  uint8_t explicitConections;
-  uint8_t charge;
-  uint8_t numCycles;
-  uint8_t cycleSize;
+  int8_t formalCharge = 0;
+  uint8_t chiralTag = 0;
+  uint8_t numRadicalElectrons = 0;
+  uint8_t hybridization = 0;
+  bool isAromatic = false;
+  uint8_t minRingSize = 0;
+  uint8_t numRings = 0;
 };
 
 __host__ __device__
