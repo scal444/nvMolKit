@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <string>
 #include <vector>
 
 #include "device_vector.h"
@@ -27,6 +28,30 @@ class ROMol;
 }  // namespace RDKit
 
 namespace nvMolKit {
+
+/**
+ * @brief Bitmask specifying which atom fields to compare for query matching.
+ *
+ * Multiple fields can be combined with bitwise OR for composite queries.
+ * For example, 'C' in SMARTS checks both AtomicNum and IsAliphatic.
+ */
+enum AtomQueryFlags : uint16_t {
+  AtomQueryNone              = 0,
+  AtomQueryAtomicNum         = 1 << 0,
+  AtomQueryNumExplicitHs     = 1 << 1,
+  AtomQueryExplicitValence   = 1 << 2,
+  AtomQueryImplicitValence   = 1 << 3,
+  AtomQueryFormalCharge      = 1 << 4,
+  AtomQueryChiralTag         = 1 << 5,
+  AtomQueryNumRadicalElectrons = 1 << 6,
+  AtomQueryHybridization     = 1 << 7,
+  AtomQueryMinRingSize       = 1 << 8,
+  AtomQueryNumRings          = 1 << 9,
+  AtomQueryIsAromatic        = 1 << 10,
+  AtomQueryIsAliphatic       = 1 << 11,
+};
+
+using AtomQuery = uint16_t;
 
 struct AtomData {
   static constexpr uint8_t unsetValenceVal = std::numeric_limits<uint8_t>::max();
@@ -64,11 +89,12 @@ struct MoleculesHost {
   std::vector<int> batchBondIndicesStarts;       ///< Start index into bondDataIndices for each molecule
 
   // Molecule-level data (flattened across all molecules)
-  std::vector<AtomData> atomData;          ///< Atom properties for all atoms
-  std::vector<BondData> bondData;          ///< Bond properties for all bonds
-  std::vector<int16_t>  atomBondStarts;    ///< Cumulative count of bonds per atom (prefix sum)
-  std::vector<int16_t>  otherAtomIndices;  ///< For each atom-bond pair, the other atom index
-  std::vector<int16_t>  bondDataIndices;   ///< For each atom-bond pair, index into bondData
+  std::vector<AtomData>  atomData;          ///< Atom properties for all atoms
+  std::vector<BondData>  bondData;          ///< Bond properties for all bonds
+  std::vector<AtomQuery> atomQueries;       ///< Query type per atom (parallel to atomData)
+  std::vector<int16_t>   atomBondStarts;    ///< Cumulative count of bonds per atom (prefix sum)
+  std::vector<int16_t>   otherAtomIndices;  ///< For each atom-bond pair, the other atom index
+  std::vector<int16_t>   bondDataIndices;   ///< For each atom-bond pair, index into bondData
 
   MoleculesHost();
 
@@ -85,17 +111,18 @@ struct MoleculesHost {
  * Use getMolecule() from molecules_device.cuh to get per-molecule views.
  */
 struct MoleculesDeviceView {
-  const int*      batchAtomStarts;
-  const int*      batchBondStarts;
-  const int*      batchAtomBondStarts;
-  const int*      batchOtherAtomIndicesStarts;
-  const int*      batchBondIndicesStarts;
-  const AtomData* atomData;
-  const BondData* bondData;
-  const int16_t*  atomBondStarts;
-  const int16_t*  otherAtomIndices;
-  const int16_t*  bondDataIndices;
-  int             numMolecules;
+  const int*       batchAtomStarts;
+  const int*       batchBondStarts;
+  const int*       batchAtomBondStarts;
+  const int*       batchOtherAtomIndicesStarts;
+  const int*       batchBondIndicesStarts;
+  const AtomData*  atomData;
+  const BondData*  bondData;
+  const AtomQuery* atomQueries;
+  const int16_t*   atomBondStarts;
+  const int16_t*   otherAtomIndices;
+  const int16_t*   bondDataIndices;
+  int              numMolecules;
 };
 
 /**
@@ -127,16 +154,17 @@ class MoleculesDevice {
   cudaStream_t stream_       = nullptr;
   int          numMolecules_ = 0;
 
-  AsyncDeviceVector<int>      batchAtomStarts_;
-  AsyncDeviceVector<int>      batchBondStarts_;
-  AsyncDeviceVector<int>      batchAtomBondStarts_;
-  AsyncDeviceVector<int>      batchOtherAtomIndicesStarts_;
-  AsyncDeviceVector<int>      batchBondIndicesStarts_;
-  AsyncDeviceVector<AtomData> atomData_;
-  AsyncDeviceVector<BondData> bondData_;
-  AsyncDeviceVector<int16_t>  atomBondStarts_;
-  AsyncDeviceVector<int16_t>  otherAtomIndices_;
-  AsyncDeviceVector<int16_t>  bondDataIndices_;
+  AsyncDeviceVector<int>       batchAtomStarts_;
+  AsyncDeviceVector<int>       batchBondStarts_;
+  AsyncDeviceVector<int>       batchAtomBondStarts_;
+  AsyncDeviceVector<int>       batchOtherAtomIndicesStarts_;
+  AsyncDeviceVector<int>       batchBondIndicesStarts_;
+  AsyncDeviceVector<AtomData>  atomData_;
+  AsyncDeviceVector<BondData>  bondData_;
+  AsyncDeviceVector<AtomQuery> atomQueries_;
+  AsyncDeviceVector<int16_t>   atomBondStarts_;
+  AsyncDeviceVector<int16_t>   otherAtomIndices_;
+  AsyncDeviceVector<int16_t>   bondDataIndices_;
 };
 
 /**
@@ -145,6 +173,24 @@ class MoleculesDevice {
  * @param batch The batch to add the molecule to
  */
 void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch);
+
+/**
+ * @brief Add a query molecule (from SMARTS) to an existing batch.
+ *
+ * Extracts query information from QueryAtom objects and populates atomQueries.
+ * Supports AND combinations of query types; OR/XOR queries throw an exception.
+ *
+ * @param mol Pointer to the RDKit molecule (typically parsed from SMARTS)
+ * @param batch The batch to add the query molecule to
+ */
+void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch);
+
+/**
+ * @brief Convert RDKit query description string to AtomQuery flags.
+ * @param description The query description from RDKit (e.g., "AtomAtomicNum")
+ * @return The corresponding AtomQuery flag value, or AtomQueryNone if unsupported
+ */
+AtomQuery atomQueryFromDescription(const std::string& description);
 
 }  // namespace nvMolKit
 

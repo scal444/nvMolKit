@@ -894,6 +894,139 @@ TEST_F(ExhaustiveConnectivityTest, NeopentaneNeighborBondsExhaustive) {
 }
 
 // =============================================================================
+// Query Batch Structure Tests (addQueryToBatch produces same structure)
+// =============================================================================
+
+struct SmilesSmartsPair {
+  std::string smiles;
+  std::string smarts;  // Equivalent SMARTS using atomic number syntax
+};
+
+class QueryBatchStructureTest : public ::testing::TestWithParam<SmilesSmartsPair> {
+ protected:
+  std::unique_ptr<RDKit::ROMol> makeMolFromSmiles(const std::string& smiles) {
+    auto mol = std::unique_ptr<RDKit::ROMol>(RDKit::SmilesToMol(smiles));
+    EXPECT_NE(mol, nullptr) << "Failed to parse SMILES: " << smiles;
+    return mol;
+  }
+
+  std::unique_ptr<RDKit::ROMol> makeMolFromSmarts(const std::string& smarts) {
+    auto mol = std::unique_ptr<RDKit::ROMol>(RDKit::SmartsToMol(smarts));
+    EXPECT_NE(mol, nullptr) << "Failed to parse SMARTS: " << smarts;
+    return mol;
+  }
+};
+
+TEST_P(QueryBatchStructureTest, StructureMatchesBetweenSmilesAndSmarts) {
+  const auto& pair = GetParam();
+
+  auto smilesMol = makeMolFromSmiles(pair.smiles);
+  auto smartsMol = makeMolFromSmarts(pair.smarts);
+  ASSERT_NE(smilesMol, nullptr);
+  ASSERT_NE(smartsMol, nullptr);
+
+  MoleculesHost smilesBatch;
+  MoleculesHost smartsBatch;
+
+  nvMolKit::addToBatch(smilesMol.get(), smilesBatch);
+  nvMolKit::addQueryToBatch(smartsMol.get(), smartsBatch);
+
+  // Verify same structure
+  EXPECT_EQ(smilesBatch.numMolecules(), smartsBatch.numMolecules());
+  EXPECT_EQ(smilesBatch.totalAtoms(), smartsBatch.totalAtoms());
+  EXPECT_EQ(smilesBatch.totalBonds(), smartsBatch.totalBonds());
+
+  // Verify atom data matches (atomic numbers should match)
+  ASSERT_EQ(smilesBatch.atomData.size(), smartsBatch.atomData.size());
+  for (size_t i = 0; i < smilesBatch.atomData.size(); ++i) {
+    EXPECT_EQ(smilesBatch.atomData[i].atomicNum, smartsBatch.atomData[i].atomicNum)
+      << "Atomic number mismatch at atom " << i;
+  }
+
+  // Verify bond data matches
+  ASSERT_EQ(smilesBatch.bondData.size(), smartsBatch.bondData.size());
+  for (size_t i = 0; i < smilesBatch.bondData.size(); ++i) {
+    EXPECT_EQ(smilesBatch.bondData[i].bondType, smartsBatch.bondData[i].bondType)
+      << "Bond type mismatch at bond " << i;
+  }
+
+  // Verify connectivity matches
+  EXPECT_EQ(smilesBatch.atomBondStarts, smartsBatch.atomBondStarts);
+  EXPECT_EQ(smilesBatch.otherAtomIndices, smartsBatch.otherAtomIndices);
+  EXPECT_EQ(smilesBatch.bondDataIndices, smartsBatch.bondDataIndices);
+}
+
+TEST_P(QueryBatchStructureTest, DeviceStructureMatchesBetweenSmilesAndSmarts) {
+  const auto& pair = GetParam();
+
+  auto smilesMol = makeMolFromSmiles(pair.smiles);
+  auto smartsMol = makeMolFromSmarts(pair.smarts);
+  ASSERT_NE(smilesMol, nullptr);
+  ASSERT_NE(smartsMol, nullptr);
+
+  MoleculesHost smilesBatch;
+  MoleculesHost smartsBatch;
+
+  nvMolKit::addToBatch(smilesMol.get(), smilesBatch);
+  nvMolKit::addQueryToBatch(smartsMol.get(), smartsBatch);
+
+  ScopedStream    stream;
+  MoleculesDevice smilesDevice(stream.stream());
+  MoleculesDevice smartsDevice(stream.stream());
+
+  smilesDevice.copyFromHost(smilesBatch);
+  smartsDevice.copyFromHost(smartsBatch);
+
+  const int numAtoms = static_cast<int>(smilesBatch.totalAtoms());
+
+  // Compare atomic numbers on device
+  AsyncDeviceVector<int> smilesResultsDev(numAtoms, stream.stream());
+  AsyncDeviceVector<int> smartsResultsDev(numAtoms, stream.stream());
+
+  readAtomPropertyKernel<<<1, numAtoms, 0, stream.stream()>>>(smilesDevice.view(),
+                                                              0,
+                                                              AtomProperty::AtomicNum,
+                                                              smilesResultsDev.data());
+  readAtomPropertyKernel<<<1, numAtoms, 0, stream.stream()>>>(smartsDevice.view(),
+                                                              0,
+                                                              AtomProperty::AtomicNum,
+                                                              smartsResultsDev.data());
+  cudaCheckError(cudaGetLastError());
+
+  std::vector<int> smilesResults(numAtoms);
+  std::vector<int> smartsResults(numAtoms);
+  smilesResultsDev.copyToHost(smilesResults);
+  smartsResultsDev.copyToHost(smartsResults);
+  cudaCheckError(cudaStreamSynchronize(stream.stream()));
+
+  for (int i = 0; i < numAtoms; ++i) {
+    EXPECT_EQ(smilesResults[i], smartsResults[i]) << "Device atomic number mismatch at atom " << i;
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(
+  SmilesVsSmarts,
+  QueryBatchStructureTest,
+  ::testing::Values(
+    // Same strings work as both SMILES and SMARTS
+    SmilesSmartsPair{"CCO", "CCO"},                // ethanol
+    SmilesSmartsPair{"c1ccccc1", "c1ccccc1"},      // benzene
+    SmilesSmartsPair{"CC(=O)O", "CC(=O)O"},        // acetic acid
+    SmilesSmartsPair{"C#N", "C#N"},                // hydrogen cyanide
+    SmilesSmartsPair{"CCCCCC", "CCCCCC"}           // hexane
+  ),
+  [](const ::testing::TestParamInfo<SmilesSmartsPair>& info) {
+    std::string name = info.param.smiles;
+    for (char& c : name) {
+      if (!std::isalnum(c)) {
+        c = '_';
+      }
+    }
+    return name;
+  }
+);
+
+// =============================================================================
 // Re-copy to Device Test
 // =============================================================================
 

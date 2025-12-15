@@ -30,6 +30,7 @@ namespace nvMolKit {
 struct MoleculeView {
   const AtomData* __restrict__ atomData;         ///< Pointer to first atom of this molecule
   const BondData* __restrict__ bondData;         ///< Pointer to first bond of this molecule
+  const AtomQuery* __restrict__ atomQueries;     ///< Pointer to this molecule's atom queries
   const int16_t* __restrict__ atomBondStarts;    ///< Pointer to this molecule's atom bond offsets
   const int16_t* __restrict__ otherAtomIndices;  ///< Pointer to this molecule's neighbor atom indices
   const int16_t* __restrict__ bondDataIndices;   ///< Pointer to this molecule's neighbor bond indices
@@ -39,6 +40,8 @@ struct MoleculeView {
   __device__ __forceinline__ const AtomData& getAtom(int atomIdx) const { return atomData[atomIdx]; }
 
   __device__ __forceinline__ const BondData& getBond(int bondIdx) const { return bondData[bondIdx]; }
+
+  __device__ __forceinline__ AtomQuery getAtomQuery(int atomIdx) const { return atomQueries[atomIdx]; }
 
   __device__ __forceinline__ int getAtomDegree(int atomIdx) const {
     return atomBondStarts[atomIdx + 1] - atomBondStarts[atomIdx];
@@ -65,6 +68,7 @@ __device__ __forceinline__ MoleculeView getMolecule(const MoleculesDeviceView& v
   MoleculeView mol;
   mol.atomData         = view.atomData + view.batchAtomStarts[molIdx];
   mol.bondData         = view.bondData + view.batchBondStarts[molIdx];
+  mol.atomQueries      = view.atomQueries + view.batchAtomStarts[molIdx];
   mol.atomBondStarts   = view.atomBondStarts + view.batchAtomBondStarts[molIdx];
   mol.otherAtomIndices = view.otherAtomIndices + view.batchOtherAtomIndicesStarts[molIdx];
   mol.bondDataIndices  = view.bondDataIndices + view.batchBondIndicesStarts[molIdx];

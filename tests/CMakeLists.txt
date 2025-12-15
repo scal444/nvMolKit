@@ -180,9 +180,13 @@ target_link_libraries(test_butina PRIVATE butina device)
 add_executable(test_molecules test_molecules.cu)
 target_link_libraries(test_molecules PRIVATE molecules device ${RDKit_LIBS})
 
+add_executable(test_query test_query.cu)
+target_link_libraries(test_query PRIVATE molecules device ${RDKit_LIBS})
+
 set(TEST_LIST
     test_butina
     test_molecules
+    test_query
     test_bfgs_hessian
     test_openmp_helpers
     test_conformer_checkers
