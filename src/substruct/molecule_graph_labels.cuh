@@ -20,48 +20,45 @@
 namespace nvMolKit {
 
 struct AtomData {
-  static constexpr uint8_t unsetValenceVal =
-      std::numeric_limits<uint8_t>::max();
+  static constexpr uint8_t unsetValenceVal = std::numeric_limits<uint8_t>::max();
 
-  uint8_t atomicNum = 0;
-  uint8_t numExplicitHs = 0;
+  uint8_t atomicNum       = 0;
+  uint8_t numExplicitHs   = 0;
   uint8_t explicitValence = unsetValenceVal;
   uint8_t implicitValence = unsetValenceVal;
 
-  int8_t formalCharge = 0;
-  uint8_t chiralTag = 0;
+  int8_t  formalCharge        = 0;
+  uint8_t chiralTag           = 0;
   uint8_t numRadicalElectrons = 0;
-  uint8_t hybridization = 0;
-  bool isAromatic = false;
-  uint8_t minRingSize = 0;
-  uint8_t numRings = 0;
+  uint8_t hybridization       = 0;
+  bool    isAromatic          = false;
+  uint8_t minRingSize         = 0;
+  uint8_t numRings            = 0;
 };
 
-__host__ __device__
-struct BondBaseInfo {
+__host__ __device__ struct BondBaseInfo {
   uint8_t bondType;
 };
 
-enum class AtomQueryType: uint8_t {
-  ATOM_NUMBER = 0,
-  CHIRAL_TYPE = 1,
-  AROMATICITY = 2,
+enum class AtomQueryType : uint8_t {
+  ATOM_NUMBER          = 0,
+  CHIRAL_TYPE          = 1,
+  AROMATICITY          = 2,
   IMPLICIT_CONNECTIONS = 3,
   EXPLICIT_CONNECTIONS = 4,
-  CHARGE = 5,
-  NUM_CYCLES = 6,
-  CYCLE_SIZE = 7,
-  ANY = 8
+  CHARGE               = 5,
+  NUM_CYCLES           = 6,
+  CYCLE_SIZE           = 7,
+  ANY                  = 8
 };
 
 struct AtomQueryBase {
   AtomQueryType type;
-  uint8_t matchValue;
+  uint8_t       matchValue;
 };
-
 
 struct BondQuery {};
 
-} // namespace nvMolKit
+}  // namespace nvMolKit
 
 #endif  // NVMOLKIT_MOLECULE_GRAPH_LABELS_H

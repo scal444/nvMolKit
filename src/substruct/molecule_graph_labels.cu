@@ -13,6 +13,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 #include "molecule_graph_labels.cuh"
-namespace nvMolKit {
-
-} // namespace nvMolKit
+namespace nvMolKit {}  // namespace nvMolKit
