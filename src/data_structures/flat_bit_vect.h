@@ -228,6 +228,81 @@ static_assert(sizeof(FlatBitVect<32>) == 4, "FlatBitVect<32> should be 4 bytes")
 static_assert(sizeof(FlatBitVect<33>) == 8, "FlatBitVect<33> should be 8 bytes");
 static_assert(sizeof(FlatBitVect<64>) == 8, "FlatBitVect<64> should be 8 bytes");
 
+/**
+ * @brief 2D view into a FlatBitVect for matrix-style bit access.
+ *
+ * Provides row-major 2D indexing into a flat bit vector. The underlying storage
+ * is a FlatBitVect of size Rows * Cols. This is a non-owning view that can wrap
+ * either stack-allocated (shared memory) or heap-allocated (global memory) storage.
+ *
+ * @tparam Rows Number of rows (typically target graph size)
+ * @tparam Cols Number of columns (typically query graph size)
+ */
+template <std::size_t Rows, std::size_t Cols>
+class BitMatrix2DView {
+ public:
+  static constexpr std::size_t kRows     = Rows;
+  static constexpr std::size_t kCols     = Cols;
+  static constexpr std::size_t kTotalBits = Rows * Cols;
+  using StorageType = FlatBitVect<kTotalBits>;
+
+ private:
+  StorageType* storage_;
+
+ public:
+  CUDA_CALLABLE_MEMBER BitMatrix2DView() : storage_(nullptr) {}
+
+  CUDA_CALLABLE_MEMBER explicit BitMatrix2DView(StorageType* storage) : storage_(storage) {}
+
+  CUDA_CALLABLE_MEMBER explicit BitMatrix2DView(StorageType& storage) : storage_(&storage) {}
+
+  /**
+   * @brief Get the linear index for a 2D coordinate (row-major order).
+   */
+  CUDA_CALLABLE_MEMBER static constexpr std::size_t linearIndex(std::size_t row, std::size_t col) {
+    return row * kCols + col;
+  }
+
+  /**
+   * @brief Get the bit value at (row, col).
+   */
+  CUDA_CALLABLE_MEMBER bool get(std::size_t row, std::size_t col) const {
+    return (*storage_)[linearIndex(row, col)];
+  }
+
+  /**
+   * @brief Set the bit value at (row, col).
+   */
+  CUDA_CALLABLE_MEMBER void set(std::size_t row, std::size_t col, bool value) {
+    storage_->setBit(linearIndex(row, col), value);
+  }
+
+  /**
+   * @brief Clear all bits in the matrix.
+   */
+  CUDA_CALLABLE_MEMBER void clear() {
+    storage_->clear();
+  }
+
+  /**
+   * @brief Check if a row has any bits set.
+   */
+  CUDA_CALLABLE_MEMBER bool rowHasAnySet(std::size_t row) const {
+    for (std::size_t col = 0; col < kCols; ++col) {
+      if (get(row, col)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * @brief Get the underlying storage pointer.
+   */
+  CUDA_CALLABLE_MEMBER StorageType* storage() { return storage_; }
+  CUDA_CALLABLE_MEMBER const StorageType* storage() const { return storage_; }
+};
+
 }  // namespace nvMolKit
 
 namespace std {

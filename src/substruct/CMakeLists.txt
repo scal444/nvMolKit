@@ -7,5 +7,5 @@ target_include_directories(molecules PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_link_libraries(
   molecules
-  PUBLIC device_vector
+  PUBLIC device_vector flatBitVect
   PRIVATE ${RDKit_LIBS})
