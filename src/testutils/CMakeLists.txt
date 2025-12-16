@@ -23,3 +23,11 @@ add_library(conformer_checkers conformer_checkers.cpp)
 target_link_libraries(conformer_checkers PRIVATE ${RDKit_LIBS})
 target_include_directories(conformer_checkers
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+if(NVMOLKIT_BUILD_TESTS OR NVMOLKIT_BUILD_BENCHMARKS)
+  add_library(substruct_validation substruct_validation.cpp)
+  target_include_directories(
+    substruct_validation PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+                                ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(substruct_validation PUBLIC ${RDKit_LIBS})
+endif()

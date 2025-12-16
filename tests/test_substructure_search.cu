@@ -15,7 +15,6 @@
 
 #include <GraphMol/ROMol.h>
 #include <GraphMol/SmilesParse/SmilesParse.h>
-#include <GraphMol/Substruct/SubstructMatch.h>
 #include <gtest/gtest.h>
 
 #include <memory>
@@ -25,10 +24,13 @@
 #include "cuda_error_check.h"
 #include "device.h"
 #include "substructure_search.cuh"
+#include "testutils/substruct_validation.h"
 
 using nvMolKit::addQueryToBatch;
 using nvMolKit::addToBatch;
+using nvMolKit::algorithmName;
 using nvMolKit::checkReturnCode;
+using nvMolKit::getRDKitSubstructMatches;
 using nvMolKit::getSubstructMatches;
 using nvMolKit::MoleculesDevice;
 using nvMolKit::MoleculesHost;
@@ -40,58 +42,11 @@ using nvMolKit::SubstructMatchResultsHost;
 namespace {
 
 std::unique_ptr<RDKit::ROMol> makeMolFromSmiles(const std::string& smiles) {
-  auto mol = std::unique_ptr<RDKit::ROMol>(RDKit::SmilesToMol(smiles));
-  return mol;
+  return std::unique_ptr<RDKit::ROMol>(RDKit::SmilesToMol(smiles));
 }
 
 std::unique_ptr<RDKit::ROMol> makeMolFromSmarts(const std::string& smarts) {
-  auto mol = std::unique_ptr<RDKit::ROMol>(RDKit::SmartsToMol(smarts));
-  return mol;
-}
-
-/**
- * @brief Get substructure matches using RDKit as ground truth.
- *
- * @param target Target molecule (SMILES)
- * @param query Query molecule (SMARTS)
- * @param uniquify If true, return only unique matches
- * @return Vector of matches, where each match is a vector of target atom indices
- */
-std::vector<std::vector<int>> getRDKitMatches(const RDKit::ROMol& target,
-                                              const RDKit::ROMol& query,
-                                              bool                uniquify = true) {
-  RDKit::SubstructMatchParameters params;
-  params.uniquify = uniquify;
-
-  std::vector<RDKit::MatchVectType> matches = RDKit::SubstructMatch(target, query, params);
-
-  std::vector<std::vector<int>> result;
-  result.reserve(matches.size());
-
-  for (const auto& match : matches) {
-    std::vector<int> mapping(match.size());
-    for (size_t i = 0; i < match.size(); ++i) {
-      mapping[match[i].first] = match[i].second;
-    }
-    result.push_back(std::move(mapping));
-  }
-
-  return result;
-}
-
-/**
- * @brief Get algorithm name for test output.
- */
-std::string algorithmName(SubstructAlgorithm algo) {
-  switch (algo) {
-    case SubstructAlgorithm::VF2:
-      return "VF2";
-    case SubstructAlgorithm::GSI:
-      return "GSI";
-    case SubstructAlgorithm::WarpUnified:
-      return "WarpUnified";
-  }
-  return "Unknown";
+  return std::unique_ptr<RDKit::ROMol>(RDKit::SmartsToMol(smarts));
 }
 
 }  // namespace
@@ -152,7 +107,7 @@ class SubstructureSearchTest : public ::testing::TestWithParam<SubstructAlgorith
     for (int t = 0; t < results.numTargets; ++t) {
       for (int q = 0; q < results.numQueries; ++q) {
         // Use uniquify=false to match our non-uniquifying GPU algorithm
-        const auto rdkitMatches    = getRDKitMatches(*targetMols[t], *queryMols[q], false);
+        const auto rdkitMatches    = getRDKitSubstructMatches(*targetMols[t], *queryMols[q], false);
         const int  pairIdx         = results.pairIndex(t, q);
         const int  gpuMatchCount   = results.matchCounts[pairIdx];
         const int  rdkitMatchCount = static_cast<int>(rdkitMatches.size());
@@ -334,7 +289,7 @@ TEST_P(SubstructureSearchTest, NoMatchPossible) {
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
   // RDKit also returns 0 matches here
-  auto rdkitMatches = getRDKitMatches(*targetMols[0], *queryMols[0]);
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0]);
   EXPECT_EQ(rdkitMatches.size(), 0u);
 
   // GPU should also return 0
@@ -364,7 +319,7 @@ TEST_P(SubstructureSearchTest, AromaticVsAliphatic) {
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
   // RDKit: benzene has no aliphatic carbons
-  auto rdkitMatches = getRDKitMatches(*targetMols[0], *queryMols[0]);
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0]);
   EXPECT_EQ(rdkitMatches.size(), 0u);
 
   EXPECT_EQ(resultsHost.matchCounts[0], 0);
@@ -467,7 +422,7 @@ TEST_P(SubstructureSearchTest, MultiAtomQuery) {
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
   // Should get 2 matches with uniquify=false
-  auto rdkitMatches = getRDKitMatches(*targetMols[0], *queryMols[0], false);
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
   EXPECT_EQ(rdkitMatches.size(), 2u) << "RDKit should find 2 non-unique matches";
 
   // Check GPU result
@@ -504,7 +459,7 @@ TEST_P(SubstructureSearchTest, ThreeAtomQuery) {
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
   // Should get 2 matches with uniquify=false
-  auto rdkitMatches = getRDKitMatches(*targetMols[0], *queryMols[0], false);
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
   EXPECT_EQ(rdkitMatches.size(), 2u) << "RDKit should find 2 non-unique matches for COC in CCOCC";
 
   // Check GPU result
@@ -536,7 +491,7 @@ TEST_P(SubstructureSearchTest, ExpectedOverflow) {
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
   // RDKit returns 10 non-unique matches
-  auto rdkitMatches = getRDKitMatches(*targetMols[0], *queryMols[0], false);
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
   EXPECT_EQ(rdkitMatches.size(), 10u);
 
   // GPU should report actual count of 10, but only store 6
@@ -561,8 +516,8 @@ TEST_F(RDKitReferenceTest, HexaneCCMatches) {
   auto target = makeMolFromSmiles("CCCCCC");
   auto query  = makeMolFromSmarts("CC");
 
-  auto matchesUnique    = getRDKitMatches(*target, *query, true);
-  auto matchesNonUnique = getRDKitMatches(*target, *query, false);
+  auto matchesUnique    = getRDKitSubstructMatches(*target, *query, true);
+  auto matchesNonUnique = getRDKitSubstructMatches(*target, *query, false);
 
   EXPECT_EQ(matchesUnique.size(), 5u);
   EXPECT_EQ(matchesNonUnique.size(), 10u);

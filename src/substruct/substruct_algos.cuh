@@ -21,21 +21,9 @@
 
 #include "flat_bit_vect.h"
 #include "molecules_device.cuh"
+#include "substruct_types.h"
 
 namespace nvMolKit {
-
-// =============================================================================
-// Algorithm Selection
-// =============================================================================
-
-/**
- * @brief Algorithm choice for substructure matching.
- */
-enum class SubstructAlgorithm {
-  VF2,          ///< VF2 iterative stack-based DFS
-  GSI,          ///< GSI-inspired BFS level-by-level join
-  WarpUnified   ///< Novel warp-collective BFS search
-};
 
 // =============================================================================
 // Shared Constants

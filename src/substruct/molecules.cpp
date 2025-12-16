@@ -289,7 +289,37 @@ AtomQuery atomQueryFromDescription(const std::string& description) {
   if (description == "AtomNull") {
     return AtomQueryNone;
   }
-  return AtomQueryNone;
+
+  // Unsupported SMARTS primitives - throw instead of silently ignoring
+  if (description == "AtomExplicitDegree") {
+    throw std::runtime_error("SMARTS degree query (D) is not supported");
+  }
+  if (description == "AtomTotalDegree") {
+    throw std::runtime_error("SMARTS total connectivity query (X) is not supported");
+  }
+  if (description == "AtomRingBondCount") {
+    throw std::runtime_error("SMARTS ring connectivity query (x) is not supported");
+  }
+  if (description == "AtomTotalValence") {
+    throw std::runtime_error("SMARTS valence query (v) is not supported");
+  }
+  if (description == "AtomImplicitHCount") {
+    throw std::runtime_error("SMARTS implicit hydrogen count query (h) is not supported");
+  }
+  if (description == "AtomMass") {
+    throw std::runtime_error("SMARTS isotope/mass query is not supported");
+  }
+  if (description == "AtomHasRingBond") {
+    throw std::runtime_error("SMARTS ring bond query (@) is not supported");
+  }
+  if (description == "AtomUnsaturated") {
+    throw std::runtime_error("SMARTS unsaturation query is not supported");
+  }
+  if (description == "AtomChiralTag") {
+    throw std::runtime_error("SMARTS chirality query (@/@@ ) is not supported");
+  }
+
+  throw std::runtime_error("Unsupported SMARTS atom query: " + description);
 }
 
 AtomQueryMask buildQueryMask(const AtomDataPacked& queryAtom, AtomQuery queryFlags) {
@@ -357,6 +387,11 @@ namespace {
 AtomQuery getQueryFlagsFromQuery(const RDKit::Atom::QUERYATOM_QUERY* query) {
   const std::string description = query->getDescription();
 
+  // Check for negation first - applies to any query type
+  if (query->getNegation()) {
+    throw std::runtime_error("Negated atom queries (!) are not supported");
+  }
+
   // Composite query - recurse into children
   if (description == "AtomAnd") {
     AtomQuery result = AtomQueryNone;
@@ -381,10 +416,19 @@ AtomQuery getQueryFlagsFromQuery(const RDKit::Atom::QUERYATOM_QUERY* query) {
     throw std::runtime_error("Composite queries (OR/XOR) are not supported: " + description);
   }
 
+  if (description == "RecursiveStructure") {
+    throw std::runtime_error("Recursive SMARTS ($(...)) are not supported");
+  }
+
   return atomQueryFromDescription(description);
 }
 
 AtomQuery getAtomQueryType(const RDKit::Atom* atom) {
+  // Check for chirality specified on the atom (SMARTS @/@@ notation)
+  if (atom->getChiralTag() != RDKit::Atom::ChiralType::CHI_UNSPECIFIED) {
+    throw std::runtime_error("SMARTS chirality query (@/@@) is not supported");
+  }
+
   if (!atom->hasQuery()) {
     return AtomQueryNone;
   }

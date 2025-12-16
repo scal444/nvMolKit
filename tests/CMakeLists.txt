@@ -191,9 +191,9 @@ add_executable(test_graph_labeler test_graph_labeler.cu)
 target_link_libraries(test_graph_labeler PRIVATE molecules device ${RDKit_LIBS})
 
 add_executable(test_substructure_search test_substructure_search.cu)
-target_link_libraries(test_substructure_search PRIVATE substructure_search
-                                                       molecules device
-                                                       ${RDKit_LIBS})
+target_link_libraries(
+  test_substructure_search PRIVATE substructure_search molecules device
+                                   substruct_validation ${RDKit_LIBS})
 
 set(TEST_LIST
     test_butina

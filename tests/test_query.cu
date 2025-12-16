@@ -34,6 +34,7 @@ using nvMolKit::AtomQueryFormalCharge;
 using nvMolKit::AtomQueryHybridization;
 using nvMolKit::AtomQueryIsAliphatic;
 using nvMolKit::AtomQueryIsAromatic;
+using nvMolKit::AtomQueryMinRingSize;
 using nvMolKit::AtomQueryNone;
 using nvMolKit::AtomQueryNumExplicitHs;
 using nvMolKit::AtomQueryNumRings;
@@ -174,7 +175,28 @@ INSTANTIATE_TEST_SUITE_P(
 
     // Combined query: aliphatic carbon with H count
     QueryTestCase{"[CH3]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryNumExplicitHs}},
-    QueryTestCase{"[CH2]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryNumExplicitHs}}),
+    QueryTestCase{"[CH2]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryNumExplicitHs}},
+
+    // Ring size queries (r = smallest ring size)
+    QueryTestCase{"[r5]", {AtomQueryMinRingSize}},
+    QueryTestCase{"[r6]", {AtomQueryMinRingSize}},
+
+    // Explicit AND with ampersand (&) - high precedence
+    QueryTestCase{"[C&R]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryNumRings}},
+    QueryTestCase{"[C&H3]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryNumExplicitHs}},
+    QueryTestCase{"[c&R1]", {AtomQueryAtomicNum | AtomQueryIsAromatic | AtomQueryNumRings}},
+    QueryTestCase{"[#6&R1]", {AtomQueryAtomicNum | AtomQueryNumRings}},
+
+    // Explicit AND with semicolon (;) - low precedence
+    QueryTestCase{"[C;H3]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryNumExplicitHs}},
+    QueryTestCase{"[c;R1]", {AtomQueryAtomicNum | AtomQueryIsAromatic | AtomQueryNumRings}},
+    QueryTestCase{"[#6;R]", {AtomQueryAtomicNum | AtomQueryNumRings}},
+
+    // Multiple ring query
+    QueryTestCase{"[R2]", {AtomQueryNumRings}},
+
+    // Combining ring membership with ring size
+    QueryTestCase{"[R1;r6]", {AtomQueryNumRings | AtomQueryMinRingSize}}),
   [](const ::testing::TestParamInfo<QueryTestCase>& info) {
     std::string name;
     for (char c : info.param.smarts) {
@@ -192,6 +214,10 @@ INSTANTIATE_TEST_SUITE_P(
         name += "L";
       } else if (c == ']') {
         name += "R";
+      } else if (c == '&') {
+        name += "And";
+      } else if (c == ';') {
+        name += "Semi";
       } else {
         name += '_';
       }
@@ -210,6 +236,118 @@ TEST(QueryCompositeTest, OrQueryThrows) {
 
   MoleculesHost batch;
   EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
+}
+
+TEST(QueryCompositeTest, RecursiveSmartsThrows) {
+  // $(*C) recursive SMARTS
+  auto mol = makeQuery("[$(*C)]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
+}
+
+TEST(QueryCompositeTest, NegationThrows) {
+  // [!C] negated query
+  auto mol = makeQuery("[!C]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
+}
+
+TEST(QueryCompositeTest, DegreeQueryThrows) {
+  // [D3] explicit degree query
+  auto mol = makeQuery("[D3]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
+}
+
+TEST(QueryCompositeTest, TotalConnectivityQueryThrows) {
+  // [X3] total connectivity query
+  auto mol = makeQuery("[X3]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
+}
+
+TEST(QueryCompositeTest, RingConnectivityQueryThrows) {
+  // [x2] ring connectivity query
+  auto mol = makeQuery("[x2]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
+}
+
+TEST(QueryCompositeTest, ValenceQueryThrows) {
+  // [v4] total valence query
+  auto mol = makeQuery("[v4]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
+}
+
+TEST(QueryCompositeTest, ImplicitHCountQueryThrows) {
+  // [h1] implicit H count query
+  auto mol = makeQuery("[h1]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
+}
+
+TEST(QueryCompositeTest, IsotopeQueryThrows) {
+  // [13C] isotope/mass query
+  auto mol = makeQuery("[13C]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
+}
+
+TEST(QueryCompositeTest, ChiralityQueryThrows) {
+  // [@] chirality query
+  auto mol = makeQuery("[C@H](F)(Cl)Br");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
+}
+
+TEST(QueryCompositeTest, WildcardAtomSucceeds) {
+  // [*] wildcard atom - matches any atom
+  // This is supported as it produces AtomNull which returns AtomQueryNone
+  auto mol = makeQuery("[*]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_EQ(batch.atomQueries[0], AtomQueryNone);
+}
+
+TEST(QueryCompositeTest, AnyAromaticAtomSucceeds) {
+  // [a] any aromatic atom
+  auto mol = makeQuery("[a]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_EQ(batch.atomQueries[0], AtomQueryIsAromatic);
+}
+
+TEST(QueryCompositeTest, AnyAliphaticAtomSucceeds) {
+  // [A] any aliphatic atom
+  auto mol = makeQuery("[A]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_EQ(batch.atomQueries[0], AtomQueryIsAliphatic);
 }
 
 // =============================================================================

@@ -74,3 +74,13 @@ target_link_libraries(
 add_executable(UpdateInverseHessianBench updateInverseHessianBench.cu)
 target_link_libraries(UpdateInverseHessianBench
                       PRIVATE CUDA::cudart cuda_error_check device_vector bfgs)
+
+add_executable(SubstructBench substruct_bench.cu)
+target_link_libraries(
+  SubstructBench
+  PRIVATE nanobench
+          ${RDKit_LIBS}
+          substructure_search
+          substruct_validation
+          device
+          cuda_error_check)
