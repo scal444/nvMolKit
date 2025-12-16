@@ -22,8 +22,11 @@
 
 #include "device_vector.h"
 #include "molecules.h"
+#include "substruct_algos.cuh"
 
 namespace nvMolKit {
+
+// SubstructAlgorithm enum is defined in substruct_algos.cuh and available here
 
 /**
  * @brief Host-side results from batch substructure matching.
@@ -162,6 +165,7 @@ class SubstructMatchResultsDevice {
  * @param targetsHost Host-side target data (for atom counts)
  * @param queriesHost Host-side query data (for atom counts)
  * @param results Output storage (will be allocated)
+ * @param algorithm Algorithm to use for matching
  * @param stream CUDA stream for async operations
  */
 void getSubstructMatches(const MoleculesDevice&       targetsDevice,
@@ -169,6 +173,7 @@ void getSubstructMatches(const MoleculesDevice&       targetsDevice,
                          const MoleculesHost&         targetsHost,
                          const MoleculesHost&         queriesHost,
                          SubstructMatchResultsDevice& results,
+                         SubstructAlgorithm           algorithm,
                          cudaStream_t                 stream);
 
 }  // namespace nvMolKit

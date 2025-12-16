@@ -20,6 +20,7 @@
 #include "cuda_error_check.h"
 #include "graph_labeler.cuh"
 #include "molecules_device.cuh"
+#include "substruct_algos.cuh"
 
 namespace nvMolKit {
 
@@ -31,17 +32,21 @@ constexpr std::size_t kMaxQueryAtoms  = 64;
 using LabelMatrixStorage = FlatBitVect<kMaxTargetAtoms * kMaxQueryAtoms>;
 using LabelMatrixView    = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
 
+constexpr int kMaxPartialsPerBlock = 256;
+constexpr int kMaxQueueSize        = 512;
+
 /**
  * @brief Kernel for batch substructure matching.
  *
  * One block per (target, query) pair. Performs graph labeling in shared memory,
- * then (placeholder) substructure search.
+ * then dispatches to algorithm-specific search based on template parameter.
  *
- * Currently only performs graph labeling - search not yet implemented.
+ * @tparam Algo Algorithm to use for the search phase
  */
-__global__ void substructMatchKernel(MoleculesDeviceView              targets,
-                                     MoleculesDeviceView              queries,
-                                     SubstructMatchResultsDeviceView  results) {
+template <SubstructAlgorithm Algo>
+__global__ void substructMatchKernel(MoleculesDeviceView             targets,
+                                     MoleculesDeviceView             queries,
+                                     SubstructMatchResultsDeviceView results) {
   // Each block handles one (target, query) pair
   const int pairIdx   = blockIdx.x;
   const int targetIdx = pairIdx / results.numQueries;
@@ -64,12 +69,90 @@ __global__ void substructMatchKernel(MoleculesDeviceView              targets,
 
   __syncthreads();
 
-  // TODO: Implement actual VF2 substructure search here
-  // For now, just report 0 matches as placeholder
+  // Get output buffer info for this pair
+  const int matchOffset = results.pairMatchStarts[pairIdx];
+  const int maxMatches  = (results.pairMatchStarts[pairIdx + 1] - matchOffset) / query.numAtoms;
+
+  // Initialize result counters
+  __shared__ int sharedMatchCount;
+  __shared__ int sharedReportedCount;
 
   if (threadIdx.x == 0) {
-    results.matchCounts[pairIdx]    = 0;
-    results.reportedCounts[pairIdx] = 0;
+    sharedMatchCount    = 0;
+    sharedReportedCount = 0;
+  }
+  __syncthreads();
+
+  // Dispatch to algorithm-specific search
+  if constexpr (Algo == SubstructAlgorithm::VF2) {
+    // VF2: Each warp handles a different starting target atom
+    namespace cg = cooperative_groups;
+    auto tile32  = cg::tiled_partition<32>(cg::this_thread_block());
+    const int warpId   = tile32.meta_group_rank();
+    const int numWarps = tile32.meta_group_size();
+
+    __shared__ VF2State vf2States[4];  // Up to 4 warps
+
+    if (warpId < 4 && tile32.thread_rank() == 0) {
+      vf2States[warpId].init();
+    }
+    __syncthreads();
+
+    // Each warp explores from different starting target atoms
+    for (int startT = warpId; startT < target.numAtoms; startT += numWarps) {
+      if (warpId < 4) {
+        vf2SearchGPU<kMaxTargetAtoms, kMaxQueryAtoms>(target,
+                                                      query,
+                                                      labelMatrix,
+                                                      vf2States[warpId],
+                                                      startT,
+                                                      &sharedMatchCount,
+                                                      &sharedReportedCount,
+                                                      results.matchIndices,
+                                                      maxMatches,
+                                                      matchOffset);
+      }
+    }
+
+  } else if constexpr (Algo == SubstructAlgorithm::GSI) {
+    // GSI: BFS level-by-level search
+    __shared__ PartialMatch gsiPartials[kMaxPartialsPerBlock * 2];  // Ping-pong buffer
+
+    gsiBFSSearchGPU<kMaxTargetAtoms, kMaxQueryAtoms>(target,
+                                                     query,
+                                                     labelMatrix,
+                                                     gsiPartials,
+                                                     kMaxPartialsPerBlock,
+                                                     &sharedMatchCount,
+                                                     &sharedReportedCount,
+                                                     results.matchIndices,
+                                                     maxMatches,
+                                                     matchOffset);
+
+  } else if constexpr (Algo == SubstructAlgorithm::WarpUnified) {
+    // WUS: Warp-collective BFS with precomputed candidates
+    __shared__ CandidateList wusCandidates[kMaxQueryAtoms];
+    __shared__ PartialMatch  wusWorkQueue[kMaxQueueSize];
+
+    warpUnifiedSearchGPU<kMaxTargetAtoms, kMaxQueryAtoms>(target,
+                                                          query,
+                                                          labelMatrix,
+                                                          wusCandidates,
+                                                          wusWorkQueue,
+                                                          kMaxQueueSize,
+                                                          &sharedMatchCount,
+                                                          &sharedReportedCount,
+                                                          results.matchIndices,
+                                                          maxMatches,
+                                                          matchOffset);
+  }
+
+  __syncthreads();
+
+  // Write final counts to global memory
+  if (threadIdx.x == 0) {
+    results.matchCounts[pairIdx]    = sharedMatchCount;
+    results.reportedCounts[pairIdx] = sharedReportedCount;
   }
 }
 
@@ -138,9 +221,10 @@ void SubstructMatchResultsDevice::allocate(int                     numTargets,
   matchIndices_.resize(totalMatchIndices_);
   queryAtomCounts_.resize(numQueries);
 
-  // Initialize counts to zero
+  // Initialize counts and indices to zero
   matchCounts_.zero();
   reportedCounts_.zero();
+  matchIndices_.zero();
 
   // Copy offsets and query atom counts to device
   pairMatchStarts_.setFromVector(hostPairMatchStarts_);
@@ -185,6 +269,7 @@ void getSubstructMatches(const MoleculesDevice&       targetsDevice,
                          const MoleculesHost&         targetsHost,
                          const MoleculesHost&         queriesHost,
                          SubstructMatchResultsDevice& results,
+                         SubstructAlgorithm           algorithm,
                          cudaStream_t                 stream) {
   const int numTargets = static_cast<int>(targetsHost.numMolecules());
   const int numQueries = static_cast<int>(queriesHost.numMolecules());
@@ -204,9 +289,9 @@ void getSubstructMatches(const MoleculesDevice&       targetsDevice,
   // Compute max matches per target (= target atom count for now)
   std::vector<int> maxMatchesPerPair(numTargets);
   for (int t = 0; t < numTargets; ++t) {
-    const int atomStart    = targetsHost.batchAtomStarts[t];
-    const int atomEnd      = targetsHost.batchAtomStarts[t + 1];
-    maxMatchesPerPair[t]   = atomEnd - atomStart;
+    const int atomStart  = targetsHost.batchAtomStarts[t];
+    const int atomEnd    = targetsHost.batchAtomStarts[t + 1];
+    maxMatchesPerPair[t] = atomEnd - atomStart;
   }
 
   // Allocate result buffers
@@ -214,14 +299,26 @@ void getSubstructMatches(const MoleculesDevice&       targetsDevice,
   results.allocate(numTargets, numQueries, queryAtomCounts, maxMatchesPerPair);
 
   // Launch kernel: one block per (target, query) pair
-  const int numPairs    = numTargets * numQueries;
-  const int threadsPerBlock = 128;  // Multiple warps for parallel label matrix population
+  const int numPairs        = numTargets * numQueries;
+  const int threadsPerBlock = 128;  // Multiple warps for parallel operations
 
-  substructMatchKernel<<<numPairs, threadsPerBlock, 0, stream>>>(
-    targetsDevice.view(),
-    queriesDevice.view(),
-    results.view()
-  );
+  // Dispatch to algorithm-specific kernel instantiation
+  switch (algorithm) {
+    case SubstructAlgorithm::VF2:
+      substructMatchKernel<SubstructAlgorithm::VF2><<<numPairs, threadsPerBlock, 0, stream>>>(
+        targetsDevice.view(), queriesDevice.view(), results.view());
+      break;
+
+    case SubstructAlgorithm::GSI:
+      substructMatchKernel<SubstructAlgorithm::GSI><<<numPairs, threadsPerBlock, 0, stream>>>(
+        targetsDevice.view(), queriesDevice.view(), results.view());
+      break;
+
+    case SubstructAlgorithm::WarpUnified:
+      substructMatchKernel<SubstructAlgorithm::WarpUnified><<<numPairs, threadsPerBlock, 0, stream>>>(
+        targetsDevice.view(), queriesDevice.view(), results.view());
+      break;
+  }
 
   cudaCheckError(cudaGetLastError());
 }
