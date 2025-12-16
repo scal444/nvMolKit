@@ -522,3 +522,536 @@ TEST_F(RDKitReferenceTest, HexaneCCMatches) {
   EXPECT_EQ(matchesUnique.size(), 5u);
   EXPECT_EQ(matchesNonUnique.size(), 10u);
 }
+
+// =============================================================================
+// Compound Query Tests (OR/NOT support)
+// =============================================================================
+
+TEST_P(SubstructureSearchTest, OrQueryMatchesBothTypes) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test OR query: [C,N] should match both carbons and nitrogens
+  // CCN has 2 carbons and 1 nitrogen, so [C,N] should match all 3 atoms
+  buildBatches({"CCN"}, {"[C,N]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(rdkitMatches.size(), 3u) << "RDKit should find 3 matches for [C,N] in CCN";
+  EXPECT_EQ(resultsHost.matchCounts[0], 3)
+    << "GPU should find 3 matches for [C,N] in CCN using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, OrQuerySelectiveMatch) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test OR query: [N,O] should match nitrogens and oxygens but not carbons
+  // CCO has 2 carbons and 1 oxygen, so [N,O] should match only the oxygen (1 atom)
+  buildBatches({"CCO"}, {"[N,O]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(rdkitMatches.size(), 1u) << "RDKit should find 1 match for [N,O] in CCO";
+  EXPECT_EQ(resultsHost.matchCounts[0], 1)
+    << "GPU should find 1 match for [N,O] in CCO using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, NotQueryExcludesAtom) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test NOT query: [!C] should match everything except carbon
+  // CCO has 2 carbons and 1 oxygen, so [!C] should match only the oxygen
+  buildBatches({"CCO"}, {"[!C]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(rdkitMatches.size(), 1u) << "RDKit should find 1 match for [!C] in CCO";
+  EXPECT_EQ(resultsHost.matchCounts[0], 1)
+    << "GPU should find 1 match for [!C] in CCO using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, NotQueryMatchesMultiple) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test NOT query: [!C] in molecule with multiple non-carbons
+  // CCNO has 2 carbons, 1 nitrogen, and 1 oxygen, so [!C] should match 2 atoms
+  buildBatches({"CCNO"}, {"[!C]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(rdkitMatches.size(), 2u) << "RDKit should find 2 matches for [!C] in CCNO";
+  EXPECT_EQ(resultsHost.matchCounts[0], 2)
+    << "GPU should find 2 matches for [!C] in CCNO using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, MultiAtomOrQuery) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test OR query with multi-atom pattern: [C,N][C,N]
+  // CCN should match CC, CN, NC, and would match NN if present
+  buildBatches({"CCN"}, {"[C,N][C,N]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  // CCN has bonds C-C and C-N, so matches: (0,1), (1,0), (1,2), (2,1) = 4 matches
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+    << "GPU should match RDKit for [C,N][C,N] in CCN using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, ThreeWayOrQuery) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test 3-way OR: [C,N,O] should match all of C, N, and O
+  // CCNO has all three types, should match 4 atoms
+  buildBatches({"CCNO"}, {"[C,N,O]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(rdkitMatches.size(), 4u) << "RDKit should find 4 matches for [C,N,O] in CCNO";
+  EXPECT_EQ(resultsHost.matchCounts[0], 4)
+    << "GPU should find 4 matches for [C,N,O] in CCNO using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, NestedAndOrQuery) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test nested AND/OR: [C,N;!R1] = (C OR N) AND NOT(in 1 ring)
+  // In "CCN" (no rings), all 3 atoms should match
+  // In "C1CC1N" (cyclopropane + N), only N should match (ring carbons fail !R1)
+  // In "C1CCC1" (cyclobutane), 0 atoms match (all ring carbons fail !R1)
+  buildBatches({"CCN", "C1CC1N", "C1CCC1"}, {"[C,N;!R1]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  // CCN: all 3 atoms match (no rings)
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for [C,N;!R1] in CCN using " << algorithmName(algorithm());
+
+  // C1CC1N: only N matches (ring carbons excluded by !R1)
+  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+    << "GPU should match RDKit for [C,N;!R1] in C1CC1N using " << algorithmName(algorithm());
+
+  // C1CCC1: 0 matches - all atoms match (C OR N) but all fail !R1 (nested AND fails)
+  auto rdkitMatches2 = getRDKitSubstructMatches(*targetMols[2], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[2], static_cast<int>(rdkitMatches2.size()))
+    << "GPU should match RDKit for [C,N;!R1] in C1CCC1 (all nested ANDs fail) using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, DeepNestedOrAndOrQuery) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test deep nesting: [C,N;R1,O] (complex SMARTS with multiple operators)
+  // In cyclopentane C1CCCC1: ring carbons match
+  // In "CCCCO": behavior depends on SMARTS precedence rules
+  buildBatches({"C1CCCC1", "CCCCO"}, {"[C,N;R1,O]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  // Cyclopentane: ring carbons should match
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for [C,N;R1,O] in C1CCCC1 using " << algorithmName(algorithm());
+
+  // CCCCO: matches depend on SMARTS interpretation
+  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+    << "GPU should match RDKit for [C,N;R1,O] in CCCCO using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, MultipleNotWithAndQuery) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test [!C;!N] = NOT(C) AND NOT(N) - matches anything except C or N
+  // In "CCNO": only O matches
+  buildBatches({"CCNO"}, {"[!C;!N]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+    << "GPU should match RDKit for [!C;!N] in CCNO using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, NotWithOrQuery) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test [!C,!N] = NOT(C) OR NOT(N) - matches anything except C AND N
+  // C atoms: NOT(C)=false, NOT(N)=true => true
+  // N atom: NOT(C)=true, NOT(N)=false => true
+  // O atom: NOT(C)=true, NOT(N)=true => true
+  // All 4 atoms match
+  buildBatches({"CCNO"}, {"[!C,!N]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+    << "GPU should match RDKit for [!C,!N] in CCNO using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, SimpleAndNotQuery) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test [C;!R1] = C AND NOT(in 1 ring)
+  // In C1CC1CCN (cyclopropane with chain): ring carbons (0,1,2) excluded, chain carbons (3,4) match
+  buildBatches({"C1CC1CCN"}, {"[C;!R1]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+    << "GPU should match RDKit for [C;!R1] in C1CC1CCN using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, BondedOrAtomQuery) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test bonded pattern with OR atoms: [C,N]-[O,S]
+  // In "CCNO": C-N-O, so N-O bond matches (N matches [C,N], O matches [O,S])
+  // In "CCSO": C-S-O, so S-O bond matches if S in query... wait, S doesn't match [C,N]
+  // Actually "CCS": C-C-S, no match for [C,N]-[O,S] since S doesn't connect to O
+  // Use "CCO" (ethanol): C-C-O, C matches [C,N], O matches [O,S], so C-O matches
+  buildBatches({"CCO", "CCS"}, {"[C,N]-[O,S]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  // CCO: C-O matches, so should get matches
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for [C,N]-[O,S] in CCO using " << algorithmName(algorithm());
+
+  // CCS: C-S matches (C matches [C,N], S matches [O,S])
+  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+    << "GPU should match RDKit for [C,N]-[O,S] in CCS using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, MultiAtomMixedBooleanQuery) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test multi-atom query with different boolean logic per atom: [C,N]-[!O]
+  // First atom is OR, second is NOT
+  // In "CCO": C-C bond matches (C for [C,N], C for [!O]), C-O doesn't match (!O fails)
+  // In "CCN": C-C and C-N bonds all match
+  buildBatches({"CCO", "CCN"}, {"[C,N]-[!O]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  // CCO: only C-C match
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for [C,N]-[!O] in CCO using " << algorithmName(algorithm());
+
+  // CCN: C-C and C-N both match
+  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+    << "GPU should match RDKit for [C,N]-[!O] in CCN using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, ThreeAtomNestedBooleanQuery) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test 3-atom pattern with nested boolean: [C,N]-[!O]-[C,O]
+  // In "CCCCO": C-C-C-C-O, should find C-C-C and C-C-O patterns
+  buildBatches({"CCCCO"}, {"[C,N]-[!O]-[C,O]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+    << "GPU should match RDKit for [C,N]-[!O]-[C,O] in CCCCO using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, AromaticOrQuery) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test aromatic OR: [c,n] should match aromatic carbons and nitrogens
+  // In pyridine "c1ccncc1": 5 aromatic carbons + 1 aromatic nitrogen = 6 matches
+  buildBatches({"c1ccncc1"}, {"[c,n]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+    << "GPU should match RDKit for [c,n] in pyridine using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, AromaticNotQuery) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test aromatic NOT: [!n] should match anything except aromatic nitrogen
+  // In pyridine "c1ccncc1": 5 aromatic carbons match, nitrogen doesn't
+  buildBatches({"c1ccncc1"}, {"[!n]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+    << "GPU should match RDKit for [!n] in pyridine using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, AromaticRingPatternWithOr) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test aromatic ring pattern with OR: c1[c,n]cccc1 (benzene or pyridine-like ring)
+  // In benzene "c1ccccc1": all carbons form 6-ring, position 1 matches [c,n]
+  // In pyridine "c1ccncc1": position 1 is nitrogen which matches [c,n]
+  buildBatches({"c1ccccc1", "c1ccncc1"}, {"c1[c,n]cccc1"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  // Benzene should match (symmetric, many automorphisms)
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for c1[c,n]cccc1 in benzene using " << algorithmName(algorithm());
+
+  // Pyridine should match
+  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+    << "GPU should match RDKit for c1[c,n]cccc1 in pyridine using " << algorithmName(algorithm());
+}

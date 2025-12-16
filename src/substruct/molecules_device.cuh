@@ -17,6 +17,7 @@
 #define NVMOLKIT_MOLECULES_DEVICE_CUH
 
 #include "atom_data_packed.h"
+#include "boolean_tree.cuh"
 #include "molecules.h"
 
 namespace nvMolKit {
@@ -42,6 +43,14 @@ struct MoleculeView {
   const AtomDataPacked* __restrict__ atomDataPacked;  ///< Packed atom properties for GPU matching
   const AtomQueryMask* __restrict__ atomQueryMasks;   ///< Precomputed query masks (query molecules only)
   const BondTypeCounts* __restrict__ bondTypeCounts;  ///< Precomputed bond type counts per atom
+
+  // Boolean expression tree data for compound queries
+  const AtomQueryTree* __restrict__ atomQueryTrees;        ///< Tree metadata per atom
+  const BoolInstruction* __restrict__ queryInstructions;   ///< All instructions (use atomInstrStarts to index)
+  const AtomQueryMask* __restrict__ queryLeafMasks;        ///< All leaf masks (use atomLeafMaskStarts)
+  const BondTypeCounts* __restrict__ queryLeafBondCounts;  ///< All leaf bond counts
+  const int* __restrict__ atomInstrStarts;                 ///< Start index into queryInstructions per atom
+  const int* __restrict__ atomLeafMaskStarts;              ///< Start index into queryLeafMasks per atom
 
   __device__ __forceinline__ const AtomData& getAtom(int atomIdx) const { return atomData[atomIdx]; }
 
@@ -73,6 +82,27 @@ struct MoleculeView {
   __device__ __forceinline__ const BondTypeCounts& getBondTypeCounts(int atomIdx) const {
     return bondTypeCounts[atomIdx];
   }
+
+  /// Get query tree metadata for compound queries (only valid for query molecules)
+  __device__ __forceinline__ const AtomQueryTree& getQueryTree(int atomIdx) const { return atomQueryTrees[atomIdx]; }
+
+  /// Get pointer to instructions for a query atom's boolean expression
+  __device__ __forceinline__ const BoolInstruction* getQueryInstructions(int atomIdx) const {
+    return queryInstructions + atomInstrStarts[atomIdx];
+  }
+
+  /// Get pointer to leaf masks for a query atom's boolean expression
+  __device__ __forceinline__ const AtomQueryMask* getQueryLeafMasks(int atomIdx) const {
+    return queryLeafMasks + atomLeafMaskStarts[atomIdx];
+  }
+
+  /// Get pointer to leaf bond counts for a query atom's boolean expression
+  __device__ __forceinline__ const BondTypeCounts* getQueryLeafBondCounts(int atomIdx) const {
+    return queryLeafBondCounts + atomLeafMaskStarts[atomIdx];
+  }
+
+  /// Check if this molecule has boolean query trees populated
+  __device__ __forceinline__ bool hasQueryTrees() const { return atomQueryTrees != nullptr; }
 };
 
 /**
@@ -97,6 +127,14 @@ __device__ __forceinline__ MoleculeView getMolecule(const MoleculesDeviceView& v
   mol.atomDataPacked = view.atomDataPacked ? view.atomDataPacked + atomStart : nullptr;
   mol.atomQueryMasks = view.atomQueryMasks ? view.atomQueryMasks + atomStart : nullptr;
   mol.bondTypeCounts = view.bondTypeCounts ? view.bondTypeCounts + atomStart : nullptr;
+
+  // Boolean expression tree data (may be nullptr if not populated)
+  mol.atomQueryTrees      = view.atomQueryTrees ? view.atomQueryTrees + atomStart : nullptr;
+  mol.queryInstructions   = view.queryInstructions;  // global array, indexed via atomInstrStarts
+  mol.queryLeafMasks      = view.queryLeafMasks;     // global array, indexed via atomLeafMaskStarts
+  mol.queryLeafBondCounts = view.queryLeafBondCounts;
+  mol.atomInstrStarts     = view.atomInstrStarts ? view.atomInstrStarts + atomStart : nullptr;
+  mol.atomLeafMaskStarts  = view.atomLeafMaskStarts ? view.atomLeafMaskStarts + atomStart : nullptr;
   return mol;
 }
 

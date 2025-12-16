@@ -239,30 +239,195 @@ INSTANTIATE_TEST_SUITE_P(
   });
 
 // =============================================================================
-// Unsupported Composite Query Tests (OR/XOR should throw)
+// Compound Query Tests (OR/NOT)
 // =============================================================================
 
-TEST(QueryCompositeTest, OrQueryThrows) {
-  // [C,N] creates an AtomOr query
-  auto mol = makeQuery("[C,N]");
+struct CompoundQueryTestCase {
+  std::string smarts;
+  int         numAtoms;          ///< Expected number of atoms in query
+  int         atom0NumLeaves;    ///< Expected numLeaves for first atom's tree
+  int         atom0MinInstrs;    ///< Minimum expected instructions for first atom
+};
+
+class CompoundQueryParsingTest : public ::testing::TestWithParam<CompoundQueryTestCase> {};
+
+TEST_P(CompoundQueryParsingTest, TreeStructureMatchesExpected) {
+  const auto& testCase = GetParam();
+  auto        mol      = makeQuery(testCase.smarts);
   ASSERT_NE(mol, nullptr);
 
   MoleculesHost batch;
-  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
+  nvMolKit::addQueryToBatch(mol.get(), batch);
+
+  ASSERT_EQ(batch.numMolecules(), 1);
+  ASSERT_EQ(static_cast<int>(batch.atomQueryTrees.size()), testCase.numAtoms)
+    << "Atom count mismatch for SMARTS: " << testCase.smarts;
+
+  EXPECT_EQ(batch.atomQueryTrees[0].numLeaves, testCase.atom0NumLeaves)
+    << "Leaf count mismatch at atom 0 for SMARTS: " << testCase.smarts;
+
+  EXPECT_GE(batch.atomQueryTrees[0].numInstructions, testCase.atom0MinInstrs)
+    << "Instruction count too low at atom 0 for SMARTS: " << testCase.smarts;
 }
+
+TEST_P(CompoundQueryParsingTest, TreeStructureMatchesOnDevice) {
+  const auto& testCase = GetParam();
+  auto        mol      = makeQuery(testCase.smarts);
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  nvMolKit::addQueryToBatch(mol.get(), batch);
+
+  ScopedStream    stream;
+  MoleculesDevice device(stream.stream());
+  device.copyFromHost(batch);
+
+  // Verify device view has query trees populated
+  auto view = device.view();
+  EXPECT_NE(view.atomQueryTrees, nullptr)
+    << "Device should have query trees for SMARTS: " << testCase.smarts;
+  EXPECT_NE(view.queryInstructions, nullptr)
+    << "Device should have query instructions for SMARTS: " << testCase.smarts;
+  EXPECT_NE(view.queryLeafMasks, nullptr)
+    << "Device should have query leaf masks for SMARTS: " << testCase.smarts;
+}
+
+INSTANTIATE_TEST_SUITE_P(
+  OrQueries,
+  CompoundQueryParsingTest,
+  ::testing::Values(
+    // Simple OR queries
+    CompoundQueryTestCase{"[C,N]", 1, 2, 3},       // 2 leaves + 1 OR
+    CompoundQueryTestCase{"[N,O]", 1, 2, 3},       // 2 leaves + 1 OR
+    CompoundQueryTestCase{"[C,N,O]", 1, 3, 5},     // 3 leaves + 2 ORs
+    CompoundQueryTestCase{"[C,N,O,S]", 1, 4, 7},   // 4 leaves + 3 ORs
+
+    // OR with aromatic/aliphatic variants
+    CompoundQueryTestCase{"[c,n]", 1, 2, 3},       // aromatic c OR n
+    CompoundQueryTestCase{"[C,c]", 1, 2, 3},       // aliphatic C OR aromatic c
+
+    // Multi-atom OR queries
+    CompoundQueryTestCase{"[C,N][C,N]", 2, 2, 3},  // two atoms, each with OR
+
+    // OR combined with other properties
+    CompoundQueryTestCase{"[C,N;R1]", 1, 3, 5}),   // (C or N) AND R1: 3 leaves + OR + AND
+  [](const ::testing::TestParamInfo<CompoundQueryTestCase>& info) {
+    std::string name;
+    for (char c : info.param.smarts) {
+      if (std::isalnum(c)) {
+        name += c;
+      } else if (c == ',') {
+        name += "Or";
+      } else if (c == '[') {
+        name += "L";
+      } else if (c == ']') {
+        name += "R";
+      } else if (c == ';') {
+        name += "Semi";
+      } else {
+        name += '_';
+      }
+    }
+    return name;
+  });
+
+INSTANTIATE_TEST_SUITE_P(
+  NotQueries,
+  CompoundQueryParsingTest,
+  ::testing::Values(
+    // Simple NOT queries
+    CompoundQueryTestCase{"[!C]", 1, 1, 2},        // 1 leaf + 1 NOT
+    CompoundQueryTestCase{"[!N]", 1, 1, 2},        // 1 leaf + 1 NOT
+    CompoundQueryTestCase{"[!c]", 1, 1, 2},        // NOT aromatic carbon
+
+    // NOT with specific properties
+    CompoundQueryTestCase{"[!R1]", 1, 1, 2},       // NOT in exactly 1 ring
+    CompoundQueryTestCase{"[!r6]", 1, 1, 2},       // NOT in 6-membered ring
+
+    // AND with NOT
+    CompoundQueryTestCase{"[C;!R1]", 1, 2, 4},     // C AND NOT(R1): 2 leaves + NOT + AND
+    CompoundQueryTestCase{"[N;!R1]", 1, 2, 4},     // N AND NOT(R1)
+
+    // Multi-atom NOT queries
+    CompoundQueryTestCase{"[!C][!N]", 2, 1, 2}),   // two atoms with NOT
+  [](const ::testing::TestParamInfo<CompoundQueryTestCase>& info) {
+    std::string name;
+    for (char c : info.param.smarts) {
+      if (std::isalnum(c)) {
+        name += c;
+      } else if (c == '!') {
+        name += "Not";
+      } else if (c == '[') {
+        name += "L";
+      } else if (c == ']') {
+        name += "R";
+      } else if (c == ';') {
+        name += "Semi";
+      } else {
+        name += '_';
+      }
+    }
+    return name;
+  });
+
+INSTANTIATE_TEST_SUITE_P(
+  CombinedQueries,
+  CompoundQueryParsingTest,
+  ::testing::Values(
+    // OR combined with NOT
+    CompoundQueryTestCase{"[!C,!N]", 1, 2, 5},     // NOT(C) OR NOT(N): 2 leaves + 2 NOTs + OR
+
+    // Complex combinations with multiple levels
+    CompoundQueryTestCase{"[C,N;!R1]", 1, 3, 6},   // (C OR N) AND NOT(R1): 3 leaves + OR + NOT + AND
+
+    // Nested alternating AND/OR: (C AND R1) OR N  (semicolon binds tighter due to left-to-right)
+    CompoundQueryTestCase{"[C;R1,N]", 1, 3, 5},    // 3 leaves + AND + OR
+
+    // Multiple ORs with AND: (C OR N OR O) AND R1
+    CompoundQueryTestCase{"[C,N,O;R1]", 1, 4, 7},  // 4 leaves + 2 ORs + AND
+
+    // Multiple ANDs with OR: C AND (R1 OR R2) - expressed as [C&R1,C&R2] workaround
+    // Actually [C;R1,R2] = (C AND R1) OR R2
+    CompoundQueryTestCase{"[C;R1,R2]", 1, 3, 5},   // 3 leaves + AND + OR
+
+    // Deep nesting: ((C OR N) AND R1) OR O
+    CompoundQueryTestCase{"[C,N;R1,O]", 1, 4, 7},  // 4 leaves + OR + AND + OR
+
+    // Multiple NOTs with AND
+    CompoundQueryTestCase{"[!C;!N]", 1, 2, 5},     // NOT(C) AND NOT(N): 2 leaves + 2 NOTs + AND
+
+    // Triple nesting: (C OR N) AND (R1 OR R2) - need explicit grouping via semicolons
+    // [C,N;R1,R2] actually parses as ((C OR N) AND R1) OR R2 due to left-to-right
+    CompoundQueryTestCase{"[C,N;R1;R2]", 1, 4, 7}),// (C OR N) AND R1 AND R2: 4 leaves + OR + 2 ANDs
+  [](const ::testing::TestParamInfo<CompoundQueryTestCase>& info) {
+    std::string name;
+    for (char c : info.param.smarts) {
+      if (std::isalnum(c)) {
+        name += c;
+      } else if (c == ',') {
+        name += "Or";
+      } else if (c == '!') {
+        name += "Not";
+      } else if (c == '[') {
+        name += "L";
+      } else if (c == ']') {
+        name += "R";
+      } else if (c == ';') {
+        name += "Semi";
+      } else {
+        name += '_';
+      }
+    }
+    return name;
+  });
+
+// =============================================================================
+// Unsupported Composite Query Tests (should throw)
+// =============================================================================
 
 TEST(QueryCompositeTest, RecursiveSmartsThrows) {
-  // $(*C) recursive SMARTS
+  // $(*C) recursive SMARTS - still unsupported
   auto mol = makeQuery("[$(*C)]");
-  ASSERT_NE(mol, nullptr);
-
-  MoleculesHost batch;
-  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
-}
-
-TEST(QueryCompositeTest, NegationThrows) {
-  // [!C] negated query
-  auto mol = makeQuery("[!C]");
   ASSERT_NE(mol, nullptr);
 
   MoleculesHost batch;

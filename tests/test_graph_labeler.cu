@@ -269,7 +269,7 @@ __global__ void populateLabelMatrixKernel(MoleculesDeviceView                tar
   MoleculeView                         target = getMolecule(targetBatch, targetMolIdx);
   MoleculeView                         query  = getMolecule(queryBatch, queryMolIdx);
   BitMatrix2DView<MaxTarget, MaxQuery> view(matrix);
-  nvMolKit::populateLabelMatrix<MaxTarget, MaxQuery>(target, query, view);
+  nvMolKit::populateLabelMatrixOptimized<MaxTarget, MaxQuery>(target, query, view);
 }
 
 class GraphLabelerTest : public ::testing::Test {
@@ -300,8 +300,9 @@ class GraphLabelerTest : public ::testing::Test {
     const LabelMatrixStorage              hostMatrix(false);
     matrixDev.setFromVector(std::vector<LabelMatrixStorage>{hostMatrix});
 
+    // Use optimized kernel with a thread block (supports boolean trees via cooperative groups)
     populateLabelMatrixKernel<kMaxTargetAtoms, kMaxQueryAtoms>
-      <<<1, 1, 0, stream_.stream()>>>(targetDevice.view(), 0, queryDevice.view(), 0, matrixDev.data());
+      <<<1, 128, 0, stream_.stream()>>>(targetDevice.view(), 0, queryDevice.view(), 0, matrixDev.data());
     cudaCheckError(cudaGetLastError());
 
     std::vector<LabelMatrixStorage> resultMatrix(1);
@@ -1076,6 +1077,230 @@ TEST_F(GraphLabelerTest, TripleAndIndolePyrrole) {
 }
 
 // =============================================================================
+// OR Query Tests (Boolean Tree)
+// =============================================================================
+
+TEST_F(GraphLabelerTest, SimpleOrQuery) {
+  // Target: CCN (two carbons, one nitrogen)
+  // Query: [C,N] (carbon OR nitrogen)
+  // All atoms should match
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}, {true}, {true}
+  };
+  runLabelingTest("CCN", "[C,N]", expected);
+}
+
+TEST_F(GraphLabelerTest, OrQueryPartialMatch) {
+  // Target: CCO (two carbons, one oxygen)
+  // Query: [N,O] (nitrogen OR oxygen)
+  // Only oxygen matches
+  std::vector<std::vector<uint8_t>> expected = {
+    {false}, {false}, {true}
+  };
+  runLabelingTest("CCO", "[N,O]", expected);
+}
+
+TEST_F(GraphLabelerTest, OrQueryNoMatch) {
+  // Target: CCC (all carbons)
+  // Query: [N,O] (nitrogen OR oxygen)
+  // Nothing matches
+  std::vector<std::vector<uint8_t>> expected = {
+    {false}, {false}, {false}
+  };
+  runLabelingTest("CCC", "[N,O]", expected);
+}
+
+TEST_F(GraphLabelerTest, ThreeWayOrQuery) {
+  // Target: CCNO (carbon, carbon, nitrogen, oxygen)
+  // Query: [C,N,O] (carbon OR nitrogen OR oxygen)
+  // All atoms match
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}, {true}, {true}, {true}
+  };
+  runLabelingTest("CCNO", "[C,N,O]", expected);
+}
+
+TEST_F(GraphLabelerTest, OrQueryAromaticAliphatic) {
+  // Target: c1ccccc1C (benzene with methyl)
+  // Query: [c,C] (aromatic c OR aliphatic C)
+  // All 7 carbons match
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}, {true}, {true}, {true}, {true}, {true}, {true}
+  };
+  runLabelingTest("c1ccccc1C", "[c,C]", expected);
+}
+
+// =============================================================================
+// NOT Query Tests (Boolean Tree)
+// =============================================================================
+
+TEST_F(GraphLabelerTest, SimpleNotQuery) {
+  // Target: CCO (two carbons, one oxygen)
+  // Query: [!C] (NOT carbon)
+  // Only oxygen matches
+  std::vector<std::vector<uint8_t>> expected = {
+    {false}, {false}, {true}
+  };
+  runLabelingTest("CCO", "[!C]", expected);
+}
+
+TEST_F(GraphLabelerTest, NotQueryMatchesMultiple) {
+  // Target: CCNO (carbon, carbon, nitrogen, oxygen)
+  // Query: [!C] (NOT carbon)
+  // Nitrogen and oxygen match
+  std::vector<std::vector<uint8_t>> expected = {
+    {false}, {false}, {true}, {true}
+  };
+  runLabelingTest("CCNO", "[!C]", expected);
+}
+
+TEST_F(GraphLabelerTest, NotQueryRingMembership) {
+  // Target: C1CC1C (cyclopropane with methyl)
+  // Query: [!R1] (NOT in exactly 1 ring)
+  // Only methyl carbon (index 3) matches
+  std::vector<std::vector<uint8_t>> expected = {
+    {false}, {false}, {false}, {true}
+  };
+  runLabelingTest("C1CC1C", "[!R1]", expected);
+}
+
+TEST_F(GraphLabelerTest, NotQueryNoMatch) {
+  // Target: CCC (all carbons)
+  // Query: [!C] (NOT carbon)
+  // Nothing matches
+  std::vector<std::vector<uint8_t>> expected = {
+    {false}, {false}, {false}
+  };
+  runLabelingTest("CCC", "[!C]", expected);
+}
+
+// =============================================================================
+// Combined OR/NOT/AND Query Tests (Nested Boolean Trees)
+// =============================================================================
+
+TEST_F(GraphLabelerTest, OrWithAndQuery) {
+  // Target: C1CCCCC1N (cyclohexane with nitrogen)
+  // Query: [C,N;R1] = (C OR N) AND in-1-ring
+  // Ring carbons (6) match, external N does not
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}, {true}, {true}, {true}, {true}, {true}, {false}
+  };
+  runLabelingTest("C1CCCCC1N", "[C,N;R1]", expected);
+}
+
+TEST_F(GraphLabelerTest, AndWithNotQuery) {
+  // Target: C1CC1CCN (cyclopropane chain with nitrogen)
+  // Query: [C;!R1] = carbon AND NOT in-1-ring
+  // Ring carbons (0,1,2) don't match; chain carbons (3,4) match; N doesn't match (not carbon)
+  std::vector<std::vector<uint8_t>> expected = {
+    {false}, {false}, {false}, {true}, {true}, {false}
+  };
+  runLabelingTest("C1CC1CCN", "[C;!R1]", expected);
+}
+
+TEST_F(GraphLabelerTest, OrThenAndQuery) {
+  // Target: C1CCCCC1O (cyclohexane with oxygen)
+  // Query: [C;R1,O] - SMARTS precedence: C AND (R1 OR O)
+  // Since O here acts as a ring-size constraint (not atom type), only ring carbons match
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}, {true}, {true}, {true}, {true}, {true}, {false}
+  };
+  runLabelingTest("C1CCCCC1O", "[C;R1,O]", expected);
+}
+
+TEST_F(GraphLabelerTest, DeepNestedQuery) {
+  // Target: C1CCCC1CCO (cyclopentane chain with oxygen)
+  // Query: [C,N;R1,O] - SMARTS precedence: (C OR N) AND (R1 OR O-constraint)
+  // Only ring carbons (0-4) match; chain carbons and oxygen don't satisfy ring constraint
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}, {true}, {true}, {true}, {true}, {false}, {false}, {false}
+  };
+  runLabelingTest("C1CCCC1CCO", "[C,N;R1,O]", expected);
+}
+
+TEST_F(GraphLabelerTest, DoubleNotWithAndQuery) {
+  // Target: CCNO (carbon, carbon, nitrogen, oxygen)
+  // Query: [!C;!N] = NOT(C) AND NOT(N) - only O matches
+  std::vector<std::vector<uint8_t>> expected = {
+    {false}, {false}, {false}, {true}
+  };
+  runLabelingTest("CCNO", "[!C;!N]", expected);
+}
+
+TEST_F(GraphLabelerTest, NotWithOrQuery) {
+  // Target: CCNO (carbon, carbon, nitrogen, oxygen)
+  // Query: [!C,!N] = NOT(C) OR NOT(N)
+  // C: NOT(C)=false, NOT(N)=true => true
+  // N: NOT(C)=true, NOT(N)=false => true  
+  // O: NOT(C)=true, NOT(N)=true => true
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}, {true}, {true}, {true}
+  };
+  runLabelingTest("CCNO", "[!C,!N]", expected);
+}
+
+TEST_F(GraphLabelerTest, OrQueryMultiAtom) {
+  // Target: CCN
+  // Query: [C,N][C,N] (two-atom query, both can be C or N)
+  // C0 can match q0 or q1 (both [C,N])
+  // C1 can match q0 or q1
+  // N2 can match q0 or q1
+  std::vector<std::vector<uint8_t>> expected = {
+    {true, true},
+    {true, true},
+    {true, true}
+  };
+  runLabelingTest("CCN", "[C,N][C,N]", expected);
+}
+
+TEST_F(GraphLabelerTest, NestedAndFailsOnSecondCondition) {
+  // Target: CCCN (chain with nitrogen at end)
+  // Query: [C,N;R1] = (C OR N) AND in-1-ring
+  // All atoms match (C OR N), but NONE are in a ring - all should fail
+  std::vector<std::vector<uint8_t>> expected = {
+    {false}, {false}, {false}, {false}
+  };
+  runLabelingTest("CCCN", "[C,N;R1]", expected);
+}
+
+TEST_F(GraphLabelerTest, NestedAndPartialMatch) {
+  // Target: C1CC1CCN (cyclopropane + chain + nitrogen)
+  // Query: [C,N;R1] = (C OR N) AND in-1-ring
+  // Ring carbons (0,1,2): match C AND R1 -> true
+  // Chain carbons (3,4): match C but NOT R1 -> false (AND fails)
+  // Nitrogen (5): matches N but NOT R1 -> false (AND fails)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}, {true}, {true}, {false}, {false}, {false}
+  };
+  runLabelingTest("C1CC1CCN", "[C,N;R1]", expected);
+}
+
+TEST_F(GraphLabelerTest, NestedAndWithOrBothFail) {
+  // Target: CCSO (carbon, carbon, sulfur, oxygen)
+  // Query: [C,N;R1] = (C OR N) AND in-1-ring
+  // C atoms: match C but not R1 -> false
+  // S atom: doesn't match (C OR N) -> false
+  // O atom: doesn't match (C OR N) -> false
+  std::vector<std::vector<uint8_t>> expected = {
+    {false}, {false}, {false}, {false}
+  };
+  runLabelingTest("CCSO", "[C,N;R1]", expected);
+}
+
+TEST_F(GraphLabelerTest, OrWithNestedNotAndFails) {
+  // Target: C1CC1CN (cyclopropane + methyl + nitrogen)
+  // Query: [C;!R1,N] - SMARTS: C AND (!R1 OR something)
+  // This tests that ring carbons fail the !R1 check within nested AND
+  // Ring C (0,1,2): C matches, but we need to check !R1 behavior
+  // Chain C (3): C matches, !R1 matches -> should match
+  // N (4): Not C, so fails outer C constraint
+  std::vector<std::vector<uint8_t>> expected = {
+    {false}, {false}, {false}, {true}, {false}
+  };
+  runLabelingTest("C1CC1CN", "[C;!R1,N]", expected);
+}
+
+// =============================================================================
 // Total Valence Tests
 // =============================================================================
 
@@ -1184,19 +1409,6 @@ TEST_F(GraphLabelerTest, AnyBondInRing) {
 // GPU-Optimized Warp-Parallel Labeling Tests
 // =============================================================================
 
-template <std::size_t MaxTarget, std::size_t MaxQuery>
-__global__ void populateLabelMatrixOptimizedKernel(MoleculesDeviceView                targetBatch,
-                                                   int                                targetMolIdx,
-                                                   MoleculesDeviceView                queryBatch,
-                                                   int                                queryMolIdx,
-                                                   FlatBitVect<MaxTarget * MaxQuery>* matrix) {
-  MoleculeView                         target = getMolecule(targetBatch, targetMolIdx);
-  MoleculeView                         query  = getMolecule(queryBatch, queryMolIdx);
-  BitMatrix2DView<MaxTarget, MaxQuery> view(matrix);
-
-  nvMolKit::populateLabelMatrixOptimized<MaxTarget, MaxQuery>(target, query, view);
-}
-
 TEST_F(GraphLabelerTest, OptimizedWarpParallelLabeling) {
   auto targetMol = makeMolFromSmiles("c1ccccc1");  // benzene
   auto queryMol  = makeMolFromSmarts("c");
@@ -1218,7 +1430,7 @@ TEST_F(GraphLabelerTest, OptimizedWarpParallelLabeling) {
   matrixDev.setFromVector(std::vector<LabelMatrixStorage>{hostMatrix});
 
   // Launch with multiple warps (128 threads = 4 warps)
-  populateLabelMatrixOptimizedKernel<kMaxTargetAtoms, kMaxQueryAtoms>
+  populateLabelMatrixKernel<kMaxTargetAtoms, kMaxQueryAtoms>
     <<<1, 128, 0, stream_.stream()>>>(targetDevice.view(), 0, queryDevice.view(), 0, matrixDev.data());
   cudaCheckError(cudaGetLastError());
 
@@ -1256,7 +1468,7 @@ TEST_F(GraphLabelerTest, OptimizedLabelingMultiAtomQuery) {
   LabelMatrixStorage                    hostMatrix(false);
   matrixDev.setFromVector(std::vector<LabelMatrixStorage>{hostMatrix});
 
-  populateLabelMatrixOptimizedKernel<kMaxTargetAtoms, kMaxQueryAtoms>
+  populateLabelMatrixKernel<kMaxTargetAtoms, kMaxQueryAtoms>
     <<<1, 128, 0, stream_.stream()>>>(targetDevice.view(), 0, queryDevice.view(), 0, matrixDev.data());
   cudaCheckError(cudaGetLastError());
 
@@ -1296,7 +1508,7 @@ TEST_F(GraphLabelerTest, OptimizedLabelingNoMatches) {
   LabelMatrixStorage                    hostMatrix(false);
   matrixDev.setFromVector(std::vector<LabelMatrixStorage>{hostMatrix});
 
-  populateLabelMatrixOptimizedKernel<kMaxTargetAtoms, kMaxQueryAtoms>
+  populateLabelMatrixKernel<kMaxTargetAtoms, kMaxQueryAtoms>
     <<<1, 128, 0, stream_.stream()>>>(targetDevice.view(), 0, queryDevice.view(), 0, matrixDev.data());
   cudaCheckError(cudaGetLastError());
 
@@ -1333,7 +1545,7 @@ TEST_F(GraphLabelerTest, OptimizedLabelingMixedMatch) {
   LabelMatrixStorage                    hostMatrix(false);
   matrixDev.setFromVector(std::vector<LabelMatrixStorage>{hostMatrix});
 
-  populateLabelMatrixOptimizedKernel<kMaxTargetAtoms, kMaxQueryAtoms>
+  populateLabelMatrixKernel<kMaxTargetAtoms, kMaxQueryAtoms>
     <<<1, 128, 0, stream_.stream()>>>(targetDevice.view(), 0, queryDevice.view(), 0, matrixDev.data());
   cudaCheckError(cudaGetLastError());
 

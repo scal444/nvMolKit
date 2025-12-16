@@ -239,6 +239,12 @@ void MoleculesDevice::setStream(cudaStream_t stream) {
   atomDataPacked_.setStream(stream);
   atomQueryMasks_.setStream(stream);
   bondTypeCounts_.setStream(stream);
+  atomQueryTrees_.setStream(stream);
+  queryInstructions_.setStream(stream);
+  queryLeafMasks_.setStream(stream);
+  queryLeafBondCounts_.setStream(stream);
+  atomInstrStarts_.setStream(stream);
+  atomLeafMaskStarts_.setStream(stream);
 }
 
 void MoleculesDevice::copyFromHost(const MoleculesHost& host, cudaStream_t stream) {
@@ -271,6 +277,16 @@ void MoleculesDevice::copyFromHost(const MoleculesHost& host, cudaStream_t strea
   if (!host.bondTypeCounts.empty()) {
     bondTypeCounts_.setFromVector(host.bondTypeCounts);
   }
+
+  // Copy boolean expression tree data for compound queries
+  if (!host.atomQueryTrees.empty()) {
+    atomQueryTrees_.setFromVector(host.atomQueryTrees);
+    queryInstructions_.setFromVector(host.queryInstructions);
+    queryLeafMasks_.setFromVector(host.queryLeafMasks);
+    queryLeafBondCounts_.setFromVector(host.queryLeafBondCounts);
+    atomInstrStarts_.setFromVector(host.atomInstrStarts);
+    atomLeafMaskStarts_.setFromVector(host.atomLeafMaskStarts);
+  }
 }
 
 MoleculesDeviceView MoleculesDevice::view() const {
@@ -290,6 +306,12 @@ MoleculesDeviceView MoleculesDevice::view() const {
   v.atomDataPacked              = atomDataPacked_.data();
   v.atomQueryMasks              = atomQueryMasks_.data();
   v.bondTypeCounts              = bondTypeCounts_.data();
+  v.atomQueryTrees              = atomQueryTrees_.data();
+  v.queryInstructions           = queryInstructions_.data();
+  v.queryLeafMasks              = queryLeafMasks_.data();
+  v.queryLeafBondCounts         = queryLeafBondCounts_.data();
+  v.atomInstrStarts             = atomInstrStarts_.data();
+  v.atomLeafMaskStarts          = atomLeafMaskStarts_.data();
   return v;
 }
 
@@ -431,6 +453,295 @@ AtomQueryMask buildQueryMask(const AtomDataPacked& queryAtom, AtomQuery queryFla
 }
 
 namespace {
+
+/**
+ * @brief Builder for constructing boolean expression trees from RDKit queries.
+ *
+ * Recursively processes RDKit query atoms (supporting AND, OR, NOT) and generates
+ * a sequence of BoolInstructions for evaluation on the GPU.
+ */
+struct QueryTreeBuilder {
+  std::vector<AtomQueryMask>   leafMasks;
+  std::vector<BondTypeCounts>  leafBondCounts;
+  std::vector<BoolInstruction> instructions;
+  uint8_t                      nextScratchIdx = 0;
+
+  /**
+   * @brief Process a leaf query (primitive comparison) and add to the tree.
+   * @return Scratch index where the result will be stored
+   */
+  uint8_t addLeaf(const AtomDataPacked& packed, AtomQuery flags, const BondTypeCounts& bondCounts) {
+    const uint8_t maskIdx = static_cast<uint8_t>(leafMasks.size());
+    leafMasks.push_back(buildQueryMask(packed, flags));
+    leafBondCounts.push_back(bondCounts);
+
+    const uint8_t dst = nextScratchIdx++;
+    instructions.push_back(BoolInstruction::makeLeaf(dst, maskIdx));
+    return dst;
+  }
+
+  /**
+   * @brief Add an AND instruction combining two operands.
+   */
+  uint8_t addAnd(uint8_t left, uint8_t right) {
+    const uint8_t dst = nextScratchIdx++;
+    instructions.push_back(BoolInstruction::makeAnd(dst, left, right));
+    return dst;
+  }
+
+  /**
+   * @brief Add an OR instruction combining two operands.
+   */
+  uint8_t addOr(uint8_t left, uint8_t right) {
+    const uint8_t dst = nextScratchIdx++;
+    instructions.push_back(BoolInstruction::makeOr(dst, left, right));
+    return dst;
+  }
+
+  /**
+   * @brief Add a NOT instruction.
+   */
+  uint8_t addNot(uint8_t src) {
+    const uint8_t dst = nextScratchIdx++;
+    instructions.push_back(BoolInstruction::makeNot(dst, src));
+    return dst;
+  }
+
+  /**
+   * @brief Build the final AtomQueryTree metadata.
+   */
+  AtomQueryTree buildTree() const {
+    AtomQueryTree tree;
+    tree.numLeaves       = static_cast<uint8_t>(leafMasks.size());
+    tree.numInstructions = static_cast<uint8_t>(instructions.size());
+    tree.scratchSize     = nextScratchIdx;
+    tree.resultIdx       = nextScratchIdx > 0 ? nextScratchIdx - 1 : 0;
+    return tree;
+  }
+};
+
+/**
+ * @brief Check if a query subtree contains only AND operations (no OR/NOT).
+ */
+bool isAndOnlyQuery(const RDKit::Atom::QUERYATOM_QUERY* query) {
+  if (query->getNegation()) {
+    return false;
+  }
+
+  const std::string desc = query->getDescription();
+  if (desc == "AtomOr" || desc == "AtomXor") {
+    return false;
+  }
+
+  if (desc == "AtomAnd") {
+    for (auto it = query->beginChildren(); it != query->endChildren(); ++it) {
+      if (!isAndOnlyQuery((*it).get())) {
+        return false;
+      }
+    }
+  }
+
+  return true;
+}
+
+/**
+ * @brief Collect flags and packed data from an AND-only query subtree.
+ *
+ * This optimized path merges all AND conditions into a single leaf mask.
+ */
+void collectAndOnlyFlags(const RDKit::Atom::QUERYATOM_QUERY* query,
+                         AtomQuery&                          flags,
+                         AtomDataPacked&                     packed) {
+  const std::string desc = query->getDescription();
+
+  if (desc == "AtomAnd") {
+    for (auto it = query->beginChildren(); it != query->endChildren(); ++it) {
+      collectAndOnlyFlags((*it).get(), flags, packed);
+    }
+    return;
+  }
+
+  if (desc == "AtomType") {
+    const auto* eqQuery = static_cast<const RDKit::ATOM_EQUALS_QUERY*>(query);
+    int         typeVal = eqQuery->getVal();
+    if (typeVal >= 1000) {
+      flags |= AtomQueryAtomicNum | AtomQueryIsAromatic;
+      packed.setAtomicNum(typeVal - 1000);
+      packed.setIsAromatic(true);
+    } else {
+      flags |= AtomQueryAtomicNum | AtomQueryIsAliphatic;
+      packed.setAtomicNum(typeVal);
+      packed.setIsAromatic(false);
+    }
+    return;
+  }
+
+  if (desc == "AtomIsAromatic") {
+    flags |= AtomQueryIsAromatic;
+    packed.setIsAromatic(true);
+    return;
+  }
+  if (desc == "AtomIsAliphatic") {
+    flags |= AtomQueryIsAliphatic;
+    packed.setIsAromatic(false);
+    return;
+  }
+
+  if (desc == "AtomNull") {
+    return;
+  }
+
+  const auto* eqQuery = static_cast<const RDKit::ATOM_EQUALS_QUERY*>(query);
+
+  if (desc == "AtomAtomicNum") {
+    flags |= AtomQueryAtomicNum;
+    packed.setAtomicNum(eqQuery->getVal());
+  } else if (desc == "AtomHCount") {
+    flags |= AtomQueryNumExplicitHs;
+    packed.setNumExplicitHs(eqQuery->getVal());
+  } else if (desc == "AtomFormalCharge") {
+    flags |= AtomQueryFormalCharge;
+    packed.setFormalCharge(eqQuery->getVal());
+  } else if (desc == "AtomHybridization") {
+    flags |= AtomQueryHybridization;
+    packed.setHybridization(eqQuery->getVal());
+  } else if (desc == "AtomInNRings") {
+    int val = eqQuery->getVal();
+    if (val < 0) {
+      throw std::runtime_error(
+          "SMARTS [R] query is not supported; use [R1], [R2], etc. for exact ring count");
+    }
+    flags |= AtomQueryNumRings;
+    packed.setNumRings(val);
+  } else if (desc == "AtomMinRingSize") {
+    flags |= AtomQueryMinRingSize;
+    packed.setMinRingSize(eqQuery->getVal());
+  } else if (desc == "AtomNumRadicalElectrons") {
+    flags |= AtomQueryNumRadicalElectrons;
+    packed.setNumRadicalElectrons(eqQuery->getVal());
+  } else if (desc == "AtomTotalValence") {
+    flags |= AtomQueryTotalValence;
+    packed.setTotalValence(eqQuery->getVal());
+  } else {
+    AtomQuery flag = atomQueryFromDescription(desc);
+    flags |= flag;
+  }
+}
+
+/**
+ * @brief Recursively process a query tree and build boolean instructions.
+ *
+ * @param query The RDKit query to process
+ * @param builder The builder accumulating leaves and instructions
+ * @param bondCounts Bond type counts for the atom (used for leaf nodes)
+ * @return Scratch index where this subtree's result will be stored
+ */
+uint8_t processQueryTree(const RDKit::Atom::QUERYATOM_QUERY* query,
+                         QueryTreeBuilder&                   builder,
+                         const BondTypeCounts&               bondCounts) {
+  const std::string desc      = query->getDescription();
+  const bool        isNegated = query->getNegation();
+
+  // Handle AND-only subtrees efficiently by merging into a single leaf
+  if (!isNegated && isAndOnlyQuery(query)) {
+    AtomQuery      flags  = AtomQueryNone;
+    AtomDataPacked packed = {};
+    collectAndOnlyFlags(query, flags, packed);
+    return builder.addLeaf(packed, flags, bondCounts);
+  }
+
+  // Handle OR: process children and combine with OR instructions
+  if (desc == "AtomOr") {
+    std::vector<uint8_t> childResults;
+    for (auto it = query->beginChildren(); it != query->endChildren(); ++it) {
+      childResults.push_back(processQueryTree((*it).get(), builder, bondCounts));
+    }
+
+    if (childResults.empty()) {
+      throw std::runtime_error("Empty AtomOr query");
+    }
+
+    uint8_t result = childResults[0];
+    for (size_t i = 1; i < childResults.size(); ++i) {
+      result = builder.addOr(result, childResults[i]);
+    }
+
+    if (isNegated) {
+      result = builder.addNot(result);
+    }
+    return result;
+  }
+
+  // Handle AND with complex children (some may have OR or NOT)
+  if (desc == "AtomAnd") {
+    std::vector<uint8_t> childResults;
+    for (auto it = query->beginChildren(); it != query->endChildren(); ++it) {
+      childResults.push_back(processQueryTree((*it).get(), builder, bondCounts));
+    }
+
+    if (childResults.empty()) {
+      throw std::runtime_error("Empty AtomAnd query");
+    }
+
+    uint8_t result = childResults[0];
+    for (size_t i = 1; i < childResults.size(); ++i) {
+      result = builder.addAnd(result, childResults[i]);
+    }
+
+    if (isNegated) {
+      result = builder.addNot(result);
+    }
+    return result;
+  }
+
+  if (desc == "AtomXor") {
+    throw std::runtime_error("SMARTS XOR queries are not supported");
+  }
+
+  if (desc == "RecursiveStructure") {
+    throw std::runtime_error("Recursive SMARTS ($(...)) are not supported");
+  }
+
+  // Leaf node - create a single leaf mask
+  AtomQuery      flags  = AtomQueryNone;
+  AtomDataPacked packed = {};
+  collectAndOnlyFlags(query, flags, packed);
+  uint8_t result = builder.addLeaf(packed, flags, bondCounts);
+
+  if (isNegated) {
+    result = builder.addNot(result);
+  }
+  return result;
+}
+
+/**
+ * @brief Build a complete query tree for an atom.
+ *
+ * @param atom The RDKit atom to process
+ * @param bondCounts Bond type counts for the atom
+ * @param builder Output: the populated QueryTreeBuilder
+ */
+void buildQueryTreeForAtom(const RDKit::Atom*    atom,
+                           const BondTypeCounts& bondCounts,
+                           QueryTreeBuilder&     builder) {
+  // Check for chirality specified on the atom (SMARTS @/@@ notation)
+  if (atom->getChiralTag() != RDKit::Atom::ChiralType::CHI_UNSPECIFIED) {
+    throw std::runtime_error("SMARTS chirality query (@/@@) is not supported");
+  }
+
+  if (!atom->hasQuery()) {
+    builder.addLeaf(AtomDataPacked{}, AtomQueryNone, bondCounts);
+    return;
+  }
+
+  const auto* query = atom->getQuery();
+  if (query == nullptr) {
+    builder.addLeaf(AtomDataPacked{}, AtomQueryNone, bondCounts);
+    return;
+  }
+
+  processQueryTree(query, builder, bondCounts);
+}
 
 AtomQuery getQueryFlagsFromQuery(const RDKit::Atom::QUERYATOM_QUERY* query) {
   const std::string description = query->getDescription();
@@ -665,6 +976,14 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   auto& otherAtomIndices  = batch.otherAtomIndices;
   auto& bondDataIndices   = batch.bondDataIndices;
 
+  // Boolean tree data
+  auto& atomQueryTreesVec     = batch.atomQueryTrees;
+  auto& queryInstructionsVec  = batch.queryInstructions;
+  auto& queryLeafMasksVec     = batch.queryLeafMasks;
+  auto& queryLeafBondCountsVec = batch.queryLeafBondCounts;
+  auto& atomInstrStartsVec    = batch.atomInstrStarts;
+  auto& atomLeafMaskStartsVec = batch.atomLeafMaskStarts;
+
   const size_t otherAtomIndicesBefore = otherAtomIndices.size();
   const size_t bondDataIndicesBefore  = bondDataIndices.size();
 
@@ -673,6 +992,9 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   atomQueriesVec.reserve(atomQueriesVec.size() + mol->getNumAtoms());
   atomQueryMasksVec.reserve(atomQueryMasksVec.size() + mol->getNumAtoms());
   bondTypeCountsVec.reserve(bondTypeCountsVec.size() + mol->getNumAtoms());
+  atomQueryTreesVec.reserve(atomQueryTreesVec.size() + mol->getNumAtoms());
+  atomInstrStartsVec.reserve(atomInstrStartsVec.size() + mol->getNumAtoms());
+  atomLeafMaskStartsVec.reserve(atomLeafMaskStartsVec.size() + mol->getNumAtoms());
 
   int cumulativeBondCount = 0;
   addBondsAndConnectivity(mol, batch, cumulativeBondCount);
@@ -684,13 +1006,46 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
     auto& thisAtomPacked = atomDataPackedVec.emplace_back();
     populateQueryAtomDataPacked(atom, thisAtomPacked);
 
-    AtomQuery queryFlags = getAtomQueryType(atom);
-    atomQueriesVec.push_back(queryFlags);
-
-    atomQueryMasksVec.push_back(buildQueryMask(thisAtomPacked, queryFlags));
-
+    // Compute bond type counts first (needed for query tree building)
     auto& thisBondCounts = bondTypeCountsVec.emplace_back();
     populateQueryBondTypeCounts(mol, atom, thisBondCounts);
+
+    // Build the boolean expression tree for this atom
+    QueryTreeBuilder builder;
+    buildQueryTreeForAtom(atom, thisBondCounts, builder);
+
+    // Store offsets into global instruction/leaf arrays
+    atomInstrStartsVec.push_back(static_cast<int>(queryInstructionsVec.size()));
+    atomLeafMaskStartsVec.push_back(static_cast<int>(queryLeafMasksVec.size()));
+
+    // Append this atom's data to global arrays
+    queryInstructionsVec.insert(queryInstructionsVec.end(),
+                                builder.instructions.begin(),
+                                builder.instructions.end());
+    queryLeafMasksVec.insert(queryLeafMasksVec.end(),
+                             builder.leafMasks.begin(),
+                             builder.leafMasks.end());
+    queryLeafBondCountsVec.insert(queryLeafBondCountsVec.end(),
+                                  builder.leafBondCounts.begin(),
+                                  builder.leafBondCounts.end());
+    atomQueryTreesVec.push_back(builder.buildTree());
+
+    // Legacy fields: for simple queries, use the first leaf mask for backwards compatibility
+    AtomQuery queryFlags = AtomQueryNone;
+    if (!builder.leafMasks.empty()) {
+      atomQueryMasksVec.push_back(builder.leafMasks[0]);
+      // Try to get flags from the legacy path for simple queries
+      if (atom->hasQuery() && atom->getQuery() != nullptr) {
+        try {
+          queryFlags = getQueryFlagsFromQuery(atom->getQuery());
+        } catch (...) {
+          // Complex query - flags not applicable
+        }
+      }
+    } else {
+      atomQueryMasksVec.push_back(AtomQueryMask{});
+    }
+    atomQueriesVec.push_back(queryFlags);
   }
 
   batch.batchAtomStarts.push_back(static_cast<int>(atomDataVec.size()));

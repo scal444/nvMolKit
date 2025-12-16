@@ -19,6 +19,7 @@
 #include <cooperative_groups.h>
 
 #include "atom_data_packed.h"
+#include "boolean_tree.cuh"
 #include "flat_bit_vect.h"
 #include "molecules.h"
 #include "molecules_device.cuh"
@@ -81,6 +82,32 @@ __device__ __forceinline__ bool atomPairMatchesOptimized(const MoleculeView& tar
   const BondTypeCounts& queryBonds   = query.getBondTypeCounts(queryAtomIdx);
 
   return atomMatchesOptimized(targetPacked, queryMask) && bondCountsMatchOptimized(targetBonds, queryBonds);
+}
+
+/**
+ * @brief Match using boolean expression tree for compound queries (OR/NOT).
+ *
+ * Evaluates the full boolean expression tree for query atoms that have
+ * compound queries. Falls back to simple mask matching for AND-only queries.
+ *
+ * @param target Target molecule view
+ * @param targetAtomIdx Index of target atom
+ * @param query Query molecule view (must have query trees populated)
+ * @param queryAtomIdx Index of query atom
+ * @return true if target atom matches the compound query expression
+ */
+__device__ __forceinline__ bool atomPairMatchesWithTree(const MoleculeView& target,
+                                                        int                 targetAtomIdx,
+                                                        const MoleculeView& query,
+                                                        int                 queryAtomIdx) {
+  const AtomDataPacked&   targetPacked   = target.getAtomPacked(targetAtomIdx);
+  const BondTypeCounts&   targetBonds    = target.getBondTypeCounts(targetAtomIdx);
+  const AtomQueryTree&    tree           = query.getQueryTree(queryAtomIdx);
+  const BoolInstruction*  instructions   = query.getQueryInstructions(queryAtomIdx);
+  const AtomQueryMask*    leafMasks      = query.getQueryLeafMasks(queryAtomIdx);
+  const BondTypeCounts*   leafBondCounts = query.getQueryLeafBondCounts(queryAtomIdx);
+
+  return evaluateBoolTree(&targetPacked, &targetBonds, leafMasks, leafBondCounts, instructions, tree);
 }
 
 // =============================================================================
@@ -193,17 +220,44 @@ template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
 __device__ void populateLabelMatrixOptimized(const MoleculeView&                             target,
                                              const MoleculeView&                             query,
                                              BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>& labelMatrix) {
-  // Declare shared memory for query data
-  __shared__ AtomDataPacked sharedQueryPacked[MaxQueryAtoms];
-  __shared__ AtomQueryMask  sharedQueryMasks[MaxQueryAtoms];
-  __shared__ BondTypeCounts sharedQueryBondCounts[MaxQueryAtoms];
+  // Check if query has boolean trees (compound queries with OR/NOT)
+  if (query.hasQueryTrees()) {
+    // Use boolean tree evaluation for compound queries
+    namespace cg = cooperative_groups;
+    auto      block      = cg::this_thread_block();
+    const int tid        = block.thread_rank();
+    const int numThreads = block.size();
 
-  populateLabelMatrixWarpParallel<MaxTargetAtoms, MaxQueryAtoms>(target,
-                                                                 query,
-                                                                 labelMatrix,
-                                                                 sharedQueryPacked,
-                                                                 sharedQueryMasks,
-                                                                 sharedQueryBondCounts);
+    const int numQueryAtoms  = query.numAtoms;
+    const int numTargetAtoms = target.numAtoms;
+
+    // Clear label matrix
+    labelMatrix.clearParallel(tid, numThreads);
+    block.sync();
+
+    // Process all (target, query) pairs
+    const int numPairs = numTargetAtoms * numQueryAtoms;
+    for (int pairIdx = tid; pairIdx < numPairs; pairIdx += numThreads) {
+      const int targetIdx = pairIdx / numQueryAtoms;
+      const int queryIdx  = pairIdx % numQueryAtoms;
+
+      if (atomPairMatchesWithTree(target, targetIdx, query, queryIdx)) {
+        labelMatrix.setAtomic(targetIdx, queryIdx);
+      }
+    }
+  } else {
+    // Use fast path for simple AND-only queries
+    __shared__ AtomDataPacked sharedQueryPacked[MaxQueryAtoms];
+    __shared__ AtomQueryMask  sharedQueryMasks[MaxQueryAtoms];
+    __shared__ BondTypeCounts sharedQueryBondCounts[MaxQueryAtoms];
+
+    populateLabelMatrixWarpParallel<MaxTargetAtoms, MaxQueryAtoms>(target,
+                                                                   query,
+                                                                   labelMatrix,
+                                                                   sharedQueryPacked,
+                                                                   sharedQueryMasks,
+                                                                   sharedQueryBondCounts);
+  }
 }
 
 // =============================================================================

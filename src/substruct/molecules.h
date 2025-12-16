@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "atom_data_packed.h"
+#include "boolean_tree.cuh"
 #include "device_vector.h"
 
 namespace RDKit {
@@ -104,6 +105,14 @@ struct MoleculesHost {
   std::vector<AtomQueryMask>  atomQueryMasks;  ///< Precomputed query masks (for query molecules only)
   std::vector<BondTypeCounts> bondTypeCounts;  ///< Precomputed bond type counts per atom
 
+  // Boolean expression tree data for compound queries (OR/NOT support)
+  std::vector<AtomQueryTree>   atomQueryTrees;       ///< Tree metadata per query atom (parallel to atomData)
+  std::vector<BoolInstruction> queryInstructions;    ///< Flattened instruction arrays
+  std::vector<AtomQueryMask>   queryLeafMasks;       ///< Flattened leaf masks for compound queries
+  std::vector<BondTypeCounts>  queryLeafBondCounts;  ///< Flattened leaf bond counts
+  std::vector<int>             atomInstrStarts;      ///< Start index into queryInstructions per atom
+  std::vector<int>             atomLeafMaskStarts;   ///< Start index into queryLeafMasks per atom
+
   MoleculesHost();
 
   [[nodiscard]] size_t numMolecules() const { return batchAtomStarts.empty() ? 0 : batchAtomStarts.size() - 1; }
@@ -136,6 +145,14 @@ struct MoleculesDeviceView {
   const AtomDataPacked* atomDataPacked;  ///< Packed atom properties for GPU matching
   const AtomQueryMask*  atomQueryMasks;  ///< Precomputed query masks (query molecules only)
   const BondTypeCounts* bondTypeCounts;  ///< Precomputed bond type counts per atom
+
+  // Boolean expression tree data for compound queries
+  const AtomQueryTree*   atomQueryTrees;       ///< Tree metadata per query atom
+  const BoolInstruction* queryInstructions;    ///< Flattened instruction arrays
+  const AtomQueryMask*   queryLeafMasks;       ///< Flattened leaf masks for compound queries
+  const BondTypeCounts*  queryLeafBondCounts;  ///< Flattened leaf bond counts
+  const int*             atomInstrStarts;      ///< Start index into queryInstructions per atom
+  const int*             atomLeafMaskStarts;   ///< Start index into queryLeafMasks per atom
 };
 
 /**
@@ -183,6 +200,14 @@ class MoleculesDevice {
   AsyncDeviceVector<AtomDataPacked> atomDataPacked_;
   AsyncDeviceVector<AtomQueryMask>  atomQueryMasks_;
   AsyncDeviceVector<BondTypeCounts> bondTypeCounts_;
+
+  // Boolean expression tree data for compound queries
+  AsyncDeviceVector<AtomQueryTree>   atomQueryTrees_;
+  AsyncDeviceVector<BoolInstruction> queryInstructions_;
+  AsyncDeviceVector<AtomQueryMask>   queryLeafMasks_;
+  AsyncDeviceVector<BondTypeCounts>  queryLeafBondCounts_;
+  AsyncDeviceVector<int>             atomInstrStarts_;
+  AsyncDeviceVector<int>             atomLeafMaskStarts_;
 };
 
 /**
@@ -196,7 +221,8 @@ void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch);
  * @brief Add a query molecule (from SMARTS) to an existing batch.
  *
  * Extracts query information from QueryAtom objects and populates atomQueries.
- * Supports AND combinations of query types; OR/XOR queries throw an exception.
+ * Supports AND, OR, and NOT combinations of query types via boolean expression trees.
+ * XOR queries and recursive SMARTS ($(...)) throw an exception.
  *
  * @param mol Pointer to the RDKit molecule (typically parsed from SMARTS)
  * @param batch The batch to add the query molecule to
