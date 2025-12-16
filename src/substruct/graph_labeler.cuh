@@ -306,44 +306,10 @@ __device__ __forceinline__ bool bondCountsMatch(const MoleculeView& target,
                                                 int                 targetAtomIdx,
                                                 const MoleculeView& query,
                                                 int                 queryAtomIdx) {
-  const int targetDegree = target.getAtomDegree(targetAtomIdx);
-  const int queryDegree  = query.getAtomDegree(queryAtomIdx);
-
-  // Target must have at least as many bonds as query
-  if (targetDegree < queryDegree) {
-    return false;
-  }
-
-  // Count bonds by type for query atom
-  // We use a simple array for bond types (RDKit bond types are small integers)
-  constexpr int kMaxBondTypes                   = 32;
-  int           queryBondCounts[kMaxBondTypes]  = {0};
-  int           targetBondCounts[kMaxBondTypes] = {0};
-
-  for (int i = 0; i < queryDegree; ++i) {
-    const int bondIdx  = query.getNeighborBondIdx(queryAtomIdx, i);
-    const int bondType = query.getBond(bondIdx).bondType;
-    if (bondType < kMaxBondTypes) {
-      ++queryBondCounts[bondType];
-    }
-  }
-
-  for (int i = 0; i < targetDegree; ++i) {
-    const int bondIdx  = target.getNeighborBondIdx(targetAtomIdx, i);
-    const int bondType = target.getBond(bondIdx).bondType;
-    if (bondType < kMaxBondTypes) {
-      ++targetBondCounts[bondType];
-    }
-  }
-
-  // Check that target has at least as many of each bond type
-  for (int bt = 0; bt < kMaxBondTypes; ++bt) {
-    if (targetBondCounts[bt] < queryBondCounts[bt]) {
-      return false;
-    }
-  }
-
-  return true;
+  // Use precomputed bond type counts - no need to recompute at runtime
+  const BondTypeCounts& targetCounts = target.getBondTypeCounts(targetAtomIdx);
+  const BondTypeCounts& queryCounts  = query.getBondTypeCounts(queryAtomIdx);
+  return targetCounts.canMatchQuery(queryCounts);
 }
 
 /**

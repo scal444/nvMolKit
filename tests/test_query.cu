@@ -372,6 +372,38 @@ TEST(QueryCompositeTest, AnyAliphaticAtomSucceeds) {
   EXPECT_EQ(batch.atomQueries[0], AtomQueryIsAliphatic);
 }
 
+TEST(QueryCompositeTest, AnyBondSucceeds) {
+  // C~C uses "any bond" (~) which should be supported
+  auto mol = makeQuery("C~C");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_EQ(batch.numMolecules(), 1);
+  // Each carbon should have 1 "any" bond
+  EXPECT_EQ(batch.bondTypeCounts[0].any, 1);
+  EXPECT_EQ(batch.bondTypeCounts[1].any, 1);
+}
+
+TEST(QueryCompositeTest, MixedBondTypesSucceeds) {
+  // C~C-C has both "any" bond and single bond
+  auto mol = makeQuery("C~C-C");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_EQ(batch.numMolecules(), 1);
+  // First C: 1 any bond
+  EXPECT_EQ(batch.bondTypeCounts[0].any, 1);
+  EXPECT_EQ(batch.bondTypeCounts[0].single, 0);
+  // Middle C: 1 any bond + 1 single bond
+  EXPECT_EQ(batch.bondTypeCounts[1].any, 1);
+  EXPECT_EQ(batch.bondTypeCounts[1].single, 1);
+  // Last C: 1 single bond
+  EXPECT_EQ(batch.bondTypeCounts[2].any, 0);
+  EXPECT_EQ(batch.bondTypeCounts[2].single, 1);
+}
+
 // =============================================================================
 // Batch with Multiple Query Molecules
 // =============================================================================

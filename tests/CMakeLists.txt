@@ -50,6 +50,9 @@ add_executable(test_openmp_helpers test_openmp_helpers.cpp)
 target_link_libraries(test_openmp_helpers PRIVATE openmp_helpers
                                                   OpenMP::OpenMP_CXX)
 
+add_executable(smarts_filter smarts_filter.cpp)
+target_link_libraries(smarts_filter PRIVATE molecules ${RDKit_LIBS})
+
 add_library(test_utils test_utils.cpp)
 target_link_libraries(
   test_utils PRIVATE ${RDKit_LIBS} GTest::gtest GTest::gtest_main GTest::gmock

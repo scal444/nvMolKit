@@ -97,6 +97,43 @@ void populateBondTypeCounts(const RDKit::ROMol* mol, const RDKit::Atom* atom, Bo
   }
 }
 
+/**
+ * @brief Populate bond type counts for a query atom (SMARTS).
+ *
+ * Unlike target molecules, query molecules can have "any" bonds (~) which
+ * RDKit represents as bond type 0 (UNSPECIFIED). These are counted in the
+ * `any` field of BondTypeCounts.
+ */
+void populateQueryBondTypeCounts(const RDKit::ROMol* mol, const RDKit::Atom* atom, BondTypeCounts& counts) {
+  auto [beg, bondEnd] = mol->getAtomBonds(atom);
+  while (beg != bondEnd) {
+    const auto* bond     = (*mol)[*beg];
+    int         bondType = bond->getBondType();
+    switch (bondType) {
+      case 0:
+        ++counts.any;
+        break;  // UNSPECIFIED = any bond (~)
+      case 1:
+        ++counts.single;
+        break;  // SINGLE
+      case 2:
+        ++counts.double_;
+        break;  // DOUBLE
+      case 3:
+        ++counts.triple;
+        break;  // TRIPLE
+      case 7:   // ONEANDAHALF (aromatic)
+      case 12:
+        ++counts.aromatic;
+        break;  // AROMATIC
+      default:
+        throw std::runtime_error("Unsupported bond type " + std::to_string(bondType) +
+                                 " in query molecule.");
+    }
+    ++beg;
+  }
+}
+
 void populateFromQuery(const RDKit::Atom::QUERYATOM_QUERY* query, AtomData& atomData);
 
 void handleQueryChildren(const RDKit::Atom::QUERYATOM_QUERY* query, AtomData& atomData) {
@@ -653,7 +690,7 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
     atomQueryMasksVec.push_back(buildQueryMask(thisAtomPacked, queryFlags));
 
     auto& thisBondCounts = bondTypeCountsVec.emplace_back();
-    populateBondTypeCounts(mol, atom, thisBondCounts);
+    populateQueryBondTypeCounts(mol, atom, thisBondCounts);
   }
 
   batch.batchAtomStarts.push_back(static_cast<int>(atomDataVec.size()));

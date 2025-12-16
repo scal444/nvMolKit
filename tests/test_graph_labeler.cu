@@ -1131,6 +1131,56 @@ TEST_F(GraphLabelerTest, TotalValenceFormaldehyde) {
 }
 
 // =============================================================================
+// Any Bond (~) Tests
+// =============================================================================
+
+TEST_F(GraphLabelerTest, AnyBondMatchesSingle) {
+  // Query C~C should match target C-C (single bond)
+  // Both target carbons are equivalent, so each can match either query carbon
+  std::vector<std::vector<uint8_t>> expected = {
+    {true, true},
+    {true, true}
+  };
+  runLabelingTest("CC", "C~C", expected);
+}
+
+TEST_F(GraphLabelerTest, AnyBondMatchesDouble) {
+  // Query C~C should match target C=C (double bond)
+  // Both target carbons are equivalent, so each can match either query carbon
+  std::vector<std::vector<uint8_t>> expected = {
+    {true, true},
+    {true, true}
+  };
+  runLabelingTest("C=C", "C~C", expected);
+}
+
+TEST_F(GraphLabelerTest, AnyBondMatchesAromatic) {
+  // Query c~c should match aromatic bonds in benzene
+  // All 6 carbons can match either query atom
+  std::vector<std::vector<uint8_t>> expected = {
+    {true, true},
+    {true, true},
+    {true, true},
+    {true, true},
+    {true, true},
+    {true, true}
+  };
+  runLabelingTest("c1ccccc1", "c~c", expected);
+}
+
+TEST_F(GraphLabelerTest, AnyBondInRing) {
+  // Query with any bond in a ring pattern
+  // C1~C~C~C1 should match cyclobutane
+  std::vector<std::vector<uint8_t>> expected = {
+    {true, true, true, true},
+    {true, true, true, true},
+    {true, true, true, true},
+    {true, true, true, true}
+  };
+  runLabelingTest("C1CCC1", "C1~C~C~C1", expected);
+}
+
+// =============================================================================
 // GPU-Optimized Warp-Parallel Labeling Tests
 // =============================================================================
 
