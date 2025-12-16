@@ -618,6 +618,464 @@ TEST_F(GraphLabelerTest, SingleAtomNoMatch) {
 }
 
 // =============================================================================
+// Hydrogen Count Query Tests
+// =============================================================================
+
+// Note: SMARTS H count queries like [CH3] check total H count (explicit + implicit).
+// For molecules with explicit Hs in SMILES, these work correctly.
+
+TEST_F(GraphLabelerTest, HCountExplicitHydrogens) {
+  // Target with explicit Hs: [CH4] (methane with explicit Hs)
+  // Query: [CH4] (carbon with 4 hydrogens)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}   // C with 4 explicit Hs
+  };
+  runLabelingTest("[CH4]", "[CH4]", expected);
+}
+
+TEST_F(GraphLabelerTest, HCountExplicitMismatch) {
+  // Target with explicit Hs: [CH4] (methane)
+  // Query: [CH3] (carbon with 3 hydrogens)
+  std::vector<std::vector<uint8_t>> expected = {
+    {false}   // C with 4 Hs doesn't match [CH3]
+  };
+  runLabelingTest("[CH4]", "[CH3]", expected);
+}
+
+// =============================================================================
+// Formal Charge Query Tests
+// =============================================================================
+
+TEST_F(GraphLabelerTest, FormalChargePositive) {
+  // Target: [NH4+] (ammonium)
+  // Query: [+1] (any atom with +1 charge)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}   // N has +1 charge
+  };
+  runLabelingTest("[NH4+]", "[+1]", expected);
+}
+
+TEST_F(GraphLabelerTest, FormalChargeNegative) {
+  // Target: [O-]C=O (formate)
+  // Query: [-1] (any atom with -1 charge)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // O- has -1 charge
+    {false},  // C has 0 charge
+    {false}   // O has 0 charge
+  };
+  runLabelingTest("[O-]C=O", "[-1]", expected);
+}
+
+TEST_F(GraphLabelerTest, FormalChargeNeutralMolecule) {
+  // Target: CCO (ethanol - all neutral)
+  // Query: [+1] (any atom with +1 charge)
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},  // C
+    {false},  // C
+    {false}   // O
+  };
+  runLabelingTest("CCO", "[+1]", expected);
+}
+
+// =============================================================================
+// Hybridization Query Tests
+// =============================================================================
+
+TEST_F(GraphLabelerTest, HybridizationSP3) {
+  // Target: CCO (ethanol - all sp3)
+  // Query: [^3] (sp3 hybridized)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // C sp3
+    {true},   // C sp3
+    {true}    // O sp3
+  };
+  runLabelingTest("CCO", "[^3]", expected);
+}
+
+TEST_F(GraphLabelerTest, HybridizationSP2) {
+  // Target: C=CC (propene)
+  // Query: [^2] (sp2 hybridized)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // C= sp2
+    {true},   // =C sp2
+    {false}   // C sp3
+  };
+  runLabelingTest("C=CC", "[^2]", expected);
+}
+
+TEST_F(GraphLabelerTest, HybridizationSP) {
+  // Target: C#CC (propyne)
+  // Query: [^1] (sp hybridized)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // C# sp
+    {true},   // #C sp
+    {false}   // C sp3
+  };
+  runLabelingTest("C#CC", "[^1]", expected);
+}
+
+// =============================================================================
+// Ring Membership Query Tests
+// =============================================================================
+
+TEST_F(GraphLabelerTest, RingMembershipAnyRing) {
+  // Target: C1CCC1C (cyclobutane with methyl)
+  // Query: [R1] (atom in exactly 1 ring)
+  // Note: [R] without a number uses >= semantics which we don't support; use [R1] instead
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // Ring C
+    {true},   // Ring C
+    {true},   // Ring C
+    {true},   // Ring C
+    {false}   // Methyl C (not in ring)
+  };
+  runLabelingTest("C1CCC1C", "[R1]", expected);
+}
+
+TEST_F(GraphLabelerTest, RingMembershipNotInRing) {
+  // Target: C1CCC1C (cyclobutane with methyl)
+  // Query: [R0] (atom not in any ring)
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},  // Ring C
+    {false},  // Ring C
+    {false},  // Ring C
+    {false},  // Ring C
+    {true}    // Methyl C (not in ring)
+  };
+  runLabelingTest("C1CCC1C", "[R0]", expected);
+}
+
+TEST_F(GraphLabelerTest, RingMembershipExactlyOneRing) {
+  // Target: c1ccccc1 (benzene - each atom in 1 ring)
+  // Query: [R1] (atom in exactly 1 ring)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}, {true}, {true}, {true}, {true}, {true}
+  };
+  runLabelingTest("c1ccccc1", "[R1]", expected);
+}
+
+TEST_F(GraphLabelerTest, RingMembershipTwoRings) {
+  // Target: c1ccc2ccccc2c1 (naphthalene - fused atoms in 2 rings)
+  // Query: [R2] (atom in exactly 2 rings)
+  // Atom order: c0,c1,c2,c3(fusion),c4,c5,c6,c7,c8(fusion),c9
+  // Fusion atoms 3 and 8 are in 2 rings
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},  // c0
+    {false},  // c1
+    {false},  // c2
+    {true},   // c3 (fusion)
+    {false},  // c4
+    {false},  // c5
+    {false},  // c6
+    {false},  // c7
+    {true},   // c8 (fusion)
+    {false}   // c9
+  };
+  runLabelingTest("c1ccc2ccccc2c1", "[R2]", expected);
+}
+
+TEST_F(GraphLabelerTest, RingMembershipIndole) {
+  // Target: c1ccc2[nH]ccc2c1 (indole - 6-membered benzene fused with 5-membered pyrrole)
+  // Query: [R2] (atom in exactly 2 rings)
+  // Atom order: c0,c1,c2,c3(fusion),[nH]4,c5,c6,c7(fusion),c8
+  // Fusion atoms 3 and 7 are in 2 rings
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},  // c0 (benzene only)
+    {false},  // c1 (benzene only)
+    {false},  // c2 (benzene only)
+    {true},   // c3 (fusion - benzene/pyrrole)
+    {false},  // nH (pyrrole only)
+    {false},  // c5 (pyrrole only)
+    {false},  // c6 (pyrrole only)
+    {true},   // c7 (fusion - benzene/pyrrole)
+    {false}   // c8 (benzene only)
+  };
+  runLabelingTest("c1ccc2[nH]ccc2c1", "[R2]", expected);
+}
+
+TEST_F(GraphLabelerTest, RingMembershipIndoleSingleRing) {
+  // Target: c1ccc2[nH]ccc2c1 (indole)
+  // Query: [R1] (atom in exactly 1 ring)
+  // Non-fusion atoms are in exactly 1 ring
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // c0 (benzene only)
+    {true},   // c1 (benzene only)
+    {true},   // c2 (benzene only)
+    {false},  // c3 (fusion - in 2 rings)
+    {true},   // nH (pyrrole only)
+    {true},   // c5 (pyrrole only)
+    {true},   // c6 (pyrrole only)
+    {false},  // c7 (fusion - in 2 rings)
+    {true}    // c8 (benzene only)
+  };
+  runLabelingTest("c1ccc2[nH]ccc2c1", "[R1]", expected);
+}
+
+// =============================================================================
+// Ring Size Query Tests
+// =============================================================================
+
+TEST_F(GraphLabelerTest, RingSizeFive) {
+  // Target: C1CCCC1 (cyclopentane)
+  // Query: [r5] (atom in 5-membered ring)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}, {true}, {true}, {true}, {true}
+  };
+  runLabelingTest("C1CCCC1", "[r5]", expected);
+}
+
+TEST_F(GraphLabelerTest, RingSizeSix) {
+  // Target: c1ccccc1 (benzene)
+  // Query: [r6] (atom in 6-membered ring)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}, {true}, {true}, {true}, {true}, {true}
+  };
+  runLabelingTest("c1ccccc1", "[r6]", expected);
+}
+
+TEST_F(GraphLabelerTest, RingSizeMismatch) {
+  // Target: C1CCCC1 (cyclopentane - 5-membered)
+  // Query: [r6] (atom in 6-membered ring)
+  std::vector<std::vector<uint8_t>> expected = {
+    {false}, {false}, {false}, {false}, {false}
+  };
+  runLabelingTest("C1CCCC1", "[r6]", expected);
+}
+
+TEST_F(GraphLabelerTest, RingSizeIndoleFiveMembered) {
+  // Target: c1ccc2[nH]ccc2c1 (indole)
+  // Query: [r5] (atom in 5-membered ring)
+  // Pyrrole atoms (including fusion) have min ring size 5
+  // Benzene-only atoms have min ring size 6
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},  // c0 (benzene, min size 6)
+    {false},  // c1 (benzene, min size 6)
+    {false},  // c2 (benzene, min size 6)
+    {true},   // c3 (fusion, min size 5 from pyrrole)
+    {true},   // nH (pyrrole, min size 5)
+    {true},   // c5 (pyrrole, min size 5)
+    {true},   // c6 (pyrrole, min size 5)
+    {true},   // c7 (fusion, min size 5 from pyrrole)
+    {false}   // c8 (benzene, min size 6)
+  };
+  runLabelingTest("c1ccc2[nH]ccc2c1", "[r5]", expected);
+}
+
+TEST_F(GraphLabelerTest, RingSizeIndoleSixMembered) {
+  // Target: c1ccc2[nH]ccc2c1 (indole)
+  // Query: [r6] (atom in 6-membered ring)
+  // Only benzene-only atoms have min ring size 6
+  // Fusion and pyrrole atoms have min ring size 5
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // c0 (benzene, min size 6)
+    {true},   // c1 (benzene, min size 6)
+    {true},   // c2 (benzene, min size 6)
+    {false},  // c3 (fusion, min size 5)
+    {false},  // nH (pyrrole, min size 5)
+    {false},  // c5 (pyrrole, min size 5)
+    {false},  // c6 (pyrrole, min size 5)
+    {false},  // c7 (fusion, min size 5)
+    {true}    // c8 (benzene, min size 6)
+  };
+  runLabelingTest("c1ccc2[nH]ccc2c1", "[r6]", expected);
+}
+
+// =============================================================================
+// Wildcard and Any Aromaticity Query Tests
+// =============================================================================
+
+TEST_F(GraphLabelerTest, WildcardMatchesAll) {
+  // Target: CCO (ethanol)
+  // Query: [*] (any atom)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // C
+    {true},   // C
+    {true}    // O
+  };
+  runLabelingTest("CCO", "[*]", expected);
+}
+
+TEST_F(GraphLabelerTest, WildcardMatchesMixed) {
+  // Target: c1ccccc1C (toluene - mixed aromaticity)
+  // Query: [*] (any atom)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}, {true}, {true}, {true}, {true}, {true}, {true}
+  };
+  runLabelingTest("c1ccccc1C", "[*]", expected);
+}
+
+TEST_F(GraphLabelerTest, AnyAromaticAtom) {
+  // Target: c1ccccc1C (toluene)
+  // Query: [a] (any aromatic atom)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // c
+    {true},   // c
+    {true},   // c
+    {true},   // c
+    {true},   // c
+    {true},   // c
+    {false}   // C (aliphatic)
+  };
+  runLabelingTest("c1ccccc1C", "[a]", expected);
+}
+
+TEST_F(GraphLabelerTest, AnyAliphaticAtom) {
+  // Target: c1ccccc1C (toluene)
+  // Query: [A] (any aliphatic atom)
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},  // c
+    {false},  // c
+    {false},  // c
+    {false},  // c
+    {false},  // c
+    {false},  // c
+    {true}    // C (aliphatic)
+  };
+  runLabelingTest("c1ccccc1C", "[A]", expected);
+}
+
+// =============================================================================
+// Explicit AND Query Tests
+// =============================================================================
+
+TEST_F(GraphLabelerTest, ExplicitAndAmpersandCarbonInRing) {
+  // Target: C1CCC1C (cyclobutane with methyl)
+  // Query: [C&R1] (aliphatic carbon AND in exactly 1 ring)
+  // Note: [R] uses >= semantics; use [R1] for exact matching
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // Ring C
+    {true},   // Ring C
+    {true},   // Ring C
+    {true},   // Ring C
+    {false}   // Methyl C (not in ring)
+  };
+  runLabelingTest("C1CCC1C", "[C&R1]", expected);
+}
+
+TEST_F(GraphLabelerTest, ExplicitAndSemicolonAromaticInRing) {
+  // Target: c1ccccc1C (toluene)
+  // Query: [c;R1] (aromatic carbon AND in exactly 1 ring)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // c in ring
+    {true},   // c in ring
+    {true},   // c in ring
+    {true},   // c in ring
+    {true},   // c in ring
+    {true},   // c in ring
+    {false}   // C (aliphatic, not matching aromatic query)
+  };
+  runLabelingTest("c1ccccc1C", "[c;R1]", expected);
+}
+
+TEST_F(GraphLabelerTest, ExplicitAndAtomicNumRing) {
+  // Target: c1ccncc1 (pyridine)
+  // Query: [#6;R1] (carbon AND in exactly 1 ring)
+  // Note: [R] uses >= semantics; use [R1] for exact matching
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // c
+    {true},   // c
+    {true},   // c
+    {false},  // n (nitrogen, not carbon)
+    {true},   // c
+    {true}    // c
+  };
+  runLabelingTest("c1ccncc1", "[#6;R1]", expected);
+}
+
+TEST_F(GraphLabelerTest, ExplicitAndHCountAromaticity) {
+  // Target: c1ccccc1[CH3] (toluene with explicit methyl Hs)
+  // Query: [CH3] - aliphatic carbon with 3 Hs
+  // Note: H count matching requires explicit Hs in target SMILES
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},  // c (aromatic)
+    {false},  // c
+    {false},  // c
+    {false},  // c
+    {false},  // c
+    {false},  // c
+    {true}    // [CH3] (methyl with explicit Hs)
+  };
+  runLabelingTest("c1ccccc1[CH3]", "[CH3]", expected);
+}
+
+TEST_F(GraphLabelerTest, CombinedRingMembershipAndSize) {
+  // Target: c1ccccc1 (benzene)
+  // Query: [R1;r6] (in exactly 1 ring AND ring size 6)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}, {true}, {true}, {true}, {true}, {true}
+  };
+  runLabelingTest("c1ccccc1", "[R1;r6]", expected);
+}
+
+// =============================================================================
+// Multiple Chained AND Query Tests (3+ conditions)
+// =============================================================================
+
+TEST_F(GraphLabelerTest, TripleAndAromaticRingRingSize) {
+  // Target: c1ccccc1 (benzene) - aromatic, in 1 ring, ring size 6
+  // Query: [c&R1&r6] (aromatic carbon AND in 1 ring AND ring size 6)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}, {true}, {true}, {true}, {true}, {true}
+  };
+  runLabelingTest("c1ccccc1", "[c&R1&r6]", expected);
+}
+
+TEST_F(GraphLabelerTest, TripleAndNoMatch) {
+  // Target: c1ccccc1 (benzene) - 6-membered ring
+  // Query: [c&R1&r5] (aromatic carbon AND in 1 ring AND ring size 5)
+  // No match because benzene is 6-membered, not 5
+  std::vector<std::vector<uint8_t>> expected = {
+    {false}, {false}, {false}, {false}, {false}, {false}
+  };
+  runLabelingTest("c1ccccc1", "[c&R1&r5]", expected);
+}
+
+TEST_F(GraphLabelerTest, TripleAndCyclopentane) {
+  // Target: C1CCCC1 (cyclopentane) - aliphatic, in 1 ring, ring size 5, sp3
+  // Query: [C&R1&r5] (aliphatic carbon AND in 1 ring AND ring size 5)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}, {true}, {true}, {true}, {true}
+  };
+  runLabelingTest("C1CCCC1", "[C&R1&r5]", expected);
+}
+
+TEST_F(GraphLabelerTest, TripleAndWithHybridization) {
+  // Target: C1CCCC1 (cyclopentane) - all sp3
+  // Query: [C&R1&^3] (aliphatic carbon AND in 1 ring AND sp3)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}, {true}, {true}, {true}, {true}
+  };
+  runLabelingTest("C1CCCC1", "[C&R1&^3]", expected);
+}
+
+TEST_F(GraphLabelerTest, TripleAndSemicolonSyntax) {
+  // Target: C1CCCC1 (cyclopentane)
+  // Query: [#6;R1;r5] (carbon AND in 1 ring AND ring size 5) using semicolon
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}, {true}, {true}, {true}, {true}
+  };
+  runLabelingTest("C1CCCC1", "[#6;R1;r5]", expected);
+}
+
+TEST_F(GraphLabelerTest, TripleAndIndolePyrrole) {
+  // Target: c1ccc2[nH]ccc2c1 (indole)
+  // Query: [c&R1&r5] (aromatic carbon AND in exactly 1 ring AND ring size 5)
+  // Only pyrrole carbons (not at fusion) match: atoms 5, 6
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},  // c0 (benzene, r6)
+    {false},  // c1 (benzene, r6)
+    {false},  // c2 (benzene, r6)
+    {false},  // c3 (fusion, R2)
+    {false},  // nH (nitrogen, not carbon)
+    {true},   // c5 (pyrrole, R1, r5)
+    {true},   // c6 (pyrrole, R1, r5)
+    {false},  // c7 (fusion, R2)
+    {false}   // c8 (benzene, r6)
+  };
+  runLabelingTest("c1ccc2[nH]ccc2c1", "[c&R1&r5]", expected);
+}
+
+// =============================================================================
 // GPU-Optimized Warp-Parallel Labeling Tests
 // =============================================================================
 

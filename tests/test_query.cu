@@ -182,7 +182,8 @@ INSTANTIATE_TEST_SUITE_P(
     QueryTestCase{"[r6]", {AtomQueryMinRingSize}},
 
     // Explicit AND with ampersand (&) - high precedence
-    QueryTestCase{"[C&R]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryNumRings}},
+    // Note: [R] without a count is not supported; use [R1], [R2], etc.
+    QueryTestCase{"[C&R1]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryNumRings}},
     QueryTestCase{"[C&H3]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryNumExplicitHs}},
     QueryTestCase{"[c&R1]", {AtomQueryAtomicNum | AtomQueryIsAromatic | AtomQueryNumRings}},
     QueryTestCase{"[#6&R1]", {AtomQueryAtomicNum | AtomQueryNumRings}},
@@ -190,13 +191,18 @@ INSTANTIATE_TEST_SUITE_P(
     // Explicit AND with semicolon (;) - low precedence
     QueryTestCase{"[C;H3]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryNumExplicitHs}},
     QueryTestCase{"[c;R1]", {AtomQueryAtomicNum | AtomQueryIsAromatic | AtomQueryNumRings}},
-    QueryTestCase{"[#6;R]", {AtomQueryAtomicNum | AtomQueryNumRings}},
+    QueryTestCase{"[#6;R1]", {AtomQueryAtomicNum | AtomQueryNumRings}},
 
     // Multiple ring query
     QueryTestCase{"[R2]", {AtomQueryNumRings}},
 
     // Combining ring membership with ring size
-    QueryTestCase{"[R1;r6]", {AtomQueryNumRings | AtomQueryMinRingSize}}),
+    QueryTestCase{"[R1;r6]", {AtomQueryNumRings | AtomQueryMinRingSize}},
+
+    // Multiple chained ANDs (3+ conditions)
+    QueryTestCase{"[c&R1&r6]", {AtomQueryAtomicNum | AtomQueryIsAromatic | AtomQueryNumRings | AtomQueryMinRingSize}},
+    QueryTestCase{"[#6;R1;r5]", {AtomQueryAtomicNum | AtomQueryNumRings | AtomQueryMinRingSize}},
+    QueryTestCase{"[C&R1&^3]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryNumRings | AtomQueryHybridization}}),
   [](const ::testing::TestParamInfo<QueryTestCase>& info) {
     std::string name;
     for (char c : info.param.smarts) {
@@ -313,6 +319,24 @@ TEST(QueryCompositeTest, IsotopeQueryThrows) {
 TEST(QueryCompositeTest, ChiralityQueryThrows) {
   // [@] chirality query
   auto mol = makeQuery("[C@H](F)(Cl)Br");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
+}
+
+TEST(QueryCompositeTest, BareRingQueryThrows) {
+  // [R] without a count is not supported - use [R1], [R2], etc.
+  auto mol = makeQuery("[R]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
+}
+
+TEST(QueryCompositeTest, BareRingInAndQueryThrows) {
+  // [C&R] contains unsupported [R] - use [C&R1] instead
+  auto mol = makeQuery("[C&R]");
   ASSERT_NE(mol, nullptr);
 
   MoleculesHost batch;

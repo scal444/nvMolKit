@@ -318,6 +318,10 @@ AtomQuery atomQueryFromDescription(const std::string& description) {
   if (description == "AtomChiralTag") {
     throw std::runtime_error("SMARTS chirality query (@/@@ ) is not supported");
   }
+  if (description == "AtomInRing") {
+    throw std::runtime_error(
+        "SMARTS [r] (any ring) query is not supported; use [r5], [r6], etc. for ring size");
+  }
 
   throw std::runtime_error("Unsupported SMARTS atom query: " + description);
 }
@@ -418,6 +422,16 @@ AtomQuery getQueryFlagsFromQuery(const RDKit::Atom::QUERYATOM_QUERY* query) {
 
   if (description == "RecursiveStructure") {
     throw std::runtime_error("Recursive SMARTS ($(...)) are not supported");
+  }
+
+  // [R] creates AtomInNRings with value -1 meaning "any ring" (numRings != 0)
+  // We only support exact ring count like [R1], [R2], etc. (value >= 0)
+  if (description == "AtomInNRings") {
+    const auto* eqQuery = static_cast<const RDKit::ATOM_EQUALS_QUERY*>(query);
+    if (eqQuery->getVal() < 0) {
+      throw std::runtime_error(
+          "SMARTS [R] query is not supported; use [R1], [R2], etc. for exact ring count");
+    }
   }
 
   return atomQueryFromDescription(description);
