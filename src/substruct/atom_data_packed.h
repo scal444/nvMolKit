@@ -50,7 +50,8 @@ namespace nvMolKit {
  *   Byte 0 [bits  0-7 ]: minRingSize (uint8_t)
  *   Byte 1 [bits  8-15]: numRings (uint8_t)
  *   Byte 2 [bits 16-23]: isAromatic (0x00 = false, 0x01 = true)
- *   Bytes 3-7 [bits 24-63]: reserved (padding, must be 0)
+ *   Byte 3 [bits 24-31]: totalValence (uint8_t, explicit + implicit)
+ *   Bytes 4-7 [bits 32-63]: reserved (padding, must be 0)
  */
 struct AtomDataPacked {
   uint64_t lo = 0;
@@ -77,9 +78,10 @@ struct AtomDataPacked {
 
   /// @name Upper 64-bit field byte offsets
   /// @{
-  static constexpr int kMinRingSizeByte = 0;
-  static constexpr int kNumRingsByte    = 1;
-  static constexpr int kIsAromaticByte  = 2;
+  static constexpr int kMinRingSizeByte  = 0;
+  static constexpr int kNumRingsByte     = 1;
+  static constexpr int kIsAromaticByte   = 2;
+  static constexpr int kTotalValenceByte = 3;
   /// @}
 
   // ============================================================================
@@ -133,6 +135,10 @@ struct AtomDataPacked {
     hi           = (hi & ~(0xFFULL << (kIsAromaticByte * 8))) | (static_cast<uint64_t>(uval) << (kIsAromaticByte * 8));
   }
 
+  HD_CALLABLE void setTotalValence(uint8_t val) {
+    hi = (hi & ~(0xFFULL << (kTotalValenceByte * 8))) | (static_cast<uint64_t>(val) << (kTotalValenceByte * 8));
+  }
+
   // ============================================================================
   // Getters - host and device
   // ============================================================================
@@ -166,6 +172,8 @@ struct AtomDataPacked {
   HD_CALLABLE uint8_t numRings() const { return static_cast<uint8_t>((hi >> (kNumRingsByte * 8)) & 0xFF); }
 
   HD_CALLABLE bool isAromatic() const { return ((hi >> (kIsAromaticByte * 8)) & 0xFF) != 0; }
+
+  HD_CALLABLE uint8_t totalValence() const { return static_cast<uint8_t>((hi >> (kTotalValenceByte * 8)) & 0xFF); }
 };
 
 static_assert(sizeof(AtomDataPacked) == 16, "AtomDataPacked must be exactly 16 bytes");

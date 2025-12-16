@@ -1076,6 +1076,61 @@ TEST_F(GraphLabelerTest, TripleAndIndolePyrrole) {
 }
 
 // =============================================================================
+// Total Valence Tests
+// =============================================================================
+
+TEST_F(GraphLabelerTest, TotalValenceMethane) {
+  // Methane: C with 4 hydrogens, total valence = 4
+  std::vector<std::vector<uint8_t>> expected = {{true}};
+  runLabelingTest("C", "[v4]", expected);
+}
+
+TEST_F(GraphLabelerTest, TotalValenceAmmonia) {
+  // Ammonia: N with 3 hydrogens, total valence = 3
+  std::vector<std::vector<uint8_t>> expected = {{true}};
+  runLabelingTest("N", "[v3]", expected);
+}
+
+TEST_F(GraphLabelerTest, TotalValenceWater) {
+  // Water: O with 2 hydrogens, total valence = 2
+  std::vector<std::vector<uint8_t>> expected = {{true}};
+  runLabelingTest("O", "[v2]", expected);
+}
+
+TEST_F(GraphLabelerTest, TotalValenceMismatch) {
+  // Methane has valence 4, not 3
+  std::vector<std::vector<uint8_t>> expected = {{false}};
+  runLabelingTest("C", "[v3]", expected);
+}
+
+TEST_F(GraphLabelerTest, TotalValenceWithAtomType) {
+  // Carbon with valence 4
+  std::vector<std::vector<uint8_t>> expected = {{true}};
+  runLabelingTest("C", "[C&v4]", expected);
+}
+
+TEST_F(GraphLabelerTest, TotalValenceEthane) {
+  // Ethane: two carbons, each with valence 4
+  std::vector<std::vector<uint8_t>> expected = {{true}, {true}};
+  runLabelingTest("CC", "[v4]", expected);
+}
+
+TEST_F(GraphLabelerTest, TotalValenceEthene) {
+  // Ethene: two sp2 carbons, each with valence 4 (double bond counts as 2)
+  std::vector<std::vector<uint8_t>> expected = {{true}, {true}};
+  runLabelingTest("C=C", "[v4]", expected);
+}
+
+TEST_F(GraphLabelerTest, TotalValenceFormaldehyde) {
+  // Formaldehyde CH2O: C has valence 4, O has valence 2
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},  // C (valence 4)
+    {false}  // O (valence 2)
+  };
+  runLabelingTest("C=O", "[v4]", expected);
+}
+
+// =============================================================================
 // GPU-Optimized Warp-Parallel Labeling Tests
 // =============================================================================
 

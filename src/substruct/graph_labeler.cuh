@@ -272,6 +272,11 @@ __device__ __forceinline__ bool atomMatches(const AtomData& target, const AtomDa
       return false;
     }
   }
+  if (queryFlags & AtomQueryTotalValence) {
+    if (target.totalValence != query.totalValence) {
+      return false;
+    }
+  }
   if (queryFlags & AtomQueryIsAromatic) {
     if (!target.isAromatic) {
       return false;

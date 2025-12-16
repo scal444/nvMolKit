@@ -38,6 +38,7 @@ using nvMolKit::AtomQueryMinRingSize;
 using nvMolKit::AtomQueryNone;
 using nvMolKit::AtomQueryNumExplicitHs;
 using nvMolKit::AtomQueryNumRings;
+using nvMolKit::AtomQueryTotalValence;
 using nvMolKit::checkReturnCode;
 using nvMolKit::getMolecule;
 using nvMolKit::MoleculesDevice;
@@ -202,7 +203,13 @@ INSTANTIATE_TEST_SUITE_P(
     // Multiple chained ANDs (3+ conditions)
     QueryTestCase{"[c&R1&r6]", {AtomQueryAtomicNum | AtomQueryIsAromatic | AtomQueryNumRings | AtomQueryMinRingSize}},
     QueryTestCase{"[#6;R1;r5]", {AtomQueryAtomicNum | AtomQueryNumRings | AtomQueryMinRingSize}},
-    QueryTestCase{"[C&R1&^3]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryNumRings | AtomQueryHybridization}}),
+    QueryTestCase{"[C&R1&^3]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryNumRings | AtomQueryHybridization}},
+
+    // Total valence queries [v]
+    QueryTestCase{"[v4]", {AtomQueryTotalValence}},
+    QueryTestCase{"[v3]", {AtomQueryTotalValence}},
+    QueryTestCase{"[C&v4]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryTotalValence}},
+    QueryTestCase{"[N;v3]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryTotalValence}}),
   [](const ::testing::TestParamInfo<QueryTestCase>& info) {
     std::string name;
     for (char c : info.param.smarts) {
@@ -283,15 +290,6 @@ TEST(QueryCompositeTest, TotalConnectivityQueryThrows) {
 TEST(QueryCompositeTest, RingConnectivityQueryThrows) {
   // [x2] ring connectivity query
   auto mol = makeQuery("[x2]");
-  ASSERT_NE(mol, nullptr);
-
-  MoleculesHost batch;
-  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
-}
-
-TEST(QueryCompositeTest, ValenceQueryThrows) {
-  // [v4] total valence query
-  auto mol = makeQuery("[v4]");
   ASSERT_NE(mol, nullptr);
 
   MoleculesHost batch;

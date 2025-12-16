@@ -39,6 +39,7 @@ void populateAtomData(const RDKit::Atom* atom, AtomData& atomData, const RDKit::
   atomData.explicitValence = atom->getExplicitValence();
   atomData.implicitValence = atom->getImplicitValence();
 #endif
+  atomData.totalValence        = atom->getTotalValence();
   atomData.formalCharge        = atom->getFormalCharge();
   atomData.hybridization       = atom->getHybridization();
   atomData.isAromatic          = atom->getIsAromatic();
@@ -59,6 +60,7 @@ void populateAtomDataPacked(const RDKit::Atom* atom, AtomDataPacked& packed, con
   packed.setExplicitValence(atom->getExplicitValence());
   packed.setImplicitValence(atom->getImplicitValence());
 #endif
+  packed.setTotalValence(atom->getTotalValence());
   packed.setFormalCharge(atom->getFormalCharge());
   packed.setHybridization(atom->getHybridization());
   packed.setIsAromatic(atom->getIsAromatic());
@@ -156,6 +158,8 @@ void populateFromQuery(const RDKit::Atom::QUERYATOM_QUERY* query, AtomData& atom
     atomData.minRingSize = eqQuery->getVal();
   } else if (desc == "AtomNumRadicalElectrons") {
     atomData.numRadicalElectrons = eqQuery->getVal();
+  } else if (desc == "AtomTotalValence") {
+    atomData.totalValence = eqQuery->getVal();
   }
 }
 
@@ -301,7 +305,7 @@ AtomQuery atomQueryFromDescription(const std::string& description) {
     throw std::runtime_error("SMARTS ring connectivity query (x) is not supported");
   }
   if (description == "AtomTotalValence") {
-    throw std::runtime_error("SMARTS valence query (v) is not supported");
+    return AtomQueryTotalValence;
   }
   if (description == "AtomImplicitHCount") {
     throw std::runtime_error("SMARTS implicit hydrogen count query (h) is not supported");
@@ -373,6 +377,9 @@ AtomQueryMask buildQueryMask(const AtomDataPacked& queryAtom, AtomQuery queryFla
   }
   if (queryFlags & AtomQueryNumRings) {
     setHiField(AtomDataPacked::kNumRingsByte, queryAtom.numRings());
+  }
+  if (queryFlags & AtomQueryTotalValence) {
+    setHiField(AtomDataPacked::kTotalValenceByte, queryAtom.totalValence());
   }
 
   // Special handling for aromaticity: both flags use the same field but expect different values
@@ -597,6 +604,8 @@ void populateQueryAtomDataPacked(const RDKit::Atom* atom, AtomDataPacked& packed
       packed.setMinRingSize(eqQuery->getVal());
     } else if (desc == "AtomNumRadicalElectrons") {
       packed.setNumRadicalElectrons(eqQuery->getVal());
+    } else if (desc == "AtomTotalValence") {
+      packed.setTotalValence(eqQuery->getVal());
     }
   };
 

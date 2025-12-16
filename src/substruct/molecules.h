@@ -50,6 +50,7 @@ enum AtomQueryFlags : uint16_t {
   AtomQueryNumRings            = 1 << 9,
   AtomQueryIsAromatic          = 1 << 10,
   AtomQueryIsAliphatic         = 1 << 11,
+  AtomQueryTotalValence        = 1 << 12,
 };
 
 using AtomQuery = uint16_t;
@@ -67,6 +68,7 @@ struct AtomData {
   uint8_t hybridization       = 0;
   uint8_t minRingSize         = 0;
   uint8_t numRings            = 0;
+  uint8_t totalValence        = 0;
   bool    isAromatic          = false;
 };
 
