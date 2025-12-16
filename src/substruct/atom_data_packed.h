@@ -51,7 +51,8 @@ namespace nvMolKit {
  *   Byte 1 [bits  8-15]: numRings (uint8_t)
  *   Byte 2 [bits 16-23]: isAromatic (0x00 = false, 0x01 = true)
  *   Byte 3 [bits 24-31]: totalValence (uint8_t, explicit + implicit)
- *   Bytes 4-7 [bits 32-63]: reserved (padding, must be 0)
+ *   Byte 4 [bits 32-39]: isInRing (0x00 = false, 0x01 = true) for [R]/[r] queries
+ *   Bytes 5-7 [bits 40-63]: reserved (padding, must be 0)
  */
 struct AtomDataPacked {
   uint64_t lo = 0;
@@ -82,6 +83,7 @@ struct AtomDataPacked {
   static constexpr int kNumRingsByte     = 1;
   static constexpr int kIsAromaticByte   = 2;
   static constexpr int kTotalValenceByte = 3;
+  static constexpr int kIsInRingByte     = 4;  ///< For [R]/[r] any-ring queries (0x00 or 0x01)
   /// @}
 
   // ============================================================================
@@ -139,6 +141,11 @@ struct AtomDataPacked {
     hi = (hi & ~(0xFFULL << (kTotalValenceByte * 8))) | (static_cast<uint64_t>(val) << (kTotalValenceByte * 8));
   }
 
+  HD_CALLABLE void setIsInRing(bool val) {
+    uint8_t uval = val ? 0x01 : 0x00;
+    hi           = (hi & ~(0xFFULL << (kIsInRingByte * 8))) | (static_cast<uint64_t>(uval) << (kIsInRingByte * 8));
+  }
+
   // ============================================================================
   // Getters - host and device
   // ============================================================================
@@ -174,6 +181,8 @@ struct AtomDataPacked {
   HD_CALLABLE bool isAromatic() const { return ((hi >> (kIsAromaticByte * 8)) & 0xFF) != 0; }
 
   HD_CALLABLE uint8_t totalValence() const { return static_cast<uint8_t>((hi >> (kTotalValenceByte * 8)) & 0xFF); }
+
+  HD_CALLABLE bool isInRing() const { return ((hi >> (kIsInRingByte * 8)) & 0xFF) != 0; }
 };
 
 static_assert(sizeof(AtomDataPacked) == 16, "AtomDataPacked must be exactly 16 bytes");

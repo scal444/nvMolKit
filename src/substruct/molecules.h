@@ -52,6 +52,7 @@ enum AtomQueryFlags : uint16_t {
   AtomQueryIsAromatic          = 1 << 10,
   AtomQueryIsAliphatic         = 1 << 11,
   AtomQueryTotalValence        = 1 << 12,
+  AtomQueryIsInRing            = 1 << 13,  ///< For [R] and [r] any-ring queries
 };
 
 using AtomQuery = uint16_t;

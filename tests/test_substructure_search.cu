@@ -1055,3 +1055,108 @@ TEST_P(SubstructureSearchTest, AromaticRingPatternWithOr) {
   EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for c1[c,n]cccc1 in pyridine using " << algorithmName(algorithm());
 }
+
+TEST_P(SubstructureSearchTest, AnyRingMembershipQuery) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test [R] any ring membership query
+  // C1CCC1C: 4 ring atoms, 1 non-ring atom
+  // CCCCC: no ring atoms
+  buildBatches({"C1CCC1C", "CCCCC"}, {"[R]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  // Cyclobutane with methyl: 4 ring atoms match [R]
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for [R] in C1CCC1C using " << algorithmName(algorithm());
+
+  // Pentane: no ring atoms, should get 0 matches
+  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+    << "GPU should match RDKit for [R] in CCCCC using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, AnyRingSizeQuery) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test [r] any ring size query (same semantics as [R])
+  // c1ccccc1: 6 ring atoms
+  // CCCCC: no ring atoms
+  buildBatches({"c1ccccc1", "CCCCC"}, {"[r]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  // Benzene: 6 ring atoms match [r]
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for [r] in benzene using " << algorithmName(algorithm());
+
+  // Pentane: no ring atoms, should get 0 matches
+  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+    << "GPU should match RDKit for [r] in CCCCC using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, AnyRingCombinedWithAtomType) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test [C;R] carbon in any ring
+  // C1CCC1C: 4 ring carbons, 1 non-ring carbon
+  // c1ccccc1: aromatic carbons (not aliphatic C)
+  buildBatches({"C1CCC1C", "c1ccccc1"}, {"[C;R]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  // Cyclobutane with methyl: 4 aliphatic ring carbons match [C;R]
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for [C;R] in C1CCC1C using " << algorithmName(algorithm());
+
+  // Benzene: aromatic carbons don't match aliphatic C
+  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+    << "GPU should match RDKit for [C;R] in benzene using " << algorithmName(algorithm());
+}

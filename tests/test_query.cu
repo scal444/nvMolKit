@@ -34,6 +34,7 @@ using nvMolKit::AtomQueryFormalCharge;
 using nvMolKit::AtomQueryHybridization;
 using nvMolKit::AtomQueryIsAliphatic;
 using nvMolKit::AtomQueryIsAromatic;
+using nvMolKit::AtomQueryIsInRing;
 using nvMolKit::AtomQueryMinRingSize;
 using nvMolKit::AtomQueryNone;
 using nvMolKit::AtomQueryNumExplicitHs;
@@ -183,7 +184,6 @@ INSTANTIATE_TEST_SUITE_P(
     QueryTestCase{"[r6]", {AtomQueryMinRingSize}},
 
     // Explicit AND with ampersand (&) - high precedence
-    // Note: [R] without a count is not supported; use [R1], [R2], etc.
     QueryTestCase{"[C&R1]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryNumRings}},
     QueryTestCase{"[C&H3]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryNumExplicitHs}},
     QueryTestCase{"[c&R1]", {AtomQueryAtomicNum | AtomQueryIsAromatic | AtomQueryNumRings}},
@@ -488,24 +488,6 @@ TEST(QueryCompositeTest, ChiralityQueryThrows) {
   EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
 }
 
-TEST(QueryCompositeTest, BareRingQueryThrows) {
-  // [R] without a count is not supported - use [R1], [R2], etc.
-  auto mol = makeQuery("[R]");
-  ASSERT_NE(mol, nullptr);
-
-  MoleculesHost batch;
-  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
-}
-
-TEST(QueryCompositeTest, BareRingInAndQueryThrows) {
-  // [C&R] contains unsupported [R] - use [C&R1] instead
-  auto mol = makeQuery("[C&R]");
-  ASSERT_NE(mol, nullptr);
-
-  MoleculesHost batch;
-  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
-}
-
 TEST(QueryCompositeTest, WildcardAtomSucceeds) {
   // [*] wildcard atom - matches any atom
   // This is supported as it produces AtomNull which returns AtomQueryNone
@@ -535,6 +517,38 @@ TEST(QueryCompositeTest, AnyAliphaticAtomSucceeds) {
   MoleculesHost batch;
   EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
   EXPECT_EQ(batch.atomQueries[0], AtomQueryIsAliphatic);
+}
+
+TEST(QueryCompositeTest, AnyRingCountSucceeds) {
+  // [R] any ring count - atom in at least one ring
+  auto mol = makeQuery("[R]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_EQ(batch.atomQueries[0], AtomQueryIsInRing);
+}
+
+TEST(QueryCompositeTest, AnyRingSizeSucceeds) {
+  // [r] any ring size - atom in any ring
+  auto mol = makeQuery("[r]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_EQ(batch.atomQueries[0], AtomQueryIsInRing);
+}
+
+TEST(QueryCompositeTest, AnyRingWithAtomTypeSucceeds) {
+  // [C;R] carbon in any ring
+  auto mol = makeQuery("[C;R]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  // Should have both atom type and ring flags
+  EXPECT_TRUE(batch.atomQueries[0] & AtomQueryAtomicNum);
+  EXPECT_TRUE(batch.atomQueries[0] & AtomQueryIsInRing);
 }
 
 TEST(QueryCompositeTest, AnyBondSucceeds) {

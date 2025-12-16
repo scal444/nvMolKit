@@ -719,10 +719,61 @@ TEST_F(GraphLabelerTest, HybridizationSP) {
 // Ring Membership Query Tests
 // =============================================================================
 
-TEST_F(GraphLabelerTest, RingMembershipAnyRing) {
+TEST_F(GraphLabelerTest, AnyRingMembershipQuery) {
+  // Target: C1CCC1C (cyclobutane with methyl)
+  // Query: [R] (atom in any ring)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // Ring C
+    {true},   // Ring C
+    {true},   // Ring C
+    {true},   // Ring C
+    {false}   // Methyl C (not in ring)
+  };
+  runLabelingTest("C1CCC1C", "[R]", expected);
+}
+
+TEST_F(GraphLabelerTest, AnyRingSizeQuery) {
+  // Target: C1CCC1C (cyclobutane with methyl)
+  // Query: [r] (atom in any ring)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // Ring C
+    {true},   // Ring C
+    {true},   // Ring C
+    {true},   // Ring C
+    {false}   // Methyl C (not in ring)
+  };
+  runLabelingTest("C1CCC1C", "[r]", expected);
+}
+
+TEST_F(GraphLabelerTest, AnyRingWithAtomType) {
+  // Target: c1ccncc1C (methylpyridine)
+  // Query: [C;R] (aliphatic carbon in any ring)
+  // Only aliphatic C in ring matches - the methyl C is not in ring
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},  // c (aromatic)
+    {false},  // c (aromatic)
+    {false},  // c (aromatic)
+    {false},  // n (nitrogen)
+    {false},  // c (aromatic)
+    {false},  // c (aromatic)
+    {false}   // C (not in ring)
+  };
+  runLabelingTest("c1ccncc1C", "[C;R]", expected);
+}
+
+TEST_F(GraphLabelerTest, AnyRingNoRingAtoms) {
+  // Target: CCCCC (pentane - no rings)
+  // Query: [R] (atom in any ring)
+  // No atoms match since there are no rings
+  std::vector<std::vector<uint8_t>> expected = {
+    {false}, {false}, {false}, {false}, {false}
+  };
+  runLabelingTest("CCCCC", "[R]", expected);
+}
+
+TEST_F(GraphLabelerTest, RingMembershipExactCount) {
   // Target: C1CCC1C (cyclobutane with methyl)
   // Query: [R1] (atom in exactly 1 ring)
-  // Note: [R] without a number uses >= semantics which we don't support; use [R1] instead
   std::vector<std::vector<uint8_t>> expected = {
     {true},   // Ring C
     {true},   // Ring C
@@ -942,7 +993,6 @@ TEST_F(GraphLabelerTest, AnyAliphaticAtom) {
 TEST_F(GraphLabelerTest, ExplicitAndAmpersandCarbonInRing) {
   // Target: C1CCC1C (cyclobutane with methyl)
   // Query: [C&R1] (aliphatic carbon AND in exactly 1 ring)
-  // Note: [R] uses >= semantics; use [R1] for exact matching
   std::vector<std::vector<uint8_t>> expected = {
     {true},   // Ring C
     {true},   // Ring C
@@ -971,7 +1021,6 @@ TEST_F(GraphLabelerTest, ExplicitAndSemicolonAromaticInRing) {
 TEST_F(GraphLabelerTest, ExplicitAndAtomicNumRing) {
   // Target: c1ccncc1 (pyridine)
   // Query: [#6;R1] (carbon AND in exactly 1 ring)
-  // Note: [R] uses >= semantics; use [R1] for exact matching
   std::vector<std::vector<uint8_t>> expected = {
     {true},   // c
     {true},   // c
