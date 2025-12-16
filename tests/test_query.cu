@@ -15,8 +15,8 @@
 
 #include <gmock/gmock.h>
 #include <GraphMol/ROMol.h>
-#include <GraphMol/SmilesParse/SmilesParse.h>
 #include <GraphMol/SmilesParse/SmartsWrite.h>
+#include <GraphMol/SmilesParse/SmilesParse.h>
 #include <gtest/gtest.h>
 
 #include <memory>
@@ -123,8 +123,8 @@ TEST_P(QueryParsingTest, QueryTypeMatchesOnDevice) {
 }
 
 // Convenience constants for common combinations
-constexpr AtomQuery kAliphaticCarbon  = AtomQueryAtomicNum | AtomQueryIsAliphatic;
-constexpr AtomQuery kAromaticCarbon   = AtomQueryAtomicNum | AtomQueryIsAromatic;
+constexpr AtomQuery kAliphaticCarbon   = AtomQueryAtomicNum | AtomQueryIsAliphatic;
+constexpr AtomQuery kAromaticCarbon    = AtomQueryAtomicNum | AtomQueryIsAromatic;
 constexpr AtomQuery kAliphaticNitrogen = AtomQueryAtomicNum | AtomQueryIsAliphatic;
 constexpr AtomQuery kAromaticNitrogen  = AtomQueryAtomicNum | AtomQueryIsAromatic;
 constexpr AtomQuery kAliphaticOxygen   = AtomQueryAtomicNum | AtomQueryIsAliphatic;
@@ -134,7 +134,10 @@ INSTANTIATE_TEST_SUITE_P(
   QueryParsingTest,
   ::testing::Values(
     // Single atom queries by atomic number only
-    QueryTestCase{"[#6]", {AtomQueryAtomicNum}},
+    QueryTestCase{
+      "[#6]",
+      {AtomQueryAtomicNum}
+},
     QueryTestCase{"[#7]", {AtomQueryAtomicNum}},
     QueryTestCase{"[#8]", {AtomQueryAtomicNum}},
 
@@ -165,13 +168,13 @@ INSTANTIATE_TEST_SUITE_P(
     QueryTestCase{"cc", {kAromaticCarbon, kAromaticCarbon}},
 
     // Benzene - all aromatic carbons
-    QueryTestCase{"c1ccccc1", {kAromaticCarbon, kAromaticCarbon, kAromaticCarbon,
-                              kAromaticCarbon, kAromaticCarbon, kAromaticCarbon}},
+    QueryTestCase{
+      "c1ccccc1",
+      {kAromaticCarbon, kAromaticCarbon, kAromaticCarbon, kAromaticCarbon, kAromaticCarbon, kAromaticCarbon}},
 
     // Combined query: aliphatic carbon with H count
     QueryTestCase{"[CH3]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryNumExplicitHs}},
-    QueryTestCase{"[CH2]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryNumExplicitHs}}
-  ),
+    QueryTestCase{"[CH2]", {AtomQueryAtomicNum | AtomQueryIsAliphatic | AtomQueryNumExplicitHs}}),
   [](const ::testing::TestParamInfo<QueryTestCase>& info) {
     std::string name;
     for (char c : info.param.smarts) {
@@ -194,8 +197,7 @@ INSTANTIATE_TEST_SUITE_P(
       }
     }
     return name;
-  }
-);
+  });
 
 // =============================================================================
 // Unsupported Composite Query Tests (OR/XOR should throw)

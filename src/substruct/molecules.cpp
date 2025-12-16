@@ -20,6 +20,7 @@
 #include <GraphMol/ROMol.h>
 #include <RDGeneral/versions.h>
 
+#include <functional>
 #include <stdexcept>
 #include <string>
 
@@ -47,6 +48,40 @@ void populateAtomData(const RDKit::Atom* atom, AtomData& atomData, const RDKit::
   atomData.minRingSize         = ringInfo->minAtomRingSize(idx);
 }
 
+void populateAtomDataPacked(const RDKit::Atom* atom, AtomDataPacked& packed, const RDKit::RingInfo* ringInfo) {
+  packed.setAtomicNum(atom->getAtomicNum());
+  packed.setChiralTag(atom->getChiralTag());
+  packed.setNumExplicitHs(atom->getNumExplicitHs());
+#if RDKIT_VERSION_NUM >= 0x20240300
+  packed.setExplicitValence(atom->getValence(RDKit::Atom::ValenceType::EXPLICIT));
+  packed.setImplicitValence(atom->getValence(RDKit::Atom::ValenceType::IMPLICIT));
+#else
+  packed.setExplicitValence(atom->getExplicitValence());
+  packed.setImplicitValence(atom->getImplicitValence());
+#endif
+  packed.setFormalCharge(atom->getFormalCharge());
+  packed.setHybridization(atom->getHybridization());
+  packed.setIsAromatic(atom->getIsAromatic());
+  packed.setNumRadicalElectrons(atom->getNumRadicalElectrons());
+  const int idx = atom->getIdx();
+  packed.setNumRings(ringInfo->numAtomRings(idx));
+  packed.setMinRingSize(ringInfo->minAtomRingSize(idx));
+}
+
+void populateBondTypeCounts(const RDKit::ROMol* mol, const RDKit::Atom* atom, BondTypeCounts& counts) {
+  auto [beg, bondEnd] = mol->getAtomBonds(atom);
+  while (beg != bondEnd) {
+    const auto* bond     = (*mol)[*beg];
+    int         bondType = bond->getBondType();
+    if (bondType < BondTypeCounts::kNumBondTypes) {
+      ++counts[bondType];
+    } else {
+      ++counts[BondTypeCounts::kNumBondTypes - 1];
+    }
+    ++beg;
+  }
+}
+
 void populateFromQuery(const RDKit::Atom::QUERYATOM_QUERY* query, AtomData& atomData);
 
 void handleQueryChildren(const RDKit::Atom::QUERYATOM_QUERY* query, AtomData& atomData) {
@@ -63,19 +98,19 @@ void populateFromQuery(const RDKit::Atom::QUERYATOM_QUERY* query, AtomData& atom
     handleQueryChildren(query, atomData);
     return;
   }
-  
+
   // AtomType is used for organic subset atoms (C, N, O, etc.) in SMARTS
   // It encodes both atomic number and aromaticity:
   // - Aliphatic: value = atomic number (e.g., C=6, O=8)
   // - Aromatic: value = 1000 + atomic number (e.g., c=1006)
   if (desc == "AtomType") {
     const auto* eqQuery = static_cast<const RDKit::ATOM_EQUALS_QUERY*>(query);
-    int typeVal = eqQuery->getVal();
+    int         typeVal = eqQuery->getVal();
     if (typeVal >= 1000) {
-      atomData.atomicNum = typeVal - 1000;
+      atomData.atomicNum  = typeVal - 1000;
       atomData.isAromatic = true;
     } else {
-      atomData.atomicNum = typeVal;
+      atomData.atomicNum  = typeVal;
       atomData.isAromatic = false;
     }
     return;
@@ -147,6 +182,9 @@ void MoleculesDevice::setStream(cudaStream_t stream) {
   atomBondStarts_.setStream(stream);
   otherAtomIndices_.setStream(stream);
   bondDataIndices_.setStream(stream);
+  atomDataPacked_.setStream(stream);
+  atomQueryMasks_.setStream(stream);
+  bondTypeCounts_.setStream(stream);
 }
 
 void MoleculesDevice::copyFromHost(const MoleculesHost& host, cudaStream_t stream) {
@@ -168,6 +206,17 @@ void MoleculesDevice::copyFromHost(const MoleculesHost& host, cudaStream_t strea
   atomBondStarts_.setFromVector(host.atomBondStarts);
   otherAtomIndices_.setFromVector(host.otherAtomIndices);
   bondDataIndices_.setFromVector(host.bondDataIndices);
+
+  // Copy GPU-optimized packed data
+  if (!host.atomDataPacked.empty()) {
+    atomDataPacked_.setFromVector(host.atomDataPacked);
+  }
+  if (!host.atomQueryMasks.empty()) {
+    atomQueryMasks_.setFromVector(host.atomQueryMasks);
+  }
+  if (!host.bondTypeCounts.empty()) {
+    bondTypeCounts_.setFromVector(host.bondTypeCounts);
+  }
 }
 
 MoleculesDeviceView MoleculesDevice::view() const {
@@ -184,6 +233,9 @@ MoleculesDeviceView MoleculesDevice::view() const {
   v.otherAtomIndices            = otherAtomIndices_.data();
   v.bondDataIndices             = bondDataIndices_.data();
   v.numMolecules                = numMolecules_;
+  v.atomDataPacked              = atomDataPacked_.data();
+  v.atomQueryMasks              = atomQueryMasks_.data();
+  v.bondTypeCounts              = bondTypeCounts_.data();
   return v;
 }
 
@@ -227,6 +279,66 @@ AtomQuery atomQueryFromDescription(const std::string& description) {
   return AtomQueryNone;
 }
 
+AtomQueryMask buildQueryMask(const AtomDataPacked& queryAtom, AtomQuery queryFlags) {
+  AtomQueryMask m = {0, 0, 0, 0};
+
+  // Helper lambda to set mask and expected for a byte in the lower 64 bits
+  auto setLoField = [&](int byteOffset, uint8_t value) {
+    m.maskLo |= 0xFFULL << (byteOffset * 8);
+    m.expectedLo |= static_cast<uint64_t>(value) << (byteOffset * 8);
+  };
+
+  // Helper lambda to set mask and expected for a byte in the upper 64 bits
+  auto setHiField = [&](int byteOffset, uint8_t value) {
+    m.maskHi |= 0xFFULL << (byteOffset * 8);
+    m.expectedHi |= static_cast<uint64_t>(value) << (byteOffset * 8);
+  };
+
+  // Lower 64-bit fields
+  if (queryFlags & AtomQueryAtomicNum) {
+    setLoField(AtomDataPacked::kAtomicNumByte, queryAtom.atomicNum());
+  }
+  if (queryFlags & AtomQueryNumExplicitHs) {
+    setLoField(AtomDataPacked::kNumExplicitHsByte, queryAtom.numExplicitHs());
+  }
+  if (queryFlags & AtomQueryExplicitValence) {
+    setLoField(AtomDataPacked::kExplicitValenceByte, queryAtom.explicitValence());
+  }
+  if (queryFlags & AtomQueryImplicitValence) {
+    setLoField(AtomDataPacked::kImplicitValenceByte, queryAtom.implicitValence());
+  }
+  if (queryFlags & AtomQueryFormalCharge) {
+    setLoField(AtomDataPacked::kFormalChargeByte, static_cast<uint8_t>(queryAtom.formalCharge()));
+  }
+  if (queryFlags & AtomQueryChiralTag) {
+    setLoField(AtomDataPacked::kChiralTagByte, queryAtom.chiralTag());
+  }
+  if (queryFlags & AtomQueryNumRadicalElectrons) {
+    setLoField(AtomDataPacked::kNumRadicalElectronsByte, queryAtom.numRadicalElectrons());
+  }
+  if (queryFlags & AtomQueryHybridization) {
+    setLoField(AtomDataPacked::kHybridizationByte, queryAtom.hybridization());
+  }
+
+  // Upper 64-bit fields
+  if (queryFlags & AtomQueryMinRingSize) {
+    setHiField(AtomDataPacked::kMinRingSizeByte, queryAtom.minRingSize());
+  }
+  if (queryFlags & AtomQueryNumRings) {
+    setHiField(AtomDataPacked::kNumRingsByte, queryAtom.numRings());
+  }
+
+  // Special handling for aromaticity: both flags use the same field but expect different values
+  if (queryFlags & AtomQueryIsAromatic) {
+    setHiField(AtomDataPacked::kIsAromaticByte, 0x01);  // expect true
+  }
+  if (queryFlags & AtomQueryIsAliphatic) {
+    setHiField(AtomDataPacked::kIsAromaticByte, 0x00);  // expect false
+  }
+
+  return m;
+}
+
 namespace {
 
 AtomQuery getQueryFlagsFromQuery(const RDKit::Atom::QUERYATOM_QUERY* query) {
@@ -245,7 +357,7 @@ AtomQuery getQueryFlagsFromQuery(const RDKit::Atom::QUERYATOM_QUERY* query) {
   // Aliphatic: value = atomic number; Aromatic: value = 1000 + atomic number
   if (description == "AtomType") {
     const auto* eqQuery = static_cast<const RDKit::ATOM_EQUALS_QUERY*>(query);
-    int typeVal = eqQuery->getVal();
+    int         typeVal = eqQuery->getVal();
     if (typeVal >= 1000) {
       return AtomQueryAtomicNum | AtomQueryIsAromatic;
     }
@@ -308,25 +420,33 @@ void addBondsAndConnectivity(const RDKit::ROMol* mol, MoleculesHost& batch, int&
 }  // namespace
 
 void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
-  auto& atomDataVec      = batch.atomData;
-  auto& otherAtomIndices = batch.otherAtomIndices;
-  auto& bondDataIndices  = batch.bondDataIndices;
+  auto& atomDataVec       = batch.atomData;
+  auto& atomDataPackedVec = batch.atomDataPacked;
+  auto& bondTypeCountsVec = batch.bondTypeCounts;
+  auto& otherAtomIndices  = batch.otherAtomIndices;
+  auto& bondDataIndices   = batch.bondDataIndices;
 
   const size_t otherAtomIndicesBefore = otherAtomIndices.size();
   const size_t bondDataIndicesBefore  = bondDataIndices.size();
 
   atomDataVec.reserve(atomDataVec.size() + mol->getNumAtoms());
+  atomDataPackedVec.reserve(atomDataPackedVec.size() + mol->getNumAtoms());
+  bondTypeCountsVec.reserve(bondTypeCountsVec.size() + mol->getNumAtoms());
 
-  int              cumulativeBondCount = 0;
+  int cumulativeBondCount = 0;
   addBondsAndConnectivity(mol, batch, cumulativeBondCount);
 
   const auto* ringInfo = mol->getRingInfo();
 
-  size_t atomIdx = 0;
   for (const RDKit::Atom* atom : mol->atoms()) {
     auto& thisAtomData = atomDataVec.emplace_back();
     populateAtomData(atom, thisAtomData, ringInfo);
-    ++atomIdx;
+
+    auto& thisAtomPacked = atomDataPackedVec.emplace_back();
+    populateAtomDataPacked(atom, thisAtomPacked, ringInfo);
+
+    auto& thisBondCounts = bondTypeCountsVec.emplace_back();
+    populateBondTypeCounts(mol, atom, thisBondCounts);
   }
 
   batch.batchAtomStarts.push_back(static_cast<int>(atomDataVec.size()));
@@ -336,25 +456,112 @@ void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   batch.batchBondIndicesStarts.push_back(static_cast<int>(bondDataIndicesBefore));
 }
 
+namespace {
+
+void populateQueryAtomDataPacked(const RDKit::Atom* atom, AtomDataPacked& packed) {
+  if (!atom->hasQuery()) {
+    return;
+  }
+
+  const auto* query = atom->getQuery();
+  if (query == nullptr) {
+    return;
+  }
+
+  // Use the existing populateFromQuery logic to extract values, but store in packed format
+  // We'll duplicate the logic here to avoid converting back and forth
+  std::function<void(const RDKit::Atom::QUERYATOM_QUERY*)> populatePacked;
+  populatePacked = [&](const RDKit::Atom::QUERYATOM_QUERY* q) {
+    const std::string desc = q->getDescription();
+
+    if (desc == "AtomAnd") {
+      for (auto it = q->beginChildren(); it != q->endChildren(); ++it) {
+        populatePacked((*it).get());
+      }
+      return;
+    }
+
+    if (desc == "AtomType") {
+      const auto* eqQuery = static_cast<const RDKit::ATOM_EQUALS_QUERY*>(q);
+      int         typeVal = eqQuery->getVal();
+      if (typeVal >= 1000) {
+        packed.setAtomicNum(typeVal - 1000);
+        packed.setIsAromatic(true);
+      } else {
+        packed.setAtomicNum(typeVal);
+        packed.setIsAromatic(false);
+      }
+      return;
+    }
+
+    if (desc == "AtomIsAromatic") {
+      packed.setIsAromatic(true);
+      return;
+    }
+    if (desc == "AtomIsAliphatic") {
+      packed.setIsAromatic(false);
+      return;
+    }
+
+    const auto* eqQuery = static_cast<const RDKit::ATOM_EQUALS_QUERY*>(q);
+
+    if (desc == "AtomAtomicNum") {
+      packed.setAtomicNum(eqQuery->getVal());
+    } else if (desc == "AtomHCount") {
+      packed.setNumExplicitHs(eqQuery->getVal());
+    } else if (desc == "AtomFormalCharge") {
+      packed.setFormalCharge(eqQuery->getVal());
+    } else if (desc == "AtomHybridization") {
+      packed.setHybridization(eqQuery->getVal());
+    } else if (desc == "AtomInNRings") {
+      packed.setNumRings(eqQuery->getVal());
+    } else if (desc == "AtomMinRingSize") {
+      packed.setMinRingSize(eqQuery->getVal());
+    } else if (desc == "AtomNumRadicalElectrons") {
+      packed.setNumRadicalElectrons(eqQuery->getVal());
+    }
+  };
+
+  populatePacked(query);
+}
+
+}  // namespace
+
 void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
-  auto& atomDataVec      = batch.atomData;
-  auto& atomQueriesVec   = batch.atomQueries;
-  auto& otherAtomIndices = batch.otherAtomIndices;
-  auto& bondDataIndices  = batch.bondDataIndices;
+  auto& atomDataVec       = batch.atomData;
+  auto& atomDataPackedVec = batch.atomDataPacked;
+  auto& atomQueriesVec    = batch.atomQueries;
+  auto& atomQueryMasksVec = batch.atomQueryMasks;
+  auto& bondTypeCountsVec = batch.bondTypeCounts;
+  auto& otherAtomIndices  = batch.otherAtomIndices;
+  auto& bondDataIndices   = batch.bondDataIndices;
 
   const size_t otherAtomIndicesBefore = otherAtomIndices.size();
   const size_t bondDataIndicesBefore  = bondDataIndices.size();
 
   atomDataVec.reserve(atomDataVec.size() + mol->getNumAtoms());
+  atomDataPackedVec.reserve(atomDataPackedVec.size() + mol->getNumAtoms());
   atomQueriesVec.reserve(atomQueriesVec.size() + mol->getNumAtoms());
+  atomQueryMasksVec.reserve(atomQueryMasksVec.size() + mol->getNumAtoms());
+  bondTypeCountsVec.reserve(bondTypeCountsVec.size() + mol->getNumAtoms());
 
   int cumulativeBondCount = 0;
   addBondsAndConnectivity(mol, batch, cumulativeBondCount);
 
   for (const RDKit::Atom* atom : mol->atoms()) {
     auto& thisAtomData = atomDataVec.emplace_back();
-    atomQueriesVec.push_back(getAtomQueryType(atom));
     populateQueryAtomData(atom, thisAtomData);
+
+    auto& thisAtomPacked = atomDataPackedVec.emplace_back();
+    populateQueryAtomDataPacked(atom, thisAtomPacked);
+
+    AtomQuery queryFlags = getAtomQueryType(atom);
+    atomQueriesVec.push_back(queryFlags);
+
+    atomQueryMasksVec.push_back(buildQueryMask(thisAtomPacked, queryFlags));
+
+    auto& thisBondCounts = bondTypeCountsVec.emplace_back();
+    populateBondTypeCounts(mol, atom, thisBondCounts);
   }
 
   batch.batchAtomStarts.push_back(static_cast<int>(atomDataVec.size()));

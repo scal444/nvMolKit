@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "atom_data_packed.h"
 #include "device_vector.h"
 
 namespace RDKit {
@@ -36,19 +37,19 @@ namespace nvMolKit {
  * For example, 'C' in SMARTS checks both AtomicNum and IsAliphatic.
  */
 enum AtomQueryFlags : uint16_t {
-  AtomQueryNone              = 0,
-  AtomQueryAtomicNum         = 1 << 0,
-  AtomQueryNumExplicitHs     = 1 << 1,
-  AtomQueryExplicitValence   = 1 << 2,
-  AtomQueryImplicitValence   = 1 << 3,
-  AtomQueryFormalCharge      = 1 << 4,
-  AtomQueryChiralTag         = 1 << 5,
+  AtomQueryNone                = 0,
+  AtomQueryAtomicNum           = 1 << 0,
+  AtomQueryNumExplicitHs       = 1 << 1,
+  AtomQueryExplicitValence     = 1 << 2,
+  AtomQueryImplicitValence     = 1 << 3,
+  AtomQueryFormalCharge        = 1 << 4,
+  AtomQueryChiralTag           = 1 << 5,
   AtomQueryNumRadicalElectrons = 1 << 6,
-  AtomQueryHybridization     = 1 << 7,
-  AtomQueryMinRingSize       = 1 << 8,
-  AtomQueryNumRings          = 1 << 9,
-  AtomQueryIsAromatic        = 1 << 10,
-  AtomQueryIsAliphatic       = 1 << 11,
+  AtomQueryHybridization       = 1 << 7,
+  AtomQueryMinRingSize         = 1 << 8,
+  AtomQueryNumRings            = 1 << 9,
+  AtomQueryIsAromatic          = 1 << 10,
+  AtomQueryIsAliphatic         = 1 << 11,
 };
 
 using AtomQuery = uint16_t;
@@ -96,6 +97,11 @@ struct MoleculesHost {
   std::vector<int16_t>   otherAtomIndices;  ///< For each atom-bond pair, the other atom index
   std::vector<int16_t>   bondDataIndices;   ///< For each atom-bond pair, index into bondData
 
+  // GPU-optimized packed data (parallel to atomData)
+  std::vector<AtomDataPacked> atomDataPacked;  ///< Packed atom properties for GPU matching
+  std::vector<AtomQueryMask>  atomQueryMasks;  ///< Precomputed query masks (for query molecules only)
+  std::vector<BondTypeCounts> bondTypeCounts;  ///< Precomputed bond type counts per atom
+
   MoleculesHost();
 
   [[nodiscard]] size_t numMolecules() const { return batchAtomStarts.empty() ? 0 : batchAtomStarts.size() - 1; }
@@ -123,6 +129,11 @@ struct MoleculesDeviceView {
   const int16_t*   otherAtomIndices;
   const int16_t*   bondDataIndices;
   int              numMolecules;
+
+  // GPU-optimized packed data
+  const AtomDataPacked* atomDataPacked;  ///< Packed atom properties for GPU matching
+  const AtomQueryMask*  atomQueryMasks;  ///< Precomputed query masks (query molecules only)
+  const BondTypeCounts* bondTypeCounts;  ///< Precomputed bond type counts per atom
 };
 
 /**
@@ -165,6 +176,11 @@ class MoleculesDevice {
   AsyncDeviceVector<int16_t>   atomBondStarts_;
   AsyncDeviceVector<int16_t>   otherAtomIndices_;
   AsyncDeviceVector<int16_t>   bondDataIndices_;
+
+  // GPU-optimized packed data
+  AsyncDeviceVector<AtomDataPacked> atomDataPacked_;
+  AsyncDeviceVector<AtomQueryMask>  atomQueryMasks_;
+  AsyncDeviceVector<BondTypeCounts> bondTypeCounts_;
 };
 
 /**
@@ -191,6 +207,19 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch);
  * @return The corresponding AtomQuery flag value, or AtomQueryNone if unsupported
  */
 AtomQuery atomQueryFromDescription(const std::string& description);
+
+/**
+ * @brief Build a query mask from packed atom data and query flags.
+ *
+ * Creates a precomputed mask and expected value pair for branchless GPU matching.
+ * For each field specified in queryFlags, sets the corresponding mask byte to 0xFF
+ * and the expected byte to the query atom's value.
+ *
+ * @param queryAtom The packed query atom data
+ * @param queryFlags Bitmask of AtomQueryFlags indicating which fields to compare
+ * @return AtomQueryMask with precomputed mask and expected values
+ */
+AtomQueryMask buildQueryMask(const AtomDataPacked& queryAtom, AtomQuery queryFlags);
 
 }  // namespace nvMolKit
 

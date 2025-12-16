@@ -946,8 +946,7 @@ TEST_P(QueryBatchStructureTest, StructureMatchesBetweenSmilesAndSmarts) {
   // Verify bond data matches
   ASSERT_EQ(smilesBatch.bondData.size(), smartsBatch.bondData.size());
   for (size_t i = 0; i < smilesBatch.bondData.size(); ++i) {
-    EXPECT_EQ(smilesBatch.bondData[i].bondType, smartsBatch.bondData[i].bondType)
-      << "Bond type mismatch at bond " << i;
+    EXPECT_EQ(smilesBatch.bondData[i].bondType, smartsBatch.bondData[i].bondType) << "Bond type mismatch at bond " << i;
   }
 
   // Verify connectivity matches
@@ -1004,27 +1003,25 @@ TEST_P(QueryBatchStructureTest, DeviceStructureMatchesBetweenSmilesAndSmarts) {
   }
 }
 
-INSTANTIATE_TEST_SUITE_P(
-  SmilesVsSmarts,
-  QueryBatchStructureTest,
-  ::testing::Values(
-    // Same strings work as both SMILES and SMARTS
-    SmilesSmartsPair{"CCO", "CCO"},                // ethanol
-    SmilesSmartsPair{"c1ccccc1", "c1ccccc1"},      // benzene
-    SmilesSmartsPair{"CC(=O)O", "CC(=O)O"},        // acetic acid
-    SmilesSmartsPair{"C#N", "C#N"},                // hydrogen cyanide
-    SmilesSmartsPair{"CCCCCC", "CCCCCC"}           // hexane
-  ),
-  [](const ::testing::TestParamInfo<SmilesSmartsPair>& info) {
-    std::string name = info.param.smiles;
-    for (char& c : name) {
-      if (!std::isalnum(c)) {
-        c = '_';
-      }
-    }
-    return name;
-  }
-);
+INSTANTIATE_TEST_SUITE_P(SmilesVsSmarts,
+                         QueryBatchStructureTest,
+                         ::testing::Values(
+                           // Same strings work as both SMILES and SMARTS
+                           SmilesSmartsPair{"CCO", "CCO"},            // ethanol
+                           SmilesSmartsPair{"c1ccccc1", "c1ccccc1"},  // benzene
+                           SmilesSmartsPair{"CC(=O)O", "CC(=O)O"},    // acetic acid
+                           SmilesSmartsPair{"C#N", "C#N"},            // hydrogen cyanide
+                           SmilesSmartsPair{"CCCCCC", "CCCCCC"}       // hexane
+                           ),
+                         [](const ::testing::TestParamInfo<SmilesSmartsPair>& info) {
+                           std::string name = info.param.smiles;
+                           for (char& c : name) {
+                             if (!std::isalnum(c)) {
+                               c = '_';
+                             }
+                           }
+                           return name;
+                         });
 
 // =============================================================================
 // Re-copy to Device Test

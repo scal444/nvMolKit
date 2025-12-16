@@ -16,6 +16,7 @@
 #ifndef NVMOLKIT_MOLECULES_DEVICE_CUH
 #define NVMOLKIT_MOLECULES_DEVICE_CUH
 
+#include "atom_data_packed.h"
 #include "molecules.h"
 
 namespace nvMolKit {
@@ -37,6 +38,11 @@ struct MoleculeView {
   int numAtoms;
   int numBonds;
 
+  // GPU-optimized packed data
+  const AtomDataPacked* __restrict__ atomDataPacked;  ///< Packed atom properties for GPU matching
+  const AtomQueryMask* __restrict__ atomQueryMasks;   ///< Precomputed query masks (query molecules only)
+  const BondTypeCounts* __restrict__ bondTypeCounts;  ///< Precomputed bond type counts per atom
+
   __device__ __forceinline__ const AtomData& getAtom(int atomIdx) const { return atomData[atomIdx]; }
 
   __device__ __forceinline__ const BondData& getBond(int bondIdx) const { return bondData[bondIdx]; }
@@ -56,6 +62,17 @@ struct MoleculeView {
     const int neighborListStart = atomBondStarts[atomIdx];
     return bondDataIndices[neighborListStart + neighborIdx];
   }
+
+  /// Get packed atom data for GPU matching
+  __device__ __forceinline__ const AtomDataPacked& getAtomPacked(int atomIdx) const { return atomDataPacked[atomIdx]; }
+
+  /// Get precomputed query mask (only valid for query molecules)
+  __device__ __forceinline__ const AtomQueryMask& getQueryMask(int atomIdx) const { return atomQueryMasks[atomIdx]; }
+
+  /// Get precomputed bond type counts
+  __device__ __forceinline__ const BondTypeCounts& getBondTypeCounts(int atomIdx) const {
+    return bondTypeCounts[atomIdx];
+  }
 };
 
 /**
@@ -66,14 +83,20 @@ struct MoleculeView {
  */
 __device__ __forceinline__ MoleculeView getMolecule(const MoleculesDeviceView& view, int molIdx) {
   MoleculeView mol;
-  mol.atomData         = view.atomData + view.batchAtomStarts[molIdx];
-  mol.bondData         = view.bondData + view.batchBondStarts[molIdx];
-  mol.atomQueries      = view.atomQueries + view.batchAtomStarts[molIdx];
-  mol.atomBondStarts   = view.atomBondStarts + view.batchAtomBondStarts[molIdx];
-  mol.otherAtomIndices = view.otherAtomIndices + view.batchOtherAtomIndicesStarts[molIdx];
-  mol.bondDataIndices  = view.bondDataIndices + view.batchBondIndicesStarts[molIdx];
-  mol.numAtoms         = view.batchAtomStarts[molIdx + 1] - view.batchAtomStarts[molIdx];
-  mol.numBonds         = view.batchBondStarts[molIdx + 1] - view.batchBondStarts[molIdx];
+  const int    atomStart = view.batchAtomStarts[molIdx];
+  mol.atomData           = view.atomData + atomStart;
+  mol.bondData           = view.bondData + view.batchBondStarts[molIdx];
+  mol.atomQueries        = view.atomQueries + atomStart;
+  mol.atomBondStarts     = view.atomBondStarts + view.batchAtomBondStarts[molIdx];
+  mol.otherAtomIndices   = view.otherAtomIndices + view.batchOtherAtomIndicesStarts[molIdx];
+  mol.bondDataIndices    = view.bondDataIndices + view.batchBondIndicesStarts[molIdx];
+  mol.numAtoms           = view.batchAtomStarts[molIdx + 1] - atomStart;
+  mol.numBonds           = view.batchBondStarts[molIdx + 1] - view.batchBondStarts[molIdx];
+
+  // GPU-optimized packed data (may be nullptr if not populated)
+  mol.atomDataPacked = view.atomDataPacked ? view.atomDataPacked + atomStart : nullptr;
+  mol.atomQueryMasks = view.atomQueryMasks ? view.atomQueryMasks + atomStart : nullptr;
+  mol.bondTypeCounts = view.bondTypeCounts ? view.bondTypeCounts + atomStart : nullptr;
   return mol;
 }
 

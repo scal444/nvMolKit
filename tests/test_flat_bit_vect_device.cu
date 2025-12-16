@@ -45,7 +45,7 @@ __global__ void clearKernel(FlatBitVect<64>* fbv) {
 TEST(FlatBitVectDevice, SetAndReadBit) {
   ScopedStream stream;
 
-  FlatBitVect<64> hostFbv(false);
+  FlatBitVect<64>                    hostFbv(false);
   AsyncDeviceVector<FlatBitVect<64>> deviceFbv(1, stream.stream());
   deviceFbv.setFromVector(std::vector<FlatBitVect<64>>{hostFbv});
 
@@ -77,7 +77,7 @@ TEST(FlatBitVectDevice, SetAndReadBit) {
 TEST(FlatBitVectDevice, ClearOnDevice) {
   ScopedStream stream;
 
-  FlatBitVect<64> hostFbv(true);  // All bits set
+  FlatBitVect<64>                    hostFbv(true);  // All bits set
   AsyncDeviceVector<FlatBitVect<64>> deviceFbv(1, stream.stream());
   deviceFbv.setFromVector(std::vector<FlatBitVect<64>>{hostFbv});
 
@@ -111,12 +111,10 @@ __global__ void getMatrix2DKernel(FlatBitVect<Rows * Cols>* storage, int row, in
   *result = view.get(row, col);
 }
 
-template <std::size_t Rows, std::size_t Cols>
-__global__ void clearMatrix2DKernel(FlatBitVect<Rows * Cols>* storage) {
+template <std::size_t Rows, std::size_t Cols> __global__ void clearMatrix2DKernel(FlatBitVect<Rows * Cols>* storage) {
   BitMatrix2DView<Rows, Cols> view(storage);
   view.clear();
 }
-
 
 TEST(BitMatrix2DViewDevice, SetAndGet) {
   constexpr std::size_t kRows = 8;
@@ -124,7 +122,7 @@ TEST(BitMatrix2DViewDevice, SetAndGet) {
 
   ScopedStream stream;
 
-  FlatBitVect<kRows * kCols> hostStorage(false);
+  FlatBitVect<kRows * kCols>                    hostStorage(false);
   AsyncDeviceVector<FlatBitVect<kRows * kCols>> deviceStorage(1, stream.stream());
   deviceStorage.setFromVector(std::vector<FlatBitVect<kRows * kCols>>{hostStorage});
 
@@ -180,7 +178,7 @@ TEST(BitMatrix2DViewDevice, Clear) {
 
   ScopedStream stream;
 
-  FlatBitVect<kRows * kCols> hostStorage(true);  // All bits set
+  FlatBitVect<kRows * kCols>                    hostStorage(true);  // All bits set
   AsyncDeviceVector<FlatBitVect<kRows * kCols>> deviceStorage(1, stream.stream());
   deviceStorage.setFromVector(std::vector<FlatBitVect<kRows * kCols>>{hostStorage});
 
@@ -205,7 +203,7 @@ TEST(BitMatrix2DViewDevice, LargeMatrix) {
 
   ScopedStream stream;
 
-  FlatBitVect<kRows * kCols> hostStorage(false);
+  FlatBitVect<kRows * kCols>                    hostStorage(false);
   AsyncDeviceVector<FlatBitVect<kRows * kCols>> deviceStorage(1, stream.stream());
   deviceStorage.setFromVector(std::vector<FlatBitVect<kRows * kCols>>{hostStorage});
 
@@ -227,13 +225,7 @@ TEST(BitMatrix2DViewDevice, LargeMatrix) {
   for (int row = 0; row < kRows; ++row) {
     for (int col = 0; col < kCols; ++col) {
       bool expected = (row == col * 2);
-      EXPECT_EQ(view.get(row, col), expected)
-          << "Mismatch at (" << row << ", " << col << ")";
+      EXPECT_EQ(view.get(row, col), expected) << "Mismatch at (" << row << ", " << col << ")";
     }
   }
 }
-
-
-
-
-
