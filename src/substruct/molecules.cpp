@@ -432,7 +432,14 @@ void addBondsAndConnectivity(const RDKit::ROMol* mol, MoleculesHost& batch, int&
 
 }  // namespace
 
+constexpr unsigned int kMaxMoleculeAtoms = 128;
+
 void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
+  if (mol->getNumAtoms() > kMaxMoleculeAtoms) {
+    throw std::runtime_error("Target molecule has " + std::to_string(mol->getNumAtoms()) +
+                             " atoms, which exceeds the maximum of " + std::to_string(kMaxMoleculeAtoms));
+  }
+
   auto& atomDataVec       = batch.atomData;
   auto& atomDataPackedVec = batch.atomDataPacked;
   auto& bondTypeCountsVec = batch.bondTypeCounts;
@@ -541,6 +548,11 @@ void populateQueryAtomDataPacked(const RDKit::Atom* atom, AtomDataPacked& packed
 }  // namespace
 
 void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
+  if (mol->getNumAtoms() > kMaxMoleculeAtoms) {
+    throw std::runtime_error("Query molecule has " + std::to_string(mol->getNumAtoms()) +
+                             " atoms, which exceeds the maximum of " + std::to_string(kMaxMoleculeAtoms));
+  }
+
   auto& atomDataVec       = batch.atomData;
   auto& atomDataPackedVec = batch.atomDataPacked;
   auto& atomQueriesVec    = batch.atomQueries;
