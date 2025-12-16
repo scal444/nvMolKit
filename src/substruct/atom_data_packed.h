@@ -200,44 +200,43 @@ static_assert(sizeof(AtomQueryMask) == 32, "AtomQueryMask must be exactly 32 byt
 /**
  * @brief Precomputed bond type counts per atom for efficient matching.
  *
- * Stores the count of each bond type (0-7) incident on this atom.
- * Bond types: 0=unspecified, 1=single, 2=double, 3=triple, 4=quadruple,
- *             5=quintuple, 6=hextuple, 7+=other/aromatic
+ * Stores counts for single, double, triple, aromatic, and any bonds.
+ * For target molecules: only single/double/triple/aromatic are populated.
+ * For query molecules: 'any' holds SMARTS "~" bonds that match any type.
  *
- * During substructure matching, a target atom can match a query atom only if
- * target.bondTypeCounts[i] >= query.bondTypeCounts[i] for all i.
+ * Match semantics:
+ * - Target must have >= of each specific bond type (single, double, triple, aromatic)
+ * - Query "any" bonds can match any remaining bonds after specific types matched
+ * - Therefore: target.total() >= query.total() must also hold
  */
 struct BondTypeCounts {
-  static constexpr int kNumBondTypes         = 8;
-  uint8_t              counts[kNumBondTypes] = {0};
+  uint8_t single   = 0;  ///< Single bonds (RDKit SINGLE=1)
+  uint8_t double_  = 0;  ///< Double bonds (RDKit DOUBLE=2)
+  uint8_t triple   = 0;  ///< Triple bonds (RDKit TRIPLE=3)
+  uint8_t aromatic = 0;  ///< Aromatic bonds (RDKit ONEANDAHALF=7 or AROMATIC=12)
+  uint8_t any      = 0;  ///< "Any" bonds from SMARTS (~), only for queries
 
-  HD_CALLABLE uint8_t  operator[](int idx) const { return counts[idx]; }
-  HD_CALLABLE uint8_t& operator[](int idx) { return counts[idx]; }
+  HD_CALLABLE uint8_t total() const { return single + double_ + triple + aromatic + any; }
 
   /**
-   * @brief Check if this atom has at least as many bonds of each type as other.
-   * @return true if counts[i] >= other.counts[i] for all i
+   * @brief Check if this atom can satisfy a query's bond requirements.
+   *
+   * For specific bond types (single, double, triple, aromatic), target must have >=.
+   * For "any" bonds in query, they can be satisfied by any remaining target bonds,
+   * so we just check that total target degree >= total query degree.
+   *
+   * @param query The query bond counts ('any' field holds SMARTS ~ bond count)
+   * @return true if this target can match the query's bond requirements
    */
-  HD_CALLABLE bool hasSufficientBonds(const BondTypeCounts& other) const {
-    // Pack comparison into 64-bit for efficiency
-    uint64_t thisVal  = 0;
-    uint64_t otherVal = 0;
-    for (int i = 0; i < kNumBondTypes; ++i) {
-      thisVal |= static_cast<uint64_t>(counts[i]) << (i * 8);
-      otherVal |= static_cast<uint64_t>(other.counts[i]) << (i * 8);
-    }
-    // Branchless: check each byte for >= using saturation arithmetic
-    // If any target byte < query byte, the subtraction underflows (high bit set)
-    // This is a simplified uniform check
-    bool sufficient = true;
-    for (int i = 0; i < kNumBondTypes; ++i) {
-      sufficient &= (counts[i] >= other.counts[i]);
-    }
-    return sufficient;
+  HD_CALLABLE bool canMatchQuery(const BondTypeCounts& query) const {
+    bool specificOk = (single >= query.single) && (double_ >= query.double_) && (triple >= query.triple) &&
+                      (aromatic >= query.aromatic);
+    bool totalOk = (total() >= query.total());
+    return specificOk && totalOk;
   }
 };
 
-static_assert(sizeof(BondTypeCounts) == 8, "BondTypeCounts must be exactly 8 bytes");
+static_assert(sizeof(BondTypeCounts) == 5, "BondTypeCounts must be exactly 5 bytes");
 
 /**
  * @brief Branchless atom matching using precomputed mask and expected values.
@@ -254,14 +253,17 @@ HD_CALLABLE inline bool atomMatchesPacked(const AtomDataPacked& target, const At
 }
 
 /**
- * @brief Check if target atom has sufficient bonds of each type to match query.
+ * @brief Check if target atom has sufficient bonds to match query requirements.
+ *
+ * Handles "any" bonds from SMARTS: specific bond types must match exactly,
+ * but "any" bonds can be satisfied by any remaining bonds in the target.
  *
  * @param target Bond counts for the target atom
- * @param query Bond counts for the query atom
- * @return true if target has >= bonds of each type compared to query
+ * @param query Bond counts for the query atom (other field = "any" bonds)
+ * @return true if target can satisfy query's bond requirements
  */
 HD_CALLABLE inline bool bondCountsMatchPacked(const BondTypeCounts& target, const BondTypeCounts& query) {
-  return target.hasSufficientBonds(query);
+  return target.canMatchQuery(query);
 }
 
 }  // namespace nvMolKit

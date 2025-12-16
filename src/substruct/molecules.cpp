@@ -73,10 +73,23 @@ void populateBondTypeCounts(const RDKit::ROMol* mol, const RDKit::Atom* atom, Bo
   while (beg != bondEnd) {
     const auto* bond     = (*mol)[*beg];
     int         bondType = bond->getBondType();
-    if (bondType < BondTypeCounts::kNumBondTypes) {
-      ++counts[bondType];
-    } else {
-      ++counts[BondTypeCounts::kNumBondTypes - 1];
+    switch (bondType) {
+      case 1:
+        ++counts.single;
+        break;  // SINGLE
+      case 2:
+        ++counts.double_;
+        break;  // DOUBLE
+      case 3:
+        ++counts.triple;
+        break;  // TRIPLE
+      case 7:   // ONEANDAHALF (aromatic)
+      case 12:
+        ++counts.aromatic;
+        break;  // AROMATIC
+      default:
+        throw std::runtime_error("Unsupported bond type " + std::to_string(bondType) +
+                                 " in target molecule. Only single, double, triple, and aromatic bonds are supported.");
     }
     ++beg;
   }

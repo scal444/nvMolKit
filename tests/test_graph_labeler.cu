@@ -849,22 +849,251 @@ TEST(AtomQueryMaskTest, BuildQueryMaskAromatic) {
 
 TEST(BondTypeCountsTest, SufficientBonds) {
   nvMolKit::BondTypeCounts target;
-  target[1] = 2;  // 2 single bonds
-  target[2] = 1;  // 1 double bond
+  target.single  = 2;  // 2 single bonds
+  target.double_ = 1;  // 1 double bond
 
   nvMolKit::BondTypeCounts query;
-  query[1] = 1;  // 1 single bond
-  query[2] = 1;  // 1 double bond
+  query.single  = 1;  // 1 single bond
+  query.double_ = 1;  // 1 double bond
 
-  EXPECT_TRUE(target.hasSufficientBonds(query));
+  EXPECT_TRUE(target.canMatchQuery(query));
 }
 
 TEST(BondTypeCountsTest, InsufficientBonds) {
   nvMolKit::BondTypeCounts target;
-  target[1] = 1;  // 1 single bond
+  target.single = 1;  // 1 single bond
 
   nvMolKit::BondTypeCounts query;
-  query[1] = 2;  // 2 single bonds needed
+  query.single = 2;  // 2 single bonds needed
 
-  EXPECT_FALSE(target.hasSufficientBonds(query));
+  EXPECT_FALSE(target.canMatchQuery(query));
+}
+
+TEST(BondTypeCountsTest, AromaticBonds) {
+  nvMolKit::BondTypeCounts target;
+  target.aromatic = 2;  // 2 aromatic bonds
+
+  nvMolKit::BondTypeCounts query;
+  query.aromatic = 2;  // need 2 aromatic bonds
+
+  EXPECT_TRUE(target.canMatchQuery(query));
+}
+
+TEST(BondTypeCountsTest, AromaticInsufficientBonds) {
+  nvMolKit::BondTypeCounts target;
+  target.aromatic = 1;  // 1 aromatic bond
+
+  nvMolKit::BondTypeCounts query;
+  query.aromatic = 2;  // need 2 aromatic bonds
+
+  EXPECT_FALSE(target.canMatchQuery(query));
+}
+
+TEST(BondTypeCountsTest, AnyBondMatchesRemaining) {
+  // Target has 2 single, 1 double = 3 total
+  nvMolKit::BondTypeCounts target;
+  target.single  = 2;
+  target.double_ = 1;
+
+  // Query needs 1 single, 1 "any" = 2 total
+  nvMolKit::BondTypeCounts query;
+  query.single = 1;
+  query.any    = 1;  // "any" bond from SMARTS (~)
+
+  // Should match: 1 single satisfied, "any" can use remaining (1 single or 1 double)
+  EXPECT_TRUE(target.canMatchQuery(query));
+}
+
+TEST(BondTypeCountsTest, AnyBondInsufficientTotal) {
+  // Target has only 1 single bond
+  nvMolKit::BondTypeCounts target;
+  target.single = 1;
+
+  // Query needs 1 single + 1 "any" = 2 total
+  nvMolKit::BondTypeCounts query;
+  query.single = 1;
+  query.any    = 1;
+
+  // Should fail: after satisfying single requirement, no bonds left for "any"
+  EXPECT_FALSE(target.canMatchQuery(query));
+}
+
+TEST(BondTypeCountsTest, AnyBondMatchesAromatic) {
+  // Target has 2 aromatic bonds
+  nvMolKit::BondTypeCounts target;
+  target.aromatic = 2;
+
+  // Query needs 1 "any" = 1 total
+  nvMolKit::BondTypeCounts query;
+  query.any = 1;
+
+  // Should match: "any" can match the aromatic bond
+  EXPECT_TRUE(target.canMatchQuery(query));
+}
+
+TEST(BondTypeCountsTest, MixedSingleDoubleTargetHasMore) {
+  // Target has 2 single, 2 double
+  nvMolKit::BondTypeCounts target;
+  target.single  = 2;
+  target.double_ = 2;
+
+  // Query needs 1 single, 1 double
+  nvMolKit::BondTypeCounts query;
+  query.single  = 1;
+  query.double_ = 1;
+
+  EXPECT_TRUE(target.canMatchQuery(query));
+}
+
+TEST(BondTypeCountsTest, MixedSingleDoubleQueryNeedsMore) {
+  // Target has 1 single, 1 double
+  nvMolKit::BondTypeCounts target;
+  target.single  = 1;
+  target.double_ = 1;
+
+  // Query needs 2 single, 1 double - not enough singles
+  nvMolKit::BondTypeCounts query;
+  query.single  = 2;
+  query.double_ = 1;
+
+  EXPECT_FALSE(target.canMatchQuery(query));
+}
+
+TEST(BondTypeCountsTest, MixedSingleTripleTargetHasMore) {
+  // Target has 3 single, 1 triple
+  nvMolKit::BondTypeCounts target;
+  target.single = 3;
+  target.triple = 1;
+
+  // Query needs 1 single, 1 triple
+  nvMolKit::BondTypeCounts query;
+  query.single = 1;
+  query.triple = 1;
+
+  EXPECT_TRUE(target.canMatchQuery(query));
+}
+
+TEST(BondTypeCountsTest, MixedSingleTripleQueryNeedsMore) {
+  // Target has 1 single, 1 triple
+  nvMolKit::BondTypeCounts target;
+  target.single = 1;
+  target.triple = 1;
+
+  // Query needs 1 single, 2 triple - not enough triples
+  nvMolKit::BondTypeCounts query;
+  query.single = 1;
+  query.triple = 2;
+
+  EXPECT_FALSE(target.canMatchQuery(query));
+}
+
+TEST(BondTypeCountsTest, MixedDoubleAromaticTargetHasMore) {
+  // Target has 1 double, 2 aromatic
+  nvMolKit::BondTypeCounts target;
+  target.double_  = 1;
+  target.aromatic = 2;
+
+  // Query needs 1 double, 1 aromatic
+  nvMolKit::BondTypeCounts query;
+  query.double_  = 1;
+  query.aromatic = 1;
+
+  EXPECT_TRUE(target.canMatchQuery(query));
+}
+
+TEST(BondTypeCountsTest, MixedDoubleAromaticQueryNeedsMore) {
+  // Target has 1 double, 1 aromatic
+  nvMolKit::BondTypeCounts target;
+  target.double_  = 1;
+  target.aromatic = 1;
+
+  // Query needs 2 double, 1 aromatic - not enough doubles
+  nvMolKit::BondTypeCounts query;
+  query.double_  = 2;
+  query.aromatic = 1;
+
+  EXPECT_FALSE(target.canMatchQuery(query));
+}
+
+TEST(BondTypeCountsTest, MixedAllTypesPass) {
+  // Target has 2 of each type
+  nvMolKit::BondTypeCounts target;
+  target.single   = 2;
+  target.double_  = 2;
+  target.triple   = 2;
+  target.aromatic = 2;
+
+  // Query needs 1 of each type
+  nvMolKit::BondTypeCounts query;
+  query.single   = 1;
+  query.double_  = 1;
+  query.triple   = 1;
+  query.aromatic = 1;
+
+  EXPECT_TRUE(target.canMatchQuery(query));
+}
+
+TEST(BondTypeCountsTest, MixedAllTypesFailOnOneType) {
+  // Target has 2 single, 2 double, 2 triple, but only 0 aromatic
+  nvMolKit::BondTypeCounts target;
+  target.single   = 2;
+  target.double_  = 2;
+  target.triple   = 2;
+  target.aromatic = 0;
+
+  // Query needs 1 of each - will fail on aromatic
+  nvMolKit::BondTypeCounts query;
+  query.single   = 1;
+  query.double_  = 1;
+  query.triple   = 1;
+  query.aromatic = 1;
+
+  EXPECT_FALSE(target.canMatchQuery(query));
+}
+
+TEST(BondTypeCountsTest, MixedWithAnyPass) {
+  // Target has 1 single, 1 double, 1 aromatic = 3 total
+  nvMolKit::BondTypeCounts target;
+  target.single   = 1;
+  target.double_  = 1;
+  target.aromatic = 1;
+
+  // Query needs 1 single, 1 any = 2 total
+  nvMolKit::BondTypeCounts query;
+  query.single = 1;
+  query.any    = 1;
+
+  // Should pass: single satisfied, any can match double or aromatic
+  EXPECT_TRUE(target.canMatchQuery(query));
+}
+
+TEST(BondTypeCountsTest, MixedWithAnyFailTotal) {
+  // Target has 1 single, 1 double = 2 total
+  nvMolKit::BondTypeCounts target;
+  target.single  = 1;
+  target.double_ = 1;
+
+  // Query needs 1 single, 1 double, 1 any = 3 total
+  nvMolKit::BondTypeCounts query;
+  query.single  = 1;
+  query.double_ = 1;
+  query.any     = 1;
+
+  // Should fail: specific types satisfied but not enough total for any
+  EXPECT_FALSE(target.canMatchQuery(query));
+}
+
+TEST(BondTypeCountsTest, MixedWithAnyFailSpecific) {
+  // Target has 2 single, 1 aromatic = 3 total
+  nvMolKit::BondTypeCounts target;
+  target.single   = 2;
+  target.aromatic = 1;
+
+  // Query needs 1 double, 1 any = 2 total
+  nvMolKit::BondTypeCounts query;
+  query.double_ = 1;
+  query.any     = 1;
+
+  // Should fail: no double bonds in target, even though total is enough
+  EXPECT_FALSE(target.canMatchQuery(query));
 }
