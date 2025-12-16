@@ -1160,3 +1160,108 @@ TEST_P(SubstructureSearchTest, AnyRingCombinedWithAtomType) {
   EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [C;R] in benzene using " << algorithmName(algorithm());
 }
+
+TEST_P(SubstructureSearchTest, IsotopeCarbon13Query) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test [13C] isotope query
+  // [13C]CC: one carbon-13 atom
+  // CC: natural abundance carbons (isotope = 0)
+  buildBatches({"[13C]CC", "CC"}, {"[13C]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  // First target has one 13C
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for [13C] in [13C]CC using " << algorithmName(algorithm());
+
+  // Second target has no isotope labels
+  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+    << "GPU should match RDKit for [13C] in CC using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, IsotopeDeuteriumQuery) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test [2H] deuterium query
+  // [2H]C([2H])([2H])[2H]: deuterated methane with 4 deuterium atoms
+  // C: regular methane (no explicit H with isotope)
+  buildBatches({"[2H]C([2H])([2H])[2H]", "C"}, {"[2H]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  // First target has 4 deuterium atoms
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for [2H] in CD4 using " << algorithmName(algorithm());
+
+  // Second target has no deuterium
+  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+    << "GPU should match RDKit for [2H] in CH4 using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, IsotopeNitrogen15Query) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test [15N] nitrogen-15 query
+  // [15N]CC: nitrogen-15 labeled
+  // NCC: natural abundance nitrogen
+  buildBatches({"[15N]CC", "NCC"}, {"[15N]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  // First target has one 15N
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for [15N] in [15N]CC using " << algorithmName(algorithm());
+
+  // Second target has no isotope labels
+  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+    << "GPU should match RDKit for [15N] in NCC using " << algorithmName(algorithm());
+}

@@ -35,6 +35,7 @@ using nvMolKit::AtomQueryHybridization;
 using nvMolKit::AtomQueryIsAliphatic;
 using nvMolKit::AtomQueryIsAromatic;
 using nvMolKit::AtomQueryIsInRing;
+using nvMolKit::AtomQueryIsotope;
 using nvMolKit::AtomQueryMinRingSize;
 using nvMolKit::AtomQueryNone;
 using nvMolKit::AtomQueryNumExplicitHs;
@@ -470,15 +471,6 @@ TEST(QueryCompositeTest, ImplicitHCountQueryThrows) {
   EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
 }
 
-TEST(QueryCompositeTest, IsotopeQueryThrows) {
-  // [13C] isotope/mass query
-  auto mol = makeQuery("[13C]");
-  ASSERT_NE(mol, nullptr);
-
-  MoleculesHost batch;
-  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
-}
-
 TEST(QueryCompositeTest, ChiralityQueryThrows) {
   // [@] chirality query
   auto mol = makeQuery("[C@H](F)(Cl)Br");
@@ -549,6 +541,39 @@ TEST(QueryCompositeTest, AnyRingWithAtomTypeSucceeds) {
   // Should have both atom type and ring flags
   EXPECT_TRUE(batch.atomQueries[0] & AtomQueryAtomicNum);
   EXPECT_TRUE(batch.atomQueries[0] & AtomQueryIsInRing);
+}
+
+TEST(QueryCompositeTest, IsotopeQuerySucceeds) {
+  // [13C] carbon-13 isotope
+  auto mol = makeQuery("[13C]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_TRUE(batch.atomQueries[0] & AtomQueryIsotope);
+  EXPECT_TRUE(batch.atomQueries[0] & AtomQueryAtomicNum);
+}
+
+TEST(QueryCompositeTest, DeuteriumQuerySucceeds) {
+  // [2H] deuterium
+  auto mol = makeQuery("[2H]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_TRUE(batch.atomQueries[0] & AtomQueryIsotope);
+  EXPECT_TRUE(batch.atomQueries[0] & AtomQueryAtomicNum);
+}
+
+TEST(QueryCompositeTest, TritiumQuerySucceeds) {
+  // [3H] tritium
+  auto mol = makeQuery("[3H]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_TRUE(batch.atomQueries[0] & AtomQueryIsotope);
+  EXPECT_TRUE(batch.atomQueries[0] & AtomQueryAtomicNum);
 }
 
 TEST(QueryCompositeTest, AnyBondSucceeds) {

@@ -70,6 +70,13 @@ void populateAtomDataPacked(const RDKit::Atom* atom, AtomDataPacked& packed, con
   packed.setNumRings(numRings);
   packed.setMinRingSize(ringInfo->minAtomRingSize(idx));
   packed.setIsInRing(numRings > 0);
+
+  // Isotope (0 = natural abundance)
+  unsigned int isotope = atom->getIsotope();
+  if (isotope > 255) {
+    throw std::runtime_error("Atom isotope " + std::to_string(isotope) + " exceeds maximum supported value of 255");
+  }
+  packed.setIsotope(static_cast<uint8_t>(isotope));
 }
 
 void populateBondTypeCounts(const RDKit::ROMol* mol, const RDKit::Atom* atom, BondTypeCounts& counts) {
@@ -371,8 +378,8 @@ AtomQuery atomQueryFromDescription(const std::string& description) {
   if (description == "AtomImplicitHCount") {
     throw std::runtime_error("SMARTS implicit hydrogen count query (h) is not supported");
   }
-  if (description == "AtomMass") {
-    throw std::runtime_error("SMARTS isotope/mass query is not supported");
+  if (description == "AtomMass" || description == "AtomIsotope") {
+    return AtomQueryIsotope;
   }
   if (description == "AtomHasRingBond") {
     throw std::runtime_error("SMARTS ring bond query (@) is not supported");
@@ -453,6 +460,11 @@ AtomQueryMask buildQueryMask(const AtomDataPacked& queryAtom, AtomQuery queryFla
   // [R] and [r] any-ring queries check the isInRing field
   if (queryFlags & AtomQueryIsInRing) {
     setHiField(AtomDataPacked::kIsInRingByte, 0x01);  // expect in ring
+  }
+
+  // Isotope queries like [13C]
+  if (queryFlags & AtomQueryIsotope) {
+    setHiField(AtomDataPacked::kIsotopeByte, queryAtom.isotope());
   }
 
   return m;
@@ -634,6 +646,13 @@ void collectAndOnlyFlags(const RDKit::Atom::QUERYATOM_QUERY* query,
   } else if (desc == "AtomTotalValence") {
     flags |= AtomQueryTotalValence;
     packed.setTotalValence(eqQuery->getVal());
+  } else if (desc == "AtomMass" || desc == "AtomIsotope") {
+    int isotope = eqQuery->getVal();
+    if (isotope > 255) {
+      throw std::runtime_error("Isotope mass " + std::to_string(isotope) + " exceeds maximum supported value of 255");
+    }
+    flags |= AtomQueryIsotope;
+    packed.setIsotope(static_cast<uint8_t>(isotope));
   } else {
     AtomQuery flag = atomQueryFromDescription(desc);
     flags |= flag;
@@ -965,6 +984,13 @@ void populateQueryAtomDataPacked(const RDKit::Atom* atom, AtomDataPacked& packed
       packed.setNumRadicalElectrons(eqQuery->getVal());
     } else if (desc == "AtomTotalValence") {
       packed.setTotalValence(eqQuery->getVal());
+    } else if (desc == "AtomMass" || desc == "AtomIsotope") {
+      int isotope = eqQuery->getVal();
+      if (isotope > 255) {
+        throw std::runtime_error("Isotope mass " + std::to_string(isotope) +
+                                 " exceeds maximum supported value of 255");
+      }
+      packed.setIsotope(static_cast<uint8_t>(isotope));
     }
   };
 

@@ -933,6 +933,56 @@ TEST_F(GraphLabelerTest, RingSizeIndoleSixMembered) {
 }
 
 // =============================================================================
+// Isotope Query Tests
+// =============================================================================
+
+TEST_F(GraphLabelerTest, IsotopeCarbon13) {
+  // Target: [13C]CC (ethane with carbon-13)
+  // Query: [13C] (carbon-13)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // 13C
+    {false},  // C (natural abundance = 0)
+    {false}   // C (natural abundance)
+  };
+  runLabelingTest("[13C]CC", "[13C]", expected);
+}
+
+TEST_F(GraphLabelerTest, IsotopeDeuterium) {
+  // Target: [2H]C([2H])([2H])[2H] (deuterated methane CD4)
+  // Query: [2H] (deuterium)
+  // Atom order: D, C, D, D, D
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // D
+    {false},  // C
+    {true},   // D
+    {true},   // D
+    {true}    // D
+  };
+  runLabelingTest("[2H]C([2H])([2H])[2H]", "[2H]", expected);
+}
+
+TEST_F(GraphLabelerTest, IsotopeNoMatch) {
+  // Target: CC (ethane, natural abundance)
+  // Query: [13C] (carbon-13)
+  std::vector<std::vector<uint8_t>> expected = {
+    {false}, {false}
+  };
+  runLabelingTest("CC", "[13C]", expected);
+}
+
+TEST_F(GraphLabelerTest, IsotopeWithAtomType) {
+  // Target: [13C]C[13N] - carbon-13 and nitrogen-15 (using nitrogen for variety)
+  // Query: [13#6] (isotope 13 + carbon)
+  // Note: [13C] queries for carbon-13 specifically
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // 13C
+    {false},  // C (natural abundance)
+    {false}   // 13N (nitrogen, not carbon)
+  };
+  runLabelingTest("[13C]C[15N]", "[13C]", expected);
+}
+
+// =============================================================================
 // Wildcard and Any Aromaticity Query Tests
 // =============================================================================
 
@@ -1627,6 +1677,7 @@ TEST(AtomDataPackedTest, PackedDataRoundTrip) {
   packed.setMinRingSize(6);
   packed.setNumRings(1);
   packed.setIsAromatic(true);
+  packed.setIsotope(13);
 
   EXPECT_EQ(packed.atomicNum(), 6);
   EXPECT_EQ(packed.numExplicitHs(), 2);
@@ -1639,6 +1690,7 @@ TEST(AtomDataPackedTest, PackedDataRoundTrip) {
   EXPECT_EQ(packed.minRingSize(), 6);
   EXPECT_EQ(packed.numRings(), 1);
   EXPECT_TRUE(packed.isAromatic());
+  EXPECT_EQ(packed.isotope(), 13);
 }
 
 TEST(AtomQueryMaskTest, BuildQueryMaskAtomicNum) {
