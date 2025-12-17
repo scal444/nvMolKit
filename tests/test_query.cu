@@ -482,6 +482,22 @@ TEST(QueryCompositeTest, ExcessiveOrBranchesThrows) {
   EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
 }
 
+TEST(QueryCompositeTest, FragmentQueryThrows) {
+  auto mol = makeQuery("C.C");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
+}
+
+TEST(QueryCompositeTest, MultiFragmentQueryThrows) {
+  auto mol = makeQuery("C[O;D1].C[O;D1].C[O;D1]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
+}
+
 TEST(QueryCompositeTest, WildcardAtomSucceeds) {
   // [*] wildcard atom - matches any atom
   // This is supported as it produces AtomNull which returns AtomQueryNone

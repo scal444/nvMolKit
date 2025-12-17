@@ -15,6 +15,7 @@
 
 #include "molecules.h"
 
+#include <GraphMol/MolOps.h>
 #include <GraphMol/QueryAtom.h>
 #include <GraphMol/QueryOps.h>
 #include <GraphMol/ROMol.h>
@@ -1157,6 +1158,14 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   if (mol->getNumAtoms() > kMaxMoleculeAtoms) {
     throw std::runtime_error("Query molecule has " + std::to_string(mol->getNumAtoms()) +
                              " atoms, which exceeds the maximum of " + std::to_string(kMaxMoleculeAtoms));
+  }
+
+  std::vector<int> fragMapping;
+  const unsigned   numFrags = RDKit::MolOps::getMolFrags(*mol, fragMapping);
+  if (numFrags > 1) {
+    throw std::runtime_error("Fragment queries (disconnected SMARTS patterns) are not supported. "
+                             "Query has " + std::to_string(numFrags) + " disconnected components: " +
+                             RDKit::MolToSmarts(*mol));
   }
 
   auto& atomDataVec       = batch.atomData;

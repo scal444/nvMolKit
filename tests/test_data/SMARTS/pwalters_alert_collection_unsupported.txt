@@ -1,3 +1,7 @@
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 4 disconnected components: [C,S,P](=O)[O&H1].[C,S,P](=O)[O&H1].[C,S,P](=O)[O&H1].[C,S,P](=O)[O&H1]
+[C,S,P](=O)[OH].[C,S,P](=O)[OH].[C,S,P](=O)[OH].[C,S,P](=O)[OH]   I2 Compounds with 4 or more acidic groups
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 3 disconnected components: C(=O)O[C,H1].C(=O)O[C,H1].C(=O)O[C,H1]
+C(=O)O[C,H1].C(=O)O[C,H1].C(=O)O[C,H1]   > 2 ester groups
 # Unsupported SMARTS atom query: RecursiveStructure
 [$([CH2]),$([CH][CX4]),$(C([CX4])[CX4])]=[$([CH2]),$([CH][CX4]),$(C([CX4])[CX4])]   isolated alkene
 # Unsupported SMARTS atom query: RecursiveStructure
@@ -84,12 +88,28 @@ CC(=O)[$([C&H1]),$(C-F),$(C-Cl),$(C-Br),$(C-I)]=[$([C&H1]),$(C-F),$(C-Cl),$(C-Br
 [$(N=N=C~C=O),$(N#N-C~C=O)]   diazo_carbonyl
 # Unsupported SMARTS atom query: RecursiveStructure
 [$(N(-C(=O))(-C(=O))(-S(=O))),$(n([#6](=O))([#6](=O))([#16](=O)))]   dicarbonyl_sulfonamide
-# Recursive SMARTS ($(...)) are not supported
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 4 disconnected components: C#N.C#N.C#N.C#N
+C#N.C#N.C#N.C#N   four_nitriles
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: [N,n;H0;+;!$(N~O);!$(n~O)].[N,n;H0;+;!$(N~O);!$(n~O)]
 [N,n;H0;+;!$(N~O);!$(n~O)].[N,n;H0;+;!$(N~O);!$(n~O)]   gte_2_N_quats
-# Recursive SMARTS ($(...)) are not supported
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: P([O&D1])=O.P([O&D1])=O
+P([O;D1])=O.P([O;D1])=O   gte_2_free_phos
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: [C,c]S(=O)(=O)[O&D1].[C,c]S(=O)(=O)[O&D1]
+[C,c]S(=O)(=O)[O;D1].[C,c]S(=O)(=O)[O;D1]   gte_2_sulfonic_acid
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 3 disconnected components: C(=O)[O&D1].C(=O)[O&D1].C(=O)[O&D1]
+C(=O)[O;D1].C(=O)[O;D1].C(=O)[O;D1]   gte_3_COOH
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 3 disconnected components: [#53].[#53].[#53]
+[#53].[#53].[#53]   gte_3_iodine
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 4 disconnected components: [N&!$(N=[N,O,S,C])&!$(NS(=O)=O)&!$(NC(F)(F)F)&!$(NC#N)&!$(NC=O)&!$(NC=S)&!$(NC=N)&!$(N#C)&!$(Nc)].[N&!$(N=[N,O,S,C])&!$(NS(=O)=O)&!$(NC(F)(F)F)&!$(NC#N)&!$(NC=O)&!$(NC=S)&!$(NC=N)&!$(N#C)&!$(Nc)].[N&!$(N=[N,O,S,C])&!$(NS(=O)=O)&!$(NC(F)(F)F)&!$(NC#N)&!$(NC=O)&!$(NC=S)&!$(NC=N)&!$(N#C)&!$(Nc)].[N&!$(N=[N,O,S,C])&!$(NS(=O)=O)&!$(NC(F)(F)F)&!$(NC#N)&!$(NC=O)&!$(NC=S)&!$(NC=N)&!$(N#C)&!$(N-c)]
 [N;!$(N(=[N,O,S,C]));!$(N(S(=O)(=O)));!$(N(C(F)(F)(F)));!$(N(C#N));!$(N(C(=O)));!$(N(C(=S)));!$(N(C(=N)));!$(N(#C));!$(Nc)].[N;!$(N(=[N,O,S,C]));!$(N(S(=O)(=O)));!$(N(C(F)(F)(F)));!$(N(C#N));!$(N(C(=O)));!$(N(C(=S)));!$(N(C(=N)));!$(N(#C));!$(Nc)].[N;!$(N(=[N,O,S,C]));!$(N(S(=O)(=O)));!$(N(C(F)(F)(F)));!$(N(C#N));!$(N(C(=O)));!$(N(C(=S)));!$(N(C(=N)));!$(N(#C));!$(Nc)].[N;!$(N(=[N,O,S,C]));!$(N(S(=O)(=O)));!$(N(C(F)(F)(F)));!$(N(C#N));!$(N(C(=O)));!$(N(C(=S)));!$(N(C(=N)));!$(N(#C));!$(N-c)]   gte_4_basic_N
-# Unsupported SMARTS atom query: RecursiveStructure
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 4 disconnected components: [$([N&+](=O)[O&-]),$(N(=O)=O)].[$([N&+](=O)[O&-]),$(N(=O)=O)].[$([N&+](=O)[O&-]),$(N(=O)=O)].[$([N&+](=O)[O&-]),$(N(=O)=O)]
 [$([N+](=O)[O-]),$(N(=O)=O)].[$([N+](=O)[O-]),$(N(=O)=O)].[$([N+](=O)[O-]),$(N(=O)=O)].[$([N+](=O)[O-]),$(N(=O)=O)]   gte_4_nitro
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 5 disconnected components: a[O&D1].a[O&D1].a[O&D1].a[O&D1].a[O&D1]
+a[O;D1].a[O;D1].a[O;D1].a[O;D1].a[O;D1]   gte_5_phenolic_OH
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 7 disconnected components: C[O&D1].C[O&D1].C[O&D1].C[O&D1].C[O&D1].C[O&D1].C[O&D1]
+C[O;D1].C[O;D1].C[O;D1].C[O;D1].C[O;D1].C[O;D1].C[O;D1]   gte_7_aliphatic_OH
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 7 disconnected components: [Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I]
+[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I]   gte_7_total_hal
 # Unsupported SMARTS atom query: RecursiveStructure
 [CH2,$(C(F)(F));R0][CH2,$(C(F)(F));R0][CH2,$(C(F)(F));R0][CH2,$(C(F)(F));R0][CH2,$(C(F)(F));R0][CH2,$(C(F)(F));R0][CH2,$(C(F)(F));R0][CH2,$(C(F)(F));R0]   gte_8_CF2_or_CH2
 # Unsupported SMARTS atom query: RecursiveStructure
@@ -134,6 +154,16 @@ S(=O)Oc1c([Cl,F])[cH1,$(c[F,Cl])]c([F,Cl])[cH1,$(c[F,Cl])]c1([F,Cl])   halo_phen
 [CH1,$(C(-[Cl,Br,I]))]1=[CH1,$(C(-[Cl,Br,I]))]C(=[O,N,S])[CH1,$(C(-[Cl,Br,I]))]=[CH1,$(C(-[Cl,Br,I]))]C1(=[O,N,S])   para_quinone
 # Unsupported SMARTS atom query: RecursiveStructure
 O=[C,S]Oc1aaa([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aa([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])1   phenolate_bis_EWG
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: c1c([O&D1])c(-[Cl,Br,I])c(-[Cl,Br,I])cc1.c1c([O&D1])c(-[Cl,Br,I])c(-[Cl,Br,I])cc1
+c1c([O;D1])c(-[Cl,Br,I])c(-[Cl,Br,I])cc1.c1c([O;D1])c(-[Cl,Br,I])c(-[Cl,Br,I])cc1   polyhalo_phenol_a
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: c1c([O&D1])c(-[Cl,Br,I])cc(-[Cl,Br,I])c1.c1c([O&D1])c(-[Cl,Br,I])cc(-[Cl,Br,I])c1
+c1c([O;D1])c(-[Cl,Br,I])cc(-[Cl,Br,I])c1.c1c([O;D1])c(-[Cl,Br,I])cc(-[Cl,Br,I])c1   polyhalo_phenol_b
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: c1c([O&D1])ccc(-[Cl,Br,I])c1-[Cl,Br,I].c1c([O&D1])ccc(-[Cl,Br,I])c1-[Cl,Br,I]
+c1c([O;D1])ccc(-[Cl,Br,I])c(-[Cl,Br,I])1.c1c([O;D1])ccc(-[Cl,Br,I])c(-[Cl,Br,I])1   polyhalo_phenol_c
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: c1(-[Cl,Br,I])c([O&D1])c(-[Cl,Br,I])ccc1.c1(-[Cl,Br,I])c([O&D1])c(-[Cl,Br,I])ccc1
+c(-[Cl,Br,I])1c([O;D1])c(-[Cl,Br,I])ccc1.c(-[Cl,Br,I])1c([O;D1])c(-[Cl,Br,I])ccc1   polyhalo_phenol_d
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: c1c([O&D1])ccc(-[Cl,Br,I])c1-[Cl,Br,I].c1c([O&D1])ccc(-[Cl,Br,I])c1-[Cl,Br,I]
+c1c([O;D1])ccc(-[Cl,Br,I])c(-[Cl,Br,I])1.c1c([O;D1])ccc(-[Cl,Br,I])c(-[Cl,Br,I])1   polyhalo_phenol_e
 # Unsupported SMARTS atom query: RecursiveStructure
 [CH2][Cl,Br,I,$(O(S(=O)(=O)[!$(N);!$([O&D1])]))]   primary_halide_sulfate
 # Recursive SMARTS ($(...)) are not supported
@@ -310,12 +340,22 @@ P(=S)(-[S;H1,H0$(S(P)C)])(-[O;H1,H0$(O(P)C)])(-N(C)C)   Thiophosphothionate
 [#6][O;R0][$(C([#6])[#6]),$([CH][#6]),$([CH2])][O;R0][#6]   glycol
 # Unsupported SMARTS atom query: RecursiveStructure
 [#6;$([#6]~[#3,#11,#12,#13,#19,#20,#26,#27,#28,#29,#30])]   Metal_Carbon_bond
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: [n&+][O&-&X1].[n&+][O&-&X1]
+[n+][O-X1].[n+][O-X1]   Aromatic_N-Oxide_more_than_one
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: [N&+](=O)[O&-].[N&+](=O)[O&-]
+[N+](=O)[O-].[N+](=O)[O-]   Nitro_more_than_one
 # Unsupported SMARTS atom query: RecursiveStructure
 a-S(=O)(=O)-O[$([a&!#6]),$(c[a&!#6]),$(cc[a&!#6]),$(ccc[a&!#6]),$(cccc[a&!#6]),$(ccccc[a&!#6])]   Heteroaryl sulfonate
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 4 disconnected components: [C,S,P](=O)[O&H1].[C,S,P](=O)[O&H1].[C,S,P](=O)[O&H1].[C,S,P](=O)[O&H1]
+[C,S,P](=O)[OH].[C,S,P](=O)[OH].[C,S,P](=O)[OH].[C,S,P](=O)[OH]   polyacidic
 # Unsupported SMARTS atom query: RecursiveStructure
 [$([A&D2]),$([A&D1])]!@[A&D2]!@[A&D2]!@[A&D2]!@[A&D2]!@[$([A&D2]),$([A&D1])]   Unbranched chain
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: a-[N&+](=O)[O&-].a-[N&+](=O)[O&-]
+a-[N+](=O)[O-].a-[N+](=O)[O-]   nitro aromatic 2+
 # Unsupported SMARTS atom query: RecursiveStructure
 O=[N+](-[O-])-caac-[$(N(C)C),$([NH]C),$([NH2])]   Dye 29
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 3 disconnected components: [#6]OP(=O)(*)O[#6].[#6]OP(=O)(*)O[#6].[#6]OP(=O)(*)O[#6]
+[#6]OP(=O)(*)O[#6].[#6]OP(=O)(*)O[#6].[#6]OP(=O)(*)O[#6]   tri phosphoric esters
 # Unsupported SMARTS atom query: RecursiveStructure
 [$([o,n]=c1ccc(=[o,n])cc1),$([O,N]=C1C=CC(=[O,N])C=C1),$([O,N]=C1[#6]:,=[#6]C(=[O,N])[#6]:,=[#6]1)]   quinone
 # Unsupported SMARTS atom query: RecursiveStructure
@@ -362,3 +402,9 @@ N-C-[F,Cl,Br,I,$(C#N)]   N-C-Hal or cyano methyl
 [NH1X2]=[C!R;!$(C(-N)(=[NH1])-N)]   acyclic C=N-H
 # Recursive SMARTS ($(...)) are not supported
 O-!@[N;!$(N(=O)=O);!$([N+](=O)[O-])]   acyclic NO not nitro
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: C#N.C#N
+C#N.C#N   too many cyano Groups (>1)
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: [C&X3](=O)[O&H1].[C&X3](=O)[O&H1]
+[CX3](=O)[OH1].[CX3](=O)[OH1]   too many COOH groups (>1)
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 4 disconnected components: [F,Cl,Br,I].[F,Cl,Br,I].[F,Cl,Br,I].[F,Cl,Br,I]
+[F,Cl,Br,I].[F,Cl,Br,I].[F,Cl,Br,I].[F,Cl,Br,I]   high halogen content (>3)
