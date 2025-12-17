@@ -265,6 +265,7 @@ void MoleculesDevice::setStream(cudaStream_t stream) {
   queryLeafBondCounts_.setStream(stream);
   atomInstrStarts_.setStream(stream);
   atomLeafMaskStarts_.setStream(stream);
+  bondQueryData_.setStream(stream);
 }
 
 void MoleculesDevice::copyFromHost(const MoleculesHost& host, cudaStream_t stream) {
@@ -307,6 +308,11 @@ void MoleculesDevice::copyFromHost(const MoleculesHost& host, cudaStream_t strea
     atomInstrStarts_.setFromVector(host.atomInstrStarts);
     atomLeafMaskStarts_.setFromVector(host.atomLeafMaskStarts);
   }
+
+  // Copy bond query data for SMARTS
+  if (!host.bondQueryData.empty()) {
+    bondQueryData_.setFromVector(host.bondQueryData);
+  }
 }
 
 MoleculesDeviceView MoleculesDevice::view() const {
@@ -332,6 +338,7 @@ MoleculesDeviceView MoleculesDevice::view() const {
   v.queryLeafBondCounts         = queryLeafBondCounts_.data();
   v.atomInstrStarts             = atomInstrStarts_.data();
   v.atomLeafMaskStarts          = atomLeafMaskStarts_.data();
+  v.bondQueryData               = bondQueryData_.data();
   return v;
 }
 
@@ -885,7 +892,10 @@ AtomQuery getAtomQueryType(const RDKit::Atom* atom) {
   return getQueryFlagsFromQuery(query);
 }
 
-void addBondsAndConnectivity(const RDKit::ROMol* mol, MoleculesHost& batch, int& cumulativeBondCount) {
+void addBondsAndConnectivity(const RDKit::ROMol*    mol,
+                             MoleculesHost&         batch,
+                             int&                   cumulativeBondCount,
+                             const RDKit::RingInfo* ringInfo) {
   auto& bondDataVec      = batch.bondData;
   auto& atomBondStarts   = batch.atomBondStarts;
   auto& bondDataIndices  = batch.bondDataIndices;
@@ -894,8 +904,10 @@ void addBondsAndConnectivity(const RDKit::ROMol* mol, MoleculesHost& batch, int&
   bondDataVec.reserve(bondDataVec.size() + mol->getNumBonds());
 
   for (unsigned int i = 0; i < mol->getNumBonds(); ++i) {
-    auto& bd    = bondDataVec.emplace_back();
-    bd.bondType = mol->getBondWithIdx(i)->getBondType();
+    auto&       bd   = bondDataVec.emplace_back();
+    const auto* bond = mol->getBondWithIdx(i);
+    bd.bondType      = bond->getBondType();
+    bd.isInRing      = ringInfo->numBondRings(i) > 0 ? 1 : 0;
   }
 
   atomBondStarts.push_back(0);
@@ -936,10 +948,10 @@ void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   atomDataPackedVec.reserve(atomDataPackedVec.size() + mol->getNumAtoms());
   bondTypeCountsVec.reserve(bondTypeCountsVec.size() + mol->getNumAtoms());
 
-  int cumulativeBondCount = 0;
-  addBondsAndConnectivity(mol, batch, cumulativeBondCount);
-
   const auto* ringInfo = mol->getRingInfo();
+
+  int cumulativeBondCount = 0;
+  addBondsAndConnectivity(mol, batch, cumulativeBondCount, ringInfo);
 
   for (const RDKit::Atom* atom : mol->atoms()) {
     auto& thisAtomData = atomDataVec.emplace_back();
@@ -1041,6 +1053,104 @@ void populateQueryAtomDataPacked(const RDKit::Atom* atom, AtomDataPacked& packed
   populatePacked(query);
 }
 
+/**
+ * @brief Extract bond query flags from an RDKit bond query.
+ *
+ * Handles ring bond constraints (!@ and @) by examining the bond's query.
+ */
+void extractBondQueryFlags(const RDKit::Bond* bond, BondQueryData& queryData) {
+  queryData.bondType   = bond->getBondType();
+  queryData.queryFlags = BondQueryNone;
+
+  if (!bond->hasQuery()) {
+    return;
+  }
+
+  const auto* query = bond->getQuery();
+  if (query == nullptr) {
+    return;
+  }
+
+  // Recursive function to process bond query tree
+  std::function<void(const RDKit::Bond::QUERYBOND_QUERY*)> processQuery;
+  processQuery = [&](const RDKit::Bond::QUERYBOND_QUERY* q) {
+    const std::string desc      = q->getDescription();
+    const bool        isNegated = q->getNegation();
+
+    if (desc == "BondAnd" || desc == "BondOr") {
+      for (auto it = q->beginChildren(); it != q->endChildren(); ++it) {
+        processQuery((*it).get());
+      }
+      return;
+    }
+
+    if (desc == "BondIsInRing" || desc == "BondInRing") {
+      if (isNegated) {
+        queryData.queryFlags |= BondQueryNotRingBond;
+      } else {
+        queryData.queryFlags |= BondQueryIsRingBond;
+      }
+    } else if (desc == "SingleOrAromaticBond") {
+      // Single or aromatic - common in SMARTS, treat as any for now
+      queryData.bondType = 0;
+    } else if (desc == "BondOrder") {
+      const auto* eqQuery = static_cast<const RDKit::BOND_EQUALS_QUERY*>(q);
+      queryData.bondType  = eqQuery->getVal();
+    } else if (desc == "BondNull") {
+      queryData.bondType = 0;  // Any bond
+    }
+  };
+
+  processQuery(query);
+}
+
+/**
+ * @brief Add bonds and connectivity for a query molecule (SMARTS).
+ *
+ * Similar to addBondsAndConnectivity but also extracts bond query information
+ * including ring bond constraints.
+ */
+void addQueryBondsAndConnectivity(const RDKit::ROMol* mol, MoleculesHost& batch, int& cumulativeBondCount) {
+  auto& bondDataVec      = batch.bondData;
+  auto& bondQueryDataVec = batch.bondQueryData;
+  auto& atomBondStarts   = batch.atomBondStarts;
+  auto& bondDataIndices  = batch.bondDataIndices;
+  auto& otherAtomIndices = batch.otherAtomIndices;
+
+  bondDataVec.reserve(bondDataVec.size() + mol->getNumBonds());
+  bondQueryDataVec.reserve(bondQueryDataVec.size() + mol->getNumBonds());
+
+  for (unsigned int i = 0; i < mol->getNumBonds(); ++i) {
+    const auto* bond = mol->getBondWithIdx(i);
+
+    auto& bd    = bondDataVec.emplace_back();
+    bd.bondType = bond->getBondType();
+    bd.isInRing = 0;  // Query molecules don't have ring info computed
+
+    auto& bq = bondQueryDataVec.emplace_back();
+    extractBondQueryFlags(bond, bq);
+  }
+
+  atomBondStarts.push_back(0);
+
+  for (const RDKit::Atom* atom : mol->atoms()) {
+    const unsigned int atomIdx = atom->getIdx();
+
+    auto [beg, bondEnd] = mol->getAtomBonds(atom);
+    while (beg != bondEnd) {
+      const auto*        bond        = (*mol)[*beg];
+      const unsigned int bondIdx     = bond->getIdx();
+      const int          otherAtomId = bond->getOtherAtomIdx(atomIdx);
+
+      otherAtomIndices.push_back(static_cast<int16_t>(otherAtomId));
+      bondDataIndices.push_back(static_cast<int16_t>(bondIdx));
+      ++cumulativeBondCount;
+      ++beg;
+    }
+    atomBondStarts.push_back(static_cast<int16_t>(cumulativeBondCount));
+  }
+}
+
 }  // namespace
 
 void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
@@ -1073,7 +1183,7 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   atomLeafMaskStartsVec.reserve(atomLeafMaskStartsVec.size() + mol->getNumAtoms());
 
   int cumulativeBondCount = 0;
-  addBondsAndConnectivity(mol, batch, cumulativeBondCount);
+  addQueryBondsAndConnectivity(mol, batch, cumulativeBondCount);
 
   for (const RDKit::Atom* atom : mol->atoms()) {
     auto& thisAtomData = atomDataVec.emplace_back();

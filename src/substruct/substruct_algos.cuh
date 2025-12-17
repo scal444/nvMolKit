@@ -31,6 +31,30 @@ namespace nvMolKit {
 
 constexpr int kWarpSize       = 32;
 
+// =============================================================================
+// Helper function for checking if target atom is used in mapping
+// =============================================================================
+
+/**
+ * @brief Check if a target atom is already used in a partial mapping.
+ *
+ * Iterates through the mapping array to check if targetAtom appears.
+ * This is O(numQueryAtoms) but avoids the need for a separate bitmask,
+ * saving significant shared memory.
+ *
+ * @param mapping The partial mapping array (mapping[q] = target atom, -1 if unassigned)
+ * @param numQueryAtoms Number of query atoms
+ * @param targetAtom Target atom to check
+ * @return true if targetAtom is already used in the mapping
+ */
+__device__ __forceinline__ bool isTargetUsedInMapping(const int8_t* mapping, int numQueryAtoms, int targetAtom) {
+  for (int q = 0; q < numQueryAtoms; ++q) {
+    if (mapping[q] == targetAtom) {
+      return true;
+    }
+  }
+  return false;
+}
 
 // =============================================================================
 // VF2 Data Structures
@@ -42,29 +66,25 @@ constexpr int kWarpSize       = 32;
  * Maintains partial match and exploration stack for DFS backtracking.
  */
 struct VF2State {
-  int8_t   mapping[kMaxQueryAtoms];       ///< mapping[q] = target atom idx, -1 if unassigned
-  uint32_t usedTargetsMask;               ///< Bitmask of target atoms already in mapping (up to 32)
-  int8_t   candidateIdx[kMaxQueryAtoms];  ///< Current candidate index at each stack level
-  int      depth;                         ///< Current recursion depth (0 to numQueryAtoms-1)
-  int      matchCount;                    ///< Number of complete matches found
+  int8_t mapping[kMaxQueryAtoms];       ///< mapping[q] = target atom idx, -1 if unassigned
+  int8_t candidateIdx[kMaxQueryAtoms];  ///< Current candidate index at each stack level
+  int    depth;                         ///< Current recursion depth (0 to numQueryAtoms-1)
+  int    matchCount;                    ///< Number of complete matches found
+  int    numQueryAtoms;                 ///< Cached for isTargetUsed check
 
-  __device__ __forceinline__ void init() {
+  __device__ __forceinline__ void init(int nQueryAtoms) {
     for (int i = 0; i < kMaxQueryAtoms; ++i) {
       mapping[i]      = -1;
       candidateIdx[i] = 0;
     }
-    usedTargetsMask = 0;
-    depth           = 0;
-    matchCount      = 0;
+    depth         = 0;
+    matchCount    = 0;
+    numQueryAtoms = nQueryAtoms;
   }
 
   __device__ __forceinline__ bool isTargetUsed(int targetIdx) const {
-    return (usedTargetsMask & (1u << targetIdx)) != 0;
+    return isTargetUsedInMapping(mapping, numQueryAtoms, targetIdx);
   }
-
-  __device__ __forceinline__ void markTargetUsed(int targetIdx) { usedTargetsMask |= (1u << targetIdx); }
-
-  __device__ __forceinline__ void unmarkTargetUsed(int targetIdx) { usedTargetsMask &= ~(1u << targetIdx); }
 };
 
 // =============================================================================
@@ -78,16 +98,14 @@ struct VF2State {
  * Stored compactly for queue-based BFS exploration.
  */
 struct PartialMatch {
-  int8_t   mapping[kMaxQueryAtoms];  ///< mapping[q] = target atom, -1 if unassigned
-  uint32_t usedTargetsMask;          ///< Bitmask of used target atoms
-  int8_t   nextQueryAtom;            ///< Next query atom to extend
+  int8_t mapping[kMaxQueryAtoms];  ///< mapping[q] = target atom, -1 if unassigned
+  int8_t nextQueryAtom;            ///< Next query atom to extend
 
   __device__ __forceinline__ void init() {
     for (int i = 0; i < kMaxQueryAtoms; ++i) {
       mapping[i] = -1;
     }
-    usedTargetsMask = 0;
-    nextQueryAtom   = 0;
+    nextQueryAtom = 0;
   }
 };
 
@@ -104,6 +122,45 @@ struct CandidateList {
 // =============================================================================
 // Edge Consistency Checking
 // =============================================================================
+
+/**
+ * @brief Check if a query bond type matches a target bond type.
+ *
+ * Handles "any bond" (type 0) which matches any target bond type.
+ *
+ * @param queryBondType Query bond type (0 = any, 1 = single, 2 = double, etc.)
+ * @param targetBondType Target bond type
+ * @return true if bond types are compatible
+ */
+__device__ __forceinline__ bool bondTypeMatches(int queryBondType, int targetBondType) {
+  // Query bond type 0 (UNSPECIFIED) means "any bond" - matches everything
+  if (queryBondType == 0) {
+    return true;
+  }
+  return queryBondType == targetBondType;
+}
+
+/**
+ * @brief Check if ring bond constraints are satisfied.
+ *
+ * @param queryFlags Bond query flags (BondQueryIsRingBond, BondQueryNotRingBond)
+ * @param targetIsInRing Whether the target bond is in a ring
+ * @return true if ring constraints are satisfied
+ */
+__device__ __forceinline__ bool ringBondConstraintsSatisfied(uint8_t queryFlags, bool targetIsInRing) {
+  // Check ring bond constraint
+  if (queryFlags & BondQueryIsRingBond) {
+    if (!targetIsInRing) {
+      return false;
+    }
+  }
+  if (queryFlags & BondQueryNotRingBond) {
+    if (targetIsInRing) {
+      return false;
+    }
+  }
+  return true;
+}
 
 /**
  * @brief Check if extending partial match with (queryAtom -> targetAtom) is edge-consistent.
@@ -124,7 +181,8 @@ __device__ __forceinline__ bool checkEdgeConsistency(const MoleculeView& target,
                                                      const int8_t*       mapping,
                                                      int                 queryAtom,
                                                      int                 targetAtom) {
-  const int queryDegree = query.getAtomDegree(queryAtom);
+  const int  queryDegree      = query.getAtomDegree(queryAtom);
+  const bool hasBondQueryData = query.hasBondQueryData();
 
   for (int i = 0; i < queryDegree; ++i) {
     const int neighborQueryAtom = query.getNeighborAtomIdx(queryAtom, i);
@@ -136,23 +194,40 @@ __device__ __forceinline__ bool checkEdgeConsistency(const MoleculeView& target,
 
     const int neighborTargetAtom = mapping[neighborQueryAtom];
     const int queryBondIdx       = query.getNeighborBondIdx(queryAtom, i);
-    const int queryBondType      = query.getBond(queryBondIdx, threadIdx.x, blockIdx.x).bondType;
 
-    // Check if targetAtom has an edge to neighborTargetAtom with compatible bond type
-    bool foundEdge          = false;
+    // Get query bond info
+    int     queryBondType  = query.getBond(queryBondIdx, threadIdx.x, blockIdx.x).bondType;
+    uint8_t queryBondFlags = 0;
+    if (hasBondQueryData) {
+      const BondQueryData& bqd = query.getBondQuery(queryBondIdx);
+      queryBondType  = bqd.bondType;
+      queryBondFlags = bqd.queryFlags;
+    }
+
+    // Check if targetAtom has an edge to neighborTargetAtom with compatible bond
+    bool      foundEdge    = false;
     const int targetDegree = target.getAtomDegree(targetAtom);
 
     for (int j = 0; j < targetDegree; ++j) {
       if (target.getNeighborAtomIdx(targetAtom, j) == neighborTargetAtom) {
-        const int targetBondIdx  = target.getNeighborBondIdx(targetAtom, j);
-        const int targetBondType = target.getBond(targetBondIdx, threadIdx.x, blockIdx.x).bondType;
+        const int       targetBondIdx = target.getNeighborBondIdx(targetAtom, j);
+        const BondData& targetBond    = target.getBond(targetBondIdx, threadIdx.x, blockIdx.x);
 
-        // Bond type compatibility check (query bond must match target bond)
-        // For now: exact match. Could extend to handle query bond wildcards.
-        if (targetBondType == queryBondType) {
-          foundEdge = true;
-          break;
+        // Check bond type compatibility (handles "any bond" type 0)
+        if (!bondTypeMatches(queryBondType, targetBond.bondType)) {
+          continue;
         }
+
+        // Check ring bond constraints if present
+        if (queryBondFlags != 0) {
+          bool targetIsInRing = (targetBond.isInRing != 0);
+          if (!ringBondConstraintsSatisfied(queryBondFlags, targetIsInRing)) {
+            continue;
+          }
+        }
+
+        foundEdge = true;
+        break;
       }
     }
 
@@ -215,9 +290,8 @@ __device__ void vf2SearchGPU(const MoleculeView&                                
     return;
   }
 
-  state.init();
+  state.init(numQueryAtoms);
   state.mapping[0] = static_cast<int8_t>(startingTargetAtom);
-  state.markTargetUsed(startingTargetAtom);
   state.depth = 1;
 
   // Iterative DFS
@@ -238,9 +312,7 @@ __device__ void vf2SearchGPU(const MoleculeView&                                
       // Backtrack to find more matches
       --state.depth;
       if (state.depth > 0) {
-        const int prevTarget = state.mapping[state.depth];
         state.mapping[state.depth] = -1;
-        state.unmarkTargetUsed(prevTarget);
         ++state.candidateIdx[state.depth];
       }
       continue;
@@ -263,7 +335,6 @@ __device__ void vf2SearchGPU(const MoleculeView&                                
       if (edgeOk) {
         // Extend match
         state.mapping[currentQueryAtom] = static_cast<int8_t>(candidateTarget);
-        state.markTargetUsed(candidateTarget);
         state.candidateIdx[state.depth + 1] = 0;
         ++state.depth;
         foundCandidate = true;
@@ -278,9 +349,7 @@ __device__ void vf2SearchGPU(const MoleculeView&                                
       state.candidateIdx[state.depth] = 0;
       --state.depth;
       if (state.depth > 0) {
-        const int prevTarget = state.mapping[state.depth];
         state.mapping[state.depth] = -1;
-        state.unmarkTargetUsed(prevTarget);
         ++state.candidateIdx[state.depth];
       } else if (state.depth == 0) {
         // Exhausted this starting point
@@ -363,9 +432,8 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
         const int slot = atomicAdd(&currentCount, 1);
         if (slot < maxPartials) {
           sharedPartials[slot].init();
-          sharedPartials[slot].mapping[0]      = static_cast<int8_t>(t);
-          sharedPartials[slot].usedTargetsMask = 1u << t;
-          sharedPartials[slot].nextQueryAtom   = 1;
+          sharedPartials[slot].mapping[0]    = static_cast<int8_t>(t);
+          sharedPartials[slot].nextQueryAtom = 1;
         }
       }
     }
@@ -398,7 +466,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
         bool valid = false;
         if (t < numTargetAtoms) {
           const bool labelOk = labelMatrix.get(t, queryAtom);
-          const bool notUsed = (partial.usedTargetsMask & (1u << t)) == 0;
+          const bool notUsed = !isTargetUsedInMapping(partial.mapping, numQueryAtoms, t);
           valid = labelOk && notUsed && 
                   checkEdgeConsistency(target, query, partial.mapping, queryAtom, t);
         }
@@ -433,9 +501,8 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
               for (int q = 0; q < numQueryAtoms; ++q) {
                 next.mapping[q] = partial.mapping[q];
               }
-              next.mapping[queryAtom]  = static_cast<int8_t>(t);
-              next.usedTargetsMask     = partial.usedTargetsMask | (1u << t);
-              next.nextQueryAtom       = static_cast<int8_t>(queryAtom + 1);
+              next.mapping[queryAtom] = static_cast<int8_t>(t);
+              next.nextQueryAtom      = static_cast<int8_t>(queryAtom + 1);
             }
           }
         }
@@ -495,6 +562,14 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
   const int numQueryAtoms  = query.numAtoms;
   const int numTargetAtoms = target.numAtoms;
 
+  // // DEBUG: Print basic info
+  // if (tid == 0) {
+  //   printf("[WUS] numQueryAtoms=%d, numTargetAtoms=%d, maxQueueSize=%d, maxMatches=%d\n",
+  //          numQueryAtoms, numTargetAtoms, maxQueueSize, maxMatches);
+  //   printf("[WUS] query.hasBondQueryData()=%d\n", query.hasBondQueryData() ? 1 : 0);
+  // }
+  // block.sync();
+
   // Phase 1: Precompute candidate lists from label matrix
   for (int q = tid; q < numQueryAtoms; q += block.size()) {
     CandidateList& list = sharedCandidates[q];
@@ -506,6 +581,19 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
     }
   }
   block.sync();
+
+  // // DEBUG: Print candidate lists
+  // if (tid == 0) {
+  //   for (int q = 0; q < numQueryAtoms; ++q) {
+  //     printf("[WUS] Phase1: query atom %d has %d candidates: ", q, sharedCandidates[q].count);
+  //     for (int i = 0; i < sharedCandidates[q].count && i < 10; ++i) {
+  //       printf("%d ", (int)sharedCandidates[q].candidates[i]);
+  //     }
+  //     if (sharedCandidates[q].count > 10) printf("...");
+  //     printf("\n");
+  //   }
+  // }
+  // block.sync();
 
   // Phase 2: Initialize work queue with candidates for query atom 0
   __shared__ int queueHead;
@@ -532,9 +620,8 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
       const int slot = atomicAdd(&queueTail, 1);
       if (slot < maxQueueSize) {
         workQueue[slot].init();
-        workQueue[slot].mapping[0]      = q0Candidates.candidates[i];
-        workQueue[slot].usedTargetsMask = 1u << q0Candidates.candidates[i];
-        workQueue[slot].nextQueryAtom   = 1;
+        workQueue[slot].mapping[0]    = q0Candidates.candidates[i];
+        workQueue[slot].nextQueryAtom = 1;
       }
     }
   }
@@ -549,41 +636,84 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
   // Shared variables declared outside loop to avoid race conditions
   __shared__ int workAvailable;
   __shared__ int warpWorkIdx[32];  // Max 32 warps
+  // __shared__ int iterCount;  // DEBUG only
+
+  // if (tid == 0) {
+  //   iterCount = 0;
+  // }
+  // block.sync();
+
+  __shared__ int snapshotQueueTail;  // Snapshot of queueTail at start of iteration
 
   while (true) {
     if (tid == 0) {
-      workAvailable = (queueHead < queueTail) ? 1 : 0;
+      snapshotQueueTail = queueTail;  // Snapshot BEFORE checking workAvailable
+      workAvailable = (queueHead < snapshotQueueTail) ? 1 : 0;
+      // ++iterCount;
     }
     block.sync();
+
+    // // DEBUG: Print iteration info
+    // if (tid == 0 && iterCount <= 10) {
+    //   printf("[WUS] Phase3 iter %d: queueHead=%d, queueTail=%d, snapshotQueueTail=%d, workAvailable=%d\n",
+    //          iterCount, queueHead, queueTail, snapshotQueueTail, workAvailable);
+    // }
+    // block.sync();
 
     if (!workAvailable) {
       break;
     }
 
-    // Each warp pops one work item
+    // Each warp tries to claim a work item using CAS to avoid over-incrementing queueHead
     if (laneId == 0 && warpId < 32) {
-      warpWorkIdx[warpId] = atomicAdd(&queueHead, 1);
+      warpWorkIdx[warpId] = -1;  // Default to invalid
+      int oldHead = queueHead;
+      while (oldHead < snapshotQueueTail) {
+        int newHead = atomicCAS(&queueHead, oldHead, oldHead + 1);
+        if (newHead == oldHead) {
+          // Successfully claimed slot
+          warpWorkIdx[warpId] = oldHead;
+          break;
+        }
+        oldHead = newHead;  // Retry with updated value
+      }
     }
     tile32.sync();
 
     const int myWorkIdx = warpWorkIdx[warpId];
 
     // Use hasWork flag instead of continue to ensure all threads hit sync
-    const bool hasWork = (myWorkIdx < queueTail && myWorkIdx < maxQueueSize);
+    const bool hasWork = (myWorkIdx >= 0 && myWorkIdx < maxQueueSize);
 
     // Copy work item to registers to avoid races with concurrent writes to workQueue
-    int8_t   localMapping[kMaxQueryAtoms];
-    uint32_t localUsedTargetsMask = 0;
-    int      localQueryAtom       = 0;
+    int8_t localMapping[kMaxQueryAtoms];
+    int    localQueryAtom = 0;
+    for (int q = 0; q < kMaxQueryAtoms; ++q) {
+      localMapping[q] = -1;
+    }
 
     if (hasWork) {
       const PartialMatch& work = workQueue[myWorkIdx];
-      localQueryAtom       = work.nextQueryAtom;
-      localUsedTargetsMask = work.usedTargetsMask;
+      localQueryAtom = work.nextQueryAtom;
       for (int q = 0; q < numQueryAtoms; ++q) {
         localMapping[q] = work.mapping[q];
       }
     }
+
+    // // DEBUG: Print work item info (only warp 0, lane 0)
+    // if (warpId == 0 && laneId == 0 && iterCount <= 10) {
+    //   printf("[WUS] Phase3 iter %d warp0: hasWork=%d, myWorkIdx=%d, localQueryAtom=%d, usedMask=0x%x\n",
+    //          iterCount, hasWork ? 1 : 0, myWorkIdx, localQueryAtom, localUsedTargetsMask);
+    //   if (hasWork) {
+    //     printf("[WUS]   localMapping: ");
+    //     for (int q = 0; q < numQueryAtoms; ++q) {
+    //       printf("%d ", (int)localMapping[q]);
+    //     }
+    //     printf("\n");
+    //     printf("[WUS]   candidates for queryAtom %d: count=%d\n",
+    //            localQueryAtom, sharedCandidates[localQueryAtom].count);
+    //   }
+    // }
 
     // Ensure all reads from workQueue complete before any writes
     block.sync();
@@ -600,8 +730,17 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
 
         if (cIdx < candidates.count) {
           targetAtom         = candidates.candidates[cIdx];
-          const bool notUsed = (localUsedTargetsMask & (1u << targetAtom)) == 0;
-          valid = notUsed && checkEdgeConsistency(target, query, localMapping, localQueryAtom, targetAtom);
+          const bool notUsed = !isTargetUsedInMapping(localMapping, numQueryAtoms, targetAtom);
+          // // Enable debug for first few candidates in first few iterations
+          // const bool debugEdge = (warpId == 0 && cIdx < 3 && iterCount <= 3);
+          const bool edgeOk  = checkEdgeConsistency(target, query, localMapping, localQueryAtom, targetAtom);
+          valid = notUsed && edgeOk;
+
+          // // DEBUG: Print candidate evaluation (only first few)
+          // if (warpId == 0 && cIdx < 5 && iterCount <= 5) {
+          //   printf("[WUS] Phase3 iter %d cand %d: targetAtom=%d, notUsed=%d, edgeOk=%d, valid=%d\n",
+          //          iterCount, cIdx, targetAtom, notUsed ? 1 : 0, edgeOk ? 1 : 0, valid ? 1 : 0);
+          // }
         }
 
         // Use ballot to find valid lanes
@@ -612,6 +751,11 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
           if (localQueryAtom == numQueryAtoms - 1) {
             // Complete match
             const int matchIdx = atomicAdd(matchCount, 1);
+            // printf("[WUS] MATCH FOUND! matchIdx=%d, mapping: ", matchIdx);
+            // for (int q = 0; q < numQueryAtoms; ++q) {
+            //   printf("%d ", (q == localQueryAtom) ? targetAtom : (int)localMapping[q]);
+            // }
+            // printf("\n");
             if (matchIdx < maxMatches) {
               const int writeOffset = matchOffset + matchIdx * numQueryAtoms;
               for (int q = 0; q < numQueryAtoms; ++q) {
@@ -623,13 +767,16 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
           } else {
             // Enqueue for next level
             const int slot = atomicAdd(&queueTail, 1);
+            // if (warpId == 0 && laneId < 5 && iterCount <= 5) {
+            //   printf("[WUS] Phase3 iter %d: enqueueing at slot %d for queryAtom %d, targetAtom=%d\n",
+            //          iterCount, slot, localQueryAtom + 1, targetAtom);
+            // }
             if (slot < maxQueueSize) {
               PartialMatch& next = workQueue[slot];
               for (int q = 0; q < numQueryAtoms; ++q) {
                 next.mapping[q] = localMapping[q];
               }
               next.mapping[localQueryAtom] = static_cast<int8_t>(targetAtom);
-              next.usedTargetsMask         = localUsedTargetsMask | (1u << targetAtom);
               next.nextQueryAtom           = static_cast<int8_t>(localQueryAtom + 1);
             }
           }
@@ -640,6 +787,12 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
     // All threads sync before next iteration to ensure queue updates are visible
     block.sync();
   }
+
+  // // DEBUG: Final state
+  // if (tid == 0) {
+  //   printf("[WUS] DONE: total iterations=%d, final matchCount=%d, reportedCount=%d\n",
+  //          iterCount, *matchCount, *reportedCount);
+  // }
 }
 
 }  // namespace nvMolKit

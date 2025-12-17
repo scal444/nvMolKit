@@ -52,6 +52,9 @@ struct MoleculeView {
   const int* __restrict__ atomInstrStarts;                 ///< Start index into queryInstructions per atom
   const int* __restrict__ atomLeafMaskStarts;              ///< Start index into queryLeafMasks per atom
 
+  // Bond query data for SMARTS
+  const BondQueryData* __restrict__ bondQueryData;  ///< Bond query info (query molecules only)
+
   __device__ __forceinline__ const AtomData& getAtom(int atomIdx) const { return atomData[atomIdx]; }
 
   __device__ __forceinline__ const BondData& getBond(int bondIdx, int tid=-1, int bid=-1) const {
@@ -110,6 +113,12 @@ struct MoleculeView {
 
   /// Check if this molecule has boolean query trees populated
   __device__ __forceinline__ bool hasQueryTrees() const { return atomQueryTrees != nullptr; }
+
+  /// Get bond query data (only valid for query molecules)
+  __device__ __forceinline__ const BondQueryData& getBondQuery(int bondIdx) const { return bondQueryData[bondIdx]; }
+
+  /// Check if this molecule has bond query data populated
+  __device__ __forceinline__ bool hasBondQueryData() const { return bondQueryData != nullptr; }
 };
 
 /**
@@ -142,6 +151,10 @@ __device__ __forceinline__ MoleculeView getMolecule(const MoleculesDeviceView& v
   mol.queryLeafBondCounts = view.queryLeafBondCounts;
   mol.atomInstrStarts     = view.atomInstrStarts ? view.atomInstrStarts + atomStart : nullptr;
   mol.atomLeafMaskStarts  = view.atomLeafMaskStarts ? view.atomLeafMaskStarts + atomStart : nullptr;
+
+  // Bond query data (may be nullptr if not populated)
+  const int bondStart = view.batchBondStarts[molIdx];
+  mol.bondQueryData   = view.bondQueryData ? view.bondQueryData + bondStart : nullptr;
   return mol;
 }
 

@@ -94,7 +94,7 @@ __global__ void substructMatchKernel(MoleculesDeviceView             targets,
     __shared__ VF2State vf2States[4];  // Up to 4 warps
 
     if (warpId < 4 && tile32.thread_rank() == 0) {
-      vf2States[warpId].init();
+      vf2States[warpId].init(query.numAtoms);
     }
     __syncthreads();
 

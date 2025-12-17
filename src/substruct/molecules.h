@@ -78,7 +78,29 @@ struct AtomData {
 };
 
 struct BondData {
-  uint8_t bondType = 0;
+  uint8_t bondType  = 0;
+  uint8_t isInRing  = 0;  ///< 1 if bond is in a ring, 0 otherwise
+};
+
+/**
+ * @brief Query flags for bond matching in SMARTS.
+ *
+ * Bonds can have queries like `-&!@` (single AND not ring bond).
+ */
+enum BondQueryFlags : uint8_t {
+  BondQueryNone        = 0,
+  BondQueryIsRingBond  = 1 << 0,  ///< Bond must be in a ring (@)
+  BondQueryNotRingBond = 1 << 1,  ///< Bond must NOT be in a ring (!@)
+};
+
+/**
+ * @brief Bond query data for SMARTS bond queries.
+ *
+ * Stores the bond type to match and ring bond constraints.
+ */
+struct BondQueryData {
+  uint8_t bondType   = 0;  ///< 0 = any, 1 = single, 2 = double, 3 = triple, 12 = aromatic
+  uint8_t queryFlags = 0;  ///< BondQueryFlags bitmask
 };
 
 /**
@@ -116,6 +138,9 @@ struct MoleculesHost {
   std::vector<BondTypeCounts>  queryLeafBondCounts;  ///< Flattened leaf bond counts
   std::vector<int>             atomInstrStarts;      ///< Start index into queryInstructions per atom
   std::vector<int>             atomLeafMaskStarts;   ///< Start index into queryLeafMasks per atom
+
+  // Bond query data for SMARTS (parallel to bondData, only for query molecules)
+  std::vector<BondQueryData> bondQueryData;  ///< Bond query info (type + ring constraints)
 
   MoleculesHost();
 
@@ -157,6 +182,9 @@ struct MoleculesDeviceView {
   const BondTypeCounts*  queryLeafBondCounts;  ///< Flattened leaf bond counts
   const int*             atomInstrStarts;      ///< Start index into queryInstructions per atom
   const int*             atomLeafMaskStarts;   ///< Start index into queryLeafMasks per atom
+
+  // Bond query data for SMARTS
+  const BondQueryData* bondQueryData;  ///< Bond query info (query molecules only)
 };
 
 /**
@@ -212,6 +240,9 @@ class MoleculesDevice {
   AsyncDeviceVector<BondTypeCounts>  queryLeafBondCounts_;
   AsyncDeviceVector<int>             atomInstrStarts_;
   AsyncDeviceVector<int>             atomLeafMaskStarts_;
+
+  // Bond query data for SMARTS
+  AsyncDeviceVector<BondQueryData> bondQueryData_;
 };
 
 /**
