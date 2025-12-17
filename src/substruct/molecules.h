@@ -37,7 +37,7 @@ namespace nvMolKit {
  * Multiple fields can be combined with bitwise OR for composite queries.
  * For example, 'C' in SMARTS checks both AtomicNum and IsAliphatic.
  */
-enum AtomQueryFlags : uint16_t {
+enum AtomQueryFlags : uint32_t {
   AtomQueryNone                = 0,
   AtomQueryAtomicNum           = 1 << 0,
   AtomQueryNumExplicitHs       = 1 << 1,
@@ -54,9 +54,11 @@ enum AtomQueryFlags : uint16_t {
   AtomQueryTotalValence        = 1 << 12,
   AtomQueryIsInRing            = 1 << 13,  ///< For [R] and [r] any-ring queries
   AtomQueryIsotope             = 1 << 14,  ///< For isotope/mass queries like [13C]
+  AtomQueryDegree              = 1 << 15,  ///< For [D] degree queries (explicit bond count)
+  AtomQueryTotalConnectivity   = 1 << 16,  ///< For [X] total connectivity queries (degree + Hs)
 };
 
-using AtomQuery = uint16_t;
+using AtomQuery = uint32_t;
 
 struct AtomData {
   static constexpr uint8_t unsetValenceVal = std::numeric_limits<uint8_t>::max();

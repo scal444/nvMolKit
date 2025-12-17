@@ -36,6 +36,8 @@ using nvMolKit::AtomQueryIsAliphatic;
 using nvMolKit::AtomQueryIsAromatic;
 using nvMolKit::AtomQueryIsInRing;
 using nvMolKit::AtomQueryIsotope;
+using nvMolKit::AtomQueryDegree;
+using nvMolKit::AtomQueryTotalConnectivity;
 using nvMolKit::AtomQueryMinRingSize;
 using nvMolKit::AtomQueryNone;
 using nvMolKit::AtomQueryNumExplicitHs;
@@ -435,24 +437,6 @@ TEST(QueryCompositeTest, RecursiveSmartsThrows) {
   EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
 }
 
-TEST(QueryCompositeTest, DegreeQueryThrows) {
-  // [D3] explicit degree query
-  auto mol = makeQuery("[D3]");
-  ASSERT_NE(mol, nullptr);
-
-  MoleculesHost batch;
-  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
-}
-
-TEST(QueryCompositeTest, TotalConnectivityQueryThrows) {
-  // [X3] total connectivity query
-  auto mol = makeQuery("[X3]");
-  ASSERT_NE(mol, nullptr);
-
-  MoleculesHost batch;
-  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
-}
-
 TEST(QueryCompositeTest, RingConnectivityQueryThrows) {
   // [x2] ring connectivity query
   auto mol = makeQuery("[x2]");
@@ -573,6 +557,88 @@ TEST(QueryCompositeTest, TritiumQuerySucceeds) {
   MoleculesHost batch;
   EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
   EXPECT_TRUE(batch.atomQueries[0] & AtomQueryIsotope);
+  EXPECT_TRUE(batch.atomQueries[0] & AtomQueryAtomicNum);
+}
+
+TEST(QueryCompositeTest, DegreeQueryD0Succeeds) {
+  // [D0] degree 0 (no explicit bonds)
+  auto mol = makeQuery("[D0]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_TRUE(batch.atomQueries[0] & AtomQueryDegree);
+}
+
+TEST(QueryCompositeTest, DegreeQueryD1Succeeds) {
+  // [D1] degree 1 (terminal atom)
+  auto mol = makeQuery("[D1]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_TRUE(batch.atomQueries[0] & AtomQueryDegree);
+}
+
+TEST(QueryCompositeTest, DegreeQueryD3Succeeds) {
+  // [D3] degree 3 (3 explicit bonds)
+  auto mol = makeQuery("[D3]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_TRUE(batch.atomQueries[0] & AtomQueryDegree);
+}
+
+TEST(QueryCompositeTest, DegreeWithAtomTypeSucceeds) {
+  // [CD3] carbon with degree 3
+  auto mol = makeQuery("[CD3]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_TRUE(batch.atomQueries[0] & AtomQueryDegree);
+  EXPECT_TRUE(batch.atomQueries[0] & AtomQueryAtomicNum);
+}
+
+TEST(QueryCompositeTest, TotalConnectivityQueryX1Succeeds) {
+  // [X1] total connectivity 1
+  auto mol = makeQuery("[X1]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_TRUE(batch.atomQueries[0] & AtomQueryTotalConnectivity);
+}
+
+TEST(QueryCompositeTest, TotalConnectivityQueryX2Succeeds) {
+  // [X2] total connectivity 2
+  auto mol = makeQuery("[X2]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_TRUE(batch.atomQueries[0] & AtomQueryTotalConnectivity);
+}
+
+TEST(QueryCompositeTest, TotalConnectivityQueryX4Succeeds) {
+  // [X4] total connectivity 4 (degree + H count)
+  auto mol = makeQuery("[X4]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_TRUE(batch.atomQueries[0] & AtomQueryTotalConnectivity);
+}
+
+TEST(QueryCompositeTest, TotalConnectivityWithAtomTypeSucceeds) {
+  // [CX4] carbon with total connectivity 4
+  auto mol = makeQuery("[CX4]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_TRUE(batch.atomQueries[0] & AtomQueryTotalConnectivity);
   EXPECT_TRUE(batch.atomQueries[0] & AtomQueryAtomicNum);
 }
 

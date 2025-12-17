@@ -53,7 +53,8 @@ namespace nvMolKit {
  *   Byte 3 [bits 24-31]: totalValence (uint8_t, explicit + implicit)
  *   Byte 4 [bits 32-39]: isInRing (0x00 = false, 0x01 = true) for [R]/[r] queries
  *   Byte 5 [bits 40-47]: isotope (uint8_t, 0 = natural abundance, throws if > 255)
- *   Bytes 6-7 [bits 48-63]: reserved (padding, must be 0)
+ *   Byte 6 [bits 48-55]: degree (uint8_t, number of explicit bonds for [D] queries)
+ *   Byte 7 [bits 56-63]: totalConnectivity (uint8_t, degree + total Hs for [X] queries)
  */
 struct AtomDataPacked {
   uint64_t lo = 0;
@@ -84,8 +85,10 @@ struct AtomDataPacked {
   static constexpr int kNumRingsByte     = 1;
   static constexpr int kIsAromaticByte   = 2;
   static constexpr int kTotalValenceByte = 3;
-  static constexpr int kIsInRingByte     = 4;  ///< For [R]/[r] any-ring queries (0x00 or 0x01)
-  static constexpr int kIsotopeByte      = 5;  ///< Isotope mass number (0 = natural abundance)
+  static constexpr int kIsInRingByte          = 4;  ///< For [R]/[r] any-ring queries (0x00 or 0x01)
+  static constexpr int kIsotopeByte           = 5;  ///< Isotope mass number (0 = natural abundance)
+  static constexpr int kDegreeByte            = 6;  ///< Number of explicit bonds for [D] queries
+  static constexpr int kTotalConnectivityByte = 7;  ///< Degree + total Hs for [X] queries
   /// @}
 
   // ============================================================================
@@ -152,6 +155,15 @@ struct AtomDataPacked {
     hi = (hi & ~(0xFFULL << (kIsotopeByte * 8))) | (static_cast<uint64_t>(val) << (kIsotopeByte * 8));
   }
 
+  HD_CALLABLE void setDegree(uint8_t val) {
+    hi = (hi & ~(0xFFULL << (kDegreeByte * 8))) | (static_cast<uint64_t>(val) << (kDegreeByte * 8));
+  }
+
+  HD_CALLABLE void setTotalConnectivity(uint8_t val) {
+    hi = (hi & ~(0xFFULL << (kTotalConnectivityByte * 8))) |
+         (static_cast<uint64_t>(val) << (kTotalConnectivityByte * 8));
+  }
+
   // ============================================================================
   // Getters - host and device
   // ============================================================================
@@ -191,6 +203,12 @@ struct AtomDataPacked {
   HD_CALLABLE bool isInRing() const { return ((hi >> (kIsInRingByte * 8)) & 0xFF) != 0; }
 
   HD_CALLABLE uint8_t isotope() const { return static_cast<uint8_t>((hi >> (kIsotopeByte * 8)) & 0xFF); }
+
+  HD_CALLABLE uint8_t degree() const { return static_cast<uint8_t>((hi >> (kDegreeByte * 8)) & 0xFF); }
+
+  HD_CALLABLE uint8_t totalConnectivity() const {
+    return static_cast<uint8_t>((hi >> (kTotalConnectivityByte * 8)) & 0xFF);
+  }
 };
 
 static_assert(sizeof(AtomDataPacked) == 16, "AtomDataPacked must be exactly 16 bytes");

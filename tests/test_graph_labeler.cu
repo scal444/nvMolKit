@@ -983,6 +983,158 @@ TEST_F(GraphLabelerTest, IsotopeWithAtomType) {
 }
 
 // =============================================================================
+// Degree Query Tests (D)
+// =============================================================================
+
+TEST_F(GraphLabelerTest, DegreeQueryD0) {
+  // Target: C (methane - single atom with only implicit H)
+  // Query: [D0] (atom with 0 explicit bonds)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true}    // C (degree 0 - no explicit bonds)
+  };
+  runLabelingTest("C", "[D0]", expected);
+}
+
+TEST_F(GraphLabelerTest, DegreeQueryD1) {
+  // Target: CC (ethane)
+  // Query: [D1] (atom with 1 explicit bond)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // CH3 (degree 1)
+    {true}    // CH3 (degree 1)
+  };
+  runLabelingTest("CC", "[D1]", expected);
+}
+
+TEST_F(GraphLabelerTest, DegreeQueryD2) {
+  // Target: CCC (propane)
+  // Query: [D2] (atom with 2 explicit bonds)
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},  // CH3 (degree 1)
+    {true},   // CH2 (degree 2)
+    {false}   // CH3 (degree 1)
+  };
+  runLabelingTest("CCC", "[D2]", expected);
+}
+
+TEST_F(GraphLabelerTest, DegreeQueryD3) {
+  // Target: CC(C)C (isobutane - central carbon has degree 3)
+  // Query: [D3] (atom with 3 explicit bonds)
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},  // CH3 (degree 1)
+    {true},   // central C (degree 3)
+    {false},  // CH3 (degree 1)
+    {false}   // CH3 (degree 1)
+  };
+  runLabelingTest("CC(C)C", "[D3]", expected);
+}
+
+TEST_F(GraphLabelerTest, DegreeQueryD4) {
+  // Target: CC(C)(C)C (neopentane - central carbon has degree 4)
+  // Query: [D4] (atom with 4 explicit bonds)
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},  // CH3 (degree 1)
+    {true},   // central C (degree 4)
+    {false},  // CH3 (degree 1)
+    {false},  // CH3 (degree 1)
+    {false}   // CH3 (degree 1)
+  };
+  runLabelingTest("CC(C)(C)C", "[D4]", expected);
+}
+
+TEST_F(GraphLabelerTest, DegreeWithAtomType) {
+  // Target: CC(C)C (isobutane)
+  // Query: [CD3] (carbon with degree 3)
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},  // CH3 (degree 1)
+    {true},   // central C (degree 3)
+    {false},  // CH3 (degree 1)
+    {false}   // CH3 (degree 1)
+  };
+  runLabelingTest("CC(C)C", "[CD3]", expected);
+}
+
+// =============================================================================
+// Total Connectivity Query Tests (X)
+// =============================================================================
+
+TEST_F(GraphLabelerTest, TotalConnectivityX1) {
+  // Target: [H][H] (H2 molecule with explicit hydrogens)
+  // Query: [X1] (atom with 1 total connection)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // H (1 bond + 0H = 1)
+    {true}    // H (1 bond + 0H = 1)
+  };
+  runLabelingTest("[H][H]", "[X1]", expected);
+}
+
+TEST_F(GraphLabelerTest, TotalConnectivityX2) {
+  // Target: C#C (acetylene)
+  // Query: [X2] (atom with 2 total connections)
+  // Each carbon has degree 1 (triple bond) + 1 H = 2
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // C (1 bond + 1H = 2)
+    {true}    // C (1 bond + 1H = 2)
+  };
+  runLabelingTest("C#C", "[X2]", expected);
+}
+
+TEST_F(GraphLabelerTest, TotalConnectivityX3) {
+  // Target: C=C (ethene)
+  // Query: [X3] (atom with 3 total connections)
+  // Each carbon has degree 1 (double bond) + 2 H = 3
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // C (1 bond + 2H = 3)
+    {true}    // C (1 bond + 2H = 3)
+  };
+  runLabelingTest("C=C", "[X3]", expected);
+}
+
+TEST_F(GraphLabelerTest, TotalConnectivityX4) {
+  // Target: CC (ethane)
+  // Query: [X4] (atom with 4 total connections: degree + H count)
+  // Each carbon has degree 1 + 3 implicit H = 4
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // C (1 bond + 3H = 4)
+    {true}    // C (1 bond + 3H = 4)
+  };
+  runLabelingTest("CC", "[X4]", expected);
+}
+
+TEST_F(GraphLabelerTest, TotalConnectivityWithAtomType) {
+  // Target: CC(C)C (isobutane)
+  // Query: [CX4] (carbon with 4 total connections)
+  // All carbons have 4 total connections (sp3)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // CH3
+    {true},   // central C
+    {true},   // CH3
+    {true}    // CH3
+  };
+  runLabelingTest("CC(C)C", "[CX4]", expected);
+}
+
+TEST_F(GraphLabelerTest, TotalConnectivityMixed) {
+  // Target: CC=C (propene)
+  // Query: [X4] (4 connections)
+  // CH3 has X4, but C=C carbons have X3
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // CH3 (X4)
+    {false},  // =CH (X3)
+    {false}   // =CH2 (X3)
+  };
+  runLabelingTest("CC=C", "[X4]", expected);
+}
+
+TEST_F(GraphLabelerTest, TotalConnectivityNoMatch) {
+  // Target: CC (ethane - all X4)
+  // Query: [X3] (3 connections)
+  std::vector<std::vector<uint8_t>> expected = {
+    {false}, {false}
+  };
+  runLabelingTest("CC", "[X3]", expected);
+}
+
+// =============================================================================
 // Wildcard and Any Aromaticity Query Tests
 // =============================================================================
 
@@ -1678,6 +1830,8 @@ TEST(AtomDataPackedTest, PackedDataRoundTrip) {
   packed.setNumRings(1);
   packed.setIsAromatic(true);
   packed.setIsotope(13);
+  packed.setDegree(3);
+  packed.setTotalConnectivity(4);
 
   EXPECT_EQ(packed.atomicNum(), 6);
   EXPECT_EQ(packed.numExplicitHs(), 2);
@@ -1691,6 +1845,8 @@ TEST(AtomDataPackedTest, PackedDataRoundTrip) {
   EXPECT_EQ(packed.numRings(), 1);
   EXPECT_TRUE(packed.isAromatic());
   EXPECT_EQ(packed.isotope(), 13);
+  EXPECT_EQ(packed.degree(), 3);
+  EXPECT_EQ(packed.totalConnectivity(), 4);
 }
 
 TEST(AtomQueryMaskTest, BuildQueryMaskAtomicNum) {

@@ -1265,3 +1265,273 @@ TEST_P(SubstructureSearchTest, IsotopeNitrogen15Query) {
   EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [15N] in NCC using " << algorithmName(algorithm());
 }
+
+TEST_P(SubstructureSearchTest, DegreeQueryD0) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test [D0] degree query - atom with no explicit bonds
+  // C: methane - single atom (degree 0)
+  // CC: ethane - both atoms have degree 1
+  buildBatches({"C", "CC"}, {"[D0]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for [D0] in methane using " << algorithmName(algorithm());
+
+  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+    << "GPU should match RDKit for [D0] in ethane using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, DegreeQueryD1) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test [D1] degree query - terminal atoms
+  // CC: ethane - both atoms have degree 1
+  // CCC: propane - 2 terminal atoms with degree 1
+  buildBatches({"CC", "CCC"}, {"[D1]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for [D1] in ethane using " << algorithmName(algorithm());
+
+  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+    << "GPU should match RDKit for [D1] in propane using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, DegreeQueryD3) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test [D3] degree query
+  // CC(C)C: isobutane - central carbon has degree 3
+  // CCC: propane - no degree 3 atoms
+  buildBatches({"CC(C)C", "CCC"}, {"[D3]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  // Isobutane: one atom with degree 3
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for [D3] in isobutane using " << algorithmName(algorithm());
+
+  // Propane: no degree 3 atoms
+  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+    << "GPU should match RDKit for [D3] in propane using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, TotalConnectivityQueryX1) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test [X1] total connectivity query
+  // [H][H]: H2 molecule - each H has X1 (1 bond + 0 H = 1)
+  // CC: ethane - carbons have X4
+  buildBatches({"[H][H]", "CC"}, {"[X1]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for [X1] in H2 using " << algorithmName(algorithm());
+
+  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+    << "GPU should match RDKit for [X1] in ethane using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, TotalConnectivityQueryX2) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test [X2] total connectivity query
+  // C#C: acetylene - carbons have X2 (1 bond + 1 H = 2)
+  // CC: ethane - carbons have X4
+  buildBatches({"C#C", "CC"}, {"[X2]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for [X2] in acetylene using " << algorithmName(algorithm());
+
+  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+    << "GPU should match RDKit for [X2] in ethane using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, TotalConnectivityQueryX3) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test [X3] total connectivity query
+  // C=C: ethene - carbons have X3 (1 bond + 2 H = 3)
+  // CC: ethane - carbons have X4
+  buildBatches({"C=C", "CC"}, {"[X3]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for [X3] in ethene using " << algorithmName(algorithm());
+
+  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+    << "GPU should match RDKit for [X3] in ethane using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, TotalConnectivityQueryX4) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test [X4] total connectivity query
+  // CC: ethane - all carbons have X4 (1 bond + 3 H = 4)
+  // C=C: ethene - carbons have X3 (1 bond + 2 H = 3)
+  buildBatches({"CC", "C=C"}, {"[X4]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  // Ethane: 2 atoms with X4
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for [X4] in ethane using " << algorithmName(algorithm());
+
+  // Ethene: no X4 atoms
+  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+    << "GPU should match RDKit for [X4] in ethene using " << algorithmName(algorithm());
+}
+
+TEST_P(SubstructureSearchTest, DegreeWithAtomTypeQuery) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Test [CD3] carbon with degree 3
+  // CC(C)C: isobutane
+  // CN(C)C: trimethylamine - nitrogen has degree 3, not carbon
+  buildBatches({"CC(C)C", "CN(C)C"}, {"[CD3]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  // Isobutane: one carbon with degree 3
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for [CD3] in isobutane using " << algorithmName(algorithm());
+
+  // Trimethylamine: no carbon with degree 3 (N has degree 3)
+  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+    << "GPU should match RDKit for [CD3] in trimethylamine using " << algorithmName(algorithm());
+}

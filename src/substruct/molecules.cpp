@@ -77,6 +77,12 @@ void populateAtomDataPacked(const RDKit::Atom* atom, AtomDataPacked& packed, con
     throw std::runtime_error("Atom isotope " + std::to_string(isotope) + " exceeds maximum supported value of 255");
   }
   packed.setIsotope(static_cast<uint8_t>(isotope));
+
+  // Degree (number of explicit bonds) for [D] queries
+  packed.setDegree(atom->getDegree());
+
+  // Total connectivity (degree + total H count) for [X] queries
+  packed.setTotalConnectivity(atom->getTotalDegree());
 }
 
 void populateBondTypeCounts(const RDKit::ROMol* mol, const RDKit::Atom* atom, BondTypeCounts& counts) {
@@ -362,13 +368,15 @@ AtomQuery atomQueryFromDescription(const std::string& description) {
     return AtomQueryNone;
   }
 
-  // Unsupported SMARTS primitives - throw instead of silently ignoring
+  // Degree and connectivity queries
   if (description == "AtomExplicitDegree") {
-    throw std::runtime_error("SMARTS degree query (D) is not supported");
+    return AtomQueryDegree;
   }
   if (description == "AtomTotalDegree") {
-    throw std::runtime_error("SMARTS total connectivity query (X) is not supported");
+    return AtomQueryTotalConnectivity;
   }
+
+  // Unsupported SMARTS primitives - throw instead of silently ignoring
   if (description == "AtomRingBondCount") {
     throw std::runtime_error("SMARTS ring connectivity query (x) is not supported");
   }
@@ -465,6 +473,16 @@ AtomQueryMask buildQueryMask(const AtomDataPacked& queryAtom, AtomQuery queryFla
   // Isotope queries like [13C]
   if (queryFlags & AtomQueryIsotope) {
     setHiField(AtomDataPacked::kIsotopeByte, queryAtom.isotope());
+  }
+
+  // Degree queries like [D3]
+  if (queryFlags & AtomQueryDegree) {
+    setHiField(AtomDataPacked::kDegreeByte, queryAtom.degree());
+  }
+
+  // Total connectivity queries like [X4]
+  if (queryFlags & AtomQueryTotalConnectivity) {
+    setHiField(AtomDataPacked::kTotalConnectivityByte, queryAtom.totalConnectivity());
   }
 
   return m;
@@ -653,6 +671,12 @@ void collectAndOnlyFlags(const RDKit::Atom::QUERYATOM_QUERY* query,
     }
     flags |= AtomQueryIsotope;
     packed.setIsotope(static_cast<uint8_t>(isotope));
+  } else if (desc == "AtomExplicitDegree") {
+    flags |= AtomQueryDegree;
+    packed.setDegree(eqQuery->getVal());
+  } else if (desc == "AtomTotalDegree") {
+    flags |= AtomQueryTotalConnectivity;
+    packed.setTotalConnectivity(eqQuery->getVal());
   } else {
     AtomQuery flag = atomQueryFromDescription(desc);
     flags |= flag;
@@ -991,6 +1015,10 @@ void populateQueryAtomDataPacked(const RDKit::Atom* atom, AtomDataPacked& packed
                                  " exceeds maximum supported value of 255");
       }
       packed.setIsotope(static_cast<uint8_t>(isotope));
+    } else if (desc == "AtomExplicitDegree") {
+      packed.setDegree(eqQuery->getVal());
+    } else if (desc == "AtomTotalDegree") {
+      packed.setTotalConnectivity(eqQuery->getVal());
     }
   };
 
