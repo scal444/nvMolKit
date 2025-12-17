@@ -190,20 +190,24 @@ void printValidationResult(const SubstructValidationResult& result, const std::s
 
 namespace {
 
-void printMatches(const std::string& label, const std::vector<std::vector<int>>& matches) {
+void printMatches(const std::string& label, const std::vector<std::vector<int>>& matches, size_t maxToPrint = 20) {
   std::cout << "    " << label << ": ";
   if (matches.empty()) {
     std::cout << "(none)" << std::endl;
     return;
   }
   std::cout << matches.size() << " match(es)" << std::endl;
-  for (size_t i = 0; i < matches.size(); ++i) {
+  const size_t toPrint = std::min(matches.size(), maxToPrint);
+  for (size_t i = 0; i < toPrint; ++i) {
     std::cout << "      [" << i << "]: {";
     for (size_t j = 0; j < matches[i].size(); ++j) {
       if (j > 0) std::cout << ", ";
       std::cout << matches[i][j];
     }
     std::cout << "}" << std::endl;
+  }
+  if (matches.size() > maxToPrint) {
+    std::cout << "      ... and " << (matches.size() - maxToPrint) << " more" << std::endl;
   }
 }
 

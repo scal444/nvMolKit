@@ -16,7 +16,9 @@
 #include <GraphMol/ROMol.h>
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <filesystem>
+#include <iostream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -47,7 +49,7 @@ using nvMolKit::validateAgainstRDKit;
 namespace {
 
 constexpr size_t kMaxAtoms  = 128;
-constexpr size_t kNumSmiles = 10;
+constexpr size_t kNumSmiles = 100;
 
 }  // namespace
 
@@ -110,6 +112,45 @@ TEST_P(SubstructureIntegrationTest, ChemblVsAlertCollection) {
 
   EXPECT_EQ(resultsHost.numTargets, static_cast<int>(targetMols.size()));
   EXPECT_EQ(resultsHost.numQueries, static_cast<int>(queryMols.size()));
+
+  const int numTargets = resultsHost.numTargets;
+  const int numQueries = resultsHost.numQueries;
+
+  std::vector<int64_t> totalMatchesPerQuery(numQueries, 0);
+  int64_t              grandTotalMatches = 0;
+
+  for (int q = 0; q < numQueries; ++q) {
+    for (int t = 0; t < numTargets; ++t) {
+      const int pairIdx = t * numQueries + q;
+      totalMatchesPerQuery[q] += resultsHost.matchCounts[pairIdx];
+    }
+    grandTotalMatches += totalMatchesPerQuery[q];
+  }
+
+  std::vector<int> zeroMatchQueries;
+  for (int q = 0; q < numQueries; ++q) {
+    if (totalMatchesPerQuery[q] == 0) {
+      zeroMatchQueries.push_back(q);
+    }
+  }
+
+  std::cout << "[" << algorithmName(algorithm()) << "] Query statistics:\n"
+            << "  Total queries: " << numQueries << "\n"
+            << "  Total targets: " << numTargets << "\n"
+            << "  Grand total matches: " << grandTotalMatches << "\n"
+            << "  Queries with 0 matches: " << zeroMatchQueries.size() << "\n";
+
+  if (!zeroMatchQueries.empty()) {
+    std::cout << "  Zero-match queries:\n";
+    const size_t maxToShow = 20;
+    for (size_t i = 0; i < std::min(zeroMatchQueries.size(), maxToShow); ++i) {
+      const int q = zeroMatchQueries[i];
+      std::cout << "    [" << q << "]: " << querySmarts[q] << "\n";
+    }
+    if (zeroMatchQueries.size() > maxToShow) {
+      std::cout << "    ... and " << (zeroMatchQueries.size() - maxToShow) << " more\n";
+    }
+  }
 
   auto validationResult = validateAgainstRDKit(resultsHost, targetMols, queryMols);
 
