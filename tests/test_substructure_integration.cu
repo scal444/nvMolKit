@@ -76,7 +76,8 @@ constexpr DatasetConfig kDatasets[] = {
   {"rdkit_tautomer_transforms_supported.txt", "RDKitTautomerTransforms"},
   {"rdkit_torsionPreferences_v2_supported.txt", "RDKitTorsionPreferencesV2"},
   {"rdkit_torsionPreferences_smallrings_supported.txt", "RDKitTorsionPreferencesSmallRings"},
-  {"rdkit_torsionPreferences_macrocycles_supported.txt", "RDKitTorsionPreferencesMacrocycles"},
+  // disabled because we don't support any yet.
+  //{"rdkit_torsionPreferences_macrocycles_supported.txt", "RDKitTorsionPreferencesMacrocycles"},
   {"RLewis_smarts_supported.txt", "RLewisSMARTS"},
   {"wehi_pains_supported.txt", "WEHIPAINS"},
 };

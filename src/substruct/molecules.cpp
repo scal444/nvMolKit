@@ -476,6 +476,13 @@ AtomQuery atomQueryFromDescription(const std::string& description) {
 AtomQueryMask buildQueryMask(const AtomDataPacked& queryAtom, AtomQuery queryFlags) {
   AtomQueryMask m = {0, 0, 0, 0};
 
+  // Impossible constraint (e.g., [C;a] aromatic aliphatic) - create unmatchable mask
+  if (queryFlags & AtomQueryNeverMatches) {
+    m.maskLo     = 0xFFULL;   // Check atomic number byte
+    m.expectedLo = 0xFFULL;   // Require atomic number 255 (impossible, max is ~118)
+    return m;
+  }
+
   // Helper lambda to set mask and expected for a byte in the lower 64 bits
   auto setLoField = [&](int byteOffset, uint8_t value) {
     m.maskLo |= 0xFFULL << (byteOffset * 8);
@@ -786,6 +793,12 @@ uint8_t processQueryTree(const RDKit::Atom::QUERYATOM_QUERY* query,
     AtomQuery      flags  = AtomQueryNone;
     AtomDataPacked packed = {};
     collectAndOnlyFlags(query, flags, packed);
+
+    // Detect contradictory aromaticity constraints (e.g., [C;a] or [c;A])
+    if ((flags & AtomQueryIsAromatic) && (flags & AtomQueryIsAliphatic)) {
+      flags |= AtomQueryNeverMatches;
+    }
+
     return builder.addLeaf(packed, flags, bondCounts);
   }
 

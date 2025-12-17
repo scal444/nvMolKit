@@ -56,6 +56,7 @@ enum AtomQueryFlags : uint32_t {
   AtomQueryIsotope             = 1 << 14,  ///< For isotope/mass queries like [13C]
   AtomQueryDegree              = 1 << 15,  ///< For [D] degree queries (explicit bond count)
   AtomQueryTotalConnectivity   = 1 << 16,  ///< For [X] total connectivity queries (degree + Hs)
+  AtomQueryNeverMatches        = 1 << 17,  ///< Impossible constraint (e.g., [C;a] aromatic aliphatic)
 };
 
 using AtomQuery = uint32_t;
