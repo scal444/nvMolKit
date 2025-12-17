@@ -221,6 +221,12 @@ __device__ __forceinline__ bool checkEdgeConsistency(const MoleculeView& target,
           if (tbt != 1 && tbt != 7 && tbt != 12) {
             continue;
           }
+        } else if (queryBondFlags & BondQueryDoubleOrAromatic) {
+          // DoubleOrAromaticBond: only match double (2) or aromatic (7, 12) bonds
+          const int tbt = targetBond.bondType;
+          if (tbt != 2 && tbt != 7 && tbt != 12) {
+            continue;
+          }
         } else if (!bondTypeMatches(queryBondType, targetBond.bondType)) {
           continue;
         }

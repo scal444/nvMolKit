@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -107,18 +108,121 @@ SmallestRepros findSmallestRepros(const PairContainer& pairs, GetT getT, GetQ ge
   return result;
 }
 
-void printSmallestRepros(const SmallestRepros&           repros,
-                         const std::vector<std::string>& targetSmiles,
-                         const std::vector<std::string>& querySmarts,
-                         const std::string&              category) {
+void printMatches(const std::string& label, const std::vector<std::vector<int>>& matches) {
+  std::cout << "    " << label << ": ";
+  if (matches.empty()) {
+    std::cout << "(none)\n";
+    return;
+  }
+  std::cout << matches.size() << " match(es)\n";
+  for (size_t i = 0; i < matches.size(); ++i) {
+    std::cout << "      [" << i << "]: {";
+    for (size_t j = 0; j < matches[i].size(); ++j) {
+      if (j > 0) std::cout << ", ";
+      std::cout << matches[i][j];
+    }
+    std::cout << "}\n";
+  }
+}
+
+std::vector<std::vector<int>> extractGpuMatches(const SubstructMatchResultsHost& results,
+                                                int                              targetIdx,
+                                                int                              queryIdx,
+                                                int                              numQueryAtoms) {
+  const int pairIdx       = results.pairIndex(targetIdx, queryIdx);
+  const int reportedCount = results.reportedCounts[pairIdx];
+  const int startOffset   = results.pairMatchStarts[pairIdx];
+
+  std::vector<std::vector<int>> gpuMatches;
+  gpuMatches.reserve(reportedCount);
+
+  for (int m = 0; m < reportedCount; ++m) {
+    std::vector<int> mapping(numQueryAtoms);
+    for (int a = 0; a < numQueryAtoms; ++a) {
+      mapping[a] = results.matchIndices[startOffset + m * numQueryAtoms + a];
+    }
+    gpuMatches.push_back(std::move(mapping));
+  }
+
+  return gpuMatches;
+}
+
+void printSmallestRepro(const char*                                       label,
+                        const SmallestRepro&                              r,
+                        const std::vector<std::string>&                   targetSmiles,
+                        const std::vector<std::string>&                   querySmarts,
+                        const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
+                        const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols,
+                        const SubstructMatchResultsHost&                  gpuResults) {
+  std::cout << "  --- " << label << " (t=" << r.t << " q=" << r.q << " sum=" << (r.t + r.q) << ") ---\n";
+  std::cout << "  Target[" << r.t << "]: " << targetSmiles[r.t] << "\n";
+  std::cout << "  Query[" << r.q << "]:  " << querySmarts[r.q] << "\n";
+
+  auto rdkitMatches = nvMolKit::getRDKitSubstructMatches(*targetMols[r.t], *queryMols[r.q], false);
+  printMatches("Expected (RDKit)", rdkitMatches);
+
+  const int numQueryAtoms = static_cast<int>(queryMols[r.q]->getNumAtoms());
+  auto      gpuMatches    = extractGpuMatches(gpuResults, r.t, r.q, numQueryAtoms);
+  printMatches("Actual (GPU)", gpuMatches);
+
+  std::cout << "\n";
+}
+
+void printSmallestRepros(const SmallestRepros&                             repros,
+                         const std::vector<std::string>&                   targetSmiles,
+                         const std::vector<std::string>&                   querySmarts,
+                         const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
+                         const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols,
+                         const SubstructMatchResultsHost&                  gpuResults,
+                         const std::string&                                category) {
   if (!repros.hasAny()) return;
 
-  std::cout << "  Smallest " << category << " repros:\n";
+  std::cout << "\n=== Smallest " << category << " repros ===\n";
+
+  if (repros.allSame()) {
+    printSmallestRepro("smallest (all criteria)", repros.smallestSum, targetSmiles, querySmarts,
+                       targetMols, queryMols, gpuResults);
+  } else {
+    printSmallestRepro("smallest sum (t+q)", repros.smallestSum, targetSmiles, querySmarts,
+                       targetMols, queryMols, gpuResults);
+    if (repros.smallestQ.t != repros.smallestSum.t || repros.smallestQ.q != repros.smallestSum.q) {
+      printSmallestRepro("smallest q", repros.smallestQ, targetSmiles, querySmarts,
+                         targetMols, queryMols, gpuResults);
+    }
+    if (repros.smallestT.t != repros.smallestSum.t || repros.smallestT.q != repros.smallestSum.q) {
+      if (repros.smallestT.t != repros.smallestQ.t || repros.smallestT.q != repros.smallestQ.q) {
+        printSmallestRepro("smallest t", repros.smallestT, targetSmiles, querySmarts,
+                           targetMols, queryMols, gpuResults);
+      }
+    }
+  }
+}
+
+void printSmallestReproSimple(const char*                     label,
+                              const SmallestRepro&            r,
+                              const std::vector<std::string>& targetSmiles,
+                              const std::vector<std::string>& querySmarts,
+                              int                             fp,
+                              int                             fn) {
+  std::cout << "  --- " << label << " (t=" << r.t << " q=" << r.q << " sum=" << (r.t + r.q) << ") ---\n";
+  std::cout << "  Target[" << r.t << "]: " << targetSmiles[r.t] << "\n";
+  std::cout << "  Query[" << r.q << "]:  " << querySmarts[r.q] << "\n";
+  std::cout << "    FP=" << fp << " FN=" << fn << "\n\n";
+}
+
+template <typename GetFPFN>
+void printSmallestReprosSimple(const SmallestRepros&           repros,
+                               const std::vector<std::string>& targetSmiles,
+                               const std::vector<std::string>& querySmarts,
+                               const std::string&              category,
+                               GetFPFN                         getFPFN) {
+  if (!repros.hasAny()) return;
+
+  std::cout << "\n=== Smallest " << category << " repros ===\n";
 
   auto printOne = [&](const char* label, const SmallestRepro& r) {
-    std::cout << "    " << label << ": t=" << r.t << " q=" << r.q << " (sum=" << (r.t + r.q) << ")\n"
-              << "      Target: " << targetSmiles[r.t] << "\n"
-              << "      Query:  " << querySmarts[r.q] << "\n";
+    auto [fp, fn] = getFPFN(r.t, r.q);
+    printSmallestReproSimple(label, r, targetSmiles, querySmarts, fp, fn);
   };
 
   if (repros.allSame()) {
@@ -248,7 +352,7 @@ TEST_P(SubstructureIntegrationTest, ChemblVsAlertCollection) {
         validationResult.mismatches,
         [](const auto& m) { return std::get<0>(m); },
         [](const auto& m) { return std::get<1>(m); });
-      printSmallestRepros(repros, targetSmiles, querySmarts, "count mismatch");
+      printSmallestRepros(repros, targetSmiles, querySmarts, targetMols, queryMols, resultsHost, "count mismatch");
     }
 
     if (!validationResult.mappingMismatches.empty()) {
@@ -256,7 +360,7 @@ TEST_P(SubstructureIntegrationTest, ChemblVsAlertCollection) {
         validationResult.mappingMismatches,
         [](const auto& m) { return m.first; },
         [](const auto& m) { return m.second; });
-      printSmallestRepros(repros, targetSmiles, querySmarts, "mapping mismatch");
+      printSmallestRepros(repros, targetSmiles, querySmarts, targetMols, queryMols, resultsHost, "mapping mismatch");
     }
   }
 
@@ -426,11 +530,19 @@ TEST_F(LabelMatrixIntegrationTest, ChemblVsAlertCollectionLabelMatrix) {
   }
 
   if (!fpPairs.empty()) {
+    std::map<std::pair<int, int>, std::pair<int, int>> fpInfo;
+    for (const auto& [t, q, fp, fn] : fpPairs) {
+      fpInfo[{t, q}] = {fp, fn};
+    }
     auto repros = findSmallestRepros(
       fpPairs,
       [](const auto& p) { return std::get<0>(p); },
       [](const auto& p) { return std::get<1>(p); });
-    printSmallestRepros(repros, targetSmiles, querySmarts, "false positive");
+    printSmallestReprosSimple(repros, targetSmiles, querySmarts, "false positive",
+      [&](int t, int q) -> std::pair<int, int> {
+        auto it = fpInfo.find({t, q});
+        return it != fpInfo.end() ? it->second : std::pair{0, 0};
+      });
   }
 
   EXPECT_EQ(totalFalsePositives, 0)

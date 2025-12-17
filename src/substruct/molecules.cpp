@@ -139,16 +139,36 @@ int getQueryBondEffectiveType(const RDKit::Bond* bond) {
     const auto* query = bond->getQuery();
     if (query != nullptr) {
       const std::string desc = query->getDescription();
-      if (desc == "SingleOrAromaticBond" || desc == "BondNull") {
-        return 0;  // Any bond
+      if (desc == "SingleOrAromaticBond" || desc == "DoubleOrAromaticBond" || desc == "BondNull") {
+        return 0;  // Any bond (flexible match)
       }
-      // For BondAnd/BondOr queries, check if any child is SingleOrAromaticBond
+      // For BondAnd/BondOr queries, check for flexible bond patterns
       if (desc == "BondAnd" || desc == "BondOr") {
+        bool hasSingle   = false;
+        bool hasDouble   = false;
+        bool hasAromatic = false;
         for (auto it = query->beginChildren(); it != query->endChildren(); ++it) {
           const std::string childDesc = (*it)->getDescription();
-          if (childDesc == "SingleOrAromaticBond" || childDesc == "BondNull") {
+          if (childDesc == "SingleOrAromaticBond" || childDesc == "DoubleOrAromaticBond" ||
+              childDesc == "BondNull") {
             return 0;
           }
+          if (childDesc == "BondOrder") {
+            const auto* eqQuery   = static_cast<const RDKit::BOND_EQUALS_QUERY*>((*it).get());
+            int         childType = eqQuery->getVal();
+            if (childType == 1)
+              hasSingle = true;
+            else if (childType == 2)
+              hasDouble = true;
+            else if (childType == 7 || childType == 12)
+              hasAromatic = true;
+          } else if (childDesc == "BondIsAromatic") {
+            hasAromatic = true;
+          }
+        }
+        // If this is a "single or aromatic" or "double or aromatic" BondOr pattern
+        if ((hasSingle && hasAromatic) || (hasDouble && hasAromatic)) {
+          return 0;  // Treat as flexible bond for counting
         }
       }
     }
@@ -1110,7 +1130,45 @@ void extractBondQueryFlags(const RDKit::Bond* bond, BondQueryData& queryData) {
     const std::string desc      = q->getDescription();
     const bool        isNegated = q->getNegation();
 
-    if (desc == "BondAnd" || desc == "BondOr") {
+    if (desc == "BondAnd") {
+      for (auto it = q->beginChildren(); it != q->endChildren(); ++it) {
+        processQuery((*it).get());
+      }
+      return;
+    }
+
+    if (desc == "BondOr") {
+      // Check if this is a "single or aromatic" or "double or aromatic" pattern
+      bool hasSingle   = false;
+      bool hasDouble   = false;
+      bool hasAromatic = false;
+      for (auto it = q->beginChildren(); it != q->endChildren(); ++it) {
+        const std::string childDesc = (*it)->getDescription();
+        if (childDesc == "BondOrder") {
+          const auto* eqQuery  = static_cast<const RDKit::BOND_EQUALS_QUERY*>((*it).get());
+          int         bondType = eqQuery->getVal();
+          if (bondType == 1) {
+            hasSingle = true;
+          } else if (bondType == 2) {
+            hasDouble = true;
+          } else if (bondType == 7 || bondType == 12) {
+            hasAromatic = true;
+          }
+        } else if (childDesc == "BondIsAromatic") {
+          hasAromatic = true;
+        }
+      }
+      if (hasSingle && hasAromatic) {
+        queryData.queryFlags |= BondQuerySingleOrAromatic;
+        queryData.bondType = 1;
+        return;
+      }
+      if (hasDouble && hasAromatic) {
+        queryData.queryFlags |= BondQueryDoubleOrAromatic;
+        queryData.bondType = 2;
+        return;
+      }
+      // Fall through to process children normally for other BondOr patterns
       for (auto it = q->beginChildren(); it != q->endChildren(); ++it) {
         processQuery((*it).get());
       }
@@ -1126,6 +1184,9 @@ void extractBondQueryFlags(const RDKit::Bond* bond, BondQueryData& queryData) {
     } else if (desc == "SingleOrAromaticBond") {
       queryData.queryFlags |= BondQuerySingleOrAromatic;
       queryData.bondType = 1;  // Base type is single, flag allows aromatic too
+    } else if (desc == "DoubleOrAromaticBond") {
+      queryData.queryFlags |= BondQueryDoubleOrAromatic;
+      queryData.bondType = 2;  // Base type is double, flag allows aromatic too
     } else if (desc == "BondOrder") {
       const auto* eqQuery = static_cast<const RDKit::BOND_EQUALS_QUERY*>(q);
       queryData.bondType  = eqQuery->getVal();

@@ -1613,3 +1613,93 @@ TEST_P(SubstructureSearchTest, SingleMolSingleQueryForDebugging) {
     << "GPU should match RDKit for query " << algorithmName(algorithm());
 
 }
+
+TEST_P(SubstructureSearchTest, DoubleOrAromaticBond) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Quinone pattern uses =,: which is "double or aromatic" bond
+  // Target: theophylline derivative with quinone moiety
+  const std::string target = "Cn1c(=O)c2c3c(cnc2n(C)c1=O)C(=O)C=CC3=O";
+  const std::string query  = "[!#6&!#1]=[#6]-1-[#6]=,:[#6]-[#6](=[!#6&!#1])-[#6]=,:[#6]-1";
+  buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "quinone_A pattern");
+}
+
+TEST_P(SubstructureSearchTest, NotRingBondSimple) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Simple pattern with single AND not-ring bond: 2 atoms connected by non-ring single bond
+  // Target: propylamine CCCN - all bonds are single and non-ring
+  const std::string target = "CCCN";
+  const std::string query  = "[C,N]-&!@[C,N]";
+  buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "simple non-ring bond");
+}
+
+TEST_P(SubstructureSearchTest, NotRingBondChain) {
+  // WarpUnified has a fixed-size work queue that can overflow for patterns with many matches.
+  // This 7-atom chain pattern produces 242 matches which exceeds WarpUnified's capacity.
+  if (algorithm() == SubstructAlgorithm::WarpUnified) {
+    GTEST_SKIP() << "WarpUnified has limited queue capacity for high-match-count patterns";
+  }
+
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Pattern with single AND not-ring bonds: chain of 7 atoms connected by non-ring bonds
+  // Target: peptide-like chain
+  const std::string target = "C[C@@H](O)[C@H](N)C(=O)N1CCC[C@H]1C(=O)N[C@@H](CCCNC(=N)N)C(=O)N[C@@H](CCCCN)C(=O)N[C@@H](CCCNC(=N)N)C(=O)N[C@@H](CCCNC(=N)N)C(=O)N[C@@H](CCCNC(=N)N)C(=O)N[C@@H](CCCCN)C(=O)N[C@@H](CCCCN)C(=O)N[C@@H](CCCNC(=N)N)C(=O)NCC(N)=O";
+  const std::string query  = "[N,C,S,O]-&!@[N,C,S,O]-&!@[N,C,S,O]-&!@[N,C,S,O]-&!@[N,C,S,O]-&!@[N,C,S,O]-&!@[N,C,S,O]";
+  buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "non-ring bond chain pattern");
+}
