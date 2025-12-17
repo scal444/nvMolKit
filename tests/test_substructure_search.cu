@@ -91,6 +91,78 @@ class SubstructureSearchTest : public ::testing::TestWithParam<SubstructAlgorith
   }
 
   /**
+   * @brief Extract GPU matches for a (target, query) pair from results.
+   */
+  static std::vector<std::vector<int>> extractGpuMatches(const SubstructMatchResultsHost& results,
+                                                         int                              targetIdx,
+                                                         int                              queryIdx,
+                                                         int                              numQueryAtoms) {
+    const int pairIdx       = results.pairIndex(targetIdx, queryIdx);
+    const int reportedCount = results.reportedCounts[pairIdx];
+    const int startOffset   = results.pairMatchStarts[pairIdx];
+
+    std::vector<std::vector<int>> gpuMatches;
+    gpuMatches.reserve(reportedCount);
+
+    for (int m = 0; m < reportedCount; ++m) {
+      std::vector<int> mapping(numQueryAtoms);
+      for (int a = 0; a < numQueryAtoms; ++a) {
+        mapping[a] = results.matchIndices[startOffset + m * numQueryAtoms + a];
+      }
+      gpuMatches.push_back(std::move(mapping));
+    }
+
+    return gpuMatches;
+  }
+
+  /**
+   * @brief Compare two sets of matches (order-independent).
+   */
+  static bool matchSetsEqual(const std::vector<std::vector<int>>& gpuMatches,
+                             const std::vector<std::vector<int>>& rdkitMatches) {
+    if (gpuMatches.size() != rdkitMatches.size()) {
+      return false;
+    }
+
+    std::set<std::vector<int>> gpuSet(gpuMatches.begin(), gpuMatches.end());
+    std::set<std::vector<int>> rdkitSet(rdkitMatches.begin(), rdkitMatches.end());
+
+    return gpuSet == rdkitSet;
+  }
+
+  /**
+   * @brief Verify GPU matches RDKit for a single (target, query) pair.
+   *
+   * Checks both match count AND actual atom mappings.
+   */
+  void expectMatchesRDKit(const SubstructMatchResultsHost&   results,
+                          const RDKit::ROMol&                target,
+                          const RDKit::ROMol&                query,
+                          int                                targetIdx,
+                          int                                queryIdx,
+                          const std::string&                 description = "") {
+    const auto rdkitMatches    = getRDKitSubstructMatches(target, query, false);
+    const int  pairIdx         = results.pairIndex(targetIdx, queryIdx);
+    const int  gpuMatchCount   = results.matchCounts[pairIdx];
+    const int  rdkitMatchCount = static_cast<int>(rdkitMatches.size());
+
+    std::string context = description.empty() ? "" : " (" + description + ")";
+
+    EXPECT_EQ(gpuMatchCount, rdkitMatchCount)
+      << "Match count mismatch" << context << " using " << algorithmName(algorithm())
+      << ": GPU=" << gpuMatchCount << ", RDKit=" << rdkitMatchCount;
+
+    if (gpuMatchCount == rdkitMatchCount && gpuMatchCount > 0 && !results.hasOverflow(targetIdx, queryIdx)) {
+      const int  numQueryAtoms = static_cast<int>(query.getNumAtoms());
+      const auto gpuMatches    = extractGpuMatches(results, targetIdx, queryIdx, numQueryAtoms);
+
+      EXPECT_TRUE(matchSetsEqual(gpuMatches, rdkitMatches))
+        << "Match indices mismatch" << context << " using " << algorithmName(algorithm())
+        << ": counts match (" << gpuMatchCount << ") but atom mappings differ";
+    }
+  }
+
+  /**
    * @brief Compare GPU results against RDKit ground truth (with uniquify=false).
    *
    * @param results GPU results
@@ -123,6 +195,17 @@ class SubstructureSearchTest : public ::testing::TestWithParam<SubstructAlgorith
           EXPECT_EQ(gpuMatchCount, rdkitMatchCount)
             << "Match count mismatch for target " << t << ", query " << q << " using algorithm "
             << algorithmName(algorithm()) << ": GPU=" << gpuMatchCount << ", RDKit=" << rdkitMatchCount;
+
+          // Also verify actual match indices if counts match and no overflow
+          if (gpuMatchCount == rdkitMatchCount && gpuMatchCount > 0 && !results.hasOverflow(t, q)) {
+            const int  numQueryAtoms = static_cast<int>(queryMols[q]->getNumAtoms());
+            const auto gpuMatches    = extractGpuMatches(results, t, q, numQueryAtoms);
+
+            EXPECT_TRUE(matchSetsEqual(gpuMatches, rdkitMatches))
+              << "Match indices mismatch for target " << t << ", query " << q << " using algorithm "
+              << algorithmName(algorithm()) << ": counts match (" << gpuMatchCount
+              << ") but atom mappings differ";
+          }
         }
       }
     }
@@ -288,12 +371,7 @@ TEST_P(SubstructureSearchTest, NoMatchPossible) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  // RDKit also returns 0 matches here
-  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0]);
-  EXPECT_EQ(rdkitMatches.size(), 0u);
-
-  // GPU should also return 0
-  EXPECT_EQ(resultsHost.matchCounts[0], 0);
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "CCCC with N query");
 }
 
 TEST_P(SubstructureSearchTest, AromaticVsAliphatic) {
@@ -318,11 +396,7 @@ TEST_P(SubstructureSearchTest, AromaticVsAliphatic) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  // RDKit: benzene has no aliphatic carbons
-  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0]);
-  EXPECT_EQ(rdkitMatches.size(), 0u);
-
-  EXPECT_EQ(resultsHost.matchCounts[0], 0);
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "benzene with aliphatic C query");
 }
 
 TEST_P(SubstructureSearchTest, LargerMolecule) {
@@ -421,13 +495,7 @@ TEST_P(SubstructureSearchTest, MultiAtomQuery) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  // Should get 2 matches with uniquify=false
-  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(rdkitMatches.size(), 2u) << "RDKit should find 2 non-unique matches";
-
-  // Check GPU result
-  EXPECT_EQ(resultsHost.matchCounts[0], 2)
-    << "GPU should find 2 matches for CCO with CC using " << algorithmName(algorithm());
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "CCO with CC query");
 }
 
 TEST_P(SubstructureSearchTest, ThreeAtomQuery) {
@@ -458,13 +526,7 @@ TEST_P(SubstructureSearchTest, ThreeAtomQuery) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  // Should get 2 matches with uniquify=false
-  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(rdkitMatches.size(), 2u) << "RDKit should find 2 non-unique matches for COC in CCOCC";
-
-  // Check GPU result
-  EXPECT_EQ(resultsHost.matchCounts[0], 2)
-    << "GPU should find 2 matches for CCOCC with COC using " << algorithmName(algorithm());
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "CCOCC with COC query");
 }
 
 TEST_P(SubstructureSearchTest, ExpectedOverflow) {
@@ -550,10 +612,7 @@ TEST_P(SubstructureSearchTest, OrQueryMatchesBothTypes) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(rdkitMatches.size(), 3u) << "RDKit should find 3 matches for [C,N] in CCN";
-  EXPECT_EQ(resultsHost.matchCounts[0], 3)
-    << "GPU should find 3 matches for [C,N] in CCN using " << algorithmName(algorithm());
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N] in CCN");
 }
 
 TEST_P(SubstructureSearchTest, OrQuerySelectiveMatch) {
@@ -579,10 +638,7 @@ TEST_P(SubstructureSearchTest, OrQuerySelectiveMatch) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(rdkitMatches.size(), 1u) << "RDKit should find 1 match for [N,O] in CCO";
-  EXPECT_EQ(resultsHost.matchCounts[0], 1)
-    << "GPU should find 1 match for [N,O] in CCO using " << algorithmName(algorithm());
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[N,O] in CCO");
 }
 
 TEST_P(SubstructureSearchTest, NotQueryExcludesAtom) {
@@ -608,10 +664,7 @@ TEST_P(SubstructureSearchTest, NotQueryExcludesAtom) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(rdkitMatches.size(), 1u) << "RDKit should find 1 match for [!C] in CCO";
-  EXPECT_EQ(resultsHost.matchCounts[0], 1)
-    << "GPU should find 1 match for [!C] in CCO using " << algorithmName(algorithm());
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[!C] in CCO");
 }
 
 TEST_P(SubstructureSearchTest, NotQueryMatchesMultiple) {
@@ -637,10 +690,7 @@ TEST_P(SubstructureSearchTest, NotQueryMatchesMultiple) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(rdkitMatches.size(), 2u) << "RDKit should find 2 matches for [!C] in CCNO";
-  EXPECT_EQ(resultsHost.matchCounts[0], 2)
-    << "GPU should find 2 matches for [!C] in CCNO using " << algorithmName(algorithm());
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[!C] in CCNO");
 }
 
 TEST_P(SubstructureSearchTest, MultiAtomOrQuery) {
@@ -666,10 +716,7 @@ TEST_P(SubstructureSearchTest, MultiAtomOrQuery) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  // CCN has bonds C-C and C-N, so matches: (0,1), (1,0), (1,2), (2,1) = 4 matches
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
-    << "GPU should match RDKit for [C,N][C,N] in CCN using " << algorithmName(algorithm());
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N][C,N] in CCN");
 }
 
 TEST_P(SubstructureSearchTest, ThreeWayOrQuery) {
@@ -695,10 +742,7 @@ TEST_P(SubstructureSearchTest, ThreeWayOrQuery) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(rdkitMatches.size(), 4u) << "RDKit should find 4 matches for [C,N,O] in CCNO";
-  EXPECT_EQ(resultsHost.matchCounts[0], 4)
-    << "GPU should find 4 matches for [C,N,O] in CCNO using " << algorithmName(algorithm());
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N,O] in CCNO");
 }
 
 TEST_P(SubstructureSearchTest, NestedAndOrQuery) {
@@ -726,20 +770,9 @@ TEST_P(SubstructureSearchTest, NestedAndOrQuery) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  // CCN: all 3 atoms match (no rings)
-  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
-    << "GPU should match RDKit for [C,N;!R1] in CCN using " << algorithmName(algorithm());
-
-  // C1CC1N: only N matches (ring carbons excluded by !R1)
-  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
-    << "GPU should match RDKit for [C,N;!R1] in C1CC1N using " << algorithmName(algorithm());
-
-  // C1CCC1: 0 matches - all atoms match (C OR N) but all fail !R1 (nested AND fails)
-  auto rdkitMatches2 = getRDKitSubstructMatches(*targetMols[2], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[2], static_cast<int>(rdkitMatches2.size()))
-    << "GPU should match RDKit for [C,N;!R1] in C1CCC1 (all nested ANDs fail) using " << algorithmName(algorithm());
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N;!R1] in CCN");
+  expectMatchesRDKit(resultsHost, *targetMols[1], *queryMols[0], 1, 0, "[C,N;!R1] in C1CC1N");
+  expectMatchesRDKit(resultsHost, *targetMols[2], *queryMols[0], 2, 0, "[C,N;!R1] in C1CCC1");
 }
 
 TEST_P(SubstructureSearchTest, DeepNestedOrAndOrQuery) {
@@ -766,15 +799,8 @@ TEST_P(SubstructureSearchTest, DeepNestedOrAndOrQuery) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  // Cyclopentane: ring carbons should match
-  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
-    << "GPU should match RDKit for [C,N;R1,O] in C1CCCC1 using " << algorithmName(algorithm());
-
-  // CCCCO: matches depend on SMARTS interpretation
-  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
-    << "GPU should match RDKit for [C,N;R1,O] in CCCCO using " << algorithmName(algorithm());
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N;R1,O] in C1CCCC1");
+  expectMatchesRDKit(resultsHost, *targetMols[1], *queryMols[0], 1, 0, "[C,N;R1,O] in CCCCO");
 }
 
 TEST_P(SubstructureSearchTest, MultipleNotWithAndQuery) {
@@ -800,9 +826,7 @@ TEST_P(SubstructureSearchTest, MultipleNotWithAndQuery) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
-    << "GPU should match RDKit for [!C;!N] in CCNO using " << algorithmName(algorithm());
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[!C;!N] in CCNO");
 }
 
 TEST_P(SubstructureSearchTest, NotWithOrQuery) {
@@ -831,9 +855,7 @@ TEST_P(SubstructureSearchTest, NotWithOrQuery) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
-    << "GPU should match RDKit for [!C,!N] in CCNO using " << algorithmName(algorithm());
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[!C,!N] in CCNO");
 }
 
 TEST_P(SubstructureSearchTest, SimpleAndNotQuery) {
@@ -859,9 +881,7 @@ TEST_P(SubstructureSearchTest, SimpleAndNotQuery) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
-    << "GPU should match RDKit for [C;!R1] in C1CC1CCN using " << algorithmName(algorithm());
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C;!R1] in C1CC1CCN");
 }
 
 TEST_P(SubstructureSearchTest, BondedOrAtomQuery) {
@@ -890,15 +910,8 @@ TEST_P(SubstructureSearchTest, BondedOrAtomQuery) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  // CCO: C-O matches, so should get matches
-  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
-    << "GPU should match RDKit for [C,N]-[O,S] in CCO using " << algorithmName(algorithm());
-
-  // CCS: C-S matches (C matches [C,N], S matches [O,S])
-  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
-    << "GPU should match RDKit for [C,N]-[O,S] in CCS using " << algorithmName(algorithm());
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N]-[O,S] in CCO");
+  expectMatchesRDKit(resultsHost, *targetMols[1], *queryMols[0], 1, 0, "[C,N]-[O,S] in CCS");
 }
 
 TEST_P(SubstructureSearchTest, MultiAtomMixedBooleanQuery) {
@@ -926,15 +939,8 @@ TEST_P(SubstructureSearchTest, MultiAtomMixedBooleanQuery) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  // CCO: only C-C match
-  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
-    << "GPU should match RDKit for [C,N]-[!O] in CCO using " << algorithmName(algorithm());
-
-  // CCN: C-C and C-N both match
-  auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
-    << "GPU should match RDKit for [C,N]-[!O] in CCN using " << algorithmName(algorithm());
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N]-[!O] in CCO");
+  expectMatchesRDKit(resultsHost, *targetMols[1], *queryMols[0], 1, 0, "[C,N]-[!O] in CCN");
 }
 
 TEST_P(SubstructureSearchTest, ThreeAtomNestedBooleanQuery) {
@@ -960,9 +966,7 @@ TEST_P(SubstructureSearchTest, ThreeAtomNestedBooleanQuery) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
-    << "GPU should match RDKit for [C,N]-[!O]-[C,O] in CCCCO using " << algorithmName(algorithm());
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N]-[!O]-[C,O] in CCCCO");
 }
 
 TEST_P(SubstructureSearchTest, AromaticOrQuery) {
@@ -988,9 +992,7 @@ TEST_P(SubstructureSearchTest, AromaticOrQuery) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
-    << "GPU should match RDKit for [c,n] in pyridine using " << algorithmName(algorithm());
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[c,n] in pyridine");
 }
 
 TEST_P(SubstructureSearchTest, AromaticNotQuery) {
@@ -1016,9 +1018,7 @@ TEST_P(SubstructureSearchTest, AromaticNotQuery) {
   resultsDevice.copyToHost(resultsHost);
   cudaCheckError(cudaStreamSynchronize(stream_.stream()));
 
-  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
-    << "GPU should match RDKit for [!n] in pyridine using " << algorithmName(algorithm());
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[!n] in pyridine");
 }
 
 TEST_P(SubstructureSearchTest, AromaticRingPatternWithOr) {

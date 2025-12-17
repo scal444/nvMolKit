@@ -1,0 +1,364 @@
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([CH2]),$([CH][CX4]),$(C([CX4])[CX4])]=[$([CH2]),$([CH][CX4]),$(C([CX4])[CX4])]   isolated alkene
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([CH]),$(CC)]#CC(=O)[C,c]   Michael acceptor
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([CH]),$(CC)]#CS(=O)(=O)[C,c]   Michael acceptor
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([CH]),$(CC)]#CC(=O)O[C,c]   Michael acceptor
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7;R1]1[#6]([F,Cl,Br,I])[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#7][#6][#6]1   2halo_pyrazine_3EWG
+# Recursive SMARTS ($(...)) are not supported
+[#7;R1]1[#6]([F,Cl,Br,I])[#6;!$(c-N)][#7][#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6;!$(c-N)]1   2halo_pyrazine_5EWG
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7;R1]1[#6]([F,Cl,Br,I])[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6][#6][#7]1   2halo_pyridazine_3EWG
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7;R1]1[#6]([F,Cl,Br,I])[#6][#6][#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#7]1   2halo_pyridazine_5EWG
+# Recursive SMARTS ($(...)) are not supported
+[#7;R1]1[#6;!$(c=O)]([F,Cl,Br,I])[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6;!$(c-N)][#6][#6;!$(c-N)]1   2halo_pyridine_3EWG
+# Recursive SMARTS ($(...)) are not supported
+[#7;R1]1[#6;!$(c=O)]([F,Cl,Br,I])[#6][#6;!$(c-N)][#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6;!$(c=O);!$(c-N)]1   2halo_pyridine_5EWG
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7;R1]1[#6]([F,Cl,Br,I])[#7][#6][#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6]1   2halo_pyrimidine_5EWG
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7;R1]1[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6]([F,Cl,Br,I])[#6][#6][#7]1   3halo_pyridazine_2EWG
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7;R1]1[#6][#6]([F,Cl,Br,I])[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6][#7]1   3halo_pyridazine_4EWG
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7,#8,#16]1~[#6;H]~[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])~[#6](=O)~[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])~[#6;H]1   4_pyridone_3_5_EWG
+# Recursive SMARTS ($(...)) are not supported
+[#7;R1]1[#6;!$(c=O);!$(c-N)][#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6]([F,Cl,Br,I])[#6][#6;!$(c=O);!$(c-N)]1   4halo_pyridine_3EWG
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7]1[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#7;R1][#6]([F,Cl,Br,I])[#6][#6]1([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])   4halo_pyrimidine_2_6EWG
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7]1[#6][#7;R1][#6]([F,Cl,Br,I])[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6]1   4halo_pyrimidine_5EWG
+# Unsupported SMARTS atom query: RecursiveStructure
+O=C(-[!N])O[$(nnn),$([#7]-[#7]=[#7])]   HOBT_ester
+# Recursive SMARTS ($(...)) are not supported
+[CH2]=[C;!$(C-N);!$(C-O)]C(=O)   acrylate
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6]1~[$(C(=O)),$(S(=O))]~[O,S,N]~[$(C(=O)),$(S(=O))]1   activated_4mem_ring
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O))]C#[C;!$(C-N);!$(C-n)]   activated_acetylene
+# Unsupported SMARTS atom query: RecursiveStructure
+[N;!R]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O))])=[N;!R]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O))])   activated_diazo
+# Unsupported SMARTS atom query: RecursiveStructure
+O=COC=[$(C(S(=O)(=O))),$(C(C(F)(F)(F))),$(C(C#N)),$(C(N(=O)(=O))),$(C([N+](=O)[O-])),$(C(C(=O)));!$(C(N))]   activated_vinyl_ester
+# Unsupported SMARTS atom query: RecursiveStructure
+O(-S(=O)(=O))C=[$(C(S(=O)(=O))),$(C(C(F)(F)(F))),$(C(C#N)),$(C(N(=O)(=O))),$(C([N+](=O)[O-])),$(C(C(=O)));!$(C(N))]   activated_vinyl_sulfonate
+# Unsupported SMARTS atom query: RecursiveStructure
+O=C(-[!N])O[$([#7;+]),$(N(C=[O,S,N])(C=[O,S,N]))]   acyl_activated_NO
+# Recursive SMARTS ($(...)) are not supported
+[C;!$(C-N)](=O)[#7]1[#6;H1,$([#6]([*;!R]))][#7][#6;H1,$([#6]([*;!R]))][#6;H1,$([#6]([*;!R]))]1   acyl_imidazole
+# Recursive SMARTS ($(...)) are not supported
+[C;!$(C-N)](=O)[#7]1[#7][#6;H1,$([#6]([*;!R]))][#6;H1,$([#6]([*;!R]))][#6;H1,$([#6]([*;!R]))]1   acyl_pyrazole
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-])]-[CH,CH2]-[Cl,Br,I,$(O(S(=O)(=O)))]   alpha_halo_EWG
+# Unsupported SMARTS atom query: RecursiveStructure
+[F,Cl,Br,I,$(O(S(=O)(=O)))]-[CH,CH2;!$(C(F)F)]-[N,n]   alpha_halo_amine
+# Unsupported SMARTS atom query: RecursiveStructure
+C(=O)([CH,CH2][Cl,Br,I,$(O(S(=O)(=O)))])   alpha_halo_carbonyl
+# Recursive SMARTS ($(...)) are not supported
+[N,n,O,S;!$(S(=O)(=O))]-[CH,CH2;!$(C(F)(F))][F,Cl,Br,I,$(O(S(=O)(=O)))]   alpha_halo_heteroatom
+# Recursive SMARTS ($(...)) are not supported
+[N,n,O,S;!$(S(=O)(=O))]-C([Cl,Br,I,$(O(S(=O)(=O)))])(C)(C)   alpha_halo_heteroatom_tert
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(C(=O)),$(C(=S))]-[O,S]-[$(C(=O)),$(C(=S)),$(C(=[N;!R])),$(C(=N(-[C;X4])))]   anhydride
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(N#[N+]-[N-]),$([N-]=[N+]=N)]   azide
+# Recursive SMARTS ($(...)) are not supported
+[N;!$(N-S(=O)(=O));!$(N-C=O)]-[N;!r3;!$(N-S(=O)(=O));!$(N-C=O)]-[N;!$(N-S(=O)(=O));!$(N-C=O)]   azo_filter2
+# Unsupported SMARTS atom query: RecursiveStructure
+[B-,BH2,BH3,$(B(F)(F))]   bad_boron
+# Unsupported SMARTS atom query: RecursiveStructure
+C1(=O)~[#6]~[#6]N1([$(S(=O)(=O)[C,c,O&D2]),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)[C,c,O&D2])])   betalactam_EWG
+# Unsupported SMARTS atom query: RecursiveStructure
+O=[C,S]Oc1aaa([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aa([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])1   bis_activated_aryl_ester
+# Unsupported SMARTS atom query: RecursiveStructure
+CC(=O)[$([C&H1]),$(C-F),$(C-Cl),$(C-Br),$(C-I)]=[$([C&H1]),$(C-F),$(C-Cl),$(C-Br),$(C-I)]C(=O)C   bis_keto_olefin
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([Ru]),$([Rh]),$([#34]),$([Pd]),$([Sc]),$([Bi]),$([Sb]),$([Ag]),$([Ti]),$([Al]),$([Cd]),$([V]),$([In]),$([Cr]),$([Sn]),$([Mn]),$([La]),$([Fe]),$([Er]),$([Tm]),$([Yb]),$([Lu]),$([Hf]),$([Ta]),$([W]),$([Re]),$([Co]),$([Os]),$([Ni]),$([Ir]),$([Cu]),$([Zn]),$([Ga]),$([Ge]),$([#33]),$([Y]),$([Zr]),$([Nb]),$([Ce]),$([Pr]),$([Nd]),$([Sm]),$([Eu]),$([Gd]),$([Tb]),$([Dy]),$([Ho]),$([Pt]),$([Au]),$([Hg]),$([Tl]),$([Pb]),$([Ac]),$([Th]),$([Pa]),$([Mo]),$([U]),$([Tc]),$([Te]),$([Po]),$([At])]   contains_metal
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([O,S,#7;R1;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][O,S,#7;R1;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][O,S,#7;R1;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18]),$([O,S,#7;R1;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][O,S,#7;R1;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][O,S,#7;R1;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18]),$([O,S,#7;R1;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][O,S,#7;R1;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][O,S,#7;R1;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18])]   crown_ether
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(N=N=C~C=O),$(N#N-C~C=O)]   diazo_carbonyl
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(N(-C(=O))(-C(=O))(-S(=O))),$(n([#6](=O))([#6](=O))([#16](=O)))]   dicarbonyl_sulfonamide
+# Recursive SMARTS ($(...)) are not supported
+[N,n;H0;+;!$(N~O);!$(n~O)].[N,n;H0;+;!$(N~O);!$(n~O)]   gte_2_N_quats
+# Recursive SMARTS ($(...)) are not supported
+[N;!$(N(=[N,O,S,C]));!$(N(S(=O)(=O)));!$(N(C(F)(F)(F)));!$(N(C#N));!$(N(C(=O)));!$(N(C(=S)));!$(N(C(=N)));!$(N(#C));!$(Nc)].[N;!$(N(=[N,O,S,C]));!$(N(S(=O)(=O)));!$(N(C(F)(F)(F)));!$(N(C#N));!$(N(C(=O)));!$(N(C(=S)));!$(N(C(=N)));!$(N(#C));!$(Nc)].[N;!$(N(=[N,O,S,C]));!$(N(S(=O)(=O)));!$(N(C(F)(F)(F)));!$(N(C#N));!$(N(C(=O)));!$(N(C(=S)));!$(N(C(=N)));!$(N(#C));!$(Nc)].[N;!$(N(=[N,O,S,C]));!$(N(S(=O)(=O)));!$(N(C(F)(F)(F)));!$(N(C#N));!$(N(C(=O)));!$(N(C(=S)));!$(N(C(=N)));!$(N(#C));!$(N-c)]   gte_4_basic_N
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([N+](=O)[O-]),$(N(=O)=O)].[$([N+](=O)[O-]),$(N(=O)=O)].[$([N+](=O)[O-]),$(N(=O)=O)].[$([N+](=O)[O-]),$(N(=O)=O)]   gte_4_nitro
+# Unsupported SMARTS atom query: RecursiveStructure
+[CH2,$(C(F)(F));R0][CH2,$(C(F)(F));R0][CH2,$(C(F)(F));R0][CH2,$(C(F)(F));R0][CH2,$(C(F)(F));R0][CH2,$(C(F)(F));R0][CH2,$(C(F)(F));R0][CH2,$(C(F)(F));R0]   gte_8_CF2_or_CH2
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7,#8,#16]1[#6]([$(S(=O)(=O)),$([F,Cl]),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O))])[#6]([$(S(=O)(=O)),$([F,Cl]),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O))])[#7][#6]1([Cl,Br,I])   halo_5heterocycle_bis_EWG
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([C;H2]),$([C&H1;$(C-F)]),$([C&H1;$(C-Cl)]),$([C&H1;$(C-Br)]),$([C&H1;$(CI)]),$(C(F)F),$(C(Cl)Cl),$(C(Br)Br),$(C(I)I),$(C(F)Cl),$(C(F)Br),$(C(F)I),$(C(Cl)Br),$(C(Br)I)](=[$([C&H1;$(C(-C(=O)))]),$(C(F)(C(=O))),$(C(Cl)(C(=O))),$(C(Br)(C(=O))),$(C(I)(C(=O))),$(C(C)(C(=O))),$(C(c)(C(=O)))])   halo_acrylate
+# Unsupported SMARTS atom query: RecursiveStructure
+C(=[#7])([Cl,Br,I,$(O(S(=O)(=O)))])   halo_imino
+# Unsupported SMARTS atom query: RecursiveStructure
+C([Cl,Br,I,$(O(S(=O)(=O)))])=C([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])   halo_olefin_bis_EWG
+# Unsupported SMARTS atom query: RecursiveStructure
+C(=O)Oc1c([Cl,F])[cH1,$(c[F,Cl])]c([F,Cl])[cH1,$(c[F,Cl])]c1([F,Cl])   halo_phenolic_carbonyl
+# Unsupported SMARTS atom query: RecursiveStructure
+S(=O)Oc1c([Cl,F])[cH1,$(c[F,Cl])]c([F,Cl])[cH1,$(c[F,Cl])]c1([F,Cl])   halo_phenolic_sulfonyl
+# Recursive SMARTS ($(...)) are not supported
+[N;X3;!$(N-S(=O)(=O));!$(N-C(F)(F)(F));!$(N-C#N);!$(N-C(=O));!$(N-C(=S));!$(N-C(=N))]-[N;X3;!$(N-S(=O)(=O));!$(N-C(F)(F)(F));!$(N-C#N);!$(N-C(=O));!$(N-C(=S));!$(N-C(=N))]   hydrazine
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([#16&D3]),$([#16&D4])]=,:[#6]   hyperval_sulfur
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(c([C;!R;!$(C-[N,O,S]);!$(C-[H])](=O))1naaaa1),$(c([C;!R;!$(C-[N,O,S]);!$(C-[H])](=O))1naa[n,s,o]1)]   keto_def_heterocycle
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(a12aaaaa1aa3a(aa(aaaa4)a4a3)a2),$(a12aaaaa1aa3a(aaa4a3aaaa4)a2),$(a12aaaaa1a(aa5)a3a(aaa4a3a5aaa4)a2)]   linear_polycyclic_aromatic_I
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(a12aaaa4a1a3a(aaaa3aa4)aa2),$(a12aaaaa1a3a(aaa4a3aaaa4)aa2),$(a1(a(aaaa4)a4a3a2aaaa3)a2aaaa1)]   linear_polycyclic_aromatic_II
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([C;H1]),$(C(-[F,Cl,Br,I]))]1=[$([C;H1]),$(C(-[F,Cl,Br,I]))]C(=O)[N,O,S]C(=O)1   maleimide_etc
+# Recursive SMARTS ($(...)) are not supported
+[O,N,S;!$(S~O)]!@[CH2]!@[O,S,N;!$(S~O)]   non_ring_CH2O_acetal
+# Recursive SMARTS ($(...)) are not supported
+[O,N,S;!$(S~O)]!@[C;H1;X4]!@[O,N,S;!$(S~O)]   non_ring_acetal
+# Recursive SMARTS ($(...)) are not supported
+[O,N,S;!$(S~O)]!@[C;H0;X4](!@[O,N,S;!$(S~O)])(C)   non_ring_ketal
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6]1(-O-[C;!R](=[O,N;!R]))[#6]([$(N(=O)(=O)),$([N+](=O)[O-])])[#6][#6][#6][#6]1   ortho_nitrophenyl_carbonyl
+# Unsupported SMARTS atom query: RecursiveStructure
+[CH1,$(C(-[Cl,Br,I]))]1=CC(=[O,N,S;!R])C(=[O,N,S])C=[CH1,$(C(-[Cl,Br,I]))]1   ortho_quinone
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(C=N[O;D1]);!$(C=[N+])][#6][#6]   oxime
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6]1(-O(-[C;!R](-[!N])(=[O,N;!R])))[#6][#6][#6]([$(N(=O)(=O)),$([N+](=O)[O-])])[#6][#6]1   para_nitrophenyl_ester
+# Unsupported SMARTS atom query: RecursiveStructure
+[CH1,$(C(-[Cl,Br,I]))]1=[CH1,$(C(-[Cl,Br,I]))]C(=[O,N,S])[CH1,$(C(-[Cl,Br,I]))]=[CH1,$(C(-[Cl,Br,I]))]C1(=[O,N,S])   para_quinone
+# Unsupported SMARTS atom query: RecursiveStructure
+O=[C,S]Oc1aaa([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aa([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])1   phenolate_bis_EWG
+# Unsupported SMARTS atom query: RecursiveStructure
+[CH2][Cl,Br,I,$(O(S(=O)(=O)[!$(N);!$([O&D1])]))]   primary_halide_sulfate
+# Recursive SMARTS ($(...)) are not supported
+[#6;!$([#6](-[N,O,S]))]1=[#6;!$([#6](-[N,O,S]))][#6](=[#6])[#6;!$([#6](-[N,O,S]))]=[#6;!$([#6](-[N,O,S]))][#6]1(=[O,N,S])   quinone_methide
+# Recursive SMARTS ($(...)) are not supported
+[CH;!$(C=C)][Cl,Br,I,$(O(S(=O)(=O)[!$(N);!$([O&D1])]))]   secondary_halide_sulfate
+# Recursive SMARTS ($(...)) are not supported
+[S;D2](-[N;!$(N(=C));!$(N(-S(=O)(=O)));!$(N(-C(=O)))])   sulf_D2_nitrogen
+# Unsupported SMARTS atom query: RecursiveStructure
+[S+;X3;$(S-C);!$(S-[O;D1])]   sulfonium
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(C(=O)),$(S(=O)(=O))][O,S](S(=O)(=O))   sulfonyl_anhydride
+# Unsupported SMARTS atom query: RecursiveStructure
+[C;X4](-[Cl,Br,I,$(O(S(=O)(=O)[!$(N);!$([O&D1])]))])(-[c,C])(-[c,C])(-[c,C])   tertiary_halide_sulfate
+# Unsupported SMARTS atom query: RecursiveStructure
+[S;D2]([$(N(=C)),$(N(-S(=O)(=O))),$(N(-C(=O)))])   thio_hydroxamate
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(N(-C(=O))(-C(=O))(-C(=O))),$(n([#6](=O))([#6](=O))([#6](=O)))]   triamide
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(C(=O));!$(C-N);!$(C-O);!$(C-S)]C(Cl)(Cl)(Cl)   trichloromethyl_ketone
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(C(=O));!$(C-N);!$(C-O);!$(C-S)]C(F)(F)(F)   trifluoromethyl_ketone
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(a1aaa([$(N(=O)(=O)),$([N+](=O)[O-])])a([$(N(=O)(=O)),$([N+](=O)[O-])])a1([$(N(=O)(=O)),$([N+](=O)[O-])])),$(a1aa([$(N(=O)(=O)),$([N+](=O)[O-])])a([$(N(=O)(=O)),$([N+](=O)[O-])])aa1([$(N(=O)(=O)),$([N+](=O)[O-])])),$(a1a([$(N(=O)(=O)),$([N+](=O)[O-])])aa([$(N(=O)(=O)),$([N+](=O)[O-])])aa1([$(N(=O)(=O)),$([N+](=O)[O-])]))]   trinitro_aromatic
+# Unsupported SMARTS atom query: RecursiveStructure
+C([$([N+](=O)[O-]),$(N(=O)=O)])([$([N+](=O)[O-]),$(N(=O)=O)])([$([N+](=O)[O-]),$(N(=O)=O)])   trinitromethane_derivative
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(O=[C,S]Oc1a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aa1),$(O=[C,S]Oc1a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aaa([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])1),$(O=[C,S]Oc1a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aa([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])a1),$(O=[C,S]Oc1a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aa([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aa([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])1)]   tris_activated_aryl_ester
+# Recursive SMARTS ($(...)) are not supported
+[CH;!R;!$(C-N)]=C([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O))])([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O))])   trisub_bis_act_olefin
+# Unsupported SMARTS atom query: RecursiveStructure
+[C;!R]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])=[C;!R]([C;!R](=O))([!$([#8]);!$([#7])])   vinyl_carbonyl_EWG
+# Unsupported SMARTS atom query: RecursiveStructure
+[C;H2]N([C;H2])c1cc([$([H]),$([C;H2]),$([O][C;H2][C;H2])])c(N)c([H])c1   anil_di_alk_A(478)
+# Unsupported SMARTS atom query: RecursiveStructure
+n:1(c(c(c:2:c:1:c:c:c:c:2-[H])-[C;D4]-[H])-[$([C;H2]),$([C]=,:[!C]),$([C;H1][N]),$([C;H1]([C;H2])[N;H1][C;H2]),$([C;H1]([C;H2])[C;H2][N;H1][C;H2])])-[$([H]),$([C;H2])]   indol_3yl_alk(461)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6]-[#6](=[!#6&!#1;!R])-[#6](=[!#6&!#1;!R])-[$([#6]),$([#16](=[#8])=[#8])]   imine_one_A(321)
+# Unsupported SMARTS atom query: RecursiveStructure
+c:1:c:c(:c:c:c:1-[#8]-[#6;X4])-[#7](-[#6;X4])-[$([#1]),$([#6;X4])]   anil_di_alk_C(246)
+# Unsupported SMARTS atom query: RecursiveStructure
+c:1:c:c(:c:c:c:1-[#7](-[#6;X4])-[#6;X4])-[#6;X4]-[$([#8]-[#1]),$([#6]=[#6]-[#1]),$([#7]-[#6;X4])]   anil_di_alk_D(198)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6](-[#1])-[#7](-[#6](-[#1])-[#1])-c:1:c(:c(:c(:c(:c:1-[#1])-[$([#1]),$([#6](-[#1])-[#1])])-[#6](-[#1])-[$([#1]),$([#6]-[#1])])-[#1])-[#1]   anil_di_alk_E(186)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6]-1(=[#6](-[$([#1]),$([#6](-[#1])-[#1]),$([#6]=[#8])])-[#16]-[#6](-[#7]-1-[$([#1]),$([#6]-[#1]),$([#6]:[#6])])=[#7;!R])-[$([#6](-[#1])-[#1]),$([#6]:[#6])]   thiaz_ene_A(128)
+# Unsupported SMARTS atom query: RecursiveStructure
+c:1(:c(:c(:c(:c(:c:1-[#1])-[#1])-[$([#8]),$([#7]),$([#6](-[#1])-[#1])])-[#1])-[#1])-[#7](-[#1])-[#1]   anil_no_alk(40)
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([#1]),$([#6](-[#1])-[#1]),$([#6]:[#6])]-c:1:c(:c(:c(:s:1)-[#7](-[#1])-[#6](=[#8])-[#6])-[#6](=[#8])-[#8])-[$([#6]:1:[#6]:[#6]:[#6]:[#6]:[#6]:1),$([#6]:1:[#16]:[#6]:[#6]:[#6]:1)]   thiophene_amino_Ab(40)
+# Unsupported SMARTS atom query: RecursiveStructure
+[H]c1c([$([N]),$([H])])ccc2ccc[n+]([$([O;X1]),$([C;H3]),$([#6][#6]:[#6]),$([#6][#6][#8]),$([#6][#6](C)=[#8]),$([#6][#6](N)=[#8]),$([#6][#6][#6])])c12   het_pyridiniums_A(39)
+# Recursive SMARTS ($(...)) are not supported
+CC(=O)c1ccccc1[#7;H1][!$([#6]=[#8])]   anthranil_one_A(38)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7](-c:1:c:c:c:c:c:1)-[#16](=[#8])(=[#8])-[#6]:2:[#6]:[#6]:[#6]:[#6]:3:[#7]:[$([#8]),$([#16])]:[#7]:[#6]:2:3   diazox_sulfon_A(36)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6](-[#1])(-[#1])-[#7](-[#6](-[#1])-[#1])-c:1:c(:c(:c(:c(:c:1-[#1])-[#1])-[#6](-[#1])=[#7]-[#7]-[$([#6](=[#8])-[#6](-[#1])(-[#1])-[#16]-[#6]:[#7]),$([#6](=[#8])-[#6](-[#1])(-[#1])-[!#1]:[!#1]:[#7]),$([#6](=[#8])-[#6]:[#6]-[#8]-[#1]),$([#6]:[#7]),$([#6](-[#1])(-[#1])-[#6](-[#1])-[#8]-[#1])])-[#1])-[#1]   hzone_anil_di_alk(35)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7][#7]=[#6][#6](-[$([#1]),$([#6])])=[#6]([#6])-!@[$([#7]),$([#8])]   hzone_enamin(30)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6](-[#6]#[#7])(-[#6]#[#7])-[#6](-[$([#6]#[#7]),$([#6]=[#7])])-[#6]#[#7]   cyano_cyano_A(23)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7]~[#6]:1:[#7]:[#7]:[#6](:[$([#7]),$([#6]-[#1]),$([#6]-[#7]-[#1])]:[$([#7]),$([#6]-[#7])]:1)-[$([#7]-[#1]),$([#8]-[#6](-[#1])-[#1])]   het_6_tetrazine(18)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6]NC(=O)-!@[#6]1=,:[#6]([$([N]),$(NC(=O)[#6]:[#6])])[#7]([$([#6;H2]-[#6;H1]=[#6;H2]),$([#6]=,:[#6])])[#6](=S)[#16]1   thiaz_ene_B(17)
+# Unsupported SMARTS atom query: RecursiveStructure
+[H]C([$([#6]-[#35]),$([#6]:[#6](-[#1]):[#6](-[F,Cl,Br,I]):[#6]:[#6]-[F,Cl,Br,I]),$([#6]:[#6](-[#1]):[#6](-[#1]):[#6]-[#16]-[#6](-[#1])-[#1]),$([#6]:[#6]:[#6]:[#6]:[#6]:[#6]:[#6]:[#6]:[#6]:[#6]-[#8]-[#6;H2]),$([#6]:1:[#6](-[#6;H2]):[#7](-[#6;H2]):[#6](-[#6;H2]):[#6]:1)])=C1SC(=O)[N]C1=O   ene_rhod_B(16)
+# Unsupported SMARTS atom query: RecursiveStructure
+c:1:c:c(:c:c:c:1-[#6;X4]-c:2:c:c:c(:c:c:2)-[#7](-[$([#1]),$([#6;X4])])-[$([#1]),$([#6;X4])])-[#7](-[$([#1]),$([#6;X4])])-[$([#1]),$([#6;X4])]   anil_di_alk_F(14)
+# Unsupported SMARTS atom query: RecursiveStructure
+c1(nn(c(c1-[$([#1]),$([#6]-[#1])])-[#8]-[#1])-c:2:c(:c(:c(:c(:c:2-[#1])-[#1])-[#1])-[#1])-[#1])-[#6;X4]   het_5_pyrazole_OH(14)
+# Unsupported SMARTS atom query: RecursiveStructure
+c:2(:c:1-[#16]-c:3:c(-[#7](-c:1:c(:c(:c:2-[#1])-[#1])-[#1])-[$([#1]),$([#6](-[#1])(-[#1])-[#1]),$([#6](-[#1])(-[#1])-[#6]-[#1])]):c(:c(~[$([#1]),$([#6]:[#6])]):c(:c:3-[#1])-[$([#1]),$([#7](-[#1])-[#1]),$([#8]-[#6;X4])])~[$([#1]),$([#7](-[#1])-[#6;X4]),$([#6]:[#6])])-[#1]   het_thio_666_A(13)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#16]-1-[#6](=[#7]-[#6]:[#6])-[#7](-[$([#1]),$([#6](-[#1])(-[#1])-[#6](-[#1])(-[#1])-[#8]),$([#6]:[#6])])-[#6](=[#8])-[#6]-1=[#6](-[#1])-[$([#6]:[#6]:[#6]-[#17]),$([#6]:[!#6&!#1])]   ene_rhod_C(13)
+# Unsupported SMARTS atom query: RecursiveStructure
+c:1:c(:c:c:c:c:1)-[#7](-[#1])-c:2:c(:c(:c(:s:2)-[$([#6]=[#8]),$([#6]#[#7]),$([#6](-[#8]-[#1])=[#6])])-[#7])-[$([#6]#[#7]),$([#6](:[#7]):[#7])]   thiophene_amino_B(12)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6]-1(=[#6](-!@[#6]=[#7])-[#16]-[#6](-[#7]-1)=[#8])-[$([F,Cl,Br,I]),$([#7+](:[#6]):[#6])]   thiaz_ene_C(11)
+# Unsupported SMARTS atom query: RecursiveStructure
+c:1:2:c(:c(:c(:c(:c:1-[#1])-[#1])-[#1])-[#1]):[!#6&!#1]:[#6](:[#6]:2-[#6](-[#1])=[#7]-[#7](-[#1])-[$([#6]:1:[#7]:[#6]:[#6](-[#1]):[#16]:1),$([#6]:[#6](-[#1]):[#6]-[#1]),$([#6]:[#7]:[#6]:[#7]:[#6]:[#7]),$([#6]:[#7]:[#7]:[#7]:[#7])])-[$([#1]),$([#8]-[#1]),$([#6](-[#1])-[#1])]   hzone_thiophene_A(11)
+# Unsupported SMARTS atom query: RecursiveStructure
+[!#1]:[!#1]-[#6](-[$([#1]),$([#6]#[#7])])=[#6]-1-[#6]=:[#6]-[#6](=[$([#8]),$([#7;!R])])-[#6]=:[#6]-1   ene_quin_methide(10)
+# Unsupported SMARTS atom query: RecursiveStructure
+c:1:c:c-2:c(:c:c:1)-[#6]-[#6](-c:3:c(-[#16]-2):c(:c(-[#1]):c(:c:3-[#1])-[$([#1]),$([#8]),$([#16;X2]),$([#6;X4]),$([#7](-[$([#1]),$([#6;X4])])-[$([#1]),$([#6;X4])])])-[#1])-[#7](-[$([#1]),$([#6;X4])])-[$([#1]),$([#6;X4])]   het_thio_676_A(10)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7]-1(-[$([#6;X4]),$([#1])])-[#6]=:[#6](-[#6](=[#8])-[#6]:[#6]:[#6])-[#6](-[#6])-[#6](=[#6]-1-[#6](-[#1])(-[#1])-[#1])-[$([#6]=[#8]),$([#6]#[#7])]   dhp_keto_A(9)
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([#7](-[#1])-[#1]),$([#8]-[#1])]-[#6]-2=[#6](-[#6]#[#7])-[#6](-[#1])(-[#6]:[#6])-c:1:c(:n(-[#6]):n:c:1)-[#8]-2   dhp_amino_CN_B(9)
+# Unsupported SMARTS atom query: RecursiveStructure
+c:1:c:c-2:c(:c:c:1)-[#6](-c:3:c(-[$([#16;X2]),$([#6;X4])]-2):c:c:c(:c:3)-[$([#1]),$([#17]),$([#6;X4])])=[#6]-[#6]   styrene_B(8)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#16]-1-[#6](=!@[#7]-[$([#1]),$([#7](-[#1])-[#6]:[#6])])-[#7](-[$([#1]),$([#6]:[#7]:[#6]:[#6]:[#16])])-[#6](=[#8])-[#6]-1=[#6](-[#1])-[#6]:[#6]-[$([#17]),$([#8]-[#6]-[#1])]   ene_rhod_D(8)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6]-1(=[#6](-[#6](-[#1])(-[#6])-[#6])-[#16]-[#6](-[#7]-1-[$([#1]),$([#6](-[#1])-[#1])])=[#8])-[#16]-[#6;R]   thiaz_ene_E(8)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6](-[#1])-[#6](-[#1])(-[#1])-c:1:c(:c(:c(:s:1)-[#7](-[#1])-[#6](=[#8])-[#6]-[#6]-[#6]=[#8])-[$([#6](=[#8])-[#8]),$([#6]#[#7])])-[#6](-[#1])-[#1]   thiophene_amino_C(7)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6](-c:1:c(:c(:c(:c:c:1-[#1])-[$([#6;X4]),$([#1])])-[#1])-[#1])(-c:2:c(:c(:c(:c(:c:2-[#1])-[#1])-[$([#1]),$([#17])])-[#1])-[#1])=[$([#7]-[#8]-[#6](-[#1])(-[#1])-[#6](-[#1])(-[#1])-[#6](-[#1])(-[#1])-[#7](-[#6](-[#1])-[#1])-[#6](-[#1])-[#1]),$([#7]-[#8]-[#6](-[#1])(-[#1])-[#6](-[#1])(-[#1])-[#7](-[#6](-[#1])-[#1])-[#6](-[#1])-[#1]),$([#7]-[#7](-[#1])-[#6](=[#7]-[#1])-[#7](-[#1])-[#1]),$([#6](-[#1])-[#7])]   hzone_phenone(7)
+# Unsupported SMARTS atom query: RecursiveStructure
+c:1(:c(:c(:c(:o:1)-[$([#1]),$([#6](-[#1])-[#1])])-[#1])-[#1])-[#6](-[$([#1]),$([#6](-[#1])-[#1])])=[#7]-[#7](-[#1])-c:2:n:c:c:s:2   hzone_furan_A(6)
+# Unsupported SMARTS atom query: RecursiveStructure
+n2c1ccccn1c(c2-[$([#6](-[!#1])=[#6](-[#1])-[#6]:[#6]),$([#6]:[#8]:[#6])])-[#7]-[#6]:[#6]   het_65_C(6)
+# Unsupported SMARTS atom query: RecursiveStructure
+c:1:2:c(:c(:c(:c(:c:1:c(:c(:c(:c:2-[#1])-[#1])-[#6]=[#7]-[#7](-[#1])-[$([#6]:[#6]),$([#6]=[#16])])-[#1])-[#1])-[#1])-[#1])-[#1]   hzone_naphth_A(5)
+# Unsupported SMARTS atom query: RecursiveStructure
+c:1(:c(:c(:c(:c(:c:1-[$([#1]),$([#6](-[#1])-[#1])])-[#1])-[#8]-[#6](-[#1])-[#1])-[#6](-[#1])(-[#1])-[$([#7](-[#1])-[#6](=[#8])-[#6](-[#1])(-[#1])-[#6](-[#1])(-[#1])-[#6](-[#1])-[#1]),$([#6](-[#1])(-[#6](-[#1])-[#1])-[#7](-[#1])-[#6](=[#16])-[#7]-[#1])])-[#1])-[#8]-[#6](-[#1])-[#1]   anisol_A(5)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7](-[#1])(-c:1:c:c:c:c:c:1)-[#7]=[#6](-[#6](=[#8])-[#6](-[#1])-[#1])-[#7](-[#1])-[$([#7]-[#1]),$([#6]:[#6])]   imine_one_B(4)
+# Unsupported SMARTS atom query: RecursiveStructure
+n2(-c:1:c(:c:c(:c(:c:1)-[#1])-[$([#7](-[#1])-[#1]),$([#6]:[#7])])-[#1])c(c(-[#1])c(c2-[#1])-[#1])-[#1]   pyrrole_G(4)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6]:[#6]-[#6](=[#16;X1])-[#16;X2]-[#6](-[#1])-[$([#6](-[#1])-[#1]),$([#6]:[#6])]   thio_ester_B(4)
+# Unsupported SMARTS atom query: RecursiveStructure
+c:1(:c(:c(:c(:s:1)-[#1])-[#1])-[$([#1]),$([#6](-[#1])-[#1])])-[#6](-[#1])=[#7]-[#7](-[#1])-c:2:c:c:c:c:c:2   hzone_thiophene_B(4)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6](-[#1])(-[#1])-[#7](-[#6](-[#1])-[#1])-[#6](-[#1])=[#6]-[#6](=[#8])-c:1:c(-[#16;X2]):s:c(:c:1)-[$([#6]#[#7]),$([#6]=[#8])]   thiophene_C(3)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6]:2(:[#6](-[#6](-[#1])-[#1]):[#6]-1:[#6](-[#7]=[#6](-[#7](-[#6]-1=[!#6&!#1;X1])-[#6](-[#1])-[$([#6](=[#8])-[#8]),$([#6]:[#6])])-[$([#1]),$([#16]-[#6](-[#1])-[#1])]):[!#6&!#1;X2]:2)-[#6](-[#1])(-[#1])-[#6](-[#1])-[#1]   het_65_pyridone_A(3)
+# Unsupported SMARTS atom query: RecursiveStructure
+c:1(:n:c(:c(-[#1]):s:1)-[!#1]:[!#1]:[!#1](-[$([#8]-[#6](-[#1])-[#1]),$([#6](-[#1])-[#1])]):[!#1]:[!#1])-[#7](-[#1])-[#6](-[#1])(-[#1])-c:2:c(-[#1]):c(:c(-[#1]):o:2)-[#1]   thiazole_amine_C(3)
+# Unsupported SMARTS atom query: RecursiveStructure
+c:1:4:c(:n:c(:n:c:1-[#7](-[#1])-[#6](-[#1])(-[#1])-c:2:c(:c(:c(:o:2)-[#1])-[#1])-[#1])-[#7](-[#1])-c:3:c:c(:c(:c:c:3-[$([#1]),$([#6](-[#1])-[#1]),$([#16;X2]),$([#8]-[#6]-[#1]),$([#7;X3])])-[$([#1]),$([#6](-[#1])-[#1]),$([#16;X2]),$([#8]-[#6]-[#1]),$([#7;X3])])-[$([#1]),$([#6](-[#1])-[#1]),$([#16;X2]),$([#8]-[#6]-[#1]),$([#7;X3])]):c:c:c:c:4   melamine_A(3)
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([#1]),$([#6](-[#1])-[#1])]-[#8]-c:1:c(:c(:c(:c(:c:1-[#1])-[#1])-[#1])-[#1])-[#7](-[#1])-[#6](-[#1])(-[#1])-c:2:n:c:c:n:2   anil_OC_alk_C(3)
+# Unsupported SMARTS atom query: RecursiveStructure
+s:1:c(:[n+](-[#6](-[#1])-[#1]):c(:c:1-[#1])-[#6])-[#7](-[#1])-c:2:c:c:c:c:c:2[$([#6](-[#1])-[#1]),$([#6]:[#6])]   thiazole_amine_D(3)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6](-[#1])(-[#1])-[#7]-2-[#6](=[$([#16]),$([#7])])-[!#6&!#1]-[#6](=[#6]-1-[#6](=[#6](-[#1])-[#6]:[#6]-[#7]-1-[#6](-[#1])-[#1])-[#1])-[#6]-2=[#8]   ene_rhod_J(3)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6]-1=:[#6]-[#6](-[#6](-[$([#8]),$([#16])]-1)=[#6]-[#6]=[#8])=[#8]   ene_five_het_M(3)
+# Unsupported SMARTS atom query: RecursiveStructure
+c:1:2:c:c:c:c(:c:1:c(:c:c:c:2)-[$([#8]-[#1]),$([#7](-[#1])-[#1])])-[#6](-[#6])=[#8]   keto_naphthol_A(2)
+# Unsupported SMARTS atom query: RecursiveStructure
+c2(c(-[#7](-[#1])-[#1])n(-c:1:c:c:c:c:c:1-[#6](=[#8])-[#8]-[#1])nc2-[#6]=[#8])-[$([#6]#[#7]),$([#6]=[#16])]   anthranil_acid_C(2)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7]-2=[#6](-c:1:c:c:c:c:c:1)-[#6](-[#1])(-[#1])-[#6](-[#8]-[#1])(-[#6](-[#9])(-[#9])-[#9])-[#7]-2-[$([#6]:[#6]:[#6]:[#6]:[#6]:[#6]),$([#6](=[#16])-[#6]:[#6]:[#6]:[#6]:[#6]:[#6])]   het_5_C(2)
+# Unsupported SMARTS atom query: RecursiveStructure
+c:1(:c(:c(:c(:o:1)-[$([#1]),$([#6](-[#1])-[#1])])-[#1])-[#1])-[#6](-[$([#1]),$([#6](-[#1])-[#1])])=[#7]-[#7](-[#1])-c:2:c:c:n:c:c:2   hzone_furan_B(2)
+# Unsupported SMARTS atom query: RecursiveStructure
+c:1(:c(:c(:c(:s:1)-[$([#1]),$([#6](-[#1])-[#1])])-[#1])-[#1])-[#6](-[$([#1]),$([#6](-[#1])-[#1])])-[#6](=[#8])-[#7](-[#1])-c:2:n:c:c:s:2   thiophene_E(2)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6](-[#1])(-[#1])-[#8]-c:1:c(:c(:c(:c(:c:1-[#1])-[#1])-[#6](-[#1])-[#1])-[#1])-[#7](-[#1])-[#6](-[#1])(-[#1])-c:2:c:c:c:c:c:2-[$([#6](-[#1])-[#1]),$([#8]-[#6](-[#1])-[#1])]   anil_OC_alk_D(2)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#16;X2]-1-[#6]=[#6](-[#6]#[#7])-[#6](-[#6])(-[#6]=[#8])-[#6](=[#6]-1-[#7](-[#1])-[#1])-[$([#6]=[#8]),$([#6]#[#7])]   dhp_amino_CN_G(1)
+# Unsupported SMARTS atom query: RecursiveStructure
+c:1(:c(:c(:c(:o:1)-[$([#1]),$([#6](-[#1])-[#1])])-[#1])-[#1])-[#6](=[#8])-[#7](-[#1])-[#7]=[#6](-[$([#1]),$([#6](-[#1])-[#1])])-c:2:c:c:c:c(:c:2)-[*]-[*]-[*]-c:3:c:c:c:o:3   hzone_acyl_misc_A(1)
+# Unsupported SMARTS atom query: RecursiveStructure
+P(=S)([OH1,O$(O[#6])])([OH1,O$(O[#6])])[S,O]   Active_Phosphate
+# Unsupported SMARTS atom query: RecursiveStructure
+[C;H1$(C([#6;!$(C=O)])),H0$(C([#6;!$(C=O)])[#6;!$(C=O)])]=[CH1]!@N([#6;!$(C(=O))])[#6;!$(C(=O))]   AlkylEnamine
+# Recursive SMARTS ($(...)) are not supported
+[C;!$(C[N])](=O)!@[C;h1,h2;H1,H2][F,Cl,Br,I]   Alpha_Halo_Carbonyl
+# Unsupported SMARTS atom query: RecursiveStructure
+[C;H2$(CF),H1$(C(F)F)]!@[CH2][N,O]   Beta-Fluoro-ethyl-ON
+# Recursive SMARTS ($(...)) are not supported
+S[C;!$(C=*)]S   Dithiomethylene_acetal
+# Recursive SMARTS ($(...)) are not supported
+[N+!$(N=O)][O-X1]   N-Oxide_aliphatic
+# Recursive SMARTS ($(...)) are not supported
+[#6][S!$(S(~[OD1])~[OD1])][N;H0]   N-S_(not_sulfonamides)
+# Unsupported SMARTS atom query: RecursiveStructure
+P(=S)(-[S;H1,H0$(S(P)C)])(-[O;H1,H0$(O(P)C)])(-N(C)C)   Thiophosphothionate
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6][CH1]!@=[CH1][S;H1,H0$(S(C)C)](=O)(=O)   Vinyl_Sulphone
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6]C(=!@N[$(OC),$([OH])])[#6]   Oxime
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(N(~!@[#6])!@O);!$([N+]([O-])=O)]   Nitrosone_not_nitro
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(Sc1nnn[nH,n-]1),$(Sc1nn[nH,n-]n1)]   thiatetrazolidine
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6][O;R0][$(C([#6])[#6]),$([CH][#6]),$([CH2])][O;R0][#6]   glycol
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6;$([#6]~[#3,#11,#12,#13,#19,#20,#26,#27,#28,#29,#30])]   Metal_Carbon_bond
+# Unsupported SMARTS atom query: RecursiveStructure
+a-S(=O)(=O)-O[$([a&!#6]),$(c[a&!#6]),$(cc[a&!#6]),$(ccc[a&!#6]),$(cccc[a&!#6]),$(ccccc[a&!#6])]   Heteroaryl sulfonate
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([A&D2]),$([A&D1])]!@[A&D2]!@[A&D2]!@[A&D2]!@[A&D2]!@[$([A&D2]),$([A&D1])]   Unbranched chain
+# Unsupported SMARTS atom query: RecursiveStructure
+O=[N+](-[O-])-caac-[$(N(C)C),$([NH]C),$([NH2])]   Dye 29
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([o,n]=c1ccc(=[o,n])cc1),$([O,N]=C1C=CC(=[O,N])C=C1),$([O,N]=C1[#6]:,=[#6]C(=[O,N])[#6]:,=[#6]1)]   quinone
+# Unsupported SMARTS atom query: RecursiveStructure
+[Cl,Br,I][CX4][CX4][$([O,S,N]*),Cl,Br,I]   Filter1_2_halo_ether
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([NX2R0]-[!#7]),$([NX2R0H1])]=[$([NX2R0]-[!#7]),$([NX2R0H1])]   Filter5_azo
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([!#1!#6!#7!#8!#9!#15!#16!#17!#35!#53]~[*]),$([!#1!#6!#7!#8!#9!#15!#16!#17!#35!#53;h])]   Filter9_metal
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([NX2]~*),$([NX2H])]~[OX1]   Filter12_nitroso
+# Unsupported SMARTS atom query: RecursiveStructure
+S=[$([PX2]~*),$([PX2H])]   Filter13_PS_double_bond
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([CX3H1]-[!#7]),$([CX3H2])]=NO[C,S,P](=O)*   Filter18_oxime_ester
+# Unsupported SMARTS atom query: RecursiveStructure
+*C([F,Cl,Br,I,$(OS(=O)(=O)*)])=[NX2]*   Filter24_react_imide
+# Unsupported SMARTS atom query: RecursiveStructure
+AA[CH2][F,Cl,Br,I,$(OS(=O)(=O)*)]   Filter26_alkyl_halide
+# Unsupported SMARTS atom query: RecursiveStructure
+CC(=[OX1,SX1,NH])[$([SX2]-*),$([SX2H])]   Filter29_thioester
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(C(-C)(-C)(=O)),$([CH](=O)-C)](=O)CC[Br,I]   Filter30_beta_halo_carbonyl
+# Recursive SMARTS ($(...)) are not supported
+[*!$(C[OH])]=C([OH])C(=O)*   Filter42_12_dicarbonyl_tautomer
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([C!$(C1(=O)C=CC(=O)C=C1)]C),$([Ch]),$(C[OH0])](=O)C=[C!$(C[Nv3X3,OH])]   Filter44_michael_acceptor2
+# Recursive SMARTS ($(...)) are not supported
+N#C[#7!$(N(C#N)=C(N)NC)]   Filter86_cyanamide
+# Recursive SMARTS ($(...)) are not supported
+[N,O,S]-@[#6!$(*(~@*)(~@*)~@*)]@[#6!$(*(~@*)(~@*)~@*)]-@[N,O,S]-@[#6!$(*(~@*)(~@*)~@*)]@[#6!$(*(~@*)(~@*)~@*)]-@[O,N]-@[#6!$(*(~@*)(~@*)~@*)]@[#6!$(*(~@*)(~@*)~@*)]-@[N,O,S]-@C   Filter87_crowns
+# Recursive SMARTS ($(...)) are not supported
+[*!$(C=O)]!@N!@[$([OX2])]   Filter89_hydroxylamine
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([CX3R0]([#6])[#6]),$([CX3HR0][#6])]=[$([NX2R0][#6]),$([NX2HR0])]   acyclic imines
+# Recursive SMARTS ($(...)) are not supported
+[N;!$(N-[C,S]=*)]-,=;!@[N;!$(N-[C,S]=*)]   acyclic N-,=N and not N bound to carbonyl or sulfone
+# Unsupported SMARTS atom query: RecursiveStructure
+N-C-[F,Cl,Br,I,$(C#N)]   N-C-Hal or cyano methyl
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(C#N),$(N(~O)~O),$(C=O),$(S(=O)=O),$(C(F)(F)F),Cl][C!H0]=[C!H0]   alpha beta-unsaturated ketones; center of Michael reactivity
+# Recursive SMARTS ($(...)) are not supported
+[C;!$(C=*)][C!R](=O)[CH2D2]   aliphatic ketone not ring and not di-carbonyl
+# Recursive SMARTS ($(...)) are not supported
+[NH1X2]=[C!R;!$(C(-N)(=[NH1])-N)]   acyclic C=N-H
+# Recursive SMARTS ($(...)) are not supported
+O-!@[N;!$(N(=O)=O);!$([N+](=O)[O-])]   acyclic NO not nitro
