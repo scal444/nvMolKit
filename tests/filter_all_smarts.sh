@@ -19,7 +19,7 @@ for file in "$SMARTS_DIR"/*.txt; do
     [[ "$base" == *_supported ]] && continue
     [[ "$base" == *_unsupported ]] && continue
     [[ "$base" == *_invalid ]] && continue
-    
+    echo " ----------------------"    
     echo "Processing: $base.txt"
     "$SMARTS_FILTER" \
         "$file" \

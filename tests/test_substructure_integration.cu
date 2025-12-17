@@ -71,6 +71,14 @@ struct DatasetConfig {
 constexpr DatasetConfig kDatasets[] = {
   {"pwalters_alert_collection_supported.txt", "PwaltersAlertCollection"},
   {"openbabel_functional_groups_supported.txt", "OpenBabelFunctionalGroups"},
+  {"BMS_2006_filter_supported.txt", "BMS2006Filter"},
+  {"rdkit_fragment_descriptors_supported.txt", "RDKitFragmentDescriptors"},
+  {"rdkit_tautomer_transforms_supported.txt", "RDKitTautomerTransforms"},
+  {"rdkit_torsionPreferences_v2_supported.txt", "RDKitTorsionPreferencesV2"},
+  {"rdkit_torsionPreferences_smallrings_supported.txt", "RDKitTorsionPreferencesSmallRings"},
+  {"rdkit_torsionPreferences_macrocycles_supported.txt", "RDKitTorsionPreferencesMacrocycles"},
+  {"RLewis_smarts_supported.txt", "RLewisSMARTS"},
+  {"wehi_pains_supported.txt", "WEHIPAINS"},
 };
 
 struct SmallestRepro {
