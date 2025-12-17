@@ -99,13 +99,16 @@ static_assert(sizeof(AtomQueryTree) == 4, "AtomQueryTree must be exactly 4 bytes
  * a compound query expression (AND/OR/NOT combinations).
  *
  * @param targetPacked The target atom's packed data
- * @param targetBonds The target atom's bond type counts
+ * @param targetBonds The target atom's bond type counts (may be nullptr if checkBonds=false)
  * @param leafMasks Pointer to first leaf mask for this query atom
- * @param leafBondCounts Pointer to first leaf bond count for this query atom
+ * @param leafBondCounts Pointer to first leaf bond count for this query atom (may be nullptr if checkBonds=false)
  * @param instructions Pointer to first instruction for this query atom
  * @param tree Tree metadata (num instructions, scratch size, result index)
+ * @param checkBonds If true, also check bond count requirements (for substructure search).
+ *                   If false, only check atom properties (for label matrix compatibility).
  * @return true if target atom matches the compound query
  */
+template <bool checkBonds = true>
 HD_CALLABLE inline bool evaluateBoolTree(const AtomDataPacked*   targetPacked,
                                          const BondTypeCounts*   targetBonds,
                                          const AtomQueryMask*    leafMasks,
@@ -120,8 +123,12 @@ HD_CALLABLE inline bool evaluateBoolTree(const AtomDataPacked*   targetPacked,
     switch (instr.op) {
       case BoolOp::Leaf: {
         const bool atomMatch = atomMatchesPacked(*targetPacked, leafMasks[instr.leafMaskIdx]);
-        const bool bondMatch = bondCountsMatchPacked(*targetBonds, leafBondCounts[instr.leafMaskIdx]);
-        scratch[instr.dst] = atomMatch && bondMatch ? 1 : 0;
+        bool match = atomMatch;
+        if constexpr (checkBonds) {
+          const bool bondMatch = bondCountsMatchPacked(*targetBonds, leafBondCounts[instr.leafMaskIdx]);
+          match = atomMatch && bondMatch;
+        }
+        scratch[instr.dst] = match ? 1 : 0;
         break;
       }
       case BoolOp::And:

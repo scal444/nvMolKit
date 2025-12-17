@@ -186,6 +186,9 @@ target_link_libraries(test_molecules PRIVATE molecules device ${RDKit_LIBS})
 add_executable(test_query test_query.cu)
 target_link_libraries(test_query PRIVATE molecules device ${RDKit_LIBS})
 
+add_executable(test_boolean_tree test_boolean_tree.cu)
+target_link_libraries(test_boolean_tree PRIVATE molecules device)
+
 add_executable(test_flat_bit_vect_device test_flat_bit_vect_device.cu)
 target_link_libraries(test_flat_bit_vect_device PRIVATE flatBitVect device
                                                         device_vector)
@@ -206,6 +209,7 @@ target_link_libraries(
 
 set(TEST_LIST
     test_butina
+    test_boolean_tree
     test_molecules
     test_query
     test_flat_bit_vect_device

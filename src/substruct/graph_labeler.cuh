@@ -88,26 +88,27 @@ __device__ __forceinline__ bool atomPairMatchesOptimized(const MoleculeView& tar
  * @brief Match using boolean expression tree for compound queries (OR/NOT).
  *
  * Evaluates the full boolean expression tree for query atoms that have
- * compound queries. Falls back to simple mask matching for AND-only queries.
+ * compound queries. For label matrix purposes, only checks atom properties
+ * (not bond counts) to match RDKit's queryAtom->Match() semantics.
  *
  * @param target Target molecule view
  * @param targetAtomIdx Index of target atom
  * @param query Query molecule view (must have query trees populated)
  * @param queryAtomIdx Index of query atom
- * @return true if target atom matches the compound query expression
+ * @return true if target atom's properties match the compound query expression
  */
 __device__ __forceinline__ bool atomPairMatchesWithTree(const MoleculeView& target,
                                                         int                 targetAtomIdx,
                                                         const MoleculeView& query,
                                                         int                 queryAtomIdx) {
   const AtomDataPacked&   targetPacked   = target.getAtomPacked(targetAtomIdx);
-  const BondTypeCounts&   targetBonds    = target.getBondTypeCounts(targetAtomIdx);
   const AtomQueryTree&    tree           = query.getQueryTree(queryAtomIdx);
   const BoolInstruction*  instructions   = query.getQueryInstructions(queryAtomIdx);
   const AtomQueryMask*    leafMasks      = query.getQueryLeafMasks(queryAtomIdx);
-  const BondTypeCounts*   leafBondCounts = query.getQueryLeafBondCounts(queryAtomIdx);
 
-  return evaluateBoolTree(&targetPacked, &targetBonds, leafMasks, leafBondCounts, instructions, tree);
+  // For label matrix, only check atom properties (not bond counts)
+  // Bond connectivity is verified during actual substructure search
+  return evaluateBoolTree<false>(&targetPacked, nullptr, leafMasks, nullptr, instructions, tree);
 }
 
 // =============================================================================
@@ -164,9 +165,8 @@ __device__ void populateLabelMatrixWarpParallel(const MoleculeView&             
 
   // Step 2: Cooperative load of query data into shared memory
   for (int q = tid; q < numQueryAtoms; q += numThreads) {
-    sharedQueryPacked[q]     = query.getAtomPacked(q);
-    sharedQueryMasks[q]      = query.getQueryMask(q);
-    sharedQueryBondCounts[q] = query.getBondTypeCounts(q);
+    sharedQueryPacked[q] = query.getAtomPacked(q);
+    sharedQueryMasks[q]  = query.getQueryMask(q);
   }
   block.sync();
 
@@ -186,16 +186,13 @@ __device__ void populateLabelMatrixWarpParallel(const MoleculeView&             
 
     // Load target data from global memory
     const AtomDataPacked targetPacked = validPair ? target.getAtomPacked(targetIdx) : AtomDataPacked{};
-    const BondTypeCounts targetBonds  = validPair ? target.getBondTypeCounts(targetIdx) : BondTypeCounts{};
 
     // Load query data from shared memory
-    const AtomQueryMask  queryMask  = sharedQueryMasks[queryIdx];
-    const BondTypeCounts queryBonds = sharedQueryBondCounts[queryIdx];
+    const AtomQueryMask queryMask = sharedQueryMasks[queryIdx];
 
-    // Branchless matching (all lanes execute same instructions)
+    // Branchless atom property matching only (bond counts not checked for label matrix)
     const bool atomMatch = atomMatchesPacked(targetPacked, queryMask);
-    const bool bondMatch = bondCountsMatchPacked(targetBonds, queryBonds);
-    const bool matches   = validPair && atomMatch && bondMatch;
+    const bool matches   = validPair && atomMatch;
 
     // Write result atomically (only matching pairs write)
     if (matches) {

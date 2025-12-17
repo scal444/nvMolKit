@@ -125,15 +125,47 @@ void populateBondTypeCounts(const RDKit::ROMol* mol, const RDKit::Atom* atom, Bo
  * RDKit represents as bond type 0 (UNSPECIFIED). These are counted in the
  * `any` field of BondTypeCounts.
  */
+/**
+ * @brief Get the effective bond type for a query bond.
+ *
+ * For SMARTS queries, implicit bonds (no explicit bond symbol) are represented
+ * with SingleOrAromaticBond query which should match any bond type. This function
+ * checks for such queries and returns 0 (any) instead of the nominal bond type.
+ */
+int getQueryBondEffectiveType(const RDKit::Bond* bond) {
+  int bondType = bond->getBondType();
+
+  if (bond->hasQuery()) {
+    const auto* query = bond->getQuery();
+    if (query != nullptr) {
+      const std::string desc = query->getDescription();
+      if (desc == "SingleOrAromaticBond" || desc == "BondNull") {
+        return 0;  // Any bond
+      }
+      // For BondAnd/BondOr queries, check if any child is SingleOrAromaticBond
+      if (desc == "BondAnd" || desc == "BondOr") {
+        for (auto it = query->beginChildren(); it != query->endChildren(); ++it) {
+          const std::string childDesc = (*it)->getDescription();
+          if (childDesc == "SingleOrAromaticBond" || childDesc == "BondNull") {
+            return 0;
+          }
+        }
+      }
+    }
+  }
+
+  return bondType;
+}
+
 void populateQueryBondTypeCounts(const RDKit::ROMol* mol, const RDKit::Atom* atom, BondTypeCounts& counts) {
   auto [beg, bondEnd] = mol->getAtomBonds(atom);
   while (beg != bondEnd) {
     const auto* bond     = (*mol)[*beg];
-    int         bondType = bond->getBondType();
+    int         bondType = getQueryBondEffectiveType(bond);
     switch (bondType) {
       case 0:
         ++counts.any;
-        break;  // UNSPECIFIED = any bond (~)
+        break;  // UNSPECIFIED or any bond query
       case 1:
         ++counts.single;
         break;  // SINGLE

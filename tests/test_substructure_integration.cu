@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <GraphMol/QueryAtom.h>
 #include <GraphMol/ROMol.h>
 #include <gtest/gtest.h>
 
@@ -25,6 +26,9 @@
 
 #include "cuda_error_check.h"
 #include "device.h"
+#include "flat_bit_vect.h"
+#include "graph_labeler.cuh"
+#include "molecules_device.cuh"
 #include "substructure_search.cuh"
 #include "test_utils.h"
 #include "testutils/mol_data.h"
@@ -33,17 +37,22 @@
 using nvMolKit::addQueryToBatch;
 using nvMolKit::addToBatch;
 using nvMolKit::algorithmName;
+using nvMolKit::AsyncDeviceVector;
+using nvMolKit::BitMatrix2DView;
 using nvMolKit::checkReturnCode;
+using nvMolKit::FlatBitVect;
 using nvMolKit::getSubstructMatches;
+using nvMolKit::kMaxQueryAtoms;
+using nvMolKit::kMaxTargetAtoms;
 using nvMolKit::MoleculesDevice;
 using nvMolKit::MoleculesHost;
+using nvMolKit::printValidationResultDetailed;
 using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
 using nvMolKit::SubstructMatchResultsDevice;
 using nvMolKit::SubstructMatchResultsHost;
 using nvMolKit::testing::readSmartsFileWithStrings;
 using nvMolKit::testing::readSmilesFileWithStrings;
-using nvMolKit::printValidationResultDetailed;
 using nvMolKit::validateAgainstRDKit;
 
 namespace {
@@ -164,4 +173,166 @@ TEST_P(SubstructureIntegrationTest, ChemblVsAlertCollection) {
     << ". Count mismatches: " << validationResult.mismatchedPairs
     << ", Mapping mismatches: " << validationResult.wrongMappingPairs
     << " / " << validationResult.totalPairs << " total pairs";
+}
+
+// =============================================================================
+// Label Matrix Integration Test (not parameterized - label matrix is shared)
+// =============================================================================
+
+using LabelMatrixStorage = FlatBitVect<kMaxTargetAtoms * kMaxQueryAtoms>;
+using LabelMatrixView    = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
+
+template <std::size_t MaxTarget, std::size_t MaxQuery>
+__global__ void populateLabelMatrixKernelForIntegration(nvMolKit::MoleculesDeviceView targetsView,
+                                                        int                          targetIdx,
+                                                        nvMolKit::MoleculesDeviceView queriesView,
+                                                        int                          queryIdx,
+                                                        LabelMatrixStorage*          output) {
+  nvMolKit::MoleculeView target = nvMolKit::getMolecule(targetsView, targetIdx);
+  nvMolKit::MoleculeView query  = nvMolKit::getMolecule(queriesView, queryIdx);
+
+  BitMatrix2DView<MaxTarget, MaxQuery> view(*output);
+  nvMolKit::populateLabelMatrixOptimized<MaxTarget, MaxQuery>(target, query, view);
+}
+
+class LabelMatrixIntegrationTest : public ::testing::Test {
+ protected:
+  ScopedStream stream_;
+  std::string  testDataPath_;
+
+  void SetUp() override { testDataPath_ = getTestDataFolderPath(); }
+};
+
+TEST_F(LabelMatrixIntegrationTest, ChemblVsAlertCollectionLabelMatrix) {
+  const std::string smilesPath = testDataPath_ + "/chembl_1k.smi";
+  const std::string smartsPath = testDataPath_ + "/SMARTS/pwalters_alert_collection_supported.txt";
+
+  ASSERT_TRUE(std::filesystem::exists(smilesPath)) << "SMILES file not found: " << smilesPath;
+  ASSERT_TRUE(std::filesystem::exists(smartsPath)) << "SMARTS file not found: " << smartsPath;
+
+  auto [targetMols, targetSmiles] = readSmilesFileWithStrings(smilesPath, kNumSmiles, kMaxAtoms);
+  auto [queryMols, querySmarts]   = readSmartsFileWithStrings(smartsPath);
+
+  ASSERT_FALSE(targetMols.empty()) << "No target molecules loaded";
+  ASSERT_FALSE(queryMols.empty()) << "No query patterns loaded";
+
+  MoleculesHost targetsHost;
+  MoleculesHost queriesHost;
+
+  for (const auto& mol : targetMols) {
+    addToBatch(mol.get(), targetsHost);
+  }
+  for (const auto& mol : queryMols) {
+    addQueryToBatch(mol.get(), queriesHost);
+  }
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  AsyncDeviceVector<LabelMatrixStorage> matrixDev(1, stream_.stream());
+
+  const int numTargets = static_cast<int>(targetMols.size());
+  const int numQueries = static_cast<int>(queryMols.size());
+
+  int totalPairs = 0;
+  int totalMismatches = 0;
+  int totalFalsePositives = 0;
+  int totalFalseNegatives = 0;
+
+  std::vector<std::tuple<int, int, int, int>> fpPairs;
+  std::vector<std::tuple<int, int, int, int, int, int, bool, bool>> fpDetails;
+
+  for (int t = 0; t < numTargets; ++t) {
+    for (int q = 0; q < numQueries; ++q) {
+      ++totalPairs;
+
+      LabelMatrixStorage hostMatrix(false);
+      matrixDev.setFromVector(std::vector<LabelMatrixStorage>{hostMatrix});
+
+      populateLabelMatrixKernelForIntegration<kMaxTargetAtoms, kMaxQueryAtoms>
+        <<<1, 128, 0, stream_.stream()>>>(targetsDevice.view(), t, queriesDevice.view(), q, matrixDev.data());
+      cudaCheckError(cudaGetLastError());
+
+      std::vector<LabelMatrixStorage> resultMatrix(1);
+      matrixDev.copyToHost(resultMatrix);
+      cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+      LabelMatrixView view(resultMatrix[0]);
+
+      const int numTargetAtoms = static_cast<int>(targetMols[t]->getNumAtoms());
+      const int numQueryAtoms  = static_cast<int>(queryMols[q]->getNumAtoms());
+
+      int pairMismatches = 0;
+      int pairFalsePositives = 0;
+      int pairFalseNegatives = 0;
+
+      for (int ta = 0; ta < numTargetAtoms; ++ta) {
+        const auto* targetAtom = targetMols[t]->getAtomWithIdx(ta);
+        for (int qa = 0; qa < numQueryAtoms; ++qa) {
+          const auto* queryAtom = queryMols[q]->getAtomWithIdx(qa);
+
+          bool rdkitResult = false;
+          if (queryAtom->hasQuery()) {
+            rdkitResult = queryAtom->Match(targetAtom);
+          } else {
+            rdkitResult = (targetAtom->getAtomicNum() == queryAtom->getAtomicNum());
+          }
+
+          bool gpuResult = view.get(ta, qa);
+
+          if (gpuResult && !rdkitResult) {
+            ++pairFalsePositives;
+            ++pairMismatches;
+            if (fpDetails.size() < 20) {
+              fpDetails.push_back({t, q, ta, qa,
+                                   targetAtom->getAtomicNum(),
+                                   queryAtom->getAtomicNum(),
+                                   targetAtom->getIsAromatic(),
+                                   queryAtom->getIsAromatic()});
+            }
+          } else if (!gpuResult && rdkitResult) {
+            ++pairFalseNegatives;
+            ++pairMismatches;
+          }
+        }
+      }
+
+      totalMismatches += pairMismatches;
+      totalFalsePositives += pairFalsePositives;
+      totalFalseNegatives += pairFalseNegatives;
+
+      if (pairFalsePositives > 0 && fpPairs.size() < 10) {
+        fpPairs.emplace_back(t, q, pairFalsePositives, pairFalseNegatives);
+      }
+    }
+  }
+
+  std::cout << "Label matrix integration test:\n"
+            << "  Total pairs tested: " << totalPairs << "\n"
+            << "  Total atom-level mismatches: " << totalMismatches << "\n"
+            << "  False positives (GPU yes, RDKit no): " << totalFalsePositives << "\n"
+            << "  False negatives (GPU no, RDKit yes): " << totalFalseNegatives << "\n";
+
+  if (!fpPairs.empty()) {
+    std::cout << "  Pairs with FALSE POSITIVES:\n";
+    for (const auto& [t, q, fp, fn] : fpPairs) {
+      std::cout << "    Target[" << t << "] x Query[" << q << "]: "
+                << fp << " false positives\n"
+                << "      Target: " << targetSmiles[t].substr(0, 80) << "...\n"
+                << "      Query: " << querySmarts[q] << "\n";
+    }
+  }
+
+  if (!fpDetails.empty()) {
+    std::cout << "  False positive atom details:\n";
+    for (const auto& [t, q, ta, qa, tAtomNum, qAtomNum, tArom, qArom] : fpDetails) {
+      std::cout << "    T[" << t << "].atom" << ta << " (Z=" << tAtomNum << ",arom=" << tArom << ")"
+                << " vs Q[" << q << "].atom" << qa << " (Z=" << qAtomNum << ",arom=" << qArom << ")\n";
+    }
+  }
+
+  EXPECT_EQ(totalFalsePositives, 0)
+    << "GPU label matrix has false positives (marks atoms as compatible when RDKit says no)";
 }
