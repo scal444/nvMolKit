@@ -34,7 +34,8 @@ namespace {
 void populateAtomData(const RDKit::Atom* atom, AtomData& atomData, const RDKit::RingInfo* ringInfo) {
   atomData.atomicNum     = atom->getAtomicNum();
   atomData.chiralTag     = atom->getChiralTag();
-  atomData.numExplicitHs = atom->getNumExplicitHs();
+  // Use total H count (explicit + implicit) for SMARTS [H] queries like [NH], [CH3], etc.
+  atomData.numExplicitHs = atom->getTotalNumHs();
 #if RDKIT_VERSION_NUM >= 0x20240300
   atomData.explicitValence = atom->getValence(RDKit::Atom::ValenceType::EXPLICIT);
   atomData.implicitValence = atom->getValence(RDKit::Atom::ValenceType::IMPLICIT);
@@ -55,7 +56,8 @@ void populateAtomData(const RDKit::Atom* atom, AtomData& atomData, const RDKit::
 void populateAtomDataPacked(const RDKit::Atom* atom, AtomDataPacked& packed, const RDKit::RingInfo* ringInfo) {
   packed.setAtomicNum(atom->getAtomicNum());
   packed.setChiralTag(atom->getChiralTag());
-  packed.setNumExplicitHs(atom->getNumExplicitHs());
+  // Use total H count (explicit + implicit) for SMARTS [H] queries like [NH], [CH3], etc.
+  packed.setNumExplicitHs(atom->getTotalNumHs());
 #if RDKIT_VERSION_NUM >= 0x20240300
   packed.setExplicitValence(atom->getValence(RDKit::Atom::ValenceType::EXPLICIT));
   packed.setImplicitValence(atom->getValence(RDKit::Atom::ValenceType::IMPLICIT));

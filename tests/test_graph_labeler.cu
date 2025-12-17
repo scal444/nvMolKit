@@ -627,21 +627,23 @@ TEST_F(GraphLabelerTest, SingleAtomNoMatch) {
 // For molecules with explicit Hs in SMILES, these work correctly.
 
 TEST_F(GraphLabelerTest, HCountExplicitHydrogens) {
-  // Target with explicit Hs: [CH4] (methane with explicit Hs)
-  // Query: [CH4] (carbon with 4 hydrogens)
-  std::vector<std::vector<uint8_t>> expected = {
-    {true}   // C with 4 explicit Hs
-  };
+  std::vector<std::vector<uint8_t>> expected = {{true}};
   runLabelingTest("[CH4]", "[CH4]", expected);
 }
 
 TEST_F(GraphLabelerTest, HCountExplicitMismatch) {
-  // Target with explicit Hs: [CH4] (methane)
-  // Query: [CH3] (carbon with 3 hydrogens)
-  std::vector<std::vector<uint8_t>> expected = {
-    {false}   // C with 4 Hs doesn't match [CH3]
-  };
+  std::vector<std::vector<uint8_t>> expected = {{false}};
   runLabelingTest("[CH4]", "[CH3]", expected);
+}
+
+TEST_F(GraphLabelerTest, ImplicitHCountMatch) {
+  std::vector<std::vector<uint8_t>> expected = {{false}, {true}};
+  runLabelingTest("C=N", "[NH]", expected);
+}
+
+TEST_F(GraphLabelerTest, ImplicitHCountNoMatch) {
+  std::vector<std::vector<uint8_t>> expected = {{false}, {false}};
+  runLabelingTest("CC", "[CH2]", expected);
 }
 
 // =============================================================================

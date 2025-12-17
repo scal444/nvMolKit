@@ -97,7 +97,7 @@ int getExpectedAtomProperty(const RDKit::ROMol* mol, int atomIdx, AtomProperty p
     case AtomProperty::AtomicNum:
       return atom->getAtomicNum();
     case AtomProperty::NumExplicitHs:
-      return atom->getNumExplicitHs();
+      return atom->getTotalNumHs();
     case AtomProperty::ExplicitValence:
       return atom->getExplicitValence();
     case AtomProperty::ImplicitValence:
@@ -546,6 +546,18 @@ TEST(MoleculesEmptyBatchTest, EmptyBatchHasZeroMolecules) {
   EXPECT_EQ(batch.numMolecules(), 0);
   EXPECT_EQ(batch.totalAtoms(), 0);
   EXPECT_EQ(batch.totalBonds(), 0);
+}
+
+TEST(MoleculesTotalHCountTest, StoresTotalNotExplicitHCount) {
+  auto          mol = makeMol("C=N");
+  MoleculesHost batch;
+  nvMolKit::addToBatch(mol.get(), batch);
+
+  ASSERT_EQ(batch.atomData.size(), 2);
+  const int nitrogenIdx = 1;
+  EXPECT_EQ(mol->getAtomWithIdx(nitrogenIdx)->getNumExplicitHs(), 0);
+  EXPECT_EQ(mol->getAtomWithIdx(nitrogenIdx)->getTotalNumHs(), 1);
+  EXPECT_EQ(batch.atomData[nitrogenIdx].numExplicitHs, 1);
 }
 
 TEST(MoleculesEmptyBatchTest, CopyFromHostThrowsOnEmptyBatch) {

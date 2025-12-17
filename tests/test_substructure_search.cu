@@ -1543,11 +1543,8 @@ TEST_P(SubstructureSearchTest, SingleMolSingleQueryForDebugging) {
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-  // Test [X3] total connectivity query
-  // C=C: ethene - carbons have X3 (1 bond + 2 H = 3)
-  // CC: ethane - carbons have X4
-  const std::string target = "Brc1cccc(Nc2ncnc3ccncc23)c1NCCN1CCOCC1";
-  const std::string query = "N-[F,Cl,Br,I]";
+  const std::string target = "COc1c(O)cc(O)c(C(=N)Cc2ccc(O)cc2)c1O";
+  const std::string query = "C=[NH]";
   buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
 
   MoleculesDevice targetsDevice(stream_.stream());
@@ -1567,4 +1564,52 @@ TEST_P(SubstructureSearchTest, SingleMolSingleQueryForDebugging) {
   EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for query " << algorithmName(algorithm());
 
+}
+
+TEST_P(SubstructureSearchTest, ImplicitHCountMatch) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  buildBatches({"C=N"}, {"[NH]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[NH] in C=N");
+}
+
+TEST_P(SubstructureSearchTest, ImplicitHCountNoMatch) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  buildBatches({"CC"}, {"[CH2]"}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[CH2] in CC");
 }
