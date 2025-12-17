@@ -29,7 +29,8 @@ namespace nvMolKit {
 // Shared Constants
 // =============================================================================
 
-constexpr int kWarpSize       = 32;
+constexpr int  kWarpSize      = 32;
+constexpr bool kDebugWUS      = false;  ///< Enable debug output in warpUnifiedSearchGPU
 
 // =============================================================================
 // Helper function for checking if target atom is used in mapping
@@ -562,13 +563,14 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
   const int numQueryAtoms  = query.numAtoms;
   const int numTargetAtoms = target.numAtoms;
 
-  // // DEBUG: Print basic info
-  // if (tid == 0) {
-  //   printf("[WUS] numQueryAtoms=%d, numTargetAtoms=%d, maxQueueSize=%d, maxMatches=%d\n",
-  //          numQueryAtoms, numTargetAtoms, maxQueueSize, maxMatches);
-  //   printf("[WUS] query.hasBondQueryData()=%d\n", query.hasBondQueryData() ? 1 : 0);
-  // }
-  // block.sync();
+  if constexpr (kDebugWUS) {
+    if (tid == 0) {
+      printf("[WUS] numQueryAtoms=%d, numTargetAtoms=%d, maxQueueSize=%d, maxMatches=%d\n",
+             numQueryAtoms, numTargetAtoms, maxQueueSize, maxMatches);
+      printf("[WUS] query.hasBondQueryData()=%d\n", query.hasBondQueryData() ? 1 : 0);
+    }
+    block.sync();
+  }
 
   // Phase 1: Precompute candidate lists from label matrix
   for (int q = tid; q < numQueryAtoms; q += block.size()) {
@@ -582,18 +584,19 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
   }
   block.sync();
 
-  // // DEBUG: Print candidate lists
-  // if (tid == 0) {
-  //   for (int q = 0; q < numQueryAtoms; ++q) {
-  //     printf("[WUS] Phase1: query atom %d has %d candidates: ", q, sharedCandidates[q].count);
-  //     for (int i = 0; i < sharedCandidates[q].count && i < 10; ++i) {
-  //       printf("%d ", (int)sharedCandidates[q].candidates[i]);
-  //     }
-  //     if (sharedCandidates[q].count > 10) printf("...");
-  //     printf("\n");
-  //   }
-  // }
-  // block.sync();
+  if constexpr (kDebugWUS) {
+    if (tid == 0) {
+      for (int q = 0; q < numQueryAtoms; ++q) {
+        printf("[WUS] Phase1: query atom %d has %d candidates: ", q, sharedCandidates[q].count);
+        for (int i = 0; i < sharedCandidates[q].count && i < 10; ++i) {
+          printf("%d ", (int)sharedCandidates[q].candidates[i]);
+        }
+        if (sharedCandidates[q].count > 10) printf("...");
+        printf("\n");
+      }
+    }
+    block.sync();
+  }
 
   // Phase 2: Initialize work queue with candidates for query atom 0
   __shared__ int queueHead;
@@ -636,12 +639,14 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
   // Shared variables declared outside loop to avoid race conditions
   __shared__ int workAvailable;
   __shared__ int warpWorkIdx[32];  // Max 32 warps
-  // __shared__ int iterCount;  // DEBUG only
+  __shared__ int iterCount;
 
-  // if (tid == 0) {
-  //   iterCount = 0;
-  // }
-  // block.sync();
+  if constexpr (kDebugWUS) {
+    if (tid == 0) {
+      iterCount = 0;
+    }
+    block.sync();
+  }
 
   __shared__ int snapshotQueueTail;  // Snapshot of queueTail at start of iteration
 
@@ -649,16 +654,19 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
     if (tid == 0) {
       snapshotQueueTail = queueTail;  // Snapshot BEFORE checking workAvailable
       workAvailable = (queueHead < snapshotQueueTail) ? 1 : 0;
-      // ++iterCount;
+      if constexpr (kDebugWUS) {
+        ++iterCount;
+      }
     }
     block.sync();
 
-    // // DEBUG: Print iteration info
-    // if (tid == 0 && iterCount <= 10) {
-    //   printf("[WUS] Phase3 iter %d: queueHead=%d, queueTail=%d, snapshotQueueTail=%d, workAvailable=%d\n",
-    //          iterCount, queueHead, queueTail, snapshotQueueTail, workAvailable);
-    // }
-    // block.sync();
+    if constexpr (kDebugWUS) {
+      if (tid == 0 && iterCount <= 10) {
+        printf("[WUS] Phase3 iter %d: queueHead=%d, queueTail=%d, snapshotQueueTail=%d, workAvailable=%d\n",
+               iterCount, queueHead, queueTail, snapshotQueueTail, workAvailable);
+      }
+      block.sync();
+    }
 
     if (!workAvailable) {
       break;
@@ -700,20 +708,21 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
       }
     }
 
-    // // DEBUG: Print work item info (only warp 0, lane 0)
-    // if (warpId == 0 && laneId == 0 && iterCount <= 10) {
-    //   printf("[WUS] Phase3 iter %d warp0: hasWork=%d, myWorkIdx=%d, localQueryAtom=%d, usedMask=0x%x\n",
-    //          iterCount, hasWork ? 1 : 0, myWorkIdx, localQueryAtom, localUsedTargetsMask);
-    //   if (hasWork) {
-    //     printf("[WUS]   localMapping: ");
-    //     for (int q = 0; q < numQueryAtoms; ++q) {
-    //       printf("%d ", (int)localMapping[q]);
-    //     }
-    //     printf("\n");
-    //     printf("[WUS]   candidates for queryAtom %d: count=%d\n",
-    //            localQueryAtom, sharedCandidates[localQueryAtom].count);
-    //   }
-    // }
+    if constexpr (kDebugWUS) {
+      if (warpId == 0 && laneId == 0 && iterCount <= 10) {
+        printf("[WUS] Phase3 iter %d warp0: hasWork=%d, myWorkIdx=%d, localQueryAtom=%d\n",
+               iterCount, hasWork ? 1 : 0, myWorkIdx, localQueryAtom);
+        if (hasWork) {
+          printf("[WUS]   localMapping: ");
+          for (int q = 0; q < numQueryAtoms; ++q) {
+            printf("%d ", (int)localMapping[q]);
+          }
+          printf("\n");
+          printf("[WUS]   candidates for queryAtom %d: count=%d\n",
+                 localQueryAtom, sharedCandidates[localQueryAtom].count);
+        }
+      }
+    }
 
     // Ensure all reads from workQueue complete before any writes
     block.sync();
@@ -731,16 +740,15 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
         if (cIdx < candidates.count) {
           targetAtom         = candidates.candidates[cIdx];
           const bool notUsed = !isTargetUsedInMapping(localMapping, numQueryAtoms, targetAtom);
-          // // Enable debug for first few candidates in first few iterations
-          // const bool debugEdge = (warpId == 0 && cIdx < 3 && iterCount <= 3);
           const bool edgeOk  = checkEdgeConsistency(target, query, localMapping, localQueryAtom, targetAtom);
           valid = notUsed && edgeOk;
 
-          // // DEBUG: Print candidate evaluation (only first few)
-          // if (warpId == 0 && cIdx < 5 && iterCount <= 5) {
-          //   printf("[WUS] Phase3 iter %d cand %d: targetAtom=%d, notUsed=%d, edgeOk=%d, valid=%d\n",
-          //          iterCount, cIdx, targetAtom, notUsed ? 1 : 0, edgeOk ? 1 : 0, valid ? 1 : 0);
-          // }
+          if constexpr (kDebugWUS) {
+            if (warpId == 0 && cIdx < 5 && iterCount <= 5) {
+              printf("[WUS] Phase3 iter %d cand %d: targetAtom=%d, notUsed=%d, edgeOk=%d, valid=%d\n",
+                     iterCount, cIdx, targetAtom, notUsed ? 1 : 0, edgeOk ? 1 : 0, valid ? 1 : 0);
+            }
+          }
         }
 
         // Use ballot to find valid lanes
@@ -751,11 +759,13 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
           if (localQueryAtom == numQueryAtoms - 1) {
             // Complete match
             const int matchIdx = atomicAdd(matchCount, 1);
-            // printf("[WUS] MATCH FOUND! matchIdx=%d, mapping: ", matchIdx);
-            // for (int q = 0; q < numQueryAtoms; ++q) {
-            //   printf("%d ", (q == localQueryAtom) ? targetAtom : (int)localMapping[q]);
-            // }
-            // printf("\n");
+            if constexpr (kDebugWUS) {
+              printf("[WUS] MATCH FOUND! matchIdx=%d, mapping: ", matchIdx);
+              for (int q = 0; q < numQueryAtoms; ++q) {
+                printf("%d ", (q == localQueryAtom) ? targetAtom : (int)localMapping[q]);
+              }
+              printf("\n");
+            }
             if (matchIdx < maxMatches) {
               const int writeOffset = matchOffset + matchIdx * numQueryAtoms;
               for (int q = 0; q < numQueryAtoms; ++q) {
@@ -767,10 +777,12 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
           } else {
             // Enqueue for next level
             const int slot = atomicAdd(&queueTail, 1);
-            // if (warpId == 0 && laneId < 5 && iterCount <= 5) {
-            //   printf("[WUS] Phase3 iter %d: enqueueing at slot %d for queryAtom %d, targetAtom=%d\n",
-            //          iterCount, slot, localQueryAtom + 1, targetAtom);
-            // }
+            if constexpr (kDebugWUS) {
+              if (warpId == 0 && laneId < 5 && iterCount <= 5) {
+                printf("[WUS] Phase3 iter %d: enqueueing at slot %d for queryAtom %d, targetAtom=%d\n",
+                       iterCount, slot, localQueryAtom + 1, targetAtom);
+              }
+            }
             if (slot < maxQueueSize) {
               PartialMatch& next = workQueue[slot];
               for (int q = 0; q < numQueryAtoms; ++q) {
@@ -788,11 +800,12 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
     block.sync();
   }
 
-  // // DEBUG: Final state
-  // if (tid == 0) {
-  //   printf("[WUS] DONE: total iterations=%d, final matchCount=%d, reportedCount=%d\n",
-  //          iterCount, *matchCount, *reportedCount);
-  // }
+  if constexpr (kDebugWUS) {
+    if (tid == 0) {
+      printf("[WUS] DONE: total iterations=%d, final matchCount=%d, reportedCount=%d\n",
+             iterCount, *matchCount, *reportedCount);
+    }
+  }
 }
 
 }  // namespace nvMolKit
