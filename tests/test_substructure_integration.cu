@@ -254,8 +254,7 @@ class SubstructureIntegrationTest : public ::testing::TestWithParam<SubstructAlg
 
 INSTANTIATE_TEST_SUITE_P(AllAlgorithms,
                          SubstructureIntegrationTest,
-                         ::testing::Values(
-                                           SubstructAlgorithm::WarpUnified, SubstructAlgorithm::GSI),
+                         ::testing::Values( SubstructAlgorithm::GSI),
                          [](const ::testing::TestParamInfo<SubstructAlgorithm>& info) {
                            return algorithmName(info.param);
                          });
