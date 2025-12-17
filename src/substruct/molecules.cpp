@@ -18,11 +18,14 @@
 #include <GraphMol/QueryAtom.h>
 #include <GraphMol/QueryOps.h>
 #include <GraphMol/ROMol.h>
+#include <GraphMol/SmilesParse/SmartsWrite.h>
 #include <RDGeneral/versions.h>
 
 #include <functional>
 #include <stdexcept>
 #include <string>
+
+#include "substruct_types.h"
 
 namespace nvMolKit {
 
@@ -500,7 +503,13 @@ struct QueryTreeBuilder {
   std::vector<AtomQueryMask>   leafMasks;
   std::vector<BondTypeCounts>  leafBondCounts;
   std::vector<BoolInstruction> instructions;
-  uint8_t                      nextScratchIdx = 0;
+  int                          nextScratchIdx = 0;  // Use int to allow counting beyond uint8_t max
+
+  /**
+   * @brief Allocate the next scratch slot.
+   * @return Scratch index where the result will be stored
+   */
+  uint8_t allocateScratch() { return static_cast<uint8_t>(nextScratchIdx++); }
 
   /**
    * @brief Process a leaf query (primitive comparison) and add to the tree.
@@ -511,7 +520,7 @@ struct QueryTreeBuilder {
     leafMasks.push_back(buildQueryMask(packed, flags));
     leafBondCounts.push_back(bondCounts);
 
-    const uint8_t dst = nextScratchIdx++;
+    const uint8_t dst = allocateScratch();
     instructions.push_back(BoolInstruction::makeLeaf(dst, maskIdx));
     return dst;
   }
@@ -520,7 +529,7 @@ struct QueryTreeBuilder {
    * @brief Add an AND instruction combining two operands.
    */
   uint8_t addAnd(uint8_t left, uint8_t right) {
-    const uint8_t dst = nextScratchIdx++;
+    const uint8_t dst = allocateScratch();
     instructions.push_back(BoolInstruction::makeAnd(dst, left, right));
     return dst;
   }
@@ -529,7 +538,7 @@ struct QueryTreeBuilder {
    * @brief Add an OR instruction combining two operands.
    */
   uint8_t addOr(uint8_t left, uint8_t right) {
-    const uint8_t dst = nextScratchIdx++;
+    const uint8_t dst = allocateScratch();
     instructions.push_back(BoolInstruction::makeOr(dst, left, right));
     return dst;
   }
@@ -538,10 +547,20 @@ struct QueryTreeBuilder {
    * @brief Add a NOT instruction.
    */
   uint8_t addNot(uint8_t src) {
-    const uint8_t dst = nextScratchIdx++;
+    const uint8_t dst = allocateScratch();
     instructions.push_back(BoolInstruction::makeNot(dst, src));
     return dst;
   }
+
+  /**
+   * @brief Check if the tree exceeds scratch limits.
+   */
+  bool exceedsScratchLimit() const { return nextScratchIdx > kMaxBoolScratchSize; }
+
+  /**
+   * @brief Get the required scratch size.
+   */
+  int requiredScratchSize() const { return nextScratchIdx; }
 
   /**
    * @brief Build the final AtomQueryTree metadata.
@@ -550,8 +569,8 @@ struct QueryTreeBuilder {
     AtomQueryTree tree;
     tree.numLeaves       = static_cast<uint8_t>(leafMasks.size());
     tree.numInstructions = static_cast<uint8_t>(instructions.size());
-    tree.scratchSize     = nextScratchIdx;
-    tree.resultIdx       = nextScratchIdx > 0 ? nextScratchIdx - 1 : 0;
+    tree.scratchSize     = static_cast<uint8_t>(std::min(nextScratchIdx, 255));
+    tree.resultIdx       = nextScratchIdx > 0 ? static_cast<uint8_t>(nextScratchIdx - 1) : 0;
     return tree;
   }
 };
@@ -1078,6 +1097,12 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
     // Build the boolean expression tree for this atom
     QueryTreeBuilder builder;
     buildQueryTreeForAtom(atom, thisBondCounts, builder);
+
+    if (builder.exceedsScratchLimit()) {
+      throw std::runtime_error("SMARTS query too complex: boolean expression requires " +
+                               std::to_string(builder.requiredScratchSize()) + " scratch slots, but maximum is " +
+                               std::to_string(kMaxBoolScratchSize) + ". Query: " + RDKit::MolToSmarts(*mol));
+    }
 
     // Store offsets into global instruction/leaf arrays
     atomInstrStartsVec.push_back(static_cast<int>(queryInstructionsVec.size()));

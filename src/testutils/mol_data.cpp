@@ -180,4 +180,78 @@ std::vector<std::unique_ptr<RDKit::ROMol>> readSmartsFile(const std::string& fil
   return queries;
 }
 
+std::pair<std::vector<std::unique_ptr<RDKit::ROMol>>, std::vector<std::string>> readSmilesFileWithStrings(
+  const std::string& filePath,
+  size_t             maxCount,
+  size_t             maxAtoms) {
+  std::ifstream file(filePath);
+  if (!file.is_open()) {
+    throw std::runtime_error("Could not open SMILES file: " + filePath);
+  }
+
+  std::vector<std::unique_ptr<RDKit::ROMol>> mols;
+  std::vector<std::string>                   smilesStrings;
+  std::string                                line;
+
+  while (std::getline(file, line) && mols.size() < maxCount) {
+    std::string trimmedLine = trim(line);
+    if (trimmedLine.empty() || trimmedLine[0] == '#') {
+      continue;
+    }
+
+    std::string smiles = trimmedLine.substr(0, trimmedLine.find_first_of(" \t"));
+    if (smiles.empty()) {
+      continue;
+    }
+
+    try {
+      auto mol = std::unique_ptr<RDKit::ROMol>(RDKit::SmilesToMol(smiles));
+      if (mol && mol->getNumAtoms() <= maxAtoms) {
+        mols.push_back(std::move(mol));
+        smilesStrings.push_back(smiles);
+      }
+    } catch (const std::exception&) {
+      // Skip invalid SMILES
+    }
+  }
+
+  return {std::move(mols), std::move(smilesStrings)};
+}
+
+std::pair<std::vector<std::unique_ptr<RDKit::ROMol>>, std::vector<std::string>> readSmartsFileWithStrings(
+  const std::string& filePath) {
+  std::ifstream file(filePath);
+  if (!file.is_open()) {
+    throw std::runtime_error("Could not open SMARTS file: " + filePath);
+  }
+
+  std::vector<std::unique_ptr<RDKit::ROMol>> queries;
+  std::vector<std::string>                   smartsStrings;
+  std::string                                line;
+
+  while (std::getline(file, line)) {
+    std::string trimmedLine = trim(line);
+    if (trimmedLine.empty() || trimmedLine[0] == '#') {
+      continue;
+    }
+
+    std::string smarts = trimmedLine.substr(0, trimmedLine.find_first_of(" \t"));
+    if (smarts.empty()) {
+      continue;
+    }
+
+    try {
+      auto mol = std::unique_ptr<RDKit::ROMol>(RDKit::SmartsToMol(smarts));
+      if (mol) {
+        queries.push_back(std::move(mol));
+        smartsStrings.push_back(smarts);
+      }
+    } catch (const std::exception&) {
+      // Skip invalid SMARTS
+    }
+  }
+
+  return {std::move(queries), std::move(smartsStrings)};
+}
+
 }  // namespace nvMolKit::testing

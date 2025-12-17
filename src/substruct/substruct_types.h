@@ -77,6 +77,12 @@ struct SubstructMatchResultsHost {
   }
 };
 
+/// Maximum scratch space for boolean expression evaluation per query atom.
+/// Complex SMARTS patterns with many OR branches can require significant scratch space.
+/// E.g., [C,N,O,S,F,Cl,Br,I,...] with N alternatives needs 2N-1 slots (N leaves + N-1 ORs).
+/// 256 supports up to ~128 OR alternatives per atom.
+constexpr int kMaxBoolScratchSize = 256;
+
 }  // namespace nvMolKit
 
 #endif  // NVMOLKIT_SUBSTRUCT_TYPES_H

@@ -87,5 +87,25 @@ SubstructValidationResult validateAgainstRDKit(
 void printValidationResult(const SubstructValidationResult& result,
                            const std::string&               algorithmName = "");
 
+/**
+ * @brief Print detailed validation results including SMILES/SMARTS strings and actual matches.
+ * @param result The validation result to print
+ * @param gpuResults GPU match results for extracting actual matches
+ * @param targetMols Target molecules for RDKit matching
+ * @param queryMols Query molecules for RDKit matching
+ * @param targetSmiles Target SMILES strings
+ * @param querySmarts Query SMARTS strings
+ * @param algorithmName Optional algorithm name to include in output
+ * @param maxDetails Maximum number of detailed mismatches to print (default 5)
+ */
+void printValidationResultDetailed(const SubstructValidationResult&                  result,
+                                   const SubstructMatchResultsHost&                  gpuResults,
+                                   const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
+                                   const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols,
+                                   const std::vector<std::string>&                   targetSmiles,
+                                   const std::vector<std::string>&                   querySmarts,
+                                   const std::string&                                algorithmName = "",
+                                   int                                               maxDetails    = 5);
+
 }  // namespace nvMolKit
 

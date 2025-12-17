@@ -19,6 +19,7 @@
 #include <cstdint>
 
 #include "atom_data_packed.h"
+#include "substruct_types.h"
 
 #ifdef __CUDACC__
 #define HD_CALLABLE __host__ __device__
@@ -90,9 +91,6 @@ struct AtomQueryTree {
 };
 
 static_assert(sizeof(AtomQueryTree) == 4, "AtomQueryTree must be exactly 4 bytes");
-
-/// Maximum scratch space for boolean expression evaluation per query atom
-constexpr int kMaxBoolScratchSize = 32;
 
 /**
  * @brief Evaluate a boolean expression tree for atom matching.

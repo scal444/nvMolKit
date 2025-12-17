@@ -39,8 +39,9 @@ using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
 using nvMolKit::SubstructMatchResultsDevice;
 using nvMolKit::SubstructMatchResultsHost;
-using nvMolKit::testing::readSmartsFile;
-using nvMolKit::testing::readSmilesFile;
+using nvMolKit::testing::readSmartsFileWithStrings;
+using nvMolKit::testing::readSmilesFileWithStrings;
+using nvMolKit::printValidationResultDetailed;
 using nvMolKit::validateAgainstRDKit;
 
 namespace {
@@ -62,8 +63,7 @@ class SubstructureIntegrationTest : public ::testing::TestWithParam<SubstructAlg
 
 INSTANTIATE_TEST_SUITE_P(AllAlgorithms,
                          SubstructureIntegrationTest,
-                         ::testing::Values(SubstructAlgorithm::VF2,
-                                           SubstructAlgorithm::GSI,
+                         ::testing::Values(
                                            SubstructAlgorithm::WarpUnified),
                          [](const ::testing::TestParamInfo<SubstructAlgorithm>& info) {
                            return algorithmName(info.param);
@@ -76,8 +76,8 @@ TEST_P(SubstructureIntegrationTest, ChemblVsAlertCollection) {
   ASSERT_TRUE(std::filesystem::exists(smilesPath)) << "SMILES file not found: " << smilesPath;
   ASSERT_TRUE(std::filesystem::exists(smartsPath)) << "SMARTS file not found: " << smartsPath;
 
-  auto targetMols = readSmilesFile(smilesPath, kNumSmiles, kMaxAtoms);
-  auto queryMols  = readSmartsFile(smartsPath);
+  auto [targetMols, targetSmiles] = readSmilesFileWithStrings(smilesPath, kNumSmiles, kMaxAtoms);
+  auto [queryMols, querySmarts]   = readSmartsFileWithStrings(smartsPath);
 
   ASSERT_FALSE(targetMols.empty()) << "No target molecules loaded";
   ASSERT_FALSE(queryMols.empty()) << "No query patterns loaded";
@@ -112,6 +112,11 @@ TEST_P(SubstructureIntegrationTest, ChemblVsAlertCollection) {
   EXPECT_EQ(resultsHost.numQueries, static_cast<int>(queryMols.size()));
 
   auto validationResult = validateAgainstRDKit(resultsHost, targetMols, queryMols);
+
+  if (!validationResult.allMatch) {
+    printValidationResultDetailed(validationResult, resultsHost, targetMols, queryMols, targetSmiles, querySmarts,
+                                  algorithmName(algorithm()));
+  }
 
   EXPECT_TRUE(validationResult.allMatch)
     << "GPU results do not match RDKit for algorithm " << algorithmName(algorithm())

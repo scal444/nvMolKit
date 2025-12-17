@@ -188,5 +188,125 @@ void printValidationResult(const SubstructValidationResult& result, const std::s
   }
 }
 
+namespace {
+
+void printMatches(const std::string& label, const std::vector<std::vector<int>>& matches) {
+  std::cout << "    " << label << ": ";
+  if (matches.empty()) {
+    std::cout << "(none)" << std::endl;
+    return;
+  }
+  std::cout << matches.size() << " match(es)" << std::endl;
+  for (size_t i = 0; i < matches.size(); ++i) {
+    std::cout << "      [" << i << "]: {";
+    for (size_t j = 0; j < matches[i].size(); ++j) {
+      if (j > 0) std::cout << ", ";
+      std::cout << matches[i][j];
+    }
+    std::cout << "}" << std::endl;
+  }
+}
+
+std::vector<std::vector<int>> extractGpuMatchesForPrint(const SubstructMatchResultsHost& results,
+                                                        int                              targetIdx,
+                                                        int                              queryIdx,
+                                                        int                              numQueryAtoms) {
+  const int pairIdx       = results.pairIndex(targetIdx, queryIdx);
+  const int reportedCount = results.reportedCounts[pairIdx];
+  const int startOffset   = results.pairMatchStarts[pairIdx];
+
+  std::vector<std::vector<int>> gpuMatches;
+  gpuMatches.reserve(reportedCount);
+
+  for (int m = 0; m < reportedCount; ++m) {
+    std::vector<int> mapping(numQueryAtoms);
+    for (int a = 0; a < numQueryAtoms; ++a) {
+      mapping[a] = results.matchIndices[startOffset + m * numQueryAtoms + a];
+    }
+    gpuMatches.push_back(std::move(mapping));
+  }
+
+  return gpuMatches;
+}
+
+}  // namespace
+
+void printValidationResultDetailed(const SubstructValidationResult&                  result,
+                                   const SubstructMatchResultsHost&                  gpuResults,
+                                   const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
+                                   const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols,
+                                   const std::vector<std::string>&                   targetSmiles,
+                                   const std::vector<std::string>&                   querySmarts,
+                                   const std::string&                                algoName,
+                                   int                                               maxDetails) {
+  std::string prefix = algoName.empty() ? "" : "[" + algoName + "] ";
+
+  std::cout << prefix << "Validation: " << result.matchingPairs << "/" << result.totalPairs
+            << " pairs match RDKit";
+
+  if (result.overflowPairs > 0) {
+    std::cout << " (" << result.overflowPairs << " overflow)";
+  }
+
+  if (result.allMatch) {
+    std::cout << " - PASS" << std::endl;
+    return;
+  }
+
+  const int totalFailures = result.mismatchedPairs + result.wrongMappingPairs;
+  std::cout << " - FAIL (" << totalFailures << " failures)" << std::endl;
+
+  int printed = 0;
+
+  if (result.mismatchedPairs > 0) {
+    std::cout << "  Count mismatches:" << std::endl;
+    for (const auto& [t, q, gpuCount, rdkitCount] : result.mismatches) {
+      if (printed++ >= maxDetails) {
+        std::cout << "  ... and " << (result.mismatchedPairs - maxDetails) << " more count mismatches"
+                  << std::endl;
+        break;
+      }
+      std::cout << "  Target[" << t << "]: " << targetSmiles[t] << std::endl;
+      std::cout << "  Query[" << q << "]:  " << querySmarts[q] << std::endl;
+
+      // Get RDKit matches
+      auto rdkitMatches = getRDKitSubstructMatches(*targetMols[t], *queryMols[q], false);
+      printMatches("Expected (RDKit)", rdkitMatches);
+
+      // Get GPU matches
+      const int numQueryAtoms = static_cast<int>(queryMols[q]->getNumAtoms());
+      auto      gpuMatches    = extractGpuMatchesForPrint(gpuResults, t, q, numQueryAtoms);
+      printMatches("Actual (GPU)", gpuMatches);
+
+      std::cout << std::endl;
+    }
+  }
+
+  if (result.wrongMappingPairs > 0) {
+    std::cout << "  Mapping mismatches (count correct but indices differ):" << std::endl;
+    printed = 0;
+    for (const auto& [t, q] : result.mappingMismatches) {
+      if (printed++ >= maxDetails) {
+        std::cout << "  ... and " << (result.wrongMappingPairs - maxDetails) << " more mapping mismatches"
+                  << std::endl;
+        break;
+      }
+      std::cout << "  Target[" << t << "]: " << targetSmiles[t] << std::endl;
+      std::cout << "  Query[" << q << "]:  " << querySmarts[q] << std::endl;
+
+      // Get RDKit matches
+      auto rdkitMatches = getRDKitSubstructMatches(*targetMols[t], *queryMols[q], false);
+      printMatches("Expected (RDKit)", rdkitMatches);
+
+      // Get GPU matches
+      const int numQueryAtoms = static_cast<int>(queryMols[q]->getNumAtoms());
+      auto      gpuMatches    = extractGpuMatchesForPrint(gpuResults, t, q, numQueryAtoms);
+      printMatches("Actual (GPU)", gpuMatches);
+
+      std::cout << std::endl;
+    }
+  }
+}
+
 }  // namespace nvMolKit
 

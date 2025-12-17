@@ -464,6 +464,24 @@ TEST(QueryCompositeTest, ChiralityQueryThrows) {
   EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
 }
 
+TEST(QueryCompositeTest, ExcessiveOrBranchesThrows) {
+  // Create a SMARTS with many OR alternatives that exceeds kMaxBoolScratchSize.
+  // Each alternative needs 1 leaf + 1 OR (except the first), so N alternatives
+  // need N leaves + (N-1) ORs = 2N-1 scratch slots.
+  // With kMaxBoolScratchSize=128, we need at least 65 alternatives to overflow.
+  std::string smarts = "[#1";  // Start with hydrogen
+  for (int i = 2; i <= 100; ++i) {
+    smarts += ",#" + std::to_string(i);  // Add element 2-100 as OR alternatives
+  }
+  smarts += "]";  // 100 alternatives = 199 scratch slots needed
+
+  auto mol = makeQuery(smarts);
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
+}
+
 TEST(QueryCompositeTest, WildcardAtomSucceeds) {
   // [*] wildcard atom - matches any atom
   // This is supported as it produces AtomNull which returns AtomQueryNone
