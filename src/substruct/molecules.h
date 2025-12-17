@@ -88,9 +88,10 @@ struct BondData {
  * Bonds can have queries like `-&!@` (single AND not ring bond).
  */
 enum BondQueryFlags : uint8_t {
-  BondQueryNone        = 0,
-  BondQueryIsRingBond  = 1 << 0,  ///< Bond must be in a ring (@)
-  BondQueryNotRingBond = 1 << 1,  ///< Bond must NOT be in a ring (!@)
+  BondQueryNone            = 0,
+  BondQueryIsRingBond      = 1 << 0,  ///< Bond must be in a ring (@)
+  BondQueryNotRingBond     = 1 << 1,  ///< Bond must NOT be in a ring (!@)
+  BondQuerySingleOrAromatic = 1 << 2,  ///< SingleOrAromaticBond query (matches single or aromatic only)
 };
 
 /**

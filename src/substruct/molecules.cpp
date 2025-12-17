@@ -1124,8 +1124,8 @@ void extractBondQueryFlags(const RDKit::Bond* bond, BondQueryData& queryData) {
         queryData.queryFlags |= BondQueryIsRingBond;
       }
     } else if (desc == "SingleOrAromaticBond") {
-      // Single or aromatic - common in SMARTS, treat as any for now
-      queryData.bondType = 0;
+      queryData.queryFlags |= BondQuerySingleOrAromatic;
+      queryData.bondType = 1;  // Base type is single, flag allows aromatic too
     } else if (desc == "BondOrder") {
       const auto* eqQuery = static_cast<const RDKit::BOND_EQUALS_QUERY*>(q);
       queryData.bondType  = eqQuery->getVal();

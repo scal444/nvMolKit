@@ -214,13 +214,19 @@ __device__ __forceinline__ bool checkEdgeConsistency(const MoleculeView& target,
         const int       targetBondIdx = target.getNeighborBondIdx(targetAtom, j);
         const BondData& targetBond    = target.getBond(targetBondIdx, threadIdx.x, blockIdx.x);
 
-        // Check bond type compatibility (handles "any bond" type 0)
-        if (!bondTypeMatches(queryBondType, targetBond.bondType)) {
+        // Check bond type compatibility
+        if (queryBondFlags & BondQuerySingleOrAromatic) {
+          // SingleOrAromaticBond: only match single (1) or aromatic (7, 12) bonds
+          const int tbt = targetBond.bondType;
+          if (tbt != 1 && tbt != 7 && tbt != 12) {
+            continue;
+          }
+        } else if (!bondTypeMatches(queryBondType, targetBond.bondType)) {
           continue;
         }
 
         // Check ring bond constraints if present
-        if (queryBondFlags != 0) {
+        if (queryBondFlags & (BondQueryIsRingBond | BondQueryNotRingBond)) {
           bool targetIsInRing = (targetBond.isInRing != 0);
           if (!ringBondConstraintsSatisfied(queryBondFlags, targetIsInRing)) {
             continue;
