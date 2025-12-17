@@ -571,54 +571,66 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
     // Use hasWork flag instead of continue to ensure all threads hit sync
     const bool hasWork = (myWorkIdx < queueTail && myWorkIdx < maxQueueSize);
 
+    // Copy work item to registers to avoid races with concurrent writes to workQueue
+    int8_t   localMapping[kMaxQueryAtoms];
+    uint32_t localUsedTargetsMask = 0;
+    int      localQueryAtom       = 0;
+
     if (hasWork) {
-      const PartialMatch& work      = workQueue[myWorkIdx % maxQueueSize];
-      const int           queryAtom = work.nextQueryAtom;
+      const PartialMatch& work = workQueue[myWorkIdx];
+      localQueryAtom       = work.nextQueryAtom;
+      localUsedTargetsMask = work.usedTargetsMask;
+      for (int q = 0; q < numQueryAtoms; ++q) {
+        localMapping[q] = work.mapping[q];
+      }
+    }
 
-      if (queryAtom < numQueryAtoms) {
-        const CandidateList& candidates = sharedCandidates[queryAtom];
+    // Ensure all reads from workQueue complete before any writes
+    block.sync();
 
-        // Warp-parallel candidate evaluation
-        for (int cBase = 0; cBase < candidates.count; cBase += kWarpSize) {
-          const int cIdx = cBase + laneId;
+    if (hasWork && localQueryAtom < numQueryAtoms) {
+      const CandidateList& candidates = sharedCandidates[localQueryAtom];
 
-          bool valid      = false;
-          int  targetAtom = -1;
+      // Warp-parallel candidate evaluation
+      for (int cBase = 0; cBase < candidates.count; cBase += kWarpSize) {
+        const int cIdx = cBase + laneId;
 
-          if (cIdx < candidates.count) {
-            targetAtom         = candidates.candidates[cIdx];
-            const bool notUsed = (work.usedTargetsMask & (1u << targetAtom)) == 0;
-            valid = notUsed && checkEdgeConsistency(target, query, work.mapping, queryAtom, targetAtom);
-          }
+        bool valid      = false;
+        int  targetAtom = -1;
 
-          // Use ballot to find valid lanes
-          const uint32_t validMask = __ballot_sync(0xFFFFFFFF, valid);
+        if (cIdx < candidates.count) {
+          targetAtom         = candidates.candidates[cIdx];
+          const bool notUsed = (localUsedTargetsMask & (1u << targetAtom)) == 0;
+          valid = notUsed && checkEdgeConsistency(target, query, localMapping, localQueryAtom, targetAtom);
+        }
 
-          // Each valid lane writes its result
-          if (valid) {
-            if (queryAtom == numQueryAtoms - 1) {
-              // Complete match
-              const int matchIdx = atomicAdd(matchCount, 1);
-              if (matchIdx < maxMatches) {
-                const int writeOffset = matchOffset + matchIdx * numQueryAtoms;
-                for (int q = 0; q < numQueryAtoms; ++q) {
-                  matchIndices[writeOffset + q] =
-                    (q == queryAtom) ? static_cast<int16_t>(targetAtom) : work.mapping[q];
-                }
-                atomicAdd(reportedCount, 1);
+        // Use ballot to find valid lanes
+        const uint32_t validMask = __ballot_sync(0xFFFFFFFF, valid);
+
+        // Each valid lane writes its result
+        if (valid) {
+          if (localQueryAtom == numQueryAtoms - 1) {
+            // Complete match
+            const int matchIdx = atomicAdd(matchCount, 1);
+            if (matchIdx < maxMatches) {
+              const int writeOffset = matchOffset + matchIdx * numQueryAtoms;
+              for (int q = 0; q < numQueryAtoms; ++q) {
+                matchIndices[writeOffset + q] =
+                  (q == localQueryAtom) ? static_cast<int16_t>(targetAtom) : localMapping[q];
               }
-            } else {
-              // Enqueue for next level
-              const int slot = atomicAdd(&queueTail, 1);
-              if (slot < maxQueueSize) {
-                PartialMatch& next = workQueue[slot % maxQueueSize];
-                for (int q = 0; q < numQueryAtoms; ++q) {
-                  next.mapping[q] = work.mapping[q];
-                }
-                next.mapping[queryAtom]  = static_cast<int8_t>(targetAtom);
-                next.usedTargetsMask     = work.usedTargetsMask | (1u << targetAtom);
-                next.nextQueryAtom       = static_cast<int8_t>(queryAtom + 1);
+              atomicAdd(reportedCount, 1);
+            }
+          } else {
+            // Enqueue for next level
+            const int slot = atomicAdd(&queueTail, 1);
+            if (slot < maxQueueSize) {
+              PartialMatch& next = workQueue[slot];
+              for (int q = 0; q < numQueryAtoms; ++q) {
+                next.mapping[q] = localMapping[q];
               }
+              next.mapping[localQueryAtom] = static_cast<int8_t>(targetAtom);
+              next.usedTargetsMask         = localUsedTargetsMask | (1u << targetAtom);
+              next.nextQueryAtom           = static_cast<int8_t>(localQueryAtom + 1);
             }
           }
         }
