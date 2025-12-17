@@ -1,0 +1,178 @@
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7;R1]1[#6]([F,Cl,Br,I])[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#7][#6][#6]1
+# Recursive SMARTS ($(...)) are not supported
+[#7;R1]1[#6]([F,Cl,Br,I])[#6;!$(cN)][#7][#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6;!$(c-N)]1
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7;R1]1[#6]([F,Cl,Br,I])[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6][#6][#7]1
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7;R1]1[#6]([F,Cl,Br,I])[#6][#6][#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#7]1
+# Recursive SMARTS ($(...)) are not supported
+[#7;R1]1[#6;!$(c=O)]([F,Cl,Br,I])[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6;!$(c-N)][#6][#6;!$(c-N)]1
+# Recursive SMARTS ($(...)) are not supported
+[#7;R1]1[#6;!$(c=O)]([F,Cl,Br,I])[#6][#6;!$(cN)][#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6;!$(c=O);!$(cN)]1
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7;R1]1[#6]([F,Cl,Br,I])[#7][#6][#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6]1
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7;R1]1[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6]([F,Cl,Br,I])[#6][#6][#7]1
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7;R1]1[#6][#6]([F,Cl,Br,I])[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6][#7]1
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7,#8,#16]1~[#6;H]~[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])~[#6](=O)~[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])~[#6;H]1
+# Recursive SMARTS ($(...)) are not supported
+[#7;R1]1[#6;!$(c=O);!$(c-N)][#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6]([F,Cl,Br,I])[#6][#6;!$(c=O);!$(c-N)]1
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7]1[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#7;R1][#6]([F,Cl,Br,I])[#6][#6]1([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7]1[#6][#7;R1][#6]([F,Cl,Br,I])[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6]1
+# Unsupported SMARTS atom query: RecursiveStructure
+O=C(-[!N])O[$(nnn),$([#7]-[#7]=[#7])]
+# Recursive SMARTS ($(...)) are not supported
+[CH2]=[C;!$(C-N);!$(C-O)]C(=O)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6]1~[$(C(=O)),$(S(=O))]~[O,S,N]~[$(C(=O)),$(S(=O))]1
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O))]C#[C;!$(C-N);!$(C-n)]
+# Unsupported SMARTS atom query: RecursiveStructure
+[N;!R]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O))])=[N;!R]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O))])
+# Unsupported SMARTS atom query: RecursiveStructure
+O=COC=[$(C(S(=O)(=O))),$(C(C(F)(F)(F))),$(C(C#N)),$(C(N(=O)(=O))),$(C([N+](=O)[O-])),$(C(C(=O)));!$(C(N))]
+# Unsupported SMARTS atom query: RecursiveStructure
+O(-S(=O)(=O))C=[$(C(S(=O)(=O))),$(C(C(F)(F)(F))),$(C(C#N)),$(C(N(=O)(=O))),$(C([N+](=O)[O-])),$(C(C(=O)));!$(C(N))]
+# Unsupported SMARTS atom query: RecursiveStructure
+O=C(-[!N])O[$([#7;+]),$(N(C=[O,S,N])(C=[O,S,N]))]
+# Recursive SMARTS ($(...)) are not supported
+[C;!$(C-N)](=O)[#7]1[#6;H1,$([#6]([*;!R]))][#7][#6;H1,$([#6]([*;!R]))][#6;H1,$([#6]([*;!R]))]1
+# Recursive SMARTS ($(...)) are not supported
+[C;!$(C-N)](=O)[#7]1[#7][#6;H1,$([#6]([*;!R]))][#6;H1,$([#6]([*;!R]))][#6;H1,$([#6]([*;!R]))]1
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-])]-[CH,CH2]-[Cl,Br,I,$(O(S(=O)(=O)))]
+# Unsupported SMARTS atom query: RecursiveStructure
+C(=O)([CH,CH2][Cl,Br,I,$(O(S(=O)(=O)))])
+# Recursive SMARTS ($(...)) are not supported
+[N,n,O,S;!$(S(=O)(=O))]-C([Cl,Br,I,$(O(S(=O)(=O)))])(C)(C)
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(C(=O)),$(C(=S))]-[O,S]-[$(C(=O)),$(C(=S)),$(C(=[N;!R])),$(C(=N(-[C;X4])))]
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(N#[N+]-[N-]),$([N-]=[N+]=N)]
+# Recursive SMARTS ($(...)) are not supported
+[N;!$(N-S(=O)(=O));!$(N-C=O)]-[N;!r3;!$(N-S(=O)(=O));!$(N-C=O)]-[N;!$(N-S(=O)(=O));!$(N-C=O)]
+# Unsupported SMARTS atom query: RecursiveStructure
+[B-,BH2,BH3,$(B(F)(F))]
+# Unsupported SMARTS atom query: RecursiveStructure
+C1(=O)~[#6]~[#6]N1([$(S(=O)(=O)[C,c,O&D2]),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)[C,c,O&D2])])
+# Unsupported SMARTS atom query: RecursiveStructure
+O=[C,S]Oc1aaa([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aa([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])1
+# Unsupported SMARTS atom query: RecursiveStructure
+CC(=O)[$([C&H1]),$(C-F),$(C-Cl),$(C-Br),$(C-I)]=[$([C&H1]),$(C-F),$(C-Cl),$(C-Br),$(C-I)]C(=O)C
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([Ru]),$([Rh]),$([Se]),$([se]),$([Pd]),$([Sc]),$([Bi]),$([Sb]),$([Ag]),$([Ti]),$([Al]),$([Cd]),$([V]),$([In]),$([Cr]),$([Sn]),$([Mn]),$([La]),$([Fe]),$([Er]),$([Tm]),$([Yb]),$([Lu]),$([Hf]),$([Ta]),$([W]),$([Re]),$([Co]),$([Os]),$([Ni]),$([Ir]),$([Cu]),$([Zn]),$([Ga]),$([Ge]),$([As]),$([as]),$([Y]),$([Zr]),$([Nb]),$([Ce]),$([Pr]),$([Nd]),$([Sm]),$([Eu]),$([Gd]),$([Tb]),$([Dy]),$([Ho]),$([Pt]),$([Au]),$([Hg]),$([Tl]),$([Pb]),$([Ac]),$([Th]),$([Pa]),$([Mo]),$([U]),$([Tc]),$([Te]),$([Po]),$([At])]
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([O,S,#7;R1;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][O,S,#7;R1;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][O,S,#7;R1;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18]),$([O,S,#7;R1;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][O,S,#7;R1;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][O,S,#7;R1;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18]),$([O,S,#7;R1;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][O,S,#7;R1;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][CH,CH2;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18][O,S,#7;R1;r9,r10,r11,r12,r13,r14,r15,r16,r17,r18])]
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(N=N=C~C=O),$(N#N-C~C=O)]
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(N(-C(=O))(-C(=O))(-S(=O))),$(n([#6](=O))([#6](=O))([#16](=O)))]
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 4 disconnected components: C#N.C#N.C#N.C#N
+C#N.C#N.C#N.C#N
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: [N,n;H0;+;!$(N~O);!$(n~O)].[N,n;H0;+;!$(N~O);!$(n~O)]
+[N,n;H0;+;!$(N~O);!$(n~O)].[N,n;H0;+;!$(N~O);!$(n~O)]
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: P([O&D1])=O.P([O&D1])=O
+P([O;D1])=O.P([O;D1])=O
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: [C,c]S(=O)(=O)[O&D1].[C,c]S(=O)(=O)[O&D1]
+[C,c]S(=O)(=O)[O;D1].[C,c]S(=O)(=O)[O;D1]
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 3 disconnected components: C(=O)[O&D1].C(=O)[O&D1].C(=O)[O&D1]
+C(=O)[O;D1].C(=O)[O;D1].C(=O)[O;D1]
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 3 disconnected components: [#53].[#53].[#53]
+[#53].[#53].[#53]
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 4 disconnected components: [N&!$(N=[N,O,S,C])&!$(NS(=O)=O)&!$(NC(F)(F)F)&!$(NC#N)&!$(NC=O)&!$(NC=S)&!$(NC=N)&!$(N#C)&!$(Nc)].[N&!$(N=[N,O,S,C])&!$(NS(=O)=O)&!$(NC(F)(F)F)&!$(NC#N)&!$(NC=O)&!$(NC=S)&!$(NC=N)&!$(N#C)&!$(Nc)].[N&!$(N=[N,O,S,C])&!$(NS(=O)=O)&!$(NC(F)(F)F)&!$(NC#N)&!$(NC=O)&!$(NC=S)&!$(NC=N)&!$(N#C)&!$(Nc)].[N&!$(N=[N,O,S,C])&!$(NS(=O)=O)&!$(NC(F)(F)F)&!$(NC#N)&!$(NC=O)&!$(NC=S)&!$(NC=N)&!$(N#C)&!$(N-c)]
+[N;!$(N(=[N,O,S,C]));!$(N(S(=O)(=O)));!$(N(C(F)(F)(F)));!$(N(C#N));!$(N(C(=O)));!$(N(C(=S)));!$(N(C(=N)));!$(N(#C));!$(Nc)].[N;!$(N(=[N,O,S,C]));!$(N(S(=O)(=O)));!$(N(C(F)(F)(F)));!$(N(C#N));!$(N(C(=O)));!$(N(C(=S)));!$(N(C(=N)));!$(N(#C));!$(Nc)].[N;!$(N(=[N,O,S,C]));!$(N(S(=O)(=O)));!$(N(C(F)(F)(F)));!$(N(C#N));!$(N(C(=O)));!$(N(C(=S)));!$(N(C(=N)));!$(N(#C));!$(Nc)].[N;!$(N(=[N,O,S,C]));!$(N(S(=O)(=O)));!$(N(C(F)(F)(F)));!$(N(C#N));!$(N(C(=O)));!$(N(C(=S)));!$(N(C(=N)));!$(N(#C));!$(N-c)]
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 4 disconnected components: [$([N&+](=O)[O&-]),$(N(=O)=O)].[$([N&+](=O)[O&-]),$(N(=O)=O)].[$([N&+](=O)[O&-]),$(N(=O)=O)].[$([N&+](=O)[O&-]),$(N(=O)=O)]
+[$([N+](=O)[O-]),$(N(=O)=O)].[$([N+](=O)[O-]),$(N(=O)=O)].[$([N+](=O)[O-]),$(N(=O)=O)].[$([N+](=O)[O-]),$(N(=O)=O)]
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 5 disconnected components: a[O&D1].a[O&D1].a[O&D1].a[O&D1].a[O&D1]
+a[O;D1].a[O;D1].a[O;D1].a[O;D1].a[O;D1]
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 7 disconnected components: C[O&D1].C[O&D1].C[O&D1].C[O&D1].C[O&D1].C[O&D1].C[O&D1]
+C[O;D1].C[O;D1].C[O;D1].C[O;D1].C[O;D1].C[O;D1].C[O;D1]
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 7 disconnected components: [Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I]
+[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I]
+# Unsupported SMARTS atom query: RecursiveStructure
+[#7,#8,#16]1[#6]([$(S(=O)(=O)),$([F,Cl]),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O))])[#6]([$(S(=O)(=O)),$([F,Cl]),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O))])[#7][#6]1([Cl,Br,I])
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([C;H2]),$([C&H1;$(C-F)]),$([C&H1;$(C-Cl)]),$([C&H1;$(C-Br)]),$([C&H1;$(CI)]),$(C(F)F),$(C(Cl)Cl),$(C(Br)Br),$(C(I)I),$(C(F)Cl),$(C(F)Br),$(C(F)I),$(C(Cl)Br),$(C(Br)I)](=[$([C&H1;$(C(-C(=O)))]),$(C(F)(C(=O))),$(C(Cl)(C(=O))),$(C(Br)(C(=O))),$(C(I)(C(=O))),$(C(C)(C(=O))),$(C(c)(C(=O)))])
+# Unsupported SMARTS atom query: RecursiveStructure
+C(=[#7])([Cl,Br,I,$(O(S(=O)(=O)))])
+# Unsupported SMARTS atom query: RecursiveStructure
+C([Cl,Br,I,$(O(S(=O)(=O)))])=C([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])
+# Unsupported SMARTS atom query: RecursiveStructure
+C(=O)Oc1c([Cl,F])[cH1,$(c[F,Cl])]c([F,Cl])[cH1,$(c[F,Cl])]c1([F,Cl])
+# Unsupported SMARTS atom query: RecursiveStructure
+S(=O)Oc1c([Cl,F])[cH1,$(c[F,Cl])]c([F,Cl])[cH1,$(c[F,Cl])]c1([F,Cl])
+# Recursive SMARTS ($(...)) are not supported
+[N;X3;!$(N-S(=O)(=O));!$(N-C(F)(F)(F));!$(N-C#N);!$(N-C(=O));!$(N-C(=S));!$(N-C(=N))]-[N;X3;!$(N-S(=O)(=O));!$(N-C(F)(F)(F));!$(N-C#N);!$(N-C(=O));!$(N-C(=S));!$(N-C(=N))]
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([#16&D3]),$([#16&D4])]=,:[#6]
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(c([C;!R;!$(C-[N,O,S]);!$(C-[H])](=O))1naaaa1),$(c([C;!R;!$(C-[N,O,S]);!$(C-[H])](=O))1naa[n,s,o]1)]
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(a12aaaaa1aa3a(aa(aaaa4)a4a3)a2),$(a12aaaaa1aa3a(aaa4a3aaaa4)a2),$(a12aaaaa1a(aa5)a3a(aaa4a3a5aaa4)a2)]
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(a12aaaa4a1a3a(aaaa3aa4)aa2),$(a12aaaaa1a3a(aaa4a3aaaa4)aa2),$(a1(a(aaaa4)a4a3a2aaaa3)a2aaaa1)]
+# Unsupported SMARTS atom query: RecursiveStructure
+[$([C;H1]),$(C(-[F,Cl,Br,I]))]1=[$([C;H1]),$(C(-[F,Cl,Br,I]))]C(=O)[N,O,S]C(=O)1
+# Recursive SMARTS ($(...)) are not supported
+[O,N,S;!$(S~O)]!@[CH2]!@[O,S,N;!$(S~O)]
+# Recursive SMARTS ($(...)) are not supported
+[O,N,S;!$(S~O)]!@[C;H1;X4]!@[O,N,S;!$(S~O)]
+# Recursive SMARTS ($(...)) are not supported
+[O,N,S;!$(S~O)]!@[C;H0;X4](!@[O,N,S;!$(S~O)])(C)
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6]1(-O-[C;!R](=[O,N;!R]))[#6]([$(N(=O)(=O)),$([N+](=O)[O-])])[#6][#6][#6][#6]1
+# Unsupported SMARTS atom query: RecursiveStructure
+[CH1,$(C(-[Cl,Br,I]))]1=CC(=[O,N,S;!R])C(=[O,N,S])C=[CH1,$(C(-[Cl,Br,I]))]1
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(C=N[O;D1]);!$(C=[N+])][#6][#6]
+# Unsupported SMARTS atom query: RecursiveStructure
+[#6]1(-O(-[C;!R](-[!N])(=[O,N;!R])))[#6][#6][#6]([$(N(=O)(=O)),$([N+](=O)[O-])])[#6][#6]1
+# Unsupported SMARTS atom query: RecursiveStructure
+[CH1,$(C(-[Cl,Br,I]))]1=[CH1,$(C(-[Cl,Br,I]))]C(=[O,N,S])[CH1,$(C(-[Cl,Br,I]))]=[CH1,$(C(-[Cl,Br,I]))]C1(=[O,N,S])
+# Unsupported SMARTS atom query: RecursiveStructure
+O=[C,S]Oc1aaa([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aa([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])1
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: c1c([O&D1])c(-[Cl,Br,I])c(-[Cl,Br,I])cc1.c1c([O&D1])c(-[Cl,Br,I])c(-[Cl,Br,I])cc1
+c1c([O;D1])c(-[Cl,Br,I])c(-[Cl,Br,I])cc1.c1c([O;D1])c(-[Cl,Br,I])c(-[Cl,Br,I])cc1
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: c1c([O&D1])c(-[Cl,Br,I])cc(-[Cl,Br,I])c1.c1c([O&D1])c(-[Cl,Br,I])cc(-[Cl,Br,I])c1
+c1c([O;D1])c(-[Cl,Br,I])cc(-[Cl,Br,I])c1.c1c([O;D1])c(-[Cl,Br,I])cc(-[Cl,Br,I])c1
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: c1c([O&D1])ccc(-[Cl,Br,I])c1-[Cl,Br,I].c1c([O&D1])ccc(-[Cl,Br,I])c1-[Cl,Br,I]
+c1c([O;D1])ccc(-[Cl,Br,I])c(-[Cl,Br,I])1.c1c([O;D1])ccc(-[Cl,Br,I])c(-[Cl,Br,I])1
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: c1(-[Cl,Br,I])c([O&D1])c(-[Cl,Br,I])ccc1.c1(-[Cl,Br,I])c([O&D1])c(-[Cl,Br,I])ccc1
+c(-[Cl,Br,I])1c([O;D1])c(-[Cl,Br,I])ccc1.c(-[Cl,Br,I])1c([O;D1])c(-[Cl,Br,I])ccc1
+# Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: c1c([O&D1])ccc(-[Cl,Br,I])c1-[Cl,Br,I].c1c([O&D1])ccc(-[Cl,Br,I])c1-[Cl,Br,I]
+c1c([O;D1])ccc(-[Cl,Br,I])c(-[Cl,Br,I])1.c1c([O;D1])ccc(-[Cl,Br,I])c(-[Cl,Br,I])1
+# Unsupported SMARTS atom query: RecursiveStructure
+[CH2][Cl,Br,I,$(O(S(=O)(=O)[!$(N);!$([O&D1])]))]
+# Recursive SMARTS ($(...)) are not supported
+[#6;!$([#6](-[N,O,S]))]1=[#6;!$([#6](-[N,O,S]))][#6](=[#6])[#6;!$([#6](-[N,O,S]))]=[#6;!$([#6](-[N,O,S]))][#6]1(=[O,N,S])
+# Recursive SMARTS ($(...)) are not supported
+[CH;!$(C=C)][Cl,Br,I,$(O(S(=O)(=O)[!$(N);!$([O&D1])]))]
+# Recursive SMARTS ($(...)) are not supported
+[S;D2](-[N;!$(N(=C));!$(N(-S(=O)(=O)));!$(N(-C(=O)))])
+# Unsupported SMARTS atom query: RecursiveStructure
+[S+;X3;$(S-C);!$(S-[O;D1])]
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(C(=O)),$(S(=O)(=O))][O,S](S(=O)(=O))
+# Unsupported SMARTS atom query: RecursiveStructure
+[C;X4](-[Cl,Br,I,$(O(S(=O)(=O)[!$(N);!$([O&D1])]))])(-[c,C])(-[c,C])(-[c,C])
+# Unsupported SMARTS atom query: RecursiveStructure
+[S;D2]([$(N(=C)),$(N(-S(=O)(=O))),$(N(-C(=O)))])
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(N(-C(=O))(-C(=O))(-C(=O))),$(n([#6](=O))([#6](=O))([#6](=O)))]
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(C(=O));!$(C-N);!$(C-O);!$(C-S)]C(Cl)(Cl)(Cl)
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(C(=O));!$(C-N);!$(C-O);!$(C-S)]C(F)(F)(F)
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(a1aaa([$(N(=O)(=O)),$([N+](=O)[O-])])a([$(N(=O)(=O)),$([N+](=O)[O-])])a1([$(N(=O)(=O)),$([N+](=O)[O-])])),$(a1aa([$(N(=O)(=O)),$([N+](=O)[O-])])a([$(N(=O)(=O)),$([N+](=O)[O-])])aa1([$(N(=O)(=O)),$([N+](=O)[O-])])),$(a1a([$(N(=O)(=O)),$([N+](=O)[O-])])aa([$(N(=O)(=O)),$([N+](=O)[O-])])aa1([$(N(=O)(=O)),$([N+](=O)[O-])]))]
+# Unsupported SMARTS atom query: RecursiveStructure
+C([$([N+](=O)[O-]),$(N(=O)=O)])([$([N+](=O)[O-]),$(N(=O)=O)])([$([N+](=O)[O-]),$(N(=O)=O)])
+# Unsupported SMARTS atom query: RecursiveStructure
+[$(O=[C,S]Oc1a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aa1),$(O=[C,S]Oc1a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aaa([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])1),$(O=[C,S]Oc1a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aa([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])a1),$(O=[C,S]Oc1a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aa([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aa([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])1)]
+# Unsupported SMARTS atom query: RecursiveStructure
+[C;!R]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])=[C;!R]([C;!R](=O))([!$([#8]);!$([#7])])

@@ -1585,34 +1585,6 @@ TEST_P(SubstructureSearchTest, ImplicitHCountNoMatch) {
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[CH2] in CC");
 }
 
-TEST_P(SubstructureSearchTest, SingleMolSingleQueryForDebugging) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
-  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
-  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
-
-  const std::string target = "CCC(=O)[C@@H]1C[C@@H](C)[C@]2(CC[C@@]3(C)C4=C(CC[C@@]32C)[C@@]2(C)CC[C@H](O[C@@H]3O[C@H](CO[C@@H]5OC[C@H](O)[C@H](O)[C@H]5O[C@@H]5O[C@H](CO)[C@@H](O)[C@H](O[C@@H]6OC[C@H](O)[C@H](O)[C@H]6O[C@@H]6OC[C@@H](O)[C@H](O)[C@H]6O)[C@H]5O[C@@H]5O[C@@H](C)[C@H](O)[C@@H](O)[C@H]5O)[C@@H](O)[C@H](O)[C@H]3O)[C@](C)(CO)[C@@H]2CC4)O1";
-  const std::string query = "O1CCCCC1OC2CCC3CCCCC3C2";
-  buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
-
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
-  SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
-
-  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
-    << "GPU should match RDKit for query " << algorithmName(algorithm());
-
-}
 
 TEST_P(SubstructureSearchTest, DoubleOrAromaticBond) {
   MoleculesHost                              targetsHost;
@@ -1734,4 +1706,35 @@ TEST_P(SubstructureSearchTest, ImpossibleBondConstraint) {
     << "Impossible bond constraint should match 0 (RDKit says " << rdkitMatches.size() << ")";
   EXPECT_EQ(resultsHost.matchCounts[0], 0)
     << "Impossible bond constraint (single AND aromatic) should never match";
+}
+
+
+// KEEP this as the last test
+TEST_P(SubstructureSearchTest, SingleMolSingleQueryForDebugging) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  const std::string target = "C[C@H](NC(=O)OCc1ccccc1)C(=O)N[C@@H](C)C(=O)NN(CC(N)=O)C(=O)/C=C/C(=O)N(Cc1ccco1)Cc1ccco1";  // Benzene - has aromatic bonds
+  const std::string query  = " *=*[*]=,#,:[*]"; 
+  buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+    << "GPU should match RDKit for query " << algorithmName(algorithm());
+
 }

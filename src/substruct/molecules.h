@@ -95,16 +95,20 @@ enum BondQueryFlags : uint8_t {
   BondQueryDoubleOrAromatic = 1 << 3,  ///< DoubleOrAromaticBond query (matches double or aromatic only)
   BondQueryAromaticOnly    = 1 << 4,  ///< Aromatic bond query (:) - matches aromatic bonds only (type 7 or 12)
   BondQueryNeverMatches    = 1 << 5,  ///< Impossible constraint (e.g., single AND aromatic)
+  BondQueryUseBondMask     = 1 << 6,  ///< Use allowedBondTypes bitmask for arbitrary OR patterns
 };
 
 /**
  * @brief Bond query data for SMARTS bond queries.
  *
  * Stores the bond type to match and ring bond constraints.
+ * For complex OR patterns (e.g., =,#,:), allowedBondTypes is a bitmask where
+ * bit N is set if bond type N is allowed (types 0-15 supported).
  */
 struct BondQueryData {
-  uint8_t bondType   = 0;  ///< 0 = any, 1 = single, 2 = double, 3 = triple, 12 = aromatic
-  uint8_t queryFlags = 0;  ///< BondQueryFlags bitmask
+  uint8_t  bondType         = 0;  ///< 0 = any, 1 = single, 2 = double, 3 = triple, 12 = aromatic
+  uint8_t  queryFlags       = 0;  ///< BondQueryFlags bitmask
+  uint16_t allowedBondTypes = 0;  ///< Bitmask of allowed bond types when BondQueryUseBondMask is set
 };
 
 /**

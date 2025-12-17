@@ -45,16 +45,24 @@ enum class SmartsStatus {
 };
 
 /**
- * @brief Trim leading and trailing whitespace from a string.
+ * @brief Extract the first whitespace-delimited token from a line.
+ *
+ * Handles formats like:
+ *   - "SMARTS" (just the pattern)
+ *   - "SMARTS   description" (pattern + description)
+ *   - "SMARTS   description   # comment" (pattern + description + comment)
  */
-std::string trim(const std::string& str) {
+std::string extractSmarts(const std::string& line) {
   const char* ws = " \t\n\r";
-  size_t start = str.find_first_not_of(ws);
+  size_t start = line.find_first_not_of(ws);
   if (start == std::string::npos) {
     return "";
   }
-  size_t end = str.find_last_not_of(ws);
-  return str.substr(start, end - start + 1);
+  size_t end = line.find_first_of(ws, start);
+  if (end == std::string::npos) {
+    return line.substr(start);
+  }
+  return line.substr(start, end - start);
 }
 
 /**
@@ -141,7 +149,7 @@ int main(int argc, char* argv[]) {
 
   std::string line;
   while (std::getline(input, line)) {
-    std::string smarts = trim(line);
+    std::string smarts = extractSmarts(line);
 
     // Skip empty lines and comments
     if (smarts.empty() || smarts[0] == '#') {

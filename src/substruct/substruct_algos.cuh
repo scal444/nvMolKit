@@ -197,12 +197,14 @@ __device__ __forceinline__ bool checkEdgeConsistency(const MoleculeView& target,
     const int queryBondIdx       = query.getNeighborBondIdx(queryAtom, i);
 
     // Get query bond info
-    int     queryBondType  = query.getBond(queryBondIdx, threadIdx.x, blockIdx.x).bondType;
-    uint8_t queryBondFlags = 0;
+    int      queryBondType       = query.getBond(queryBondIdx, threadIdx.x, blockIdx.x).bondType;
+    uint8_t  queryBondFlags      = 0;
+    uint16_t queryAllowedBondTypes = 0;
     if (hasBondQueryData) {
       const BondQueryData& bqd = query.getBondQuery(queryBondIdx);
-      queryBondType  = bqd.bondType;
-      queryBondFlags = bqd.queryFlags;
+      queryBondType       = bqd.bondType;
+      queryBondFlags      = bqd.queryFlags;
+      queryAllowedBondTypes = bqd.allowedBondTypes;
     }
 
     // Check if targetAtom has an edge to neighborTargetAtom with compatible bond
@@ -218,22 +220,10 @@ __device__ __forceinline__ bool checkEdgeConsistency(const MoleculeView& target,
         if (queryBondFlags & BondQueryNeverMatches) {
           // Impossible constraint (e.g., single AND aromatic) - never matches
           continue;
-        } else if (queryBondFlags & BondQuerySingleOrAromatic) {
-          // SingleOrAromaticBond: only match single (1) or aromatic (7, 12) bonds
+        } else if (queryBondFlags & BondQueryUseBondMask) {
+          // Bond OR pattern: check if target bond type is in allowed mask
           const int tbt = targetBond.bondType;
-          if (tbt != 1 && tbt != 7 && tbt != 12) {
-            continue;
-          }
-        } else if (queryBondFlags & BondQueryDoubleOrAromatic) {
-          // DoubleOrAromaticBond: only match double (2) or aromatic (7, 12) bonds
-          const int tbt = targetBond.bondType;
-          if (tbt != 2 && tbt != 7 && tbt != 12) {
-            continue;
-          }
-        } else if (queryBondFlags & BondQueryAromaticOnly) {
-          // Aromatic bond query (:): only match aromatic bonds (7 or 12)
-          const int tbt = targetBond.bondType;
-          if (tbt != 7 && tbt != 12) {
+          if (tbt < 0 || tbt >= 16 || !(queryAllowedBondTypes & (1u << tbt))) {
             continue;
           }
         } else if (!bondTypeMatches(queryBondType, targetBond.bondType)) {

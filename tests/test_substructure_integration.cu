@@ -24,6 +24,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "cuda_error_check.h"
@@ -61,6 +62,16 @@ namespace {
 
 constexpr size_t kMaxAtoms  = 128;
 constexpr size_t kNumSmiles = 100;
+
+struct DatasetConfig {
+  const char* smartsFile;
+  const char* name;
+};
+
+constexpr DatasetConfig kDatasets[] = {
+  {"pwalters_alert_collection_supported.txt", "PwaltersAlertCollection"},
+  {"openbabel_functional_groups_supported.txt", "OpenBabelFunctionalGroups"},
+};
 
 struct SmallestRepro {
   int t = -1;
@@ -242,26 +253,33 @@ void printSmallestReprosSimple(const SmallestRepros&           repros,
 
 }  // namespace
 
-class SubstructureIntegrationTest : public ::testing::TestWithParam<SubstructAlgorithm> {
+using SubstructParams = std::tuple<SubstructAlgorithm, DatasetConfig>;
+
+class SubstructureIntegrationTest : public ::testing::TestWithParam<SubstructParams> {
  protected:
   ScopedStream stream_;
   std::string  testDataPath_;
 
   void SetUp() override { testDataPath_ = getTestDataFolderPath(); }
 
-  SubstructAlgorithm algorithm() const { return GetParam(); }
+  SubstructAlgorithm algorithm() const { return std::get<0>(GetParam()); }
+  const DatasetConfig& dataset() const { return std::get<1>(GetParam()); }
 };
 
-INSTANTIATE_TEST_SUITE_P(AllAlgorithms,
-                         SubstructureIntegrationTest,
-                         ::testing::Values( SubstructAlgorithm::GSI),
-                         [](const ::testing::TestParamInfo<SubstructAlgorithm>& info) {
-                           return algorithmName(info.param);
-                         });
+INSTANTIATE_TEST_SUITE_P(
+  AllCombinations,
+  SubstructureIntegrationTest,
+  ::testing::Combine(
+    ::testing::Values(SubstructAlgorithm::GSI),
+    ::testing::ValuesIn(kDatasets)),
+  [](const ::testing::TestParamInfo<SubstructParams>& info) {
+    return std::string(algorithmName(std::get<0>(info.param))) + "_" +
+           std::get<1>(info.param).name;
+  });
 
-TEST_P(SubstructureIntegrationTest, ChemblVsAlertCollection) {
+TEST_P(SubstructureIntegrationTest, ChemblVsSmarts) {
   const std::string smilesPath = testDataPath_ + "/chembl_1k.smi";
-  const std::string smartsPath = testDataPath_ + "/SMARTS/pwalters_alert_collection_supported.txt";
+  const std::string smartsPath = testDataPath_ + "/SMARTS/" + dataset().smartsFile;
 
   ASSERT_TRUE(std::filesystem::exists(smilesPath)) << "SMILES file not found: " << smilesPath;
   ASSERT_TRUE(std::filesystem::exists(smartsPath)) << "SMARTS file not found: " << smartsPath;
@@ -390,17 +408,27 @@ __global__ void populateLabelMatrixKernelForIntegration(nvMolKit::MoleculesDevic
   nvMolKit::populateLabelMatrixOptimized<MaxTarget, MaxQuery>(target, query, view);
 }
 
-class LabelMatrixIntegrationTest : public ::testing::Test {
+class LabelMatrixIntegrationTest : public ::testing::TestWithParam<DatasetConfig> {
  protected:
   ScopedStream stream_;
   std::string  testDataPath_;
 
   void SetUp() override { testDataPath_ = getTestDataFolderPath(); }
+
+  const DatasetConfig& dataset() const { return GetParam(); }
 };
 
-TEST_F(LabelMatrixIntegrationTest, ChemblVsAlertCollectionLabelMatrix) {
+INSTANTIATE_TEST_SUITE_P(
+  AllDatasets,
+  LabelMatrixIntegrationTest,
+  ::testing::ValuesIn(kDatasets),
+  [](const ::testing::TestParamInfo<DatasetConfig>& info) {
+    return std::string(info.param.name);
+  });
+
+TEST_P(LabelMatrixIntegrationTest, ChemblVsSmartsLabelMatrix) {
   const std::string smilesPath = testDataPath_ + "/chembl_1k.smi";
-  const std::string smartsPath = testDataPath_ + "/SMARTS/pwalters_alert_collection_supported.txt";
+  const std::string smartsPath = testDataPath_ + "/SMARTS/" + dataset().smartsFile;
 
   ASSERT_TRUE(std::filesystem::exists(smilesPath)) << "SMILES file not found: " << smilesPath;
   ASSERT_TRUE(std::filesystem::exists(smartsPath)) << "SMARTS file not found: " << smartsPath;

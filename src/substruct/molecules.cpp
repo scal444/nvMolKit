@@ -1170,36 +1170,48 @@ void extractBondQueryFlags(const RDKit::Bond* bond, BondQueryData& queryData) {
     }
 
     if (desc == "BondOr") {
-      // Check if this is a "single or aromatic" or "double or aromatic" pattern
-      bool hasSingle   = false;
-      bool hasDouble   = false;
-      bool hasAromatic = false;
-      for (auto it = q->beginChildren(); it != q->endChildren(); ++it) {
-        const std::string childDesc = (*it)->getDescription();
-        if (childDesc == "BondOrder") {
-          const auto* eqQuery  = static_cast<const RDKit::BOND_EQUALS_QUERY*>((*it).get());
-          int         bondType = eqQuery->getVal();
-          if (bondType == 1) {
-            hasSingle = true;
-          } else if (bondType == 2) {
-            hasDouble = true;
-          } else if (bondType == 7 || bondType == 12) {
-            hasAromatic = true;
+      // Collect all allowed bond types from the OR pattern (recursive for nested BondOr)
+      std::function<uint16_t(const RDKit::Bond::QUERYBOND_QUERY*)> collectBondMask;
+      collectBondMask = [&](const RDKit::Bond::QUERYBOND_QUERY* orQuery) -> uint16_t {
+        uint16_t mask = 0;
+        for (auto it = orQuery->beginChildren(); it != orQuery->endChildren(); ++it) {
+          const std::string childDesc = (*it)->getDescription();
+          if (childDesc == "BondOr") {
+            mask |= collectBondMask((*it).get());
+          } else if (childDesc == "BondOrder") {
+            const auto* eqQuery  = static_cast<const RDKit::BOND_EQUALS_QUERY*>((*it).get());
+            int         bondType = eqQuery->getVal();
+            if (bondType >= 0 && bondType < 16) {
+              mask |= (1u << bondType);
+              if (bondType == 7 || bondType == 12) {
+                mask |= (1u << 7) | (1u << 12);
+              }
+            }
+          } else if (childDesc == "BondIsAromatic") {
+            mask |= (1u << 7) | (1u << 12);
+          } else if (childDesc == "DoubleOrAromaticBond") {
+            mask |= (1u << 2) | (1u << 7) | (1u << 12);
+          } else if (childDesc == "SingleOrAromaticBond") {
+            mask |= (1u << 1) | (1u << 7) | (1u << 12);
+          } else if (childDesc == "TripleBond") {
+            mask |= (1u << 3);
+          } else if (childDesc == "DoubleBond") {
+            mask |= (1u << 2);
+          } else if (childDesc == "SingleBond") {
+            mask |= (1u << 1);
           }
-        } else if (childDesc == "BondIsAromatic") {
-          hasAromatic = true;
         }
-      }
-      if (hasSingle && hasAromatic) {
-        queryData.queryFlags |= BondQuerySingleOrAromatic;
-        queryData.bondType = 1;
+        return mask;
+      };
+
+      uint16_t bondMask = collectBondMask(q);
+
+      if (bondMask != 0) {
+        queryData.queryFlags |= BondQueryUseBondMask;
+        queryData.allowedBondTypes = bondMask;
         return;
       }
-      if (hasDouble && hasAromatic) {
-        queryData.queryFlags |= BondQueryDoubleOrAromatic;
-        queryData.bondType = 2;
-        return;
-      }
+
       // Fall through to process children normally for other BondOr patterns
       for (auto it = q->beginChildren(); it != q->endChildren(); ++it) {
         processQuery((*it).get());
@@ -1214,19 +1226,29 @@ void extractBondQueryFlags(const RDKit::Bond* bond, BondQueryData& queryData) {
         queryData.queryFlags |= BondQueryIsRingBond;
       }
     } else if (desc == "SingleOrAromaticBond") {
-      queryData.queryFlags |= BondQuerySingleOrAromatic;
-      queryData.bondType = 1;  // Base type is single, flag allows aromatic too
+      queryData.queryFlags |= BondQueryUseBondMask;
+      queryData.allowedBondTypes = (1u << 1) | (1u << 7) | (1u << 12);  // single, oneandahalf, aromatic
     } else if (desc == "DoubleOrAromaticBond") {
-      queryData.queryFlags |= BondQueryDoubleOrAromatic;
-      queryData.bondType = 2;  // Base type is double, flag allows aromatic too
+      queryData.queryFlags |= BondQueryUseBondMask;
+      queryData.allowedBondTypes = (1u << 2) | (1u << 7) | (1u << 12);  // double, oneandahalf, aromatic
     } else if (desc == "BondIsAromatic") {
-      // Aromatic bond query (:) - must match aromatic bonds (type 7 or 12)
-      queryData.queryFlags |= BondQueryAromaticOnly;
+      queryData.queryFlags |= BondQueryUseBondMask;
+      queryData.allowedBondTypes = (1u << 7) | (1u << 12);  // oneandahalf, aromatic
     } else if (desc == "BondOrder") {
-      const auto* eqQuery = static_cast<const RDKit::BOND_EQUALS_QUERY*>(q);
-      queryData.bondType  = eqQuery->getVal();
+      const auto* eqQuery  = static_cast<const RDKit::BOND_EQUALS_QUERY*>(q);
+      int         bondType = eqQuery->getVal();
+      queryData.bondType   = bondType;
+      // Also set up mask for consistency with edge consistency checker
+      if (bondType >= 0 && bondType < 16) {
+        queryData.queryFlags |= BondQueryUseBondMask;
+        queryData.allowedBondTypes = (1u << bondType);
+        // Aromatic bonds can be stored as type 7 or 12
+        if (bondType == 7 || bondType == 12) {
+          queryData.allowedBondTypes |= (1u << 7) | (1u << 12);
+        }
+      }
     } else if (desc == "BondNull") {
-      queryData.bondType = 0;  // Any bond
+      queryData.bondType = 0;  // Any bond - don't set mask, bondTypeMatches handles type 0
     }
   };
 
