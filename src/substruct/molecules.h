@@ -93,6 +93,8 @@ enum BondQueryFlags : uint8_t {
   BondQueryNotRingBond     = 1 << 1,  ///< Bond must NOT be in a ring (!@)
   BondQuerySingleOrAromatic = 1 << 2,  ///< SingleOrAromaticBond query (matches single or aromatic only)
   BondQueryDoubleOrAromatic = 1 << 3,  ///< DoubleOrAromaticBond query (matches double or aromatic only)
+  BondQueryAromaticOnly    = 1 << 4,  ///< Aromatic bond query (:) - matches aromatic bonds only (type 7 or 12)
+  BondQueryNeverMatches    = 1 << 5,  ///< Impossible constraint (e.g., single AND aromatic)
 };
 
 /**

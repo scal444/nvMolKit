@@ -1703,3 +1703,35 @@ TEST_P(SubstructureSearchTest, NotRingBondChain) {
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "non-ring bond chain pattern");
 }
+
+TEST_P(SubstructureSearchTest, ImpossibleBondConstraint) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Pattern with -: (single AND aromatic) which is impossible
+  // This should never match anything
+  const std::string target = "c1ccccc1";  // Benzene - has aromatic bonds
+  const std::string query  = "[!#1]-:a";  // Not-hydrogen with single-AND-aromatic bond to aromatic atom
+  buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+    << "Impossible bond constraint should match 0 (RDKit says " << rdkitMatches.size() << ")";
+  EXPECT_EQ(resultsHost.matchCounts[0], 0)
+    << "Impossible bond constraint (single AND aromatic) should never match";
+}

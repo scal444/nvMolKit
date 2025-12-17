@@ -215,7 +215,10 @@ __device__ __forceinline__ bool checkEdgeConsistency(const MoleculeView& target,
         const BondData& targetBond    = target.getBond(targetBondIdx, threadIdx.x, blockIdx.x);
 
         // Check bond type compatibility
-        if (queryBondFlags & BondQuerySingleOrAromatic) {
+        if (queryBondFlags & BondQueryNeverMatches) {
+          // Impossible constraint (e.g., single AND aromatic) - never matches
+          continue;
+        } else if (queryBondFlags & BondQuerySingleOrAromatic) {
           // SingleOrAromaticBond: only match single (1) or aromatic (7, 12) bonds
           const int tbt = targetBond.bondType;
           if (tbt != 1 && tbt != 7 && tbt != 12) {
@@ -225,6 +228,12 @@ __device__ __forceinline__ bool checkEdgeConsistency(const MoleculeView& target,
           // DoubleOrAromaticBond: only match double (2) or aromatic (7, 12) bonds
           const int tbt = targetBond.bondType;
           if (tbt != 2 && tbt != 7 && tbt != 12) {
+            continue;
+          }
+        } else if (queryBondFlags & BondQueryAromaticOnly) {
+          // Aromatic bond query (:): only match aromatic bonds (7 or 12)
+          const int tbt = targetBond.bondType;
+          if (tbt != 7 && tbt != 12) {
             continue;
           }
         } else if (!bondTypeMatches(queryBondType, targetBond.bondType)) {

@@ -142,6 +142,9 @@ int getQueryBondEffectiveType(const RDKit::Bond* bond) {
       if (desc == "SingleOrAromaticBond" || desc == "DoubleOrAromaticBond" || desc == "BondNull") {
         return 0;  // Any bond (flexible match)
       }
+      if (desc == "BondIsAromatic") {
+        return 12;  // Aromatic bond
+      }
       // For BondAnd/BondOr queries, check for flexible bond patterns
       if (desc == "BondAnd" || desc == "BondOr") {
         bool hasSingle   = false;
@@ -1131,6 +1134,35 @@ void extractBondQueryFlags(const RDKit::Bond* bond, BondQueryData& queryData) {
     const bool        isNegated = q->getNegation();
 
     if (desc == "BondAnd") {
+      // Check for impossible constraints like single AND aromatic
+      bool hasSingle   = false;
+      bool hasDouble   = false;
+      bool hasTriple   = false;
+      bool hasAromatic = false;
+      for (auto it = q->beginChildren(); it != q->endChildren(); ++it) {
+        const std::string childDesc = (*it)->getDescription();
+        if (childDesc == "BondOrder") {
+          const auto* eqQuery  = static_cast<const RDKit::BOND_EQUALS_QUERY*>((*it).get());
+          int         bondType = eqQuery->getVal();
+          if (bondType == 1) {
+            hasSingle = true;
+          } else if (bondType == 2) {
+            hasDouble = true;
+          } else if (bondType == 3) {
+            hasTriple = true;
+          } else if (bondType == 7 || bondType == 12) {
+            hasAromatic = true;
+          }
+        } else if (childDesc == "BondIsAromatic") {
+          hasAromatic = true;
+        }
+      }
+      // Conflicting constraints: non-aromatic bond type AND aromatic requirement
+      if (hasAromatic && (hasSingle || hasDouble || hasTriple)) {
+        queryData.queryFlags |= BondQueryNeverMatches;
+        return;
+      }
+      // Process children normally for other BondAnd patterns (e.g., ring constraints)
       for (auto it = q->beginChildren(); it != q->endChildren(); ++it) {
         processQuery((*it).get());
       }
@@ -1187,6 +1219,9 @@ void extractBondQueryFlags(const RDKit::Bond* bond, BondQueryData& queryData) {
     } else if (desc == "DoubleOrAromaticBond") {
       queryData.queryFlags |= BondQueryDoubleOrAromatic;
       queryData.bondType = 2;  // Base type is double, flag allows aromatic too
+    } else if (desc == "BondIsAromatic") {
+      // Aromatic bond query (:) - must match aromatic bonds (type 7 or 12)
+      queryData.queryFlags |= BondQueryAromaticOnly;
     } else if (desc == "BondOrder") {
       const auto* eqQuery = static_cast<const RDKit::BOND_EQUALS_QUERY*>(q);
       queryData.bondType  = eqQuery->getVal();
