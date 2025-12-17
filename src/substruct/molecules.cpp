@@ -675,11 +675,18 @@ bool isAndOnlyQuery(const RDKit::Atom::QUERYATOM_QUERY* query) {
  * @brief Collect flags and packed data from an AND-only query subtree.
  *
  * This optimized path merges all AND conditions into a single leaf mask.
+ * Detects contradictory constraints (same property with different values) and
+ * sets AtomQueryNeverMatches when found.
  */
 void collectAndOnlyFlags(const RDKit::Atom::QUERYATOM_QUERY* query,
                          AtomQuery&                          flags,
                          AtomDataPacked&                     packed) {
   const std::string desc = query->getDescription();
+
+  // If already marked as never-matching, skip processing
+  if (flags & AtomQueryNeverMatches) {
+    return;
+  }
 
   if (desc == "AtomAnd") {
     for (auto it = query->beginChildren(); it != query->endChildren(); ++it) {
@@ -720,18 +727,35 @@ void collectAndOnlyFlags(const RDKit::Atom::QUERYATOM_QUERY* query,
 
   const auto* eqQuery = static_cast<const RDKit::ATOM_EQUALS_QUERY*>(query);
 
+  // Helper to detect conflicting values for the same property
+  auto checkConflict = [&](AtomQuery flag, auto currentVal, auto newVal) {
+    if ((flags & flag) && currentVal != newVal) {
+      flags |= AtomQueryNeverMatches;
+      return true;
+    }
+    return false;
+  };
+
   if (desc == "AtomAtomicNum") {
-    flags |= AtomQueryAtomicNum;
-    packed.setAtomicNum(eqQuery->getVal());
+    if (!checkConflict(AtomQueryAtomicNum, packed.atomicNum(), static_cast<uint8_t>(eqQuery->getVal()))) {
+      flags |= AtomQueryAtomicNum;
+      packed.setAtomicNum(eqQuery->getVal());
+    }
   } else if (desc == "AtomHCount") {
-    flags |= AtomQueryNumExplicitHs;
-    packed.setNumExplicitHs(eqQuery->getVal());
+    if (!checkConflict(AtomQueryNumExplicitHs, packed.numExplicitHs(), static_cast<uint8_t>(eqQuery->getVal()))) {
+      flags |= AtomQueryNumExplicitHs;
+      packed.setNumExplicitHs(eqQuery->getVal());
+    }
   } else if (desc == "AtomFormalCharge") {
-    flags |= AtomQueryFormalCharge;
-    packed.setFormalCharge(eqQuery->getVal());
+    if (!checkConflict(AtomQueryFormalCharge, packed.formalCharge(), static_cast<int8_t>(eqQuery->getVal()))) {
+      flags |= AtomQueryFormalCharge;
+      packed.setFormalCharge(eqQuery->getVal());
+    }
   } else if (desc == "AtomHybridization") {
-    flags |= AtomQueryHybridization;
-    packed.setHybridization(eqQuery->getVal());
+    if (!checkConflict(AtomQueryHybridization, packed.hybridization(), static_cast<uint8_t>(eqQuery->getVal()))) {
+      flags |= AtomQueryHybridization;
+      packed.setHybridization(eqQuery->getVal());
+    }
   } else if (desc == "AtomInNRings") {
     int val = eqQuery->getVal();
     if (val < 0) {
@@ -739,35 +763,51 @@ void collectAndOnlyFlags(const RDKit::Atom::QUERYATOM_QUERY* query,
       flags |= AtomQueryIsInRing;
       packed.setIsInRing(true);
     } else {
-      flags |= AtomQueryNumRings;
-      packed.setNumRings(val);
+      if (!checkConflict(AtomQueryNumRings, packed.numRings(), static_cast<uint8_t>(val))) {
+        flags |= AtomQueryNumRings;
+        packed.setNumRings(val);
+      }
     }
   } else if (desc == "AtomInRing") {
     // [r] any ring query - just check isInRing
     flags |= AtomQueryIsInRing;
     packed.setIsInRing(true);
   } else if (desc == "AtomMinRingSize") {
-    flags |= AtomQueryMinRingSize;
-    packed.setMinRingSize(eqQuery->getVal());
+    if (!checkConflict(AtomQueryMinRingSize, packed.minRingSize(), static_cast<uint8_t>(eqQuery->getVal()))) {
+      flags |= AtomQueryMinRingSize;
+      packed.setMinRingSize(eqQuery->getVal());
+    }
   } else if (desc == "AtomNumRadicalElectrons") {
-    flags |= AtomQueryNumRadicalElectrons;
-    packed.setNumRadicalElectrons(eqQuery->getVal());
+    if (!checkConflict(AtomQueryNumRadicalElectrons, packed.numRadicalElectrons(),
+                       static_cast<uint8_t>(eqQuery->getVal()))) {
+      flags |= AtomQueryNumRadicalElectrons;
+      packed.setNumRadicalElectrons(eqQuery->getVal());
+    }
   } else if (desc == "AtomTotalValence") {
-    flags |= AtomQueryTotalValence;
-    packed.setTotalValence(eqQuery->getVal());
+    if (!checkConflict(AtomQueryTotalValence, packed.totalValence(), static_cast<uint8_t>(eqQuery->getVal()))) {
+      flags |= AtomQueryTotalValence;
+      packed.setTotalValence(eqQuery->getVal());
+    }
   } else if (desc == "AtomMass" || desc == "AtomIsotope") {
     int isotope = eqQuery->getVal();
     if (isotope > 255) {
       throw std::runtime_error("Isotope mass " + std::to_string(isotope) + " exceeds maximum supported value of 255");
     }
-    flags |= AtomQueryIsotope;
-    packed.setIsotope(static_cast<uint8_t>(isotope));
+    if (!checkConflict(AtomQueryIsotope, packed.isotope(), static_cast<uint8_t>(isotope))) {
+      flags |= AtomQueryIsotope;
+      packed.setIsotope(static_cast<uint8_t>(isotope));
+    }
   } else if (desc == "AtomExplicitDegree") {
-    flags |= AtomQueryDegree;
-    packed.setDegree(eqQuery->getVal());
+    if (!checkConflict(AtomQueryDegree, packed.degree(), static_cast<uint8_t>(eqQuery->getVal()))) {
+      flags |= AtomQueryDegree;
+      packed.setDegree(eqQuery->getVal());
+    }
   } else if (desc == "AtomTotalDegree") {
-    flags |= AtomQueryTotalConnectivity;
-    packed.setTotalConnectivity(eqQuery->getVal());
+    if (!checkConflict(AtomQueryTotalConnectivity, packed.totalConnectivity(),
+                       static_cast<uint8_t>(eqQuery->getVal()))) {
+      flags |= AtomQueryTotalConnectivity;
+      packed.setTotalConnectivity(eqQuery->getVal());
+    }
   } else {
     AtomQuery flag = atomQueryFromDescription(desc);
     flags |= flag;

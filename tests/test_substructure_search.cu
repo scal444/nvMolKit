@@ -1743,6 +1743,40 @@ TEST_P(SubstructureSearchTest, ImpossibleAtomConstraint) {
   }
 }
 
+TEST_P(SubstructureSearchTest, ImpossibleChargeConstraint) {
+  // [OX1;+0;-1] has charge +0 AND charge -1 in an AND, which is contradictory
+  const std::string query = "[OX1;+0;-1]";
+
+  for (const std::string& target : {"O=S(=O)(CCO)c1ccccc1", "[O-]C"}) {
+    MoleculesHost                              targetsHost;
+    MoleculesHost                              queriesHost;
+    std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+    std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+    buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
+
+    MoleculesDevice targetsDevice(stream_.stream());
+    MoleculesDevice queriesDevice(stream_.stream());
+    targetsDevice.copyFromHost(targetsHost);
+    queriesDevice.copyFromHost(queriesHost);
+
+    SubstructMatchResultsDevice resultsDevice(stream_.stream());
+    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                        resultsDevice, algorithm(), stream_.stream());
+
+    SubstructMatchResultsHost resultsHost;
+    resultsDevice.copyToHost(resultsHost);
+    cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+    auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+    EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+        << "Impossible charge constraint [OX1;+0;-1] on " << target << " should match 0 (RDKit says "
+        << rdkitMatches.size() << ")";
+    EXPECT_EQ(resultsHost.matchCounts[0], 0)
+        << "Impossible charge constraint [OX1;+0;-1] (charge 0 AND -1) should never match " << target;
+  }
+}
+
 
 // KEEP this as the last test
 TEST_P(SubstructureSearchTest, SingleMolSingleQueryForDebugging) {
