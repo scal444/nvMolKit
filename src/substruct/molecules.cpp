@@ -929,11 +929,6 @@ void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   auto& atomDataVec       = batch.atomData;
   auto& atomDataPackedVec = batch.atomDataPacked;
   auto& bondTypeCountsVec = batch.bondTypeCounts;
-  auto& otherAtomIndices  = batch.otherAtomIndices;
-  auto& bondDataIndices   = batch.bondDataIndices;
-
-  const size_t otherAtomIndicesBefore = otherAtomIndices.size();
-  const size_t bondDataIndicesBefore  = bondDataIndices.size();
 
   atomDataVec.reserve(atomDataVec.size() + mol->getNumAtoms());
   atomDataPackedVec.reserve(atomDataPackedVec.size() + mol->getNumAtoms());
@@ -958,8 +953,8 @@ void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   batch.batchAtomStarts.push_back(static_cast<int>(atomDataVec.size()));
   batch.batchBondStarts.push_back(static_cast<int>(batch.bondData.size()));
   batch.batchAtomBondStarts.push_back(static_cast<int>(batch.atomBondStarts.size()));
-  batch.batchOtherAtomIndicesStarts.push_back(static_cast<int>(otherAtomIndicesBefore));
-  batch.batchBondIndicesStarts.push_back(static_cast<int>(bondDataIndicesBefore));
+  batch.batchOtherAtomIndicesStarts.push_back(static_cast<int>(batch.otherAtomIndices.size()));
+  batch.batchBondIndicesStarts.push_back(static_cast<int>(batch.bondDataIndices.size()));
 }
 
 namespace {
@@ -1057,8 +1052,6 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   auto& atomQueriesVec    = batch.atomQueries;
   auto& atomQueryMasksVec = batch.atomQueryMasks;
   auto& bondTypeCountsVec = batch.bondTypeCounts;
-  auto& otherAtomIndices  = batch.otherAtomIndices;
-  auto& bondDataIndices   = batch.bondDataIndices;
 
   // Boolean tree data
   auto& atomQueryTreesVec     = batch.atomQueryTrees;
@@ -1067,9 +1060,6 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   auto& queryLeafBondCountsVec = batch.queryLeafBondCounts;
   auto& atomInstrStartsVec    = batch.atomInstrStarts;
   auto& atomLeafMaskStartsVec = batch.atomLeafMaskStarts;
-
-  const size_t otherAtomIndicesBefore = otherAtomIndices.size();
-  const size_t bondDataIndicesBefore  = bondDataIndices.size();
 
   atomDataVec.reserve(atomDataVec.size() + mol->getNumAtoms());
   atomDataPackedVec.reserve(atomDataPackedVec.size() + mol->getNumAtoms());
@@ -1141,8 +1131,8 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   batch.batchAtomStarts.push_back(static_cast<int>(atomDataVec.size()));
   batch.batchBondStarts.push_back(static_cast<int>(batch.bondData.size()));
   batch.batchAtomBondStarts.push_back(static_cast<int>(batch.atomBondStarts.size()));
-  batch.batchOtherAtomIndicesStarts.push_back(static_cast<int>(otherAtomIndicesBefore));
-  batch.batchBondIndicesStarts.push_back(static_cast<int>(bondDataIndicesBefore));
+  batch.batchOtherAtomIndicesStarts.push_back(static_cast<int>(batch.otherAtomIndices.size()));
+  batch.batchBondIndicesStarts.push_back(static_cast<int>(batch.bondDataIndices.size()));
 }
 
 }  // namespace nvMolKit

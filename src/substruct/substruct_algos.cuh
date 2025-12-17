@@ -30,8 +30,7 @@ namespace nvMolKit {
 // =============================================================================
 
 constexpr int kWarpSize       = 32;
-constexpr int kMaxQueryAtoms  = 64;
-constexpr int kMaxTargetAtoms = 128;
+
 
 // =============================================================================
 // VF2 Data Structures
@@ -137,7 +136,7 @@ __device__ __forceinline__ bool checkEdgeConsistency(const MoleculeView& target,
 
     const int neighborTargetAtom = mapping[neighborQueryAtom];
     const int queryBondIdx       = query.getNeighborBondIdx(queryAtom, i);
-    const int queryBondType      = query.getBond(queryBondIdx).bondType;
+    const int queryBondType      = query.getBond(queryBondIdx, threadIdx.x, blockIdx.x).bondType;
 
     // Check if targetAtom has an edge to neighborTargetAtom with compatible bond type
     bool foundEdge          = false;
@@ -146,7 +145,7 @@ __device__ __forceinline__ bool checkEdgeConsistency(const MoleculeView& target,
     for (int j = 0; j < targetDegree; ++j) {
       if (target.getNeighborAtomIdx(targetAtom, j) == neighborTargetAtom) {
         const int targetBondIdx  = target.getNeighborBondIdx(targetAtom, j);
-        const int targetBondType = target.getBond(targetBondIdx).bondType;
+        const int targetBondType = target.getBond(targetBondIdx, threadIdx.x, blockIdx.x).bondType;
 
         // Bond type compatibility check (query bond must match target bond)
         // For now: exact match. Could extend to handle query bond wildcards.

@@ -54,7 +54,14 @@ struct MoleculeView {
 
   __device__ __forceinline__ const AtomData& getAtom(int atomIdx) const { return atomData[atomIdx]; }
 
-  __device__ __forceinline__ const BondData& getBond(int bondIdx) const { return bondData[bondIdx]; }
+  __device__ __forceinline__ const BondData& getBond(int bondIdx, int tid=-1, int bid=-1) const {
+    if (bondIdx > numBonds) {
+      if (tid == 0) {
+        printf("OOB, accessing bond %d out of %d, tid=%d, bid=%d\n", bondIdx, numBonds, tid, bid);
+      }
+    }
+    return bondData[bondIdx];
+  }
 
   __device__ __forceinline__ AtomQuery getAtomQuery(int atomIdx) const { return atomQueries[atomIdx]; }
 

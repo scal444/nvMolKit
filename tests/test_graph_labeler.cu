@@ -25,6 +25,7 @@
 #include "device.h"
 #include "graph_labeler.cuh"
 #include "molecules_device.cuh"
+#include "substruct_types.h"
 
 using nvMolKit::addQueryToBatch;
 using nvMolKit::addToBatch;
@@ -36,6 +37,8 @@ using nvMolKit::AtomQueryIsAromatic;
 using nvMolKit::BitMatrix2DView;
 using nvMolKit::checkReturnCode;
 using nvMolKit::FlatBitVect;
+using nvMolKit::kMaxTargetAtoms;
+using nvMolKit::kMaxQueryAtoms;
 using nvMolKit::getMolecule;
 using nvMolKit::MoleculesDevice;
 using nvMolKit::MoleculesDeviceView;
@@ -55,8 +58,6 @@ std::unique_ptr<RDKit::ROMol> makeMolFromSmarts(const std::string& smarts) {
   return mol;
 }
 
-constexpr std::size_t kMaxTargetAtoms = 128;
-constexpr std::size_t kMaxQueryAtoms  = 64;
 using LabelMatrixStorage              = FlatBitVect<kMaxTargetAtoms * kMaxQueryAtoms>;
 using LabelMatrixView                 = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
 

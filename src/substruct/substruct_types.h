@@ -83,6 +83,9 @@ struct SubstructMatchResultsHost {
 /// 256 supports up to ~128 OR alternatives per atom.
 constexpr int kMaxBoolScratchSize = 256;
 
+constexpr std::size_t kMaxTargetAtoms = 128;
+constexpr std::size_t kMaxQueryAtoms  = 64;
+
 }  // namespace nvMolKit
 
 #endif  // NVMOLKIT_SUBSTRUCT_TYPES_H

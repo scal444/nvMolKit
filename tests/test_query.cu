@@ -470,7 +470,7 @@ TEST(QueryCompositeTest, ExcessiveOrBranchesThrows) {
   // need N leaves + (N-1) ORs = 2N-1 scratch slots.
   // With kMaxBoolScratchSize=128, we need at least 65 alternatives to overflow.
   std::string smarts = "[#1";  // Start with hydrogen
-  for (int i = 2; i <= 100; ++i) {
+  for (int i = 2; i <= 200; ++i) {
     smarts += ",#" + std::to_string(i);  // Add element 2-100 as OR alternatives
   }
   smarts += "]";  // 100 alternatives = 199 scratch slots needed
