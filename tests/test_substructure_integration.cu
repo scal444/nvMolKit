@@ -17,6 +17,7 @@
 #include <GraphMol/ROMol.h>
 #include <gtest/gtest.h>
 
+#include <climits>
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
@@ -59,6 +60,81 @@ namespace {
 
 constexpr size_t kMaxAtoms  = 128;
 constexpr size_t kNumSmiles = 100;
+
+struct SmallestRepro {
+  int t = -1;
+  int q = -1;
+};
+
+struct SmallestRepros {
+  SmallestRepro smallestSum;
+  SmallestRepro smallestQ;
+  SmallestRepro smallestT;
+
+  bool allSame() const {
+    return smallestSum.t == smallestQ.t && smallestSum.q == smallestQ.q &&
+           smallestSum.t == smallestT.t && smallestSum.q == smallestT.q;
+  }
+
+  bool hasAny() const { return smallestSum.t >= 0; }
+};
+
+template <typename PairContainer, typename GetT, typename GetQ>
+SmallestRepros findSmallestRepros(const PairContainer& pairs, GetT getT, GetQ getQ) {
+  SmallestRepros result;
+  int            minSum = INT_MAX;
+  int            minQ   = INT_MAX;
+  int            minT   = INT_MAX;
+
+  for (const auto& pair : pairs) {
+    const int t   = getT(pair);
+    const int q   = getQ(pair);
+    const int sum = t + q;
+
+    if (sum < minSum) {
+      minSum              = sum;
+      result.smallestSum  = {t, q};
+    }
+    if (q < minQ) {
+      minQ              = q;
+      result.smallestQ  = {t, q};
+    }
+    if (t < minT) {
+      minT              = t;
+      result.smallestT  = {t, q};
+    }
+  }
+  return result;
+}
+
+void printSmallestRepros(const SmallestRepros&           repros,
+                         const std::vector<std::string>& targetSmiles,
+                         const std::vector<std::string>& querySmarts,
+                         const std::string&              category) {
+  if (!repros.hasAny()) return;
+
+  std::cout << "  Smallest " << category << " repros:\n";
+
+  auto printOne = [&](const char* label, const SmallestRepro& r) {
+    std::cout << "    " << label << ": t=" << r.t << " q=" << r.q << " (sum=" << (r.t + r.q) << ")\n"
+              << "      Target: " << targetSmiles[r.t] << "\n"
+              << "      Query:  " << querySmarts[r.q] << "\n";
+  };
+
+  if (repros.allSame()) {
+    printOne("smallest (all criteria)", repros.smallestSum);
+  } else {
+    printOne("smallest sum (t+q)", repros.smallestSum);
+    if (repros.smallestQ.t != repros.smallestSum.t || repros.smallestQ.q != repros.smallestSum.q) {
+      printOne("smallest q", repros.smallestQ);
+    }
+    if (repros.smallestT.t != repros.smallestSum.t || repros.smallestT.q != repros.smallestSum.q) {
+      if (repros.smallestT.t != repros.smallestQ.t || repros.smallestT.q != repros.smallestQ.q) {
+        printOne("smallest t", repros.smallestT);
+      }
+    }
+  }
+}
 
 }  // namespace
 
@@ -166,6 +242,22 @@ TEST_P(SubstructureIntegrationTest, ChemblVsAlertCollection) {
   if (!validationResult.allMatch) {
     printValidationResultDetailed(validationResult, resultsHost, targetMols, queryMols, targetSmiles, querySmarts,
                                   algorithmName(algorithm()));
+
+    if (!validationResult.mismatches.empty()) {
+      auto repros = findSmallestRepros(
+        validationResult.mismatches,
+        [](const auto& m) { return std::get<0>(m); },
+        [](const auto& m) { return std::get<1>(m); });
+      printSmallestRepros(repros, targetSmiles, querySmarts, "count mismatch");
+    }
+
+    if (!validationResult.mappingMismatches.empty()) {
+      auto repros = findSmallestRepros(
+        validationResult.mappingMismatches,
+        [](const auto& m) { return m.first; },
+        [](const auto& m) { return m.second; });
+      printSmallestRepros(repros, targetSmiles, querySmarts, "mapping mismatch");
+    }
   }
 
   EXPECT_TRUE(validationResult.allMatch)
@@ -331,6 +423,14 @@ TEST_F(LabelMatrixIntegrationTest, ChemblVsAlertCollectionLabelMatrix) {
       std::cout << "    T[" << t << "].atom" << ta << " (Z=" << tAtomNum << ",arom=" << tArom << ")"
                 << " vs Q[" << q << "].atom" << qa << " (Z=" << qAtomNum << ",arom=" << qArom << ")\n";
     }
+  }
+
+  if (!fpPairs.empty()) {
+    auto repros = findSmallestRepros(
+      fpPairs,
+      [](const auto& p) { return std::get<0>(p); },
+      [](const auto& p) { return std::get<1>(p); });
+    printSmallestRepros(repros, targetSmiles, querySmarts, "false positive");
   }
 
   EXPECT_EQ(totalFalsePositives, 0)

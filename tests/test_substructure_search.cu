@@ -1591,8 +1591,8 @@ TEST_P(SubstructureSearchTest, SingleMolSingleQueryForDebugging) {
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-  const std::string target = "Brc1cccc(Nc2ncnc3ccncc23)c1NCCN1CCOCC1";
-  const std::string query = "Br-c:*";
+  const std::string target = "CCC(=O)[C@@H]1C[C@@H](C)[C@]2(CC[C@@]3(C)C4=C(CC[C@@]32C)[C@@]2(C)CC[C@H](O[C@@H]3O[C@H](CO[C@@H]5OC[C@H](O)[C@H](O)[C@H]5O[C@@H]5O[C@H](CO)[C@@H](O)[C@H](O[C@@H]6OC[C@H](O)[C@H](O)[C@H]6O[C@@H]6OC[C@@H](O)[C@H](O)[C@H]6O)[C@H]5O[C@@H]5O[C@@H](C)[C@H](O)[C@@H](O)[C@H]5O)[C@@H](O)[C@H](O)[C@H]3O)[C@](C)(CO)[C@@H]2CC4)O1";
+  const std::string query = "O1CCCCC1OC2CCC3CCCCC3C2";
   buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
 
   MoleculesDevice targetsDevice(stream_.stream());
