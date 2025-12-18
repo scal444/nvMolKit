@@ -54,6 +54,10 @@ struct SubstructMatchResultsDeviceView {
   int           overflowBatchSize;  ///< Number of pairs overflow is allocated for
   int           pairOffset;         ///< Offset for current batch (blockIdx.x + pairOffset = actual pair)
 
+  // Per-pair recursive match bits: [numPairs * maxTargetAtoms] with 32 bits per atom
+  uint32_t* recursiveMatchBits;  ///< Indexed by pairIdx * maxTargetAtoms + atomIdx
+  int       maxTargetAtoms;      ///< Stride for recursiveMatchBits indexing
+
   __device__ __forceinline__ int pairIndex(int targetIdx, int queryIdx) const {
     return targetIdx * numQueries + queryIdx;
   }
@@ -61,6 +65,18 @@ struct SubstructMatchResultsDeviceView {
   /// Get overflow buffer for a block within current batch (ping-pong: bufferIdx 0 or 1)
   __device__ __forceinline__ PartialMatch* getOverflowBuffer(int blockIdxInBatch, int bufferIdx) const {
     return overflowBuffer + (blockIdxInBatch * 2 + bufferIdx) * overflowSize;
+  }
+
+  /// Get recursive match bits for a specific (pair, atom) combination
+  __device__ __forceinline__ uint32_t getRecursiveMatchBits(int pairIdx, int atomIdx) const {
+    return recursiveMatchBits[pairIdx * maxTargetAtoms + atomIdx];
+  }
+
+  /// Set a recursive match bit for a specific (pair, atom, pattern) combination
+  __device__ __forceinline__ void setRecursiveMatchBit(int pairIdx, int atomIdx, int patternId) const {
+    if (patternId < 32) {
+      atomicOr(&recursiveMatchBits[pairIdx * maxTargetAtoms + atomIdx], 1u << patternId);
+    }
   }
 };
 
@@ -118,6 +134,10 @@ class SubstructMatchResultsDevice {
   AsyncDeviceVector<PartialMatch> overflowBuffer_;
   int                             overflowSize_ = 0;
 
+  // Per-pair recursive match bits storage
+  AsyncDeviceVector<uint32_t> recursiveMatchBits_;
+  int                         maxTargetAtoms_ = 0;
+
   std::vector<int> hostPairMatchStarts_;
   std::vector<int> hostQueryAtomCounts_;
   int              totalMatchIndices_ = 0;
@@ -146,39 +166,42 @@ void getSubstructMatches(MoleculesDevice&             targetsDevice,
                          cudaStream_t                 stream);
 
 /**
- * @brief Paint recursive SMARTS match bits onto target atom labels.
+ * @brief Paint recursive SMARTS match bits into per-pair storage.
  *
  * Given substructure match results from recursive pattern matching, sets the
- * corresponding recursive match bits on each target atom that matched.
+ * corresponding recursive match bits in the per-pair buffer for the main query.
  *
- * @param targetsDevice Device-resident target molecules (will be modified)
- * @param results Match results from running substruct match on recursive patterns
- * @param patternIds Vector mapping query index to pattern ID (for each pattern query)
+ * @param patternResults Match results from running substruct match on recursive patterns
+ * @param outputResults The main results buffer where recursiveMatchBits will be written
+ * @param patternIds Vector mapping pattern query index to pattern ID (bit position 0-31)
+ * @param mainQueryIdx Index of the main query whose pair storage should be updated
  * @param stream CUDA stream for async operations
  */
-void paintRecursiveMatchBits(MoleculesDevice&                   targetsDevice,
-                             const SubstructMatchResultsDevice& results,
+void paintRecursiveMatchBits(const SubstructMatchResultsDevice& patternResults,
+                             SubstructMatchResultsDevice&       outputResults,
                              const std::vector<int>&            patternIds,
+                             int                                mainQueryIdx,
                              cudaStream_t                       stream);
 
 /**
- * @brief Preprocess recursive SMARTS patterns for a batch of queries.
+ * @brief Preprocess recursive SMARTS patterns for a single query.
  *
- * For queries containing recursive SMARTS ($(...)), this function:
- * 1. Extracts all recursive patterns from the queries
- * 2. Runs substruct matching for each pattern against all targets
- * 3. Paints the recursive match bits on target atoms
+ * For a query containing recursive SMARTS ($(...)), this function:
+ * 1. Runs substruct matching for each pattern against all targets
+ * 2. Paints the recursive match bits into the per-pair storage
  *
- * Call this before getSubstructMatches for queries with recursive SMARTS.
- *
- * @param targetsDevice Device-resident target molecules (will be modified)
+ * @param targetsDevice Device-resident target molecules
  * @param targetsHost Host-side target data
- * @param recursiveInfo Extracted recursive pattern information
+ * @param recursiveInfo Extracted recursive pattern information for this query
+ * @param outputResults The main results buffer where recursiveMatchBits will be written
+ * @param mainQueryIdx Index of the main query whose pair storage should be updated
  * @param stream CUDA stream for async operations
  */
 void preprocessRecursiveSmarts(MoleculesDevice&             targetsDevice,
                                const MoleculesHost&         targetsHost,
                                const RecursivePatternInfo&  recursiveInfo,
+                               SubstructMatchResultsDevice& outputResults,
+                               int                          mainQueryIdx,
                                cudaStream_t                 stream);
 
 }  // namespace nvMolKit

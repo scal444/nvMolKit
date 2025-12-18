@@ -1,0 +1,829 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#include <GraphMol/ROMol.h>
+#include <GraphMol/SmilesParse/SmilesParse.h>
+#include <gtest/gtest.h>
+
+#include <memory>
+#include <vector>
+
+#include "boolean_tree.cuh"
+#include "cuda_error_check.h"
+#include "device.h"
+#include "graph_labeler.cuh"
+#include "molecules.h"
+#include "molecules_device.cuh"
+#include "substruct_types.h"
+#include "substructure_search.cuh"
+
+using nvMolKit::addQueryToBatch;
+using nvMolKit::addToBatch;
+using nvMolKit::AsyncDeviceVector;
+using nvMolKit::AtomDataPacked;
+using nvMolKit::AtomQueryTree;
+using nvMolKit::BitMatrix2DView;
+using nvMolKit::BoolInstruction;
+using nvMolKit::BoolOp;
+using nvMolKit::checkReturnCode;
+using nvMolKit::extractRecursivePatterns;
+using nvMolKit::FlatBitVect;
+using nvMolKit::getMolecule;
+using nvMolKit::hasRecursiveSmarts;
+using nvMolKit::kMaxQueryAtoms;
+using nvMolKit::kMaxTargetAtoms;
+using nvMolKit::MoleculesDevice;
+using nvMolKit::MoleculesDeviceView;
+using nvMolKit::MoleculesHost;
+using nvMolKit::MoleculeView;
+using nvMolKit::paintRecursiveMatchBits;
+using nvMolKit::preprocessRecursiveSmarts;
+using nvMolKit::RecursivePatternInfo;
+using nvMolKit::ScopedStream;
+using nvMolKit::SubstructMatchResultsDevice;
+
+namespace {
+
+std::unique_ptr<RDKit::ROMol> makeMolFromSmiles(const std::string& smiles) {
+  return std::unique_ptr<RDKit::ROMol>(RDKit::SmilesToMol(smiles));
+}
+
+std::unique_ptr<RDKit::ROMol> makeMolFromSmarts(const std::string& smarts) {
+  return std::unique_ptr<RDKit::ROMol>(RDKit::SmartsToMol(smarts));
+}
+
+using LabelMatrixStorage = FlatBitVect<kMaxTargetAtoms * kMaxQueryAtoms>;
+using LabelMatrixView    = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
+
+}  // namespace
+
+// =============================================================================
+// RecursiveMatch Instruction Generation Tests
+// =============================================================================
+
+class RecursiveInstructionTest : public ::testing::Test {
+ protected:
+  void checkRecursiveMatchInstruction(const MoleculesHost& queryHost, int atomIdx, int expectedPatternId) {
+    ASSERT_GT(queryHost.atomQueryTrees.size(), static_cast<size_t>(atomIdx));
+    ASSERT_GT(queryHost.atomInstrStarts.size(), static_cast<size_t>(atomIdx));
+
+    const AtomQueryTree& tree       = queryHost.atomQueryTrees[atomIdx];
+    int                  instrStart = queryHost.atomInstrStarts[atomIdx];
+    int                  instrEnd   = instrStart + tree.numInstructions;
+
+    bool foundRecursiveMatch = false;
+    int  foundPatternId      = -1;
+
+    for (int i = instrStart; i < instrEnd; ++i) {
+      const BoolInstruction& instr = queryHost.queryInstructions[i];
+      if (instr.op == BoolOp::RecursiveMatch) {
+        foundRecursiveMatch = true;
+        foundPatternId      = instr.leafMaskIdx;
+        break;
+      }
+    }
+
+    EXPECT_TRUE(foundRecursiveMatch) << "Expected RecursiveMatch instruction for atom " << atomIdx;
+    EXPECT_EQ(foundPatternId, expectedPatternId)
+      << "Expected pattern ID " << expectedPatternId << " but got " << foundPatternId;
+  }
+};
+
+TEST_F(RecursiveInstructionTest, SingleRecursivePattern) {
+  auto queryMol = makeMolFromSmarts("[$(*-N)]");
+  ASSERT_NE(queryMol, nullptr);
+
+  EXPECT_TRUE(hasRecursiveSmarts(queryMol.get()));
+
+  RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
+  ASSERT_EQ(info.size(), 1);
+  EXPECT_EQ(info.patterns[0].patternId, 0);
+  EXPECT_EQ(info.patterns[0].queryAtomIdx, 0);
+
+  MoleculesHost queryHost;
+  addQueryToBatch(queryMol.get(), queryHost);
+
+  checkRecursiveMatchInstruction(queryHost, 0, 0);
+}
+
+TEST_F(RecursiveInstructionTest, TwoRecursivePatternsOnDifferentAtoms) {
+  auto queryMol = makeMolFromSmarts("[$(*-N)][$(*-O)]");
+  ASSERT_NE(queryMol, nullptr);
+
+  EXPECT_TRUE(hasRecursiveSmarts(queryMol.get()));
+
+  RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
+  ASSERT_EQ(info.size(), 2);
+  EXPECT_EQ(info.patterns[0].patternId, 0);
+  EXPECT_EQ(info.patterns[0].queryAtomIdx, 0);
+  EXPECT_EQ(info.patterns[1].patternId, 1);
+  EXPECT_EQ(info.patterns[1].queryAtomIdx, 1);
+
+  MoleculesHost queryHost;
+  addQueryToBatch(queryMol.get(), queryHost);
+
+  checkRecursiveMatchInstruction(queryHost, 0, 0);
+  checkRecursiveMatchInstruction(queryHost, 1, 1);
+}
+
+TEST_F(RecursiveInstructionTest, RecursivePatternWithAndCondition) {
+  auto queryMol = makeMolFromSmarts("[C;$(*-N)]");
+  ASSERT_NE(queryMol, nullptr);
+
+  EXPECT_TRUE(hasRecursiveSmarts(queryMol.get()));
+
+  RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
+  ASSERT_EQ(info.size(), 1);
+  EXPECT_EQ(info.patterns[0].patternId, 0);
+
+  MoleculesHost queryHost;
+  addQueryToBatch(queryMol.get(), queryHost);
+
+  checkRecursiveMatchInstruction(queryHost, 0, 0);
+}
+
+TEST_F(RecursiveInstructionTest, MultipleRecursivePatternsOnSameAtom) {
+  auto queryMol = makeMolFromSmarts("[C;$(*-N);$(*-O)]");
+  ASSERT_NE(queryMol, nullptr);
+
+  EXPECT_TRUE(hasRecursiveSmarts(queryMol.get()));
+
+  RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
+  ASSERT_EQ(info.size(), 2);
+  EXPECT_EQ(info.patterns[0].patternId, 0);
+  EXPECT_EQ(info.patterns[0].queryAtomIdx, 0);
+  EXPECT_EQ(info.patterns[1].patternId, 1);
+  EXPECT_EQ(info.patterns[1].queryAtomIdx, 0);
+
+  MoleculesHost queryHost;
+  addQueryToBatch(queryMol.get(), queryHost);
+
+  const AtomQueryTree& tree       = queryHost.atomQueryTrees[0];
+  int                  instrStart = queryHost.atomInstrStarts[0];
+  int                  instrEnd   = instrStart + tree.numInstructions;
+
+  int recursiveMatchCount = 0;
+  for (int i = instrStart; i < instrEnd; ++i) {
+    if (queryHost.queryInstructions[i].op == BoolOp::RecursiveMatch) {
+      recursiveMatchCount++;
+    }
+  }
+  EXPECT_EQ(recursiveMatchCount, 2);
+}
+
+TEST_F(RecursiveInstructionTest, RecursivePatternWithOr) {
+  auto queryMol = makeMolFromSmarts("[C,$(*-N)]");
+  ASSERT_NE(queryMol, nullptr);
+
+  EXPECT_TRUE(hasRecursiveSmarts(queryMol.get()));
+
+  RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
+  ASSERT_EQ(info.size(), 1);
+
+  MoleculesHost queryHost;
+  addQueryToBatch(queryMol.get(), queryHost);
+
+  checkRecursiveMatchInstruction(queryHost, 0, 0);
+}
+
+TEST_F(RecursiveInstructionTest, NegatedRecursivePattern) {
+  auto queryMol = makeMolFromSmarts("[C;!$(*-N)]");
+  ASSERT_NE(queryMol, nullptr);
+
+  EXPECT_TRUE(hasRecursiveSmarts(queryMol.get()));
+
+  RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
+  ASSERT_EQ(info.size(), 1);
+
+  MoleculesHost queryHost;
+  addQueryToBatch(queryMol.get(), queryHost);
+
+  const AtomQueryTree& tree       = queryHost.atomQueryTrees[0];
+  int                  instrStart = queryHost.atomInstrStarts[0];
+  int                  instrEnd   = instrStart + tree.numInstructions;
+
+  bool hasRecursive = false;
+  bool hasNot       = false;
+  int  recursiveIdx = -1;
+
+  for (int i = instrStart; i < instrEnd; ++i) {
+    const BoolInstruction& instr = queryHost.queryInstructions[i];
+    if (instr.op == BoolOp::RecursiveMatch) {
+      hasRecursive = true;
+      recursiveIdx = instr.dst;
+    }
+    if (instr.op == BoolOp::Not && instr.src1 == recursiveIdx) {
+      hasNot = true;
+    }
+  }
+
+  EXPECT_TRUE(hasRecursive);
+  EXPECT_TRUE(hasNot) << "Expected NOT instruction negating the RecursiveMatch";
+}
+
+// =============================================================================
+// Preprocess -> Paint Workflow Tests
+// =============================================================================
+
+class RecursivePaintTest : public ::testing::Test {
+ protected:
+  ScopedStream stream_;
+  std::unique_ptr<SubstructMatchResultsDevice> results_;
+  int maxTargetAtoms_ = 0;
+  int numTargets_ = 0;
+
+  void setupResults(const MoleculesHost& targetsHost, int numQueries = 1) {
+    const int numTargets = static_cast<int>(targetsHost.numMolecules());
+    numTargets_ = numTargets;
+
+    std::vector<int> queryAtomCounts(numQueries, 1);
+    std::vector<int> maxMatchesPerPair;
+    maxTargetAtoms_ = 0;
+    for (int t = 0; t < numTargets; ++t) {
+      int atomCount = targetsHost.batchAtomStarts[t + 1] - targetsHost.batchAtomStarts[t];
+      maxMatchesPerPair.push_back(atomCount);
+      maxTargetAtoms_ = std::max(maxTargetAtoms_, atomCount);
+    }
+
+    results_ = std::make_unique<SubstructMatchResultsDevice>(stream_.stream());
+    results_->allocate(numTargets, numQueries, queryAtomCounts, maxMatchesPerPair);
+  }
+
+  void verifyRecursiveBitSet(int targetMolIdx,
+                             int targetAtomIdx,
+                             int patternId,
+                             bool expectedSet,
+                             int queryIdx = 0) {
+    ASSERT_NE(results_, nullptr) << "Results not initialized - call setupResults first";
+
+    auto view = results_->view();
+    const int pairIdx = targetMolIdx * view.numQueries + queryIdx;
+    const int bufferIdx = pairIdx * maxTargetAtoms_ + targetAtomIdx;
+
+    std::vector<uint32_t> hostBits(1);
+    cudaCheckError(cudaMemcpyAsync(hostBits.data(),
+                                   view.recursiveMatchBits + bufferIdx,
+                                   sizeof(uint32_t),
+                                   cudaMemcpyDeviceToHost,
+                                   stream_.stream()));
+    cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+    bool isSet = (hostBits[0] >> patternId) & 1u;
+    EXPECT_EQ(isSet, expectedSet) << "Target mol " << targetMolIdx << ", atom " << targetAtomIdx
+                                  << ", pattern " << patternId << " expected " << (expectedSet ? "set" : "unset");
+  }
+};
+
+TEST_F(RecursivePaintTest, SimpleCarbonBondedToNitrogen) {
+  auto targetMol = makeMolFromSmiles("CN");
+  auto queryMol  = makeMolFromSmarts("[$(*-N)]");
+  ASSERT_NE(targetMol, nullptr);
+  ASSERT_NE(queryMol, nullptr);
+
+  MoleculesHost targetHost;
+  addToBatch(targetMol.get(), targetHost);
+  setupResults(targetHost);
+
+  MoleculesDevice targetDevice(stream_.stream());
+  targetDevice.copyFromHost(targetHost);
+
+  RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
+  ASSERT_EQ(info.size(), 1);
+
+  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, stream_.stream());
+
+  // Pattern *-N paints the atom matching * (the anchor), not the N
+  verifyRecursiveBitSet(0, 0, 0, true);   // C is bonded to N
+  verifyRecursiveBitSet(0, 1, 0, false);  // N is not the anchor
+}
+
+TEST_F(RecursivePaintTest, OnlyMatchingAtomsArePainted) {
+  // CCN: C(0)-C(1)-N(2)
+  auto targetMol = makeMolFromSmiles("CCN");
+  auto queryMol  = makeMolFromSmarts("[$(*-N)]");
+  ASSERT_NE(targetMol, nullptr);
+  ASSERT_NE(queryMol, nullptr);
+
+  MoleculesHost targetHost;
+  addToBatch(targetMol.get(), targetHost);
+  setupResults(targetHost);
+
+  MoleculesDevice targetDevice(stream_.stream());
+  targetDevice.copyFromHost(targetHost);
+
+  RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
+  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, stream_.stream());
+
+  // Only C(1) is bonded to N, so only C(1) gets painted
+  verifyRecursiveBitSet(0, 0, 0, false);  // C(0) not bonded to N
+  verifyRecursiveBitSet(0, 1, 0, true);   // C(1) bonded to N
+  verifyRecursiveBitSet(0, 2, 0, false);  // N is not the anchor
+}
+
+TEST_F(RecursivePaintTest, MultiplePatternsMultipleBits) {
+  // CNO: C(0)-N(1)-O(2)
+  // Both C and O are bonded to N!
+  auto targetMol = makeMolFromSmiles("CNO");
+  auto queryMol  = makeMolFromSmarts("[$(*-N)][$(*-O)]");
+  ASSERT_NE(targetMol, nullptr);
+  ASSERT_NE(queryMol, nullptr);
+
+  MoleculesHost targetHost;
+  addToBatch(targetMol.get(), targetHost);
+  setupResults(targetHost);
+
+  MoleculesDevice targetDevice(stream_.stream());
+  targetDevice.copyFromHost(targetHost);
+
+  RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
+  ASSERT_EQ(info.size(), 2);
+
+  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, stream_.stream());
+
+  // Pattern 0 (*-N): C(0) and O(2) are both bonded to N(1)
+  verifyRecursiveBitSet(0, 0, 0, true);   // C bonded to N
+  verifyRecursiveBitSet(0, 1, 0, false);  // N is not anchor for *-N
+  verifyRecursiveBitSet(0, 2, 0, true);   // O bonded to N
+
+  // Pattern 1 (*-O): N(1) is bonded to O(2)
+  verifyRecursiveBitSet(0, 0, 1, false);  // C not bonded to O
+  verifyRecursiveBitSet(0, 1, 1, true);   // N bonded to O
+  verifyRecursiveBitSet(0, 2, 1, false);  // O is not anchor for *-O
+}
+
+TEST_F(RecursivePaintTest, NoMatchNoBitsPainted) {
+  auto targetMol = makeMolFromSmiles("CCC");
+  auto queryMol  = makeMolFromSmarts("[$(*-N)]");
+  ASSERT_NE(targetMol, nullptr);
+  ASSERT_NE(queryMol, nullptr);
+
+  MoleculesHost targetHost;
+  addToBatch(targetMol.get(), targetHost);
+  setupResults(targetHost);
+
+  MoleculesDevice targetDevice(stream_.stream());
+  targetDevice.copyFromHost(targetHost);
+
+  RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
+  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, stream_.stream());
+
+  for (int i = 0; i < 3; ++i) {
+    verifyRecursiveBitSet(0, i, 0, false);
+  }
+}
+
+TEST_F(RecursivePaintTest, MultipleTargetMolecules) {
+  // Target 1: CN -> C(0)-N(1)
+  // Target 2: CC -> C(0)-C(1), no N
+  // Target 3: NCN -> N(0)-C(1)-N(2)
+  auto target1 = makeMolFromSmiles("CN");
+  auto target2 = makeMolFromSmiles("CC");
+  auto target3 = makeMolFromSmiles("NCN");
+  auto queryMol = makeMolFromSmarts("[$(*-N)]");
+  ASSERT_NE(target1, nullptr);
+  ASSERT_NE(target2, nullptr);
+  ASSERT_NE(target3, nullptr);
+  ASSERT_NE(queryMol, nullptr);
+
+  MoleculesHost targetHost;
+  addToBatch(target1.get(), targetHost);
+  addToBatch(target2.get(), targetHost);
+  addToBatch(target3.get(), targetHost);
+  setupResults(targetHost);
+
+  MoleculesDevice targetDevice(stream_.stream());
+  targetDevice.copyFromHost(targetHost);
+
+  RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
+  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, stream_.stream());
+
+  // Target 1 (CN): C bonded to N
+  verifyRecursiveBitSet(0, 0, 0, true);   // C bonded to N
+  verifyRecursiveBitSet(0, 1, 0, false);  // N not anchor
+
+  // Target 2 (CC): no N, nothing painted
+  verifyRecursiveBitSet(1, 0, 0, false);
+  verifyRecursiveBitSet(1, 1, 0, false);
+
+  // Target 3 (NCN): C(1) is bonded to both N(0) and N(2)
+  verifyRecursiveBitSet(2, 0, 0, false);  // N(0) not anchor
+  verifyRecursiveBitSet(2, 1, 0, true);   // C bonded to N
+  verifyRecursiveBitSet(2, 2, 0, false);  // N(2) not anchor
+}
+
+TEST_F(RecursivePaintTest, AromaticPattern) {
+  // c1ccccc1N: atoms 0-5 are aromatic carbons, atom 6 is N bonded to atom 5
+  auto targetMol = makeMolFromSmiles("c1ccccc1N");
+  auto queryMol  = makeMolFromSmarts("[$(*-N)]");
+  ASSERT_NE(targetMol, nullptr);
+  ASSERT_NE(queryMol, nullptr);
+
+  MoleculesHost targetHost;
+  addToBatch(targetMol.get(), targetHost);
+  setupResults(targetHost);
+
+  MoleculesDevice targetDevice(stream_.stream());
+  targetDevice.copyFromHost(targetHost);
+
+  RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
+  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, stream_.stream());
+
+  // Only atom 5 (the carbon bonded to N) gets painted
+  for (int i = 0; i < 6; ++i) {
+    bool shouldMatch = (i == 5);
+    verifyRecursiveBitSet(0, i, 0, shouldMatch);
+  }
+  verifyRecursiveBitSet(0, 6, 0, false);  // N is not anchor
+}
+
+TEST_F(RecursivePaintTest, MultipleTargetsMultiplePatterns) {
+  // Test batch of targets with a query that has multiple recursive patterns
+  // Target 0: CN (C-N)
+  // Target 1: CO (C-O)
+  // Query: [$(*-N)][$(*-O)] has pattern 0 (*-N) and pattern 1 (*-O)
+  auto target0  = makeMolFromSmiles("CN");
+  auto target1  = makeMolFromSmiles("CO");
+  auto queryMol = makeMolFromSmarts("[$(*-N)][$(*-O)]");
+  ASSERT_NE(target0, nullptr);
+  ASSERT_NE(target1, nullptr);
+  ASSERT_NE(queryMol, nullptr);
+
+  MoleculesHost targetHost;
+  addToBatch(target0.get(), targetHost);
+  addToBatch(target1.get(), targetHost);
+  setupResults(targetHost);
+
+  MoleculesDevice targetDevice(stream_.stream());
+  targetDevice.copyFromHost(targetHost);
+
+  RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
+  ASSERT_EQ(info.size(), 2);
+
+  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, stream_.stream());
+
+  // Target 0 (CN): C bonded to N, no O
+  verifyRecursiveBitSet(0, 0, 0, true);   // C has p0 (bonded to N)
+  verifyRecursiveBitSet(0, 1, 0, false);  // N not anchor
+  verifyRecursiveBitSet(0, 0, 1, false);  // C not bonded to O
+  verifyRecursiveBitSet(0, 1, 1, false);  // N not bonded to O
+
+  // Target 1 (CO): C bonded to O, no N
+  verifyRecursiveBitSet(1, 0, 0, false);  // C not bonded to N
+  verifyRecursiveBitSet(1, 1, 0, false);  // O not bonded to N
+  verifyRecursiveBitSet(1, 0, 1, true);   // C has p1 (bonded to O)
+  verifyRecursiveBitSet(1, 1, 1, false);  // O not anchor
+}
+
+TEST_F(RecursivePaintTest, MultipleTargetsDifferentQueries) {
+  // Test that preprocessing works correctly with multiple targets
+  // and a query with distinct recursive patterns that match different targets
+  // Target 0: CCN (chain with N)
+  // Target 1: CCO (chain with O)
+  // Query: [$(*-N);$(*-O)] requires BOTH patterns to match (nothing should match)
+  auto target0  = makeMolFromSmiles("CCN");
+  auto target1  = makeMolFromSmiles("CCO");
+  auto queryMol = makeMolFromSmarts("[$(*-N);$(*-O)]");
+  ASSERT_NE(target0, nullptr);
+  ASSERT_NE(target1, nullptr);
+  ASSERT_NE(queryMol, nullptr);
+
+  MoleculesHost targetHost;
+  addToBatch(target0.get(), targetHost);
+  addToBatch(target1.get(), targetHost);
+  setupResults(targetHost);
+
+  MoleculesDevice targetDevice(stream_.stream());
+  targetDevice.copyFromHost(targetHost);
+
+  RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
+  ASSERT_EQ(info.size(), 2);
+
+  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, stream_.stream());
+
+  // Target 0 (CCN): C(1) bonded to N gets p0, but no O so no p1
+  verifyRecursiveBitSet(0, 0, 0, false);  // C(0) not bonded to N
+  verifyRecursiveBitSet(0, 1, 0, true);   // C(1) bonded to N
+  verifyRecursiveBitSet(0, 2, 0, false);  // N not anchor
+  verifyRecursiveBitSet(0, 0, 1, false);  // no O in molecule
+  verifyRecursiveBitSet(0, 1, 1, false);
+  verifyRecursiveBitSet(0, 2, 1, false);
+
+  // Target 1 (CCO): C(1) bonded to O gets p1, but no N so no p0
+  verifyRecursiveBitSet(1, 0, 0, false);  // no N in molecule
+  verifyRecursiveBitSet(1, 1, 0, false);
+  verifyRecursiveBitSet(1, 2, 0, false);
+  verifyRecursiveBitSet(1, 0, 1, false);  // C(0) not bonded to O
+  verifyRecursiveBitSet(1, 1, 1, true);   // C(1) bonded to O
+  verifyRecursiveBitSet(1, 2, 1, false);  // O not anchor
+}
+
+// =============================================================================
+// Label Matrix Tests with Recursive SMARTS
+// =============================================================================
+
+template <std::size_t MaxTarget, std::size_t MaxQuery>
+__global__ void populateLabelMatrixKernel(MoleculesDeviceView                targetBatch,
+                                          int                                targetMolIdx,
+                                          MoleculesDeviceView                queryBatch,
+                                          int                                queryMolIdx,
+                                          FlatBitVect<MaxTarget * MaxQuery>* matrix,
+                                          const uint32_t*                    pairRecursiveBits = nullptr) {
+  MoleculeView                         target = getMolecule(targetBatch, targetMolIdx);
+  MoleculeView                         query  = getMolecule(queryBatch, queryMolIdx);
+  BitMatrix2DView<MaxTarget, MaxQuery> view(matrix);
+  nvMolKit::populateLabelMatrixOptimized<MaxTarget, MaxQuery>(target, query, view, pairRecursiveBits);
+}
+
+class RecursiveLabelingTest : public ::testing::Test {
+ protected:
+  ScopedStream stream_;
+
+  void runRecursiveLabelingTest(const std::string&                 targetSmiles,
+                                const std::string&                 querySmarts,
+                                std::vector<std::vector<uint8_t>>& expectedMatrix) {
+    auto targetMol = makeMolFromSmiles(targetSmiles);
+    auto queryMol  = makeMolFromSmarts(querySmarts);
+    ASSERT_NE(targetMol, nullptr) << "Failed to parse target: " << targetSmiles;
+    ASSERT_NE(queryMol, nullptr) << "Failed to parse query: " << querySmarts;
+
+    MoleculesHost targetHost;
+    MoleculesHost queryHost;
+    addToBatch(targetMol.get(), targetHost);
+    addQueryToBatch(queryMol.get(), queryHost);
+
+    MoleculesDevice targetDevice(stream_.stream());
+    MoleculesDevice queryDevice(stream_.stream());
+    targetDevice.copyFromHost(targetHost);
+    queryDevice.copyFromHost(queryHost);
+
+    // Set up results for per-pair recursive bits storage
+    const int numTargets = 1;
+    const int numQueries = 1;
+    const int numTargetAtoms = static_cast<int>(targetHost.totalAtoms());
+    std::vector<int> queryAtomCounts = {static_cast<int>(queryHost.totalAtoms())};
+    std::vector<int> maxMatchesPerPair = {numTargetAtoms};
+
+    SubstructMatchResultsDevice results(stream_.stream());
+    results.allocate(numTargets, numQueries, queryAtomCounts, maxMatchesPerPair);
+
+    RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
+    if (!info.empty()) {
+      preprocessRecursiveSmarts(targetDevice, targetHost, info, results, 0, stream_.stream());
+    }
+
+    AsyncDeviceVector<LabelMatrixStorage> matrixDev(1, stream_.stream());
+    const LabelMatrixStorage              hostMatrix(false);
+    matrixDev.setFromVector(std::vector<LabelMatrixStorage>{hostMatrix});
+
+    // Get per-pair recursive bits for pair 0 (target 0, query 0)
+    auto resultsView = results.view();
+    const uint32_t* pairRecursiveBits = resultsView.recursiveMatchBits;
+
+    populateLabelMatrixKernel<kMaxTargetAtoms, kMaxQueryAtoms>
+      <<<1, 128, 0, stream_.stream()>>>(targetDevice.view(), 0, queryDevice.view(), 0, matrixDev.data(), pairRecursiveBits);
+    cudaCheckError(cudaGetLastError());
+
+    std::vector<LabelMatrixStorage> resultMatrix(1);
+    matrixDev.copyToHost(resultMatrix);
+    cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+    const LabelMatrixView view(resultMatrix[0]);
+
+    const int numQueryAtoms  = static_cast<int>(queryHost.totalAtoms());
+
+    ASSERT_EQ(expectedMatrix.size(), numTargetAtoms);
+    for (int i = 0; i < numTargetAtoms; ++i) {
+      ASSERT_EQ(expectedMatrix[i].size(), numQueryAtoms);
+      for (int j = 0; j < numQueryAtoms; ++j) {
+        EXPECT_EQ(view.get(i, j), expectedMatrix[i][j])
+          << "Mismatch at target atom " << i << ", query atom " << j << " for target=" << targetSmiles
+          << ", query=" << querySmarts;
+      }
+    }
+  }
+};
+
+TEST_F(RecursiveLabelingTest, SimpleRecursiveMatch) {
+  // CN: C(0) has recursive bit (bonded to N), N(1) does not
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // C has bit set
+    {false}   // N does not have bit set
+  };
+  runRecursiveLabelingTest("CN", "[$(*-N)]", expected);
+}
+
+TEST_F(RecursiveLabelingTest, RecursiveNoMatch) {
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},
+    {false},
+    {false}
+  };
+  runRecursiveLabelingTest("CCC", "[$(*-N)]", expected);
+}
+
+TEST_F(RecursiveLabelingTest, RecursivePartialMatch) {
+  // CCN: only C(1) has the recursive bit (bonded to N)
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},  // C(0) not bonded to N
+    {true},   // C(1) bonded to N
+    {false}   // N(2) does not have bit set
+  };
+  runRecursiveLabelingTest("CCN", "[$(*-N)]", expected);
+}
+
+TEST_F(RecursiveLabelingTest, RecursiveWithAtomType) {
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},
+    {false}
+  };
+  runRecursiveLabelingTest("CN", "[C;$(*-N)]", expected);
+}
+
+TEST_F(RecursiveLabelingTest, RecursiveWithAtomTypeNoMatch) {
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},
+    {false}
+  };
+  runRecursiveLabelingTest("CC", "[C;$(*-N)]", expected);
+}
+
+TEST_F(RecursiveLabelingTest, NegatedRecursive) {
+  // CCN: C(0) has no bit, C(1) has bit, N(2) has no bit
+  // Query [C;!$(*-N)] = aliphatic C AND NOT bonded-to-N
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // C(0): is C, no bit -> matches
+    {false},  // C(1): is C, HAS bit -> fails NOT
+    {false}   // N(2): not C -> fails
+  };
+  runRecursiveLabelingTest("CCN", "[C;!$(*-N)]", expected);
+}
+
+TEST_F(RecursiveLabelingTest, TwoAtomQueryWithRecursive) {
+  // CN: C(0) has bit, N(1) does not
+  // Query: q0=[$(*-N)], q1=N
+  std::vector<std::vector<uint8_t>> expected = {
+    {true, false},   // C: has bit (matches q0), not N (fails q1)
+    {false, true}    // N: no bit (fails q0), is N (matches q1)
+  };
+  runRecursiveLabelingTest("CN", "[$(*-N)]N", expected);
+}
+
+TEST_F(RecursiveLabelingTest, RecursiveOrAtomType) {
+  // CCN: C(0) no bit, C(1) has bit, N(2) no bit
+  // Query [C,$(*-N)] = aliphatic C OR has-recursive-bit
+  std::vector<std::vector<uint8_t>> expected = {
+    {true},   // C(0): is C -> matches
+    {true},   // C(1): is C (or has bit) -> matches
+    {false}   // N(2): not C, no bit -> fails
+  };
+  runRecursiveLabelingTest("CCN", "[C,$(*-N)]", expected);
+}
+
+TEST_F(RecursiveLabelingTest, ComplexRecursivePattern) {
+  // c1ccccc1N: atoms 0-5 are aromatic c, atom 6 is N
+  // Only c(5) has the recursive bit (bonded to N)
+  // Query [c;$(*-N)] = aromatic c AND has-bit
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},  // c(0)
+    {false},  // c(1)
+    {false},  // c(2)
+    {false},  // c(3)
+    {false},  // c(4)
+    {true},   // c(5) bonded to N
+    {false}   // N(6) not aromatic c
+  };
+  runRecursiveLabelingTest("c1ccccc1N", "[c;$(*-N)]", expected);
+}
+
+TEST_F(RecursiveLabelingTest, MultipleRecursivePatternsInQuery) {
+  // CNO: C(0)-N(1)-O(2)
+  // Pattern 0 (*-N): C(0) and O(2) both get bit 0 (both bonded to N)
+  // Pattern 1 (*-O): N(1) gets bit 1
+  // Query: q0=[$(*-N)] (has p0), q1=[$(*-O)] (has p1)
+  std::vector<std::vector<uint8_t>> expected = {
+    {true, false},   // C: has p0 (matches q0), no p1 (fails q1)
+    {false, true},   // N: no p0 (fails q0), has p1 (matches q1)
+    {true, false}    // O: has p0 (matches q0), no p1 (fails q1)
+  };
+  runRecursiveLabelingTest("CNO", "[$(*-N)][$(*-O)]", expected);
+}
+
+TEST_F(RecursiveLabelingTest, RecursiveAndRingQuery) {
+  // c1ccccc1N: atoms 0-5 aromatic c (in ring), atom 6 is N (not in ring)
+  // Only c(5) has the recursive bit
+  // Query [R;$(*-N)] = in-ring AND has-bit
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},  // c(0): in ring but no bit
+    {false},  // c(1): in ring but no bit
+    {false},  // c(2): in ring but no bit
+    {false},  // c(3): in ring but no bit
+    {false},  // c(4): in ring but no bit
+    {true},   // c(5): in ring AND has bit
+    {false}   // N(6): not in ring
+  };
+  runRecursiveLabelingTest("c1ccccc1N", "[R;$(*-N)]", expected);
+}
+
+TEST_F(RecursiveLabelingTest, ChainedRecursiveOnSameAtom) {
+  // CNO: C(0)-N(1)-O(2)
+  // Pattern 0 (*-N): C(0) and O(2) get p0 (both bonded to N)
+  // Pattern 1 (*-O): N(1) gets p1
+  // Query [$(*-N);$(*-O)] = has p0 AND has p1
+  // No atom has BOTH bits
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},  // C: has p0 only
+    {false},  // N: has p1 only
+    {false}   // O: has p0 only
+  };
+  runRecursiveLabelingTest("CNO", "[$(*-N);$(*-O)]", expected);
+}
+
+TEST_F(RecursiveLabelingTest, RecursiveWithAromaticity) {
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},
+    {false},
+    {false},
+    {false},
+    {false},
+    {false},
+    {false}
+  };
+  runRecursiveLabelingTest("c1ccccc1N", "[c;$(*-n)]", expected);
+}
+
+TEST_F(RecursiveLabelingTest, RecursiveAliphaticNitrogen) {
+  // c1ccccc1N: atoms 0-5 aromatic c, atom 6 is N
+  // Pattern *-N: only c(5) gets the bit (bonded to N)
+  // Query [$(*-N)] = has bit
+  std::vector<std::vector<uint8_t>> expected = {
+    {false},  // c(0)
+    {false},  // c(1)
+    {false},  // c(2)
+    {false},  // c(3)
+    {false},  // c(4)
+    {true},   // c(5) bonded to N
+    {false}   // N(6) is not the anchor
+  };
+  runRecursiveLabelingTest("c1ccccc1N", "[$(*-N)]", expected);
+}
+
+// =============================================================================
+// Edge Cases and Error Handling
+// =============================================================================
+
+TEST(RecursiveLabelerEdgeCases, NoRecursivePatterns) {
+  auto queryMol = makeMolFromSmarts("CC");
+  ASSERT_NE(queryMol, nullptr);
+
+  EXPECT_FALSE(hasRecursiveSmarts(queryMol.get()));
+
+  RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
+  EXPECT_TRUE(info.empty());
+  EXPECT_EQ(info.size(), 0);
+}
+
+TEST(RecursiveLabelerEdgeCases, MaxPatternsLimit) {
+  std::string smarts = "[C";
+  for (int i = 0; i < 8; ++i) {
+    smarts += ";$(*-N)";
+  }
+  smarts += "]";
+
+  auto queryMol = makeMolFromSmarts(smarts);
+  ASSERT_NE(queryMol, nullptr);
+
+  RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
+  EXPECT_EQ(info.size(), 8);
+
+  for (int i = 0; i < 8; ++i) {
+    EXPECT_EQ(info.patterns[i].patternId, i);
+  }
+}
+
+TEST(RecursiveLabelerEdgeCases, TooManyPatternsThrows) {
+  // Currently only 8 patterns are supported (expandable to 16)
+  std::string smarts = "[C";
+  for (int i = 0; i < 12; ++i) {
+    smarts += ";$(*-N)";
+  }
+  smarts += "]";
+
+  auto queryMol = makeMolFromSmarts(smarts);
+  ASSERT_NE(queryMol, nullptr);
+
+  EXPECT_THROW(extractRecursivePatterns(queryMol.get()), std::runtime_error);
+}
+
+

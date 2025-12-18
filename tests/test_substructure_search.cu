@@ -1916,8 +1916,8 @@ TEST_P(SubstructureSearchTest, SingleMolSingleQueryForDebugging) {
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-  const std::string target = "CC(C)=C[C@H]1C[C@](C)(O)[C@@H]2[C@H]3CC[C@@H]4[C@@]5(C)CC[C@H](O[C@@H]6OC[C@H](O)[C@H](O[C@@H]7O[C@H](CO)[C@@H](O)[C@H](O)[C@H]7O)[C@H]6O[C@@H]6O[C@@H](COC(=O)CC(=O)O)[C@H](O)[C@H]6O)C(C)(C)[C@@H]5CC[C@@]4(C)[C@@]34CO[C@@]2(C4)O1";  // Benzene - has aromatic bonds
-  const std::string query  = "C14~*~*~*~*~C~1~*~*~C2~C3~*~*~*~C~3~*~*~C~2~4";
+  const std::string target = "CNC(=O)c1cc(C(O)CNC(C)CCc2ccc3c(c2)OCO3)ccc1O.Cl";
+  const std::string query  = "[$([NH]([CX4])[CX4]);!$([NH]([CX4])[CX4][O,N]);!$([NH]([CX4])[CX4][O,N])]";
   buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
 
   MoleculesDevice targetsDevice(stream_.stream());

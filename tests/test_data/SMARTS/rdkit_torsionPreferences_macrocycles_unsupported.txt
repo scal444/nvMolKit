@@ -12,13 +12,13 @@
 [O:1]=[C;r{9-}:2]@;-[O;r{9-}:3]~[C:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [O:1]=[C;r{9-}:2]@;-[O;r{9-}:3]~[!#1:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][O;r{9-}:2]@;-[c;r{9-}:3]~[*:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][O;r{9-}:2]@;-[CX3;r{9-}:3]~[*:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][O;r{9-}:2]@;-[CH1;r{9-}:3][H:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][O;r{9-}:2]@;-[CH2;r{9-}:3]~[C:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [H:1][CX4H1;r{9-}:2]@;-[O;r{9-}:3][CX4:4]
@@ -68,11 +68,11 @@
 [cH1:1][c;r{9-}:2]([nX3])@;-[O;r{9-}:3][C:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [cH1:1][c;r{9-}:2]([nX2])@;-[O;r{9-}:3][C:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([cH0]([CX3])):1][c;r{9-}:2]([cH1])@;-[O;r{9-}:3][C:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [cH1:1][c;r{9-}:2](cO)@;-[O;r{9-}:3][C:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(cO):1][c;r{9-}:2](cO)@;-[O;r{9-}:3][C:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [cH0:1][c;r{9-}:2]([cH0])@;-[O;r{9-}:3][C:4]
@@ -108,33 +108,33 @@
 [!#1:1][CX4H2;r{9-}:2]@;-[OX2;r{9-}:3][!#1:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [!#1:1][CX4;r{9-}:2]@;-[OX2;r{9-}:3][!#1:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([CX3]=O):1][NX3H0;r{9-}:2](C)@;-[CX4H2;r{9-}:3][C:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([CX3]=O):1][NX3H1;r{9-}:2]@;-[CX4H2;r{9-}:3][C:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(S(=O)(=O)):1][NX3H0;r{9-}:2]@;-[CX4H2;r{9-}:3][!#1:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(S(=O)(=O)):1][NX3H1;r{9-}:2]@;-[CX4H2;r{9-}:3][!#1:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(S(=O)(=O)):1][NX3H0;r{9-}:2]@;-[CX4H1;r{9-}:3][H:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(S(=O)(=O)):1][NX3H1;r{9-}:2]@;-[CX4H1;r{9-}:3][H:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(S(=O)(=O)):1][NH1;r{9-}:2]@;-[c;r{9-}:3][nX2:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(S(=O)(=O)):1][NH0;r{9-}:2]@;-[c;r{9-}:3]([cH1])[cH1:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(S(=O)(=O)):1][NH1;r{9-}:2]@;-[c;r{9-}:3]([cH1])[cH1:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(S(=O)(=O)):1][NH0;r{9-}:2]@;-[c;r{9-}:3]([cH1])[cH0:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(S(=O)(=O)):1][NH1;r{9-}:2]@;-[c;r{9-}:3]([cH1])[cH0:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(S(=O)(=O)):1][NH0;r{9-}:2]@;-[c;r{9-}:3]([cH0])[cH0:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(S(=O)(=O)):1][NH1;r{9-}:2]@;-[c;r{9-}:3]([cH0])[cH0:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(S(=O)(=O)):1][N;r{9-}:2]@;-[c;r{9-}:3][a:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [O-:1][N+;r{9-}:2](=O)@;-[c;r{9-}:3]([cH,nX2H0])[cH,nX2H0:4]
@@ -176,77 +176,77 @@
 [O:1]=[C;r{9-}:2]@;-[NX3H1;r{9-}:3](C=O)[H:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [O:1]=[C;r{9-}:2]@;-[NX3;r{9-}:3](C=O)[*:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H1;r{9-}:2]@;-[CX3;r{9-}:3]=[NX2:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H0;r{9-}:2]@;-[CX3;r{9-}:3]=[*H0:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H0;r{9-}:2]@;-[CX3;r{9-}:3]=[*H1:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H1;r{9-}:2]@;-[CX3;r{9-}:3]=[*H2:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H1;r{9-}:2]@;-[CX3;r{9-}:3]=[*H1:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H1;r{9-}:2]@;-[CX3;r{9-}:3]=[*H0:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H0;r{9-}:2]@;-[CX3H1;r{9-}:3]=[*:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H1;r{9-}:2]@;-[CX3H1;r{9-}:3]=[*:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([C](=O)):1][NX3H0;r{9-}:2]@;-[CX4H2;r{9-}:3][$([c]([cH,nX2H0])[cH,nX2H0]):4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H1;r{9-}:2]@;-[CX4H2;r{9-}:3][$([c]([cH,nX2H0])[cH,nX2H0]):4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H0;r{9-}:2]@;-[CX4H2;r{9-}:3][!#1:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H1;r{9-}:2]@;-[CX4H2;r{9-}:3][!#1:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H0;r{9-}:2]@;-[CX4H1;r{9-}:3][H:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H1;r{9-}:2]@;-[CX4H1;r{9-}:3][H:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H0;r{9-}:2]@;-[CX4H0;r{9-}:3][C:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H1;r{9-}:2]@;-[CX4H0;r{9-}:3][C:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3;r{9-}:2]@;-[!#1;r{9-}:3][!#1:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([C](=O)([$([NX3H1]),$([NX3H2])])[NX3H1]):1][NX3H1;r{9-}:2]@;-[c;r{9-}:3]([nH1])[nH0:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([C](=O)([$([NX3H1]),$([NX3H2])])[NX3H1]):1][NX3H1;r{9-}:2]@;-[c;r{9-}:3]([nH0])[cH1:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([C](=O)):1][NX3H1;r{9-}:2]@;-[$([a]([nH0,o]));r{9-}:3][cH1:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([C](=O)([$([NX3H1]),$([NX3H2])])[NX3H1]):1][NX3H1;r{9-}:2]@;-[c&r6;r{9-}:3][nH0&r6:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([C](=O)):1][NX3H1;r{9-}:2]@;-[c;r{9-}:3]([cH])[nX2H0:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H0;r{9-}:2]@;-[c;r{9-}:3]([s,o])[n:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H1;r{9-}:2]@;-[c;r{9-}:3]([s,o])[n:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([C](=O)):1][NX3;r{9-}:2]@;-[a;r{9-}:3](s)[a:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3;r{9-}:2]@;-[a;r{9-}:3][nH:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H1;r{9-}:2]@;-[c;r{9-}:3]([cH0]Cl)[cH:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H1;r{9-}:2]@;-[c;r{9-}:3]([cH0]F)[cH:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3;r{9-}:2]@;-[$([a]([cH1]));r{9-}:3][$([aH0](!@O)):4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3;r{9-}:2]@;-[a;r{9-}:3][aH0:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H1;r{9-}:2]@;-[c;r{9-}:3]([cH1])[cH1:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H0;r{9-}:2]@;-[c;r{9-}:3]([cH1])[cH1:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H0;r{9-}:2]@;-[c;r{9-}:3]([cH0])[cH:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H1;r{9-}:2]@;-[c;r{9-}:3]([cH0])[cH:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H0;r{9-}:2]@;-[c;r{9-}:3]([cH0])[cH0:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(C=O):1][NX3H1;r{9-}:2]@;-[c;r{9-}:3]([cH0])[cH0:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [O,S:1]=[C;r{9-}:2]([$([NX3H1]),$([NX3H2])])@;-[$([NX3]c[nH0]);r{9-}:3][H:4]
@@ -298,7 +298,7 @@
 [cH0:1][a;r{9-}:2]@;-[NX3H1;r{9-}:3][$([CX3]=O):4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [nX2H0:1][a;r{9-}:2]([nX2H0])@;-[NX3H0;r{9-}:3][$([CX3]=O):4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [nX2H0:1][$(a([!nX2H0])([nX2H0])@;-[NX3H1]);r{9-}:2]!@[NX3H1;r{9-}:3][$([CX3](a)=O):4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [nX2H0:1][a;r{9-}:2]@;-[NX3H1;r{9-}:3][$([CX3]=O):4]
@@ -338,33 +338,33 @@
 [!#1:1][CX4H1;r{9-}:2]@;-[NX3;r{9-}:3][!#1:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [!#1:1][CX4;r{9-}:2]@;-[NX3;r{9-}:3][!#1:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [!#1:1][$(S(=O)=O);r{9-}:2]@;-[nX3;r{9-}:3]([aH1])[aH1:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [!#1:1][$(S(=O)=O);r{9-}:2]@;-[nX3;r{9-}:3][aH0:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [c:1][S;r{9-}:2](=O)(=O)@;-[NX2H0-;r{9-}:3]-[*:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [*:1][$(S(=O)=O);r{9-}:2]@;-[NX3H0&r;r{9-}:3][*:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [C:1][$(S(=O)=O);r{9-}:2]@;-[NX3H1;r{9-}:3][c:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [C:1][$(S(=O)=O);r{9-}:2]@;-[NX3H0;r{9-}:3][c:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [c:1][$(S(=O)=O);r{9-}:2]@;-[NX3H1;r{9-}:3][C:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [c:1][$(S(=O)=O);r{9-}:2]@;-[NX3H0;r{9-}:3][C:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [c:1][$(S(=O)=O);r{9-}:2]@;-[NX3H1;r{9-}:3][c:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [c:1][$(S(=O)=O);r{9-}:2]@;-[NX3H0;r{9-}:3][c:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [C:1][$(S(=O)=O);r{9-}:2]@;-[NX3H1;r{9-}:3][C:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [C:1][$(S(=O)=O);r{9-}:2]@;-[NX3H0;r{9-}:3][C:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [*:1][$(S(=O)=O);r{9-}:2]@;-[NX3H1;r{9-}:3][*:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [*:1][$(S(=O)=O);r{9-}:2]@;-[NX3H0;r{9-}:3][*:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [!#1:1][CX3;r{9-}:2]@;-[SX2;r{9-}:3][!#1:4]
@@ -402,11 +402,11 @@
 [O:1]=[CX3;r{9-}:2]([NH1])@;-[CH2;r{9-}:3][CX3:4]=O
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [O:1]=[CX3;r{9-}:2]([NH1])@;-[CH2;r{9-}:3][C:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([CX3]([C])([H])):1]=[CX3;r{9-}:2]([C])@;-[CH2;r{9-}:3][C:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([CX3]([C])([H])):1]=[CX3;r{9-}:2]([H])@;-[CH1;r{9-}:3](C)[C:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([CX3]([C])([H])):1]=[CX3;r{9-}:2]([H])@;-[CH2;r{9-}:3][C:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [N:1][C;r{9-}:2](=O)@;-[CX4H2;r{9-}:3][CX4H2:4]
@@ -502,7 +502,7 @@ N[C;r{9-}:2](=[O:1])@;-[CH2;r{9-}:3][N:4]
 [H:1][CX4H1;r{9-}:2]@;-[CX3;r{9-}:3][!#1:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [!#1:1][CX4H2;r{9-}:2]@;-[CX3;r{9-}:3][!#1:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([cH0]([$([NX3H2]),$([NX3H1])])):1][a;r{9-}:2]@;-[a;r{9-}:3][nX2:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [nH0:1][c&r6;r{9-}:2]([nH0])@;-[c&r6;r{9-}:3]([nH0])[nH0:4]
@@ -528,9 +528,9 @@ N[C;r{9-}:2](=[O:1])@;-[CH2;r{9-}:3][N:4]
 [nX2H0:1][c;r{9-}:2]@;-[c;r{9-}:3][nX3H1:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [nX2H0:1][c;r{9-}:2]([!nX2H0])@;-[c;r{9-}:3]([!nX2H0])[nX2H0:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [nX2H0:1][$(c([nX2H0])(a(a)(a))@;-c[nX2H0]);r{9-}:2]!@[c;r{9-}:3][nX2H0:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [nX2H0:1][$([c&r6](c[OH]));r{9-}:2]@;-[$([c&r6](c[OH]));r{9-}:3][nX2H0:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [c:1][c;r{9-}:2]@;-[c;r{9-}:3][s,o,nX3H1:4]
@@ -640,11 +640,11 @@ N[C;r{9-}:2](=[O:1])@;-[CH2;r{9-}:3][N:4]
 [O:1]=[C;r{9-}:2]([O-])@;-[c;r{9-}:3]([cH1])[cH1:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [O:1]=[C;r{9-}:2]([O-])@;-[c;r{9-}:3][a:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([c]([NH1,NH2])):1][c;r{9-}:2]@;-[CX3;r{9-}:3]([!O])=[O:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(a[OH1]):1][a;r{9-}:2]@;-[CX3;r{9-}:3]([NX3H0,CX4H0,c])=[O:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$(a[NH1,NH2]):1][a;r{9-}:2]@;-[CX3;r{9-}:3]([NX3H0,CX4H0,c])=[O:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [cH0:1][c;r{9-}:2]([cH1])@;-[CX3;r{9-}:3](c)=[O:4]
@@ -652,19 +652,19 @@ N[C;r{9-}:2](=[O:1])@;-[CH2;r{9-}:3][N:4]
 [cH1:1][c;r{9-}:2]([cH1])@;-[CX3;r{9-}:3](c)=[O:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [a:1][a;r{9-}:2]@;-[CX3;r{9-}:3](a)=[O:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([cH0](=O)):1][c;r{9-}:2]([cH1])@;-[CX3;r{9-}:3]([NX3H1,NX3H2])=[O:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [nH0&r6:1][c&r6;r{9-}:2]([cH1&r6])@;-[C;r{9-}:3]([NH1,NH2])=[O:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [s:1][c;r{9-}:2]@;-[C;r{9-}:3]([NH1])=[O:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([cH0]Cl):1][c;r{9-}:2]([cH1])@;-[CX3;r{9-}:3]([NX3H1])=[O:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([cH0]F):1][c;r{9-}:2]([cH1])@;-[CX3;r{9-}:3]([NX3H1])=[O:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([cH0][OH0]):1][c;r{9-}:2]([cH1])@;-[C;r{9-}:3](=O)[NH1:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([cH0][OH1]):1][c;r{9-}:2]([cH1])@;-[C;r{9-}:3](=O)[NH1:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [cH0:1][c;r{9-}:2]([cH1])@;-[CX3;r{9-}:3]([NX3H1])=[O:4]
@@ -680,15 +680,15 @@ N[C;r{9-}:2](=[O:1])@;-[CH2;r{9-}:3][N:4]
 [s:1][c;r{9-}:2]([aX2,cH1])@;-[CX3;r{9-}:3](O)=[O:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [s:1][c;r{9-}:2]([aX2,cH1])@;-[CX3;r{9-}:3]=[O:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([cH0](F)):1][c;r{9-}:2]([cH1])@;-[CX3;r{9-}:3]([O,N])=[O:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([cH0]F):1][c;r{9-}:2]([cH1])@;-[CX3;r{9-}:3]=[O:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([cH0](Cl)):1][c;r{9-}:2]([cH1])@;-[CX3;r{9-}:3]([CX3H])=[O:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([cH0](Cl)):1][c;r{9-}:2]([cH1])@;-[CX3H;r{9-}:3]=[O:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([cH0](Cl)):1][c;r{9-}:2]([cH1])@;-[CX3;r{9-}:3](O)=[O:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [nX3H1:1][a;r{9-}:2]@;-[CX3;r{9-}:3]=[O:4]
@@ -698,7 +698,7 @@ N[C;r{9-}:2](=[O:1])@;-[CH2;r{9-}:3][N:4]
 [nX2H0&r6:1][c&r6;r{9-}:2]([c&r6])@;-[CX3;r{9-}:3]([!O])=[O:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [nX2H0:1][a;r{9-}:2]([nX2H0])@;-[CX3;r{9-}:3]=[O:4]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: less_AtomMinRingSize
 [$([cH0]@;-[*^2]):1][c;r{9-}:2]([cH1])!@[CX3;r{9-}:3]=[O:4]
 # Unsupported SMARTS atom query: less_AtomMinRingSize
 [cH0:1][c;r{9-}:2]([cH1])@;-[CX3;r{9-}:3]=[O:4]

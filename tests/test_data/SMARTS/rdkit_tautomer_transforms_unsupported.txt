@@ -8,7 +8,7 @@
 [O,S,Se,Te;X2!H0]-[Cz1H0]=[C]-[C]=[Cz0,N]
 # Unsupported SMARTS atom query: range_AtomInNRings
 [CX4R{0-2}!H0]-[Cz1]=[NX2;N!H0,$(N-a)]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: range_AtomNumHeteroatomNeighbors
 [NX3;NH2,$([NH1]-a)]-[C;z{1-2}]=[CX3]
 # Unsupported SMARTS atom query: AtomNumHeteroatomNeighbors
 [Nz0!H0]-[C]=[Cz0X3R0]
@@ -22,12 +22,8 @@
 [#7+0,S,O,Se,Te,Cz0X4;!H0]-[#6,#7X2]=[#6]-[#6,#7X2]=[#6,#7X2]-[#6,#7X2]=[NX2,S,O,Se,Te]
 # Unsupported SMARTS atom query: AtomNumHeteroatomNeighbors
 [O,S,N;!H0]-[#6z2r5]=,:[#6X3r5;$([#6]([#6;r5])=,:[#6X3r5])]
-# Unsupported SMARTS atom query: RecursiveStructure
+# Unsupported SMARTS atom query: AtomNumHeteroatomNeighbors
 [#6r5!H0;$([#6]([#6r5])[#6r5])][#6z2r5]=[O,S,N]
-# Unsupported SMARTS atom query: RecursiveStructure
-[C!H0]-[N+;$([N][O-])]=[O]
-# Unsupported SMARTS atom query: RecursiveStructure
-[O!H0]-[N+;$([N][O-])]=[C]
 # Unsupported SMARTS atom query: AtomNumHeteroatomNeighbors
 [O!H0]-[Nz1]=[C]
 # Unsupported SMARTS atom query: AtomNumHeteroatomNeighbors

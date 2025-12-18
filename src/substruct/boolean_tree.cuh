@@ -111,6 +111,7 @@ static_assert(sizeof(AtomQueryTree) == 4, "AtomQueryTree must be exactly 4 bytes
  * @param leafBondCounts Pointer to first leaf bond count for this query atom (may be nullptr if checkBonds=false)
  * @param instructions Pointer to first instruction for this query atom
  * @param tree Tree metadata (num instructions, scratch size, result index)
+ * @param recursiveMatchBits Per-pair recursive match bits for this target atom (32 bits for patterns 0-31)
  * @param checkBonds If true, also check bond count requirements (for substructure search).
  *                   If false, only check atom properties (for label matrix compatibility).
  * @return true if target atom matches the compound query
@@ -121,7 +122,8 @@ HD_CALLABLE inline bool evaluateBoolTree(const AtomDataPacked*   targetPacked,
                                          const AtomQueryMask*    leafMasks,
                                          const BondTypeCounts*   leafBondCounts,
                                          const BoolInstruction*  instructions,
-                                         const AtomQueryTree&    tree) {
+                                         const AtomQueryTree&    tree,
+                                         uint32_t                recursiveMatchBits = 0) {
   // Empty tree (e.g., wildcard atom *) - atom properties always match,
   // but still need to check bond counts if requested
   if (tree.numInstructions == 0) {
@@ -158,7 +160,7 @@ HD_CALLABLE inline bool evaluateBoolTree(const AtomDataPacked*   targetPacked,
         scratch[instr.dst] = scratch[instr.src1] ? 0 : 1;
         break;
       case BoolOp::RecursiveMatch:
-        scratch[instr.dst] = targetPacked->hasRecursiveMatch(instr.leafMaskIdx) ? 1 : 0;
+        scratch[instr.dst] = ((recursiveMatchBits >> instr.leafMaskIdx) & 1u) ? 1 : 0;
         break;
     }
   }

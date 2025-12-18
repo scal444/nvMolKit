@@ -30,7 +30,7 @@ namespace nvMolKit {
 // =============================================================================
 
 constexpr int  kWarpSize      = 32;
-constexpr bool kDebugWUS      = true;  ///< Enable debug output in warpUnifiedSearchGPU
+constexpr bool kDebugWUS      = false;  ///< Enable debug output in warpUnifiedSearchGPU
 constexpr bool kDebugGSI      = false;  ///< Enable debug output in gsiBFSSearchGPU
 
 // =============================================================================

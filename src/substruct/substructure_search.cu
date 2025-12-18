@@ -71,8 +71,13 @@ __global__ void substructMatchKernel(MoleculesDeviceView             targets,
   __shared__ LabelMatrixStorage sharedLabelMatrix;
   LabelMatrixView               labelMatrix(&sharedLabelMatrix);
 
+  // Get pointer to per-pair recursive match bits for this (target, query) pair
+  const uint32_t* pairRecursiveBits = results.recursiveMatchBits
+                                        ? &results.recursiveMatchBits[pairIdx * results.maxTargetAtoms]
+                                        : nullptr;
+
   // Populate label matrix using optimized warp-parallel function
-  populateLabelMatrixOptimized<kMaxTargetAtoms, kMaxQueryAtoms>(target, query, labelMatrix);
+  populateLabelMatrixOptimized<kMaxTargetAtoms, kMaxQueryAtoms>(target, query, labelMatrix, pairRecursiveBits);
 
   __syncthreads();
 
@@ -189,6 +194,7 @@ void SubstructMatchResultsDevice::setStream(cudaStream_t stream) {
   matchIndices_.setStream(stream);
   queryAtomCounts_.setStream(stream);
   overflowBuffer_.setStream(stream);
+  recursiveMatchBits_.setStream(stream);
 }
 
 void SubstructMatchResultsDevice::allocate(int                     numTargets,
@@ -248,10 +254,17 @@ void SubstructMatchResultsDevice::allocate(int                     numTargets,
   const int overflowBatchSize = std::min(numTargets, numQueries);
   overflowBuffer_.resize(overflowBatchSize * 2 * overflowSize_);
 
+  // Allocate per-pair recursive match bits buffer
+  // Each (pair, atom) gets 32 bits for recursive pattern matches
+  maxTargetAtoms_ = *std::max_element(maxMatchesPerPairVec.begin(), maxMatchesPerPairVec.end());
+  recursiveMatchBits_.setStream(stream_);
+  recursiveMatchBits_.resize(numPairs * maxTargetAtoms_);
+
   // Initialize counts and indices to zero
   matchCounts_.zero();
   reportedCounts_.zero();
   matchIndices_.zero();
+  recursiveMatchBits_.zero();
 
   // Copy offsets and query atom counts to device
   pairMatchStarts_.setFromVector(hostPairMatchStarts_);
@@ -288,6 +301,8 @@ SubstructMatchResultsDeviceView SubstructMatchResultsDevice::view() const {
   v.overflowSize       = overflowSize_;
   v.overflowBatchSize  = static_cast<int>(overflowBuffer_.size() / (2 * overflowSize_));
   v.pairOffset         = 0;  // Default, will be set per-batch in getSubstructMatches
+  v.recursiveMatchBits = recursiveMatchBits_.data();
+  v.maxTargetAtoms     = maxTargetAtoms_;
   return v;
 }
 
@@ -388,15 +403,14 @@ void getSubstructMatches(MoleculesDevice&             targetsDevice,
     }
   };
 
-  // Step 2: Launch recursive subentries FIRST (preprocessing paints bits on target atoms)
+  // Step 2: Preprocess all recursive queries (per-pair storage avoids conflicts)
   for (int q : recursiveQueries) {
-    preprocessRecursiveSmarts(targetsDevice, targetsHost, queriesHost.recursivePatterns[q], stream);
+    preprocessRecursiveSmarts(targetsDevice, targetsHost, queriesHost.recursivePatterns[q],
+                              results, q, stream);
   }
 
-  // Step 3: Launch non-recursive queries (don't need painted bits)
+  // Step 3: Launch all queries (non-recursive first, then recursive)
   launchQueryBatch(nonRecursiveQueries);
-
-  // Step 4: Launch recursive queries LAST (need the painted bits from step 2)
   launchQueryBatch(recursiveQueries);
 
   cudaCheckError(cudaStreamSynchronize(stream));
@@ -411,70 +425,80 @@ void getSubstructMatches(MoleculesDevice&             targetsDevice,
 namespace {
 
 /**
- * @brief Kernel to paint recursive match bits on target atoms.
+ * @brief Kernel to paint recursive match bits into per-pair storage.
  *
- * For each match in the results, sets the corresponding recursive pattern bit
- * on the matched target atom (atom 0 of the match, which is the atom that
- * anchored the recursive pattern).
+ * For each match in the pattern results, sets the corresponding recursive pattern bit
+ * in the per-pair recursiveMatchBits buffer. This writes to the output pair buffer
+ * (for the main query) rather than to the target atoms directly.
+ *
+ * @param patternResults Results from matching recursive patterns against targets
+ * @param outputResults The main results buffer where we write recursiveMatchBits
+ * @param patternQueryIdx Index of this pattern in patternResults
+ * @param patternId Bit position (0-31) to set for this pattern
+ * @param mainQueryIdx Index of the main query in outputResults (determines output pair)
  */
-__global__ void paintRecursiveMatchBitsKernel(AtomDataPacked*                     atomDataPacked,
-                                              const int*                          batchAtomStarts,
-                                              const SubstructMatchResultsDeviceView results,
-                                              int                                 patternId,
-                                              int                                 queryIdx) {
+__global__ void paintRecursiveMatchBitsKernel(const SubstructMatchResultsDeviceView patternResults,
+                                              SubstructMatchResultsDeviceView       outputResults,
+                                              int                                   patternQueryIdx,
+                                              int                                   patternId,
+                                              int                                   mainQueryIdx) {
   const int targetIdx = blockIdx.x;
-  if (targetIdx >= results.numTargets) {
+  if (targetIdx >= patternResults.numTargets) {
     return;
   }
 
-  const int pairIdx      = targetIdx * results.numQueries + queryIdx;
-  const int matchCount   = results.reportedCounts[pairIdx];
-  const int matchOffset  = results.pairMatchStarts[pairIdx];
-  const int queryAtoms   = results.queryAtomCounts[queryIdx];
-  const int atomStart    = batchAtomStarts[targetIdx];
+  // Read from pattern results (pattern matching results)
+  const int patternPairIdx = targetIdx * patternResults.numQueries + patternQueryIdx;
+  const int matchCount     = patternResults.reportedCounts[patternPairIdx];
+  const int matchOffset    = patternResults.pairMatchStarts[patternPairIdx];
+  const int queryAtoms     = patternResults.queryAtomCounts[patternQueryIdx];
+
+  // Write to output pair buffer (main query's per-pair storage)
+  const int outputPairIdx = targetIdx * outputResults.numQueries + mainQueryIdx;
 
   for (int m = threadIdx.x; m < matchCount; m += blockDim.x) {
-    const int targetAtomIdx = results.matchIndices[matchOffset + m * queryAtoms];
+    const int targetAtomIdx = patternResults.matchIndices[matchOffset + m * queryAtoms];
     if (targetAtomIdx >= 0) {
-      atomDataPacked[atomStart + targetAtomIdx].setRecursiveMatchBit(patternId);
+      outputResults.setRecursiveMatchBit(outputPairIdx, targetAtomIdx, patternId);
     }
   }
 }
 
 }  // namespace
 
-void paintRecursiveMatchBits(MoleculesDevice&                   targetsDevice,
-                             const SubstructMatchResultsDevice& results,
+void paintRecursiveMatchBits(const SubstructMatchResultsDevice& patternResults,
+                             SubstructMatchResultsDevice&       outputResults,
                              const std::vector<int>&            patternIds,
+                             int                                mainQueryIdx,
                              cudaStream_t                       stream) {
   if (patternIds.empty()) {
     return;
   }
 
-  auto resultsView = results.view();
-  auto targetsView = targetsDevice.view();
+  auto patternView = patternResults.view();
+  auto outputView  = outputResults.view();
 
-  const int numTargets = resultsView.numTargets;
-  const int numQueries = resultsView.numQueries;
+  const int numTargets = patternView.numTargets;
+  const int numPatternQueries = patternView.numQueries;
 
-  if (numTargets == 0 || numQueries == 0) {
+  if (numTargets == 0 || numPatternQueries == 0) {
     return;
   }
 
   const int threadsPerBlock = 64;
 
-  for (int q = 0; q < numQueries && q < static_cast<int>(patternIds.size()); ++q) {
+  for (int q = 0; q < numPatternQueries && q < static_cast<int>(patternIds.size()); ++q) {
     const int patternId = patternIds[q];
-    if (patternId < 0 || patternId >= AtomDataPacked::kMaxRecursivePatterns) {
+    if (patternId < 0 || patternId >= 32) {
       continue;
     }
 
     paintRecursiveMatchBitsKernel<<<numTargets, threadsPerBlock, 0, stream>>>(
-      const_cast<AtomDataPacked*>(targetsView.atomDataPacked),
-      targetsView.batchAtomStarts,
-      resultsView,
+      patternView,
+      outputView,
+      q,
       patternId,
-      q);
+      mainQueryIdx);
   }
 
   cudaCheckError(cudaGetLastError());
@@ -483,6 +507,8 @@ void paintRecursiveMatchBits(MoleculesDevice&                   targetsDevice,
 void preprocessRecursiveSmarts(MoleculesDevice&             targetsDevice,
                                const MoleculesHost&         targetsHost,
                                const RecursivePatternInfo&  recursiveInfo,
+                               SubstructMatchResultsDevice& outputResults,
+                               int                          mainQueryIdx,
                                cudaStream_t                 stream) {
   if (recursiveInfo.empty()) {
     return;
@@ -505,11 +531,11 @@ void preprocessRecursiveSmarts(MoleculesDevice&             targetsDevice,
   MoleculesDevice patternsDevice(stream);
   patternsDevice.copyFromHost(patternsHost, stream);
 
-  SubstructMatchResultsDevice results(stream);
-  getSubstructMatches(targetsDevice, patternsDevice, targetsHost, patternsHost, results,
+  SubstructMatchResultsDevice patternResults(stream);
+  getSubstructMatches(targetsDevice, patternsDevice, targetsHost, patternsHost, patternResults,
                       SubstructAlgorithm::WarpUnified, stream);
 
-  paintRecursiveMatchBits(targetsDevice, results, patternIds, stream);
+  paintRecursiveMatchBits(patternResults, outputResults, patternIds, mainQueryIdx, stream);
 }
 
 }  // namespace nvMolKit
