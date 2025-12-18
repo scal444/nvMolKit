@@ -38,6 +38,7 @@ using LabelMatrixView    = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
 
 constexpr int kMaxPartialsPerBlock = 256;   // Shared memory partials per block
 constexpr int kMaxQueueSize        = 512;   // Shared memory queue size
+constexpr int kWarpsPerBlock       = threadsPerBlock / 32;
 
 constexpr bool kDebugDumpLabelMatrix = false;  ///< Dump full label matrices after recursive preprocessing
 constexpr bool kDebugPaintRecursive  = false;  ///< Debug recursive bit painting kernel
@@ -131,27 +132,25 @@ __global__ void substructMatchKernel(MoleculesDeviceView             targets,
     const int warpId   = tile32.meta_group_rank();
     const int numWarps = tile32.meta_group_size();
 
-    __shared__ VF2State vf2States[4];  // Up to 4 warps
+    __shared__ VF2State vf2States[kWarpsPerBlock];
 
-    if (warpId < 4 && tile32.thread_rank() == 0) {
+    if (tile32.thread_rank() == 0) {
       vf2States[warpId].init(query.numAtoms);
     }
     __syncthreads();
 
     // Each warp explores from different starting target atoms
     for (int startT = warpId; startT < target.numAtoms; startT += numWarps) {
-      if (warpId < 4) {
-        vf2SearchGPU<kMaxTargetAtoms, kMaxQueryAtoms>(target,
-                                                      query,
-                                                      labelMatrix,
-                                                      vf2States[warpId],
-                                                      startT,
-                                                      &sharedMatchCount,
-                                                      &sharedReportedCount,
-                                                      results.matchIndices,
-                                                      maxMatches,
-                                                      matchOffset);
-      }
+      vf2SearchGPU<kMaxTargetAtoms, kMaxQueryAtoms>(target,
+                                                    query,
+                                                    labelMatrix,
+                                                    vf2States[warpId],
+                                                    startT,
+                                                    &sharedMatchCount,
+                                                    &sharedReportedCount,
+                                                    results.matchIndices,
+                                                    maxMatches,
+                                                    matchOffset);
     }
 
   } else if constexpr (Algo == SubstructAlgorithm::GSI) {
