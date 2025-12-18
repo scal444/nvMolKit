@@ -33,10 +33,11 @@ namespace nvMolKit {
  * @brief Boolean operation type for query expression evaluation.
  */
 enum class BoolOp : uint8_t {
-  Leaf,  ///< Evaluate AtomQueryMask against target atom
-  And,   ///< Binary AND of two operands
-  Or,    ///< Binary OR of two operands
-  Not    ///< Unary NOT of single operand
+  Leaf,            ///< Evaluate AtomQueryMask against target atom
+  And,             ///< Binary AND of two operands
+  Or,              ///< Binary OR of two operands
+  Not,             ///< Unary NOT of single operand
+  RecursiveMatch   ///< Check if target atom has recursive pattern bit set
 };
 
 /**
@@ -46,17 +47,19 @@ enum class BoolOp : uint8_t {
  * For simple AND-only queries, a single Leaf instruction suffices.
  *
  * Layout:
- * - Leaf: scratch[dst] = atomMatchesPacked(target, leafMasks[leafMaskIdx])
- * - And:  scratch[dst] = scratch[src1] & scratch[src2]
- * - Or:   scratch[dst] = scratch[src1] | scratch[src2]
- * - Not:  scratch[dst] = !scratch[src1]
+ * - Leaf:           scratch[dst] = atomMatchesPacked(target, leafMasks[leafMaskIdx])
+ * - And:            scratch[dst] = scratch[src1] & scratch[src2]
+ * - Or:             scratch[dst] = scratch[src1] | scratch[src2]
+ * - Not:            scratch[dst] = !scratch[src1]
+ * - RecursiveMatch: scratch[dst] = target.hasRecursiveMatch(patternId)
+ *                   where patternId is stored in leafMaskIdx field
  */
 struct BoolInstruction {
   BoolOp  op;           ///< Operation type
   uint8_t dst;          ///< Destination index in scratch array
   uint8_t src1;         ///< Left operand index (or source for NOT)
-  uint8_t src2;         ///< Right operand index (unused for Leaf/Not)
-  uint8_t leafMaskIdx;  ///< Index into leaf masks array (for Leaf op only)
+  uint8_t src2;         ///< Right operand index (unused for Leaf/Not/RecursiveMatch)
+  uint8_t leafMaskIdx;  ///< Index into leaf masks array (Leaf) or pattern ID (RecursiveMatch)
 
   HD_CALLABLE static BoolInstruction makeLeaf(uint8_t dst, uint8_t maskIdx) {
     return BoolInstruction{BoolOp::Leaf, dst, 0, 0, maskIdx};
@@ -72,6 +75,10 @@ struct BoolInstruction {
 
   HD_CALLABLE static BoolInstruction makeNot(uint8_t dst, uint8_t src) {
     return BoolInstruction{BoolOp::Not, dst, src, 0, 0};
+  }
+
+  HD_CALLABLE static BoolInstruction makeRecursiveMatch(uint8_t dst, uint8_t patternId) {
+    return BoolInstruction{BoolOp::RecursiveMatch, dst, 0, 0, patternId};
   }
 };
 
@@ -149,6 +156,9 @@ HD_CALLABLE inline bool evaluateBoolTree(const AtomDataPacked*   targetPacked,
         break;
       case BoolOp::Not:
         scratch[instr.dst] = scratch[instr.src1] ? 0 : 1;
+        break;
+      case BoolOp::RecursiveMatch:
+        scratch[instr.dst] = targetPacked->hasRecursiveMatch(instr.leafMaskIdx) ? 1 : 0;
         break;
     }
   }

@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -113,6 +114,38 @@ struct BondQueryData {
 };
 
 /**
+ * @brief Information about a single recursive SMARTS pattern within a query.
+ *
+ * Each RecursivePatternEntry represents one $(...) pattern found in the SMARTS query.
+ * The queryMol pointer is non-owning - the original query owns the pattern.
+ */
+struct RecursivePatternEntry {
+  const RDKit::ROMol* queryMol = nullptr;  ///< The inner query molecule from $(...) 
+  int queryAtomIdx = 0;                     ///< Index of the query atom containing this pattern
+  int patternId = 0;                        ///< Unique ID (0-15) for this pattern in the batch
+};
+
+/**
+ * @brief Collection of recursive SMARTS patterns extracted from a query.
+ *
+ * Used to preprocess recursive patterns before main substructure matching.
+ */
+struct RecursivePatternInfo {
+  std::vector<RecursivePatternEntry> patterns;  ///< All recursive patterns found
+  bool hasRecursivePatterns = false;            ///< Quick check for any patterns
+
+  /**
+   * @brief Check if the query has any recursive patterns.
+   */
+  [[nodiscard]] bool empty() const { return patterns.empty(); }
+
+  /**
+   * @brief Get the number of recursive patterns.
+   */
+  [[nodiscard]] size_t size() const { return patterns.size(); }
+};
+
+/**
  * @brief Host-side batched molecule storage.
  *
  * Stores multiple molecules in a flattened format optimized for GPU transfer.
@@ -150,6 +183,9 @@ struct MoleculesHost {
 
   // Bond query data for SMARTS (parallel to bondData, only for query molecules)
   std::vector<BondQueryData> bondQueryData;  ///< Bond query info (type + ring constraints)
+
+  // Recursive SMARTS patterns extracted from query molecules (one per molecule in batch)
+  std::vector<RecursivePatternInfo> recursivePatterns;
 
   MoleculesHost();
 
@@ -292,6 +328,29 @@ AtomQuery atomQueryFromDescription(const std::string& description);
  * @return AtomQueryMask with precomputed mask and expected values
  */
 AtomQueryMask buildQueryMask(const AtomDataPacked& queryAtom, AtomQuery queryFlags);
+/**
+ * @brief Extract recursive SMARTS patterns from a query molecule.
+ *
+ * Walks the query tree looking for RecursiveStructure nodes and extracts the
+ * inner query molecules. Validates constraints:
+ * - Maximum 8 non-nested recursive patterns per query (expandable to 16)
+ * - No nested recursion (throws if $($(...)) patterns are found)
+ *
+ * @param mol The query molecule (typically parsed from SMARTS)
+ * @return RecursivePatternInfo containing all found patterns
+ * @throws std::runtime_error if constraints are violated
+ */
+RecursivePatternInfo extractRecursivePatterns(const RDKit::ROMol* mol);
+
+/**
+ * @brief Check if a SMARTS query contains recursive patterns.
+ *
+ * Quick check without full extraction. Useful for batch sorting.
+ *
+ * @param mol The query molecule to check
+ * @return true if the query contains any recursive SMARTS ($(...))
+ */
+bool hasRecursiveSmarts(const RDKit::ROMol* mol);
 
 }  // namespace nvMolKit
 

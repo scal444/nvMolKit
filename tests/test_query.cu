@@ -20,6 +20,7 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <vector>
 
@@ -428,14 +429,6 @@ INSTANTIATE_TEST_SUITE_P(
 // Unsupported Composite Query Tests (should throw)
 // =============================================================================
 
-TEST(QueryCompositeTest, RecursiveSmartsThrows) {
-  // $(*C) recursive SMARTS - still unsupported
-  auto mol = makeQuery("[$(*C)]");
-  ASSERT_NE(mol, nullptr);
-
-  MoleculesHost batch;
-  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
-}
 
 TEST(QueryCompositeTest, RingConnectivityQueryThrows) {
   // [x2] ring connectivity query
@@ -805,4 +798,106 @@ TEST(QueryBatchTest, MixedAliphaticAromaticQueries) {
   }
   // Last atom is aliphatic carbon
   EXPECT_EQ(batch.atomQueries[6], kAliphaticCarbon) << "Atom 6 should be aliphatic carbon";
+}
+
+// =============================================================================
+// Recursive SMARTS Pattern Extraction Tests
+// =============================================================================
+
+TEST(RecursivePatternExtraction, NoRecursivePatterns) {
+  auto q = makeQuery("[CH3]");
+  
+  EXPECT_FALSE(nvMolKit::hasRecursiveSmarts(q.get()));
+  
+  auto info = nvMolKit::extractRecursivePatterns(q.get());
+  EXPECT_TRUE(info.empty());
+  EXPECT_EQ(info.size(), 0);
+  EXPECT_FALSE(info.hasRecursivePatterns);
+}
+
+TEST(RecursivePatternExtraction, SimpleRecursivePattern) {
+  auto q = makeQuery("[$([OH])]");
+  
+  EXPECT_TRUE(nvMolKit::hasRecursiveSmarts(q.get()));
+  
+  auto info = nvMolKit::extractRecursivePatterns(q.get());
+  EXPECT_FALSE(info.empty());
+  EXPECT_EQ(info.size(), 1);
+  EXPECT_TRUE(info.hasRecursivePatterns);
+  
+  EXPECT_EQ(info.patterns[0].queryAtomIdx, 0);
+  EXPECT_EQ(info.patterns[0].patternId, 0);
+  EXPECT_NE(info.patterns[0].queryMol, nullptr);
+}
+
+TEST(RecursivePatternExtraction, MultipleRecursivePatterns) {
+  auto q = makeQuery("[$([OH]),$([NH2])]");
+  
+  EXPECT_TRUE(nvMolKit::hasRecursiveSmarts(q.get()));
+  
+  auto info = nvMolKit::extractRecursivePatterns(q.get());
+  EXPECT_EQ(info.size(), 2);
+  
+  EXPECT_EQ(info.patterns[0].patternId, 0);
+  EXPECT_EQ(info.patterns[1].patternId, 1);
+  EXPECT_EQ(info.patterns[0].queryAtomIdx, 0);
+  EXPECT_EQ(info.patterns[1].queryAtomIdx, 0);
+}
+
+TEST(RecursivePatternExtraction, RecursivePatternsOnDifferentAtoms) {
+  auto q = makeQuery("[$([OH])]-[$([C]=O)]");
+  
+  EXPECT_TRUE(nvMolKit::hasRecursiveSmarts(q.get()));
+  
+  auto info = nvMolKit::extractRecursivePatterns(q.get());
+  EXPECT_EQ(info.size(), 2);
+  
+  std::set<int> atomIndices;
+  for (const auto& pattern : info.patterns) {
+    atomIndices.insert(pattern.queryAtomIdx);
+  }
+  EXPECT_EQ(atomIndices.size(), 2);
+}
+
+TEST(RecursivePatternExtraction, MixedRecursiveAndNonRecursive) {
+  auto q = makeQuery("C[$([OH])]");
+  
+  EXPECT_TRUE(nvMolKit::hasRecursiveSmarts(q.get()));
+  
+  auto info = nvMolKit::extractRecursivePatterns(q.get());
+  EXPECT_EQ(info.size(), 1);
+  EXPECT_EQ(info.patterns[0].queryAtomIdx, 1);
+}
+
+TEST(RecursivePatternExtraction, ComplexRecursivePattern) {
+  auto q = makeQuery("[$([CX3]=[OX1]),$([CX3+]-[OX1-])]");
+  
+  EXPECT_TRUE(nvMolKit::hasRecursiveSmarts(q.get()));
+  
+  auto info = nvMolKit::extractRecursivePatterns(q.get());
+  EXPECT_EQ(info.size(), 2);
+}
+
+TEST(RecursivePatternExtraction, MaxPatternsAllowed) {
+  auto q = makeQuery("[$([C]),$([N]),$([O]),$([S]),$([F]),$([Cl]),$([Br]),$([I])]");
+  
+  auto info = nvMolKit::extractRecursivePatterns(q.get());
+  EXPECT_EQ(info.size(), 8);
+  
+  for (int i = 0; i < 8; ++i) {
+    EXPECT_EQ(info.patterns[i].patternId, i);
+  }
+}
+
+TEST(RecursivePatternExtraction, TooManyPatternsThrows) {
+  auto q = makeQuery("[$([C]),$([N]),$([O]),$([S]),$([F]),$([Cl]),$([Br]),$([I]),$([P])]");
+  
+  EXPECT_THROW(nvMolKit::extractRecursivePatterns(q.get()), std::runtime_error);
+}
+
+TEST(RecursivePatternExtraction, NullMolecule) {
+  EXPECT_FALSE(nvMolKit::hasRecursiveSmarts(nullptr));
+  
+  auto info = nvMolKit::extractRecursivePatterns(nullptr);
+  EXPECT_TRUE(info.empty());
 }

@@ -137,13 +137,49 @@ class SubstructMatchResultsDevice {
  * @param algorithm Algorithm to use for matching
  * @param stream CUDA stream for async operations
  */
-void getSubstructMatches(const MoleculesDevice&       targetsDevice,
+void getSubstructMatches(MoleculesDevice&             targetsDevice,
                          const MoleculesDevice&       queriesDevice,
                          const MoleculesHost&         targetsHost,
                          const MoleculesHost&         queriesHost,
                          SubstructMatchResultsDevice& results,
                          SubstructAlgorithm           algorithm,
                          cudaStream_t                 stream);
+
+/**
+ * @brief Paint recursive SMARTS match bits onto target atom labels.
+ *
+ * Given substructure match results from recursive pattern matching, sets the
+ * corresponding recursive match bits on each target atom that matched.
+ *
+ * @param targetsDevice Device-resident target molecules (will be modified)
+ * @param results Match results from running substruct match on recursive patterns
+ * @param patternIds Vector mapping query index to pattern ID (for each pattern query)
+ * @param stream CUDA stream for async operations
+ */
+void paintRecursiveMatchBits(MoleculesDevice&                   targetsDevice,
+                             const SubstructMatchResultsDevice& results,
+                             const std::vector<int>&            patternIds,
+                             cudaStream_t                       stream);
+
+/**
+ * @brief Preprocess recursive SMARTS patterns for a batch of queries.
+ *
+ * For queries containing recursive SMARTS ($(...)), this function:
+ * 1. Extracts all recursive patterns from the queries
+ * 2. Runs substruct matching for each pattern against all targets
+ * 3. Paints the recursive match bits on target atoms
+ *
+ * Call this before getSubstructMatches for queries with recursive SMARTS.
+ *
+ * @param targetsDevice Device-resident target molecules (will be modified)
+ * @param targetsHost Host-side target data
+ * @param recursiveInfo Extracted recursive pattern information
+ * @param stream CUDA stream for async operations
+ */
+void preprocessRecursiveSmarts(MoleculesDevice&             targetsDevice,
+                               const MoleculesHost&         targetsHost,
+                               const RecursivePatternInfo&  recursiveInfo,
+                               cudaStream_t                 stream);
 
 }  // namespace nvMolKit
 

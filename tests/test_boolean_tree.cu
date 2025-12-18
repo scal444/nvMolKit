@@ -98,8 +98,9 @@ AtomQueryMask makeAromaticMask() {
   AtomQueryMask mask;
   mask.maskLo     = 0;
   mask.expectedLo = 0;
-  mask.maskHi     = 0xFFULL << (AtomDataPacked::kIsAromaticByte * 8);
-  mask.expectedHi = 0x01ULL << (AtomDataPacked::kIsAromaticByte * 8);
+  const int aromaticBitPos = AtomDataPacked::kDegreeByte * 8 + AtomDataPacked::kIsAromaticBit;
+  mask.maskHi     = 1ULL << aromaticBitPos;
+  mask.expectedHi = 1ULL << aromaticBitPos;
   return mask;
 }
 
@@ -107,8 +108,9 @@ AtomQueryMask makeAliphaticMask() {
   AtomQueryMask mask;
   mask.maskLo     = 0;
   mask.expectedLo = 0;
-  mask.maskHi     = 0xFFULL << (AtomDataPacked::kIsAromaticByte * 8);
-  mask.expectedHi = 0x00ULL << (AtomDataPacked::kIsAromaticByte * 8);
+  const int aromaticBitPos = AtomDataPacked::kDegreeByte * 8 + AtomDataPacked::kIsAromaticBit;
+  mask.maskHi     = 1ULL << aromaticBitPos;
+  mask.expectedHi = 0;  // Expect bit NOT set for aliphatic
   return mask;
 }
 
@@ -856,5 +858,154 @@ TEST_F(BoolTreeDeviceTest, ComplexExpressionOnDevice) {
   EXPECT_FALSE(results[1]);
   EXPECT_TRUE(results[2]);
   EXPECT_FALSE(results[3]);
+}
+
+// =============================================================================
+// BoolInstruction::makeRecursiveMatch Tests
+// =============================================================================
+
+TEST(BoolInstructionTest, MakeRecursiveMatchSetsCorrectFields) {
+  const BoolInstruction instr = BoolInstruction::makeRecursiveMatch(5, 3);
+
+  EXPECT_EQ(instr.op, BoolOp::RecursiveMatch);
+  EXPECT_EQ(instr.dst, 5);
+  EXPECT_EQ(instr.leafMaskIdx, 3);  // pattern ID stored here
+}
+
+// =============================================================================
+// RecursiveMatch Evaluation Tests
+// =============================================================================
+
+TEST_F(BoolTreeDeviceTest, RecursiveMatchChecksPatternBit) {
+  std::vector<AtomDataPacked> targets(4);
+  targets[0].setRecursiveMatchBit(0);
+  targets[1].setRecursiveMatchBit(1);
+  targets[2].setRecursiveMatchBit(0);
+  targets[2].setRecursiveMatchBit(1);
+  // targets[3] has no bits set
+
+  std::vector<BondTypeCounts> targetBonds(4);
+
+  std::vector<AtomQueryMask> leafMasks;
+  std::vector<BondTypeCounts> leafBonds;
+
+  std::vector<BoolInstruction> instructions = {
+    BoolInstruction::makeRecursiveMatch(0, 0)
+  };
+  std::vector<AtomQueryTree> trees = {{0, 1, 1, 0}};
+
+  AsyncDeviceVector<AtomDataPacked>  targetsDev(targets.size(), stream_->stream());
+  AsyncDeviceVector<BondTypeCounts>  targetBondsDev(targetBonds.size(), stream_->stream());
+  AsyncDeviceVector<AtomQueryMask>   leafMasksDev(1, stream_->stream());
+  AsyncDeviceVector<BondTypeCounts>  leafBondsDev(1, stream_->stream());
+  AsyncDeviceVector<BoolInstruction> instructionsDev(instructions.size(), stream_->stream());
+  AsyncDeviceVector<AtomQueryTree>   treesDev(trees.size(), stream_->stream());
+  AsyncDeviceVector<int>             resultsDev(targets.size(), stream_->stream());
+
+  targetsDev.copyFromHost(targets);
+  targetBondsDev.copyFromHost(targetBonds);
+  instructionsDev.copyFromHost(instructions);
+  treesDev.copyFromHost(trees);
+
+  evaluateBoolTreeKernel<<<1, 4, 0, stream_->stream()>>>(
+    targetsDev.data(), targetBondsDev.data(), leafMasksDev.data(), leafBondsDev.data(),
+    instructionsDev.data(), treesDev.data(), static_cast<int>(targets.size()), resultsDev.data());
+  cudaCheckError(cudaGetLastError());
+
+  std::vector<int> results(targets.size());
+  resultsDev.copyToHost(results);
+  cudaCheckError(cudaStreamSynchronize(stream_->stream()));
+
+  EXPECT_TRUE(results[0]) << "Target with pattern 0 bit set should match pattern 0";
+  EXPECT_FALSE(results[1]) << "Target with only pattern 1 bit set should not match pattern 0";
+  EXPECT_TRUE(results[2]) << "Target with both patterns should match pattern 0";
+  EXPECT_FALSE(results[3]) << "Target with no patterns should not match";
+}
+
+TEST_F(BoolTreeDeviceTest, RecursiveMatchWithOr) {
+  std::vector<AtomDataPacked> targets(4);
+  targets[0].setRecursiveMatchBit(0);
+  targets[1].setRecursiveMatchBit(1);
+  targets[2].setRecursiveMatchBit(0);
+  targets[2].setRecursiveMatchBit(1);
+  // targets[3] has no bits set
+
+  std::vector<BondTypeCounts> targetBonds(4);
+
+  std::vector<AtomQueryMask> leafMasks;
+  std::vector<BondTypeCounts> leafBonds;
+
+  std::vector<BoolInstruction> instructions = {
+    BoolInstruction::makeRecursiveMatch(0, 0),
+    BoolInstruction::makeRecursiveMatch(1, 1),
+    BoolInstruction::makeOr(2, 0, 1)
+  };
+  std::vector<AtomQueryTree> trees = {{0, 3, 3, 2}};
+
+  AsyncDeviceVector<AtomDataPacked>  targetsDev(targets.size(), stream_->stream());
+  AsyncDeviceVector<BondTypeCounts>  targetBondsDev(targetBonds.size(), stream_->stream());
+  AsyncDeviceVector<AtomQueryMask>   leafMasksDev(1, stream_->stream());
+  AsyncDeviceVector<BondTypeCounts>  leafBondsDev(1, stream_->stream());
+  AsyncDeviceVector<BoolInstruction> instructionsDev(instructions.size(), stream_->stream());
+  AsyncDeviceVector<AtomQueryTree>   treesDev(trees.size(), stream_->stream());
+  AsyncDeviceVector<int>             resultsDev(targets.size(), stream_->stream());
+
+  targetsDev.copyFromHost(targets);
+  targetBondsDev.copyFromHost(targetBonds);
+  instructionsDev.copyFromHost(instructions);
+  treesDev.copyFromHost(trees);
+
+  evaluateBoolTreeKernel<<<1, 4, 0, stream_->stream()>>>(
+    targetsDev.data(), targetBondsDev.data(), leafMasksDev.data(), leafBondsDev.data(),
+    instructionsDev.data(), treesDev.data(), static_cast<int>(targets.size()), resultsDev.data());
+  cudaCheckError(cudaGetLastError());
+
+  std::vector<int> results(targets.size());
+  resultsDev.copyToHost(results);
+  cudaCheckError(cudaStreamSynchronize(stream_->stream()));
+
+  EXPECT_TRUE(results[0]) << "Target with pattern 0 should match (pattern 0 OR pattern 1)";
+  EXPECT_TRUE(results[1]) << "Target with pattern 1 should match (pattern 0 OR pattern 1)";
+  EXPECT_TRUE(results[2]) << "Target with both patterns should match";
+  EXPECT_FALSE(results[3]) << "Target with no patterns should not match";
+}
+
+TEST_F(BoolTreeDeviceTest, RecursiveMatchNegated) {
+  std::vector<AtomDataPacked> targets(2);
+  targets[0].setRecursiveMatchBit(0);
+  // targets[1] has no bits set
+
+  std::vector<BondTypeCounts> targetBonds(2);
+
+  std::vector<BoolInstruction> instructions = {
+    BoolInstruction::makeRecursiveMatch(0, 0),
+    BoolInstruction::makeNot(1, 0)
+  };
+  std::vector<AtomQueryTree> trees = {{0, 2, 2, 1}};
+
+  AsyncDeviceVector<AtomDataPacked>  targetsDev(targets.size(), stream_->stream());
+  AsyncDeviceVector<BondTypeCounts>  targetBondsDev(targetBonds.size(), stream_->stream());
+  AsyncDeviceVector<AtomQueryMask>   leafMasksDev(1, stream_->stream());
+  AsyncDeviceVector<BondTypeCounts>  leafBondsDev(1, stream_->stream());
+  AsyncDeviceVector<BoolInstruction> instructionsDev(instructions.size(), stream_->stream());
+  AsyncDeviceVector<AtomQueryTree>   treesDev(trees.size(), stream_->stream());
+  AsyncDeviceVector<int>             resultsDev(targets.size(), stream_->stream());
+
+  targetsDev.copyFromHost(targets);
+  targetBondsDev.copyFromHost(targetBonds);
+  instructionsDev.copyFromHost(instructions);
+  treesDev.copyFromHost(trees);
+
+  evaluateBoolTreeKernel<<<1, 2, 0, stream_->stream()>>>(
+    targetsDev.data(), targetBondsDev.data(), leafMasksDev.data(), leafBondsDev.data(),
+    instructionsDev.data(), treesDev.data(), static_cast<int>(targets.size()), resultsDev.data());
+  cudaCheckError(cudaGetLastError());
+
+  std::vector<int> results(targets.size());
+  resultsDev.copyToHost(results);
+  cudaCheckError(cudaStreamSynchronize(stream_->stream()));
+
+  EXPECT_FALSE(results[0]) << "Target with pattern should NOT match negated recursive pattern";
+  EXPECT_TRUE(results[1]) << "Target without pattern should match negated recursive pattern";
 }
 

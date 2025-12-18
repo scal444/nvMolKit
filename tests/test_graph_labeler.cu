@@ -1872,9 +1872,11 @@ TEST(AtomQueryMaskTest, BuildQueryMaskAromatic) {
 
   nvMolKit::AtomQueryMask mask = nvMolKit::buildQueryMask(queryAtom, nvMolKit::AtomQueryIsAromatic);
 
-  // Mask should have 0xFF in byte 2 of hi (isAromatic position)
-  EXPECT_EQ((mask.maskHi >> 16) & 0xFF, 0xFF);
-  EXPECT_EQ((mask.expectedHi >> 16) & 0xFF, 0x01);  // expect true
+  // isAromatic is now bit 54 (kDegreeByte * 8 + kIsAromaticBit = 6 * 8 + 6)
+  constexpr uint64_t aromaticBit = 1ULL << (nvMolKit::AtomDataPacked::kDegreeByte * 8 + 
+                                            nvMolKit::AtomDataPacked::kIsAromaticBit);
+  EXPECT_EQ(mask.maskHi & aromaticBit, aromaticBit);
+  EXPECT_EQ(mask.expectedHi & aromaticBit, aromaticBit);  // expect true
 
   // Rest should be zero
   EXPECT_EQ(mask.maskLo, 0);
@@ -2130,4 +2132,192 @@ TEST(BondTypeCountsTest, MixedWithAnyFailSpecific) {
 
   // Should fail: no double bonds in target, even though total is enough
   EXPECT_FALSE(target.canMatchQuery(query));
+}
+
+// =============================================================================
+// AtomDataPacked Bit Packing Tests
+// =============================================================================
+
+TEST(AtomDataPackedBitPacking, IsAromaticSetAndGet) {
+  nvMolKit::AtomDataPacked packed;
+
+  EXPECT_FALSE(packed.isAromatic());
+
+  packed.setIsAromatic(true);
+  EXPECT_TRUE(packed.isAromatic());
+
+  packed.setIsAromatic(false);
+  EXPECT_FALSE(packed.isAromatic());
+}
+
+TEST(AtomDataPackedBitPacking, IsInRingSetAndGet) {
+  nvMolKit::AtomDataPacked packed;
+
+  EXPECT_FALSE(packed.isInRing());
+
+  packed.setIsInRing(true);
+  EXPECT_TRUE(packed.isInRing());
+
+  packed.setIsInRing(false);
+  EXPECT_FALSE(packed.isInRing());
+}
+
+TEST(AtomDataPackedBitPacking, IsAromaticAndIsInRingIndependent) {
+  nvMolKit::AtomDataPacked packed;
+
+  packed.setIsAromatic(true);
+  packed.setIsInRing(false);
+  EXPECT_TRUE(packed.isAromatic());
+  EXPECT_FALSE(packed.isInRing());
+
+  packed.setIsInRing(true);
+  EXPECT_TRUE(packed.isAromatic());
+  EXPECT_TRUE(packed.isInRing());
+
+  packed.setIsAromatic(false);
+  EXPECT_FALSE(packed.isAromatic());
+  EXPECT_TRUE(packed.isInRing());
+}
+
+TEST(AtomDataPackedBitPacking, DegreeUseSixBits) {
+  nvMolKit::AtomDataPacked packed;
+
+  packed.setDegree(0);
+  EXPECT_EQ(packed.degree(), 0);
+
+  packed.setDegree(1);
+  EXPECT_EQ(packed.degree(), 1);
+
+  packed.setDegree(63);
+  EXPECT_EQ(packed.degree(), 63);
+
+  packed.setDegree(64);
+  EXPECT_EQ(packed.degree(), 0);
+
+  packed.setDegree(127);
+  EXPECT_EQ(packed.degree(), 63);
+}
+
+TEST(AtomDataPackedBitPacking, DegreeDoesNotAffectAromaticOrInRing) {
+  nvMolKit::AtomDataPacked packed;
+
+  packed.setIsAromatic(true);
+  packed.setIsInRing(true);
+  packed.setDegree(42);
+
+  EXPECT_EQ(packed.degree(), 42);
+  EXPECT_TRUE(packed.isAromatic());
+  EXPECT_TRUE(packed.isInRing());
+
+  packed.setDegree(0);
+  EXPECT_EQ(packed.degree(), 0);
+  EXPECT_TRUE(packed.isAromatic());
+  EXPECT_TRUE(packed.isInRing());
+}
+
+TEST(AtomDataPackedBitPacking, AromaticAndInRingDoNotAffectDegree) {
+  nvMolKit::AtomDataPacked packed;
+
+  packed.setDegree(35);
+  packed.setIsAromatic(true);
+  EXPECT_EQ(packed.degree(), 35);
+
+  packed.setIsInRing(true);
+  EXPECT_EQ(packed.degree(), 35);
+
+  packed.setIsAromatic(false);
+  packed.setIsInRing(false);
+  EXPECT_EQ(packed.degree(), 35);
+}
+
+TEST(AtomDataPackedBitPacking, RecursiveMatchesSetAndGet) {
+  nvMolKit::AtomDataPacked packed;
+
+  EXPECT_EQ(packed.recursiveMatches(), 0);
+
+  packed.setRecursiveMatches(0x1234);
+  EXPECT_EQ(packed.recursiveMatches(), 0x1234);
+
+  packed.setRecursiveMatches(0xFFFF);
+  EXPECT_EQ(packed.recursiveMatches(), 0xFFFF);
+
+  packed.setRecursiveMatches(0x0000);
+  EXPECT_EQ(packed.recursiveMatches(), 0x0000);
+}
+
+TEST(AtomDataPackedBitPacking, RecursiveMatchBitSetAndCheck) {
+  nvMolKit::AtomDataPacked packed;
+
+  for (int i = 0; i < 16; ++i) {
+    EXPECT_FALSE(packed.hasRecursiveMatch(i));
+  }
+
+  packed.setRecursiveMatchBit(0);
+  EXPECT_TRUE(packed.hasRecursiveMatch(0));
+  EXPECT_FALSE(packed.hasRecursiveMatch(1));
+
+  packed.setRecursiveMatchBit(7);
+  EXPECT_TRUE(packed.hasRecursiveMatch(0));
+  EXPECT_TRUE(packed.hasRecursiveMatch(7));
+  EXPECT_FALSE(packed.hasRecursiveMatch(8));
+
+  packed.setRecursiveMatchBit(8);
+  EXPECT_TRUE(packed.hasRecursiveMatch(8));
+  EXPECT_FALSE(packed.hasRecursiveMatch(9));
+
+  packed.setRecursiveMatchBit(15);
+  EXPECT_TRUE(packed.hasRecursiveMatch(15));
+}
+
+TEST(AtomDataPackedBitPacking, ClearRecursiveMatches) {
+  nvMolKit::AtomDataPacked packed;
+
+  packed.setRecursiveMatches(0xFFFF);
+  EXPECT_EQ(packed.recursiveMatches(), 0xFFFF);
+
+  packed.clearRecursiveMatches();
+  EXPECT_EQ(packed.recursiveMatches(), 0);
+}
+
+TEST(AtomDataPackedBitPacking, RecursiveMatchesDoNotAffectOtherFields) {
+  nvMolKit::AtomDataPacked packed;
+
+  packed.setMinRingSize(5);
+  packed.setNumRings(3);
+  packed.setTotalValence(4);
+  packed.setIsotope(13);
+  packed.setDegree(2);
+  packed.setTotalConnectivity(4);
+  packed.setIsAromatic(true);
+  packed.setIsInRing(true);
+
+  packed.setRecursiveMatches(0xABCD);
+
+  EXPECT_EQ(packed.minRingSize(), 5);
+  EXPECT_EQ(packed.numRings(), 3);
+  EXPECT_EQ(packed.totalValence(), 4);
+  EXPECT_EQ(packed.isotope(), 13);
+  EXPECT_EQ(packed.degree(), 2);
+  EXPECT_EQ(packed.totalConnectivity(), 4);
+  EXPECT_TRUE(packed.isAromatic());
+  EXPECT_TRUE(packed.isInRing());
+  EXPECT_EQ(packed.recursiveMatches(), 0xABCD);
+}
+
+TEST(AtomDataPackedBitPacking, OtherFieldsDoNotAffectRecursiveMatches) {
+  nvMolKit::AtomDataPacked packed;
+
+  packed.setRecursiveMatches(0x5A5A);
+
+  packed.setMinRingSize(7);
+  EXPECT_EQ(packed.recursiveMatches(), 0x5A5A);
+
+  packed.setNumRings(2);
+  EXPECT_EQ(packed.recursiveMatches(), 0x5A5A);
+
+  packed.setTotalValence(6);
+  EXPECT_EQ(packed.recursiveMatches(), 0x5A5A);
+
+  packed.setIsotope(14);
+  EXPECT_EQ(packed.recursiveMatches(), 0x5A5A);
 }

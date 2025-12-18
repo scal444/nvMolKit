@@ -15,6 +15,7 @@
 
 #include <GraphMol/QueryAtom.h>
 #include <GraphMol/ROMol.h>
+#include <GraphMol/SmilesParse/SmilesParse.h>
 #include <gtest/gtest.h>
 
 #include <climits>
@@ -62,6 +63,12 @@ namespace {
 
 constexpr size_t kMaxAtoms  = 128;
 constexpr size_t kNumSmiles = 100;
+
+std::unique_ptr<RDKit::ROMol> makeSmartsQuery(const std::string& smarts) {
+  auto mol = std::unique_ptr<RDKit::ROMol>(RDKit::SmartsToMol(smarts));
+  EXPECT_NE(mol, nullptr) << "Failed to parse SMARTS: " << smarts;
+  return mol;
+}
 
 struct DatasetConfig {
   const char* smartsFile;
@@ -583,4 +590,46 @@ TEST_P(LabelMatrixIntegrationTest, ChemblVsSmartsLabelMatrix) {
 
   EXPECT_EQ(totalFalsePositives, 0)
     << "GPU label matrix has false positives (marks atoms as compatible when RDKit says no)";
+}
+
+// =============================================================================
+// Recursive SMARTS Tests
+// =============================================================================
+
+TEST(RecursiveSmartsTest, HasRecursiveSmartsDetection) {
+  auto nonRecursive = makeSmartsQuery("[CH3]");
+  EXPECT_FALSE(nvMolKit::hasRecursiveSmarts(nonRecursive.get()));
+
+  auto recursive = makeSmartsQuery("[$([OH])]");
+  EXPECT_TRUE(nvMolKit::hasRecursiveSmarts(recursive.get()));
+}
+
+TEST(RecursiveSmartsTest, ExtractSimplePattern) {
+  auto query = makeSmartsQuery("[$([OH])]");
+  auto info = nvMolKit::extractRecursivePatterns(query.get());
+
+  EXPECT_EQ(info.size(), 1);
+  EXPECT_TRUE(info.hasRecursivePatterns);
+}
+
+TEST(RecursiveSmartsTest, ExtractMultiplePatterns) {
+  auto query = makeSmartsQuery("[$([OH]),$([NH2])]");
+  auto info = nvMolKit::extractRecursivePatterns(query.get());
+
+  EXPECT_EQ(info.size(), 2);
+}
+
+TEST(RecursiveSmartsTest, PatternIdsAreSequential) {
+  auto query = makeSmartsQuery("[$([C]),$([N]),$([O])]");
+  auto info = nvMolKit::extractRecursivePatterns(query.get());
+
+  EXPECT_EQ(info.size(), 3);
+  EXPECT_EQ(info.patterns[0].patternId, 0);
+  EXPECT_EQ(info.patterns[1].patternId, 1);
+  EXPECT_EQ(info.patterns[2].patternId, 2);
+}
+
+TEST(RecursiveSmartsTest, TooManyPatternsThrows) {
+  auto query = makeSmartsQuery("[$([C]),$([N]),$([O]),$([S]),$([F]),$([Cl]),$([Br]),$([I]),$([P])]");
+  EXPECT_THROW(nvMolKit::extractRecursivePatterns(query.get()), std::runtime_error);
 }
