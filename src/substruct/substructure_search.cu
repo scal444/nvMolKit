@@ -31,6 +31,8 @@ namespace {
 constexpr std::size_t kMaxTargetAtoms = 128;
 constexpr std::size_t kMaxQueryAtoms  = 64;
 
+constexpr int threadsPerBlock = 256;
+
 using LabelMatrixStorage = FlatBitVect<kMaxTargetAtoms * kMaxQueryAtoms>;
 using LabelMatrixView    = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
 
@@ -503,7 +505,6 @@ void getSubstructMatches(MoleculesDevice&             targetsDevice,
   results.allocateBatchRecursiveBits(effectiveBatchSize, maxTargetAtoms);
   results.allocateOverflow(effectiveBatchSize, numBuffersPerBlock);
 
-  constexpr int threadsPerBlock = 128;
 
   // Reusable scratch buffers (avoid alloc/free between kernels)
   RecursiveScratchBuffers recursiveScratch(stream);
@@ -643,7 +644,6 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&             targets
   scratch.patternsDevice.copyFromHost(combinedPatterns, stream);
 
   const auto outputView = outputResults.view();
-  constexpr int threadsPerBlock    = 128;
   constexpr int gsiBuffersPerBlock = 2;
   constexpr int wusBuffersPerBlock = 1;
   processRecursiveRangeSetup.pop();
