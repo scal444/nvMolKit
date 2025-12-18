@@ -31,6 +31,19 @@ namespace {
 constexpr std::size_t kMaxTargetAtoms = 128;
 constexpr std::size_t kMaxQueryAtoms  = 64;
 
+/**
+ * @brief Per-pattern metadata for batched recursive preprocessing kernel.
+ *
+ * Each entry describes one recursive pattern in the combined batch:
+ * which main query it belongs to, what bit to paint, and where the
+ * pattern data starts in the combined pattern batch.
+ */
+struct BatchedPatternEntry {
+  int mainQueryIdx;   ///< Index of the main query this pattern belongs to
+  int patternId;      ///< Bit position (0-31) to paint for this pattern
+  int patternMolIdx;  ///< Index into the combined patterns MoleculesDevice
+};
+
 using LabelMatrixStorage = FlatBitVect<kMaxTargetAtoms * kMaxQueryAtoms>;
 using LabelMatrixView    = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
 
@@ -206,36 +219,49 @@ __global__ void substructMatchKernel(MoleculesDeviceView             targets,
  * into the output buffer. This avoids overflow issues since painting is
  * idempotent (multiple matches with same first atom just set same bit).
  *
+ * Block indexing: blockIdx.x = targetIdx * numPatterns + patternIdx
+ *
+ * When patternEntries is non-null (batched mode), reads mainQueryIdx and patternId
+ * from the array. Otherwise uses the scalar parameters.
+ *
  * @tparam Algo Algorithm to use for the search phase
  * @param targets Target molecules
- * @param queries Query molecules (recursive patterns)
+ * @param patterns Query molecules (recursive patterns)
+ * @param patternEntries Per-pattern metadata array (null for single-pattern mode)
+ * @param numPatterns Number of patterns (patterns.numMolecules)
  * @param outputRecursiveBits Buffer to paint bits into (batch-sized)
- * @param maxTargetAtoms Stride for recursiveBits indexing  
+ * @param maxTargetAtoms Stride for recursiveBits indexing
  * @param outputNumQueries Number of queries in the output (main query) results
- * @param patternId Bit position to set (0-31)
- * @param mainQueryIdx Which main query these patterns belong to
+ * @param defaultPatternId Bit position to set (0-31), used when patternEntries is null
+ * @param defaultMainQueryIdx Main query index, used when patternEntries is null
  * @param batchPairOffset Global pair index where the current batch starts
  * @param batchSize Number of pairs in the current batch
  */
 template <SubstructAlgorithm Algo>
-__global__ void substructPaintKernel(MoleculesDeviceView targets,
-                                     MoleculesDeviceView queries,
-                                     uint32_t*           outputRecursiveBits,
-                                     int                 maxTargetAtoms,
-                                     int                 outputNumQueries,
-                                     int                 patternId,
-                                     int                 mainQueryIdx,
-                                     int                 batchPairOffset,
-                                     int                 batchSize,
-                                     PartialMatch*       overflowA,
-                                     PartialMatch*       overflowB,
-                                     int                 overflowCapacity) {
-  const int targetIdx = blockIdx.x / queries.numMolecules;
-  const int queryIdx  = blockIdx.x % queries.numMolecules;
+__global__ void substructPaintKernel(MoleculesDeviceView         targets,
+                                     MoleculesDeviceView         patterns,
+                                     const BatchedPatternEntry*  patternEntries,
+                                     int                         numPatterns,
+                                     uint32_t*                   outputRecursiveBits,
+                                     int                         maxTargetAtoms,
+                                     int                         outputNumQueries,
+                                     int                         defaultPatternId,
+                                     int                         defaultMainQueryIdx,
+                                     int                         batchPairOffset,
+                                     int                         batchSize,
+                                     PartialMatch*               overflowA,
+                                     PartialMatch*               overflowB,
+                                     int                         overflowCapacity) {
+  const int targetIdx     = blockIdx.x / numPatterns;
+  const int patternMolIdx = blockIdx.x % numPatterns;
 
-  if (targetIdx >= targets.numMolecules || queryIdx >= queries.numMolecules) {
+  if (targetIdx >= targets.numMolecules || patternMolIdx >= numPatterns) {
     return;
   }
+
+  // Get mainQueryIdx and patternId from array (batched) or scalar params (single)
+  const int mainQueryIdx = patternEntries ? patternEntries[patternMolIdx].mainQueryIdx : defaultMainQueryIdx;
+  const int patternId    = patternEntries ? patternEntries[patternMolIdx].patternId : defaultPatternId;
 
   // Compute global pair index for this (target, mainQuery) combination
   const int globalPairIdx = targetIdx * outputNumQueries + mainQueryIdx;
@@ -248,13 +274,13 @@ __global__ void substructPaintKernel(MoleculesDeviceView targets,
   // Compute batch-local index for output
   const int batchLocalPairIdx = globalPairIdx - batchPairOffset;
 
-  const MoleculeView target = getMolecule(targets, targetIdx);
-  const MoleculeView query  = getMolecule(queries, queryIdx);
+  const MoleculeView target  = getMolecule(targets, targetIdx);
+  const MoleculeView pattern = getMolecule(patterns, patternMolIdx);
 
   __shared__ LabelMatrixStorage sharedLabelMatrix;
   LabelMatrixView               labelMatrix(&sharedLabelMatrix);
 
-  populateLabelMatrixOptimized<kMaxTargetAtoms, kMaxQueryAtoms>(target, query, labelMatrix, nullptr);
+  populateLabelMatrixOptimized<kMaxTargetAtoms, kMaxQueryAtoms>(target, pattern, labelMatrix, nullptr);
   __syncthreads();
 
   __shared__ int sharedMatchCount;
@@ -272,7 +298,6 @@ __global__ void substructPaintKernel(MoleculesDeviceView targets,
   paintParams.maxTargetAtoms = maxTargetAtoms;
   paintParams.outputPairIdx  = batchLocalPairIdx;
 
-  // Get per-block overflow buffer offsets (GSI uses 2 buffers, WUS uses 1)
   constexpr int gsiBuffersPerBlock = 2;
   constexpr int wusBuffersPerBlock = 1;
 
@@ -283,11 +308,11 @@ __global__ void substructPaintKernel(MoleculesDeviceView targets,
     PartialMatch* blockOverflowB = blockOverflowA + overflowCapacity;
 
     gsiBFSSearchGPU<kMaxTargetAtoms, kMaxQueryAtoms, SubstructOutputMode::PaintBits>(
-      target, query, labelMatrix,
+      target, pattern, labelMatrix,
       gsiPartials, kMaxPartialsPerBlock,
       blockOverflowA, blockOverflowB, overflowCapacity,
       &sharedMatchCount, &sharedReportedCount,
-      nullptr, 0, 0,  // No match storage needed
+      nullptr, 0, 0,
       paintParams);
 
   } else if constexpr (Algo == SubstructAlgorithm::WarpUnified) {
@@ -297,11 +322,11 @@ __global__ void substructPaintKernel(MoleculesDeviceView targets,
     PartialMatch* blockOverflow = overflowA + blockIdx.x * wusBuffersPerBlock * overflowCapacity;
 
     warpUnifiedSearchGPU<kMaxTargetAtoms, kMaxQueryAtoms, SubstructOutputMode::PaintBits>(
-      target, query, labelMatrix,
+      target, pattern, labelMatrix,
       wusCandidates, wusWorkQueue, kMaxQueueSize,
       blockOverflow, overflowCapacity,
       &sharedMatchCount, &sharedReportedCount,
-      nullptr, 0, 0,  // No match storage needed
+      nullptr, 0, 0,
       paintParams);
   }
 }
@@ -502,22 +527,10 @@ void getSubstructMatches(MoleculesDevice&             targetsDevice,
       pairIndices[i] = batchStart + i;
     }
 
-    // Preprocess recursive patterns for queries that have pairs in this batch
-    // Only call once per query (the paint kernel filters by batch range internally)
-    std::vector<bool> queryProcessed(numQueries, false);
-    for (int i = 0; i < numPairsInBatch; ++i) {
-      const int pairIdx = batchStart + i;
-      const int queryIdx = pairIdx % numQueries;
-
-      if (!queryProcessed[queryIdx] &&
-          queryIdx < static_cast<int>(queriesHost.recursivePatterns.size()) &&
-          !queriesHost.recursivePatterns[queryIdx].empty()) {
-        preprocessRecursiveSmarts(targetsDevice, targetsHost, queriesHost.recursivePatterns[queryIdx],
-                                  results, queryIdx, numQueries, batchStart, numPairsInBatch,
-                                  algorithm, stream);
-        queryProcessed[queryIdx] = true;
-      }
-    }
+    // Preprocess all recursive patterns for this batch in a single kernel launch
+    preprocessRecursiveSmartsBatched(targetsDevice, targetsHost, queriesHost,
+                                     results, numQueries, batchStart, numPairsInBatch,
+                                     algorithm, stream);
 
     // Get view after scratch allocation
     SubstructMatchResultsDeviceView batchView = results.view();
@@ -602,14 +615,17 @@ void preprocessRecursiveSmarts(const MoleculesDevice&             targetsDevice,
     const int overflowSizeGSI = numBlocks * gsiBuffersPerBlock * kOverflowEntriesPerBuffer;
     const int overflowSizeWUS = numBlocks * wusBuffersPerBlock * kOverflowEntriesPerBuffer;
 
+    const int numPatterns = 1;
+
     switch (algorithm) {
       case SubstructAlgorithm::VF2:
-        // VF2 doesn't support paint mode, fall back to GSI
       case SubstructAlgorithm::GSI: {
         AsyncDeviceVector<PartialMatch> overflowBuf(overflowSizeGSI, stream);
         substructPaintKernel<SubstructAlgorithm::GSI><<<numBlocks, threadsPerBlock, 0, stream>>>(
           targetsDevice.view(),
           patternDevice.view(),
+          nullptr,  // No batched entries, use scalar params
+          numPatterns,
           outputView.recursiveMatchBits,
           outputView.maxTargetAtoms,
           numQueries,
@@ -618,7 +634,7 @@ void preprocessRecursiveSmarts(const MoleculesDevice&             targetsDevice,
           batchPairOffset,
           batchSize,
           overflowBuf.data(),
-          overflowBuf.data(),  // Both pointers into same buffer, kernel offsets internally
+          overflowBuf.data(),
           kOverflowEntriesPerBuffer);
         break;
       }
@@ -627,6 +643,8 @@ void preprocessRecursiveSmarts(const MoleculesDevice&             targetsDevice,
         substructPaintKernel<SubstructAlgorithm::WarpUnified><<<numBlocks, threadsPerBlock, 0, stream>>>(
           targetsDevice.view(),
           patternDevice.view(),
+          nullptr,  // No batched entries, use scalar params
+          numPatterns,
           outputView.recursiveMatchBits,
           outputView.maxTargetAtoms,
           numQueries,
@@ -635,7 +653,7 @@ void preprocessRecursiveSmarts(const MoleculesDevice&             targetsDevice,
           batchPairOffset,
           batchSize,
           overflowBuf.data(),
-          overflowBuf.data(),  // WUS only uses first pointer
+          overflowBuf.data(),
           kOverflowEntriesPerBuffer);
         break;
       }
@@ -643,6 +661,132 @@ void preprocessRecursiveSmarts(const MoleculesDevice&             targetsDevice,
 
     cudaCheckError(cudaGetLastError());
   }
+}
+
+void preprocessRecursiveSmartsBatched(const MoleculesDevice&             targetsDevice,
+                                      const MoleculesHost&               targetsHost,
+                                      const MoleculesHost&               queriesHost,
+                                      const SubstructMatchResultsDevice& outputResults,
+                                      const int                          numQueries,
+                                      const int                          batchPairOffset,
+                                      const int                          batchSize,
+                                      const SubstructAlgorithm           algorithm,
+                                      cudaStream_t                       stream) {
+  // Collect all recursive patterns from queries that have pairs in this batch
+  std::vector<BatchedPatternEntry> patternEntries;
+  MoleculesHost                    combinedPatterns;
+
+  // Track which queries have pairs in this batch
+  std::vector<bool> queryInBatch(numQueries, false);
+  for (int i = 0; i < batchSize; ++i) {
+    const int pairIdx  = batchPairOffset + i;
+    const int queryIdx = pairIdx % numQueries;
+    queryInBatch[queryIdx] = true;
+  }
+
+  // Collect patterns from relevant queries
+  for (int queryIdx = 0; queryIdx < numQueries; ++queryIdx) {
+    if (!queryInBatch[queryIdx]) {
+      continue;
+    }
+
+    if (queryIdx >= static_cast<int>(queriesHost.recursivePatterns.size())) {
+      continue;
+    }
+
+    const auto& recursiveInfo = queriesHost.recursivePatterns[queryIdx];
+    if (recursiveInfo.empty()) {
+      continue;
+    }
+
+    for (const auto& entry : recursiveInfo.patterns) {
+      if (entry.queryMol == nullptr) {
+        continue;
+      }
+
+      BatchedPatternEntry batchEntry;
+      batchEntry.mainQueryIdx  = queryIdx;
+      batchEntry.patternId     = entry.patternId;
+      batchEntry.patternMolIdx = static_cast<int>(combinedPatterns.numMolecules());
+
+      addQueryToBatch(entry.queryMol, combinedPatterns);
+      patternEntries.push_back(batchEntry);
+    }
+  }
+
+  if (patternEntries.empty()) {
+    if constexpr (kDebugPaintRecursive) {
+      printf("[PreprocessBatched] No recursive patterns to process\n");
+    }
+    return;
+  }
+
+  if constexpr (kDebugPaintRecursive) {
+    printf("[PreprocessBatched] Processing %zu patterns in single kernel launch\n", patternEntries.size());
+  }
+
+  // Copy combined patterns to device
+  MoleculesDevice patternsDevice(stream);
+  patternsDevice.copyFromHost(combinedPatterns, stream);
+
+  // Copy pattern metadata to device
+  AsyncDeviceVector<BatchedPatternEntry> patternEntriesDevice(patternEntries.size(), stream);
+  patternEntriesDevice.copyFromHost(patternEntries.data(), patternEntries.size());
+
+  const auto   outputView  = outputResults.view();
+  const int    numTargets  = targetsDevice.view().numMolecules;
+  const size_t numPatterns = patternEntries.size();
+  const size_t numBlocks   = numTargets * numPatterns;
+
+  constexpr int threadsPerBlock = 128;
+
+  // Allocate overflow buffers
+  constexpr int gsiBuffersPerBlock = 2;
+  constexpr int wusBuffersPerBlock = 1;
+  const int     overflowSizeGSI    = numBlocks * gsiBuffersPerBlock * kOverflowEntriesPerBuffer;
+  const int     overflowSizeWUS    = numBlocks * wusBuffersPerBlock * kOverflowEntriesPerBuffer;
+
+  switch (algorithm) {
+    case SubstructAlgorithm::VF2:
+    case SubstructAlgorithm::GSI: {
+      AsyncDeviceVector<PartialMatch> overflowBuf(overflowSizeGSI, stream);
+      substructPaintKernel<SubstructAlgorithm::GSI><<<numBlocks, threadsPerBlock, 0, stream>>>(
+        targetsDevice.view(),
+        patternsDevice.view(),
+        patternEntriesDevice.data(),
+        static_cast<int>(numPatterns),
+        outputView.recursiveMatchBits,
+        outputView.maxTargetAtoms,
+        numQueries,
+        0, 0,  // Defaults ignored when patternEntries is non-null
+        batchPairOffset,
+        batchSize,
+        overflowBuf.data(),
+        overflowBuf.data(),
+        kOverflowEntriesPerBuffer);
+      break;
+    }
+    case SubstructAlgorithm::WarpUnified: {
+      AsyncDeviceVector<PartialMatch> overflowBuf(overflowSizeWUS, stream);
+      substructPaintKernel<SubstructAlgorithm::WarpUnified><<<numBlocks, threadsPerBlock, 0, stream>>>(
+        targetsDevice.view(),
+        patternsDevice.view(),
+        patternEntriesDevice.data(),
+        static_cast<int>(numPatterns),
+        outputView.recursiveMatchBits,
+        outputView.maxTargetAtoms,
+        numQueries,
+        0, 0,  // Defaults ignored when patternEntries is non-null
+        batchPairOffset,
+        batchSize,
+        overflowBuf.data(),
+        overflowBuf.data(),
+        kOverflowEntriesPerBuffer);
+      break;
+    }
+  }
+
+  cudaCheckError(cudaGetLastError());
 }
 
 }  // namespace nvMolKit

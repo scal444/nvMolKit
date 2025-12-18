@@ -221,6 +221,32 @@ void preprocessRecursiveSmarts(const MoleculesDevice&             targetsDevice,
                                SubstructAlgorithm           algorithm,
                                cudaStream_t                 stream);
 
+/**
+ * @brief Preprocess ALL recursive SMARTS patterns for a batch in a single kernel launch.
+ *
+ * Collects all recursive patterns from all queries that have pairs in the batch,
+ * builds a combined pattern batch, and launches a single fused paint kernel.
+ *
+ * @param targetsDevice Device-resident target molecules
+ * @param targetsHost Host-side target data
+ * @param queriesHost Host-side query data (contains recursivePatterns per query)
+ * @param outputResults The main results buffer where recursiveMatchBits will be written
+ * @param numQueries Total number of queries (for computing pair indices)
+ * @param batchPairOffset Global pair index where current batch starts
+ * @param batchSize Number of pairs in this batch
+ * @param algorithm Algorithm to use for matching
+ * @param stream CUDA stream for async operations
+ */
+void preprocessRecursiveSmartsBatched(const MoleculesDevice&             targetsDevice,
+                                      const MoleculesHost&               targetsHost,
+                                      const MoleculesHost&               queriesHost,
+                                      const SubstructMatchResultsDevice& outputResults,
+                                      int                                numQueries,
+                                      int                                batchPairOffset,
+                                      int                                batchSize,
+                                      SubstructAlgorithm                 algorithm,
+                                      cudaStream_t                       stream);
+
 }  // namespace nvMolKit
 
 #endif  // NVMOLKIT_SUBSTRUCTURE_SEARCH_CUH
