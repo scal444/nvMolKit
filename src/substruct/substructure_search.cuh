@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "device_vector.h"
+#include "global_pool.cuh"
 #include "molecules.h"
 #include "substruct_algos.cuh"
 #include "substruct_types.h"
@@ -48,11 +49,10 @@ struct SubstructMatchResultsDeviceView {
   /// Number of query atoms (stride for match indices)
   const int* queryAtomCounts;  ///< [numQueries] atoms per query molecule
 
-  // Global memory overflow buffers for search algorithms
-  PartialMatch* overflowBuffer;     ///< [overflowBatchSize * overflowSize * 2] ping-pong overflow
-  int           overflowSize;       ///< Overflow capacity per pair (per buffer)
-  int           overflowBatchSize;  ///< Number of pairs overflow is allocated for
-  int           pairOffset;         ///< Offset for current batch (blockIdx.x + pairOffset = actual pair)
+  // Pre-allocated per-block overflow buffers (simple chunked DeviceVector)
+  PartialMatch* overflowBuffer;       ///< Base pointer to overflow storage
+  int           overflowEntriesPerBuffer;  ///< Entries per buffer (kOverflowEntriesPerBuffer)
+  int           overflowBuffersPerBlock;   ///< 2 for GSI ping-pong, 1 for WUS
 
   // Per-pair recursive match bits: [numPairs * maxTargetAtoms] with 32 bits per atom
   uint32_t* recursiveMatchBits;  ///< Indexed by pairIdx * maxTargetAtoms + atomIdx
@@ -62,9 +62,14 @@ struct SubstructMatchResultsDeviceView {
     return targetIdx * numQueries + queryIdx;
   }
 
-  /// Get overflow buffer for a block within current batch (ping-pong: bufferIdx 0 or 1)
-  __device__ __forceinline__ PartialMatch* getOverflowBuffer(int blockIdxInBatch, int bufferIdx) const {
-    return overflowBuffer + (blockIdxInBatch * 2 + bufferIdx) * overflowSize;
+  /// Get overflow buffer for this block (GSI ping-pong: bufferIdx 0 or 1)
+  __device__ __forceinline__ PartialMatch* getOverflowBuffer(int bufferIdx = 0) const {
+    return overflowBuffer + (blockIdx.x * overflowBuffersPerBlock + bufferIdx) * overflowEntriesPerBuffer;
+  }
+
+  /// Get overflow buffer capacity (entries per buffer)
+  __device__ __forceinline__ int getOverflowCapacity() const {
+    return overflowEntriesPerBuffer;
   }
 
   /// Get recursive match bits for a specific (pair, atom) combination
@@ -118,6 +123,27 @@ class SubstructMatchResultsDevice {
 
   void setStream(cudaStream_t stream);
 
+  /**
+   * @brief Allocate overflow buffers for a batch size.
+   *
+   * @param batchSize Number of blocks to allocate overflow for
+   * @param numBuffersPerBlock 2 for GSI (ping-pong), 1 for WUS
+   */
+  void allocateOverflow(int batchSize, int numBuffersPerBlock);
+
+  /**
+   * @brief Allocate batch-sized recursive match bits buffer.
+   *
+   * @param batchSize Number of pairs in the batch
+   * @param maxTargetAtoms Max atoms per target (stride for indexing)
+   */
+  void allocateBatchRecursiveBits(int batchSize, int maxTargetAtoms);
+
+  /**
+   * @brief Zero the recursive match bits buffer for a new batch.
+   */
+  void zeroRecursiveBits();
+
  private:
   cudaStream_t stream_ = nullptr;
 
@@ -130,9 +156,9 @@ class SubstructMatchResultsDevice {
   AsyncDeviceVector<int16_t> matchIndices_;
   AsyncDeviceVector<int>     queryAtomCounts_;
 
-  // Global memory overflow buffers for search algorithms
+  // Pre-allocated per-block overflow buffers (simple chunked storage)
   AsyncDeviceVector<PartialMatch> overflowBuffer_;
-  int                             overflowSize_ = 0;
+  int overflowBuffersPerBlock_ = 0;
 
   // Per-pair recursive match bits storage
   AsyncDeviceVector<uint32_t> recursiveMatchBits_;
@@ -148,6 +174,7 @@ class SubstructMatchResultsDevice {
  *
  * Matches each target molecule against each query molecule (all-to-all).
  * Results are stored in device memory and can be copied to host.
+ * Processing is divided into batches to limit GPU memory usage.
  *
  * @param targetsDevice Device-resident target molecules (use addToBatch to build)
  * @param queriesDevice Device-resident query molecules (use addQueryToBatch to build)
@@ -156,6 +183,7 @@ class SubstructMatchResultsDevice {
  * @param results Output storage (will be allocated)
  * @param algorithm Algorithm to use for matching
  * @param stream CUDA stream for async operations
+ * @param batchSize Number of (target, query) pairs to process per batch (default 1024)
  */
 void getSubstructMatches(MoleculesDevice&             targetsDevice,
                          const MoleculesDevice&       queriesDevice,
@@ -163,38 +191,24 @@ void getSubstructMatches(MoleculesDevice&             targetsDevice,
                          const MoleculesHost&         queriesHost,
                          SubstructMatchResultsDevice& results,
                          SubstructAlgorithm           algorithm,
-                         cudaStream_t                 stream);
+                         cudaStream_t                 stream,
+                         int                          batchSize = 1024);
 
 /**
- * @brief Paint recursive SMARTS match bits into per-pair storage.
+ * @brief Preprocess recursive SMARTS patterns for a single query within a batch.
  *
- * Given substructure match results from recursive pattern matching, sets the
- * corresponding recursive match bits in the per-pair buffer for the main query.
- *
- * @param patternResults Match results from running substruct match on recursive patterns
- * @param outputResults The main results buffer where recursiveMatchBits will be written
- * @param patternIds Vector mapping pattern query index to pattern ID (bit position 0-31)
- * @param mainQueryIdx Index of the main query whose pair storage should be updated
- * @param stream CUDA stream for async operations
- */
-void paintRecursiveMatchBits(const SubstructMatchResultsDevice& patternResults,
-                             SubstructMatchResultsDevice&       outputResults,
-                             const std::vector<int>&            patternIds,
-                             int                                mainQueryIdx,
-                             cudaStream_t                       stream);
-
-/**
- * @brief Preprocess recursive SMARTS patterns for a single query.
- *
- * For a query containing recursive SMARTS ($(...)), this function:
- * 1. Runs substruct matching for each pattern against all targets
- * 2. Paints the recursive match bits into the per-pair storage
+ * Uses fused paint mode to directly paint recursive match bits during
+ * pattern matching, avoiding overflow issues from intermediate storage.
  *
  * @param targetsDevice Device-resident target molecules
  * @param targetsHost Host-side target data
  * @param recursiveInfo Extracted recursive pattern information for this query
  * @param outputResults The main results buffer where recursiveMatchBits will be written
  * @param mainQueryIdx Index of the main query whose pair storage should be updated
+ * @param numQueries Total number of queries (for computing pair indices)
+ * @param batchPairOffset Global pair index where current batch starts
+ * @param batchSize Number of pairs in this batch
+ * @param algorithm Algorithm to use for matching
  * @param stream CUDA stream for async operations
  */
 void preprocessRecursiveSmarts(MoleculesDevice&             targetsDevice,
@@ -202,8 +216,11 @@ void preprocessRecursiveSmarts(MoleculesDevice&             targetsDevice,
                                const RecursivePatternInfo&  recursiveInfo,
                                SubstructMatchResultsDevice& outputResults,
                                int                          mainQueryIdx,
-                               SubstructAlgorithm           algorithm = SubstructAlgorithm::GSI,
-                               cudaStream_t                 stream = nullptr);
+                               int                          numQueries,
+                               int                          batchPairOffset,
+                               int                          batchSize,
+                               SubstructAlgorithm           algorithm,
+                               cudaStream_t                 stream);
 
 }  // namespace nvMolKit
 

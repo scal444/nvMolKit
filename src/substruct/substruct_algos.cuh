@@ -20,6 +20,7 @@
 #include <cstdint>
 
 #include "flat_bit_vect.h"
+#include "global_pool.cuh"
 #include "molecules_device.cuh"
 #include "substruct_types.h"
 
@@ -30,8 +31,30 @@ namespace nvMolKit {
 // =============================================================================
 
 constexpr int  kWarpSize      = 32;
-constexpr bool kDebugWUS      = true;  ///< Enable debug output in warpUnifiedSearchGPU
-constexpr bool kDebugGSI      = true;  ///< Enable debug output in gsiBFSSearchGPU
+constexpr bool kDebugWUS      = false;  ///< Enable debug output in warpUnifiedSearchGPU
+constexpr bool kDebugGSI      = false;  ///< Enable debug output in gsiBFSSearchGPU
+
+// =============================================================================
+// Output Mode for Substructure Search
+// =============================================================================
+
+/**
+ * @brief Determines how matches are recorded.
+ */
+enum class SubstructOutputMode {
+  StoreMatches,  ///< Store full match mappings to output buffer
+  PaintBits      ///< Paint recursive match bit for first matched atom (no storage)
+};
+
+/**
+ * @brief Parameters for paint mode output.
+ */
+struct PaintModeParams {
+  uint32_t* recursiveBits;  ///< Buffer to paint bits into [maxTargetAtoms per pair]
+  int       patternId;      ///< Bit position (0-31) to set
+  int       maxTargetAtoms; ///< Stride for indexing recursiveBits
+  int       outputPairIdx;  ///< Which pair's buffer to write to
+};
 
 // =============================================================================
 // Helper function for checking if target atom is used in mapping
@@ -380,38 +403,42 @@ __device__ void vf2SearchGPU(const MoleculeView&                                
  * @brief GSI-inspired BFS level-by-level search.
  *
  * Processes query atoms in order, extending all partial matches at each level.
- * Uses shared memory with global memory overflow for large searches.
+ * Uses shared memory with pre-allocated per-block overflow buffers.
  *
  * @tparam MaxTargetAtoms Maximum target atoms
  * @tparam MaxQueryAtoms Maximum query atoms
+ * @tparam OutputMode How to record matches (StoreMatches or PaintBits)
  * @param target Target molecule view
  * @param query Query molecule view
  * @param labelMatrix Precomputed label compatibility matrix
  * @param sharedPartials Shared memory for partial matches (ping-pong buffers)
  * @param maxPartials Max partials in shared memory
- * @param globalOverflowA Global memory overflow buffer A
- * @param globalOverflowB Global memory overflow buffer B (ping-pong)
- * @param maxOverflow Max partials in global overflow
+ * @param overflowA Pre-allocated overflow buffer A (ping)
+ * @param overflowB Pre-allocated overflow buffer B (pong)
+ * @param maxOverflow Entries per overflow buffer
  * @param matchCount Output: number of matches found
- * @param reportedCount Output: number of matches written
- * @param matchIndices Output buffer
- * @param maxMatches Maximum matches to write
- * @param matchOffset Offset into output
+ * @param reportedCount Output: number of matches written (StoreMatches) or painted (PaintBits)
+ * @param matchIndices Output buffer (only used in StoreMatches mode)
+ * @param maxMatches Maximum matches to write (only used in StoreMatches mode)
+ * @param matchOffset Offset into output (only used in StoreMatches mode)
+ * @param paintParams Paint mode parameters (only used in PaintBits mode)
  */
-template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
+template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms, 
+          SubstructOutputMode OutputMode = SubstructOutputMode::StoreMatches>
 __device__ void gsiBFSSearchGPU(const MoleculeView&                                   target,
                                 const MoleculeView&                                   query,
                                 const BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>& labelMatrix,
                                 PartialMatch*                                         sharedPartials,
                                 int                                                   maxPartials,
-                                PartialMatch*                                         globalOverflowA,
-                                PartialMatch*                                         globalOverflowB,
+                                PartialMatch*                                         overflowA,
+                                PartialMatch*                                         overflowB,
                                 int                                                   maxOverflow,
                                 int*                                                  matchCount,
                                 int*                                                  reportedCount,
                                 int16_t*                                              matchIndices,
                                 int                                                   maxMatches,
-                                int                                                   matchOffset) {
+                                int                                                   matchOffset,
+                                PaintModeParams                                       paintParams = {}) {
   namespace cg = cooperative_groups;
   auto block   = cg::this_thread_block();
   auto tile32  = cg::tiled_partition<32>(block);
@@ -423,21 +450,11 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
 
   const int numQueryAtoms  = query.numAtoms;
   const int numTargetAtoms = target.numAtoms;
-  const int maxTotal       = maxPartials + maxOverflow;  // Total capacity
+  const int maxTotal       = maxPartials + maxOverflow;
 
-  if constexpr (kDebugGSI) {
-    if (tid == 0) {
-      printf("[GSI] numQueryAtoms=%d, numTargetAtoms=%d, maxPartials=%d, maxOverflow=%d, maxTotal=%d\n",
-             numQueryAtoms, numTargetAtoms, maxPartials, maxOverflow, maxTotal);
-      printf("[GSI] query.hasBondQueryData()=%d, query.hasQueryTrees()=%d\n",
-             query.hasBondQueryData() ? 1 : 0, query.hasQueryTrees() ? 1 : 0);
-    }
-    block.sync();
-  }
-
-  // Ping-pong pointers for global overflow
-  PartialMatch* currentOverflow = globalOverflowA;
-  PartialMatch* nextOverflow    = globalOverflowB;
+  // Ping-pong overflow pointers (pre-allocated, no dynamic allocation needed)
+  PartialMatch* currentOverflow = overflowA;
+  PartialMatch* nextOverflow    = overflowB;
 
   // Use ping-pong buffers for BFS levels
   __shared__ int currentCount;
@@ -449,6 +466,16 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
   }
   block.sync();
 
+  if constexpr (kDebugGSI) {
+    if (tid == 0) {
+      printf("[GSI] numQueryAtoms=%d, numTargetAtoms=%d, maxPartials=%d, maxOverflow=%d, maxTotal=%d\n",
+             numQueryAtoms, numTargetAtoms, maxPartials, maxOverflow, maxTotal);
+      printf("[GSI] query.hasBondQueryData()=%d, query.hasQueryTrees()=%d\n",
+             query.hasBondQueryData() ? 1 : 0, query.hasQueryTrees() ? 1 : 0);
+    }
+    block.sync();
+  }
+
   // Initialize level 0: all candidates for query atom 0
   const bool singleAtomQuery = (numQueryAtoms == 1);
 
@@ -456,8 +483,15 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
     if (labelMatrix.get(t, 0)) {
       if (singleAtomQuery) {
         const int matchIdx = atomicAdd(matchCount, 1);
-        if (matchIdx < maxMatches) {
-          matchIndices[matchOffset + matchIdx] = static_cast<int16_t>(t);
+        if constexpr (OutputMode == SubstructOutputMode::StoreMatches) {
+          if (matchIdx < maxMatches) {
+            matchIndices[matchOffset + matchIdx] = static_cast<int16_t>(t);
+            atomicAdd(reportedCount, 1);
+          }
+        } else {
+          // Paint mode: set bit for this target atom
+          atomicOr(&paintParams.recursiveBits[paintParams.outputPairIdx * paintParams.maxTargetAtoms + t],
+                   1u << paintParams.patternId);
           atomicAdd(reportedCount, 1);
         }
       } else {
@@ -467,9 +501,21 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
           sharedPartials[slot].mapping[0]    = static_cast<int8_t>(t);
           sharedPartials[slot].nextQueryAtom = 1;
         } else if (slot < maxTotal) {
-          currentOverflow[slot - maxPartials].init();
-          currentOverflow[slot - maxPartials].mapping[0]    = static_cast<int8_t>(t);
-          currentOverflow[slot - maxPartials].nextQueryAtom = 1;
+          if constexpr (kDebugGSI) {
+            if (slot == maxPartials) {
+              printf("[GSI] Level 0: spilling to overflow buffer (slot=%d)\n", slot);
+            }
+          }
+          const int overflowSlot = slot - maxPartials;
+          currentOverflow[overflowSlot].init();
+          currentOverflow[overflowSlot].mapping[0]    = static_cast<int8_t>(t);
+          currentOverflow[overflowSlot].nextQueryAtom = 1;
+        } else {
+          if constexpr (kDebugGSI) {
+            if (slot == maxTotal) {
+              printf("[GSI] WARNING: Level 0 OVERFLOW EXHAUSTED! slot=%d >= maxTotal=%d\n", slot, maxTotal);
+            }
+          }
         }
       }
     }
@@ -478,7 +524,11 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
 
   if constexpr (kDebugGSI) {
     if (tid == 0) {
-      printf("[GSI] Level 0: %d candidates for query atom 0\n", currentCount);
+      printf("[GSI] Level 0: %d candidates for query atom 0", currentCount);
+      if (currentCount > maxPartials) {
+        printf(" (%d in shared, %d in overflow)", maxPartials, currentCount - maxPartials);
+      }
+      printf("\n");
       printf("[GSI] Level 0 candidates (shared): ");
       for (int i = 0; i < min(currentCount, maxPartials) && i < 10; ++i) {
         printf("%d ", (int)sharedPartials[i].mapping[0]);
@@ -523,7 +573,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
 
     // Each warp processes partial matches in round-robin
     for (int pIdx = warpId; pIdx < numPartials; pIdx += numWarps) {
-      // Read partial from shared or global memory
+      // Read partial from shared or overflow buffer
       PartialMatch partial;
       if (pIdx < maxPartials) {
         partial = sharedPartials[pIdx];
@@ -581,12 +631,20 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
               }
               printf("\n");
             }
-            if (matchIdx < maxMatches) {
-              const int writeOffset = matchOffset + matchIdx * numQueryAtoms;
-              for (int q = 0; q < numQueryAtoms; ++q) {
-                matchIndices[writeOffset + q] = (q == queryAtom) ? static_cast<int16_t>(t) 
-                                                                  : partial.mapping[q];
+            if constexpr (OutputMode == SubstructOutputMode::StoreMatches) {
+              if (matchIdx < maxMatches) {
+                const int writeOffset = matchOffset + matchIdx * numQueryAtoms;
+                for (int q = 0; q < numQueryAtoms; ++q) {
+                  matchIndices[writeOffset + q] = (q == queryAtom) ? static_cast<int16_t>(t) 
+                                                                    : partial.mapping[q];
+                }
+                atomicAdd(reportedCount, 1);
               }
+            } else {
+              // Paint mode: set bit for first target atom in this match (mapping[0])
+              const int firstTargetAtom = partial.mapping[0];
+              atomicOr(&paintParams.recursiveBits[paintParams.outputPairIdx * paintParams.maxTargetAtoms + firstTargetAtom],
+                       1u << paintParams.patternId);
               atomicAdd(reportedCount, 1);
             }
           } else {
@@ -606,16 +664,24 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
               next.mapping[queryAtom] = static_cast<int8_t>(t);
               next.nextQueryAtom      = static_cast<int8_t>(queryAtom + 1);
             } else if (slot < maxTotal) {
-              PartialMatch& next = nextOverflow[slot - maxPartials];
+              if constexpr (kDebugGSI) {
+                if (slot == maxPartials) {
+                  printf("[GSI] Level %d: spilling to overflow buffer (slot=%d)\n", level, slot);
+                }
+              }
+              const int overflowSlot = slot - maxPartials;
+              PartialMatch& next = nextOverflow[overflowSlot];
               for (int q = 0; q < numQueryAtoms; ++q) {
                 next.mapping[q] = partial.mapping[q];
               }
               next.mapping[queryAtom] = static_cast<int8_t>(t);
               next.nextQueryAtom      = static_cast<int8_t>(queryAtom + 1);
-            } else if constexpr (kDebugGSI) {
-              if (slot == maxTotal) {
-                printf("[GSI] WARNING: Level %d total overflow! slot=%d >= maxTotal=%d\n",
-                       level, slot, maxTotal);
+            } else {
+              if constexpr (kDebugGSI) {
+                if (slot == maxTotal) {
+                  printf("[GSI] WARNING: Level %d OVERFLOW EXHAUSTED! slot=%d >= maxTotal=%d\n",
+                         level, slot, maxTotal);
+                }
               }
             }
           }
@@ -626,8 +692,15 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
 
     if constexpr (kDebugGSI) {
       if (tid == 0) {
-        printf("[GSI] Level %d summary: checked=%d, valid=%d, nextCount=%d\n",
+        printf("[GSI] Level %d summary: checked=%d, valid=%d, nextCount=%d",
                level, debugCheckedTotal, debugValidTotal, nextCount);
+        if (nextCount > maxPartials) {
+          printf(" (%d in shared, %d in overflow)", maxPartials, nextCount - maxPartials);
+        }
+        if (nextCount > maxTotal) {
+          printf(" [OVERFLOW LOST %d]", nextCount - maxTotal);
+        }
+        printf("\n");
       }
       block.sync();
     }
@@ -646,9 +719,9 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
     
     // Swap global overflow pointers
     PartialMatch* tmp = currentOverflow;
-    currentOverflow   = nextOverflow;
-    nextOverflow      = tmp;
-    
+    currentOverflow = nextOverflow;
+    nextOverflow = tmp;
+
     block.sync();
 
     if constexpr (kDebugGSI) {
@@ -677,25 +750,28 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
  *
  * Precomputes candidate lists from label matrix, then uses warp-collective
  * operations for candidate evaluation with minimal divergence.
- * Uses global memory overflow when shared queue fills.
+ * Uses pre-allocated per-block overflow buffer when shared queue fills.
  *
  * @tparam MaxTargetAtoms Maximum target atoms
  * @tparam MaxQueryAtoms Maximum query atoms
+ * @tparam OutputMode How to record matches (StoreMatches or PaintBits)
  */
-template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
+template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms,
+          SubstructOutputMode OutputMode = SubstructOutputMode::StoreMatches>
 __device__ void warpUnifiedSearchGPU(const MoleculeView&                                   target,
                                      const MoleculeView&                                   query,
                                      const BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>& labelMatrix,
                                      CandidateList*                                        sharedCandidates,
                                      PartialMatch*                                         workQueue,
                                      int                                                   maxQueueSize,
-                                     PartialMatch*                                         globalOverflow,
+                                     PartialMatch*                                         overflowBuffer,
                                      int                                                   maxOverflow,
                                      int*                                                  matchCount,
                                      int*                                                  reportedCount,
                                      int16_t*                                              matchIndices,
                                      int                                                   maxMatches,
-                                     int                                                   matchOffset) {
+                                     int                                                   matchOffset,
+                                     PaintModeParams                                       paintParams = {}) {
   namespace cg = cooperative_groups;
   auto block   = cg::this_thread_block();
   auto tile32  = cg::tiled_partition<32>(block);
@@ -707,7 +783,20 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
 
   const int numQueryAtoms  = query.numAtoms;
   const int numTargetAtoms = target.numAtoms;
-  const int maxTotal       = maxQueueSize + maxOverflow;  // Total queue capacity
+  const int maxTotal       = maxQueueSize + maxOverflow;
+
+  // Pre-allocated overflow (no dynamic allocation needed)
+  PartialMatch* globalOverflow = overflowBuffer;
+
+  // Queue state
+  __shared__ int queueHead;
+  __shared__ int queueTail;
+
+  if (tid == 0) {
+    queueHead = 0;
+    queueTail = 0;
+  }
+  block.sync();
 
   if constexpr (kDebugWUS) {
     if (tid == 0) {
@@ -746,24 +835,23 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
   }
 
   // Phase 2: Initialize work queue with candidates for query atom 0
-  __shared__ int queueHead;
-  __shared__ int queueTail;
-
-  if (tid == 0) {
-    queueHead = 0;
-    queueTail = 0;
-  }
-  block.sync();
-
-  const CandidateList& q0Candidates = sharedCandidates[0];
+  const CandidateList& q0Candidates    = sharedCandidates[0];
   const bool           singleAtomQuery = (numQueryAtoms == 1);
 
   for (int i = tid; i < q0Candidates.count; i += block.size()) {
     if (singleAtomQuery) {
       // Single-atom query: record as complete match
       const int matchIdx = atomicAdd(matchCount, 1);
-      if (matchIdx < maxMatches) {
-        matchIndices[matchOffset + matchIdx] = static_cast<int16_t>(q0Candidates.candidates[i]);
+      const int targetAtom = q0Candidates.candidates[i];
+      if constexpr (OutputMode == SubstructOutputMode::StoreMatches) {
+        if (matchIdx < maxMatches) {
+          matchIndices[matchOffset + matchIdx] = static_cast<int16_t>(targetAtom);
+          atomicAdd(reportedCount, 1);
+        }
+      } else {
+        // Paint mode: set bit for this target atom
+        atomicOr(&paintParams.recursiveBits[paintParams.outputPairIdx * paintParams.maxTargetAtoms + targetAtom],
+                 1u << paintParams.patternId);
         atomicAdd(reportedCount, 1);
       }
     } else {
@@ -773,9 +861,21 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
         workQueue[slot].mapping[0]    = q0Candidates.candidates[i];
         workQueue[slot].nextQueryAtom = 1;
       } else if (slot < maxTotal) {
-        globalOverflow[slot - maxQueueSize].init();
-        globalOverflow[slot - maxQueueSize].mapping[0]    = q0Candidates.candidates[i];
-        globalOverflow[slot - maxQueueSize].nextQueryAtom = 1;
+        if constexpr (kDebugWUS) {
+          if (slot == maxQueueSize) {
+            printf("[WUS] Phase2: spilling to overflow buffer (slot=%d)\n", slot);
+          }
+        }
+        const int overflowSlot = slot - maxQueueSize;
+        globalOverflow[overflowSlot].init();
+        globalOverflow[overflowSlot].mapping[0]    = q0Candidates.candidates[i];
+        globalOverflow[overflowSlot].nextQueryAtom = 1;
+      } else {
+        if constexpr (kDebugWUS) {
+          if (slot == maxTotal) {
+            printf("[WUS] WARNING: Phase2 OVERFLOW EXHAUSTED! slot=%d >= maxTotal=%d\n", slot, maxTotal);
+          }
+        }
       }
     }
   }
@@ -791,19 +891,16 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
   __shared__ int workAvailable;
   __shared__ int warpWorkIdx[32];  // Max 32 warps
   __shared__ int iterCount;
+  __shared__ int snapshotQueueTail;
 
-  if constexpr (kDebugWUS) {
-    if (tid == 0) {
-      iterCount = 0;
-    }
-    block.sync();
+  if (tid == 0) {
+    iterCount = 0;
   }
-
-  __shared__ int snapshotQueueTail;  // Snapshot of queueTail at start of iteration
+  block.sync();
 
   while (true) {
     if (tid == 0) {
-      snapshotQueueTail = queueTail;  // Snapshot BEFORE checking workAvailable
+      snapshotQueueTail = queueTail;
       workAvailable = (queueHead < snapshotQueueTail) ? 1 : 0;
       if constexpr (kDebugWUS) {
         ++iterCount;
@@ -813,8 +910,9 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
 
     if constexpr (kDebugWUS) {
       if (tid == 0 && iterCount <= 10) {
-        printf("[WUS] Phase3 iter %d: queueHead=%d, queueTail=%d, snapshotQueueTail=%d, workAvailable=%d\n",
-               iterCount, queueHead, queueTail, snapshotQueueTail, workAvailable);
+        printf("[WUS] Phase3 iter %d: queueHead=%d, queueTail=%d (overflow=%d), workAvailable=%d\n",
+               iterCount, queueHead, queueTail, 
+               (queueTail > maxQueueSize) ? queueTail - maxQueueSize : 0, workAvailable);
       }
       block.sync();
     }
@@ -852,7 +950,7 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
     }
 
     if (hasWork) {
-      // Read from shared or global memory based on index
+      // Read from shared queue or overflow buffer based on index
       const PartialMatch& work = (myWorkIdx < maxQueueSize) 
                                    ? workQueue[myWorkIdx] 
                                    : globalOverflow[myWorkIdx - maxQueueSize];
@@ -921,12 +1019,20 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
               }
               printf("\n");
             }
-            if (matchIdx < maxMatches) {
-              const int writeOffset = matchOffset + matchIdx * numQueryAtoms;
-              for (int q = 0; q < numQueryAtoms; ++q) {
-                matchIndices[writeOffset + q] =
-                  (q == localQueryAtom) ? static_cast<int16_t>(targetAtom) : localMapping[q];
+            if constexpr (OutputMode == SubstructOutputMode::StoreMatches) {
+              if (matchIdx < maxMatches) {
+                const int writeOffset = matchOffset + matchIdx * numQueryAtoms;
+                for (int q = 0; q < numQueryAtoms; ++q) {
+                  matchIndices[writeOffset + q] =
+                    (q == localQueryAtom) ? static_cast<int16_t>(targetAtom) : localMapping[q];
+                }
+                atomicAdd(reportedCount, 1);
               }
+            } else {
+              // Paint mode: set bit for first target atom in this match (localMapping[0])
+              const int firstTargetAtom = localMapping[0];
+              atomicOr(&paintParams.recursiveBits[paintParams.outputPairIdx * paintParams.maxTargetAtoms + firstTargetAtom],
+                       1u << paintParams.patternId);
               atomicAdd(reportedCount, 1);
             }
           } else {
@@ -946,15 +1052,23 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
               next.mapping[localQueryAtom] = static_cast<int8_t>(targetAtom);
               next.nextQueryAtom           = static_cast<int8_t>(localQueryAtom + 1);
             } else if (slot < maxTotal) {
-              PartialMatch& next = globalOverflow[slot - maxQueueSize];
+              if constexpr (kDebugWUS) {
+                if (slot == maxQueueSize) {
+                  printf("[WUS] Spilling to overflow buffer (slot=%d)\n", slot);
+                }
+              }
+              const int overflowSlot = slot - maxQueueSize;
+              PartialMatch& next = globalOverflow[overflowSlot];
               for (int q = 0; q < numQueryAtoms; ++q) {
                 next.mapping[q] = localMapping[q];
               }
               next.mapping[localQueryAtom] = static_cast<int8_t>(targetAtom);
               next.nextQueryAtom           = static_cast<int8_t>(localQueryAtom + 1);
-            } else if constexpr (kDebugWUS) {
-              if (slot == maxTotal) {
-                printf("[WUS] WARNING: total overflow! slot=%d >= maxTotal=%d\n", slot, maxTotal);
+            } else {
+              if constexpr (kDebugWUS) {
+                if (slot == maxTotal) {
+                  printf("[WUS] WARNING: OVERFLOW EXHAUSTED! slot=%d >= maxTotal=%d\n", slot, maxTotal);
+                }
               }
             }
           }
@@ -968,8 +1082,15 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
 
   if constexpr (kDebugWUS) {
     if (tid == 0) {
-      printf("[WUS] DONE: total iterations=%d, final matchCount=%d, reportedCount=%d\n",
+      printf("[WUS] DONE: total iterations=%d, final matchCount=%d, reportedCount=%d",
              iterCount, *matchCount, *reportedCount);
+      if (queueTail > maxQueueSize) {
+        printf(" (used overflow: %d entries)", min(queueTail, maxTotal) - maxQueueSize);
+      }
+      if (queueTail > maxTotal) {
+        printf(" [OVERFLOW LOST %d]", queueTail - maxTotal);
+      }
+      printf("\n");
     }
   }
 }

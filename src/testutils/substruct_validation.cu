@@ -381,10 +381,12 @@ std::vector<std::vector<uint8_t>> computeGpuLabelMatrix(const RDKit::ROMol& targ
 
   SubstructMatchResultsDevice results(stream);
   results.allocate(1, 1, queryAtomCounts, maxMatchesPerPair);
+  results.allocateBatchRecursiveBits(1, numTargetAtoms);
 
   RecursivePatternInfo info = extractRecursivePatterns(&queryMol);
   if (!info.empty()) {
-    preprocessRecursiveSmarts(targetDevice, targetHost, info, results, 0, SubstructAlgorithm::GSI, stream);
+    preprocessRecursiveSmarts(targetDevice, targetHost, info, results, 0, 1, 0, 1,
+                              SubstructAlgorithm::GSI, stream);
   }
 
   AsyncDeviceVector<LabelMatrixStorage> matrixDev(1, stream);

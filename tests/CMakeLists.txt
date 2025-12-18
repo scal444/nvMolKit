@@ -214,9 +214,13 @@ target_link_libraries(
                                         substruct_validation test_utils molData
                                         ${RDKit_LIBS})
 
+add_executable(test_global_pool test_global_pool.cu)
+target_link_libraries(test_global_pool PRIVATE substructure_search device)
+
 set(TEST_LIST
     test_butina
     test_boolean_tree
+    test_global_pool
     test_molecules
     test_query
     test_flat_bit_vect_device
