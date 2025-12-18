@@ -344,6 +344,21 @@ void MoleculesDevice::setStream(cudaStream_t stream) {
   bondQueryData_.setStream(stream);
 }
 
+namespace {
+
+template <typename T>
+void setFromVectorGrowOnly(AsyncDeviceVector<T>& dest, const std::vector<T>& src, cudaStream_t stream) {
+  if (src.empty()) {
+    return;
+  }
+  if (src.size() > dest.size()) {
+    dest.resize(src.size());
+  }
+  cudaMemcpyAsync(dest.data(), src.data(), src.size() * sizeof(T), cudaMemcpyHostToDevice, stream);
+}
+
+}  // namespace
+
 void MoleculesDevice::copyFromHost(const MoleculesHost& host, cudaStream_t stream) {
   if (host.numMolecules() == 0) {
     throw std::invalid_argument("Cannot copy empty MoleculesHost to device");
@@ -352,42 +367,42 @@ void MoleculesDevice::copyFromHost(const MoleculesHost& host, cudaStream_t strea
   setStream(stream);
   numMolecules_ = static_cast<int>(host.numMolecules());
 
-  batchAtomStarts_.setFromVector(host.batchAtomStarts);
-  batchBondStarts_.setFromVector(host.batchBondStarts);
-  batchAtomBondStarts_.setFromVector(host.batchAtomBondStarts);
-  batchOtherAtomIndicesStarts_.setFromVector(host.batchOtherAtomIndicesStarts);
-  batchBondIndicesStarts_.setFromVector(host.batchBondIndicesStarts);
-  atomData_.setFromVector(host.atomData);
-  bondData_.setFromVector(host.bondData);
-  atomQueries_.setFromVector(host.atomQueries);
-  atomBondStarts_.setFromVector(host.atomBondStarts);
-  otherAtomIndices_.setFromVector(host.otherAtomIndices);
-  bondDataIndices_.setFromVector(host.bondDataIndices);
+  setFromVectorGrowOnly(batchAtomStarts_, host.batchAtomStarts, stream);
+  setFromVectorGrowOnly(batchBondStarts_, host.batchBondStarts, stream);
+  setFromVectorGrowOnly(batchAtomBondStarts_, host.batchAtomBondStarts, stream);
+  setFromVectorGrowOnly(batchOtherAtomIndicesStarts_, host.batchOtherAtomIndicesStarts, stream);
+  setFromVectorGrowOnly(batchBondIndicesStarts_, host.batchBondIndicesStarts, stream);
+  setFromVectorGrowOnly(atomData_, host.atomData, stream);
+  setFromVectorGrowOnly(bondData_, host.bondData, stream);
+  setFromVectorGrowOnly(atomQueries_, host.atomQueries, stream);
+  setFromVectorGrowOnly(atomBondStarts_, host.atomBondStarts, stream);
+  setFromVectorGrowOnly(otherAtomIndices_, host.otherAtomIndices, stream);
+  setFromVectorGrowOnly(bondDataIndices_, host.bondDataIndices, stream);
 
   // Copy GPU-optimized packed data
   if (!host.atomDataPacked.empty()) {
-    atomDataPacked_.setFromVector(host.atomDataPacked);
+    setFromVectorGrowOnly(atomDataPacked_, host.atomDataPacked, stream);
   }
   if (!host.atomQueryMasks.empty()) {
-    atomQueryMasks_.setFromVector(host.atomQueryMasks);
+    setFromVectorGrowOnly(atomQueryMasks_, host.atomQueryMasks, stream);
   }
   if (!host.bondTypeCounts.empty()) {
-    bondTypeCounts_.setFromVector(host.bondTypeCounts);
+    setFromVectorGrowOnly(bondTypeCounts_, host.bondTypeCounts, stream);
   }
 
   // Copy boolean expression tree data for compound queries
   if (!host.atomQueryTrees.empty()) {
-    atomQueryTrees_.setFromVector(host.atomQueryTrees);
-    queryInstructions_.setFromVector(host.queryInstructions);
-    queryLeafMasks_.setFromVector(host.queryLeafMasks);
-    queryLeafBondCounts_.setFromVector(host.queryLeafBondCounts);
-    atomInstrStarts_.setFromVector(host.atomInstrStarts);
-    atomLeafMaskStarts_.setFromVector(host.atomLeafMaskStarts);
+    setFromVectorGrowOnly(atomQueryTrees_, host.atomQueryTrees, stream);
+    setFromVectorGrowOnly(queryInstructions_, host.queryInstructions, stream);
+    setFromVectorGrowOnly(queryLeafMasks_, host.queryLeafMasks, stream);
+    setFromVectorGrowOnly(queryLeafBondCounts_, host.queryLeafBondCounts, stream);
+    setFromVectorGrowOnly(atomInstrStarts_, host.atomInstrStarts, stream);
+    setFromVectorGrowOnly(atomLeafMaskStarts_, host.atomLeafMaskStarts, stream);
   }
 
   // Copy bond query data for SMARTS
   if (!host.bondQueryData.empty()) {
-    bondQueryData_.setFromVector(host.bondQueryData);
+    setFromVectorGrowOnly(bondQueryData_, host.bondQueryData, stream);
   }
 }
 

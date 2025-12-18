@@ -194,32 +194,40 @@ void getSubstructMatches(MoleculesDevice&             targetsDevice,
                          int                          batchSize = 1024);
 
 /**
- * @brief Preprocess recursive SMARTS patterns for a single query within a batch.
+ * @brief Per-pattern metadata for batched recursive preprocessing kernel.
  *
- * Uses fused paint mode to directly paint recursive match bits during
- * pattern matching, avoiding overflow issues from intermediate storage.
- *
- * @param targetsDevice Device-resident target molecules
- * @param targetsHost Host-side target data
- * @param recursiveInfo Extracted recursive pattern information for this query
- * @param outputResults The main results buffer where recursiveMatchBits will be written
- * @param mainQueryIdx Index of the main query whose pair storage should be updated
- * @param numQueries Total number of queries (for computing pair indices)
- * @param batchPairOffset Global pair index where current batch starts
- * @param batchSize Number of pairs in this batch
- * @param algorithm Algorithm to use for matching
- * @param stream CUDA stream for async operations
+ * Each entry describes one recursive pattern in the combined batch:
+ * which main query it belongs to, what bit to paint, and where the
+ * pattern data starts in the combined pattern batch.
  */
-void preprocessRecursiveSmarts(const MoleculesDevice&             targetsDevice,
-                               const MoleculesHost&         targetsHost,
-                               const RecursivePatternInfo&  recursiveInfo,
-                               const SubstructMatchResultsDevice& outputResults,
-                               int                          mainQueryIdx,
-                               int                          numQueries,
-                               int                          batchPairOffset,
-                               int                          batchSize,
-                               SubstructAlgorithm           algorithm,
-                               cudaStream_t                 stream);
+struct BatchedPatternEntry {
+  int mainQueryIdx;   ///< Index of the main query this pattern belongs to
+  int patternId;      ///< Bit position (0-31) to paint for this pattern
+  int patternMolIdx;  ///< Index into the combined patterns MoleculesDevice
+};
+
+/**
+ * @brief Scratch buffers for recursive SMARTS preprocessing.
+ *
+ * Reusable device memory to avoid repeated alloc/free between kernels.
+ */
+struct RecursiveScratchBuffers {
+  MoleculesDevice                       patternsDevice;
+  AsyncDeviceVector<BatchedPatternEntry> patternEntries;
+  AsyncDeviceVector<PartialMatch>       overflow;
+
+  explicit RecursiveScratchBuffers(cudaStream_t stream)
+      : patternsDevice(stream), patternEntries(), overflow() {
+    patternEntries.setStream(stream);
+    overflow.setStream(stream);
+  }
+
+  void setStream(cudaStream_t stream) {
+    patternsDevice.setStream(stream);
+    patternEntries.setStream(stream);
+    overflow.setStream(stream);
+  }
+};
 
 /**
  * @brief Preprocess ALL recursive SMARTS patterns for a batch in a single kernel launch.
@@ -236,6 +244,7 @@ void preprocessRecursiveSmarts(const MoleculesDevice&             targetsDevice,
  * @param batchSize Number of pairs in this batch
  * @param algorithm Algorithm to use for matching
  * @param stream CUDA stream for async operations
+ * @param scratch Reusable scratch buffers (avoids alloc/free between kernels)
  */
 void preprocessRecursiveSmartsBatched(const MoleculesDevice&             targetsDevice,
                                       const MoleculesHost&               targetsHost,
@@ -245,7 +254,8 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&             targets
                                       int                                batchPairOffset,
                                       int                                batchSize,
                                       SubstructAlgorithm                 algorithm,
-                                      cudaStream_t                       stream);
+                                      cudaStream_t                       stream,
+                                      RecursiveScratchBuffers&           scratch);
 
 }  // namespace nvMolKit
 

@@ -51,8 +51,9 @@ using nvMolKit::MoleculesDevice;
 using nvMolKit::MoleculesDeviceView;
 using nvMolKit::MoleculesHost;
 using nvMolKit::MoleculeView;
-using nvMolKit::preprocessRecursiveSmarts;
+using nvMolKit::preprocessRecursiveSmartsBatched;
 using nvMolKit::RecursivePatternInfo;
+using nvMolKit::RecursiveScratchBuffers;
 using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
 using nvMolKit::SubstructMatchResultsDevice;
@@ -290,6 +291,19 @@ class RecursivePaintTest : public ::testing::Test {
     EXPECT_EQ(isSet, expectedSet) << "Target mol " << targetMolIdx << ", atom " << targetAtomIdx
                                   << ", pattern " << patternId << " expected " << (expectedSet ? "set" : "unset");
   }
+
+  void preprocessRecursive(const MoleculesDevice& targetDevice,
+                           const MoleculesHost&   targetHost,
+                           const RDKit::ROMol*    queryMol) {
+    MoleculesHost queryHost;
+    addQueryToBatch(queryMol, queryHost);
+
+    RecursiveScratchBuffers scratch(stream_.stream());
+    preprocessRecursiveSmartsBatched(targetDevice, targetHost, queryHost, *results_,
+                                     numQueries_, 0, numTargets_ * numQueries_,
+                                     SubstructAlgorithm::GSI, stream_.stream(), scratch);
+    cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  }
 };
 
 TEST_F(RecursivePaintTest, SimpleCarbonBondedToNitrogen) {
@@ -308,8 +322,7 @@ TEST_F(RecursivePaintTest, SimpleCarbonBondedToNitrogen) {
   RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
   ASSERT_EQ(info.size(), 1);
 
-  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, numQueries_, 0,
-                            numTargets_ * numQueries_, SubstructAlgorithm::GSI, stream_.stream());
+  preprocessRecursive(targetDevice, targetHost, queryMol.get());
 
   // Pattern *-N paints the atom matching * (the anchor), not the N
   verifyRecursiveBitSet(0, 0, 0, true);   // C is bonded to N
@@ -331,8 +344,8 @@ TEST_F(RecursivePaintTest, OnlyMatchingAtomsArePainted) {
   targetDevice.copyFromHost(targetHost);
 
   RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
-  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, numQueries_, 0,
-                            numTargets_ * numQueries_, SubstructAlgorithm::GSI, stream_.stream());
+
+  preprocessRecursive(targetDevice, targetHost, queryMol.get());
 
   // Only C(1) is bonded to N, so only C(1) gets painted
   verifyRecursiveBitSet(0, 0, 0, false);  // C(0) not bonded to N
@@ -358,8 +371,7 @@ TEST_F(RecursivePaintTest, MultiplePatternsMultipleBits) {
   RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
   ASSERT_EQ(info.size(), 2);
 
-  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, numQueries_, 0,
-                            numTargets_ * numQueries_, SubstructAlgorithm::GSI, stream_.stream());
+  preprocessRecursive(targetDevice, targetHost, queryMol.get());
 
   // Pattern 0 (*-N): C(0) and O(2) are both bonded to N(1)
   verifyRecursiveBitSet(0, 0, 0, true);   // C bonded to N
@@ -386,8 +398,7 @@ TEST_F(RecursivePaintTest, NoMatchNoBitsPainted) {
   targetDevice.copyFromHost(targetHost);
 
   RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
-  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, numQueries_, 0,
-                            numTargets_ * numQueries_, SubstructAlgorithm::GSI, stream_.stream());
+  preprocessRecursive(targetDevice, targetHost, queryMol.get());
 
   for (int i = 0; i < 3; ++i) {
     verifyRecursiveBitSet(0, i, 0, false);
@@ -417,8 +428,7 @@ TEST_F(RecursivePaintTest, MultipleTargetMolecules) {
   targetDevice.copyFromHost(targetHost);
 
   RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
-  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, numQueries_, 0,
-                            numTargets_ * numQueries_, SubstructAlgorithm::GSI, stream_.stream());
+  preprocessRecursive(targetDevice, targetHost, queryMol.get());
 
   // Target 1 (CN): C bonded to N
   verifyRecursiveBitSet(0, 0, 0, true);   // C bonded to N
@@ -449,8 +459,7 @@ TEST_F(RecursivePaintTest, AromaticPattern) {
   targetDevice.copyFromHost(targetHost);
 
   RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
-  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, numQueries_, 0,
-                            numTargets_ * numQueries_, SubstructAlgorithm::GSI, stream_.stream());
+  preprocessRecursive(targetDevice, targetHost, queryMol.get());
 
   // Only atom 5 (the carbon bonded to N) gets painted
   for (int i = 0; i < 6; ++i) {
@@ -483,8 +492,7 @@ TEST_F(RecursivePaintTest, MultipleTargetsMultiplePatterns) {
   RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
   ASSERT_EQ(info.size(), 2);
 
-  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, numQueries_, 0,
-                            numTargets_ * numQueries_, SubstructAlgorithm::GSI, stream_.stream());
+  preprocessRecursive(targetDevice, targetHost, queryMol.get());
 
   // Target 0 (CN): C bonded to N, no O
   verifyRecursiveBitSet(0, 0, 0, true);   // C has p0 (bonded to N)
@@ -523,8 +531,7 @@ TEST_F(RecursivePaintTest, MultipleTargetsDifferentQueries) {
   RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
   ASSERT_EQ(info.size(), 2);
 
-  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, numQueries_, 0,
-                            numTargets_ * numQueries_, SubstructAlgorithm::GSI, stream_.stream());
+  preprocessRecursive(targetDevice, targetHost, queryMol.get());
 
   // Target 0 (CCN): C(1) bonded to N gets p0, but no O so no p1
   verifyRecursiveBitSet(0, 0, 0, false);  // C(0) not bonded to N
