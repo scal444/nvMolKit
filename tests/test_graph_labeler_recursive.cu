@@ -28,6 +28,7 @@
 #include "molecules_device.cuh"
 #include "substruct_types.h"
 #include "substructure_search.cuh"
+#include "testutils/substruct_validation.h"
 
 using nvMolKit::addQueryToBatch;
 using nvMolKit::addToBatch;
@@ -38,6 +39,8 @@ using nvMolKit::BitMatrix2DView;
 using nvMolKit::BoolInstruction;
 using nvMolKit::BoolOp;
 using nvMolKit::checkReturnCode;
+using nvMolKit::compareLabelMatrices;
+using nvMolKit::computeGpuLabelMatrix;
 using nvMolKit::extractRecursivePatterns;
 using nvMolKit::FlatBitVect;
 using nvMolKit::getMolecule;
@@ -52,6 +55,7 @@ using nvMolKit::paintRecursiveMatchBits;
 using nvMolKit::preprocessRecursiveSmarts;
 using nvMolKit::RecursivePatternInfo;
 using nvMolKit::ScopedStream;
+using nvMolKit::SubstructAlgorithm;
 using nvMolKit::SubstructMatchResultsDevice;
 
 namespace {
@@ -302,7 +306,7 @@ TEST_F(RecursivePaintTest, SimpleCarbonBondedToNitrogen) {
   RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
   ASSERT_EQ(info.size(), 1);
 
-  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, stream_.stream());
+  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, SubstructAlgorithm::GSI, stream_.stream());
 
   // Pattern *-N paints the atom matching * (the anchor), not the N
   verifyRecursiveBitSet(0, 0, 0, true);   // C is bonded to N
@@ -324,7 +328,7 @@ TEST_F(RecursivePaintTest, OnlyMatchingAtomsArePainted) {
   targetDevice.copyFromHost(targetHost);
 
   RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
-  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, stream_.stream());
+  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0,SubstructAlgorithm::GSI, stream_.stream());
 
   // Only C(1) is bonded to N, so only C(1) gets painted
   verifyRecursiveBitSet(0, 0, 0, false);  // C(0) not bonded to N
@@ -350,7 +354,7 @@ TEST_F(RecursivePaintTest, MultiplePatternsMultipleBits) {
   RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
   ASSERT_EQ(info.size(), 2);
 
-  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, stream_.stream());
+  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0,SubstructAlgorithm::GSI, stream_.stream());
 
   // Pattern 0 (*-N): C(0) and O(2) are both bonded to N(1)
   verifyRecursiveBitSet(0, 0, 0, true);   // C bonded to N
@@ -377,7 +381,7 @@ TEST_F(RecursivePaintTest, NoMatchNoBitsPainted) {
   targetDevice.copyFromHost(targetHost);
 
   RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
-  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, stream_.stream());
+  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, SubstructAlgorithm::GSI,stream_.stream());
 
   for (int i = 0; i < 3; ++i) {
     verifyRecursiveBitSet(0, i, 0, false);
@@ -407,7 +411,7 @@ TEST_F(RecursivePaintTest, MultipleTargetMolecules) {
   targetDevice.copyFromHost(targetHost);
 
   RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
-  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, stream_.stream());
+  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0,SubstructAlgorithm::GSI, stream_.stream());
 
   // Target 1 (CN): C bonded to N
   verifyRecursiveBitSet(0, 0, 0, true);   // C bonded to N
@@ -438,7 +442,7 @@ TEST_F(RecursivePaintTest, AromaticPattern) {
   targetDevice.copyFromHost(targetHost);
 
   RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
-  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, stream_.stream());
+  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, SubstructAlgorithm::GSI,stream_.stream());
 
   // Only atom 5 (the carbon bonded to N) gets painted
   for (int i = 0; i < 6; ++i) {
@@ -471,7 +475,7 @@ TEST_F(RecursivePaintTest, MultipleTargetsMultiplePatterns) {
   RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
   ASSERT_EQ(info.size(), 2);
 
-  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, stream_.stream());
+  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, SubstructAlgorithm::GSI, stream_.stream());
 
   // Target 0 (CN): C bonded to N, no O
   verifyRecursiveBitSet(0, 0, 0, true);   // C has p0 (bonded to N)
@@ -510,7 +514,7 @@ TEST_F(RecursivePaintTest, MultipleTargetsDifferentQueries) {
   RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
   ASSERT_EQ(info.size(), 2);
 
-  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0, stream_.stream());
+  preprocessRecursiveSmarts(targetDevice, targetHost, info, *results_, 0,SubstructAlgorithm::GSI, stream_.stream());
 
   // Target 0 (CCN): C(1) bonded to N gets p0, but no O so no p1
   verifyRecursiveBitSet(0, 0, 0, false);  // C(0) not bonded to N
@@ -533,19 +537,6 @@ TEST_F(RecursivePaintTest, MultipleTargetsDifferentQueries) {
 // Label Matrix Tests with Recursive SMARTS
 // =============================================================================
 
-template <std::size_t MaxTarget, std::size_t MaxQuery>
-__global__ void populateLabelMatrixKernel(MoleculesDeviceView                targetBatch,
-                                          int                                targetMolIdx,
-                                          MoleculesDeviceView                queryBatch,
-                                          int                                queryMolIdx,
-                                          FlatBitVect<MaxTarget * MaxQuery>* matrix,
-                                          const uint32_t*                    pairRecursiveBits = nullptr) {
-  MoleculeView                         target = getMolecule(targetBatch, targetMolIdx);
-  MoleculeView                         query  = getMolecule(queryBatch, queryMolIdx);
-  BitMatrix2DView<MaxTarget, MaxQuery> view(matrix);
-  nvMolKit::populateLabelMatrixOptimized<MaxTarget, MaxQuery>(target, query, view, pairRecursiveBits);
-}
-
 class RecursiveLabelingTest : public ::testing::Test {
  protected:
   ScopedStream stream_;
@@ -558,60 +549,31 @@ class RecursiveLabelingTest : public ::testing::Test {
     ASSERT_NE(targetMol, nullptr) << "Failed to parse target: " << targetSmiles;
     ASSERT_NE(queryMol, nullptr) << "Failed to parse query: " << querySmarts;
 
-    MoleculesHost targetHost;
-    MoleculesHost queryHost;
-    addToBatch(targetMol.get(), targetHost);
-    addQueryToBatch(queryMol.get(), queryHost);
+    auto gpuMatrix = computeGpuLabelMatrix(*targetMol, *queryMol, stream_.stream());
 
-    MoleculesDevice targetDevice(stream_.stream());
-    MoleculesDevice queryDevice(stream_.stream());
-    targetDevice.copyFromHost(targetHost);
-    queryDevice.copyFromHost(queryHost);
-
-    // Set up results for per-pair recursive bits storage
-    const int numTargets = 1;
-    const int numQueries = 1;
-    const int numTargetAtoms = static_cast<int>(targetHost.totalAtoms());
-    std::vector<int> queryAtomCounts = {static_cast<int>(queryHost.totalAtoms())};
-    std::vector<int> maxMatchesPerPair = {numTargetAtoms};
-
-    SubstructMatchResultsDevice results(stream_.stream());
-    results.allocate(numTargets, numQueries, queryAtomCounts, maxMatchesPerPair);
-
-    RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
-    if (!info.empty()) {
-      preprocessRecursiveSmarts(targetDevice, targetHost, info, results, 0, stream_.stream());
-    }
-
-    AsyncDeviceVector<LabelMatrixStorage> matrixDev(1, stream_.stream());
-    const LabelMatrixStorage              hostMatrix(false);
-    matrixDev.setFromVector(std::vector<LabelMatrixStorage>{hostMatrix});
-
-    // Get per-pair recursive bits for pair 0 (target 0, query 0)
-    auto resultsView = results.view();
-    const uint32_t* pairRecursiveBits = resultsView.recursiveMatchBits;
-
-    populateLabelMatrixKernel<kMaxTargetAtoms, kMaxQueryAtoms>
-      <<<1, 128, 0, stream_.stream()>>>(targetDevice.view(), 0, queryDevice.view(), 0, matrixDev.data(), pairRecursiveBits);
-    cudaCheckError(cudaGetLastError());
-
-    std::vector<LabelMatrixStorage> resultMatrix(1);
-    matrixDev.copyToHost(resultMatrix);
-    cudaCheckError(cudaStreamSynchronize(stream_.stream()));
-
-    const LabelMatrixView view(resultMatrix[0]);
-
-    const int numQueryAtoms  = static_cast<int>(queryHost.totalAtoms());
+    const int numTargetAtoms = static_cast<int>(gpuMatrix.size());
+    const int numQueryAtoms  = numTargetAtoms > 0 ? static_cast<int>(gpuMatrix[0].size()) : 0;
 
     ASSERT_EQ(expectedMatrix.size(), numTargetAtoms);
     for (int i = 0; i < numTargetAtoms; ++i) {
       ASSERT_EQ(expectedMatrix[i].size(), numQueryAtoms);
       for (int j = 0; j < numQueryAtoms; ++j) {
-        EXPECT_EQ(view.get(i, j), expectedMatrix[i][j])
+        EXPECT_EQ(gpuMatrix[i][j], expectedMatrix[i][j])
           << "Mismatch at target atom " << i << ", query atom " << j << " for target=" << targetSmiles
           << ", query=" << querySmarts;
       }
     }
+  }
+
+  void runRecursiveLabelingTestVsRDKit(const std::string& targetSmiles, const std::string& querySmarts) {
+    auto targetMol = makeMolFromSmiles(targetSmiles);
+    auto queryMol  = makeMolFromSmarts(querySmarts);
+    ASSERT_NE(targetMol, nullptr) << "Failed to parse target: " << targetSmiles;
+    ASSERT_NE(queryMol, nullptr) << "Failed to parse query: " << querySmarts;
+
+    auto result = compareLabelMatrices(*targetMol, *queryMol, stream_.stream());
+    EXPECT_TRUE(result.allMatch) << "GPU/RDKit mismatch for target=" << targetSmiles << ", query=" << querySmarts
+                                 << " (FP=" << result.falsePositives << ", FN=" << result.falseNegatives << ")";
   }
 };
 

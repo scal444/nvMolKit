@@ -202,7 +202,8 @@ void preprocessRecursiveSmarts(MoleculesDevice&             targetsDevice,
                                const RecursivePatternInfo&  recursiveInfo,
                                SubstructMatchResultsDevice& outputResults,
                                int                          mainQueryIdx,
-                               cudaStream_t                 stream);
+                               SubstructAlgorithm           algorithm = SubstructAlgorithm::GSI,
+                               cudaStream_t                 stream = nullptr);
 
 }  // namespace nvMolKit
 

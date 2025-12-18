@@ -15,11 +15,18 @@
 
 #include "substruct_validation.h"
 
+#include <GraphMol/QueryAtom.h>
 #include <GraphMol/Substruct/SubstructMatch.h>
 
 #include <algorithm>
 #include <iostream>
 #include <set>
+
+#include "cuda_error_check.h"
+#include "device.h"
+#include "graph_labeler.cuh"
+#include "molecules_device.cuh"
+#include "substructure_search.cuh"
 
 namespace nvMolKit {
 
@@ -233,6 +240,22 @@ std::vector<std::vector<int>> extractGpuMatchesForPrint(const SubstructMatchResu
   return gpuMatches;
 }
 
+using LabelMatrixStorage = FlatBitVect<kMaxTargetAtoms * kMaxQueryAtoms>;
+using LabelMatrixView    = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
+
+template <std::size_t MaxTarget, std::size_t MaxQuery>
+__global__ void populateLabelMatrixKernel(MoleculesDeviceView                targetBatch,
+                                          int                                targetMolIdx,
+                                          MoleculesDeviceView                queryBatch,
+                                          int                                queryMolIdx,
+                                          FlatBitVect<MaxTarget * MaxQuery>* matrix,
+                                          const uint32_t*                    pairRecursiveBits) {
+  MoleculeView                         target = getMolecule(targetBatch, targetMolIdx);
+  MoleculeView                         query  = getMolecule(queryBatch, queryMolIdx);
+  BitMatrix2DView<MaxTarget, MaxQuery> view(matrix);
+  populateLabelMatrixOptimized<MaxTarget, MaxQuery>(target, query, view, pairRecursiveBits);
+}
+
 }  // namespace
 
 void printValidationResultDetailed(const SubstructValidationResult&                  result,
@@ -310,6 +333,116 @@ void printValidationResultDetailed(const SubstructValidationResult&             
       std::cout << std::endl;
     }
   }
+}
+
+std::vector<std::vector<uint8_t>> computeRDKitLabelMatrix(const RDKit::ROMol& targetMol,
+                                                          const RDKit::ROMol& queryMol) {
+  const int numTargetAtoms = static_cast<int>(targetMol.getNumAtoms());
+  const int numQueryAtoms  = static_cast<int>(queryMol.getNumAtoms());
+
+  std::vector<std::vector<uint8_t>> result(numTargetAtoms, std::vector<uint8_t>(numQueryAtoms));
+
+  for (int ta = 0; ta < numTargetAtoms; ++ta) {
+    const auto* targetAtom = targetMol.getAtomWithIdx(ta);
+    for (int qa = 0; qa < numQueryAtoms; ++qa) {
+      const auto* queryAtom = queryMol.getAtomWithIdx(qa);
+
+      bool rdkitResult = false;
+      if (queryAtom->hasQuery()) {
+        rdkitResult = queryAtom->Match(targetAtom);
+      } else {
+        rdkitResult = (targetAtom->getAtomicNum() == queryAtom->getAtomicNum());
+      }
+      result[ta][qa] = rdkitResult ? 1 : 0;
+    }
+  }
+
+  return result;
+}
+
+std::vector<std::vector<uint8_t>> computeGpuLabelMatrix(const RDKit::ROMol& targetMol,
+                                                        const RDKit::ROMol& queryMol,
+                                                        cudaStream_t        stream) {
+  MoleculesHost targetHost;
+  MoleculesHost queryHost;
+  addToBatch(&targetMol, targetHost);
+  addQueryToBatch(&queryMol, queryHost);
+
+  MoleculesDevice targetDevice(stream);
+  MoleculesDevice queryDevice(stream);
+  targetDevice.copyFromHost(targetHost);
+  queryDevice.copyFromHost(queryHost);
+
+  const int numTargetAtoms = static_cast<int>(targetHost.totalAtoms());
+  const int numQueryAtoms  = static_cast<int>(queryHost.totalAtoms());
+
+  std::vector<int> queryAtomCounts   = {numQueryAtoms};
+  std::vector<int> maxMatchesPerPair = {numTargetAtoms};
+
+  SubstructMatchResultsDevice results(stream);
+  results.allocate(1, 1, queryAtomCounts, maxMatchesPerPair);
+
+  RecursivePatternInfo info = extractRecursivePatterns(&queryMol);
+  if (!info.empty()) {
+    preprocessRecursiveSmarts(targetDevice, targetHost, info, results, 0, SubstructAlgorithm::GSI, stream);
+  }
+
+  AsyncDeviceVector<LabelMatrixStorage> matrixDev(1, stream);
+  const LabelMatrixStorage              hostMatrix(false);
+  matrixDev.setFromVector(std::vector<LabelMatrixStorage>{hostMatrix});
+
+  auto            resultsView       = results.view();
+  const uint32_t* pairRecursiveBits = info.empty() ? nullptr : resultsView.recursiveMatchBits;
+
+  populateLabelMatrixKernel<kMaxTargetAtoms, kMaxQueryAtoms>
+    <<<1, 128, 0, stream>>>(targetDevice.view(), 0, queryDevice.view(), 0, matrixDev.data(), pairRecursiveBits);
+  cudaCheckError(cudaGetLastError());
+
+  std::vector<LabelMatrixStorage> resultMatrix(1);
+  matrixDev.copyToHost(resultMatrix);
+  cudaCheckError(cudaStreamSynchronize(stream));
+
+  const LabelMatrixView view(resultMatrix[0]);
+
+  std::vector<std::vector<uint8_t>> result(numTargetAtoms, std::vector<uint8_t>(numQueryAtoms));
+  for (int ta = 0; ta < numTargetAtoms; ++ta) {
+    for (int qa = 0; qa < numQueryAtoms; ++qa) {
+      result[ta][qa] = view.get(ta, qa) ? 1 : 0;
+    }
+  }
+
+  return result;
+}
+
+LabelMatrixComparisonResult compareLabelMatrices(const RDKit::ROMol& targetMol,
+                                                 const RDKit::ROMol& queryMol,
+                                                 cudaStream_t        stream) {
+  auto gpuMatrix   = computeGpuLabelMatrix(targetMol, queryMol, stream);
+  auto rdkitMatrix = computeRDKitLabelMatrix(targetMol, queryMol);
+
+  LabelMatrixComparisonResult result;
+  result.numTargetAtoms   = static_cast<int>(gpuMatrix.size());
+  result.numQueryAtoms    = result.numTargetAtoms > 0 ? static_cast<int>(gpuMatrix[0].size()) : 0;
+  result.totalComparisons = result.numTargetAtoms * result.numQueryAtoms;
+
+  for (int ta = 0; ta < result.numTargetAtoms; ++ta) {
+    for (int qa = 0; qa < result.numQueryAtoms; ++qa) {
+      bool gpuResult   = gpuMatrix[ta][qa] != 0;
+      bool rdkitResult = rdkitMatrix[ta][qa] != 0;
+
+      if (gpuResult != rdkitResult) {
+        if (gpuResult && !rdkitResult) {
+          ++result.falsePositives;
+        } else {
+          ++result.falseNegatives;
+        }
+        result.mismatches.emplace_back(ta, qa, gpuResult, rdkitResult);
+      }
+    }
+  }
+
+  result.allMatch = (result.falsePositives == 0 && result.falseNegatives == 0);
+  return result;
 }
 
 }  // namespace nvMolKit

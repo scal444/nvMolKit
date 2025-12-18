@@ -30,8 +30,8 @@ namespace nvMolKit {
 // =============================================================================
 
 constexpr int  kWarpSize      = 32;
-constexpr bool kDebugWUS      = false;  ///< Enable debug output in warpUnifiedSearchGPU
-constexpr bool kDebugGSI      = false;  ///< Enable debug output in gsiBFSSearchGPU
+constexpr bool kDebugWUS      = true;  ///< Enable debug output in warpUnifiedSearchGPU
+constexpr bool kDebugGSI      = true;  ///< Enable debug output in gsiBFSSearchGPU
 
 // =============================================================================
 // Helper function for checking if target atom is used in mapping
@@ -429,7 +429,8 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
     if (tid == 0) {
       printf("[GSI] numQueryAtoms=%d, numTargetAtoms=%d, maxPartials=%d, maxOverflow=%d, maxTotal=%d\n",
              numQueryAtoms, numTargetAtoms, maxPartials, maxOverflow, maxTotal);
-      printf("[GSI] query.hasBondQueryData()=%d\n", query.hasBondQueryData() ? 1 : 0);
+      printf("[GSI] query.hasBondQueryData()=%d, query.hasQueryTrees()=%d\n",
+             query.hasBondQueryData() ? 1 : 0, query.hasQueryTrees() ? 1 : 0);
     }
     block.sync();
   }
@@ -562,8 +563,9 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
 
         if constexpr (kDebugGSI) {
           if (pIdx == 0 && t < 5 && level <= 3) {
-            printf("[GSI] Level %d partial 0 cand %d: labelOk=%d, notUsed=%d, edgeOk=%d, valid=%d\n",
-                   level, t, labelOk ? 1 : 0, notUsed ? 1 : 0, edgeOk ? 1 : 0, valid ? 1 : 0);
+            printf("[GSI] Level %d partial 0 cand %d: labelOk=%d, notUsed=%d, edgeOk=%d, valid=%d, recBits=0x%04x\n",
+                   level, t, labelOk ? 1 : 0, notUsed ? 1 : 0, edgeOk ? 1 : 0, valid ? 1 : 0,
+                   (t < numTargetAtoms) ? target.getAtomPacked(t).recursiveMatches() : 0);
           }
         }
 
@@ -711,7 +713,8 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
     if (tid == 0) {
       printf("[WUS] numQueryAtoms=%d, numTargetAtoms=%d, maxQueueSize=%d, maxOverflow=%d, maxTotal=%d\n",
              numQueryAtoms, numTargetAtoms, maxQueueSize, maxOverflow, maxTotal);
-      printf("[WUS] query.hasBondQueryData()=%d\n", query.hasBondQueryData() ? 1 : 0);
+      printf("[WUS] query.hasBondQueryData()=%d, query.hasQueryTrees()=%d\n",
+             query.hasBondQueryData() ? 1 : 0, query.hasQueryTrees() ? 1 : 0);
     }
     block.sync();
   }
@@ -896,8 +899,9 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
 
           if constexpr (kDebugWUS) {
             if (warpId == 0 && cIdx < 5 && iterCount <= 5) {
-              printf("[WUS] Phase3 iter %d cand %d: targetAtom=%d, notUsed=%d, edgeOk=%d, valid=%d\n",
-                     iterCount, cIdx, targetAtom, notUsed ? 1 : 0, edgeOk ? 1 : 0, valid ? 1 : 0);
+              printf("[WUS] Phase3 iter %d cand %d: targetAtom=%d, notUsed=%d, edgeOk=%d, valid=%d, recBits=0x%04x\n",
+                     iterCount, cIdx, targetAtom, notUsed ? 1 : 0, edgeOk ? 1 : 0, valid ? 1 : 0,
+                     (targetAtom >= 0 && targetAtom < numTargetAtoms) ? target.getAtomPacked(targetAtom).recursiveMatches() : 0);
             }
           }
         }

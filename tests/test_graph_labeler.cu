@@ -28,6 +28,7 @@
 #include "graph_labeler.cuh"
 #include "molecules_device.cuh"
 #include "substruct_types.h"
+#include "testutils/substruct_validation.h"
 
 using nvMolKit::addQueryToBatch;
 using nvMolKit::addToBatch;
@@ -38,6 +39,9 @@ using nvMolKit::AtomQueryIsAliphatic;
 using nvMolKit::AtomQueryIsAromatic;
 using nvMolKit::BitMatrix2DView;
 using nvMolKit::checkReturnCode;
+using nvMolKit::compareLabelMatrices;
+using nvMolKit::computeGpuLabelMatrix;
+using nvMolKit::computeRDKitLabelMatrix;
 using nvMolKit::FlatBitVect;
 using nvMolKit::kMaxTargetAtoms;
 using nvMolKit::kMaxQueryAtoms;
@@ -263,18 +267,6 @@ TEST(GraphLabelerAtomMatches, NoQueryFlags) {
 // Full Graph Labeling Tests with Real Molecules
 // =============================================================================
 
-template <std::size_t MaxTarget, std::size_t MaxQuery>
-__global__ void populateLabelMatrixKernel(MoleculesDeviceView                targetBatch,
-                                          int                                targetMolIdx,
-                                          MoleculesDeviceView                queryBatch,
-                                          int                                queryMolIdx,
-                                          FlatBitVect<MaxTarget * MaxQuery>* matrix) {
-  MoleculeView                         target = getMolecule(targetBatch, targetMolIdx);
-  MoleculeView                         query  = getMolecule(queryBatch, queryMolIdx);
-  BitMatrix2DView<MaxTarget, MaxQuery> view(matrix);
-  nvMolKit::populateLabelMatrixOptimized<MaxTarget, MaxQuery>(target, query, view);
-}
-
 class GraphLabelerTest : public ::testing::Test {
  protected:
   ScopedStream stream_;
@@ -289,42 +281,30 @@ class GraphLabelerTest : public ::testing::Test {
     ASSERT_NE(targetMol, nullptr) << "Failed to parse target: " << targetSmiles;
     ASSERT_NE(queryMol, nullptr) << "Failed to parse query: " << querySmarts;
 
-    MoleculesHost targetHost;
-    MoleculesHost queryHost;
-    addToBatch(targetMol.get(), targetHost);
-    addQueryToBatch(queryMol.get(), queryHost);
+    auto gpuMatrix = computeGpuLabelMatrix(*targetMol, *queryMol, stream_.stream());
 
-    MoleculesDevice targetDevice(stream_.stream());
-    MoleculesDevice queryDevice(stream_.stream());
-    targetDevice.copyFromHost(targetHost);
-    queryDevice.copyFromHost(queryHost);
-
-    AsyncDeviceVector<LabelMatrixStorage> matrixDev(1, stream_.stream());
-    const LabelMatrixStorage              hostMatrix(false);
-    matrixDev.setFromVector(std::vector<LabelMatrixStorage>{hostMatrix});
-
-    // Use optimized kernel with a thread block (supports boolean trees via cooperative groups)
-    populateLabelMatrixKernel<kMaxTargetAtoms, kMaxQueryAtoms>
-      <<<1, 128, 0, stream_.stream()>>>(targetDevice.view(), 0, queryDevice.view(), 0, matrixDev.data());
-    cudaCheckError(cudaGetLastError());
-
-    std::vector<LabelMatrixStorage> resultMatrix(1);
-    matrixDev.copyToHost(resultMatrix);
-    cudaCheckError(cudaStreamSynchronize(stream_.stream()));
-
-    const LabelMatrixView view(resultMatrix[0]);
-
-    const int numTargetAtoms = static_cast<int>(targetHost.totalAtoms());
-    const int numQueryAtoms  = static_cast<int>(queryHost.totalAtoms());
+    const int numTargetAtoms = static_cast<int>(gpuMatrix.size());
+    const int numQueryAtoms  = numTargetAtoms > 0 ? static_cast<int>(gpuMatrix[0].size()) : 0;
 
     ASSERT_EQ(expectedMatrix.size(), numTargetAtoms);
     for (int i = 0; i < numTargetAtoms; ++i) {
       ASSERT_EQ(expectedMatrix[i].size(), numQueryAtoms);
       for (int j = 0; j < numQueryAtoms; ++j) {
-        EXPECT_EQ(view.get(i, j), expectedMatrix[i][j]) << "Mismatch at target atom " << i << ", query atom " << j
-                                                        << " for target=" << targetSmiles << ", query=" << querySmarts;
+        EXPECT_EQ(gpuMatrix[i][j], expectedMatrix[i][j]) << "Mismatch at target atom " << i << ", query atom " << j
+                                                         << " for target=" << targetSmiles << ", query=" << querySmarts;
       }
     }
+  }
+
+  void runLabelingTestVsRDKit(const std::string& targetSmiles, const std::string& querySmarts) {
+    auto targetMol = makeMolFromSmiles(targetSmiles);
+    auto queryMol  = makeMolFromSmarts(querySmarts);
+    ASSERT_NE(targetMol, nullptr) << "Failed to parse target: " << targetSmiles;
+    ASSERT_NE(queryMol, nullptr) << "Failed to parse query: " << querySmarts;
+
+    auto result = compareLabelMatrices(*targetMol, *queryMol, stream_.stream());
+    EXPECT_TRUE(result.allMatch) << "GPU/RDKit mismatch for target=" << targetSmiles << ", query=" << querySmarts
+                                 << " (FP=" << result.falsePositives << ", FN=" << result.falseNegatives << ")";
   }
 };
 
@@ -1664,78 +1644,23 @@ TEST_F(GraphLabelerTest, AnyBondInRing) {
 // =============================================================================
 
 TEST_F(GraphLabelerTest, OptimizedWarpParallelLabeling) {
-  auto targetMol = makeMolFromSmiles("c1ccccc1");  // benzene
-  auto queryMol  = makeMolFromSmarts("c");
-  ASSERT_NE(targetMol, nullptr);
-  ASSERT_NE(queryMol, nullptr);
-
-  MoleculesHost targetHost;
-  MoleculesHost queryHost;
-  addToBatch(targetMol.get(), targetHost);
-  addQueryToBatch(queryMol.get(), queryHost);
-
-  MoleculesDevice targetDevice(stream_.stream());
-  MoleculesDevice queryDevice(stream_.stream());
-  targetDevice.copyFromHost(targetHost);
-  queryDevice.copyFromHost(queryHost);
-
-  AsyncDeviceVector<LabelMatrixStorage> matrixDev(1, stream_.stream());
-  LabelMatrixStorage                    hostMatrix(false);
-  matrixDev.setFromVector(std::vector<LabelMatrixStorage>{hostMatrix});
-
-  // Launch with multiple warps (128 threads = 4 warps)
-  populateLabelMatrixKernel<kMaxTargetAtoms, kMaxQueryAtoms>
-    <<<1, 128, 0, stream_.stream()>>>(targetDevice.view(), 0, queryDevice.view(), 0, matrixDev.data());
-  cudaCheckError(cudaGetLastError());
-
-  std::vector<LabelMatrixStorage> resultMatrix(1);
-  matrixDev.copyToHost(resultMatrix);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
-
-  LabelMatrixView view(resultMatrix[0]);
+  auto gpuMatrix = computeGpuLabelMatrix(*makeMolFromSmiles("c1ccccc1"), *makeMolFromSmarts("c"), stream_.stream());
 
   // All 6 aromatic carbons should match the aromatic carbon query
   for (int i = 0; i < 6; ++i) {
-    EXPECT_TRUE(view.get(i, 0)) << "Atom " << i << " should match aromatic carbon query";
+    EXPECT_TRUE(gpuMatrix[i][0]) << "Atom " << i << " should match aromatic carbon query";
   }
 }
 
 TEST_F(GraphLabelerTest, OptimizedLabelingMultiAtomQuery) {
   // Target: CCC (propane) - 3 carbons
   // Query: CC (two bonded carbons)
-  auto targetMol = makeMolFromSmiles("CCC");
-  auto queryMol  = makeMolFromSmarts("CC");
-  ASSERT_NE(targetMol, nullptr);
-  ASSERT_NE(queryMol, nullptr);
-
-  MoleculesHost targetHost;
-  MoleculesHost queryHost;
-  addToBatch(targetMol.get(), targetHost);
-  addQueryToBatch(queryMol.get(), queryHost);
-
-  MoleculesDevice targetDevice(stream_.stream());
-  MoleculesDevice queryDevice(stream_.stream());
-  targetDevice.copyFromHost(targetHost);
-  queryDevice.copyFromHost(queryHost);
-
-  AsyncDeviceVector<LabelMatrixStorage> matrixDev(1, stream_.stream());
-  LabelMatrixStorage                    hostMatrix(false);
-  matrixDev.setFromVector(std::vector<LabelMatrixStorage>{hostMatrix});
-
-  populateLabelMatrixKernel<kMaxTargetAtoms, kMaxQueryAtoms>
-    <<<1, 128, 0, stream_.stream()>>>(targetDevice.view(), 0, queryDevice.view(), 0, matrixDev.data());
-  cudaCheckError(cudaGetLastError());
-
-  std::vector<LabelMatrixStorage> resultMatrix(1);
-  matrixDev.copyToHost(resultMatrix);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
-
-  LabelMatrixView view(resultMatrix[0]);
+  auto gpuMatrix = computeGpuLabelMatrix(*makeMolFromSmiles("CCC"), *makeMolFromSmarts("CC"), stream_.stream());
 
   // All 3 carbons should match both query atoms (each has >= 1 bond)
   for (int t = 0; t < 3; ++t) {
     for (int q = 0; q < 2; ++q) {
-      EXPECT_TRUE(view.get(t, q)) << "Target atom " << t << " should match query atom " << q;
+      EXPECT_TRUE(gpuMatrix[t][q]) << "Target atom " << t << " should match query atom " << q;
     }
   }
 }
@@ -1743,75 +1668,21 @@ TEST_F(GraphLabelerTest, OptimizedLabelingMultiAtomQuery) {
 TEST_F(GraphLabelerTest, OptimizedLabelingNoMatches) {
   // Target: C (methane) - single carbon with 0 bonds to heavy atoms
   // Query: CC (two bonded carbons, each with 1 bond)
-  auto targetMol = makeMolFromSmiles("C");
-  auto queryMol  = makeMolFromSmarts("CC");
-  ASSERT_NE(targetMol, nullptr);
-  ASSERT_NE(queryMol, nullptr);
+  auto gpuMatrix = computeGpuLabelMatrix(*makeMolFromSmiles("C"), *makeMolFromSmarts("CC"), stream_.stream());
 
-  MoleculesHost targetHost;
-  MoleculesHost queryHost;
-  addToBatch(targetMol.get(), targetHost);
-  addQueryToBatch(queryMol.get(), queryHost);
-
-  MoleculesDevice targetDevice(stream_.stream());
-  MoleculesDevice queryDevice(stream_.stream());
-  targetDevice.copyFromHost(targetHost);
-  queryDevice.copyFromHost(queryHost);
-
-  AsyncDeviceVector<LabelMatrixStorage> matrixDev(1, stream_.stream());
-  LabelMatrixStorage                    hostMatrix(false);
-  matrixDev.setFromVector(std::vector<LabelMatrixStorage>{hostMatrix});
-
-  populateLabelMatrixKernel<kMaxTargetAtoms, kMaxQueryAtoms>
-    <<<1, 128, 0, stream_.stream()>>>(targetDevice.view(), 0, queryDevice.view(), 0, matrixDev.data());
-  cudaCheckError(cudaGetLastError());
-
-  std::vector<LabelMatrixStorage> resultMatrix(1);
-  matrixDev.copyToHost(resultMatrix);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
-
-  LabelMatrixView view(resultMatrix[0]);
-
-  EXPECT_TRUE(view.get(0, 0));
-  EXPECT_TRUE(view.get(0, 1));
+  EXPECT_TRUE(gpuMatrix[0][0]);
+  EXPECT_TRUE(gpuMatrix[0][1]);
 }
 
 TEST_F(GraphLabelerTest, OptimizedLabelingMixedMatch) {
   // Target: CCO (ethanol) - 2 carbons, 1 oxygen
   // Query: O (oxygen)
-  auto targetMol = makeMolFromSmiles("CCO");
-  auto queryMol  = makeMolFromSmarts("O");
-  ASSERT_NE(targetMol, nullptr);
-  ASSERT_NE(queryMol, nullptr);
-
-  MoleculesHost targetHost;
-  MoleculesHost queryHost;
-  addToBatch(targetMol.get(), targetHost);
-  addQueryToBatch(queryMol.get(), queryHost);
-
-  MoleculesDevice targetDevice(stream_.stream());
-  MoleculesDevice queryDevice(stream_.stream());
-  targetDevice.copyFromHost(targetHost);
-  queryDevice.copyFromHost(queryHost);
-
-  AsyncDeviceVector<LabelMatrixStorage> matrixDev(1, stream_.stream());
-  LabelMatrixStorage                    hostMatrix(false);
-  matrixDev.setFromVector(std::vector<LabelMatrixStorage>{hostMatrix});
-
-  populateLabelMatrixKernel<kMaxTargetAtoms, kMaxQueryAtoms>
-    <<<1, 128, 0, stream_.stream()>>>(targetDevice.view(), 0, queryDevice.view(), 0, matrixDev.data());
-  cudaCheckError(cudaGetLastError());
-
-  std::vector<LabelMatrixStorage> resultMatrix(1);
-  matrixDev.copyToHost(resultMatrix);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
-
-  LabelMatrixView view(resultMatrix[0]);
+  auto gpuMatrix = computeGpuLabelMatrix(*makeMolFromSmiles("CCO"), *makeMolFromSmarts("O"), stream_.stream());
 
   // Only oxygen should match
-  EXPECT_FALSE(view.get(0, 0));  // C doesn't match O
-  EXPECT_FALSE(view.get(1, 0));  // C doesn't match O
-  EXPECT_TRUE(view.get(2, 0));   // O matches O
+  EXPECT_FALSE(gpuMatrix[0][0]);  // C doesn't match O
+  EXPECT_FALSE(gpuMatrix[1][0]);  // C doesn't match O
+  EXPECT_TRUE(gpuMatrix[2][0]);   // O matches O
 }
 
 // =============================================================================

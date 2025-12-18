@@ -25,9 +25,9 @@ target_include_directories(conformer_checkers
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 if(NVMOLKIT_BUILD_TESTS OR NVMOLKIT_BUILD_BENCHMARKS)
-  add_library(substruct_validation substruct_validation.cpp)
+  add_library(substruct_validation substruct_validation.cu)
   target_include_directories(
     substruct_validation PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
                                 ${CMAKE_SOURCE_DIR}/src)
-  target_link_libraries(substruct_validation PUBLIC ${RDKit_LIBS})
+  target_link_libraries(substruct_validation PUBLIC ${RDKit_LIBS} substructure_search cuda_error_check)
 endif()

@@ -37,6 +37,9 @@ constexpr int kMaxPartialsPerBlock = 256;   // Shared memory partials per block
 constexpr int kMaxQueueSize        = 512;   // Shared memory queue size
 constexpr int kGlobalOverflowSize  = 2048;   // Global memory overflow per pair (per buffer)
 
+constexpr bool kDebugDumpLabelMatrix = true;   ///< Dump full label matrices after recursive preprocessing
+constexpr bool kDebugPaintRecursive  = true;   ///< Debug recursive bit painting kernel
+
 /**
  * @brief Kernel for batch substructure matching.
  *
@@ -80,6 +83,32 @@ __global__ void substructMatchKernel(MoleculesDeviceView             targets,
   populateLabelMatrixOptimized<kMaxTargetAtoms, kMaxQueryAtoms>(target, query, labelMatrix, pairRecursiveBits);
 
   __syncthreads();
+
+  if constexpr (kDebugDumpLabelMatrix) {
+    if (threadIdx.x == 0) {
+      printf("[LabelDump] pair=%d (target=%d, query=%d): targetAtoms=%d, queryAtoms=%d\n",
+             pairIdx, targetIdx, queryIdx, target.numAtoms, query.numAtoms);
+      printf("[LabelDump] Recursive bits per target atom:\n");
+      for (int t = 0; t < target.numAtoms; ++t) {
+        uint32_t bits = pairRecursiveBits ? pairRecursiveBits[t] : 0;
+        printf("[LabelDump]   t%d=0x%08x\n", t, bits);
+      }
+      printf("[LabelDump] Label matrix (row=target, col=query, 1=compatible):\n");
+      printf("[LabelDump]     ");
+      for (int q = 0; q < query.numAtoms; ++q) {
+        printf("q%d ", q);
+      }
+      printf("\n");
+      for (int t = 0; t < target.numAtoms; ++t) {
+        printf("[LabelDump] t%2d: ", t);
+        for (int q = 0; q < query.numAtoms; ++q) {
+          printf("%d  ", labelMatrix.get(t, q) ? 1 : 0);
+        }
+        printf("\n");
+      }
+    }
+    __syncthreads();
+  }
 
   // Get output buffer info for this pair
   const int matchOffset = results.pairMatchStarts[pairIdx];
@@ -406,7 +435,7 @@ void getSubstructMatches(MoleculesDevice&             targetsDevice,
   // Step 2: Preprocess all recursive queries (per-pair storage avoids conflicts)
   for (int q : recursiveQueries) {
     preprocessRecursiveSmarts(targetsDevice, targetsHost, queriesHost.recursivePatterns[q],
-                              results, q, stream);
+                              results, q, algorithm, stream);
   }
 
   // Step 3: Launch all queries (non-recursive first, then recursive)
@@ -456,9 +485,30 @@ __global__ void paintRecursiveMatchBitsKernel(const SubstructMatchResultsDeviceV
   // Write to output pair buffer (main query's per-pair storage)
   const int outputPairIdx = targetIdx * outputResults.numQueries + mainQueryIdx;
 
+  if constexpr (kDebugPaintRecursive) {
+    if (threadIdx.x == 0 && targetIdx == 0) {
+      printf("[Paint] patternQueryIdx=%d, patternId=%d, mainQueryIdx=%d\n",
+             patternQueryIdx, patternId, mainQueryIdx);
+      printf("[Paint] target=%d: matchCount=%d, matchOffset=%d, queryAtoms=%d, outputPairIdx=%d\n",
+             targetIdx, matchCount, matchOffset, queryAtoms, outputPairIdx);
+      printf("[Paint] target=%d: Match indices to paint for pattern %d:\n", targetIdx, patternId);
+      for (int m = 0; m < matchCount && m < 20; ++m) {
+        const int targetAtomIdx = patternResults.matchIndices[matchOffset + m * queryAtoms];
+        printf("[Paint]   match %d -> targetAtom %d\n", m, targetAtomIdx);
+      }
+      if (matchCount > 20) printf("[Paint]   ... and %d more\n", matchCount - 20);
+    }
+  }
+
   for (int m = threadIdx.x; m < matchCount; m += blockDim.x) {
     const int targetAtomIdx = patternResults.matchIndices[matchOffset + m * queryAtoms];
     if (targetAtomIdx >= 0) {
+      if constexpr (kDebugPaintRecursive) {
+        if (targetIdx == 0 && (targetAtomIdx == 25 || targetAtomIdx == 27)) {
+          printf("[Paint] target=%d: Setting bit %d for atom %d (thread %d)\n",
+                 targetIdx, patternId, targetAtomIdx, threadIdx.x);
+        }
+      }
       outputResults.setRecursiveMatchBit(outputPairIdx, targetAtomIdx, patternId);
     }
   }
@@ -481,6 +531,13 @@ void paintRecursiveMatchBits(const SubstructMatchResultsDevice& patternResults,
   const int numTargets = patternView.numTargets;
   const int numPatternQueries = patternView.numQueries;
 
+  if constexpr (kDebugPaintRecursive) {
+    printf("[PaintBits] numTargets=%d, numPatternQueries=%d, mainQueryIdx=%d, patternIds.size()=%zu\n",
+           numTargets, numPatternQueries, mainQueryIdx, patternIds.size());
+    printf("[PaintBits] outputView.maxTargetAtoms=%d, outputView.numQueries=%d\n",
+           outputView.maxTargetAtoms, outputView.numQueries);
+  }
+
   if (numTargets == 0 || numPatternQueries == 0) {
     return;
   }
@@ -491,6 +548,10 @@ void paintRecursiveMatchBits(const SubstructMatchResultsDevice& patternResults,
     const int patternId = patternIds[q];
     if (patternId < 0 || patternId >= 32) {
       continue;
+    }
+
+    if constexpr (kDebugPaintRecursive) {
+      printf("[PaintBits] Launching kernel for patternQueryIdx=%d, patternId=%d\n", q, patternId);
     }
 
     paintRecursiveMatchBitsKernel<<<numTargets, threadsPerBlock, 0, stream>>>(
@@ -509,9 +570,18 @@ void preprocessRecursiveSmarts(MoleculesDevice&             targetsDevice,
                                const RecursivePatternInfo&  recursiveInfo,
                                SubstructMatchResultsDevice& outputResults,
                                int                          mainQueryIdx,
+                               SubstructAlgorithm           algorithm,
                                cudaStream_t                 stream) {
   if (recursiveInfo.empty()) {
+    if constexpr (kDebugPaintRecursive) {
+      printf("[PreprocessRecursive] mainQueryIdx=%d: No recursive patterns\n", mainQueryIdx);
+    }
     return;
+  }
+
+  if constexpr (kDebugPaintRecursive) {
+    printf("[PreprocessRecursive] mainQueryIdx=%d: Processing %zu recursive patterns\n",
+           mainQueryIdx, recursiveInfo.patterns.size());
   }
 
   MoleculesHost patternsHost;
@@ -519,6 +589,9 @@ void preprocessRecursiveSmarts(MoleculesDevice&             targetsDevice,
 
   for (const auto& entry : recursiveInfo.patterns) {
     if (entry.queryMol != nullptr) {
+      if constexpr (kDebugPaintRecursive) {
+        printf("[PreprocessRecursive]   Pattern %d\n", entry.patternId);
+      }
       addQueryToBatch(entry.queryMol, patternsHost);
       patternIds.push_back(entry.patternId);
     }
@@ -533,7 +606,20 @@ void preprocessRecursiveSmarts(MoleculesDevice&             targetsDevice,
 
   SubstructMatchResultsDevice patternResults(stream);
   getSubstructMatches(targetsDevice, patternsDevice, targetsHost, patternsHost, patternResults,
-                      SubstructAlgorithm::WarpUnified, stream);
+                      algorithm, stream);
+
+  if constexpr (kDebugPaintRecursive) {
+    SubstructMatchResultsHost patternResultsHost;
+    patternResults.copyToHost(patternResultsHost);
+    cudaStreamSynchronize(stream);
+    printf("[PreprocessRecursive] Pattern matching done for mainQuery=%d. Results for target 0:\n", mainQueryIdx);
+    for (size_t q = 0; q < patternIds.size(); ++q) {
+      const int pairIdx = 0 * patternResultsHost.numQueries + static_cast<int>(q);
+      printf("[PreprocessRecursive]   Pattern %d (patternId=%d): matchCount=%d, reportedCount=%d\n",
+             static_cast<int>(q), patternIds[q], patternResultsHost.matchCounts[pairIdx], 
+             patternResultsHost.reportedCounts[pairIdx]);
+    }
+  }
 
   paintRecursiveMatchBits(patternResults, outputResults, patternIds, mainQueryIdx, stream);
 }

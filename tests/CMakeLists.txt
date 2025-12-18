@@ -194,11 +194,13 @@ target_link_libraries(test_flat_bit_vect_device PRIVATE flatBitVect device
                                                         device_vector)
 
 add_executable(test_graph_labeler test_graph_labeler.cu)
-target_link_libraries(test_graph_labeler PRIVATE molecules device ${RDKit_LIBS})
+target_link_libraries(test_graph_labeler PRIVATE molecules device
+                                                 substruct_validation ${RDKit_LIBS})
 
 add_executable(test_graph_labeler_recursive test_graph_labeler_recursive.cu)
 target_link_libraries(test_graph_labeler_recursive PRIVATE substructure_search
                                                            molecules device
+                                                           substruct_validation
                                                            ${RDKit_LIBS})
 
 add_executable(test_substructure_search test_substructure_search.cu)
