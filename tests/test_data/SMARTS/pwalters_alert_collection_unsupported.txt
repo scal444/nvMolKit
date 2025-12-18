@@ -100,6 +100,8 @@ c:1:4:c(:n:c(:n:c:1-[#7](-[#1])-[#6](-[#1])(-[#1])-c:2:c(:c(:c(:o:2)-[#1])-[#1])
 a-[N+](=O)[O-].a-[N+](=O)[O-]
 # Fragment queries (disconnected SMARTS patterns) are not supported. Query has 3 disconnected components: [#6]OP(=O)(*)O[#6].[#6]OP(=O)(*)O[#6].[#6]OP(=O)(*)O[#6]
 [#6]OP(=O)(*)O[#6].[#6]OP(=O)(*)O[#6].[#6]OP(=O)(*)O[#6]
+# Unsupported SMARTS atom query: AtomHasImplicitH
+[$([!#1!#6!#7!#8!#9!#15!#16!#17!#35!#53]~[*]),$([!#1!#6!#7!#8!#9!#15!#16!#17!#35!#53;h])]
 # Nested recursive SMARTS ($($(...))) are not supported
 [$([C!$(C1(=O)C=CC(=O)C=C1)]C),$([Ch]),$(C[OH0])](=O)C=[C!$(C[Nv3X3,OH])]
 # Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: C#N.C#N

@@ -84,6 +84,16 @@ SmartsStatus classifySmarts(const std::string& smarts, std::string& errorMsg) {
   try {
     nvMolKit::MoleculesHost batch;
     nvMolKit::addQueryToBatch(mol.get(), batch);
+
+    // Also validate inner patterns of recursive SMARTS ($(...))
+    auto recursiveInfo = nvMolKit::extractRecursivePatterns(mol.get());
+    for (const auto& entry : recursiveInfo.patterns) {
+      if (entry.queryMol != nullptr) {
+        nvMolKit::MoleculesHost innerBatch;
+        nvMolKit::addQueryToBatch(entry.queryMol, innerBatch);
+      }
+    }
+
     return SmartsStatus::Supported;
   } catch (const std::exception& e) {
     errorMsg = e.what();
