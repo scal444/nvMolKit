@@ -22,7 +22,7 @@
 #include "substruct_types.h"
 
 #ifdef __CUDACC__
-#define HD_CALLABLE __host__ __device__
+#define HD_CALLABLE __host__ __device__ __forceinline__
 #else
 #define HD_CALLABLE
 #endif
@@ -117,7 +117,7 @@ static_assert(sizeof(AtomQueryTree) == 4, "AtomQueryTree must be exactly 4 bytes
  * @return true if target atom matches the compound query
  */
 template <bool checkBonds = true>
-HD_CALLABLE inline bool evaluateBoolTree(const AtomDataPacked*   targetPacked,
+HD_CALLABLE bool evaluateBoolTree(const AtomDataPacked*   targetPacked,
                                          const BondTypeCounts*   targetBonds,
                                          const AtomQueryMask*    leafMasks,
                                          const BondTypeCounts*   leafBondCounts,

@@ -26,9 +26,10 @@
 #define DEVICE_ONLY_MEMBER
 #endif  // __CUDACC__
 
-#include <cassert>
 #include <cstring>
 #include <functional>
+
+#include "device_assert.cuh"
 
 namespace nvMolKit {
 
@@ -132,7 +133,7 @@ template <std::size_t NBits> class FlatBitVect {
 
   CUDA_CALLABLE_MEMBER void setBit(const std::size_t i, const bool value) {
     const std::size_t storageIdx = i / kStorageBits;
-    assert(storageIdx < kStorageCount);
+    debugAssert(storageIdx < kStorageCount);
     const std::size_t bitIdx = i % kStorageBits;
     if (value) {
       bits_[storageIdx] |= (1U << bitIdx);
@@ -159,7 +160,7 @@ template <std::size_t NBits> class FlatBitVect {
    */
   DEVICE_ONLY_MEMBER void setBitAtomic(const std::size_t i) {
     const std::size_t storageIdx = i / kStorageBits;
-    assert(storageIdx < kStorageCount);
+    debugAssert(storageIdx < kStorageCount);
     const std::size_t bitIdx = i % kStorageBits;
     atomicOr(&bits_[storageIdx], 1U << bitIdx);
   }

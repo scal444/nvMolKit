@@ -53,3 +53,6 @@ target_include_directories(openmp_helpers INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
 add_library(cub_helpers INTERFACE)
 target_link_libraries(cub_helpers INTERFACE CUDA::cudart)
 target_include_directories(cub_helpers INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_library(device_assert INTERFACE)
+target_include_directories(device_assert INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
