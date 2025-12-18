@@ -327,6 +327,31 @@ __global__ void substructPaintKernel(MoleculesDeviceView         targets,
 }  // namespace
 
 // =============================================================================
+// RecursivePatternCache Implementation
+// =============================================================================
+
+int RecursivePatternCache::getOrAddPattern(int queryIdx, int patternId, const RDKit::ROMol* queryMol) {
+  RecursivePatternKey key{queryIdx, patternId};
+  auto                it = patternIndexMap.find(key);
+  if (it != patternIndexMap.end()) {
+    return it->second;
+  }
+
+  int molIdx = static_cast<int>(cachedPatterns.numMolecules());
+  addQueryToBatch(queryMol, cachedPatterns);
+  patternIndexMap[key] = molIdx;
+  deviceNeedsUpdate    = true;
+  return molIdx;
+}
+
+void RecursivePatternCache::syncToDevice(cudaStream_t stream) {
+  if (deviceNeedsUpdate) {
+    cachedPatternsDevice.copyFromHost(cachedPatterns, stream);
+    deviceNeedsUpdate = false;
+  }
+}
+
+// =============================================================================
 // SubstructMatchResultsDevice Implementation
 // =============================================================================
 
@@ -508,9 +533,11 @@ void getSubstructMatches(MoleculesDevice&             targetsDevice,
 
   // Reusable scratch buffers (avoid alloc/free between kernels)
   RecursiveScratchBuffers recursiveScratch(stream);
+  RecursivePatternCache   patternCache(stream);
   AsyncDeviceVector<int>  pairIndicesDev;
   pairIndicesDev.setStream(stream);
-  std::vector<int> pairIndicesHost(effectiveBatchSize);
+  std::vector<int>                 pairIndicesHost(effectiveBatchSize);
+  std::vector<BatchedPatternEntry> scratchPatternEntries;
 
   // Process all pairs in batches
   for (int batchStart = 0; batchStart < numPairs; batchStart += batchSize) {
@@ -529,7 +556,8 @@ void getSubstructMatches(MoleculesDevice&             targetsDevice,
     // Preprocess all recursive patterns for this batch in a single kernel launch
     preprocessRecursiveSmartsBatched(targetsDevice, targetsHost, queriesHost,
                                      results, numQueries, batchStart, numPairsInBatch,
-                                     algorithm, stream, recursiveScratch);
+                                     algorithm, stream, recursiveScratch, patternCache,
+                                     scratchPatternEntries);
 
     // Get view after scratch allocation
     SubstructMatchResultsDeviceView batchView = results.view();
@@ -573,12 +601,14 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&             targets
                                       const int                          batchSize,
                                       const SubstructAlgorithm           algorithm,
                                       cudaStream_t                       stream,
-                                      RecursiveScratchBuffers&           scratch) {
+                                      RecursiveScratchBuffers&           scratch,
+                                      RecursivePatternCache&             patternCache,
+                                      std::vector<BatchedPatternEntry>&  scratchPatternEntries) {
   ScopedNvtxRange processRecursiveRange("Process recursive batch");
   ScopedNvtxRange processRecursiveRangeSetup("Process recursive batch setup");
   // Collect all recursive patterns from queries that have pairs in this batch
-  std::vector<BatchedPatternEntry> patternEntriesHost;
-  MoleculesHost                    combinedPatterns;
+  std::vector<BatchedPatternEntry>& patternEntriesHost = scratchPatternEntries;
+  patternEntriesHost.clear();
 
   // Track which queries have pairs in this batch
   std::vector<bool> queryInBatch(numQueries, false);
@@ -587,7 +617,7 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&             targets
     const int queryIdx = pairIdx % numQueries;
     queryInBatch[queryIdx] = true;
   }
-  // Collect patterns from relevant queries
+  // Collect patterns from relevant queries, using cache for molecule data
   for (int queryIdx = 0; queryIdx < numQueries; ++queryIdx) {
     if (!queryInBatch[queryIdx]) {
       continue;
@@ -607,13 +637,10 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&             targets
         continue;
       }
 
-      BatchedPatternEntry batchEntry;
+      BatchedPatternEntry& batchEntry = patternEntriesHost.emplace_back();
       batchEntry.mainQueryIdx  = queryIdx;
       batchEntry.patternId     = entry.patternId;
-      batchEntry.patternMolIdx = static_cast<int>(combinedPatterns.numMolecules());
-
-      addQueryToBatch(entry.queryMol, combinedPatterns);
-      patternEntriesHost.push_back(batchEntry);
+      batchEntry.patternMolIdx = patternCache.getOrAddPattern(queryIdx, entry.patternId, entry.queryMol);
     }
   }
 
@@ -640,8 +667,8 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&             targets
            numPatterns, totalPaintPairs, patternsPerSubBatch);
   }
 
-  // Copy combined patterns to device (reuses scratch buffer)
-  scratch.patternsDevice.copyFromHost(combinedPatterns, stream);
+  // Sync cached patterns to device (only copies if new patterns were added)
+  patternCache.syncToDevice(stream);
 
   const auto outputView = outputResults.view();
   constexpr int gsiBuffersPerBlock = 2;
@@ -674,7 +701,7 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&             targets
       case SubstructAlgorithm::GSI: {
         substructPaintKernel<SubstructAlgorithm::GSI><<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
           targetsDevice.view(),
-          scratch.patternsDevice.view(),
+          patternCache.cachedPatternsDevice.view(),
           scratch.patternEntries.data(),
           static_cast<int>(numPatternsInSubBatch),
           outputView.recursiveMatchBits,
@@ -692,7 +719,7 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&             targets
       case SubstructAlgorithm::WarpUnified: {
         substructPaintKernel<SubstructAlgorithm::WarpUnified><<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
           targetsDevice.view(),
-          scratch.patternsDevice.view(),
+          patternCache.cachedPatternsDevice.view(),
           scratch.patternEntries.data(),
           static_cast<int>(numPatternsInSubBatch),
           outputView.recursiveMatchBits,

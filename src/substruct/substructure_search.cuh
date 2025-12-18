@@ -18,6 +18,7 @@
 
 #include <cuda_runtime.h>
 
+#include <unordered_map>
 #include <vector>
 
 #include "device_vector.h"
@@ -212,21 +213,75 @@ struct BatchedPatternEntry {
  * Reusable device memory to avoid repeated alloc/free between kernels.
  */
 struct RecursiveScratchBuffers {
-  MoleculesDevice                       patternsDevice;
   AsyncDeviceVector<BatchedPatternEntry> patternEntries;
-  AsyncDeviceVector<PartialMatch>       overflow;
+  AsyncDeviceVector<PartialMatch>        overflow;
 
-  explicit RecursiveScratchBuffers(cudaStream_t stream)
-      : patternsDevice(stream), patternEntries(), overflow() {
+  explicit RecursiveScratchBuffers(cudaStream_t stream) : patternEntries(), overflow() {
     patternEntries.setStream(stream);
     overflow.setStream(stream);
   }
 
   void setStream(cudaStream_t stream) {
-    patternsDevice.setStream(stream);
     patternEntries.setStream(stream);
     overflow.setStream(stream);
   }
+};
+
+/**
+ * @brief Key for caching recursive patterns.
+ */
+struct RecursivePatternKey {
+  int queryIdx;
+  int patternId;
+
+  bool operator==(const RecursivePatternKey& other) const {
+    return queryIdx == other.queryIdx && patternId == other.patternId;
+  }
+};
+
+/**
+ * @brief Hash function for RecursivePatternKey.
+ */
+struct RecursivePatternKeyHash {
+  std::size_t operator()(const RecursivePatternKey& key) const {
+    return std::hash<int>()(key.queryIdx) ^ (std::hash<int>()(key.patternId) << 16);
+  }
+};
+
+/**
+ * @brief Cache for recursive SMARTS patterns.
+ *
+ * Caches patterns across batch iterations to avoid reprocessing the same
+ * patterns for each batch. The cache maps (queryIdx, patternId) to the
+ * molecule index in a persistent MoleculesHost/MoleculesDevice.
+ */
+struct RecursivePatternCache {
+  std::unordered_map<RecursivePatternKey, int, RecursivePatternKeyHash> patternIndexMap;
+  MoleculesHost   cachedPatterns;
+  MoleculesDevice cachedPatternsDevice;
+  bool            deviceNeedsUpdate = false;
+
+  RecursivePatternCache() = default;
+  explicit RecursivePatternCache(cudaStream_t stream) : cachedPatternsDevice(stream) {}
+
+  void setStream(cudaStream_t stream) { cachedPatternsDevice.setStream(stream); }
+
+  /**
+   * @brief Look up or add a pattern to the cache.
+   *
+   * @param queryIdx Index of the query containing the pattern
+   * @param patternId Pattern ID within the query
+   * @param queryMol The pattern molecule (only used if not in cache)
+   * @return The molecule index in the cached patterns batch
+   */
+  int getOrAddPattern(int queryIdx, int patternId, const RDKit::ROMol* queryMol);
+
+  /**
+   * @brief Sync cached patterns to device if needed.
+   *
+   * @param stream CUDA stream for the copy
+   */
+  void syncToDevice(cudaStream_t stream);
 };
 
 /**
@@ -245,6 +300,8 @@ struct RecursiveScratchBuffers {
  * @param algorithm Algorithm to use for matching
  * @param stream CUDA stream for async operations
  * @param scratch Reusable scratch buffers (avoids alloc/free between kernels)
+ * @param patternCache Cache for recursive patterns (reused across batch iterations)
+ * @param scratchPatternEntries Vector to store pattern entries for the batch
  */
 void preprocessRecursiveSmartsBatched(const MoleculesDevice&             targetsDevice,
                                       const MoleculesHost&               targetsHost,
@@ -255,7 +312,9 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&             targets
                                       int                                batchSize,
                                       SubstructAlgorithm                 algorithm,
                                       cudaStream_t                       stream,
-                                      RecursiveScratchBuffers&           scratch);
+                                      RecursiveScratchBuffers&           scratch,
+                                      RecursivePatternCache&             patternCache,
+                                      std::vector<BatchedPatternEntry>&  scratchPatternEntries);
 
 }  // namespace nvMolKit
 

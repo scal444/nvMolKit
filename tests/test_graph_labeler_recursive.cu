@@ -35,6 +35,7 @@ using nvMolKit::addToBatch;
 using nvMolKit::AsyncDeviceVector;
 using nvMolKit::AtomDataPacked;
 using nvMolKit::AtomQueryTree;
+using nvMolKit::BatchedPatternEntry;
 using nvMolKit::BitMatrix2DView;
 using nvMolKit::BoolInstruction;
 using nvMolKit::BoolOp;
@@ -52,6 +53,7 @@ using nvMolKit::MoleculesDeviceView;
 using nvMolKit::MoleculesHost;
 using nvMolKit::MoleculeView;
 using nvMolKit::preprocessRecursiveSmartsBatched;
+using nvMolKit::RecursivePatternCache;
 using nvMolKit::RecursivePatternInfo;
 using nvMolKit::RecursiveScratchBuffers;
 using nvMolKit::ScopedStream;
@@ -298,10 +300,13 @@ class RecursivePaintTest : public ::testing::Test {
     MoleculesHost queryHost;
     addQueryToBatch(queryMol, queryHost);
 
-    RecursiveScratchBuffers scratch(stream_.stream());
+    RecursiveScratchBuffers          scratch(stream_.stream());
+    RecursivePatternCache            patternCache(stream_.stream());
+    std::vector<BatchedPatternEntry> scratchPatternEntries;
     preprocessRecursiveSmartsBatched(targetDevice, targetHost, queryHost, *results_,
                                      numQueries_, 0, numTargets_ * numQueries_,
-                                     SubstructAlgorithm::GSI, stream_.stream(), scratch);
+                                     SubstructAlgorithm::GSI, stream_.stream(), scratch, patternCache,
+                                     scratchPatternEntries);
     cudaCheckError(cudaStreamSynchronize(stream_.stream()));
   }
 };
