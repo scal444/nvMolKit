@@ -21,7 +21,6 @@
 #include <vector>
 
 #include "device_vector.h"
-#include "global_pool.cuh"
 #include "molecules.h"
 #include "substruct_algos.cuh"
 #include "substruct_types.h"
@@ -104,7 +103,7 @@ class SubstructMatchResultsDevice {
    * @param numTargets Number of target molecules
    * @param numQueries Number of query molecules
    * @param queryAtomCounts Number of atoms in each query molecule
-   * @param maxMatchesPerPair Maximum matches to store per pair (typically target atom count)
+   * @param maxMatchesPerPairVec Maximum matches to store per pair (typically target atom count)
    */
   void allocate(int                     numTargets,
                 int                     numQueries,
@@ -211,10 +210,10 @@ void getSubstructMatches(MoleculesDevice&             targetsDevice,
  * @param algorithm Algorithm to use for matching
  * @param stream CUDA stream for async operations
  */
-void preprocessRecursiveSmarts(MoleculesDevice&             targetsDevice,
+void preprocessRecursiveSmarts(const MoleculesDevice&             targetsDevice,
                                const MoleculesHost&         targetsHost,
                                const RecursivePatternInfo&  recursiveInfo,
-                               SubstructMatchResultsDevice& outputResults,
+                               const SubstructMatchResultsDevice& outputResults,
                                int                          mainQueryIdx,
                                int                          numQueries,
                                int                          batchPairOffset,

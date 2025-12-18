@@ -374,7 +374,7 @@ void SubstructMatchResultsDevice::allocate(int                     numTargets,
   queryAtomCounts_.resize(numQueries);
 
   // Store max target atoms for later batch allocation
-  maxTargetAtoms_ = *std::max_element(maxMatchesPerPairVec.begin(), maxMatchesPerPairVec.end());
+  maxTargetAtoms_ = *std::ranges::max_element(maxMatchesPerPairVec);
 
   // Initialize counts and indices to zero
   matchCounts_.zero();
@@ -486,7 +486,7 @@ void getSubstructMatches(MoleculesDevice&             targetsDevice,
   results.allocateBatchRecursiveBits(effectiveBatchSize, maxTargetAtoms);
   results.allocateOverflow(effectiveBatchSize, numBuffersPerBlock);
 
-  const int threadsPerBlock = 128;
+  constexpr int threadsPerBlock = 128;
 
   // Process all pairs in batches
   for (int batchStart = 0; batchStart < numPairs; batchStart += batchSize) {
@@ -551,15 +551,15 @@ void getSubstructMatches(MoleculesDevice&             targetsDevice,
 // Recursive SMARTS Preprocessing
 // =============================================================================
 
-void preprocessRecursiveSmarts(MoleculesDevice&             targetsDevice,
+void preprocessRecursiveSmarts(const MoleculesDevice&             targetsDevice,
                                const MoleculesHost&         targetsHost,
                                const RecursivePatternInfo&  recursiveInfo,
-                               SubstructMatchResultsDevice& outputResults,
-                               int                          mainQueryIdx,
-                               int                          numQueries,
-                               int                          batchPairOffset,
-                               int                          batchSize,
-                               SubstructAlgorithm           algorithm,
+                               const SubstructMatchResultsDevice& outputResults,
+                               const int                          mainQueryIdx,
+                               const int                          numQueries,
+                               const int                          batchPairOffset,
+                               const int                          batchSize,
+                               const SubstructAlgorithm           algorithm,
                                cudaStream_t                 stream) {
   if (recursiveInfo.empty()) {
     if constexpr (kDebugPaintRecursive) {
@@ -573,7 +573,7 @@ void preprocessRecursiveSmarts(MoleculesDevice&             targetsDevice,
            mainQueryIdx, recursiveInfo.patterns.size());
   }
 
-  auto outputView = outputResults.view();
+  const auto outputView = outputResults.view();
   const int numTargets = targetsDevice.view().numMolecules;
 
   // Process each recursive pattern with the paint kernel
@@ -593,12 +593,12 @@ void preprocessRecursiveSmarts(MoleculesDevice&             targetsDevice,
     MoleculesDevice patternDevice(stream);
     patternDevice.copyFromHost(patternHost, stream);
 
-    const int numBlocks = numTargets * patternHost.numMolecules();
-    const int threadsPerBlock = 128;
+    const size_t numBlocks = numTargets * patternHost.numMolecules();
+    constexpr int threadsPerBlock = 128;
 
     // Allocate overflow buffers (GSI uses 2 buffers per block, WUS uses 1)
-    const int gsiBuffersPerBlock = 2;
-    const int wusBuffersPerBlock = 1;
+    constexpr int gsiBuffersPerBlock = 2;
+    constexpr int wusBuffersPerBlock = 1;
     const int overflowSizeGSI = numBlocks * gsiBuffersPerBlock * kOverflowEntriesPerBuffer;
     const int overflowSizeWUS = numBlocks * wusBuffersPerBlock * kOverflowEntriesPerBuffer;
 
