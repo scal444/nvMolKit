@@ -115,6 +115,16 @@ HD_CALLABLE inline bool evaluateBoolTree(const AtomDataPacked*   targetPacked,
                                          const BondTypeCounts*   leafBondCounts,
                                          const BoolInstruction*  instructions,
                                          const AtomQueryTree&    tree) {
+  // Empty tree (e.g., wildcard atom *) - atom properties always match,
+  // but still need to check bond counts if requested
+  if (tree.numInstructions == 0) {
+    if constexpr (checkBonds) {
+      // For empty trees, leaf 0 still holds the bond count requirements
+      return tree.numLeaves > 0 ? bondCountsMatchPacked(*targetBonds, leafBondCounts[0]) : true;
+    }
+    return true;
+  }
+
   uint8_t scratch[kMaxBoolScratchSize];
 
   for (int i = 0; i < tree.numInstructions; ++i) {

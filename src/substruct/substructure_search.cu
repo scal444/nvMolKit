@@ -15,6 +15,7 @@
 
 #include "substructure_search.cuh"
 
+#include <algorithm>
 #include <stdexcept>
 
 #include "cuda_error_check.h"
@@ -32,8 +33,9 @@ constexpr std::size_t kMaxQueryAtoms  = 64;
 using LabelMatrixStorage = FlatBitVect<kMaxTargetAtoms * kMaxQueryAtoms>;
 using LabelMatrixView    = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
 
-constexpr int kMaxPartialsPerBlock = 256;
-constexpr int kMaxQueueSize        = 512;
+constexpr int kMaxPartialsPerBlock = 256;   // Shared memory partials per block
+constexpr int kMaxQueueSize        = 512;   // Shared memory queue size
+constexpr int kGlobalOverflowSize  = 2048;   // Global memory overflow per pair (per buffer)
 
 /**
  * @brief Kernel for batch substructure matching.
@@ -48,9 +50,11 @@ __global__ void substructMatchKernel(MoleculesDeviceView             targets,
                                      MoleculesDeviceView             queries,
                                      SubstructMatchResultsDeviceView results) {
   // Each block handles one (target, query) pair
-  const int pairIdx   = blockIdx.x;
-  const int targetIdx = pairIdx / results.numQueries;
-  const int queryIdx  = pairIdx % results.numQueries;
+  // pairOffset allows batching: blockIdx.x is index within batch
+  const int blockIdxInBatch = blockIdx.x;
+  const int pairIdx         = results.pairOffset + blockIdxInBatch;
+  const int targetIdx       = pairIdx / results.numQueries;
+  const int queryIdx        = pairIdx % results.numQueries;
 
   if (targetIdx >= targets.numMolecules || queryIdx >= queries.numMolecules) {
     return;
@@ -118,11 +122,18 @@ __global__ void substructMatchKernel(MoleculesDeviceView             targets,
     // GSI: BFS level-by-level search
     __shared__ PartialMatch gsiPartials[kMaxPartialsPerBlock * 2];  // Ping-pong buffer
 
+    // Get global overflow buffers for this block within the batch
+    PartialMatch* overflowA = results.getOverflowBuffer(blockIdxInBatch, 0);
+    PartialMatch* overflowB = results.getOverflowBuffer(blockIdxInBatch, 1);
+
     gsiBFSSearchGPU<kMaxTargetAtoms, kMaxQueryAtoms>(target,
                                                      query,
                                                      labelMatrix,
                                                      gsiPartials,
                                                      kMaxPartialsPerBlock,
+                                                     overflowA,
+                                                     overflowB,
+                                                     results.overflowSize,
                                                      &sharedMatchCount,
                                                      &sharedReportedCount,
                                                      results.matchIndices,
@@ -134,12 +145,17 @@ __global__ void substructMatchKernel(MoleculesDeviceView             targets,
     __shared__ CandidateList wusCandidates[kMaxQueryAtoms];
     __shared__ PartialMatch  wusWorkQueue[kMaxQueueSize];
 
+    // Get global overflow buffers for this block within the batch
+    PartialMatch* overflowQueue = results.getOverflowBuffer(blockIdxInBatch, 0);
+
     warpUnifiedSearchGPU<kMaxTargetAtoms, kMaxQueryAtoms>(target,
                                                           query,
                                                           labelMatrix,
                                                           wusCandidates,
                                                           wusWorkQueue,
                                                           kMaxQueueSize,
+                                                          overflowQueue,
+                                                          results.overflowSize,
                                                           &sharedMatchCount,
                                                           &sharedReportedCount,
                                                           results.matchIndices,
@@ -169,6 +185,7 @@ void SubstructMatchResultsDevice::setStream(cudaStream_t stream) {
   pairMatchStarts_.setStream(stream);
   matchIndices_.setStream(stream);
   queryAtomCounts_.setStream(stream);
+  overflowBuffer_.setStream(stream);
 }
 
 void SubstructMatchResultsDevice::allocate(int                     numTargets,
@@ -214,12 +231,19 @@ void SubstructMatchResultsDevice::allocate(int                     numTargets,
   pairMatchStarts_.setStream(stream_);
   matchIndices_.setStream(stream_);
   queryAtomCounts_.setStream(stream_);
+  overflowBuffer_.setStream(stream_);
 
   matchCounts_.resize(numPairs);
   reportedCounts_.resize(numPairs);
   pairMatchStarts_.resize(numPairs + 1);
   matchIndices_.resize(totalMatchIndices_);
   queryAtomCounts_.resize(numQueries);
+
+  // Allocate global memory overflow buffers for batched processing
+  // Only allocate for min(numTargets, numQueries) pairs at a time to save memory
+  overflowSize_ = kGlobalOverflowSize;
+  const int overflowBatchSize = std::min(numTargets, numQueries);
+  overflowBuffer_.resize(overflowBatchSize * 2 * overflowSize_);
 
   // Initialize counts and indices to zero
   matchCounts_.zero();
@@ -249,14 +273,18 @@ void SubstructMatchResultsDevice::copyToHost(SubstructMatchResultsHost& host) co
 
 SubstructMatchResultsDeviceView SubstructMatchResultsDevice::view() const {
   SubstructMatchResultsDeviceView v;
-  v.matchCounts       = matchCounts_.data();
-  v.reportedCounts    = reportedCounts_.data();
-  v.pairMatchStarts   = pairMatchStarts_.data();
-  v.matchIndices      = matchIndices_.data();
-  v.numTargets        = numTargets_;
-  v.numQueries        = numQueries_;
-  v.queryAtomCounts   = queryAtomCounts_.data();
-  v.maxMatchesPerPair = 0;  // Not used in current implementation
+  v.matchCounts        = matchCounts_.data();
+  v.reportedCounts     = reportedCounts_.data();
+  v.pairMatchStarts    = pairMatchStarts_.data();
+  v.matchIndices       = matchIndices_.data();
+  v.numTargets         = numTargets_;
+  v.numQueries         = numQueries_;
+  v.queryAtomCounts    = queryAtomCounts_.data();
+  v.maxMatchesPerPair  = 0;  // Not used in current implementation
+  v.overflowBuffer     = overflowBuffer_.data();
+  v.overflowSize       = overflowSize_;
+  v.overflowBatchSize  = static_cast<int>(overflowBuffer_.size() / (2 * overflowSize_));
+  v.pairOffset         = 0;  // Default, will be set per-batch in getSubstructMatches
   return v;
 }
 
@@ -298,26 +326,42 @@ void getSubstructMatches(const MoleculesDevice&       targetsDevice,
   results.setStream(stream);
   results.allocate(numTargets, numQueries, queryAtomCounts, maxMatchesPerPair);
 
-  // Launch kernel: one block per (target, query) pair
+  // Launch kernel in batches to limit overflow memory usage
   const int numPairs        = numTargets * numQueries;
   const int threadsPerBlock = 128;  // Multiple warps for parallel operations
 
-  // Dispatch to algorithm-specific kernel instantiation
-  switch (algorithm) {
-    case SubstructAlgorithm::VF2:
-      substructMatchKernel<SubstructAlgorithm::VF2><<<numPairs, threadsPerBlock, 0, stream>>>(
-        targetsDevice.view(), queriesDevice.view(), results.view());
-      break;
+  // Batch size = overflow buffer capacity (min of numTargets, numQueries from allocate)
+  SubstructMatchResultsDeviceView baseView = results.view();
+  const int batchSize = baseView.overflowBatchSize;
 
-    case SubstructAlgorithm::GSI:
-      substructMatchKernel<SubstructAlgorithm::GSI><<<numPairs, threadsPerBlock, 0, stream>>>(
-        targetsDevice.view(), queriesDevice.view(), results.view());
-      break;
+  // Process pairs in batches, synchronizing between batches
+  for (int pairOffset = 0; pairOffset < numPairs; pairOffset += batchSize) {
+    const int batchPairs = std::min(batchSize, numPairs - pairOffset);
 
-    case SubstructAlgorithm::WarpUnified:
-      substructMatchKernel<SubstructAlgorithm::WarpUnified><<<numPairs, threadsPerBlock, 0, stream>>>(
-        targetsDevice.view(), queriesDevice.view(), results.view());
-      break;
+    // Create view with current batch offset
+    SubstructMatchResultsDeviceView batchView = baseView;
+    batchView.pairOffset = pairOffset;
+
+    // Dispatch to algorithm-specific kernel instantiation
+    switch (algorithm) {
+      case SubstructAlgorithm::VF2:
+        substructMatchKernel<SubstructAlgorithm::VF2><<<batchPairs, threadsPerBlock, 0, stream>>>(
+          targetsDevice.view(), queriesDevice.view(), batchView);
+        break;
+
+      case SubstructAlgorithm::GSI:
+        substructMatchKernel<SubstructAlgorithm::GSI><<<batchPairs, threadsPerBlock, 0, stream>>>(
+          targetsDevice.view(), queriesDevice.view(), batchView);
+        break;
+
+      case SubstructAlgorithm::WarpUnified:
+        substructMatchKernel<SubstructAlgorithm::WarpUnified><<<batchPairs, threadsPerBlock, 0, stream>>>(
+          targetsDevice.view(), queriesDevice.view(), batchView);
+        break;
+    }
+
+    // Synchronize before next batch to ensure overflow buffers can be reused
+    cudaCheckError(cudaStreamSynchronize(stream));
   }
 
   cudaCheckError(cudaGetLastError());

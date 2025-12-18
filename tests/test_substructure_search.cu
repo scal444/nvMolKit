@@ -1777,6 +1777,137 @@ TEST_P(SubstructureSearchTest, ImpossibleChargeConstraint) {
   }
 }
 
+TEST_P(SubstructureSearchTest, WildcardAtoms) {
+  // Tests that wildcard atoms (*) with empty boolean trees correctly match any atom
+  const std::string target = "CCCCCC";      // hexane
+  const std::string query  = "C~*~*~C";     // C-any-any-C
+
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+      << "Wildcard pattern C~*~*~C should match " << rdkitMatches.size() << " times (RDKit), got "
+      << resultsHost.matchCounts[0];
+  EXPECT_GT(resultsHost.matchCounts[0], 0)
+      << "Wildcard pattern should find matches in hexane";
+}
+
+TEST_P(SubstructureSearchTest, WildcardAtomsInRing) {
+  // Ring pattern with wildcard atoms: C1~*~*~C~*~*~1
+  const std::string target = "C1CCCCC1";        // cyclohexane
+  const std::string query  = "C1~*~*~C~*~*~1";  // 6-membered ring with wildcards
+
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+      << "Wildcard ring pattern should match " << rdkitMatches.size() << " times (RDKit), got "
+      << resultsHost.matchCounts[0];
+  EXPECT_GT(resultsHost.matchCounts[0], 0)
+      << "Wildcard ring pattern should find matches in cyclohexane";
+}
+
+TEST_P(SubstructureSearchTest, WildcardAtomsFusedRings) {
+  // Two fused 6-membered rings with wildcards (decalin pattern)
+  const std::string target = "C1CCC2CCCCC2C1";                   // decalin
+  const std::string query  = "C12~*~*~*~*~C~1~*~*~*~*~2";        // two 6-rings sharing edge
+
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+      << "Fused ring wildcard pattern should match " << rdkitMatches.size() << " times (RDKit), got "
+      << resultsHost.matchCounts[0];
+  EXPECT_GT(resultsHost.matchCounts[0], 0)
+      << "Fused ring wildcard pattern should find matches in decalin";
+}
+
+TEST_P(SubstructureSearchTest, NegatedBondType) {
+  // !- means NOT single bond (should only match double, triple, or aromatic)
+  // This ring pattern requires non-single bonds between atoms
+  const std::string target = "C=CCn1cc(C[C@@H]2NC(=O)[C@@H]3CCCN3C2=O)c2ccc(OC)cc21";
+  const std::string query  = "[c,C]1(~[O;D1])~*!-*~[c,C](~[O;D1])~*!-*~1";
+
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+  auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+      << "Negated bond type !- query should match " << rdkitMatches.size() << " times (RDKit), got "
+      << resultsHost.matchCounts[0];
+}
+
 
 // KEEP this as the last test
 TEST_P(SubstructureSearchTest, SingleMolSingleQueryForDebugging) {
@@ -1785,8 +1916,8 @@ TEST_P(SubstructureSearchTest, SingleMolSingleQueryForDebugging) {
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-  const std::string target = "C[C@H](NC(=O)OCc1ccccc1)C(=O)N[C@@H](C)C(=O)NN(CC(N)=O)C(=O)/C=C/C(=O)N(Cc1ccco1)Cc1ccco1";  // Benzene - has aromatic bonds
-  const std::string query  = " *=*[*]=,#,:[*]"; 
+  const std::string target = "CC(C)=C[C@H]1C[C@](C)(O)[C@@H]2[C@H]3CC[C@@H]4[C@@]5(C)CC[C@H](O[C@@H]6OC[C@H](O)[C@H](O[C@@H]7O[C@H](CO)[C@@H](O)[C@H](O)[C@H]7O)[C@H]6O[C@@H]6O[C@@H](COC(=O)CC(=O)O)[C@H](O)[C@H]6O)C(C)(C)[C@@H]5CC[C@@]4(C)[C@@]34CO[C@@]2(C4)O1";  // Benzene - has aromatic bonds
+  const std::string query  = "C14~*~*~*~*~C~1~*~*~C2~C3~*~*~*~C~3~*~*~C~2~4";
   buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
 
   MoleculesDevice targetsDevice(stream_.stream());

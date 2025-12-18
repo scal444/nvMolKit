@@ -131,6 +131,9 @@ void populateBondTypeCounts(const RDKit::ROMol* mol, const RDKit::Atom* atom, Bo
  * For SMARTS queries, implicit bonds (no explicit bond symbol) are represented
  * with SingleOrAromaticBond query which should match any bond type. This function
  * checks for such queries and returns 0 (any) instead of the nominal bond type.
+ *
+ * Negated bond queries like !- (NOT single) are treated as "any" since they can
+ * match multiple bond types.
  */
 int getQueryBondEffectiveType(const RDKit::Bond* bond) {
   int bondType = bond->getBondType();
@@ -138,20 +141,32 @@ int getQueryBondEffectiveType(const RDKit::Bond* bond) {
   if (bond->hasQuery()) {
     const auto* query = bond->getQuery();
     if (query != nullptr) {
-      const std::string desc = query->getDescription();
+      const std::string desc      = query->getDescription();
+      const bool        isNegated = query->getNegation();
+
       if (desc == "SingleOrAromaticBond" || desc == "DoubleOrAromaticBond" || desc == "BondNull") {
         return 0;  // Any bond (flexible match)
       }
       if (desc == "BondIsAromatic") {
-        return 12;  // Aromatic bond
+        return isNegated ? 0 : 12;  // Negated aromatic = any; aromatic = 12
+      }
+      if (desc == "BondOrder") {
+        // Negated bond order (e.g., !-) can match multiple types, treat as "any"
+        if (isNegated) {
+          return 0;
+        }
       }
       // For BondAnd/BondOr queries, check for flexible bond patterns
       if (desc == "BondAnd" || desc == "BondOr") {
         bool hasSingle   = false;
         bool hasDouble   = false;
         bool hasAromatic = false;
+        bool hasNegated  = false;
         for (auto it = query->beginChildren(); it != query->endChildren(); ++it) {
           const std::string childDesc = (*it)->getDescription();
+          if ((*it)->getNegation()) {
+            hasNegated = true;
+          }
           if (childDesc == "SingleOrAromaticBond" || childDesc == "DoubleOrAromaticBond" ||
               childDesc == "BondNull") {
             return 0;
@@ -168,6 +183,10 @@ int getQueryBondEffectiveType(const RDKit::Bond* bond) {
           } else if (childDesc == "BondIsAromatic") {
             hasAromatic = true;
           }
+        }
+        // If any child is negated, treat as flexible
+        if (hasNegated) {
+          return 0;
         }
         // If this is a "single or aromatic" or "double or aromatic" BondOr pattern
         if ((hasSingle && hasAromatic) || (hasDouble && hasAromatic)) {
@@ -1294,10 +1313,21 @@ void extractBondQueryFlags(const RDKit::Bond* bond, BondQueryData& queryData) {
       // Also set up mask for consistency with edge consistency checker
       if (bondType >= 0 && bondType < 16) {
         queryData.queryFlags |= BondQueryUseBondMask;
-        queryData.allowedBondTypes = (1u << bondType);
-        // Aromatic bonds can be stored as type 7 or 12
-        if (bondType == 7 || bondType == 12) {
-          queryData.allowedBondTypes |= (1u << 7) | (1u << 12);
+        if (isNegated) {
+          // NOT this bond type - allow all common types except this one
+          // Common bond types: single(1), double(2), triple(3), aromatic(7,12)
+          uint16_t allCommonTypes = (1u << 1) | (1u << 2) | (1u << 3) | (1u << 7) | (1u << 12);
+          uint16_t excludeMask    = (1u << bondType);
+          if (bondType == 7 || bondType == 12) {
+            excludeMask = (1u << 7) | (1u << 12);  // Exclude both aromatic representations
+          }
+          queryData.allowedBondTypes = allCommonTypes & ~excludeMask;
+        } else {
+          queryData.allowedBondTypes = (1u << bondType);
+          // Aromatic bonds can be stored as type 7 or 12
+          if (bondType == 7 || bondType == 12) {
+            queryData.allowedBondTypes |= (1u << 7) | (1u << 12);
+          }
         }
       }
     } else if (desc == "BondNull") {

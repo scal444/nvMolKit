@@ -48,8 +48,19 @@ struct SubstructMatchResultsDeviceView {
   /// Number of query atoms (stride for match indices)
   const int* queryAtomCounts;  ///< [numQueries] atoms per query molecule
 
+  // Global memory overflow buffers for search algorithms
+  PartialMatch* overflowBuffer;     ///< [overflowBatchSize * overflowSize * 2] ping-pong overflow
+  int           overflowSize;       ///< Overflow capacity per pair (per buffer)
+  int           overflowBatchSize;  ///< Number of pairs overflow is allocated for
+  int           pairOffset;         ///< Offset for current batch (blockIdx.x + pairOffset = actual pair)
+
   __device__ __forceinline__ int pairIndex(int targetIdx, int queryIdx) const {
     return targetIdx * numQueries + queryIdx;
+  }
+
+  /// Get overflow buffer for a block within current batch (ping-pong: bufferIdx 0 or 1)
+  __device__ __forceinline__ PartialMatch* getOverflowBuffer(int blockIdxInBatch, int bufferIdx) const {
+    return overflowBuffer + (blockIdxInBatch * 2 + bufferIdx) * overflowSize;
   }
 };
 
@@ -102,6 +113,10 @@ class SubstructMatchResultsDevice {
   AsyncDeviceVector<int>     pairMatchStarts_;
   AsyncDeviceVector<int16_t> matchIndices_;
   AsyncDeviceVector<int>     queryAtomCounts_;
+
+  // Global memory overflow buffers for search algorithms
+  AsyncDeviceVector<PartialMatch> overflowBuffer_;
+  int                             overflowSize_ = 0;
 
   std::vector<int> hostPairMatchStarts_;
   std::vector<int> hostQueryAtomCounts_;
