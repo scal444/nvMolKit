@@ -36,7 +36,6 @@ using nvMolKit::MoleculesDevice;
 using nvMolKit::MoleculesHost;
 using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
-using nvMolKit::SubstructMatchResultsDevice;
 using nvMolKit::SubstructMatchResultsHost;
 
 namespace {
@@ -239,13 +238,9 @@ TEST_P(SubstructureSearchTest, SingleTargetSingleQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   EXPECT_EQ(resultsHost.numTargets, 1);
   EXPECT_EQ(resultsHost.numQueries, 1);
@@ -267,13 +262,9 @@ TEST_P(SubstructureSearchTest, MultipleTargetsSingleQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   EXPECT_EQ(resultsHost.numTargets, 3);
   EXPECT_EQ(resultsHost.numQueries, 1);
@@ -294,13 +285,9 @@ TEST_P(SubstructureSearchTest, SingleTargetMultipleQueries) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   EXPECT_EQ(resultsHost.numTargets, 1);
   EXPECT_EQ(resultsHost.numQueries, 3);
@@ -330,13 +317,9 @@ TEST_P(SubstructureSearchTest, BatchAllToAll) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   EXPECT_EQ(resultsHost.numTargets, 4);
   EXPECT_EQ(resultsHost.numQueries, 4);
@@ -363,13 +346,9 @@ TEST_P(SubstructureSearchTest, NoMatchPossible) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "CCCC with N query");
 }
@@ -388,13 +367,9 @@ TEST_P(SubstructureSearchTest, AromaticVsAliphatic) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "benzene with aliphatic C query");
 }
@@ -413,13 +388,9 @@ TEST_P(SubstructureSearchTest, LargerMolecule) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   EXPECT_EQ(resultsHost.numTargets, 1);
   EXPECT_EQ(resultsHost.numQueries, 3);
@@ -447,13 +418,9 @@ TEST_P(SubstructureSearchTest, BufferAllocationCorrect) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   // Verify pairMatchStarts offsets are correctly computed
   // Both queries have 1 atom each (C and N)
@@ -487,13 +454,9 @@ TEST_P(SubstructureSearchTest, MultiAtomQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "CCO with CC query");
 }
@@ -518,13 +481,9 @@ TEST_P(SubstructureSearchTest, ThreeAtomQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "CCOCC with COC query");
 }
@@ -544,13 +503,9 @@ TEST_P(SubstructureSearchTest, ExpectedOverflow) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   // RDKit returns 10 non-unique matches
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -604,13 +559,9 @@ TEST_P(SubstructureSearchTest, OrQueryMatchesBothTypes) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N] in CCN");
 }
@@ -630,13 +581,9 @@ TEST_P(SubstructureSearchTest, OrQuerySelectiveMatch) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[N,O] in CCO");
 }
@@ -656,13 +603,9 @@ TEST_P(SubstructureSearchTest, NotQueryExcludesAtom) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[!C] in CCO");
 }
@@ -682,13 +625,9 @@ TEST_P(SubstructureSearchTest, NotQueryMatchesMultiple) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[!C] in CCNO");
 }
@@ -708,13 +647,9 @@ TEST_P(SubstructureSearchTest, MultiAtomOrQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N][C,N] in CCN");
 }
@@ -734,13 +669,9 @@ TEST_P(SubstructureSearchTest, ThreeWayOrQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N,O] in CCNO");
 }
@@ -762,13 +693,9 @@ TEST_P(SubstructureSearchTest, NestedAndOrQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N;!R1] in CCN");
   expectMatchesRDKit(resultsHost, *targetMols[1], *queryMols[0], 1, 0, "[C,N;!R1] in C1CC1N");
@@ -791,13 +718,9 @@ TEST_P(SubstructureSearchTest, DeepNestedOrAndOrQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N;R1,O] in C1CCCC1");
   expectMatchesRDKit(resultsHost, *targetMols[1], *queryMols[0], 1, 0, "[C,N;R1,O] in CCCCO");
@@ -818,13 +741,9 @@ TEST_P(SubstructureSearchTest, MultipleNotWithAndQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[!C;!N] in CCNO");
 }
@@ -847,13 +766,9 @@ TEST_P(SubstructureSearchTest, NotWithOrQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[!C,!N] in CCNO");
 }
@@ -873,13 +788,9 @@ TEST_P(SubstructureSearchTest, SimpleAndNotQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C;!R1] in C1CC1CCN");
 }
@@ -902,13 +813,9 @@ TEST_P(SubstructureSearchTest, BondedOrAtomQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N]-[O,S] in CCO");
   expectMatchesRDKit(resultsHost, *targetMols[1], *queryMols[0], 1, 0, "[C,N]-[O,S] in CCS");
@@ -931,13 +838,9 @@ TEST_P(SubstructureSearchTest, MultiAtomMixedBooleanQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N]-[!O] in CCO");
   expectMatchesRDKit(resultsHost, *targetMols[1], *queryMols[0], 1, 0, "[C,N]-[!O] in CCN");
@@ -958,13 +861,9 @@ TEST_P(SubstructureSearchTest, ThreeAtomNestedBooleanQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N]-[!O]-[C,O] in CCCCO");
 }
@@ -984,13 +883,9 @@ TEST_P(SubstructureSearchTest, AromaticOrQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[c,n] in pyridine");
 }
@@ -1010,13 +905,9 @@ TEST_P(SubstructureSearchTest, AromaticNotQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[!n] in pyridine");
 }
@@ -1037,13 +928,9 @@ TEST_P(SubstructureSearchTest, AromaticRingPatternWithOr) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   // Benzene should match (symmetric, many automorphisms)
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1072,13 +959,9 @@ TEST_P(SubstructureSearchTest, AnyRingMembershipQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   // Cyclobutane with methyl: 4 ring atoms match [R]
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1107,13 +990,9 @@ TEST_P(SubstructureSearchTest, AnyRingSizeQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   // Benzene: 6 ring atoms match [r]
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1142,13 +1021,9 @@ TEST_P(SubstructureSearchTest, AnyRingCombinedWithAtomType) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   // Cyclobutane with methyl: 4 aliphatic ring carbons match [C;R]
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1177,13 +1052,9 @@ TEST_P(SubstructureSearchTest, IsotopeCarbon13Query) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   // First target has one 13C
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1212,13 +1083,9 @@ TEST_P(SubstructureSearchTest, IsotopeDeuteriumQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   // First target has 4 deuterium atoms
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1247,13 +1114,9 @@ TEST_P(SubstructureSearchTest, IsotopeNitrogen15Query) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   // First target has one 15N
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1282,13 +1145,9 @@ TEST_P(SubstructureSearchTest, DegreeQueryD0) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
   EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
@@ -1315,13 +1174,9 @@ TEST_P(SubstructureSearchTest, DegreeQueryD1) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
   EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
@@ -1348,13 +1203,9 @@ TEST_P(SubstructureSearchTest, DegreeQueryD3) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   // Isobutane: one atom with degree 3
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1383,13 +1234,9 @@ TEST_P(SubstructureSearchTest, TotalConnectivityQueryX1) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
   EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
@@ -1416,13 +1263,9 @@ TEST_P(SubstructureSearchTest, TotalConnectivityQueryX2) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
   EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
@@ -1449,13 +1292,9 @@ TEST_P(SubstructureSearchTest, TotalConnectivityQueryX3) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
   EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
@@ -1482,13 +1321,9 @@ TEST_P(SubstructureSearchTest, TotalConnectivityQueryX4) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   // Ethane: 2 atoms with X4
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1517,13 +1352,9 @@ TEST_P(SubstructureSearchTest, DegreeWithAtomTypeQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   // Isobutane: one carbon with degree 3
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1550,13 +1381,9 @@ TEST_P(SubstructureSearchTest, ImplicitHCountMatch) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[NH] in C=N");
 }
@@ -1574,13 +1401,9 @@ TEST_P(SubstructureSearchTest, ImplicitHCountNoMatch) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[CH2] in CC");
 }
@@ -1603,13 +1426,9 @@ TEST_P(SubstructureSearchTest, DoubleOrAromaticBond) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "quinone_A pattern");
 }
@@ -1631,13 +1450,9 @@ TEST_P(SubstructureSearchTest, NotRingBondSimple) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "simple non-ring bond");
 }
@@ -1665,13 +1480,9 @@ TEST_P(SubstructureSearchTest, NotRingBondChain) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "non-ring bond chain pattern");
 }
@@ -1693,13 +1504,9 @@ TEST_P(SubstructureSearchTest, ImpossibleBondConstraint) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
   EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
@@ -1726,13 +1533,9 @@ TEST_P(SubstructureSearchTest, ImpossibleAtomConstraint) {
     targetsDevice.copyFromHost(targetsHost);
     queriesDevice.copyFromHost(queriesHost);
 
-    SubstructMatchResultsDevice resultsDevice(stream_.stream());
-    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                        resultsDevice, algorithm(), stream_.stream());
-
     SubstructMatchResultsHost resultsHost;
-    resultsDevice.copyToHost(resultsHost);
-    cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                        resultsHost, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
     EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
@@ -1760,13 +1563,9 @@ TEST_P(SubstructureSearchTest, ImpossibleChargeConstraint) {
     targetsDevice.copyFromHost(targetsHost);
     queriesDevice.copyFromHost(queriesHost);
 
-    SubstructMatchResultsDevice resultsDevice(stream_.stream());
-    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                        resultsDevice, algorithm(), stream_.stream());
-
     SubstructMatchResultsHost resultsHost;
-    resultsDevice.copyToHost(resultsHost);
-    cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                        resultsHost, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
     EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
@@ -1794,13 +1593,9 @@ TEST_P(SubstructureSearchTest, WildcardAtoms) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
   EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
@@ -1827,13 +1622,9 @@ TEST_P(SubstructureSearchTest, WildcardAtomsInRing) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
   EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
@@ -1860,13 +1651,9 @@ TEST_P(SubstructureSearchTest, WildcardAtomsFusedRings) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
   EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
@@ -1894,13 +1681,9 @@ TEST_P(SubstructureSearchTest, NegatedBondType) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
   EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
@@ -1942,13 +1725,9 @@ TEST_P(SubstructureSearchTest, RingBondCountQuery) {
     targetsDevice.copyFromHost(targetsHost);
     queriesDevice.copyFromHost(queriesHost);
 
-    SubstructMatchResultsDevice resultsDevice(stream_.stream());
-    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                        resultsDevice, algorithm(), stream_.stream());
-
     SubstructMatchResultsHost resultsHost;
-    resultsDevice.copyToHost(resultsHost);
-    cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                        resultsHost, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
     EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
@@ -1986,13 +1765,9 @@ TEST_P(SubstructureSearchTest, ImplicitHCountQuery) {
     targetsDevice.copyFromHost(targetsHost);
     queriesDevice.copyFromHost(queriesHost);
 
-    SubstructMatchResultsDevice resultsDevice(stream_.stream());
-    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                        resultsDevice, algorithm(), stream_.stream());
-
     SubstructMatchResultsHost resultsHost;
-    resultsDevice.copyToHost(resultsHost);
-    cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                        resultsHost, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
     EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
@@ -2030,13 +1805,9 @@ TEST_P(SubstructureSearchTest, HeteroatomNeighborsQuery) {
     targetsDevice.copyFromHost(targetsHost);
     queriesDevice.copyFromHost(queriesHost);
 
-    SubstructMatchResultsDevice resultsDevice(stream_.stream());
-    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                        resultsDevice, algorithm(), stream_.stream());
-
     SubstructMatchResultsHost resultsHost;
-    resultsDevice.copyToHost(resultsHost);
-    cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                        resultsHost, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
     EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
@@ -2075,13 +1846,9 @@ TEST_P(SubstructureSearchTest, RangeRingSizeQuery) {
     targetsDevice.copyFromHost(targetsHost);
     queriesDevice.copyFromHost(queriesHost);
 
-    SubstructMatchResultsDevice resultsDevice(stream_.stream());
-    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                        resultsDevice, algorithm(), stream_.stream());
-
     SubstructMatchResultsHost resultsHost;
-    resultsDevice.copyToHost(resultsHost);
-    cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                        resultsHost, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
     EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
@@ -2116,13 +1883,9 @@ TEST_P(SubstructureSearchTest, RangeNumRingsQuery) {
     targetsDevice.copyFromHost(targetsHost);
     queriesDevice.copyFromHost(queriesHost);
 
-    SubstructMatchResultsDevice resultsDevice(stream_.stream());
-    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                        resultsDevice, algorithm(), stream_.stream());
-
     SubstructMatchResultsHost resultsHost;
-    resultsDevice.copyToHost(resultsHost);
-    cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                        resultsHost, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
     EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
@@ -2147,13 +1910,9 @@ TEST_P(SubstructureSearchTest, SingleMolSingleQueryForDebugging) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
   EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
@@ -2179,12 +1938,9 @@ TEST_P(SubstructureSearchTest, NestedRecursiveSimple) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, 
                      "[$([C;$(*-N)])] in CN");
@@ -2208,12 +1964,9 @@ TEST_P(SubstructureSearchTest, NestedRecursiveWithNegation) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0);
   expectMatchesRDKit(resultsHost, *targetMols[1], *queryMols[0], 1, 0);
@@ -2238,12 +1991,9 @@ TEST_P(SubstructureSearchTest, NestedRecursiveBatchProcessing) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsDevice, algorithm(), stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsHost, algorithm(), stream_.stream());
 
   for (size_t t = 0; t < targets.size(); ++t) {
     expectMatchesRDKit(resultsHost, *targetMols[t], *queryMols[0], 

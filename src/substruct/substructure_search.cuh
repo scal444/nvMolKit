@@ -230,6 +230,53 @@ void getSubstructMatches(MoleculesDevice&             targetsDevice,
                          int                          batchSize = 1024);
 
 /**
+ * @brief Perform batch substructure matching on GPU with host-side CSR results.
+ *
+ * This overload returns results in a CSR format suitable for efficient processing.
+ * Manages device memory internally.
+ *
+ * @param targetsDevice Device-resident target molecules (use addToBatch to build)
+ * @param queriesDevice Device-resident query molecules (use addQueryToBatch to build)
+ * @param targetsHost Host-side target data (for atom counts)
+ * @param queriesHost Host-side query data (for atom counts)
+ * @param results Host-side CSR output storage (will be populated)
+ * @param algorithm Algorithm to use for matching
+ * @param stream CUDA stream for async operations
+ * @param batchSize Number of pairs per batch (default 1024).
+ */
+void getSubstructMatches(MoleculesDevice&           targetsDevice,
+                         const MoleculesDevice&     queriesDevice,
+                         const MoleculesHost&       targetsHost,
+                         const MoleculesHost&       queriesHost,
+                         SubstructMatchResultsHost& results,
+                         SubstructAlgorithm         algorithm,
+                         cudaStream_t               stream,
+                         int                        batchSize = 1024);
+
+/**
+ * @brief Perform batch substructure matching on GPU with simple accumulated results.
+ *
+ * This overload returns results in an easy-to-use nested vector format.
+ *
+ * @param targetsDevice Device-resident target molecules (use addToBatch to build)
+ * @param queriesDevice Device-resident query molecules (use addQueryToBatch to build)
+ * @param targetsHost Host-side target data (for atom counts)
+ * @param queriesHost Host-side query data (for atom counts)
+ * @param results Output: matches[target][query][match] = vector of target atom indices
+ * @param algorithm Algorithm to use for matching
+ * @param stream CUDA stream for async operations
+ * @param batchSize Number of pairs per batch (default 1024).
+ */
+void getSubstructMatches(MoleculesDevice&        targetsDevice,
+                         const MoleculesDevice&  queriesDevice,
+                         const MoleculesHost&    targetsHost,
+                         const MoleculesHost&    queriesHost,
+                         SubstructSearchResults& results,
+                         SubstructAlgorithm      algorithm,
+                         cudaStream_t            stream,
+                         int                     batchSize = 1024);
+
+/**
  * @brief Per-pattern metadata for batched recursive preprocessing kernel.
  *
  * Each entry describes one recursive pattern in the combined batch:

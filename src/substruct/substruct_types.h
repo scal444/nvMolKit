@@ -31,7 +31,7 @@ enum class SubstructAlgorithm {
 };
 
 /**
- * @brief Host-side results from batch substructure matching.
+ * @brief Host-side results from batch substructure matching (CSR format).
  *
  * For M targets x N queries (all-to-all matching), stores:
  * - Match counts for each pair (actual count, may exceed buffer)
@@ -74,6 +74,39 @@ struct SubstructMatchResultsHost {
   [[nodiscard]] bool hasOverflow(int targetIdx, int queryIdx) const {
     const int idx = pairIndex(targetIdx, queryIdx);
     return matchCounts[idx] > reportedCounts[idx];
+  }
+};
+
+/**
+ * @brief Simple accumulated results from substructure matching.
+ *
+ * Easy-to-use nested vector format: matches[targetIdx][queryIdx][matchIdx]
+ * is a vector of target atom indices for that match.
+ */
+struct SubstructSearchResults {
+  /// matches[t][q] = vector of matches for target t against query q
+  /// Each match is a vector<int> of target atom indices (one per query atom)
+  std::vector<std::vector<std::vector<std::vector<int>>>> matches;
+
+  /// overflowed[t][q] = true if more matches exist than were stored
+  std::vector<std::vector<uint8_t>> overflowed;
+
+  int numTargets = 0;
+  int numQueries = 0;
+
+  void resize(int nTargets, int nQueries) {
+    numTargets = nTargets;
+    numQueries = nQueries;
+    matches.assign(nTargets, std::vector<std::vector<std::vector<int>>>(nQueries));
+    overflowed.assign(nTargets, std::vector<uint8_t>(nQueries, 0));
+  }
+
+  [[nodiscard]] bool hasOverflow(int targetIdx, int queryIdx) const {
+    return overflowed[targetIdx][queryIdx] != 0;
+  }
+
+  [[nodiscard]] size_t matchCount(int targetIdx, int queryIdx) const {
+    return matches[targetIdx][queryIdx].size();
   }
 };
 

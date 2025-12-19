@@ -44,7 +44,6 @@ using nvMolKit::MoleculesHost;
 using nvMolKit::printValidationResult;
 using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
-using nvMolKit::SubstructMatchResultsDevice;
 using nvMolKit::SubstructMatchResultsHost;
 using nvMolKit::SubstructValidationResult;
 using nvMolKit::validateAgainstRDKit;
@@ -178,16 +177,10 @@ void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream.stream());
-
   ankerl::nanobench::Bench().epochIterations(1).epochs(1).run(benchName, [&]() {
     getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                        resultsDevice, algorithm, stream.stream());
-    cudaCheckError(cudaStreamSynchronize(stream.stream()));
+                        resultsOut, algorithm, stream.stream());
   });
-
-  resultsDevice.copyToHost(resultsOut);
-  cudaCheckError(cudaStreamSynchronize(stream.stream()));
 
   totalMatches = 0;
   for (int count : resultsOut.matchCounts) {

@@ -53,7 +53,6 @@ using nvMolKit::MoleculesHost;
 using nvMolKit::printValidationResultDetailed;
 using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
-using nvMolKit::SubstructMatchResultsDevice;
 using nvMolKit::SubstructMatchResultsHost;
 using nvMolKit::testing::readSmartsFileWithStrings;
 using nvMolKit::testing::readSmilesFileWithStrings;
@@ -324,13 +323,9 @@ TEST_P(SubstructureIntegrationTest, ChemblVsSmarts) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsDevice resultsDevice(stream_.stream());
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost, resultsDevice, algorithm(),
-                      stream_.stream());
-
   SubstructMatchResultsHost resultsHost;
-  resultsDevice.copyToHost(resultsHost);
-  cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost, resultsHost, algorithm(),
+                      stream_.stream());
 
   EXPECT_EQ(resultsHost.numTargets, static_cast<int>(targetMols.size()));
   EXPECT_EQ(resultsHost.numQueries, static_cast<int>(queryMols.size()));
