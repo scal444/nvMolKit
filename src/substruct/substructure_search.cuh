@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "device_vector.h"
+#include "flat_bit_vect.h"
 #include "molecules.h"
 #include "substruct_algos.cuh"
 #include "substruct_types.h"
@@ -29,6 +30,17 @@
 namespace nvMolKit {
 
 // SubstructAlgorithm and SubstructMatchResultsHost are defined in substruct_types.h
+
+/// Constants for label matrix sizing (must match substructure_search.cu)
+constexpr std::size_t kLabelMaxTargetAtoms = 128;
+constexpr std::size_t kLabelMaxQueryAtoms  = 64;
+constexpr std::size_t kLabelMatrixBits     = kLabelMaxTargetAtoms * kLabelMaxQueryAtoms;
+
+/// Storage type for a single label matrix
+using LabelMatrixStorage = FlatBitVect<kLabelMatrixBits>;
+
+/// Number of uint32_t words per label matrix
+constexpr std::size_t kLabelMatrixWords = LabelMatrixStorage::kStorageCount;
 
 /**
  * @brief POD view into device-side substructure match results.
@@ -58,8 +70,16 @@ struct SubstructMatchResultsDeviceView {
   uint32_t* recursiveMatchBits;  ///< Indexed by pairIdx * maxTargetAtoms + atomIdx
   int       maxTargetAtoms;      ///< Stride for recursiveMatchBits indexing
 
+  // Pre-computed label matrices: [batchSize] label matrices in global memory
+  uint32_t* labelMatrixBuffer;  ///< Indexed by batchLocalIdx * kLabelMatrixWords
+
   __device__ __forceinline__ int pairIndex(int targetIdx, int queryIdx) const {
     return targetIdx * numQueries + queryIdx;
+  }
+
+  /// Get pointer to label matrix for a batch-local pair index
+  __device__ __forceinline__ uint32_t* getLabelMatrixPtr(int batchLocalIdx) const {
+    return labelMatrixBuffer + batchLocalIdx * kLabelMatrixWords;
   }
 
   /// Get overflow buffer for this block (GSI ping-pong: bufferIdx 0 or 1)
@@ -144,6 +164,18 @@ class SubstructMatchResultsDevice {
    */
   void zeroRecursiveBits();
 
+  /**
+   * @brief Allocate batch-sized label matrix buffer.
+   *
+   * @param batchSize Number of pairs in the batch
+   */
+  void allocateLabelMatrixBuffer(int batchSize);
+
+  /**
+   * @brief Zero the label matrix buffer for a new batch.
+   */
+  void zeroLabelMatrixBuffer();
+
  private:
   cudaStream_t stream_ = nullptr;
 
@@ -163,6 +195,9 @@ class SubstructMatchResultsDevice {
   // Per-pair recursive match bits storage
   AsyncDeviceVector<uint32_t> recursiveMatchBits_;
   int                         maxTargetAtoms_ = 0;
+
+  // Pre-computed label matrices (batch-sized)
+  AsyncDeviceVector<uint32_t> labelMatrixBuffer_;
 
   std::vector<int> hostPairMatchStarts_;
   std::vector<int> hostQueryAtomCounts_;
@@ -215,15 +250,18 @@ struct BatchedPatternEntry {
 struct RecursiveScratchBuffers {
   AsyncDeviceVector<BatchedPatternEntry> patternEntries;
   AsyncDeviceVector<PartialMatch>        overflow;
+  AsyncDeviceVector<uint32_t>            labelMatrixBuffer;
 
-  explicit RecursiveScratchBuffers(cudaStream_t stream) : patternEntries(), overflow() {
+  explicit RecursiveScratchBuffers(cudaStream_t stream) : patternEntries(), overflow(), labelMatrixBuffer() {
     patternEntries.setStream(stream);
     overflow.setStream(stream);
+    labelMatrixBuffer.setStream(stream);
   }
 
   void setStream(cudaStream_t stream) {
     patternEntries.setStream(stream);
     overflow.setStream(stream);
+    labelMatrixBuffer.setStream(stream);
   }
 };
 

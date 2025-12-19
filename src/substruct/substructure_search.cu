@@ -28,13 +28,12 @@ namespace nvMolKit {
 
 namespace {
 
-constexpr std::size_t kMaxTargetAtoms = 128;
-constexpr std::size_t kMaxQueryAtoms  = 64;
+constexpr std::size_t kMaxTargetAtoms = kLabelMaxTargetAtoms;
+constexpr std::size_t kMaxQueryAtoms  = kLabelMaxQueryAtoms;
 
 constexpr int threadsPerBlock = 256;
 
-using LabelMatrixStorage = FlatBitVect<kMaxTargetAtoms * kMaxQueryAtoms>;
-using LabelMatrixView    = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
+using LabelMatrixView = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
 
 constexpr int kMaxPartialsPerBlock = 256;   // Shared memory partials per block
 constexpr int kMaxQueueSize        = 512;   // Shared memory queue size
@@ -44,10 +43,117 @@ constexpr bool kDebugDumpLabelMatrix = false;  ///< Dump full label matrices aft
 constexpr bool kDebugPaintRecursive  = false;  ///< Debug recursive bit painting kernel
 
 /**
+ * @brief Compute label matrix and write to global memory.
+ *
+ * Core logic shared between labelMatrixKernel and labelMatrixPaintKernel.
+ * Populates label matrix in shared memory, then copies to global buffer.
+ *
+ * @param target Target molecule view
+ * @param query Query/pattern molecule view
+ * @param sharedLabelMatrix Shared memory for label matrix (declared by caller)
+ * @param globalOut Output pointer in global memory
+ * @param pairRecursiveBits Per-pair recursive match bits, or nullptr
+ */
+__device__ __forceinline__ void computeLabelMatrixToGlobal(const MoleculeView&   target,
+                                                           const MoleculeView&   query,
+                                                           LabelMatrixStorage&   sharedLabelMatrix,
+                                                           uint32_t*             globalOut,
+                                                           const uint32_t*       pairRecursiveBits) {
+  LabelMatrixView labelMatrix(&sharedLabelMatrix);
+
+  populateLabelMatrixOptimized<kMaxTargetAtoms, kMaxQueryAtoms>(target, query, labelMatrix, pairRecursiveBits);
+  __syncthreads();
+
+  const uint32_t* sharedIn   = sharedLabelMatrix.cbegin();
+  const int       tid        = threadIdx.x;
+  const int       numThreads = blockDim.x;
+
+  for (std::size_t i = tid; i < kLabelMatrixWords; i += numThreads) {
+    globalOut[i] = sharedIn[i];
+  }
+}
+
+/**
+ * @brief Kernel for batch label matrix computation.
+ *
+ * One block per (target, query) pair. Computes label matrix and writes to global buffer.
+ * This separates the labeling phase from the matching phase for better occupancy and reuse.
+ */
+__global__ void labelMatrixKernel(MoleculesDeviceView targets,
+                                  MoleculesDeviceView queries,
+                                  const int*          pairIndices,
+                                  int                 numQueries,
+                                  uint32_t*           labelMatrixBuffer,
+                                  const uint32_t*     recursiveMatchBits,
+                                  int                 maxTargetAtoms) {
+  const int batchLocalIdx = blockIdx.x;
+  const int pairIdx       = pairIndices[batchLocalIdx];
+  const int targetIdx     = pairIdx / numQueries;
+  const int queryIdx      = pairIdx % numQueries;
+
+  if (targetIdx >= targets.numMolecules || queryIdx >= queries.numMolecules) {
+    return;
+  }
+
+  const MoleculeView target = getMolecule(targets, targetIdx);
+  const MoleculeView query  = getMolecule(queries, queryIdx);
+
+  __shared__ LabelMatrixStorage sharedLabelMatrix;
+
+  const uint32_t* pairRecursiveBits = recursiveMatchBits
+                                        ? &recursiveMatchBits[batchLocalIdx * maxTargetAtoms]
+                                        : nullptr;
+  uint32_t* globalOut = labelMatrixBuffer + batchLocalIdx * kLabelMatrixWords;
+
+  computeLabelMatrixToGlobal(target, query, sharedLabelMatrix, globalOut, pairRecursiveBits);
+}
+
+/**
+ * @brief Kernel for label matrix computation for recursive pattern preprocessing.
+ *
+ * Block indexing: blockIdx.x = localTargetIdx * numPatterns + localPatternIdx
+ */
+__global__ void labelMatrixPaintKernel(MoleculesDeviceView        targets,
+                                       MoleculesDeviceView        patterns,
+                                       const BatchedPatternEntry* patternEntries,
+                                       int                        numPatterns,
+                                       int                        numQueries,
+                                       int                        batchPairOffset,
+                                       int                        batchSize,
+                                       uint32_t*                  labelMatrixBuffer,
+                                       int                        firstTargetIdx) {
+  const int localTargetIdx   = blockIdx.x / numPatterns;
+  const int targetIdx        = firstTargetIdx + localTargetIdx;
+  const int localPatternIdx  = blockIdx.x % numPatterns;
+
+  if (targetIdx >= targets.numMolecules || localPatternIdx >= numPatterns) {
+    return;
+  }
+
+  const int mainQueryIdx  = patternEntries[localPatternIdx].mainQueryIdx;
+  const int patternMolIdx = patternEntries[localPatternIdx].patternMolIdx;
+
+  const int globalPairIdx = targetIdx * numQueries + mainQueryIdx;
+
+  if (globalPairIdx < batchPairOffset || globalPairIdx >= batchPairOffset + batchSize) {
+    return;
+  }
+
+  const MoleculeView target  = getMolecule(targets, targetIdx);
+  const MoleculeView pattern = getMolecule(patterns, patternMolIdx);
+
+  __shared__ LabelMatrixStorage sharedLabelMatrix;
+
+  uint32_t* globalOut = labelMatrixBuffer + blockIdx.x * kLabelMatrixWords;
+
+  computeLabelMatrixToGlobal(target, pattern, sharedLabelMatrix, globalOut, nullptr);
+}
+
+/**
  * @brief Kernel for batch substructure matching.
  *
- * One block per (target, query) pair. Performs graph labeling in shared memory,
- * then dispatches to algorithm-specific search based on template parameter.
+ * One block per (target, query) pair. Loads pre-computed label matrix from global
+ * memory, then dispatches to algorithm-specific search based on template parameter.
  *
  * @tparam Algo Algorithm to use for the search phase
  * @param pairIndices Array of global pair indices for this batch
@@ -74,25 +180,21 @@ __global__ void substructMatchKernel(MoleculesDeviceView             targets,
   __shared__ LabelMatrixStorage sharedLabelMatrix;
   LabelMatrixView               labelMatrix(&sharedLabelMatrix);
 
-  // Get pointer to per-pair recursive match bits using batch-local index
-  const uint32_t* pairRecursiveBits = results.recursiveMatchBits
-                                        ? &results.recursiveMatchBits[batchLocalIdx * results.maxTargetAtoms]
-                                        : nullptr;
+  // Load label matrix from global memory (pre-computed by labelMatrixKernel)
+  const uint32_t* globalIn   = results.getLabelMatrixPtr(batchLocalIdx);
+  uint32_t*       sharedOut  = sharedLabelMatrix.begin();
+  const int       tid        = threadIdx.x;
+  const int       numThreads = blockDim.x;
 
-  // Populate label matrix using optimized warp-parallel function
-  populateLabelMatrixOptimized<kMaxTargetAtoms, kMaxQueryAtoms>(target, query, labelMatrix, pairRecursiveBits);
-
+  for (std::size_t i = tid; i < kLabelMatrixWords; i += numThreads) {
+    sharedOut[i] = globalIn[i];
+  }
   __syncthreads();
 
   if constexpr (kDebugDumpLabelMatrix) {
     if (threadIdx.x == 0) {
       printf("[LabelDump] pair=%d (target=%d, query=%d): targetAtoms=%d, queryAtoms=%d\n",
              pairIdx, targetIdx, queryIdx, target.numAtoms, query.numAtoms);
-      printf("[LabelDump] Recursive bits per target atom:\n");
-      for (int t = 0; t < target.numAtoms; ++t) {
-        uint32_t bits = pairRecursiveBits ? pairRecursiveBits[t] : 0;
-        printf("[LabelDump]   t%d=0x%08x\n", t, bits);
-      }
       printf("[LabelDump] Label matrix (row=target, col=query, 1=compatible):\n");
       printf("[LabelDump]     ");
       for (int q = 0; q < query.numAtoms; ++q) {
@@ -224,6 +326,7 @@ __global__ void substructMatchKernel(MoleculesDeviceView             targets,
  * @param defaultMainQueryIdx Main query index, used when patternEntries is null
  * @param batchPairOffset Global pair index where the current batch starts
  * @param batchSize Number of pairs in the current batch
+ * @param labelMatrixBuffer Pre-computed label matrices [numBlocks * kLabelMatrixWords]
  * @param firstTargetIdx First target index to process (offset for block indexing)
  */
 template <SubstructAlgorithm Algo>
@@ -241,6 +344,7 @@ __global__ void substructPaintKernel(MoleculesDeviceView         targets,
                                      PartialMatch*               overflowA,
                                      PartialMatch*               overflowB,
                                      int                         overflowCapacity,
+                                     const uint32_t*             labelMatrixBuffer,
                                      int                         firstTargetIdx) {
   const int localTargetIdx   = blockIdx.x / numPatterns;
   const int targetIdx        = firstTargetIdx + localTargetIdx;
@@ -269,10 +373,18 @@ __global__ void substructPaintKernel(MoleculesDeviceView         targets,
   const MoleculeView target  = getMolecule(targets, targetIdx);
   const MoleculeView pattern = getMolecule(patterns, patternMolIdx);
 
+  // Load label matrix from global memory (pre-computed by labelMatrixPaintKernel)
   __shared__ LabelMatrixStorage sharedLabelMatrix;
   LabelMatrixView               labelMatrix(&sharedLabelMatrix);
 
-  populateLabelMatrixOptimized<kMaxTargetAtoms, kMaxQueryAtoms>(target, pattern, labelMatrix, nullptr);
+  const uint32_t* globalIn   = labelMatrixBuffer + blockIdx.x * kLabelMatrixWords;
+  uint32_t*       sharedOut  = sharedLabelMatrix.begin();
+  const int       tid        = threadIdx.x;
+  const int       numThreads = blockDim.x;
+
+  for (std::size_t i = tid; i < kLabelMatrixWords; i += numThreads) {
+    sharedOut[i] = globalIn[i];
+  }
   __syncthreads();
 
   __shared__ int sharedMatchCount;
@@ -363,6 +475,7 @@ void SubstructMatchResultsDevice::setStream(cudaStream_t stream) {
   queryAtomCounts_.setStream(stream);
   overflowBuffer_.setStream(stream);
   recursiveMatchBits_.setStream(stream);
+  labelMatrixBuffer_.setStream(stream);
 }
 
 void SubstructMatchResultsDevice::allocate(int                     numTargets,
@@ -459,6 +572,7 @@ SubstructMatchResultsDeviceView SubstructMatchResultsDevice::view() const {
   v.overflowBuffersPerBlock  = overflowBuffersPerBlock_;
   v.recursiveMatchBits       = recursiveMatchBits_.data();
   v.maxTargetAtoms           = maxTargetAtoms_;
+  v.labelMatrixBuffer        = labelMatrixBuffer_.data();
   return v;
 }
 
@@ -477,6 +591,16 @@ void SubstructMatchResultsDevice::allocateBatchRecursiveBits(int batchSize, int 
 
 void SubstructMatchResultsDevice::zeroRecursiveBits() {
   recursiveMatchBits_.zero();
+}
+
+void SubstructMatchResultsDevice::allocateLabelMatrixBuffer(int batchSize) {
+  labelMatrixBuffer_.setStream(stream_);
+  labelMatrixBuffer_.resize(batchSize * kLabelMatrixWords);
+  labelMatrixBuffer_.zero();
+}
+
+void SubstructMatchResultsDevice::zeroLabelMatrixBuffer() {
+  labelMatrixBuffer_.zero();
 }
 
 // =============================================================================
@@ -528,6 +652,7 @@ void getSubstructMatches(MoleculesDevice&             targetsDevice,
 
   results.allocateBatchRecursiveBits(effectiveBatchSize, maxTargetAtoms);
   results.allocateOverflow(effectiveBatchSize, numBuffersPerBlock);
+  results.allocateLabelMatrixBuffer(effectiveBatchSize);
 
 
   // Reusable scratch buffers (avoid alloc/free between kernels)
@@ -552,6 +677,10 @@ void getSubstructMatches(MoleculesDevice&             targetsDevice,
       pairIndicesHost[i] = batchStart + i;
     }
 
+    // Copy pair indices to device (needed for both labeling and matching)
+    pairIndicesDev.resize(numPairsInBatch);
+    pairIndicesDev.copyFromHost(pairIndicesHost.data(), numPairsInBatch);
+
     // Preprocess all recursive patterns for this batch in a single kernel launch
     preprocessRecursiveSmartsBatched(targetsDevice, targetsHost, queriesHost,
                                      results, numQueries, batchStart, numPairsInBatch,
@@ -561,24 +690,36 @@ void getSubstructMatches(MoleculesDevice&             targetsDevice,
     // Get view after scratch allocation
     SubstructMatchResultsDeviceView batchView = results.view();
 
-    // Copy pair indices to device (resize reuses memory when possible)
-    pairIndicesDev.resize(numPairsInBatch);
-    pairIndicesDev.copyFromHost(pairIndicesHost.data(), numPairsInBatch);
-    ScopedNvtxRange launchKernelRange("getSubStructMatches Kernel launch");
+    // Launch label matrix kernel (uses recursive bits from preprocessing)
+    {
+      ScopedNvtxRange labelKernelRange("getSubStructMatches LabelMatrix Kernel");
+      labelMatrixKernel<<<numPairsInBatch, threadsPerBlock, 0, stream>>>(
+        targetsDevice.view(),
+        queriesDevice.view(),
+        pairIndicesDev.data(),
+        numQueries,
+        batchView.labelMatrixBuffer,
+        batchView.recursiveMatchBits,
+        batchView.maxTargetAtoms);
+    }
 
-    switch (algorithm) {
-      case SubstructAlgorithm::VF2:
-        substructMatchKernel<SubstructAlgorithm::VF2><<<numPairsInBatch, threadsPerBlock, 0, stream>>>(
-          targetsDevice.view(), queriesDevice.view(), batchView, pairIndicesDev.data());
-        break;
-      case SubstructAlgorithm::GSI:
-        substructMatchKernel<SubstructAlgorithm::GSI><<<numPairsInBatch, threadsPerBlock, 0, stream>>>(
-          targetsDevice.view(), queriesDevice.view(), batchView, pairIndicesDev.data());
-        break;
-      case SubstructAlgorithm::WarpUnified:
-        substructMatchKernel<SubstructAlgorithm::WarpUnified><<<numPairsInBatch, threadsPerBlock, 0, stream>>>(
-          targetsDevice.view(), queriesDevice.view(), batchView, pairIndicesDev.data());
-        break;
+    // Launch match kernel (loads pre-computed label matrices)
+    {
+      ScopedNvtxRange launchKernelRange("getSubStructMatches Match Kernel");
+      switch (algorithm) {
+        case SubstructAlgorithm::VF2:
+          substructMatchKernel<SubstructAlgorithm::VF2><<<numPairsInBatch, threadsPerBlock, 0, stream>>>(
+            targetsDevice.view(), queriesDevice.view(), batchView, pairIndicesDev.data());
+          break;
+        case SubstructAlgorithm::GSI:
+          substructMatchKernel<SubstructAlgorithm::GSI><<<numPairsInBatch, threadsPerBlock, 0, stream>>>(
+            targetsDevice.view(), queriesDevice.view(), batchView, pairIndicesDev.data());
+          break;
+        case SubstructAlgorithm::WarpUnified:
+          substructMatchKernel<SubstructAlgorithm::WarpUnified><<<numPairsInBatch, threadsPerBlock, 0, stream>>>(
+            targetsDevice.view(), queriesDevice.view(), batchView, pairIndicesDev.data());
+          break;
+      }
     }
 
     cudaCheckError(cudaStreamSynchronize(stream));
@@ -690,48 +831,77 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&             targets
     const int buffersPerBlock = (algorithm == SubstructAlgorithm::WarpUnified) ? wusBuffersPerBlock : gsiBuffersPerBlock;
     const size_t overflowNeeded = numBlocksInSubBatch * buffersPerBlock * kOverflowEntriesPerBuffer;
 
-    // Only grow overflow buffer if needed (resize down is a no-op anyway)
+    // Only grow overflow buffer if needed. Zero before resize so copied data is initialized.
     if (scratch.overflow.size() < overflowNeeded) {
+      scratch.overflow.zero();
       scratch.overflow.resize(overflowNeeded);
     }
-    ScopedNvtxRange processRecursiveRangeSubBatchPaint("Process recursive batch sub-batch paint");
-    switch (algorithm) {
-      case SubstructAlgorithm::VF2:
-      case SubstructAlgorithm::GSI: {
-        substructPaintKernel<SubstructAlgorithm::GSI><<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
-          targetsDevice.view(),
-          patternCache.cachedPatternsDevice.view(),
-          scratch.patternEntries.data(),
-          static_cast<int>(numPatternsInSubBatch),
-          outputView.recursiveMatchBits,
-          outputView.maxTargetAtoms,
-          numQueries,
-          0, 0,  // Defaults ignored when patternEntries is non-null
-          batchPairOffset,
-          batchSize,
-          scratch.overflow.data(),
-          scratch.overflow.data(),
-          kOverflowEntriesPerBuffer,
-          firstTargetInBatch);
-        break;
-      }
-      case SubstructAlgorithm::WarpUnified: {
-        substructPaintKernel<SubstructAlgorithm::WarpUnified><<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
-          targetsDevice.view(),
-          patternCache.cachedPatternsDevice.view(),
-          scratch.patternEntries.data(),
-          static_cast<int>(numPatternsInSubBatch),
-          outputView.recursiveMatchBits,
-          outputView.maxTargetAtoms,
-          numQueries,
-          0, 0,  // Defaults ignored when patternEntries is non-null
-          batchPairOffset,
-          batchSize,
-          scratch.overflow.data(),
-          scratch.overflow.data(),
-          kOverflowEntriesPerBuffer,
-          firstTargetInBatch);
-        break;
+
+    // Allocate/grow label matrix buffer for this sub-batch
+    const size_t labelMatrixNeeded = numBlocksInSubBatch * kLabelMatrixWords;
+    if (scratch.labelMatrixBuffer.size() < labelMatrixNeeded) {
+      scratch.labelMatrixBuffer.resize(labelMatrixNeeded);
+    }
+    scratch.labelMatrixBuffer.zero();
+
+    // Launch label matrix kernel for recursive patterns
+    {
+      ScopedNvtxRange processRecursiveRangeSubBatchLabel("Process recursive batch sub-batch label");
+      labelMatrixPaintKernel<<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
+        targetsDevice.view(),
+        patternCache.cachedPatternsDevice.view(),
+        scratch.patternEntries.data(),
+        static_cast<int>(numPatternsInSubBatch),
+        numQueries,
+        batchPairOffset,
+        batchSize,
+        scratch.labelMatrixBuffer.data(),
+        firstTargetInBatch);
+    }
+
+    // Launch paint kernel (loads pre-computed label matrices)
+    {
+      ScopedNvtxRange processRecursiveRangeSubBatchPaint("Process recursive batch sub-batch paint");
+      switch (algorithm) {
+        case SubstructAlgorithm::VF2:
+        case SubstructAlgorithm::GSI: {
+          substructPaintKernel<SubstructAlgorithm::GSI><<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
+            targetsDevice.view(),
+            patternCache.cachedPatternsDevice.view(),
+            scratch.patternEntries.data(),
+            static_cast<int>(numPatternsInSubBatch),
+            outputView.recursiveMatchBits,
+            outputView.maxTargetAtoms,
+            numQueries,
+            0, 0,  // Defaults ignored when patternEntries is non-null
+            batchPairOffset,
+            batchSize,
+            scratch.overflow.data(),
+            scratch.overflow.data(),
+            kOverflowEntriesPerBuffer,
+            scratch.labelMatrixBuffer.data(),
+            firstTargetInBatch);
+          break;
+        }
+        case SubstructAlgorithm::WarpUnified: {
+          substructPaintKernel<SubstructAlgorithm::WarpUnified><<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
+            targetsDevice.view(),
+            patternCache.cachedPatternsDevice.view(),
+            scratch.patternEntries.data(),
+            static_cast<int>(numPatternsInSubBatch),
+            outputView.recursiveMatchBits,
+            outputView.maxTargetAtoms,
+            numQueries,
+            0, 0,  // Defaults ignored when patternEntries is non-null
+            batchPairOffset,
+            batchSize,
+            scratch.overflow.data(),
+            scratch.overflow.data(),
+            kOverflowEntriesPerBuffer,
+            scratch.labelMatrixBuffer.data(),
+            firstTargetInBatch);
+          break;
+        }
       }
     }
   }
