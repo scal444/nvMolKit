@@ -381,18 +381,18 @@ std::vector<std::vector<uint8_t>> computeGpuLabelMatrix(const RDKit::ROMol& targ
   const int numQueryAtoms  = static_cast<int>(queryHost.totalAtoms());
 
   std::vector<int> queryAtomCounts   = {numQueryAtoms};
-  std::vector<int> maxMatchesPerPair = {numTargetAtoms};
+  std::vector<int> batchPairMatchStarts = {0, 0};
 
-  SubstructMatchResultsDevice results(stream);
-  results.allocate(1, 1, queryAtomCounts, maxMatchesPerPair);
-  results.allocateBatchRecursiveBits(1, numTargetAtoms);
-  results.zeroRecursiveBits();
+  BatchResultsDevice batchResults(stream);
+  batchResults.allocateBatch(1, batchPairMatchStarts, 0, 1, numTargetAtoms, 2);
+  batchResults.setQueryAtomCounts(queryAtomCounts);
+  batchResults.zeroRecursiveBits();
 
   if (!queryHost.recursivePatterns.empty() && !queryHost.recursivePatterns[0].empty()) {
     RecursiveScratchBuffers          scratch(stream);
     RecursivePatternCache            patternCache(stream);
     std::vector<BatchedPatternEntry> scratchPatternEntries;
-    preprocessRecursiveSmartsBatched(targetDevice, targetHost, queryHost, results, 1, 0, 1,
+    preprocessRecursiveSmartsBatched(targetDevice, targetHost, queryHost, batchResults, 1, 0, 1,
                                      SubstructAlgorithm::GSI, stream, scratch, patternCache,
                                      scratchPatternEntries);
   }
@@ -402,7 +402,7 @@ std::vector<std::vector<uint8_t>> computeGpuLabelMatrix(const RDKit::ROMol& targ
   const LabelMatrixStorage              hostMatrix(false);
   matrixDev.setFromVector(std::vector<LabelMatrixStorage>{hostMatrix});
 
-  auto            resultsView       = results.view();
+  auto            resultsView       = batchResults.view();
   const uint32_t* pairRecursiveBits = info.empty() ? nullptr : resultsView.recursiveMatchBits;
 
   populateLabelMatrixKernel<kMaxTargetAtoms, kMaxQueryAtoms>

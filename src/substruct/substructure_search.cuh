@@ -43,20 +43,19 @@ using LabelMatrixStorage = FlatBitVect<kLabelMatrixBits>;
 constexpr std::size_t kLabelMatrixWords = LabelMatrixStorage::kStorageCount;
 
 /**
- * @brief POD view into device-side substructure match results.
+ * @brief POD view into batch-local device-side substructure match results.
  *
  * Passed to kernels by value. All pointers are device memory.
+ * All indexing is batch-local (0 to batchSize-1).
  */
 struct SubstructMatchResultsDeviceView {
-  int* matchCounts;      ///< [numPairs] actual match count per pair
-  int* reportedCounts;   ///< [numPairs] stored match count per pair
-  int* pairMatchStarts;  ///< [numPairs + 1] offset into matchIndices
+  int* matchCounts;      ///< [batchSize] actual match count per pair
+  int* reportedCounts;   ///< [batchSize] stored match count per pair
+  int* pairMatchStarts;  ///< [batchSize + 1] batch-local offset into matchIndices
 
-  int16_t* matchIndices;  ///< Flattened match mappings
+  int16_t* matchIndices;  ///< Flattened match mappings (batch-local)
 
-  int numTargets;
-  int numQueries;
-  int maxMatchesPerPair;  ///< Buffer capacity per pair
+  int numQueries;         ///< Total queries (for decoding global pair indices)
 
   /// Number of query atoms (stride for match indices)
   const int* queryAtomCounts;  ///< [numQueries] atoms per query molecule
@@ -66,16 +65,12 @@ struct SubstructMatchResultsDeviceView {
   int           overflowEntriesPerBuffer;  ///< Entries per buffer (kOverflowEntriesPerBuffer)
   int           overflowBuffersPerBlock;   ///< 2 for GSI ping-pong, 1 for WUS
 
-  // Per-pair recursive match bits: [numPairs * maxTargetAtoms] with 32 bits per atom
-  uint32_t* recursiveMatchBits;  ///< Indexed by pairIdx * maxTargetAtoms + atomIdx
+  // Per-pair recursive match bits: [batchSize * maxTargetAtoms] with 32 bits per atom
+  uint32_t* recursiveMatchBits;  ///< Indexed by batchLocalIdx * maxTargetAtoms + atomIdx
   int       maxTargetAtoms;      ///< Stride for recursiveMatchBits indexing
 
   // Pre-computed label matrices: [batchSize] label matrices in global memory
   uint32_t* labelMatrixBuffer;  ///< Indexed by batchLocalIdx * kLabelMatrixWords
-
-  __device__ __forceinline__ int pairIndex(int targetIdx, int queryIdx) const {
-    return targetIdx * numQueries + queryIdx;
-  }
 
   /// Get pointer to label matrix for a batch-local pair index
   __device__ __forceinline__ uint32_t* getLabelMatrixPtr(int batchLocalIdx) const {
@@ -92,49 +87,46 @@ struct SubstructMatchResultsDeviceView {
     return overflowEntriesPerBuffer;
   }
 
-  /// Get recursive match bits for a specific (pair, atom) combination
-  __device__ __forceinline__ uint32_t getRecursiveMatchBits(int pairIdx, int atomIdx) const {
-    return recursiveMatchBits[pairIdx * maxTargetAtoms + atomIdx];
+  /// Get recursive match bits for a batch-local (pair, atom) combination
+  __device__ __forceinline__ uint32_t getRecursiveMatchBits(int batchLocalIdx, int atomIdx) const {
+    return recursiveMatchBits[batchLocalIdx * maxTargetAtoms + atomIdx];
   }
 
-  /// Set a recursive match bit for a specific (pair, atom, pattern) combination
-  __device__ __forceinline__ void setRecursiveMatchBit(int pairIdx, int atomIdx, int patternId) const {
+  /// Set a recursive match bit for a batch-local (pair, atom, pattern) combination
+  __device__ __forceinline__ void setRecursiveMatchBit(int batchLocalIdx, int atomIdx, int patternId) const {
     if (patternId < 32) {
-      atomicOr(&recursiveMatchBits[pairIdx * maxTargetAtoms + atomIdx], 1u << patternId);
+      atomicOr(&recursiveMatchBits[batchLocalIdx * maxTargetAtoms + atomIdx], 1u << patternId);
     }
   }
 };
 
 /**
- * @brief Device-side storage for substructure match results.
+ * @brief Batch-local device-side storage for substructure match results.
  *
- * Owns device memory and provides views for kernel access.
+ * Owns device memory for a single batch and provides views for kernel access.
+ * Results are copied back to host after each batch and accumulated.
  */
-class SubstructMatchResultsDevice {
+class BatchResultsDevice {
  public:
-  SubstructMatchResultsDevice() = default;
-  explicit SubstructMatchResultsDevice(cudaStream_t stream) : stream_(stream) {}
+  BatchResultsDevice() = default;
+  explicit BatchResultsDevice(cudaStream_t stream) : stream_(stream) { setStream(stream); }
 
   /**
-   * @brief Allocate output buffers for batch matching.
+   * @brief Allocate batch-local buffers for a specific batch.
    *
-   * Buffer sizing: each (target, query) pair gets space for up to
-   * maxMatchesPerPair matches. Each match requires numQueryAtoms int16_t values.
-   *
-   * @param numTargets Number of target molecules
-   * @param numQueries Number of query molecules
-   * @param queryAtomCounts Number of atoms in each query molecule
-   * @param maxMatchesPerPairVec Maximum matches to store per pair (typically target atom count)
+   * @param batchSize Number of pairs in this batch
+   * @param batchPairMatchStarts Batch-local offsets into matchIndices [batchSize + 1]
+   * @param totalBatchMatchIndices Total match indices capacity for this batch
+   * @param numQueries Total number of queries (for kernel view)
+   * @param maxTargetAtoms Max atoms per target (stride for recursiveMatchBits)
+   * @param numBuffersPerBlock Overflow buffers per block (2 for GSI, 1 for WUS)
    */
-  void allocate(int                     numTargets,
-                int                     numQueries,
-                const std::vector<int>& queryAtomCounts,
-                const std::vector<int>& maxMatchesPerPairVec);
-
-  /**
-   * @brief Copy results from device to host.
-   */
-  void copyToHost(SubstructMatchResultsHost& host) const;
+  void allocateBatch(int                     batchSize,
+                     const std::vector<int>& batchPairMatchStarts,
+                     int                     totalBatchMatchIndices,
+                     int                     numQueries,
+                     int                     maxTargetAtoms,
+                     int                     numBuffersPerBlock);
 
   /**
    * @brief Get a view suitable for passing to CUDA kernels.
@@ -144,43 +136,38 @@ class SubstructMatchResultsDevice {
   void setStream(cudaStream_t stream);
 
   /**
-   * @brief Allocate overflow buffers for a batch size.
-   *
-   * @param batchSize Number of blocks to allocate overflow for
-   * @param numBuffersPerBlock 2 for GSI (ping-pong), 1 for WUS
-   */
-  void allocateOverflow(int batchSize, int numBuffersPerBlock);
-
-  /**
-   * @brief Allocate batch-sized recursive match bits buffer.
-   *
-   * @param batchSize Number of pairs in the batch
-   * @param maxTargetAtoms Max atoms per target (stride for indexing)
-   */
-  void allocateBatchRecursiveBits(int batchSize, int maxTargetAtoms);
-
-  /**
    * @brief Zero the recursive match bits buffer for a new batch.
    */
   void zeroRecursiveBits();
-
-  /**
-   * @brief Allocate batch-sized label matrix buffer.
-   *
-   * @param batchSize Number of pairs in the batch
-   */
-  void allocateLabelMatrixBuffer(int batchSize);
 
   /**
    * @brief Zero the label matrix buffer for a new batch.
    */
   void zeroLabelMatrixBuffer();
 
+  /**
+   * @brief Copy batch results to host vectors.
+   *
+   * @param hostMatchCounts Output: match counts for this batch [batchSize]
+   * @param hostReportedCounts Output: reported counts for this batch [batchSize]
+   * @param hostMatchIndices Output: match indices for this batch
+   */
+  void copyBatchToHost(std::vector<int>&     hostMatchCounts,
+                       std::vector<int>&     hostReportedCounts,
+                       std::vector<int16_t>& hostMatchIndices) const;
+
+  void setQueryAtomCounts(const std::vector<int>& queryAtomCounts);
+
+  [[nodiscard]] int batchSize() const { return batchSize_; }
+  [[nodiscard]] int maxTargetAtoms() const { return maxTargetAtoms_; }
+  [[nodiscard]] uint32_t* recursiveMatchBits() { return recursiveMatchBits_.data(); }
+
  private:
   cudaStream_t stream_ = nullptr;
 
-  int numTargets_ = 0;
-  int numQueries_ = 0;
+  int batchSize_    = 0;
+  int numQueries_   = 0;
+  int maxTargetAtoms_ = 0;
 
   AsyncDeviceVector<int>     matchCounts_;
   AsyncDeviceVector<int>     reportedCounts_;
@@ -188,46 +175,15 @@ class SubstructMatchResultsDevice {
   AsyncDeviceVector<int16_t> matchIndices_;
   AsyncDeviceVector<int>     queryAtomCounts_;
 
-  // Pre-allocated per-block overflow buffers (simple chunked storage)
   AsyncDeviceVector<PartialMatch> overflowBuffer_;
   int overflowBuffersPerBlock_ = 0;
 
-  // Per-pair recursive match bits storage
   AsyncDeviceVector<uint32_t> recursiveMatchBits_;
-  int                         maxTargetAtoms_ = 0;
 
-  // Pre-computed label matrices (batch-sized)
   AsyncDeviceVector<uint32_t> labelMatrixBuffer_;
 
-  std::vector<int> hostPairMatchStarts_;
-  std::vector<int> hostQueryAtomCounts_;
-  int              totalMatchIndices_ = 0;
+  int totalBatchMatchIndices_ = 0;
 };
-
-/**
- * @brief Perform batch substructure matching on GPU.
- *
- * Matches each target molecule against each query molecule (all-to-all).
- * Results are stored in device memory and can be copied to host.
- * Processing is divided into batches to limit GPU memory usage.
- *
- * @param targetsDevice Device-resident target molecules (use addToBatch to build)
- * @param queriesDevice Device-resident query molecules (use addQueryToBatch to build)
- * @param targetsHost Host-side target data (for atom counts)
- * @param queriesHost Host-side query data (for atom counts)
- * @param results Output storage (will be allocated)
- * @param algorithm Algorithm to use for matching
- * @param stream CUDA stream for async operations
- * @param batchSize Number of (target, query) pairs to process per batch (default 1024)
- */
-void getSubstructMatches(MoleculesDevice&             targetsDevice,
-                         const MoleculesDevice&       queriesDevice,
-                         const MoleculesHost&         targetsHost,
-                         const MoleculesHost&         queriesHost,
-                         SubstructMatchResultsDevice& results,
-                         SubstructAlgorithm           algorithm,
-                         cudaStream_t                 stream,
-                         int                          batchSize = 1024);
 
 /**
  * @brief Perform batch substructure matching on GPU with host-side CSR results.
@@ -387,7 +343,7 @@ struct RecursivePatternCache {
  * @param targetsDevice Device-resident target molecules
  * @param targetsHost Host-side target data
  * @param queriesHost Host-side query data (contains recursivePatterns per query)
- * @param outputResults The main results buffer where recursiveMatchBits will be written
+ * @param batchResults The batch results buffer where recursiveMatchBits will be written
  * @param numQueries Total number of queries (for computing pair indices)
  * @param batchPairOffset Global pair index where current batch starts
  * @param batchSize Number of pairs in this batch
@@ -397,18 +353,18 @@ struct RecursivePatternCache {
  * @param patternCache Cache for recursive patterns (reused across batch iterations)
  * @param scratchPatternEntries Vector to store pattern entries for the batch
  */
-void preprocessRecursiveSmartsBatched(const MoleculesDevice&             targetsDevice,
-                                      const MoleculesHost&               targetsHost,
-                                      const MoleculesHost&               queriesHost,
-                                      const SubstructMatchResultsDevice& outputResults,
-                                      int                                numQueries,
-                                      int                                batchPairOffset,
-                                      int                                batchSize,
-                                      SubstructAlgorithm                 algorithm,
-                                      cudaStream_t                       stream,
-                                      RecursiveScratchBuffers&           scratch,
-                                      RecursivePatternCache&             patternCache,
-                                      std::vector<BatchedPatternEntry>&  scratchPatternEntries);
+void preprocessRecursiveSmartsBatched(const MoleculesDevice&            targetsDevice,
+                                      const MoleculesHost&              targetsHost,
+                                      const MoleculesHost&              queriesHost,
+                                      BatchResultsDevice&               batchResults,
+                                      int                               numQueries,
+                                      int                               batchPairOffset,
+                                      int                               batchSize,
+                                      SubstructAlgorithm                algorithm,
+                                      cudaStream_t                      stream,
+                                      RecursiveScratchBuffers&          scratch,
+                                      RecursivePatternCache&            patternCache,
+                                      std::vector<BatchedPatternEntry>& scratchPatternEntries);
 
 }  // namespace nvMolKit
 
