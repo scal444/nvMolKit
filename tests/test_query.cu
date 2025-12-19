@@ -961,12 +961,18 @@ TEST(RecursivePatternExtraction, ComplexRecursivePattern) {
 }
 
 TEST(RecursivePatternExtraction, MaxPatternsAllowed) {
-  auto q = makeQuery("[$([C]),$([N]),$([O]),$([S]),$([F]),$([Cl]),$([Br]),$([I])]");
-  
+  std::string smarts = "[C";
+  for (int i = 0; i < nvMolKit::RecursivePatternInfo::kMaxPatterns; ++i) {
+    smarts += ";$(*-N)";
+  }
+  smarts += "]";
+
+  auto q = makeQuery(smarts);
+
   auto info = nvMolKit::extractRecursivePatterns(q.get());
-  EXPECT_EQ(info.size(), 8);
-  
-  for (int i = 0; i < 8; ++i) {
+  EXPECT_EQ(info.size(), nvMolKit::RecursivePatternInfo::kMaxPatterns);
+
+  for (int i = 0; i < nvMolKit::RecursivePatternInfo::kMaxPatterns; ++i) {
     EXPECT_EQ(info.patterns[i].patternId, i);
   }
 }

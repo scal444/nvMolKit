@@ -1,2 +1,0 @@
-# Too many recursive SMARTS patterns (maximum 8 supported)
-[$([CX3]);!$(CC=[O,S,N]);!$(C[O,S,N])]=[$([CX3][$([NH2]),$([NH][CX4]),$([N;R0]([CX4])[CX4])]);!$(CC=[O,S,N]);!$(C[O,S])]

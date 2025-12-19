@@ -145,7 +145,8 @@ struct RecursivePatternEntry {
  * Patterns are sorted by depth (leaves first) for level-by-level processing.
  */
 struct RecursivePatternInfo {
-  static constexpr int kMaxPatterns = 8;        ///< Maximum supported recursive SMARTS patterns
+  static constexpr int kMaxPatterns = 32;       ///< Maximum supported recursive SMARTS patterns
+  static_assert(kMaxPatterns <= 32, "kMaxPatterns must fit in the 32-bit recursive match mask");
 
   std::vector<RecursivePatternEntry> patterns;  ///< All recursive patterns found, sorted by depth
   bool hasRecursivePatterns = false;            ///< Quick check for any patterns
