@@ -70,8 +70,6 @@ std::unique_ptr<RDKit::ROMol> makeMolFromSmarts(const std::string& smarts) {
   return std::unique_ptr<RDKit::ROMol>(RDKit::SmartsToMol(smarts));
 }
 
-using LabelMatrixStorage = FlatBitVect<kMaxTargetAtoms * kMaxQueryAtoms>;
-using LabelMatrixView    = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
 
 }  // namespace
 

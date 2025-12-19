@@ -141,7 +141,7 @@ __device__ __forceinline__ bool atomPairMatchesWithTree(const MoleculeView& targ
  * @param sharedQueryBondCounts Shared memory buffer for query bond counts [MaxQueryAtoms]
  */
 template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
-__device__ void populateLabelMatrixWarpParallel(const MoleculeView&                             target,
+__device__ __forceinline__ void populateLabelMatrixWarpParallel(const MoleculeView&                             target,
                                                 const MoleculeView&                             query,
                                                 BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>& labelMatrix,
                                                 AtomDataPacked*                                 sharedQueryPacked,
@@ -217,7 +217,7 @@ __device__ void populateLabelMatrixWarpParallel(const MoleculeView&             
  * @param pairRecursiveBits Per-pair recursive match bits indexed by [targetAtomIdx], or nullptr if none
  */
 template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
-__device__ void populateLabelMatrixOptimized(const MoleculeView&                             target,
+__device__ __forceinline__ void populateLabelMatrixOptimized(const MoleculeView&                             target,
                                              const MoleculeView&                             query,
                                              BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>& labelMatrix,
                                              const uint32_t*                                 pairRecursiveBits = nullptr) {
@@ -384,7 +384,7 @@ __device__ __forceinline__ bool bondCountsMatch(const MoleculeView& target,
  * @param labelMatrix Output 2D bit matrix view [target_atoms x query_atoms]
  */
 template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
-__device__ void populateLabelMatrix(const MoleculeView&                             target,
+__device__ __forceinline__ void populateLabelMatrix(const MoleculeView&                             target,
                                     const MoleculeView&                             query,
                                     BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>& labelMatrix) {
   // Clear the matrix first
@@ -429,7 +429,7 @@ __device__ void populateLabelMatrix(const MoleculeView&                         
  * @param labelMatrix Output 2D bit matrix view [target_atoms x query_atoms]
  */
 template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
-__device__ void populateLabelMatrixForAtom(const MoleculeView&                             target,
+__device__ __forceinline__ void populateLabelMatrixForAtom(const MoleculeView&                             target,
                                            int                                             targetAtomIdx,
                                            const MoleculeView&                             query,
                                            BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>& labelMatrix) {

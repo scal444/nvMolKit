@@ -28,6 +28,7 @@
 
 namespace nvMolKit {
 
+using LabelMatrixStorage = FlatBitVect<kMaxTargetAtoms * kMaxQueryAtoms>;
 // SubstructAlgorithm and SubstructMatchResultsHost are defined in substruct_types.h
 
 /**
@@ -215,15 +216,20 @@ struct BatchedPatternEntry {
 struct RecursiveScratchBuffers {
   AsyncDeviceVector<BatchedPatternEntry> patternEntries;
   AsyncDeviceVector<PartialMatch>        overflow;
+  AsyncDeviceVector<LabelMatrixStorage>  labels;
+  AsyncDeviceVector<int>                 targetIndices;
+  AsyncDeviceVector<int>                 queryIndices;
 
-  explicit RecursiveScratchBuffers(cudaStream_t stream) : patternEntries(), overflow() {
+  explicit RecursiveScratchBuffers(cudaStream_t stream)  {
     patternEntries.setStream(stream);
     overflow.setStream(stream);
+    labels.setStream(stream);
   }
 
   void setStream(cudaStream_t stream) {
     patternEntries.setStream(stream);
     overflow.setStream(stream);
+    labels.setStream(stream);
   }
 };
 
