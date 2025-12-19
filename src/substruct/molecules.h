@@ -58,6 +58,10 @@ enum AtomQueryFlags : uint32_t {
   AtomQueryDegree              = 1 << 15,  ///< For [D] degree queries (explicit bond count)
   AtomQueryTotalConnectivity   = 1 << 16,  ///< For [X] total connectivity queries (degree + Hs)
   AtomQueryNeverMatches        = 1 << 17,  ///< Impossible constraint (e.g., [C;a] aromatic aliphatic)
+  AtomQueryRingBondCount       = 1 << 18,  ///< For [x] ring connectivity queries (ring bond count)
+  AtomQueryNumImplicitHs       = 1 << 19,  ///< For [h] implicit hydrogen count queries
+  AtomQueryHasImplicitH        = 1 << 20,  ///< For [h] without number - has any implicit H
+  AtomQueryNumHeteroNeighbors  = 1 << 21,  ///< For heteroatom neighbor count queries
 };
 
 using AtomQuery = uint32_t;

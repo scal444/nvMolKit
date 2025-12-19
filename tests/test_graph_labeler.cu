@@ -2101,94 +2101,138 @@ TEST(AtomDataPackedBitPacking, AromaticAndInRingDoNotAffectDegree) {
   EXPECT_EQ(packed.degree(), 35);
 }
 
-TEST(AtomDataPackedBitPacking, RecursiveMatchesSetAndGet) {
+// Note: Recursive match bits are no longer stored in AtomDataPacked.
+// They are now stored in a separate buffer and passed to evaluateBoolTree.
+// Tests for recursive match bit handling are in test_boolean_tree.cu.
+
+// =============================================================================
+// New AtomDataPacked Field Tests - Ring Bond Count, Implicit H, Heteroatom Neighbors
+// =============================================================================
+
+TEST(AtomDataPackedBitPacking, RingBondCountSetAndGet) {
   nvMolKit::AtomDataPacked packed;
 
-  EXPECT_EQ(packed.recursiveMatches(), 0);
+  EXPECT_EQ(packed.ringBondCount(), 0);
 
-  packed.setRecursiveMatches(0x1234);
-  EXPECT_EQ(packed.recursiveMatches(), 0x1234);
+  packed.setRingBondCount(0);
+  EXPECT_EQ(packed.ringBondCount(), 0);
 
-  packed.setRecursiveMatches(0xFFFF);
-  EXPECT_EQ(packed.recursiveMatches(), 0xFFFF);
+  packed.setRingBondCount(2);
+  EXPECT_EQ(packed.ringBondCount(), 2);
 
-  packed.setRecursiveMatches(0x0000);
-  EXPECT_EQ(packed.recursiveMatches(), 0x0000);
+  packed.setRingBondCount(4);
+  EXPECT_EQ(packed.ringBondCount(), 4);
+
+  packed.setRingBondCount(7);
+  EXPECT_EQ(packed.ringBondCount(), 7);
 }
 
-TEST(AtomDataPackedBitPacking, RecursiveMatchBitSetAndCheck) {
+TEST(AtomDataPackedBitPacking, RingBondCountMaxValue) {
   nvMolKit::AtomDataPacked packed;
 
-  for (int i = 0; i < 16; ++i) {
-    EXPECT_FALSE(packed.hasRecursiveMatch(i));
-  }
-
-  packed.setRecursiveMatchBit(0);
-  EXPECT_TRUE(packed.hasRecursiveMatch(0));
-  EXPECT_FALSE(packed.hasRecursiveMatch(1));
-
-  packed.setRecursiveMatchBit(7);
-  EXPECT_TRUE(packed.hasRecursiveMatch(0));
-  EXPECT_TRUE(packed.hasRecursiveMatch(7));
-  EXPECT_FALSE(packed.hasRecursiveMatch(8));
-
-  packed.setRecursiveMatchBit(8);
-  EXPECT_TRUE(packed.hasRecursiveMatch(8));
-  EXPECT_FALSE(packed.hasRecursiveMatch(9));
-
-  packed.setRecursiveMatchBit(15);
-  EXPECT_TRUE(packed.hasRecursiveMatch(15));
+  packed.setRingBondCount(7);
+  EXPECT_EQ(packed.ringBondCount(), 7);
 }
 
-TEST(AtomDataPackedBitPacking, ClearRecursiveMatches) {
+TEST(AtomDataPackedBitPacking, NumImplicitHsSetAndGet) {
   nvMolKit::AtomDataPacked packed;
 
-  packed.setRecursiveMatches(0xFFFF);
-  EXPECT_EQ(packed.recursiveMatches(), 0xFFFF);
+  EXPECT_EQ(packed.numImplicitHs(), 0);
 
-  packed.clearRecursiveMatches();
-  EXPECT_EQ(packed.recursiveMatches(), 0);
+  packed.setNumImplicitHs(0);
+  EXPECT_EQ(packed.numImplicitHs(), 0);
+
+  packed.setNumImplicitHs(1);
+  EXPECT_EQ(packed.numImplicitHs(), 1);
+
+  packed.setNumImplicitHs(3);
+  EXPECT_EQ(packed.numImplicitHs(), 3);
+
+  packed.setNumImplicitHs(7);
+  EXPECT_EQ(packed.numImplicitHs(), 7);
 }
 
-TEST(AtomDataPackedBitPacking, RecursiveMatchesDoNotAffectOtherFields) {
+TEST(AtomDataPackedBitPacking, NumHeteroatomNeighborsSetAndGet) {
   nvMolKit::AtomDataPacked packed;
 
-  packed.setMinRingSize(5);
-  packed.setNumRings(3);
-  packed.setTotalValence(4);
-  packed.setIsotope(13);
-  packed.setDegree(2);
-  packed.setTotalConnectivity(4);
+  EXPECT_EQ(packed.numHeteroatomNeighbors(), 0);
+
+  packed.setNumHeteroatomNeighbors(0);
+  EXPECT_EQ(packed.numHeteroatomNeighbors(), 0);
+
+  packed.setNumHeteroatomNeighbors(1);
+  EXPECT_EQ(packed.numHeteroatomNeighbors(), 1);
+
+  packed.setNumHeteroatomNeighbors(2);
+  EXPECT_EQ(packed.numHeteroatomNeighbors(), 2);
+
+  packed.setNumHeteroatomNeighbors(7);
+  EXPECT_EQ(packed.numHeteroatomNeighbors(), 7);
+}
+
+TEST(AtomDataPackedBitPacking, NewFieldsIndependent) {
+  nvMolKit::AtomDataPacked packed;
+
+  packed.setRingBondCount(2);
+  packed.setNumImplicitHs(3);
+  packed.setNumHeteroatomNeighbors(1);
+
+  EXPECT_EQ(packed.ringBondCount(), 2);
+  EXPECT_EQ(packed.numImplicitHs(), 3);
+  EXPECT_EQ(packed.numHeteroatomNeighbors(), 1);
+
+  packed.setRingBondCount(5);
+  EXPECT_EQ(packed.ringBondCount(), 5);
+  EXPECT_EQ(packed.numImplicitHs(), 3);
+  EXPECT_EQ(packed.numHeteroatomNeighbors(), 1);
+
+  packed.setNumImplicitHs(0);
+  EXPECT_EQ(packed.ringBondCount(), 5);
+  EXPECT_EQ(packed.numImplicitHs(), 0);
+  EXPECT_EQ(packed.numHeteroatomNeighbors(), 1);
+}
+
+TEST(AtomDataPackedBitPacking, NewFieldsDoNotAffectExistingFields) {
+  nvMolKit::AtomDataPacked packed;
+
+  packed.setAtomicNum(6);
+  packed.setFormalCharge(0);
+  packed.setMinRingSize(6);
+  packed.setNumRings(1);
+  packed.setDegree(3);
   packed.setIsAromatic(true);
   packed.setIsInRing(true);
 
-  packed.setRecursiveMatches(0xABCD);
+  packed.setRingBondCount(2);
+  packed.setNumImplicitHs(1);
+  packed.setNumHeteroatomNeighbors(2);
 
-  EXPECT_EQ(packed.minRingSize(), 5);
-  EXPECT_EQ(packed.numRings(), 3);
-  EXPECT_EQ(packed.totalValence(), 4);
-  EXPECT_EQ(packed.isotope(), 13);
-  EXPECT_EQ(packed.degree(), 2);
-  EXPECT_EQ(packed.totalConnectivity(), 4);
+  EXPECT_EQ(packed.atomicNum(), 6);
+  EXPECT_EQ(packed.formalCharge(), 0);
+  EXPECT_EQ(packed.minRingSize(), 6);
+  EXPECT_EQ(packed.numRings(), 1);
+  EXPECT_EQ(packed.degree(), 3);
   EXPECT_TRUE(packed.isAromatic());
   EXPECT_TRUE(packed.isInRing());
-  EXPECT_EQ(packed.recursiveMatches(), 0xABCD);
+  EXPECT_EQ(packed.ringBondCount(), 2);
+  EXPECT_EQ(packed.numImplicitHs(), 1);
+  EXPECT_EQ(packed.numHeteroatomNeighbors(), 2);
 }
 
-TEST(AtomDataPackedBitPacking, OtherFieldsDoNotAffectRecursiveMatches) {
+TEST(AtomDataPackedBitPacking, ExistingFieldsDoNotAffectNewFields) {
   nvMolKit::AtomDataPacked packed;
 
-  packed.setRecursiveMatches(0x5A5A);
+  packed.setRingBondCount(4);
+  packed.setNumImplicitHs(2);
+  packed.setNumHeteroatomNeighbors(3);
 
-  packed.setMinRingSize(7);
-  EXPECT_EQ(packed.recursiveMatches(), 0x5A5A);
+  packed.setAtomicNum(7);
+  packed.setMinRingSize(5);
+  packed.setDegree(2);
+  packed.setIsAromatic(false);
+  packed.setIsInRing(true);
 
-  packed.setNumRings(2);
-  EXPECT_EQ(packed.recursiveMatches(), 0x5A5A);
-
-  packed.setTotalValence(6);
-  EXPECT_EQ(packed.recursiveMatches(), 0x5A5A);
-
-  packed.setIsotope(14);
-  EXPECT_EQ(packed.recursiveMatches(), 0x5A5A);
+  EXPECT_EQ(packed.ringBondCount(), 4);
+  EXPECT_EQ(packed.numImplicitHs(), 2);
+  EXPECT_EQ(packed.numHeteroatomNeighbors(), 3);
 }

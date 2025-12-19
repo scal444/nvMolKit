@@ -88,8 +88,6 @@ c:1:c:c-2:c(:c:c:1)-[#6]-[#6](-c:3:c(-[#16]-2):c(:c(-[#1]):c(:c:3-[#1])-[$([#1])
 c:1:4:c(:n:c(:n:c:1-[#7](-[#1])-[#6](-[#1])(-[#1])-c:2:c(:c(:c(:o:2)-[#1])-[#1])-[#1])-[#7](-[#1])-c:3:c:c(:c(:c:c:3-[$([#1]),$([#6](-[#1])-[#1]),$([#16;X2]),$([#8]-[#6]-[#1]),$([#7;X3])])-[$([#1]),$([#6](-[#1])-[#1]),$([#16;X2]),$([#8]-[#6]-[#1]),$([#7;X3])])-[$([#1]),$([#6](-[#1])-[#1]),$([#16;X2]),$([#8]-[#6]-[#1]),$([#7;X3])]):c:c:c:c:4
 # Nested recursive SMARTS ($($(...))) are not supported
 [C;H1$(C([#6;!$(C=O)])),H0$(C([#6;!$(C=O)])[#6;!$(C=O)])]=[CH1]!@N([#6;!$(C(=O))])[#6;!$(C(=O))]
-# SMARTS implicit hydrogen count query (h) is not supported
-[C;!$(C[N])](=O)!@[C;h1,h2;H1,H2][F,Cl,Br,I]
 # Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: [n&+][O&-&X1].[n&+][O&-&X1]
 [n+][O-X1].[n+][O-X1]
 # Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: [N&+](=O)[O&-].[N&+](=O)[O&-]
@@ -100,8 +98,6 @@ c:1:4:c(:n:c(:n:c:1-[#7](-[#1])-[#6](-[#1])(-[#1])-c:2:c(:c(:c(:o:2)-[#1])-[#1])
 a-[N+](=O)[O-].a-[N+](=O)[O-]
 # Fragment queries (disconnected SMARTS patterns) are not supported. Query has 3 disconnected components: [#6]OP(=O)(*)O[#6].[#6]OP(=O)(*)O[#6].[#6]OP(=O)(*)O[#6]
 [#6]OP(=O)(*)O[#6].[#6]OP(=O)(*)O[#6].[#6]OP(=O)(*)O[#6]
-# Unsupported SMARTS atom query: AtomHasImplicitH
-[$([!#1!#6!#7!#8!#9!#15!#16!#17!#35!#53]~[*]),$([!#1!#6!#7!#8!#9!#15!#16!#17!#35!#53;h])]
 # Nested recursive SMARTS ($($(...))) are not supported
 [$([C!$(C1(=O)C=CC(=O)C=C1)]C),$([Ch]),$(C[OH0])](=O)C=[C!$(C[Nv3X3,OH])]
 # Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: C#N.C#N

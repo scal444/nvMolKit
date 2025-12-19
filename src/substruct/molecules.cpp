@@ -55,7 +55,10 @@ void populateAtomData(const RDKit::Atom* atom, AtomData& atomData, const RDKit::
   atomData.minRingSize         = ringInfo->minAtomRingSize(idx);
 }
 
-void populateAtomDataPacked(const RDKit::Atom* atom, AtomDataPacked& packed, const RDKit::RingInfo* ringInfo) {
+void populateAtomDataPacked(const RDKit::ROMol* mol,
+                            const RDKit::Atom*  atom,
+                            AtomDataPacked&     packed,
+                            const RDKit::RingInfo* ringInfo) {
   packed.setAtomicNum(atom->getAtomicNum());
   packed.setChiralTag(atom->getChiralTag());
   // Use total H count (explicit + implicit) for SMARTS [H] queries like [NH], [CH3], etc.
@@ -72,11 +75,58 @@ void populateAtomDataPacked(const RDKit::Atom* atom, AtomDataPacked& packed, con
   packed.setHybridization(atom->getHybridization());
   packed.setIsAromatic(atom->getIsAromatic());
   packed.setNumRadicalElectrons(atom->getNumRadicalElectrons());
+
   const int idx      = atom->getIdx();
   const int numRings = ringInfo->numAtomRings(idx);
+  if (numRings > AtomDataPacked::kMax4BitValue) {
+    throw std::runtime_error("Atom ring count " + std::to_string(numRings) +
+                             " exceeds maximum storable value of " +
+                             std::to_string(AtomDataPacked::kMax4BitValue));
+  }
   packed.setNumRings(numRings);
   packed.setMinRingSize(ringInfo->minAtomRingSize(idx));
   packed.setIsInRing(numRings > 0);
+
+  // Ring bond count: count bonds where the bond is in a ring
+  int ringBondCount = 0;
+  auto [beg, bondEnd] = mol->getAtomBonds(atom);
+  while (beg != bondEnd) {
+    const auto* bond = (*mol)[*beg];
+    if (ringInfo->numBondRings(bond->getIdx()) > 0) {
+      ++ringBondCount;
+    }
+    ++beg;
+  }
+  if (ringBondCount > AtomDataPacked::kMax4BitValue) {
+    throw std::runtime_error("Ring bond count " + std::to_string(ringBondCount) +
+                             " exceeds maximum storable value of " +
+                             std::to_string(AtomDataPacked::kMax4BitValue));
+  }
+  packed.setRingBondCount(ringBondCount);
+
+  // Implicit H count for [h] queries
+  const unsigned int numImplicitHs = atom->getNumImplicitHs();
+  if (numImplicitHs > AtomDataPacked::kMax4BitValue) {
+    throw std::runtime_error("Implicit H count " + std::to_string(numImplicitHs) +
+                             " exceeds maximum storable value of " +
+                             std::to_string(AtomDataPacked::kMax4BitValue));
+  }
+  packed.setNumImplicitHs(numImplicitHs);
+
+  // Heteroatom neighbor count: neighbors that are not C or H
+  int numHeteroNeighbors = 0;
+  for (const auto* neighbor : mol->atomNeighbors(atom)) {
+    const int neighborAtomicNum = neighbor->getAtomicNum();
+    if (neighborAtomicNum != 6 && neighborAtomicNum != 1) {
+      ++numHeteroNeighbors;
+    }
+  }
+  if (numHeteroNeighbors > AtomDataPacked::kMax4BitValue) {
+    throw std::runtime_error("Heteroatom neighbor count " + std::to_string(numHeteroNeighbors) +
+                             " exceeds maximum storable value of " +
+                             std::to_string(AtomDataPacked::kMax4BitValue));
+  }
+  packed.setNumHeteroatomNeighbors(numHeteroNeighbors);
 
   // Isotope (0 = natural abundance)
   unsigned int isotope = atom->getIsotope();
@@ -479,15 +529,23 @@ AtomQuery atomQueryFromDescription(const std::string& description) {
     return AtomQueryTotalConnectivity;
   }
 
-  // Unsupported SMARTS primitives - throw instead of silently ignoring
+  // Ring bond count [x] queries
   if (description == "AtomRingBondCount") {
-    throw std::runtime_error("SMARTS ring connectivity query (x) is not supported");
+    return AtomQueryRingBondCount;
   }
   if (description == "AtomTotalValence") {
     return AtomQueryTotalValence;
   }
+  // Implicit H count [h] queries
   if (description == "AtomImplicitHCount") {
-    throw std::runtime_error("SMARTS implicit hydrogen count query (h) is not supported");
+    return AtomQueryNumImplicitHs;
+  }
+  if (description == "AtomHasImplicitH") {
+    return AtomQueryHasImplicitH;
+  }
+  // Heteroatom neighbor count queries
+  if (description == "AtomNumHeteroatomNeighbors") {
+    return AtomQueryNumHeteroNeighbors;
   }
   if (description == "AtomMass" || description == "AtomIsotope") {
     return AtomQueryIsotope;
@@ -570,12 +628,28 @@ AtomQueryMask buildQueryMask(const AtomDataPacked& queryAtom, AtomQuery queryFla
     setLoField(AtomDataPacked::kHybridizationByte, queryAtom.hybridization());
   }
 
+  // Helper lambda to set mask and expected for a 4-bit field in the upper 64 bits
+  auto setHi4BitField = [&](int byteOffset, int bitOffset, uint8_t value) {
+    const uint64_t shift = byteOffset * 8 + bitOffset;
+    m.maskHi |= static_cast<uint64_t>(AtomDataPacked::k4BitMask) << shift;
+    m.expectedHi |= static_cast<uint64_t>(value & AtomDataPacked::k4BitMask) << shift;
+  };
+
   // Upper 64-bit fields
   if (queryFlags & AtomQueryMinRingSize) {
     setHiField(AtomDataPacked::kMinRingSizeByte, queryAtom.minRingSize());
   }
   if (queryFlags & AtomQueryNumRings) {
-    setHiField(AtomDataPacked::kNumRingsByte, queryAtom.numRings());
+    setHi4BitField(AtomDataPacked::kNumRingsRingBondsByte, AtomDataPacked::kNumRingsBits, queryAtom.numRings());
+  }
+  if (queryFlags & AtomQueryRingBondCount) {
+    setHi4BitField(AtomDataPacked::kNumRingsRingBondsByte, AtomDataPacked::kRingBondCountBits, queryAtom.ringBondCount());
+  }
+  if (queryFlags & AtomQueryNumImplicitHs) {
+    setHi4BitField(AtomDataPacked::kImplicitHsHeterosByte, AtomDataPacked::kNumImplicitHsBits, queryAtom.numImplicitHs());
+  }
+  if (queryFlags & AtomQueryNumHeteroNeighbors) {
+    setHi4BitField(AtomDataPacked::kImplicitHsHeterosByte, AtomDataPacked::kNumHeteroNeighborBits, queryAtom.numHeteroatomNeighbors());
   }
   if (queryFlags & AtomQueryTotalValence) {
     setHiField(AtomDataPacked::kTotalValenceByte, queryAtom.totalValence());
@@ -685,6 +759,47 @@ struct QueryTreeBuilder {
   }
 
   /**
+   * @brief Add a comparison instruction (for GreaterThan, LessEqual, GreaterEqual).
+   * @param op The comparison operation
+   * @param field The field to compare
+   * @param value The value to compare against
+   * @return Scratch index where the result will be stored
+   */
+  uint8_t addCompare(BoolOp op, CompareField field, uint8_t value) {
+    const uint8_t dst = allocateScratch();
+    switch (op) {
+      case BoolOp::GreaterThan:
+        instructions.push_back(BoolInstruction::makeGreaterThan(dst, field, value));
+        break;
+      case BoolOp::LessEqual:
+        instructions.push_back(BoolInstruction::makeLessEqual(dst, field, value));
+        break;
+      case BoolOp::GreaterEqual:
+        instructions.push_back(BoolInstruction::makeGreaterEqual(dst, field, value));
+        break;
+      default:
+        break;
+    }
+    return dst;
+  }
+
+  /**
+   * @brief Add a range comparison instruction.
+   * @param op Should be BoolOp::Range
+   * @param field The field to compare
+   * @param minVal Minimum value (inclusive)
+   * @param maxVal Maximum value (inclusive)
+   * @return Scratch index where the result will be stored
+   */
+  uint8_t addCompare(BoolOp op, CompareField field, uint8_t minVal, uint8_t maxVal) {
+    const uint8_t dst = allocateScratch();
+    if (op == BoolOp::Range) {
+      instructions.push_back(BoolInstruction::makeRange(dst, field, minVal, maxVal));
+    }
+    return dst;
+  }
+
+  /**
    * @brief Check if the tree exceeds scratch limits.
    */
   bool exceedsScratchLimit() const { return nextScratchIdx > kMaxBoolScratchSize; }
@@ -708,7 +823,59 @@ struct QueryTreeBuilder {
 };
 
 /**
- * @brief Check if a query subtree contains only AND operations (no OR/NOT/Recursive).
+ * @brief Check if a query description is a comparison (range) query type.
+ *
+ * RDKit encodes range queries with prefixes: less_, greater_, range_
+ * These require comparison instructions rather than mask/expected matching.
+ */
+bool isComparisonQuery(const std::string& desc) {
+  return desc.rfind("less_", 0) == 0 ||
+         desc.rfind("greater_", 0) == 0 ||
+         desc.rfind("range_", 0) == 0;
+}
+
+/**
+ * @brief Map a base query description to its CompareField enum.
+ */
+CompareField getCompareField(const std::string& baseDesc) {
+  if (baseDesc == "AtomMinRingSize") {
+    return CompareField::MinRingSize;
+  } else if (baseDesc == "AtomInNRings") {
+    return CompareField::NumRings;
+  } else if (baseDesc == "AtomRingBondCount") {
+    return CompareField::RingBondCount;
+  } else if (baseDesc == "AtomImplicitHCount") {
+    return CompareField::NumImplicitHs;
+  } else if (baseDesc == "AtomNumHeteroatomNeighbors") {
+    return CompareField::NumHeteroatomNeighbors;
+  } else if (baseDesc == "AtomTotalValence") {
+    return CompareField::TotalValence;
+  } else if (baseDesc == "AtomExplicitDegree") {
+    return CompareField::Degree;
+  } else if (baseDesc == "AtomHCount") {
+    return CompareField::NumExplicitHs;
+  }
+  throw std::runtime_error("Unsupported comparison field: " + baseDesc);
+}
+
+/**
+ * @brief Extract the base query name from a comparison query description.
+ *
+ * E.g., "range_AtomMinRingSize" -> "AtomMinRingSize"
+ */
+std::string getBaseQueryName(const std::string& desc) {
+  if (desc.rfind("less_", 0) == 0) {
+    return desc.substr(5);
+  } else if (desc.rfind("greater_", 0) == 0) {
+    return desc.substr(8);
+  } else if (desc.rfind("range_", 0) == 0) {
+    return desc.substr(6);
+  }
+  return desc;
+}
+
+/**
+ * @brief Check if a query subtree contains only AND operations (no OR/NOT/Recursive/Comparison).
  */
 bool isAndOnlyQuery(const RDKit::Atom::QUERYATOM_QUERY* query) {
   if (query->getNegation()) {
@@ -717,6 +884,11 @@ bool isAndOnlyQuery(const RDKit::Atom::QUERYATOM_QUERY* query) {
 
   const std::string desc = query->getDescription();
   if (desc == "AtomOr" || desc == "AtomXor" || desc == "RecursiveStructure") {
+    return false;
+  }
+
+  // Comparison queries require special handling
+  if (isComparisonQuery(desc) || desc == "AtomHasImplicitH") {
     return false;
   }
 
@@ -848,6 +1020,43 @@ void collectAndOnlyFlags(const RDKit::Atom::QUERYATOM_QUERY* query,
       flags |= AtomQueryTotalValence;
       packed.setTotalValence(eqQuery->getVal());
     }
+  } else if (desc == "AtomRingBondCount") {
+    int val = eqQuery->getVal();
+    if (val > AtomDataPacked::kMax4BitValue) {
+      throw std::runtime_error("Ring bond count query value " + std::to_string(val) +
+                               " exceeds maximum storable value of " +
+                               std::to_string(AtomDataPacked::kMax4BitValue));
+    }
+    if (!checkConflict(AtomQueryRingBondCount, packed.ringBondCount(), static_cast<uint8_t>(val))) {
+      flags |= AtomQueryRingBondCount;
+      packed.setRingBondCount(val);
+    }
+  } else if (desc == "AtomImplicitHCount") {
+    int val = eqQuery->getVal();
+    if (val > AtomDataPacked::kMax4BitValue) {
+      throw std::runtime_error("Implicit H count query value " + std::to_string(val) +
+                               " exceeds maximum storable value of " +
+                               std::to_string(AtomDataPacked::kMax4BitValue));
+    }
+    if (!checkConflict(AtomQueryNumImplicitHs, packed.numImplicitHs(), static_cast<uint8_t>(val))) {
+      flags |= AtomQueryNumImplicitHs;
+      packed.setNumImplicitHs(val);
+    }
+  } else if (desc == "AtomHasImplicitH") {
+    // [h] without a number - check if numImplicitHs > 0
+    // This is handled specially during matching via comparison
+    flags |= AtomQueryHasImplicitH;
+  } else if (desc == "AtomNumHeteroatomNeighbors") {
+    int val = eqQuery->getVal();
+    if (val > AtomDataPacked::kMax4BitValue) {
+      throw std::runtime_error("Heteroatom neighbor count query value " + std::to_string(val) +
+                               " exceeds maximum storable value of " +
+                               std::to_string(AtomDataPacked::kMax4BitValue));
+    }
+    if (!checkConflict(AtomQueryNumHeteroNeighbors, packed.numHeteroatomNeighbors(), static_cast<uint8_t>(val))) {
+      flags |= AtomQueryNumHeteroNeighbors;
+      packed.setNumHeteroatomNeighbors(val);
+    }
   } else if (desc == "AtomMass" || desc == "AtomIsotope") {
     int isotope = eqQuery->getVal();
     if (isotope > 255) {
@@ -889,6 +1098,9 @@ uint8_t processQueryTree(const RDKit::Atom::QUERYATOM_QUERY* query,
                          int&                                nextPatternId) {
   const std::string desc      = query->getDescription();
   const bool        isNegated = query->getNegation();
+
+  // std::cerr << "[QUERY] desc=\"" << desc << "\" negated=" << isNegated
+  //           << " isComparisonQuery=" << isComparisonQuery(desc) << std::endl;
 
   // Handle AND-only subtrees efficiently by merging into a single leaf
   if (!isNegated && isAndOnlyQuery(query)) {
@@ -958,6 +1170,50 @@ uint8_t processQueryTree(const RDKit::Atom::QUERYATOM_QUERY* query,
                                std::to_string(AtomDataPacked::kMaxRecursivePatterns) + " supported)");
     }
     uint8_t result = builder.addRecursiveMatch(static_cast<uint8_t>(nextPatternId++));
+    if (isNegated) {
+      result = builder.addNot(result);
+    }
+    return result;
+  }
+
+  // Handle [h] (has implicit H) query - check if numImplicitHs > 0
+  if (desc == "AtomHasImplicitH") {
+    uint8_t result = builder.addCompare(BoolOp::GreaterThan, CompareField::NumImplicitHs, 0);
+    if (isNegated) {
+      result = builder.addNot(result);
+    }
+    return result;
+  }
+
+  // Handle comparison queries (less_, greater_, range_ prefixes)
+  if (isComparisonQuery(desc)) {
+    const std::string baseDesc = getBaseQueryName(desc);
+    const CompareField field = getCompareField(baseDesc);
+    // Cast to ATOM_EQUALS_QUERY to access getVal()/getTol() - all numeric query types derive from this
+    const auto* eqQuery = static_cast<const RDKit::ATOM_EQUALS_QUERY*>(query);
+    const int queryVal = eqQuery->getVal();
+    const int queryTol = eqQuery->getTol();
+
+    uint8_t result;
+    if (desc.rfind("less_", 0) == 0) {
+      // RDKit's "less_" means the value is a LOWER bound (field >= val)
+      // This is counterintuitive but matches RDKit's actual behavior
+      result = builder.addCompare(BoolOp::GreaterEqual, field, static_cast<uint8_t>(queryVal));
+    } else if (desc.rfind("greater_", 0) == 0) {
+      // RDKit's "greater_" means the value is an UPPER bound (field <= val)
+      result = builder.addCompare(BoolOp::LessEqual, field, static_cast<uint8_t>(queryVal));
+    } else {
+      // range_ - RDKit stores bounds in getLower()/getUpper(), not getVal()/getTol()
+      const auto* rangeQuery = static_cast<const RDKit::ATOM_RANGE_QUERY*>(query);
+      int minVal = rangeQuery->getLower();
+      int maxVal = rangeQuery->getUpper();
+      if (minVal < 0) minVal = 0;
+      if (maxVal > 255) maxVal = 255;
+      result = builder.addCompare(BoolOp::Range, field,
+                                   static_cast<uint8_t>(minVal),
+                                   static_cast<uint8_t>(maxVal));
+    }
+
     if (isNegated) {
       result = builder.addNot(result);
     }
@@ -1139,7 +1395,7 @@ void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
     populateAtomData(atom, thisAtomData, ringInfo);
 
     auto& thisAtomPacked = atomDataPackedVec.emplace_back();
-    populateAtomDataPacked(atom, thisAtomPacked, ringInfo);
+    populateAtomDataPacked(mol, atom, thisAtomPacked, ringInfo);
 
     auto& thisBondCounts = bondTypeCountsVec.emplace_back();
     populateBondTypeCounts(mol, atom, thisBondCounts);
@@ -1228,6 +1484,12 @@ void populateQueryAtomDataPacked(const RDKit::Atom* atom, AtomDataPacked& packed
       packed.setDegree(eqQuery->getVal());
     } else if (desc == "AtomTotalDegree") {
       packed.setTotalConnectivity(eqQuery->getVal());
+    } else if (desc == "AtomRingBondCount") {
+      packed.setRingBondCount(eqQuery->getVal());
+    } else if (desc == "AtomImplicitHCount") {
+      packed.setNumImplicitHs(eqQuery->getVal());
+    } else if (desc == "AtomNumHeteroatomNeighbors") {
+      packed.setNumHeteroatomNeighbors(eqQuery->getVal());
     }
   };
 

@@ -430,22 +430,104 @@ INSTANTIATE_TEST_SUITE_P(
 // =============================================================================
 
 
-TEST(QueryCompositeTest, RingConnectivityQueryThrows) {
-  // [x2] ring connectivity query
+TEST(QueryCompositeTest, RingConnectivityQuerySucceeds) {
+  // [x2] ring connectivity query - atoms with 2 ring bonds
   auto mol = makeQuery("[x2]");
   ASSERT_NE(mol, nullptr);
 
   MoleculesHost batch;
-  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_EQ(batch.numMolecules(), 1);
 }
 
-TEST(QueryCompositeTest, ImplicitHCountQueryThrows) {
+TEST(QueryCompositeTest, RingConnectivityWithAtomTypeSucceeds) {
+  // [Cx2] carbon with 2 ring bonds
+  auto mol = makeQuery("[Cx2]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_EQ(batch.numMolecules(), 1);
+}
+
+TEST(QueryCompositeTest, ImplicitHCountQuerySucceeds) {
   // [h1] implicit H count query
   auto mol = makeQuery("[h1]");
   ASSERT_NE(mol, nullptr);
 
   MoleculesHost batch;
-  EXPECT_THROW(nvMolKit::addQueryToBatch(mol.get(), batch), std::runtime_error);
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_EQ(batch.numMolecules(), 1);
+}
+
+TEST(QueryCompositeTest, HasImplicitHQuerySucceeds) {
+  // [h] has any implicit hydrogens
+  auto mol = makeQuery("[h]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_EQ(batch.numMolecules(), 1);
+}
+
+TEST(QueryCompositeTest, RangRingSizeQuerySucceeds) {
+  // [r{5-7}] ring size in range 5-7
+  auto mol = makeQuery("[r{5-7}]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_EQ(batch.numMolecules(), 1);
+}
+
+TEST(QueryCompositeTest, LessRingSizeQuerySucceeds) {
+  // [r{-6}] ring size <= 6
+  auto mol = makeQuery("[r{-6}]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_EQ(batch.numMolecules(), 1);
+}
+
+TEST(QueryCompositeTest, GreaterRingSizeQuerySucceeds) {
+  // [r{5-}] ring size >= 5
+  auto mol = makeQuery("[r{5-}]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_EQ(batch.numMolecules(), 1);
+}
+
+TEST(QueryCompositeTest, RangeNumRingsQuerySucceeds) {
+  // [R{1-3}] in 1-3 rings
+  auto mol = makeQuery("[R{1-3}]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_EQ(batch.numMolecules(), 1);
+}
+
+TEST(QueryCompositeTest, HeteroatomNeighborsQuerySucceeds) {
+  // [z1] atom with 1 heteroatom neighbor (RDKit extension)
+  auto mol = makeQuery("[z1]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_EQ(batch.numMolecules(), 1);
+}
+
+TEST(QueryCompositeTest, RangeHeteroatomNeighborsQuerySucceeds) {
+  // [z{1-2}] atom with 1-2 heteroatom neighbors
+  auto mol = makeQuery("[z{1-2}]");
+  ASSERT_NE(mol, nullptr);
+
+  MoleculesHost batch;
+  EXPECT_NO_THROW(nvMolKit::addQueryToBatch(mol.get(), batch));
+  EXPECT_EQ(batch.numMolecules(), 1);
 }
 
 TEST(QueryCompositeTest, ChiralityQueryThrows) {

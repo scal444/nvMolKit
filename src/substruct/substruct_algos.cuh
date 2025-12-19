@@ -613,9 +613,8 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
 
         if constexpr (kDebugGSI) {
           if (pIdx == 0 && t < 5 && level <= 3) {
-            printf("[GSI] Level %d partial 0 cand %d: labelOk=%d, notUsed=%d, edgeOk=%d, valid=%d, recBits=0x%04x\n",
-                   level, t, labelOk ? 1 : 0, notUsed ? 1 : 0, edgeOk ? 1 : 0, valid ? 1 : 0,
-                   (t < numTargetAtoms) ? target.getAtomPacked(t).recursiveMatches() : 0);
+            printf("[GSI] Level %d partial 0 cand %d: labelOk=%d, notUsed=%d, edgeOk=%d, valid=%d\n",
+                   level, t, labelOk ? 1 : 0, notUsed ? 1 : 0, edgeOk ? 1 : 0, valid ? 1 : 0);
           }
         }
 
@@ -997,9 +996,8 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
 
           if constexpr (kDebugWUS) {
             if (warpId == 0 && cIdx < 5 && iterCount <= 5) {
-              printf("[WUS] Phase3 iter %d cand %d: targetAtom=%d, notUsed=%d, edgeOk=%d, valid=%d, recBits=0x%04x\n",
-                     iterCount, cIdx, targetAtom, notUsed ? 1 : 0, edgeOk ? 1 : 0, valid ? 1 : 0,
-                     (targetAtom >= 0 && targetAtom < numTargetAtoms) ? target.getAtomPacked(targetAtom).recursiveMatches() : 0);
+              printf("[WUS] Phase3 iter %d cand %d: targetAtom=%d, notUsed=%d, edgeOk=%d, valid=%d\n",
+                     iterCount, cIdx, targetAtom, notUsed ? 1 : 0, edgeOk ? 1 : 0, valid ? 1 : 0);
             }
           }
         }

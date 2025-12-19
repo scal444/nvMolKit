@@ -1909,6 +1909,228 @@ TEST_P(SubstructureSearchTest, NegatedBondType) {
 }
 
 
+// =============================================================================
+// New Query Type Tests - Ring Bond Count, Implicit H, Heteroatom Neighbors, Ranges
+// =============================================================================
+
+TEST_P(SubstructureSearchTest, RingBondCountQuery) {
+  // [x2] matches atoms with exactly 2 ring bonds (e.g., atoms in a single ring)
+  // [x4] matches atoms with 4 ring bonds (e.g., bridgehead atoms in fused rings)
+  struct TestCase {
+    std::string target;
+    std::string query;
+    std::string description;
+  };
+
+  const std::vector<TestCase> cases = {
+    {"C1CCCCC1", "[x2]", "Cyclohexane atoms have 2 ring bonds"},
+    {"C1CCC2CCCCC2C1", "[x4]", "Decalin bridgehead atoms have 4 ring bonds"},
+    {"c1ccccc1", "[cx2]", "Benzene aromatic carbons have 2 ring bonds"},
+    {"c1ccc2ccccc2c1", "[cx3]", "Naphthalene fusion atoms have 3 ring bonds"},
+  };
+
+  for (const auto& tc : cases) {
+    MoleculesHost                              targetsHost;
+    MoleculesHost                              queriesHost;
+    std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+    std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+    buildBatches({tc.target}, {tc.query}, targetsHost, queriesHost, targetMols, queryMols);
+
+    MoleculesDevice targetsDevice(stream_.stream());
+    MoleculesDevice queriesDevice(stream_.stream());
+    targetsDevice.copyFromHost(targetsHost);
+    queriesDevice.copyFromHost(queriesHost);
+
+    SubstructMatchResultsDevice resultsDevice(stream_.stream());
+    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                        resultsDevice, algorithm(), stream_.stream());
+
+    SubstructMatchResultsHost resultsHost;
+    resultsDevice.copyToHost(resultsHost);
+    cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+    auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+    EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+        << tc.description << " - " << tc.query << " on " << tc.target;
+  }
+}
+
+TEST_P(SubstructureSearchTest, ImplicitHCountQuery) {
+  // [h1] matches atoms with exactly 1 implicit hydrogen
+  // [h] matches atoms with any implicit hydrogens
+  struct TestCase {
+    std::string target;
+    std::string query;
+    std::string description;
+  };
+
+  const std::vector<TestCase> cases = {
+    {"CC", "[h3]", "Methyl carbons have 3 implicit H"},
+    {"CC", "[h]", "Both carbons have implicit H"},
+    {"CC(C)C", "[h1]", "Central carbon in isobutane has 1 implicit H"},
+    {"C(C)(C)(C)C", "[h0]", "Quaternary carbon has 0 implicit H"},
+    {"N", "[Nh2]", "NH3 nitrogen has 2 implicit H (one is explicit in SMILES)"},
+  };
+
+  for (const auto& tc : cases) {
+    MoleculesHost                              targetsHost;
+    MoleculesHost                              queriesHost;
+    std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+    std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+    buildBatches({tc.target}, {tc.query}, targetsHost, queriesHost, targetMols, queryMols);
+
+    MoleculesDevice targetsDevice(stream_.stream());
+    MoleculesDevice queriesDevice(stream_.stream());
+    targetsDevice.copyFromHost(targetsHost);
+    queriesDevice.copyFromHost(queriesHost);
+
+    SubstructMatchResultsDevice resultsDevice(stream_.stream());
+    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                        resultsDevice, algorithm(), stream_.stream());
+
+    SubstructMatchResultsHost resultsHost;
+    resultsDevice.copyToHost(resultsHost);
+    cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+    auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+    EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+        << tc.description << " - " << tc.query << " on " << tc.target;
+  }
+}
+
+TEST_P(SubstructureSearchTest, HeteroatomNeighborsQuery) {
+  // [z1] matches atoms with exactly 1 heteroatom neighbor
+  // [z2] matches atoms with 2 heteroatom neighbors
+  struct TestCase {
+    std::string target;
+    std::string query;
+    std::string description;
+  };
+
+  const std::vector<TestCase> cases = {
+    {"CCO", "[Cz1]", "Carbon next to oxygen has 1 heteroatom neighbor"},
+    {"OCCO", "[Cz2]", "Central carbons in ethylene glycol have 2 heteroatom neighbors"},
+    {"CCN", "[Cz1]", "Carbon next to nitrogen has 1 heteroatom neighbor"},
+    {"NCCN", "[Cz1]", "Central carbons in EDA each have 1 heteroatom neighbor"},
+    {"CCCC", "[Cz0]", "Alkane carbons have 0 heteroatom neighbors"},
+  };
+
+  for (const auto& tc : cases) {
+    MoleculesHost                              targetsHost;
+    MoleculesHost                              queriesHost;
+    std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+    std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+    buildBatches({tc.target}, {tc.query}, targetsHost, queriesHost, targetMols, queryMols);
+
+    MoleculesDevice targetsDevice(stream_.stream());
+    MoleculesDevice queriesDevice(stream_.stream());
+    targetsDevice.copyFromHost(targetsHost);
+    queriesDevice.copyFromHost(queriesHost);
+
+    SubstructMatchResultsDevice resultsDevice(stream_.stream());
+    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                        resultsDevice, algorithm(), stream_.stream());
+
+    SubstructMatchResultsHost resultsHost;
+    resultsDevice.copyToHost(resultsHost);
+    cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+    auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+    EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+        << tc.description << " - " << tc.query << " on " << tc.target;
+  }
+}
+
+TEST_P(SubstructureSearchTest, RangeRingSizeQuery) {
+  // [r{5-7}] matches atoms in rings of size 5, 6, or 7
+  // [r{-6}] matches atoms in rings of size <= 6
+  // [r{5-}] matches atoms in rings of size >= 5
+  struct TestCase {
+    std::string target;
+    std::string query;
+    std::string description;
+  };
+
+  const std::vector<TestCase> cases = {
+    {"C1CCCC1", "[r{5-6}]", "Cyclopentane atoms match [r{5-6}]"},
+    {"C1CCCCC1", "[r{5-6}]", "Cyclohexane atoms match [r{5-6}]"},
+    {"C1CCCCC1", "[r{-6}]", "Cyclohexane atoms match [r{-6}] (ring size <= 6)"},
+    {"C1CCCCCCC1", "[r{5-}]", "Cyclooctane atoms match [r{5-}] (ring size >= 5)"},
+    {"C1CC1", "[r{-4}]", "Cyclopropane atoms match [r{-4}] (ring size <= 4)"},
+  };
+
+  for (const auto& tc : cases) {
+    MoleculesHost                              targetsHost;
+    MoleculesHost                              queriesHost;
+    std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+    std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+    buildBatches({tc.target}, {tc.query}, targetsHost, queriesHost, targetMols, queryMols);
+
+    MoleculesDevice targetsDevice(stream_.stream());
+    MoleculesDevice queriesDevice(stream_.stream());
+    targetsDevice.copyFromHost(targetsHost);
+    queriesDevice.copyFromHost(queriesHost);
+
+    SubstructMatchResultsDevice resultsDevice(stream_.stream());
+    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                        resultsDevice, algorithm(), stream_.stream());
+
+    SubstructMatchResultsHost resultsHost;
+    resultsDevice.copyToHost(resultsHost);
+    cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+    auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+    EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+        << tc.description << " - " << tc.query << " on " << tc.target;
+  }
+}
+
+TEST_P(SubstructureSearchTest, RangeNumRingsQuery) {
+  // [R{1-2}] matches atoms in 1 or 2 rings
+  struct TestCase {
+    std::string target;
+    std::string query;
+    std::string description;
+  };
+
+  const std::vector<TestCase> cases = {
+    {"C1CCCCC1", "[R{1-2}]", "Cyclohexane atoms are in exactly 1 ring"},
+    {"C1CCC2CCCCC2C1", "[R{2-}]", "Decalin bridgehead atoms are in 2 rings"},
+    {"c1ccc2ccccc2c1", "[R{1-2}]", "Naphthalene atoms are in 1-2 rings"},
+  };
+
+  for (const auto& tc : cases) {
+    MoleculesHost                              targetsHost;
+    MoleculesHost                              queriesHost;
+    std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+    std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+    buildBatches({tc.target}, {tc.query}, targetsHost, queriesHost, targetMols, queryMols);
+
+    MoleculesDevice targetsDevice(stream_.stream());
+    MoleculesDevice queriesDevice(stream_.stream());
+    targetsDevice.copyFromHost(targetsHost);
+    queriesDevice.copyFromHost(queriesHost);
+
+    SubstructMatchResultsDevice resultsDevice(stream_.stream());
+    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                        resultsDevice, algorithm(), stream_.stream());
+
+    SubstructMatchResultsHost resultsHost;
+    resultsDevice.copyToHost(resultsHost);
+    cudaCheckError(cudaStreamSynchronize(stream_.stream()));
+
+    auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+    EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+        << tc.description << " - " << tc.query << " on " << tc.target;
+  }
+}
+
+
 // KEEP this as the last test
 TEST_P(SubstructureSearchTest, SingleMolSingleQueryForDebugging) {
   MoleculesHost                              targetsHost;

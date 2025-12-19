@@ -632,6 +632,22 @@ __global__ void evaluateBoolTreeKernel(const AtomDataPacked*  targets,
   results[idx] = evaluateBoolTree(&targets[idx], &targetBonds[idx], leafMasks, leafBonds, instructions, trees[0]) ? 1 : 0;
 }
 
+__global__ void evaluateBoolTreeWithRecursiveKernel(const AtomDataPacked*  targets,
+                                                    const BondTypeCounts*  targetBonds,
+                                                    const AtomQueryMask*   leafMasks,
+                                                    const BondTypeCounts*  leafBonds,
+                                                    const BoolInstruction* instructions,
+                                                    const AtomQueryTree*   trees,
+                                                    const uint32_t*        recursiveMatchBits,
+                                                    int                    numTargets,
+                                                    int*                   results) {
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= numTargets) {
+    return;
+  }
+  results[idx] = evaluateBoolTree(&targets[idx], &targetBonds[idx], leafMasks, leafBonds, instructions, trees[0], recursiveMatchBits[idx]) ? 1 : 0;
+}
+
 // =============================================================================
 // evaluateBoolTree Device Tests
 // =============================================================================
@@ -878,13 +894,15 @@ TEST(BoolInstructionTest, MakeRecursiveMatchSetsCorrectFields) {
 
 TEST_F(BoolTreeDeviceTest, RecursiveMatchChecksPatternBit) {
   std::vector<AtomDataPacked> targets(4);
-  targets[0].setRecursiveMatchBit(0);
-  targets[1].setRecursiveMatchBit(1);
-  targets[2].setRecursiveMatchBit(0);
-  targets[2].setRecursiveMatchBit(1);
-  // targets[3] has no bits set
-
   std::vector<BondTypeCounts> targetBonds(4);
+
+  // Recursive match bits are now passed separately, not stored in AtomDataPacked
+  std::vector<uint32_t> recursiveMatchBits = {
+    1u << 0,        // target 0: pattern 0 bit set
+    1u << 1,        // target 1: pattern 1 bit set
+    (1u << 0) | (1u << 1),  // target 2: both patterns set
+    0               // target 3: no bits set
+  };
 
   std::vector<AtomQueryMask> leafMasks;
   std::vector<BondTypeCounts> leafBonds;
@@ -900,16 +918,19 @@ TEST_F(BoolTreeDeviceTest, RecursiveMatchChecksPatternBit) {
   AsyncDeviceVector<BondTypeCounts>  leafBondsDev(1, stream_->stream());
   AsyncDeviceVector<BoolInstruction> instructionsDev(instructions.size(), stream_->stream());
   AsyncDeviceVector<AtomQueryTree>   treesDev(trees.size(), stream_->stream());
+  AsyncDeviceVector<uint32_t>        recursiveMatchBitsDev(recursiveMatchBits.size(), stream_->stream());
   AsyncDeviceVector<int>             resultsDev(targets.size(), stream_->stream());
 
   targetsDev.copyFromHost(targets);
   targetBondsDev.copyFromHost(targetBonds);
   instructionsDev.copyFromHost(instructions);
   treesDev.copyFromHost(trees);
+  recursiveMatchBitsDev.copyFromHost(recursiveMatchBits);
 
-  evaluateBoolTreeKernel<<<1, 4, 0, stream_->stream()>>>(
+  evaluateBoolTreeWithRecursiveKernel<<<1, 4, 0, stream_->stream()>>>(
     targetsDev.data(), targetBondsDev.data(), leafMasksDev.data(), leafBondsDev.data(),
-    instructionsDev.data(), treesDev.data(), static_cast<int>(targets.size()), resultsDev.data());
+    instructionsDev.data(), treesDev.data(), recursiveMatchBitsDev.data(),
+    static_cast<int>(targets.size()), resultsDev.data());
   cudaCheckError(cudaGetLastError());
 
   std::vector<int> results(targets.size());
@@ -924,13 +945,15 @@ TEST_F(BoolTreeDeviceTest, RecursiveMatchChecksPatternBit) {
 
 TEST_F(BoolTreeDeviceTest, RecursiveMatchWithOr) {
   std::vector<AtomDataPacked> targets(4);
-  targets[0].setRecursiveMatchBit(0);
-  targets[1].setRecursiveMatchBit(1);
-  targets[2].setRecursiveMatchBit(0);
-  targets[2].setRecursiveMatchBit(1);
-  // targets[3] has no bits set
-
   std::vector<BondTypeCounts> targetBonds(4);
+
+  // Recursive match bits are now passed separately
+  std::vector<uint32_t> recursiveMatchBits = {
+    1u << 0,        // target 0: pattern 0 bit set
+    1u << 1,        // target 1: pattern 1 bit set
+    (1u << 0) | (1u << 1),  // target 2: both patterns set
+    0               // target 3: no bits set
+  };
 
   std::vector<AtomQueryMask> leafMasks;
   std::vector<BondTypeCounts> leafBonds;
@@ -948,16 +971,19 @@ TEST_F(BoolTreeDeviceTest, RecursiveMatchWithOr) {
   AsyncDeviceVector<BondTypeCounts>  leafBondsDev(1, stream_->stream());
   AsyncDeviceVector<BoolInstruction> instructionsDev(instructions.size(), stream_->stream());
   AsyncDeviceVector<AtomQueryTree>   treesDev(trees.size(), stream_->stream());
+  AsyncDeviceVector<uint32_t>        recursiveMatchBitsDev(recursiveMatchBits.size(), stream_->stream());
   AsyncDeviceVector<int>             resultsDev(targets.size(), stream_->stream());
 
   targetsDev.copyFromHost(targets);
   targetBondsDev.copyFromHost(targetBonds);
   instructionsDev.copyFromHost(instructions);
   treesDev.copyFromHost(trees);
+  recursiveMatchBitsDev.copyFromHost(recursiveMatchBits);
 
-  evaluateBoolTreeKernel<<<1, 4, 0, stream_->stream()>>>(
+  evaluateBoolTreeWithRecursiveKernel<<<1, 4, 0, stream_->stream()>>>(
     targetsDev.data(), targetBondsDev.data(), leafMasksDev.data(), leafBondsDev.data(),
-    instructionsDev.data(), treesDev.data(), static_cast<int>(targets.size()), resultsDev.data());
+    instructionsDev.data(), treesDev.data(), recursiveMatchBitsDev.data(),
+    static_cast<int>(targets.size()), resultsDev.data());
   cudaCheckError(cudaGetLastError());
 
   std::vector<int> results(targets.size());
@@ -972,10 +998,13 @@ TEST_F(BoolTreeDeviceTest, RecursiveMatchWithOr) {
 
 TEST_F(BoolTreeDeviceTest, RecursiveMatchNegated) {
   std::vector<AtomDataPacked> targets(2);
-  targets[0].setRecursiveMatchBit(0);
-  // targets[1] has no bits set
-
   std::vector<BondTypeCounts> targetBonds(2);
+
+  // Recursive match bits are now passed separately
+  std::vector<uint32_t> recursiveMatchBits = {
+    1u << 0,  // target 0: pattern 0 bit set
+    0         // target 1: no bits set
+  };
 
   std::vector<BoolInstruction> instructions = {
     BoolInstruction::makeRecursiveMatch(0, 0),
@@ -989,16 +1018,19 @@ TEST_F(BoolTreeDeviceTest, RecursiveMatchNegated) {
   AsyncDeviceVector<BondTypeCounts>  leafBondsDev(1, stream_->stream());
   AsyncDeviceVector<BoolInstruction> instructionsDev(instructions.size(), stream_->stream());
   AsyncDeviceVector<AtomQueryTree>   treesDev(trees.size(), stream_->stream());
+  AsyncDeviceVector<uint32_t>        recursiveMatchBitsDev(recursiveMatchBits.size(), stream_->stream());
   AsyncDeviceVector<int>             resultsDev(targets.size(), stream_->stream());
 
   targetsDev.copyFromHost(targets);
   targetBondsDev.copyFromHost(targetBonds);
   instructionsDev.copyFromHost(instructions);
   treesDev.copyFromHost(trees);
+  recursiveMatchBitsDev.copyFromHost(recursiveMatchBits);
 
-  evaluateBoolTreeKernel<<<1, 2, 0, stream_->stream()>>>(
+  evaluateBoolTreeWithRecursiveKernel<<<1, 2, 0, stream_->stream()>>>(
     targetsDev.data(), targetBondsDev.data(), leafMasksDev.data(), leafBondsDev.data(),
-    instructionsDev.data(), treesDev.data(), static_cast<int>(targets.size()), resultsDev.data());
+    instructionsDev.data(), treesDev.data(), recursiveMatchBitsDev.data(),
+    static_cast<int>(targets.size()), resultsDev.data());
   cudaCheckError(cudaGetLastError());
 
   std::vector<int> results(targets.size());

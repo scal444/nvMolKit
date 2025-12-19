@@ -24,7 +24,7 @@
 #ifdef __CUDACC__
 #define HD_CALLABLE __host__ __device__ __forceinline__
 #else
-#define HD_CALLABLE
+#define HD_CALLABLE inline
 #endif
 
 namespace nvMolKit {
@@ -37,8 +37,45 @@ enum class BoolOp : uint8_t {
   And,             ///< Binary AND of two operands
   Or,              ///< Binary OR of two operands
   Not,             ///< Unary NOT of single operand
-  RecursiveMatch   ///< Check if target atom has recursive pattern bit set
+  RecursiveMatch,  ///< Check if target atom has recursive pattern bit set
+  GreaterThan,     ///< Compare: getField(target, fieldId) > value
+  LessEqual,       ///< Compare: getField(target, fieldId) <= value
+  GreaterEqual,    ///< Compare: getField(target, fieldId) >= value
+  Range            ///< Compare: minVal <= getField(target, fieldId) <= maxVal
 };
+
+/**
+ * @brief Field identifiers for comparison operations.
+ *
+ * Used by comparison BoolOps to specify which atom field to compare.
+ */
+enum class CompareField : uint8_t {
+  MinRingSize = 0,
+  NumRings,
+  RingBondCount,
+  NumImplicitHs,
+  NumHeteroatomNeighbors,
+  TotalValence,
+  Degree,
+  NumExplicitHs
+};
+
+/**
+ * @brief Extract a field value from packed atom data for comparison.
+ */
+HD_CALLABLE uint8_t getAtomField(const AtomDataPacked& atom, CompareField field) {
+  switch (field) {
+    case CompareField::MinRingSize:           return atom.minRingSize();
+    case CompareField::NumRings:              return atom.numRings();
+    case CompareField::RingBondCount:         return atom.ringBondCount();
+    case CompareField::NumImplicitHs:         return atom.numImplicitHs();
+    case CompareField::NumHeteroatomNeighbors: return atom.numHeteroatomNeighbors();
+    case CompareField::TotalValence:          return atom.totalValence();
+    case CompareField::Degree:                return atom.degree();
+    case CompareField::NumExplicitHs:         return atom.numExplicitHs();
+    default:                                  return 0;
+  }
+}
 
 /**
  * @brief A single instruction in the boolean expression evaluation sequence.
@@ -51,15 +88,23 @@ enum class BoolOp : uint8_t {
  * - And:            scratch[dst] = scratch[src1] & scratch[src2]
  * - Or:             scratch[dst] = scratch[src1] | scratch[src2]
  * - Not:            scratch[dst] = !scratch[src1]
- * - RecursiveMatch: scratch[dst] = target.hasRecursiveMatch(patternId)
+ * - RecursiveMatch: scratch[dst] = (recursiveMatchBits >> patternId) & 1
  *                   where patternId is stored in leafMaskIdx field
+ * - GreaterThan:    scratch[dst] = getField(target, fieldId) > value
+ *                   where fieldId=src1, value=src2
+ * - LessEqual:      scratch[dst] = getField(target, fieldId) <= value
+ *                   where fieldId=src1, value=src2
+ * - GreaterEqual:   scratch[dst] = getField(target, fieldId) >= value
+ *                   where fieldId=src1, value=src2
+ * - Range:          scratch[dst] = minVal <= getField(target, fieldId) <= maxVal
+ *                   where fieldId=src1, minVal=src2, maxVal=leafMaskIdx
  */
 struct BoolInstruction {
   BoolOp  op;           ///< Operation type
   uint8_t dst;          ///< Destination index in scratch array
-  uint8_t src1;         ///< Left operand index (or source for NOT)
-  uint8_t src2;         ///< Right operand index (unused for Leaf/Not/RecursiveMatch)
-  uint8_t leafMaskIdx;  ///< Index into leaf masks array (Leaf) or pattern ID (RecursiveMatch)
+  uint8_t src1;         ///< Left operand index, or fieldId for comparisons
+  uint8_t src2;         ///< Right operand index, or value/minVal for comparisons
+  uint8_t leafMaskIdx;  ///< Leaf mask index, patternId, or maxVal for Range
 
   HD_CALLABLE static BoolInstruction makeLeaf(uint8_t dst, uint8_t maskIdx) {
     return BoolInstruction{BoolOp::Leaf, dst, 0, 0, maskIdx};
@@ -79,6 +124,22 @@ struct BoolInstruction {
 
   HD_CALLABLE static BoolInstruction makeRecursiveMatch(uint8_t dst, uint8_t patternId) {
     return BoolInstruction{BoolOp::RecursiveMatch, dst, 0, 0, patternId};
+  }
+
+  HD_CALLABLE static BoolInstruction makeGreaterThan(uint8_t dst, CompareField field, uint8_t value) {
+    return BoolInstruction{BoolOp::GreaterThan, dst, static_cast<uint8_t>(field), value, 0};
+  }
+
+  HD_CALLABLE static BoolInstruction makeLessEqual(uint8_t dst, CompareField field, uint8_t value) {
+    return BoolInstruction{BoolOp::LessEqual, dst, static_cast<uint8_t>(field), value, 0};
+  }
+
+  HD_CALLABLE static BoolInstruction makeGreaterEqual(uint8_t dst, CompareField field, uint8_t value) {
+    return BoolInstruction{BoolOp::GreaterEqual, dst, static_cast<uint8_t>(field), value, 0};
+  }
+
+  HD_CALLABLE static BoolInstruction makeRange(uint8_t dst, CompareField field, uint8_t minVal, uint8_t maxVal) {
+    return BoolInstruction{BoolOp::Range, dst, static_cast<uint8_t>(field), minVal, maxVal};
   }
 };
 
@@ -162,6 +223,26 @@ HD_CALLABLE bool evaluateBoolTree(const AtomDataPacked*   targetPacked,
       case BoolOp::RecursiveMatch:
         scratch[instr.dst] = ((recursiveMatchBits >> instr.leafMaskIdx) & 1u) ? 1 : 0;
         break;
+      case BoolOp::GreaterThan: {
+        const uint8_t fieldVal = getAtomField(*targetPacked, static_cast<CompareField>(instr.src1));
+        scratch[instr.dst] = (fieldVal > instr.src2) ? 1 : 0;
+        break;
+      }
+      case BoolOp::LessEqual: {
+        const uint8_t fieldVal = getAtomField(*targetPacked, static_cast<CompareField>(instr.src1));
+        scratch[instr.dst] = (fieldVal <= instr.src2) ? 1 : 0;
+        break;
+      }
+      case BoolOp::GreaterEqual: {
+        const uint8_t fieldVal = getAtomField(*targetPacked, static_cast<CompareField>(instr.src1));
+        scratch[instr.dst] = (fieldVal >= instr.src2) ? 1 : 0;
+        break;
+      }
+      case BoolOp::Range: {
+        const uint8_t fieldVal = getAtomField(*targetPacked, static_cast<CompareField>(instr.src1));
+        scratch[instr.dst] = (fieldVal >= instr.src2 && fieldVal <= instr.leafMaskIdx) ? 1 : 0;
+        break;
+      }
     }
   }
 

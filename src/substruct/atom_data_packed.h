@@ -48,13 +48,15 @@ namespace nvMolKit {
  *
  * Upper 64 bits (hi):
  *   Byte 0 [bits  0-7 ]: minRingSize (uint8_t)
- *   Byte 1 [bits  8-15]: numRings (uint8_t)
- *   Byte 2 [bits 16-23]: recursiveMatchesLo (uint8_t, low 8 bits of recursive SMARTS match flags)
+ *   Byte 1 [bits  8-15]: numRings (4 bits [8-11]) | ringBondCount (4 bits [12-15])
+ *   Byte 2 [bits 16-23]: numImplicitHs (4 bits [16-19]) | numHeteroatomNeighbors (4 bits [20-23])
  *   Byte 3 [bits 24-31]: totalValence (uint8_t, explicit + implicit)
- *   Byte 4 [bits 32-39]: recursiveMatchesHi (uint8_t, high 8 bits of recursive SMARTS match flags)
+ *   Byte 4 [bits 32-39]: RESERVED for future use
  *   Byte 5 [bits 40-47]: isotope (uint8_t, 0 = natural abundance, throws if > 255)
  *   Byte 6 [bits 48-55]: degree (6 bits [48-53]) | isAromatic (bit 54) | isInRing (bit 55)
  *   Byte 7 [bits 56-63]: totalConnectivity (uint8_t, degree + total Hs for [X] queries)
+ *
+ * Compacted 4-bit fields have max value 15. Overflow during loading throws an exception.
  */
 struct AtomDataPacked {
   uint64_t lo = 0;
@@ -82,10 +84,10 @@ struct AtomDataPacked {
   /// @name Upper 64-bit field byte offsets
   /// @{
   static constexpr int kMinRingSizeByte        = 0;
-  static constexpr int kNumRingsByte           = 1;
-  static constexpr int kRecursiveMatchesLoByte = 2;  ///< Low 8 bits of recursive SMARTS match flags
+  static constexpr int kNumRingsRingBondsByte  = 1;  ///< numRings (lo 4 bits) | ringBondCount (hi 4 bits)
+  static constexpr int kImplicitHsHeterosByte  = 2;  ///< numImplicitHs (lo 4 bits) | numHeteroatomNeighbors (hi 4 bits)
   static constexpr int kTotalValenceByte       = 3;
-  static constexpr int kRecursiveMatchesHiByte = 4;  ///< High 8 bits of recursive SMARTS match flags
+  static constexpr int kReservedByte           = 4;  ///< Reserved for future use
   static constexpr int kIsotopeByte            = 5;  ///< Isotope mass number (0 = natural abundance)
   static constexpr int kDegreeByte             = 6;  ///< Bits 0-5: degree, bit 6: isAromatic, bit 7: isInRing
   static constexpr int kTotalConnectivityByte  = 7;  ///< Degree + total Hs for [X] queries
@@ -97,6 +99,16 @@ struct AtomDataPacked {
   static constexpr int kDegreeMask      = 0x3F;  ///< Mask for 6-bit degree (bits 0-5)
   static constexpr int kIsAromaticBit   = 6;   ///< Bit position within degree byte for isAromatic
   static constexpr int kIsInRingBit     = 7;   ///< Bit position within degree byte for isInRing
+  /// @}
+
+  /// @name Compacted 4-bit field masks and bit positions
+  /// @{
+  static constexpr int k4BitMask              = 0x0F;  ///< Mask for 4-bit fields (max value 15)
+  static constexpr int kNumRingsBits          = 0;     ///< Low 4 bits of byte 1
+  static constexpr int kRingBondCountBits     = 4;     ///< High 4 bits of byte 1
+  static constexpr int kNumImplicitHsBits     = 0;     ///< Low 4 bits of byte 2
+  static constexpr int kNumHeteroNeighborBits = 4;     ///< High 4 bits of byte 2
+  static constexpr int kMax4BitValue          = 15;    ///< Maximum value for 4-bit fields
   /// @}
 
   /// @name Recursive SMARTS match constants
@@ -147,7 +159,27 @@ struct AtomDataPacked {
   }
 
   HD_CALLABLE void setNumRings(uint8_t val) {
-    hi = (hi & ~(0xFFULL << (kNumRingsByte * 8))) | (static_cast<uint64_t>(val) << (kNumRingsByte * 8));
+    const uint64_t shift = kNumRingsRingBondsByte * 8 + kNumRingsBits;
+    hi = (hi & ~(static_cast<uint64_t>(k4BitMask) << shift)) |
+         (static_cast<uint64_t>(val & k4BitMask) << shift);
+  }
+
+  HD_CALLABLE void setRingBondCount(uint8_t val) {
+    const uint64_t shift = kNumRingsRingBondsByte * 8 + kRingBondCountBits;
+    hi = (hi & ~(static_cast<uint64_t>(k4BitMask) << shift)) |
+         (static_cast<uint64_t>(val & k4BitMask) << shift);
+  }
+
+  HD_CALLABLE void setNumImplicitHs(uint8_t val) {
+    const uint64_t shift = kImplicitHsHeterosByte * 8 + kNumImplicitHsBits;
+    hi = (hi & ~(static_cast<uint64_t>(k4BitMask) << shift)) |
+         (static_cast<uint64_t>(val & k4BitMask) << shift);
+  }
+
+  HD_CALLABLE void setNumHeteroatomNeighbors(uint8_t val) {
+    const uint64_t shift = kImplicitHsHeterosByte * 8 + kNumHeteroNeighborBits;
+    hi = (hi & ~(static_cast<uint64_t>(k4BitMask) << shift)) |
+         (static_cast<uint64_t>(val & k4BitMask) << shift);
   }
 
   HD_CALLABLE void setIsAromatic(bool val) {
@@ -180,26 +212,6 @@ struct AtomDataPacked {
     const uint64_t shift = kDegreeByte * 8;
     hi = (hi & ~(static_cast<uint64_t>(kDegreeMask) << shift)) |
          (static_cast<uint64_t>(val & kDegreeMask) << shift);
-  }
-
-  HD_CALLABLE void setRecursiveMatches(uint16_t val) {
-    hi = (hi & ~(0xFFULL << (kRecursiveMatchesLoByte * 8))) |
-         (static_cast<uint64_t>(val & 0xFF) << (kRecursiveMatchesLoByte * 8));
-    hi = (hi & ~(0xFFULL << (kRecursiveMatchesHiByte * 8))) |
-         (static_cast<uint64_t>((val >> 8) & 0xFF) << (kRecursiveMatchesHiByte * 8));
-  }
-
-  HD_CALLABLE void setRecursiveMatchBit(int patternId) {
-    if (patternId < 8) {
-      hi |= (1ULL << (kRecursiveMatchesLoByte * 8 + patternId));
-    } else if (patternId < 16) {
-      hi |= (1ULL << (kRecursiveMatchesHiByte * 8 + (patternId - 8)));
-    }
-  }
-
-  HD_CALLABLE void clearRecursiveMatches() {
-    hi &= ~(0xFFULL << (kRecursiveMatchesLoByte * 8));
-    hi &= ~(0xFFULL << (kRecursiveMatchesHiByte * 8));
   }
 
   HD_CALLABLE void setTotalConnectivity(uint8_t val) {
@@ -237,7 +249,21 @@ struct AtomDataPacked {
 
   HD_CALLABLE uint8_t minRingSize() const { return static_cast<uint8_t>((hi >> (kMinRingSizeByte * 8)) & 0xFF); }
 
-  HD_CALLABLE uint8_t numRings() const { return static_cast<uint8_t>((hi >> (kNumRingsByte * 8)) & 0xFF); }
+  HD_CALLABLE uint8_t numRings() const {
+    return static_cast<uint8_t>((hi >> (kNumRingsRingBondsByte * 8 + kNumRingsBits)) & k4BitMask);
+  }
+
+  HD_CALLABLE uint8_t ringBondCount() const {
+    return static_cast<uint8_t>((hi >> (kNumRingsRingBondsByte * 8 + kRingBondCountBits)) & k4BitMask);
+  }
+
+  HD_CALLABLE uint8_t numImplicitHs() const {
+    return static_cast<uint8_t>((hi >> (kImplicitHsHeterosByte * 8 + kNumImplicitHsBits)) & k4BitMask);
+  }
+
+  HD_CALLABLE uint8_t numHeteroatomNeighbors() const {
+    return static_cast<uint8_t>((hi >> (kImplicitHsHeterosByte * 8 + kNumHeteroNeighborBits)) & k4BitMask);
+  }
 
   HD_CALLABLE bool isAromatic() const {
     const uint64_t bitPos = kDegreeByte * 8 + kIsAromaticBit;
@@ -255,21 +281,6 @@ struct AtomDataPacked {
 
   HD_CALLABLE uint8_t degree() const {
     return static_cast<uint8_t>((hi >> (kDegreeByte * 8)) & kDegreeMask);
-  }
-
-  HD_CALLABLE uint16_t recursiveMatches() const {
-    uint16_t lo8 = static_cast<uint8_t>((hi >> (kRecursiveMatchesLoByte * 8)) & 0xFF);
-    uint16_t hi8 = static_cast<uint8_t>((hi >> (kRecursiveMatchesHiByte * 8)) & 0xFF);
-    return lo8 | (hi8 << 8);
-  }
-
-  HD_CALLABLE bool hasRecursiveMatch(int patternId) const {
-    if (patternId < 8) {
-      return (hi & (1ULL << (kRecursiveMatchesLoByte * 8 + patternId))) != 0;
-    } else if (patternId < 16) {
-      return (hi & (1ULL << (kRecursiveMatchesHiByte * 8 + (patternId - 8)))) != 0;
-    }
-    return false;
   }
 
   HD_CALLABLE uint8_t totalConnectivity() const {
