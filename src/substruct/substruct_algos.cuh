@@ -657,6 +657,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
             // Write to shared memory ping-pong or global overflow
             if (slot < maxPartials) {
               PartialMatch& next = sharedPartials[maxPartials + slot];
+              next.init();
               for (int q = 0; q < numQueryAtoms; ++q) {
                 next.mapping[q] = partial.mapping[q];
               }
@@ -670,6 +671,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
               }
               const int overflowSlot = slot - maxPartials;
               PartialMatch& next = nextOverflow[overflowSlot];
+              next.init();
               for (int q = 0; q < numQueryAtoms; ++q) {
                 next.mapping[q] = partial.mapping[q];
               }
