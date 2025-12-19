@@ -972,8 +972,13 @@ TEST(RecursivePatternExtraction, MaxPatternsAllowed) {
 }
 
 TEST(RecursivePatternExtraction, TooManyPatternsThrows) {
-  auto q = makeQuery("[$([C]),$([N]),$([O]),$([S]),$([F]),$([Cl]),$([Br]),$([I]),$([P])]");
-  
+  std::string smarts = "[C";
+  for (int i = 0; i < nvMolKit::RecursivePatternInfo::kMaxPatterns + 1; ++i) {
+    smarts += ";$(*-N)";
+  }
+  smarts += "]";
+
+  auto q = makeQuery(smarts);
   EXPECT_THROW(nvMolKit::extractRecursivePatterns(q.get()), std::runtime_error);
 }
 
@@ -982,4 +987,111 @@ TEST(RecursivePatternExtraction, NullMolecule) {
   
   auto info = nvMolKit::extractRecursivePatterns(nullptr);
   EXPECT_TRUE(info.empty());
+}
+
+// =============================================================================
+// Nested Recursive Pattern Extraction Tests
+// =============================================================================
+
+TEST(NestedRecursivePatternExtraction, SimpleNestedRecursive) {
+  auto q = makeQuery("[$([C;$(*-N)])]");
+  ASSERT_NE(q, nullptr);
+  EXPECT_TRUE(nvMolKit::hasRecursiveSmarts(q.get()));
+  
+  auto info = nvMolKit::extractRecursivePatterns(q.get());
+  EXPECT_FALSE(info.empty());
+  EXPECT_GE(info.size(), 2u);
+  EXPECT_GE(info.maxDepth, 1);
+  EXPECT_TRUE(info.hasNestedPatterns());
+}
+
+TEST(NestedRecursivePatternExtraction, DepthOrdering) {
+  auto q = makeQuery("[$([C;$(*-N)])]");
+  ASSERT_NE(q, nullptr);
+  
+  auto info = nvMolKit::extractRecursivePatterns(q.get());
+  ASSERT_GE(info.size(), 2u);
+  
+  int maxSeenDepth = 0;
+  for (const auto& pattern : info.patterns) {
+    EXPECT_GE(pattern.depth, maxSeenDepth) << "Patterns should be sorted by depth";
+    maxSeenDepth = std::max(maxSeenDepth, pattern.depth);
+  }
+}
+
+TEST(NestedRecursivePatternExtraction, DoublyNestedRecursive) {
+  auto q = makeQuery("[$([C;$([N;$(*-O)])])]");
+  ASSERT_NE(q, nullptr);
+  EXPECT_TRUE(nvMolKit::hasRecursiveSmarts(q.get()));
+  
+  auto info = nvMolKit::extractRecursivePatterns(q.get());
+  EXPECT_GE(info.size(), 3u);
+  EXPECT_GE(info.maxDepth, 2);
+}
+
+TEST(NestedRecursivePatternExtraction, MultipleNestedOnSameAtom) {
+  auto q = makeQuery("[C;$([N;$(*-O)]);$([S;$(*-F)])]");
+  ASSERT_NE(q, nullptr);
+  EXPECT_TRUE(nvMolKit::hasRecursiveSmarts(q.get()));
+  
+  auto info = nvMolKit::extractRecursivePatterns(q.get());
+  EXPECT_GE(info.size(), 4u);
+}
+
+TEST(NestedRecursivePatternExtraction, NestedPatternIdAssignment) {
+  auto q = makeQuery("[$([C;$(*-N)])]");
+  ASSERT_NE(q, nullptr);
+  
+  auto info = nvMolKit::extractRecursivePatterns(q.get());
+  
+  std::set<int> ids;
+  for (const auto& p : info.patterns) {
+    EXPECT_EQ(ids.count(p.patternId), 0u) << "Duplicate pattern ID: " << p.patternId;
+    ids.insert(p.patternId);
+  }
+}
+
+TEST(NestedRecursivePatternExtraction, LocalIdInParentAssignment) {
+  auto q = makeQuery("[C;$(*-N);$(*-O)]");
+  ASSERT_NE(q, nullptr);
+  
+  auto info = nvMolKit::extractRecursivePatterns(q.get());
+  ASSERT_EQ(info.size(), 2u);
+  
+  EXPECT_EQ(info.patterns[0].localIdInParent, 0);
+  EXPECT_EQ(info.patterns[1].localIdInParent, 1);
+}
+
+TEST(NestedRecursivePatternExtraction, ParentPatternIndexTracking) {
+  auto q = makeQuery("[$([C;$(*-N)])]");
+  ASSERT_NE(q, nullptr);
+  
+  auto info = nvMolKit::extractRecursivePatterns(q.get());
+  ASSERT_GE(info.size(), 2u);
+  
+  int leafCount = 0;
+  int nonLeafCount = 0;
+  int childPatternCount = 0;
+  for (const auto& p : info.patterns) {
+    if (p.depth == 0) {
+      leafCount++;
+    } else {
+      nonLeafCount++;
+    }
+    if (p.parentPatternIdx != -1) {
+      childPatternCount++;
+    }
+  }
+  EXPECT_GE(leafCount, 1) << "Should have at least one leaf pattern";
+  EXPECT_GE(nonLeafCount, 1) << "Should have at least one non-leaf pattern";
+  EXPECT_GE(childPatternCount, 1) << "Should have at least one pattern with a parent";
+}
+
+TEST(NestedRecursivePatternExtraction, NestedWithOrBranch) {
+  auto q = makeQuery("[$([C,$([N;$(*-O)])])]");
+  ASSERT_NE(q, nullptr);
+  EXPECT_TRUE(nvMolKit::hasRecursiveSmarts(q.get()));
+  
+  auto info = nvMolKit::extractRecursivePatterns(q.get());
+  EXPECT_GE(info.size(), 2u);
 }

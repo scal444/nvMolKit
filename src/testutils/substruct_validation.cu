@@ -340,20 +340,24 @@ std::vector<std::vector<uint8_t>> computeRDKitLabelMatrix(const RDKit::ROMol& ta
   const int numTargetAtoms = static_cast<int>(targetMol.getNumAtoms());
   const int numQueryAtoms  = static_cast<int>(queryMol.getNumAtoms());
 
-  std::vector<std::vector<uint8_t>> result(numTargetAtoms, std::vector<uint8_t>(numQueryAtoms));
+  std::vector<std::vector<uint8_t>> result(numTargetAtoms, std::vector<uint8_t>(numQueryAtoms, 0));
 
-  for (int ta = 0; ta < numTargetAtoms; ++ta) {
-    const auto* targetAtom = targetMol.getAtomWithIdx(ta);
-    for (int qa = 0; qa < numQueryAtoms; ++qa) {
-      const auto* queryAtom = queryMol.getAtomWithIdx(qa);
+  // For recursive SMARTS, atom-level Match() doesn't work correctly.
+  // Use full substructure matching to get valid (targetAtom, queryAtom) pairs.
+  RDKit::MatchVectType match;
+  RDKit::SubstructMatchParameters params;
+  params.uniquify = false;
+  params.maxMatches = 0;  // Find all matches
 
-      bool rdkitResult = false;
-      if (queryAtom->hasQuery()) {
-        rdkitResult = queryAtom->Match(targetAtom);
-      } else {
-        rdkitResult = (targetAtom->getAtomicNum() == queryAtom->getAtomicNum());
+  auto matches = RDKit::SubstructMatch(targetMol, queryMol, params);
+
+  for (const auto& matchVec : matches) {
+    for (const auto& pair : matchVec) {
+      int qa = pair.first;
+      int ta = pair.second;
+      if (ta >= 0 && ta < numTargetAtoms && qa >= 0 && qa < numQueryAtoms) {
+        result[ta][qa] = 1;
       }
-      result[ta][qa] = rdkitResult ? 1 : 0;
     }
   }
 
@@ -382,6 +386,7 @@ std::vector<std::vector<uint8_t>> computeGpuLabelMatrix(const RDKit::ROMol& targ
   SubstructMatchResultsDevice results(stream);
   results.allocate(1, 1, queryAtomCounts, maxMatchesPerPair);
   results.allocateBatchRecursiveBits(1, numTargetAtoms);
+  results.zeroRecursiveBits();
 
   if (!queryHost.recursivePatterns.empty() && !queryHost.recursivePatterns[0].empty()) {
     RecursiveScratchBuffers          scratch(stream);

@@ -630,6 +630,12 @@ TEST(RecursiveSmartsTest, PatternIdsAreSequential) {
 }
 
 TEST(RecursiveSmartsTest, TooManyPatternsThrows) {
-  auto query = makeSmartsQuery("[$([C]),$([N]),$([O]),$([S]),$([F]),$([Cl]),$([Br]),$([I]),$([P])]");
+  std::string smarts = "[C";
+  for (int i = 0; i < nvMolKit::RecursivePatternInfo::kMaxPatterns + 1; ++i) {
+    smarts += ";$(*-N)";
+  }
+  smarts += "]";
+
+  auto query = makeSmartsQuery(smarts);
   EXPECT_THROW(nvMolKit::extractRecursivePatterns(query.get()), std::runtime_error);
 }

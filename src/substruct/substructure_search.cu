@@ -23,7 +23,9 @@
 #include "graph_labeler.cuh"
 #include "molecules_device.cuh"
 #include "substruct_algos.cuh"
+#include "substruct_debug.h"
 #include "nvtx.h"
+
 namespace nvMolKit {
 
 namespace {
@@ -38,9 +40,6 @@ using LabelMatrixView = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
 constexpr int kMaxPartialsPerBlock = 256;   // Shared memory partials per block
 constexpr int kMaxQueueSize        = 512;   // Shared memory queue size
 constexpr int kWarpsPerBlock       = threadsPerBlock / 32;
-
-constexpr bool kDebugDumpLabelMatrix = false;  ///< Dump full label matrices after recursive preprocessing
-constexpr bool kDebugPaintRecursive  = false;  ///< Debug recursive bit painting kernel
 
 /**
  * @brief Compute label matrix and write to global memory.
@@ -121,7 +120,9 @@ __global__ void labelMatrixPaintKernel(MoleculesDeviceView        targets,
                                        int                        batchPairOffset,
                                        int                        batchSize,
                                        uint32_t*                  labelMatrixBuffer,
-                                       int                        firstTargetIdx) {
+                                       int                        firstTargetIdx,
+                                       const uint32_t*            recursiveMatchBits,
+                                       int                        maxTargetAtoms) {
   const int localTargetIdx   = blockIdx.x / numPatterns;
   const int targetIdx        = firstTargetIdx + localTargetIdx;
   const int localPatternIdx  = blockIdx.x % numPatterns;
@@ -139,6 +140,8 @@ __global__ void labelMatrixPaintKernel(MoleculesDeviceView        targets,
     return;
   }
 
+  const int batchLocalPairIdx = globalPairIdx - batchPairOffset;
+
   const MoleculeView target  = getMolecule(targets, targetIdx);
   const MoleculeView pattern = getMolecule(patterns, patternMolIdx);
 
@@ -146,7 +149,12 @@ __global__ void labelMatrixPaintKernel(MoleculesDeviceView        targets,
 
   uint32_t* globalOut = labelMatrixBuffer + blockIdx.x * kLabelMatrixWords;
 
-  computeLabelMatrixToGlobal(target, pattern, sharedLabelMatrix, globalOut, nullptr);
+  // Pass per-pair recursive bits for evaluating nested patterns' boolean trees
+  const uint32_t* pairBits = (recursiveMatchBits != nullptr)
+                           ? recursiveMatchBits + batchLocalPairIdx * maxTargetAtoms
+                           : nullptr;
+
+  computeLabelMatrixToGlobal(target, pattern, sharedLabelMatrix, globalOut, pairBits);
 }
 
 /**
@@ -441,7 +449,8 @@ __global__ void substructPaintKernel(MoleculesDeviceView         targets,
 // RecursivePatternCache Implementation
 // =============================================================================
 
-int RecursivePatternCache::getOrAddPattern(int queryIdx, int patternId, const RDKit::ROMol* queryMol) {
+int RecursivePatternCache::getOrAddPattern(int queryIdx, int patternId, const RDKit::ROMol* queryMol,
+                                           const RecursivePatternInfo& patternInfo) {
   RecursivePatternKey key{queryIdx, patternId};
   auto                it = patternIndexMap.find(key);
   if (it != patternIndexMap.end()) {
@@ -449,7 +458,37 @@ int RecursivePatternCache::getOrAddPattern(int queryIdx, int patternId, const RD
   }
 
   int molIdx = static_cast<int>(cachedPatterns.numMolecules());
-  addQueryToBatch(queryMol, cachedPatterns);
+
+  // Find children of this pattern (patterns whose parentPatternId matches this patternId)
+  // Sort by localIdInParent to ensure correct order for RecursiveMatch instructions
+  std::vector<std::pair<int, int>> childrenByLocalId;  // (localIdInParent, patternId)
+  for (const auto& p : patternInfo.patterns) {
+    if (p.parentPatternId == patternId) {
+      childrenByLocalId.emplace_back(p.localIdInParent, p.patternId);
+    }
+  }
+  std::sort(childrenByLocalId.begin(), childrenByLocalId.end());
+
+  std::vector<int> childPatternIds;
+  for (const auto& [localId, childId] : childrenByLocalId) {
+    childPatternIds.push_back(childId);
+  }
+
+  if constexpr (kDebugPaintRecursive) {
+    printf("[PatternCache] getOrAddPattern: queryIdx=%d, patternId=%d, found %zu children: [",
+           queryIdx, patternId, childPatternIds.size());
+    for (size_t i = 0; i < childPatternIds.size(); ++i) {
+      printf("%d%s", childPatternIds[i], i + 1 < childPatternIds.size() ? "," : "");
+    }
+    printf("]\n");
+  }
+
+  if (childPatternIds.empty()) {
+    addQueryToBatch(queryMol, cachedPatterns);
+  } else {
+    addQueryToBatch(queryMol, cachedPatterns, childPatternIds);
+  }
+
   patternIndexMap[key] = molIdx;
   deviceNeedsUpdate    = true;
   return molIdx;
@@ -746,18 +785,18 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&             targets
                                       std::vector<BatchedPatternEntry>&  scratchPatternEntries) {
   ScopedNvtxRange processRecursiveRange("Process recursive batch");
   ScopedNvtxRange processRecursiveRangeSetup("Process recursive batch setup");
-  // Collect all recursive patterns from queries that have pairs in this batch
+
   std::vector<BatchedPatternEntry>& patternEntriesHost = scratchPatternEntries;
   patternEntriesHost.clear();
 
-  // Track which queries have pairs in this batch
   std::vector<bool> queryInBatch(numQueries, false);
   for (int i = 0; i < batchSize; ++i) {
     const int pairIdx  = batchPairOffset + i;
     const int queryIdx = pairIdx % numQueries;
     queryInBatch[queryIdx] = true;
   }
-  // Collect patterns from relevant queries, using cache for molecule data
+
+  int maxDepth = 0;
   for (int queryIdx = 0; queryIdx < numQueries; ++queryIdx) {
     if (!queryInBatch[queryIdx]) {
       continue;
@@ -772,15 +811,19 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&             targets
       continue;
     }
 
+    maxDepth = std::max(maxDepth, recursiveInfo.maxDepth);
+
     for (const auto& entry : recursiveInfo.patterns) {
       if (entry.queryMol == nullptr) {
         continue;
       }
 
       BatchedPatternEntry& batchEntry = patternEntriesHost.emplace_back();
-      batchEntry.mainQueryIdx  = queryIdx;
-      batchEntry.patternId     = entry.patternId;
-      batchEntry.patternMolIdx = patternCache.getOrAddPattern(queryIdx, entry.patternId, entry.queryMol);
+      batchEntry.mainQueryIdx    = queryIdx;
+      batchEntry.patternId       = entry.patternId;
+      batchEntry.patternMolIdx   = patternCache.getOrAddPattern(queryIdx, entry.patternId, entry.queryMol, recursiveInfo);
+      batchEntry.depth           = entry.depth;
+      batchEntry.localIdInParent = entry.localIdInParent;
     }
   }
 
@@ -790,117 +833,143 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&             targets
     }
     return;
   }
-  // Only process targets that are actually in this batch of pairs
+
+  if constexpr (kDebugPaintRecursive) {
+    printf("[PreprocessBatched] All patterns collected:\n");
+    for (const auto& p : patternEntriesHost) {
+      printf("[PreprocessBatched]   mainQueryIdx=%d, patternId=%d, patternMolIdx=%d, depth=%d, localIdInParent=%d\n",
+             p.mainQueryIdx, p.patternId, p.patternMolIdx, p.depth, p.localIdInParent);
+    }
+  }
+
   const int firstTargetInBatch = batchPairOffset / numQueries;
   const int lastTargetInBatch  = (batchPairOffset + batchSize - 1) / numQueries;
   const int numTargetsInBatch  = lastTargetInBatch - firstTargetInBatch + 1;
 
-  const size_t numPatterns     = patternEntriesHost.size();
-  const size_t totalPaintPairs = static_cast<size_t>(numTargetsInBatch) * numPatterns;
-
-  // Sub-batch if needed (with 8 max recursions per query, typical case is well under batchSize)
-  const int maxPaintPairsPerSubBatch = std::max(batchSize, 1024);
-  const int patternsPerSubBatch = std::max(1, maxPaintPairsPerSubBatch / numTargetsInBatch);
-
-  if constexpr (kDebugPaintRecursive) {
-    printf("[PreprocessBatched] Processing %zu patterns (%zu paint pairs) in sub-batches of %d patterns\n",
-           numPatterns, totalPaintPairs, patternsPerSubBatch);
-  }
-
-  // Sync cached patterns to device (only copies if new patterns were added)
   patternCache.syncToDevice(stream);
 
   const auto outputView = outputResults.view();
   constexpr int gsiBuffersPerBlock = 2;
   constexpr int wusBuffersPerBlock = 1;
+
+  const int maxPaintPairsPerSubBatch = std::max(batchSize, 1024);
   processRecursiveRangeSetup.pop();
-  // Process patterns in sub-batches (typically just one iteration when few patterns)
-  for (size_t patternStart = 0; patternStart < numPatterns; patternStart += patternsPerSubBatch) {
-    ScopedNvtxRange processRecursiveRangeSubBatch("Process recursive batch sub-batch");
-    const size_t patternEnd            = std::min(patternStart + patternsPerSubBatch, numPatterns);
-    const size_t numPatternsInSubBatch = patternEnd - patternStart;
-    const size_t numBlocksInSubBatch   = numTargetsInBatch * numPatternsInSubBatch;
 
-    // Copy pattern metadata for this sub-batch to device (only grow buffer if needed)
-    if (scratch.patternEntries.size() < numPatternsInSubBatch) {
-      scratch.patternEntries.resize(numPatternsInSubBatch);
-    }
-    scratch.patternEntries.copyFromHost(patternEntriesHost.data() + patternStart, numPatternsInSubBatch);
+  // For nested patterns, process level by level (depth 0 first, then 1, etc.)
+  // Depth 0 patterns are leaves (no children), higher depths have children at lower depths
+  for (int currentDepth = 0; currentDepth <= maxDepth; ++currentDepth) {
+    ScopedNvtxRange depthRange("Process recursive depth level");
 
-    // Compute overflow buffer size needed for this sub-batch
-    const int buffersPerBlock = (algorithm == SubstructAlgorithm::WarpUnified) ? wusBuffersPerBlock : gsiBuffersPerBlock;
-    const size_t overflowNeeded = numBlocksInSubBatch * buffersPerBlock * kOverflowEntriesPerBuffer;
-
-    // Only grow overflow buffer if needed. Zero before resize so copied data is initialized.
-    if (scratch.overflow.size() < overflowNeeded) {
-      scratch.overflow.zero();
-      scratch.overflow.resize(overflowNeeded);
+    // Filter patterns at current depth
+    std::vector<BatchedPatternEntry> patternsAtDepth;
+    for (const auto& entry : patternEntriesHost) {
+      if (entry.depth == currentDepth) {
+        patternsAtDepth.push_back(entry);
+      }
     }
 
-    // Allocate/grow label matrix buffer for this sub-batch
-    const size_t labelMatrixNeeded = numBlocksInSubBatch * kLabelMatrixWords;
-    if (scratch.labelMatrixBuffer.size() < labelMatrixNeeded) {
-      scratch.labelMatrixBuffer.resize(labelMatrixNeeded);
-    }
-    scratch.labelMatrixBuffer.zero();
-
-    // Launch label matrix kernel for recursive patterns
-    {
-      ScopedNvtxRange processRecursiveRangeSubBatchLabel("Process recursive batch sub-batch label");
-      labelMatrixPaintKernel<<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
-        targetsDevice.view(),
-        patternCache.cachedPatternsDevice.view(),
-        scratch.patternEntries.data(),
-        static_cast<int>(numPatternsInSubBatch),
-        numQueries,
-        batchPairOffset,
-        batchSize,
-        scratch.labelMatrixBuffer.data(),
-        firstTargetInBatch);
+    if (patternsAtDepth.empty()) {
+      continue;
     }
 
-    // Launch paint kernel (loads pre-computed label matrices)
-    {
-      ScopedNvtxRange processRecursiveRangeSubBatchPaint("Process recursive batch sub-batch paint");
-      switch (algorithm) {
-        case SubstructAlgorithm::VF2:
-        case SubstructAlgorithm::GSI: {
-          substructPaintKernel<SubstructAlgorithm::GSI><<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
-            targetsDevice.view(),
-            patternCache.cachedPatternsDevice.view(),
-            scratch.patternEntries.data(),
-            static_cast<int>(numPatternsInSubBatch),
-            outputView.recursiveMatchBits,
-            outputView.maxTargetAtoms,
-            numQueries,
-            0, 0,  // Defaults ignored when patternEntries is non-null
-            batchPairOffset,
-            batchSize,
-            scratch.overflow.data(),
-            scratch.overflow.data(),
-            kOverflowEntriesPerBuffer,
-            scratch.labelMatrixBuffer.data(),
-            firstTargetInBatch);
-          break;
-        }
-        case SubstructAlgorithm::WarpUnified: {
-          substructPaintKernel<SubstructAlgorithm::WarpUnified><<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
-            targetsDevice.view(),
-            patternCache.cachedPatternsDevice.view(),
-            scratch.patternEntries.data(),
-            static_cast<int>(numPatternsInSubBatch),
-            outputView.recursiveMatchBits,
-            outputView.maxTargetAtoms,
-            numQueries,
-            0, 0,  // Defaults ignored when patternEntries is non-null
-            batchPairOffset,
-            batchSize,
-            scratch.overflow.data(),
-            scratch.overflow.data(),
-            kOverflowEntriesPerBuffer,
-            scratch.labelMatrixBuffer.data(),
-            firstTargetInBatch);
-          break;
+    const size_t numPatterns = patternsAtDepth.size();
+    const int patternsPerSubBatch = std::max(1, maxPaintPairsPerSubBatch / numTargetsInBatch);
+
+    if constexpr (kDebugPaintRecursive) {
+      printf("[PreprocessBatched] Depth %d: Processing %zu patterns\n", currentDepth, numPatterns);
+      for (const auto& p : patternsAtDepth) {
+        printf("[PreprocessBatched]   patternId=%d, patternMolIdx=%d, localIdInParent=%d\n",
+               p.patternId, p.patternMolIdx, p.localIdInParent);
+      }
+    }
+
+    for (size_t patternStart = 0; patternStart < numPatterns; patternStart += patternsPerSubBatch) {
+      ScopedNvtxRange processRecursiveRangeSubBatch("Process recursive batch sub-batch");
+      const size_t patternEnd            = std::min(patternStart + patternsPerSubBatch, numPatterns);
+      const size_t numPatternsInSubBatch = patternEnd - patternStart;
+      const size_t numBlocksInSubBatch   = numTargetsInBatch * numPatternsInSubBatch;
+
+      if (scratch.patternEntries.size() < numPatternsInSubBatch) {
+        scratch.patternEntries.resize(numPatternsInSubBatch);
+      }
+      scratch.patternEntries.copyFromHost(patternsAtDepth.data() + patternStart, numPatternsInSubBatch);
+
+      const int buffersPerBlock = (algorithm == SubstructAlgorithm::WarpUnified) ? wusBuffersPerBlock : gsiBuffersPerBlock;
+      const size_t overflowNeeded = numBlocksInSubBatch * buffersPerBlock * kOverflowEntriesPerBuffer;
+
+      if (scratch.overflow.size() < overflowNeeded) {
+        scratch.overflow.zero();
+        scratch.overflow.resize(overflowNeeded);
+      }
+
+      const size_t labelMatrixNeeded = numBlocksInSubBatch * kLabelMatrixWords;
+      if (scratch.labelMatrixBuffer.size() < labelMatrixNeeded) {
+        scratch.labelMatrixBuffer.resize(labelMatrixNeeded);
+      }
+      scratch.labelMatrixBuffer.zero();
+
+      // For depth > 0 patterns, pass recursive bits from previous levels so their
+      // boolean trees can check child pattern results
+      const uint32_t* recursiveBitsForLabel = (currentDepth > 0) ? outputView.recursiveMatchBits : nullptr;
+
+      {
+        ScopedNvtxRange processRecursiveRangeSubBatchLabel("Process recursive batch sub-batch label");
+        labelMatrixPaintKernel<<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
+          targetsDevice.view(),
+          patternCache.cachedPatternsDevice.view(),
+          scratch.patternEntries.data(),
+          static_cast<int>(numPatternsInSubBatch),
+          numQueries,
+          batchPairOffset,
+          batchSize,
+          scratch.labelMatrixBuffer.data(),
+          firstTargetInBatch,
+          recursiveBitsForLabel,
+          outputView.maxTargetAtoms);
+      }
+
+      {
+        ScopedNvtxRange processRecursiveRangeSubBatchPaint("Process recursive batch sub-batch paint");
+        switch (algorithm) {
+          case SubstructAlgorithm::VF2:
+          case SubstructAlgorithm::GSI: {
+            substructPaintKernel<SubstructAlgorithm::GSI><<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
+              targetsDevice.view(),
+              patternCache.cachedPatternsDevice.view(),
+              scratch.patternEntries.data(),
+              static_cast<int>(numPatternsInSubBatch),
+              outputView.recursiveMatchBits,
+              outputView.maxTargetAtoms,
+              numQueries,
+              0, 0,
+              batchPairOffset,
+              batchSize,
+              scratch.overflow.data(),
+              scratch.overflow.data(),
+              kOverflowEntriesPerBuffer,
+              scratch.labelMatrixBuffer.data(),
+              firstTargetInBatch);
+            break;
+          }
+          case SubstructAlgorithm::WarpUnified: {
+            substructPaintKernel<SubstructAlgorithm::WarpUnified><<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
+              targetsDevice.view(),
+              patternCache.cachedPatternsDevice.view(),
+              scratch.patternEntries.data(),
+              static_cast<int>(numPatternsInSubBatch),
+              outputView.recursiveMatchBits,
+              outputView.maxTargetAtoms,
+              numQueries,
+              0, 0,
+              batchPairOffset,
+              batchSize,
+              scratch.overflow.data(),
+              scratch.overflow.data(),
+              kOverflowEntriesPerBuffer,
+              scratch.labelMatrixBuffer.data(),
+              firstTargetInBatch);
+            break;
+          }
         }
       }
     }

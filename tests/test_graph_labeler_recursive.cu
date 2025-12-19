@@ -268,6 +268,7 @@ class RecursivePaintTest : public ::testing::Test {
     results_ = std::make_unique<SubstructMatchResultsDevice>(stream_.stream());
     results_->allocate(numTargets, numQueries, queryAtomCounts, maxMatchesPerPair);
     results_->allocateBatchRecursiveBits(numTargets * numQueries, maxTargetAtoms_);
+    results_->zeroRecursiveBits();
   }
 
   void verifyRecursiveBitSet(int targetMolIdx,
@@ -780,7 +781,7 @@ TEST(RecursiveLabelerEdgeCases, NoRecursivePatterns) {
 
 TEST(RecursiveLabelerEdgeCases, MaxPatternsLimit) {
   std::string smarts = "[C";
-  for (int i = 0; i < 8; ++i) {
+  for (int i = 0; i < RecursivePatternInfo::kMaxPatterns; ++i) {
     smarts += ";$(*-N)";
   }
   smarts += "]";
@@ -789,17 +790,16 @@ TEST(RecursiveLabelerEdgeCases, MaxPatternsLimit) {
   ASSERT_NE(queryMol, nullptr);
 
   RecursivePatternInfo info = extractRecursivePatterns(queryMol.get());
-  EXPECT_EQ(info.size(), 8);
+  EXPECT_EQ(info.size(), RecursivePatternInfo::kMaxPatterns);
 
-  for (int i = 0; i < 8; ++i) {
+  for (size_t i = 0; i < RecursivePatternInfo::kMaxPatterns; ++i) {
     EXPECT_EQ(info.patterns[i].patternId, i);
   }
 }
 
 TEST(RecursiveLabelerEdgeCases, TooManyPatternsThrows) {
-  // Currently only 8 patterns are supported (expandable to 16)
   std::string smarts = "[C";
-  for (int i = 0; i < 12; ++i) {
+  for (int i = 0; i < RecursivePatternInfo::kMaxPatterns + 1; ++i) {
     smarts += ";$(*-N)";
   }
   smarts += "]";
@@ -808,6 +808,17 @@ TEST(RecursiveLabelerEdgeCases, TooManyPatternsThrows) {
   ASSERT_NE(queryMol, nullptr);
 
   EXPECT_THROW(extractRecursivePatterns(queryMol.get()), std::runtime_error);
+}
+
+// =============================================================================
+// Nested Recursive Labeling Tests
+// =============================================================================
+
+TEST_F(RecursiveLabelingTest, NestedRecursiveMatchVsRDKit) {
+  runRecursiveLabelingTestVsRDKit("CN", "[$([*;$(*-N)])]");
+  runRecursiveLabelingTestVsRDKit("CCN", "[$([C;$(*-N)])]");
+  runRecursiveLabelingTestVsRDKit("CNOF", "[$([*;$([*;$(*-F)])])]");
+  runRecursiveLabelingTestVsRDKit("c1ccccc1N", "[$([c;$(*-N)])]");
 }
 
 

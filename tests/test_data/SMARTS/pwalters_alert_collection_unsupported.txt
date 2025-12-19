@@ -2,23 +2,23 @@
 [C,S,P](=O)[OH].[C,S,P](=O)[OH].[C,S,P](=O)[OH].[C,S,P](=O)[OH]
 # Fragment queries (disconnected SMARTS patterns) are not supported. Query has 3 disconnected components: C(=O)O[C,H1].C(=O)O[C,H1].C(=O)O[C,H1]
 C(=O)O[C,H1].C(=O)O[C,H1].C(=O)O[C,H1]
-# Query contains 9 recursive SMARTS patterns, but only 8 are currently supported (expandable to 16 in future)
+# Too many recursive SMARTS patterns (maximum 8 supported)
 [#7;R1]1[#6;!$(c=O)]([F,Cl,Br,I])[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6;!$(c-N)][#6][#6;!$(c-N)]1
-# Query contains 10 recursive SMARTS patterns, but only 8 are currently supported (expandable to 16 in future)
+# Too many recursive SMARTS patterns (maximum 8 supported)
 [#7;R1]1[#6;!$(c=O)]([F,Cl,Br,I])[#6][#6;!$(c-N)][#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6;!$(c=O);!$(c-N)]1
-# Query contains 12 recursive SMARTS patterns, but only 8 are currently supported (expandable to 16 in future)
+# Too many recursive SMARTS patterns (maximum 8 supported)
 [#7,#8,#16]1~[#6;H]~[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])~[#6](=O)~[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])~[#6;H]1
-# Query contains 10 recursive SMARTS patterns, but only 8 are currently supported (expandable to 16 in future)
+# Too many recursive SMARTS patterns (maximum 8 supported)
 [#7;R1]1[#6;!$(c=O);!$(c-N)][#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#6]([F,Cl,Br,I])[#6][#6;!$(c=O);!$(c-N)]1
-# Query contains 12 recursive SMARTS patterns, but only 8 are currently supported (expandable to 16 in future)
+# Too many recursive SMARTS patterns (maximum 8 supported)
 [#7]1[#6]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])[#7;R1][#6]([F,Cl,Br,I])[#6][#6]1([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])
-# Query contains 12 recursive SMARTS patterns, but only 8 are currently supported (expandable to 16 in future)
+# Too many recursive SMARTS patterns (maximum 8 supported)
 [N;!R]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O))])=[N;!R]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O))])
-# Query contains 14 recursive SMARTS patterns, but only 8 are currently supported (expandable to 16 in future)
+# Too many recursive SMARTS patterns (maximum 8 supported)
 O=[C,S]Oc1aaa([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aa([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])1
-# Query contains 10 recursive SMARTS patterns, but only 8 are currently supported (expandable to 16 in future)
+# Too many recursive SMARTS patterns (maximum 8 supported)
 CC(=O)[$([C&H1]),$(C-F),$(C-Cl),$(C-Br),$(C-I)]=[$([C&H1]),$(C-F),$(C-Cl),$(C-Br),$(C-I)]C(=O)C
-# Too many recursive SMARTS patterns (maximum 16 supported)
+# Too many recursive SMARTS patterns (maximum 8 supported)
 [$([Ru]),$([Rh]),$([#34]),$([Pd]),$([Sc]),$([Bi]),$([Sb]),$([Ag]),$([Ti]),$([Al]),$([Cd]),$([V]),$([In]),$([Cr]),$([Sn]),$([Mn]),$([La]),$([Fe]),$([Er]),$([Tm]),$([Yb]),$([Lu]),$([Hf]),$([Ta]),$([W]),$([Re]),$([Co]),$([Os]),$([Ni]),$([Ir]),$([Cu]),$([Zn]),$([Ga]),$([Ge]),$([#33]),$([Y]),$([Zr]),$([Nb]),$([Ce]),$([Pr]),$([Nd]),$([Sm]),$([Eu]),$([Gd]),$([Tb]),$([Dy]),$([Ho]),$([Pt]),$([Au]),$([Hg]),$([Tl]),$([Pb]),$([Ac]),$([Th]),$([Pa]),$([Mo]),$([U]),$([Tc]),$([Te]),$([Po]),$([At])]
 # Fragment queries (disconnected SMARTS patterns) are not supported. Query has 4 disconnected components: C#N.C#N.C#N.C#N
 C#N.C#N.C#N.C#N
@@ -42,17 +42,15 @@ a[O;D1].a[O;D1].a[O;D1].a[O;D1].a[O;D1]
 C[O;D1].C[O;D1].C[O;D1].C[O;D1].C[O;D1].C[O;D1].C[O;D1]
 # Fragment queries (disconnected SMARTS patterns) are not supported. Query has 7 disconnected components: [Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I]
 [Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I].[Cl,Br,I]
-# Query contains 14 recursive SMARTS patterns, but only 8 are currently supported (expandable to 16 in future)
+# Too many recursive SMARTS patterns (maximum 8 supported)
 [#7,#8,#16]1[#6]([$(S(=O)(=O)),$([F,Cl]),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O))])[#6]([$(S(=O)(=O)),$([F,Cl]),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O))])[#7][#6]1([Cl,Br,I])
-# Too many recursive SMARTS patterns (maximum 16 supported)
+# Too many recursive SMARTS patterns (maximum 8 supported)
 [$([C;H2]),$([C&H1;$(C-F)]),$([C&H1;$(C-Cl)]),$([C&H1;$(C-Br)]),$([C&H1;$(CI)]),$(C(F)F),$(C(Cl)Cl),$(C(Br)Br),$(C(I)I),$(C(F)Cl),$(C(F)Br),$(C(F)I),$(C(Cl)Br),$(C(Br)I)](=[$([C&H1;$(C(-C(=O)))]),$(C(F)(C(=O))),$(C(Cl)(C(=O))),$(C(Br)(C(=O))),$(C(I)(C(=O))),$(C(C)(C(=O))),$(C(c)(C(=O)))])
-# Query contains 13 recursive SMARTS patterns, but only 8 are currently supported (expandable to 16 in future)
+# Too many recursive SMARTS patterns (maximum 8 supported)
 C([Cl,Br,I,$(O(S(=O)(=O)))])=C([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])
-# Query contains 12 recursive SMARTS patterns, but only 8 are currently supported (expandable to 16 in future)
+# Too many recursive SMARTS patterns (maximum 8 supported)
 [N;X3;!$(N-S(=O)(=O));!$(N-C(F)(F)(F));!$(N-C#N);!$(N-C(=O));!$(N-C(=S));!$(N-C(=N))]-[N;X3;!$(N-S(=O)(=O));!$(N-C(F)(F)(F));!$(N-C#N);!$(N-C(=O));!$(N-C(=S));!$(N-C(=N))]
-# Nested recursive SMARTS ($($(...))) are not supported
-[$(c([C;!R;!$(C-[N,O,S]);!$(C-[H])](=O))1naaaa1),$(c([C;!R;!$(C-[N,O,S]);!$(C-[H])](=O))1naa[n,s,o]1)]
-# Query contains 14 recursive SMARTS patterns, but only 8 are currently supported (expandable to 16 in future)
+# Too many recursive SMARTS patterns (maximum 8 supported)
 O=[C,S]Oc1aaa([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aa([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])1
 # Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: c1c([O&D1])c(-[Cl,Br,I])c(-[Cl,Br,I])cc1.c1c([O&D1])c(-[Cl,Br,I])c(-[Cl,Br,I])cc1
 c1c([O;D1])c(-[Cl,Br,I])c(-[Cl,Br,I])cc1.c1c([O;D1])c(-[Cl,Br,I])c(-[Cl,Br,I])cc1
@@ -64,30 +62,22 @@ c1c([O;D1])ccc(-[Cl,Br,I])c(-[Cl,Br,I])1.c1c([O;D1])ccc(-[Cl,Br,I])c(-[Cl,Br,I])
 c(-[Cl,Br,I])1c([O;D1])c(-[Cl,Br,I])ccc1.c(-[Cl,Br,I])1c([O;D1])c(-[Cl,Br,I])ccc1
 # Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: c1c([O&D1])ccc(-[Cl,Br,I])c1-[Cl,Br,I].c1c([O&D1])ccc(-[Cl,Br,I])c1-[Cl,Br,I]
 c1c([O;D1])ccc(-[Cl,Br,I])c(-[Cl,Br,I])1.c1c([O;D1])ccc(-[Cl,Br,I])c(-[Cl,Br,I])1
-# Nested recursive SMARTS ($($(...))) are not supported
-[CH2][Cl,Br,I,$(O(S(=O)(=O)[!$(N);!$([O&D1])]))]
-# Nested recursive SMARTS ($($(...))) are not supported
-[CH;!$(C=C)][Cl,Br,I,$(O(S(=O)(=O)[!$(N);!$([O&D1])]))]
-# Nested recursive SMARTS ($($(...))) are not supported
-[C;X4](-[Cl,Br,I,$(O(S(=O)(=O)[!$(N);!$([O&D1])]))])(-[c,C])(-[c,C])(-[c,C])
-# Nested recursive SMARTS ($($(...))) are not supported
+# Too many recursive SMARTS patterns (maximum 8 supported)
 [$(a1aaa([$(N(=O)(=O)),$([N+](=O)[O-])])a([$(N(=O)(=O)),$([N+](=O)[O-])])a1([$(N(=O)(=O)),$([N+](=O)[O-])])),$(a1aa([$(N(=O)(=O)),$([N+](=O)[O-])])a([$(N(=O)(=O)),$([N+](=O)[O-])])aa1([$(N(=O)(=O)),$([N+](=O)[O-])])),$(a1a([$(N(=O)(=O)),$([N+](=O)[O-])])aa([$(N(=O)(=O)),$([N+](=O)[O-])])aa1([$(N(=O)(=O)),$([N+](=O)[O-])]))]
-# Nested recursive SMARTS ($($(...))) are not supported
+# Too many recursive SMARTS patterns (maximum 8 supported)
 [$(O=[C,S]Oc1a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aa1),$(O=[C,S]Oc1a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aaa([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])1),$(O=[C,S]Oc1a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aa([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])a1),$(O=[C,S]Oc1a([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aa([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])aa([$(S(=O)(=O)),F,$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O)O),$(C(=O)N)])1)]
-# Query contains 13 recursive SMARTS patterns, but only 8 are currently supported (expandable to 16 in future)
+# Too many recursive SMARTS patterns (maximum 8 supported)
 [CH;!R;!$(C-N)]=C([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O))])([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C(=O))])
-# Query contains 14 recursive SMARTS patterns, but only 8 are currently supported (expandable to 16 in future)
+# Too many recursive SMARTS patterns (maximum 8 supported)
 [C;!R]([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])([$(S(=O)(=O)),$(C(F)(F)(F)),$(C#N),$(N(=O)(=O)),$([N+](=O)[O-]),$(C=O)])=[C;!R]([C;!R](=O))([!$([#8]);!$([#7])])
-# Query contains 9 recursive SMARTS patterns, but only 8 are currently supported (expandable to 16 in future)
+# Too many recursive SMARTS patterns (maximum 8 supported)
 [H]c1c([$([N]),$([H])])ccc2ccc[n+]([$([O;X1]),$([C;H3]),$([#6][#6]:[#6]),$([#6][#6][#8]),$([#6][#6](C)=[#8]),$([#6][#6](N)=[#8]),$([#6][#6][#6])])c12
-# Query contains 11 recursive SMARTS patterns, but only 8 are currently supported (expandable to 16 in future)
+# Too many recursive SMARTS patterns (maximum 8 supported)
 c:2(:c:1-[#16]-c:3:c(-[#7](-c:1:c(:c(:c:2-[#1])-[#1])-[#1])-[$([#1]),$([#6](-[#1])(-[#1])-[#1]),$([#6](-[#1])(-[#1])-[#6]-[#1])]):c(:c(~[$([#1]),$([#6]:[#6])]):c(:c:3-[#1])-[$([#1]),$([#7](-[#1])-[#1]),$([#8]-[#6;X4])])~[$([#1]),$([#7](-[#1])-[#6;X4]),$([#6]:[#6])])-[#1]
-# Nested recursive SMARTS ($($(...))) are not supported
+# Too many recursive SMARTS patterns (maximum 8 supported)
 c:1:c:c-2:c(:c:c:1)-[#6]-[#6](-c:3:c(-[#16]-2):c(:c(-[#1]):c(:c:3-[#1])-[$([#1]),$([#8]),$([#16;X2]),$([#6;X4]),$([#7](-[$([#1]),$([#6;X4])])-[$([#1]),$([#6;X4])])])-[#1])-[#7](-[$([#1]),$([#6;X4])])-[$([#1]),$([#6;X4])]
-# Query contains 15 recursive SMARTS patterns, but only 8 are currently supported (expandable to 16 in future)
+# Too many recursive SMARTS patterns (maximum 8 supported)
 c:1:4:c(:n:c(:n:c:1-[#7](-[#1])-[#6](-[#1])(-[#1])-c:2:c(:c(:c(:o:2)-[#1])-[#1])-[#1])-[#7](-[#1])-c:3:c:c(:c(:c:c:3-[$([#1]),$([#6](-[#1])-[#1]),$([#16;X2]),$([#8]-[#6]-[#1]),$([#7;X3])])-[$([#1]),$([#6](-[#1])-[#1]),$([#16;X2]),$([#8]-[#6]-[#1]),$([#7;X3])])-[$([#1]),$([#6](-[#1])-[#1]),$([#16;X2]),$([#8]-[#6]-[#1]),$([#7;X3])]):c:c:c:c:4
-# Nested recursive SMARTS ($($(...))) are not supported
-[C;H1$(C([#6;!$(C=O)])),H0$(C([#6;!$(C=O)])[#6;!$(C=O)])]=[CH1]!@N([#6;!$(C(=O))])[#6;!$(C(=O))]
 # Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: [n&+][O&-&X1].[n&+][O&-&X1]
 [n+][O-X1].[n+][O-X1]
 # Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: [N&+](=O)[O&-].[N&+](=O)[O&-]
@@ -98,8 +88,6 @@ c:1:4:c(:n:c(:n:c:1-[#7](-[#1])-[#6](-[#1])(-[#1])-c:2:c(:c(:c(:o:2)-[#1])-[#1])
 a-[N+](=O)[O-].a-[N+](=O)[O-]
 # Fragment queries (disconnected SMARTS patterns) are not supported. Query has 3 disconnected components: [#6]OP(=O)(*)O[#6].[#6]OP(=O)(*)O[#6].[#6]OP(=O)(*)O[#6]
 [#6]OP(=O)(*)O[#6].[#6]OP(=O)(*)O[#6].[#6]OP(=O)(*)O[#6]
-# Nested recursive SMARTS ($($(...))) are not supported
-[$([C!$(C1(=O)C=CC(=O)C=C1)]C),$([Ch]),$(C[OH0])](=O)C=[C!$(C[Nv3X3,OH])]
 # Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: C#N.C#N
 C#N.C#N
 # Fragment queries (disconnected SMARTS patterns) are not supported. Query has 2 disconnected components: [C&X3](=O)[O&H1].[C&X3](=O)[O&H1]

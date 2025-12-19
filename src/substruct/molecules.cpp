@@ -23,10 +23,12 @@
 #include <GraphMol/Substruct/SubstructMatch.h>
 #include <RDGeneral/versions.h>
 
+#include <algorithm>
 #include <functional>
 #include <stdexcept>
 #include <string>
 
+#include "substruct_debug.h"
 #include "substruct_types.h"
 
 namespace nvMolKit {
@@ -1090,12 +1092,14 @@ void collectAndOnlyFlags(const RDKit::Atom::QUERYATOM_QUERY* query,
  * @param builder The builder accumulating leaves and instructions
  * @param bondCounts Bond type counts for the atom (used for leaf nodes)
  * @param nextPatternId Reference to pattern ID counter for recursive SMARTS
+ * @param childPatternIds Optional: explicit pattern IDs for RecursiveMatch (for cached patterns)
  * @return Scratch index where this subtree's result will be stored
  */
 uint8_t processQueryTree(const RDKit::Atom::QUERYATOM_QUERY* query,
                          QueryTreeBuilder&                   builder,
                          const BondTypeCounts&               bondCounts,
-                         int&                                nextPatternId) {
+                         int&                                nextPatternId,
+                         const std::vector<int>*             childPatternIds = nullptr) {
   const std::string desc      = query->getDescription();
   const bool        isNegated = query->getNegation();
 
@@ -1120,7 +1124,7 @@ uint8_t processQueryTree(const RDKit::Atom::QUERYATOM_QUERY* query,
   if (desc == "AtomOr") {
     std::vector<uint8_t> childResults;
     for (auto it = query->beginChildren(); it != query->endChildren(); ++it) {
-      childResults.push_back(processQueryTree((*it).get(), builder, bondCounts, nextPatternId));
+      childResults.push_back(processQueryTree((*it).get(), builder, bondCounts, nextPatternId, childPatternIds));
     }
 
     if (childResults.empty()) {
@@ -1142,7 +1146,7 @@ uint8_t processQueryTree(const RDKit::Atom::QUERYATOM_QUERY* query,
   if (desc == "AtomAnd") {
     std::vector<uint8_t> childResults;
     for (auto it = query->beginChildren(); it != query->endChildren(); ++it) {
-      childResults.push_back(processQueryTree((*it).get(), builder, bondCounts, nextPatternId));
+      childResults.push_back(processQueryTree((*it).get(), builder, bondCounts, nextPatternId, childPatternIds));
     }
 
     if (childResults.empty()) {
@@ -1165,11 +1169,23 @@ uint8_t processQueryTree(const RDKit::Atom::QUERYATOM_QUERY* query,
   }
 
   if (desc == "RecursiveStructure") {
-    if (nextPatternId >= AtomDataPacked::kMaxRecursivePatterns) {
-      throw std::runtime_error("Too many recursive SMARTS patterns (maximum " +
-                               std::to_string(AtomDataPacked::kMaxRecursivePatterns) + " supported)");
+    int patternIdToUse;
+    if (childPatternIds != nullptr) {
+      if (nextPatternId >= static_cast<int>(childPatternIds->size())) {
+        throw std::runtime_error("Child pattern ID index out of bounds");
+      }
+      patternIdToUse = (*childPatternIds)[nextPatternId++];
+    } else {
+      if (nextPatternId >= RecursivePatternInfo::kMaxPatterns) {
+        throw std::runtime_error("Too many recursive SMARTS patterns (maximum " +
+                                 std::to_string(RecursivePatternInfo::kMaxPatterns) + " supported)");
+      }
+      patternIdToUse = nextPatternId++;
     }
-    uint8_t result = builder.addRecursiveMatch(static_cast<uint8_t>(nextPatternId++));
+    if constexpr (kDebugBoolTreeBuild) {
+      printf("[BoolTreeBuild] Adding RecursiveMatch for patternId=%d\n", patternIdToUse);
+    }
+    uint8_t result = builder.addRecursiveMatch(static_cast<uint8_t>(patternIdToUse));
     if (isNegated) {
       result = builder.addNot(result);
     }
@@ -1239,11 +1255,13 @@ uint8_t processQueryTree(const RDKit::Atom::QUERYATOM_QUERY* query,
  * @param bondCounts Bond type counts for the atom
  * @param builder Output: the populated QueryTreeBuilder
  * @param nextPatternId Reference to pattern ID counter for recursive SMARTS
+ * @param childPatternIds Optional: explicit pattern IDs for RecursiveMatch (for cached patterns)
  */
-void buildQueryTreeForAtom(const RDKit::Atom*    atom,
-                           const BondTypeCounts& bondCounts,
-                           QueryTreeBuilder&     builder,
-                           int&                  nextPatternId) {
+void buildQueryTreeForAtom(const RDKit::Atom*      atom,
+                           const BondTypeCounts&   bondCounts,
+                           QueryTreeBuilder&       builder,
+                           int&                    nextPatternId,
+                           const std::vector<int>* childPatternIds = nullptr) {
   // Check for chirality specified on the atom (SMARTS @/@@ notation)
   if (atom->getChiralTag() != RDKit::Atom::ChiralType::CHI_UNSPECIFIED) {
     throw std::runtime_error("SMARTS chirality query (@/@@) is not supported");
@@ -1260,7 +1278,7 @@ void buildQueryTreeForAtom(const RDKit::Atom*    atom,
     return;
   }
 
-  processQueryTree(query, builder, bondCounts, nextPatternId);
+  processQueryTree(query, builder, bondCounts, nextPatternId, childPatternIds);
 }
 
 AtomQuery getQueryFlagsFromQuery(const RDKit::Atom::QUERYATOM_QUERY* query) {
@@ -1744,6 +1762,11 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
 
   int nextPatternId = 0;
 
+  if constexpr (kDebugBoolTreeBuild) {
+    printf("[BoolTreeBuild] addQueryToBatch: starting with nextPatternId=0, smarts=%s\n",
+           RDKit::MolToSmarts(*mol).c_str());
+  }
+
   for (const RDKit::Atom* atom : mol->atoms()) {
     auto& thisAtomData = atomDataVec.emplace_back();
     populateQueryAtomData(atom, thisAtomData);
@@ -1809,12 +1832,120 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   batch.recursivePatterns.push_back(extractRecursivePatterns(mol));
 }
 
+void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch,
+                     const std::vector<int>& childPatternIds) {
+  if (mol->getNumAtoms() > kMaxMoleculeAtoms) {
+    throw std::runtime_error("Query molecule has " + std::to_string(mol->getNumAtoms()) +
+                             " atoms, which exceeds the maximum of " + std::to_string(kMaxMoleculeAtoms));
+  }
+
+  std::vector<int> fragMapping;
+  const unsigned   numFrags = RDKit::MolOps::getMolFrags(*mol, fragMapping);
+  if (numFrags > 1) {
+    throw std::runtime_error("Fragment queries (disconnected SMARTS patterns) are not supported. "
+                             "Query has " + std::to_string(numFrags) + " disconnected components: " +
+                             RDKit::MolToSmarts(*mol));
+  }
+
+  auto& atomDataVec       = batch.atomData;
+  auto& atomDataPackedVec = batch.atomDataPacked;
+  auto& atomQueriesVec    = batch.atomQueries;
+  auto& atomQueryMasksVec = batch.atomQueryMasks;
+  auto& bondTypeCountsVec = batch.bondTypeCounts;
+  auto& atomQueryTreesVec     = batch.atomQueryTrees;
+  auto& queryInstructionsVec  = batch.queryInstructions;
+  auto& queryLeafMasksVec     = batch.queryLeafMasks;
+  auto& queryLeafBondCountsVec = batch.queryLeafBondCounts;
+  auto& atomInstrStartsVec    = batch.atomInstrStarts;
+  auto& atomLeafMaskStartsVec = batch.atomLeafMaskStarts;
+
+  atomDataVec.reserve(atomDataVec.size() + mol->getNumAtoms());
+  atomDataPackedVec.reserve(atomDataPackedVec.size() + mol->getNumAtoms());
+  atomQueriesVec.reserve(atomQueriesVec.size() + mol->getNumAtoms());
+  atomQueryMasksVec.reserve(atomQueryMasksVec.size() + mol->getNumAtoms());
+  bondTypeCountsVec.reserve(bondTypeCountsVec.size() + mol->getNumAtoms());
+  atomQueryTreesVec.reserve(atomQueryTreesVec.size() + mol->getNumAtoms());
+  atomInstrStartsVec.reserve(atomInstrStartsVec.size() + mol->getNumAtoms());
+  atomLeafMaskStartsVec.reserve(atomLeafMaskStartsVec.size() + mol->getNumAtoms());
+
+  int cumulativeBondCount = 0;
+  addQueryBondsAndConnectivity(mol, batch, cumulativeBondCount);
+
+  int nextPatternId = 0;
+
+  if constexpr (kDebugBoolTreeBuild) {
+    printf("[BoolTreeBuild] addQueryToBatch (with childPatternIds): smarts=%s, childIds=[",
+           RDKit::MolToSmarts(*mol).c_str());
+    for (size_t i = 0; i < childPatternIds.size(); ++i) {
+      printf("%d%s", childPatternIds[i], i + 1 < childPatternIds.size() ? "," : "");
+    }
+    printf("]\n");
+  }
+
+  for (const RDKit::Atom* atom : mol->atoms()) {
+    auto& thisAtomData = atomDataVec.emplace_back();
+    populateQueryAtomData(atom, thisAtomData);
+
+    auto& thisAtomPacked = atomDataPackedVec.emplace_back();
+    populateQueryAtomDataPacked(atom, thisAtomPacked);
+
+    auto& thisBondCounts = bondTypeCountsVec.emplace_back();
+    populateQueryBondTypeCounts(mol, atom, thisBondCounts);
+
+    QueryTreeBuilder builder;
+    buildQueryTreeForAtom(atom, thisBondCounts, builder, nextPatternId, &childPatternIds);
+
+    if (builder.exceedsScratchLimit()) {
+      throw std::runtime_error("SMARTS query too complex: boolean expression requires " +
+                               std::to_string(builder.requiredScratchSize()) + " scratch slots, but maximum is " +
+                               std::to_string(kMaxBoolScratchSize) + ". Query: " + RDKit::MolToSmarts(*mol));
+    }
+
+    atomInstrStartsVec.push_back(static_cast<int>(queryInstructionsVec.size()));
+    atomLeafMaskStartsVec.push_back(static_cast<int>(queryLeafMasksVec.size()));
+
+    queryInstructionsVec.insert(queryInstructionsVec.end(),
+                                builder.instructions.begin(),
+                                builder.instructions.end());
+    queryLeafMasksVec.insert(queryLeafMasksVec.end(),
+                             builder.leafMasks.begin(),
+                             builder.leafMasks.end());
+    queryLeafBondCountsVec.insert(queryLeafBondCountsVec.end(),
+                                  builder.leafBondCounts.begin(),
+                                  builder.leafBondCounts.end());
+    atomQueryTreesVec.push_back(builder.buildTree());
+
+    AtomQuery queryFlags = AtomQueryNone;
+    if (!builder.leafMasks.empty()) {
+      atomQueryMasksVec.push_back(builder.leafMasks[0]);
+      if (atom->hasQuery() && atom->getQuery() != nullptr) {
+        try {
+          queryFlags = getQueryFlagsFromQuery(atom->getQuery());
+        } catch (...) {
+        }
+      }
+    } else {
+      atomQueryMasksVec.push_back(AtomQueryMask{});
+    }
+    atomQueriesVec.push_back(queryFlags);
+  }
+
+  batch.batchAtomStarts.push_back(static_cast<int>(atomDataVec.size()));
+  batch.batchBondStarts.push_back(static_cast<int>(batch.bondData.size()));
+  batch.batchAtomBondStarts.push_back(static_cast<int>(batch.atomBondStarts.size()));
+  batch.batchOtherAtomIndicesStarts.push_back(static_cast<int>(batch.otherAtomIndices.size()));
+  batch.batchBondIndicesStarts.push_back(static_cast<int>(batch.bondDataIndices.size()));
+
+  // No recursive patterns extraction for cached patterns - they're pre-extracted
+  batch.recursivePatterns.emplace_back();
+}
+
 namespace {
 
 /**
- * @brief Check if a query contains nested recursive SMARTS.
+ * @brief Check if a query contains any RecursiveStructure queries.
  *
- * @param query The inner query molecule from a RecursiveStructure
+ * @param query The query to check
  * @return true if the query contains any RecursiveStructure queries
  */
 bool containsRecursiveSmarts(const RDKit::Atom::QUERYATOM_QUERY* query) {
@@ -1836,61 +1967,154 @@ bool containsRecursiveSmarts(const RDKit::Atom::QUERYATOM_QUERY* query) {
 }
 
 /**
- * @brief Recursively collect RecursiveStructure patterns from a query tree.
+ * @brief Recursively collect patterns from a molecule's atoms.
  *
- * @param query The query to search
- * @param atomIdx The atom index containing this query
+ * Helper for extracting patterns from inner query molecules.
+ *
+ * @param mol The molecule to extract patterns from
  * @param patterns Output vector of patterns found
  * @param nextPatternId Next available pattern ID
- * @param depth Current recursion depth (for nested detection)
+ * @param parentIdx Index of parent pattern in patterns array, -1 for root
+ * @param parentAtomIdx Atom index in the parent pattern that contains this pattern
+ * @param currentDepth Current nesting depth
+ * @param nextLocalId Counter for localIdInParent assignment (reset per parent)
+ * @return Maximum depth encountered in this subtree
  */
-void collectRecursivePatterns(const RDKit::Atom::QUERYATOM_QUERY* query,
-                              int                                  atomIdx,
-                              std::vector<RecursivePatternEntry>&  patterns,
-                              int&                                 nextPatternId,
-                              int                                  depth) {
+int collectPatternsFromMolecule(const RDKit::ROMol*                 mol,
+                                std::vector<RecursivePatternEntry>& patterns,
+                                int&                                nextPatternId,
+                                int                                 parentIdx,
+                                int                                 parentAtomIdx,
+                                int                                 currentDepth,
+                                int&                                nextLocalId);
+
+/**
+ * @brief Recursively collect RecursiveStructure patterns from a query tree.
+ *
+ * Extracts patterns depth-first: child patterns are collected before parents.
+ * Each pattern gets a unique patternId and tracks its parent relationship.
+ *
+ * @param query The query to search
+ * @param atomIdx The atom index containing this query (in the parent molecule)
+ * @param patterns Output vector of patterns found
+ * @param nextPatternId Next available pattern ID
+ * @param parentIdx Index of parent pattern in patterns array, -1 for root
+ * @param currentDepth Current nesting depth
+ * @param nextLocalId Counter for localIdInParent assignment (passed to children)
+ * @return Maximum depth encountered in this subtree
+ */
+struct PendingRecursiveChild {
+  int                patternIdx = -1;
+  const RDKit::ROMol* queryMol   = nullptr;
+  int                atomIdx    = -1;
+  int                depth      = 0;
+};
+
+int collectRecursivePatterns(const RDKit::Atom::QUERYATOM_QUERY* query,
+                             int                                 atomIdx,
+                             std::vector<RecursivePatternEntry>&  patterns,
+                             int&                                nextPatternId,
+                             int                                 parentIdx,
+                             int                                 currentDepth,
+                             int&                                nextLocalId,
+                             std::vector<PendingRecursiveChild>*  pendingChildren) {
   if (query == nullptr) {
-    return;
+    return 0;
   }
 
   const std::string desc = query->getDescription();
+  int maxDepth = 0;
 
   if (desc == "RecursiveStructure") {
-    if (depth > 0) {
-      throw std::runtime_error("Nested recursive SMARTS ($($(...))) are not supported");
-    }
-
-    if (nextPatternId >= AtomDataPacked::kMaxRecursivePatterns) {
+    if (nextPatternId >= RecursivePatternInfo::kMaxPatterns) {
       throw std::runtime_error("Too many recursive SMARTS patterns (maximum " +
-                               std::to_string(AtomDataPacked::kMaxRecursivePatterns) + " supported)");
+                               std::to_string(RecursivePatternInfo::kMaxPatterns) + " supported)");
     }
 
     const auto* recursiveQuery = static_cast<const RDKit::RecursiveStructureQuery*>(query);
     auto queryMol = recursiveQuery->getQueryMol();
 
     if (queryMol != nullptr) {
-      for (const auto* innerAtom : queryMol->atoms()) {
-        if (innerAtom->hasQuery()) {
-          const auto* innerQuery = innerAtom->getQuery();
-          if (containsRecursiveSmarts(innerQuery)) {
-            throw std::runtime_error("Nested recursive SMARTS ($($(...))) are not supported");
-          }
-        }
-      }
+      const int thisPatternIdx = static_cast<int>(patterns.size());
+      const int thisLocalId    = nextLocalId++;
 
       RecursivePatternEntry entry;
-      entry.queryMol = queryMol;
-      entry.queryAtomIdx = atomIdx;
-      entry.patternId = nextPatternId++;
+      entry.queryMol           = queryMol;
+      entry.queryAtomIdx       = atomIdx;
+      entry.patternId          = nextPatternId++;
+      entry.parentPatternIdx   = parentIdx;
+      entry.parentPatternId    = (parentIdx >= 0) ? patterns[parentIdx].patternId : -1;
+      entry.parentQueryAtomIdx = atomIdx;
+      entry.localIdInParent    = thisLocalId;
       patterns.push_back(entry);
+
+      if constexpr (kDebugBoolTreeBuild) {
+        printf("[ExtractPatterns] Added pattern: patternId=%d, depth=%d, parentIdx=%d, parentPatternId=%d, localIdInParent=%d, smarts=%s\n",
+               entry.patternId, currentDepth, parentIdx, entry.parentPatternId, thisLocalId, RDKit::MolToSmarts(*queryMol).c_str());
+      }
+
+      // Defer descending into the recursive query molecule until we've assigned IDs
+      // for all RecursiveStructure nodes in this molecule. This keeps top-level
+      // recursive IDs consistent with the order used when building query trees.
+      if (pendingChildren != nullptr) {
+        pendingChildren->push_back(PendingRecursiveChild{thisPatternIdx, queryMol, atomIdx, currentDepth});
+      }
+      // This RecursiveStructure contributes at least one level of depth.
+      maxDepth = std::max(maxDepth, 1);
     }
-    return;
+    return maxDepth;
   }
 
   for (auto it = query->beginChildren(); it != query->endChildren(); ++it) {
-    collectRecursivePatterns((*it).get(), atomIdx, patterns, nextPatternId,
-                             desc == "RecursiveStructure" ? depth + 1 : depth);
+    int childDepth = collectRecursivePatterns(
+      (*it).get(), atomIdx, patterns, nextPatternId, parentIdx, currentDepth, nextLocalId, pendingChildren);
+    maxDepth = std::max(maxDepth, childDepth);
   }
+
+  return maxDepth;
+}
+
+int collectPatternsFromMolecule(const RDKit::ROMol*                  mol,
+                                std::vector<RecursivePatternEntry>&  patterns,
+                                int&                                 nextPatternId,
+                                int                                  parentIdx,
+                                int                                  parentAtomIdx,
+                                int                                  currentDepth,
+                                int&                                 nextLocalId) {
+  int maxDepth = 0;
+  std::vector<PendingRecursiveChild> pendingChildren;
+  for (const auto* atom : mol->atoms()) {
+    if (!atom->hasQuery()) {
+      continue;
+    }
+
+    const auto* query = atom->getQuery();
+    if (query != nullptr) {
+      int childDepth = collectRecursivePatterns(
+        query, atom->getIdx(), patterns, nextPatternId, parentIdx, currentDepth, nextLocalId, &pendingChildren);
+      maxDepth = std::max(maxDepth, childDepth);
+    }
+  }
+
+  // Now that all recursive patterns in this molecule have stable patternIds, walk
+  // into each recursive query molecule to collect nested patterns and finalize depths.
+  for (const auto& pending : pendingChildren) {
+    int childLocalId   = 0;
+    int childMaxDepth  = 0;
+    if (pending.queryMol != nullptr) {
+      childMaxDepth = collectPatternsFromMolecule(pending.queryMol,
+                                                  patterns,
+                                                  nextPatternId,
+                                                  pending.patternIdx,
+                                                  pending.atomIdx,
+                                                  currentDepth + 1,
+                                                  childLocalId);
+    }
+    patterns[pending.patternIdx].depth = childMaxDepth;
+    maxDepth = std::max(maxDepth, childMaxDepth + 1);
+  }
+
+  return maxDepth;
 }
 
 }  // namespace
@@ -1921,24 +2145,32 @@ RecursivePatternInfo extractRecursivePatterns(const RDKit::ROMol* mol) {
   }
 
   int nextPatternId = 0;
+  int nextLocalId   = 0;
 
-  for (const auto* atom : mol->atoms()) {
-    if (!atom->hasQuery()) {
-      continue;
-    }
-
-    const auto* query = atom->getQuery();
-    if (query != nullptr) {
-      collectRecursivePatterns(query, atom->getIdx(), info.patterns, nextPatternId, 0);
-    }
-  }
+  // Collect patterns molecule-wide so that patternIds are assigned in the same
+  // order that query trees encounter RecursiveStructure nodes (outer level first).
+  int maxDepth = collectPatternsFromMolecule(mol, info.patterns, nextPatternId, -1, -1, 0, nextLocalId);
 
   info.hasRecursivePatterns = !info.patterns.empty();
+  info.maxDepth = maxDepth;
 
-  if (info.size() > 8) {
+  if (info.size() > RecursivePatternInfo::kMaxPatterns) {
     throw std::runtime_error("Query contains " + std::to_string(info.size()) +
-                             " recursive SMARTS patterns, but only 8 are currently supported "
-                             "(expandable to 16 in future)");
+                             " recursive SMARTS patterns, but only " +
+                             std::to_string(RecursivePatternInfo::kMaxPatterns) + " are supported");
+  }
+
+  std::stable_sort(info.patterns.begin(), info.patterns.end(),
+                   [](const RecursivePatternEntry& a, const RecursivePatternEntry& b) {
+                     return a.depth < b.depth;
+                   });
+
+  if constexpr (kDebugBoolTreeBuild) {
+    printf("[ExtractPatterns] After sorting by depth:\n");
+    for (const auto& p : info.patterns) {
+      printf("[ExtractPatterns]   patternId=%d, depth=%d, parentPatternId=%d, localIdInParent=%d\n",
+             p.patternId, p.depth, p.parentPatternId, p.localIdInParent);
+    }
   }
 
   return info;

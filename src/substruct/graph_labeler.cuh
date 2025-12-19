@@ -23,6 +23,7 @@
 #include "flat_bit_vect.h"
 #include "molecules.h"
 #include "molecules_device.cuh"
+#include "substruct_debug.h"
 
 namespace nvMolKit {
 
@@ -243,7 +244,14 @@ __device__ void populateLabelMatrixOptimized(const MoleculeView&                
       const int queryIdx  = pairIdx % numQueryAtoms;
 
       const uint32_t recursiveBits = pairRecursiveBits ? pairRecursiveBits[targetIdx] : 0;
-      if (atomPairMatchesWithTree(target, targetIdx, query, queryIdx, recursiveBits)) {
+      const bool matches = atomPairMatchesWithTree(target, targetIdx, query, queryIdx, recursiveBits);
+      if constexpr (kDebugLabelMatrix) {
+        if (pairRecursiveBits != nullptr) {
+          printf("[LabelMatrixTree] targetAtom=%d, queryAtom=%d, recursiveBits=0x%x, matches=%d\n",
+                 targetIdx, queryIdx, recursiveBits, matches ? 1 : 0);
+        }
+      }
+      if (matches) {
         labelMatrix.setAtomic(targetIdx, queryIdx);
       }
     }

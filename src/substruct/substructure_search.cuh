@@ -237,31 +237,38 @@ void getSubstructMatches(MoleculesDevice&             targetsDevice,
  * pattern data starts in the combined pattern batch.
  */
 struct BatchedPatternEntry {
-  int mainQueryIdx;   ///< Index of the main query this pattern belongs to
-  int patternId;      ///< Bit position (0-31) to paint for this pattern
-  int patternMolIdx;  ///< Index into the combined patterns MoleculesDevice
+  int mainQueryIdx;     ///< Index of the main query this pattern belongs to
+  int patternId;        ///< Bit position (0-31) to paint for this pattern
+  int patternMolIdx;    ///< Index into the combined patterns MoleculesDevice
+  int depth;            ///< Nesting depth (0=leaf, higher=parent of children)
+  int localIdInParent;  ///< Bit position in parent's input (for nested patterns)
 };
 
 /**
  * @brief Scratch buffers for recursive SMARTS preprocessing.
  *
  * Reusable device memory to avoid repeated alloc/free between kernels.
+ * For nested patterns, intermediateBits holds results from child levels
+ * that become input for parent patterns.
  */
 struct RecursiveScratchBuffers {
   AsyncDeviceVector<BatchedPatternEntry> patternEntries;
   AsyncDeviceVector<PartialMatch>        overflow;
   AsyncDeviceVector<uint32_t>            labelMatrixBuffer;
+  AsyncDeviceVector<uint32_t>            intermediateBits;  ///< Child pattern results for nested recursion
 
-  explicit RecursiveScratchBuffers(cudaStream_t stream) : patternEntries(), overflow(), labelMatrixBuffer() {
+  explicit RecursiveScratchBuffers(cudaStream_t stream) : patternEntries(), overflow(), labelMatrixBuffer(), intermediateBits() {
     patternEntries.setStream(stream);
     overflow.setStream(stream);
     labelMatrixBuffer.setStream(stream);
+    intermediateBits.setStream(stream);
   }
 
   void setStream(cudaStream_t stream) {
     patternEntries.setStream(stream);
     overflow.setStream(stream);
     labelMatrixBuffer.setStream(stream);
+    intermediateBits.setStream(stream);
   }
 };
 
@@ -310,9 +317,11 @@ struct RecursivePatternCache {
    * @param queryIdx Index of the query containing the pattern
    * @param patternId Pattern ID within the query
    * @param queryMol The pattern molecule (only used if not in cache)
+   * @param patternInfo Full recursive pattern info for this query (to find children's patternIds)
    * @return The molecule index in the cached patterns batch
    */
-  int getOrAddPattern(int queryIdx, int patternId, const RDKit::ROMol* queryMol);
+  int getOrAddPattern(int queryIdx, int patternId, const RDKit::ROMol* queryMol,
+                      const RecursivePatternInfo& patternInfo);
 
   /**
    * @brief Sync cached patterns to device if needed.

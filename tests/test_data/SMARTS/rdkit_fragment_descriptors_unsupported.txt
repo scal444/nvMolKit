@@ -1,12 +1,8 @@
-# Nested recursive SMARTS ($($(...))) are not supported
+# Too many recursive SMARTS patterns (maximum 8 supported)
 [$(P(=[OX1])([$([OX2H]),$([OX1-]),$([OX2]P)])([$([OX2H]),$([OX1-]),$([OX2]P)])[$([OX2H]),$([OX1-]),$([OX2]P)]),$([P+]([OX1-])([$([OX2H]),$([OX1-]),$([OX2]P)])([$([OX2H]),$([OX1-]),$([OX2]P)])[$([OX2H]),$([OX1-]),$([OX2]P)])]
-# Nested recursive SMARTS ($($(...))) are not supported
+# Too many recursive SMARTS patterns (maximum 8 supported)
 [$(P(=[OX1])([OX2][#6])([$([OX2H]),$([OX1-]),$([OX2][#6])])[$([OX2H]),$([OX1-]),$([OX2][#6]),$([OX2]P)]),$([P+]([OX1-])([OX2][#6])([$([OX2H]),$([OX1-]),$([OX2][#6])])[$([OX2H]),$([OX1-]),$([OX2][#6]),$([OX2]P)])]
-# Nested recursive SMARTS ($($(...))) are not supported
-[$(c1(-[$([NX3](=O)=O),$([NX3+](=O)[O-])])ccccc1)]
-# Nested recursive SMARTS ($($(...))) are not supported
-[$(c1(-[$([NX3](=O)=O),$([NX3+](=O)[O-])])ccccc1);!$(cc-!:*)]
-# Nested recursive SMARTS ($($(...))) are not supported
+# Too many recursive SMARTS patterns (maximum 8 supported)
 [$([cH]1[cH]cc(c[cH]1)~[$([#8,$([#8]~[H,c,C])])]),$([cH]1[cH]cc(c[cH]1)~[$([#7X3,$([#7](~[H,c,C])~[H,c,C])])]),$([cH]1[cH]cc(c[cH]1)-!:[$([NX3H,$(NC(=O)[H,c,C])])])]
-# Nested recursive SMARTS ($($(...))) are not supported
+# Too many recursive SMARTS patterns (maximum 8 supported)
 [$(N(-[CH3])-C-[$(C~O),$(C-a),$(C-N),$(C=C)]),$(N(-[CH2][CH3])-C-[$(C~O),$(C-a),$(C-N),$(C=C)])]

@@ -1,8 +1,0 @@
-# Nested recursive SMARTS ($($(...))) are not supported
-[$([C](=O)([$([NX3H1]),$([NX3H2])])[NX3H1]):1][NX3H1;r{9-}:2]@;-[c;r{9-}:3]([nH1])[nH0:4]
-# Nested recursive SMARTS ($($(...))) are not supported
-[$([C](=O)([$([NX3H1]),$([NX3H2])])[NX3H1]):1][NX3H1;r{9-}:2]@;-[c;r{9-}:3]([nH0])[cH1:4]
-# Nested recursive SMARTS ($($(...))) are not supported
-[$([C](=O)([$([NX3H1]),$([NX3H2])])[NX3H1]):1][NX3H1;r{9-}:2]@;-[c&r6;r{9-}:3][nH0&r6:4]
-# Nested recursive SMARTS ($($(...))) are not supported
-[$([cH0]([$([NX3H2]),$([NX3H1])])):1][a;r{9-}:2]@;-[a;r{9-}:3][nX2:4]

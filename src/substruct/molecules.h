@@ -122,21 +122,34 @@ struct BondQueryData {
  *
  * Each RecursivePatternEntry represents one $(...) pattern found in the SMARTS query.
  * The queryMol pointer is non-owning - the original query owns the pattern.
+ *
+ * For nested recursive patterns, patterns are extracted leaf-first and stored in
+ * depth order (depth 0 = leaves, depth N = root-level patterns). This enables
+ * level-by-level processing where child pattern results become input for parents.
  */
 struct RecursivePatternEntry {
-  const RDKit::ROMol* queryMol = nullptr;  ///< The inner query molecule from $(...) 
+  const RDKit::ROMol* queryMol = nullptr;  ///< The inner query molecule from $(...)
   int queryAtomIdx = 0;                     ///< Index of the query atom containing this pattern
-  int patternId = 0;                        ///< Unique ID (0-15) for this pattern in the batch
+  int patternId = 0;                        ///< Unique ID (0-31) for this pattern in the batch
+  int depth = 0;                            ///< Nesting depth: 0=leaf (no children), 1+=has children
+  int parentPatternIdx = -1;                ///< Index into patterns array (before sorting), -1=root
+  int parentPatternId = -1;                 ///< Parent's patternId (stable across sorting), -1=root
+  int parentQueryAtomIdx = -1;              ///< Atom index in parent pattern needing this bit
+  int localIdInParent = 0;                  ///< Bit position in parent's RecursiveMatch (0, 1, 2...)
 };
 
 /**
  * @brief Collection of recursive SMARTS patterns extracted from a query.
  *
  * Used to preprocess recursive patterns before main substructure matching.
+ * Patterns are sorted by depth (leaves first) for level-by-level processing.
  */
 struct RecursivePatternInfo {
-  std::vector<RecursivePatternEntry> patterns;  ///< All recursive patterns found
+  static constexpr int kMaxPatterns = 8;        ///< Maximum supported recursive SMARTS patterns
+
+  std::vector<RecursivePatternEntry> patterns;  ///< All recursive patterns found, sorted by depth
   bool hasRecursivePatterns = false;            ///< Quick check for any patterns
+  int maxDepth = 0;                             ///< Maximum nesting depth (0=flat, 1+=nested)
 
   /**
    * @brief Check if the query has any recursive patterns.
@@ -147,6 +160,11 @@ struct RecursivePatternInfo {
    * @brief Get the number of recursive patterns.
    */
   [[nodiscard]] size_t size() const { return patterns.size(); }
+
+  /**
+   * @brief Check if the query has nested recursive patterns.
+   */
+  [[nodiscard]] bool hasNestedPatterns() const { return maxDepth > 0; }
 };
 
 /**
@@ -314,6 +332,19 @@ void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch);
 void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch);
 
 /**
+ * @brief Add a query molecule with explicit child pattern ID mapping.
+ *
+ * Used when adding cached recursive patterns. The childPatternIds vector maps
+ * local RecursiveStructure indices (in DFS order) to global pattern IDs.
+ *
+ * @param mol Pointer to the RDKit molecule
+ * @param batch The batch to add the query molecule to
+ * @param childPatternIds Map from local index (0, 1, ...) to global patternId
+ */
+void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch,
+                     const std::vector<int>& childPatternIds);
+
+/**
  * @brief Convert RDKit query description string to AtomQuery flags.
  * @param description The query description from RDKit (e.g., "AtomAtomicNum")
  * @return The corresponding AtomQuery flag value, or AtomQueryNone if unsupported
@@ -336,12 +367,14 @@ AtomQueryMask buildQueryMask(const AtomDataPacked& queryAtom, AtomQuery queryFla
  * @brief Extract recursive SMARTS patterns from a query molecule.
  *
  * Walks the query tree looking for RecursiveStructure nodes and extracts the
- * inner query molecules. Validates constraints:
- * - Maximum 8 non-nested recursive patterns per query (expandable to 16)
- * - No nested recursion (throws if $($(...)) patterns are found)
+ * inner query molecules, including nested patterns. Patterns are extracted
+ * depth-first and sorted by depth (leaves first) for level-by-level processing.
+ *
+ * Validates constraints:
+ * - Maximum 32 total recursive patterns per query (including nested)
  *
  * @param mol The query molecule (typically parsed from SMARTS)
- * @return RecursivePatternInfo containing all found patterns
+ * @return RecursivePatternInfo containing all found patterns sorted by depth
  * @throws std::runtime_error if constraints are violated
  */
 RecursivePatternInfo extractRecursivePatterns(const RDKit::ROMol* mol);

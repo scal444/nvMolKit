@@ -66,6 +66,8 @@ O1CC1
 [CR0;D2,D1][CR0;D2][CR0;D2][CR0;D2,D1]
 [R2][R2]
 c1ccccc1
+[$(c1(-[$([NX3](=O)=O),$([NX3+](=O)[O-])])ccccc1)]
+[$(c1(-[$([NX3](=O)=O),$([NX3+](=O)[O-])])ccccc1);!$(cc-!:*)]
 [$([NX3H1]1-C=C-C-C=C1),$([Nv3]1=C-C-C=C-C1),$([Nv3]1=C-C=C-C-C1),$([NX3H1]1-C-C=C-C=C1)]
 [$(c1(-[OX2H])ccccc1);!$(cc-!:[CH2]-[OX2H]);!$(cc-!:C(=O)[O;H1,-]);!$(cc-!:C(=O)-[NH2])]
 [$(C-[OX2H]);!$([CX3](-[OX2H])=[OX1]);!$([CD4]-[OX2H])]

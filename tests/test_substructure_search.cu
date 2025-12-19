@@ -2138,8 +2138,8 @@ TEST_P(SubstructureSearchTest, SingleMolSingleQueryForDebugging) {
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-  const std::string target = "CCCCCCCCCCCCCC(=O)NCc1ccc(C(=O)N[C@H](C(=O)O)[C@@H](C)CC)cc1";
-  const std::string query  = "[CX3;$([R0][#6]),$([H1R0])](=[OX1])[$([OX2H]),$([OX1-])]";
+  const std::string target = "Cc1cc(-c2csc(N=C(N)N)n2)cn1C";
+  const std::string query  = "[$([#16;D2]([$([CX4,c]);!$(C[O,N,S])])[$([CX4,c]);!$(C[O,N,S])]);!$([#16;D2]1[CX4][CX4]1);!$(s1aaaa1)]";
   buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
 
   MoleculesDevice targetsDevice(stream_.stream());
@@ -2159,4 +2159,94 @@ TEST_P(SubstructureSearchTest, SingleMolSingleQueryForDebugging) {
   EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for query " << algorithmName(algorithm());
 
+}
+
+// =============================================================================
+// Nested Recursive SMARTS Integration Tests
+// =============================================================================
+
+TEST_P(SubstructureSearchTest, NestedRecursiveSimple) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  buildBatches({"CN", "CCN", "CCC"}, {"[$([C;$(*-N)])]"}, 
+               targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, 
+                     "[$([C;$(*-N)])] in CN");
+  expectMatchesRDKit(resultsHost, *targetMols[1], *queryMols[0], 1, 0, 
+                     "[$([C;$(*-N)])] in CCN");
+  expectMatchesRDKit(resultsHost, *targetMols[2], *queryMols[0], 2, 0, 
+                     "[$([C;$(*-N)])] in CCC");
+}
+
+TEST_P(SubstructureSearchTest, NestedRecursiveWithNegation) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  buildBatches({"CCN", "CCC"}, {"[C;!$([C;$(*-N)])]"},
+               targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+
+  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0);
+  expectMatchesRDKit(resultsHost, *targetMols[1], *queryMols[0], 1, 0);
+}
+
+TEST_P(SubstructureSearchTest, NestedRecursiveBatchProcessing) {
+  MoleculesHost                              targetsHost;
+  MoleculesHost                              queriesHost;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  std::vector<std::string> targets = {
+    "CN", "CC", "CCN", "CCCN", "CNO", "CNOF", 
+    "c1ccccc1N", "c1ccccc1", "NC(=O)C"
+  };
+  
+  buildBatches(targets, {"[$([C;$(*-N)])]"}, 
+               targetsHost, queriesHost, targetMols, queryMols);
+
+  MoleculesDevice targetsDevice(stream_.stream());
+  MoleculesDevice queriesDevice(stream_.stream());
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+
+  SubstructMatchResultsDevice resultsDevice(stream_.stream());
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                      resultsDevice, algorithm(), stream_.stream());
+
+  SubstructMatchResultsHost resultsHost;
+  resultsDevice.copyToHost(resultsHost);
+
+  for (size_t t = 0; t < targets.size(); ++t) {
+    expectMatchesRDKit(resultsHost, *targetMols[t], *queryMols[0], 
+                       static_cast<int>(t), 0, targets[t]);
+  }
 }

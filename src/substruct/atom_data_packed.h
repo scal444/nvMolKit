@@ -111,11 +111,6 @@ struct AtomDataPacked {
   static constexpr int kMax4BitValue          = 15;    ///< Maximum value for 4-bit fields
   /// @}
 
-  /// @name Recursive SMARTS match constants
-  /// @{
-  static constexpr int kMaxRecursivePatterns = 16;  ///< Maximum supported recursive SMARTS patterns
-  /// @}
-
   // ============================================================================
   // Setters - host-side, used during molecule loading
   // ============================================================================

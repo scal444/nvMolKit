@@ -22,6 +22,7 @@
 #include "flat_bit_vect.h"
 #include "global_pool.cuh"
 #include "molecules_device.cuh"
+#include "substruct_debug.h"
 #include "substruct_types.h"
 
 namespace nvMolKit {
@@ -30,9 +31,7 @@ namespace nvMolKit {
 // Shared Constants
 // =============================================================================
 
-constexpr int  kWarpSize      = 32;
-constexpr bool kDebugWUS      = false;  ///< Enable debug output in warpUnifiedSearchGPU
-constexpr bool kDebugGSI      = false;  ///< Enable debug output in gsiBFSSearchGPU
+constexpr int kWarpSize = 32;
 
 // =============================================================================
 // Output Mode for Substructure Search
@@ -493,6 +492,10 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
           atomicOr(&paintParams.recursiveBits[paintParams.outputPairIdx * paintParams.maxTargetAtoms + t],
                    1u << paintParams.patternId);
           atomicAdd(reportedCount, 1);
+          if constexpr (kDebugGSI) {
+            printf("[GSI Paint] pairIdx=%d, targetAtom=%d, patternId=%d, bit=0x%x\n",
+                   paintParams.outputPairIdx, t, paintParams.patternId, 1u << paintParams.patternId);
+          }
         }
       } else {
         const int slot = atomicAdd(&currentCount, 1);
