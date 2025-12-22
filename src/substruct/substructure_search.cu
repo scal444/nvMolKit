@@ -476,18 +476,34 @@ struct BatchSlot {
   PinnedHostVector<int>     reportedCountsHost;
   PinnedHostVector<int16_t> matchIndicesHost;
 
+  // Streams declared first so they're destroyed last (after resources that use them)
+  ScopedStream                              computeStream;
+  ScopedCudaEvent                           copyDoneEvent;
+  std::unique_ptr<TwoStreamPipelineContext> twoStreamCtx;
+  RecursiveScratchBuffers                   recursiveScratch;
+  RecursivePatternCache                     patternCache;
+  
   BatchResultsDevice     deviceResults;
   AsyncDeviceVector<int> pairIndicesDev;
 
-  void setStream(cudaStream_t stream) {
-    deviceResults.setStream(stream);
-    pairIndicesDev.setStream(stream);
+  BatchSlot() : recursiveScratch(nullptr), patternCache(nullptr) {
+    twoStreamCtx = std::make_unique<TwoStreamPipelineContext>();
   }
+
+  void initializeForStream() {
+    cudaStream_t s = computeStream.stream();
+    cudaStream_t recStream = twoStreamCtx->recursiveStream.stream();
+    deviceResults.setStream(s);
+    pairIndicesDev.setStream(s);
+    recursiveScratch.setStream(recStream);
+    patternCache.setStream(recStream);
+  }
+
+  cudaStream_t stream() const { return computeStream.stream(); }
 
   void reserveHostBuffers(int maxBatchSize, int maxMatchIndicesEstimate) {
     pairIndicesHost.reserve(maxBatchSize);
     batchPairMatchStarts.reserve(maxBatchSize + 1);
-    // Pre-allocate pinned vectors - only grow, never shrink
     if (matchCountsHost.size() < static_cast<size_t>(maxBatchSize)) {
       matchCountsHost = PinnedHostVector<int>(maxBatchSize);
     }
@@ -503,9 +519,8 @@ struct BatchSlot {
 struct BatchPipelineContext {
   static constexpr int kNumSlots = 2;
 
-  RecursiveScratchBuffers recursiveScratch;
-  RecursivePatternCache   patternCache;
-  cudaStream_t            stream = nullptr;
+  // Slots declared first so they're destroyed last (contain streams)
+  std::array<BatchSlot, kNumSlots> slots;
 
   std::vector<int> queryAtomCounts;
   std::vector<int> globalPairMatchStarts;
@@ -513,22 +528,16 @@ struct BatchPipelineContext {
   int numQueries     = 0;
   int maxTargetAtoms = 0;
 
-  std::array<BatchSlot, kNumSlots> slots;
   int currentSlot = 0;
 
-  std::unique_ptr<TwoStreamPipelineContext> twoStreamCtx;
-
-  explicit BatchPipelineContext(cudaStream_t s, int maxBatchSize)
-      : recursiveScratch(s), patternCache(s), stream(s), maxBatchSize_(maxBatchSize) {
+  explicit BatchPipelineContext(int maxBatchSize)
+      : maxBatchSize_(maxBatchSize) {
     for (auto& slot : slots) {
-      slot.setStream(s);
+      slot.initializeForStream();
     }
-    twoStreamCtx = std::make_unique<TwoStreamPipelineContext>();
   }
 
   void allocatePinnedBuffers(int maxQueryAtoms, int maxTargetAtomsArg) {
-    // Generous estimate: worst case is every pair has maxTargetAtoms matches
-    // Each match needs maxQueryAtoms indices
     const int maxMatchIndicesPerBatch = maxBatchSize_ * maxTargetAtomsArg * maxQueryAtoms;
     for (auto& slot : slots) {
       slot.reserveHostBuffers(maxBatchSize_, maxMatchIndicesPerBatch);
@@ -879,14 +888,15 @@ void uploadAndLaunchBatch(BatchSlot&             slot,
                           SubstructAlgorithm     algorithm) {
   ScopedNvtxRange uploadRange("uploadAndLaunchBatch");
 
-  precomputePipelineSchedule(*ctx.twoStreamCtx, queriesHost, slot.numPairsInBatch, slot.batchStart, ctx.numQueries);
+  cudaStream_t slotStream = slot.stream();
 
-  TwoStreamPipelineContext& twoStreamCtx = *ctx.twoStreamCtx;
+  precomputePipelineSchedule(*slot.twoStreamCtx, queriesHost, slot.numPairsInBatch, slot.batchStart, ctx.numQueries);
+
+  TwoStreamPipelineContext& twoStreamCtx = *slot.twoStreamCtx;
   const int numBuffersPerBlock = (algorithm == SubstructAlgorithm::GSI) ? 2 : 1;
 
   if (twoStreamCtx.maxDepthInBatch == 0) {
     ScopedNvtxRange allocRange("Allocate batch (non-recursive path)");
-    slot.deviceResults.setStream(ctx.stream);
     slot.deviceResults.allocateBatch(slot.numPairsInBatch,
                                      slot.batchPairMatchStarts,
                                      slot.totalMatchIndices,
@@ -894,7 +904,6 @@ void uploadAndLaunchBatch(BatchSlot&             slot,
                                      ctx.maxTargetAtoms,
                                      numBuffersPerBlock);
     slot.deviceResults.setQueryAtomCounts(ctx.queryAtomCounts);
-    // zeroRecursiveBits not needed - allocateBatch already zeros it
 
     slot.pairIndicesDev.resize(slot.numPairsInBatch);
     slot.pairIndicesDev.copyFromHost(slot.pairIndicesHost.data(), slot.numPairsInBatch);
@@ -903,7 +912,7 @@ void uploadAndLaunchBatch(BatchSlot&             slot,
     SubstructMatchResultsDeviceView batchView = slot.deviceResults.view();
 
     ScopedNvtxRange labelKernelRange("LabelMatrix Kernel");
-    labelMatrixKernel<<<slot.numPairsInBatch, threadsPerBlock, 0, ctx.stream>>>(
+    labelMatrixKernel<<<slot.numPairsInBatch, threadsPerBlock, 0, slotStream>>>(
       targetsDevice.view(),
       queriesDevice.view(),
       slot.pairIndicesDev.data(),
@@ -916,15 +925,15 @@ void uploadAndLaunchBatch(BatchSlot&             slot,
     ScopedNvtxRange launchKernelRange("Match Kernel");
     switch (algorithm) {
       case SubstructAlgorithm::VF2:
-        substructMatchKernel<SubstructAlgorithm::VF2><<<slot.numPairsInBatch, threadsPerBlock, 0, ctx.stream>>>(
+        substructMatchKernel<SubstructAlgorithm::VF2><<<slot.numPairsInBatch, threadsPerBlock, 0, slotStream>>>(
           targetsDevice.view(), queriesDevice.view(), batchView, slot.pairIndicesDev.data(), ctx.numQueries);
         break;
       case SubstructAlgorithm::GSI:
-        substructMatchKernel<SubstructAlgorithm::GSI><<<slot.numPairsInBatch, threadsPerBlock, 0, ctx.stream>>>(
+        substructMatchKernel<SubstructAlgorithm::GSI><<<slot.numPairsInBatch, threadsPerBlock, 0, slotStream>>>(
           targetsDevice.view(), queriesDevice.view(), batchView, slot.pairIndicesDev.data(), ctx.numQueries);
         break;
       case SubstructAlgorithm::WarpUnified:
-        substructMatchKernel<SubstructAlgorithm::WarpUnified><<<slot.numPairsInBatch, threadsPerBlock, 0, ctx.stream>>>(
+        substructMatchKernel<SubstructAlgorithm::WarpUnified><<<slot.numPairsInBatch, threadsPerBlock, 0, slotStream>>>(
           targetsDevice.view(), queriesDevice.view(), batchView, slot.pairIndicesDev.data(), ctx.numQueries);
         break;
     }
@@ -935,8 +944,7 @@ void uploadAndLaunchBatch(BatchSlot&             slot,
 
   cudaStream_t recursiveStream = twoStreamCtx.recursiveStream.stream();
 
-  ScopedNvtxRange allocRange("Allocate batch on ctx.stream");
-  slot.deviceResults.setStream(ctx.stream);
+  ScopedNvtxRange allocRange("Allocate batch on slotStream");
   slot.deviceResults.allocateBatch(slot.numPairsInBatch,
                                    slot.batchPairMatchStarts,
                                    slot.totalMatchIndices,
@@ -946,13 +954,9 @@ void uploadAndLaunchBatch(BatchSlot&             slot,
   slot.deviceResults.setQueryAtomCounts(ctx.queryAtomCounts);
   allocRange.pop();
 
-  // Synchronize: allocations were done on ctx.stream, recursiveStream needs to wait
   ScopedCudaEvent allocDoneEvent;
-  cudaCheckError(cudaEventRecord(allocDoneEvent.event(), ctx.stream));
+  cudaCheckError(cudaEventRecord(allocDoneEvent.event(), slotStream));
   cudaCheckError(cudaStreamWaitEvent(recursiveStream, allocDoneEvent.event(), 0));
-
-  ctx.recursiveScratch.setStream(recursiveStream);
-  ctx.patternCache.setStream(recursiveStream);
 
   std::array<cudaEvent_t, kMaxRecursionDepth> depthEventPtrs;
   for (int i = 0; i < kMaxRecursionDepth; ++i) {
@@ -964,26 +968,23 @@ void uploadAndLaunchBatch(BatchSlot&             slot,
                                               slot.deviceResults, ctx.numQueries,
                                               slot.batchStart, slot.numPairsInBatch,
                                               algorithm, recursiveStream,
-                                              ctx.recursiveScratch, ctx.patternCache,
+                                              slot.recursiveScratch, slot.patternCache,
                                               slot.patternEntriesHost,
                                               depthEventPtrs.data(),
                                               kMaxRecursionDepth);
   preprocRange.pop();
 
-  // Depth 0 pairs have no recursive patterns - use ctx.stream directly
-  ScopedNvtxRange depth0Range("Match depth-0 pairs (ctx.stream)");
+  ScopedNvtxRange depth0Range("Match depth-0 pairs (slotStream)");
   launchLabelAndMatch(twoStreamCtx.matchPairsHost[0], slot, ctx, targetsDevice, queriesDevice,
-                      algorithm, ctx.stream, twoStreamCtx, 0);
+                      algorithm, slotStream, twoStreamCtx, 0);
   depth0Range.pop();
 
-  // Depths 1..maxDepth each get their own low-priority stream for parallelism
   for (int depth = 1; depth <= twoStreamCtx.maxDepthInBatch; ++depth) {
     ScopedNvtxRange depthRange("Match depth-" + std::to_string(depth) + " pairs (matchStream " +
                                std::to_string(depth - 1) + ")");
 
     cudaStream_t depthStream = twoStreamCtx.matchStreams[depth - 1].stream();
 
-    // This stream waits for: (1) allocations on ctx.stream, (2) preprocessing at depth-1
     cudaCheckError(cudaStreamWaitEvent(depthStream, allocDoneEvent.event(), 0));
     cudaCheckError(cudaStreamWaitEvent(depthStream, depthEventPtrs[depth - 1], 0));
 
@@ -993,28 +994,28 @@ void uploadAndLaunchBatch(BatchSlot&             slot,
 
   ScopedNvtxRange syncRange("Sync all streams");
   cudaCheckError(cudaStreamSynchronize(recursiveStream));
-  cudaCheckError(cudaStreamSynchronize(ctx.stream));
+  cudaCheckError(cudaStreamSynchronize(slotStream));
   for (int depth = 1; depth <= twoStreamCtx.maxDepthInBatch; ++depth) {
     cudaCheckError(cudaStreamSynchronize(twoStreamCtx.matchStreams[depth - 1].stream()));
   }
   syncRange.pop();
-
-  ctx.recursiveScratch.setStream(ctx.stream);
-  ctx.patternCache.setStream(ctx.stream);
-  slot.deviceResults.setStream(ctx.stream);
 }
 
 void initiateResultsCopyToHost(BatchSlot& slot) {
   ScopedNvtxRange copyRange("initiateResultsCopyToHost");
   slot.deviceResults.copyBatchToHost(slot.matchCountsHost, slot.reportedCountsHost, slot.matchIndicesHost);
+  cudaCheckError(cudaEventRecord(slot.copyDoneEvent.event(), slot.stream()));
 }
 
-void accumulateBatchResults(const BatchSlot&            slot,
+void accumulateBatchResults(BatchSlot&                  slot,
                             const BatchPipelineContext& ctx,
                             SubstructMatchResultsHost&  results) {
   ScopedNvtxRange accumRange("accumulateBatchResults");
 
-  // Bulk copy counts - contiguous in both source and destination
+  ScopedNvtxRange waitRange("Wait for D2H copy");
+  cudaCheckError(cudaEventSynchronize(slot.copyDoneEvent.event()));
+  waitRange.pop();
+
   std::memcpy(results.matchCounts.data() + slot.batchStart,
               slot.matchCountsHost.data(),
               slot.numPairsInBatch * sizeof(int));
@@ -1022,7 +1023,6 @@ void accumulateBatchResults(const BatchSlot&            slot,
               slot.reportedCountsHost.data(),
               slot.numPairsInBatch * sizeof(int));
 
-  // Copy match indices - only copy actual reported matches, not full capacity
   for (int i = 0; i < slot.numPairsInBatch; ++i) {
     const int globalPairIdx    = slot.batchStart + i;
     const int queryIdx         = globalPairIdx % ctx.numQueries;
@@ -1066,7 +1066,7 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
   const int effectiveBatchSize = std::min(batchSize, numPairs);
 
   ScopedNvtxRange ctxRange("CPU: BatchPipelineContext construction");
-  auto ctxPtr = std::make_unique<BatchPipelineContext>(stream, effectiveBatchSize);
+  auto ctxPtr = std::make_unique<BatchPipelineContext>(effectiveBatchSize);
   ctxRange.pop();
 
   BatchPipelineContext& ctx = *ctxPtr;
@@ -1117,7 +1117,7 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
   results.matchIndices.resize(totalMatchIndices);
   resultsAllocRange.pop();
 
-  // Pipeline: Overlap CPU prep of batch N+1 with GPU execution of batch N
+  // Leapfrog pipeline: Overlap everything using async streams and events
   int batchStart = 0;
   int batchNum   = 0;
 
@@ -1142,11 +1142,7 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
     prepareBatchOnCPU(ctx.current(), ctx, batchStart, effectiveBatchSize);
     loopPrepRange.pop();
 
-    ScopedNvtxRange syncRange("cudaStreamSynchronize (wait for prev batch)");
-    cudaCheckError(cudaStreamSynchronize(stream));
-    syncRange.pop();
-
-    ScopedNvtxRange accumRange("CPU: accumulateBatchResults");
+    ScopedNvtxRange accumRange("CPU: accumulateBatchResults (async wait on prev)");
     accumulateBatchResults(ctx.next(), ctx, results);
     accumRange.pop();
 
@@ -1158,13 +1154,8 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
     ++batchNum;
   }
 
-  ScopedNvtxRange finalRange("Final batch sync and accumulate");
-  ScopedNvtxRange finalSyncRange("cudaStreamSynchronize (wait for final batch)");
-  cudaCheckError(cudaStreamSynchronize(stream));
-  finalSyncRange.pop();
-  ScopedNvtxRange finalAccumRange("CPU: accumulateBatchResults");
+  ScopedNvtxRange finalRange("Final batch accumulate");
   accumulateBatchResults(ctx.current(), ctx, results);
-  finalAccumRange.pop();
   finalRange.pop();
 
   cudaCheckError(cudaGetLastError());
