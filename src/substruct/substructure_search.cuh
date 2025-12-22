@@ -25,6 +25,7 @@
 #include "device.h"
 #include "device_vector.h"
 #include "flat_bit_vect.h"
+#include "host_vector.h"
 #include "molecules.h"
 #include "substruct_algos.cuh"
 #include "substruct_types.h"
@@ -154,9 +155,9 @@ class BatchResultsDevice {
    * @param hostReportedCounts Output: reported counts for this batch [batchSize]
    * @param hostMatchIndices Output: match indices for this batch
    */
-  void copyBatchToHost(std::vector<int>&     hostMatchCounts,
-                       std::vector<int>&     hostReportedCounts,
-                       std::vector<int16_t>& hostMatchIndices) const;
+  void copyBatchToHost(PinnedHostVector<int>&     hostMatchCounts,
+                       PinnedHostVector<int>&     hostReportedCounts,
+                       PinnedHostVector<int16_t>& hostMatchIndices) const;
 
   void setQueryAtomCounts(const std::vector<int>& queryAtomCounts);
 

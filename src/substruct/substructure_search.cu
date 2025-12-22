@@ -21,6 +21,7 @@
 #include <stdexcept>
 
 #include "cuda_error_check.h"
+#include "host_vector.h"
 #include "global_pool.cuh"
 #include "graph_labeler.cuh"
 #include "molecules_device.cuh"
@@ -470,9 +471,10 @@ struct BatchSlot {
   std::vector<int>                 batchPairMatchStarts;
   std::vector<BatchedPatternEntry> patternEntriesHost;
 
-  std::vector<int>     matchCountsHost;
-  std::vector<int>     reportedCountsHost;
-  std::vector<int16_t> matchIndicesHost;
+  // Pinned memory for D2H transfers - pre-allocated and reused between batches
+  PinnedHostVector<int>     matchCountsHost;
+  PinnedHostVector<int>     reportedCountsHost;
+  PinnedHostVector<int16_t> matchIndicesHost;
 
   BatchResultsDevice     deviceResults;
   AsyncDeviceVector<int> pairIndicesDev;
@@ -482,11 +484,19 @@ struct BatchSlot {
     pairIndicesDev.setStream(stream);
   }
 
-  void reserveHostBuffers(int maxBatchSize) {
+  void reserveHostBuffers(int maxBatchSize, int maxMatchIndicesEstimate) {
     pairIndicesHost.reserve(maxBatchSize);
     batchPairMatchStarts.reserve(maxBatchSize + 1);
-    matchCountsHost.reserve(maxBatchSize);
-    reportedCountsHost.reserve(maxBatchSize);
+    // Pre-allocate pinned vectors - only grow, never shrink
+    if (matchCountsHost.size() < static_cast<size_t>(maxBatchSize)) {
+      matchCountsHost = PinnedHostVector<int>(maxBatchSize);
+    }
+    if (reportedCountsHost.size() < static_cast<size_t>(maxBatchSize)) {
+      reportedCountsHost = PinnedHostVector<int>(maxBatchSize);
+    }
+    if (matchIndicesHost.size() < static_cast<size_t>(maxMatchIndicesEstimate)) {
+      matchIndicesHost = PinnedHostVector<int16_t>(maxMatchIndicesEstimate);
+    }
   }
 };
 
@@ -509,17 +519,28 @@ struct BatchPipelineContext {
   std::unique_ptr<TwoStreamPipelineContext> twoStreamCtx;
 
   explicit BatchPipelineContext(cudaStream_t s, int maxBatchSize)
-      : recursiveScratch(s), patternCache(s), stream(s) {
+      : recursiveScratch(s), patternCache(s), stream(s), maxBatchSize_(maxBatchSize) {
     for (auto& slot : slots) {
       slot.setStream(s);
-      slot.reserveHostBuffers(maxBatchSize);
     }
     twoStreamCtx = std::make_unique<TwoStreamPipelineContext>();
+  }
+
+  void allocatePinnedBuffers(int maxQueryAtoms, int maxTargetAtomsArg) {
+    // Generous estimate: worst case is every pair has maxTargetAtoms matches
+    // Each match needs maxQueryAtoms indices
+    const int maxMatchIndicesPerBatch = maxBatchSize_ * maxTargetAtomsArg * maxQueryAtoms;
+    for (auto& slot : slots) {
+      slot.reserveHostBuffers(maxBatchSize_, maxMatchIndicesPerBatch);
+    }
   }
 
   BatchSlot& current() { return slots[currentSlot]; }
   BatchSlot& next() { return slots[1 - currentSlot]; }
   void rotate() { currentSlot = 1 - currentSlot; }
+
+ private:
+  int maxBatchSize_ = 0;
 };
 
 }  // namespace
@@ -682,16 +703,13 @@ void BatchResultsDevice::zeroLabelMatrixBuffer() {
   labelMatrixBuffer_.zero();
 }
 
-void BatchResultsDevice::copyBatchToHost(std::vector<int>&     hostMatchCounts,
-                                         std::vector<int>&     hostReportedCounts,
-                                         std::vector<int16_t>& hostMatchIndices) const {
-  hostMatchCounts.resize(batchSize_);
-  hostReportedCounts.resize(batchSize_);
-  hostMatchIndices.resize(totalBatchMatchIndices_);
-
-  matchCounts_.copyToHost(hostMatchCounts);
-  reportedCounts_.copyToHost(hostReportedCounts);
-  matchIndices_.copyToHost(hostMatchIndices);
+void BatchResultsDevice::copyBatchToHost(PinnedHostVector<int>&     hostMatchCounts,
+                                         PinnedHostVector<int>&     hostReportedCounts,
+                                         PinnedHostVector<int16_t>& hostMatchIndices) const {
+  // Pinned vectors should be pre-allocated large enough - no resize here
+  matchCounts_.copyToHost(hostMatchCounts.data(), batchSize_);
+  reportedCounts_.copyToHost(hostReportedCounts.data(), batchSize_);
+  matchIndices_.copyToHost(hostMatchIndices.data(), totalBatchMatchIndices_);
 }
 
 // =============================================================================
@@ -1057,10 +1075,12 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
 
   ScopedNvtxRange metadataRange("CPU: Compute batch metadata");
   ctx.queryAtomCounts.resize(numQueries);
+  int maxQueryAtoms = 0;
   for (int q = 0; q < numQueries; ++q) {
     const int atomStart = queriesHost.batchAtomStarts[q];
     const int atomEnd   = queriesHost.batchAtomStarts[q + 1];
     ctx.queryAtomCounts[q] = atomEnd - atomStart;
+    maxQueryAtoms = std::max(maxQueryAtoms, ctx.queryAtomCounts[q]);
   }
 
   std::vector<int> maxMatchesPerTarget(numTargets);
@@ -1084,6 +1104,8 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
     }
   }
   const int totalMatchIndices = ctx.globalPairMatchStarts.back();
+
+  ctx.allocatePinnedBuffers(maxQueryAtoms, ctx.maxTargetAtoms);
   metadataRange.pop();
 
   ScopedNvtxRange resultsAllocRange("CPU: Allocate results host vectors");
