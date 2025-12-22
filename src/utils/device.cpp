@@ -15,6 +15,8 @@
 
 #include "device.h"
 
+#include <algorithm>
+
 #include <cuda_runtime.h>
 
 #include "cuda_error_check.h"
@@ -57,6 +59,37 @@ ScopedStream::~ScopedStream() noexcept {
 
 ScopedStream::ScopedStream(ScopedStream&& other) noexcept : original_stream_(other.original_stream_) {
   other.original_stream_ = nullptr;
+}
+
+ScopedStreamWithPriority::ScopedStreamWithPriority(int priority) {
+  int leastPriority    = 0;
+  int greatestPriority = 0;
+  cudaCheckError(cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority));
+
+  const int clampedPriority = std::max(greatestPriority, std::min(leastPriority, priority));
+  cudaCheckError(cudaStreamCreateWithPriority(&stream_, cudaStreamNonBlocking, clampedPriority));
+}
+
+ScopedStreamWithPriority::~ScopedStreamWithPriority() noexcept {
+  if (stream_ == nullptr) {
+    return;
+  }
+  cudaCheckErrorNoThrow(cudaStreamSynchronize(stream_));
+  cudaCheckErrorNoThrow(cudaStreamDestroy(stream_));
+}
+
+ScopedStreamWithPriority::ScopedStreamWithPriority(ScopedStreamWithPriority&& other) noexcept : stream_(other.stream_) {
+  other.stream_ = nullptr;
+}
+
+ScopedStreamWithPriority& ScopedStreamWithPriority::operator=(ScopedStreamWithPriority&& other) noexcept {
+  if (stream_ != nullptr && stream_ != other.stream_) {
+    cudaCheckErrorNoThrow(cudaStreamSynchronize(stream_));
+    cudaCheckErrorNoThrow(cudaStreamDestroy(stream_));
+  }
+  stream_       = other.stream_;
+  other.stream_ = nullptr;
+  return *this;
 }
 
 ScopedCudaEvent::ScopedCudaEvent() {

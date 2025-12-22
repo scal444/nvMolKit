@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <memory>
 #include <stdexcept>
 
 #include "cuda_error_check.h"
@@ -78,6 +79,9 @@ __device__ __forceinline__ void computeLabelMatrixToGlobal(const MoleculeView&  
  *
  * One block per (target, query) pair. Computes label matrix and writes to global buffer.
  * This separates the labeling phase from the matching phase for better occupancy and reuse.
+ *
+ * @param batchLocalIndices Optional mapping from blockIdx.x to batch-local index (for split launches).
+ *                          If nullptr, uses blockIdx.x directly.
  */
 __global__ void labelMatrixKernel(MoleculesDeviceView targets,
                                   MoleculesDeviceView queries,
@@ -85,9 +89,11 @@ __global__ void labelMatrixKernel(MoleculesDeviceView targets,
                                   int                 numQueries,
                                   uint32_t*           labelMatrixBuffer,
                                   const uint32_t*     recursiveMatchBits,
-                                  int                 maxTargetAtoms) {
-  const int batchLocalIdx = blockIdx.x;
-  const int pairIdx       = pairIndices[batchLocalIdx];
+                                  int                 maxTargetAtoms,
+                                  const int*          batchLocalIndices = nullptr) {
+  const int launchIdx     = blockIdx.x;
+  const int batchLocalIdx = batchLocalIndices ? batchLocalIndices[launchIdx] : launchIdx;
+  const int pairIdx       = pairIndices[launchIdx];
   const int targetIdx     = pairIdx / numQueries;
   const int queryIdx      = pairIdx % numQueries;
 
@@ -166,17 +172,21 @@ __global__ void labelMatrixPaintKernel(MoleculesDeviceView        targets,
  * All result indexing is batch-local.
  *
  * @tparam Algo Algorithm to use for the search phase
- * @param pairIndices Array of global pair indices for this batch
+ * @param pairIndices Array of global pair indices for this launch
  * @param numQueries Number of queries (for decoding global pair indices)
+ * @param batchLocalIndices Optional mapping from blockIdx.x to batch-local index (for split launches).
+ *                          If nullptr, uses blockIdx.x directly.
  */
 template <SubstructAlgorithm Algo>
 __global__ void substructMatchKernel(MoleculesDeviceView             targets,
                                      MoleculesDeviceView             queries,
                                      SubstructMatchResultsDeviceView results,
                                      const int*                      pairIndices,
-                                     int                             numQueries) {
-  const int batchLocalIdx = blockIdx.x;
-  const int pairIdx       = pairIndices[batchLocalIdx];
+                                     int                             numQueries,
+                                     const int*                      batchLocalIndices = nullptr) {
+  const int launchIdx     = blockIdx.x;
+  const int batchLocalIdx = batchLocalIndices ? batchLocalIndices[launchIdx] : launchIdx;
+  const int pairIdx       = pairIndices[launchIdx];
   const int targetIdx     = pairIdx / numQueries;
   const int queryIdx      = pairIdx % numQueries;
 
@@ -496,12 +506,15 @@ struct BatchPipelineContext {
   std::array<BatchSlot, kNumSlots> slots;
   int currentSlot = 0;
 
+  std::unique_ptr<TwoStreamPipelineContext> twoStreamCtx;
+
   explicit BatchPipelineContext(cudaStream_t s, int maxBatchSize)
       : recursiveScratch(s), patternCache(s), stream(s) {
     for (auto& slot : slots) {
       slot.setStream(s);
       slot.reserveHostBuffers(maxBatchSize);
     }
+    twoStreamCtx = std::make_unique<TwoStreamPipelineContext>();
   }
 
   BatchSlot& current() { return slots[currentSlot]; }
@@ -565,6 +578,15 @@ void RecursivePatternCache::syncToDevice(cudaStream_t stream) {
     cachedPatternsDevice.copyFromHost(cachedPatterns, stream);
     deviceNeedsUpdate = false;
   }
+}
+
+// =============================================================================
+// TwoStreamPipelineContext Implementation
+// =============================================================================
+
+TwoStreamPipelineContext::TwoStreamPipelineContext()
+    : recursiveStream(0),   // High priority (lower numerical value)
+      matchStream(1) {      // Low priority (higher numerical value)
 }
 
 // =============================================================================
@@ -667,6 +689,63 @@ void BatchResultsDevice::copyBatchToHost(std::vector<int>&     hostMatchCounts,
 
 namespace {
 
+/**
+ * @brief Determine the recursion depth for a query (number of paint rounds needed).
+ *
+ * @param queriesHost Host-side query data
+ * @param queryIdx Query index
+ * @return 0 if no recursive patterns, otherwise maxDepth + 1
+ */
+int getQueryRecursionDepth(const MoleculesHost& queriesHost, int queryIdx) {
+  if (queryIdx >= static_cast<int>(queriesHost.recursivePatterns.size())) {
+    return 0;
+  }
+  const auto& recursiveInfo = queriesHost.recursivePatterns[queryIdx];
+  if (recursiveInfo.empty()) {
+    return 0;
+  }
+  return recursiveInfo.maxDepth + 1;
+}
+
+/**
+ * @brief Precompute the two-stream pipeline schedule for a batch.
+ *
+ * Groups pairs by their query's recursion depth and populates the host-side
+ * index vectors for the recursive stream and match stream.
+ *
+ * @param ctx Pipeline context to populate
+ * @param queriesHost Host-side query data (for recursivePatterns)
+ * @param numPairsInBatch Number of pairs in the batch
+ * @param batchStart Global pair index where the batch starts
+ * @param numQueries Total number of queries (for decoding pair indices)
+ */
+void precomputePipelineSchedule(TwoStreamPipelineContext& ctx,
+                                const MoleculesHost&      queriesHost,
+                                int                       numPairsInBatch,
+                                int                       batchStart,
+                                int                       numQueries) {
+  ctx.maxDepthInBatch = 0;
+
+  for (auto& vec : ctx.matchPairsHost) {
+    vec.clear();
+  }
+
+  for (int i = 0; i < numPairsInBatch; ++i) {
+    const int globalPairIdx = batchStart + i;
+    const int queryIdx      = globalPairIdx % numQueries;
+    const int depth         = getQueryRecursionDepth(queriesHost, queryIdx);
+
+    if (depth > kMaxRecursionDepth) {
+      throw std::runtime_error("Recursive SMARTS depth " + std::to_string(depth) +
+                               " exceeds maximum supported depth of " +
+                               std::to_string(kMaxRecursionDepth));
+    }
+
+    ctx.matchPairsHost[depth].push_back(i);
+    ctx.maxDepthInBatch = std::max(ctx.maxDepthInBatch, depth);
+  }
+}
+
 void prepareBatchOnCPU(BatchSlot&                  slot,
                        const BatchPipelineContext& ctx,
                        int                         batchStart,
@@ -696,6 +775,71 @@ void prepareBatchOnCPU(BatchSlot&                  slot,
   }
 }
 
+/**
+ * @brief Launch label matrix and match kernels for a subset of pairs.
+ */
+void launchLabelAndMatch(const std::vector<int>&             batchLocalIndices,
+                         BatchSlot&                          slot,
+                         BatchPipelineContext&               ctx,
+                         MoleculesDevice&                    targetsDevice,
+                         const MoleculesDevice&              queriesDevice,
+                         SubstructAlgorithm                  algorithm,
+                         cudaStream_t                        stream,
+                         TwoStreamPipelineContext&           twoStreamCtx,
+                         int                                 depthGroupIdx) {
+  if (batchLocalIndices.empty()) {
+    return;
+  }
+
+  const int numPairsInGroup = static_cast<int>(batchLocalIndices.size());
+
+  std::vector<int> globalPairIndices(numPairsInGroup);
+  for (int i = 0; i < numPairsInGroup; ++i) {
+    globalPairIndices[i] = slot.pairIndicesHost[batchLocalIndices[i]];
+  }
+
+  auto& globalPairIndicesDev = twoStreamCtx.matchGlobalPairIndices[depthGroupIdx];
+  auto& batchLocalIndicesDev = twoStreamCtx.matchBatchLocalIndices[depthGroupIdx];
+
+  globalPairIndicesDev.setStream(stream);
+  globalPairIndicesDev.resize(numPairsInGroup);
+  globalPairIndicesDev.copyFromHost(globalPairIndices.data(), numPairsInGroup);
+
+  batchLocalIndicesDev.setStream(stream);
+  batchLocalIndicesDev.resize(numPairsInGroup);
+  batchLocalIndicesDev.copyFromHost(batchLocalIndices.data(), numPairsInGroup);
+
+  SubstructMatchResultsDeviceView batchView = slot.deviceResults.view();
+
+  labelMatrixKernel<<<numPairsInGroup, threadsPerBlock, 0, stream>>>(
+    targetsDevice.view(),
+    queriesDevice.view(),
+    globalPairIndicesDev.data(),
+    ctx.numQueries,
+    batchView.labelMatrixBuffer,
+    batchView.recursiveMatchBits,
+    batchView.maxTargetAtoms,
+    batchLocalIndicesDev.data());
+
+  switch (algorithm) {
+    case SubstructAlgorithm::VF2:
+      substructMatchKernel<SubstructAlgorithm::VF2><<<numPairsInGroup, threadsPerBlock, 0, stream>>>(
+        targetsDevice.view(), queriesDevice.view(), batchView, globalPairIndicesDev.data(), ctx.numQueries,
+        batchLocalIndicesDev.data());
+      break;
+    case SubstructAlgorithm::GSI:
+      substructMatchKernel<SubstructAlgorithm::GSI><<<numPairsInGroup, threadsPerBlock, 0, stream>>>(
+        targetsDevice.view(), queriesDevice.view(), batchView, globalPairIndicesDev.data(), ctx.numQueries,
+        batchLocalIndicesDev.data());
+      break;
+    case SubstructAlgorithm::WarpUnified:
+      substructMatchKernel<SubstructAlgorithm::WarpUnified><<<numPairsInGroup, threadsPerBlock, 0, stream>>>(
+        targetsDevice.view(), queriesDevice.view(), batchView, globalPairIndicesDev.data(), ctx.numQueries,
+        batchLocalIndicesDev.data());
+      break;
+  }
+}
+
 void uploadAndLaunchBatch(BatchSlot&             slot,
                           BatchPipelineContext&  ctx,
                           MoleculesDevice&       targetsDevice,
@@ -715,47 +859,97 @@ void uploadAndLaunchBatch(BatchSlot&             slot,
   slot.deviceResults.setQueryAtomCounts(ctx.queryAtomCounts);
   slot.deviceResults.zeroRecursiveBits();
 
-  slot.pairIndicesDev.resize(slot.numPairsInBatch);
-  slot.pairIndicesDev.copyFromHost(slot.pairIndicesHost.data(), slot.numPairsInBatch);
+  precomputePipelineSchedule(*ctx.twoStreamCtx, queriesHost, slot.numPairsInBatch, slot.batchStart, ctx.numQueries);
 
-  preprocessRecursiveSmartsBatched(targetsDevice, targetsHost, queriesHost,
-                                   slot.deviceResults, ctx.numQueries,
-                                   slot.batchStart, slot.numPairsInBatch,
-                                   algorithm, ctx.stream,
-                                   ctx.recursiveScratch, ctx.patternCache,
-                                   slot.patternEntriesHost);
+  TwoStreamPipelineContext& twoStreamCtx = *ctx.twoStreamCtx;
 
-  SubstructMatchResultsDeviceView batchView = slot.deviceResults.view();
+  if (twoStreamCtx.maxDepthInBatch == 0) {
+    slot.pairIndicesDev.resize(slot.numPairsInBatch);
+    slot.pairIndicesDev.copyFromHost(slot.pairIndicesHost.data(), slot.numPairsInBatch);
 
-  {
-    ScopedNvtxRange labelKernelRange("LabelMatrix Kernel");
-    labelMatrixKernel<<<slot.numPairsInBatch, threadsPerBlock, 0, ctx.stream>>>(
-      targetsDevice.view(),
-      queriesDevice.view(),
-      slot.pairIndicesDev.data(),
-      ctx.numQueries,
-      batchView.labelMatrixBuffer,
-      batchView.recursiveMatchBits,
-      batchView.maxTargetAtoms);
-  }
+    SubstructMatchResultsDeviceView batchView = slot.deviceResults.view();
 
-  {
-    ScopedNvtxRange launchKernelRange("Match Kernel");
-    switch (algorithm) {
-      case SubstructAlgorithm::VF2:
-        substructMatchKernel<SubstructAlgorithm::VF2><<<slot.numPairsInBatch, threadsPerBlock, 0, ctx.stream>>>(
-          targetsDevice.view(), queriesDevice.view(), batchView, slot.pairIndicesDev.data(), ctx.numQueries);
-        break;
-      case SubstructAlgorithm::GSI:
-        substructMatchKernel<SubstructAlgorithm::GSI><<<slot.numPairsInBatch, threadsPerBlock, 0, ctx.stream>>>(
-          targetsDevice.view(), queriesDevice.view(), batchView, slot.pairIndicesDev.data(), ctx.numQueries);
-        break;
-      case SubstructAlgorithm::WarpUnified:
-        substructMatchKernel<SubstructAlgorithm::WarpUnified><<<slot.numPairsInBatch, threadsPerBlock, 0, ctx.stream>>>(
-          targetsDevice.view(), queriesDevice.view(), batchView, slot.pairIndicesDev.data(), ctx.numQueries);
-        break;
+    {
+      ScopedNvtxRange labelKernelRange("LabelMatrix Kernel");
+      labelMatrixKernel<<<slot.numPairsInBatch, threadsPerBlock, 0, ctx.stream>>>(
+        targetsDevice.view(),
+        queriesDevice.view(),
+        slot.pairIndicesDev.data(),
+        ctx.numQueries,
+        batchView.labelMatrixBuffer,
+        batchView.recursiveMatchBits,
+        batchView.maxTargetAtoms);
     }
+
+    {
+      ScopedNvtxRange launchKernelRange("Match Kernel");
+      switch (algorithm) {
+        case SubstructAlgorithm::VF2:
+          substructMatchKernel<SubstructAlgorithm::VF2><<<slot.numPairsInBatch, threadsPerBlock, 0, ctx.stream>>>(
+            targetsDevice.view(), queriesDevice.view(), batchView, slot.pairIndicesDev.data(), ctx.numQueries);
+          break;
+        case SubstructAlgorithm::GSI:
+          substructMatchKernel<SubstructAlgorithm::GSI><<<slot.numPairsInBatch, threadsPerBlock, 0, ctx.stream>>>(
+            targetsDevice.view(), queriesDevice.view(), batchView, slot.pairIndicesDev.data(), ctx.numQueries);
+          break;
+        case SubstructAlgorithm::WarpUnified:
+          substructMatchKernel<SubstructAlgorithm::WarpUnified><<<slot.numPairsInBatch, threadsPerBlock, 0, ctx.stream>>>(
+            targetsDevice.view(), queriesDevice.view(), batchView, slot.pairIndicesDev.data(), ctx.numQueries);
+          break;
+      }
+    }
+    return;
   }
+
+  ScopedNvtxRange twoStreamRange("Two-stream recursive pipeline");
+
+  cudaStream_t recursiveStream = twoStreamCtx.recursiveStream.stream();
+  cudaStream_t matchStream     = twoStreamCtx.matchStream.stream();
+
+  // Synchronize: allocations were done on ctx.stream, need to complete before
+  // using the memory on recursiveStream and matchStream
+  ScopedCudaEvent allocDoneEvent;
+  cudaCheckError(cudaEventRecord(allocDoneEvent.event(), ctx.stream));
+  cudaCheckError(cudaStreamWaitEvent(recursiveStream, allocDoneEvent.event(), 0));
+  cudaCheckError(cudaStreamWaitEvent(matchStream, allocDoneEvent.event(), 0));
+
+  ctx.recursiveScratch.setStream(recursiveStream);
+  ctx.patternCache.setStream(recursiveStream);
+
+  std::array<cudaEvent_t, kMaxRecursionDepth> depthEventPtrs;
+  for (int i = 0; i < kMaxRecursionDepth; ++i) {
+    depthEventPtrs[i] = twoStreamCtx.depthEvents[i].event();
+  }
+
+  preprocessRecursiveSmartsBatchedWithEvents(targetsDevice, targetsHost, queriesHost,
+                                              slot.deviceResults, ctx.numQueries,
+                                              slot.batchStart, slot.numPairsInBatch,
+                                              algorithm, recursiveStream,
+                                              ctx.recursiveScratch, ctx.patternCache,
+                                              slot.patternEntriesHost,
+                                              depthEventPtrs.data(),
+                                              kMaxRecursionDepth);
+
+  {
+    ScopedNvtxRange depth0Range("Match depth-0 pairs");
+    launchLabelAndMatch(twoStreamCtx.matchPairsHost[0], slot, ctx, targetsDevice, queriesDevice,
+                        algorithm, matchStream, twoStreamCtx, 0);
+  }
+
+  for (int depth = 1; depth <= twoStreamCtx.maxDepthInBatch; ++depth) {
+    ScopedNvtxRange depthRange("Match depth-" + std::to_string(depth) + " pairs");
+
+    cudaCheckError(cudaStreamWaitEvent(matchStream, depthEventPtrs[depth - 1], 0));
+
+    launchLabelAndMatch(twoStreamCtx.matchPairsHost[depth], slot, ctx, targetsDevice, queriesDevice,
+                        algorithm, matchStream, twoStreamCtx, depth);
+  }
+
+  cudaCheckError(cudaStreamSynchronize(recursiveStream));
+  cudaCheckError(cudaStreamSynchronize(matchStream));
+
+  ctx.recursiveScratch.setStream(ctx.stream);
+  ctx.patternCache.setStream(ctx.stream);
 }
 
 void initiateResultsCopyToHost(BatchSlot& slot) {
@@ -1000,6 +1194,12 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&            targetsD
     return;
   }
 
+  if (maxDepth >= kMaxRecursionDepth) {
+    throw std::runtime_error("Recursive SMARTS nesting depth " + std::to_string(maxDepth) +
+                             " exceeds maximum supported depth of " +
+                             std::to_string(kMaxRecursionDepth - 1));
+  }
+
   if constexpr (kDebugPaintRecursive) {
     printf("[PreprocessBatched] All patterns collected:\n");
     for (const auto& p : patternEntriesHost) {
@@ -1138,6 +1338,191 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&            targetsD
           }
         }
       }
+    }
+  }
+
+  cudaCheckError(cudaGetLastError());
+}
+
+void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&            targetsDevice,
+                                                const MoleculesHost&              targetsHost,
+                                                const MoleculesHost&              queriesHost,
+                                                BatchResultsDevice&               batchResults,
+                                                const int                         numQueries,
+                                                const int                         batchPairOffset,
+                                                const int                         batchSize,
+                                                const SubstructAlgorithm          algorithm,
+                                                cudaStream_t                      stream,
+                                                RecursiveScratchBuffers&          scratch,
+                                                RecursivePatternCache&            patternCache,
+                                                std::vector<BatchedPatternEntry>& scratchPatternEntries,
+                                                cudaEvent_t*                      depthEvents,
+                                                int                               numDepthEvents) {
+  ScopedNvtxRange processRecursiveRange("Process recursive batch with events");
+  ScopedNvtxRange processRecursiveRangeSetup("Process recursive batch setup");
+
+  std::vector<BatchedPatternEntry>& patternEntriesHost = scratchPatternEntries;
+  patternEntriesHost.clear();
+
+  std::vector<bool> queryInBatch(numQueries, false);
+  for (int i = 0; i < batchSize; ++i) {
+    const int pairIdx  = batchPairOffset + i;
+    const int queryIdx = pairIdx % numQueries;
+    queryInBatch[queryIdx] = true;
+  }
+
+  int maxDepth = 0;
+  for (int queryIdx = 0; queryIdx < numQueries; ++queryIdx) {
+    if (!queryInBatch[queryIdx]) {
+      continue;
+    }
+
+    if (queryIdx >= static_cast<int>(queriesHost.recursivePatterns.size())) {
+      continue;
+    }
+
+    const auto& recursiveInfo = queriesHost.recursivePatterns[queryIdx];
+    if (recursiveInfo.empty()) {
+      continue;
+    }
+
+    maxDepth = std::max(maxDepth, recursiveInfo.maxDepth);
+
+    for (const auto& entry : recursiveInfo.patterns) {
+      if (entry.queryMol == nullptr) {
+        continue;
+      }
+
+      BatchedPatternEntry& batchEntry = patternEntriesHost.emplace_back();
+      batchEntry.mainQueryIdx    = queryIdx;
+      batchEntry.patternId       = entry.patternId;
+      batchEntry.patternMolIdx   = patternCache.getOrAddPattern(queryIdx, entry.patternId, entry.queryMol, recursiveInfo);
+      batchEntry.depth           = entry.depth;
+      batchEntry.localIdInParent = entry.localIdInParent;
+    }
+  }
+
+  if (patternEntriesHost.empty()) {
+    return;
+  }
+
+  const int firstTargetInBatch = batchPairOffset / numQueries;
+  const int lastTargetInBatch  = (batchPairOffset + batchSize - 1) / numQueries;
+  const int numTargetsInBatch  = lastTargetInBatch - firstTargetInBatch + 1;
+
+  patternCache.syncToDevice(stream);
+
+  const auto batchView = batchResults.view();
+  constexpr int gsiBuffersPerBlock = 2;
+  constexpr int wusBuffersPerBlock = 1;
+
+  const int maxPaintPairsPerSubBatch = std::max(batchSize, 1024);
+  processRecursiveRangeSetup.pop();
+
+  for (int currentDepth = 0; currentDepth <= maxDepth; ++currentDepth) {
+    ScopedNvtxRange depthRange("Process recursive depth level " + std::to_string(currentDepth));
+
+    std::vector<BatchedPatternEntry> patternsAtDepth;
+    for (const auto& entry : patternEntriesHost) {
+      if (entry.depth == currentDepth) {
+        patternsAtDepth.push_back(entry);
+      }
+    }
+
+    if (patternsAtDepth.empty()) {
+      if (currentDepth < numDepthEvents && depthEvents != nullptr) {
+        cudaCheckError(cudaEventRecord(depthEvents[currentDepth], stream));
+      }
+      continue;
+    }
+
+    const size_t numPatterns = patternsAtDepth.size();
+    const int patternsPerSubBatch = std::max(1, maxPaintPairsPerSubBatch / numTargetsInBatch);
+
+    for (size_t patternStart = 0; patternStart < numPatterns; patternStart += patternsPerSubBatch) {
+      const size_t patternEnd            = std::min(patternStart + patternsPerSubBatch, numPatterns);
+      const size_t numPatternsInSubBatch = patternEnd - patternStart;
+      const size_t numBlocksInSubBatch   = numTargetsInBatch * numPatternsInSubBatch;
+
+      if (scratch.patternEntries.size() < numPatternsInSubBatch) {
+        scratch.patternEntries.resize(numPatternsInSubBatch);
+      }
+      scratch.patternEntries.copyFromHost(patternsAtDepth.data() + patternStart, numPatternsInSubBatch);
+
+      const int buffersPerBlock = (algorithm == SubstructAlgorithm::WarpUnified) ? wusBuffersPerBlock : gsiBuffersPerBlock;
+      const size_t overflowNeeded = numBlocksInSubBatch * buffersPerBlock * kOverflowEntriesPerBuffer;
+
+      if (scratch.overflow.size() < overflowNeeded) {
+        scratch.overflow.resize(overflowNeeded);
+      }
+      scratch.overflow.zero();
+
+      const size_t labelMatrixNeeded = numBlocksInSubBatch * kLabelMatrixWords;
+      if (scratch.labelMatrixBuffer.size() < labelMatrixNeeded) {
+        scratch.labelMatrixBuffer.resize(labelMatrixNeeded);
+      }
+      scratch.labelMatrixBuffer.zero();
+
+      const uint32_t* recursiveBitsForLabel = (currentDepth > 0) ? batchView.recursiveMatchBits : nullptr;
+
+      labelMatrixPaintKernel<<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
+        targetsDevice.view(),
+        patternCache.cachedPatternsDevice.view(),
+        scratch.patternEntries.data(),
+        static_cast<int>(numPatternsInSubBatch),
+        numQueries,
+        batchPairOffset,
+        batchSize,
+        scratch.labelMatrixBuffer.data(),
+        firstTargetInBatch,
+        recursiveBitsForLabel,
+        batchView.maxTargetAtoms);
+
+      switch (algorithm) {
+        case SubstructAlgorithm::VF2:
+        case SubstructAlgorithm::GSI: {
+          substructPaintKernel<SubstructAlgorithm::GSI><<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
+            targetsDevice.view(),
+            patternCache.cachedPatternsDevice.view(),
+            scratch.patternEntries.data(),
+            static_cast<int>(numPatternsInSubBatch),
+            batchView.recursiveMatchBits,
+            batchView.maxTargetAtoms,
+            numQueries,
+            0, 0,
+            batchPairOffset,
+            batchSize,
+            scratch.overflow.data(),
+            scratch.overflow.data(),
+            kOverflowEntriesPerBuffer,
+            scratch.labelMatrixBuffer.data(),
+            firstTargetInBatch);
+          break;
+        }
+        case SubstructAlgorithm::WarpUnified: {
+          substructPaintKernel<SubstructAlgorithm::WarpUnified><<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
+            targetsDevice.view(),
+            patternCache.cachedPatternsDevice.view(),
+            scratch.patternEntries.data(),
+            static_cast<int>(numPatternsInSubBatch),
+            batchView.recursiveMatchBits,
+            batchView.maxTargetAtoms,
+            numQueries,
+            0, 0,
+            batchPairOffset,
+            batchSize,
+            scratch.overflow.data(),
+            scratch.overflow.data(),
+            kOverflowEntriesPerBuffer,
+            scratch.labelMatrixBuffer.data(),
+            firstTargetInBatch);
+          break;
+        }
+      }
+    }
+
+    if (currentDepth < numDepthEvents && depthEvents != nullptr) {
+      cudaCheckError(cudaEventRecord(depthEvents[currentDepth], stream));
     }
   }
 

@@ -56,8 +56,10 @@ using nvMolKit::preprocessRecursiveSmartsBatched;
 using nvMolKit::RecursivePatternCache;
 using nvMolKit::RecursivePatternInfo;
 using nvMolKit::RecursiveScratchBuffers;
+using nvMolKit::kMaxRecursionDepth;
 using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
+using nvMolKit::SubstructSearchResults;
 using nvMolKit::BatchResultsDevice;
 
 namespace {
@@ -809,6 +811,61 @@ TEST(RecursiveLabelerEdgeCases, TooManyPatternsThrows) {
   ASSERT_NE(queryMol, nullptr);
 
   EXPECT_THROW(extractRecursivePatterns(queryMol.get()), std::runtime_error);
+}
+
+TEST(RecursiveLabelerEdgeCases, MaxRecursionDepthLimit) {
+  // kMaxRecursionDepth is 4, so maxDepth of 3 (0,1,2,3) should work
+  // maxDepth of 4 (0,1,2,3,4) should throw
+  // Create nested patterns: depth 0 inside depth 1 inside depth 2 etc.
+  // [$([*;$([*;$([*;$([*;$(*)])])])])] has depth 4 (5 levels: 0,1,2,3,4)
+
+  // This pattern has depth 4: [$([*;$([*;$([*;$([*;$(*-N)])])])])]
+  // Outer: depth 4, contains depth 3
+  // Next: depth 3, contains depth 2
+  // Next: depth 2, contains depth 1
+  // Next: depth 1, contains depth 0
+  // Inner: depth 0 (leaf)
+  const std::string deeplyNested = "[$([*;$([*;$([*;$([*;$(*-N)])])])])]";
+
+  auto queryMol = makeMolFromSmarts(deeplyNested);
+  ASSERT_NE(queryMol, nullptr);
+
+  // Extract should succeed (patterns are extracted but depth is recorded)
+  auto info = extractRecursivePatterns(queryMol.get());
+  EXPECT_GE(info.maxDepth, kMaxRecursionDepth);
+}
+
+TEST(RecursiveLabelerEdgeCases, MaxRecursionDepthThrowsOnPreprocess) {
+  // Create a pattern that exceeds kMaxRecursionDepth and verify it throws
+  // during preprocessing when run through the full pipeline
+  const std::string deeplyNested = "[$([*;$([*;$([*;$([*;$(*-N)])])])])]";
+
+  auto targetMol = makeMolFromSmiles("CCCCN");
+  auto queryMol = makeMolFromSmarts(deeplyNested);
+  ASSERT_NE(targetMol, nullptr);
+  ASSERT_NE(queryMol, nullptr);
+
+  // Verify the pattern exceeds depth limit
+  auto info = extractRecursivePatterns(queryMol.get());
+  ASSERT_GE(info.maxDepth, kMaxRecursionDepth) << "Test pattern does not exceed depth limit";
+
+  MoleculesHost targetHost;
+  addToBatch(targetMol.get(), targetHost);
+
+  MoleculesHost queryHost;
+  addQueryToBatch(queryMol.get(), queryHost);
+
+  ScopedStream stream;
+  MoleculesDevice targetDevice(stream.stream());
+  MoleculesDevice queryDevice(stream.stream());
+  targetDevice.copyFromHost(targetHost);
+  queryDevice.copyFromHost(queryHost);
+
+  nvMolKit::SubstructSearchResults results;
+  EXPECT_THROW(
+    nvMolKit::getSubstructMatches(targetDevice, queryDevice, targetHost, queryHost,
+                                  results, SubstructAlgorithm::GSI, stream.stream()),
+    std::runtime_error);
 }
 
 // =============================================================================

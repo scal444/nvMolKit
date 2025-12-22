@@ -63,6 +63,27 @@ class ScopedStream {
   cudaStream_t original_stream_ = nullptr;
 };
 
+/**
+ * @brief RAII stream with explicit priority.
+ *
+ * Creates a non-blocking stream with the specified priority.
+ * Lower numerical priority means higher execution priority.
+ */
+class ScopedStreamWithPriority {
+ public:
+  explicit ScopedStreamWithPriority(int priority);
+  ScopedStreamWithPriority(const ScopedStreamWithPriority&)            = delete;
+  ScopedStreamWithPriority& operator=(const ScopedStreamWithPriority&) = delete;
+  ~ScopedStreamWithPriority() noexcept;
+
+  ScopedStreamWithPriority(ScopedStreamWithPriority&& other) noexcept;
+  ScopedStreamWithPriority& operator=(ScopedStreamWithPriority&& other) noexcept;
+  cudaStream_t              stream() const noexcept { return stream_; }
+
+ private:
+  cudaStream_t stream_ = nullptr;
+};
+
 class ScopedCudaEvent {
  public:
   explicit ScopedCudaEvent();

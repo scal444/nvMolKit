@@ -18,9 +18,11 @@
 
 #include <cuda_runtime.h>
 
+#include <array>
 #include <unordered_map>
 #include <vector>
 
+#include "device.h"
 #include "device_vector.h"
 #include "flat_bit_vect.h"
 #include "molecules.h"
@@ -334,6 +336,43 @@ struct RecursivePatternCache {
   void syncToDevice(cudaStream_t stream);
 };
 
+/// Maximum supported recursion depth for nested recursive SMARTS patterns.
+/// A query with depth N requires N paint rounds before matching can begin.
+constexpr int kMaxRecursionDepth = 4;
+
+/**
+ * @brief Two-stream pipeline context for overlapping recursive preprocessing with matching.
+ *
+ * Uses a high-priority stream for recursive paint operations and a low-priority
+ * stream for main query matching. Events synchronize pairs that depend on
+ * recursive preprocessing results.
+ */
+struct TwoStreamPipelineContext {
+  ScopedStreamWithPriority recursiveStream;  ///< High priority stream for paint kernels
+  ScopedStreamWithPriority matchStream;      ///< Low priority stream for match kernels
+
+  std::array<ScopedCudaEvent, kMaxRecursionDepth> depthEvents;
+
+  /// Matching: global pair indices for each depth group (depth 0..kMaxRecursionDepth)
+  std::array<AsyncDeviceVector<int>, kMaxRecursionDepth + 1> matchGlobalPairIndices;
+
+  /// Matching: batch-local indices for each depth group (depth 0..kMaxRecursionDepth)
+  std::array<AsyncDeviceVector<int>, kMaxRecursionDepth + 1> matchBatchLocalIndices;
+
+  /// Host-side schedule: pairs to match after each depth level completes
+  std::array<std::vector<int>, kMaxRecursionDepth + 1> matchPairsHost;
+
+  int maxDepthInBatch = 0;
+
+  /**
+   * @brief Construct pipeline context with priority streams.
+   *
+   * The recursive stream gets high priority (lower numerical value),
+   * the match stream gets low priority (higher numerical value).
+   */
+  TwoStreamPipelineContext();
+};
+
 /**
  * @brief Preprocess ALL recursive SMARTS patterns for a batch in a single kernel launch.
  *
@@ -365,6 +404,30 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&            targetsD
                                       RecursiveScratchBuffers&          scratch,
                                       RecursivePatternCache&            patternCache,
                                       std::vector<BatchedPatternEntry>& scratchPatternEntries);
+
+/**
+ * @brief Preprocess recursive SMARTS patterns with event recording for two-stream pipeline.
+ *
+ * Same as preprocessRecursiveSmartsBatched but records events after each depth level
+ * for synchronization with the match stream.
+ *
+ * @param depthEvents Array of events to record after each depth level (size >= maxDepth)
+ * @param numDepthEvents Number of events in the array (typically kMaxRecursionDepth)
+ */
+void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&            targetsDevice,
+                                                const MoleculesHost&              targetsHost,
+                                                const MoleculesHost&              queriesHost,
+                                                BatchResultsDevice&               batchResults,
+                                                int                               numQueries,
+                                                int                               batchPairOffset,
+                                                int                               batchSize,
+                                                SubstructAlgorithm                algorithm,
+                                                cudaStream_t                      stream,
+                                                RecursiveScratchBuffers&          scratch,
+                                                RecursivePatternCache&            patternCache,
+                                                std::vector<BatchedPatternEntry>& scratchPatternEntries,
+                                                cudaEvent_t*                      depthEvents,
+                                                int                               numDepthEvents);
 
 }  // namespace nvMolKit
 
