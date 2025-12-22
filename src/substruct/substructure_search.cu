@@ -585,24 +585,20 @@ void RecursivePatternCache::syncToDevice(cudaStream_t stream) {
 // =============================================================================
 
 namespace {
-int getHighestStreamPriority() {
+std::pair<int, int> getStreamPriorityRange() {
   int leastPriority    = 0;
   int greatestPriority = 0;
   cudaCheckError(cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority));
-  return greatestPriority;
-}
-
-int getLowestStreamPriority() {
-  int leastPriority    = 0;
-  int greatestPriority = 0;
-  cudaCheckError(cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority));
-  return leastPriority;
+  return {greatestPriority, leastPriority};
 }
 }  // namespace
 
 TwoStreamPipelineContext::TwoStreamPipelineContext()
-    : recursiveStream(getHighestStreamPriority()),
-      matchStream(getLowestStreamPriority()) {}
+    : recursiveStream(getStreamPriorityRange().first),
+      matchStreams{ScopedStreamWithPriority(getStreamPriorityRange().second),
+                   ScopedStreamWithPriority(getStreamPriorityRange().second),
+                   ScopedStreamWithPriority(getStreamPriorityRange().second),
+                   ScopedStreamWithPriority(getStreamPriorityRange().second)} {}
 
 // =============================================================================
 // BatchResultsDevice Implementation
@@ -917,13 +913,12 @@ void uploadAndLaunchBatch(BatchSlot&             slot,
     return;
   }
 
-  ScopedNvtxRange twoStreamRange("Two-stream recursive pipeline");
+  ScopedNvtxRange twoStreamRange("Multi-stream recursive pipeline");
 
   cudaStream_t recursiveStream = twoStreamCtx.recursiveStream.stream();
-  cudaStream_t matchStream     = twoStreamCtx.matchStream.stream();
 
-  ScopedNvtxRange allocRange("Allocate batch on matchStream");
-  slot.deviceResults.setStream(matchStream);
+  ScopedNvtxRange allocRange("Allocate batch on ctx.stream");
+  slot.deviceResults.setStream(ctx.stream);
   slot.deviceResults.allocateBatch(slot.numPairsInBatch,
                                    slot.batchPairMatchStarts,
                                    slot.totalMatchIndices,
@@ -931,12 +926,11 @@ void uploadAndLaunchBatch(BatchSlot&             slot,
                                    ctx.maxTargetAtoms,
                                    numBuffersPerBlock);
   slot.deviceResults.setQueryAtomCounts(ctx.queryAtomCounts);
-  // zeroRecursiveBits not needed - allocateBatch already zeros it
   allocRange.pop();
 
-  // Synchronize: allocations were done on matchStream, recursiveStream needs to wait
+  // Synchronize: allocations were done on ctx.stream, recursiveStream needs to wait
   ScopedCudaEvent allocDoneEvent;
-  cudaCheckError(cudaEventRecord(allocDoneEvent.event(), matchStream));
+  cudaCheckError(cudaEventRecord(allocDoneEvent.event(), ctx.stream));
   cudaCheckError(cudaStreamWaitEvent(recursiveStream, allocDoneEvent.event(), 0));
 
   ctx.recursiveScratch.setStream(recursiveStream);
@@ -958,23 +952,33 @@ void uploadAndLaunchBatch(BatchSlot&             slot,
                                               kMaxRecursionDepth);
   preprocRange.pop();
 
-  ScopedNvtxRange depth0Range("Match depth-0 pairs");
+  // Depth 0 pairs have no recursive patterns - use ctx.stream directly
+  ScopedNvtxRange depth0Range("Match depth-0 pairs (ctx.stream)");
   launchLabelAndMatch(twoStreamCtx.matchPairsHost[0], slot, ctx, targetsDevice, queriesDevice,
-                      algorithm, matchStream, twoStreamCtx, 0);
+                      algorithm, ctx.stream, twoStreamCtx, 0);
   depth0Range.pop();
 
+  // Depths 1..maxDepth each get their own low-priority stream for parallelism
   for (int depth = 1; depth <= twoStreamCtx.maxDepthInBatch; ++depth) {
-    ScopedNvtxRange depthRange("Match depth-" + std::to_string(depth) + " pairs");
+    ScopedNvtxRange depthRange("Match depth-" + std::to_string(depth) + " pairs (matchStream " +
+                               std::to_string(depth - 1) + ")");
 
-    cudaCheckError(cudaStreamWaitEvent(matchStream, depthEventPtrs[depth - 1], 0));
+    cudaStream_t depthStream = twoStreamCtx.matchStreams[depth - 1].stream();
+
+    // This stream waits for: (1) allocations on ctx.stream, (2) preprocessing at depth-1
+    cudaCheckError(cudaStreamWaitEvent(depthStream, allocDoneEvent.event(), 0));
+    cudaCheckError(cudaStreamWaitEvent(depthStream, depthEventPtrs[depth - 1], 0));
 
     launchLabelAndMatch(twoStreamCtx.matchPairsHost[depth], slot, ctx, targetsDevice, queriesDevice,
-                        algorithm, matchStream, twoStreamCtx, depth);
+                        algorithm, depthStream, twoStreamCtx, depth);
   }
 
-  ScopedNvtxRange syncRange("Sync recursive and match streams");
+  ScopedNvtxRange syncRange("Sync all streams");
   cudaCheckError(cudaStreamSynchronize(recursiveStream));
-  cudaCheckError(cudaStreamSynchronize(matchStream));
+  cudaCheckError(cudaStreamSynchronize(ctx.stream));
+  for (int depth = 1; depth <= twoStreamCtx.maxDepthInBatch; ++depth) {
+    cudaCheckError(cudaStreamSynchronize(twoStreamCtx.matchStreams[depth - 1].stream()));
+  }
   syncRange.pop();
 
   ctx.recursiveScratch.setStream(ctx.stream);
@@ -992,17 +996,28 @@ void accumulateBatchResults(const BatchSlot&            slot,
                             SubstructMatchResultsHost&  results) {
   ScopedNvtxRange accumRange("accumulateBatchResults");
 
+  // Bulk copy counts - contiguous in both source and destination
+  std::memcpy(results.matchCounts.data() + slot.batchStart,
+              slot.matchCountsHost.data(),
+              slot.numPairsInBatch * sizeof(int));
+  std::memcpy(results.reportedCounts.data() + slot.batchStart,
+              slot.reportedCountsHost.data(),
+              slot.numPairsInBatch * sizeof(int));
+
+  // Copy match indices - only copy actual reported matches, not full capacity
   for (int i = 0; i < slot.numPairsInBatch; ++i) {
-    const int globalPairIdx = slot.batchStart + i;
-    results.matchCounts[globalPairIdx]    = slot.matchCountsHost[i];
-    results.reportedCounts[globalPairIdx] = slot.reportedCountsHost[i];
+    const int globalPairIdx    = slot.batchStart + i;
+    const int queryIdx         = globalPairIdx % ctx.numQueries;
+    const int queryAtoms       = ctx.queryAtomCounts[queryIdx];
+    const int reportedMatches  = slot.reportedCountsHost[i];
+    const int numIndicesToCopy = reportedMatches * queryAtoms;
 
-    const int batchLocalOffset = slot.batchPairMatchStarts[i];
-    const int globalOffset     = ctx.globalPairMatchStarts[globalPairIdx];
-    const int numIndicesToCopy = slot.batchPairMatchStarts[i + 1] - batchLocalOffset;
-
-    for (int j = 0; j < numIndicesToCopy; ++j) {
-      results.matchIndices[globalOffset + j] = slot.matchIndicesHost[batchLocalOffset + j];
+    if (numIndicesToCopy > 0) {
+      const int batchLocalOffset = slot.batchPairMatchStarts[i];
+      const int globalOffset     = ctx.globalPairMatchStarts[globalPairIdx];
+      std::memcpy(results.matchIndices.data() + globalOffset,
+                  slot.matchIndicesHost.data() + batchLocalOffset,
+                  numIndicesToCopy * sizeof(int16_t));
     }
   }
 }

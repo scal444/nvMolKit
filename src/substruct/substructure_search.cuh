@@ -349,7 +349,11 @@ constexpr int kMaxRecursionDepth = 4;
  */
 struct TwoStreamPipelineContext {
   ScopedStreamWithPriority recursiveStream;  ///< High priority stream for paint kernels
-  ScopedStreamWithPriority matchStream;      ///< Low priority stream for match kernels
+
+  /// Low priority streams for match kernels at depth > 0.
+  /// Depth 0 uses the main ctx.stream. Depths 1..kMaxRecursionDepth each get their own stream
+  /// so matching at different depths can overlap.
+  std::array<ScopedStreamWithPriority, kMaxRecursionDepth> matchStreams;
 
   std::array<ScopedCudaEvent, kMaxRecursionDepth> depthEvents;
 
@@ -368,7 +372,7 @@ struct TwoStreamPipelineContext {
    * @brief Construct pipeline context with priority streams.
    *
    * The recursive stream gets high priority (lower numerical value),
-   * the match stream gets low priority (higher numerical value).
+   * match streams get low priority (higher numerical value).
    */
   TwoStreamPipelineContext();
 };
