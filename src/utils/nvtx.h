@@ -19,6 +19,7 @@
 #include <string>
 
 #include "nvtx3/nvToolsExt.h"
+#include "nvtx3/nvToolsExtCudaRt.h"
 
 namespace nvMolKit {
 

@@ -50,7 +50,7 @@ class WithDevice {
 //! Creates and holds a CUDA stream on the current device
 class ScopedStream {
  public:
-  explicit ScopedStream();
+  explicit ScopedStream(const char* name = nullptr);
   ScopedStream(const ScopedStream&)            = delete;
   ScopedStream& operator=(const ScopedStream&) = delete;
   ~ScopedStream() noexcept;
@@ -71,7 +71,7 @@ class ScopedStream {
  */
 class ScopedStreamWithPriority {
  public:
-  explicit ScopedStreamWithPriority(int priority);
+  explicit ScopedStreamWithPriority(int priority, const char* name = nullptr);
   ScopedStreamWithPriority(const ScopedStreamWithPriority&)            = delete;
   ScopedStreamWithPriority& operator=(const ScopedStreamWithPriority&) = delete;
   ~ScopedStreamWithPriority() noexcept;

@@ -17,8 +17,12 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <exception>
 #include <memory>
 #include <stdexcept>
+#include <thread>
+#include <vector>
 
 #include "cuda_error_check.h"
 #include "host_vector.h"
@@ -467,9 +471,9 @@ struct BatchSlot {
   int numPairsInBatch   = 0;
   int totalMatchIndices = 0;
 
-  std::vector<int>                 pairIndicesHost;
-  std::vector<int>                 batchPairMatchStarts;
-  std::vector<BatchedPatternEntry> patternEntriesHost;
+  PinnedHostVector<int>                 pairIndicesHost;
+  PinnedHostVector<int>                 batchPairMatchStarts;
+  std::vector<BatchedPatternEntry>      patternEntriesHost;
 
   // Pinned memory for D2H transfers - pre-allocated and reused between batches
   PinnedHostVector<int>     matchCountsHost;
@@ -486,8 +490,11 @@ struct BatchSlot {
   BatchResultsDevice     deviceResults;
   AsyncDeviceVector<int> pairIndicesDev;
 
-  BatchSlot() : recursiveScratch(nullptr), patternCache(nullptr) {
-    twoStreamCtx = std::make_unique<TwoStreamPipelineContext>();
+  explicit BatchSlot(int workerIdx) 
+      : computeStream(("worker" + std::to_string(workerIdx) + "_mainStream").c_str()),
+        recursiveScratch(nullptr), 
+        patternCache(nullptr) {
+    twoStreamCtx = std::make_unique<TwoStreamPipelineContext>(workerIdx);
   }
 
   void initializeForStream() {
@@ -502,8 +509,12 @@ struct BatchSlot {
   cudaStream_t stream() const { return computeStream.stream(); }
 
   void reserveHostBuffers(int maxBatchSize, int maxMatchIndicesEstimate) {
-    pairIndicesHost.reserve(maxBatchSize);
-    batchPairMatchStarts.reserve(maxBatchSize + 1);
+    if (pairIndicesHost.size() < static_cast<size_t>(maxBatchSize)) {
+      pairIndicesHost.resize(maxBatchSize);
+    }
+    if (batchPairMatchStarts.size() < static_cast<size_t>(maxBatchSize + 1)) {
+      batchPairMatchStarts.resize(maxBatchSize + 1);
+    }
     if (matchCountsHost.size() < static_cast<size_t>(maxBatchSize)) {
       matchCountsHost = PinnedHostVector<int>(maxBatchSize);
     }
@@ -516,40 +527,16 @@ struct BatchSlot {
   }
 };
 
-struct BatchPipelineContext {
-  static constexpr int kNumSlots = 2;
-
-  // Slots declared first so they're destroyed last (contain streams)
-  std::array<BatchSlot, kNumSlots> slots;
-
+struct ThreadWorkerContext {
   std::vector<int> queryAtomCounts;
   std::vector<int> globalPairMatchStarts;
   int numTargets     = 0;
   int numQueries     = 0;
   int maxTargetAtoms = 0;
+  int maxBatchSize   = 0;
 
-  int currentSlot = 0;
-
-  explicit BatchPipelineContext(int maxBatchSize)
-      : maxBatchSize_(maxBatchSize) {
-    for (auto& slot : slots) {
-      slot.initializeForStream();
-    }
-  }
-
-  void allocatePinnedBuffers(int maxQueryAtoms, int maxTargetAtomsArg) {
-    const int maxMatchIndicesPerBatch = maxBatchSize_ * maxTargetAtomsArg * maxQueryAtoms;
-    for (auto& slot : slots) {
-      slot.reserveHostBuffers(maxBatchSize_, maxMatchIndicesPerBatch);
-    }
-  }
-
-  BatchSlot& current() { return slots[currentSlot]; }
-  BatchSlot& next() { return slots[1 - currentSlot]; }
-  void rotate() { currentSlot = 1 - currentSlot; }
-
- private:
-  int maxBatchSize_ = 0;
+  explicit ThreadWorkerContext(int maxBatchSize)
+      : maxBatchSize(maxBatchSize) {}
 };
 
 }  // namespace
@@ -623,12 +610,18 @@ std::pair<int, int> getStreamPriorityRange() {
 }
 }  // namespace
 
-TwoStreamPipelineContext::TwoStreamPipelineContext()
-    : recursiveStream(getStreamPriorityRange().first),
-      matchStreams{ScopedStreamWithPriority(getStreamPriorityRange().second),
-                   ScopedStreamWithPriority(getStreamPriorityRange().second),
-                   ScopedStreamWithPriority(getStreamPriorityRange().second),
-                   ScopedStreamWithPriority(getStreamPriorityRange().second)} {}
+TwoStreamPipelineContext::TwoStreamPipelineContext(int workerIdx)
+    : recursiveStream(getStreamPriorityRange().first, 
+                      ("worker" + std::to_string(workerIdx) + "_priorityRecursiveStream").c_str()),
+      matchStreams{
+          ScopedStreamWithPriority(getStreamPriorityRange().second, 
+                                   ("worker" + std::to_string(workerIdx) + "_depth1FinalLabelStream").c_str()),
+          ScopedStreamWithPriority(getStreamPriorityRange().second, 
+                                   ("worker" + std::to_string(workerIdx) + "_depth2FinalLabelStream").c_str()),
+          ScopedStreamWithPriority(getStreamPriorityRange().second, 
+                                   ("worker" + std::to_string(workerIdx) + "_depth3FinalLabelStream").c_str()),
+          ScopedStreamWithPriority(getStreamPriorityRange().second, 
+                                   ("worker" + std::to_string(workerIdx) + "_depth4FinalLabelStream").c_str())} {}
 
 // =============================================================================
 // BatchResultsDevice Implementation
@@ -646,12 +639,12 @@ void BatchResultsDevice::setStream(cudaStream_t stream) {
   labelMatrixBuffer_.setStream(stream);
 }
 
-void BatchResultsDevice::allocateBatch(int                     batchSize,
-                                       const std::vector<int>& batchPairMatchStarts,
-                                       int                     totalBatchMatchIndices,
-                                       int                     numQueries,
-                                       int                     maxTargetAtoms,
-                                       int                     numBuffersPerBlock) {
+void BatchResultsDevice::allocateBatch(int        batchSize,
+                                       const int* batchPairMatchStarts,
+                                       int        totalBatchMatchIndices,
+                                       int        numQueries,
+                                       int        maxTargetAtoms,
+                                       int        numBuffersPerBlock) {
   batchSize_              = batchSize;
   numQueries_             = numQueries;
   maxTargetAtoms_         = maxTargetAtoms;
@@ -665,7 +658,7 @@ void BatchResultsDevice::allocateBatch(int                     batchSize,
   reportedCounts_.zero();
 
   pairMatchStarts_.resize(batchSize + 1);
-  pairMatchStarts_.setFromVector(batchPairMatchStarts);
+  pairMatchStarts_.copyFromHost(batchPairMatchStarts, batchSize + 1);
 
   matchIndices_.resize(totalBatchMatchIndices);
   // No zero needed - only written at specific indices based on counts
@@ -785,10 +778,10 @@ void precomputePipelineSchedule(TwoStreamPipelineContext& ctx,
   }
 }
 
-void prepareBatchOnCPU(BatchSlot&                  slot,
-                       const BatchPipelineContext& ctx,
-                       int                         batchStart,
-                       int                         maxPairsInBatch) {
+void prepareBatchOnCPU(BatchSlot&                   slot,
+                       const ThreadWorkerContext&   ctx,
+                       int                          batchStart,
+                       int                          maxPairsInBatch) {
   ScopedNvtxRange prepRange("prepareBatchOnCPU");
 
   const int numPairs = ctx.numTargets * ctx.numQueries;
@@ -798,7 +791,6 @@ void prepareBatchOnCPU(BatchSlot&                  slot,
   slot.batchStart       = batchStart;
   slot.numPairsInBatch  = numPairsInBatch;
 
-  slot.batchPairMatchStarts.resize(numPairsInBatch + 1);
   slot.batchPairMatchStarts[0] = 0;
   for (int i = 0; i < numPairsInBatch; ++i) {
     const int globalPairIdx = batchStart + i;
@@ -806,9 +798,8 @@ void prepareBatchOnCPU(BatchSlot&                  slot,
                              ctx.globalPairMatchStarts[globalPairIdx];
     slot.batchPairMatchStarts[i + 1] = slot.batchPairMatchStarts[i] + pairCapacity;
   }
-  slot.totalMatchIndices = slot.batchPairMatchStarts.back();
+  slot.totalMatchIndices = slot.batchPairMatchStarts[numPairsInBatch];
 
-  slot.pairIndicesHost.resize(numPairsInBatch);
   for (int i = 0; i < numPairsInBatch; ++i) {
     slot.pairIndicesHost[i] = batchStart + i;
   }
@@ -817,35 +808,43 @@ void prepareBatchOnCPU(BatchSlot&                  slot,
 /**
  * @brief Launch label matrix and match kernels for a subset of pairs.
  */
-void launchLabelAndMatch(const std::vector<int>&             batchLocalIndices,
-                         BatchSlot&                          slot,
-                         BatchPipelineContext&               ctx,
-                         MoleculesDevice&                    targetsDevice,
-                         const MoleculesDevice&              queriesDevice,
-                         SubstructAlgorithm                  algorithm,
-                         cudaStream_t                        stream,
-                         TwoStreamPipelineContext&           twoStreamCtx,
-                         int                                 depthGroupIdx) {
+void launchLabelAndMatch(const std::vector<int>&      batchLocalIndices,
+                         BatchSlot&                   slot,
+                         const ThreadWorkerContext&   ctx,
+                         MoleculesDevice&             targetsDevice,
+                         const MoleculesDevice&       queriesDevice,
+                         SubstructAlgorithm           algorithm,
+                         cudaStream_t                 stream,
+                         TwoStreamPipelineContext&    twoStreamCtx,
+                         int                          depthGroupIdx) {
   if (batchLocalIndices.empty()) {
     return;
   }
 
   const int numPairsInGroup = static_cast<int>(batchLocalIndices.size());
 
-  std::vector<int> globalPairIndices(numPairsInGroup);
+  auto& globalPairIndicesHost = twoStreamCtx.matchGlobalPairIndicesHost[depthGroupIdx];
+  if (globalPairIndicesHost.size() < static_cast<size_t>(numPairsInGroup)) {
+    globalPairIndicesHost.resize(numPairsInGroup);
+  }
+
   for (int i = 0; i < numPairsInGroup; ++i) {
-    globalPairIndices[i] = slot.pairIndicesHost[batchLocalIndices[i]];
+    globalPairIndicesHost[i] = slot.pairIndicesHost[batchLocalIndices[i]];
   }
 
   auto& globalPairIndicesDev = twoStreamCtx.matchGlobalPairIndices[depthGroupIdx];
   auto& batchLocalIndicesDev = twoStreamCtx.matchBatchLocalIndices[depthGroupIdx];
 
   globalPairIndicesDev.setStream(stream);
-  globalPairIndicesDev.resize(numPairsInGroup);
-  globalPairIndicesDev.copyFromHost(globalPairIndices.data(), numPairsInGroup);
+  if (globalPairIndicesDev.size() < static_cast<size_t>(numPairsInGroup)) {
+    globalPairIndicesDev.resize(numPairsInGroup);
+  }
+  globalPairIndicesDev.copyFromHost(globalPairIndicesHost.data(), numPairsInGroup);
 
   batchLocalIndicesDev.setStream(stream);
-  batchLocalIndicesDev.resize(numPairsInGroup);
+  if (batchLocalIndicesDev.size() < static_cast<size_t>(numPairsInGroup)) {
+    batchLocalIndicesDev.resize(numPairsInGroup);
+  }
   batchLocalIndicesDev.copyFromHost(batchLocalIndices.data(), numPairsInGroup);
 
   SubstructMatchResultsDeviceView batchView = slot.deviceResults.view();
@@ -879,13 +878,13 @@ void launchLabelAndMatch(const std::vector<int>&             batchLocalIndices,
   }
 }
 
-void uploadAndLaunchBatch(BatchSlot&             slot,
-                          BatchPipelineContext&  ctx,
-                          MoleculesDevice&       targetsDevice,
-                          const MoleculesDevice& queriesDevice,
-                          const MoleculesHost&   targetsHost,
-                          const MoleculesHost&   queriesHost,
-                          SubstructAlgorithm     algorithm) {
+void uploadAndLaunchBatch(BatchSlot&                 slot,
+                          const ThreadWorkerContext& ctx,
+                          MoleculesDevice&           targetsDevice,
+                          const MoleculesDevice&     queriesDevice,
+                          const MoleculesHost&       targetsHost,
+                          const MoleculesHost&       queriesHost,
+                          SubstructAlgorithm         algorithm) {
   ScopedNvtxRange uploadRange("uploadAndLaunchBatch");
 
   cudaStream_t slotStream = slot.stream();
@@ -898,14 +897,16 @@ void uploadAndLaunchBatch(BatchSlot&             slot,
   if (twoStreamCtx.maxDepthInBatch == 0) {
     ScopedNvtxRange allocRange("Allocate batch (non-recursive path)");
     slot.deviceResults.allocateBatch(slot.numPairsInBatch,
-                                     slot.batchPairMatchStarts,
+                                     slot.batchPairMatchStarts.data(),
                                      slot.totalMatchIndices,
                                      ctx.numQueries,
                                      ctx.maxTargetAtoms,
                                      numBuffersPerBlock);
     slot.deviceResults.setQueryAtomCounts(ctx.queryAtomCounts);
 
-    slot.pairIndicesDev.resize(slot.numPairsInBatch);
+    if (slot.pairIndicesDev.size() < static_cast<size_t>(slot.numPairsInBatch)) {
+      slot.pairIndicesDev.resize(slot.numPairsInBatch);
+    }
     slot.pairIndicesDev.copyFromHost(slot.pairIndicesHost.data(), slot.numPairsInBatch);
     allocRange.pop();
 
@@ -946,7 +947,7 @@ void uploadAndLaunchBatch(BatchSlot&             slot,
 
   ScopedNvtxRange allocRange("Allocate batch on slotStream");
   slot.deviceResults.allocateBatch(slot.numPairsInBatch,
-                                   slot.batchPairMatchStarts,
+                                   slot.batchPairMatchStarts.data(),
                                    slot.totalMatchIndices,
                                    ctx.numQueries,
                                    ctx.maxTargetAtoms,
@@ -1007,9 +1008,9 @@ void initiateResultsCopyToHost(BatchSlot& slot) {
   cudaCheckError(cudaEventRecord(slot.copyDoneEvent.event(), slot.stream()));
 }
 
-void accumulateBatchResults(BatchSlot&                  slot,
-                            const BatchPipelineContext& ctx,
-                            SubstructMatchResultsHost&  results) {
+void accumulateBatchResults(BatchSlot&                   slot,
+                            const ThreadWorkerContext&   ctx,
+                            SubstructMatchResultsHost&   results) {
   ScopedNvtxRange accumRange("accumulateBatchResults");
 
   ScopedNvtxRange waitRange("Wait for D2H copy");
@@ -1040,6 +1041,51 @@ void accumulateBatchResults(BatchSlot&                  slot,
   }
 }
 
+void threadWorker(int                        workerIdx,
+                  const ThreadWorkerContext& ctx,
+                  MoleculesDevice&           targetsDevice,
+                  const MoleculesDevice&     queriesDevice,
+                  const MoleculesHost&       targetsHost,
+                  const MoleculesHost&       queriesHost,
+                  SubstructMatchResultsHost& results,
+                  SubstructAlgorithm         algorithm,
+                  std::atomic<int>&          nextBatchIdx,
+                  int                        totalNumBatches,
+                  int                        effectiveBatchSize,
+                  int                        maxQueryAtoms,
+                  std::exception_ptr&        exceptionPtr) {
+  try {
+    BatchSlot slot(workerIdx);
+    slot.initializeForStream();
+    
+    const int maxMatchIndicesPerBatch = effectiveBatchSize * ctx.maxTargetAtoms * maxQueryAtoms;
+    slot.reserveHostBuffers(effectiveBatchSize, maxMatchIndicesPerBatch);
+
+    const int numPairs = ctx.numTargets * ctx.numQueries;
+
+    while (true) {
+      const int batchIdx = nextBatchIdx.fetch_add(1, std::memory_order_relaxed);
+      if (batchIdx >= totalNumBatches) {
+        break;
+      }
+
+      const int batchStart = batchIdx * effectiveBatchSize;
+      if (batchStart >= numPairs) {
+        break;
+      }
+
+      ScopedNvtxRange batchRange("Thread batch " + std::to_string(batchIdx));
+      
+      prepareBatchOnCPU(slot, ctx, batchStart, effectiveBatchSize);
+      uploadAndLaunchBatch(slot, ctx, targetsDevice, queriesDevice, targetsHost, queriesHost, algorithm);
+      initiateResultsCopyToHost(slot);
+      accumulateBatchResults(slot, ctx, results);
+    }
+  } catch (...) {
+    exceptionPtr = std::current_exception();
+  }
+}
+
 }  // namespace
 
 // =============================================================================
@@ -1065,11 +1111,10 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
   const int numPairs = numTargets * numQueries;
   const int effectiveBatchSize = std::min(batchSize, numPairs);
 
-  ScopedNvtxRange ctxRange("CPU: BatchPipelineContext construction");
-  auto ctxPtr = std::make_unique<BatchPipelineContext>(effectiveBatchSize);
+  ScopedNvtxRange ctxRange("CPU: ThreadWorkerContext construction");
+  ThreadWorkerContext ctx(effectiveBatchSize);
   ctxRange.pop();
 
-  BatchPipelineContext& ctx = *ctxPtr;
   ctx.numTargets = numTargets;
   ctx.numQueries = numQueries;
 
@@ -1104,8 +1149,6 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
     }
   }
   const int totalMatchIndices = ctx.globalPairMatchStarts.back();
-
-  ctx.allocatePinnedBuffers(maxQueryAtoms, ctx.maxTargetAtoms);
   metadataRange.pop();
 
   ScopedNvtxRange resultsAllocRange("CPU: Allocate results host vectors");
@@ -1117,46 +1160,42 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
   results.matchIndices.resize(totalMatchIndices);
   resultsAllocRange.pop();
 
-  // Leapfrog pipeline: Overlap everything using async streams and events
-  int batchStart = 0;
-  int batchNum   = 0;
+  const int totalNumBatches = (numPairs + effectiveBatchSize - 1) / effectiveBatchSize;
+  const int numThreads = std::min(2, totalNumBatches);
+  std::atomic<int> nextBatchIdx(0);
 
-  // Prepare and launch first batch
-  ScopedNvtxRange batchRange("Batch " + std::to_string(batchNum));
-  ScopedNvtxRange prepRange("CPU: prepareBatchOnCPU");
-  prepareBatchOnCPU(ctx.current(), ctx, batchStart, effectiveBatchSize);
-  prepRange.pop();
-  uploadAndLaunchBatch(ctx.current(), ctx, targetsDevice, queriesDevice, targetsHost, queriesHost, algorithm);
-  ScopedNvtxRange copyRange("initiateResultsCopyToHost");
-  initiateResultsCopyToHost(ctx.current());
-  copyRange.pop();
-  batchStart += ctx.current().numPairsInBatch;
-  ++batchNum;
-  batchRange.pop();
+  ScopedNvtxRange threadRange("Multithreaded batch processing");
+  std::vector<std::thread> workers;
+  std::vector<std::exception_ptr> exceptions(numThreads);
+  workers.reserve(numThreads);
 
-  while (batchStart < numPairs) {
-    ScopedNvtxRange loopBatchRange("Batch " + std::to_string(batchNum));
-    ctx.rotate();
-
-    ScopedNvtxRange loopPrepRange("CPU: prepareBatchOnCPU");
-    prepareBatchOnCPU(ctx.current(), ctx, batchStart, effectiveBatchSize);
-    loopPrepRange.pop();
-
-    ScopedNvtxRange accumRange("CPU: accumulateBatchResults (async wait on prev)");
-    accumulateBatchResults(ctx.next(), ctx, results);
-    accumRange.pop();
-
-    uploadAndLaunchBatch(ctx.current(), ctx, targetsDevice, queriesDevice, targetsHost, queriesHost, algorithm);
-    ScopedNvtxRange loopCopyRange("initiateResultsCopyToHost");
-    initiateResultsCopyToHost(ctx.current());
-    loopCopyRange.pop();
-    batchStart += ctx.current().numPairsInBatch;
-    ++batchNum;
+  for (int t = 0; t < numThreads; ++t) {
+    workers.emplace_back(threadWorker,
+                         t,
+                         std::cref(ctx),
+                         std::ref(targetsDevice),
+                         std::cref(queriesDevice),
+                         std::cref(targetsHost),
+                         std::cref(queriesHost),
+                         std::ref(results),
+                         algorithm,
+                         std::ref(nextBatchIdx),
+                         totalNumBatches,
+                         effectiveBatchSize,
+                         maxQueryAtoms,
+                         std::ref(exceptions[t]));
   }
 
-  ScopedNvtxRange finalRange("Final batch accumulate");
-  accumulateBatchResults(ctx.current(), ctx, results);
-  finalRange.pop();
+  for (auto& worker : workers) {
+    worker.join();
+  }
+  threadRange.pop();
+
+  for (const auto& ex : exceptions) {
+    if (ex) {
+      std::rethrow_exception(ex);
+    }
+  }
 
   cudaCheckError(cudaGetLastError());
 }
@@ -1340,10 +1379,17 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&            targetsD
       const size_t numPatternsInSubBatch = patternEnd - patternStart;
       const size_t numBlocksInSubBatch   = numTargetsInBatch * numPatternsInSubBatch;
 
-      if (scratch.patternEntries.size() < numPatternsInSubBatch) {
-        scratch.patternEntries.resize(numPatternsInSubBatch);
+      // Use pinned buffer for H2D transfer (grow-only to avoid reallocation)
+      if (scratch.patternsAtDepthHostCopyPending) {
+        cudaCheckError(cudaEventSynchronize(scratch.patternsAtDepthHostCopyDone.event()));
+        scratch.patternsAtDepthHostCopyPending = false;
       }
-      scratch.patternEntries.copyFromHost(patternsAtDepth.data() + patternStart, numPatternsInSubBatch);
+      if (scratch.patternsAtDepthHost.size() < numPatternsInSubBatch) {
+        scratch.patternsAtDepthHost.resize(numPatternsInSubBatch);
+      }
+      for (size_t i = 0; i < numPatternsInSubBatch; ++i) {
+        scratch.patternsAtDepthHost[i] = patternsAtDepth[patternStart + i];
+      }
 
       const int buffersPerBlock = (algorithm == SubstructAlgorithm::WarpUnified) ? wusBuffersPerBlock : gsiBuffersPerBlock;
       const size_t overflowNeeded = numBlocksInSubBatch * buffersPerBlock * kOverflowEntriesPerBuffer;
@@ -1356,6 +1402,17 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&            targetsD
       if (scratch.labelMatrixBuffer.size() < labelMatrixNeeded) {
         scratch.labelMatrixBuffer.resize(labelMatrixNeeded);
       }
+
+      // Device buffer also grow-only to avoid reallocation
+      if (scratch.patternEntries.size() < numPatternsInSubBatch) {
+        scratch.patternEntries.resize(numPatternsInSubBatch);
+      }
+      scratch.patternEntries.copyFromHost(scratch.patternsAtDepthHost.data(), numPatternsInSubBatch);
+      cudaCheckError(cudaEventRecord(scratch.patternsAtDepthHostCopyDone.event(), scratch.patternEntries.stream()));
+      scratch.patternsAtDepthHostCopyPending = true;
+
+      // Diagnostic: full stream sync to confirm if this is a stream ordering issue
+      cudaCheckError(cudaStreamSynchronize(scratch.patternEntries.stream()));
 
       // For depth > 0 patterns, pass recursive bits from previous levels so their
       // boolean trees can check child pattern results
@@ -1527,10 +1584,17 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
       const size_t numPatternsInSubBatch = patternEnd - patternStart;
       const size_t numBlocksInSubBatch   = numTargetsInBatch * numPatternsInSubBatch;
 
-      if (scratch.patternEntries.size() < numPatternsInSubBatch) {
-        scratch.patternEntries.resize(numPatternsInSubBatch);
+      // Use pinned buffer for H2D transfer (grow-only to avoid reallocation)
+      if (scratch.patternsAtDepthHostCopyPending) {
+        cudaCheckError(cudaEventSynchronize(scratch.patternsAtDepthHostCopyDone.event()));
+        scratch.patternsAtDepthHostCopyPending = false;
       }
-      scratch.patternEntries.copyFromHost(patternsAtDepth.data() + patternStart, numPatternsInSubBatch);
+      if (scratch.patternsAtDepthHost.size() < numPatternsInSubBatch) {
+        scratch.patternsAtDepthHost.resize(numPatternsInSubBatch);
+      }
+      for (size_t i = 0; i < numPatternsInSubBatch; ++i) {
+        scratch.patternsAtDepthHost[i] = patternsAtDepth[patternStart + i];
+      }
 
       const int buffersPerBlock = (algorithm == SubstructAlgorithm::WarpUnified) ? wusBuffersPerBlock : gsiBuffersPerBlock;
       const size_t overflowNeeded = numBlocksInSubBatch * buffersPerBlock * kOverflowEntriesPerBuffer;
@@ -1543,6 +1607,17 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
       if (scratch.labelMatrixBuffer.size() < labelMatrixNeeded) {
         scratch.labelMatrixBuffer.resize(labelMatrixNeeded);
       }
+
+      // Device buffer also grow-only to avoid reallocation
+      if (scratch.patternEntries.size() < numPatternsInSubBatch) {
+        scratch.patternEntries.resize(numPatternsInSubBatch);
+      }
+      scratch.patternEntries.copyFromHost(scratch.patternsAtDepthHost.data(), numPatternsInSubBatch);
+      cudaCheckError(cudaEventRecord(scratch.patternsAtDepthHostCopyDone.event(), scratch.patternEntries.stream()));
+      scratch.patternsAtDepthHostCopyPending = true;
+
+      // Diagnostic: full stream sync to confirm if this is a stream ordering issue
+      cudaCheckError(cudaStreamSynchronize(scratch.patternEntries.stream()));
 
       const uint32_t* recursiveBitsForLabel = (currentDepth > 0) ? batchView.recursiveMatchBits : nullptr;
 

@@ -124,12 +124,12 @@ class BatchResultsDevice {
    * @param maxTargetAtoms Max atoms per target (stride for recursiveMatchBits)
    * @param numBuffersPerBlock Overflow buffers per block (2 for GSI, 1 for WUS)
    */
-  void allocateBatch(int                     batchSize,
-                     const std::vector<int>& batchPairMatchStarts,
-                     int                     totalBatchMatchIndices,
-                     int                     numQueries,
-                     int                     maxTargetAtoms,
-                     int                     numBuffersPerBlock);
+  void allocateBatch(int         batchSize,
+                     const int*  batchPairMatchStarts,
+                     int         totalBatchMatchIndices,
+                     int         numQueries,
+                     int         maxTargetAtoms,
+                     int         numBuffersPerBlock);
 
   /**
    * @brief Get a view suitable for passing to CUDA kernels.
@@ -262,8 +262,13 @@ struct RecursiveScratchBuffers {
   AsyncDeviceVector<PartialMatch>        overflow;
   AsyncDeviceVector<uint32_t>            labelMatrixBuffer;
   AsyncDeviceVector<uint32_t>            intermediateBits;  ///< Child pattern results for nested recursion
+  PinnedHostVector<BatchedPatternEntry>  patternsAtDepthHost;  ///< Pinned buffer for H2D transfers
+  ScopedCudaEvent                        patternsAtDepthHostCopyDone;  ///< Guards reuse of patternsAtDepthHost
+  bool                                   patternsAtDepthHostCopyPending = false;
 
-  explicit RecursiveScratchBuffers(cudaStream_t stream) : patternEntries(), overflow(), labelMatrixBuffer(), intermediateBits() {
+  explicit RecursiveScratchBuffers(cudaStream_t stream) 
+      : patternEntries(), overflow(), labelMatrixBuffer(), intermediateBits(), patternsAtDepthHost(),
+        patternsAtDepthHostCopyDone(), patternsAtDepthHostCopyPending(false) {
     patternEntries.setStream(stream);
     overflow.setStream(stream);
     labelMatrixBuffer.setStream(stream);
@@ -367,6 +372,9 @@ struct TwoStreamPipelineContext {
   /// Host-side schedule: pairs to match after each depth level completes
   std::array<std::vector<int>, kMaxRecursionDepth + 1> matchPairsHost;
 
+  /// Temporary pinned buffers for H2D transfers (reused per depth)
+  std::array<PinnedHostVector<int>, kMaxRecursionDepth + 1> matchGlobalPairIndicesHost;
+
   int maxDepthInBatch = 0;
 
   /**
@@ -374,8 +382,10 @@ struct TwoStreamPipelineContext {
    *
    * The recursive stream gets high priority (lower numerical value),
    * match streams get low priority (higher numerical value).
+   * 
+   * @param workerIdx Worker thread index for unique stream naming
    */
-  TwoStreamPipelineContext();
+  explicit TwoStreamPipelineContext(int workerIdx = 0);
 };
 
 /**

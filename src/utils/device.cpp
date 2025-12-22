@@ -20,6 +20,7 @@
 #include <cuda_runtime.h>
 
 #include "cuda_error_check.h"
+#include "nvtx.h"
 
 namespace nvMolKit {
 
@@ -45,8 +46,11 @@ size_t getDeviceFreeMemory() {
   return free;
 }
 
-ScopedStream::ScopedStream() {
+ScopedStream::ScopedStream(const char* name) {
   cudaCheckError(cudaStreamCreateWithFlags(&original_stream_, cudaStreamNonBlocking));
+  if (name != nullptr) {
+    nvtxNameCudaStreamA(original_stream_, name);
+  }
 }
 
 ScopedStream::~ScopedStream() noexcept {
@@ -61,13 +65,16 @@ ScopedStream::ScopedStream(ScopedStream&& other) noexcept : original_stream_(oth
   other.original_stream_ = nullptr;
 }
 
-ScopedStreamWithPriority::ScopedStreamWithPriority(int priority) {
+ScopedStreamWithPriority::ScopedStreamWithPriority(int priority, const char* name) {
   int leastPriority    = 0;
   int greatestPriority = 0;
   cudaCheckError(cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority));
 
   const int clampedPriority = std::max(greatestPriority, std::min(leastPriority, priority));
   cudaCheckError(cudaStreamCreateWithPriority(&stream_, cudaStreamNonBlocking, clampedPriority));
+  if (name != nullptr) {
+    nvtxNameCudaStreamA(stream_, name);
+  }
 }
 
 ScopedStreamWithPriority::~ScopedStreamWithPriority() noexcept {
