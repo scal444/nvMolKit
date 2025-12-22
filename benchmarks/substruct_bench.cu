@@ -17,7 +17,6 @@
 #include <GraphMol/ROMol.h>
 #include <GraphMol/SmilesParse/SmilesParse.h>
 #include <GraphMol/Substruct/SubstructMatch.h>
-#include <nanobench.h>
 
 #include <algorithm>
 #include <cctype>
@@ -28,6 +27,7 @@
 #include <string>
 #include <vector>
 
+#include "benchmark_utils.h"
 #include "cuda_error_check.h"
 #include "device.h"
 #include "substruct/substructure_search.cuh"
@@ -134,23 +134,28 @@ void buildBatches(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
  */
 void benchRDKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
                 const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols,
-                int&                                              totalMatches) {
-  std::string benchName = "RDKit SubstructMatch, targets=" + std::to_string(targetMols.size()) +
-                          ", queries=" + std::to_string(queryMols.size());
-
+                int&                                              totalMatches,
+                BenchUtils::TimingResult&                         timingOut) {
   totalMatches = 0;
 
-  ankerl::nanobench::Bench().epochIterations(1).epochs(1).run(benchName, [&]() {
-    RDKit::SubstructMatchParameters params;
-    params.uniquify = false;
+  timingOut = BenchUtils::timeIt(
+    [&]() {
+      RDKit::SubstructMatchParameters params;
+      params.uniquify = false;
+      int              localMatches = 0;
 
-    for (const auto& target : targetMols) {
-      for (const auto& query : queryMols) {
-        auto matches = RDKit::SubstructMatch(*target, *query, params);
-        totalMatches += static_cast<int>(matches.size());
+      for (const auto& target : targetMols) {
+        for (const auto& query : queryMols) {
+          auto matches = RDKit::SubstructMatch(*target, *query, params);
+          localMatches += static_cast<int>(matches.size());
+        }
       }
-    }
-  });
+      totalMatches = localMatches;
+    },
+    3, 1);
+
+  std::cout << "RDKit SubstructMatch, targets=" << targetMols.size() << ", queries=" << queryMols.size()
+            << ": " << timingOut.avgMs << " ms (±" << timingOut.stdMs << " ms)\n";
 }
 
 /**
@@ -160,11 +165,9 @@ void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
                    const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols,
                    SubstructAlgorithm                                algorithm,
                    int&                                              totalMatches,
-                   SubstructMatchResultsHost&                        resultsOut) {
-  std::string algoStr   = algorithmName(algorithm);
-  std::string benchName = "nvMolKit SubstructMatch (" + algoStr +
-                          "), targets=" + std::to_string(targetMols.size()) +
-                          ", queries=" + std::to_string(queryMols.size());
+                   SubstructMatchResultsHost&                        resultsOut,
+                   BenchUtils::TimingResult&                         timingOut) {
+  std::string algoStr = algorithmName(algorithm);
 
   ScopedStream stream;
 
@@ -177,15 +180,21 @@ void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  ankerl::nanobench::Bench().epochIterations(1).epochs(1).run(benchName, [&]() {
-    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                        resultsOut, algorithm, stream.stream());
-  });
+  timingOut = BenchUtils::timeIt(
+    [&]() {
+      getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost, resultsOut, algorithm,
+                          stream.stream());
+    },
+    3, 1);
 
   totalMatches = 0;
   for (int count : resultsOut.matchCounts) {
     totalMatches += count;
   }
+
+  std::cout << "nvMolKit SubstructMatch (" << algoStr << "), targets=" << targetMols.size()
+            << ", queries=" << queryMols.size() << ": " << timingOut.avgMs << " ms (±" << timingOut.stdMs
+            << " ms)\n";
 }
 
 bool parseBoolArg(const std::string& arg) {
@@ -370,6 +379,21 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
+  if (static_cast<int>(targetMols.size()) < numTargets) {
+    std::cerr << "Error: Requested " << numTargets << " targets but only " << targetMols.size()
+              << " valid targets available in file\n";
+    return 1;
+  }
+
+  if (static_cast<int>(queryMols.size()) < numQueries) {
+    std::cout << "Note: Requested " << numQueries << " queries but only " << queryMols.size()
+              << " available. Duplicating to reach " << numQueries << " queries.\n";
+    const size_t originalSize = queryMols.size();
+    for (int i = static_cast<int>(originalSize); i < numQueries; ++i) {
+      queryMols.push_back(std::make_unique<RDKit::ROMol>(*queryMols[i % originalSize]));
+    }
+  }
+
   std::cout << "Parsed " << targetMols.size() << " targets and " << queryMols.size()
             << " queries\n\n";
 
@@ -383,10 +407,12 @@ int main(int argc, char* argv[]) {
 
     int                       warmupMatches;
     SubstructMatchResultsHost warmupResults;
-    benchNvMolKit(warmupTargets, warmupQueries, algorithm, warmupMatches, warmupResults);
+    BenchUtils::TimingResult  warmupTiming;
+    benchNvMolKit(warmupTargets, warmupQueries, algorithm, warmupMatches, warmupResults, warmupTiming);
 
     if (doRdkit) {
-      benchRDKit(warmupTargets, warmupQueries, warmupMatches);
+      BenchUtils::TimingResult rdkitWarmupTiming;
+      benchRDKit(warmupTargets, warmupQueries, warmupMatches, rdkitWarmupTiming);
     }
 
     std::cout << "Warmed up\n\n";
@@ -394,12 +420,15 @@ int main(int argc, char* argv[]) {
 
   int                       nvmolkitMatches = 0;
   SubstructMatchResultsHost nvmolkitResults;
-  benchNvMolKit(targetMols, queryMols, algorithm, nvmolkitMatches, nvmolkitResults);
+  BenchUtils::TimingResult  nvmolkitTiming;
+  benchNvMolKit(targetMols, queryMols, algorithm, nvmolkitMatches, nvmolkitResults, nvmolkitTiming);
   std::cout << "nvMolKit total matches: " << nvmolkitMatches << "\n";
 
+  int                      rdkitMatches = 0;
+  BenchUtils::TimingResult rdkitTiming{0.0, 0.0};
+
   if (doRdkit) {
-    int rdkitMatches = 0;
-    benchRDKit(targetMols, queryMols, rdkitMatches);
+    benchRDKit(targetMols, queryMols, rdkitMatches, rdkitTiming);
     std::cout << "RDKit total matches: " << rdkitMatches << "\n";
 
     if (nvmolkitMatches == rdkitMatches) {
@@ -407,6 +436,8 @@ int main(int argc, char* argv[]) {
     } else {
       std::cout << "Match counts DIFFER by " << std::abs(nvmolkitMatches - rdkitMatches) << "\n";
     }
+
+    std::cout << "\nSpeedup: " << (rdkitTiming.avgMs / nvmolkitTiming.avgMs) << "x\n";
   }
 
   if (doValidate) {
@@ -414,6 +445,20 @@ int main(int argc, char* argv[]) {
     auto validation = validateAgainstRDKit(nvmolkitResults, targetMols, queryMols);
     printValidationResult(validation, algorithmName(algorithm));
   }
+
+  std::cout << "\n\nCSV Results:\n";
+  std::cout << "algorithm,num_targets,num_queries,nvmolkit_time_ms,nvmolkit_std_ms";
+  if (doRdkit) {
+    std::cout << ",rdkit_time_ms,rdkit_std_ms";
+  }
+  std::cout << "\n";
+
+  std::cout << algorithmName(algorithm) << "," << targetMols.size() << "," << queryMols.size() << ","
+            << nvmolkitTiming.avgMs << "," << nvmolkitTiming.stdMs;
+  if (doRdkit) {
+    std::cout << "," << rdkitTiming.avgMs << "," << rdkitTiming.stdMs;
+  }
+  std::cout << "\n";
 
   return 0;
 }
