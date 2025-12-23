@@ -53,7 +53,7 @@ using nvMolKit::MoleculesHost;
 using nvMolKit::printValidationResultDetailed;
 using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
-using nvMolKit::SubstructMatchResultsHost;
+using nvMolKit::SubstructSearchResults;
 using nvMolKit::testing::readSmartsFileWithStrings;
 using nvMolKit::testing::readSmilesFileWithStrings;
 using nvMolKit::validateAgainstRDKit;
@@ -151,26 +151,11 @@ void printMatches(const std::string& label, const std::vector<std::vector<int>>&
   }
 }
 
-std::vector<std::vector<int>> extractGpuMatches(const SubstructMatchResultsHost& results,
-                                                int                              targetIdx,
-                                                int                              queryIdx,
-                                                int                              numQueryAtoms) {
-  const int pairIdx       = results.pairIndex(targetIdx, queryIdx);
-  const int reportedCount = results.reportedCounts[pairIdx];
-  const int startOffset   = results.pairMatchStarts[pairIdx];
-
-  std::vector<std::vector<int>> gpuMatches;
-  gpuMatches.reserve(reportedCount);
-
-  for (int m = 0; m < reportedCount; ++m) {
-    std::vector<int> mapping(numQueryAtoms);
-    for (int a = 0; a < numQueryAtoms; ++a) {
-      mapping[a] = results.matchIndices[startOffset + m * numQueryAtoms + a];
-    }
-    gpuMatches.push_back(std::move(mapping));
-  }
-
-  return gpuMatches;
+std::vector<std::vector<int>> extractGpuMatches(const SubstructSearchResults& results,
+                                                int                           targetIdx,
+                                                int                           queryIdx,
+                                                int /* numQueryAtoms */) {
+  return results.getMatches(targetIdx, queryIdx);
 }
 
 void printSmallestRepro(const char*                                       label,
@@ -179,7 +164,7 @@ void printSmallestRepro(const char*                                       label,
                         const std::vector<std::string>&                   querySmarts,
                         const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
                         const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols,
-                        const SubstructMatchResultsHost&                  gpuResults) {
+                        const SubstructSearchResults&                     gpuResults) {
   std::cout << "  --- " << label << " (t=" << r.t << " q=" << r.q << " sum=" << (r.t + r.q) << ") ---\n";
   std::cout << "  Target[" << r.t << "]: " << targetSmiles[r.t] << "\n";
   std::cout << "  Query[" << r.q << "]:  " << querySmarts[r.q] << "\n";
@@ -199,7 +184,7 @@ void printSmallestRepros(const SmallestRepros&                             repro
                          const std::vector<std::string>&                   querySmarts,
                          const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
                          const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols,
-                         const SubstructMatchResultsHost&                  gpuResults,
+                         const SubstructSearchResults&                     gpuResults,
                          const std::string&                                category) {
   if (!repros.hasAny()) return;
 
@@ -323,23 +308,22 @@ TEST_P(SubstructureIntegrationTest, ChemblVsSmarts) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost, resultsHost, algorithm(),
+  SubstructSearchResults results;
+  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost, results, algorithm(),
                       stream_.stream());
 
-  EXPECT_EQ(resultsHost.numTargets, static_cast<int>(targetMols.size()));
-  EXPECT_EQ(resultsHost.numQueries, static_cast<int>(queryMols.size()));
+  EXPECT_EQ(results.numTargets, static_cast<int>(targetMols.size()));
+  EXPECT_EQ(results.numQueries, static_cast<int>(queryMols.size()));
 
-  const int numTargets = resultsHost.numTargets;
-  const int numQueries = resultsHost.numQueries;
+  const int numTargets = results.numTargets;
+  const int numQueries = results.numQueries;
 
   std::vector<int64_t> totalMatchesPerQuery(numQueries, 0);
   int64_t              grandTotalMatches = 0;
 
   for (int q = 0; q < numQueries; ++q) {
     for (int t = 0; t < numTargets; ++t) {
-      const int pairIdx = t * numQueries + q;
-      totalMatchesPerQuery[q] += resultsHost.matchCounts[pairIdx];
+      totalMatchesPerQuery[q] += results.actualCount(t, q);
     }
     grandTotalMatches += totalMatchesPerQuery[q];
   }
@@ -369,26 +353,26 @@ TEST_P(SubstructureIntegrationTest, ChemblVsSmarts) {
     }
   }
 
-  auto validationResult = validateAgainstRDKit(resultsHost, targetMols, queryMols);
+  auto validationResult = validateAgainstRDKit(results, targetMols, queryMols);
 
   if (!validationResult.allMatch) {
-    printValidationResultDetailed(validationResult, resultsHost, targetMols, queryMols, targetSmiles, querySmarts,
+    printValidationResultDetailed(validationResult, results, targetMols, queryMols, targetSmiles, querySmarts,
                                   algorithmName(algorithm()));
 
     if (!validationResult.mismatches.empty()) {
       auto repros = findSmallestRepros(
-        validationResult.mismatches,
-        [](const auto& m) { return std::get<0>(m); },
-        [](const auto& m) { return std::get<1>(m); });
-      printSmallestRepros(repros, targetSmiles, querySmarts, targetMols, queryMols, resultsHost, "count mismatch");
+          validationResult.mismatches,
+          [](const auto& m) { return std::get<0>(m); },
+          [](const auto& m) { return std::get<1>(m); });
+      printSmallestRepros(repros, targetSmiles, querySmarts, targetMols, queryMols, results, "count mismatch");
     }
 
     if (!validationResult.mappingMismatches.empty()) {
       auto repros = findSmallestRepros(
-        validationResult.mappingMismatches,
-        [](const auto& m) { return m.first; },
-        [](const auto& m) { return m.second; });
-      printSmallestRepros(repros, targetSmiles, querySmarts, targetMols, queryMols, resultsHost, "mapping mismatch");
+          validationResult.mappingMismatches,
+          [](const auto& m) { return m.first; },
+          [](const auto& m) { return m.second; });
+      printSmallestRepros(repros, targetSmiles, querySmarts, targetMols, queryMols, results, "mapping mismatch");
     }
   }
 

@@ -78,9 +78,9 @@ struct SubstructValidationResult {
  * @return Validation result with mismatch details
  */
 SubstructValidationResult validateAgainstRDKit(
-  const SubstructMatchResultsHost&                  results,
-  const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
-  const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols);
+    const SubstructSearchResults&                     results,
+    const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
+    const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols);
 
 /**
  * @brief Print validation results to stdout.
@@ -102,7 +102,7 @@ void printValidationResult(const SubstructValidationResult& result,
  * @param maxDetails Maximum number of detailed mismatches to print (default 5)
  */
 void printValidationResultDetailed(const SubstructValidationResult&                  result,
-                                   const SubstructMatchResultsHost&                  gpuResults,
+                                   const SubstructSearchResults&                     gpuResults,
                                    const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
                                    const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols,
                                    const std::vector<std::string>&                   targetSmiles,

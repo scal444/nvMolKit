@@ -44,7 +44,7 @@ using nvMolKit::MoleculesHost;
 using nvMolKit::printValidationResult;
 using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
-using nvMolKit::SubstructMatchResultsHost;
+using nvMolKit::SubstructSearchResults;
 using nvMolKit::SubstructValidationResult;
 using nvMolKit::validateAgainstRDKit;
 
@@ -193,7 +193,7 @@ void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
                    int                                               batchSize,
                    int                                               numThreads,
                    int&                                              totalMatches,
-                   SubstructMatchResultsHost&                        resultsOut,
+                   SubstructSearchResults&                           resultsOut,
                    BenchUtils::TimingResult&                         timingOut,
                    int                                               iterations = 3,
                    int                                               warmups    = 1) {
@@ -211,15 +211,17 @@ void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
   queriesDevice.copyFromHost(queriesHost);
 
   timingOut = BenchUtils::timeIt(
-    [&]() {
-      getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost, resultsOut, algorithm,
-                          stream.stream(), batchSize, numThreads);
-    },
-    iterations, warmups);
+      [&]() {
+        getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost, resultsOut, algorithm,
+                            stream.stream(), batchSize, numThreads);
+      },
+      iterations, warmups);
 
   totalMatches = 0;
-  for (int count : resultsOut.matchCounts) {
-    totalMatches += count;
+  for (int t = 0; t < resultsOut.numTargets; ++t) {
+    for (int q = 0; q < resultsOut.numQueries; ++q) {
+      totalMatches += resultsOut.actualCount(t, q);
+    }
   }
 
   std::cout << "nvMolKit SubstructMatch (" << algoStr << "), targets=" << targetMols.size()
@@ -503,9 +505,9 @@ int main(int argc, char* argv[]) {
     warmupTargets.push_back(makeMolFromSmiles("CCO"));
     warmupQueries.push_back(makeMolFromSmarts("C"));
 
-    int                       warmupMatches;
-    SubstructMatchResultsHost warmupResults;
-    BenchUtils::TimingResult  warmupTiming;
+    int                      warmupMatches;
+    SubstructSearchResults   warmupResults;
+    BenchUtils::TimingResult warmupTiming;
     benchNvMolKit(warmupTargets, warmupQueries, algorithm, batchSize, numThreads, warmupMatches, warmupResults, warmupTiming);
 
     if (doRdkit) {
@@ -521,9 +523,9 @@ int main(int argc, char* argv[]) {
   const int benchIterations = doProfile ? 1 : 3;
   const int benchWarmups    = doProfile ? 0 : 1;
 
-  int                       nvmolkitMatches = 0;
-  SubstructMatchResultsHost nvmolkitResults;
-  BenchUtils::TimingResult  nvmolkitTiming;
+  int                      nvmolkitMatches = 0;
+  SubstructSearchResults   nvmolkitResults;
+  BenchUtils::TimingResult nvmolkitTiming;
   benchNvMolKit(targetMols, queryMols, algorithm, batchSize, numThreads, nvmolkitMatches, nvmolkitResults, nvmolkitTiming, benchIterations, benchWarmups);
   std::cout << "nvMolKit total matches: " << nvmolkitMatches << "\n";
 

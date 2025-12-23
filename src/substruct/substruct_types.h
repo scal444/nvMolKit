@@ -31,65 +31,21 @@ enum class SubstructAlgorithm {
 };
 
 /**
- * @brief Host-side results from batch substructure matching (CSR format).
+ * @brief Accumulated results from substructure matching.
  *
- * For M targets x N queries (all-to-all matching), stores:
- * - Match counts for each pair (actual count, may exceed buffer)
- * - Reported counts for each pair (clamped to buffer capacity)
- * - Per-pair offsets into the flattened match index array
- * - Flattened match mappings (query atom -> target atom indices)
- */
-struct SubstructMatchResultsHost {
-  int numTargets = 0;
-  int numQueries = 0;
-
-  /// Actual match count per (target, query) pair [numTargets * numQueries]
-  /// May exceed buffer capacity - use for detecting overflow
-  std::vector<int> matchCounts;
-
-  /// Reported (stored) match count per pair [numTargets * numQueries]
-  /// Clamped to maxMatchesPerPair
-  std::vector<int> reportedCounts;
-
-  /// Offset into matchIndices for each pair [numTargets * numQueries + 1]
-  /// matchIndices for pair i start at pairMatchStarts[i]
-  std::vector<int> pairMatchStarts;
-
-  /// Flattened match mappings
-  /// Each match is numQueryAtoms consecutive int16_t values
-  /// matchIndices[j] = target atom index that query atom (j % numQueryAtoms) maps to
-  std::vector<int16_t> matchIndices;
-
-  /// Maximum matches stored per pair (used to detect overflow)
-  int maxMatchesPerPair = 0;
-
-  /**
-   * @brief Get pair index for (targetIdx, queryIdx).
-   */
-  [[nodiscard]] int pairIndex(int targetIdx, int queryIdx) const { return targetIdx * numQueries + queryIdx; }
-
-  /**
-   * @brief Check if pair had more matches than could be stored.
-   */
-  [[nodiscard]] bool hasOverflow(int targetIdx, int queryIdx) const {
-    const int idx = pairIndex(targetIdx, queryIdx);
-    return matchCounts[idx] > reportedCounts[idx];
-  }
-};
-
-/**
- * @brief Simple accumulated results from substructure matching.
- *
- * Easy-to-use nested vector format: matches[targetIdx][queryIdx][matchIdx]
+ * Dynamically allocated nested vector format: matches[targetIdx][queryIdx][matchIdx]
  * is a vector of target atom indices for that match.
+ *
+ * Memory is allocated proportional to actual matches found, avoiding the
+ * worst-case pre-allocation required by CSR formats.
  */
 struct SubstructSearchResults {
   /// matches[t][q] = vector of matches for target t against query q
   /// Each match is a vector<int> of target atom indices (one per query atom)
   std::vector<std::vector<std::vector<std::vector<int>>>> matches;
 
-  /// overflowed[t][q] = true if more matches exist than were stored
-  std::vector<std::vector<uint8_t>> overflowed;
+  /// actualMatchCounts[t][q] = total matches found (may exceed stored if capped)
+  std::vector<std::vector<int>> actualMatchCounts;
 
   int numTargets = 0;
   int numQueries = 0;
@@ -98,15 +54,33 @@ struct SubstructSearchResults {
     numTargets = nTargets;
     numQueries = nQueries;
     matches.assign(nTargets, std::vector<std::vector<std::vector<int>>>(nQueries));
-    overflowed.assign(nTargets, std::vector<uint8_t>(nQueries, 0));
+    actualMatchCounts.assign(nTargets, std::vector<int>(nQueries, 0));
   }
 
+  /// Compute flat pair index (for compatibility with CSR-style access patterns)
+  [[nodiscard]] int pairIndex(int targetIdx, int queryIdx) const {
+    return targetIdx * numQueries + queryIdx;
+  }
+
+  /// Check if pair had more matches than could be stored
   [[nodiscard]] bool hasOverflow(int targetIdx, int queryIdx) const {
-    return overflowed[targetIdx][queryIdx] != 0;
+    return actualMatchCounts[targetIdx][queryIdx] >
+           static_cast<int>(matches[targetIdx][queryIdx].size());
   }
 
-  [[nodiscard]] size_t matchCount(int targetIdx, int queryIdx) const {
-    return matches[targetIdx][queryIdx].size();
+  /// Number of matches stored for this pair
+  [[nodiscard]] int matchCount(int targetIdx, int queryIdx) const {
+    return static_cast<int>(matches[targetIdx][queryIdx].size());
+  }
+
+  /// Actual number of matches found (may exceed stored count)
+  [[nodiscard]] int actualCount(int targetIdx, int queryIdx) const {
+    return actualMatchCounts[targetIdx][queryIdx];
+  }
+
+  /// Get the matches for a (target, query) pair
+  [[nodiscard]] const std::vector<std::vector<int>>& getMatches(int targetIdx, int queryIdx) const {
+    return matches[targetIdx][queryIdx];
   }
 };
 

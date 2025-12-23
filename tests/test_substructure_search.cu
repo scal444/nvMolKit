@@ -36,7 +36,7 @@ using nvMolKit::MoleculesDevice;
 using nvMolKit::MoleculesHost;
 using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
-using nvMolKit::SubstructMatchResultsHost;
+using nvMolKit::SubstructSearchResults;
 
 namespace {
 
@@ -92,26 +92,11 @@ class SubstructureSearchTest : public ::testing::TestWithParam<SubstructAlgorith
   /**
    * @brief Extract GPU matches for a (target, query) pair from results.
    */
-  static std::vector<std::vector<int>> extractGpuMatches(const SubstructMatchResultsHost& results,
-                                                         int                              targetIdx,
-                                                         int                              queryIdx,
-                                                         int                              numQueryAtoms) {
-    const int pairIdx       = results.pairIndex(targetIdx, queryIdx);
-    const int reportedCount = results.reportedCounts[pairIdx];
-    const int startOffset   = results.pairMatchStarts[pairIdx];
-
-    std::vector<std::vector<int>> gpuMatches;
-    gpuMatches.reserve(reportedCount);
-
-    for (int m = 0; m < reportedCount; ++m) {
-      std::vector<int> mapping(numQueryAtoms);
-      for (int a = 0; a < numQueryAtoms; ++a) {
-        mapping[a] = results.matchIndices[startOffset + m * numQueryAtoms + a];
-      }
-      gpuMatches.push_back(std::move(mapping));
-    }
-
-    return gpuMatches;
+  static std::vector<std::vector<int>> extractGpuMatches(const SubstructSearchResults& results,
+                                                         int                           targetIdx,
+                                                         int                           queryIdx,
+                                                         int /* numQueryAtoms */) {
+    return results.getMatches(targetIdx, queryIdx);
   }
 
   /**
@@ -134,30 +119,29 @@ class SubstructureSearchTest : public ::testing::TestWithParam<SubstructAlgorith
    *
    * Checks both match count AND actual atom mappings.
    */
-  void expectMatchesRDKit(const SubstructMatchResultsHost&   results,
-                          const RDKit::ROMol&                target,
-                          const RDKit::ROMol&                query,
-                          int                                targetIdx,
-                          int                                queryIdx,
-                          const std::string&                 description = "") {
+  void expectMatchesRDKit(const SubstructSearchResults& results,
+                          const RDKit::ROMol&           target,
+                          const RDKit::ROMol&           query,
+                          int                           targetIdx,
+                          int                           queryIdx,
+                          const std::string&            description = "") {
     const auto rdkitMatches    = getRDKitSubstructMatches(target, query, false);
-    const int  pairIdx         = results.pairIndex(targetIdx, queryIdx);
-    const int  gpuMatchCount   = results.matchCounts[pairIdx];
+    const int  gpuMatchCount   = results.actualCount(targetIdx, queryIdx);
     const int  rdkitMatchCount = static_cast<int>(rdkitMatches.size());
 
     std::string context = description.empty() ? "" : " (" + description + ")";
 
     EXPECT_EQ(gpuMatchCount, rdkitMatchCount)
-      << "Match count mismatch" << context << " using " << algorithmName(algorithm())
-      << ": GPU=" << gpuMatchCount << ", RDKit=" << rdkitMatchCount;
+        << "Match count mismatch" << context << " using " << algorithmName(algorithm())
+        << ": GPU=" << gpuMatchCount << ", RDKit=" << rdkitMatchCount;
 
     if (gpuMatchCount == rdkitMatchCount && gpuMatchCount > 0 && !results.hasOverflow(targetIdx, queryIdx)) {
       const int  numQueryAtoms = static_cast<int>(query.getNumAtoms());
       const auto gpuMatches    = extractGpuMatches(results, targetIdx, queryIdx, numQueryAtoms);
 
       EXPECT_TRUE(matchSetsEqual(gpuMatches, rdkitMatches))
-        << "Match indices mismatch" << context << " using " << algorithmName(algorithm())
-        << ": counts match (" << gpuMatchCount << ") but atom mappings differ";
+          << "Match indices mismatch" << context << " using " << algorithmName(algorithm())
+          << ": counts match (" << gpuMatchCount << ") but atom mappings differ";
     }
   }
 
@@ -170,7 +154,7 @@ class SubstructureSearchTest : public ::testing::TestWithParam<SubstructAlgorith
    * @param expectMatch If true, expect tests to pass; if false, expect current failures
    * @param allowOverflow If false, assert that no pairs overflowed
    */
-  void compareWithRDKit(const SubstructMatchResultsHost&                  results,
+  void compareWithRDKit(const SubstructSearchResults&                     results,
                         const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
                         const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols,
                         bool                                              expectMatch   = false,
@@ -179,21 +163,20 @@ class SubstructureSearchTest : public ::testing::TestWithParam<SubstructAlgorith
       for (int q = 0; q < results.numQueries; ++q) {
         // Use uniquify=false to match our non-uniquifying GPU algorithm
         const auto rdkitMatches    = getRDKitSubstructMatches(*targetMols[t], *queryMols[q], false);
-        const int  pairIdx         = results.pairIndex(t, q);
-        const int  gpuMatchCount   = results.matchCounts[pairIdx];
+        const int  gpuMatchCount   = results.actualCount(t, q);
         const int  rdkitMatchCount = static_cast<int>(rdkitMatches.size());
 
         if (!allowOverflow) {
           EXPECT_FALSE(results.hasOverflow(t, q))
-            << "Unexpected overflow for target " << t << ", query " << q << " using algorithm "
-            << algorithmName(algorithm()) << ": actual=" << gpuMatchCount
-            << ", reported=" << results.reportedCounts[pairIdx];
+              << "Unexpected overflow for target " << t << ", query " << q << " using algorithm "
+              << algorithmName(algorithm()) << ": actual=" << gpuMatchCount
+              << ", reported=" << results.matchCount(t, q);
         }
 
         if (expectMatch) {
           EXPECT_EQ(gpuMatchCount, rdkitMatchCount)
-            << "Match count mismatch for target " << t << ", query " << q << " using algorithm "
-            << algorithmName(algorithm()) << ": GPU=" << gpuMatchCount << ", RDKit=" << rdkitMatchCount;
+              << "Match count mismatch for target " << t << ", query " << q << " using algorithm "
+              << algorithmName(algorithm()) << ": GPU=" << gpuMatchCount << ", RDKit=" << rdkitMatchCount;
 
           // Also verify actual match indices if counts match and no overflow
           if (gpuMatchCount == rdkitMatchCount && gpuMatchCount > 0 && !results.hasOverflow(t, q)) {
@@ -201,9 +184,9 @@ class SubstructureSearchTest : public ::testing::TestWithParam<SubstructAlgorith
             const auto gpuMatches    = extractGpuMatches(results, t, q, numQueryAtoms);
 
             EXPECT_TRUE(matchSetsEqual(gpuMatches, rdkitMatches))
-              << "Match indices mismatch for target " << t << ", query " << q << " using algorithm "
-              << algorithmName(algorithm()) << ": counts match (" << gpuMatchCount
-              << ") but atom mappings differ";
+                << "Match indices mismatch for target " << t << ", query " << q << " using algorithm "
+                << algorithmName(algorithm()) << ": counts match (" << gpuMatchCount
+                << ") but atom mappings differ";
           }
         }
       }
@@ -238,15 +221,15 @@ TEST_P(SubstructureSearchTest, SingleTargetSingleQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  EXPECT_EQ(resultsHost.numTargets, 1);
-  EXPECT_EQ(resultsHost.numQueries, 1);
+  EXPECT_EQ(results.numTargets, 1);
+  EXPECT_EQ(results.numQueries, 1);
 
   // Compare with RDKit - expect match once algorithms are working
-  compareWithRDKit(resultsHost, targetMols, queryMols, true);
+  compareWithRDKit(results, targetMols, queryMols, true);
 }
 
 TEST_P(SubstructureSearchTest, MultipleTargetsSingleQuery) {
@@ -262,14 +245,14 @@ TEST_P(SubstructureSearchTest, MultipleTargetsSingleQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  EXPECT_EQ(resultsHost.numTargets, 3);
-  EXPECT_EQ(resultsHost.numQueries, 1);
+  EXPECT_EQ(results.numTargets, 3);
+  EXPECT_EQ(results.numQueries, 1);
 
-  compareWithRDKit(resultsHost, targetMols, queryMols, true);
+  compareWithRDKit(results, targetMols, queryMols, true);
 }
 
 TEST_P(SubstructureSearchTest, SingleTargetMultipleQueries) {
@@ -285,14 +268,14 @@ TEST_P(SubstructureSearchTest, SingleTargetMultipleQueries) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  EXPECT_EQ(resultsHost.numTargets, 1);
-  EXPECT_EQ(resultsHost.numQueries, 3);
+  EXPECT_EQ(results.numTargets, 1);
+  EXPECT_EQ(results.numQueries, 3);
 
-  compareWithRDKit(resultsHost, targetMols, queryMols, true);
+  compareWithRDKit(results, targetMols, queryMols, true);
 }
 
 TEST_P(SubstructureSearchTest, BatchAllToAll) {
@@ -317,15 +300,14 @@ TEST_P(SubstructureSearchTest, BatchAllToAll) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  EXPECT_EQ(resultsHost.numTargets, 4);
-  EXPECT_EQ(resultsHost.numQueries, 4);
-  EXPECT_EQ(static_cast<int>(resultsHost.matchCounts.size()), 16);
+  EXPECT_EQ(results.numTargets, 4);
+  EXPECT_EQ(results.numQueries, 4);
 
-  compareWithRDKit(resultsHost, targetMols, queryMols, true);
+  compareWithRDKit(results, targetMols, queryMols, true);
 }
 
 // =============================================================================
@@ -346,11 +328,11 @@ TEST_P(SubstructureSearchTest, NoMatchPossible) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "CCCC with N query");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "CCCC with N query");
 }
 
 TEST_P(SubstructureSearchTest, AromaticVsAliphatic) {
@@ -367,11 +349,11 @@ TEST_P(SubstructureSearchTest, AromaticVsAliphatic) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "benzene with aliphatic C query");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "benzene with aliphatic C query");
 }
 
 TEST_P(SubstructureSearchTest, LargerMolecule) {
@@ -388,17 +370,17 @@ TEST_P(SubstructureSearchTest, LargerMolecule) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  EXPECT_EQ(resultsHost.numTargets, 1);
-  EXPECT_EQ(resultsHost.numQueries, 3);
+  EXPECT_EQ(results.numTargets, 1);
+  EXPECT_EQ(results.numQueries, 3);
 
-  compareWithRDKit(resultsHost, targetMols, queryMols, true);
+  compareWithRDKit(results, targetMols, queryMols, true);
 }
 
-TEST_P(SubstructureSearchTest, BufferAllocationCorrect) {
+TEST_P(SubstructureSearchTest, DifferentMoleculeSizes) {
   MoleculesHost                              targetsHost;
   MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
@@ -418,19 +400,22 @@ TEST_P(SubstructureSearchTest, BufferAllocationCorrect) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  // Verify pairMatchStarts offsets are correctly computed
-  // Both queries have 1 atom each (C and N)
-  EXPECT_EQ(resultsHost.pairMatchStarts[0], 0);
-  EXPECT_EQ(resultsHost.pairMatchStarts[1], 1);   // 0 + 1*1   (target 0, query 0)
-  EXPECT_EQ(resultsHost.pairMatchStarts[2], 2);   // 1 + 1*1   (target 0, query 1)
-  EXPECT_EQ(resultsHost.pairMatchStarts[3], 5);   // 2 + 3*1   (target 1, query 0)
-  EXPECT_EQ(resultsHost.pairMatchStarts[4], 8);   // 5 + 3*1   (target 1, query 1)
-  EXPECT_EQ(resultsHost.pairMatchStarts[5], 13);  // 8 + 5*1   (target 2, query 0)
-  EXPECT_EQ(resultsHost.pairMatchStarts[6], 18);  // 13 + 5*1  (target 2, query 1)
+  // Verify match counts are correct
+  // C (query) matches: 1 in C, 3 in CCC, 5 in CCCCC
+  EXPECT_EQ(results.matchCount(0, 0), 1);
+  EXPECT_EQ(results.matchCount(1, 0), 3);
+  EXPECT_EQ(results.matchCount(2, 0), 5);
+
+  // N (query) matches: 0 in all targets
+  EXPECT_EQ(results.matchCount(0, 1), 0);
+  EXPECT_EQ(results.matchCount(1, 1), 0);
+  EXPECT_EQ(results.matchCount(2, 1), 0);
+
+  compareWithRDKit(results, targetMols, queryMols, true);
 }
 
 TEST_P(SubstructureSearchTest, MultiAtomQuery) {
@@ -454,11 +439,11 @@ TEST_P(SubstructureSearchTest, MultiAtomQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "CCO with CC query");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "CCO with CC query");
 }
 
 TEST_P(SubstructureSearchTest, ThreeAtomQuery) {
@@ -481,11 +466,11 @@ TEST_P(SubstructureSearchTest, ThreeAtomQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "CCOCC with COC query");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "CCOCC with COC query");
 }
 
 TEST_P(SubstructureSearchTest, ExpectedOverflow) {
@@ -503,21 +488,18 @@ TEST_P(SubstructureSearchTest, ExpectedOverflow) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   // RDKit returns 10 non-unique matches
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
   EXPECT_EQ(rdkitMatches.size(), 10u);
 
   // GPU should report actual count of 10, but only store 6
-  EXPECT_TRUE(resultsHost.hasOverflow(0, 0))
-    << "Expected overflow for hexane/CC pair";
-  EXPECT_EQ(resultsHost.matchCounts[0], 10)
-    << "GPU should count all 10 matches";
-  EXPECT_EQ(resultsHost.reportedCounts[0], 6)
-    << "GPU should only store 6 matches (buffer limit)";
+  EXPECT_TRUE(results.hasOverflow(0, 0)) << "Expected overflow for hexane/CC pair";
+  EXPECT_EQ(results.actualCount(0, 0), 10) << "GPU should count all 10 matches";
+  EXPECT_EQ(results.matchCount(0, 0), 6) << "GPU should only store 6 matches (buffer limit)";
 }
 
 // =============================================================================
@@ -559,11 +541,11 @@ TEST_P(SubstructureSearchTest, OrQueryMatchesBothTypes) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N] in CCN");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[C,N] in CCN");
 }
 
 TEST_P(SubstructureSearchTest, OrQuerySelectiveMatch) {
@@ -581,11 +563,11 @@ TEST_P(SubstructureSearchTest, OrQuerySelectiveMatch) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[N,O] in CCO");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[N,O] in CCO");
 }
 
 TEST_P(SubstructureSearchTest, NotQueryExcludesAtom) {
@@ -603,11 +585,11 @@ TEST_P(SubstructureSearchTest, NotQueryExcludesAtom) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[!C] in CCO");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[!C] in CCO");
 }
 
 TEST_P(SubstructureSearchTest, NotQueryMatchesMultiple) {
@@ -625,11 +607,11 @@ TEST_P(SubstructureSearchTest, NotQueryMatchesMultiple) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[!C] in CCNO");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[!C] in CCNO");
 }
 
 TEST_P(SubstructureSearchTest, MultiAtomOrQuery) {
@@ -647,11 +629,11 @@ TEST_P(SubstructureSearchTest, MultiAtomOrQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N][C,N] in CCN");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[C,N][C,N] in CCN");
 }
 
 TEST_P(SubstructureSearchTest, ThreeWayOrQuery) {
@@ -669,11 +651,11 @@ TEST_P(SubstructureSearchTest, ThreeWayOrQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N,O] in CCNO");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[C,N,O] in CCNO");
 }
 
 TEST_P(SubstructureSearchTest, NestedAndOrQuery) {
@@ -693,13 +675,13 @@ TEST_P(SubstructureSearchTest, NestedAndOrQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N;!R1] in CCN");
-  expectMatchesRDKit(resultsHost, *targetMols[1], *queryMols[0], 1, 0, "[C,N;!R1] in C1CC1N");
-  expectMatchesRDKit(resultsHost, *targetMols[2], *queryMols[0], 2, 0, "[C,N;!R1] in C1CCC1");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[C,N;!R1] in CCN");
+  expectMatchesRDKit(results, *targetMols[1], *queryMols[0], 1, 0, "[C,N;!R1] in C1CC1N");
+  expectMatchesRDKit(results, *targetMols[2], *queryMols[0], 2, 0, "[C,N;!R1] in C1CCC1");
 }
 
 TEST_P(SubstructureSearchTest, DeepNestedOrAndOrQuery) {
@@ -718,12 +700,12 @@ TEST_P(SubstructureSearchTest, DeepNestedOrAndOrQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N;R1,O] in C1CCCC1");
-  expectMatchesRDKit(resultsHost, *targetMols[1], *queryMols[0], 1, 0, "[C,N;R1,O] in CCCCO");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[C,N;R1,O] in C1CCCC1");
+  expectMatchesRDKit(results, *targetMols[1], *queryMols[0], 1, 0, "[C,N;R1,O] in CCCCO");
 }
 
 TEST_P(SubstructureSearchTest, MultipleNotWithAndQuery) {
@@ -741,11 +723,11 @@ TEST_P(SubstructureSearchTest, MultipleNotWithAndQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[!C;!N] in CCNO");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[!C;!N] in CCNO");
 }
 
 TEST_P(SubstructureSearchTest, NotWithOrQuery) {
@@ -766,11 +748,11 @@ TEST_P(SubstructureSearchTest, NotWithOrQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[!C,!N] in CCNO");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[!C,!N] in CCNO");
 }
 
 TEST_P(SubstructureSearchTest, SimpleAndNotQuery) {
@@ -788,11 +770,11 @@ TEST_P(SubstructureSearchTest, SimpleAndNotQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C;!R1] in C1CC1CCN");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[C;!R1] in C1CC1CCN");
 }
 
 TEST_P(SubstructureSearchTest, BondedOrAtomQuery) {
@@ -813,12 +795,12 @@ TEST_P(SubstructureSearchTest, BondedOrAtomQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N]-[O,S] in CCO");
-  expectMatchesRDKit(resultsHost, *targetMols[1], *queryMols[0], 1, 0, "[C,N]-[O,S] in CCS");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[C,N]-[O,S] in CCO");
+  expectMatchesRDKit(results, *targetMols[1], *queryMols[0], 1, 0, "[C,N]-[O,S] in CCS");
 }
 
 TEST_P(SubstructureSearchTest, MultiAtomMixedBooleanQuery) {
@@ -838,12 +820,12 @@ TEST_P(SubstructureSearchTest, MultiAtomMixedBooleanQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N]-[!O] in CCO");
-  expectMatchesRDKit(resultsHost, *targetMols[1], *queryMols[0], 1, 0, "[C,N]-[!O] in CCN");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[C,N]-[!O] in CCO");
+  expectMatchesRDKit(results, *targetMols[1], *queryMols[0], 1, 0, "[C,N]-[!O] in CCN");
 }
 
 TEST_P(SubstructureSearchTest, ThreeAtomNestedBooleanQuery) {
@@ -861,11 +843,11 @@ TEST_P(SubstructureSearchTest, ThreeAtomNestedBooleanQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[C,N]-[!O]-[C,O] in CCCCO");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[C,N]-[!O]-[C,O] in CCCCO");
 }
 
 TEST_P(SubstructureSearchTest, AromaticOrQuery) {
@@ -883,11 +865,11 @@ TEST_P(SubstructureSearchTest, AromaticOrQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[c,n] in pyridine");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[c,n] in pyridine");
 }
 
 TEST_P(SubstructureSearchTest, AromaticNotQuery) {
@@ -905,11 +887,11 @@ TEST_P(SubstructureSearchTest, AromaticNotQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[!n] in pyridine");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[!n] in pyridine");
 }
 
 TEST_P(SubstructureSearchTest, AromaticRingPatternWithOr) {
@@ -928,18 +910,18 @@ TEST_P(SubstructureSearchTest, AromaticRingPatternWithOr) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   // Benzene should match (symmetric, many automorphisms)
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for c1[c,n]cccc1 in benzene using " << algorithmName(algorithm());
 
   // Pyridine should match
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for c1[c,n]cccc1 in pyridine using " << algorithmName(algorithm());
 }
 
@@ -959,18 +941,18 @@ TEST_P(SubstructureSearchTest, AnyRingMembershipQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   // Cyclobutane with methyl: 4 ring atoms match [R]
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [R] in C1CCC1C using " << algorithmName(algorithm());
 
   // Pentane: no ring atoms, should get 0 matches
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [R] in CCCCC using " << algorithmName(algorithm());
 }
 
@@ -990,18 +972,18 @@ TEST_P(SubstructureSearchTest, AnyRingSizeQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   // Benzene: 6 ring atoms match [r]
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [r] in benzene using " << algorithmName(algorithm());
 
   // Pentane: no ring atoms, should get 0 matches
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [r] in CCCCC using " << algorithmName(algorithm());
 }
 
@@ -1021,18 +1003,18 @@ TEST_P(SubstructureSearchTest, AnyRingCombinedWithAtomType) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   // Cyclobutane with methyl: 4 aliphatic ring carbons match [C;R]
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [C;R] in C1CCC1C using " << algorithmName(algorithm());
 
   // Benzene: aromatic carbons don't match aliphatic C
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [C;R] in benzene using " << algorithmName(algorithm());
 }
 
@@ -1052,18 +1034,18 @@ TEST_P(SubstructureSearchTest, IsotopeCarbon13Query) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   // First target has one 13C
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [13C] in [13C]CC using " << algorithmName(algorithm());
 
   // Second target has no isotope labels
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [13C] in CC using " << algorithmName(algorithm());
 }
 
@@ -1083,18 +1065,18 @@ TEST_P(SubstructureSearchTest, IsotopeDeuteriumQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   // First target has 4 deuterium atoms
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [2H] in CD4 using " << algorithmName(algorithm());
 
   // Second target has no deuterium
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [2H] in CH4 using " << algorithmName(algorithm());
 }
 
@@ -1114,18 +1096,18 @@ TEST_P(SubstructureSearchTest, IsotopeNitrogen15Query) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   // First target has one 15N
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [15N] in [15N]CC using " << algorithmName(algorithm());
 
   // Second target has no isotope labels
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [15N] in NCC using " << algorithmName(algorithm());
 }
 
@@ -1145,16 +1127,16 @@ TEST_P(SubstructureSearchTest, DegreeQueryD0) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [D0] in methane using " << algorithmName(algorithm());
 
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [D0] in ethane using " << algorithmName(algorithm());
 }
 
@@ -1174,16 +1156,16 @@ TEST_P(SubstructureSearchTest, DegreeQueryD1) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [D1] in ethane using " << algorithmName(algorithm());
 
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [D1] in propane using " << algorithmName(algorithm());
 }
 
@@ -1203,18 +1185,18 @@ TEST_P(SubstructureSearchTest, DegreeQueryD3) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   // Isobutane: one atom with degree 3
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [D3] in isobutane using " << algorithmName(algorithm());
 
   // Propane: no degree 3 atoms
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [D3] in propane using " << algorithmName(algorithm());
 }
 
@@ -1234,16 +1216,16 @@ TEST_P(SubstructureSearchTest, TotalConnectivityQueryX1) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [X1] in H2 using " << algorithmName(algorithm());
 
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [X1] in ethane using " << algorithmName(algorithm());
 }
 
@@ -1263,16 +1245,16 @@ TEST_P(SubstructureSearchTest, TotalConnectivityQueryX2) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [X2] in acetylene using " << algorithmName(algorithm());
 
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [X2] in ethane using " << algorithmName(algorithm());
 }
 
@@ -1292,16 +1274,16 @@ TEST_P(SubstructureSearchTest, TotalConnectivityQueryX3) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [X3] in ethene using " << algorithmName(algorithm());
 
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [X3] in ethane using " << algorithmName(algorithm());
 }
 
@@ -1321,18 +1303,18 @@ TEST_P(SubstructureSearchTest, TotalConnectivityQueryX4) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   // Ethane: 2 atoms with X4
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [X4] in ethane using " << algorithmName(algorithm());
 
   // Ethene: no X4 atoms
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [X4] in ethene using " << algorithmName(algorithm());
 }
 
@@ -1352,18 +1334,18 @@ TEST_P(SubstructureSearchTest, DegreeWithAtomTypeQuery) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   // Isobutane: one carbon with degree 3
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [CD3] in isobutane using " << algorithmName(algorithm());
 
   // Trimethylamine: no carbon with degree 3 (N has degree 3)
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[1], static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [CD3] in trimethylamine using " << algorithmName(algorithm());
 }
 
@@ -1381,11 +1363,11 @@ TEST_P(SubstructureSearchTest, ImplicitHCountMatch) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[NH] in C=N");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[NH] in C=N");
 }
 
 TEST_P(SubstructureSearchTest, ImplicitHCountNoMatch) {
@@ -1401,11 +1383,11 @@ TEST_P(SubstructureSearchTest, ImplicitHCountNoMatch) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "[CH2] in CC");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[CH2] in CC");
 }
 
 
@@ -1426,11 +1408,11 @@ TEST_P(SubstructureSearchTest, DoubleOrAromaticBond) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "quinone_A pattern");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "quinone_A pattern");
 }
 
 TEST_P(SubstructureSearchTest, NotRingBondSimple) {
@@ -1450,11 +1432,11 @@ TEST_P(SubstructureSearchTest, NotRingBondSimple) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "simple non-ring bond");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "simple non-ring bond");
 }
 
 TEST_P(SubstructureSearchTest, NotRingBondChain) {
@@ -1480,11 +1462,11 @@ TEST_P(SubstructureSearchTest, NotRingBondChain) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, "non-ring bond chain pattern");
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "non-ring bond chain pattern");
 }
 
 TEST_P(SubstructureSearchTest, ImpossibleBondConstraint) {
@@ -1504,14 +1486,14 @@ TEST_P(SubstructureSearchTest, ImpossibleBondConstraint) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
     << "Impossible bond constraint should match 0 (RDKit says " << rdkitMatches.size() << ")";
-  EXPECT_EQ(resultsHost.matchCounts[0], 0)
+  EXPECT_EQ(results.actualCount(0, 0), 0)
     << "Impossible bond constraint (single AND aromatic) should never match";
 }
 
@@ -1533,15 +1515,15 @@ TEST_P(SubstructureSearchTest, ImpossibleAtomConstraint) {
     targetsDevice.copyFromHost(targetsHost);
     queriesDevice.copyFromHost(queriesHost);
 
-    SubstructMatchResultsHost resultsHost;
+    SubstructSearchResults results;
     getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                        resultsHost, algorithm(), stream_.stream());
+                        results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-    EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+    EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
         << "Impossible atom constraint [C;a] on " << target << " should match 0 (RDKit says "
         << rdkitMatches.size() << ")";
-    EXPECT_EQ(resultsHost.matchCounts[0], 0)
+    EXPECT_EQ(results.actualCount(0, 0), 0)
         << "Impossible atom constraint [C;a] (aliphatic AND aromatic) should never match " << target;
   }
 }
@@ -1563,15 +1545,15 @@ TEST_P(SubstructureSearchTest, ImpossibleChargeConstraint) {
     targetsDevice.copyFromHost(targetsHost);
     queriesDevice.copyFromHost(queriesHost);
 
-    SubstructMatchResultsHost resultsHost;
+    SubstructSearchResults results;
     getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                        resultsHost, algorithm(), stream_.stream());
+                        results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-    EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+    EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
         << "Impossible charge constraint [OX1;+0;-1] on " << target << " should match 0 (RDKit says "
         << rdkitMatches.size() << ")";
-    EXPECT_EQ(resultsHost.matchCounts[0], 0)
+    EXPECT_EQ(results.actualCount(0, 0), 0)
         << "Impossible charge constraint [OX1;+0;-1] (charge 0 AND -1) should never match " << target;
   }
 }
@@ -1593,15 +1575,15 @@ TEST_P(SubstructureSearchTest, WildcardAtoms) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
       << "Wildcard pattern C~*~*~C should match " << rdkitMatches.size() << " times (RDKit), got "
-      << resultsHost.matchCounts[0];
-  EXPECT_GT(resultsHost.matchCounts[0], 0)
+      << results.actualCount(0, 0);
+  EXPECT_GT(results.actualCount(0, 0), 0)
       << "Wildcard pattern should find matches in hexane";
 }
 
@@ -1622,15 +1604,15 @@ TEST_P(SubstructureSearchTest, WildcardAtomsInRing) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
       << "Wildcard ring pattern should match " << rdkitMatches.size() << " times (RDKit), got "
-      << resultsHost.matchCounts[0];
-  EXPECT_GT(resultsHost.matchCounts[0], 0)
+      << results.actualCount(0, 0);
+  EXPECT_GT(results.actualCount(0, 0), 0)
       << "Wildcard ring pattern should find matches in cyclohexane";
 }
 
@@ -1651,15 +1633,15 @@ TEST_P(SubstructureSearchTest, WildcardAtomsFusedRings) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
       << "Fused ring wildcard pattern should match " << rdkitMatches.size() << " times (RDKit), got "
-      << resultsHost.matchCounts[0];
-  EXPECT_GT(resultsHost.matchCounts[0], 0)
+      << results.actualCount(0, 0);
+  EXPECT_GT(results.actualCount(0, 0), 0)
       << "Fused ring wildcard pattern should find matches in decalin";
 }
 
@@ -1681,14 +1663,14 @@ TEST_P(SubstructureSearchTest, NegatedBondType) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
       << "Negated bond type !- query should match " << rdkitMatches.size() << " times (RDKit), got "
-      << resultsHost.matchCounts[0];
+      << results.actualCount(0, 0);
 }
 
 
@@ -1725,12 +1707,12 @@ TEST_P(SubstructureSearchTest, RingBondCountQuery) {
     targetsDevice.copyFromHost(targetsHost);
     queriesDevice.copyFromHost(queriesHost);
 
-    SubstructMatchResultsHost resultsHost;
+    SubstructSearchResults results;
     getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                        resultsHost, algorithm(), stream_.stream());
+                        results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-    EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+    EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
         << tc.description << " - " << tc.query << " on " << tc.target;
   }
 }
@@ -1765,12 +1747,12 @@ TEST_P(SubstructureSearchTest, ImplicitHCountQuery) {
     targetsDevice.copyFromHost(targetsHost);
     queriesDevice.copyFromHost(queriesHost);
 
-    SubstructMatchResultsHost resultsHost;
+    SubstructSearchResults results;
     getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                        resultsHost, algorithm(), stream_.stream());
+                        results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-    EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+    EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
         << tc.description << " - " << tc.query << " on " << tc.target;
   }
 }
@@ -1805,12 +1787,12 @@ TEST_P(SubstructureSearchTest, HeteroatomNeighborsQuery) {
     targetsDevice.copyFromHost(targetsHost);
     queriesDevice.copyFromHost(queriesHost);
 
-    SubstructMatchResultsHost resultsHost;
+    SubstructSearchResults results;
     getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                        resultsHost, algorithm(), stream_.stream());
+                        results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-    EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+    EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
         << tc.description << " - " << tc.query << " on " << tc.target;
   }
 }
@@ -1846,12 +1828,12 @@ TEST_P(SubstructureSearchTest, RangeRingSizeQuery) {
     targetsDevice.copyFromHost(targetsHost);
     queriesDevice.copyFromHost(queriesHost);
 
-    SubstructMatchResultsHost resultsHost;
+    SubstructSearchResults results;
     getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                        resultsHost, algorithm(), stream_.stream());
+                        results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-    EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+    EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
         << tc.description << " - " << tc.query << " on " << tc.target;
   }
 }
@@ -1883,12 +1865,12 @@ TEST_P(SubstructureSearchTest, RangeNumRingsQuery) {
     targetsDevice.copyFromHost(targetsHost);
     queriesDevice.copyFromHost(queriesHost);
 
-    SubstructMatchResultsHost resultsHost;
+    SubstructSearchResults results;
     getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                        resultsHost, algorithm(), stream_.stream());
+                        results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-    EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches.size()))
+    EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
         << tc.description << " - " << tc.query << " on " << tc.target;
   }
 }
@@ -1910,12 +1892,12 @@ TEST_P(SubstructureSearchTest, SingleMolSingleQueryForDebugging) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(resultsHost.matchCounts[0], static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for query " << algorithmName(algorithm());
 
 }
@@ -1938,15 +1920,15 @@ TEST_P(SubstructureSearchTest, NestedRecursiveSimple) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0, 
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, 
                      "[$([C;$(*-N)])] in CN");
-  expectMatchesRDKit(resultsHost, *targetMols[1], *queryMols[0], 1, 0, 
+  expectMatchesRDKit(results, *targetMols[1], *queryMols[0], 1, 0, 
                      "[$([C;$(*-N)])] in CCN");
-  expectMatchesRDKit(resultsHost, *targetMols[2], *queryMols[0], 2, 0, 
+  expectMatchesRDKit(results, *targetMols[2], *queryMols[0], 2, 0, 
                      "[$([C;$(*-N)])] in CCC");
 }
 
@@ -1964,12 +1946,12 @@ TEST_P(SubstructureSearchTest, NestedRecursiveWithNegation) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
-  expectMatchesRDKit(resultsHost, *targetMols[0], *queryMols[0], 0, 0);
-  expectMatchesRDKit(resultsHost, *targetMols[1], *queryMols[0], 1, 0);
+  expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0);
+  expectMatchesRDKit(results, *targetMols[1], *queryMols[0], 1, 0);
 }
 
 TEST_P(SubstructureSearchTest, NestedRecursiveBatchProcessing) {
@@ -1991,12 +1973,12 @@ TEST_P(SubstructureSearchTest, NestedRecursiveBatchProcessing) {
   targetsDevice.copyFromHost(targetsHost);
   queriesDevice.copyFromHost(queriesHost);
 
-  SubstructMatchResultsHost resultsHost;
+  SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm(), stream_.stream());
+                      results, algorithm(), stream_.stream());
 
   for (size_t t = 0; t < targets.size(); ++t) {
-    expectMatchesRDKit(resultsHost, *targetMols[t], *queryMols[0], 
+    expectMatchesRDKit(results, *targetMols[t], *queryMols[0], 
                        static_cast<int>(t), 0, targets[t]);
   }
 }

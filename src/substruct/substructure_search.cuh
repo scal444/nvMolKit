@@ -32,7 +32,7 @@
 
 namespace nvMolKit {
 
-// SubstructAlgorithm and SubstructMatchResultsHost are defined in substruct_types.h
+// SubstructAlgorithm and SubstructSearchResults are defined in substruct_types.h
 
 /// Constants for label matrix sizing (must match substructure_search.cu)
 constexpr std::size_t kLabelMaxTargetAtoms = 128;
@@ -192,36 +192,10 @@ class BatchResultsDevice {
 struct LeafSubpatterns;
 
 /**
- * @brief Perform batch substructure matching on GPU with host-side CSR results.
+ * @brief Perform batch substructure matching on GPU.
  *
- * This overload returns results in a CSR format suitable for efficient processing.
- * Manages device memory internally.
- *
- * @param targetsDevice Device-resident target molecules (use addToBatch to build)
- * @param queriesDevice Device-resident query molecules (use addQueryToBatch to build)
- * @param targetsHost Host-side target data (for atom counts)
- * @param queriesHost Host-side query data (for atom counts)
- * @param leafSubpatterns Pre-built leaf subpatterns for recursive SMARTS (or empty)
- * @param results Host-side CSR output storage (will be populated)
- * @param algorithm Algorithm to use for matching
- * @param stream CUDA stream for async operations
- * @param batchSize Number of pairs per batch (default 1024).
- */
-void getSubstructMatches(MoleculesDevice&           targetsDevice,
-                         const MoleculesDevice&     queriesDevice,
-                         const MoleculesHost&       targetsHost,
-                         const MoleculesHost&       queriesHost,
-                         const LeafSubpatterns&     leafSubpatterns,
-                         SubstructMatchResultsHost& results,
-                         SubstructAlgorithm         algorithm,
-                         cudaStream_t               stream,
-                         int                        batchSize = 1024,
-                         int                        numThreads = 2);
-
-/**
- * @brief Perform batch substructure matching on GPU with simple accumulated results.
- *
- * This overload returns results in an easy-to-use nested vector format.
+ * Returns results in a dynamically allocated nested vector format.
+ * Memory is proportional to actual matches, avoiding worst-case pre-allocation.
  *
  * @param targetsDevice Device-resident target molecules (use addToBatch to build)
  * @param queriesDevice Device-resident query molecules (use addQueryToBatch to build)
@@ -232,6 +206,7 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
  * @param algorithm Algorithm to use for matching
  * @param stream CUDA stream for async operations
  * @param batchSize Number of pairs per batch (default 1024).
+ * @param numThreads Number of CPU worker threads (default 2).
  */
 void getSubstructMatches(MoleculesDevice&           targetsDevice,
                          const MoleculesDevice&     queriesDevice,
@@ -239,22 +214,6 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
                          const MoleculesHost&       queriesHost,
                          const LeafSubpatterns&     leafSubpatterns,
                          SubstructSearchResults&    results,
-                         SubstructAlgorithm         algorithm,
-                         cudaStream_t               stream,
-                         int                        batchSize = 1024,
-                         int                        numThreads = 2);
-
-/**
- * @brief Convenience overload that builds LeafSubpatterns internally.
- *
- * Builds leaf subpatterns from queriesHost before matching. For repeated calls
- * with the same queries, prefer the overload accepting pre-built LeafSubpatterns.
- */
-void getSubstructMatches(MoleculesDevice&           targetsDevice,
-                         const MoleculesDevice&     queriesDevice,
-                         const MoleculesHost&       targetsHost,
-                         const MoleculesHost&       queriesHost,
-                         SubstructMatchResultsHost& results,
                          SubstructAlgorithm         algorithm,
                          cudaStream_t               stream,
                          int                        batchSize = 1024,

@@ -69,26 +69,11 @@ namespace {
 /**
  * @brief Extract GPU matches for a (target, query) pair from results.
  */
-std::vector<std::vector<int>> extractGpuMatches(const SubstructMatchResultsHost& results,
-                                                int                              targetIdx,
-                                                int                              queryIdx,
-                                                int                              numQueryAtoms) {
-  const int pairIdx       = results.pairIndex(targetIdx, queryIdx);
-  const int reportedCount = results.reportedCounts[pairIdx];
-  const int startOffset   = results.pairMatchStarts[pairIdx];
-
-  std::vector<std::vector<int>> gpuMatches;
-  gpuMatches.reserve(reportedCount);
-
-  for (int m = 0; m < reportedCount; ++m) {
-    std::vector<int> mapping(numQueryAtoms);
-    for (int a = 0; a < numQueryAtoms; ++a) {
-      mapping[a] = results.matchIndices[startOffset + m * numQueryAtoms + a];
-    }
-    gpuMatches.push_back(std::move(mapping));
-  }
-
-  return gpuMatches;
+std::vector<std::vector<int>> extractGpuMatches(const SubstructSearchResults& results,
+                                                int                           targetIdx,
+                                                int                           queryIdx,
+                                                int /* numQueryAtoms */) {
+  return results.getMatches(targetIdx, queryIdx);
 }
 
 /**
@@ -109,17 +94,16 @@ bool matchSetsEqual(const std::vector<std::vector<int>>& gpuMatches,
 }  // namespace
 
 SubstructValidationResult validateAgainstRDKit(
-  const SubstructMatchResultsHost&                  results,
-  const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
-  const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols) {
+    const SubstructSearchResults&                     results,
+    const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
+    const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols) {
   SubstructValidationResult validation;
   validation.totalPairs = results.numTargets * results.numQueries;
 
   for (int t = 0; t < results.numTargets; ++t) {
     for (int q = 0; q < results.numQueries; ++q) {
       const auto rdkitMatches    = getRDKitSubstructMatches(*targetMols[t], *queryMols[q], false);
-      const int  pairIdx         = results.pairIndex(t, q);
-      const int  gpuMatchCount   = results.matchCounts[pairIdx];
+      const int  gpuMatchCount   = results.actualCount(t, q);
       const int  rdkitMatchCount = static_cast<int>(rdkitMatches.size());
 
       if (results.hasOverflow(t, q)) {
@@ -218,26 +202,11 @@ void printMatches(const std::string& label, const std::vector<std::vector<int>>&
   }
 }
 
-std::vector<std::vector<int>> extractGpuMatchesForPrint(const SubstructMatchResultsHost& results,
-                                                        int                              targetIdx,
-                                                        int                              queryIdx,
-                                                        int                              numQueryAtoms) {
-  const int pairIdx       = results.pairIndex(targetIdx, queryIdx);
-  const int reportedCount = results.reportedCounts[pairIdx];
-  const int startOffset   = results.pairMatchStarts[pairIdx];
-
-  std::vector<std::vector<int>> gpuMatches;
-  gpuMatches.reserve(reportedCount);
-
-  for (int m = 0; m < reportedCount; ++m) {
-    std::vector<int> mapping(numQueryAtoms);
-    for (int a = 0; a < numQueryAtoms; ++a) {
-      mapping[a] = results.matchIndices[startOffset + m * numQueryAtoms + a];
-    }
-    gpuMatches.push_back(std::move(mapping));
-  }
-
-  return gpuMatches;
+std::vector<std::vector<int>> extractGpuMatchesForPrint(const SubstructSearchResults& results,
+                                                        int                           targetIdx,
+                                                        int                           queryIdx,
+                                                        int /* numQueryAtoms */) {
+  return results.getMatches(targetIdx, queryIdx);
 }
 
 using LabelMatrixStorage = FlatBitVect<kMaxTargetAtoms * kMaxQueryAtoms>;
@@ -259,7 +228,7 @@ __global__ void populateLabelMatrixKernel(MoleculesDeviceView                tar
 }  // namespace
 
 void printValidationResultDetailed(const SubstructValidationResult&                  result,
-                                   const SubstructMatchResultsHost&                  gpuResults,
+                                   const SubstructSearchResults&                     gpuResults,
                                    const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
                                    const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols,
                                    const std::vector<std::string>&                   targetSmiles,
