@@ -19,7 +19,7 @@
 namespace nvMolKit {
 
 /// Entries per overflow buffer per block
-constexpr int kOverflowEntriesPerBuffer = 4096;
+constexpr int kOverflowEntriesPerBuffer = 2048;
 
 }  // namespace nvMolKit
 

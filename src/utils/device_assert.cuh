@@ -11,6 +11,8 @@
 #define DEVICE_ONLY_MEMBER
 #endif  // __CUDACC__
 
+#include <cassert>
+
 namespace nvMolKit {
 // Turn this on for dev build device asserts.
 constexpr bool enableDeviceAssert = false;
