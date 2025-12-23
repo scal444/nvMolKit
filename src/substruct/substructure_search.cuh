@@ -459,10 +459,11 @@ struct TwoStreamPipelineContext {
 };
 
 /**
- * @brief Preprocess ALL recursive SMARTS patterns for a batch in a single kernel launch.
+ * @brief Preprocess ALL recursive SMARTS patterns for a batch.
  *
  * Uses pre-built leaf subpatterns to run paint kernels for all recursive patterns
- * that affect pairs in the current batch.
+ * that affect pairs in the current batch. Optionally records events after each
+ * depth level for two-stream pipeline synchronization.
  *
  * @param targetsDevice Device-resident target molecules
  * @param targetsHost Host-side target data
@@ -476,27 +477,7 @@ struct TwoStreamPipelineContext {
  * @param stream CUDA stream for async operations
  * @param scratch Reusable scratch buffers (avoids alloc/free between kernels)
  * @param scratchPatternEntries Vector to store pattern entries for the batch
- */
-void preprocessRecursiveSmartsBatched(const MoleculesDevice&            targetsDevice,
-                                      const MoleculesHost&              targetsHost,
-                                      const MoleculesHost&              queriesHost,
-                                      const LeafSubpatterns&            leafSubpatterns,
-                                      BatchResultsDevice&               batchResults,
-                                      int                               numQueries,
-                                      int                               batchPairOffset,
-                                      int                               batchSize,
-                                      SubstructAlgorithm                algorithm,
-                                      cudaStream_t                      stream,
-                                      RecursiveScratchBuffers&          scratch,
-                                      std::vector<BatchedPatternEntry>& scratchPatternEntries);
-
-/**
- * @brief Preprocess recursive SMARTS patterns with event recording for two-stream pipeline.
- *
- * Same as preprocessRecursiveSmartsBatched but records events after each depth level
- * for synchronization with the match stream.
- *
- * @param depthEvents Array of events to record after each depth level (size >= maxDepth)
+ * @param depthEvents Array of events to record after each depth level, or nullptr
  * @param numDepthEvents Number of events in the array (typically kMaxRecursionDepth)
  */
 void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&            targetsDevice,

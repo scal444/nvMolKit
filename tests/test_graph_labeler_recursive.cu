@@ -52,7 +52,7 @@ using nvMolKit::MoleculesDevice;
 using nvMolKit::MoleculesDeviceView;
 using nvMolKit::MoleculesHost;
 using nvMolKit::MoleculeView;
-using nvMolKit::preprocessRecursiveSmartsBatched;
+using nvMolKit::preprocessRecursiveSmartsBatchedWithEvents;
 using nvMolKit::LeafSubpatterns;
 using nvMolKit::RecursivePatternInfo;
 using nvMolKit::RecursiveScratchBuffers;
@@ -310,10 +310,10 @@ class RecursivePaintTest : public ::testing::Test {
 
     RecursiveScratchBuffers          scratch(stream_.stream());
     std::vector<BatchedPatternEntry> scratchPatternEntries;
-    preprocessRecursiveSmartsBatched(targetDevice, targetHost, queryHost, leafSubpatterns, *results_,
-                                     numQueries_, 0, numTargets_ * numQueries_,
-                                     SubstructAlgorithm::GSI, stream_.stream(), scratch,
-                                     scratchPatternEntries);
+    preprocessRecursiveSmartsBatchedWithEvents(targetDevice, targetHost, queryHost, leafSubpatterns, *results_,
+                                               numQueries_, 0, numTargets_ * numQueries_,
+                                               SubstructAlgorithm::GSI, stream_.stream(), scratch,
+                                               scratchPatternEntries, nullptr, 0);
     cudaCheckError(cudaStreamSynchronize(stream_.stream()));
   }
 };
