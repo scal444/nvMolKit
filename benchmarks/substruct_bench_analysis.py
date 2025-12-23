@@ -43,6 +43,10 @@ SCATTER_SAMPLE_SIZE = 50000
 def load_numeric_data(csv_path: str) -> pd.DataFrame:
     """Load only the numeric columns from the CSV file."""
     print(f"Loading data from {csv_path}...")
+    desired_cols = list(NUMERIC_COLS) + ["num_threads"]
+    present_cols = list(pd.read_csv(csv_path, nrows=0).columns)
+    usecols = [c for c in desired_cols if c in present_cols]
+
     dtypes = {
         "time_seconds": float,
         "num_matches": int,
@@ -50,8 +54,9 @@ def load_numeric_data(csv_path: str) -> pd.DataFrame:
         "query_num_atoms": int,
         "query_recursion_count": int,
         "query_recursion_depth": int,
+        "num_threads": int,
     }
-    df = pd.read_csv(csv_path, usecols=NUMERIC_COLS, dtype=dtypes)
+    df = pd.read_csv(csv_path, usecols=usecols, dtype={k: v for k, v in dtypes.items() if k in usecols})
     print(f"Loaded {len(df):,} rows")
     return df
 
@@ -247,7 +252,11 @@ def plot_block_averages(df: pd.DataFrame):
     """Combined plot of mean time vs target, query, matches, and recursion."""
     print(f"  Unique recursion depths: {sorted(df['query_recursion_depth'].unique())}")
     print(f"  Unique recursion counts: {sorted(df['query_recursion_count'].unique())}")
-    fig, axes = plt.subplots(1, 5, figsize=(24, 5))
+    if "num_threads" in df.columns:
+        print(f"  Unique num_threads: {sorted(df['num_threads'].unique())}")
+        fig, axes = plt.subplots(1, 6, figsize=(29, 5))
+    else:
+        fig, axes = plt.subplots(1, 5, figsize=(24, 5))
 
     agg_target = df.groupby("target_num_atoms")["time_seconds"].mean() * 1e6
     axes[0].plot(agg_target.index, agg_target.values, "o-", color="darkgreen", markersize=4)
@@ -274,6 +283,12 @@ def plot_block_averages(df: pd.DataFrame):
     axes[4].plot(agg_depth.index, agg_depth.values, "o-", color="goldenrod", markersize=4)
     axes[4].set_xlabel("Recursion Depth")
     axes[4].set_title("Time vs Recursion Depth")
+
+    if "num_threads" in df.columns:
+        agg_threads = df.groupby("num_threads")["time_seconds"].mean() * 1e6
+        axes[5].plot(agg_threads.index, agg_threads.values, "o-", color="slategray", markersize=4)
+        axes[5].set_xlabel("num_threads")
+        axes[5].set_title("Time vs num_threads")
 
     fig.suptitle("Mean Search Time by Variable", fontsize=14, fontweight="bold")
     plt.tight_layout()
@@ -307,6 +322,9 @@ def print_summary_stats(df: pd.DataFrame):
     print(f"\nRecursion statistics:")
     print(f"  Recursion count range: {df['query_recursion_count'].min()} - {df['query_recursion_count'].max()}")
     print(f"  Recursion depth range: {df['query_recursion_depth'].min()} - {df['query_recursion_depth'].max()}")
+    if "num_threads" in df.columns:
+        print(f"\nnum_threads:")
+        print(f"  Unique: {sorted(df['num_threads'].unique())}")
     print("=" * 60)
 
 

@@ -210,7 +210,8 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
                          SubstructMatchResultsHost& results,
                          SubstructAlgorithm         algorithm,
                          cudaStream_t               stream,
-                         int                        batchSize = 1024);
+                         int                        batchSize = 1024,
+                         int                        numThreads = 2);
 
 /**
  * @brief Perform batch substructure matching on GPU with simple accumulated results.
@@ -233,7 +234,8 @@ void getSubstructMatches(MoleculesDevice&        targetsDevice,
                          SubstructSearchResults& results,
                          SubstructAlgorithm      algorithm,
                          cudaStream_t            stream,
-                         int                     batchSize = 1024);
+                         int                     batchSize = 1024,
+                         int                     numThreads = 2);
 
 /**
  * @brief Per-pattern metadata for batched recursive preprocessing kernel.
@@ -336,8 +338,6 @@ struct RecursivePatternCache {
 
   /**
    * @brief Sync cached patterns to device if needed.
-   *
-   * @param stream CUDA stream for the copy
    */
   void syncToDevice(cudaStream_t stream);
 };

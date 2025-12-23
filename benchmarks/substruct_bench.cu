@@ -164,6 +164,7 @@ void benchRDKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
 void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
                    const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols,
                    SubstructAlgorithm                                algorithm,
+                   int                                               numThreads,
                    int&                                              totalMatches,
                    SubstructMatchResultsHost&                        resultsOut,
                    BenchUtils::TimingResult&                         timingOut) {
@@ -183,7 +184,7 @@ void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
   timingOut = BenchUtils::timeIt(
     [&]() {
       getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost, resultsOut, algorithm,
-                          stream.stream());
+                          stream.stream(), 1024, numThreads);
     },
     3, 1);
 
@@ -227,6 +228,7 @@ void printHelp(const char* progName) {
   std::cout << "  -m, --num_queries <int>   Max number of query molecules [default: 10]\n";
   std::cout
     << "  -a, --algorithm <str>     Algorithm: vf2, gsi, or warpunified [default: warpunified]\n";
+  std::cout << "  -p, --num_threads <int>   CPU worker threads used by nvMolKit [default: 2]\n";
   std::cout << "  -r, --do_rdkit <bool>     Run RDKit benchmark comparison [default: true]\n";
   std::cout << "  -w, --do_warmup <bool>    Run warmup before benchmarking [default: true]\n";
   std::cout << "  -v, --validate <bool>     Validate GPU results against RDKit [default: false]\n";
@@ -246,6 +248,7 @@ int main(int argc, char* argv[]) {
   int                numTargets = 100;
   int                numQueries = 10;
   SubstructAlgorithm algorithm  = SubstructAlgorithm::WarpUnified;
+  int                numThreads = 2;
   bool               doRdkit    = true;
   bool               doWarmup   = true;
   bool               doValidate = false;
@@ -256,6 +259,7 @@ int main(int argc, char* argv[]) {
     {"num_targets", required_argument, 0, 'n'},
     {"num_queries", required_argument, 0, 'm'},
     { "algorithm", required_argument, 0, 'a'},
+    {"num_threads", required_argument, 0, 'p'},
     {  "do_rdkit", required_argument, 0, 'r'},
     { "do_warmup", required_argument, 0, 'w'},
     {  "validate", required_argument, 0, 'v'},
@@ -266,7 +270,7 @@ int main(int argc, char* argv[]) {
   int option_index = 0;
   int c;
 
-  while ((c = getopt_long(argc, argv, "t:q:n:m:a:r:w:v:h", long_options, &option_index)) != -1) {
+  while ((c = getopt_long(argc, argv, "t:q:n:m:a:p:r:w:v:h", long_options, &option_index)) != -1) {
     switch (c) {
       case 't':
         targetsPath = optarg;
@@ -303,6 +307,18 @@ int main(int argc, char* argv[]) {
           algorithm = parseAlgorithmArg(optarg);
         } catch (const std::exception& e) {
           std::cerr << "Error: " << e.what() << "\n";
+          return 1;
+        }
+        break;
+      case 'p':
+        try {
+          numThreads = std::stoi(optarg);
+          if (numThreads <= 0) {
+            std::cerr << "Error: num_threads must be positive\n";
+            return 1;
+          }
+        } catch (const std::exception& e) {
+          std::cerr << "Error: Invalid value for num_threads: " << optarg << "\n";
           return 1;
         }
         break;
@@ -357,6 +373,7 @@ int main(int argc, char* argv[]) {
   std::cout << "  Max targets: " << numTargets << "\n";
   std::cout << "  Max queries: " << numQueries << "\n";
   std::cout << "  Algorithm: " << algorithmName(algorithm) << "\n";
+  std::cout << "  nvMolKit threads: " << numThreads << "\n";
   std::cout << "  Run RDKit comparison: " << (doRdkit ? "yes" : "no") << "\n";
   std::cout << "  Run warmup: " << (doWarmup ? "yes" : "no") << "\n";
   std::cout << "  Validate results: " << (doValidate ? "yes" : "no") << "\n\n";
@@ -408,7 +425,7 @@ int main(int argc, char* argv[]) {
     int                       warmupMatches;
     SubstructMatchResultsHost warmupResults;
     BenchUtils::TimingResult  warmupTiming;
-    benchNvMolKit(warmupTargets, warmupQueries, algorithm, warmupMatches, warmupResults, warmupTiming);
+    benchNvMolKit(warmupTargets, warmupQueries, algorithm, numThreads, warmupMatches, warmupResults, warmupTiming);
 
     if (doRdkit) {
       BenchUtils::TimingResult rdkitWarmupTiming;
@@ -421,7 +438,7 @@ int main(int argc, char* argv[]) {
   int                       nvmolkitMatches = 0;
   SubstructMatchResultsHost nvmolkitResults;
   BenchUtils::TimingResult  nvmolkitTiming;
-  benchNvMolKit(targetMols, queryMols, algorithm, nvmolkitMatches, nvmolkitResults, nvmolkitTiming);
+  benchNvMolKit(targetMols, queryMols, algorithm, numThreads, nvmolkitMatches, nvmolkitResults, nvmolkitTiming);
   std::cout << "nvMolKit total matches: " << nvmolkitMatches << "\n";
 
   int                      rdkitMatches = 0;
@@ -447,13 +464,14 @@ int main(int argc, char* argv[]) {
   }
 
   std::cout << "\n\nCSV Results:\n";
-  std::cout << "algorithm,num_targets,num_queries,nvmolkit_time_ms,nvmolkit_std_ms";
+  std::cout << "algorithm,num_targets,num_queries,num_threads,nvmolkit_time_ms,nvmolkit_std_ms";
   if (doRdkit) {
     std::cout << ",rdkit_time_ms,rdkit_std_ms";
   }
   std::cout << "\n";
 
   std::cout << algorithmName(algorithm) << "," << targetMols.size() << "," << queryMols.size() << ","
+            << numThreads << ","
             << nvmolkitTiming.avgMs << "," << nvmolkitTiming.stdMs;
   if (doRdkit) {
     std::cout << "," << rdkitTiming.avgMs << "," << rdkitTiming.stdMs;

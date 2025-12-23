@@ -516,13 +516,13 @@ struct BatchSlot {
       batchPairMatchStarts.resize(maxBatchSize + 1);
     }
     if (matchCountsHost.size() < static_cast<size_t>(maxBatchSize)) {
-      matchCountsHost = PinnedHostVector<int>(maxBatchSize);
+      matchCountsHost.resize(maxBatchSize);
     }
     if (reportedCountsHost.size() < static_cast<size_t>(maxBatchSize)) {
-      reportedCountsHost = PinnedHostVector<int>(maxBatchSize);
+      reportedCountsHost.resize(maxBatchSize);
     }
     if (matchIndicesHost.size() < static_cast<size_t>(maxMatchIndicesEstimate)) {
-      matchIndicesHost = PinnedHostVector<int16_t>(maxMatchIndicesEstimate);
+      matchIndicesHost.resize(maxMatchIndicesEstimate);
     }
   }
 };
@@ -1049,6 +1049,7 @@ void threadWorker(int                        workerIdx,
                   const MoleculesHost&       queriesHost,
                   SubstructMatchResultsHost& results,
                   SubstructAlgorithm         algorithm,
+                  cudaEvent_t                upstreamReadyEvent,
                   std::atomic<int>&          nextBatchIdx,
                   int                        totalNumBatches,
                   int                        effectiveBatchSize,
@@ -1057,6 +1058,17 @@ void threadWorker(int                        workerIdx,
   try {
     BatchSlot slot(workerIdx);
     slot.initializeForStream();
+
+    // Ensure any upstream async work enqueued on the caller-provided stream (e.g. H2D uploads
+    // into targetsDevice/queriesDevice using cudaMallocAsync/cudaMemcpyAsync) completes before
+    // this worker's private streams touch those allocations.
+    if (upstreamReadyEvent != nullptr) {
+      cudaCheckError(cudaStreamWaitEvent(slot.stream(), upstreamReadyEvent, 0));
+      cudaCheckError(cudaStreamWaitEvent(slot.twoStreamCtx->recursiveStream.stream(), upstreamReadyEvent, 0));
+      for (int depth = 0; depth < kMaxRecursionDepth; ++depth) {
+        cudaCheckError(cudaStreamWaitEvent(slot.twoStreamCtx->matchStreams[depth].stream(), upstreamReadyEvent, 0));
+      }
+    }
     
     const int maxMatchIndicesPerBatch = effectiveBatchSize * ctx.maxTargetAtoms * maxQueryAtoms;
     slot.reserveHostBuffers(effectiveBatchSize, maxMatchIndicesPerBatch);
@@ -1099,7 +1111,8 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
                          SubstructMatchResultsHost& results,
                          SubstructAlgorithm         algorithm,
                          cudaStream_t               stream,
-                         int                        batchSize) {
+                         int                        batchSize,
+                         int                        requestedNumThreads) {
   ScopedNvtxRange e2eRange("getSubstructMatches");
   const int numTargets = static_cast<int>(targetsHost.numMolecules());
   const int numQueries = static_cast<int>(queriesHost.numMolecules());
@@ -1161,8 +1174,13 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
   resultsAllocRange.pop();
 
   const int totalNumBatches = (numPairs + effectiveBatchSize - 1) / effectiveBatchSize;
-  const int numThreads = std::min(2, totalNumBatches);
+  const int numThreads = std::min(std::max(1, requestedNumThreads), totalNumBatches);
   std::atomic<int> nextBatchIdx(0);
+
+  // Fence: the caller may have enqueued async uploads to targetsDevice/queriesDevice on `stream`.
+  // The matching pipeline uses its own private streams; ensure they wait for upstream work.
+  ScopedCudaEvent upstreamReadyEvent;
+  cudaCheckError(cudaEventRecord(upstreamReadyEvent.event(), stream));
 
   ScopedNvtxRange threadRange("Multithreaded batch processing");
   std::vector<std::thread> workers;
@@ -1179,6 +1197,7 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
                          std::cref(queriesHost),
                          std::ref(results),
                          algorithm,
+                         upstreamReadyEvent.event(),
                          std::ref(nextBatchIdx),
                          totalNumBatches,
                          effectiveBatchSize,
@@ -1207,7 +1226,8 @@ void getSubstructMatches(MoleculesDevice&        targetsDevice,
                          SubstructSearchResults& results,
                          SubstructAlgorithm      algorithm,
                          cudaStream_t            stream,
-                         int                     batchSize) {
+                         int                     batchSize,
+                         int                     numThreads) {
   ScopedNvtxRange e2eRange("getSubstructMatches (accumulated)");
   const int numTargets = static_cast<int>(targetsHost.numMolecules());
   const int numQueries = static_cast<int>(queriesHost.numMolecules());
@@ -1218,7 +1238,7 @@ void getSubstructMatches(MoleculesDevice&        targetsDevice,
 
   SubstructMatchResultsHost resultsHost;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      resultsHost, algorithm, stream, batchSize);
+                      resultsHost, algorithm, stream, batchSize, numThreads);
 
   std::vector<int> queryAtomCounts(numQueries);
   for (int q = 0; q < numQueries; ++q) {
@@ -1269,6 +1289,10 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&            targetsD
                                       std::vector<BatchedPatternEntry>& scratchPatternEntries) {
   ScopedNvtxRange processRecursiveRange("Process recursive batch");
   ScopedNvtxRange processRecursiveRangeSetup("Process recursive batch setup");
+
+  // Keep scratch/cache async work ordered on the same stream that will launch the kernels.
+  scratch.setStream(stream);
+  patternCache.setStream(stream);
 
   std::vector<BatchedPatternEntry>& patternEntriesHost = scratchPatternEntries;
   patternEntriesHost.clear();
@@ -1336,6 +1360,11 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&            targetsD
   const int lastTargetInBatch  = (batchPairOffset + batchSize - 1) / numQueries;
   const int numTargetsInBatch  = lastTargetInBatch - firstTargetInBatch + 1;
 
+  // Ensure scratch buffers and pattern cache use the kernel stream. This guarantees
+  // all operations (resizes, copies) are serialized with the kernel, avoiding cross-stream
+  // races. Previously hidden by pageable memory making cudaMemcpyAsync synchronous.
+  scratch.setStream(stream);
+  patternCache.setStream(stream);
   patternCache.syncToDevice(stream);
 
   const auto batchView = batchResults.view();
@@ -1501,6 +1530,11 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
   ScopedNvtxRange processRecursiveRange("Process recursive batch with events");
   ScopedNvtxRange processRecursiveRangeSetup("Process recursive batch setup");
 
+  // Ensure all scratch/cache allocations and copies are ordered on the same stream that
+  // will launch the recursive labeling/paint kernels.
+  scratch.setStream(stream);
+  patternCache.setStream(stream);
+
   std::vector<BatchedPatternEntry>& patternEntriesHost = scratchPatternEntries;
   patternEntriesHost.clear();
 
@@ -1550,6 +1584,11 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
   const int lastTargetInBatch  = (batchPairOffset + batchSize - 1) / numQueries;
   const int numTargetsInBatch  = lastTargetInBatch - firstTargetInBatch + 1;
 
+  // Ensure scratch buffers and pattern cache use the kernel stream. This guarantees
+  // all operations (resizes, copies) are serialized with the kernel, avoiding cross-stream
+  // races. Previously hidden by pageable memory making cudaMemcpyAsync synchronous.
+  scratch.setStream(stream);
+  patternCache.setStream(stream);
   patternCache.syncToDevice(stream);
 
   const auto batchView = batchResults.view();
