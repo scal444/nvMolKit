@@ -159,7 +159,9 @@ void buildBatches(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
 void benchRDKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
                 const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols,
                 int&                                              totalMatches,
-                BenchUtils::TimingResult&                         timingOut) {
+                BenchUtils::TimingResult&                         timingOut,
+                int                                               iterations = 3,
+                int                                               warmups    = 1) {
   totalMatches = 0;
 
   timingOut = BenchUtils::timeIt(
@@ -176,7 +178,7 @@ void benchRDKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
       }
       totalMatches = localMatches;
     },
-    3, 1);
+    iterations, warmups);
 
   std::cout << "RDKit SubstructMatch, targets=" << targetMols.size() << ", queries=" << queryMols.size()
             << ": " << timingOut.avgMs << " ms (±" << timingOut.stdMs << " ms)\n";
@@ -192,7 +194,9 @@ void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
                    int                                               numThreads,
                    int&                                              totalMatches,
                    SubstructMatchResultsHost&                        resultsOut,
-                   BenchUtils::TimingResult&                         timingOut) {
+                   BenchUtils::TimingResult&                         timingOut,
+                   int                                               iterations = 3,
+                   int                                               warmups    = 1) {
   std::string algoStr = algorithmName(algorithm);
 
   ScopedStream stream;
@@ -211,7 +215,7 @@ void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
       getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost, resultsOut, algorithm,
                           stream.stream(), batchSize, numThreads);
     },
-    3, 1);
+    iterations, warmups);
 
   totalMatches = 0;
   for (int count : resultsOut.matchCounts) {
@@ -259,6 +263,7 @@ void printHelp(const char* progName) {
   std::cout << "  -r, --do_rdkit <bool>     Run RDKit benchmark comparison [default: true]\n";
   std::cout << "  -w, --do_warmup <bool>    Run warmup before benchmarking [default: true]\n";
   std::cout << "  -v, --validate <bool>     Validate GPU results against RDKit [default: false]\n";
+  std::cout << "  -P, --profile <bool>      Profile mode: run 1 iteration only [default: false]\n";
   std::cout << "  -d, --debug <int>         Debug/verbosity level (0-2) [default: 0]\n";
   std::cout << "                            0: No debug output\n";
   std::cout << "                            1: Print validation failures summary\n";
@@ -285,6 +290,7 @@ int main(int argc, char* argv[]) {
   bool               doRdkit    = true;
   bool               doWarmup   = true;
   bool               doValidate = false;
+  bool               doProfile  = false;
   int                debugLevel = 0;
 
   static struct option long_options[] = {
@@ -299,6 +305,7 @@ int main(int argc, char* argv[]) {
     {  "do_rdkit", required_argument, 0, 'r'},
     { "do_warmup", required_argument, 0, 'w'},
     {  "validate", required_argument, 0, 'v'},
+    {   "profile", required_argument, 0, 'P'},
     {     "debug", required_argument, 0, 'd'},
     {      "help",       no_argument, 0, 'h'},
     {           0,                 0, 0,   0}
@@ -307,7 +314,7 @@ int main(int argc, char* argv[]) {
   int option_index = 0;
   int c;
 
-  while ((c = getopt_long(argc, argv, "t:q:n:m:a:b:c:p:r:w:v:d:h", long_options, &option_index)) != -1) {
+  while ((c = getopt_long(argc, argv, "t:q:n:m:a:b:c:p:r:w:v:P:d:h", long_options, &option_index)) != -1) {
     switch (c) {
       case 't':
         targetsPath = optarg;
@@ -392,6 +399,9 @@ int main(int argc, char* argv[]) {
       case 'v':
         doValidate = parseBoolArg(optarg);
         break;
+      case 'P':
+        doProfile = parseBoolArg(optarg);
+        break;
       case 'd':
         try {
           debugLevel = std::stoi(optarg);
@@ -452,6 +462,7 @@ int main(int argc, char* argv[]) {
   std::cout << "  Run RDKit comparison: " << (doRdkit ? "yes" : "no") << "\n";
   std::cout << "  Run warmup: " << (doWarmup ? "yes" : "no") << "\n";
   std::cout << "  Validate results: " << (doValidate ? "yes" : "no") << "\n";
+  std::cout << "  Profile mode: " << (doProfile ? "yes" : "no") << "\n";
   std::cout << "  Debug level: " << debugLevel << "\n\n";
 
   std::cout << "Loading and parsing molecules...\n";
@@ -507,17 +518,20 @@ int main(int argc, char* argv[]) {
 
   std::cout << "Running benchmarks...\n";
 
+  const int benchIterations = doProfile ? 1 : 3;
+  const int benchWarmups    = doProfile ? 0 : 1;
+
   int                       nvmolkitMatches = 0;
   SubstructMatchResultsHost nvmolkitResults;
   BenchUtils::TimingResult  nvmolkitTiming;
-  benchNvMolKit(targetMols, queryMols, algorithm, batchSize, numThreads, nvmolkitMatches, nvmolkitResults, nvmolkitTiming);
+  benchNvMolKit(targetMols, queryMols, algorithm, batchSize, numThreads, nvmolkitMatches, nvmolkitResults, nvmolkitTiming, benchIterations, benchWarmups);
   std::cout << "nvMolKit total matches: " << nvmolkitMatches << "\n";
 
   int                      rdkitMatches = 0;
   BenchUtils::TimingResult rdkitTiming{0.0, 0.0};
 
   if (doRdkit) {
-    benchRDKit(targetMols, queryMols, rdkitMatches, rdkitTiming);
+    benchRDKit(targetMols, queryMols, rdkitMatches, rdkitTiming, benchIterations, benchWarmups);
     std::cout << "RDKit total matches: " << rdkitMatches << "\n";
 
     if (nvmolkitMatches == rdkitMatches) {
