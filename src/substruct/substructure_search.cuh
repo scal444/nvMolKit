@@ -19,6 +19,7 @@
 #include <cuda_runtime.h>
 
 #include <array>
+#include <stdexcept>
 #include <unordered_map>
 #include <vector>
 
@@ -27,6 +28,7 @@
 #include "flat_bit_vect.h"
 #include "host_vector.h"
 #include "molecules.h"
+#include "pinned_buffer_pool.h"
 #include "substruct_algos.cuh"
 #include "substruct_types.h"
 
@@ -159,6 +161,17 @@ class BatchResultsDevice {
                        PinnedHostVector<int>&     hostReportedCounts,
                        PinnedHostVector<int16_t>& hostMatchIndices) const;
 
+  /**
+   * @brief Copy batch results to raw pinned memory pointers.
+   *
+   * @param hostMatchCounts Output: match counts for this batch [batchSize]
+   * @param hostReportedCounts Output: reported counts for this batch [batchSize]
+   * @param hostMatchIndices Output: match indices for this batch
+   */
+  void copyBatchToHost(int*     hostMatchCounts,
+                       int*     hostReportedCounts,
+                       int16_t* hostMatchIndices) const;
+
   void setQueryAtomCounts(const int* queryAtomCounts, size_t count);
 
   [[nodiscard]] int batchSize() const { return batchSize_; }
@@ -235,20 +248,7 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
                          int                        batchSize = 1024,
                          int                        numThreads = 2);
 
-/**
- * @brief Per-pattern metadata for batched recursive preprocessing kernel.
- *
- * Each entry describes one recursive pattern in the combined batch:
- * which main query it belongs to, what bit to paint, and where the
- * pattern data starts in the combined pattern batch.
- */
-struct BatchedPatternEntry {
-  int mainQueryIdx;     ///< Index of the main query this pattern belongs to
-  int patternId;        ///< Bit position (0-31) to paint for this pattern
-  int patternMolIdx;    ///< Index into the combined patterns MoleculesDevice
-  int depth;            ///< Nesting depth (0=leaf, higher=parent of children)
-  int localIdInParent;  ///< Bit position in parent's input (for nested patterns)
-};
+// BatchedPatternEntry is defined in pinned_buffer_pool.h
 
 /**
  * @brief Scratch buffers for recursive SMARTS preprocessing.
@@ -256,18 +256,22 @@ struct BatchedPatternEntry {
  * Reusable device memory to avoid repeated alloc/free between kernels.
  * For nested patterns, intermediateBits holds results from child levels
  * that become input for parent patterns.
+ *
+ * The patternsAtDepthHost pointer can reference memory from the consolidated
+ * pinned buffer, or fallback to an owned allocation if not set.
  */
 struct RecursiveScratchBuffers {
   AsyncDeviceVector<BatchedPatternEntry> patternEntries;
   AsyncDeviceVector<PartialMatch>        overflow;
   AsyncDeviceVector<uint32_t>            labelMatrixBuffer;
   AsyncDeviceVector<uint32_t>            intermediateBits;  ///< Child pattern results for nested recursion
-  PinnedHostVector<BatchedPatternEntry>  patternsAtDepthHost;  ///< Pinned buffer for H2D transfers
+  BatchedPatternEntry*                   patternsAtDepthHost = nullptr;  ///< Points into consolidated buffer or ownedBuffer
+  int                                    patternsAtDepthHostCapacity = 0;
   ScopedCudaEvent                        patternsAtDepthHostCopyDone;  ///< Guards reuse of patternsAtDepthHost
   bool                                   patternsAtDepthHostCopyPending = false;
 
   explicit RecursiveScratchBuffers(cudaStream_t stream) 
-      : patternEntries(), overflow(), labelMatrixBuffer(), intermediateBits(), patternsAtDepthHost(),
+      : patternEntries(), overflow(), labelMatrixBuffer(), intermediateBits(),
         patternsAtDepthHostCopyDone(), patternsAtDepthHostCopyPending(false) {
     patternEntries.setStream(stream);
     overflow.setStream(stream);
@@ -275,12 +279,54 @@ struct RecursiveScratchBuffers {
     intermediateBits.setStream(stream);
   }
 
+  ~RecursiveScratchBuffers() {
+    if (ownsBuffer_ && patternsAtDepthHost != nullptr) {
+      cudaFreeHost(patternsAtDepthHost);
+    }
+  }
+
+  RecursiveScratchBuffers(const RecursiveScratchBuffers&)            = delete;
+  RecursiveScratchBuffers& operator=(const RecursiveScratchBuffers&) = delete;
+  RecursiveScratchBuffers(RecursiveScratchBuffers&&)                 = delete;
+  RecursiveScratchBuffers& operator=(RecursiveScratchBuffers&&)      = delete;
+
   void setStream(cudaStream_t stream) {
     patternEntries.setStream(stream);
     overflow.setStream(stream);
     labelMatrixBuffer.setStream(stream);
     intermediateBits.setStream(stream);
   }
+
+  void setPinnedBuffer(BatchedPatternEntry* ptr, int capacity) {
+    if (ownsBuffer_ && patternsAtDepthHost != nullptr) {
+      cudaFreeHost(patternsAtDepthHost);
+    }
+    patternsAtDepthHost         = ptr;
+    patternsAtDepthHostCapacity = capacity;
+    ownsBuffer_                 = false;
+  }
+
+  /**
+   * @brief Ensure pinned buffer capacity, allocating if needed.
+   *
+   * If the consolidated buffer is too small, allocates a separate owned buffer.
+   */
+  void ensureCapacity(int requiredCapacity) {
+    if (patternsAtDepthHostCapacity >= requiredCapacity) {
+      return;
+    }
+    // Need to allocate (or reallocate) an owned buffer
+    if (ownsBuffer_ && patternsAtDepthHost != nullptr) {
+      cudaFreeHost(patternsAtDepthHost);
+    }
+    const int newCapacity = static_cast<int>(requiredCapacity * 1.5);
+    cudaCheckError(cudaMallocHost(&patternsAtDepthHost, newCapacity * sizeof(BatchedPatternEntry)));
+    patternsAtDepthHostCapacity = newCapacity;
+    ownsBuffer_                 = true;
+  }
+
+ private:
+  bool ownsBuffer_ = false;
 };
 
 /**
@@ -367,9 +413,7 @@ struct LeafSubpatterns {
   [[nodiscard]] MoleculesDeviceView view() const { return patternsDevice.view(); }
 };
 
-/// Maximum supported recursion depth for nested recursive SMARTS patterns.
-/// A query with depth N requires N paint rounds before matching can begin.
-constexpr int kMaxRecursionDepth = 4;
+// kMaxRecursionDepth is defined in pinned_buffer_pool.h
 
 /**
  * @brief Two-stream pipeline context for overlapping recursive preprocessing with matching.
@@ -377,6 +421,9 @@ constexpr int kMaxRecursionDepth = 4;
  * Uses a high-priority stream for recursive paint operations and a low-priority
  * stream for main query matching. Events synchronize pairs that depend on
  * recursive preprocessing results.
+ *
+ * Host-side pinned buffers are now referenced via pointers into the consolidated
+ * buffer rather than owned allocations.
  */
 struct TwoStreamPipelineContext {
   ScopedStreamWithPriority recursiveStream;  ///< High priority stream for paint kernels
@@ -400,9 +447,10 @@ struct TwoStreamPipelineContext {
   /// Host-side schedule: pairs to match after each depth level completes
   std::array<std::vector<int>, kMaxRecursionDepth + 1> matchPairsHost;
 
-  /// Temporary pinned buffers for H2D transfers (reused per depth)
-  std::array<PinnedHostVector<int>, kMaxRecursionDepth + 1> matchGlobalPairIndicesHost;
-  std::array<PinnedHostVector<int>, kMaxRecursionDepth + 1> matchBatchLocalIndicesHost;
+  /// Pointers to pinned buffers for H2D transfers (reference consolidated buffer)
+  std::array<int*, kMaxRecursionDepth + 1> matchGlobalPairIndicesHost = {};
+  std::array<int*, kMaxRecursionDepth + 1> matchBatchLocalIndicesHost = {};
+  int perDepthCapacity = 0;
 
   int maxDepthInBatch = 0;
 
@@ -415,6 +463,17 @@ struct TwoStreamPipelineContext {
    * @param workerIdx Worker thread index for unique stream naming
    */
   explicit TwoStreamPipelineContext(int workerIdx = 0);
+
+  /**
+   * @brief Set pointers to consolidated pinned buffer regions.
+   */
+  void setPinnedBuffers(const std::array<int*, kMaxRecursionDepth + 1>& globalPairPtrs,
+                        const std::array<int*, kMaxRecursionDepth + 1>& batchLocalPtrs,
+                        int capacity) {
+    matchGlobalPairIndicesHost = globalPairPtrs;
+    matchBatchLocalIndicesHost = batchLocalPtrs;
+    perDepthCapacity           = capacity;
+  }
 };
 
 /**

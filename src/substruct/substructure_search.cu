@@ -30,6 +30,7 @@
 #include "global_pool.cuh"
 #include "graph_labeler.cuh"
 #include "molecules_device.cuh"
+#include "pinned_buffer_pool.h"
 #include "substruct_algos.cuh"
 #include "substruct_debug.h"
 #include "nvtx.h"
@@ -472,8 +473,15 @@ struct BatchSlot {
   int numPairsInBatch   = 0;
   int totalMatchIndices = 0;
 
-  PinnedHostVector<int>                 pairIndicesHost;
-  PinnedHostVector<int>                 batchPairMatchStarts;
+  // Pointers into consolidated pinned buffer (not owned)
+  int*     pairIndicesHost          = nullptr;
+  int*     batchPairMatchStarts     = nullptr;
+  int*     matchCountsHost          = nullptr;
+  int*     reportedCountsHost       = nullptr;
+  int16_t* matchIndicesHost         = nullptr;
+  int      pairIndicesCapacity      = 0;
+  int      matchIndicesCapacity     = 0;
+
   std::vector<BatchedPatternEntry>      patternEntriesHost;
 
   // Precomputed recursive batch setup (populated by prepareRecursiveBatchOnCPU)
@@ -481,11 +489,6 @@ struct BatchSlot {
   int firstTargetInBatch      = 0;
   int numTargetsInBatch       = 0;
   std::array<std::vector<BatchedPatternEntry>, kMaxRecursionDepth + 1> patternsAtDepth;
-
-  // Pinned memory for D2H transfers - pre-allocated and reused between batches
-  PinnedHostVector<int>     matchCountsHost;
-  PinnedHostVector<int>     reportedCountsHost;
-  PinnedHostVector<int16_t> matchIndicesHost;
 
   // Streams and events declared first so they're destroyed last (after resources that use them)
   ScopedStream                              computeStream;
@@ -513,22 +516,26 @@ struct BatchSlot {
 
   cudaStream_t stream() const { return computeStream.stream(); }
 
-  void reserveHostBuffers(int maxBatchSize, int maxMatchIndicesEstimate) {
-    if (pairIndicesHost.size() < static_cast<size_t>(maxBatchSize)) {
-      pairIndicesHost.resize(static_cast<size_t>(maxBatchSize * 1.5));
-    }
-    if (batchPairMatchStarts.size() < static_cast<size_t>(maxBatchSize + 1)) {
-      batchPairMatchStarts.resize(static_cast<size_t>((maxBatchSize + 1) * 1.5));
-    }
-    if (matchCountsHost.size() < static_cast<size_t>(maxBatchSize)) {
-      matchCountsHost.resize(static_cast<size_t>(maxBatchSize * 1.5));
-    }
-    if (reportedCountsHost.size() < static_cast<size_t>(maxBatchSize)) {
-      reportedCountsHost.resize(static_cast<size_t>(maxBatchSize * 1.5));
-    }
-    if (matchIndicesHost.size() < static_cast<size_t>(maxMatchIndicesEstimate)) {
-      matchIndicesHost.resize(static_cast<size_t>(maxMatchIndicesEstimate * 1.5));
-    }
+  /**
+   * @brief Bind pointers from consolidated pinned buffer.
+   *
+   * Must be called before processing batches. The consolidated buffer
+   * must outlive the BatchSlot.
+   */
+  void bindPinnedBuffer(ConsolidatedPinnedBuffer& buffer) {
+    pairIndicesHost      = buffer.pairIndices;
+    batchPairMatchStarts = buffer.batchPairMatchStarts;
+    matchCountsHost      = buffer.matchCounts;
+    reportedCountsHost   = buffer.reportedCounts;
+    matchIndicesHost     = buffer.matchIndices;
+    pairIndicesCapacity  = buffer.pairIndicesCapacity;
+    matchIndicesCapacity = buffer.matchIndicesCapacity;
+
+    twoStreamCtx->setPinnedBuffers(buffer.matchGlobalPairIndicesHost,
+                                   buffer.matchBatchLocalIndicesHost,
+                                   buffer.perDepthCapacity);
+
+    recursiveScratch.setPinnedBuffer(buffer.patternsAtDepthHost, buffer.patternsCapacity);
   }
 };
 
@@ -750,6 +757,14 @@ void BatchResultsDevice::copyBatchToHost(PinnedHostVector<int>&     hostMatchCou
   matchIndices_.copyToHost(hostMatchIndices.data(), totalBatchMatchIndices_);
 }
 
+void BatchResultsDevice::copyBatchToHost(int*     hostMatchCounts,
+                                         int*     hostReportedCounts,
+                                         int16_t* hostMatchIndices) const {
+  matchCounts_.copyToHost(hostMatchCounts, batchSize_);
+  reportedCounts_.copyToHost(hostReportedCounts, batchSize_);
+  matchIndices_.copyToHost(hostMatchIndices, totalBatchMatchIndices_);
+}
+
 // =============================================================================
 // Pipelined Batch Processing Implementation
 // =============================================================================
@@ -931,20 +946,14 @@ void launchLabelAndMatch(const std::vector<int>&      batchLocalIndices,
 
   const int numPairsInGroup = static_cast<int>(batchLocalIndices.size());
 
-  auto& globalPairIndicesHost = twoStreamCtx.matchGlobalPairIndicesHost[depthGroupIdx];
-  auto& batchLocalIndicesHost = twoStreamCtx.matchBatchLocalIndicesHost[depthGroupIdx];
+  int* globalPairIndicesHost = twoStreamCtx.matchGlobalPairIndicesHost[depthGroupIdx];
+  int* batchLocalIndicesHostPtr = twoStreamCtx.matchBatchLocalIndicesHost[depthGroupIdx];
   
   ScopedNvtxRange prepareRange("CPU: Prepare host index arrays");
-  if (globalPairIndicesHost.size() < static_cast<size_t>(numPairsInGroup)) {
-    globalPairIndicesHost.resize(static_cast<size_t>(numPairsInGroup * 1.5));
-  }
-  if (batchLocalIndicesHost.size() < static_cast<size_t>(numPairsInGroup)) {
-    batchLocalIndicesHost.resize(static_cast<size_t>(numPairsInGroup * 1.5));
-  }
 
   for (int i = 0; i < numPairsInGroup; ++i) {
     globalPairIndicesHost[i] = slot.pairIndicesHost[batchLocalIndices[i]];
-    batchLocalIndicesHost[i] = batchLocalIndices[i];
+    batchLocalIndicesHostPtr[i] = batchLocalIndices[i];
   }
   prepareRange.pop();
 
@@ -955,13 +964,13 @@ void launchLabelAndMatch(const std::vector<int>&      batchLocalIndices,
   if (globalPairIndicesDev.size() < static_cast<size_t>(numPairsInGroup)) {
     globalPairIndicesDev.resize(static_cast<size_t>(numPairsInGroup * 1.5));
   }
-  globalPairIndicesDev.copyFromHost(globalPairIndicesHost.data(), numPairsInGroup);
+  globalPairIndicesDev.copyFromHost(globalPairIndicesHost, numPairsInGroup);
 
   batchLocalIndicesDev.setStream(stream);
   if (batchLocalIndicesDev.size() < static_cast<size_t>(numPairsInGroup)) {
     batchLocalIndicesDev.resize(static_cast<size_t>(numPairsInGroup * 1.5));
   }
-  batchLocalIndicesDev.copyFromHost(batchLocalIndicesHost.data(), numPairsInGroup);
+  batchLocalIndicesDev.copyFromHost(batchLocalIndicesHostPtr, numPairsInGroup);
 
   SubstructMatchResultsDeviceView batchView = slot.deviceResults.view();
 
@@ -1049,9 +1058,7 @@ void launchRecursivePaintKernels(
         waitRange.pop();
         scratch.patternsAtDepthHostCopyPending = false;
       }
-      if (scratch.patternsAtDepthHost.size() < numPatternsInSubBatch) {
-        scratch.patternsAtDepthHost.resize(static_cast<size_t>(numPatternsInSubBatch * 1.5));
-      }
+      scratch.ensureCapacity(static_cast<int>(numPatternsInSubBatch));
       for (size_t i = 0; i < numPatternsInSubBatch; ++i) {
         scratch.patternsAtDepthHost[i] = patternsForDepth[patternStart + i];
       }
@@ -1073,7 +1080,7 @@ void launchRecursivePaintKernels(
         scratch.patternEntries.resize(static_cast<size_t>(numPatternsInSubBatch * 1.5));
       }
       
-      scratch.patternEntries.copyFromHost(scratch.patternsAtDepthHost.data(), numPatternsInSubBatch);
+      scratch.patternEntries.copyFromHost(scratch.patternsAtDepthHost, numPatternsInSubBatch);
       cudaCheckError(cudaEventRecord(scratch.patternsAtDepthHostCopyDone.event(), scratch.patternEntries.stream()));
       scratch.patternsAtDepthHostCopyPending = true;
 
@@ -1160,7 +1167,7 @@ void uploadAndLaunchBatch(BatchSlot&                 slot,
     ScopedNvtxRange nonRecursiveRange("Non-recursive path");
     
     slot.deviceResults.allocateBatch(slot.numPairsInBatch,
-                                     slot.batchPairMatchStarts.data(),
+                                     slot.batchPairMatchStarts,
                                      slot.totalMatchIndices,
                                      ctx.numQueries,
                                      ctx.maxTargetAtoms,
@@ -1170,7 +1177,7 @@ void uploadAndLaunchBatch(BatchSlot&                 slot,
     if (slot.pairIndicesDev.size() < static_cast<size_t>(slot.numPairsInBatch)) {
       slot.pairIndicesDev.resize(static_cast<size_t>(slot.numPairsInBatch * 1.5));
     }
-    slot.pairIndicesDev.copyFromHost(slot.pairIndicesHost.data(), slot.numPairsInBatch);
+    slot.pairIndicesDev.copyFromHost(slot.pairIndicesHost, slot.numPairsInBatch);
 
     SubstructMatchResultsDeviceView batchView = slot.deviceResults.view();
 
@@ -1205,7 +1212,7 @@ void uploadAndLaunchBatch(BatchSlot&                 slot,
   cudaStream_t recursiveStream = twoStreamCtx.recursiveStream.stream();
 
   slot.deviceResults.allocateBatch(slot.numPairsInBatch,
-                                   slot.batchPairMatchStarts.data(),
+                                   slot.batchPairMatchStarts,
                                    slot.totalMatchIndices,
                                    ctx.numQueries,
                                    ctx.maxTargetAtoms,
@@ -1334,11 +1341,15 @@ void threadWorker(int                        workerIdx,
                   int                        totalNumBatches,
                   int                        effectiveBatchSize,
                   int                        maxQueryAtoms,
-                  std::exception_ptr&        exceptionPtr) {
+                  std::exception_ptr&        exceptionPtr,
+                  ConsolidatedPinnedBuffer&  pinnedBuffer0,
+                  ConsolidatedPinnedBuffer&  pinnedBuffer1) {
   try {
     ScopedNvtxRange workerRange("threadWorker " + std::to_string(workerIdx));
 
     std::array<BatchSlot, 2> slots{BatchSlot(workerIdx * 2), BatchSlot(workerIdx * 2 + 1)};
+    slots[0].bindPinnedBuffer(pinnedBuffer0);
+    slots[1].bindPinnedBuffer(pinnedBuffer1);
     for (auto& slot : slots) {
       slot.initializeForStream();
     }
@@ -1355,13 +1366,6 @@ void threadWorker(int                        workerIdx,
       }
     }
     waitRange.pop();
-
-    ScopedNvtxRange reserveRange("CPU: Reserve host buffers");
-    const int       maxMatchIndicesPerBatch = effectiveBatchSize * ctx.maxTargetAtoms * maxQueryAtoms;
-    for (auto& slot : slots) {
-      slot.reserveHostBuffers(effectiveBatchSize, maxMatchIndicesPerBatch);
-    }
-    reserveRange.pop();
 
     const int numPairs = ctx.numTargets * ctx.numQueries;
 
@@ -1496,6 +1500,26 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
   ScopedCudaEvent upstreamReadyEvent;
   cudaCheckError(cudaEventRecord(upstreamReadyEvent.event(), stream));
 
+  // Pre-allocate consolidated pinned buffers before spawning threads (2 slots per thread)
+  ScopedNvtxRange allocRange("CPU: Pre-allocate consolidated pinned buffers");
+  const int maxMatchIndicesPerBatch = effectiveBatchSize * ctx.maxTargetAtoms * maxQueryAtoms;
+
+  // Estimate max patterns per depth based on query data
+  int maxPatternsPerDepth = 256;
+  for (size_t q = 0; q < queriesHost.recursivePatterns.size(); ++q) {
+    const auto& recInfo = queriesHost.recursivePatterns[q];
+    maxPatternsPerDepth = std::max(maxPatternsPerDepth, static_cast<int>(recInfo.patterns.size()));
+  }
+
+  std::vector<std::unique_ptr<ConsolidatedPinnedBuffer>> pinnedBuffers;
+  pinnedBuffers.reserve(numThreads * 2);
+  for (int i = 0; i < numThreads * 2; ++i) {
+    auto buf = std::make_unique<ConsolidatedPinnedBuffer>();
+    buf->allocate(effectiveBatchSize, maxMatchIndicesPerBatch, maxPatternsPerDepth);
+    pinnedBuffers.push_back(std::move(buf));
+  }
+  allocRange.pop();
+
   ScopedNvtxRange          threadRange("Multithreaded batch processing");
   std::vector<std::thread> workers;
   std::vector<std::exception_ptr> exceptions(numThreads);
@@ -1519,7 +1543,9 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
                          totalNumBatches,
                          effectiveBatchSize,
                          maxQueryAtoms,
-                         std::ref(exceptions[t]));
+                         std::ref(exceptions[t]),
+                         std::ref(*pinnedBuffers[t * 2]),
+                         std::ref(*pinnedBuffers[t * 2 + 1]));
   }
   launchRange.pop();
 
@@ -1538,6 +1564,11 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
   }
 
   cudaCheckError(cudaGetLastError());
+
+  // Fire-and-forget async cleanup of pinned buffers
+  for (auto& buf : pinnedBuffers) {
+    AsyncResourceCleaner::instance().scheduleBufferCleanup(std::move(buf));
+  }
 }
 
 void getSubstructMatches(MoleculesDevice&           targetsDevice,
@@ -1680,9 +1711,7 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
         waitRange.pop();
         scratch.patternsAtDepthHostCopyPending = false;
       }
-      if (scratch.patternsAtDepthHost.size() < numPatternsInSubBatch) {
-        scratch.patternsAtDepthHost.resize(static_cast<size_t>(numPatternsInSubBatch * 1.5));
-      }
+      scratch.ensureCapacity(static_cast<int>(numPatternsInSubBatch));
       for (size_t i = 0; i < numPatternsInSubBatch; ++i) {
         scratch.patternsAtDepthHost[i] = patternsAtDepth[patternStart + i];
       }
@@ -1704,7 +1733,7 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
         scratch.patternEntries.resize(static_cast<size_t>(numPatternsInSubBatch * 1.5));
       }
       
-      scratch.patternEntries.copyFromHost(scratch.patternsAtDepthHost.data(), numPatternsInSubBatch);
+      scratch.patternEntries.copyFromHost(scratch.patternsAtDepthHost, numPatternsInSubBatch);
       cudaCheckError(cudaEventRecord(scratch.patternsAtDepthHostCopyDone.event(), scratch.patternEntries.stream()));
       scratch.patternsAtDepthHostCopyPending = true;
 

@@ -10,8 +10,14 @@ target_link_libraries(
   PUBLIC device_vector flatBitVect
   PRIVATE ${RDKit_LIBS})
 
+add_library(pinned_buffer_pool pinned_buffer_pool.cpp)
+target_include_directories(pinned_buffer_pool
+                           PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(pinned_buffer_pool PUBLIC cuda_error_check)
+
 add_library(substructure_search substructure_search.cu)
 target_include_directories(substructure_search
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(substructure_search PUBLIC molecules device_vector
-                                                  flatBitVect cuda_error_check)
+                                                  flatBitVect cuda_error_check
+                                                  pinned_buffer_pool)
