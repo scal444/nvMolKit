@@ -389,11 +389,14 @@ std::vector<std::vector<uint8_t>> computeGpuLabelMatrix(const RDKit::ROMol& targ
   batchResults.zeroRecursiveBits();
 
   if (!queryHost.recursivePatterns.empty() && !queryHost.recursivePatterns[0].empty()) {
+    LeafSubpatterns leafSubpatterns;
+    leafSubpatterns.buildAllPatterns(queryHost);
+    leafSubpatterns.syncToDevice(stream);
+
     RecursiveScratchBuffers          scratch(stream);
-    RecursivePatternCache            patternCache(stream);
     std::vector<BatchedPatternEntry> scratchPatternEntries;
-    preprocessRecursiveSmartsBatched(targetDevice, targetHost, queryHost, batchResults, 1, 0, 1,
-                                     SubstructAlgorithm::GSI, stream, scratch, patternCache,
+    preprocessRecursiveSmartsBatched(targetDevice, targetHost, queryHost, leafSubpatterns, batchResults, 1, 0, 1,
+                                     SubstructAlgorithm::GSI, stream, scratch,
                                      scratchPatternEntries);
   }
   RecursivePatternInfo info = extractRecursivePatterns(&queryMol);

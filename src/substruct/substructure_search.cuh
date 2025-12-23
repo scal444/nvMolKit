@@ -188,6 +188,9 @@ class BatchResultsDevice {
   int totalBatchMatchIndices_ = 0;
 };
 
+// Forward declaration for function signatures below
+struct LeafSubpatterns;
+
 /**
  * @brief Perform batch substructure matching on GPU with host-side CSR results.
  *
@@ -198,6 +201,7 @@ class BatchResultsDevice {
  * @param queriesDevice Device-resident query molecules (use addQueryToBatch to build)
  * @param targetsHost Host-side target data (for atom counts)
  * @param queriesHost Host-side query data (for atom counts)
+ * @param leafSubpatterns Pre-built leaf subpatterns for recursive SMARTS (or empty)
  * @param results Host-side CSR output storage (will be populated)
  * @param algorithm Algorithm to use for matching
  * @param stream CUDA stream for async operations
@@ -207,6 +211,7 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
                          const MoleculesDevice&     queriesDevice,
                          const MoleculesHost&       targetsHost,
                          const MoleculesHost&       queriesHost,
+                         const LeafSubpatterns&     leafSubpatterns,
                          SubstructMatchResultsHost& results,
                          SubstructAlgorithm         algorithm,
                          cudaStream_t               stream,
@@ -222,20 +227,54 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
  * @param queriesDevice Device-resident query molecules (use addQueryToBatch to build)
  * @param targetsHost Host-side target data (for atom counts)
  * @param queriesHost Host-side query data (for atom counts)
+ * @param leafSubpatterns Pre-built leaf subpatterns for recursive SMARTS (or empty)
  * @param results Output: matches[target][query][match] = vector of target atom indices
  * @param algorithm Algorithm to use for matching
  * @param stream CUDA stream for async operations
  * @param batchSize Number of pairs per batch (default 1024).
  */
-void getSubstructMatches(MoleculesDevice&        targetsDevice,
-                         const MoleculesDevice&  queriesDevice,
-                         const MoleculesHost&    targetsHost,
-                         const MoleculesHost&    queriesHost,
-                         SubstructSearchResults& results,
-                         SubstructAlgorithm      algorithm,
-                         cudaStream_t            stream,
-                         int                     batchSize = 1024,
-                         int                     numThreads = 2);
+void getSubstructMatches(MoleculesDevice&           targetsDevice,
+                         const MoleculesDevice&     queriesDevice,
+                         const MoleculesHost&       targetsHost,
+                         const MoleculesHost&       queriesHost,
+                         const LeafSubpatterns&     leafSubpatterns,
+                         SubstructSearchResults&    results,
+                         SubstructAlgorithm         algorithm,
+                         cudaStream_t               stream,
+                         int                        batchSize = 1024,
+                         int                        numThreads = 2);
+
+/**
+ * @brief Convenience overload that builds LeafSubpatterns internally.
+ *
+ * Builds leaf subpatterns from queriesHost before matching. For repeated calls
+ * with the same queries, prefer the overload accepting pre-built LeafSubpatterns.
+ */
+void getSubstructMatches(MoleculesDevice&           targetsDevice,
+                         const MoleculesDevice&     queriesDevice,
+                         const MoleculesHost&       targetsHost,
+                         const MoleculesHost&       queriesHost,
+                         SubstructMatchResultsHost& results,
+                         SubstructAlgorithm         algorithm,
+                         cudaStream_t               stream,
+                         int                        batchSize = 1024,
+                         int                        numThreads = 2);
+
+/**
+ * @brief Convenience overload that builds LeafSubpatterns internally.
+ *
+ * Builds leaf subpatterns from queriesHost before matching. For repeated calls
+ * with the same queries, prefer the overload accepting pre-built LeafSubpatterns.
+ */
+void getSubstructMatches(MoleculesDevice&           targetsDevice,
+                         const MoleculesDevice&     queriesDevice,
+                         const MoleculesHost&       targetsHost,
+                         const MoleculesHost&       queriesHost,
+                         SubstructSearchResults&    results,
+                         SubstructAlgorithm         algorithm,
+                         cudaStream_t               stream,
+                         int                        batchSize = 1024,
+                         int                        numThreads = 2);
 
 /**
  * @brief Per-pattern metadata for batched recursive preprocessing kernel.
@@ -286,60 +325,87 @@ struct RecursiveScratchBuffers {
 };
 
 /**
- * @brief Key for caching recursive patterns.
+ * @brief Key for mapping (queryIdx, patternId) to leaf subpattern molecule index.
  */
-struct RecursivePatternKey {
+struct LeafSubpatternKey {
   int queryIdx;
   int patternId;
 
-  bool operator==(const RecursivePatternKey& other) const {
+  bool operator==(const LeafSubpatternKey& other) const {
     return queryIdx == other.queryIdx && patternId == other.patternId;
   }
 };
 
 /**
- * @brief Hash function for RecursivePatternKey.
+ * @brief Hash function for LeafSubpatternKey.
  */
-struct RecursivePatternKeyHash {
-  std::size_t operator()(const RecursivePatternKey& key) const {
+struct LeafSubpatternKeyHash {
+  std::size_t operator()(const LeafSubpatternKey& key) const {
     return std::hash<int>()(key.queryIdx) ^ (std::hash<int>()(key.patternId) << 16);
   }
 };
 
 /**
- * @brief Cache for recursive SMARTS patterns.
+ * @brief Pre-built collection of all recursive SMARTS leaf subpatterns.
  *
- * Caches patterns across batch iterations to avoid reprocessing the same
- * patterns for each batch. The cache maps (queryIdx, patternId) to the
- * molecule index in a persistent MoleculesHost/MoleculesDevice.
+ * Contains all recursive patterns from all queries, built once before batch
+ * processing begins. Kernels access patterns by molecule index via the
+ * patternIndexMap lookup.
+ *
+ * The device-side data is shared (read-only) across all worker threads.
  */
-struct RecursivePatternCache {
-  std::unordered_map<RecursivePatternKey, int, RecursivePatternKeyHash> patternIndexMap;
-  MoleculesHost   cachedPatterns;
-  MoleculesDevice cachedPatternsDevice;
-  bool            deviceNeedsUpdate = false;
+struct LeafSubpatterns {
+  std::unordered_map<LeafSubpatternKey, int, LeafSubpatternKeyHash> patternIndexMap;
+  MoleculesHost   patternsHost;
+  MoleculesDevice patternsDevice;
 
-  RecursivePatternCache() = default;
-  explicit RecursivePatternCache(cudaStream_t stream) : cachedPatternsDevice(stream) {}
-
-  void setStream(cudaStream_t stream) { cachedPatternsDevice.setStream(stream); }
+  LeafSubpatterns() = default;
 
   /**
-   * @brief Look up or add a pattern to the cache.
+   * @brief Build all leaf subpatterns from all queries.
+   *
+   * Iterates through all queries and extracts all recursive patterns,
+   * building them into a single MoleculesHost batch. Must be called
+   * before batch processing begins.
+   *
+   * @param queriesHost Host-side query data containing recursivePatterns
+   */
+  void buildAllPatterns(const MoleculesHost& queriesHost);
+
+  /**
+   * @brief Upload patterns to device.
+   *
+   * @param stream CUDA stream for async operations
+   */
+  void syncToDevice(cudaStream_t stream);
+
+  /**
+   * @brief Look up a pattern's molecule index.
    *
    * @param queryIdx Index of the query containing the pattern
    * @param patternId Pattern ID within the query
-   * @param queryMol The pattern molecule (only used if not in cache)
-   * @param patternInfo Full recursive pattern info for this query (to find children's patternIds)
-   * @return The molecule index in the cached patterns batch
+   * @return The molecule index in patternsHost/patternsDevice, or -1 if not found
    */
-  int getOrAddPattern(int queryIdx, int patternId, const RDKit::ROMol* queryMol,
-                      const RecursivePatternInfo& patternInfo);
+  [[nodiscard]] int getPatternIndex(int queryIdx, int patternId) const {
+    LeafSubpatternKey key{queryIdx, patternId};
+    auto it = patternIndexMap.find(key);
+    return (it != patternIndexMap.end()) ? it->second : -1;
+  }
 
   /**
-   * @brief Sync cached patterns to device if needed.
+   * @brief Check if any patterns were built.
    */
-  void syncToDevice(cudaStream_t stream);
+  [[nodiscard]] bool empty() const { return patternIndexMap.empty(); }
+
+  /**
+   * @brief Get the number of patterns.
+   */
+  [[nodiscard]] size_t size() const { return patternIndexMap.size(); }
+
+  /**
+   * @brief Get view for kernel access.
+   */
+  [[nodiscard]] MoleculesDeviceView view() const { return patternsDevice.view(); }
 };
 
 /// Maximum supported recursion depth for nested recursive SMARTS patterns.
@@ -392,12 +458,13 @@ struct TwoStreamPipelineContext {
 /**
  * @brief Preprocess ALL recursive SMARTS patterns for a batch in a single kernel launch.
  *
- * Collects all recursive patterns from all queries that have pairs in the batch,
- * builds a combined pattern batch, and launches a single fused paint kernel.
+ * Uses pre-built leaf subpatterns to run paint kernels for all recursive patterns
+ * that affect pairs in the current batch.
  *
  * @param targetsDevice Device-resident target molecules
  * @param targetsHost Host-side target data
  * @param queriesHost Host-side query data (contains recursivePatterns per query)
+ * @param leafSubpatterns Pre-built leaf subpattern molecules (device-resident)
  * @param batchResults The batch results buffer where recursiveMatchBits will be written
  * @param numQueries Total number of queries (for computing pair indices)
  * @param batchPairOffset Global pair index where current batch starts
@@ -405,12 +472,12 @@ struct TwoStreamPipelineContext {
  * @param algorithm Algorithm to use for matching
  * @param stream CUDA stream for async operations
  * @param scratch Reusable scratch buffers (avoids alloc/free between kernels)
- * @param patternCache Cache for recursive patterns (reused across batch iterations)
  * @param scratchPatternEntries Vector to store pattern entries for the batch
  */
 void preprocessRecursiveSmartsBatched(const MoleculesDevice&            targetsDevice,
                                       const MoleculesHost&              targetsHost,
                                       const MoleculesHost&              queriesHost,
+                                      const LeafSubpatterns&            leafSubpatterns,
                                       BatchResultsDevice&               batchResults,
                                       int                               numQueries,
                                       int                               batchPairOffset,
@@ -418,7 +485,6 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&            targetsD
                                       SubstructAlgorithm                algorithm,
                                       cudaStream_t                      stream,
                                       RecursiveScratchBuffers&          scratch,
-                                      RecursivePatternCache&            patternCache,
                                       std::vector<BatchedPatternEntry>& scratchPatternEntries);
 
 /**
@@ -433,6 +499,7 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&            targetsD
 void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&            targetsDevice,
                                                 const MoleculesHost&              targetsHost,
                                                 const MoleculesHost&              queriesHost,
+                                                const LeafSubpatterns&            leafSubpatterns,
                                                 BatchResultsDevice&               batchResults,
                                                 int                               numQueries,
                                                 int                               batchPairOffset,
@@ -440,7 +507,6 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
                                                 SubstructAlgorithm                algorithm,
                                                 cudaStream_t                      stream,
                                                 RecursiveScratchBuffers&          scratch,
-                                                RecursivePatternCache&            patternCache,
                                                 std::vector<BatchedPatternEntry>& scratchPatternEntries,
                                                 cudaEvent_t*                      depthEvents,
                                                 int                               numDepthEvents);
