@@ -59,57 +59,81 @@ std::unique_ptr<RDKit::ROMol> makeMolFromSmarts(const std::string& smarts) {
 }
 
 /**
- * @brief Read SMILES strings from a file.
+ * @brief Read and parse molecules from SMILES file until we get enough valid ones.
  *
  * Supports .smi, .smiles, .cxsmiles file formats.
  * Lines starting with # are treated as comments.
+ * Continues reading until either maxCount valid molecules are parsed or EOF.
+ * 
+ * @param filePath Path to SMILES file
+ * @param maxCount Maximum number of valid molecules to parse
+ * @param asQuery If true, parse as SMARTS; otherwise parse as SMILES
+ * @param maxAtoms Maximum number of atoms allowed (0 = no limit)
+ * @param smilesOut Optional output vector to store the original SMILES/SMARTS strings
+ * @return Vector of parsed molecules
  */
-std::vector<std::string> readSmilesFile(const std::string& filePath, unsigned int maxCount) {
+std::vector<std::unique_ptr<RDKit::ROMol>> readAndParseMolecules(const std::string&        filePath,
+                                                                  unsigned int              maxCount,
+                                                                  bool                      asQuery,
+                                                                  unsigned int              maxAtoms = 0,
+                                                                  std::vector<std::string>* smilesOut = nullptr) {
   std::ifstream file(filePath);
   if (!file.is_open()) {
-    throw std::runtime_error("Could not open SMILES file: " + filePath);
+    throw std::runtime_error("Could not open file: " + filePath);
   }
 
-  std::vector<std::string> smilesList;
-  std::string              line;
+  std::vector<std::unique_ptr<RDKit::ROMol>> mols;
+  mols.reserve(maxCount);
+  std::string line;
+  unsigned int linesRead = 0;
+  unsigned int parseFailures = 0;
+  unsigned int filteredByAtoms = 0;
 
-  while (std::getline(file, line) && smilesList.size() < maxCount) {
+  while (std::getline(file, line) && mols.size() < maxCount) {
+    linesRead++;
+    
     if (line.empty() || line[0] == '#') {
       continue;
     }
+    
     std::string smiles = line.substr(0, line.find_first_of(" \t"));
-    if (!smiles.empty()) {
-      smilesList.push_back(smiles);
+    if (smiles.empty()) {
+      continue;
+    }
+
+    auto mol = asQuery ? makeMolFromSmarts(smiles) : makeMolFromSmiles(smiles);
+    if (!mol) {
+      parseFailures++;
+      continue;
+    }
+
+    if (maxAtoms > 0 && mol->getNumAtoms() > maxAtoms) {
+      filteredByAtoms++;
+      continue;
+    }
+
+    mols.push_back(std::move(mol));
+    if (smilesOut) {
+      smilesOut->push_back(smiles);
     }
   }
 
-  if (smilesList.empty()) {
-    throw std::runtime_error("No valid SMILES found in file: " + filePath);
+  if (mols.empty()) {
+    throw std::runtime_error("No valid molecules found in file: " + filePath);
   }
 
-  return smilesList;
-}
-
-/**
- * @brief Parse molecules from SMILES/SMARTS strings.
- * @param smilesList List of SMILES strings
- * @param asQuery If true, parse as SMARTS; otherwise parse as SMILES
- * @return Vector of parsed molecules
- */
-std::vector<std::unique_ptr<RDKit::ROMol>> parseMolecules(const std::vector<std::string>& smilesList,
-                                                          bool                            asQuery) {
-  std::vector<std::unique_ptr<RDKit::ROMol>> mols;
-  mols.reserve(smilesList.size());
-
-  for (const auto& smi : smilesList) {
-    auto mol = asQuery ? makeMolFromSmarts(smi) : makeMolFromSmiles(smi);
-    if (mol) {
-      mols.push_back(std::move(mol));
-    } else {
-      std::cerr << "Warning: Failed to parse " << (asQuery ? "SMARTS" : "SMILES") << ": " << smi
-                << std::endl;
+  std::cout << "  Read " << linesRead << " lines from " << filePath << "\n";
+  std::cout << "  Parsed " << mols.size() << " valid " << (asQuery ? "queries" : "targets");
+  if (parseFailures > 0) {
+    std::cout << " (" << parseFailures << " parse failures";
+    if (filteredByAtoms > 0) {
+      std::cout << ", " << filteredByAtoms << " filtered by atom cap";
     }
+    std::cout << ")";
+  } else if (filteredByAtoms > 0) {
+    std::cout << " (" << filteredByAtoms << " filtered by atom cap)";
   }
+  std::cout << "\n";
 
   return mols;
 }
@@ -164,6 +188,7 @@ void benchRDKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
 void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
                    const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols,
                    SubstructAlgorithm                                algorithm,
+                   int                                               batchSize,
                    int                                               numThreads,
                    int&                                              totalMatches,
                    SubstructMatchResultsHost&                        resultsOut,
@@ -184,7 +209,7 @@ void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
   timingOut = BenchUtils::timeIt(
     [&]() {
       getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost, resultsOut, algorithm,
-                          stream.stream(), 1024, numThreads);
+                          stream.stream(), batchSize, numThreads);
     },
     3, 1);
 
@@ -228,16 +253,22 @@ void printHelp(const char* progName) {
   std::cout << "  -m, --num_queries <int>   Max number of query molecules [default: 10]\n";
   std::cout
     << "  -a, --algorithm <str>     Algorithm: vf2, gsi, or warpunified [default: warpunified]\n";
+  std::cout << "  -b, --batch_size <int>    GPU batch size for matching [default: 1024]\n";
+  std::cout << "  -c, --cap <int>           Max atoms per molecule (filter larger) [default: 128]\n";
   std::cout << "  -p, --num_threads <int>   CPU worker threads used by nvMolKit [default: 2]\n";
   std::cout << "  -r, --do_rdkit <bool>     Run RDKit benchmark comparison [default: true]\n";
   std::cout << "  -w, --do_warmup <bool>    Run warmup before benchmarking [default: true]\n";
   std::cout << "  -v, --validate <bool>     Validate GPU results against RDKit [default: false]\n";
+  std::cout << "  -d, --debug <int>         Debug/verbosity level (0-2) [default: 0]\n";
+  std::cout << "                            0: No debug output\n";
+  std::cout << "                            1: Print validation failures summary\n";
+  std::cout << "                            2: Print detailed validation failures with SMILES\n";
   std::cout << "  -h, --help                Show this help message\n\n";
   std::cout << "Boolean values can be: true/false, 1/0, yes/no, on/off (case insensitive)\n";
   std::cout << "\nExamples:\n";
   std::cout << "  " << progName
             << " --targets targets.smi --queries queries.smi --num_targets 1000 --algorithm gsi\n";
-  std::cout << "  " << progName << " -t targets.smi -q queries.smi -n 500 -m 20 -v true\n";
+  std::cout << "  " << progName << " -t targets.smi -q queries.smi -n 500 -m 20 -b 512 -c 64 -v true -d 2\n";
 }
 
 }  // namespace
@@ -248,10 +279,13 @@ int main(int argc, char* argv[]) {
   int                numTargets = 100;
   int                numQueries = 10;
   SubstructAlgorithm algorithm  = SubstructAlgorithm::WarpUnified;
+  int                batchSize  = 1024;
+  unsigned int       maxAtoms   = 128;
   int                numThreads = 2;
   bool               doRdkit    = true;
   bool               doWarmup   = true;
   bool               doValidate = false;
+  int                debugLevel = 0;
 
   static struct option long_options[] = {
     {   "targets", required_argument, 0, 't'},
@@ -259,10 +293,13 @@ int main(int argc, char* argv[]) {
     {"num_targets", required_argument, 0, 'n'},
     {"num_queries", required_argument, 0, 'm'},
     { "algorithm", required_argument, 0, 'a'},
+    {"batch_size", required_argument, 0, 'b'},
+    {       "cap", required_argument, 0, 'c'},
     {"num_threads", required_argument, 0, 'p'},
     {  "do_rdkit", required_argument, 0, 'r'},
     { "do_warmup", required_argument, 0, 'w'},
     {  "validate", required_argument, 0, 'v'},
+    {     "debug", required_argument, 0, 'd'},
     {      "help",       no_argument, 0, 'h'},
     {           0,                 0, 0,   0}
   };
@@ -270,7 +307,7 @@ int main(int argc, char* argv[]) {
   int option_index = 0;
   int c;
 
-  while ((c = getopt_long(argc, argv, "t:q:n:m:a:p:r:w:v:h", long_options, &option_index)) != -1) {
+  while ((c = getopt_long(argc, argv, "t:q:n:m:a:b:c:p:r:w:v:d:h", long_options, &option_index)) != -1) {
     switch (c) {
       case 't':
         targetsPath = optarg;
@@ -310,6 +347,30 @@ int main(int argc, char* argv[]) {
           return 1;
         }
         break;
+      case 'b':
+        try {
+          batchSize = std::stoi(optarg);
+          if (batchSize <= 0) {
+            std::cerr << "Error: batch_size must be positive\n";
+            return 1;
+          }
+        } catch (const std::exception& e) {
+          std::cerr << "Error: Invalid value for batch_size: " << optarg << "\n";
+          return 1;
+        }
+        break;
+      case 'c':
+        try {
+          maxAtoms = std::stoul(optarg);
+          if (maxAtoms == 0) {
+            std::cerr << "Error: cap must be positive\n";
+            return 1;
+          }
+        } catch (const std::exception& e) {
+          std::cerr << "Error: Invalid value for cap: " << optarg << "\n";
+          return 1;
+        }
+        break;
       case 'p':
         try {
           numThreads = std::stoi(optarg);
@@ -330,6 +391,18 @@ int main(int argc, char* argv[]) {
         break;
       case 'v':
         doValidate = parseBoolArg(optarg);
+        break;
+      case 'd':
+        try {
+          debugLevel = std::stoi(optarg);
+          if (debugLevel < 0 || debugLevel > 2) {
+            std::cerr << "Error: debug level must be 0, 1, or 2\n";
+            return 1;
+          }
+        } catch (const std::exception& e) {
+          std::cerr << "Error: Invalid value for debug: " << optarg << "\n";
+          return 1;
+        }
         break;
       case 'h':
         printHelp(argv[0]);
@@ -373,19 +446,22 @@ int main(int argc, char* argv[]) {
   std::cout << "  Max targets: " << numTargets << "\n";
   std::cout << "  Max queries: " << numQueries << "\n";
   std::cout << "  Algorithm: " << algorithmName(algorithm) << "\n";
+  std::cout << "  Batch size: " << batchSize << "\n";
+  std::cout << "  Atom cap: " << maxAtoms << "\n";
   std::cout << "  nvMolKit threads: " << numThreads << "\n";
   std::cout << "  Run RDKit comparison: " << (doRdkit ? "yes" : "no") << "\n";
   std::cout << "  Run warmup: " << (doWarmup ? "yes" : "no") << "\n";
-  std::cout << "  Validate results: " << (doValidate ? "yes" : "no") << "\n\n";
+  std::cout << "  Validate results: " << (doValidate ? "yes" : "no") << "\n";
+  std::cout << "  Debug level: " << debugLevel << "\n\n";
 
-  std::vector<std::string> targetSmiles = readSmilesFile(targetsPath, numTargets);
-  std::vector<std::string> querySmiles  = readSmilesFile(queriesPath, numQueries);
-
-  std::cout << "Loaded " << targetSmiles.size() << " targets and " << querySmiles.size()
-            << " queries\n\n";
-
-  auto targetMols = parseMolecules(targetSmiles, false);
-  auto queryMols  = parseMolecules(querySmiles, true);
+  std::cout << "Loading and parsing molecules...\n";
+  std::vector<std::string> targetSmiles;
+  std::vector<std::string> querySmarts;
+  auto targetMols = readAndParseMolecules(targetsPath, numTargets, false, maxAtoms,
+                                          debugLevel >= 2 ? &targetSmiles : nullptr);
+  auto queryMols  = readAndParseMolecules(queriesPath, numQueries, true, maxAtoms,
+                                          debugLevel >= 2 ? &querySmarts : nullptr);
+  std::cout << "\n";
 
   if (targetMols.empty()) {
     std::cerr << "Error: No valid target molecules parsed\n";
@@ -393,12 +469,6 @@ int main(int argc, char* argv[]) {
   }
   if (queryMols.empty()) {
     std::cerr << "Error: No valid query molecules parsed\n";
-    return 1;
-  }
-
-  if (static_cast<int>(targetMols.size()) < numTargets) {
-    std::cerr << "Error: Requested " << numTargets << " targets but only " << targetMols.size()
-              << " valid targets available in file\n";
     return 1;
   }
 
@@ -411,8 +481,8 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  std::cout << "Parsed " << targetMols.size() << " targets and " << queryMols.size()
-            << " queries\n\n";
+  std::cout << "Using " << targetMols.size() << " targets and " << queryMols.size()
+            << " queries for benchmark\n\n";
 
   if (doWarmup) {
     std::cout << "Warming up...\n";
@@ -425,7 +495,7 @@ int main(int argc, char* argv[]) {
     int                       warmupMatches;
     SubstructMatchResultsHost warmupResults;
     BenchUtils::TimingResult  warmupTiming;
-    benchNvMolKit(warmupTargets, warmupQueries, algorithm, numThreads, warmupMatches, warmupResults, warmupTiming);
+    benchNvMolKit(warmupTargets, warmupQueries, algorithm, batchSize, numThreads, warmupMatches, warmupResults, warmupTiming);
 
     if (doRdkit) {
       BenchUtils::TimingResult rdkitWarmupTiming;
@@ -435,10 +505,12 @@ int main(int argc, char* argv[]) {
     std::cout << "Warmed up\n\n";
   }
 
+  std::cout << "Running benchmarks...\n";
+
   int                       nvmolkitMatches = 0;
   SubstructMatchResultsHost nvmolkitResults;
   BenchUtils::TimingResult  nvmolkitTiming;
-  benchNvMolKit(targetMols, queryMols, algorithm, numThreads, nvmolkitMatches, nvmolkitResults, nvmolkitTiming);
+  benchNvMolKit(targetMols, queryMols, algorithm, batchSize, numThreads, nvmolkitMatches, nvmolkitResults, nvmolkitTiming);
   std::cout << "nvMolKit total matches: " << nvmolkitMatches << "\n";
 
   int                      rdkitMatches = 0;
@@ -460,18 +532,27 @@ int main(int argc, char* argv[]) {
   if (doValidate) {
     std::cout << "\nValidating against RDKit (per-pair comparison)...\n";
     auto validation = validateAgainstRDKit(nvmolkitResults, targetMols, queryMols);
-    printValidationResult(validation, algorithmName(algorithm));
+    
+    if (debugLevel == 0) {
+      printValidationResult(validation, algorithmName(algorithm));
+    } else if (debugLevel == 1) {
+      printValidationResult(validation, algorithmName(algorithm));
+    } else if (debugLevel >= 2) {
+      const int maxDetails = (debugLevel == 2) ? 10 : 100;
+      printValidationResultDetailed(validation, nvmolkitResults, targetMols, queryMols,
+                                    targetSmiles, querySmarts, algorithmName(algorithm), maxDetails);
+    }
   }
 
   std::cout << "\n\nCSV Results:\n";
-  std::cout << "algorithm,num_targets,num_queries,num_threads,nvmolkit_time_ms,nvmolkit_std_ms";
+  std::cout << "algorithm,num_targets,num_queries,batch_size,num_threads,nvmolkit_time_ms,nvmolkit_std_ms";
   if (doRdkit) {
     std::cout << ",rdkit_time_ms,rdkit_std_ms";
   }
   std::cout << "\n";
 
   std::cout << algorithmName(algorithm) << "," << targetMols.size() << "," << queryMols.size() << ","
-            << numThreads << ","
+            << batchSize << "," << numThreads << ","
             << nvmolkitTiming.avgMs << "," << nvmolkitTiming.stdMs;
   if (doRdkit) {
     std::cout << "," << rdkitTiming.avgMs << "," << rdkitTiming.stdMs;
