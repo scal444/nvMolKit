@@ -1101,25 +1101,35 @@ void threadWorker(int                        workerIdx,
   try {
     ScopedNvtxRange workerRange("threadWorker " + std::to_string(workerIdx));
     
-    BatchSlot slot(workerIdx);
-    slot.initializeForStream();
+    std::array<BatchSlot, 2> slots{BatchSlot(workerIdx * 2), BatchSlot(workerIdx * 2 + 1)};
+    for (auto& slot : slots) {
+      slot.initializeForStream();
+    }
 
     ScopedNvtxRange waitRange("Wait: worker streams wait for upstream ready event");
     if (upstreamReadyEvent != nullptr) {
-      cudaCheckError(cudaStreamWaitEvent(slot.stream(), upstreamReadyEvent, 0));
-      cudaCheckError(cudaStreamWaitEvent(slot.twoStreamCtx->recursiveStream.stream(), upstreamReadyEvent, 0));
-      for (int depth = 0; depth < kMaxRecursionDepth; ++depth) {
-        cudaCheckError(cudaStreamWaitEvent(slot.twoStreamCtx->matchStreams[depth].stream(), upstreamReadyEvent, 0));
+      for (auto& slot : slots) {
+        cudaCheckError(cudaStreamWaitEvent(slot.stream(), upstreamReadyEvent, 0));
+        cudaCheckError(cudaStreamWaitEvent(slot.twoStreamCtx->recursiveStream.stream(), upstreamReadyEvent, 0));
+        for (int depth = 0; depth < kMaxRecursionDepth; ++depth) {
+          cudaCheckError(cudaStreamWaitEvent(slot.twoStreamCtx->matchStreams[depth].stream(), upstreamReadyEvent, 0));
+        }
       }
     }
     waitRange.pop();
     
     ScopedNvtxRange reserveRange("CPU: Reserve host buffers");
     const int maxMatchIndicesPerBatch = effectiveBatchSize * ctx.maxTargetAtoms * maxQueryAtoms;
-    slot.reserveHostBuffers(effectiveBatchSize, maxMatchIndicesPerBatch);
+    for (auto& slot : slots) {
+      slot.reserveHostBuffers(effectiveBatchSize, maxMatchIndicesPerBatch);
+    }
     reserveRange.pop();
 
     const int numPairs = ctx.numTargets * ctx.numQueries;
+
+    int currentSlotIdx = 0;
+    int pendingSlotIdx = -1;
+    int pendingBatchIdx = -1;
 
     while (true) {
       const int batchIdx = nextBatchIdx.fetch_add(1, std::memory_order_relaxed);
@@ -1134,10 +1144,38 @@ void threadWorker(int                        workerIdx,
 
       ScopedNvtxRange batchRange("Thread batch " + std::to_string(batchIdx));
       
-      prepareBatchOnCPU(slot, ctx, batchStart, effectiveBatchSize);
-      uploadAndLaunchBatch(slot, ctx, targetsDevice, queriesDevice, targetsHost, queriesHost, leafSubpatterns, algorithm);
-      initiateResultsCopyToHost(slot);
-      accumulateBatchResults(slot, ctx, results);
+      BatchSlot& currentSlot = slots[currentSlotIdx];
+      
+      ScopedNvtxRange prepRange("CPU prep batch " + std::to_string(batchIdx) + " (slot " + 
+                                std::to_string(currentSlotIdx) + ")");
+      prepareBatchOnCPU(currentSlot, ctx, batchStart, effectiveBatchSize);
+      prepRange.pop();
+      
+      if (pendingSlotIdx >= 0) {
+        ScopedNvtxRange accumRange("Accumulate batch " + std::to_string(pendingBatchIdx) + 
+                                   " (slot " + std::to_string(pendingSlotIdx) + ")");
+        accumulateBatchResults(slots[pendingSlotIdx], ctx, results);
+        accumRange.pop();
+        pendingSlotIdx = -1;
+        pendingBatchIdx = -1;
+      }
+      
+      ScopedNvtxRange launchRange("GPU launch batch " + std::to_string(batchIdx) + " (slot " + 
+                                  std::to_string(currentSlotIdx) + ")");
+      uploadAndLaunchBatch(currentSlot, ctx, targetsDevice, queriesDevice, targetsHost, queriesHost, leafSubpatterns, algorithm);
+      initiateResultsCopyToHost(currentSlot);
+      launchRange.pop();
+      
+      pendingSlotIdx = currentSlotIdx;
+      pendingBatchIdx = batchIdx;
+      currentSlotIdx = 1 - currentSlotIdx;
+    }
+    
+    if (pendingSlotIdx >= 0) {
+      ScopedNvtxRange accumRange("Accumulate final batch " + std::to_string(pendingBatchIdx) + 
+                                 " (slot " + std::to_string(pendingSlotIdx) + ")");
+      accumulateBatchResults(slots[pendingSlotIdx], ctx, results);
+      accumRange.pop();
     }
   } catch (...) {
     exceptionPtr = std::current_exception();
