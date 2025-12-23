@@ -651,29 +651,38 @@ void BatchResultsDevice::allocateBatch(int        batchSize,
   totalBatchMatchIndices_ = totalBatchMatchIndices;
   overflowBuffersPerBlock_ = numBuffersPerBlock;
 
-  matchCounts_.resize(batchSize);
-  matchCounts_.zero();
+  if (matchCounts_.size() < static_cast<size_t>(batchSize)) {
+    matchCounts_.resize(batchSize);
+  }
 
-  reportedCounts_.resize(batchSize);
-  reportedCounts_.zero();
+  if (reportedCounts_.size() < static_cast<size_t>(batchSize)) {
+    reportedCounts_.resize(batchSize);
+  }
 
-  pairMatchStarts_.resize(batchSize + 1);
+  if (pairMatchStarts_.size() < static_cast<size_t>(batchSize + 1)) {
+    pairMatchStarts_.resize(batchSize + 1);
+  }
   pairMatchStarts_.copyFromHost(batchPairMatchStarts, batchSize + 1);
 
-  matchIndices_.resize(totalBatchMatchIndices);
-  // No zero needed - only written at specific indices based on counts
+  if (matchIndices_.size() < static_cast<size_t>(totalBatchMatchIndices)) {
+    matchIndices_.resize(totalBatchMatchIndices);
+  }
 
   const int overflowEntries = batchSize * numBuffersPerBlock * kOverflowEntriesPerBuffer;
-  overflowBuffer_.resize(overflowEntries);
-  // No zero needed - slots claimed via atomicAdd then initialized with .init()
+  if (overflowBuffer_.size() < static_cast<size_t>(overflowEntries)) {
+    overflowBuffer_.resize(overflowEntries);
+  }
 
   const size_t recursiveBitsSize = static_cast<size_t>(batchSize) * maxTargetAtoms;
-  recursiveMatchBits_.resize(recursiveBitsSize);
+  if (recursiveMatchBits_.size() < recursiveBitsSize) {
+    recursiveMatchBits_.resize(recursiveBitsSize);
+  }
   recursiveMatchBits_.zero();
 
   const size_t labelMatrixSize = static_cast<size_t>(batchSize) * kLabelMatrixWords;
-  labelMatrixBuffer_.resize(labelMatrixSize);
-  // No zero needed - completely overwritten by labelMatrixKernel
+  if (labelMatrixBuffer_.size() < labelMatrixSize) {
+    labelMatrixBuffer_.resize(labelMatrixSize);
+  }
 }
 
 void BatchResultsDevice::setQueryAtomCounts(const std::vector<int>& queryAtomCounts) {
