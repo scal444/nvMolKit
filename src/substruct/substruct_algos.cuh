@@ -239,17 +239,40 @@ __device__ __forceinline__ bool checkEdgeConsistency(const MoleculeView& target,
         const int       targetBondIdx = target.getNeighborBondIdx(targetAtom, j);
         const BondData& targetBond    = target.getBond(targetBondIdx, threadIdx.x, blockIdx.x);
 
+        if constexpr (kDebugEdgeConsistency) {
+          if (threadIdx.x == 0 && blockIdx.x == 0) {
+            printf("[EdgeCheck] q%d->q%d (t%d->t%d): qBondType=%d, tBondType=%d, qFlags=0x%x, qAllowed=0x%x, tInRing=%d\n",
+                   queryAtom, neighborQueryAtom, targetAtom, neighborTargetAtom,
+                   queryBondType, targetBond.bondType, queryBondFlags, queryAllowedBondTypes, targetBond.isInRing);
+          }
+        }
+
         // Check bond type compatibility
         if (queryBondFlags & BondQueryNeverMatches) {
           // Impossible constraint (e.g., single AND aromatic) - never matches
+          if constexpr (kDebugEdgeConsistency) {
+            if (threadIdx.x == 0 && blockIdx.x == 0) {
+              printf("[EdgeCheck]   -> FAIL: NeverMatches flag set\n");
+            }
+          }
           continue;
         } else if (queryBondFlags & BondQueryUseBondMask) {
           // Bond OR pattern: check if target bond type is in allowed mask
           const int tbt = targetBond.bondType;
           if (tbt < 0 || tbt >= 16 || !(queryAllowedBondTypes & (1u << tbt))) {
+            if constexpr (kDebugEdgeConsistency) {
+              if (threadIdx.x == 0 && blockIdx.x == 0) {
+                printf("[EdgeCheck]   -> FAIL: bondMask check (tbt=%d not in mask 0x%x)\n", tbt, queryAllowedBondTypes);
+              }
+            }
             continue;
           }
         } else if (!bondTypeMatches(queryBondType, targetBond.bondType)) {
+          if constexpr (kDebugEdgeConsistency) {
+            if (threadIdx.x == 0 && blockIdx.x == 0) {
+              printf("[EdgeCheck]   -> FAIL: bondType mismatch (%d != %d)\n", queryBondType, targetBond.bondType);
+            }
+          }
           continue;
         }
 
@@ -257,16 +280,32 @@ __device__ __forceinline__ bool checkEdgeConsistency(const MoleculeView& target,
         if (queryBondFlags & (BondQueryIsRingBond | BondQueryNotRingBond)) {
           bool targetIsInRing = (targetBond.isInRing != 0);
           if (!ringBondConstraintsSatisfied(queryBondFlags, targetIsInRing)) {
+            if constexpr (kDebugEdgeConsistency) {
+              if (threadIdx.x == 0 && blockIdx.x == 0) {
+                printf("[EdgeCheck]   -> FAIL: ring constraint (flags=0x%x, targetInRing=%d)\n", queryBondFlags, targetIsInRing);
+              }
+            }
             continue;
           }
         }
 
+        if constexpr (kDebugEdgeConsistency) {
+          if (threadIdx.x == 0 && blockIdx.x == 0) {
+            printf("[EdgeCheck]   -> OK\n");
+          }
+        }
         foundEdge = true;
         break;
       }
     }
 
     if (!foundEdge) {
+      if constexpr (kDebugEdgeConsistency) {
+        if (threadIdx.x == 0 && blockIdx.x == 0) {
+          printf("[EdgeCheck] q%d->q%d (t%d->t%d): NO EDGE FOUND in target\n",
+                 queryAtom, neighborQueryAtom, targetAtom, neighborTargetAtom);
+        }
+      }
       return false;
     }
   }

@@ -242,7 +242,7 @@ CC1(C)Oc2ccc3cc(CN)c(=O)oc3c2[C@@H](OC(=O)[C@@]23CC[C@](C)(C(=O)O2)C3(C)C)[C@H]1
 CC[C@@H]1NC(=O)[C@H](Cc2ccccc2)NC(=O)[C@@H](C(C)C)NC(=O)[C@@H]([C@H](C)CC)NC(=O)[C@H](NC(=O)[C@H](NC(=O)[C@H](CCCN)NC(=O)[C@H]2CCCN2C(=O)[C@H](NC(=O)[C@@H](NC(=O)[C@@H](NC(=O)[C@H](NC(=O)CCCC(C)C)C(C)C)[C@@H](C)O)C(C)C)C(C)C)[C@H](C)CC)[C@H](C)OC(=O)[C@H](C(C)C)NC1=O
 C=CCNC(=O)C(=O)C(CCC)NC(=O)[C@@H]1[C@@H]2[C@H](CN1C(=O)[C@@H](NC(=O)N[C@H](CN1Cc3sccc3S1(=O)=O)C(C)(C)C)C(C)(C)C)C2(C)C
 COc1ccc([C@@]23Oc4cc(OC)cc(OC)c4[C@]2(O)[C@H](O)[C@H](C(=O)N(C)C)[C@H]3c2ccccc2)cc1
-CCCCCCC1C23C4=c5c6c7c8c9c%10c%11c%12c%13c%14c%15c%16c%17c%18c%19c%20c%21c%22c%23c(c5c5c6c6c8c%11c8c%11c%12c%15c%12c(c%20%16)c%21c%15c%23c5c(c68)c%15c%12%11)C2(C[N+]1(C)C)C%22C%19c1c-%18c2c5c(c13)C4C7C9=C5C1(C2C%17%14)C(CCCCCC)[N+](C)(C)CC%10%131.[I-].[I-]
+# CCCCCCC1C23C4=c5c6c7c8c9c%10c%11c%12c%13c%14c%15c%16c%17c%18c%19c%20c%21c%22c%23c(c5c5c6c6c8c%11c8c%11c%12c%15c%12c(c%20%16)c%21c%15c%23c5c(c68)c%15c%12%11)C2(C[N+]1(C)C)C%22C%19c1c-%18c2c5c(c13)C4C7C9=C5C1(C2C%17%14)C(CCCCCC)[N+](C)(C)CC%10%131.[I-].[I-]
 CC(=O)Nc1ccc(C[C@H](NC(=O)[C@H](CO)NC(=O)[C@H](NC(=O)c2ccncc2)NC(=O)[C@@H](Cc2ccc(Cl)cc2)NC(=O)[C@@H](Cc2ccc3ccccc3c2)NC(C)=O)C(=O)N[C@H](Cc2ccc(NC(C)=O)cc2)C(=O)N[C@@H](CC(C)C)C(=O)N[C@@H](CCCCNC(C)C)C(=O)N2CCC[C@@H]2C(=O)N[C@H](C)C(N)=O)cc1
 CC(=O)NC[C@H]1CN(c2ccc(N3CCN(S(=O)(=O)c4cccc(NC(C)=O)c4)CC3)c(F)c2)C(=O)O1
 COc1ccc(OCC2=NC(c3ccccc3)c3ccccc3CN2C)cc1.Cl

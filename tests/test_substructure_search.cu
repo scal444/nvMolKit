@@ -1901,8 +1901,8 @@ TEST_P(SubstructureSearchTest, SingleMolSingleQueryForDebugging) {
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-  const std::string target = "Cc1cc(-c2csc(N=C(N)N)n2)cn1C";
-  const std::string query  = "[$([#16;D2]([$([CX4,c]);!$(C[O,N,S])])[$([CX4,c]);!$(C[O,N,S])]);!$([#16;D2]1[CX4][CX4]1);!$(s1aaaa1)]";
+  const std::string target = "CN1CCc2cccc3c2[C@H]1Cc1ccc(CO)c(O)c1-3";
+  const std::string query  = "[$(c1(-[OX2H])ccccc1);!$(cc-!:[CH2]-[OX2H]);!$(cc-!:C(=O)[O;H1,-]);!$(cc-!:C(=O)-[NH2])]";
   buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
 
   MoleculesDevice targetsDevice(stream_.stream());

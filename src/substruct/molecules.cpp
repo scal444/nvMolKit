@@ -917,6 +917,10 @@ void collectAndOnlyFlags(const RDKit::Atom::QUERYATOM_QUERY* query,
                          AtomDataPacked&                     packed) {
   const std::string desc = query->getDescription();
 
+  if constexpr (kDebugBoolTreeBuild) {
+    printf("[collectAndOnlyFlags] desc=\"%s\" negated=%d\n", desc.c_str(), query->getNegation());
+  }
+
   // If already marked as never-matching, skip processing
   if (flags & AtomQueryNeverMatches) {
     return;
@@ -1081,6 +1085,9 @@ void collectAndOnlyFlags(const RDKit::Atom::QUERYATOM_QUERY* query,
     }
   } else {
     AtomQuery flag = atomQueryFromDescription(desc);
+    if constexpr (kDebugBoolTreeBuild) {
+      printf("[collectAndOnlyFlags] unhandled desc=\"%s\" -> flag=0x%x\n", desc.c_str(), flag);
+    }
     flags |= flag;
   }
 }
@@ -1540,30 +1547,44 @@ void extractBondQueryFlags(const RDKit::Bond* bond, BondQueryData& queryData) {
 
     if (desc == "BondAnd") {
       // Check for impossible constraints like single AND aromatic
-      bool hasSingle   = false;
-      bool hasDouble   = false;
-      bool hasTriple   = false;
-      bool hasAromatic = false;
+      // Must track both positive and negated constraints:
+      //   -:  (single AND aromatic) -> impossible
+      //   -!: (single AND NOT aromatic) -> valid
+      //   !-: (NOT single AND aromatic) -> valid
+      bool hasPositiveSingle   = false;
+      bool hasPositiveDouble   = false;
+      bool hasPositiveTriple   = false;
+      bool hasPositiveAromatic = false;
       for (auto it = q->beginChildren(); it != q->endChildren(); ++it) {
         const std::string childDesc = (*it)->getDescription();
+        const bool childNegated = (*it)->getNegation();
         if (childDesc == "BondOrder") {
           const auto* eqQuery  = static_cast<const RDKit::BOND_EQUALS_QUERY*>((*it).get());
           int         bondType = eqQuery->getVal();
-          if (bondType == 1) {
-            hasSingle = true;
-          } else if (bondType == 2) {
-            hasDouble = true;
-          } else if (bondType == 3) {
-            hasTriple = true;
-          } else if (bondType == 7 || bondType == 12) {
-            hasAromatic = true;
+          // Only count positive (non-negated) bond order constraints
+          if (!childNegated) {
+            if (bondType == 1) {
+              hasPositiveSingle = true;
+            } else if (bondType == 2) {
+              hasPositiveDouble = true;
+            } else if (bondType == 3) {
+              hasPositiveTriple = true;
+            } else if (bondType == 7 || bondType == 12) {
+              hasPositiveAromatic = true;
+            }
           }
         } else if (childDesc == "BondIsAromatic") {
-          hasAromatic = true;
+          // Only count positive (non-negated) aromatic constraint
+          // !: (NOT aromatic) is valid with single/double/triple
+          if (!childNegated) {
+            hasPositiveAromatic = true;
+          }
         }
       }
-      // Conflicting constraints: non-aromatic bond type AND aromatic requirement
-      if (hasAromatic && (hasSingle || hasDouble || hasTriple)) {
+      // Conflicting constraints: positive non-aromatic bond type AND positive aromatic requirement
+      // Examples that ARE impossible: -: (single AND aromatic)
+      // Examples that are valid: -!: (single AND NOT aromatic), !-: (NOT single AND aromatic)
+      if (hasPositiveAromatic && (hasPositiveSingle || hasPositiveDouble || hasPositiveTriple)) {
         queryData.queryFlags |= BondQueryNeverMatches;
         return;
       }
@@ -1696,6 +1717,12 @@ void addQueryBondsAndConnectivity(const RDKit::ROMol* mol, MoleculesHost& batch,
 
     auto& bq = bondQueryDataVec.emplace_back();
     extractBondQueryFlags(bond, bq);
+
+    if constexpr (kDebugBoolTreeBuild) {
+      printf("[BondQuery] bond %d (%d-%d): rdkitType=%d, queryType=%d, flags=0x%x, allowedTypes=0x%x\n",
+             i, bond->getBeginAtomIdx(), bond->getEndAtomIdx(),
+             static_cast<int>(bond->getBondType()), bq.bondType, bq.queryFlags, bq.allowedBondTypes);
+    }
   }
 
   atomBondStarts.push_back(0);

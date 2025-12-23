@@ -61,7 +61,7 @@ using nvMolKit::validateAgainstRDKit;
 namespace {
 
 constexpr size_t kMaxAtoms  = 128;
-constexpr size_t kNumSmiles = 100;
+constexpr size_t kNumSmiles = 300;
 
 std::unique_ptr<RDKit::ROMol> makeSmartsQuery(const std::string& smarts) {
   auto mol = std::unique_ptr<RDKit::ROMol>(RDKit::SmartsToMol(smarts));

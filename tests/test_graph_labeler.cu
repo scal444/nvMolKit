@@ -26,6 +26,7 @@
 #include "cuda_error_check.h"
 #include "device.h"
 #include "graph_labeler.cuh"
+#include "molecules.h"
 #include "molecules_device.cuh"
 #include "substruct_types.h"
 #include "testutils/substruct_validation.h"
@@ -2235,4 +2236,111 @@ TEST(AtomDataPackedBitPacking, ExistingFieldsDoNotAffectNewFields) {
   EXPECT_EQ(packed.ringBondCount(), 4);
   EXPECT_EQ(packed.numImplicitHs(), 2);
   EXPECT_EQ(packed.numHeteroatomNeighbors(), 3);
+}
+
+// =============================================================================
+// Bond Query Flag Extraction Tests
+// =============================================================================
+
+// Helper to get bond query flags from a SMARTS pattern
+nvMolKit::BondQueryData getBondQueryData(const std::string& smarts, int bondIdx) {
+  auto mol = makeMolFromSmarts(smarts);
+  EXPECT_NE(mol, nullptr) << "Failed to parse SMARTS: " << smarts;
+  
+  MoleculesHost batch;
+  addQueryToBatch(mol.get(), batch);
+  
+  EXPECT_GT(batch.bondQueryData.size(), static_cast<size_t>(bondIdx)) 
+    << "Bond index " << bondIdx << " out of range for SMARTS: " << smarts;
+  
+  return batch.bondQueryData[bondIdx];
+}
+
+TEST(BondQueryFlags, SingleBondOnly) {
+  // "-" = single bond, no special flags
+  auto bqd = getBondQueryData("C-C", 0);
+  EXPECT_EQ(bqd.bondType, 1);  // Single bond
+  EXPECT_EQ(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
+    << "Single bond should not be NeverMatches";
+}
+
+TEST(BondQueryFlags, AromaticBondOnly) {
+  // ":" = aromatic bond
+  auto bqd = getBondQueryData("c:c", 0);
+  EXPECT_EQ(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
+    << "Aromatic bond should not be NeverMatches";
+}
+
+TEST(BondQueryFlags, SingleAndAromatic_Impossible) {
+  // "-:" = single AND aromatic - impossible combination
+  auto bqd = getBondQueryData("C-:C", 0);
+  EXPECT_NE(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
+    << "Single AND aromatic should be NeverMatches";
+}
+
+TEST(BondQueryFlags, SingleAndNotAromatic_Valid) {
+  // "-!:" = single AND NOT aromatic - valid combination (aliphatic single bond)
+  auto bqd = getBondQueryData("C-!:C", 0);
+  EXPECT_EQ(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
+    << "Single AND NOT aromatic should NOT be NeverMatches";
+}
+
+TEST(BondQueryFlags, NotSingleAndAromatic_Valid) {
+  // "!-:" = NOT single AND aromatic - valid (aromatic bonds aren't single)
+  auto bqd = getBondQueryData("c!-:c", 0);
+  EXPECT_EQ(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
+    << "NOT single AND aromatic should NOT be NeverMatches";
+}
+
+TEST(BondQueryFlags, DoubleAndAromatic_Impossible) {
+  // "=:" = double AND aromatic - impossible combination
+  auto bqd = getBondQueryData("C=:C", 0);
+  EXPECT_NE(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
+    << "Double AND aromatic should be NeverMatches";
+}
+
+TEST(BondQueryFlags, DoubleAndNotAromatic_Valid) {
+  // "=!:" = double AND NOT aromatic - valid (aliphatic double bond)
+  auto bqd = getBondQueryData("C=!:C", 0);
+  EXPECT_EQ(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
+    << "Double AND NOT aromatic should NOT be NeverMatches";
+}
+
+TEST(BondQueryFlags, TripleAndAromatic_Impossible) {
+  // "#:" = triple AND aromatic - impossible combination
+  auto bqd = getBondQueryData("C#:C", 0);
+  EXPECT_NE(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
+    << "Triple AND aromatic should be NeverMatches";
+}
+
+TEST(BondQueryFlags, TripleAndNotAromatic_Valid) {
+  // "#!:" = triple AND NOT aromatic - valid (aliphatic triple bond)
+  auto bqd = getBondQueryData("C#!:C", 0);
+  EXPECT_EQ(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
+    << "Triple AND NOT aromatic should NOT be NeverMatches";
+}
+
+TEST(BondQueryFlags, NotSingleNotAromatic_Valid) {
+  // "!-!:" = NOT single AND NOT aromatic - valid (double or triple aliphatic)
+  auto bqd = getBondQueryData("C!-!:C", 0);
+  EXPECT_EQ(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
+    << "NOT single AND NOT aromatic should NOT be NeverMatches";
+}
+
+TEST(BondQueryFlags, RingBondConstraint) {
+  // "@" = ring bond
+  auto bqd = getBondQueryData("C@C", 0);
+  EXPECT_NE(bqd.queryFlags & nvMolKit::BondQueryIsRingBond, 0) 
+    << "Ring bond constraint should set BondQueryIsRingBond";
+  EXPECT_EQ(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
+    << "Ring bond should not be NeverMatches";
+}
+
+TEST(BondQueryFlags, NotRingBondConstraint) {
+  // "!@" = not ring bond
+  auto bqd = getBondQueryData("C!@C", 0);
+  EXPECT_NE(bqd.queryFlags & nvMolKit::BondQueryNotRingBond, 0) 
+    << "Not-ring bond constraint should set BondQueryNotRingBond";
+  EXPECT_EQ(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
+    << "Not-ring bond should not be NeverMatches";
 }

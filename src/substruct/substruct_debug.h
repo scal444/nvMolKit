@@ -27,6 +27,7 @@ constexpr bool kDebugDumpLabelMatrix = kDebugAll || false;  ///< Dump full label
 constexpr bool kDebugPaintRecursive  = kDebugAll || false;  ///< Debug recursive bit painting kernel
 constexpr bool kDebugLabelMatrix     = kDebugAll || false;  ///< Debug label matrix population
 constexpr bool kDebugBoolTreeBuild   = kDebugAll || false;  ///< Debug boolean tree construction
+constexpr bool kDebugEdgeConsistency = kDebugAll || false;  ///< Debug edge consistency checking
 /// @}
 
 }  // namespace nvMolKit
