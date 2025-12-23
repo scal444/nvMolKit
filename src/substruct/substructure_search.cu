@@ -507,19 +507,19 @@ struct BatchSlot {
 
   void reserveHostBuffers(int maxBatchSize, int maxMatchIndicesEstimate) {
     if (pairIndicesHost.size() < static_cast<size_t>(maxBatchSize)) {
-      pairIndicesHost.resize(maxBatchSize);
+      pairIndicesHost.resize(static_cast<size_t>(maxBatchSize * 1.5));
     }
     if (batchPairMatchStarts.size() < static_cast<size_t>(maxBatchSize + 1)) {
-      batchPairMatchStarts.resize(maxBatchSize + 1);
+      batchPairMatchStarts.resize(static_cast<size_t>((maxBatchSize + 1) * 1.5));
     }
     if (matchCountsHost.size() < static_cast<size_t>(maxBatchSize)) {
-      matchCountsHost.resize(maxBatchSize);
+      matchCountsHost.resize(static_cast<size_t>(maxBatchSize * 1.5));
     }
     if (reportedCountsHost.size() < static_cast<size_t>(maxBatchSize)) {
-      reportedCountsHost.resize(maxBatchSize);
+      reportedCountsHost.resize(static_cast<size_t>(maxBatchSize * 1.5));
     }
     if (matchIndicesHost.size() < static_cast<size_t>(maxMatchIndicesEstimate)) {
-      matchIndicesHost.resize(maxMatchIndicesEstimate);
+      matchIndicesHost.resize(static_cast<size_t>(maxMatchIndicesEstimate * 1.5));
     }
   }
 };
@@ -664,42 +664,42 @@ void BatchResultsDevice::allocateBatch(int        batchSize,
   overflowBuffersPerBlock_ = numBuffersPerBlock;
 
   if (matchCounts_.size() < static_cast<size_t>(batchSize)) {
-    matchCounts_.resize(batchSize);
+    matchCounts_.resize(static_cast<size_t>(batchSize * 1.5));
   }
 
   if (reportedCounts_.size() < static_cast<size_t>(batchSize)) {
-    reportedCounts_.resize(batchSize);
+    reportedCounts_.resize(static_cast<size_t>(batchSize * 1.5));
   }
 
   if (pairMatchStarts_.size() < static_cast<size_t>(batchSize + 1)) {
-    pairMatchStarts_.resize(batchSize + 1);
+    pairMatchStarts_.resize(static_cast<size_t>((batchSize + 1) * 1.5));
   }
   pairMatchStarts_.copyFromHost(batchPairMatchStarts, batchSize + 1);
 
   if (matchIndices_.size() < static_cast<size_t>(totalBatchMatchIndices)) {
-    matchIndices_.resize(totalBatchMatchIndices);
+    matchIndices_.resize(static_cast<size_t>(totalBatchMatchIndices * 1.5));
   }
 
   const int overflowEntries = batchSize * numBuffersPerBlock * kOverflowEntriesPerBuffer;
   if (overflowBuffer_.size() < static_cast<size_t>(overflowEntries)) {
-    overflowBuffer_.resize(overflowEntries);
+    overflowBuffer_.resize(static_cast<size_t>(overflowEntries * 1.5));
   }
 
   const size_t recursiveBitsSize = static_cast<size_t>(batchSize) * maxTargetAtoms;
   if (recursiveMatchBits_.size() < recursiveBitsSize) {
-    recursiveMatchBits_.resize(recursiveBitsSize);
+    recursiveMatchBits_.resize(static_cast<size_t>(recursiveBitsSize * 1.5));
   }
   recursiveMatchBits_.zero();
 
   const size_t labelMatrixSize = static_cast<size_t>(batchSize) * kLabelMatrixWords;
   if (labelMatrixBuffer_.size() < labelMatrixSize) {
-    labelMatrixBuffer_.resize(labelMatrixSize);
+    labelMatrixBuffer_.resize(static_cast<size_t>(labelMatrixSize * 1.5));
   }
 }
 
 void BatchResultsDevice::setQueryAtomCounts(const int* queryAtomCounts, size_t count) {
   if (queryAtomCounts_.size() < count) {
-    queryAtomCounts_.resize(count);
+    queryAtomCounts_.resize(static_cast<size_t>(count * 1.5));
   }
   queryAtomCounts_.copyFromHost(queryAtomCounts, count);
 }
@@ -851,10 +851,10 @@ void launchLabelAndMatch(const std::vector<int>&      batchLocalIndices,
   auto& batchLocalIndicesHost = twoStreamCtx.matchBatchLocalIndicesHost[depthGroupIdx];
   
   if (globalPairIndicesHost.size() < static_cast<size_t>(numPairsInGroup)) {
-    globalPairIndicesHost.resize(numPairsInGroup);
+    globalPairIndicesHost.resize(static_cast<size_t>(numPairsInGroup * 1.5));
   }
   if (batchLocalIndicesHost.size() < static_cast<size_t>(numPairsInGroup)) {
-    batchLocalIndicesHost.resize(numPairsInGroup);
+    batchLocalIndicesHost.resize(static_cast<size_t>(numPairsInGroup * 1.5));
   }
 
   for (int i = 0; i < numPairsInGroup; ++i) {
@@ -867,13 +867,13 @@ void launchLabelAndMatch(const std::vector<int>&      batchLocalIndices,
 
   globalPairIndicesDev.setStream(stream);
   if (globalPairIndicesDev.size() < static_cast<size_t>(numPairsInGroup)) {
-    globalPairIndicesDev.resize(numPairsInGroup);
+    globalPairIndicesDev.resize(static_cast<size_t>(numPairsInGroup * 1.5));
   }
   globalPairIndicesDev.copyFromHost(globalPairIndicesHost.data(), numPairsInGroup);
 
   batchLocalIndicesDev.setStream(stream);
   if (batchLocalIndicesDev.size() < static_cast<size_t>(numPairsInGroup)) {
-    batchLocalIndicesDev.resize(numPairsInGroup);
+    batchLocalIndicesDev.resize(static_cast<size_t>(numPairsInGroup * 1.5));
   }
   batchLocalIndicesDev.copyFromHost(batchLocalIndicesHost.data(), numPairsInGroup);
 
@@ -933,10 +933,10 @@ void uploadAndLaunchBatch(BatchSlot&                 slot,
                                      ctx.numQueries,
                                      ctx.maxTargetAtoms,
                                      numBuffersPerBlock);
-    slot.deviceResults.setQueryAtomCounts(ctx.queryAtomCounts.data(), ctx.queryAtomCounts.size());
+    slot.deviceResults.setQueryAtomCounts(ctx.queryAtomCounts.data(), ctx.numQueries);
 
     if (slot.pairIndicesDev.size() < static_cast<size_t>(slot.numPairsInBatch)) {
-      slot.pairIndicesDev.resize(slot.numPairsInBatch);
+      slot.pairIndicesDev.resize(static_cast<size_t>(slot.numPairsInBatch * 1.5));
     }
     slot.pairIndicesDev.copyFromHost(slot.pairIndicesHost.data(), slot.numPairsInBatch);
     allocRange.pop();
@@ -983,7 +983,7 @@ void uploadAndLaunchBatch(BatchSlot&                 slot,
                                    ctx.numQueries,
                                    ctx.maxTargetAtoms,
                                    numBuffersPerBlock);
-  slot.deviceResults.setQueryAtomCounts(ctx.queryAtomCounts.data(), ctx.queryAtomCounts.size());
+  slot.deviceResults.setQueryAtomCounts(ctx.queryAtomCounts.data(), ctx.numQueries);
   allocRange.pop();
 
   ScopedCudaEvent allocDoneEvent;
@@ -1166,7 +1166,7 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
   ctx.numQueries = numQueries;
 
   ScopedNvtxRange metadataRange("CPU: Compute batch metadata");
-  ctx.queryAtomCounts.resize(numQueries);
+  ctx.queryAtomCounts.resize(static_cast<size_t>(numQueries * 1.5));
   int maxQueryAtoms = 0;
   for (int q = 0; q < numQueries; ++q) {
     const int atomStart = queriesHost.batchAtomStarts[q];
@@ -1195,7 +1195,7 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
       ctx.globalPairMatchStarts[pairIdx + 1] = ctx.globalPairMatchStarts[pairIdx] + pairCapacity;
     }
   }
-  const int totalMatchIndices = ctx.globalPairMatchStarts.back();
+  const int totalMatchIndices = ctx.globalPairMatchStarts[numPairs];
   metadataRange.pop();
 
   ScopedNvtxRange resultsAllocRange("CPU: Allocate results host vectors");
@@ -1483,7 +1483,7 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&            targetsD
         scratch.patternsAtDepthHostCopyPending = false;
       }
       if (scratch.patternsAtDepthHost.size() < numPatternsInSubBatch) {
-        scratch.patternsAtDepthHost.resize(numPatternsInSubBatch);
+        scratch.patternsAtDepthHost.resize(static_cast<size_t>(numPatternsInSubBatch * 1.5));
       }
       for (size_t i = 0; i < numPatternsInSubBatch; ++i) {
         scratch.patternsAtDepthHost[i] = patternsAtDepth[patternStart + i];
@@ -1493,16 +1493,16 @@ void preprocessRecursiveSmartsBatched(const MoleculesDevice&            targetsD
       const size_t overflowNeeded = numBlocksInSubBatch * buffersPerBlock * kOverflowEntriesPerBuffer;
 
       if (scratch.overflow.size() < overflowNeeded) {
-        scratch.overflow.resize(overflowNeeded);
+        scratch.overflow.resize(static_cast<size_t>(overflowNeeded * 1.5));
       }
 
       const size_t labelMatrixNeeded = numBlocksInSubBatch * kLabelMatrixWords;
       if (scratch.labelMatrixBuffer.size() < labelMatrixNeeded) {
-        scratch.labelMatrixBuffer.resize(labelMatrixNeeded);
+        scratch.labelMatrixBuffer.resize(static_cast<size_t>(labelMatrixNeeded * 1.5));
       }
 
       if (scratch.patternEntries.size() < numPatternsInSubBatch) {
-        scratch.patternEntries.resize(numPatternsInSubBatch);
+        scratch.patternEntries.resize(static_cast<size_t>(numPatternsInSubBatch * 1.5));
       }
       scratch.patternEntries.copyFromHost(scratch.patternsAtDepthHost.data(), numPatternsInSubBatch);
       cudaCheckError(cudaEventRecord(scratch.patternsAtDepthHostCopyDone.event(), scratch.patternEntries.stream()));
@@ -1691,7 +1691,7 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
         scratch.patternsAtDepthHostCopyPending = false;
       }
       if (scratch.patternsAtDepthHost.size() < numPatternsInSubBatch) {
-        scratch.patternsAtDepthHost.resize(numPatternsInSubBatch);
+        scratch.patternsAtDepthHost.resize(static_cast<size_t>(numPatternsInSubBatch * 1.5));
       }
       for (size_t i = 0; i < numPatternsInSubBatch; ++i) {
         scratch.patternsAtDepthHost[i] = patternsAtDepth[patternStart + i];
@@ -1701,16 +1701,16 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
       const size_t overflowNeeded = numBlocksInSubBatch * buffersPerBlock * kOverflowEntriesPerBuffer;
 
       if (scratch.overflow.size() < overflowNeeded) {
-        scratch.overflow.resize(overflowNeeded);
+        scratch.overflow.resize(static_cast<size_t>(overflowNeeded * 1.5));
       }
 
       const size_t labelMatrixNeeded = numBlocksInSubBatch * kLabelMatrixWords;
       if (scratch.labelMatrixBuffer.size() < labelMatrixNeeded) {
-        scratch.labelMatrixBuffer.resize(labelMatrixNeeded);
+        scratch.labelMatrixBuffer.resize(static_cast<size_t>(labelMatrixNeeded * 1.5));
       }
 
       if (scratch.patternEntries.size() < numPatternsInSubBatch) {
-        scratch.patternEntries.resize(numPatternsInSubBatch);
+        scratch.patternEntries.resize(static_cast<size_t>(numPatternsInSubBatch * 1.5));
       }
       scratch.patternEntries.copyFromHost(scratch.patternsAtDepthHost.data(), numPatternsInSubBatch);
       cudaCheckError(cudaEventRecord(scratch.patternsAtDepthHostCopyDone.event(), scratch.patternEntries.stream()));

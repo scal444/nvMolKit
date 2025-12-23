@@ -404,7 +404,7 @@ void setFromVectorGrowOnly(AsyncDeviceVector<T>& dest, const std::vector<T>& src
     return;
   }
   if (src.size() > dest.size()) {
-    dest.resize(src.size());
+    dest.resize(static_cast<size_t>(src.size() * 1.5));
   }
   cudaMemcpyAsync(dest.data(), src.data(), src.size() * sizeof(T), cudaMemcpyHostToDevice, stream);
 }
