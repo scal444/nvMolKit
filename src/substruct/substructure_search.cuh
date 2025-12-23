@@ -429,6 +429,9 @@ struct TwoStreamPipelineContext {
 
   std::array<ScopedCudaEvent, kMaxRecursionDepth> depthEvents;
 
+  ScopedCudaEvent recursiveDoneEvent;  ///< Signaled when recursive stream work completes
+  std::array<ScopedCudaEvent, kMaxRecursionDepth> matchDoneEvents;  ///< Signaled when match stream work completes
+
   /// Matching: global pair indices for each depth group (depth 0..kMaxRecursionDepth)
   std::array<AsyncDeviceVector<int>, kMaxRecursionDepth + 1> matchGlobalPairIndices;
 
