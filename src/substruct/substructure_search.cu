@@ -475,6 +475,12 @@ struct BatchSlot {
   PinnedHostVector<int>                 batchPairMatchStarts;
   std::vector<BatchedPatternEntry>      patternEntriesHost;
 
+  // Precomputed recursive batch setup (populated by prepareRecursiveBatchOnCPU)
+  int recursiveMaxDepth       = 0;
+  int firstTargetInBatch      = 0;
+  int numTargetsInBatch       = 0;
+  std::array<std::vector<BatchedPatternEntry>, kMaxRecursionDepth + 1> patternsAtDepth;
+
   // Pinned memory for D2H transfers - pre-allocated and reused between batches
   PinnedHostVector<int>     matchCountsHost;
   PinnedHostVector<int>     reportedCountsHost;
@@ -807,8 +813,76 @@ void precomputePipelineSchedule(TwoStreamPipelineContext& ctx,
   }
 }
 
+void prepareRecursiveBatchOnCPU(BatchSlot&                 slot,
+                                const ThreadWorkerContext& ctx,
+                                const MoleculesHost&       queriesHost,
+                                const LeafSubpatterns&     leafSubpatterns) {
+  ScopedNvtxRange prepRecRange("prepareRecursiveBatchOnCPU");
+
+  precomputePipelineSchedule(*slot.twoStreamCtx, queriesHost, slot.numPairsInBatch, 
+                             slot.batchStart, ctx.numQueries);
+
+  slot.patternEntriesHost.clear();
+  for (auto& vec : slot.patternsAtDepth) {
+    vec.clear();
+  }
+
+  std::vector<bool> queryInBatch(ctx.numQueries, false);
+  for (int i = 0; i < slot.numPairsInBatch; ++i) {
+    const int pairIdx  = slot.batchStart + i;
+    const int queryIdx = pairIdx % ctx.numQueries;
+    queryInBatch[queryIdx] = true;
+  }
+
+  slot.recursiveMaxDepth = 0;
+  for (int queryIdx = 0; queryIdx < ctx.numQueries; ++queryIdx) {
+    if (!queryInBatch[queryIdx]) {
+      continue;
+    }
+
+    if (queryIdx >= static_cast<int>(queriesHost.recursivePatterns.size())) {
+      continue;
+    }
+
+    const auto& recursiveInfo = queriesHost.recursivePatterns[queryIdx];
+    if (recursiveInfo.empty()) {
+      continue;
+    }
+
+    slot.recursiveMaxDepth = std::max(slot.recursiveMaxDepth, recursiveInfo.maxDepth);
+
+    for (const auto& entry : recursiveInfo.patterns) {
+      if (entry.queryMol == nullptr) {
+        continue;
+      }
+
+      const int patternMolIdx = leafSubpatterns.getPatternIndex(queryIdx, entry.patternId);
+      if (patternMolIdx < 0) {
+        throw std::runtime_error("Pattern not found in pre-built LeafSubpatterns: queryIdx=" +
+                                 std::to_string(queryIdx) + ", patternId=" + std::to_string(entry.patternId));
+      }
+
+      BatchedPatternEntry batchEntry;
+      batchEntry.mainQueryIdx    = queryIdx;
+      batchEntry.patternId       = entry.patternId;
+      batchEntry.patternMolIdx   = patternMolIdx;
+      batchEntry.depth           = entry.depth;
+      batchEntry.localIdInParent = entry.localIdInParent;
+
+      slot.patternEntriesHost.push_back(batchEntry);
+      slot.patternsAtDepth[entry.depth].push_back(batchEntry);
+    }
+  }
+
+  slot.firstTargetInBatch = slot.batchStart / ctx.numQueries;
+  const int lastTargetInBatch = (slot.batchStart + slot.numPairsInBatch - 1) / ctx.numQueries;
+  slot.numTargetsInBatch = lastTargetInBatch - slot.firstTargetInBatch + 1;
+}
+
 void prepareBatchOnCPU(BatchSlot&                   slot,
                        const ThreadWorkerContext&   ctx,
+                       const MoleculesHost&         queriesHost,
+                       const LeafSubpatterns&       leafSubpatterns,
                        int                          batchStart,
                        int                          maxPairsInBatch) {
   ScopedNvtxRange prepRange("prepareBatchOnCPU");
@@ -832,6 +906,8 @@ void prepareBatchOnCPU(BatchSlot&                   slot,
   for (int i = 0; i < numPairsInBatch; ++i) {
     slot.pairIndicesHost[i] = batchStart + i;
   }
+
+  prepareRecursiveBatchOnCPU(slot, ctx, queriesHost, leafSubpatterns);
 }
 
 /**
@@ -917,19 +993,164 @@ void launchLabelAndMatch(const std::vector<int>&      batchLocalIndices,
   }
 }
 
+void launchRecursivePaintKernels(
+    const MoleculesDevice&                                                   targetsDevice,
+    const LeafSubpatterns&                                                   leafSubpatterns,
+    BatchResultsDevice&                                                      batchResults,
+    int                                                                      numQueries,
+    int                                                                      batchPairOffset,
+    int                                                                      batchSize,
+    SubstructAlgorithm                                                       algorithm,
+    cudaStream_t                                                             stream,
+    RecursiveScratchBuffers&                                                 scratch,
+    const std::array<std::vector<BatchedPatternEntry>, kMaxRecursionDepth + 1>& patternsAtDepth,
+    int                                                                      maxDepth,
+    int                                                                      firstTargetInBatch,
+    int                                                                      numTargetsInBatch,
+    cudaEvent_t*                                                             depthEvents,
+    int                                                                      numDepthEvents) {
+  ScopedNvtxRange processRecursiveRange("launchRecursivePaintKernels");
+
+  scratch.setStream(stream);
+
+  const auto batchView = batchResults.view();
+  constexpr int gsiBuffersPerBlock = 2;
+  constexpr int wusBuffersPerBlock = 1;
+
+  const int maxPaintPairsPerSubBatch = std::max(batchSize, 1024);
+
+  for (int currentDepth = 0; currentDepth <= maxDepth; ++currentDepth) {
+    ScopedNvtxRange depthRange("Process recursive depth level " + std::to_string(currentDepth));
+
+    const auto& patternsForDepth = patternsAtDepth[currentDepth];
+
+    if (patternsForDepth.empty()) {
+      if (currentDepth < numDepthEvents && depthEvents != nullptr) {
+        cudaCheckError(cudaEventRecord(depthEvents[currentDepth], stream));
+      }
+      continue;
+    }
+
+    const size_t numPatterns = patternsForDepth.size();
+    const int patternsPerSubBatch = std::max(1, maxPaintPairsPerSubBatch / numTargetsInBatch);
+
+    for (size_t patternStart = 0; patternStart < numPatterns; patternStart += patternsPerSubBatch) {
+      ScopedNvtxRange subBatchRange("Process sub-batch " + std::to_string(patternStart));
+      
+      const size_t patternEnd            = std::min(patternStart + patternsPerSubBatch, numPatterns);
+      const size_t numPatternsInSubBatch = patternEnd - patternStart;
+      const size_t numBlocksInSubBatch   = numTargetsInBatch * numPatternsInSubBatch;
+
+      ScopedNvtxRange prepareRange("GPU: Upload pattern entries");
+      if (scratch.patternsAtDepthHostCopyPending) {
+        ScopedNvtxRange waitRange("Wait: pattern entries H2D copy");
+        cudaCheckError(cudaEventSynchronize(scratch.patternsAtDepthHostCopyDone.event()));
+        waitRange.pop();
+        scratch.patternsAtDepthHostCopyPending = false;
+      }
+      if (scratch.patternsAtDepthHost.size() < numPatternsInSubBatch) {
+        scratch.patternsAtDepthHost.resize(static_cast<size_t>(numPatternsInSubBatch * 1.5));
+      }
+      for (size_t i = 0; i < numPatternsInSubBatch; ++i) {
+        scratch.patternsAtDepthHost[i] = patternsForDepth[patternStart + i];
+      }
+      prepareRange.pop();
+
+      const int buffersPerBlock = (algorithm == SubstructAlgorithm::WarpUnified) ? wusBuffersPerBlock : gsiBuffersPerBlock;
+      const size_t overflowNeeded = numBlocksInSubBatch * buffersPerBlock * kOverflowEntriesPerBuffer;
+
+      if (scratch.overflow.size() < overflowNeeded) {
+        scratch.overflow.resize(static_cast<size_t>(overflowNeeded * 1.5));
+      }
+
+      const size_t labelMatrixNeeded = numBlocksInSubBatch * kLabelMatrixWords;
+      if (scratch.labelMatrixBuffer.size() < labelMatrixNeeded) {
+        scratch.labelMatrixBuffer.resize(static_cast<size_t>(labelMatrixNeeded * 1.5));
+      }
+
+      if (scratch.patternEntries.size() < numPatternsInSubBatch) {
+        scratch.patternEntries.resize(static_cast<size_t>(numPatternsInSubBatch * 1.5));
+      }
+      
+      scratch.patternEntries.copyFromHost(scratch.patternsAtDepthHost.data(), numPatternsInSubBatch);
+      cudaCheckError(cudaEventRecord(scratch.patternsAtDepthHostCopyDone.event(), scratch.patternEntries.stream()));
+      scratch.patternsAtDepthHostCopyPending = true;
+
+      const uint32_t* recursiveBitsForLabel = (currentDepth > 0) ? batchView.recursiveMatchBits : nullptr;
+
+      labelMatrixPaintKernel<<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
+        targetsDevice.view(),
+        leafSubpatterns.view(),
+        scratch.patternEntries.data(),
+        static_cast<int>(numPatternsInSubBatch),
+        numQueries,
+        batchPairOffset,
+        batchSize,
+        scratch.labelMatrixBuffer.data(),
+        firstTargetInBatch,
+        recursiveBitsForLabel,
+        batchView.maxTargetAtoms);
+
+      switch (algorithm) {
+        case SubstructAlgorithm::VF2:
+        case SubstructAlgorithm::GSI: {
+          substructPaintKernel<SubstructAlgorithm::GSI><<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
+            targetsDevice.view(),
+            leafSubpatterns.view(),
+            scratch.patternEntries.data(),
+            static_cast<int>(numPatternsInSubBatch),
+            batchView.recursiveMatchBits,
+            batchView.maxTargetAtoms,
+            numQueries,
+            0, 0,
+            batchPairOffset,
+            batchSize,
+            scratch.overflow.data(),
+            scratch.overflow.data(),
+            kOverflowEntriesPerBuffer,
+            scratch.labelMatrixBuffer.data(),
+            firstTargetInBatch);
+          break;
+        }
+        case SubstructAlgorithm::WarpUnified: {
+          substructPaintKernel<SubstructAlgorithm::WarpUnified><<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
+            targetsDevice.view(),
+            leafSubpatterns.view(),
+            scratch.patternEntries.data(),
+            static_cast<int>(numPatternsInSubBatch),
+            batchView.recursiveMatchBits,
+            batchView.maxTargetAtoms,
+            numQueries,
+            0, 0,
+            batchPairOffset,
+            batchSize,
+            scratch.overflow.data(),
+            scratch.overflow.data(),
+            kOverflowEntriesPerBuffer,
+            scratch.labelMatrixBuffer.data(),
+            firstTargetInBatch);
+          break;
+        }
+      }
+    }
+
+    if (currentDepth < numDepthEvents && depthEvents != nullptr) {
+      cudaCheckError(cudaEventRecord(depthEvents[currentDepth], stream));
+    }
+  }
+
+  cudaCheckError(cudaGetLastError());
+}
+
 void uploadAndLaunchBatch(BatchSlot&                 slot,
                           const ThreadWorkerContext& ctx,
                           MoleculesDevice&           targetsDevice,
                           const MoleculesDevice&     queriesDevice,
-                          const MoleculesHost&       targetsHost,
-                          const MoleculesHost&       queriesHost,
                           const LeafSubpatterns&     leafSubpatterns,
                           SubstructAlgorithm         algorithm) {
   ScopedNvtxRange uploadRange("uploadAndLaunchBatch");
 
   cudaStream_t slotStream = slot.stream();
-
-  precomputePipelineSchedule(*slot.twoStreamCtx, queriesHost, slot.numPairsInBatch, slot.batchStart, ctx.numQueries);
 
   TwoStreamPipelineContext& twoStreamCtx = *slot.twoStreamCtx;
   const int numBuffersPerBlock = (algorithm == SubstructAlgorithm::GSI) ? 2 : 1;
@@ -1001,16 +1222,18 @@ void uploadAndLaunchBatch(BatchSlot&                 slot,
     depthEventPtrs[i] = twoStreamCtx.depthEvents[i].event();
   }
 
-  ScopedNvtxRange preprocRange("preprocessRecursiveSmartsBatchedWithEvents (recursiveStream)");
-  preprocessRecursiveSmartsBatchedWithEvents(targetsDevice, targetsHost, queriesHost,
-                                              leafSubpatterns,
-                                              slot.deviceResults, ctx.numQueries,
-                                              slot.batchStart, slot.numPairsInBatch,
-                                              algorithm, recursiveStream,
-                                              slot.recursiveScratch,
-                                              slot.patternEntriesHost,
-                                              depthEventPtrs.data(),
-                                              kMaxRecursionDepth);
+  ScopedNvtxRange preprocRange("launchRecursivePaintKernels (recursiveStream)");
+  launchRecursivePaintKernels(targetsDevice, leafSubpatterns,
+                              slot.deviceResults, ctx.numQueries,
+                              slot.batchStart, slot.numPairsInBatch,
+                              algorithm, recursiveStream,
+                              slot.recursiveScratch,
+                              slot.patternsAtDepth,
+                              slot.recursiveMaxDepth,
+                              slot.firstTargetInBatch,
+                              slot.numTargetsInBatch,
+                              depthEventPtrs.data(),
+                              kMaxRecursionDepth);
   preprocRange.pop();
 
   ScopedNvtxRange depth0Range("Match depth-0 pairs (slotStream)");
@@ -1148,8 +1371,14 @@ void threadWorker(int                        workerIdx,
       
       ScopedNvtxRange prepRange("CPU prep batch " + std::to_string(batchIdx) + " (slot " + 
                                 std::to_string(currentSlotIdx) + ")");
-      prepareBatchOnCPU(currentSlot, ctx, batchStart, effectiveBatchSize);
+      prepareBatchOnCPU(currentSlot, ctx, queriesHost, leafSubpatterns, batchStart, effectiveBatchSize);
       prepRange.pop();
+      
+      ScopedNvtxRange launchRange("GPU launch batch " + std::to_string(batchIdx) + " (slot " + 
+                                  std::to_string(currentSlotIdx) + ")");
+      uploadAndLaunchBatch(currentSlot, ctx, targetsDevice, queriesDevice, leafSubpatterns, algorithm);
+      initiateResultsCopyToHost(currentSlot);
+      launchRange.pop();
       
       if (pendingSlotIdx >= 0) {
         ScopedNvtxRange accumRange("Accumulate batch " + std::to_string(pendingBatchIdx) + 
@@ -1159,12 +1388,6 @@ void threadWorker(int                        workerIdx,
         pendingSlotIdx = -1;
         pendingBatchIdx = -1;
       }
-      
-      ScopedNvtxRange launchRange("GPU launch batch " + std::to_string(batchIdx) + " (slot " + 
-                                  std::to_string(currentSlotIdx) + ")");
-      uploadAndLaunchBatch(currentSlot, ctx, targetsDevice, queriesDevice, targetsHost, queriesHost, leafSubpatterns, algorithm);
-      initiateResultsCopyToHost(currentSlot);
-      launchRange.pop();
       
       pendingSlotIdx = currentSlotIdx;
       pendingBatchIdx = batchIdx;
