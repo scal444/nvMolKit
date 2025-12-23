@@ -1510,10 +1510,6 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
       cudaCheckError(cudaEventRecord(scratch.patternsAtDepthHostCopyDone.event(), scratch.patternEntries.stream()));
       scratch.patternsAtDepthHostCopyPending = true;
 
-      ScopedNvtxRange syncRange("Wait: pattern entries stream sync");
-      cudaCheckError(cudaStreamSynchronize(scratch.patternEntries.stream()));
-      syncRange.pop();
-
       const uint32_t* recursiveBitsForLabel = (currentDepth > 0) ? batchView.recursiveMatchBits : nullptr;
 
       labelMatrixPaintKernel<<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
