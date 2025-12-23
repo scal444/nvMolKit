@@ -528,7 +528,7 @@ struct BatchSlot {
 };
 
 struct ThreadWorkerContext {
-  std::vector<int> queryAtomCounts;
+  PinnedHostVector<int> queryAtomCounts;
   std::vector<int> globalPairMatchStarts;
   int numTargets     = 0;
   int numQueries     = 0;
@@ -685,8 +685,11 @@ void BatchResultsDevice::allocateBatch(int        batchSize,
   }
 }
 
-void BatchResultsDevice::setQueryAtomCounts(const std::vector<int>& queryAtomCounts) {
-  queryAtomCounts_.setFromVector(queryAtomCounts);
+void BatchResultsDevice::setQueryAtomCounts(const int* queryAtomCounts, size_t count) {
+  if (queryAtomCounts_.size() < count) {
+    queryAtomCounts_.resize(count);
+  }
+  queryAtomCounts_.copyFromHost(queryAtomCounts, count);
 }
 
 SubstructMatchResultsDeviceView BatchResultsDevice::view() const {
@@ -833,12 +836,18 @@ void launchLabelAndMatch(const std::vector<int>&      batchLocalIndices,
   const int numPairsInGroup = static_cast<int>(batchLocalIndices.size());
 
   auto& globalPairIndicesHost = twoStreamCtx.matchGlobalPairIndicesHost[depthGroupIdx];
+  auto& batchLocalIndicesHost = twoStreamCtx.matchBatchLocalIndicesHost[depthGroupIdx];
+  
   if (globalPairIndicesHost.size() < static_cast<size_t>(numPairsInGroup)) {
     globalPairIndicesHost.resize(numPairsInGroup);
+  }
+  if (batchLocalIndicesHost.size() < static_cast<size_t>(numPairsInGroup)) {
+    batchLocalIndicesHost.resize(numPairsInGroup);
   }
 
   for (int i = 0; i < numPairsInGroup; ++i) {
     globalPairIndicesHost[i] = slot.pairIndicesHost[batchLocalIndices[i]];
+    batchLocalIndicesHost[i] = batchLocalIndices[i];
   }
 
   auto& globalPairIndicesDev = twoStreamCtx.matchGlobalPairIndices[depthGroupIdx];
@@ -854,7 +863,7 @@ void launchLabelAndMatch(const std::vector<int>&      batchLocalIndices,
   if (batchLocalIndicesDev.size() < static_cast<size_t>(numPairsInGroup)) {
     batchLocalIndicesDev.resize(numPairsInGroup);
   }
-  batchLocalIndicesDev.copyFromHost(batchLocalIndices.data(), numPairsInGroup);
+  batchLocalIndicesDev.copyFromHost(batchLocalIndicesHost.data(), numPairsInGroup);
 
   SubstructMatchResultsDeviceView batchView = slot.deviceResults.view();
 
@@ -911,7 +920,7 @@ void uploadAndLaunchBatch(BatchSlot&                 slot,
                                      ctx.numQueries,
                                      ctx.maxTargetAtoms,
                                      numBuffersPerBlock);
-    slot.deviceResults.setQueryAtomCounts(ctx.queryAtomCounts);
+    slot.deviceResults.setQueryAtomCounts(ctx.queryAtomCounts.data(), ctx.queryAtomCounts.size());
 
     if (slot.pairIndicesDev.size() < static_cast<size_t>(slot.numPairsInBatch)) {
       slot.pairIndicesDev.resize(slot.numPairsInBatch);
@@ -961,7 +970,7 @@ void uploadAndLaunchBatch(BatchSlot&                 slot,
                                    ctx.numQueries,
                                    ctx.maxTargetAtoms,
                                    numBuffersPerBlock);
-  slot.deviceResults.setQueryAtomCounts(ctx.queryAtomCounts);
+  slot.deviceResults.setQueryAtomCounts(ctx.queryAtomCounts.data(), ctx.queryAtomCounts.size());
   allocRange.pop();
 
   ScopedCudaEvent allocDoneEvent;

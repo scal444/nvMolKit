@@ -159,7 +159,7 @@ class BatchResultsDevice {
                        PinnedHostVector<int>&     hostReportedCounts,
                        PinnedHostVector<int16_t>& hostMatchIndices) const;
 
-  void setQueryAtomCounts(const std::vector<int>& queryAtomCounts);
+  void setQueryAtomCounts(const int* queryAtomCounts, size_t count);
 
   [[nodiscard]] int batchSize() const { return batchSize_; }
   [[nodiscard]] int maxTargetAtoms() const { return maxTargetAtoms_; }
@@ -374,6 +374,7 @@ struct TwoStreamPipelineContext {
 
   /// Temporary pinned buffers for H2D transfers (reused per depth)
   std::array<PinnedHostVector<int>, kMaxRecursionDepth + 1> matchGlobalPairIndicesHost;
+  std::array<PinnedHostVector<int>, kMaxRecursionDepth + 1> matchBatchLocalIndicesHost;
 
   int maxDepthInBatch = 0;
 

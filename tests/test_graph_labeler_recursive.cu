@@ -270,7 +270,7 @@ class RecursivePaintTest : public ::testing::Test {
 
     results_ = std::make_unique<BatchResultsDevice>(stream_.stream());
     results_->allocateBatch(batchSize, batchPairMatchStarts.data(), 0, numQueries, maxTargetAtoms_, 2);
-    results_->setQueryAtomCounts(queryAtomCounts);
+    results_->setQueryAtomCounts(queryAtomCounts.data(), queryAtomCounts.size());
     results_->zeroRecursiveBits();
   }
 

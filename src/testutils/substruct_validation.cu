@@ -385,7 +385,7 @@ std::vector<std::vector<uint8_t>> computeGpuLabelMatrix(const RDKit::ROMol& targ
 
   BatchResultsDevice batchResults(stream);
   batchResults.allocateBatch(1, batchPairMatchStarts.data(), 0, 1, numTargetAtoms, 2);
-  batchResults.setQueryAtomCounts(queryAtomCounts);
+  batchResults.setQueryAtomCounts(queryAtomCounts.data(), queryAtomCounts.size());
   batchResults.zeroRecursiveBits();
 
   if (!queryHost.recursivePatterns.empty() && !queryHost.recursivePatterns[0].empty()) {
