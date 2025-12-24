@@ -484,11 +484,15 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
   PartialMatch* currentOverflow = overflowA;
   PartialMatch* nextOverflow    = overflowB;
 
-  // Use ping-pong buffers for BFS levels
+  // Ping-pong buffer offsets for shared memory (avoid copy by swapping offsets)
+  __shared__ int currentBase;  // Offset into sharedPartials for current level
+  __shared__ int nextBase;     // Offset into sharedPartials for next level
   __shared__ int currentCount;
   __shared__ int nextCount;
 
   if (tid == 0) {
+    currentBase  = 0;
+    nextBase     = maxPartials;
     currentCount = 0;
     nextCount    = 0;
   }
@@ -529,8 +533,8 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
       } else {
         const int slot = atomicAdd(&currentCount, 1);
         if (slot < maxPartials) {
-          sharedPartials[slot].mapping[0]    = static_cast<int8_t>(t);
-          sharedPartials[slot].nextQueryAtom = 1;
+          sharedPartials[currentBase + slot].mapping[0]    = static_cast<int8_t>(t);
+          sharedPartials[currentBase + slot].nextQueryAtom = 1;
         } else if (slot < maxTotal) {
           if constexpr (kDebugGSI) {
             if (slot == maxPartials) {
@@ -561,7 +565,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
       printf("\n");
       printf("[GSI] Level 0 candidates (shared): ");
       for (int i = 0; i < min(currentCount, maxPartials) && i < 10; ++i) {
-        printf("%d ", (int)sharedPartials[i].mapping[0]);
+        printf("%d ", (int)sharedPartials[currentBase + i].mapping[0]);
       }
       if (currentCount > 10) printf("...");
       printf("\n");
@@ -606,7 +610,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
       // Read partial from shared or overflow buffer
       PartialMatch* partial;
       if (pIdx < maxPartials) {
-        partial = &sharedPartials[pIdx];
+        partial = &sharedPartials[currentBase + pIdx];
       } else {
         partial = &currentOverflow[pIdx - maxPartials];
       }
@@ -687,7 +691,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
             // Write to shared memory ping-pong or global overflow
             // Only copy [0..queryAtom-1] from parent, then set [queryAtom]
             if (slot < maxPartials) {
-              PartialMatch& next = sharedPartials[maxPartials + slot];
+              PartialMatch& next = sharedPartials[nextBase + slot];
               for (int q = 0; q < queryAtom; ++q) {
                 next.mapping[q] = partial->mapping[q];
               }
@@ -735,19 +739,15 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
       block.sync();
     }
 
-    // Swap buffers
+    // Swap buffers (just swap offsets/pointers, no copy needed)
     if (tid == 0) {
       currentCount = nextCount;
+      // Swap shared memory offsets
+      const int tmpBase = currentBase;
+      currentBase = nextBase;
+      nextBase = tmpBase;
     }
-    block.sync();
-
-    // Copy shared ping-pong portion to start of buffer
-    const int toCopyShared = min(nextCount, maxPartials);
-    for (int i = tid; i < toCopyShared; i += block.size()) {
-      sharedPartials[i] = sharedPartials[maxPartials + i];
-    }
-    
-    // Swap global overflow pointers
+    // Swap global overflow pointers (each thread has its own copy)
     PartialMatch* tmp = currentOverflow;
     currentOverflow = nextOverflow;
     nextOverflow = tmp;
