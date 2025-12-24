@@ -1313,14 +1313,14 @@ void accumulateBatchResults(BatchSlot&                 slot,
       }
 
       std::lock_guard<std::mutex> lock(resultsMutex);
-      auto& targetMatches = results.matches[targetIdx][queryIdx];
+      auto& targetMatches = results.getMatchesMut(targetIdx, queryIdx);
       targetMatches.insert(targetMatches.end(),
                            std::make_move_iterator(pairMatches.begin()),
                            std::make_move_iterator(pairMatches.end()));
-      results.actualMatchCounts[targetIdx][queryIdx] += actualMatches;
+      results.addActualCount(targetIdx, queryIdx, actualMatches);
     } else if (actualMatches > 0) {
       std::lock_guard<std::mutex> lock(resultsMutex);
-      results.actualMatchCounts[targetIdx][queryIdx] += actualMatches;
+      results.addActualCount(targetIdx, queryIdx, actualMatches);
     }
   }
   processRange.pop();

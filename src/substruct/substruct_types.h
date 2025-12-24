@@ -17,6 +17,7 @@
 #define NVMOLKIT_SUBSTRUCT_TYPES_H
 
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 namespace nvMolKit {
@@ -33,19 +34,16 @@ enum class SubstructAlgorithm {
 /**
  * @brief Accumulated results from substructure matching.
  *
- * Dynamically allocated nested vector format: matches[targetIdx][queryIdx][matchIdx]
- * is a vector of target atom indices for that match.
- *
- * Memory is allocated proportional to actual matches found, avoiding the
- * worst-case pre-allocation required by CSR formats.
+ * Uses sparse storage: only pairs with matches are stored.
+ * Memory is allocated proportional to actual matches found.
  */
 struct SubstructSearchResults {
-  /// matches[t][q] = vector of matches for target t against query q
+  /// Sparse storage: pairIndex -> vector of matches
   /// Each match is a vector<int> of target atom indices (one per query atom)
-  std::vector<std::vector<std::vector<std::vector<int>>>> matches;
+  std::unordered_map<int, std::vector<std::vector<int>>> matches;
 
-  /// actualMatchCounts[t][q] = total matches found (may exceed stored if capped)
-  std::vector<std::vector<int>> actualMatchCounts;
+  /// Sparse storage: pairIndex -> actual match count (may exceed stored if capped)
+  std::unordered_map<int, int> actualMatchCounts;
 
   int numTargets = 0;
   int numQueries = 0;
@@ -53,34 +51,56 @@ struct SubstructSearchResults {
   void resize(int nTargets, int nQueries) {
     numTargets = nTargets;
     numQueries = nQueries;
-    matches.assign(nTargets, std::vector<std::vector<std::vector<int>>>(nQueries));
-    actualMatchCounts.assign(nTargets, std::vector<int>(nQueries, 0));
+    matches.clear();
+    actualMatchCounts.clear();
+    // Reserve based on expected sparsity (assume ~10% of pairs have matches)
+    const size_t expectedPairs = static_cast<size_t>(nTargets) * nQueries / 10 + 1;
+    matches.reserve(expectedPairs);
+    actualMatchCounts.reserve(expectedPairs);
   }
 
-  /// Compute flat pair index (for compatibility with CSR-style access patterns)
+  /// Compute flat pair index
   [[nodiscard]] int pairIndex(int targetIdx, int queryIdx) const {
     return targetIdx * numQueries + queryIdx;
   }
 
   /// Check if pair had more matches than could be stored
   [[nodiscard]] bool hasOverflow(int targetIdx, int queryIdx) const {
-    return actualMatchCounts[targetIdx][queryIdx] >
-           static_cast<int>(matches[targetIdx][queryIdx].size());
+    const int idx = pairIndex(targetIdx, queryIdx);
+    auto countIt = actualMatchCounts.find(idx);
+    if (countIt == actualMatchCounts.end()) return false;
+    auto matchIt = matches.find(idx);
+    if (matchIt == matches.end()) return countIt->second > 0;
+    return countIt->second > static_cast<int>(matchIt->second.size());
   }
 
   /// Number of matches stored for this pair
   [[nodiscard]] int matchCount(int targetIdx, int queryIdx) const {
-    return static_cast<int>(matches[targetIdx][queryIdx].size());
+    auto it = matches.find(pairIndex(targetIdx, queryIdx));
+    return (it != matches.end()) ? static_cast<int>(it->second.size()) : 0;
   }
 
   /// Actual number of matches found (may exceed stored count)
   [[nodiscard]] int actualCount(int targetIdx, int queryIdx) const {
-    return actualMatchCounts[targetIdx][queryIdx];
+    auto it = actualMatchCounts.find(pairIndex(targetIdx, queryIdx));
+    return (it != actualMatchCounts.end()) ? it->second : 0;
   }
 
-  /// Get the matches for a (target, query) pair
+  /// Get the matches for a (target, query) pair (returns empty if none)
   [[nodiscard]] const std::vector<std::vector<int>>& getMatches(int targetIdx, int queryIdx) const {
-    return matches[targetIdx][queryIdx];
+    static const std::vector<std::vector<int>> empty;
+    auto it = matches.find(pairIndex(targetIdx, queryIdx));
+    return (it != matches.end()) ? it->second : empty;
+  }
+
+  /// Mutable access to matches (creates entry if needed)
+  std::vector<std::vector<int>>& getMatchesMut(int targetIdx, int queryIdx) {
+    return matches[pairIndex(targetIdx, queryIdx)];
+  }
+
+  /// Add to actual match count
+  void addActualCount(int targetIdx, int queryIdx, int count) {
+    actualMatchCounts[pairIndex(targetIdx, queryIdx)] += count;
   }
 };
 
