@@ -62,17 +62,16 @@ struct PaintModeParams {
 /**
  * @brief Check if a target atom is already used in a partial mapping.
  *
- * Iterates through the mapping array to check if targetAtom appears.
- * This is O(numQueryAtoms) but avoids the need for a separate bitmask,
- * saving significant shared memory.
+ * Only checks mapping[0..depth-1] since query atoms are processed in order.
+ * This avoids the need for -1 sentinel initialization.
  *
- * @param mapping The partial mapping array (mapping[q] = target atom, -1 if unassigned)
- * @param numQueryAtoms Number of query atoms
+ * @param mapping The partial mapping array
+ * @param depth Current search depth (number of assigned query atoms)
  * @param targetAtom Target atom to check
  * @return true if targetAtom is already used in the mapping
  */
-__device__ __forceinline__ bool isTargetUsedInMapping(const int8_t* mapping, int numQueryAtoms, int targetAtom) {
-  for (int q = 0; q < numQueryAtoms; ++q) {
+__device__ __forceinline__ bool isTargetUsedInMapping(const int8_t* mapping, int depth, int targetAtom) {
+  for (int q = 0; q < depth; ++q) {
     if (mapping[q] == targetAtom) {
       return true;
     }
@@ -90,24 +89,22 @@ __device__ __forceinline__ bool isTargetUsedInMapping(const int8_t* mapping, int
  * Maintains partial match and exploration stack for DFS backtracking.
  */
 struct VF2State {
-  int8_t mapping[kMaxQueryAtoms];       ///< mapping[q] = target atom idx, -1 if unassigned
+  int8_t mapping[kMaxQueryAtoms];       ///< mapping[q] = target atom idx (only [0..depth-1] valid)
   int8_t candidateIdx[kMaxQueryAtoms];  ///< Current candidate index at each stack level
   int    depth;                         ///< Current recursion depth (0 to numQueryAtoms-1)
   int    matchCount;                    ///< Number of complete matches found
-  int    numQueryAtoms;                 ///< Cached for isTargetUsed check
 
-  __device__ __forceinline__ void init(int nQueryAtoms) {
+  __device__ __forceinline__ void init() {
+    // No need to initialize mapping - we only read [0..depth-1] which are always written first
     for (int i = 0; i < kMaxQueryAtoms; ++i) {
-      mapping[i]      = -1;
       candidateIdx[i] = 0;
     }
-    depth         = 0;
-    matchCount    = 0;
-    numQueryAtoms = nQueryAtoms;
+    depth      = 0;
+    matchCount = 0;
   }
 
   __device__ __forceinline__ bool isTargetUsed(int targetIdx) const {
-    return isTargetUsedInMapping(mapping, numQueryAtoms, targetIdx);
+    return isTargetUsedInMapping(mapping, depth, targetIdx);
   }
 };
 
@@ -122,15 +119,8 @@ struct VF2State {
  * Stored compactly for queue-based BFS exploration.
  */
 struct PartialMatch {
-  int8_t mapping[kMaxQueryAtoms];  ///< mapping[q] = target atom, -1 if unassigned
-  int8_t nextQueryAtom;            ///< Next query atom to extend
-
-  __device__ __forceinline__ void init() {
-    for (int i = 0; i < kMaxQueryAtoms; ++i) {
-      mapping[i] = -1;
-    }
-    nextQueryAtom = 0;
-  }
+  int8_t mapping[kMaxQueryAtoms];  ///< mapping[q] = target atom (only [0..nextQueryAtom-1] valid)
+  int8_t nextQueryAtom;            ///< Next query atom to extend (also serves as depth)
 };
 
 /**
@@ -196,7 +186,7 @@ __device__ __forceinline__ bool ringBondConstraintsSatisfied(uint8_t queryFlags,
  * @param target Target molecule view
  * @param query Query molecule view
  * @param mapping Current partial mapping (query -> target)
- * @param queryAtom Query atom being matched
+ * @param queryAtom Query atom being matched (also the current depth)
  * @param targetAtom Candidate target atom
  * @return true if edge consistency is satisfied
  */
@@ -207,12 +197,14 @@ __device__ __forceinline__ bool checkEdgeConsistency(const MoleculeView& target,
                                                      int                 targetAtom) {
   const int  queryDegree      = query.getAtomDegree(queryAtom);
   const bool hasBondQueryData = query.hasBondQueryData();
+  // queryAtom is the current depth - atoms 0..queryAtom-1 are already mapped
+  const int  depth            = queryAtom;
 
   for (int i = 0; i < queryDegree; ++i) {
     const int neighborQueryAtom = query.getNeighborAtomIdx(queryAtom, i);
 
-    // Only check neighbors that are already mapped
-    if (mapping[neighborQueryAtom] < 0) {
+    // Only check neighbors that are already mapped (index < current depth)
+    if (neighborQueryAtom >= depth) {
       continue;
     }
 
@@ -364,7 +356,7 @@ __device__ void vf2SearchGPU(const MoleculeView&                                
     return;
   }
 
-  state.init(numQueryAtoms);
+  state.init();
   state.mapping[0] = static_cast<int8_t>(startingTargetAtom);
   state.depth = 1;
 
@@ -386,7 +378,6 @@ __device__ void vf2SearchGPU(const MoleculeView&                                
       // Backtrack to find more matches
       --state.depth;
       if (state.depth > 0) {
-        state.mapping[state.depth] = -1;
         ++state.candidateIdx[state.depth];
       }
       continue;
@@ -423,7 +414,6 @@ __device__ void vf2SearchGPU(const MoleculeView&                                
       state.candidateIdx[state.depth] = 0;
       --state.depth;
       if (state.depth > 0) {
-        state.mapping[state.depth] = -1;
         ++state.candidateIdx[state.depth];
       } else if (state.depth == 0) {
         // Exhausted this starting point
@@ -539,7 +529,6 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
       } else {
         const int slot = atomicAdd(&currentCount, 1);
         if (slot < maxPartials) {
-          sharedPartials[slot].init();
           sharedPartials[slot].mapping[0]    = static_cast<int8_t>(t);
           sharedPartials[slot].nextQueryAtom = 1;
         } else if (slot < maxTotal) {
@@ -549,7 +538,6 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
             }
           }
           const int overflowSlot = slot - maxPartials;
-          currentOverflow[overflowSlot].init();
           currentOverflow[overflowSlot].mapping[0]    = static_cast<int8_t>(t);
           currentOverflow[overflowSlot].nextQueryAtom = 1;
         } else {
@@ -616,18 +604,18 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
     // Each warp processes partial matches in round-robin
     for (int pIdx = warpId; pIdx < numPartials; pIdx += numWarps) {
       // Read partial from shared or overflow buffer
-      PartialMatch partial;
+      PartialMatch* partial;
       if (pIdx < maxPartials) {
-        partial = sharedPartials[pIdx];
+        partial = &sharedPartials[pIdx];
       } else {
-        partial = currentOverflow[pIdx - maxPartials];
+        partial = &currentOverflow[pIdx - maxPartials];
       }
 
       if constexpr (kDebugGSI) {
         if (pIdx == 0 && laneId == 0 && level <= 5) {
           printf("[GSI] Level %d partial 0 mapping: ", level);
           for (int q = 0; q < numQueryAtoms; ++q) {
-            printf("%d ", (int)partial.mapping[q]);
+            printf("%d ", (int)partial->mapping[q]);
           }
           printf("\n");
         }
@@ -643,8 +631,8 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
         
         if (t < numTargetAtoms) {
           labelOk = labelMatrix.get(t, queryAtom);
-          notUsed = !isTargetUsedInMapping(partial.mapping, numQueryAtoms, t);
-          edgeOk = checkEdgeConsistency(target, query, partial.mapping, queryAtom, t);
+          notUsed = !isTargetUsedInMapping(partial->mapping, queryAtom, t);
+          edgeOk = checkEdgeConsistency(target, query, partial->mapping, queryAtom, t);
           valid = labelOk && notUsed && edgeOk;
           
           if constexpr (kDebugGSI) {
@@ -668,7 +656,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
             if constexpr (kDebugGSI) {
               printf("[GSI] MATCH FOUND! matchIdx=%d, mapping: ", matchIdx);
               for (int q = 0; q < numQueryAtoms; ++q) {
-                printf("%d ", (q == queryAtom) ? t : (int)partial.mapping[q]);
+                printf("%d ", (q == queryAtom) ? t : (int)partial->mapping[q]);
               }
               printf("\n");
             }
@@ -677,13 +665,13 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
                 const int writeOffset = matchOffset + matchIdx * numQueryAtoms;
                 for (int q = 0; q < numQueryAtoms; ++q) {
                   matchIndices[writeOffset + q] = (q == queryAtom) ? static_cast<int16_t>(t) 
-                                                                    : partial.mapping[q];
+                                                                    : partial->mapping[q];
                 }
                 atomicAdd(reportedCount, 1);
               }
             } else {
               // Paint mode: set bit for first target atom in this match (mapping[0])
-              const int firstTargetAtom = partial.mapping[0];
+              const int firstTargetAtom = partial->mapping[0];
               atomicOr(&paintParams.recursiveBits[paintParams.outputPairIdx * paintParams.maxTargetAtoms + firstTargetAtom],
                        1u << paintParams.patternId);
               atomicAdd(reportedCount, 1);
@@ -697,11 +685,11 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
               }
             }
             // Write to shared memory ping-pong or global overflow
+            // Only copy [0..queryAtom-1] from parent, then set [queryAtom]
             if (slot < maxPartials) {
               PartialMatch& next = sharedPartials[maxPartials + slot];
-              next.init();
-              for (int q = 0; q < numQueryAtoms; ++q) {
-                next.mapping[q] = partial.mapping[q];
+              for (int q = 0; q < queryAtom; ++q) {
+                next.mapping[q] = partial->mapping[q];
               }
               next.mapping[queryAtom] = static_cast<int8_t>(t);
               next.nextQueryAtom      = static_cast<int8_t>(queryAtom + 1);
@@ -713,9 +701,8 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
               }
               const int overflowSlot = slot - maxPartials;
               PartialMatch& next = nextOverflow[overflowSlot];
-              next.init();
-              for (int q = 0; q < numQueryAtoms; ++q) {
-                next.mapping[q] = partial.mapping[q];
+              for (int q = 0; q < queryAtom; ++q) {
+                next.mapping[q] = partial->mapping[q];
               }
               next.mapping[queryAtom] = static_cast<int8_t>(t);
               next.nextQueryAtom      = static_cast<int8_t>(queryAtom + 1);
@@ -900,7 +887,6 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
     } else {
       const int slot = atomicAdd(&queueTail, 1);
       if (slot < maxQueueSize) {
-        workQueue[slot].init();
         workQueue[slot].mapping[0]    = q0Candidates.candidates[i];
         workQueue[slot].nextQueryAtom = 1;
       } else if (slot < maxTotal) {
@@ -910,7 +896,6 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
           }
         }
         const int overflowSlot = slot - maxQueueSize;
-        globalOverflow[overflowSlot].init();
         globalOverflow[overflowSlot].mapping[0]    = q0Candidates.candidates[i];
         globalOverflow[overflowSlot].nextQueryAtom = 1;
       } else {
@@ -986,11 +971,9 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
     const bool hasWork = (myWorkIdx >= 0 && myWorkIdx < maxTotal);
 
     // Copy work item to registers to avoid races with concurrent writes to workQueue
+    // Only [0..localQueryAtom-1] are valid - no need to init or copy beyond that
     int8_t localMapping[kMaxQueryAtoms];
     int    localQueryAtom = 0;
-    for (int q = 0; q < kMaxQueryAtoms; ++q) {
-      localMapping[q] = -1;
-    }
 
     if (hasWork) {
       // Read from shared queue or overflow buffer based on index
@@ -998,7 +981,7 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
                                    ? workQueue[myWorkIdx] 
                                    : globalOverflow[myWorkIdx - maxQueueSize];
       localQueryAtom = work.nextQueryAtom;
-      for (int q = 0; q < numQueryAtoms; ++q) {
+      for (int q = 0; q < localQueryAtom; ++q) {
         localMapping[q] = work.mapping[q];
       }
     }
@@ -1034,7 +1017,7 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
 
         if (cIdx < candidates.count) {
           targetAtom         = candidates.candidates[cIdx];
-          const bool notUsed = !isTargetUsedInMapping(localMapping, numQueryAtoms, targetAtom);
+          const bool notUsed = !isTargetUsedInMapping(localMapping, localQueryAtom, targetAtom);
           const bool edgeOk  = checkEdgeConsistency(target, query, localMapping, localQueryAtom, targetAtom);
           valid = notUsed && edgeOk;
 
@@ -1086,9 +1069,10 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
                        iterCount, slot, localQueryAtom + 1, targetAtom);
               }
             }
+            // Only copy [0..localQueryAtom-1] from parent, then set [localQueryAtom]
             if (slot < maxQueueSize) {
               PartialMatch& next = workQueue[slot];
-              for (int q = 0; q < numQueryAtoms; ++q) {
+              for (int q = 0; q < localQueryAtom; ++q) {
                 next.mapping[q] = localMapping[q];
               }
               next.mapping[localQueryAtom] = static_cast<int8_t>(targetAtom);
@@ -1101,7 +1085,7 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
               }
               const int overflowSlot = slot - maxQueueSize;
               PartialMatch& next = globalOverflow[overflowSlot];
-              for (int q = 0; q < numQueryAtoms; ++q) {
+              for (int q = 0; q < localQueryAtom; ++q) {
                 next.mapping[q] = localMapping[q];
               }
               next.mapping[localQueryAtom] = static_cast<int8_t>(targetAtom);

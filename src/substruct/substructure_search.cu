@@ -266,7 +266,7 @@ __global__ void substructMatchKernel(MoleculesDeviceView             targets,
     __shared__ VF2State vf2States[kWarpsPerBlock];
 
     if (tile32.thread_rank() == 0) {
-      vf2States[warpId].init(query.numAtoms);
+      vf2States[warpId].init();
     }
     __syncthreads();
 
