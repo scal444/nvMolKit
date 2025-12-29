@@ -31,6 +31,7 @@
 #include "graph_labeler.cuh"
 #include "molecules_device.cuh"
 #include "pinned_buffer_pool.h"
+#include "sm_shared_mem_config.cuh"
 #include "substruct_algos.cuh"
 #include "substruct_debug.h"
 #include "nvtx.h"
@@ -46,9 +47,28 @@ constexpr int threadsPerBlock = 256;
 
 using LabelMatrixView = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
 
-constexpr int kMaxPartialsPerBlock = 256;   // Shared memory partials per block
-constexpr int kMaxQueueSize        = 512;   // Shared memory queue size
-constexpr int kWarpsPerBlock       = threadsPerBlock / 32;
+/**
+ * @brief SM-aware max partials per block for GSI algorithm.
+ *
+ * Uses __CUDA_ARCH__ to select appropriate sizing at compile time.
+ * Targets 6 blocks/SM for reasonable occupancy with 10% buffer, rounded to nearest 10.
+ *
+ * SM 9.0+ (Hopper, 228 KB/SM): 38 KB/block @ 6 blocks -> 260 partials (34.9 KB actual)
+ * SM 8.0  (A100, 160 KB/SM):   26 KB/block @ 6 blocks  -> 180 partials (24.5 KB actual)
+ * SM 8.6+ (Ada, 100 KB/SM):    16 KB/block @ 6 blocks  -> 110 partials (15.4 KB actual)
+ * Default (100 KB/SM):         16 KB/block @ 6 blocks  -> 110 partials (15.4 KB actual)
+ */
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+constexpr int kMaxPartialsPerBlock = 260;
+#elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 800
+constexpr int kMaxPartialsPerBlock = 180;
+#else
+constexpr int kMaxPartialsPerBlock = 110;
+#endif
+
+constexpr int kMaxPartialsPerBlockHost = 110;  // Conservative default for host-side sizing
+constexpr int kMaxQueueSize            = 220;  // WUS queue size (2x partials for safety)
+constexpr int kWarpsPerBlock           = threadsPerBlock / 32;
 
 /**
  * @brief Compute label matrix and write to global memory.

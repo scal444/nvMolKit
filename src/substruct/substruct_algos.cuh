@@ -467,14 +467,10 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
                                 int                                                   maxMatches,
                                 int                                                   matchOffset,
                                 PaintModeParams                                       paintParams = {}) {
-  namespace cg = cooperative_groups;
-  auto block   = cg::this_thread_block();
-  auto tile32  = cg::tiled_partition<32>(block);
-  
-  const int tid       = block.thread_rank();
-  const int laneId    = tile32.thread_rank();
-  const int warpId    = tile32.meta_group_rank();
-  const int numWarps  = tile32.meta_group_size();
+  const int tid = threadIdx.x;
+  const int laneId = tid % 32;
+  const int warpId    = tid / 32;
+  const int numWarps  = blockDim.x / 32;
 
   const int numQueryAtoms  = query.numAtoms;
   const int numTargetAtoms = target.numAtoms;
@@ -496,7 +492,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
     currentCount = 0;
     nextCount    = 0;
   }
-  block.sync();
+  __syncthreads();
 
   if constexpr (kDebugGSI) {
     if (tid == 0) {
@@ -505,13 +501,13 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
       printf("[GSI] query.hasBondQueryData()=%d, query.hasQueryTrees()=%d\n",
              query.hasBondQueryData() ? 1 : 0, query.hasQueryTrees() ? 1 : 0);
     }
-    block.sync();
+    __syncthreads();
   }
 
   // Initialize level 0: all candidates for query atom 0
   const bool singleAtomQuery = (numQueryAtoms == 1);
 
-  for (int t = tid; t < numTargetAtoms; t += block.size()) {
+  for (int t = tid; t < numTargetAtoms; t += blockDim.x) {
     if (labelMatrix.get(t, 0)) {
       if (singleAtomQuery) {
         const int matchIdx = atomicAdd(matchCount, 1);
@@ -554,7 +550,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
       }
     }
   }
-  block.sync();
+  __syncthreads();
 
   if constexpr (kDebugGSI) {
     if (tid == 0) {
@@ -570,7 +566,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
       if (currentCount > 10) printf("...");
       printf("\n");
     }
-    block.sync();
+    __syncthreads();
   }
 
   if (singleAtomQuery) {
@@ -587,13 +583,13 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
         printf("[GSI] === Level %d: processing %d partials for queryAtom %d ===\n",
                level, numPartials, queryAtom);
       }
-      block.sync();
+      __syncthreads();
     }
 
     if (tid == 0) {
       nextCount = 0;
     }
-    block.sync();
+    __syncthreads();
 
     __shared__ int debugValidTotal;
     __shared__ int debugCheckedTotal;
@@ -602,7 +598,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
         debugValidTotal = 0;
         debugCheckedTotal = 0;
       }
-      block.sync();
+      __syncthreads();
     }
 
     // Each warp processes partial matches in round-robin
@@ -651,9 +647,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
                    level, t, labelOk ? 1 : 0, notUsed ? 1 : 0, edgeOk ? 1 : 0, valid ? 1 : 0);
           }
         }
-
-        const uint32_t validMask = __ballot_sync(0xFFFFFFFF, valid);
-
+        
         if (valid) {
           if (level == numQueryAtoms - 1) {
             const int matchIdx = atomicAdd(matchCount, 1);
@@ -722,7 +716,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
         }
       }
     }
-    block.sync();
+    __syncthreads();
 
     if constexpr (kDebugGSI) {
       if (tid == 0) {
@@ -736,7 +730,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
         }
         printf("\n");
       }
-      block.sync();
+      __syncthreads();
     }
 
     // Swap buffers (just swap offsets/pointers, no copy needed)
@@ -752,7 +746,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
     currentOverflow = nextOverflow;
     nextOverflow = tmp;
 
-    block.sync();
+    __syncthreads();
 
     if constexpr (kDebugGSI) {
       if (tid == 0 && currentCount == 0) {
@@ -1029,8 +1023,6 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
           }
         }
 
-        // Use ballot to find valid lanes
-        const uint32_t validMask = __ballot_sync(0xFFFFFFFF, valid);
 
         // Each valid lane writes its result
         if (valid) {
