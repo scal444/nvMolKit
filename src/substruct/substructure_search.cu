@@ -1431,6 +1431,7 @@ void runnerWorker(int                        workerIdx,
                   int                        effectiveBatchSize,
                   BatchSlotPool&             slotPool,
                   PreparedBatchQueue*        readyQueue,
+                  std::atomic<bool>&         shutdownFlag,
                   std::exception_ptr&        exceptionPtr) {
   try {
     ScopedNvtxRange workerRange("runnerWorker " + std::to_string(workerIdx));
@@ -1496,6 +1497,10 @@ void runnerWorker(int                        workerIdx,
     }
   } catch (...) {
     exceptionPtr = std::current_exception();
+    // Signal shutdown to unblock other threads waiting on pool/queue
+    shutdownFlag.store(true, std::memory_order_release);
+    slotPool.shutdown();
+    if (readyQueue) readyQueue->shutdown();
   }
 }
 
@@ -1515,6 +1520,7 @@ void preprocessorWorker(int                        workerIdx,
                         int                        effectiveBatchSize,
                         BatchSlotPool&             slotPool,
                         PreparedBatchQueue&        readyQueue,
+                        std::atomic<bool>&         shutdownFlag,
                         std::exception_ptr&        exceptionPtr) {
   try {
     ScopedNvtxRange workerRange("preprocessorWorker " + std::to_string(workerIdx));
@@ -1554,6 +1560,10 @@ void preprocessorWorker(int                        workerIdx,
     }
   } catch (...) {
     exceptionPtr = std::current_exception();
+    // Signal shutdown to unblock other threads waiting on pool/queue
+    shutdownFlag.store(true, std::memory_order_release);
+    slotPool.shutdown();
+    readyQueue.shutdown();
   }
 }
 
@@ -1707,6 +1717,8 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
     readyQueue = std::make_unique<PreparedBatchQueue>(numRunners * 2 + numPreprocessors);
   }
 
+  std::atomic<bool> shutdownFlag{false};
+
   ScopedNvtxRange launchRange("CPU: Launch worker threads");
   
   for (int t = 0; t < numPreprocessors; ++t) {
@@ -1721,6 +1733,7 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
                          effectiveBatchSize,
                          std::ref(slotPool),
                          std::ref(*readyQueue),
+                         std::ref(shutdownFlag),
                          std::ref(exceptions[t]));
   }
 
@@ -1741,19 +1754,21 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
                          effectiveBatchSize,
                          std::ref(slotPool),
                          readyQueue.get(),
+                         std::ref(shutdownFlag),
                          std::ref(exceptions[numPreprocessors + t]));
   }
   launchRange.pop();
 
   ScopedNvtxRange joinRange("CPU: Join worker threads");
-  for (int i = 0; i < numPreprocessors; ++i) {
-    workers[i].join();
+  // Workers that fail will call shutdown() on pool/queue to unblock others.
+  // Join all workers - they'll exit either normally or due to shutdown.
+  for (auto& worker : workers) {
+    worker.join();
   }
+  // Defensive cleanup (shutdown already called if any worker failed)
+  slotPool.shutdown();
   if (readyQueue) {
     readyQueue->shutdown();
-  }
-  for (int i = numPreprocessors; i < totalThreads; ++i) {
-    workers[i].join();
   }
   joinRange.pop();
 
