@@ -26,7 +26,6 @@
 #include "device.h"
 #include "device_vector.h"
 #include "flat_bit_vect.h"
-#include "host_vector.h"
 #include "molecules.h"
 #include "pinned_buffer_pool.h"
 #include "substruct_algos.cuh"
@@ -144,22 +143,6 @@ class BatchResultsDevice {
    * @brief Zero the recursive match bits buffer for a new batch.
    */
   void zeroRecursiveBits();
-
-  /**
-   * @brief Zero the label matrix buffer for a new batch.
-   */
-  void zeroLabelMatrixBuffer();
-
-  /**
-   * @brief Copy batch results to host vectors.
-   *
-   * @param hostMatchCounts Output: match counts for this batch [batchSize]
-   * @param hostReportedCounts Output: reported counts for this batch [batchSize]
-   * @param hostMatchIndices Output: match indices for this batch
-   */
-  void copyBatchToHost(PinnedHostVector<int>&     hostMatchCounts,
-                       PinnedHostVector<int>&     hostReportedCounts,
-                       PinnedHostVector<int16_t>& hostMatchIndices) const;
 
   /**
    * @brief Copy batch results to raw pinned memory pointers.
@@ -499,7 +482,6 @@ struct TwoStreamPipelineContext {
  * @param numDepthEvents Number of events in the array (typically kMaxRecursionDepth)
  */
 void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&            targetsDevice,
-                                                const MoleculesHost&              targetsHost,
                                                 const MoleculesHost&              queriesHost,
                                                 const LeafSubpatterns&            leafSubpatterns,
                                                 BatchResultsDevice&               batchResults,

@@ -364,7 +364,7 @@ std::vector<std::vector<uint8_t>> computeGpuLabelMatrix(const RDKit::ROMol& targ
 
     RecursiveScratchBuffers          scratch(stream);
     std::vector<BatchedPatternEntry> scratchPatternEntries;
-    preprocessRecursiveSmartsBatchedWithEvents(targetDevice, targetHost, queryHost, leafSubpatterns, batchResults,
+    preprocessRecursiveSmartsBatchedWithEvents(targetDevice, queryHost, leafSubpatterns, batchResults,
                                                1, 0, 1, SubstructAlgorithm::GSI, stream, scratch,
                                                scratchPatternEntries, nullptr, 0);
   }

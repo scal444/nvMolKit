@@ -577,10 +577,7 @@ struct BatchSlot {
   int*     matchCountsHost          = nullptr;
   int*     reportedCountsHost       = nullptr;
   int16_t* matchIndicesHost         = nullptr;
-  int      pairIndicesCapacity      = 0;
-  int      matchIndicesCapacity     = 0;
 
-  std::vector<BatchedPatternEntry>      patternEntriesHost;
 
   // Precomputed recursive batch setup (populated by prepareRecursiveBatchOnCPU)
   int recursiveMaxDepth       = 0;
@@ -626,8 +623,6 @@ struct BatchSlot {
     matchCountsHost      = buffer.matchCounts;
     reportedCountsHost   = buffer.reportedCounts;
     matchIndicesHost     = buffer.matchIndices;
-    pairIndicesCapacity  = buffer.pairIndicesCapacity;
-    matchIndicesCapacity = buffer.matchIndicesCapacity;
 
     twoStreamCtx->setPinnedBuffers(buffer.matchGlobalPairIndicesHost,
                                    buffer.matchBatchLocalIndicesHost,
@@ -643,10 +638,6 @@ struct ThreadWorkerContext {
   int numTargets     = 0;
   int numQueries     = 0;
   int maxTargetAtoms = 0;
-  int maxBatchSize   = 0;
-
-  explicit ThreadWorkerContext(int maxBatchSize)
-      : maxBatchSize(maxBatchSize) {}
 };
 
 }  // namespace
@@ -842,19 +833,6 @@ void BatchResultsDevice::zeroRecursiveBits() {
   recursiveMatchBits_.zero();
 }
 
-void BatchResultsDevice::zeroLabelMatrixBuffer() {
-  labelMatrixBuffer_.zero();
-}
-
-void BatchResultsDevice::copyBatchToHost(PinnedHostVector<int>&     hostMatchCounts,
-                                         PinnedHostVector<int>&     hostReportedCounts,
-                                         PinnedHostVector<int16_t>& hostMatchIndices) const {
-  // Pinned vectors should be pre-allocated large enough - no resize here
-  matchCounts_.copyToHost(hostMatchCounts.data(), batchSize_);
-  reportedCounts_.copyToHost(hostReportedCounts.data(), batchSize_);
-  matchIndices_.copyToHost(hostMatchIndices.data(), totalBatchMatchIndices_);
-}
-
 void BatchResultsDevice::copyBatchToHost(int*     hostMatchCounts,
                                          int*     hostReportedCounts,
                                          int16_t* hostMatchIndices) const {
@@ -936,7 +914,6 @@ void prepareRecursiveBatchOnCPU(BatchSlot&                 slot,
   precomputePipelineSchedule(*slot.twoStreamCtx, queriesHost, slot.numPairsInBatch, 
                              slot.batchStart, ctx.numQueries);
 
-  slot.patternEntriesHost.clear();
   for (auto& vec : slot.patternsAtDepth) {
     vec.clear();
   }
@@ -976,15 +953,12 @@ void prepareRecursiveBatchOnCPU(BatchSlot&                 slot,
                                  std::to_string(queryIdx) + ", patternId=" + std::to_string(entry.patternId));
       }
 
-      BatchedPatternEntry batchEntry;
+      BatchedPatternEntry&  batchEntry = slot.patternsAtDepth[entry.depth].emplace_back();
       batchEntry.mainQueryIdx    = queryIdx;
       batchEntry.patternId       = entry.patternId;
       batchEntry.patternMolIdx   = patternMolIdx;
       batchEntry.depth           = entry.depth;
       batchEntry.localIdInParent = entry.localIdInParent;
-
-      slot.patternEntriesHost.push_back(batchEntry);
-      slot.patternsAtDepth[entry.depth].push_back(batchEntry);
     }
   }
 
@@ -1434,7 +1408,6 @@ void threadWorker(int                        workerIdx,
                   const ThreadWorkerContext& ctx,
                   MoleculesDevice&           targetsDevice,
                   const MoleculesDevice&     queriesDevice,
-                  const MoleculesHost&       targetsHost,
                   const MoleculesHost&       queriesHost,
                   const LeafSubpatterns&     leafSubpatterns,
                   SubstructSearchResults&    results,
@@ -1560,7 +1533,7 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
   const int effectiveBatchSize = std::min(batchSize, numPairs);
 
   ScopedNvtxRange ctxRange("CPU: ThreadWorkerContext construction");
-  ThreadWorkerContext ctx(effectiveBatchSize);
+  ThreadWorkerContext ctx;
   ctxRange.pop();
 
   ctx.numTargets = numTargets;
@@ -1640,7 +1613,6 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
                          std::cref(ctx),
                          std::ref(targetsDevice),
                          std::cref(queriesDevice),
-                         std::cref(targetsHost),
                          std::cref(queriesHost),
                          std::cref(leafSubpatterns),
                          std::ref(results),
@@ -1703,7 +1675,6 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
 // =============================================================================
 
 void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&            targetsDevice,
-                                                const MoleculesHost&              targetsHost,
                                                 const MoleculesHost&              queriesHost,
                                                 const LeafSubpatterns&            leafSubpatterns,
                                                 BatchResultsDevice&               batchResults,
