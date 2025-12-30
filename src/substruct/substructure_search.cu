@@ -47,28 +47,83 @@ constexpr int threadsPerBlock = 256;
 
 using LabelMatrixView = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
 
-/**
- * @brief SM-aware max partials per block for GSI algorithm.
- *
- * Uses __CUDA_ARCH__ to select appropriate sizing at compile time.
- * Targets 6 blocks/SM for reasonable occupancy with 10% buffer, rounded to nearest 10.
- *
- * SM 9.0+ (Hopper, 228 KB/SM): 38 KB/block @ 6 blocks -> 260 partials (34.9 KB actual)
- * SM 8.0  (A100, 160 KB/SM):   26 KB/block @ 6 blocks  -> 180 partials (24.5 KB actual)
- * SM 8.6+ (Ada, 100 KB/SM):    16 KB/block @ 6 blocks  -> 110 partials (15.4 KB actual)
- * Default (100 KB/SM):         16 KB/block @ 6 blocks  -> 110 partials (15.4 KB actual)
- */
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
-constexpr int kMaxPartialsPerBlock = 260;
-#elif defined(__CUDA_ARCH__) && __CUDA_ARCH__ == 800
-constexpr int kMaxPartialsPerBlock = 180;
+// =============================================================================
+// Architecture tables for compile-time shared memory sizing
+// =============================================================================
+
+/// Shared memory per SM in KiB for each compute capability
+constexpr int getSharedMemPerSM_KiB(int sm) {
+  if (sm >= 120) return 128;   // SM 12.0+
+  if (sm >= 100) return 228;   // SM 10.0+ (Blackwell)
+  if (sm >= 90)  return 228;   // SM 9.0+ (Hopper)
+  if (sm == 80)  return 160;   // SM 8.0 (Ampere A100)
+  return 100;                  // SM 8.6/8.9 (Ada), default
+}
+
+/// Max threads per SM for each compute capability
+constexpr int getMaxThreadsPerSM(int sm) {
+  if (sm >= 90)  return 2048;  // Hopper+
+  if (sm == 80)  return 2048;  // A100
+  if (sm >= 86)  return 1536;  // Ada/consumer Ampere
+  return 1536;                 // Default
+}
+
+/// Compute max blocks per SM given block size
+constexpr int getMaxBlocksPerSM(int sm, int blockSize) {
+  return getMaxThreadsPerSM(sm) / blockSize;
+}
+
+/// Compute max partials that fit in shared memory budget
+constexpr int computeMaxPartials(int sharedPerSM_KiB, int blocksPerSM) {
+  constexpr int kLabelMatrixBytes = 1024;
+  constexpr int kControlVarsBytes = 32;
+  constexpr int kPartialMatchSize = 65;
+  
+  const int budgetBytes = (sharedPerSM_KiB * 1024) / blocksPerSM;
+  const int availableBytes = (budgetBytes * 9 / 10) - kLabelMatrixBytes - kControlVarsBytes;
+  const int rawPartials = availableBytes / (kPartialMatchSize * 2);  // ping-pong
+  return (rawPartials / 10) * 10;  // round to 10
+}
+
+/// Compute partials for a given SM architecture
+constexpr int getMaxPartialsForSM(int sm, int blockSize) {
+  return computeMaxPartials(getSharedMemPerSM_KiB(sm), getMaxBlocksPerSM(sm, blockSize));
+}
+
+// Compute at compile time based on __CUDA_ARCH__
+#if defined(__CUDA_ARCH__)
+constexpr int kMaxPartialsPerBlock = getMaxPartialsForSM(__CUDA_ARCH__ / 10, threadsPerBlock);
+static_assert(getMaxThreadsPerSM(__CUDA_ARCH__ / 10) % threadsPerBlock == 0, 
+              "threadsPerBlock must evenly divide max threads/SM");
 #else
-constexpr int kMaxPartialsPerBlock = 110;
+constexpr int kMaxPartialsPerBlock = getMaxPartialsForSM(86, threadsPerBlock);
 #endif
 
-constexpr int kMaxPartialsPerBlockHost = 110;  // Conservative default for host-side sizing
-constexpr int kMaxQueueSize            = 220;  // WUS queue size (2x partials for safety)
+constexpr int kMaxPartialsPerBlockHost = getMaxPartialsForSM(86, threadsPerBlock);
+static_assert(getMaxThreadsPerSM(86) % threadsPerBlock == 0,
+              "threadsPerBlock must evenly divide max threads/SM");
+constexpr int kMaxQueueSize = kMaxPartialsPerBlockHost * 2;
 constexpr int kWarpsPerBlock           = threadsPerBlock / 32;
+
+/**
+ * @brief Configure kernel to use maximum shared memory carveout.
+ *
+ * On Hopper+ architectures, shared memory is configurable via carveout.
+ * This sets the kernel to prefer maximum shared memory over L1 cache.
+ */
+template <typename KernelFunc>
+void configureSharedMemCarveout(KernelFunc kernel) {
+  cudaFuncSetAttribute(kernel, cudaFuncAttributePreferredSharedMemoryCarveout, cudaSharedmemCarveoutMaxShared);
+}
+
+/// Flag to ensure we only configure carveout once
+inline bool& sharedMemCarveoutConfigured() {
+  static bool configured = false;
+  return configured;
+}
+
+/// Configure all substruct kernels for max shared memory (call once before first use)
+void configureSubstructKernelsSharedMem();
 
 /**
  * @brief Compute label matrix and write to global memory.
@@ -482,6 +537,27 @@ __global__ void substructPaintKernel(MoleculesDeviceView         targets,
       nullptr, 0, 0,
       paintParams);
   }
+}
+
+// =============================================================================
+// Shared Memory Carveout Configuration
+// =============================================================================
+
+void configureSubstructKernelsSharedMem() {
+  if (sharedMemCarveoutConfigured()) return;
+  
+  // Configure GSI kernels for max shared memory
+  configureSharedMemCarveout(substructMatchKernel<SubstructAlgorithm::GSI>);
+  configureSharedMemCarveout(substructPaintKernel<SubstructAlgorithm::GSI>);
+  
+  // Configure WUS kernels
+  configureSharedMemCarveout(substructMatchKernel<SubstructAlgorithm::WarpUnified>);
+  configureSharedMemCarveout(substructPaintKernel<SubstructAlgorithm::WarpUnified>);
+  
+  // VF2 uses less shared memory but configure anyway
+  configureSharedMemCarveout(substructMatchKernel<SubstructAlgorithm::VF2>);
+  
+  sharedMemCarveoutConfigured() = true;
 }
 
 // =============================================================================
@@ -1461,6 +1537,10 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
                          int                        batchSize,
                          int                        requestedNumThreads) {
   ScopedNvtxRange e2eRange("getSubstructMatches");
+  
+  // Configure kernels for max shared memory carveout (once per process)
+  configureSubstructKernelsSharedMem();
+  
   const int numTargets = static_cast<int>(targetsHost.numMolecules());
   const int numQueries = static_cast<int>(queriesHost.numMolecules());
 
@@ -1629,6 +1709,10 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
                                                 cudaEvent_t*                      depthEvents,
                                                 int                               numDepthEvents) {
   ScopedNvtxRange processRecursiveRange("Process recursive batch with events");
+  
+  // Configure kernels for max shared memory carveout (once per process)
+  configureSubstructKernelsSharedMem();
+  
   ScopedNvtxRange processRecursiveRangeSetup("Process recursive batch setup");
 
   scratch.setStream(stream);
