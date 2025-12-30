@@ -347,6 +347,13 @@ struct LeafSubpatterns {
   MoleculesHost   patternsHost;
   MoleculesDevice patternsDevice;
 
+  /// Precomputed pattern entries per query, organized by depth.
+  /// perQueryPatterns[queryIdx][depth] = vector of BatchedPatternEntry
+  std::vector<std::array<std::vector<BatchedPatternEntry>, kMaxRecursionDepth + 1>> perQueryPatterns;
+  
+  /// Max recursion depth per query (0 if no recursive patterns)
+  std::vector<int> perQueryMaxDepth;
+
   LeafSubpatterns() = default;
 
   /**

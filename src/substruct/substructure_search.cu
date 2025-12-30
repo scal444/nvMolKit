@@ -651,6 +651,7 @@ void LeafSubpatterns::buildAllPatterns(const MoleculesHost& queriesHost) {
 
   const int numQueries = static_cast<int>(queriesHost.numMolecules());
 
+  // First pass: build pattern molecules and register in patternIndexMap
   for (int queryIdx = 0; queryIdx < numQueries; ++queryIdx) {
     if (queryIdx >= static_cast<int>(queriesHost.recursivePatterns.size())) {
       continue;
@@ -702,6 +703,43 @@ void LeafSubpatterns::buildAllPatterns(const MoleculesHost& queriesHost) {
       }
 
       patternIndexMap[key] = molIdx;
+    }
+  }
+
+  // Second pass: build precomputed BatchedPatternEntry structures
+  perQueryPatterns.resize(numQueries);
+  perQueryMaxDepth.resize(numQueries, 0);
+
+  for (int queryIdx = 0; queryIdx < numQueries; ++queryIdx) {
+    if (queryIdx >= static_cast<int>(queriesHost.recursivePatterns.size())) {
+      continue;
+    }
+
+    const auto& recursiveInfo = queriesHost.recursivePatterns[queryIdx];
+    if (recursiveInfo.empty()) {
+      continue;
+    }
+
+    perQueryMaxDepth[queryIdx] = recursiveInfo.maxDepth;
+
+    for (const auto& entry : recursiveInfo.patterns) {
+      if (entry.queryMol == nullptr) {
+        continue;
+      }
+
+      const int patternMolIdx = getPatternIndex(queryIdx, entry.patternId);
+      if (patternMolIdx < 0) {
+        continue;
+      }
+
+      BatchedPatternEntry batchEntry;
+      batchEntry.mainQueryIdx    = queryIdx;
+      batchEntry.patternId       = entry.patternId;
+      batchEntry.patternMolIdx   = patternMolIdx;
+      batchEntry.depth           = entry.depth;
+      batchEntry.localIdInParent = entry.localIdInParent;
+
+      perQueryPatterns[queryIdx][entry.depth].push_back(batchEntry);
     }
   }
 }
@@ -913,48 +951,34 @@ void prepareRecursiveBatchOnCPU(BatchSlot&                 slot,
 
   precomputePipelineSchedule(*slot.twoStreamCtx, queriesHost, slot.numPairsInBatch, 
                              slot.batchStart, ctx.numQueries);
-  ScopedNvtxRange postPipelineSchedule("prepareRecursiveBatchPostPipelineCompute");
 
   for (auto& vec : slot.patternsAtDepth) {
     vec.clear();
   }
 
-  const int firstQueryInBatch  = slot.batchStart % ctx.numQueries;
-  const int numUniqueQueries   = std::min(slot.numPairsInBatch, ctx.numQueries);
-  const int recursivePatternsSize = static_cast<int>(queriesHost.recursivePatterns.size());
+  const int firstQueryInBatch = slot.batchStart % ctx.numQueries;
+  const int numUniqueQueries  = std::min(slot.numPairsInBatch, ctx.numQueries);
+  const int precomputedSize   = static_cast<int>(leafSubpatterns.perQueryPatterns.size());
 
   slot.recursiveMaxDepth = 0;
   for (int i = 0; i < numUniqueQueries; ++i) {
     const int queryIdx = (firstQueryInBatch + i) % ctx.numQueries;
 
-    if (queryIdx >= recursivePatternsSize) {
+    if (queryIdx >= precomputedSize) {
       continue;
     }
 
-    const auto& recursiveInfo = queriesHost.recursivePatterns[queryIdx];
-    if (recursiveInfo.empty()) {
+    const int queryMaxDepth = leafSubpatterns.perQueryMaxDepth[queryIdx];
+    if (queryMaxDepth == 0 && leafSubpatterns.perQueryPatterns[queryIdx][0].empty()) {
       continue;
     }
 
-    slot.recursiveMaxDepth = std::max(slot.recursiveMaxDepth, recursiveInfo.maxDepth);
+    slot.recursiveMaxDepth = std::max(slot.recursiveMaxDepth, queryMaxDepth);
 
-    for (const auto& entry : recursiveInfo.patterns) {
-      if (entry.queryMol == nullptr) {
-        continue;
-      }
-
-      const int patternMolIdx = leafSubpatterns.getPatternIndex(queryIdx, entry.patternId);
-      if (patternMolIdx < 0) {
-        throw std::runtime_error("Pattern not found in pre-built LeafSubpatterns: queryIdx=" +
-                                 std::to_string(queryIdx) + ", patternId=" + std::to_string(entry.patternId));
-      }
-
-      BatchedPatternEntry&  batchEntry = slot.patternsAtDepth[entry.depth].emplace_back();
-      batchEntry.mainQueryIdx    = queryIdx;
-      batchEntry.patternId       = entry.patternId;
-      batchEntry.patternMolIdx   = patternMolIdx;
-      batchEntry.depth           = entry.depth;
-      batchEntry.localIdInParent = entry.localIdInParent;
+    for (int d = 0; d <= queryMaxDepth; ++d) {
+      const auto& srcEntries = leafSubpatterns.perQueryPatterns[queryIdx][d];
+      auto& destEntries = slot.patternsAtDepth[d];
+      destEntries.insert(destEntries.end(), srcEntries.begin(), srcEntries.end());
     }
   }
 
