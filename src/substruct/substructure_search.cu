@@ -913,25 +913,21 @@ void prepareRecursiveBatchOnCPU(BatchSlot&                 slot,
 
   precomputePipelineSchedule(*slot.twoStreamCtx, queriesHost, slot.numPairsInBatch, 
                              slot.batchStart, ctx.numQueries);
+  ScopedNvtxRange postPipelineSchedule("prepareRecursiveBatchPostPipelineCompute");
 
   for (auto& vec : slot.patternsAtDepth) {
     vec.clear();
   }
 
-  std::vector<bool> queryInBatch(ctx.numQueries, false);
-  for (int i = 0; i < slot.numPairsInBatch; ++i) {
-    const int pairIdx  = slot.batchStart + i;
-    const int queryIdx = pairIdx % ctx.numQueries;
-    queryInBatch[queryIdx] = true;
-  }
+  const int firstQueryInBatch  = slot.batchStart % ctx.numQueries;
+  const int numUniqueQueries   = std::min(slot.numPairsInBatch, ctx.numQueries);
+  const int recursivePatternsSize = static_cast<int>(queriesHost.recursivePatterns.size());
 
   slot.recursiveMaxDepth = 0;
-  for (int queryIdx = 0; queryIdx < ctx.numQueries; ++queryIdx) {
-    if (!queryInBatch[queryIdx]) {
-      continue;
-    }
+  for (int i = 0; i < numUniqueQueries; ++i) {
+    const int queryIdx = (firstQueryInBatch + i) % ctx.numQueries;
 
-    if (queryIdx >= static_cast<int>(queriesHost.recursivePatterns.size())) {
+    if (queryIdx >= recursivePatternsSize) {
       continue;
     }
 
@@ -1699,20 +1695,15 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
   std::vector<BatchedPatternEntry>& patternEntriesHost = scratchPatternEntries;
   patternEntriesHost.clear();
 
-  std::vector<bool> queryInBatch(numQueries, false);
-  for (int i = 0; i < batchSize; ++i) {
-    const int pairIdx  = batchPairOffset + i;
-    const int queryIdx = pairIdx % numQueries;
-    queryInBatch[queryIdx] = true;
-  }
+  const int firstQueryInBatch   = batchPairOffset % numQueries;
+  const int numUniqueQueries    = std::min(batchSize, numQueries);
+  const int recursivePatternsSize = static_cast<int>(queriesHost.recursivePatterns.size());
 
   int maxDepth = 0;
-  for (int queryIdx = 0; queryIdx < numQueries; ++queryIdx) {
-    if (!queryInBatch[queryIdx]) {
-      continue;
-    }
+  for (int i = 0; i < numUniqueQueries; ++i) {
+    const int queryIdx = (firstQueryInBatch + i) % numQueries;
 
-    if (queryIdx >= static_cast<int>(queriesHost.recursivePatterns.size())) {
+    if (queryIdx >= recursivePatternsSize) {
       continue;
     }
 
