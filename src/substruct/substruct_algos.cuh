@@ -117,11 +117,15 @@ struct VF2State {
  *
  * Represents a partial mapping from query atoms to target atoms.
  * Stored compactly for queue-based BFS exploration.
+ *
+ * Complete matches are never stored in the queue, so we only need
+ * kMaxQueryAtoms - 1 slots (matching atoms 0 through numQueryAtoms-2).
  */
 struct PartialMatch {
-  int8_t mapping[kMaxQueryAtoms];  ///< mapping[q] = target atom (only [0..nextQueryAtom-1] valid)
-  int8_t nextQueryAtom;            ///< Next query atom to extend (also serves as depth)
+  int8_t mapping[kMaxQueryAtoms - 1];  ///< mapping[q] = target atom (only [0..nextQueryAtom-1] valid)
+  int8_t nextQueryAtom;                ///< Next query atom to extend (also serves as depth)
 };
+static_assert(sizeof(PartialMatch) == kMaxQueryAtoms, "PartialMatch must be kMaxQueryAtoms bytes");
 
 /**
  * @brief Candidate list for a query atom.

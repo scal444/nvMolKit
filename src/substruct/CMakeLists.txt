@@ -21,3 +21,4 @@ target_include_directories(substructure_search
 target_link_libraries(substructure_search PUBLIC molecules device_vector
                                                   flatBitVect cuda_error_check
                                                   pinned_buffer_pool)
+target_compile_options(substructure_search PRIVATE -Xptxas=-v )

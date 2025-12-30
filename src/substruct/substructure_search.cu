@@ -77,7 +77,8 @@ constexpr int getMaxBlocksPerSM(int sm, int blockSize) {
 constexpr int computeMaxPartials(int sharedPerSM_KiB, int blocksPerSM) {
   constexpr int kLabelMatrixBytes = 1024;
   constexpr int kControlVarsBytes = 32;
-  constexpr int kPartialMatchSize = 65;
+  constexpr int kPartialMatchSize = sizeof(PartialMatch);
+  static_assert(kPartialMatchSize == 64, "PartialMatch size changed - update shared memory calculations");
   
   const int budgetBytes = (sharedPerSM_KiB * 1024) / blocksPerSM;
   const int availableBytes = (budgetBytes * 9 / 10) - kLabelMatrixBytes - kControlVarsBytes;
