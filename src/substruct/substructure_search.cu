@@ -635,7 +635,9 @@ struct BatchSlot {
 struct ThreadWorkerContext {
   PinnedHostVector<int> queryAtomCounts;
   std::vector<int> globalPairMatchStarts;
-  std::vector<int> queryDepths;  ///< Cached recursion depth for each query
+  std::vector<int> queryDepths;       ///< Cached recursion depth for each query
+  std::vector<int> queryMaxDepths;    ///< Cached max recursion depth per query (from leafSubpatterns)
+  std::vector<int8_t> queryHasPatterns;  ///< Whether query has any recursive patterns
   int numTargets     = 0;
   int numQueries     = 0;
   int maxTargetAtoms = 0;
@@ -948,21 +950,16 @@ void prepareRecursiveBatchOnCPU(BatchSlot&                 slot,
 
   const int firstQueryInBatch = slot.batchStart % ctx.numQueries;
   const int numUniqueQueries  = std::min(slot.numPairsInBatch, ctx.numQueries);
-  const int precomputedSize   = static_cast<int>(leafSubpatterns.perQueryPatterns.size());
 
   slot.recursiveMaxDepth = 0;
   for (int i = 0; i < numUniqueQueries; ++i) {
     const int queryIdx = (firstQueryInBatch + i) % ctx.numQueries;
 
-    if (queryIdx >= precomputedSize) {
+    if (!ctx.queryHasPatterns[queryIdx]) {
       continue;
     }
 
-    const int queryMaxDepth = leafSubpatterns.perQueryMaxDepth[queryIdx];
-    if (queryMaxDepth == 0 && leafSubpatterns.perQueryPatterns[queryIdx][0].empty()) {
-      continue;
-    }
-
+    const int queryMaxDepth = ctx.queryMaxDepths[queryIdx];
     slot.recursiveMaxDepth = std::max(slot.recursiveMaxDepth, queryMaxDepth);
 
     for (int d = 0; d <= queryMaxDepth; ++d) {
@@ -1552,6 +1549,9 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
   ScopedNvtxRange metadataRange("CPU: Compute batch metadata");
   ctx.queryAtomCounts.resize(static_cast<size_t>(numQueries * 1.5));
   ctx.queryDepths.resize(numQueries);
+  ctx.queryMaxDepths.resize(numQueries);
+  ctx.queryHasPatterns.resize(numQueries);
+  const int precomputedSize = static_cast<int>(leafSubpatterns.perQueryPatterns.size());
   int maxQueryAtoms = 0;
   for (int q = 0; q < numQueries; ++q) {
     const int atomStart     = queriesHost.batchAtomStarts[q];
@@ -1563,6 +1563,11 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
                                " exceeds maximum supported depth of " +
                                std::to_string(kMaxRecursionDepth));
     }
+    ctx.queryMaxDepths[q]   = (q < static_cast<int>(leafSubpatterns.perQueryMaxDepth.size()))
+                                  ? leafSubpatterns.perQueryMaxDepth[q]
+                                  : 0;
+    ctx.queryHasPatterns[q] = (q < precomputedSize) &&
+                              (ctx.queryMaxDepths[q] > 0 || !leafSubpatterns.perQueryPatterns[q][0].empty());
     maxQueryAtoms           = std::max(maxQueryAtoms, ctx.queryAtomCounts[q]);
   }
 
