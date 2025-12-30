@@ -635,6 +635,7 @@ struct BatchSlot {
 struct ThreadWorkerContext {
   PinnedHostVector<int> queryAtomCounts;
   std::vector<int> globalPairMatchStarts;
+  std::vector<int> queryDepths;  ///< Cached recursion depth for each query
   int numTargets     = 0;
   int numQueries     = 0;
   int maxTargetAtoms = 0;
@@ -909,48 +910,37 @@ int getQueryRecursionDepth(const MoleculesHost& queriesHost, int queryIdx) {
  * Groups pairs by their query's recursion depth and populates the host-side
  * index vectors for the recursive stream and match stream.
  *
- * @param ctx Pipeline context to populate
- * @param queriesHost Host-side query data (for recursivePatterns)
+ * @param pipelineCtx Pipeline context to populate
+ * @param ctx Worker context with cached query depths
  * @param numPairsInBatch Number of pairs in the batch
  * @param batchStart Global pair index where the batch starts
- * @param numQueries Total number of queries (for decoding pair indices)
  */
-void precomputePipelineSchedule(TwoStreamPipelineContext& ctx,
-                                const MoleculesHost&      queriesHost,
-                                int                       numPairsInBatch,
-                                int                       batchStart,
-                                int                       numQueries) {
+void precomputePipelineSchedule(TwoStreamPipelineContext&  pipelineCtx,
+                                const ThreadWorkerContext& ctx,
+                                int                        numPairsInBatch,
+                                int                        batchStart) {
   ScopedNvtxRange scheduleRange("CPU: precomputePipelineSchedule");
-  ctx.maxDepthInBatch = 0;
+  pipelineCtx.maxDepthInBatch = 0;
 
-  for (auto& vec : ctx.matchPairsHost) {
+  for (auto& vec : pipelineCtx.matchPairsHost) {
     vec.clear();
   }
 
   for (int i = 0; i < numPairsInBatch; ++i) {
-    const int globalPairIdx = batchStart + i;
-    const int queryIdx      = globalPairIdx % numQueries;
-    const int depth         = getQueryRecursionDepth(queriesHost, queryIdx);
+    const int queryIdx = (batchStart + i) % ctx.numQueries;
+    const int depth    = ctx.queryDepths[queryIdx];
 
-    if (depth > kMaxRecursionDepth) {
-      throw std::runtime_error("Recursive SMARTS depth " + std::to_string(depth) +
-                               " exceeds maximum supported depth of " +
-                               std::to_string(kMaxRecursionDepth));
-    }
-
-    ctx.matchPairsHost[depth].push_back(i);
-    ctx.maxDepthInBatch = std::max(ctx.maxDepthInBatch, depth);
+    pipelineCtx.matchPairsHost[depth].push_back(i);
+    pipelineCtx.maxDepthInBatch = std::max(pipelineCtx.maxDepthInBatch, depth);
   }
 }
 
 void prepareRecursiveBatchOnCPU(BatchSlot&                 slot,
                                 const ThreadWorkerContext& ctx,
-                                const MoleculesHost&       queriesHost,
                                 const LeafSubpatterns&     leafSubpatterns) {
   ScopedNvtxRange prepRecRange("prepareRecursiveBatchOnCPU");
 
-  precomputePipelineSchedule(*slot.twoStreamCtx, queriesHost, slot.numPairsInBatch, 
-                             slot.batchStart, ctx.numQueries);
+  precomputePipelineSchedule(*slot.twoStreamCtx, ctx, slot.numPairsInBatch, slot.batchStart);
 
   for (auto& vec : slot.patternsAtDepth) {
     vec.clear();
@@ -1015,7 +1005,7 @@ void prepareBatchOnCPU(BatchSlot&                   slot,
     slot.pairIndicesHost[i] = batchStart + i;
   }
 
-  prepareRecursiveBatchOnCPU(slot, ctx, queriesHost, leafSubpatterns);
+  prepareRecursiveBatchOnCPU(slot, ctx, leafSubpatterns);
 }
 
 /**
@@ -1561,11 +1551,18 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
 
   ScopedNvtxRange metadataRange("CPU: Compute batch metadata");
   ctx.queryAtomCounts.resize(static_cast<size_t>(numQueries * 1.5));
+  ctx.queryDepths.resize(numQueries);
   int maxQueryAtoms = 0;
   for (int q = 0; q < numQueries; ++q) {
     const int atomStart     = queriesHost.batchAtomStarts[q];
     const int atomEnd       = queriesHost.batchAtomStarts[q + 1];
     ctx.queryAtomCounts[q]  = atomEnd - atomStart;
+    ctx.queryDepths[q]      = getQueryRecursionDepth(queriesHost, q);
+    if (ctx.queryDepths[q] > kMaxRecursionDepth) {
+      throw std::runtime_error("Recursive SMARTS depth " + std::to_string(ctx.queryDepths[q]) +
+                               " exceeds maximum supported depth of " +
+                               std::to_string(kMaxRecursionDepth));
+    }
     maxQueryAtoms           = std::max(maxQueryAtoms, ctx.queryAtomCounts[q]);
   }
 
