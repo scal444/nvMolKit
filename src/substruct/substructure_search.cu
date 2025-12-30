@@ -1138,15 +1138,11 @@ void launchRecursivePaintKernels(
       const size_t numBlocksInSubBatch   = numTargetsInBatch * numPatternsInSubBatch;
 
       ScopedNvtxRange prepareRange("GPU: Upload pattern entries");
-      if (scratch.patternsAtDepthHostCopyPending) {
-        ScopedNvtxRange waitRange("Wait: pattern entries H2D copy");
-        cudaCheckError(cudaEventSynchronize(scratch.patternsAtDepthHostCopyDone.event()));
-        waitRange.pop();
-        scratch.patternsAtDepthHostCopyPending = false;
-      }
-      scratch.ensureCapacity(static_cast<int>(numPatternsInSubBatch));
+      const int bufferIdx = scratch.acquireBufferIndex();
+      scratch.waitForBuffer(bufferIdx);
+      scratch.ensureCapacity(bufferIdx, static_cast<int>(numPatternsInSubBatch));
       for (size_t i = 0; i < numPatternsInSubBatch; ++i) {
-        scratch.patternsAtDepthHost[i] = patternsForDepth[patternStart + i];
+        scratch.patternsAtDepthHost[bufferIdx][i] = patternsForDepth[patternStart + i];
       }
       prepareRange.pop();
 
@@ -1166,9 +1162,8 @@ void launchRecursivePaintKernels(
         scratch.patternEntries.resize(static_cast<size_t>(numPatternsInSubBatch * 1.5));
       }
       
-      scratch.patternEntries.copyFromHost(scratch.patternsAtDepthHost, numPatternsInSubBatch);
-      cudaCheckError(cudaEventRecord(scratch.patternsAtDepthHostCopyDone.event(), scratch.patternEntries.stream()));
-      scratch.patternsAtDepthHostCopyPending = true;
+      scratch.patternEntries.copyFromHost(scratch.patternsAtDepthHost[bufferIdx], numPatternsInSubBatch);
+      scratch.recordCopy(bufferIdx, scratch.patternEntries.stream());
 
       const uint32_t* recursiveBitsForLabel = (currentDepth > 0) ? batchView.recursiveMatchBits : nullptr;
 
@@ -1668,9 +1663,14 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
     maxPatternsPerDepth = std::max(maxPatternsPerDepth, static_cast<int>(recInfo.patterns.size()));
   }
 
-  // Slot count: runners need 2 each for ping-pong, plus a small buffer for preprocessing overlap.
-  // Don't scale with numPreprocessors to avoid excessive GPU memory usage.
-  const int numSlots = numRunners * 2 + std::min(numPreprocessors, 2);
+  // Slot count:
+  // - Inline mode: runners need 3 each for triple-buffering (one accumulating, one copying, one computing)
+  //   This allows overlap of D2H copy wait with GPU execution and CPU accumulation
+  // - Separated mode: runners hold 2 slots each (current + pending), PPs hold 1 each (preparing),
+  //   plus buffer slots to keep the queue/pool from starving
+  const int numSlots = (numPreprocessors > 0) 
+                     ? (numRunners * 2 + numPreprocessors + std::max(2, numRunners))
+                     : (numRunners * 3);
   std::vector<std::unique_ptr<ConsolidatedPinnedBuffer>> pinnedBuffers;
   std::vector<std::unique_ptr<BatchSlot>> slots;
   std::vector<BatchSlot*> slotPtrs;
@@ -1702,7 +1702,9 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
 
   std::unique_ptr<PreparedBatchQueue> readyQueue;
   if (numPreprocessors > 0) {
-    readyQueue = std::make_unique<PreparedBatchQueue>(numRunners * 2);
+    // Queue capacity should allow PPs to stay ahead of runners
+    // At minimum, buffer enough for each runner plus slack
+    readyQueue = std::make_unique<PreparedBatchQueue>(numRunners * 2 + numPreprocessors);
   }
 
   ScopedNvtxRange launchRange("CPU: Launch worker threads");
@@ -1903,15 +1905,11 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
       const size_t numBlocksInSubBatch   = numTargetsInBatch * numPatternsInSubBatch;
 
       ScopedNvtxRange prepareRange("CPU: Prepare pattern entries");
-      if (scratch.patternsAtDepthHostCopyPending) {
-        ScopedNvtxRange waitRange("Wait: pattern entries H2D copy");
-        cudaCheckError(cudaEventSynchronize(scratch.patternsAtDepthHostCopyDone.event()));
-        waitRange.pop();
-        scratch.patternsAtDepthHostCopyPending = false;
-      }
-      scratch.ensureCapacity(static_cast<int>(numPatternsInSubBatch));
+      const int bufferIdx = scratch.acquireBufferIndex();
+      scratch.waitForBuffer(bufferIdx);
+      scratch.ensureCapacity(bufferIdx, static_cast<int>(numPatternsInSubBatch));
       for (size_t i = 0; i < numPatternsInSubBatch; ++i) {
-        scratch.patternsAtDepthHost[i] = patternsAtDepth[patternStart + i];
+        scratch.patternsAtDepthHost[bufferIdx][i] = patternsAtDepth[patternStart + i];
       }
       prepareRange.pop();
 
@@ -1931,9 +1929,8 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
         scratch.patternEntries.resize(static_cast<size_t>(numPatternsInSubBatch * 1.5));
       }
       
-      scratch.patternEntries.copyFromHost(scratch.patternsAtDepthHost, numPatternsInSubBatch);
-      cudaCheckError(cudaEventRecord(scratch.patternsAtDepthHostCopyDone.event(), scratch.patternEntries.stream()));
-      scratch.patternsAtDepthHostCopyPending = true;
+      scratch.patternEntries.copyFromHost(scratch.patternsAtDepthHost[bufferIdx], numPatternsInSubBatch);
+      scratch.recordCopy(bufferIdx, scratch.patternEntries.stream());
 
       const uint32_t* recursiveBitsForLabel = (currentDepth > 0) ? batchView.recursiveMatchBits : nullptr;
 

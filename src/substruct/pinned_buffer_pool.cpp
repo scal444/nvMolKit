@@ -71,10 +71,13 @@ void ConsolidatedPinnedBuffer::allocate(int maxBatchSize, int maxMatchIndicesEst
     offset = alignUp(offset, kAlignment);
   }
 
-  // patternsAtDepthHost: BatchedPatternEntry[maxPatternsPerDepth]
-  size_t patternsOff = offset;
-  offset += sizeof(BatchedPatternEntry) * maxPatternsPerDepth;
-  offset = alignUp(offset, kAlignment);
+  // patternsAtDepthHost: 2 x BatchedPatternEntry[maxPatternsPerDepth] (double-buffered)
+  std::array<size_t, 2> patternsOff = {};
+  for (int i = 0; i < 2; ++i) {
+    patternsOff[i] = offset;
+    offset += sizeof(BatchedPatternEntry) * maxPatternsPerDepth;
+    offset = alignUp(offset, kAlignment);
+  }
 
   totalSize = offset;
   cudaCheckError(cudaMallocHost(&basePtr, totalSize));
@@ -91,7 +94,9 @@ void ConsolidatedPinnedBuffer::allocate(int maxBatchSize, int maxMatchIndicesEst
     matchBatchLocalIndicesHost[i] = reinterpret_cast<int*>(basePtr + batchLocalOff[i]);
   }
 
-  patternsAtDepthHost = reinterpret_cast<BatchedPatternEntry*>(basePtr + patternsOff);
+  for (int i = 0; i < 2; ++i) {
+    patternsAtDepthHost[i] = reinterpret_cast<BatchedPatternEntry*>(basePtr + patternsOff[i]);
+  }
 
   // Store capacities
   pairIndicesCapacity  = maxBatchSize;

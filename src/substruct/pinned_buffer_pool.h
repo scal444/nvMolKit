@@ -72,8 +72,8 @@ struct ConsolidatedPinnedBuffer {
   std::array<int*, kMaxRecursionDepth + 1> matchGlobalPairIndicesHost = {};
   std::array<int*, kMaxRecursionDepth + 1> matchBatchLocalIndicesHost = {};
 
-  // RecursiveScratchBuffers buffer
-  BatchedPatternEntry* patternsAtDepthHost = nullptr;
+  // RecursiveScratchBuffers double-buffered pattern entries
+  std::array<BatchedPatternEntry*, 2> patternsAtDepthHost = {nullptr, nullptr};
 
   // Capacities for bounds checking
   int pairIndicesCapacity   = 0;

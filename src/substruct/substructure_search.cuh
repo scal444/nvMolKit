@@ -243,22 +243,25 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
  * For nested patterns, intermediateBits holds results from child levels
  * that become input for parent patterns.
  *
- * The patternsAtDepthHost pointer can reference memory from the consolidated
- * pinned buffer, or fallback to an owned allocation if not set.
+ * Uses double-buffered pinned memory for pattern entries to avoid CPU stalls
+ * waiting for H2D copies to complete. While one buffer is being copied, the
+ * other can be filled with the next sub-batch's data.
  */
 struct RecursiveScratchBuffers {
   AsyncDeviceVector<BatchedPatternEntry> patternEntries;
   AsyncDeviceVector<PartialMatch>        overflow;
   AsyncDeviceVector<uint32_t>            labelMatrixBuffer;
   AsyncDeviceVector<uint32_t>            intermediateBits;  ///< Child pattern results for nested recursion
-  BatchedPatternEntry*                   patternsAtDepthHost = nullptr;  ///< Points into consolidated buffer or ownedBuffer
-  int                                    patternsAtDepthHostCapacity = 0;
-  ScopedCudaEvent                        patternsAtDepthHostCopyDone;  ///< Guards reuse of patternsAtDepthHost
-  bool                                   patternsAtDepthHostCopyPending = false;
+
+  /// Double-buffered pinned pattern entries for overlap
+  std::array<BatchedPatternEntry*, 2>    patternsAtDepthHost = {nullptr, nullptr};
+  std::array<int, 2>                     patternsAtDepthHostCapacity = {0, 0};
+  std::array<ScopedCudaEvent, 2>         patternsAtDepthHostCopyDone;
+  std::array<bool, 2>                    patternsAtDepthHostCopyPending = {false, false};
+  int                                    currentPatternBuffer = 0;  ///< Index of buffer to fill next
 
   explicit RecursiveScratchBuffers(cudaStream_t stream) 
-      : patternEntries(), overflow(), labelMatrixBuffer(), intermediateBits(),
-        patternsAtDepthHostCopyDone(), patternsAtDepthHostCopyPending(false) {
+      : patternEntries(), overflow(), labelMatrixBuffer(), intermediateBits() {
     patternEntries.setStream(stream);
     overflow.setStream(stream);
     labelMatrixBuffer.setStream(stream);
@@ -266,8 +269,10 @@ struct RecursiveScratchBuffers {
   }
 
   ~RecursiveScratchBuffers() {
-    if (ownsBuffer_ && patternsAtDepthHost != nullptr) {
-      cudaFreeHost(patternsAtDepthHost);
+    for (int i = 0; i < 2; ++i) {
+      if (ownsBuffer_[i] && patternsAtDepthHost[i] != nullptr) {
+        cudaFreeHost(patternsAtDepthHost[i]);
+      }
     }
   }
 
@@ -283,36 +288,62 @@ struct RecursiveScratchBuffers {
     intermediateBits.setStream(stream);
   }
 
-  void setPinnedBuffer(BatchedPatternEntry* ptr, int capacity) {
-    if (ownsBuffer_ && patternsAtDepthHost != nullptr) {
-      cudaFreeHost(patternsAtDepthHost);
+  void setPinnedBuffer(const std::array<BatchedPatternEntry*, 2>& ptrs, int capacity) {
+    for (int i = 0; i < 2; ++i) {
+      if (ownsBuffer_[i] && patternsAtDepthHost[i] != nullptr) {
+        cudaFreeHost(patternsAtDepthHost[i]);
+      }
+      patternsAtDepthHost[i]         = ptrs[i];
+      patternsAtDepthHostCapacity[i] = capacity;
+      ownsBuffer_[i]                 = false;
     }
-    patternsAtDepthHost         = ptr;
-    patternsAtDepthHostCapacity = capacity;
-    ownsBuffer_                 = false;
   }
 
   /**
-   * @brief Ensure pinned buffer capacity, allocating if needed.
-   *
-   * If the consolidated buffer is too small, allocates a separate owned buffer.
+   * @brief Get the current buffer index and advance to next for double-buffering.
    */
-  void ensureCapacity(int requiredCapacity) {
-    if (patternsAtDepthHostCapacity >= requiredCapacity) {
+  int acquireBufferIndex() {
+    int idx = currentPatternBuffer;
+    currentPatternBuffer = 1 - currentPatternBuffer;
+    return idx;
+  }
+
+  /**
+   * @brief Wait for a specific buffer's copy to complete if pending.
+   */
+  void waitForBuffer(int bufferIdx) {
+    if (patternsAtDepthHostCopyPending[bufferIdx]) {
+      cudaCheckError(cudaEventSynchronize(patternsAtDepthHostCopyDone[bufferIdx].event()));
+      patternsAtDepthHostCopyPending[bufferIdx] = false;
+    }
+  }
+
+  /**
+   * @brief Record that a copy has been initiated on a buffer.
+   */
+  void recordCopy(int bufferIdx, cudaStream_t stream) {
+    cudaCheckError(cudaEventRecord(patternsAtDepthHostCopyDone[bufferIdx].event(), stream));
+    patternsAtDepthHostCopyPending[bufferIdx] = true;
+  }
+
+  /**
+   * @brief Ensure pinned buffer capacity for a specific buffer index.
+   */
+  void ensureCapacity(int bufferIdx, int requiredCapacity) {
+    if (patternsAtDepthHostCapacity[bufferIdx] >= requiredCapacity) {
       return;
     }
-    // Need to allocate (or reallocate) an owned buffer
-    if (ownsBuffer_ && patternsAtDepthHost != nullptr) {
-      cudaFreeHost(patternsAtDepthHost);
+    if (ownsBuffer_[bufferIdx] && patternsAtDepthHost[bufferIdx] != nullptr) {
+      cudaFreeHost(patternsAtDepthHost[bufferIdx]);
     }
     const int newCapacity = static_cast<int>(requiredCapacity * 1.5);
-    cudaCheckError(cudaMallocHost(&patternsAtDepthHost, newCapacity * sizeof(BatchedPatternEntry)));
-    patternsAtDepthHostCapacity = newCapacity;
-    ownsBuffer_                 = true;
+    cudaCheckError(cudaMallocHost(&patternsAtDepthHost[bufferIdx], newCapacity * sizeof(BatchedPatternEntry)));
+    patternsAtDepthHostCapacity[bufferIdx] = newCapacity;
+    ownsBuffer_[bufferIdx]                 = true;
   }
 
  private:
-  bool ownsBuffer_ = false;
+  std::array<bool, 2> ownsBuffer_ = {false, false};
 };
 
 /**
