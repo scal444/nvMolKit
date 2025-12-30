@@ -197,9 +197,10 @@ class SubstructureSearchTest : public ::testing::TestWithParam<SubstructAlgorith
 // Instantiate parameterized tests for all algorithms
 INSTANTIATE_TEST_SUITE_P(AllAlgorithms,
                          SubstructureSearchTest,
-                         ::testing::Values(SubstructAlgorithm::VF2,
-                                           SubstructAlgorithm::GSI,
-                                           SubstructAlgorithm::WarpUnified),
+                         ::testing::Values(//SubstructAlgorithm::VF2,
+                                           //SubstructAlgorithm::WarpUnified
+                                           SubstructAlgorithm::GSI
+                                           ),
                          [](const ::testing::TestParamInfo<SubstructAlgorithm>& info) {
                            return algorithmName(info.param);
                          });

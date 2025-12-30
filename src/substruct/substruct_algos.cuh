@@ -19,6 +19,7 @@
 #include <cooperative_groups.h>
 #include <cstdint>
 
+#include "device_timings.cuh"
 #include "flat_bit_vect.h"
 #include "global_pool.cuh"
 #include "molecules_device.cuh"
@@ -470,38 +471,59 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
                                 int16_t*                                              matchIndices,
                                 int                                                   maxMatches,
                                 int                                                   matchOffset,
-                                PaintModeParams                                       paintParams = {}) {
-  const int tid = threadIdx.x;
+                                PaintModeParams                                       paintParams = {},
+                                DeviceTimingsData*                                    timings = nullptr) {
+  long long int t_start;
+  DEVICE_TIMING_START(timings, 0, t_start);
+
+  const int tid    = threadIdx.x;
   const int laneId = tid % 32;
-  const int warpId    = tid / 32;
-  const int numWarps  = blockDim.x / 32;
+  const int warpId = tid / 32;
+  constexpr int numWarps = kThreadsPerBlock / 32;
 
   const int numQueryAtoms  = query.numAtoms;
   const int numTargetAtoms = target.numAtoms;
-  const int maxTotal       = maxPartials + maxOverflow;
 
-  // Ping-pong overflow pointers (pre-allocated, no dynamic allocation needed)
-  PartialMatch* currentOverflow = overflowA;
-  PartialMatch* nextOverflow    = overflowB;
+  // Runtime-sized partial matches: stride = numQueryAtoms bytes per partial.
+  // This allows fitting more partials when queries have fewer atoms.
+  const int stride = numQueryAtoms;
 
-  // Ping-pong buffer offsets for shared memory (avoid copy by swapping offsets)
-  __shared__ int currentBase;  // Offset into sharedPartials for current level
-  __shared__ int nextBase;     // Offset into sharedPartials for next level
+  // Treat buffers as raw bytes for runtime-sized access
+  int8_t* sharedBytes   = reinterpret_cast<int8_t*>(sharedPartials);
+  int8_t* overflowABytes = reinterpret_cast<int8_t*>(overflowA);
+  int8_t* overflowBBytes = reinterpret_cast<int8_t*>(overflowB);
+
+  // Compute effective capacities based on runtime stride
+  const int sharedBytesPerHalf    = maxPartials * sizeof(PartialMatch);
+  const int effectiveMaxPartials  = sharedBytesPerHalf / stride;
+  const int overflowBytes         = maxOverflow * sizeof(PartialMatch);
+  const int effectiveMaxOverflow  = overflowBytes / stride;
+  const int maxTotal              = effectiveMaxPartials + effectiveMaxOverflow;
+
+  // Ping-pong byte pointers for shared memory halves
+  int8_t* currentShared = sharedBytes;
+  int8_t* nextShared    = sharedBytes + sharedBytesPerHalf;
+
+  // Ping-pong overflow byte pointers
+  int8_t* currentOverflow = overflowABytes;
+  int8_t* nextOverflow    = overflowBBytes;
+
   __shared__ int currentCount;
   __shared__ int nextCount;
 
   if (tid == 0) {
-    currentBase  = 0;
-    nextBase     = maxPartials;
     currentCount = 0;
     nextCount    = 0;
   }
   __syncthreads();
 
+  DEVICE_TIMING_END(timings, 0, t_start);
+  DEVICE_TIMING_START(timings, 1, t_start);
+
   if constexpr (kDebugGSI) {
     if (tid == 0) {
-      printf("[GSI] numQueryAtoms=%d, numTargetAtoms=%d, maxPartials=%d, maxOverflow=%d, maxTotal=%d\n",
-             numQueryAtoms, numTargetAtoms, maxPartials, maxOverflow, maxTotal);
+      printf("[GSI] numQueryAtoms=%d, numTargetAtoms=%d, effectiveMaxPartials=%d, effectiveMaxOverflow=%d, maxTotal=%d\n",
+             numQueryAtoms, numTargetAtoms, effectiveMaxPartials, effectiveMaxOverflow, maxTotal);
       printf("[GSI] query.hasBondQueryData()=%d, query.hasQueryTrees()=%d\n",
              query.hasBondQueryData() ? 1 : 0, query.hasQueryTrees() ? 1 : 0);
     }
@@ -532,18 +554,20 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
         }
       } else {
         const int slot = atomicAdd(&currentCount, 1);
-        if (slot < maxPartials) {
-          sharedPartials[currentBase + slot].mapping[0]    = static_cast<int8_t>(t);
-          sharedPartials[currentBase + slot].nextQueryAtom = 1;
+        if (slot < effectiveMaxPartials) {
+          int8_t* p = currentShared + slot * stride;
+          p[0]          = static_cast<int8_t>(t);
+          p[stride - 1] = 1;  // nextQueryAtom
         } else if (slot < maxTotal) {
           if constexpr (kDebugGSI) {
-            if (slot == maxPartials) {
+            if (slot == effectiveMaxPartials) {
               printf("[GSI] Level 0: spilling to overflow buffer (slot=%d)\n", slot);
             }
           }
-          const int overflowSlot = slot - maxPartials;
-          currentOverflow[overflowSlot].mapping[0]    = static_cast<int8_t>(t);
-          currentOverflow[overflowSlot].nextQueryAtom = 1;
+          const int overflowSlot = slot - effectiveMaxPartials;
+          int8_t* p = currentOverflow + overflowSlot * stride;
+          p[0]          = static_cast<int8_t>(t);
+          p[stride - 1] = 1;  // nextQueryAtom
         } else {
           if constexpr (kDebugGSI) {
             if (slot == maxTotal) {
@@ -559,13 +583,13 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
   if constexpr (kDebugGSI) {
     if (tid == 0) {
       printf("[GSI] Level 0: %d candidates for query atom 0", currentCount);
-      if (currentCount > maxPartials) {
-        printf(" (%d in shared, %d in overflow)", maxPartials, currentCount - maxPartials);
+      if (currentCount > effectiveMaxPartials) {
+        printf(" (%d in shared, %d in overflow)", effectiveMaxPartials, currentCount - effectiveMaxPartials);
       }
       printf("\n");
       printf("[GSI] Level 0 candidates (shared): ");
-      for (int i = 0; i < min(currentCount, maxPartials) && i < 10; ++i) {
-        printf("%d ", (int)sharedPartials[currentBase + i].mapping[0]);
+      for (int i = 0; i < min(currentCount, effectiveMaxPartials) && i < 10; ++i) {
+        printf("%d ", (int)currentShared[i * stride]);
       }
       if (currentCount > 10) printf("...");
       printf("\n");
@@ -573,9 +597,13 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
     __syncthreads();
   }
 
+  DEVICE_TIMING_END(timings, 1, t_start);
+
   if (singleAtomQuery) {
     return;
   }
+
+  DEVICE_TIMING_START(timings, 2, t_start);
 
   // BFS levels
   for (int level = 1; level < numQueryAtoms; ++level) {
@@ -599,7 +627,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
     __shared__ int debugCheckedTotal;
     if constexpr (kDebugGSI) {
       if (tid == 0) {
-        debugValidTotal = 0;
+        debugValidTotal   = 0;
         debugCheckedTotal = 0;
       }
       __syncthreads();
@@ -607,19 +635,16 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
 
     // Each warp processes partial matches in round-robin
     for (int pIdx = warpId; pIdx < numPartials; pIdx += numWarps) {
-      // Read partial from shared or overflow buffer
-      PartialMatch* partial;
-      if (pIdx < maxPartials) {
-        partial = &sharedPartials[currentBase + pIdx];
-      } else {
-        partial = &currentOverflow[pIdx - maxPartials];
-      }
+      // Get pointer to partial's mapping (raw byte access)
+      const int8_t* partial = (pIdx < effectiveMaxPartials)
+                                  ? (currentShared + pIdx * stride)
+                                  : (currentOverflow + (pIdx - effectiveMaxPartials) * stride);
 
       if constexpr (kDebugGSI) {
         if (pIdx == 0 && laneId == 0 && level <= 5) {
           printf("[GSI] Level %d partial 0 mapping: ", level);
           for (int q = 0; q < numQueryAtoms; ++q) {
-            printf("%d ", (int)partial->mapping[q]);
+            printf("%d ", (int)partial[q]);
           }
           printf("\n");
         }
@@ -628,16 +653,16 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
       for (int tBase = 0; tBase < numTargetAtoms; tBase += kWarpSize) {
         const int t = tBase + laneId;
         
-        bool valid = false;
+        bool valid   = false;
         bool labelOk = false;
         bool notUsed = false;
-        bool edgeOk = false;
+        bool edgeOk  = false;
         
         if (t < numTargetAtoms) {
           labelOk = labelMatrix.get(t, queryAtom);
-          notUsed = !isTargetUsedInMapping(partial->mapping, queryAtom, t);
-          edgeOk = checkEdgeConsistency(target, query, partial->mapping, queryAtom, t);
-          valid = labelOk && notUsed && edgeOk;
+          notUsed = !isTargetUsedInMapping(partial, queryAtom, t);
+          edgeOk  = checkEdgeConsistency(target, query, partial, queryAtom, t);
+          valid   = labelOk && notUsed && edgeOk;
           
           if constexpr (kDebugGSI) {
             atomicAdd(&debugCheckedTotal, 1);
@@ -658,7 +683,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
             if constexpr (kDebugGSI) {
               printf("[GSI] MATCH FOUND! matchIdx=%d, mapping: ", matchIdx);
               for (int q = 0; q < numQueryAtoms; ++q) {
-                printf("%d ", (q == queryAtom) ? t : (int)partial->mapping[q]);
+                printf("%d ", (q == queryAtom) ? t : (int)partial[q]);
               }
               printf("\n");
             }
@@ -666,14 +691,14 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
               if (matchIdx < maxMatches) {
                 const int writeOffset = matchOffset + matchIdx * numQueryAtoms;
                 for (int q = 0; q < numQueryAtoms; ++q) {
-                  matchIndices[writeOffset + q] = (q == queryAtom) ? static_cast<int16_t>(t) 
-                                                                    : partial->mapping[q];
+                  matchIndices[writeOffset + q] = (q == queryAtom) ? static_cast<int16_t>(t)
+                                                                   : partial[q];
                 }
                 atomicAdd(reportedCount, 1);
               }
             } else {
               // Paint mode: set bit for first target atom in this match (mapping[0])
-              const int firstTargetAtom = partial->mapping[0];
+              const int firstTargetAtom = partial[0];
               atomicOr(&paintParams.recursiveBits[paintParams.outputPairIdx * paintParams.maxTargetAtoms + firstTargetAtom],
                        1u << paintParams.patternId);
               atomicAdd(reportedCount, 1);
@@ -688,26 +713,26 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
             }
             // Write to shared memory ping-pong or global overflow
             // Only copy [0..queryAtom-1] from parent, then set [queryAtom]
-            if (slot < maxPartials) {
-              PartialMatch& next = sharedPartials[nextBase + slot];
+            if (slot < effectiveMaxPartials) {
+              int8_t* next = nextShared + slot * stride;
               for (int q = 0; q < queryAtom; ++q) {
-                next.mapping[q] = partial->mapping[q];
+                next[q] = partial[q];
               }
-              next.mapping[queryAtom] = static_cast<int8_t>(t);
-              next.nextQueryAtom      = static_cast<int8_t>(queryAtom + 1);
+              next[queryAtom]    = static_cast<int8_t>(t);
+              next[stride - 1]   = static_cast<int8_t>(queryAtom + 1);  // nextQueryAtom
             } else if (slot < maxTotal) {
               if constexpr (kDebugGSI) {
-                if (slot == maxPartials) {
+                if (slot == effectiveMaxPartials) {
                   printf("[GSI] Level %d: spilling to overflow buffer (slot=%d)\n", level, slot);
                 }
               }
-              const int overflowSlot = slot - maxPartials;
-              PartialMatch& next = nextOverflow[overflowSlot];
+              const int overflowSlot = slot - effectiveMaxPartials;
+              int8_t* next = nextOverflow + overflowSlot * stride;
               for (int q = 0; q < queryAtom; ++q) {
-                next.mapping[q] = partial->mapping[q];
+                next[q] = partial[q];
               }
-              next.mapping[queryAtom] = static_cast<int8_t>(t);
-              next.nextQueryAtom      = static_cast<int8_t>(queryAtom + 1);
+              next[queryAtom]    = static_cast<int8_t>(t);
+              next[stride - 1]   = static_cast<int8_t>(queryAtom + 1);  // nextQueryAtom
             } else {
               if constexpr (kDebugGSI) {
                 if (slot == maxTotal) {
@@ -726,8 +751,8 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
       if (tid == 0) {
         printf("[GSI] Level %d summary: checked=%d, valid=%d, nextCount=%d",
                level, debugCheckedTotal, debugValidTotal, nextCount);
-        if (nextCount > maxPartials) {
-          printf(" (%d in shared, %d in overflow)", maxPartials, nextCount - maxPartials);
+        if (nextCount > effectiveMaxPartials) {
+          printf(" (%d in shared, %d in overflow)", effectiveMaxPartials, nextCount - effectiveMaxPartials);
         }
         if (nextCount > maxTotal) {
           printf(" [OVERFLOW LOST %d]", nextCount - maxTotal);
@@ -737,18 +762,18 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
       __syncthreads();
     }
 
-    // Swap buffers (just swap offsets/pointers, no copy needed)
+    // Swap buffers (just swap pointers, no copy needed)
     if (tid == 0) {
       currentCount = nextCount;
-      // Swap shared memory offsets
-      const int tmpBase = currentBase;
-      currentBase = nextBase;
-      nextBase = tmpBase;
     }
-    // Swap global overflow pointers (each thread has its own copy)
-    PartialMatch* tmp = currentOverflow;
-    currentOverflow = nextOverflow;
-    nextOverflow = tmp;
+    // Swap shared pointers (each thread has its own copy)
+    int8_t* tmpShared = currentShared;
+    currentShared     = nextShared;
+    nextShared        = tmpShared;
+    // Swap overflow pointers
+    int8_t* tmpOverflow = currentOverflow;
+    currentOverflow     = nextOverflow;
+    nextOverflow        = tmpOverflow;
 
     __syncthreads();
 
@@ -761,6 +786,8 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
       break;
     }
   }
+
+  DEVICE_TIMING_END(timings, 2, t_start);
 
   if constexpr (kDebugGSI) {
     if (tid == 0) {
@@ -807,7 +834,7 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
   const int tid      = block.thread_rank();
   const int laneId   = tile32.thread_rank();
   const int warpId   = tile32.meta_group_rank();
-  const int numWarps = tile32.meta_group_size();
+  constexpr int numWarps = kThreadsPerBlock / kWarpSize;
 
   const int numQueryAtoms  = query.numAtoms;
   const int numTargetAtoms = target.numAtoms;

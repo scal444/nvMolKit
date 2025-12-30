@@ -16,20 +16,20 @@
 #ifndef NVMOLKIT_FLAT_BIT_VECT_H
 #define NVMOLKIT_FLAT_BIT_VECT_H
 
+#include <cstring>
+#include <functional>
+
+#include "device_assert.cuh"
+
 #ifdef __CUDACC__
-#define CUDA_CALLABLE_MEMBER __host__ __device__
+#define CUDA_CALLABLE_MEMBER __host__ __device__ __forceinline__
 #define CPU_ONLY_MEMBER      __host__
-#define DEVICE_ONLY_MEMBER   __device__
+#define DEVICE_ONLY_MEMBER   __device__ __forceinline__
 #else
 #define CUDA_CALLABLE_MEMBER
 #define CPU_ONLY_MEMBER
 #define DEVICE_ONLY_MEMBER
 #endif  // __CUDACC__
-
-#include <cstring>
-#include <functional>
-
-#include "device_assert.cuh"
 
 namespace nvMolKit {
 

@@ -1,0 +1,41 @@
+# Instructions for installing build and lint requirements
+# These can be run to create a docker file, or individual instructions
+# used manually to install the requirements on a local machine.
+FROM nvcr.io/nvidia/cuda:12.9.1-devel-ubuntu24.04
+
+RUN apt-get update && \
+    apt-get install -y \
+      git \
+      wget \
+      curl \
+      nano \
+      libeigen3-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+
+
+ENV PATH="/opt/conda/bin:${PATH}"
+
+RUN mkdir -p /var/tmp && wget -q -nc --no-check-certificate -P /var/tmp https://github.com/conda-forge/miniforge/releases/download/25.11.0-1/Miniforge3-25.11.0-1-Linux-x86_64.sh && \
+    bash /var/tmp/Miniforge3-25.11.0-1-Linux-x86_64.sh -b -p /usr/local/anaconda && \
+    /usr/local/anaconda/bin/conda init && \
+    ln -s /usr/local/anaconda/etc/profile.d/conda.sh /etc/profile.d/conda.sh && \
+    . /usr/local/anaconda/etc/profile.d/conda.sh && \
+    conda activate base && \
+    conda config --add channels conda-forge --add channels nvidia && \
+    CONDA_CUDA_OVERRIDE='12.9' conda install -y cmake  libboost-devel libboost-headers libboost-python-devel librdkit-dev=2025.03.6 pip pytest python=3.12 pytorch rdkit=2025.03.6 scikit-build=0.18 && \
+    conda clean --all -f -y && \
+    rm -rf /var/tmp/Miniforge3-25.3.0-3-Linux-x86_64.sh
+
+RUN \
+    apt install -y --no-install-recommends gnupg && \
+    echo "deb http://developer.download.nvidia.com/devtools/repos/ubuntu2404/amd64 /" | tee /etc/apt/sources.list.d/nvidia-devtools.list && \
+    apt-key adv --fetch-keys http://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/x86_64/7fa2af80.pub && \
+    apt update && \
+    apt install -y nsight-systems-cli && \
+    apt clean -y
+
+ENV PATH=/usr/local/anaconda/bin:$PATH
+
+
+SHELL ["conda", "run", "-n", "base", "/bin/bash", "-c"]

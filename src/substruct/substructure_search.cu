@@ -41,9 +41,7 @@ namespace nvMolKit {
 namespace {
 
 constexpr std::size_t kMaxTargetAtoms = kLabelMaxTargetAtoms;
-constexpr std::size_t kMaxQueryAtoms  = kLabelMaxQueryAtoms;
-
-constexpr int threadsPerBlock = 256;
+constexpr std::size_t kMaxQueryAtoms  = kLabelMaxQueryAtoms;    
 
 using LabelMatrixView = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
 
@@ -93,18 +91,18 @@ constexpr int getMaxPartialsForSM(int sm, int blockSize) {
 
 // Compute at compile time based on __CUDA_ARCH__
 #if defined(__CUDA_ARCH__)
-constexpr int kMaxPartialsPerBlock = getMaxPartialsForSM(__CUDA_ARCH__ / 10, threadsPerBlock);
-static_assert(getMaxThreadsPerSM(__CUDA_ARCH__ / 10) % threadsPerBlock == 0, 
-              "threadsPerBlock must evenly divide max threads/SM");
+constexpr int kMaxPartialsPerBlock = getMaxPartialsForSM(__CUDA_ARCH__ / 10, kThreadsPerBlock);
+static_assert(getMaxThreadsPerSM(__CUDA_ARCH__ / 10) % kThreadsPerBlock == 0, 
+              "kThreadsPerBlock must evenly divide max threads/SM");
 #else
-constexpr int kMaxPartialsPerBlock = getMaxPartialsForSM(86, threadsPerBlock);
+constexpr int kMaxPartialsPerBlock = getMaxPartialsForSM(86, kThreadsPerBlock);
 #endif
 
-constexpr int kMaxPartialsPerBlockHost = getMaxPartialsForSM(86, threadsPerBlock);
-static_assert(getMaxThreadsPerSM(86) % threadsPerBlock == 0,
-              "threadsPerBlock must evenly divide max threads/SM");
+constexpr int kMaxPartialsPerBlockHost = getMaxPartialsForSM(86, kThreadsPerBlock);
+static_assert(getMaxThreadsPerSM(86) % kThreadsPerBlock == 0,
+              "kThreadsPerBlock must evenly divide max threads/SM");
 constexpr int kMaxQueueSize = kMaxPartialsPerBlockHost * 2;
-constexpr int kWarpsPerBlock           = threadsPerBlock / 32;
+constexpr int kWarpsPerBlock           = kThreadsPerBlock / 32;
 
 /**
  * @brief Configure kernel to use maximum shared memory carveout.
@@ -266,7 +264,8 @@ __global__ void substructMatchKernel(MoleculesDeviceView             targets,
                                      SubstructMatchResultsDeviceView results,
                                      const int*                      pairIndices,
                                      int                             numQueries,
-                                     const int*                      batchLocalIndices = nullptr) {
+                                     const int*                      batchLocalIndices = nullptr,
+                                     DeviceTimingsData*              timings = nullptr) {
   const int launchIdx     = blockIdx.x;
   const int batchLocalIdx = batchLocalIndices ? batchLocalIndices[launchIdx] : launchIdx;
   const int pairIdx       = pairIndices[launchIdx];
@@ -376,7 +375,9 @@ __global__ void substructMatchKernel(MoleculesDeviceView             targets,
                                                      &sharedReportedCount,
                                                      results.matchIndices,
                                                      maxMatches,
-                                                     matchOffset);
+                                                     matchOffset,
+                                                     {},
+                                                     timings);
 
   } else if constexpr (Algo == SubstructAlgorithm::WarpUnified) {
     // WUS: Warp-collective BFS with precomputed candidates
@@ -552,11 +553,11 @@ void configureSubstructKernelsSharedMem() {
   configureSharedMemCarveout(substructPaintKernel<SubstructAlgorithm::GSI>);
   
   // Configure WUS kernels
-  configureSharedMemCarveout(substructMatchKernel<SubstructAlgorithm::WarpUnified>);
-  configureSharedMemCarveout(substructPaintKernel<SubstructAlgorithm::WarpUnified>);
+  // configureSharedMemCarveout(substructMatchKernel<SubstructAlgorithm::WarpUnified>);
+  // configureSharedMemCarveout(substructPaintKernel<SubstructAlgorithm::WarpUnified>);
   
   // VF2 uses less shared memory but configure anyway
-  configureSharedMemCarveout(substructMatchKernel<SubstructAlgorithm::VF2>);
+  // configureSharedMemCarveout(substructMatchKernel<SubstructAlgorithm::VF2>);
   
   sharedMemCarveoutConfigured() = true;
 }
@@ -1071,7 +1072,7 @@ void launchLabelAndMatch(const std::vector<int>&      batchLocalIndices,
 
   SubstructMatchResultsDeviceView batchView = slot.deviceResults.view();
 
-  labelMatrixKernel<<<numPairsInGroup, threadsPerBlock, 0, stream>>>(
+  labelMatrixKernel<<<numPairsInGroup, kThreadsPerBlock, 0, stream>>>(
     targetsDevice.view(),
     queriesDevice.view(),
     globalPairIndicesDev.data(),
@@ -1082,21 +1083,24 @@ void launchLabelAndMatch(const std::vector<int>&      batchLocalIndices,
     batchLocalIndicesDev.data());
 
   switch (algorithm) {
-    case SubstructAlgorithm::VF2:
-      substructMatchKernel<SubstructAlgorithm::VF2><<<numPairsInGroup, threadsPerBlock, 0, stream>>>(
-        targetsDevice.view(), queriesDevice.view(), batchView, globalPairIndicesDev.data(), ctx.numQueries,
-        batchLocalIndicesDev.data());
-      break;
+    // case SubstructAlgorithm::VF2:
+    //   substructMatchKernel<SubstructAlgorithm::VF2><<<numPairsInGroup, kThreadsPerBlock, 0, stream>>>(
+    //     targetsDevice.view(), queriesDevice.view(), batchView, globalPairIndicesDev.data(), ctx.numQueries,
+    //     batchLocalIndicesDev.data());
+    //   break;
     case SubstructAlgorithm::GSI:
-      substructMatchKernel<SubstructAlgorithm::GSI><<<numPairsInGroup, threadsPerBlock, 0, stream>>>(
-        targetsDevice.view(), queriesDevice.view(), batchView, globalPairIndicesDev.data(), ctx.numQueries,
-        batchLocalIndicesDev.data());
-      break;
+    case SubstructAlgorithm::VF2:
     case SubstructAlgorithm::WarpUnified:
-      substructMatchKernel<SubstructAlgorithm::WarpUnified><<<numPairsInGroup, threadsPerBlock, 0, stream>>>(
+
+      substructMatchKernel<SubstructAlgorithm::GSI><<<numPairsInGroup, kThreadsPerBlock, 0, stream>>>(
         targetsDevice.view(), queriesDevice.view(), batchView, globalPairIndicesDev.data(), ctx.numQueries,
         batchLocalIndicesDev.data());
       break;
+    // case SubstructAlgorithm::WarpUnified:
+    //   substructMatchKernel<SubstructAlgorithm::WarpUnified><<<numPairsInGroup, kThreadsPerBlock, 0, stream>>>(
+    //     targetsDevice.view(), queriesDevice.view(), batchView, globalPairIndicesDev.data(), ctx.numQueries,
+    //     batchLocalIndicesDev.data());
+    //   break;
   }
 }
 
@@ -1183,7 +1187,7 @@ void launchRecursivePaintKernels(
 
       const uint32_t* recursiveBitsForLabel = (currentDepth > 0) ? batchView.recursiveMatchBits : nullptr;
 
-      labelMatrixPaintKernel<<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
+      labelMatrixPaintKernel<<<numBlocksInSubBatch, kThreadsPerBlock, 0, stream>>>(
         targetsDevice.view(),
         leafSubpatterns.view(),
         scratch.patternEntries.data(),
@@ -1198,27 +1202,9 @@ void launchRecursivePaintKernels(
 
       switch (algorithm) {
         case SubstructAlgorithm::VF2:
-        case SubstructAlgorithm::GSI: {
-          substructPaintKernel<SubstructAlgorithm::GSI><<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
-            targetsDevice.view(),
-            leafSubpatterns.view(),
-            scratch.patternEntries.data(),
-            static_cast<int>(numPatternsInSubBatch),
-            batchView.recursiveMatchBits,
-            batchView.maxTargetAtoms,
-            numQueries,
-            0, 0,
-            batchPairOffset,
-            batchSize,
-            scratch.overflow.data(),
-            scratch.overflow.data(),
-            kOverflowEntriesPerBuffer,
-            scratch.labelMatrixBuffer.data(),
-            firstTargetInBatch);
-          break;
-        }
+        case SubstructAlgorithm::GSI:
         case SubstructAlgorithm::WarpUnified: {
-          substructPaintKernel<SubstructAlgorithm::WarpUnified><<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
+          substructPaintKernel<SubstructAlgorithm::GSI><<<numBlocksInSubBatch, kThreadsPerBlock, 0, stream>>>(
             targetsDevice.view(),
             leafSubpatterns.view(),
             scratch.patternEntries.data(),
@@ -1236,6 +1222,25 @@ void launchRecursivePaintKernels(
             firstTargetInBatch);
           break;
         }
+        // case SubstructAlgorithm::WarpUnified: {
+        //   substructPaintKernel<SubstructAlgorithm::WarpUnified><<<numBlocksInSubBatch, kThreadsPerBlock, 0, stream>>>(
+        //     targetsDevice.view(),
+        //     leafSubpatterns.view(),
+        //     scratch.patternEntries.data(),
+        //     static_cast<int>(numPatternsInSubBatch),
+        //     batchView.recursiveMatchBits,
+        //     batchView.maxTargetAtoms,
+        //     numQueries,
+        //     0, 0,
+        //     batchPairOffset,
+        //     batchSize,
+        //     scratch.overflow.data(),
+        //     scratch.overflow.data(),
+        //     kOverflowEntriesPerBuffer,
+        //     scratch.labelMatrixBuffer.data(),
+        //     firstTargetInBatch);
+        //   break;
+        // }
       }
     }
 
@@ -1278,7 +1283,7 @@ void uploadAndLaunchBatch(BatchSlot&                 slot,
 
     SubstructMatchResultsDeviceView batchView = slot.deviceResults.view();
 
-    labelMatrixKernel<<<slot.numPairsInBatch, threadsPerBlock, 0, slotStream>>>(
+    labelMatrixKernel<<<slot.numPairsInBatch, kThreadsPerBlock, 0, slotStream>>>(
       targetsDevice.view(),
       queriesDevice.view(),
       slot.pairIndicesDev.data(),
@@ -1288,18 +1293,20 @@ void uploadAndLaunchBatch(BatchSlot&                 slot,
       batchView.maxTargetAtoms);
 
     switch (algorithm) {
-      case SubstructAlgorithm::VF2:
-        substructMatchKernel<SubstructAlgorithm::VF2><<<slot.numPairsInBatch, threadsPerBlock, 0, slotStream>>>(
+      // case SubstructAlgorithm::VF2:
+      //   substructMatchKernel<SubstructAlgorithm::VF2><<<slot.numPairsInBatch, kThreadsPerBlock, 0, slotStream>>>(
+      //     targetsDevice.view(), queriesDevice.view(), batchView, slot.pairIndicesDev.data(), ctx.numQueries);
+      //   break;
+        case SubstructAlgorithm::VF2:
+        case SubstructAlgorithm::GSI:
+        case SubstructAlgorithm::WarpUnified:
+        substructMatchKernel<SubstructAlgorithm::GSI><<<slot.numPairsInBatch, kThreadsPerBlock, 0, slotStream>>>(
           targetsDevice.view(), queriesDevice.view(), batchView, slot.pairIndicesDev.data(), ctx.numQueries);
         break;
-      case SubstructAlgorithm::GSI:
-        substructMatchKernel<SubstructAlgorithm::GSI><<<slot.numPairsInBatch, threadsPerBlock, 0, slotStream>>>(
-          targetsDevice.view(), queriesDevice.view(), batchView, slot.pairIndicesDev.data(), ctx.numQueries);
-        break;
-      case SubstructAlgorithm::WarpUnified:
-        substructMatchKernel<SubstructAlgorithm::WarpUnified><<<slot.numPairsInBatch, threadsPerBlock, 0, slotStream>>>(
-          targetsDevice.view(), queriesDevice.view(), batchView, slot.pairIndicesDev.data(), ctx.numQueries);
-        break;
+      // case SubstructAlgorithm::WarpUnified:
+      //   substructMatchKernel<SubstructAlgorithm::WarpUnified><<<slot.numPairsInBatch, kThreadsPerBlock, 0, slotStream>>>(
+      //     targetsDevice.view(), queriesDevice.view(), batchView, slot.pairIndicesDev.data(), ctx.numQueries);
+      //   break;
     }
     return;
   }
@@ -1844,7 +1851,7 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
 
       const uint32_t* recursiveBitsForLabel = (currentDepth > 0) ? batchView.recursiveMatchBits : nullptr;
 
-      labelMatrixPaintKernel<<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
+      labelMatrixPaintKernel<<<numBlocksInSubBatch, kThreadsPerBlock, 0, stream>>>(
         targetsDevice.view(),
         leafSubpatterns.view(),
         scratch.patternEntries.data(),
@@ -1859,27 +1866,9 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
 
       switch (algorithm) {
         case SubstructAlgorithm::VF2:
-        case SubstructAlgorithm::GSI: {
-          substructPaintKernel<SubstructAlgorithm::GSI><<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
-            targetsDevice.view(),
-            leafSubpatterns.view(),
-            scratch.patternEntries.data(),
-            static_cast<int>(numPatternsInSubBatch),
-            batchView.recursiveMatchBits,
-            batchView.maxTargetAtoms,
-            numQueries,
-            0, 0,
-            batchPairOffset,
-            batchSize,
-            scratch.overflow.data(),
-            scratch.overflow.data(),
-            kOverflowEntriesPerBuffer,
-            scratch.labelMatrixBuffer.data(),
-            firstTargetInBatch);
-          break;
-        }
+        case SubstructAlgorithm::GSI:
         case SubstructAlgorithm::WarpUnified: {
-          substructPaintKernel<SubstructAlgorithm::WarpUnified><<<numBlocksInSubBatch, threadsPerBlock, 0, stream>>>(
+          substructPaintKernel<SubstructAlgorithm::GSI><<<numBlocksInSubBatch, kThreadsPerBlock, 0, stream>>>(
             targetsDevice.view(),
             leafSubpatterns.view(),
             scratch.patternEntries.data(),
@@ -1897,6 +1886,25 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
             firstTargetInBatch);
           break;
         }
+        // case SubstructAlgorithm::WarpUnified: {
+        //   substructPaintKernel<SubstructAlgorithm::WarpUnified><<<numBlocksInSubBatch, kThreadsPerBlock, 0, stream>>>(
+        //     targetsDevice.view(),
+        //     leafSubpatterns.view(),
+        //     scratch.patternEntries.data(),
+        //     static_cast<int>(numPatternsInSubBatch),
+        //     batchView.recursiveMatchBits,
+        //     batchView.maxTargetAtoms,
+        //     numQueries,
+        //     0, 0,
+        //     batchPairOffset,
+        //     batchSize,
+        //     scratch.overflow.data(),
+        //     scratch.overflow.data(),
+        //     kOverflowEntriesPerBuffer,
+        //     scratch.labelMatrixBuffer.data(),
+        //     firstTargetInBatch);
+        //   break;
+        // }
       }
     }
 

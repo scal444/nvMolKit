@@ -20,5 +20,5 @@ target_include_directories(substructure_search
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(substructure_search PUBLIC molecules device_vector
                                                   flatBitVect cuda_error_check
-                                                  pinned_buffer_pool)
+                                                  pinned_buffer_pool device_timings)
 target_compile_options(substructure_search PRIVATE -Xptxas=-v )

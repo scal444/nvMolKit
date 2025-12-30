@@ -22,6 +22,8 @@
 
 namespace nvMolKit {
 
+constexpr int kThreadsPerBlock = 256;
+
 /**
  * @brief Algorithm choice for substructure matching.
  */
