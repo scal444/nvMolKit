@@ -562,8 +562,10 @@ void configureSubstructKernelsSharedMem() {
   sharedMemCarveoutConfigured() = true;
 }
 
+}  // anonymous namespace
+
 // =============================================================================
-// Pipelined Batch Processing Types (internal)
+// Pipelined Batch Processing Types (internal, but needs external linkage for forward decl)
 // =============================================================================
 
 struct BatchSlot {
@@ -632,6 +634,8 @@ struct BatchSlot {
   }
 };
 
+namespace {
+
 struct ThreadWorkerContext {
   PinnedHostVector<int> queryAtomCounts;
   std::vector<int> globalPairMatchStarts;
@@ -643,7 +647,7 @@ struct ThreadWorkerContext {
   int maxTargetAtoms = 0;
 };
 
-}  // namespace
+}  // anonymous namespace
 
 // =============================================================================
 // LeafSubpatterns Implementation
@@ -1411,7 +1415,13 @@ void accumulateBatchResults(BatchSlot&                 slot,
   processRange.pop();
 }
 
-void threadWorker(int                        workerIdx,
+/**
+ * @brief Unified runner worker that handles both inline and queued preprocessing modes.
+ *
+ * When readyQueue is nullptr: acquires slots from pool, preprocesses inline (legacy mode).
+ * When readyQueue is non-null: dequeues preprocessed slots from the queue.
+ */
+void runnerWorker(int                        workerIdx,
                   const ThreadWorkerContext& ctx,
                   MoleculesDevice&           targetsDevice,
                   const MoleculesDevice&     queriesDevice,
@@ -1424,84 +1434,128 @@ void threadWorker(int                        workerIdx,
                   std::atomic<int>&          nextBatchIdx,
                   int                        totalNumBatches,
                   int                        effectiveBatchSize,
-                  int                        maxQueryAtoms,
-                  std::exception_ptr&        exceptionPtr,
-                  ConsolidatedPinnedBuffer&  pinnedBuffer0,
-                  ConsolidatedPinnedBuffer&  pinnedBuffer1) {
+                  BatchSlotPool&             slotPool,
+                  PreparedBatchQueue*        readyQueue,
+                  std::exception_ptr&        exceptionPtr) {
   try {
-    ScopedNvtxRange workerRange("threadWorker " + std::to_string(workerIdx));
-
-    std::array<BatchSlot, 2> slots{BatchSlot(workerIdx * 2), BatchSlot(workerIdx * 2 + 1)};
-    slots[0].bindPinnedBuffer(pinnedBuffer0);
-    slots[1].bindPinnedBuffer(pinnedBuffer1);
-    for (auto& slot : slots) {
-      slot.initializeForStream();
-    }
-
-    ScopedNvtxRange waitRange("Wait: worker streams wait for upstream ready event");
-    if (upstreamReadyEvent != nullptr) {
-      for (auto& slot : slots) {
-        cudaCheckError(cudaStreamWaitEvent(slot.stream(), upstreamReadyEvent, 0));
-        cudaCheckError(cudaStreamWaitEvent(slot.twoStreamCtx->recursiveStream.stream(), upstreamReadyEvent, 0));
-        for (int depth = 0; depth < kMaxRecursionDepth; ++depth) {
-          cudaCheckError(
-              cudaStreamWaitEvent(slot.twoStreamCtx->matchStreams[depth].stream(), upstreamReadyEvent, 0));
-        }
-      }
-    }
-    waitRange.pop();
+    ScopedNvtxRange workerRange("runnerWorker " + std::to_string(workerIdx));
 
     const int numPairs = ctx.numTargets * ctx.numQueries;
 
-    int currentSlotIdx  = 0;
-    int pendingSlotIdx  = -1;
-    int pendingBatchIdx = -1;
+    BatchSlot* pendingSlot = nullptr;
+
+    while (true) {
+      BatchSlot* slot;
+      
+      if (readyQueue) {
+        ScopedNvtxRange waitRange("Wait: dequeue from preprocessor", NvtxColor::kRed);
+        slot = readyQueue->dequeue();
+        waitRange.pop();
+        if (!slot) break;
+      } else {
+        const int batchIdx = nextBatchIdx.fetch_add(1, std::memory_order_relaxed);
+        if (batchIdx >= totalNumBatches) break;
+
+        const int batchStart = batchIdx * effectiveBatchSize;
+        if (batchStart >= numPairs) break;
+
+        {
+          ScopedNvtxRange waitRange("Wait: acquire slot from pool");
+          slot = slotPool.acquire();
+        }
+        if (!slot) break;
+
+        if (upstreamReadyEvent != nullptr) {
+          cudaCheckError(cudaStreamWaitEvent(slot->stream(), upstreamReadyEvent, 0));
+          cudaCheckError(cudaStreamWaitEvent(slot->twoStreamCtx->recursiveStream.stream(), upstreamReadyEvent, 0));
+          for (int depth = 0; depth < kMaxRecursionDepth; ++depth) {
+            cudaCheckError(cudaStreamWaitEvent(slot->twoStreamCtx->matchStreams[depth].stream(), upstreamReadyEvent, 0));
+          }
+        }
+
+        ScopedNvtxRange prepRange("CPU prep batch " + std::to_string(batchIdx));
+        prepareBatchOnCPU(*slot, ctx, queriesHost, leafSubpatterns, batchStart, effectiveBatchSize);
+        prepRange.pop();
+      }
+
+      ScopedNvtxRange launchRange("GPU launch batch " + std::to_string(slot->batchStart / effectiveBatchSize));
+      uploadAndLaunchBatch(*slot, ctx, targetsDevice, queriesDevice, leafSubpatterns, algorithm);
+      initiateResultsCopyToHost(*slot);
+      launchRange.pop();
+
+      if (pendingSlot) {
+        ScopedNvtxRange accumRange("Accumulate batch");
+        accumulateBatchResults(*pendingSlot, ctx, results, resultsMutex);
+        slotPool.release(pendingSlot);
+        accumRange.pop();
+      }
+
+      pendingSlot = slot;
+    }
+
+    if (pendingSlot) {
+      ScopedNvtxRange accumRange("Accumulate final batch");
+      accumulateBatchResults(*pendingSlot, ctx, results, resultsMutex);
+      slotPool.release(pendingSlot);
+      accumRange.pop();
+    }
+  } catch (...) {
+    exceptionPtr = std::current_exception();
+  }
+}
+
+/**
+ * @brief Preprocessor worker that prepares batches and enqueues them for runners.
+ *
+ * Acquires slots from the pool, runs prepareBatchOnCPU, then enqueues to readyQueue.
+ * Runners will dequeue and execute the GPU work.
+ */
+void preprocessorWorker(int                        workerIdx,
+                        const ThreadWorkerContext& ctx,
+                        const MoleculesHost&       queriesHost,
+                        const LeafSubpatterns&     leafSubpatterns,
+                        cudaEvent_t                upstreamReadyEvent,
+                        std::atomic<int>&          nextBatchIdx,
+                        int                        totalNumBatches,
+                        int                        effectiveBatchSize,
+                        BatchSlotPool&             slotPool,
+                        PreparedBatchQueue&        readyQueue,
+                        std::exception_ptr&        exceptionPtr) {
+  try {
+    ScopedNvtxRange workerRange("preprocessorWorker " + std::to_string(workerIdx));
+
+    const int numPairs = ctx.numTargets * ctx.numQueries;
 
     while (true) {
       const int batchIdx = nextBatchIdx.fetch_add(1, std::memory_order_relaxed);
-      if (batchIdx >= totalNumBatches) {
-        break;
-      }
+      if (batchIdx >= totalNumBatches) break;
 
       const int batchStart = batchIdx * effectiveBatchSize;
-      if (batchStart >= numPairs) {
-        break;
+      if (batchStart >= numPairs) break;
+
+      BatchSlot* slot;
+      {
+        ScopedNvtxRange waitRange("Wait: acquire slot from pool");
+        slot = slotPool.acquire();
+      }
+      if (!slot) break;
+
+      if (upstreamReadyEvent != nullptr) {
+        cudaCheckError(cudaStreamWaitEvent(slot->stream(), upstreamReadyEvent, 0));
+        cudaCheckError(cudaStreamWaitEvent(slot->twoStreamCtx->recursiveStream.stream(), upstreamReadyEvent, 0));
+        for (int depth = 0; depth < kMaxRecursionDepth; ++depth) {
+          cudaCheckError(cudaStreamWaitEvent(slot->twoStreamCtx->matchStreams[depth].stream(), upstreamReadyEvent, 0));
+        }
       }
 
-      ScopedNvtxRange batchRange("Thread batch " + std::to_string(batchIdx));
-
-      BatchSlot& currentSlot = slots[currentSlotIdx];
-
-      ScopedNvtxRange prepRange("CPU prep batch " + std::to_string(batchIdx) + " (slot " +
-                                std::to_string(currentSlotIdx) + ")");
-      prepareBatchOnCPU(currentSlot, ctx, queriesHost, leafSubpatterns, batchStart, effectiveBatchSize);
+      ScopedNvtxRange prepRange("CPU prep batch " + std::to_string(batchIdx));
+      prepareBatchOnCPU(*slot, ctx, queriesHost, leafSubpatterns, batchStart, effectiveBatchSize);
       prepRange.pop();
 
-      ScopedNvtxRange launchRange("GPU launch batch " + std::to_string(batchIdx) + " (slot " +
-                                  std::to_string(currentSlotIdx) + ")");
-      uploadAndLaunchBatch(currentSlot, ctx, targetsDevice, queriesDevice, leafSubpatterns, algorithm);
-      initiateResultsCopyToHost(currentSlot);
-      launchRange.pop();
-
-      if (pendingSlotIdx >= 0) {
-        ScopedNvtxRange accumRange("Accumulate batch " + std::to_string(pendingBatchIdx) + " (slot " +
-                                   std::to_string(pendingSlotIdx) + ")");
-        accumulateBatchResults(slots[pendingSlotIdx], ctx, results, resultsMutex);
-        accumRange.pop();
-        pendingSlotIdx  = -1;
-        pendingBatchIdx = -1;
+      {
+        ScopedNvtxRange waitRange("Wait: enqueue to runner", NvtxColor::kRed);
+        readyQueue.enqueue(slot);
       }
-
-      pendingSlotIdx  = currentSlotIdx;
-      pendingBatchIdx = batchIdx;
-      currentSlotIdx  = 1 - currentSlotIdx;
-    }
-
-    if (pendingSlotIdx >= 0) {
-      ScopedNvtxRange accumRange("Accumulate final batch " + std::to_string(pendingBatchIdx) + " (slot " +
-                                 std::to_string(pendingSlotIdx) + ")");
-      accumulateBatchResults(slots[pendingSlotIdx], ctx, results, resultsMutex);
-      accumRange.pop();
     }
   } catch (...) {
     exceptionPtr = std::current_exception();
@@ -1523,10 +1577,10 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
                          SubstructAlgorithm         algorithm,
                          cudaStream_t               stream,
                          int                        batchSize,
-                         int                        requestedNumThreads) {
+                         int                        requestedNumRunners,
+                         int                        requestedNumPreprocessors) {
   ScopedNvtxRange e2eRange("getSubstructMatches");
   
-  // Configure kernels for max shared memory carveout (once per process)
   configureSubstructKernelsSharedMem();
   
   const int numTargets = static_cast<int>(targetsHost.numMolecules());
@@ -1538,6 +1592,10 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
 
   const int numPairs           = numTargets * numQueries;
   const int effectiveBatchSize = std::min(batchSize, numPairs);
+  const int totalNumBatches    = (numPairs + effectiveBatchSize - 1) / effectiveBatchSize;
+
+  const int numRunners       = std::min(std::max(1, requestedNumRunners), totalNumBatches);
+  const int numPreprocessors = std::min(std::max(0, requestedNumPreprocessors), totalNumBatches);
 
   ScopedNvtxRange ctxRange("CPU: ThreadWorkerContext construction");
   ThreadWorkerContext ctx;
@@ -1595,42 +1653,77 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
   results.resize(numTargets, numQueries);
   resultsAllocRange.pop();
 
-  const int            totalNumBatches = (numPairs + effectiveBatchSize - 1) / effectiveBatchSize;
-  const int            numThreads      = std::min(std::max(1, requestedNumThreads), totalNumBatches);
-  std::atomic<int>     nextBatchIdx(0);
-  std::mutex           resultsMutex;
+  std::atomic<int> nextBatchIdx(0);
+  std::mutex       resultsMutex;
 
   ScopedCudaEvent upstreamReadyEvent;
   cudaCheckError(cudaEventRecord(upstreamReadyEvent.event(), stream));
 
-  // Pre-allocate consolidated pinned buffers before spawning threads (2 slots per thread)
-  ScopedNvtxRange allocRange("CPU: Pre-allocate consolidated pinned buffers");
+  ScopedNvtxRange allocRange("CPU: Pre-allocate BatchSlots");
   const int maxMatchIndicesPerBatch = effectiveBatchSize * ctx.maxTargetAtoms * maxQueryAtoms;
 
-  // Estimate max patterns per depth based on query data
   int maxPatternsPerDepth = 256;
   for (size_t q = 0; q < queriesHost.recursivePatterns.size(); ++q) {
     const auto& recInfo = queriesHost.recursivePatterns[q];
     maxPatternsPerDepth = std::max(maxPatternsPerDepth, static_cast<int>(recInfo.patterns.size()));
   }
 
+  // Slot count: runners need 2 each for ping-pong, plus a small buffer for preprocessing overlap.
+  // Don't scale with numPreprocessors to avoid excessive GPU memory usage.
+  const int numSlots = numRunners * 2 + std::min(numPreprocessors, 2);
   std::vector<std::unique_ptr<ConsolidatedPinnedBuffer>> pinnedBuffers;
-  pinnedBuffers.reserve(numThreads * 2);
-  for (int i = 0; i < numThreads * 2; ++i) {
+  std::vector<std::unique_ptr<BatchSlot>> slots;
+  std::vector<BatchSlot*> slotPtrs;
+  pinnedBuffers.reserve(numSlots);
+  slots.reserve(numSlots);
+  slotPtrs.reserve(numSlots);
+  for (int i = 0; i < numSlots; ++i) {
     auto buf = std::make_unique<ConsolidatedPinnedBuffer>();
     buf->allocate(effectiveBatchSize, maxMatchIndicesPerBatch, maxPatternsPerDepth);
+    
+    auto slot = std::make_unique<BatchSlot>(i);
+    slot->bindPinnedBuffer(*buf);
+    slot->initializeForStream();
+    
+    slotPtrs.push_back(slot.get());
     pinnedBuffers.push_back(std::move(buf));
+    slots.push_back(std::move(slot));
   }
   allocRange.pop();
 
-  ScopedNvtxRange          threadRange("Multithreaded batch processing");
+  BatchSlotPool slotPool;
+  slotPool.initialize(slotPtrs);
+
+  ScopedNvtxRange threadRange("Multithreaded batch processing");
+  const int totalThreads = numRunners + numPreprocessors;
   std::vector<std::thread> workers;
-  std::vector<std::exception_ptr> exceptions(numThreads);
-  workers.reserve(numThreads);
+  std::vector<std::exception_ptr> exceptions(totalThreads);
+  workers.reserve(totalThreads);
+
+  std::unique_ptr<PreparedBatchQueue> readyQueue;
+  if (numPreprocessors > 0) {
+    readyQueue = std::make_unique<PreparedBatchQueue>(numRunners * 2);
+  }
 
   ScopedNvtxRange launchRange("CPU: Launch worker threads");
-  for (int t = 0; t < numThreads; ++t) {
-    workers.emplace_back(threadWorker,
+  
+  for (int t = 0; t < numPreprocessors; ++t) {
+    workers.emplace_back(preprocessorWorker,
+                         t,
+                         std::cref(ctx),
+                         std::cref(queriesHost),
+                         std::cref(leafSubpatterns),
+                         upstreamReadyEvent.event(),
+                         std::ref(nextBatchIdx),
+                         totalNumBatches,
+                         effectiveBatchSize,
+                         std::ref(slotPool),
+                         std::ref(*readyQueue),
+                         std::ref(exceptions[t]));
+  }
+
+  for (int t = 0; t < numRunners; ++t) {
+    workers.emplace_back(runnerWorker,
                          t,
                          std::cref(ctx),
                          std::ref(targetsDevice),
@@ -1644,16 +1737,21 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
                          std::ref(nextBatchIdx),
                          totalNumBatches,
                          effectiveBatchSize,
-                         maxQueryAtoms,
-                         std::ref(exceptions[t]),
-                         std::ref(*pinnedBuffers[t * 2]),
-                         std::ref(*pinnedBuffers[t * 2 + 1]));
+                         std::ref(slotPool),
+                         readyQueue.get(),
+                         std::ref(exceptions[numPreprocessors + t]));
   }
   launchRange.pop();
 
   ScopedNvtxRange joinRange("CPU: Join worker threads");
-  for (auto& worker : workers) {
-    worker.join();
+  for (int i = 0; i < numPreprocessors; ++i) {
+    workers[i].join();
+  }
+  if (readyQueue) {
+    readyQueue->shutdown();
+  }
+  for (int i = numPreprocessors; i < totalThreads; ++i) {
+    workers[i].join();
   }
   joinRange.pop();
 
@@ -1667,7 +1765,6 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
 
   cudaCheckError(cudaGetLastError());
 
-  // Fire-and-forget async cleanup of pinned buffers
   for (auto& buf : pinnedBuffers) {
     AsyncResourceCleaner::instance().scheduleBufferCleanup(std::move(buf));
   }
@@ -1681,7 +1778,8 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
                          SubstructAlgorithm         algorithm,
                          cudaStream_t               stream,
                          int                        batchSize,
-                         int                        numThreads) {
+                         int                        numRunners,
+                         int                        numPreprocessors) {
   ScopedNvtxRange buildRange("Build LeafSubpatterns");
   LeafSubpatterns leafSubpatterns;
   leafSubpatterns.buildAllPatterns(queriesHost);
@@ -1689,7 +1787,7 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
   buildRange.pop();
 
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      leafSubpatterns, results, algorithm, stream, batchSize, numThreads);
+                      leafSubpatterns, results, algorithm, stream, batchSize, numRunners, numPreprocessors);
 }
 
 // =============================================================================

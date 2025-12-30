@@ -74,6 +74,17 @@ struct DatasetConfig {
   const char* name;
 };
 
+struct ThreadingConfig {
+  int         numRunners;
+  int         numPreprocessors;
+  const char* name;
+};
+
+constexpr ThreadingConfig kThreadingConfigs[] = {
+  {2, 0, "Inline"},
+  {2, 4, "Separated_2r4p"},
+};
+
 constexpr DatasetConfig kDatasets[] = {
   {"pwalters_alert_collection_supported.txt", "PwaltersAlertCollection"},
   {"openbabel_functional_groups_supported.txt", "OpenBabelFunctionalGroups"},
@@ -253,7 +264,7 @@ void printSmallestReprosSimple(const SmallestRepros&           repros,
 
 }  // namespace
 
-using SubstructParams = std::tuple<SubstructAlgorithm, DatasetConfig>;
+using SubstructParams = std::tuple<SubstructAlgorithm, DatasetConfig, ThreadingConfig>;
 
 class SubstructureIntegrationTest : public ::testing::TestWithParam<SubstructParams> {
  protected:
@@ -264,6 +275,7 @@ class SubstructureIntegrationTest : public ::testing::TestWithParam<SubstructPar
 
   SubstructAlgorithm algorithm() const { return std::get<0>(GetParam()); }
   const DatasetConfig& dataset() const { return std::get<1>(GetParam()); }
+  const ThreadingConfig& threading() const { return std::get<2>(GetParam()); }
 };
 
 INSTANTIATE_TEST_SUITE_P(
@@ -271,10 +283,12 @@ INSTANTIATE_TEST_SUITE_P(
   SubstructureIntegrationTest,
   ::testing::Combine(
     ::testing::Values(SubstructAlgorithm::GSI),
-    ::testing::ValuesIn(kDatasets)),
+    ::testing::ValuesIn(kDatasets),
+    ::testing::ValuesIn(kThreadingConfigs)),
   [](const ::testing::TestParamInfo<SubstructParams>& info) {
     return std::string(algorithmName(std::get<0>(info.param))) + "_" +
-           std::get<1>(info.param).name;
+           std::get<1>(info.param).name + "_" +
+           std::get<2>(info.param).name;
   });
 
 TEST_P(SubstructureIntegrationTest, ChemblVsSmarts) {
@@ -310,7 +324,7 @@ TEST_P(SubstructureIntegrationTest, ChemblVsSmarts) {
 
   SubstructSearchResults results;
   getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost, results, algorithm(),
-                      stream_.stream());
+                      stream_.stream(), 1024, threading().numRunners, threading().numPreprocessors);
 
   EXPECT_EQ(results.numTargets, static_cast<int>(targetMols.size()));
   EXPECT_EQ(results.numQueries, static_cast<int>(queryMols.size()));
@@ -335,7 +349,9 @@ TEST_P(SubstructureIntegrationTest, ChemblVsSmarts) {
     }
   }
 
-  std::cout << "[" << algorithmName(algorithm()) << "] Query statistics:\n"
+  std::cout << "[" << algorithmName(algorithm()) << ", " << threading().name << "] Query statistics:\n"
+            << "  Threading: " << threading().numRunners << " runners, " 
+            << threading().numPreprocessors << " preprocessors\n"
             << "  Total queries: " << numQueries << "\n"
             << "  Total targets: " << numTargets << "\n"
             << "  Grand total matches: " << grandTotalMatches << "\n"

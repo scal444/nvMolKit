@@ -202,7 +202,8 @@ struct LeafSubpatterns;
  * @param algorithm Algorithm to use for matching
  * @param stream CUDA stream for async operations
  * @param batchSize Number of pairs per batch (default 1024).
- * @param numThreads Number of CPU worker threads (default 2).
+ * @param numRunners Number of GPU runner threads (default 2).
+ * @param numPreprocessors Number of CPU preprocessor threads (0 = runners preprocess inline).
  */
 void getSubstructMatches(MoleculesDevice&           targetsDevice,
                          const MoleculesDevice&     queriesDevice,
@@ -213,7 +214,8 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
                          SubstructAlgorithm         algorithm,
                          cudaStream_t               stream,
                          int                        batchSize = 1024,
-                         int                        numThreads = 2);
+                         int                        numRunners = 2,
+                         int                        numPreprocessors = 0);
 
 /**
  * @brief Convenience overload that builds LeafSubpatterns internally.
@@ -229,7 +231,8 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
                          SubstructAlgorithm         algorithm,
                          cudaStream_t               stream,
                          int                        batchSize = 1024,
-                         int                        numThreads = 2);
+                         int                        numRunners = 2,
+                         int                        numPreprocessors = 0);
 
 // BatchedPatternEntry is defined in pinned_buffer_pool.h
 

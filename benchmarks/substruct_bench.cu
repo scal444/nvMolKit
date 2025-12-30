@@ -191,7 +191,8 @@ void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
                    const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols,
                    SubstructAlgorithm                                algorithm,
                    int                                               batchSize,
-                   int                                               numThreads,
+                   int                                               numRunners,
+                   int                                               numPreprocessors,
                    int&                                              totalMatches,
                    SubstructSearchResults&                           resultsOut,
                    BenchUtils::TimingResult&                         timingOut,
@@ -213,7 +214,7 @@ void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
   timingOut = BenchUtils::timeIt(
       [&]() {
         getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost, resultsOut, algorithm,
-                            stream.stream(), batchSize, numThreads);
+                            stream.stream(), batchSize, numRunners, numPreprocessors);
       },
       iterations, warmups);
 
@@ -224,7 +225,10 @@ void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
     }
   }
 
-  std::cout << "nvMolKit SubstructMatch (" << algoStr << "), targets=" << targetMols.size()
+  std::string threadingStr = numPreprocessors > 0 
+      ? std::to_string(numRunners) + "r/" + std::to_string(numPreprocessors) + "p"
+      : std::to_string(numRunners) + " runners (inline)";
+  std::cout << "nvMolKit SubstructMatch (" << algoStr << ", " << threadingStr << "), targets=" << targetMols.size()
             << ", queries=" << queryMols.size() << ": " << timingOut.avgMs << " ms (±" << timingOut.stdMs
             << " ms)\n";
 }
@@ -261,7 +265,8 @@ void printHelp(const char* progName) {
     << "  -a, --algorithm <str>     Algorithm: vf2, gsi, or warpunified [default: warpunified]\n";
   std::cout << "  -b, --batch_size <int>    GPU batch size for matching [default: 1024]\n";
   std::cout << "  -c, --cap <int>           Max atoms per molecule (filter larger) [default: 128]\n";
-  std::cout << "  -p, --num_threads <int>   CPU worker threads used by nvMolKit [default: 2]\n";
+  std::cout << "  -p, --num_runners <int>   Number of GPU runner threads [default: 2]\n";
+  std::cout << "  -e, --num_preproc <int>   Number of CPU preprocessor threads (0 = inline) [default: 0]\n";
   std::cout << "  -r, --do_rdkit <bool>     Run RDKit benchmark comparison [default: true]\n";
   std::cout << "  -w, --do_warmup <bool>    Run warmup before benchmarking [default: true]\n";
   std::cout << "  -v, --validate <bool>     Validate GPU results against RDKit [default: false]\n";
@@ -276,6 +281,7 @@ void printHelp(const char* progName) {
   std::cout << "  " << progName
             << " --targets targets.smi --queries queries.smi --num_targets 1000 --algorithm gsi\n";
   std::cout << "  " << progName << " -t targets.smi -q queries.smi -n 500 -m 20 -b 512 -c 64 -v true -d 2\n";
+  std::cout << "  " << progName << " -t targets.smi -q queries.smi -p 2 -e 4  # 2 runners, 4 preprocessors\n";
 }
 
 }  // namespace
@@ -283,40 +289,42 @@ void printHelp(const char* progName) {
 int main(int argc, char* argv[]) {
   std::string        targetsPath;
   std::string        queriesPath;
-  int                numTargets = 100;
-  int                numQueries = 10;
-  SubstructAlgorithm algorithm  = SubstructAlgorithm::WarpUnified;
-  int                batchSize  = 1024;
-  unsigned int       maxAtoms   = 128;
-  int                numThreads = 2;
-  bool               doRdkit    = true;
-  bool               doWarmup   = true;
-  bool               doValidate = false;
-  bool               doProfile  = false;
-  int                debugLevel = 0;
+  int                numTargets       = 100;
+  int                numQueries       = 10;
+  SubstructAlgorithm algorithm        = SubstructAlgorithm::WarpUnified;
+  int                batchSize        = 1024;
+  unsigned int       maxAtoms         = 128;
+  int                numRunners       = 2;
+  int                numPreprocessors = 0;
+  bool               doRdkit          = true;
+  bool               doWarmup         = true;
+  bool               doValidate       = false;
+  bool               doProfile        = false;
+  int                debugLevel       = 0;
 
   static struct option long_options[] = {
-    {   "targets", required_argument, 0, 't'},
-    {   "queries", required_argument, 0, 'q'},
+    {    "targets", required_argument, 0, 't'},
+    {    "queries", required_argument, 0, 'q'},
     {"num_targets", required_argument, 0, 'n'},
     {"num_queries", required_argument, 0, 'm'},
-    { "algorithm", required_argument, 0, 'a'},
-    {"batch_size", required_argument, 0, 'b'},
-    {       "cap", required_argument, 0, 'c'},
-    {"num_threads", required_argument, 0, 'p'},
-    {  "do_rdkit", required_argument, 0, 'r'},
-    { "do_warmup", required_argument, 0, 'w'},
-    {  "validate", required_argument, 0, 'v'},
-    {   "profile", required_argument, 0, 'P'},
-    {     "debug", required_argument, 0, 'd'},
-    {      "help",       no_argument, 0, 'h'},
-    {           0,                 0, 0,   0}
+    {  "algorithm", required_argument, 0, 'a'},
+    { "batch_size", required_argument, 0, 'b'},
+    {        "cap", required_argument, 0, 'c'},
+    {"num_runners", required_argument, 0, 'p'},
+    {"num_preproc", required_argument, 0, 'e'},
+    {   "do_rdkit", required_argument, 0, 'r'},
+    {  "do_warmup", required_argument, 0, 'w'},
+    {   "validate", required_argument, 0, 'v'},
+    {    "profile", required_argument, 0, 'P'},
+    {      "debug", required_argument, 0, 'd'},
+    {       "help",       no_argument, 0, 'h'},
+    {            0,                 0, 0,   0}
   };
 
   int option_index = 0;
   int c;
 
-  while ((c = getopt_long(argc, argv, "t:q:n:m:a:b:c:p:r:w:v:P:d:h", long_options, &option_index)) != -1) {
+  while ((c = getopt_long(argc, argv, "t:q:n:m:a:b:c:p:e:r:w:v:P:d:h", long_options, &option_index)) != -1) {
     switch (c) {
       case 't':
         targetsPath = optarg;
@@ -382,13 +390,25 @@ int main(int argc, char* argv[]) {
         break;
       case 'p':
         try {
-          numThreads = std::stoi(optarg);
-          if (numThreads <= 0) {
-            std::cerr << "Error: num_threads must be positive\n";
+          numRunners = std::stoi(optarg);
+          if (numRunners <= 0) {
+            std::cerr << "Error: num_runners must be positive\n";
             return 1;
           }
         } catch (const std::exception& e) {
-          std::cerr << "Error: Invalid value for num_threads: " << optarg << "\n";
+          std::cerr << "Error: Invalid value for num_runners: " << optarg << "\n";
+          return 1;
+        }
+        break;
+      case 'e':
+        try {
+          numPreprocessors = std::stoi(optarg);
+          if (numPreprocessors < 0) {
+            std::cerr << "Error: num_preproc must be non-negative\n";
+            return 1;
+          }
+        } catch (const std::exception& e) {
+          std::cerr << "Error: Invalid value for num_preproc: " << optarg << "\n";
           return 1;
         }
         break;
@@ -460,7 +480,8 @@ int main(int argc, char* argv[]) {
   std::cout << "  Algorithm: " << algorithmName(algorithm) << "\n";
   std::cout << "  Batch size: " << batchSize << "\n";
   std::cout << "  Atom cap: " << maxAtoms << "\n";
-  std::cout << "  nvMolKit threads: " << numThreads << "\n";
+  std::cout << "  Runner threads: " << numRunners << "\n";
+  std::cout << "  Preprocessor threads: " << numPreprocessors << (numPreprocessors == 0 ? " (inline)" : "") << "\n";
   std::cout << "  Run RDKit comparison: " << (doRdkit ? "yes" : "no") << "\n";
   std::cout << "  Run warmup: " << (doWarmup ? "yes" : "no") << "\n";
   std::cout << "  Validate results: " << (doValidate ? "yes" : "no") << "\n";
@@ -508,7 +529,7 @@ int main(int argc, char* argv[]) {
     int                      warmupMatches;
     SubstructSearchResults   warmupResults;
     BenchUtils::TimingResult warmupTiming;
-    benchNvMolKit(warmupTargets, warmupQueries, algorithm, batchSize, numThreads, warmupMatches, warmupResults, warmupTiming);
+    benchNvMolKit(warmupTargets, warmupQueries, algorithm, batchSize, numRunners, numPreprocessors, warmupMatches, warmupResults, warmupTiming);
 
     if (doRdkit) {
       BenchUtils::TimingResult rdkitWarmupTiming;
@@ -526,7 +547,7 @@ int main(int argc, char* argv[]) {
   int                      nvmolkitMatches = 0;
   SubstructSearchResults   nvmolkitResults;
   BenchUtils::TimingResult nvmolkitTiming;
-  benchNvMolKit(targetMols, queryMols, algorithm, batchSize, numThreads, nvmolkitMatches, nvmolkitResults, nvmolkitTiming, benchIterations, benchWarmups);
+  benchNvMolKit(targetMols, queryMols, algorithm, batchSize, numRunners, numPreprocessors, nvmolkitMatches, nvmolkitResults, nvmolkitTiming, benchIterations, benchWarmups);
   std::cout << "nvMolKit total matches: " << nvmolkitMatches << "\n";
 
   int                      rdkitMatches = 0;
@@ -561,14 +582,14 @@ int main(int argc, char* argv[]) {
   }
 
   std::cout << "\n\nCSV Results:\n";
-  std::cout << "algorithm,num_targets,num_queries,batch_size,num_threads,nvmolkit_time_ms,nvmolkit_std_ms";
+  std::cout << "algorithm,num_targets,num_queries,batch_size,num_runners,num_preproc,nvmolkit_time_ms,nvmolkit_std_ms";
   if (doRdkit) {
     std::cout << ",rdkit_time_ms,rdkit_std_ms";
   }
   std::cout << "\n";
 
   std::cout << algorithmName(algorithm) << "," << targetMols.size() << "," << queryMols.size() << ","
-            << batchSize << "," << numThreads << ","
+            << batchSize << "," << numRunners << "," << numPreprocessors << ","
             << nvmolkitTiming.avgMs << "," << nvmolkitTiming.stdMs;
   if (doRdkit) {
     std::cout << "," << rdkitTiming.avgMs << "," << rdkitTiming.stdMs;
