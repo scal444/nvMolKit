@@ -1530,6 +1530,7 @@ void preprocessorWorker(int                        workerIdx,
                         int                        effectiveBatchSize,
                         BatchSlotPool&             slotPool,
                         PreparedBatchQueue&        readyQueue,
+                        std::atomic<int>&          activePreprocessors,
                         std::atomic<bool>&         shutdownFlag,
                         std::exception_ptr&        exceptionPtr) {
   try {
@@ -1567,6 +1568,10 @@ void preprocessorWorker(int                        workerIdx,
         ScopedNvtxRange waitRange("Wait: enqueue to runner", NvtxColor::kRed);
         readyQueue.enqueue(slot);
       }
+    }
+
+    if (activePreprocessors.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+      readyQueue.shutdown();
     }
   } catch (...) {
     exceptionPtr = std::current_exception();
@@ -1735,6 +1740,7 @@ void getSubstructMatchesImpl(MoleculesDevice&             targetsDevice,
   }
 
   std::atomic<bool> shutdownFlag{false};
+  std::atomic<int> activePreprocessors{numPreprocessors};
 
   ScopedNvtxRange launchRange("CPU: Launch worker threads");
   
@@ -1750,6 +1756,7 @@ void getSubstructMatchesImpl(MoleculesDevice&             targetsDevice,
                          effectiveBatchSize,
                          std::ref(slotPool),
                          std::ref(*readyQueue),
+                         std::ref(activePreprocessors),
                          std::ref(shutdownFlag),
                          std::ref(exceptions[t]));
   }
