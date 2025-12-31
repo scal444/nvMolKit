@@ -334,15 +334,14 @@ class BatchResultsDevice {
 struct TwoStreamPipelineContext {
   ScopedStreamWithPriority recursiveStream;  ///< High priority stream for paint kernels
 
-  /// Low priority streams for match kernels at depth > 0.
-  /// Depth 0 uses the main ctx.stream. Depths 1..kMaxRecursionDepth each get their own stream
-  /// so matching at different depths can overlap.
-  std::array<ScopedStreamWithPriority, kMaxRecursionDepth> matchStreams;
+  /// Low priority stream for match kernels at depth > 0.
+  /// Depth 0 uses the main ctx.stream.
+  ScopedStreamWithPriority postRecursionStream;
 
   std::array<ScopedCudaEvent, kMaxRecursionDepth> depthEvents;
 
-  ScopedCudaEvent recursiveDoneEvent;  ///< Signaled when recursive stream work completes
-  std::array<ScopedCudaEvent, kMaxRecursionDepth> matchDoneEvents;  ///< Signaled when match stream work completes
+  ScopedCudaEvent recursiveDoneEvent;      ///< Signaled when recursive stream work completes
+  ScopedCudaEvent postRecursionDoneEvent;  ///< Signaled when post-recursion stream work completes
 
   /// Matching: global pair indices for each depth group (depth 0..kMaxRecursionDepth)
   std::array<AsyncDeviceVector<int>, kMaxRecursionDepth + 1> matchGlobalPairIndices;
@@ -364,7 +363,7 @@ struct TwoStreamPipelineContext {
    * @brief Construct pipeline context with priority streams.
    *
    * The recursive stream gets high priority (lower numerical value),
-   * match streams get low priority (higher numerical value).
+   * post-recursion stream gets low priority (higher numerical value).
    * 
    * @param workerIdx Worker thread index for unique stream naming
    */

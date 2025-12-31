@@ -32,6 +32,7 @@ using nvMolKit::getRDKitSubstructMatches;
 using nvMolKit::getSubstructMatches;
 using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
+using nvMolKit::SubstructSearchConfig;
 using nvMolKit::SubstructSearchResults;
 
 namespace {
@@ -1537,5 +1538,48 @@ TEST_P(SubstructureSearchTest, NestedRecursiveBatchProcessing) {
   for (size_t t = 0; t < targets.size(); ++t) {
     expectMatchesRDKit(results, *targetMols[t], *queryMols[0], 
                        static_cast<int>(t), 0, targets[t]);
+  }
+}
+
+TEST_P(SubstructureSearchTest, InvalidSlotsPerRunnerThrows) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  parseMolecules({"CCO"}, {"C"}, targetMols, queryMols);
+
+  SubstructSearchResults results;
+  SubstructSearchConfig config;
+
+  config.slotsPerRunner = 0;
+  EXPECT_THROW(getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                                   results, algorithm(), stream_.stream(), config),
+               std::invalid_argument);
+
+  config.slotsPerRunner = -1;
+  EXPECT_THROW(getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                                   results, algorithm(), stream_.stream(), config),
+               std::invalid_argument);
+
+  config.slotsPerRunner = 9;
+  EXPECT_THROW(getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                                   results, algorithm(), stream_.stream(), config),
+               std::invalid_argument);
+}
+
+TEST_P(SubstructureSearchTest, ValidSlotsPerRunnerWorks) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  parseMolecules({"CCO", "CCCO"}, {"C", "CC"}, targetMols, queryMols);
+
+  SubstructSearchConfig config;
+
+  for (int slots = 1; slots <= 8; ++slots) {
+    config.slotsPerRunner = slots;
+    SubstructSearchResults results;
+    EXPECT_NO_THROW(getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                                        results, algorithm(), stream_.stream(), config))
+        << "slotsPerRunner=" << slots << " should be valid";
+    EXPECT_GT(results.matchCount(0, 0), 0) << "Should find matches with slots=" << slots;
   }
 }

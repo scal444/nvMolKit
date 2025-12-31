@@ -43,6 +43,7 @@ struct SubstructSearchConfig {
   int  batchSize           = 1024;   ///< Number of (target, query) pairs per GPU batch
   int  workerThreads       = 1;      ///< Number of GPU runner threads (1 = single-threaded)
   int  preprocessorThreads = 0;      ///< Number of CPU preprocessor threads (0 = inline preprocessing)
+  int  slotsPerRunner      = 3;      ///< Slots per runner for inline mode (1-8, higher = more overlap)
   bool presort             = true;   ///< Sort molecules by atom count (largest first) for GPU efficiency
 };
 
