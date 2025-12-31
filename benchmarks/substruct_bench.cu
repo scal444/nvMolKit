@@ -208,9 +208,7 @@ void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
     }
   }
 
-  std::string threadingStr = config.preprocessorThreads > 0 
-      ? std::to_string(config.workerThreads) + "r/" + std::to_string(config.preprocessorThreads) + "p"
-      : std::to_string(config.workerThreads) + " workers (inline)";
+  std::string threadingStr = std::to_string(config.workerThreads) + " workers";
   std::cout << "nvMolKit SubstructMatch (" << algoStr << ", " << threadingStr << "), targets=" << targetMols.size()
             << ", queries=" << queryMols.size() << ": " << timingOut.avgMs << " ms (±" << timingOut.stdMs
             << " ms)\n";
@@ -529,8 +527,8 @@ int main(int argc, char* argv[]) {
   std::cout << "  Batch size: " << batchSize << "\n";
   std::cout << "  Atom cap: " << maxAtoms << "\n";
   std::cout << "  Runner threads: " << numRunners << " per GPU\n";
-  std::cout << "  Preprocessor threads: " << numPreprocessors << (numPreprocessors == 0 ? " (inline)" : "") << "\n";
-  std::cout << "  Slots per runner: " << slotsPerRunner << (numPreprocessors == 0 ? "" : " (ignored in queue mode)") << "\n";
+  std::cout << "  Preprocessing threads: " << numPreprocessors << "\n";
+  std::cout << "  Slots per runner: " << slotsPerRunner << "\n";
   std::cout << "  Multi-GPU: " << (useMultiGpu ? "yes" : "no") << " (" << numGpus << " GPU(s))\n";
   std::cout << "  Presort by size: " << (doPresort ? "yes" : "no") << "\n";
   std::cout << "  Run RDKit comparison: " << (doRdkit ? "yes" : "no") << "\n";
@@ -583,7 +581,7 @@ int main(int argc, char* argv[]) {
   SubstructSearchConfig benchConfig;
   benchConfig.batchSize           = batchSize;
   benchConfig.workerThreads       = numRunners;
-  benchConfig.preprocessorThreads = numPreprocessors;
+  benchConfig.preprocessingThreads = numPreprocessors;
   benchConfig.slotsPerRunner      = slotsPerRunner;
   benchConfig.presort             = doPresort;
   benchConfig.gpuIds              = gpuIds;

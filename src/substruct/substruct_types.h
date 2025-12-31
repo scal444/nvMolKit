@@ -46,8 +46,8 @@ enum class SubstructAlgorithm {
 struct SubstructSearchConfig {
   int  batchSize           = 1024;   ///< Number of (target, query) pairs per GPU batch
   int  workerThreads       = 1;      ///< Number of GPU runner threads per GPU
-  int  preprocessorThreads = 0;      ///< Number of CPU preprocessor threads (0 = inline preprocessing)
-  int  slotsPerRunner      = 3;      ///< Slots per runner for inline mode (1-8, higher = more overlap)
+  int  preprocessingThreads = 0;     ///< CPU threads for input preprocessing (0 = single-threaded)
+  int  slotsPerRunner      = 3;      ///< Batch slots per runner thread (1-8, higher = more overlap)
   bool presort             = true;   ///< Sort molecules by atom count (largest first) for GPU efficiency
   std::vector<int> gpuIds;           ///< GPU device IDs to use (empty = current device only)
 };

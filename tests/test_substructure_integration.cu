@@ -298,8 +298,7 @@ TEST_P(SubstructureIntegrationTest, ChemblVsSmarts) {
 
   const int numGpus = threading().config.gpuIds.empty() ? 1 : static_cast<int>(threading().config.gpuIds.size());
   std::cout << "[" << algorithmName(algorithm()) << ", " << threading().name << "] Query statistics:\n"
-            << "  Threading: " << threading().config.workerThreads << " workers/GPU, " 
-            << threading().config.preprocessorThreads << " preprocessors, "
+            << "  Threading: " << threading().config.workerThreads << " workers/GPU, "
             << numGpus << " GPU(s)\n"
             << "  Total queries: " << numQueries << "\n"
             << "  Total targets: " << numTargets << "\n"
