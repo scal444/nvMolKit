@@ -34,6 +34,18 @@ enum class SubstructAlgorithm {
 };
 
 /**
+ * @brief Configuration for substructure search execution.
+ *
+ * Controls threading and batching behavior. Default configuration is single-threaded
+ * for deterministic behavior and simpler debugging.
+ */
+struct SubstructSearchConfig {
+  int batchSize           = 1024;  ///< Number of (target, query) pairs per GPU batch
+  int workerThreads       = 1;     ///< Number of GPU runner threads (1 = single-threaded)
+  int preprocessorThreads = 0;     ///< Number of CPU preprocessor threads (0 = inline preprocessing)
+};
+
+/**
  * @brief Accumulated results from substructure matching.
  *
  * Uses sparse storage: only pairs with matches are stored.

@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include "substructure_search.cuh"
+#include "substructure_search_internal.cuh"
 
 #include <algorithm>
 #include <array>
@@ -1573,17 +1574,20 @@ void preprocessorWorker(int                        workerIdx,
 // Main API
 // =============================================================================
 
-void getSubstructMatches(MoleculesDevice&           targetsDevice,
-                         const MoleculesDevice&     queriesDevice,
-                         const MoleculesHost&       targetsHost,
-                         const MoleculesHost&       queriesHost,
-                         const LeafSubpatterns&     leafSubpatterns,
-                         SubstructSearchResults&    results,
-                         SubstructAlgorithm         algorithm,
-                         cudaStream_t               stream,
-                         int                        batchSize,
-                         int                        requestedNumRunners,
-                         int                        requestedNumPreprocessors) {
+namespace {
+
+void getSubstructMatchesImpl(MoleculesDevice&             targetsDevice,
+                             const MoleculesDevice&       queriesDevice,
+                             const MoleculesHost&         targetsHost,
+                             const MoleculesHost&         queriesHost,
+                             const LeafSubpatterns&       leafSubpatterns,
+                             SubstructSearchResults&      results,
+                             SubstructAlgorithm           algorithm,
+                             cudaStream_t                 stream,
+                             const SubstructSearchConfig& config) {
+  const int batchSize                  = config.batchSize;
+  const int requestedNumRunners        = config.workerThreads;
+  const int requestedNumPreprocessors  = config.preprocessorThreads;
   ScopedNvtxRange e2eRange("getSubstructMatches");
   
   configureSubstructKernelsSharedMem();
@@ -1787,24 +1791,24 @@ void getSubstructMatches(MoleculesDevice&           targetsDevice,
   }
 }
 
-void getSubstructMatches(MoleculesDevice&           targetsDevice,
-                         const MoleculesDevice&     queriesDevice,
-                         const MoleculesHost&       targetsHost,
-                         const MoleculesHost&       queriesHost,
-                         SubstructSearchResults&    results,
-                         SubstructAlgorithm         algorithm,
-                         cudaStream_t               stream,
-                         int                        batchSize,
-                         int                        numRunners,
-                         int                        numPreprocessors) {
+}  // namespace
+
+void getSubstructMatches(MoleculesDevice&             targetsDevice,
+                         const MoleculesDevice&       queriesDevice,
+                         const MoleculesHost&         targetsHost,
+                         const MoleculesHost&         queriesHost,
+                         SubstructSearchResults&      results,
+                         SubstructAlgorithm           algorithm,
+                         cudaStream_t                 stream,
+                         const SubstructSearchConfig& config) {
   ScopedNvtxRange buildRange("Build LeafSubpatterns");
   LeafSubpatterns leafSubpatterns;
   leafSubpatterns.buildAllPatterns(queriesHost);
   leafSubpatterns.syncToDevice(stream);
   buildRange.pop();
 
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                      leafSubpatterns, results, algorithm, stream, batchSize, numRunners, numPreprocessors);
+  getSubstructMatchesImpl(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                          leafSubpatterns, results, algorithm, stream, config);
 }
 
 // =============================================================================

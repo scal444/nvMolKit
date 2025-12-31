@@ -16,7 +16,9 @@
 #ifndef NVMOLKIT_FLAT_BIT_VECT_H
 #define NVMOLKIT_FLAT_BIT_VECT_H
 
+#include <cstdint>
 #include <cstring>
+#include <stdexcept>
 #include <functional>
 
 #include "device_assert.cuh"

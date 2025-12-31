@@ -44,6 +44,7 @@ using nvMolKit::MoleculesHost;
 using nvMolKit::printValidationResult;
 using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
+using nvMolKit::SubstructSearchConfig;
 using nvMolKit::SubstructSearchResults;
 using nvMolKit::SubstructValidationResult;
 using nvMolKit::validateAgainstRDKit;
@@ -190,9 +191,7 @@ void benchRDKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
 void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
                    const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols,
                    SubstructAlgorithm                                algorithm,
-                   int                                               batchSize,
-                   int                                               numRunners,
-                   int                                               numPreprocessors,
+                   const SubstructSearchConfig&                      config,
                    int&                                              totalMatches,
                    SubstructSearchResults&                           resultsOut,
                    BenchUtils::TimingResult&                         timingOut,
@@ -214,7 +213,7 @@ void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
   timingOut = BenchUtils::timeIt(
       [&]() {
         getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost, resultsOut, algorithm,
-                            stream.stream(), batchSize, numRunners, numPreprocessors);
+                            stream.stream(), config);
       },
       iterations, warmups);
 
@@ -225,9 +224,9 @@ void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
     }
   }
 
-  std::string threadingStr = numPreprocessors > 0 
-      ? std::to_string(numRunners) + "r/" + std::to_string(numPreprocessors) + "p"
-      : std::to_string(numRunners) + " runners (inline)";
+  std::string threadingStr = config.preprocessorThreads > 0 
+      ? std::to_string(config.workerThreads) + "r/" + std::to_string(config.preprocessorThreads) + "p"
+      : std::to_string(config.workerThreads) + " workers (inline)";
   std::cout << "nvMolKit SubstructMatch (" << algoStr << ", " << threadingStr << "), targets=" << targetMols.size()
             << ", queries=" << queryMols.size() << ": " << timingOut.avgMs << " ms (±" << timingOut.stdMs
             << " ms)\n";
@@ -526,10 +525,15 @@ int main(int argc, char* argv[]) {
     warmupTargets.push_back(makeMolFromSmiles("CCO"));
     warmupQueries.push_back(makeMolFromSmarts("C"));
 
+    SubstructSearchConfig config;
+    config.batchSize           = batchSize;
+    config.workerThreads       = numRunners;
+    config.preprocessorThreads = numPreprocessors;
+
     int                      warmupMatches;
     SubstructSearchResults   warmupResults;
     BenchUtils::TimingResult warmupTiming;
-    benchNvMolKit(warmupTargets, warmupQueries, algorithm, batchSize, numRunners, numPreprocessors, warmupMatches, warmupResults, warmupTiming);
+    benchNvMolKit(warmupTargets, warmupQueries, algorithm, config, warmupMatches, warmupResults, warmupTiming);
 
     if (doRdkit) {
       BenchUtils::TimingResult rdkitWarmupTiming;
@@ -544,10 +548,15 @@ int main(int argc, char* argv[]) {
   const int benchIterations = doProfile ? 1 : 3;
   const int benchWarmups    = doProfile ? 0 : 1;
 
+  SubstructSearchConfig benchConfig;
+  benchConfig.batchSize           = batchSize;
+  benchConfig.workerThreads       = numRunners;
+  benchConfig.preprocessorThreads = numPreprocessors;
+
   int                      nvmolkitMatches = 0;
   SubstructSearchResults   nvmolkitResults;
   BenchUtils::TimingResult nvmolkitTiming;
-  benchNvMolKit(targetMols, queryMols, algorithm, batchSize, numRunners, numPreprocessors, nvmolkitMatches, nvmolkitResults, nvmolkitTiming, benchIterations, benchWarmups);
+  benchNvMolKit(targetMols, queryMols, algorithm, benchConfig, nvmolkitMatches, nvmolkitResults, nvmolkitTiming, benchIterations, benchWarmups);
   std::cout << "nvMolKit total matches: " << nvmolkitMatches << "\n";
 
   int                      rdkitMatches = 0;

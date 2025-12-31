@@ -214,6 +214,11 @@ target_link_libraries(
                                         substruct_validation test_utils molData
                                         ${RDKit_LIBS})
 
+add_executable(test_substruct_label_integration test_substruct_label_integration.cu)
+target_link_libraries(
+  test_substruct_label_integration PRIVATE substructure_search molecules device
+                                           test_utils molData ${RDKit_LIBS})
+
 
 set(TEST_LIST
     test_butina
@@ -225,6 +230,7 @@ set(TEST_LIST
     test_graph_labeler_recursive
     test_substructure_search
     test_substructure_integration
+    test_substruct_label_integration
     test_bfgs_hessian
     test_openmp_helpers
     test_conformer_checkers

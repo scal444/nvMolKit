@@ -27,6 +27,7 @@
 #include "graph_labeler.cuh"
 #include "molecules_device.cuh"
 #include "substructure_search.cuh"
+#include "substructure_search_internal.cuh"
 
 namespace nvMolKit {
 

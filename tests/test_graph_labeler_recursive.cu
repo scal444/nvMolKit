@@ -28,6 +28,7 @@
 #include "molecules_device.cuh"
 #include "substruct_types.h"
 #include "substructure_search.cuh"
+#include "substructure_search_internal.cuh"
 #include "testutils/substruct_validation.h"
 
 using nvMolKit::addQueryToBatch;
