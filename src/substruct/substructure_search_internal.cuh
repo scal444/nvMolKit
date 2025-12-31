@@ -195,6 +195,21 @@ struct RecursiveScratchBuffers {
   }
 
   /**
+   * @brief Allocate owned pinned buffers with given capacity.
+   * For tests and standalone usage.
+   */
+  void allocateBuffers(int capacity) {
+    for (int i = 0; i < 2; ++i) {
+      if (ownsBuffer_[i] && patternsAtDepthHost[i] != nullptr) {
+        cudaFreeHost(patternsAtDepthHost[i]);
+      }
+      cudaCheckError(cudaMallocHost(&patternsAtDepthHost[i], capacity * sizeof(BatchedPatternEntry)));
+      patternsAtDepthHostCapacity[i] = capacity;
+      ownsBuffer_[i]                 = true;
+    }
+  }
+
+  /**
    * @brief Get the current buffer index and advance to next for double-buffering.
    */
   int acquireBufferIndex() {
@@ -222,19 +237,17 @@ struct RecursiveScratchBuffers {
   }
 
   /**
-   * @brief Ensure pinned buffer capacity for a specific buffer index.
+   * @brief Check that pinned buffer has sufficient capacity.
+   * @throws std::runtime_error if capacity is exceeded or buffer not initialized
    */
   void ensureCapacity(int bufferIdx, int requiredCapacity) {
     if (patternsAtDepthHostCapacity[bufferIdx] >= requiredCapacity) {
       return;
     }
-    if (ownsBuffer_[bufferIdx] && patternsAtDepthHost[bufferIdx] != nullptr) {
-      cudaFreeHost(patternsAtDepthHost[bufferIdx]);
-    }
-    const int newCapacity = static_cast<int>(requiredCapacity * 1.5);
-    cudaCheckError(cudaMallocHost(&patternsAtDepthHost[bufferIdx], newCapacity * sizeof(BatchedPatternEntry)));
-    patternsAtDepthHostCapacity[bufferIdx] = newCapacity;
-    ownsBuffer_[bufferIdx]                 = true;
+    throw std::runtime_error(
+        "Recursive SMARTS pattern count (" + std::to_string(requiredCapacity) +
+        ") exceeds pre-allocated capacity (" + std::to_string(patternsAtDepthHostCapacity[bufferIdx]) +
+        "). Ensure buffers are properly initialized.");
   }
 
  private:

@@ -15,6 +15,8 @@
 
 #include "pinned_buffer_pool.h"
 
+#include "nvtx.h"
+
 namespace nvMolKit {
 
 namespace {
@@ -25,77 +27,128 @@ size_t alignUp(size_t offset, size_t alignment) {
 }
 }  // namespace
 
-void ConsolidatedPinnedBuffer::allocate(int maxBatchSize, int maxMatchIndicesEstimate, int maxPatternsPerDepth) {
-  if (basePtr != nullptr) {
-    cudaFreeHost(basePtr);
-    basePtr = nullptr;
-  }
+namespace {
 
+struct BufferLayout {
+  size_t totalSize;
+  size_t pairIndicesOff;
+  size_t batchMatchStartsOff;
+  size_t matchCountsOff;
+  size_t reportedCountsOff;
+  size_t matchIndicesOff;
+  std::array<size_t, kMaxRecursionDepth + 1> globalPairOff;
+  std::array<size_t, kMaxRecursionDepth + 1> batchLocalOff;
+  std::array<size_t, 2> patternsOff;
+};
+
+BufferLayout computeLayout(int maxBatchSize, int maxMatchIndicesEstimate, int maxPatternsPerDepth) {
+  BufferLayout layout{};
   size_t offset = 0;
 
-  // pairIndices: int[maxBatchSize]
-  size_t pairIndicesOff = offset;
+  layout.pairIndicesOff = offset;
   offset += sizeof(int) * maxBatchSize;
   offset = alignUp(offset, kAlignment);
 
-  // batchPairMatchStarts: int[maxBatchSize + 1]
-  size_t batchMatchStartsOff = offset;
+  layout.batchMatchStartsOff = offset;
   offset += sizeof(int) * (maxBatchSize + 1);
   offset = alignUp(offset, kAlignment);
 
-  // matchCounts: int[maxBatchSize]
-  size_t matchCountsOff = offset;
+  layout.matchCountsOff = offset;
   offset += sizeof(int) * maxBatchSize;
   offset = alignUp(offset, kAlignment);
 
-  // reportedCounts: int[maxBatchSize]
-  size_t reportedCountsOff = offset;
+  layout.reportedCountsOff = offset;
   offset += sizeof(int) * maxBatchSize;
   offset = alignUp(offset, kAlignment);
 
-  // matchIndices: int16_t[maxMatchIndicesEstimate]
-  size_t matchIndicesOff = offset;
+  layout.matchIndicesOff = offset;
   offset += sizeof(int16_t) * maxMatchIndicesEstimate;
   offset = alignUp(offset, kAlignment);
 
-  // matchGlobalPairIndicesHost and matchBatchLocalIndicesHost: (kMaxRecursionDepth + 1) arrays each
-  std::array<size_t, kMaxRecursionDepth + 1> globalPairOff = {};
-  std::array<size_t, kMaxRecursionDepth + 1> batchLocalOff = {};
   for (int i = 0; i <= kMaxRecursionDepth; ++i) {
-    globalPairOff[i] = offset;
+    layout.globalPairOff[i] = offset;
     offset += sizeof(int) * maxBatchSize;
     offset = alignUp(offset, kAlignment);
 
-    batchLocalOff[i] = offset;
+    layout.batchLocalOff[i] = offset;
     offset += sizeof(int) * maxBatchSize;
     offset = alignUp(offset, kAlignment);
   }
 
-  // patternsAtDepthHost: 2 x BatchedPatternEntry[maxPatternsPerDepth] (double-buffered)
-  std::array<size_t, 2> patternsOff = {};
   for (int i = 0; i < 2; ++i) {
-    patternsOff[i] = offset;
+    layout.patternsOff[i] = offset;
     offset += sizeof(BatchedPatternEntry) * maxPatternsPerDepth;
     offset = alignUp(offset, kAlignment);
   }
 
-  totalSize = offset;
-  cudaCheckError(cudaMallocHost(&basePtr, totalSize));
+  layout.totalSize = offset;
+  return layout;
+}
 
-  // Assign pointers
-  pairIndices          = reinterpret_cast<int*>(basePtr + pairIndicesOff);
-  batchPairMatchStarts = reinterpret_cast<int*>(basePtr + batchMatchStartsOff);
-  matchCounts          = reinterpret_cast<int*>(basePtr + matchCountsOff);
-  reportedCounts       = reinterpret_cast<int*>(basePtr + reportedCountsOff);
-  matchIndices         = reinterpret_cast<int16_t*>(basePtr + matchIndicesOff);
+}  // namespace
+
+size_t ConsolidatedPinnedBuffer::computeSize(int maxBatchSize, int maxMatchIndicesEstimate, int maxPatternsPerDepth) {
+  return computeLayout(maxBatchSize, maxMatchIndicesEstimate, maxPatternsPerDepth).totalSize;
+}
+
+void ConsolidatedPinnedBuffer::assignExternal(char* externalPtr, int maxBatchSize, int maxMatchIndicesEstimate, int maxPatternsPerDepth) {
+  if (basePtr != nullptr && ownsMemory_) {
+    cudaFreeHost(basePtr);
+  }
+  
+  const auto layout = computeLayout(maxBatchSize, maxMatchIndicesEstimate, maxPatternsPerDepth);
+  
+  basePtr = externalPtr;
+  totalSize = layout.totalSize;
+  ownsMemory_ = false;
+  
+  pairIndices          = reinterpret_cast<int*>(basePtr + layout.pairIndicesOff);
+  batchPairMatchStarts = reinterpret_cast<int*>(basePtr + layout.batchMatchStartsOff);
+  matchCounts          = reinterpret_cast<int*>(basePtr + layout.matchCountsOff);
+  reportedCounts       = reinterpret_cast<int*>(basePtr + layout.reportedCountsOff);
+  matchIndices         = reinterpret_cast<int16_t*>(basePtr + layout.matchIndicesOff);
 
   for (int i = 0; i <= kMaxRecursionDepth; ++i) {
-    matchGlobalPairIndicesHost[i] = reinterpret_cast<int*>(basePtr + globalPairOff[i]);
-    matchBatchLocalIndicesHost[i] = reinterpret_cast<int*>(basePtr + batchLocalOff[i]);
+    matchGlobalPairIndicesHost[i] = reinterpret_cast<int*>(basePtr + layout.globalPairOff[i]);
+    matchBatchLocalIndicesHost[i] = reinterpret_cast<int*>(basePtr + layout.batchLocalOff[i]);
   }
 
   for (int i = 0; i < 2; ++i) {
-    patternsAtDepthHost[i] = reinterpret_cast<BatchedPatternEntry*>(basePtr + patternsOff[i]);
+    patternsAtDepthHost[i] = reinterpret_cast<BatchedPatternEntry*>(basePtr + layout.patternsOff[i]);
+  }
+
+  pairIndicesCapacity  = maxBatchSize;
+  matchIndicesCapacity = maxMatchIndicesEstimate;
+  perDepthCapacity     = maxBatchSize;
+  patternsCapacity     = maxPatternsPerDepth;
+}
+
+void ConsolidatedPinnedBuffer::allocate(int maxBatchSize, int maxMatchIndicesEstimate, int maxPatternsPerDepth) {
+  if (basePtr != nullptr && ownsMemory_) {
+    cudaFreeHost(basePtr);
+    basePtr = nullptr;
+  }
+
+  const auto layout = computeLayout(maxBatchSize, maxMatchIndicesEstimate, maxPatternsPerDepth);
+
+  totalSize = layout.totalSize;
+  ownsMemory_ = true;
+  cudaCheckError(cudaMallocHost(&basePtr, totalSize));
+
+  // Assign pointers
+  pairIndices          = reinterpret_cast<int*>(basePtr + layout.pairIndicesOff);
+  batchPairMatchStarts = reinterpret_cast<int*>(basePtr + layout.batchMatchStartsOff);
+  matchCounts          = reinterpret_cast<int*>(basePtr + layout.matchCountsOff);
+  reportedCounts       = reinterpret_cast<int*>(basePtr + layout.reportedCountsOff);
+  matchIndices         = reinterpret_cast<int16_t*>(basePtr + layout.matchIndicesOff);
+
+  for (int i = 0; i <= kMaxRecursionDepth; ++i) {
+    matchGlobalPairIndicesHost[i] = reinterpret_cast<int*>(basePtr + layout.globalPairOff[i]);
+    matchBatchLocalIndicesHost[i] = reinterpret_cast<int*>(basePtr + layout.batchLocalOff[i]);
+  }
+
+  for (int i = 0; i < 2; ++i) {
+    patternsAtDepthHost[i] = reinterpret_cast<BatchedPatternEntry*>(basePtr + layout.patternsOff[i]);
   }
 
   // Store capacities
@@ -127,8 +180,9 @@ AsyncResourceCleaner::~AsyncResourceCleaner() {
 }
 
 void AsyncResourceCleaner::cleanupThreadFunc() {
+  ScopedNvtxRange threadRange("AsyncResourceCleaner thread");
   while (true) {
-    std::function<void()>                         task;
+    std::function<void()>                     task;
     std::unique_ptr<ConsolidatedPinnedBuffer> buffer;
 
     {
@@ -151,12 +205,13 @@ void AsyncResourceCleaner::cleanupThreadFunc() {
     }
 
     if (task) {
+      ScopedNvtxRange taskRange("Cleanup task");
       task();
       --pendingCount_;
     }
 
-    // buffer destructor runs here, freeing pinned memory
     if (buffer) {
+      ScopedNvtxRange bufferRange("Free pinned buffer");
       buffer.reset();
       --pendingCount_;
     }

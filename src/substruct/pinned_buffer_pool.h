@@ -100,18 +100,21 @@ struct ConsolidatedPinnedBuffer {
         pairIndicesCapacity(other.pairIndicesCapacity),
         matchIndicesCapacity(other.matchIndicesCapacity),
         perDepthCapacity(other.perDepthCapacity),
-        patternsCapacity(other.patternsCapacity) {
+        patternsCapacity(other.patternsCapacity),
+        ownsMemory_(other.ownsMemory_) {
     other.basePtr   = nullptr;
     other.totalSize = 0;
+    other.ownsMemory_ = true;
   }
 
   ConsolidatedPinnedBuffer& operator=(ConsolidatedPinnedBuffer&& other) noexcept {
     if (this != &other) {
-      if (basePtr != nullptr) {
+      if (basePtr != nullptr && ownsMemory_) {
         cudaFreeHost(basePtr);
       }
       basePtr                    = other.basePtr;
       totalSize                  = other.totalSize;
+      ownsMemory_                = other.ownsMemory_;
       pairIndices                = other.pairIndices;
       batchPairMatchStarts       = other.batchPairMatchStarts;
       matchCounts                = other.matchCounts;
@@ -127,15 +130,21 @@ struct ConsolidatedPinnedBuffer {
 
       other.basePtr   = nullptr;
       other.totalSize = 0;
+      other.ownsMemory_ = true;
     }
     return *this;
   }
 
   ~ConsolidatedPinnedBuffer() {
-    if (basePtr != nullptr) {
+    if (basePtr != nullptr && ownsMemory_) {
       cudaFreeHost(basePtr);
     }
   }
+
+  /**
+   * @brief Compute the size needed for one consolidated buffer.
+   */
+  static size_t computeSize(int maxBatchSize, int maxMatchIndicesEstimate, int maxPatternsPerDepth);
 
   /**
    * @brief Allocate consolidated pinned memory and partition into regions.
@@ -146,7 +155,19 @@ struct ConsolidatedPinnedBuffer {
    */
   void allocate(int maxBatchSize, int maxMatchIndicesEstimate, int maxPatternsPerDepth);
 
+  /**
+   * @brief Assign from externally-allocated memory (no ownership).
+   *
+   * The caller is responsible for freeing the memory. This buffer will not
+   * free it on destruction.
+   */
+  void assignExternal(char* externalPtr, int maxBatchSize, int maxMatchIndicesEstimate, int maxPatternsPerDepth);
+
   [[nodiscard]] bool isAllocated() const { return basePtr != nullptr; }
+  [[nodiscard]] bool ownsMemory() const { return ownsMemory_; }
+
+ private:
+  bool ownsMemory_ = true;
 };
 
 /**

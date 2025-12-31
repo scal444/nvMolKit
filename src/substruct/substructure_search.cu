@@ -27,6 +27,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #include "cuda_error_check.h"
@@ -600,10 +601,13 @@ struct BatchSlot {
   
   BatchResultsDevice     deviceResults;
   AsyncDeviceVector<int> pairIndicesDev;
+  
+  int deviceId = 0;  ///< GPU device ID this slot is assigned to
 
-  explicit BatchSlot(int workerIdx) 
+  BatchSlot(int workerIdx, int gpuDeviceId) 
       : computeStream(("worker" + std::to_string(workerIdx) + "_mainStream").c_str()),
-        recursiveScratch(nullptr) {
+        recursiveScratch(nullptr),
+        deviceId(gpuDeviceId) {
     twoStreamCtx = std::make_unique<TwoStreamPipelineContext>(workerIdx);
   }
 
@@ -1419,6 +1423,7 @@ constexpr int kMaxSlotsPerRunner = 8;
  * queued while waiting for D2H copies.
  *
  * @param slotsPerRunner Number of slots assigned to this runner (2-8)
+ * @param deviceId GPU device ID to use for this worker
  */
 void runnerWorkerInline(int                        workerIdx,
                         const ThreadWorkerContext& ctx,
@@ -1433,12 +1438,14 @@ void runnerWorkerInline(int                        workerIdx,
                         std::atomic<int>&          nextBatchIdx,
                         int                        totalNumBatches,
                         int                        effectiveBatchSize,
-                        BatchSlot* const*          localSlots,
-                        int                        slotsPerRunner,
+                        int                        deviceId,
+                        std::vector<BatchSlot*>    localSlots,
                         std::exception_ptr&        exceptionPtr) {
   try {
-    ScopedNvtxRange workerRange("runnerWorkerInline " + std::to_string(workerIdx));
+    ScopedNvtxRange workerRange("runnerWorkerInline " + std::to_string(workerIdx) + " GPU" + std::to_string(deviceId));
+    const WithDevice setDevice(deviceId);
 
+    const int slotsPerRunner = static_cast<int>(localSlots.size());
     const int numPairs = ctx.numTargets * ctx.numQueries;
 
     std::array<BatchSlot*, kMaxSlotsPerRunner> pendingSlots{};
@@ -1509,6 +1516,8 @@ void runnerWorkerInline(int                        workerIdx,
  *
  * Dequeues preprocessed slots from the queue, launches GPU work, and
  * accumulates results.
+ *
+ * @param deviceId GPU device ID to use for this worker
  */
 void runnerWorkerQueued(int                        workerIdx,
                         const ThreadWorkerContext& ctx,
@@ -1522,9 +1531,11 @@ void runnerWorkerQueued(int                        workerIdx,
                         BatchSlotPool&             slotPool,
                         PreparedBatchQueue&        readyQueue,
                         std::atomic<bool>&         shutdownFlag,
+                        int                        deviceId,
                         std::exception_ptr&        exceptionPtr) {
   try {
-    ScopedNvtxRange workerRange("runnerWorkerQueued " + std::to_string(workerIdx));
+    const WithDevice setDevice(deviceId);
+    ScopedNvtxRange workerRange("runnerWorkerQueued " + std::to_string(workerIdx) + " GPU" + std::to_string(deviceId));
 
     BatchSlot* pendingSlot = nullptr;
 
@@ -1662,12 +1673,30 @@ void getSubstructMatchesImpl(MoleculesDevice&             targetsDevice,
     throw std::invalid_argument("Target and query batches must not be empty");
   }
 
+  // Determine GPU list: empty gpuIds = current device only
+  std::vector<int> gpuIds = config.gpuIds;
+  int currentDevice = 0;
+  cudaCheckError(cudaGetDevice(&currentDevice));
+  if (gpuIds.empty()) {
+    gpuIds.push_back(currentDevice);
+  }
+  const int numGpus = static_cast<int>(gpuIds.size());
+
   const int numPairs           = numTargets * numQueries;
   const int effectiveBatchSize = std::min(batchSize, numPairs);
   const int totalNumBatches    = (numPairs + effectiveBatchSize - 1) / effectiveBatchSize;
 
-  const int numRunners       = std::min(std::max(1, requestedNumRunners), totalNumBatches);
+  // Total runners = workerThreads (per GPU) * numGPUs
+  const int runnersPerGpu  = std::max(1, requestedNumRunners);
+  const int totalRunners   = std::min(runnersPerGpu * numGpus, totalNumBatches);
+  const int numRunners     = totalRunners;
   const int numPreprocessors = std::min(std::max(0, requestedNumPreprocessors), totalNumBatches);
+
+  // Multi-GPU with preprocessor threads is not yet supported
+  if (numGpus > 1 && numPreprocessors > 0) {
+    throw std::invalid_argument("Multi-GPU mode with preprocessor threads is not supported. "
+                                "Set preprocessorThreads=0 or use a single GPU.");
+  }
 
   ScopedNvtxRange ctxRange("CPU: ThreadWorkerContext construction");
   ThreadWorkerContext ctx;
@@ -1733,46 +1762,54 @@ void getSubstructMatchesImpl(MoleculesDevice&             targetsDevice,
   ScopedCudaEvent upstreamReadyEvent;
   cudaCheckError(cudaEventRecord(upstreamReadyEvent.event(), stream));
 
-  ScopedNvtxRange allocRange("CPU: Pre-allocate BatchSlots");
   const int maxMatchIndicesPerBatch = effectiveBatchSize * ctx.maxTargetAtoms * maxQueryAtoms;
 
+  // Calculate max patterns that could be accumulated at any depth level across all queries
+  // (patterns from multiple queries can accumulate when processing a batch)
   int maxPatternsPerDepth = 256;
-  for (size_t q = 0; q < queriesHost.recursivePatterns.size(); ++q) {
-    const auto& recInfo = queriesHost.recursivePatterns[q];
-    maxPatternsPerDepth = std::max(maxPatternsPerDepth, static_cast<int>(recInfo.patterns.size()));
+  for (int d = 0; d <= kMaxRecursionDepth; ++d) {
+    int patternsAtThisDepth = 0;
+    for (size_t q = 0; q < leafSubpatterns.perQueryPatterns.size(); ++q) {
+      patternsAtThisDepth += static_cast<int>(leafSubpatterns.perQueryPatterns[q][d].size());
+    }
+    maxPatternsPerDepth = std::max(maxPatternsPerDepth, patternsAtThisDepth);
   }
 
-  // Slot count:
-  // - Inline mode: runners need slotsPerRunner each for N-buffering with deferred accumulation
-  // - Separated mode: runners hold 2 slots each (current + pending), PPs hold 1 each (preparing),
-  //   plus buffer slots to keep the queue/pool from starving
   if (config.slotsPerRunner < 1 || config.slotsPerRunner > kMaxSlotsPerRunner) {
     throw std::invalid_argument("slotsPerRunner must be between 1 and " + 
                                 std::to_string(kMaxSlotsPerRunner));
   }
   const int slotsPerRunner = config.slotsPerRunner;
-  const int numSlots = (numPreprocessors > 0) 
-                     ? (numRunners * 2 + numPreprocessors + std::max(2, numRunners))
-                     : (numRunners * slotsPerRunner);
+
+  // Pre-allocate slots only for queued mode (single GPU, slots shared via pool)
+  // For inline mode, slots are allocated inside each worker thread on the correct GPU
   std::vector<std::unique_ptr<ConsolidatedPinnedBuffer>> pinnedBuffers;
   std::vector<std::unique_ptr<BatchSlot>> slots;
   std::vector<BatchSlot*> slotPtrs;
-  pinnedBuffers.reserve(numSlots);
-  slots.reserve(numSlots);
-  slotPtrs.reserve(numSlots);
-  for (int i = 0; i < numSlots; ++i) {
-    auto buf = std::make_unique<ConsolidatedPinnedBuffer>();
-    buf->allocate(effectiveBatchSize, maxMatchIndicesPerBatch, maxPatternsPerDepth);
+  
+  if (numPreprocessors > 0) {
+    ScopedNvtxRange allocRange("CPU: Pre-allocate BatchSlots (queued mode)");
+    const int numSlots = numRunners * 2 + numPreprocessors + std::max(2, numRunners);
+    const int deviceId = gpuIds[0];  // Single GPU for queued mode
+    const WithDevice setDevice(deviceId);
     
-    auto slot = std::make_unique<BatchSlot>(i);
-    slot->bindPinnedBuffer(*buf);
-    slot->initializeForStream();
+    pinnedBuffers.reserve(numSlots);
+    slots.reserve(numSlots);
+    slotPtrs.reserve(numSlots);
     
-    slotPtrs.push_back(slot.get());
-    pinnedBuffers.push_back(std::move(buf));
-    slots.push_back(std::move(slot));
+    for (int i = 0; i < numSlots; ++i) {
+      auto buf = std::make_unique<ConsolidatedPinnedBuffer>();
+      buf->allocate(effectiveBatchSize, maxMatchIndicesPerBatch, maxPatternsPerDepth);
+      
+      auto slot = std::make_unique<BatchSlot>(i, deviceId);
+      slot->bindPinnedBuffer(*buf);
+      slot->initializeForStream();
+      
+      slotPtrs.push_back(slot.get());
+      pinnedBuffers.push_back(std::move(buf));
+      slots.push_back(std::move(slot));
+    }
   }
-  allocRange.pop();
 
   ScopedNvtxRange threadRange("Multithreaded batch processing");
   std::vector<std::thread> workers;
@@ -1807,6 +1844,8 @@ void getSubstructMatchesImpl(MoleculesDevice&             targetsDevice,
                            std::ref(exceptions[t]));
     }
 
+    // Queued mode only supports single GPU (multi-GPU with preprocessors throws above)
+    const int deviceId = gpuIds[0];
     for (int t = 0; t < numRunners; ++t) {
       workers.emplace_back(runnerWorkerQueued,
                            t,
@@ -1821,6 +1860,7 @@ void getSubstructMatchesImpl(MoleculesDevice&             targetsDevice,
                            std::ref(slotPool),
                            std::ref(*readyQueue),
                            std::ref(shutdownFlag),
+                           deviceId,
                            std::ref(exceptions[numPreprocessors + t]));
     }
     launchRange.pop();
@@ -1832,36 +1872,162 @@ void getSubstructMatchesImpl(MoleculesDevice&             targetsDevice,
     slotPool.shutdown();
     readyQueue->shutdown();
     joinRange.pop();
+    
+    // Schedule async cleanup of queued mode's pinned buffers
+    for (auto& buf : pinnedBuffers) {
+      AsyncResourceCleaner::instance().scheduleBufferCleanup(std::move(buf));
+    }
   } else {
-    ScopedNvtxRange launchRange("CPU: Launch worker threads (inline mode)");
+    // Inline mode: main thread allocates all pinned buffers, then coordinators set up GPUs
+    
+    std::vector<int> workersPerGpu(numGpus, numRunners / numGpus);
+    for (int i = 0; i < numRunners % numGpus; ++i) {
+      workersPerGpu[i]++;
+    }
 
-    for (int t = 0; t < numRunners; ++t) {
-      BatchSlot* const* localSlots = &slotPtrs[t * slotsPerRunner];
-      workers.emplace_back(runnerWorkerInline,
-                           t,
-                           std::cref(ctx),
-                           std::ref(targetsDevice),
-                           std::cref(queriesDevice),
-                           std::cref(queriesHost),
-                           std::cref(leafSubpatterns),
-                           std::ref(results),
-                           std::ref(resultsMutex),
-                           algorithm,
-                           upstreamReadyEvent.event(),
-                           std::ref(nextBatchIdx),
-                           totalNumBatches,
-                           effectiveBatchSize,
-                           localSlots,
-                           slotsPerRunner,
-                           std::ref(exceptions[t]));
+    // Compute total pinned memory needed and check against system RAM
+    const int totalSlots = numRunners * slotsPerRunner;
+    const size_t perSlotSize = ConsolidatedPinnedBuffer::computeSize(
+        effectiveBatchSize, maxMatchIndicesPerBatch, maxPatternsPerDepth);
+    const size_t totalPinnedBytes = static_cast<size_t>(totalSlots) * perSlotSize;
+    
+    const long pages = sysconf(_SC_PHYS_PAGES);
+    const long pageSize = sysconf(_SC_PAGE_SIZE);
+    const size_t systemRam = static_cast<size_t>(pages) * static_cast<size_t>(pageSize);
+    const size_t maxAllowed = systemRam / 4;
+    
+    if (totalPinnedBytes > maxAllowed) {
+      throw std::runtime_error(
+          "Substructure search would require " + std::to_string(totalPinnedBytes / (1024 * 1024)) +
+          " MB of pinned memory, exceeding 1/4 of system RAM (" + 
+          std::to_string(maxAllowed / (1024 * 1024)) + " MB). "
+          "Reduce workerThreads, slotsPerRunner, or batchSize.");
+    }
+
+    // Single consolidated allocation for all slots
+    ScopedNvtxRange allocRange("CPU: Allocate all pinned buffers");
+    char* megaBuffer = nullptr;
+    cudaCheckError(cudaMallocHost(&megaBuffer, totalPinnedBytes));
+    
+    std::vector<ConsolidatedPinnedBuffer> pinnedBuffers(totalSlots);
+    for (int i = 0; i < totalSlots; ++i) {
+      char* slotPtr = megaBuffer + i * perSlotSize;
+      pinnedBuffers[i].assignExternal(slotPtr, effectiveBatchSize, maxMatchIndicesPerBatch, maxPatternsPerDepth);
+    }
+    allocRange.pop();
+
+    ScopedNvtxRange launchRange("CPU: Launch GPU coordinators (inline mode)");
+    std::vector<std::thread> gpuThreads;
+    gpuThreads.reserve(numGpus);
+
+    int slotOffset = 0;
+    int workerIdOffset = 0;
+    for (int g = 0; g < numGpus; ++g) {
+      const int numWorkersThisGpu = workersPerGpu[g];
+      if (numWorkersThisGpu == 0) {
+        continue;
+      }
+      
+      const int deviceId = gpuIds[g];
+      const int startWorkerIdx = workerIdOffset;
+      const int startSlotIdx = slotOffset;
+      const int numSlotsThisGpu = numWorkersThisGpu * slotsPerRunner;
+      workerIdOffset += numWorkersThisGpu;
+      slotOffset += numSlotsThisGpu;
+      
+      // Collect raw pointers to this GPU's pinned buffers
+      std::vector<ConsolidatedPinnedBuffer*> gpuBufferPtrs;
+      gpuBufferPtrs.reserve(numSlotsThisGpu);
+      for (int i = 0; i < numSlotsThisGpu; ++i) {
+        gpuBufferPtrs.push_back(&pinnedBuffers[startSlotIdx + i]);
+      }
+      
+      gpuThreads.emplace_back([=, &ctx, &targetsHost, &queriesHost, &targetsDevice, 
+                               &queriesDevice, &leafSubpatterns, &results, &resultsMutex,
+                               &nextBatchIdx, &exceptions, upstreamEvent = upstreamReadyEvent.event(),
+                               bufferPtrs = std::move(gpuBufferPtrs)]() {
+        try {
+          ScopedNvtxRange coordRange("GPU" + std::to_string(deviceId) + " coordinator setup");
+          const WithDevice setDevice(deviceId);
+          
+          std::unique_ptr<MoleculesDevice> localTargets;
+          std::unique_ptr<MoleculesDevice> localQueries;
+          std::unique_ptr<LeafSubpatterns> localLeafPatterns;
+          
+          MoleculesDevice* targetsPtr = &targetsDevice;
+          const MoleculesDevice* queriesPtr = &queriesDevice;
+          const LeafSubpatterns* leafPtr = &leafSubpatterns;
+          
+          if (deviceId != currentDevice) {
+            ScopedNvtxRange copyRange("GPU" + std::to_string(deviceId) + " copy device data");
+            localTargets = std::make_unique<MoleculesDevice>();
+            localTargets->copyFromHost(targetsHost);
+            localQueries = std::make_unique<MoleculesDevice>();
+            localQueries->copyFromHost(queriesHost);
+            localLeafPatterns = std::make_unique<LeafSubpatterns>();
+            localLeafPatterns->buildAllPatterns(queriesHost);
+            localLeafPatterns->syncToDevice(nullptr);
+            
+            targetsPtr = localTargets.get();
+            queriesPtr = localQueries.get();
+            leafPtr = localLeafPatterns.get();
+          }
+          
+          ScopedNvtxRange slotsRange("GPU" + std::to_string(deviceId) + " create BatchSlots");
+          std::vector<std::unique_ptr<BatchSlot>> slots;
+          slots.reserve(bufferPtrs.size());
+          
+          for (size_t i = 0; i < bufferPtrs.size(); ++i) {
+            auto slot = std::make_unique<BatchSlot>(startWorkerIdx * slotsPerRunner + static_cast<int>(i), deviceId);
+            slot->bindPinnedBuffer(*bufferPtrs[i]);
+            slot->initializeForStream();
+            slots.push_back(std::move(slot));
+          }
+          slotsRange.pop();
+          
+          coordRange.pop();
+          
+          std::vector<std::thread> workers;
+          workers.reserve(numWorkersThisGpu);
+          
+          for (int w = 0; w < numWorkersThisGpu; ++w) {
+            const int globalIdx = startWorkerIdx + w;
+            std::vector<BatchSlot*> workerSlots;
+            workerSlots.reserve(slotsPerRunner);
+            for (int s = 0; s < slotsPerRunner; ++s) {
+              workerSlots.push_back(slots[w * slotsPerRunner + s].get());
+            }
+            
+            workers.emplace_back(runnerWorkerInline,
+                                 globalIdx, std::cref(ctx),
+                                 std::ref(*targetsPtr), std::cref(*queriesPtr),
+                                 std::cref(queriesHost), std::cref(*leafPtr),
+                                 std::ref(results), std::ref(resultsMutex),
+                                 algorithm, upstreamEvent,
+                                 std::ref(nextBatchIdx), totalNumBatches,
+                                 effectiveBatchSize, deviceId,
+                                 std::move(workerSlots),
+                                 std::ref(exceptions[globalIdx]));
+          }
+          
+          for (auto& w : workers) {
+            w.join();
+          }
+        } catch (...) {
+          exceptions[startWorkerIdx] = std::current_exception();
+        }
+      });
     }
     launchRange.pop();
 
-    ScopedNvtxRange joinRange("CPU: Join worker threads");
-    for (auto& worker : workers) {
-      worker.join();
+    ScopedNvtxRange joinRange("CPU: Join GPU coordinators");
+    for (auto& t : gpuThreads) {
+      t.join();
     }
     joinRange.pop();
+    
+    // Free the single mega-buffer (ConsolidatedPinnedBuffers don't own their memory)
+    cudaFreeHost(megaBuffer);
   }
 
   threadRange.pop();
@@ -1873,10 +2039,6 @@ void getSubstructMatchesImpl(MoleculesDevice&             targetsDevice,
   }
 
   cudaCheckError(cudaGetLastError());
-
-  for (auto& buf : pinnedBuffers) {
-    AsyncResourceCleaner::instance().scheduleBufferCleanup(std::move(buf));
-  }
 }
 
 }  // namespace

@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <cublas_v2.h>
 #include <getopt.h>
 #include <GraphMol/ROMol.h>
 #include <GraphMol/SmilesParse/SmilesParse.h>
@@ -35,6 +36,7 @@
 
 using nvMolKit::algorithmName;
 using nvMolKit::checkReturnCode;
+using nvMolKit::countCudaDevices;
 using nvMolKit::getRDKitSubstructMatches;
 using nvMolKit::getSubstructMatches;
 using nvMolKit::printValidationResult;
@@ -214,6 +216,35 @@ void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
             << " ms)\n";
 }
 
+/**
+ * @brief Warm up GPU(s) with a simple memcpy and cuBLAS operation.
+ *
+ * This initializes CUDA contexts and wakes GPUs from power-saving mode.
+ */
+void warmupGpus(const std::vector<int>& gpuIds) {
+  std::vector<int> devices = gpuIds.empty() ? std::vector<int>{0} : gpuIds;
+
+  constexpr int N = 256;
+  std::vector<float> hostData(N, 1.0f);
+
+  for (int gpuId : devices) {
+    cudaCheckError(cudaSetDevice(gpuId));
+
+    float* devData = nullptr;
+    cudaCheckError(cudaMalloc(&devData, N * sizeof(float)));
+    cudaCheckError(cudaMemcpy(devData, hostData.data(), N * sizeof(float), cudaMemcpyHostToDevice));
+
+    cublasHandle_t handle;
+    cublasCreate(&handle);
+    float result = 0.0f;
+    cublasSnrm2(handle, N, devData, 1, &result);
+    cublasDestroy(handle);
+
+    cudaCheckError(cudaFree(devData));
+    cudaCheckError(cudaDeviceSynchronize());
+  }
+}
+
 bool parseBoolArg(const std::string& arg) {
   std::string s = arg;
   std::transform(s.begin(), s.end(), s.begin(), ::tolower);
@@ -246,9 +277,10 @@ void printHelp(const char* progName) {
     << "  -a, --algorithm <str>     Algorithm: vf2, gsi, or warpunified [default: warpunified]\n";
   std::cout << "  -b, --batch_size <int>    GPU batch size for matching [default: 1024]\n";
   std::cout << "  -c, --cap <int>           Max atoms per molecule (filter larger) [default: 128]\n";
-  std::cout << "  -p, --num_runners <int>   Number of GPU runner threads [default: 2]\n";
+  std::cout << "  -p, --num_runners <int>   Number of GPU runner threads per GPU [default: 2]\n";
   std::cout << "  -e, --num_preproc <int>   Number of CPU preprocessor threads (0 = inline) [default: 0]\n";
   std::cout << "  -S, --slots <int>         Slots per runner for inline mode (1-8) [default: 3]\n";
+  std::cout << "  -G, --multi_gpu <bool>    Use all available GPUs [default: false]\n";
   std::cout << "  -s, --presort <bool>      Sort molecules by size for GPU efficiency [default: true]\n";
   std::cout << "  -r, --do_rdkit <bool>     Run RDKit benchmark comparison [default: true]\n";
   std::cout << "  -w, --do_warmup <bool>    Run warmup before benchmarking [default: true]\n";
@@ -265,6 +297,7 @@ void printHelp(const char* progName) {
             << " --targets targets.smi --queries queries.smi --num_targets 1000 --algorithm gsi\n";
   std::cout << "  " << progName << " -t targets.smi -q queries.smi -n 500 -m 20 -b 512 -c 64 -v true -d 2\n";
   std::cout << "  " << progName << " -t targets.smi -q queries.smi -p 2 -e 4  # 2 runners, 4 preprocessors\n";
+  std::cout << "  " << progName << " -t targets.smi -q queries.smi -G true    # Use all GPUs\n";
 }
 
 }  // namespace
@@ -280,6 +313,7 @@ int main(int argc, char* argv[]) {
   int                numRunners       = 2;
   int                numPreprocessors = 0;
   int                slotsPerRunner   = 3;
+  bool               useMultiGpu      = false;
   bool               doPresort        = true;
   bool               doRdkit          = true;
   bool               doWarmup         = true;
@@ -298,6 +332,7 @@ int main(int argc, char* argv[]) {
     {"num_runners", required_argument, 0, 'p'},
     {"num_preproc", required_argument, 0, 'e'},
     {      "slots", required_argument, 0, 'S'},
+    {  "multi_gpu", required_argument, 0, 'G'},
     {    "presort", required_argument, 0, 's'},
     {   "do_rdkit", required_argument, 0, 'r'},
     {  "do_warmup", required_argument, 0, 'w'},
@@ -311,7 +346,7 @@ int main(int argc, char* argv[]) {
   int option_index = 0;
   int c;
 
-  while ((c = getopt_long(argc, argv, "t:q:n:m:a:b:c:p:e:S:s:r:w:v:P:d:h", long_options, &option_index)) != -1) {
+  while ((c = getopt_long(argc, argv, "t:q:n:m:a:b:c:p:e:S:G:s:r:w:v:P:d:h", long_options, &option_index)) != -1) {
     switch (c) {
       case 't':
         targetsPath = optarg;
@@ -411,6 +446,9 @@ int main(int argc, char* argv[]) {
           return 1;
         }
         break;
+      case 'G':
+        useMultiGpu = parseBoolArg(optarg);
+        break;
       case 's':
         doPresort = parseBoolArg(optarg);
         break;
@@ -474,6 +512,14 @@ int main(int argc, char* argv[]) {
     return 1;
   }
 
+  const int numGpus = useMultiGpu ? countCudaDevices() : 1;
+  std::vector<int> gpuIds;
+  if (useMultiGpu) {
+    for (int i = 0; i < numGpus; ++i) {
+      gpuIds.push_back(i);
+    }
+  }
+
   std::cout << "Configuration:\n";
   std::cout << "  Targets file: " << targetsPath << "\n";
   std::cout << "  Queries file: " << queriesPath << "\n";
@@ -482,9 +528,10 @@ int main(int argc, char* argv[]) {
   std::cout << "  Algorithm: " << algorithmName(algorithm) << "\n";
   std::cout << "  Batch size: " << batchSize << "\n";
   std::cout << "  Atom cap: " << maxAtoms << "\n";
-  std::cout << "  Runner threads: " << numRunners << "\n";
+  std::cout << "  Runner threads: " << numRunners << " per GPU\n";
   std::cout << "  Preprocessor threads: " << numPreprocessors << (numPreprocessors == 0 ? " (inline)" : "") << "\n";
   std::cout << "  Slots per runner: " << slotsPerRunner << (numPreprocessors == 0 ? "" : " (ignored in queue mode)") << "\n";
+  std::cout << "  Multi-GPU: " << (useMultiGpu ? "yes" : "no") << " (" << numGpus << " GPU(s))\n";
   std::cout << "  Presort by size: " << (doPresort ? "yes" : "no") << "\n";
   std::cout << "  Run RDKit comparison: " << (doRdkit ? "yes" : "no") << "\n";
   std::cout << "  Run warmup: " << (doWarmup ? "yes" : "no") << "\n";
@@ -523,30 +570,8 @@ int main(int argc, char* argv[]) {
             << " queries for benchmark\n\n";
 
   if (doWarmup) {
-    std::cout << "Warming up...\n";
-
-    std::vector<std::unique_ptr<RDKit::ROMol>> warmupTargets;
-    std::vector<std::unique_ptr<RDKit::ROMol>> warmupQueries;
-    warmupTargets.push_back(makeMolFromSmiles("CCO"));
-    warmupQueries.push_back(makeMolFromSmarts("C"));
-
-    SubstructSearchConfig config;
-    config.batchSize           = batchSize;
-    config.workerThreads       = numRunners;
-    config.preprocessorThreads = numPreprocessors;
-    config.slotsPerRunner      = slotsPerRunner;
-    config.presort             = doPresort;
-
-    int                      warmupMatches;
-    SubstructSearchResults   warmupResults;
-    BenchUtils::TimingResult warmupTiming;
-    benchNvMolKit(warmupTargets, warmupQueries, algorithm, config, warmupMatches, warmupResults, warmupTiming);
-
-    if (doRdkit) {
-      BenchUtils::TimingResult rdkitWarmupTiming;
-      benchRDKit(warmupTargets, warmupQueries, warmupMatches, rdkitWarmupTiming);
-    }
-
+    std::cout << "Warming up GPU(s)...\n";
+    warmupGpus(gpuIds);
     std::cout << "Warmed up\n\n";
   }
 
@@ -561,6 +586,7 @@ int main(int argc, char* argv[]) {
   benchConfig.preprocessorThreads = numPreprocessors;
   benchConfig.slotsPerRunner      = slotsPerRunner;
   benchConfig.presort             = doPresort;
+  benchConfig.gpuIds              = gpuIds;
 
   int                      nvmolkitMatches = 0;
   SubstructSearchResults   nvmolkitResults;
@@ -600,14 +626,14 @@ int main(int argc, char* argv[]) {
   }
 
   std::cout << "\n\nCSV Results:\n";
-  std::cout << "algorithm,num_targets,num_queries,batch_size,num_runners,num_preproc,slots,presort,nvmolkit_time_ms,nvmolkit_std_ms";
+  std::cout << "algorithm,num_targets,num_queries,batch_size,num_runners,num_preproc,slots,num_gpus,presort,nvmolkit_time_ms,nvmolkit_std_ms";
   if (doRdkit) {
     std::cout << ",rdkit_time_ms,rdkit_std_ms";
   }
   std::cout << "\n";
 
   std::cout << algorithmName(algorithm) << "," << targetMols.size() << "," << queryMols.size() << ","
-            << batchSize << "," << numRunners << "," << numPreprocessors << "," << slotsPerRunner << "," << (doPresort ? 1 : 0) << ","
+            << batchSize << "," << numRunners << "," << numPreprocessors << "," << slotsPerRunner << "," << numGpus << "," << (doPresort ? 1 : 0) << ","
             << nvmolkitTiming.avgMs << "," << nvmolkitTiming.stdMs;
   if (doRdkit) {
     std::cout << "," << rdkitTiming.avgMs << "," << rdkitTiming.stdMs;

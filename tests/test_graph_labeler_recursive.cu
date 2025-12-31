@@ -310,6 +310,7 @@ class RecursivePaintTest : public ::testing::Test {
     leafSubpatterns.syncToDevice(stream_.stream());
 
     RecursiveScratchBuffers          scratch(stream_.stream());
+    scratch.allocateBuffers(256);
     std::vector<BatchedPatternEntry> scratchPatternEntries;
     preprocessRecursiveSmartsBatchedWithEvents(targetDevice, queryHost, leafSubpatterns, *results_,
                                                numQueries_, 0, numTargets_ * numQueries_,

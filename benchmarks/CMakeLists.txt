@@ -83,4 +83,5 @@ target_link_libraries(
           substructure_search
           substruct_validation
           device
-          cuda_error_check)
+          cuda_error_check
+          CUDA::cublas)

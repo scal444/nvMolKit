@@ -32,6 +32,8 @@
 #include "testutils/mol_data.h"
 #include "testutils/substruct_validation.h"
 
+using nvMolKit::countCudaDevices;
+
 using nvMolKit::algorithmName;
 using nvMolKit::getSubstructMatches;
 using nvMolKit::printValidationResultDetailed;
@@ -72,6 +74,16 @@ struct ThreadingConfig {
   nvMolKit::SubstructSearchConfig config;
   const char*                     name;
 };
+
+std::vector<int> getAllGpuIds() {
+  const int numDevices = countCudaDevices();
+  std::vector<int> ids;
+  ids.reserve(numDevices);
+  for (int i = 0; i < numDevices; ++i) {
+    ids.push_back(i);
+  }
+  return ids;
+}
 
 const ThreadingConfig kThreadingConfigs[] = {
   {nvMolKit::SubstructSearchConfig{1024, 1, 0}, "SingleThreaded"},
@@ -284,9 +296,11 @@ TEST_P(SubstructureIntegrationTest, ChemblVsSmarts) {
     }
   }
 
+  const int numGpus = threading().config.gpuIds.empty() ? 1 : static_cast<int>(threading().config.gpuIds.size());
   std::cout << "[" << algorithmName(algorithm()) << ", " << threading().name << "] Query statistics:\n"
-            << "  Threading: " << threading().config.workerThreads << " workers, " 
-            << threading().config.preprocessorThreads << " preprocessors\n"
+            << "  Threading: " << threading().config.workerThreads << " workers/GPU, " 
+            << threading().config.preprocessorThreads << " preprocessors, "
+            << numGpus << " GPU(s)\n"
             << "  Total queries: " << numQueries << "\n"
             << "  Total targets: " << numTargets << "\n"
             << "  Grand total matches: " << grandTotalMatches << "\n"
@@ -332,6 +346,91 @@ TEST_P(SubstructureIntegrationTest, ChemblVsSmarts) {
     << ". Count mismatches: " << validationResult.mismatchedPairs
     << ", Mapping mismatches: " << validationResult.wrongMappingPairs
     << " / " << validationResult.totalPairs << " total pairs";
+}
+
+// =============================================================================
+// Multi-GPU Tests
+// =============================================================================
+
+class MultiGpuSubstructTest : public ::testing::Test {
+ protected:
+  ScopedStream stream_;
+  std::string  testDataPath_;
+
+  void SetUp() override {
+    testDataPath_ = getTestDataFolderPath();
+    const int numDevices = countCudaDevices();
+    if (numDevices < 2) {
+      GTEST_SKIP() << "Multi-GPU test requires at least 2 GPUs, found " << numDevices;
+    }
+  }
+};
+
+TEST_F(MultiGpuSubstructTest, MultiGpuMatchesSingleGpu) {
+  const std::string smilesPath = testDataPath_ + "/chembl_1k.smi";
+  const std::string smartsPath = testDataPath_ + "/SMARTS/rdkit_fragment_descriptors_supported.txt";
+
+  ASSERT_TRUE(std::filesystem::exists(smilesPath)) << "SMILES file not found: " << smilesPath;
+  ASSERT_TRUE(std::filesystem::exists(smartsPath)) << "SMARTS file not found: " << smartsPath;
+
+  auto [targetMols, targetSmiles] = readSmilesFileWithStrings(smilesPath, kNumSmiles, kMaxAtoms);
+  auto [queryMols, querySmarts]   = readSmartsFileWithStrings(smartsPath);
+
+  ASSERT_FALSE(targetMols.empty()) << "No target molecules loaded";
+  ASSERT_FALSE(queryMols.empty()) << "No query patterns loaded";
+
+  auto targetPtrs = getRawPtrs(targetMols);
+  auto queryPtrs  = getRawPtrs(queryMols);
+
+  // Run single-GPU
+  SubstructSearchConfig singleGpuConfig;
+  singleGpuConfig.batchSize     = 1024;
+  singleGpuConfig.workerThreads = 2;
+  
+  SubstructSearchResults singleGpuResults;
+  getSubstructMatches(targetPtrs, queryPtrs, singleGpuResults, SubstructAlgorithm::GSI,
+                      stream_.stream(), singleGpuConfig);
+
+  // Run multi-GPU
+  SubstructSearchConfig multiGpuConfig;
+  multiGpuConfig.batchSize     = 1024;
+  multiGpuConfig.workerThreads = 2;
+  multiGpuConfig.gpuIds        = getAllGpuIds();
+
+  SubstructSearchResults multiGpuResults;
+  getSubstructMatches(targetPtrs, queryPtrs, multiGpuResults, SubstructAlgorithm::GSI,
+                      stream_.stream(), multiGpuConfig);
+
+  const int numGpus = static_cast<int>(multiGpuConfig.gpuIds.size());
+  std::cout << "[MultiGPU] Using " << numGpus << " GPUs with " 
+            << multiGpuConfig.workerThreads << " workers each\n";
+
+  // Compare results
+  EXPECT_EQ(singleGpuResults.numTargets, multiGpuResults.numTargets);
+  EXPECT_EQ(singleGpuResults.numQueries, multiGpuResults.numQueries);
+
+  int64_t singleGpuTotal = 0;
+  int64_t multiGpuTotal  = 0;
+  int     mismatches     = 0;
+
+  for (int t = 0; t < singleGpuResults.numTargets; ++t) {
+    for (int q = 0; q < singleGpuResults.numQueries; ++q) {
+      const int singleCount = singleGpuResults.actualCount(t, q);
+      const int multiCount  = multiGpuResults.actualCount(t, q);
+      singleGpuTotal += singleCount;
+      multiGpuTotal += multiCount;
+      if (singleCount != multiCount) {
+        ++mismatches;
+      }
+    }
+  }
+
+  std::cout << "[MultiGPU] Single-GPU total matches: " << singleGpuTotal << "\n";
+  std::cout << "[MultiGPU] Multi-GPU total matches: " << multiGpuTotal << "\n";
+  std::cout << "[MultiGPU] Mismatched pairs: " << mismatches << "\n";
+
+  EXPECT_EQ(singleGpuTotal, multiGpuTotal) << "Total match counts differ between single and multi-GPU";
+  EXPECT_EQ(mismatches, 0) << "Some pairs have different match counts";
 }
 
 // =============================================================================

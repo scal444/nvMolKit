@@ -36,15 +36,20 @@ enum class SubstructAlgorithm {
 /**
  * @brief Configuration for substructure search execution.
  *
- * Controls threading and batching behavior. Default configuration is single-threaded
- * for deterministic behavior and simpler debugging.
+ * Controls threading, batching, and multi-GPU behavior. Default configuration is
+ * single-threaded for deterministic behavior and simpler debugging.
+ *
+ * Multi-GPU mode: When gpuIds is non-empty, work is distributed across the specified
+ * GPUs using round-robin assignment. Each GPU gets workerThreads workers, so total
+ * worker threads = workerThreads * gpuIds.size().
  */
 struct SubstructSearchConfig {
   int  batchSize           = 1024;   ///< Number of (target, query) pairs per GPU batch
-  int  workerThreads       = 1;      ///< Number of GPU runner threads (1 = single-threaded)
+  int  workerThreads       = 1;      ///< Number of GPU runner threads per GPU
   int  preprocessorThreads = 0;      ///< Number of CPU preprocessor threads (0 = inline preprocessing)
   int  slotsPerRunner      = 3;      ///< Slots per runner for inline mode (1-8, higher = more overlap)
   bool presort             = true;   ///< Sort molecules by atom count (largest first) for GPU efficiency
+  std::vector<int> gpuIds;           ///< GPU device IDs to use (empty = current device only)
 };
 
 /**
