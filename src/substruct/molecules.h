@@ -212,6 +212,13 @@ struct MoleculesHost {
 
   MoleculesHost();
 
+  /**
+   * @brief Pre-allocate storage for expected batch size.
+   * @param numMols Expected number of molecules
+   * @param numAtoms Expected total number of atoms across all molecules
+   */
+  void reserve(size_t numMols, size_t numAtoms);
+
   [[nodiscard]] size_t numMolecules() const { return batchAtomStarts.empty() ? 0 : batchAtomStarts.size() - 1; }
   [[nodiscard]] size_t totalAtoms() const { return atomData.size(); }
   [[nodiscard]] size_t totalBonds() const { return bondData.size(); }

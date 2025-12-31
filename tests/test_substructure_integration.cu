@@ -27,18 +27,13 @@
 
 #include "device.h"
 #include "graph_labeler.cuh"
-#include "molecules_device.cuh"
 #include "substructure_search.cuh"
 #include "test_utils.h"
 #include "testutils/mol_data.h"
 #include "testutils/substruct_validation.h"
 
-using nvMolKit::addQueryToBatch;
-using nvMolKit::addToBatch;
 using nvMolKit::algorithmName;
 using nvMolKit::getSubstructMatches;
-using nvMolKit::MoleculesDevice;
-using nvMolKit::MoleculesHost;
 using nvMolKit::printValidationResultDetailed;
 using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
@@ -47,6 +42,15 @@ using nvMolKit::SubstructSearchResults;
 using nvMolKit::testing::readSmartsFileWithStrings;
 using nvMolKit::testing::readSmilesFileWithStrings;
 using nvMolKit::validateAgainstRDKit;
+
+std::vector<const RDKit::ROMol*> getRawPtrs(const std::vector<std::unique_ptr<RDKit::ROMol>>& mols) {
+  std::vector<const RDKit::ROMol*> ptrs;
+  ptrs.reserve(mols.size());
+  for (const auto& m : mols) {
+    ptrs.push_back(m.get());
+  }
+  return ptrs;
+}
 
 namespace {
 
@@ -253,24 +257,8 @@ TEST_P(SubstructureIntegrationTest, ChemblVsSmarts) {
 
   ASSERT_LE(targetMols.size(), kNumSmiles) << "Loaded more targets than requested";
 
-  MoleculesHost targetsHost;
-  MoleculesHost queriesHost;
-
-  for (const auto& mol : targetMols) {
-    addToBatch(mol.get(), targetsHost);
-  }
-
-  for (const auto& mol : queryMols) {
-    addQueryToBatch(mol.get(), queriesHost);
-  }
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
-
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost, results, algorithm(),
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols), results, algorithm(),
                       stream_.stream(), threading().config);
 
   EXPECT_EQ(results.numTargets, static_cast<int>(targetMols.size()));

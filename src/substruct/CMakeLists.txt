@@ -8,7 +8,7 @@ target_include_directories(molecules PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(
   molecules
   PUBLIC device_vector flatBitVect
-  PRIVATE ${RDKit_LIBS})
+  PRIVATE ${RDKit_LIBS} nvtx)
 
 add_library(pinned_buffer_pool pinned_buffer_pool.cpp)
 target_include_directories(pinned_buffer_pool
@@ -20,5 +20,6 @@ target_include_directories(substructure_search
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(substructure_search PUBLIC molecules device_vector
                                                   flatBitVect cuda_error_check
-                                                  pinned_buffer_pool device_timings)
+                                                  pinned_buffer_pool device_timings
+                                          PRIVATE ${RDKit_LIBS})
 target_compile_options(substructure_search PRIVATE -Xptxas=-v )

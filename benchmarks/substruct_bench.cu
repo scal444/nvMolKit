@@ -33,14 +33,10 @@
 #include "substruct/substructure_search.cuh"
 #include "testutils/substruct_validation.h"
 
-using nvMolKit::addQueryToBatch;
-using nvMolKit::addToBatch;
 using nvMolKit::algorithmName;
 using nvMolKit::checkReturnCode;
 using nvMolKit::getRDKitSubstructMatches;
 using nvMolKit::getSubstructMatches;
-using nvMolKit::MoleculesDevice;
-using nvMolKit::MoleculesHost;
 using nvMolKit::printValidationResult;
 using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
@@ -140,21 +136,6 @@ std::vector<std::unique_ptr<RDKit::ROMol>> readAndParseMolecules(const std::stri
 }
 
 /**
- * @brief Build host-side molecule batches for GPU processing.
- */
-void buildBatches(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
-                  const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols,
-                  MoleculesHost&                                    targetsHost,
-                  MoleculesHost&                                    queriesHost) {
-  for (const auto& mol : targetMols) {
-    addToBatch(mol.get(), targetsHost);
-  }
-  for (const auto& mol : queryMols) {
-    addQueryToBatch(mol.get(), queriesHost);
-  }
-}
-
-/**
  * @brief Benchmark RDKit substructure matching.
  */
 void benchRDKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
@@ -201,19 +182,20 @@ void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
 
   ScopedStream stream;
 
-  MoleculesHost targetsHost;
-  MoleculesHost queriesHost;
-  buildBatches(targetMols, queryMols, targetsHost, queriesHost);
-
-  MoleculesDevice targetsDevice(stream.stream());
-  MoleculesDevice queriesDevice(stream.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  std::vector<const RDKit::ROMol*> targetPtrs;
+  std::vector<const RDKit::ROMol*> queryPtrs;
+  targetPtrs.reserve(targetMols.size());
+  queryPtrs.reserve(queryMols.size());
+  for (const auto& mol : targetMols) {
+    targetPtrs.push_back(mol.get());
+  }
+  for (const auto& mol : queryMols) {
+    queryPtrs.push_back(mol.get());
+  }
 
   timingOut = BenchUtils::timeIt(
       [&]() {
-        getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost, resultsOut, algorithm,
-                            stream.stream(), config);
+        getSubstructMatches(targetPtrs, queryPtrs, resultsOut, algorithm, stream.stream(), config);
       },
       iterations, warmups);
 
@@ -266,6 +248,7 @@ void printHelp(const char* progName) {
   std::cout << "  -c, --cap <int>           Max atoms per molecule (filter larger) [default: 128]\n";
   std::cout << "  -p, --num_runners <int>   Number of GPU runner threads [default: 2]\n";
   std::cout << "  -e, --num_preproc <int>   Number of CPU preprocessor threads (0 = inline) [default: 0]\n";
+  std::cout << "  -s, --presort <bool>      Sort molecules by size for GPU efficiency [default: true]\n";
   std::cout << "  -r, --do_rdkit <bool>     Run RDKit benchmark comparison [default: true]\n";
   std::cout << "  -w, --do_warmup <bool>    Run warmup before benchmarking [default: true]\n";
   std::cout << "  -v, --validate <bool>     Validate GPU results against RDKit [default: false]\n";
@@ -295,6 +278,7 @@ int main(int argc, char* argv[]) {
   unsigned int       maxAtoms         = 128;
   int                numRunners       = 2;
   int                numPreprocessors = 0;
+  bool               doPresort        = true;
   bool               doRdkit          = true;
   bool               doWarmup         = true;
   bool               doValidate       = false;
@@ -311,6 +295,7 @@ int main(int argc, char* argv[]) {
     {        "cap", required_argument, 0, 'c'},
     {"num_runners", required_argument, 0, 'p'},
     {"num_preproc", required_argument, 0, 'e'},
+    {    "presort", required_argument, 0, 's'},
     {   "do_rdkit", required_argument, 0, 'r'},
     {  "do_warmup", required_argument, 0, 'w'},
     {   "validate", required_argument, 0, 'v'},
@@ -323,7 +308,7 @@ int main(int argc, char* argv[]) {
   int option_index = 0;
   int c;
 
-  while ((c = getopt_long(argc, argv, "t:q:n:m:a:b:c:p:e:r:w:v:P:d:h", long_options, &option_index)) != -1) {
+  while ((c = getopt_long(argc, argv, "t:q:n:m:a:b:c:p:e:s:r:w:v:P:d:h", long_options, &option_index)) != -1) {
     switch (c) {
       case 't':
         targetsPath = optarg;
@@ -411,6 +396,9 @@ int main(int argc, char* argv[]) {
           return 1;
         }
         break;
+      case 's':
+        doPresort = parseBoolArg(optarg);
+        break;
       case 'r':
         doRdkit = parseBoolArg(optarg);
         break;
@@ -481,6 +469,7 @@ int main(int argc, char* argv[]) {
   std::cout << "  Atom cap: " << maxAtoms << "\n";
   std::cout << "  Runner threads: " << numRunners << "\n";
   std::cout << "  Preprocessor threads: " << numPreprocessors << (numPreprocessors == 0 ? " (inline)" : "") << "\n";
+  std::cout << "  Presort by size: " << (doPresort ? "yes" : "no") << "\n";
   std::cout << "  Run RDKit comparison: " << (doRdkit ? "yes" : "no") << "\n";
   std::cout << "  Run warmup: " << (doWarmup ? "yes" : "no") << "\n";
   std::cout << "  Validate results: " << (doValidate ? "yes" : "no") << "\n";
@@ -529,6 +518,7 @@ int main(int argc, char* argv[]) {
     config.batchSize           = batchSize;
     config.workerThreads       = numRunners;
     config.preprocessorThreads = numPreprocessors;
+    config.presort             = doPresort;
 
     int                      warmupMatches;
     SubstructSearchResults   warmupResults;
@@ -552,6 +542,7 @@ int main(int argc, char* argv[]) {
   benchConfig.batchSize           = batchSize;
   benchConfig.workerThreads       = numRunners;
   benchConfig.preprocessorThreads = numPreprocessors;
+  benchConfig.presort             = doPresort;
 
   int                      nvmolkitMatches = 0;
   SubstructSearchResults   nvmolkitResults;
@@ -591,14 +582,14 @@ int main(int argc, char* argv[]) {
   }
 
   std::cout << "\n\nCSV Results:\n";
-  std::cout << "algorithm,num_targets,num_queries,batch_size,num_runners,num_preproc,nvmolkit_time_ms,nvmolkit_std_ms";
+  std::cout << "algorithm,num_targets,num_queries,batch_size,num_runners,num_preproc,presort,nvmolkit_time_ms,nvmolkit_std_ms";
   if (doRdkit) {
     std::cout << ",rdkit_time_ms,rdkit_std_ms";
   }
   std::cout << "\n";
 
   std::cout << algorithmName(algorithm) << "," << targetMols.size() << "," << queryMols.size() << ","
-            << batchSize << "," << numRunners << "," << numPreprocessors << ","
+            << batchSize << "," << numRunners << "," << numPreprocessors << "," << (doPresort ? 1 : 0) << ","
             << nvmolkitTiming.avgMs << "," << nvmolkitTiming.stdMs;
   if (doRdkit) {
     std::cout << "," << rdkitTiming.avgMs << "," << rdkitTiming.stdMs;

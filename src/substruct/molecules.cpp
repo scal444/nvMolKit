@@ -30,6 +30,7 @@
 
 #include "substruct_debug.h"
 #include "substruct_types.h"
+#include "nvtx.h"
 
 namespace nvMolKit {
 
@@ -369,6 +370,32 @@ MoleculesHost::MoleculesHost() {
   batchAtomBondStarts.push_back(0);
   batchOtherAtomIndicesStarts.push_back(0);
   batchBondIndicesStarts.push_back(0);
+}
+
+void MoleculesHost::reserve(size_t numMols, size_t numAtoms) {
+  const size_t estimatedBonds = numAtoms * 2;
+
+  batchAtomStarts.reserve(numMols + 1);
+  batchBondStarts.reserve(numMols + 1);
+  batchAtomBondStarts.reserve(numMols + 1);
+  batchOtherAtomIndicesStarts.reserve(numMols + 1);
+  batchBondIndicesStarts.reserve(numMols + 1);
+
+  atomData.reserve(numAtoms);
+  atomDataPacked.reserve(numAtoms);
+  bondTypeCounts.reserve(numAtoms);
+  bondData.reserve(estimatedBonds);
+  atomBondStarts.reserve(numAtoms);
+  otherAtomIndices.reserve(estimatedBonds * 2);
+  bondDataIndices.reserve(estimatedBonds * 2);
+
+  atomQueries.reserve(numAtoms);
+  atomQueryMasks.reserve(numAtoms);
+  atomQueryTrees.reserve(numAtoms);
+  atomInstrStarts.reserve(numAtoms);
+  atomLeafMaskStarts.reserve(numAtoms);
+  bondQueryData.reserve(estimatedBonds);
+  recursivePatterns.reserve(numMols);
 }
 
 void MoleculesDevice::setStream(cudaStream_t stream) {
@@ -1397,6 +1424,7 @@ void addBondsAndConnectivity(const RDKit::ROMol*    mol,
 constexpr unsigned int kMaxMoleculeAtoms = 128;
 
 void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
+  ScopedNvtxRange range("addToBatch");
   if (mol->getNumAtoms() > kMaxMoleculeAtoms) {
     throw std::runtime_error("Target molecule has " + std::to_string(mol->getNumAtoms()) +
                              " atoms, which exceeds the maximum of " + std::to_string(kMaxMoleculeAtoms));
@@ -1748,6 +1776,7 @@ void addQueryBondsAndConnectivity(const RDKit::ROMol* mol, MoleculesHost& batch,
 }  // namespace
 
 void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
+  ScopedNvtxRange range("addQueryToBatch");
   if (mol->getNumAtoms() > kMaxMoleculeAtoms) {
     throw std::runtime_error("Query molecule has " + std::to_string(mol->getNumAtoms()) +
                              " atoms, which exceeds the maximum of " + std::to_string(kMaxMoleculeAtoms));

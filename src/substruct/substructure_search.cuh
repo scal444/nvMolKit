@@ -18,10 +18,16 @@
 
 #include <cuda_runtime.h>
 
+#include <vector>
+
 #include "flat_bit_vect.h"
 #include "molecules.h"
 #include "substruct_algos.cuh"
 #include "substruct_types.h"
+
+namespace RDKit {
+class ROMol;
+}  // namespace RDKit
 
 namespace nvMolKit {
 
@@ -97,20 +103,15 @@ struct SubstructMatchResultsDeviceView {
   }
 };
 
+namespace detail {
+
 /**
- * @brief Perform batch substructure matching on GPU.
+ * @brief Internal: Perform batch substructure matching on GPU.
  *
- * Returns results in a dynamically allocated nested vector format.
- * Memory is proportional to actual matches, avoiding worst-case pre-allocation.
+ * Prefer using getSubstructMatches(const std::vector<const RDKit::ROMol*>&, ...) instead.
  *
- * @param targetsDevice Device-resident target molecules (use addToBatch to build)
- * @param queriesDevice Device-resident query molecules (use addQueryToBatch to build)
- * @param targetsHost Host-side target data (for atom counts)
- * @param queriesHost Host-side query data (for atom counts)
- * @param results Output: matches[target][query][match] = vector of target atom indices
- * @param algorithm Algorithm to use for matching
- * @param stream CUDA stream for async operations
- * @param config Execution configuration (threading, batching). Defaults to single-threaded.
+ * @param targetSortOrder If non-empty, maps sorted index -> original index for targets
+ * @param querySortOrder If non-empty, maps sorted index -> original index for queries
  */
 void getSubstructMatches(MoleculesDevice&              targetsDevice,
                          const MoleculesDevice&        queriesDevice,
@@ -119,7 +120,31 @@ void getSubstructMatches(MoleculesDevice&              targetsDevice,
                          SubstructSearchResults&       results,
                          SubstructAlgorithm            algorithm,
                          cudaStream_t                  stream,
-                         const SubstructSearchConfig&  config = SubstructSearchConfig{});
+                         const SubstructSearchConfig&  config            = SubstructSearchConfig{},
+                         const std::vector<int>&       targetSortOrder   = {},
+                         const std::vector<int>&       querySortOrder    = {});
+
+}  // namespace detail
+
+/**
+ * @brief Perform batch substructure matching on GPU.
+ *
+ * Molecules are sorted by atom count (largest first) for improved GPU efficiency,
+ * and results are returned in the original input order.
+ *
+ * @param targets Vector of target molecule pointers
+ * @param queries Vector of query molecule pointers (typically from SMARTS)
+ * @param results Output: matches[target][query][match] = vector of target atom indices
+ * @param algorithm Algorithm to use for matching
+ * @param stream CUDA stream for async operations
+ * @param config Execution configuration (threading, batching). Defaults to single-threaded.
+ */
+void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
+                         const std::vector<const RDKit::ROMol*>& queries,
+                         SubstructSearchResults&                 results,
+                         SubstructAlgorithm                      algorithm,
+                         cudaStream_t                            stream,
+                         const SubstructSearchConfig&            config = SubstructSearchConfig{});
 
 }  // namespace nvMolKit
 

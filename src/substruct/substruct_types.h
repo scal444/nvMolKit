@@ -40,9 +40,10 @@ enum class SubstructAlgorithm {
  * for deterministic behavior and simpler debugging.
  */
 struct SubstructSearchConfig {
-  int batchSize           = 1024;  ///< Number of (target, query) pairs per GPU batch
-  int workerThreads       = 1;     ///< Number of GPU runner threads (1 = single-threaded)
-  int preprocessorThreads = 0;     ///< Number of CPU preprocessor threads (0 = inline preprocessing)
+  int  batchSize           = 1024;   ///< Number of (target, query) pairs per GPU batch
+  int  workerThreads       = 1;      ///< Number of GPU runner threads (1 = single-threaded)
+  int  preprocessorThreads = 0;      ///< Number of CPU preprocessor threads (0 = inline preprocessing)
+  bool presort             = true;   ///< Sort molecules by atom count (largest first) for GPU efficiency
 };
 
 /**

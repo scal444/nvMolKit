@@ -26,14 +26,10 @@
 #include "substructure_search.cuh"
 #include "testutils/substruct_validation.h"
 
-using nvMolKit::addQueryToBatch;
-using nvMolKit::addToBatch;
 using nvMolKit::algorithmName;
 using nvMolKit::checkReturnCode;
 using nvMolKit::getRDKitSubstructMatches;
 using nvMolKit::getSubstructMatches;
-using nvMolKit::MoleculesDevice;
-using nvMolKit::MoleculesHost;
 using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
 using nvMolKit::SubstructSearchResults;
@@ -63,30 +59,39 @@ class SubstructureSearchTest : public ::testing::TestWithParam<SubstructAlgorith
   void SetUp() override {}
 
   /**
-   * @brief Build target and query batches from SMILES/SMARTS strings.
+   * @brief Parse target and query molecules from SMILES/SMARTS strings.
    */
-  void buildBatches(const std::vector<std::string>&             targetSmiles,
-                    const std::vector<std::string>&             querySmarts,
-                    MoleculesHost&                              targetsHost,
-                    MoleculesHost&                              queriesHost,
-                    std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
-                    std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols) {
+  void parseMolecules(const std::vector<std::string>&             targetSmiles,
+                      const std::vector<std::string>&             querySmarts,
+                      std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
+                      std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols) {
     targetMols.clear();
     queryMols.clear();
 
     for (const auto& smiles : targetSmiles) {
       auto mol = makeMolFromSmiles(smiles);
       ASSERT_NE(mol, nullptr) << "Failed to parse target SMILES: " << smiles;
-      addToBatch(mol.get(), targetsHost);
       targetMols.push_back(std::move(mol));
     }
 
     for (const auto& smarts : querySmarts) {
       auto mol = makeMolFromSmarts(smarts);
       ASSERT_NE(mol, nullptr) << "Failed to parse query SMARTS: " << smarts;
-      addQueryToBatch(mol.get(), queriesHost);
       queryMols.push_back(std::move(mol));
     }
+  }
+
+  /**
+   * @brief Get raw pointers from unique_ptr vectors for API call.
+   */
+  static std::vector<const RDKit::ROMol*> getRawPtrs(
+      const std::vector<std::unique_ptr<RDKit::ROMol>>& mols) {
+    std::vector<const RDKit::ROMol*> ptrs;
+    ptrs.reserve(mols.size());
+    for (const auto& mol : mols) {
+      ptrs.push_back(mol.get());
+    }
+    return ptrs;
   }
 
   /**
@@ -210,20 +215,13 @@ INSTANTIATE_TEST_SUITE_P(AllAlgorithms,
 // =============================================================================
 
 TEST_P(SubstructureSearchTest, SingleTargetSingleQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-  buildBatches({"CCO"}, {"C"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CCO"}, {"C"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   EXPECT_EQ(results.numTargets, 1);
@@ -234,20 +232,13 @@ TEST_P(SubstructureSearchTest, SingleTargetSingleQuery) {
 }
 
 TEST_P(SubstructureSearchTest, MultipleTargetsSingleQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-  buildBatches({"CCO", "CCCC", "c1ccccc1"}, {"C"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CCO", "CCCC", "c1ccccc1"}, {"C"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   EXPECT_EQ(results.numTargets, 3);
@@ -257,20 +248,13 @@ TEST_P(SubstructureSearchTest, MultipleTargetsSingleQuery) {
 }
 
 TEST_P(SubstructureSearchTest, SingleTargetMultipleQueries) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-  buildBatches({"CCO"}, {"C", "O", "CC"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CCO"}, {"C", "O", "CC"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   EXPECT_EQ(results.numTargets, 1);
@@ -280,8 +264,6 @@ TEST_P(SubstructureSearchTest, SingleTargetMultipleQueries) {
 }
 
 TEST_P(SubstructureSearchTest, BatchAllToAll) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
@@ -289,20 +271,13 @@ TEST_P(SubstructureSearchTest, BatchAllToAll) {
   // Buffer size = target atom count. CC query gives 2*(N-1) matches for N-carbon chain.
   // To avoid overflow: need 2*(N-1) <= N, i.e., N >= 2. But also need margin for branching.
   // Use single-atom queries and aromatic targets which have limited matches.
-  buildBatches({"CCO", "c1ccccc1", "c1ccc(O)cc1", "CCN"},  // 4 targets: 3, 6, 7, 3 atoms
+  parseMolecules({"CCO", "c1ccccc1", "c1ccc(O)cc1", "CCN"},  // 4 targets: 3, 6, 7, 3 atoms
                {"C", "O", "c", "N"},                        // 4 single-atom queries
-               targetsHost,
-               queriesHost,
                targetMols,
                queryMols);
 
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
-
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   EXPECT_EQ(results.numTargets, 4);
@@ -316,63 +291,42 @@ TEST_P(SubstructureSearchTest, BatchAllToAll) {
 // =============================================================================
 
 TEST_P(SubstructureSearchTest, NoMatchPossible) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Carbon chain vs nitrogen query - no match possible
-  buildBatches({"CCCC"}, {"N"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CCCC"}, {"N"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "CCCC with N query");
 }
 
 TEST_P(SubstructureSearchTest, AromaticVsAliphatic) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Benzene (aromatic) vs aliphatic carbon query
-  buildBatches({"c1ccccc1"}, {"C"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"c1ccccc1"}, {"C"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "benzene with aliphatic C query");
 }
 
 TEST_P(SubstructureSearchTest, LargerMolecule) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Caffeine as a larger test case
-  buildBatches({"Cn1cnc2c1c(=O)n(c(=O)n2C)C"}, {"c", "N", "C"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"Cn1cnc2c1c(=O)n(c(=O)n2C)C"}, {"c", "N", "C"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   EXPECT_EQ(results.numTargets, 1);
@@ -382,27 +336,18 @@ TEST_P(SubstructureSearchTest, LargerMolecule) {
 }
 
 TEST_P(SubstructureSearchTest, DifferentMoleculeSizes) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Different sized molecules to test buffer allocation
   // Use single-atom queries to avoid overflow from non-unique CC matching
-  buildBatches({"C", "CCC", "CCCCC"},  // 1, 3, 5 atoms
+  parseMolecules({"C", "CCC", "CCCCC"},  // 1, 3, 5 atoms
                {"C", "N"},              // 1, 1 query atoms
-               targetsHost,
-               queriesHost,
                targetMols,
                queryMols);
 
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
-
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   // Verify match counts are correct
@@ -420,77 +365,52 @@ TEST_P(SubstructureSearchTest, DifferentMoleculeSizes) {
 }
 
 TEST_P(SubstructureSearchTest, MultiAtomQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test multi-atom queries
   // CCO with CC: 2 non-unique matches (0,1) and (1,0)
   // Use larger buffer (3 atoms) so no overflow
-  buildBatches({"CCO"},    // 3 atoms
+  parseMolecules({"CCO"},    // 3 atoms
                {"CC"},     // 2 atom query - should get 2 matches with uniquify=false
-               targetsHost,
-               queriesHost,
                targetMols,
                queryMols);
 
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
-
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "CCO with CC query");
 }
 
 TEST_P(SubstructureSearchTest, ThreeAtomQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test 3-atom query: CCOCC with COC
   // Should get 2 matches: (1,2,3) and (3,2,1) - both directions through the ether
-  buildBatches({"CCOCC"},   // 5 atoms - diethyl ether
+  parseMolecules({"CCOCC"},   // 5 atoms - diethyl ether
                {"COC"},     // 3 atom query
-               targetsHost,
-               queriesHost,
                targetMols,
                queryMols);
 
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
-
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "CCOCC with COC query");
 }
 
 TEST_P(SubstructureSearchTest, ExpectedOverflow) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // CCCCCC (6 atoms) with CC query has 10 non-unique matches
   // Buffer sized to target atoms (6), so this should overflow
-  buildBatches({"CCCCCC"}, {"CC"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CCCCCC"}, {"CC"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   // RDKit returns 10 non-unique matches
@@ -528,140 +448,96 @@ TEST_F(RDKitReferenceTest, HexaneCCMatches) {
 // =============================================================================
 
 TEST_P(SubstructureSearchTest, OrQueryMatchesBothTypes) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test OR query: [C,N] should match both carbons and nitrogens
   // CCN has 2 carbons and 1 nitrogen, so [C,N] should match all 3 atoms
-  buildBatches({"CCN"}, {"[C,N]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CCN"}, {"[C,N]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[C,N] in CCN");
 }
 
 TEST_P(SubstructureSearchTest, OrQuerySelectiveMatch) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test OR query: [N,O] should match nitrogens and oxygens but not carbons
   // CCO has 2 carbons and 1 oxygen, so [N,O] should match only the oxygen (1 atom)
-  buildBatches({"CCO"}, {"[N,O]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CCO"}, {"[N,O]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[N,O] in CCO");
 }
 
 TEST_P(SubstructureSearchTest, NotQueryExcludesAtom) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test NOT query: [!C] should match everything except carbon
   // CCO has 2 carbons and 1 oxygen, so [!C] should match only the oxygen
-  buildBatches({"CCO"}, {"[!C]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CCO"}, {"[!C]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[!C] in CCO");
 }
 
 TEST_P(SubstructureSearchTest, NotQueryMatchesMultiple) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test NOT query: [!C] in molecule with multiple non-carbons
   // CCNO has 2 carbons, 1 nitrogen, and 1 oxygen, so [!C] should match 2 atoms
-  buildBatches({"CCNO"}, {"[!C]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CCNO"}, {"[!C]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[!C] in CCNO");
 }
 
 TEST_P(SubstructureSearchTest, MultiAtomOrQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test OR query with multi-atom pattern: [C,N][C,N]
   // CCN should match CC, CN, NC, and would match NN if present
-  buildBatches({"CCN"}, {"[C,N][C,N]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CCN"}, {"[C,N][C,N]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[C,N][C,N] in CCN");
 }
 
 TEST_P(SubstructureSearchTest, ThreeWayOrQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test 3-way OR: [C,N,O] should match all of C, N, and O
   // CCNO has all three types, should match 4 atoms
-  buildBatches({"CCNO"}, {"[C,N,O]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CCNO"}, {"[C,N,O]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[C,N,O] in CCNO");
 }
 
 TEST_P(SubstructureSearchTest, NestedAndOrQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
@@ -669,15 +545,10 @@ TEST_P(SubstructureSearchTest, NestedAndOrQuery) {
   // In "CCN" (no rings), all 3 atoms should match
   // In "C1CC1N" (cyclopropane + N), only N should match (ring carbons fail !R1)
   // In "C1CCC1" (cyclobutane), 0 atoms match (all ring carbons fail !R1)
-  buildBatches({"CCN", "C1CC1N", "C1CCC1"}, {"[C,N;!R1]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CCN", "C1CC1N", "C1CCC1"}, {"[C,N;!R1]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[C,N;!R1] in CCN");
@@ -686,23 +557,16 @@ TEST_P(SubstructureSearchTest, NestedAndOrQuery) {
 }
 
 TEST_P(SubstructureSearchTest, DeepNestedOrAndOrQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test deep nesting: [C,N;R1,O] (complex SMARTS with multiple operators)
   // In cyclopentane C1CCCC1: ring carbons match
   // In "CCCCO": behavior depends on SMARTS precedence rules
-  buildBatches({"C1CCCC1", "CCCCO"}, {"[C,N;R1,O]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"C1CCCC1", "CCCCO"}, {"[C,N;R1,O]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[C,N;R1,O] in C1CCCC1");
@@ -710,30 +574,21 @@ TEST_P(SubstructureSearchTest, DeepNestedOrAndOrQuery) {
 }
 
 TEST_P(SubstructureSearchTest, MultipleNotWithAndQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test [!C;!N] = NOT(C) AND NOT(N) - matches anything except C or N
   // In "CCNO": only O matches
-  buildBatches({"CCNO"}, {"[!C;!N]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CCNO"}, {"[!C;!N]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[!C;!N] in CCNO");
 }
 
 TEST_P(SubstructureSearchTest, NotWithOrQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
@@ -742,45 +597,31 @@ TEST_P(SubstructureSearchTest, NotWithOrQuery) {
   // N atom: NOT(C)=true, NOT(N)=false => true
   // O atom: NOT(C)=true, NOT(N)=true => true
   // All 4 atoms match
-  buildBatches({"CCNO"}, {"[!C,!N]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CCNO"}, {"[!C,!N]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[!C,!N] in CCNO");
 }
 
 TEST_P(SubstructureSearchTest, SimpleAndNotQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test [C;!R1] = C AND NOT(in 1 ring)
   // In C1CC1CCN (cyclopropane with chain): ring carbons (0,1,2) excluded, chain carbons (3,4) match
-  buildBatches({"C1CC1CCN"}, {"[C;!R1]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"C1CC1CCN"}, {"[C;!R1]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[C;!R1] in C1CC1CCN");
 }
 
 TEST_P(SubstructureSearchTest, BondedOrAtomQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
@@ -789,15 +630,10 @@ TEST_P(SubstructureSearchTest, BondedOrAtomQuery) {
   // In "CCSO": C-S-O, so S-O bond matches if S in query... wait, S doesn't match [C,N]
   // Actually "CCS": C-C-S, no match for [C,N]-[O,S] since S doesn't connect to O
   // Use "CCO" (ethanol): C-C-O, C matches [C,N], O matches [O,S], so C-O matches
-  buildBatches({"CCO", "CCS"}, {"[C,N]-[O,S]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CCO", "CCS"}, {"[C,N]-[O,S]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[C,N]-[O,S] in CCO");
@@ -805,8 +641,6 @@ TEST_P(SubstructureSearchTest, BondedOrAtomQuery) {
 }
 
 TEST_P(SubstructureSearchTest, MultiAtomMixedBooleanQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
@@ -814,15 +648,10 @@ TEST_P(SubstructureSearchTest, MultiAtomMixedBooleanQuery) {
   // First atom is OR, second is NOT
   // In "CCO": C-C bond matches (C for [C,N], C for [!O]), C-O doesn't match (!O fails)
   // In "CCN": C-C and C-N bonds all match
-  buildBatches({"CCO", "CCN"}, {"[C,N]-[!O]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CCO", "CCN"}, {"[C,N]-[!O]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[C,N]-[!O] in CCO");
@@ -830,89 +659,61 @@ TEST_P(SubstructureSearchTest, MultiAtomMixedBooleanQuery) {
 }
 
 TEST_P(SubstructureSearchTest, ThreeAtomNestedBooleanQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test 3-atom pattern with nested boolean: [C,N]-[!O]-[C,O]
   // In "CCCCO": C-C-C-C-O, should find C-C-C and C-C-O patterns
-  buildBatches({"CCCCO"}, {"[C,N]-[!O]-[C,O]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CCCCO"}, {"[C,N]-[!O]-[C,O]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[C,N]-[!O]-[C,O] in CCCCO");
 }
 
 TEST_P(SubstructureSearchTest, AromaticOrQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test aromatic OR: [c,n] should match aromatic carbons and nitrogens
   // In pyridine "c1ccncc1": 5 aromatic carbons + 1 aromatic nitrogen = 6 matches
-  buildBatches({"c1ccncc1"}, {"[c,n]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"c1ccncc1"}, {"[c,n]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[c,n] in pyridine");
 }
 
 TEST_P(SubstructureSearchTest, AromaticNotQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test aromatic NOT: [!n] should match anything except aromatic nitrogen
   // In pyridine "c1ccncc1": 5 aromatic carbons match, nitrogen doesn't
-  buildBatches({"c1ccncc1"}, {"[!n]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"c1ccncc1"}, {"[!n]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[!n] in pyridine");
 }
 
 TEST_P(SubstructureSearchTest, AromaticRingPatternWithOr) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test aromatic ring pattern with OR: c1[c,n]cccc1 (benzene or pyridine-like ring)
   // In benzene "c1ccccc1": all carbons form 6-ring, position 1 matches [c,n]
   // In pyridine "c1ccncc1": position 1 is nitrogen which matches [c,n]
-  buildBatches({"c1ccccc1", "c1ccncc1"}, {"c1[c,n]cccc1"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"c1ccccc1", "c1ccncc1"}, {"c1[c,n]cccc1"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   // Benzene should match (symmetric, many automorphisms)
@@ -927,23 +728,16 @@ TEST_P(SubstructureSearchTest, AromaticRingPatternWithOr) {
 }
 
 TEST_P(SubstructureSearchTest, AnyRingMembershipQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test [R] any ring membership query
   // C1CCC1C: 4 ring atoms, 1 non-ring atom
   // CCCCC: no ring atoms
-  buildBatches({"C1CCC1C", "CCCCC"}, {"[R]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"C1CCC1C", "CCCCC"}, {"[R]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   // Cyclobutane with methyl: 4 ring atoms match [R]
@@ -958,23 +752,16 @@ TEST_P(SubstructureSearchTest, AnyRingMembershipQuery) {
 }
 
 TEST_P(SubstructureSearchTest, AnyRingSizeQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test [r] any ring size query (same semantics as [R])
   // c1ccccc1: 6 ring atoms
   // CCCCC: no ring atoms
-  buildBatches({"c1ccccc1", "CCCCC"}, {"[r]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"c1ccccc1", "CCCCC"}, {"[r]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   // Benzene: 6 ring atoms match [r]
@@ -989,23 +776,16 @@ TEST_P(SubstructureSearchTest, AnyRingSizeQuery) {
 }
 
 TEST_P(SubstructureSearchTest, AnyRingCombinedWithAtomType) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test [C;R] carbon in any ring
   // C1CCC1C: 4 ring carbons, 1 non-ring carbon
   // c1ccccc1: aromatic carbons (not aliphatic C)
-  buildBatches({"C1CCC1C", "c1ccccc1"}, {"[C;R]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"C1CCC1C", "c1ccccc1"}, {"[C;R]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   // Cyclobutane with methyl: 4 aliphatic ring carbons match [C;R]
@@ -1020,23 +800,16 @@ TEST_P(SubstructureSearchTest, AnyRingCombinedWithAtomType) {
 }
 
 TEST_P(SubstructureSearchTest, IsotopeCarbon13Query) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test [13C] isotope query
   // [13C]CC: one carbon-13 atom
   // CC: natural abundance carbons (isotope = 0)
-  buildBatches({"[13C]CC", "CC"}, {"[13C]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"[13C]CC", "CC"}, {"[13C]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   // First target has one 13C
@@ -1051,23 +824,16 @@ TEST_P(SubstructureSearchTest, IsotopeCarbon13Query) {
 }
 
 TEST_P(SubstructureSearchTest, IsotopeDeuteriumQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test [2H] deuterium query
   // [2H]C([2H])([2H])[2H]: deuterated methane with 4 deuterium atoms
   // C: regular methane (no explicit H with isotope)
-  buildBatches({"[2H]C([2H])([2H])[2H]", "C"}, {"[2H]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"[2H]C([2H])([2H])[2H]", "C"}, {"[2H]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   // First target has 4 deuterium atoms
@@ -1082,23 +848,16 @@ TEST_P(SubstructureSearchTest, IsotopeDeuteriumQuery) {
 }
 
 TEST_P(SubstructureSearchTest, IsotopeNitrogen15Query) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test [15N] nitrogen-15 query
   // [15N]CC: nitrogen-15 labeled
   // NCC: natural abundance nitrogen
-  buildBatches({"[15N]CC", "NCC"}, {"[15N]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"[15N]CC", "NCC"}, {"[15N]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   // First target has one 15N
@@ -1113,23 +872,16 @@ TEST_P(SubstructureSearchTest, IsotopeNitrogen15Query) {
 }
 
 TEST_P(SubstructureSearchTest, DegreeQueryD0) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test [D0] degree query - atom with no explicit bonds
   // C: methane - single atom (degree 0)
   // CC: ethane - both atoms have degree 1
-  buildBatches({"C", "CC"}, {"[D0]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"C", "CC"}, {"[D0]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1142,23 +894,16 @@ TEST_P(SubstructureSearchTest, DegreeQueryD0) {
 }
 
 TEST_P(SubstructureSearchTest, DegreeQueryD1) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test [D1] degree query - terminal atoms
   // CC: ethane - both atoms have degree 1
   // CCC: propane - 2 terminal atoms with degree 1
-  buildBatches({"CC", "CCC"}, {"[D1]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CC", "CCC"}, {"[D1]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1171,23 +916,16 @@ TEST_P(SubstructureSearchTest, DegreeQueryD1) {
 }
 
 TEST_P(SubstructureSearchTest, DegreeQueryD3) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test [D3] degree query
   // CC(C)C: isobutane - central carbon has degree 3
   // CCC: propane - no degree 3 atoms
-  buildBatches({"CC(C)C", "CCC"}, {"[D3]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CC(C)C", "CCC"}, {"[D3]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   // Isobutane: one atom with degree 3
@@ -1202,23 +940,16 @@ TEST_P(SubstructureSearchTest, DegreeQueryD3) {
 }
 
 TEST_P(SubstructureSearchTest, TotalConnectivityQueryX1) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test [X1] total connectivity query
   // [H][H]: H2 molecule - each H has X1 (1 bond + 0 H = 1)
   // CC: ethane - carbons have X4
-  buildBatches({"[H][H]", "CC"}, {"[X1]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"[H][H]", "CC"}, {"[X1]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1231,23 +962,16 @@ TEST_P(SubstructureSearchTest, TotalConnectivityQueryX1) {
 }
 
 TEST_P(SubstructureSearchTest, TotalConnectivityQueryX2) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test [X2] total connectivity query
   // C#C: acetylene - carbons have X2 (1 bond + 1 H = 2)
   // CC: ethane - carbons have X4
-  buildBatches({"C#C", "CC"}, {"[X2]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"C#C", "CC"}, {"[X2]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1260,23 +984,16 @@ TEST_P(SubstructureSearchTest, TotalConnectivityQueryX2) {
 }
 
 TEST_P(SubstructureSearchTest, TotalConnectivityQueryX3) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test [X3] total connectivity query
   // C=C: ethene - carbons have X3 (1 bond + 2 H = 3)
   // CC: ethane - carbons have X4
-  buildBatches({"C=C", "CC"}, {"[X3]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"C=C", "CC"}, {"[X3]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1289,23 +1006,16 @@ TEST_P(SubstructureSearchTest, TotalConnectivityQueryX3) {
 }
 
 TEST_P(SubstructureSearchTest, TotalConnectivityQueryX4) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test [X4] total connectivity query
   // CC: ethane - all carbons have X4 (1 bond + 3 H = 4)
   // C=C: ethene - carbons have X3 (1 bond + 2 H = 3)
-  buildBatches({"CC", "C=C"}, {"[X4]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CC", "C=C"}, {"[X4]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   // Ethane: 2 atoms with X4
@@ -1320,23 +1030,16 @@ TEST_P(SubstructureSearchTest, TotalConnectivityQueryX4) {
 }
 
 TEST_P(SubstructureSearchTest, DegreeWithAtomTypeQuery) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Test [CD3] carbon with degree 3
   // CC(C)C: isobutane
   // CN(C)C: trimethylamine - nitrogen has degree 3, not carbon
-  buildBatches({"CC(C)C", "CN(C)C"}, {"[CD3]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CC(C)C", "CN(C)C"}, {"[CD3]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   // Isobutane: one carbon with degree 3
@@ -1352,40 +1055,26 @@ TEST_P(SubstructureSearchTest, DegreeWithAtomTypeQuery) {
 
 
 TEST_P(SubstructureSearchTest, ImplicitHCountMatch) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-  buildBatches({"C=N"}, {"[NH]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"C=N"}, {"[NH]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[NH] in C=N");
 }
 
 TEST_P(SubstructureSearchTest, ImplicitHCountNoMatch) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-  buildBatches({"CC"}, {"[CH2]"}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CC"}, {"[CH2]"}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "[CH2] in CC");
@@ -1393,8 +1082,6 @@ TEST_P(SubstructureSearchTest, ImplicitHCountNoMatch) {
 
 
 TEST_P(SubstructureSearchTest, DoubleOrAromaticBond) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
@@ -1402,23 +1089,16 @@ TEST_P(SubstructureSearchTest, DoubleOrAromaticBond) {
   // Target: theophylline derivative with quinone moiety
   const std::string target = "Cn1c(=O)c2c3c(cnc2n(C)c1=O)C(=O)C=CC3=O";
   const std::string query  = "[!#6&!#1]=[#6]-1-[#6]=,:[#6]-[#6](=[!#6&!#1])-[#6]=,:[#6]-1";
-  buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({target}, {query}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "quinone_A pattern");
 }
 
 TEST_P(SubstructureSearchTest, NotRingBondSimple) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
@@ -1426,15 +1106,10 @@ TEST_P(SubstructureSearchTest, NotRingBondSimple) {
   // Target: propylamine CCCN - all bonds are single and non-ring
   const std::string target = "CCCN";
   const std::string query  = "[C,N]-&!@[C,N]";
-  buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({target}, {query}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "simple non-ring bond");
@@ -1447,8 +1122,6 @@ TEST_P(SubstructureSearchTest, NotRingBondChain) {
     GTEST_SKIP() << "WarpUnified has limited queue capacity for high-match-count patterns";
   }
 
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
@@ -1456,23 +1129,16 @@ TEST_P(SubstructureSearchTest, NotRingBondChain) {
   // Target: peptide-like chain
   const std::string target = "C[C@@H](O)[C@H](N)C(=O)N1CCC[C@H]1C(=O)N[C@@H](CCCNC(=N)N)C(=O)N[C@@H](CCCCN)C(=O)N[C@@H](CCCNC(=N)N)C(=O)N[C@@H](CCCNC(=N)N)C(=O)N[C@@H](CCCNC(=N)N)C(=O)N[C@@H](CCCCN)C(=O)N[C@@H](CCCCN)C(=O)N[C@@H](CCCNC(=N)N)C(=O)NCC(N)=O";
   const std::string query  = "[N,C,S,O]-&!@[N,C,S,O]-&!@[N,C,S,O]-&!@[N,C,S,O]-&!@[N,C,S,O]-&!@[N,C,S,O]-&!@[N,C,S,O]";
-  buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({target}, {query}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "non-ring bond chain pattern");
 }
 
 TEST_P(SubstructureSearchTest, ImpossibleBondConstraint) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
@@ -1480,15 +1146,10 @@ TEST_P(SubstructureSearchTest, ImpossibleBondConstraint) {
   // This should never match anything
   const std::string target = "c1ccccc1";  // Benzene - has aromatic bonds
   const std::string query  = "[!#1]-:a";  // Not-hydrogen with single-AND-aromatic bond to aromatic atom
-  buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({target}, {query}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1504,20 +1165,13 @@ TEST_P(SubstructureSearchTest, ImpossibleAtomConstraint) {
   const std::string query = "[C;a]";
 
   for (const std::string& target : {"CCCCC", "c1ccccc1"}) {
-    MoleculesHost                              targetsHost;
-    MoleculesHost                              queriesHost;
     std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
     std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-    buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
-
-    MoleculesDevice targetsDevice(stream_.stream());
-    MoleculesDevice queriesDevice(stream_.stream());
-    targetsDevice.copyFromHost(targetsHost);
-    queriesDevice.copyFromHost(queriesHost);
+    parseMolecules({target}, {query}, targetMols, queryMols);
 
     SubstructSearchResults results;
-    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+    getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                         results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1534,20 +1188,13 @@ TEST_P(SubstructureSearchTest, ImpossibleChargeConstraint) {
   const std::string query = "[OX1;+0;-1]";
 
   for (const std::string& target : {"O=S(=O)(CCO)c1ccccc1", "[O-]C"}) {
-    MoleculesHost                              targetsHost;
-    MoleculesHost                              queriesHost;
     std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
     std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-    buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
-
-    MoleculesDevice targetsDevice(stream_.stream());
-    MoleculesDevice queriesDevice(stream_.stream());
-    targetsDevice.copyFromHost(targetsHost);
-    queriesDevice.copyFromHost(queriesHost);
+    parseMolecules({target}, {query}, targetMols, queryMols);
 
     SubstructSearchResults results;
-    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+    getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                         results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1564,20 +1211,13 @@ TEST_P(SubstructureSearchTest, WildcardAtoms) {
   const std::string target = "CCCCCC";      // hexane
   const std::string query  = "C~*~*~C";     // C-any-any-C
 
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-  buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({target}, {query}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1593,20 +1233,13 @@ TEST_P(SubstructureSearchTest, WildcardAtomsInRing) {
   const std::string target = "C1CCCCC1";        // cyclohexane
   const std::string query  = "C1~*~*~C~*~*~1";  // 6-membered ring with wildcards
 
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-  buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({target}, {query}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1622,20 +1255,13 @@ TEST_P(SubstructureSearchTest, WildcardAtomsFusedRings) {
   const std::string target = "C1CCC2CCCCC2C1";                   // decalin
   const std::string query  = "C12~*~*~*~*~C~1~*~*~*~*~2";        // two 6-rings sharing edge
 
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-  buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({target}, {query}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1652,20 +1278,13 @@ TEST_P(SubstructureSearchTest, NegatedBondType) {
   const std::string target = "C=CCn1cc(C[C@@H]2NC(=O)[C@@H]3CCCN3C2=O)c2ccc(OC)cc21";
   const std::string query  = "[c,C]1(~[O;D1])~*!-*~[c,C](~[O;D1])~*!-*~1";
 
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-  buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({target}, {query}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1696,20 +1315,13 @@ TEST_P(SubstructureSearchTest, RingBondCountQuery) {
   };
 
   for (const auto& tc : cases) {
-    MoleculesHost                              targetsHost;
-    MoleculesHost                              queriesHost;
     std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
     std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-    buildBatches({tc.target}, {tc.query}, targetsHost, queriesHost, targetMols, queryMols);
-
-    MoleculesDevice targetsDevice(stream_.stream());
-    MoleculesDevice queriesDevice(stream_.stream());
-    targetsDevice.copyFromHost(targetsHost);
-    queriesDevice.copyFromHost(queriesHost);
+    parseMolecules({tc.target}, {tc.query}, targetMols, queryMols);
 
     SubstructSearchResults results;
-    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+    getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                         results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1736,20 +1348,13 @@ TEST_P(SubstructureSearchTest, ImplicitHCountQuery) {
   };
 
   for (const auto& tc : cases) {
-    MoleculesHost                              targetsHost;
-    MoleculesHost                              queriesHost;
     std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
     std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-    buildBatches({tc.target}, {tc.query}, targetsHost, queriesHost, targetMols, queryMols);
-
-    MoleculesDevice targetsDevice(stream_.stream());
-    MoleculesDevice queriesDevice(stream_.stream());
-    targetsDevice.copyFromHost(targetsHost);
-    queriesDevice.copyFromHost(queriesHost);
+    parseMolecules({tc.target}, {tc.query}, targetMols, queryMols);
 
     SubstructSearchResults results;
-    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+    getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                         results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1776,20 +1381,13 @@ TEST_P(SubstructureSearchTest, HeteroatomNeighborsQuery) {
   };
 
   for (const auto& tc : cases) {
-    MoleculesHost                              targetsHost;
-    MoleculesHost                              queriesHost;
     std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
     std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-    buildBatches({tc.target}, {tc.query}, targetsHost, queriesHost, targetMols, queryMols);
-
-    MoleculesDevice targetsDevice(stream_.stream());
-    MoleculesDevice queriesDevice(stream_.stream());
-    targetsDevice.copyFromHost(targetsHost);
-    queriesDevice.copyFromHost(queriesHost);
+    parseMolecules({tc.target}, {tc.query}, targetMols, queryMols);
 
     SubstructSearchResults results;
-    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+    getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                         results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1817,20 +1415,13 @@ TEST_P(SubstructureSearchTest, RangeRingSizeQuery) {
   };
 
   for (const auto& tc : cases) {
-    MoleculesHost                              targetsHost;
-    MoleculesHost                              queriesHost;
     std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
     std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-    buildBatches({tc.target}, {tc.query}, targetsHost, queriesHost, targetMols, queryMols);
-
-    MoleculesDevice targetsDevice(stream_.stream());
-    MoleculesDevice queriesDevice(stream_.stream());
-    targetsDevice.copyFromHost(targetsHost);
-    queriesDevice.copyFromHost(queriesHost);
+    parseMolecules({tc.target}, {tc.query}, targetMols, queryMols);
 
     SubstructSearchResults results;
-    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+    getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                         results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1854,20 +1445,13 @@ TEST_P(SubstructureSearchTest, RangeNumRingsQuery) {
   };
 
   for (const auto& tc : cases) {
-    MoleculesHost                              targetsHost;
-    MoleculesHost                              queriesHost;
     std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
     std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-    buildBatches({tc.target}, {tc.query}, targetsHost, queriesHost, targetMols, queryMols);
-
-    MoleculesDevice targetsDevice(stream_.stream());
-    MoleculesDevice queriesDevice(stream_.stream());
-    targetsDevice.copyFromHost(targetsHost);
-    queriesDevice.copyFromHost(queriesHost);
+    parseMolecules({tc.target}, {tc.query}, targetMols, queryMols);
 
     SubstructSearchResults results;
-    getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+    getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                         results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1879,22 +1463,15 @@ TEST_P(SubstructureSearchTest, RangeNumRingsQuery) {
 
 // KEEP this as the last test
 TEST_P(SubstructureSearchTest, SingleMolSingleQueryForDebugging) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   const std::string target = "CN1CCc2cccc3c2[C@H]1Cc1ccc(CO)c(O)c1-3";
   const std::string query  = "[$(c1(-[OX2H])ccccc1);!$(cc-!:[CH2]-[OX2H]);!$(cc-!:C(=O)[O;H1,-]);!$(cc-!:C(=O)-[NH2])]";
-  buildBatches({target}, {query}, targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({target}, {query}, targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
@@ -1908,21 +1485,14 @@ TEST_P(SubstructureSearchTest, SingleMolSingleQueryForDebugging) {
 // =============================================================================
 
 TEST_P(SubstructureSearchTest, NestedRecursiveSimple) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-  buildBatches({"CN", "CCN", "CCC"}, {"[$([C;$(*-N)])]"}, 
-               targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CN", "CCN", "CCC"}, {"[$([C;$(*-N)])]"}, 
+               targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, 
@@ -1934,21 +1504,14 @@ TEST_P(SubstructureSearchTest, NestedRecursiveSimple) {
 }
 
 TEST_P(SubstructureSearchTest, NestedRecursiveWithNegation) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-  buildBatches({"CCN", "CCC"}, {"[C;!$([C;$(*-N)])]"},
-               targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules({"CCN", "CCC"}, {"[C;!$([C;$(*-N)])]"},
+               targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0);
@@ -1956,8 +1519,6 @@ TEST_P(SubstructureSearchTest, NestedRecursiveWithNegation) {
 }
 
 TEST_P(SubstructureSearchTest, NestedRecursiveBatchProcessing) {
-  MoleculesHost                              targetsHost;
-  MoleculesHost                              queriesHost;
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
@@ -1966,16 +1527,11 @@ TEST_P(SubstructureSearchTest, NestedRecursiveBatchProcessing) {
     "c1ccccc1N", "c1ccccc1", "NC(=O)C"
   };
   
-  buildBatches(targets, {"[$([C;$(*-N)])]"}, 
-               targetsHost, queriesHost, targetMols, queryMols);
-
-  MoleculesDevice targetsDevice(stream_.stream());
-  MoleculesDevice queriesDevice(stream_.stream());
-  targetsDevice.copyFromHost(targetsHost);
-  queriesDevice.copyFromHost(queriesHost);
+  parseMolecules(targets, {"[$([C;$(*-N)])]"}, 
+               targetMols, queryMols);
 
   SubstructSearchResults results;
-  getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream());
 
   for (size_t t = 0; t < targets.size(); ++t) {

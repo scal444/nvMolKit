@@ -853,22 +853,13 @@ TEST(RecursiveLabelerEdgeCases, MaxRecursionDepthThrowsOnPreprocess) {
   auto info = extractRecursivePatterns(queryMol.get());
   ASSERT_GE(info.maxDepth, kMaxRecursionDepth) << "Test pattern does not exceed depth limit";
 
-  MoleculesHost targetHost;
-  addToBatch(targetMol.get(), targetHost);
-
-  MoleculesHost queryHost;
-  addQueryToBatch(queryMol.get(), queryHost);
-
   ScopedStream stream;
-  MoleculesDevice targetDevice(stream.stream());
-  MoleculesDevice queryDevice(stream.stream());
-  targetDevice.copyFromHost(targetHost);
-  queryDevice.copyFromHost(queryHost);
+  std::vector<const RDKit::ROMol*> targets = {targetMol.get()};
+  std::vector<const RDKit::ROMol*> queries = {queryMol.get()};
 
   nvMolKit::SubstructSearchResults results;
   EXPECT_THROW(
-    nvMolKit::getSubstructMatches(targetDevice, queryDevice, targetHost, queryHost,
-                                  results, SubstructAlgorithm::GSI, stream.stream()),
+    nvMolKit::getSubstructMatches(targets, queries, results, SubstructAlgorithm::GSI, stream.stream()),
     std::runtime_error);
 }
 

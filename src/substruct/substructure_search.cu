@@ -16,12 +16,15 @@
 #include "substructure_search.cuh"
 #include "substructure_search_internal.cuh"
 
+#include <GraphMol/ROMol.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <exception>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -643,6 +646,8 @@ struct ThreadWorkerContext {
   std::vector<int> queryDepths;       ///< Cached recursion depth for each query
   std::vector<int> queryMaxDepths;    ///< Cached max recursion depth per query (from leafSubpatterns)
   std::vector<int8_t> queryHasPatterns;  ///< Whether query has any recursive patterns
+  const std::vector<int>* targetSortOrder = nullptr;  ///< Maps sorted -> original index (nullptr = identity)
+  const std::vector<int>* querySortOrder  = nullptr;  ///< Maps sorted -> original index (nullptr = identity)
   int numTargets     = 0;
   int numQueries     = 0;
   int maxTargetAtoms = 0;
@@ -1377,9 +1382,13 @@ void accumulateBatchResults(BatchSlot&                 slot,
   ScopedNvtxRange processRange("Process batch results");
   for (int i = 0; i < slot.numPairsInBatch; ++i) {
     const int globalPairIdx   = slot.batchStart + i;
-    const int targetIdx       = globalPairIdx / ctx.numQueries;
-    const int queryIdx        = globalPairIdx % ctx.numQueries;
-    const int queryAtoms      = ctx.queryAtomCounts[queryIdx];
+    const int sortedTargetIdx = globalPairIdx / ctx.numQueries;
+    const int sortedQueryIdx  = globalPairIdx % ctx.numQueries;
+
+    const int targetIdx = ctx.targetSortOrder ? (*ctx.targetSortOrder)[sortedTargetIdx] : sortedTargetIdx;
+    const int queryIdx  = ctx.querySortOrder ? (*ctx.querySortOrder)[sortedQueryIdx] : sortedQueryIdx;
+
+    const int queryAtoms      = ctx.queryAtomCounts[sortedQueryIdx];
     const int actualMatches   = slot.matchCountsHost[i];
     const int reportedMatches = slot.reportedCountsHost[i];
 
@@ -1584,7 +1593,9 @@ void getSubstructMatchesImpl(MoleculesDevice&             targetsDevice,
                              SubstructSearchResults&      results,
                              SubstructAlgorithm           algorithm,
                              cudaStream_t                 stream,
-                             const SubstructSearchConfig& config) {
+                             const SubstructSearchConfig& config,
+                             const std::vector<int>*      targetSortOrder,
+                             const std::vector<int>*      querySortOrder) {
   const int batchSize                  = config.batchSize;
   const int requestedNumRunners        = config.workerThreads;
   const int requestedNumPreprocessors  = config.preprocessorThreads;
@@ -1610,8 +1621,10 @@ void getSubstructMatchesImpl(MoleculesDevice&             targetsDevice,
   ThreadWorkerContext ctx;
   ctxRange.pop();
 
-  ctx.numTargets = numTargets;
-  ctx.numQueries = numQueries;
+  ctx.numTargets       = numTargets;
+  ctx.numQueries       = numQueries;
+  ctx.targetSortOrder  = targetSortOrder;
+  ctx.querySortOrder   = querySortOrder;
 
   ScopedNvtxRange metadataRange("CPU: Compute batch metadata");
   ctx.queryAtomCounts.resize(static_cast<size_t>(numQueries * 1.5));
@@ -1793,6 +1806,8 @@ void getSubstructMatchesImpl(MoleculesDevice&             targetsDevice,
 
 }  // namespace
 
+namespace detail {
+
 void getSubstructMatches(MoleculesDevice&             targetsDevice,
                          const MoleculesDevice&       queriesDevice,
                          const MoleculesHost&         targetsHost,
@@ -1800,16 +1815,24 @@ void getSubstructMatches(MoleculesDevice&             targetsDevice,
                          SubstructSearchResults&      results,
                          SubstructAlgorithm           algorithm,
                          cudaStream_t                 stream,
-                         const SubstructSearchConfig& config) {
+                         const SubstructSearchConfig& config,
+                         const std::vector<int>&      targetSortOrder,
+                         const std::vector<int>&      querySortOrder) {
   ScopedNvtxRange buildRange("Build LeafSubpatterns");
   LeafSubpatterns leafSubpatterns;
   leafSubpatterns.buildAllPatterns(queriesHost);
   leafSubpatterns.syncToDevice(stream);
   buildRange.pop();
 
+  const std::vector<int>* targetOrderPtr = targetSortOrder.empty() ? nullptr : &targetSortOrder;
+  const std::vector<int>* queryOrderPtr  = querySortOrder.empty() ? nullptr : &querySortOrder;
+
   getSubstructMatchesImpl(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                          leafSubpatterns, results, algorithm, stream, config);
+                          leafSubpatterns, results, algorithm, stream, config,
+                          targetOrderPtr, queryOrderPtr);
 }
+
+}  // namespace detail
 
 // =============================================================================
 // Recursive SMARTS Preprocessing
@@ -2016,6 +2039,95 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
   }
 
   cudaCheckError(cudaGetLastError());
+}
+
+void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
+                         const std::vector<const RDKit::ROMol*>& queries,
+                         SubstructSearchResults&                 results,
+                         SubstructAlgorithm                      algorithm,
+                         cudaStream_t                            stream,
+                         const SubstructSearchConfig&            config) {
+  ScopedNvtxRange overloadRange("getSubstructMatches (ROMol* overload)");
+
+  const int numTargets = static_cast<int>(targets.size());
+  const int numQueries = static_cast<int>(queries.size());
+
+  if (numTargets == 0 || numQueries == 0) {
+    results.resize(numTargets, numQueries);
+    return;
+  }
+
+  std::vector<unsigned int> targetAtomCounts(numTargets);
+  std::vector<unsigned int> queryAtomCounts(numQueries);
+  unsigned int              totalTargetAtoms = 0;
+  unsigned int              totalQueryAtoms  = 0;
+  for (int i = 0; i < numTargets; ++i) {
+    targetAtomCounts[i] = targets[i]->getNumAtoms();
+    totalTargetAtoms += targetAtomCounts[i];
+  }
+  for (int i = 0; i < numQueries; ++i) {
+    queryAtomCounts[i] = queries[i]->getNumAtoms();
+    totalQueryAtoms += queryAtomCounts[i];
+  }
+
+  std::vector<int> targetSortOrder;
+  std::vector<int> querySortOrder;
+
+  if (config.presort) {
+    ScopedNvtxRange sortRange("Compute sort ordering");
+
+    targetSortOrder.resize(numTargets);
+    querySortOrder.resize(numQueries);
+    std::iota(targetSortOrder.begin(), targetSortOrder.end(), 0);
+    std::iota(querySortOrder.begin(), querySortOrder.end(), 0);
+
+    std::sort(targetSortOrder.begin(), targetSortOrder.end(), [&](int a, int b) {
+      return targetAtomCounts[a] > targetAtomCounts[b];
+    });
+    std::sort(querySortOrder.begin(), querySortOrder.end(), [&](int a, int b) {
+      return queryAtomCounts[a] > queryAtomCounts[b];
+    });
+  }
+
+  ScopedNvtxRange buildRange2("Build host data structures");
+  MoleculesHost   targetsHost;
+  MoleculesHost   queriesHost;
+  targetsHost.reserve(numTargets, totalTargetAtoms);
+  queriesHost.reserve(numQueries, totalQueryAtoms);
+
+  if (config.presort) {
+    ScopedNvtxRange sortRange("Add targets to batch");
+    for (int sortedT = 0; sortedT < numTargets; ++sortedT) {
+      addToBatch(targets[targetSortOrder[sortedT]], targetsHost);
+    }
+    sortRange.pop();
+    ScopedNvtxRange sortRange2("Add queries to batch");
+    for (int sortedQ = 0; sortedQ < numQueries; ++sortedQ) {
+      addQueryToBatch(queries[querySortOrder[sortedQ]], queriesHost);
+    }
+  } else {
+    ScopedNvtxRange sortRange3("Add targets to batch");
+    for (int t = 0; t < numTargets; ++t) {
+      addToBatch(targets[t], targetsHost);
+    }
+    sortRange3.pop();
+    ScopedNvtxRange sortRange4("Add queries to batch");
+    for (int q = 0; q < numQueries; ++q) {
+      addQueryToBatch(queries[q], queriesHost);
+    }
+    sortRange4.pop();
+  }
+  buildRange2.pop();
+  ScopedNvtxRange buildRange3("Build device data structures");
+  MoleculesDevice targetsDevice(stream);
+  MoleculesDevice queriesDevice(stream);
+  buildRange3.pop();
+  ScopedNvtxRange buildRange4("Copy data to device");
+  targetsDevice.copyFromHost(targetsHost);
+  queriesDevice.copyFromHost(queriesHost);
+  buildRange4.pop();
+  detail::getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                              results, algorithm, stream, config, targetSortOrder, querySortOrder);
 }
 
 }  // namespace nvMolKit
