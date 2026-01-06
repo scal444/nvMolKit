@@ -332,6 +332,8 @@ __device__ __forceinline__ bool checkEdgeConsistency(const MoleculeView& target,
  * @param matchIndices Output: match index buffer
  * @param maxMatches Maximum matches to write
  * @param matchOffset Offset into matchIndices for this pair
+ * @param maxMatchesToFind Stop searching after this many matches (-1 = no limit)
+ * @param countOnly If true, count matches but don't store them
  */
 template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
 __device__ void vf2SearchGPU(const MoleculeView&                                   target,
@@ -343,7 +345,9 @@ __device__ void vf2SearchGPU(const MoleculeView&                                
                              int*                                                  reportedCount,
                              int16_t*                                              matchIndices,
                              int                                                   maxMatches,
-                             int                                                   matchOffset) {
+                             int                                                   matchOffset,
+                             int                                                   maxMatchesToFind = -1,
+                             bool                                                  countOnly = false) {
   namespace cg = cooperative_groups;
   auto tile32  = cg::tiled_partition<32>(cg::this_thread_block());
   const int laneId = tile32.thread_rank();
@@ -365,13 +369,20 @@ __device__ void vf2SearchGPU(const MoleculeView&                                
   state.mapping[0] = static_cast<int8_t>(startingTargetAtom);
   state.depth = 1;
 
+  const bool hasEarlyExitLimit = (maxMatchesToFind >= 0);
+
   // Iterative DFS
   while (state.depth > 0) {
+    // Check early exit
+    if (hasEarlyExitLimit && *matchCount >= maxMatchesToFind) {
+      break;
+    }
+
     if (state.depth == numQueryAtoms) {
       // Complete match found
       const int currentMatchCount = atomicAdd(matchCount, 1);
 
-      if (currentMatchCount < maxMatches) {
+      if (!countOnly && currentMatchCount < maxMatches) {
         // Write match to output
         const int writeOffset = matchOffset + currentMatchCount * numQueryAtoms;
         for (int q = 0; q < numQueryAtoms; ++q) {
@@ -455,6 +466,9 @@ __device__ void vf2SearchGPU(const MoleculeView&                                
  * @param maxMatches Maximum matches to write (only used in StoreMatches mode)
  * @param matchOffset Offset into output (only used in StoreMatches mode)
  * @param paintParams Paint mode parameters (only used in PaintBits mode)
+ * @param maxMatchesToFind Stop searching after this many matches (-1 = no limit)
+ * @param countOnly If true, count matches but don't store them
+ * @param timings Optional timing data collection
  */
 template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms, 
           SubstructOutputMode OutputMode = SubstructOutputMode::StoreMatches>
@@ -472,6 +486,8 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
                                 int                                                   maxMatches,
                                 int                                                   matchOffset,
                                 PaintModeParams                                       paintParams = {},
+                                int                                                   maxMatchesToFind = -1,
+                                bool                                                  countOnly = false,
                                 DeviceTimingsData*                                    timings = nullptr) {
   long long int t_start;
   DEVICE_TIMING_START(timings, 0, t_start);
@@ -510,10 +526,12 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
 
   __shared__ int currentCount;
   __shared__ int nextCount;
+  __shared__ int earlyExitFlag;
 
   if (tid == 0) {
-    currentCount = 0;
-    nextCount    = 0;
+    currentCount  = 0;
+    nextCount     = 0;
+    earlyExitFlag = 0;
   }
   __syncthreads();
 
@@ -532,13 +550,22 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
 
   // Initialize level 0: all candidates for query atom 0
   const bool singleAtomQuery = (numQueryAtoms == 1);
+  const bool hasEarlyExitLimit = (maxMatchesToFind >= 0);
 
   for (int t = tid; t < numTargetAtoms; t += blockDim.x) {
+    // Check early exit before processing
+    if (hasEarlyExitLimit && earlyExitFlag) {
+      break;
+    }
     if (labelMatrix.get(t, 0)) {
       if (singleAtomQuery) {
         const int matchIdx = atomicAdd(matchCount, 1);
+        // Check if we should signal early exit
+        if (hasEarlyExitLimit && matchIdx + 1 >= maxMatchesToFind) {
+          earlyExitFlag = 1;
+        }
         if constexpr (OutputMode == SubstructOutputMode::StoreMatches) {
-          if (matchIdx < maxMatches) {
+          if (!countOnly && matchIdx < maxMatches) {
             matchIndices[matchOffset + matchIdx] = static_cast<int16_t>(t);
             atomicAdd(reportedCount, 1);
           }
@@ -607,6 +634,11 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
 
   // BFS levels
   for (int level = 1; level < numQueryAtoms; ++level) {
+    // Check early exit at start of level
+    if (hasEarlyExitLimit && earlyExitFlag) {
+      break;
+    }
+
     const int queryAtom   = level;
     const int numPartials = min(currentCount, maxTotal);
 
@@ -680,6 +712,10 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
         if (valid) {
           if (level == numQueryAtoms - 1) {
             const int matchIdx = atomicAdd(matchCount, 1);
+            // Check if we should signal early exit
+            if (hasEarlyExitLimit && matchIdx + 1 >= maxMatchesToFind) {
+              earlyExitFlag = 1;
+            }
             if constexpr (kDebugGSI) {
               printf("[GSI] MATCH FOUND! matchIdx=%d, mapping: ", matchIdx);
               for (int q = 0; q < numQueryAtoms; ++q) {
@@ -688,7 +724,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
               printf("\n");
             }
             if constexpr (OutputMode == SubstructOutputMode::StoreMatches) {
-              if (matchIdx < maxMatches) {
+              if (!countOnly && matchIdx < maxMatches) {
                 const int writeOffset = matchOffset + matchIdx * numQueryAtoms;
                 for (int q = 0; q < numQueryAtoms; ++q) {
                   matchIndices[writeOffset + q] = (q == queryAtom) ? static_cast<int16_t>(t)
@@ -826,7 +862,9 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
                                      int16_t*                                              matchIndices,
                                      int                                                   maxMatches,
                                      int                                                   matchOffset,
-                                     PaintModeParams                                       paintParams = {}) {
+                                     PaintModeParams                                       paintParams = {},
+                                     int                                                   maxMatchesToFind = -1,
+                                     bool                                                  countOnly = false) {
   namespace cg = cooperative_groups;
   auto block   = cg::this_thread_block();
   auto tile32  = cg::tiled_partition<32>(block);
@@ -846,10 +884,14 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
   // Queue state
   __shared__ int queueHead;
   __shared__ int queueTail;
+  __shared__ int earlyExitFlag;
+
+  const bool hasEarlyExitLimit = (maxMatchesToFind >= 0);
 
   if (tid == 0) {
-    queueHead = 0;
-    queueTail = 0;
+    queueHead     = 0;
+    queueTail     = 0;
+    earlyExitFlag = 0;
   }
   block.sync();
 
@@ -894,12 +936,20 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
   const bool           singleAtomQuery = (numQueryAtoms == 1);
 
   for (int i = tid; i < q0Candidates.count; i += block.size()) {
+    // Check early exit before processing
+    if (hasEarlyExitLimit && earlyExitFlag) {
+      break;
+    }
     if (singleAtomQuery) {
       // Single-atom query: record as complete match
       const int matchIdx = atomicAdd(matchCount, 1);
+      // Check if we should signal early exit
+      if (hasEarlyExitLimit && matchIdx + 1 >= maxMatchesToFind) {
+        earlyExitFlag = 1;
+      }
       const int targetAtom = q0Candidates.candidates[i];
       if constexpr (OutputMode == SubstructOutputMode::StoreMatches) {
-        if (matchIdx < maxMatches) {
+        if (!countOnly && matchIdx < maxMatches) {
           matchIndices[matchOffset + matchIdx] = static_cast<int16_t>(targetAtom);
           atomicAdd(reportedCount, 1);
         }
@@ -954,7 +1004,8 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
   while (true) {
     if (tid == 0) {
       snapshotQueueTail = queueTail;
-      workAvailable = (queueHead < snapshotQueueTail) ? 1 : 0;
+      // Check for early exit or no more work
+      workAvailable = (queueHead < snapshotQueueTail && !(hasEarlyExitLimit && earlyExitFlag)) ? 1 : 0;
       if constexpr (kDebugWUS) {
         ++iterCount;
       }
@@ -1060,6 +1111,10 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
           if (localQueryAtom == numQueryAtoms - 1) {
             // Complete match
             const int matchIdx = atomicAdd(matchCount, 1);
+            // Check if we should signal early exit
+            if (hasEarlyExitLimit && matchIdx + 1 >= maxMatchesToFind) {
+              earlyExitFlag = 1;
+            }
             if constexpr (kDebugWUS) {
               printf("[WUS] MATCH FOUND! matchIdx=%d, mapping: ", matchIdx);
               for (int q = 0; q < numQueryAtoms; ++q) {
@@ -1068,7 +1123,7 @@ __device__ void warpUnifiedSearchGPU(const MoleculeView&                        
               printf("\n");
             }
             if constexpr (OutputMode == SubstructOutputMode::StoreMatches) {
-              if (matchIdx < maxMatches) {
+              if (!countOnly && matchIdx < maxMatches) {
                 const int writeOffset = matchOffset + matchIdx * numQueryAtoms;
                 for (int q = 0; q < numQueryAtoms; ++q) {
                   matchIndices[writeOffset + q] =

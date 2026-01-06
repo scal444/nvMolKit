@@ -30,6 +30,8 @@ using nvMolKit::algorithmName;
 using nvMolKit::checkReturnCode;
 using nvMolKit::getRDKitSubstructMatches;
 using nvMolKit::getSubstructMatches;
+using nvMolKit::hasSubstructMatch;
+using nvMolKit::HasSubstructMatchResults;
 using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
 using nvMolKit::SubstructSearchConfig;
@@ -268,10 +270,8 @@ TEST_P(SubstructureSearchTest, BatchAllToAll) {
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-  // Use molecules where non-unique matches won't overflow buffer
-  // Buffer size = target atom count. CC query gives 2*(N-1) matches for N-carbon chain.
-  // To avoid overflow: need 2*(N-1) <= N, i.e., N >= 2. But also need margin for branching.
-  // Use single-atom queries and aromatic targets which have limited matches.
+  // Use molecules and queries that produce reasonable match counts.
+  // Single-atom queries and aromatic targets are used for simpler test cases.
   parseMolecules({"CCO", "c1ccccc1", "c1ccc(O)cc1", "CCN"},  // 4 targets: 3, 6, 7, 3 atoms
                {"C", "O", "c", "N"},                        // 4 single-atom queries
                targetMols,
@@ -341,7 +341,6 @@ TEST_P(SubstructureSearchTest, DifferentMoleculeSizes) {
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // Different sized molecules to test buffer allocation
-  // Use single-atom queries to avoid overflow from non-unique CC matching
   parseMolecules({"C", "CCC", "CCCCC"},  // 1, 3, 5 atoms
                {"C", "N"},              // 1, 1 query atoms
                targetMols,
@@ -371,7 +370,6 @@ TEST_P(SubstructureSearchTest, MultiAtomQuery) {
 
   // Test multi-atom queries
   // CCO with CC: 2 non-unique matches (0,1) and (1,0)
-  // Use larger buffer (3 atoms) so no overflow
   parseMolecules({"CCO"},    // 3 atoms
                {"CC"},     // 2 atom query - should get 2 matches with uniquify=false
                targetMols,
@@ -402,12 +400,12 @@ TEST_P(SubstructureSearchTest, ThreeAtomQuery) {
   expectMatchesRDKit(results, *targetMols[0], *queryMols[0], 0, 0, "CCOCC with COC query");
 }
 
-TEST_P(SubstructureSearchTest, ExpectedOverflow) {
+TEST_P(SubstructureSearchTest, OverflowHandledByRDKitFallback) {
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
   // CCCCCC (6 atoms) with CC query has 10 non-unique matches
-  // Buffer sized to target atoms (6), so this should overflow
+  // Buffer sized to target atoms (6), but RDKit fallback should provide all matches
   parseMolecules({"CCCCCC"}, {"CC"}, targetMols, queryMols);
 
   SubstructSearchResults results;
@@ -418,10 +416,10 @@ TEST_P(SubstructureSearchTest, ExpectedOverflow) {
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
   EXPECT_EQ(rdkitMatches.size(), 10u);
 
-  // GPU should report actual count of 10, but only store 6
-  EXPECT_TRUE(results.hasOverflow(0, 0)) << "Expected overflow for hexane/CC pair";
-  EXPECT_EQ(results.actualCount(0, 0), 10) << "GPU should count all 10 matches";
-  EXPECT_EQ(results.matchCount(0, 0), 6) << "GPU should only store 6 matches (buffer limit)";
+  // With RDKit fallback, we should get all 10 matches
+  EXPECT_FALSE(results.hasOverflow(0, 0)) << "Overflow should be handled by RDKit fallback";
+  EXPECT_EQ(results.actualCount(0, 0), 10) << "Should have all 10 matches via fallback";
+  EXPECT_EQ(results.matchCount(0, 0), 10) << "Should store all 10 matches via fallback";
 }
 
 // =============================================================================
@@ -1582,4 +1580,205 @@ TEST_P(SubstructureSearchTest, ValidSlotsPerRunnerWorks) {
         << "slotsPerRunner=" << slots << " should be valid";
     EXPECT_GT(results.matchCount(0, 0), 0) << "Should find matches with slots=" << slots;
   }
+}
+
+// =============================================================================
+// maxMatches Parameter Tests
+// =============================================================================
+
+TEST_P(SubstructureSearchTest, MaxMatchesZeroCountOnly) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // CCO with C query has 2 carbon matches
+  parseMolecules({"CCO"}, {"C"}, targetMols, queryMols);
+
+  SubstructSearchConfig config;
+  config.maxMatches = 0;  // Count only, don't store matches
+
+  SubstructSearchResults results;
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                      results, algorithm(), stream_.stream(), config);
+
+  // Should count the matches
+  EXPECT_EQ(results.actualCount(0, 0), 2)
+      << "Should count 2 carbon atoms with maxMatches=0";
+
+  // Should not store any matches
+  EXPECT_EQ(results.matchCount(0, 0), 0)
+      << "Should not store matches when maxMatches=0";
+}
+
+TEST_P(SubstructureSearchTest, MaxMatchesLimitedToN) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // CCCC with C query has 4 carbon matches
+  parseMolecules({"CCCC"}, {"C"}, targetMols, queryMols);
+
+  SubstructSearchConfig config;
+  config.maxMatches = 2;  // Only store up to 2 matches
+
+  SubstructSearchResults results;
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                      results, algorithm(), stream_.stream(), config);
+
+  // Should count all matches
+  EXPECT_EQ(results.actualCount(0, 0), 4)
+      << "Should count all 4 carbon atoms";
+
+  // Should only store up to maxMatches
+  EXPECT_EQ(results.matchCount(0, 0), 2)
+      << "Should only store 2 matches when maxMatches=2";
+
+  // Should indicate overflow
+  EXPECT_TRUE(results.hasOverflow(0, 0))
+      << "Should indicate overflow when actual > stored";
+}
+
+TEST_P(SubstructureSearchTest, MaxMatchesGreaterThanActual) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // CC with C query has 2 carbon matches
+  parseMolecules({"CC"}, {"C"}, targetMols, queryMols);
+
+  SubstructSearchConfig config;
+  config.maxMatches = 10;  // More than actual matches
+
+  SubstructSearchResults results;
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                      results, algorithm(), stream_.stream(), config);
+
+  // Should count all matches
+  EXPECT_EQ(results.actualCount(0, 0), 2)
+      << "Should count 2 carbon atoms";
+
+  // Should store all matches (not capped)
+  EXPECT_EQ(results.matchCount(0, 0), 2)
+      << "Should store all 2 matches when maxMatches > actual";
+
+  // Should not indicate overflow
+  EXPECT_FALSE(results.hasOverflow(0, 0))
+      << "Should not indicate overflow when all matches stored";
+}
+
+TEST_P(SubstructureSearchTest, MaxMatchesOneEarlyExit) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Large molecule with many matches - early exit should limit work
+  parseMolecules({"CCCCCCCCCC"}, {"C"}, targetMols, queryMols);  // 10 carbons
+
+  SubstructSearchConfig config;
+  config.maxMatches = 1;  // Stop after first match
+
+  SubstructSearchResults results;
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                      results, algorithm(), stream_.stream(), config);
+
+  // Should find at least 1 match (early exit may count more)
+  EXPECT_GE(results.actualCount(0, 0), 1)
+      << "Should find at least 1 match";
+
+  // Should only store 1 match
+  EXPECT_EQ(results.matchCount(0, 0), 1)
+      << "Should only store 1 match when maxMatches=1";
+}
+
+TEST_P(SubstructureSearchTest, MaxMatchesWithMultiAtomQuery) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // CCCCCC with CC query has 10 non-unique matches
+  parseMolecules({"CCCCCC"}, {"CC"}, targetMols, queryMols);
+
+  SubstructSearchConfig config;
+  config.maxMatches = 3;  // Limit to 3 matches
+
+  SubstructSearchResults results;
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                      results, algorithm(), stream_.stream(), config);
+
+  // RDKit gives 10 non-unique matches
+  EXPECT_GE(results.actualCount(0, 0), 3)
+      << "Should find at least 3 matches";
+
+  // Should store exactly 3 matches
+  EXPECT_EQ(results.matchCount(0, 0), 3)
+      << "Should store exactly 3 matches when maxMatches=3";
+
+  // Each stored match should have 2 atoms (CC query)
+  const auto& matches = results.getMatches(0, 0);
+  EXPECT_EQ(matches.size(), 3u);
+  for (const auto& match : matches) {
+    EXPECT_EQ(match.size(), 2u) << "Each match should have 2 atoms for CC query";
+  }
+}
+
+// =============================================================================
+// hasSubstructMatch Tests
+// =============================================================================
+
+TEST_P(SubstructureSearchTest, HasSubstructMatchBasic) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  parseMolecules({"CCO", "CCCC", "c1ccccc1"}, {"C", "O", "N"}, targetMols, queryMols);
+
+  HasSubstructMatchResults results;
+  hasSubstructMatch(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                    results, algorithm(), stream_.stream());
+
+  EXPECT_EQ(results.numTargets, 3);
+  EXPECT_EQ(results.numQueries, 3);
+
+  // CCO contains C and O, but not N
+  EXPECT_TRUE(results.matches(0, 0)) << "CCO should contain C";
+  EXPECT_TRUE(results.matches(0, 1)) << "CCO should contain O";
+  EXPECT_FALSE(results.matches(0, 2)) << "CCO should not contain N";
+
+  // CCCC contains C, but not O or N
+  EXPECT_TRUE(results.matches(1, 0)) << "CCCC should contain C";
+  EXPECT_FALSE(results.matches(1, 1)) << "CCCC should not contain O";
+  EXPECT_FALSE(results.matches(1, 2)) << "CCCC should not contain N";
+
+  // benzene contains aromatic c, but not aliphatic C, O, or N
+  EXPECT_FALSE(results.matches(2, 0)) << "benzene should not contain aliphatic C";
+  EXPECT_FALSE(results.matches(2, 1)) << "benzene should not contain O";
+  EXPECT_FALSE(results.matches(2, 2)) << "benzene should not contain N";
+}
+
+TEST_P(SubstructureSearchTest, HasSubstructMatchMultiAtomQuery) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  parseMolecules({"CCO", "CCC"}, {"CO", "CC"}, targetMols, queryMols);
+
+  HasSubstructMatchResults results;
+  hasSubstructMatch(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                    results, algorithm(), stream_.stream());
+
+  // CCO contains CO and CC
+  EXPECT_TRUE(results.matches(0, 0)) << "CCO should contain CO";
+  EXPECT_TRUE(results.matches(0, 1)) << "CCO should contain CC";
+
+  // CCC contains CC but not CO
+  EXPECT_FALSE(results.matches(1, 0)) << "CCC should not contain CO";
+  EXPECT_TRUE(results.matches(1, 1)) << "CCC should contain CC";
+}
+
+TEST_P(SubstructureSearchTest, HasSubstructMatchEmptyInputs) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Empty targets
+  parseMolecules({}, {"C"}, targetMols, queryMols);
+
+  HasSubstructMatchResults results;
+  hasSubstructMatch(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                    results, algorithm(), stream_.stream());
+
+  EXPECT_EQ(results.numTargets, 0);
+  EXPECT_EQ(results.numQueries, 1);
 }

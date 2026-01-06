@@ -50,6 +50,7 @@ struct SubstructSearchConfig {
   int  slotsPerRunner      = 3;      ///< Batch slots per runner thread (1-8, higher = more overlap)
   bool presort             = true;   ///< Sort molecules by atom count (largest first) for GPU efficiency
   std::vector<int> gpuIds;           ///< GPU device IDs to use (empty = current device only)
+  int  maxMatches          = -1;     ///< Max matches to store per pair (-1 = no limit, 0 = count only)
 };
 
 /**
@@ -125,6 +126,39 @@ struct SubstructSearchResults {
   }
 };
 
+/**
+ * @brief Results from hasSubstructMatch - boolean per (target, query) pair.
+ *
+ * More efficient than full match enumeration when only existence is needed.
+ * Uses uint8_t instead of bool to avoid std::vector<bool> specialization issues.
+ */
+struct HasSubstructMatchResults {
+  std::vector<uint8_t> hasMatch;  ///< Flattened [target * numQueries + query], 0=false, non-zero=true
+  int numTargets = 0;
+  int numQueries = 0;
+
+  void resize(int nTargets, int nQueries) {
+    numTargets = nTargets;
+    numQueries = nQueries;
+    hasMatch.assign(static_cast<size_t>(nTargets) * nQueries, 0);
+  }
+
+  /// Compute flat pair index
+  [[nodiscard]] int pairIndex(int targetIdx, int queryIdx) const {
+    return targetIdx * numQueries + queryIdx;
+  }
+
+  /// Check if target contains query as substructure
+  [[nodiscard]] bool matches(int targetIdx, int queryIdx) const {
+    return hasMatch[pairIndex(targetIdx, queryIdx)] != 0;
+  }
+
+  /// Set match result for a pair
+  void setMatch(int targetIdx, int queryIdx, bool value) {
+    hasMatch[pairIndex(targetIdx, queryIdx)] = value ? 1 : 0;
+  }
+};
+
 /// Maximum scratch space for boolean expression evaluation per query atom.
 /// Complex SMARTS patterns with many OR branches can require significant scratch space.
 /// E.g., [C,N,O,S,F,Cl,Br,I,...] with N alternatives needs 2N-1 slots (N leaves + N-1 ORs).
@@ -133,6 +167,25 @@ constexpr int kMaxBoolScratchSize = 256;
 
 constexpr std::size_t kMaxTargetAtoms = 128;
 constexpr std::size_t kMaxQueryAtoms  = 64;
+
+/**
+ * @brief Entry representing a (target, query) pair that needs RDKit fallback processing.
+ *
+ * Used when GPU processing cannot handle a pair, either due to:
+ * - Target molecule exceeding kMaxTargetAtoms
+ * - Output buffer overflow during GPU matching
+ */
+struct RDKitFallbackEntry {
+  int originalTargetIdx;  ///< Index in the original input targets vector
+  int originalQueryIdx;   ///< Index in the original input queries vector
+
+  bool operator<(const RDKitFallbackEntry& other) const {
+    if (originalTargetIdx != other.originalTargetIdx) {
+      return originalTargetIdx < other.originalTargetIdx;
+    }
+    return originalQueryIdx < other.originalQueryIdx;
+  }
+};
 
 }  // namespace nvMolKit
 

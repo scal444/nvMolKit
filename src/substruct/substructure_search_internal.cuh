@@ -274,13 +274,17 @@ class BatchResultsDevice {
    * @param numQueries Total number of queries (for kernel view)
    * @param maxTargetAtoms Max atoms per target (stride for recursiveMatchBits)
    * @param numBuffersPerBlock Overflow buffers per block (2 for GSI, 1 for WUS)
+   * @param maxMatchesToFind Stop searching after this many matches (-1 = no limit)
+   * @param countOnly If true, count matches but don't store them
    */
   void allocateBatch(int         batchSize,
                      const int*  batchPairMatchStarts,
                      int         totalBatchMatchIndices,
                      int         numQueries,
                      int         maxTargetAtoms,
-                     int         numBuffersPerBlock);
+                     int         numBuffersPerBlock,
+                     int         maxMatchesToFind = -1,
+                     bool        countOnly = false);
 
   /**
    * @brief Get a view suitable for passing to CUDA kernels.
@@ -332,6 +336,10 @@ class BatchResultsDevice {
   AsyncDeviceVector<uint32_t> labelMatrixBuffer_;
 
   int totalBatchMatchIndices_ = 0;
+
+  // Early exit control
+  int  maxMatchesToFind_ = -1;
+  bool countOnly_        = false;
 };
 
 /**

@@ -39,6 +39,8 @@ using nvMolKit::checkReturnCode;
 using nvMolKit::countCudaDevices;
 using nvMolKit::getRDKitSubstructMatches;
 using nvMolKit::getSubstructMatches;
+using nvMolKit::hasSubstructMatch;
+using nvMolKit::HasSubstructMatchResults;
 using nvMolKit::printValidationResult;
 using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
@@ -169,6 +171,54 @@ void benchRDKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
 }
 
 /**
+ * @brief Benchmark nvMolKit GPU hasSubstructMatch (boolean mode).
+ */
+void benchNvMolKitHasMatch(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
+                           const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols,
+                           SubstructAlgorithm                                algorithm,
+                           const SubstructSearchConfig&                      config,
+                           int&                                              totalMatches,
+                           HasSubstructMatchResults&                         resultsOut,
+                           BenchUtils::TimingResult&                         timingOut,
+                           int                                               iterations = 3,
+                           int                                               warmups    = 1) {
+  std::string algoStr = algorithmName(algorithm);
+
+  ScopedStream stream;
+
+  std::vector<const RDKit::ROMol*> targetPtrs;
+  std::vector<const RDKit::ROMol*> queryPtrs;
+  targetPtrs.reserve(targetMols.size());
+  queryPtrs.reserve(queryMols.size());
+  for (const auto& mol : targetMols) {
+    targetPtrs.push_back(mol.get());
+  }
+  for (const auto& mol : queryMols) {
+    queryPtrs.push_back(mol.get());
+  }
+
+  timingOut = BenchUtils::timeIt(
+      [&]() {
+        hasSubstructMatch(targetPtrs, queryPtrs, resultsOut, algorithm, stream.stream(), config);
+      },
+      iterations, warmups);
+
+  totalMatches = 0;
+  for (int t = 0; t < resultsOut.numTargets; ++t) {
+    for (int q = 0; q < resultsOut.numQueries; ++q) {
+      if (resultsOut.matches(t, q)) {
+        totalMatches++;
+      }
+    }
+  }
+
+  std::string threadingStr = std::to_string(config.workerThreads) + " workers";
+  std::cout << "nvMolKit HasSubstructMatch (" << algoStr << ", " << threadingStr << "), targets=" << targetMols.size()
+            << ", queries=" << queryMols.size() << ": " << timingOut.avgMs << " ms (±" << timingOut.stdMs
+            << " ms)\n";
+}
+
+/**
  * @brief Benchmark nvMolKit GPU substructure matching.
  */
 void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
@@ -288,6 +338,8 @@ void printHelp(const char* progName) {
   std::cout << "                            0: No debug output\n";
   std::cout << "                            1: Print validation failures summary\n";
   std::cout << "                            2: Print detailed validation failures with SMILES\n";
+  std::cout << "  -M, --max_matches <int>   Max matches to find per pair (-1 = no limit) [default: -1]\n";
+  std::cout << "  -H, --has_match_only <bool> Only check for existence of match [default: false]\n";
   std::cout << "  -h, --help                Show this help message\n\n";
   std::cout << "Boolean values can be: true/false, 1/0, yes/no, on/off (case insensitive)\n";
   std::cout << "\nExamples:\n";
@@ -318,33 +370,37 @@ int main(int argc, char* argv[]) {
   bool               doValidate       = false;
   bool               doProfile        = false;
   int                debugLevel       = 0;
+  int                maxMatches       = -1;
+  bool               hasMatchOnly     = false;
 
   static struct option long_options[] = {
-    {    "targets", required_argument, 0, 't'},
-    {    "queries", required_argument, 0, 'q'},
-    {"num_targets", required_argument, 0, 'n'},
-    {"num_queries", required_argument, 0, 'm'},
-    {  "algorithm", required_argument, 0, 'a'},
-    { "batch_size", required_argument, 0, 'b'},
-    {        "cap", required_argument, 0, 'c'},
-    {"num_runners", required_argument, 0, 'p'},
-    {"num_preproc", required_argument, 0, 'e'},
-    {      "slots", required_argument, 0, 'S'},
-    {  "multi_gpu", required_argument, 0, 'G'},
-    {    "presort", required_argument, 0, 's'},
-    {   "do_rdkit", required_argument, 0, 'r'},
-    {  "do_warmup", required_argument, 0, 'w'},
-    {   "validate", required_argument, 0, 'v'},
-    {    "profile", required_argument, 0, 'P'},
-    {      "debug", required_argument, 0, 'd'},
-    {       "help",       no_argument, 0, 'h'},
-    {            0,                 0, 0,   0}
+    {      "targets", required_argument, 0, 't'},
+    {      "queries", required_argument, 0, 'q'},
+    {  "num_targets", required_argument, 0, 'n'},
+    {  "num_queries", required_argument, 0, 'm'},
+    {    "algorithm", required_argument, 0, 'a'},
+    {   "batch_size", required_argument, 0, 'b'},
+    {          "cap", required_argument, 0, 'c'},
+    {  "num_runners", required_argument, 0, 'p'},
+    {  "num_preproc", required_argument, 0, 'e'},
+    {        "slots", required_argument, 0, 'S'},
+    {    "multi_gpu", required_argument, 0, 'G'},
+    {      "presort", required_argument, 0, 's'},
+    {     "do_rdkit", required_argument, 0, 'r'},
+    {    "do_warmup", required_argument, 0, 'w'},
+    {     "validate", required_argument, 0, 'v'},
+    {      "profile", required_argument, 0, 'P'},
+    {        "debug", required_argument, 0, 'd'},
+    {  "max_matches", required_argument, 0, 'M'},
+    {"has_match_only", required_argument, 0, 'H'},
+    {         "help",       no_argument, 0, 'h'},
+    {              0,                 0, 0,   0}
   };
 
   int option_index = 0;
   int c;
 
-  while ((c = getopt_long(argc, argv, "t:q:n:m:a:b:c:p:e:S:G:s:r:w:v:P:d:h", long_options, &option_index)) != -1) {
+  while ((c = getopt_long(argc, argv, "t:q:n:m:a:b:c:p:e:S:G:s:r:w:v:P:d:M:H:h", long_options, &option_index)) != -1) {
     switch (c) {
       case 't':
         targetsPath = optarg;
@@ -474,6 +530,17 @@ int main(int argc, char* argv[]) {
           return 1;
         }
         break;
+      case 'M':
+        try {
+          maxMatches = std::stoi(optarg);
+        } catch (const std::exception& e) {
+          std::cerr << "Error: Invalid value for max_matches: " << optarg << "\n";
+          return 1;
+        }
+        break;
+      case 'H':
+        hasMatchOnly = parseBoolArg(optarg);
+        break;
       case 'h':
         printHelp(argv[0]);
         return 0;
@@ -535,7 +602,9 @@ int main(int argc, char* argv[]) {
   std::cout << "  Run warmup: " << (doWarmup ? "yes" : "no") << "\n";
   std::cout << "  Validate results: " << (doValidate ? "yes" : "no") << "\n";
   std::cout << "  Profile mode: " << (doProfile ? "yes" : "no") << "\n";
-  std::cout << "  Debug level: " << debugLevel << "\n\n";
+  std::cout << "  Debug level: " << debugLevel << "\n";
+  std::cout << "  Max matches: " << (maxMatches < 0 ? "unlimited" : std::to_string(maxMatches)) << "\n";
+  std::cout << "  Has match only: " << (hasMatchOnly ? "yes" : "no") << "\n\n";
 
   std::cout << "Loading and parsing molecules...\n";
   std::vector<std::string> targetSmiles;
@@ -579,18 +648,26 @@ int main(int argc, char* argv[]) {
   const int benchWarmups    = doProfile ? 0 : 1;
 
   SubstructSearchConfig benchConfig;
-  benchConfig.batchSize           = batchSize;
-  benchConfig.workerThreads       = numRunners;
+  benchConfig.batchSize            = batchSize;
+  benchConfig.workerThreads        = numRunners;
   benchConfig.preprocessingThreads = numPreprocessors;
-  benchConfig.slotsPerRunner      = slotsPerRunner;
-  benchConfig.presort             = doPresort;
-  benchConfig.gpuIds              = gpuIds;
+  benchConfig.slotsPerRunner       = slotsPerRunner;
+  benchConfig.presort              = doPresort;
+  benchConfig.gpuIds               = gpuIds;
+  benchConfig.maxMatches           = maxMatches;
 
   int                      nvmolkitMatches = 0;
   SubstructSearchResults   nvmolkitResults;
+  HasSubstructMatchResults nvmolkitHasMatchResults;
   BenchUtils::TimingResult nvmolkitTiming;
-  benchNvMolKit(targetMols, queryMols, algorithm, benchConfig, nvmolkitMatches, nvmolkitResults, nvmolkitTiming, benchIterations, benchWarmups);
-  std::cout << "nvMolKit total matches: " << nvmolkitMatches << "\n";
+
+  if (hasMatchOnly) {
+    benchNvMolKitHasMatch(targetMols, queryMols, algorithm, benchConfig, nvmolkitMatches, nvmolkitHasMatchResults, nvmolkitTiming, benchIterations, benchWarmups);
+    std::cout << "nvMolKit pairs with matches: " << nvmolkitMatches << "\n";
+  } else {
+    benchNvMolKit(targetMols, queryMols, algorithm, benchConfig, nvmolkitMatches, nvmolkitResults, nvmolkitTiming, benchIterations, benchWarmups);
+    std::cout << "nvMolKit total matches: " << nvmolkitMatches << "\n";
+  }
 
   int                      rdkitMatches = 0;
   BenchUtils::TimingResult rdkitTiming{0.0, 0.0};
@@ -599,32 +676,38 @@ int main(int argc, char* argv[]) {
     benchRDKit(targetMols, queryMols, rdkitMatches, rdkitTiming, benchIterations, benchWarmups);
     std::cout << "RDKit total matches: " << rdkitMatches << "\n";
 
-    if (nvmolkitMatches == rdkitMatches) {
-      std::cout << "Match counts EQUAL\n";
-    } else {
-      std::cout << "Match counts DIFFER by " << std::abs(nvmolkitMatches - rdkitMatches) << "\n";
+    if (!hasMatchOnly) {
+      if (nvmolkitMatches == rdkitMatches) {
+        std::cout << "Match counts EQUAL\n";
+      } else {
+        std::cout << "Match counts DIFFER by " << std::abs(nvmolkitMatches - rdkitMatches) << "\n";
+      }
     }
 
     std::cout << "\nSpeedup: " << (rdkitTiming.avgMs / nvmolkitTiming.avgMs) << "x\n";
   }
 
   if (doValidate) {
-    std::cout << "\nValidating against RDKit (per-pair comparison)...\n";
-    auto validation = validateAgainstRDKit(nvmolkitResults, targetMols, queryMols);
-    
-    if (debugLevel == 0) {
-      printValidationResult(validation, algorithmName(algorithm));
-    } else if (debugLevel == 1) {
-      printValidationResult(validation, algorithmName(algorithm));
-    } else if (debugLevel >= 2) {
-      const int maxDetails = (debugLevel == 2) ? 10 : 100;
-      printValidationResultDetailed(validation, nvmolkitResults, targetMols, queryMols,
-                                    targetSmiles, querySmarts, algorithmName(algorithm), maxDetails);
+    if (hasMatchOnly) {
+      std::cout << "\nValidation not supported for has_match_only mode\n";
+    } else {
+      std::cout << "\nValidating against RDKit (per-pair comparison)...\n";
+      auto validation = validateAgainstRDKit(nvmolkitResults, targetMols, queryMols);
+      
+      if (debugLevel == 0) {
+        printValidationResult(validation, algorithmName(algorithm));
+      } else if (debugLevel == 1) {
+        printValidationResult(validation, algorithmName(algorithm));
+      } else if (debugLevel >= 2) {
+        const int maxDetails = (debugLevel == 2) ? 10 : 100;
+        printValidationResultDetailed(validation, nvmolkitResults, targetMols, queryMols,
+                                      targetSmiles, querySmarts, algorithmName(algorithm), maxDetails);
+      }
     }
   }
 
   std::cout << "\n\nCSV Results:\n";
-  std::cout << "algorithm,num_targets,num_queries,batch_size,num_runners,num_preproc,slots,num_gpus,presort,nvmolkit_time_ms,nvmolkit_std_ms";
+  std::cout << "algorithm,num_targets,num_queries,batch_size,num_runners,num_preproc,slots,num_gpus,presort,max_matches,has_match_only,nvmolkit_time_ms,nvmolkit_std_ms";
   if (doRdkit) {
     std::cout << ",rdkit_time_ms,rdkit_std_ms";
   }
@@ -632,6 +715,7 @@ int main(int argc, char* argv[]) {
 
   std::cout << algorithmName(algorithm) << "," << targetMols.size() << "," << queryMols.size() << ","
             << batchSize << "," << numRunners << "," << numPreprocessors << "," << slotsPerRunner << "," << numGpus << "," << (doPresort ? 1 : 0) << ","
+            << maxMatches << "," << (hasMatchOnly ? 1 : 0) << ","
             << nvmolkitTiming.avgMs << "," << nvmolkitTiming.stdMs;
   if (doRdkit) {
     std::cout << "," << rdkitTiming.avgMs << "," << rdkitTiming.stdMs;

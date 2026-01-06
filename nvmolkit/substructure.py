@@ -18,10 +18,12 @@
 from nvmolkit._substructure import (
     SubstructSearchConfig,
     getSubstructMatches,
+    hasSubstructMatch,
 )
 
 __all__ = [
     "SubstructSearchConfig",
     "getSubstructMatches",
+    "hasSubstructMatch",
 ]
 

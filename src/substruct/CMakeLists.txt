@@ -21,6 +21,6 @@ target_include_directories(substructure_search
 target_link_libraries(substructure_search PUBLIC molecules device_vector
                                                   flatBitVect cuda_error_check
                                                   pinned_buffer_pool device_timings
-                                                  OpenMP::OpenMP_CXX
+                                                  device OpenMP::OpenMP_CXX
                                           PRIVATE ${RDKit_LIBS})
 target_compile_options(substructure_search PRIVATE -Xptxas=-v $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp>)

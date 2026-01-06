@@ -75,6 +75,10 @@ struct SubstructMatchResultsDeviceView {
   // Pre-computed label matrices: [batchSize] label matrices in global memory
   uint32_t* labelMatrixBuffer;  ///< Indexed by batchLocalIdx * kLabelMatrixWords
 
+  // Early exit control
+  int  maxMatchesToFind;  ///< Stop searching after finding this many matches (-1 = no limit)
+  bool countOnly;         ///< If true, count matches but don't store them
+
   /// Get pointer to label matrix for a batch-local pair index
   __device__ __forceinline__ uint32_t* getLabelMatrixPtr(int batchLocalIdx) const {
     return labelMatrixBuffer + batchLocalIdx * kLabelMatrixWords;
@@ -112,17 +116,19 @@ namespace detail {
  *
  * @param targetSortOrder If non-empty, maps sorted index -> original index for targets
  * @param querySortOrder If non-empty, maps sorted index -> original index for queries
+ * @param overflowFallback If non-null, pairs with output overflow are added to this queue
  */
-void getSubstructMatches(MoleculesDevice&              targetsDevice,
-                         const MoleculesDevice&        queriesDevice,
-                         const MoleculesHost&          targetsHost,
-                         const MoleculesHost&          queriesHost,
-                         SubstructSearchResults&       results,
-                         SubstructAlgorithm            algorithm,
-                         cudaStream_t                  stream,
-                         const SubstructSearchConfig&  config            = SubstructSearchConfig{},
-                         const std::vector<int>&       targetSortOrder   = {},
-                         const std::vector<int>&       querySortOrder    = {});
+void getSubstructMatches(MoleculesDevice&                  targetsDevice,
+                         const MoleculesDevice&            queriesDevice,
+                         const MoleculesHost&              targetsHost,
+                         const MoleculesHost&              queriesHost,
+                         SubstructSearchResults&           results,
+                         SubstructAlgorithm                algorithm,
+                         cudaStream_t                      stream,
+                         const SubstructSearchConfig&      config            = SubstructSearchConfig{},
+                         const std::vector<int>&           targetSortOrder   = {},
+                         const std::vector<int>&           querySortOrder    = {},
+                         std::vector<RDKitFallbackEntry>*  overflowFallback  = nullptr);
 
 }  // namespace detail
 
@@ -145,6 +151,23 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
                          SubstructAlgorithm                      algorithm,
                          cudaStream_t                            stream,
                          const SubstructSearchConfig&            config = SubstructSearchConfig{});
+
+/**
+ * @brief Check if targets contain queries as substructures
+ *
+ * @param targets Vector of target molecule pointers
+ * @param queries Vector of query molecule pointers (typically from SMARTS)
+ * @param results Output: boolean for each (target, query) pair
+ * @param algorithm Algorithm to use for matching
+ * @param stream CUDA stream for async operations
+ * @param config Execution configuration (threading, batching). Defaults to single-threaded.
+ */
+void hasSubstructMatch(const std::vector<const RDKit::ROMol*>& targets,
+                       const std::vector<const RDKit::ROMol*>& queries,
+                       HasSubstructMatchResults&               results,
+                       SubstructAlgorithm                      algorithm,
+                       cudaStream_t                            stream,
+                       const SubstructSearchConfig&            config = SubstructSearchConfig{});
 
 }  // namespace nvMolKit
 
