@@ -15,6 +15,8 @@
 
 #include "molecules.h"
 
+#include <omp.h>
+
 #include <GraphMol/MolOps.h>
 #include <GraphMol/QueryAtom.h>
 #include <GraphMol/QueryOps.h>
@@ -2230,6 +2232,189 @@ RecursivePatternInfo extractRecursivePatterns(const RDKit::ROMol* mol) {
   }
 
   return info;
+}
+
+// =============================================================================
+// Parallel Batch Building
+// =============================================================================
+
+namespace {
+
+/**
+ * @brief Merge a source batch into destination, adjusting all offsets.
+ * 
+ * Works for both target and query batches. Query-specific fields are only
+ * copied if non-empty in the source.
+ */
+void mergeBatch(MoleculesHost& dest, const MoleculesHost& src) {
+  if (src.numMolecules() == 0) return;
+
+  const int atomOffset = static_cast<int>(dest.atomData.size());
+  const int bondOffset = static_cast<int>(dest.bondData.size());
+  const int atomBondStartsOffset = static_cast<int>(dest.atomBondStarts.size());
+  const int connectivityOffset = static_cast<int>(dest.otherAtomIndices.size());
+  const int instrOffset = static_cast<int>(dest.queryInstructions.size());
+  const int leafMaskOffset = static_cast<int>(dest.queryLeafMasks.size());
+
+  dest.atomData.insert(dest.atomData.end(), src.atomData.begin(), src.atomData.end());
+  dest.atomDataPacked.insert(dest.atomDataPacked.end(), src.atomDataPacked.begin(), src.atomDataPacked.end());
+  dest.bondTypeCounts.insert(dest.bondTypeCounts.end(), src.bondTypeCounts.begin(), src.bondTypeCounts.end());
+  dest.bondData.insert(dest.bondData.end(), src.bondData.begin(), src.bondData.end());
+  dest.atomBondStarts.insert(dest.atomBondStarts.end(), src.atomBondStarts.begin(), src.atomBondStarts.end());
+  dest.otherAtomIndices.insert(dest.otherAtomIndices.end(), src.otherAtomIndices.begin(), src.otherAtomIndices.end());
+  dest.bondDataIndices.insert(dest.bondDataIndices.end(), src.bondDataIndices.begin(), src.bondDataIndices.end());
+
+  dest.atomQueries.insert(dest.atomQueries.end(), src.atomQueries.begin(), src.atomQueries.end());
+  dest.atomQueryMasks.insert(dest.atomQueryMasks.end(), src.atomQueryMasks.begin(), src.atomQueryMasks.end());
+  dest.bondQueryData.insert(dest.bondQueryData.end(), src.bondQueryData.begin(), src.bondQueryData.end());
+  dest.atomQueryTrees.insert(dest.atomQueryTrees.end(), src.atomQueryTrees.begin(), src.atomQueryTrees.end());
+  dest.queryInstructions.insert(dest.queryInstructions.end(), src.queryInstructions.begin(), src.queryInstructions.end());
+  dest.queryLeafMasks.insert(dest.queryLeafMasks.end(), src.queryLeafMasks.begin(), src.queryLeafMasks.end());
+  dest.queryLeafBondCounts.insert(dest.queryLeafBondCounts.end(), src.queryLeafBondCounts.begin(), src.queryLeafBondCounts.end());
+
+  for (int start : src.atomInstrStarts) {
+    dest.atomInstrStarts.push_back(start + instrOffset);
+  }
+  for (int start : src.atomLeafMaskStarts) {
+    dest.atomLeafMaskStarts.push_back(start + leafMaskOffset);
+  }
+
+  for (size_t i = 1; i < src.batchAtomStarts.size(); ++i) {
+    dest.batchAtomStarts.push_back(src.batchAtomStarts[i] + atomOffset);
+    dest.batchBondStarts.push_back(src.batchBondStarts[i] + bondOffset);
+    dest.batchAtomBondStarts.push_back(src.batchAtomBondStarts[i] + atomBondStartsOffset);
+    dest.batchOtherAtomIndicesStarts.push_back(src.batchOtherAtomIndicesStarts[i] + connectivityOffset);
+    dest.batchBondIndicesStarts.push_back(src.batchBondIndicesStarts[i] + connectivityOffset);
+  }
+
+  dest.recursivePatterns.insert(dest.recursivePatterns.end(), 
+                                 src.recursivePatterns.begin(), 
+                                 src.recursivePatterns.end());
+}
+
+}  // namespace
+
+MoleculesHost buildTargetBatchParallel(const std::vector<const RDKit::ROMol*>& molecules,
+                                       const std::vector<int>&                 sortOrder,
+                                       int                                     numThreads) {
+  ScopedNvtxRange range("buildTargetBatchParallel");
+  
+  const int numMols = static_cast<int>(molecules.size());
+  if (numMols == 0) {
+    return MoleculesHost();
+  }
+
+  const bool useSortOrder = !sortOrder.empty();
+
+  if (numThreads <= 1) {
+    MoleculesHost batch;
+    for (int i = 0; i < numMols; ++i) {
+      const int molIdx = useSortOrder ? sortOrder[i] : i;
+      addToBatch(molecules[molIdx], batch);
+    }
+    return batch;
+  }
+
+  // Compute total atoms to estimate per-thread capacity
+  size_t totalAtoms = 0;
+  for (int i = 0; i < numMols; ++i) {
+    totalAtoms += molecules[i]->getNumAtoms();
+  }
+  const size_t atomsPerThread = (totalAtoms + numThreads - 1) / numThreads;
+  const size_t molsPerThread = (numMols + numThreads - 1) / numThreads;
+
+  std::vector<MoleculesHost> threadBatches(numThreads);
+
+  // Pre-reserve to avoid allocator contention during parallel phase
+  for (int t = 0; t < numThreads; ++t) {
+    threadBatches[t].reserve(molsPerThread, atomsPerThread);
+  }
+
+#pragma omp parallel num_threads(numThreads)
+  {
+    const int tid = omp_get_thread_num();
+    MoleculesHost& localBatch = threadBatches[tid];
+
+#pragma omp for schedule(dynamic, 64)
+    for (int i = 0; i < numMols; ++i) {
+      const int molIdx = useSortOrder ? sortOrder[i] : i;
+      addToBatch(molecules[molIdx], localBatch);
+    }
+  }
+
+  MoleculesHost result;
+  for (int t = 0; t < numThreads; ++t) {
+    mergeBatch(result, threadBatches[t]);
+  }
+
+  return result;
+}
+
+MoleculesHost buildQueryBatchParallel(const std::vector<const RDKit::ROMol*>& molecules,
+                                      const std::vector<int>&                 sortOrder,
+                                      int                                     numThreads) {
+  ScopedNvtxRange range("buildQueryBatchParallel");
+  
+  const int numMols = static_cast<int>(molecules.size());
+  if (numMols == 0) {
+    return MoleculesHost();
+  }
+
+  const bool useSortOrder = !sortOrder.empty();
+
+  if (numThreads <= 1) {
+    MoleculesHost batch;
+    for (int i = 0; i < numMols; ++i) {
+      const int molIdx = useSortOrder ? sortOrder[i] : i;
+      addQueryToBatch(molecules[molIdx], batch);
+    }
+    return batch;
+  }
+
+  // Compute total atoms to estimate per-thread capacity
+  size_t totalAtoms = 0;
+  for (int i = 0; i < numMols; ++i) {
+    totalAtoms += molecules[i]->getNumAtoms();
+  }
+  const size_t atomsPerThread = (totalAtoms + numThreads - 1) / numThreads;
+  const size_t molsPerThread = (numMols + numThreads - 1) / numThreads;
+
+  std::vector<MoleculesHost> threadBatches(numThreads);
+
+  // Pre-reserve to avoid allocator contention during parallel phase
+  for (int t = 0; t < numThreads; ++t) {
+    threadBatches[t].reserve(molsPerThread, atomsPerThread);
+  }
+
+#pragma omp parallel num_threads(numThreads)
+  {
+    const int tid = omp_get_thread_num();
+    MoleculesHost& localBatch = threadBatches[tid];
+
+#pragma omp for schedule(dynamic, 64)
+    for (int i = 0; i < numMols; ++i) {
+      const int molIdx = useSortOrder ? sortOrder[i] : i;
+      addQueryToBatch(molecules[molIdx], localBatch);
+    }
+  }
+
+  MoleculesHost result;
+  for (int t = 0; t < numThreads; ++t) {
+    mergeBatch(result, threadBatches[t]);
+  }
+
+  return result;
+}
+
+int getQueryRecursionDepth(const MoleculesHost& queriesHost, int queryIdx) {
+  if (queryIdx >= static_cast<int>(queriesHost.recursivePatterns.size())) {
+    return 0;
+  }
+  const auto& recursiveInfo = queriesHost.recursivePatterns[queryIdx];
+  if (recursiveInfo.empty()) {
+    return 0;
+  }
+  return recursiveInfo.maxDepth + 1;
 }
 
 }  // namespace nvMolKit

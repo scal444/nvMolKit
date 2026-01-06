@@ -7,7 +7,7 @@ target_include_directories(molecules PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_link_libraries(
   molecules
-  PUBLIC device_vector flatBitVect
+  PUBLIC device_vector flatBitVect OpenMP::OpenMP_CXX
   PRIVATE ${RDKit_LIBS} nvtx)
 
 add_library(pinned_buffer_pool pinned_buffer_pool.cpp)
@@ -21,5 +21,6 @@ target_include_directories(substructure_search
 target_link_libraries(substructure_search PUBLIC molecules device_vector
                                                   flatBitVect cuda_error_check
                                                   pinned_buffer_pool device_timings
+                                                  OpenMP::OpenMP_CXX
                                           PRIVATE ${RDKit_LIBS})
-target_compile_options(substructure_search PRIVATE -Xptxas=-v )
+target_compile_options(substructure_search PRIVATE -Xptxas=-v $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp>)

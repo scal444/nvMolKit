@@ -18,6 +18,8 @@
 
 #include <GraphMol/ROMol.h>
 
+#include <omp.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -896,24 +898,6 @@ void BatchResultsDevice::copyBatchToHost(int*     hostMatchCounts,
 namespace {
 
 /**
- * @brief Determine the recursion depth for a query (number of paint rounds needed).
- *
- * @param queriesHost Host-side query data
- * @param queryIdx Query index
- * @return 0 if no recursive patterns, otherwise maxDepth + 1
- */
-int getQueryRecursionDepth(const MoleculesHost& queriesHost, int queryIdx) {
-  if (queryIdx >= static_cast<int>(queriesHost.recursivePatterns.size())) {
-    return 0;
-  }
-  const auto& recursiveInfo = queriesHost.recursivePatterns[queryIdx];
-  if (recursiveInfo.empty()) {
-    return 0;
-  }
-  return recursiveInfo.maxDepth + 1;
-}
-
-/**
  * @brief Precompute the two-stream pipeline schedule for a batch.
  *
  * Groups pairs by their query's recursion depth and populates the host-side
@@ -1576,30 +1560,45 @@ void getSubstructMatchesImpl(MoleculesDevice&             targetsDevice,
   ctx.queryMaxDepths.resize(numQueries);
   ctx.queryHasPatterns.resize(numQueries);
   const int precomputedSize = static_cast<int>(leafSubpatterns.perQueryPatterns.size());
+  const int perQueryMaxDepthSize = static_cast<int>(leafSubpatterns.perQueryMaxDepth.size());
   int maxQueryAtoms = 0;
-  for (int q = 0; q < numQueries; ++q) {
-    const int atomStart     = queriesHost.batchAtomStarts[q];
-    const int atomEnd       = queriesHost.batchAtomStarts[q + 1];
-    ctx.queryAtomCounts[q]  = atomEnd - atomStart;
-    ctx.queryDepths[q]      = getQueryRecursionDepth(queriesHost, q);
-    if (ctx.queryDepths[q] > kMaxRecursionDepth) {
-      throw std::runtime_error("Recursive SMARTS depth " + std::to_string(ctx.queryDepths[q]) +
-                               " exceeds maximum supported depth of " +
-                               std::to_string(kMaxRecursionDepth));
+  int maxDepthSeen = 0;
+  int maxTargetAtoms = 0;
+
+  const int numPreprocessingThreads = config.preprocessingThreads > 0 
+      ? config.preprocessingThreads 
+      : 1;
+
+#pragma omp parallel num_threads(numPreprocessingThreads) \
+    reduction(max:maxQueryAtoms, maxDepthSeen, maxTargetAtoms)
+  {
+#pragma omp for nowait
+    for (int q = 0; q < numQueries; ++q) {
+      const int atomStart     = queriesHost.batchAtomStarts[q];
+      const int atomEnd       = queriesHost.batchAtomStarts[q + 1];
+      ctx.queryAtomCounts[q]  = atomEnd - atomStart;
+      ctx.queryDepths[q]      = getQueryRecursionDepth(queriesHost, q);
+      maxDepthSeen            = std::max(maxDepthSeen, ctx.queryDepths[q]);
+      ctx.queryMaxDepths[q]   = (q < perQueryMaxDepthSize) ? leafSubpatterns.perQueryMaxDepth[q] : 0;
+      ctx.queryHasPatterns[q] = (q < precomputedSize) &&
+                                (ctx.queryMaxDepths[q] > 0 || !leafSubpatterns.perQueryPatterns[q][0].empty());
+      maxQueryAtoms           = std::max(maxQueryAtoms, ctx.queryAtomCounts[q]);
     }
-    ctx.queryMaxDepths[q]   = (q < static_cast<int>(leafSubpatterns.perQueryMaxDepth.size()))
-                                  ? leafSubpatterns.perQueryMaxDepth[q]
-                                  : 0;
-    ctx.queryHasPatterns[q] = (q < precomputedSize) &&
-                              (ctx.queryMaxDepths[q] > 0 || !leafSubpatterns.perQueryPatterns[q][0].empty());
-    maxQueryAtoms           = std::max(maxQueryAtoms, ctx.queryAtomCounts[q]);
+
+#pragma omp for
+    for (int t = 0; t < numTargets; ++t) {
+      const int atomStart = targetsHost.batchAtomStarts[t];
+      const int atomEnd   = targetsHost.batchAtomStarts[t + 1];
+      maxTargetAtoms      = std::max(maxTargetAtoms, atomEnd - atomStart);
+    }
   }
 
-  ctx.maxTargetAtoms = 0;
-  for (int t = 0; t < numTargets; ++t) {
-    const int atomStart = targetsHost.batchAtomStarts[t];
-    const int atomEnd   = targetsHost.batchAtomStarts[t + 1];
-    ctx.maxTargetAtoms  = std::max(ctx.maxTargetAtoms, atomEnd - atomStart);
+  ctx.maxTargetAtoms = maxTargetAtoms;
+
+  if (maxDepthSeen > kMaxRecursionDepth) {
+    throw std::runtime_error("Recursive SMARTS depth " + std::to_string(maxDepthSeen) +
+                             " exceeds maximum supported depth of " +
+                             std::to_string(kMaxRecursionDepth));
   }
 
   ctx.globalPairMatchStarts.resize(numPairs + 1);
@@ -2060,17 +2059,23 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
     return;
   }
 
+  const int numPreprocessingThreads = config.preprocessingThreads > 0 
+      ? config.preprocessingThreads 
+      : 1;
+
   std::vector<unsigned int> targetAtomCounts(numTargets);
   std::vector<unsigned int> queryAtomCounts(numQueries);
-  unsigned int              totalTargetAtoms = 0;
-  unsigned int              totalQueryAtoms  = 0;
-  for (int i = 0; i < numTargets; ++i) {
-    targetAtomCounts[i] = targets[i]->getNumAtoms();
-    totalTargetAtoms += targetAtomCounts[i];
-  }
-  for (int i = 0; i < numQueries; ++i) {
-    queryAtomCounts[i] = queries[i]->getNumAtoms();
-    totalQueryAtoms += queryAtomCounts[i];
+
+#pragma omp parallel num_threads(numPreprocessingThreads)
+  {
+#pragma omp for nowait
+    for (int i = 0; i < numTargets; ++i) {
+      targetAtomCounts[i] = targets[i]->getNumAtoms();
+    }
+#pragma omp for
+    for (int i = 0; i < numQueries; ++i) {
+      queryAtomCounts[i] = queries[i]->getNumAtoms();
+    }
   }
 
   std::vector<int> targetSortOrder;
@@ -2093,33 +2098,8 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
   }
 
   ScopedNvtxRange buildRange2("Build host data structures");
-  MoleculesHost   targetsHost;
-  MoleculesHost   queriesHost;
-  targetsHost.reserve(numTargets, totalTargetAtoms);
-  queriesHost.reserve(numQueries, totalQueryAtoms);
-
-  if (config.presort) {
-    ScopedNvtxRange sortRange("Add targets to batch");
-    for (int sortedT = 0; sortedT < numTargets; ++sortedT) {
-      addToBatch(targets[targetSortOrder[sortedT]], targetsHost);
-    }
-    sortRange.pop();
-    ScopedNvtxRange sortRange2("Add queries to batch");
-    for (int sortedQ = 0; sortedQ < numQueries; ++sortedQ) {
-      addQueryToBatch(queries[querySortOrder[sortedQ]], queriesHost);
-    }
-  } else {
-    ScopedNvtxRange sortRange3("Add targets to batch");
-    for (int t = 0; t < numTargets; ++t) {
-      addToBatch(targets[t], targetsHost);
-    }
-    sortRange3.pop();
-    ScopedNvtxRange sortRange4("Add queries to batch");
-    for (int q = 0; q < numQueries; ++q) {
-      addQueryToBatch(queries[q], queriesHost);
-    }
-    sortRange4.pop();
-  }
+  MoleculesHost targetsHost = buildTargetBatchParallel(targets, targetSortOrder, numPreprocessingThreads);
+  MoleculesHost queriesHost = buildQueryBatchParallel(queries, querySortOrder, numPreprocessingThreads);
   buildRange2.pop();
   ScopedNvtxRange buildRange3("Build device data structures");
   MoleculesDevice targetsDevice(stream);
