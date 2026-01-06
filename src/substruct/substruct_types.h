@@ -29,8 +29,7 @@ constexpr int kThreadsPerBlock = 256;
  */
 enum class SubstructAlgorithm {
   VF2,          ///< VF2 iterative stack-based DFS
-  GSI,          ///< GSI-inspired BFS level-by-level join
-  WarpUnified   ///< Novel warp-collective BFS search
+  GSI           ///< GSI-inspired BFS level-by-level join
 };
 
 /**

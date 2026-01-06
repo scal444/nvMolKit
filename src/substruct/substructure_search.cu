@@ -394,27 +394,6 @@ __global__ void substructMatchKernel(MoleculesDeviceView             targets,
                                                      countOnly,
                                                      timings);
 
-  } else if constexpr (Algo == SubstructAlgorithm::WarpUnified) {
-    // WUS: Warp-collective BFS with precomputed candidates
-    __shared__ CandidateList wusCandidates[kMaxQueryAtoms];
-    __shared__ PartialMatch  wusWorkQueue[kMaxQueueSize];
-
-    warpUnifiedSearchGPU<kMaxTargetAtoms, kMaxQueryAtoms>(target,
-                                                          query,
-                                                          labelMatrix,
-                                                          wusCandidates,
-                                                          wusWorkQueue,
-                                                          kMaxQueueSize,
-                                                          results.getOverflowBuffer(0),
-                                                          results.getOverflowCapacity(),
-                                                          &sharedMatchCount,
-                                                          &sharedReportedCount,
-                                                          results.matchIndices,
-                                                          maxMatches,
-                                                          matchOffset,
-                                                          {},
-                                                          maxMatchesToFind,
-                                                          countOnly);
   }
 
   __syncthreads();
@@ -527,7 +506,6 @@ __global__ void substructPaintKernel(MoleculesDeviceView         targets,
   paintParams.outputPairIdx  = batchLocalPairIdx;
 
   constexpr int gsiBuffersPerBlock = 2;
-  constexpr int wusBuffersPerBlock = 1;
 
   if constexpr (Algo == SubstructAlgorithm::GSI) {
     __shared__ PartialMatch gsiPartials[kMaxPartialsPerBlock * 2];
@@ -539,20 +517,6 @@ __global__ void substructPaintKernel(MoleculesDeviceView         targets,
       target, pattern, labelMatrix,
       gsiPartials, kMaxPartialsPerBlock,
       blockOverflowA, blockOverflowB, overflowCapacity,
-      &sharedMatchCount, &sharedReportedCount,
-      nullptr, 0, 0,
-      paintParams);
-
-  } else if constexpr (Algo == SubstructAlgorithm::WarpUnified) {
-    __shared__ CandidateList wusCandidates[kMaxQueryAtoms];
-    __shared__ PartialMatch  wusWorkQueue[kMaxQueueSize];
-
-    PartialMatch* blockOverflow = overflowA + blockIdx.x * wusBuffersPerBlock * overflowCapacity;
-
-    warpUnifiedSearchGPU<kMaxTargetAtoms, kMaxQueryAtoms, SubstructOutputMode::PaintBits>(
-      target, pattern, labelMatrix,
-      wusCandidates, wusWorkQueue, kMaxQueueSize,
-      blockOverflow, overflowCapacity,
       &sharedMatchCount, &sharedReportedCount,
       nullptr, 0, 0,
       paintParams);
@@ -569,13 +533,6 @@ void configureSubstructKernelsSharedMem() {
   // Configure GSI kernels for max shared memory
   configureSharedMemCarveout(substructMatchKernel<SubstructAlgorithm::GSI>);
   configureSharedMemCarveout(substructPaintKernel<SubstructAlgorithm::GSI>);
-  
-  // Configure WUS kernels
-  // configureSharedMemCarveout(substructMatchKernel<SubstructAlgorithm::WarpUnified>);
-  // configureSharedMemCarveout(substructPaintKernel<SubstructAlgorithm::WarpUnified>);
-  
-  // VF2 uses less shared memory but configure anyway
-  // configureSharedMemCarveout(substructMatchKernel<SubstructAlgorithm::VF2>);
   
   sharedMemCarveoutConfigured() = true;
 }
@@ -1080,17 +1037,10 @@ void launchLabelAndMatch(const std::vector<int>&      batchLocalIndices,
     //   break;
     case SubstructAlgorithm::GSI:
     case SubstructAlgorithm::VF2:
-    case SubstructAlgorithm::WarpUnified:
-
       substructMatchKernel<SubstructAlgorithm::GSI><<<numPairsInGroup, kThreadsPerBlock, 0, stream>>>(
         targetsDevice.view(), queriesDevice.view(), batchView, globalPairIndicesDev.data(), ctx.numQueries,
         batchLocalIndicesDev.data());
       break;
-    // case SubstructAlgorithm::WarpUnified:
-    //   substructMatchKernel<SubstructAlgorithm::WarpUnified><<<numPairsInGroup, kThreadsPerBlock, 0, stream>>>(
-    //     targetsDevice.view(), queriesDevice.view(), batchView, globalPairIndicesDev.data(), ctx.numQueries,
-    //     batchLocalIndicesDev.data());
-    //   break;
   }
 }
 
@@ -1116,7 +1066,6 @@ void launchRecursivePaintKernels(
 
   const auto batchView = batchResults.view();
   constexpr int gsiBuffersPerBlock = 2;
-  constexpr int wusBuffersPerBlock = 1;
 
   const int maxPaintPairsPerSubBatch = std::max(batchSize, 1024);
 
@@ -1151,7 +1100,7 @@ void launchRecursivePaintKernels(
       }
       prepareRange.pop();
 
-      const int buffersPerBlock = (algorithm == SubstructAlgorithm::WarpUnified) ? wusBuffersPerBlock : gsiBuffersPerBlock;
+      const int buffersPerBlock = gsiBuffersPerBlock;
       const size_t overflowNeeded = numBlocksInSubBatch * buffersPerBlock * kOverflowEntriesPerBuffer;
 
       if (scratch.overflow.size() < overflowNeeded) {
@@ -1188,7 +1137,6 @@ void launchRecursivePaintKernels(
       switch (algorithm) {
         case SubstructAlgorithm::VF2:
         case SubstructAlgorithm::GSI:
-        case SubstructAlgorithm::WarpUnified: {
           substructPaintKernel<SubstructAlgorithm::GSI><<<numBlocksInSubBatch, kThreadsPerBlock, 0, stream>>>(
             targetsDevice.view(),
             leafSubpatterns.view(),
@@ -1206,26 +1154,6 @@ void launchRecursivePaintKernels(
             scratch.labelMatrixBuffer.data(),
             firstTargetInBatch);
           break;
-        }
-        // case SubstructAlgorithm::WarpUnified: {
-        //   substructPaintKernel<SubstructAlgorithm::WarpUnified><<<numBlocksInSubBatch, kThreadsPerBlock, 0, stream>>>(
-        //     targetsDevice.view(),
-        //     leafSubpatterns.view(),
-        //     scratch.patternEntries.data(),
-        //     static_cast<int>(numPatternsInSubBatch),
-        //     batchView.recursiveMatchBits,
-        //     batchView.maxTargetAtoms,
-        //     numQueries,
-        //     0, 0,
-        //     batchPairOffset,
-        //     batchSize,
-        //     scratch.overflow.data(),
-        //     scratch.overflow.data(),
-        //     kOverflowEntriesPerBuffer,
-        //     scratch.labelMatrixBuffer.data(),
-        //     firstTargetInBatch);
-        //   break;
-        // }
       }
     }
 
@@ -1280,20 +1208,11 @@ void uploadAndLaunchBatch(BatchSlot&                 slot,
       batchView.maxTargetAtoms);
 
     switch (algorithm) {
-      // case SubstructAlgorithm::VF2:
-      //   substructMatchKernel<SubstructAlgorithm::VF2><<<slot.numPairsInBatch, kThreadsPerBlock, 0, slotStream>>>(
-      //     targetsDevice.view(), queriesDevice.view(), batchView, slot.pairIndicesDev.data(), ctx.numQueries);
-      //   break;
         case SubstructAlgorithm::VF2:
         case SubstructAlgorithm::GSI:
-        case SubstructAlgorithm::WarpUnified:
         substructMatchKernel<SubstructAlgorithm::GSI><<<slot.numPairsInBatch, kThreadsPerBlock, 0, slotStream>>>(
           targetsDevice.view(), queriesDevice.view(), batchView, slot.pairIndicesDev.data(), ctx.numQueries);
         break;
-      // case SubstructAlgorithm::WarpUnified:
-      //   substructMatchKernel<SubstructAlgorithm::WarpUnified><<<slot.numPairsInBatch, kThreadsPerBlock, 0, slotStream>>>(
-      //     targetsDevice.view(), queriesDevice.view(), batchView, slot.pairIndicesDev.data(), ctx.numQueries);
-      //   break;
     }
     return;
   }
@@ -1982,7 +1901,6 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
 
   const auto batchView = batchResults.view();
   constexpr int gsiBuffersPerBlock = 2;
-  constexpr int wusBuffersPerBlock = 1;
 
   const int maxPaintPairsPerSubBatch = std::max(batchSize, 1024);
   processRecursiveRangeSetup.pop();
@@ -2023,7 +1941,7 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
       }
       prepareRange.pop();
 
-      const int buffersPerBlock = (algorithm == SubstructAlgorithm::WarpUnified) ? wusBuffersPerBlock : gsiBuffersPerBlock;
+      const int buffersPerBlock = gsiBuffersPerBlock;
       const size_t overflowNeeded = numBlocksInSubBatch * buffersPerBlock * kOverflowEntriesPerBuffer;
 
       if (scratch.overflow.size() < overflowNeeded) {
@@ -2060,7 +1978,6 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
       switch (algorithm) {
         case SubstructAlgorithm::VF2:
         case SubstructAlgorithm::GSI:
-        case SubstructAlgorithm::WarpUnified: {
           substructPaintKernel<SubstructAlgorithm::GSI><<<numBlocksInSubBatch, kThreadsPerBlock, 0, stream>>>(
             targetsDevice.view(),
             leafSubpatterns.view(),
@@ -2078,26 +1995,6 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
             scratch.labelMatrixBuffer.data(),
             firstTargetInBatch);
           break;
-        }
-        // case SubstructAlgorithm::WarpUnified: {
-        //   substructPaintKernel<SubstructAlgorithm::WarpUnified><<<numBlocksInSubBatch, kThreadsPerBlock, 0, stream>>>(
-        //     targetsDevice.view(),
-        //     leafSubpatterns.view(),
-        //     scratch.patternEntries.data(),
-        //     static_cast<int>(numPatternsInSubBatch),
-        //     batchView.recursiveMatchBits,
-        //     batchView.maxTargetAtoms,
-        //     numQueries,
-        //     0, 0,
-        //     batchPairOffset,
-        //     batchSize,
-        //     scratch.overflow.data(),
-        //     scratch.overflow.data(),
-        //     kOverflowEntriesPerBuffer,
-        //     scratch.labelMatrixBuffer.data(),
-        //     firstTargetInBatch);
-        //   break;
-        // }
       }
     }
 

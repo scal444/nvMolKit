@@ -22,7 +22,6 @@ constexpr bool kDebugAll = false;
 /// @name Substructure Search Debug Flags
 /// @{
 constexpr bool kDebugGSI             = kDebugAll || false;  ///< Debug output in gsiBFSSearchGPU
-constexpr bool kDebugWUS             = kDebugAll || false;  ///< Debug output in warpUnifiedSearchGPU
 constexpr bool kDebugDumpLabelMatrix = kDebugAll || false;  ///< Dump full label matrices after recursive preprocessing
 constexpr bool kDebugPaintRecursive  = kDebugAll || false;  ///< Debug recursive bit painting kernel
 constexpr bool kDebugLabelMatrix     = kDebugAll || false;  ///< Debug label matrix population

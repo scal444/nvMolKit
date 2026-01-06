@@ -66,7 +66,7 @@ struct SubstructMatchResultsDeviceView {
   // Pre-allocated per-block overflow buffers (simple chunked DeviceVector)
   PartialMatch* overflowBuffer;       ///< Base pointer to overflow storage
   int           overflowEntriesPerBuffer;  ///< Entries per buffer (kOverflowEntriesPerBuffer)
-  int           overflowBuffersPerBlock;   ///< 2 for GSI ping-pong, 1 for WUS
+  int           overflowBuffersPerBlock;   ///< 2 for GSI ping-pong
 
   // Per-pair recursive match bits: [batchSize * maxTargetAtoms] with 32 bits per atom
   uint32_t* recursiveMatchBits;  ///< Indexed by batchLocalIdx * maxTargetAtoms + atomIdx

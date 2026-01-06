@@ -273,7 +273,7 @@ class BatchResultsDevice {
    * @param totalBatchMatchIndices Total match indices capacity for this batch
    * @param numQueries Total number of queries (for kernel view)
    * @param maxTargetAtoms Max atoms per target (stride for recursiveMatchBits)
-   * @param numBuffersPerBlock Overflow buffers per block (2 for GSI, 1 for WUS)
+   * @param numBuffersPerBlock Overflow buffers per block (2 for GSI)
    * @param maxMatchesToFind Stop searching after this many matches (-1 = no limit)
    * @param countOnly If true, count matches but don't store them
    */

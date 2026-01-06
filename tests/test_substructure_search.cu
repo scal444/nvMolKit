@@ -205,10 +205,7 @@ class SubstructureSearchTest : public ::testing::TestWithParam<SubstructAlgorith
 // Instantiate parameterized tests for all algorithms
 INSTANTIATE_TEST_SUITE_P(AllAlgorithms,
                          SubstructureSearchTest,
-                         ::testing::Values(//SubstructAlgorithm::VF2,
-                                           //SubstructAlgorithm::WarpUnified
-                                           SubstructAlgorithm::GSI
-                                           ),
+                         ::testing::Values(SubstructAlgorithm::GSI),
                          [](const ::testing::TestParamInfo<SubstructAlgorithm>& info) {
                            return algorithmName(info.param);
                          });
@@ -1115,12 +1112,6 @@ TEST_P(SubstructureSearchTest, NotRingBondSimple) {
 }
 
 TEST_P(SubstructureSearchTest, NotRingBondChain) {
-  // WarpUnified has a fixed-size work queue that can overflow for patterns with many matches.
-  // This 7-atom chain pattern produces 242 matches which exceeds WarpUnified's capacity.
-  if (algorithm() == SubstructAlgorithm::WarpUnified) {
-    GTEST_SKIP() << "WarpUnified has limited queue capacity for high-match-count patterns";
-  }
-
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 

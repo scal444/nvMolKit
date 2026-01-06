@@ -226,7 +226,7 @@ def bench_nvmolkit(
     
     def run():
         nonlocal flagged
-        results = getSubstructMatches(mols, queries, SubstructAlgorithm.WarpUnified, config)
+        results = getSubstructMatches(mols, queries, SubstructAlgorithm.GSI, config)
         torch.cuda.synchronize()
         flagged = []
         for target_matches in results:

@@ -306,10 +306,8 @@ SubstructAlgorithm parseAlgorithmArg(const std::string& arg) {
     return SubstructAlgorithm::VF2;
   } else if (s == "gsi" || s == "1") {
     return SubstructAlgorithm::GSI;
-  } else if (s == "warpunified" || s == "warp" || s == "2") {
-    return SubstructAlgorithm::WarpUnified;
   } else {
-    throw std::runtime_error("Invalid algorithm. Use 'vf2', 'gsi', or 'warpunified'");
+    throw std::runtime_error("Invalid algorithm. Use 'vf2' or 'gsi'");
   }
 }
 
@@ -322,7 +320,7 @@ void printHelp(const char* progName) {
   std::cout << "  -n, --num_targets <int>   Max number of target molecules [default: 100]\n";
   std::cout << "  -m, --num_queries <int>   Max number of query molecules [default: 10]\n";
   std::cout
-    << "  -a, --algorithm <str>     Algorithm: vf2, gsi, or warpunified [default: warpunified]\n";
+    << "  -a, --algorithm <str>     Algorithm: vf2 or gsi [default: gsi]\n";
   std::cout << "  -b, --batch_size <int>    GPU batch size for matching [default: 1024]\n";
   std::cout << "  -c, --cap <int>           Max atoms per molecule (filter larger) [default: 128]\n";
   std::cout << "  -p, --num_runners <int>   Number of GPU runner threads per GPU [default: 2]\n";
@@ -357,7 +355,7 @@ int main(int argc, char* argv[]) {
   std::string        queriesPath;
   int                numTargets       = 100;
   int                numQueries       = 10;
-  SubstructAlgorithm algorithm        = SubstructAlgorithm::WarpUnified;
+  SubstructAlgorithm algorithm        = SubstructAlgorithm::GSI;
   int                batchSize        = 1024;
   unsigned int       maxAtoms         = 128;
   int                numRunners       = 2;

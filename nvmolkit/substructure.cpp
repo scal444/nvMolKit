@@ -123,7 +123,7 @@ BOOST_PYTHON_MODULE(_substructure) {
 
       nvMolKit::SubstructSearchResults results;
       nvMolKit::getSubstructMatches(targetsVec, queriesVec, results,
-                                    nvMolKit::SubstructAlgorithm::WarpUnified, nullptr, config);
+                                    nvMolKit::SubstructAlgorithm::GSI, nullptr, config);
 
       // Convert results to Python: list[target][query] -> list of matches
       // Each match is a list of target atom indices
@@ -184,7 +184,7 @@ BOOST_PYTHON_MODULE(_substructure) {
 
       nvMolKit::HasSubstructMatchResults results;
       nvMolKit::hasSubstructMatch(targetsVec, queriesVec, results,
-                                  nvMolKit::SubstructAlgorithm::WarpUnified, nullptr, config);
+                                  nvMolKit::SubstructAlgorithm::GSI, nullptr, config);
 
       // Convert results to Python: 2D list of booleans [target][query]
       list pyResults;
