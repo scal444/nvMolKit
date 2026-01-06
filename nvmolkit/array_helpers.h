@@ -17,11 +17,41 @@
 #define NVMOLKIT_ARRAY_HELPERS
 
 #include <boost/python.hpp>
+#include <boost/python/stl_iterator.hpp>
 #include <optional>
 
 #include "device_vector.h"
 
 namespace nvMolKit {
+
+template <typename T>
+boost::python::list vectorToList(const std::vector<T>& vec) {
+  boost::python::list result;
+  for (const auto& value : vec) {
+    result.append(value);
+  }
+  return result;
+}
+
+template <typename T>
+std::vector<T> listFromIterable(const boost::python::object& iterable) {
+  std::vector<T> converted;
+  if (PySequence_Check(iterable.ptr())) {
+    Py_ssize_t n = PySequence_Size(iterable.ptr());
+    converted.reserve(static_cast<size_t>(n));
+    for (Py_ssize_t i = 0; i < n; ++i) {
+      boost::python::object item(boost::python::handle<>(
+          boost::python::borrowed(PySequence_GetItem(iterable.ptr(), i))));
+      converted.push_back(boost::python::extract<T>(item));
+    }
+  } else {
+    boost::python::stl_input_iterator<T> it(iterable), end;
+    for (; it != end; ++it) {
+      converted.push_back(*it);
+    }
+  }
+  return converted;
+}
 
 template <typename blockT> cuda::std::span<const blockT> getSpanFromDictElems(void* data, boost::python::tuple& shape) {
   size_t size = boost::python::extract<size_t>(shape[0]);
