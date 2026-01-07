@@ -643,8 +643,9 @@ class TestSubstructSearchConfig:
         config = SubstructSearchConfig()
 
         assert config.batchSize == 1024
-        assert config.workerThreads == 1
-        assert config.preprocessingThreads == 0
+        assert config.workerThreads == -1  # -1 = autoselect
+        assert config.preprocessingThreads == -1  # -1 = autoselect
+        assert config.rdkitFallbackThreads == -1  # -1 = autoselect
         assert config.slotsPerRunner == 3
         assert config.presort is True
         assert config.maxMatches == 0  # 0 = unlimited (like RDKit)

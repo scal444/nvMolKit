@@ -86,8 +86,9 @@ std::vector<int> getAllGpuIds() {
 }
 
 const ThreadingConfig kThreadingConfigs[] = {
-  {nvMolKit::SubstructSearchConfig{1024, 1, 0, -1}, "SingleThreaded"},
-  {nvMolKit::SubstructSearchConfig{1024, 2, 0, -1}, "MultiThreaded"},
+  {nvMolKit::SubstructSearchConfig{1024, 1, 1, 0}, "SingleThreaded"},
+  {nvMolKit::SubstructSearchConfig{1024, 2, 4, 0}, "MultiThreaded"},
+  {nvMolKit::SubstructSearchConfig{1024, -1, -1, -1}, "Autoselect"},
 };
 
 constexpr DatasetConfig kDatasets[] = {
@@ -298,8 +299,10 @@ TEST_P(SubstructureIntegrationTest, ChemblVsSmarts) {
 
   const int numGpus = threading().config.gpuIds.empty() ? 1 : static_cast<int>(threading().config.gpuIds.size());
   std::cout << "[" << algorithmName(algorithm()) << ", " << threading().name << "] Query statistics:\n"
-            << "  Threading: " << threading().config.workerThreads << " workers/GPU, "
-            << numGpus << " GPU(s)\n"
+            << "  Threading: workerThreads=" << threading().config.workerThreads
+            << ", preprocessingThreads=" << threading().config.preprocessingThreads
+            << ", rdkitFallbackThreads=" << threading().config.rdkitFallbackThreads
+            << ", " << numGpus << " GPU(s)\n"
             << "  Total queries: " << numQueries << "\n"
             << "  Total targets: " << numTargets << "\n"
             << "  Grand total matches: " << grandTotalMatches << "\n"

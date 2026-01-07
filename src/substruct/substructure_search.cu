@@ -112,10 +112,12 @@ class RDKitFallbackQueue {
   RDKitFallbackQueue(const std::vector<const RDKit::ROMol*>* targets,
                      const std::vector<const RDKit::ROMol*>* queries,
                      SubstructSearchResults*                 results,
+                     std::mutex*                             resultsMutex,
                      int                                     maxMatches)
       : targets_(targets),
         queries_(queries),
         results_(results),
+        resultsMutex_(resultsMutex),
         maxMatches_(maxMatches),
         shutdown_(false),
         activeProducers_(0) {}
@@ -226,6 +228,13 @@ class RDKitFallbackQueue {
     return result;
   }
 
+  /**
+   * @brief Get the results mutex for use by batch accumulation.
+   *
+   * Ensures GPU batch accumulation and fallback processing use the same mutex.
+   */
+  std::mutex& getResultsMutex() { return *resultsMutex_; }
+
  private:
   void processEntry(const RDKitFallbackEntry& entry) {
     ScopedNvtxRange pairRange("RDKit fallback T" + std::to_string(entry.originalTargetIdx) + 
@@ -235,7 +244,7 @@ class RDKitFallbackQueue {
     const RDKit::ROMol* query  = (*queries_)[entry.originalQueryIdx];
 
     processWithRDKitFallback(target, query, entry.originalTargetIdx, entry.originalQueryIdx,
-                             *results_, resultsMutex_, maxMatches_);
+                             *results_, *resultsMutex_, maxMatches_);
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -246,10 +255,10 @@ class RDKitFallbackQueue {
   const std::vector<const RDKit::ROMol*>* targets_;
   const std::vector<const RDKit::ROMol*>* queries_;
   SubstructSearchResults*                 results_;
+  std::mutex*                             resultsMutex_;
   int                                     maxMatches_;
 
   mutable std::mutex      mutex_;
-  std::mutex              resultsMutex_;
   std::condition_variable cv_;
   std::queue<RDKitFallbackEntry> queue_;
   bool                    shutdown_;
@@ -1807,7 +1816,11 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
   }
 
   std::atomic<int> nextBatchIdx(0);
-  std::mutex       resultsMutex;
+  
+  // Use the fallback queue's mutex if available (ensures GPU batch accumulation
+  // and fallback processing use the same mutex to avoid race conditions)
+  std::mutex localResultsMutex;
+  std::mutex& resultsMutex = fallbackQueue ? fallbackQueue->getResultsMutex() : localResultsMutex;
 
   ScopedCudaEvent upstreamReadyEvent;
   cudaCheckError(cudaEventRecord(upstreamReadyEvent.event(), stream));
@@ -2465,11 +2478,31 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
   // Determine if we should use concurrent fallback processing
   const bool useConcurrentFallback = (effectiveFallbackThreads > 0);
   
+  // Mutex shared between GPU batch accumulation and fallback queue processing
+  std::mutex resultsMutex;
+  
   // Create fallback queue (always needed to collect overflow from GPU processing)
-  RDKitFallbackQueue fallbackQueue(&targets, &queries, &results, config.maxMatches);
+  RDKitFallbackQueue fallbackQueue(&targets, &queries, &results, &resultsMutex, config.maxMatches);
   std::vector<std::thread> fallbackWorkers;
 
+  // RAII helper to ensure fallback workers are always joined, even on exception
+  auto shutdownFallbackWorkers = [&]() {
+    if (useConcurrentFallback) {
+      fallbackQueue.unregisterProducer();
+      fallbackQueue.shutdown();
+      for (auto& worker : fallbackWorkers) {
+        if (worker.joinable()) {
+          worker.join();
+        }
+      }
+    }
+  };
+
   if (useConcurrentFallback) {
+    // Register main thread as producer BEFORE spawning workers to prevent
+    // workers from exiting immediately due to (activeProducers_ == 0 && queue_.empty())
+    fallbackQueue.registerProducer();
+    
     ScopedNvtxRange spawnRange("Spawn RDKit fallback workers");
     fallbackWorkers.reserve(effectiveFallbackThreads);
     for (int i = 0; i < effectiveFallbackThreads; ++i) {
@@ -2486,12 +2519,21 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
   }
 
   // GPU processing - overflow entries are enqueued to fallbackQueue as they're discovered
-  detail::getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                              results, algorithm, stream, effectiveConfig, sortedToOriginal, querySortOrder,
-                              &fallbackQueue);
+  // Wrap in try-catch to ensure fallback workers are cleaned up on exception
+  try {
+    detail::getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                                results, algorithm, stream, effectiveConfig, sortedToOriginal, querySortOrder,
+                                &fallbackQueue);
+  } catch (...) {
+    shutdownFallbackWorkers();
+    throw;
+  }
 
   // Signal queue shutdown and wait for workers to finish
   if (useConcurrentFallback) {
+    // Unregister main thread as producer - GPU processing is done
+    fallbackQueue.unregisterProducer();
+    
     ScopedNvtxRange shutdownRange("Shutdown RDKit fallback queue");
     fallbackQueue.shutdown();
     for (auto& worker : fallbackWorkers) {
@@ -2503,8 +2545,7 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
     std::vector<RDKitFallbackEntry> allFallbacks = fallbackQueue.drainToVector();
     allFallbacks.insert(allFallbacks.end(), fallbackTargets.begin(), fallbackTargets.end());
     if (!allFallbacks.empty()) {
-      std::mutex fallbackMutex;
-      processRDKitFallbackQueue(targets, queries, allFallbacks, results, fallbackMutex,
+      processRDKitFallbackQueue(targets, queries, allFallbacks, results, resultsMutex,
                                 config.maxMatches, "FALLBACK (serial)");
     }
   }

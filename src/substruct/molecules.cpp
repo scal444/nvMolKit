@@ -2335,7 +2335,7 @@ MoleculesHost buildTargetBatchParallel(const std::vector<const RDKit::ROMol*>& m
     const int tid = omp_get_thread_num();
     MoleculesHost& localBatch = threadBatches[tid];
 
-#pragma omp for schedule(dynamic, 64)
+#pragma omp for schedule(static)
     for (int i = 0; i < numMols; ++i) {
       const int molIdx = useSortOrder ? sortOrder[i] : i;
       addToBatch(molecules[molIdx], localBatch);
@@ -2391,7 +2391,7 @@ MoleculesHost buildQueryBatchParallel(const std::vector<const RDKit::ROMol*>& mo
     const int tid = omp_get_thread_num();
     MoleculesHost& localBatch = threadBatches[tid];
 
-#pragma omp for schedule(dynamic, 64)
+#pragma omp for schedule(static)
     for (int i = 0; i < numMols; ++i) {
       const int molIdx = useSortOrder ? sortOrder[i] : i;
       addQueryToBatch(molecules[molIdx], localBatch);
