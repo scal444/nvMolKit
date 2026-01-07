@@ -90,6 +90,7 @@ BOOST_PYTHON_MODULE(_substructure) {
     .def_readwrite("batchSize", &nvMolKit::SubstructSearchConfig::batchSize)
     .def_readwrite("workerThreads", &nvMolKit::SubstructSearchConfig::workerThreads)
     .def_readwrite("preprocessingThreads", &nvMolKit::SubstructSearchConfig::preprocessingThreads)
+    .def_readwrite("rdkitFallbackThreads", &nvMolKit::SubstructSearchConfig::rdkitFallbackThreads)
     .def_readwrite("slotsPerRunner", &nvMolKit::SubstructSearchConfig::slotsPerRunner)
     .def_readwrite("presort", &nvMolKit::SubstructSearchConfig::presort)
     .def_readwrite("maxMatches", &nvMolKit::SubstructSearchConfig::maxMatches)

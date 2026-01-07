@@ -6,6 +6,7 @@ class SubstructSearchConfig:
     batchSize: int
     workerThreads: int
     preprocessingThreads: int
+    rdkitFallbackThreads: int
     slotsPerRunner: int
     presort: bool
     maxMatches: int

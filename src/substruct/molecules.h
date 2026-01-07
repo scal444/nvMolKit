@@ -428,6 +428,20 @@ RecursivePatternInfo extractRecursivePatterns(const RDKit::ROMol* mol);
 bool hasRecursiveSmarts(const RDKit::ROMol* mol);
 
 /**
+ * @brief Check if a target molecule requires RDKit fallback processing.
+ *
+ * Detects molecules with properties that exceed GPU processing limits:
+ * - Atom ring count > 15 (e.g., buckyballs)
+ * - Ring bond count > 15
+ * - Implicit H count > 15
+ * - Heteroatom neighbor count > 15
+ *
+ * @param mol The molecule to check
+ * @return true if the molecule cannot be processed on GPU and needs RDKit fallback
+ */
+bool requiresRDKitFallback(const RDKit::ROMol* mol);
+
+/**
  * @brief Get the recursion depth for a query in a batch.
  *
  * @param queriesHost The host batch containing the query

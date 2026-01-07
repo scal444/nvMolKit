@@ -24,10 +24,12 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <exception>
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <queue>
 #include <set>
 #include <stdexcept>
 #include <thread>
@@ -50,7 +52,227 @@ namespace nvMolKit {
 namespace {
 
 constexpr std::size_t kMaxTargetAtoms = kLabelMaxTargetAtoms;
-constexpr std::size_t kMaxQueryAtoms  = kLabelMaxQueryAtoms;    
+constexpr std::size_t kMaxQueryAtoms  = kLabelMaxQueryAtoms;
+
+// =============================================================================
+// RDKit Fallback Helper
+// =============================================================================
+
+/**
+ * @brief Process a single (target, query) pair using RDKit's CPU implementation.
+ *
+ * Used as fallback for oversized targets or overflow cases.
+ */
+void processWithRDKitFallback(const RDKit::ROMol*     target,
+                              const RDKit::ROMol*     query,
+                              int                     targetIdx,
+                              int                     queryIdx,
+                              SubstructSearchResults& results,
+                              std::mutex&             resultsMutex,
+                              int                     maxMatches) {
+  RDKit::SubstructMatchParameters params;
+  params.uniquify = false;
+  params.maxMatches = (maxMatches > 0) ? static_cast<unsigned int>(maxMatches) : 0;
+  params.useChirality = false;
+  params.useQueryQueryMatches = false;
+
+  std::vector<RDKit::MatchVectType> rdkitMatches = RDKit::SubstructMatch(*target, *query, params);
+
+  if (!rdkitMatches.empty()) {
+    std::vector<std::vector<int>> convertedMatches;
+    convertedMatches.reserve(rdkitMatches.size());
+    for (const auto& match : rdkitMatches) {
+      std::vector<int> mapping(match.size());
+      for (size_t i = 0; i < match.size(); ++i) {
+        mapping[i] = match[i].second;
+      }
+      convertedMatches.push_back(std::move(mapping));
+    }
+
+    std::lock_guard<std::mutex> lock(resultsMutex);
+    auto& targetMatches = results.getMatchesMut(targetIdx, queryIdx);
+    targetMatches.insert(targetMatches.end(),
+                         std::make_move_iterator(convertedMatches.begin()),
+                         std::make_move_iterator(convertedMatches.end()));
+  }
+}
+
+// =============================================================================
+// RDKit Fallback Queue Implementation
+// =============================================================================
+
+/**
+ * @brief Thread-safe queue for RDKit fallback processing.
+ *
+ * Worker threads wait on a condition variable and consume entries as they arrive.
+ * Supports concurrent producers (GPU batch accumulators) and consumers (RDKit workers).
+ */
+class RDKitFallbackQueue {
+ public:
+  RDKitFallbackQueue(const std::vector<const RDKit::ROMol*>* targets,
+                     const std::vector<const RDKit::ROMol*>* queries,
+                     SubstructSearchResults*                 results,
+                     int                                     maxMatches)
+      : targets_(targets),
+        queries_(queries),
+        results_(results),
+        maxMatches_(maxMatches),
+        shutdown_(false),
+        activeProducers_(0) {}
+
+  /**
+   * @brief Add entries to the queue (thread-safe).
+   */
+  void enqueue(const std::vector<RDKitFallbackEntry>& entries) {
+    if (entries.empty()) return;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      for (const auto& entry : entries) {
+        queue_.push(entry);
+      }
+    }
+    cv_.notify_all();
+  }
+
+  /**
+   * @brief Add a single entry to the queue (thread-safe).
+   */
+  void enqueue(const RDKitFallbackEntry& entry) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      queue_.push(entry);
+    }
+    cv_.notify_one();
+  }
+
+  /**
+   * @brief Increment active producer count (call when starting to produce).
+   */
+  void registerProducer() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++activeProducers_;
+  }
+
+  /**
+   * @brief Decrement active producer count and notify if no more producers.
+   */
+  void unregisterProducer() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      --activeProducers_;
+    }
+    cv_.notify_all();
+  }
+
+  /**
+   * @brief Signal shutdown to all waiting threads.
+   */
+  void shutdown() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      shutdown_ = true;
+    }
+    cv_.notify_all();
+  }
+
+  /**
+   * @brief Worker thread function - processes entries until queue is empty and no producers remain.
+   */
+  void workerLoop() {
+    while (true) {
+      RDKitFallbackEntry entry;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this] {
+          return !queue_.empty() || shutdown_ || (activeProducers_ == 0 && queue_.empty());
+        });
+
+        if (queue_.empty()) {
+          if (shutdown_ || activeProducers_ == 0) {
+            return;
+          }
+          continue;
+        }
+
+        entry = queue_.front();
+        queue_.pop();
+      }
+
+      processEntry(entry);
+    }
+  }
+
+  /**
+   * @brief Get total entries processed (for diagnostics).
+   */
+  [[nodiscard]] size_t processedCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return processedCount_;
+  }
+
+  /**
+   * @brief Drain all entries from the queue into a vector.
+   *
+   * Used for serial processing when worker threads are disabled.
+   */
+  std::vector<RDKitFallbackEntry> drainToVector() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<RDKitFallbackEntry> result;
+    result.reserve(queue_.size());
+    while (!queue_.empty()) {
+      result.push_back(queue_.front());
+      queue_.pop();
+    }
+    return result;
+  }
+
+ private:
+  void processEntry(const RDKitFallbackEntry& entry) {
+    ScopedNvtxRange pairRange("RDKit fallback T" + std::to_string(entry.originalTargetIdx) + 
+                              "/Q" + std::to_string(entry.originalQueryIdx));
+
+    const RDKit::ROMol* target = (*targets_)[entry.originalTargetIdx];
+    const RDKit::ROMol* query  = (*queries_)[entry.originalQueryIdx];
+
+    processWithRDKitFallback(target, query, entry.originalTargetIdx, entry.originalQueryIdx,
+                             *results_, resultsMutex_, maxMatches_);
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      ++processedCount_;
+    }
+  }
+
+  const std::vector<const RDKit::ROMol*>* targets_;
+  const std::vector<const RDKit::ROMol*>* queries_;
+  SubstructSearchResults*                 results_;
+  int                                     maxMatches_;
+
+  mutable std::mutex      mutex_;
+  std::mutex              resultsMutex_;
+  std::condition_variable cv_;
+  std::queue<RDKitFallbackEntry> queue_;
+  bool                    shutdown_;
+  int                     activeProducers_;
+  size_t                  processedCount_ = 0;
+};
+
+/**
+ * @brief RAII helper to register/unregister as a producer on the fallback queue.
+ */
+class FallbackQueueProducerGuard {
+ public:
+  explicit FallbackQueueProducerGuard(RDKitFallbackQueue* queue) : queue_(queue) {
+    if (queue_) queue_->registerProducer();
+  }
+  ~FallbackQueueProducerGuard() {
+    if (queue_) queue_->unregisterProducer();
+  }
+  FallbackQueueProducerGuard(const FallbackQueueProducerGuard&) = delete;
+  FallbackQueueProducerGuard& operator=(const FallbackQueueProducerGuard&) = delete;
+ private:
+  RDKitFallbackQueue* queue_;
+};    
 
 using LabelMatrixView = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
 
@@ -1294,8 +1516,7 @@ void accumulateBatchResults(BatchSlot&                        slot,
                             const ThreadWorkerContext&        ctx,
                             SubstructSearchResults&           results,
                             std::mutex&                       resultsMutex,
-                            std::vector<RDKitFallbackEntry>*  overflowFallback = nullptr,
-                            std::mutex*                       overflowMutex = nullptr) {
+                            RDKitFallbackQueue*               fallbackQueue = nullptr) {
   ScopedNvtxRange accumRange("accumulateBatchResults (dynamic)");
 
   ScopedNvtxRange waitRange("Wait for D2H copy");
@@ -1319,9 +1540,8 @@ void accumulateBatchResults(BatchSlot&                        slot,
     // Only trigger RDKit fallback for unintentional overflow (maxMatches == 0 = unlimited).
     // When user sets maxMatches explicitly, excess matches are expected behavior.
     const bool isBufferOverflow = (actualMatches > reportedMatches) && (ctx.maxMatches == 0);
-    if (isBufferOverflow && overflowFallback != nullptr && overflowMutex != nullptr) {
-      std::lock_guard<std::mutex> lock(*overflowMutex);
-      overflowFallback->push_back({targetIdx, queryIdx});
+    if (isBufferOverflow && fallbackQueue != nullptr) {
+      fallbackQueue->enqueue({targetIdx, queryIdx});
       continue;
     }
 
@@ -1377,9 +1597,9 @@ void runnerWorkerInline(int                               workerIdx,
                         int                               deviceId,
                         std::vector<BatchSlot*>           localSlots,
                         std::exception_ptr&               exceptionPtr,
-                        std::vector<RDKitFallbackEntry>*  overflowFallback,
-                        std::mutex*                       overflowMutex) {
+                        RDKitFallbackQueue*               fallbackQueue) {
   try {
+    FallbackQueueProducerGuard producerGuard(fallbackQueue);
     ScopedNvtxRange workerRange("runnerWorkerInline " + std::to_string(workerIdx) + " GPU" + std::to_string(deviceId));
     const WithDevice setDevice(deviceId);
 
@@ -1398,7 +1618,7 @@ void runnerWorkerInline(int                               workerIdx,
       waitRange.pop();
 
       ScopedNvtxRange accumRange("Accumulate batch");
-      accumulateBatchResults(*oldest, ctx, results, resultsMutex, overflowFallback, overflowMutex);
+      accumulateBatchResults(*oldest, ctx, results, resultsMutex, fallbackQueue);
       accumRange.pop();
 
       pendingHead = (pendingHead + 1) % slotsPerRunner;
@@ -1468,7 +1688,7 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
                              const SubstructSearchConfig&      config,
                              const std::vector<int>*           targetSortOrder,
                              const std::vector<int>*           querySortOrder,
-                             std::vector<RDKitFallbackEntry>*  overflowFallback = nullptr) {
+                             RDKitFallbackQueue*               fallbackQueue = nullptr) {
   const int batchSize           = config.batchSize;
   const int requestedNumRunners = config.workerThreads;
   ScopedNvtxRange e2eRange("getSubstructMatches");
@@ -1520,9 +1740,11 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
   int maxDepthSeen = 0;
   int maxTargetAtoms = 0;
 
-  const int numPreprocessingThreads = config.preprocessingThreads > 0 
+  const int numPreprocessingThreads = (config.preprocessingThreads > 0) 
       ? config.preprocessingThreads 
-      : 1;
+      : ((config.preprocessingThreads == -1) 
+         ? static_cast<int>(std::thread::hardware_concurrency()) 
+         : 1);
 
 #pragma omp parallel num_threads(numPreprocessingThreads) \
     reduction(max:maxQueryAtoms, maxDepthSeen, maxTargetAtoms)
@@ -1586,7 +1808,6 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
 
   std::atomic<int> nextBatchIdx(0);
   std::mutex       resultsMutex;
-  std::mutex       overflowMutex;
 
   ScopedCudaEvent upstreamReadyEvent;
   cudaCheckError(cudaEventRecord(upstreamReadyEvent.event(), stream));
@@ -1685,7 +1906,7 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
     
     gpuThreads.emplace_back([=, &ctx, &targetsHost, &queriesHost, &targetsDevice, 
                              &queriesDevice, &leafSubpatterns, &results, &resultsMutex,
-                             &nextBatchIdx, &exceptions, &overflowMutex,
+                             &nextBatchIdx, &exceptions,
                              upstreamEvent = upstreamReadyEvent.event(),
                              bufferPtrs = std::move(gpuBufferPtrs)]() {
       try {
@@ -1750,7 +1971,7 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
                                effectiveBatchSize, deviceId,
                                std::move(workerSlots),
                                std::ref(exceptions[globalIdx]),
-                               overflowFallback, &overflowMutex);
+                               fallbackQueue);
         }
         
         for (auto& w : workers) {
@@ -1797,7 +2018,8 @@ void getSubstructMatches(MoleculesDevice&                  targetsDevice,
                          const SubstructSearchConfig&      config,
                          const std::vector<int>&           targetSortOrder,
                          const std::vector<int>&           querySortOrder,
-                         std::vector<RDKitFallbackEntry>*  overflowFallback) {
+                         void*                             fallbackQueuePtr) {
+  auto* fallbackQueue = static_cast<RDKitFallbackQueue*>(fallbackQueuePtr);
   ScopedNvtxRange buildRange("Build LeafSubpatterns");
   LeafSubpatterns leafSubpatterns;
   leafSubpatterns.buildAllPatterns(queriesHost);
@@ -1809,7 +2031,7 @@ void getSubstructMatches(MoleculesDevice&                  targetsDevice,
 
   getSubstructMatchesImpl(targetsDevice, queriesDevice, targetsHost, queriesHost,
                           leafSubpatterns, results, algorithm, stream, config,
-                          targetOrderPtr, queryOrderPtr, overflowFallback);
+                          targetOrderPtr, queryOrderPtr, fallbackQueue);
 }
 
 }  // namespace detail
@@ -2002,46 +2224,6 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
 namespace {
 
 /**
- * @brief Process a single (target, query) pair using RDKit's CPU implementation.
- *
- * Used as fallback for oversized targets or overflow cases.
- */
-void processWithRDKit(const RDKit::ROMol*     target,
-                      const RDKit::ROMol*     query,
-                      int                     targetIdx,
-                      int                     queryIdx,
-                      SubstructSearchResults& results,
-                      std::mutex&             resultsMutex,
-                      int                     maxMatches) {
-  RDKit::SubstructMatchParameters params;
-  params.uniquify = false;
-  params.maxMatches = (maxMatches > 0) ? static_cast<unsigned int>(maxMatches) : 0;
-  params.useChirality = false;
-  params.useQueryQueryMatches = false;
-
-  std::vector<RDKit::MatchVectType> rdkitMatches;
-  rdkitMatches = RDKit::SubstructMatch(*target, *query, params);
-
-  if (!rdkitMatches.empty()) {
-    std::vector<std::vector<int>> convertedMatches;
-    convertedMatches.reserve(rdkitMatches.size());
-    for (const auto& match : rdkitMatches) {
-      std::vector<int> mapping(match.size());
-      for (size_t i = 0; i < match.size(); ++i) {
-        mapping[i] = match[i].second;
-      }
-      convertedMatches.push_back(std::move(mapping));
-    }
-
-    std::lock_guard<std::mutex> lock(resultsMutex);
-    auto& targetMatches = results.getMatchesMut(targetIdx, queryIdx);
-    targetMatches.insert(targetMatches.end(),
-                         std::make_move_iterator(convertedMatches.begin()),
-                         std::make_move_iterator(convertedMatches.end()));
-  }
-}
-
-/**
  * @brief Process RDKit fallback queue.
  *
  * Runs all (target, query) pairs in the fallback queue using RDKit CPU implementation.
@@ -2063,10 +2245,8 @@ void processRDKitFallbackQueue(const std::vector<const RDKit::ROMol*>& targets,
     const RDKit::ROMol* target = targets[entry.originalTargetIdx];
     const RDKit::ROMol* query  = queries[entry.originalQueryIdx];
     
-    ScopedNvtxRange pairRange("RDKit pair T" + std::to_string(entry.originalTargetIdx) + 
-                              "/Q" + std::to_string(entry.originalQueryIdx));
-    processWithRDKit(target, query, entry.originalTargetIdx, entry.originalQueryIdx,
-                     results, resultsMutex, maxMatches);
+    processWithRDKitFallback(target, query, entry.originalTargetIdx, entry.originalQueryIdx,
+                             results, resultsMutex, maxMatches);
   }
 }
 
@@ -2113,6 +2293,36 @@ void uniquifyResults(SubstructSearchResults& results) {
 
 }  // namespace
 
+/**
+ * @brief Compute effective thread counts using autoselect logic.
+ *
+ * When a config value is -1 (autoselect):
+ * - preprocessingThreads: uses hardware_concurrency
+ * - workerThreads (per GPU): min(4, hardware_concurrency / numGpus)
+ * - rdkitFallbackThreads: hardware_concurrency - (workerThreads * numGpus)
+ */
+void computeEffectiveThreadCounts(const SubstructSearchConfig& config,
+                                  int                          numGpus,
+                                  int&                         effectivePreprocessingThreads,
+                                  int&                         effectiveWorkerThreads,
+                                  int&                         effectiveFallbackThreads) {
+  const int hwThreads = static_cast<int>(std::thread::hardware_concurrency());
+  const int effectiveNumGpus = std::max(1, numGpus);
+
+  effectivePreprocessingThreads = (config.preprocessingThreads == -1)
+      ? hwThreads
+      : std::max(1, config.preprocessingThreads);
+
+  effectiveWorkerThreads = (config.workerThreads == -1)
+      ? std::min(4, std::max(1, hwThreads / effectiveNumGpus))
+      : std::max(1, config.workerThreads);
+
+  const int gpuThreadsTotal = effectiveWorkerThreads * effectiveNumGpus;
+  effectiveFallbackThreads = (config.rdkitFallbackThreads == -1)
+      ? std::max(1, hwThreads - gpuThreadsTotal)
+      : std::max(0, config.rdkitFallbackThreads);
+}
+
 void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
                          const std::vector<const RDKit::ROMol*>& queries,
                          SubstructSearchResults&                 results,
@@ -2129,14 +2339,31 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
     return;
   }
 
-  const int numPreprocessingThreads = config.preprocessingThreads > 0 
-      ? config.preprocessingThreads 
-      : 1;
+  // Determine GPU list and compute effective thread counts
+  std::vector<int> gpuIds = config.gpuIds;
+  if (gpuIds.empty()) {
+    int currentDevice = 0;
+    cudaCheckError(cudaGetDevice(&currentDevice));
+    gpuIds.push_back(currentDevice);
+  }
+  const int numGpus = static_cast<int>(gpuIds.size());
+
+  int effectivePreprocessingThreads, effectiveWorkerThreads, effectiveFallbackThreads;
+  computeEffectiveThreadCounts(config, numGpus,
+                               effectivePreprocessingThreads,
+                               effectiveWorkerThreads,
+                               effectiveFallbackThreads);
+
+  // Create modified config with resolved thread counts
+  SubstructSearchConfig effectiveConfig = config;
+  effectiveConfig.preprocessingThreads = effectivePreprocessingThreads;
+  effectiveConfig.workerThreads = effectiveWorkerThreads;
+  effectiveConfig.gpuIds = gpuIds;
 
   std::vector<unsigned int> targetAtomCounts(numTargets);
   std::vector<unsigned int> queryAtomCounts(numQueries);
 
-#pragma omp parallel num_threads(numPreprocessingThreads)
+#pragma omp parallel num_threads(effectivePreprocessingThreads)
   {
 #pragma omp for nowait
     for (int i = 0; i < numTargets; ++i) {
@@ -2148,20 +2375,20 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
     }
   }
 
-  // Identify oversized targets for RDKit fallback
-  std::vector<RDKitFallbackEntry> oversizedFallback;
+  // Identify targets requiring RDKit fallback (oversized or exceeding packed field limits)
+  std::vector<RDKitFallbackEntry> fallbackTargets;
   std::vector<int>                gpuTargetIndices;  // Original indices of GPU-processable targets
   std::vector<const RDKit::ROMol*> gpuTargets;       // GPU-processable target molecules
-  int                             numOversizedTargets = 0;
+  int                             numFallbackTargets = 0;
 
   gpuTargetIndices.reserve(numTargets);
   gpuTargets.reserve(numTargets);
 
   for (int i = 0; i < numTargets; ++i) {
-    if (targetAtomCounts[i] > kLabelMaxTargetAtoms) {
-      ++numOversizedTargets;
+    if (targetAtomCounts[i] > kLabelMaxTargetAtoms || requiresRDKitFallback(targets[i])) {
+      ++numFallbackTargets;
       for (int q = 0; q < numQueries; ++q) {
-        oversizedFallback.push_back({i, q});
+        fallbackTargets.push_back({i, q});
       }
     } else {
       gpuTargetIndices.push_back(i);
@@ -2169,20 +2396,20 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
     }
   }
   
-  if (numOversizedTargets > 0) {
-    ScopedNvtxRange warnRange("WARNING: " + std::to_string(numOversizedTargets) + 
-                              " oversized targets (>128 atoms) will use RDKit fallback");
+  if (numFallbackTargets > 0) {
+    ScopedNvtxRange warnRange("WARNING: " + std::to_string(numFallbackTargets) + 
+                              " targets will use RDKit fallback");
   }
 
   // Initialize results for all original targets
   results.resize(numTargets, numQueries);
 
-  // If no GPU-processable targets, just run RDKit fallback
+  // If no GPU-processable targets, just run RDKit fallback (no queue needed)
   if (gpuTargets.empty()) {
-    ScopedNvtxRange allFallbackRange("ALL TARGETS OVERSIZED - full RDKit fallback");
+    ScopedNvtxRange allFallbackRange("ALL TARGETS - full RDKit fallback");
     std::mutex resultsMutex;
-    processRDKitFallbackQueue(targets, queries, oversizedFallback, results, resultsMutex, 
-                              config.maxMatches, "ALL TARGETS OVERSIZED");
+    processRDKitFallbackQueue(targets, queries, fallbackTargets, results, resultsMutex, 
+                              config.maxMatches, "ALL TARGETS");
     return;
   }
 
@@ -2221,8 +2448,8 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
   }
 
   ScopedNvtxRange buildRange2("Build host data structures");
-  MoleculesHost targetsHost = buildTargetBatchParallel(gpuTargets, targetSortOrder, numPreprocessingThreads);
-  MoleculesHost queriesHost = buildQueryBatchParallel(queries, querySortOrder, numPreprocessingThreads);
+  MoleculesHost targetsHost = buildTargetBatchParallel(gpuTargets, targetSortOrder, effectivePreprocessingThreads);
+  MoleculesHost queriesHost = buildQueryBatchParallel(queries, querySortOrder, effectivePreprocessingThreads);
   buildRange2.pop();
 
   ScopedNvtxRange buildRange3("Build device data structures");
@@ -2235,23 +2462,51 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
   queriesDevice.copyFromHost(queriesHost);
   buildRange4.pop();
 
-  // Create overflow fallback queue for pairs that overflow GPU buffers
-  std::vector<RDKitFallbackEntry> overflowFallback;
+  // Determine if we should use concurrent fallback processing
+  const bool useConcurrentFallback = (effectiveFallbackThreads > 0);
+  
+  // Create fallback queue (always needed to collect overflow from GPU processing)
+  RDKitFallbackQueue fallbackQueue(&targets, &queries, &results, config.maxMatches);
+  std::vector<std::thread> fallbackWorkers;
 
-  // Use modified sort orders that map to original indices
-  detail::getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                              results, algorithm, stream, config, sortedToOriginal, querySortOrder,
-                              &overflowFallback);
+  if (useConcurrentFallback) {
+    ScopedNvtxRange spawnRange("Spawn RDKit fallback workers");
+    fallbackWorkers.reserve(effectiveFallbackThreads);
+    for (int i = 0; i < effectiveFallbackThreads; ++i) {
+      fallbackWorkers.emplace_back([&fallbackQueue]() {
+        fallbackQueue.workerLoop();
+      });
+    }
 
-  // Process RDKit fallback for oversized targets and overflow pairs (after GPU work completes)
-  std::mutex fallbackMutex;
-  if (!oversizedFallback.empty()) {
-    processRDKitFallbackQueue(targets, queries, oversizedFallback, results, fallbackMutex, 
-                              config.maxMatches, "OVERSIZED TARGETS (>128 atoms)");
+    // Enqueue oversized target fallbacks immediately (processed concurrently)
+    if (!fallbackTargets.empty()) {
+      ScopedNvtxRange enqueueRange("Enqueue oversized targets");
+      fallbackQueue.enqueue(fallbackTargets);
+    }
   }
-  if (!overflowFallback.empty()) {
-    processRDKitFallbackQueue(targets, queries, overflowFallback, results, fallbackMutex, 
-                              config.maxMatches, "BUFFER OVERFLOW");
+
+  // GPU processing - overflow entries are enqueued to fallbackQueue as they're discovered
+  detail::getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
+                              results, algorithm, stream, effectiveConfig, sortedToOriginal, querySortOrder,
+                              &fallbackQueue);
+
+  // Signal queue shutdown and wait for workers to finish
+  if (useConcurrentFallback) {
+    ScopedNvtxRange shutdownRange("Shutdown RDKit fallback queue");
+    fallbackQueue.shutdown();
+    for (auto& worker : fallbackWorkers) {
+      worker.join();
+    }
+  } else {
+    // Process fallback pairs serially when concurrent processing is disabled
+    // Include any overflow entries from GPU processing
+    std::vector<RDKitFallbackEntry> allFallbacks = fallbackQueue.drainToVector();
+    allFallbacks.insert(allFallbacks.end(), fallbackTargets.begin(), fallbackTargets.end());
+    if (!allFallbacks.empty()) {
+      std::mutex fallbackMutex;
+      processRDKitFallbackQueue(targets, queries, allFallbacks, results, fallbackMutex,
+                                config.maxMatches, "FALLBACK (serial)");
+    }
   }
 
   if (config.uniquify) {

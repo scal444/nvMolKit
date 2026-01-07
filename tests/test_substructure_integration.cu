@@ -86,8 +86,8 @@ std::vector<int> getAllGpuIds() {
 }
 
 const ThreadingConfig kThreadingConfigs[] = {
-  {nvMolKit::SubstructSearchConfig{1024, 1, 0}, "SingleThreaded"},
-  {nvMolKit::SubstructSearchConfig{1024, 2, 0}, "MultiThreaded"},
+  {nvMolKit::SubstructSearchConfig{1024, 1, 0, -1}, "SingleThreaded"},
+  {nvMolKit::SubstructSearchConfig{1024, 2, 0, -1}, "MultiThreaded"},
 };
 
 constexpr DatasetConfig kDatasets[] = {

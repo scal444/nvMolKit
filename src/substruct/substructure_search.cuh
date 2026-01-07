@@ -116,7 +116,7 @@ namespace detail {
  *
  * @param targetSortOrder If non-empty, maps sorted index -> original index for targets
  * @param querySortOrder If non-empty, maps sorted index -> original index for queries
- * @param overflowFallback If non-null, pairs with output overflow are added to this queue
+ * @param fallbackQueuePtr Opaque pointer to RDKitFallbackQueue for overflow handling (internal use)
  */
 void getSubstructMatches(MoleculesDevice&                  targetsDevice,
                          const MoleculesDevice&            queriesDevice,
@@ -128,7 +128,7 @@ void getSubstructMatches(MoleculesDevice&                  targetsDevice,
                          const SubstructSearchConfig&      config            = SubstructSearchConfig{},
                          const std::vector<int>&           targetSortOrder   = {},
                          const std::vector<int>&           querySortOrder    = {},
-                         std::vector<RDKitFallbackEntry>*  overflowFallback  = nullptr);
+                         void*                             fallbackQueuePtr  = nullptr);
 
 }  // namespace detail
 

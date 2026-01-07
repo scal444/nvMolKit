@@ -24,27 +24,26 @@ Compares three approaches:
 Usage:
     python pains_filter_bench.py --smiles <smiles_file> --smarts <smarts_file>
 
-    # Use built-in RDKit PAINS patterns (no --smarts needed):
-    python pains_filter_bench.py --smiles <smiles_file> --use_builtin_pains
-
     # Skip nvmolkit (for CPU-only comparison):
-    python pains_filter_bench.py --smiles <smiles_file> --use_builtin_pains --no_nvmolkit
+    python pains_filter_bench.py --smiles <smiles_file> --smarts <smarts_file> --no_nvmolkit
 """
 
 import argparse
+import pickle
 import sys
 import time
+from functools import partial
 from typing import Callable
 
+import nvtx
 from rdkit import Chem
+from tqdm.contrib.concurrent import process_map
 from rdkit.Chem import FilterCatalog
 from rdkit.Chem.FilterCatalog import FilterCatalogParams
 
 
-def time_it(func: Callable, runs: int = 3, warmups: int = 1) -> tuple[float, float]:
-    """Time a function with warmups and return (avg_ms, std_ms)."""
-    for _ in range(warmups):
-        func()
+def time_it(func: Callable, runs: int = 1) -> tuple[float, float]:
+    """Time a function and return (avg_ms, std_ms)."""
     times = []
     for _ in range(runs):
         start = time.perf_counter_ns()
@@ -56,37 +55,49 @@ def time_it(func: Callable, runs: int = 3, warmups: int = 1) -> tuple[float, flo
     return avg_ms, std_ms
 
 
-def load_smiles(filepath: str, max_count: int, max_atoms: int) -> tuple[list[Chem.Mol], list[str]]:
+def load_pickle(filepath: str, max_count: int = 0) -> list[Chem.Mol]:
+    """Load molecules from a pickled file containing binary mol data."""
+    with open(filepath, "rb") as f:
+        binary_mols = pickle.load(f)
+    if max_count > 0:
+        binary_mols = binary_mols[:max_count]
+    mols = [Chem.Mol(b) for b in binary_mols]
+    print(f"  Loaded {len(mols)} molecules from {filepath}")
+    return mols
+
+
+def _parse_smiles(smi: str, sanitize: bool) -> Chem.Mol | None:
+    """Parse a single SMILES string."""
+    return Chem.MolFromSmiles(smi, sanitize=sanitize)
+
+
+def load_smiles(filepath: str, max_count: int = 0, sanitize: bool = True) -> list[Chem.Mol]:
     """Load and parse molecules from a SMILES file."""
-    mols = []
     smiles_list = []
-    parse_failures = 0
-    atom_filtered = 0
-    
     with open(filepath, "r") as f:
         for line in f:
-            if len(mols) >= max_count:
+            if max_count > 0 and len(smiles_list) >= max_count:
                 break
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            smi = line.split()[0]
-            mol = Chem.MolFromSmiles(smi)
-            if mol is None:
-                parse_failures += 1
-                continue
-            if max_atoms > 0 and mol.GetNumAtoms() > max_atoms:
-                atom_filtered += 1
-                continue
+            smiles_list.append(line.split()[0])
+    
+    parse_func = partial(_parse_smiles, sanitize=sanitize)
+    parsed = process_map(parse_func, smiles_list, desc="Parsing molecules", chunksize=1000)
+    
+    mols = []
+    parse_failures = 0
+    for mol in parsed:
+        if mol is None:
+            parse_failures += 1
+        else:
             mols.append(mol)
-            smiles_list.append(smi)
     
     print(f"  Loaded {len(mols)} molecules from {filepath}")
     if parse_failures > 0:
         print(f"    ({parse_failures} parse failures)")
-    if atom_filtered > 0:
-        print(f"    ({atom_filtered} filtered by atom cap)")
-    return mols, smiles_list
+    return mols
 
 
 def load_smarts(filepath: str, max_count: int = 0) -> tuple[list[Chem.Mol], list[str]]:
@@ -164,15 +175,16 @@ def extract_patterns_from_catalog(catalog: FilterCatalog.FilterCatalog) -> tuple
     return queries, smarts_list
 
 
+@nvtx.annotate("bench_rdkit_filter_catalog", color="blue")
 def bench_rdkit_filter_catalog(
     mols: list[Chem.Mol], 
     catalog: FilterCatalog.FilterCatalog,
-    runs: int, 
-    warmups: int
+    runs: int
 ) -> tuple[float, float, list[bool]]:
     """Benchmark RDKit FilterCatalog for PAINS filtering."""
     flagged = []
     
+    @nvtx.annotate("filter_catalog_run", color="cyan")
     def run():
         nonlocal flagged
         flagged = []
@@ -180,15 +192,15 @@ def bench_rdkit_filter_catalog(
             entry = catalog.GetFirstMatch(mol)
             flagged.append(entry is not None)
     
-    avg_ms, std_ms = time_it(run, runs, warmups)
+    avg_ms, std_ms = time_it(run, runs)
     return avg_ms, std_ms, flagged
 
 
+@nvtx.annotate("bench_rdkit_substruct", color="green")
 def bench_rdkit_substruct(
     mols: list[Chem.Mol], 
     queries: list[Chem.Mol], 
-    runs: int, 
-    warmups: int
+    runs: int
 ) -> tuple[float, float, list[bool]]:
     """Benchmark RDKit SubstructMatch API directly."""
     params = Chem.SubstructMatchParameters()
@@ -196,6 +208,7 @@ def bench_rdkit_substruct(
     
     flagged = []
     
+    @nvtx.annotate("substruct_run", color="yellow")
     def run():
         nonlocal flagged
         flagged = []
@@ -207,33 +220,31 @@ def bench_rdkit_substruct(
                     break
             flagged.append(is_flagged)
     
-    avg_ms, std_ms = time_it(run, runs, warmups)
+    avg_ms, std_ms = time_it(run, runs)
     return avg_ms, std_ms, flagged
 
 
+@nvtx.annotate("bench_nvmolkit", color="red")
 def bench_nvmolkit(
     mols: list[Chem.Mol],
     queries: list[Chem.Mol],
     runs: int,
-    warmups: int,
     config
 ) -> tuple[float, float, list[bool]]:
     """Benchmark nvmolkit GPU substructure search."""
     import torch
-    from nvmolkit.substructure import SubstructAlgorithm, getSubstructMatches
+    from nvmolkit.substructure import hasSubstructMatch
     
     flagged = []
     
+    @nvtx.annotate("nvmolkit_run", color="orange")
     def run():
         nonlocal flagged
-        results = getSubstructMatches(mols, queries, SubstructAlgorithm.GSI, config)
+        results = hasSubstructMatch(mols, queries, config)
         torch.cuda.synchronize()
-        flagged = []
-        for target_matches in results:
-            is_flagged = any(len(query_matches) > 0 for query_matches in target_matches)
-            flagged.append(is_flagged)
+        flagged = [any(query_matches) for query_matches in results]
     
-    avg_ms, std_ms = time_it(run, runs, warmups)
+    avg_ms, std_ms = time_it(run, runs)
     return avg_ms, std_ms, flagged
 
 
@@ -241,14 +252,14 @@ def main():
     parser = argparse.ArgumentParser(
         description="PAINS filtering benchmark: nvmolkit vs RDKit FilterCatalog vs RDKit SubstructMatch"
     )
-    parser.add_argument("--smiles", "-s", required=True, help="Path to SMILES file with molecules to filter")
-    parser.add_argument("--smarts", "-q", help="Path to SMARTS file with filter patterns")
-    parser.add_argument("--use_builtin_pains", action="store_true", 
-                        help="Use RDKit's built-in PAINS patterns instead of --smarts file")
-    parser.add_argument("--num_mols", "-n", type=int, default=10000, help="Max number of molecules (default: 10000)")
-    parser.add_argument("--max_atoms", "-a", type=int, default=128, help="Max atoms per molecule (default: 128)")
-    parser.add_argument("--runs", "-r", type=int, default=3, help="Number of timing runs (default: 3)")
-    parser.add_argument("--warmups", "-w", type=int, default=1, help="Number of warmup runs (default: 1)")
+    parser.add_argument("--smiles", "-s", help="Path to SMILES file with molecules to filter")
+    parser.add_argument("--pickle", help="Path to pickled molecules file (alternative to --smiles)")
+    parser.add_argument("--smarts", "-q", required=True, help="Path to SMARTS file with filter patterns")
+    parser.add_argument("--num_mols", "-n", type=int, default=0, help="Max number of molecules (default: 0 = all)")
+    parser.add_argument("--sanitize", action="store_true", dest="sanitize", help="Sanitize SMILES during parsing")
+    parser.add_argument("--no_sanitize", action="store_false", dest="sanitize", help="Skip sanitization (preprocessed SMILES)")
+    parser.set_defaults(sanitize=False)
+    parser.add_argument("--runs", "-r", type=int, default=1, help="Number of timing runs (default: 1)")
     parser.add_argument("--no_nvmolkit", action="store_true", help="Skip nvmolkit benchmark")
     parser.add_argument("--no_filter_catalog", action="store_true", help="Skip RDKit FilterCatalog benchmark")
     parser.add_argument("--no_substruct", action="store_true", help="Skip RDKit SubstructMatch benchmark")
@@ -257,57 +268,53 @@ def main():
     
     args = parser.parse_args()
     
-    if not args.smarts and not args.use_builtin_pains:
-        print("Error: Either --smarts or --use_builtin_pains is required")
+    if not args.smiles and not args.pickle:
+        print("Error: Either --smiles or --pickle is required")
         sys.exit(1)
     
-    if args.smarts and args.use_builtin_pains:
-        print("Warning: Both --smarts and --use_builtin_pains specified, using --smarts")
-        args.use_builtin_pains = False
+    if args.smiles and args.pickle:
+        print("Error: Cannot specify both --smiles and --pickle")
+        sys.exit(1)
     
     print("\nConfiguration:")
-    print(f"  SMILES file: {args.smiles}")
-    print(f"  SMARTS file: {args.smarts if args.smarts else '(builtin PAINS)'}")
-    print(f"  Max molecules: {args.num_mols}")
-    print(f"  Max atoms: {args.max_atoms}")
-    print(f"  Runs: {args.runs}, Warmups: {args.warmups}")
+    print(f"  Input file: {args.smiles or args.pickle} ({'pickle' if args.pickle else 'smiles'})")
+    print(f"  SMARTS file: {args.smarts}")
+    print(f"  Max molecules: {args.num_mols if args.num_mols > 0 else 'all'}")
+    print(f"  Runs: {args.runs}")
     print(f"  Run nvmolkit: {not args.no_nvmolkit}")
     print(f"  Run FilterCatalog: {not args.no_filter_catalog}")
     print(f"  Run SubstructMatch: {not args.no_substruct}")
     
     print("\nLoading molecules...")
-    mols, _ = load_smiles(args.smiles, args.num_mols, args.max_atoms)
+    if args.pickle:
+        mols = load_pickle(args.pickle, args.num_mols)
+    else:
+        mols = load_smiles(args.smiles, args.num_mols, args.sanitize)
     
     if len(mols) == 0:
         print("Error: No valid molecules loaded")
         sys.exit(1)
     
     print("\nLoading SMARTS patterns...")
+    queries, _ = load_smarts(args.smarts)
+    if len(queries) == 0:
+        print("Error: No valid SMARTS patterns loaded from file")
+        sys.exit(1)
+    
     catalog = None
-    queries = []
-    
-    if args.use_builtin_pains:
+    if not args.no_filter_catalog:
+        print("\nLoading builtin PAINS FilterCatalog...")
         catalog = get_builtin_pains_catalog()
-        queries, _ = extract_patterns_from_catalog(catalog)
-        if len(queries) == 0:
-            print("  Warning: Could not extract patterns from FilterCatalog.")
-            print("  FilterCatalog benchmark will still work, but SubstructMatch/nvmolkit will be skipped.")
-            print("  To compare all methods, provide explicit SMARTS patterns with --smarts.")
-    else:
-        queries, _ = load_smarts(args.smarts)
-        if len(queries) == 0:
-            print("Error: No valid SMARTS patterns loaded from file")
-            sys.exit(1)
     
-    num_patterns = len(queries) if queries else catalog.GetNumEntries() if catalog else 0
+    num_patterns = len(queries)
     print(f"\nBenchmarking PAINS filtering: {len(mols)} molecules × {num_patterns} patterns")
     print("=" * 70)
     
     results = {}
     
-    if not args.no_nvmolkit and queries:
+    if not args.no_nvmolkit:
         try:
-            from nvmolkit.substructure import SubstructSearchConfig
+            from nvmolkit.substructure import SubstructSearchConfig, hasSubstructMatch
             import torch
             
             config = SubstructSearchConfig()
@@ -315,36 +322,35 @@ def main():
             config.workerThreads = args.workers
             config.presort = True
             
-            print("\nRunning nvmolkit GPU benchmark...")
+            print("\nWarming up nvmolkit...")
+            warmup_mols = mols[:10]
+            with nvtx.annotate("nvmolkit_warmup", color="purple"):
+                hasSubstructMatch(warmup_mols, queries, config)
+                torch.cuda.synchronize()
+            
+            print("Running nvmolkit GPU benchmark...")
             nvmolkit_avg, nvmolkit_std, nvmolkit_flagged = bench_nvmolkit(
-                mols, queries, args.runs, args.warmups, config
+                mols, queries, args.runs, config
             )
             nvmolkit_hits = sum(nvmolkit_flagged)
             print(f"  nvmolkit:        {nvmolkit_avg:10.2f} ms (± {nvmolkit_std:.2f} ms), {nvmolkit_hits} flagged")
             results["nvmolkit"] = (nvmolkit_avg, nvmolkit_std, nvmolkit_flagged)
         except ImportError as e:
             print(f"  nvmolkit: SKIPPED (import error: {e})")
-    elif not args.no_nvmolkit:
-        print("\n  nvmolkit: SKIPPED (no SMARTS patterns available)")
     
     if not args.no_filter_catalog:
-        if catalog is not None:
-            print("\nRunning RDKit FilterCatalog benchmark...")
-            fc_avg, fc_std, fc_flagged = bench_rdkit_filter_catalog(mols, catalog, args.runs, args.warmups)
-            fc_hits = sum(fc_flagged)
-            print(f"  FilterCatalog:   {fc_avg:10.2f} ms (± {fc_std:.2f} ms), {fc_hits} flagged")
-            results["filter_catalog"] = (fc_avg, fc_std, fc_flagged)
-        else:
-            print("\n  FilterCatalog: SKIPPED (only available with --use_builtin_pains)")
+        print("\nRunning RDKit FilterCatalog benchmark...")
+        fc_avg, fc_std, fc_flagged = bench_rdkit_filter_catalog(mols, catalog, args.runs)
+        fc_hits = sum(fc_flagged)
+        print(f"  FilterCatalog:   {fc_avg:10.2f} ms (± {fc_std:.2f} ms), {fc_hits} flagged")
+        results["filter_catalog"] = (fc_avg, fc_std, fc_flagged)
     
-    if not args.no_substruct and queries:
+    if not args.no_substruct:
         print("\nRunning RDKit SubstructMatch benchmark...")
-        ss_avg, ss_std, ss_flagged = bench_rdkit_substruct(mols, queries, args.runs, args.warmups)
+        ss_avg, ss_std, ss_flagged = bench_rdkit_substruct(mols, queries, args.runs)
         ss_hits = sum(ss_flagged)
         print(f"  SubstructMatch:  {ss_avg:10.2f} ms (± {ss_std:.2f} ms), {ss_hits} flagged")
         results["substruct"] = (ss_avg, ss_std, ss_flagged)
-    elif not args.no_substruct:
-        print("\n  SubstructMatch: SKIPPED (no SMARTS patterns available)")
     
     print("\n" + "=" * 70)
     print("Summary:")

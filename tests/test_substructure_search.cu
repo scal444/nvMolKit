@@ -1909,3 +1909,30 @@ TEST_P(SubstructureSearchTest, UniquifyBatch) {
     }
   }
 }
+
+// =============================================================================
+// RDKit Fallback Tests - High Ring Count Molecules
+// =============================================================================
+
+TEST_P(SubstructureSearchTest, HighRingCountFallback) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // C60 buckyball has atoms with ring count > 15, requiring RDKit fallback
+  // Mix with normal molecule to test batch handling
+  const std::string buckyball = 
+      "c12c3c4c5c1c1c6c7c2c2c8c3c3c9c4c4c%10c5c5c1c1c6c6c%11c7c2c2c7c8c3c3c8c9c4c4c9c%10c5c5c1c1c6c6c%11c2c2c7c3c3c8c4c4c9c5c1c1c6c2c3c41";
+  
+  parseMolecules({"c1ccccc1", buckyball}, {"c"}, targetMols, queryMols);
+
+  SubstructSearchResults results;
+  EXPECT_NO_THROW(
+      getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                          results, algorithm(), stream_.stream()))
+      << "Buckyball should be handled via RDKit fallback without throwing";
+
+  for (int t = 0; t < results.numTargets; ++t) {
+    auto rdkitMatches = getRDKitSubstructMatches(*targetMols[t], *queryMols[0], false);
+    EXPECT_EQ(results.matchCount(t, 0), static_cast<int>(rdkitMatches.size()));
+  }
+}

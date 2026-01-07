@@ -35,22 +35,28 @@ enum class SubstructAlgorithm {
 /**
  * @brief Configuration for substructure search execution.
  *
- * Controls threading, batching, and multi-GPU behavior. Default configuration is
- * single-threaded for deterministic behavior and simpler debugging.
+ * Controls threading, batching, and multi-GPU behavior. Default configuration uses
+ * autoselect (-1) which determines optimal thread counts based on hardware.
  *
  * Multi-GPU mode: When gpuIds is non-empty, work is distributed across the specified
  * GPUs using round-robin assignment. Each GPU gets workerThreads workers, so total
  * worker threads = workerThreads * gpuIds.size().
+ *
+ * Threading autoselect (-1 for any thread count):
+ * - preprocessingThreads: uses hardware_concurrency
+ * - workerThreads: min(4, hardware_concurrency / numGpus)
+ * - rdkitFallbackThreads: hardware_concurrency - (workerThreads * numGpus)
  */
 struct SubstructSearchConfig {
-  int  batchSize           = 1024;   ///< Number of (target, query) pairs per GPU batch
-  int  workerThreads       = 1;      ///< Number of GPU runner threads per GPU
-  int  preprocessingThreads = 0;     ///< CPU threads for input preprocessing (0 = single-threaded)
-  int  slotsPerRunner      = 3;      ///< Batch slots per runner thread (1-8, higher = more overlap)
-  bool presort             = true;   ///< Sort molecules by atom count (largest first) for GPU efficiency
+  int  batchSize            = 1024;  ///< Number of (target, query) pairs per GPU batch
+  int  workerThreads        = -1;    ///< GPU runner threads per GPU (-1 = autoselect)
+  int  preprocessingThreads = -1;    ///< CPU threads for input preprocessing (-1 = autoselect)
+  int  rdkitFallbackThreads = -1;    ///< Threads for RDKit fallback queue (-1 = autoselect)
+  int  slotsPerRunner       = 3;     ///< Batch slots per runner thread (1-8, higher = more overlap)
+  bool presort              = true;  ///< Sort molecules by atom count (largest first) for GPU efficiency
   std::vector<int> gpuIds;           ///< GPU device IDs to use (empty = current device only)
-  int  maxMatches          = 0;      ///< Max matches per pair (0 = unlimited, like RDKit)
-  bool uniquify            = false;  ///< Remove duplicate matches differing only in atom enumeration order
+  int  maxMatches           = 0;     ///< Max matches per pair (0 = unlimited, like RDKit)
+  bool uniquify             = false; ///< Remove duplicate matches differing only in atom enumeration order
 };
 
 /**

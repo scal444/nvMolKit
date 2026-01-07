@@ -2417,4 +2417,49 @@ int getQueryRecursionDepth(const MoleculesHost& queriesHost, int queryIdx) {
   return recursiveInfo.maxDepth + 1;
 }
 
+bool requiresRDKitFallback(const RDKit::ROMol* mol) {
+  const auto* ringInfo = mol->getRingInfo();
+  if (!ringInfo->isSymmSssr()) {
+    throw std::runtime_error("Molecule ring info not initialized - call RDKit::MolOps::symmetrizeSSSR first");
+  }
+
+  for (const RDKit::Atom* atom : mol->atoms()) {
+    const int idx = atom->getIdx();
+
+    if (ringInfo->numAtomRings(idx) > AtomDataPacked::kMax4BitValue) {
+      return true;
+    }
+
+    int ringBondCount = 0;
+    auto [beg, bondEnd] = mol->getAtomBonds(atom);
+    while (beg != bondEnd) {
+      const auto* bond = (*mol)[*beg];
+      if (ringInfo->numBondRings(bond->getIdx()) > 0) {
+        ++ringBondCount;
+      }
+      ++beg;
+    }
+    if (ringBondCount > AtomDataPacked::kMax4BitValue) {
+      return true;
+    }
+
+    if (atom->getNumImplicitHs() > AtomDataPacked::kMax4BitValue) {
+      return true;
+    }
+
+    int numHeteroNeighbors = 0;
+    for (const auto* neighbor : mol->atomNeighbors(atom)) {
+      const int neighborAtomicNum = neighbor->getAtomicNum();
+      if (neighborAtomicNum != 6 && neighborAtomicNum != 1) {
+        ++numHeteroNeighbors;
+      }
+    }
+    if (numHeteroNeighbors > AtomDataPacked::kMax4BitValue) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 }  // namespace nvMolKit
