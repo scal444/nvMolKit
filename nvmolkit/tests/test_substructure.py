@@ -379,18 +379,18 @@ class TestDegreeQueries:
 class TestMaxMatchesConfig:
     """Tests for maxMatches configuration parameter."""
 
-    def test_max_matches_zero_count_only(self):
-        """Test maxMatches=0 only counts matches without storing."""
+    def test_max_matches_zero_unlimited(self):
+        """Test maxMatches=0 means unlimited (like RDKit)."""
         targets = [Chem.MolFromSmiles("CCO")]
         queries = [Chem.MolFromSmarts("C")]
 
         config = SubstructSearchConfig()
-        config.maxMatches = 0
+        config.maxMatches = 0  # Unlimited
 
         results = getSubstructMatches(targets, queries, config)
 
-        # With maxMatches=0, no matches are stored
-        assert len(results[0][0]) == 0
+        # With maxMatches=0 (unlimited), all matches are stored
+        assert len(results[0][0]) == 2
 
     def test_max_matches_limited(self):
         """Test maxMatches limits stored matches."""
@@ -402,7 +402,7 @@ class TestMaxMatchesConfig:
 
         results = getSubstructMatches(targets, queries, config)
 
-        # Only 2 matches stored even though 4 exist
+        # Only 2 matches stored
         assert len(results[0][0]) == 2
 
     def test_max_matches_greater_than_actual(self):
@@ -417,6 +417,147 @@ class TestMaxMatchesConfig:
 
         # All 2 matches stored
         assert len(results[0][0]) == 2
+
+
+# =============================================================================
+# Uniquify Tests
+# =============================================================================
+
+class TestUniquify:
+    """Tests for the uniquify option that removes duplicate matches."""
+
+    def test_uniquify_cyclohexane_ccc(self):
+        """Test uniquify on cyclohexane with CCC query (classic example)."""
+        target = Chem.MolFromSmiles("C1CCCCC1")  # cyclohexane
+        query = Chem.MolFromSmarts("CCC")
+
+        # Without uniquify: 12 matches
+        config_no_uniquify = SubstructSearchConfig()
+        config_no_uniquify.uniquify = False
+        results_no_uniquify = getSubstructMatches([target], [query], config_no_uniquify)
+
+        rdkit_non_unique = list(target.GetSubstructMatches(query, uniquify=False))
+        assert len(results_no_uniquify[0][0]) == len(rdkit_non_unique)
+        assert len(results_no_uniquify[0][0]) == 12
+
+        # With uniquify: 6 matches
+        config_uniquify = SubstructSearchConfig()
+        config_uniquify.uniquify = True
+        results_uniquify = getSubstructMatches([target], [query], config_uniquify)
+
+        rdkit_unique = list(target.GetSubstructMatches(query, uniquify=True))
+        assert len(results_uniquify[0][0]) == len(rdkit_unique)
+        assert len(results_uniquify[0][0]) == 6
+
+    def test_uniquify_hexane_cc(self):
+        """Test uniquify on hexane with CC query."""
+        target = Chem.MolFromSmiles("CCCCCC")  # hexane
+        query = Chem.MolFromSmarts("CC")
+
+        # Verify against RDKit
+        rdkit_non_unique = list(target.GetSubstructMatches(query, uniquify=False))
+        rdkit_unique = list(target.GetSubstructMatches(query, uniquify=True))
+
+        # Without uniquify
+        config_no_uniquify = SubstructSearchConfig()
+        config_no_uniquify.uniquify = False
+        results_no_uniquify = getSubstructMatches([target], [query], config_no_uniquify)
+        assert len(results_no_uniquify[0][0]) == len(rdkit_non_unique)
+
+        # With uniquify
+        config_uniquify = SubstructSearchConfig()
+        config_uniquify.uniquify = True
+        results_uniquify = getSubstructMatches([target], [query], config_uniquify)
+        assert len(results_uniquify[0][0]) == len(rdkit_unique)
+
+    def test_uniquify_symmetric_query(self):
+        """Test uniquify with symmetric query COC on diethyl ether."""
+        target = Chem.MolFromSmiles("CCOCC")  # diethyl ether
+        query = Chem.MolFromSmarts("COC")
+
+        # Without uniquify
+        config_no_uniquify = SubstructSearchConfig()
+        config_no_uniquify.uniquify = False
+        results_no_uniquify = getSubstructMatches([target], [query], config_no_uniquify)
+
+        rdkit_non_unique = list(target.GetSubstructMatches(query, uniquify=False))
+        assert len(results_no_uniquify[0][0]) == len(rdkit_non_unique)
+
+        # With uniquify
+        config_uniquify = SubstructSearchConfig()
+        config_uniquify.uniquify = True
+        results_uniquify = getSubstructMatches([target], [query], config_uniquify)
+
+        rdkit_unique = list(target.GetSubstructMatches(query, uniquify=True))
+        assert len(results_uniquify[0][0]) == len(rdkit_unique)
+
+    def test_uniquify_no_effect_asymmetric(self):
+        """Test that uniquify has no effect on asymmetric query."""
+        target = Chem.MolFromSmiles("CCOCC")  # diethyl ether
+        query = Chem.MolFromSmarts("CCO")  # asymmetric
+
+        config_no_uniquify = SubstructSearchConfig()
+        config_no_uniquify.uniquify = False
+        results_no_uniquify = getSubstructMatches([target], [query], config_no_uniquify)
+
+        config_uniquify = SubstructSearchConfig()
+        config_uniquify.uniquify = True
+        results_uniquify = getSubstructMatches([target], [query], config_uniquify)
+
+        # Asymmetric queries should have same count
+        assert len(results_uniquify[0][0]) == len(results_no_uniquify[0][0])
+
+    def test_uniquify_single_atom_query(self):
+        """Test that uniquify has no effect on single atom queries."""
+        target = Chem.MolFromSmiles("CCCC")
+        query = Chem.MolFromSmarts("C")
+
+        config_no_uniquify = SubstructSearchConfig()
+        config_no_uniquify.uniquify = False
+        results_no_uniquify = getSubstructMatches([target], [query], config_no_uniquify)
+
+        config_uniquify = SubstructSearchConfig()
+        config_uniquify.uniquify = True
+        results_uniquify = getSubstructMatches([target], [query], config_uniquify)
+
+        # Single atom queries can't have duplicates
+        assert len(results_uniquify[0][0]) == len(results_no_uniquify[0][0])
+        assert len(results_uniquify[0][0]) == 4
+
+    def test_uniquify_batch(self):
+        """Test uniquify with batch of molecules and queries."""
+        targets = [
+            Chem.MolFromSmiles("C1CCCCC1"),  # cyclohexane
+            Chem.MolFromSmiles("CCOCC"),     # diethyl ether
+            Chem.MolFromSmiles("c1ccccc1"),  # benzene
+        ]
+        queries = [
+            Chem.MolFromSmarts("CC"),
+            Chem.MolFromSmarts("CCC"),
+        ]
+
+        config = SubstructSearchConfig()
+        config.uniquify = True
+
+        results = getSubstructMatches(targets, queries, config)
+
+        # Verify each pair matches RDKit with uniquify=True
+        for t_idx, target in enumerate(targets):
+            for q_idx, query in enumerate(queries):
+                rdkit_matches = list(target.GetSubstructMatches(query, uniquify=True))
+                assert len(results[t_idx][q_idx]) == len(rdkit_matches), \
+                    f"Mismatch at target {t_idx}, query {q_idx}"
+
+    def test_uniquify_config_property(self):
+        """Test that uniquify config property can be set."""
+        config = SubstructSearchConfig()
+        assert config.uniquify is False
+
+        config.uniquify = True
+        assert config.uniquify is True
+
+        config.uniquify = False
+        assert config.uniquify is False
 
 
 # =============================================================================
@@ -506,7 +647,8 @@ class TestSubstructSearchConfig:
         assert config.preprocessingThreads == 0
         assert config.slotsPerRunner == 3
         assert config.presort is True
-        assert config.maxMatches == -1
+        assert config.maxMatches == 0  # 0 = unlimited (like RDKit)
+        assert config.uniquify is False
 
     def test_config_modification(self):
         """Test configuration parameter modification."""

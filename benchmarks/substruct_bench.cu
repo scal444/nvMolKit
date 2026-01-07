@@ -254,7 +254,7 @@ void benchNvMolKit(const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
   totalMatches = 0;
   for (int t = 0; t < resultsOut.numTargets; ++t) {
     for (int q = 0; q < resultsOut.numQueries; ++q) {
-      totalMatches += resultsOut.actualCount(t, q);
+      totalMatches += resultsOut.matchCount(t, q);
     }
   }
 
@@ -368,7 +368,7 @@ int main(int argc, char* argv[]) {
   bool               doValidate       = false;
   bool               doProfile        = false;
   int                debugLevel       = 0;
-  int                maxMatches       = -1;
+  int                maxMatches       = 0;
   bool               hasMatchOnly     = false;
 
   static struct option long_options[] = {

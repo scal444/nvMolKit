@@ -284,7 +284,7 @@ TEST_P(SubstructureIntegrationTest, ChemblVsSmarts) {
 
   for (int q = 0; q < numQueries; ++q) {
     for (int t = 0; t < numTargets; ++t) {
-      totalMatchesPerQuery[q] += results.actualCount(t, q);
+      totalMatchesPerQuery[q] += results.matchCount(t, q);
     }
     grandTotalMatches += totalMatchesPerQuery[q];
   }
@@ -414,8 +414,8 @@ TEST_F(MultiGpuSubstructTest, MultiGpuMatchesSingleGpu) {
 
   for (int t = 0; t < singleGpuResults.numTargets; ++t) {
     for (int q = 0; q < singleGpuResults.numQueries; ++q) {
-      const int singleCount = singleGpuResults.actualCount(t, q);
-      const int multiCount  = multiGpuResults.actualCount(t, q);
+      const int singleCount = singleGpuResults.matchCount(t, q);
+      const int multiCount  = multiGpuResults.matchCount(t, q);
       singleGpuTotal += singleCount;
       multiGpuTotal += multiCount;
       if (singleCount != multiCount) {

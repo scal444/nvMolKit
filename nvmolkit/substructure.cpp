@@ -93,6 +93,7 @@ BOOST_PYTHON_MODULE(_substructure) {
     .def_readwrite("slotsPerRunner", &nvMolKit::SubstructSearchConfig::slotsPerRunner)
     .def_readwrite("presort", &nvMolKit::SubstructSearchConfig::presort)
     .def_readwrite("maxMatches", &nvMolKit::SubstructSearchConfig::maxMatches)
+    .def_readwrite("uniquify", &nvMolKit::SubstructSearchConfig::uniquify)
     .add_property("gpuIds", &getGpuIdsPy, &setGpuIdsPy);
 
   def(

@@ -9,6 +9,7 @@ class SubstructSearchConfig:
     slotsPerRunner: int
     presort: bool
     maxMatches: int
+    uniquify: bool
     gpuIds: list[int]
 
 def getSubstructMatches(

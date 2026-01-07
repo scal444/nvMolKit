@@ -102,18 +102,13 @@ SubstructValidationResult validateAgainstRDKit(
   for (int t = 0; t < results.numTargets; ++t) {
     for (int q = 0; q < results.numQueries; ++q) {
       const auto rdkitMatches    = getRDKitSubstructMatches(*targetMols[t], *queryMols[q], false);
-      const int  gpuMatchCount   = results.actualCount(t, q);
+      const int  gpuMatchCount   = results.matchCount(t, q);
       const int  rdkitMatchCount = static_cast<int>(rdkitMatches.size());
-
-      if (results.hasOverflow(t, q)) {
-        validation.overflowPairs++;
-        validation.hasOverflows = true;
-      }
 
       if (gpuMatchCount != rdkitMatchCount) {
         validation.mismatchedPairs++;
         validation.mismatches.emplace_back(t, q, gpuMatchCount, rdkitMatchCount);
-      } else if (gpuMatchCount > 0 && !results.hasOverflow(t, q)) {
+      } else if (gpuMatchCount > 0) {
         const int  numQueryAtoms = static_cast<int>(queryMols[q]->getNumAtoms());
         const auto gpuMatches    = extractGpuMatches(results, t, q, numQueryAtoms);
 
@@ -138,10 +133,6 @@ void printValidationResult(const SubstructValidationResult& result, const std::s
 
   std::cout << prefix << "Validation: " << result.matchingPairs << "/" << result.totalPairs
             << " pairs match RDKit";
-
-  if (result.overflowPairs > 0) {
-    std::cout << " (" << result.overflowPairs << " overflow)";
-  }
 
   if (result.allMatch) {
     std::cout << " - PASS" << std::endl;
@@ -238,10 +229,6 @@ void printValidationResultDetailed(const SubstructValidationResult&             
 
   std::cout << prefix << "Validation: " << result.matchingPairs << "/" << result.totalPairs
             << " pairs match RDKit";
-
-  if (result.overflowPairs > 0) {
-    std::cout << " (" << result.overflowPairs << " overflow)";
-  }
 
   if (result.allMatch) {
     std::cout << " - PASS" << std::endl;

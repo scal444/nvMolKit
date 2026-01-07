@@ -28,6 +28,7 @@
 #include <memory>
 #include <mutex>
 #include <numeric>
+#include <set>
 #include <stdexcept>
 #include <thread>
 #include <unistd.h>
@@ -625,7 +626,7 @@ struct ThreadWorkerContext {
   int numTargets     = 0;
   int numQueries     = 0;
   int maxTargetAtoms = 0;
-  int maxMatches     = -1;  ///< Max matches to store per pair (-1 = no limit, 0 = count only)
+  int maxMatches     = 0;   ///< Max matches to store per pair (0 = unlimited, like RDKit)
 };
 
 }  // anonymous namespace
@@ -1181,14 +1182,15 @@ void uploadAndLaunchBatch(BatchSlot&                 slot,
   if (twoStreamCtx.maxDepthInBatch == 0) {
     ScopedNvtxRange nonRecursiveRange("Non-recursive path");
     
+    const int maxMatchesToFind = ctx.maxMatches > 0 ? ctx.maxMatches : -1;
     slot.deviceResults.allocateBatch(slot.numPairsInBatch,
                                      slot.batchPairMatchStarts,
                                      slot.totalMatchIndices,
                                      ctx.numQueries,
                                      ctx.maxTargetAtoms,
                                      numBuffersPerBlock,
-                                     ctx.maxMatches,
-                                     ctx.maxMatches == 0);
+                                     maxMatchesToFind,
+                                     false);
     slot.deviceResults.setQueryAtomCounts(ctx.queryAtomCounts.data(), ctx.numQueries);
 
     if (slot.pairIndicesDev.size() < static_cast<size_t>(slot.numPairsInBatch)) {
@@ -1221,14 +1223,15 @@ void uploadAndLaunchBatch(BatchSlot&                 slot,
 
   cudaStream_t recursiveStream = twoStreamCtx.recursiveStream.stream();
 
+  const int maxMatchesToFind = ctx.maxMatches > 0 ? ctx.maxMatches : -1;
   slot.deviceResults.allocateBatch(slot.numPairsInBatch,
                                    slot.batchPairMatchStarts,
                                    slot.totalMatchIndices,
                                    ctx.numQueries,
                                    ctx.maxTargetAtoms,
                                    numBuffersPerBlock,
-                                   ctx.maxMatches,
-                                   ctx.maxMatches == 0);
+                                   maxMatchesToFind,
+                                   false);
   slot.deviceResults.setQueryAtomCounts(ctx.queryAtomCounts.data(), ctx.numQueries);
 
   cudaCheckError(cudaEventRecord(slot.allocDoneEvent.event(), slotStream));
@@ -1313,9 +1316,9 @@ void accumulateBatchResults(BatchSlot&                        slot,
     const int reportedMatches = slot.reportedCountsHost[i];
 
     // Detect buffer overflow: GPU found more matches than buffer could store.
-    // Only trigger RDKit fallback for unintentional overflow (maxMatches == -1).
+    // Only trigger RDKit fallback for unintentional overflow (maxMatches == 0 = unlimited).
     // When user sets maxMatches explicitly, excess matches are expected behavior.
-    const bool isBufferOverflow = (actualMatches > reportedMatches) && (ctx.maxMatches == -1);
+    const bool isBufferOverflow = (actualMatches > reportedMatches) && (ctx.maxMatches == 0);
     if (isBufferOverflow && overflowFallback != nullptr && overflowMutex != nullptr) {
       std::lock_guard<std::mutex> lock(*overflowMutex);
       overflowFallback->push_back({targetIdx, queryIdx});
@@ -1341,10 +1344,6 @@ void accumulateBatchResults(BatchSlot&                        slot,
       targetMatches.insert(targetMatches.end(),
                            std::make_move_iterator(pairMatches.begin()),
                            std::make_move_iterator(pairMatches.end()));
-      results.addActualCount(targetIdx, queryIdx, actualMatches);
-    } else if (actualMatches > 0) {
-      std::lock_guard<std::mutex> lock(resultsMutex);
-      results.addActualCount(targetIdx, queryIdx, actualMatches);
     }
   }
   processRange.pop();
@@ -1565,13 +1564,10 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
     for (int q = 0; q < numQueries; ++q) {
       const int pairIdx      = t * numQueries + q;
       const int queryAtoms   = ctx.queryAtomCounts[q];
-      // When maxMatches >= 0, limit capacity to maxMatches * queryAtoms
-      // When maxMatches == 0 (count only), use 0 capacity
-      // When maxMatches == -1 (no limit), use heuristic targetAtoms * queryAtoms
+      // When maxMatches > 0, limit capacity to maxMatches * queryAtoms
+      // When maxMatches == 0 (unlimited), use heuristic targetAtoms * queryAtoms
       int pairCapacity;
-      if (ctx.maxMatches == 0) {
-        pairCapacity = 0;
-      } else if (ctx.maxMatches > 0) {
+      if (ctx.maxMatches > 0) {
         pairCapacity = ctx.maxMatches * queryAtoms;
       } else {
         pairCapacity = targetAtoms * queryAtoms;
@@ -1597,14 +1593,11 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
 
   // Calculate max match indices per batch based on maxMatches config
   int maxMatchIndicesPerBatch;
-  if (ctx.maxMatches == 0) {
-    // Count only mode: no match storage needed
-    maxMatchIndicesPerBatch = 0;
-  } else if (ctx.maxMatches > 0) {
+  if (ctx.maxMatches > 0) {
     // Fixed limit: allocate for maxMatches per pair
     maxMatchIndicesPerBatch = effectiveBatchSize * ctx.maxMatches * maxQueryAtoms;
   } else {
-    // No limit: use heuristic based on target/query sizes
+    // Unlimited (maxMatches == 0): use heuristic based on target/query sizes
     maxMatchIndicesPerBatch = effectiveBatchSize * ctx.maxTargetAtoms * maxQueryAtoms;
   }
 
@@ -2022,7 +2015,7 @@ void processWithRDKit(const RDKit::ROMol*     target,
                       int                     maxMatches) {
   RDKit::SubstructMatchParameters params;
   params.uniquify = false;
-  params.maxMatches = (maxMatches >= 0) ? static_cast<unsigned int>(maxMatches) : 0;
+  params.maxMatches = (maxMatches > 0) ? static_cast<unsigned int>(maxMatches) : 0;
   params.useChirality = false;
   params.useQueryQueryMatches = false;
 
@@ -2045,7 +2038,6 @@ void processWithRDKit(const RDKit::ROMol*     target,
     targetMatches.insert(targetMatches.end(),
                          std::make_move_iterator(convertedMatches.begin()),
                          std::make_move_iterator(convertedMatches.end()));
-    results.addActualCount(targetIdx, queryIdx, static_cast<int>(rdkitMatches.size()));
   }
 }
 
@@ -2075,6 +2067,47 @@ void processRDKitFallbackQueue(const std::vector<const RDKit::ROMol*>& targets,
                               "/Q" + std::to_string(entry.originalQueryIdx));
     processWithRDKit(target, query, entry.originalTargetIdx, entry.originalQueryIdx,
                      results, resultsMutex, maxMatches);
+  }
+}
+
+/**
+ * @brief Remove duplicate matches that differ only in atom enumeration order.
+ *
+ * Two matches are considered duplicates if they map query atoms to the same set
+ * of target atoms, regardless of the ordering. For example, with query "CCC" on
+ * cyclohexane, matches (0,1,2) and (2,1,0) would be considered duplicates since
+ * they both involve target atoms {0,1,2}.
+ *
+ * This is a postprocessing step applied after all matches are collected.
+ */
+void uniquifyResults(SubstructSearchResults& results) {
+  ScopedNvtxRange uniquifyRange("uniquifyResults");
+
+  std::set<std::vector<int>> seenSorted;
+  std::vector<std::vector<int>> uniqueMatches;
+  std::vector<int> sortedMatch;
+
+  for (auto& [pairIdx, matchList] : results.matches) {
+    if (matchList.size() <= 1) {
+      continue;
+    }
+
+    seenSorted.clear();
+    uniqueMatches.clear();
+    uniqueMatches.reserve(matchList.size());
+
+    for (auto& match : matchList) {
+      sortedMatch.assign(match.begin(), match.end());
+      std::sort(sortedMatch.begin(), sortedMatch.end());
+
+      if (seenSorted.insert(sortedMatch).second) {
+        uniqueMatches.push_back(std::move(match));
+      }
+    }
+
+    if (uniqueMatches.size() < matchList.size()) {
+      matchList = std::move(uniqueMatches);
+    }
   }
 }
 
@@ -2220,6 +2253,10 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
     processRDKitFallbackQueue(targets, queries, overflowFallback, results, fallbackMutex, 
                               config.maxMatches, "BUFFER OVERFLOW");
   }
+
+  if (config.uniquify) {
+    uniquifyResults(results);
+  }
 }
 
 void hasSubstructMatch(const std::vector<const RDKit::ROMol*>& targets,
@@ -2249,7 +2286,7 @@ void hasSubstructMatch(const std::vector<const RDKit::ROMol*>& targets,
   // Convert match counts to boolean results
   for (int t = 0; t < numTargets; ++t) {
     for (int q = 0; q < numQueries; ++q) {
-      results.setMatch(t, q, matchResults.actualCount(t, q) > 0);
+      results.setMatch(t, q, matchResults.matchCount(t, q) > 0);
     }
   }
 }

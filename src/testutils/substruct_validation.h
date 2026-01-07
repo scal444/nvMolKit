@@ -52,13 +52,11 @@ std::string algorithmName(SubstructAlgorithm algo);
  * @brief Validation results from comparing GPU matches to RDKit ground truth.
  */
 struct SubstructValidationResult {
-  int  totalPairs            = 0;
-  int  matchingPairs         = 0;
-  int  mismatchedPairs       = 0;
-  int  overflowPairs         = 0;
-  int  wrongMappingPairs     = 0;  ///< Pairs where count matches but mappings differ
-  bool allMatch              = false;
-  bool hasOverflows          = false;
+  int  totalPairs        = 0;
+  int  matchingPairs     = 0;
+  int  mismatchedPairs   = 0;
+  int  wrongMappingPairs = 0;  ///< Pairs where count matches but mappings differ
+  bool allMatch          = false;
 
   /// Details about count mismatches: (targetIdx, queryIdx, gpuCount, rdkitCount)
   std::vector<std::tuple<int, int, int, int>> mismatches;

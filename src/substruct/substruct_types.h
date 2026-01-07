@@ -49,7 +49,8 @@ struct SubstructSearchConfig {
   int  slotsPerRunner      = 3;      ///< Batch slots per runner thread (1-8, higher = more overlap)
   bool presort             = true;   ///< Sort molecules by atom count (largest first) for GPU efficiency
   std::vector<int> gpuIds;           ///< GPU device IDs to use (empty = current device only)
-  int  maxMatches          = -1;     ///< Max matches to store per pair (-1 = no limit, 0 = count only)
+  int  maxMatches          = 0;      ///< Max matches per pair (0 = unlimited, like RDKit)
+  bool uniquify            = false;  ///< Remove duplicate matches differing only in atom enumeration order
 };
 
 /**
@@ -63,9 +64,6 @@ struct SubstructSearchResults {
   /// Each match is a vector<int> of target atom indices (one per query atom)
   std::unordered_map<int, std::vector<std::vector<int>>> matches;
 
-  /// Sparse storage: pairIndex -> actual match count (may exceed stored if capped)
-  std::unordered_map<int, int> actualMatchCounts;
-
   int numTargets = 0;
   int numQueries = 0;
 
@@ -73,11 +71,9 @@ struct SubstructSearchResults {
     numTargets = nTargets;
     numQueries = nQueries;
     matches.clear();
-    actualMatchCounts.clear();
     // Reserve based on expected sparsity (assume ~10% of pairs have matches)
     const size_t expectedPairs = static_cast<size_t>(nTargets) * nQueries / 10 + 1;
     matches.reserve(expectedPairs);
-    actualMatchCounts.reserve(expectedPairs);
   }
 
   /// Compute flat pair index
@@ -85,26 +81,10 @@ struct SubstructSearchResults {
     return targetIdx * numQueries + queryIdx;
   }
 
-  /// Check if pair had more matches than could be stored
-  [[nodiscard]] bool hasOverflow(int targetIdx, int queryIdx) const {
-    const int idx = pairIndex(targetIdx, queryIdx);
-    auto countIt = actualMatchCounts.find(idx);
-    if (countIt == actualMatchCounts.end()) return false;
-    auto matchIt = matches.find(idx);
-    if (matchIt == matches.end()) return countIt->second > 0;
-    return countIt->second > static_cast<int>(matchIt->second.size());
-  }
-
-  /// Number of matches stored for this pair
+  /// Number of matches for this pair
   [[nodiscard]] int matchCount(int targetIdx, int queryIdx) const {
     auto it = matches.find(pairIndex(targetIdx, queryIdx));
     return (it != matches.end()) ? static_cast<int>(it->second.size()) : 0;
-  }
-
-  /// Actual number of matches found (may exceed stored count)
-  [[nodiscard]] int actualCount(int targetIdx, int queryIdx) const {
-    auto it = actualMatchCounts.find(pairIndex(targetIdx, queryIdx));
-    return (it != actualMatchCounts.end()) ? it->second : 0;
   }
 
   /// Get the matches for a (target, query) pair (returns empty if none)
@@ -117,11 +97,6 @@ struct SubstructSearchResults {
   /// Mutable access to matches (creates entry if needed)
   std::vector<std::vector<int>>& getMatchesMut(int targetIdx, int queryIdx) {
     return matches[pairIndex(targetIdx, queryIdx)];
-  }
-
-  /// Add to actual match count
-  void addActualCount(int targetIdx, int queryIdx, int count) {
-    actualMatchCounts[pairIndex(targetIdx, queryIdx)] += count;
   }
 };
 

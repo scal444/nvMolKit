@@ -134,7 +134,7 @@ class SubstructureSearchTest : public ::testing::TestWithParam<SubstructAlgorith
                           int                           queryIdx,
                           const std::string&            description = "") {
     const auto rdkitMatches    = getRDKitSubstructMatches(target, query, false);
-    const int  gpuMatchCount   = results.actualCount(targetIdx, queryIdx);
+    const int  gpuMatchCount   = results.matchCount(targetIdx, queryIdx);
     const int  rdkitMatchCount = static_cast<int>(rdkitMatches.size());
 
     std::string context = description.empty() ? "" : " (" + description + ")";
@@ -143,7 +143,7 @@ class SubstructureSearchTest : public ::testing::TestWithParam<SubstructAlgorith
         << "Match count mismatch" << context << " using " << algorithmName(algorithm())
         << ": GPU=" << gpuMatchCount << ", RDKit=" << rdkitMatchCount;
 
-    if (gpuMatchCount == rdkitMatchCount && gpuMatchCount > 0 && !results.hasOverflow(targetIdx, queryIdx)) {
+    if (gpuMatchCount == rdkitMatchCount && gpuMatchCount > 0) {
       const int  numQueryAtoms = static_cast<int>(query.getNumAtoms());
       const auto gpuMatches    = extractGpuMatches(results, targetIdx, queryIdx, numQueryAtoms);
 
@@ -160,34 +160,25 @@ class SubstructureSearchTest : public ::testing::TestWithParam<SubstructAlgorith
    * @param targetMols Target molecules for RDKit comparison
    * @param queryMols Query molecules for RDKit comparison
    * @param expectMatch If true, expect tests to pass; if false, expect current failures
-   * @param allowOverflow If false, assert that no pairs overflowed
    */
   void compareWithRDKit(const SubstructSearchResults&                     results,
                         const std::vector<std::unique_ptr<RDKit::ROMol>>& targetMols,
                         const std::vector<std::unique_ptr<RDKit::ROMol>>& queryMols,
-                        bool                                              expectMatch   = false,
-                        bool                                              allowOverflow = false) {
+                        bool                                              expectMatch = false) {
     for (int t = 0; t < results.numTargets; ++t) {
       for (int q = 0; q < results.numQueries; ++q) {
         // Use uniquify=false to match our non-uniquifying GPU algorithm
         const auto rdkitMatches    = getRDKitSubstructMatches(*targetMols[t], *queryMols[q], false);
-        const int  gpuMatchCount   = results.actualCount(t, q);
+        const int  gpuMatchCount   = results.matchCount(t, q);
         const int  rdkitMatchCount = static_cast<int>(rdkitMatches.size());
-
-        if (!allowOverflow) {
-          EXPECT_FALSE(results.hasOverflow(t, q))
-              << "Unexpected overflow for target " << t << ", query " << q << " using algorithm "
-              << algorithmName(algorithm()) << ": actual=" << gpuMatchCount
-              << ", reported=" << results.matchCount(t, q);
-        }
 
         if (expectMatch) {
           EXPECT_EQ(gpuMatchCount, rdkitMatchCount)
               << "Match count mismatch for target " << t << ", query " << q << " using algorithm "
               << algorithmName(algorithm()) << ": GPU=" << gpuMatchCount << ", RDKit=" << rdkitMatchCount;
 
-          // Also verify actual match indices if counts match and no overflow
-          if (gpuMatchCount == rdkitMatchCount && gpuMatchCount > 0 && !results.hasOverflow(t, q)) {
+          // Also verify actual match indices if counts match
+          if (gpuMatchCount == rdkitMatchCount && gpuMatchCount > 0) {
             const int  numQueryAtoms = static_cast<int>(queryMols[q]->getNumAtoms());
             const auto gpuMatches    = extractGpuMatches(results, t, q, numQueryAtoms);
 
@@ -414,9 +405,7 @@ TEST_P(SubstructureSearchTest, OverflowHandledByRDKitFallback) {
   EXPECT_EQ(rdkitMatches.size(), 10u);
 
   // With RDKit fallback, we should get all 10 matches
-  EXPECT_FALSE(results.hasOverflow(0, 0)) << "Overflow should be handled by RDKit fallback";
-  EXPECT_EQ(results.actualCount(0, 0), 10) << "Should have all 10 matches via fallback";
-  EXPECT_EQ(results.matchCount(0, 0), 10) << "Should store all 10 matches via fallback";
+  EXPECT_EQ(results.matchCount(0, 0), 10) << "Should have all 10 matches via fallback";
 }
 
 // =============================================================================
@@ -714,12 +703,12 @@ TEST_P(SubstructureSearchTest, AromaticRingPatternWithOr) {
 
   // Benzene should match (symmetric, many automorphisms)
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for c1[c,n]cccc1 in benzene using " << algorithmName(algorithm());
 
   // Pyridine should match
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.matchCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for c1[c,n]cccc1 in pyridine using " << algorithmName(algorithm());
 }
 
@@ -738,12 +727,12 @@ TEST_P(SubstructureSearchTest, AnyRingMembershipQuery) {
 
   // Cyclobutane with methyl: 4 ring atoms match [R]
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [R] in C1CCC1C using " << algorithmName(algorithm());
 
   // Pentane: no ring atoms, should get 0 matches
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.matchCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [R] in CCCCC using " << algorithmName(algorithm());
 }
 
@@ -762,12 +751,12 @@ TEST_P(SubstructureSearchTest, AnyRingSizeQuery) {
 
   // Benzene: 6 ring atoms match [r]
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [r] in benzene using " << algorithmName(algorithm());
 
   // Pentane: no ring atoms, should get 0 matches
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.matchCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [r] in CCCCC using " << algorithmName(algorithm());
 }
 
@@ -786,12 +775,12 @@ TEST_P(SubstructureSearchTest, AnyRingCombinedWithAtomType) {
 
   // Cyclobutane with methyl: 4 aliphatic ring carbons match [C;R]
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [C;R] in C1CCC1C using " << algorithmName(algorithm());
 
   // Benzene: aromatic carbons don't match aliphatic C
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.matchCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [C;R] in benzene using " << algorithmName(algorithm());
 }
 
@@ -810,12 +799,12 @@ TEST_P(SubstructureSearchTest, IsotopeCarbon13Query) {
 
   // First target has one 13C
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [13C] in [13C]CC using " << algorithmName(algorithm());
 
   // Second target has no isotope labels
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.matchCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [13C] in CC using " << algorithmName(algorithm());
 }
 
@@ -834,12 +823,12 @@ TEST_P(SubstructureSearchTest, IsotopeDeuteriumQuery) {
 
   // First target has 4 deuterium atoms
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [2H] in CD4 using " << algorithmName(algorithm());
 
   // Second target has no deuterium
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.matchCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [2H] in CH4 using " << algorithmName(algorithm());
 }
 
@@ -858,12 +847,12 @@ TEST_P(SubstructureSearchTest, IsotopeNitrogen15Query) {
 
   // First target has one 15N
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [15N] in [15N]CC using " << algorithmName(algorithm());
 
   // Second target has no isotope labels
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.matchCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [15N] in NCC using " << algorithmName(algorithm());
 }
 
@@ -881,11 +870,11 @@ TEST_P(SubstructureSearchTest, DegreeQueryD0) {
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [D0] in methane using " << algorithmName(algorithm());
 
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.matchCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [D0] in ethane using " << algorithmName(algorithm());
 }
 
@@ -903,11 +892,11 @@ TEST_P(SubstructureSearchTest, DegreeQueryD1) {
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [D1] in ethane using " << algorithmName(algorithm());
 
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.matchCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [D1] in propane using " << algorithmName(algorithm());
 }
 
@@ -926,12 +915,12 @@ TEST_P(SubstructureSearchTest, DegreeQueryD3) {
 
   // Isobutane: one atom with degree 3
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [D3] in isobutane using " << algorithmName(algorithm());
 
   // Propane: no degree 3 atoms
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.matchCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [D3] in propane using " << algorithmName(algorithm());
 }
 
@@ -949,11 +938,11 @@ TEST_P(SubstructureSearchTest, TotalConnectivityQueryX1) {
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [X1] in H2 using " << algorithmName(algorithm());
 
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.matchCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [X1] in ethane using " << algorithmName(algorithm());
 }
 
@@ -971,11 +960,11 @@ TEST_P(SubstructureSearchTest, TotalConnectivityQueryX2) {
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [X2] in acetylene using " << algorithmName(algorithm());
 
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.matchCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [X2] in ethane using " << algorithmName(algorithm());
 }
 
@@ -993,11 +982,11 @@ TEST_P(SubstructureSearchTest, TotalConnectivityQueryX3) {
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [X3] in ethene using " << algorithmName(algorithm());
 
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.matchCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [X3] in ethane using " << algorithmName(algorithm());
 }
 
@@ -1016,12 +1005,12 @@ TEST_P(SubstructureSearchTest, TotalConnectivityQueryX4) {
 
   // Ethane: 2 atoms with X4
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [X4] in ethane using " << algorithmName(algorithm());
 
   // Ethene: no X4 atoms
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.matchCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [X4] in ethene using " << algorithmName(algorithm());
 }
 
@@ -1040,12 +1029,12 @@ TEST_P(SubstructureSearchTest, DegreeWithAtomTypeQuery) {
 
   // Isobutane: one carbon with degree 3
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for [CD3] in isobutane using " << algorithmName(algorithm());
 
   // Trimethylamine: no carbon with degree 3 (N has degree 3)
   auto rdkitMatches1 = getRDKitSubstructMatches(*targetMols[1], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(1, 0), static_cast<int>(rdkitMatches1.size()))
+  EXPECT_EQ(results.matchCount(1, 0), static_cast<int>(rdkitMatches1.size()))
     << "GPU should match RDKit for [CD3] in trimethylamine using " << algorithmName(algorithm());
 }
 
@@ -1143,9 +1132,9 @@ TEST_P(SubstructureSearchTest, ImpossibleBondConstraint) {
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches.size()))
     << "Impossible bond constraint should match 0 (RDKit says " << rdkitMatches.size() << ")";
-  EXPECT_EQ(results.actualCount(0, 0), 0)
+  EXPECT_EQ(results.matchCount(0, 0), 0)
     << "Impossible bond constraint (single AND aromatic) should never match";
 }
 
@@ -1165,10 +1154,10 @@ TEST_P(SubstructureSearchTest, ImpossibleAtomConstraint) {
                         results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-    EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
+    EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches.size()))
         << "Impossible atom constraint [C;a] on " << target << " should match 0 (RDKit says "
         << rdkitMatches.size() << ")";
-    EXPECT_EQ(results.actualCount(0, 0), 0)
+    EXPECT_EQ(results.matchCount(0, 0), 0)
         << "Impossible atom constraint [C;a] (aliphatic AND aromatic) should never match " << target;
   }
 }
@@ -1188,10 +1177,10 @@ TEST_P(SubstructureSearchTest, ImpossibleChargeConstraint) {
                         results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-    EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
+    EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches.size()))
         << "Impossible charge constraint [OX1;+0;-1] on " << target << " should match 0 (RDKit says "
         << rdkitMatches.size() << ")";
-    EXPECT_EQ(results.actualCount(0, 0), 0)
+    EXPECT_EQ(results.matchCount(0, 0), 0)
         << "Impossible charge constraint [OX1;+0;-1] (charge 0 AND -1) should never match " << target;
   }
 }
@@ -1211,10 +1200,10 @@ TEST_P(SubstructureSearchTest, WildcardAtoms) {
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches.size()))
       << "Wildcard pattern C~*~*~C should match " << rdkitMatches.size() << " times (RDKit), got "
-      << results.actualCount(0, 0);
-  EXPECT_GT(results.actualCount(0, 0), 0)
+      << results.matchCount(0, 0);
+  EXPECT_GT(results.matchCount(0, 0), 0)
       << "Wildcard pattern should find matches in hexane";
 }
 
@@ -1233,10 +1222,10 @@ TEST_P(SubstructureSearchTest, WildcardAtomsInRing) {
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches.size()))
       << "Wildcard ring pattern should match " << rdkitMatches.size() << " times (RDKit), got "
-      << results.actualCount(0, 0);
-  EXPECT_GT(results.actualCount(0, 0), 0)
+      << results.matchCount(0, 0);
+  EXPECT_GT(results.matchCount(0, 0), 0)
       << "Wildcard ring pattern should find matches in cyclohexane";
 }
 
@@ -1255,10 +1244,10 @@ TEST_P(SubstructureSearchTest, WildcardAtomsFusedRings) {
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches.size()))
       << "Fused ring wildcard pattern should match " << rdkitMatches.size() << " times (RDKit), got "
-      << results.actualCount(0, 0);
-  EXPECT_GT(results.actualCount(0, 0), 0)
+      << results.matchCount(0, 0);
+  EXPECT_GT(results.matchCount(0, 0), 0)
       << "Fused ring wildcard pattern should find matches in decalin";
 }
 
@@ -1278,9 +1267,9 @@ TEST_P(SubstructureSearchTest, NegatedBondType) {
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches.size()))
       << "Negated bond type !- query should match " << rdkitMatches.size() << " times (RDKit), got "
-      << results.actualCount(0, 0);
+      << results.matchCount(0, 0);
 }
 
 
@@ -1315,7 +1304,7 @@ TEST_P(SubstructureSearchTest, RingBondCountQuery) {
                         results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-    EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
+    EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches.size()))
         << tc.description << " - " << tc.query << " on " << tc.target;
   }
 }
@@ -1348,7 +1337,7 @@ TEST_P(SubstructureSearchTest, ImplicitHCountQuery) {
                         results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-    EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
+    EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches.size()))
         << tc.description << " - " << tc.query << " on " << tc.target;
   }
 }
@@ -1381,7 +1370,7 @@ TEST_P(SubstructureSearchTest, HeteroatomNeighborsQuery) {
                         results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-    EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
+    EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches.size()))
         << tc.description << " - " << tc.query << " on " << tc.target;
   }
 }
@@ -1415,7 +1404,7 @@ TEST_P(SubstructureSearchTest, RangeRingSizeQuery) {
                         results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-    EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
+    EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches.size()))
         << tc.description << " - " << tc.query << " on " << tc.target;
   }
 }
@@ -1445,7 +1434,7 @@ TEST_P(SubstructureSearchTest, RangeNumRingsQuery) {
                         results, algorithm(), stream_.stream());
 
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-    EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches.size()))
+    EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches.size()))
         << tc.description << " - " << tc.query << " on " << tc.target;
   }
 }
@@ -1465,7 +1454,7 @@ TEST_P(SubstructureSearchTest, SingleMolSingleQueryForDebugging) {
                       results, algorithm(), stream_.stream());
 
   auto rdkitMatches0 = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
-  EXPECT_EQ(results.actualCount(0, 0), static_cast<int>(rdkitMatches0.size()))
+  EXPECT_EQ(results.matchCount(0, 0), static_cast<int>(rdkitMatches0.size()))
     << "GPU should match RDKit for query " << algorithmName(algorithm());
 
 }
@@ -1577,7 +1566,7 @@ TEST_P(SubstructureSearchTest, ValidSlotsPerRunnerWorks) {
 // maxMatches Parameter Tests
 // =============================================================================
 
-TEST_P(SubstructureSearchTest, MaxMatchesZeroCountOnly) {
+TEST_P(SubstructureSearchTest, MaxMatchesZeroUnlimited) {
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
@@ -1585,19 +1574,15 @@ TEST_P(SubstructureSearchTest, MaxMatchesZeroCountOnly) {
   parseMolecules({"CCO"}, {"C"}, targetMols, queryMols);
 
   SubstructSearchConfig config;
-  config.maxMatches = 0;  // Count only, don't store matches
+  config.maxMatches = 0;  // Unlimited (like RDKit)
 
   SubstructSearchResults results;
   getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream(), config);
 
-  // Should count the matches
-  EXPECT_EQ(results.actualCount(0, 0), 2)
-      << "Should count 2 carbon atoms with maxMatches=0";
-
-  // Should not store any matches
-  EXPECT_EQ(results.matchCount(0, 0), 0)
-      << "Should not store matches when maxMatches=0";
+  // Should store all matches
+  EXPECT_EQ(results.matchCount(0, 0), 2)
+      << "maxMatches=0 should store all 2 carbon atoms";
 }
 
 TEST_P(SubstructureSearchTest, MaxMatchesLimitedToN) {
@@ -1608,23 +1593,15 @@ TEST_P(SubstructureSearchTest, MaxMatchesLimitedToN) {
   parseMolecules({"CCCC"}, {"C"}, targetMols, queryMols);
 
   SubstructSearchConfig config;
-  config.maxMatches = 2;  // Only store up to 2 matches
+  config.maxMatches = 2;  // Limit to 2 matches
 
   SubstructSearchResults results;
   getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream(), config);
 
-  // Should count all matches
-  EXPECT_EQ(results.actualCount(0, 0), 4)
-      << "Should count all 4 carbon atoms";
-
   // Should only store up to maxMatches
   EXPECT_EQ(results.matchCount(0, 0), 2)
-      << "Should only store 2 matches when maxMatches=2";
-
-  // Should indicate overflow
-  EXPECT_TRUE(results.hasOverflow(0, 0))
-      << "Should indicate overflow when actual > stored";
+      << "Should store only 2 matches when maxMatches=2";
 }
 
 TEST_P(SubstructureSearchTest, MaxMatchesGreaterThanActual) {
@@ -1641,24 +1618,16 @@ TEST_P(SubstructureSearchTest, MaxMatchesGreaterThanActual) {
   getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream(), config);
 
-  // Should count all matches
-  EXPECT_EQ(results.actualCount(0, 0), 2)
-      << "Should count 2 carbon atoms";
-
-  // Should store all matches (not capped)
+  // Should store all matches when maxMatches > actual
   EXPECT_EQ(results.matchCount(0, 0), 2)
       << "Should store all 2 matches when maxMatches > actual";
-
-  // Should not indicate overflow
-  EXPECT_FALSE(results.hasOverflow(0, 0))
-      << "Should not indicate overflow when all matches stored";
 }
 
 TEST_P(SubstructureSearchTest, MaxMatchesOneEarlyExit) {
   std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
   std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
 
-  // Large molecule with many matches - early exit should limit work
+  // Large molecule with many matches
   parseMolecules({"CCCCCCCCCC"}, {"C"}, targetMols, queryMols);  // 10 carbons
 
   SubstructSearchConfig config;
@@ -1668,13 +1637,9 @@ TEST_P(SubstructureSearchTest, MaxMatchesOneEarlyExit) {
   getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream(), config);
 
-  // Should find at least 1 match (early exit may count more)
-  EXPECT_GE(results.actualCount(0, 0), 1)
-      << "Should find at least 1 match";
-
   // Should only store 1 match
   EXPECT_EQ(results.matchCount(0, 0), 1)
-      << "Should only store 1 match when maxMatches=1";
+      << "Should store only 1 match when maxMatches=1";
 }
 
 TEST_P(SubstructureSearchTest, MaxMatchesWithMultiAtomQuery) {
@@ -1690,10 +1655,6 @@ TEST_P(SubstructureSearchTest, MaxMatchesWithMultiAtomQuery) {
   SubstructSearchResults results;
   getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                       results, algorithm(), stream_.stream(), config);
-
-  // RDKit gives 10 non-unique matches
-  EXPECT_GE(results.actualCount(0, 0), 3)
-      << "Should find at least 3 matches";
 
   // Should store exactly 3 matches
   EXPECT_EQ(results.matchCount(0, 0), 3)
@@ -1772,4 +1733,179 @@ TEST_P(SubstructureSearchTest, HasSubstructMatchEmptyInputs) {
 
   EXPECT_EQ(results.numTargets, 0);
   EXPECT_EQ(results.numQueries, 1);
+}
+
+// =============================================================================
+// Uniquify Tests
+// =============================================================================
+
+TEST_P(SubstructureSearchTest, UniquifyCyclohexaneCCC) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // CCC query on cyclohexane: without uniquify gives 12, with uniquify gives 6
+  parseMolecules({"C1CCCCC1"}, {"CCC"}, targetMols, queryMols);
+
+  // Without uniquify
+  SubstructSearchResults resultsNoUniquify;
+  SubstructSearchConfig configNoUniquify;
+  configNoUniquify.uniquify = false;
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                      resultsNoUniquify, algorithm(), stream_.stream(), configNoUniquify);
+
+  auto rdkitMatchesNonUnique = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsNoUniquify.matchCount(0, 0), static_cast<int>(rdkitMatchesNonUnique.size()))
+      << "Without uniquify should match RDKit non-unique count";
+  EXPECT_EQ(resultsNoUniquify.matchCount(0, 0), 12)
+      << "CCC on cyclohexane without uniquify should have 12 matches";
+
+  // With uniquify
+  SubstructSearchResults resultsUniquify;
+  SubstructSearchConfig configUniquify;
+  configUniquify.uniquify = true;
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                      resultsUniquify, algorithm(), stream_.stream(), configUniquify);
+
+  auto rdkitMatchesUnique = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], true);
+  EXPECT_EQ(resultsUniquify.matchCount(0, 0), static_cast<int>(rdkitMatchesUnique.size()))
+      << "With uniquify should match RDKit unique count";
+  EXPECT_EQ(resultsUniquify.matchCount(0, 0), 6)
+      << "CCC on cyclohexane with uniquify should have 6 matches";
+}
+
+TEST_P(SubstructureSearchTest, UniquifyCC) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // CC query on hexane
+  parseMolecules({"CCCCCC"}, {"CC"}, targetMols, queryMols);
+
+  auto rdkitMatchesNonUnique = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  auto rdkitMatchesUnique = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], true);
+
+  // Without uniquify
+  SubstructSearchResults resultsNoUniquify;
+  SubstructSearchConfig configNoUniquify;
+  configNoUniquify.uniquify = false;
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                      resultsNoUniquify, algorithm(), stream_.stream(), configNoUniquify);
+
+  EXPECT_EQ(resultsNoUniquify.matchCount(0, 0), static_cast<int>(rdkitMatchesNonUnique.size()))
+      << "CC on hexane without uniquify should match RDKit";
+
+  // With uniquify
+  SubstructSearchResults resultsUniquify;
+  SubstructSearchConfig configUniquify;
+  configUniquify.uniquify = true;
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                      resultsUniquify, algorithm(), stream_.stream(), configUniquify);
+
+  EXPECT_EQ(resultsUniquify.matchCount(0, 0), static_cast<int>(rdkitMatchesUnique.size()))
+      << "CC on hexane with uniquify should match RDKit";
+
+  // Verify uniquify reduces count
+  EXPECT_LT(resultsUniquify.matchCount(0, 0), resultsNoUniquify.matchCount(0, 0))
+      << "Uniquify should reduce match count for symmetric query";
+}
+
+TEST_P(SubstructureSearchTest, UniquifySymmetricQuery) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Symmetric query COC on diethyl ether: 2 matches without uniquify, 1 with
+  parseMolecules({"CCOCC"}, {"COC"}, targetMols, queryMols);
+
+  // Without uniquify
+  SubstructSearchResults resultsNoUniquify;
+  SubstructSearchConfig configNoUniquify;
+  configNoUniquify.uniquify = false;
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                      resultsNoUniquify, algorithm(), stream_.stream(), configNoUniquify);
+
+  auto rdkitMatchesNonUnique = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], false);
+  EXPECT_EQ(resultsNoUniquify.matchCount(0, 0), static_cast<int>(rdkitMatchesNonUnique.size()));
+
+  // With uniquify
+  SubstructSearchResults resultsUniquify;
+  SubstructSearchConfig configUniquify;
+  configUniquify.uniquify = true;
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                      resultsUniquify, algorithm(), stream_.stream(), configUniquify);
+
+  auto rdkitMatchesUnique = getRDKitSubstructMatches(*targetMols[0], *queryMols[0], true);
+  EXPECT_EQ(resultsUniquify.matchCount(0, 0), static_cast<int>(rdkitMatchesUnique.size()));
+}
+
+TEST_P(SubstructureSearchTest, UniquifyNoEffect) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Asymmetric query CCO: matches are already unique
+  parseMolecules({"CCOCC"}, {"CCO"}, targetMols, queryMols);
+
+  SubstructSearchResults resultsNoUniquify;
+  SubstructSearchConfig configNoUniquify;
+  configNoUniquify.uniquify = false;
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                      resultsNoUniquify, algorithm(), stream_.stream(), configNoUniquify);
+
+  SubstructSearchResults resultsUniquify;
+  SubstructSearchConfig configUniquify;
+  configUniquify.uniquify = true;
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                      resultsUniquify, algorithm(), stream_.stream(), configUniquify);
+
+  // For asymmetric queries, uniquify shouldn't change the count
+  EXPECT_EQ(resultsUniquify.matchCount(0, 0), resultsNoUniquify.matchCount(0, 0))
+      << "Asymmetric query should have same count with or without uniquify";
+}
+
+TEST_P(SubstructureSearchTest, UniquifySingleAtomQuery) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Single atom query: uniquify has no effect (can't have duplicates)
+  parseMolecules({"CCCC"}, {"C"}, targetMols, queryMols);
+
+  SubstructSearchResults resultsNoUniquify;
+  SubstructSearchConfig configNoUniquify;
+  configNoUniquify.uniquify = false;
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                      resultsNoUniquify, algorithm(), stream_.stream(), configNoUniquify);
+
+  SubstructSearchResults resultsUniquify;
+  SubstructSearchConfig configUniquify;
+  configUniquify.uniquify = true;
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                      resultsUniquify, algorithm(), stream_.stream(), configUniquify);
+
+  EXPECT_EQ(resultsUniquify.matchCount(0, 0), resultsNoUniquify.matchCount(0, 0))
+      << "Single atom query should have same count with or without uniquify";
+  EXPECT_EQ(resultsUniquify.matchCount(0, 0), 4);
+}
+
+TEST_P(SubstructureSearchTest, UniquifyBatch) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Multiple targets and queries with uniquify
+  parseMolecules({"C1CCCCC1", "CCOCC", "c1ccccc1"},
+                 {"CC", "CCC"},
+                 targetMols, queryMols);
+
+  SubstructSearchConfig config;
+  config.uniquify = true;
+
+  SubstructSearchResults results;
+  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                      results, algorithm(), stream_.stream(), config);
+
+  // Verify each pair matches RDKit with uniquify=true
+  for (int t = 0; t < results.numTargets; ++t) {
+    for (int q = 0; q < results.numQueries; ++q) {
+      auto rdkitMatches = getRDKitSubstructMatches(*targetMols[t], *queryMols[q], true);
+      EXPECT_EQ(results.matchCount(t, q), static_cast<int>(rdkitMatches.size()))
+          << "Mismatch at target " << t << ", query " << q;
+    }
+  }
 }
