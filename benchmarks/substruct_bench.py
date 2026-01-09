@@ -14,18 +14,27 @@
 # limitations under the License.
 
 """
-PAINS filtering benchmark comparing nvmolkit GPU substructure search against RDKit.
+Substructure search benchmark comparing nvmolkit GPU substructure search against RDKit.
 
-Compares three approaches:
+Compares two approaches:
   1. nvmolkit GPU-accelerated substructure search
-  2. RDKit FilterCatalog (built-in PAINS filtering)
-  3. RDKit SubstructMatch API directly
+  2. RDKit SubstructMatch API
+
+Supports two modes:
+  - hasSubstructMatch: Boolean match detection (faster)
+  - getSubstructMatches: Full match enumeration with optional max matches
 
 Usage:
-    python pains_filter_bench.py --smiles <smiles_file> --smarts <smarts_file>
+    python substruct_bench.py --smiles <smiles_file> --smarts <smarts_file>
+
+    # Get all matches instead of just boolean:
+    python substruct_bench.py --smiles <smiles_file> --smarts <smarts_file> --mode getSubstructMatches
+
+    # Limit to first 10 matches per target/query pair:
+    python substruct_bench.py --smiles <smiles_file> --smarts <smarts_file> --mode getSubstructMatches --max_matches 10
 
     # Skip nvmolkit (for CPU-only comparison):
-    python pains_filter_bench.py --smiles <smiles_file> --smarts <smarts_file> --no_nvmolkit
+    python substruct_bench.py --smiles <smiles_file> --smarts <smarts_file> --no_nvmolkit
 """
 
 import argparse
@@ -38,8 +47,6 @@ from typing import Callable
 import nvtx
 from rdkit import Chem
 from tqdm.contrib.concurrent import process_map
-from rdkit.Chem import FilterCatalog
-from rdkit.Chem.FilterCatalog import FilterCatalogParams
 
 
 def time_it(func: Callable, runs: int = 1) -> tuple[float, float]:
@@ -127,101 +134,42 @@ def load_smarts(filepath: str, max_count: int = 0) -> tuple[list[Chem.Mol], list
     return queries, smarts_list
 
 
-def get_builtin_pains_catalog() -> FilterCatalog.FilterCatalog:
-    """Get RDKit's built-in PAINS FilterCatalog."""
-    params = FilterCatalogParams()
-    params.AddCatalog(FilterCatalogParams.FilterCatalogs.PAINS)
-    catalog = FilterCatalog.FilterCatalog(params)
-    print(f"  Loaded PAINS FilterCatalog with {catalog.GetNumEntries()} filter entries")
-    return catalog
-
-
-def extract_patterns_from_catalog(catalog: FilterCatalog.FilterCatalog) -> tuple[list[Chem.Mol], list[str]]:
-    """Extract query patterns from a FilterCatalog for direct SubstructMatch comparison."""
-    queries = []
-    smarts_list = []
-    
-    def extract_from_matcher(matcher, description: str):
-        """Recursively extract SMARTS patterns from a filter matcher."""
-        if hasattr(matcher, "GetPattern"):
-            pattern = matcher.GetPattern()
-            if pattern is not None:
-                queries.append(pattern)
-                smarts_list.append(description)
-        if hasattr(matcher, "GetMatchers"):
-            for sub_matcher in matcher.GetMatchers():
-                extract_from_matcher(sub_matcher, description)
-    
-    try:
-        for i in range(catalog.GetNumEntries()):
-            entry = catalog.GetEntryWithIdx(i)
-            description = entry.GetDescription()
-            
-            if hasattr(entry, "GetNumFilters"):
-                for j in range(entry.GetNumFilters()):
-                    matcher = entry.GetFilter(j)
-                    extract_from_matcher(matcher, description)
-            elif hasattr(entry, "GetSmarts"):
-                smarts = entry.GetSmarts()
-                if smarts:
-                    query = Chem.MolFromSmarts(smarts)
-                    if query is not None:
-                        queries.append(query)
-                        smarts_list.append(description)
-    except Exception as e:
-        print(f"  Warning: Could not extract all patterns from catalog: {e}")
-    
-    print(f"  Extracted {len(queries)} SMARTS patterns from FilterCatalog")
-    return queries, smarts_list
-
-
-@nvtx.annotate("bench_rdkit_filter_catalog", color="blue")
-def bench_rdkit_filter_catalog(
-    mols: list[Chem.Mol], 
-    catalog: FilterCatalog.FilterCatalog,
-    runs: int
-) -> tuple[float, float, list[bool]]:
-    """Benchmark RDKit FilterCatalog for PAINS filtering."""
-    flagged = []
-    
-    @nvtx.annotate("filter_catalog_run", color="cyan")
-    def run():
-        nonlocal flagged
-        flagged = []
-        for mol in mols:
-            entry = catalog.GetFirstMatch(mol)
-            flagged.append(entry is not None)
-    
-    avg_ms, std_ms = time_it(run, runs)
-    return avg_ms, std_ms, flagged
-
-
 @nvtx.annotate("bench_rdkit_substruct", color="green")
 def bench_rdkit_substruct(
     mols: list[Chem.Mol], 
     queries: list[Chem.Mol], 
-    runs: int
-) -> tuple[float, float, list[bool]]:
-    """Benchmark RDKit SubstructMatch API directly."""
+    runs: int,
+    mode: str,
+    max_matches: int
+) -> tuple[float, float, list]:
+    """Benchmark RDKit SubstructMatch API."""
     params = Chem.SubstructMatchParameters()
     params.uniquify = False
+    if max_matches > 0:
+        params.maxMatches = max_matches
     
-    flagged = []
+    results_data = []
     
     @nvtx.annotate("substruct_run", color="yellow")
     def run():
-        nonlocal flagged
-        flagged = []
-        for mol in mols:
-            is_flagged = False
-            for query in queries:
-                if mol.HasSubstructMatch(query, params):
-                    is_flagged = True
-                    break
-            flagged.append(is_flagged)
+        nonlocal results_data
+        results_data = []
+        if mode == "hasSubstructMatch":
+            for mol in mols:
+                mol_results = []
+                for query in queries:
+                    mol_results.append(mol.HasSubstructMatch(query, params))
+                results_data.append(mol_results)
+        else:
+            for mol in mols:
+                mol_results = []
+                for query in queries:
+                    matches = mol.GetSubstructMatches(query, params)
+                    mol_results.append(matches)
+                results_data.append(mol_results)
     
     avg_ms, std_ms = time_it(run, runs)
-    return avg_ms, std_ms, flagged
+    return avg_ms, std_ms, results_data
 
 
 @nvtx.annotate("bench_nvmolkit", color="red")
@@ -229,40 +177,49 @@ def bench_nvmolkit(
     mols: list[Chem.Mol],
     queries: list[Chem.Mol],
     runs: int,
+    mode: str,
     config
-) -> tuple[float, float, list[bool]]:
+) -> tuple[float, float, list]:
     """Benchmark nvmolkit GPU substructure search."""
     import torch
-    from nvmolkit.substructure import hasSubstructMatch
+    from nvmolkit.substructure import hasSubstructMatch, getSubstructMatches
     
-    flagged = []
+    results_data = []
     
     @nvtx.annotate("nvmolkit_run", color="orange")
     def run():
-        nonlocal flagged
-        results = hasSubstructMatch(mols, queries, config)
-        torch.cuda.synchronize()
-        flagged = [any(query_matches) for query_matches in results]
+        nonlocal results_data
+        if mode == "hasSubstructMatch":
+            results = hasSubstructMatch(mols, queries, config)
+            torch.cuda.synchronize()
+            results_data = results.tolist()
+        else:
+            results = getSubstructMatches(mols, queries, config)
+            torch.cuda.synchronize()
+            results_data = results
     
     avg_ms, std_ms = time_it(run, runs)
-    return avg_ms, std_ms, flagged
+    return avg_ms, std_ms, results_data
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="PAINS filtering benchmark: nvmolkit vs RDKit FilterCatalog vs RDKit SubstructMatch"
+        description="Substructure search benchmark: nvmolkit vs RDKit SubstructMatch"
     )
-    parser.add_argument("--smiles", "-s", help="Path to SMILES file with molecules to filter")
+    parser.add_argument("--smiles", "-s", help="Path to SMILES file with molecules to search")
     parser.add_argument("--pickle", help="Path to pickled molecules file (alternative to --smiles)")
-    parser.add_argument("--smarts", "-q", required=True, help="Path to SMARTS file with filter patterns")
+    parser.add_argument("--smarts", "-q", required=True, help="Path to SMARTS file with query patterns")
     parser.add_argument("--num_mols", "-n", type=int, default=0, help="Max number of molecules (default: 0 = all)")
     parser.add_argument("--sanitize", action="store_true", dest="sanitize", help="Sanitize SMILES during parsing")
     parser.add_argument("--no_sanitize", action="store_false", dest="sanitize", help="Skip sanitization (preprocessed SMILES)")
     parser.set_defaults(sanitize=False)
     parser.add_argument("--runs", "-r", type=int, default=1, help="Number of timing runs (default: 1)")
+    parser.add_argument("--mode", "-m", choices=["hasSubstructMatch", "getSubstructMatches"], 
+                        default="hasSubstructMatch", help="Search mode (default: hasSubstructMatch)")
+    parser.add_argument("--max_matches", type=int, default=0, 
+                        help="Maximum matches per target/query pair, 0 = all (default: 0)")
     parser.add_argument("--no_nvmolkit", action="store_true", help="Skip nvmolkit benchmark")
-    parser.add_argument("--no_filter_catalog", action="store_true", help="Skip RDKit FilterCatalog benchmark")
-    parser.add_argument("--no_substruct", action="store_true", help="Skip RDKit SubstructMatch benchmark")
+    parser.add_argument("--no_rdkit", action="store_true", help="Skip RDKit benchmark")
     parser.add_argument("--batch_size", "-b", type=int, default=1024, help="nvmolkit batch size (default: 1024)")
     parser.add_argument("--workers", "-p", type=int, default=2, help="nvmolkit worker threads (default: 2)")
     
@@ -280,10 +237,11 @@ def main():
     print(f"  Input file: {args.smiles or args.pickle} ({'pickle' if args.pickle else 'smiles'})")
     print(f"  SMARTS file: {args.smarts}")
     print(f"  Max molecules: {args.num_mols if args.num_mols > 0 else 'all'}")
+    print(f"  Mode: {args.mode}")
+    print(f"  Max matches: {args.max_matches if args.max_matches > 0 else 'all'}")
     print(f"  Runs: {args.runs}")
     print(f"  Run nvmolkit: {not args.no_nvmolkit}")
-    print(f"  Run FilterCatalog: {not args.no_filter_catalog}")
-    print(f"  Run SubstructMatch: {not args.no_substruct}")
+    print(f"  Run RDKit: {not args.no_rdkit}")
     
     print("\nLoading molecules...")
     if args.pickle:
@@ -301,56 +259,49 @@ def main():
         print("Error: No valid SMARTS patterns loaded from file")
         sys.exit(1)
     
-    catalog = None
-    if not args.no_filter_catalog:
-        print("\nLoading builtin PAINS FilterCatalog...")
-        catalog = get_builtin_pains_catalog()
-    
     num_patterns = len(queries)
-    print(f"\nBenchmarking PAINS filtering: {len(mols)} molecules × {num_patterns} patterns")
+    print(f"\nBenchmarking substructure search ({args.mode}): {len(mols)} molecules × {num_patterns} patterns")
     print("=" * 70)
     
     results = {}
     
     if not args.no_nvmolkit:
         try:
-            from nvmolkit.substructure import SubstructSearchConfig, hasSubstructMatch
+            from nvmolkit.substructure import SubstructSearchConfig, hasSubstructMatch, getSubstructMatches
             import torch
             
             config = SubstructSearchConfig()
             config.batchSize = args.batch_size
             config.workerThreads = args.workers
             config.presort = True
+            if args.max_matches > 0:
+                config.maxMatches = args.max_matches
             
             print("\nWarming up nvmolkit...")
             warmup_mols = mols[:10]
             with nvtx.annotate("nvmolkit_warmup", color="purple"):
-                hasSubstructMatch(warmup_mols, queries, config)
+                if args.mode == "hasSubstructMatch":
+                    hasSubstructMatch(warmup_mols, queries, config)
+                else:
+                    getSubstructMatches(warmup_mols, queries, config)
                 torch.cuda.synchronize()
             
             print("Running nvmolkit GPU benchmark...")
-            nvmolkit_avg, nvmolkit_std, nvmolkit_flagged = bench_nvmolkit(
-                mols, queries, args.runs, config
+            nvmolkit_avg, nvmolkit_std, nvmolkit_results = bench_nvmolkit(
+                mols, queries, args.runs, args.mode, config
             )
-            nvmolkit_hits = sum(nvmolkit_flagged)
-            print(f"  nvmolkit:        {nvmolkit_avg:10.2f} ms (± {nvmolkit_std:.2f} ms), {nvmolkit_hits} flagged")
-            results["nvmolkit"] = (nvmolkit_avg, nvmolkit_std, nvmolkit_flagged)
+            print(f"  nvmolkit:        {nvmolkit_avg:10.2f} ms (± {nvmolkit_std:.2f} ms)")
+            results["nvmolkit"] = (nvmolkit_avg, nvmolkit_std, nvmolkit_results)
         except ImportError as e:
             print(f"  nvmolkit: SKIPPED (import error: {e})")
     
-    if not args.no_filter_catalog:
-        print("\nRunning RDKit FilterCatalog benchmark...")
-        fc_avg, fc_std, fc_flagged = bench_rdkit_filter_catalog(mols, catalog, args.runs)
-        fc_hits = sum(fc_flagged)
-        print(f"  FilterCatalog:   {fc_avg:10.2f} ms (± {fc_std:.2f} ms), {fc_hits} flagged")
-        results["filter_catalog"] = (fc_avg, fc_std, fc_flagged)
-    
-    if not args.no_substruct:
+    if not args.no_rdkit:
         print("\nRunning RDKit SubstructMatch benchmark...")
-        ss_avg, ss_std, ss_flagged = bench_rdkit_substruct(mols, queries, args.runs)
-        ss_hits = sum(ss_flagged)
-        print(f"  SubstructMatch:  {ss_avg:10.2f} ms (± {ss_std:.2f} ms), {ss_hits} flagged")
-        results["substruct"] = (ss_avg, ss_std, ss_flagged)
+        rdkit_avg, rdkit_std, rdkit_results = bench_rdkit_substruct(
+            mols, queries, args.runs, args.mode, args.max_matches
+        )
+        print(f"  RDKit:           {rdkit_avg:10.2f} ms (± {rdkit_std:.2f} ms)")
+        results["rdkit"] = (rdkit_avg, rdkit_std, rdkit_results)
     
     print("\n" + "=" * 70)
     print("Summary:")
@@ -360,43 +311,51 @@ def main():
         sys.exit(1)
     
     baseline = None
-    if "substruct" in results:
-        baseline = ("RDKit SubstructMatch", results["substruct"][0])
-    elif "filter_catalog" in results:
-        baseline = ("RDKit FilterCatalog", results["filter_catalog"][0])
+    if "rdkit" in results:
+        baseline = ("RDKit", results["rdkit"][0])
     
-    for name, (avg_ms, std_ms, flagged) in results.items():
-        hits = sum(flagged)
+    for name, (avg_ms, std_ms, _) in results.items():
         speedup_str = ""
-        if baseline and name != baseline[0].lower().replace(" ", "_"):
+        if baseline and name != "rdkit":
             speedup = baseline[1] / avg_ms if avg_ms > 0 else 0
             speedup_str = f", {speedup:.1f}x vs {baseline[0]}"
-        print(f"  {name:20s}: {avg_ms:10.2f} ms (± {std_ms:.2f} ms), {hits:5d} flagged{speedup_str}")
+        print(f"  {name:20s}: {avg_ms:10.2f} ms (± {std_ms:.2f} ms){speedup_str}")
     
-    ref_flagged = None
-    ref_name = None
-    for name in ["filter_catalog", "substruct"]:
-        if name in results:
-            ref_flagged = results[name][2]
-            ref_name = name
-            break
-    
-    if ref_flagged is not None:
+    if "nvmolkit" in results and "rdkit" in results:
         print("\nValidation:")
-        for name, (_, _, flagged) in results.items():
-            if name == ref_name:
-                continue
-            matches = sum(1 for a, b in zip(flagged, ref_flagged) if a == b)
-            pct = 100.0 * matches / len(flagged) if flagged else 0
-            diff = sum(1 for a, b in zip(flagged, ref_flagged) if a != b)
-            print(f"  {name} vs {ref_name}: {matches}/{len(flagged)} ({pct:.1f}%) agree, {diff} differ")
+        nvmolkit_data = results["nvmolkit"][2]
+        rdkit_data = results["rdkit"][2]
+        
+        if args.mode == "hasSubstructMatch":
+            matches = 0
+            total = 0
+            for t in range(len(mols)):
+                for q in range(len(queries)):
+                    nv_match = bool(nvmolkit_data[t][q])
+                    rd_match = rdkit_data[t][q]
+                    if nv_match == rd_match:
+                        matches += 1
+                    total += 1
+            pct = 100.0 * matches / total if total > 0 else 0
+            print(f"  Boolean match agreement: {matches}/{total} ({pct:.1f}%)")
+        else:
+            matches = 0
+            total = 0
+            for t in range(len(mols)):
+                for q in range(len(queries)):
+                    nv_matches = set(tuple(m) for m in nvmolkit_data[t][q])
+                    rd_matches = set(rdkit_data[t][q])
+                    if nv_matches == rd_matches:
+                        matches += 1
+                    total += 1
+            pct = 100.0 * matches / total if total > 0 else 0
+            print(f"  Full match agreement: {matches}/{total} ({pct:.1f}%)")
     
     print("\n\nCSV Results:")
-    print("method,num_mols,num_patterns,time_ms,std_ms,flagged")
-    for name, (avg_ms, std_ms, flagged) in results.items():
-        print(f"{name},{len(mols)},{num_patterns},{avg_ms:.2f},{std_ms:.2f},{sum(flagged)}")
+    print("method,mode,num_mols,num_patterns,max_matches,time_ms,std_ms")
+    for name, (avg_ms, std_ms, _) in results.items():
+        print(f"{name},{args.mode},{len(mols)},{num_patterns},{args.max_matches},{avg_ms:.2f},{std_ms:.2f}")
 
 
 if __name__ == "__main__":
     main()
-

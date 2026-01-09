@@ -1,5 +1,6 @@
 from typing import Sequence
 
+import numpy as np
 from rdkit.Chem import Mol
 
 class SubstructSearchConfig:
@@ -35,7 +36,7 @@ def hasSubstructMatch(
     targets: Sequence[Mol],
     queries: Sequence[Mol],
     config: SubstructSearchConfig = ...,
-) -> list[list[bool]]:
+) -> np.ndarray:
     """Check if targets contain query substructures (boolean results).
 
     More efficient than getSubstructMatches when only existence is needed.
@@ -46,7 +47,8 @@ def hasSubstructMatch(
         config: SubstructSearchConfig with execution settings
 
     Returns:
-        2D list of booleans: results[target_idx][query_idx] = True if match exists
+        2D numpy array of uint8 with shape (num_targets, num_queries).
+        results[target_idx, query_idx] = 1 if match exists, 0 otherwise.
     """
     ...
 

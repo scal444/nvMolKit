@@ -16,7 +16,9 @@
 #include <GraphMol/ROMol.h>
 
 #include <boost/python.hpp>
+#include <boost/python/numpy.hpp>
 #include <boost/python/stl_iterator.hpp>
+#include <memory>
 #include <vector>
 
 #include "substruct_types.h"
@@ -85,6 +87,8 @@ void setGpuIdsPy(nvMolKit::SubstructSearchConfig& config, const object& iterable
 }  // namespace
 
 BOOST_PYTHON_MODULE(_substructure) {
+  numpy::initialize();
+
   class_<nvMolKit::SubstructSearchConfig>("SubstructSearchConfig")
     .def(init<>())
     .def_readwrite("batchSize", &nvMolKit::SubstructSearchConfig::batchSize)
@@ -184,20 +188,37 @@ BOOST_PYTHON_MODULE(_substructure) {
         queriesVec.push_back(mol);
       }
 
-      nvMolKit::HasSubstructMatchResults results;
-      nvMolKit::hasSubstructMatch(targetsVec, queriesVec, results,
+      auto resultsPtr = std::make_unique<nvMolKit::HasSubstructMatchResults>();
+      nvMolKit::hasSubstructMatch(targetsVec, queriesVec, *resultsPtr,
                                   nvMolKit::SubstructAlgorithm::GSI, nullptr, config);
 
-      // Convert results to Python: 2D list of booleans [target][query]
-      list pyResults;
-      for (int t = 0; t < results.numTargets; ++t) {
-        list targetMatches;
-        for (int q = 0; q < results.numQueries; ++q) {
-          targetMatches.append(results.matches(t, q));
-        }
-        pyResults.append(targetMatches);
+      const int numTargets = resultsPtr->numTargets;
+      const int numQueries = resultsPtr->numQueries;
+      uint8_t* dataPtr = resultsPtr->hasMatch.data();
+
+      auto deleter = [](PyObject* cap) {
+        auto* r = reinterpret_cast<nvMolKit::HasSubstructMatchResults*>(
+            PyCapsule_GetPointer(cap, "nvmolkit.hassubstruct_results"));
+        delete r;
+      };
+      PyObject* cap = PyCapsule_New(static_cast<void*>(resultsPtr.get()),
+                                    "nvmolkit.hassubstruct_results", deleter);
+      if (cap == nullptr) {
+        throw std::runtime_error("Failed to create PyCapsule for hasSubstructMatch results");
       }
-      return pyResults;
+      object owner{handle<>(cap)};
+      resultsPtr.release();
+
+      const Py_intptr_t shape_arr[2] = {static_cast<Py_intptr_t>(numTargets),
+                                        static_cast<Py_intptr_t>(numQueries)};
+      const Py_intptr_t strides_arr[2] = {static_cast<Py_intptr_t>(numQueries * sizeof(uint8_t)),
+                                          static_cast<Py_intptr_t>(sizeof(uint8_t))};
+
+      return numpy::from_data(dataPtr,
+                              numpy::dtype::get_builtin<uint8_t>(),
+                              make_tuple(shape_arr[0], shape_arr[1]),
+                              make_tuple(strides_arr[0], strides_arr[1]),
+                              owner);
     },
     (arg("targets"),
      arg("queries"),
@@ -212,6 +233,6 @@ BOOST_PYTHON_MODULE(_substructure) {
     "    config: SubstructSearchConfig with execution settings\n"
     "\n"
     "Returns:\n"
-    "    2D list of booleans: results[target_idx][query_idx] = True if match exists");
+    "    2D numpy array of uint8: results[target_idx, query_idx] = 1 if match exists, 0 otherwise");
 }
 

@@ -848,9 +848,9 @@ namespace {
 
 struct ThreadWorkerContext {
   PinnedHostVector<int> queryAtomCounts;
-  std::vector<int> globalPairMatchStarts;
-  std::vector<int> queryDepths;       ///< Cached recursion depth for each query
-  std::vector<int> queryMaxDepths;    ///< Cached max recursion depth per query (from leafSubpatterns)
+  std::vector<int> targetAtomCounts;   ///< Atom count for each target (for per-pair capacity)
+  std::vector<int> queryDepths;        ///< Cached recursion depth for each query
+  std::vector<int> queryMaxDepths;     ///< Cached max recursion depth per query (from leafSubpatterns)
   std::vector<int8_t> queryHasPatterns;  ///< Whether query has any recursive patterns
   const std::vector<int>* targetSortOrder = nullptr;  ///< Maps sorted -> original index (nullptr = identity)
   const std::vector<int>* querySortOrder  = nullptr;  ///< Maps sorted -> original index (nullptr = identity)
@@ -1040,7 +1040,7 @@ void BatchResultsDevice::allocateBatch(int        batchSize,
   pairMatchStarts_.copyFromHost(batchPairMatchStarts, batchSize + 1);
 
   if (matchIndices_.size() < static_cast<size_t>(totalBatchMatchIndices)) {
-    matchIndices_.resize(static_cast<size_t>(totalBatchMatchIndices * 1.5));
+    matchIndices_.resize(static_cast<size_t>(totalBatchMatchIndices) * 3 / 2);
   }
 
   const int overflowEntries = batchSize * numBuffersPerBlock * kOverflowEntriesPerBuffer;
@@ -1190,8 +1190,15 @@ void prepareBatchOnCPU(BatchSlot&                   slot,
   slot.batchPairMatchStarts[0] = 0;
   for (int i = 0; i < numPairsInBatch; ++i) {
     const int globalPairIdx = batchStart + i;
-    const int pairCapacity = ctx.globalPairMatchStarts[globalPairIdx + 1] -
-                             ctx.globalPairMatchStarts[globalPairIdx];
+    const int sortedTargetIdx = globalPairIdx / ctx.numQueries;
+    const int sortedQueryIdx  = globalPairIdx % ctx.numQueries;
+    const int targetAtoms = ctx.targetAtomCounts[sortedTargetIdx];
+    const int queryAtoms  = ctx.queryAtomCounts[sortedQueryIdx];
+    // When maxMatches > 0, limit capacity to maxMatches * queryAtoms
+    // When maxMatches == 0 (unlimited), use heuristic targetAtoms * queryAtoms
+    const int pairCapacity = (ctx.maxMatches > 0) 
+        ? (ctx.maxMatches * queryAtoms) 
+        : (targetAtoms * queryAtoms);
     slot.batchPairMatchStarts[i + 1] = slot.batchPairMatchStarts[i] + pairCapacity;
   }
   slot.totalMatchIndices = slot.batchPairMatchStarts[numPairsInBatch];
@@ -1787,25 +1794,13 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
                              std::to_string(kMaxRecursionDepth));
   }
 
-  ctx.globalPairMatchStarts.resize(numPairs + 1);
-  ctx.globalPairMatchStarts[0] = 0;
-  ctx.maxMatches = config.maxMatches;
+  // Store per-target atom counts for on-demand capacity calculation
+  // (avoids int32 overflow in cumulative sum for large datasets)
+  ctx.targetAtomCounts.resize(numTargets);
   for (int t = 0; t < numTargets; ++t) {
-    const int targetAtoms = targetsHost.batchAtomStarts[t + 1] - targetsHost.batchAtomStarts[t];
-    for (int q = 0; q < numQueries; ++q) {
-      const int pairIdx      = t * numQueries + q;
-      const int queryAtoms   = ctx.queryAtomCounts[q];
-      // When maxMatches > 0, limit capacity to maxMatches * queryAtoms
-      // When maxMatches == 0 (unlimited), use heuristic targetAtoms * queryAtoms
-      int pairCapacity;
-      if (ctx.maxMatches > 0) {
-        pairCapacity = ctx.maxMatches * queryAtoms;
-      } else {
-        pairCapacity = targetAtoms * queryAtoms;
-      }
-      ctx.globalPairMatchStarts[pairIdx + 1] = ctx.globalPairMatchStarts[pairIdx] + pairCapacity;
-    }
+    ctx.targetAtomCounts[t] = targetsHost.batchAtomStarts[t + 1] - targetsHost.batchAtomStarts[t];
   }
+  ctx.maxMatches = config.maxMatches;
   metadataRange.pop();
 
   // Only resize if not already sized (caller may have pre-sized for oversized target fallback)
@@ -1826,13 +1821,14 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
   cudaCheckError(cudaEventRecord(upstreamReadyEvent.event(), stream));
 
   // Calculate max match indices per batch based on maxMatches config
-  int maxMatchIndicesPerBatch;
+  // Use size_t for intermediate calculation to avoid int32 overflow
+  size_t maxMatchIndicesPerBatch;
   if (ctx.maxMatches > 0) {
     // Fixed limit: allocate for maxMatches per pair
-    maxMatchIndicesPerBatch = effectiveBatchSize * ctx.maxMatches * maxQueryAtoms;
+    maxMatchIndicesPerBatch = static_cast<size_t>(effectiveBatchSize) * ctx.maxMatches * maxQueryAtoms;
   } else {
     // Unlimited (maxMatches == 0): use heuristic based on target/query sizes
-    maxMatchIndicesPerBatch = effectiveBatchSize * ctx.maxTargetAtoms * maxQueryAtoms;
+    maxMatchIndicesPerBatch = static_cast<size_t>(effectiveBatchSize) * ctx.maxTargetAtoms * maxQueryAtoms;
   }
 
   // Calculate max patterns that could be accumulated at any depth level across all queries
@@ -1863,7 +1859,7 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
   // Compute total pinned memory needed and check against system RAM
   const int totalSlots = numRunners * slotsPerRunner;
   const size_t perSlotSize = ConsolidatedPinnedBuffer::computeSize(
-      effectiveBatchSize, maxMatchIndicesPerBatch, maxPatternsPerDepth);
+      effectiveBatchSize, static_cast<int>(maxMatchIndicesPerBatch), maxPatternsPerDepth);
   const size_t totalPinnedBytes = static_cast<size_t>(totalSlots) * perSlotSize;
   
   const long pages = sysconf(_SC_PHYS_PAGES);
@@ -1887,7 +1883,7 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
   std::vector<ConsolidatedPinnedBuffer> pinnedBuffers(totalSlots);
   for (int i = 0; i < totalSlots; ++i) {
     char* slotPtr = megaBuffer + i * perSlotSize;
-    pinnedBuffers[i].assignExternal(slotPtr, effectiveBatchSize, maxMatchIndicesPerBatch, maxPatternsPerDepth);
+    pinnedBuffers[i].assignExternal(slotPtr, effectiveBatchSize, static_cast<int>(maxMatchIndicesPerBatch), maxPatternsPerDepth);
   }
   allocRange.pop();
 
@@ -2352,7 +2348,6 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
     return;
   }
 
-  // Determine GPU list and compute effective thread counts
   std::vector<int> gpuIds = config.gpuIds;
   if (gpuIds.empty()) {
     int currentDevice = 0;
@@ -2367,20 +2362,22 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
                                effectiveWorkerThreads,
                                effectiveFallbackThreads);
 
-  // Create modified config with resolved thread counts
   SubstructSearchConfig effectiveConfig = config;
   effectiveConfig.preprocessingThreads = effectivePreprocessingThreads;
   effectiveConfig.workerThreads = effectiveWorkerThreads;
   effectiveConfig.gpuIds = gpuIds;
 
+  ScopedNvtxRange preprocessRange("Preprocess molecules");
   std::vector<unsigned int> targetAtomCounts(numTargets);
   std::vector<unsigned int> queryAtomCounts(numQueries);
+  std::vector<uint8_t> needsFallback(numTargets);
 
 #pragma omp parallel num_threads(effectivePreprocessingThreads)
   {
 #pragma omp for nowait
     for (int i = 0; i < numTargets; ++i) {
       targetAtomCounts[i] = targets[i]->getNumAtoms();
+      needsFallback[i] = (targetAtomCounts[i] > kLabelMaxTargetAtoms) || requiresRDKitFallback(targets[i]);
     }
 #pragma omp for
     for (int i = 0; i < numQueries; ++i) {
@@ -2388,17 +2385,16 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
     }
   }
 
-  // Identify targets requiring RDKit fallback (oversized or exceeding packed field limits)
   std::vector<RDKitFallbackEntry> fallbackTargets;
-  std::vector<int>                gpuTargetIndices;  // Original indices of GPU-processable targets
-  std::vector<const RDKit::ROMol*> gpuTargets;       // GPU-processable target molecules
+  std::vector<int>                gpuTargetIndices;
+  std::vector<const RDKit::ROMol*> gpuTargets;
   int                             numFallbackTargets = 0;
 
   gpuTargetIndices.reserve(numTargets);
   gpuTargets.reserve(numTargets);
 
   for (int i = 0; i < numTargets; ++i) {
-    if (targetAtomCounts[i] > kLabelMaxTargetAtoms || requiresRDKitFallback(targets[i])) {
+    if (needsFallback[i]) {
       ++numFallbackTargets;
       for (int q = 0; q < numQueries; ++q) {
         fallbackTargets.push_back({i, q});
@@ -2408,6 +2404,7 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
       gpuTargets.push_back(targets[i]);
     }
   }
+  preprocessRange.pop();
   
   if (numFallbackTargets > 0) {
     ScopedNvtxRange warnRange("WARNING: " + std::to_string(numFallbackTargets) + 
@@ -2572,19 +2569,20 @@ void hasSubstructMatch(const std::vector<const RDKit::ROMol*>& targets,
     return;
   }
 
-  // Use getSubstructMatches with maxMatches=1 for early exit behavior
   SubstructSearchConfig hasMatchConfig = config;
   hasMatchConfig.maxMatches = 1;
 
   SubstructSearchResults matchResults;
   getSubstructMatches(targets, queries, matchResults, algorithm, stream, hasMatchConfig);
 
-  // Convert match counts to boolean results
-  for (int t = 0; t < numTargets; ++t) {
-    for (int q = 0; q < numQueries; ++q) {
-      results.setMatch(t, q, matchResults.matchCount(t, q) > 0);
+  for (auto& [pairIdx, matches] : matchResults.matches) {
+    if (!matches.empty()) {
+      results.hasMatch[pairIdx] = 1;
     }
+    matches.clear();
+    matches.shrink_to_fit();
   }
+  matchResults.matches.clear();
 }
 
 }  // namespace nvMolKit

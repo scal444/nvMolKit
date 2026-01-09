@@ -582,23 +582,22 @@ class TestHasSubstructMatch:
 
         results = hasSubstructMatch(targets, queries)
 
-        assert len(results) == 3
-        assert len(results[0]) == 3
+        assert results.shape == (3, 3)
 
         # CCO contains C and O, but not N
-        assert results[0][0] is True   # CCO has C
-        assert results[0][1] is True   # CCO has O
-        assert results[0][2] is False  # CCO has no N
+        assert results[0, 0] == 1  # CCO has C
+        assert results[0, 1] == 1  # CCO has O
+        assert results[0, 2] == 0  # CCO has no N
 
         # CCCC contains C, but not O or N
-        assert results[1][0] is True   # CCCC has C
-        assert results[1][1] is False  # CCCC has no O
-        assert results[1][2] is False  # CCCC has no N
+        assert results[1, 0] == 1  # CCCC has C
+        assert results[1, 1] == 0  # CCCC has no O
+        assert results[1, 2] == 0  # CCCC has no N
 
         # Benzene has aromatic c, not aliphatic C, O, or N
-        assert results[2][0] is False  # benzene has no aliphatic C
-        assert results[2][1] is False  # benzene has no O
-        assert results[2][2] is False  # benzene has no N
+        assert results[2, 0] == 0  # benzene has no aliphatic C
+        assert results[2, 1] == 0  # benzene has no O
+        assert results[2, 2] == 0  # benzene has no N
 
     def test_has_match_multi_atom_query(self):
         """Test hasSubstructMatch with multi-atom queries."""
@@ -614,12 +613,12 @@ class TestHasSubstructMatch:
         results = hasSubstructMatch(targets, queries)
 
         # CCO contains CO and CC
-        assert results[0][0] is True
-        assert results[0][1] is True
+        assert results[0, 0] == 1
+        assert results[0, 1] == 1
 
         # CCC contains CC but not CO
-        assert results[1][0] is False
-        assert results[1][1] is True
+        assert results[1, 0] == 0
+        assert results[1, 1] == 1
 
     def test_has_match_empty_inputs(self):
         """Test hasSubstructMatch with empty inputs."""
@@ -628,7 +627,7 @@ class TestHasSubstructMatch:
 
         results = hasSubstructMatch(targets, queries)
 
-        assert len(results) == 0
+        assert results.shape == (0, 1)
 
 
 # =============================================================================
@@ -968,12 +967,11 @@ class TestIntegrationChemblSmarts:
 
         results = hasSubstructMatch(chembl_mols, queries)
 
-        assert len(results) == len(chembl_mols)
+        assert results.shape == (len(chembl_mols), len(queries))
         for t_idx, target in enumerate(chembl_mols):
-            assert len(results[t_idx]) == len(queries)
             for q_idx, query in enumerate(queries):
                 rdkit_has_match = target.HasSubstructMatch(query)
-                assert results[t_idx][q_idx] == rdkit_has_match, \
+                assert bool(results[t_idx, q_idx]) == rdkit_has_match, \
                     f"Mismatch at target {t_idx}, query {q_idx}"
 
 
