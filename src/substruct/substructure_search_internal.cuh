@@ -255,31 +255,31 @@ struct RecursiveScratchBuffers {
 };
 
 /**
- * @brief Batch-local device-side storage for substructure match results.
+ * @brief Mini-batch-local device-side storage for substructure match results.
  *
- * Owns device memory for a single batch and provides views for kernel access.
- * Results are copied back to host after each batch and accumulated.
+ * Owns device memory for a single mini-batch and provides views for kernel access.
+ * Results are copied back to host after each mini-batch and accumulated.
  */
-class BatchResultsDevice {
+class MiniBatchResultsDevice {
  public:
-  BatchResultsDevice() = default;
-  explicit BatchResultsDevice(cudaStream_t stream) : stream_(stream) { setStream(stream); }
+  MiniBatchResultsDevice() = default;
+  explicit MiniBatchResultsDevice(cudaStream_t stream) : stream_(stream) { setStream(stream); }
 
   /**
-   * @brief Allocate batch-local buffers for a specific batch.
+   * @brief Allocate mini-batch-local buffers for a specific mini-batch.
    *
-   * @param batchSize Number of pairs in this batch
-   * @param batchPairMatchStarts Batch-local offsets into matchIndices [batchSize + 1]
-   * @param totalBatchMatchIndices Total match indices capacity for this batch
+   * @param miniBatchSize Number of pairs in this mini-batch
+   * @param miniBatchPairMatchStarts Mini-batch-local offsets into matchIndices [miniBatchSize + 1]
+   * @param totalMiniBatchMatchIndices Total match indices capacity for this mini-batch
    * @param numQueries Total number of queries (for kernel view)
    * @param maxTargetAtoms Max atoms per target (stride for recursiveMatchBits)
    * @param numBuffersPerBlock Overflow buffers per block (2 for GSI)
    * @param maxMatchesToFind Stop searching after this many matches (-1 = no limit)
    * @param countOnly If true, count matches but don't store them
    */
-  void allocateBatch(int         batchSize,
-                     const int*  batchPairMatchStarts,
-                     int         totalBatchMatchIndices,
+  void allocateMiniBatch(int         miniBatchSize,
+                         const int*  miniBatchPairMatchStarts,
+                         int         totalMiniBatchMatchIndices,
                      int         numQueries,
                      int         maxTargetAtoms,
                      int         numBuffersPerBlock,
@@ -294,31 +294,31 @@ class BatchResultsDevice {
   void setStream(cudaStream_t stream);
 
   /**
-   * @brief Zero the recursive match bits buffer for a new batch.
+   * @brief Zero the recursive match bits buffer for a new mini-batch.
    */
   void zeroRecursiveBits();
 
   /**
-   * @brief Copy batch results to raw pinned memory pointers.
+   * @brief Copy mini-batch results to raw pinned memory pointers.
    *
-   * @param hostMatchCounts Output: match counts for this batch [batchSize]
-   * @param hostReportedCounts Output: reported counts for this batch [batchSize]
-   * @param hostMatchIndices Output: match indices for this batch
+   * @param hostMatchCounts Output: match counts for this mini-batch [miniBatchSize]
+   * @param hostReportedCounts Output: reported counts for this mini-batch [miniBatchSize]
+   * @param hostMatchIndices Output: match indices for this mini-batch
    */
-  void copyBatchToHost(int*     hostMatchCounts,
-                       int*     hostReportedCounts,
-                       int16_t* hostMatchIndices) const;
+  void copyMiniBatchToHost(int*     hostMatchCounts,
+                           int*     hostReportedCounts,
+                           int16_t* hostMatchIndices) const;
 
   void setQueryAtomCounts(const int* queryAtomCounts, size_t count);
 
-  [[nodiscard]] int batchSize() const { return batchSize_; }
+  [[nodiscard]] int miniBatchSize() const { return miniBatchSize_; }
   [[nodiscard]] int maxTargetAtoms() const { return maxTargetAtoms_; }
   [[nodiscard]] uint32_t* recursiveMatchBits() { return recursiveMatchBits_.data(); }
 
  private:
   cudaStream_t stream_ = nullptr;
 
-  int batchSize_    = 0;
+  int miniBatchSize_    = 0;
   int numQueries_   = 0;
   int maxTargetAtoms_ = 0;
 
@@ -335,7 +335,7 @@ class BatchResultsDevice {
 
   AsyncDeviceVector<uint32_t> labelMatrixBuffer_;
 
-  int totalBatchMatchIndices_ = 0;
+  int totalMiniBatchMatchIndices_ = 0;
 
   // Early exit control
   int  maxMatchesToFind_ = -1;
@@ -343,7 +343,7 @@ class BatchResultsDevice {
 };
 
 /**
- * @brief Two-stream pipeline context for overlapping recursive preprocessing with matching.
+ * @brief Pipeline context for overlapping recursive preprocessing with matching.
  *
  * Uses a high-priority stream for recursive paint operations and a low-priority
  * stream for main query matching. Events synchronize pairs that depend on
@@ -352,7 +352,7 @@ class BatchResultsDevice {
  * Host-side pinned buffers are now referenced via pointers into the consolidated
  * buffer rather than owned allocations.
  */
-struct TwoStreamPipelineContext {
+struct RecursivePipelineContext {
   ScopedStreamWithPriority recursiveStream;  ///< High priority stream for paint kernels
 
   /// Low priority stream for match kernels at depth > 0.
@@ -367,18 +367,18 @@ struct TwoStreamPipelineContext {
   /// Matching: global pair indices for each depth group (depth 0..kMaxRecursionDepth)
   std::array<AsyncDeviceVector<int>, kMaxRecursionDepth + 1> matchGlobalPairIndices;
 
-  /// Matching: batch-local indices for each depth group (depth 0..kMaxRecursionDepth)
-  std::array<AsyncDeviceVector<int>, kMaxRecursionDepth + 1> matchBatchLocalIndices;
+  /// Matching: mini-batch-local indices for each depth group (depth 0..kMaxRecursionDepth)
+  std::array<AsyncDeviceVector<int>, kMaxRecursionDepth + 1> matchMiniBatchLocalIndices;
 
   /// Host-side schedule: pairs to match after each depth level completes
   std::array<std::vector<int>, kMaxRecursionDepth + 1> matchPairsHost;
 
   /// Pointers to pinned buffers for H2D transfers (reference consolidated buffer)
   std::array<int*, kMaxRecursionDepth + 1> matchGlobalPairIndicesHost = {};
-  std::array<int*, kMaxRecursionDepth + 1> matchBatchLocalIndicesHost = {};
+  std::array<int*, kMaxRecursionDepth + 1> matchMiniBatchLocalIndicesHost = {};
   int perDepthCapacity = 0;
 
-  int maxDepthInBatch = 0;
+  int maxDepthInMiniBatch = 0;
 
   /**
    * @brief Construct pipeline context with priority streams.
@@ -386,50 +386,50 @@ struct TwoStreamPipelineContext {
    * The recursive stream gets high priority (lower numerical value),
    * post-recursion stream gets low priority (higher numerical value).
    * 
-   * @param workerIdx Worker thread index for unique stream naming
+   * @param executorIdx Executor index for unique stream naming
    */
-  explicit TwoStreamPipelineContext(int workerIdx = 0);
+  explicit RecursivePipelineContext(int executorIdx = 0);
 
   /**
    * @brief Set pointers to consolidated pinned buffer regions.
    */
   void setPinnedBuffers(const std::array<int*, kMaxRecursionDepth + 1>& globalPairPtrs,
-                        const std::array<int*, kMaxRecursionDepth + 1>& batchLocalPtrs,
+                        const std::array<int*, kMaxRecursionDepth + 1>& miniBatchLocalPtrs,
                         int capacity) {
     matchGlobalPairIndicesHost = globalPairPtrs;
-    matchBatchLocalIndicesHost = batchLocalPtrs;
+    matchMiniBatchLocalIndicesHost = miniBatchLocalPtrs;
     perDepthCapacity           = capacity;
   }
 };
 
 /**
- * @brief Preprocess ALL recursive SMARTS patterns for a batch.
+ * @brief Preprocess ALL recursive SMARTS patterns for a mini-batch.
  *
  * Uses pre-built leaf subpatterns to run paint kernels for all recursive patterns
- * that affect pairs in the current batch. Optionally records events after each
- * depth level for two-stream pipeline synchronization.
+ * that affect pairs in the current mini-batch. Optionally records events after each
+ * depth level for pipeline synchronization.
  *
  * @param targetsDevice Device-resident target molecules
  * @param queriesHost Host-side query data (contains recursivePatterns per query)
  * @param leafSubpatterns Pre-built leaf subpattern molecules (device-resident)
- * @param batchResults The batch results buffer where recursiveMatchBits will be written
+ * @param miniBatchResults The mini-batch results buffer where recursiveMatchBits will be written
  * @param numQueries Total number of queries (for computing pair indices)
- * @param batchPairOffset Global pair index where current batch starts
- * @param batchSize Number of pairs in this batch
+ * @param miniBatchPairOffset Global pair index where current mini-batch starts
+ * @param miniBatchSize Number of pairs in this mini-batch
  * @param algorithm Algorithm to use for matching
  * @param stream CUDA stream for async operations
  * @param scratch Reusable scratch buffers (avoids alloc/free between kernels)
- * @param scratchPatternEntries Vector to store pattern entries for the batch
+ * @param scratchPatternEntries Vector to store pattern entries for the mini-batch
  * @param depthEvents Array of events to record after each depth level, or nullptr
  * @param numDepthEvents Number of events in the array (typically kMaxRecursionDepth)
  */
 void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&            targetsDevice,
                                                 const MoleculesHost&              queriesHost,
                                                 const LeafSubpatterns&            leafSubpatterns,
-                                                BatchResultsDevice&               batchResults,
+                                                MiniBatchResultsDevice&           miniBatchResults,
                                                 int                               numQueries,
-                                                int                               batchPairOffset,
-                                                int                               batchSize,
+                                                int                               miniBatchPairOffset,
+                                                int                               miniBatchSize,
                                                 SubstructAlgorithm                algorithm,
                                                 cudaStream_t                      stream,
                                                 RecursiveScratchBuffers&          scratch,

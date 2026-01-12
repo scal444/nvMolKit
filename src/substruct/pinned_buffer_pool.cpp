@@ -103,7 +103,7 @@ void ConsolidatedPinnedBuffer::assignExternal(char* externalPtr, int maxBatchSiz
   ownsMemory_ = false;
   
   pairIndices          = reinterpret_cast<int*>(basePtr + layout.pairIndicesOff);
-  batchPairMatchStarts = reinterpret_cast<int*>(basePtr + layout.batchMatchStartsOff);
+  miniBatchPairMatchStarts = reinterpret_cast<int*>(basePtr + layout.batchMatchStartsOff);
   matchCounts          = reinterpret_cast<int*>(basePtr + layout.matchCountsOff);
   reportedCounts       = reinterpret_cast<int*>(basePtr + layout.reportedCountsOff);
   matchIndices         = reinterpret_cast<int16_t*>(basePtr + layout.matchIndicesOff);
@@ -137,7 +137,7 @@ void ConsolidatedPinnedBuffer::allocate(int maxBatchSize, int maxMatchIndicesEst
 
   // Assign pointers
   pairIndices          = reinterpret_cast<int*>(basePtr + layout.pairIndicesOff);
-  batchPairMatchStarts = reinterpret_cast<int*>(basePtr + layout.batchMatchStartsOff);
+  miniBatchPairMatchStarts = reinterpret_cast<int*>(basePtr + layout.batchMatchStartsOff);
   matchCounts          = reinterpret_cast<int*>(basePtr + layout.matchCountsOff);
   reportedCounts       = reinterpret_cast<int*>(basePtr + layout.reportedCountsOff);
   matchIndices         = reinterpret_cast<int16_t*>(basePtr + layout.matchIndicesOff);

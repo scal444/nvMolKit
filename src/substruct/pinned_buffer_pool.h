@@ -51,7 +51,7 @@ struct BatchedPatternEntry {
 };
 
 /**
- * @brief Consolidated pinned memory buffer for a single BatchSlot.
+ * @brief Consolidated pinned memory buffer for a single GpuExecutor.
  *
  * Combines all pinned host memory allocations into a single cudaMallocHost call,
  * then partitions the memory into separate logical regions accessed via raw pointers.
@@ -61,14 +61,14 @@ struct ConsolidatedPinnedBuffer {
   char*  basePtr   = nullptr;
   size_t totalSize = 0;
 
-  // BatchSlot buffers
+  // GpuExecutor buffers
   int*     pairIndices          = nullptr;
-  int*     batchPairMatchStarts = nullptr;
+  int*     miniBatchPairMatchStarts = nullptr;
   int*     matchCounts          = nullptr;
   int*     reportedCounts       = nullptr;
   int16_t* matchIndices         = nullptr;
 
-  // TwoStreamPipelineContext buffers (kMaxRecursionDepth + 1 = 5 arrays each)
+  // RecursivePipelineContext buffers (kMaxRecursionDepth + 1 = 5 arrays each)
   std::array<int*, kMaxRecursionDepth + 1> matchGlobalPairIndicesHost = {};
   std::array<int*, kMaxRecursionDepth + 1> matchBatchLocalIndicesHost = {};
 
@@ -90,7 +90,7 @@ struct ConsolidatedPinnedBuffer {
       : basePtr(other.basePtr),
         totalSize(other.totalSize),
         pairIndices(other.pairIndices),
-        batchPairMatchStarts(other.batchPairMatchStarts),
+        miniBatchPairMatchStarts(other.miniBatchPairMatchStarts),
         matchCounts(other.matchCounts),
         reportedCounts(other.reportedCounts),
         matchIndices(other.matchIndices),
@@ -116,7 +116,7 @@ struct ConsolidatedPinnedBuffer {
       totalSize                  = other.totalSize;
       ownsMemory_                = other.ownsMemory_;
       pairIndices                = other.pairIndices;
-      batchPairMatchStarts       = other.batchPairMatchStarts;
+      miniBatchPairMatchStarts   = other.miniBatchPairMatchStarts;
       matchCounts                = other.matchCounts;
       reportedCounts             = other.reportedCounts;
       matchIndices               = other.matchIndices;

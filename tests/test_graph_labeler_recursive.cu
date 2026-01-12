@@ -61,7 +61,7 @@ using nvMolKit::kMaxRecursionDepth;
 using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
 using nvMolKit::SubstructSearchResults;
-using nvMolKit::BatchResultsDevice;
+using nvMolKit::MiniBatchResultsDevice;
 
 namespace {
 
@@ -249,7 +249,7 @@ TEST_F(RecursiveInstructionTest, NegatedRecursivePattern) {
 class RecursivePaintTest : public ::testing::Test {
  protected:
   ScopedStream stream_;
-  std::unique_ptr<BatchResultsDevice> results_;
+  std::unique_ptr<MiniBatchResultsDevice> results_;
   int maxTargetAtoms_ = 0;
   int numTargets_ = 0;
   int numQueries_ = 1;
@@ -266,11 +266,11 @@ class RecursivePaintTest : public ::testing::Test {
       maxTargetAtoms_ = std::max(maxTargetAtoms_, atomCount);
     }
 
-    const int batchSize = numTargets * numQueries;
-    std::vector<int> batchPairMatchStarts(batchSize + 1, 0);
+    const int miniBatchSize = numTargets * numQueries;
+    std::vector<int> miniBatchPairMatchStarts(miniBatchSize + 1, 0);
 
-    results_ = std::make_unique<BatchResultsDevice>(stream_.stream());
-    results_->allocateBatch(batchSize, batchPairMatchStarts.data(), 0, numQueries, maxTargetAtoms_, 2);
+    results_ = std::make_unique<MiniBatchResultsDevice>(stream_.stream());
+    results_->allocateMiniBatch(miniBatchSize, miniBatchPairMatchStarts.data(), 0, numQueries, maxTargetAtoms_, 2);
     results_->setQueryAtomCounts(queryAtomCounts.data(), queryAtomCounts.size());
     results_->zeroRecursiveBits();
   }

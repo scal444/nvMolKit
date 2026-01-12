@@ -336,12 +336,12 @@ std::vector<std::vector<uint8_t>> computeGpuLabelMatrix(const RDKit::ROMol& targ
   const int numQueryAtoms  = static_cast<int>(queryHost.totalAtoms());
 
   std::vector<int> queryAtomCounts   = {numQueryAtoms};
-  std::vector<int> batchPairMatchStarts = {0, 0};
+  std::vector<int> miniBatchPairMatchStarts = {0, 0};
 
-  BatchResultsDevice batchResults(stream);
-  batchResults.allocateBatch(1, batchPairMatchStarts.data(), 0, 1, numTargetAtoms, 2);
-  batchResults.setQueryAtomCounts(queryAtomCounts.data(), queryAtomCounts.size());
-  batchResults.zeroRecursiveBits();
+  MiniBatchResultsDevice miniBatchResults(stream);
+  miniBatchResults.allocateMiniBatch(1, miniBatchPairMatchStarts.data(), 0, 1, numTargetAtoms, 2);
+  miniBatchResults.setQueryAtomCounts(queryAtomCounts.data(), queryAtomCounts.size());
+  miniBatchResults.zeroRecursiveBits();
 
   if (!queryHost.recursivePatterns.empty() && !queryHost.recursivePatterns[0].empty()) {
     LeafSubpatterns leafSubpatterns;
@@ -351,7 +351,7 @@ std::vector<std::vector<uint8_t>> computeGpuLabelMatrix(const RDKit::ROMol& targ
     RecursiveScratchBuffers          scratch(stream);
     scratch.allocateBuffers(256);
     std::vector<BatchedPatternEntry> scratchPatternEntries;
-    preprocessRecursiveSmartsBatchedWithEvents(targetDevice, queryHost, leafSubpatterns, batchResults,
+    preprocessRecursiveSmartsBatchedWithEvents(targetDevice, queryHost, leafSubpatterns, miniBatchResults,
                                                1, 0, 1, SubstructAlgorithm::GSI, stream, scratch,
                                                scratchPatternEntries, nullptr, 0);
   }
@@ -361,7 +361,7 @@ std::vector<std::vector<uint8_t>> computeGpuLabelMatrix(const RDKit::ROMol& targ
   const LabelMatrixStorage              hostMatrix(false);
   matrixDev.setFromVector(std::vector<LabelMatrixStorage>{hostMatrix});
 
-  auto            resultsView       = batchResults.view();
+  auto            resultsView       = miniBatchResults.view();
   const uint32_t* pairRecursiveBits = info.empty() ? nullptr : resultsView.recursiveMatchBits;
 
   populateLabelMatrixKernel<kMaxTargetAtoms, kMaxQueryAtoms>

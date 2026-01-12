@@ -1528,12 +1528,12 @@ TEST_P(SubstructureSearchTest, InvalidSlotsPerRunnerThrows) {
   SubstructSearchResults results;
   SubstructSearchConfig config;
 
-  config.slotsPerRunner = 0;
+  config.executorsPerRunner = 0;
   EXPECT_THROW(getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                                    results, algorithm(), stream_.stream(), config),
                std::invalid_argument);
 
-  config.slotsPerRunner = 9;
+  config.executorsPerRunner = 9;
   EXPECT_THROW(getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                                    results, algorithm(), stream_.stream(), config),
                std::invalid_argument);
@@ -1547,13 +1547,13 @@ TEST_P(SubstructureSearchTest, ValidSlotsPerRunnerWorks) {
 
   SubstructSearchConfig config;
 
-  for (int slots = 1; slots <= 8; ++slots) {
-    config.slotsPerRunner = slots;
+  for (int executors = 1; executors <= 8; ++executors) {
+    config.executorsPerRunner = executors;
     SubstructSearchResults results;
     EXPECT_NO_THROW(getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                                         results, algorithm(), stream_.stream(), config))
-        << "slotsPerRunner=" << slots << " should be valid";
-    EXPECT_GT(results.matchCount(0, 0), 0) << "Should find matches with slots=" << slots;
+        << "executorsPerRunner=" << executors << " should be valid";
+    EXPECT_GT(results.matchCount(0, 0), 0) << "Should find matches with executors=" << executors;
   }
 }
 

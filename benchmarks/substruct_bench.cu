@@ -360,7 +360,7 @@ int main(int argc, char* argv[]) {
   unsigned int       maxAtoms         = 128;
   int                numRunners       = 2;
   int                numPreprocessors = 0;
-  int                slotsPerRunner   = 3;
+  int                executorsPerRunner   = 3;
   bool               useMultiGpu      = false;
   bool               doPresort        = true;
   bool               doRdkit          = true;
@@ -488,9 +488,9 @@ int main(int argc, char* argv[]) {
         break;
       case 'S':
         try {
-          slotsPerRunner = std::stoi(optarg);
-          if (slotsPerRunner < 1 || slotsPerRunner > 8) {
-            std::cerr << "Error: slots must be between 1 and 8\n";
+          executorsPerRunner = std::stoi(optarg);
+          if (executorsPerRunner < 1 || executorsPerRunner > 8) {
+            std::cerr << "Error: executors must be between 1 and 8\n";
             return 1;
           }
         } catch (const std::exception& e) {
@@ -593,7 +593,7 @@ int main(int argc, char* argv[]) {
   std::cout << "  Atom cap: " << maxAtoms << "\n";
   std::cout << "  Runner threads: " << numRunners << " per GPU\n";
   std::cout << "  Preprocessing threads: " << numPreprocessors << "\n";
-  std::cout << "  Slots per runner: " << slotsPerRunner << "\n";
+  std::cout << "  Executors per runner: " << executorsPerRunner << "\n";
   std::cout << "  Multi-GPU: " << (useMultiGpu ? "yes" : "no") << " (" << numGpus << " GPU(s))\n";
   std::cout << "  Presort by size: " << (doPresort ? "yes" : "no") << "\n";
   std::cout << "  Run RDKit comparison: " << (doRdkit ? "yes" : "no") << "\n";
@@ -649,7 +649,7 @@ int main(int argc, char* argv[]) {
   benchConfig.batchSize            = batchSize;
   benchConfig.workerThreads        = numRunners;
   benchConfig.preprocessingThreads = numPreprocessors;
-  benchConfig.slotsPerRunner       = slotsPerRunner;
+  benchConfig.executorsPerRunner       = executorsPerRunner;
   benchConfig.presort              = doPresort;
   benchConfig.gpuIds               = gpuIds;
   benchConfig.maxMatches           = maxMatches;
@@ -712,7 +712,7 @@ int main(int argc, char* argv[]) {
   std::cout << "\n";
 
   std::cout << algorithmName(algorithm) << "," << targetMols.size() << "," << queryMols.size() << ","
-            << batchSize << "," << numRunners << "," << numPreprocessors << "," << slotsPerRunner << "," << numGpus << "," << (doPresort ? 1 : 0) << ","
+            << batchSize << "," << numRunners << "," << numPreprocessors << "," << executorsPerRunner << "," << numGpus << "," << (doPresort ? 1 : 0) << ","
             << maxMatches << "," << (hasMatchOnly ? 1 : 0) << ","
             << nvmolkitTiming.avgMs << "," << nvmolkitTiming.stdMs;
   if (doRdkit) {
