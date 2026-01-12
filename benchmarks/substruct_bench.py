@@ -222,24 +222,22 @@ def bench_nvmolkit(
     runs: int,
     mode: str,
     config
-) -> tuple[float, float, list]:
+) -> tuple[float, float, object]:
     """Benchmark nvmolkit GPU substructure search."""
     import torch
     from nvmolkit.substructure import hasSubstructMatch, getSubstructMatches
     
-    results_data = []
+    results_data: object = None
     
     @nvtx.annotate("nvmolkit_run", color="orange")
     def run():
         nonlocal results_data
         if mode == "hasSubstructMatch":
-            results = hasSubstructMatch(mols, queries, config)
+            results_data = hasSubstructMatch(mols, queries, config)
             torch.cuda.synchronize()
-            results_data = results.tolist()
         else:
-            results = getSubstructMatches(mols, queries, config)
+            results_data = getSubstructMatches(mols, queries, config)
             torch.cuda.synchronize()
-            results_data = results
     
     avg_ms, std_ms = time_it(run, runs)
     return avg_ms, std_ms, results_data
