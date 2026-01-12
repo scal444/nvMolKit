@@ -132,6 +132,7 @@ class RDKitFallbackQueue {
       for (const auto& entry : entries) {
         queue_.push(entry);
       }
+      queueSize_.store(queue_.size(), std::memory_order_release);
     }
     cv_.notify_all();
   }
@@ -143,6 +144,7 @@ class RDKitFallbackQueue {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       queue_.push(entry);
+      queueSize_.fetch_add(1, std::memory_order_release);
     }
     cv_.notify_one();
   }
@@ -179,6 +181,9 @@ class RDKitFallbackQueue {
 
   /**
    * @brief Worker thread function - processes entries until queue is empty and no producers remain.
+   * 
+   * Note: This is kept for potential external use but is no longer used internally.
+   * Fallback work is now processed opportunistically by preprocessing threads.
    */
   void workerLoop() {
     while (true) {
@@ -198,6 +203,7 @@ class RDKitFallbackQueue {
 
         entry = queue_.front();
         queue_.pop();
+        queueSize_.fetch_sub(1, std::memory_order_release);
       }
 
       processEntry(entry);
@@ -205,11 +211,10 @@ class RDKitFallbackQueue {
   }
 
   /**
-   * @brief Get total entries processed (for diagnostics).
+   * @brief Get total entries processed (for diagnostics, lock-free).
    */
   [[nodiscard]] size_t processedCount() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return processedCount_;
+    return processedCount_.load(std::memory_order_relaxed);
   }
 
   /**
@@ -225,6 +230,7 @@ class RDKitFallbackQueue {
       result.push_back(queue_.front());
       queue_.pop();
     }
+    queueSize_.store(0, std::memory_order_release);
     return result;
   }
 
@@ -234,6 +240,58 @@ class RDKitFallbackQueue {
    * Ensures GPU batch accumulation and fallback processing use the same mutex.
    */
   std::mutex& getResultsMutex() { return *resultsMutex_; }
+
+  /**
+   * @brief Try to dequeue and process one entry without blocking.
+   *
+   * Used by preprocessing threads to opportunistically process fallback work
+   * while waiting for GPU operations to complete.
+   *
+   * @return true if an entry was processed, false if queue was empty
+   */
+  bool tryProcessOne() {
+    RDKitFallbackEntry entry;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (queue_.empty()) {
+        return false;
+      }
+      entry = queue_.front();
+      queue_.pop();
+      queueSize_.fetch_sub(1, std::memory_order_release);
+    }
+    processEntry(entry);
+    return true;
+  }
+
+  /**
+   * @brief Process entries from the queue until a condition becomes true.
+   *
+   * Processes fallback work opportunistically while waiting for something else.
+   * Checks the condition between each entry to allow early exit.
+   *
+   * @tparam Predicate Callable returning bool
+   * @param shouldStop Callable that returns true when processing should stop
+   * @return Number of entries processed
+   */
+  template <typename Predicate>
+  int processWhileWaiting(Predicate shouldStop) {
+    int processed = 0;
+    while (!shouldStop()) {
+      if (!tryProcessOne()) {
+        break;
+      }
+      ++processed;
+    }
+    return processed;
+  }
+
+  /**
+   * @brief Check if queue has pending entries (lock-free).
+   */
+  [[nodiscard]] bool hasWork() const {
+    return queueSize_.load(std::memory_order_relaxed) > 0;
+  }
 
  private:
   void processEntry(const RDKitFallbackEntry& entry) {
@@ -246,10 +304,7 @@ class RDKitFallbackQueue {
     processWithRDKitFallback(target, query, entry.originalTargetIdx, entry.originalQueryIdx,
                              *results_, *resultsMutex_, maxMatches_);
 
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      ++processedCount_;
-    }
+    processedCount_.fetch_add(1, std::memory_order_relaxed);
   }
 
   const std::vector<const RDKit::ROMol*>* targets_;
@@ -261,9 +316,10 @@ class RDKitFallbackQueue {
   mutable std::mutex      mutex_;
   std::condition_variable cv_;
   std::queue<RDKitFallbackEntry> queue_;
+  std::atomic<size_t>     queueSize_{0};  ///< Atomic size for lock-free hasWork() check
   bool                    shutdown_;
   int                     activeProducers_;
-  size_t                  processedCount_ = 0;
+  std::atomic<size_t>     processedCount_{0};
 };
 
 /**
@@ -1953,7 +2009,7 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
 
   std::mutex              doneMutex;
   std::condition_variable doneCv;
-  int                     gpusDone = 0;
+  std::atomic<int>        gpusDone{0};
 
   std::atomic<int> nextBatchIdx(0);
 
@@ -2146,10 +2202,7 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
           }
 
           // Notify global done.
-          {
-            std::lock_guard<std::mutex> lock(doneMutex);
-            ++gpusDone;
-          }
+          gpusDone.fetch_add(1, std::memory_order_release);
           doneCv.notify_one();
         }
 
@@ -2182,10 +2235,7 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
 
     // Reset global batch counter for this macro, then publish new macro epoch.
     nextBatchIdx.store(0, std::memory_order_relaxed);
-    {
-      std::lock_guard<std::mutex> lock(doneMutex);
-      gpusDone = 0;
-    }
+    gpusDone.store(0, std::memory_order_relaxed);
     {
       std::lock_guard<std::mutex> lock(macroMutex);
       currentMacro = &current;
@@ -2198,10 +2248,37 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
       buildMacro(macroIdx + 1, buffers[(macroIdx + 1) % 2]);
     }
 
-    // Wait for all GPUs to finish this macro.
-    {
+    // Process RDKit fallback work while waiting for GPUs to finish.
+    // This hides fallback latency in the preprocessing thread's idle time.
+    // Use OMP parallel to leverage preprocessing threads for fallback processing.
+    if (fallbackQueue != nullptr && fallbackQueue->hasWork()) {
+      ScopedNvtxRange fallbackWhileWaitingRange("Process RDKit fallback while waiting");
+      
+      // Use OMP threads to process fallback work until GPUs are done or queue is empty
+      #pragma omp parallel num_threads(effectivePreprocessingThreads)
+      {
+        while (true) {
+          // Lock-free check if GPUs are done
+          if (gpusDone.load(std::memory_order_acquire) >= activeGpus) {
+            break;
+          }
+          
+          // Try to process one fallback entry
+          if (!fallbackQueue->tryProcessOne()) {
+            // Queue empty - exit this worker
+            break;
+          }
+        }
+      }
+      
+      // Ensure GPUs have finished (in case queue emptied before GPUs were done)
+      {
+        std::unique_lock<std::mutex> lock(doneMutex);
+        doneCv.wait(lock, [&]() { return gpusDone.load(std::memory_order_acquire) >= activeGpus; });
+      }
+    } else {
       std::unique_lock<std::mutex> lock(doneMutex);
-      doneCv.wait(lock, [&]() { return gpusDone >= activeGpus; });
+      doneCv.wait(lock, [&]() { return gpusDone.load(std::memory_order_acquire) >= activeGpus; });
     }
   }
 
@@ -2494,13 +2571,11 @@ void uniquifyResults(SubstructSearchResults& results) {
  * When a config value is -1 (autoselect):
  * - preprocessingThreads: uses hardware_concurrency
  * - workerThreads (per GPU): min(4, hardware_concurrency / numGpus)
- * - rdkitFallbackThreads: hardware_concurrency - (workerThreads * numGpus)
  */
 void computeEffectiveThreadCounts(const SubstructSearchConfig& config,
                                   int                          numGpus,
                                   int&                         effectivePreprocessingThreads,
-                                  int&                         effectiveWorkerThreads,
-                                  int&                         effectiveFallbackThreads) {
+                                  int&                         effectiveWorkerThreads) {
   const int hwThreads = static_cast<int>(std::thread::hardware_concurrency());
   const int effectiveNumGpus = std::max(1, numGpus);
 
@@ -2511,11 +2586,6 @@ void computeEffectiveThreadCounts(const SubstructSearchConfig& config,
   effectiveWorkerThreads = (config.workerThreads == -1)
       ? std::min(4, std::max(1, hwThreads / effectiveNumGpus))
       : std::max(1, config.workerThreads);
-
-  const int gpuThreadsTotal = effectiveWorkerThreads * effectiveNumGpus;
-  effectiveFallbackThreads = (config.rdkitFallbackThreads == -1)
-      ? std::max(1, hwThreads - gpuThreadsTotal)
-      : std::max(0, config.rdkitFallbackThreads);
 }
 
 void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
@@ -2540,11 +2610,10 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
   }
   const int numGpus = static_cast<int>(gpuIds.size());
 
-  int effectivePreprocessingThreads, effectiveWorkerThreads, effectiveFallbackThreads;
+  int effectivePreprocessingThreads, effectiveWorkerThreads;
   computeEffectiveThreadCounts(config, numGpus,
                                effectivePreprocessingThreads,
-                               effectiveWorkerThreads,
-                               effectiveFallbackThreads);
+                               effectiveWorkerThreads);
 
   ScopedNvtxRange overloadRange(
       "getSubstructMatches T=" + std::to_string(numTargets) +
@@ -2552,7 +2621,6 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
       " batch=" + std::to_string(config.batchSize) +
       " prep=" + std::to_string(effectivePreprocessingThreads) +
       " workers=" + std::to_string(effectiveWorkerThreads) +
-      " fallback=" + std::to_string(effectiveFallbackThreads) +
       " gpus=" + std::to_string(numGpus));
 
   SubstructSearchConfig effectiveConfig = config;
@@ -2654,91 +2722,43 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
   leafSubpatterns.syncToDevice(stream);
   leafRange.pop();
 
-  // Determine if we should use concurrent fallback processing
-  const bool useConcurrentFallback = (effectiveFallbackThreads > 0);
-  
   // Mutex shared between GPU batch accumulation and fallback queue processing
   std::mutex resultsMutex;
   
-  // Create fallback queue (always needed to collect overflow from GPU processing)
+  // Create fallback queue to collect overflow from GPU processing.
+  // Preprocessing threads will opportunistically process entries while waiting for GPUs.
   RDKitFallbackQueue fallbackQueue(&targets, &queries, &results, &resultsMutex, config.maxMatches);
-  std::vector<std::thread> fallbackWorkers;
 
-  // RAII helper to ensure fallback workers are always joined, even on exception
-  auto shutdownFallbackWorkers = [&]() {
-    if (useConcurrentFallback) {
-      fallbackQueue.unregisterProducer();
-      fallbackQueue.shutdown();
-      for (auto& worker : fallbackWorkers) {
-        if (worker.joinable()) {
-          worker.join();
-        }
-      }
-    }
-  };
-
-  if (useConcurrentFallback) {
-    // Register main thread as producer BEFORE spawning workers to prevent
-    // workers from exiting immediately due to (activeProducers_ == 0 && queue_.empty())
-    fallbackQueue.registerProducer();
-    
-    ScopedNvtxRange spawnRange("Spawn RDKit fallback workers");
-    fallbackWorkers.reserve(effectiveFallbackThreads);
-    for (int i = 0; i < effectiveFallbackThreads; ++i) {
-      fallbackWorkers.emplace_back([&fallbackQueue]() {
-        fallbackQueue.workerLoop();
-      });
-    }
-
-    // Enqueue oversized target fallbacks immediately (processed concurrently)
-    if (!fallbackTargets.empty()) {
-      ScopedNvtxRange enqueueRange("Enqueue oversized targets");
-      fallbackQueue.enqueue(fallbackTargets);
-    }
+  // Enqueue oversized target fallbacks - processed opportunistically during macro batch loop
+  if (!fallbackTargets.empty()) {
+    ScopedNvtxRange enqueueRange("Enqueue oversized targets for opportunistic processing");
+    fallbackQueue.enqueue(fallbackTargets);
   }
 
   // Macro-batch overlap:
   // Run target preprocessing (macro-batches) overlapped with persistent GPU worker threads.
-  // NOTE: This must NOT spawn new worker threads once per macro, since that would
-  // respawn worker threads for each macro and destroy the intended overlap.
-  try {
-    runMacroBatchedSubstructSearch(gpuTargets,
-                                  gpuTargetIndices,
-                                  gpuTargetAtomCounts,
-                                  queriesHost,
-                                  queriesDevice,
-                                  leafSubpatterns,
-                                  results,
-                                  algorithm,
-                                  stream,
-                                  effectiveConfig,
-                                  querySortOrder,
-                                  effectivePreprocessingThreads,
-                                  &fallbackQueue);
-  } catch (...) {
-    shutdownFallbackWorkers();
-    throw;
-  }
+  // Preprocessing threads will process RDKit fallback work while waiting for GPUs.
+  runMacroBatchedSubstructSearch(gpuTargets,
+                                gpuTargetIndices,
+                                gpuTargetAtomCounts,
+                                queriesHost,
+                                queriesDevice,
+                                leafSubpatterns,
+                                results,
+                                algorithm,
+                                stream,
+                                effectiveConfig,
+                                querySortOrder,
+                                effectivePreprocessingThreads,
+                                &fallbackQueue);
 
-  // Signal queue shutdown and wait for workers to finish
-  if (useConcurrentFallback) {
-    // Unregister main thread as producer - GPU processing is done
-    fallbackQueue.unregisterProducer();
-    
-    ScopedNvtxRange shutdownRange("Shutdown RDKit fallback queue");
-    fallbackQueue.shutdown();
-    for (auto& worker : fallbackWorkers) {
-      worker.join();
-    }
-  } else {
-    // Process fallback pairs serially when concurrent processing is disabled
-    // Include any overflow entries from GPU processing
-    std::vector<RDKitFallbackEntry> allFallbacks = fallbackQueue.drainToVector();
-    allFallbacks.insert(allFallbacks.end(), fallbackTargets.begin(), fallbackTargets.end());
-    if (!allFallbacks.empty()) {
-      processRDKitFallbackQueue(targets, queries, allFallbacks, results, resultsMutex,
-                                config.maxMatches, "FALLBACK (serial)");
-    }
+  // Process any remaining fallback entries after GPU work completes.
+  // This handles overflow entries added during GPU processing and any
+  // oversized targets not processed during the wait periods.
+  std::vector<RDKitFallbackEntry> remainingFallbacks = fallbackQueue.drainToVector();
+  if (!remainingFallbacks.empty()) {
+    processRDKitFallbackQueue(targets, queries, remainingFallbacks, results, resultsMutex,
+                              config.maxMatches, "REMAINING FALLBACK");
   }
 
   if (config.uniquify) {

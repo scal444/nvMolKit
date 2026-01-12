@@ -265,7 +265,6 @@ def main():
     parser.add_argument("--batch_size", "-b", type=int, default=1024, help="nvmolkit batch size (default: 1024)")
     parser.add_argument("--workers", type=int, default=-1, help="nvmolkit GPU worker threads per GPU (-1 = auto)")
     parser.add_argument("--prep_threads", type=int, default=-1, help="nvmolkit preprocessing threads (-1 = auto)")
-    parser.add_argument("--fallback_threads", type=int, default=-1, help="nvmolkit RDKit fallback threads (-1 = auto)")
     
     args = parser.parse_args()
     
@@ -293,7 +292,6 @@ def main():
         print(f"    batch_size: {args.batch_size}")
         print(f"    workers: {args.workers if args.workers >= 0 else 'auto'}")
         print(f"    prep_threads: {args.prep_threads if args.prep_threads >= 0 else 'auto'}")
-        print(f"    fallback_threads: {args.fallback_threads if args.fallback_threads >= 0 else 'auto'}")
     
     print("\nLoading molecules...")
     if args.pickle:
@@ -326,7 +324,6 @@ def main():
             config.batchSize = args.batch_size
             config.workerThreads = args.workers
             config.preprocessingThreads = args.prep_threads
-            config.rdkitFallbackThreads = args.fallback_threads
             config.presort = True
             if args.max_matches > 0:
                 config.maxMatches = args.max_matches

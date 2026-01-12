@@ -45,14 +45,15 @@ enum class SubstructAlgorithm {
  * Threading autoselect (-1 for any thread count):
  * - preprocessingThreads: uses hardware_concurrency
  * - workerThreads: min(4, hardware_concurrency / numGpus)
- * - rdkitFallbackThreads: hardware_concurrency - (workerThreads * numGpus)
+ *
+ * RDKit fallback (for oversized molecules or overflow) is processed opportunistically
+ * by preprocessing threads while waiting for GPU work to complete.
  */
 struct SubstructSearchConfig {
   int  batchSize            = 1024;  ///< Number of (target, query) pairs per GPU batch
   int  macroBatchMinibatches = 500;  ///< Number of mini-batches per macro-batch for target preprocessing overlap (<=1 disables macro batching)
   int  workerThreads        = -1;    ///< GPU runner threads per GPU (-1 = autoselect)
-  int  preprocessingThreads = -1;    ///< CPU threads for input preprocessing (-1 = autoselect)
-  int  rdkitFallbackThreads = -1;    ///< Threads for RDKit fallback queue (-1 = autoselect)
+  int  preprocessingThreads = -1;    ///< CPU threads for preprocessing and opportunistic RDKit fallback (-1 = autoselect)
   int  slotsPerRunner       = -1;    ///< Batch slots per runner thread (-1 = auto: 3 for single runner, 2 otherwise)
   bool presort              = true;  ///< Sort molecules by atom count (largest first) for GPU efficiency
   std::vector<int> gpuIds;           ///< GPU device IDs to use (empty = current device only)
