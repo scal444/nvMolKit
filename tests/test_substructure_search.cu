@@ -1533,11 +1533,6 @@ TEST_P(SubstructureSearchTest, InvalidSlotsPerRunnerThrows) {
                                    results, algorithm(), stream_.stream(), config),
                std::invalid_argument);
 
-  config.slotsPerRunner = -1;
-  EXPECT_THROW(getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
-                                   results, algorithm(), stream_.stream(), config),
-               std::invalid_argument);
-
   config.slotsPerRunner = 9;
   EXPECT_THROW(getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                                    results, algorithm(), stream_.stream(), config),

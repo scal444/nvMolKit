@@ -1842,11 +1842,15 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
     maxPatternsPerDepth = std::max(maxPatternsPerDepth, patternsAtThisDepth);
   }
 
-  if (config.slotsPerRunner < 1 || config.slotsPerRunner > kMaxSlotsPerRunner) {
-    throw std::invalid_argument("slotsPerRunner must be between 1 and " + 
+  int slotsPerRunner;
+  if (config.slotsPerRunner == -1) {
+    slotsPerRunner = (numRunners == 1) ? 3 : 2;
+  } else if (config.slotsPerRunner < 1 || config.slotsPerRunner > kMaxSlotsPerRunner) {
+    throw std::invalid_argument("slotsPerRunner must be -1 (auto) or between 1 and " + 
                                 std::to_string(kMaxSlotsPerRunner));
+  } else {
+    slotsPerRunner = config.slotsPerRunner;
   }
-  const int slotsPerRunner = config.slotsPerRunner;
 
   ScopedNvtxRange threadRange("Multithreaded batch processing");
   std::vector<std::exception_ptr> exceptions(numRunners);
@@ -2338,8 +2342,6 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
                          SubstructAlgorithm                      algorithm,
                          cudaStream_t                            stream,
                          const SubstructSearchConfig&            config) {
-  ScopedNvtxRange overloadRange("getSubstructMatches (ROMol* overload)");
-
   const int numTargets = static_cast<int>(targets.size());
   const int numQueries = static_cast<int>(queries.size());
 
@@ -2361,6 +2363,15 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
                                effectivePreprocessingThreads,
                                effectiveWorkerThreads,
                                effectiveFallbackThreads);
+
+  ScopedNvtxRange overloadRange(
+      "getSubstructMatches T=" + std::to_string(numTargets) +
+      " Q=" + std::to_string(numQueries) +
+      " batch=" + std::to_string(config.batchSize) +
+      " prep=" + std::to_string(effectivePreprocessingThreads) +
+      " workers=" + std::to_string(effectiveWorkerThreads) +
+      " fallback=" + std::to_string(effectiveFallbackThreads) +
+      " gpus=" + std::to_string(numGpus));
 
   SubstructSearchConfig effectiveConfig = config;
   effectiveConfig.preprocessingThreads = effectivePreprocessingThreads;
@@ -2558,10 +2569,12 @@ void hasSubstructMatch(const std::vector<const RDKit::ROMol*>& targets,
                        SubstructAlgorithm                      algorithm,
                        cudaStream_t                            stream,
                        const SubstructSearchConfig&            config) {
-  ScopedNvtxRange overloadRange("hasSubstructMatch");
-
   const int numTargets = static_cast<int>(targets.size());
   const int numQueries = static_cast<int>(queries.size());
+
+  ScopedNvtxRange overloadRange(
+      "hasSubstructMatch T=" + std::to_string(numTargets) +
+      " Q=" + std::to_string(numQueries));
 
   results.resize(numTargets, numQueries);
 

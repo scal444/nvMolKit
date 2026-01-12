@@ -8,7 +8,6 @@ class SubstructSearchConfig:
     workerThreads: int
     preprocessingThreads: int
     rdkitFallbackThreads: int
-    slotsPerRunner: int
     presort: bool
     maxMatches: int
     uniquify: bool

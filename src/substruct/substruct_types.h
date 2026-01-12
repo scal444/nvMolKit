@@ -52,7 +52,7 @@ struct SubstructSearchConfig {
   int  workerThreads        = -1;    ///< GPU runner threads per GPU (-1 = autoselect)
   int  preprocessingThreads = -1;    ///< CPU threads for input preprocessing (-1 = autoselect)
   int  rdkitFallbackThreads = -1;    ///< Threads for RDKit fallback queue (-1 = autoselect)
-  int  slotsPerRunner       = 3;     ///< Batch slots per runner thread (1-8, higher = more overlap)
+  int  slotsPerRunner       = -1;    ///< Batch slots per runner thread (-1 = auto: 3 for single runner, 2 otherwise)
   bool presort              = true;  ///< Sort molecules by atom count (largest first) for GPU efficiency
   std::vector<int> gpuIds;           ///< GPU device IDs to use (empty = current device only)
   int  maxMatches           = 0;     ///< Max matches per pair (0 = unlimited, like RDKit)

@@ -645,7 +645,6 @@ class TestSubstructSearchConfig:
         assert config.workerThreads == -1  # -1 = autoselect
         assert config.preprocessingThreads == -1  # -1 = autoselect
         assert config.rdkitFallbackThreads == -1  # -1 = autoselect
-        assert config.slotsPerRunner == 3
         assert config.presort is True
         assert config.maxMatches == 0  # 0 = unlimited (like RDKit)
         assert config.uniquify is False
