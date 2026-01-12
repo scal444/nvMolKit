@@ -17,7 +17,7 @@ def getSubstructMatches(
     targets: Sequence[Mol],
     queries: Sequence[Mol],
     config: SubstructSearchConfig = ...,
-) -> list[list[list[list[int]]]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[int, int]]:
     """Perform batch substructure matching on GPU.
 
     Args:
@@ -26,8 +26,8 @@ def getSubstructMatches(
         config: SubstructSearchConfig with execution settings
 
     Returns:
-        Nested list: results[target_idx][query_idx] = list of matches,
-        where each match is a list of target atom indices (one per query atom)
+        CSR-style tuple of numpy arrays:
+        (atom_indices, match_indptr, pair_indptr, shape)
     """
     ...
 

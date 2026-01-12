@@ -39,8 +39,11 @@ def get_rdkit_matches(target: Chem.Mol, query: Chem.Mol, uniquify: bool = False)
     return list(target.GetSubstructMatches(query, uniquify=uniquify))
 
 
-def matches_equal(gpu_matches: list[list[int]], rdkit_matches: list[tuple[int, ...]]) -> bool:
-    """Compare GPU matches to RDKit matches (order-independent)."""
+def matches_equal(gpu_matches: list, rdkit_matches: list[tuple[int, ...]]) -> bool:
+    """Compare GPU matches to RDKit matches (order-independent).
+    
+    GPU matches can be numpy arrays or lists.
+    """
     gpu_set = {tuple(m) for m in gpu_matches}
     rdkit_set = set(rdkit_matches)
     return gpu_set == rdkit_set

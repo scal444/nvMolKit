@@ -18,9 +18,11 @@
 #include <boost/python.hpp>
 #include <boost/python/numpy.hpp>
 #include <boost/python/stl_iterator.hpp>
+#include <cstdint>
 #include <memory>
 #include <vector>
 
+#include "nvtx.h"
 #include "substruct_types.h"
 
 // Forward declarations - avoid including CUDA headers
@@ -47,6 +49,14 @@ void hasSubstructMatch(const std::vector<const RDKit::ROMol*>& targets,
 namespace {
 
 using namespace boost::python;
+
+struct SubstructMatchesCSR {
+  std::vector<int32_t> atomIndices;   // concatenated atom indices for all matches
+  std::vector<int32_t> matchIndptr;   // offsets into atomIndices, length = numMatches + 1
+  std::vector<int32_t> pairIndptr;    // offsets into matchIndptr (match index), length = numPairs + 1
+  int                 numTargets = 0;
+  int                 numQueries = 0;
+};
 
 template <typename T>
 list vectorToList(const std::vector<T>& vec) {
@@ -105,6 +115,7 @@ BOOST_PYTHON_MODULE(_substructure) {
     +[](const list& targets,
         const list& queries,
         const nvMolKit::SubstructSearchConfig& config) {
+      nvMolKit::ScopedNvtxRange extractRange("Python: extract mol pointers", nvMolKit::NvtxColor::kYellow);
       std::vector<const RDKit::ROMol*> targetsVec;
       std::vector<const RDKit::ROMol*> queriesVec;
 
@@ -125,27 +136,90 @@ BOOST_PYTHON_MODULE(_substructure) {
         }
         queriesVec.push_back(mol);
       }
+      extractRange.pop();
 
       nvMolKit::SubstructSearchResults results;
       nvMolKit::getSubstructMatches(targetsVec, queriesVec, results,
                                     nvMolKit::SubstructAlgorithm::GSI, nullptr, config);
 
-      // Convert results to Python: list[target][query] -> list of matches
-      // Each match is a list of target atom indices
-      list pyResults;
-      for (int t = 0; t < results.numTargets; ++t) {
-        list targetMatches;
-        for (int q = 0; q < results.numQueries; ++q) {
-          list queryMatches;
+      auto csrPtr = std::make_unique<SubstructMatchesCSR>();
+      csrPtr->numTargets = results.numTargets;
+      csrPtr->numQueries = results.numQueries;
+
+      nvMolKit::ScopedNvtxRange csrBuildRange("Python: build CSR buffers", nvMolKit::NvtxColor::kOrange);
+
+      const int numTargets = csrPtr->numTargets;
+      const int numQueries = csrPtr->numQueries;
+      const int64_t numPairs = static_cast<int64_t>(numTargets) * static_cast<int64_t>(numQueries);
+
+      csrPtr->pairIndptr.resize(static_cast<size_t>(numPairs) + 1, 0);
+      csrPtr->matchIndptr.clear();
+      csrPtr->matchIndptr.reserve(1024);
+      csrPtr->matchIndptr.push_back(0);
+
+      // Populate CSR in deterministic pair order [t,q]
+      int32_t matchCount = 0;
+      int32_t atomCount  = 0;
+      for (int t = 0; t < numTargets; ++t) {
+        for (int q = 0; q < numQueries; ++q) {
+          const int64_t pairIdx = static_cast<int64_t>(t) * numQueries + q;
+          csrPtr->pairIndptr[static_cast<size_t>(pairIdx)] = matchCount;
+
           const auto& matches = results.getMatches(t, q);
           for (const auto& match : matches) {
-            queryMatches.append(vectorToList(match));
+            csrPtr->atomIndices.insert(csrPtr->atomIndices.end(), match.begin(), match.end());
+            atomCount += static_cast<int32_t>(match.size());
+            csrPtr->matchIndptr.push_back(atomCount);
+            ++matchCount;
           }
-          targetMatches.append(queryMatches);
         }
-        pyResults.append(targetMatches);
       }
-      return pyResults;
+      csrPtr->pairIndptr[static_cast<size_t>(numPairs)] = matchCount;
+      csrBuildRange.pop();
+
+      nvMolKit::ScopedNvtxRange csrWrapRange("Python: wrap CSR numpy arrays", nvMolKit::NvtxColor::kGreen);
+      auto deleter = [](PyObject* cap) {
+        auto* r = reinterpret_cast<SubstructMatchesCSR*>(
+            PyCapsule_GetPointer(cap, "nvmolkit.substruct_csr"));
+        delete r;
+      };
+      PyObject* cap = PyCapsule_New(static_cast<void*>(csrPtr.get()),
+                                    "nvmolkit.substruct_csr", deleter);
+      if (cap == nullptr) {
+        throw std::runtime_error("Failed to create PyCapsule for getSubstructMatches CSR results");
+      }
+      object owner{handle<>(cap)};
+      csrPtr.release();
+
+      auto* csr = reinterpret_cast<SubstructMatchesCSR*>(
+          PyCapsule_GetPointer(cap, "nvmolkit.substruct_csr"));
+
+      const Py_intptr_t atomShape    = static_cast<Py_intptr_t>(csr->atomIndices.size());
+      const Py_intptr_t matchShape   = static_cast<Py_intptr_t>(csr->matchIndptr.size());
+      const Py_intptr_t pairShape    = static_cast<Py_intptr_t>(csr->pairIndptr.size());
+      const Py_intptr_t stride32     = static_cast<Py_intptr_t>(sizeof(int32_t));
+
+      numpy::ndarray atomIndicesArr = numpy::from_data(
+          csr->atomIndices.data(),
+          numpy::dtype::get_builtin<int32_t>(),
+          make_tuple(atomShape),
+          make_tuple(stride32),
+          owner);
+      numpy::ndarray matchIndptrArr = numpy::from_data(
+          csr->matchIndptr.data(),
+          numpy::dtype::get_builtin<int32_t>(),
+          make_tuple(matchShape),
+          make_tuple(stride32),
+          owner);
+      numpy::ndarray pairIndptrArr = numpy::from_data(
+          csr->pairIndptr.data(),
+          numpy::dtype::get_builtin<int32_t>(),
+          make_tuple(pairShape),
+          make_tuple(stride32),
+          owner);
+
+      return make_tuple(atomIndicesArr, matchIndptrArr, pairIndptrArr,
+                        make_tuple(csr->numTargets, csr->numQueries));
     },
     (arg("targets"),
      arg("queries"),
@@ -158,14 +232,15 @@ BOOST_PYTHON_MODULE(_substructure) {
     "    config: SubstructSearchConfig with execution settings\n"
     "\n"
     "Returns:\n"
-    "    Nested list: results[target_idx][query_idx] = list of matches,\n"
-    "    where each match is a list of target atom indices (one per query atom)");
+    "    CSR-style tuple of numpy arrays: (atom_indices, match_indptr, pair_indptr, shape).\n"
+    "    Use nvmolkit.substructure.getSubstructMatches() (Python wrapper) for list-like access.");
 
   def(
     "hasSubstructMatch",
     +[](const list& targets,
         const list& queries,
         const nvMolKit::SubstructSearchConfig& config) {
+      nvMolKit::ScopedNvtxRange extractRange("Python: extract mol pointers", nvMolKit::NvtxColor::kYellow);
       std::vector<const RDKit::ROMol*> targetsVec;
       std::vector<const RDKit::ROMol*> queriesVec;
 
@@ -186,11 +261,13 @@ BOOST_PYTHON_MODULE(_substructure) {
         }
         queriesVec.push_back(mol);
       }
+      extractRange.pop();
 
       auto resultsPtr = std::make_unique<nvMolKit::HasSubstructMatchResults>();
       nvMolKit::hasSubstructMatch(targetsVec, queriesVec, *resultsPtr,
                                   nvMolKit::SubstructAlgorithm::GSI, nullptr, config);
 
+      nvMolKit::ScopedNvtxRange wrapRange("Python: wrap numpy array", nvMolKit::NvtxColor::kGreen);
       const int numTargets = resultsPtr->numTargets;
       const int numQueries = resultsPtr->numQueries;
       uint8_t* dataPtr = resultsPtr->hasMatch.data();
