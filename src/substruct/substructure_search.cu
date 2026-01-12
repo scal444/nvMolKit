@@ -55,15 +55,26 @@ namespace {
 constexpr std::size_t kMaxTargetAtoms = kLabelMaxTargetAtoms;
 constexpr std::size_t kMaxQueryAtoms  = kLabelMaxQueryAtoms;
 
+void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuTargets,
+                                    const std::vector<int>&                gpuTargetIndices,
+                                    const std::vector<unsigned int>&       gpuTargetAtomCounts,
+                                    const MoleculesHost&                   queriesHost,
+                                    const MoleculesDevice&                 queriesDevice,
+                                    const LeafSubpatterns&                 leafSubpatterns,
+                                    SubstructSearchResults&                results,
+                                    SubstructAlgorithm                     algorithm,
+                                    cudaStream_t                           stream,
+                                    const SubstructSearchConfig&           config,
+                                    const std::vector<int>&                querySortOrder,
+                                    int                                    effectivePreprocessingThreads,
+                                    RDKitFallbackQueue*                    fallbackQueue);
+
+}  // anonymous namespace
+
 // =============================================================================
-// RDKit Fallback Helper
+// RDKit Fallback Implementation
 // =============================================================================
 
-/**
- * @brief Process a single (target, query) pair using RDKit's CPU implementation.
- *
- * Used as fallback for oversized targets or overflow cases.
- */
 void processWithRDKitFallback(const RDKit::ROMol*     target,
                               const RDKit::ROMol*     query,
                               int                     targetIdx,
@@ -98,267 +109,141 @@ void processWithRDKitFallback(const RDKit::ROMol*     target,
   }
 }
 
-// =============================================================================
-// RDKit Fallback Queue Implementation
-// =============================================================================
+RDKitFallbackQueue::RDKitFallbackQueue(const std::vector<const RDKit::ROMol*>* targets,
+                                       const std::vector<const RDKit::ROMol*>* queries,
+                                       SubstructSearchResults*                 results,
+                                       std::mutex*                             resultsMutex,
+                                       int                                     maxMatches)
+    : targets_(targets),
+      queries_(queries),
+      results_(results),
+      resultsMutex_(resultsMutex),
+      maxMatches_(maxMatches),
+      shutdown_(false),
+      activeProducers_(0) {}
 
-/**
- * @brief Thread-safe queue for RDKit fallback processing.
- *
- * Worker threads wait on a condition variable and consume entries as they arrive.
- * Supports concurrent producers (GPU batch accumulators) and consumers (RDKit workers).
- */
-class RDKitFallbackQueue {
- public:
-  RDKitFallbackQueue(const std::vector<const RDKit::ROMol*>* targets,
-                     const std::vector<const RDKit::ROMol*>* queries,
-                     SubstructSearchResults*                 results,
-                     std::mutex*                             resultsMutex,
-                     int                                     maxMatches)
-      : targets_(targets),
-        queries_(queries),
-        results_(results),
-        resultsMutex_(resultsMutex),
-        maxMatches_(maxMatches),
-        shutdown_(false),
-        activeProducers_(0) {}
-
-  /**
-   * @brief Add entries to the queue (thread-safe).
-   */
-  void enqueue(const std::vector<RDKitFallbackEntry>& entries) {
-    if (entries.empty()) return;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      for (const auto& entry : entries) {
-        queue_.push(entry);
-      }
-      queueSize_.store(queue_.size(), std::memory_order_release);
-    }
-    cv_.notify_all();
-  }
-
-  /**
-   * @brief Add a single entry to the queue (thread-safe).
-   */
-  void enqueue(const RDKitFallbackEntry& entry) {
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
+void RDKitFallbackQueue::enqueue(const std::vector<RDKitFallbackEntry>& entries) {
+  if (entries.empty()) return;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& entry : entries) {
       queue_.push(entry);
-      queueSize_.fetch_add(1, std::memory_order_release);
     }
-    cv_.notify_one();
+    queueSize_.store(queue_.size(), std::memory_order_release);
   }
+  cv_.notify_all();
+}
 
-  /**
-   * @brief Increment active producer count (call when starting to produce).
-   */
-  void registerProducer() {
+void RDKitFallbackQueue::enqueue(const RDKitFallbackEntry& entry) {
+  {
     std::lock_guard<std::mutex> lock(mutex_);
-    ++activeProducers_;
+    queue_.push(entry);
+    queueSize_.fetch_add(1, std::memory_order_release);
   }
+  cv_.notify_one();
+}
 
-  /**
-   * @brief Decrement active producer count and notify if no more producers.
-   */
-  void unregisterProducer() {
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      --activeProducers_;
-    }
-    cv_.notify_all();
-  }
+void RDKitFallbackQueue::registerProducer() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  ++activeProducers_;
+}
 
-  /**
-   * @brief Signal shutdown to all waiting threads.
-   */
-  void shutdown() {
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      shutdown_ = true;
-    }
-    cv_.notify_all();
-  }
-
-  /**
-   * @brief Worker thread function - processes entries until queue is empty and no producers remain.
-   * 
-   * Note: This is kept for potential external use but is no longer used internally.
-   * Fallback work is now processed opportunistically by preprocessing threads.
-   */
-  void workerLoop() {
-    while (true) {
-      RDKitFallbackEntry entry;
-      {
-        std::unique_lock<std::mutex> lock(mutex_);
-        cv_.wait(lock, [this] {
-          return !queue_.empty() || shutdown_ || (activeProducers_ == 0 && queue_.empty());
-        });
-
-        if (queue_.empty()) {
-          if (shutdown_ || activeProducers_ == 0) {
-            return;
-          }
-          continue;
-        }
-
-        entry = queue_.front();
-        queue_.pop();
-        queueSize_.fetch_sub(1, std::memory_order_release);
-      }
-
-      processEntry(entry);
-    }
-  }
-
-  /**
-   * @brief Get total entries processed (for diagnostics, lock-free).
-   */
-  [[nodiscard]] size_t processedCount() const {
-    return processedCount_.load(std::memory_order_relaxed);
-  }
-
-  /**
-   * @brief Drain all entries from the queue into a vector.
-   *
-   * Used for serial processing when worker threads are disabled.
-   */
-  std::vector<RDKitFallbackEntry> drainToVector() {
+void RDKitFallbackQueue::unregisterProducer() {
+  {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<RDKitFallbackEntry> result;
-    result.reserve(queue_.size());
-    while (!queue_.empty()) {
-      result.push_back(queue_.front());
-      queue_.pop();
-    }
-    queueSize_.store(0, std::memory_order_release);
-    return result;
+    --activeProducers_;
   }
+  cv_.notify_all();
+}
 
-  /**
-   * @brief Get the results mutex for use by batch accumulation.
-   *
-   * Ensures GPU batch accumulation and fallback processing use the same mutex.
-   */
-  std::mutex& getResultsMutex() { return *resultsMutex_; }
+void RDKitFallbackQueue::shutdown() {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    shutdown_ = true;
+  }
+  cv_.notify_all();
+}
 
-  /**
-   * @brief Try to dequeue and process one entry without blocking.
-   *
-   * Used by preprocessing threads to opportunistically process fallback work
-   * while waiting for GPU operations to complete.
-   *
-   * @return true if an entry was processed, false if queue was empty
-   */
-  bool tryProcessOne() {
+void RDKitFallbackQueue::workerLoop() {
+  while (true) {
     RDKitFallbackEntry entry;
     {
-      std::lock_guard<std::mutex> lock(mutex_);
+      std::unique_lock<std::mutex> lock(mutex_);
+      cv_.wait(lock, [this] {
+        return !queue_.empty() || shutdown_ || (activeProducers_ == 0 && queue_.empty());
+      });
+
       if (queue_.empty()) {
-        return false;
+        if (shutdown_ || activeProducers_ == 0) {
+          return;
+        }
+        continue;
       }
+
       entry = queue_.front();
       queue_.pop();
       queueSize_.fetch_sub(1, std::memory_order_release);
     }
+
     processEntry(entry);
-    return true;
   }
+}
 
-  /**
-   * @brief Process entries from the queue until a condition becomes true.
-   *
-   * Processes fallback work opportunistically while waiting for something else.
-   * Checks the condition between each entry to allow early exit.
-   *
-   * @tparam Predicate Callable returning bool
-   * @param shouldStop Callable that returns true when processing should stop
-   * @return Number of entries processed
-   */
-  template <typename Predicate>
-  int processWhileWaiting(Predicate shouldStop) {
-    int processed = 0;
-    while (!shouldStop()) {
-      if (!tryProcessOne()) {
-        break;
-      }
-      ++processed;
+size_t RDKitFallbackQueue::processedCount() const {
+  return processedCount_.load(std::memory_order_relaxed);
+}
+
+std::vector<RDKitFallbackEntry> RDKitFallbackQueue::drainToVector() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  std::vector<RDKitFallbackEntry> result;
+  result.reserve(queue_.size());
+  while (!queue_.empty()) {
+    result.push_back(queue_.front());
+    queue_.pop();
+  }
+  queueSize_.store(0, std::memory_order_release);
+  return result;
+}
+
+std::mutex& RDKitFallbackQueue::getResultsMutex() { return *resultsMutex_; }
+
+bool RDKitFallbackQueue::tryProcessOne() {
+  RDKitFallbackEntry entry;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (queue_.empty()) {
+      return false;
     }
-    return processed;
+    entry = queue_.front();
+    queue_.pop();
+    queueSize_.fetch_sub(1, std::memory_order_release);
   }
+  processEntry(entry);
+  return true;
+}
 
-  /**
-   * @brief Check if queue has pending entries (lock-free).
-   */
-  [[nodiscard]] bool hasWork() const {
-    return queueSize_.load(std::memory_order_relaxed) > 0;
-  }
+bool RDKitFallbackQueue::hasWork() const {
+  return queueSize_.load(std::memory_order_relaxed) > 0;
+}
 
- private:
-  void processEntry(const RDKitFallbackEntry& entry) {
-    ScopedNvtxRange pairRange("RDKit fallback T" + std::to_string(entry.originalTargetIdx) + 
-                              "/Q" + std::to_string(entry.originalQueryIdx));
+void RDKitFallbackQueue::processEntry(const RDKitFallbackEntry& entry) {
+  ScopedNvtxRange pairRange("RDKit fallback T" + std::to_string(entry.originalTargetIdx) + 
+                            "/Q" + std::to_string(entry.originalQueryIdx));
 
-    const RDKit::ROMol* target = (*targets_)[entry.originalTargetIdx];
-    const RDKit::ROMol* query  = (*queries_)[entry.originalQueryIdx];
+  const RDKit::ROMol* target = (*targets_)[entry.originalTargetIdx];
+  const RDKit::ROMol* query  = (*queries_)[entry.originalQueryIdx];
 
-    processWithRDKitFallback(target, query, entry.originalTargetIdx, entry.originalQueryIdx,
-                             *results_, *resultsMutex_, maxMatches_);
+  processWithRDKitFallback(target, query, entry.originalTargetIdx, entry.originalQueryIdx,
+                           *results_, *resultsMutex_, maxMatches_);
 
-    processedCount_.fetch_add(1, std::memory_order_relaxed);
-  }
-
-  const std::vector<const RDKit::ROMol*>* targets_;
-  const std::vector<const RDKit::ROMol*>* queries_;
-  SubstructSearchResults*                 results_;
-  std::mutex*                             resultsMutex_;
-  int                                     maxMatches_;
-
-  mutable std::mutex      mutex_;
-  std::condition_variable cv_;
-  std::queue<RDKitFallbackEntry> queue_;
-  std::atomic<size_t>     queueSize_{0};  ///< Atomic size for lock-free hasWork() check
-  bool                    shutdown_;
-  int                     activeProducers_;
-  std::atomic<size_t>     processedCount_{0};
-};
-
-/**
- * @brief RAII helper to register/unregister as a producer on the fallback queue.
- */
-class FallbackQueueProducerGuard {
- public:
-  explicit FallbackQueueProducerGuard(RDKitFallbackQueue* queue) : queue_(queue) {
-    if (queue_) queue_->registerProducer();
-  }
-  ~FallbackQueueProducerGuard() {
-    if (queue_) queue_->unregisterProducer();
-  }
-  FallbackQueueProducerGuard(const FallbackQueueProducerGuard&) = delete;
-  FallbackQueueProducerGuard& operator=(const FallbackQueueProducerGuard&) = delete;
- private:
-  RDKitFallbackQueue* queue_;
-};    
-
-void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuTargets,
-                                    const std::vector<int>&                gpuTargetIndices,
-                                    const std::vector<unsigned int>&       gpuTargetAtomCounts,
-                                    const MoleculesHost&                   queriesHost,
-                                    const MoleculesDevice&                 queriesDevice,
-                                    const LeafSubpatterns&                 leafSubpatterns,
-                                    SubstructSearchResults&                results,
-                                    SubstructAlgorithm                     algorithm,
-                                    cudaStream_t                           stream,
-                                    const SubstructSearchConfig&           config,
-                                    const std::vector<int>&                querySortOrder,
-                                    int                                    effectivePreprocessingThreads,
-                                    RDKitFallbackQueue*                    fallbackQueue);
-
-}  // anonymous namespace
+  processedCount_.fetch_add(1, std::memory_order_relaxed);
+}
 
 // =============================================================================
 // Pipelined Batch Processing Types (internal, but needs external linkage for forward decl)
 // =============================================================================
+
+std::pair<int, int> getStreamPriorityRange();
 
 struct GpuExecutor {
   int miniBatchStart        = 0;
@@ -372,35 +257,49 @@ struct GpuExecutor {
   int*     reportedCountsHost       = nullptr;
   int16_t* matchIndicesHost         = nullptr;
 
-
   // Precomputed recursive mini-batch setup (populated by prepareRecursiveMiniBatchOnCPU)
   int recursiveMaxDepth       = 0;
   int firstTargetInMiniBatch  = 0;
   int numTargetsInMiniBatch   = 0;
   std::array<std::vector<BatchedPatternEntry>, kMaxRecursionDepth + 1> patternsAtDepth;
 
-  // Streams and events declared first so they're destroyed last (after resources that use them)
-  ScopedStream                              computeStream;
-  ScopedCudaEvent                           copyDoneEvent;
-  ScopedCudaEvent                           allocDoneEvent;
-  std::unique_ptr<RecursivePipelineContext> recursivePipelineCtx;
-  RecursiveScratchBuffers                   recursiveScratch;
-  
-  MiniBatchResultsDevice deviceResults;
-  AsyncDeviceVector<int> pairIndicesDev;
+  // Streams and events (declared first so they're destroyed last)
+  ScopedStream             computeStream;
+  ScopedCudaEvent          copyDoneEvent;
+  ScopedCudaEvent          allocDoneEvent;
+
+  // Recursive pipeline (inlined from RecursivePipelineContext)
+  ScopedStreamWithPriority recursiveStream;
+  ScopedStreamWithPriority postRecursionStream;
+  std::array<ScopedCudaEvent, kMaxRecursionDepth> depthEvents;
+  ScopedCudaEvent          recursiveDoneEvent;
+  ScopedCudaEvent          postRecursionDoneEvent;
+  std::array<AsyncDeviceVector<int>, kMaxRecursionDepth + 1> matchGlobalPairIndices;
+  std::array<AsyncDeviceVector<int>, kMaxRecursionDepth + 1> matchMiniBatchLocalIndices;
+  std::array<std::vector<int>, kMaxRecursionDepth + 1> matchPairsHost;
+  std::array<int*, kMaxRecursionDepth + 1> matchGlobalPairIndicesHost = {};
+  std::array<int*, kMaxRecursionDepth + 1> matchMiniBatchLocalIndicesHost = {};
+  int perDepthCapacity = 0;
+  int maxDepthInMiniBatch = 0;
+
+  RecursiveScratchBuffers  recursiveScratch;
+  MiniBatchResultsDevice   deviceResults;
+  AsyncDeviceVector<int>   pairIndicesDev;
   
   int deviceId = 0;  ///< GPU device ID this executor is assigned to
 
   GpuExecutor(int executorIdx, int gpuDeviceId) 
       : computeStream(("executor" + std::to_string(executorIdx) + "_mainStream").c_str()),
+        recursiveStream(getStreamPriorityRange().first, 
+                        ("executor" + std::to_string(executorIdx) + "_priorityRecursiveStream").c_str()),
+        postRecursionStream(getStreamPriorityRange().second,
+                            ("executor" + std::to_string(executorIdx) + "_postRecursionStream").c_str()),
         recursiveScratch(nullptr),
-        deviceId(gpuDeviceId) {
-    recursivePipelineCtx = std::make_unique<RecursivePipelineContext>(executorIdx);
-  }
+        deviceId(gpuDeviceId) {}
 
   void initializeForStream() {
     cudaStream_t s = computeStream.stream();
-    cudaStream_t recStream = recursivePipelineCtx->recursiveStream.stream();
+    cudaStream_t recStream = recursiveStream.stream();
     deviceResults.setStream(s);
     pairIndicesDev.setStream(s);
     recursiveScratch.setStream(recStream);
@@ -410,9 +309,6 @@ struct GpuExecutor {
 
   /**
    * @brief Bind pointers from consolidated pinned buffer.
-   *
-   * Must be called before processing mini-batches. The consolidated buffer
-   * must outlive the GpuExecutor.
    */
   void bindPinnedBuffer(ConsolidatedPinnedBuffer& buffer) {
     pairIndicesHost          = buffer.pairIndices;
@@ -421,31 +317,13 @@ struct GpuExecutor {
     reportedCountsHost       = buffer.reportedCounts;
     matchIndicesHost         = buffer.matchIndices;
 
-    recursivePipelineCtx->setPinnedBuffers(buffer.matchGlobalPairIndicesHost,
-                                           buffer.matchBatchLocalIndicesHost,
-                                           buffer.perDepthCapacity);
+    matchGlobalPairIndicesHost = buffer.matchGlobalPairIndicesHost;
+    matchMiniBatchLocalIndicesHost = buffer.matchBatchLocalIndicesHost;
+    perDepthCapacity = buffer.perDepthCapacity;
 
     recursiveScratch.setPinnedBuffer(buffer.patternsAtDepthHost, buffer.patternsCapacity);
   }
 };
-
-namespace {
-
-struct ThreadWorkerContext {
-  PinnedHostVector<int> queryAtomCounts;
-  std::vector<int> targetAtomCounts;   ///< Atom count for each target (for per-pair capacity)
-  std::vector<int> queryDepths;        ///< Cached recursion depth for each query
-  std::vector<int> queryMaxDepths;     ///< Cached max recursion depth per query (from leafSubpatterns)
-  std::vector<int8_t> queryHasPatterns;  ///< Whether query has any recursive patterns
-  const std::vector<int>* targetSortOrder = nullptr;  ///< Maps sorted -> original index (nullptr = identity)
-  const std::vector<int>* querySortOrder  = nullptr;  ///< Maps sorted -> original index (nullptr = identity)
-  int numTargets     = 0;
-  int numQueries     = 0;
-  int maxTargetAtoms = 0;
-  int maxMatches     = 0;   ///< Max matches to store per pair (0 = unlimited, like RDKit)
-};
-
-}  // anonymous namespace
 
 // =============================================================================
 // LeafSubpatterns Implementation
@@ -559,23 +437,15 @@ void LeafSubpatterns::syncToDevice(cudaStream_t stream) {
 }
 
 // =============================================================================
-// RecursivePipelineContext Implementation
+// Stream Priority Helper
 // =============================================================================
 
-namespace {
 std::pair<int, int> getStreamPriorityRange() {
   int leastPriority    = 0;
   int greatestPriority = 0;
   cudaCheckError(cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority));
   return {greatestPriority, leastPriority};
 }
-}  // namespace
-
-RecursivePipelineContext::RecursivePipelineContext(int executorIdx)
-    : recursiveStream(getStreamPriorityRange().first, 
-                      ("executor" + std::to_string(executorIdx) + "_priorityRecursiveStream").c_str()),
-      postRecursionStream(getStreamPriorityRange().second,
-                          ("executor" + std::to_string(executorIdx) + "_postRecursionStream").c_str()) {}
 
 // =============================================================================
 // MiniBatchResultsDevice Implementation
@@ -695,19 +565,19 @@ namespace {
  * Groups pairs by their query's recursion depth and populates the host-side
  * index vectors for the recursive stream and match stream.
  *
- * @param pipelineCtx Pipeline context to populate
+ * @param executor GPU executor to populate with schedule
  * @param ctx Worker context with cached query depths
  * @param numPairsInMiniBatch Number of pairs in the mini-batch
  * @param miniBatchStart Global pair index where the mini-batch starts
  */
-void precomputePipelineSchedule(RecursivePipelineContext&  pipelineCtx,
+void precomputePipelineSchedule(GpuExecutor&               executor,
                                 const ThreadWorkerContext& ctx,
                                 int                        numPairsInMiniBatch,
                                 int                        miniBatchStart) {
   ScopedNvtxRange scheduleRange("CPU: precomputePipelineSchedule");
-  pipelineCtx.maxDepthInMiniBatch = 0;
+  executor.maxDepthInMiniBatch = 0;
 
-  for (auto& vec : pipelineCtx.matchPairsHost) {
+  for (auto& vec : executor.matchPairsHost) {
     vec.clear();
   }
 
@@ -715,8 +585,8 @@ void precomputePipelineSchedule(RecursivePipelineContext&  pipelineCtx,
     const int queryIdx = (miniBatchStart + i) % ctx.numQueries;
     const int depth    = ctx.queryDepths[queryIdx];
 
-    pipelineCtx.matchPairsHost[depth].push_back(i);
-    pipelineCtx.maxDepthInMiniBatch = std::max(pipelineCtx.maxDepthInMiniBatch, depth);
+    executor.matchPairsHost[depth].push_back(i);
+    executor.maxDepthInMiniBatch = std::max(executor.maxDepthInMiniBatch, depth);
   }
 }
 
@@ -725,7 +595,7 @@ void prepareRecursiveMiniBatchOnCPU(GpuExecutor&               executor,
                                     const LeafSubpatterns&     leafSubpatterns) {
   ScopedNvtxRange prepRecRange("prepareRecursiveMiniBatchOnCPU");
 
-  precomputePipelineSchedule(*executor.recursivePipelineCtx, ctx, executor.numPairsInMiniBatch, executor.miniBatchStart);
+  precomputePipelineSchedule(executor, ctx, executor.numPairsInMiniBatch, executor.miniBatchStart);
 
   for (auto& vec : executor.patternsAtDepth) {
     vec.clear();
@@ -805,7 +675,6 @@ void launchLabelAndMatch(const std::vector<int>&      miniBatchLocalIndices,
                          const MoleculesDevice&       queriesDevice,
                          SubstructAlgorithm           algorithm,
                          cudaStream_t                 stream,
-                         RecursivePipelineContext&    pipelineCtx,
                          int                          depthGroupIdx) {
   ScopedNvtxRange launchRange("launchLabelAndMatch depth=" + std::to_string(depthGroupIdx));
   
@@ -815,8 +684,8 @@ void launchLabelAndMatch(const std::vector<int>&      miniBatchLocalIndices,
 
   const int numPairsInGroup = static_cast<int>(miniBatchLocalIndices.size());
 
-  int* globalPairIndicesHost = pipelineCtx.matchGlobalPairIndicesHost[depthGroupIdx];
-  int* miniBatchLocalIndicesHostPtr = pipelineCtx.matchMiniBatchLocalIndicesHost[depthGroupIdx];
+  int* globalPairIndicesHost = executor.matchGlobalPairIndicesHost[depthGroupIdx];
+  int* miniBatchLocalIndicesHostPtr = executor.matchMiniBatchLocalIndicesHost[depthGroupIdx];
   
   ScopedNvtxRange prepareRange("CPU: Prepare host index arrays");
 
@@ -826,8 +695,8 @@ void launchLabelAndMatch(const std::vector<int>&      miniBatchLocalIndices,
   }
   prepareRange.pop();
 
-  auto& globalPairIndicesDev = pipelineCtx.matchGlobalPairIndices[depthGroupIdx];
-  auto& miniBatchLocalIndicesDev = pipelineCtx.matchMiniBatchLocalIndices[depthGroupIdx];
+  auto& globalPairIndicesDev = executor.matchGlobalPairIndices[depthGroupIdx];
+  auto& miniBatchLocalIndicesDev = executor.matchMiniBatchLocalIndices[depthGroupIdx];
 
   globalPairIndicesDev.setStream(stream);
   if (globalPairIndicesDev.size() < static_cast<size_t>(numPairsInGroup)) {
@@ -998,11 +867,9 @@ void uploadAndLaunchMiniBatch(GpuExecutor&               executor,
   ScopedNvtxRange uploadRange("uploadAndLaunchMiniBatch");
 
   cudaStream_t executorStream = executor.stream();
-
-  RecursivePipelineContext& pipelineCtx = *executor.recursivePipelineCtx;
   const int numBuffersPerBlock = (algorithm == SubstructAlgorithm::GSI) ? 2 : 1;
 
-  if (pipelineCtx.maxDepthInMiniBatch == 0) {
+  if (executor.maxDepthInMiniBatch == 0) {
     ScopedNvtxRange nonRecursiveRange("Non-recursive path");
     
     const int maxMatchesToFind = ctx.maxMatches > 0 ? ctx.maxMatches : -1;
@@ -1051,7 +918,7 @@ void uploadAndLaunchMiniBatch(GpuExecutor&               executor,
 
   ScopedNvtxRange multiStreamRange("Multi-stream recursive pipeline");
 
-  cudaStream_t recursiveStream = pipelineCtx.recursiveStream.stream();
+  cudaStream_t recursiveStream = executor.recursiveStream.stream();
 
   const int maxMatchesToFind = ctx.maxMatches > 0 ? ctx.maxMatches : -1;
   executor.deviceResults.allocateMiniBatch(executor.numPairsInMiniBatch,
@@ -1072,7 +939,7 @@ void uploadAndLaunchMiniBatch(GpuExecutor&               executor,
 
   std::array<cudaEvent_t, kMaxRecursionDepth> depthEventPtrs;
   for (int i = 0; i < kMaxRecursionDepth; ++i) {
-    depthEventPtrs[i] = pipelineCtx.depthEvents[i].event();
+    depthEventPtrs[i] = executor.depthEvents[i].event();
   }
 
   ScopedNvtxRange preprocRange("launchRecursivePaintKernels (recursiveStream)");
@@ -1090,28 +957,28 @@ void uploadAndLaunchMiniBatch(GpuExecutor&               executor,
   preprocRange.pop();
 
   ScopedNvtxRange depth0Range("Match depth-0 pairs (executorStream)");
-  launchLabelAndMatch(pipelineCtx.matchPairsHost[0], executor, ctx, targetsDevice, queriesDevice,
-                      algorithm, executorStream, pipelineCtx, 0);
+  launchLabelAndMatch(executor.matchPairsHost[0], executor, ctx, targetsDevice, queriesDevice,
+                      algorithm, executorStream, 0);
   depth0Range.pop();
 
-  cudaStream_t postStream = pipelineCtx.postRecursionStream.stream();
+  cudaStream_t postStream = executor.postRecursionStream.stream();
   cudaCheckError(cudaStreamWaitEvent(postStream, executor.allocDoneEvent.event(), 0));
 
-  for (int depth = 1; depth <= pipelineCtx.maxDepthInMiniBatch; ++depth) {
+  for (int depth = 1; depth <= executor.maxDepthInMiniBatch; ++depth) {
     ScopedNvtxRange depthRange("Match depth-" + std::to_string(depth) + " pairs (postRecursionStream)");
 
     ScopedNvtxRange waitRange("Wait: postRecursionStream waits for depth event");
     cudaCheckError(cudaStreamWaitEvent(postStream, depthEventPtrs[depth - 1], 0));
     waitRange.pop();
 
-    launchLabelAndMatch(pipelineCtx.matchPairsHost[depth], executor, ctx, targetsDevice, queriesDevice,
-                        algorithm, postStream, pipelineCtx, depth);
+    launchLabelAndMatch(executor.matchPairsHost[depth], executor, ctx, targetsDevice, queriesDevice,
+                        algorithm, postStream, depth);
   }
-  cudaCheckError(cudaEventRecord(pipelineCtx.postRecursionDoneEvent.event(), postStream));
+  cudaCheckError(cudaEventRecord(executor.postRecursionDoneEvent.event(), postStream));
 
-  cudaCheckError(cudaEventRecord(pipelineCtx.recursiveDoneEvent.event(), recursiveStream));
-  cudaCheckError(cudaStreamWaitEvent(executorStream, pipelineCtx.recursiveDoneEvent.event(), 0));
-  cudaCheckError(cudaStreamWaitEvent(executorStream, pipelineCtx.postRecursionDoneEvent.event(), 0));
+  cudaCheckError(cudaEventRecord(executor.recursiveDoneEvent.event(), recursiveStream));
+  cudaCheckError(cudaStreamWaitEvent(executorStream, executor.recursiveDoneEvent.event(), 0));
+  cudaCheckError(cudaStreamWaitEvent(executorStream, executor.postRecursionDoneEvent.event(), 0));
 }
 
 void initiateResultsCopyToHost(GpuExecutor& executor) {
@@ -1250,8 +1117,8 @@ void runnerWorkerInline(int                               workerIdx,
 
       if (upstreamReadyEvent != nullptr && localMiniBatchCount < executorsPerRunner) {
         cudaCheckError(cudaStreamWaitEvent(executor->stream(), upstreamReadyEvent, 0));
-        cudaCheckError(cudaStreamWaitEvent(executor->recursivePipelineCtx->recursiveStream.stream(), upstreamReadyEvent, 0));
-        cudaCheckError(cudaStreamWaitEvent(executor->recursivePipelineCtx->postRecursionStream.stream(), upstreamReadyEvent, 0));
+        cudaCheckError(cudaStreamWaitEvent(executor->recursiveStream.stream(), upstreamReadyEvent, 0));
+        cudaCheckError(cudaStreamWaitEvent(executor->postRecursionStream.stream(), upstreamReadyEvent, 0));
       }
       ++localMiniBatchCount;
 

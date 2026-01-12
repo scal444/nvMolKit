@@ -27,10 +27,20 @@
 #include <cuda_runtime.h>
 
 #include <array>
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
+#include <queue>
 #include <unordered_map>
 #include <vector>
 
 #include "cuda_error_check.h"
+#include "host_vector.h"
+#include "nvtx.h"
+
+namespace RDKit {
+class ROMol;
+}  // namespace RDKit
 #include "device.h"
 #include "device_vector.h"
 #include "molecules.h"
@@ -436,6 +446,122 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
                                                 std::vector<BatchedPatternEntry>& scratchPatternEntries,
                                                 cudaEvent_t*                      depthEvents,
                                                 int                               numDepthEvents);
+
+// =============================================================================
+// RDKit Fallback Processing
+// =============================================================================
+
+/**
+ * @brief Process a single (target, query) pair using RDKit's CPU implementation.
+ *
+ * Used as fallback for oversized targets or overflow cases.
+ */
+void processWithRDKitFallback(const RDKit::ROMol*     target,
+                              const RDKit::ROMol*     query,
+                              int                     targetIdx,
+                              int                     queryIdx,
+                              SubstructSearchResults& results,
+                              std::mutex&             resultsMutex,
+                              int                     maxMatches);
+
+/**
+ * @brief Thread-safe queue for RDKit fallback processing.
+ *
+ * Worker threads wait on a condition variable and consume entries as they arrive.
+ * Supports concurrent producers (GPU batch accumulators) and consumers (RDKit workers).
+ */
+class RDKitFallbackQueue {
+ public:
+  RDKitFallbackQueue(const std::vector<const RDKit::ROMol*>* targets,
+                     const std::vector<const RDKit::ROMol*>* queries,
+                     SubstructSearchResults*                 results,
+                     std::mutex*                             resultsMutex,
+                     int                                     maxMatches);
+
+  void enqueue(const std::vector<RDKitFallbackEntry>& entries);
+  void enqueue(const RDKitFallbackEntry& entry);
+
+  void registerProducer();
+  void unregisterProducer();
+  void shutdown();
+  void workerLoop();
+
+  [[nodiscard]] size_t processedCount() const;
+  std::vector<RDKitFallbackEntry> drainToVector();
+  std::mutex& getResultsMutex();
+  bool tryProcessOne();
+
+  template <typename Predicate>
+  int processWhileWaiting(Predicate shouldStop) {
+    int processed = 0;
+    while (!shouldStop()) {
+      if (!tryProcessOne()) {
+        break;
+      }
+      ++processed;
+    }
+    return processed;
+  }
+
+  [[nodiscard]] bool hasWork() const;
+
+ private:
+  void processEntry(const RDKitFallbackEntry& entry);
+
+  const std::vector<const RDKit::ROMol*>* targets_;
+  const std::vector<const RDKit::ROMol*>* queries_;
+  SubstructSearchResults*                 results_;
+  std::mutex*                             resultsMutex_;
+  int                                     maxMatches_;
+
+  mutable std::mutex      mutex_;
+  std::condition_variable cv_;
+  std::queue<RDKitFallbackEntry> queue_;
+  std::atomic<size_t>     queueSize_{0};
+  bool                    shutdown_;
+  int                     activeProducers_;
+  std::atomic<size_t>     processedCount_{0};
+};
+
+/**
+ * @brief RAII helper to register/unregister as a producer on the fallback queue.
+ */
+class FallbackQueueProducerGuard {
+ public:
+  explicit FallbackQueueProducerGuard(RDKitFallbackQueue* queue) : queue_(queue) {
+    if (queue_) queue_->registerProducer();
+  }
+  ~FallbackQueueProducerGuard() {
+    if (queue_) queue_->unregisterProducer();
+  }
+  FallbackQueueProducerGuard(const FallbackQueueProducerGuard&) = delete;
+  FallbackQueueProducerGuard& operator=(const FallbackQueueProducerGuard&) = delete;
+ private:
+  RDKitFallbackQueue* queue_;
+};
+
+// =============================================================================
+// Thread Worker Context
+// =============================================================================
+
+/**
+ * @brief Per-worker context for substructure search threads.
+ *
+ * Contains cached data about queries and targets that's reused across mini-batches.
+ */
+struct ThreadWorkerContext {
+  PinnedHostVector<int> queryAtomCounts;
+  std::vector<int> targetAtomCounts;
+  std::vector<int> queryDepths;
+  std::vector<int> queryMaxDepths;
+  std::vector<int8_t> queryHasPatterns;
+  const std::vector<int>* targetSortOrder = nullptr;
+  const std::vector<int>* querySortOrder  = nullptr;
+  int numTargets     = 0;
+  int numQueries     = 0;
+  int maxTargetAtoms = 0;
+  int maxMatches     = 0;
+};
 
 }  // namespace nvMolKit
 
