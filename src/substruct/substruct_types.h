@@ -49,6 +49,7 @@ enum class SubstructAlgorithm {
  */
 struct SubstructSearchConfig {
   int  batchSize            = 1024;  ///< Number of (target, query) pairs per GPU batch
+  int  macroBatchMinibatches = 100;  ///< Number of mini-batches per macro-batch for target preprocessing overlap (<=1 disables macro batching)
   int  workerThreads        = -1;    ///< GPU runner threads per GPU (-1 = autoselect)
   int  preprocessingThreads = -1;    ///< CPU threads for input preprocessing (-1 = autoselect)
   int  rdkitFallbackThreads = -1;    ///< Threads for RDKit fallback queue (-1 = autoselect)

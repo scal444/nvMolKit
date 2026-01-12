@@ -283,6 +283,20 @@ class FallbackQueueProducerGuard {
   RDKitFallbackQueue* queue_;
 };    
 
+void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuTargets,
+                                    const std::vector<int>&                gpuTargetIndices,
+                                    const std::vector<unsigned int>&       gpuTargetAtomCounts,
+                                    const MoleculesHost&                   queriesHost,
+                                    const MoleculesDevice&                 queriesDevice,
+                                    const LeafSubpatterns&                 leafSubpatterns,
+                                    SubstructSearchResults&                results,
+                                    SubstructAlgorithm                     algorithm,
+                                    cudaStream_t                           stream,
+                                    const SubstructSearchConfig&           config,
+                                    const std::vector<int>&                querySortOrder,
+                                    int                                    effectivePreprocessingThreads,
+                                    RDKitFallbackQueue*                    fallbackQueue);
+
 using LabelMatrixView = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
 
 // =============================================================================
@@ -1693,29 +1707,25 @@ void runnerWorkerInline(int                               workerIdx,
 
 namespace {
 
-void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
-                             const MoleculesDevice&            queriesDevice,
-                             const MoleculesHost&              targetsHost,
-                             const MoleculesHost&              queriesHost,
-                             const LeafSubpatterns&            leafSubpatterns,
-                             SubstructSearchResults&           results,
-                             SubstructAlgorithm                algorithm,
-                             cudaStream_t                      stream,
-                             const SubstructSearchConfig&      config,
-                             const std::vector<int>*           targetSortOrder,
-                             const std::vector<int>*           querySortOrder,
-                             RDKitFallbackQueue*               fallbackQueue = nullptr) {
-  const int batchSize           = config.batchSize;
-  const int requestedNumRunners = config.workerThreads;
-  ScopedNvtxRange e2eRange("getSubstructMatches");
-  
-  configureSubstructKernelsSharedMem();
-  
-  const int numTargets = static_cast<int>(targetsHost.numMolecules());
-  const int numQueries = static_cast<int>(queriesHost.numMolecules());
+void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuTargets,
+                                    const std::vector<int>&                gpuTargetIndices,
+                                    const std::vector<unsigned int>&       gpuTargetAtomCounts,
+                                    const MoleculesHost&                   queriesHost,
+                                    const MoleculesDevice&                 queriesDevice,
+                                    const LeafSubpatterns&                 leafSubpatterns,
+                                    SubstructSearchResults&                results,
+                                    SubstructAlgorithm                     algorithm,
+                                    cudaStream_t                           stream,
+                                    const SubstructSearchConfig&           config,
+                                    const std::vector<int>&                querySortOrder,
+                                    int                                    effectivePreprocessingThreads,
+                                    RDKitFallbackQueue*                    fallbackQueue) {
+  ScopedNvtxRange e2eRange("runMacroBatchedSubstructSearch");
 
-  if (numTargets == 0 || numQueries == 0) {
-    throw std::invalid_argument("Target and query batches must not be empty");
+  const int numGpuTargets = static_cast<int>(gpuTargets.size());
+  const int numQueries    = static_cast<int>(queriesHost.numMolecules());
+  if (numGpuTargets == 0 || numQueries == 0) {
+    return;
   }
 
   // Determine GPU list: empty gpuIds = current device only
@@ -1727,66 +1737,51 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
   }
   const int numGpus = static_cast<int>(gpuIds.size());
 
-  const int numPairs           = numTargets * numQueries;
-  const int effectiveBatchSize = std::min(batchSize, numPairs);
-  const int totalNumBatches    = (numPairs + effectiveBatchSize - 1) / effectiveBatchSize;
+  // Macro partitioning (targets in original order, no target straddles macros)
+  const int macroMinibatches = std::max(1, config.macroBatchMinibatches);
+  const int64_t macroPairsTarget = static_cast<int64_t>(config.batchSize) * static_cast<int64_t>(macroMinibatches);
+  int targetsPerMacro = numGpuTargets;
+  if (macroMinibatches > 1) {
+    targetsPerMacro = static_cast<int>((macroPairsTarget + numQueries - 1) / numQueries);
+    targetsPerMacro = std::max(1, std::min(targetsPerMacro, numGpuTargets));
+  }
+  const int numMacros = (numGpuTargets + targetsPerMacro - 1) / targetsPerMacro;
 
-  // Total runners = workerThreads (per GPU) * numGPUs
-  const int runnersPerGpu  = std::max(1, requestedNumRunners);
-  const int totalRunners   = std::min(runnersPerGpu * numGpus, totalNumBatches);
-  const int numRunners     = totalRunners;
-
-  ScopedNvtxRange ctxRange("CPU: ThreadWorkerContext construction");
-  ThreadWorkerContext ctx;
-  ctxRange.pop();
-
-  ctx.numTargets       = numTargets;
-  ctx.numQueries       = numQueries;
-  ctx.targetSortOrder  = targetSortOrder;
-  ctx.querySortOrder   = querySortOrder;
-
-  ScopedNvtxRange metadataRange("CPU: Compute batch metadata");
-  ctx.queryAtomCounts.resize(static_cast<size_t>(numQueries * 1.5));
-  ctx.queryDepths.resize(numQueries);
-  ctx.queryMaxDepths.resize(numQueries);
-  ctx.queryHasPatterns.resize(numQueries);
-  const int precomputedSize = static_cast<int>(leafSubpatterns.perQueryPatterns.size());
+  // Precompute query metadata once (query preprocessing is kept up-front).
+  const int precomputedSize      = static_cast<int>(leafSubpatterns.perQueryPatterns.size());
   const int perQueryMaxDepthSize = static_cast<int>(leafSubpatterns.perQueryMaxDepth.size());
+
+  std::vector<int>     queryAtomCountsHost(numQueries);
+  std::vector<int>     queryDepthsHost(numQueries);
+  std::vector<int>     queryMaxDepthsHost(numQueries);
+  std::vector<int8_t>  queryHasPatternsHost(numQueries);
+
   int maxQueryAtoms = 0;
-  int maxDepthSeen = 0;
-  int maxTargetAtoms = 0;
+  int maxDepthSeen  = 0;
 
-  const int numPreprocessingThreads = (config.preprocessingThreads > 0) 
-      ? config.preprocessingThreads 
-      : ((config.preprocessingThreads == -1) 
-         ? static_cast<int>(std::thread::hardware_concurrency()) 
-         : 1);
-
-#pragma omp parallel num_threads(numPreprocessingThreads) \
-    reduction(max:maxQueryAtoms, maxDepthSeen, maxTargetAtoms)
+#pragma omp parallel num_threads(effectivePreprocessingThreads) reduction(max:maxQueryAtoms, maxDepthSeen)
   {
 #pragma omp for nowait
     for (int q = 0; q < numQueries; ++q) {
-      const int atomStart     = queriesHost.batchAtomStarts[q];
-      const int atomEnd       = queriesHost.batchAtomStarts[q + 1];
-      ctx.queryAtomCounts[q]  = atomEnd - atomStart;
-      ctx.queryDepths[q]      = getQueryRecursionDepth(queriesHost, q);
-      maxDepthSeen            = std::max(maxDepthSeen, ctx.queryDepths[q]);
-      ctx.queryMaxDepths[q]   = (q < perQueryMaxDepthSize) ? leafSubpatterns.perQueryMaxDepth[q] : 0;
-      ctx.queryHasPatterns[q] = (q < precomputedSize) &&
-                                (ctx.queryMaxDepths[q] > 0 || !leafSubpatterns.perQueryPatterns[q][0].empty());
-      maxQueryAtoms           = std::max(maxQueryAtoms, ctx.queryAtomCounts[q]);
-    }
+      const int atomStart    = queriesHost.batchAtomStarts[q];
+      const int atomEnd      = queriesHost.batchAtomStarts[q + 1];
+      const int atomCount    = atomEnd - atomStart;
+      queryAtomCountsHost[q] = atomCount;
 
-#pragma omp for
-    for (int t = 0; t < numTargets; ++t) {
-      const int atomStart = targetsHost.batchAtomStarts[t];
-      const int atomEnd   = targetsHost.batchAtomStarts[t + 1];
-      maxTargetAtoms      = std::max(maxTargetAtoms, atomEnd - atomStart);
+      const int depth        = getQueryRecursionDepth(queriesHost, q);
+      queryDepthsHost[q]     = depth;
+      maxDepthSeen           = std::max(maxDepthSeen, depth);
+
+      const int maxDepth     = (q < perQueryMaxDepthSize) ? leafSubpatterns.perQueryMaxDepth[q] : 0;
+      queryMaxDepthsHost[q]  = maxDepth;
+
+      const bool hasPatterns = (q < precomputedSize) &&
+                               (maxDepth > 0 || !leafSubpatterns.perQueryPatterns[q][0].empty());
+      queryHasPatternsHost[q] = hasPatterns ? 1 : 0;
+
+      maxQueryAtoms          = std::max(maxQueryAtoms, atomCount);
     }
   }
-
-  ctx.maxTargetAtoms = maxTargetAtoms;
 
   if (maxDepthSeen > kMaxRecursionDepth) {
     throw std::runtime_error("Recursive SMARTS depth " + std::to_string(maxDepthSeen) +
@@ -1794,45 +1789,7 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
                              std::to_string(kMaxRecursionDepth));
   }
 
-  // Store per-target atom counts for on-demand capacity calculation
-  // (avoids int32 overflow in cumulative sum for large datasets)
-  ctx.targetAtomCounts.resize(numTargets);
-  for (int t = 0; t < numTargets; ++t) {
-    ctx.targetAtomCounts[t] = targetsHost.batchAtomStarts[t + 1] - targetsHost.batchAtomStarts[t];
-  }
-  ctx.maxMatches = config.maxMatches;
-  metadataRange.pop();
-
-  // Only resize if not already sized (caller may have pre-sized for oversized target fallback)
-  if (results.numTargets == 0) {
-    ScopedNvtxRange resultsAllocRange("CPU: Allocate results structure");
-    results.resize(numTargets, numQueries);
-    resultsAllocRange.pop();
-  }
-
-  std::atomic<int> nextBatchIdx(0);
-  
-  // Use the fallback queue's mutex if available (ensures GPU batch accumulation
-  // and fallback processing use the same mutex to avoid race conditions)
-  std::mutex localResultsMutex;
-  std::mutex& resultsMutex = fallbackQueue ? fallbackQueue->getResultsMutex() : localResultsMutex;
-
-  ScopedCudaEvent upstreamReadyEvent;
-  cudaCheckError(cudaEventRecord(upstreamReadyEvent.event(), stream));
-
-  // Calculate max match indices per batch based on maxMatches config
-  // Use size_t for intermediate calculation to avoid int32 overflow
-  size_t maxMatchIndicesPerBatch;
-  if (ctx.maxMatches > 0) {
-    // Fixed limit: allocate for maxMatches per pair
-    maxMatchIndicesPerBatch = static_cast<size_t>(effectiveBatchSize) * ctx.maxMatches * maxQueryAtoms;
-  } else {
-    // Unlimited (maxMatches == 0): use heuristic based on target/query sizes
-    maxMatchIndicesPerBatch = static_cast<size_t>(effectiveBatchSize) * ctx.maxTargetAtoms * maxQueryAtoms;
-  }
-
-  // Calculate max patterns that could be accumulated at any depth level across all queries
-  // (patterns from multiple queries can accumulate when processing a batch)
+  // Precompute max patterns per depth across all queries for pinned buffer sizing.
   int maxPatternsPerDepth = 256;
   for (int d = 0; d <= kMaxRecursionDepth; ++d) {
     int patternsAtThisDepth = 0;
@@ -1842,58 +1799,175 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
     maxPatternsPerDepth = std::max(maxPatternsPerDepth, patternsAtThisDepth);
   }
 
+  // Use global maximum target atoms for sizing pinned buffers once.
+  int globalMaxTargetAtoms = 0;
+  for (size_t i = 0; i < gpuTargetAtomCounts.size(); ++i) {
+    globalMaxTargetAtoms = std::max(globalMaxTargetAtoms, static_cast<int>(gpuTargetAtomCounts[i]));
+  }
+
+  // Pinned buffers are sized for the worst-case mini-batch size within a macro.
+  const int maxPairsInMacro = std::min(numGpuTargets, targetsPerMacro) * numQueries;
+  const int pinnedBatchSize = std::min(config.batchSize, maxPairsInMacro);
+
+  size_t maxMatchIndicesPerBatch;
+  if (config.maxMatches > 0) {
+    maxMatchIndicesPerBatch = static_cast<size_t>(pinnedBatchSize) * config.maxMatches * maxQueryAtoms;
+  } else {
+    maxMatchIndicesPerBatch = static_cast<size_t>(pinnedBatchSize) * globalMaxTargetAtoms * maxQueryAtoms;
+  }
+
+  // Determine runners and slots using the same logic as getSubstructMatchesImpl, but based on worst-case macro.
+  const int requestedNumRunners = config.workerThreads;
+  const int numPairsWorstCase = std::min(numGpuTargets, targetsPerMacro) * numQueries;
+  const int effectiveBatchSizeWorstCase = std::min(config.batchSize, numPairsWorstCase);
+  const int totalNumBatchesWorstCase = (numPairsWorstCase + effectiveBatchSizeWorstCase - 1) / effectiveBatchSizeWorstCase;
+
+  const int runnersPerGpu = std::max(1, requestedNumRunners);
+  const int totalRunners  = std::min(runnersPerGpu * numGpus, totalNumBatchesWorstCase);
+  const int numRunners    = totalRunners;
+
   int slotsPerRunner;
   if (config.slotsPerRunner == -1) {
     slotsPerRunner = (numRunners == 1) ? 3 : 2;
   } else if (config.slotsPerRunner < 1 || config.slotsPerRunner > kMaxSlotsPerRunner) {
-    throw std::invalid_argument("slotsPerRunner must be -1 (auto) or between 1 and " + 
+    throw std::invalid_argument("slotsPerRunner must be -1 (auto) or between 1 and " +
                                 std::to_string(kMaxSlotsPerRunner));
   } else {
     slotsPerRunner = config.slotsPerRunner;
   }
-
-  ScopedNvtxRange threadRange("Multithreaded batch processing");
-  std::vector<std::exception_ptr> exceptions(numRunners);
 
   std::vector<int> workersPerGpu(numGpus, numRunners / numGpus);
   for (int i = 0; i < numRunners % numGpus; ++i) {
     workersPerGpu[i]++;
   }
 
-  // Compute total pinned memory needed and check against system RAM
+  // Compute pinned memory footprint (worst-case macro) and allocate once.
   const int totalSlots = numRunners * slotsPerRunner;
   const size_t perSlotSize = ConsolidatedPinnedBuffer::computeSize(
-      effectiveBatchSize, static_cast<int>(maxMatchIndicesPerBatch), maxPatternsPerDepth);
+      pinnedBatchSize, static_cast<int>(maxMatchIndicesPerBatch), maxPatternsPerDepth);
   const size_t totalPinnedBytes = static_cast<size_t>(totalSlots) * perSlotSize;
-  
-  const long pages = sysconf(_SC_PHYS_PAGES);
+
+  const long pages    = sysconf(_SC_PHYS_PAGES);
   const long pageSize = sysconf(_SC_PAGE_SIZE);
-  const size_t systemRam = static_cast<size_t>(pages) * static_cast<size_t>(pageSize);
+  const size_t systemRam  = static_cast<size_t>(pages) * static_cast<size_t>(pageSize);
   const size_t maxAllowed = systemRam / 4;
-  
   if (totalPinnedBytes > maxAllowed) {
     throw std::runtime_error(
         "Substructure search would require " + std::to_string(totalPinnedBytes / (1024 * 1024)) +
-        " MB of pinned memory, exceeding 1/4 of system RAM (" + 
+        " MB of pinned memory, exceeding 1/4 of system RAM (" +
         std::to_string(maxAllowed / (1024 * 1024)) + " MB). "
         "Reduce workerThreads, slotsPerRunner, or batchSize.");
   }
 
-  // Single consolidated allocation for all slots
-  ScopedNvtxRange allocRange("CPU: Allocate all pinned buffers");
+  ScopedNvtxRange allocRange("CPU: Allocate all pinned buffers (macro)");
   char* megaBuffer = nullptr;
   cudaCheckError(cudaMallocHost(&megaBuffer, totalPinnedBytes));
-  
+
   std::vector<ConsolidatedPinnedBuffer> pinnedBuffers(totalSlots);
   for (int i = 0; i < totalSlots; ++i) {
     char* slotPtr = megaBuffer + i * perSlotSize;
-    pinnedBuffers[i].assignExternal(slotPtr, effectiveBatchSize, static_cast<int>(maxMatchIndicesPerBatch), maxPatternsPerDepth);
+    pinnedBuffers[i].assignExternal(slotPtr, pinnedBatchSize, static_cast<int>(maxMatchIndicesPerBatch), maxPatternsPerDepth);
   }
   allocRange.pop();
 
-  ScopedNvtxRange launchRange("CPU: Launch GPU coordinators");
+  struct MacroData {
+    MoleculesHost    targetsHost;
+    std::vector<int> sortedToOriginal;   ///< sorted target idx -> original target idx (full input)
+    ThreadWorkerContext ctx;             ///< fully-populated context for this macro
+    int totalNumBatches    = 0;
+    int effectiveBatchSize = 0;
+  };
+
+  auto initializeMacroContextQueries = [&](ThreadWorkerContext& ctx) {
+    ctx.numQueries     = numQueries;
+    ctx.querySortOrder = querySortOrder.empty() ? nullptr : &querySortOrder;
+    ctx.maxMatches     = config.maxMatches;
+
+    ctx.queryAtomCounts.resize(static_cast<size_t>(numQueries * 1.5));
+    ctx.queryDepths.resize(numQueries);
+    ctx.queryMaxDepths.resize(numQueries);
+    ctx.queryHasPatterns.resize(numQueries);
+
+    for (int q = 0; q < numQueries; ++q) {
+      ctx.queryAtomCounts[q]  = queryAtomCountsHost[q];
+      ctx.queryDepths[q]      = queryDepthsHost[q];
+      ctx.queryMaxDepths[q]   = queryMaxDepthsHost[q];
+      ctx.queryHasPatterns[q] = queryHasPatternsHost[q];
+    }
+  };
+
+  auto buildMacro = [&](int macroIdx, MacroData& out) {
+    ScopedNvtxRange macroBuildRange("CPU: Build macro " + std::to_string(macroIdx));
+    const int t0 = macroIdx * targetsPerMacro;
+    const int t1 = std::min(t0 + targetsPerMacro, numGpuTargets);
+    const int n  = t1 - t0;
+
+    std::vector<const RDKit::ROMol*> macroTargets;
+    macroTargets.reserve(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+      macroTargets.push_back(gpuTargets[t0 + i]);
+    }
+
+    std::vector<int> macroBuildOrder;
+    if (config.presort) {
+      macroBuildOrder.resize(n);
+      std::iota(macroBuildOrder.begin(), macroBuildOrder.end(), 0);
+      std::sort(macroBuildOrder.begin(), macroBuildOrder.end(), [&](int a, int b) {
+        return gpuTargetAtomCounts[t0 + a] > gpuTargetAtomCounts[t0 + b];
+      });
+    }
+
+    out.targetsHost = buildTargetBatchParallel(macroTargets, macroBuildOrder, effectivePreprocessingThreads);
+
+    out.sortedToOriginal.resize(static_cast<size_t>(n));
+    for (int sortedIdx = 0; sortedIdx < n; ++sortedIdx) {
+      const int macroLocalIdx = macroBuildOrder.empty() ? sortedIdx : macroBuildOrder[sortedIdx];
+      out.sortedToOriginal[sortedIdx] = gpuTargetIndices[t0 + macroLocalIdx];
+    }
+
+    out.ctx.numTargets      = n;
+    out.ctx.targetSortOrder = &out.sortedToOriginal;
+
+    out.ctx.targetAtomCounts.resize(n);
+    int maxTargetAtoms = 0;
+    for (int t = 0; t < n; ++t) {
+      const int atomStart = out.targetsHost.batchAtomStarts[t];
+      const int atomEnd   = out.targetsHost.batchAtomStarts[t + 1];
+      const int atoms     = atomEnd - atomStart;
+      out.ctx.targetAtomCounts[t] = atoms;
+      maxTargetAtoms = std::max(maxTargetAtoms, atoms);
+    }
+    out.ctx.maxTargetAtoms = maxTargetAtoms;
+
+    const int numPairs = n * numQueries;
+    out.effectiveBatchSize = std::min(config.batchSize, numPairs);
+    out.totalNumBatches    = (numPairs + out.effectiveBatchSize - 1) / out.effectiveBatchSize;
+  };
+
+  // Global macro dispatch state.
+  std::mutex              macroMutex;
+  std::condition_variable macroCv;
+  int                     macroEpoch = 0;
+  bool                    shutdown   = false;
+  MacroData*              currentMacro = nullptr;
+
+  std::mutex              doneMutex;
+  std::condition_variable doneCv;
+  int                     gpusDone = 0;
+
+  std::atomic<int> nextBatchIdx(0);
+
+  // Use the fallback queue's mutex if available (ensures GPU batch accumulation
+  // and fallback processing use the same mutex to avoid race conditions)
+  std::mutex localResultsMutex;
+  std::mutex& resultsMutex = fallbackQueue ? fallbackQueue->getResultsMutex() : localResultsMutex;
+
+  std::vector<std::exception_ptr> exceptions(numRunners);
+
+  ScopedNvtxRange launchRange("CPU: Launch GPU coordinators (macro)");
   std::vector<std::thread> gpuThreads;
   gpuThreads.reserve(numGpus);
+  int activeGpus = 0;
 
   int slotOffset = 0;
   int workerIdOffset = 0;
@@ -1902,70 +1976,126 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
     if (numWorkersThisGpu == 0) {
       continue;
     }
-    
+    ++activeGpus;
+
     const int deviceId = gpuIds[g];
     const int startWorkerIdx = workerIdOffset;
     const int startSlotIdx = slotOffset;
     const int numSlotsThisGpu = numWorkersThisGpu * slotsPerRunner;
     workerIdOffset += numWorkersThisGpu;
     slotOffset += numSlotsThisGpu;
-    
-    // Collect raw pointers to this GPU's pinned buffers
+
     std::vector<ConsolidatedPinnedBuffer*> gpuBufferPtrs;
     gpuBufferPtrs.reserve(numSlotsThisGpu);
     for (int i = 0; i < numSlotsThisGpu; ++i) {
       gpuBufferPtrs.push_back(&pinnedBuffers[startSlotIdx + i]);
     }
-    
-    gpuThreads.emplace_back([=, &ctx, &targetsHost, &queriesHost, &targetsDevice, 
-                             &queriesDevice, &leafSubpatterns, &results, &resultsMutex,
-                             &nextBatchIdx, &exceptions,
-                             upstreamEvent = upstreamReadyEvent.event(),
-                             bufferPtrs = std::move(gpuBufferPtrs)]() {
+
+    gpuThreads.emplace_back([=, &macroMutex, &macroCv, &macroEpoch, &shutdown, &currentMacro,
+                             &doneMutex, &doneCv, &gpusDone,
+                             &queriesHost, &queriesDevice, &leafSubpatterns, &results, &resultsMutex,
+                             &nextBatchIdx, &exceptions]() mutable {
       try {
-        ScopedNvtxRange coordRange("GPU" + std::to_string(deviceId) + " coordinator setup");
+        ScopedNvtxRange coordRange("GPU" + std::to_string(deviceId) + " coordinator (macro)");
         const WithDevice setDevice(deviceId);
-        
+
+        // Slots must be declared before device objects so streams outlive async memory.
+        std::vector<std::unique_ptr<BatchSlot>> slots;
+        slots.reserve(gpuBufferPtrs.size());
+        for (size_t i = 0; i < gpuBufferPtrs.size(); ++i) {
+          auto slot = std::make_unique<BatchSlot>(startWorkerIdx * slotsPerRunner + static_cast<int>(i), deviceId);
+          slot->bindPinnedBuffer(*gpuBufferPtrs[i]);
+          slot->initializeForStream();
+          slots.push_back(std::move(slot));
+        }
+
         std::unique_ptr<MoleculesDevice> localTargets;
         std::unique_ptr<MoleculesDevice> localQueries;
         std::unique_ptr<LeafSubpatterns> localLeafPatterns;
-        
-        MoleculesDevice* targetsPtr = &targetsDevice;
+
+        MoleculesDevice* targetsPtr = nullptr;
         const MoleculesDevice* queriesPtr = &queriesDevice;
         const LeafSubpatterns* leafPtr = &leafSubpatterns;
-        
+
         if (deviceId != currentDevice) {
-          ScopedNvtxRange copyRange("GPU" + std::to_string(deviceId) + " copy device data");
           localTargets = std::make_unique<MoleculesDevice>();
-          localTargets->copyFromHost(targetsHost);
           localQueries = std::make_unique<MoleculesDevice>();
           localQueries->copyFromHost(queriesHost);
           localLeafPatterns = std::make_unique<LeafSubpatterns>();
           localLeafPatterns->buildAllPatterns(queriesHost);
           localLeafPatterns->syncToDevice(nullptr);
-          
           targetsPtr = localTargets.get();
           queriesPtr = localQueries.get();
           leafPtr = localLeafPatterns.get();
+        } else {
+          localTargets = std::make_unique<MoleculesDevice>();
+          targetsPtr = localTargets.get();
         }
-        
-        ScopedNvtxRange slotsRange("GPU" + std::to_string(deviceId) + " create BatchSlots");
-        std::vector<std::unique_ptr<BatchSlot>> slots;
-        slots.reserve(bufferPtrs.size());
-        
-        for (size_t i = 0; i < bufferPtrs.size(); ++i) {
-          auto slot = std::make_unique<BatchSlot>(startWorkerIdx * slotsPerRunner + static_cast<int>(i), deviceId);
-          slot->bindPinnedBuffer(*bufferPtrs[i]);
-          slot->initializeForStream();
-          slots.push_back(std::move(slot));
-        }
-        slotsRange.pop();
-        
-        coordRange.pop();
-        
+
+        // Per-GPU worker dispatch
+        std::mutex              localMutex;
+        std::condition_variable localCv;
+        int                     localEpoch = 0;
+        bool                    localShutdown = false;
+        const ThreadWorkerContext* localCtx = nullptr;
+        int                     localTotalBatches = 0;
+        int                     localBatchSize = 0;
+        cudaEvent_t             localUpstreamEvent = nullptr;
+        int                     localWorkersRemaining = 0;
+
+        ScopedCudaEvent upstreamEventStorage;
+
+        auto workerLoop = [&](int globalIdx, const std::vector<BatchSlot*>& workerSlots) {
+          int seenEpoch = 0;
+          while (true) {
+            const ThreadWorkerContext* ctxPtr = nullptr;
+            int totalBatches = 0;
+            int batchSize = 0;
+            cudaEvent_t upstreamEvent = nullptr;
+
+            {
+              std::unique_lock<std::mutex> lock(localMutex);
+              localCv.wait(lock, [&]() { return localEpoch != seenEpoch || localShutdown; });
+              if (localShutdown) {
+                return;
+              }
+              seenEpoch     = localEpoch;
+              ctxPtr        = localCtx;
+              totalBatches  = localTotalBatches;
+              batchSize     = localBatchSize;
+              upstreamEvent = localUpstreamEvent;
+            }
+
+            runnerWorkerInline(globalIdx,
+                               std::cref(*ctxPtr),
+                               std::ref(*targetsPtr),
+                               std::cref(*queriesPtr),
+                               std::cref(queriesHost),
+                               std::cref(*leafPtr),
+                               std::ref(results),
+                               std::ref(resultsMutex),
+                               algorithm,
+                               upstreamEvent,
+                               std::ref(nextBatchIdx),
+                               totalBatches,
+                               batchSize,
+                               deviceId,
+                               workerSlots,
+                               std::ref(exceptions[globalIdx]),
+                               fallbackQueue);
+
+            {
+              std::lock_guard<std::mutex> lock(localMutex);
+              --localWorkersRemaining;
+              if (localWorkersRemaining == 0) {
+                localCv.notify_all();
+              }
+            }
+          }
+        };
+
         std::vector<std::thread> workers;
         workers.reserve(numWorkersThisGpu);
-        
         for (int w = 0; w < numWorkersThisGpu; ++w) {
           const int globalIdx = startWorkerIdx + w;
           std::vector<BatchSlot*> workerSlots;
@@ -1973,20 +2103,62 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
           for (int s = 0; s < slotsPerRunner; ++s) {
             workerSlots.push_back(slots[w * slotsPerRunner + s].get());
           }
-          
-          workers.emplace_back(runnerWorkerInline,
-                               globalIdx, std::cref(ctx),
-                               std::ref(*targetsPtr), std::cref(*queriesPtr),
-                               std::cref(queriesHost), std::cref(*leafPtr),
-                               std::ref(results), std::ref(resultsMutex),
-                               algorithm, upstreamEvent,
-                               std::ref(nextBatchIdx), totalNumBatches,
-                               effectiveBatchSize, deviceId,
-                               std::move(workerSlots),
-                               std::ref(exceptions[globalIdx]),
-                               fallbackQueue);
+          workers.emplace_back(workerLoop, globalIdx, workerSlots);
         }
-        
+
+        int seenMacroEpoch = 0;
+        while (true) {
+          MacroData* macro = nullptr;
+          int epoch = 0;
+
+          {
+            std::unique_lock<std::mutex> lock(macroMutex);
+            macroCv.wait(lock, [&]() { return macroEpoch != seenMacroEpoch || shutdown; });
+            if (shutdown) {
+              break;
+            }
+            epoch = macroEpoch;
+            macro = currentMacro;
+            seenMacroEpoch = epoch;
+          }
+
+          // Copy macro targets to this GPU and produce an upstream event for slots to wait on.
+          cudaStream_t copyStream = slots.front()->stream();
+          targetsPtr->copyFromHost(macro->targetsHost, copyStream);
+          cudaCheckError(cudaEventRecord(upstreamEventStorage.event(), copyStream));
+
+          // Reset local worker counter and publish macro parameters to workers.
+          {
+            std::lock_guard<std::mutex> lock(localMutex);
+            localCtx           = &macro->ctx;
+            localTotalBatches  = macro->totalNumBatches;
+            localBatchSize     = macro->effectiveBatchSize;
+            localUpstreamEvent = upstreamEventStorage.event();
+            localWorkersRemaining = numWorkersThisGpu;
+            localEpoch = epoch;
+          }
+          localCv.notify_all();
+
+          // Wait for all local workers to finish this macro.
+          {
+            std::unique_lock<std::mutex> lock(localMutex);
+            localCv.wait(lock, [&]() { return localWorkersRemaining == 0; });
+          }
+
+          // Notify global done.
+          {
+            std::lock_guard<std::mutex> lock(doneMutex);
+            ++gpusDone;
+          }
+          doneCv.notify_one();
+        }
+
+        // Shutdown local workers.
+        {
+          std::lock_guard<std::mutex> lock(localMutex);
+          localShutdown = true;
+        }
+        localCv.notify_all();
         for (auto& w : workers) {
           w.join();
         }
@@ -1997,16 +2169,56 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
   }
   launchRange.pop();
 
-  ScopedNvtxRange joinRange("CPU: Join GPU coordinators");
+  // Double-buffered macro build + run loop on the main thread.
+  MacroData buffers[2];
+  initializeMacroContextQueries(buffers[0].ctx);
+  initializeMacroContextQueries(buffers[1].ctx);
+
+  // Build first macro (blocking) so workers can start quickly.
+  buildMacro(0, buffers[0]);
+
+  for (int macroIdx = 0; macroIdx < numMacros; ++macroIdx) {
+    MacroData& current = buffers[macroIdx % 2];
+
+    // Reset global batch counter for this macro, then publish new macro epoch.
+    nextBatchIdx.store(0, std::memory_order_relaxed);
+    {
+      std::lock_guard<std::mutex> lock(doneMutex);
+      gpusDone = 0;
+    }
+    {
+      std::lock_guard<std::mutex> lock(macroMutex);
+      currentMacro = &current;
+      ++macroEpoch;
+    }
+    macroCv.notify_all();
+
+    // Build next macro while GPUs are working on current.
+    if (macroIdx + 1 < numMacros) {
+      buildMacro(macroIdx + 1, buffers[(macroIdx + 1) % 2]);
+    }
+
+    // Wait for all GPUs to finish this macro.
+    {
+      std::unique_lock<std::mutex> lock(doneMutex);
+      doneCv.wait(lock, [&]() { return gpusDone >= activeGpus; });
+    }
+  }
+
+  // Shut down coordinators.
+  {
+    std::lock_guard<std::mutex> lock(macroMutex);
+    shutdown = true;
+  }
+  macroCv.notify_all();
+
+  ScopedNvtxRange joinRange("CPU: Join GPU coordinators (macro)");
   for (auto& t : gpuThreads) {
     t.join();
   }
   joinRange.pop();
-    
-  // Free the single mega-buffer (ConsolidatedPinnedBuffers don't own their memory)
-  cudaFreeHost(megaBuffer);
 
-  threadRange.pop();
+  cudaFreeHost(megaBuffer);
 
   for (const auto& ex : exceptions) {
     if (ex) {
@@ -2018,36 +2230,6 @@ void getSubstructMatchesImpl(MoleculesDevice&                  targetsDevice,
 }
 
 }  // namespace
-
-namespace detail {
-
-void getSubstructMatches(MoleculesDevice&                  targetsDevice,
-                         const MoleculesDevice&            queriesDevice,
-                         const MoleculesHost&              targetsHost,
-                         const MoleculesHost&              queriesHost,
-                         SubstructSearchResults&           results,
-                         SubstructAlgorithm                algorithm,
-                         cudaStream_t                      stream,
-                         const SubstructSearchConfig&      config,
-                         const std::vector<int>&           targetSortOrder,
-                         const std::vector<int>&           querySortOrder,
-                         void*                             fallbackQueuePtr) {
-  auto* fallbackQueue = static_cast<RDKitFallbackQueue*>(fallbackQueuePtr);
-  ScopedNvtxRange buildRange("Build LeafSubpatterns");
-  LeafSubpatterns leafSubpatterns;
-  leafSubpatterns.buildAllPatterns(queriesHost);
-  leafSubpatterns.syncToDevice(stream);
-  buildRange.pop();
-
-  const std::vector<int>* targetOrderPtr = targetSortOrder.empty() ? nullptr : &targetSortOrder;
-  const std::vector<int>* queryOrderPtr  = querySortOrder.empty() ? nullptr : &querySortOrder;
-
-  getSubstructMatchesImpl(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                          leafSubpatterns, results, algorithm, stream, config,
-                          targetOrderPtr, queryOrderPtr, fallbackQueue);
-}
-
-}  // namespace detail
 
 // =============================================================================
 // Recursive SMARTS Preprocessing
@@ -2440,48 +2622,37 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
     gpuTargetAtomCounts[i] = targetAtomCounts[gpuTargetIndices[i]];
   }
 
-  std::vector<int> targetSortOrder;
   std::vector<int> querySortOrder;
   const int numGpuTargets = static_cast<int>(gpuTargets.size());
 
   if (config.presort) {
     ScopedNvtxRange sortRange("Compute sort ordering");
 
-    targetSortOrder.resize(numGpuTargets);
     querySortOrder.resize(numQueries);
-    std::iota(targetSortOrder.begin(), targetSortOrder.end(), 0);
     std::iota(querySortOrder.begin(), querySortOrder.end(), 0);
 
-    std::sort(targetSortOrder.begin(), targetSortOrder.end(), [&](int a, int b) {
-      return gpuTargetAtomCounts[a] > gpuTargetAtomCounts[b];
-    });
     std::sort(querySortOrder.begin(), querySortOrder.end(), [&](int a, int b) {
       return queryAtomCounts[a] > queryAtomCounts[b];
     });
   }
 
-  // Build mapping from sorted GPU index to original index
-  // sortedGpuIdx -> gpuTargetIndices[sortOrder[sortedGpuIdx]] -> original index
-  std::vector<int> sortedToOriginal(numGpuTargets);
-  for (int i = 0; i < numGpuTargets; ++i) {
-    int gpuIdx = targetSortOrder.empty() ? i : targetSortOrder[i];
-    sortedToOriginal[i] = gpuTargetIndices[gpuIdx];
-  }
-
-  ScopedNvtxRange buildRange2("Build host data structures");
-  MoleculesHost targetsHost = buildTargetBatchParallel(gpuTargets, targetSortOrder, effectivePreprocessingThreads);
+  ScopedNvtxRange buildRange2("Build host query data structures");
   MoleculesHost queriesHost = buildQueryBatchParallel(queries, querySortOrder, effectivePreprocessingThreads);
   buildRange2.pop();
 
-  ScopedNvtxRange buildRange3("Build device data structures");
-  MoleculesDevice targetsDevice(stream);
+  ScopedNvtxRange buildRange3("Build device query data structures");
   MoleculesDevice queriesDevice(stream);
   buildRange3.pop();
 
-  ScopedNvtxRange buildRange4("Copy data to device");
-  targetsDevice.copyFromHost(targetsHost);
+  ScopedNvtxRange buildRange4("Copy queries to device");
   queriesDevice.copyFromHost(queriesHost);
   buildRange4.pop();
+
+  ScopedNvtxRange leafRange("Build LeafSubpatterns");
+  LeafSubpatterns leafSubpatterns;
+  leafSubpatterns.buildAllPatterns(queriesHost);
+  leafSubpatterns.syncToDevice(stream);
+  leafRange.pop();
 
   // Determine if we should use concurrent fallback processing
   const bool useConcurrentFallback = (effectiveFallbackThreads > 0);
@@ -2526,12 +2697,24 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
     }
   }
 
-  // GPU processing - overflow entries are enqueued to fallbackQueue as they're discovered
-  // Wrap in try-catch to ensure fallback workers are cleaned up on exception
+  // Macro-batch overlap:
+  // Run target preprocessing (macro-batches) overlapped with persistent GPU worker threads.
+  // NOTE: This must NOT spawn new worker threads once per macro, since that would
+  // respawn worker threads for each macro and destroy the intended overlap.
   try {
-    detail::getSubstructMatches(targetsDevice, queriesDevice, targetsHost, queriesHost,
-                                results, algorithm, stream, effectiveConfig, sortedToOriginal, querySortOrder,
-                                &fallbackQueue);
+    runMacroBatchedSubstructSearch(gpuTargets,
+                                  gpuTargetIndices,
+                                  gpuTargetAtomCounts,
+                                  queriesHost,
+                                  queriesDevice,
+                                  leafSubpatterns,
+                                  results,
+                                  algorithm,
+                                  stream,
+                                  effectiveConfig,
+                                  querySortOrder,
+                                  effectivePreprocessingThreads,
+                                  &fallbackQueue);
   } catch (...) {
     shutdownFallbackWorkers();
     throw;

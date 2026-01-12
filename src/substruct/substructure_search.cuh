@@ -109,26 +109,8 @@ struct SubstructMatchResultsDeviceView {
 
 namespace detail {
 
-/**
- * @brief Internal: Perform batch substructure matching on GPU.
- *
- * Prefer using getSubstructMatches(const std::vector<const RDKit::ROMol*>&, ...) instead.
- *
- * @param targetSortOrder If non-empty, maps sorted index -> original index for targets
- * @param querySortOrder If non-empty, maps sorted index -> original index for queries
- * @param fallbackQueuePtr Opaque pointer to RDKitFallbackQueue for overflow handling (internal use)
- */
-void getSubstructMatches(MoleculesDevice&                  targetsDevice,
-                         const MoleculesDevice&            queriesDevice,
-                         const MoleculesHost&              targetsHost,
-                         const MoleculesHost&              queriesHost,
-                         SubstructSearchResults&           results,
-                         SubstructAlgorithm                algorithm,
-                         cudaStream_t                      stream,
-                         const SubstructSearchConfig&      config            = SubstructSearchConfig{},
-                         const std::vector<int>&           targetSortOrder   = {},
-                         const std::vector<int>&           querySortOrder    = {},
-                         void*                             fallbackQueuePtr  = nullptr);
+// (removed) Internal overload that accepted pre-built MoleculesHost/MoleculesDevice.
+// The public API performs macro-batched preprocessing and launches persistent workers.
 
 }  // namespace detail
 

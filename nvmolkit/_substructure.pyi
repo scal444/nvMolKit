@@ -5,6 +5,7 @@ from rdkit.Chem import Mol
 
 class SubstructSearchConfig:
     batchSize: int
+    macroBatchMinibatches: int
     workerThreads: int
     preprocessingThreads: int
     rdkitFallbackThreads: int
