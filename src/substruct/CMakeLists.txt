@@ -15,12 +15,20 @@ target_include_directories(pinned_buffer_pool
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(pinned_buffer_pool PUBLIC cuda_error_check)
 
+add_library(substruct_kernels substruct_kernels.cu)
+target_include_directories(substruct_kernels
+                           PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(substruct_kernels PUBLIC molecules device_vector
+                                                flatBitVect cuda_error_check
+                                                device_timings)
+target_compile_options(substruct_kernels PRIVATE -Xptxas=-v)
+
 add_library(substructure_search substructure_search.cu)
 target_include_directories(substructure_search
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(substructure_search PUBLIC molecules device_vector
                                                   flatBitVect cuda_error_check
                                                   pinned_buffer_pool device_timings
-                                                  device OpenMP::OpenMP_CXX
+                                                  device substruct_kernels OpenMP::OpenMP_CXX
                                           PRIVATE ${RDKit_LIBS})
 target_compile_options(substructure_search PRIVATE -Xptxas=-v $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp>)
