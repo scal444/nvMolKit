@@ -35,6 +35,9 @@ Usage:
 
     # Skip nvmolkit (for CPU-only comparison):
     python substruct_bench.py --smiles <smiles_file> --smarts <smarts_file> --no_nvmolkit
+
+    # Use multiprocessing for RDKit with 8 processes:
+    python substruct_bench.py --smiles <smiles_file> --smarts <smarts_file> --rdkit_threads 8
 """
 
 import argparse
@@ -42,6 +45,7 @@ import pickle
 import sys
 import time
 from functools import partial
+from multiprocessing import Pool
 from typing import Callable
 
 import nvtx
@@ -134,13 +138,40 @@ def load_smarts(filepath: str, max_count: int = 0) -> tuple[list[Chem.Mol], list
     return queries, smarts_list
 
 
+_worker_queries = None
+_worker_params = None
+
+
+def _rdkit_worker_init(query_binaries: list[bytes], max_matches: int):
+    """Initialize worker process with shared query data."""
+    global _worker_queries, _worker_params
+    _worker_queries = [Chem.Mol(qb) for qb in query_binaries]
+    _worker_params = Chem.SubstructMatchParameters()
+    _worker_params.uniquify = False
+    if max_matches > 0:
+        _worker_params.maxMatches = max_matches
+
+
+def _rdkit_worker_has(mol_binary: bytes) -> list[bool]:
+    """Worker function for hasSubstructMatch multiprocessing."""
+    mol = Chem.Mol(mol_binary)
+    return [mol.HasSubstructMatch(q, _worker_params) for q in _worker_queries]
+
+
+def _rdkit_worker_get(mol_binary: bytes) -> list[tuple]:
+    """Worker function for getSubstructMatches multiprocessing."""
+    mol = Chem.Mol(mol_binary)
+    return [mol.GetSubstructMatches(q, _worker_params) for q in _worker_queries]
+
+
 @nvtx.annotate("bench_rdkit_substruct", color="green")
 def bench_rdkit_substruct(
     mols: list[Chem.Mol], 
     queries: list[Chem.Mol], 
     runs: int,
     mode: str,
-    max_matches: int
+    max_matches: int,
+    threads: int = 1
 ) -> tuple[float, float, list]:
     """Benchmark RDKit SubstructMatch API."""
     params = Chem.SubstructMatchParameters()
@@ -150,23 +181,35 @@ def bench_rdkit_substruct(
     
     results_data = []
     
-    @nvtx.annotate("substruct_run", color="yellow")
-    def run():
-        nonlocal results_data
-        results_data = []
-        if mode == "hasSubstructMatch":
-            for mol in mols:
-                mol_results = []
-                for query in queries:
-                    mol_results.append(mol.HasSubstructMatch(query, params))
-                results_data.append(mol_results)
-        else:
-            for mol in mols:
-                mol_results = []
-                for query in queries:
-                    matches = mol.GetSubstructMatches(query, params)
-                    mol_results.append(matches)
-                results_data.append(mol_results)
+    if threads > 1:
+        mol_binaries = [mol.ToBinary() for mol in mols]
+        query_binaries = [q.ToBinary() for q in queries]
+        worker_func = _rdkit_worker_has if mode == "hasSubstructMatch" else _rdkit_worker_get
+        chunksize = max(1, len(mol_binaries) // (threads * 4))
+        
+        @nvtx.annotate("substruct_run_mp", color="yellow")
+        def run():
+            nonlocal results_data
+            with Pool(threads, initializer=_rdkit_worker_init, initargs=(query_binaries, max_matches)) as pool:
+                results_data = pool.map(worker_func, mol_binaries, chunksize=chunksize)
+    else:
+        @nvtx.annotate("substruct_run", color="yellow")
+        def run():
+            nonlocal results_data
+            results_data = []
+            if mode == "hasSubstructMatch":
+                for mol in mols:
+                    mol_results = []
+                    for query in queries:
+                        mol_results.append(mol.HasSubstructMatch(query, params))
+                    results_data.append(mol_results)
+            else:
+                for mol in mols:
+                    mol_results = []
+                    for query in queries:
+                        matches = mol.GetSubstructMatches(query, params)
+                        mol_results.append(matches)
+                    results_data.append(mol_results)
     
     avg_ms, std_ms = time_it(run, runs)
     return avg_ms, std_ms, results_data
@@ -220,6 +263,7 @@ def main():
                         help="Maximum matches per target/query pair, 0 = all (default: 0)")
     parser.add_argument("--no_nvmolkit", action="store_true", help="Skip nvmolkit benchmark")
     parser.add_argument("--no_rdkit", action="store_true", help="Skip RDKit benchmark")
+    parser.add_argument("--rdkit_threads", type=int, default=1, help="RDKit multiprocessing threads (default: 1)")
     parser.add_argument("--batch_size", "-b", type=int, default=1024, help="nvmolkit batch size (default: 1024)")
     parser.add_argument("--workers", type=int, default=-1, help="nvmolkit GPU worker threads per GPU (-1 = auto)")
     parser.add_argument("--prep_threads", type=int, default=-1, help="nvmolkit preprocessing threads (-1 = auto)")
@@ -244,6 +288,8 @@ def main():
     print(f"  Runs: {args.runs}")
     print(f"  Run nvmolkit: {not args.no_nvmolkit}")
     print(f"  Run RDKit: {not args.no_rdkit}")
+    if not args.no_rdkit:
+        print(f"  RDKit threads: {args.rdkit_threads}")
     if not args.no_nvmolkit:
         print(f"  nvmolkit config:")
         print(f"    batch_size: {args.batch_size}")
@@ -308,7 +354,7 @@ def main():
     if not args.no_rdkit:
         print("\nRunning RDKit SubstructMatch benchmark...")
         rdkit_avg, rdkit_std, rdkit_results = bench_rdkit_substruct(
-            mols, queries, args.runs, args.mode, args.max_matches
+            mols, queries, args.runs, args.mode, args.max_matches, args.rdkit_threads
         )
         print(f"  RDKit:           {rdkit_avg:10.2f} ms (± {rdkit_std:.2f} ms)")
         results["rdkit"] = (rdkit_avg, rdkit_std, rdkit_results)

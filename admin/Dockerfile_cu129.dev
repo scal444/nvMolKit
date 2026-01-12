@@ -23,7 +23,8 @@ RUN mkdir -p /var/tmp && wget -q -nc --no-check-certificate -P /var/tmp https://
     . /usr/local/anaconda/etc/profile.d/conda.sh && \
     conda activate base && \
     conda config --add channels conda-forge --add channels nvidia && \
-    CONDA_CUDA_OVERRIDE='12.9' conda install -y cmake  libboost-devel libboost-headers libboost-python-devel librdkit-dev=2025.03.6 pip pytest python=3.12 pytorch rdkit=2025.03.6 scikit-build=0.18 && \
+    pip install torch && \
+    CONDA_CUDA_OVERRIDE='12.9' conda install -y -q cmake  libboost-devel libboost-headers libboost-python-devel librdkit-dev=2025.03.6 pip pytest python=3.12 rdkit=2025.03.6 scikit-build=0.18 && \
     conda clean --all -f -y && \
     rm -rf /var/tmp/Miniforge3-25.3.0-3-Linux-x86_64.sh
 
