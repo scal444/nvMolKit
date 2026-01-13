@@ -22,7 +22,20 @@
 
 namespace nvMolKit {
 
-constexpr int kThreadsPerBlock = 256;
+constexpr int kThreadsPerBlock = 128;
+
+/// Block size varies by MaxTargetAtoms to fit shared memory budget
+template <std::size_t MaxTargetAtoms>
+#ifdef __CUDACC__
+__host__ __device__
+#endif
+constexpr int getBlockSizeForConfig() {
+  if constexpr (MaxTargetAtoms >= 128) {
+    return 256;
+  } else {
+    return 128;
+  }
+}
 
 /**
  * @brief Algorithm choice for substructure matching.

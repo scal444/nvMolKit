@@ -116,8 +116,12 @@ __host__ __device__ constexpr int computeMaxPartials(int sharedPerSM_KiB, int bl
   const int budgetBytes = (sharedPerSM_KiB * 1024) / blocksPerSM;
   const int fixedOverhead = kLabelMatrixBytes + kControlVarsBytes + kTargetBondsBytes + kQueryBondsBytes;
   const int availableBytes = (budgetBytes * 9 / 10) - fixedOverhead;
+  if (availableBytes < kPartialMatchSize * 2) {
+    return 0;
+  }
   const int rawPartials = availableBytes / (kPartialMatchSize * 2);  // ping-pong
-  return (rawPartials / 10) * 10;  // round to 10
+  const int rounded = (rawPartials / 10) * 10;
+  return rounded > 0 ? rounded : rawPartials;
 }
 
 /// Compute partials for a given SM architecture
@@ -127,18 +131,19 @@ __host__ __device__ constexpr int getMaxPartialsForSM(int sm, int blockSize) {
 }
 
 // Compute at compile time based on __CUDA_ARCH__
+constexpr int kDefaultBlockSize = getBlockSizeForConfig<kMaxTargetAtoms>();
 #if defined(__CUDA_ARCH__)
-constexpr int kMaxPartialsPerBlock = getMaxPartialsForSM<kMaxTargetAtoms, kMaxQueryAtoms>(__CUDA_ARCH__ / 10, kThreadsPerBlock);
-static_assert(getMaxThreadsPerSM(__CUDA_ARCH__ / 10) % kThreadsPerBlock == 0, 
-              "kThreadsPerBlock must evenly divide max threads/SM");
+constexpr int kMaxPartialsPerBlock = getMaxPartialsForSM<kMaxTargetAtoms, kMaxQueryAtoms>(__CUDA_ARCH__ / 10, kDefaultBlockSize);
+static_assert(getMaxThreadsPerSM(__CUDA_ARCH__ / 10) % kDefaultBlockSize == 0, 
+              "block size must evenly divide max threads/SM");
 #else
-constexpr int kMaxPartialsPerBlock = getMaxPartialsForSM<kMaxTargetAtoms, kMaxQueryAtoms>(86, kThreadsPerBlock);
+constexpr int kMaxPartialsPerBlock = getMaxPartialsForSM<kMaxTargetAtoms, kMaxQueryAtoms>(86, kDefaultBlockSize);
 #endif
 
-constexpr int kMaxPartialsPerBlockHost = getMaxPartialsForSM<kMaxTargetAtoms, kMaxQueryAtoms>(86, kThreadsPerBlock);
-static_assert(getMaxThreadsPerSM(86) % kThreadsPerBlock == 0,
-              "kThreadsPerBlock must evenly divide max threads/SM");
-constexpr int kWarpsPerBlock = kThreadsPerBlock / 32;
+constexpr int kMaxPartialsPerBlockHost = getMaxPartialsForSM<kMaxTargetAtoms, kMaxQueryAtoms>(86, kDefaultBlockSize);
+static_assert(getMaxThreadsPerSM(86) % kDefaultBlockSize == 0,
+              "block size must evenly divide max threads/SM");
+constexpr int kWarpsPerBlock = kDefaultBlockSize / 32;
 
 // =============================================================================
 // Shared Memory Carveout Configuration
@@ -417,7 +422,10 @@ __global__ void substructMatchKernelT(MoleculesDeviceView                       
     }
 
   } else if constexpr (Algo == SubstructAlgorithm::GSI) {
-    constexpr int kMaxPartialsT = getMaxPartialsForSM<MaxTargetAtoms, MaxQueryAtoms>(86, kThreadsPerBlock);
+    constexpr int kBlockSizeT = getBlockSizeForConfig<MaxTargetAtoms>();
+    constexpr int kMaxPartialsT = getMaxPartialsForSM<MaxTargetAtoms, MaxQueryAtoms>(86, kBlockSizeT);
+    static_assert(kMaxPartialsT > 0,
+                  "Insufficient shared memory for GSI partials - check block size for MaxTargetAtoms/MaxQueryAtoms");
     __shared__ PartialMatchT<MaxQueryAtoms> gsiPartials[kMaxPartialsT * 2];
 
     gsiBFSSearchGPU<MaxTargetAtoms, MaxQueryAtoms, MaxBondsPerAtom>(
@@ -552,7 +560,10 @@ __global__ void substructPaintKernelT(MoleculesDeviceView             targets,
   constexpr int gsiBuffersPerBlock = 2;
 
   if constexpr (Algo == SubstructAlgorithm::GSI) {
-    constexpr int kMaxPartialsT = getMaxPartialsForSM<MaxTargetAtoms, MaxQueryAtoms>(86, kThreadsPerBlock);
+    constexpr int kBlockSizeT = getBlockSizeForConfig<MaxTargetAtoms>();
+    constexpr int kMaxPartialsT = getMaxPartialsForSM<MaxTargetAtoms, MaxQueryAtoms>(86, kBlockSizeT);
+    static_assert(kMaxPartialsT > 0,
+                  "Insufficient shared memory for GSI partials - check block size for MaxTargetAtoms/MaxQueryAtoms");
     __shared__ PartialMatchT<MaxQueryAtoms> gsiPartials[kMaxPartialsT * 2];
 
     PartialMatchT<MaxQueryAtoms>* blockOverflowA = overflowA + blockIdx.x * gsiBuffersPerBlock * overflowCapacity;
@@ -665,7 +676,8 @@ void launchLabelMatrixKernelForConfig(MoleculesDeviceView targets,
                                       int                 maxTargetAtoms,
                                       const int*          batchLocalIndices,
                                       cudaStream_t        stream) {
-  labelMatrixKernelT<MaxTargetAtoms, MaxQueryAtoms><<<numPairs, kThreadsPerBlock, 0, stream>>>(
+  constexpr int kBlockSize = getBlockSizeForConfig<MaxTargetAtoms>();
+  labelMatrixKernelT<MaxTargetAtoms, MaxQueryAtoms><<<numPairs, kBlockSize, 0, stream>>>(
       targets, queries, pairIndices, numQueries, labelMatrixBuffer,
       recursiveMatchBits, maxTargetAtoms, batchLocalIndices);
 }
@@ -736,7 +748,8 @@ void launchLabelMatrixPaintKernelForConfig(MoleculesDeviceView        targets,
                                            const uint32_t*            recursiveMatchBits,
                                            int                        maxTargetAtoms,
                                            cudaStream_t               stream) {
-  labelMatrixPaintKernelT<MaxTargetAtoms, MaxQueryAtoms><<<numBlocks, kThreadsPerBlock, 0, stream>>>(
+  constexpr int kBlockSize = getBlockSizeForConfig<MaxTargetAtoms>();
+  labelMatrixPaintKernelT<MaxTargetAtoms, MaxQueryAtoms><<<numBlocks, kBlockSize, 0, stream>>>(
       targets, patterns, patternEntries, numPatterns, numQueries,
       miniBatchPairOffset, miniBatchSize, labelMatrixBuffer, firstTargetIdx,
       recursiveMatchBits, maxTargetAtoms);
@@ -819,12 +832,13 @@ void launchSubstructPaintKernelForConfig(SubstructAlgorithm          algorithm,
                                          int                         firstTargetIdx,
                                          cudaStream_t                stream) {
   constexpr std::size_t kLabelMatrixWordsT = (MaxTargetAtoms * MaxQueryAtoms) / 32;
+  constexpr int kBlockSize = getBlockSizeForConfig<MaxTargetAtoms>();
   switch (algorithm) {
     case SubstructAlgorithm::VF2:
       break;
     case SubstructAlgorithm::GSI:
       substructPaintKernelT<MaxTargetAtoms, MaxQueryAtoms, MaxBondsPerAtom, SubstructAlgorithm::GSI>
-          <<<numBlocks, kThreadsPerBlock, 0, stream>>>(
+          <<<numBlocks, kBlockSize, 0, stream>>>(
               targets, patterns, patternEntries, numPatterns,
               outputRecursiveBits, maxTargetAtoms, outputNumQueries,
               defaultPatternId, defaultMainQueryIdx, miniBatchPairOffset, miniBatchSize,
@@ -914,6 +928,7 @@ void launchMatchKernelForConfig(SubstructAlgorithm             algorithm,
                                 DeviceTimingsData*             timings,
                                 cudaStream_t                   stream) {
   constexpr std::size_t labelMatrixWordsT = MaxTargetAtoms * MaxQueryAtoms / 32;
+  constexpr int kBlockSize = getBlockSizeForConfig<MaxTargetAtoms>();
 
   SubstructMatchResultsDeviceViewT<MaxQueryAtoms> results;
   results.matchCounts              = miniBatchResults.matchCounts();
@@ -935,12 +950,12 @@ void launchMatchKernelForConfig(SubstructAlgorithm             algorithm,
   switch (algorithm) {
     case SubstructAlgorithm::VF2:
       substructMatchKernelT<MaxTargetAtoms, MaxQueryAtoms, MaxBondsPerAtom, SubstructAlgorithm::VF2>
-          <<<numPairs, kThreadsPerBlock, 0, stream>>>(
+          <<<numPairs, kBlockSize, 0, stream>>>(
               targets, queries, results, pairIndices, numQueries, batchLocalIndices, timings);
       break;
     case SubstructAlgorithm::GSI:
       substructMatchKernelT<MaxTargetAtoms, MaxQueryAtoms, MaxBondsPerAtom, SubstructAlgorithm::GSI>
-          <<<numPairs, kThreadsPerBlock, 0, stream>>>(
+          <<<numPairs, kBlockSize, 0, stream>>>(
               targets, queries, results, pairIndices, numQueries, batchLocalIndices, timings);
       break;
   }
