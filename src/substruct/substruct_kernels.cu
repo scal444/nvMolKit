@@ -105,34 +105,37 @@ __host__ __device__ constexpr int getMaxBlocksPerSM(int sm, int blockSize) {
 }
 
 /// Compute max partials that fit in shared memory budget
-template <std::size_t MaxQueryAtoms>
+template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
 __host__ __device__ constexpr int computeMaxPartials(int sharedPerSM_KiB, int blocksPerSM) {
-  constexpr int kLabelMatrixBytes = 1024;
+  constexpr int kLabelMatrixBytes = (MaxTargetAtoms * MaxQueryAtoms) / 8;
   constexpr int kControlVarsBytes = 32;
   constexpr int kPartialMatchSize = sizeof(PartialMatchT<MaxQueryAtoms>);
+  constexpr int kTargetBondsBytes = MaxTargetAtoms * 17;  // sizeof(TargetAtomBonds) = 17
+  constexpr int kQueryBondsBytes = MaxQueryAtoms * 44;    // sizeof(QueryAtomBonds) = 44
   
   const int budgetBytes = (sharedPerSM_KiB * 1024) / blocksPerSM;
-  const int availableBytes = (budgetBytes * 9 / 10) - kLabelMatrixBytes - kControlVarsBytes;
+  const int fixedOverhead = kLabelMatrixBytes + kControlVarsBytes + kTargetBondsBytes + kQueryBondsBytes;
+  const int availableBytes = (budgetBytes * 9 / 10) - fixedOverhead;
   const int rawPartials = availableBytes / (kPartialMatchSize * 2);  // ping-pong
   return (rawPartials / 10) * 10;  // round to 10
 }
 
 /// Compute partials for a given SM architecture
-template <std::size_t MaxQueryAtoms>
+template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
 __host__ __device__ constexpr int getMaxPartialsForSM(int sm, int blockSize) {
-  return computeMaxPartials<MaxQueryAtoms>(getSharedMemPerSM_KiB(sm), getMaxBlocksPerSM(sm, blockSize));
+  return computeMaxPartials<MaxTargetAtoms, MaxQueryAtoms>(getSharedMemPerSM_KiB(sm), getMaxBlocksPerSM(sm, blockSize));
 }
 
 // Compute at compile time based on __CUDA_ARCH__
 #if defined(__CUDA_ARCH__)
-constexpr int kMaxPartialsPerBlock = getMaxPartialsForSM<kMaxQueryAtoms>(__CUDA_ARCH__ / 10, kThreadsPerBlock);
+constexpr int kMaxPartialsPerBlock = getMaxPartialsForSM<kMaxTargetAtoms, kMaxQueryAtoms>(__CUDA_ARCH__ / 10, kThreadsPerBlock);
 static_assert(getMaxThreadsPerSM(__CUDA_ARCH__ / 10) % kThreadsPerBlock == 0, 
               "kThreadsPerBlock must evenly divide max threads/SM");
 #else
-constexpr int kMaxPartialsPerBlock = getMaxPartialsForSM<kMaxQueryAtoms>(86, kThreadsPerBlock);
+constexpr int kMaxPartialsPerBlock = getMaxPartialsForSM<kMaxTargetAtoms, kMaxQueryAtoms>(86, kThreadsPerBlock);
 #endif
 
-constexpr int kMaxPartialsPerBlockHost = getMaxPartialsForSM<kMaxQueryAtoms>(86, kThreadsPerBlock);
+constexpr int kMaxPartialsPerBlockHost = getMaxPartialsForSM<kMaxTargetAtoms, kMaxQueryAtoms>(86, kThreadsPerBlock);
 static_assert(getMaxThreadsPerSM(86) % kThreadsPerBlock == 0,
               "kThreadsPerBlock must evenly divide max threads/SM");
 constexpr int kWarpsPerBlock = kThreadsPerBlock / 32;
@@ -310,8 +313,8 @@ __global__ void substructMatchKernelT(MoleculesDeviceView                       
     return;
   }
 
-  const MoleculeView target = getMolecule(targets, targetIdx);
-  const MoleculeView query  = getMolecule(queries, queryIdx);
+  MoleculeView target = getMolecule(targets, targetIdx);
+  MoleculeView query  = getMolecule(queries, queryIdx);
 
   constexpr std::size_t kLabelMatrixBitsT = MaxTargetAtoms * MaxQueryAtoms;
   constexpr std::size_t kLabelMatrixWordsT = kLabelMatrixBitsT / 32;
@@ -321,6 +324,9 @@ __global__ void substructMatchKernelT(MoleculesDeviceView                       
   __shared__ LabelMatrixStorageT sharedLabelMatrix;
   LabelMatrixViewT labelMatrix(&sharedLabelMatrix);
 
+  __shared__ TargetAtomBonds sharedTargetBonds[MaxTargetAtoms];
+  __shared__ QueryAtomBonds sharedQueryBonds[MaxQueryAtoms];
+
   const uint32_t* globalIn   = results.getLabelMatrixPtr(batchLocalIdx);
   uint32_t*       sharedOut  = sharedLabelMatrix.begin();
   const int       tid        = threadIdx.x;
@@ -329,7 +335,26 @@ __global__ void substructMatchKernelT(MoleculesDeviceView                       
   for (std::size_t i = tid; i < kLabelMatrixWordsT; i += numThreads) {
     sharedOut[i] = globalIn[i];
   }
+
+  const int numTargetAtoms = target.numAtoms;
+  const int numQueryAtoms = query.numAtoms;
+
+  for (int i = tid; i < numTargetAtoms; i += numThreads) {
+    sharedTargetBonds[i] = target.targetAtomBonds[i];
+  }
+
+  constexpr int kQueryBondWords = sizeof(QueryAtomBonds) / sizeof(uint32_t);
+  static_assert(sizeof(QueryAtomBonds) % sizeof(uint32_t) == 0, "QueryAtomBonds must be word-aligned");
+  const uint32_t* queryBondsSrc = reinterpret_cast<const uint32_t*>(query.queryAtomBonds);
+  uint32_t* queryBondsDst = reinterpret_cast<uint32_t*>(sharedQueryBonds);
+  const int totalQueryWords = numQueryAtoms * kQueryBondWords;
+  for (int i = tid; i < totalQueryWords; i += numThreads) {
+    queryBondsDst[i] = queryBondsSrc[i];
+  }
   __syncthreads();
+
+  target.targetAtomBonds = sharedTargetBonds;
+  query.queryAtomBonds = sharedQueryBonds;
 
   if constexpr (kDebugDumpLabelMatrix) {
     if (threadIdx.x == 0) {
@@ -388,7 +413,7 @@ __global__ void substructMatchKernelT(MoleculesDeviceView                       
     }
 
   } else if constexpr (Algo == SubstructAlgorithm::GSI) {
-    constexpr int kMaxPartialsT = getMaxPartialsForSM<MaxQueryAtoms>(86, kThreadsPerBlock);
+    constexpr int kMaxPartialsT = getMaxPartialsForSM<MaxTargetAtoms, MaxQueryAtoms>(86, kThreadsPerBlock);
     __shared__ PartialMatchT<MaxQueryAtoms> gsiPartials[kMaxPartialsT * 2];
 
     gsiBFSSearchGPU<MaxTargetAtoms, MaxQueryAtoms, MaxBondsPerAtom>(
@@ -458,8 +483,8 @@ __global__ void substructPaintKernelT(MoleculesDeviceView             targets,
 
   const int batchLocalPairIdx = globalPairIdx - miniBatchPairOffset;
 
-  const MoleculeView target  = getMolecule(targets, targetIdx);
-  const MoleculeView pattern = getMolecule(patterns, patternMolIdx);
+  MoleculeView target  = getMolecule(targets, targetIdx);
+  MoleculeView pattern = getMolecule(patterns, patternMolIdx);
 
   constexpr std::size_t kLabelMatrixBitsT = MaxTargetAtoms * MaxQueryAtoms;
   constexpr std::size_t kLabelMatrixWordsT = kLabelMatrixBitsT / 32;
@@ -469,6 +494,9 @@ __global__ void substructPaintKernelT(MoleculesDeviceView             targets,
   __shared__ LabelMatrixStorageT sharedLabelMatrix;
   LabelMatrixViewT labelMatrix(&sharedLabelMatrix);
 
+  __shared__ TargetAtomBonds sharedTargetBonds[MaxTargetAtoms];
+  __shared__ QueryAtomBonds sharedPatternBonds[MaxQueryAtoms];
+
   const uint32_t* globalIn   = labelMatrixBuffer + blockIdx.x * labelMatrixWords;
   uint32_t*       sharedOut  = sharedLabelMatrix.begin();
   const int       tid        = threadIdx.x;
@@ -477,7 +505,26 @@ __global__ void substructPaintKernelT(MoleculesDeviceView             targets,
   for (std::size_t i = tid; i < kLabelMatrixWordsT; i += numThreads) {
     sharedOut[i] = globalIn[i];
   }
+
+  const int numTargetAtoms = target.numAtoms;
+  const int numPatternAtoms = pattern.numAtoms;
+
+  for (int i = tid; i < numTargetAtoms; i += numThreads) {
+    sharedTargetBonds[i] = target.targetAtomBonds[i];
+  }
+
+  constexpr int kQueryBondWords = sizeof(QueryAtomBonds) / sizeof(uint32_t);
+  static_assert(sizeof(QueryAtomBonds) % sizeof(uint32_t) == 0, "QueryAtomBonds must be word-aligned");
+  const uint32_t* patternBondsSrc = reinterpret_cast<const uint32_t*>(pattern.queryAtomBonds);
+  uint32_t* patternBondsDst = reinterpret_cast<uint32_t*>(sharedPatternBonds);
+  const int totalPatternWords = numPatternAtoms * kQueryBondWords;
+  for (int i = tid; i < totalPatternWords; i += numThreads) {
+    patternBondsDst[i] = patternBondsSrc[i];
+  }
   __syncthreads();
+
+  target.targetAtomBonds = sharedTargetBonds;
+  pattern.queryAtomBonds = sharedPatternBonds;
 
   __shared__ int sharedMatchCount;
   __shared__ int sharedReportedCount;
@@ -497,7 +544,7 @@ __global__ void substructPaintKernelT(MoleculesDeviceView             targets,
   constexpr int gsiBuffersPerBlock = 2;
 
   if constexpr (Algo == SubstructAlgorithm::GSI) {
-    constexpr int kMaxPartialsT = getMaxPartialsForSM<MaxQueryAtoms>(86, kThreadsPerBlock);
+    constexpr int kMaxPartialsT = getMaxPartialsForSM<MaxTargetAtoms, MaxQueryAtoms>(86, kThreadsPerBlock);
     __shared__ PartialMatchT<MaxQueryAtoms> gsiPartials[kMaxPartialsT * 2];
 
     PartialMatchT<MaxQueryAtoms>* blockOverflowA = overflowA + blockIdx.x * gsiBuffersPerBlock * overflowCapacity;
