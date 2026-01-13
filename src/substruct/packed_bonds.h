@@ -50,9 +50,10 @@ constexpr uint8_t kNoNeighbor = 0xFF;
  *   - bits [0-3]: bondType (0-15)
  *   - bit [4]: isInRing
  *   - bits [5-7]: unused
+ * padding: ensures 4-byte alignment for coalesced GPU memory access
  */
 template <int MaxBonds = kMaxBondsPerAtom>
-struct TargetAtomBondsT {
+struct alignas(4) TargetAtomBondsT {
   static constexpr int kMaxBonds = MaxBonds;
   uint8_t degree;
   uint8_t neighborIdx[MaxBonds];

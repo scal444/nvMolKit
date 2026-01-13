@@ -110,8 +110,8 @@ __host__ __device__ constexpr int computeMaxPartials(int sharedPerSM_KiB, int bl
   constexpr int kLabelMatrixBytes = (MaxTargetAtoms * MaxQueryAtoms) / 8;
   constexpr int kControlVarsBytes = 32;
   constexpr int kPartialMatchSize = sizeof(PartialMatchT<MaxQueryAtoms>);
-  constexpr int kTargetBondsBytes = MaxTargetAtoms * 17;  // sizeof(TargetAtomBonds) = 17
-  constexpr int kQueryBondsBytes = MaxQueryAtoms * 44;    // sizeof(QueryAtomBonds) = 44
+  constexpr int kTargetBondsBytes = MaxTargetAtoms * sizeof(TargetAtomBonds);
+  constexpr int kQueryBondsBytes = MaxQueryAtoms * sizeof(QueryAtomBonds);
   
   const int budgetBytes = (sharedPerSM_KiB * 1024) / blocksPerSM;
   const int fixedOverhead = kLabelMatrixBytes + kControlVarsBytes + kTargetBondsBytes + kQueryBondsBytes;
@@ -339,8 +339,12 @@ __global__ void substructMatchKernelT(MoleculesDeviceView                       
   const int numTargetAtoms = target.numAtoms;
   const int numQueryAtoms = query.numAtoms;
 
-  for (int i = tid; i < numTargetAtoms; i += numThreads) {
-    sharedTargetBonds[i] = target.targetAtomBonds[i];
+  const int totalTargetBytes = numTargetAtoms * sizeof(TargetAtomBonds);
+  const int totalTargetWords = (totalTargetBytes + 3) / 4;
+  const uint32_t* targetBondsSrc = reinterpret_cast<const uint32_t*>(target.targetAtomBonds);
+  uint32_t* targetBondsDst = reinterpret_cast<uint32_t*>(sharedTargetBonds);
+  for (int i = tid; i < totalTargetWords; i += numThreads) {
+    targetBondsDst[i] = targetBondsSrc[i];
   }
 
   constexpr int kQueryBondWords = sizeof(QueryAtomBonds) / sizeof(uint32_t);
@@ -509,8 +513,12 @@ __global__ void substructPaintKernelT(MoleculesDeviceView             targets,
   const int numTargetAtoms = target.numAtoms;
   const int numPatternAtoms = pattern.numAtoms;
 
-  for (int i = tid; i < numTargetAtoms; i += numThreads) {
-    sharedTargetBonds[i] = target.targetAtomBonds[i];
+  const int totalTargetBytes = numTargetAtoms * sizeof(TargetAtomBonds);
+  const int totalTargetWords = (totalTargetBytes + 3) / 4;
+  const uint32_t* targetBondsSrc = reinterpret_cast<const uint32_t*>(target.targetAtomBonds);
+  uint32_t* targetBondsDst = reinterpret_cast<uint32_t*>(sharedTargetBonds);
+  for (int i = tid; i < totalTargetWords; i += numThreads) {
+    targetBondsDst[i] = targetBondsSrc[i];
   }
 
   constexpr int kQueryBondWords = sizeof(QueryAtomBonds) / sizeof(uint32_t);
