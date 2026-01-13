@@ -48,11 +48,15 @@ __device__ __forceinline__ bool packedBondMatches(uint32_t queryMask, uint8_t ta
 }
 
 /**
- * @brief Check edge consistency using packed bond data.
+ * @brief Check edge consistency using packed bond data with templated loop unrolling.
+ *
+ * Storage is always max-sized (kMaxBondsPerAtom=8), but templates on the
+ * expected maximum bonds for tighter loop unrolling.
  *
  * For each already-mapped neighbor of queryAtom, verifies that the corresponding
  * edge exists in the target graph with compatible bond properties.
  *
+ * @tparam MaxBonds Maximum bonds per atom for loop unrolling (4, 6, or 8)
  * @param targetBonds Array of packed target atom bonds (indexed by atom)
  * @param queryBonds Packed bonds for the current query atom
  * @param mapping Current partial mapping (query atom -> target atom)
@@ -60,6 +64,7 @@ __device__ __forceinline__ bool packedBondMatches(uint32_t queryMask, uint8_t ta
  * @param targetAtom Candidate target atom to extend mapping with
  * @return true if edge consistency is satisfied
  */
+template <int MaxBonds = kMaxBondsPerAtom>
 __device__ __forceinline__ bool checkEdgeConsistencyPacked(
     const TargetAtomBonds* targetBonds,
     const QueryAtomBonds&  queryBonds,
@@ -67,9 +72,9 @@ __device__ __forceinline__ bool checkEdgeConsistencyPacked(
     int                    queryAtom,
     int                    targetAtom) {
 
-  const int              depth       = queryAtom;
-  const TargetAtomBonds& tb          = targetBonds[targetAtom];
-  const int              queryDegree = queryBonds.degree;
+  const int              depth        = queryAtom;
+  const TargetAtomBonds& tb           = targetBonds[targetAtom];
+  const int              queryDegree  = queryBonds.degree;
   const int              targetDegree = tb.degree;
 
   for (int i = 0; i < queryDegree; ++i) {
@@ -85,7 +90,7 @@ __device__ __forceinline__ bool checkEdgeConsistencyPacked(
     bool foundMatch = false;
 
     #pragma unroll
-    for (int j = 0; j < kMaxBondsPerAtom; ++j) {
+    for (int j = 0; j < MaxBonds; ++j) {
       if (j >= targetDegree) {
         break;
       }
@@ -106,4 +111,3 @@ __device__ __forceinline__ bool checkEdgeConsistencyPacked(
 }  // namespace nvMolKit
 
 #endif  // NVMOLKIT_PACKED_BONDS_DEVICE_CUH
-

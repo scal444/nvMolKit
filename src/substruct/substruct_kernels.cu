@@ -33,27 +33,29 @@ using LabelMatrixStorage = FlatBitVect<kLabelMatrixBits>;
 // Internal View Struct (passed to kernels by value)
 // =============================================================================
 
-struct SubstructMatchResultsDeviceView {
+template <std::size_t MaxQueryAtoms = kMaxQueryAtoms>
+struct SubstructMatchResultsDeviceViewT {
   int* matchCounts;
   int* reportedCounts;
   int* pairMatchStarts;
   int16_t* matchIndices;
   int numQueries;
   const int* queryAtomCounts;
-  PartialMatch* overflowBuffer;
+  PartialMatchT<MaxQueryAtoms>* overflowBuffer;
   int overflowEntriesPerBuffer;
   int overflowBuffersPerBlock;
   uint32_t* recursiveMatchBits;
   int maxTargetAtoms;
   uint32_t* labelMatrixBuffer;
+  std::size_t labelMatrixWords;
   int maxMatchesToFind;
   bool countOnly;
 
   __device__ __forceinline__ uint32_t* getLabelMatrixPtr(int batchLocalIdx) const {
-    return labelMatrixBuffer + batchLocalIdx * kLabelMatrixWords;
+    return labelMatrixBuffer + batchLocalIdx * labelMatrixWords;
   }
 
-  __device__ __forceinline__ PartialMatch* getOverflowBuffer(int bufferIdx = 0) const {
+  __device__ __forceinline__ PartialMatchT<MaxQueryAtoms>* getOverflowBuffer(int bufferIdx = 0) const {
     return overflowBuffer + (blockIdx.x * overflowBuffersPerBlock + bufferIdx) * overflowEntriesPerBuffer;
   }
 
@@ -72,6 +74,8 @@ struct SubstructMatchResultsDeviceView {
   }
 };
 
+using SubstructMatchResultsDeviceView = SubstructMatchResultsDeviceViewT<kMaxQueryAtoms>;
+
 // =============================================================================
 // Architecture-Specific Shared Memory Configuration
 // =============================================================================
@@ -79,7 +83,7 @@ struct SubstructMatchResultsDeviceView {
 using LabelMatrixView = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
 
 /// Shared memory per SM in KiB for each compute capability
-constexpr int getSharedMemPerSM_KiB(int sm) {
+__host__ __device__ constexpr int getSharedMemPerSM_KiB(int sm) {
   if (sm >= 120) return 128;   // SM 12.0+
   if (sm >= 100) return 228;   // SM 10.0+ (Blackwell)
   if (sm >= 90)  return 228;   // SM 9.0+ (Hopper)
@@ -88,7 +92,7 @@ constexpr int getSharedMemPerSM_KiB(int sm) {
 }
 
 /// Max threads per SM for each compute capability
-constexpr int getMaxThreadsPerSM(int sm) {
+__host__ __device__ constexpr int getMaxThreadsPerSM(int sm) {
   if (sm >= 90)  return 2048;  // Hopper+
   if (sm == 80)  return 2048;  // A100
   if (sm >= 86)  return 1536;  // Ada/consumer Ampere
@@ -96,16 +100,16 @@ constexpr int getMaxThreadsPerSM(int sm) {
 }
 
 /// Compute max blocks per SM given block size
-constexpr int getMaxBlocksPerSM(int sm, int blockSize) {
+__host__ __device__ constexpr int getMaxBlocksPerSM(int sm, int blockSize) {
   return getMaxThreadsPerSM(sm) / blockSize;
 }
 
 /// Compute max partials that fit in shared memory budget
-constexpr int computeMaxPartials(int sharedPerSM_KiB, int blocksPerSM) {
+template <std::size_t MaxQueryAtoms>
+__host__ __device__ constexpr int computeMaxPartials(int sharedPerSM_KiB, int blocksPerSM) {
   constexpr int kLabelMatrixBytes = 1024;
   constexpr int kControlVarsBytes = 32;
-  constexpr int kPartialMatchSize = sizeof(PartialMatch);
-  static_assert(kPartialMatchSize == 64, "PartialMatch size changed - update shared memory calculations");
+  constexpr int kPartialMatchSize = sizeof(PartialMatchT<MaxQueryAtoms>);
   
   const int budgetBytes = (sharedPerSM_KiB * 1024) / blocksPerSM;
   const int availableBytes = (budgetBytes * 9 / 10) - kLabelMatrixBytes - kControlVarsBytes;
@@ -114,20 +118,21 @@ constexpr int computeMaxPartials(int sharedPerSM_KiB, int blocksPerSM) {
 }
 
 /// Compute partials for a given SM architecture
-constexpr int getMaxPartialsForSM(int sm, int blockSize) {
-  return computeMaxPartials(getSharedMemPerSM_KiB(sm), getMaxBlocksPerSM(sm, blockSize));
+template <std::size_t MaxQueryAtoms>
+__host__ __device__ constexpr int getMaxPartialsForSM(int sm, int blockSize) {
+  return computeMaxPartials<MaxQueryAtoms>(getSharedMemPerSM_KiB(sm), getMaxBlocksPerSM(sm, blockSize));
 }
 
 // Compute at compile time based on __CUDA_ARCH__
 #if defined(__CUDA_ARCH__)
-constexpr int kMaxPartialsPerBlock = getMaxPartialsForSM(__CUDA_ARCH__ / 10, kThreadsPerBlock);
+constexpr int kMaxPartialsPerBlock = getMaxPartialsForSM<kMaxQueryAtoms>(__CUDA_ARCH__ / 10, kThreadsPerBlock);
 static_assert(getMaxThreadsPerSM(__CUDA_ARCH__ / 10) % kThreadsPerBlock == 0, 
               "kThreadsPerBlock must evenly divide max threads/SM");
 #else
-constexpr int kMaxPartialsPerBlock = getMaxPartialsForSM(86, kThreadsPerBlock);
+constexpr int kMaxPartialsPerBlock = getMaxPartialsForSM<kMaxQueryAtoms>(86, kThreadsPerBlock);
 #endif
 
-constexpr int kMaxPartialsPerBlockHost = getMaxPartialsForSM(86, kThreadsPerBlock);
+constexpr int kMaxPartialsPerBlockHost = getMaxPartialsForSM<kMaxQueryAtoms>(86, kThreadsPerBlock);
 static_assert(getMaxThreadsPerSM(86) % kThreadsPerBlock == 0,
               "kThreadsPerBlock must evenly divide max threads/SM");
 constexpr int kWarpsPerBlock = kThreadsPerBlock / 32;
@@ -150,47 +155,32 @@ inline bool& sharedMemCarveoutConfigured() {
 // Device Helper Functions
 // =============================================================================
 
-/**
- * @brief Compute label matrix and write to global memory.
- *
- * Core logic shared between labelMatrixKernel and labelMatrixPaintKernel.
- */
-__device__ __forceinline__ void computeLabelMatrixToGlobal(const MoleculeView&   target,
-                                                           const MoleculeView&   query,
-                                                           LabelMatrixStorage&   sharedLabelMatrix,
-                                                           uint32_t*             globalOut,
-                                                           const uint32_t*       pairRecursiveBits) {
-  LabelMatrixView labelMatrix(&sharedLabelMatrix);
-
-  populateLabelMatrixOptimized<kMaxTargetAtoms, kMaxQueryAtoms>(target, query, labelMatrix, pairRecursiveBits);
-  __syncthreads();
-
-  const uint32_t* sharedIn   = sharedLabelMatrix.cbegin();
-  const int       tid        = threadIdx.x;
-  const int       numThreads = blockDim.x;
-
-  for (std::size_t i = tid; i < kLabelMatrixWords; i += numThreads) {
-    globalOut[i] = sharedIn[i];
-  }
-}
-
 // =============================================================================
 // Kernel Definitions
 // =============================================================================
 
 /**
- * @brief Kernel for batch label matrix computation.
+ * @brief Templated kernel for batch label matrix computation.
  *
  * One block per (target, query) pair. Computes label matrix and writes to global buffer.
+ *
+ * @tparam MaxTargetAtoms Maximum target atoms for label matrix sizing
+ * @tparam MaxQueryAtoms Maximum query atoms for label matrix sizing
  */
-__global__ void labelMatrixKernel(MoleculesDeviceView targets,
-                                  MoleculesDeviceView queries,
-                                  const int*          pairIndices,
-                                  int                 numQueries,
-                                  uint32_t*           labelMatrixBuffer,
-                                  const uint32_t*     recursiveMatchBits,
-                                  int                 maxTargetAtoms,
-                                  const int*          batchLocalIndices) {
+template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
+__global__ void labelMatrixKernelT(MoleculesDeviceView targets,
+                                   MoleculesDeviceView queries,
+                                   const int*          pairIndices,
+                                   int                 numQueries,
+                                   uint32_t*           labelMatrixBuffer,
+                                   const uint32_t*     recursiveMatchBits,
+                                   int                 maxTargetAtoms,
+                                   const int*          batchLocalIndices) {
+  constexpr std::size_t kLabelMatrixBitsT = MaxTargetAtoms * MaxQueryAtoms;
+  constexpr std::size_t kLabelMatrixWordsT = kLabelMatrixBitsT / 32;
+  using LabelMatrixStorageT = FlatBitVect<kLabelMatrixBitsT>;
+  using LabelMatrixViewT = BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>;
+
   const int launchIdx     = blockIdx.x;
   const int batchLocalIdx = batchLocalIndices ? batchLocalIndices[launchIdx] : launchIdx;
   const int pairIdx       = pairIndices[launchIdx];
@@ -204,32 +194,51 @@ __global__ void labelMatrixKernel(MoleculesDeviceView targets,
   const MoleculeView target = getMolecule(targets, targetIdx);
   const MoleculeView query  = getMolecule(queries, queryIdx);
 
-  __shared__ LabelMatrixStorage sharedLabelMatrix;
+  __shared__ LabelMatrixStorageT sharedLabelMatrix;
+  LabelMatrixViewT labelMatrix(&sharedLabelMatrix);
 
   const uint32_t* pairRecursiveBits = recursiveMatchBits
                                         ? &recursiveMatchBits[batchLocalIdx * maxTargetAtoms]
                                         : nullptr;
-  uint32_t* globalOut = labelMatrixBuffer + batchLocalIdx * kLabelMatrixWords;
 
-  computeLabelMatrixToGlobal(target, query, sharedLabelMatrix, globalOut, pairRecursiveBits);
+  populateLabelMatrixOptimized<MaxTargetAtoms, MaxQueryAtoms>(target, query, labelMatrix, pairRecursiveBits);
+  __syncthreads();
+
+  const uint32_t* sharedIn   = sharedLabelMatrix.cbegin();
+  uint32_t*       globalOut  = labelMatrixBuffer + batchLocalIdx * kLabelMatrixWordsT;
+  const int       tid        = threadIdx.x;
+  const int       numThreads = blockDim.x;
+
+  for (std::size_t i = tid; i < kLabelMatrixWordsT; i += numThreads) {
+    globalOut[i] = sharedIn[i];
+  }
 }
 
 /**
- * @brief Kernel for label matrix computation for recursive pattern preprocessing.
+ * @brief Templated kernel for label matrix computation for recursive pattern preprocessing.
  *
  * Block indexing: blockIdx.x = localTargetIdx * numPatterns + localPatternIdx
+ *
+ * @tparam MaxTargetAtoms Maximum target atoms for label matrix sizing
+ * @tparam MaxQueryAtoms Maximum query atoms for label matrix sizing
  */
-__global__ void labelMatrixPaintKernel(MoleculesDeviceView        targets,
-                                       MoleculesDeviceView        patterns,
-                                       const BatchedPatternEntry* patternEntries,
-                                       int                        numPatterns,
-                                       int                        numQueries,
-                                       int                        miniBatchPairOffset,
-                                       int                        miniBatchSize,
-                                       uint32_t*                  labelMatrixBuffer,
-                                       int                        firstTargetIdx,
-                                       const uint32_t*            recursiveMatchBits,
-                                       int                        maxTargetAtoms) {
+template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
+__global__ void labelMatrixPaintKernelT(MoleculesDeviceView        targets,
+                                        MoleculesDeviceView        patterns,
+                                        const BatchedPatternEntry* patternEntries,
+                                        int                        numPatterns,
+                                        int                        numQueries,
+                                        int                        miniBatchPairOffset,
+                                        int                        miniBatchSize,
+                                        uint32_t*                  labelMatrixBuffer,
+                                        int                        firstTargetIdx,
+                                        const uint32_t*            recursiveMatchBits,
+                                        int                        maxTargetAtoms) {
+  constexpr std::size_t kLabelMatrixBitsT = MaxTargetAtoms * MaxQueryAtoms;
+  constexpr std::size_t kLabelMatrixWordsT = kLabelMatrixBitsT / 32;
+  using LabelMatrixStorageT = FlatBitVect<kLabelMatrixBitsT>;
+  using LabelMatrixViewT = BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>;
+
   const int localTargetIdx   = blockIdx.x / numPatterns;
   const int targetIdx        = firstTargetIdx + localTargetIdx;
   const int localPatternIdx  = blockIdx.x % numPatterns;
@@ -252,31 +261,45 @@ __global__ void labelMatrixPaintKernel(MoleculesDeviceView        targets,
   const MoleculeView target  = getMolecule(targets, targetIdx);
   const MoleculeView pattern = getMolecule(patterns, patternMolIdx);
 
-  __shared__ LabelMatrixStorage sharedLabelMatrix;
-
-  uint32_t* globalOut = labelMatrixBuffer + blockIdx.x * kLabelMatrixWords;
+  __shared__ LabelMatrixStorageT sharedLabelMatrix;
+  LabelMatrixViewT labelMatrix(&sharedLabelMatrix);
 
   const uint32_t* pairBits = (recursiveMatchBits != nullptr)
                            ? recursiveMatchBits + batchLocalPairIdx * maxTargetAtoms
                            : nullptr;
 
-  computeLabelMatrixToGlobal(target, pattern, sharedLabelMatrix, globalOut, pairBits);
+  populateLabelMatrixOptimized<MaxTargetAtoms, MaxQueryAtoms>(target, pattern, labelMatrix, pairBits);
+  __syncthreads();
+
+  const uint32_t* sharedIn   = sharedLabelMatrix.cbegin();
+  uint32_t*       globalOut  = labelMatrixBuffer + blockIdx.x * kLabelMatrixWordsT;
+  const int       tid        = threadIdx.x;
+  const int       numThreads = blockDim.x;
+
+  for (std::size_t i = tid; i < kLabelMatrixWordsT; i += numThreads) {
+    globalOut[i] = sharedIn[i];
+  }
 }
 
 /**
- * @brief Kernel for batch substructure matching.
+ * @brief Templated kernel for batch substructure matching.
  *
  * One block per (target, query) pair. Loads pre-computed label matrix from global
- * memory, then dispatches to algorithm-specific search based on template parameter.
+ * memory, then dispatches to algorithm-specific search based on template parameters.
+ *
+ * @tparam MaxTargetAtoms Maximum target atoms for label matrix sizing
+ * @tparam MaxQueryAtoms Maximum query atoms for label matrix and partial match sizing
+ * @tparam MaxBondsPerAtom Maximum bonds per atom for edge consistency loop unrolling
+ * @tparam Algo Algorithm to use (VF2 or GSI)
  */
-template <SubstructAlgorithm Algo>
-__global__ void substructMatchKernel(MoleculesDeviceView             targets,
-                                     MoleculesDeviceView             queries,
-                                     SubstructMatchResultsDeviceView results,
-                                     const int*                      pairIndices,
-                                     int                             numQueries,
-                                     const int*                      batchLocalIndices,
-                                     DeviceTimingsData*              timings) {
+template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms, int MaxBondsPerAtom, SubstructAlgorithm Algo>
+__global__ void substructMatchKernelT(MoleculesDeviceView                           targets,
+                                      MoleculesDeviceView                           queries,
+                                      SubstructMatchResultsDeviceViewT<MaxQueryAtoms> results,
+                                      const int*                                    pairIndices,
+                                      int                                           numQueries,
+                                      const int*                                    batchLocalIndices,
+                                      DeviceTimingsData*                            timings) {
   const int launchIdx     = blockIdx.x;
   const int batchLocalIdx = batchLocalIndices ? batchLocalIndices[launchIdx] : launchIdx;
   const int pairIdx       = pairIndices[launchIdx];
@@ -290,15 +313,20 @@ __global__ void substructMatchKernel(MoleculesDeviceView             targets,
   const MoleculeView target = getMolecule(targets, targetIdx);
   const MoleculeView query  = getMolecule(queries, queryIdx);
 
-  __shared__ LabelMatrixStorage sharedLabelMatrix;
-  LabelMatrixView               labelMatrix(&sharedLabelMatrix);
+  constexpr std::size_t kLabelMatrixBitsT = MaxTargetAtoms * MaxQueryAtoms;
+  constexpr std::size_t kLabelMatrixWordsT = kLabelMatrixBitsT / 32;
+  using LabelMatrixStorageT = FlatBitVect<kLabelMatrixBitsT>;
+  using LabelMatrixViewT = BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>;
+
+  __shared__ LabelMatrixStorageT sharedLabelMatrix;
+  LabelMatrixViewT labelMatrix(&sharedLabelMatrix);
 
   const uint32_t* globalIn   = results.getLabelMatrixPtr(batchLocalIdx);
   uint32_t*       sharedOut  = sharedLabelMatrix.begin();
   const int       tid        = threadIdx.x;
   const int       numThreads = blockDim.x;
 
-  for (std::size_t i = tid; i < kLabelMatrixWords; i += numThreads) {
+  for (std::size_t i = tid; i < kLabelMatrixWordsT; i += numThreads) {
     sharedOut[i] = globalIn[i];
   }
   __syncthreads();
@@ -345,7 +373,7 @@ __global__ void substructMatchKernel(MoleculesDeviceView             targets,
     const int warpId   = tile32.meta_group_rank();
     const int numWarps = tile32.meta_group_size();
 
-    __shared__ VF2State vf2States[kWarpsPerBlock];
+    __shared__ VF2StateT<MaxQueryAtoms> vf2States[kWarpsPerBlock];
 
     if (tile32.thread_rank() == 0) {
       vf2States[warpId].init();
@@ -353,41 +381,24 @@ __global__ void substructMatchKernel(MoleculesDeviceView             targets,
     __syncthreads();
 
     for (int startT = warpId; startT < target.numAtoms; startT += numWarps) {
-      vf2SearchGPU<kMaxTargetAtoms, kMaxQueryAtoms>(target,
-                                                    query,
-                                                    labelMatrix,
-                                                    vf2States[warpId],
-                                                    startT,
-                                                    &sharedMatchCount,
-                                                    &sharedReportedCount,
-                                                    results.matchIndices,
-                                                    maxMatches,
-                                                    matchOffset,
-                                                    maxMatchesToFind,
-                                                    countOnly);
+      vf2SearchGPU<MaxTargetAtoms, MaxQueryAtoms, MaxBondsPerAtom>(
+          target, query, labelMatrix, vf2States[warpId], startT,
+          &sharedMatchCount, &sharedReportedCount, results.matchIndices,
+          maxMatches, matchOffset, maxMatchesToFind, countOnly);
     }
 
   } else if constexpr (Algo == SubstructAlgorithm::GSI) {
-    __shared__ PartialMatch gsiPartials[kMaxPartialsPerBlock * 2];
+    constexpr int kMaxPartialsT = getMaxPartialsForSM<MaxQueryAtoms>(86, kThreadsPerBlock);
+    __shared__ PartialMatchT<MaxQueryAtoms> gsiPartials[kMaxPartialsT * 2];
 
-    gsiBFSSearchGPU<kMaxTargetAtoms, kMaxQueryAtoms>(target,
-                                                     query,
-                                                     labelMatrix,
-                                                     gsiPartials,
-                                                     kMaxPartialsPerBlock,
-                                                     results.getOverflowBuffer(0),
-                                                     results.getOverflowBuffer(1),
-                                                     results.getOverflowCapacity(),
-                                                     &sharedMatchCount,
-                                                     &sharedReportedCount,
-                                                     results.matchIndices,
-                                                     maxMatches,
-                                                     matchOffset,
-                                                     {},
-                                                     maxMatchesToFind,
-                                                     countOnly,
-                                                     timings);
-
+    gsiBFSSearchGPU<MaxTargetAtoms, MaxQueryAtoms, MaxBondsPerAtom>(
+        target, query, labelMatrix,
+        gsiPartials, kMaxPartialsT,
+        results.getOverflowBuffer(0), results.getOverflowBuffer(1),
+        results.getOverflowCapacity(),
+        &sharedMatchCount, &sharedReportedCount,
+        results.matchIndices, maxMatches, matchOffset,
+        {}, maxMatchesToFind, countOnly, timings);
   }
 
   __syncthreads();
@@ -403,24 +414,30 @@ __global__ void substructMatchKernel(MoleculesDeviceView             targets,
  *
  * Instead of storing match mappings, directly paints recursive match bits
  * into the output buffer.
+ *
+ * @tparam MaxTargetAtoms Maximum target atoms for label matrix sizing
+ * @tparam MaxQueryAtoms Maximum query atoms for label matrix and partial match sizing
+ * @tparam MaxBondsPerAtom Maximum bonds per atom for edge consistency loop unrolling
+ * @tparam Algo Algorithm to use (VF2 or GSI)
  */
-template <SubstructAlgorithm Algo>
-__global__ void substructPaintKernel(MoleculesDeviceView         targets,
-                                     MoleculesDeviceView         patterns,
-                                     const BatchedPatternEntry*  patternEntries,
-                                     int                         numPatterns,
-                                     uint32_t*                   outputRecursiveBits,
-                                     int                         maxTargetAtoms,
-                                     int                         outputNumQueries,
-                                     int                         defaultPatternId,
-                                     int                         defaultMainQueryIdx,
-                                     int                         miniBatchPairOffset,
-                                     int                         miniBatchSize,
-                                     PartialMatch*               overflowA,
-                                     PartialMatch*               overflowB,
-                                     int                         overflowCapacity,
-                                     const uint32_t*             labelMatrixBuffer,
-                                     int                         firstTargetIdx) {
+template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms, int MaxBondsPerAtom, SubstructAlgorithm Algo>
+__global__ void substructPaintKernelT(MoleculesDeviceView             targets,
+                                      MoleculesDeviceView             patterns,
+                                      const BatchedPatternEntry*      patternEntries,
+                                      int                             numPatterns,
+                                      uint32_t*                       outputRecursiveBits,
+                                      int                             maxTargetAtoms,
+                                      int                             outputNumQueries,
+                                      int                             defaultPatternId,
+                                      int                             defaultMainQueryIdx,
+                                      int                             miniBatchPairOffset,
+                                      int                             miniBatchSize,
+                                      PartialMatchT<MaxQueryAtoms>*   overflowA,
+                                      PartialMatchT<MaxQueryAtoms>*   overflowB,
+                                      int                             overflowCapacity,
+                                      const uint32_t*                 labelMatrixBuffer,
+                                      std::size_t                     labelMatrixWords,
+                                      int                             firstTargetIdx) {
   const int localTargetIdx   = blockIdx.x / numPatterns;
   const int targetIdx        = firstTargetIdx + localTargetIdx;
   const int localPatternIdx  = blockIdx.x % numPatterns;
@@ -444,15 +461,20 @@ __global__ void substructPaintKernel(MoleculesDeviceView         targets,
   const MoleculeView target  = getMolecule(targets, targetIdx);
   const MoleculeView pattern = getMolecule(patterns, patternMolIdx);
 
-  __shared__ LabelMatrixStorage sharedLabelMatrix;
-  LabelMatrixView               labelMatrix(&sharedLabelMatrix);
+  constexpr std::size_t kLabelMatrixBitsT = MaxTargetAtoms * MaxQueryAtoms;
+  constexpr std::size_t kLabelMatrixWordsT = kLabelMatrixBitsT / 32;
+  using LabelMatrixStorageT = FlatBitVect<kLabelMatrixBitsT>;
+  using LabelMatrixViewT = BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>;
 
-  const uint32_t* globalIn   = labelMatrixBuffer + blockIdx.x * kLabelMatrixWords;
+  __shared__ LabelMatrixStorageT sharedLabelMatrix;
+  LabelMatrixViewT labelMatrix(&sharedLabelMatrix);
+
+  const uint32_t* globalIn   = labelMatrixBuffer + blockIdx.x * labelMatrixWords;
   uint32_t*       sharedOut  = sharedLabelMatrix.begin();
   const int       tid        = threadIdx.x;
   const int       numThreads = blockDim.x;
 
-  for (std::size_t i = tid; i < kLabelMatrixWords; i += numThreads) {
+  for (std::size_t i = tid; i < kLabelMatrixWordsT; i += numThreads) {
     sharedOut[i] = globalIn[i];
   }
   __syncthreads();
@@ -475,14 +497,15 @@ __global__ void substructPaintKernel(MoleculesDeviceView         targets,
   constexpr int gsiBuffersPerBlock = 2;
 
   if constexpr (Algo == SubstructAlgorithm::GSI) {
-    __shared__ PartialMatch gsiPartials[kMaxPartialsPerBlock * 2];
+    constexpr int kMaxPartialsT = getMaxPartialsForSM<MaxQueryAtoms>(86, kThreadsPerBlock);
+    __shared__ PartialMatchT<MaxQueryAtoms> gsiPartials[kMaxPartialsT * 2];
 
-    PartialMatch* blockOverflowA = overflowA + blockIdx.x * gsiBuffersPerBlock * overflowCapacity;
-    PartialMatch* blockOverflowB = blockOverflowA + overflowCapacity;
+    PartialMatchT<MaxQueryAtoms>* blockOverflowA = overflowA + blockIdx.x * gsiBuffersPerBlock * overflowCapacity;
+    PartialMatchT<MaxQueryAtoms>* blockOverflowB = blockOverflowA + overflowCapacity;
 
-    gsiBFSSearchGPU<kMaxTargetAtoms, kMaxQueryAtoms, SubstructOutputMode::PaintBits>(
+    gsiBFSSearchGPU<MaxTargetAtoms, MaxQueryAtoms, MaxBondsPerAtom, SubstructOutputMode::PaintBits>(
       target, pattern, labelMatrix,
-      gsiPartials, kMaxPartialsPerBlock,
+      gsiPartials, kMaxPartialsT,
       blockOverflowA, blockOverflowB, overflowCapacity,
       &sharedMatchCount, &sharedReportedCount,
       nullptr, 0, 0,
@@ -490,13 +513,112 @@ __global__ void substructPaintKernel(MoleculesDeviceView         targets,
   }
 }
 
+// =============================================================================
+// Explicit Template Instantiations for All 24 Valid Configurations
+// =============================================================================
+
+// Helper macro to instantiate both VF2 and GSI for a given configuration
+#define INSTANTIATE_SUBSTRUCT_KERNELS(MaxT, MaxQ, MaxB) \
+  template __global__ void substructMatchKernelT<MaxT, MaxQ, MaxB, SubstructAlgorithm::VF2>( \
+      MoleculesDeviceView, MoleculesDeviceView, SubstructMatchResultsDeviceViewT<MaxQ>, \
+      const int*, int, const int*, DeviceTimingsData*); \
+  template __global__ void substructMatchKernelT<MaxT, MaxQ, MaxB, SubstructAlgorithm::GSI>( \
+      MoleculesDeviceView, MoleculesDeviceView, SubstructMatchResultsDeviceViewT<MaxQ>, \
+      const int*, int, const int*, DeviceTimingsData*); \
+  template __global__ void substructPaintKernelT<MaxT, MaxQ, MaxB, SubstructAlgorithm::GSI>( \
+      MoleculesDeviceView, MoleculesDeviceView, const BatchedPatternEntry*, int, uint32_t*, int, int, \
+      int, int, int, int, PartialMatchT<MaxQ>*, PartialMatchT<MaxQ>*, int, const uint32_t*, std::size_t, int);
+
+// Target 32, Query 16
+INSTANTIATE_SUBSTRUCT_KERNELS(32, 16, 4)
+INSTANTIATE_SUBSTRUCT_KERNELS(32, 16, 6)
+INSTANTIATE_SUBSTRUCT_KERNELS(32, 16, 8)
+
+// Target 32, Query 32
+INSTANTIATE_SUBSTRUCT_KERNELS(32, 32, 4)
+INSTANTIATE_SUBSTRUCT_KERNELS(32, 32, 6)
+INSTANTIATE_SUBSTRUCT_KERNELS(32, 32, 8)
+
+// Target 64, Query 16
+INSTANTIATE_SUBSTRUCT_KERNELS(64, 16, 4)
+INSTANTIATE_SUBSTRUCT_KERNELS(64, 16, 6)
+INSTANTIATE_SUBSTRUCT_KERNELS(64, 16, 8)
+
+// Target 64, Query 32
+INSTANTIATE_SUBSTRUCT_KERNELS(64, 32, 4)
+INSTANTIATE_SUBSTRUCT_KERNELS(64, 32, 6)
+INSTANTIATE_SUBSTRUCT_KERNELS(64, 32, 8)
+
+// Target 64, Query 64
+INSTANTIATE_SUBSTRUCT_KERNELS(64, 64, 4)
+INSTANTIATE_SUBSTRUCT_KERNELS(64, 64, 6)
+INSTANTIATE_SUBSTRUCT_KERNELS(64, 64, 8)
+
+// Target 128, Query 16
+INSTANTIATE_SUBSTRUCT_KERNELS(128, 16, 4)
+INSTANTIATE_SUBSTRUCT_KERNELS(128, 16, 6)
+INSTANTIATE_SUBSTRUCT_KERNELS(128, 16, 8)
+
+// Target 128, Query 32
+INSTANTIATE_SUBSTRUCT_KERNELS(128, 32, 4)
+INSTANTIATE_SUBSTRUCT_KERNELS(128, 32, 6)
+INSTANTIATE_SUBSTRUCT_KERNELS(128, 32, 8)
+
+// Target 128, Query 64
+INSTANTIATE_SUBSTRUCT_KERNELS(128, 64, 4)
+INSTANTIATE_SUBSTRUCT_KERNELS(128, 64, 6)
+INSTANTIATE_SUBSTRUCT_KERNELS(128, 64, 8)
+
+#undef INSTANTIATE_SUBSTRUCT_KERNELS
+
+// Label matrix kernel instantiations (one per target/query combo, no MaxBonds needed)
+#define INSTANTIATE_LABEL_MATRIX_KERNEL(MaxT, MaxQ) \
+  template __global__ void labelMatrixKernelT<MaxT, MaxQ>( \
+      MoleculesDeviceView, MoleculesDeviceView, const int*, int, uint32_t*, \
+      const uint32_t*, int, const int*); \
+  template __global__ void labelMatrixPaintKernelT<MaxT, MaxQ>( \
+      MoleculesDeviceView, MoleculesDeviceView, const BatchedPatternEntry*, int, int, \
+      int, int, uint32_t*, int, const uint32_t*, int);
+
+INSTANTIATE_LABEL_MATRIX_KERNEL(32, 16)
+INSTANTIATE_LABEL_MATRIX_KERNEL(32, 32)
+INSTANTIATE_LABEL_MATRIX_KERNEL(64, 16)
+INSTANTIATE_LABEL_MATRIX_KERNEL(64, 32)
+INSTANTIATE_LABEL_MATRIX_KERNEL(64, 64)
+INSTANTIATE_LABEL_MATRIX_KERNEL(128, 16)
+INSTANTIATE_LABEL_MATRIX_KERNEL(128, 32)
+INSTANTIATE_LABEL_MATRIX_KERNEL(128, 64)
+
+#undef INSTANTIATE_LABEL_MATRIX_KERNEL
+
 }  // anonymous namespace
 
 // =============================================================================
 // Public Launch Wrapper Implementations
 // =============================================================================
 
-void launchLabelMatrixKernel(MoleculesDeviceView targets,
+namespace {
+
+template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
+void launchLabelMatrixKernelForConfig(MoleculesDeviceView targets,
+                                      MoleculesDeviceView queries,
+                                      const int*          pairIndices,
+                                      int                 numPairs,
+                                      int                 numQueries,
+                                      uint32_t*           labelMatrixBuffer,
+                                      const uint32_t*     recursiveMatchBits,
+                                      int                 maxTargetAtoms,
+                                      const int*          batchLocalIndices,
+                                      cudaStream_t        stream) {
+  labelMatrixKernelT<MaxTargetAtoms, MaxQueryAtoms><<<numPairs, kThreadsPerBlock, 0, stream>>>(
+      targets, queries, pairIndices, numQueries, labelMatrixBuffer,
+      recursiveMatchBits, maxTargetAtoms, batchLocalIndices);
+}
+
+}  // namespace
+
+void launchLabelMatrixKernel(SubstructTemplateConfig config,
+                             MoleculesDeviceView targets,
                              MoleculesDeviceView queries,
                              const int*          pairIndices,
                              int                 numPairs,
@@ -506,12 +628,69 @@ void launchLabelMatrixKernel(MoleculesDeviceView targets,
                              int                 maxTargetAtoms,
                              const int*          batchLocalIndices,
                              cudaStream_t        stream) {
-  labelMatrixKernel<<<numPairs, kThreadsPerBlock, 0, stream>>>(
-      targets, queries, pairIndices, numQueries, labelMatrixBuffer,
-      recursiveMatchBits, maxTargetAtoms, batchLocalIndices);
+  switch (config) {
+    case SubstructTemplateConfig::Config_T32_Q16_B4:
+    case SubstructTemplateConfig::Config_T32_Q16_B6:
+    case SubstructTemplateConfig::Config_T32_Q16_B8:
+      launchLabelMatrixKernelForConfig<32, 16>(targets, queries, pairIndices, numPairs, numQueries, labelMatrixBuffer, recursiveMatchBits, maxTargetAtoms, batchLocalIndices, stream); break;
+    case SubstructTemplateConfig::Config_T32_Q32_B4:
+    case SubstructTemplateConfig::Config_T32_Q32_B6:
+    case SubstructTemplateConfig::Config_T32_Q32_B8:
+      launchLabelMatrixKernelForConfig<32, 32>(targets, queries, pairIndices, numPairs, numQueries, labelMatrixBuffer, recursiveMatchBits, maxTargetAtoms, batchLocalIndices, stream); break;
+    case SubstructTemplateConfig::Config_T64_Q16_B4:
+    case SubstructTemplateConfig::Config_T64_Q16_B6:
+    case SubstructTemplateConfig::Config_T64_Q16_B8:
+      launchLabelMatrixKernelForConfig<64, 16>(targets, queries, pairIndices, numPairs, numQueries, labelMatrixBuffer, recursiveMatchBits, maxTargetAtoms, batchLocalIndices, stream); break;
+    case SubstructTemplateConfig::Config_T64_Q32_B4:
+    case SubstructTemplateConfig::Config_T64_Q32_B6:
+    case SubstructTemplateConfig::Config_T64_Q32_B8:
+      launchLabelMatrixKernelForConfig<64, 32>(targets, queries, pairIndices, numPairs, numQueries, labelMatrixBuffer, recursiveMatchBits, maxTargetAtoms, batchLocalIndices, stream); break;
+    case SubstructTemplateConfig::Config_T64_Q64_B4:
+    case SubstructTemplateConfig::Config_T64_Q64_B6:
+    case SubstructTemplateConfig::Config_T64_Q64_B8:
+      launchLabelMatrixKernelForConfig<64, 64>(targets, queries, pairIndices, numPairs, numQueries, labelMatrixBuffer, recursiveMatchBits, maxTargetAtoms, batchLocalIndices, stream); break;
+    case SubstructTemplateConfig::Config_T128_Q16_B4:
+    case SubstructTemplateConfig::Config_T128_Q16_B6:
+    case SubstructTemplateConfig::Config_T128_Q16_B8:
+      launchLabelMatrixKernelForConfig<128, 16>(targets, queries, pairIndices, numPairs, numQueries, labelMatrixBuffer, recursiveMatchBits, maxTargetAtoms, batchLocalIndices, stream); break;
+    case SubstructTemplateConfig::Config_T128_Q32_B4:
+    case SubstructTemplateConfig::Config_T128_Q32_B6:
+    case SubstructTemplateConfig::Config_T128_Q32_B8:
+      launchLabelMatrixKernelForConfig<128, 32>(targets, queries, pairIndices, numPairs, numQueries, labelMatrixBuffer, recursiveMatchBits, maxTargetAtoms, batchLocalIndices, stream); break;
+    case SubstructTemplateConfig::Config_T128_Q64_B4:
+    case SubstructTemplateConfig::Config_T128_Q64_B6:
+    case SubstructTemplateConfig::Config_T128_Q64_B8:
+    default:
+      launchLabelMatrixKernelForConfig<128, 64>(targets, queries, pairIndices, numPairs, numQueries, labelMatrixBuffer, recursiveMatchBits, maxTargetAtoms, batchLocalIndices, stream); break;
+  }
 }
 
-void launchLabelMatrixPaintKernel(MoleculesDeviceView        targets,
+namespace {
+
+template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
+void launchLabelMatrixPaintKernelForConfig(MoleculesDeviceView        targets,
+                                           MoleculesDeviceView        patterns,
+                                           const BatchedPatternEntry* patternEntries,
+                                           int                        numPatterns,
+                                           int                        numBlocks,
+                                           int                        numQueries,
+                                           int                        miniBatchPairOffset,
+                                           int                        miniBatchSize,
+                                           uint32_t*                  labelMatrixBuffer,
+                                           int                        firstTargetIdx,
+                                           const uint32_t*            recursiveMatchBits,
+                                           int                        maxTargetAtoms,
+                                           cudaStream_t               stream) {
+  labelMatrixPaintKernelT<MaxTargetAtoms, MaxQueryAtoms><<<numBlocks, kThreadsPerBlock, 0, stream>>>(
+      targets, patterns, patternEntries, numPatterns, numQueries,
+      miniBatchPairOffset, miniBatchSize, labelMatrixBuffer, firstTargetIdx,
+      recursiveMatchBits, maxTargetAtoms);
+}
+
+}  // namespace
+
+void launchLabelMatrixPaintKernel(SubstructTemplateConfig    config,
+                                  MoleculesDeviceView        targets,
                                   MoleculesDeviceView        patterns,
                                   const BatchedPatternEntry* patternEntries,
                                   int                        numPatterns,
@@ -524,51 +703,87 @@ void launchLabelMatrixPaintKernel(MoleculesDeviceView        targets,
                                   const uint32_t*            recursiveMatchBits,
                                   int                        maxTargetAtoms,
                                   cudaStream_t               stream) {
-  labelMatrixPaintKernel<<<numBlocks, kThreadsPerBlock, 0, stream>>>(
-      targets, patterns, patternEntries, numPatterns, numQueries,
-      miniBatchPairOffset, miniBatchSize, labelMatrixBuffer, firstTargetIdx,
-      recursiveMatchBits, maxTargetAtoms);
+  switch (config) {
+    case SubstructTemplateConfig::Config_T32_Q16_B4:
+    case SubstructTemplateConfig::Config_T32_Q16_B6:
+    case SubstructTemplateConfig::Config_T32_Q16_B8:
+      launchLabelMatrixPaintKernelForConfig<32, 16>(targets, patterns, patternEntries, numPatterns, numBlocks, numQueries, miniBatchPairOffset, miniBatchSize, labelMatrixBuffer, firstTargetIdx, recursiveMatchBits, maxTargetAtoms, stream); break;
+    case SubstructTemplateConfig::Config_T32_Q32_B4:
+    case SubstructTemplateConfig::Config_T32_Q32_B6:
+    case SubstructTemplateConfig::Config_T32_Q32_B8:
+      launchLabelMatrixPaintKernelForConfig<32, 32>(targets, patterns, patternEntries, numPatterns, numBlocks, numQueries, miniBatchPairOffset, miniBatchSize, labelMatrixBuffer, firstTargetIdx, recursiveMatchBits, maxTargetAtoms, stream); break;
+    case SubstructTemplateConfig::Config_T64_Q16_B4:
+    case SubstructTemplateConfig::Config_T64_Q16_B6:
+    case SubstructTemplateConfig::Config_T64_Q16_B8:
+      launchLabelMatrixPaintKernelForConfig<64, 16>(targets, patterns, patternEntries, numPatterns, numBlocks, numQueries, miniBatchPairOffset, miniBatchSize, labelMatrixBuffer, firstTargetIdx, recursiveMatchBits, maxTargetAtoms, stream); break;
+    case SubstructTemplateConfig::Config_T64_Q32_B4:
+    case SubstructTemplateConfig::Config_T64_Q32_B6:
+    case SubstructTemplateConfig::Config_T64_Q32_B8:
+      launchLabelMatrixPaintKernelForConfig<64, 32>(targets, patterns, patternEntries, numPatterns, numBlocks, numQueries, miniBatchPairOffset, miniBatchSize, labelMatrixBuffer, firstTargetIdx, recursiveMatchBits, maxTargetAtoms, stream); break;
+    case SubstructTemplateConfig::Config_T64_Q64_B4:
+    case SubstructTemplateConfig::Config_T64_Q64_B6:
+    case SubstructTemplateConfig::Config_T64_Q64_B8:
+      launchLabelMatrixPaintKernelForConfig<64, 64>(targets, patterns, patternEntries, numPatterns, numBlocks, numQueries, miniBatchPairOffset, miniBatchSize, labelMatrixBuffer, firstTargetIdx, recursiveMatchBits, maxTargetAtoms, stream); break;
+    case SubstructTemplateConfig::Config_T128_Q16_B4:
+    case SubstructTemplateConfig::Config_T128_Q16_B6:
+    case SubstructTemplateConfig::Config_T128_Q16_B8:
+      launchLabelMatrixPaintKernelForConfig<128, 16>(targets, patterns, patternEntries, numPatterns, numBlocks, numQueries, miniBatchPairOffset, miniBatchSize, labelMatrixBuffer, firstTargetIdx, recursiveMatchBits, maxTargetAtoms, stream); break;
+    case SubstructTemplateConfig::Config_T128_Q32_B4:
+    case SubstructTemplateConfig::Config_T128_Q32_B6:
+    case SubstructTemplateConfig::Config_T128_Q32_B8:
+      launchLabelMatrixPaintKernelForConfig<128, 32>(targets, patterns, patternEntries, numPatterns, numBlocks, numQueries, miniBatchPairOffset, miniBatchSize, labelMatrixBuffer, firstTargetIdx, recursiveMatchBits, maxTargetAtoms, stream); break;
+    case SubstructTemplateConfig::Config_T128_Q64_B4:
+    case SubstructTemplateConfig::Config_T128_Q64_B6:
+    case SubstructTemplateConfig::Config_T128_Q64_B8:
+    default:
+      launchLabelMatrixPaintKernelForConfig<128, 64>(targets, patterns, patternEntries, numPatterns, numBlocks, numQueries, miniBatchPairOffset, miniBatchSize, labelMatrixBuffer, firstTargetIdx, recursiveMatchBits, maxTargetAtoms, stream); break;
+  }
 }
 
-void launchSubstructMatchKernel(SubstructAlgorithm             algorithm,
-                                MoleculesDeviceView            targets,
-                                MoleculesDeviceView            queries,
-                                const MiniBatchResultsDevice&  miniBatchResults,
-                                const int*                     pairIndices,
-                                int                            numPairs,
-                                int                            numQueries,
-                                const int*                     batchLocalIndices,
-                                DeviceTimingsData*             timings,
-                                cudaStream_t                   stream) {
-  SubstructMatchResultsDeviceView results;
-  results.matchCounts              = miniBatchResults.matchCounts_.data();
-  results.reportedCounts           = miniBatchResults.reportedCounts_.data();
-  results.pairMatchStarts          = miniBatchResults.pairMatchStarts_.data();
-  results.matchIndices             = miniBatchResults.matchIndices_.data();
-  results.numQueries               = miniBatchResults.numQueries_;
-  results.queryAtomCounts          = miniBatchResults.queryAtomCounts_.data();
-  results.overflowBuffer           = miniBatchResults.overflowBuffer_.data();
-  results.overflowEntriesPerBuffer = kOverflowEntriesPerBuffer;
-  results.overflowBuffersPerBlock  = miniBatchResults.overflowBuffersPerBlock_;
-  results.recursiveMatchBits       = miniBatchResults.recursiveMatchBits_.data();
-  results.maxTargetAtoms           = miniBatchResults.maxTargetAtoms_;
-  results.labelMatrixBuffer        = miniBatchResults.labelMatrixBuffer_.data();
-  results.maxMatchesToFind         = miniBatchResults.maxMatchesToFind_;
-  results.countOnly                = miniBatchResults.countOnly_;
 
+namespace {
+
+template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms, int MaxBondsPerAtom>
+void launchSubstructPaintKernelForConfig(SubstructAlgorithm          algorithm,
+                                         MoleculesDeviceView         targets,
+                                         MoleculesDeviceView         patterns,
+                                         const BatchedPatternEntry*  patternEntries,
+                                         int                         numPatterns,
+                                         int                         numBlocks,
+                                         uint32_t*                   outputRecursiveBits,
+                                         int                         maxTargetAtoms,
+                                         int                         outputNumQueries,
+                                         int                         defaultPatternId,
+                                         int                         defaultMainQueryIdx,
+                                         int                         miniBatchPairOffset,
+                                         int                         miniBatchSize,
+                                         PartialMatch*               overflowA,
+                                         PartialMatch*               overflowB,
+                                         int                         overflowCapacity,
+                                         const uint32_t*             labelMatrixBuffer,
+                                         int                         firstTargetIdx,
+                                         cudaStream_t                stream) {
+  constexpr std::size_t kLabelMatrixWordsT = (MaxTargetAtoms * MaxQueryAtoms) / 32;
   switch (algorithm) {
     case SubstructAlgorithm::VF2:
-      substructMatchKernel<SubstructAlgorithm::VF2><<<numPairs, kThreadsPerBlock, 0, stream>>>(
-          targets, queries, results, pairIndices, numQueries, batchLocalIndices, timings);
       break;
     case SubstructAlgorithm::GSI:
-      substructMatchKernel<SubstructAlgorithm::GSI><<<numPairs, kThreadsPerBlock, 0, stream>>>(
-          targets, queries, results, pairIndices, numQueries, batchLocalIndices, timings);
+      substructPaintKernelT<MaxTargetAtoms, MaxQueryAtoms, MaxBondsPerAtom, SubstructAlgorithm::GSI>
+          <<<numBlocks, kThreadsPerBlock, 0, stream>>>(
+              targets, patterns, patternEntries, numPatterns,
+              outputRecursiveBits, maxTargetAtoms, outputNumQueries,
+              defaultPatternId, defaultMainQueryIdx, miniBatchPairOffset, miniBatchSize,
+              reinterpret_cast<PartialMatchT<MaxQueryAtoms>*>(overflowA),
+              reinterpret_cast<PartialMatchT<MaxQueryAtoms>*>(overflowB),
+              overflowCapacity, labelMatrixBuffer, kLabelMatrixWordsT, firstTargetIdx);
       break;
   }
 }
 
-void launchSubstructPaintKernel(SubstructAlgorithm          algorithm,
+}  // namespace
+
+void launchSubstructPaintKernel(SubstructTemplateConfig     config,
+                                SubstructAlgorithm          algorithm,
                                 MoleculesDeviceView         targets,
                                 MoleculesDeviceView         patterns,
                                 const BatchedPatternEntry*  patternEntries,
@@ -587,28 +802,159 @@ void launchSubstructPaintKernel(SubstructAlgorithm          algorithm,
                                 const uint32_t*             labelMatrixBuffer,
                                 int                         firstTargetIdx,
                                 cudaStream_t                stream) {
-  switch (algorithm) {
-    case SubstructAlgorithm::VF2:
-      // VF2 paint mode not implemented
-      break;
-    case SubstructAlgorithm::GSI:
-      substructPaintKernel<SubstructAlgorithm::GSI><<<numBlocks, kThreadsPerBlock, 0, stream>>>(
-          targets, patterns, patternEntries, numPatterns,
-          outputRecursiveBits, maxTargetAtoms, outputNumQueries,
-          defaultPatternId, defaultMainQueryIdx, miniBatchPairOffset, miniBatchSize,
-          overflowA, overflowB, overflowCapacity, labelMatrixBuffer, firstTargetIdx);
-      break;
+#define LAUNCH_PAINT(MaxT, MaxQ, MaxB) \
+  launchSubstructPaintKernelForConfig<MaxT, MaxQ, MaxB>(algorithm, targets, patterns, patternEntries, numPatterns, numBlocks, outputRecursiveBits, maxTargetAtoms, outputNumQueries, defaultPatternId, defaultMainQueryIdx, miniBatchPairOffset, miniBatchSize, overflowA, overflowB, overflowCapacity, labelMatrixBuffer, firstTargetIdx, stream)
+
+  switch (config) {
+    case SubstructTemplateConfig::Config_T32_Q16_B4: LAUNCH_PAINT(32, 16, 4); break;
+    case SubstructTemplateConfig::Config_T32_Q16_B6: LAUNCH_PAINT(32, 16, 6); break;
+    case SubstructTemplateConfig::Config_T32_Q16_B8: LAUNCH_PAINT(32, 16, 8); break;
+    case SubstructTemplateConfig::Config_T32_Q32_B4: LAUNCH_PAINT(32, 32, 4); break;
+    case SubstructTemplateConfig::Config_T32_Q32_B6: LAUNCH_PAINT(32, 32, 6); break;
+    case SubstructTemplateConfig::Config_T32_Q32_B8: LAUNCH_PAINT(32, 32, 8); break;
+    case SubstructTemplateConfig::Config_T64_Q16_B4: LAUNCH_PAINT(64, 16, 4); break;
+    case SubstructTemplateConfig::Config_T64_Q16_B6: LAUNCH_PAINT(64, 16, 6); break;
+    case SubstructTemplateConfig::Config_T64_Q16_B8: LAUNCH_PAINT(64, 16, 8); break;
+    case SubstructTemplateConfig::Config_T64_Q32_B4: LAUNCH_PAINT(64, 32, 4); break;
+    case SubstructTemplateConfig::Config_T64_Q32_B6: LAUNCH_PAINT(64, 32, 6); break;
+    case SubstructTemplateConfig::Config_T64_Q32_B8: LAUNCH_PAINT(64, 32, 8); break;
+    case SubstructTemplateConfig::Config_T64_Q64_B4: LAUNCH_PAINT(64, 64, 4); break;
+    case SubstructTemplateConfig::Config_T64_Q64_B6: LAUNCH_PAINT(64, 64, 6); break;
+    case SubstructTemplateConfig::Config_T64_Q64_B8: LAUNCH_PAINT(64, 64, 8); break;
+    case SubstructTemplateConfig::Config_T128_Q16_B4: LAUNCH_PAINT(128, 16, 4); break;
+    case SubstructTemplateConfig::Config_T128_Q16_B6: LAUNCH_PAINT(128, 16, 6); break;
+    case SubstructTemplateConfig::Config_T128_Q16_B8: LAUNCH_PAINT(128, 16, 8); break;
+    case SubstructTemplateConfig::Config_T128_Q32_B4: LAUNCH_PAINT(128, 32, 4); break;
+    case SubstructTemplateConfig::Config_T128_Q32_B6: LAUNCH_PAINT(128, 32, 6); break;
+    case SubstructTemplateConfig::Config_T128_Q32_B8: LAUNCH_PAINT(128, 32, 8); break;
+    case SubstructTemplateConfig::Config_T128_Q64_B4: LAUNCH_PAINT(128, 64, 4); break;
+    case SubstructTemplateConfig::Config_T128_Q64_B6: LAUNCH_PAINT(128, 64, 6); break;
+    case SubstructTemplateConfig::Config_T128_Q64_B8:
+    default:
+      LAUNCH_PAINT(128, 64, 8); break;
   }
+#undef LAUNCH_PAINT
 }
 
 void configureSubstructKernelsSharedMem() {
   if (sharedMemCarveoutConfigured()) return;
   
-  configureSharedMemCarveout(substructMatchKernel<SubstructAlgorithm::GSI>);
-  configureSharedMemCarveout(substructPaintKernel<SubstructAlgorithm::GSI>);
+  configureSharedMemCarveout(substructMatchKernelT<kMaxTargetAtoms, kMaxQueryAtoms, kMaxBondsPerAtom, SubstructAlgorithm::GSI>);
+  configureSharedMemCarveout(substructPaintKernelT<kMaxTargetAtoms, kMaxQueryAtoms, kMaxBondsPerAtom, SubstructAlgorithm::GSI>);
   
   sharedMemCarveoutConfigured() = true;
 }
 
-}  // namespace nvMolKit
+namespace {
 
+template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms, int MaxBondsPerAtom>
+void launchMatchKernelForConfig(SubstructAlgorithm             algorithm,
+                                MoleculesDeviceView            targets,
+                                MoleculesDeviceView            queries,
+                                const MiniBatchResultsDevice&  miniBatchResults,
+                                const int*                     pairIndices,
+                                int                            numPairs,
+                                int                            numQueries,
+                                const int*                     batchLocalIndices,
+                                DeviceTimingsData*             timings,
+                                cudaStream_t                   stream) {
+  constexpr std::size_t labelMatrixWordsT = MaxTargetAtoms * MaxQueryAtoms / 32;
+
+  SubstructMatchResultsDeviceViewT<MaxQueryAtoms> results;
+  results.matchCounts              = miniBatchResults.matchCounts();
+  results.reportedCounts           = miniBatchResults.reportedCounts();
+  results.pairMatchStarts          = miniBatchResults.pairMatchStarts();
+  results.matchIndices             = miniBatchResults.matchIndices();
+  results.numQueries               = miniBatchResults.numQueries();
+  results.queryAtomCounts          = miniBatchResults.queryAtomCounts();
+  results.overflowBuffer           = reinterpret_cast<PartialMatchT<MaxQueryAtoms>*>(miniBatchResults.overflowBuffer());
+  results.overflowEntriesPerBuffer = kOverflowEntriesPerBuffer;
+  results.overflowBuffersPerBlock  = miniBatchResults.overflowBuffersPerBlock();
+  results.recursiveMatchBits       = miniBatchResults.recursiveMatchBits();
+  results.maxTargetAtoms           = miniBatchResults.maxTargetAtoms();
+  results.labelMatrixBuffer        = miniBatchResults.labelMatrixBuffer();
+  results.labelMatrixWords         = labelMatrixWordsT;
+  results.maxMatchesToFind         = miniBatchResults.maxMatchesToFind();
+  results.countOnly                = miniBatchResults.countOnly();
+
+  switch (algorithm) {
+    case SubstructAlgorithm::VF2:
+      substructMatchKernelT<MaxTargetAtoms, MaxQueryAtoms, MaxBondsPerAtom, SubstructAlgorithm::VF2>
+          <<<numPairs, kThreadsPerBlock, 0, stream>>>(
+              targets, queries, results, pairIndices, numQueries, batchLocalIndices, timings);
+      break;
+    case SubstructAlgorithm::GSI:
+      substructMatchKernelT<MaxTargetAtoms, MaxQueryAtoms, MaxBondsPerAtom, SubstructAlgorithm::GSI>
+          <<<numPairs, kThreadsPerBlock, 0, stream>>>(
+              targets, queries, results, pairIndices, numQueries, batchLocalIndices, timings);
+      break;
+  }
+}
+
+}  // namespace
+
+void launchSubstructMatchKernel(SubstructTemplateConfig        config,
+                                SubstructAlgorithm             algorithm,
+                                MoleculesDeviceView            targets,
+                                MoleculesDeviceView            queries,
+                                const MiniBatchResultsDevice&  miniBatchResults,
+                                const int*                     pairIndices,
+                                int                            numPairs,
+                                int                            numQueries,
+                                const int*                     batchLocalIndices,
+                                DeviceTimingsData*             timings,
+                                cudaStream_t                   stream) {
+  switch (config) {
+    case SubstructTemplateConfig::Config_T32_Q16_B4:
+      launchMatchKernelForConfig<32, 16, 4>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T32_Q16_B6:
+      launchMatchKernelForConfig<32, 16, 6>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T32_Q16_B8:
+      launchMatchKernelForConfig<32, 16, 8>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T32_Q32_B4:
+      launchMatchKernelForConfig<32, 32, 4>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T32_Q32_B6:
+      launchMatchKernelForConfig<32, 32, 6>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T32_Q32_B8:
+      launchMatchKernelForConfig<32, 32, 8>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T64_Q16_B4:
+      launchMatchKernelForConfig<64, 16, 4>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T64_Q16_B6:
+      launchMatchKernelForConfig<64, 16, 6>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T64_Q16_B8:
+      launchMatchKernelForConfig<64, 16, 8>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T64_Q32_B4:
+      launchMatchKernelForConfig<64, 32, 4>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T64_Q32_B6:
+      launchMatchKernelForConfig<64, 32, 6>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T64_Q32_B8:
+      launchMatchKernelForConfig<64, 32, 8>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T64_Q64_B4:
+      launchMatchKernelForConfig<64, 64, 4>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T64_Q64_B6:
+      launchMatchKernelForConfig<64, 64, 6>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T64_Q64_B8:
+      launchMatchKernelForConfig<64, 64, 8>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T128_Q16_B4:
+      launchMatchKernelForConfig<128, 16, 4>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T128_Q16_B6:
+      launchMatchKernelForConfig<128, 16, 6>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T128_Q16_B8:
+      launchMatchKernelForConfig<128, 16, 8>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T128_Q32_B4:
+      launchMatchKernelForConfig<128, 32, 4>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T128_Q32_B6:
+      launchMatchKernelForConfig<128, 32, 6>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T128_Q32_B8:
+      launchMatchKernelForConfig<128, 32, 8>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T128_Q64_B4:
+      launchMatchKernelForConfig<128, 64, 4>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T128_Q64_B6:
+      launchMatchKernelForConfig<128, 64, 6>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+    case SubstructTemplateConfig::Config_T128_Q64_B8:
+    default:
+      launchMatchKernelForConfig<128, 64, 8>(algorithm, targets, queries, miniBatchResults, pairIndices, numPairs, numQueries, batchLocalIndices, timings, stream); break;
+  }
+}
+
+}  // namespace nvMolKit

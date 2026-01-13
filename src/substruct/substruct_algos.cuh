@@ -82,23 +82,27 @@ __device__ __forceinline__ bool isTargetUsedInMapping(const int8_t* mapping, int
 }
 
 // =============================================================================
-// VF2 Data Structures
+// VF2 Data Structures (templated)
 // =============================================================================
 
 /**
  * @brief State for VF2 iterative search (per-warp in shared memory).
  *
+ * @tparam MaxQueryAtoms Maximum query atoms for array sizing
+ *
  * Maintains partial match and exploration stack for DFS backtracking.
  */
-struct VF2State {
-  int8_t mapping[kMaxQueryAtoms];       ///< mapping[q] = target atom idx (only [0..depth-1] valid)
-  int8_t candidateIdx[kMaxQueryAtoms];  ///< Current candidate index at each stack level
-  int    depth;                         ///< Current recursion depth (0 to numQueryAtoms-1)
-  int    matchCount;                    ///< Number of complete matches found
+template <std::size_t MaxQueryAtoms = kMaxQueryAtoms>
+struct VF2StateT {
+  static constexpr std::size_t kMaxQueryAtomsValue = MaxQueryAtoms;
+  int8_t mapping[MaxQueryAtoms];       ///< mapping[q] = target atom idx (only [0..depth-1] valid)
+  int8_t candidateIdx[MaxQueryAtoms];  ///< Current candidate index at each stack level
+  int    depth;                        ///< Current recursion depth (0 to numQueryAtoms-1)
+  int    matchCount;                   ///< Number of complete matches found
 
   __device__ __forceinline__ void init() {
-    // No need to initialize mapping - we only read [0..depth-1] which are always written first
-    for (int i = 0; i < kMaxQueryAtoms; ++i) {
+    #pragma unroll
+    for (std::size_t i = 0; i < MaxQueryAtoms; ++i) {
       candidateIdx[i] = 0;
     }
     depth      = 0;
@@ -110,34 +114,31 @@ struct VF2State {
   }
 };
 
+/// Type alias for max-sized VF2 state (backward compatibility)
+using VF2State = VF2StateT<kMaxQueryAtoms>;
+
 // =============================================================================
-// GSI/BFS Data Structures
+// GSI/BFS Data Structures (templated)
 // =============================================================================
 
-/**
- * @brief Partial match for BFS-style algorithms.
- *
- * Represents a partial mapping from query atoms to target atoms.
- * Stored compactly for queue-based BFS exploration.
- *
- * Complete matches are never stored in the queue, so we only need
- * kMaxQueryAtoms - 1 slots (matching atoms 0 through numQueryAtoms-2).
- */
-struct PartialMatch {
-  int8_t mapping[kMaxQueryAtoms - 1];  ///< mapping[q] = target atom (only [0..nextQueryAtom-1] valid)
-  int8_t nextQueryAtom;                ///< Next query atom to extend (also serves as depth)
-};
-static_assert(sizeof(PartialMatch) == kMaxQueryAtoms, "PartialMatch must be kMaxQueryAtoms bytes");
+// PartialMatchT is defined in substruct_types.h
 
 /**
  * @brief Candidate list for a query atom.
  *
+ * @tparam MaxTargetAtoms Maximum target atoms for array sizing
+ *
  * Precomputed from label matrix for efficient iteration.
  */
-struct CandidateList {
-  int8_t candidates[kMaxTargetAtoms];  ///< Target atoms that can match this query atom
-  int    count;                        ///< Number of valid candidates
+template <std::size_t MaxTargetAtoms = kMaxTargetAtoms>
+struct CandidateListT {
+  static constexpr std::size_t kMaxTargetAtomsValue = MaxTargetAtoms;
+  int8_t candidates[MaxTargetAtoms];  ///< Target atoms that can match this query atom
+  int    count;                       ///< Number of valid candidates
 };
+
+/// Type alias for max-sized candidate list (backward compatibility)
+using CandidateList = CandidateListT<kMaxTargetAtoms>;
 
 // =============================================================================
 // VF2 Algorithm Implementation
@@ -151,6 +152,7 @@ struct CandidateList {
  *
  * @tparam MaxTargetAtoms Maximum target atoms (for label matrix sizing)
  * @tparam MaxQueryAtoms Maximum query atoms (for label matrix sizing)
+ * @tparam MaxBondsPerAtom Maximum bonds per atom (for edge consistency loop unrolling)
  * @param target Target molecule view
  * @param query Query molecule view
  * @param labelMatrix Precomputed label compatibility matrix
@@ -164,11 +166,11 @@ struct CandidateList {
  * @param maxMatchesToFind Stop searching after this many matches (-1 = no limit)
  * @param countOnly If true, count matches but don't store them
  */
-template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
+template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms, int MaxBondsPerAtom = kMaxBondsPerAtom>
 __device__ void vf2SearchGPU(const MoleculeView&                                   target,
                              const MoleculeView&                                   query,
                              const BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>& labelMatrix,
-                             VF2State&                                             state,
+                             VF2StateT<MaxQueryAtoms>&                             state,
                              int                                                   startingTargetAtom,
                              int*                                                  matchCount,
                              int*                                                  reportedCount,
@@ -240,8 +242,9 @@ __device__ void vf2SearchGPU(const MoleculeView&                                
       const bool labelOk    = labelMatrix.get(candidateTarget, currentQueryAtom);
       const bool notUsed    = !state.isTargetUsed(candidateTarget);
       const bool edgeOk     = labelOk && notUsed && 
-                              checkEdgeConsistencyPacked(target.targetAtomBonds, query.getQueryBonds(currentQueryAtom),
-                                                         state.mapping, currentQueryAtom, candidateTarget);
+                              checkEdgeConsistencyPacked<MaxBondsPerAtom>(
+                                  target.targetAtomBonds, query.getQueryBonds(currentQueryAtom),
+                                  state.mapping, currentQueryAtom, candidateTarget);
 
       if (edgeOk) {
         // Extend match
@@ -281,6 +284,7 @@ __device__ void vf2SearchGPU(const MoleculeView&                                
  *
  * @tparam MaxTargetAtoms Maximum target atoms
  * @tparam MaxQueryAtoms Maximum query atoms
+ * @tparam MaxBondsPerAtom Maximum bonds per atom (for edge consistency loop unrolling)
  * @tparam OutputMode How to record matches (StoreMatches or PaintBits)
  * @param target Target molecule view
  * @param query Query molecule view
@@ -300,15 +304,15 @@ __device__ void vf2SearchGPU(const MoleculeView&                                
  * @param countOnly If true, count matches but don't store them
  * @param timings Optional timing data collection
  */
-template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms, 
+template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms, int MaxBondsPerAtom = kMaxBondsPerAtom,
           SubstructOutputMode OutputMode = SubstructOutputMode::StoreMatches>
 __device__ void gsiBFSSearchGPU(const MoleculeView&                                   target,
                                 const MoleculeView&                                   query,
                                 const BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>& labelMatrix,
-                                PartialMatch*                                         sharedPartials,
+                                PartialMatchT<MaxQueryAtoms>*                         sharedPartials,
                                 int                                                   maxPartials,
-                                PartialMatch*                                         overflowA,
-                                PartialMatch*                                         overflowB,
+                                PartialMatchT<MaxQueryAtoms>*                         overflowA,
+                                PartialMatchT<MaxQueryAtoms>*                         overflowB,
                                 int                                                   maxOverflow,
                                 int*                                                  matchCount,
                                 int*                                                  reportedCount,
@@ -340,9 +344,9 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
   int8_t* overflowBBytes = reinterpret_cast<int8_t*>(overflowB);
 
   // Compute effective capacities based on runtime stride
-  const int sharedBytesPerHalf    = maxPartials * sizeof(PartialMatch);
+  const int sharedBytesPerHalf    = maxPartials * sizeof(PartialMatchT<MaxQueryAtoms>);
   const int effectiveMaxPartials  = sharedBytesPerHalf / stride;
-  const int overflowBytes         = maxOverflow * sizeof(PartialMatch);
+  const int overflowBytes         = maxOverflow * sizeof(PartialMatchT<MaxQueryAtoms>);
   const int effectiveMaxOverflow  = overflowBytes / stride;
   const int maxTotal              = effectiveMaxPartials + effectiveMaxOverflow;
 
@@ -522,8 +526,9 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
         if (t < numTargetAtoms) {
           labelOk = labelMatrix.get(t, queryAtom);
           notUsed = !isTargetUsedInMapping(partial, queryAtom, t);
-          edgeOk  = checkEdgeConsistencyPacked(target.targetAtomBonds, query.getQueryBonds(queryAtom),
-                                               partial, queryAtom, t);
+          edgeOk  = checkEdgeConsistencyPacked<MaxBondsPerAtom>(
+                        target.targetAtomBonds, query.getQueryBonds(queryAtom),
+                        partial, queryAtom, t);
           valid   = labelOk && notUsed && edgeOk;
           
           if constexpr (kDebugGSI) {
@@ -665,4 +670,3 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
 }  // namespace nvMolKit
 
 #endif  // NVMOLKIT_SUBSTRUCT_ALGOS_CUH
-

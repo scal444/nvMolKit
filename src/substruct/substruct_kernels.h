@@ -27,7 +27,6 @@ namespace nvMolKit {
 // Forward declarations
 class MiniBatchResultsDevice;
 struct DeviceTimingsData;
-struct PartialMatch;
 
 // =============================================================================
 // Shared Memory Configuration Constants (host-side)
@@ -56,7 +55,8 @@ constexpr int kMaxQueueSize = 180;  // Based on SM 8.6 configuration
  * @param batchLocalIndices Optional remapping for split launches (nullptr = identity)
  * @param stream CUDA stream
  */
-void launchLabelMatrixKernel(MoleculesDeviceView targets,
+void launchLabelMatrixKernel(SubstructTemplateConfig config,
+                             MoleculesDeviceView targets,
                              MoleculesDeviceView queries,
                              const int*          pairIndices,
                              int                 numPairs,
@@ -86,7 +86,8 @@ void launchLabelMatrixKernel(MoleculesDeviceView targets,
  * @param maxTargetAtoms Stride for recursiveMatchBits indexing
  * @param stream CUDA stream
  */
-void launchLabelMatrixPaintKernel(MoleculesDeviceView        targets,
+void launchLabelMatrixPaintKernel(SubstructTemplateConfig    config,
+                                  MoleculesDeviceView        targets,
                                   MoleculesDeviceView        patterns,
                                   const BatchedPatternEntry* patternEntries,
                                   int                        numPatterns,
@@ -101,14 +102,17 @@ void launchLabelMatrixPaintKernel(MoleculesDeviceView        targets,
                                   cudaStream_t               stream);
 
 /**
- * @brief Launch substructure matching kernel.
+ * @brief Launch substructure matching kernel with template configuration dispatch.
  *
- * One block per pair. Uses pre-computed label matrices from labelMatrixBuffer.
+ * Selects the appropriate templated kernel based on the config parameter.
+ * Uses smaller label matrices and data structures for improved performance
+ * when actual molecule sizes are smaller than maximums.
  *
+ * @param config Template configuration specifying MaxTargetAtoms, MaxQueryAtoms, MaxBondsPerAtom
  * @param algorithm Algorithm to use (VF2 or GSI)
  * @param targets Target molecules
  * @param queries Query molecules
- * @param results Device view for results
+ * @param miniBatchResults Device view for results
  * @param pairIndices Global pair indices
  * @param numPairs Number of pairs to process
  * @param numQueries Total number of queries
@@ -116,7 +120,8 @@ void launchLabelMatrixPaintKernel(MoleculesDeviceView        targets,
  * @param timings Optional device timings (nullptr if not collecting)
  * @param stream CUDA stream
  */
-void launchSubstructMatchKernel(SubstructAlgorithm             algorithm,
+void launchSubstructMatchKernel(SubstructTemplateConfig        config,
+                                SubstructAlgorithm             algorithm,
                                 MoleculesDeviceView            targets,
                                 MoleculesDeviceView            queries,
                                 const MiniBatchResultsDevice&  miniBatchResults,
@@ -153,7 +158,8 @@ void launchSubstructMatchKernel(SubstructAlgorithm             algorithm,
  * @param firstTargetIdx First target index for block offset calculation
  * @param stream CUDA stream
  */
-void launchSubstructPaintKernel(SubstructAlgorithm          algorithm,
+void launchSubstructPaintKernel(SubstructTemplateConfig     config,
+                                SubstructAlgorithm          algorithm,
                                 MoleculesDeviceView         targets,
                                 MoleculesDeviceView         patterns,
                                 const BatchedPatternEntry*  patternEntries,

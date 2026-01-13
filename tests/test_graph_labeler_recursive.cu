@@ -61,6 +61,7 @@ using nvMolKit::kMaxRecursionDepth;
 using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
 using nvMolKit::SubstructSearchResults;
+using nvMolKit::SubstructTemplateConfig;
 using nvMolKit::MiniBatchResultsDevice;
 
 namespace {
@@ -311,7 +312,8 @@ class RecursivePaintTest : public ::testing::Test {
     RecursiveScratchBuffers          scratch(stream_.stream());
     scratch.allocateBuffers(256);
     std::vector<BatchedPatternEntry> scratchPatternEntries;
-    preprocessRecursiveSmartsBatchedWithEvents(targetDevice, queryHost, leafSubpatterns, *results_,
+    preprocessRecursiveSmartsBatchedWithEvents(SubstructTemplateConfig::Config_T128_Q64_B8,
+                                               targetDevice, queryHost, leafSubpatterns, *results_,
                                                numQueries_, 0, numTargets_ * numQueries_,
                                                SubstructAlgorithm::GSI, stream_.stream(), scratch,
                                                scratchPatternEntries, nullptr, 0);

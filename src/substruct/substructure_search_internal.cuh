@@ -275,9 +275,6 @@ struct RecursiveScratchBuffers {
  * Results are copied back to host after each mini-batch and accumulated.
  */
 class MiniBatchResultsDevice {
-  friend void launchSubstructMatchKernel(SubstructAlgorithm, MoleculesDeviceView, MoleculesDeviceView,
-                                         const MiniBatchResultsDevice&, const int*, int, int,
-                                         const int*, DeviceTimingsData*, cudaStream_t);
  public:
   MiniBatchResultsDevice() = default;
   explicit MiniBatchResultsDevice(cudaStream_t stream) : stream_(stream) { setStream(stream); }
@@ -326,8 +323,18 @@ class MiniBatchResultsDevice {
   [[nodiscard]] int miniBatchSize() const { return miniBatchSize_; }
   [[nodiscard]] int numQueries() const { return numQueries_; }
   [[nodiscard]] int maxTargetAtoms() const { return maxTargetAtoms_; }
-  [[nodiscard]] uint32_t* recursiveMatchBits() { return recursiveMatchBits_.data(); }
-  [[nodiscard]] uint32_t* labelMatrixBuffer() { return labelMatrixBuffer_.data(); }
+  [[nodiscard]] int overflowBuffersPerBlock() const { return overflowBuffersPerBlock_; }
+  [[nodiscard]] int maxMatchesToFind() const { return maxMatchesToFind_; }
+  [[nodiscard]] bool countOnly() const { return countOnly_; }
+
+  [[nodiscard]] int* matchCounts() const { return matchCounts_.data(); }
+  [[nodiscard]] int* reportedCounts() const { return reportedCounts_.data(); }
+  [[nodiscard]] int* pairMatchStarts() const { return pairMatchStarts_.data(); }
+  [[nodiscard]] int16_t* matchIndices() const { return matchIndices_.data(); }
+  [[nodiscard]] const int* queryAtomCounts() const { return queryAtomCounts_.data(); }
+  [[nodiscard]] PartialMatch* overflowBuffer() const { return overflowBuffer_.data(); }
+  [[nodiscard]] uint32_t* recursiveMatchBits() const { return recursiveMatchBits_.data(); }
+  [[nodiscard]] uint32_t* labelMatrixBuffer() const { return labelMatrixBuffer_.data(); }
 
  private:
   cudaStream_t stream_ = nullptr;
@@ -437,7 +444,8 @@ struct RecursivePipelineContext {
  * @param depthEvents Array of events to record after each depth level, or nullptr
  * @param numDepthEvents Number of events in the array (typically kMaxRecursionDepth)
  */
-void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&            targetsDevice,
+void preprocessRecursiveSmartsBatchedWithEvents(SubstructTemplateConfig           templateConfig,
+                                                const MoleculesDevice&            targetsDevice,
                                                 const MoleculesHost&              queriesHost,
                                                 const LeafSubpatterns&            leafSubpatterns,
                                                 MiniBatchResultsDevice&           miniBatchResults,
@@ -564,7 +572,10 @@ struct ThreadWorkerContext {
   int numTargets     = 0;
   int numQueries     = 0;
   int maxTargetAtoms = 0;
+  int maxQueryAtoms  = 0;
+  int maxBondsPerAtom = 0;
   int maxMatches     = 0;
+  SubstructTemplateConfig templateConfig = SubstructTemplateConfig::Config_T128_Q64_B8;
 };
 
 }  // namespace nvMolKit

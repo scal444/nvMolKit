@@ -42,35 +42,49 @@ constexpr uint8_t kNoNeighbor = 0xFF;
 /**
  * @brief Packed bond adjacency for a target atom.
  *
- * degree: number of valid bonds (0-8)
- * neighborIdx: 8 neighbor atom indices
- * bondInfo: 8 packed bond descriptors
+ * @tparam MaxBonds Maximum number of bonds per atom (4, 6, or 8)
+ *
+ * degree: number of valid bonds (0-MaxBonds)
+ * neighborIdx: MaxBonds neighbor atom indices
+ * bondInfo: MaxBonds packed bond descriptors
  *   - bits [0-3]: bondType (0-15)
  *   - bit [4]: isInRing
  *   - bits [5-7]: unused
  */
-struct TargetAtomBonds {
+template <int MaxBonds = kMaxBondsPerAtom>
+struct TargetAtomBondsT {
+  static constexpr int kMaxBonds = MaxBonds;
   uint8_t degree;
-  uint8_t neighborIdx[kMaxBondsPerAtom];
-  uint8_t bondInfo[kMaxBondsPerAtom];
+  uint8_t neighborIdx[MaxBonds];
+  uint8_t bondInfo[MaxBonds];
 };
 
 /**
  * @brief Packed bond adjacency for a query atom.
  *
- * degree: number of valid bonds (0-8)
- * neighborIdx: 8 neighbor query atom indices
- * matchMask: 8 precomputed 32-bit match masks
+ * @tparam MaxBonds Maximum number of bonds per atom (4, 6, or 8)
+ *
+ * degree: number of valid bonds (0-MaxBonds)
+ * neighborIdx: MaxBonds neighbor query atom indices
+ * matchMask: MaxBonds precomputed 32-bit match masks
  *   - bits [0-15]: target bond types that match when target isInRing=0
  *   - bits [16-31]: target bond types that match when target isInRing=1
  *
  * Match check: (matchMask >> (isInRing * 16 + bondType)) & 1
  */
-struct QueryAtomBonds {
+template <int MaxBonds = kMaxBondsPerAtom>
+struct QueryAtomBondsT {
+  static constexpr int kMaxBonds = MaxBonds;
   uint8_t  degree;
-  uint8_t  neighborIdx[kMaxBondsPerAtom];
-  uint32_t matchMask[kMaxBondsPerAtom];
+  uint8_t  neighborIdx[MaxBonds];
+  uint32_t matchMask[MaxBonds];
 };
+
+/// Type alias for max-sized target atom bonds (host-side storage)
+using TargetAtomBonds = TargetAtomBondsT<kMaxBondsPerAtom>;
+
+/// Type alias for max-sized query atom bonds (host-side storage)
+using QueryAtomBonds = QueryAtomBondsT<kMaxBondsPerAtom>;
 
 /**
  * @brief Pack target bond info into a single byte.
@@ -92,4 +106,3 @@ uint32_t buildQueryBondMatchMask(uint8_t queryBondType, uint8_t queryFlags, uint
 }  // namespace nvMolKit
 
 #endif  // NVMOLKIT_PACKED_BONDS_H
-

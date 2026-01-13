@@ -700,6 +700,7 @@ void launchLabelAndMatch(const std::vector<int>&      miniBatchLocalIndices,
   miniBatchLocalIndicesDev.copyFromHost(miniBatchLocalIndicesHostPtr, numPairsInGroup);
 
   launchLabelMatrixKernel(
+    ctx.templateConfig,
     targetsDevice.view(),
     queriesDevice.view(),
     globalPairIndicesDev.data(),
@@ -712,6 +713,7 @@ void launchLabelAndMatch(const std::vector<int>&      miniBatchLocalIndices,
     stream);
 
   launchSubstructMatchKernel(
+    ctx.templateConfig,
     algorithm,
     targetsDevice.view(),
     queriesDevice.view(),
@@ -725,6 +727,7 @@ void launchLabelAndMatch(const std::vector<int>&      miniBatchLocalIndices,
 }
 
 void launchRecursivePaintKernels(
+    SubstructTemplateConfig                                                  templateConfig,
     const MoleculesDevice&                                                   targetsDevice,
     const LeafSubpatterns&                                                   leafSubpatterns,
     MiniBatchResultsDevice&                                                  miniBatchResults,
@@ -801,6 +804,7 @@ void launchRecursivePaintKernels(
       const uint32_t* recursiveBitsForLabel = (currentDepth > 0) ? miniBatchResults.recursiveMatchBits() : nullptr;
 
       launchLabelMatrixPaintKernel(
+        templateConfig,
         targetsDevice.view(),
         leafSubpatterns.view(),
         scratch.patternEntries.data(),
@@ -816,6 +820,7 @@ void launchRecursivePaintKernels(
         stream);
 
       launchSubstructPaintKernel(
+        templateConfig,
         algorithm,
         targetsDevice.view(),
         leafSubpatterns.view(),
@@ -875,6 +880,7 @@ void uploadAndLaunchMiniBatch(GpuExecutor&               executor,
     executor.pairIndicesDev.copyFromHost(executor.pairIndicesHost, executor.numPairsInMiniBatch);
 
     launchLabelMatrixKernel(
+      ctx.templateConfig,
       targetsDevice.view(),
       queriesDevice.view(),
       executor.pairIndicesDev.data(),
@@ -887,6 +893,7 @@ void uploadAndLaunchMiniBatch(GpuExecutor&               executor,
       executorStream);
 
     launchSubstructMatchKernel(
+      ctx.templateConfig,
       algorithm,
       targetsDevice.view(),
       queriesDevice.view(),
@@ -927,7 +934,7 @@ void uploadAndLaunchMiniBatch(GpuExecutor&               executor,
   }
 
   ScopedNvtxRange preprocRange("launchRecursivePaintKernels (recursiveStream)");
-  launchRecursivePaintKernels(targetsDevice, leafSubpatterns,
+  launchRecursivePaintKernels(ctx.templateConfig, targetsDevice, leafSubpatterns,
                               executor.deviceResults, ctx.numQueries,
                               executor.miniBatchStart, executor.numPairsInMiniBatch,
                               algorithm, recursiveStream,
@@ -1350,15 +1357,22 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
     out.ctx.targetSortOrder = &out.sortedToOriginal;
 
     out.ctx.targetAtomCounts.resize(n);
-    int maxTargetAtoms = 0;
+    int localMaxTargetAtoms = 0;
+    int localMaxBondsPerAtom = 0;
     for (int t = 0; t < n; ++t) {
       const int atomStart = out.targetsHost.batchAtomStarts[t];
       const int atomEnd   = out.targetsHost.batchAtomStarts[t + 1];
       const int atoms     = atomEnd - atomStart;
       out.ctx.targetAtomCounts[t] = atoms;
-      maxTargetAtoms = std::max(maxTargetAtoms, atoms);
+      localMaxTargetAtoms = std::max(localMaxTargetAtoms, atoms);
+      for (int a = atomStart; a < atomEnd; ++a) {
+        localMaxBondsPerAtom = std::max(localMaxBondsPerAtom, static_cast<int>(out.targetsHost.targetAtomBonds[a].degree));
+      }
     }
-    out.ctx.maxTargetAtoms = maxTargetAtoms;
+    out.ctx.maxTargetAtoms = localMaxTargetAtoms;
+    out.ctx.maxQueryAtoms = maxQueryAtoms;
+    out.ctx.maxBondsPerAtom = localMaxBondsPerAtom;
+    out.ctx.templateConfig = selectTemplateConfig(localMaxTargetAtoms, maxQueryAtoms, localMaxBondsPerAtom);
 
     const int numPairs = n * numQueries;
     out.effectiveMiniBatchSize = std::min(config.batchSize, numPairs);
@@ -1677,7 +1691,8 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
 // Recursive SMARTS Preprocessing
 // =============================================================================
 
-void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&            targetsDevice,
+void preprocessRecursiveSmartsBatchedWithEvents(SubstructTemplateConfig           templateConfig,
+                                                const MoleculesDevice&            targetsDevice,
                                                 const MoleculesHost&              queriesHost,
                                                 const LeafSubpatterns&            leafSubpatterns,
                                                 MiniBatchResultsDevice&           miniBatchResults,
@@ -1812,6 +1827,7 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
       const uint32_t* recursiveBitsForLabel = (currentDepth > 0) ? miniBatchResults.recursiveMatchBits() : nullptr;
 
       launchLabelMatrixPaintKernel(
+        templateConfig,
         targetsDevice.view(),
         leafSubpatterns.view(),
         scratch.patternEntries.data(),
@@ -1827,6 +1843,7 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
         stream);
 
       launchSubstructPaintKernel(
+        templateConfig,
         algorithm,
         targetsDevice.view(),
         leafSubpatterns.view(),
