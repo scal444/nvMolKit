@@ -26,7 +26,7 @@
 #include "device.h"
 #include "graph_labeler.cuh"
 #include "molecules_device.cuh"
-#include "substructure_search.cuh"
+#include "substructure_search.h"
 #include "substructure_search_internal.cuh"
 
 namespace nvMolKit {
@@ -361,8 +361,7 @@ std::vector<std::vector<uint8_t>> computeGpuLabelMatrix(const RDKit::ROMol& targ
   const LabelMatrixStorage              hostMatrix(false);
   matrixDev.setFromVector(std::vector<LabelMatrixStorage>{hostMatrix});
 
-  auto            resultsView       = miniBatchResults.view();
-  const uint32_t* pairRecursiveBits = info.empty() ? nullptr : resultsView.recursiveMatchBits;
+  const uint32_t* pairRecursiveBits = info.empty() ? nullptr : miniBatchResults.recursiveMatchBits();
 
   populateLabelMatrixKernel<kMaxTargetAtoms, kMaxQueryAtoms>
     <<<1, 128, 0, stream>>>(targetDevice.view(), 0, queryDevice.view(), 0, matrixDev.data(), pairRecursiveBits);

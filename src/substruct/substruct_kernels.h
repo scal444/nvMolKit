@@ -25,7 +25,7 @@
 namespace nvMolKit {
 
 // Forward declarations
-struct SubstructMatchResultsDeviceView;
+class MiniBatchResultsDevice;
 struct DeviceTimingsData;
 struct PartialMatch;
 
@@ -116,16 +116,16 @@ void launchLabelMatrixPaintKernel(MoleculesDeviceView        targets,
  * @param timings Optional device timings (nullptr if not collecting)
  * @param stream CUDA stream
  */
-void launchSubstructMatchKernel(SubstructAlgorithm              algorithm,
-                                MoleculesDeviceView             targets,
-                                MoleculesDeviceView             queries,
-                                SubstructMatchResultsDeviceView results,
-                                const int*                      pairIndices,
-                                int                             numPairs,
-                                int                             numQueries,
-                                const int*                      batchLocalIndices,
-                                DeviceTimingsData*              timings,
-                                cudaStream_t                    stream);
+void launchSubstructMatchKernel(SubstructAlgorithm             algorithm,
+                                MoleculesDeviceView            targets,
+                                MoleculesDeviceView            queries,
+                                const MiniBatchResultsDevice&  miniBatchResults,
+                                const int*                     pairIndices,
+                                int                            numPairs,
+                                int                            numQueries,
+                                const int*                     batchLocalIndices,
+                                DeviceTimingsData*             timings,
+                                cudaStream_t                   stream);
 
 /**
  * @brief Launch paint mode kernel for recursive SMARTS preprocessing.
@@ -184,4 +184,3 @@ void configureSubstructKernelsSharedMem();
 }  // namespace nvMolKit
 
 #endif  // NVMOLKIT_SUBSTRUCT_KERNELS_H
-

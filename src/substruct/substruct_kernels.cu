@@ -15,22 +15,66 @@
 
 #include "substruct_kernels.h"
 
+#include "flat_bit_vect.h"
+#include "global_pool.cuh"
 #include "graph_labeler.cuh"
 #include "molecules_device.cuh"
 #include "substruct_algos.cuh"
 #include "substruct_debug.h"
-#include "substructure_search.cuh"
+#include "substructure_search_internal.cuh"
 
 namespace nvMolKit {
 
 namespace {
 
+using LabelMatrixStorage = FlatBitVect<kLabelMatrixBits>;
+
+// =============================================================================
+// Internal View Struct (passed to kernels by value)
+// =============================================================================
+
+struct SubstructMatchResultsDeviceView {
+  int* matchCounts;
+  int* reportedCounts;
+  int* pairMatchStarts;
+  int16_t* matchIndices;
+  int numQueries;
+  const int* queryAtomCounts;
+  PartialMatch* overflowBuffer;
+  int overflowEntriesPerBuffer;
+  int overflowBuffersPerBlock;
+  uint32_t* recursiveMatchBits;
+  int maxTargetAtoms;
+  uint32_t* labelMatrixBuffer;
+  int maxMatchesToFind;
+  bool countOnly;
+
+  __device__ __forceinline__ uint32_t* getLabelMatrixPtr(int batchLocalIdx) const {
+    return labelMatrixBuffer + batchLocalIdx * kLabelMatrixWords;
+  }
+
+  __device__ __forceinline__ PartialMatch* getOverflowBuffer(int bufferIdx = 0) const {
+    return overflowBuffer + (blockIdx.x * overflowBuffersPerBlock + bufferIdx) * overflowEntriesPerBuffer;
+  }
+
+  __device__ __forceinline__ int getOverflowCapacity() const {
+    return overflowEntriesPerBuffer;
+  }
+
+  __device__ __forceinline__ uint32_t getRecursiveMatchBits(int batchLocalIdx, int atomIdx) const {
+    return recursiveMatchBits[batchLocalIdx * maxTargetAtoms + atomIdx];
+  }
+
+  __device__ __forceinline__ void setRecursiveMatchBit(int batchLocalIdx, int atomIdx, int patternId) const {
+    if (patternId < 32) {
+      atomicOr(&recursiveMatchBits[batchLocalIdx * maxTargetAtoms + atomIdx], 1u << patternId);
+    }
+  }
+};
+
 // =============================================================================
 // Architecture-Specific Shared Memory Configuration
 // =============================================================================
-
-constexpr std::size_t kMaxTargetAtoms = kLabelMaxTargetAtoms;
-constexpr std::size_t kMaxQueryAtoms  = kLabelMaxQueryAtoms;
 
 using LabelMatrixView = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
 
@@ -486,16 +530,32 @@ void launchLabelMatrixPaintKernel(MoleculesDeviceView        targets,
       recursiveMatchBits, maxTargetAtoms);
 }
 
-void launchSubstructMatchKernel(SubstructAlgorithm              algorithm,
-                                MoleculesDeviceView             targets,
-                                MoleculesDeviceView             queries,
-                                SubstructMatchResultsDeviceView results,
-                                const int*                      pairIndices,
-                                int                             numPairs,
-                                int                             numQueries,
-                                const int*                      batchLocalIndices,
-                                DeviceTimingsData*              timings,
-                                cudaStream_t                    stream) {
+void launchSubstructMatchKernel(SubstructAlgorithm             algorithm,
+                                MoleculesDeviceView            targets,
+                                MoleculesDeviceView            queries,
+                                const MiniBatchResultsDevice&  miniBatchResults,
+                                const int*                     pairIndices,
+                                int                            numPairs,
+                                int                            numQueries,
+                                const int*                     batchLocalIndices,
+                                DeviceTimingsData*             timings,
+                                cudaStream_t                   stream) {
+  SubstructMatchResultsDeviceView results;
+  results.matchCounts              = miniBatchResults.matchCounts_.data();
+  results.reportedCounts           = miniBatchResults.reportedCounts_.data();
+  results.pairMatchStarts          = miniBatchResults.pairMatchStarts_.data();
+  results.matchIndices             = miniBatchResults.matchIndices_.data();
+  results.numQueries               = miniBatchResults.numQueries_;
+  results.queryAtomCounts          = miniBatchResults.queryAtomCounts_.data();
+  results.overflowBuffer           = miniBatchResults.overflowBuffer_.data();
+  results.overflowEntriesPerBuffer = kOverflowEntriesPerBuffer;
+  results.overflowBuffersPerBlock  = miniBatchResults.overflowBuffersPerBlock_;
+  results.recursiveMatchBits       = miniBatchResults.recursiveMatchBits_.data();
+  results.maxTargetAtoms           = miniBatchResults.maxTargetAtoms_;
+  results.labelMatrixBuffer        = miniBatchResults.labelMatrixBuffer_.data();
+  results.maxMatchesToFind         = miniBatchResults.maxMatchesToFind_;
+  results.countOnly                = miniBatchResults.countOnly_;
+
   switch (algorithm) {
     case SubstructAlgorithm::VF2:
       substructMatchKernel<SubstructAlgorithm::VF2><<<numPairs, kThreadsPerBlock, 0, stream>>>(

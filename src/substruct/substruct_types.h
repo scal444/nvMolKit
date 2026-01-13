@@ -150,6 +150,12 @@ constexpr int kMaxBoolScratchSize = 256;
 constexpr std::size_t kMaxTargetAtoms = 128;
 constexpr std::size_t kMaxQueryAtoms  = 64;
 
+/// Total bits in a label matrix (target × query)
+constexpr std::size_t kLabelMatrixBits = kMaxTargetAtoms * kMaxQueryAtoms;
+
+/// Number of 32-bit words per label matrix
+constexpr std::size_t kLabelMatrixWords = kLabelMatrixBits / 32;
+
 /**
  * @brief Entry representing a (target, query) pair that needs RDKit fallback processing.
  *

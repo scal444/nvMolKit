@@ -31,7 +31,7 @@
 #include "benchmark_utils.h"
 #include "cuda_error_check.h"
 #include "device.h"
-#include "substruct/substructure_search.cuh"
+#include "substruct/substructure_search.h"
 #include "testutils/substruct_validation.h"
 
 using nvMolKit::algorithmName;

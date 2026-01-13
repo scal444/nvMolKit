@@ -46,9 +46,13 @@ class ROMol;
 #include "molecules.h"
 #include "molecules_device.cuh"
 #include "pinned_buffer_pool.h"
-#include "substructure_search.cuh"
+#include "substruct_algos.cuh"
+#include "substructure_search.h"
 
 namespace nvMolKit {
+
+// Forward declarations for friend function
+struct DeviceTimingsData;
 
 /**
  * @brief Key for mapping (queryIdx, patternId) to leaf subpattern molecule index.
@@ -271,6 +275,9 @@ struct RecursiveScratchBuffers {
  * Results are copied back to host after each mini-batch and accumulated.
  */
 class MiniBatchResultsDevice {
+  friend void launchSubstructMatchKernel(SubstructAlgorithm, MoleculesDeviceView, MoleculesDeviceView,
+                                         const MiniBatchResultsDevice&, const int*, int, int,
+                                         const int*, DeviceTimingsData*, cudaStream_t);
  public:
   MiniBatchResultsDevice() = default;
   explicit MiniBatchResultsDevice(cudaStream_t stream) : stream_(stream) { setStream(stream); }
@@ -296,11 +303,6 @@ class MiniBatchResultsDevice {
                      int         maxMatchesToFind = -1,
                      bool        countOnly = false);
 
-  /**
-   * @brief Get a view suitable for passing to CUDA kernels.
-   */
-  [[nodiscard]] SubstructMatchResultsDeviceView view() const;
-
   void setStream(cudaStream_t stream);
 
   /**
@@ -322,8 +324,10 @@ class MiniBatchResultsDevice {
   void setQueryAtomCounts(const int* queryAtomCounts, size_t count);
 
   [[nodiscard]] int miniBatchSize() const { return miniBatchSize_; }
+  [[nodiscard]] int numQueries() const { return numQueries_; }
   [[nodiscard]] int maxTargetAtoms() const { return maxTargetAtoms_; }
   [[nodiscard]] uint32_t* recursiveMatchBits() { return recursiveMatchBits_.data(); }
+  [[nodiscard]] uint32_t* labelMatrixBuffer() { return labelMatrixBuffer_.data(); }
 
  private:
   cudaStream_t stream_ = nullptr;

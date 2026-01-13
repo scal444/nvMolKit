@@ -27,7 +27,7 @@
 #include "molecules.h"
 #include "molecules_device.cuh"
 #include "substruct_types.h"
-#include "substructure_search.cuh"
+#include "substructure_search.h"
 #include "substructure_search_internal.cuh"
 #include "testutils/substruct_validation.h"
 
@@ -282,13 +282,12 @@ class RecursivePaintTest : public ::testing::Test {
                              int queryIdx = 0) {
     ASSERT_NE(results_, nullptr) << "Results not initialized - call setupResults first";
 
-    auto view = results_->view();
-    const int pairIdx = targetMolIdx * view.numQueries + queryIdx;
+    const int pairIdx = targetMolIdx * results_->numQueries() + queryIdx;
     const int bufferIdx = pairIdx * maxTargetAtoms_ + targetAtomIdx;
 
     std::vector<uint32_t> hostBits(1);
     cudaCheckError(cudaMemcpyAsync(hostBits.data(),
-                                   view.recursiveMatchBits + bufferIdx,
+                                   results_->recursiveMatchBits() + bufferIdx,
                                    sizeof(uint32_t),
                                    cudaMemcpyDeviceToHost,
                                    stream_.stream()));

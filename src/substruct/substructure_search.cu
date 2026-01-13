@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "substructure_search.cuh"
+#include "substructure_search.h"
 #include "substructure_search_internal.cuh"
 #include "substruct_kernels.h"
 
@@ -51,9 +51,6 @@
 namespace nvMolKit {
 
 namespace {
-
-constexpr std::size_t kMaxTargetAtoms = kLabelMaxTargetAtoms;
-constexpr std::size_t kMaxQueryAtoms  = kLabelMaxQueryAtoms;
 
 void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuTargets,
                                     const std::vector<int>&                gpuTargetIndices,
@@ -522,25 +519,6 @@ void MiniBatchResultsDevice::setQueryAtomCounts(const int* queryAtomCounts, size
   queryAtomCounts_.copyFromHost(queryAtomCounts, count);
 }
 
-SubstructMatchResultsDeviceView MiniBatchResultsDevice::view() const {
-  SubstructMatchResultsDeviceView v;
-  v.matchCounts              = matchCounts_.data();
-  v.reportedCounts           = reportedCounts_.data();
-  v.pairMatchStarts          = pairMatchStarts_.data();
-  v.matchIndices             = matchIndices_.data();
-  v.numQueries               = numQueries_;
-  v.queryAtomCounts          = queryAtomCounts_.data();
-  v.overflowBuffer           = overflowBuffer_.data();
-  v.overflowEntriesPerBuffer = kOverflowEntriesPerBuffer;
-  v.overflowBuffersPerBlock  = overflowBuffersPerBlock_;
-  v.recursiveMatchBits       = recursiveMatchBits_.data();
-  v.maxTargetAtoms           = maxTargetAtoms_;
-  v.labelMatrixBuffer        = labelMatrixBuffer_.data();
-  v.maxMatchesToFind         = maxMatchesToFind_;
-  v.countOnly                = countOnly_;
-  return v;
-}
-
 void MiniBatchResultsDevice::zeroRecursiveBits() {
   recursiveMatchBits_.zero();
 }
@@ -710,17 +688,15 @@ void launchLabelAndMatch(const std::vector<int>&      miniBatchLocalIndices,
   }
   miniBatchLocalIndicesDev.copyFromHost(miniBatchLocalIndicesHostPtr, numPairsInGroup);
 
-  SubstructMatchResultsDeviceView miniBatchView = executor.deviceResults.view();
-
   launchLabelMatrixKernel(
     targetsDevice.view(),
     queriesDevice.view(),
     globalPairIndicesDev.data(),
     numPairsInGroup,
     ctx.numQueries,
-    miniBatchView.labelMatrixBuffer,
-    miniBatchView.recursiveMatchBits,
-    miniBatchView.maxTargetAtoms,
+    executor.deviceResults.labelMatrixBuffer(),
+    executor.deviceResults.recursiveMatchBits(),
+    executor.deviceResults.maxTargetAtoms(),
     miniBatchLocalIndicesDev.data(),
     stream);
 
@@ -728,7 +704,7 @@ void launchLabelAndMatch(const std::vector<int>&      miniBatchLocalIndices,
     algorithm,
     targetsDevice.view(),
     queriesDevice.view(),
-    miniBatchView,
+    executor.deviceResults,
     globalPairIndicesDev.data(),
     numPairsInGroup,
     ctx.numQueries,
@@ -757,7 +733,6 @@ void launchRecursivePaintKernels(
 
   scratch.setStream(stream);
 
-  const auto miniBatchView = miniBatchResults.view();
   constexpr int gsiBuffersPerBlock = 2;
 
   const int maxPaintPairsPerSubBatch = std::max(miniBatchSize, 1024);
@@ -812,7 +787,7 @@ void launchRecursivePaintKernels(
       scratch.patternEntries.copyFromHost(scratch.patternsAtDepthHost[bufferIdx], numPatternsInSubBatch);
       scratch.recordCopy(bufferIdx, scratch.patternEntries.stream());
 
-      const uint32_t* recursiveBitsForLabel = (currentDepth > 0) ? miniBatchView.recursiveMatchBits : nullptr;
+      const uint32_t* recursiveBitsForLabel = (currentDepth > 0) ? miniBatchResults.recursiveMatchBits() : nullptr;
 
       launchLabelMatrixPaintKernel(
         targetsDevice.view(),
@@ -826,7 +801,7 @@ void launchRecursivePaintKernels(
         scratch.labelMatrixBuffer.data(),
         firstTargetInMiniBatch,
         recursiveBitsForLabel,
-        miniBatchView.maxTargetAtoms,
+        miniBatchResults.maxTargetAtoms(),
         stream);
 
       launchSubstructPaintKernel(
@@ -836,8 +811,8 @@ void launchRecursivePaintKernels(
         scratch.patternEntries.data(),
         static_cast<int>(numPatternsInSubBatch),
         numBlocksInSubBatch,
-        miniBatchView.recursiveMatchBits,
-        miniBatchView.maxTargetAtoms,
+        miniBatchResults.recursiveMatchBits(),
+        miniBatchResults.maxTargetAtoms(),
         numQueries,
         0, 0,
         miniBatchPairOffset,
@@ -888,17 +863,15 @@ void uploadAndLaunchMiniBatch(GpuExecutor&               executor,
     }
     executor.pairIndicesDev.copyFromHost(executor.pairIndicesHost, executor.numPairsInMiniBatch);
 
-    SubstructMatchResultsDeviceView miniBatchView = executor.deviceResults.view();
-
     launchLabelMatrixKernel(
       targetsDevice.view(),
       queriesDevice.view(),
       executor.pairIndicesDev.data(),
       executor.numPairsInMiniBatch,
       ctx.numQueries,
-      miniBatchView.labelMatrixBuffer,
-      miniBatchView.recursiveMatchBits,
-      miniBatchView.maxTargetAtoms,
+      executor.deviceResults.labelMatrixBuffer(),
+      executor.deviceResults.recursiveMatchBits(),
+      executor.deviceResults.maxTargetAtoms(),
       nullptr,
       executorStream);
 
@@ -906,7 +879,7 @@ void uploadAndLaunchMiniBatch(GpuExecutor&               executor,
       algorithm,
       targetsDevice.view(),
       queriesDevice.view(),
-      miniBatchView,
+      executor.deviceResults,
       executor.pairIndicesDev.data(),
       executor.numPairsInMiniBatch,
       ctx.numQueries,
@@ -1775,7 +1748,6 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
 
   scratch.setStream(stream);
 
-  const auto miniBatchView = miniBatchResults.view();
   constexpr int gsiBuffersPerBlock = 2;
 
   const int maxPaintPairsPerSubBatch = std::max(miniBatchSize, 1024);
@@ -1836,7 +1808,7 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
       scratch.patternEntries.copyFromHost(scratch.patternsAtDepthHost[bufferIdx], numPatternsInSubBatch);
       scratch.recordCopy(bufferIdx, scratch.patternEntries.stream());
 
-      const uint32_t* recursiveBitsForLabel = (currentDepth > 0) ? miniBatchView.recursiveMatchBits : nullptr;
+      const uint32_t* recursiveBitsForLabel = (currentDepth > 0) ? miniBatchResults.recursiveMatchBits() : nullptr;
 
       launchLabelMatrixPaintKernel(
         targetsDevice.view(),
@@ -1850,7 +1822,7 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
         scratch.labelMatrixBuffer.data(),
         firstTargetInMiniBatch,
         recursiveBitsForLabel,
-        miniBatchView.maxTargetAtoms,
+        miniBatchResults.maxTargetAtoms(),
         stream);
 
       launchSubstructPaintKernel(
@@ -1860,8 +1832,8 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
         scratch.patternEntries.data(),
         static_cast<int>(numPatternsInSubBatch),
         numBlocksInSubBatch,
-        miniBatchView.recursiveMatchBits,
-        miniBatchView.maxTargetAtoms,
+        miniBatchResults.recursiveMatchBits(),
+        miniBatchResults.maxTargetAtoms(),
         numQueries,
         0, 0,
         miniBatchPairOffset,
@@ -2027,7 +1999,7 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
 #pragma omp for nowait
     for (int i = 0; i < numTargets; ++i) {
       targetAtomCounts[i] = targets[i]->getNumAtoms();
-      needsFallback[i] = (targetAtomCounts[i] > kLabelMaxTargetAtoms) || requiresRDKitFallback(targets[i]);
+      needsFallback[i] = (targetAtomCounts[i] > kMaxTargetAtoms) || requiresRDKitFallback(targets[i]);
     }
 #pragma omp for
     for (int i = 0; i < numQueries; ++i) {
