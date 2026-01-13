@@ -49,7 +49,7 @@ from multiprocessing import Pool
 from typing import Callable
 
 import nvtx
-from rdkit import Chem
+from rdkit import Chem, RDLogger
 from tqdm.contrib.concurrent import process_map
 
 
@@ -84,30 +84,52 @@ def _parse_smiles(smi: str, sanitize: bool) -> Chem.Mol | None:
 
 def load_smiles(filepath: str, max_count: int = 0, sanitize: bool = True) -> list[Chem.Mol]:
     """Load and parse molecules from a SMILES file."""
+    mols = []
     smiles_list = []
+    
+    # Use a 10% buffer to account for potential parse failures
+    # "On parse failures continue down the file. Load 10% more molecules than needed"
+    read_limit = int(max_count * 1.1) if max_count > 0 else 0
+    
     with open(filepath, "r") as f:
-        for line in f:
-            if max_count > 0 and len(smiles_list) >= max_count:
+        for i, line in enumerate(f):
+            if read_limit > 0 and (len(mols) + len(smiles_list)) >= read_limit:
                 break
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            smiles_list.append(line.split()[0])
+            
+            smi = line.split()[0]
+            if i == 0:
+                # Try to parse line 0 quietly in case it's a header
+                RDLogger.DisableLog("rdApp.*")
+                mol = Chem.MolFromSmiles(smi, sanitize=sanitize)
+                RDLogger.EnableLog("rdApp.*")
+                if mol:
+                    mols.append(mol)
+                # If mol is None, we skip it and don't count as failure (potential header)
+            else:
+                smiles_list.append(smi)
     
-    parse_func = partial(_parse_smiles, sanitize=sanitize)
-    parsed = process_map(parse_func, smiles_list, desc="Parsing molecules", chunksize=1000)
-    
-    mols = []
-    parse_failures = 0
-    for mol in parsed:
-        if mol is None:
-            parse_failures += 1
-        else:
-            mols.append(mol)
-    
+    if smiles_list:
+        parse_func = partial(_parse_smiles, sanitize=sanitize)
+        parsed = process_map(parse_func, smiles_list, desc="Parsing molecules", chunksize=1000)
+        
+        parse_failures = 0
+        for mol in parsed:
+            if mol is None:
+                parse_failures += 1
+            else:
+                mols.append(mol)
+        
+        if parse_failures > 0:
+            print(f"    ({parse_failures} parse failures)")
+
+    # Trim to exactly max_count if we have more than requested
+    if max_count > 0 and len(mols) > max_count:
+        mols = mols[:max_count]
+
     print(f"  Loaded {len(mols)} molecules from {filepath}")
-    if parse_failures > 0:
-        print(f"    ({parse_failures} parse failures)")
     return mols
 
 
@@ -225,6 +247,7 @@ def bench_nvmolkit(
 ) -> tuple[float, float, object]:
     """Benchmark nvmolkit GPU substructure search."""
     import torch
+    
     from nvmolkit.substructure import hasSubstructMatch, getSubstructMatches
     
     results_data: object = None
@@ -327,7 +350,8 @@ def main():
             config.presort = True
             if args.max_matches > 0:
                 config.maxMatches = args.max_matches
-            
+            torch.cuda.cudart().cudaProfilerStart()
+
             print("\nWarming up nvmolkit...")
             warmup_mols = mols[:10]
             with nvtx.annotate("nvmolkit_warmup", color="purple"):
@@ -343,6 +367,8 @@ def main():
             )
             print(f"  nvmolkit:        {nvmolkit_avg:10.2f} ms (± {nvmolkit_std:.2f} ms)")
             results["nvmolkit"] = (nvmolkit_avg, nvmolkit_std, nvmolkit_results)
+            torch.cuda.cudart().cudaProfilerStop()
+
         except ImportError as e:
             print(f"  nvmolkit: SKIPPED (import error: {e})")
     
@@ -403,9 +429,13 @@ def main():
             print(f"  Full match agreement: {matches}/{total} ({pct:.1f}%)")
     
     print("\n\nCSV Results:")
-    print("method,mode,num_mols,num_patterns,max_matches,time_ms,std_ms")
+    print("method,mode,num_mols,num_patterns,max_matches,batch_size,workers,prep_threads,rdkit_threads,time_ms,std_ms")
     for name, (avg_ms, std_ms, _) in results.items():
-        print(f"{name},{args.mode},{len(mols)},{num_patterns},{args.max_matches},{avg_ms:.2f},{std_ms:.2f}")
+        batch_size = args.batch_size if name == "nvmolkit" else "N/A"
+        workers = args.workers if name == "nvmolkit" else "N/A"
+        prep_threads = args.prep_threads if name == "nvmolkit" else "N/A"
+        rdkit_threads = args.rdkit_threads if name == "rdkit" else "N/A"
+        print(f"{name},{args.mode},{len(mols)},{num_patterns},{args.max_matches},{batch_size},{workers},{prep_threads},{rdkit_threads},{avg_ms:.2f},{std_ms:.2f}")
 
 
 if __name__ == "__main__":
