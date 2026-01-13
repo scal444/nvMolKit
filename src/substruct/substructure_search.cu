@@ -273,9 +273,9 @@ struct GpuExecutor {
   ScopedCudaEvent          postRecursionDoneEvent;
   std::array<AsyncDeviceVector<int>, kMaxRecursionDepth + 1> matchGlobalPairIndices;
   std::array<AsyncDeviceVector<int>, kMaxRecursionDepth + 1> matchMiniBatchLocalIndices;
-  std::array<std::vector<int>, kMaxRecursionDepth + 1> matchPairsHost;
   std::array<int*, kMaxRecursionDepth + 1> matchGlobalPairIndicesHost = {};
   std::array<int*, kMaxRecursionDepth + 1> matchMiniBatchLocalIndicesHost = {};
+  std::array<int, kMaxRecursionDepth + 1> matchPairsCounts = {};
   int perDepthCapacity = 0;
   int maxDepthInMiniBatch = 0;
 
@@ -555,15 +555,16 @@ void precomputePipelineSchedule(GpuExecutor&               executor,
   ScopedNvtxRange scheduleRange("CPU: precomputePipelineSchedule");
   int maxDepth = 0;
 
-  for (auto& vec : executor.matchPairsHost) {
-    vec.clear();
-  }
+  executor.matchPairsCounts.fill(0);
 
   int queryIdx = miniBatchStart % ctx.numQueries;
   for (int i = 0; i < numPairsInMiniBatch; ++i) {
     const int depth = ctx.queryDepths[queryIdx];
+    const int offset = executor.matchPairsCounts[depth]++;
 
-    executor.matchPairsHost[depth].push_back(i);
+    executor.matchGlobalPairIndicesHost[depth][offset] = executor.pairIndicesHost[i];
+    executor.matchMiniBatchLocalIndicesHost[depth][offset] = i;
+
     if (depth > maxDepth) {
       maxDepth = depth;
     }
@@ -657,7 +658,7 @@ void prepareMiniBatchOnCPU(GpuExecutor&                 executor,
 /**
  * @brief Launch label matrix and match kernels for a subset of pairs.
  */
-void launchLabelAndMatch(const std::vector<int>&      miniBatchLocalIndices,
+void launchLabelAndMatch(int                          numPairsInGroup,
                          GpuExecutor&                 executor,
                          const ThreadWorkerContext&   ctx,
                          MoleculesDevice&             targetsDevice,
@@ -667,22 +668,12 @@ void launchLabelAndMatch(const std::vector<int>&      miniBatchLocalIndices,
                          int                          depthGroupIdx) {
   ScopedNvtxRange launchRange("launchLabelAndMatch depth=" + std::to_string(depthGroupIdx));
   
-  if (miniBatchLocalIndices.empty()) {
+  if (numPairsInGroup == 0) {
     return;
   }
 
-  const int numPairsInGroup = static_cast<int>(miniBatchLocalIndices.size());
-
   int* globalPairIndicesHost = executor.matchGlobalPairIndicesHost[depthGroupIdx];
   int* miniBatchLocalIndicesHostPtr = executor.matchMiniBatchLocalIndicesHost[depthGroupIdx];
-  
-  ScopedNvtxRange prepareRange("CPU: Prepare host index arrays");
-
-  for (int i = 0; i < numPairsInGroup; ++i) {
-    globalPairIndicesHost[i] = executor.pairIndicesHost[miniBatchLocalIndices[i]];
-    miniBatchLocalIndicesHostPtr[i] = miniBatchLocalIndices[i];
-  }
-  prepareRange.pop();
 
   auto& globalPairIndicesDev = executor.matchGlobalPairIndices[depthGroupIdx];
   auto& miniBatchLocalIndicesDev = executor.matchMiniBatchLocalIndices[depthGroupIdx];
@@ -948,7 +939,7 @@ void uploadAndLaunchMiniBatch(GpuExecutor&               executor,
   preprocRange.pop();
 
   ScopedNvtxRange depth0Range("Match depth-0 pairs (executorStream)");
-  launchLabelAndMatch(executor.matchPairsHost[0], executor, ctx, targetsDevice, queriesDevice,
+  launchLabelAndMatch(executor.matchPairsCounts[0], executor, ctx, targetsDevice, queriesDevice,
                       algorithm, executorStream, 0);
   depth0Range.pop();
 
@@ -962,7 +953,7 @@ void uploadAndLaunchMiniBatch(GpuExecutor&               executor,
     cudaCheckError(cudaStreamWaitEvent(postStream, depthEventPtrs[depth - 1], 0));
     waitRange.pop();
 
-    launchLabelAndMatch(executor.matchPairsHost[depth], executor, ctx, targetsDevice, queriesDevice,
+    launchLabelAndMatch(executor.matchPairsCounts[depth], executor, ctx, targetsDevice, queriesDevice,
                         algorithm, postStream, depth);
   }
   cudaCheckError(cudaEventRecord(executor.postRecursionDoneEvent.event(), postStream));
@@ -1105,9 +1096,7 @@ void runnerWorkerInline(int                               workerIdx,
       }
       ++localMiniBatchCount;
 
-      ScopedNvtxRange prepRange("CPU prep mini-batch " + std::to_string(miniBatchIdx));
       prepareMiniBatchOnCPU(*executor, ctx, queriesHost, leafSubpatterns, miniBatchStart, effectiveMiniBatchSize);
-      prepRange.pop();
 
       ScopedNvtxRange launchRange("GPU launch mini-batch " + std::to_string(miniBatchIdx));
       uploadAndLaunchMiniBatch(*executor, ctx, targetsDevice, queriesDevice, leafSubpatterns, algorithm);

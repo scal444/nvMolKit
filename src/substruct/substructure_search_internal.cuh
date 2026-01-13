@@ -391,12 +391,13 @@ struct RecursivePipelineContext {
   /// Matching: mini-batch-local indices for each depth group (depth 0..kMaxRecursionDepth)
   std::array<AsyncDeviceVector<int>, kMaxRecursionDepth + 1> matchMiniBatchLocalIndices;
 
-  /// Host-side schedule: pairs to match after each depth level completes
-  std::array<std::vector<int>, kMaxRecursionDepth + 1> matchPairsHost;
-
   /// Pointers to pinned buffers for H2D transfers (reference consolidated buffer)
   std::array<int*, kMaxRecursionDepth + 1> matchGlobalPairIndicesHost = {};
   std::array<int*, kMaxRecursionDepth + 1> matchMiniBatchLocalIndicesHost = {};
+
+  /// Counts of pairs per depth level (populated during schedule precomputation)
+  std::array<int, kMaxRecursionDepth + 1> matchPairsCounts = {};
+
   int perDepthCapacity = 0;
 
   int maxDepthInMiniBatch = 0;
