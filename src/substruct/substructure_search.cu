@@ -553,19 +553,26 @@ void precomputePipelineSchedule(GpuExecutor&               executor,
                                 int                        numPairsInMiniBatch,
                                 int                        miniBatchStart) {
   ScopedNvtxRange scheduleRange("CPU: precomputePipelineSchedule");
-  executor.maxDepthInMiniBatch = 0;
+  int maxDepth = 0;
 
   for (auto& vec : executor.matchPairsHost) {
     vec.clear();
   }
 
+  int queryIdx = miniBatchStart % ctx.numQueries;
   for (int i = 0; i < numPairsInMiniBatch; ++i) {
-    const int queryIdx = (miniBatchStart + i) % ctx.numQueries;
-    const int depth    = ctx.queryDepths[queryIdx];
+    const int depth = ctx.queryDepths[queryIdx];
 
     executor.matchPairsHost[depth].push_back(i);
-    executor.maxDepthInMiniBatch = std::max(executor.maxDepthInMiniBatch, depth);
+    if (depth > maxDepth) {
+      maxDepth = depth;
+    }
+
+    if (++queryIdx >= ctx.numQueries) {
+      queryIdx = 0;
+    }
   }
+  executor.maxDepthInMiniBatch = maxDepth;
 }
 
 void prepareRecursiveMiniBatchOnCPU(GpuExecutor&               executor,
@@ -579,26 +586,29 @@ void prepareRecursiveMiniBatchOnCPU(GpuExecutor&               executor,
     vec.clear();
   }
 
-  const int firstQueryInMiniBatch = executor.miniBatchStart % ctx.numQueries;
-  const int numUniqueQueries  = std::min(executor.numPairsInMiniBatch, ctx.numQueries);
+  const int numUniqueQueries = std::min(executor.numPairsInMiniBatch, ctx.numQueries);
 
-  executor.recursiveMaxDepth = 0;
+  int maxDepth = 0;
+  int queryIdx = executor.miniBatchStart % ctx.numQueries;
   for (int i = 0; i < numUniqueQueries; ++i) {
-    const int queryIdx = (firstQueryInMiniBatch + i) % ctx.numQueries;
+    if (ctx.queryHasPatterns[queryIdx]) {
+      const int queryMaxDepth = ctx.queryMaxDepths[queryIdx];
+      if (queryMaxDepth > maxDepth) {
+        maxDepth = queryMaxDepth;
+      }
 
-    if (!ctx.queryHasPatterns[queryIdx]) {
-      continue;
+      for (int d = 0; d <= queryMaxDepth; ++d) {
+        const auto& srcEntries = leafSubpatterns.perQueryPatterns[queryIdx][d];
+        auto& destEntries = executor.patternsAtDepth[d];
+        destEntries.insert(destEntries.end(), srcEntries.begin(), srcEntries.end());
+      }
     }
 
-    const int queryMaxDepth = ctx.queryMaxDepths[queryIdx];
-    executor.recursiveMaxDepth = std::max(executor.recursiveMaxDepth, queryMaxDepth);
-
-    for (int d = 0; d <= queryMaxDepth; ++d) {
-      const auto& srcEntries = leafSubpatterns.perQueryPatterns[queryIdx][d];
-      auto& destEntries = executor.patternsAtDepth[d];
-      destEntries.insert(destEntries.end(), srcEntries.begin(), srcEntries.end());
+    if (++queryIdx >= ctx.numQueries) {
+      queryIdx = 0;
     }
   }
+  executor.recursiveMaxDepth = maxDepth;
 
   executor.firstTargetInMiniBatch = executor.miniBatchStart / ctx.numQueries;
   const int lastTargetInMiniBatch = (executor.miniBatchStart + executor.numPairsInMiniBatch - 1) / ctx.numQueries;
@@ -620,25 +630,26 @@ void prepareMiniBatchOnCPU(GpuExecutor&                 executor,
   executor.miniBatchStart       = miniBatchStart;
   executor.numPairsInMiniBatch  = numPairsInMiniBatch;
 
+  const bool useMaxMatchesLimit = ctx.maxMatches > 0;
+  int sortedTargetIdx = miniBatchStart / ctx.numQueries;
+  int sortedQueryIdx  = miniBatchStart % ctx.numQueries;
+
   executor.miniBatchPairMatchStarts[0] = 0;
   for (int i = 0; i < numPairsInMiniBatch; ++i) {
-    const int globalPairIdx = miniBatchStart + i;
-    const int sortedTargetIdx = globalPairIdx / ctx.numQueries;
-    const int sortedQueryIdx  = globalPairIdx % ctx.numQueries;
     const int targetAtoms = ctx.targetAtomCounts[sortedTargetIdx];
     const int queryAtoms  = ctx.queryAtomCounts[sortedQueryIdx];
-    // When maxMatches > 0, limit capacity to maxMatches * queryAtoms
-    // When maxMatches == 0 (unlimited), use heuristic targetAtoms * queryAtoms
-    const int pairCapacity = (ctx.maxMatches > 0) 
-        ? (ctx.maxMatches * queryAtoms) 
+    const int pairCapacity = useMaxMatchesLimit
+        ? (ctx.maxMatches * queryAtoms)
         : (targetAtoms * queryAtoms);
     executor.miniBatchPairMatchStarts[i + 1] = executor.miniBatchPairMatchStarts[i] + pairCapacity;
+    executor.pairIndicesHost[i] = miniBatchStart + i;
+
+    if (++sortedQueryIdx >= ctx.numQueries) {
+      sortedQueryIdx = 0;
+      ++sortedTargetIdx;
+    }
   }
   executor.totalMatchIndices = executor.miniBatchPairMatchStarts[numPairsInMiniBatch];
-
-  for (int i = 0; i < numPairsInMiniBatch; ++i) {
-    executor.pairIndicesHost[i] = miniBatchStart + i;
-  }
 
   prepareRecursiveMiniBatchOnCPU(executor, ctx, leafSubpatterns);
 }
@@ -967,16 +978,16 @@ void accumulateMiniBatchResults(GpuExecutor&                      executor,
                                 RDKitFallbackQueue*               fallbackQueue = nullptr) {
   ScopedNvtxRange accumRange("accumulateMiniBatchResults");
 
-
-  ScopedNvtxRange processRange("Process mini-batch results");
+  const bool hasTargetSort = ctx.targetSortOrder != nullptr;
+  const bool hasQuerySort = ctx.querySortOrder != nullptr;
   std::unique_lock<std::mutex> lock(resultsMutex, std::defer_lock);
   for (int i = 0; i < executor.numPairsInMiniBatch; ++i) {
     const int pairIdxInMacrobatch = executor.miniBatchStart + i;
     const int sortedTargetIdx = pairIdxInMacrobatch / ctx.numQueries;
     const int sortedQueryIdx  = pairIdxInMacrobatch % ctx.numQueries;
 
-    const int targetIdx = ctx.targetSortOrder ? (*ctx.targetSortOrder)[sortedTargetIdx] : sortedTargetIdx;
-    const int queryIdx  = ctx.querySortOrder ? (*ctx.querySortOrder)[sortedQueryIdx] : sortedQueryIdx;
+    const int targetIdx = hasTargetSort ? (*ctx.targetSortOrder)[sortedTargetIdx] : sortedTargetIdx;
+    const int queryIdx  = hasQuerySort ? (*ctx.querySortOrder)[sortedQueryIdx] : sortedQueryIdx;
 
     const int queryAtoms      = ctx.queryAtomCounts[sortedQueryIdx];
     const int actualMatches   = executor.matchCountsHost[i];
@@ -1007,7 +1018,6 @@ void accumulateMiniBatchResults(GpuExecutor&                      executor,
       }
     }
   }
-  processRange.pop();
 }
 
 constexpr int kMaxExecutorsPerRunner = 8;
