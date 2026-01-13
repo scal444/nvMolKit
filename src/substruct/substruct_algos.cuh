@@ -324,7 +324,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
 
   const int tid    = threadIdx.x;
   const int laneId = tid % 32;
-  const int warpId = tid / 32;
+  const int warpId = __shfl_sync(0xFFFFFFFF, tid / 32, 0);
   constexpr int numWarps = kThreadsPerBlock / 32;
 
   const int numQueryAtoms  = query.numAtoms;
