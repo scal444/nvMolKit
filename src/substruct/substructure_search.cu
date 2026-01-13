@@ -965,17 +965,15 @@ void accumulateMiniBatchResults(GpuExecutor&                      executor,
                                 SubstructSearchResults&           results,
                                 std::mutex&                       resultsMutex,
                                 RDKitFallbackQueue*               fallbackQueue = nullptr) {
-  ScopedNvtxRange accumRange("accumulateMiniBatchResults (dynamic)");
+  ScopedNvtxRange accumRange("accumulateMiniBatchResults");
 
-  ScopedNvtxRange waitRange("Wait for D2H copy");
-  cudaCheckError(cudaEventSynchronize(executor.copyDoneEvent.event()));
-  waitRange.pop();
 
   ScopedNvtxRange processRange("Process mini-batch results");
+  std::unique_lock<std::mutex> lock(resultsMutex, std::defer_lock);
   for (int i = 0; i < executor.numPairsInMiniBatch; ++i) {
-    const int globalPairIdx   = executor.miniBatchStart + i;
-    const int sortedTargetIdx = globalPairIdx / ctx.numQueries;
-    const int sortedQueryIdx  = globalPairIdx % ctx.numQueries;
+    const int pairIdxInMacrobatch = executor.miniBatchStart + i;
+    const int sortedTargetIdx = pairIdxInMacrobatch / ctx.numQueries;
+    const int sortedQueryIdx  = pairIdxInMacrobatch % ctx.numQueries;
 
     const int targetIdx = ctx.targetSortOrder ? (*ctx.targetSortOrder)[sortedTargetIdx] : sortedTargetIdx;
     const int queryIdx  = ctx.querySortOrder ? (*ctx.querySortOrder)[sortedQueryIdx] : sortedQueryIdx;
@@ -996,22 +994,17 @@ void accumulateMiniBatchResults(GpuExecutor&                      executor,
     if (reportedMatches > 0) {
       const int miniBatchLocalOffset = executor.miniBatchPairMatchStarts[i];
 
-      std::vector<std::vector<int>> pairMatches;
-      pairMatches.reserve(reportedMatches);
+      lock.lock();
+      auto& targetMatches = results.getMatchesMut(targetIdx, queryIdx);
+      lock.unlock();
 
+      targetMatches.reserve(targetMatches.size() + reportedMatches);
       for (int m = 0; m < reportedMatches; ++m) {
-        std::vector<int> match(queryAtoms);
+        std::vector<int>& match = targetMatches.emplace_back(queryAtoms);
         for (int a = 0; a < queryAtoms; ++a) {
           match[a] = executor.matchIndicesHost[miniBatchLocalOffset + m * queryAtoms + a];
         }
-        pairMatches.push_back(std::move(match));
       }
-
-      std::lock_guard<std::mutex> lock(resultsMutex);
-      auto& targetMatches = results.getMatchesMut(targetIdx, queryIdx);
-      targetMatches.insert(targetMatches.end(),
-                           std::make_move_iterator(pairMatches.begin()),
-                           std::make_move_iterator(pairMatches.end()));
     }
   }
   processRange.pop();
@@ -1745,8 +1738,6 @@ void preprocessRecursiveSmartsBatchedWithEvents(const MoleculesDevice&          
   const int firstTargetInMiniBatch = miniBatchPairOffset / numQueries;
   const int lastTargetInMiniBatch  = (miniBatchPairOffset + miniBatchSize - 1) / numQueries;
   const int numTargetsInMiniBatch  = lastTargetInMiniBatch - firstTargetInMiniBatch + 1;
-
-  scratch.setStream(stream);
 
   constexpr int gsiBuffersPerBlock = 2;
 
