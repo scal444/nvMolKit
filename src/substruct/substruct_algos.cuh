@@ -23,6 +23,7 @@
 #include "flat_bit_vect.h"
 #include "global_pool.cuh"
 #include "molecules_device.cuh"
+#include "packed_bonds_device.cuh"
 #include "substruct_debug.h"
 #include "substruct_types.h"
 
@@ -139,178 +140,6 @@ struct CandidateList {
 };
 
 // =============================================================================
-// Edge Consistency Checking
-// =============================================================================
-
-/**
- * @brief Check if a query bond type matches a target bond type.
- *
- * Handles "any bond" (type 0) which matches any target bond type.
- *
- * @param queryBondType Query bond type (0 = any, 1 = single, 2 = double, etc.)
- * @param targetBondType Target bond type
- * @return true if bond types are compatible
- */
-__device__ __forceinline__ bool bondTypeMatches(int queryBondType, int targetBondType) {
-  // Query bond type 0 (UNSPECIFIED) means "any bond" - matches everything
-  if (queryBondType == 0) {
-    return true;
-  }
-  return queryBondType == targetBondType;
-}
-
-/**
- * @brief Check if ring bond constraints are satisfied.
- *
- * @param queryFlags Bond query flags (BondQueryIsRingBond, BondQueryNotRingBond)
- * @param targetIsInRing Whether the target bond is in a ring
- * @return true if ring constraints are satisfied
- */
-__device__ __forceinline__ bool ringBondConstraintsSatisfied(uint8_t queryFlags, bool targetIsInRing) {
-  // Check ring bond constraint
-  if (queryFlags & BondQueryIsRingBond) {
-    if (!targetIsInRing) {
-      return false;
-    }
-  }
-  if (queryFlags & BondQueryNotRingBond) {
-    if (targetIsInRing) {
-      return false;
-    }
-  }
-  return true;
-}
-
-/**
- * @brief Check if extending partial match with (queryAtom -> targetAtom) is edge-consistent.
- *
- * For each already-matched neighbor of queryAtom in the query graph, verify that
- * the corresponding edge exists in the target graph between targetAtom and the
- * mapped neighbor.
- *
- * @param target Target molecule view
- * @param query Query molecule view
- * @param mapping Current partial mapping (query -> target)
- * @param queryAtom Query atom being matched (also the current depth)
- * @param targetAtom Candidate target atom
- * @return true if edge consistency is satisfied
- */
-__device__ __forceinline__ bool checkEdgeConsistency(const MoleculeView& target,
-                                                     const MoleculeView& query,
-                                                     const int8_t*       mapping,
-                                                     int                 queryAtom,
-                                                     int                 targetAtom) {
-  const int  queryDegree      = query.getAtomDegree(queryAtom);
-  const bool hasBondQueryData = query.hasBondQueryData();
-  // queryAtom is the current depth - atoms 0..queryAtom-1 are already mapped
-  const int  depth            = queryAtom;
-
-  for (int i = 0; i < queryDegree; ++i) {
-    const int neighborQueryAtom = query.getNeighborAtomIdx(queryAtom, i);
-
-    // Only check neighbors that are already mapped (index < current depth)
-    if (neighborQueryAtom >= depth) {
-      continue;
-    }
-
-    const int neighborTargetAtom = mapping[neighborQueryAtom];
-    const int queryBondIdx       = query.getNeighborBondIdx(queryAtom, i);
-
-    // Get query bond info
-    int      queryBondType       = query.getBond(queryBondIdx, threadIdx.x, blockIdx.x).bondType;
-    uint8_t  queryBondFlags      = 0;
-    uint16_t queryAllowedBondTypes = 0;
-    if (hasBondQueryData) {
-      const BondQueryData& bqd = query.getBondQuery(queryBondIdx);
-      queryBondType       = bqd.bondType;
-      queryBondFlags      = bqd.queryFlags;
-      queryAllowedBondTypes = bqd.allowedBondTypes;
-    }
-
-    // Check if targetAtom has an edge to neighborTargetAtom with compatible bond
-    bool      foundEdge    = false;
-    const int targetDegree = target.getAtomDegree(targetAtom);
-
-    for (int j = 0; j < targetDegree; ++j) {
-      if (target.getNeighborAtomIdx(targetAtom, j) == neighborTargetAtom) {
-        const int       targetBondIdx = target.getNeighborBondIdx(targetAtom, j);
-        const BondData& targetBond    = target.getBond(targetBondIdx, threadIdx.x, blockIdx.x);
-
-        if constexpr (kDebugEdgeConsistency) {
-          if (threadIdx.x == 0 && blockIdx.x == 0) {
-            printf("[EdgeCheck] q%d->q%d (t%d->t%d): qBondType=%d, tBondType=%d, qFlags=0x%x, qAllowed=0x%x, tInRing=%d\n",
-                   queryAtom, neighborQueryAtom, targetAtom, neighborTargetAtom,
-                   queryBondType, targetBond.bondType, queryBondFlags, queryAllowedBondTypes, targetBond.isInRing);
-          }
-        }
-
-        // Check bond type compatibility
-        if (queryBondFlags & BondQueryNeverMatches) {
-          // Impossible constraint (e.g., single AND aromatic) - never matches
-          if constexpr (kDebugEdgeConsistency) {
-            if (threadIdx.x == 0 && blockIdx.x == 0) {
-              printf("[EdgeCheck]   -> FAIL: NeverMatches flag set\n");
-            }
-          }
-          continue;
-        } else if (queryBondFlags & BondQueryUseBondMask) {
-          // Bond OR pattern: check if target bond type is in allowed mask
-          const int tbt = targetBond.bondType;
-          if (tbt < 0 || tbt >= 16 || !(queryAllowedBondTypes & (1u << tbt))) {
-            if constexpr (kDebugEdgeConsistency) {
-              if (threadIdx.x == 0 && blockIdx.x == 0) {
-                printf("[EdgeCheck]   -> FAIL: bondMask check (tbt=%d not in mask 0x%x)\n", tbt, queryAllowedBondTypes);
-              }
-            }
-            continue;
-          }
-        } else if (!bondTypeMatches(queryBondType, targetBond.bondType)) {
-          if constexpr (kDebugEdgeConsistency) {
-            if (threadIdx.x == 0 && blockIdx.x == 0) {
-              printf("[EdgeCheck]   -> FAIL: bondType mismatch (%d != %d)\n", queryBondType, targetBond.bondType);
-            }
-          }
-          continue;
-        }
-
-        // Check ring bond constraints if present
-        if (queryBondFlags & (BondQueryIsRingBond | BondQueryNotRingBond)) {
-          bool targetIsInRing = (targetBond.isInRing != 0);
-          if (!ringBondConstraintsSatisfied(queryBondFlags, targetIsInRing)) {
-            if constexpr (kDebugEdgeConsistency) {
-              if (threadIdx.x == 0 && blockIdx.x == 0) {
-                printf("[EdgeCheck]   -> FAIL: ring constraint (flags=0x%x, targetInRing=%d)\n", queryBondFlags, targetIsInRing);
-              }
-            }
-            continue;
-          }
-        }
-
-        if constexpr (kDebugEdgeConsistency) {
-          if (threadIdx.x == 0 && blockIdx.x == 0) {
-            printf("[EdgeCheck]   -> OK\n");
-          }
-        }
-        foundEdge = true;
-        break;
-      }
-    }
-
-    if (!foundEdge) {
-      if constexpr (kDebugEdgeConsistency) {
-        if (threadIdx.x == 0 && blockIdx.x == 0) {
-          printf("[EdgeCheck] q%d->q%d (t%d->t%d): NO EDGE FOUND in target\n",
-                 queryAtom, neighborQueryAtom, targetAtom, neighborTargetAtom);
-        }
-      }
-      return false;
-    }
-  }
-
-  return true;
-}
-
-// =============================================================================
 // VF2 Algorithm Implementation
 // =============================================================================
 
@@ -411,7 +240,8 @@ __device__ void vf2SearchGPU(const MoleculeView&                                
       const bool labelOk    = labelMatrix.get(candidateTarget, currentQueryAtom);
       const bool notUsed    = !state.isTargetUsed(candidateTarget);
       const bool edgeOk     = labelOk && notUsed && 
-                              checkEdgeConsistency(target, query, state.mapping, currentQueryAtom, candidateTarget);
+                              checkEdgeConsistencyPacked(target.targetAtomBonds, query.getQueryBonds(currentQueryAtom),
+                                                         state.mapping, currentQueryAtom, candidateTarget);
 
       if (edgeOk) {
         // Extend match
@@ -542,8 +372,7 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
     if (tid == 0) {
       printf("[GSI] numQueryAtoms=%d, numTargetAtoms=%d, effectiveMaxPartials=%d, effectiveMaxOverflow=%d, maxTotal=%d\n",
              numQueryAtoms, numTargetAtoms, effectiveMaxPartials, effectiveMaxOverflow, maxTotal);
-      printf("[GSI] query.hasBondQueryData()=%d, query.hasQueryTrees()=%d\n",
-             query.hasBondQueryData() ? 1 : 0, query.hasQueryTrees() ? 1 : 0);
+      printf("[GSI] query.hasQueryTrees()=%d\n", query.hasQueryTrees() ? 1 : 0);
     }
     __syncthreads();
   }
@@ -693,7 +522,8 @@ __device__ void gsiBFSSearchGPU(const MoleculeView&                             
         if (t < numTargetAtoms) {
           labelOk = labelMatrix.get(t, queryAtom);
           notUsed = !isTargetUsedInMapping(partial, queryAtom, t);
-          edgeOk  = checkEdgeConsistency(target, query, partial, queryAtom, t);
+          edgeOk  = checkEdgeConsistencyPacked(target.targetAtomBonds, query.getQueryBonds(queryAtom),
+                                               partial, queryAtom, t);
           valid   = labelOk && notUsed && edgeOk;
           
           if constexpr (kDebugGSI) {

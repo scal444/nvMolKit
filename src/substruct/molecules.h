@@ -25,6 +25,7 @@
 #include "atom_data_packed.h"
 #include "boolean_tree.cuh"
 #include "device_vector.h"
+#include "packed_bonds.h"
 
 namespace RDKit {
 class ROMol;
@@ -86,22 +87,6 @@ struct AtomData {
 struct BondData {
   uint8_t bondType  = 0;
   uint8_t isInRing  = 0;  ///< 1 if bond is in a ring, 0 otherwise
-};
-
-/**
- * @brief Query flags for bond matching in SMARTS.
- *
- * Bonds can have queries like `-&!@` (single AND not ring bond).
- */
-enum BondQueryFlags : uint8_t {
-  BondQueryNone            = 0,
-  BondQueryIsRingBond      = 1 << 0,  ///< Bond must be in a ring (@)
-  BondQueryNotRingBond     = 1 << 1,  ///< Bond must NOT be in a ring (!@)
-  BondQuerySingleOrAromatic = 1 << 2,  ///< SingleOrAromaticBond query (matches single or aromatic only)
-  BondQueryDoubleOrAromatic = 1 << 3,  ///< DoubleOrAromaticBond query (matches double or aromatic only)
-  BondQueryAromaticOnly    = 1 << 4,  ///< Aromatic bond query (:) - matches aromatic bonds only (type 7 or 12)
-  BondQueryNeverMatches    = 1 << 5,  ///< Impossible constraint (e.g., single AND aromatic)
-  BondQueryUseBondMask     = 1 << 6,  ///< Use allowedBondTypes bitmask for arbitrary OR patterns
 };
 
 /**
@@ -177,24 +162,18 @@ struct RecursivePatternInfo {
  */
 struct MoleculesHost {
   // Batch-level offsets (size = numMolecules + 1)
-  std::vector<int> batchAtomStarts;              ///< Start index into atomData for each molecule
-  std::vector<int> batchBondStarts;              ///< Start index into bondData for each molecule
-  std::vector<int> batchAtomBondStarts;          ///< Start index into atomBondStarts for each molecule
-  std::vector<int> batchOtherAtomIndicesStarts;  ///< Start index into otherAtomIndices for each molecule
-  std::vector<int> batchBondIndicesStarts;       ///< Start index into bondDataIndices for each molecule
+  std::vector<int> batchAtomStarts;  ///< Start index into atomData for each molecule
 
   // Molecule-level data (flattened across all molecules)
-  std::vector<AtomData>  atomData;          ///< Atom properties for all atoms
-  std::vector<BondData>  bondData;          ///< Bond properties for all bonds
-  std::vector<AtomQuery> atomQueries;       ///< Query type per atom (parallel to atomData)
-  std::vector<int16_t>   atomBondStarts;    ///< Cumulative count of bonds per atom (prefix sum)
-  std::vector<int16_t>   otherAtomIndices;  ///< For each atom-bond pair, the other atom index
-  std::vector<int16_t>   bondDataIndices;   ///< For each atom-bond pair, index into bondData
+  std::vector<AtomData>  atomData;     ///< Atom properties for all atoms
+  std::vector<AtomQuery> atomQueries;  ///< Query type per atom (parallel to atomData)
 
   // GPU-optimized packed data (parallel to atomData)
-  std::vector<AtomDataPacked> atomDataPacked;  ///< Packed atom properties for GPU matching
-  std::vector<AtomQueryMask>  atomQueryMasks;  ///< Precomputed query masks (for query molecules only)
-  std::vector<BondTypeCounts> bondTypeCounts;  ///< Precomputed bond type counts per atom
+  std::vector<AtomDataPacked>  atomDataPacked;   ///< Packed atom properties for GPU matching
+  std::vector<AtomQueryMask>   atomQueryMasks;   ///< Precomputed query masks (for query molecules only)
+  std::vector<BondTypeCounts>  bondTypeCounts;   ///< Precomputed bond type counts per atom
+  std::vector<TargetAtomBonds> targetAtomBonds;  ///< Packed bond adjacency for targets (parallel to atomData)
+  std::vector<QueryAtomBonds>  queryAtomBonds;   ///< Packed bond adjacency for queries (parallel to atomData)
 
   // Boolean expression tree data for compound queries (OR/NOT support)
   std::vector<AtomQueryTree>   atomQueryTrees;       ///< Tree metadata per query atom (parallel to atomData)
@@ -203,9 +182,6 @@ struct MoleculesHost {
   std::vector<BondTypeCounts>  queryLeafBondCounts;  ///< Flattened leaf bond counts
   std::vector<int>             atomInstrStarts;      ///< Start index into queryInstructions per atom
   std::vector<int>             atomLeafMaskStarts;   ///< Start index into queryLeafMasks per atom
-
-  // Bond query data for SMARTS (parallel to bondData, only for query molecules)
-  std::vector<BondQueryData> bondQueryData;  ///< Bond query info (type + ring constraints)
 
   // Recursive SMARTS patterns extracted from query molecules (one per molecule in batch)
   std::vector<RecursivePatternInfo> recursivePatterns;
@@ -221,7 +197,6 @@ struct MoleculesHost {
 
   [[nodiscard]] size_t numMolecules() const { return batchAtomStarts.empty() ? 0 : batchAtomStarts.size() - 1; }
   [[nodiscard]] size_t totalAtoms() const { return atomData.size(); }
-  [[nodiscard]] size_t totalBonds() const { return bondData.size(); }
 };
 
 /**
@@ -233,22 +208,16 @@ struct MoleculesHost {
  */
 struct MoleculesDeviceView {
   const int*       batchAtomStarts;
-  const int*       batchBondStarts;
-  const int*       batchAtomBondStarts;
-  const int*       batchOtherAtomIndicesStarts;
-  const int*       batchBondIndicesStarts;
   const AtomData*  atomData;
-  const BondData*  bondData;
   const AtomQuery* atomQueries;
-  const int16_t*   atomBondStarts;
-  const int16_t*   otherAtomIndices;
-  const int16_t*   bondDataIndices;
   int              numMolecules;
 
   // GPU-optimized packed data
-  const AtomDataPacked* atomDataPacked;  ///< Packed atom properties for GPU matching
-  const AtomQueryMask*  atomQueryMasks;  ///< Precomputed query masks (query molecules only)
-  const BondTypeCounts* bondTypeCounts;  ///< Precomputed bond type counts per atom
+  const AtomDataPacked*  atomDataPacked;   ///< Packed atom properties for GPU matching
+  const AtomQueryMask*   atomQueryMasks;   ///< Precomputed query masks (query molecules only)
+  const BondTypeCounts*  bondTypeCounts;   ///< Precomputed bond type counts per atom
+  const TargetAtomBonds* targetAtomBonds;  ///< Packed bond adjacency for targets
+  const QueryAtomBonds*  queryAtomBonds;   ///< Packed bond adjacency for queries
 
   // Boolean expression tree data for compound queries
   const AtomQueryTree*   atomQueryTrees;       ///< Tree metadata per query atom
@@ -257,9 +226,6 @@ struct MoleculesDeviceView {
   const BondTypeCounts*  queryLeafBondCounts;  ///< Flattened leaf bond counts
   const int*             atomInstrStarts;      ///< Start index into queryInstructions per atom
   const int*             atomLeafMaskStarts;   ///< Start index into queryLeafMasks per atom
-
-  // Bond query data for SMARTS
-  const BondQueryData* bondQueryData;  ///< Bond query info (query molecules only)
 };
 
 /**
@@ -292,21 +258,15 @@ class MoleculesDevice {
   int          numMolecules_ = 0;
 
   AsyncDeviceVector<int>       batchAtomStarts_;
-  AsyncDeviceVector<int>       batchBondStarts_;
-  AsyncDeviceVector<int>       batchAtomBondStarts_;
-  AsyncDeviceVector<int>       batchOtherAtomIndicesStarts_;
-  AsyncDeviceVector<int>       batchBondIndicesStarts_;
   AsyncDeviceVector<AtomData>  atomData_;
-  AsyncDeviceVector<BondData>  bondData_;
   AsyncDeviceVector<AtomQuery> atomQueries_;
-  AsyncDeviceVector<int16_t>   atomBondStarts_;
-  AsyncDeviceVector<int16_t>   otherAtomIndices_;
-  AsyncDeviceVector<int16_t>   bondDataIndices_;
 
   // GPU-optimized packed data
-  AsyncDeviceVector<AtomDataPacked> atomDataPacked_;
-  AsyncDeviceVector<AtomQueryMask>  atomQueryMasks_;
-  AsyncDeviceVector<BondTypeCounts> bondTypeCounts_;
+  AsyncDeviceVector<AtomDataPacked>  atomDataPacked_;
+  AsyncDeviceVector<AtomQueryMask>   atomQueryMasks_;
+  AsyncDeviceVector<BondTypeCounts>  bondTypeCounts_;
+  AsyncDeviceVector<TargetAtomBonds> targetAtomBonds_;
+  AsyncDeviceVector<QueryAtomBonds>  queryAtomBonds_;
 
   // Boolean expression tree data for compound queries
   AsyncDeviceVector<AtomQueryTree>   atomQueryTrees_;
@@ -315,9 +275,6 @@ class MoleculesDevice {
   AsyncDeviceVector<BondTypeCounts>  queryLeafBondCounts_;
   AsyncDeviceVector<int>             atomInstrStarts_;
   AsyncDeviceVector<int>             atomLeafMaskStarts_;
-
-  // Bond query data for SMARTS
-  AsyncDeviceVector<BondQueryData> bondQueryData_;
 };
 
 /**
@@ -431,6 +388,7 @@ bool hasRecursiveSmarts(const RDKit::ROMol* mol);
  * @brief Check if a target molecule requires RDKit fallback processing.
  *
  * Detects molecules with properties that exceed GPU processing limits:
+ * - Atom degree > 8 (hypervalent atoms)
  * - Atom ring count > 15 (e.g., buckyballs)
  * - Ring bond count > 15
  * - Implicit H count > 15

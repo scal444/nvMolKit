@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <GraphMol/MolOps.h>
 #include <GraphMol/ROMol.h>
 #include <GraphMol/SmilesParse/SmilesParse.h>
 #include <gtest/gtest.h>
@@ -1925,6 +1926,39 @@ TEST_P(SubstructureSearchTest, HighRingCountFallback) {
       getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
                           results, algorithm(), stream_.stream()))
       << "Buckyball should be handled via RDKit fallback without throwing";
+
+  for (int t = 0; t < results.numTargets; ++t) {
+    auto rdkitMatches = getRDKitSubstructMatches(*targetMols[t], *queryMols[0], false);
+    EXPECT_EQ(results.matchCount(t, 0), static_cast<int>(rdkitMatches.size()));
+  }
+}
+
+TEST_P(SubstructureSearchTest, HypervalentAtomFallback) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  // Create a hypervalent metal center with 9 bonds (exceeds kMaxBondsPerAtom=8)
+  // Use sanitize=false to allow chemically unusual structures
+  RDKit::SmilesParserParams params;
+  params.sanitize = false;
+  auto hypervalent = std::unique_ptr<RDKit::ROMol>(
+      RDKit::SmilesToMol("[Fe](C)(C)(C)(C)(C)(C)(C)(C)C", params));
+  ASSERT_NE(hypervalent, nullptr) << "Failed to parse hypervalent SMILES";
+  RDKit::MolOps::symmetrizeSSSR(*hypervalent);
+
+  // Verify the Fe atom has 9 bonds
+  ASSERT_GT(hypervalent->getAtomWithIdx(0)->getDegree(), 8u) 
+      << "Test molecule should have atom with >8 bonds";
+
+  targetMols.push_back(makeMolFromSmiles("c1ccccc1"));  // Normal molecule
+  targetMols.push_back(std::move(hypervalent));
+  queryMols.push_back(makeMolFromSmiles("C"));
+
+  SubstructSearchResults results;
+  EXPECT_NO_THROW(
+      getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                          results, algorithm(), stream_.stream()))
+      << "Hypervalent molecule should be handled via RDKit fallback without throwing";
 
   for (int t = 0; t < results.numTargets; ++t) {
     auto rdkitMatches = getRDKitSubstructMatches(*targetMols[t], *queryMols[0], false);

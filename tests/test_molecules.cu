@@ -26,6 +26,7 @@
 #include "cuda_error_check.h"
 #include "device.h"
 #include "molecules_device.cuh"
+#include "packed_bonds_device.cuh"
 
 using nvMolKit::AsyncDeviceVector;
 using nvMolKit::AtomData;
@@ -36,6 +37,8 @@ using nvMolKit::MoleculesDeviceView;
 using nvMolKit::MoleculesHost;
 using nvMolKit::MoleculeView;
 using nvMolKit::ScopedStream;
+using nvMolKit::TargetAtomBonds;
+using nvMolKit::unpackBondType;
 
 namespace {
 
@@ -176,25 +179,16 @@ __global__ void readNumAtomsKernel(MoleculesDeviceView view, int* results, int n
   results[molIdx]        = mol.numAtoms;
 }
 
-//! Kernel to read number of bonds per molecule
-__global__ void readNumBondsKernel(MoleculesDeviceView view, int* results, int numMols) {
-  const int molIdx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (molIdx >= numMols) {
-    return;
-  }
-  const MoleculeView mol = getMolecule(view, molIdx);
-  results[molIdx]        = mol.numBonds;
-}
-
-//! Kernel to read bond type of first bond
+//! Kernel to read bond type of first atom's first bond
 __global__ void readBondTypeKernel(MoleculesDeviceView view, int* results, int numMols) {
   const int molIdx = blockIdx.x * blockDim.x + threadIdx.x;
   if (molIdx >= numMols) {
     return;
   }
   const MoleculeView mol = getMolecule(view, molIdx);
-  if (mol.numBonds > 0) {
-    results[molIdx] = mol.getBond(0).bondType;
+  if (mol.numAtoms > 0 && mol.getAtomDegree(0) > 0) {
+    const TargetAtomBonds& bonds = mol.getTargetBonds(0);
+    results[molIdx] = unpackBondType(bonds.bondInfo[0]);
   } else {
     results[molIdx] = -1;
   }
@@ -222,21 +216,8 @@ __global__ void readNeighborAtomKernel(MoleculesDeviceView view, int* results, i
   }
   const MoleculeView mol = getMolecule(view, molIdx);
   if (mol.numAtoms > 0 && mol.getAtomDegree(0) > 0) {
-    results[molIdx] = mol.getNeighborAtomIdx(0, 0);
-  } else {
-    results[molIdx] = -1;
-  }
-}
-
-//! Kernel to read neighbor bond index for first atom's first neighbor
-__global__ void readNeighborBondKernel(MoleculesDeviceView view, int* results, int numMols) {
-  const int molIdx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (molIdx >= numMols) {
-    return;
-  }
-  const MoleculeView mol = getMolecule(view, molIdx);
-  if (mol.numAtoms > 0 && mol.getAtomDegree(0) > 0) {
-    results[molIdx] = mol.getNeighborBondIdx(0, 0);
+    const TargetAtomBonds& bonds = mol.getTargetBonds(0);
+    results[molIdx] = bonds.neighborIdx[0];
   } else {
     results[molIdx] = -1;
   }
@@ -253,21 +234,21 @@ __global__ void readAllAtomDegreesKernel(MoleculesDeviceView view, int molIdx, i
 
 //! Kernel to read all neighbor atom indices for a specific atom in a specific molecule
 __global__ void readAllNeighborsKernel(MoleculesDeviceView view, int molIdx, int atomIdx, int* results) {
-  const MoleculeView mol         = getMolecule(view, molIdx);
-  const int          neighborIdx = threadIdx.x;
-  const int          degree      = mol.getAtomDegree(atomIdx);
-  if (neighborIdx < degree) {
-    results[neighborIdx] = mol.getNeighborAtomIdx(atomIdx, neighborIdx);
+  const MoleculeView     mol         = getMolecule(view, molIdx);
+  const int              neighborIdx = threadIdx.x;
+  const TargetAtomBonds& bonds       = mol.getTargetBonds(atomIdx);
+  if (neighborIdx < bonds.degree) {
+    results[neighborIdx] = bonds.neighborIdx[neighborIdx];
   }
 }
 
-//! Kernel to read all neighbor bond indices for a specific atom in a specific molecule
-__global__ void readAllNeighborBondsKernel(MoleculesDeviceView view, int molIdx, int atomIdx, int* results) {
-  const MoleculeView mol         = getMolecule(view, molIdx);
-  const int          neighborIdx = threadIdx.x;
-  const int          degree      = mol.getAtomDegree(atomIdx);
-  if (neighborIdx < degree) {
-    results[neighborIdx] = mol.getNeighborBondIdx(atomIdx, neighborIdx);
+//! Kernel to read all neighbor bond types for a specific atom in a specific molecule
+__global__ void readAllNeighborBondTypesKernel(MoleculesDeviceView view, int molIdx, int atomIdx, int* results) {
+  const MoleculeView     mol         = getMolecule(view, molIdx);
+  const int              neighborIdx = threadIdx.x;
+  const TargetAtomBonds& bonds       = mol.getTargetBonds(atomIdx);
+  if (neighborIdx < bonds.degree) {
+    results[neighborIdx] = unpackBondType(bonds.bondInfo[neighborIdx]);
   }
 }
 
@@ -298,7 +279,6 @@ class BatchStructureTest : public ::testing::Test {
 TEST_F(BatchStructureTest, HostBatchStructure) {
   EXPECT_EQ(batch_.numMolecules(), 5);
   EXPECT_EQ(batch_.totalAtoms(), 16);  // 3 + 6 + 4 + 1 + 2
-  EXPECT_EQ(batch_.totalBonds(), 12);  // 2 + 6 + 3 + 0 + 1
 }
 
 TEST_F(BatchStructureTest, NumAtomsMatchRDKit) {
@@ -321,7 +301,7 @@ TEST_F(BatchStructureTest, NumAtomsMatchRDKit) {
   }
 }
 
-TEST_F(BatchStructureTest, NumBondsMatchRDKit) {
+TEST_F(BatchStructureTest, AtomDegreeMatchesRDKit) {
   ScopedStream    stream;
   MoleculesDevice device(stream.stream());
   device.copyFromHost(batch_);
@@ -329,7 +309,7 @@ TEST_F(BatchStructureTest, NumBondsMatchRDKit) {
   const int              numMols = static_cast<int>(batch_.numMolecules());
   AsyncDeviceVector<int> resultsDev(numMols, stream.stream());
 
-  readNumBondsKernel<<<1, 32, 0, stream.stream()>>>(device.view(), resultsDev.data(), numMols);
+  readAtomDegreeKernel<<<1, 32, 0, stream.stream()>>>(device.view(), resultsDev.data(), numMols);
   cudaCheckError(cudaGetLastError());
 
   std::vector<int> results(numMols);
@@ -337,7 +317,10 @@ TEST_F(BatchStructureTest, NumBondsMatchRDKit) {
   cudaCheckError(cudaStreamSynchronize(stream.stream()));
 
   for (int i = 0; i < numMols; ++i) {
-    EXPECT_EQ(results[i], static_cast<int>(mols_[i]->getNumBonds())) << "Mismatch at molecule " << i;
+    if (mols_[i]->getNumAtoms() > 0) {
+      EXPECT_EQ(results[i], static_cast<int>(mols_[i]->getAtomWithIdx(0)->getDegree())) 
+        << "Mismatch at molecule " << i;
+    }
   }
 }
 
@@ -357,8 +340,11 @@ TEST_F(BatchStructureTest, BondTypeMatchesRDKit) {
   cudaCheckError(cudaStreamSynchronize(stream.stream()));
 
   for (int i = 0; i < numMols; ++i) {
-    if (mols_[i]->getNumBonds() > 0) {
-      const int expected = static_cast<int>(mols_[i]->getBondWithIdx(0)->getBondType());
+    const auto& mol = mols_[i];
+    if (mol->getNumAtoms() > 0 && mol->getAtomWithIdx(0)->getDegree() > 0) {
+      auto [beg, end]      = mol->getAtomBonds(mol->getAtomWithIdx(0));
+      const auto* bond     = (*mol)[*beg];
+      const int   expected = static_cast<int>(bond->getBondType());
       EXPECT_EQ(results[i], expected) << "Mismatch at molecule " << i;
     }
   }
@@ -515,37 +501,11 @@ TEST_F(ConnectivityTestFixture, NeighborAtomIndexMatchesRDKit) {
   }
 }
 
-TEST_F(ConnectivityTestFixture, NeighborBondIndexMatchesRDKit) {
-  ScopedStream    stream;
-  MoleculesDevice device(stream.stream());
-  device.copyFromHost(batch_);
-
-  const int              numMols = static_cast<int>(batch_.numMolecules());
-  AsyncDeviceVector<int> resultsDev(numMols, stream.stream());
-
-  readNeighborBondKernel<<<1, 32, 0, stream.stream()>>>(device.view(), resultsDev.data(), numMols);
-  cudaCheckError(cudaGetLastError());
-
-  std::vector<int> results(numMols);
-  resultsDev.copyToHost(results);
-  cudaCheckError(cudaStreamSynchronize(stream.stream()));
-
-  for (int i = 0; i < numMols; ++i) {
-    const auto& mol = mols_[i];
-    if (mol->getNumAtoms() > 0 && mol->getAtomWithIdx(0)->getDegree() > 0) {
-      auto [beg, end]      = mol->getAtomBonds(mol->getAtomWithIdx(0));
-      const auto* bond     = (*mol)[*beg];
-      const int   expected = bond->getIdx();
-      EXPECT_EQ(results[i], expected) << "Mismatch at molecule " << i;
-    }
-  }
-}
 
 TEST(MoleculesEmptyBatchTest, EmptyBatchHasZeroMolecules) {
   MoleculesHost batch;
   EXPECT_EQ(batch.numMolecules(), 0);
   EXPECT_EQ(batch.totalAtoms(), 0);
-  EXPECT_EQ(batch.totalBonds(), 0);
 }
 
 TEST(MoleculesTotalHCountTest, StoresTotalNotExplicitHCount) {
@@ -575,7 +535,6 @@ TEST(MoleculesSingleMolTest, SingleMoleculeWorks) {
 
   EXPECT_EQ(batch.numMolecules(), 1);
   EXPECT_EQ(batch.totalAtoms(), 1);
-  EXPECT_EQ(batch.totalBonds(), 0);
 
   ScopedStream    stream;
   MoleculesDevice device(stream.stream());
@@ -604,7 +563,6 @@ TEST(MoleculesLargeBatchTest, ManyMoleculesWork) {
 
   EXPECT_EQ(batch.numMolecules(), numMols);
   EXPECT_EQ(batch.totalAtoms(), numMols * 6);
-  EXPECT_EQ(batch.totalBonds(), numMols * 5);
 
   ScopedStream    stream;
   MoleculesDevice device(stream.stream());
@@ -867,7 +825,7 @@ TEST_F(ExhaustiveConnectivityTest, NeopentaneNeighborsExhaustive) {
   }
 }
 
-TEST_F(ExhaustiveConnectivityTest, NeopentaneNeighborBondsExhaustive) {
+TEST_F(ExhaustiveConnectivityTest, NeopentaneNeighborBondTypesExhaustive) {
   ScopedStream    stream;
   MoleculesDevice device(stream.stream());
   device.copyFromHost(batch_);
@@ -883,25 +841,25 @@ TEST_F(ExhaustiveConnectivityTest, NeopentaneNeighborBondsExhaustive) {
       continue;
     }
 
-    AsyncDeviceVector<int> bondIdxDev(degree, stream.stream());
-    readAllNeighborBondsKernel<<<1, degree, 0, stream.stream()>>>(device.view(), 1, atomIdx, bondIdxDev.data());
+    AsyncDeviceVector<int> bondTypeDev(degree, stream.stream());
+    readAllNeighborBondTypesKernel<<<1, degree, 0, stream.stream()>>>(device.view(), 1, atomIdx, bondTypeDev.data());
     cudaCheckError(cudaGetLastError());
 
-    std::vector<int> bondIndices(degree);
-    bondIdxDev.copyToHost(bondIndices);
+    std::vector<int> bondTypes(degree);
+    bondTypeDev.copyToHost(bondTypes);
     cudaCheckError(cudaStreamSynchronize(stream.stream()));
 
-    // Get expected bond indices from RDKit
-    std::set<int> expectedBondIndices;
+    // Get expected bond types from RDKit
+    std::multiset<int> expectedBondTypes;
     auto [beg, end] = neopentane->getAtomBonds(atom);
     while (beg != end) {
       const auto* bond = (*neopentane)[*beg];
-      expectedBondIndices.insert(bond->getIdx());
+      expectedBondTypes.insert(static_cast<int>(bond->getBondType()));
       ++beg;
     }
 
-    std::set<int> actualBondIndices(bondIndices.begin(), bondIndices.end());
-    EXPECT_EQ(actualBondIndices, expectedBondIndices) << "Bond index mismatch at atom " << atomIdx;
+    std::multiset<int> actualBondTypes(bondTypes.begin(), bondTypes.end());
+    EXPECT_EQ(actualBondTypes, expectedBondTypes) << "Bond type mismatch at atom " << atomIdx;
   }
 }
 
@@ -946,7 +904,6 @@ TEST_P(QueryBatchStructureTest, StructureMatchesBetweenSmilesAndSmarts) {
   // Verify same structure
   EXPECT_EQ(smilesBatch.numMolecules(), smartsBatch.numMolecules());
   EXPECT_EQ(smilesBatch.totalAtoms(), smartsBatch.totalAtoms());
-  EXPECT_EQ(smilesBatch.totalBonds(), smartsBatch.totalBonds());
 
   // Verify atom data matches (atomic numbers should match)
   ASSERT_EQ(smilesBatch.atomData.size(), smartsBatch.atomData.size());
@@ -955,16 +912,12 @@ TEST_P(QueryBatchStructureTest, StructureMatchesBetweenSmilesAndSmarts) {
       << "Atomic number mismatch at atom " << i;
   }
 
-  // Verify bond data matches
-  ASSERT_EQ(smilesBatch.bondData.size(), smartsBatch.bondData.size());
-  for (size_t i = 0; i < smilesBatch.bondData.size(); ++i) {
-    EXPECT_EQ(smilesBatch.bondData[i].bondType, smartsBatch.bondData[i].bondType) << "Bond type mismatch at bond " << i;
+  // Verify packed bond data matches (same degree and neighbor structure)
+  ASSERT_EQ(smilesBatch.targetAtomBonds.size(), smartsBatch.queryAtomBonds.size());
+  for (size_t i = 0; i < smilesBatch.targetAtomBonds.size(); ++i) {
+    EXPECT_EQ(smilesBatch.targetAtomBonds[i].degree, smartsBatch.queryAtomBonds[i].degree)
+      << "Degree mismatch at atom " << i;
   }
-
-  // Verify connectivity matches
-  EXPECT_EQ(smilesBatch.atomBondStarts, smartsBatch.atomBondStarts);
-  EXPECT_EQ(smilesBatch.otherAtomIndices, smartsBatch.otherAtomIndices);
-  EXPECT_EQ(smilesBatch.bondDataIndices, smartsBatch.bondDataIndices);
 }
 
 TEST_P(QueryBatchStructureTest, DeviceStructureMatchesBetweenSmilesAndSmarts) {

@@ -2239,108 +2239,102 @@ TEST(AtomDataPackedBitPacking, ExistingFieldsDoNotAffectNewFields) {
 }
 
 // =============================================================================
-// Bond Query Flag Extraction Tests
+// Bond Query Match Mask Tests
 // =============================================================================
 
-// Helper to get bond query flags from a SMARTS pattern
-nvMolKit::BondQueryData getBondQueryData(const std::string& smarts, int bondIdx) {
+// Helper to get bond match mask from a SMARTS pattern (from first atom's first bond)
+uint32_t getBondMatchMask(const std::string& smarts) {
   auto mol = makeMolFromSmarts(smarts);
   EXPECT_NE(mol, nullptr) << "Failed to parse SMARTS: " << smarts;
   
   MoleculesHost batch;
   addQueryToBatch(mol.get(), batch);
   
-  EXPECT_GT(batch.bondQueryData.size(), static_cast<size_t>(bondIdx)) 
-    << "Bond index " << bondIdx << " out of range for SMARTS: " << smarts;
+  EXPECT_GT(batch.queryAtomBonds.size(), 0u) << "No query bonds for SMARTS: " << smarts;
+  EXPECT_GT(batch.queryAtomBonds[0].degree, 0u) << "First atom has no bonds for SMARTS: " << smarts;
   
-  return batch.bondQueryData[bondIdx];
+  return batch.queryAtomBonds[0].matchMask[0];
 }
 
+// A NeverMatches bond has matchMask == 0 (no target bond type can match)
 TEST(BondQueryFlags, SingleBondOnly) {
-  // "-" = single bond, no special flags
-  auto bqd = getBondQueryData("C-C", 0);
-  EXPECT_EQ(bqd.bondType, 1);  // Single bond
-  EXPECT_EQ(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
-    << "Single bond should not be NeverMatches";
+  // "-" = single bond, should match
+  auto mask = getBondMatchMask("C-C");
+  EXPECT_NE(mask, 0u) << "Single bond should match something";
 }
 
 TEST(BondQueryFlags, AromaticBondOnly) {
   // ":" = aromatic bond
-  auto bqd = getBondQueryData("c:c", 0);
-  EXPECT_EQ(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
-    << "Aromatic bond should not be NeverMatches";
+  auto mask = getBondMatchMask("c:c");
+  EXPECT_NE(mask, 0u) << "Aromatic bond should match something";
 }
 
 TEST(BondQueryFlags, SingleAndAromatic_Impossible) {
   // "-:" = single AND aromatic - impossible combination
-  auto bqd = getBondQueryData("C-:C", 0);
-  EXPECT_NE(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
-    << "Single AND aromatic should be NeverMatches";
+  auto mask = getBondMatchMask("C-:C");
+  EXPECT_EQ(mask, 0u) << "Single AND aromatic should be NeverMatches (mask=0)";
 }
 
 TEST(BondQueryFlags, SingleAndNotAromatic_Valid) {
   // "-!:" = single AND NOT aromatic - valid combination (aliphatic single bond)
-  auto bqd = getBondQueryData("C-!:C", 0);
-  EXPECT_EQ(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
-    << "Single AND NOT aromatic should NOT be NeverMatches";
+  auto mask = getBondMatchMask("C-!:C");
+  EXPECT_NE(mask, 0u) << "Single AND NOT aromatic should NOT be NeverMatches";
 }
 
 TEST(BondQueryFlags, NotSingleAndAromatic_Valid) {
   // "!-:" = NOT single AND aromatic - valid (aromatic bonds aren't single)
-  auto bqd = getBondQueryData("c!-:c", 0);
-  EXPECT_EQ(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
-    << "NOT single AND aromatic should NOT be NeverMatches";
+  auto mask = getBondMatchMask("c!-:c");
+  EXPECT_NE(mask, 0u) << "NOT single AND aromatic should NOT be NeverMatches";
 }
 
 TEST(BondQueryFlags, DoubleAndAromatic_Impossible) {
   // "=:" = double AND aromatic - impossible combination
-  auto bqd = getBondQueryData("C=:C", 0);
-  EXPECT_NE(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
-    << "Double AND aromatic should be NeverMatches";
+  auto mask = getBondMatchMask("C=:C");
+  EXPECT_EQ(mask, 0u) << "Double AND aromatic should be NeverMatches (mask=0)";
 }
 
 TEST(BondQueryFlags, DoubleAndNotAromatic_Valid) {
   // "=!:" = double AND NOT aromatic - valid (aliphatic double bond)
-  auto bqd = getBondQueryData("C=!:C", 0);
-  EXPECT_EQ(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
-    << "Double AND NOT aromatic should NOT be NeverMatches";
+  auto mask = getBondMatchMask("C=!:C");
+  EXPECT_NE(mask, 0u) << "Double AND NOT aromatic should NOT be NeverMatches";
 }
 
 TEST(BondQueryFlags, TripleAndAromatic_Impossible) {
   // "#:" = triple AND aromatic - impossible combination
-  auto bqd = getBondQueryData("C#:C", 0);
-  EXPECT_NE(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
-    << "Triple AND aromatic should be NeverMatches";
+  auto mask = getBondMatchMask("C#:C");
+  EXPECT_EQ(mask, 0u) << "Triple AND aromatic should be NeverMatches (mask=0)";
 }
 
 TEST(BondQueryFlags, TripleAndNotAromatic_Valid) {
   // "#!:" = triple AND NOT aromatic - valid (aliphatic triple bond)
-  auto bqd = getBondQueryData("C#!:C", 0);
-  EXPECT_EQ(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
-    << "Triple AND NOT aromatic should NOT be NeverMatches";
+  auto mask = getBondMatchMask("C#!:C");
+  EXPECT_NE(mask, 0u) << "Triple AND NOT aromatic should NOT be NeverMatches";
 }
 
 TEST(BondQueryFlags, NotSingleNotAromatic_Valid) {
   // "!-!:" = NOT single AND NOT aromatic - valid (double or triple aliphatic)
-  auto bqd = getBondQueryData("C!-!:C", 0);
-  EXPECT_EQ(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
-    << "NOT single AND NOT aromatic should NOT be NeverMatches";
+  auto mask = getBondMatchMask("C!-!:C");
+  EXPECT_NE(mask, 0u) << "NOT single AND NOT aromatic should NOT be NeverMatches";
 }
 
 TEST(BondQueryFlags, RingBondConstraint) {
-  // "@" = ring bond
-  auto bqd = getBondQueryData("C@C", 0);
-  EXPECT_NE(bqd.queryFlags & nvMolKit::BondQueryIsRingBond, 0) 
-    << "Ring bond constraint should set BondQueryIsRingBond";
-  EXPECT_EQ(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
-    << "Ring bond should not be NeverMatches";
+  // "@" = ring bond - should only match in-ring bonds (upper 16 bits)
+  auto mask = getBondMatchMask("C@C");
+  EXPECT_NE(mask, 0u) << "Ring bond should not be NeverMatches";
+  // Upper 16 bits are for in-ring bonds, lower 16 bits for not-in-ring
+  const uint32_t inRingMask    = mask >> 16;
+  const uint32_t notInRingMask = mask & 0xFFFF;
+  EXPECT_NE(inRingMask, 0u) << "Ring bond should match in-ring bond types";
+  EXPECT_EQ(notInRingMask, 0u) << "Ring bond should not match not-in-ring bonds";
 }
 
 TEST(BondQueryFlags, NotRingBondConstraint) {
-  // "!@" = not ring bond
-  auto bqd = getBondQueryData("C!@C", 0);
-  EXPECT_NE(bqd.queryFlags & nvMolKit::BondQueryNotRingBond, 0) 
-    << "Not-ring bond constraint should set BondQueryNotRingBond";
-  EXPECT_EQ(bqd.queryFlags & nvMolKit::BondQueryNeverMatches, 0) 
-    << "Not-ring bond should not be NeverMatches";
+  // "!@" = not ring bond - should only match not-in-ring bonds (lower 16 bits)
+  auto mask = getBondMatchMask("C!@C");
+  EXPECT_NE(mask, 0u) << "Not-ring bond should not be NeverMatches";
+  // Upper 16 bits are for in-ring bonds, lower 16 bits for not-in-ring
+  const uint32_t inRingMask    = mask >> 16;
+  const uint32_t notInRingMask = mask & 0xFFFF;
+  EXPECT_EQ(inRingMask, 0u) << "Not-ring bond should not match in-ring bonds";
+  EXPECT_NE(notInRingMask, 0u) << "Not-ring bond should match not-in-ring bond types";
 }

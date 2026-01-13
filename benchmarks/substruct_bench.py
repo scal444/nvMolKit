@@ -288,6 +288,9 @@ def main():
     parser.add_argument("--batch_size", "-b", type=int, default=1024, help="nvmolkit batch size (default: 1024)")
     parser.add_argument("--workers", type=int, default=-1, help="nvmolkit GPU worker threads per GPU (-1 = auto)")
     parser.add_argument("--prep_threads", type=int, default=-1, help="nvmolkit preprocessing threads (-1 = auto)")
+    parser.add_argument("--warmup", action="store_true", dest="warmup", help="Perform warmup run (default)")
+    parser.add_argument("--no_warmup", action="store_false", dest="warmup", help="Skip warmup run")
+    parser.set_defaults(warmup=True)
     
     args = parser.parse_args()
     
@@ -306,6 +309,7 @@ def main():
     print(f"  Mode: {args.mode}")
     print(f"  Max matches: {args.max_matches if args.max_matches > 0 else 'all'}")
     print(f"  Runs: {args.runs}")
+    print(f"  Warmup: {args.warmup}")
     print(f"  Run nvmolkit: {not args.no_nvmolkit}")
     print(f"  Run RDKit: {not args.no_rdkit}")
     if not args.no_rdkit:
@@ -351,15 +355,16 @@ def main():
             if args.max_matches > 0:
                 config.maxMatches = args.max_matches
             torch.cuda.cudart().cudaProfilerStart()
-
-            print("\nWarming up nvmolkit...")
-            warmup_mols = mols[:10]
-            with nvtx.annotate("nvmolkit_warmup", color="purple"):
-                if args.mode == "hasSubstructMatch":
-                    hasSubstructMatch(warmup_mols, queries, config)
-                else:
-                    getSubstructMatches(warmup_mols, queries, config)
-                torch.cuda.synchronize()
+            
+            if args.warmup:
+                print("\nWarming up nvmolkit...")
+                warmup_mols = mols[:10]
+                with nvtx.annotate("nvmolkit_warmup", color="purple"):
+                    if args.mode == "hasSubstructMatch":
+                        hasSubstructMatch(warmup_mols, queries, config)
+                    else:
+                        getSubstructMatches(warmup_mols, queries, config)
+                    torch.cuda.synchronize()
             
             print("Running nvmolkit GPU benchmark...")
             nvmolkit_avg, nvmolkit_std, nvmolkit_results = bench_nvmolkit(

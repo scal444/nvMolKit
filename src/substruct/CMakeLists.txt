@@ -1,5 +1,8 @@
 add_library(molecule_graph_labels molecule_graph_labels.cu)
 
+add_library(packed_bonds packed_bonds.cpp)
+target_include_directories(packed_bonds PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
 add_library(molecules molecules.cpp)
 target_include_directories(molecule_graph_labels
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -7,7 +10,7 @@ target_include_directories(molecules PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_link_libraries(
   molecules
-  PUBLIC device_vector flatBitVect OpenMP::OpenMP_CXX
+  PUBLIC device_vector flatBitVect OpenMP::OpenMP_CXX packed_bonds
   PRIVATE ${RDKit_LIBS} nvtx)
 
 add_library(pinned_buffer_pool pinned_buffer_pool.cpp)

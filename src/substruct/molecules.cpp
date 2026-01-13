@@ -30,6 +30,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "packed_bonds.h"
 #include "substruct_debug.h"
 #include "substruct_types.h"
 #include "nvtx.h"
@@ -368,61 +369,41 @@ void populateQueryAtomData(const RDKit::Atom* atom, AtomData& atomData) {
 
 MoleculesHost::MoleculesHost() {
   batchAtomStarts.push_back(0);
-  batchBondStarts.push_back(0);
-  batchAtomBondStarts.push_back(0);
-  batchOtherAtomIndicesStarts.push_back(0);
-  batchBondIndicesStarts.push_back(0);
 }
 
 void MoleculesHost::reserve(size_t numMols, size_t numAtoms) {
-  const size_t estimatedBonds = numAtoms * 2;
-
   batchAtomStarts.reserve(numMols + 1);
-  batchBondStarts.reserve(numMols + 1);
-  batchAtomBondStarts.reserve(numMols + 1);
-  batchOtherAtomIndicesStarts.reserve(numMols + 1);
-  batchBondIndicesStarts.reserve(numMols + 1);
 
   atomData.reserve(numAtoms);
   atomDataPacked.reserve(numAtoms);
   bondTypeCounts.reserve(numAtoms);
-  bondData.reserve(estimatedBonds);
-  atomBondStarts.reserve(numAtoms);
-  otherAtomIndices.reserve(estimatedBonds * 2);
-  bondDataIndices.reserve(estimatedBonds * 2);
+  targetAtomBonds.reserve(numAtoms);
+  queryAtomBonds.reserve(numAtoms);
 
   atomQueries.reserve(numAtoms);
   atomQueryMasks.reserve(numAtoms);
   atomQueryTrees.reserve(numAtoms);
   atomInstrStarts.reserve(numAtoms);
   atomLeafMaskStarts.reserve(numAtoms);
-  bondQueryData.reserve(estimatedBonds);
   recursivePatterns.reserve(numMols);
 }
 
 void MoleculesDevice::setStream(cudaStream_t stream) {
   stream_ = stream;
   batchAtomStarts_.setStream(stream);
-  batchBondStarts_.setStream(stream);
-  batchAtomBondStarts_.setStream(stream);
-  batchOtherAtomIndicesStarts_.setStream(stream);
-  batchBondIndicesStarts_.setStream(stream);
   atomData_.setStream(stream);
-  bondData_.setStream(stream);
   atomQueries_.setStream(stream);
-  atomBondStarts_.setStream(stream);
-  otherAtomIndices_.setStream(stream);
-  bondDataIndices_.setStream(stream);
   atomDataPacked_.setStream(stream);
   atomQueryMasks_.setStream(stream);
   bondTypeCounts_.setStream(stream);
+  targetAtomBonds_.setStream(stream);
+  queryAtomBonds_.setStream(stream);
   atomQueryTrees_.setStream(stream);
   queryInstructions_.setStream(stream);
   queryLeafMasks_.setStream(stream);
   queryLeafBondCounts_.setStream(stream);
   atomInstrStarts_.setStream(stream);
   atomLeafMaskStarts_.setStream(stream);
-  bondQueryData_.setStream(stream);
 }
 
 namespace {
@@ -449,16 +430,8 @@ void MoleculesDevice::copyFromHost(const MoleculesHost& host, cudaStream_t strea
   numMolecules_ = static_cast<int>(host.numMolecules());
 
   setFromVectorGrowOnly(batchAtomStarts_, host.batchAtomStarts, stream);
-  setFromVectorGrowOnly(batchBondStarts_, host.batchBondStarts, stream);
-  setFromVectorGrowOnly(batchAtomBondStarts_, host.batchAtomBondStarts, stream);
-  setFromVectorGrowOnly(batchOtherAtomIndicesStarts_, host.batchOtherAtomIndicesStarts, stream);
-  setFromVectorGrowOnly(batchBondIndicesStarts_, host.batchBondIndicesStarts, stream);
   setFromVectorGrowOnly(atomData_, host.atomData, stream);
-  setFromVectorGrowOnly(bondData_, host.bondData, stream);
   setFromVectorGrowOnly(atomQueries_, host.atomQueries, stream);
-  setFromVectorGrowOnly(atomBondStarts_, host.atomBondStarts, stream);
-  setFromVectorGrowOnly(otherAtomIndices_, host.otherAtomIndices, stream);
-  setFromVectorGrowOnly(bondDataIndices_, host.bondDataIndices, stream);
 
   // Copy GPU-optimized packed data
   if (!host.atomDataPacked.empty()) {
@@ -470,6 +443,12 @@ void MoleculesDevice::copyFromHost(const MoleculesHost& host, cudaStream_t strea
   if (!host.bondTypeCounts.empty()) {
     setFromVectorGrowOnly(bondTypeCounts_, host.bondTypeCounts, stream);
   }
+  if (!host.targetAtomBonds.empty()) {
+    setFromVectorGrowOnly(targetAtomBonds_, host.targetAtomBonds, stream);
+  }
+  if (!host.queryAtomBonds.empty()) {
+    setFromVectorGrowOnly(queryAtomBonds_, host.queryAtomBonds, stream);
+  }
 
   // Copy boolean expression tree data for compound queries
   if (!host.atomQueryTrees.empty()) {
@@ -480,37 +459,25 @@ void MoleculesDevice::copyFromHost(const MoleculesHost& host, cudaStream_t strea
     setFromVectorGrowOnly(atomInstrStarts_, host.atomInstrStarts, stream);
     setFromVectorGrowOnly(atomLeafMaskStarts_, host.atomLeafMaskStarts, stream);
   }
-
-  // Copy bond query data for SMARTS
-  if (!host.bondQueryData.empty()) {
-    setFromVectorGrowOnly(bondQueryData_, host.bondQueryData, stream);
-  }
 }
 
 MoleculesDeviceView MoleculesDevice::view() const {
   MoleculesDeviceView v;
-  v.batchAtomStarts             = batchAtomStarts_.data();
-  v.batchBondStarts             = batchBondStarts_.data();
-  v.batchAtomBondStarts         = batchAtomBondStarts_.data();
-  v.batchOtherAtomIndicesStarts = batchOtherAtomIndicesStarts_.data();
-  v.batchBondIndicesStarts      = batchBondIndicesStarts_.data();
-  v.atomData                    = atomData_.data();
-  v.bondData                    = bondData_.data();
-  v.atomQueries                 = atomQueries_.data();
-  v.atomBondStarts              = atomBondStarts_.data();
-  v.otherAtomIndices            = otherAtomIndices_.data();
-  v.bondDataIndices             = bondDataIndices_.data();
-  v.numMolecules                = numMolecules_;
-  v.atomDataPacked              = atomDataPacked_.data();
-  v.atomQueryMasks              = atomQueryMasks_.data();
-  v.bondTypeCounts              = bondTypeCounts_.data();
-  v.atomQueryTrees              = atomQueryTrees_.data();
-  v.queryInstructions           = queryInstructions_.data();
-  v.queryLeafMasks              = queryLeafMasks_.data();
-  v.queryLeafBondCounts         = queryLeafBondCounts_.data();
-  v.atomInstrStarts             = atomInstrStarts_.data();
-  v.atomLeafMaskStarts          = atomLeafMaskStarts_.data();
-  v.bondQueryData               = bondQueryData_.data();
+  v.batchAtomStarts     = batchAtomStarts_.data();
+  v.atomData            = atomData_.data();
+  v.atomQueries         = atomQueries_.data();
+  v.numMolecules        = numMolecules_;
+  v.atomDataPacked      = atomDataPacked_.data();
+  v.atomQueryMasks      = atomQueryMasks_.data();
+  v.bondTypeCounts      = bondTypeCounts_.data();
+  v.targetAtomBonds     = targetAtomBonds_.data();
+  v.queryAtomBonds      = queryAtomBonds_.data();
+  v.atomQueryTrees      = atomQueryTrees_.data();
+  v.queryInstructions   = queryInstructions_.data();
+  v.queryLeafMasks      = queryLeafMasks_.data();
+  v.queryLeafBondCounts = queryLeafBondCounts_.data();
+  v.atomInstrStarts     = atomInstrStarts_.data();
+  v.atomLeafMaskStarts  = atomLeafMaskStarts_.data();
   return v;
 }
 
@@ -1383,41 +1350,32 @@ AtomQuery getAtomQueryType(const RDKit::Atom* atom) {
   return getQueryFlagsFromQuery(query);
 }
 
-void addBondsAndConnectivity(const RDKit::ROMol*    mol,
-                             MoleculesHost&         batch,
-                             int&                   cumulativeBondCount,
-                             const RDKit::RingInfo* ringInfo) {
-  auto& bondDataVec      = batch.bondData;
-  auto& atomBondStarts   = batch.atomBondStarts;
-  auto& bondDataIndices  = batch.bondDataIndices;
-  auto& otherAtomIndices = batch.otherAtomIndices;
-
-  bondDataVec.reserve(bondDataVec.size() + mol->getNumBonds());
-
-  for (unsigned int i = 0; i < mol->getNumBonds(); ++i) {
-    auto&       bd   = bondDataVec.emplace_back();
-    const auto* bond = mol->getBondWithIdx(i);
-    bd.bondType      = bond->getBondType();
-    bd.isInRing      = ringInfo->numBondRings(i) > 0 ? 1 : 0;
-  }
-
-  atomBondStarts.push_back(0);
+void populateTargetAtomBonds(const RDKit::ROMol* mol, MoleculesHost& batch, const RDKit::RingInfo* ringInfo) {
+  auto& targetAtomBondsVec = batch.targetAtomBonds;
+  targetAtomBondsVec.reserve(targetAtomBondsVec.size() + mol->getNumAtoms());
 
   for (const RDKit::Atom* atom : mol->atoms()) {
-    const unsigned int atomIdx = atom->getIdx();
+    auto& tab = targetAtomBondsVec.emplace_back();
+    tab.degree = 0;
 
+    const unsigned int atomIdx = atom->getIdx();
     auto [beg, bondEnd] = mol->getAtomBonds(atom);
-    while (beg != bondEnd) {
+
+    while (beg != bondEnd && tab.degree < kMaxBondsPerAtom) {
       const auto*        bond        = (*mol)[*beg];
       const unsigned int bondIdx     = bond->getIdx();
       const int          otherAtomId = bond->getOtherAtomIdx(atomIdx);
+      const bool         isInRing    = ringInfo->numBondRings(bondIdx) > 0;
 
-      otherAtomIndices.push_back(static_cast<int16_t>(otherAtomId));
-      bondDataIndices.push_back(static_cast<int16_t>(bondIdx));
-      ++cumulativeBondCount;
+      tab.neighborIdx[tab.degree] = static_cast<uint8_t>(otherAtomId);
+      tab.bondInfo[tab.degree]    = packTargetBondInfo(bond->getBondType(), isInRing);
+      ++tab.degree;
       ++beg;
     }
-    atomBondStarts.push_back(static_cast<int16_t>(cumulativeBondCount));
+
+    if (beg != bondEnd) {
+      throw std::runtime_error("Atom has more than " + std::to_string(kMaxBondsPerAtom) + " bonds");
+    }
   }
 }
 
@@ -1442,8 +1400,7 @@ void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
 
   const auto* ringInfo = mol->getRingInfo();
 
-  int cumulativeBondCount = 0;
-  addBondsAndConnectivity(mol, batch, cumulativeBondCount, ringInfo);
+  populateTargetAtomBonds(mol, batch, ringInfo);
 
   for (const RDKit::Atom* atom : mol->atoms()) {
     auto& thisAtomData = atomDataVec.emplace_back();
@@ -1457,10 +1414,6 @@ void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   }
 
   batch.batchAtomStarts.push_back(static_cast<int>(atomDataVec.size()));
-  batch.batchBondStarts.push_back(static_cast<int>(batch.bondData.size()));
-  batch.batchAtomBondStarts.push_back(static_cast<int>(batch.atomBondStarts.size()));
-  batch.batchOtherAtomIndicesStarts.push_back(static_cast<int>(batch.otherAtomIndices.size()));
-  batch.batchBondIndicesStarts.push_back(static_cast<int>(batch.bondDataIndices.size()));
 }
 
 namespace {
@@ -1728,50 +1681,39 @@ void extractBondQueryFlags(const RDKit::Bond* bond, BondQueryData& queryData) {
  * Similar to addBondsAndConnectivity but also extracts bond query information
  * including ring bond constraints.
  */
-void addQueryBondsAndConnectivity(const RDKit::ROMol* mol, MoleculesHost& batch, int& cumulativeBondCount) {
-  auto& bondDataVec      = batch.bondData;
-  auto& bondQueryDataVec = batch.bondQueryData;
-  auto& atomBondStarts   = batch.atomBondStarts;
-  auto& bondDataIndices  = batch.bondDataIndices;
-  auto& otherAtomIndices = batch.otherAtomIndices;
-
-  bondDataVec.reserve(bondDataVec.size() + mol->getNumBonds());
-  bondQueryDataVec.reserve(bondQueryDataVec.size() + mol->getNumBonds());
-
-  for (unsigned int i = 0; i < mol->getNumBonds(); ++i) {
-    const auto* bond = mol->getBondWithIdx(i);
-
-    auto& bd    = bondDataVec.emplace_back();
-    bd.bondType = bond->getBondType();
-    bd.isInRing = 0;  // Query molecules don't have ring info computed
-
-    auto& bq = bondQueryDataVec.emplace_back();
-    extractBondQueryFlags(bond, bq);
-
-    if constexpr (kDebugBoolTreeBuild) {
-      printf("[BondQuery] bond %d (%d-%d): rdkitType=%d, queryType=%d, flags=0x%x, allowedTypes=0x%x\n",
-             i, bond->getBeginAtomIdx(), bond->getEndAtomIdx(),
-             static_cast<int>(bond->getBondType()), bq.bondType, bq.queryFlags, bq.allowedBondTypes);
-    }
-  }
-
-  atomBondStarts.push_back(0);
+void populateQueryAtomBonds(const RDKit::ROMol* mol, MoleculesHost& batch) {
+  auto& queryAtomBondsVec = batch.queryAtomBonds;
+  queryAtomBondsVec.reserve(queryAtomBondsVec.size() + mol->getNumAtoms());
 
   for (const RDKit::Atom* atom : mol->atoms()) {
+    auto& qab = queryAtomBondsVec.emplace_back();
+    qab.degree = 0;
+
     const unsigned int atomIdx = atom->getIdx();
-
     auto [beg, bondEnd] = mol->getAtomBonds(atom);
-    while (beg != bondEnd) {
-      const auto*        bond        = (*mol)[*beg];
-      const unsigned int bondIdx     = bond->getIdx();
-      const int          otherAtomId = bond->getOtherAtomIdx(atomIdx);
 
-      otherAtomIndices.push_back(static_cast<int16_t>(otherAtomId));
-      bondDataIndices.push_back(static_cast<int16_t>(bondIdx));
-      ++cumulativeBondCount;
+    while (beg != bondEnd && qab.degree < kMaxBondsPerAtom) {
+      const auto* bond        = (*mol)[*beg];
+      const int   otherAtomId = bond->getOtherAtomIdx(atomIdx);
+
+      BondQueryData bqd;
+      extractBondQueryFlags(bond, bqd);
+
+      if constexpr (kDebugBoolTreeBuild) {
+        printf("[BondQuery] atom %d bond %d (%d-%d): queryType=%d, flags=0x%x, allowedTypes=0x%x\n",
+               atomIdx, qab.degree, bond->getBeginAtomIdx(), bond->getEndAtomIdx(),
+               bqd.bondType, bqd.queryFlags, bqd.allowedBondTypes);
+      }
+
+      qab.neighborIdx[qab.degree] = static_cast<uint8_t>(otherAtomId);
+      qab.matchMask[qab.degree]   = buildQueryBondMatchMask(bqd.bondType, bqd.queryFlags, bqd.allowedBondTypes);
+      ++qab.degree;
       ++beg;
     }
-    atomBondStarts.push_back(static_cast<int16_t>(cumulativeBondCount));
+
+    if (beg != bondEnd) {
+      throw std::runtime_error("Query atom has more than " + std::to_string(kMaxBondsPerAtom) + " bonds");
+    }
   }
 }
 
@@ -1815,8 +1757,7 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   atomInstrStartsVec.reserve(atomInstrStartsVec.size() + mol->getNumAtoms());
   atomLeafMaskStartsVec.reserve(atomLeafMaskStartsVec.size() + mol->getNumAtoms());
 
-  int cumulativeBondCount = 0;
-  addQueryBondsAndConnectivity(mol, batch, cumulativeBondCount);
+  populateQueryAtomBonds(mol, batch);
 
   int nextPatternId = 0;
 
@@ -1881,10 +1822,6 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   }
 
   batch.batchAtomStarts.push_back(static_cast<int>(atomDataVec.size()));
-  batch.batchBondStarts.push_back(static_cast<int>(batch.bondData.size()));
-  batch.batchAtomBondStarts.push_back(static_cast<int>(batch.atomBondStarts.size()));
-  batch.batchOtherAtomIndicesStarts.push_back(static_cast<int>(batch.otherAtomIndices.size()));
-  batch.batchBondIndicesStarts.push_back(static_cast<int>(batch.bondDataIndices.size()));
 
   // Extract recursive SMARTS patterns for preprocessing
   batch.recursivePatterns.push_back(extractRecursivePatterns(mol));
@@ -1926,8 +1863,7 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch,
   atomInstrStartsVec.reserve(atomInstrStartsVec.size() + mol->getNumAtoms());
   atomLeafMaskStartsVec.reserve(atomLeafMaskStartsVec.size() + mol->getNumAtoms());
 
-  int cumulativeBondCount = 0;
-  addQueryBondsAndConnectivity(mol, batch, cumulativeBondCount);
+  populateQueryAtomBonds(mol, batch);
 
   int nextPatternId = 0;
 
@@ -1989,10 +1925,6 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch,
   }
 
   batch.batchAtomStarts.push_back(static_cast<int>(atomDataVec.size()));
-  batch.batchBondStarts.push_back(static_cast<int>(batch.bondData.size()));
-  batch.batchAtomBondStarts.push_back(static_cast<int>(batch.atomBondStarts.size()));
-  batch.batchOtherAtomIndicesStarts.push_back(static_cast<int>(batch.otherAtomIndices.size()));
-  batch.batchBondIndicesStarts.push_back(static_cast<int>(batch.bondDataIndices.size()));
 
   // No recursive patterns extraction for cached patterns - they're pre-extracted
   batch.recursivePatterns.emplace_back();
@@ -2250,23 +2182,17 @@ void mergeBatch(MoleculesHost& dest, const MoleculesHost& src) {
   if (src.numMolecules() == 0) return;
 
   const int atomOffset = static_cast<int>(dest.atomData.size());
-  const int bondOffset = static_cast<int>(dest.bondData.size());
-  const int atomBondStartsOffset = static_cast<int>(dest.atomBondStarts.size());
-  const int connectivityOffset = static_cast<int>(dest.otherAtomIndices.size());
   const int instrOffset = static_cast<int>(dest.queryInstructions.size());
   const int leafMaskOffset = static_cast<int>(dest.queryLeafMasks.size());
 
   dest.atomData.insert(dest.atomData.end(), src.atomData.begin(), src.atomData.end());
   dest.atomDataPacked.insert(dest.atomDataPacked.end(), src.atomDataPacked.begin(), src.atomDataPacked.end());
   dest.bondTypeCounts.insert(dest.bondTypeCounts.end(), src.bondTypeCounts.begin(), src.bondTypeCounts.end());
-  dest.bondData.insert(dest.bondData.end(), src.bondData.begin(), src.bondData.end());
-  dest.atomBondStarts.insert(dest.atomBondStarts.end(), src.atomBondStarts.begin(), src.atomBondStarts.end());
-  dest.otherAtomIndices.insert(dest.otherAtomIndices.end(), src.otherAtomIndices.begin(), src.otherAtomIndices.end());
-  dest.bondDataIndices.insert(dest.bondDataIndices.end(), src.bondDataIndices.begin(), src.bondDataIndices.end());
+  dest.targetAtomBonds.insert(dest.targetAtomBonds.end(), src.targetAtomBonds.begin(), src.targetAtomBonds.end());
+  dest.queryAtomBonds.insert(dest.queryAtomBonds.end(), src.queryAtomBonds.begin(), src.queryAtomBonds.end());
 
   dest.atomQueries.insert(dest.atomQueries.end(), src.atomQueries.begin(), src.atomQueries.end());
   dest.atomQueryMasks.insert(dest.atomQueryMasks.end(), src.atomQueryMasks.begin(), src.atomQueryMasks.end());
-  dest.bondQueryData.insert(dest.bondQueryData.end(), src.bondQueryData.begin(), src.bondQueryData.end());
   dest.atomQueryTrees.insert(dest.atomQueryTrees.end(), src.atomQueryTrees.begin(), src.atomQueryTrees.end());
   dest.queryInstructions.insert(dest.queryInstructions.end(), src.queryInstructions.begin(), src.queryInstructions.end());
   dest.queryLeafMasks.insert(dest.queryLeafMasks.end(), src.queryLeafMasks.begin(), src.queryLeafMasks.end());
@@ -2281,10 +2207,6 @@ void mergeBatch(MoleculesHost& dest, const MoleculesHost& src) {
 
   for (size_t i = 1; i < src.batchAtomStarts.size(); ++i) {
     dest.batchAtomStarts.push_back(src.batchAtomStarts[i] + atomOffset);
-    dest.batchBondStarts.push_back(src.batchBondStarts[i] + bondOffset);
-    dest.batchAtomBondStarts.push_back(src.batchAtomBondStarts[i] + atomBondStartsOffset);
-    dest.batchOtherAtomIndicesStarts.push_back(src.batchOtherAtomIndicesStarts[i] + connectivityOffset);
-    dest.batchBondIndicesStarts.push_back(src.batchBondIndicesStarts[i] + connectivityOffset);
   }
 
   dest.recursivePatterns.insert(dest.recursivePatterns.end(), 
@@ -2425,6 +2347,10 @@ bool requiresRDKitFallback(const RDKit::ROMol* mol) {
 
   for (const RDKit::Atom* atom : mol->atoms()) {
     const int idx = atom->getIdx();
+
+    if (atom->getDegree() > kMaxBondsPerAtom) {
+      return true;
+    }
 
     if (ringInfo->numAtomRings(idx) > AtomDataPacked::kMax4BitValue) {
       return true;
