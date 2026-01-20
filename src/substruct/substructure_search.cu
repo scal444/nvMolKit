@@ -65,7 +65,8 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
                                     const std::vector<int>&                querySortOrder,
                                     int                                    effectivePreprocessingThreads,
                                     RDKitFallbackQueue*                    fallbackQueue,
-                                    HasSubstructMatchResults*              boolResults = nullptr);
+                                    HasSubstructMatchResults*              boolResults = nullptr,
+                                    std::vector<int>*                      countResults = nullptr);
 
 }  // anonymous namespace
 
@@ -80,7 +81,8 @@ void processWithRDKitFallback(const RDKit::ROMol*       target,
                               SubstructSearchResults&   results,
                               std::mutex&               resultsMutex,
                               int                       maxMatches,
-                              HasSubstructMatchResults* boolResults) {
+                              HasSubstructMatchResults* boolResults,
+                              std::vector<int>*         countResults) {
   RDKit::SubstructMatchParameters params;
   params.uniquify = false;
   params.maxMatches = (maxMatches > 0) ? static_cast<unsigned int>(maxMatches) : 0;
@@ -89,27 +91,33 @@ void processWithRDKitFallback(const RDKit::ROMol*       target,
 
   std::vector<RDKit::MatchVectType> rdkitMatches = RDKit::SubstructMatch(*target, *query, params);
 
-  if (!rdkitMatches.empty()) {
-    std::lock_guard<std::mutex> lock(resultsMutex);
+  const int matchCount = static_cast<int>(rdkitMatches.size());
+  if (matchCount == 0) {
+    return;
+  }
 
-    if (boolResults) {
-      boolResults->setMatch(targetIdx, queryIdx, true);
-    } else {
-      std::vector<std::vector<int>> convertedMatches;
-      convertedMatches.reserve(rdkitMatches.size());
-      for (const auto& match : rdkitMatches) {
-        std::vector<int> mapping(match.size());
-        for (size_t i = 0; i < match.size(); ++i) {
-          mapping[i] = match[i].second;
-        }
-        convertedMatches.push_back(std::move(mapping));
+  std::lock_guard<std::mutex> lock(resultsMutex);
+
+  if (boolResults) {
+    boolResults->setMatch(targetIdx, queryIdx, true);
+  } else if (countResults) {
+    const int pairIdx = targetIdx * results.numQueries + queryIdx;
+    (*countResults)[pairIdx] = matchCount;
+  } else {
+    std::vector<std::vector<int>> convertedMatches;
+    convertedMatches.reserve(rdkitMatches.size());
+    for (const auto& match : rdkitMatches) {
+      std::vector<int> mapping(match.size());
+      for (size_t i = 0; i < match.size(); ++i) {
+        mapping[i] = match[i].second;
       }
-
-      auto& targetMatches = results.getMatchesMut(targetIdx, queryIdx);
-      targetMatches.insert(targetMatches.end(),
-                           std::make_move_iterator(convertedMatches.begin()),
-                           std::make_move_iterator(convertedMatches.end()));
+      convertedMatches.push_back(std::move(mapping));
     }
+
+    auto& targetMatches = results.getMatchesMut(targetIdx, queryIdx);
+    targetMatches.insert(targetMatches.end(),
+                         std::make_move_iterator(convertedMatches.begin()),
+                         std::make_move_iterator(convertedMatches.end()));
   }
 }
 
@@ -118,11 +126,13 @@ RDKitFallbackQueue::RDKitFallbackQueue(const std::vector<const RDKit::ROMol*>* t
                                        SubstructSearchResults*                 results,
                                        std::mutex*                             resultsMutex,
                                        int                                     maxMatches,
-                                       HasSubstructMatchResults*               boolResults)
+                                       HasSubstructMatchResults*               boolResults,
+                                       std::vector<int>*                       countResults)
     : targets_(targets),
       queries_(queries),
       results_(results),
       boolResults_(boolResults),
+      countResults_(countResults),
       resultsMutex_(resultsMutex),
       maxMatches_(maxMatches),
       shutdown_(false),
@@ -241,7 +251,7 @@ void RDKitFallbackQueue::processEntry(const RDKitFallbackEntry& entry) {
 
   const int effectiveMaxMatches = boolResults_ ? 1 : maxMatches_;
   processWithRDKitFallback(target, query, entry.originalTargetIdx, entry.originalQueryIdx,
-                           *results_, *resultsMutex_, effectiveMaxMatches, boolResults_);
+                           *results_, *resultsMutex_, effectiveMaxMatches, boolResults_, countResults_);
 
   processedCount_.fetch_add(1, std::memory_order_relaxed);
 }
@@ -1098,7 +1108,115 @@ void accumulateMiniBatchResultsBoolean(GpuExecutor&              executor,
   }
 }
 
+void accumulateMiniBatchResultsCounts(GpuExecutor&              executor,
+                                      const ThreadWorkerContext& ctx,
+                                      std::vector<int>&          counts,
+                                      std::mutex&                resultsMutex) {
+  ScopedNvtxRange accumRange("accumulateMiniBatchResultsCounts");
+
+  const bool hasTargetSort = ctx.targetSortOrder != nullptr;
+  const bool hasQuerySort  = ctx.querySortOrder != nullptr;
+
+  std::lock_guard<std::mutex> lock(resultsMutex);
+
+  for (int i = 0; i < executor.numPairsInMiniBatch; ++i) {
+    const int pairIdxInMacrobatch = executor.miniBatchStart + i;
+    const int sortedTargetIdx     = pairIdxInMacrobatch / ctx.numQueries;
+    const int sortedQueryIdx      = pairIdxInMacrobatch % ctx.numQueries;
+
+    const int targetIdx = hasTargetSort ? (*ctx.targetSortOrder)[sortedTargetIdx] : sortedTargetIdx;
+    const int queryIdx  = hasQuerySort ? (*ctx.querySortOrder)[sortedQueryIdx] : sortedQueryIdx;
+
+    const int pairIdx = targetIdx * ctx.numQueries + queryIdx;
+    counts[pairIdx] = executor.matchCountsHost[i];
+  }
+}
+
 constexpr int kMaxExecutorsPerRunner = 8;
+
+template <typename AccumulateFunc>
+void runnerWorkerInlineCountOnly(int                               workerIdx,
+                                 const ThreadWorkerContext&        ctx,
+                                 MoleculesDevice&                  targetsDevice,
+                                 const MoleculesDevice&            queriesDevice,
+                                 const MoleculesHost&              queriesHost,
+                                 const LeafSubpatterns&            leafSubpatterns,
+                                 SubstructAlgorithm                algorithm,
+                                 cudaEvent_t                       upstreamReadyEvent,
+                                 std::atomic<int>&                 nextMiniBatchIdx,
+                                 int                               totalNumMiniBatches,
+                                 int                               effectiveMiniBatchSize,
+                                 int                               deviceId,
+                                 std::vector<GpuExecutor*>         executors,
+                                 AccumulateFunc&&                  accumulate,
+                                 std::exception_ptr&               exceptionPtr) {
+  try {
+    ScopedNvtxRange workerRange("runnerWorkerInlineCountOnly " + std::to_string(workerIdx) + " GPU" + std::to_string(deviceId));
+    const WithDevice setDevice(deviceId);
+
+    const int executorsPerRunner = static_cast<int>(executors.size());
+    const int numPairs = ctx.numTargets * ctx.numQueries;
+
+    std::array<GpuExecutor*, kMaxExecutorsPerRunner> pendingExecutors{};
+    int pendingHead  = 0;
+    int pendingTail  = 0;
+    int pendingCount = 0;
+
+    auto drainOneExecutor = [&]() {
+      GpuExecutor* oldest = pendingExecutors[pendingHead];
+      ScopedNvtxRange waitRange("Wait for D2H copy");
+      cudaCheckError(cudaEventSynchronize(oldest->copyDoneEvent.event()));
+      waitRange.pop();
+
+      ScopedNvtxRange accumRange("Accumulate mini-batch counts");
+      accumulate(*oldest);
+      accumRange.pop();
+
+      pendingHead = (pendingHead + 1) % executorsPerRunner;
+      --pendingCount;
+    };
+
+    int localMiniBatchCount = 0;
+
+    while (true) {
+      const int miniBatchIdx = nextMiniBatchIdx.fetch_add(1, std::memory_order_relaxed);
+      if (miniBatchIdx >= totalNumMiniBatches) break;
+
+      const int miniBatchStart = miniBatchIdx * effectiveMiniBatchSize;
+      if (miniBatchStart >= numPairs) break;
+
+      if (pendingCount == executorsPerRunner) {
+        drainOneExecutor();
+      }
+
+      GpuExecutor* executor = executors[pendingTail];
+
+      if (upstreamReadyEvent != nullptr && localMiniBatchCount < executorsPerRunner) {
+        cudaCheckError(cudaStreamWaitEvent(executor->stream(), upstreamReadyEvent, 0));
+        cudaCheckError(cudaStreamWaitEvent(executor->recursiveStream.stream(), upstreamReadyEvent, 0));
+        cudaCheckError(cudaStreamWaitEvent(executor->postRecursionStream.stream(), upstreamReadyEvent, 0));
+      }
+      ++localMiniBatchCount;
+
+      prepareMiniBatchOnCPU(*executor, ctx, queriesHost, leafSubpatterns, miniBatchStart, effectiveMiniBatchSize);
+
+      ScopedNvtxRange launchRange("GPU launch mini-batch " + std::to_string(miniBatchIdx));
+      uploadAndLaunchMiniBatch(*executor, ctx, targetsDevice, queriesDevice, leafSubpatterns, algorithm);
+      initiateCountsOnlyCopyToHost(*executor);
+      launchRange.pop();
+
+      pendingExecutors[pendingTail] = executor;
+      pendingTail = (pendingTail + 1) % executorsPerRunner;
+      ++pendingCount;
+    }
+
+    while (pendingCount > 0) {
+      drainOneExecutor();
+    }
+  } catch (...) {
+    exceptionPtr = std::current_exception();
+  }
+}
 
 /**
  * @brief Inline runner with thread-local executors and deferred accumulation.
@@ -1218,72 +1336,38 @@ void runnerWorkerInlineBoolean(int                               workerIdx,
                                int                               deviceId,
                                std::vector<GpuExecutor*>         executors,
                                std::exception_ptr&               exceptionPtr) {
-  try {
-    ScopedNvtxRange workerRange("runnerWorkerInlineBoolean " + std::to_string(workerIdx) + " GPU" + std::to_string(deviceId));
-    const WithDevice setDevice(deviceId);
+  auto accumulate = [&](GpuExecutor& executor) {
+    accumulateMiniBatchResultsBoolean(executor, ctx, results, resultsMutex);
+  };
+  runnerWorkerInlineCountOnly(workerIdx, ctx, targetsDevice, queriesDevice, queriesHost, leafSubpatterns,
+                              algorithm, upstreamReadyEvent, nextMiniBatchIdx, totalNumMiniBatches,
+                              effectiveMiniBatchSize, deviceId, std::move(executors),
+                              accumulate, exceptionPtr);
+}
 
-    const int executorsPerRunner = static_cast<int>(executors.size());
-    const int numPairs = ctx.numTargets * ctx.numQueries;
-
-    std::array<GpuExecutor*, kMaxExecutorsPerRunner> pendingExecutors{};
-    int pendingHead  = 0;
-    int pendingTail  = 0;
-    int pendingCount = 0;
-
-    auto drainOneExecutor = [&]() {
-      GpuExecutor* oldest = pendingExecutors[pendingHead];
-      ScopedNvtxRange waitRange("Wait for D2H copy");
-      cudaCheckError(cudaEventSynchronize(oldest->copyDoneEvent.event()));
-      waitRange.pop();
-
-      ScopedNvtxRange accumRange("Accumulate mini-batch boolean");
-      accumulateMiniBatchResultsBoolean(*oldest, ctx, results, resultsMutex);
-      accumRange.pop();
-
-      pendingHead = (pendingHead + 1) % executorsPerRunner;
-      --pendingCount;
-    };
-
-    int localMiniBatchCount = 0;
-
-    while (true) {
-      const int miniBatchIdx = nextMiniBatchIdx.fetch_add(1, std::memory_order_relaxed);
-      if (miniBatchIdx >= totalNumMiniBatches) break;
-
-      const int miniBatchStart = miniBatchIdx * effectiveMiniBatchSize;
-      if (miniBatchStart >= numPairs) break;
-
-      if (pendingCount == executorsPerRunner) {
-        drainOneExecutor();
-      }
-
-      GpuExecutor* executor = executors[pendingTail];
-
-      if (upstreamReadyEvent != nullptr && localMiniBatchCount < executorsPerRunner) {
-        cudaCheckError(cudaStreamWaitEvent(executor->stream(), upstreamReadyEvent, 0));
-        cudaCheckError(cudaStreamWaitEvent(executor->recursiveStream.stream(), upstreamReadyEvent, 0));
-        cudaCheckError(cudaStreamWaitEvent(executor->postRecursionStream.stream(), upstreamReadyEvent, 0));
-      }
-      ++localMiniBatchCount;
-
-      prepareMiniBatchOnCPU(*executor, ctx, queriesHost, leafSubpatterns, miniBatchStart, effectiveMiniBatchSize);
-
-      ScopedNvtxRange launchRange("GPU launch mini-batch " + std::to_string(miniBatchIdx));
-      uploadAndLaunchMiniBatch(*executor, ctx, targetsDevice, queriesDevice, leafSubpatterns, algorithm);
-      initiateCountsOnlyCopyToHost(*executor);
-      launchRange.pop();
-
-      pendingExecutors[pendingTail] = executor;
-      pendingTail = (pendingTail + 1) % executorsPerRunner;
-      ++pendingCount;
-    }
-
-    while (pendingCount > 0) {
-      drainOneExecutor();
-    }
-  } catch (...) {
-    exceptionPtr = std::current_exception();
-  }
+void runnerWorkerInlineCounts(int                               workerIdx,
+                              const ThreadWorkerContext&        ctx,
+                              MoleculesDevice&                  targetsDevice,
+                              const MoleculesDevice&            queriesDevice,
+                              const MoleculesHost&              queriesHost,
+                              const LeafSubpatterns&            leafSubpatterns,
+                              std::vector<int>&                 counts,
+                              std::mutex&                       resultsMutex,
+                              SubstructAlgorithm                algorithm,
+                              cudaEvent_t                       upstreamReadyEvent,
+                              std::atomic<int>&                 nextMiniBatchIdx,
+                              int                               totalNumMiniBatches,
+                              int                               effectiveMiniBatchSize,
+                              int                               deviceId,
+                              std::vector<GpuExecutor*>         executors,
+                              std::exception_ptr&               exceptionPtr) {
+  auto accumulate = [&](GpuExecutor& executor) {
+    accumulateMiniBatchResultsCounts(executor, ctx, counts, resultsMutex);
+  };
+  runnerWorkerInlineCountOnly(workerIdx, ctx, targetsDevice, queriesDevice, queriesHost, leafSubpatterns,
+                              algorithm, upstreamReadyEvent, nextMiniBatchIdx, totalNumMiniBatches,
+                              effectiveMiniBatchSize, deviceId, std::move(executors),
+                              accumulate, exceptionPtr);
 }
 
 }  // namespace
@@ -1307,8 +1391,13 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
                                     const std::vector<int>&                querySortOrder,
                                     int                                    effectivePreprocessingThreads,
                                     RDKitFallbackQueue*                    fallbackQueue,
-                                    HasSubstructMatchResults*              boolResults) {
-  ScopedNvtxRange e2eRange(boolResults ? "runMacroBatchedHasSubstructMatch" : "runMacroBatchedSubstructSearch");
+                                    HasSubstructMatchResults*              boolResults,
+                                    std::vector<int>*                      countResults) {
+  const bool countOnly = (boolResults != nullptr) || (countResults != nullptr);
+  const char* rangeLabel = boolResults
+      ? "runMacroBatchedHasSubstructMatch"
+      : (countResults ? "runMacroBatchedCountSubstructMatches" : "runMacroBatchedSubstructSearch");
+  ScopedNvtxRange e2eRange(rangeLabel);
 
   const int numGpuTargets = static_cast<int>(gpuTargets.size());
   const int numQueries    = static_cast<int>(queriesHost.numMolecules());
@@ -1398,7 +1487,9 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
   const int pinnedMiniBatchSize = std::min(config.batchSize, maxPairsInMacro);
 
   size_t maxMatchIndicesPerMiniBatch;
-  if (config.maxMatches > 0) {
+  if (countOnly) {
+    maxMatchIndicesPerMiniBatch = 0;
+  } else if (config.maxMatches > 0) {
     maxMatchIndicesPerMiniBatch = static_cast<size_t>(pinnedMiniBatchSize) * config.maxMatches * maxQueryAtoms;
   } else {
     maxMatchIndicesPerMiniBatch = static_cast<size_t>(pinnedMiniBatchSize) * globalMaxTargetAtoms * maxQueryAtoms;
@@ -1470,7 +1561,7 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
     ctx.numQueries     = numQueries;
     ctx.querySortOrder = querySortOrder.empty() ? nullptr : &querySortOrder;
     ctx.maxMatches     = config.maxMatches;
-    ctx.countOnly      = (boolResults != nullptr);
+    ctx.countOnly      = countOnly;
 
     ctx.queryAtomCounts.resize(static_cast<size_t>(numQueries * 1.5));
     ctx.queryDepths.resize(numQueries);
@@ -1670,6 +1761,23 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
                                  std::cref(queriesHost),
                                  std::cref(*leafPtr),
                                  std::ref(*boolResults),
+                                 std::ref(resultsMutex),
+                                 algorithm,
+                                 upstreamEvent,
+                                 std::ref(nextMiniBatchIdx),
+                                 totalMiniBatches,
+                                 miniBatchSize,
+                                 deviceId,
+                                 workerExecutors,
+                                 std::ref(exceptions[globalIdx]));
+            } else if (countResults) {
+              runnerWorkerInlineCounts(globalIdx,
+                                 std::cref(*ctxPtr),
+                                 std::ref(*targetsPtr),
+                                 std::cref(*queriesPtr),
+                                 std::cref(queriesHost),
+                                 std::cref(*leafPtr),
+                                 std::ref(*countResults),
                                  std::ref(resultsMutex),
                                  algorithm,
                                  upstreamEvent,
@@ -2155,7 +2263,8 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
                              SubstructAlgorithm                      algorithm,
                              cudaStream_t                            stream,
                              const SubstructSearchConfig&            config,
-                             HasSubstructMatchResults*               boolResults) {
+                             HasSubstructMatchResults*               boolResults,
+                             std::vector<int>*                       countResults) {
   const int numTargets = static_cast<int>(targets.size());
   const int numQueries = static_cast<int>(queries.size());
 
@@ -2241,7 +2350,7 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
   if (gpuTargets.empty()) {
     ScopedNvtxRange allFallbackRange("ALL TARGETS - full RDKit fallback");
     std::mutex resultsMutex;
-    RDKitFallbackQueue fallbackQueue(&targets, &queries, &results, &resultsMutex, config.maxMatches, boolResults);
+    RDKitFallbackQueue fallbackQueue(&targets, &queries, &results, &resultsMutex, config.maxMatches, boolResults, countResults);
     fallbackQueue.enqueue(fallbackTargets);
     while (fallbackQueue.tryProcessOne()) {}
     return;
@@ -2294,7 +2403,7 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
   
   // Create fallback queue to collect overflow from GPU processing.
   // Preprocessing threads will opportunistically process entries while waiting for GPUs.
-  RDKitFallbackQueue fallbackQueue(&targets, &queries, &results, &resultsMutex, config.maxMatches, boolResults);
+  RDKitFallbackQueue fallbackQueue(&targets, &queries, &results, &resultsMutex, config.maxMatches, boolResults, countResults);
 
   // Enqueue oversized target fallbacks - processed opportunistically during macro batch loop
   if (!fallbackTargets.empty()) {
@@ -2318,7 +2427,8 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
                                 querySortOrder,
                                 effectivePreprocessingThreads,
                                 &fallbackQueue,
-                                boolResults);
+                                boolResults,
+                                countResults);
 
   // Process any remaining fallback entries after GPU work completes.
   // This handles overflow entries added during GPU processing and any
@@ -2338,7 +2448,25 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
                          SubstructAlgorithm                      algorithm,
                          cudaStream_t                            stream,
                          const SubstructSearchConfig&            config) {
-  getSubstructMatchesImpl(targets, queries, results, algorithm, stream, config, nullptr);
+  getSubstructMatchesImpl(targets, queries, results, algorithm, stream, config, nullptr, nullptr);
+}
+
+void countSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
+                           const std::vector<const RDKit::ROMol*>& queries,
+                           std::vector<int>&                       counts,
+                           SubstructAlgorithm                      algorithm,
+                           cudaStream_t                            stream,
+                           const SubstructSearchConfig&            config) {
+  const int numTargets = static_cast<int>(targets.size());
+  const int numQueries = static_cast<int>(queries.size());
+
+  counts.assign(static_cast<size_t>(numTargets) * numQueries, 0);
+
+  SubstructSearchResults matchResults;
+  SubstructSearchConfig countConfig = config;
+  countConfig.maxMatches = 0;
+
+  getSubstructMatchesImpl(targets, queries, matchResults, algorithm, stream, countConfig, nullptr, &counts);
 }
 
 void hasSubstructMatch(const std::vector<const RDKit::ROMol*>& targets,
@@ -2364,7 +2492,7 @@ void hasSubstructMatch(const std::vector<const RDKit::ROMol*>& targets,
   hasMatchConfig.maxMatches = 1;
 
   SubstructSearchResults matchResults;
-  getSubstructMatchesImpl(targets, queries, matchResults, algorithm, stream, hasMatchConfig, &results);
+  getSubstructMatchesImpl(targets, queries, matchResults, algorithm, stream, hasMatchConfig, &results, nullptr);
 
   for (auto& [pairIdx, matches] : matchResults.matches) {
     if (!matches.empty()) {

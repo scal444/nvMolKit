@@ -49,6 +49,23 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
                          const SubstructSearchConfig&            config = SubstructSearchConfig{});
 
 /**
+ * @brief Count substructure matches per (target, query) pair.
+ *
+ * @param targets Vector of target molecule pointers
+ * @param queries Vector of query molecule pointers (typically from SMARTS)
+ * @param counts Output: flattened [target * numQueries + query] match counts
+ * @param algorithm Algorithm to use for matching
+ * @param stream CUDA stream for async operations
+ * @param config Execution configuration (threading, batching). Defaults to single-threaded.
+ */
+void countSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
+                           const std::vector<const RDKit::ROMol*>& queries,
+                           std::vector<int>&                       counts,
+                           SubstructAlgorithm                      algorithm,
+                           cudaStream_t                            stream,
+                           const SubstructSearchConfig&            config = SubstructSearchConfig{});
+
+/**
  * @brief Check if targets contain queries as substructures
  *
  * @param targets Vector of target molecule pointers

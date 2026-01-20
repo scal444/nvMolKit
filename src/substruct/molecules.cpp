@@ -135,7 +135,7 @@ void populateAtomDataPacked(const RDKit::ROMol* mol,
   packed.setNumHeteroatomNeighbors(numHeteroNeighbors);
 
   // Isotope (0 = natural abundance)
-  unsigned int isotope = atom->getIsotope();
+  const unsigned int isotope = atom->getIsotope();
   if (isotope > 255) {
     throw std::runtime_error("Atom isotope " + std::to_string(isotope) + " exceeds maximum supported value of 255");
   }

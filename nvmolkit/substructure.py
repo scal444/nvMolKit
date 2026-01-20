@@ -23,12 +23,13 @@ from typing import Sequence
 import numpy as np
 from rdkit.Chem import Mol
 
-from nvmolkit._substructure import SubstructSearchConfig, hasSubstructMatch
+from nvmolkit._substructure import SubstructSearchConfig, countSubstructMatches, hasSubstructMatch
 from nvmolkit._substructure import getSubstructMatches as _getSubstructMatches
 
 __all__ = [
     "SubstructSearchConfig",
     "getSubstructMatches",
+    "countSubstructMatches",
     "hasSubstructMatch",
 ]
 

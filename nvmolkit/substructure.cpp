@@ -37,6 +37,13 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
                          cudaStream_t                            stream,
                          const SubstructSearchConfig&            config);
 
+void countSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
+                           const std::vector<const RDKit::ROMol*>& queries,
+                           std::vector<int>&                       counts,
+                           SubstructAlgorithm                      algorithm,
+                           cudaStream_t                            stream,
+                           const SubstructSearchConfig&            config);
+
 void hasSubstructMatch(const std::vector<const RDKit::ROMol*>& targets,
                        const std::vector<const RDKit::ROMol*>& queries,
                        HasSubstructMatchResults&               results,
@@ -234,6 +241,81 @@ BOOST_PYTHON_MODULE(_substructure) {
     "Returns:\n"
     "    CSR-style tuple of numpy arrays: (atom_indices, match_indptr, pair_indptr, shape).\n"
     "    Use nvmolkit.substructure.getSubstructMatches() (Python wrapper) for list-like access.");
+
+  def(
+    "countSubstructMatches",
+    +[](const list& targets,
+        const list& queries,
+        const nvMolKit::SubstructSearchConfig& config) {
+      nvMolKit::ScopedNvtxRange extractRange("Python: extract mol pointers", nvMolKit::NvtxColor::kYellow);
+      std::vector<const RDKit::ROMol*> targetsVec;
+      std::vector<const RDKit::ROMol*> queriesVec;
+
+      targetsVec.reserve(len(targets));
+      for (int i = 0; i < len(targets); ++i) {
+        const RDKit::ROMol* mol = extract<const RDKit::ROMol*>(object(targets[i]));
+        if (mol == nullptr) {
+          throw std::invalid_argument("Invalid target molecule at index " + std::to_string(i));
+        }
+        targetsVec.push_back(mol);
+      }
+
+      queriesVec.reserve(len(queries));
+      for (int i = 0; i < len(queries); ++i) {
+        const RDKit::ROMol* mol = extract<const RDKit::ROMol*>(object(queries[i]));
+        if (mol == nullptr) {
+          throw std::invalid_argument("Invalid query molecule at index " + std::to_string(i));
+        }
+        queriesVec.push_back(mol);
+      }
+      extractRange.pop();
+
+      const int numTargets = static_cast<int>(targetsVec.size());
+      const int numQueries = static_cast<int>(queriesVec.size());
+
+      auto countsPtr = std::make_unique<std::vector<int>>();
+      nvMolKit::countSubstructMatches(targetsVec, queriesVec, *countsPtr,
+                                      nvMolKit::SubstructAlgorithm::GSI, nullptr, config);
+
+      nvMolKit::ScopedNvtxRange wrapRange("Python: wrap numpy array", nvMolKit::NvtxColor::kGreen);
+      int* dataPtr = countsPtr->data();
+
+      auto deleter = [](PyObject* cap) {
+        auto* r = reinterpret_cast<std::vector<int>*>(
+            PyCapsule_GetPointer(cap, "nvmolkit.countsubstruct_results"));
+        delete r;
+      };
+      PyObject* cap = PyCapsule_New(static_cast<void*>(countsPtr.get()),
+                                    "nvmolkit.countsubstruct_results", deleter);
+      if (cap == nullptr) {
+        throw std::runtime_error("Failed to create PyCapsule for countSubstructMatches results");
+      }
+      object owner{handle<>(cap)};
+      countsPtr.release();
+
+      const Py_intptr_t shape_arr[2] = {static_cast<Py_intptr_t>(numTargets),
+                                        static_cast<Py_intptr_t>(numQueries)};
+      const Py_intptr_t strides_arr[2] = {static_cast<Py_intptr_t>(numQueries * sizeof(int)),
+                                          static_cast<Py_intptr_t>(sizeof(int))};
+
+      return numpy::from_data(dataPtr,
+                              numpy::dtype::get_builtin<int>(),
+                              make_tuple(shape_arr[0], shape_arr[1]),
+                              make_tuple(strides_arr[0], strides_arr[1]),
+                              owner);
+    },
+    (arg("targets"),
+     arg("queries"),
+     arg("config") = nvMolKit::SubstructSearchConfig()),
+    "Count substructure matches per target/query pair.\n"
+    "\n"
+    "Args:\n"
+    "    targets: List of target RDKit molecules\n"
+    "    queries: List of query RDKit molecules (typically from SMARTS)\n"
+    "    config: SubstructSearchConfig with execution settings\n"
+    "\n"
+    "Returns:\n"
+    "    2D numpy array of int: results[target_idx, query_idx] = match count");
 
   def(
     "hasSubstructMatch",

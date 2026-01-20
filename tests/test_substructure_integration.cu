@@ -36,6 +36,7 @@
 using nvMolKit::countCudaDevices;
 
 using nvMolKit::algorithmName;
+using nvMolKit::countSubstructMatches;
 using nvMolKit::getSubstructMatches;
 using nvMolKit::hasSubstructMatch;
 using nvMolKit::HasSubstructMatchResults;
@@ -231,7 +232,13 @@ void printSmallestRepros(const SmallestRepros&                             repro
 
 }  // namespace
 
-using SubstructParams = std::tuple<SubstructAlgorithm, DatasetConfig, ThreadingConfig, bool>;
+enum class SubstructMode {
+  Matches,
+  HasMatch,
+  CountMatches
+};
+
+using SubstructParams = std::tuple<SubstructAlgorithm, DatasetConfig, ThreadingConfig, SubstructMode>;
 
 class SubstructureIntegrationTest : public ::testing::TestWithParam<SubstructParams> {
  protected:
@@ -243,7 +250,7 @@ class SubstructureIntegrationTest : public ::testing::TestWithParam<SubstructPar
   SubstructAlgorithm algorithm() const { return std::get<0>(GetParam()); }
   const DatasetConfig& dataset() const { return std::get<1>(GetParam()); }
   const ThreadingConfig& threading() const { return std::get<2>(GetParam()); }
-  bool useBooleanMode() const { return std::get<3>(GetParam()); }
+  SubstructMode mode() const { return std::get<3>(GetParam()); }
 };
 
 const ThreadingConfig kMainTestThreadingConfigs[] = {
@@ -258,7 +265,7 @@ INSTANTIATE_TEST_SUITE_P(
     ::testing::Values(SubstructAlgorithm::GSI),
     ::testing::ValuesIn(kDatasets),
     ::testing::ValuesIn(kMainTestThreadingConfigs),
-    ::testing::Values(false)),
+    ::testing::Values(SubstructMode::Matches)),
   [](const ::testing::TestParamInfo<SubstructParams>& info) {
     return std::string(algorithmName(std::get<0>(info.param))) + "_" +
            std::get<1>(info.param).name + "_" +
@@ -269,14 +276,18 @@ INSTANTIATE_TEST_SUITE_P(
   ConfigOptionTests,
   SubstructureIntegrationTest,
   ::testing::Values(
-    SubstructParams{SubstructAlgorithm::GSI, kDatasets[0], kThreadingConfigs[2], false},  // Autoselect, bool=false
-    SubstructParams{SubstructAlgorithm::GSI, kDatasets[0], kThreadingConfigs[0], true}),  // SingleThreaded, bool=true
+    SubstructParams{SubstructAlgorithm::GSI, kDatasets[0], kThreadingConfigs[2], SubstructMode::Matches},      // Autoselect
+    SubstructParams{SubstructAlgorithm::GSI, kDatasets[0], kThreadingConfigs[0], SubstructMode::HasMatch},     // SingleThreaded, bool
+    SubstructParams{SubstructAlgorithm::GSI, kDatasets[3], kThreadingConfigs[2], SubstructMode::CountMatches}),// Autoselect, counts
   [](const ::testing::TestParamInfo<SubstructParams>& info) {
-    const bool boolMode = std::get<3>(info.param);
+    const SubstructMode mode = std::get<3>(info.param);
+    const char* modeSuffix = (mode == SubstructMode::HasMatch)
+        ? "HasSubstructMatch"
+        : (mode == SubstructMode::CountMatches ? "CountSubstructMatches" : "Autoselect");
     return std::string(algorithmName(std::get<0>(info.param))) + "_" +
            std::get<1>(info.param).name + "_" +
            std::get<2>(info.param).name +
-           (boolMode ? "_HasSubstructMatch" : "_Autoselect");
+           "_" + modeSuffix;
   });
 
 TEST_P(SubstructureIntegrationTest, ChemblVsSmarts) {
@@ -298,7 +309,7 @@ TEST_P(SubstructureIntegrationTest, ChemblVsSmarts) {
   const int numQueries = static_cast<int>(queryMols.size());
   const int numGpus = threading().config.gpuIds.empty() ? 1 : static_cast<int>(threading().config.gpuIds.size());
 
-  if (useBooleanMode()) {
+  if (mode() == SubstructMode::HasMatch) {
     HasSubstructMatchResults boolResults;
     hasSubstructMatch(getRawPtrs(targetMols), getRawPtrs(queryMols), boolResults, algorithm(),
                       stream_.stream(), threading().config);
@@ -349,6 +360,55 @@ TEST_P(SubstructureIntegrationTest, ChemblVsSmarts) {
     }
 
     EXPECT_EQ(mismatches, 0) << "HasSubstructMatch results do not match RDKit for algorithm "
+                             << algorithmName(algorithm());
+  } else if (mode() == SubstructMode::CountMatches) {
+    std::vector<int> counts;
+    countSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols), counts, algorithm(),
+                          stream_.stream(), threading().config);
+
+    EXPECT_EQ(counts.size(), static_cast<size_t>(numTargets * numQueries));
+
+    RDKit::SubstructMatchParameters params;
+    params.uniquify = false;
+    params.maxMatches = 0;
+
+    int mismatches = 0;
+    std::vector<std::pair<int, int>> mismatchPairs;
+    for (int t = 0; t < numTargets; ++t) {
+      for (int q = 0; q < numQueries; ++q) {
+        const int gpuCount = counts[t * numQueries + q];
+        const auto rdkitMatches = RDKit::SubstructMatch(*targetMols[t], *queryMols[q], params);
+        const int rdkitCount = static_cast<int>(rdkitMatches.size());
+        if (gpuCount != rdkitCount) {
+          ++mismatches;
+          if (mismatchPairs.size() < 10) {
+            mismatchPairs.emplace_back(t, q);
+          }
+        }
+      }
+    }
+
+    std::cout << "[" << algorithmName(algorithm()) << ", " << threading().name
+              << ", CountSubstructMatches] Statistics:\n"
+              << "  Threading: workerThreads=" << threading().config.workerThreads
+              << ", preprocessingThreads=" << threading().config.preprocessingThreads
+              << ", " << numGpus << " GPU(s)\n"
+              << "  Total queries: " << numQueries << "\n"
+              << "  Total targets: " << numTargets << "\n"
+              << "  Mismatches: " << mismatches << "\n";
+
+    if (!mismatchPairs.empty()) {
+      std::cout << "  First mismatches:\n";
+      for (const auto& [t, q] : mismatchPairs) {
+        const auto rdkitMatches = RDKit::SubstructMatch(*targetMols[t], *queryMols[q], params);
+        std::cout << "    T[" << t << "]=" << targetSmiles[t]
+                  << " Q[" << q << "]=" << querySmarts[q]
+                  << " GPU=" << counts[t * numQueries + q]
+                  << " RDKit=" << rdkitMatches.size() << "\n";
+      }
+    }
+
+    EXPECT_EQ(mismatches, 0) << "CountSubstructMatches results do not match RDKit for algorithm "
                              << algorithmName(algorithm());
   } else {
     SubstructSearchResults results;

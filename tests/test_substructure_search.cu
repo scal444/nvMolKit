@@ -29,6 +29,7 @@
 
 using nvMolKit::algorithmName;
 using nvMolKit::checkReturnCode;
+using nvMolKit::countSubstructMatches;
 using nvMolKit::getRDKitSubstructMatches;
 using nvMolKit::getSubstructMatches;
 using nvMolKit::hasSubstructMatch;
@@ -1729,6 +1730,34 @@ TEST_P(SubstructureSearchTest, HasSubstructMatchEmptyInputs) {
 
   EXPECT_EQ(results.numTargets, 0);
   EXPECT_EQ(results.numQueries, 1);
+}
+
+// =============================================================================
+// countSubstructMatches Tests
+// =============================================================================
+
+TEST_P(SubstructureSearchTest, CountSubstructMatchesBasic) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targetMols;
+  std::vector<std::unique_ptr<RDKit::ROMol>> queryMols;
+
+  parseMolecules({"CCO", "CCCC"}, {"N", "O", "C"}, targetMols, queryMols);
+
+  std::vector<int> counts;
+  countSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols),
+                        counts, algorithm(), stream_.stream());
+
+  const int numTargets = static_cast<int>(targetMols.size());
+  const int numQueries = static_cast<int>(queryMols.size());
+  EXPECT_EQ(counts.size(), static_cast<size_t>(numTargets * numQueries));
+
+  auto idx = [numQueries](int t, int q) { return t * numQueries + q; };
+
+  EXPECT_EQ(counts[idx(0, 0)], 0);
+  EXPECT_EQ(counts[idx(0, 1)], 1);
+  EXPECT_EQ(counts[idx(0, 2)], 2);
+  EXPECT_EQ(counts[idx(1, 0)], 0);
+  EXPECT_EQ(counts[idx(1, 1)], 0);
+  EXPECT_EQ(counts[idx(1, 2)], 4);
 }
 
 // =============================================================================

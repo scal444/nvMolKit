@@ -481,6 +481,7 @@ void preprocessRecursiveSmartsBatchedWithEvents(SubstructTemplateConfig         
  *
  * @param boolResults Optional boolean results to populate instead of full matches.
  *                    When non-null, only sets match flag without storing mappings.
+ * @param countResults Optional count results to populate instead of full matches.
  */
 void processWithRDKitFallback(const RDKit::ROMol*       target,
                               const RDKit::ROMol*       query,
@@ -489,7 +490,8 @@ void processWithRDKitFallback(const RDKit::ROMol*       target,
                               SubstructSearchResults&   results,
                               std::mutex&               resultsMutex,
                               int                       maxMatches,
-                              HasSubstructMatchResults* boolResults = nullptr);
+                              HasSubstructMatchResults* boolResults = nullptr,
+                              std::vector<int>*         countResults = nullptr);
 
 /**
  * @brief Thread-safe queue for RDKit fallback processing.
@@ -504,7 +506,8 @@ class RDKitFallbackQueue {
                      SubstructSearchResults*                 results,
                      std::mutex*                             resultsMutex,
                      int                                     maxMatches,
-                     HasSubstructMatchResults*               boolResults = nullptr);
+                     HasSubstructMatchResults*               boolResults = nullptr,
+                     std::vector<int>*                       countResults = nullptr);
 
   void enqueue(const std::vector<RDKitFallbackEntry>& entries);
   void enqueue(const RDKitFallbackEntry& entry);
@@ -540,6 +543,7 @@ class RDKitFallbackQueue {
   const std::vector<const RDKit::ROMol*>* queries_;
   SubstructSearchResults*                 results_;
   HasSubstructMatchResults*               boolResults_;
+  std::vector<int>*                       countResults_;
   std::mutex*                             resultsMutex_;
   int                                     maxMatches_;
 

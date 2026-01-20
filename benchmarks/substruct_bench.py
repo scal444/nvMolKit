@@ -186,6 +186,12 @@ def _rdkit_worker_get(mol_binary: bytes) -> list[tuple]:
     return [mol.GetSubstructMatches(q, _worker_params) for q in _worker_queries]
 
 
+def _rdkit_worker_count(mol_binary: bytes) -> list[int]:
+    """Worker function for countSubstructMatches multiprocessing."""
+    mol = Chem.Mol(mol_binary)
+    return [len(mol.GetSubstructMatches(q, _worker_params)) for q in _worker_queries]
+
+
 @nvtx.annotate("bench_rdkit_substruct", color="green")
 def bench_rdkit_substruct(
     mols: list[Chem.Mol], 
@@ -206,7 +212,12 @@ def bench_rdkit_substruct(
     if threads > 1:
         mol_binaries = [mol.ToBinary() for mol in mols]
         query_binaries = [q.ToBinary() for q in queries]
-        worker_func = _rdkit_worker_has if mode == "hasSubstructMatch" else _rdkit_worker_get
+        if mode == "hasSubstructMatch":
+            worker_func = _rdkit_worker_has
+        elif mode == "countSubstructMatches":
+            worker_func = _rdkit_worker_count
+        else:
+            worker_func = _rdkit_worker_get
         chunksize = max(1, len(mol_binaries) // (threads * 4))
         
         @nvtx.annotate("substruct_run_mp", color="yellow")
@@ -224,6 +235,12 @@ def bench_rdkit_substruct(
                     mol_results = []
                     for query in queries:
                         mol_results.append(mol.HasSubstructMatch(query, params))
+                    results_data.append(mol_results)
+            elif mode == "countSubstructMatches":
+                for mol in mols:
+                    mol_results = []
+                    for query in queries:
+                        mol_results.append(len(mol.GetSubstructMatches(query, params)))
                     results_data.append(mol_results)
             else:
                 for mol in mols:
@@ -248,7 +265,7 @@ def bench_nvmolkit(
     """Benchmark nvmolkit GPU substructure search."""
     import torch
     
-    from nvmolkit.substructure import hasSubstructMatch, getSubstructMatches
+    from nvmolkit.substructure import countSubstructMatches, hasSubstructMatch, getSubstructMatches
     
     results_data: object = None
     
@@ -257,6 +274,9 @@ def bench_nvmolkit(
         nonlocal results_data
         if mode == "hasSubstructMatch":
             results_data = hasSubstructMatch(mols, queries, config)
+            torch.cuda.synchronize()
+        elif mode == "countSubstructMatches":
+            results_data = countSubstructMatches(mols, queries, config)
             torch.cuda.synchronize()
         else:
             results_data = getSubstructMatches(mols, queries, config)
@@ -278,7 +298,7 @@ def main():
     parser.add_argument("--no_sanitize", action="store_false", dest="sanitize", help="Skip sanitization (preprocessed SMILES)")
     parser.set_defaults(sanitize=False)
     parser.add_argument("--runs", "-r", type=int, default=1, help="Number of timing runs (default: 1)")
-    parser.add_argument("--mode", "-m", choices=["hasSubstructMatch", "getSubstructMatches"], 
+    parser.add_argument("--mode", "-m", choices=["hasSubstructMatch", "getSubstructMatches", "countSubstructMatches"], 
                         default="hasSubstructMatch", help="Search mode (default: hasSubstructMatch)")
     parser.add_argument("--max_matches", type=int, default=0, 
                         help="Maximum matches per target/query pair, 0 = all (default: 0)")
@@ -344,7 +364,7 @@ def main():
     
     if not args.no_nvmolkit:
         try:
-            from nvmolkit.substructure import SubstructSearchConfig, hasSubstructMatch, getSubstructMatches
+            from nvmolkit.substructure import SubstructSearchConfig, countSubstructMatches, hasSubstructMatch, getSubstructMatches
             import torch
             
             config = SubstructSearchConfig()
@@ -362,6 +382,8 @@ def main():
                 with nvtx.annotate("nvmolkit_warmup", color="purple"):
                     if args.mode == "hasSubstructMatch":
                         hasSubstructMatch(warmup_mols, queries, config)
+                    elif args.mode == "countSubstructMatches":
+                        countSubstructMatches(warmup_mols, queries, config)
                     else:
                         getSubstructMatches(warmup_mols, queries, config)
                     torch.cuda.synchronize()
@@ -420,6 +442,18 @@ def main():
                     total += 1
             pct = 100.0 * matches / total if total > 0 else 0
             print(f"  Boolean match agreement: {matches}/{total} ({pct:.1f}%)")
+        elif args.mode == "countSubstructMatches":
+            matches = 0
+            total = 0
+            for t in range(len(mols)):
+                for q in range(len(queries)):
+                    nv_count = int(nvmolkit_data[t][q])
+                    rd_count = int(rdkit_data[t][q])
+                    if nv_count == rd_count:
+                        matches += 1
+                    total += 1
+            pct = 100.0 * matches / total if total > 0 else 0
+            print(f"  Count agreement: {matches}/{total} ({pct:.1f}%)")
         else:
             matches = 0
             total = 0

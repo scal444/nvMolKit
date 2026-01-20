@@ -31,6 +31,24 @@ def getSubstructMatches(
     """
     ...
 
+def countSubstructMatches(
+    targets: Sequence[Mol],
+    queries: Sequence[Mol],
+    config: SubstructSearchConfig = ...,
+) -> np.ndarray:
+    """Count substructure matches per target/query pair.
+
+    Args:
+        targets: List of target RDKit molecules
+        queries: List of query RDKit molecules (typically from SMARTS)
+        config: SubstructSearchConfig with execution settings
+
+    Returns:
+        2D numpy array of int with shape (num_targets, num_queries).
+        results[target_idx, query_idx] = match count.
+    """
+    ...
+
 def hasSubstructMatch(
     targets: Sequence[Mol],
     queries: Sequence[Mol],
