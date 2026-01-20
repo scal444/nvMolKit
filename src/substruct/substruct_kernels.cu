@@ -386,8 +386,11 @@ __global__ void substructMatchKernelT(MoleculesDeviceView                       
     __syncthreads();
   }
 
-  const int matchOffset = results.pairMatchStarts[batchLocalIdx];
-  const int maxMatches  = (results.pairMatchStarts[batchLocalIdx + 1] - matchOffset) / query.numAtoms;
+  const int  maxMatchesToFind = results.maxMatchesToFind;
+  const bool countOnly        = results.countOnly;
+
+  const int matchOffset = countOnly ? 0 : results.pairMatchStarts[batchLocalIdx];
+  const int maxMatches  = countOnly ? 0 : (results.pairMatchStarts[batchLocalIdx + 1] - matchOffset) / query.numAtoms;
 
   __shared__ int sharedMatchCount;
   __shared__ int sharedReportedCount;
@@ -397,9 +400,6 @@ __global__ void substructMatchKernelT(MoleculesDeviceView                       
     sharedReportedCount = 0;
   }
   __syncthreads();
-
-  const int  maxMatchesToFind = results.maxMatchesToFind;
-  const bool countOnly        = results.countOnly;
 
   if constexpr (Algo == SubstructAlgorithm::VF2) {
     namespace cg = cooperative_groups;
@@ -441,8 +441,10 @@ __global__ void substructMatchKernelT(MoleculesDeviceView                       
   __syncthreads();
 
   if (threadIdx.x == 0) {
-    results.matchCounts[batchLocalIdx]    = sharedMatchCount;
-    results.reportedCounts[batchLocalIdx] = sharedReportedCount;
+    results.matchCounts[batchLocalIdx] = sharedMatchCount;
+    if (!countOnly) {
+      results.reportedCounts[batchLocalIdx] = sharedReportedCount;
+    }
   }
 }
 

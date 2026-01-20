@@ -318,6 +318,16 @@ class MiniBatchResultsDevice {
                            int*     hostReportedCounts,
                            int16_t* hostMatchIndices) const;
 
+  /**
+   * @brief Copy only match counts to host (for boolean output mode).
+   *
+   * Skips copying reportedCounts and matchIndices for efficiency when
+   * only existence of matches is needed.
+   *
+   * @param hostMatchCounts Output: match counts for this mini-batch [miniBatchSize]
+   */
+  void copyCountsOnlyToHost(int* hostMatchCounts) const;
+
   void setQueryAtomCounts(const int* queryAtomCounts, size_t count);
 
   [[nodiscard]] int miniBatchSize() const { return miniBatchSize_; }
@@ -468,14 +478,18 @@ void preprocessRecursiveSmartsBatchedWithEvents(SubstructTemplateConfig         
  * @brief Process a single (target, query) pair using RDKit's CPU implementation.
  *
  * Used as fallback for oversized targets or overflow cases.
+ *
+ * @param boolResults Optional boolean results to populate instead of full matches.
+ *                    When non-null, only sets match flag without storing mappings.
  */
-void processWithRDKitFallback(const RDKit::ROMol*     target,
-                              const RDKit::ROMol*     query,
-                              int                     targetIdx,
-                              int                     queryIdx,
-                              SubstructSearchResults& results,
-                              std::mutex&             resultsMutex,
-                              int                     maxMatches);
+void processWithRDKitFallback(const RDKit::ROMol*       target,
+                              const RDKit::ROMol*       query,
+                              int                       targetIdx,
+                              int                       queryIdx,
+                              SubstructSearchResults&   results,
+                              std::mutex&               resultsMutex,
+                              int                       maxMatches,
+                              HasSubstructMatchResults* boolResults = nullptr);
 
 /**
  * @brief Thread-safe queue for RDKit fallback processing.
@@ -489,7 +503,8 @@ class RDKitFallbackQueue {
                      const std::vector<const RDKit::ROMol*>* queries,
                      SubstructSearchResults*                 results,
                      std::mutex*                             resultsMutex,
-                     int                                     maxMatches);
+                     int                                     maxMatches,
+                     HasSubstructMatchResults*               boolResults = nullptr);
 
   void enqueue(const std::vector<RDKitFallbackEntry>& entries);
   void enqueue(const RDKitFallbackEntry& entry);
@@ -524,6 +539,7 @@ class RDKitFallbackQueue {
   const std::vector<const RDKit::ROMol*>* targets_;
   const std::vector<const RDKit::ROMol*>* queries_;
   SubstructSearchResults*                 results_;
+  HasSubstructMatchResults*               boolResults_;
   std::mutex*                             resultsMutex_;
   int                                     maxMatches_;
 
@@ -576,6 +592,7 @@ struct ThreadWorkerContext {
   int maxQueryAtoms  = 0;
   int maxBondsPerAtom = 0;
   int maxMatches     = 0;
+  bool countOnly     = false;  ///< If true, count matches only (for hasSubstructMatch)
   SubstructTemplateConfig templateConfig = SubstructTemplateConfig::Config_T128_Q64_B8;
 };
 

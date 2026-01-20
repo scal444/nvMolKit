@@ -15,6 +15,7 @@
 
 #include <GraphMol/ROMol.h>
 #include <GraphMol/SmilesParse/SmilesParse.h>
+#include <GraphMol/Substruct/SubstructMatch.h>
 #include <gtest/gtest.h>
 
 #include <climits>
@@ -36,6 +37,8 @@ using nvMolKit::countCudaDevices;
 
 using nvMolKit::algorithmName;
 using nvMolKit::getSubstructMatches;
+using nvMolKit::hasSubstructMatch;
+using nvMolKit::HasSubstructMatchResults;
 using nvMolKit::printValidationResultDetailed;
 using nvMolKit::ScopedStream;
 using nvMolKit::SubstructAlgorithm;
@@ -228,7 +231,7 @@ void printSmallestRepros(const SmallestRepros&                             repro
 
 }  // namespace
 
-using SubstructParams = std::tuple<SubstructAlgorithm, DatasetConfig, ThreadingConfig>;
+using SubstructParams = std::tuple<SubstructAlgorithm, DatasetConfig, ThreadingConfig, bool>;
 
 class SubstructureIntegrationTest : public ::testing::TestWithParam<SubstructParams> {
  protected:
@@ -240,6 +243,12 @@ class SubstructureIntegrationTest : public ::testing::TestWithParam<SubstructPar
   SubstructAlgorithm algorithm() const { return std::get<0>(GetParam()); }
   const DatasetConfig& dataset() const { return std::get<1>(GetParam()); }
   const ThreadingConfig& threading() const { return std::get<2>(GetParam()); }
+  bool useBooleanMode() const { return std::get<3>(GetParam()); }
+};
+
+const ThreadingConfig kMainTestThreadingConfigs[] = {
+  kThreadingConfigs[0],  // SingleThreaded
+  kThreadingConfigs[1],  // MultiThreaded
 };
 
 INSTANTIATE_TEST_SUITE_P(
@@ -248,11 +257,26 @@ INSTANTIATE_TEST_SUITE_P(
   ::testing::Combine(
     ::testing::Values(SubstructAlgorithm::GSI),
     ::testing::ValuesIn(kDatasets),
-    ::testing::ValuesIn(kThreadingConfigs)),
+    ::testing::ValuesIn(kMainTestThreadingConfigs),
+    ::testing::Values(false)),
   [](const ::testing::TestParamInfo<SubstructParams>& info) {
     return std::string(algorithmName(std::get<0>(info.param))) + "_" +
            std::get<1>(info.param).name + "_" +
            std::get<2>(info.param).name;
+  });
+
+INSTANTIATE_TEST_SUITE_P(
+  ConfigOptionTests,
+  SubstructureIntegrationTest,
+  ::testing::Values(
+    SubstructParams{SubstructAlgorithm::GSI, kDatasets[0], kThreadingConfigs[2], false},  // Autoselect, bool=false
+    SubstructParams{SubstructAlgorithm::GSI, kDatasets[0], kThreadingConfigs[0], true}),  // SingleThreaded, bool=true
+  [](const ::testing::TestParamInfo<SubstructParams>& info) {
+    const bool boolMode = std::get<3>(info.param);
+    return std::string(algorithmName(std::get<0>(info.param))) + "_" +
+           std::get<1>(info.param).name + "_" +
+           std::get<2>(info.param).name +
+           (boolMode ? "_HasSubstructMatch" : "_Autoselect");
   });
 
 TEST_P(SubstructureIntegrationTest, ChemblVsSmarts) {
@@ -270,83 +294,137 @@ TEST_P(SubstructureIntegrationTest, ChemblVsSmarts) {
 
   ASSERT_LE(targetMols.size(), kNumSmiles) << "Loaded more targets than requested";
 
-  SubstructSearchResults results;
-  getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols), results, algorithm(),
+  const int numTargets = static_cast<int>(targetMols.size());
+  const int numQueries = static_cast<int>(queryMols.size());
+  const int numGpus = threading().config.gpuIds.empty() ? 1 : static_cast<int>(threading().config.gpuIds.size());
+
+  if (useBooleanMode()) {
+    HasSubstructMatchResults boolResults;
+    hasSubstructMatch(getRawPtrs(targetMols), getRawPtrs(queryMols), boolResults, algorithm(),
                       stream_.stream(), threading().config);
 
-  EXPECT_EQ(results.numTargets, static_cast<int>(targetMols.size()));
-  EXPECT_EQ(results.numQueries, static_cast<int>(queryMols.size()));
+    EXPECT_EQ(boolResults.numTargets, numTargets);
+    EXPECT_EQ(boolResults.numQueries, numQueries);
 
-  const int numTargets = results.numTargets;
-  const int numQueries = results.numQueries;
+    int mismatches = 0;
+    int totalMatches = 0;
+    std::vector<std::pair<int, int>> mismatchPairs;
 
-  std::vector<int64_t> totalMatchesPerQuery(numQueries, 0);
-  int64_t              grandTotalMatches = 0;
-
-  for (int q = 0; q < numQueries; ++q) {
     for (int t = 0; t < numTargets; ++t) {
-      totalMatchesPerQuery[q] += results.matchCount(t, q);
+      for (int q = 0; q < numQueries; ++q) {
+        const bool gpuHasMatch = boolResults.matches(t, q);
+        RDKit::MatchVectType matchVect;
+        const bool rdkitHasMatch = RDKit::SubstructMatch(*targetMols[t], *queryMols[q], matchVect);
+
+        if (gpuHasMatch) ++totalMatches;
+
+        if (gpuHasMatch != rdkitHasMatch) {
+          ++mismatches;
+          if (mismatchPairs.size() < 10) {
+            mismatchPairs.emplace_back(t, q);
+          }
+        }
+      }
     }
-    grandTotalMatches += totalMatchesPerQuery[q];
+
+    std::cout << "[" << algorithmName(algorithm()) << ", " << threading().name << ", HasSubstructMatch] Statistics:\n"
+              << "  Threading: workerThreads=" << threading().config.workerThreads
+              << ", preprocessingThreads=" << threading().config.preprocessingThreads
+              << ", " << numGpus << " GPU(s)\n"
+              << "  Total queries: " << numQueries << "\n"
+              << "  Total targets: " << numTargets << "\n"
+              << "  Total pairs with matches: " << totalMatches << "\n"
+              << "  Mismatches: " << mismatches << "\n";
+
+    if (!mismatchPairs.empty()) {
+      std::cout << "  First mismatches:\n";
+      for (const auto& [t, q] : mismatchPairs) {
+        RDKit::MatchVectType matchVect;
+        const bool rdkitHasMatch = RDKit::SubstructMatch(*targetMols[t], *queryMols[q], matchVect);
+        std::cout << "    T[" << t << "]=" << targetSmiles[t]
+                  << " Q[" << q << "]=" << querySmarts[q]
+                  << " GPU=" << boolResults.matches(t, q)
+                  << " RDKit=" << rdkitHasMatch << "\n";
+      }
+    }
+
+    EXPECT_EQ(mismatches, 0) << "HasSubstructMatch results do not match RDKit for algorithm "
+                             << algorithmName(algorithm());
+  } else {
+    SubstructSearchResults results;
+    getSubstructMatches(getRawPtrs(targetMols), getRawPtrs(queryMols), results, algorithm(),
+                        stream_.stream(), threading().config);
+
+    EXPECT_EQ(results.numTargets, numTargets);
+    EXPECT_EQ(results.numQueries, numQueries);
+
+    std::vector<int64_t> totalMatchesPerQuery(numQueries, 0);
+    int64_t              grandTotalMatches = 0;
+
+    for (int q = 0; q < numQueries; ++q) {
+      for (int t = 0; t < numTargets; ++t) {
+        totalMatchesPerQuery[q] += results.matchCount(t, q);
+      }
+      grandTotalMatches += totalMatchesPerQuery[q];
+    }
+
+    std::vector<int> zeroMatchQueries;
+    for (int q = 0; q < numQueries; ++q) {
+      if (totalMatchesPerQuery[q] == 0) {
+        zeroMatchQueries.push_back(q);
+      }
+    }
+
+    std::cout << "[" << algorithmName(algorithm()) << ", " << threading().name << "] Query statistics:\n"
+              << "  Threading: workerThreads=" << threading().config.workerThreads
+              << ", preprocessingThreads=" << threading().config.preprocessingThreads
+              << ", " << numGpus << " GPU(s)\n"
+              << "  Total queries: " << numQueries << "\n"
+              << "  Total targets: " << numTargets << "\n"
+              << "  Grand total matches: " << grandTotalMatches << "\n"
+              << "  Queries with 0 matches: " << zeroMatchQueries.size() << "\n";
+
+    if (!zeroMatchQueries.empty()) {
+      std::cout << "  Zero-match queries:\n";
+      const size_t maxToShow = 20;
+      for (size_t i = 0; i < std::min(zeroMatchQueries.size(), maxToShow); ++i) {
+        const int q = zeroMatchQueries[i];
+        std::cout << "    [" << q << "]: " << querySmarts[q] << "\n";
+      }
+      if (zeroMatchQueries.size() > maxToShow) {
+        std::cout << "    ... and " << (zeroMatchQueries.size() - maxToShow) << " more\n";
+      }
+    }
+
+    auto validationResult = validateAgainstRDKit(results, targetMols, queryMols);
+
+    if (!validationResult.allMatch) {
+      printValidationResultDetailed(validationResult, results, targetMols, queryMols, targetSmiles, querySmarts,
+                                    algorithmName(algorithm()));
+
+      if (!validationResult.mismatches.empty()) {
+        auto repros = findSmallestRepros(
+            validationResult.mismatches,
+            [](const auto& m) { return std::get<0>(m); },
+            [](const auto& m) { return std::get<1>(m); });
+        printSmallestRepros(repros, targetSmiles, querySmarts, targetMols, queryMols, results, "count mismatch");
+      }
+
+      if (!validationResult.mappingMismatches.empty()) {
+        auto repros = findSmallestRepros(
+            validationResult.mappingMismatches,
+            [](const auto& m) { return m.first; },
+            [](const auto& m) { return m.second; });
+        printSmallestRepros(repros, targetSmiles, querySmarts, targetMols, queryMols, results, "mapping mismatch");
+      }
+    }
+
+    EXPECT_TRUE(validationResult.allMatch)
+      << "GPU results do not match RDKit for algorithm " << algorithmName(algorithm())
+      << ". Count mismatches: " << validationResult.mismatchedPairs
+      << ", Mapping mismatches: " << validationResult.wrongMappingPairs
+      << " / " << validationResult.totalPairs << " total pairs";
   }
-
-  std::vector<int> zeroMatchQueries;
-  for (int q = 0; q < numQueries; ++q) {
-    if (totalMatchesPerQuery[q] == 0) {
-      zeroMatchQueries.push_back(q);
-    }
-  }
-
-  const int numGpus = threading().config.gpuIds.empty() ? 1 : static_cast<int>(threading().config.gpuIds.size());
-  std::cout << "[" << algorithmName(algorithm()) << ", " << threading().name << "] Query statistics:\n"
-            << "  Threading: workerThreads=" << threading().config.workerThreads
-            << ", preprocessingThreads=" << threading().config.preprocessingThreads
-            << ", " << numGpus << " GPU(s)\n"
-            << "  Total queries: " << numQueries << "\n"
-            << "  Total targets: " << numTargets << "\n"
-            << "  Grand total matches: " << grandTotalMatches << "\n"
-            << "  Queries with 0 matches: " << zeroMatchQueries.size() << "\n";
-
-  if (!zeroMatchQueries.empty()) {
-    std::cout << "  Zero-match queries:\n";
-    const size_t maxToShow = 20;
-    for (size_t i = 0; i < std::min(zeroMatchQueries.size(), maxToShow); ++i) {
-      const int q = zeroMatchQueries[i];
-      std::cout << "    [" << q << "]: " << querySmarts[q] << "\n";
-    }
-    if (zeroMatchQueries.size() > maxToShow) {
-      std::cout << "    ... and " << (zeroMatchQueries.size() - maxToShow) << " more\n";
-    }
-  }
-
-  auto validationResult = validateAgainstRDKit(results, targetMols, queryMols);
-
-  if (!validationResult.allMatch) {
-    printValidationResultDetailed(validationResult, results, targetMols, queryMols, targetSmiles, querySmarts,
-                                  algorithmName(algorithm()));
-
-    if (!validationResult.mismatches.empty()) {
-      auto repros = findSmallestRepros(
-          validationResult.mismatches,
-          [](const auto& m) { return std::get<0>(m); },
-          [](const auto& m) { return std::get<1>(m); });
-      printSmallestRepros(repros, targetSmiles, querySmarts, targetMols, queryMols, results, "count mismatch");
-    }
-
-    if (!validationResult.mappingMismatches.empty()) {
-      auto repros = findSmallestRepros(
-          validationResult.mappingMismatches,
-          [](const auto& m) { return m.first; },
-          [](const auto& m) { return m.second; });
-      printSmallestRepros(repros, targetSmiles, querySmarts, targetMols, queryMols, results, "mapping mismatch");
-    }
-  }
-
-  EXPECT_TRUE(validationResult.allMatch)
-    << "GPU results do not match RDKit for algorithm " << algorithmName(algorithm())
-    << ". Count mismatches: " << validationResult.mismatchedPairs
-    << ", Mapping mismatches: " << validationResult.wrongMappingPairs
-    << " / " << validationResult.totalPairs << " total pairs";
 }
 
 // =============================================================================
