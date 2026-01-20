@@ -2090,6 +2090,10 @@ void getSubstructMatches(const std::vector<const RDKit::ROMol*>& targets,
   leafSubpatterns.syncToDevice(stream);
   leafRange.pop();
 
+  // Ensure queries and patterns are fully copied before workers start using them.
+  // Workers use different streams, so we need an explicit sync here.
+  cudaCheckError(cudaStreamSynchronize(stream));
+
   // Mutex shared between GPU batch accumulation and fallback queue processing
   std::mutex resultsMutex;
   
