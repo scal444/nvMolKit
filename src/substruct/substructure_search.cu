@@ -996,16 +996,19 @@ void accumulateMiniBatchResults(GpuExecutor&                      executor,
     // When user sets maxMatches explicitly, excess matches are expected behavior.
     const bool isBufferOverflow = (actualMatches > reportedMatches) && (ctx.maxMatches == 0);
     if (isBufferOverflow && fallbackQueue != nullptr) {
+      ScopedNvtxRange enqueueRange("Enqueue overflow entry");
       fallbackQueue->enqueue({targetIdx, queryIdx});
       continue;
     }
 
     if (reportedMatches > 0) {
       const int miniBatchLocalOffset = executor.miniBatchPairMatchStarts[i];
+      ScopedNvtxRange accumulateRange("Accumulate matches get lock");
 
       lock.lock();
       auto& targetMatches = results.getMatchesMut(targetIdx, queryIdx);
       lock.unlock();
+      accumulateRange.pop();
 
       targetMatches.reserve(targetMatches.size() + reportedMatches);
       for (int m = 0; m < reportedMatches; ++m) {
