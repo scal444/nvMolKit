@@ -162,21 +162,17 @@ struct RecursivePatternInfo {
  */
 struct MoleculesHost {
   // Batch-level offsets (size = numMolecules + 1)
-  std::vector<int> batchAtomStarts;  ///< Start index into atomData for each molecule
+  std::vector<int> batchAtomStarts;  ///< Start index into atomDataPacked for each molecule
 
-  // Molecule-level data (flattened across all molecules)
-  std::vector<AtomData>  atomData;     ///< Atom properties for all atoms
-  std::vector<AtomQuery> atomQueries;  ///< Query type per atom (parallel to atomData)
-
-  // GPU-optimized packed data (parallel to atomData)
+  // GPU-optimized packed data (flattened across all molecules)
   std::vector<AtomDataPacked>  atomDataPacked;   ///< Packed atom properties for GPU matching
   std::vector<AtomQueryMask>   atomQueryMasks;   ///< Precomputed query masks (for query molecules only)
   std::vector<BondTypeCounts>  bondTypeCounts;   ///< Precomputed bond type counts per atom
-  std::vector<TargetAtomBonds> targetAtomBonds;  ///< Packed bond adjacency for targets (parallel to atomData)
-  std::vector<QueryAtomBonds>  queryAtomBonds;   ///< Packed bond adjacency for queries (parallel to atomData)
+  std::vector<TargetAtomBonds> targetAtomBonds;  ///< Packed bond adjacency for targets
+  std::vector<QueryAtomBonds>  queryAtomBonds;   ///< Packed bond adjacency for queries
 
   // Boolean expression tree data for compound queries (OR/NOT support)
-  std::vector<AtomQueryTree>   atomQueryTrees;       ///< Tree metadata per query atom (parallel to atomData)
+  std::vector<AtomQueryTree>   atomQueryTrees;       ///< Tree metadata per query atom
   std::vector<BoolInstruction> queryInstructions;    ///< Flattened instruction arrays
   std::vector<AtomQueryMask>   queryLeafMasks;       ///< Flattened leaf masks for compound queries
   std::vector<BondTypeCounts>  queryLeafBondCounts;  ///< Flattened leaf bond counts
@@ -196,7 +192,7 @@ struct MoleculesHost {
   void reserve(size_t numMols, size_t numAtoms);
 
   [[nodiscard]] size_t numMolecules() const { return batchAtomStarts.empty() ? 0 : batchAtomStarts.size() - 1; }
-  [[nodiscard]] size_t totalAtoms() const { return atomData.size(); }
+  [[nodiscard]] size_t totalAtoms() const { return atomDataPacked.size(); }
 };
 
 /**
@@ -207,10 +203,8 @@ struct MoleculesHost {
  * Use getMolecule() from molecules_device.cuh to get per-molecule views.
  */
 struct MoleculesDeviceView {
-  const int*       batchAtomStarts;
-  const AtomData*  atomData;
-  const AtomQuery* atomQueries;
-  int              numMolecules;
+  const int* batchAtomStarts;
+  int        numMolecules;
 
   // GPU-optimized packed data
   const AtomDataPacked*  atomDataPacked;   ///< Packed atom properties for GPU matching
@@ -257,12 +251,10 @@ class MoleculesDevice {
   cudaStream_t stream_       = nullptr;
   int          numMolecules_ = 0;
 
-  AsyncDeviceVector<int>       batchAtomStarts_;
-  AsyncDeviceVector<AtomData>  atomData_;
-  AsyncDeviceVector<AtomQuery> atomQueries_;
+  AsyncDeviceVector<int> batchAtomStarts_;
 
   // GPU-optimized packed data
-  AsyncDeviceVector<AtomDataPacked>  atomDataPacked_;
+  AsyncDeviceVector<AtomDataPacked> atomDataPacked_;
   AsyncDeviceVector<AtomQueryMask>   atomQueryMasks_;
   AsyncDeviceVector<BondTypeCounts>  bondTypeCounts_;
   AsyncDeviceVector<TargetAtomBonds> targetAtomBonds_;

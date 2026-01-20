@@ -31,12 +31,10 @@ namespace nvMolKit {
  * getMolecule() from a MoleculesDeviceView.
  */
 struct MoleculeView {
-  const AtomData* __restrict__ atomData;     ///< Pointer to first atom of this molecule
-  const AtomQuery* __restrict__ atomQueries; ///< Pointer to this molecule's atom queries
   int numAtoms;
 
   // GPU-optimized packed data
-  const AtomDataPacked* __restrict__ atomDataPacked;    ///< Packed atom properties for GPU matching
+  const AtomDataPacked* __restrict__ atomDataPacked;  ///< Packed atom properties for GPU matching
   const AtomQueryMask* __restrict__ atomQueryMasks;     ///< Precomputed query masks (query molecules only)
   const BondTypeCounts* __restrict__ bondTypeCounts;    ///< Precomputed bond type counts per atom
   const TargetAtomBonds* __restrict__ targetAtomBonds;  ///< Packed bond adjacency (targets only)
@@ -49,10 +47,6 @@ struct MoleculeView {
   const BondTypeCounts* __restrict__ queryLeafBondCounts;  ///< All leaf bond counts
   const int* __restrict__ atomInstrStarts;                 ///< Start index into queryInstructions per atom
   const int* __restrict__ atomLeafMaskStarts;              ///< Start index into queryLeafMasks per atom
-
-  __device__ __forceinline__ const AtomData& getAtom(int atomIdx) const { return atomData[atomIdx]; }
-
-  __device__ __forceinline__ AtomQuery getAtomQuery(int atomIdx) const { return atomQueries[atomIdx]; }
 
   __device__ __forceinline__ int getAtomDegree(int atomIdx) const {
     if (targetAtomBonds) {
@@ -113,8 +107,6 @@ struct MoleculeView {
 __device__ __forceinline__ MoleculeView getMolecule(const MoleculesDeviceView& view, int molIdx) {
   MoleculeView mol;
   const int    atomStart = view.batchAtomStarts[molIdx];
-  mol.atomData           = view.atomData + atomStart;
-  mol.atomQueries        = view.atomQueries + atomStart;
   mol.numAtoms           = view.batchAtomStarts[molIdx + 1] - atomStart;
 
   // GPU-optimized packed data (may be nullptr if not populated)

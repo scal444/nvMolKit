@@ -29,7 +29,7 @@
 #include "packed_bonds_device.cuh"
 
 using nvMolKit::AsyncDeviceVector;
-using nvMolKit::AtomData;
+using nvMolKit::AtomDataPacked;
 using nvMolKit::checkReturnCode;
 using nvMolKit::getMolecule;
 using nvMolKit::MoleculesDevice;
@@ -131,40 +131,40 @@ __global__ void readAtomPropertyKernel(MoleculesDeviceView view, int molIdx, Ato
     return;
   }
 
-  const AtomData& atom = mol.getAtom(atomIdx);
+  const AtomDataPacked& atom = mol.getAtomPacked(atomIdx);
   switch (prop) {
     case AtomProperty::AtomicNum:
-      results[atomIdx] = atom.atomicNum;
+      results[atomIdx] = atom.atomicNum();
       break;
     case AtomProperty::NumExplicitHs:
-      results[atomIdx] = atom.numExplicitHs;
+      results[atomIdx] = atom.numExplicitHs();
       break;
     case AtomProperty::ExplicitValence:
-      results[atomIdx] = atom.explicitValence;
+      results[atomIdx] = atom.explicitValence();
       break;
     case AtomProperty::ImplicitValence:
-      results[atomIdx] = atom.implicitValence;
+      results[atomIdx] = atom.implicitValence();
       break;
     case AtomProperty::FormalCharge:
-      results[atomIdx] = atom.formalCharge;
+      results[atomIdx] = atom.formalCharge();
       break;
     case AtomProperty::ChiralTag:
-      results[atomIdx] = atom.chiralTag;
+      results[atomIdx] = atom.chiralTag();
       break;
     case AtomProperty::NumRadicalElectrons:
-      results[atomIdx] = atom.numRadicalElectrons;
+      results[atomIdx] = atom.numRadicalElectrons();
       break;
     case AtomProperty::Hybridization:
-      results[atomIdx] = atom.hybridization;
+      results[atomIdx] = atom.hybridization();
       break;
     case AtomProperty::MinRingSize:
-      results[atomIdx] = atom.minRingSize;
+      results[atomIdx] = atom.minRingSize();
       break;
     case AtomProperty::NumRings:
-      results[atomIdx] = atom.numRings;
+      results[atomIdx] = atom.numRings();
       break;
     case AtomProperty::IsAromatic:
-      results[atomIdx] = atom.isAromatic ? 1 : 0;
+      results[atomIdx] = atom.isAromatic() ? 1 : 0;
       break;
   }
 }
@@ -513,11 +513,11 @@ TEST(MoleculesTotalHCountTest, StoresTotalNotExplicitHCount) {
   MoleculesHost batch;
   nvMolKit::addToBatch(mol.get(), batch);
 
-  ASSERT_EQ(batch.atomData.size(), 2);
+  ASSERT_EQ(batch.atomDataPacked.size(), 2);
   const int nitrogenIdx = 1;
   EXPECT_EQ(mol->getAtomWithIdx(nitrogenIdx)->getNumExplicitHs(), 0);
   EXPECT_EQ(mol->getAtomWithIdx(nitrogenIdx)->getTotalNumHs(), 1);
-  EXPECT_EQ(batch.atomData[nitrogenIdx].numExplicitHs, 1);
+  EXPECT_EQ(batch.atomDataPacked[nitrogenIdx].numExplicitHs(), 1);
 }
 
 TEST(MoleculesEmptyBatchTest, CopyFromHostThrowsOnEmptyBatch) {
@@ -906,9 +906,9 @@ TEST_P(QueryBatchStructureTest, StructureMatchesBetweenSmilesAndSmarts) {
   EXPECT_EQ(smilesBatch.totalAtoms(), smartsBatch.totalAtoms());
 
   // Verify atom data matches (atomic numbers should match)
-  ASSERT_EQ(smilesBatch.atomData.size(), smartsBatch.atomData.size());
-  for (size_t i = 0; i < smilesBatch.atomData.size(); ++i) {
-    EXPECT_EQ(smilesBatch.atomData[i].atomicNum, smartsBatch.atomData[i].atomicNum)
+  ASSERT_EQ(smilesBatch.atomDataPacked.size(), smartsBatch.atomDataPacked.size());
+  for (size_t i = 0; i < smilesBatch.atomDataPacked.size(); ++i) {
+    EXPECT_EQ(smilesBatch.atomDataPacked[i].atomicNum(), smartsBatch.atomDataPacked[i].atomicNum())
       << "Atomic number mismatch at atom " << i;
   }
 

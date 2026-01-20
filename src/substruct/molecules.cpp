@@ -374,13 +374,11 @@ MoleculesHost::MoleculesHost() {
 void MoleculesHost::reserve(size_t numMols, size_t numAtoms) {
   batchAtomStarts.reserve(numMols + 1);
 
-  atomData.reserve(numAtoms);
   atomDataPacked.reserve(numAtoms);
   bondTypeCounts.reserve(numAtoms);
   targetAtomBonds.reserve(numAtoms);
   queryAtomBonds.reserve(numAtoms);
 
-  atomQueries.reserve(numAtoms);
   atomQueryMasks.reserve(numAtoms);
   atomQueryTrees.reserve(numAtoms);
   atomInstrStarts.reserve(numAtoms);
@@ -391,8 +389,6 @@ void MoleculesHost::reserve(size_t numMols, size_t numAtoms) {
 void MoleculesDevice::setStream(cudaStream_t stream) {
   stream_ = stream;
   batchAtomStarts_.setStream(stream);
-  atomData_.setStream(stream);
-  atomQueries_.setStream(stream);
   atomDataPacked_.setStream(stream);
   atomQueryMasks_.setStream(stream);
   bondTypeCounts_.setStream(stream);
@@ -430,13 +426,9 @@ void MoleculesDevice::copyFromHost(const MoleculesHost& host, cudaStream_t strea
   numMolecules_ = static_cast<int>(host.numMolecules());
 
   setFromVectorGrowOnly(batchAtomStarts_, host.batchAtomStarts, stream);
-  setFromVectorGrowOnly(atomData_, host.atomData, stream);
-  setFromVectorGrowOnly(atomQueries_, host.atomQueries, stream);
 
   // Copy GPU-optimized packed data
-  if (!host.atomDataPacked.empty()) {
-    setFromVectorGrowOnly(atomDataPacked_, host.atomDataPacked, stream);
-  }
+  setFromVectorGrowOnly(atomDataPacked_, host.atomDataPacked, stream);
   if (!host.atomQueryMasks.empty()) {
     setFromVectorGrowOnly(atomQueryMasks_, host.atomQueryMasks, stream);
   }
@@ -464,8 +456,6 @@ void MoleculesDevice::copyFromHost(const MoleculesHost& host, cudaStream_t strea
 MoleculesDeviceView MoleculesDevice::view() const {
   MoleculesDeviceView v;
   v.batchAtomStarts     = batchAtomStarts_.data();
-  v.atomData            = atomData_.data();
-  v.atomQueries         = atomQueries_.data();
   v.numMolecules        = numMolecules_;
   v.atomDataPacked      = atomDataPacked_.data();
   v.atomQueryMasks      = atomQueryMasks_.data();
@@ -1390,11 +1380,9 @@ void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
                              " atoms, which exceeds the maximum of " + std::to_string(kMaxMoleculeAtoms));
   }
 
-  auto& atomDataVec       = batch.atomData;
   auto& atomDataPackedVec = batch.atomDataPacked;
   auto& bondTypeCountsVec = batch.bondTypeCounts;
 
-  atomDataVec.reserve(atomDataVec.size() + mol->getNumAtoms());
   atomDataPackedVec.reserve(atomDataPackedVec.size() + mol->getNumAtoms());
   bondTypeCountsVec.reserve(bondTypeCountsVec.size() + mol->getNumAtoms());
 
@@ -1403,9 +1391,6 @@ void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   populateTargetAtomBonds(mol, batch, ringInfo);
 
   for (const RDKit::Atom* atom : mol->atoms()) {
-    auto& thisAtomData = atomDataVec.emplace_back();
-    populateAtomData(atom, thisAtomData, ringInfo);
-
     auto& thisAtomPacked = atomDataPackedVec.emplace_back();
     populateAtomDataPacked(mol, atom, thisAtomPacked, ringInfo);
 
@@ -1413,7 +1398,7 @@ void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
     populateBondTypeCounts(mol, atom, thisBondCounts);
   }
 
-  batch.batchAtomStarts.push_back(static_cast<int>(atomDataVec.size()));
+  batch.batchAtomStarts.push_back(static_cast<int>(atomDataPackedVec.size()));
 }
 
 namespace {
@@ -1734,9 +1719,7 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
                              RDKit::MolToSmarts(*mol));
   }
 
-  auto& atomDataVec       = batch.atomData;
   auto& atomDataPackedVec = batch.atomDataPacked;
-  auto& atomQueriesVec    = batch.atomQueries;
   auto& atomQueryMasksVec = batch.atomQueryMasks;
   auto& bondTypeCountsVec = batch.bondTypeCounts;
 
@@ -1748,9 +1731,7 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   auto& atomInstrStartsVec    = batch.atomInstrStarts;
   auto& atomLeafMaskStartsVec = batch.atomLeafMaskStarts;
 
-  atomDataVec.reserve(atomDataVec.size() + mol->getNumAtoms());
   atomDataPackedVec.reserve(atomDataPackedVec.size() + mol->getNumAtoms());
-  atomQueriesVec.reserve(atomQueriesVec.size() + mol->getNumAtoms());
   atomQueryMasksVec.reserve(atomQueryMasksVec.size() + mol->getNumAtoms());
   bondTypeCountsVec.reserve(bondTypeCountsVec.size() + mol->getNumAtoms());
   atomQueryTreesVec.reserve(atomQueryTreesVec.size() + mol->getNumAtoms());
@@ -1767,9 +1748,6 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   }
 
   for (const RDKit::Atom* atom : mol->atoms()) {
-    auto& thisAtomData = atomDataVec.emplace_back();
-    populateQueryAtomData(atom, thisAtomData);
-
     auto& thisAtomPacked = atomDataPackedVec.emplace_back();
     populateQueryAtomDataPacked(atom, thisAtomPacked);
 
@@ -1803,25 +1781,15 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
                                   builder.leafBondCounts.end());
     atomQueryTreesVec.push_back(builder.buildTree());
 
-    // Legacy fields: for simple queries, use the first leaf mask for backwards compatibility
-    AtomQuery queryFlags = AtomQueryNone;
+    // For simple queries, use the first leaf mask
     if (!builder.leafMasks.empty()) {
       atomQueryMasksVec.push_back(builder.leafMasks[0]);
-      // Try to get flags from the legacy path for simple queries
-      if (atom->hasQuery() && atom->getQuery() != nullptr) {
-        try {
-          queryFlags = getQueryFlagsFromQuery(atom->getQuery());
-        } catch (...) {
-          // Complex query - flags not applicable
-        }
-      }
     } else {
       atomQueryMasksVec.push_back(AtomQueryMask{});
     }
-    atomQueriesVec.push_back(queryFlags);
   }
 
-  batch.batchAtomStarts.push_back(static_cast<int>(atomDataVec.size()));
+  batch.batchAtomStarts.push_back(static_cast<int>(atomDataPackedVec.size()));
 
   // Extract recursive SMARTS patterns for preprocessing
   batch.recursivePatterns.push_back(extractRecursivePatterns(mol));
@@ -1842,9 +1810,7 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch,
                              RDKit::MolToSmarts(*mol));
   }
 
-  auto& atomDataVec       = batch.atomData;
   auto& atomDataPackedVec = batch.atomDataPacked;
-  auto& atomQueriesVec    = batch.atomQueries;
   auto& atomQueryMasksVec = batch.atomQueryMasks;
   auto& bondTypeCountsVec = batch.bondTypeCounts;
   auto& atomQueryTreesVec     = batch.atomQueryTrees;
@@ -1854,9 +1820,7 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch,
   auto& atomInstrStartsVec    = batch.atomInstrStarts;
   auto& atomLeafMaskStartsVec = batch.atomLeafMaskStarts;
 
-  atomDataVec.reserve(atomDataVec.size() + mol->getNumAtoms());
   atomDataPackedVec.reserve(atomDataPackedVec.size() + mol->getNumAtoms());
-  atomQueriesVec.reserve(atomQueriesVec.size() + mol->getNumAtoms());
   atomQueryMasksVec.reserve(atomQueryMasksVec.size() + mol->getNumAtoms());
   bondTypeCountsVec.reserve(bondTypeCountsVec.size() + mol->getNumAtoms());
   atomQueryTreesVec.reserve(atomQueryTreesVec.size() + mol->getNumAtoms());
@@ -1877,9 +1841,6 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch,
   }
 
   for (const RDKit::Atom* atom : mol->atoms()) {
-    auto& thisAtomData = atomDataVec.emplace_back();
-    populateQueryAtomData(atom, thisAtomData);
-
     auto& thisAtomPacked = atomDataPackedVec.emplace_back();
     populateQueryAtomDataPacked(atom, thisAtomPacked);
 
@@ -1909,22 +1870,14 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch,
                                   builder.leafBondCounts.end());
     atomQueryTreesVec.push_back(builder.buildTree());
 
-    AtomQuery queryFlags = AtomQueryNone;
     if (!builder.leafMasks.empty()) {
       atomQueryMasksVec.push_back(builder.leafMasks[0]);
-      if (atom->hasQuery() && atom->getQuery() != nullptr) {
-        try {
-          queryFlags = getQueryFlagsFromQuery(atom->getQuery());
-        } catch (...) {
-        }
-      }
     } else {
       atomQueryMasksVec.push_back(AtomQueryMask{});
     }
-    atomQueriesVec.push_back(queryFlags);
   }
 
-  batch.batchAtomStarts.push_back(static_cast<int>(atomDataVec.size()));
+  batch.batchAtomStarts.push_back(static_cast<int>(atomDataPackedVec.size()));
 
   // No recursive patterns extraction for cached patterns - they're pre-extracted
   batch.recursivePatterns.emplace_back();
@@ -2181,17 +2134,15 @@ namespace {
 void mergeBatch(MoleculesHost& dest, const MoleculesHost& src) {
   if (src.numMolecules() == 0) return;
 
-  const int atomOffset = static_cast<int>(dest.atomData.size());
+  const int atomOffset = static_cast<int>(dest.atomDataPacked.size());
   const int instrOffset = static_cast<int>(dest.queryInstructions.size());
   const int leafMaskOffset = static_cast<int>(dest.queryLeafMasks.size());
 
-  dest.atomData.insert(dest.atomData.end(), src.atomData.begin(), src.atomData.end());
   dest.atomDataPacked.insert(dest.atomDataPacked.end(), src.atomDataPacked.begin(), src.atomDataPacked.end());
   dest.bondTypeCounts.insert(dest.bondTypeCounts.end(), src.bondTypeCounts.begin(), src.bondTypeCounts.end());
   dest.targetAtomBonds.insert(dest.targetAtomBonds.end(), src.targetAtomBonds.begin(), src.targetAtomBonds.end());
   dest.queryAtomBonds.insert(dest.queryAtomBonds.end(), src.queryAtomBonds.begin(), src.queryAtomBonds.end());
 
-  dest.atomQueries.insert(dest.atomQueries.end(), src.atomQueries.begin(), src.atomQueries.end());
   dest.atomQueryMasks.insert(dest.atomQueryMasks.end(), src.atomQueryMasks.begin(), src.atomQueryMasks.end());
   dest.atomQueryTrees.insert(dest.atomQueryTrees.end(), src.atomQueryTrees.begin(), src.atomQueryTrees.end());
   dest.queryInstructions.insert(dest.queryInstructions.end(), src.queryInstructions.begin(), src.queryInstructions.end());
