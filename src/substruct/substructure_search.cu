@@ -969,16 +969,29 @@ void initiateResultsCopyToHost(GpuExecutor& executor) {
   cudaCheckError(cudaEventRecord(executor.copyDoneEvent.event(), executor.stream()));
 }
 
-void accumulateMiniBatchResults(GpuExecutor&                      executor,
-                                const ThreadWorkerContext&        ctx,
-                                SubstructSearchResults&           results,
-                                std::mutex&                       resultsMutex,
-                                RDKitFallbackQueue*               fallbackQueue = nullptr) {
+struct PairUpdate {
+  int targetIdx;
+  int queryIdx;
+  int miniBatchLocalOffset;
+  int reportedMatches;
+  int queryAtoms;
+};
+
+void accumulateMiniBatchResults(GpuExecutor& executor,
+  const ThreadWorkerContext& ctx,
+  SubstructSearchResults& results,
+  std::mutex& resultsMutex,
+  RDKitFallbackQueue* fallbackQueue = nullptr) {
   ScopedNvtxRange accumRange("accumulateMiniBatchResults");
 
   const bool hasTargetSort = ctx.targetSortOrder != nullptr;
   const bool hasQuerySort = ctx.querySortOrder != nullptr;
-  std::unique_lock<std::mutex> lock(resultsMutex, std::defer_lock);
+
+  // Phase 1: Build update list without any locks
+
+  std::vector<PairUpdate> updates;
+  updates.reserve(executor.numPairsInMiniBatch);
+
   for (int i = 0; i < executor.numPairsInMiniBatch; ++i) {
     const int pairIdxInMacrobatch = executor.miniBatchStart + i;
     const int sortedTargetIdx = pairIdxInMacrobatch / ctx.numQueries;
@@ -991,32 +1004,47 @@ void accumulateMiniBatchResults(GpuExecutor&                      executor,
     const int actualMatches   = executor.matchCountsHost[i];
     const int reportedMatches = executor.reportedCountsHost[i];
 
-    // Detect buffer overflow: GPU found more matches than buffer could store.
-    // Only trigger RDKit fallback for unintentional overflow (maxMatches == 0 = unlimited).
-    // When user sets maxMatches explicitly, excess matches are expected behavior.
     const bool isBufferOverflow = (actualMatches > reportedMatches) && (ctx.maxMatches == 0);
     if (isBufferOverflow && fallbackQueue != nullptr) {
-      ScopedNvtxRange enqueueRange("Enqueue overflow entry");
       fallbackQueue->enqueue({targetIdx, queryIdx});
       continue;
     }
 
     if (reportedMatches > 0) {
-      const int miniBatchLocalOffset = executor.miniBatchPairMatchStarts[i];
-      ScopedNvtxRange accumulateRange("Accumulate matches get lock");
+      updates.push_back({targetIdx, queryIdx, executor.miniBatchPairMatchStarts[i], reportedMatches, queryAtoms});
+    }
+  }
 
-      lock.lock();
-      auto& targetMatches = results.getMatchesMut(targetIdx, queryIdx);
-      lock.unlock();
-      accumulateRange.pop();
+  if (updates.empty()) { 
+    return; 
+  }
 
-      targetMatches.reserve(targetMatches.size() + reportedMatches);
-      for (int m = 0; m < reportedMatches; ++m) {
-        std::vector<int>& match = targetMatches.emplace_back(queryAtoms);
-        for (int a = 0; a < queryAtoms; ++a) {
-          match[a] = executor.matchIndicesHost[miniBatchLocalOffset + m * queryAtoms + a];
-        }
-      }
+  // Phase 2: Single lock acquisition to get all hash map references
+  std::vector<std::vector<std::vector<int>>*> matchRefs;
+  matchRefs.reserve(updates.size());
+
+  {
+    std::lock_guard<std::mutex> lock(resultsMutex);
+    for (const auto& u : updates) {
+      matchRefs.push_back(&results.getMatchesMut(u.targetIdx, u.queryIdx));
+    }
+  }
+  // Lock released here
+
+  // Phase 3: Copy all match data without holding the lock
+  // Safe because mini-batches have non-overlapping pair indices
+  for (size_t i = 0; i < updates.size(); ++i) {
+    const auto& u = updates[i];
+    auto& targetMatches = *matchRefs[i];
+
+    targetMatches.reserve(targetMatches.size() + u.reportedMatches);
+    const int16_t* src = executor.matchIndicesHost + u.miniBatchLocalOffset;
+
+    for (int m = 0; m < u.reportedMatches; ++m) {
+      auto& match = targetMatches.emplace_back(u.queryAtoms);
+    for (int a = 0; a < u.queryAtoms; ++a) {
+      match[a] = src[m * u.queryAtoms + a];
+    }
     }
   }
 }
