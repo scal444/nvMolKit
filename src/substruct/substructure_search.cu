@@ -1557,6 +1557,10 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
     int effectiveMiniBatchSize = 0;
   };
 
+  // Create reusable thread pool for preprocessing (persists across macro iterations)
+  PreprocessingThreadPool preprocessingPool;
+  preprocessingPool.init(effectivePreprocessingThreads);
+
   auto initializeMacroContextQueries = [&](ThreadWorkerContext& ctx) {
     ctx.numQueries     = numQueries;
     ctx.querySortOrder = querySortOrder.empty() ? nullptr : &querySortOrder;
@@ -1583,52 +1587,58 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
     const int n  = t1 - t0;
 
     std::vector<const RDKit::ROMol*> macroTargets;
-    macroTargets.reserve(static_cast<size_t>(n));
-    for (int i = 0; i < n; ++i) {
-      macroTargets.push_back(gpuTargets[t0 + i]);
-    }
-
     std::vector<int> macroBuildOrder;
-    if (config.presort) {
-      macroBuildOrder.resize(n);
-      std::iota(macroBuildOrder.begin(), macroBuildOrder.end(), 0);
-      std::sort(macroBuildOrder.begin(), macroBuildOrder.end(), [&](int a, int b) {
-        return gpuTargetAtomCounts[t0 + a] > gpuTargetAtomCounts[t0 + b];
-      });
-    }
+    {
+      ScopedNvtxRange setupRange("CPU: Macro setup and sort");
+      macroTargets.reserve(static_cast<size_t>(n));
+      for (int i = 0; i < n; ++i) {
+        macroTargets.push_back(gpuTargets[t0 + i]);
+      }
 
-    out.targetsHost = buildTargetBatchParallel(macroTargets, macroBuildOrder, effectivePreprocessingThreads);
-
-    out.sortedToOriginal.resize(static_cast<size_t>(n));
-    for (int sortedIdx = 0; sortedIdx < n; ++sortedIdx) {
-      const int macroLocalIdx = macroBuildOrder.empty() ? sortedIdx : macroBuildOrder[sortedIdx];
-      out.sortedToOriginal[sortedIdx] = gpuTargetIndices[t0 + macroLocalIdx];
-    }
-
-    out.ctx.numTargets      = n;
-    out.ctx.targetSortOrder = &out.sortedToOriginal;
-
-    out.ctx.targetAtomCounts.resize(n);
-    int localMaxTargetAtoms = 0;
-    int localMaxBondsPerAtom = 0;
-    for (int t = 0; t < n; ++t) {
-      const int atomStart = out.targetsHost.batchAtomStarts[t];
-      const int atomEnd   = out.targetsHost.batchAtomStarts[t + 1];
-      const int atoms     = atomEnd - atomStart;
-      out.ctx.targetAtomCounts[t] = atoms;
-      localMaxTargetAtoms = std::max(localMaxTargetAtoms, atoms);
-      for (int a = atomStart; a < atomEnd; ++a) {
-        localMaxBondsPerAtom = std::max(localMaxBondsPerAtom, static_cast<int>(out.targetsHost.targetAtomBonds[a].degree));
+      if (config.presort) {
+        macroBuildOrder.resize(n);
+        std::iota(macroBuildOrder.begin(), macroBuildOrder.end(), 0);
+        std::sort(macroBuildOrder.begin(), macroBuildOrder.end(), [&](int a, int b) {
+          return gpuTargetAtomCounts[t0 + a] > gpuTargetAtomCounts[t0 + b];
+        });
       }
     }
-    out.ctx.maxTargetAtoms = localMaxTargetAtoms;
-    out.ctx.maxQueryAtoms = maxQueryAtoms;
-    out.ctx.maxBondsPerAtom = localMaxBondsPerAtom;
-    out.ctx.templateConfig = selectTemplateConfig(localMaxTargetAtoms, maxQueryAtoms, localMaxBondsPerAtom);
 
-    const int numPairs = n * numQueries;
-    out.effectiveMiniBatchSize = std::min(config.batchSize, numPairs);
-    out.totalNumMiniBatches    = (numPairs + out.effectiveMiniBatchSize - 1) / out.effectiveMiniBatchSize;
+    buildTargetBatchParallelInto(out.targetsHost, preprocessingPool, macroIdx % 2, macroTargets, macroBuildOrder);
+
+    {
+      ScopedNvtxRange postRange("CPU: Macro context setup");
+      out.sortedToOriginal.resize(static_cast<size_t>(n));
+      for (int sortedIdx = 0; sortedIdx < n; ++sortedIdx) {
+        const int macroLocalIdx = macroBuildOrder.empty() ? sortedIdx : macroBuildOrder[sortedIdx];
+        out.sortedToOriginal[sortedIdx] = gpuTargetIndices[t0 + macroLocalIdx];
+      }
+
+      out.ctx.numTargets      = n;
+      out.ctx.targetSortOrder = &out.sortedToOriginal;
+
+      out.ctx.targetAtomCounts.resize(n);
+      int localMaxTargetAtoms = 0;
+      int localMaxBondsPerAtom = 0;
+      for (int t = 0; t < n; ++t) {
+        const int atomStart = out.targetsHost.batchAtomStarts[t];
+        const int atomEnd   = out.targetsHost.batchAtomStarts[t + 1];
+        const int atoms     = atomEnd - atomStart;
+        out.ctx.targetAtomCounts[t] = atoms;
+        localMaxTargetAtoms = std::max(localMaxTargetAtoms, atoms);
+        for (int a = atomStart; a < atomEnd; ++a) {
+          localMaxBondsPerAtom = std::max(localMaxBondsPerAtom, static_cast<int>(out.targetsHost.targetAtomBonds[a].degree));
+        }
+      }
+      out.ctx.maxTargetAtoms = localMaxTargetAtoms;
+      out.ctx.maxQueryAtoms = maxQueryAtoms;
+      out.ctx.maxBondsPerAtom = localMaxBondsPerAtom;
+      out.ctx.templateConfig = selectTemplateConfig(localMaxTargetAtoms, maxQueryAtoms, localMaxBondsPerAtom);
+
+      const int numPairs = n * numQueries;
+      out.effectiveMiniBatchSize = std::min(config.batchSize, numPairs);
+      out.totalNumMiniBatches    = (numPairs + out.effectiveMiniBatchSize - 1) / out.effectiveMiniBatchSize;
+    }
   };
 
   // Global macro dispatch state.
@@ -1741,6 +1751,7 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
             cudaEvent_t upstreamEvent = nullptr;
 
             {
+              ScopedNvtxRange waitRange("Worker " + std::to_string(globalIdx) + " wait for next batch");
               std::unique_lock<std::mutex> lock(localMutex);
               localCv.wait(lock, [&]() { return localEpoch != seenEpoch || localShutdown; });
               if (localShutdown) {

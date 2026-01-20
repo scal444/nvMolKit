@@ -386,6 +386,25 @@ void MoleculesHost::reserve(size_t numMols, size_t numAtoms) {
   recursivePatterns.reserve(numMols);
 }
 
+void MoleculesHost::clear() {
+  batchAtomStarts.clear();
+  batchAtomStarts.push_back(0);
+
+  atomDataPacked.clear();
+  bondTypeCounts.clear();
+  targetAtomBonds.clear();
+  queryAtomBonds.clear();
+
+  atomQueryMasks.clear();
+  atomQueryTrees.clear();
+  queryInstructions.clear();
+  queryLeafMasks.clear();
+  queryLeafBondCounts.clear();
+  atomInstrStarts.clear();
+  atomLeafMaskStarts.clear();
+  recursivePatterns.clear();
+}
+
 void MoleculesDevice::setStream(cudaStream_t stream) {
   stream_ = stream;
   batchAtomStarts_.setStream(stream);
@@ -1342,7 +1361,6 @@ AtomQuery getAtomQueryType(const RDKit::Atom* atom) {
 
 void populateTargetAtomBonds(const RDKit::ROMol* mol, MoleculesHost& batch, const RDKit::RingInfo* ringInfo) {
   auto& targetAtomBondsVec = batch.targetAtomBonds;
-  targetAtomBondsVec.reserve(targetAtomBondsVec.size() + mol->getNumAtoms());
 
   for (const RDKit::Atom* atom : mol->atoms()) {
     auto& tab = targetAtomBondsVec.emplace_back();
@@ -1382,9 +1400,6 @@ void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
 
   auto& atomDataPackedVec = batch.atomDataPacked;
   auto& bondTypeCountsVec = batch.bondTypeCounts;
-
-  atomDataPackedVec.reserve(atomDataPackedVec.size() + mol->getNumAtoms());
-  bondTypeCountsVec.reserve(bondTypeCountsVec.size() + mol->getNumAtoms());
 
   const auto* ringInfo = mol->getRingInfo();
 
@@ -1668,7 +1683,6 @@ void extractBondQueryFlags(const RDKit::Bond* bond, BondQueryData& queryData) {
  */
 void populateQueryAtomBonds(const RDKit::ROMol* mol, MoleculesHost& batch) {
   auto& queryAtomBondsVec = batch.queryAtomBonds;
-  queryAtomBondsVec.reserve(queryAtomBondsVec.size() + mol->getNumAtoms());
 
   for (const RDKit::Atom* atom : mol->atoms()) {
     auto& qab = queryAtomBondsVec.emplace_back();
@@ -1730,13 +1744,6 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   auto& queryLeafBondCountsVec = batch.queryLeafBondCounts;
   auto& atomInstrStartsVec    = batch.atomInstrStarts;
   auto& atomLeafMaskStartsVec = batch.atomLeafMaskStarts;
-
-  atomDataPackedVec.reserve(atomDataPackedVec.size() + mol->getNumAtoms());
-  atomQueryMasksVec.reserve(atomQueryMasksVec.size() + mol->getNumAtoms());
-  bondTypeCountsVec.reserve(bondTypeCountsVec.size() + mol->getNumAtoms());
-  atomQueryTreesVec.reserve(atomQueryTreesVec.size() + mol->getNumAtoms());
-  atomInstrStartsVec.reserve(atomInstrStartsVec.size() + mol->getNumAtoms());
-  atomLeafMaskStartsVec.reserve(atomLeafMaskStartsVec.size() + mol->getNumAtoms());
 
   populateQueryAtomBonds(mol, batch);
 
@@ -1819,13 +1826,6 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch,
   auto& queryLeafBondCountsVec = batch.queryLeafBondCounts;
   auto& atomInstrStartsVec    = batch.atomInstrStarts;
   auto& atomLeafMaskStartsVec = batch.atomLeafMaskStarts;
-
-  atomDataPackedVec.reserve(atomDataPackedVec.size() + mol->getNumAtoms());
-  atomQueryMasksVec.reserve(atomQueryMasksVec.size() + mol->getNumAtoms());
-  bondTypeCountsVec.reserve(bondTypeCountsVec.size() + mol->getNumAtoms());
-  atomQueryTreesVec.reserve(atomQueryTreesVec.size() + mol->getNumAtoms());
-  atomInstrStartsVec.reserve(atomInstrStartsVec.size() + mol->getNumAtoms());
-  atomLeafMaskStartsVec.reserve(atomLeafMaskStartsVec.size() + mol->getNumAtoms());
 
   populateQueryAtomBonds(mol, batch);
 
@@ -2132,6 +2132,7 @@ namespace {
  * copied if non-empty in the source.
  */
 void mergeBatch(MoleculesHost& dest, const MoleculesHost& src) {
+  ScopedNvtxRange range("mergeBatch");
   if (src.numMolecules() == 0) return;
 
   const int atomOffset = static_cast<int>(dest.atomDataPacked.size());
@@ -2166,6 +2167,33 @@ void mergeBatch(MoleculesHost& dest, const MoleculesHost& src) {
 }
 
 }  // namespace
+
+// =============================================================================
+// PreprocessingThreadPool
+// =============================================================================
+
+void PreprocessingThreadPool::init(int threads) {
+  numThreads = threads;
+  threadBatches.resize(threads);
+}
+
+void PreprocessingThreadPool::clearAll() {
+  for (int t = 0; t < numThreads; ++t) {
+    for (int b = 0; b < kBuffersPerThread; ++b) {
+      threadBatches[t][b].clear();
+    }
+  }
+}
+
+void PreprocessingThreadPool::clearBuffer(int bufferIdx) {
+  for (int t = 0; t < numThreads; ++t) {
+    threadBatches[t][bufferIdx].clear();
+  }
+}
+
+// =============================================================================
+// Parallel Batch Building
+// =============================================================================
 
 MoleculesHost buildTargetBatchParallel(const std::vector<const RDKit::ROMol*>& molecules,
                                        const std::vector<int>&                 sortOrder,
@@ -2206,6 +2234,7 @@ MoleculesHost buildTargetBatchParallel(const std::vector<const RDKit::ROMol*>& m
 #pragma omp parallel num_threads(numThreads)
   {
     const int tid = omp_get_thread_num();
+    ScopedNvtxRange threadRange("Preprocess thread " + std::to_string(tid));
     MoleculesHost& localBatch = threadBatches[tid];
 
 #pragma omp for schedule(static)
@@ -2216,11 +2245,62 @@ MoleculesHost buildTargetBatchParallel(const std::vector<const RDKit::ROMol*>& m
   }
 
   MoleculesHost result;
-  for (int t = 0; t < numThreads; ++t) {
-    mergeBatch(result, threadBatches[t]);
+  {
+    ScopedNvtxRange mergeRange("Merge thread batches");
+    for (int t = 0; t < numThreads; ++t) {
+      mergeBatch(result, threadBatches[t]);
+    }
   }
 
   return result;
+}
+
+void buildTargetBatchParallelInto(MoleculesHost&                          result,
+                                  PreprocessingThreadPool&                pool,
+                                  int                                     bufferIdx,
+                                  const std::vector<const RDKit::ROMol*>& molecules,
+                                  const std::vector<int>&                 sortOrder) {
+  ScopedNvtxRange range("buildTargetBatchParallelInto");
+  
+  const int numMols = static_cast<int>(molecules.size());
+  result.clear();
+  
+  if (numMols == 0) {
+    return;
+  }
+
+  const bool useSortOrder = !sortOrder.empty();
+  const int numThreads = pool.numThreads;
+
+  if (numThreads <= 1) {
+    for (int i = 0; i < numMols; ++i) {
+      const int molIdx = useSortOrder ? sortOrder[i] : i;
+      addToBatch(molecules[molIdx], result);
+    }
+    return;
+  }
+
+  pool.clearBuffer(bufferIdx);
+
+#pragma omp parallel num_threads(numThreads)
+  {
+    const int tid = omp_get_thread_num();
+    ScopedNvtxRange threadRange("Preprocess thread " + std::to_string(tid));
+    MoleculesHost& localBatch = pool.getBuffer(tid, bufferIdx);
+
+#pragma omp for schedule(static)
+    for (int i = 0; i < numMols; ++i) {
+      const int molIdx = useSortOrder ? sortOrder[i] : i;
+      addToBatch(molecules[molIdx], localBatch);
+    }
+  }
+
+  {
+    ScopedNvtxRange mergeRange("Merge thread batches");
+    for (int t = 0; t < numThreads; ++t) {
+      mergeBatch(result, pool.getBuffer(t, bufferIdx));
+    }
+  }
 }
 
 MoleculesHost buildQueryBatchParallel(const std::vector<const RDKit::ROMol*>& molecules,
@@ -2262,6 +2342,7 @@ MoleculesHost buildQueryBatchParallel(const std::vector<const RDKit::ROMol*>& mo
 #pragma omp parallel num_threads(numThreads)
   {
     const int tid = omp_get_thread_num();
+    ScopedNvtxRange threadRange("Query preprocess thread " + std::to_string(tid));
     MoleculesHost& localBatch = threadBatches[tid];
 
 #pragma omp for schedule(static)
@@ -2272,8 +2353,11 @@ MoleculesHost buildQueryBatchParallel(const std::vector<const RDKit::ROMol*>& mo
   }
 
   MoleculesHost result;
-  for (int t = 0; t < numThreads; ++t) {
-    mergeBatch(result, threadBatches[t]);
+  {
+    ScopedNvtxRange mergeRange("Merge thread batches");
+    for (int t = 0; t < numThreads; ++t) {
+      mergeBatch(result, threadBatches[t]);
+    }
   }
 
   return result;
