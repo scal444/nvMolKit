@@ -146,10 +146,10 @@ static_assert(sizeof(BoolInstruction) == 5, "BoolInstruction must be exactly 5 b
  * For simple AND-only queries, numInstructions=1 and scratchSize=1.
  */
 struct AtomQueryTree {
-  uint8_t numLeaves;        ///< Number of AtomQueryMask entries for this atom
-  uint8_t numInstructions;  ///< Length of instruction sequence
-  uint8_t scratchSize;      ///< Number of scratch slots needed for evaluation
-  uint8_t resultIdx;        ///< Index in scratch where final result is stored
+  uint8_t numLeaves = 0;        ///< Number of AtomQueryMask entries for this atom
+  uint8_t numInstructions = 0;  ///< Length of instruction sequence
+  uint8_t scratchSize = 0;      ///< Number of scratch slots needed for evaluation
+  uint8_t resultIdx = 0;        ///< Index in scratch where final result is stored
 };
 
 static_assert(sizeof(AtomQueryTree) == 4, "AtomQueryTree must be exactly 4 bytes");
@@ -167,7 +167,7 @@ static_assert(sizeof(AtomQueryTree) == 4, "AtomQueryTree must be exactly 4 bytes
  * @param instructions Pointer to first instruction for this query atom
  * @param tree Tree metadata (num instructions, scratch size, result index)
  * @param recursiveMatchBits Per-pair recursive match bits for this target atom (32 bits for patterns 0-31)
- * @param checkBonds If true, also check bond count requirements (for substructure search).
+ * @tparam checkBonds If true, also check bond count requirements (for substructure search).
  *                   If false, only check atom properties (for label matrix compatibility).
  * @return true if target atom matches the compound query
  */
@@ -196,11 +196,9 @@ HD_CALLABLE bool evaluateBoolTree(const AtomDataPacked*   targetPacked,
 
     switch (instr.op) {
       case BoolOp::Leaf: {
-        const bool atomMatch = atomMatchesPacked(*targetPacked, leafMasks[instr.auxArg]);
-        bool match = atomMatch;
+        bool match = atomMatchesPacked(*targetPacked, leafMasks[instr.auxArg]);
         if constexpr (checkBonds) {
-          const bool bondMatch = bondCountsMatchPacked(*targetBonds, leafBondCounts[instr.auxArg]);
-          match = atomMatch && bondMatch;
+          match &= bondCountsMatchPacked(*targetBonds, leafBondCounts[instr.auxArg]);
         }
         scratch[instr.dst] = match ? 1 : 0;
         break;

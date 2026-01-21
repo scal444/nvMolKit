@@ -153,31 +153,31 @@ struct AtomDataPacked {
   }
 
   HD_CALLABLE void setNumRings(uint8_t val) {
-    const uint64_t shift = kNumRingsRingBondsByte * 8 + kNumRingsBits;
+    constexpr uint64_t shift = kNumRingsRingBondsByte * 8 + kNumRingsBits;
     hi = (hi & ~(static_cast<uint64_t>(k4BitMask) << shift)) |
          (static_cast<uint64_t>(val & k4BitMask) << shift);
   }
 
   HD_CALLABLE void setRingBondCount(uint8_t val) {
-    const uint64_t shift = kNumRingsRingBondsByte * 8 + kRingBondCountBits;
+    constexpr uint64_t shift = kNumRingsRingBondsByte * 8 + kRingBondCountBits;
     hi = (hi & ~(static_cast<uint64_t>(k4BitMask) << shift)) |
          (static_cast<uint64_t>(val & k4BitMask) << shift);
   }
 
   HD_CALLABLE void setNumImplicitHs(uint8_t val) {
-    const uint64_t shift = kImplicitHsHeterosByte * 8 + kNumImplicitHsBits;
+    constexpr uint64_t shift = kImplicitHsHeterosByte * 8 + kNumImplicitHsBits;
     hi = (hi & ~(static_cast<uint64_t>(k4BitMask) << shift)) |
          (static_cast<uint64_t>(val & k4BitMask) << shift);
   }
 
   HD_CALLABLE void setNumHeteroatomNeighbors(uint8_t val) {
-    const uint64_t shift = kImplicitHsHeterosByte * 8 + kNumHeteroNeighborBits;
+    constexpr uint64_t shift = kImplicitHsHeterosByte * 8 + kNumHeteroNeighborBits;
     hi = (hi & ~(static_cast<uint64_t>(k4BitMask) << shift)) |
          (static_cast<uint64_t>(val & k4BitMask) << shift);
   }
 
   HD_CALLABLE void setIsAromatic(bool val) {
-    const uint64_t bitPos = kDegreeByte * 8 + kIsAromaticBit;
+    constexpr uint64_t bitPos = kDegreeByte * 8 + kIsAromaticBit;
     if (val) {
       hi |= (1ULL << bitPos);
     } else {
@@ -190,7 +190,7 @@ struct AtomDataPacked {
   }
 
   HD_CALLABLE void setIsInRing(bool val) {
-    const uint64_t bitPos = kDegreeByte * 8 + kIsInRingBit;
+    constexpr uint64_t bitPos = kDegreeByte * 8 + kIsInRingBit;
     if (val) {
       hi |= (1ULL << bitPos);
     } else {
@@ -203,7 +203,7 @@ struct AtomDataPacked {
   }
 
   HD_CALLABLE void setDegree(uint8_t val) {
-    const uint64_t shift = kDegreeByte * 8;
+    constexpr uint64_t shift = kDegreeByte * 8;
     hi = (hi & ~(static_cast<uint64_t>(kDegreeMask) << shift)) |
          (static_cast<uint64_t>(val & kDegreeMask) << shift);
   }
@@ -260,14 +260,14 @@ struct AtomDataPacked {
   }
 
   HD_CALLABLE bool isAromatic() const {
-    const uint64_t bitPos = kDegreeByte * 8 + kIsAromaticBit;
+    constexpr uint64_t bitPos = kDegreeByte * 8 + kIsAromaticBit;
     return (hi & (1ULL << bitPos)) != 0;
   }
 
   HD_CALLABLE uint8_t totalValence() const { return static_cast<uint8_t>((hi >> (kTotalValenceByte * 8)) & 0xFF); }
 
   HD_CALLABLE bool isInRing() const {
-    const uint64_t bitPos = kDegreeByte * 8 + kIsInRingBit;
+    constexpr uint64_t bitPos = kDegreeByte * 8 + kIsInRingBit;
     return (hi & (1ULL << bitPos)) != 0;
   }
 
