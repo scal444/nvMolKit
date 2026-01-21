@@ -34,7 +34,7 @@ namespace nvMolKit {
  * branchless mask-and-compare matching. All threads in a warp execute the same
  * instructions regardless of which fields are being compared.
  *
- * Bit layout (little-endian byte order within each uint64_t):
+ * Bit layout:
  *
  * Lower 64 bits (lo):
  *   Byte 0 [bits  0-7 ]: atomicNum (uint8_t, valid range 0-118)
@@ -51,12 +51,11 @@ namespace nvMolKit {
  *   Byte 1 [bits  8-15]: numRings (4 bits [8-11]) | ringBondCount (4 bits [12-15])
  *   Byte 2 [bits 16-23]: numImplicitHs (4 bits [16-19]) | numHeteroatomNeighbors (4 bits [20-23])
  *   Byte 3 [bits 24-31]: totalValence (uint8_t, explicit + implicit)
- *   Byte 4 [bits 32-39]: RESERVED for future use
+ *   Byte 4 [bits 32-39]: UNUSED. Reserved for future use.
  *   Byte 5 [bits 40-47]: isotope (uint8_t, 0 = natural abundance, throws if > 255)
  *   Byte 6 [bits 48-55]: degree (6 bits [48-53]) | isAromatic (bit 54) | isInRing (bit 55)
  *   Byte 7 [bits 56-63]: totalConnectivity (uint8_t, degree + total Hs for [X] queries)
  *
- * Compacted 4-bit fields have max value 15. Overflow during loading throws an exception.
  */
 struct AtomDataPacked {
   uint64_t lo = 0;
@@ -112,7 +111,7 @@ struct AtomDataPacked {
   /// @}
 
   // ============================================================================
-  // Setters - host-side, used during molecule loading
+  // Setters
   // ============================================================================
 
   HD_CALLABLE void setAtomicNum(uint8_t val) {
@@ -215,7 +214,7 @@ struct AtomDataPacked {
   }
 
   // ============================================================================
-  // Getters - host and device
+  // Getters
   // ============================================================================
 
   HD_CALLABLE uint8_t atomicNum() const { return static_cast<uint8_t>((lo >> (kAtomicNumByte * 8)) & 0xFF); }
@@ -322,11 +321,11 @@ static_assert(sizeof(AtomQueryMask) == 32, "AtomQueryMask must be exactly 32 byt
  * Match semantics:
  * - Target must have >= of each specific bond type (single, double, triple, aromatic)
  * - Query "any" bonds can match any remaining bonds after specific types matched
- * - Therefore: target.total() >= query.total() must also hold
+ * - Therefore: target.total() >= query.total() must also be true.
  */
 struct BondTypeCounts {
   uint8_t single   = 0;  ///< Single bonds (RDKit SINGLE=1)
-  uint8_t double_  = 0;  ///< Double bonds (RDKit DOUBLE=2)
+  uint8_t double_  = 0;  ///< Double bonds (RDKit DOUBLE=2) (can't use double keyword)
   uint8_t triple   = 0;  ///< Triple bonds (RDKit TRIPLE=3)
   uint8_t aromatic = 0;  ///< Aromatic bonds (RDKit ONEANDAHALF=7 or AROMATIC=12)
   uint8_t any      = 0;  ///< "Any" bonds from SMARTS (~), only for queries
@@ -346,8 +345,8 @@ struct BondTypeCounts {
   HD_CALLABLE bool canMatchQuery(const BondTypeCounts& query) const {
     bool specificOk = (single >= query.single) && (double_ >= query.double_) && (triple >= query.triple) &&
                       (aromatic >= query.aromatic);
-    bool totalOk = (total() >= query.total());
-    return specificOk && totalOk;
+    // Short-circuit total() check if specific types are not met.
+    return specificOk && (total() >= query.total());
   }
 };
 
