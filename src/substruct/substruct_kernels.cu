@@ -158,6 +158,39 @@ inline bool& sharedMemCarveoutConfigured() {
 // Device Helper Functions
 // =============================================================================
 
+template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
+__device__ void writeLabelMatrixToGlobal(const MoleculeView& target,
+                                         const MoleculeView& query,
+                                         FlatBitVect<MaxTargetAtoms * MaxQueryAtoms>& sharedLabelMatrix,
+                                         const uint32_t* pairRecursiveBits,
+                                         uint32_t* globalOut) {
+  constexpr std::size_t kLabelMatrixWordsT = (MaxTargetAtoms * MaxQueryAtoms) / 32;
+  using LabelMatrixViewT = BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>;
+  LabelMatrixViewT labelMatrix(&sharedLabelMatrix);
+
+  populateLabelMatrixOptimized<MaxTargetAtoms, MaxQueryAtoms>(target, query, labelMatrix, pairRecursiveBits);
+  __syncthreads();
+
+  const uint32_t* sharedIn   = sharedLabelMatrix.cbegin();
+  const int       tid        = threadIdx.x;
+  const int       numThreads = blockDim.x;
+  for (std::size_t i = tid; i < kLabelMatrixWordsT; i += numThreads) {
+    globalOut[i] = sharedIn[i];
+  }
+}
+
+template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
+__device__ void loadLabelMatrixToShared(FlatBitVect<MaxTargetAtoms * MaxQueryAtoms>& sharedLabelMatrix,
+                                        const uint32_t*                             globalIn) {
+  constexpr std::size_t kLabelMatrixWordsT = (MaxTargetAtoms * MaxQueryAtoms) / 32;
+  uint32_t*             sharedOut          = sharedLabelMatrix.begin();
+  const int             tid                = threadIdx.x;
+  const int             numThreads         = blockDim.x;
+  for (std::size_t i = tid; i < kLabelMatrixWordsT; i += numThreads) {
+    sharedOut[i] = globalIn[i];
+  }
+}
+
 // =============================================================================
 // Kernel Definitions
 // =============================================================================
@@ -180,9 +213,7 @@ __global__ void labelMatrixKernelT(MoleculesDeviceView targets,
                                    int                 maxTargetAtoms,
                                    const int*          batchLocalIndices) {
   constexpr std::size_t kLabelMatrixBitsT = MaxTargetAtoms * MaxQueryAtoms;
-  constexpr std::size_t kLabelMatrixWordsT = kLabelMatrixBitsT / 32;
   using LabelMatrixStorageT = FlatBitVect<kLabelMatrixBitsT>;
-  using LabelMatrixViewT = BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>;
 
   const int launchIdx     = blockIdx.x;
   const int batchLocalIdx = batchLocalIndices ? batchLocalIndices[launchIdx] : launchIdx;
@@ -197,24 +228,17 @@ __global__ void labelMatrixKernelT(MoleculesDeviceView targets,
   const MoleculeView target = getMolecule(targets, targetIdx);
   const MoleculeView query  = getMolecule(queries, queryIdx);
 
-  __shared__ LabelMatrixStorageT sharedLabelMatrix;
-  LabelMatrixViewT labelMatrix(&sharedLabelMatrix);
-
   const uint32_t* pairRecursiveBits = recursiveMatchBits
                                         ? &recursiveMatchBits[batchLocalIdx * maxTargetAtoms]
                                         : nullptr;
 
-  populateLabelMatrixOptimized<MaxTargetAtoms, MaxQueryAtoms>(target, query, labelMatrix, pairRecursiveBits);
-  __syncthreads();
-
-  const uint32_t* sharedIn   = sharedLabelMatrix.cbegin();
-  uint32_t*       globalOut  = labelMatrixBuffer + batchLocalIdx * kLabelMatrixWordsT;
-  const int       tid        = threadIdx.x;
-  const int       numThreads = blockDim.x;
-
-  for (std::size_t i = tid; i < kLabelMatrixWordsT; i += numThreads) {
-    globalOut[i] = sharedIn[i];
-  }
+  __shared__ LabelMatrixStorageT sharedLabelMatrix;
+  uint32_t*                      globalOut  = labelMatrixBuffer + batchLocalIdx * (kLabelMatrixBitsT / 32);
+  writeLabelMatrixToGlobal<MaxTargetAtoms, MaxQueryAtoms>(target,
+                                                         query,
+                                                         sharedLabelMatrix,
+                                                         pairRecursiveBits,
+                                                         globalOut);
 }
 
 /**
@@ -238,9 +262,7 @@ __global__ void labelMatrixPaintKernelT(MoleculesDeviceView        targets,
                                         const uint32_t*            recursiveMatchBits,
                                         int                        maxTargetAtoms) {
   constexpr std::size_t kLabelMatrixBitsT = MaxTargetAtoms * MaxQueryAtoms;
-  constexpr std::size_t kLabelMatrixWordsT = kLabelMatrixBitsT / 32;
   using LabelMatrixStorageT = FlatBitVect<kLabelMatrixBitsT>;
-  using LabelMatrixViewT = BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>;
 
   const int localTargetIdx   = blockIdx.x / numPatterns;
   const int targetIdx        = firstTargetIdx + localTargetIdx;
@@ -264,24 +286,17 @@ __global__ void labelMatrixPaintKernelT(MoleculesDeviceView        targets,
   const MoleculeView target  = getMolecule(targets, targetIdx);
   const MoleculeView pattern = getMolecule(patterns, patternMolIdx);
 
-  __shared__ LabelMatrixStorageT sharedLabelMatrix;
-  LabelMatrixViewT labelMatrix(&sharedLabelMatrix);
-
   const uint32_t* pairBits = (recursiveMatchBits != nullptr)
                            ? recursiveMatchBits + batchLocalPairIdx * maxTargetAtoms
                            : nullptr;
 
-  populateLabelMatrixOptimized<MaxTargetAtoms, MaxQueryAtoms>(target, pattern, labelMatrix, pairBits);
-  __syncthreads();
-
-  const uint32_t* sharedIn   = sharedLabelMatrix.cbegin();
-  uint32_t*       globalOut  = labelMatrixBuffer + blockIdx.x * kLabelMatrixWordsT;
-  const int       tid        = threadIdx.x;
-  const int       numThreads = blockDim.x;
-
-  for (std::size_t i = tid; i < kLabelMatrixWordsT; i += numThreads) {
-    globalOut[i] = sharedIn[i];
-  }
+  __shared__ LabelMatrixStorageT sharedLabelMatrix;
+  uint32_t*                      globalOut = labelMatrixBuffer + blockIdx.x * (kLabelMatrixBitsT / 32);
+  writeLabelMatrixToGlobal<MaxTargetAtoms, MaxQueryAtoms>(target,
+                                                         pattern,
+                                                         sharedLabelMatrix,
+                                                         pairBits,
+                                                         globalOut);
 }
 
 /**
@@ -317,7 +332,6 @@ __global__ void substructMatchKernelT(MoleculesDeviceView                       
   MoleculeView query  = getMolecule(queries, queryIdx);
 
   constexpr std::size_t kLabelMatrixBitsT = MaxTargetAtoms * MaxQueryAtoms;
-  constexpr std::size_t kLabelMatrixWordsT = kLabelMatrixBitsT / 32;
   using LabelMatrixStorageT = FlatBitVect<kLabelMatrixBitsT>;
   using LabelMatrixViewT = BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>;
 
@@ -328,13 +342,10 @@ __global__ void substructMatchKernelT(MoleculesDeviceView                       
   __shared__ QueryAtomBonds sharedQueryBonds[MaxQueryAtoms];
 
   const uint32_t* globalIn   = results.getLabelMatrixPtr(batchLocalIdx);
-  uint32_t*       sharedOut  = sharedLabelMatrix.begin();
   const int       tid        = threadIdx.x;
   const int       numThreads = blockDim.x;
 
-  for (std::size_t i = tid; i < kLabelMatrixWordsT; i += numThreads) {
-    sharedOut[i] = globalIn[i];
-  }
+  loadLabelMatrixToShared<MaxTargetAtoms, MaxQueryAtoms>(sharedLabelMatrix, globalIn);
 
   const int numTargetAtoms = target.numAtoms;
   const int numQueryAtoms = query.numAtoms;
@@ -470,7 +481,6 @@ __global__ void substructPaintKernelT(MoleculesDeviceView             targets,
                                       PartialMatchT<MaxQueryAtoms>*   overflowB,
                                       int                             overflowCapacity,
                                       const uint32_t*                 labelMatrixBuffer,
-                                      std::size_t                     labelMatrixWords,
                                       int                             firstTargetIdx) {
   const int localTargetIdx   = blockIdx.x / numPatterns;
   const int targetIdx        = firstTargetIdx + localTargetIdx;
@@ -506,14 +516,11 @@ __global__ void substructPaintKernelT(MoleculesDeviceView             targets,
   __shared__ TargetAtomBonds sharedTargetBonds[MaxTargetAtoms];
   __shared__ QueryAtomBonds sharedPatternBonds[MaxQueryAtoms];
 
-  const uint32_t* globalIn   = labelMatrixBuffer + blockIdx.x * labelMatrixWords;
-  uint32_t*       sharedOut  = sharedLabelMatrix.begin();
+  const uint32_t* globalIn   = labelMatrixBuffer + blockIdx.x * kLabelMatrixWordsT;
   const int       tid        = threadIdx.x;
   const int       numThreads = blockDim.x;
 
-  for (std::size_t i = tid; i < kLabelMatrixWordsT; i += numThreads) {
-    sharedOut[i] = globalIn[i];
-  }
+  loadLabelMatrixToShared<MaxTargetAtoms, MaxQueryAtoms>(sharedLabelMatrix, globalIn);
 
   const int numTargetAtoms = target.numAtoms;
   const int numPatternAtoms = pattern.numAtoms;
@@ -590,7 +597,7 @@ __global__ void substructPaintKernelT(MoleculesDeviceView             targets,
       const int*, int, const int*, DeviceTimingsData*); \
   template __global__ void substructPaintKernelT<MaxT, MaxQ, MaxB, SubstructAlgorithm::GSI>( \
       MoleculesDeviceView, MoleculesDeviceView, const BatchedPatternEntry*, int, uint32_t*, int, int, \
-      int, int, int, int, PartialMatchT<MaxQ>*, PartialMatchT<MaxQ>*, int, const uint32_t*, std::size_t, int);
+      int, int, int, int, PartialMatchT<MaxQ>*, PartialMatchT<MaxQ>*, int, const uint32_t*, int);
 
 // Target 32, Query 16
 INSTANTIATE_SUBSTRUCT_KERNELS(32, 16, 4)
@@ -828,7 +835,6 @@ void launchSubstructPaintKernelForConfig(SubstructAlgorithm          algorithm,
                                          const uint32_t*             labelMatrixBuffer,
                                          int                         firstTargetIdx,
                                          cudaStream_t                stream) {
-  constexpr std::size_t kLabelMatrixWordsT = (MaxTargetAtoms * MaxQueryAtoms) / 32;
   constexpr int kBlockSize = getBlockSizeForConfig<MaxTargetAtoms>();
   switch (algorithm) {
     case SubstructAlgorithm::VF2:
@@ -841,7 +847,7 @@ void launchSubstructPaintKernelForConfig(SubstructAlgorithm          algorithm,
               defaultPatternId, defaultMainQueryIdx, miniBatchPairOffset, miniBatchSize,
               reinterpret_cast<PartialMatchT<MaxQueryAtoms>*>(overflowA),
               reinterpret_cast<PartialMatchT<MaxQueryAtoms>*>(overflowB),
-              overflowCapacity, labelMatrixBuffer, kLabelMatrixWordsT, firstTargetIdx);
+              overflowCapacity, labelMatrixBuffer, firstTargetIdx);
       break;
   }
 }

@@ -98,7 +98,7 @@ struct BoolInstruction {
   uint8_t dst;          ///< Destination index in scratch array
   uint8_t src1;         ///< Left operand index, or fieldId for comparisons
   uint8_t src2;         ///< Right operand index, or value/minVal for comparisons
-  uint8_t auxArg;  ///< Aux operand: leaf mask index (Leaf), pattern id (RecursiveMatch), max (Range)
+  uint8_t auxArg;  ///< Aux operand: leaf mask index (Leaf), pattern id (RecursiveMatch), max (Range) depending on use case.
 
   HD_CALLABLE static BoolInstruction makeLeaf(uint8_t dst, uint8_t maskIdx) {
     return BoolInstruction{BoolOp::Leaf, dst, 0, 0, maskIdx};
