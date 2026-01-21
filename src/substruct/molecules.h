@@ -298,47 +298,6 @@ void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch);
 void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch);
 
 /**
- * @brief Pool of reusable MoleculesHost batches for parallel preprocessing.
- *
- * Maintains per-thread double-buffered MoleculesHost objects to enable:
- * 1. Reuse of allocated capacity across macro iterations (avoiding reallocation)
- * 2. Overlapped preprocessing and merge operations via rotating buffers
- *
- * Each thread has two buffers (A and B). While one buffer is being merged into
- * the result, the thread can start filling the other buffer with the next chunk.
- */
-struct PreprocessingThreadPool {
-  static constexpr int kBuffersPerThread = 2;
-
-  std::vector<std::array<MoleculesHost, kBuffersPerThread>> threadBatches;
-  int numThreads = 0;
-
-  /**
-   * @brief Initialize the pool for a given number of threads.
-   * @param threads Number of preprocessing threads
-   */
-  void init(int threads);
-
-  /**
-   * @brief Clear all batches while preserving allocated capacity.
-   */
-  void clearAll();
-
-  /**
-   * @brief Clear specific buffer for all threads.
-   * @param bufferIdx Which buffer to clear (0 or 1)
-   */
-  void clearBuffer(int bufferIdx);
-
-  /**
-   * @brief Get write buffer for a thread.
-   * @param tid Thread ID (0 to numThreads-1)
-   * @param bufferIdx Which buffer (0 or 1)
-   */
-  MoleculesHost& getBuffer(int tid, int bufferIdx) { return threadBatches[tid][bufferIdx]; }
-};
-
-/**
  * @brief Build a target molecule batch in parallel using OpenMP.
  *
  * Processes molecules in parallel when numThreads > 1. The molecules are added
@@ -356,18 +315,16 @@ MoleculesHost buildTargetBatchParallel(const std::vector<const RDKit::ROMol*>& m
 /**
  * @brief Build a target molecule batch in parallel into existing storage.
  *
- * Uses reusable thread-local batches from the pool to avoid reallocation.
- * The result MoleculesHost is cleared and repopulated.
+ * Uses direct parallel writing - each thread writes directly to the result
+ * buffer at computed offsets. Reuses result's existing capacity when possible.
  *
- * @param result Output batch (will be cleared first)
- * @param pool Thread pool with reusable per-thread batches
- * @param bufferIdx Which buffer set to use (0 or 1), typically macroIdx % 2
+ * @param result Output batch (will be overwritten)
+ * @param numThreads Number of OpenMP threads to use
  * @param molecules Vector of molecule pointers
  * @param sortOrder Optional sort order (empty = use sequential order)
  */
 void buildTargetBatchParallelInto(MoleculesHost&                          result,
-                                  PreprocessingThreadPool&                pool,
-                                  int                                     bufferIdx,
+                                  int                                     numThreads,
                                   const std::vector<const RDKit::ROMol*>& molecules,
                                   const std::vector<int>&                 sortOrder);
 

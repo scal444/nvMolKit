@@ -1557,9 +1557,7 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
     int effectiveMiniBatchSize = 0;
   };
 
-  // Create reusable thread pool for preprocessing (persists across macro iterations)
-  PreprocessingThreadPool preprocessingPool;
-  preprocessingPool.init(effectivePreprocessingThreads);
+  const int preprocessingThreads = effectivePreprocessingThreads;
 
   auto initializeMacroContextQueries = [&](ThreadWorkerContext& ctx) {
     ctx.numQueries     = numQueries;
@@ -1604,7 +1602,7 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
       }
     }
 
-    buildTargetBatchParallelInto(out.targetsHost, preprocessingPool, macroIdx % 2, macroTargets, macroBuildOrder);
+    buildTargetBatchParallelInto(out.targetsHost, preprocessingThreads, macroTargets, macroBuildOrder);
 
     {
       ScopedNvtxRange postRange("CPU: Macro context setup");

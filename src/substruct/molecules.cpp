@@ -26,9 +26,11 @@
 #include <RDGeneral/versions.h>
 
 #include <algorithm>
+#include <cstring>
 #include <functional>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 
 #include "packed_bonds.h"
 #include "substruct_debug.h"
@@ -39,35 +41,34 @@ namespace nvMolKit {
 
 namespace {
 
-void populateAtomData(const RDKit::Atom* atom, AtomData& atomData, const RDKit::RingInfo* ringInfo) {
-  atomData.atomicNum     = atom->getAtomicNum();
-  atomData.chiralTag     = atom->getChiralTag();
-  // Use total H count (explicit + implicit) for SMARTS [H] queries like [NH], [CH3], etc.
-  atomData.numExplicitHs = atom->getTotalNumHs();
-#if RDKIT_VERSION_NUM >= 0x20240300
-  atomData.explicitValence = atom->getValence(RDKit::Atom::ValenceType::EXPLICIT);
-  atomData.implicitValence = atom->getValence(RDKit::Atom::ValenceType::IMPLICIT);
-#else
-  atomData.explicitValence = atom->getExplicitValence();
-  atomData.implicitValence = atom->getImplicitValence();
-#endif
-  atomData.totalValence        = atom->getTotalValence();
-  atomData.formalCharge        = atom->getFormalCharge();
-  atomData.hybridization       = atom->getHybridization();
-  atomData.isAromatic          = atom->getIsAromatic();
-  atomData.numRadicalElectrons = atom->getNumRadicalElectrons();
-  const int idx                = atom->getIdx();
-  atomData.numRings            = ringInfo->numAtomRings(idx);
-  atomData.minRingSize         = ringInfo->minAtomRingSize(idx);
+/**
+ * @brief Resize vector without value-initialization for trivially copyable types.
+ *
+ * Uses a wrapper struct trick to avoid zero-initialization when capacity is sufficient.
+ */
+template <typename T>
+void resizeUninit(std::vector<T>& vec, size_t newSize) {
+  static_assert(std::is_trivially_copyable_v<T>, "resizeUninit requires trivially copyable type");
+  struct Wrapper {
+    T value;
+    Wrapper() = default;
+  };
+  static_assert(sizeof(Wrapper) == sizeof(T));
+  reinterpret_cast<std::vector<Wrapper>&>(vec).resize(newSize);
 }
 
-void populateAtomDataPacked(const RDKit::ROMol* mol,
-                            const RDKit::Atom*  atom,
-                            AtomDataPacked&     packed,
-                            const RDKit::RingInfo* ringInfo) {
+/**
+ * @brief Populate non-bond-related atom properties into packed format.
+ *
+ * Extracts scalar atom properties from RDKit atom. Bond-related properties
+ * (ring bond count, heteroatom neighbors, bond type counts) are populated
+ * separately during the fused bond iteration.
+ */
+void populateAtomScalars(const RDKit::Atom*     atom,
+                         AtomDataPacked&        packed,
+                         const RDKit::RingInfo* ringInfo) {
   packed.setAtomicNum(atom->getAtomicNum());
   packed.setChiralTag(atom->getChiralTag());
-  // Use total H count (explicit + implicit) for SMARTS [H] queries like [NH], [CH3], etc.
   packed.setNumExplicitHs(atom->getTotalNumHs());
 #if RDKIT_VERSION_NUM >= 0x20240300
   packed.setExplicitValence(atom->getValence(RDKit::Atom::ValenceType::EXPLICIT));
@@ -93,24 +94,6 @@ void populateAtomDataPacked(const RDKit::ROMol* mol,
   packed.setMinRingSize(ringInfo->minAtomRingSize(idx));
   packed.setIsInRing(numRings > 0);
 
-  // Ring bond count: count bonds where the bond is in a ring
-  int ringBondCount = 0;
-  auto [beg, bondEnd] = mol->getAtomBonds(atom);
-  while (beg != bondEnd) {
-    const auto* bond = (*mol)[*beg];
-    if (ringInfo->numBondRings(bond->getIdx()) > 0) {
-      ++ringBondCount;
-    }
-    ++beg;
-  }
-  if (ringBondCount > AtomDataPacked::kMax4BitValue) {
-    throw std::runtime_error("Ring bond count " + std::to_string(ringBondCount) +
-                             " exceeds maximum storable value of " +
-                             std::to_string(AtomDataPacked::kMax4BitValue));
-  }
-  packed.setRingBondCount(ringBondCount);
-
-  // Implicit H count for [h] queries
   const unsigned int numImplicitHs = atom->getNumImplicitHs();
   if (numImplicitHs > AtomDataPacked::kMax4BitValue) {
     throw std::runtime_error("Implicit H count " + std::to_string(numImplicitHs) +
@@ -119,59 +102,108 @@ void populateAtomDataPacked(const RDKit::ROMol* mol,
   }
   packed.setNumImplicitHs(numImplicitHs);
 
-  // Heteroatom neighbor count: neighbors that are not C or H
-  int numHeteroNeighbors = 0;
-  for (const auto* neighbor : mol->atomNeighbors(atom)) {
-    const int neighborAtomicNum = neighbor->getAtomicNum();
-    if (neighborAtomicNum != 6 && neighborAtomicNum != 1) {
-      ++numHeteroNeighbors;
-    }
-  }
-  if (numHeteroNeighbors > AtomDataPacked::kMax4BitValue) {
-    throw std::runtime_error("Heteroatom neighbor count " + std::to_string(numHeteroNeighbors) +
-                             " exceeds maximum storable value of " +
-                             std::to_string(AtomDataPacked::kMax4BitValue));
-  }
-  packed.setNumHeteroatomNeighbors(numHeteroNeighbors);
-
-  // Isotope (0 = natural abundance)
   const unsigned int isotope = atom->getIsotope();
   if (isotope > 255) {
     throw std::runtime_error("Atom isotope " + std::to_string(isotope) + " exceeds maximum supported value of 255");
   }
   packed.setIsotope(static_cast<uint8_t>(isotope));
 
-  // Degree (number of explicit bonds) for [D] queries
   packed.setDegree(atom->getDegree());
-
-  // Total connectivity (degree + total H count) for [X] queries
   packed.setTotalConnectivity(atom->getTotalDegree());
 }
 
-void populateBondTypeCounts(const RDKit::ROMol* mol, const RDKit::Atom* atom, BondTypeCounts& counts) {
-  auto [beg, bondEnd] = mol->getAtomBonds(atom);
-  while (beg != bondEnd) {
-    const auto* bond     = (*mol)[*beg];
-    int         bondType = bond->getBondType();
-    switch (bondType) {
-      case 1:
-        ++counts.single;
-        break;  // SINGLE
-      case 2:
-        ++counts.double_;
-        break;  // DOUBLE
-      case 3:
-        ++counts.triple;
-        break;  // TRIPLE
-      case 7:   // ONEANDAHALF (aromatic)
-      case 12:
-        ++counts.aromatic;
-        break;  // AROMATIC
-      default:
-        throw std::runtime_error("Unsupported bond type " + std::to_string(bondType) +
-                                 " in target molecule. Only single, double, triple, and aromatic bonds are supported.");
+/**
+ * @brief Increment bond type count based on RDKit bond type.
+ */
+inline void incrementBondTypeCount(BondTypeCounts& counts, int bondType) {
+  switch (bondType) {
+    case 1:
+      ++counts.single;
+      break;
+    case 2:
+      ++counts.double_;
+      break;
+    case 3:
+      ++counts.triple;
+      break;
+    case 7:
+    case 12:
+      ++counts.aromatic;
+      break;
+    default:
+      throw std::runtime_error("Unsupported bond type " + std::to_string(bondType) +
+                               " in target molecule. Only single, double, triple, and aromatic bonds are supported.");
+  }
+}
+
+/**
+ * @brief Process all atoms and bonds for a target molecule in a single fused pass.
+ *
+ * Combines what was previously done by populateTargetAtomBonds, populateAtomDataPacked
+ * (bond iteration part), and populateBondTypeCounts into a single iteration per atom.
+ * This eliminates redundant bond traversals.
+ */
+void populateTargetMolecule(const RDKit::ROMol*    mol,
+                            MoleculesHost&         batch,
+                            const RDKit::RingInfo* ringInfo) {
+  auto& atomDataPackedVec  = batch.atomDataPacked;
+  auto& bondTypeCountsVec  = batch.bondTypeCounts;
+  auto& targetAtomBondsVec = batch.targetAtomBonds;
+
+  for (const RDKit::Atom* atom : mol->atoms()) {
+    auto& packed     = atomDataPackedVec.emplace_back();
+    auto& bondCounts = bondTypeCountsVec.emplace_back();
+    auto& tab        = targetAtomBondsVec.emplace_back();
+
+    populateAtomScalars(atom, packed, ringInfo);
+
+    const unsigned int atomIdx = atom->getIdx();
+    int                ringBondCount      = 0;
+    int                numHeteroNeighbors = 0;
+    int                totalBonds         = 0;
+    tab.degree = 0;
+
+    auto [beg, bondEnd] = mol->getAtomBonds(atom);
+    while (beg != bondEnd) {
+      const auto*        bond        = (*mol)[*beg];
+      const unsigned int bondIdx     = bond->getIdx();
+      const int          bondType    = bond->getBondType();
+      const int          otherAtomId = bond->getOtherAtomIdx(atomIdx);
+      const bool         isInRing    = ringInfo->numBondRings(bondIdx) > 0;
+
+      incrementBondTypeCount(bondCounts, bondType);
+
+      ringBondCount += isInRing;
+
+      const int neighborAtomicNum = mol->getAtomWithIdx(otherAtomId)->getAtomicNum();
+      numHeteroNeighbors += (neighborAtomicNum != 6 && neighborAtomicNum != 1);
+
+      if (tab.degree < kMaxBondsPerAtom) {
+        tab.neighborIdx[tab.degree] = static_cast<uint8_t>(otherAtomId);
+        tab.bondInfo[tab.degree]    = packTargetBondInfo(bondType, isInRing);
+        ++tab.degree;
+      }
+      ++totalBonds;
+      ++beg;
     }
-    ++beg;
+
+    if (totalBonds > kMaxBondsPerAtom) {
+      throw std::runtime_error("Atom has more than " + std::to_string(kMaxBondsPerAtom) + " bonds");
+    }
+
+    if (ringBondCount > AtomDataPacked::kMax4BitValue) {
+      throw std::runtime_error("Ring bond count " + std::to_string(ringBondCount) +
+                               " exceeds maximum storable value of " +
+                               std::to_string(AtomDataPacked::kMax4BitValue));
+    }
+    packed.setRingBondCount(ringBondCount);
+
+    if (numHeteroNeighbors > AtomDataPacked::kMax4BitValue) {
+      throw std::runtime_error("Heteroatom neighbor count " + std::to_string(numHeteroNeighbors) +
+                               " exceeds maximum storable value of " +
+                               std::to_string(AtomDataPacked::kMax4BitValue));
+    }
+    packed.setNumHeteroatomNeighbors(numHeteroNeighbors);
   }
 }
 
@@ -1359,34 +1391,6 @@ AtomQuery getAtomQueryType(const RDKit::Atom* atom) {
   return getQueryFlagsFromQuery(query);
 }
 
-void populateTargetAtomBonds(const RDKit::ROMol* mol, MoleculesHost& batch, const RDKit::RingInfo* ringInfo) {
-  auto& targetAtomBondsVec = batch.targetAtomBonds;
-
-  for (const RDKit::Atom* atom : mol->atoms()) {
-    auto& tab = targetAtomBondsVec.emplace_back();
-    tab.degree = 0;
-
-    const unsigned int atomIdx = atom->getIdx();
-    auto [beg, bondEnd] = mol->getAtomBonds(atom);
-
-    while (beg != bondEnd && tab.degree < kMaxBondsPerAtom) {
-      const auto*        bond        = (*mol)[*beg];
-      const unsigned int bondIdx     = bond->getIdx();
-      const int          otherAtomId = bond->getOtherAtomIdx(atomIdx);
-      const bool         isInRing    = ringInfo->numBondRings(bondIdx) > 0;
-
-      tab.neighborIdx[tab.degree] = static_cast<uint8_t>(otherAtomId);
-      tab.bondInfo[tab.degree]    = packTargetBondInfo(bond->getBondType(), isInRing);
-      ++tab.degree;
-      ++beg;
-    }
-
-    if (beg != bondEnd) {
-      throw std::runtime_error("Atom has more than " + std::to_string(kMaxBondsPerAtom) + " bonds");
-    }
-  }
-}
-
 }  // namespace
 
 constexpr unsigned int kMaxMoleculeAtoms = 128;
@@ -1398,22 +1402,10 @@ void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
                              " atoms, which exceeds the maximum of " + std::to_string(kMaxMoleculeAtoms));
   }
 
-  auto& atomDataPackedVec = batch.atomDataPacked;
-  auto& bondTypeCountsVec = batch.bondTypeCounts;
-
   const auto* ringInfo = mol->getRingInfo();
+  populateTargetMolecule(mol, batch, ringInfo);
 
-  populateTargetAtomBonds(mol, batch, ringInfo);
-
-  for (const RDKit::Atom* atom : mol->atoms()) {
-    auto& thisAtomPacked = atomDataPackedVec.emplace_back();
-    populateAtomDataPacked(mol, atom, thisAtomPacked, ringInfo);
-
-    auto& thisBondCounts = bondTypeCountsVec.emplace_back();
-    populateBondTypeCounts(mol, atom, thisBondCounts);
-  }
-
-  batch.batchAtomStarts.push_back(static_cast<int>(atomDataPackedVec.size()));
+  batch.batchAtomStarts.push_back(static_cast<int>(batch.atomDataPacked.size()));
 }
 
 namespace {
@@ -2166,30 +2158,81 @@ void mergeBatch(MoleculesHost& dest, const MoleculesHost& src) {
                                  src.recursivePatterns.end());
 }
 
-}  // namespace
+/**
+ * @brief Parallel merge of thread batches into result for target molecules.
+ *
+ * Computes prefix sums of sizes, pre-allocates result, then uses parallel
+ * memcpy to copy each thread's data to its destination range. This avoids
+ * the serial bottleneck of sequential mergeBatch calls.
+ *
+ * @tparam BatchAccessor Callable with signature: const MoleculesHost&(int tid)
+ * @param result Output batch to populate
+ * @param numThreads Number of source thread batches
+ * @param getBatch Accessor function to retrieve batch for thread tid
+ */
+template <typename BatchAccessor>
+void mergeTargetBatchesParallelImpl(MoleculesHost&       result,
+                                    int                  numThreads,
+                                    BatchAccessor        getBatch) {
+  ScopedNvtxRange range("mergeTargetBatchesParallel");
 
-// =============================================================================
-// PreprocessingThreadPool
-// =============================================================================
+  std::vector<size_t> atomOffsets(numThreads + 1, 0);
+  std::vector<size_t> molOffsets(numThreads + 1, 0);
 
-void PreprocessingThreadPool::init(int threads) {
-  numThreads = threads;
-  threadBatches.resize(threads);
-}
-
-void PreprocessingThreadPool::clearAll() {
   for (int t = 0; t < numThreads; ++t) {
-    for (int b = 0; b < kBuffersPerThread; ++b) {
-      threadBatches[t][b].clear();
+    const MoleculesHost& batch = getBatch(t);
+    atomOffsets[t + 1] = atomOffsets[t] + batch.atomDataPacked.size();
+    molOffsets[t + 1]  = molOffsets[t] + batch.numMolecules();
+  }
+
+  const size_t totalAtoms = atomOffsets[numThreads];
+  const size_t totalMols  = molOffsets[numThreads];
+
+  if (totalAtoms == 0) {
+    return;
+  }
+
+  {
+    ScopedNvtxRange allocRange("Merge: allocate");
+    resizeUninit(result.atomDataPacked, totalAtoms);
+    resizeUninit(result.bondTypeCounts, totalAtoms);
+    resizeUninit(result.targetAtomBonds, totalAtoms);
+    result.batchAtomStarts.resize(totalMols + 1);
+    result.batchAtomStarts[0] = 0;
+  }
+
+  {
+    ScopedNvtxRange copyRange("Merge: parallel copy");
+#pragma omp parallel num_threads(numThreads)
+    {
+      const int tid = omp_get_thread_num();
+      const MoleculesHost& src = getBatch(tid);
+      const size_t atomOff = atomOffsets[tid];
+      const size_t molOff  = molOffsets[tid];
+      const size_t numAtoms = src.atomDataPacked.size();
+      const size_t numMols  = src.numMolecules();
+
+      if (numAtoms > 0) {
+        std::memcpy(result.atomDataPacked.data() + atomOff,
+                    src.atomDataPacked.data(),
+                    numAtoms * sizeof(AtomDataPacked));
+        std::memcpy(result.bondTypeCounts.data() + atomOff,
+                    src.bondTypeCounts.data(),
+                    numAtoms * sizeof(BondTypeCounts));
+        std::memcpy(result.targetAtomBonds.data() + atomOff,
+                    src.targetAtomBonds.data(),
+                    numAtoms * sizeof(TargetAtomBonds));
+      }
+
+      for (size_t i = 0; i < numMols; ++i) {
+        result.batchAtomStarts[molOff + i + 1] =
+            static_cast<int>(src.batchAtomStarts[i + 1] + atomOff);
+      }
     }
   }
 }
 
-void PreprocessingThreadPool::clearBuffer(int bufferIdx) {
-  for (int t = 0; t < numThreads; ++t) {
-    threadBatches[t][bufferIdx].clear();
-  }
-}
+}  // namespace
 
 // =============================================================================
 // Parallel Batch Building
@@ -2245,34 +2288,29 @@ MoleculesHost buildTargetBatchParallel(const std::vector<const RDKit::ROMol*>& m
   }
 
   MoleculesHost result;
-  {
-    ScopedNvtxRange mergeRange("Merge thread batches");
-    for (int t = 0; t < numThreads; ++t) {
-      mergeBatch(result, threadBatches[t]);
-    }
-  }
+  mergeTargetBatchesParallelImpl(result, numThreads,
+                                 [&](int tid) -> const MoleculesHost& { return threadBatches[tid]; });
 
   return result;
 }
 
 void buildTargetBatchParallelInto(MoleculesHost&                          result,
-                                  PreprocessingThreadPool&                pool,
-                                  int                                     bufferIdx,
+                                  int                                     numThreads,
                                   const std::vector<const RDKit::ROMol*>& molecules,
                                   const std::vector<int>&                 sortOrder) {
   ScopedNvtxRange range("buildTargetBatchParallelInto");
   
   const int numMols = static_cast<int>(molecules.size());
-  result.clear();
   
   if (numMols == 0) {
+    result.clear();
     return;
   }
 
   const bool useSortOrder = !sortOrder.empty();
-  const int numThreads = pool.numThreads;
 
   if (numThreads <= 1) {
+    result.clear();
     for (int i = 0; i < numMols; ++i) {
       const int molIdx = useSortOrder ? sortOrder[i] : i;
       addToBatch(molecules[molIdx], result);
@@ -2280,25 +2318,91 @@ void buildTargetBatchParallelInto(MoleculesHost&                          result
     return;
   }
 
-  pool.clearBuffer(bufferIdx);
+  // Compute per-molecule atom offsets for direct writing
+  std::vector<int>& atomStarts = result.batchAtomStarts;
+  atomStarts.resize(numMols + 1);
+  atomStarts[0] = 0;
+  for (int i = 0; i < numMols; ++i) {
+    const int molIdx = useSortOrder ? sortOrder[i] : i;
+    atomStarts[i + 1] = atomStarts[i] + static_cast<int>(molecules[molIdx]->getNumAtoms());
+  }
+  const size_t totalAtoms = atomStarts[numMols];
 
+  // Resize result vectors (reuses capacity if sufficient)
+  resizeUninit(result.atomDataPacked, totalAtoms);
+  resizeUninit(result.bondTypeCounts, totalAtoms);
+  resizeUninit(result.targetAtomBonds, totalAtoms);
+
+  // Direct parallel write - each thread writes to its molecules' positions in result
 #pragma omp parallel num_threads(numThreads)
   {
-    const int tid = omp_get_thread_num();
-    ScopedNvtxRange threadRange("Preprocess thread " + std::to_string(tid));
-    MoleculesHost& localBatch = pool.getBuffer(tid, bufferIdx);
+    ScopedNvtxRange threadRange("Preprocess direct write");
 
 #pragma omp for schedule(static)
     for (int i = 0; i < numMols; ++i) {
       const int molIdx = useSortOrder ? sortOrder[i] : i;
-      addToBatch(molecules[molIdx], localBatch);
-    }
-  }
+      const RDKit::ROMol* mol = molecules[molIdx];
+      const int atomOffset = atomStarts[i];
+      const auto* ringInfo = mol->getRingInfo();
 
-  {
-    ScopedNvtxRange mergeRange("Merge thread batches");
-    for (int t = 0; t < numThreads; ++t) {
-      mergeBatch(result, pool.getBuffer(t, bufferIdx));
+      int localAtomIdx = 0;
+      for (const RDKit::Atom* atom : mol->atoms()) {
+        const int destIdx = atomOffset + localAtomIdx;
+        
+        AtomDataPacked& packed = result.atomDataPacked[destIdx];
+        BondTypeCounts& bondCounts = result.bondTypeCounts[destIdx];
+        TargetAtomBonds& tab = result.targetAtomBonds[destIdx];
+
+        packed = AtomDataPacked{};
+        bondCounts = BondTypeCounts{};
+        tab = TargetAtomBonds{};
+
+        populateAtomScalars(atom, packed, ringInfo);
+
+        const unsigned int atomIdx = atom->getIdx();
+        int ringBondCount = 0;
+        int numHeteroNeighbors = 0;
+        int totalBonds = 0;
+        tab.degree = 0;
+
+        auto [beg, bondEnd] = mol->getAtomBonds(atom);
+        while (beg != bondEnd) {
+          const auto* bond = (*mol)[*beg];
+          const unsigned int bondIdx = bond->getIdx();
+          const int bondType = bond->getBondType();
+          const int otherAtomId = bond->getOtherAtomIdx(atomIdx);
+          const bool isInRing = ringInfo->numBondRings(bondIdx) > 0;
+
+          incrementBondTypeCount(bondCounts, bondType);
+          ringBondCount += isInRing;
+
+          const int neighborAtomicNum = mol->getAtomWithIdx(otherAtomId)->getAtomicNum();
+          numHeteroNeighbors += (neighborAtomicNum != 6 && neighborAtomicNum != 1);
+
+          if (tab.degree < kMaxBondsPerAtom) {
+            tab.neighborIdx[tab.degree] = static_cast<uint8_t>(otherAtomId);
+            tab.bondInfo[tab.degree] = packTargetBondInfo(bondType, isInRing);
+            ++tab.degree;
+          }
+          ++totalBonds;
+          ++beg;
+        }
+
+        if (totalBonds > kMaxBondsPerAtom) {
+          throw std::runtime_error("Atom has more than " + std::to_string(kMaxBondsPerAtom) + " bonds");
+        }
+        if (ringBondCount > AtomDataPacked::kMax4BitValue) {
+          throw std::runtime_error("Ring bond count exceeds maximum");
+        }
+        if (numHeteroNeighbors > AtomDataPacked::kMax4BitValue) {
+          throw std::runtime_error("Heteroatom neighbor count exceeds maximum");
+        }
+
+        packed.setRingBondCount(ringBondCount);
+        packed.setNumHeteroatomNeighbors(numHeteroNeighbors);
+
+        ++localAtomIdx;
+      }
     }
   }
 }
@@ -2391,29 +2495,27 @@ bool requiresRDKitFallback(const RDKit::ROMol* mol) {
       return true;
     }
 
-    int ringBondCount = 0;
+    if (atom->getNumImplicitHs() > AtomDataPacked::kMax4BitValue) {
+      return true;
+    }
+
+    int ringBondCount      = 0;
+    int numHeteroNeighbors = 0;
     auto [beg, bondEnd] = mol->getAtomBonds(atom);
     while (beg != bondEnd) {
       const auto* bond = (*mol)[*beg];
       if (ringInfo->numBondRings(bond->getIdx()) > 0) {
         ++ringBondCount;
       }
+      const int otherAtomIdx      = bond->getOtherAtomIdx(idx);
+      const int neighborAtomicNum = mol->getAtomWithIdx(otherAtomIdx)->getAtomicNum();
+      if (neighborAtomicNum != 6 && neighborAtomicNum != 1) {
+        ++numHeteroNeighbors;
+      }
       ++beg;
     }
     if (ringBondCount > AtomDataPacked::kMax4BitValue) {
       return true;
-    }
-
-    if (atom->getNumImplicitHs() > AtomDataPacked::kMax4BitValue) {
-      return true;
-    }
-
-    int numHeteroNeighbors = 0;
-    for (const auto* neighbor : mol->atomNeighbors(atom)) {
-      const int neighborAtomicNum = neighbor->getAtomicNum();
-      if (neighborAtomicNum != 6 && neighborAtomicNum != 1) {
-        ++numHeteroNeighbors;
-      }
     }
     if (numHeteroNeighbors > AtomDataPacked::kMax4BitValue) {
       return true;
