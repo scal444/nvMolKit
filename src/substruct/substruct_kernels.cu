@@ -27,8 +27,6 @@ namespace nvMolKit {
 
 namespace {
 
-using LabelMatrixStorage = FlatBitVect<kLabelMatrixBits>;
-
 // =============================================================================
 // Internal View Struct (passed to kernels by value)
 // =============================================================================
@@ -79,8 +77,6 @@ using SubstructMatchResultsDeviceView = SubstructMatchResultsDeviceViewT<kMaxQue
 // =============================================================================
 // Architecture-Specific Shared Memory Configuration
 // =============================================================================
-
-using LabelMatrixView = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
 
 /// Shared memory per SM in KiB for each compute capability
 __host__ __device__ constexpr int getSharedMemPerSM_KiB(int sm) {
@@ -140,7 +136,6 @@ static_assert(getMaxThreadsPerSM(__CUDA_ARCH__ / 10) % kDefaultBlockSize == 0,
 constexpr int kMaxPartialsPerBlock = getMaxPartialsForSM<kMaxTargetAtoms, kMaxQueryAtoms>(86, kDefaultBlockSize);
 #endif
 
-constexpr int kMaxPartialsPerBlockHost = getMaxPartialsForSM<kMaxTargetAtoms, kMaxQueryAtoms>(86, kDefaultBlockSize);
 static_assert(getMaxThreadsPerSM(86) % kDefaultBlockSize == 0,
               "block size must evenly divide max threads/SM");
 constexpr int kWarpsPerBlock = kDefaultBlockSize / 32;

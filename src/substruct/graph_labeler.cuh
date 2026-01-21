@@ -32,36 +32,6 @@ namespace nvMolKit {
 // =============================================================================
 
 /**
- * @brief Branchless atom matching using packed data and precomputed masks.
- *
- * Uses bitwise mask-and-compare to check all atom properties in just 4 instructions
- * (2 AND, 2 CMP). All threads in a warp execute identical instructions regardless
- * of which fields are being compared, eliminating warp divergence.
- *
- * @param target Packed target atom data
- * @param queryMask Precomputed query mask with expected values
- * @return true if target matches all specified query fields
- */
-__device__ __forceinline__ bool atomMatchesOptimized(const AtomDataPacked& target, const AtomQueryMask& queryMask) {
-  return atomMatchesPacked(target, queryMask);
-}
-
-/**
- * @brief Check if target atom has sufficient bonds using precomputed counts.
- *
- * Uses precomputed bond type counts to avoid runtime bond traversal.
- * Uniform comparison across all bond types eliminates divergent loops.
- *
- * @param targetCounts Precomputed bond type counts for target atom
- * @param queryCounts Precomputed bond type counts for query atom
- * @return true if target has >= bonds of each type compared to query
- */
-__device__ __forceinline__ bool bondCountsMatchOptimized(const BondTypeCounts& targetCounts,
-                                                         const BondTypeCounts& queryCounts) {
-  return bondCountsMatchPacked(targetCounts, queryCounts);
-}
-
-/**
  * @brief Combined optimized match check for a (target, query) atom pair.
  *
  * Checks both atom properties and bond counts using precomputed data.
@@ -82,7 +52,7 @@ __device__ __forceinline__ bool atomPairMatchesOptimized(const MoleculeView& tar
   const BondTypeCounts& targetBonds  = target.getBondTypeCounts(targetAtomIdx);
   const BondTypeCounts& queryBonds   = query.getBondTypeCounts(queryAtomIdx);
 
-  return atomMatchesOptimized(targetPacked, queryMask) && bondCountsMatchOptimized(targetBonds, queryBonds);
+  return atomMatchesPacked(targetPacked, queryMask) && bondCountsMatchPacked(targetBonds, queryBonds);
 }
 
 /**
@@ -146,8 +116,7 @@ __device__ void populateLabelMatrixWarpParallel(const MoleculeView&             
                                                 const MoleculeView&                             query,
                                                 BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>& labelMatrix,
                                                 AtomDataPacked*                                 sharedQueryPacked,
-                                                AtomQueryMask*                                  sharedQueryMasks,
-                                                BondTypeCounts*                                 sharedQueryBondCounts) {
+                                                AtomQueryMask*                                  sharedQueryMasks) {
   namespace cg = cooperative_groups;
 
   // Get thread block and warp information
@@ -259,14 +228,12 @@ __device__ void populateLabelMatrixOptimized(const MoleculeView&                
     // Use fast path for simple AND-only queries
     __shared__ AtomDataPacked sharedQueryPacked[MaxQueryAtoms];
     __shared__ AtomQueryMask  sharedQueryMasks[MaxQueryAtoms];
-    __shared__ BondTypeCounts sharedQueryBondCounts[MaxQueryAtoms];
 
     populateLabelMatrixWarpParallel<MaxTargetAtoms, MaxQueryAtoms>(target,
                                                                    query,
                                                                    labelMatrix,
                                                                    sharedQueryPacked,
-                                                                   sharedQueryMasks,
-                                                                   sharedQueryBondCounts);
+                                                                   sharedQueryMasks);
   }
 }
 

@@ -318,85 +318,6 @@ void populateQueryBondTypeCounts(const RDKit::ROMol* mol, const RDKit::Atom* ato
   }
 }
 
-void populateFromQuery(const RDKit::Atom::QUERYATOM_QUERY* query, AtomData& atomData);
-
-void handleQueryChildren(const RDKit::Atom::QUERYATOM_QUERY* query, AtomData& atomData) {
-  for (auto it = query->beginChildren(); it != query->endChildren(); ++it) {
-    populateFromQuery((*it).get(), atomData);
-  }
-}
-
-void populateFromQuery(const RDKit::Atom::QUERYATOM_QUERY* query, AtomData& atomData) {
-  const std::string desc = query->getDescription();
-
-  // Composite queries - recurse into children
-  if (desc == "AtomAnd") {
-    handleQueryChildren(query, atomData);
-    return;
-  }
-
-  // AtomType is used for organic subset atoms (C, N, O, etc.) in SMARTS
-  // It encodes both atomic number and aromaticity:
-  // - Aliphatic: value = atomic number (e.g., C=6, O=8)
-  // - Aromatic: value = 1000 + atomic number (e.g., c=1006)
-  if (desc == "AtomType") {
-    const auto* eqQuery = static_cast<const RDKit::ATOM_EQUALS_QUERY*>(query);
-    int         typeVal = eqQuery->getVal();
-    if (typeVal >= 1000) {
-      atomData.atomicNum  = typeVal - 1000;
-      atomData.isAromatic = true;
-    } else {
-      atomData.atomicNum  = typeVal;
-      atomData.isAromatic = false;
-    }
-    return;
-  }
-
-  // Boolean queries (no value to extract)
-  if (desc == "AtomIsAromatic") {
-    atomData.isAromatic = true;
-    return;
-  }
-  if (desc == "AtomIsAliphatic") {
-    atomData.isAromatic = false;
-    return;
-  }
-
-  // For ATOM_EQUALS_QUERY types, extract the comparison value
-  const auto* eqQuery = static_cast<const RDKit::ATOM_EQUALS_QUERY*>(query);
-
-  if (desc == "AtomAtomicNum") {
-    atomData.atomicNum = eqQuery->getVal();
-  } else if (desc == "AtomHCount") {
-    atomData.numExplicitHs = eqQuery->getVal();
-  } else if (desc == "AtomFormalCharge") {
-    atomData.formalCharge = eqQuery->getVal();
-  } else if (desc == "AtomHybridization") {
-    atomData.hybridization = eqQuery->getVal();
-  } else if (desc == "AtomInNRings") {
-    atomData.numRings = eqQuery->getVal();
-  } else if (desc == "AtomMinRingSize") {
-    atomData.minRingSize = eqQuery->getVal();
-  } else if (desc == "AtomNumRadicalElectrons") {
-    atomData.numRadicalElectrons = eqQuery->getVal();
-  } else if (desc == "AtomTotalValence") {
-    atomData.totalValence = eqQuery->getVal();
-  }
-}
-
-void populateQueryAtomData(const RDKit::Atom* atom, AtomData& atomData) {
-  if (!atom->hasQuery()) {
-    return;
-  }
-
-  const auto* query = atom->getQuery();
-  if (query == nullptr) {
-    return;
-  }
-
-  populateFromQuery(query, atomData);
-}
-
 }  // namespace
 
 MoleculesHost::MoleculesHost() {
@@ -1325,81 +1246,13 @@ void buildQueryTreeForAtom(const RDKit::Atom*      atom,
   processQueryTree(query, builder, bondCounts, nextPatternId, childPatternIds);
 }
 
-AtomQuery getQueryFlagsFromQuery(const RDKit::Atom::QUERYATOM_QUERY* query) {
-  const std::string description = query->getDescription();
-
-  // Check for negation first - applies to any query type
-  if (query->getNegation()) {
-    throw std::runtime_error("Negated atom queries (!) are not supported");
-  }
-
-  // Composite query - recurse into children
-  if (description == "AtomAnd") {
-    AtomQuery result = AtomQueryNone;
-    for (auto it = query->beginChildren(); it != query->endChildren(); ++it) {
-      result |= getQueryFlagsFromQuery((*it).get());
-    }
-    return result;
-  }
-
-  // AtomType encodes atomic number + aromaticity in the value
-  // Aliphatic: value = atomic number; Aromatic: value = 1000 + atomic number
-  if (description == "AtomType") {
-    const auto* eqQuery = static_cast<const RDKit::ATOM_EQUALS_QUERY*>(query);
-    int         typeVal = eqQuery->getVal();
-    if (typeVal >= 1000) {
-      return AtomQueryAtomicNum | AtomQueryIsAromatic;
-    }
-    return AtomQueryAtomicNum | AtomQueryIsAliphatic;
-  }
-
-  if (description == "AtomOr" || description == "AtomXor") {
-    throw std::runtime_error("Composite queries (OR/XOR) are not supported: " + description);
-  }
-
-  if (description == "RecursiveStructure") {
-    throw std::runtime_error("Recursive SMARTS ($(...)) are not supported");
-  }
-
-  // [R] creates AtomInNRings with value -1 meaning "any ring" (numRings != 0)
-  // Now supported via AtomQueryIsInRing
-  if (description == "AtomInNRings") {
-    const auto* eqQuery = static_cast<const RDKit::ATOM_EQUALS_QUERY*>(query);
-    if (eqQuery->getVal() < 0) {
-      return AtomQueryIsInRing;
-    }
-  }
-
-  return atomQueryFromDescription(description);
-}
-
-AtomQuery getAtomQueryType(const RDKit::Atom* atom) {
-  // Check for chirality specified on the atom (SMARTS @/@@ notation)
-  if (atom->getChiralTag() != RDKit::Atom::ChiralType::CHI_UNSPECIFIED) {
-    throw std::runtime_error("SMARTS chirality query (@/@@) is not supported");
-  }
-
-  if (!atom->hasQuery()) {
-    return AtomQueryNone;
-  }
-
-  const auto* query = atom->getQuery();
-  if (query == nullptr) {
-    return AtomQueryNone;
-  }
-
-  return getQueryFlagsFromQuery(query);
-}
-
 }  // namespace
-
-constexpr unsigned int kMaxMoleculeAtoms = 128;
 
 void addToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   ScopedNvtxRange range("addToBatch");
-  if (mol->getNumAtoms() > kMaxMoleculeAtoms) {
+  if (mol->getNumAtoms() > kMaxTargetAtoms) {
     throw std::runtime_error("Target molecule has " + std::to_string(mol->getNumAtoms()) +
-                             " atoms, which exceeds the maximum of " + std::to_string(kMaxMoleculeAtoms));
+                             " atoms, which exceeds the maximum of " + std::to_string(kMaxTargetAtoms));
   }
 
   const auto* ringInfo = mol->getRingInfo();
@@ -1712,9 +1565,9 @@ void populateQueryAtomBonds(const RDKit::ROMol* mol, MoleculesHost& batch) {
 
 void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
   ScopedNvtxRange range("addQueryToBatch");
-  if (mol->getNumAtoms() > kMaxMoleculeAtoms) {
+  if (mol->getNumAtoms() > kMaxTargetAtoms) {
     throw std::runtime_error("Query molecule has " + std::to_string(mol->getNumAtoms()) +
-                             " atoms, which exceeds the maximum of " + std::to_string(kMaxMoleculeAtoms));
+                             " atoms, which exceeds the maximum of " + std::to_string(kMaxTargetAtoms));
   }
 
   std::vector<int> fragMapping;
@@ -1796,9 +1649,9 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch) {
 
 void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch,
                      const std::vector<int>& childPatternIds) {
-  if (mol->getNumAtoms() > kMaxMoleculeAtoms) {
+  if (mol->getNumAtoms() > kMaxTargetAtoms) {
     throw std::runtime_error("Query molecule has " + std::to_string(mol->getNumAtoms()) +
-                             " atoms, which exceeds the maximum of " + std::to_string(kMaxMoleculeAtoms));
+                             " atoms, which exceeds the maximum of " + std::to_string(kMaxTargetAtoms));
   }
 
   std::vector<int> fragMapping;

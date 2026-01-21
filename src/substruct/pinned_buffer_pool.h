@@ -86,60 +86,9 @@ struct ConsolidatedPinnedBuffer {
   ConsolidatedPinnedBuffer(const ConsolidatedPinnedBuffer&)            = delete;
   ConsolidatedPinnedBuffer& operator=(const ConsolidatedPinnedBuffer&) = delete;
 
-  ConsolidatedPinnedBuffer(ConsolidatedPinnedBuffer&& other) noexcept
-      : basePtr(other.basePtr),
-        totalSize(other.totalSize),
-        pairIndices(other.pairIndices),
-        miniBatchPairMatchStarts(other.miniBatchPairMatchStarts),
-        matchCounts(other.matchCounts),
-        reportedCounts(other.reportedCounts),
-        matchIndices(other.matchIndices),
-        matchGlobalPairIndicesHost(other.matchGlobalPairIndicesHost),
-        matchBatchLocalIndicesHost(other.matchBatchLocalIndicesHost),
-        patternsAtDepthHost(other.patternsAtDepthHost),
-        pairIndicesCapacity(other.pairIndicesCapacity),
-        matchIndicesCapacity(other.matchIndicesCapacity),
-        perDepthCapacity(other.perDepthCapacity),
-        patternsCapacity(other.patternsCapacity),
-        ownsMemory_(other.ownsMemory_) {
-    other.basePtr   = nullptr;
-    other.totalSize = 0;
-    other.ownsMemory_ = true;
-  }
-
-  ConsolidatedPinnedBuffer& operator=(ConsolidatedPinnedBuffer&& other) noexcept {
-    if (this != &other) {
-      if (basePtr != nullptr && ownsMemory_) {
-        cudaFreeHost(basePtr);
-      }
-      basePtr                    = other.basePtr;
-      totalSize                  = other.totalSize;
-      ownsMemory_                = other.ownsMemory_;
-      pairIndices                = other.pairIndices;
-      miniBatchPairMatchStarts   = other.miniBatchPairMatchStarts;
-      matchCounts                = other.matchCounts;
-      reportedCounts             = other.reportedCounts;
-      matchIndices               = other.matchIndices;
-      matchGlobalPairIndicesHost = other.matchGlobalPairIndicesHost;
-      matchBatchLocalIndicesHost = other.matchBatchLocalIndicesHost;
-      patternsAtDepthHost        = other.patternsAtDepthHost;
-      pairIndicesCapacity        = other.pairIndicesCapacity;
-      matchIndicesCapacity       = other.matchIndicesCapacity;
-      perDepthCapacity           = other.perDepthCapacity;
-      patternsCapacity           = other.patternsCapacity;
-
-      other.basePtr   = nullptr;
-      other.totalSize = 0;
-      other.ownsMemory_ = true;
-    }
-    return *this;
-  }
-
-  ~ConsolidatedPinnedBuffer() {
-    if (basePtr != nullptr && ownsMemory_) {
-      cudaFreeHost(basePtr);
-    }
-  }
+  ConsolidatedPinnedBuffer(ConsolidatedPinnedBuffer&& other) noexcept;
+  ConsolidatedPinnedBuffer& operator=(ConsolidatedPinnedBuffer&& other) noexcept;
+  ~ConsolidatedPinnedBuffer();
 
   /**
    * @brief Compute the size needed for one consolidated buffer.

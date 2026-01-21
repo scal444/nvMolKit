@@ -129,7 +129,7 @@ TEST(BoolInstructionTest, MakeLeafSetsCorrectFields) {
 
   EXPECT_EQ(instr.op, BoolOp::Leaf);
   EXPECT_EQ(instr.dst, 3);
-  EXPECT_EQ(instr.leafMaskIdx, 5);
+  EXPECT_EQ(instr.auxArg, 5);
 }
 
 TEST(BoolInstructionTest, MakeAndSetsCorrectFields) {
@@ -885,7 +885,7 @@ TEST(BoolInstructionTest, MakeRecursiveMatchSetsCorrectFields) {
 
   EXPECT_EQ(instr.op, BoolOp::RecursiveMatch);
   EXPECT_EQ(instr.dst, 5);
-  EXPECT_EQ(instr.leafMaskIdx, 3);  // pattern ID stored here
+  EXPECT_EQ(instr.auxArg, 3);  // pattern ID stored here
 }
 
 // =============================================================================

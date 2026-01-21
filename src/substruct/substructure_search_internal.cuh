@@ -180,7 +180,9 @@ struct RecursiveScratchBuffers {
   ~RecursiveScratchBuffers() {
     for (int i = 0; i < 2; ++i) {
       if (ownsBuffer_[i] && patternsAtDepthHost[i] != nullptr) {
-        cudaFreeHost(patternsAtDepthHost[i]);
+        auto* buffer = patternsAtDepthHost[i];
+        patternsAtDepthHost[i] = nullptr;
+        AsyncResourceCleaner::instance().scheduleCleanup([buffer]() { cudaFreeHost(buffer); });
       }
     }
   }

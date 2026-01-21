@@ -32,9 +32,6 @@ struct DeviceTimingsData;
 // Shared Memory Configuration Constants (host-side)
 // =============================================================================
 
-/// Max queue size for GSI algorithm (host-side value, used for allocation)
-constexpr int kMaxQueueSize = 180;  // Based on SM 8.6 configuration
-
 // =============================================================================
 // Kernel Launch Wrappers
 // =============================================================================

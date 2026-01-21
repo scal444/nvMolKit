@@ -18,7 +18,6 @@
 
 #include <array>
 #include <cstdint>
-#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -67,28 +66,6 @@ enum AtomQueryFlags : uint32_t {
 };
 
 using AtomQuery = uint32_t;
-
-struct AtomData {
-  static constexpr uint8_t unsetValenceVal = std::numeric_limits<uint8_t>::max();
-
-  uint8_t atomicNum           = 0;
-  uint8_t numExplicitHs       = 0;
-  uint8_t explicitValence     = unsetValenceVal;
-  uint8_t implicitValence     = unsetValenceVal;
-  int8_t  formalCharge        = 0;
-  uint8_t chiralTag           = 0;
-  uint8_t numRadicalElectrons = 0;
-  uint8_t hybridization       = 0;
-  uint8_t minRingSize         = 0;
-  uint8_t numRings            = 0;
-  uint8_t totalValence        = 0;
-  bool    isAromatic          = false;
-};
-
-struct BondData {
-  uint8_t bondType  = 0;
-  uint8_t isInRing  = 0;  ///< 1 if bond is in a ring, 0 otherwise
-};
 
 /**
  * @brief Bond query data for SMARTS bond queries.

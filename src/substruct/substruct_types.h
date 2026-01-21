@@ -20,22 +20,9 @@
 #include <unordered_map>
 #include <vector>
 
+#include "substruct_launch_config.h"
+
 namespace nvMolKit {
-
-constexpr int kThreadsPerBlock = 128;
-
-/// Block size varies by MaxTargetAtoms to fit shared memory budget
-template <std::size_t MaxTargetAtoms>
-#ifdef __CUDACC__
-__host__ __device__
-#endif
-constexpr int getBlockSizeForConfig() {
-  if constexpr (MaxTargetAtoms >= 128) {
-    return 256;
-  } else {
-    return 128;
-  }
-}
 
 /**
  * @brief Algorithm choice for substructure matching.
@@ -154,21 +141,6 @@ struct HasSubstructMatchResults {
   }
 };
 
-/// Maximum scratch space for boolean expression evaluation per query atom.
-/// Complex SMARTS patterns with many OR branches can require significant scratch space.
-/// E.g., [C,N,O,S,F,Cl,Br,I,...] with N alternatives needs 2N-1 slots (N leaves + N-1 ORs).
-/// 256 supports up to ~128 OR alternatives per atom.
-constexpr int kMaxBoolScratchSize = 256;
-
-constexpr std::size_t kMaxTargetAtoms = 128;
-constexpr std::size_t kMaxQueryAtoms  = 64;
-
-/// Total bits in a label matrix (target × query)
-constexpr std::size_t kLabelMatrixBits = kMaxTargetAtoms * kMaxQueryAtoms;
-
-/// Number of 32-bit words per label matrix
-constexpr std::size_t kLabelMatrixWords = kLabelMatrixBits / 32;
-
 // =============================================================================
 // Partial Match Structure (for GSI algorithm queue)
 // =============================================================================
@@ -244,8 +216,6 @@ enum class SubstructTemplateConfig : uint8_t {
   NumConfigs  ///< Total number of configurations (24)
 };
 
-constexpr int kNumTemplateConfigs = static_cast<int>(SubstructTemplateConfig::NumConfigs);
-
 /**
  * @brief Compile-time properties for a template configuration.
  */
@@ -256,135 +226,6 @@ struct TemplateConfigProperties {
   std::size_t labelMatrixBits;
   std::size_t labelMatrixWords;
 };
-
-/**
- * @brief Get properties for a template configuration at compile time.
- */
-constexpr TemplateConfigProperties getTemplateConfigProperties(SubstructTemplateConfig config) {
-  switch (config) {
-    case SubstructTemplateConfig::Config_T32_Q16_B4:  return {32, 16, 4, 32*16, 32*16/32};
-    case SubstructTemplateConfig::Config_T32_Q16_B6:  return {32, 16, 6, 32*16, 32*16/32};
-    case SubstructTemplateConfig::Config_T32_Q16_B8:  return {32, 16, 8, 32*16, 32*16/32};
-    case SubstructTemplateConfig::Config_T32_Q32_B4:  return {32, 32, 4, 32*32, 32*32/32};
-    case SubstructTemplateConfig::Config_T32_Q32_B6:  return {32, 32, 6, 32*32, 32*32/32};
-    case SubstructTemplateConfig::Config_T32_Q32_B8:  return {32, 32, 8, 32*32, 32*32/32};
-    case SubstructTemplateConfig::Config_T64_Q16_B4:  return {64, 16, 4, 64*16, 64*16/32};
-    case SubstructTemplateConfig::Config_T64_Q16_B6:  return {64, 16, 6, 64*16, 64*16/32};
-    case SubstructTemplateConfig::Config_T64_Q16_B8:  return {64, 16, 8, 64*16, 64*16/32};
-    case SubstructTemplateConfig::Config_T64_Q32_B4:  return {64, 32, 4, 64*32, 64*32/32};
-    case SubstructTemplateConfig::Config_T64_Q32_B6:  return {64, 32, 6, 64*32, 64*32/32};
-    case SubstructTemplateConfig::Config_T64_Q32_B8:  return {64, 32, 8, 64*32, 64*32/32};
-    case SubstructTemplateConfig::Config_T64_Q64_B4:  return {64, 64, 4, 64*64, 64*64/32};
-    case SubstructTemplateConfig::Config_T64_Q64_B6:  return {64, 64, 6, 64*64, 64*64/32};
-    case SubstructTemplateConfig::Config_T64_Q64_B8:  return {64, 64, 8, 64*64, 64*64/32};
-    case SubstructTemplateConfig::Config_T128_Q16_B4: return {128, 16, 4, 128*16, 128*16/32};
-    case SubstructTemplateConfig::Config_T128_Q16_B6: return {128, 16, 6, 128*16, 128*16/32};
-    case SubstructTemplateConfig::Config_T128_Q16_B8: return {128, 16, 8, 128*16, 128*16/32};
-    case SubstructTemplateConfig::Config_T128_Q32_B4: return {128, 32, 4, 128*32, 128*32/32};
-    case SubstructTemplateConfig::Config_T128_Q32_B6: return {128, 32, 6, 128*32, 128*32/32};
-    case SubstructTemplateConfig::Config_T128_Q32_B8: return {128, 32, 8, 128*32, 128*32/32};
-    case SubstructTemplateConfig::Config_T128_Q64_B4: return {128, 64, 4, 128*64, 128*64/32};
-    case SubstructTemplateConfig::Config_T128_Q64_B6: return {128, 64, 6, 128*64, 128*64/32};
-    case SubstructTemplateConfig::Config_T128_Q64_B8: return {128, 64, 8, 128*64, 128*64/32};
-    default: return {128, 64, 8, 128*64, 128*64/32};  // fallback to max
-  }
-}
-
-/**
- * @brief Compute label matrix words for a given (targets, queries) pair.
- */
-constexpr std::size_t computeLabelMatrixWords(int maxTargetAtoms, int maxQueryAtoms) {
-  return static_cast<std::size_t>(maxTargetAtoms) * maxQueryAtoms / 32;
-}
-
-/**
- * @brief Select the smallest template configuration that fits the given sizes.
- *
- * Finds the configuration with the smallest resource requirements (label matrix size,
- * partial match size) that can handle molecules with the specified maximums.
- *
- * @param maxTargetAtoms Maximum target atoms in the batch (1-128)
- * @param maxQueryAtoms Maximum query atoms in the batch (1-64)
- * @param maxBondsPerAtom Maximum bonds per atom in the batch (1-8)
- * @return The smallest fitting template configuration
- */
-inline SubstructTemplateConfig selectTemplateConfig(int maxTargetAtoms, int maxQueryAtoms, int maxBondsPerAtom) {
-  // Clamp maxBondsPerAtom to valid template values: 4, 6, or 8
-  int bondConfig;
-  if (maxBondsPerAtom <= 4) {
-    bondConfig = 4;
-  } else if (maxBondsPerAtom <= 6) {
-    bondConfig = 6;
-  } else {
-    bondConfig = 8;
-  }
-
-  // Select target size tier
-  int targetTier;
-  if (maxTargetAtoms <= 32) {
-    targetTier = 32;
-  } else if (maxTargetAtoms <= 64) {
-    targetTier = 64;
-  } else {
-    targetTier = 128;
-  }
-
-  // Select query size tier (must be <= target tier)
-  int queryTier;
-  if (maxQueryAtoms <= 16) {
-    queryTier = 16;
-  } else if (maxQueryAtoms <= 32) {
-    queryTier = 32;
-  } else {
-    queryTier = 64;
-  }
-
-  // Ensure query <= target
-  if (queryTier > targetTier) {
-    queryTier = targetTier;
-  }
-
-  // Map to config enum
-  if (targetTier == 32) {
-    if (queryTier == 16) {
-      if (bondConfig == 4) return SubstructTemplateConfig::Config_T32_Q16_B4;
-      if (bondConfig == 6) return SubstructTemplateConfig::Config_T32_Q16_B6;
-      return SubstructTemplateConfig::Config_T32_Q16_B8;
-    } else {  // queryTier == 32
-      if (bondConfig == 4) return SubstructTemplateConfig::Config_T32_Q32_B4;
-      if (bondConfig == 6) return SubstructTemplateConfig::Config_T32_Q32_B6;
-      return SubstructTemplateConfig::Config_T32_Q32_B8;
-    }
-  } else if (targetTier == 64) {
-    if (queryTier == 16) {
-      if (bondConfig == 4) return SubstructTemplateConfig::Config_T64_Q16_B4;
-      if (bondConfig == 6) return SubstructTemplateConfig::Config_T64_Q16_B6;
-      return SubstructTemplateConfig::Config_T64_Q16_B8;
-    } else if (queryTier == 32) {
-      if (bondConfig == 4) return SubstructTemplateConfig::Config_T64_Q32_B4;
-      if (bondConfig == 6) return SubstructTemplateConfig::Config_T64_Q32_B6;
-      return SubstructTemplateConfig::Config_T64_Q32_B8;
-    } else {  // queryTier == 64
-      if (bondConfig == 4) return SubstructTemplateConfig::Config_T64_Q64_B4;
-      if (bondConfig == 6) return SubstructTemplateConfig::Config_T64_Q64_B6;
-      return SubstructTemplateConfig::Config_T64_Q64_B8;
-    }
-  } else {  // targetTier == 128
-    if (queryTier == 16) {
-      if (bondConfig == 4) return SubstructTemplateConfig::Config_T128_Q16_B4;
-      if (bondConfig == 6) return SubstructTemplateConfig::Config_T128_Q16_B6;
-      return SubstructTemplateConfig::Config_T128_Q16_B8;
-    } else if (queryTier == 32) {
-      if (bondConfig == 4) return SubstructTemplateConfig::Config_T128_Q32_B4;
-      if (bondConfig == 6) return SubstructTemplateConfig::Config_T128_Q32_B6;
-      return SubstructTemplateConfig::Config_T128_Q32_B8;
-    } else {  // queryTier == 64
-      if (bondConfig == 4) return SubstructTemplateConfig::Config_T128_Q64_B4;
-      if (bondConfig == 6) return SubstructTemplateConfig::Config_T128_Q64_B6;
-      return SubstructTemplateConfig::Config_T128_Q64_B8;
-    }
-  }
-}
 
 /**
  * @brief Entry representing a (target, query) pair that needs RDKit fallback processing.

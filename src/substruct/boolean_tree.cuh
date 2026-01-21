@@ -80,31 +80,25 @@ HD_CALLABLE uint8_t getAtomField(const AtomDataPacked& atom, CompareField field)
 /**
  * @brief A single instruction in the boolean expression evaluation sequence.
  *
- * Instructions are executed in post-order to evaluate compound SMARTS queries.
- * For simple AND-only queries, a single Leaf instruction suffices.
- *
- * Layout:
- * - Leaf:           scratch[dst] = atomMatchesPacked(target, leafMasks[leafMaskIdx])
- * - And:            scratch[dst] = scratch[src1] & scratch[src2]
- * - Or:             scratch[dst] = scratch[src1] | scratch[src2]
- * - Not:            scratch[dst] = !scratch[src1]
- * - RecursiveMatch: scratch[dst] = (recursiveMatchBits >> patternId) & 1
- *                   where patternId is stored in leafMaskIdx field
- * - GreaterThan:    scratch[dst] = getField(target, fieldId) > value
- *                   where fieldId=src1, value=src2
- * - LessEqual:      scratch[dst] = getField(target, fieldId) <= value
- *                   where fieldId=src1, value=src2
- * - GreaterEqual:   scratch[dst] = getField(target, fieldId) >= value
- *                   where fieldId=src1, value=src2
- * - Range:          scratch[dst] = minVal <= getField(target, fieldId) <= maxVal
- *                   where fieldId=src1, minVal=src2, maxVal=leafMaskIdx
+ * Instructions are executed in post-order and write a boolean result into the
+ * scratch array at index @c dst. Operand mapping by op:
+ * - Leaf: @c scratch[dst] = atomMatchesPacked(target, leafMasks[auxArg])
+ * - And/Or: @c scratch[dst] = scratch[src1] &/| scratch[src2]
+ * - Not: @c scratch[dst] = !scratch[src1]
+ * - RecursiveMatch: @c scratch[dst] = (recursiveMatchBits >> auxArg) & 1
+ * - GreaterThan/LessEqual/GreaterEqual:
+ *   @c field = static_cast<CompareField>(src1), @c rhs = src2, compare
+ *   @c getAtomField(target, field) against @c rhs
+ * - Range:
+ *   @c field = static_cast<CompareField>(src1), @c min = src2, @c max = auxArg,
+ *   @c scratch[dst] = (min <= getAtomField(target, field) && getAtomField(target, field) <= max)
  */
 struct BoolInstruction {
   BoolOp  op;           ///< Operation type
   uint8_t dst;          ///< Destination index in scratch array
   uint8_t src1;         ///< Left operand index, or fieldId for comparisons
   uint8_t src2;         ///< Right operand index, or value/minVal for comparisons
-  uint8_t leafMaskIdx;  ///< Leaf mask index, patternId, or maxVal for Range
+  uint8_t auxArg;  ///< Aux operand: leaf mask index (Leaf), pattern id (RecursiveMatch), max (Range)
 
   HD_CALLABLE static BoolInstruction makeLeaf(uint8_t dst, uint8_t maskIdx) {
     return BoolInstruction{BoolOp::Leaf, dst, 0, 0, maskIdx};
@@ -202,10 +196,10 @@ HD_CALLABLE bool evaluateBoolTree(const AtomDataPacked*   targetPacked,
 
     switch (instr.op) {
       case BoolOp::Leaf: {
-        const bool atomMatch = atomMatchesPacked(*targetPacked, leafMasks[instr.leafMaskIdx]);
+        const bool atomMatch = atomMatchesPacked(*targetPacked, leafMasks[instr.auxArg]);
         bool match = atomMatch;
         if constexpr (checkBonds) {
-          const bool bondMatch = bondCountsMatchPacked(*targetBonds, leafBondCounts[instr.leafMaskIdx]);
+          const bool bondMatch = bondCountsMatchPacked(*targetBonds, leafBondCounts[instr.auxArg]);
           match = atomMatch && bondMatch;
         }
         scratch[instr.dst] = match ? 1 : 0;
@@ -221,7 +215,7 @@ HD_CALLABLE bool evaluateBoolTree(const AtomDataPacked*   targetPacked,
         scratch[instr.dst] = scratch[instr.src1] ? 0 : 1;
         break;
       case BoolOp::RecursiveMatch:
-        scratch[instr.dst] = ((recursiveMatchBits >> instr.leafMaskIdx) & 1u) ? 1 : 0;
+        scratch[instr.dst] = ((recursiveMatchBits >> instr.auxArg) & 1u) ? 1 : 0;
         break;
       case BoolOp::GreaterThan: {
         const uint8_t fieldVal = getAtomField(*targetPacked, static_cast<CompareField>(instr.src1));
@@ -240,7 +234,7 @@ HD_CALLABLE bool evaluateBoolTree(const AtomDataPacked*   targetPacked,
       }
       case BoolOp::Range: {
         const uint8_t fieldVal = getAtomField(*targetPacked, static_cast<CompareField>(instr.src1));
-        scratch[instr.dst] = (fieldVal >= instr.src2 && fieldVal <= instr.leafMaskIdx) ? 1 : 0;
+        scratch[instr.dst] = (fieldVal >= instr.src2 && fieldVal <= instr.auxArg) ? 1 : 0;
         break;
       }
     }

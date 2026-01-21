@@ -1971,7 +1971,11 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
   }
   joinRange.pop();
 
-  cudaFreeHost(megaBuffer);
+  if (megaBuffer != nullptr) {
+    char* bufferToFree = megaBuffer;
+    AsyncResourceCleaner::instance().scheduleCleanup([bufferToFree]() { cudaFreeHost(bufferToFree); });
+    megaBuffer = nullptr;
+  }
 
   for (const auto& ex : exceptions) {
     if (ex) {

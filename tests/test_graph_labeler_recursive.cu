@@ -100,7 +100,7 @@ class RecursiveInstructionTest : public ::testing::Test {
       const BoolInstruction& instr = queryHost.queryInstructions[i];
       if (instr.op == BoolOp::RecursiveMatch) {
         foundRecursiveMatch = true;
-        foundPatternId      = instr.leafMaskIdx;
+        foundPatternId      = instr.auxArg;
         break;
       }
     }

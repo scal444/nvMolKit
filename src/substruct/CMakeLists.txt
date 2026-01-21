@@ -1,11 +1,7 @@
-add_library(molecule_graph_labels molecule_graph_labels.cu)
-
 add_library(packed_bonds packed_bonds.cpp)
 target_include_directories(packed_bonds PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_library(molecules molecules.cpp)
-target_include_directories(molecule_graph_labels
-                           PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(molecules PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 target_link_libraries(
@@ -26,7 +22,7 @@ target_link_libraries(substruct_kernels PUBLIC molecules device_vector
                                                 device_timings)
 target_compile_options(substruct_kernels PRIVATE -Xptxas=-v)
 
-add_library(substructure_search substructure_search.cu)
+add_library(substructure_search substructure_search.cu substruct_launch_config.cpp)
 target_include_directories(substructure_search
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(substructure_search PUBLIC molecules device_vector
@@ -34,4 +30,5 @@ target_link_libraries(substructure_search PUBLIC molecules device_vector
                                                   pinned_buffer_pool device_timings
                                                   device substruct_kernels OpenMP::OpenMP_CXX
                                           PRIVATE ${RDKit_LIBS})
-target_compile_options(substructure_search PRIVATE -Xptxas=-v $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp>)
+target_compile_options(substructure_search PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-v>
+                                                  $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp>)
