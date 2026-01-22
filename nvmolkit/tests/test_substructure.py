@@ -647,7 +647,6 @@ class TestSubstructSearchConfig:
         assert config.batchSize == 1024
         assert config.workerThreads == -1  # -1 = autoselect
         assert config.preprocessingThreads == -1  # -1 = autoselect
-        assert config.presort is True
         assert config.maxMatches == 0  # 0 = unlimited (like RDKit)
         assert config.uniquify is False
 
@@ -657,13 +656,11 @@ class TestSubstructSearchConfig:
         config.batchSize = 512
         config.workerThreads = 4
         config.preprocessingThreads = 8
-        config.presort = False
         config.maxMatches = 100
 
         assert config.batchSize == 512
         assert config.workerThreads == 4
         assert config.preprocessingThreads == 8
-        assert config.presort is False
         assert config.maxMatches == 100
 
     def test_gpu_ids_property(self):
@@ -1031,14 +1028,11 @@ class TestIntegrationConfig:
         validation = validate_against_rdkit(targets, queries, results)
         assert len(validation.count_mismatches) == 0
 
-    def test_no_presort(self, test_mols):
-        """Test with presort disabled."""
+    def test_results_exist(self, test_mols):
+        """Test basic match results exist."""
         targets, queries = test_mols
 
-        config = SubstructSearchConfig()
-        config.presort = False
-
-        results = getSubstructMatches(targets, queries, config)
+        results = getSubstructMatches(targets, queries)
 
         validation = validate_against_rdkit(targets, queries, results)
         assert len(validation.count_mismatches) == 0

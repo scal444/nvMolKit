@@ -585,13 +585,12 @@ class FallbackQueueProducerGuard {
  * Contains cached data about queries and targets that's reused across mini-batches.
  */
 struct ThreadWorkerContext {
-  PinnedHostVector<int> queryAtomCounts;
-  std::vector<int> targetAtomCounts;
-  std::vector<int> queryDepths;
-  std::vector<int> queryMaxDepths;
-  std::vector<int8_t> queryHasPatterns;
-  const std::vector<int>* targetSortOrder = nullptr;
-  const std::vector<int>* querySortOrder  = nullptr;
+  const int* queryAtomCounts = nullptr;
+  const int* queryDepths     = nullptr;
+  const int* queryMaxDepths  = nullptr;
+  const int8_t* queryHasPatterns = nullptr;
+  const std::vector<int>* targetAtomCounts = nullptr;
+  const std::vector<int>* targetOriginalIndices = nullptr;
   int numTargets     = 0;
   int numQueries     = 0;
   int maxTargetAtoms = 0;

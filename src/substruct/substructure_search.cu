@@ -50,23 +50,23 @@
 
 namespace nvMolKit {
 
+struct QueryPreprocessContext;
+
 namespace {
 
-void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuTargets,
-                                    const std::vector<int>&                gpuTargetIndices,
-                                    const std::vector<unsigned int>&       gpuTargetAtomCounts,
-                                    const MoleculesHost&                   queriesHost,
-                                    const MoleculesDevice&                 queriesDevice,
-                                    const LeafSubpatterns&                 leafSubpatterns,
-                                    SubstructSearchResults&                results,
-                                    SubstructAlgorithm                     algorithm,
-                                    cudaStream_t                           stream,
-                                    const SubstructSearchConfig&           config,
-                                    const std::vector<int>&                querySortOrder,
-                                    int                                    effectivePreprocessingThreads,
-                                    RDKitFallbackQueue*                    fallbackQueue,
-                                    HasSubstructMatchResults*              boolResults = nullptr,
-                                    std::vector<int>*                      countResults = nullptr);
+void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets,
+                                 const MoleculesHost&                   queriesHost,
+                                 const MoleculesDevice&                 queriesDevice,
+                                 const LeafSubpatterns&                 leafSubpatterns,
+                                 const QueryPreprocessContext&          queryContext,
+                                 SubstructSearchResults&                results,
+                                 SubstructAlgorithm                     algorithm,
+                                 cudaStream_t                           stream,
+                                 const SubstructSearchConfig&           config,
+                                 int                                    effectivePreprocessingThreads,
+                                 RDKitFallbackQueue*                    fallbackQueue,
+                                 HasSubstructMatchResults*              boolResults = nullptr,
+                                 std::vector<int>*                      countResults = nullptr);
 
 }  // anonymous namespace
 
@@ -263,9 +263,9 @@ void RDKitFallbackQueue::processEntry(const RDKitFallbackEntry& entry) {
 std::pair<int, int> getStreamPriorityRange();
 
 struct GpuExecutor {
-  int miniBatchStart        = 0;
-  int numPairsInMiniBatch   = 0;
-  int totalMatchIndices = 0;
+  int miniBatchPairOffset = 0;
+  int numPairsInMiniBatch = 0;
+  int totalMatchIndices   = 0;
 
   // Pointers into consolidated pinned buffer (not owned)
   int*     pairIndicesHost          = nullptr;
@@ -284,6 +284,7 @@ struct GpuExecutor {
   ScopedStream             computeStream;
   ScopedCudaEvent          copyDoneEvent;
   ScopedCudaEvent          allocDoneEvent;
+  ScopedCudaEvent          targetsReadyEvent;
 
   // Recursive pipeline (inlined from RecursivePipelineContext)
   ScopedStreamWithPriority recursiveStream;
@@ -302,6 +303,7 @@ struct GpuExecutor {
   RecursiveScratchBuffers  recursiveScratch;
   MiniBatchResultsDevice   deviceResults;
   AsyncDeviceVector<int>   pairIndicesDev;
+  MoleculesDevice          targetsDevice;
   
   int deviceId = 0;  ///< GPU device ID this executor is assigned to
 
@@ -340,6 +342,85 @@ struct GpuExecutor {
 
     recursiveScratch.setPinnedBuffer(buffer.patternsAtDepthHost, buffer.patternsCapacity);
   }
+};
+
+struct MiniBatchPlan {
+  int miniBatchPairOffset = 0;
+  int numPairsInMiniBatch = 0;
+  int totalMatchIndices   = 0;
+  int recursiveMaxDepth   = 0;
+  int firstTargetInMiniBatch = 0;
+  int numTargetsInMiniBatch  = 0;
+  int maxDepthInMiniBatch = 0;
+  std::array<std::vector<BatchedPatternEntry>, kMaxRecursionDepth + 1> patternsAtDepth;
+  std::array<int, kMaxRecursionDepth + 1> matchPairsCounts = {};
+};
+
+struct PreparedMiniBatch {
+  std::shared_ptr<MoleculesHost> targetsHost;
+  std::shared_ptr<std::vector<int>> targetOriginalIndices;
+  std::shared_ptr<std::vector<int>> targetAtomCounts;
+  ThreadWorkerContext ctx;
+  MiniBatchPlan plan;
+  ConsolidatedPinnedBuffer* pinnedBuffer = nullptr;
+};
+
+class PreparedBatchQueue {
+ public:
+  void push(std::unique_ptr<PreparedMiniBatch> batch) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (closed_) {
+        return;
+      }
+      queue_.push(std::move(batch));
+    }
+    cv_.notify_one();
+  }
+
+  std::unique_ptr<PreparedMiniBatch> pop() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [&]() { return closed_ || !queue_.empty(); });
+    if (queue_.empty()) {
+      return nullptr;
+    }
+    auto batch = std::move(queue_.front());
+    queue_.pop();
+    return batch;
+  }
+
+  std::unique_ptr<PreparedMiniBatch> tryPop() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (queue_.empty()) {
+      return nullptr;
+    }
+    auto batch = std::move(queue_.front());
+    queue_.pop();
+    return batch;
+  }
+
+  void close() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      closed_ = true;
+    }
+    cv_.notify_all();
+  }
+
+ private:
+    std::queue<std::unique_ptr<PreparedMiniBatch>> queue_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    bool closed_ = false;
+};
+
+struct QueryPreprocessContext {
+  PinnedHostVector<int> queryAtomCounts;
+  std::vector<int> queryDepths;
+  std::vector<int> queryMaxDepths;
+  std::vector<int8_t> queryHasPatterns;
+  int numQueries = 0;
+  int maxQueryAtoms = 0;
 };
 
 // =============================================================================
@@ -569,27 +650,25 @@ namespace {
  * Groups pairs by their query's recursion depth and populates the host-side
  * index vectors for the recursive stream and match stream.
  *
- * @param executor GPU executor to populate with schedule
+ * @param plan Mini-batch plan to populate with schedule
  * @param ctx Worker context with cached query depths
- * @param numPairsInMiniBatch Number of pairs in the mini-batch
- * @param miniBatchStart Global pair index where the mini-batch starts
+ * @param buffer Pinned buffer holding host-side index arrays
  */
-void precomputePipelineSchedule(GpuExecutor&               executor,
+void precomputePipelineSchedule(MiniBatchPlan&             plan,
                                 const ThreadWorkerContext& ctx,
-                                int                        numPairsInMiniBatch,
-                                int                        miniBatchStart) {
+                                ConsolidatedPinnedBuffer&  buffer) {
   ScopedNvtxRange scheduleRange("CPU: precomputePipelineSchedule");
   int maxDepth = 0;
 
-  executor.matchPairsCounts.fill(0);
+  plan.matchPairsCounts.fill(0);
 
-  int queryIdx = miniBatchStart % ctx.numQueries;
-  for (int i = 0; i < numPairsInMiniBatch; ++i) {
+  int queryIdx = plan.miniBatchPairOffset % ctx.numQueries;
+  for (int i = 0; i < plan.numPairsInMiniBatch; ++i) {
     const int depth = ctx.queryDepths[queryIdx];
-    const int offset = executor.matchPairsCounts[depth]++;
+    const int offset = plan.matchPairsCounts[depth]++;
 
-    executor.matchGlobalPairIndicesHost[depth][offset] = executor.pairIndicesHost[i];
-    executor.matchMiniBatchLocalIndicesHost[depth][offset] = i;
+    buffer.matchGlobalPairIndicesHost[depth][offset] = buffer.pairIndices[i];
+    buffer.matchBatchLocalIndicesHost[depth][offset] = i;
 
     if (depth > maxDepth) {
       maxDepth = depth;
@@ -599,24 +678,25 @@ void precomputePipelineSchedule(GpuExecutor&               executor,
       queryIdx = 0;
     }
   }
-  executor.maxDepthInMiniBatch = maxDepth;
+  plan.maxDepthInMiniBatch = maxDepth;
 }
 
-void prepareRecursiveMiniBatchOnCPU(GpuExecutor&               executor,
+void prepareRecursiveMiniBatchOnCPU(MiniBatchPlan&             plan,
                                     const ThreadWorkerContext& ctx,
-                                    const LeafSubpatterns&     leafSubpatterns) {
+                                    const LeafSubpatterns&     leafSubpatterns,
+                                    ConsolidatedPinnedBuffer&  buffer) {
   ScopedNvtxRange prepRecRange("prepareRecursiveMiniBatchOnCPU");
 
-  precomputePipelineSchedule(executor, ctx, executor.numPairsInMiniBatch, executor.miniBatchStart);
+  precomputePipelineSchedule(plan, ctx, buffer);
 
-  for (auto& vec : executor.patternsAtDepth) {
+  for (auto& vec : plan.patternsAtDepth) {
     vec.clear();
   }
 
-  const int numUniqueQueries = std::min(executor.numPairsInMiniBatch, ctx.numQueries);
+  const int numUniqueQueries = std::min(plan.numPairsInMiniBatch, ctx.numQueries);
 
   int maxDepth = 0;
-  int queryIdx = executor.miniBatchStart % ctx.numQueries;
+  int queryIdx = plan.miniBatchPairOffset % ctx.numQueries;
   for (int i = 0; i < numUniqueQueries; ++i) {
     if (ctx.queryHasPatterns[queryIdx]) {
       const int queryMaxDepth = ctx.queryMaxDepths[queryIdx];
@@ -626,7 +706,7 @@ void prepareRecursiveMiniBatchOnCPU(GpuExecutor&               executor,
 
       for (int d = 0; d <= queryMaxDepth; ++d) {
         const auto& srcEntries = leafSubpatterns.perQueryPatterns[queryIdx][d];
-        auto& destEntries = executor.patternsAtDepth[d];
+        auto& destEntries = plan.patternsAtDepth[d];
         destEntries.insert(destEntries.end(), srcEntries.begin(), srcEntries.end());
       }
     }
@@ -635,50 +715,50 @@ void prepareRecursiveMiniBatchOnCPU(GpuExecutor&               executor,
       queryIdx = 0;
     }
   }
-  executor.recursiveMaxDepth = maxDepth;
+  plan.recursiveMaxDepth = maxDepth;
 
-  executor.firstTargetInMiniBatch = executor.miniBatchStart / ctx.numQueries;
-  const int lastTargetInMiniBatch = (executor.miniBatchStart + executor.numPairsInMiniBatch - 1) / ctx.numQueries;
-  executor.numTargetsInMiniBatch = lastTargetInMiniBatch - executor.firstTargetInMiniBatch + 1;
+  plan.firstTargetInMiniBatch = plan.miniBatchPairOffset / ctx.numQueries;
+  const int lastTargetInMiniBatch = (plan.miniBatchPairOffset + plan.numPairsInMiniBatch - 1) / ctx.numQueries;
+  plan.numTargetsInMiniBatch = lastTargetInMiniBatch - plan.firstTargetInMiniBatch + 1;
 }
 
-void prepareMiniBatchOnCPU(GpuExecutor&                 executor,
+void prepareMiniBatchOnCPU(MiniBatchPlan&               plan,
+                           ConsolidatedPinnedBuffer&    buffer,
                            const ThreadWorkerContext&   ctx,
-                           const MoleculesHost&         queriesHost,
                            const LeafSubpatterns&       leafSubpatterns,
-                           int                          miniBatchStart,
+                           int                          miniBatchPairOffset,
                            int                          maxPairsInMiniBatch) {
   ScopedNvtxRange prepRange("prepareMiniBatchOnCPU");
 
   const int numPairs = ctx.numTargets * ctx.numQueries;
-  const int miniBatchEnd = std::min(miniBatchStart + maxPairsInMiniBatch, numPairs);
-  const int numPairsInMiniBatch = miniBatchEnd - miniBatchStart;
+  const int miniBatchEnd = std::min(miniBatchPairOffset + maxPairsInMiniBatch, numPairs);
+  const int numPairsInMiniBatch = miniBatchEnd - miniBatchPairOffset;
 
-  executor.miniBatchStart       = miniBatchStart;
-  executor.numPairsInMiniBatch  = numPairsInMiniBatch;
+  plan.miniBatchPairOffset = miniBatchPairOffset;
+  plan.numPairsInMiniBatch = numPairsInMiniBatch;
 
   const bool useMaxMatchesLimit = ctx.maxMatches > 0;
-  int sortedTargetIdx = miniBatchStart / ctx.numQueries;
-  int sortedQueryIdx  = miniBatchStart % ctx.numQueries;
+  int targetIdx = miniBatchPairOffset / ctx.numQueries;
+  int queryIdx  = miniBatchPairOffset % ctx.numQueries;
 
-  executor.miniBatchPairMatchStarts[0] = 0;
+  buffer.miniBatchPairMatchStarts[0] = 0;
   for (int i = 0; i < numPairsInMiniBatch; ++i) {
-    const int targetAtoms = ctx.targetAtomCounts[sortedTargetIdx];
-    const int queryAtoms  = ctx.queryAtomCounts[sortedQueryIdx];
+    const int targetAtoms = (*ctx.targetAtomCounts)[targetIdx];
+    const int queryAtoms  = ctx.queryAtomCounts[queryIdx];
     const int pairCapacity = useMaxMatchesLimit
         ? (ctx.maxMatches * queryAtoms)
         : (targetAtoms * queryAtoms);
-    executor.miniBatchPairMatchStarts[i + 1] = executor.miniBatchPairMatchStarts[i] + pairCapacity;
-    executor.pairIndicesHost[i] = miniBatchStart + i;
+    buffer.miniBatchPairMatchStarts[i + 1] = buffer.miniBatchPairMatchStarts[i] + pairCapacity;
+    buffer.pairIndices[i] = miniBatchPairOffset + i;
 
-    if (++sortedQueryIdx >= ctx.numQueries) {
-      sortedQueryIdx = 0;
-      ++sortedTargetIdx;
+    if (++queryIdx >= ctx.numQueries) {
+      queryIdx = 0;
+      ++targetIdx;
     }
   }
-  executor.totalMatchIndices = executor.miniBatchPairMatchStarts[numPairsInMiniBatch];
+  plan.totalMatchIndices = buffer.miniBatchPairMatchStarts[numPairsInMiniBatch];
 
-  prepareRecursiveMiniBatchOnCPU(executor, ctx, leafSubpatterns);
+  prepareRecursiveMiniBatchOnCPU(plan, ctx, leafSubpatterns, buffer);
 }
 
 /**
@@ -889,7 +969,7 @@ void uploadAndLaunchMiniBatch(GpuExecutor&               executor,
                                              numBuffersPerBlock,
                                              maxMatchesToFind,
                                              ctx.countOnly);
-    executor.deviceResults.setQueryAtomCounts(ctx.queryAtomCounts.data(), ctx.numQueries);
+    executor.deviceResults.setQueryAtomCounts(ctx.queryAtomCounts, ctx.numQueries);
 
     if (executor.pairIndicesDev.size() < static_cast<size_t>(executor.numPairsInMiniBatch)) {
       executor.pairIndicesDev.resize(static_cast<size_t>(executor.numPairsInMiniBatch * 1.5));
@@ -937,7 +1017,7 @@ void uploadAndLaunchMiniBatch(GpuExecutor&               executor,
                                            numBuffersPerBlock,
                                            maxMatchesToFind,
                                            ctx.countOnly);
-  executor.deviceResults.setQueryAtomCounts(ctx.queryAtomCounts.data(), ctx.numQueries);
+  executor.deviceResults.setQueryAtomCounts(ctx.queryAtomCounts, ctx.numQueries);
 
   cudaCheckError(cudaEventRecord(executor.allocDoneEvent.event(), executorStream));
   
@@ -953,7 +1033,7 @@ void uploadAndLaunchMiniBatch(GpuExecutor&               executor,
   ScopedNvtxRange preprocRange("launchRecursivePaintKernels (recursiveStream)");
   launchRecursivePaintKernels(ctx.templateConfig, targetsDevice, leafSubpatterns,
                               executor.deviceResults, ctx.numQueries,
-                              executor.miniBatchStart, executor.numPairsInMiniBatch,
+                              executor.miniBatchPairOffset, executor.numPairsInMiniBatch,
                               algorithm, recursiveStream,
                               executor.recursiveScratch,
                               executor.patternsAtDepth,
@@ -1010,23 +1090,19 @@ void accumulateMiniBatchResults(GpuExecutor& executor,
   RDKitFallbackQueue* fallbackQueue = nullptr) {
   ScopedNvtxRange accumRange("accumulateMiniBatchResults");
 
-  const bool hasTargetSort = ctx.targetSortOrder != nullptr;
-  const bool hasQuerySort = ctx.querySortOrder != nullptr;
-
   // Phase 1: Build update list without any locks
 
   std::vector<PairUpdate> updates;
   updates.reserve(executor.numPairsInMiniBatch);
 
   for (int i = 0; i < executor.numPairsInMiniBatch; ++i) {
-    const int pairIdxInMacrobatch = executor.miniBatchStart + i;
-    const int sortedTargetIdx = pairIdxInMacrobatch / ctx.numQueries;
-    const int sortedQueryIdx  = pairIdxInMacrobatch % ctx.numQueries;
+    const int pairIdxInBatch = executor.pairIndicesHost[i];
+    const int localTargetIdx = pairIdxInBatch / ctx.numQueries;
+    const int queryIdx       = pairIdxInBatch % ctx.numQueries;
 
-    const int targetIdx = hasTargetSort ? (*ctx.targetSortOrder)[sortedTargetIdx] : sortedTargetIdx;
-    const int queryIdx  = hasQuerySort ? (*ctx.querySortOrder)[sortedQueryIdx] : sortedQueryIdx;
+    const int targetIdx = (*ctx.targetOriginalIndices)[localTargetIdx];
 
-    const int queryAtoms      = ctx.queryAtomCounts[sortedQueryIdx];
+    const int queryAtoms      = ctx.queryAtomCounts[queryIdx];
     const int actualMatches   = executor.matchCountsHost[i];
     const int reportedMatches = executor.reportedCountsHost[i];
 
@@ -1087,9 +1163,6 @@ void accumulateMiniBatchResultsBoolean(GpuExecutor&              executor,
                                        std::mutex&                resultsMutex) {
   ScopedNvtxRange accumRange("accumulateMiniBatchResultsBoolean");
 
-  const bool hasTargetSort = ctx.targetSortOrder != nullptr;
-  const bool hasQuerySort  = ctx.querySortOrder != nullptr;
-
   std::lock_guard<std::mutex> lock(resultsMutex);
 
   for (int i = 0; i < executor.numPairsInMiniBatch; ++i) {
@@ -1097,12 +1170,11 @@ void accumulateMiniBatchResultsBoolean(GpuExecutor&              executor,
       continue;
     }
 
-    const int pairIdxInMacrobatch = executor.miniBatchStart + i;
-    const int sortedTargetIdx     = pairIdxInMacrobatch / ctx.numQueries;
-    const int sortedQueryIdx      = pairIdxInMacrobatch % ctx.numQueries;
+    const int pairIdxInBatch = executor.pairIndicesHost[i];
+    const int localTargetIdx = pairIdxInBatch / ctx.numQueries;
+    const int queryIdx       = pairIdxInBatch % ctx.numQueries;
 
-    const int targetIdx = hasTargetSort ? (*ctx.targetSortOrder)[sortedTargetIdx] : sortedTargetIdx;
-    const int queryIdx  = hasQuerySort ? (*ctx.querySortOrder)[sortedQueryIdx] : sortedQueryIdx;
+    const int targetIdx = (*ctx.targetOriginalIndices)[localTargetIdx];
 
     results.setMatch(targetIdx, queryIdx, true);
   }
@@ -1114,18 +1186,14 @@ void accumulateMiniBatchResultsCounts(GpuExecutor&              executor,
                                       std::mutex&                resultsMutex) {
   ScopedNvtxRange accumRange("accumulateMiniBatchResultsCounts");
 
-  const bool hasTargetSort = ctx.targetSortOrder != nullptr;
-  const bool hasQuerySort  = ctx.querySortOrder != nullptr;
-
   std::lock_guard<std::mutex> lock(resultsMutex);
 
   for (int i = 0; i < executor.numPairsInMiniBatch; ++i) {
-    const int pairIdxInMacrobatch = executor.miniBatchStart + i;
-    const int sortedTargetIdx     = pairIdxInMacrobatch / ctx.numQueries;
-    const int sortedQueryIdx      = pairIdxInMacrobatch % ctx.numQueries;
+    const int pairIdxInBatch = executor.pairIndicesHost[i];
+    const int localTargetIdx = pairIdxInBatch / ctx.numQueries;
+    const int queryIdx       = pairIdxInBatch % ctx.numQueries;
 
-    const int targetIdx = hasTargetSort ? (*ctx.targetSortOrder)[sortedTargetIdx] : sortedTargetIdx;
-    const int queryIdx  = hasQuerySort ? (*ctx.querySortOrder)[sortedQueryIdx] : sortedQueryIdx;
+    const int targetIdx = (*ctx.targetOriginalIndices)[localTargetIdx];
 
     const int pairIdx = targetIdx * ctx.numQueries + queryIdx;
     counts[pairIdx] = executor.matchCountsHost[i];
@@ -1134,240 +1202,181 @@ void accumulateMiniBatchResultsCounts(GpuExecutor&              executor,
 
 constexpr int kMaxExecutorsPerRunner = 8;
 
-template <typename AccumulateFunc>
-void runnerWorkerInlineCountOnly(int                               workerIdx,
-                                 const ThreadWorkerContext&        ctx,
-                                 MoleculesDevice&                  targetsDevice,
-                                 const MoleculesDevice&            queriesDevice,
-                                 const MoleculesHost&              queriesHost,
-                                 const LeafSubpatterns&            leafSubpatterns,
-                                 SubstructAlgorithm                algorithm,
-                                 cudaEvent_t                       upstreamReadyEvent,
-                                 std::atomic<int>&                 nextMiniBatchIdx,
-                                 int                               totalNumMiniBatches,
-                                 int                               effectiveMiniBatchSize,
-                                 int                               deviceId,
-                                 std::vector<GpuExecutor*>         executors,
-                                 AccumulateFunc&&                  accumulate,
-                                 std::exception_ptr&               exceptionPtr) {
-  try {
-    ScopedNvtxRange workerRange("runnerWorkerInlineCountOnly " + std::to_string(workerIdx) + " GPU" + std::to_string(deviceId));
-    const WithDevice setDevice(deviceId);
+struct InFlightBatch {
+  GpuExecutor* executor = nullptr;
+  std::unique_ptr<PreparedMiniBatch> batch;
+};
 
-    const int executorsPerRunner = static_cast<int>(executors.size());
-    const int numPairs = ctx.numTargets * ctx.numQueries;
-
-    std::array<GpuExecutor*, kMaxExecutorsPerRunner> pendingExecutors{};
-    int pendingHead  = 0;
-    int pendingTail  = 0;
-    int pendingCount = 0;
-
-    auto drainOneExecutor = [&]() {
-      GpuExecutor* oldest = pendingExecutors[pendingHead];
-      ScopedNvtxRange waitRange("Wait for D2H copy");
-      cudaCheckError(cudaEventSynchronize(oldest->copyDoneEvent.event()));
-      waitRange.pop();
-
-      ScopedNvtxRange accumRange("Accumulate mini-batch counts");
-      accumulate(*oldest);
-      accumRange.pop();
-
-      pendingHead = (pendingHead + 1) % executorsPerRunner;
-      --pendingCount;
-    };
-
-    int localMiniBatchCount = 0;
-
-    while (true) {
-      const int miniBatchIdx = nextMiniBatchIdx.fetch_add(1, std::memory_order_relaxed);
-      if (miniBatchIdx >= totalNumMiniBatches) break;
-
-      const int miniBatchStart = miniBatchIdx * effectiveMiniBatchSize;
-      if (miniBatchStart >= numPairs) break;
-
-      if (pendingCount == executorsPerRunner) {
-        drainOneExecutor();
-      }
-
-      GpuExecutor* executor = executors[pendingTail];
-
-      if (upstreamReadyEvent != nullptr && localMiniBatchCount < executorsPerRunner) {
-        cudaCheckError(cudaStreamWaitEvent(executor->stream(), upstreamReadyEvent, 0));
-        cudaCheckError(cudaStreamWaitEvent(executor->recursiveStream.stream(), upstreamReadyEvent, 0));
-        cudaCheckError(cudaStreamWaitEvent(executor->postRecursionStream.stream(), upstreamReadyEvent, 0));
-      }
-      ++localMiniBatchCount;
-
-      prepareMiniBatchOnCPU(*executor, ctx, queriesHost, leafSubpatterns, miniBatchStart, effectiveMiniBatchSize);
-
-      ScopedNvtxRange launchRange("GPU launch mini-batch " + std::to_string(miniBatchIdx));
-      uploadAndLaunchMiniBatch(*executor, ctx, targetsDevice, queriesDevice, leafSubpatterns, algorithm);
-      initiateCountsOnlyCopyToHost(*executor);
-      launchRange.pop();
-
-      pendingExecutors[pendingTail] = executor;
-      pendingTail = (pendingTail + 1) % executorsPerRunner;
-      ++pendingCount;
-    }
-
-    while (pendingCount > 0) {
-      drainOneExecutor();
-    }
-  } catch (...) {
-    exceptionPtr = std::current_exception();
-  }
+void applyPreparedMiniBatch(GpuExecutor& executor, PreparedMiniBatch& batch) {
+  executor.miniBatchPairOffset  = batch.plan.miniBatchPairOffset;
+  executor.numPairsInMiniBatch  = batch.plan.numPairsInMiniBatch;
+  executor.totalMatchIndices    = batch.plan.totalMatchIndices;
+  executor.recursiveMaxDepth    = batch.plan.recursiveMaxDepth;
+  executor.firstTargetInMiniBatch = batch.plan.firstTargetInMiniBatch;
+  executor.numTargetsInMiniBatch  = batch.plan.numTargetsInMiniBatch;
+  executor.maxDepthInMiniBatch  = batch.plan.maxDepthInMiniBatch;
+  executor.matchPairsCounts     = batch.plan.matchPairsCounts;
+  executor.patternsAtDepth      = std::move(batch.plan.patternsAtDepth);
 }
 
-/**
- * @brief Inline runner with thread-local executors and deferred accumulation.
- *
- * Uses N-buffering with deferred accumulation: only blocks when all
- * executors are in-flight. This maximizes GPU utilization by keeping mini-batches
- * queued while waiting for D2H copies.
- *
- * @param executorsPerRunner Number of executors assigned to this runner (2-8)
- * @param deviceId GPU device ID to use for this worker
- */
-void runnerWorkerInline(int                               workerIdx,
-                        const ThreadWorkerContext&        ctx,
-                        MoleculesDevice&                  targetsDevice,
-                        const MoleculesDevice&            queriesDevice,
-                        const MoleculesHost&              queriesHost,
-                        const LeafSubpatterns&            leafSubpatterns,
-                        SubstructSearchResults&           results,
-                        std::mutex&                       resultsMutex,
-                        SubstructAlgorithm                algorithm,
-                        cudaEvent_t                       upstreamReadyEvent,
-                        std::atomic<int>&                 nextMiniBatchIdx,
-                        int                               totalNumMiniBatches,
-                        int                               effectiveMiniBatchSize,
-                        int                               deviceId,
-                        std::vector<GpuExecutor*>         executors,
-                        std::exception_ptr&               exceptionPtr,
-                        RDKitFallbackQueue*               fallbackQueue) {
+template <typename InitiateCopyFunc, typename AccumulateFunc>
+void runnerWorkerPipeline(int                               workerIdx,
+                          const MoleculesDevice&            queriesDevice,
+                          const LeafSubpatterns&            leafSubpatterns,
+                          SubstructAlgorithm                algorithm,
+                          int                               deviceId,
+                          std::vector<GpuExecutor*>         executors,
+                          PreparedBatchQueue&               batchQueue,
+                          PinnedBufferPool&                 bufferPool,
+                          InitiateCopyFunc&&                initiateCopy,
+                          AccumulateFunc&&                  accumulate,
+                          RDKitFallbackQueue*               fallbackQueue,
+                          std::exception_ptr&               exceptionPtr) {
   try {
     FallbackQueueProducerGuard producerGuard(fallbackQueue);
-    ScopedNvtxRange workerRange("runnerWorkerInline " + std::to_string(workerIdx) + " GPU" + std::to_string(deviceId));
+    ScopedNvtxRange workerRange("runnerWorkerPipeline " + std::to_string(workerIdx) +
+                                " GPU" + std::to_string(deviceId));
     const WithDevice setDevice(deviceId);
 
     const int executorsPerRunner = static_cast<int>(executors.size());
-    const int numPairs = ctx.numTargets * ctx.numQueries;
-
-    std::array<GpuExecutor*, kMaxExecutorsPerRunner> pendingExecutors{};
+    std::array<InFlightBatch, kMaxExecutorsPerRunner> pending{};
     int pendingHead  = 0;
     int pendingTail  = 0;
     int pendingCount = 0;
 
-    auto drainOneExecutor = [&]() {
-      GpuExecutor* oldest = pendingExecutors[pendingHead];
+    auto drainOne = [&]() {
+      InFlightBatch& slot = pending[pendingHead];
+      GpuExecutor* oldest = slot.executor;
       ScopedNvtxRange waitRange("Wait for D2H copy");
       cudaCheckError(cudaEventSynchronize(oldest->copyDoneEvent.event()));
       waitRange.pop();
 
       ScopedNvtxRange accumRange("Accumulate mini-batch");
-      accumulateMiniBatchResults(*oldest, ctx, results, resultsMutex, fallbackQueue);
+      accumulate(*oldest, slot.batch->ctx);
       accumRange.pop();
+
+      bufferPool.release(slot.batch->pinnedBuffer);
+      slot.batch.reset();
 
       pendingHead = (pendingHead + 1) % executorsPerRunner;
       --pendingCount;
     };
 
-    int localMiniBatchCount = 0;
-
     while (true) {
-      const int miniBatchIdx = nextMiniBatchIdx.fetch_add(1, std::memory_order_relaxed);
-      if (miniBatchIdx >= totalNumMiniBatches) break;
-
-      const int miniBatchStart = miniBatchIdx * effectiveMiniBatchSize;
-      if (miniBatchStart >= numPairs) break;
-
       if (pendingCount == executorsPerRunner) {
-        drainOneExecutor();
+        drainOne();
+        continue;
+      }
+
+      std::unique_ptr<PreparedMiniBatch> batch;
+      if (pendingCount > 0) {
+        batch = batchQueue.tryPop();
+        if (!batch) {
+          drainOne();
+          continue;
+        }
+      } else {
+        batch = batchQueue.pop();
+        if (!batch) {
+          break;
+        }
       }
 
       GpuExecutor* executor = executors[pendingTail];
+      executor->bindPinnedBuffer(*batch->pinnedBuffer);
+      applyPreparedMiniBatch(*executor, *batch);
 
-      if (upstreamReadyEvent != nullptr && localMiniBatchCount < executorsPerRunner) {
-        cudaCheckError(cudaStreamWaitEvent(executor->stream(), upstreamReadyEvent, 0));
-        cudaCheckError(cudaStreamWaitEvent(executor->recursiveStream.stream(), upstreamReadyEvent, 0));
-        cudaCheckError(cudaStreamWaitEvent(executor->postRecursionStream.stream(), upstreamReadyEvent, 0));
-      }
-      ++localMiniBatchCount;
+      executor->targetsDevice.copyFromHost(*batch->targetsHost, executor->stream());
+      cudaCheckError(cudaEventRecord(executor->targetsReadyEvent.event(), executor->stream()));
+      cudaCheckError(cudaStreamWaitEvent(executor->recursiveStream.stream(),
+                                         executor->targetsReadyEvent.event(), 0));
+      cudaCheckError(cudaStreamWaitEvent(executor->postRecursionStream.stream(),
+                                         executor->targetsReadyEvent.event(), 0));
 
-      prepareMiniBatchOnCPU(*executor, ctx, queriesHost, leafSubpatterns, miniBatchStart, effectiveMiniBatchSize);
-
-      ScopedNvtxRange launchRange("GPU launch mini-batch " + std::to_string(miniBatchIdx));
-      uploadAndLaunchMiniBatch(*executor, ctx, targetsDevice, queriesDevice, leafSubpatterns, algorithm);
-      initiateResultsCopyToHost(*executor);
+      ScopedNvtxRange launchRange("GPU launch prepared batch");
+      uploadAndLaunchMiniBatch(*executor, batch->ctx, executor->targetsDevice, queriesDevice, leafSubpatterns, algorithm);
+      initiateCopy(*executor);
       launchRange.pop();
 
-      pendingExecutors[pendingTail] = executor;
+      pending[pendingTail].executor = executor;
+      pending[pendingTail].batch = std::move(batch);
       pendingTail = (pendingTail + 1) % executorsPerRunner;
       ++pendingCount;
     }
 
     while (pendingCount > 0) {
-      drainOneExecutor();
+      drainOne();
     }
   } catch (...) {
     exceptionPtr = std::current_exception();
   }
 }
 
-/**
- * @brief Boolean output variant of runnerWorkerInline.
- *
- * Optimized for hasSubstructMatch: uses countOnly mode to skip match index
- * storage/transfer, only copies match counts, and directly populates boolean results.
- */
-void runnerWorkerInlineBoolean(int                               workerIdx,
-                               const ThreadWorkerContext&        ctx,
-                               MoleculesDevice&                  targetsDevice,
-                               const MoleculesDevice&            queriesDevice,
-                               const MoleculesHost&              queriesHost,
-                               const LeafSubpatterns&            leafSubpatterns,
-                               HasSubstructMatchResults&         results,
-                               std::mutex&                       resultsMutex,
-                               SubstructAlgorithm                algorithm,
-                               cudaEvent_t                       upstreamReadyEvent,
-                               std::atomic<int>&                 nextMiniBatchIdx,
-                               int                               totalNumMiniBatches,
-                               int                               effectiveMiniBatchSize,
-                               int                               deviceId,
-                               std::vector<GpuExecutor*>         executors,
-                               std::exception_ptr&               exceptionPtr) {
-  auto accumulate = [&](GpuExecutor& executor) {
-    accumulateMiniBatchResultsBoolean(executor, ctx, results, resultsMutex);
+void runnerWorkerPipelineResults(int                               workerIdx,
+                                 const MoleculesDevice&            queriesDevice,
+                                 const LeafSubpatterns&            leafSubpatterns,
+                                 SubstructSearchResults&           results,
+                                 std::mutex&                       resultsMutex,
+                                 SubstructAlgorithm                algorithm,
+                                 int                               deviceId,
+                                 std::vector<GpuExecutor*>         executors,
+                                 PreparedBatchQueue&               batchQueue,
+                                 PinnedBufferPool&                 bufferPool,
+                                 RDKitFallbackQueue*               fallbackQueue,
+                                 std::exception_ptr&               exceptionPtr) {
+  auto initiateCopy = [&](GpuExecutor& executor) {
+    initiateResultsCopyToHost(executor);
   };
-  runnerWorkerInlineCountOnly(workerIdx, ctx, targetsDevice, queriesDevice, queriesHost, leafSubpatterns,
-                              algorithm, upstreamReadyEvent, nextMiniBatchIdx, totalNumMiniBatches,
-                              effectiveMiniBatchSize, deviceId, std::move(executors),
-                              accumulate, exceptionPtr);
+  auto accumulate = [&](GpuExecutor& executor, const ThreadWorkerContext& ctx) {
+    accumulateMiniBatchResults(executor, ctx, results, resultsMutex, fallbackQueue);
+  };
+  runnerWorkerPipeline(workerIdx, queriesDevice, leafSubpatterns, algorithm, deviceId,
+                       std::move(executors), batchQueue, bufferPool,
+                       initiateCopy, accumulate, fallbackQueue, exceptionPtr);
 }
 
-void runnerWorkerInlineCounts(int                               workerIdx,
-                              const ThreadWorkerContext&        ctx,
-                              MoleculesDevice&                  targetsDevice,
-                              const MoleculesDevice&            queriesDevice,
-                              const MoleculesHost&              queriesHost,
-                              const LeafSubpatterns&            leafSubpatterns,
-                              std::vector<int>&                 counts,
-                              std::mutex&                       resultsMutex,
-                              SubstructAlgorithm                algorithm,
-                              cudaEvent_t                       upstreamReadyEvent,
-                              std::atomic<int>&                 nextMiniBatchIdx,
-                              int                               totalNumMiniBatches,
-                              int                               effectiveMiniBatchSize,
-                              int                               deviceId,
-                              std::vector<GpuExecutor*>         executors,
-                              std::exception_ptr&               exceptionPtr) {
-  auto accumulate = [&](GpuExecutor& executor) {
+void runnerWorkerPipelineBoolean(int                               workerIdx,
+                                 const MoleculesDevice&            queriesDevice,
+                                 const LeafSubpatterns&            leafSubpatterns,
+                                 HasSubstructMatchResults&         results,
+                                 std::mutex&                       resultsMutex,
+                                 SubstructAlgorithm                algorithm,
+                                 int                               deviceId,
+                                 std::vector<GpuExecutor*>         executors,
+                                 PreparedBatchQueue&               batchQueue,
+                                 PinnedBufferPool&                 bufferPool,
+                                 std::exception_ptr&               exceptionPtr) {
+  auto initiateCopy = [&](GpuExecutor& executor) {
+    initiateCountsOnlyCopyToHost(executor);
+  };
+  auto accumulate = [&](GpuExecutor& executor, const ThreadWorkerContext& ctx) {
+    accumulateMiniBatchResultsBoolean(executor, ctx, results, resultsMutex);
+  };
+  runnerWorkerPipeline(workerIdx, queriesDevice, leafSubpatterns, algorithm, deviceId,
+                       std::move(executors), batchQueue, bufferPool,
+                       initiateCopy, accumulate, nullptr, exceptionPtr);
+}
+
+void runnerWorkerPipelineCounts(int                               workerIdx,
+                                const MoleculesDevice&            queriesDevice,
+                                const LeafSubpatterns&            leafSubpatterns,
+                                std::vector<int>&                 counts,
+                                std::mutex&                       resultsMutex,
+                                SubstructAlgorithm                algorithm,
+                                int                               deviceId,
+                                std::vector<GpuExecutor*>         executors,
+                                PreparedBatchQueue&               batchQueue,
+                                PinnedBufferPool&                 bufferPool,
+                                std::exception_ptr&               exceptionPtr) {
+  auto initiateCopy = [&](GpuExecutor& executor) {
+    initiateCountsOnlyCopyToHost(executor);
+  };
+  auto accumulate = [&](GpuExecutor& executor, const ThreadWorkerContext& ctx) {
     accumulateMiniBatchResultsCounts(executor, ctx, counts, resultsMutex);
   };
-  runnerWorkerInlineCountOnly(workerIdx, ctx, targetsDevice, queriesDevice, queriesHost, leafSubpatterns,
-                              algorithm, upstreamReadyEvent, nextMiniBatchIdx, totalNumMiniBatches,
-                              effectiveMiniBatchSize, deviceId, std::move(executors),
-                              accumulate, exceptionPtr);
+  runnerWorkerPipeline(workerIdx, queriesDevice, leafSubpatterns, algorithm, deviceId,
+                       std::move(executors), batchQueue, bufferPool,
+                       initiateCopy, accumulate, nullptr, exceptionPtr);
 }
 
 }  // namespace
@@ -1378,30 +1387,29 @@ void runnerWorkerInlineCounts(int                               workerIdx,
 
 namespace {
 
-void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuTargets,
-                                    const std::vector<int>&                gpuTargetIndices,
-                                    const std::vector<unsigned int>&       gpuTargetAtomCounts,
-                                    const MoleculesHost&                   queriesHost,
-                                    const MoleculesDevice&                 queriesDevice,
-                                    const LeafSubpatterns&                 leafSubpatterns,
-                                    SubstructSearchResults&                results,
-                                    SubstructAlgorithm                     algorithm,
-                                    cudaStream_t                           stream,
-                                    const SubstructSearchConfig&           config,
-                                    const std::vector<int>&                querySortOrder,
-                                    int                                    effectivePreprocessingThreads,
-                                    RDKitFallbackQueue*                    fallbackQueue,
-                                    HasSubstructMatchResults*              boolResults,
-                                    std::vector<int>*                      countResults) {
+void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets,
+                                 const MoleculesHost&                   queriesHost,
+                                 const MoleculesDevice&                 queriesDevice,
+                                 const LeafSubpatterns&                 leafSubpatterns,
+                                 const QueryPreprocessContext&          queryContext,
+                                 SubstructSearchResults&                results,
+                                 SubstructAlgorithm                     algorithm,
+                                 cudaStream_t                           stream,
+                                 const SubstructSearchConfig&           config,
+                                 int                                    effectivePreprocessingThreads,
+                                 RDKitFallbackQueue*                    fallbackQueue,
+                                 HasSubstructMatchResults*              boolResults,
+                                 std::vector<int>*                      countResults) {
+  (void)stream;
   const bool countOnly = (boolResults != nullptr) || (countResults != nullptr);
   const char* rangeLabel = boolResults
-      ? "runMacroBatchedHasSubstructMatch"
-      : (countResults ? "runMacroBatchedCountSubstructMatches" : "runMacroBatchedSubstructSearch");
+      ? "runPipelinedHasSubstructMatch"
+      : (countResults ? "runPipelinedCountSubstructMatches" : "runPipelinedSubstructSearch");
   ScopedNvtxRange e2eRange(rangeLabel);
 
-  const int numGpuTargets = static_cast<int>(gpuTargets.size());
-  const int numQueries    = static_cast<int>(queriesHost.numMolecules());
-  if (numGpuTargets == 0 || numQueries == 0) {
+  const int numTargets = static_cast<int>(targets.size());
+  const int numQueries = queryContext.numQueries;
+  if (numTargets == 0 || numQueries == 0) {
     return;
   }
 
@@ -1414,96 +1422,15 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
   }
   const int numGpus = static_cast<int>(gpuIds.size());
 
-  // Macro partitioning (targets in original order, no target straddles macros)
-  const int macroMinibatches = std::max(1, config.macroBatchMinibatches);
-  const int64_t macroPairsTarget = static_cast<int64_t>(config.batchSize) * static_cast<int64_t>(macroMinibatches);
-  int targetsPerMacro = numGpuTargets;
-  if (macroMinibatches > 1) {
-    targetsPerMacro = static_cast<int>((macroPairsTarget + numQueries - 1) / numQueries);
-    targetsPerMacro = std::max(1, std::min(targetsPerMacro, numGpuTargets));
+  // Determine runner counts (per GPU, possibly limited by target count).
+  const int runnersPerGpu = std::max(1, config.workerThreads);
+  int numRunners = runnersPerGpu * numGpus;
+  if (numRunners > numTargets) {
+    numRunners = numTargets;
   }
-  const int numMacros = (numGpuTargets + targetsPerMacro - 1) / targetsPerMacro;
-
-  // Precompute query metadata once (query preprocessing is kept up-front).
-  const int precomputedSize      = static_cast<int>(leafSubpatterns.perQueryPatterns.size());
-  const int perQueryMaxDepthSize = static_cast<int>(leafSubpatterns.perQueryMaxDepth.size());
-
-  std::vector<int>     queryAtomCountsHost(numQueries);
-  std::vector<int>     queryDepthsHost(numQueries);
-  std::vector<int>     queryMaxDepthsHost(numQueries);
-  std::vector<int8_t>  queryHasPatternsHost(numQueries);
-
-  int maxQueryAtoms = 0;
-  int maxDepthSeen  = 0;
-
-#pragma omp parallel num_threads(effectivePreprocessingThreads) reduction(max:maxQueryAtoms, maxDepthSeen)
-  {
-#pragma omp for nowait
-    for (int q = 0; q < numQueries; ++q) {
-      const int atomStart    = queriesHost.batchAtomStarts[q];
-      const int atomEnd      = queriesHost.batchAtomStarts[q + 1];
-      const int atomCount    = atomEnd - atomStart;
-      queryAtomCountsHost[q] = atomCount;
-
-      const int depth        = getQueryRecursionDepth(queriesHost, q);
-      queryDepthsHost[q]     = depth;
-      maxDepthSeen           = std::max(maxDepthSeen, depth);
-
-      const int maxDepth     = (q < perQueryMaxDepthSize) ? leafSubpatterns.perQueryMaxDepth[q] : 0;
-      queryMaxDepthsHost[q]  = maxDepth;
-
-      const bool hasPatterns = (q < precomputedSize) &&
-                               (maxDepth > 0 || !leafSubpatterns.perQueryPatterns[q][0].empty());
-      queryHasPatternsHost[q] = hasPatterns ? 1 : 0;
-
-      maxQueryAtoms          = std::max(maxQueryAtoms, atomCount);
-    }
+  if (numRunners == 0) {
+    return;
   }
-
-  if (maxDepthSeen > kMaxRecursionDepth) {
-    throw std::runtime_error("Recursive SMARTS depth " + std::to_string(maxDepthSeen) +
-                             " exceeds maximum supported depth of " +
-                             std::to_string(kMaxRecursionDepth));
-  }
-
-  // Precompute max patterns per depth across all queries for pinned buffer sizing.
-  int maxPatternsPerDepth = 256;
-  for (int d = 0; d <= kMaxRecursionDepth; ++d) {
-    int patternsAtThisDepth = 0;
-    for (size_t q = 0; q < leafSubpatterns.perQueryPatterns.size(); ++q) {
-      patternsAtThisDepth += static_cast<int>(leafSubpatterns.perQueryPatterns[q][d].size());
-    }
-    maxPatternsPerDepth = std::max(maxPatternsPerDepth, patternsAtThisDepth);
-  }
-
-  // Use global maximum target atoms for sizing pinned buffers once.
-  int globalMaxTargetAtoms = 0;
-  for (size_t i = 0; i < gpuTargetAtomCounts.size(); ++i) {
-    globalMaxTargetAtoms = std::max(globalMaxTargetAtoms, static_cast<int>(gpuTargetAtomCounts[i]));
-  }
-
-  // Pinned buffers are sized for the worst-case mini-batch size within a macro.
-  const int maxPairsInMacro = std::min(numGpuTargets, targetsPerMacro) * numQueries;
-  const int pinnedMiniBatchSize = std::min(config.batchSize, maxPairsInMacro);
-
-  size_t maxMatchIndicesPerMiniBatch;
-  if (countOnly) {
-    maxMatchIndicesPerMiniBatch = 0;
-  } else if (config.maxMatches > 0) {
-    maxMatchIndicesPerMiniBatch = static_cast<size_t>(pinnedMiniBatchSize) * config.maxMatches * maxQueryAtoms;
-  } else {
-    maxMatchIndicesPerMiniBatch = static_cast<size_t>(pinnedMiniBatchSize) * globalMaxTargetAtoms * maxQueryAtoms;
-  }
-
-  // Determine runners and slots using the same logic as getSubstructMatchesImpl, but based on worst-case macro.
-  const int requestedNumRunners = config.workerThreads;
-  const int numPairsWorstCase = std::min(numGpuTargets, targetsPerMacro) * numQueries;
-  const int effectiveMiniBatchSizeWorstCase = std::min(config.batchSize, numPairsWorstCase);
-  const int totalNumMiniBatchesWorstCase = (numPairsWorstCase + effectiveMiniBatchSizeWorstCase - 1) / effectiveMiniBatchSizeWorstCase;
-
-  const int runnersPerGpu = std::max(1, requestedNumRunners);
-  const int totalRunners  = std::min(runnersPerGpu * numGpus, totalNumMiniBatchesWorstCase);
-  const int numRunners    = totalRunners;
 
   int executorsPerRunner;
   if (config.executorsPerRunner == -1) {
@@ -1520,11 +1447,32 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
     workersPerGpu[i]++;
   }
 
-  // Compute pinned memory footprint (worst-case macro) and allocate once.
-  const int totalExecutors = numRunners * executorsPerRunner;
-  const size_t perExecutorSize = ConsolidatedPinnedBuffer::computeSize(
-      pinnedMiniBatchSize, static_cast<int>(maxMatchIndicesPerMiniBatch), maxPatternsPerDepth);
-  const size_t totalPinnedBytes = static_cast<size_t>(totalExecutors) * perExecutorSize;
+  // Precompute max patterns per depth across all queries for pinned buffer sizing.
+  int maxPatternsPerDepth = 256;
+  for (int d = 0; d <= kMaxRecursionDepth; ++d) {
+    int patternsAtThisDepth = 0;
+    for (size_t q = 0; q < leafSubpatterns.perQueryPatterns.size(); ++q) {
+      patternsAtThisDepth += static_cast<int>(leafSubpatterns.perQueryPatterns[q][d].size());
+    }
+    maxPatternsPerDepth = std::max(maxPatternsPerDepth, patternsAtThisDepth);
+  }
+
+  const int targetsPerBatch = std::max(1, config.batchSize / numQueries);
+  const int maxPairsPerBatch = std::max(1, config.batchSize);
+
+  size_t maxMatchIndicesPerMiniBatch;
+  if (countOnly) {
+    maxMatchIndicesPerMiniBatch = 0;
+  } else if (config.maxMatches > 0) {
+    maxMatchIndicesPerMiniBatch = static_cast<size_t>(maxPairsPerBatch) * config.maxMatches * queryContext.maxQueryAtoms;
+  } else {
+    maxMatchIndicesPerMiniBatch = static_cast<size_t>(maxPairsPerBatch) * kMaxTargetAtoms * queryContext.maxQueryAtoms;
+  }
+
+  const int poolSize = std::max(1, effectivePreprocessingThreads) * 2;
+  const size_t perBufferSize = ConsolidatedPinnedBuffer::computeSize(
+      maxPairsPerBatch, static_cast<int>(maxMatchIndicesPerMiniBatch), maxPatternsPerDepth);
+  const size_t totalPinnedBytes = static_cast<size_t>(poolSize) * perBufferSize;
 
   const long pages    = sysconf(_SC_PHYS_PAGES);
   const long pageSize = sysconf(_SC_PAGE_SIZE);
@@ -1538,119 +1486,14 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
         "Reduce workerThreads, executorsPerRunner, or batchSize.");
   }
 
-  ScopedNvtxRange allocRange("CPU: Allocate all pinned buffers (macro)");
-  char* megaBuffer = nullptr;
-  cudaCheckError(cudaMallocHost(&megaBuffer, totalPinnedBytes));
+  PinnedBufferPool bufferPool;
+  bufferPool.initialize(poolSize,
+                        maxPairsPerBatch,
+                        static_cast<int>(maxMatchIndicesPerMiniBatch),
+                        maxPatternsPerDepth);
 
-  std::vector<ConsolidatedPinnedBuffer> pinnedBuffers(totalExecutors);
-  for (int i = 0; i < totalExecutors; ++i) {
-    char* executorPtr = megaBuffer + i * perExecutorSize;
-    pinnedBuffers[i].assignExternal(executorPtr, pinnedMiniBatchSize, static_cast<int>(maxMatchIndicesPerMiniBatch), maxPatternsPerDepth);
-  }
-  allocRange.pop();
-
-  struct MacroData {
-    MoleculesHost    targetsHost;
-    std::vector<int> sortedToOriginal;   ///< sorted target idx -> original target idx (full input)
-    ThreadWorkerContext ctx;             ///< fully-populated context for this macro
-    int totalNumMiniBatches    = 0;
-    int effectiveMiniBatchSize = 0;
-  };
-
-  const int preprocessingThreads = effectivePreprocessingThreads;
-
-  auto initializeMacroContextQueries = [&](ThreadWorkerContext& ctx) {
-    ctx.numQueries     = numQueries;
-    ctx.querySortOrder = querySortOrder.empty() ? nullptr : &querySortOrder;
-    ctx.maxMatches     = config.maxMatches;
-    ctx.countOnly      = countOnly;
-
-    ctx.queryAtomCounts.resize(static_cast<size_t>(numQueries * 1.5));
-    ctx.queryDepths.resize(numQueries);
-    ctx.queryMaxDepths.resize(numQueries);
-    ctx.queryHasPatterns.resize(numQueries);
-
-    for (int q = 0; q < numQueries; ++q) {
-      ctx.queryAtomCounts[q]  = queryAtomCountsHost[q];
-      ctx.queryDepths[q]      = queryDepthsHost[q];
-      ctx.queryMaxDepths[q]   = queryMaxDepthsHost[q];
-      ctx.queryHasPatterns[q] = queryHasPatternsHost[q];
-    }
-  };
-
-  auto buildMacro = [&](int macroIdx, MacroData& out) {
-    ScopedNvtxRange macroBuildRange("CPU: Build macro " + std::to_string(macroIdx));
-    const int t0 = macroIdx * targetsPerMacro;
-    const int t1 = std::min(t0 + targetsPerMacro, numGpuTargets);
-    const int n  = t1 - t0;
-
-    std::vector<const RDKit::ROMol*> macroTargets;
-    std::vector<int> macroBuildOrder;
-    {
-      ScopedNvtxRange setupRange("CPU: Macro setup and sort");
-      macroTargets.reserve(static_cast<size_t>(n));
-      for (int i = 0; i < n; ++i) {
-        macroTargets.push_back(gpuTargets[t0 + i]);
-      }
-
-      if (config.presort) {
-        macroBuildOrder.resize(n);
-        std::iota(macroBuildOrder.begin(), macroBuildOrder.end(), 0);
-        std::sort(macroBuildOrder.begin(), macroBuildOrder.end(), [&](int a, int b) {
-          return gpuTargetAtomCounts[t0 + a] > gpuTargetAtomCounts[t0 + b];
-        });
-      }
-    }
-
-    buildTargetBatchParallelInto(out.targetsHost, preprocessingThreads, macroTargets, macroBuildOrder);
-
-    {
-      ScopedNvtxRange postRange("CPU: Macro context setup");
-      out.sortedToOriginal.resize(static_cast<size_t>(n));
-      for (int sortedIdx = 0; sortedIdx < n; ++sortedIdx) {
-        const int macroLocalIdx = macroBuildOrder.empty() ? sortedIdx : macroBuildOrder[sortedIdx];
-        out.sortedToOriginal[sortedIdx] = gpuTargetIndices[t0 + macroLocalIdx];
-      }
-
-      out.ctx.numTargets      = n;
-      out.ctx.targetSortOrder = &out.sortedToOriginal;
-
-      out.ctx.targetAtomCounts.resize(n);
-      int localMaxTargetAtoms = 0;
-      int localMaxBondsPerAtom = 0;
-      for (int t = 0; t < n; ++t) {
-        const int atomStart = out.targetsHost.batchAtomStarts[t];
-        const int atomEnd   = out.targetsHost.batchAtomStarts[t + 1];
-        const int atoms     = atomEnd - atomStart;
-        out.ctx.targetAtomCounts[t] = atoms;
-        localMaxTargetAtoms = std::max(localMaxTargetAtoms, atoms);
-        for (int a = atomStart; a < atomEnd; ++a) {
-          localMaxBondsPerAtom = std::max(localMaxBondsPerAtom, static_cast<int>(out.targetsHost.targetAtomBonds[a].degree));
-        }
-      }
-      out.ctx.maxTargetAtoms = localMaxTargetAtoms;
-      out.ctx.maxQueryAtoms = maxQueryAtoms;
-      out.ctx.maxBondsPerAtom = localMaxBondsPerAtom;
-      out.ctx.templateConfig = selectTemplateConfig(localMaxTargetAtoms, maxQueryAtoms, localMaxBondsPerAtom);
-
-      const int numPairs = n * numQueries;
-      out.effectiveMiniBatchSize = std::min(config.batchSize, numPairs);
-      out.totalNumMiniBatches    = (numPairs + out.effectiveMiniBatchSize - 1) / out.effectiveMiniBatchSize;
-    }
-  };
-
-  // Global macro dispatch state.
-  std::mutex              macroMutex;
-  std::condition_variable macroCv;
-  int                     macroEpoch = 0;
-  bool                    shutdown   = false;
-  MacroData*              currentMacro = nullptr;
-
-  std::mutex              doneMutex;
-  std::condition_variable doneCv;
-  std::atomic<int>        gpusDone{0};
-
-  std::atomic<int> nextMiniBatchIdx(0);
+  PreparedBatchQueue batchQueue;
+  std::atomic<int> nextTargetIdx{0};
 
   // Use the fallback queue's mutex if available (ensures GPU batch accumulation
   // and fallback processing use the same mutex to avoid race conditions)
@@ -1658,11 +1501,11 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
   std::mutex& resultsMutex = fallbackQueue ? fallbackQueue->getResultsMutex() : localResultsMutex;
 
   std::vector<std::exception_ptr> exceptions(numRunners);
+  std::vector<std::exception_ptr> preprocessExceptions(effectivePreprocessingThreads);
 
-  ScopedNvtxRange launchRange("CPU: Launch GPU coordinators (macro)");
+  ScopedNvtxRange launchRange("CPU: Launch GPU coordinators (pipeline)");
   std::vector<std::thread> gpuThreads;
   gpuThreads.reserve(numGpus);
-  int activeGpus = 0;
 
   int executorOffset = 0;
   int workerIdOffset = 0;
@@ -1671,160 +1514,42 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
     if (numWorkersThisGpu == 0) {
       continue;
     }
-    ++activeGpus;
 
     const int deviceId = gpuIds[g];
     const int startWorkerIdx = workerIdOffset;
-    const int startExecutorIdx = executorOffset;
     const int numExecutorsThisGpu = numWorkersThisGpu * executorsPerRunner;
     workerIdOffset += numWorkersThisGpu;
     executorOffset += numExecutorsThisGpu;
 
-    std::vector<ConsolidatedPinnedBuffer*> gpuBufferPtrs;
-    gpuBufferPtrs.reserve(numExecutorsThisGpu);
-    for (int i = 0; i < numExecutorsThisGpu; ++i) {
-      gpuBufferPtrs.push_back(&pinnedBuffers[startExecutorIdx + i]);
-    }
-
-    gpuThreads.emplace_back([=, &macroMutex, &macroCv, &macroEpoch, &shutdown, &currentMacro,
-                             &doneMutex, &doneCv, &gpusDone,
-                             &queriesHost, &queriesDevice, &leafSubpatterns, &results, &resultsMutex,
-                             &nextMiniBatchIdx, &exceptions]() mutable {
+    gpuThreads.emplace_back([=, &batchQueue, &bufferPool, &queriesHost, &queriesDevice,
+                             &leafSubpatterns, &results, &resultsMutex, &exceptions]() mutable {
       try {
-        ScopedNvtxRange coordRange("GPU" + std::to_string(deviceId) + " coordinator (macro)");
+        ScopedNvtxRange coordRange("GPU" + std::to_string(deviceId) + " coordinator (pipeline)");
         const WithDevice setDevice(deviceId);
 
-        // Executors must be declared before device objects so streams outlive async memory.
         std::vector<std::unique_ptr<GpuExecutor>> executors;
-        executors.reserve(gpuBufferPtrs.size());
-        for (size_t i = 0; i < gpuBufferPtrs.size(); ++i) {
-          auto executor = std::make_unique<GpuExecutor>(startWorkerIdx * executorsPerRunner + static_cast<int>(i), deviceId);
-          executor->bindPinnedBuffer(*gpuBufferPtrs[i]);
+        executors.reserve(static_cast<size_t>(numExecutorsThisGpu));
+        for (int i = 0; i < numExecutorsThisGpu; ++i) {
+          auto executor = std::make_unique<GpuExecutor>(startWorkerIdx * executorsPerRunner + i, deviceId);
           executor->initializeForStream();
           executors.push_back(std::move(executor));
         }
 
-        std::unique_ptr<MoleculesDevice> localTargets;
         std::unique_ptr<MoleculesDevice> localQueries;
         std::unique_ptr<LeafSubpatterns> localLeafPatterns;
 
-        MoleculesDevice* targetsPtr = nullptr;
         const MoleculesDevice* queriesPtr = &queriesDevice;
         const LeafSubpatterns* leafPtr = &leafSubpatterns;
 
         if (deviceId != currentDevice) {
-          localTargets = std::make_unique<MoleculesDevice>();
           localQueries = std::make_unique<MoleculesDevice>();
           localQueries->copyFromHost(queriesHost);
           localLeafPatterns = std::make_unique<LeafSubpatterns>();
           localLeafPatterns->buildAllPatterns(queriesHost);
           localLeafPatterns->syncToDevice(nullptr);
-          targetsPtr = localTargets.get();
           queriesPtr = localQueries.get();
           leafPtr = localLeafPatterns.get();
-        } else {
-          localTargets = std::make_unique<MoleculesDevice>();
-          targetsPtr = localTargets.get();
         }
-
-        // Per-GPU worker dispatch
-        std::mutex              localMutex;
-        std::condition_variable localCv;
-        int                     localEpoch = 0;
-        bool                    localShutdown = false;
-        const ThreadWorkerContext* localCtx = nullptr;
-        int                     localTotalMiniBatches = 0;
-        int                     localMiniBatchSize = 0;
-        cudaEvent_t             localUpstreamEvent = nullptr;
-        int                     localWorkersRemaining = 0;
-
-        ScopedCudaEvent upstreamEventStorage;
-
-        auto workerLoop = [&](int globalIdx, const std::vector<GpuExecutor*>& workerExecutors) {
-          int seenEpoch = 0;
-          while (true) {
-            const ThreadWorkerContext* ctxPtr = nullptr;
-            int totalMiniBatches = 0;
-            int miniBatchSize = 0;
-            cudaEvent_t upstreamEvent = nullptr;
-
-            {
-              ScopedNvtxRange waitRange("Worker " + std::to_string(globalIdx) + " wait for next batch");
-              std::unique_lock<std::mutex> lock(localMutex);
-              localCv.wait(lock, [&]() { return localEpoch != seenEpoch || localShutdown; });
-              if (localShutdown) {
-                return;
-              }
-              seenEpoch     = localEpoch;
-              ctxPtr        = localCtx;
-              totalMiniBatches  = localTotalMiniBatches;
-              miniBatchSize     = localMiniBatchSize;
-              upstreamEvent = localUpstreamEvent;
-            }
-
-            if (boolResults) {
-              runnerWorkerInlineBoolean(globalIdx,
-                                 std::cref(*ctxPtr),
-                                 std::ref(*targetsPtr),
-                                 std::cref(*queriesPtr),
-                                 std::cref(queriesHost),
-                                 std::cref(*leafPtr),
-                                 std::ref(*boolResults),
-                                 std::ref(resultsMutex),
-                                 algorithm,
-                                 upstreamEvent,
-                                 std::ref(nextMiniBatchIdx),
-                                 totalMiniBatches,
-                                 miniBatchSize,
-                                 deviceId,
-                                 workerExecutors,
-                                 std::ref(exceptions[globalIdx]));
-            } else if (countResults) {
-              runnerWorkerInlineCounts(globalIdx,
-                                 std::cref(*ctxPtr),
-                                 std::ref(*targetsPtr),
-                                 std::cref(*queriesPtr),
-                                 std::cref(queriesHost),
-                                 std::cref(*leafPtr),
-                                 std::ref(*countResults),
-                                 std::ref(resultsMutex),
-                                 algorithm,
-                                 upstreamEvent,
-                                 std::ref(nextMiniBatchIdx),
-                                 totalMiniBatches,
-                                 miniBatchSize,
-                                 deviceId,
-                                 workerExecutors,
-                                 std::ref(exceptions[globalIdx]));
-            } else {
-              runnerWorkerInline(globalIdx,
-                                 std::cref(*ctxPtr),
-                                 std::ref(*targetsPtr),
-                                 std::cref(*queriesPtr),
-                                 std::cref(queriesHost),
-                                 std::cref(*leafPtr),
-                                 std::ref(results),
-                                 std::ref(resultsMutex),
-                                 algorithm,
-                                 upstreamEvent,
-                                 std::ref(nextMiniBatchIdx),
-                                 totalMiniBatches,
-                                 miniBatchSize,
-                                 deviceId,
-                                 workerExecutors,
-                                 std::ref(exceptions[globalIdx]),
-                                 fallbackQueue);
-            }
-
-            {
-              std::lock_guard<std::mutex> lock(localMutex);
-              --localWorkersRemaining;
-              if (localWorkersRemaining == 0) {
-                localCv.notify_all();
-              }
-            }
-          }
-        };
 
         std::vector<std::thread> workers;
         workers.reserve(numWorkersThisGpu);
@@ -1835,61 +1560,53 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
           for (int s = 0; s < executorsPerRunner; ++s) {
             workerExecutors.push_back(executors[w * executorsPerRunner + s].get());
           }
-          workers.emplace_back(workerLoop, globalIdx, workerExecutors);
-        }
 
-        int seenMacroEpoch = 0;
-        while (true) {
-          MacroData* macro = nullptr;
-          int epoch = 0;
-
-          {
-            std::unique_lock<std::mutex> lock(macroMutex);
-            macroCv.wait(lock, [&]() { return macroEpoch != seenMacroEpoch || shutdown; });
-            if (shutdown) {
-              break;
+          auto workerLoop = [&, globalIdx, workerExecutors]() mutable {
+            if (boolResults) {
+              runnerWorkerPipelineBoolean(globalIdx,
+                                          std::cref(*queriesPtr),
+                                          std::cref(*leafPtr),
+                                          std::ref(*boolResults),
+                                          std::ref(resultsMutex),
+                                          algorithm,
+                                          deviceId,
+                                          std::move(workerExecutors),
+                                          std::ref(batchQueue),
+                                          std::ref(bufferPool),
+                                          std::ref(exceptions[globalIdx]));
+            } else if (countResults) {
+              runnerWorkerPipelineCounts(globalIdx,
+                                         std::cref(*queriesPtr),
+                                         std::cref(*leafPtr),
+                                         std::ref(*countResults),
+                                         std::ref(resultsMutex),
+                                         algorithm,
+                                         deviceId,
+                                         std::move(workerExecutors),
+                                         std::ref(batchQueue),
+                                         std::ref(bufferPool),
+                                         std::ref(exceptions[globalIdx]));
+            } else {
+              runnerWorkerPipelineResults(globalIdx,
+                                          std::cref(*queriesPtr),
+                                          std::cref(*leafPtr),
+                                          std::ref(results),
+                                          std::ref(resultsMutex),
+                                          algorithm,
+                                          deviceId,
+                                          std::move(workerExecutors),
+                                          std::ref(batchQueue),
+                                          std::ref(bufferPool),
+                                          fallbackQueue,
+                                          std::ref(exceptions[globalIdx]));
             }
-            epoch = macroEpoch;
-            macro = currentMacro;
-            seenMacroEpoch = epoch;
-          }
+          };
 
-          // Copy macro targets to this GPU and produce an upstream event for slots to wait on.
-          cudaStream_t copyStream = executors.front()->stream();
-          targetsPtr->copyFromHost(macro->targetsHost, copyStream);
-          cudaCheckError(cudaEventRecord(upstreamEventStorage.event(), copyStream));
-
-          // Reset local worker counter and publish macro parameters to workers.
-          {
-            std::lock_guard<std::mutex> lock(localMutex);
-            localCtx           = &macro->ctx;
-            localTotalMiniBatches  = macro->totalNumMiniBatches;
-            localMiniBatchSize     = macro->effectiveMiniBatchSize;
-            localUpstreamEvent = upstreamEventStorage.event();
-            localWorkersRemaining = numWorkersThisGpu;
-            localEpoch = epoch;
-          }
-          localCv.notify_all();
-
-          // Wait for all local workers to finish this macro.
-          {
-            std::unique_lock<std::mutex> lock(localMutex);
-            localCv.wait(lock, [&]() { return localWorkersRemaining == 0; });
-          }
-
-          // Notify global done.
-          gpusDone.fetch_add(1, std::memory_order_release);
-          doneCv.notify_one();
+          workers.emplace_back(workerLoop);
         }
 
-        // Shutdown local workers.
-        {
-          std::lock_guard<std::mutex> lock(localMutex);
-          localShutdown = true;
-        }
-        localCv.notify_all();
-        for (auto& w : workers) {
-          w.join();
+        for (auto& worker : workers) {
+          worker.join();
         }
       } catch (...) {
         exceptions[startWorkerIdx] = std::current_exception();
@@ -1898,83 +1615,158 @@ void runMacroBatchedSubstructSearch(const std::vector<const RDKit::ROMol*>& gpuT
   }
   launchRange.pop();
 
-  // Double-buffered macro build + run loop on the main thread.
-  MacroData buffers[2];
-  initializeMacroContextQueries(buffers[0].ctx);
-  initializeMacroContextQueries(buffers[1].ctx);
+  ScopedNvtxRange preprocessRange("CPU: Preprocess micro-batches");
+  std::vector<std::thread> preprocessThreads;
+  preprocessThreads.reserve(effectivePreprocessingThreads);
 
-  // Build first macro (blocking) so workers can start quickly.
-  buildMacro(0, buffers[0]);
-
-  for (int macroIdx = 0; macroIdx < numMacros; ++macroIdx) {
-    MacroData& current = buffers[macroIdx % 2];
-
-    // Reset global batch counter for this macro, then publish new macro epoch.
-    nextMiniBatchIdx.store(0, std::memory_order_relaxed);
-    gpusDone.store(0, std::memory_order_relaxed);
-    {
-      std::lock_guard<std::mutex> lock(macroMutex);
-      currentMacro = &current;
-      ++macroEpoch;
+  struct BufferReleaseGuard {
+    PinnedBufferPool* pool = nullptr;
+    ConsolidatedPinnedBuffer* buffer = nullptr;
+    ~BufferReleaseGuard() {
+      if (pool && buffer) {
+        pool->release(buffer);
+      }
     }
-    macroCv.notify_all();
+    void release() { buffer = nullptr; }
+  };
 
-    // Build next macro while GPUs are working on current.
-    if (macroIdx + 1 < numMacros) {
-      buildMacro(macroIdx + 1, buffers[(macroIdx + 1) % 2]);
-    }
+  for (int t = 0; t < effectivePreprocessingThreads; ++t) {
+    preprocessThreads.emplace_back([&, t]() {
+      try {
+        ScopedNvtxRange threadRange("Preprocess thread " + std::to_string(t));
+        std::vector<const RDKit::ROMol*> batchTargets;
+        std::vector<int> batchOriginalIndices;
+        std::vector<RDKitFallbackEntry> fallbackEntries;
+        batchTargets.reserve(static_cast<size_t>(targetsPerBatch));
+        batchOriginalIndices.reserve(static_cast<size_t>(targetsPerBatch));
 
-    // Process RDKit fallback work while waiting for GPUs to finish.
-    // This hides fallback latency in the preprocessing thread's idle time.
-    // Use OMP parallel to leverage preprocessing threads for fallback processing.
-    if (fallbackQueue != nullptr && fallbackQueue->hasWork()) {
-      ScopedNvtxRange fallbackWhileWaitingRange("Process RDKit fallback while waiting");
-      
-      // Use OMP threads to process fallback work until GPUs are done or queue is empty
-      #pragma omp parallel num_threads(effectivePreprocessingThreads)
-      {
         while (true) {
-          // Lock-free check if GPUs are done
-          if (gpusDone.load(std::memory_order_acquire) >= activeGpus) {
+          const int start = nextTargetIdx.fetch_add(targetsPerBatch, std::memory_order_relaxed);
+          if (start >= numTargets) {
             break;
           }
-          
-          // Try to process one fallback entry
-          if (!fallbackQueue->tryProcessOne()) {
-            // Queue empty - exit this worker
-            break;
+
+          const int end = std::min(start + targetsPerBatch, numTargets);
+          batchTargets.clear();
+          batchOriginalIndices.clear();
+          fallbackEntries.clear();
+
+          for (int i = start; i < end; ++i) {
+            const RDKit::ROMol* target = targets[i];
+            const unsigned int atomCount = target->getNumAtoms();
+            const bool needsFallback = (atomCount > kMaxTargetAtoms) || requiresRDKitFallback(target);
+            if (needsFallback) {
+              for (int q = 0; q < numQueries; ++q) {
+                fallbackEntries.push_back({i, q});
+              }
+              continue;
+            }
+            batchTargets.push_back(target);
+            batchOriginalIndices.push_back(i);
+          }
+
+          if (!fallbackEntries.empty() && fallbackQueue != nullptr) {
+            fallbackQueue->enqueue(fallbackEntries);
+          }
+
+          if (batchTargets.empty()) {
+            if (fallbackQueue != nullptr) {
+              fallbackQueue->tryProcessOne();
+            }
+            continue;
+          }
+
+          MoleculesHost targetsHost;
+          std::vector<int> emptySortOrder;
+          buildTargetBatchParallelInto(targetsHost, 1, batchTargets, emptySortOrder);
+
+          auto sharedTargetsHost = std::make_shared<MoleculesHost>(std::move(targetsHost));
+          auto sharedOriginalIndices = std::make_shared<std::vector<int>>(std::move(batchOriginalIndices));
+          batchOriginalIndices.clear();
+          batchOriginalIndices.reserve(static_cast<size_t>(targetsPerBatch));
+
+          const int numBatchTargets = static_cast<int>(sharedOriginalIndices->size());
+          auto sharedAtomCounts = std::make_shared<std::vector<int>>(static_cast<size_t>(numBatchTargets));
+
+          int localMaxTargetAtoms = 0;
+          int localMaxBondsPerAtom = 0;
+          for (int tIdx = 0; tIdx < numBatchTargets; ++tIdx) {
+            const int atomStart = sharedTargetsHost->batchAtomStarts[tIdx];
+            const int atomEnd   = sharedTargetsHost->batchAtomStarts[tIdx + 1];
+            const int atoms     = atomEnd - atomStart;
+            (*sharedAtomCounts)[tIdx] = atoms;
+            localMaxTargetAtoms = std::max(localMaxTargetAtoms, atoms);
+            for (int a = atomStart; a < atomEnd; ++a) {
+              localMaxBondsPerAtom = std::max(
+                  localMaxBondsPerAtom,
+                  static_cast<int>(sharedTargetsHost->targetAtomBonds[a].degree));
+            }
+          }
+
+          const int totalPairs = numBatchTargets * numQueries;
+          for (int pairOffset = 0; pairOffset < totalPairs; pairOffset += maxPairsPerBatch) {
+            ConsolidatedPinnedBuffer* buffer = bufferPool.acquire();
+            if (buffer == nullptr) {
+              break;
+            }
+            BufferReleaseGuard innerReleaseGuard{&bufferPool, buffer};
+
+            auto batch = std::make_unique<PreparedMiniBatch>();
+            batch->pinnedBuffer = buffer;
+            batch->targetsHost = sharedTargetsHost;
+            batch->targetOriginalIndices = sharedOriginalIndices;
+            batch->targetAtomCounts = sharedAtomCounts;
+
+            batch->ctx.queryAtomCounts = queryContext.queryAtomCounts.data();
+            batch->ctx.queryDepths     = queryContext.queryDepths.data();
+            batch->ctx.queryMaxDepths  = queryContext.queryMaxDepths.data();
+            batch->ctx.queryHasPatterns = queryContext.queryHasPatterns.data();
+            batch->ctx.targetAtomCounts = sharedAtomCounts.get();
+            batch->ctx.targetOriginalIndices = sharedOriginalIndices.get();
+            batch->ctx.numTargets     = numBatchTargets;
+            batch->ctx.numQueries     = numQueries;
+            batch->ctx.maxTargetAtoms = localMaxTargetAtoms;
+            batch->ctx.maxQueryAtoms  = queryContext.maxQueryAtoms;
+            batch->ctx.maxBondsPerAtom = localMaxBondsPerAtom;
+            batch->ctx.maxMatches     = config.maxMatches;
+            batch->ctx.countOnly      = countOnly;
+            batch->ctx.templateConfig = selectTemplateConfig(localMaxTargetAtoms,
+                                                             queryContext.maxQueryAtoms,
+                                                             localMaxBondsPerAtom);
+
+            prepareMiniBatchOnCPU(batch->plan, *buffer, batch->ctx, leafSubpatterns, pairOffset, maxPairsPerBatch);
+
+            innerReleaseGuard.release();
+            batchQueue.push(std::move(batch));
+          }
+
+          if (fallbackQueue != nullptr && fallbackQueue->hasWork()) {
+            fallbackQueue->tryProcessOne();
           }
         }
+      } catch (...) {
+        preprocessExceptions[t] = std::current_exception();
       }
-      
-      // Ensure GPUs have finished (in case queue emptied before GPUs were done)
-      {
-        std::unique_lock<std::mutex> lock(doneMutex);
-        doneCv.wait(lock, [&]() { return gpusDone.load(std::memory_order_acquire) >= activeGpus; });
-      }
-    } else {
-      std::unique_lock<std::mutex> lock(doneMutex);
-      doneCv.wait(lock, [&]() { return gpusDone.load(std::memory_order_acquire) >= activeGpus; });
-    }
+    });
   }
 
-  // Shut down coordinators.
-  {
-    std::lock_guard<std::mutex> lock(macroMutex);
-    shutdown = true;
+  for (auto& t : preprocessThreads) {
+    t.join();
   }
-  macroCv.notify_all();
+  preprocessRange.pop();
 
-  ScopedNvtxRange joinRange("CPU: Join GPU coordinators (macro)");
+  batchQueue.close();
+
+  ScopedNvtxRange joinRange("CPU: Join GPU coordinators (pipeline)");
   for (auto& t : gpuThreads) {
     t.join();
   }
   joinRange.pop();
 
-  if (megaBuffer != nullptr) {
-    char* bufferToFree = megaBuffer;
-    AsyncResourceCleaner::instance().scheduleCleanup([bufferToFree]() { cudaFreeHost(bufferToFree); });
-    megaBuffer = nullptr;
+  for (const auto& ex : preprocessExceptions) {
+    if (ex) {
+      std::rethrow_exception(ex);
+    }
   }
 
   for (const auto& ex : exceptions) {
@@ -2312,85 +2104,12 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
   effectiveConfig.workerThreads = effectiveWorkerThreads;
   effectiveConfig.gpuIds = gpuIds;
 
-  ScopedNvtxRange preprocessRange("Preprocess molecules");
-  std::vector<unsigned int> targetAtomCounts(numTargets);
-  std::vector<unsigned int> queryAtomCounts(numQueries);
-  std::vector<uint8_t> needsFallback(numTargets);
-
-#pragma omp parallel num_threads(effectivePreprocessingThreads)
-  {
-#pragma omp for nowait
-    for (int i = 0; i < numTargets; ++i) {
-      targetAtomCounts[i] = targets[i]->getNumAtoms();
-      needsFallback[i] = (targetAtomCounts[i] > kMaxTargetAtoms) || requiresRDKitFallback(targets[i]);
-    }
-#pragma omp for
-    for (int i = 0; i < numQueries; ++i) {
-      queryAtomCounts[i] = queries[i]->getNumAtoms();
-    }
-  }
-
-  std::vector<RDKitFallbackEntry> fallbackTargets;
-  std::vector<int>                gpuTargetIndices;
-  std::vector<const RDKit::ROMol*> gpuTargets;
-  int                             numFallbackTargets = 0;
-
-  gpuTargetIndices.reserve(numTargets);
-  gpuTargets.reserve(numTargets);
-
-  for (int i = 0; i < numTargets; ++i) {
-    if (needsFallback[i]) {
-      ++numFallbackTargets;
-      for (int q = 0; q < numQueries; ++q) {
-        fallbackTargets.push_back({i, q});
-      }
-    } else {
-      gpuTargetIndices.push_back(i);
-      gpuTargets.push_back(targets[i]);
-    }
-  }
-  preprocessRange.pop();
-  
-  if (numFallbackTargets > 0) {
-    ScopedNvtxRange warnRange("WARNING: " + std::to_string(numFallbackTargets) + 
-                              " targets will use RDKit fallback");
-  }
-
   // Initialize results for all original targets
   results.resize(numTargets, numQueries);
 
-  // If no GPU-processable targets, just run RDKit fallback (no queue needed)
-  if (gpuTargets.empty()) {
-    ScopedNvtxRange allFallbackRange("ALL TARGETS - full RDKit fallback");
-    std::mutex resultsMutex;
-    RDKitFallbackQueue fallbackQueue(&targets, &queries, &results, &resultsMutex, config.maxMatches, boolResults, countResults);
-    fallbackQueue.enqueue(fallbackTargets);
-    while (fallbackQueue.tryProcessOne()) {}
-    return;
-  }
-
-  // Compute atom counts for GPU-processable targets
-  std::vector<unsigned int> gpuTargetAtomCounts(gpuTargets.size());
-  for (size_t i = 0; i < gpuTargets.size(); ++i) {
-    gpuTargetAtomCounts[i] = targetAtomCounts[gpuTargetIndices[i]];
-  }
-
-  std::vector<int> querySortOrder;
-  const int numGpuTargets = static_cast<int>(gpuTargets.size());
-
-  if (config.presort) {
-    ScopedNvtxRange sortRange("Compute sort ordering");
-
-    querySortOrder.resize(numQueries);
-    std::iota(querySortOrder.begin(), querySortOrder.end(), 0);
-
-    std::sort(querySortOrder.begin(), querySortOrder.end(), [&](int a, int b) {
-      return queryAtomCounts[a] > queryAtomCounts[b];
-    });
-  }
-
   ScopedNvtxRange buildRange2("Build host query data structures");
-  MoleculesHost queriesHost = buildQueryBatchParallel(queries, querySortOrder, effectivePreprocessingThreads);
+  std::vector<int> emptySortOrder;
+  MoleculesHost queriesHost = buildQueryBatchParallel(queries, emptySortOrder, effectivePreprocessingThreads);
   buildRange2.pop();
 
   ScopedNvtxRange buildRange3("Build device query data structures");
@@ -2411,41 +2130,71 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
   // Workers use different streams, so we need an explicit sync here.
   cudaCheckError(cudaStreamSynchronize(stream));
 
+  QueryPreprocessContext queryContext;
+  queryContext.numQueries = numQueries;
+  queryContext.queryAtomCounts.resize(numQueries);
+  queryContext.queryDepths.resize(numQueries);
+  queryContext.queryMaxDepths.resize(numQueries);
+  queryContext.queryHasPatterns.resize(numQueries);
+
+  const int precomputedSize      = static_cast<int>(leafSubpatterns.perQueryPatterns.size());
+  const int perQueryMaxDepthSize = static_cast<int>(leafSubpatterns.perQueryMaxDepth.size());
+
+  int maxQueryAtoms = 0;
+  int maxDepthSeen  = 0;
+
+#pragma omp parallel num_threads(effectivePreprocessingThreads) reduction(max:maxQueryAtoms, maxDepthSeen)
+  {
+#pragma omp for nowait
+    for (int q = 0; q < numQueries; ++q) {
+      const int atomStart = queriesHost.batchAtomStarts[q];
+      const int atomEnd   = queriesHost.batchAtomStarts[q + 1];
+      const int atomCount = atomEnd - atomStart;
+      queryContext.queryAtomCounts[q] = atomCount;
+
+      const int depth        = getQueryRecursionDepth(queriesHost, q);
+      queryContext.queryDepths[q] = depth;
+      maxDepthSeen           = std::max(maxDepthSeen, depth);
+
+      const int maxDepth     = (q < perQueryMaxDepthSize) ? leafSubpatterns.perQueryMaxDepth[q] : 0;
+      queryContext.queryMaxDepths[q] = maxDepth;
+
+      const bool hasPatterns = (q < precomputedSize) &&
+                               (maxDepth > 0 || !leafSubpatterns.perQueryPatterns[q][0].empty());
+      queryContext.queryHasPatterns[q] = hasPatterns ? 1 : 0;
+
+      maxQueryAtoms          = std::max(maxQueryAtoms, atomCount);
+    }
+  }
+
+  if (maxDepthSeen > kMaxRecursionDepth) {
+    throw std::runtime_error("Recursive SMARTS depth " + std::to_string(maxDepthSeen) +
+                             " exceeds maximum supported depth of " +
+                             std::to_string(kMaxRecursionDepth));
+  }
+  queryContext.maxQueryAtoms = maxQueryAtoms;
+
   // Mutex shared between GPU batch accumulation and fallback queue processing
   std::mutex resultsMutex;
   
-  // Create fallback queue to collect overflow from GPU processing.
-  // Preprocessing threads will opportunistically process entries while waiting for GPUs.
+  // Create fallback queue to collect overflow and oversized targets.
   RDKitFallbackQueue fallbackQueue(&targets, &queries, &results, &resultsMutex, config.maxMatches, boolResults, countResults);
 
-  // Enqueue oversized target fallbacks - processed opportunistically during macro batch loop
-  if (!fallbackTargets.empty()) {
-    ScopedNvtxRange enqueueRange("Enqueue oversized targets for opportunistic processing");
-    fallbackQueue.enqueue(fallbackTargets);
-  }
-
-  // Macro-batch overlap:
-  // Run target preprocessing (macro-batches) overlapped with persistent GPU worker threads.
-  // Preprocessing threads will process RDKit fallback work while waiting for GPUs.
-  runMacroBatchedSubstructSearch(gpuTargets,
-                                gpuTargetIndices,
-                                gpuTargetAtomCounts,
-                                queriesHost,
-                                queriesDevice,
-                                leafSubpatterns,
-                                results,
-                                algorithm,
-                                stream,
-                                effectiveConfig,
-                                querySortOrder,
-                                effectivePreprocessingThreads,
-                                &fallbackQueue,
-                                boolResults,
-                                countResults);
+  runPipelinedSubstructSearch(targets,
+                              queriesHost,
+                              queriesDevice,
+                              leafSubpatterns,
+                              queryContext,
+                              results,
+                              algorithm,
+                              stream,
+                              effectiveConfig,
+                              effectivePreprocessingThreads,
+                              &fallbackQueue,
+                              boolResults,
+                              countResults);
 
   // Process any remaining fallback entries after GPU work completes.
-  // This handles overflow entries added during GPU processing and any
-  // oversized targets not processed during the wait periods.
   while (fallbackQueue.tryProcessOne()) {}
 
   if (!boolResults && config.uniquify) {

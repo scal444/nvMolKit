@@ -5,10 +5,8 @@ from rdkit.Chem import Mol
 
 class SubstructSearchConfig:
     batchSize: int
-    macroBatchMinibatches: int
     workerThreads: int
     preprocessingThreads: int  # Also handles RDKit fallback opportunistically
-    presort: bool
     maxMatches: int
     uniquify: bool
     gpuIds: list[int]

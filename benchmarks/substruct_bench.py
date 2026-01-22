@@ -39,8 +39,6 @@ Usage:
     # Use multiprocessing for RDKit with 8 processes:
     python substruct_bench.py --smiles <smiles_file> --smarts <smarts_file> --rdkit_threads 8
 
-    # Disable molecule presorting by atom count:
-    python substruct_bench.py --smiles <smiles_file> --smarts <smarts_file> --no_presort
 """
 
 import argparse
@@ -314,10 +312,7 @@ def main():
     parser.add_argument("--warmup", action="store_true", dest="warmup", help="Perform warmup run (default)")
     parser.add_argument("--no_warmup", action="store_false", dest="warmup", help="Skip warmup run")
     parser.set_defaults(warmup=True)
-    parser.add_argument("--presort", action="store_true", dest="presort", help="Sort molecules by atom count (default)")
-    parser.add_argument("--no_presort", action="store_false", dest="presort", help="Disable molecule sorting")
-    parser.set_defaults(presort=True)
-    
+
     args = parser.parse_args()
     
     if not args.smiles and not args.pickle:
@@ -345,7 +340,6 @@ def main():
         print(f"    batch_size: {args.batch_size}")
         print(f"    workers: {args.workers if args.workers >= 0 else 'auto'}")
         print(f"    prep_threads: {args.prep_threads if args.prep_threads >= 0 else 'auto'}")
-        print(f"    presort: {args.presort}")
     
     print("\nLoading molecules...")
     if args.pickle:
@@ -378,7 +372,6 @@ def main():
             config.batchSize = args.batch_size
             config.workerThreads = args.workers
             config.preprocessingThreads = args.prep_threads
-            config.presort = args.presort
             if args.max_matches > 0:
                 config.maxMatches = args.max_matches
             torch.cuda.cudart().cudaProfilerStart()
@@ -475,14 +468,13 @@ def main():
             print(f"  Full match agreement: {matches}/{total} ({pct:.1f}%)")
     
     print("\n\nCSV Results:")
-    print("method,mode,num_mols,num_patterns,max_matches,batch_size,workers,prep_threads,presort,rdkit_threads,time_ms,std_ms")
+    print("method,mode,num_mols,num_patterns,max_matches,batch_size,workers,prep_threads,rdkit_threads,time_ms,std_ms")
     for name, (avg_ms, std_ms, _) in results.items():
         batch_size = args.batch_size if name == "nvmolkit" else "N/A"
         workers = args.workers if name == "nvmolkit" else "N/A"
         prep_threads = args.prep_threads if name == "nvmolkit" else "N/A"
-        presort = args.presort if name == "nvmolkit" else "N/A"
         rdkit_threads = args.rdkit_threads if name == "rdkit" else "N/A"
-        print(f"{name},{args.mode},{len(mols)},{num_patterns},{args.max_matches},{batch_size},{workers},{prep_threads},{presort},{rdkit_threads},{avg_ms:.2f},{std_ms:.2f}")
+        print(f"{name},{args.mode},{len(mols)},{num_patterns},{args.max_matches},{batch_size},{workers},{prep_threads},{rdkit_threads},{avg_ms:.2f},{std_ms:.2f}")
 
 
 if __name__ == "__main__":

@@ -298,5 +298,61 @@ void AsyncResourceCleaner::flush() {
   flushCv_.wait(lock, [this] { return pendingCount_ == 0; });
 }
 
+// =============================================================================
+// PinnedBufferPool Implementation
+// =============================================================================
+
+void PinnedBufferPool::initialize(int poolSize,
+                                  int maxBatchSize,
+                                  int maxMatchIndicesEstimate,
+                                  int maxPatternsPerDepth) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  buffers_.clear();
+  std::queue<ConsolidatedPinnedBuffer*> empty;
+  available_.swap(empty);
+  shutdown_ = false;
+
+  buffers_.reserve(static_cast<size_t>(poolSize));
+  for (int i = 0; i < poolSize; ++i) {
+    auto buffer = std::make_unique<ConsolidatedPinnedBuffer>();
+    buffer->allocate(maxBatchSize, maxMatchIndicesEstimate, maxPatternsPerDepth);
+    available_.push(buffer.get());
+    buffers_.push_back(std::move(buffer));
+  }
+}
+
+ConsolidatedPinnedBuffer* PinnedBufferPool::acquire() {
+  std::unique_lock<std::mutex> lock(mutex_);
+  cv_.wait(lock, [this] { return shutdown_ || !available_.empty(); });
+  if (shutdown_) {
+    return nullptr;
+  }
+  ConsolidatedPinnedBuffer* buffer = available_.front();
+  available_.pop();
+  return buffer;
+}
+
+void PinnedBufferPool::release(ConsolidatedPinnedBuffer* buffer) {
+  if (buffer == nullptr) {
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (shutdown_) {
+      return;
+    }
+    available_.push(buffer);
+  }
+  cv_.notify_one();
+}
+
+void PinnedBufferPool::shutdown() {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    shutdown_ = true;
+  }
+  cv_.notify_all();
+}
+
 }  // namespace nvMolKit
 

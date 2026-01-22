@@ -31,8 +31,7 @@ namespace nvMolKit {
 /**
  * @brief Perform batch substructure matching on GPU.
  *
- * Molecules are sorted by atom count (largest first) for improved GPU efficiency,
- * and results are returned in the original input order.
+ * Targets are processed in input order and results are returned in the same order.
  *
  * @param targets Vector of target molecule pointers
  * @param queries Vector of query molecule pointers (typically from SMARTS)

@@ -28,6 +28,7 @@
 #include <mutex>
 #include <queue>
 #include <thread>
+#include <vector>
 
 #include "cuda_error_check.h"
 
@@ -168,6 +169,36 @@ class AsyncResourceCleaner {
   std::condition_variable                 flushCv_;
   std::atomic<bool>                       shutdown_{false};
   std::atomic<int>                        pendingCount_{0};
+};
+
+/**
+ * @brief Thread-safe pool of consolidated pinned buffers.
+ *
+ * Pre-allocates a fixed number of ConsolidatedPinnedBuffer instances and
+ * allows concurrent acquire/release from preprocessing and worker threads.
+ */
+class PinnedBufferPool {
+ public:
+  PinnedBufferPool() = default;
+
+  PinnedBufferPool(const PinnedBufferPool&)            = delete;
+  PinnedBufferPool& operator=(const PinnedBufferPool&) = delete;
+
+  void initialize(int poolSize,
+                  int maxBatchSize,
+                  int maxMatchIndicesEstimate,
+                  int maxPatternsPerDepth);
+
+  ConsolidatedPinnedBuffer* acquire();
+  void release(ConsolidatedPinnedBuffer* buffer);
+  void shutdown();
+
+ private:
+  std::vector<std::unique_ptr<ConsolidatedPinnedBuffer>> buffers_;
+  std::queue<ConsolidatedPinnedBuffer*>                  available_;
+  std::mutex                                             mutex_;
+  std::condition_variable                                cv_;
+  bool                                                   shutdown_ = false;
 };
 
 }  // namespace nvMolKit

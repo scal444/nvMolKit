@@ -327,7 +327,6 @@ void printHelp(const char* progName) {
   std::cout << "  -e, --num_preproc <int>   Number of CPU preprocessor threads (0 = inline) [default: 0]\n";
   std::cout << "  -S, --slots <int>         Slots per runner for inline mode (1-8) [default: 3]\n";
   std::cout << "  -G, --multi_gpu <bool>    Use all available GPUs [default: false]\n";
-  std::cout << "  -s, --presort <bool>      Sort molecules by size for GPU efficiency [default: true]\n";
   std::cout << "  -r, --do_rdkit <bool>     Run RDKit benchmark comparison [default: true]\n";
   std::cout << "  -w, --do_warmup <bool>    Run warmup before benchmarking [default: true]\n";
   std::cout << "  -v, --validate <bool>     Validate GPU results against RDKit [default: false]\n";
@@ -362,7 +361,6 @@ int main(int argc, char* argv[]) {
   int                numPreprocessors = 0;
   int                executorsPerRunner   = 3;
   bool               useMultiGpu      = false;
-  bool               doPresort        = true;
   bool               doRdkit          = true;
   bool               doWarmup         = true;
   bool               doValidate       = false;
@@ -383,7 +381,6 @@ int main(int argc, char* argv[]) {
     {  "num_preproc", required_argument, 0, 'e'},
     {        "slots", required_argument, 0, 'S'},
     {    "multi_gpu", required_argument, 0, 'G'},
-    {      "presort", required_argument, 0, 's'},
     {     "do_rdkit", required_argument, 0, 'r'},
     {    "do_warmup", required_argument, 0, 'w'},
     {     "validate", required_argument, 0, 'v'},
@@ -398,7 +395,7 @@ int main(int argc, char* argv[]) {
   int option_index = 0;
   int c;
 
-  while ((c = getopt_long(argc, argv, "t:q:n:m:a:b:c:p:e:S:G:s:r:w:v:P:d:M:H:h", long_options, &option_index)) != -1) {
+  while ((c = getopt_long(argc, argv, "t:q:n:m:a:b:c:p:e:S:G:r:w:v:P:d:M:H:h", long_options, &option_index)) != -1) {
     switch (c) {
       case 't':
         targetsPath = optarg;
@@ -501,9 +498,6 @@ int main(int argc, char* argv[]) {
       case 'G':
         useMultiGpu = parseBoolArg(optarg);
         break;
-      case 's':
-        doPresort = parseBoolArg(optarg);
-        break;
       case 'r':
         doRdkit = parseBoolArg(optarg);
         break;
@@ -595,7 +589,6 @@ int main(int argc, char* argv[]) {
   std::cout << "  Preprocessing threads: " << numPreprocessors << "\n";
   std::cout << "  Executors per runner: " << executorsPerRunner << "\n";
   std::cout << "  Multi-GPU: " << (useMultiGpu ? "yes" : "no") << " (" << numGpus << " GPU(s))\n";
-  std::cout << "  Presort by size: " << (doPresort ? "yes" : "no") << "\n";
   std::cout << "  Run RDKit comparison: " << (doRdkit ? "yes" : "no") << "\n";
   std::cout << "  Run warmup: " << (doWarmup ? "yes" : "no") << "\n";
   std::cout << "  Validate results: " << (doValidate ? "yes" : "no") << "\n";
@@ -650,7 +643,6 @@ int main(int argc, char* argv[]) {
   benchConfig.workerThreads        = numRunners;
   benchConfig.preprocessingThreads = numPreprocessors;
   benchConfig.executorsPerRunner       = executorsPerRunner;
-  benchConfig.presort              = doPresort;
   benchConfig.gpuIds               = gpuIds;
   benchConfig.maxMatches           = maxMatches;
 
@@ -705,14 +697,14 @@ int main(int argc, char* argv[]) {
   }
 
   std::cout << "\n\nCSV Results:\n";
-  std::cout << "algorithm,num_targets,num_queries,batch_size,num_runners,num_preproc,slots,num_gpus,presort,max_matches,has_match_only,nvmolkit_time_ms,nvmolkit_std_ms";
+  std::cout << "algorithm,num_targets,num_queries,batch_size,num_runners,num_preproc,slots,num_gpus,max_matches,has_match_only,nvmolkit_time_ms,nvmolkit_std_ms";
   if (doRdkit) {
     std::cout << ",rdkit_time_ms,rdkit_std_ms";
   }
   std::cout << "\n";
 
   std::cout << algorithmName(algorithm) << "," << targetMols.size() << "," << queryMols.size() << ","
-            << batchSize << "," << numRunners << "," << numPreprocessors << "," << executorsPerRunner << "," << numGpus << "," << (doPresort ? 1 : 0) << ","
+            << batchSize << "," << numRunners << "," << numPreprocessors << "," << executorsPerRunner << "," << numGpus << ","
             << maxMatches << "," << (hasMatchOnly ? 1 : 0) << ","
             << nvmolkitTiming.avgMs << "," << nvmolkitTiming.stdMs;
   if (doRdkit) {
