@@ -1231,6 +1231,7 @@ void runnerWorkerPipeline(int                               workerIdx,
                           InitiateCopyFunc&&                initiateCopy,
                           AccumulateFunc&&                  accumulate,
                           RDKitFallbackQueue*               fallbackQueue,
+                          std::atomic<bool>&                pipelineAbort,
                           std::exception_ptr&               exceptionPtr) {
   try {
     FallbackQueueProducerGuard producerGuard(fallbackQueue);
@@ -1247,7 +1248,7 @@ void runnerWorkerPipeline(int                               workerIdx,
     auto drainOne = [&]() {
       InFlightBatch& slot = pending[pendingHead];
       GpuExecutor* oldest = slot.executor;
-      ScopedNvtxRange waitRange("Wait for D2H copy");
+      ScopedNvtxRange waitRange("Wait for D2H copy", NvtxColor::kRed);
       cudaCheckError(cudaEventSynchronize(oldest->copyDoneEvent.event()));
       waitRange.pop();
 
@@ -1276,7 +1277,10 @@ void runnerWorkerPipeline(int                               workerIdx,
           continue;
         }
       } else {
-        batch = batchQueue.pop();
+        {
+          ScopedNvtxRange waitRange("Wait for prepared batch", NvtxColor::kRed);
+          batch = batchQueue.pop();
+        }
         if (!batch) {
           break;
         }
@@ -1309,6 +1313,9 @@ void runnerWorkerPipeline(int                               workerIdx,
     }
   } catch (...) {
     exceptionPtr = std::current_exception();
+    pipelineAbort.store(true, std::memory_order_release);
+    batchQueue.close();
+    bufferPool.shutdown();
   }
 }
 
@@ -1323,6 +1330,7 @@ void runnerWorkerPipelineResults(int                               workerIdx,
                                  PreparedBatchQueue&               batchQueue,
                                  PinnedBufferPool&                 bufferPool,
                                  RDKitFallbackQueue*               fallbackQueue,
+                                 std::atomic<bool>&                pipelineAbort,
                                  std::exception_ptr&               exceptionPtr) {
   auto initiateCopy = [&](GpuExecutor& executor) {
     initiateResultsCopyToHost(executor);
@@ -1332,7 +1340,7 @@ void runnerWorkerPipelineResults(int                               workerIdx,
   };
   runnerWorkerPipeline(workerIdx, queriesDevice, leafSubpatterns, algorithm, deviceId,
                        std::move(executors), batchQueue, bufferPool,
-                       initiateCopy, accumulate, fallbackQueue, exceptionPtr);
+                       initiateCopy, accumulate, fallbackQueue, pipelineAbort, exceptionPtr);
 }
 
 void runnerWorkerPipelineBoolean(int                               workerIdx,
@@ -1345,6 +1353,7 @@ void runnerWorkerPipelineBoolean(int                               workerIdx,
                                  std::vector<GpuExecutor*>         executors,
                                  PreparedBatchQueue&               batchQueue,
                                  PinnedBufferPool&                 bufferPool,
+                                 std::atomic<bool>&                pipelineAbort,
                                  std::exception_ptr&               exceptionPtr) {
   auto initiateCopy = [&](GpuExecutor& executor) {
     initiateCountsOnlyCopyToHost(executor);
@@ -1354,7 +1363,7 @@ void runnerWorkerPipelineBoolean(int                               workerIdx,
   };
   runnerWorkerPipeline(workerIdx, queriesDevice, leafSubpatterns, algorithm, deviceId,
                        std::move(executors), batchQueue, bufferPool,
-                       initiateCopy, accumulate, nullptr, exceptionPtr);
+                       initiateCopy, accumulate, nullptr, pipelineAbort, exceptionPtr);
 }
 
 void runnerWorkerPipelineCounts(int                               workerIdx,
@@ -1367,6 +1376,7 @@ void runnerWorkerPipelineCounts(int                               workerIdx,
                                 std::vector<GpuExecutor*>         executors,
                                 PreparedBatchQueue&               batchQueue,
                                 PinnedBufferPool&                 bufferPool,
+                                std::atomic<bool>&                pipelineAbort,
                                 std::exception_ptr&               exceptionPtr) {
   auto initiateCopy = [&](GpuExecutor& executor) {
     initiateCountsOnlyCopyToHost(executor);
@@ -1376,7 +1386,7 @@ void runnerWorkerPipelineCounts(int                               workerIdx,
   };
   runnerWorkerPipeline(workerIdx, queriesDevice, leafSubpatterns, algorithm, deviceId,
                        std::move(executors), batchQueue, bufferPool,
-                       initiateCopy, accumulate, nullptr, exceptionPtr);
+                       initiateCopy, accumulate, nullptr, pipelineAbort, exceptionPtr);
 }
 
 }  // namespace
@@ -1494,6 +1504,7 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
 
   PreparedBatchQueue batchQueue;
   std::atomic<int> nextTargetIdx{0};
+  std::atomic<bool> pipelineAbort{false};
 
   // Use the fallback queue's mutex if available (ensures GPU batch accumulation
   // and fallback processing use the same mutex to avoid race conditions)
@@ -1522,7 +1533,8 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
     executorOffset += numExecutorsThisGpu;
 
     gpuThreads.emplace_back([=, &batchQueue, &bufferPool, &queriesHost, &queriesDevice,
-                             &leafSubpatterns, &results, &resultsMutex, &exceptions]() mutable {
+                             &leafSubpatterns, &results, &resultsMutex, &exceptions,
+                             &pipelineAbort]() mutable {
       try {
         ScopedNvtxRange coordRange("GPU" + std::to_string(deviceId) + " coordinator (pipeline)");
         const WithDevice setDevice(deviceId);
@@ -1573,6 +1585,7 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
                                           std::move(workerExecutors),
                                           std::ref(batchQueue),
                                           std::ref(bufferPool),
+                                          std::ref(pipelineAbort),
                                           std::ref(exceptions[globalIdx]));
             } else if (countResults) {
               runnerWorkerPipelineCounts(globalIdx,
@@ -1585,6 +1598,7 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
                                          std::move(workerExecutors),
                                          std::ref(batchQueue),
                                          std::ref(bufferPool),
+                                         std::ref(pipelineAbort),
                                          std::ref(exceptions[globalIdx]));
             } else {
               runnerWorkerPipelineResults(globalIdx,
@@ -1598,6 +1612,7 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
                                           std::ref(batchQueue),
                                           std::ref(bufferPool),
                                           fallbackQueue,
+                                          std::ref(pipelineAbort),
                                           std::ref(exceptions[globalIdx]));
             }
           };
@@ -1641,6 +1656,9 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
         batchOriginalIndices.reserve(static_cast<size_t>(targetsPerBatch));
 
         while (true) {
+          if (pipelineAbort.load(std::memory_order_acquire)) {
+            break;
+          }
           const int start = nextTargetIdx.fetch_add(targetsPerBatch, std::memory_order_relaxed);
           if (start >= numTargets) {
             break;
@@ -1705,7 +1723,14 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
 
           const int totalPairs = numBatchTargets * numQueries;
           for (int pairOffset = 0; pairOffset < totalPairs; pairOffset += maxPairsPerBatch) {
-            ConsolidatedPinnedBuffer* buffer = bufferPool.acquire();
+            if (pipelineAbort.load(std::memory_order_acquire)) {
+              break;
+            }
+            ConsolidatedPinnedBuffer* buffer = nullptr;
+            {
+              ScopedNvtxRange waitRange("Wait for pinned buffer", NvtxColor::kRed);
+              buffer = bufferPool.acquire();
+            }
             if (buffer == nullptr) {
               break;
             }
@@ -1730,9 +1755,10 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
             batch->ctx.maxBondsPerAtom = localMaxBondsPerAtom;
             batch->ctx.maxMatches     = config.maxMatches;
             batch->ctx.countOnly      = countOnly;
-            batch->ctx.templateConfig = selectTemplateConfig(localMaxTargetAtoms,
-                                                             queryContext.maxQueryAtoms,
-                                                             localMaxBondsPerAtom);
+          const int templateTargetAtoms = std::max(localMaxTargetAtoms, queryContext.maxQueryAtoms);
+          batch->ctx.templateConfig = selectTemplateConfig(templateTargetAtoms,
+                                                           queryContext.maxQueryAtoms,
+                                                           localMaxBondsPerAtom);
 
             prepareMiniBatchOnCPU(batch->plan, *buffer, batch->ctx, leafSubpatterns, pairOffset, maxPairsPerBatch);
 
@@ -1746,6 +1772,9 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
         }
       } catch (...) {
         preprocessExceptions[t] = std::current_exception();
+        pipelineAbort.store(true, std::memory_order_release);
+        batchQueue.close();
+        bufferPool.shutdown();
       }
     });
   }
@@ -2104,8 +2133,11 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
   effectiveConfig.workerThreads = effectiveWorkerThreads;
   effectiveConfig.gpuIds = gpuIds;
 
-  // Initialize results for all original targets
-  results.resize(numTargets, numQueries);
+  {
+    ScopedNvtxRange setupRange("Prepare search context");
+    // Initialize results for all original targets
+    results.resize(numTargets, numQueries);
+  }
 
   ScopedNvtxRange buildRange2("Build host query data structures");
   std::vector<int> emptySortOrder;
@@ -2250,10 +2282,13 @@ void hasSubstructMatch(const std::vector<const RDKit::ROMol*>& targets,
     return;
   }
 
-  SubstructSearchConfig hasMatchConfig = config;
-  hasMatchConfig.maxMatches = 1;
-
+  SubstructSearchConfig hasMatchConfig;
   SubstructSearchResults matchResults;
+  {
+    ScopedNvtxRange setupRange("hasSubstructMatch setup");
+    hasMatchConfig = config;
+    hasMatchConfig.maxMatches = 1;
+  }
   getSubstructMatchesImpl(targets, queries, matchResults, algorithm, stream, hasMatchConfig, &results, nullptr);
 
   for (auto& [pairIdx, matches] : matchResults.matches) {
