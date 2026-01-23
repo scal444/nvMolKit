@@ -39,9 +39,13 @@ Usage:
     # Use multiprocessing for RDKit with 8 processes:
     python substruct_bench.py --smiles <smiles_file> --smarts <smarts_file> --rdkit_threads 8
 
+    # Run multiple configurations from a dataframe (smarts, batch_size, workers, prep_threads, mode, num_gpus):
+    python substruct_bench.py --smiles <smiles_file> --config <config.csv>
+
 """
 
 import argparse
+import gc
 import pickle
 import sys
 import time
@@ -50,9 +54,9 @@ from multiprocessing import Pool
 from typing import Callable
 
 import nvtx
+import pandas as pd
 from rdkit import Chem, RDLogger
 from tqdm.contrib.concurrent import process_map
-
 
 def time_it(func: Callable, runs: int = 1) -> tuple[float, float]:
     """Time a function and return (avg_ms, std_ms)."""
@@ -73,9 +77,19 @@ def load_pickle(filepath: str, max_count: int = 0) -> list[Chem.Mol]:
         binary_mols = pickle.load(f)
     if max_count > 0:
         binary_mols = binary_mols[:max_count]
-    mols = [Chem.Mol(b) for b in binary_mols]
+    mols = process_map(
+        _mol_from_binary,
+        binary_mols,
+        desc="Unpickling molecules",
+        chunksize=1000,
+    )
     print(f"  Loaded {len(mols)} molecules from {filepath}")
     return mols
+
+
+def _mol_from_binary(binary_mol: bytes) -> Chem.Mol:
+    """Load a molecule from RDKit binary format."""
+    return Chem.Mol(binary_mol)
 
 
 def _parse_smiles(smi: str, sanitize: bool) -> Chem.Mol | None:
@@ -287,13 +301,24 @@ def bench_nvmolkit(
     return avg_ms, std_ms, results_data
 
 
+def _load_config_dataframe(config_path: str) -> list[dict]:
+    return pd.read_csv(config_path).to_dict("records")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Substructure search benchmark: nvmolkit vs RDKit SubstructMatch"
     )
     parser.add_argument("--smiles", "-s", help="Path to SMILES file with molecules to search")
     parser.add_argument("--pickle", help="Path to pickled molecules file (alternative to --smiles)")
-    parser.add_argument("--smarts", "-q", required=True, help="Path to SMARTS file with query patterns")
+    parser.add_argument("--smarts", "-q", help="Path to SMARTS file with query patterns")
+    parser.add_argument(
+        "--config",
+        help=(
+            "Path to config dataframe (.csv/.pkl/.pickle/.parquet) with columns: "
+            "smarts, batch_size, workers, prep_threads, mode, num_gpus"
+        ),
+    )
     parser.add_argument("--num_mols", "-n", type=int, default=0, help="Max number of molecules (default: 0 = all)")
     parser.add_argument("--sanitize", action="store_true", dest="sanitize", help="Sanitize SMILES during parsing")
     parser.add_argument("--no_sanitize", action="store_false", dest="sanitize", help="Skip sanitization (preprocessed SMILES)")
@@ -309,9 +334,13 @@ def main():
     parser.add_argument("--batch_size", "-b", type=int, default=1024, help="nvmolkit batch size (default: 1024)")
     parser.add_argument("--workers", type=int, default=-1, help="nvmolkit GPU worker threads per GPU (-1 = auto)")
     parser.add_argument("--prep_threads", type=int, default=-1, help="nvmolkit preprocessing threads (-1 = auto)")
+    parser.add_argument("--num_gpus", type=int, default=1, help="Number of GPUs to use (default: 1)")
     parser.add_argument("--warmup", action="store_true", dest="warmup", help="Perform warmup run (default)")
     parser.add_argument("--no_warmup", action="store_false", dest="warmup", help="Skip warmup run")
     parser.set_defaults(warmup=True)
+    parser.add_argument("--validate", action="store_true", dest="validate", help="Validate nvmolkit vs RDKit (default)")
+    parser.add_argument("--no_validate", action="store_false", dest="validate", help="Skip validation checks")
+    parser.set_defaults(validate=True)
 
     args = parser.parse_args()
     
@@ -323,23 +352,46 @@ def main():
         print("Error: Cannot specify both --smiles and --pickle")
         sys.exit(1)
     
+    if args.config and args.smarts:
+        print("Error: --smarts cannot be used with --config")
+        sys.exit(1)
+
+    if not args.config and not args.smarts:
+        print("Error: --smarts is required unless --config is provided")
+        sys.exit(1)
+
+    input_file = args.smiles or args.pickle
+    input_type = "pickle" if args.pickle else "smiles"
+
+    sanitize_value = args.sanitize if args.smiles else "N/A"
+
+    if args.num_gpus <= 0:
+        print("Error: --num_gpus must be >= 1")
+        sys.exit(1)
+
     print("\nConfiguration:")
-    print(f"  Input file: {args.smiles or args.pickle} ({'pickle' if args.pickle else 'smiles'})")
-    print(f"  SMARTS file: {args.smarts}")
+    print(f"  Input file: {input_file} ({input_type})")
+    print(f"  Sanitize: {sanitize_value}")
     print(f"  Max molecules: {args.num_mols if args.num_mols > 0 else 'all'}")
-    print(f"  Mode: {args.mode}")
     print(f"  Max matches: {args.max_matches if args.max_matches > 0 else 'all'}")
     print(f"  Runs: {args.runs}")
     print(f"  Warmup: {args.warmup}")
+    print(f"  Validate: {args.validate}")
     print(f"  Run nvmolkit: {not args.no_nvmolkit}")
     print(f"  Run RDKit: {not args.no_rdkit}")
     if not args.no_rdkit:
         print(f"  RDKit threads: {args.rdkit_threads}")
-    if not args.no_nvmolkit:
-        print(f"  nvmolkit config:")
-        print(f"    batch_size: {args.batch_size}")
-        print(f"    workers: {args.workers if args.workers >= 0 else 'auto'}")
-        print(f"    prep_threads: {args.prep_threads if args.prep_threads >= 0 else 'auto'}")
+    if args.config:
+        print(f"  Config dataframe: {args.config}")
+    else:
+        print(f"  SMARTS file: {args.smarts}")
+        print(f"  Mode: {args.mode}")
+        if not args.no_nvmolkit:
+            print(f"  nvmolkit config:")
+            print(f"    batch_size: {args.batch_size}")
+            print(f"    num_gpus: {args.num_gpus}")
+            print(f"    workers: {args.workers if args.workers >= 0 else 'auto'}")
+            print(f"    prep_threads: {args.prep_threads if args.prep_threads >= 0 else 'auto'}")
     
     print("\nLoading molecules...")
     if args.pickle:
@@ -351,130 +403,223 @@ def main():
         print("Error: No valid molecules loaded")
         sys.exit(1)
     
-    print("\nLoading SMARTS patterns...")
-    queries, _ = load_smarts(args.smarts)
-    if len(queries) == 0:
-        print("Error: No valid SMARTS patterns loaded from file")
-        sys.exit(1)
-    
-    num_patterns = len(queries)
-    print(f"\nBenchmarking substructure search ({args.mode}): {len(mols)} molecules × {num_patterns} patterns")
-    print("=" * 70)
-    
-    results = {}
-    
-    if not args.no_nvmolkit:
-        try:
-            from nvmolkit.substructure import SubstructSearchConfig, countSubstructMatches, hasSubstructMatch, getSubstructMatches
-            import torch
-            
-            config = SubstructSearchConfig()
-            config.batchSize = args.batch_size
-            config.workerThreads = args.workers
-            config.preprocessingThreads = args.prep_threads
-            if args.max_matches > 0:
-                config.maxMatches = args.max_matches
-            torch.cuda.cudart().cudaProfilerStart()
-            
-            if args.warmup:
-                print("\nWarming up nvmolkit...")
-                warmup_mols = mols[:10]
-                with nvtx.annotate("nvmolkit_warmup", color="purple"):
-                    if args.mode == "hasSubstructMatch":
-                        hasSubstructMatch(warmup_mols, queries, config)
-                    elif args.mode == "countSubstructMatches":
-                        countSubstructMatches(warmup_mols, queries, config)
-                    else:
-                        getSubstructMatches(warmup_mols, queries, config)
-                    torch.cuda.synchronize()
-            
-            print("Running nvmolkit GPU benchmark...")
-            nvmolkit_avg, nvmolkit_std, nvmolkit_results = bench_nvmolkit(
-                mols, queries, args.runs, args.mode, config
-            )
-            print(f"  nvmolkit:        {nvmolkit_avg:10.2f} ms (± {nvmolkit_std:.2f} ms)")
-            results["nvmolkit"] = (nvmolkit_avg, nvmolkit_std, nvmolkit_results)
-            torch.cuda.cudart().cudaProfilerStop()
+    if args.config:
+        config_rows = _load_config_dataframe(args.config)
+    else:
+        config_rows = [
+            {
+                "smarts": args.smarts,
+                "batch_size": args.batch_size,
+                "workers": args.workers,
+                "prep_threads": args.prep_threads,
+                "mode": args.mode,
+                "num_gpus": args.num_gpus,
+            }
+        ]
 
-        except ImportError as e:
-            print(f"  nvmolkit: SKIPPED (import error: {e})")
-    
-    if not args.no_rdkit:
-        print("\nRunning RDKit SubstructMatch benchmark...")
-        rdkit_avg, rdkit_std, rdkit_results = bench_rdkit_substruct(
-            mols, queries, args.runs, args.mode, args.max_matches, args.rdkit_threads
-        )
-        print(f"  RDKit:           {rdkit_avg:10.2f} ms (± {rdkit_std:.2f} ms)")
-        results["rdkit"] = (rdkit_avg, rdkit_std, rdkit_results)
-    
-    print("\n" + "=" * 70)
-    print("Summary:")
-    
-    if not results:
-        print("  No benchmarks were run!")
-        sys.exit(1)
-    
-    baseline = None
-    if "rdkit" in results:
-        baseline = ("RDKit", results["rdkit"][0])
-    
-    for name, (avg_ms, std_ms, _) in results.items():
-        speedup_str = ""
-        if baseline and name != "rdkit":
-            speedup = baseline[1] / avg_ms if avg_ms > 0 else 0
-            speedup_str = f", {speedup:.1f}x vs {baseline[0]}"
-        print(f"  {name:20s}: {avg_ms:10.2f} ms (± {std_ms:.2f} ms){speedup_str}")
-    
-    if "nvmolkit" in results and "rdkit" in results:
-        print("\nValidation:")
-        nvmolkit_data = results["nvmolkit"][2]
-        rdkit_data = results["rdkit"][2]
-        
-        if args.mode == "hasSubstructMatch":
-            matches = 0
-            total = 0
-            for t in range(len(mols)):
-                for q in range(len(queries)):
-                    nv_match = bool(nvmolkit_data[t][q])
-                    rd_match = rdkit_data[t][q]
-                    if nv_match == rd_match:
-                        matches += 1
-                    total += 1
-            pct = 100.0 * matches / total if total > 0 else 0
-            print(f"  Boolean match agreement: {matches}/{total} ({pct:.1f}%)")
-        elif args.mode == "countSubstructMatches":
-            matches = 0
-            total = 0
-            for t in range(len(mols)):
-                for q in range(len(queries)):
-                    nv_count = int(nvmolkit_data[t][q])
-                    rd_count = int(rdkit_data[t][q])
-                    if nv_count == rd_count:
-                        matches += 1
-                    total += 1
-            pct = 100.0 * matches / total if total > 0 else 0
-            print(f"  Count agreement: {matches}/{total} ({pct:.1f}%)")
+    smarts_cache: dict[str, tuple[list[Chem.Mol], list[str]]] = {}
+    csv_rows = []
+
+    for config_row in config_rows:
+        smarts_path = config_row["smarts"]
+        mode = config_row["mode"]
+
+        print("\nRun configuration:")
+        print(f"  SMARTS file: {smarts_path}")
+        print(f"  Mode: {mode}")
+        if not args.no_nvmolkit:
+            print(f"  nvmolkit config:")
+            print(f"    batch_size: {config_row['batch_size']}")
+            print(f"    num_gpus: {config_row['num_gpus']}")
+            print(f"    workers: {config_row['workers'] if config_row['workers'] >= 0 else 'auto'}")
+            print(f"    prep_threads: {config_row['prep_threads'] if config_row['prep_threads'] >= 0 else 'auto'}")
+
+        if smarts_path in smarts_cache:
+            queries, _ = smarts_cache[smarts_path]
         else:
-            matches = 0
-            total = 0
-            for t in range(len(mols)):
-                for q in range(len(queries)):
-                    nv_matches = set(tuple(m) for m in nvmolkit_data[t][q])
-                    rd_matches = set(rdkit_data[t][q])
-                    if nv_matches == rd_matches:
-                        matches += 1
-                    total += 1
-            pct = 100.0 * matches / total if total > 0 else 0
-            print(f"  Full match agreement: {matches}/{total} ({pct:.1f}%)")
-    
+            print("\nLoading SMARTS patterns...")
+            queries, smarts_list = load_smarts(smarts_path)
+            if len(queries) == 0:
+                print("Error: No valid SMARTS patterns loaded from file")
+                sys.exit(1)
+            smarts_cache[smarts_path] = (queries, smarts_list)
+
+        num_patterns = len(queries)
+        print(f"\nBenchmarking substructure search ({mode}): {len(mols)} molecules × {num_patterns} patterns")
+        print("=" * 70)
+
+        results = {}
+        ran_nvmolkit = False
+        torch_module = None
+
+        if not args.no_nvmolkit:
+            try:
+                from nvmolkit.substructure import SubstructSearchConfig, countSubstructMatches, hasSubstructMatch, getSubstructMatches
+                import torch
+
+                config = SubstructSearchConfig()
+                config.batchSize = config_row["batch_size"]
+                config.workerThreads = config_row["workers"]
+                config.preprocessingThreads = config_row["prep_threads"]
+                config.gpuIds = list(range(config_row["num_gpus"]))
+                if args.max_matches > 0:
+                    config.maxMatches = args.max_matches
+                ran_nvmolkit = True
+                torch_module = torch
+                torch.cuda.cudart().cudaProfilerStart()
+
+                if args.warmup:
+                    print("\nWarming up nvmolkit...")
+                    warmup_mols = mols[:10]
+                    with nvtx.annotate("nvmolkit_warmup", color="purple"):
+                        if mode == "hasSubstructMatch":
+                            hasSubstructMatch(warmup_mols, queries, config)
+                        elif mode == "countSubstructMatches":
+                            countSubstructMatches(warmup_mols, queries, config)
+                        else:
+                            getSubstructMatches(warmup_mols, queries, config)
+                        torch.cuda.synchronize()
+
+                print("Running nvmolkit GPU benchmark...")
+                nvmolkit_avg, nvmolkit_std, nvmolkit_results = bench_nvmolkit(
+                    mols, queries, args.runs, mode, config
+                )
+                print(f"  nvmolkit:        {nvmolkit_avg:10.2f} ms (± {nvmolkit_std:.2f} ms)")
+                results["nvmolkit"] = (nvmolkit_avg, nvmolkit_std, nvmolkit_results)
+                torch.cuda.cudart().cudaProfilerStop()
+
+            except ImportError as e:
+                print(f"  nvmolkit: SKIPPED (import error: {e})")
+
+        if not args.no_rdkit:
+            print("\nRunning RDKit SubstructMatch benchmark...")
+            rdkit_avg, rdkit_std, rdkit_results = bench_rdkit_substruct(
+                mols, queries, args.runs, mode, args.max_matches, args.rdkit_threads
+            )
+            print(f"  RDKit:           {rdkit_avg:10.2f} ms (± {rdkit_std:.2f} ms)")
+            results["rdkit"] = (rdkit_avg, rdkit_std, rdkit_results)
+
+        print("\n" + "=" * 70)
+        print("Summary:")
+
+        if not results:
+            print("  No benchmarks were run!")
+            sys.exit(1)
+
+        baseline = None
+        if "rdkit" in results:
+            baseline = ("RDKit", results["rdkit"][0])
+
+        for name, (avg_ms, std_ms, _) in results.items():
+            speedup_str = ""
+            if baseline and name != "rdkit":
+                speedup = baseline[1] / avg_ms if avg_ms > 0 else 0
+                speedup_str = f", {speedup:.1f}x vs {baseline[0]}"
+            print(f"  {name:20s}: {avg_ms:10.2f} ms (± {std_ms:.2f} ms){speedup_str}")
+
+        if args.validate and "nvmolkit" in results and "rdkit" in results:
+            print("\nValidation:")
+            nvmolkit_data = results["nvmolkit"][2]
+            rdkit_data = results["rdkit"][2]
+
+            if mode == "hasSubstructMatch":
+                matches = 0
+                total = 0
+                for t in range(len(mols)):
+                    for q in range(len(queries)):
+                        nv_match = bool(nvmolkit_data[t][q])
+                        rd_match = rdkit_data[t][q]
+                        if nv_match == rd_match:
+                            matches += 1
+                        total += 1
+                pct = 100.0 * matches / total if total > 0 else 0
+                print(f"  Boolean match agreement: {matches}/{total} ({pct:.1f}%)")
+            elif mode == "countSubstructMatches":
+                matches = 0
+                total = 0
+                for t in range(len(mols)):
+                    for q in range(len(queries)):
+                        nv_count = int(nvmolkit_data[t][q])
+                        rd_count = int(rdkit_data[t][q])
+                        if nv_count == rd_count:
+                            matches += 1
+                        total += 1
+                pct = 100.0 * matches / total if total > 0 else 0
+                print(f"  Count agreement: {matches}/{total} ({pct:.1f}%)")
+            else:
+                matches = 0
+                total = 0
+                for t in range(len(mols)):
+                    for q in range(len(queries)):
+                        nv_matches = set(tuple(m) for m in nvmolkit_data[t][q])
+                        rd_matches = set(rdkit_data[t][q])
+                        if nv_matches == rd_matches:
+                            matches += 1
+                        total += 1
+                pct = 100.0 * matches / total if total > 0 else 0
+                print(f"  Full match agreement: {matches}/{total} ({pct:.1f}%)")
+
+        for name, (avg_ms, std_ms, _) in results.items():
+            batch_size = config_row["batch_size"] if name == "nvmolkit" else "N/A"
+            workers = config_row["workers"] if name == "nvmolkit" else "N/A"
+            prep_threads = config_row["prep_threads"] if name == "nvmolkit" else "N/A"
+            rdkit_threads = args.rdkit_threads if name == "rdkit" else "N/A"
+            csv_rows.append(
+                (
+                    name,
+                    mode,
+                    smarts_path,
+                    input_file,
+                    input_type,
+                    sanitize_value,
+                    len(mols),
+                    num_patterns,
+                    args.max_matches,
+                    batch_size,
+                    config_row["num_gpus"],
+                    workers,
+                    prep_threads,
+                    rdkit_threads,
+                    avg_ms,
+                    std_ms,
+                )
+            )
+
+        if ran_nvmolkit:
+            torch_module.cuda.synchronize()
+            torch_module.cuda.empty_cache()
+            torch_module.cuda.ipc_collect()
+        gc.collect()
+
     print("\n\nCSV Results:")
-    print("method,mode,num_mols,num_patterns,max_matches,batch_size,workers,prep_threads,rdkit_threads,time_ms,std_ms")
-    for name, (avg_ms, std_ms, _) in results.items():
-        batch_size = args.batch_size if name == "nvmolkit" else "N/A"
-        workers = args.workers if name == "nvmolkit" else "N/A"
-        prep_threads = args.prep_threads if name == "nvmolkit" else "N/A"
-        rdkit_threads = args.rdkit_threads if name == "rdkit" else "N/A"
-        print(f"{name},{args.mode},{len(mols)},{num_patterns},{args.max_matches},{batch_size},{workers},{prep_threads},{rdkit_threads},{avg_ms:.2f},{std_ms:.2f}")
+    print(
+        "method,mode,smarts,input_file,input_type,sanitize,num_mols,num_patterns,"
+        "max_matches,batch_size,num_gpus,workers,prep_threads,rdkit_threads,time_ms,std_ms"
+    )
+    for row in csv_rows:
+        (
+            name,
+            mode,
+            smarts_path,
+            input_file,
+            input_type,
+            sanitize,
+            num_mols,
+            num_patterns,
+            max_matches,
+            batch_size,
+            num_gpus,
+            workers,
+            prep_threads,
+            rdkit_threads,
+            avg_ms,
+            std_ms,
+        ) = row
+        print(
+            f"{name},{mode},{smarts_path},{input_file},{input_type},{sanitize},"
+            f"{num_mols},{num_patterns},{max_matches},{batch_size},{num_gpus},{workers},{prep_threads},"
+            f"{rdkit_threads},{avg_ms:.2f},{std_ms:.2f}"
+        )
 
 
 if __name__ == "__main__":

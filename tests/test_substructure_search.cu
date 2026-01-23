@@ -1548,6 +1548,7 @@ TEST_P(SubstructureSearchTest, ValidSlotsPerRunnerWorks) {
   parseMolecules({"CCO", "CCCO"}, {"C", "CC"}, targetMols, queryMols);
 
   SubstructSearchConfig config;
+  config.batchSize = 256;
 
   for (int executors = 1; executors <= 8; ++executors) {
     config.executorsPerRunner = executors;
