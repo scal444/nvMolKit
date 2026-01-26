@@ -46,11 +46,8 @@ using nvMolKit::computeRDKitLabelMatrix;
 using nvMolKit::FlatBitVect;
 using nvMolKit::kMaxTargetAtoms;
 using nvMolKit::kMaxQueryAtoms;
-using nvMolKit::getMolecule;
 using nvMolKit::MoleculesDevice;
-using nvMolKit::MoleculesDeviceView;
 using nvMolKit::MoleculesHost;
-using nvMolKit::MoleculeView;
 using nvMolKit::ScopedStream;
 
 namespace {

@@ -142,7 +142,9 @@ struct LeafSubpatterns {
   /**
    * @brief Get view for kernel access.
    */
-  [[nodiscard]] MoleculesDeviceView view() const { return patternsDevice.view(); }
+  [[nodiscard]] QueryMoleculesDeviceView view() const {
+    return patternsDevice.view<MoleculeType::Query>();
+  }
 };
 
 /**

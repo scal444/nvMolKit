@@ -32,9 +32,8 @@ using nvMolKit::AsyncDeviceVector;
 using nvMolKit::checkReturnCode;
 using nvMolKit::getMolecule;
 using nvMolKit::MoleculesDevice;
-using nvMolKit::MoleculesDeviceView;
+using nvMolKit::MoleculeType;
 using nvMolKit::MoleculesHost;
-using nvMolKit::MoleculeView;
 using nvMolKit::ScopedStream;
 
 namespace {
@@ -92,7 +91,7 @@ TEST_P(CompoundQueryParsingTest, TreeStructureMatchesOnDevice) {
   device.copyFromHost(batch);
 
   // Verify device view has query trees populated
-  auto view = device.view();
+  auto view = device.view<MoleculeType::Query>();
   EXPECT_NE(view.atomQueryTrees, nullptr)
     << "Device should have query trees for SMARTS: " << testCase.smarts;
   EXPECT_NE(view.queryInstructions, nullptr)

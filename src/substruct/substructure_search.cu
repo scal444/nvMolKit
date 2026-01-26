@@ -902,8 +902,8 @@ void launchLabelAndMatch(int                          numPairsInGroup,
 
   launchLabelMatrixKernel(
     ctx.templateConfig,
-    targetsDevice.view(),
-    queriesDevice.view(),
+    targetsDevice.view<MoleculeType::Target>(),
+    queriesDevice.view<MoleculeType::Query>(),
     globalPairIndicesDev.data(),
     numPairsInGroup,
     ctx.numQueries,
@@ -916,8 +916,8 @@ void launchLabelAndMatch(int                          numPairsInGroup,
   launchSubstructMatchKernel(
     ctx.templateConfig,
     algorithm,
-    targetsDevice.view(),
-    queriesDevice.view(),
+    targetsDevice.view<MoleculeType::Target>(),
+    queriesDevice.view<MoleculeType::Query>(),
     executor.deviceResults,
     globalPairIndicesDev.data(),
     numPairsInGroup,
@@ -1006,7 +1006,7 @@ void launchRecursivePaintKernels(
 
       launchLabelMatrixPaintKernel(
         templateConfig,
-        targetsDevice.view(),
+        targetsDevice.view<MoleculeType::Target>(),
         leafSubpatterns.view(),
         scratch.patternEntries.data(),
         static_cast<int>(numPatternsInSubBatch),
@@ -1023,7 +1023,7 @@ void launchRecursivePaintKernels(
       launchSubstructPaintKernel(
         templateConfig,
         algorithm,
-        targetsDevice.view(),
+        targetsDevice.view<MoleculeType::Target>(),
         leafSubpatterns.view(),
         scratch.patternEntries.data(),
         static_cast<int>(numPatternsInSubBatch),
@@ -1083,8 +1083,8 @@ void uploadAndLaunchMiniBatch(GpuExecutor&               executor,
 
     launchLabelMatrixKernel(
       ctx.templateConfig,
-      targetsDevice.view(),
-      queriesDevice.view(),
+      targetsDevice.view<MoleculeType::Target>(),
+      queriesDevice.view<MoleculeType::Query>(),
       executor.pairIndicesDev.data(),
       executor.numPairsInMiniBatch,
       ctx.numQueries,
@@ -1097,8 +1097,8 @@ void uploadAndLaunchMiniBatch(GpuExecutor&               executor,
     launchSubstructMatchKernel(
       ctx.templateConfig,
       algorithm,
-      targetsDevice.view(),
-      queriesDevice.view(),
+      targetsDevice.view<MoleculeType::Target>(),
+      queriesDevice.view<MoleculeType::Query>(),
       executor.deviceResults,
       executor.pairIndicesDev.data(),
       executor.numPairsInMiniBatch,
@@ -2062,7 +2062,7 @@ void preprocessRecursiveSmartsBatchedWithEvents(SubstructTemplateConfig         
 
       launchLabelMatrixPaintKernel(
         templateConfig,
-        targetsDevice.view(),
+        targetsDevice.view<MoleculeType::Target>(),
         leafSubpatterns.view(),
         scratch.patternEntries.data(),
         static_cast<int>(numPatternsInSubBatch),
@@ -2079,7 +2079,7 @@ void preprocessRecursiveSmartsBatchedWithEvents(SubstructTemplateConfig         
       launchSubstructPaintKernel(
         templateConfig,
         algorithm,
-        targetsDevice.view(),
+        targetsDevice.view<MoleculeType::Target>(),
         leafSubpatterns.view(),
         scratch.patternEntries.data(),
         static_cast<int>(numPatternsInSubBatch),

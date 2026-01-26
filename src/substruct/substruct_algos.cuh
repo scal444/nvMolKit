@@ -167,8 +167,8 @@ using CandidateList = CandidateListT<kMaxTargetAtoms>;
  * @param countOnly If true, count matches but don't store them
  */
 template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms, int MaxBondsPerAtom = kMaxBondsPerAtom>
-__device__ void vf2SearchGPU(const MoleculeView&                                   target,
-                             const MoleculeView&                                   query,
+__device__ void vf2SearchGPU(const TargetMoleculeView&                             target,
+                             const QueryMoleculeView&                              query,
                              const BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>& labelMatrix,
                              VF2StateT<MaxQueryAtoms>&                             state,
                              int                                                   startingTargetAtom,
@@ -306,8 +306,8 @@ __device__ void vf2SearchGPU(const MoleculeView&                                
  */
 template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms, int MaxBondsPerAtom = kMaxBondsPerAtom,
           SubstructOutputMode OutputMode = SubstructOutputMode::StoreMatches>
-__device__ void gsiBFSSearchGPU(const MoleculeView&                                   target,
-                                const MoleculeView&                                   query,
+__device__ void gsiBFSSearchGPU(const TargetMoleculeView&                             target,
+                                const QueryMoleculeView&                              query,
                                 const BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>& labelMatrix,
                                 PartialMatchT<MaxQueryAtoms>*                         sharedPartials,
                                 int                                                   maxPartials,

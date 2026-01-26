@@ -203,14 +203,14 @@ using LabelMatrixStorage = FlatBitVect<kMaxTargetAtoms * kMaxQueryAtoms>;
 using LabelMatrixView    = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
 
 template <std::size_t MaxTarget, std::size_t MaxQuery>
-__global__ void populateLabelMatrixKernel(MoleculesDeviceView                targetBatch,
+__global__ void populateLabelMatrixKernel(TargetMoleculesDeviceView           targetBatch,
                                           int                                targetMolIdx,
-                                          MoleculesDeviceView                queryBatch,
+                                          QueryMoleculesDeviceView            queryBatch,
                                           int                                queryMolIdx,
                                           FlatBitVect<MaxTarget * MaxQuery>* matrix,
                                           const uint32_t*                    pairRecursiveBits) {
-  MoleculeView                         target = getMolecule(targetBatch, targetMolIdx);
-  MoleculeView                         query  = getMolecule(queryBatch, queryMolIdx);
+  TargetMoleculeView                   target = getMolecule(targetBatch, targetMolIdx);
+  QueryMoleculeView                    query  = getMolecule(queryBatch, queryMolIdx);
   BitMatrix2DView<MaxTarget, MaxQuery> view(matrix);
   populateLabelMatrixOptimized<MaxTarget, MaxQuery>(target, query, view, pairRecursiveBits);
 }
@@ -365,7 +365,9 @@ std::vector<std::vector<uint8_t>> computeGpuLabelMatrix(const RDKit::ROMol& targ
   const uint32_t* pairRecursiveBits = info.empty() ? nullptr : miniBatchResults.recursiveMatchBits();
 
   populateLabelMatrixKernel<kMaxTargetAtoms, kMaxQueryAtoms>
-    <<<1, 128, 0, stream>>>(targetDevice.view(), 0, queryDevice.view(), 0, matrixDev.data(), pairRecursiveBits);
+    <<<1, 128, 0, stream>>>(targetDevice.view<MoleculeType::Target>(), 0,
+                            queryDevice.view<MoleculeType::Query>(), 0,
+                            matrixDev.data(), pairRecursiveBits);
   cudaCheckError(cudaGetLastError());
 
   std::vector<LabelMatrixStorage> resultMatrix(1);

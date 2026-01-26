@@ -159,8 +159,8 @@ inline bool& sharedMemCarveoutConfigured() {
 // =============================================================================
 
 template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
-__device__ void writeLabelMatrixToGlobal(const MoleculeView& target,
-                                         const MoleculeView& query,
+__device__ void writeLabelMatrixToGlobal(const TargetMoleculeView& target,
+                                         const QueryMoleculeView&  query,
                                          FlatBitVect<MaxTargetAtoms * MaxQueryAtoms>& sharedLabelMatrix,
                                          const uint32_t* pairRecursiveBits,
                                          uint32_t* globalOut) {
@@ -204,8 +204,8 @@ __device__ void loadLabelMatrixToShared(FlatBitVect<MaxTargetAtoms * MaxQueryAto
  * @tparam MaxQueryAtoms Maximum query atoms for label matrix sizing
  */
 template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
-__global__ void labelMatrixKernelT(MoleculesDeviceView targets,
-                                   MoleculesDeviceView queries,
+__global__ void labelMatrixKernelT(TargetMoleculesDeviceView targets,
+                                   QueryMoleculesDeviceView  queries,
                                    const int*          pairIndices,
                                    int                 numQueries,
                                    uint32_t*           labelMatrixBuffer,
@@ -225,8 +225,8 @@ __global__ void labelMatrixKernelT(MoleculesDeviceView targets,
     return;
   }
 
-  const MoleculeView target = getMolecule(targets, targetIdx);
-  const MoleculeView query  = getMolecule(queries, queryIdx);
+  const TargetMoleculeView target = getMolecule(targets, targetIdx);
+  const QueryMoleculeView  query  = getMolecule(queries, queryIdx);
 
   const uint32_t* pairRecursiveBits = recursiveMatchBits
                                         ? &recursiveMatchBits[batchLocalIdx * maxTargetAtoms]
@@ -250,8 +250,8 @@ __global__ void labelMatrixKernelT(MoleculesDeviceView targets,
  * @tparam MaxQueryAtoms Maximum query atoms for label matrix sizing
  */
 template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
-__global__ void labelMatrixPaintKernelT(MoleculesDeviceView        targets,
-                                        MoleculesDeviceView        patterns,
+__global__ void labelMatrixPaintKernelT(TargetMoleculesDeviceView  targets,
+                                        QueryMoleculesDeviceView   patterns,
                                         const BatchedPatternEntry* patternEntries,
                                         int                        numPatterns,
                                         int                        numQueries,
@@ -283,8 +283,8 @@ __global__ void labelMatrixPaintKernelT(MoleculesDeviceView        targets,
 
   const int batchLocalPairIdx = globalPairIdx - miniBatchPairOffset;
 
-  const MoleculeView target  = getMolecule(targets, targetIdx);
-  const MoleculeView pattern = getMolecule(patterns, patternMolIdx);
+  const TargetMoleculeView target  = getMolecule(targets, targetIdx);
+  const QueryMoleculeView  pattern = getMolecule(patterns, patternMolIdx);
 
   const uint32_t* pairBits = (recursiveMatchBits != nullptr)
                            ? recursiveMatchBits + batchLocalPairIdx * maxTargetAtoms
@@ -311,8 +311,8 @@ __global__ void labelMatrixPaintKernelT(MoleculesDeviceView        targets,
  * @tparam Algo Algorithm to use (VF2 or GSI)
  */
 template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms, int MaxBondsPerAtom, SubstructAlgorithm Algo>
-__global__ void substructMatchKernelT(MoleculesDeviceView                           targets,
-                                      MoleculesDeviceView                           queries,
+__global__ void substructMatchKernelT(TargetMoleculesDeviceView                      targets,
+                                      QueryMoleculesDeviceView                       queries,
                                       SubstructMatchResultsDeviceViewT<MaxQueryAtoms> results,
                                       const int*                                    pairIndices,
                                       int                                           numQueries,
@@ -328,8 +328,8 @@ __global__ void substructMatchKernelT(MoleculesDeviceView                       
     return;
   }
 
-  MoleculeView target = getMolecule(targets, targetIdx);
-  MoleculeView query  = getMolecule(queries, queryIdx);
+  TargetMoleculeView target = getMolecule(targets, targetIdx);
+  QueryMoleculeView  query  = getMolecule(queries, queryIdx);
 
   constexpr std::size_t kLabelMatrixBitsT = MaxTargetAtoms * MaxQueryAtoms;
   using LabelMatrixStorageT = FlatBitVect<kLabelMatrixBitsT>;
@@ -466,8 +466,8 @@ __global__ void substructMatchKernelT(MoleculesDeviceView                       
  * @tparam Algo Algorithm to use (VF2 or GSI)
  */
 template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms, int MaxBondsPerAtom, SubstructAlgorithm Algo>
-__global__ void substructPaintKernelT(MoleculesDeviceView             targets,
-                                      MoleculesDeviceView             patterns,
+__global__ void substructPaintKernelT(TargetMoleculesDeviceView        targets,
+                                      QueryMoleculesDeviceView         patterns,
                                       const BatchedPatternEntry*      patternEntries,
                                       int                             numPatterns,
                                       uint32_t*                       outputRecursiveBits,
@@ -502,8 +502,8 @@ __global__ void substructPaintKernelT(MoleculesDeviceView             targets,
 
   const int batchLocalPairIdx = globalPairIdx - miniBatchPairOffset;
 
-  MoleculeView target  = getMolecule(targets, targetIdx);
-  MoleculeView pattern = getMolecule(patterns, patternMolIdx);
+  TargetMoleculeView target  = getMolecule(targets, targetIdx);
+  QueryMoleculeView  pattern = getMolecule(patterns, patternMolIdx);
 
   constexpr std::size_t kLabelMatrixBitsT = MaxTargetAtoms * MaxQueryAtoms;
   constexpr std::size_t kLabelMatrixWordsT = kLabelMatrixBitsT / 32;
@@ -590,13 +590,13 @@ __global__ void substructPaintKernelT(MoleculesDeviceView             targets,
 // Helper macro to instantiate both VF2 and GSI for a given configuration
 #define INSTANTIATE_SUBSTRUCT_KERNELS(MaxT, MaxQ, MaxB) \
   template __global__ void substructMatchKernelT<MaxT, MaxQ, MaxB, SubstructAlgorithm::VF2>( \
-      MoleculesDeviceView, MoleculesDeviceView, SubstructMatchResultsDeviceViewT<MaxQ>, \
+      TargetMoleculesDeviceView, QueryMoleculesDeviceView, SubstructMatchResultsDeviceViewT<MaxQ>, \
       const int*, int, const int*, DeviceTimingsData*); \
   template __global__ void substructMatchKernelT<MaxT, MaxQ, MaxB, SubstructAlgorithm::GSI>( \
-      MoleculesDeviceView, MoleculesDeviceView, SubstructMatchResultsDeviceViewT<MaxQ>, \
+      TargetMoleculesDeviceView, QueryMoleculesDeviceView, SubstructMatchResultsDeviceViewT<MaxQ>, \
       const int*, int, const int*, DeviceTimingsData*); \
   template __global__ void substructPaintKernelT<MaxT, MaxQ, MaxB, SubstructAlgorithm::GSI>( \
-      MoleculesDeviceView, MoleculesDeviceView, const BatchedPatternEntry*, int, uint32_t*, int, int, \
+      TargetMoleculesDeviceView, QueryMoleculesDeviceView, const BatchedPatternEntry*, int, uint32_t*, int, int, \
       int, int, int, int, PartialMatchT<MaxQ>*, PartialMatchT<MaxQ>*, int, const uint32_t*, int);
 
 // Target 32, Query 16
@@ -644,10 +644,10 @@ INSTANTIATE_SUBSTRUCT_KERNELS(128, 64, 8)
 // Label matrix kernel instantiations (one per target/query combo, no MaxBonds needed)
 #define INSTANTIATE_LABEL_MATRIX_KERNEL(MaxT, MaxQ) \
   template __global__ void labelMatrixKernelT<MaxT, MaxQ>( \
-      MoleculesDeviceView, MoleculesDeviceView, const int*, int, uint32_t*, \
+      TargetMoleculesDeviceView, QueryMoleculesDeviceView, const int*, int, uint32_t*, \
       const uint32_t*, int, const int*); \
   template __global__ void labelMatrixPaintKernelT<MaxT, MaxQ>( \
-      MoleculesDeviceView, MoleculesDeviceView, const BatchedPatternEntry*, int, int, \
+      TargetMoleculesDeviceView, QueryMoleculesDeviceView, const BatchedPatternEntry*, int, int, \
       int, int, uint32_t*, int, const uint32_t*, int);
 
 INSTANTIATE_LABEL_MATRIX_KERNEL(32, 16)
@@ -670,8 +670,8 @@ INSTANTIATE_LABEL_MATRIX_KERNEL(128, 64)
 namespace {
 
 template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
-void launchLabelMatrixKernelForConfig(MoleculesDeviceView targets,
-                                      MoleculesDeviceView queries,
+void launchLabelMatrixKernelForConfig(TargetMoleculesDeviceView targets,
+                                      QueryMoleculesDeviceView  queries,
                                       const int*          pairIndices,
                                       int                 numPairs,
                                       int                 numQueries,
@@ -689,8 +689,8 @@ void launchLabelMatrixKernelForConfig(MoleculesDeviceView targets,
 }  // namespace
 
 void launchLabelMatrixKernel(SubstructTemplateConfig config,
-                             MoleculesDeviceView targets,
-                             MoleculesDeviceView queries,
+                             TargetMoleculesDeviceView targets,
+                             QueryMoleculesDeviceView  queries,
                              const int*          pairIndices,
                              int                 numPairs,
                              int                 numQueries,
@@ -739,8 +739,8 @@ void launchLabelMatrixKernel(SubstructTemplateConfig config,
 namespace {
 
 template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
-void launchLabelMatrixPaintKernelForConfig(MoleculesDeviceView        targets,
-                                           MoleculesDeviceView        patterns,
+void launchLabelMatrixPaintKernelForConfig(TargetMoleculesDeviceView  targets,
+                                           QueryMoleculesDeviceView   patterns,
                                            const BatchedPatternEntry* patternEntries,
                                            int                        numPatterns,
                                            int                        numBlocks,
@@ -762,8 +762,8 @@ void launchLabelMatrixPaintKernelForConfig(MoleculesDeviceView        targets,
 }  // namespace
 
 void launchLabelMatrixPaintKernel(SubstructTemplateConfig    config,
-                                  MoleculesDeviceView        targets,
-                                  MoleculesDeviceView        patterns,
+                                  TargetMoleculesDeviceView  targets,
+                                  QueryMoleculesDeviceView   patterns,
                                   const BatchedPatternEntry* patternEntries,
                                   int                        numPatterns,
                                   int                        numBlocks,
@@ -817,8 +817,8 @@ namespace {
 
 template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms, int MaxBondsPerAtom>
 void launchSubstructPaintKernelForConfig(SubstructAlgorithm          algorithm,
-                                         MoleculesDeviceView         targets,
-                                         MoleculesDeviceView         patterns,
+                                         TargetMoleculesDeviceView   targets,
+                                         QueryMoleculesDeviceView    patterns,
                                          const BatchedPatternEntry*  patternEntries,
                                          int                         numPatterns,
                                          int                         numBlocks,
@@ -856,8 +856,8 @@ void launchSubstructPaintKernelForConfig(SubstructAlgorithm          algorithm,
 
 void launchSubstructPaintKernel(SubstructTemplateConfig     config,
                                 SubstructAlgorithm          algorithm,
-                                MoleculesDeviceView         targets,
-                                MoleculesDeviceView         patterns,
+                                TargetMoleculesDeviceView   targets,
+                                QueryMoleculesDeviceView    patterns,
                                 const BatchedPatternEntry*  patternEntries,
                                 int                         numPatterns,
                                 int                         numBlocks,
@@ -921,8 +921,8 @@ namespace {
 
 template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms, int MaxBondsPerAtom>
 void launchMatchKernelForConfig(SubstructAlgorithm             algorithm,
-                                MoleculesDeviceView            targets,
-                                MoleculesDeviceView            queries,
+                                TargetMoleculesDeviceView      targets,
+                                QueryMoleculesDeviceView       queries,
                                 const MiniBatchResultsDevice&  miniBatchResults,
                                 const int*                     pairIndices,
                                 int                            numPairs,
@@ -968,8 +968,8 @@ void launchMatchKernelForConfig(SubstructAlgorithm             algorithm,
 
 void launchSubstructMatchKernel(SubstructTemplateConfig        config,
                                 SubstructAlgorithm             algorithm,
-                                MoleculesDeviceView            targets,
-                                MoleculesDeviceView            queries,
+                                TargetMoleculesDeviceView      targets,
+                                QueryMoleculesDeviceView       queries,
                                 const MiniBatchResultsDevice&  miniBatchResults,
                                 const int*                     pairIndices,
                                 int                            numPairs,

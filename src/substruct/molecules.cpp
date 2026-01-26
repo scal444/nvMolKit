@@ -425,14 +425,25 @@ void MoleculesDevice::copyFromHost(const MoleculesHost& host, cudaStream_t strea
   }
 }
 
-MoleculesDeviceView MoleculesDevice::view() const {
-  MoleculesDeviceView v;
+template <>
+TargetMoleculesDeviceView MoleculesDevice::view<MoleculeType::Target>() const {
+  TargetMoleculesDeviceView v;
+  v.batchAtomStarts = batchAtomStarts_.data();
+  v.numMolecules    = numMolecules_;
+  v.atomDataPacked  = atomDataPacked_.data();
+  v.bondTypeCounts  = bondTypeCounts_.data();
+  v.targetAtomBonds = targetAtomBonds_.data();
+  return v;
+}
+
+template <>
+QueryMoleculesDeviceView MoleculesDevice::view<MoleculeType::Query>() const {
+  QueryMoleculesDeviceView v;
   v.batchAtomStarts     = batchAtomStarts_.data();
   v.numMolecules        = numMolecules_;
   v.atomDataPacked      = atomDataPacked_.data();
   v.atomQueryMasks      = atomQueryMasks_.data();
   v.bondTypeCounts      = bondTypeCounts_.data();
-  v.targetAtomBonds     = targetAtomBonds_.data();
   v.queryAtomBonds      = queryAtomBonds_.data();
   v.atomQueryTrees      = atomQueryTrees_.data();
   v.queryInstructions   = queryInstructions_.data();

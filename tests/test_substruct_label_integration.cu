@@ -166,13 +166,13 @@ using LabelMatrixStorage = FlatBitVect<kMaxTargetAtoms * kMaxQueryAtoms>;
 using LabelMatrixView    = BitMatrix2DView<kMaxTargetAtoms, kMaxQueryAtoms>;
 
 template <std::size_t MaxTarget, std::size_t MaxQuery>
-__global__ void populateLabelMatrixKernelForIntegration(nvMolKit::MoleculesDeviceView targetsView,
-                                                        int                          targetIdx,
-                                                        nvMolKit::MoleculesDeviceView queriesView,
-                                                        int                          queryIdx,
-                                                        LabelMatrixStorage*          output) {
-  nvMolKit::MoleculeView target = nvMolKit::getMolecule(targetsView, targetIdx);
-  nvMolKit::MoleculeView query  = nvMolKit::getMolecule(queriesView, queryIdx);
+__global__ void populateLabelMatrixKernelForIntegration(nvMolKit::TargetMoleculesDeviceView targetsView,
+                                                        int                                targetIdx,
+                                                        nvMolKit::QueryMoleculesDeviceView  queriesView,
+                                                        int                                queryIdx,
+                                                        LabelMatrixStorage*                output) {
+  nvMolKit::TargetMoleculeView target = nvMolKit::getMolecule(targetsView, targetIdx);
+  nvMolKit::QueryMoleculeView  query  = nvMolKit::getMolecule(queriesView, queryIdx);
 
   BitMatrix2DView<MaxTarget, MaxQuery> view(*output);
   nvMolKit::populateLabelMatrixOptimized<MaxTarget, MaxQuery>(target, query, view);
@@ -247,7 +247,11 @@ TEST_P(LabelMatrixIntegrationTest, ChemblVsSmartsLabelMatrix) {
       matrixDev.setFromVector(std::vector<LabelMatrixStorage>{hostMatrix});
 
       populateLabelMatrixKernelForIntegration<kMaxTargetAtoms, kMaxQueryAtoms>
-        <<<1, 128, 0, stream_.stream()>>>(targetsDevice.view(), t, queriesDevice.view(), q, matrixDev.data());
+        <<<1, 128, 0, stream_.stream()>>>(targetsDevice.view<nvMolKit::MoleculeType::Target>(),
+                                          t,
+                                          queriesDevice.view<nvMolKit::MoleculeType::Query>(),
+                                          q,
+                                          matrixDev.data());
       cudaCheckError(cudaGetLastError());
 
       std::vector<LabelMatrixStorage> resultMatrix(1);

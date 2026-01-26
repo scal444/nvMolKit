@@ -182,31 +182,61 @@ struct MoleculesHost {
 };
 
 /**
- * @brief Device-side view into batched molecule data.
+ * @brief Molecule type for device-side views.
+ */
+enum class MoleculeType : uint8_t { Target, Query };
+
+/**
+ * @brief Device-side view into batched molecule data (templated by molecule type).
  *
  * This structure contains pointers to device memory for the full batch.
  * This is a POD struct that can be passed to CUDA kernels by value.
  * Use getMolecule() from molecules_device.cuh to get per-molecule views.
+ *
+ * @tparam Type MoleculeType::Target or MoleculeType::Query
  */
-struct MoleculesDeviceView {
-  const int* batchAtomStarts;
+template <MoleculeType Type>
+struct MoleculesDeviceViewT;
+
+/**
+ * @brief Device-side view for target molecule batches.
+ */
+template <>
+struct MoleculesDeviceViewT<MoleculeType::Target> {
+  int const* batchAtomStarts;
   int        numMolecules;
 
   // GPU-optimized packed data
-  const AtomDataPacked*  atomDataPacked;   ///< Packed atom properties for GPU matching
-  const AtomQueryMask*   atomQueryMasks;   ///< Precomputed query masks (query molecules only)
-  const BondTypeCounts*  bondTypeCounts;   ///< Precomputed bond type counts per atom
-  const TargetAtomBonds* targetAtomBonds;  ///< Packed bond adjacency for targets
-  const QueryAtomBonds*  queryAtomBonds;   ///< Packed bond adjacency for queries
+  AtomDataPacked const*  atomDataPacked;   ///< Packed atom properties for GPU matching
+  BondTypeCounts const*  bondTypeCounts;   ///< Precomputed bond type counts per atom
+  TargetAtomBonds const* targetAtomBonds;  ///< Packed bond adjacency for targets
+};
+
+/**
+ * @brief Device-side view for query molecule batches.
+ */
+template <>
+struct MoleculesDeviceViewT<MoleculeType::Query> {
+  int const* batchAtomStarts;
+  int        numMolecules;
+
+  // GPU-optimized packed data
+  AtomDataPacked const* atomDataPacked;  ///< Packed atom properties for GPU matching
+  AtomQueryMask const*  atomQueryMasks;  ///< Precomputed query masks
+  BondTypeCounts const* bondTypeCounts;  ///< Precomputed bond type counts per atom
+  QueryAtomBonds const* queryAtomBonds;  ///< Packed bond adjacency for queries
 
   // Boolean expression tree data for compound queries
-  const AtomQueryTree*   atomQueryTrees;       ///< Tree metadata per query atom
-  const BoolInstruction* queryInstructions;    ///< Flattened instruction arrays
-  const AtomQueryMask*   queryLeafMasks;       ///< Flattened leaf masks for compound queries
-  const BondTypeCounts*  queryLeafBondCounts;  ///< Flattened leaf bond counts
-  const int*             atomInstrStarts;      ///< Start index into queryInstructions per atom
-  const int*             atomLeafMaskStarts;   ///< Start index into queryLeafMasks per atom
+  AtomQueryTree const*   atomQueryTrees;       ///< Tree metadata per query atom
+  BoolInstruction const* queryInstructions;    ///< Flattened instruction arrays
+  AtomQueryMask const*   queryLeafMasks;       ///< Flattened leaf masks for compound queries
+  BondTypeCounts const*  queryLeafBondCounts;  ///< Flattened leaf bond counts
+  int const*             atomInstrStarts;      ///< Start index into queryInstructions per atom
+  int const*             atomLeafMaskStarts;   ///< Start index into queryLeafMasks per atom
 };
+
+using TargetMoleculesDeviceView = MoleculesDeviceViewT<MoleculeType::Target>;
+using QueryMoleculesDeviceView  = MoleculesDeviceViewT<MoleculeType::Query>;
 
 /**
  * @brief Device-side storage for batched molecules using AsyncDeviceVector.
@@ -229,7 +259,8 @@ class MoleculesDevice {
   /**
    * @brief Get a view suitable for passing to CUDA kernels.
    */
-  [[nodiscard]] MoleculesDeviceView view() const;
+  template <MoleculeType Type>
+  [[nodiscard]] MoleculesDeviceViewT<Type> view() const;
 
   void setStream(cudaStream_t stream);
 

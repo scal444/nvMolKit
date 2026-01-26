@@ -43,10 +43,10 @@ namespace nvMolKit {
  * @param queryAtomIdx Index of query atom
  * @return true if target atom can match query atom
  */
-__device__ __forceinline__ bool atomPairMatchesOptimized(const MoleculeView& target,
-                                                         int                 targetAtomIdx,
-                                                         const MoleculeView& query,
-                                                         int                 queryAtomIdx) {
+__device__ __forceinline__ bool atomPairMatchesOptimized(const TargetMoleculeView& target,
+                                                         int                       targetAtomIdx,
+                                                         const QueryMoleculeView&  query,
+                                                         int                       queryAtomIdx) {
   const AtomDataPacked& targetPacked = target.getAtomPacked(targetAtomIdx);
   const AtomQueryMask&  queryMask    = query.getQueryMask(queryAtomIdx);
   const BondTypeCounts& targetBonds  = target.getBondTypeCounts(targetAtomIdx);
@@ -69,11 +69,11 @@ __device__ __forceinline__ bool atomPairMatchesOptimized(const MoleculeView& tar
  * @param recursiveMatchBits Per-pair recursive match bits for this target atom (32 bits for patterns 0-31)
  * @return true if target atom's properties match the compound query expression
  */
-__device__ __forceinline__ bool atomPairMatchesWithTree(const MoleculeView& target,
-                                                        int                 targetAtomIdx,
-                                                        const MoleculeView& query,
-                                                        int                 queryAtomIdx,
-                                                        uint32_t            recursiveMatchBits = 0) {
+__device__ __forceinline__ bool atomPairMatchesWithTree(const TargetMoleculeView& target,
+                                                        int                       targetAtomIdx,
+                                                        const QueryMoleculeView&  query,
+                                                        int                       queryAtomIdx,
+                                                        uint32_t                  recursiveMatchBits = 0) {
   const AtomDataPacked&   targetPacked   = target.getAtomPacked(targetAtomIdx);
   const AtomQueryTree&    tree           = query.getQueryTree(queryAtomIdx);
   const BoolInstruction*  instructions   = query.getQueryInstructions(queryAtomIdx);
@@ -112,8 +112,8 @@ __device__ __forceinline__ bool atomPairMatchesWithTree(const MoleculeView& targ
  * @param sharedQueryBondCounts Shared memory buffer for query bond counts [MaxQueryAtoms]
  */
 template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
-__device__ void populateLabelMatrixWarpParallel(const MoleculeView&                             target,
-                                                const MoleculeView&                             query,
+__device__ void populateLabelMatrixWarpParallel(const TargetMoleculeView&                       target,
+                                                const QueryMoleculeView&                        query,
                                                 BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>& labelMatrix,
                                                 AtomDataPacked*                                 sharedQueryPacked,
                                                 AtomQueryMask*                                  sharedQueryMasks) {
@@ -187,8 +187,8 @@ __device__ void populateLabelMatrixWarpParallel(const MoleculeView&             
  * @param pairRecursiveBits Per-pair recursive match bits indexed by [targetAtomIdx], or nullptr if none
  */
 template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms>
-__device__ void populateLabelMatrixOptimized(const MoleculeView&                             target,
-                                             const MoleculeView&                             query,
+__device__ void populateLabelMatrixOptimized(const TargetMoleculeView&                       target,
+                                             const QueryMoleculeView&                        query,
                                              BitMatrix2DView<MaxTargetAtoms, MaxQueryAtoms>& labelMatrix,
                                              const uint32_t*                                 pairRecursiveBits = nullptr) {
   // Check if query has boolean trees (compound queries with OR/NOT)
