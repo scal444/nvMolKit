@@ -19,7 +19,7 @@
 #include <cuda_runtime.h>
 
 #include "molecules.h"
-#include "pinned_buffer_pool.h"
+#include "substruct_types.h"
 #include "substruct_types.h"
 
 namespace nvMolKit {

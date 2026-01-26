@@ -17,12 +17,15 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <numeric>
 #include <vector>
 
 #include "cuda_error_check.h"
 #include "device_vector.h"
 #include "host_vector.h"
+#include "pinned_host_allocator.h"
 
 using namespace nvMolKit;
 
@@ -331,4 +334,81 @@ TEST(PinnedHostVector, MultipleResizes) {
   EXPECT_EQ(vec[1], 2);
   EXPECT_EQ(vec[30], 0);
   EXPECT_EQ(vec.size(), 50);
+}
+
+TEST(PinnedHostAllocator, PreallocateZeroThrows) {
+  PinnedHostAllocator allocator;
+  EXPECT_THROW(allocator.preallocate(0), std::invalid_argument);
+}
+
+TEST(PinnedHostAllocator, PreallocateTwiceThrows) {
+  PinnedHostAllocator allocator;
+  allocator.preallocate(1024);
+  EXPECT_THROW(allocator.preallocate(1024), std::runtime_error);
+}
+
+TEST(PinnedHostAllocator, AllocateZeroThrows) {
+  PinnedHostAllocator allocator(256);
+  EXPECT_THROW(allocator.allocate<int>(0), std::invalid_argument);
+}
+
+TEST(PinnedHostAllocator, AllocateBeforePreallocateThrows) {
+  PinnedHostAllocator allocator;
+  EXPECT_THROW(allocator.allocate<int>(1), std::runtime_error);
+}
+
+TEST(PinnedHostAllocator, AllocateTooLargeThrows) {
+  PinnedHostAllocator allocator(256);
+  EXPECT_THROW(allocator.allocate<std::byte>(300), std::runtime_error);
+}
+
+TEST(PinnedHostAllocator, AllocationAlignment) {
+  PinnedHostAllocator allocator(2048);
+  auto viewA = allocator.allocate<int>(1);
+  auto viewB = allocator.allocate<int>(7);
+
+  EXPECT_NE(viewA.data(), nullptr);
+  EXPECT_NE(viewB.data(), nullptr);
+  EXPECT_EQ(reinterpret_cast<std::uintptr_t>(viewA.data()) % 256, 0u);
+  EXPECT_EQ(reinterpret_cast<std::uintptr_t>(viewB.data()) % 256, 0u);
+}
+
+TEST(PinnedHostAllocator, AllocationNoOverlap) {
+  PinnedHostAllocator allocator(2048);
+  auto viewA = allocator.allocate<int>(64);
+  auto viewB = allocator.allocate<int>(64);
+
+  ASSERT_NE(viewA.data(), nullptr);
+  ASSERT_NE(viewB.data(), nullptr);
+  EXPECT_NE(viewA.data(), viewB.data());
+
+  for (size_t i = 0; i < viewA.size(); ++i) {
+    viewA[i] = 11;
+  }
+  for (size_t i = 0; i < viewB.size(); ++i) {
+    viewB[i] = 22;
+  }
+  for (size_t i = 0; i < viewA.size(); ++i) {
+    EXPECT_EQ(viewA[i], 11);
+  }
+  for (size_t i = 0; i < viewB.size(); ++i) {
+    EXPECT_EQ(viewB[i], 22);
+  }
+}
+
+TEST(PinnedHostView, RetainsOwnership) {
+  PinnedHostView<int> view;
+  {
+    PinnedHostAllocator allocator(1024);
+    view = allocator.allocate<int>(8);
+    for (size_t i = 0; i < view.size(); ++i) {
+      view[i] = static_cast<int>(i + 5);
+    }
+  }
+
+  EXPECT_EQ(view.size(), 8u);
+  EXPECT_NE(view.data(), nullptr);
+  for (size_t i = 0; i < view.size(); ++i) {
+    EXPECT_EQ(view[i], static_cast<int>(i + 5));
+  }
 }

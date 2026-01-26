@@ -37,6 +37,7 @@
 #include "cuda_error_check.h"
 #include "host_vector.h"
 #include "nvtx.h"
+#include "pinned_host_allocator.h"
 
 namespace RDKit {
 class ROMol;
@@ -45,7 +46,6 @@ class ROMol;
 #include "device_vector.h"
 #include "molecules.h"
 #include "molecules_device.cuh"
-#include "pinned_buffer_pool.h"
 #include "substruct_algos.cuh"
 #include "substructure_search.h"
 
@@ -163,11 +163,12 @@ struct RecursiveScratchBuffers {
   AsyncDeviceVector<uint32_t>            intermediateBits;  ///< Child pattern results for nested recursion
 
   /// Double-buffered pinned pattern entries for overlap
-  std::array<BatchedPatternEntry*, 2>    patternsAtDepthHost = {nullptr, nullptr};
+  std::array<PinnedHostView<BatchedPatternEntry>, 2> patternsAtDepthHost = {};
   std::array<int, 2>                     patternsAtDepthHostCapacity = {0, 0};
   std::array<ScopedCudaEvent, 2>         patternsAtDepthHostCopyDone;
   std::array<bool, 2>                    patternsAtDepthHostCopyPending = {false, false};
   int                                    currentPatternBuffer = 0;  ///< Index of buffer to fill next
+  PinnedHostAllocator                    pinnedAllocator_;
 
   explicit RecursiveScratchBuffers(cudaStream_t stream) 
       : patternEntries(), overflow(), labelMatrixBuffer(), intermediateBits() {
@@ -177,15 +178,7 @@ struct RecursiveScratchBuffers {
     intermediateBits.setStream(stream);
   }
 
-  ~RecursiveScratchBuffers() {
-    for (int i = 0; i < 2; ++i) {
-      if (ownsBuffer_[i] && patternsAtDepthHost[i] != nullptr) {
-        auto* buffer = patternsAtDepthHost[i];
-        patternsAtDepthHost[i] = nullptr;
-        AsyncResourceCleaner::instance().scheduleCleanup([buffer]() { cudaFreeHost(buffer); });
-      }
-    }
-  }
+  ~RecursiveScratchBuffers() = default;
 
   RecursiveScratchBuffers(const RecursiveScratchBuffers&)            = delete;
   RecursiveScratchBuffers& operator=(const RecursiveScratchBuffers&) = delete;
@@ -199,14 +192,10 @@ struct RecursiveScratchBuffers {
     intermediateBits.setStream(stream);
   }
 
-  void setPinnedBuffer(const std::array<BatchedPatternEntry*, 2>& ptrs, int capacity) {
+  void setPinnedBuffer(const std::array<PinnedHostView<BatchedPatternEntry>, 2>& views, int capacity) {
     for (int i = 0; i < 2; ++i) {
-      if (ownsBuffer_[i] && patternsAtDepthHost[i] != nullptr) {
-        cudaFreeHost(patternsAtDepthHost[i]);
-      }
-      patternsAtDepthHost[i]         = ptrs[i];
+      patternsAtDepthHost[i]         = views[i];
       patternsAtDepthHostCapacity[i] = capacity;
-      ownsBuffer_[i]                 = false;
     }
   }
 
@@ -215,14 +204,12 @@ struct RecursiveScratchBuffers {
    * For tests and standalone usage.
    */
   void allocateBuffers(int capacity) {
-    for (int i = 0; i < 2; ++i) {
-      if (ownsBuffer_[i] && patternsAtDepthHost[i] != nullptr) {
-        cudaFreeHost(patternsAtDepthHost[i]);
-      }
-      cudaCheckError(cudaMallocHost(&patternsAtDepthHost[i], capacity * sizeof(BatchedPatternEntry)));
-      patternsAtDepthHostCapacity[i] = capacity;
-      ownsBuffer_[i]                 = true;
-    }
+    const size_t bufferBytes = static_cast<size_t>(capacity) * sizeof(BatchedPatternEntry);
+    pinnedAllocator_         = PinnedHostAllocator(bufferBytes * 2 + 256);
+    patternsAtDepthHost[0]   = pinnedAllocator_.allocate<BatchedPatternEntry>(capacity);
+    patternsAtDepthHost[1]   = pinnedAllocator_.allocate<BatchedPatternEntry>(capacity);
+    patternsAtDepthHostCapacity[0] = capacity;
+    patternsAtDepthHostCapacity[1] = capacity;
   }
 
   /**
@@ -266,8 +253,6 @@ struct RecursiveScratchBuffers {
         "). Ensure buffers are properly initialized.");
   }
 
- private:
-  std::array<bool, 2> ownsBuffer_ = {false, false};
 };
 
 /**
@@ -382,8 +367,8 @@ class MiniBatchResultsDevice {
  * stream for main query matching. Events synchronize pairs that depend on
  * recursive preprocessing results.
  *
- * Host-side pinned buffers are now referenced via pointers into the consolidated
- * buffer rather than owned allocations.
+ * Host-side pinned buffers are referenced via allocator-backed views rather than
+ * owned allocations.
  */
 struct RecursivePipelineContext {
   ScopedStreamWithPriority recursiveStream;  ///< High priority stream for paint kernels
@@ -403,7 +388,7 @@ struct RecursivePipelineContext {
   /// Matching: mini-batch-local indices for each depth group (depth 0..kMaxRecursionDepth)
   std::array<AsyncDeviceVector<int>, kMaxRecursionDepth + 1> matchMiniBatchLocalIndices;
 
-  /// Pointers to pinned buffers for H2D transfers (reference consolidated buffer)
+  /// Pointers to pinned buffers for H2D transfers (allocator-backed views)
   std::array<int*, kMaxRecursionDepth + 1> matchGlobalPairIndicesHost = {};
   std::array<int*, kMaxRecursionDepth + 1> matchMiniBatchLocalIndicesHost = {};
 
@@ -425,7 +410,7 @@ struct RecursivePipelineContext {
   explicit RecursivePipelineContext(int executorIdx = 0);
 
   /**
-   * @brief Set pointers to consolidated pinned buffer regions.
+   * @brief Set pointers to pinned buffer regions.
    */
   void setPinnedBuffers(const std::array<int*, kMaxRecursionDepth + 1>& globalPairPtrs,
                         const std::array<int*, kMaxRecursionDepth + 1>& miniBatchLocalPtrs,

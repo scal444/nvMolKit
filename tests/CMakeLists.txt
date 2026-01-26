@@ -172,7 +172,7 @@ target_link_libraries(test_conformer_checkers PRIVATE ${RDKit_LIBS}
                                                       conformer_checkers)
 
 add_executable(test_host_vector test_host_vector.cu)
-target_link_libraries(test_host_vector PRIVATE host_vector device_vector)
+target_link_libraries(test_host_vector PRIVATE host_vector device_vector pinned_host_allocator)
 
 add_executable(test_etkdg_result_tracker test_etkdg_result_tracker.cpp)
 target_link_libraries(test_etkdg_result_tracker PRIVATE etkdg_impl)

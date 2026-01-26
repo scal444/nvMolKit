@@ -74,5 +74,5 @@ target_include_directories(
                        ${CMAKE_SOURCE_DIR}/src/substruct)
 target_link_libraries(_substructure PUBLIC ${Boost_LIBRARIES}
                                            ${PYTHON_LIBRARIES})
-target_link_libraries(_substructure PRIVATE ${RDKit_LIBS} substructure_search pinned_buffer_pool)
+target_link_libraries(_substructure PRIVATE ${RDKit_LIBS} substructure_search pinned_host_allocator)
 installpythontarget(_substructure ./)
