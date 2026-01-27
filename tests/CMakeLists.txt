@@ -203,12 +203,12 @@ target_link_libraries(test_graph_labeler_recursive PRIVATE substructure_search
                                                            substruct_validation
                                                            ${RDKit_LIBS})
 
-add_executable(test_substructure_search test_substructure_search.cu)
+add_executable(test_substructure_search test_substruct_search.cu)
 target_link_libraries(
   test_substructure_search PRIVATE substructure_search molecules device
                                    substruct_validation ${RDKit_LIBS})
 
-add_executable(test_substructure_integration test_substructure_integration.cu)
+add_executable(test_substructure_integration test_substruct_integration.cu)
 target_link_libraries(
   test_substructure_integration PRIVATE substructure_search molecules device
                                         substruct_validation test_utils molData

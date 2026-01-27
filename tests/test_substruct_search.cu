@@ -24,7 +24,7 @@
 
 #include "cuda_error_check.h"
 #include "device.h"
-#include "substructure_search.h"
+#include "substruct_search.h"
 #include "testutils/substruct_validation.h"
 
 using nvMolKit::algorithmName;

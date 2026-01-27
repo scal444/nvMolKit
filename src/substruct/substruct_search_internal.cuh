@@ -17,7 +17,7 @@
 #define NVMOLKIT_SUBSTRUCTURE_SEARCH_INTERNAL_CUH
 
 /**
- * @file substructure_search_internal.cuh
+ * @file substruct_search_internal.cuh
  * @brief Internal implementation details for substructure search.
  *
  * This header exposes internal types and functions needed for testing.
@@ -47,7 +47,7 @@ class ROMol;
 #include "molecules.h"
 #include "molecules_device.cuh"
 #include "substruct_algos.cuh"
-#include "substructure_search.h"
+#include "substruct_search.h"
 
 namespace nvMolKit {
 

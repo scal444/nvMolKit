@@ -26,9 +26,9 @@
 #include "graph_labeler.cuh"
 #include "molecules.h"
 #include "molecules_device.cuh"
+#include "substruct_search.h"
+#include "substruct_search_internal.cuh"
 #include "substruct_types.h"
-#include "substructure_search.h"
-#include "substructure_search_internal.cuh"
 #include "testutils/substruct_validation.h"
 
 using nvMolKit::addQueryToBatch;

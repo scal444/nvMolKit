@@ -28,7 +28,7 @@
 
 #include "device.h"
 #include "graph_labeler.cuh"
-#include "substructure_search.h"
+#include "substruct_search.h"
 #include "test_utils.h"
 #include "testutils/mol_data.h"
 #include "testutils/substruct_validation.h"

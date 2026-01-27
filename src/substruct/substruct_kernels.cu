@@ -13,15 +13,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "substruct_kernels.h"
-
 #include "flat_bit_vect.h"
 #include "global_pool.cuh"
 #include "graph_labeler.cuh"
 #include "molecules_device.cuh"
 #include "substruct_algos.cuh"
 #include "substruct_debug.h"
-#include "substructure_search_internal.cuh"
+#include "substruct_kernels.h"
+#include "substruct_search_internal.cuh"
 
 namespace nvMolKit {
 

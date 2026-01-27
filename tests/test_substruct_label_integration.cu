@@ -31,10 +31,10 @@
 #include "device.h"
 #include "flat_bit_vect.h"
 #include "graph_labeler.cuh"
-#include "molecules_device.cuh"
-#include "substructure_search.h"
-#include "test_utils.h"
 #include "mol_data.h"
+#include "molecules_device.cuh"
+#include "substruct_search.h"
+#include "test_utils.h"
 
 using nvMolKit::addQueryToBatch;
 using nvMolKit::addToBatch;

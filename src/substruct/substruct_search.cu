@@ -13,14 +13,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "substructure_search.h"
-#include "substructure_search_internal.cuh"
-#include "substruct_kernels.h"
-
 #include <GraphMol/ROMol.h>
 #include <GraphMol/Substruct/SubstructMatch.h>
-
 #include <omp.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <array>
@@ -34,19 +30,21 @@
 #include <set>
 #include <stdexcept>
 #include <thread>
-#include <unistd.h>
 #include <vector>
 
 #include "cuda_error_check.h"
-#include "host_vector.h"
 #include "global_pool.cuh"
 #include "graph_labeler.cuh"
+#include "host_vector.h"
 #include "molecules_device.cuh"
+#include "nvtx.h"
 #include "pinned_host_allocator.h"
 #include "sm_shared_mem_config.cuh"
 #include "substruct_algos.cuh"
 #include "substruct_debug.h"
-#include "nvtx.h"
+#include "substruct_kernels.h"
+#include "substruct_search.h"
+#include "substruct_search_internal.cuh"
 
 namespace nvMolKit {
 

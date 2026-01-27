@@ -26,10 +26,10 @@ namespace nvMolKit {
  * Values represent the maximum configurable shared memory per SM.
  * Only specific known architectures get their actual limits; others default to 100 KB.
  */
-constexpr int getMaxSharedMemoryPerSM_KB(int smMajor, int smMinor = 0) {
+constexpr int getMaxSharedMemoryPerSM_KB(const int smMajor, const int smMinor = 0) {
   const int sm = smMajor * 10 + smMinor;
   
-  if (sm >= 120) return 128;   // SM 12.0+
+  if (sm >= 120) return 128;   // SM 12.0+ (Blackwell RTX)
   if (sm >= 100) return 228;   // SM 10.0+ (Blackwell)
   if (sm >= 90)  return 228;   // SM 9.0+ (Hopper)
   if (sm == 80)  return 160;   // SM 8.0 (Ampere A100)
@@ -40,7 +40,7 @@ constexpr int getMaxSharedMemoryPerSM_KB(int smMajor, int smMinor = 0) {
 /**
  * @brief Maximum shared memory per SM in bytes.
  */
-constexpr std::size_t getMaxSharedMemoryPerSM(int smMajor, int smMinor = 0) {
+constexpr std::size_t getMaxSharedMemoryPerSM(const int smMajor, const int smMinor = 0) {
   return static_cast<std::size_t>(getMaxSharedMemoryPerSM_KB(smMajor, smMinor)) * 1024;
 }
 
@@ -52,7 +52,7 @@ constexpr std::size_t getMaxSharedMemoryPerSM(int smMajor, int smMinor = 0) {
  * @param blocksPerSM Target blocks per SM for occupancy
  * @return Shared memory budget per block in bytes
  */
-constexpr std::size_t getSharedMemoryPerBlock(int smMajor, int smMinor, int blocksPerSM) {
+constexpr std::size_t getSharedMemoryPerBlock(const int smMajor, const int smMinor, int blocksPerSM) {
   return getMaxSharedMemoryPerSM(smMajor, smMinor) / blocksPerSM;
 }
 
@@ -70,10 +70,10 @@ constexpr std::size_t getSharedMemoryPerBlock(int smMajor, int smMinor, int bloc
  * @param usePingPong If true, budget covers 2 buffers; if false, single buffer
  * @return Number of PartialMatch entries per buffer (multiple of 10)
  */
-constexpr int calculateMaxPartials(std::size_t sharedMemBudget,
-                                   std::size_t labelMatrixBytes = 1024,
-                                   std::size_t controlVarsBytes = 32,
-                                   bool usePingPong = true) {
+constexpr int calculateMaxPartials(const std::size_t sharedMemBudget,
+                                   const std::size_t labelMatrixBytes = 1024,
+                                   const std::size_t controlVarsBytes = 32,
+                                   const bool usePingPong = true) {
   constexpr std::size_t kPartialMatchSize = 65;  // sizeof(PartialMatch)
   
   const std::size_t available = (sharedMemBudget * 9 / 10) - labelMatrixBytes - controlVarsBytes;

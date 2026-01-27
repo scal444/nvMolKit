@@ -13,8 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "substruct_validation.h"
-
 #include <GraphMol/QueryAtom.h>
 #include <GraphMol/Substruct/SubstructMatch.h>
 
@@ -26,8 +24,9 @@
 #include "device.h"
 #include "graph_labeler.cuh"
 #include "molecules_device.cuh"
-#include "substructure_search.h"
-#include "substructure_search_internal.cuh"
+#include "substruct_search.h"
+#include "substruct_search_internal.cuh"
+#include "substruct_validation.h"
 
 namespace nvMolKit {
 
