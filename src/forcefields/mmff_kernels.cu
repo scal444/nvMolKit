@@ -646,11 +646,13 @@ cudaError_t launchReduceEnergiesKernel(const int     numBlocks,
                                        const double* energyBuffer,
                                        const int*    energyBufferBlockIdxToBatchIdx,
                                        double*       outs,
+                                       const uint8_t* activeThisStage,
                                        cudaStream_t  stream) {
   reduceEnergiesKernel<<<numBlocks, nvMolKit::FFKernelUtils::blockSizeEnergyReduction, 0, stream>>>(
     energyBuffer,
     energyBufferBlockIdxToBatchIdx,
-    outs);
+    outs,
+    activeThisStage);
   return cudaGetLastError();
 }
 

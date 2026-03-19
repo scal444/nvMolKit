@@ -275,6 +275,14 @@ void setStreams(BatchedMolecularDeviceBuffers& molSystemDevice, cudaStream_t str
 void allocateIntermediateBuffers(const BatchedMolecularSystemHost& molSystemHost,
                                  BatchedMolecularDeviceBuffers&    molSystemDevice);
 
+//! Compute energies into caller-provided output buffer.
+//! energyOuts and molSystemDevice.energyBuffer must be zeroed before calling.
+cudaError_t computeEnergy(BatchedMolecularDeviceBuffers& molSystemDevice,
+                          double*                        energyOuts,
+                          const double*                  positions,
+                          const uint8_t*                 activeSystemMask = nullptr,
+                          cudaStream_t                   stream           = nullptr);
+
 //! Compute the energy of the batched molecular system. This will populate the energyOuts buffer on device.
 //! energyOuts and energyBuffer must be zeroed before calling this function.
 //! Optionally computes on user-provided coordinates rather than those in molSystemDevice.
@@ -289,6 +297,12 @@ cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDev
                                      cudaStream_t                   stream = nullptr);
 //! Compute the gradients of the batched molecular system. This will populate the grad buffer on device.
 //! grad must be zeroed before calling this function.
+cudaError_t computeGradients(BatchedMolecularDeviceBuffers& molSystemDevice,
+                             const double*                  positions,
+                             double*                        grad,
+                             const uint8_t*                 activeSystemMask = nullptr,
+                             cudaStream_t                   stream           = nullptr);
+
 cudaError_t computeGradients(BatchedMolecularDeviceBuffers& molSystemDevice, cudaStream_t stream = nullptr);
 
 cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDevice, cudaStream_t stream = nullptr);

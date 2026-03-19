@@ -19,6 +19,7 @@ add_subdirectory(minimizer)
 add_subdirectory(substruct)
 add_subdirectory(testutils)
 add_subdirectory(utils)
+add_subdirectory(tautomer)
 
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/versions.h.in
                ${CMAKE_CURRENT_BINARY_DIR}/versions.h @ONLY)
@@ -99,6 +100,7 @@ target_link_libraries(
   PUBLIC bfgs
   PRIVATE device_vector
           ${RDKit_LIBS}
+          batched_forcefield
           ff_kernel_utils
           dist_geom
           rdkit_dist_geom_flattened

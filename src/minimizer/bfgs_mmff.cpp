@@ -24,6 +24,7 @@
 #include "device.h"
 #include "ff_utils.h"
 #include "host_vector.h"
+#include "mmff_batched_forcefield.h"
 #include "mmff_flattened_builder.h"
 #include "nvtx.h"
 #include "openmp_helpers.h"
@@ -190,34 +191,60 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
         nvMolKit::MMFF::addMoleculeToBatch(ffParams, pos, systemHost);
       }
 
-      // Send to device and set up streams
-      nvMolKit::MMFF::sendContribsAndIndicesToDevice(systemHost, systemDevice);
-      nvMolKit::MMFF::setStreams(systemDevice, streamPtr);
-      nvMolKit::MMFF::allocateIntermediateBuffers(systemHost, systemDevice);
-
       // Get thread-local buffers and ensure they have enough capacity
       auto& buffers = threadBuffers[threadId];
       buffers.ensureCapacity(systemHost.positions.size(), batchConformers.size());
 
       // Copy to pinned memory for async transfer
       std::copy(systemHost.positions.begin(), systemHost.positions.end(), buffers.initialPositions.begin());
-      systemDevice.positions.resize(systemHost.positions.size());
-      systemDevice.positions.copyFromHost(buffers.initialPositions.data(), systemHost.positions.size());
-
-      systemDevice.grad.resize(systemHost.positions.size());
-      systemDevice.grad.zero();
 
       nvMolKit::BfgsBatchMinimizer bfgsMinimizer(/*dataDim=*/3, nvMolKit::DebugLevel::NONE, true, streamPtr, backend);
       constexpr double             gradTol = 1e-4;  // hard-coded in RDKit.
+      const auto                   effectiveBackend = bfgsMinimizer.resolveBackend(systemHost.indices.atomStarts);
       setupBatchRange.pop();
 
-      bfgsMinimizer.minimizeWithMMFF(maxIters, gradTol, systemHost.indices.atomStarts, systemDevice);
+      if (effectiveBackend == BfgsBackend::BATCHED) {
+        MMFFBatchedForcefield     forcefield(systemHost, streamPtr);
+        AsyncDeviceVector<double> positionsDevice;
+        AsyncDeviceVector<double> gradDevice;
+        AsyncDeviceVector<double> energyOutsDevice;
+        positionsDevice.setStream(streamPtr);
+        gradDevice.setStream(streamPtr);
+        energyOutsDevice.setStream(streamPtr);
+        positionsDevice.resize(systemHost.positions.size());
+        positionsDevice.copyFromHost(buffers.initialPositions.data(), systemHost.positions.size());
+        gradDevice.resize(systemHost.positions.size());
+        gradDevice.zero();
+        energyOutsDevice.resize(batchConformers.size());
+        energyOutsDevice.zero();
 
-      ScopedNvtxRange finalizeBatchRange("OpenMP loop finalizing batch");
+        bfgsMinimizer.minimize(maxIters,
+                               gradTol,
+                               forcefield,
+                               positionsDevice,
+                               gradDevice,
+                               energyOutsDevice);
 
-      systemDevice.positions.copyToHost(buffers.positions.data(), systemDevice.positions.size());
-      systemDevice.energyOuts.copyToHost(buffers.energies.data(), systemDevice.energyOuts.size());
-      cudaStreamSynchronize(streamPtr);
+        ScopedNvtxRange finalizeBatchRange("OpenMP loop finalizing batch");
+        positionsDevice.copyToHost(buffers.positions.data(), positionsDevice.size());
+        energyOutsDevice.copyToHost(buffers.energies.data(), energyOutsDevice.size());
+        cudaStreamSynchronize(streamPtr);
+      } else {
+        nvMolKit::MMFF::sendContribsAndIndicesToDevice(systemHost, systemDevice);
+        nvMolKit::MMFF::setStreams(systemDevice, streamPtr);
+        nvMolKit::MMFF::allocateIntermediateBuffers(systemHost, systemDevice);
+        systemDevice.positions.resize(systemHost.positions.size());
+        systemDevice.positions.copyFromHost(buffers.initialPositions.data(), systemHost.positions.size());
+        systemDevice.grad.resize(systemHost.positions.size());
+        systemDevice.grad.zero();
+
+        bfgsMinimizer.minimizeWithMMFF(maxIters, gradTol, systemHost.indices.atomStarts, systemDevice);
+
+        ScopedNvtxRange finalizeBatchRange("OpenMP loop finalizing batch");
+        systemDevice.positions.copyToHost(buffers.positions.data(), systemDevice.positions.size());
+        systemDevice.energyOuts.copyToHost(buffers.energies.data(), systemDevice.energyOuts.size());
+        cudaStreamSynchronize(streamPtr);
+      }
 
       // Update conformer positions and store energies
       for (size_t i = 0; i < batchConformers.size(); ++i) {

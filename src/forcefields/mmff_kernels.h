@@ -205,6 +205,7 @@ cudaError_t launchReduceEnergiesKernel(int           numBlocks,
                                        const double* energyBuffer,
                                        const int*    energyBufferBlockIdxToBatchIdx,
                                        double*       outs,
+                                       const uint8_t* activeThisStage = nullptr,
                                        cudaStream_t  stream = 0);
 
 //! Pointer versions of contrib structs for kernel launches

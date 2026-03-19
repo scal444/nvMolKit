@@ -133,9 +133,9 @@ DistGeomMinimizeStage::DistGeomMinimizeStage(
                                                      ctx.systemHost.atomStarts,
                                                      molSystemHost);
   }
-  ScopedNvtxRange buffersRange("Setup buffers");
   DistGeom::setStreams(molSystemDevice, stream_);
-  nvMolKit::DistGeom::sendContribsAndIndicesToDevice(molSystemHost, molSystemDevice);
+  grad_.setStream(stream_);
+  energyOuts_.setStream(stream_);
 }
 
 void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
@@ -143,25 +143,60 @@ void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
                                         double        fourthDimWeight,
                                         int           maxIters,
                                         bool          checkEnergy) {
-  // Setup device buffers for minimization
-  DistGeom::setupDeviceBuffers(molSystemHost,
-                               molSystemDevice,
-                               ctx.systemHost.positions,
-                               static_cast<int>(ctx.systemHost.atomStarts.size() - 1));
+  const auto effectiveBackend = minimizer_.resolveBackend(ctx.systemHost.atomStarts);
+  bool       needsMore        = false;
 
-  // Use unified minimizeWithDG - backend selection is handled internally
-  bool needsMore = minimizer_.minimizeWithDG(maxIters,
-                                             embedParam_.optimizerForceTol,
-                                             ctx.systemHost.atomStarts,
-                                             ctx.systemDevice.atomStarts,
-                                             ctx.systemDevice.positions,
-                                             molSystemDevice,
-                                             chiralWeight,
-                                             fourthDimWeight,
-                                             ctx.activeThisStage.data());
+  if (effectiveBackend == BfgsBackend::BATCHED) {
+    DGBatchedForcefield forcefield(molSystemHost, ctx.systemHost.atomStarts, chiralWeight, fourthDimWeight, stream_);
+    grad_.resize(ctx.systemHost.positions.size());
+    grad_.zero();
+    energyOuts_.resize(ctx.systemHost.atomStarts.size() - 1);
+    energyOuts_.zero();
+    needsMore = minimizer_.minimize(maxIters,
+                                    embedParam_.optimizerForceTol,
+                                    forcefield,
+                                    ctx.systemDevice.positions,
+                                    grad_,
+                                    energyOuts_,
+                                    ctx.activeThisStage.data());
 
-  // Repeat until converged
-  while (needsMore) {
+    while (needsMore) {
+      energyOuts_.zero();
+      needsMore = minimizer_.minimize(maxIters,
+                                      embedParam_.optimizerForceTol,
+                                      forcefield,
+                                      ctx.systemDevice.positions,
+                                      grad_,
+                                      energyOuts_,
+                                      ctx.activeThisStage.data());
+    }
+
+    if (checkEnergy) {
+      energyOuts_.zero();
+      forcefield.computeEnergy(energyOuts_.data(), ctx.systemDevice.positions.data(), nullptr, stream_);
+      const int molNum   = energyOuts_.size();
+      const int gridSize = (molNum + kBlockSize - 1) / kBlockSize;
+
+      checkMinimizedEnergiesKernel<<<gridSize, kBlockSize, 0, stream_>>>(molNum,
+                                                                         energyOuts_.data(),
+                                                                         ctx.systemDevice.atomStarts.data(),
+                                                                         ctx.failedThisStage.data());
+    }
+
+    molSystemDevice.energyOuts.resize(energyOuts_.size());
+    cudaCheckError(cudaMemcpyAsync(molSystemDevice.energyOuts.data(),
+                                   energyOuts_.data(),
+                                   energyOuts_.size() * sizeof(double),
+                                   cudaMemcpyDeviceToDevice,
+                                   stream_));
+  } else {
+    DistGeom::setStreams(molSystemDevice, stream_);
+    nvMolKit::DistGeom::sendContribsAndIndicesToDevice(molSystemHost, molSystemDevice);
+    DistGeom::setupDeviceBuffers(molSystemHost,
+                                 molSystemDevice,
+                                 ctx.systemHost.positions,
+                                 static_cast<int>(ctx.systemHost.atomStarts.size() - 1));
+
     needsMore = minimizer_.minimizeWithDG(maxIters,
                                           embedParam_.optimizerForceTol,
                                           ctx.systemHost.atomStarts,
@@ -171,25 +206,35 @@ void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
                                           chiralWeight,
                                           fourthDimWeight,
                                           ctx.activeThisStage.data());
-  }
+    while (needsMore) {
+      needsMore = minimizer_.minimizeWithDG(maxIters,
+                                            embedParam_.optimizerForceTol,
+                                            ctx.systemHost.atomStarts,
+                                            ctx.systemDevice.atomStarts,
+                                            ctx.systemDevice.positions,
+                                            molSystemDevice,
+                                            chiralWeight,
+                                            fourthDimWeight,
+                                            ctx.activeThisStage.data());
+    }
 
-  // Check energy per atom if requested
-  if (checkEnergy) {
-    nvMolKit::DistGeom::computeEnergy(molSystemDevice,
-                                      ctx.systemDevice.atomStarts,
-                                      ctx.systemDevice.positions,
-                                      chiralWeight,
-                                      fourthDimWeight,
-                                      nullptr,
-                                      nullptr,
-                                      stream_);
-    const int molNum   = molSystemDevice.energyOuts.size();
-    const int gridSize = (molNum + kBlockSize - 1) / kBlockSize;
+    if (checkEnergy) {
+      nvMolKit::DistGeom::computeEnergy(molSystemDevice,
+                                        ctx.systemDevice.atomStarts,
+                                        ctx.systemDevice.positions,
+                                        chiralWeight,
+                                        fourthDimWeight,
+                                        nullptr,
+                                        nullptr,
+                                        stream_);
+      const int molNum   = molSystemDevice.energyOuts.size();
+      const int gridSize = (molNum + kBlockSize - 1) / kBlockSize;
 
-    checkMinimizedEnergiesKernel<<<gridSize, kBlockSize, 0, stream_>>>(molNum,
-                                                                       molSystemDevice.energyOuts.data(),
-                                                                       ctx.systemDevice.atomStarts.data(),
-                                                                       ctx.failedThisStage.data());
+      checkMinimizedEnergiesKernel<<<gridSize, kBlockSize, 0, stream_>>>(molNum,
+                                                                         molSystemDevice.energyOuts.data(),
+                                                                         ctx.systemDevice.atomStarts.data(),
+                                                                         ctx.failedThisStage.data());
+    }
   }
 }
 
