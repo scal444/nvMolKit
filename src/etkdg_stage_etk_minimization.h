@@ -47,6 +47,7 @@ class ETKMinimizationStage final : public ETKDGStage {
   //! Re-sets the bounds for distance constraints based on the current positions.
   void setReferenceValues(const ETKDGContext& ctx, const ETKBatchedForcefield& forcefield);
 
+  BatchedForcefieldMetadata                         metadata_;
   nvMolKit::DistGeom::BatchedMolecularSystem3DHost    molSystemHost;
   AsyncDeviceVector<double>                           grad_;
   AsyncDeviceVector<double>                           energyOuts_;

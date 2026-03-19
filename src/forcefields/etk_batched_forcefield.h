@@ -11,6 +11,7 @@ class ETKBatchedForcefield final : public BatchedForcefield {
   ETKBatchedForcefield(const DistGeom::BatchedMolecularSystem3DHost& molSystemHost,
                        const std::vector<int>&                       atomStartsHost,
                        bool                                          useBasicKnowledge,
+                       BatchedForcefieldMetadata                     metadata = {},
                        cudaStream_t                                  stream = nullptr);
 
   cudaError_t computeEnergy(double*        energyOuts,

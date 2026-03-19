@@ -162,6 +162,7 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
       // Process this batch
       BatchedMolecularSystemHost    systemHost;
       BatchedMolecularDeviceBuffers systemDevice;
+      BatchedForcefieldMetadata     metadata;
       std::vector<double>           pos;
 
       // Track conformer atom start positions for molecules with different sizes
@@ -188,7 +189,7 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
         currentAtomOffset += numAtoms;
 
         nvMolKit::confPosToVect(*confInfo.conformer, pos);
-        nvMolKit::MMFF::addMoleculeToBatch(ffParams, pos, systemHost);
+        nvMolKit::MMFF::addMoleculeToBatch(ffParams, pos, systemHost, metadata, confInfo.molIdx, confInfo.confIdx);
       }
 
       // Get thread-local buffers and ensure they have enough capacity
@@ -204,7 +205,7 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
       setupBatchRange.pop();
 
       if (effectiveBackend == BfgsBackend::BATCHED) {
-        MMFFBatchedForcefield     forcefield(systemHost, streamPtr);
+        MMFFBatchedForcefield     forcefield(systemHost, metadata, streamPtr);
         AsyncDeviceVector<double> positionsDevice;
         AsyncDeviceVector<double> gradDevice;
         AsyncDeviceVector<double> energyOutsDevice;

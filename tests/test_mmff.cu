@@ -443,6 +443,60 @@ std::vector<double> getCombinedGradientViaForcefield(const BatchedMolecularSyste
   return grad;
 }
 
+TEST(BatchedForcefieldMetadata, TracksSystemsPerMoleculeAndConformer) {
+  auto mol = std::unique_ptr<RDKit::RWMol>(RDKit::SmilesToMol("CC"));
+  ASSERT_NE(mol, nullptr);
+  RDKit::MolOps::sanitizeMol(*mol);
+  mol->addConformer(new RDKit::Conformer(mol->getNumAtoms()));
+
+  auto ffParams = constructForcefieldContribs(*mol);
+  std::vector<double> positions;
+  nvMolKit::confPosToVect(*mol, positions);
+
+  BatchedMolecularSystemHost       systemHost;
+  nvMolKit::BatchedForcefieldMetadata metadata;
+  nvMolKit::MMFF::addMoleculeToBatch(ffParams, positions, systemHost, metadata, 0, 0);
+  nvMolKit::MMFF::addMoleculeToBatch(ffParams, positions, systemHost, metadata, 0, 1);
+  nvMolKit::MMFF::addMoleculeToBatch(ffParams, positions, systemHost, metadata, 1, 0);
+
+  nvMolKit::MMFFBatchedForcefield forcefield(systemHost, metadata);
+  EXPECT_EQ(forcefield.numMolecules(), 3);
+  EXPECT_EQ(forcefield.numLogicalMolecules(), 2);
+  EXPECT_THAT(forcefield.systemToMoleculeIdx(), ::testing::ElementsAre(0, 0, 1));
+  EXPECT_THAT(forcefield.systemToConformerIdx(), ::testing::ElementsAre(0, 1, 0));
+  EXPECT_THAT(forcefield.systemsForMolecule(0), ::testing::ElementsAre(0, 1));
+  EXPECT_THAT(forcefield.systemsForMolecule(1), ::testing::ElementsAre(2));
+}
+
+TEST(BatchedForcefieldCustomization, AppliesHostCustomizationBeforeFlattening) {
+  const std::string mol2FilePath = getTestDataFolderPath() + "/rdkit_smallmol_1.mol2";
+  ASSERT_TRUE(std::filesystem::exists(mol2FilePath));
+  auto mol = std::unique_ptr<RDKit::RWMol>(RDKit::MolFileToMol(mol2FilePath, false));
+  ASSERT_NE(mol, nullptr);
+  RDKit::MolOps::sanitizeMol(*mol);
+  std::vector<double> positions;
+  nvMolKit::confPosToVect(*mol, positions);
+
+  auto filteredContribs = filterContribsForTerm(constructForcefieldContribs(*mol), FFTerm::BondStretch);
+  BatchedMolecularSystemHost systemHostBaseline;
+  nvMolKit::MMFF::addMoleculeToBatch(filteredContribs, positions, systemHostBaseline);
+  const double baselineEnergy = getCombinedEnergyViaForcefield(systemHostBaseline);
+
+  BatchedMolecularSystemHost          systemHostCustomized;
+  nvMolKit::BatchedForcefieldMetadata metadata;
+  nvMolKit::MMFF::HostCustomization   customization = [](const nvMolKit::BatchedSystemInfo&,
+                                                       const std::vector<double>&,
+                                                       EnergyForceContribsHost& contribs) {
+    for (auto& kb : contribs.bondTerms.kb) {
+      kb *= 2.0;
+    }
+  };
+  nvMolKit::MMFF::addMoleculeToBatch(filteredContribs, positions, systemHostCustomized, metadata, 0, 0, customization);
+  const double customizedEnergy = getCombinedEnergyViaForcefield(systemHostCustomized);
+
+  EXPECT_NEAR(customizedEnergy, 2.0 * baselineEnergy, FUNCTION_E_TOL);
+}
+
 class MMffGpuTestFixture : public ::testing::Test {
  public:
   MMffGpuTestFixture() { testDataFolderPath_ = getTestDataFolderPath(); }

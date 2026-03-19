@@ -23,6 +23,8 @@
 #include "minimizer/bfgs_distgeom.h"
 #include "nvtx.h"
 
+#include <unordered_map>
+
 using ::nvMolKit::detail::ETKDGContext;
 using ::nvMolKit::detail::ETKDGStage;
 
@@ -78,7 +80,9 @@ DistGeomMinimizeStage::DistGeomMinimizeStage(
   }
 
   // Preallocate memory based on first molecule (if available)
-  bool preallocated = false;
+  bool                                            preallocated = false;
+  std::unordered_map<const RDKit::ROMol*, int>    moleculeSlots;
+  std::unordered_map<const RDKit::ROMol*, int>    conformerCounts;
 
   // Process each molecule
   for (size_t i = 0; i < mols.size(); ++i) {
@@ -126,12 +130,20 @@ DistGeomMinimizeStage::DistGeomMinimizeStage(
       preallocated = true;
     }
 
+    auto [slotIt, inserted] = moleculeSlots.emplace(mol, static_cast<int>(moleculeSlots.size()));
+    const int moleculeIdx   = slotIt->second;
+    const int conformerIdx  = conformerCounts[mol]++;
+
     // Add to molecular system
     nvMolKit::DistGeom::addMoleculeToMolecularSystem(*ffParams,
                                                      numAtoms,
                                                      embedArg.dim,
                                                      ctx.systemHost.atomStarts,
-                                                     molSystemHost);
+                                                     molSystemHost,
+                                                     metadata_,
+                                                     moleculeIdx,
+                                                     conformerIdx,
+                                                     embedArg.posVec);
   }
   DistGeom::setStreams(molSystemDevice, stream_);
   grad_.setStream(stream_);
@@ -147,7 +159,7 @@ void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
   bool       needsMore        = false;
 
   if (effectiveBackend == BfgsBackend::BATCHED) {
-    DGBatchedForcefield forcefield(molSystemHost, ctx.systemHost.atomStarts, chiralWeight, fourthDimWeight, stream_);
+    DGBatchedForcefield forcefield(molSystemHost, ctx.systemHost.atomStarts, chiralWeight, fourthDimWeight, metadata_, stream_);
     grad_.resize(ctx.systemHost.positions.size());
     grad_.zero();
     energyOuts_.resize(ctx.systemHost.atomStarts.size() - 1);

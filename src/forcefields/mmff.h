@@ -17,8 +17,10 @@
 #define NVMOLKIT_MMFF_H
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 
+#include "batched_forcefield.h"
 #include "device_vector.h"
 #include "mmff_kernels.h"
 namespace nvMolKit {
@@ -101,6 +103,10 @@ struct EnergyForceContribsHost {
   VdwTerms                vdwTerms;
   EleTerms                eleTerms;
 };
+
+using HostCustomization = std::function<void(const BatchedSystemInfo&,
+                                             const std::vector<double>&,
+                                             EnergyForceContribsHost&)>;
 
 struct BatchedIndicesHost {
   //! Size n_molecules + 1, defines the start and end of each molecule in the batch.
@@ -262,6 +268,14 @@ struct BatchedMolecularDeviceBuffers {
 void addMoleculeToBatch(const EnergyForceContribsHost& contribs,
                         const std::vector<double>&     positions,
                         BatchedMolecularSystemHost&    molSystem);
+
+void addMoleculeToBatch(const EnergyForceContribsHost& contribs,
+                        const std::vector<double>&     positions,
+                        BatchedMolecularSystemHost&    molSystem,
+                        BatchedForcefieldMetadata&     metadata,
+                        int                            moleculeIdx,
+                        int                            conformerIdx,
+                        const HostCustomization&       customization = {});
 
 //! Send the batched molecular system to the device.
 void sendContribsAndIndicesToDevice(const BatchedMolecularSystemHost& molSystemHost,

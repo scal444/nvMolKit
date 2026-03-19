@@ -9,6 +9,7 @@ namespace nvMolKit {
 class MMFFBatchedForcefield final : public BatchedForcefield {
  public:
   explicit MMFFBatchedForcefield(const MMFF::BatchedMolecularSystemHost& molSystemHost,
+                                 BatchedForcefieldMetadata                metadata = {},
                                  cudaStream_t                            stream = nullptr);
 
   cudaError_t computeEnergy(double*        energyOuts,

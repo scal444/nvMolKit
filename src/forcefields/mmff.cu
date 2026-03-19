@@ -357,6 +357,21 @@ void addMoleculeToBatch(const EnergyForceContribsHost& contribs,
   }
 }
 
+void addMoleculeToBatch(const EnergyForceContribsHost& contribs,
+                        const std::vector<double>&     positions,
+                        BatchedMolecularSystemHost&    molSystem,
+                        BatchedForcefieldMetadata&     metadata,
+                        const int                      moleculeIdx,
+                        const int                      conformerIdx,
+                        const HostCustomization&       customization) {
+  EnergyForceContribsHost contribsCopy = contribs;
+  const BatchedSystemInfo systemInfo   = metadata.recordSystem(moleculeIdx, conformerIdx);
+  if (customization) {
+    customization(systemInfo, positions, contribsCopy);
+  }
+  addMoleculeToBatch(contribsCopy, positions, molSystem);
+}
+
 void allocateIntermediateBuffers(const BatchedMolecularSystemHost& molSystemHost,
                                  BatchedMolecularDeviceBuffers&    molSystemDevice) {
   nvMolKit::FFKernelUtils::allocateIntermediateBuffers(molSystemHost,

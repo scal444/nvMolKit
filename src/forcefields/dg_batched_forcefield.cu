@@ -15,8 +15,9 @@ DGBatchedForcefield::DGBatchedForcefield(const DistGeom::BatchedMolecularSystemH
                                          const std::vector<int>&                     atomStartsHost,
                                          const double                                chiralWeight,
                                          const double                                fourthDimWeight,
+                                         BatchedForcefieldMetadata                   metadata,
                                          const cudaStream_t                          stream)
-    : BatchedForcefield(ForceFieldType::DG, molSystemHost.dimension, atomStartsHost, nullptr),
+    : BatchedForcefield(ForceFieldType::DG, molSystemHost.dimension, atomStartsHost, nullptr, std::move(metadata)),
       chiralWeight_(chiralWeight),
       fourthDimWeight_(fourthDimWeight) {
   atomStartsDevice_.setStream(stream);

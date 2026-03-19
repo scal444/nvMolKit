@@ -77,6 +77,7 @@ class DistGeomMinimizeStage : public ETKDGStage {
 
   nvMolKit::DistGeom::BatchedMolecularSystemHost    molSystemHost;
   nvMolKit::DistGeom::BatchedMolecularDeviceBuffers molSystemDevice;
+  BatchedForcefieldMetadata                         metadata_;
   AsyncDeviceVector<double>                         grad_;
   AsyncDeviceVector<double>                         energyOuts_;
   const RDKit::DGeomHelpers::EmbedParameters&       embedParam_;

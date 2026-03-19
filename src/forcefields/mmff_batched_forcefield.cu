@@ -11,8 +11,9 @@ void allocateEnergyScratch(const MMFF::BatchedMolecularSystemHost& molSystemHost
 }  // namespace
 
 MMFFBatchedForcefield::MMFFBatchedForcefield(const MMFF::BatchedMolecularSystemHost& molSystemHost,
+                                             BatchedForcefieldMetadata                metadata,
                                              const cudaStream_t                       stream)
-    : BatchedForcefield(ForceFieldType::MMFF, 3, molSystemHost.indices.atomStarts, nullptr) {
+    : BatchedForcefield(ForceFieldType::MMFF, 3, molSystemHost.indices.atomStarts, nullptr, std::move(metadata)) {
   MMFF::setStreams(systemDevice_, stream);
   MMFF::sendContribsAndIndicesToDevice(molSystemHost, systemDevice_);
   allocateEnergyScratch(molSystemHost, systemDevice_);

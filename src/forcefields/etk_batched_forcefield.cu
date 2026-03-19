@@ -13,8 +13,9 @@ void allocateEnergyScratch(const DistGeom::BatchedMolecularSystem3DHost& molSyst
 ETKBatchedForcefield::ETKBatchedForcefield(const DistGeom::BatchedMolecularSystem3DHost& molSystemHost,
                                            const std::vector<int>&                       atomStartsHost,
                                            const bool                                    useBasicKnowledge,
+                                           BatchedForcefieldMetadata                     metadata,
                                            const cudaStream_t                            stream)
-    : BatchedForcefield(ForceFieldType::ETK, 4, atomStartsHost, nullptr),
+    : BatchedForcefield(ForceFieldType::ETK, 4, atomStartsHost, nullptr, std::move(metadata)),
       term_(useBasicKnowledge ? DistGeom::ETKTerm::ALL : DistGeom::ETKTerm::PLAIN) {
   atomStartsDevice_.setStream(stream);
   DistGeom::setStreams(systemDevice_, stream);

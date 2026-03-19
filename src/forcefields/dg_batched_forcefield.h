@@ -12,6 +12,7 @@ class DGBatchedForcefield final : public BatchedForcefield {
                       const std::vector<int>&                     atomStartsHost,
                       double                                      chiralWeight,
                       double                                      fourthDimWeight,
+                      BatchedForcefieldMetadata                   metadata = {},
                       cudaStream_t                                stream = nullptr);
 
   cudaError_t computeEnergy(double*        energyOuts,

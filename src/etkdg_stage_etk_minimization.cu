@@ -17,6 +17,8 @@
 #include "etkdg_stage_etk_minimization.h"
 #include "minimizer/bfgs_minimize.h"
 
+#include <unordered_map>
+
 namespace nvMolKit {
 namespace detail {
 
@@ -102,7 +104,9 @@ ETKMinimizationStage::ETKMinimizationStage(
 
   std::vector<double> positions(totalNumAtoms * dim, 0.0);
 
-  bool preallocated = false;
+  bool                                         preallocated = false;
+  std::unordered_map<const RDKit::ROMol*, int> moleculeSlots;
+  std::unordered_map<const RDKit::ROMol*, int> conformerCounts;
   for (size_t i = 0; i < mols.size(); ++i) {
     const auto& mol          = mols[i];
     const auto& etkdgDetails = eargs[i].etkdgDetails;
@@ -142,7 +146,27 @@ ETKMinimizationStage::ETKMinimizationStage(
       preallocated = true;
     }
 
-    addMoleculeToMolecularSystem3D(*ffParams, ctx.systemHost.atomStarts, molSystemHost);
+    auto [slotIt, inserted] = moleculeSlots.emplace(mol, static_cast<int>(moleculeSlots.size()));
+    const int moleculeIdx   = slotIt->second;
+    const int conformerIdx  = conformerCounts[mol]++;
+    std::vector<double> molPositions3D;
+    molPositions3D.reserve(3 * mol->getNumAtoms());
+    const int atomStart = ctx.systemHost.atomStarts[i];
+    const int atomEnd   = ctx.systemHost.atomStarts[i + 1];
+    for (int atomIdx = atomStart; atomIdx < atomEnd; ++atomIdx) {
+      molPositions3D.push_back(ctx.systemHost.positions[4 * atomIdx + 0]);
+      molPositions3D.push_back(ctx.systemHost.positions[4 * atomIdx + 1]);
+      molPositions3D.push_back(ctx.systemHost.positions[4 * atomIdx + 2]);
+    }
+
+    addMoleculeToMolecularSystem3D(*ffParams,
+                                   ctx.systemHost.atomStarts,
+                                   molSystemHost,
+                                   metadata_,
+                                   moleculeIdx,
+                                   conformerIdx,
+                                   molPositions3D,
+                                   {});
   }
 }
 
@@ -183,7 +207,8 @@ void ETKMinimizationStage::execute(ETKDGContext& ctx) {
   constexpr int maxIters = 300;  // Taken from hard-coded RDKit value.
 
   if (effectiveBackend == BfgsBackend::BATCHED) {
-    ETKBatchedForcefield forcefield(molSystemHost, ctx.systemHost.atomStarts, embedParam_.useBasicKnowledge, stream_);
+    ETKBatchedForcefield forcefield(
+      molSystemHost, ctx.systemHost.atomStarts, embedParam_.useBasicKnowledge, metadata_, stream_);
     setReferenceValues(ctx, forcefield);
     grad_.resize(ctx.systemHost.positions.size());
     grad_.zero();
