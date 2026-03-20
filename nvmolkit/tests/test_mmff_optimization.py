@@ -22,7 +22,7 @@ from rdkit.Chem.AllChem import ETKDGv3
 
 from nvmolkit.embedMolecules import EmbedMolecules
 import nvmolkit.mmffOptimization as nvmolkit_mmff
-from nvmolkit.types import HardwareOptions
+from nvmolkit.types import HardwareOptions, MMFFProperties
 
 
 @pytest.fixture
@@ -82,7 +82,25 @@ def create_hard_copy_mols(molecules):
     return copied_mols
 
 
-def calculate_rdkit_mmff_energies(molecules, maxIters=200, nonBondedThreshold=100.0):
+def make_rdkit_mmff_properties(mol, properties: MMFFProperties | None = None):
+    properties = MMFFProperties() if properties is None else properties
+    mmff_props = rdForceFieldHelpers.MMFFGetMoleculeProperties(mol, mmffVariant=properties.variant)
+    if mmff_props is None:
+        raise ValueError("RDKit could not create MMFF properties for molecule")
+    mmff_props.SetMMFFVariant(properties.variant)
+    mmff_props.SetMMFFDielectricConstant(properties.dielectric_constant)
+    mmff_props.SetMMFFDielectricModel(properties.dielectric_model)
+    mmff_props.SetMMFFBondTerm(properties.bond_term)
+    mmff_props.SetMMFFAngleTerm(properties.angle_term)
+    mmff_props.SetMMFFStretchBendTerm(properties.stretch_bend_term)
+    mmff_props.SetMMFFOopTerm(properties.oop_term)
+    mmff_props.SetMMFFTorsionTerm(properties.torsion_term)
+    mmff_props.SetMMFFVdWTerm(properties.vdw_term)
+    mmff_props.SetMMFFEleTerm(properties.ele_term)
+    return mmff_props
+
+
+def calculate_rdkit_mmff_energies(molecules, maxIters=200, properties: MMFFProperties | None = None):
     """Calculate MMFF energies using RDKit for all conformers of all molecules.
 
     Args:
@@ -92,6 +110,8 @@ def calculate_rdkit_mmff_energies(molecules, maxIters=200, nonBondedThreshold=10
         list: List of lists containing energies for each molecule's conformers
     """
     all_energies = []
+
+    properties = MMFFProperties() if properties is None else properties
 
     for mol in molecules:
         mol_energies = []
@@ -103,13 +123,18 @@ def calculate_rdkit_mmff_energies(molecules, maxIters=200, nonBondedThreshold=10
 
         # Optimize all conformers for this molecule using RDKit
         # The signature shows it's a method on the molecule object
-        results = rdForceFieldHelpers.MMFFOptimizeMoleculeConfs(
-            mol, maxIters=maxIters, mmffVariant="MMFF94", nonBondedThresh=nonBondedThreshold
-        )
-
-        if results:
-            for _, energy in results:
-                mol_energies.append(energy)
+        mmff_props = make_rdkit_mmff_properties(mol, properties)
+        for conf_id in range(num_conformers):
+            ff = rdForceFieldHelpers.MMFFGetMoleculeForceField(
+                mol,
+                mmff_props,
+                nonBondedThresh=properties.non_bonded_threshold,
+                confId=conf_id,
+                ignoreInterfragInteractions=properties.ignore_interfrag_interactions,
+            )
+            ff.Initialize()
+            ff.Minimize(maxIts=maxIters)
+            mol_energies.append(ff.CalcEnergy())
 
         all_energies.append(mol_energies)
 
@@ -126,8 +151,10 @@ def test_mmff_optimization_serial_vs_rdkit(mmff_test_mols):
     rdkit_mols = create_hard_copy_mols(mmff_test_mols)
     nvmolkit_mols = create_hard_copy_mols(mmff_test_mols)
 
+    properties = MMFFProperties()
+
     # Get RDKit reference energies
-    rdkit_energies = calculate_rdkit_mmff_energies(rdkit_mols)
+    rdkit_energies = calculate_rdkit_mmff_energies(rdkit_mols, properties=properties)
 
     # Get nvMolKit energies one molecule at a time (serial mode)
     nvmolkit_energies = []
@@ -140,7 +167,7 @@ def test_mmff_optimization_serial_vs_rdkit(mmff_test_mols):
         mol_energies = nvmolkit_mmff.MMFFOptimizeMoleculesConfs(
             [mol],
             maxIters=200,
-            nonBondedThreshold=100.0,
+            properties=properties,
         )
         nvmolkit_energies.extend(mol_energies)
 
@@ -183,8 +210,10 @@ def test_mmff_optimization_batch_vs_rdkit(mmff_test_mols, gpu_ids, batchesize, b
     rdkit_mols = create_hard_copy_mols(mmff_test_mols)
     nvmolkit_mols = create_hard_copy_mols(mmff_test_mols)
 
+    properties = MMFFProperties()
+
     # Get RDKit reference energies
-    rdkit_energies = calculate_rdkit_mmff_energies(rdkit_mols)
+    rdkit_energies = calculate_rdkit_mmff_energies(rdkit_mols, properties=properties)
 
     hardware_options = HardwareOptions(
         gpuIds=gpu_ids,
@@ -194,7 +223,7 @@ def test_mmff_optimization_batch_vs_rdkit(mmff_test_mols, gpu_ids, batchesize, b
 
     # Get nvMolKit energies in batch mode (all molecules at once)
     nvmolkit_energies = nvmolkit_mmff.MMFFOptimizeMoleculesConfs(
-        nvmolkit_mols, maxIters=200, nonBondedThreshold=100.0, hardwareOptions=hardware_options
+        nvmolkit_mols, maxIters=200, properties=properties, hardwareOptions=hardware_options
     )
 
     # Verify we have the same number of molecules
@@ -246,9 +275,10 @@ def test_mmff_optimization_allows_large_molecule_interleaved():
 
     mols = [small1, big, small2]
     rdkit_mols = create_hard_copy_mols(mols)
-    rdkit_energies = calculate_rdkit_mmff_energies(rdkit_mols, maxIters=10, nonBondedThreshold=100.0)
+    properties = MMFFProperties()
+    rdkit_energies = calculate_rdkit_mmff_energies(rdkit_mols, maxIters=10, properties=properties)
 
-    energies = nvmolkit_mmff.MMFFOptimizeMoleculesConfs(mols, maxIters=10, nonBondedThreshold=100.0)
+    energies = nvmolkit_mmff.MMFFOptimizeMoleculesConfs(mols, maxIters=10, properties=properties)
     assert len(energies) == 3
 
     for mol_idx, (rdkit_mol_energies, nvmolkit_mol_energies) in enumerate(zip(rdkit_energies, energies)):
@@ -261,6 +291,35 @@ def test_mmff_optimization_allows_large_molecule_interleaved():
             energy_diff = abs(rdkit_energy - nvmolkit_energy)
             rel_error = energy_diff / abs(rdkit_energy) if abs(rdkit_energy) > 1e-10 else energy_diff
 
+            assert rel_error < 1e-3, (
+                f"Molecule {mol_idx}, Conformer {conf_idx}: energy mismatch: "
+                f"RDKit={rdkit_energy:.6f}, nvMolKit={nvmolkit_energy:.6f}, "
+                f"abs_diff={energy_diff:.6f}, rel_error={rel_error:.6f}"
+            )
+
+
+def test_mmff_optimization_custom_properties_vs_rdkit(mmff_test_mols):
+    rdkit_mols = create_hard_copy_mols(mmff_test_mols[:2])
+    nvmolkit_mols = create_hard_copy_mols(mmff_test_mols[:2])
+    properties = MMFFProperties(
+        dielectric_constant=2.0,
+        dielectric_model=2,
+        non_bonded_threshold=30.0,
+    )
+
+    rdkit_energies = calculate_rdkit_mmff_energies(rdkit_mols, maxIters=100, properties=properties)
+    nvmolkit_energies = nvmolkit_mmff.MMFFOptimizeMoleculesConfs(
+        nvmolkit_mols,
+        maxIters=100,
+        properties=properties,
+    )
+
+    assert len(rdkit_energies) == len(nvmolkit_energies)
+    for mol_idx, (rdkit_mol_energies, nvmolkit_mol_energies) in enumerate(zip(rdkit_energies, nvmolkit_energies)):
+        assert len(rdkit_mol_energies) == len(nvmolkit_mol_energies)
+        for conf_idx, (rdkit_energy, nvmolkit_energy) in enumerate(zip(rdkit_mol_energies, nvmolkit_mol_energies)):
+            energy_diff = abs(rdkit_energy - nvmolkit_energy)
+            rel_error = energy_diff / abs(rdkit_energy) if abs(rdkit_energy) > 1e-10 else energy_diff
             assert rel_error < 1e-3, (
                 f"Molecule {mol_idx}, Conformer {conf_idx}: energy mismatch: "
                 f"RDKit={rdkit_energy:.6f}, nvMolKit={nvmolkit_energy:.6f}, "

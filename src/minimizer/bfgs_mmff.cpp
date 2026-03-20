@@ -59,7 +59,7 @@ struct ThreadLocalBuffers {
 
 std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKit::ROMol*>& mols,
                                                                 const int                   maxIters,
-                                                                const double                nonBondedThreshold,
+                                                                const MMFFPropertiesNative& properties,
                                                                 const BatchHardwareOptions& perfOptions,
                                                                 const BfgsBackend           backend) {
   ScopedNvtxRange fullMinimizeRange("BFGS MMFF Optimize Molecules Confs");
@@ -138,7 +138,7 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
                                                                                           totalConformers,    \
                                                                                           effectiveBatchSize, \
                                                                                           maxIters,           \
-                                                                                          nonBondedThreshold, \
+                                                                                          properties,         \
                                                                                           streamPool,         \
                                                                                           devicesPerThread,   \
                                                                                           threadBuffers,      \
@@ -179,7 +179,7 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
         if (it == moleculeCache.end()) {
           ScopedNvtxRange    computeCacheRange("Preprocess single molecule");
           CachedMoleculeData cached;
-          cached.ffParams = constructForcefieldContribs(*mol, nonBondedThreshold);
+          cached.ffParams = constructForcefieldContribs(*mol, properties);
           it              = moleculeCache.insert({mol, std::move(cached)}).first;
         }
         auto&           ffParams = it->second.ffParams;

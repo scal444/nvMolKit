@@ -534,5 +534,24 @@ MMFF::EnergyForceContribsHost constructForcefieldContribs(RDKit::ROMol& mol,
   return constructForcefieldContribs(mol, &mmffMolProperties, nonBondedThresh, confId, ignoreInterfragInteractions);
 }
 
+MMFF::EnergyForceContribsHost constructForcefieldContribs(RDKit::ROMol&                mol,
+                                                          const nvMolKit::MMFFPropertiesNative& props,
+                                                          int                          confId) {
+  RDKit::MMFF::MMFFMolProperties mmffMolProperties(mol, props.variant);
+  PRECONDITION(mmffMolProperties.isValid(), "missing atom types - invalid force-field");
+  mmffMolProperties.SetMMFFVariant(props.variant);
+  mmffMolProperties.SetMMFFDielectricConstant(props.dielectricConstant);
+  mmffMolProperties.SetMMFFDielectricModel(props.dielectricModel);
+  mmffMolProperties.SetMMFFBondTerm(props.bondTerm);
+  mmffMolProperties.SetMMFFAngleTerm(props.angleTerm);
+  mmffMolProperties.SetMMFFStretchBendTerm(props.stretchBendTerm);
+  mmffMolProperties.SetMMFFOopTerm(props.oopTerm);
+  mmffMolProperties.SetMMFFTorsionTerm(props.torsionTerm);
+  mmffMolProperties.SetMMFFVdWTerm(props.vdwTerm);
+  mmffMolProperties.SetMMFFEleTerm(props.eleTerm);
+  return constructForcefieldContribs(
+    mol, &mmffMolProperties, props.nonBondedThreshold, confId, props.ignoreInterfragInteractions);
+}
+
 }  // namespace MMFF
 }  // namespace nvMolKit

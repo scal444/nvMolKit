@@ -14,8 +14,11 @@
 # limitations under the License.
 
 """Types facilitating GPU-accelerated operations."""
-import torch
+from dataclasses import dataclass
 from typing import Iterable, List
+
+import torch
+
 from nvmolkit import _embedMolecules  # type: ignore
 
 
@@ -90,6 +93,48 @@ class HardwareOptions:
     def _as_native(self):
         """Internal: return the underlying BatchHardwareOptions object."""
         return self._native
+
+
+@dataclass
+class MMFFProperties:
+    """Configuration for MMFF forcefield construction.
+
+    These settings correspond to RDKit's ``MMFFMolProperties`` configuration.
+    The resulting parameters are baked into the flattened forcefield during
+    build, so changing them requires a rebuild of the batched forcefield.
+    """
+
+    variant: str = "MMFF94"
+    dielectric_constant: float = 1.0
+    dielectric_model: int = 1
+    non_bonded_threshold: float = 100.0
+    ignore_interfrag_interactions: bool = True
+    bond_term: bool = True
+    angle_term: bool = True
+    stretch_bend_term: bool = True
+    oop_term: bool = True
+    torsion_term: bool = True
+    vdw_term: bool = True
+    ele_term: bool = True
+
+    def _as_native(self):
+        """Internal: convert to the native MMFF properties struct."""
+        from nvmolkit import _batchedForcefield  # type: ignore
+
+        native = _batchedForcefield.MMFFPropertiesNative()
+        native.variant = str(self.variant)
+        native.dielectricConstant = float(self.dielectric_constant)
+        native.dielectricModel = int(self.dielectric_model)
+        native.nonBondedThreshold = float(self.non_bonded_threshold)
+        native.ignoreInterfragInteractions = bool(self.ignore_interfrag_interactions)
+        native.bondTerm = bool(self.bond_term)
+        native.angleTerm = bool(self.angle_term)
+        native.stretchBendTerm = bool(self.stretch_bend_term)
+        native.oopTerm = bool(self.oop_term)
+        native.torsionTerm = bool(self.torsion_term)
+        native.vdwTerm = bool(self.vdw_term)
+        native.eleTerm = bool(self.ele_term)
+        return native
 
 class AsyncGpuResult:
     """Handle to a GPU result.

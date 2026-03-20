@@ -27,13 +27,13 @@ if TYPE_CHECKING:
     from rdkit.Chem import Mol
 
 from nvmolkit import _mmffOptimization
-from nvmolkit.types import HardwareOptions
+from nvmolkit.types import HardwareOptions, MMFFProperties
 
 
 def MMFFOptimizeMoleculesConfs(
     molecules: list["Mol"],
     maxIters: int = 200,
-    nonBondedThreshold: float = 100.0,
+    properties: MMFFProperties | None = None,
     hardwareOptions: HardwareOptions | None = None,
 ) -> list[list[float]]:
     """Optimize conformers for multiple molecules using MMFF force field with BFGS minimization.
@@ -46,7 +46,7 @@ def MMFFOptimizeMoleculesConfs(
         molecules: List of RDKit molecules to optimize. Each molecule should have
                   conformers already generated.
         maxIters: Maximum number of BFGS optimization iterations (default: 200)
-        nonBondedThreshold: Radius threshold for non-bonded interactions in Ångströms (default: 100.0)
+        properties: MMFF forcefield construction properties. Uses default MMFF94 settings when omitted.
         hardwareOptions: Configures CPU and GPU batching, threading, and device selection. Will attempt to use reasonable defaults if not set.
 
     Returns:
@@ -120,5 +120,10 @@ def MMFFOptimizeMoleculesConfs(
     # Call the C++ implementation
     if hardwareOptions is None:
         hardwareOptions = HardwareOptions()
+    if properties is None:
+        properties = MMFFProperties()
     native_options = hardwareOptions._as_native()
-    return _mmffOptimization.MMFFOptimizeMoleculesConfs(molecules, maxIters, nonBondedThreshold, native_options)
+    native_properties = properties._as_native()
+    return _mmffOptimization.MMFFOptimizeMoleculesConfs(
+        molecules, maxIters, native_properties, native_options
+    )

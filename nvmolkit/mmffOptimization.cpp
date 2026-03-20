@@ -17,6 +17,7 @@
 
 #include <boost/python.hpp>
 
+#include "mmff_properties.h"
 #include "bfgs_mmff.h"
 
 template <typename T> boost::python::list vectorToList(const std::vector<T>& vec) {
@@ -35,12 +36,32 @@ template <typename T> boost::python::list vectorOfVectorsToList(const std::vecto
   return outerList;
 }
 
+nvMolKit::MMFFPropertiesNative extractMMFFProperties(const boost::python::object& obj) {
+  nvMolKit::MMFFPropertiesNative props;
+  if (obj.is_none()) {
+    return props;
+  }
+  props.variant = boost::python::extract<std::string>(obj.attr("variant"));
+  props.dielectricConstant = boost::python::extract<double>(obj.attr("dielectricConstant"));
+  props.dielectricModel = boost::python::extract<int>(obj.attr("dielectricModel"));
+  props.nonBondedThreshold = boost::python::extract<double>(obj.attr("nonBondedThreshold"));
+  props.ignoreInterfragInteractions = boost::python::extract<bool>(obj.attr("ignoreInterfragInteractions"));
+  props.bondTerm = boost::python::extract<bool>(obj.attr("bondTerm"));
+  props.angleTerm = boost::python::extract<bool>(obj.attr("angleTerm"));
+  props.stretchBendTerm = boost::python::extract<bool>(obj.attr("stretchBendTerm"));
+  props.oopTerm = boost::python::extract<bool>(obj.attr("oopTerm"));
+  props.torsionTerm = boost::python::extract<bool>(obj.attr("torsionTerm"));
+  props.vdwTerm = boost::python::extract<bool>(obj.attr("vdwTerm"));
+  props.eleTerm = boost::python::extract<bool>(obj.attr("eleTerm"));
+  return props;
+}
+
 BOOST_PYTHON_MODULE(_mmffOptimization) {
   boost::python::def(
     "MMFFOptimizeMoleculesConfs",
     +[](const boost::python::list&            molecules,
         int                                   maxIters,
-        double                                nonBondedThreshold,
+        const boost::python::object&          propertiesObj,
         const nvMolKit::BatchHardwareOptions& hardwareOptions) -> boost::python::list {
       // Convert Python list to std::vector<RDKit::ROMol*>
       std::vector<RDKit::ROMol*> molsVec;
@@ -54,23 +75,23 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
         molsVec.push_back(mol);
       }
 
+      const auto properties = extractMMFFProperties(propertiesObj);
       // Call the C++ function (uses HYBRID backend by default, which auto-selects based on max atoms)
-      auto result =
-        nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molsVec, maxIters, nonBondedThreshold, hardwareOptions);
+      auto result = nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molsVec, maxIters, properties, hardwareOptions);
 
       // Convert result back to Python list of lists
       return vectorOfVectorsToList(result);
     },
     (boost::python::arg("molecules"),
      boost::python::arg("maxIters")           = 200,
-     boost::python::arg("nonBondedThreshold") = 100.0,
+     boost::python::arg("properties")         = boost::python::object(),
      boost::python::arg("hardwareOptions")    = nvMolKit::BatchHardwareOptions()),
     "Optimize conformers for multiple molecules using MMFF force field.\n"
     "\n"
     "Args:\n"
     "    molecules: List of RDKit molecules to optimize\n"
     "    maxIters: Maximum number of optimization iterations (default: 200)\n"
-    "    nonBondedThreshold: Radius threshold for non-bonded interactions (default: 100.0)\n"
+    "    properties: MMFFPropertiesNative-compatible object with forcefield settings\n"
     "    hardwareOptions: BatchHardwareOptions object with hardware settings (default: default options)\n"
     "\n"
     "Returns:\n"
