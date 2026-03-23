@@ -54,7 +54,8 @@ target_link_libraries(_batchedForcefield PUBLIC ${Boost_LIBRARIES}
                                                 ${PYTHON_LIBRARIES})
 target_link_libraries(
   _batchedForcefield PRIVATE ${RDKit_LIBS} batched_forcefield rdkit_mmff_flattened
-                             rdkit_dist_geom_flattened ff_utils embedder_utils)
+                             rdkit_dist_geom_flattened device_vector ff_utils
+                             embedder_utils)
 target_include_directories(
   _batchedForcefield PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/utils
                             ${Python_INCLUDE_DIRS})
@@ -89,13 +90,3 @@ target_link_libraries(_substructure PUBLIC ${Boost_LIBRARIES}
         ${PYTHON_LIBRARIES})
 target_link_libraries(_substructure PRIVATE ${RDKit_LIBS} substructure_search pinned_host_allocator)
 installpythontarget(_substructure ./)
-
-add_library(_tautomerEnumeration MODULE tautomerEnumeration.cpp)
-target_include_directories(
-  _tautomerEnumeration PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/utils ${Boost_INCLUDE_DIRS}
-                              ${Python_INCLUDE_DIRS}
-                              ${CMAKE_SOURCE_DIR}/src/tautomer)
-target_link_libraries(_tautomerEnumeration PUBLIC ${Boost_LIBRARIES}
-                                                  ${PYTHON_LIBRARIES})
-target_link_libraries(_tautomerEnumeration PRIVATE ${RDKit_LIBS} tautomer_enumeration)
-installpythontarget(_tautomerEnumeration ./)

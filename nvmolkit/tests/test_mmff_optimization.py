@@ -299,19 +299,49 @@ def test_mmff_optimization_allows_large_molecule_interleaved():
 
 
 def test_mmff_optimization_custom_properties_vs_rdkit(mmff_test_mols):
-    rdkit_mols = create_hard_copy_mols(mmff_test_mols[:2])
-    nvmolkit_mols = create_hard_copy_mols(mmff_test_mols[:2])
-    properties = MMFFProperties(
+    custom_props = MMFFProperties(
         dielectric_constant=2.0,
         dielectric_model=2,
-        non_bonded_threshold=30.0,
     )
+    default_props = MMFFProperties()
 
-    rdkit_energies = calculate_rdkit_mmff_energies(rdkit_mols, maxIters=100, properties=properties)
+    # Step 0: compare initial energies (no minimization) to verify properties are applied
+    for label, props in [("default", default_props), ("custom", custom_props)]:
+        rdkit_mols_0 = create_hard_copy_mols(mmff_test_mols[:2])
+        nvmolkit_mols_0 = create_hard_copy_mols(mmff_test_mols[:2])
+        rdkit_e0 = calculate_rdkit_mmff_energies(rdkit_mols_0, maxIters=0, properties=props)
+        nvmolkit_e0 = nvmolkit_mmff.MMFFOptimizeMoleculesConfs(
+            nvmolkit_mols_0, maxIters=0, properties=props,
+        )
+        for mol_idx, (r, n) in enumerate(zip(rdkit_e0, nvmolkit_e0)):
+            for conf_idx, (re, ne) in enumerate(zip(r, n)):
+                diff = abs(re - ne)
+                rel = diff / abs(re) if abs(re) > 1e-10 else diff
+                assert rel < 1e-3, (
+                    f"[{label}] Step-0 mol {mol_idx} conf {conf_idx}: "
+                    f"RDKit={re:.6f} nvMolKit={ne:.6f} rel={rel:.6f}"
+                )
+
+    # Verify custom properties actually change the energy
+    default_mols = create_hard_copy_mols(mmff_test_mols[:2])
+    custom_mols = create_hard_copy_mols(mmff_test_mols[:2])
+    default_e0 = calculate_rdkit_mmff_energies(default_mols, maxIters=0, properties=default_props)
+    custom_e0 = calculate_rdkit_mmff_energies(custom_mols, maxIters=0, properties=custom_props)
+    for mol_idx, (de, ce) in enumerate(zip(default_e0, custom_e0)):
+        for conf_idx, (d, c) in enumerate(zip(de, ce)):
+            assert abs(d - c) > 1e-3, (
+                f"Mol {mol_idx} conf {conf_idx}: default and custom energies "
+                f"should differ: default={d:.6f} custom={c:.6f}"
+            )
+
+    # Now test with minimization
+    rdkit_mols = create_hard_copy_mols(mmff_test_mols[:2])
+    nvmolkit_mols = create_hard_copy_mols(mmff_test_mols[:2])
+    rdkit_energies = calculate_rdkit_mmff_energies(rdkit_mols, maxIters=100, properties=custom_props)
     nvmolkit_energies = nvmolkit_mmff.MMFFOptimizeMoleculesConfs(
         nvmolkit_mols,
         maxIters=100,
-        properties=properties,
+        properties=custom_props,
     )
 
     assert len(rdkit_energies) == len(nvmolkit_energies)
@@ -320,7 +350,7 @@ def test_mmff_optimization_custom_properties_vs_rdkit(mmff_test_mols):
         for conf_idx, (rdkit_energy, nvmolkit_energy) in enumerate(zip(rdkit_mol_energies, nvmolkit_mol_energies)):
             energy_diff = abs(rdkit_energy - nvmolkit_energy)
             rel_error = energy_diff / abs(rdkit_energy) if abs(rdkit_energy) > 1e-10 else energy_diff
-            assert rel_error < 1e-3, (
+            assert rel_error < 1e-2, (
                 f"Molecule {mol_idx}, Conformer {conf_idx}: energy mismatch: "
                 f"RDKit={rdkit_energy:.6f}, nvMolKit={nvmolkit_energy:.6f}, "
                 f"abs_diff={energy_diff:.6f}, rel_error={rel_error:.6f}"

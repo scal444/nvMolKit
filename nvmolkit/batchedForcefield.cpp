@@ -47,7 +47,7 @@ std::vector<RDKit::ROMol*> extractMolecules(const bp::list& molecules) {
   std::vector<RDKit::ROMol*> mols;
   mols.reserve(bp::len(molecules));
   for (int i = 0; i < bp::len(molecules); ++i) {
-    auto* mol = bp::extract<RDKit::ROMol*>(bp::object(molecules[i]));
+    auto* mol = bp::extract<RDKit::ROMol*>(bp::object(molecules[i]))();
     if (mol == nullptr) {
       throw std::invalid_argument("Invalid molecule at index " + std::to_string(i));
     }
