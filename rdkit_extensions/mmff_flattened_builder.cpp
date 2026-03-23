@@ -539,16 +539,16 @@ MMFF::EnergyForceContribsHost constructForcefieldContribs(RDKit::ROMol&         
                                                           int                          confId) {
   RDKit::MMFF::MMFFMolProperties mmffMolProperties(mol, props.variant);
   PRECONDITION(mmffMolProperties.isValid(), "missing atom types - invalid force-field");
-  mmffMolProperties.SetMMFFVariant(props.variant);
-  mmffMolProperties.SetMMFFDielectricConstant(props.dielectricConstant);
-  mmffMolProperties.SetMMFFDielectricModel(props.dielectricModel);
-  mmffMolProperties.SetMMFFBondTerm(props.bondTerm);
-  mmffMolProperties.SetMMFFAngleTerm(props.angleTerm);
-  mmffMolProperties.SetMMFFStretchBendTerm(props.stretchBendTerm);
-  mmffMolProperties.SetMMFFOopTerm(props.oopTerm);
-  mmffMolProperties.SetMMFFTorsionTerm(props.torsionTerm);
-  mmffMolProperties.SetMMFFVdWTerm(props.vdwTerm);
-  mmffMolProperties.SetMMFFEleTerm(props.eleTerm);
+  mmffMolProperties.setMMFFVariant(props.variant);
+  mmffMolProperties.setMMFFDielectricConstant(props.dielectricConstant);
+  mmffMolProperties.setMMFFDielectricModel(props.dielectricModel);
+  mmffMolProperties.setMMFFBondTerm(props.bondTerm);
+  mmffMolProperties.setMMFFAngleTerm(props.angleTerm);
+  mmffMolProperties.setMMFFStretchBendTerm(props.stretchBendTerm);
+  mmffMolProperties.setMMFFOopTerm(props.oopTerm);
+  mmffMolProperties.setMMFFTorsionTerm(props.torsionTerm);
+  mmffMolProperties.setMMFFVdWTerm(props.vdwTerm);
+  mmffMolProperties.setMMFFEleTerm(props.eleTerm);
   return constructForcefieldContribs(
     mol, &mmffMolProperties, props.nonBondedThreshold, confId, props.ignoreInterfragInteractions);
 }

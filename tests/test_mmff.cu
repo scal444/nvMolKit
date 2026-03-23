@@ -1487,7 +1487,7 @@ TEST(MMFFMultiGPU, SpecificGpuIds) {
 
   // Run optimizer on specific GPU
   std::vector<std::vector<double>> gotEnergies =
-    nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molPtrs, 200, 100.0, options);
+    nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molPtrs, 200, {}, options);
 
   // Verify energies against RDKit-minimized reference energies
   ASSERT_EQ(gotEnergies.size(), mols.size());
@@ -1550,7 +1550,7 @@ TEST(MMFFMultiGPU, NonZeroGPUID) {
   }
 
   std::vector<std::vector<double>> gotEnergies =
-    nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molPtrs, 200, 100.0, options);
+    nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molPtrs, 200, {}, options);
 
   ASSERT_EQ(gotEnergies.size(), mols.size());
   for (size_t molIdx = 0; molIdx < mols.size(); ++molIdx) {
@@ -1613,7 +1613,7 @@ TEST(MMFFMultiGPU, MultiGPUSpecificIds) {
   }
 
   std::vector<std::vector<double>> gotEnergies =
-    nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molPtrs, 200, 100.0, options);
+    nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molPtrs, 200, {}, options);
 
   ASSERT_EQ(gotEnergies.size(), mols.size());
   for (size_t molIdx = 0; molIdx < mols.size(); ++molIdx) {
@@ -1699,7 +1699,7 @@ TEST(MMFFAllowsLargeMol, LargeMoleculeInterleavedOptimizes) {
 
   std::vector<RDKit::ROMol*>     molPtrs = {small1.get(), big.get(), small2.get()};
   nvMolKit::BatchHardwareOptions options;
-  const auto                     energies = nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molPtrs, 10, 10.0, options);
+  const auto                     energies = nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molPtrs, 10, {}, options);
 
   for (size_t molIdx = 0; molIdx < rdkitRefs.size(); ++molIdx) {
     auto& molRef   = *rdkitRefs[molIdx];
