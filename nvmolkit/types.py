@@ -14,8 +14,10 @@
 # limitations under the License.
 
 """Types facilitating GPU-accelerated operations."""
-import torch
 from typing import Iterable, List
+
+import torch
+
 from nvmolkit import _embedMolecules  # type: ignore
 
 
