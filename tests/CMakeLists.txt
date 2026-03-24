@@ -91,6 +91,19 @@ target_link_libraries(
           ff_utils
           test_utils)
 
+add_executable(test_uff test_uff.cu)
+target_link_libraries(
+  test_uff
+  PRIVATE ${RDKit_LIBS}
+          batched_forcefield
+          bfgs
+          uff
+          rdkit_uff_flattened
+          device_vector
+          ff_utils
+          ff_kernel_utils
+          test_utils)
+
 add_executable(test_distgeom test_distgeom.cu)
 target_link_libraries(
   test_distgeom
@@ -269,6 +282,7 @@ set(TEST_LIST
     test_etkdg_result_tracker
     test_molecules
     test_mmff
+    test_uff
     test_distgeom
     test_pinned_host_allocator
     test_triangle_smooth
