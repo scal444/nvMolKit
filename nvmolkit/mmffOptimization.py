@@ -19,14 +19,17 @@ This module provides GPU-accelerated implementations of MMFF (Molecular Mechanic
 optimization for multiple molecules and conformers using CUDA and OpenMP.
 """
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from rdkit.Chem import AllChem
 
 if TYPE_CHECKING:
     from rdkit.Chem import Mol
+    from rdkit.ForceField.rdForceField import MMFFMolProperties as RDKitMMFFMolProperties
 
 from nvmolkit import _mmffOptimization
+from nvmolkit._mmff_bridge import default_rdkit_mmff_properties, make_internal_mmff_properties
 from nvmolkit.types import HardwareOptions
 
 
@@ -34,6 +37,8 @@ def MMFFOptimizeMoleculesConfs(
     molecules: list["Mol"],
     maxIters: int = 200,
     nonBondedThreshold: float = 100.0,
+    properties: "RDKitMMFFMolProperties | Sequence[RDKitMMFFMolProperties | None] | None" = None,
+    ignoreInterfragInteractions: bool = True,
     hardwareOptions: HardwareOptions | None = None,
 ) -> list[list[float]]:
     """Optimize conformers for multiple molecules using MMFF force field with BFGS minimization.
@@ -46,7 +51,15 @@ def MMFFOptimizeMoleculesConfs(
         molecules: List of RDKit molecules to optimize. Each molecule should have
                   conformers already generated.
         maxIters: Maximum number of BFGS optimization iterations (default: 200)
-        nonBondedThreshold: Radius threshold for non-bonded interactions in Ångströms (default: 100.0)
+        nonBondedThreshold: Radius threshold for non-bonded interactions in Angstroms
+            (default: 100.0).  Ignored when ``properties`` supplies per-molecule
+            settings that already include a threshold.
+        properties: RDKit ``MMFFMolProperties`` object, a per-molecule list of
+            those objects, or ``None`` to use default MMFF94 settings.  A single
+            object is broadcast to all molecules.  Allows selecting MMFF94 vs
+            MMFF94s, dielectric settings, and per-term toggles.
+        ignoreInterfragInteractions: Whether to omit interfragment non-bonded
+            interactions (default: True).  Ignored when ``properties`` is given.
         hardwareOptions: Configures CPU and GPU batching, threading, and device selection. Will attempt to use reasonable defaults if not set.
 
     Returns:
@@ -70,31 +83,23 @@ def MMFFOptimizeMoleculesConfs(
 
     Example:
         >>> from rdkit import Chem
-        >>> from rdkit.Chem import rdDistGeom
+        >>> from rdkit.Chem import rdDistGeom, rdForceFieldHelpers
         >>> from nvmolkit.mmffOptimization import MMFFOptimizeMoleculesConfs
-        >>> from nvmolkit.types import HardwareOptions
         >>>
-        >>> # Load molecules and generate conformers
-        >>> mol1 = Chem.AddHs(Chem.MolFromSmiles('CCO'))
-        >>> mol2 = Chem.AddHs(Chem.MolFromSmiles('CCC'))
-        >>> rdDistGeom.EmbedMultipleConfs(mol1, numConfs=5)
-        >>> rdDistGeom.EmbedMultipleConfs(mol2, numConfs=3)
+        >>> mol = Chem.AddHs(Chem.MolFromSmiles('CCO'))
+        >>> rdDistGeom.EmbedMultipleConfs(mol, numConfs=5)
         >>>
-        >>> # Set custom runtime performance options (optional)
-        >>> hardware_options = HardwareOptions(batchSize=200, batchesPerGpu=4)
-        >>> energies = MMFFOptimizeMoleculesConfs(
-        ...     [mol1, mol2],
-        ...     maxIters=500,
-        ...     hardwareOptions=hardware_options
-        ... )
+        >>> # Default MMFF94 optimization
+        >>> energies = MMFFOptimizeMoleculesConfs([mol])
         >>>
-        >>> # energies[0] contains 5 energies for mol1's conformers
-        >>> # energies[1] contains 3 energies for mol2's conformers
+        >>> # MMFF94s with custom dielectric
+        >>> props = rdForceFieldHelpers.MMFFGetMoleculeProperties(mol, mmffVariant='MMFF94s')
+        >>> props.SetMMFFDielectricConstant(80.0)
+        >>> energies = MMFFOptimizeMoleculesConfs([mol], properties=props)
 
     Note:
         - Input molecules are modified in-place with optimized conformer coordinates
     """
-    # Validate input
     if not molecules:
         return []
 
@@ -117,8 +122,58 @@ def MMFFOptimizeMoleculesConfs(
             {"none": none_indices, "no_params": no_params_indices},
         )
 
-    # Call the C++ implementation
     if hardwareOptions is None:
         hardwareOptions = HardwareOptions()
     native_options = hardwareOptions._as_native()
-    return _mmffOptimization.MMFFOptimizeMoleculesConfs(molecules, maxIters, nonBondedThreshold, native_options)
+
+    if properties is not None:
+        native_props = _build_native_properties(molecules, properties, nonBondedThreshold, ignoreInterfragInteractions)
+        if len(native_props) == 1:
+            return _mmffOptimization.MMFFOptimizeMoleculesConfs(
+                molecules, maxIters, native_props[0], native_options
+            )
+        return _mmffOptimization.MMFFOptimizeMoleculesConfsPerMol(
+            molecules, maxIters, native_props, native_options
+        )
+
+    props = _mmffOptimization.MMFFProperties()
+    props.nonBondedThreshold = nonBondedThreshold
+    props.ignoreInterfragInteractions = ignoreInterfragInteractions
+    return _mmffOptimization.MMFFOptimizeMoleculesConfs(molecules, maxIters, props, native_options)
+
+
+def _build_native_properties(
+    molecules: list["Mol"],
+    properties: "RDKitMMFFMolProperties | Sequence[RDKitMMFFMolProperties | None] | None",
+    non_bonded_threshold: float,
+    ignore_interfrag_interactions: bool,
+) -> list:
+    if properties is None:
+        return [_mmffOptimization.MMFFProperties() for _ in molecules]
+
+    is_sequence = isinstance(properties, Sequence) and not hasattr(properties, "SetMMFFVariant")
+    if is_sequence:
+        if len(properties) != len(molecules):
+            raise ValueError(f"Expected {len(molecules)} MMFFMolProperties, got {len(properties)}")
+        result = []
+        for mol, prop in zip(molecules, properties):
+            if prop is None:
+                source = default_rdkit_mmff_properties(mol)
+            else:
+                source = prop
+            result.append(
+                make_internal_mmff_properties(
+                    source,
+                    non_bonded_threshold=non_bonded_threshold,
+                    ignore_interfrag_interactions=ignore_interfrag_interactions,
+                )
+            )
+        return result
+
+    return [
+        make_internal_mmff_properties(
+            properties,
+            non_bonded_threshold=non_bonded_threshold,
+            ignore_interfrag_interactions=ignore_interfrag_interactions,
+        )
+    ]

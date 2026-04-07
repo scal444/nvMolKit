@@ -20,60 +20,102 @@
 #include "bfgs_mmff.h"
 #include "mmff_properties.h"
 
-template <typename T> boost::python::list vectorToList(const std::vector<T>& vec) {
-  boost::python::list list;
+namespace bp = boost::python;
+
+template <typename T> bp::list vectorToList(const std::vector<T>& vec) {
+  bp::list list;
   for (const auto& value : vec) {
     list.append(value);
   }
   return list;
 }
 
-template <typename T> boost::python::list vectorOfVectorsToList(const std::vector<std::vector<T>>& vecOfVecs) {
-  boost::python::list outerList;
+template <typename T> bp::list vectorOfVectorsToList(const std::vector<std::vector<T>>& vecOfVecs) {
+  bp::list outerList;
   for (const auto& innerVec : vecOfVecs) {
     outerList.append(vectorToList(innerVec));
   }
   return outerList;
 }
 
+static std::vector<RDKit::ROMol*> extractMolecules(const bp::list& molecules) {
+  const int                  n = bp::len(molecules);
+  std::vector<RDKit::ROMol*> mols;
+  mols.reserve(n);
+  for (int i = 0; i < n; ++i) {
+    auto* mol = bp::extract<RDKit::ROMol*>(bp::object(molecules[i]))();
+    if (mol == nullptr) {
+      throw std::invalid_argument("Invalid molecule at index " + std::to_string(i));
+    }
+    mols.push_back(mol);
+  }
+  return mols;
+}
+
+static nvMolKit::MMFFProperties extractInternalMMFFProperties(const bp::object& obj) {
+  if (obj.is_none()) {
+    return {};
+  }
+  return bp::extract<nvMolKit::MMFFProperties>(obj);
+}
+
+static std::vector<nvMolKit::MMFFProperties> extractMMFFPropertiesList(const bp::list& propertiesList, int numMols) {
+  const int                             n = bp::len(propertiesList);
+  std::vector<nvMolKit::MMFFProperties> props;
+  props.reserve(numMols);
+  for (int i = 0; i < numMols; ++i) {
+    if (i < n) {
+      props.push_back(extractInternalMMFFProperties(bp::object(propertiesList[i])));
+    } else {
+      props.emplace_back();
+    }
+  }
+  return props;
+}
+
 BOOST_PYTHON_MODULE(_mmffOptimization) {
-  boost::python::def(
+  bp::class_<nvMolKit::MMFFProperties>("MMFFProperties")
+    .def_readwrite("variant", &nvMolKit::MMFFProperties::variant)
+    .def_readwrite("dielectricConstant", &nvMolKit::MMFFProperties::dielectricConstant)
+    .def_readwrite("dielectricModel", &nvMolKit::MMFFProperties::dielectricModel)
+    .def_readwrite("nonBondedThreshold", &nvMolKit::MMFFProperties::nonBondedThreshold)
+    .def_readwrite("ignoreInterfragInteractions", &nvMolKit::MMFFProperties::ignoreInterfragInteractions)
+    .def_readwrite("bondTerm", &nvMolKit::MMFFProperties::bondTerm)
+    .def_readwrite("angleTerm", &nvMolKit::MMFFProperties::angleTerm)
+    .def_readwrite("stretchBendTerm", &nvMolKit::MMFFProperties::stretchBendTerm)
+    .def_readwrite("oopTerm", &nvMolKit::MMFFProperties::oopTerm)
+    .def_readwrite("torsionTerm", &nvMolKit::MMFFProperties::torsionTerm)
+    .def_readwrite("vdwTerm", &nvMolKit::MMFFProperties::vdwTerm)
+    .def_readwrite("eleTerm", &nvMolKit::MMFFProperties::eleTerm);
+
+  bp::def(
     "MMFFOptimizeMoleculesConfs",
-    +[](const boost::python::list&            molecules,
+    +[](const bp::list&                       molecules,
         int                                   maxIters,
-        double                                nonBondedThreshold,
-        const nvMolKit::BatchHardwareOptions& hardwareOptions) -> boost::python::list {
-      // Convert Python list to std::vector<RDKit::ROMol*>
-      std::vector<RDKit::ROMol*> molsVec;
-      molsVec.reserve(len(molecules));
-
-      for (int i = 0; i < len(molecules); i++) {
-        RDKit::ROMol* mol = boost::python::extract<RDKit::ROMol*>(boost::python::object(molecules[i]));
-        if (mol == nullptr) {
-          throw std::invalid_argument("Invalid molecule at index " + std::to_string(i));
-        }
-        molsVec.push_back(mol);
-      }
-
-      nvMolKit::MMFFProperties properties;
-      properties.nonBondedThreshold = nonBondedThreshold;
-      auto result = nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molsVec, maxIters, properties, hardwareOptions);
-
-      // Convert result back to Python list of lists
+        const nvMolKit::MMFFProperties&       properties,
+        const nvMolKit::BatchHardwareOptions& hardwareOptions) -> bp::list {
+      auto molsVec = extractMolecules(molecules);
+      auto result  = nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molsVec, maxIters, properties, hardwareOptions);
       return vectorOfVectorsToList(result);
     },
-    (boost::python::arg("molecules"),
-     boost::python::arg("maxIters")           = 200,
-     boost::python::arg("nonBondedThreshold") = 100.0,
-     boost::python::arg("hardwareOptions")    = nvMolKit::BatchHardwareOptions()),
-    "Optimize conformers for multiple molecules using MMFF force field.\n"
-    "\n"
-    "Args:\n"
-    "    molecules: List of RDKit molecules to optimize\n"
-    "    maxIters: Maximum number of optimization iterations (default: 200)\n"
-    "    nonBondedThreshold: Radius threshold for non-bonded interactions (default: 100.0)\n"
-    "    hardwareOptions: BatchHardwareOptions object with hardware settings (default: default options)\n"
-    "\n"
-    "Returns:\n"
-    "    List of lists of energies, where each inner list contains energies for conformers of one molecule");
+    (bp::arg("molecules"),
+     bp::arg("maxIters")        = 200,
+     bp::arg("properties")      = nvMolKit::MMFFProperties(),
+     bp::arg("hardwareOptions") = nvMolKit::BatchHardwareOptions()));
+
+  bp::def(
+    "MMFFOptimizeMoleculesConfsPerMol",
+    +[](const bp::list&                       molecules,
+        int                                   maxIters,
+        const bp::list&                       propertiesList,
+        const nvMolKit::BatchHardwareOptions& hardwareOptions) -> bp::list {
+      auto molsVec = extractMolecules(molecules);
+      auto props   = extractMMFFPropertiesList(propertiesList, static_cast<int>(molsVec.size()));
+      auto result  = nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molsVec, maxIters, props, hardwareOptions);
+      return vectorOfVectorsToList(result);
+    },
+    (bp::arg("molecules"),
+     bp::arg("maxIters")        = 200,
+     bp::arg("propertiesList"),
+     bp::arg("hardwareOptions") = nvMolKit::BatchHardwareOptions()));
 }
