@@ -1,0 +1,11 @@
+[
+  {"size": 1000, "run": ["rdkit", "rdkit_lowmem", "fused", "nvmolkit"], "neighborlist_sizes": [128]},
+  {"size": 5000, "run": ["rdkit", "rdkit_lowmem", "fused", "nvmolkit"], "neighborlist_sizes": [128]},
+  {"size": 10000, "run": ["rdkit", "rdkit_lowmem", "fused", "nvmolkit"], "neighborlist_sizes": [128]},
+  {"size": 20000, "run": ["rdkit", "fused", "nvmolkit"], "neighborlist_sizes": [128]},
+  {"size": 30000, "run": ["rdkit", "fused", "nvmolkit"], "neighborlist_sizes": [128]},
+  {"size": 40000, "run": ["rdkit", "fused", "nvmolkit"], "neighborlist_sizes": [128]},
+  {"size": 60000, "run": ["rdkit", "fused"]},
+  {"size": 80000, "run": ["rdkit", "fused"]},
+  {"size": 100000, "run": ["rdkit", "fused"]}
+]
