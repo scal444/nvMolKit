@@ -19,7 +19,12 @@ import torch
 
 from nvmolkit import _clustering
 from nvmolkit._arrayHelpers import *  # noqa: F403
-from nvmolkit._fused_Butina import extract_cluster_and_singletons, update_neighbor_counts
+from nvmolkit._fused_Butina import (
+    cosine_similarity,
+    extract_cluster_and_singletons,
+    tanimoto_similarity,
+    update_neighbor_counts,
+)
 from nvmolkit.types import AsyncGpuResult
 
 _VALID_NEIGHBORLIST_SIZES = frozenset({8, 16, 24, 32, 64, 128})
@@ -88,7 +93,7 @@ def fused_butina(
     cutoff: float,
     return_centroids: bool = False,
     stream: torch.cuda.Stream | None = None,
-    metric: str = "tanimoto",
+    metric_fn=tanimoto_similarity,
 ):
     """Perform fused Butina clustering on a set of fingerprints.
 
@@ -102,8 +107,9 @@ def fused_butina(
                 distance is less than this cutoff (i.e. similarity > 1 - cutoff).
         return_centroids: Whether to return centroid indices for each cluster.
         stream: CUDA stream to use. If None, uses the current stream.
-        metric: Metric to use for similarity computation. Currently only "tanimoto"
-                and "cosine" are supported.
+        metric_fn: A ``@triton.jit`` function computing similarity from
+            ``(dot, norm_a, norm_b)`` and returning a float. Built-in options are
+            :func:`tanimoto_similarity` (default) and :func:`cosine_similarity`.
 
     Returns:
         A tuple ``(clusters, cluster_sizes)`` where *clusters* is a list of tuples
@@ -112,8 +118,6 @@ def fused_butina(
         If ``return_centroids`` is True, returns a tuple ``(clusters, cluster_sizes, centroids)``
         where *centroids* is a list of centroid indices.
     """
-    if metric not in ["tanimoto", "cosine"]:
-        raise ValueError(f"metric must be one of ['tanimoto', 'cosine'], got {metric}")
     if stream is not None and not isinstance(stream, torch.cuda.Stream):
         raise TypeError(f"stream must be a torch.cuda.Stream or None, got {type(stream).__name__}")
     with torch.cuda.stream(stream):
@@ -131,7 +135,7 @@ def fused_butina(
         y = x
         first_run = True
         while cluster_count[0].item() < cluster_count[1].item():
-            update_neighbor_counts(x, y, neigh, threshold, subtract=not first_run, metric=metric)
+            update_neighbor_counts(x, y, neigh, threshold, subtract=not first_run, metric_fn=metric_fn)
             first_run = False
 
             max_val = neigh.max().item()
@@ -141,7 +145,7 @@ def fused_butina(
             centroids.append(indices[id_max].item())
 
             extract_cluster_and_singletons(
-                x, id_max, is_free, neigh, cluster_count, cluster_indices, threshold, indices, metric=metric
+                x, id_max, is_free, neigh, cluster_count, cluster_indices, threshold, indices, metric_fn=metric_fn
             )
             cluster_sizes.append(cluster_count[0].item())
             x, y = x[is_free.bool(), :].contiguous(), x[~is_free.bool(), :].contiguous()

@@ -20,6 +20,7 @@ import triton.language as tl
 TILE_X = 32
 TILE_Y = 64
 
+
 @triton.jit
 def _popcount32(x):
     x = x.to(tl.uint32)
@@ -31,6 +32,20 @@ def _popcount32(x):
         is_pure=True,
         pack=1,
     ).to(tl.int32)
+
+
+@triton.jit
+def tanimoto_similarity(dot, norm_a, norm_b):
+    """Tanimoto similarity: dot / (norm_a + norm_b - dot)."""
+    denom = norm_a + norm_b - dot
+    return tl.where(denom > 0, dot.to(tl.float32) / denom.to(tl.float32), 0.0)
+
+
+@triton.jit
+def cosine_similarity(dot, norm_a, norm_b):
+    """Cosine similarity: dot / sqrt(norm_a * norm_b)."""
+    denom = tl.sqrt(norm_a.to(tl.float32) * norm_b.to(tl.float32))
+    return tl.where(denom > 0, dot.to(tl.float32) / denom.to(tl.float32), 0.0)
 
 
 def _check_fingerprint_matrix(name: str, x: torch.Tensor) -> None:
@@ -85,7 +100,7 @@ def _update_neighbor_count_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     SUBTRACT: tl.constexpr,
-    METRIC: tl.constexpr,
+    METRIC_FN: tl.constexpr,
 ):
     """Compute pairwise similarity between blocks of x and y using bit-packed fingerprints.
 
@@ -124,17 +139,8 @@ def _update_neighbor_count_kernel(
             norm_y += _popcount32(yk)
             dots += _popcount32(xk[:, None] & yk[None, :])
 
-    if METRIC == "tanimoto":
-        denom = norm_x[:, None] + norm_y[None, :] - dots
-    elif METRIC == "cosine":
-        denom = tl.sqrt(norm_x[:, None].to(tl.float32) * norm_y[None, :].to(tl.float32))
-    else:
-        raise ValueError(f"Invalid metric: {METRIC}")
-
-    valid = mask_m[:, None] & mask_n[None, :] & (denom > 0)
-
-    similarity = tl.where(valid, dots.to(tl.float32) / denom.to(tl.float32), 0.0)
-    is_neighbor = valid & (similarity >= threshold)
+    similarity = METRIC_FN(dots, norm_x[:, None], norm_y[None, :])
+    is_neighbor = mask_m[:, None] & mask_n[None, :] & (similarity >= threshold)
 
     row_counts = tl.sum(is_neighbor.to(tl.int32), axis=1)
     if SUBTRACT:
@@ -158,7 +164,7 @@ def _extract_cluster_singleton_kernel(
     x_stride_n,
     x_stride_k,
     BLOCK_K: tl.constexpr,
-    METRIC: tl.constexpr,
+    METRIC_FN: tl.constexpr,
 ):
     """For each free row, compute similarity to the cluster center.
 
@@ -188,17 +194,10 @@ def _extract_cluster_singleton_kernel(
             pb += _popcount32(row_k)
             dot += _popcount32(row_k & center_k)
 
-    if METRIC == "tanimoto":
-        union = pa + pb - dot
-    elif METRIC == "cosine":
-        union = tl.sqrt(pa.to(tl.float32) * pb.to(tl.float32))
-    else:
-        raise ValueError(f"Invalid metric: {METRIC}")
+    similarity = METRIC_FN(dot, pa, pb)
 
     row_is_free = tl.load(is_free_ptr + row, mask=row_mask, other=0)
-    valid = row_mask & (row_is_free != 0) & (union > 0)
-    similarity = tl.where(valid, dot.to(tl.float32) / union.to(tl.float32), 0.0)
-    is_neighbor = valid & (similarity >= threshold)
+    is_neighbor = row_mask & (row_is_free != 0) & (similarity >= threshold)
 
     orig_idx = tl.load(indices_ptr + row, mask=row_mask, other=0)
     neighbor_slot = tl.atomic_add(cluster_count_ptr + 0, 1, mask=is_neighbor)
@@ -218,7 +217,7 @@ def update_neighbor_counts(
     neighbors: torch.Tensor,
     threshold: float,
     subtract: bool = False,
-    metric: str = "tanimoto",
+    metric_fn=tanimoto_similarity,
 ) -> None:
     """Update per-row neighbor counts for fingerprints in ``x`` against ``y``.
 
@@ -255,7 +254,7 @@ def update_neighbor_counts(
         BLOCK_K=32,
         num_warps=8,
         SUBTRACT=subtract,
-        METRIC=metric,
+        METRIC_FN=metric_fn,
     )
 
 
@@ -268,7 +267,7 @@ def extract_cluster_and_singletons(
     cluster_indices: torch.Tensor,
     threshold: float,
     indices: torch.Tensor,
-    metric: str = "tanimoto",
+    metric_fn=tanimoto_similarity,
 ) -> None:
     """Extract the cluster around center ``id`` and collect singletons.
 
@@ -312,5 +311,5 @@ def extract_cluster_and_singletons(
         x.stride(1),
         BLOCK_K=32,
         num_warps=1,
-        METRIC=metric,
+        METRIC_FN=metric_fn,
     )
