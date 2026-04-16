@@ -14,43 +14,26 @@
 // limitations under the License.
 
 #include <GraphMol/Conformer.h>
-#include <GraphMol/ROMol.h>
 
 #include <boost/python.hpp>
 #include <cstdint>
 #include <memory>
-#include <stdexcept>
-#include <string>
 #include <vector>
 
 #include "bfgs_minimize.h"
 #include "bfgs_types.h"
+#include "boost_python_utils.h"
 #include "device_vector.h"
 #include "ff_utils.h"
 #include "forcefield_constraints.h"
 #include "mmff_batched_forcefield.h"
 #include "mmff_flattened_builder.h"
 #include "mmff_properties.h"
+#include "mmff_python_utils.h"
 #include "uff_batched_forcefield.h"
 #include "uff_flattened_builder.h"
 
 namespace bp = boost::python;
-
-template <typename T> bp::list vectorToList(const std::vector<T>& vec) {
-  bp::list list;
-  for (const auto& value : vec) {
-    list.append(value);
-  }
-  return list;
-}
-
-template <typename T> bp::list vectorOfVectorsToList(const std::vector<std::vector<T>>& vecOfVecs) {
-  bp::list outerList;
-  for (const auto& innerVec : vecOfVecs) {
-    outerList.append(vectorToList(innerVec));
-  }
-  return outerList;
-}
 
 namespace {
 
@@ -94,7 +77,7 @@ bp::list reshapeGradientsToNested(const std::vector<std::vector<double>>& perSys
   for (const int nConfs : numConformersPerMol) {
     bp::list inner;
     for (int j = 0; j < nConfs; ++j) {
-      inner.append(vectorToList(perSystem[idx++]));
+      inner.append(nvMolKit::vectorToList(perSystem[idx++]));
     }
     outer.append(inner);
   }
@@ -117,20 +100,6 @@ void writeBackPositions(const std::vector<ConformerEntry>& entries,
 
 }  // namespace
 
-static std::vector<RDKit::ROMol*> extractMolecules(const bp::list& molecules) {
-  const int                  n = bp::len(molecules);
-  std::vector<RDKit::ROMol*> mols;
-  mols.reserve(n);
-  for (int i = 0; i < n; ++i) {
-    auto* mol = bp::extract<RDKit::ROMol*>(bp::object(molecules[i]))();
-    if (mol == nullptr) {
-      throw std::invalid_argument("Invalid molecule at index " + std::to_string(i));
-    }
-    mols.push_back(mol);
-  }
-  return mols;
-}
-
 static void throwIfCudaError(cudaError_t err, const std::string& context) {
   if (err != cudaSuccess) {
     throw std::runtime_error(context + ": " + cudaGetErrorString(err));
@@ -142,33 +111,6 @@ template <typename T> std::vector<T> copyDeviceVector(nvMolKit::AsyncDeviceVecto
   deviceVec.copyToHost(hostVec);
   cudaStreamSynchronize(deviceVec.stream());
   return hostVec;
-}
-
-static nvMolKit::MMFFProperties extractInternalMMFFProperties(const bp::object& obj,
-                                                              double            nonBondedThreshold          = 100.0,
-                                                              bool              ignoreInterfragInteractions = true) {
-  nvMolKit::MMFFProperties props;
-  if (obj.is_none()) {
-    props.nonBondedThreshold          = nonBondedThreshold;
-    props.ignoreInterfragInteractions = ignoreInterfragInteractions;
-    return props;
-  }
-  props = bp::extract<nvMolKit::MMFFProperties>(obj);
-  return props;
-}
-
-static std::vector<nvMolKit::MMFFProperties> extractMMFFPropertiesList(const bp::list& properties, int numMols) {
-  const int                             n = bp::len(properties);
-  std::vector<nvMolKit::MMFFProperties> props;
-  props.reserve(numMols);
-  for (int i = 0; i < numMols; ++i) {
-    if (i < n) {
-      props.push_back(extractInternalMMFFProperties(bp::object(properties[i])));
-    } else {
-      props.emplace_back();
-    }
-  }
-  return props;
 }
 
 template <typename Spec, typename Parser>
@@ -287,32 +229,6 @@ static std::vector<PerMolConstraints> extractAllConstraints(const bp::list& dist
   return result;
 }
 
-static std::vector<double> extractDoubleList(const bp::list& values, int expectedSize, const std::string& name) {
-  if (bp::len(values) != expectedSize) {
-    throw std::invalid_argument("Expected " + std::to_string(expectedSize) + " values for " + name + ", got " +
-                                std::to_string(bp::len(values)));
-  }
-  std::vector<double> result;
-  result.reserve(expectedSize);
-  for (int i = 0; i < expectedSize; ++i) {
-    result.push_back(bp::extract<double>(values[i]));
-  }
-  return result;
-}
-
-static std::vector<bool> extractBoolList(const bp::list& values, int expectedSize, const std::string& name) {
-  if (bp::len(values) != expectedSize) {
-    throw std::invalid_argument("Expected " + std::to_string(expectedSize) + " values for " + name + ", got " +
-                                std::to_string(bp::len(values)));
-  }
-  std::vector<bool> result;
-  result.reserve(expectedSize);
-  for (int i = 0; i < expectedSize; ++i) {
-    result.push_back(bp::extract<bool>(values[i]));
-  }
-  return result;
-}
-
 // =============================================================================
 // NativeMMFFBatchedForcefield
 // =============================================================================
@@ -325,9 +241,9 @@ class NativeMMFFBatchedForcefield {
                               const bp::list& positionConstraints,
                               const bp::list& angleConstraints,
                               const bp::list& torsionConstraints) {
-    const auto mols    = extractMolecules(molecules);
+    const auto mols    = nvMolKit::extractMolecules(molecules);
     const int  numMols = static_cast<int>(mols.size());
-    const auto props   = extractMMFFPropertiesList(properties, numMols);
+    const auto props   = nvMolKit::extractMMFFPropertiesList(properties, numMols);
     const auto constraints = extractAllConstraints(distanceConstraints, positionConstraints, angleConstraints,
                                                    torsionConstraints, numMols);
 
@@ -412,10 +328,10 @@ class NativeUFFBatchedForcefield {
                              const bp::list& positionConstraints,
                              const bp::list& angleConstraints,
                              const bp::list& torsionConstraints) {
-    const auto mols    = extractMolecules(molecules);
+    const auto mols    = nvMolKit::extractMolecules(molecules);
     const int  numMols = static_cast<int>(mols.size());
-    const auto vdwVec  = extractDoubleList(vdwThresholds, numMols, "vdwThreshold");
-    const auto ignoreVec = extractBoolList(ignoreInterfragInteractions, numMols, "ignoreInterfragInteractions");
+    const auto vdwVec  = nvMolKit::extractDoubleList(vdwThresholds, numMols, "vdwThreshold");
+    const auto ignoreVec = nvMolKit::extractBoolList(ignoreInterfragInteractions, numMols, "ignoreInterfragInteractions");
     const auto constraints = extractAllConstraints(distanceConstraints, positionConstraints, angleConstraints,
                                                    torsionConstraints, numMols);
 
