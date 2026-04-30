@@ -18,6 +18,7 @@
 #include <numeric>
 #include <stdexcept>
 
+#include "../forcefields/batched_forcefield.h"
 #include "fire_minimizer.h"
 
 namespace nvMolKit {
@@ -575,6 +576,46 @@ bool FireBatchMinimizer::minimize(const int                                   nu
     lastKnownNumUnfinished_ = readbackNumUnfinished();
   }
   return lastKnownNumUnfinished_ == 0;
+}
+
+bool FireBatchMinimizer::minimize(const int                  numIters,
+                                  const double               gradTol,
+                                  BatchedForcefield&         ff,
+                                  AsyncDeviceVector<double>& positions,
+                                  AsyncDeviceVector<double>& grad,
+                                  AsyncDeviceVector<double>& energyOuts,
+                                  const uint8_t*             activeSystemMask) {
+  const auto& atomStartsHost = ff.atomStartsHost();
+
+  AsyncDeviceVector<double> energyBuffer;
+  energyBuffer.setStream(stream_);
+  energyBuffer.resize(energyOuts.size());
+  energyBuffer.zero();
+
+  auto eFunc = [&](const double* evalPositions) {
+    const double* positionsToEvaluate = evalPositions != nullptr ? evalPositions : positions.data();
+    ff.computeEnergy(energyOuts.data(), positionsToEvaluate, activeSystemMask, stream_);
+  };
+  auto gFunc = [&]() { ff.computeGradients(grad.data(), positions.data(), activeSystemMask, stream_); };
+
+  // The base minimize() expects an AsyncDeviceVector<int>& for atomStarts but
+  // only ever calls .data() and .size() on it. Wrap the raw device pointer in
+  // a non-owning shim by allocating a tiny mirror.
+  AsyncDeviceVector<int> atomStartsDeviceMirror;
+  atomStartsDeviceMirror.setStream(stream_);
+  atomStartsDeviceMirror.setFromArray(ff.atomStartsHost().data(), atomStartsHost.size());
+
+  return minimize(numIters,
+                  gradTol,
+                  atomStartsHost,
+                  atomStartsDeviceMirror,
+                  positions,
+                  grad,
+                  energyOuts,
+                  energyBuffer,
+                  eFunc,
+                  gFunc,
+                  activeSystemMask);
 }
 
 FireInternalState FireBatchMinimizer::snapshotInternalState() const {

@@ -30,7 +30,9 @@ target_link_libraries(
 target_include_directories(bfgs_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_library(fire_minimizer fire_minimizer.cu fire_minimizer.h)
-target_link_libraries(fire_minimizer PUBLIC device_vector PRIVATE cccl_interface)
+target_link_libraries(fire_minimizer
+  PUBLIC device_vector batched_forcefield
+  PRIVATE cccl_interface)
 target_include_directories(fire_minimizer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_library(bfgs_mmff bfgs_mmff.cpp)

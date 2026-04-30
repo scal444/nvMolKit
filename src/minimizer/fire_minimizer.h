@@ -24,6 +24,9 @@
 
 namespace nvMolKit {
 
+class BatchedForcefield;
+
+
 //! \brief Algorithm parameters for the FIRE minimizer.
 //!
 //! Defaults match ASE FIRE 2.0
@@ -131,6 +134,17 @@ class FireBatchMinimizer final : public BatchMinimizer {
                 EnergyFunctor                 eFunc,
                 GradFunctor                   gFunc,
                 const uint8_t*                activeThisStage = nullptr) override;
+
+  //! \brief Minimize using a BatchedForcefield directly (matches the
+  //! BfgsBatchMinimizer overload). The forcefield's compute hooks are wrapped
+  //! into EnergyFunctor / GradFunctor that honor @p activeSystemMask.
+  bool minimize(int                        numIters,
+                double                     gradTol,
+                BatchedForcefield&         ff,
+                AsyncDeviceVector<double>& positions,
+                AsyncDeviceVector<double>& grad,
+                AsyncDeviceVector<double>& energyOuts,
+                const uint8_t*             activeSystemMask = nullptr);
 
   const std::vector<FireDebugOutput>& debugOutputs() const { return debugOutputs_; }
 

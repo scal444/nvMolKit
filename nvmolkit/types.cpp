@@ -17,7 +17,7 @@
 #include <boost/python/stl_iterator.hpp>
 
 #include "hardware_options.h"
-#include "minimizer/bfgs_mmff.h"
+#include "minimizer/fire_minimizer.h"
 
 namespace {
 
@@ -53,18 +53,12 @@ void setGpuIds(nvMolKit::BatchHardwareOptions& opts, const boost::python::object
 }  // namespace
 
 BOOST_PYTHON_MODULE(_types) {
-  namespace mmff = nvMolKit::MMFF;
-
   boost::python::class_<nvMolKit::BatchHardwareOptions>("BatchHardwareOptions")
     .def(boost::python::init<>())
     .def_readwrite("preprocessingThreads", &nvMolKit::BatchHardwareOptions::preprocessingThreads)
     .def_readwrite("batchSize", &nvMolKit::BatchHardwareOptions::batchSize)
     .def_readwrite("batchesPerGpu", &nvMolKit::BatchHardwareOptions::batchesPerGpu)
     .add_property("gpuIds", &getGpuIdsPy, &setGpuIds);
-
-  boost::python::enum_<mmff::OptimizerOptions::Backend>("OptimizerBackend")
-    .value("BFGS", mmff::OptimizerOptions::Backend::BFGS)
-    .value("FIRE", mmff::OptimizerOptions::Backend::FIRE);
 
   boost::python::class_<nvMolKit::FireOptions>("FireOptions")
     .def(boost::python::init<>())
@@ -81,9 +75,4 @@ BOOST_PYTHON_MODULE(_types) {
     .def_readwrite("gradTol", &nvMolKit::FireOptions::gradTol)
     .def_readwrite("takeHalfStepBack", &nvMolKit::FireOptions::takeHalfStepBack)
     .def_readwrite("abcCorrection", &nvMolKit::FireOptions::abcCorrection);
-
-  boost::python::class_<mmff::OptimizerOptions>("OptimizerOptions")
-    .def(boost::python::init<>())
-    .def_readwrite("backend", &mmff::OptimizerOptions::backend)
-    .def_readwrite("fireOptions", &mmff::OptimizerOptions::fireOptions);
 }

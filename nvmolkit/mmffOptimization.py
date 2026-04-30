@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from rdkit.ForceField.rdForceField import MMFFMolProperties
 
 from nvmolkit import _mmffOptimization
+from nvmolkit._types import FireOptions  # noqa: F401  (re-export)
 from nvmolkit._mmff_bridge import default_rdkit_mmff_properties, make_internal_mmff_properties
 from nvmolkit.types import HardwareOptions
 
@@ -161,3 +162,100 @@ def MMFFOptimizeMoleculesConfs(
         for props, threshold, ignore_interfrag in zip(properties_list, thresholds, interfrag_flags)
     ]
     return _mmffOptimization.MMFFOptimizeMoleculesConfs(molecules, maxIters, native_properties, native_options)
+
+
+
+def MMFFOptimizeMoleculesConfsFire(
+    molecules: list["Mol"],
+    maxIters: int = 200,
+    fireOptions: FireOptions | None = None,
+    properties: "MMFFMolProperties | Sequence[MMFFMolProperties | None] | None" = None,
+    nonBondedThreshold: float | Sequence[float] = 100.0,
+    ignoreInterfragInteractions: bool | Sequence[bool] = True,
+    hardwareOptions: HardwareOptions | None = None,
+) -> list[list[float]]:
+    """Optimize MMFF conformers using the FIRE 2.0 minimizer.
+
+    Same input contract as :func:`MMFFOptimizeMoleculesConfs` (which uses BFGS) but
+    drives the FIRE 2.0 minimizer instead. Algorithm parameters are passed via
+    a :class:`FireOptions` instance.
+
+    Args:
+        molecules: List of RDKit molecules to optimize. Modified in-place.
+        maxIters: Maximum number of FIRE iterations.
+        fireOptions: Algorithm parameters. Pass `None` to use defaults
+            (ASE FIRE 2.0 defaults; convergence on `fireOptions.gradTol`).
+        properties: RDKit `MMFFMolProperties` or per-molecule sequence.
+        nonBondedThreshold: Scalar or per-molecule sequence.
+        ignoreInterfragInteractions: Scalar or per-molecule sequence.
+        hardwareOptions: GPU/CPU batching settings.
+
+    Returns:
+        List of lists of energies, mirroring the BFGS variant.
+    """
+    if not molecules:
+        return []
+
+    none_indices = []
+    no_params_indices = []
+    for i, mol in enumerate(molecules):
+        if mol is None:
+            none_indices.append(i)
+        elif not AllChem.MMFFHasAllMoleculeParams(mol):
+            no_params_indices.append(i)
+
+    if none_indices or no_params_indices:
+        parts = []
+        if none_indices:
+            parts.append(f"None at indices {none_indices}")
+        if no_params_indices:
+            parts.append(f"lacking MMFF atom types at indices {no_params_indices}")
+        raise ValueError(
+            "; ".join(parts),
+            {"none": none_indices, "no_params": no_params_indices},
+        )
+
+    def _normalize_scalar_or_list(value, name: str):
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            if len(value) != len(molecules):
+                raise ValueError(f"Expected {len(molecules)} values for {name}, got {len(value)}")
+            return list(value)
+        return [value for _ in molecules]
+
+    def _normalize_properties(value):
+        if value is None:
+            return [default_rdkit_mmff_properties(mol) for mol in molecules]
+        if isinstance(value, Sequence) and not hasattr(value, "SetMMFFVariant"):
+            if len(value) != len(molecules):
+                raise ValueError(f"Expected {len(molecules)} MMFFMolProperties objects, got {len(value)}")
+            return [
+                default_rdkit_mmff_properties(mol) if props is None else props for mol, props in zip(molecules, value)
+            ]
+        return [value for _ in molecules]
+
+    if hardwareOptions is None:
+        hardwareOptions = HardwareOptions()
+    native_options = hardwareOptions._as_native()
+    properties_list = _normalize_properties(properties)
+    thresholds = _normalize_scalar_or_list(nonBondedThreshold, "nonBondedThreshold")
+    interfrag_flags = _normalize_scalar_or_list(ignoreInterfragInteractions, "ignoreInterfragInteractions")
+    native_properties = [
+        make_internal_mmff_properties(
+            props,
+            non_bonded_threshold=float(threshold),
+            ignore_interfrag_interactions=bool(ignore_interfrag),
+        )
+        for props, threshold, ignore_interfrag in zip(properties_list, thresholds, interfrag_flags)
+    ]
+
+    if fireOptions is None:
+        fireOptions = FireOptions()
+
+    return _mmffOptimization.MMFFOptimizeMoleculesConfsFire(
+        molecules,
+        maxIters,
+        fireOptions,
+        native_properties,
+        native_options,
+    )
+

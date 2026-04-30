@@ -20,6 +20,7 @@
 
 #include "../hardware_options.h"
 #include "bfgs_minimize.h"
+#include "fire_minimizer.h"
 #include "forcefield_constraints.h"
 #include "mmff_properties.h"
 
@@ -71,6 +72,31 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfs(
   const std::vector<ForceFieldConstraints::PerMolConstraints>& constraints = {},
   const BatchHardwareOptions&                                  perfOptions = {},
   BfgsBackend                                                  backend     = BfgsBackend::HYBRID);
+
+//! \brief Optimize conformers using the FIRE 2.0 minimizer instead of BFGS.
+//!
+//! Mirrors the API shape of the BFGS overloads but always runs through the
+//! batched-forcefield path (FIRE has no per-molecule kernel). Constraints are
+//! not applied yet (untested); pass an empty list.
+//! \param mols Molecules to optimize (positions written back in-place).
+//! \param maxIters Maximum FIRE iterations.
+//! \param fireOptions Algorithm parameters; the @ref FireOptions::gradTol field
+//!        controls convergence.
+//! \param properties Per-molecule MMFF settings (one entry per molecule).
+//! \param perfOptions Hardware and batching configuration.
+//! \return Energies and per-system convergence flags.
+MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&        mols,
+                                                  int                                maxIters       = 200,
+                                                  const FireOptions&                 fireOptions    = {},
+                                                  const std::vector<MMFFProperties>& properties     = {},
+                                                  const BatchHardwareOptions&        perfOptions    = {});
+
+//! \brief Convenience wrapper returning energies only.
+std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&        mols,
+                                                                int                                maxIters    = 200,
+                                                                const FireOptions&                 fireOptions = {},
+                                                                const std::vector<MMFFProperties>& properties  = {},
+                                                                const BatchHardwareOptions&        perfOptions = {});
 
 }  // namespace nvMolKit::MMFF
 #endif  // NVMOLKIT_BFGS_MMFF_H

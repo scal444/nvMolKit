@@ -17,6 +17,7 @@
 
 #include "bfgs_mmff.h"
 #include "boost_python_utils.h"
+#include "minimizer/fire_minimizer.h"
 #include "mmff_python_utils.h"
 
 BOOST_PYTHON_MODULE(_mmffOptimization) {
@@ -38,13 +39,47 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
      boost::python::arg("maxIters")        = 200,
      boost::python::arg("properties")      = boost::python::list(),
      boost::python::arg("hardwareOptions") = nvMolKit::BatchHardwareOptions()),
-    "Optimize conformers for multiple molecules using MMFF force field.\n"
+    "Optimize conformers for multiple molecules using MMFF force field with BFGS.\n"
     "\n"
     "Args:\n"
     "    molecules: List of RDKit molecules to optimize\n"
     "    maxIters: Maximum number of optimization iterations (default: 200)\n"
     "    properties: MMFFProperties-compatible object with forcefield settings\n"
     "    hardwareOptions: BatchHardwareOptions object with hardware settings (default: default options)\n"
+    "\n"
+    "Returns:\n"
+    "    List of lists of energies, where each inner list contains energies for conformers of one molecule");
+
+  boost::python::def(
+    "MMFFOptimizeMoleculesConfsFire",
+    +[](const boost::python::list&            molecules,
+        int                                   maxIters,
+        const nvMolKit::FireOptions&          fireOptions,
+        const boost::python::list&            propertiesList,
+        const nvMolKit::BatchHardwareOptions& hardwareOptions) -> boost::python::list {
+      auto       molsVec = nvMolKit::extractMolecules(molecules);
+      const auto properties =
+        nvMolKit::extractMMFFPropertiesList(propertiesList, static_cast<int>(molsVec.size()));
+      const auto result = nvMolKit::MMFF::MMFFOptimizeMoleculesConfsFire(molsVec,
+                                                                        maxIters,
+                                                                        fireOptions,
+                                                                        properties,
+                                                                        hardwareOptions);
+      return nvMolKit::vectorOfVectorsToList(result);
+    },
+    (boost::python::arg("molecules"),
+     boost::python::arg("maxIters")        = 200,
+     boost::python::arg("fireOptions")     = nvMolKit::FireOptions(),
+     boost::python::arg("properties")      = boost::python::list(),
+     boost::python::arg("hardwareOptions") = nvMolKit::BatchHardwareOptions()),
+    "Optimize conformers using the FIRE 2.0 minimizer.\n"
+    "\n"
+    "Args:\n"
+    "    molecules: List of RDKit molecules to optimize\n"
+    "    maxIters: Maximum number of FIRE iterations (default: 200)\n"
+    "    fireOptions: FireOptions instance controlling the algorithm parameters\n"
+    "    properties: MMFFProperties-compatible object with forcefield settings\n"
+    "    hardwareOptions: BatchHardwareOptions object with hardware settings\n"
     "\n"
     "Returns:\n"
     "    List of lists of energies, where each inner list contains energies for conformers of one molecule");
