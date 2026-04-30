@@ -66,23 +66,21 @@ BOOST_PYTHON_MODULE(_types) {
     .value("BFGS", mmff::OptimizerOptions::Backend::BFGS)
     .value("FIRE", mmff::OptimizerOptions::Backend::FIRE);
 
-  boost::python::enum_<nvMolKit::FireIntegrationScheme>("FireIntegrationScheme")
-    .value("ExplicitEuler", nvMolKit::FireIntegrationScheme::ExplicitEuler)
-    .value("SemiImplicitEuler", nvMolKit::FireIntegrationScheme::SemiImplicitEuler);
-
   boost::python::class_<nvMolKit::FireOptions>("FireOptions")
     .def(boost::python::init<>())
     .def_readwrite("dtInit", &nvMolKit::FireOptions::dtInit)
     .def_readwrite("dtMinFactor", &nvMolKit::FireOptions::dtMinFactor)
     .def_readwrite("dtMaxFactor", &nvMolKit::FireOptions::dtMaxFactor)
+    .def_readwrite("dMax", &nvMolKit::FireOptions::dMax)
     .def_readwrite("timeStepIncrement", &nvMolKit::FireOptions::timeStepIncrement)
     .def_readwrite("timeStepDecrement", &nvMolKit::FireOptions::timeStepDecrement)
     .def_readwrite("nMinForIncrease", &nvMolKit::FireOptions::nMinForIncrease)
     .def_readwrite("alphaInit", &nvMolKit::FireOptions::alphaInit)
     .def_readwrite("alphaDecrement", &nvMolKit::FireOptions::alphaDecrement)
     .def_readwrite("useMass", &nvMolKit::FireOptions::useMass)
-    .def_readwrite("integrationScheme", &nvMolKit::FireOptions::integrationScheme)
-    .def_readwrite("takeHalfStepBack", &nvMolKit::FireOptions::takeHalfStepBack);
+    .def_readwrite("gradTol", &nvMolKit::FireOptions::gradTol)
+    .def_readwrite("takeHalfStepBack", &nvMolKit::FireOptions::takeHalfStepBack)
+    .def_readwrite("abcCorrection", &nvMolKit::FireOptions::abcCorrection);
 
   boost::python::class_<mmff::OptimizerOptions>("OptimizerOptions")
     .def(boost::python::init<>())

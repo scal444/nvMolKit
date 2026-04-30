@@ -25,8 +25,8 @@ import nvmolkit.mmffOptimization as nvmolkit_mmff
 from nvmolkit.types import HardwareOptions
 
 
-FIRE_INTEGRATION_SCHEMES = ("explicit_euler", "semi_implicit_euler")
 FIRE_HALF_STEP_OPTIONS = (True, False)
+FIRE_USE_ABC_OPTIONS = (True, False)
 
 
 @pytest.fixture
@@ -121,9 +121,9 @@ def calculate_rdkit_mmff_energies(molecules, maxIters=200, nonBondedThreshold=10
     [
         ("BFGS", {}),
         *[
-            ("FIRE", {"integration_scheme": scheme, "take_half_step_back": half_step})
-            for scheme in FIRE_INTEGRATION_SCHEMES
+            ("FIRE", {"take_half_step_back": half_step, "use_abc": use_abc})
             for half_step in FIRE_HALF_STEP_OPTIONS
+            for use_abc in FIRE_USE_ABC_OPTIONS
         ],
     ],
 )
@@ -185,13 +185,13 @@ def test_mmff_optimization_serial_vs_rdkit(mmff_test_mols, optimizer_backend, op
             "FIRE",
             {
                 "use_masses": use_masses,
-                "integration_scheme": scheme,
                 "take_half_step_back": half_step,
+                "use_abc": use_abc,
             },
         )
         for use_masses in (True, False)
-        for scheme in FIRE_INTEGRATION_SCHEMES
         for half_step in FIRE_HALF_STEP_OPTIONS
+        for use_abc in FIRE_USE_ABC_OPTIONS
     ],
 )
 @pytest.mark.parametrize("gpu_ids", [[0, 1], [0], [1]])
