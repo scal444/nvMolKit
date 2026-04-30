@@ -22,12 +22,17 @@ if(NVMOLKIT_CUDA_TARGET_MODE STREQUAL "native")
       "NVMOLKIT_CUDA_TARGET_MODE=native: Using native CUDA architecture for fast local builds"
   )
 elseif(NVMOLKIT_CUDA_TARGET_MODE STREQUAL "full")
-  set(_nvmolkit_cuda_arch_list "70;75-real;80-real;86-real;89-real;90-real")
+  set(_nvmolkit_cuda_arch_list
+      "70-real;75-real;80-real;86-real;89-real;90-real")
   if(DEFINED CUDAToolkit_VERSION)
     string(REPLACE "." ";" _cuda_version_list "${CUDAToolkit_VERSION}")
     list(GET _cuda_version_list 0 _cuda_major)
     list(GET _cuda_version_list 1 _cuda_minor)
     math(EXPR _cuda_version_num "${_cuda_major} * 100 + ${_cuda_minor}")
+    if(_cuda_major GREATER_EQUAL 13)
+      list(REMOVE_ITEM _nvmolkit_cuda_arch_list "70-real")
+      message(STATUS "CUDA >= 13 detected, removing Volta (70-real) arch")
+    endif()
     if(_cuda_version_num GREATER_EQUAL 1208)
       list(APPEND _nvmolkit_cuda_arch_list "100-real")
       message(
@@ -36,9 +41,14 @@ elseif(NVMOLKIT_CUDA_TARGET_MODE STREQUAL "full")
       message(
         STATUS "CUDA < 12.8 detected, Blackwell (100-real) arch not enabled")
     endif()
+    if(_cuda_version_num GREATER_EQUAL 1209)
+      list(APPEND _nvmolkit_cuda_arch_list "120")
+      message(
+        STATUS
+          "CUDA >= 12.9 detected, enabling Blackwell (120 + PTX) for forward compatibility"
+      )
+    endif()
   endif()
-  # Suppress possible warnings about deprecated GPU targets 70 and onward.
-  string(APPEND CMAKE_CUDA_FLAGS " -Wno-deprecated-gpu-targets")
 
   set(CMAKE_CUDA_ARCHITECTURES "${_nvmolkit_cuda_arch_list}")
   message(
@@ -66,10 +76,10 @@ else() # default
           "  Resetting to 70.")
     endif()
   else()
-    set(CMAKE_CUDA_ARCHITECTURES 70)
+    set(CMAKE_CUDA_ARCHITECTURES 80)
     message(
       STATUS
-        "NVMOLKIT_CUDA_TARGET_MODE=default: No CMAKE_CUDA_ARCHITECTURES set, defaulting to 70"
+        "NVMOLKIT_CUDA_TARGET_MODE=default: No CMAKE_CUDA_ARCHITECTURES set, defaulting to 80"
     )
   endif()
 endif()
@@ -108,7 +118,7 @@ if(CMAKE_CUDA_ARCHITECTURES STREQUAL "native")
     message(FATAL_ERROR "Failed to build detect_cuda_arch.cu")
   endif()
   # _native_cc will be something like "86"
-  foreach(cc IN ITEMS 80 86 89 90)
+  foreach(cc IN ITEMS 80 86 89 90 100 120)
     if(_native_cc STREQUAL "${cc}")
       add_definitions(-DNVMOLKIT_CUDA_CC_${cc}=1)
     else()
@@ -116,7 +126,7 @@ if(CMAKE_CUDA_ARCHITECTURES STREQUAL "native")
     endif()
   endforeach()
 else()
-  foreach(cc IN ITEMS 80 86 89 90)
+  foreach(cc IN ITEMS 80 86 89 90 100 120)
     string(REPLACE ";" " " _cuda_arch_str "${CMAKE_CUDA_ARCHITECTURES}")
     string(REGEX MATCH "(^| )${cc}(-real)?( |$)" _match "${_cuda_arch_str}")
     if(_match)

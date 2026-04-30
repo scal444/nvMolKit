@@ -19,7 +19,9 @@
 #include <cstdint>
 #include <vector>
 
+#include "batched_forcefield.h"
 #include "device_vector.h"
+#include "dist_geom_kernels.h"
 
 namespace nvMolKit {
 namespace DistGeom {
@@ -41,12 +43,10 @@ struct ChiralViolationContribTerms {
   std::vector<int>    idx4;
   std::vector<double> volUpper;
   std::vector<double> volLower;
-  std::vector<double> weight;
 };
 
 struct FourthDimContribTerms {
-  std::vector<int>    idx;
-  std::vector<double> weight;
+  std::vector<int> idx;
 };
 
 struct EnergyForceContribsHost {
@@ -162,8 +162,6 @@ struct BatchedIndices3DHost {
 struct BatchedMolecularSystemHost {
   EnergyForceContribsHost contribs;
   BatchedIndicesHost      indices;
-  //! Size total num atoms
-  std::vector<int>        atomNumbers;
   //! Largest system size in the batch
   int                     maxNumAtoms = 0;
   //! Dimension of all molecules in the batch (3 or 4)
@@ -190,12 +188,10 @@ struct ChiralViolationContribTermsDevice {
   nvMolKit::AsyncDeviceVector<int>    idx4;
   nvMolKit::AsyncDeviceVector<double> volUpper;
   nvMolKit::AsyncDeviceVector<double> volLower;
-  nvMolKit::AsyncDeviceVector<double> weight;
 };
 
 struct FourthDimContribTermsDevice {
-  nvMolKit::AsyncDeviceVector<int>    idx;
-  nvMolKit::AsyncDeviceVector<double> weight;
+  nvMolKit::AsyncDeviceVector<int> idx;
 };
 
 struct TorsionAngleContribTermsDevice {
@@ -292,38 +288,6 @@ struct BatchedIndices3DDevice {
   nvMolKit::AsyncDeviceVector<int> longRangeDistTermStarts;        // Start indices for long range distance terms
 };
 
-//! Buffers for interfacing with the 4D padded L-BFGS minimizer.
-//! The minimizer requires homogenous batches, so we need to pad the positions
-//! and gradients. It also works in double4s, so we need to convert.
-//!
-//!  Operation flow between buffers:
-//!      In energy calculation:
-//!         - Copy interface padded d4 positions to our condensed d3.
-//!         - Compute energies
-//!         - return enegies, no additional copying needed since 1 per molecule.
-//!
-//!      In grad calculation:
-//!         - Copy interface padded d4 positions to our condensed d3
-//!         - Compute gradients
-//!         - Copy d3 gradients to interface padded d3 gradients
-//!
-//!      In output gathering:
-//!         - Copy d4 padded positions to our d3 condensed and download
-//! TODO: Potential optimization points:
-//!    - Kernels that work on d4 padded positions and gradients directly
-//!    - One copy of positions for energy and gradient. This might be shaky
-
-struct PaddedInterfaceBuffers {
-  //! Size n_molecules * (max atoms in batch) * 4
-  nvMolKit::AsyncDeviceVector<double> positionsD4Padded;
-  //! Size n_molecules * (max atoms in batch) * 3
-  nvMolKit::AsyncDeviceVector<double> gradD3Padded;
-  //! Size n_molecules * (max atoms in batch) * 4, will be -1 for padded or 4th dims.
-  nvMolKit::AsyncDeviceVector<int>    writeBackIndices;
-  //! Size n_molecules * (max atoms in batch)
-  nvMolKit::AsyncDeviceVector<int>    atomNumbers;
-};
-
 //! Device buffers for the batched molecular system.
 //! Most of the terms are either 1 per molecule or CSR-like format with the BatchedIndicesDevice terms used for
 //! indexing.
@@ -346,8 +310,6 @@ struct BatchedMolecularDeviceBuffers {
   EnergyForceContribsDevice           contribs;
   //! Size n_molecules
   BatchedIndicesDevice                indices;
-  //! Size total num atoms
-  nvMolKit::AsyncDeviceVector<int>    atomNumbers;
   //! Size total num positions of all molecules
   nvMolKit::AsyncDeviceVector<double> grad;
   //! Variable size - max terms in each molecule concatenated.
@@ -355,8 +317,6 @@ struct BatchedMolecularDeviceBuffers {
   nvMolKit::AsyncDeviceVector<double> energyBuffer;
   //! Size n_molecules
   nvMolKit::AsyncDeviceVector<double> energyOuts;
-  //! Dimension change and padding buffers
-  PaddedInterfaceBuffers              dataFormatInterchangeBuffers;
   //! Dimension of all molecules in the batch (3 or 4)
   int                                 dimension = 3;
 };
@@ -391,36 +351,60 @@ void addMoleculeToContextWithPositions(const std::vector<double>& positions,
                                        std::vector<int>&          ctxAtomStarts,
                                        std::vector<double>&       ctxPositions);
 
+//! Preallocate memory for estimated batch size (4D DG).
+//! Call this after creating the first EnergyForceContribsHost to optimize memory allocation.
+void preallocateEstimatedBatch(const EnergyForceContribsHost& templateContribs,
+                               BatchedMolecularSystemHost&    molSystem,
+                               int                            estimatedBatchSize);
+
+//! Preallocate memory for estimated batch size (3D ETK).
+//! Call this after creating the first Energy3DForceContribsHost to optimize memory allocation.
+void preallocateEstimatedBatch3D(const Energy3DForceContribsHost& templateContribs,
+                                 BatchedMolecularSystem3DHost&    molSystem,
+                                 int                              estimatedBatchSize);
+
 //! Add a molecule to the molecular system.
 void addMoleculeToMolecularSystem(const EnergyForceContribsHost& contribs,
                                   const int                      numAtoms,
                                   const int                      dimension,
                                   const std::vector<int>&        ctxAtomStarts,
                                   BatchedMolecularSystemHost&    molSystem,
-                                  std::vector<int>*              atomNumbers = nullptr);
+                                  BatchedForcefieldMetadata*     metadata     = nullptr,
+                                  int                            moleculeIdx  = -1,
+                                  int                            conformerIdx = -1);
 
 //! Add a molecule to the molecular system.
 void addMoleculeToMolecularSystem3D(const Energy3DForceContribsHost& contribs,
                                     const std::vector<int>&          ctxAtomStarts,
-                                    BatchedMolecularSystem3DHost&    molSystem);
+                                    BatchedMolecularSystem3DHost&    molSystem,
+                                    BatchedForcefieldMetadata*       metadata     = nullptr,
+                                    int                              moleculeIdx  = -1,
+                                    int                              conformerIdx = -1);
 
-//! Add a molecule to the batched molecular system.
-//! Populates the molSystem with the molecule's energy force contribs, and adds the current positions.
+//! \brief Adds a molecule to the batched DG system.
+//! \param metadata Optional mapping from concrete systems back to logical molecules.
+//!        When null, no logical molecule metadata is recorded.
 void addMoleculeToBatch(const EnergyForceContribsHost& contribs,
                         const std::vector<double>&     positions,
                         BatchedMolecularSystemHost&    molSystem,
-                        const int                      dimension,
+                        int                            dimension,
                         std::vector<int>&              ctxAtomStarts,
                         std::vector<double>&           ctxPositions,
-                        std::vector<int>*              atomNumbers = nullptr);
+                        BatchedForcefieldMetadata*     metadata     = nullptr,
+                        int                            moleculeIdx  = -1,
+                        int                            conformerIdx = -1);
 
-//! Add a molecule to the batched molecular system.
-//! Populates the molSystem with the molecule's energy force contribs, and adds the current positions.
+//! \brief Adds a molecule to the batched ETK system.
+//! \param metadata Optional mapping from concrete systems back to logical molecules.
+//!        When null, no logical molecule metadata is recorded.
 void addMoleculeToBatch3D(const Energy3DForceContribsHost& contribs,
                           const std::vector<double>&       positions,
                           BatchedMolecularSystem3DHost&    molSystem,
                           std::vector<int>&                ctxAtomStarts,
-                          std::vector<double>&             ctxPositions);
+                          std::vector<double>&             ctxPositions,
+                          BatchedForcefieldMetadata*       metadata     = nullptr,
+                          int                              moleculeIdx  = -1,
+                          int                              conformerIdx = -1);
 
 //! Send the batched molecular system to the device.
 void sendContribsAndIndicesToDevice(const BatchedMolecularSystemHost& molSystemHost,
@@ -448,6 +432,20 @@ void setupDeviceBuffers3D(BatchedMolecularSystem3DHost&    molSystemHost,
                           const std::vector<double>&       ctxPositionsHost,
                           const int                        numMols);
 
+//! Create pointer struct from device buffers for use in per-molecule kernels (4D DG)
+EnergyForceContribsDevicePtr toEnergyForceContribsDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice);
+
+//! Create pointer struct from device buffers for use in per-molecule kernels (4D DG)
+BatchedIndicesDevicePtr toBatchedIndicesDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice,
+                                                  const int*                           atomStarts);
+
+//! Create pointer struct from device buffers for use in per-molecule kernels (3D ETK)
+Energy3DForceContribsDevicePtr toEnergy3DForceContribsDevicePtr(const BatchedMolecular3DDeviceBuffers& molSystemDevice);
+
+//! Create pointer struct from device buffers for use in per-molecule kernels (3D ETK)
+BatchedIndices3DDevicePtr toBatchedIndices3DDevicePtr(const BatchedMolecular3DDeviceBuffers& molSystemDevice,
+                                                      const int*                             atomStarts);
+
 //! Allocate intermediate buffers on the device for the batched molecular system.
 //! These include the gradients, energy buffer, and energy outs.
 void allocateIntermediateBuffers(const BatchedMolecularSystemHost& molSystemHost,
@@ -458,18 +456,35 @@ void allocateIntermediateBuffers(const BatchedMolecularSystemHost& molSystemHost
 void allocateIntermediateBuffers3D(const BatchedMolecularSystem3DHost& molSystemHost,
                                    BatchedMolecular3DDeviceBuffers&    molSystemDevice);
 
-//! Allocate the buffers for the 4D padded interface.
-void allocateDim4ConversionBuffers(const BatchedMolecularSystemHost& molSystemHost,
-                                   BatchedMolecularDeviceBuffers&    molSystemDevice);
+cudaError_t computeEnergy(BatchedMolecularDeviceBuffers& molSystemDevice,
+                          double*                        energyOuts,
+                          const int*                     ctxAtomStarts,
+                          const double*                  ctxPositions,
+                          double                         chiralWeight,
+                          double                         fourthDimWeight,
+                          const uint8_t*                 activeSystemMask = nullptr,
+                          const double*                  positions        = nullptr,
+                          cudaStream_t                   stream           = nullptr);
 
 //! Compute the energy of the batched molecular system. This will populate the energyOuts buffer on device.
 //! energyOuts and energyBuffer must be zeroed before calling this function.
 cudaError_t computeEnergy(BatchedMolecularDeviceBuffers&             molSystemDevice,
                           const nvMolKit::AsyncDeviceVector<int>&    ctxAtomStartsDevice,
                           const nvMolKit::AsyncDeviceVector<double>& ctxPositionsDevice,
+                          double                                     chiralWeight,
+                          double                                     fourthDimWeight,
                           const uint8_t*                             activeThisStage = nullptr,
                           const double*                              positions       = nullptr,
                           cudaStream_t                               stream          = nullptr);
+
+cudaError_t computeEnergyETK(BatchedMolecular3DDeviceBuffers& molSystemDevice,
+                             double*                          energyOuts,
+                             const int*                       ctxAtomStarts,
+                             const double*                    ctxPositions,
+                             const uint8_t*                   activeSystemMask = nullptr,
+                             const double*                    positions        = nullptr,
+                             ETKTerm                          term             = ETKTerm::ALL,
+                             cudaStream_t                     stream           = nullptr);
 
 //! Compute the energy of the batched molecular system. This will populate the energyOuts buffer on device.
 //! energyOuts and energyBuffer must be zeroed before calling this function.
@@ -481,13 +496,32 @@ cudaError_t computeEnergyETK(BatchedMolecular3DDeviceBuffers&           molSyste
                              ETKTerm                                    term            = ETKTerm::ALL,
                              cudaStream_t                               stream          = nullptr);
 
+cudaError_t computeGradients(BatchedMolecularDeviceBuffers& molSystemDevice,
+                             double*                        grad,
+                             const int*                     ctxAtomStarts,
+                             const double*                  ctxPositions,
+                             double                         chiralWeight,
+                             double                         fourthDimWeight,
+                             const uint8_t*                 activeSystemMask = nullptr,
+                             cudaStream_t                   stream           = nullptr);
+
 //! Compute the gradients of the batched molecular system. This will populate the grad buffer on device.
 //! grad must be zeroed before calling this function.
 cudaError_t computeGradients(BatchedMolecularDeviceBuffers&             molSystemDevice,
                              const nvMolKit::AsyncDeviceVector<int>&    ctxAtomStartsDevice,
                              const nvMolKit::AsyncDeviceVector<double>& ctxPositionsDevice,
+                             double                                     chiralWeight,
+                             double                                     fourthDimWeight,
                              const uint8_t*                             activeThisStage = nullptr,
                              cudaStream_t                               stream          = nullptr);
+
+cudaError_t computeGradientsETK(BatchedMolecular3DDeviceBuffers& molSystemDevice,
+                                double*                          grad,
+                                const int*                       ctxAtomStarts,
+                                const double*                    ctxPositions,
+                                const uint8_t*                   activeSystemMask = nullptr,
+                                ETKTerm                          term             = ETKTerm::ALL,
+                                cudaStream_t                     stream           = nullptr);
 
 //! Compute the gradients of the batched molecular system. This will populate the grad buffer on device.
 //! grad must be zeroed before calling this function.
@@ -504,6 +538,48 @@ cudaError_t computePlanarEnergy(BatchedMolecular3DDeviceBuffers&           molSy
                                 const uint8_t*                             activeThisStage,
                                 const double*                              positions = nullptr,
                                 cudaStream_t                               stream    = nullptr);
+
+cudaError_t computePlanarEnergy(BatchedMolecular3DDeviceBuffers& molSystemDevice,
+                                double*                          energyOuts,
+                                const int*                       ctxAtomStarts,
+                                const double*                    ctxPositions,
+                                const uint8_t*                   activeSystemMask = nullptr,
+                                const double*                    positions        = nullptr,
+                                cudaStream_t                     stream           = nullptr);
+
+//! Compute the energy of DG terms using block-per-mol kernels.
+cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffers&             molSystemDevice,
+                                     const nvMolKit::AsyncDeviceVector<int>&    ctxAtomStartsDevice,
+                                     const nvMolKit::AsyncDeviceVector<double>& ctxPositionsDevice,
+                                     double                                     chiralWeight,
+                                     double                                     fourthDimWeight,
+                                     const uint8_t*                             activeThisStage = nullptr,
+                                     const double*                              positions       = nullptr,
+                                     cudaStream_t                               stream          = nullptr);
+
+//! Compute the gradient of DG terms using block-per-mol kernels.
+cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffers&             molSystemDevice,
+                                   const nvMolKit::AsyncDeviceVector<int>&    ctxAtomStartsDevice,
+                                   const nvMolKit::AsyncDeviceVector<double>& ctxPositionsDevice,
+                                   double                                     chiralWeight,
+                                   double                                     fourthDimWeight,
+                                   const uint8_t*                             activeThisStage = nullptr,
+                                   cudaStream_t                               stream          = nullptr);
+
+//! Compute the energy of ETK terms using block-per-mol kernels.
+cudaError_t computeEnergyBlockPerMolETK(BatchedMolecular3DDeviceBuffers&           molSystemDevice,
+                                        const nvMolKit::AsyncDeviceVector<int>&    ctxAtomStartsDevice,
+                                        const nvMolKit::AsyncDeviceVector<double>& ctxPositionsDevice,
+                                        const uint8_t*                             activeThisStage = nullptr,
+                                        const double*                              positions       = nullptr,
+                                        cudaStream_t                               stream          = nullptr);
+
+//! Compute the gradients of ETK terms using block-per-mol kernels.
+cudaError_t computeGradBlockPerMolETK(BatchedMolecular3DDeviceBuffers&           molSystemDevice,
+                                      const nvMolKit::AsyncDeviceVector<int>&    ctxAtomStartsDevice,
+                                      const nvMolKit::AsyncDeviceVector<double>& ctxPositionsDevice,
+                                      const uint8_t*                             activeThisStage = nullptr,
+                                      cudaStream_t                               stream          = nullptr);
 }  // namespace DistGeom
 }  // namespace nvMolKit
 

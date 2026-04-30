@@ -18,6 +18,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 #include "cuda_runtime.h"
 
@@ -50,7 +51,7 @@ class WithDevice {
 //! Creates and holds a CUDA stream on the current device
 class ScopedStream {
  public:
-  explicit ScopedStream();
+  explicit ScopedStream(const char* name = nullptr);
   ScopedStream(const ScopedStream&)            = delete;
   ScopedStream& operator=(const ScopedStream&) = delete;
   ~ScopedStream() noexcept;
@@ -61,6 +62,27 @@ class ScopedStream {
 
  private:
   cudaStream_t original_stream_ = nullptr;
+};
+
+/**
+ * @brief RAII stream with explicit priority.
+ *
+ * Creates a non-blocking stream with the specified priority.
+ * Lower numerical priority means higher execution priority.
+ */
+class ScopedStreamWithPriority {
+ public:
+  explicit ScopedStreamWithPriority(int priority, const char* name = nullptr);
+  ScopedStreamWithPriority(const ScopedStreamWithPriority&)            = delete;
+  ScopedStreamWithPriority& operator=(const ScopedStreamWithPriority&) = delete;
+  ~ScopedStreamWithPriority() noexcept;
+
+  ScopedStreamWithPriority(ScopedStreamWithPriority&& other) noexcept;
+  ScopedStreamWithPriority& operator=(ScopedStreamWithPriority&& other) noexcept;
+  cudaStream_t              stream() const noexcept { return stream_; }
+
+ private:
+  cudaStream_t stream_ = nullptr;
 };
 
 class ScopedCudaEvent {
@@ -77,6 +99,24 @@ class ScopedCudaEvent {
  private:
   cudaEvent_t original_event_ = nullptr;
 };
+
+/**
+ * @brief Validate and acquire a CUDA stream from an externally-provided pointer value.
+ *
+ * Casts the integer to a cudaStream_t, then validates that the stream handle
+ * is recognized by the CUDA runtime on the current device.  Returns the stream
+ * on success, or std::nullopt if the handle belongs to a different device
+ * context.
+ *
+ * @note The caller must provide a valid CUDA stream pointer (e.g. from
+ *       torch.cuda.Stream.cuda_stream) or 0 for the default stream.
+ *       Passing an arbitrary integer that is not a CUDA stream handle
+ *       is undefined behavior.
+ *
+ * @param streamPtr Stream pointer as an integer (e.g. from Python's
+ *                  torch.cuda.Stream.cuda_stream).  0 is the default stream.
+ */
+std::optional<cudaStream_t> acquireExternalStream(std::uintptr_t streamPtr);
 
 //! Returns the amount of free memory on the current device.
 size_t getDeviceFreeMemory();

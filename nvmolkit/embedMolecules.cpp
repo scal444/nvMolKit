@@ -14,22 +14,47 @@
 // limitations under the License.
 
 #include <GraphMol/DistGeomHelpers/Embedder.h>
-#include <GraphMol/ROMol.h>
 
 #include <boost/python.hpp>
+#include <boost/python/stl_iterator.hpp>
 
+#include "boost_python_utils.h"
 #include "etkdg.h"
 
-// Utility: convert std::vector<T> to Python list
-template <typename T> boost::python::list vectorToList(const std::vector<T>& vec) {
-  boost::python::list list;
-  for (const auto& value : vec) {
-    list.append(value);
+static boost::python::list getGpuIdsPy(nvMolKit::BatchHardwareOptions& opts) {
+  return nvMolKit::vectorToList(opts.gpuIds);
+}
+
+static void setGpuIds(nvMolKit::BatchHardwareOptions& opts, const boost::python::object& iterable) {
+  std::vector<int> converted;
+  using namespace boost::python;
+  // Prefer fast sequence path
+  if (PySequence_Check(iterable.ptr())) {
+    Py_ssize_t n = PySequence_Size(iterable.ptr());
+    converted.reserve(static_cast<size_t>(n));
+    for (Py_ssize_t i = 0; i < n; ++i) {
+      object item(handle<>(borrowed(PySequence_GetItem(iterable.ptr(), i))));
+      converted.push_back(extract<int>(item));
+    }
+  } else {
+    // Fallback: try generic iterable
+    stl_input_iterator<int> it(iterable), end;
+    for (; it != end; ++it) {
+      converted.push_back(*it);
+    }
   }
-  return list;
+  opts.gpuIds.swap(converted);
 }
 
 BOOST_PYTHON_MODULE(_embedMolecules) {
+  // Expose BatchHardwareOptions struct to Python
+  boost::python::class_<nvMolKit::BatchHardwareOptions>("BatchHardwareOptions")
+    .def(boost::python::init<>())
+    .def_readwrite("preprocessingThreads", &nvMolKit::BatchHardwareOptions::preprocessingThreads)
+    .def_readwrite("batchSize", &nvMolKit::BatchHardwareOptions::batchSize)
+    .def_readwrite("batchesPerGpu", &nvMolKit::BatchHardwareOptions::batchesPerGpu)
+    .add_property("gpuIds", &getGpuIdsPy, &setGpuIds);
+
   boost::python::def(
     "EmbedMolecules",
     +[](const boost::python::list&                  molecules,
@@ -37,17 +62,7 @@ BOOST_PYTHON_MODULE(_embedMolecules) {
         int                                         confsPerMolecule,
         int                                         maxIterations,
         const nvMolKit::BatchHardwareOptions&       hardwareOptions) {
-      // Convert Python list to std::vector<RDKit::ROMol*>
-      std::vector<RDKit::ROMol*> molsVec;
-      molsVec.reserve(len(molecules));
-
-      for (int i = 0; i < len(molecules); i++) {
-        RDKit::ROMol* mol = boost::python::extract<RDKit::ROMol*>(boost::python::object(molecules[i]));
-        if (mol == nullptr) {
-          throw std::invalid_argument("Invalid molecule at index " + std::to_string(i));
-        }
-        molsVec.push_back(mol);
-      }
+      auto molsVec = nvMolKit::extractMolecules(molecules);
 
       // Call the C++ function with nullptr for failures
       nvMolKit::embedMolecules(molsVec,

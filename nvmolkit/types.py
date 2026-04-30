@@ -14,10 +14,12 @@
 # limitations under the License.
 
 """Types facilitating GPU-accelerated operations."""
-import enum
+
 import torch
-from typing import Iterable, List
-from nvmolkit import _types  # type: ignore
+from typing import Any, Iterable, List
+
+
+from nvmolkit import _embedMolecules  # type: ignore
 
 
 class HardwareOptions:
@@ -40,14 +42,14 @@ class HardwareOptions:
         batchesPerGpu: int = -1,
         gpuIds: Iterable[int] | None = None,
     ) -> None:
-        if _types is None:  # propagate real import failure early
-            raise ImportError("nvmolkit._types is not available; build native extensions")
-        native = _types.BatchHardwareOptions()
+        if _embedMolecules is None:  # propagate real import failure early
+            raise ImportError("nvmolkit._embedMolecules is not available; build native extensions")
+        native = _embedMolecules.BatchHardwareOptions()
         native.preprocessingThreads = int(preprocessingThreads)
         native.batchSize = int(batchSize)
-        native.batchesPerGpu = int(batchesPerGpu)
         native.gpuIds = list(gpuIds) if gpuIds is not None else []
         self._native = native
+        self.batchesPerGpu = batchesPerGpu  # reuses setter validation
 
     @property
     def preprocessingThreads(self) -> int:
@@ -74,7 +76,10 @@ class HardwareOptions:
 
     @batchesPerGpu.setter
     def batchesPerGpu(self, value: int) -> None:
-        self._native.batchesPerGpu = int(value)
+        value = int(value)
+        if value != -1 and value <= 0:
+            raise ValueError("batchesPerGpu must be greater than 0 or -1 for automatic")
+        self._native.batchesPerGpu = value
 
     @property
     def gpuIds(self) -> List[int]:
@@ -89,20 +94,45 @@ class HardwareOptions:
         """Internal: return the underlying BatchHardwareOptions object."""
         return self._native
 
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable dictionary of this object's fields.
+
+        The returned dictionary can be persisted with :func:`json.dump` and
+        round-tripped through :meth:`from_dict`.
+        """
+        return {
+            "preprocessingThreads": self.preprocessingThreads,
+            "batchSize": self.batchSize,
+            "batchesPerGpu": self.batchesPerGpu,
+            "gpuIds": list(self.gpuIds),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "HardwareOptions":
+        """Create a :class:`HardwareOptions` from a dictionary produced by :meth:`to_dict`.
+
+        Unknown keys are rejected so callers catch typos early. Missing keys
+        fall back to the constructor defaults.
+        """
+        known = {"preprocessingThreads", "batchSize", "batchesPerGpu", "gpuIds"}
+        unknown = set(data) - known
+        if unknown:
+            raise ValueError(f"Unknown HardwareOptions keys: {sorted(unknown)}")
+        return cls(**{key: data[key] for key in known if key in data})
+
 
 class AsyncGpuResult:
     """Handle to a GPU result.
 
-    Populates the __cuda_array_interface__ attribute which can be consumed by other libraries. Note that
-    this result is async, and the data cannot be accessed without a sync, such as torch.cuda.synchronize().
-
-    # TODO: Handle devices and streams.
+    Populates the ``__cuda_array_interface__`` attribute which can be consumed by other libraries. Note that
+    this result is async, and the data cannot be accessed without a sync, such as ``torch.cuda.synchronize()``.
     """
+
     def __init__(self, obj):
         """Internal construction of the AsyncGpuResult object."""
-        if not hasattr(obj, '__cuda_array_interface__'):
+        if not hasattr(obj, "__cuda_array_interface__"):
             raise TypeError(f"Object {obj} does not have a __cuda_array_interface__ attribute")
-        self.arr = torch.as_tensor(obj, device='cuda')
+        self.arr = torch.as_tensor(obj, device="cuda")
 
     @property
     def __cuda_array_interface__(self):

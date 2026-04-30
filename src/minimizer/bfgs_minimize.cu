@@ -13,19 +13,38 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <math.h>
-
 #include <cub/cub.cuh>
 #include <numeric>
 
+#include "batched_forcefield.h"
 #include "bfgs_hessian.h"
 #include "bfgs_minimize.h"
+#include "bfgs_minimize_permol_kernels.h"
+#include "cub_helpers.cuh"
 #include "device_vector.h"
-#include "minimizer_api.h"
+#include "dist_geom.h"
+#include "dist_geom_kernels.h"
+#include "mmff.h"
+#include "mmff_kernels.h"
 #include "nvtx.h"
+
 namespace nvMolKit {
 constexpr double FUNCTOL = 1e-4;  //!< Default tolerance for function convergence in the minimizer
 constexpr double MOVETOL = 1e-7;  //!< Default tolerance for x changes in the minimizer
+
+namespace {
+BfgsBackend resolveBackend(BfgsBackend backend, const std::vector<int>& atomStartsHost) {
+  if (backend != BfgsBackend::HYBRID) {
+    return backend;
+  }
+  for (size_t i = 0; i + 1 < atomStartsHost.size(); ++i) {
+    if (atomStartsHost[i + 1] - atomStartsHost[i] > kHybridBackendAtomThreshold) {
+      return BfgsBackend::BATCHED;
+    }
+  }
+  return BfgsBackend::PER_MOLECULE;
+}
+}  // namespace
 
 // TODO - consolidate this to device vector code. We don't want CUDA in the device vector
 // header so we'll need to specialize for a few types and instantiate them in the cu file.
@@ -81,8 +100,8 @@ __global__ void initializeLineSearchKernel(const int16_t* statuses,
   double*       dirStart  = &dirs[atomStarts[sysIdx] * DIM];
 
   using BlockReduce = cub::BlockReduce<double, 128>;
-  __shared__ typename BlockReduce::TempStorage tempStorage;
-  __shared__ double                            dirSum[1];
+  __shared__ BlockReduce::TempStorage tempStorage;
+  __shared__ double                   dirSum[1];
 
   // ---------------------------------
   //  Scale direction vector if needed
@@ -133,7 +152,7 @@ __global__ void initializeLineSearchKernel(const int16_t* statuses,
     }
   }
   // Perform block-wide reduction to find the maximum
-  double blockMax = BlockReduce(tempStorage).Reduce(localMax, cub::Max());
+  double blockMax = BlockReduce(tempStorage).Reduce(localMax, cubMax());
 
   // The first thread in the block writes the result
   if (isFirstThread) {
@@ -353,12 +372,22 @@ struct EqualsZeroFunctor {
   __host__ __device__ int operator()(const int16_t& x) const { return x == 0; }
 };
 
-BfgsBatchMinimizer::BfgsBatchMinimizer(const int dataDim, DebugLevel debugLevel, bool scaleGrads, cudaStream_t stream) {
+BfgsBatchMinimizer::BfgsBatchMinimizer(const int    dataDim,
+                                       DebugLevel   debugLevel,
+                                       bool         scaleGrads,
+                                       cudaStream_t stream,
+                                       BfgsBackend  backend)
+    : countFinished_(0, stream) {
   debugLevel_ = debugLevel;
   dataDim_    = dataDim;
   scaleGrads_ = scaleGrads;
   stream_     = stream;
-  loopStatusHost_.resize(1);
+  backend_    = backend;
+
+  // For HYBRID, we need to support both paths, so initialize for both
+  if (backend_ == BfgsBackend::BATCHED || backend_ == BfgsBackend::HYBRID) {
+    loopStatusHost_.resize(1);
+  }
 
   if (stream_ != nullptr) {
     activeSystemIndices_.setStream(stream_);
@@ -387,15 +416,26 @@ BfgsBatchMinimizer::BfgsBatchMinimizer(const int dataDim, DebugLevel debugLevel,
     gradScales_.setStream(stream_);
     inverseHessian_.setStream(stream_);
     hessDGrad_.setStream(stream_);
+    scratchBuffersDevice_.setStream(stream_);
+    activeMolIdsDevice_.setStream(stream_);
+  }
+  // Allocate device array for per-molecule backend (also needed for HYBRID which might use it)
+  if (backend_ == BfgsBackend::PER_MOLECULE || backend_ == BfgsBackend::HYBRID) {
+    scratchBuffersDevice_.resize(5);
   }
 }
 BfgsBatchMinimizer::~BfgsBatchMinimizer() = default;
+
+BfgsBackend BfgsBatchMinimizer::resolveBackend(const std::vector<int>& atomStartsHost) const {
+  return nvMolKit::resolveBackend(backend_, atomStartsHost);
+}
 
 void BfgsBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
                                     const int*              atomStarts,
                                     double*                 positions,
                                     double*                 grad,
                                     double*                 energyOuts,
+                                    BfgsBackend             effectiveBackend,
                                     const uint8_t*          activeThisStage) {
   atomStartsDevice = atomStarts;
   positionsDevice  = positions;
@@ -403,6 +443,10 @@ void BfgsBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
   energyOutsDevice = energyOuts;
 
   const int numSystems = atomStartsHost.size() - 1;
+  activeHost_.resize(numSystems);
+  convergenceHost_.resize(numSystems);
+  scratchBufferPointersHost_.resize(5);
+
   statuses_.resize(numSystems);
   if (activeThisStage) {
     // Copy activeThisStage to statuses_ with type conversion
@@ -418,35 +462,73 @@ void BfgsBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
   numSystems_     = numSystems;
   numAtomsTotal_  = atomStartsHost.back();
   hasLargeSystem_ = false;
-  for (int i = 0; i < numSystems_; ++i) {
-    const int numAtoms = atomStartsHost[i + 1] - atomStartsHost[i];
-    if (numAtoms > 256) {
-      hasLargeSystem_ = true;
-      break;
+
+  if (effectiveBackend == BfgsBackend::PER_MOLECULE) {
+    // Copy activeThisStage to host for CPU-side filtering (using pinned memory)
+    std::fill_n(activeHost_.begin(), numSystems, 1);
+    if (activeThisStage) {
+      cudaCheckError(cudaMemcpyAsync(activeHost_.data(),
+                                     activeThisStage,
+                                     numSystems * sizeof(uint8_t),
+                                     cudaMemcpyDeviceToHost,
+                                     stream_));
+      cudaCheckError(cudaStreamSynchronize(stream_));
+    }
+
+    activeMolIds_.clear();
+    maxAtomsInBatch_ = 0;
+
+    for (int i = 0; i < numSystems_; ++i) {
+      if (activeHost_[i] == 0) {
+        continue;
+      }
+
+      const int numAtoms = atomStartsHost[i + 1] - atomStartsHost[i];
+      activeMolIds_.push_back(i);
+
+      if (numAtoms > maxAtomsInBatch_) {
+        maxAtomsInBatch_ = numAtoms;
+      }
+      if (numAtoms > 256) {
+        hasLargeSystem_ = true;
+      }
+    }
+
+    // Transfer active molecule list to device
+    if (!activeMolIds_.empty()) {
+      activeMolIdsDevice_.resize(activeMolIds_.size());
+      activeMolIdsDevice_.setFromVector(activeMolIds_);
+    }
+  } else {
+    // Original logic for batched backend
+    for (int i = 0; i < numSystems_; ++i) {
+      const int numAtoms = atomStartsHost[i + 1] - atomStartsHost[i];
+      if (numAtoms > 256) {
+        hasLargeSystem_ = true;
+        break;
+      }
     }
   }
 
   activeSystemIndices_.resize(numSystems_);
   allSystemIndices_.resize(numSystems_);
-  std::vector<int> activeSystemIndicesHost(numSystems_);
-  std::iota(activeSystemIndicesHost.begin(), activeSystemIndicesHost.end(), 0);
-  allSystemIndices_.setFromVector(activeSystemIndicesHost);
-  activeSystemIndices_.setFromVector(activeSystemIndicesHost);
+  systemIndicesHost_.resize(numSystems_);
+  std::iota(systemIndicesHost_.begin(), systemIndicesHost_.end(), 0);
+  allSystemIndices_.setFromVector(systemIndicesHost_);
+  activeSystemIndices_.setFromVector(systemIndicesHost_);
 
-  std::vector<int> hessianStartsHost;
-  hessianStartsHost.reserve(numSystems + 1);
-  hessianStartsHost.push_back(0);
-  std::vector<int> blockIdxToSYstemIdxHost;
-  std::vector<int> blockWithinSysHost;
+  hessianStartsHost_.clear();
+  hessianStartsHost_.reserve(numSystems + 1);
+  hessianStartsHost_.push_back(0);
   for (int i = 0; i < numSystems; ++i) {
     const int numAtoms = atomStartsHost[i + 1] - atomStartsHost[i];
     // Note - hessian starts is total term based, not atom based.
     const int numTerms = (dataDim_ * numAtoms) * (dataDim_ * numAtoms);
-    hessianStartsHost.push_back(hessianStartsHost.back() + numTerms);
+    hessianStartsHost_.push_back(hessianStartsHost_.back() + numTerms);
   }
   hessianStarts_.resize(numSystems + 1);
-  hessianStarts_.setFromVector(hessianStartsHost);
-  inverseHessian_.resize(hessianStartsHost.back());
+  hessianStarts_.setFromVector(hessianStartsHost_);
+  inverseHessian_.resize(hessianStartsHost_.back());
   inverseHessian_.zero();
 
   hessDGrad_.resize(atomStartsHost.back() * dataDim_);
@@ -468,13 +550,13 @@ void BfgsBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
   lineSearchEnergyScratch_.resize(numSystems);
 
   // Compute needed reduction storage.
-  size_t temp_storage_bytes;
+  size_t temp_storage_bytes = 0;
   cub::DeviceReduce::TransformReduce(nullptr,
                                      temp_storage_bytes,
                                      lineSearchStatus_.data(),
                                      countFinished_.data(),
                                      lineSearchStatus_.size(),
-                                     cub::Sum(),
+                                     cubSum(),
                                      NotEqualToMinusTwoFunctor(),
                                      0,
                                      stream_);
@@ -490,6 +572,7 @@ void BfgsBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
                              stream_);
 
   if (temp_storage_bytes > countTempStorage_.size()) {
+    countTempStorage_.zero();
     countTempStorage_.resize(temp_storage_bytes);
   }
 }
@@ -538,7 +621,7 @@ __global__ void setMaxStepKernel(const int* atomStarts, const double* positions,
   }
 
   using BlockReduce = cub::BlockReduce<double, 128>;
-  __shared__ typename BlockReduce::TempStorage tempStorage;
+  __shared__ BlockReduce::TempStorage tempStorage;
 
   const double squaredSum = BlockReduce(tempStorage).Sum(sumSquaredPos);
   if (isFirstThread) {
@@ -564,6 +647,43 @@ __global__ void copyAndNegate(const int numElements, const double* src, double* 
   }
 }
 
+void prepareScratchBuffers(AsyncDeviceVector<double>&  grad,
+                           AsyncDeviceVector<double>&  lineSearchDir,
+                           AsyncDeviceVector<double>&  scratchPositions,
+                           AsyncDeviceVector<double>&  hessDGrad,
+                           AsyncDeviceVector<double>&  scratchGrad,
+                           AsyncDeviceVector<double*>& scratchBuffersDevice,
+                           PinnedHostVector<double*>&  scratchBufferPointersHost,
+                           cudaStream_t                stream) {
+  scratchBufferPointersHost[0] = grad.data();
+  scratchBufferPointersHost[1] = lineSearchDir.data();
+  scratchBufferPointersHost[2] = scratchPositions.data();
+  scratchBufferPointersHost[3] = hessDGrad.data();
+  scratchBufferPointersHost[4] = scratchGrad.data();
+
+  cudaCheckError(cudaMemcpyAsync(scratchBuffersDevice.data(),
+                                 scratchBufferPointersHost.data(),
+                                 5 * sizeof(double*),
+                                 cudaMemcpyHostToDevice,
+                                 stream));
+}
+
+bool checkConvergence(const std::vector<int>&     activeMolIds,
+                      AsyncDeviceVector<int16_t>& statuses,
+                      PinnedHostVector<int16_t>&  convergenceHost,
+                      const int                   numSystems,
+                      cudaStream_t                stream) {
+  statuses.copyToHost(convergenceHost.data(), numSystems);
+  cudaCheckError(cudaStreamSynchronize(stream));
+
+  for (const int molIdx : activeMolIds) {
+    if (convergenceHost[molIdx] != 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 int BfgsBatchMinimizer::lineSearchCountFinished() const {
@@ -573,7 +693,7 @@ int BfgsBatchMinimizer::lineSearchCountFinished() const {
                                      lineSearchStatus_.data(),
                                      countFinished_.data(),
                                      lineSearchStatus_.size(),
-                                     cub::Sum(),
+                                     cubSum(),
                                      NotEqualToMinusTwoFunctor(),
                                      0,
                                      stream_);
@@ -645,8 +765,8 @@ __global__ void setDirectionKernel(const int*    atomStarts,
     }
   }
 
-  __shared__ typename cub::BlockReduce<double, 128>::TempStorage tempStorage;
-  double           blockMax = cub::BlockReduce<double, 128>(tempStorage).Reduce(localMax, cub::Max());
+  __shared__ cub::BlockReduce<double, 128>::TempStorage tempStorage;
+  double           blockMax = cub::BlockReduce<double, 128>(tempStorage).Reduce(localMax, cubMax());
   constexpr double TOLX     = 4. * 3e-8;
   if (idxWithinSystem == 0 && blockMax < TOLX) {
     // Converged
@@ -700,8 +820,8 @@ __global__ void scaleGradKernel(const int16_t* statuses,
     }
   }
 
-  __shared__ typename cub::BlockReduce<double, 128>::TempStorage tempStorage;
-  double blockMax = cub::BlockReduce<double, 128>(tempStorage).Reduce(maxGrad, cub::Max());
+  __shared__ cub::BlockReduce<double, 128>::TempStorage tempStorage;
+  double blockMax = cub::BlockReduce<double, 128>(tempStorage).Reduce(maxGrad, cubMax());
 
   if (idxWithinSystem == 0) {
     distributedMax[0] = blockMax;
@@ -776,8 +896,8 @@ __global__ void updateDGradKernel(const double  gradTol,
       localMax = temp;
     }
   }
-  __shared__ typename cub::BlockReduce<double, 128>::TempStorage tempStorage;
-  double blockMax = cub::BlockReduce<double, 128>(tempStorage).Reduce(localMax, cub::Max());
+  __shared__ cub::BlockReduce<double, 128>::TempStorage tempStorage;
+  double blockMax = cub::BlockReduce<double, 128>(tempStorage).Reduce(localMax, cubMax());
 
   if (idxWithinSystem == 0) {
     const double term = max(energies[sysIdx] * gradScales[sysIdx], 1.0);
@@ -847,38 +967,45 @@ void BfgsBatchMinimizer::collectDebugData() {
   stepwiseEnergies.push_back(std::move(energiesHost));
 }
 
-bool BfgsBatchMinimizer::minimize(const int                     numIters,
-                                  const double                  gradTol,
-                                  const std::vector<int>&       atomStartsHost,
-                                  const AsyncDeviceVector<int>& atomStarts,
-                                  AsyncDeviceVector<double>&    positions,
-                                  AsyncDeviceVector<double>&    grad,
-                                  AsyncDeviceVector<double>&    energyOuts,
-                                  AsyncDeviceVector<double>&    energyBuffer,
-                                  EnergyFunctor                 eFunc,
-                                  GradFunctor                   gFunc,
-                                  const uint8_t*                activeThisStage) {
-  gradTol_                = gradTol;
-  const int totalNumAtoms = atomStartsHost.back();
-  const int numSystems    = atomStartsHost.size() - 1;
+bool BfgsBatchMinimizer::minimize(const int                  numIters,
+                                  const double               gradTol,
+                                  const std::vector<int>&    atomStartsHost,
+                                  const int*                 atomStarts,
+                                  AsyncDeviceVector<double>& positions,
+                                  AsyncDeviceVector<double>& grad,
+                                  AsyncDeviceVector<double>& energyOuts,
+                                  EnergyFunctor              eFunc,
+                                  GradFunctor                gFunc,
+                                  const uint8_t*             activeThisStage) {
+  gradTol_             = gradTol;
+  const int numSystems = atomStartsHost.size() - 1;
+
+  if (backend_ == BfgsBackend::PER_MOLECULE) {
+    throw std::runtime_error(
+      "PER_MOLECULE backend is only supported through the forcefield-specific entry points. "
+      "Use minimizeWithMMFF(), minimizeWithETK(), minimizeWithDG(), or switch to BATCHED backend.");
+  }
 
   {
     const ScopedNvtxRange bfgsFullInitialize("BfgsBatchMinimizer::fullInitialize");
-    if (totalNumAtoms != numAtomsTotal_ || numSystems != numSystems_) {
-      initialize(atomStartsHost, atomStarts.data(), positions.data(), grad.data(), energyOuts.data(), activeThisStage);
-    }
+    initialize(atomStartsHost,
+               atomStarts,
+               positions.data(),
+               grad.data(),
+               energyOuts.data(),
+               BfgsBackend::BATCHED,
+               activeThisStage);
 
-    // Set up Hessian. Offsets are n X n, where atomstarts were n.
     setHessianToIdentity();
 
-    // Initial E and F
+    energyOuts.zero();
     eFunc(nullptr);
+    grad.zero();
     gFunc();
     scaleGrad(/*preLoop=*/true);
-    collectDebugData();
-    // Set up xi as negative grad.
-    copyAndInvert(grad, lineSearchDir_);
 
+    collectDebugData();
+    copyAndInvert(grad, lineSearchDir_);
     setMaxStep();
   }
 
@@ -886,26 +1013,18 @@ bool BfgsBatchMinimizer::minimize(const int                     numIters,
     {
       const ScopedNvtxRange bfgsLineSearch("BfgsBatchMinimizer::lineSearch");
       doLineSearchSetup(energyOuts.data());
+
       int              lineSearchIter         = 0;
       constexpr double MAX_ITER_LINEAR_SEARCH = 1000;
       while (lineSearchIter < MAX_ITER_LINEAR_SEARCH && lineSearchCountFinished() < numSystems) {
-        // The RDKit algorithm has 3 energy terms. First is oldVal, which is the original energy before line search.
-        // That's copied above as lineSearchStoredEnergy_ and not modified.
-        // The other two are the current energy at the putative position (newVal) and the energy at the previous attempt
-        // at position (val2). These are buffers.energyOuts and lineSearchEnergyScratch_, respectively. At the end of
-        // each line search iteration, energyout is copied into energy scratch. This happens in kernel. Populate scratch
-        // positions with perturbed positions, based on dir and lambda.
         doLineSearchPerturb();
-        energyBuffer.zero();
         energyOuts.zero();
         eFunc(scratchPositions_.data());
-
         doLineSearchPostEnergy(lineSearchIter);
         lineSearchIter++;
       }
       doLineSearchPostLoop();
     }
-
     setDirection();
 
     {
@@ -916,13 +1035,240 @@ bool BfgsBatchMinimizer::minimize(const int                     numIters,
     }
 
     updateDGrad();
-
     updateHessian();
-
     collectDebugData();
   }
 
+  energyOuts.zero();
+  eFunc(nullptr);
   return compactAndCountConverged() == numSystems ? 0 : 1;
+}
+
+bool BfgsBatchMinimizer::minimize(const int                  numIters,
+                                  const double               gradTol,
+                                  BatchedForcefield&         ff,
+                                  AsyncDeviceVector<double>& positions,
+                                  AsyncDeviceVector<double>& grad,
+                                  AsyncDeviceVector<double>& energyOuts,
+                                  const uint8_t*             activeSystemMask) {
+  const auto& atomStartsHost = ff.atomStartsHost();
+
+  if (resolveBackend(atomStartsHost) != BfgsBackend::BATCHED) {
+    throw std::runtime_error("BatchedForcefield minimization is only supported on the BATCHED backend");
+  }
+
+  auto eFunc = [&](const double* evalPositions) {
+    const double* positionsToEvaluate = evalPositions != nullptr ? evalPositions : positions.data();
+    ff.computeEnergy(energyOuts.data(), positionsToEvaluate, activeSystemMask, stream_);
+  };
+  auto gFunc = [&]() { ff.computeGradients(grad.data(), positions.data(), activeSystemMask, stream_); };
+
+  return minimize(numIters,
+                  gradTol,
+                  atomStartsHost,
+                  ff.atomStartsDevice(),
+                  positions,
+                  grad,
+                  energyOuts,
+                  eFunc,
+                  gFunc,
+                  activeSystemMask);
+}
+
+bool BfgsBatchMinimizer::minimizeWithMMFF(const int                            numIters,
+                                          const double                         gradTol,
+                                          const std::vector<int>&              atomStartsHost,
+                                          MMFF::BatchedMolecularDeviceBuffers& systemDevice,
+                                          const uint8_t*                       activeThisStage) {
+  const int         numSystems       = atomStartsHost.size() - 1;
+  const BfgsBackend effectiveBackend = resolveBackend(atomStartsHost);
+
+  if (effectiveBackend == BfgsBackend::BATCHED) {
+    throw std::runtime_error("Use minimize(..., BatchedForcefield&) for batched MMFF minimization");
+  }
+
+  initialize(atomStartsHost,
+             systemDevice.indices.atomStarts.data(),
+             systemDevice.positions.data(),
+             systemDevice.grad.data(),
+             systemDevice.energyOuts.data(),
+             effectiveBackend,
+             activeThisStage);
+
+  setHessianToIdentity();
+
+  const ScopedNvtxRange bfgsPerMolecule("BfgsBatchMinimizer::perMoleculeMinimize");
+
+  prepareScratchBuffers(systemDevice.grad,
+                        lineSearchDir_,
+                        scratchPositions_,
+                        hessDGrad_,
+                        scratchGrad_,
+                        scratchBuffersDevice_,
+                        scratchBufferPointersHost_,
+                        stream_);
+
+  auto terms         = MMFF::toEnergyForceContribsDevicePtr(systemDevice);
+  auto systemIndices = MMFF::toBatchedIndicesDevicePtr(systemDevice);
+
+  cudaError_t err = launchBfgsMinimizePerMolKernel(static_cast<int>(activeMolIds_.size()),
+                                                   activeMolIdsDevice_.data(),
+                                                   maxAtomsInBatch_,
+                                                   systemDevice.indices.atomStarts.data(),
+                                                   hessianStarts_.data(),
+                                                   numIters,
+                                                   gradTol,
+                                                   scaleGrads_,
+                                                   terms,
+                                                   systemIndices,
+                                                   systemDevice.positions.data(),
+                                                   systemDevice.grad.data(),
+                                                   inverseHessian_.data(),
+                                                   scratchBuffersDevice_.data(),
+                                                   systemDevice.energyOuts.data(),
+                                                   statuses_.data(),
+                                                   stream_);
+
+  if (err != cudaSuccess) {
+    throw std::runtime_error(std::string("Per-molecule BFGS kernel failed: ") + cudaGetErrorString(err));
+  }
+
+  return checkConvergence(activeMolIds_, statuses_, convergenceHost_, numSystems, stream_);
+}
+
+bool BfgsBatchMinimizer::minimizeWithETK(const int                                  numIters,
+                                         const double                               gradTol,
+                                         const std::vector<int>&                    atomStartsHost,
+                                         const AsyncDeviceVector<int>&              atomStarts,
+                                         AsyncDeviceVector<double>&                 positions,
+                                         DistGeom::BatchedMolecular3DDeviceBuffers& systemDevice,
+                                         const uint8_t*                             activeThisStage) {
+  const int         numSystems       = atomStartsHost.size() - 1;
+  const BfgsBackend effectiveBackend = resolveBackend(atomStartsHost);
+
+  if (effectiveBackend == BfgsBackend::BATCHED) {
+    throw std::runtime_error("Use minimize(..., BatchedForcefield&) for batched ETK minimization");
+  }
+
+  initialize(atomStartsHost,
+             atomStarts.data(),
+             positions.data(),
+             systemDevice.grad.data(),
+             systemDevice.energyOuts.data(),
+             effectiveBackend,
+             activeThisStage);
+
+  setHessianToIdentity();
+
+  const ScopedNvtxRange bfgsPerMoleculeETK("BfgsBatchMinimizer::perMoleculeMinimizeETK");
+
+  prepareScratchBuffers(systemDevice.grad,
+                        lineSearchDir_,
+                        scratchPositions_,
+                        hessDGrad_,
+                        scratchGrad_,
+                        scratchBuffersDevice_,
+                        scratchBufferPointersHost_,
+                        stream_);
+
+  auto terms         = DistGeom::toEnergy3DForceContribsDevicePtr(systemDevice);
+  auto systemIndices = DistGeom::toBatchedIndices3DDevicePtr(systemDevice, atomStarts.data());
+
+  cudaError_t err = launchBfgsMinimizePerMolKernelETK(static_cast<int>(activeMolIds_.size()),
+                                                      activeMolIdsDevice_.data(),
+                                                      maxAtomsInBatch_,
+                                                      atomStarts.data(),
+                                                      hessianStarts_.data(),
+                                                      numIters,
+                                                      gradTol,
+                                                      scaleGrads_,
+                                                      terms,
+                                                      systemIndices,
+                                                      positions.data(),
+                                                      systemDevice.grad.data(),
+                                                      inverseHessian_.data(),
+                                                      scratchBuffersDevice_.data(),
+                                                      systemDevice.energyOuts.data(),
+                                                      statuses_.data(),
+                                                      stream_);
+
+  if (err != cudaSuccess) {
+    throw std::runtime_error(std::string("Per-molecule BFGS ETK kernel failed: ") + cudaGetErrorString(err));
+  }
+
+  return checkConvergence(activeMolIds_, statuses_, convergenceHost_, numSystems, stream_);
+}
+
+bool BfgsBatchMinimizer::minimizeWithDG(const int                                numIters,
+                                        const double                             gradTol,
+                                        const std::vector<int>&                  atomStartsHost,
+                                        const AsyncDeviceVector<int>&            atomStarts,
+                                        AsyncDeviceVector<double>&               positions,
+                                        DistGeom::BatchedMolecularDeviceBuffers& systemDevice,
+                                        double                                   chiralWeight,
+                                        double                                   fourthDimWeight,
+                                        const uint8_t*                           activeThisStage) {
+  const int numSystems = atomStartsHost.size() - 1;
+
+  if (dataDim_ != 4) {
+    throw std::runtime_error("minimizeWithDG requires BfgsBatchMinimizer to be constructed with dataDim=4");
+  }
+
+  const BfgsBackend effectiveBackend = resolveBackend(atomStartsHost);
+
+  if (effectiveBackend == BfgsBackend::BATCHED) {
+    throw std::runtime_error("Use minimize(..., BatchedForcefield&) for batched DG minimization");
+  }
+
+  initialize(atomStartsHost,
+             atomStarts.data(),
+             positions.data(),
+             systemDevice.grad.data(),
+             systemDevice.energyOuts.data(),
+             effectiveBackend,
+             activeThisStage);
+
+  setHessianToIdentity();
+
+  const ScopedNvtxRange bfgsPerMoleculeDG("BfgsBatchMinimizer::perMoleculeMinimizeDG");
+
+  prepareScratchBuffers(systemDevice.grad,
+                        lineSearchDir_,
+                        scratchPositions_,
+                        hessDGrad_,
+                        scratchGrad_,
+                        scratchBuffersDevice_,
+                        scratchBufferPointersHost_,
+                        stream_);
+
+  auto terms         = DistGeom::toEnergyForceContribsDevicePtr(systemDevice);
+  auto systemIndices = DistGeom::toBatchedIndicesDevicePtr(systemDevice, atomStarts.data());
+
+  cudaError_t err = launchBfgsMinimizePerMolKernelDG(static_cast<int>(activeMolIds_.size()),
+                                                     activeMolIdsDevice_.data(),
+                                                     maxAtomsInBatch_,
+                                                     atomStarts.data(),
+                                                     hessianStarts_.data(),
+                                                     numIters,
+                                                     gradTol,
+                                                     scaleGrads_,
+                                                     terms,
+                                                     systemIndices,
+                                                     positions.data(),
+                                                     systemDevice.grad.data(),
+                                                     inverseHessian_.data(),
+                                                     scratchBuffersDevice_.data(),
+                                                     systemDevice.energyOuts.data(),
+                                                     chiralWeight,
+                                                     fourthDimWeight,
+                                                     statuses_.data(),
+                                                     stream_);
+
+  if (err != cudaSuccess) {
+    throw std::runtime_error(std::string("Per-molecule BFGS DG kernel failed: ") + cudaGetErrorString(err));
+  }
+
+  return checkConvergence(activeMolIds_, statuses_, convergenceHost_, numSystems, stream_);
 }
 
 void copyAndInvert(const AsyncDeviceVector<double>& src, AsyncDeviceVector<double>& dst) {

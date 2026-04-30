@@ -14,11 +14,13 @@
 # limitations under the License.
 
 """GPU-accelerated fingerprint generation."""
+
 import torch
 
 from nvmolkit._arrayHelpers import *  # noqa: F403
 from nvmolkit._Fingerprints import MorganFingerprintGenerator as InternalFPGen
 from nvmolkit.types import AsyncGpuResult
+
 
 def unpack_fingerprint(fp: torch.Tensor) -> torch.Tensor:
     """Unpack a 32-bit integer-encoded fingerprint into a 2D boolean tensor of shape (len(fp), fingerprint_size).
@@ -34,7 +36,11 @@ def unpack_fingerprint(fp: torch.Tensor) -> torch.Tensor:
     n_fps = fp.shape[0]
     n_ints = fp.shape[1]
     fp_size = n_ints * 32
-    return ((fp.unsqueeze(2) >> torch.arange(0, 32, device=fp.device, dtype=torch.int32)) & 1).bool().reshape(n_fps, fp_size)
+    return (
+        ((fp.unsqueeze(2) >> torch.arange(0, 32, device=fp.device, dtype=torch.int32)) & 1)
+        .bool()
+        .reshape(n_fps, fp_size)
+    )
 
 
 def pack_fingerprint(fp: torch.Tensor) -> torch.Tensor:
@@ -65,8 +71,10 @@ def pack_fingerprint(fp: torch.Tensor) -> torch.Tensor:
     # Multiply and sum to create packed integers
     return (fp_reshaped * powers.unsqueeze(0)).sum(dim=2, dtype=torch.int32)
 
+
 class MorganFingerprintGenerator:
     """Morgan fingerprint generator."""
+
     def __init__(self, radius: int, fpSize: int):
         """Initialize the Morgan fingerprint generator.
 
@@ -76,7 +84,7 @@ class MorganFingerprintGenerator:
         """
         self._internal = InternalFPGen(radius, fpSize)
 
-    def GetFingerprints(self, mols: list, num_threads: int = 0):
+    def GetFingerprints(self, mols: list, num_threads: int = 0, stream: torch.cuda.Stream | None = None):
         """Compute Morgan fingerprints for a list of molecules.
 
         Preprocessing of fingerprinting features is done on the CPU, and is parallelized with the `num_threads` argument.
@@ -88,9 +96,13 @@ class MorganFingerprintGenerator:
         Args:
             mols: List of RDKit molecules to generate fingerprints for
             num_threads: Number of CPU threads to use for fingerprint generation. If 0, uses all available threads.
+            stream: CUDA stream to use. If None, uses the current stream.
 
         Returns:
             AsyncGpuResult wrapping a torch.Tensor of shape (len(mols), fpSize / 32) containing the fingerprints.
             Each row is a fingerprint for the corresponding molecule.
         """
-        return AsyncGpuResult(self._internal.GetFingerprintsDevice(mols, num_threads))
+        if stream is not None and not isinstance(stream, torch.cuda.Stream):
+            raise TypeError(f"stream must be a torch.cuda.Stream or None, got {type(stream).__name__}")
+        stream_ptr = (stream if stream is not None else torch.cuda.current_stream()).cuda_stream
+        return AsyncGpuResult(self._internal.GetFingerprintsDevice(mols, num_threads, stream_ptr))

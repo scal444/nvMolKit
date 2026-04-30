@@ -36,22 +36,24 @@ constexpr int kBitsPerByte = 8;
 // --------------------------------
 
 AsyncDeviceVector<double> crossTanimotoSimilarityGpuResult(const cuda::std::span<const std::uint32_t> bits,
-                                                           int                                        fpSize) {
+                                                           int                                        fpSize,
+                                                           cudaStream_t                               stream) {
   const size_t nElementsPerFp = fpSize / (kBitsPerByte * sizeof(std::uint32_t));
   const size_t nFps           = bits.size() / nElementsPerFp;
-  auto         similarities_d = AsyncDeviceVector<double>(nFps * nFps);
-  launchCrossTanimotoSimilarity(bits, bits, nElementsPerFp, toSpan(similarities_d), 0);
+  auto         similarities_d = AsyncDeviceVector<double>(nFps * nFps, stream);
+  launchCrossTanimotoSimilarity(bits, bits, nElementsPerFp, toSpan(similarities_d), 0, stream);
   return similarities_d;
 }
 
 AsyncDeviceVector<double> crossTanimotoSimilarityGpuResult(const cuda::std::span<const std::uint32_t> bitsOneBuffer,
                                                            const cuda::std::span<const std::uint32_t> bitsTwoBuffer,
-                                                           int                                        fpSize) {
+                                                           int                                        fpSize,
+                                                           cudaStream_t                               stream) {
   const size_t nElementsPerFp = fpSize / (kBitsPerByte * sizeof(std::uint32_t));
   const size_t nFps1          = bitsOneBuffer.size() / nElementsPerFp;
   const size_t nFps2          = bitsTwoBuffer.size() / nElementsPerFp;
-  auto         similarities_d = AsyncDeviceVector<double>(nFps1 * nFps2);
-  launchCrossTanimotoSimilarity(bitsOneBuffer, bitsTwoBuffer, nElementsPerFp, toSpan(similarities_d), 0);
+  auto         similarities_d = AsyncDeviceVector<double>(nFps1 * nFps2, stream);
+  launchCrossTanimotoSimilarity(bitsOneBuffer, bitsTwoBuffer, nElementsPerFp, toSpan(similarities_d), 0, stream);
   return similarities_d;
 }
 
@@ -112,11 +114,12 @@ std::vector<double> crossSimilarityImpl(const cuda::std::span<const std::uint32_
 
   // If there is enough memory, compute in one shot on the device then copy to host
   if (freeBytes >= nFps1 * nFps2 * sizeof(double)) {
-    AsyncDeviceVector<double> similarities_d(nFps1 * nFps2);
-    launchKernel(bitsOneBuffer, bitsTwoBuffer, nElementsPerFp, toSpan(similarities_d), 0, /*stream*/ nullptr);
+    ScopedStream              stream;
+    AsyncDeviceVector<double> similarities_d(nFps1 * nFps2, stream.stream());
+    launchKernel(bitsOneBuffer, bitsTwoBuffer, nElementsPerFp, toSpan(similarities_d), 0, stream.stream());
     std::vector<double> res(similarities_d.size());
     similarities_d.copyToHost(res);
-    cudaDeviceSynchronize();
+    cudaStreamSynchronize(stream.stream());
     return res;
   }
 
@@ -254,22 +257,25 @@ std::vector<double> crossTanimotoSimilarityCPUResult(const cuda::std::span<const
 // Cosine similarity wrapper functions
 // --------------------------------
 
-AsyncDeviceVector<double> crossCosineSimilarityGpuResult(const cuda::std::span<const std::uint32_t> bits, int fpSize) {
+AsyncDeviceVector<double> crossCosineSimilarityGpuResult(const cuda::std::span<const std::uint32_t> bits,
+                                                         int                                        fpSize,
+                                                         cudaStream_t                               stream) {
   const size_t nElementsPerFp = fpSize / (kBitsPerByte * sizeof(std::uint32_t));
   const size_t nFps           = bits.size() / nElementsPerFp;
-  auto         similarities_d = AsyncDeviceVector<double>(nFps * nFps);
-  launchCrossCosineSimilarity(bits, bits, nElementsPerFp, toSpan(similarities_d), 0);
+  auto         similarities_d = AsyncDeviceVector<double>(nFps * nFps, stream);
+  launchCrossCosineSimilarity(bits, bits, nElementsPerFp, toSpan(similarities_d), 0, stream);
   return similarities_d;
 }
 
 AsyncDeviceVector<double> crossCosineSimilarityGpuResult(const cuda::std::span<const std::uint32_t> bitsOneBuffer,
                                                          const cuda::std::span<const std::uint32_t> bitsTwoBuffer,
-                                                         int                                        fpSize) {
+                                                         int                                        fpSize,
+                                                         cudaStream_t                               stream) {
   const size_t nElementsPerFp = fpSize / (kBitsPerByte * sizeof(std::uint32_t));
   const size_t nFps1          = bitsOneBuffer.size() / nElementsPerFp;
   const size_t nFps2          = bitsTwoBuffer.size() / nElementsPerFp;
-  auto         similarities_d = AsyncDeviceVector<double>(nFps1 * nFps2);
-  launchCrossCosineSimilarity(bitsOneBuffer, bitsTwoBuffer, nElementsPerFp, toSpan(similarities_d), 0);
+  auto         similarities_d = AsyncDeviceVector<double>(nFps1 * nFps2, stream);
+  launchCrossCosineSimilarity(bitsOneBuffer, bitsTwoBuffer, nElementsPerFp, toSpan(similarities_d), 0, stream);
   return similarities_d;
 }
 

@@ -13,23 +13,52 @@
 # License for the specific language governing permissions and limitations under
 # the License.
 
-add_library(bfgs bfgs_minimize.cu bfgs_hessian.cu minimizer_api.h)
-target_link_libraries(bfgs PRIVATE ${RDKit_LIBS} rdkit_mmff_flattened
-                                   device_vector)
+add_library(bfgs bfgs_minimize.cu bfgs_hessian.cu
+                 bfgs_minimize_permol_kernels.cu)
+target_link_libraries(
+  bfgs
+  PUBLIC host_vector device_vector
+  PRIVATE ${RDKit_LIBS} batched_forcefield rdkit_mmff_flattened dist_geom
+          cub_helpers cccl_interface)
 target_include_directories(bfgs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_library(bfgs_common bfgs_common.cpp)
+target_link_libraries(
+  bfgs_common
+  PUBLIC host_vector device
+  PRIVATE ${RDKit_LIBS} OpenMP::OpenMP_CXX)
+target_include_directories(bfgs_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_library(fire_minimizer fire_minimizer.cu fire_minimizer.h)
+target_link_libraries(fire_minimizer PUBLIC device_vector PRIVATE cccl_interface)
+target_include_directories(fire_minimizer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_library(bfgs_mmff bfgs_mmff.cpp)
 target_link_libraries(
-  bfgs_mmff PRIVATE ${RDKit_LIBS} rdkit_mmff_flattened device device_vector
-                    bfgs OpenMP::OpenMP_CXX openmp_helpers PUBLIC fire_minimizer)
+  bfgs_mmff
+  PUBLIC bfgs fire_minimizer
+  PRIVATE ${RDKit_LIBS}
+          bfgs_common
+          mmff_batched_forcefield
+          rdkit_mmff_flattened
+          forcefield_constraints
+          device_vector
+          OpenMP::OpenMP_CXX
+          openmp_helpers
+          cccl_interface)
 target_include_directories(bfgs_mmff PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-add_library(bfgs_distgeom bfgs_distgeom.cpp)
+add_library(bfgs_uff bfgs_uff.cpp)
 target_link_libraries(
-  bfgs_distgeom PRIVATE ${RDKit_LIBS} dist_geom rdkit_dist_geom_flattened
-                        device_vector etkdg bfgs)
-target_include_directories(bfgs_distgeom PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-
-add_library(fire_minimizer fire_minimizer.cu fire_minimizer.h)
-target_link_libraries(fire_minimizer PUBLIC device_vector)
-target_include_directories(fire_minimizer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+  bfgs_uff
+  PUBLIC bfgs
+  PRIVATE ${RDKit_LIBS}
+          bfgs_common
+          uff_batched_forcefield
+          rdkit_uff_flattened
+          forcefield_constraints
+          device_vector
+          OpenMP::OpenMP_CXX
+          openmp_helpers
+          cccl_interface)
+target_include_directories(bfgs_uff PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

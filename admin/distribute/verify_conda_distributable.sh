@@ -1,5 +1,18 @@
 #!/usr/bin/env bash
-
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 set -exuo pipefail
 
 if [[ $# -ne 4 ]]; then
@@ -32,6 +45,14 @@ if [[ $PYTHON_VERSION != 3.* ]]; then
   exit 1
 fi
 
+# Optional: use conda default locations unless you export CONDA_PKGS_DIRS / CONDA_ENVS_PATH (e.g. to scratch)
+if [[ -n "${CONDA_PKGS_DIRS:-}" ]]; then
+  mkdir -p "$CONDA_PKGS_DIRS"
+fi
+if [[ -n "${CONDA_ENVS_PATH:-}" ]]; then
+  mkdir -p "$CONDA_ENVS_PATH"
+fi
+
 LOCAL_CHANNEL_SPEC=$LOCAL_CONDA_ENDPOINT
 
 if [[ $LOCAL_CHANNEL_SPEC != file://* ]]; then
@@ -55,11 +76,17 @@ trap 'cleanup $?' EXIT
 
 eval "$(conda shell.bash hook)"
 
-conda create --name "$ENV_NAME" "python=$PYTHON_VERSION" "rdkit=$RDKIT_VERSION" pytest pandas psutil --yes
+# Create env with python, rdkit, and nvmolkit's other run deps (numpy, pytorch) from conda-forge.
+conda create -c conda-forge --name "$ENV_NAME" \
+  "python=$PYTHON_VERSION" "rdkit=$RDKIT_VERSION" \
+  numpy pytorch pytest pandas psutil --yes
 
 conda activate "$ENV_NAME"
 
-conda install --name "$ENV_NAME" --yes -c "$LOCAL_CHANNEL_SPEC" nvmolkit
+# Install nvmolkit from local channel (first), run deps from conda-forge. Strict channel priority
+# ensures nvmolkit is taken from local, not conda-forge.
+conda install --name "$ENV_NAME" --yes --strict-channel-priority \
+  -c "$LOCAL_CHANNEL_SPEC" -c conda-forge nvmolkit
 
 pytest "$PYTEST_DIR"
 

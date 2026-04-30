@@ -24,11 +24,11 @@
 #include "conformer_pruning.h"
 #include "device.h"
 #include "etkdg_stage_coordgen.h"
+#include "etkdg_stage_distgeom_minimize.h"
 #include "etkdg_stage_etk_minimization.h"
-#include "etkdg_stage_firstminimization.h"
-#include "etkdg_stage_fourthdimminimization.h"
 #include "etkdg_stage_stereochem_checks.h"
 #include "etkdg_stage_update_conformers.h"
+#include "host_vector.h"
 #include "nvtx.h"
 #include "openmp_helpers.h"
 
@@ -61,7 +61,8 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
                     int                                         maxIterations,
                     bool                                        debugMode,
                     std::vector<std::vector<int16_t>>*          failures,
-                    const BatchHardwareOptions&                 hardwareOptions) {
+                    const BatchHardwareOptions&                 hardwareOptions,
+                    BfgsBackend                                 backend) {
   const ScopedNvtxRange fullRange("EmbedMolecules");
   if (!params.useRandomCoords) {
     throw std::runtime_error("ETKDG requires useRandomCoords to be true. Please set it in the EmbedParameters.");
@@ -81,11 +82,6 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
     hardwareOptions.preprocessingThreads == -1 ? omp_get_max_threads() : hardwareOptions.preprocessingThreads;
   const int batchSize = hardwareOptions.batchSize == -1 ? 500 : hardwareOptions.batchSize;
 
-  // Validate batchesPerGpu
-  if (batchesPerGpu > numThreads) {
-    throw std::invalid_argument("batchesPerGpu (" + std::to_string(batchesPerGpu) + ") cannot exceed numThreads (" +
-                                std::to_string(numThreads) + ")");
-  }
   if (batchesPerGpu <= 0) {
     throw std::invalid_argument("batchesPerGpu must be greater than 0");
   }
@@ -191,6 +187,22 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
 #pragma omp parallel num_threads(numThreadsGpuBatching) default(shared)
   {
     try {
+      cudaStream_t     streamPtr = streamsPerThread[omp_get_thread_num()].stream();
+      const int        deviceId  = devicesPerThread[omp_get_thread_num()];
+      const WithDevice dev(deviceId);
+      auto             minimizer = std::make_unique<BfgsBatchMinimizer>(4,  // dataDim for ETKDG (4D distance geometry)
+                                                            DebugLevel::NONE,
+                                                            true,  // scaleGrads
+                                                            streamPtr,
+                                                            backend);
+      std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::EnergyForceContribsHost>   dgCache;
+      std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::Energy3DForceContribsHost> etkCache;
+      // Pinned reusable buffers for common copies.
+      PinnedHostVector<double>                                                               positionsScratch;
+      PinnedHostVector<uint8_t>                                                              activeScratch;
+      PinnedHostVector<int16_t>                                                              failuresScratch;
+      detail::ETKDGDriver                                                                    driver;
+
       while (!workComplete.load()) {
         // Dispatch work for this thread
         std::vector<int> molIds = Scheduler.dispatch(effectiveBatchSize);
@@ -204,9 +216,6 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
           }
           break;
         }
-        cudaStream_t     streamPtr = streamsPerThread[omp_get_thread_num()].stream();
-        const int        deviceId  = devicesPerThread[omp_get_thread_num()];
-        const WithDevice dev(deviceId);
 
         // Create batch of molecules and eargs for the dispatched work
         std::vector<RDKit::ROMol*>     batchMolsWithConfs;
@@ -221,10 +230,10 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
           batchEargs.push_back(eargs[molId]);
         }
 
-        detail::ETKDGContext context;
-        detail::setStreams(context, streamPtr);
+        auto context = std::make_unique<detail::ETKDGContext>(streamPtr);
+        detail::setStreams(*context, streamPtr);
         // Treat each conformer attempt as an individual molecule (confsPerMolecule = 1)
-        detail::initETKDGContext(batchMolsWithConfs, context, 1);
+        detail::initETKDGContext(batchMolsWithConfs, *context, 1);
 
         ScopedNvtxRange                                  stageSetupRange("Setup ETKDG Stages");
         // Create stages in order
@@ -235,59 +244,84 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
 
         // Create coordinate generation stage based on parameter
         // FIXME: arguments still involve useRDKitcoordgen.
-        stages.push_back(
-          std::make_unique<detail::ETKDGCoordGenRDKitStage>(paramsCopy, constMolPtrs, batchEargs, streamPtr));
+        stages.push_back(std::make_unique<detail::ETKDGCoordGenRDKitStage>(paramsCopy,
+                                                                           constMolPtrs,
+                                                                           batchEargs,
+                                                                           positionsScratch,
+                                                                           activeScratch,
+                                                                           streamPtr));
 
         // First minimize, then first round of chiral checks.
-        stages.push_back(
-          std::make_unique<detail::FirstMinimizeStage>(constMolPtrs, batchEargs, paramsCopy, context, streamPtr));
-        stages.push_back(std::make_unique<detail::ETKDGTetrahedralCheckStage>(context, batchEargs, dim, streamPtr));
+        auto                           firstMinStage    = std::make_unique<detail::DistGeomMinimizeStage>(constMolPtrs,
+                                                                             batchEargs,
+                                                                             paramsCopy,
+                                                                             *context,
+                                                                             *minimizer,
+                                                                             1.0,
+                                                                             0.1,
+                                                                             400,
+                                                                             true,
+                                                                             "First Minimization",
+                                                                             streamPtr,
+                                                                             &dgCache);
+        detail::DistGeomMinimizeStage* firstMinStagePtr = firstMinStage.get();
+        stages.push_back(std::move(firstMinStage));
+        stages.push_back(std::make_unique<detail::ETKDGTetrahedralCheckStage>(*context, batchEargs, dim, streamPtr));
 
         // Only add first chiral check if enforceChirality is enabled
         detail::ETKDGFirstChiralCenterCheckStage* chiralStagePtr = nullptr;
         if (paramsCopy.enforceChirality) {
           auto chiralStage =
-            std::make_unique<detail::ETKDGFirstChiralCenterCheckStage>(context, batchEargs, dim, streamPtr);
+            std::make_unique<detail::ETKDGFirstChiralCenterCheckStage>(*context, batchEargs, dim, streamPtr);
           chiralStagePtr = chiralStage.get();
           stages.push_back(std::move(chiralStage));
         }
 
         // Second + 3rd minimize, then double bond checks.
-        stages.push_back(
-          std::make_unique<detail::FourthDimMinimizeStage>(constMolPtrs, batchEargs, paramsCopy, context, streamPtr));
-
+        stages.push_back(std::make_unique<detail::DistGeomMinimizeWrapperStage>(*firstMinStagePtr,
+                                                                                0.2,
+                                                                                1.0,
+                                                                                200,
+                                                                                false,
+                                                                                "Fourth Dimension Minimization"));
         // (ET)(K)DG: Add experimental torsion minimization stage only if needed to match RDKit's logic.
         if (paramsCopy.useExpTorsionAnglePrefs || paramsCopy.useBasicKnowledge) {
-          stages.push_back(
-            std::make_unique<detail::ETKMinimizationStage>(constMolPtrs, batchEargs, paramsCopy, context, streamPtr));
+          stages.push_back(std::make_unique<detail::ETKMinimizationStage>(constMolPtrs,
+                                                                          batchEargs,
+                                                                          paramsCopy,
+                                                                          *context,
+                                                                          *minimizer,
+                                                                          streamPtr,
+                                                                          &etkCache));
         }
 
         // Final chiral and stereochem checks
         stages.push_back(
-          std::make_unique<detail::ETKDGDoubleBondGeometryCheckStage>(context, batchEargs, dim, streamPtr));
+          std::make_unique<detail::ETKDGDoubleBondGeometryCheckStage>(*context, batchEargs, dim, streamPtr));
 
         if (paramsCopy.enforceChirality) {
           // This is a pass-through, don't need to set the stream
           stages.push_back(std::make_unique<detail::ETKDGFinalChiralCenterCheckStage>(*chiralStagePtr));
           stages.push_back(
-            std::make_unique<detail::ETKDGChiralDistMatrixCheckStage>(context, batchEargs, dim, streamPtr));
+            std::make_unique<detail::ETKDGChiralDistMatrixCheckStage>(*context, batchEargs, dim, streamPtr));
           stages.push_back(
-            std::make_unique<detail::ETKDGChiralCenterVolumeCheckStage>(context, batchEargs, dim, streamPtr));
+            std::make_unique<detail::ETKDGChiralCenterVolumeCheckStage>(*context, batchEargs, dim, streamPtr));
           stages.push_back(
-            std::make_unique<detail::ETKDGDoubleBondStereoCheckStage>(context, batchEargs, dim, streamPtr));
+            std::make_unique<detail::ETKDGDoubleBondStereoCheckStage>(*context, batchEargs, dim, streamPtr));
         }
 
         // Writeback
         stages.push_back(std::make_unique<detail::ETKDGUpdateConformersStage>(batchMolsWithConfs,
                                                                               batchEargs,
                                                                               conformers,
+                                                                              positionsScratch,
+                                                                              activeScratch,
                                                                               streamPtr,
                                                                               &conformer_mutex,
                                                                               confsPerMolecule));
 
         // Create and run driver
-        auto                context_ptr = std::make_unique<detail::ETKDGContext>(std::move(context));
-        detail::ETKDGDriver driver(std::move(context_ptr), std::move(stages), debugMode, streamPtr, &allFinished);
+        driver.reset(std::move(context), std::move(stages), debugMode, streamPtr, &allFinished);
         stageSetupRange.pop();
 
         ScopedNvtxRange runRange("ETKDG execute");
@@ -299,7 +333,7 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
 
         // Handle failures if requested
         if (failures != nullptr) {
-          auto batchFailures = driver.getFailures();
+          auto batchFailures = driver.getFailures(failuresScratch);
 
           const std::lock_guard<std::mutex> failureLock(failure_mutex);
           // Initialize failures structure on first batch (outer vector is per stage, inner per conformer)

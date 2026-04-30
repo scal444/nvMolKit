@@ -15,36 +15,14 @@
 
 import os
 
+from setuptools import find_packages
 from skbuild import setup
 
 pyroot = os.getenv("CONDA_PREFIX")
 
 cmake_extra_args = []
 if pyroot:
-    cmake_extra_args.append(
-        f"-DCMAKE_PREFIX_PATH={pyroot}"
-    )
-
-# Handle CUDA architecture settings
-# If NVMOLKIT_CUDA_TARGET_MODE is set, use that. If set to default, also search for CMAKE_CUDA_ARCHITECTURES
-# If not set, search for CMAKE_CUDA_ARCHITECTURES, and if not found, set to full mode.
-cuda_target_mode = os.getenv("NVMOLKIT_CUDA_TARGET_MODE")
-custom_arch = os.getenv("CMAKE_CUDA_ARCHITECTURES")
-if cuda_target_mode:
-    print("CUDA target mode is set via env var to ", cuda_target_mode)
-    cmake_extra_args.append(f"-DNVMOLKIT_CUDA_TARGET_MODE={cuda_target_mode}")
-    if cuda_target_mode == "default" and custom_arch is not None:
-        print("With default mode, also setting custom arch from CMAKE_CUDA_ARCHITECTURES to ", custom_arch)
-        cmake_extra_args.append(f"-DCMAKE_CUDA_ARCHITECTURES={custom_arch}")
-else:
-    if custom_arch is not None:
-        print("CUDA target mode not set, but CMAKE_CUDA_ARCHITECTURES is set to ", custom_arch)
-        cmake_extra_args.append(f"-DCMAKE_CUDA_ARCHITECTURES={custom_arch}")
-        cmake_extra_args.append("-DNVMOLKIT_CUDA_TARGET_MODE=default")
-    else:
-        print("CUDA target mode and CMAKE_CUDA_ARCHITECTURES not set, defaulting to full mode")
-        cmake_extra_args.append("-DNVMOLKIT_CUDA_TARGET_MODE=full")
-
+    cmake_extra_args.append(f"-DCMAKE_PREFIX_PATH={pyroot}")
 
 # Detect if we're doing an install against pip rdkit
 nvmolkit_build_against_pip = os.getenv("NVMOLKIT_BUILD_AGAINST_PIP_RDKIT")
@@ -58,16 +36,17 @@ if nvmolkit_build_against_pip:
     NVMOLKIT_BUILD_AGAINST_PIP_BOOSTINCLUDEDIR = os.getenv("NVMOLKIT_BUILD_AGAINST_PIP_BOOSTINCLUDEDIR")
     if not NVMOLKIT_BUILD_AGAINST_PIP_BOOSTINCLUDEDIR:
         raise ValueError("NVMOLKIT_BUILD_AGAINST_PIP_BOOSTINCLUDEDIR must be set when building against pip rdkit")
-    cmake_extra_args.extend([
-        "-DNVMOLKIT_BUILD_AGAINST_PIP_RDKIT=ON",
-        f"-DNVMOLKIT_BUILD_AGAINST_PIP_LIBDIR={NVMOLKIT_BUILD_AGAINST_PIP_LIBDIR}",
-        f"-DNVMOLKIT_BUILD_AGAINST_PIP_INCDIR={NVMOLKIT_BUILD_AGAINST_PIP_INCDIR}",
-        f"-DNVMOLKIT_BUILD_AGAINST_PIP_BOOSTINCLUDEDIR={NVMOLKIT_BUILD_AGAINST_PIP_BOOSTINCLUDEDIR}"
-    ])
+    cmake_extra_args.extend(
+        [
+            "-DNVMOLKIT_BUILD_AGAINST_PIP_RDKIT=ON",
+            f"-DNVMOLKIT_BUILD_AGAINST_PIP_LIBDIR={NVMOLKIT_BUILD_AGAINST_PIP_LIBDIR}",
+            f"-DNVMOLKIT_BUILD_AGAINST_PIP_INCDIR={NVMOLKIT_BUILD_AGAINST_PIP_INCDIR}",
+            f"-DNVMOLKIT_BUILD_AGAINST_PIP_BOOSTINCLUDEDIR={NVMOLKIT_BUILD_AGAINST_PIP_BOOSTINCLUDEDIR}",
+        ]
+    )
 
 
 if __name__ == "__main__":
-
     setup(
         cmake_languages=("CXX", "CUDA"),
         cmake_args=[
@@ -75,9 +54,12 @@ if __name__ == "__main__":
             "-DNVMOLKIT_BUILD_PYTHON_BINDINGS=ON",
             "-DNVMOLKIT_BUILD_TESTS=OFF",
             "-DNVMOLKIT_BUILD_BENCHMARKS=OFF",
-            #"-DBoost_NO_BOOST_CMAKE=TRUE"
-        ] + cmake_extra_args,
-        packages=["nvmolkit"],
+            f"-DNVMOLKIT_CUDA_TARGET_MODE={os.getenv('NVMOLKIT_CUDA_TARGET_MODE', 'full')}",
+            f"-DCMAKE_BUILD_TYPE={os.getenv('CMAKE_BUILD_TYPE', 'Release')}",
+            # "-DBoost_NO_BOOST_CMAKE=TRUE"
+        ]
+        + cmake_extra_args,
+        packages=find_packages(include=["nvmolkit", "nvmolkit.*"], exclude=["nvmolkit.tests*"]),
         exclude_package_data={"nvmolkit": ["tests/*", "*.cpp"]},
         package_data={"nvmolkit": ["**/*.csv"]},
         cmake_install_dir="nvmolkit",

@@ -16,6 +16,7 @@
 add_subdirectory(data_structures)
 add_subdirectory(forcefields)
 add_subdirectory(minimizer)
+add_subdirectory(substruct)
 add_subdirectory(testutils)
 add_subdirectory(utils)
 
@@ -23,24 +24,31 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/versions.h.in
                ${CMAKE_CURRENT_BINARY_DIR}/versions.h @ONLY)
 
 add_library(similarity_kernels similarity_kernels.cu)
-target_link_libraries(similarity_kernels PRIVATE cuda_error_check device)
+target_link_libraries(similarity_kernels PRIVATE cuda_error_check device
+                                                 cccl_interface)
 
 target_include_directories(similarity_kernels
                            PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_include_directories(similarity_kernels PUBLIC ${Boost_INCLUDE_DIRS})
+target_include_directories(similarity_kernels SYSTEM
+                           PRIVATE ${Boost_INCLUDE_DIRS})
 add_library(Similarity similarity.cpp)
 
 target_link_libraries(
   Similarity
   PUBLIC CUDA::cudart device_vector
-  PRIVATE similarity_kernels ${RDKit_LIBS} device_vector device openmp_helpers
-          OpenMP::OpenMP_CXX)
+  PRIVATE similarity_kernels
+          ${RDKit_LIBS}
+          device_vector
+          device
+          openmp_helpers
+          OpenMP::OpenMP_CXX
+          cccl_interface)
 target_include_directories(Similarity PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(Similarity SYSTEM PRIVATE ${Boost_INCLUDE_DIRS})
 add_library(morganFingerprintKernels morgan_fingerprint_kernels.cu)
 target_link_libraries(
   morganFingerprintKernels
-  PRIVATE cuda_error_check flatBitVect ${RDKit_LIBS}
+  PRIVATE cuda_error_check flatBitVect ${RDKit_LIBS} cccl_interface
   PUBLIC device_vector flatBitVect cuda_error_check)
 target_include_directories(morganFingerprintKernels
                            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
@@ -82,24 +90,27 @@ target_include_directories(etkdg_impl PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_library(
   etkdg_stages
-  etkdg_stage_coordgen.cu etkdg_stage_firstminimization.cu
-  etkdg_stage_fourthdimminimization.cu etkdg_stage_update_conformers.cu
-  etkdg_stage_stereochem_checks.cu etkdg_stage_etk_minimization.cu)
+  etkdg_stage_coordgen.cu etkdg_stage_distgeom_minimize.cu
+  etkdg_stage_update_conformers.cu etkdg_stage_stereochem_checks.cu
+  etkdg_stage_etk_minimization.cu)
 
 target_link_libraries(
   etkdg_stages
+  PUBLIC bfgs
   PRIVATE device_vector
           ${RDKit_LIBS}
+          dg_batched_forcefield
+          etk_batched_forcefield
           ff_kernel_utils
           dist_geom
           rdkit_dist_geom_flattened
-          etkdg
-          bfgs_distgeom)
+          etkdg)
 target_include_directories(etkdg_stages PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
 add_library(etkdg etkdg.cpp)
 target_link_libraries(
   etkdg
+  PUBLIC bfgs
   PRIVATE ${RDKit_LIBS}
           conformer_pruning
           device_vector
@@ -111,3 +122,27 @@ target_link_libraries(
           openmp_helpers
           OpenMP::OpenMP_CXX)
 target_include_directories(etkdg PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_library(butina butina.cu)
+target_link_libraries(
+  butina
+  PUBLIC device_vector
+  PRIVATE cub_helpers nvtx)
+target_include_directories(butina PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_library(conformer_rmsd conformer_rmsd.cu)
+target_link_libraries(
+  conformer_rmsd
+  PUBLIC device_vector
+  PRIVATE cuda_error_check)
+target_include_directories(conformer_rmsd PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_library(conformer_rmsd_mol conformer_rmsd_mol.cpp)
+target_link_libraries(
+  conformer_rmsd_mol
+  PUBLIC device_vector conformer_rmsd
+  PRIVATE ${RDKit_LIBS})
+target_include_directories(conformer_rmsd_mol
+                           PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+add_subdirectory(tfd)

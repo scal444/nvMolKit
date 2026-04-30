@@ -19,13 +19,19 @@ set(CMAKE_SHARED_MODULE_PREFIX "")
 add_library(_DataStructs MODULE DataStructs.cpp)
 target_link_libraries(
   _DataStructs PUBLIC ${Boost_LIBRARIES} ${PYTHON_LIBRARIES} ${RDKit_LIBS}
-                      Similarity)
+                      Similarity device)
 target_include_directories(_DataStructs PRIVATE ${Python_INCLUDE_DIRS})
 installpythontarget(_DataStructs ./)
 
 add_library(_Fingerprints MODULE fingerprints.cpp)
-target_link_libraries(_Fingerprints ${Boost_LIBRARIES} ${PYTHON_LIBRARIES}
-                      ${RDKit_LIBS} morganFingerprint CUDA::cudart)
+target_link_libraries(
+  _Fingerprints
+  ${Boost_LIBRARIES}
+  ${PYTHON_LIBRARIES}
+  ${RDKit_LIBS}
+  morganFingerprint
+  device
+  CUDA::cudart)
 target_include_directories(_Fingerprints PRIVATE ${Python_INCLUDE_DIRS})
 installpythontarget(_Fingerprints ./)
 
@@ -57,6 +63,38 @@ target_include_directories(_mmffOptimization SYSTEM
                            PUBLIC ${Boost_INCLUDE_DIRS})
 installpythontarget(_mmffOptimization ./)
 
+add_library(_uffOptimization MODULE uffOptimization.cpp)
+target_link_libraries(_uffOptimization PUBLIC ${Boost_LIBRARIES}
+                                              ${PYTHON_LIBRARIES})
+target_link_libraries(_uffOptimization PRIVATE ${RDKit_LIBS} bfgs_uff ff_utils)
+target_include_directories(
+  _uffOptimization PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/utils
+                          ${Python_INCLUDE_DIRS})
+target_include_directories(_uffOptimization SYSTEM PUBLIC ${Boost_INCLUDE_DIRS})
+installpythontarget(_uffOptimization ./)
+
+add_library(_batchedForcefield MODULE batchedForcefield.cpp)
+target_link_libraries(_batchedForcefield PUBLIC ${Boost_LIBRARIES}
+                                                ${PYTHON_LIBRARIES})
+target_link_libraries(
+  _batchedForcefield
+  PRIVATE ${RDKit_LIBS}
+          bfgs_mmff
+          bfgs_uff
+          mmff_batched_forcefield
+          uff_batched_forcefield
+          batched_forcefield
+          rdkit_mmff_flattened
+          rdkit_uff_flattened
+          device_vector
+          ff_utils)
+target_include_directories(
+  _batchedForcefield PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/utils
+                            ${Python_INCLUDE_DIRS})
+target_include_directories(_batchedForcefield SYSTEM
+                           PUBLIC ${Boost_INCLUDE_DIRS})
+installpythontarget(_batchedForcefield ./)
+
 add_library(_embedMolecules MODULE embedMolecules.cpp)
 target_link_libraries(_embedMolecules PUBLIC ${Boost_LIBRARIES}
                                              ${PYTHON_LIBRARIES} device_vector)
@@ -66,3 +104,41 @@ target_include_directories(
                          ${Python_INCLUDE_DIRS})
 target_include_directories(_embedMolecules SYSTEM PUBLIC ${Boost_INCLUDE_DIRS})
 installpythontarget(_embedMolecules ./)
+
+add_library(_clustering MODULE clustering.cpp)
+target_include_directories(
+  _clustering PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/utils ${Boost_INCLUDE_DIRS}
+                     ${Python_INCLUDE_DIRS})
+target_link_libraries(_clustering PUBLIC ${Boost_LIBRARIES} ${PYTHON_LIBRARIES}
+                                         device_vector butina device)
+installpythontarget(_clustering ./)
+
+add_library(_conformerRmsd MODULE conformerRmsd.cpp)
+target_include_directories(
+  _conformerRmsd PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/utils ${Boost_INCLUDE_DIRS}
+                        ${Python_INCLUDE_DIRS})
+target_link_libraries(
+  _conformerRmsd PUBLIC ${Boost_LIBRARIES} ${PYTHON_LIBRARIES} device_vector
+                        conformer_rmsd_mol device)
+target_link_libraries(_conformerRmsd PRIVATE ${RDKit_LIBS})
+installpythontarget(_conformerRmsd ./)
+
+add_library(_substructure MODULE substructure.cpp)
+target_include_directories(
+  _substructure
+  PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/utils ${Boost_INCLUDE_DIRS}
+         ${Python_INCLUDE_DIRS} ${PROJECT_SOURCE_DIR}/src/substruct)
+target_link_libraries(_substructure PUBLIC ${Boost_LIBRARIES}
+                                           ${PYTHON_LIBRARIES})
+target_link_libraries(_substructure PRIVATE ${RDKit_LIBS} substructure_search
+                                            pinned_host_allocator)
+installpythontarget(_substructure ./)
+
+add_library(_TFD MODULE tfd.cpp)
+target_include_directories(
+  _TFD PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/utils ${Boost_INCLUDE_DIRS}
+              ${Python_INCLUDE_DIRS})
+target_link_libraries(_TFD PUBLIC ${Boost_LIBRARIES} ${PYTHON_LIBRARIES}
+                                  device_vector)
+target_link_libraries(_TFD PRIVATE ${RDKit_LIBS} tfd_gpu CUDA::cudart)
+installpythontarget(_TFD ./)

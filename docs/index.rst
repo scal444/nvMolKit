@@ -16,6 +16,7 @@ An example using nvMolKit to compute Morgan fingerprints in parallel on the GPU 
 
 .. code-block:: python
 
+    import torch
     # RDKit API as common base
     from rdkit import Chem
     mols = [Chem.MolFromSmiles(smi) for smi in ['C1CCCCC1', 'C1CCCCC2CCCCC12', "COO"]]
@@ -67,7 +68,29 @@ nvMolKit is open source under the Apache License, and is available on `GitHub <h
 Installation
 ------------
 
-See installation instructions in the `GitHub README <https://github.com/NVIDIA-Digital-Bio/nvMolKit>`_.
+.. important::
+
+   nvMolKit requires an NVIDIA GPU with compute capability 7.0 (V100) or higher. You can check your GPU's compute capability at the `NVIDIA CUDA GPUs page <https://developer.nvidia.com/cuda-gpus>`_.
+   A CUDA Driver compatible with CUDA 12.6 or later is also required (driver version >=560.28). Some degree of backward compatibility may be available; for details, see the `CUDA compatibility guide <https://docs.nvidia.com/deploy/cuda-compatibility/index.html>`_.
+
+Conda Forge
+^^^^^^^^^^^
+
+Conda is the recommended way to install nvMolKit, in line with RDKit's recommended installation practice. First, ensure
+you have a conda-based environment manager installed and activated, such as `Miniconda <https://docs.conda.io/en/latest/miniconda.html>`_ or `Miniforge <https://conda-forge.org/download/>`_.
+
+nvMolKit v0.4.0 supports RDKit 2024.09.6 through 2025.09.5.
+
+To install with conda, run::
+
+    conda install -c conda-forge nvmolkit
+
+
+
+From Source
+^^^^^^^^^^^
+
+nvMolKit can be installed from source using a C++ and CUDA compiler. See installation instructions in the `GitHub README <https://github.com/NVIDIA-Digital-Bio/nvMolKit>`_.
 
 
 Features
@@ -82,22 +105,28 @@ nvMolKit currently supports the following features:
 * **Molecular Similarity**: Fast GPU-accelerated similarity calculations (see :doc:`similarity`)
     * Tanimoto and cosine Similarity
     * Supports all-to-all comparisons between fingerprints in a batch or between two batches of fingerprints
+    * Supports compute in chunks to limit GPU memory usage
 
 * **ETKDG Conformer Generation**: GPU-accelerated 3D conformer generation using Experimental-Torsion Knowledge-based Distance Geometry
     * Batch processing of multiple molecules with multiple conformers per molecule
     * Supports multiple GPUs
-    * Does not support all ETKDG options. Defaults in ETKDGv3() are supported with 1 exception.
-        * Requires ``useRandomCoords=True``
-        * Does not yet support coordMap or fixed atoms
-        * Does not yet support conformer deduplication
-    * Maximum of 256 atoms per molecule
+    * Does not support all RDKit `EmbedParameters` options. Defaults in ETKDGv3() are supported with a few exceptions (see API documentation)
 
-* **MMFF Geometry Relaxation**: GPU-accelerated molecular mechanics force field optimization
-    * MMFF94 force field implementation for conformer optimization
+* **Geometry Relaxation**: GPU-accelerated force field optimization of conformers
+    * MMFF94 and UFF force fields
     * Batch optimization of multiple molecules and conformers
     * Supports multiple GPUs
-    * Maximum of 256 atoms per molecule
 
+* **Butina clustering**: GPU-accelerated clustering from a distance matrix via the Taylor-Butina method
+
+* **Substructure Search**: GPU-accelerated substructure matching against batches of molecules
+    * Supports SMILES and recursive SMARTS-based query molecules via RDKit
+    * Does not yet support chirality-aware matching, enhanced stereochemistry, or other advanced RDKit ``SubstructMatchParameters`` options
+
+* **Conformer RMSD**: GPU-accelerated pairwise RMSD matrix computation for conformer ensembles
+
+* **Torsion Fingerprint Deviation (TFD)**: GPU-accelerated TFD computation for comparing conformer geometry
+    * Batch processing of multiple molecules with all-pairs conformer comparison
 
 .. _async-results:
 
@@ -131,7 +160,8 @@ The "asynchronous" nature of nvMolKit operations allows you to queue multiple GP
 You can then choose when to synchronize with the GPU and retrieve results or launch additional operations. Numpy conversions involve
 synchronizing with the GPU before copy to the GPU. For torch operations, synchronization can be achieved at any time via `torch.cuda.synchronize()`.
 
-NOTE: Support for streams is not yet implemented, all operations are executed on the default stream.
+Most nvMolKit operations accept an optional ``stream`` parameter (a ``torch.cuda.Stream``) to control which CUDA stream
+the operation runs on. If not specified, the current torch stream is used.
 
 
 Hardware targeting
@@ -179,6 +209,7 @@ Guides
    :maxdepth: 1
 
    similarity
+   forcefield
 
 
 API Reference

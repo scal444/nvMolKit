@@ -20,6 +20,7 @@
 
 #include "dist_geom.h"
 #include "etkdg_impl.h"
+#include "minimizer/bfgs_minimize.h"
 
 using ::nvMolKit::detail::EmbedArgs;
 using ::nvMolKit::detail::ETKDGContext;
@@ -30,23 +31,29 @@ namespace detail {
 
 class ETKMinimizationStage final : public ETKDGStage {
  public:
-  ETKMinimizationStage(const std::vector<const RDKit::ROMol*>&     mols,
-                       const std::vector<EmbedArgs>&               eargs,
-                       const RDKit::DGeomHelpers::EmbedParameters& embedParam,
-                       const ETKDGContext&                         ctx,
-                       cudaStream_t                                stream = nullptr);
+  ETKMinimizationStage(
+    const std::vector<const RDKit::ROMol*>&                                                 mols,
+    const std::vector<EmbedArgs>&                                                           eargs,
+    const RDKit::DGeomHelpers::EmbedParameters&                                             embedParam,
+    const ETKDGContext&                                                                     ctx,
+    BfgsBatchMinimizer&                                                                     minimizer,
+    cudaStream_t                                                                            stream = nullptr,
+    std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::Energy3DForceContribsHost>* cache  = nullptr);
 
   void        execute(ETKDGContext& ctx) override;
   std::string name() const override { return "ETK 3D Minimization"; }
 
  private:
   //! Re-sets the bounds for distance constraints based on the current positions.
-  void setReferenceValues(const ETKDGContext& ctx);
+  void setReferenceValues(const ETKDGContext& ctx, const DistGeom::Energy3DForceContribsDevice& contribs);
 
-  nvMolKit::DistGeom::BatchedMolecular3DDeviceBuffers molSystemDevice;
-  nvMolKit::DistGeom::BatchedMolecularSystem3DHost    molSystemHost;
-  const RDKit::DGeomHelpers::EmbedParameters&         embedParam_;
-  cudaStream_t                                        stream_;
+  BatchedForcefieldMetadata                        metadata_;
+  nvMolKit::DistGeom::BatchedMolecularSystem3DHost molSystemHost;
+  AsyncDeviceVector<double>                        grad_;
+  AsyncDeviceVector<double>                        energyOuts_;
+  const RDKit::DGeomHelpers::EmbedParameters&      embedParam_;
+  BfgsBatchMinimizer&                              minimizer_;
+  cudaStream_t                                     stream_;
 };
 
 }  // namespace detail

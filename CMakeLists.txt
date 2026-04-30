@@ -10,21 +10,53 @@
 # "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 # specific language governing permissions and limitations under the License.
 
-cmake_minimum_required(VERSION 3.26)
+cmake_minimum_required(VERSION 3.30)
+
+# Use the FindBoost replacement provided by the upstream Boost project.
+cmake_policy(SET CMP0167 NEW)
 
 project(
   nvmolkit
-  VERSION 0.0.1
+  VERSION 0.4.0
   LANGUAGES CXX CUDA)
-set(CMAKE_CUDA_STANDARD 17)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CUDA_STANDARD 20)
+set(CMAKE_CXX_STANDARD 20)
 find_package(CUDAToolkit REQUIRED)
+
+find_package(CCCL HINTS ${CUDAToolkit_LIBRARY_DIR}/cmake/cccl QUIET)
+
+# Create the cccl_interface library
+add_library(cccl_interface INTERFACE)
+
+if(CCCL_FOUND AND CCCL_VERSION VERSION_GREATER_EQUAL "3.0.0")
+  message(STATUS "CCCL ${CCCL_VERSION} found, using CCCL::CCCL")
+  target_link_libraries(cccl_interface INTERFACE CCCL::CCCL)
+elseif(CCCL_FOUND)
+  message(STATUS "CCCL ${CCCL_VERSION} found but < 3.0.0, using bundled CUDA headers")
+  if(CMAKE_PREFIX_PATH)
+    message(STATUS "CMAKE_PREFIX_PATH is set - CCCL headers may be used from PREFIX path")
+  endif()
+else()
+  message(STATUS "CCCL not found, using bundled CUDA headers")
+endif()
 
 set(CMAKE_MODULE_PATH "${CMAKE_MODULE_PATH};${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-set(CMAKE_BUILD_TYPE
-    ${CMAKE_BUILD_TYPE}
-    CACHE STRING "Choose type of build, options are: Debug RelWithDebInfo Release asan tsan ubsan" FORCE)
+get_property(_nvmolkit_is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(NOT _nvmolkit_is_multi_config AND NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE
+      "RelWithDebInfo"
+      CACHE STRING "Choose type of build, options are: Debug RelWithDebInfo Release asan tsan ubsan")
+  set_property(
+    CACHE CMAKE_BUILD_TYPE
+    PROPERTY STRINGS
+             Debug
+             RelWithDebInfo
+             Release
+             asan
+             tsan
+             ubsan)
+endif()
 
 # --------------------------------
 # Global compilation features

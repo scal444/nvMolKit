@@ -13,9 +13,6 @@
 # License for the specific language governing permissions and limitations under
 # the License.
 
-# Suppress deprecation warning using old find boost method
-cmake_policy(SET CMP0167 NEW)
-
 if(NOT NVMOLKIT_BUILD_AGAINST_PIP_RDKIT)
   find_package(RDKit REQUIRED)
   set(RDKit_LIBS
@@ -107,6 +104,7 @@ else()
                                   ${NVMOLKIT_BUILD_AGAINST_PIP_BOOSTINCLUDEDIR})
     list(APPEND RDKit_LIBS ${libname})
   endforeach()
-  set(BOOST_INCLUDE_DIRS ${NVMOLKIT_BUILD_AGAINST_PIP_BOOSTINCLUDEDIR})
+  # cmake-lint: disable=C0103
+  set(Boost_INCLUDE_DIRS ${NVMOLKIT_BUILD_AGAINST_PIP_BOOSTINCLUDEDIR})
   message(STATUS "Using boost libs from pip RDKit")
 endif(NOT NVMOLKIT_BUILD_AGAINST_PIP_RDKIT)

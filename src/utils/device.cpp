@@ -18,6 +18,7 @@
 #include <cuda_runtime.h>
 
 #include "cuda_error_check.h"
+#include "nvtx.h"
 
 namespace nvMolKit {
 
@@ -36,6 +37,20 @@ WithDevice::~WithDevice() {
   cudaCheckErrorNoThrow(cudaSetDevice(original_device_id_));
 }
 
+std::optional<cudaStream_t> acquireExternalStream(std::uintptr_t streamPtr) {
+  auto stream = reinterpret_cast<cudaStream_t>(streamPtr);
+  if (streamPtr == 0) {
+    return stream;
+  }
+  cudaError_t err = cudaStreamQuery(stream);
+  if (err == cudaSuccess || err == cudaErrorNotReady) {
+    return stream;
+  }
+  // Clear the sticky error state
+  cudaGetLastError();
+  return std::nullopt;
+}
+
 size_t getDeviceFreeMemory() {
   size_t free  = 0;
   size_t total = 0;
@@ -43,8 +58,11 @@ size_t getDeviceFreeMemory() {
   return free;
 }
 
-ScopedStream::ScopedStream() {
+ScopedStream::ScopedStream(const char* name) {
   cudaCheckError(cudaStreamCreateWithFlags(&original_stream_, cudaStreamNonBlocking));
+  if (name != nullptr) {
+    nvtxNameCudaStreamA(original_stream_, name);
+  }
 }
 
 ScopedStream::~ScopedStream() noexcept {
@@ -57,6 +75,40 @@ ScopedStream::~ScopedStream() noexcept {
 
 ScopedStream::ScopedStream(ScopedStream&& other) noexcept : original_stream_(other.original_stream_) {
   other.original_stream_ = nullptr;
+}
+
+ScopedStreamWithPriority::ScopedStreamWithPriority(int priority, const char* name) {
+  int leastPriority    = 0;
+  int greatestPriority = 0;
+  cudaCheckError(cudaDeviceGetStreamPriorityRange(&leastPriority, &greatestPriority));
+
+  const int clampedPriority = std::max(greatestPriority, std::min(leastPriority, priority));
+  cudaCheckError(cudaStreamCreateWithPriority(&stream_, cudaStreamNonBlocking, clampedPriority));
+  if (name != nullptr) {
+    nvtxNameCudaStreamA(stream_, name);
+  }
+}
+
+ScopedStreamWithPriority::~ScopedStreamWithPriority() noexcept {
+  if (stream_ == nullptr) {
+    return;
+  }
+  cudaCheckErrorNoThrow(cudaStreamSynchronize(stream_));
+  cudaCheckErrorNoThrow(cudaStreamDestroy(stream_));
+}
+
+ScopedStreamWithPriority::ScopedStreamWithPriority(ScopedStreamWithPriority&& other) noexcept : stream_(other.stream_) {
+  other.stream_ = nullptr;
+}
+
+ScopedStreamWithPriority& ScopedStreamWithPriority::operator=(ScopedStreamWithPriority&& other) noexcept {
+  if (stream_ != nullptr && stream_ != other.stream_) {
+    cudaCheckErrorNoThrow(cudaStreamSynchronize(stream_));
+    cudaCheckErrorNoThrow(cudaStreamDestroy(stream_));
+  }
+  stream_       = other.stream_;
+  other.stream_ = nullptr;
+  return *this;
 }
 
 ScopedCudaEvent::ScopedCudaEvent() {

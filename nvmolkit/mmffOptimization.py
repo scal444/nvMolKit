@@ -19,25 +19,29 @@ This module provides GPU-accelerated implementations of MMFF (Molecular Mechanic
 optimization for multiple molecules and conformers using CUDA and OpenMP.
 """
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
+
+from rdkit.Chem import AllChem
 
 if TYPE_CHECKING:
     from rdkit.Chem import Mol
+    from rdkit.ForceField.rdForceField import MMFFMolProperties
 
-from nvmolkit.types import HardwareOptions
 from nvmolkit import _mmffOptimization
+from nvmolkit._mmff_bridge import default_rdkit_mmff_properties, make_internal_mmff_properties
+from nvmolkit.types import HardwareOptions
 
 
 def MMFFOptimizeMoleculesConfs(
     molecules: list["Mol"],
     maxIters: int = 200,
-    nonBondedThreshold: float = 100.0,
+    properties: "MMFFMolProperties | Sequence[MMFFMolProperties | None] | None" = None,
+    nonBondedThreshold: float | Sequence[float] = 100.0,
+    ignoreInterfragInteractions: bool | Sequence[bool] = True,
     hardwareOptions: HardwareOptions | None = None,
-    optimizer_backend: str | None = None,
-    optimizer_options: dict[str, object] | None = None,
-    fire_debug_output: list[dict[str, list[float]]] | None = None,
 ) -> list[list[float]]:
-    """Optimize conformers for multiple molecules using MMFF force field with selectable minimization backend.
+    """Optimize conformers for multiple molecules using MMFF force field with BFGS minimization.
 
     This function performs GPU-accelerated MMFF optimization on multiple molecules with
     multiple conformers each. It uses CUDA for GPU acceleration and OpenMP for CPU
@@ -47,13 +51,13 @@ def MMFFOptimizeMoleculesConfs(
         molecules: List of RDKit molecules to optimize. Each molecule should have
                   conformers already generated.
         maxIters: Maximum number of BFGS optimization iterations (default: 200)
-        nonBondedThreshold: Radius threshold for non-bonded interactions in Ångströms (default: 100.0)
-        hardwareOptions: Hardware tuning options for GPU execution (default: auto)
-        optimizer_backend: Minimizer backend to run, e.g. ``"BFGS"`` or ``"FIRE"`` (default: ``"BFGS"``)
-        optimizer_options: Backend-specific configuration dictionary. Only FIRE options are currently supported.
-        fire_debug_output: Optional list that will be populated with FIRE debug information when using the FIRE backend.
-            The populated structure is ``List[List[Dict[str, List[float]]]]`` keyed by ``"alphas"``, ``"dt"``,
-            ``"powers"``, and ``"energies"``.
+        properties: RDKit ``MMFFMolProperties`` object, a per-molecule sequence
+            of those objects, or ``None`` to use default MMFF94 settings.
+        nonBondedThreshold: Radius threshold used to exclude long-range
+            non-bonded interactions, either as a scalar or per-molecule sequence.
+        ignoreInterfragInteractions: If ``True``, omit non-bonded terms between
+            fragments. May also be provided as a per-molecule sequence.
+        hardwareOptions: Configures CPU and GPU batching, threading, and device selection. Will attempt to use reasonable defaults if not set.
 
     Returns:
         List of lists of energies, where each inner list contains the optimized energies
@@ -61,26 +65,37 @@ def MMFFOptimizeMoleculesConfs(
         molecule order and conformer iteration order.
 
     Raises:
-        ValueError: If any molecule in the input list is invalid
+        ValueError: If any molecules in the input list are None or lack MMFF atom types.
+            ``e.args[0]`` is a summary message, ``e.args[1]`` is a dict
+            with keys ``"none"`` (indices of None molecules) and ``"no_params"``
+            (indices of molecules lacking MMFF atom types). Example::
+
+                try:
+                    MMFFOptimizeMoleculesConfs(mols, ...)
+                except ValueError as e:
+                    failed = e.args[1]
+                    none_idx = failed["none"]
+                    no_params_idx = failed["no_params"]
         RuntimeError: If CUDA operations fail or optimization encounters errors
 
     Example:
         >>> from rdkit import Chem
         >>> from rdkit.Chem import rdDistGeom
-        >>> import nvmolkit.mmff as mmff
+        >>> from nvmolkit.mmffOptimization import MMFFOptimizeMoleculesConfs
+        >>> from nvmolkit.types import HardwareOptions
         >>>
         >>> # Load molecules and generate conformers
-        >>> mol1 = Chem.MolFromSmiles('CCO')
-        >>> mol2 = Chem.MolFromSmiles('CCC')
+        >>> mol1 = Chem.AddHs(Chem.MolFromSmiles('CCO'))
+        >>> mol2 = Chem.AddHs(Chem.MolFromSmiles('CCC'))
         >>> rdDistGeom.EmbedMultipleConfs(mol1, numConfs=5)
         >>> rdDistGeom.EmbedMultipleConfs(mol2, numConfs=3)
         >>>
-        >>> # Optimize with custom settings
-        >>> energies = mmff.MMFFOptimizeMoleculesConfs(
+        >>> # Set custom runtime performance options (optional)
+        >>> hardware_options = HardwareOptions(batchSize=200, batchesPerGpu=4)
+        >>> energies = MMFFOptimizeMoleculesConfs(
         ...     [mol1, mol2],
         ...     maxIters=500,
-        ...     numThreads=4,
-        ...     batchSize=32
+        ...     hardwareOptions=hardware_options
         ... )
         >>>
         >>> # energies[0] contains 5 energies for mol1's conformers
@@ -93,71 +108,56 @@ def MMFFOptimizeMoleculesConfs(
     if not molecules:
         return []
 
+    none_indices = []
+    no_params_indices = []
     for i, mol in enumerate(molecules):
         if mol is None:
-            raise ValueError(f"Molecule at index {i} is None")
+            none_indices.append(i)
+        elif not AllChem.MMFFHasAllMoleculeParams(mol):
+            no_params_indices.append(i)
+
+    if none_indices or no_params_indices:
+        parts = []
+        if none_indices:
+            parts.append(f"None at indices {none_indices}")
+        if no_params_indices:
+            parts.append(f"lacking MMFF atom types at indices {no_params_indices}")
+        raise ValueError(
+            "; ".join(parts),
+            {"none": none_indices, "no_params": no_params_indices},
+        )
+
+    def _normalize_scalar_or_list(value, name: str):
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            if len(value) != len(molecules):
+                raise ValueError(f"Expected {len(molecules)} values for {name}, got {len(value)}")
+            return list(value)
+        return [value for _ in molecules]
+
+    def _normalize_properties(value):
+        if value is None:
+            return [default_rdkit_mmff_properties(mol) for mol in molecules]
+        if isinstance(value, Sequence) and not hasattr(value, "SetMMFFVariant"):
+            if len(value) != len(molecules):
+                raise ValueError(f"Expected {len(molecules)} MMFFMolProperties objects, got {len(value)}")
+            return [
+                default_rdkit_mmff_properties(mol) if props is None else props for mol, props in zip(molecules, value)
+            ]
+        return [value for _ in molecules]
 
     # Call the C++ implementation
     if hardwareOptions is None:
         hardwareOptions = HardwareOptions()
     native_options = hardwareOptions._as_native()
-
-    backend_value = "BFGS" if optimizer_backend is None else optimizer_backend
-    if not isinstance(backend_value, str):
-        raise TypeError("optimizer_backend must be a string if provided")
-
-    if optimizer_options is None:
-        optimizer_options = dict()
-    elif not isinstance(optimizer_options, dict):
-        raise TypeError("optimizer_options must be a dictionary if provided")
-
-    backend_lc = backend_value.lower()
-    if backend_lc not in {"bfgs", "fire"}:
-        raise ValueError(f"Unsupported optimizer backend '{backend_value}'")
-
-    if backend_lc == "fire":
-        normalized_options: dict[str, object] = {}
-        take_half_step_back: bool | None = None
-        for key, value in optimizer_options.items():
-            if not isinstance(key, str):
-                raise TypeError("optimizer_options keys must be strings")
-            key_lc = key.lower()
-            if key_lc == "take_half_step_back":
-                if not isinstance(value, bool):
-                    raise TypeError("take_half_step_back must be a boolean")
-                take_half_step_back = value
-            elif key_lc in {"max_step", "maxstep"}:
-                normalized_options["max_step"] = value
-            else:
-                normalized_options[key_lc] = value
-
-        if take_half_step_back is not None:
-            normalized_options["take_half_step_back"] = take_half_step_back
-
-        optimizer_options = normalized_options
-    elif fire_debug_output is not None:
-        raise ValueError("fire_debug_output can only be used with the FIRE optimizer backend")
-
-    if fire_debug_output is None:
-        return _mmffOptimization.MMFFOptimizeMoleculesConfs(
-            molecules,
-            maxIters,
-            nonBondedThreshold,
-            native_options,
-            backend_value,
-            optimizer_options,
+    properties_list = _normalize_properties(properties)
+    thresholds = _normalize_scalar_or_list(nonBondedThreshold, "nonBondedThreshold")
+    interfrag_flags = _normalize_scalar_or_list(ignoreInterfragInteractions, "ignoreInterfragInteractions")
+    native_properties = [
+        make_internal_mmff_properties(
+            props,
+            non_bonded_threshold=float(threshold),
+            ignore_interfrag_interactions=bool(ignore_interfrag),
         )
-
-    if not isinstance(fire_debug_output, list):
-        raise TypeError("fire_debug_output must be a list when provided")
-
-    return _mmffOptimization.MMFFOptimizeMoleculesConfs(
-        molecules,
-        maxIters,
-        nonBondedThreshold,
-        native_options,
-        backend_value,
-        optimizer_options,
-        fire_debug_output,
-    )
-
+        for props, threshold, ignore_interfrag in zip(properties_list, thresholds, interfrag_flags)
+    ]
+    return _mmffOptimization.MMFFOptimizeMoleculesConfs(molecules, maxIters, native_properties, native_options)

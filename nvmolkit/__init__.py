@@ -25,6 +25,9 @@ Currently supported functionality:
 - Bulk tanimoto/cosine similarity calculations between fingerprints
 - ETKDG conformer generation for multiple molecules
 - MMFF optimization for multiple molecules and conformers
+- UFF optimization for multiple molecules and conformers
+- TFD (Torsion Fingerprint Deviation) calculation for conformer comparison
 """
-VERSION = "0.2.0"
+
+VERSION = "0.4.0"
 __version__ = VERSION

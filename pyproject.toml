@@ -8,13 +8,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nvMolKit"
-version = "0.2.0"
+version = "0.4.0"
 description = "Python bindings for the nvMolKit project"
 
 
 dependencies = [
     "numpy",
     "torch",
+    "triton",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +32,9 @@ docs = [
     "myst-parser",
     "jupyter-sphinx",
 ]
+autotune = [
+    "optuna",
+]
 
 [tool.pytest.ini_options]
 log_cli = true
@@ -43,10 +47,14 @@ python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test"]
 python_functions = ["test"]
 xfail_strict = true
+markers = [
+    "long: marks tests as long-running tests",
+]
+
 
 [tool.ruff]
 line-length = 119
-include = ["nvmolkit/tests/conftest.py"]
+include = ["nvmolkit/**/*.py", "benchmarks/**/*.py", "setup.py"]
 
 [tool.ruff.lint]
 ignore = [

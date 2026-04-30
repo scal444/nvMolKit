@@ -26,8 +26,9 @@ Similarity Calculations
    :template: function_template.rst
 
    similarity.crossTanimotoSimilarity
+   similarity.crossTanimotoSimilarityMemoryConstrained
    similarity.crossCosineSimilarity
-
+   similarity.crossCosineSimilarityMemoryConstrained
 
 
 ETKDG Conformer Generation
@@ -47,6 +48,76 @@ MMFF Optimization
    :template: function_template.rst
 
    mmffOptimization.MMFFOptimizeMoleculesConfs
+
+.. autosummary::
+   :toctree: generated/
+   :template: class_template.rst
+
+   batchedForcefield.MMFFBatchedForcefield
+   batchedForcefield.MMFFBatchElement
+
+UFF Optimization
+----------------
+
+.. autosummary::
+   :toctree: generated/
+   :template: function_template.rst
+
+   uffOptimization.UFFOptimizeMoleculesConfs
+
+.. autosummary::
+   :toctree: generated/
+   :template: class_template.rst
+
+   batchedForcefield.UFFBatchedForcefield
+   batchedForcefield.UFFBatchElement
+
+Butina Clustering
+-----------------
+
+.. autosummary::
+   :toctree: generated/
+   :template: function_template.rst
+
+   clustering.butina
+
+Substructure Search
+-------------------
+
+.. autosummary::
+   :toctree: generated/
+   :template: function_template.rst
+
+   substructure.hasSubstructMatch
+   substructure.countSubstructMatches
+   substructure.getSubstructMatches
+
+.. autosummary::
+   :toctree: generated/
+   :template: class_template.rst
+
+   substructure.SubstructSearchConfig
+   substructure.SubstructMatchResults
+
+Conformer RMSD
+--------------
+
+.. autosummary::
+   :toctree: generated/
+   :template: function_template.rst
+
+   conformerRmsd.GetConformerRMSMatrix
+   conformerRmsd.GetConformerRMSMatrixBatch
+
+Torsion Fingerprint Deviation (TFD)
+-----------------------------------
+
+.. autosummary::
+   :toctree: generated/
+   :template: function_template.rst
+
+   tfd.GetTFDMatrix
+   tfd.GetTFDMatrices
 
 Types
 -----
