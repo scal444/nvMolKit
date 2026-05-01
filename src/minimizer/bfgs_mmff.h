@@ -85,18 +85,25 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfs(
 //! \param properties Per-molecule MMFF settings (one entry per molecule).
 //! \param perfOptions Hardware and batching configuration.
 //! \return Energies and per-system convergence flags.
-MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&        mols,
-                                                  int                                maxIters    = 200,
-                                                  const FireOptions&                 fireOptions = {},
-                                                  const std::vector<MMFFProperties>& properties  = {},
-                                                  const BatchHardwareOptions&        perfOptions = {});
+//! \param fireDebugOutput TODO(remove-before-pr): when non-null, populated with
+//!        per-iteration FIRE state (alpha, dt, power, energy) per system. Used
+//!        only by the experimental benchmark scripts and will be removed before
+//!        the FIRE work is opened as a PR.
+MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&                mols,
+                                                  int                                        maxIters        = 200,
+                                                  const FireOptions&                         fireOptions     = {},
+                                                  const std::vector<MMFFProperties>&         properties      = {},
+                                                  const BatchHardwareOptions&                perfOptions     = {},
+                                                  std::vector<std::vector<FireDebugOutput>>* fireDebugOutput = nullptr);
 
 //! \brief Convenience wrapper returning energies only.
-std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&        mols,
-                                                                int                                maxIters    = 200,
-                                                                const FireOptions&                 fireOptions = {},
-                                                                const std::vector<MMFFProperties>& properties  = {},
-                                                                const BatchHardwareOptions&        perfOptions = {});
+std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsFire(
+  std::vector<RDKit::ROMol*>&                mols,
+  int                                        maxIters        = 200,
+  const FireOptions&                         fireOptions     = {},
+  const std::vector<MMFFProperties>&         properties      = {},
+  const BatchHardwareOptions&                perfOptions     = {},
+  std::vector<std::vector<FireDebugOutput>>* fireDebugOutput = nullptr);
 
 }  // namespace nvMolKit::MMFF
 #endif  // NVMOLKIT_BFGS_MMFF_H

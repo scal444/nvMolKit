@@ -13,5 +13,6 @@ def MMFFOptimizeMoleculesConfsFire(
     maxIters: int = 200,
     fireOptions: Any = None,
     properties: Any = None,
-    hardwareOptions: Any = None
+    hardwareOptions: Any = None,
+    fireDebugOutput: Any = None,
 ) -> List[List[float]]: ...

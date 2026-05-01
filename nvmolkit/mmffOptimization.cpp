@@ -50,24 +50,64 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
     "Returns:\n"
     "    List of lists of energies, where each inner list contains energies for conformers of one molecule");
 
+  // TODO(remove-before-pr): the fireDebugOutput parameter exists for the
+  // benchmark scripts under benchmarks/ that produce per-step trajectories
+  // (alpha, dt, power, energy) for diagnostic plots. It will be removed when
+  // the FIRE work is opened as a PR; the benchmark scripts will either be
+  // deleted or rewritten to not depend on it at that time.
   boost::python::def(
     "MMFFOptimizeMoleculesConfsFire",
     +[](const boost::python::list&            molecules,
         int                                   maxIters,
         const nvMolKit::FireOptions&          fireOptions,
         const boost::python::list&            propertiesList,
-        const nvMolKit::BatchHardwareOptions& hardwareOptions) -> boost::python::list {
+        const nvMolKit::BatchHardwareOptions& hardwareOptions,
+        const boost::python::object&          fireDebugOutput) -> boost::python::list {
       auto       molsVec    = nvMolKit::extractMolecules(molecules);
       const auto properties = nvMolKit::extractMMFFPropertiesList(propertiesList, static_cast<int>(molsVec.size()));
-      const auto result =
-        nvMolKit::MMFF::MMFFOptimizeMoleculesConfsFire(molsVec, maxIters, fireOptions, properties, hardwareOptions);
+
+      std::vector<std::vector<nvMolKit::FireDebugOutput>>  debugStorage;
+      std::vector<std::vector<nvMolKit::FireDebugOutput>>* debugPtr = nullptr;
+      if (fireDebugOutput.ptr() != Py_None) {
+        if (!PyList_Check(fireDebugOutput.ptr())) {
+          throw std::invalid_argument("fireDebugOutput must be a list when provided");
+        }
+        debugPtr = &debugStorage;
+      }
+
+      const auto result = nvMolKit::MMFF::MMFFOptimizeMoleculesConfsFire(molsVec,
+                                                                         maxIters,
+                                                                         fireOptions,
+                                                                         properties,
+                                                                         hardwareOptions,
+                                                                         debugPtr);
+
+      if (debugPtr != nullptr) {
+        boost::python::list outer;
+        for (const auto& molEntries : debugStorage) {
+          boost::python::list inner;
+          for (const auto& entry : molEntries) {
+            boost::python::dict dict;
+            dict["alphas"]   = nvMolKit::vectorToList(entry.alphas);
+            dict["dt"]       = nvMolKit::vectorToList(entry.dt);
+            dict["powers"]   = nvMolKit::vectorToList(entry.powers);
+            dict["energies"] = nvMolKit::vectorToList(entry.energies);
+            inner.append(dict);
+          }
+          outer.append(inner);
+        }
+        fireDebugOutput.attr("clear")();
+        fireDebugOutput.attr("extend")(outer);
+      }
+
       return nvMolKit::vectorOfVectorsToList(result);
     },
     (boost::python::arg("molecules"),
      boost::python::arg("maxIters")        = 200,
      boost::python::arg("fireOptions")     = nvMolKit::FireOptions(),
      boost::python::arg("properties")      = boost::python::list(),
-     boost::python::arg("hardwareOptions") = nvMolKit::BatchHardwareOptions()),
+     boost::python::arg("hardwareOptions") = nvMolKit::BatchHardwareOptions(),
+     boost::python::arg("fireDebugOutput") = boost::python::object()),
     "Optimize conformers using the FIRE 2.0 minimizer.\n"
     "\n"
     "Args:\n"
@@ -76,6 +116,9 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
     "    fireOptions: FireOptions instance controlling the algorithm parameters\n"
     "    properties: MMFFProperties-compatible object with forcefield settings\n"
     "    hardwareOptions: BatchHardwareOptions object with hardware settings\n"
+    "    fireDebugOutput: Optional empty list that will be populated with\n"
+    "        per-iteration FIRE state for diagnostic benchmarking. EXPERIMENTAL\n"
+    "        and slated for removal before PR.\n"
     "\n"
     "Returns:\n"
     "    List of lists of energies, where each inner list contains energies for conformers of one molecule");

@@ -212,11 +212,12 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
   return MMFFMinimizeMoleculesConfs(mols, maxIters, 1e-4, properties, {}, perfOptions, backend).energies;
 }
 
-MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&        mols,
-                                                  const int                          maxIters,
-                                                  const FireOptions&                 fireOptions,
-                                                  const std::vector<MMFFProperties>& propertiesIn,
-                                                  const BatchHardwareOptions&        perfOptions) {
+MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&                mols,
+                                                  const int                                  maxIters,
+                                                  const FireOptions&                         fireOptions,
+                                                  const std::vector<MMFFProperties>&         propertiesIn,
+                                                  const BatchHardwareOptions&                perfOptions,
+                                                  std::vector<std::vector<FireDebugOutput>>* fireDebugOutput) {
   ScopedNvtxRange fullRange("FIRE MMFF Minimize Molecules Confs");
 
   std::vector<MMFFProperties> properties = propertiesIn;
@@ -233,6 +234,15 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&   
   std::vector<std::vector<int8_t>> moleculeConverged(mols.size());
   for (size_t i = 0; i < mols.size(); ++i) {
     moleculeConverged[i].resize(moleculeEnergies[i].size(), 0);
+  }
+
+  // TODO(remove-before-pr): debug output is benchmark-only and will go away.
+  const bool collectDebug = fireDebugOutput != nullptr;
+  if (collectDebug) {
+    fireDebugOutput->assign(mols.size(), {});
+    for (size_t i = 0; i < mols.size(); ++i) {
+      (*fireDebugOutput)[i].resize(moleculeEnergies[i].size());
+    }
   }
 
   const size_t totalConformers    = allConformers.size();
@@ -254,6 +264,8 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&   
                                                                                               properties,         \
                                                                                               ctx,                \
                                                                                               threadBuffers,      \
+                                                                                              collectDebug,       \
+                                                                                              fireDebugOutput,    \
                                                                                               exceptionHandler)
   for (size_t batchStart = 0; batchStart < totalConformers; batchStart += effectiveBatchSize) {
     try {
@@ -316,11 +328,16 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&   
       energyOutsDevice.resize(batchConformers.size());
       energyOutsDevice.zero();
 
-      FireBatchMinimizer fireMinimizer(/*dataDim=*/3, fireOptions, streamPtr);
+      FireBatchMinimizer fireMinimizer(/*dataDim=*/3, fireOptions, streamPtr, /*debugMode=*/collectDebug);
       if (fireOptions.useMass) {
         fireMinimizer.setMasses(massesPerAtom);
       }
 
+      // The fire minimize entry that takes a BatchedForcefield runs without
+      // surfacing energies per step, so when collecting debug we instead drive
+      // the minimizer manually so we can record per-iteration energies through
+      // the energy functor that FireBatchMinimizer::minimize already invokes
+      // when debugMode_ is true.
       const bool converged = fireMinimizer.minimize(maxIters,
                                                     fireOptions.gradTol,
                                                     forcefield,
@@ -344,6 +361,14 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&   
         const auto& confInfo                                 = batchConformers[i];
         moleculeConverged[confInfo.molIdx][confInfo.confIdx] = static_cast<int8_t>(state.statuses[i] == 0);
       }
+
+      if (collectDebug) {
+        const auto& batchDebug = fireMinimizer.debugOutputs();
+        for (size_t i = 0; i < batchConformers.size(); ++i) {
+          const auto& confInfo                                  = batchConformers[i];
+          (*fireDebugOutput)[confInfo.molIdx][confInfo.confIdx] = batchDebug[i];
+        }
+      }
     } catch (...) {
       exceptionHandler.store(std::current_exception());
     }
@@ -352,12 +377,14 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&   
   return {moleculeEnergies, moleculeConverged};
 }
 
-std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&        mols,
-                                                                const int                          maxIters,
-                                                                const FireOptions&                 fireOptions,
-                                                                const std::vector<MMFFProperties>& properties,
-                                                                const BatchHardwareOptions&        perfOptions) {
-  return MMFFMinimizeMoleculesConfsFire(mols, maxIters, fireOptions, properties, perfOptions).energies;
+std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsFire(
+  std::vector<RDKit::ROMol*>&                mols,
+  const int                                  maxIters,
+  const FireOptions&                         fireOptions,
+  const std::vector<MMFFProperties>&         properties,
+  const BatchHardwareOptions&                perfOptions,
+  std::vector<std::vector<FireDebugOutput>>* fireDebugOutput) {
+  return MMFFMinimizeMoleculesConfsFire(mols, maxIters, fireOptions, properties, perfOptions, fireDebugOutput).energies;
 }
 
 }  // namespace nvMolKit::MMFF

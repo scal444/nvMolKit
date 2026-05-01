@@ -28,8 +28,8 @@ if TYPE_CHECKING:
     from rdkit.Chem import Mol
     from rdkit.ForceField.rdForceField import MMFFMolProperties
 
+from nvmolkit._types import FireOptions  # noqa: F401  (re-export). Must precede _mmffOptimization to register Boost.Python converters for FireOptions / BatchHardwareOptions used by the FIRE entry point.
 from nvmolkit import _mmffOptimization
-from nvmolkit._types import FireOptions  # noqa: F401  (re-export)
 from nvmolkit._mmff_bridge import default_rdkit_mmff_properties, make_internal_mmff_properties
 from nvmolkit.types import HardwareOptions
 
@@ -172,6 +172,7 @@ def MMFFOptimizeMoleculesConfsFire(
     nonBondedThreshold: float | Sequence[float] = 100.0,
     ignoreInterfragInteractions: bool | Sequence[bool] = True,
     hardwareOptions: HardwareOptions | None = None,
+    fireDebugOutput: list | None = None,
 ) -> list[list[float]]:
     """Optimize MMFF conformers using the FIRE 2.0 minimizer.
 
@@ -188,6 +189,9 @@ def MMFFOptimizeMoleculesConfsFire(
         nonBondedThreshold: Scalar or per-molecule sequence.
         ignoreInterfragInteractions: Scalar or per-molecule sequence.
         hardwareOptions: GPU/CPU batching settings.
+        fireDebugOutput: Optional empty list. When provided, populated with
+            per-iteration FIRE state for diagnostic benchmarking. EXPERIMENTAL
+            and slated for removal before PR; do not use in production.
 
     Returns:
         List of lists of energies, mirroring the BFGS variant.
@@ -250,10 +254,23 @@ def MMFFOptimizeMoleculesConfsFire(
     if fireOptions is None:
         fireOptions = FireOptions()
 
+    if fireDebugOutput is None:
+        return _mmffOptimization.MMFFOptimizeMoleculesConfsFire(
+            molecules,
+            maxIters,
+            fireOptions,
+            native_properties,
+            native_options,
+        )
+
+    if not isinstance(fireDebugOutput, list):
+        raise TypeError("fireDebugOutput must be a list when provided")
+
     return _mmffOptimization.MMFFOptimizeMoleculesConfsFire(
         molecules,
         maxIters,
         fireOptions,
         native_properties,
         native_options,
+        fireDebugOutput,
     )
