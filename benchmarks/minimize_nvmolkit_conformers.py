@@ -1,24 +1,30 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Minimize conformers from an SDF using nvmolkit MMFF and save energies and minimized structures."""
+"""Minimize conformers from an SDF using nvmolkit MMFF and save energies and minimized structures.
+
+Currently uses the FIRE 2.0 backend (`MMFFOptimizeMoleculesConfsFire`). For BFGS,
+use `minimize_nvmolkit_conformers_bfgs.py` (or call `MMFFOptimizeMoleculesConfs`
+directly) - this script is FIRE-specific so the FIRE-only knobs (alpha/dt/half-step
+back/ABC) can be exposed without overloading the CLI.
+"""
 
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import json
+from pathlib import Path
 
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
-from nvmolkit.mmffOptimization import MMFFOptimizeMoleculesConfs
+from nvmolkit.mmffOptimization import FireOptions, MMFFOptimizeMoleculesConfsFire
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run nvmolkit MMFF minimization on conformers in an SDF file.",
+        description="Run nvmolkit MMFF/FIRE 2.0 minimization on conformers in an SDF file.",
     )
     parser.add_argument("input_sdf", type=Path, help="Path to the input SDF containing conformers.")
     parser.add_argument(
@@ -27,33 +33,35 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Output path prefix (default: derive from input SDF path).",
     )
-    parser.add_argument(
-        "--max-iters",
-        type=int,
-        default=1000,
-        help="Maximum MMFF iterations per conformer (default: 1000).",
-    )
+    parser.add_argument("--max-iters", type=int, default=1000, help="Maximum FIRE iterations (default: 1000).")
     parser.add_argument(
         "--gradtol",
         type=float,
         default=1e-4,
-        help="Gradient convergence tolerance for the FIRE optimizer (default: 1e-4).",
+        help="Gradient convergence tolerance for FIRE (default: 1e-4).",
     )
+    parser.add_argument("--mass-weighting", action="store_true", help="Enable mass weighting in the FIRE kick.")
+    parser.add_argument("--use-abc", action="store_true", help="Enable the ABC-FIRE mixer correction.")
     parser.add_argument(
-        "--mass-weighting",
+        "--no-half-step-back",
         action="store_true",
-        help="Enable mass weighting during minimization.",
+        help="Disable the half-step-back behavior on negative-power steps. ASE FIRE2 always half-steps; this is for ablation.",
     )
+    parser.add_argument("--dt-init", type=float, default=0.001, help="Initial dt in picoseconds (default: 0.001).")
+    parser.add_argument("--dt-max-factor", type=float, default=10.0, help="dtmax / dtinit (default: 10.0).")
+    parser.add_argument("--dt-min-factor", type=float, default=0.002, help="dtmin / dtinit (default: 0.002).")
     parser.add_argument(
-        "--integration-scheme",
-        choices=("explicit_euler", "semi_implicit_euler"),
-        default="semi_implicit_euler",
-        help="FIRE integration scheme to use (default: semi_implicit_euler).",
+        "--n-min-for-increase",
+        type=int,
+        default=20,
+        help="Number of consecutive positive-power steps before dt grows (default: 20, ASE FIRE2 default).",
     )
+    parser.add_argument("--alpha-init", type=float, default=0.25, help="Initial mixer alpha (default: 0.25).")
     parser.add_argument(
-        "--take-half-step-back",
-        action="store_true",
-        help="Enable FIRE half-step back behavior when power becomes negative.",
+        "--max-step",
+        type=float,
+        default=0.2,
+        help="Maximum displacement per step in Angstroms (default: 0.2). 0 disables clipping.",
     )
     parser.add_argument(
         "--save-initial",
@@ -65,7 +73,8 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Optional path to write FIRE debug information as JSON. Only valid when using the FIRE optimizer backend."
+            "Optional path to write FIRE per-iteration debug data (alphas, dt, powers, energies) as JSON. "
+            "Slated for removal before PR; for diagnostic use only."
         ),
     )
     return parser.parse_args()
@@ -92,28 +101,33 @@ def compute_initial_energies(mol: Chem.Mol) -> np.ndarray:
     return energies
 
 
+def fire_options_from_args(args: argparse.Namespace) -> FireOptions:
+    opts = FireOptions()
+    opts.gradTol = args.gradtol
+    opts.useMass = args.mass_weighting
+    opts.abcCorrection = args.use_abc
+    opts.takeHalfStepBack = not args.no_half_step_back
+    opts.dtInit = args.dt_init
+    opts.dtMaxFactor = args.dt_max_factor
+    opts.dtMinFactor = args.dt_min_factor
+    opts.nMinForIncrease = args.n_min_for_increase
+    opts.alphaInit = args.alpha_init
+    opts.dMax = args.max_step
+    return opts
+
+
 def minimize_molecules(
     mols: list[Chem.Mol],
     max_iters: int,
-    grad_tol: float,
-    mass_weighting: bool,
-    integration_scheme: str,
-    take_half_step_back: bool,
+    fire_opts: FireOptions,
     collect_fire_debug: bool,
 ) -> tuple[list[np.ndarray], list[list[dict[str, list[float]]]] | None]:
-    options: dict[str, object] = {
-        "use_masses": mass_weighting,
-        "grad_tol": grad_tol,
-        "integration_scheme": integration_scheme,
-        "take_half_step_back": take_half_step_back,
-    }
     fire_debug: list[list[dict[str, list[float]]]] | None = [] if collect_fire_debug else None
-    energies_nested = MMFFOptimizeMoleculesConfs(
+    energies_nested = MMFFOptimizeMoleculesConfsFire(
         mols,
         maxIters=max_iters,
-        optimizer_backend="FIRE",
-        optimizer_options=options,
-        fire_debug_output=fire_debug,
+        fireOptions=fire_opts,
+        fireDebugOutput=fire_debug,
     )
     per_mol: list[np.ndarray] = []
     for mol, energies in zip(mols, energies_nested):
@@ -153,17 +167,10 @@ def main() -> None:
         for mol in mols:
             initial_per_mol.append(compute_initial_energies(mol))
 
+    fire_opts = fire_options_from_args(args)
     collect_fire_debug = args.fire_debug_output is not None
 
-    minimized_per_mol, fire_debug = minimize_molecules(
-        mols,
-        args.max_iters,
-        args.gradtol,
-        args.mass_weighting,
-        args.integration_scheme,
-        args.take_half_step_back,
-        collect_fire_debug,
-    )
+    minimized_per_mol, fire_debug = minimize_molecules(mols, args.max_iters, fire_opts, collect_fire_debug)
 
     if args.fire_debug_output is not None:
         if fire_debug is None:
