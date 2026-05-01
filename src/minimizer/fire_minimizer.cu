@@ -37,16 +37,14 @@ constexpr int kFireBlockSize = 256;
 // This replaces the previous (incorrect) energy-only kCalMolToEV factor.
 constexpr double kForceKcalMolPerAng_PerAmu_to_AngPerPs2 = 4.184 * 100.0;
 
-template <typename T>
-__global__ void setAllKernel(const int numElements, const T value, T* dst) {
+template <typename T> __global__ void setAllKernel(const int numElements, const T value, T* dst) {
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx < numElements) {
     dst[idx] = value;
   }
 }
 
-template <typename T>
-void setAll(AsyncDeviceVector<T>& vec, const T& value) {
+template <typename T> void setAll(AsyncDeviceVector<T>& vec, const T& value) {
   const int numElements = static_cast<int>(vec.size());
   if (numElements == 0) {
     return;
@@ -62,8 +60,7 @@ __device__ __forceinline__ cuda::std::span<T> getSystemSpan(const cuda::std::spa
                                                             const cuda::std::span<const int> atomStarts,
                                                             const int                        sysIdx,
                                                             const int                        dataDim) {
-  return data.subspan(atomStarts[sysIdx] * dataDim,
-                      (atomStarts[sysIdx + 1] - atomStarts[sysIdx]) * dataDim);
+  return data.subspan(atomStarts[sysIdx] * dataDim, (atomStarts[sysIdx + 1] - atomStarts[sysIdx]) * dataDim);
 }
 
 //! Packed read-only kernel parameters.
@@ -177,8 +174,8 @@ __global__ void fireKernel(const cuda::std::span<const int>    atomStarts,
 
   if (threadIdx.x == 0) {
     if (sqrt(gradSqShared) <= params.gradTol) {
-      sharedConverged   = true;
-      statuses[sysIdx]  = 0;
+      sharedConverged  = true;
+      statuses[sysIdx] = 0;
     }
   }
   __syncthreads();
@@ -209,12 +206,12 @@ __global__ void fireKernel(const cuda::std::span<const int>    atomStarts,
       newDt     = fmax(dtIn * params.dtDecrementFactor, params.minDt);
     }
 
-    sharedDt              = newDt;
-    sharedAlpha           = newAlpha;
-    sharedNsteps          = newNsteps;
-    sharedNegative        = negative;
-    dts[sysIdx]           = newDt;
-    alphas[sysIdx]        = newAlpha;
+    sharedDt               = newDt;
+    sharedAlpha            = newAlpha;
+    sharedNsteps           = newNsteps;
+    sharedNegative         = negative;
+    dts[sysIdx]            = newDt;
+    alphas[sysIdx]         = newAlpha;
     nStepsPositive[sysIdx] = newNsteps;
   }
   __syncthreads();
@@ -349,7 +346,7 @@ void FireBatchMinimizer::setConvergencePollInterval(const int interval) {
 void FireBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
                                     const double*           masses,
                                     const uint8_t*          activeThisStage) {
-  step_ = 0;
+  step_                = 0;
   const int totalAtoms = atomStartsHost.back();
   const int numSystems = static_cast<int>(atomStartsHost.size()) - 1;
   numSystems_          = numSystems;
@@ -359,8 +356,7 @@ void FireBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
 
   if (fireOptions_.useMass && masses != nullptr) {
     masses_.resize(totalAtoms);
-    cudaCheckError(
-      cudaMemcpyAsync(masses_.data(), masses, totalAtoms * sizeof(double), cudaMemcpyDefault, stream_));
+    cudaCheckError(cudaMemcpyAsync(masses_.data(), masses, totalAtoms * sizeof(double), cudaMemcpyDefault, stream_));
   } else if (fireOptions_.useMass && !hostMasses_.empty()) {
     if (hostMasses_.size() != static_cast<size_t>(totalAtoms)) {
       throw std::runtime_error("Stored masses size does not match atom count");
@@ -562,9 +558,7 @@ bool FireBatchMinimizer::minimize(const int                                   nu
     launchFireKernel(gradTol, atomStarts, positions, grad, lastKnownNumUnfinished_, isFirstStep);
     compactActiveAsync();
 
-    const bool poll = debugMode_ ||
-                      ((iter + 1) % convergencePollInterval_ == 0) ||
-                      (iter + 1 == numIters);
+    const bool poll = debugMode_ || ((iter + 1) % convergencePollInterval_ == 0) || (iter + 1 == numIters);
     if (poll) {
       lastKnownNumUnfinished_ = readbackNumUnfinished();
     }

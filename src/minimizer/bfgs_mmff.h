@@ -86,10 +86,10 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfs(
 //! \param perfOptions Hardware and batching configuration.
 //! \return Energies and per-system convergence flags.
 MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&        mols,
-                                                  int                                maxIters       = 200,
-                                                  const FireOptions&                 fireOptions    = {},
-                                                  const std::vector<MMFFProperties>& properties     = {},
-                                                  const BatchHardwareOptions&        perfOptions    = {});
+                                                  int                                maxIters    = 200,
+                                                  const FireOptions&                 fireOptions = {},
+                                                  const std::vector<MMFFProperties>& properties  = {},
+                                                  const BatchHardwareOptions&        perfOptions = {});
 
 //! \brief Convenience wrapper returning energies only.
 std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&        mols,

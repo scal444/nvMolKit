@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from ase.calculators.calculator import Calculator, all_changes
 from rdkit import Chem
 from rdkit.Chem import AllChem
@@ -6,18 +21,21 @@ import numpy as np
 
 from ase.units import kcal, eV
 from ase.units import mol as avogadro_number
+
+
 class RDKitMMFFCalculator(Calculator):
-    implemented_properties = ['energy', 'forces']
+    implemented_properties = ["energy", "forces"]
+
     def __init__(self, **kwargs):
 
         Calculator.__init__(self, **kwargs)
-        sd_supplier = Chem.SDMolSupplier('/home/kboyd/data/fire/inital_confs.sdf', removeHs=False)
+        sd_supplier = Chem.SDMolSupplier("/home/kboyd/data/fire/inital_confs.sdf", removeHs=False)
         rdmol = next(m for m in sd_supplier if m is not None)  # get first non-None entry
         self.rdmol = rdmol
 
-    def calculate(self, atoms=None, properties=('energy', 'forces'), system_changes=all_changes):
+    def calculate(self, atoms=None, properties=("energy", "forces"), system_changes=all_changes):
         super().calculate(atoms, properties, system_changes)
-        pos  = atoms.get_positions()
+        pos = atoms.get_positions()
         this_conf = self.rdmol.GetConformer()
         for i in range(self.rdmol.GetNumAtoms()):
             this_conf.SetAtomPosition(i, tuple(pos[i]))
@@ -32,14 +50,13 @@ class RDKitMMFFCalculator(Calculator):
         f = -np.array(g).reshape(-1, 3)
 
         self.results = {
-            'energy': e * (kcal / avogadro_number) / eV,  # Convert to eV
-            'forces': f * (kcal / avogadro_number) / eV  # Convert to eV/Å,
+            "energy": e * (kcal / avogadro_number) / eV,  # Convert to eV
+            "forces": f * (kcal / avogadro_number) / eV,  # Convert to eV/Å,
         }
 
 
-
 # 1. Read the SDF file and get the first molecule
-sdf_supplier = Chem.SDMolSupplier('/home/kboyd/data/fire/inital_confs.sdf', removeHs=False)
+sdf_supplier = Chem.SDMolSupplier("/home/kboyd/data/fire/inital_confs.sdf", removeHs=False)
 mol = next(m for m in sdf_supplier if m is not None)  # get first non-None entry
 
 # 2. Get atomic symbols
@@ -54,17 +71,18 @@ at = Atoms(symbols=symbols, positions=positions)
 
 calc = RDKitMMFFCalculator()
 at.calc = calc
-energy = at.get_potential_energy()     # MMFF energy
-forces = at.get_forces()               # MMFF forces
+energy = at.get_potential_energy()  # MMFF energy
+forces = at.get_forces()  # MMFF forces
 
 from ase.optimize import FIRE2
+
 dyn = FIRE2(at)
 res = []
 for _ in range(2):
     print("\n\nStep\n\n")
     res.append(at.get_potential_energy() * avogadro_number / kcal)
     dyn.step()
-    new_mol = Chem.SDMolSupplier('/home/kboyd/data/fire/inital_confs.sdf', removeHs=False)[0]
+    new_mol = Chem.SDMolSupplier("/home/kboyd/data/fire/inital_confs.sdf", removeHs=False)[0]
     # Update RDKit molecule with new positions
     new_conf = new_mol.GetConformer()
     for i in range(new_mol.GetNumAtoms()):

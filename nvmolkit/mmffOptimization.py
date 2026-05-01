@@ -164,7 +164,6 @@ def MMFFOptimizeMoleculesConfs(
     return _mmffOptimization.MMFFOptimizeMoleculesConfs(molecules, maxIters, native_properties, native_options)
 
 
-
 def MMFFOptimizeMoleculesConfsFire(
     molecules: list["Mol"],
     maxIters: int = 200,
@@ -258,4 +257,3 @@ def MMFFOptimizeMoleculesConfsFire(
         native_properties,
         native_options,
     )
-

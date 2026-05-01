@@ -197,7 +197,8 @@ add_executable(test_bfgs_hessian test_bfgs_hessian.cpp)
 target_link_libraries(test_bfgs_hessian PRIVATE bfgs device_vector)
 
 add_executable(test_fire_minimizer test_fire_minimizer.cu)
-target_link_libraries(test_fire_minimizer PRIVATE fire_minimizer device_vector cuda_error_check)
+target_link_libraries(test_fire_minimizer PRIVATE fire_minimizer device_vector
+                                                  cuda_error_check)
 
 add_executable(test_etkdg_etk_minimize test_etkdg_etk_minimize.cu)
 target_link_libraries(

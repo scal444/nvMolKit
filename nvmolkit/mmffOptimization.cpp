@@ -57,14 +57,10 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
         const nvMolKit::FireOptions&          fireOptions,
         const boost::python::list&            propertiesList,
         const nvMolKit::BatchHardwareOptions& hardwareOptions) -> boost::python::list {
-      auto       molsVec = nvMolKit::extractMolecules(molecules);
-      const auto properties =
-        nvMolKit::extractMMFFPropertiesList(propertiesList, static_cast<int>(molsVec.size()));
-      const auto result = nvMolKit::MMFF::MMFFOptimizeMoleculesConfsFire(molsVec,
-                                                                        maxIters,
-                                                                        fireOptions,
-                                                                        properties,
-                                                                        hardwareOptions);
+      auto       molsVec    = nvMolKit::extractMolecules(molecules);
+      const auto properties = nvMolKit::extractMMFFPropertiesList(propertiesList, static_cast<int>(molsVec.size()));
+      const auto result =
+        nvMolKit::MMFF::MMFFOptimizeMoleculesConfsFire(molsVec, maxIters, fireOptions, properties, hardwareOptions);
       return nvMolKit::vectorOfVectorsToList(result);
     },
     (boost::python::arg("molecules"),

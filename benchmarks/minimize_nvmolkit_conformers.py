@@ -65,8 +65,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "Optional path to write FIRE debug information as JSON. "
-            "Only valid when using the FIRE optimizer backend."
+            "Optional path to write FIRE debug information as JSON. Only valid when using the FIRE optimizer backend."
         ),
     )
     return parser.parse_args()
@@ -145,9 +144,7 @@ def main() -> None:
     mols = load_conformers(args.input_sdf)
 
     output_prefix = (
-        args.output_prefix
-        if args.output_prefix is not None
-        else args.input_sdf.parent / args.input_sdf.stem
+        args.output_prefix if args.output_prefix is not None else args.input_sdf.parent / args.input_sdf.stem
     )
     output_prefix.parent.mkdir(parents=True, exist_ok=True)
 
@@ -186,12 +183,8 @@ def main() -> None:
     minimized_sdf = output_prefix.parent / f"{output_prefix.name}_minimized_nvm.sdf"
     write_minimized_sdf(mols, minimized_sdf)
 
-    print(
-        f"Processed {len(minimized_array)} conformers. Saved minimized structures to {minimized_sdf}."
-    )
+    print(f"Processed {len(minimized_array)} conformers. Saved minimized structures to {minimized_sdf}.")
 
 
 if __name__ == "__main__":
     main()
-
-

@@ -26,7 +26,6 @@ namespace nvMolKit {
 
 class BatchedForcefield;
 
-
 //! \brief Algorithm parameters for the FIRE minimizer.
 //!
 //! Defaults match ASE FIRE 2.0
@@ -42,7 +41,8 @@ struct FireOptions {
   //! Skipped when @ref abcCorrection is true (matches ASE FIRE2 behavior).
   double dMax = 0.2;
 
-  double timeStepIncrement = 1.1;  //!< Multiplicative dt increase factor when power has been positive for nMinForIncrease steps.
+  double timeStepIncrement =
+    1.1;  //!< Multiplicative dt increase factor when power has been positive for nMinForIncrease steps.
   double timeStepDecrement = 0.5;  //!< Multiplicative dt decrease factor when power becomes negative.
 
   int nMinForIncrease = 20;  //!< Number of consecutive positive-power steps required before dt is allowed to grow.
@@ -79,10 +79,10 @@ struct FireDebugOutput {
 
 //! \brief Snapshot of internal per-system state, exposed for testing.
 struct FireInternalState {
-  std::vector<double> velocities;
-  std::vector<double> dt;
-  std::vector<double> alpha;
-  std::vector<int>    nStepsPositive;
+  std::vector<double>  velocities;
+  std::vector<double>  dt;
+  std::vector<double>  alpha;
+  std::vector<int>     nStepsPositive;
   std::vector<uint8_t> statuses;
 };
 

@@ -63,13 +63,13 @@ void initReferenceSystem(ReferenceSystem&           sys,
                          const std::vector<double>& startingPositions,
                          const std::vector<double>& masses,
                          const ReferenceConfig&     cfg) {
-  sys.positions  = startingPositions;
+  sys.positions = startingPositions;
   sys.velocities.assign(startingPositions.size(), 0.0);
-  sys.masses     = masses;
-  sys.dt         = cfg.dtInit;
-  sys.alpha      = cfg.alphaInit;
-  sys.nstep      = 0;
-  sys.converged  = false;
+  sys.masses    = masses;
+  sys.dt        = cfg.dtInit;
+  sys.alpha     = cfg.alphaInit;
+  sys.nstep     = 0;
+  sys.converged = false;
 }
 
 void referenceStep(ReferenceSystem&           sys,
@@ -101,10 +101,10 @@ void referenceStep(ReferenceSystem&           sys,
         sys.alpha = sys.alpha * cfg.alphaDecrement;
       }
     } else {
-      negative   = true;
-      sys.nstep  = 0;
-      sys.alpha  = cfg.alphaInit;
-      sys.dt     = std::max(sys.dt * cfg.timeStepDecrement, cfg.dtInit * cfg.dtMinFactor);
+      negative  = true;
+      sys.nstep = 0;
+      sys.alpha = cfg.alphaInit;
+      sys.dt    = std::max(sys.dt * cfg.timeStepDecrement, cfg.dtInit * cfg.dtMinFactor);
     }
   }
 
@@ -144,8 +144,8 @@ void referenceStep(ReferenceSystem&           sys,
   }
 
   for (size_t i = 0; i < sys.velocities.size(); ++i) {
-    const double vMix  = mixCoef1 * sys.velocities[i] + mixCoef2 * (-grad[i]);
-    sys.velocities[i]  = abcMult * vMix;
+    const double vMix = mixCoef1 * sys.velocities[i] + mixCoef2 * (-grad[i]);
+    sys.velocities[i] = abcMult * vMix;
   }
 
   if (cfg.abcCorrection) {
@@ -208,10 +208,10 @@ __global__ void harmonicGradKernel(const int     numSystems,
   if (sysIdx >= numSystems) {
     return;
   }
-  const int atomBegin    = atomStarts[sysIdx];
-  const int atomEnd      = atomStarts[sysIdx + 1];
-  const int coordCount   = (atomEnd - atomBegin) * dataDim;
-  const double k         = kPerSystem[sysIdx];
+  const int    atomBegin  = atomStarts[sysIdx];
+  const int    atomEnd    = atomStarts[sysIdx + 1];
+  const int    coordCount = (atomEnd - atomBegin) * dataDim;
+  const double k          = kPerSystem[sysIdx];
   for (int i = threadIdx.x; i < coordCount; i += blockDim.x) {
     const int globalCoord = atomBegin * dataDim + i;
     const int coordInSys  = i % dataDim;
@@ -221,10 +221,10 @@ __global__ void harmonicGradKernel(const int     numSystems,
 
 class HarmonicSystems {
  public:
-  HarmonicSystems(const std::vector<int>&     atomCounts,
-                  const std::vector<double>&  kPerSystem,
-                  const std::vector<double>&  startingPositions,
-                  const std::vector<double>&  targetPositions) {
+  HarmonicSystems(const std::vector<int>&    atomCounts,
+                  const std::vector<double>& kPerSystem,
+                  const std::vector<double>& startingPositions,
+                  const std::vector<double>& targetPositions) {
     numSystems_ = static_cast<int>(atomCounts.size());
     atomStarts_.resize(numSystems_ + 1);
     atomStarts_[0] = 0;
@@ -276,8 +276,8 @@ class HarmonicSystems {
       const double k = kHost_[sysIdx];
       for (int atomIdx = atomStarts_[sysIdx]; atomIdx < atomStarts_[sysIdx + 1]; ++atomIdx) {
         for (int dim = 0; dim < kDim; ++dim) {
-          const int globalCoord  = atomIdx * kDim + dim;
-          grad[globalCoord]      = k * (positions[globalCoord] - targetHost_[sysIdx * kDim + dim]);
+          const int globalCoord = atomIdx * kDim + dim;
+          grad[globalCoord]     = k * (positions[globalCoord] - targetHost_[sysIdx * kDim + dim]);
         }
       }
     }
@@ -297,45 +297,42 @@ class HarmonicSystems {
     return result;
   }
 
-  void writePositions(const std::vector<double>& positions) {
-    positionsDevice_.setFromVector(positions);
-  }
+  void writePositions(const std::vector<double>& positions) { positionsDevice_.setFromVector(positions); }
 
-  int                                 numSystems() const { return numSystems_; }
-  int                                 totalAtoms() const { return totalAtoms_; }
-  int                                 totalCoords() const { return totalCoords_; }
-  const std::vector<int>&             atomStartsHost() const { return atomStarts_; }
-  const std::vector<double>&          startingPositionsHost() const { return positionsHost_; }
-  const std::vector<double>&          targetsHost() const { return targetHost_; }
-  const std::vector<double>&          kHost() const { return kHost_; }
-  nvMolKit::AsyncDeviceVector<int>&   atomStartsDevice() { return atomStartsDevice_; }
+  int                                  numSystems() const { return numSystems_; }
+  int                                  totalAtoms() const { return totalAtoms_; }
+  int                                  totalCoords() const { return totalCoords_; }
+  const std::vector<int>&              atomStartsHost() const { return atomStarts_; }
+  const std::vector<double>&           startingPositionsHost() const { return positionsHost_; }
+  const std::vector<double>&           targetsHost() const { return targetHost_; }
+  const std::vector<double>&           kHost() const { return kHost_; }
+  nvMolKit::AsyncDeviceVector<int>&    atomStartsDevice() { return atomStartsDevice_; }
   nvMolKit::AsyncDeviceVector<double>& positionsDevice() { return positionsDevice_; }
   nvMolKit::AsyncDeviceVector<double>& gradDevice() { return gradDevice_; }
   nvMolKit::AsyncDeviceVector<double>& energyOutsDevice() { return energyOuts_; }
   nvMolKit::AsyncDeviceVector<double>& energyBufferDevice() { return energyBuffer_; }
 
  private:
-  int                                  numSystems_  = 0;
-  int                                  totalAtoms_  = 0;
-  int                                  totalCoords_ = 0;
-  std::vector<int>                     atomStarts_;
-  std::vector<double>                  positionsHost_;
-  std::vector<double>                  targetHost_;
-  std::vector<double>                  kHost_;
-  nvMolKit::AsyncDeviceVector<int>     atomStartsDevice_;
-  nvMolKit::AsyncDeviceVector<double>  positionsDevice_;
-  nvMolKit::AsyncDeviceVector<double>  gradDevice_;
-  nvMolKit::AsyncDeviceVector<double>  energyOuts_;
-  nvMolKit::AsyncDeviceVector<double>  energyBuffer_;
-  nvMolKit::AsyncDeviceVector<double>  kDevice_;
-  nvMolKit::AsyncDeviceVector<double>  targetDevice_;
+  int                                 numSystems_  = 0;
+  int                                 totalAtoms_  = 0;
+  int                                 totalCoords_ = 0;
+  std::vector<int>                    atomStarts_;
+  std::vector<double>                 positionsHost_;
+  std::vector<double>                 targetHost_;
+  std::vector<double>                 kHost_;
+  nvMolKit::AsyncDeviceVector<int>    atomStartsDevice_;
+  nvMolKit::AsyncDeviceVector<double> positionsDevice_;
+  nvMolKit::AsyncDeviceVector<double> gradDevice_;
+  nvMolKit::AsyncDeviceVector<double> energyOuts_;
+  nvMolKit::AsyncDeviceVector<double> energyBuffer_;
+  nvMolKit::AsyncDeviceVector<double> kDevice_;
+  nvMolKit::AsyncDeviceVector<double> targetDevice_;
 };
 
-std::vector<ReferenceSystem> initializeReferenceSystems(const HarmonicSystems&  systems,
-                                                        const ReferenceConfig& cfg) {
+std::vector<ReferenceSystem> initializeReferenceSystems(const HarmonicSystems& systems, const ReferenceConfig& cfg) {
   std::vector<ReferenceSystem> refs(systems.numSystems());
   for (int sysIdx = 0; sysIdx < systems.numSystems(); ++sysIdx) {
-    const auto         sysPos = systems.systemPositions(systems.startingPositionsHost(), sysIdx);
+    const auto          sysPos = systems.systemPositions(systems.startingPositionsHost(), sysIdx);
     std::vector<double> empty;
     initReferenceSystem(refs[sysIdx], sysPos, empty, cfg);
   }
@@ -379,23 +376,23 @@ TEST(FireMinimizer, BatchedReferenceTrajectoryMatchesAseFire2) {
   HarmonicSystems systems(atomCounts, kPerSys, startingPositions, targets);
 
   nvMolKit::FireOptions options;
-  options.dtInit          = 0.001;
-  options.dMax            = 0.0;  // no clip
-  options.gradTol         = 1e-3;
-  options.useMass         = false;
+  options.dtInit           = 0.001;
+  options.dMax             = 0.0;  // no clip
+  options.gradTol          = 1e-3;
+  options.useMass          = false;
   options.takeHalfStepBack = true;
-  options.abcCorrection   = false;
-  options.nMinForIncrease = 5;
+  options.abcCorrection    = false;
+  options.nMinForIncrease  = 5;
 
   nvMolKit::FireBatchMinimizer minimizer(kDim, options);
   minimizer.setConvergencePollInterval(1);
   minimizer.initialize(systems.atomStartsHost());
 
-  ReferenceConfig                   refCfg = referenceConfigFromOptions(options);
-  std::vector<ReferenceSystem>      refs   = initializeReferenceSystems(systems, refCfg);
-  std::vector<bool>                 sawConvergedReference(refs.size(), false);
-  std::vector<int>                  refConvergedAtIter(refs.size(), -1);
-  std::vector<int>                  deviceConvergedAtIter(refs.size(), -1);
+  ReferenceConfig              refCfg = referenceConfigFromOptions(options);
+  std::vector<ReferenceSystem> refs   = initializeReferenceSystems(systems, refCfg);
+  std::vector<bool>            sawConvergedReference(refs.size(), false);
+  std::vector<int>             refConvergedAtIter(refs.size(), -1);
+  std::vector<int>             deviceConvergedAtIter(refs.size(), -1);
 
   const int maxIters = 4000;
   bool      done     = false;
@@ -412,8 +409,8 @@ TEST(FireMinimizer, BatchedReferenceTrajectoryMatchesAseFire2) {
     const auto state     = minimizer.snapshotInternalState();
 
     for (int sysIdx = 0; sysIdx < systems.numSystems(); ++sysIdx) {
-      const auto        devPos = systems.systemPositions(positions, sysIdx);
-      const ReferenceSystem& ref = refs[sysIdx];
+      const auto             devPos = systems.systemPositions(positions, sysIdx);
+      const ReferenceSystem& ref    = refs[sysIdx];
       if (ref.converged && !sawConvergedReference[sysIdx]) {
         sawConvergedReference[sysIdx] = true;
         refConvergedAtIter[sysIdx]    = iter;
@@ -427,12 +424,9 @@ TEST(FireMinimizer, BatchedReferenceTrajectoryMatchesAseFire2) {
                               << " device=" << devPos[coord] << " ref=" << ref.positions[coord];
       }
       if (!ref.converged) {
-        ASSERT_NEAR(state.dt[sysIdx], ref.dt, 1e-12)
-          << "dt mismatch iter=" << iter << " sys=" << sysIdx;
-        ASSERT_NEAR(state.alpha[sysIdx], ref.alpha, 1e-12)
-          << "alpha mismatch iter=" << iter << " sys=" << sysIdx;
-        ASSERT_EQ(state.nStepsPositive[sysIdx], ref.nstep)
-          << "nstep mismatch iter=" << iter << " sys=" << sysIdx;
+        ASSERT_NEAR(state.dt[sysIdx], ref.dt, 1e-12) << "dt mismatch iter=" << iter << " sys=" << sysIdx;
+        ASSERT_NEAR(state.alpha[sysIdx], ref.alpha, 1e-12) << "alpha mismatch iter=" << iter << " sys=" << sysIdx;
+        ASSERT_EQ(state.nStepsPositive[sysIdx], ref.nstep) << "nstep mismatch iter=" << iter << " sys=" << sysIdx;
       }
     }
   }
@@ -447,10 +441,8 @@ TEST(FireMinimizer, BatchedReferenceTrajectoryMatchesAseFire2) {
   // Verify systems converged at staggered iterations (not all on the same step).
   std::vector<int> uniqueConvIters(refConvergedAtIter.begin(), refConvergedAtIter.end());
   std::sort(uniqueConvIters.begin(), uniqueConvIters.end());
-  uniqueConvIters.erase(std::unique(uniqueConvIters.begin(), uniqueConvIters.end()),
-                        uniqueConvIters.end());
-  EXPECT_GE(uniqueConvIters.size(), 2u)
-    << "Test should produce at least two distinct convergence iterations";
+  uniqueConvIters.erase(std::unique(uniqueConvIters.begin(), uniqueConvIters.end()), uniqueConvIters.end());
+  EXPECT_GE(uniqueConvIters.size(), 2u) << "Test should produce at least two distinct convergence iterations";
 }
 
 TEST(FireMinimizer, AbcModeMatchesReference) {
@@ -496,9 +488,8 @@ TEST(FireMinimizer, AbcModeMatchesReference) {
       const auto devPos = systems.systemPositions(positions, sysIdx);
       for (size_t coord = 0; coord < refs[sysIdx].positions.size(); ++coord) {
         const double diff = std::abs(devPos[coord] - refs[sysIdx].positions[coord]);
-        ASSERT_LT(diff, 1e-9)
-          << "iter=" << iter << " sys=" << sysIdx << " coord=" << coord
-          << " device=" << devPos[coord] << " ref=" << refs[sysIdx].positions[coord];
+        ASSERT_LT(diff, 1e-9) << "iter=" << iter << " sys=" << sysIdx << " coord=" << coord
+                              << " device=" << devPos[coord] << " ref=" << refs[sysIdx].positions[coord];
       }
     }
   }
@@ -530,7 +521,7 @@ TEST(FireMinimizer, MaxStepNormClipping) {
 
   std::vector<double> previous = systems.readbackPositions();
   for (int iter = 0; iter < 200; ++iter) {
-    const bool done = minimizer.step(options.gradTol,
+    const bool done    = minimizer.step(options.gradTol,
                                      systems.atomStartsDevice(),
                                      systems.positionsDevice(),
                                      systems.gradDevice(),
@@ -542,8 +533,7 @@ TEST(FireMinimizer, MaxStepNormClipping) {
       drNorm += d * d;
     }
     drNorm = std::sqrt(drNorm);
-    EXPECT_LE(drNorm, options.dMax + 1e-9)
-      << "iter=" << iter << " unbounded displacement " << drNorm;
+    EXPECT_LE(drNorm, options.dMax + 1e-9) << "iter=" << iter << " unbounded displacement " << drNorm;
     previous = current;
     if (done) {
       break;
@@ -551,15 +541,15 @@ TEST(FireMinimizer, MaxStepNormClipping) {
   }
 
   // Repeat without clipping: drNorm exceeds dMax for at least one step
-  HarmonicSystems systems2(atomCounts, kPerSys, startingPositions, targets);
+  HarmonicSystems       systems2(atomCounts, kPerSys, startingPositions, targets);
   nvMolKit::FireOptions options2 = options;
   options2.dMax                  = 0.0;
   nvMolKit::FireBatchMinimizer minimizer2(kDim, options2);
   minimizer2.setConvergencePollInterval(1);
   minimizer2.initialize(systems2.atomStartsHost());
 
-  bool exceeded = false;
-  std::vector<double> prev2 = systems2.readbackPositions();
+  bool                exceeded = false;
+  std::vector<double> prev2    = systems2.readbackPositions();
   for (int iter = 0; iter < 50; ++iter) {
     minimizer2.step(options.gradTol,
                     systems2.atomStartsDevice(),
@@ -579,8 +569,7 @@ TEST(FireMinimizer, MaxStepNormClipping) {
     }
     prev2 = current;
   }
-  EXPECT_TRUE(exceeded)
-    << "Without clipping, the unconstrained dynamics should overshoot dMax in at least one step";
+  EXPECT_TRUE(exceeded) << "Without clipping, the unconstrained dynamics should overshoot dMax in at least one step";
 }
 
 TEST(FireMinimizer, NegativePowerHalfStepBack) {
@@ -697,9 +686,9 @@ TEST(FireMinimizer, MassWeightingScalesAcceleration) {
     return systems.readbackPositions();
   };
 
-  const auto pos1   = runOneKick(1.0);
-  const auto pos5   = runOneKick(5.0);
-  const auto pos10  = runOneKick(10.0);
+  const auto pos1  = runOneKick(1.0);
+  const auto pos5  = runOneKick(5.0);
+  const auto pos10 = runOneKick(10.0);
 
   const double disp1  = std::abs(pos1[0] - startingPositions[0]);
   const double disp5  = std::abs(pos5[0] - startingPositions[0]);
@@ -746,8 +735,8 @@ TEST(FireMinimizer, UseMassFalseEqualsAllOnesMass) {
     return systems.readbackPositions();
   };
 
-  const auto noMass    = runFifty(false, {});
-  const auto unitMass  = runFifty(true, {1.0, 1.0});
+  const auto noMass   = runFifty(false, {});
+  const auto unitMass = runFifty(true, {1.0, 1.0});
   ASSERT_EQ(noMass.size(), unitMass.size());
   for (size_t i = 0; i < noMass.size(); ++i) {
     EXPECT_NEAR(noMass[i], unitMass[i], 1e-12) << "coord " << i;
@@ -763,19 +752,19 @@ TEST(FireMinimizer, ParameterPropagation) {
   HarmonicSystems     systems(atomCounts, kPerSys, startingPositions, targets);
 
   nvMolKit::FireOptions options;
-  options.dtInit           = 0.002;
-  options.dtMinFactor      = 0.01;
-  options.dtMaxFactor      = 4.0;
-  options.alphaInit        = 0.4;
-  options.alphaDecrement   = 0.5;
+  options.dtInit            = 0.002;
+  options.dtMinFactor       = 0.01;
+  options.dtMaxFactor       = 4.0;
+  options.alphaInit         = 0.4;
+  options.alphaDecrement    = 0.5;
   options.timeStepIncrement = 1.5;
   options.timeStepDecrement = 0.25;
-  options.nMinForIncrease  = 2;
-  options.dMax             = 0.0;
-  options.gradTol          = 1e-9;  // never converge during this test
-  options.useMass          = false;
-  options.takeHalfStepBack = true;
-  options.abcCorrection    = false;
+  options.nMinForIncrease   = 2;
+  options.dMax              = 0.0;
+  options.gradTol           = 1e-9;  // never converge during this test
+  options.useMass           = false;
+  options.takeHalfStepBack  = true;
+  options.abcCorrection     = false;
 
   nvMolKit::FireBatchMinimizer minimizer(kDim, options);
   minimizer.setConvergencePollInterval(1);
@@ -900,14 +889,12 @@ TEST(FireMinimizer, ActiveMaskMatchesBfgsContract) {
         EXPECT_DOUBLE_EQ(positions[coord], startingPositions[coord])
           << "Inactive system " << sysIdx << " dim " << dim << " was modified";
       }
-      EXPECT_EQ(finalState.dt[sysIdx], initialState.dt[sysIdx])
-        << "Inactive system " << sysIdx << " dt was modified";
+      EXPECT_EQ(finalState.dt[sysIdx], initialState.dt[sysIdx]) << "Inactive system " << sysIdx << " dt was modified";
       EXPECT_EQ(finalState.alpha[sysIdx], initialState.alpha[sysIdx])
         << "Inactive system " << sysIdx << " alpha was modified";
       EXPECT_EQ(finalState.nStepsPositive[sysIdx], initialState.nStepsPositive[sysIdx])
         << "Inactive system " << sysIdx << " nStepsPositive was modified";
-      EXPECT_EQ(finalState.statuses[sysIdx], 0)
-        << "Inactive system " << sysIdx << " status flipped to active";
+      EXPECT_EQ(finalState.statuses[sysIdx], 0) << "Inactive system " << sysIdx << " status flipped to active";
       for (int dim = 0; dim < kDim; ++dim) {
         const int coord = sysIdx * kDim + dim;
         EXPECT_DOUBLE_EQ(finalState.velocities[coord], 0.0)
@@ -916,8 +903,7 @@ TEST(FireMinimizer, ActiveMaskMatchesBfgsContract) {
     } else {
       for (int dim = 0; dim < kDim; ++dim) {
         const int coord = sysIdx * kDim + dim;
-        EXPECT_NEAR(positions[coord], 0.0, 1e-2)
-          << "Active system " << sysIdx << " dim " << dim << " did not relax";
+        EXPECT_NEAR(positions[coord], 0.0, 1e-2) << "Active system " << sysIdx << " dim " << dim << " did not relax";
       }
     }
   }
@@ -964,8 +950,7 @@ TEST(FireMinimizer, StaggeredConvergenceCount) {
       }
     }
     EXPECT_EQ(minimizer.numActiveSystemsHost(), expectedActive)
-      << "iter=" << iter
-      << " device active count diverged from reference active count";
+      << "iter=" << iter << " device active count diverged from reference active count";
   }
   EXPECT_EQ(minimizer.numActiveSystemsHost(), 0);
 }

@@ -260,16 +260,16 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&   
       std::unordered_map<RDKit::ROMol*, CachedMoleculeData> moleculeCache;
       const int                                             threadId = omp_get_thread_num();
       const WithDevice                                      dev(ctx.devicesPerThread[threadId]);
-      const size_t batchEnd = std::min(batchStart + effectiveBatchSize, totalConformers);
+      const size_t                         batchEnd = std::min(batchStart + effectiveBatchSize, totalConformers);
       std::vector<nvMolKit::ConformerInfo> batchConformers(allConformers.begin() + batchStart,
                                                            allConformers.begin() + batchEnd);
-      cudaStream_t                  streamPtr = ctx.streamPool[threadId].stream();
-      BatchedMolecularSystemHost    systemHost;
-      BatchedForcefieldMetadata     metadata;
-      std::vector<double>           pos;
-      std::vector<double>           massesPerAtom;
-      std::vector<uint32_t>         conformerAtomStarts;
-      uint32_t                      currentAtomOffset = 0;
+      cudaStream_t                         streamPtr = ctx.streamPool[threadId].stream();
+      BatchedMolecularSystemHost           systemHost;
+      BatchedForcefieldMetadata            metadata;
+      std::vector<double>                  pos;
+      std::vector<double>                  massesPerAtom;
+      std::vector<uint32_t>                conformerAtomStarts;
+      uint32_t                             currentAtomOffset = 0;
 
       for (const auto& confInfo : batchConformers) {
         auto*          mol      = confInfo.mol;

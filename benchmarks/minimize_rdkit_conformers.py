@@ -91,7 +91,9 @@ def minimize_molecule(
     return energies
 
 
-def _clone_molecule_with_positions(mol: Chem.Mol, positions: list[Chem.rdGeometry.Point3D]) -> tuple[Chem.Mol, Chem.Conformer]:
+def _clone_molecule_with_positions(
+    mol: Chem.Mol, positions: list[Chem.rdGeometry.Point3D]
+) -> tuple[Chem.Mol, Chem.Conformer]:
     clone = Chem.Mol(mol)
     clone.RemoveAllConformers()
     conf = Chem.Conformer(len(positions))
@@ -187,7 +189,9 @@ def minimize_molecule_with_debug(
     return initial, final, debug_entries, final_positions
 
 
-def _process_debug_task(args: tuple[int, str, int]) -> tuple[int, list[float], list[float], list[dict[str, list[float]]], list[list[list[float]]]]:
+def _process_debug_task(
+    args: tuple[int, str, int],
+) -> tuple[int, list[float], list[float], list[dict[str, list[float]]], list[list[list[float]]]]:
     index, mol_block, max_iters = args
     mol = Chem.MolFromMolBlock(mol_block, sanitize=True, removeHs=False, strictParsing=False)
     if mol is None:
@@ -268,9 +272,7 @@ def main() -> None:
     mols = load_conformers(args.input_sdf)
 
     output_prefix = (
-        args.output_prefix
-        if args.output_prefix is not None
-        else args.input_sdf.parent / args.input_sdf.stem
+        args.output_prefix if args.output_prefix is not None else args.input_sdf.parent / args.input_sdf.stem
     )
     output_prefix.parent.mkdir(parents=True, exist_ok=True)
 
@@ -303,12 +305,8 @@ def main() -> None:
         with args.fire_debug_output.open("w", encoding="utf-8") as handle:
             json.dump(debug_data, handle)
 
-    print(
-        f"Processed {len(initial_array)} conformers. Saved minimized structures to {minimized_sdf}."
-    )
+    print(f"Processed {len(initial_array)} conformers. Saved minimized structures to {minimized_sdf}.")
 
 
 if __name__ == "__main__":
     main()
-
-

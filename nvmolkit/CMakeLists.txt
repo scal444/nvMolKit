@@ -46,8 +46,8 @@ installpythontarget(_arrayHelpers ./)
 add_library(_types MODULE types.cpp)
 target_link_libraries(_types PUBLIC ${Boost_LIBRARIES})
 target_link_libraries(_types PRIVATE bfgs_mmff)
-target_include_directories(
-  _types PUBLIC ${PROJECT_SOURCE_DIR}/src ${Python_INCLUDE_DIRS})
+target_include_directories(_types PUBLIC ${PROJECT_SOURCE_DIR}/src
+                                         ${Python_INCLUDE_DIRS})
 target_include_directories(_types SYSTEM PUBLIC ${Boost_INCLUDE_DIRS})
 installpythontarget(_types ./)
 
