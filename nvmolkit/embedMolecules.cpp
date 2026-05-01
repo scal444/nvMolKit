@@ -20,6 +20,7 @@
 
 #include "boost_python_utils.h"
 #include "etkdg.h"
+#include "minimizer/bfgs_types.h"
 
 static boost::python::list getGpuIdsPy(nvMolKit::BatchHardwareOptions& opts) {
   return nvMolKit::vectorToList(opts.gpuIds);
@@ -55,13 +56,18 @@ BOOST_PYTHON_MODULE(_embedMolecules) {
     .def_readwrite("batchesPerGpu", &nvMolKit::BatchHardwareOptions::batchesPerGpu)
     .add_property("gpuIds", &getGpuIdsPy, &setGpuIds);
 
+  boost::python::enum_<nvMolKit::MinimizerKind>("MinimizerKind")
+    .value("BFGS", nvMolKit::MinimizerKind::BFGS)
+    .value("FIRE", nvMolKit::MinimizerKind::FIRE);
+
   boost::python::def(
     "EmbedMolecules",
     +[](const boost::python::list&                  molecules,
         const RDKit::DGeomHelpers::EmbedParameters& params,
         int                                         confsPerMolecule,
         int                                         maxIterations,
-        const nvMolKit::BatchHardwareOptions&       hardwareOptions) {
+        const nvMolKit::BatchHardwareOptions&       hardwareOptions,
+        nvMolKit::MinimizerKind                     minimizerKind) {
       auto molsVec = nvMolKit::extractMolecules(molecules);
 
       // Call the C++ function with nullptr for failures
@@ -71,13 +77,16 @@ BOOST_PYTHON_MODULE(_embedMolecules) {
                                maxIterations,
                                false,    // debugMode = false
                                nullptr,  // failures = nullptr
-                               hardwareOptions);
+                               hardwareOptions,
+                               nvMolKit::BfgsBackend::HYBRID,
+                               minimizerKind);
     },
     (boost::python::arg("molecules"),
      boost::python::arg("params"),
      boost::python::arg("confsPerMolecule") = 1,
      boost::python::arg("maxIterations")    = -1,
-     boost::python::arg("hardwareOptions")  = nvMolKit::BatchHardwareOptions()),
+     boost::python::arg("hardwareOptions")  = nvMolKit::BatchHardwareOptions(),
+     boost::python::arg("minimizerKind")    = nvMolKit::MinimizerKind::BFGS),
     "Embed multiple molecules with multiple conformers using ETKDG.\n"
     "\n"
     "Args:\n"
@@ -86,6 +95,8 @@ BOOST_PYTHON_MODULE(_embedMolecules) {
     "    confsPerMolecule: Number of conformers to generate per molecule (default: 1)\n"
     "    maxIterations: Maximum iterations, -1 for auto (default: -1)\n"
     "    hardwareOptions: BatchHardwareOptions object with hardware settings (default: default options)\n"
+    "    minimizerKind: Selects the inner minimizer (BFGS or FIRE). Default BFGS preserves\n"
+    "                   historical behavior. FIRE always runs through the batched path.\n"
     "\n"
     "Returns:\n"
     "    None (molecules are modified in-place with generated conformers)");

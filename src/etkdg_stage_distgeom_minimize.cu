@@ -81,7 +81,7 @@ DistGeomMinimizeStage::DistGeomMinimizeStage(
   const std::vector<EmbedArgs>&                                                         eargs,
   const RDKit::DGeomHelpers::EmbedParameters&                                           embedParam,
   ETKDGContext&                                                                         ctx,
-  BfgsBatchMinimizer&                                                                   minimizer,
+  const MinimizerHandle&                                                                minimizer,
   double                                                                                chiralWeight,
   double                                                                                fourthDimWeight,
   int                                                                                   maxIters,
@@ -179,9 +179,13 @@ void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
                                         double        fourthDimWeight,
                                         int           maxIters,
                                         bool          checkEnergy) {
-  const auto effectiveBackend = minimizer_.resolveBackend(ctx.systemHost.atomStarts);
+  // FIRE always runs through the BATCHED BatchedForcefield path; only BFGS may
+  // resolve to PER_MOLECULE / HYBRID.
+  const bool useBatchedForcefield =
+    minimizer_.kind == MinimizerKind::FIRE ||
+    minimizer_.bfgs->resolveBackend(ctx.systemHost.atomStarts) == BfgsBackend::BATCHED;
 
-  if (effectiveBackend == BfgsBackend::BATCHED) {
+  if (useBatchedForcefield) {
     DGBatchedForcefield forcefield(molSystemHost,
                                    ctx.systemHost.atomStarts,
                                    chiralWeight,
@@ -193,13 +197,22 @@ void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
     energyOuts_.resize(ctx.systemHost.atomStarts.size() - 1);
     energyOuts_.zero();
     repeatUntilConverged([&]() {
-      return minimizer_.minimize(maxIters,
-                                 embedParam_.optimizerForceTol,
-                                 forcefield,
-                                 ctx.systemDevice.positions,
-                                 grad_,
-                                 energyOuts_,
-                                 ctx.activeThisStage.data());
+      if (minimizer_.kind == MinimizerKind::FIRE) {
+        return minimizer_.fire->minimize(maxIters,
+                                         embedParam_.optimizerForceTol,
+                                         forcefield,
+                                         ctx.systemDevice.positions,
+                                         grad_,
+                                         energyOuts_,
+                                         ctx.activeThisStage.data());
+      }
+      return minimizer_.bfgs->minimize(maxIters,
+                                       embedParam_.optimizerForceTol,
+                                       forcefield,
+                                       ctx.systemDevice.positions,
+                                       grad_,
+                                       energyOuts_,
+                                       ctx.activeThisStage.data());
     });
 
     if (checkEnergy) {
@@ -223,15 +236,15 @@ void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
                                  static_cast<int>(ctx.systemHost.atomStarts.size() - 1));
 
     repeatUntilConverged([&]() {
-      return minimizer_.minimizeWithDG(maxIters,
-                                       embedParam_.optimizerForceTol,
-                                       ctx.systemHost.atomStarts,
-                                       ctx.systemDevice.atomStarts,
-                                       ctx.systemDevice.positions,
-                                       molSystemDevice,
-                                       chiralWeight,
-                                       fourthDimWeight,
-                                       ctx.activeThisStage.data());
+      return minimizer_.bfgs->minimizeWithDG(maxIters,
+                                             embedParam_.optimizerForceTol,
+                                             ctx.systemHost.atomStarts,
+                                             ctx.systemDevice.atomStarts,
+                                             ctx.systemDevice.positions,
+                                             molSystemDevice,
+                                             chiralWeight,
+                                             fourthDimWeight,
+                                             ctx.activeThisStage.data());
     });
 
     if (checkEnergy) {

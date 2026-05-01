@@ -28,12 +28,22 @@
 #include "etkdg_impl.h"
 #include "etkdg_stage_coordgen.h"
 #include "etkdg_stage_distgeom_minimize.h"
+#include "minimizer/fire_minimizer.h"
 #include "test_utils.h"
 #include "utils/host_vector.h"
 
 using namespace ::nvMolKit::detail;
 
 using ETKDGStageTestParams = std::tuple<ETKDGOption, int>;
+using ETKDGMinimizeParam   = std::tuple<ETKDGOption, nvMolKit::MinimizerKind>;
+
+namespace {
+
+std::string minimizerKindName(nvMolKit::MinimizerKind kind) {
+  return kind == nvMolKit::MinimizerKind::FIRE ? "FIRE" : "BFGS";
+}
+
+}  // namespace
 
 namespace {
 
@@ -133,7 +143,7 @@ void checkFinalEnergies(const std::vector<double>&                        finalE
 }  // anonymous namespace
 
 // Test fixture for single molecule tests
-class ETKDGMinimizeSingleMolTestFixture : public ::testing::TestWithParam<ETKDGOption> {
+class ETKDGMinimizeSingleMolTestFixture : public ::testing::TestWithParam<ETKDGMinimizeParam> {
  public:
   ETKDGMinimizeSingleMolTestFixture() { testDataFolderPath_ = getTestDataFolderPath(); }
 
@@ -153,12 +163,18 @@ class ETKDGMinimizeSingleMolTestFixture : public ::testing::TestWithParam<ETKDGO
     molsPtrs_.push_back(std::move(molPtr_));
 
     // Initialize common test components
-    embedParam_                 = getETKDGOption(GetParam());
+    embedParam_                 = getETKDGOption(std::get<0>(GetParam()));
     embedParam_.useRandomCoords = true;
     initTestComponents();
 
-    // Create minimizer after context is initialized
-    minimizer_ = std::make_unique<nvMolKit::BfgsBatchMinimizer>(4, nvMolKit::DebugLevel::NONE, true, nullptr);
+    // Construct both minimizers; the active one is selected through handle_.
+    minimizer_     = std::make_unique<nvMolKit::BfgsBatchMinimizer>(4, nvMolKit::DebugLevel::NONE, true, nullptr);
+    nvMolKit::FireOptions fireOptions{};
+    fireOptions.useMass = false;
+    fireMinimizer_      = std::make_unique<nvMolKit::FireBatchMinimizer>(4, fireOptions, nullptr);
+    handle_             = std::get<1>(GetParam()) == nvMolKit::MinimizerKind::FIRE
+                            ? nvMolKit::detail::MinimizerHandle::forFire(*fireMinimizer_)
+                            : nvMolKit::detail::MinimizerHandle::forBfgs(*minimizer_);
 
     // Pre-allocate scratch buffers for stages
     const size_t totalAtoms = context_.systemHost.atomStarts.back();
@@ -169,16 +185,18 @@ class ETKDGMinimizeSingleMolTestFixture : public ::testing::TestWithParam<ETKDGO
   void initTestComponents() { initTestComponentsCommon(mols_, molsPtrs_, context_, eargs_, embedParam_); }
 
  protected:
-  std::string                                   testDataFolderPath_;
-  std::unique_ptr<RDKit::RWMol>                 molPtr_;
-  std::vector<std::unique_ptr<RDKit::RWMol>>    molsPtrs_;
-  std::vector<const RDKit::ROMol*>              mols_;
-  ETKDGContext                                  context_;
-  std::vector<nvMolKit::detail::EmbedArgs>      eargs_;
-  RDKit::DGeomHelpers::EmbedParameters          embedParam_;
-  std::unique_ptr<nvMolKit::BfgsBatchMinimizer> minimizer_;
-  nvMolKit::PinnedHostVector<double>            positionsScratch_;
-  nvMolKit::PinnedHostVector<uint8_t>           activeScratch_;
+  std::string                                    testDataFolderPath_;
+  std::unique_ptr<RDKit::RWMol>                  molPtr_;
+  std::vector<std::unique_ptr<RDKit::RWMol>>     molsPtrs_;
+  std::vector<const RDKit::ROMol*>               mols_;
+  ETKDGContext                                   context_;
+  std::vector<nvMolKit::detail::EmbedArgs>       eargs_;
+  RDKit::DGeomHelpers::EmbedParameters           embedParam_;
+  std::unique_ptr<nvMolKit::BfgsBatchMinimizer>  minimizer_;
+  std::unique_ptr<nvMolKit::FireBatchMinimizer>  fireMinimizer_;
+  nvMolKit::detail::MinimizerHandle              handle_;
+  nvMolKit::PinnedHostVector<double>             positionsScratch_;
+  nvMolKit::PinnedHostVector<uint8_t>            activeScratch_;
 };
 
 // BFGS Stage Tests
@@ -192,7 +210,7 @@ TEST_P(ETKDGMinimizeSingleMolTestFixture, FirstMinimizeStageBFGSTest) {
                                                                          eargs_,
                                                                          embedParam_,
                                                                          context_,
-                                                                         *minimizer_,
+                                                                         handle_,
                                                                          1.0,
                                                                          0.1,
                                                                          400,
@@ -232,7 +250,7 @@ TEST_P(ETKDGMinimizeSingleMolTestFixture, FourthDimMinimizeStageBFGSTest) {
                                                                              eargs_,
                                                                              embedParam_,
                                                                              context_,
-                                                                             *minimizer_,
+                                                                             handle_,
                                                                              0.2,
                                                                              1.0,
                                                                              200,
@@ -266,7 +284,7 @@ TEST_P(ETKDGMinimizeSingleMolTestFixture, FullMinimizationPipelineBFGSTest) {
                                                                               eargs_,
                                                                               embedParam_,
                                                                               context_,
-                                                                              *minimizer_,
+                                                                              handle_,
                                                                               1.0,
                                                                               0.1,
                                                                               400,
@@ -325,7 +343,7 @@ TEST_P(ETKDGMinimizeSingleMolTestFixture, FirstPartETKDGPipelineBFGSTest) {
                                                                               eargs_,
                                                                               embedParam_,
                                                                               context_,
-                                                                              *minimizer_,
+                                                                              handle_,
                                                                               1.0,
                                                                               0.1,
                                                                               400,
@@ -367,7 +385,7 @@ TEST_P(ETKDGMinimizeSingleMolTestFixture, FirstPartETKDGPipelineBFGSTest) {
 }
 
 // Test fixture for multiple diverse molecules tests
-class ETKDGMinimizeMultiMolDiverseTestFixture : public ::testing::TestWithParam<ETKDGOption> {
+class ETKDGMinimizeMultiMolDiverseTestFixture : public ::testing::TestWithParam<ETKDGMinimizeParam> {
  public:
   ETKDGMinimizeMultiMolDiverseTestFixture() { testDataFolderPath_ = getTestDataFolderPath(); }
 
@@ -391,12 +409,18 @@ class ETKDGMinimizeMultiMolDiverseTestFixture : public ::testing::TestWithParam<
     ASSERT_EQ(mols_.size(), 5) << "Expected 5 molecules";
 
     // Initialize common test components
-    embedParam_                 = getETKDGOption(GetParam());
+    embedParam_                 = getETKDGOption(std::get<0>(GetParam()));
     embedParam_.useRandomCoords = true;
     initTestComponents();
 
-    // Create minimizer after context is initialized
+    // Construct both minimizers; the active one is selected through handle_.
     minimizer_ = std::make_unique<nvMolKit::BfgsBatchMinimizer>(4, nvMolKit::DebugLevel::NONE, true, nullptr);
+    nvMolKit::FireOptions fireOptions{};
+    fireOptions.useMass = false;
+    fireMinimizer_      = std::make_unique<nvMolKit::FireBatchMinimizer>(4, fireOptions, nullptr);
+    handle_             = std::get<1>(GetParam()) == nvMolKit::MinimizerKind::FIRE
+                            ? nvMolKit::detail::MinimizerHandle::forFire(*fireMinimizer_)
+                            : nvMolKit::detail::MinimizerHandle::forBfgs(*minimizer_);
 
     // Pre-allocate scratch buffers for stages
     const size_t totalAtoms = context_.systemHost.atomStarts.back();
@@ -407,15 +431,17 @@ class ETKDGMinimizeMultiMolDiverseTestFixture : public ::testing::TestWithParam<
   void initTestComponents() { initTestComponentsCommon(mols_, molsPtrs_, context_, eargs_, embedParam_); }
 
  protected:
-  std::string                                   testDataFolderPath_;
-  std::vector<std::unique_ptr<RDKit::RWMol>>    molsPtrs_;
-  std::vector<const RDKit::ROMol*>              mols_;
-  ETKDGContext                                  context_;
-  std::vector<nvMolKit::detail::EmbedArgs>      eargs_;
-  RDKit::DGeomHelpers::EmbedParameters          embedParam_;
-  std::unique_ptr<nvMolKit::BfgsBatchMinimizer> minimizer_;
-  nvMolKit::PinnedHostVector<double>            positionsScratch_;
-  nvMolKit::PinnedHostVector<uint8_t>           activeScratch_;
+  std::string                                    testDataFolderPath_;
+  std::vector<std::unique_ptr<RDKit::RWMol>>     molsPtrs_;
+  std::vector<const RDKit::ROMol*>               mols_;
+  ETKDGContext                                   context_;
+  std::vector<nvMolKit::detail::EmbedArgs>       eargs_;
+  RDKit::DGeomHelpers::EmbedParameters           embedParam_;
+  std::unique_ptr<nvMolKit::BfgsBatchMinimizer>  minimizer_;
+  std::unique_ptr<nvMolKit::FireBatchMinimizer>  fireMinimizer_;
+  nvMolKit::detail::MinimizerHandle              handle_;
+  nvMolKit::PinnedHostVector<double>             positionsScratch_;
+  nvMolKit::PinnedHostVector<uint8_t>            activeScratch_;
 };
 
 // BFGS Stage Tests for diverse molecules
@@ -431,7 +457,7 @@ TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, FirstMinimizeStageBFGSTest) {
                                                                          eargs_,
                                                                          embedParam_,
                                                                          context_,
-                                                                         *minimizer_,
+                                                                         handle_,
                                                                          1.0,
                                                                          0.1,
                                                                          400,
@@ -472,7 +498,7 @@ TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, FourthDimMinimizeStageBFGSTest) 
                                                                              eargs_,
                                                                              embedParam_,
                                                                              context_,
-                                                                             *minimizer_,
+                                                                             handle_,
                                                                              0.2,
                                                                              1.0,
                                                                              200,
@@ -508,7 +534,7 @@ TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, FullMinimizationPipelineBFGSTest
                                                                               eargs_,
                                                                               embedParam_,
                                                                               context_,
-                                                                              *minimizer_,
+                                                                              handle_,
                                                                               1.0,
                                                                               0.1,
                                                                               400,
@@ -569,7 +595,7 @@ TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, FirstPartETKDGPipelineBFGSTest) 
                                                                               eargs_,
                                                                               embedParam_,
                                                                               context_,
-                                                                              *minimizer_,
+                                                                              handle_,
                                                                               1.0,
                                                                               0.1,
                                                                               400,
@@ -614,7 +640,7 @@ TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, FirstMinimizeStageBFGSWithInacti
                                                                          eargs_,
                                                                          embedParam_,
                                                                          context_,
-                                                                         *minimizer_,
+                                                                         handle_,
                                                                          1.0,
                                                                          0.1,
                                                                          400,
@@ -656,8 +682,14 @@ TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, FirstMinimizeStageBFGSWithInacti
 INSTANTIATE_TEST_SUITE_P(
   ETKDGOptions,
   ETKDGMinimizeSingleMolTestFixture,
-  ::testing::Values(ETKDGOption::ETKDGv3, ETKDGOption::ETKDGv2, ETKDGOption::ETKDG, ETKDGOption::KDG),
-  [](const ::testing::TestParamInfo<ETKDGOption>& info) { return getETKDGOptionName(info.param); });
+  ::testing::Combine(::testing::Values(ETKDGOption::ETKDGv3,
+                                       ETKDGOption::ETKDGv2,
+                                       ETKDGOption::ETKDG,
+                                       ETKDGOption::KDG),
+                     ::testing::Values(nvMolKit::MinimizerKind::BFGS, nvMolKit::MinimizerKind::FIRE)),
+  [](const ::testing::TestParamInfo<ETKDGMinimizeParam>& info) {
+    return getETKDGOptionName(std::get<0>(info.param)) + "_" + minimizerKindName(std::get<1>(info.param));
+  });
 
 // TODO: Currently only testing ETKDGv3 due to non-deterministic failures when testing multiple options.
 // When multiple ETKDGOptions are tested together (even though each may pass individually),
@@ -665,9 +697,11 @@ INSTANTIATE_TEST_SUITE_P(
 // specifically in the setupRDKitFFWithPos call which ports RDKit's original ETKDG pipeline.
 // Previous attempts to resolve similar issues by cleaning up the RDKit porting were partially
 // successful but not definitive. Further investigation is needed
-INSTANTIATE_TEST_SUITE_P(ETKDGOptions,
-                         ETKDGMinimizeMultiMolDiverseTestFixture,
-                         ::testing::Values(ETKDGOption::ETKDGv3),
-                         [](const ::testing::TestParamInfo<ETKDGOption>& info) {
-                           return getETKDGOptionName(info.param);
-                         });
+INSTANTIATE_TEST_SUITE_P(
+  ETKDGOptions,
+  ETKDGMinimizeMultiMolDiverseTestFixture,
+  ::testing::Combine(::testing::Values(ETKDGOption::ETKDGv3),
+                     ::testing::Values(nvMolKit::MinimizerKind::BFGS, nvMolKit::MinimizerKind::FIRE)),
+  [](const ::testing::TestParamInfo<ETKDGMinimizeParam>& info) {
+    return getETKDGOptionName(std::get<0>(info.param)) + "_" + minimizerKindName(std::get<1>(info.param));
+  });

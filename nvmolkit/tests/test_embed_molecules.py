@@ -188,11 +188,13 @@ def compare_conformers_rmsd(rdkit_mols, nvmolkit_mols, rmsd_threshold=0.2, min_m
 
 
 @pytest.mark.parametrize("etkdg_variant", ["ETKDG", "ETKDGv2", "ETKDGv3", "srETKDGv3", "KDG", "ETDG", "DG"])
-def test_embed_molecules_serial_vs_rdkit(embed_test_mols, etkdg_variant):
+@pytest.mark.parametrize("minimizer_kind", [embed.MinimizerKind.BFGS, embed.MinimizerKind.FIRE])
+def test_embed_molecules_serial_vs_rdkit(embed_test_mols, etkdg_variant, minimizer_kind):
     """Test nvMolKit EmbedMolecules one molecule at a time against RDKit reference.
 
     This test compares the conformer generation when embedding molecules individually
-    using nvMolKit vs RDKit's EmbedMultipleConfs function for different ETKDG variants.
+    using nvMolKit vs RDKit's EmbedMultipleConfs function for different ETKDG variants
+    and both supported inner minimizers (BFGS and FIRE).
     """
     confs_per_mol = 5
 
@@ -236,7 +238,12 @@ def test_embed_molecules_serial_vs_rdkit(embed_test_mols, etkdg_variant):
         )
 
         embed.EmbedMolecules(
-            [mol], params, confsPerMolecule=confs_per_mol, maxIterations=-1, hardwareOptions=hardware_opts
+            [mol],
+            params,
+            confsPerMolecule=confs_per_mol,
+            maxIterations=-1,
+            hardwareOptions=hardware_opts,
+            minimizerKind=minimizer_kind,
         )
         nvmolkit_conf_counts.append(mol.GetNumConformers())
 
@@ -257,17 +264,24 @@ def test_embed_molecules_serial_vs_rdkit(embed_test_mols, etkdg_variant):
             f"Molecule {mol_idx}: expected {confs_per_mol} conformers, got {nvmolkit_count}"
         )
 
-    # Compare conformer similarity using RMSD
-    compare_conformers_rmsd(rdkit_mols, nvmolkit_mols, rmsd_threshold=0.2, min_match_fraction=0.5)
+    # Compare conformer similarity using RMSD. The RDKit reference uses RDKit's BFGS-style
+    # minimizer, so a FIRE-driven nvMolKit run will systematically deviate more than the
+    # BFGS-driven run; widen the RMSD budget for FIRE accordingly.
+    if minimizer_kind == embed.MinimizerKind.FIRE:
+        compare_conformers_rmsd(rdkit_mols, nvmolkit_mols, rmsd_threshold=0.5, min_match_fraction=0.3)
+    else:
+        compare_conformers_rmsd(rdkit_mols, nvmolkit_mols, rmsd_threshold=0.2, min_match_fraction=0.5)
 
 
 @pytest.mark.parametrize("etkdg_variant", ["ETKDG", "ETKDGv2", "ETKDGv3", "srETKDGv3", "KDG", "ETDG", "DG"])
 @pytest.mark.parametrize("gpu_ids", [[], [0], [1], [0, 1]])
-def test_embed_molecules_batch_vs_rdkit(embed_test_mols, etkdg_variant, gpu_ids):
+@pytest.mark.parametrize("minimizer_kind", [embed.MinimizerKind.BFGS, embed.MinimizerKind.FIRE])
+def test_embed_molecules_batch_vs_rdkit(embed_test_mols, etkdg_variant, gpu_ids, minimizer_kind):
     """Test nvMolKit EmbedMolecules batch mode against RDKit reference.
 
     This test compares the conformer generation when embedding all molecules together
-    in batch mode using nvMolKit vs individual RDKit embedding for different ETKDG variants.
+    in batch mode using nvMolKit vs individual RDKit embedding for different ETKDG
+    variants and both supported inner minimizers (BFGS and FIRE).
     """
     available_devices = torch.cuda.device_count()
     if available_devices == 1 and 1 in gpu_ids:
@@ -312,7 +326,12 @@ def test_embed_molecules_batch_vs_rdkit(embed_test_mols, etkdg_variant, gpu_ids)
     )
 
     embed.EmbedMolecules(
-        nvmolkit_mols, params, confsPerMolecule=confs_per_mol, maxIterations=-1, hardwareOptions=hardware_opts
+        nvmolkit_mols,
+        params,
+        confsPerMolecule=confs_per_mol,
+        maxIterations=-1,
+        hardwareOptions=hardware_opts,
+        minimizerKind=minimizer_kind,
     )
 
     # Get nvMolKit conformer counts
@@ -335,8 +354,12 @@ def test_embed_molecules_batch_vs_rdkit(embed_test_mols, etkdg_variant, gpu_ids)
             f"Molecule {mol_idx}: expected {confs_per_mol} conformers, got {nvmolkit_count}"
         )
 
-    # Compare conformer similarity using RMSD
-    compare_conformers_rmsd(rdkit_mols, nvmolkit_mols, rmsd_threshold=0.2, min_match_fraction=0.5)
+    # Compare conformer similarity using RMSD. See the serial-mode test for the rationale
+    # behind the wider FIRE budget.
+    if minimizer_kind == embed.MinimizerKind.FIRE:
+        compare_conformers_rmsd(rdkit_mols, nvmolkit_mols, rmsd_threshold=0.5, min_match_fraction=0.3)
+    else:
+        compare_conformers_rmsd(rdkit_mols, nvmolkit_mols, rmsd_threshold=0.2, min_match_fraction=0.5)
 
 
 def test_embed_molecules_empty_input():
@@ -370,7 +393,8 @@ def test_embed_molecules_invalid_params():
         embed.EmbedMolecules([mol], params)
 
 
-def test_embed_molecules_with_hardware_options(embed_test_mols):
+@pytest.mark.parametrize("minimizer_kind", [embed.MinimizerKind.BFGS, embed.MinimizerKind.FIRE])
+def test_embed_molecules_with_hardware_options(embed_test_mols, minimizer_kind):
     """Test nvMolKit EmbedMolecules using hardware options wrapper."""
     confs_per_mol = 3
 
@@ -391,7 +415,12 @@ def test_embed_molecules_with_hardware_options(embed_test_mols):
 
     # Embed molecules using the struct interface
     embed.EmbedMolecules(
-        nvmolkit_mols, params, confsPerMolecule=confs_per_mol, maxIterations=-1, hardwareOptions=hardware_opts
+        nvmolkit_mols,
+        params,
+        confsPerMolecule=confs_per_mol,
+        maxIterations=-1,
+        hardwareOptions=hardware_opts,
+        minimizerKind=minimizer_kind,
     )
 
     # Verify conformer counts
@@ -402,7 +431,8 @@ def test_embed_molecules_with_hardware_options(embed_test_mols):
         )
 
 
-def test_embed_molecules_allows_large_molecule_interleaved():
+@pytest.mark.parametrize("minimizer_kind", [embed.MinimizerKind.BFGS, embed.MinimizerKind.FIRE])
+def test_embed_molecules_allows_large_molecule_interleaved(minimizer_kind):
     """Ensure a large (>256 atoms) molecule in batch is accepted and embedded."""
     small1 = Chem.AddHs(Chem.MolFromSmiles("CCCCCC"))  # 6 atoms
     small2 = Chem.AddHs(Chem.MolFromSmiles("CCC"))  # 3 atoms
@@ -413,17 +443,18 @@ def test_embed_molecules_allows_large_molecule_interleaved():
     params.useRandomCoords = True
     params.maxIterations = 5
 
-    embed.EmbedMolecules([small1, big, small2], params, confsPerMolecule=1)
+    embed.EmbedMolecules([small1, big, small2], params, confsPerMolecule=1, minimizerKind=minimizer_kind)
     assert small1.GetNumConformers() == 1
     assert small2.GetNumConformers() == 1
     assert big.GetNumConformers() == 1
 
 
-def test_embed_molecules_prune_rmsthresh():
+@pytest.mark.parametrize("minimizer_kind", [embed.MinimizerKind.BFGS, embed.MinimizerKind.FIRE])
+def test_embed_molecules_prune_rmsthresh(minimizer_kind):
     mols = [Chem.MolFromSmiles("c1ccccc1"), Chem.MolFromSmiles("C" * 30)]
     params = EmbedParameters()
     params.useRandomCoords = True
     params.pruneRmsThresh = 0.5
-    embed.EmbedMolecules(mols, params, confsPerMolecule=5)
+    embed.EmbedMolecules(mols, params, confsPerMolecule=5, minimizerKind=minimizer_kind)
     assert mols[0].GetNumConformers() == 1
     assert mols[1].GetNumConformers() == 5

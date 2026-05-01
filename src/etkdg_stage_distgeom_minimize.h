@@ -23,6 +23,7 @@
 #include "bfgs_minimize.h"
 #include "dist_geom.h"
 #include "etkdg_impl.h"
+#include "minimizer/fire_minimizer.h"
 
 using ::nvMolKit::detail::EmbedArgs;
 using ::nvMolKit::detail::ETKDGContext;
@@ -37,21 +38,36 @@ constexpr double MAX_MINIMIZED_E_PER_ATOM = 0.05;  // Maximum energy per atom th
 class DistGeomMinimizeStage : public ETKDGStage {
  public:
   /**
-   * @brief Construct a distance geometry minimization stage
+   * @brief Construct a distance geometry minimization stage.
    *
-   * @param mols Vector of molecules to minimize
-   * @param eargs Vector of embed arguments
-   * @param embedParam Embedding parameters
-   * @param ctx ETKDG context
-   * @param minimizer BFGS minimizer
-   * @param chiralWeight Weight for Chiral violation term
-   * @param fourthDimWeight Weight for 4th dim minimization term
-   * @param maxIters Maximum number of iterations per minimization cycle
-   * @param checkEnergy Whether to check energy per atom after minimization
-   * @param stageName Name of the stage for logging
-   * @param stream CUDA stream
-   * @param cache Optional cache for force field parameters
+   * @param mols Vector of molecules to minimize.
+   * @param eargs Vector of embed arguments.
+   * @param embedParam Embedding parameters.
+   * @param ctx ETKDG context.
+   * @param minimizer Type-tagged handle to the minimizer (BFGS or FIRE).
+   * @param chiralWeight Weight for chiral violation term.
+   * @param fourthDimWeight Weight for 4th-dim minimization term.
+   * @param maxIters Maximum number of iterations per minimization cycle.
+   * @param checkEnergy Whether to check energy per atom after minimization.
+   * @param stageName Name of the stage for logging.
+   * @param stream CUDA stream.
+   * @param cache Optional cache for force-field parameters.
    */
+  DistGeomMinimizeStage(
+    const std::vector<const RDKit::ROMol*>&                                               mols,
+    const std::vector<EmbedArgs>&                                                         eargs,
+    const RDKit::DGeomHelpers::EmbedParameters&                                           embedParam,
+    ETKDGContext&                                                                         ctx,
+    const MinimizerHandle&                                                                minimizer,
+    double                                                                                chiralWeight,
+    double                                                                                fourthDimWeight,
+    int                                                                                   maxIters,
+    bool                                                                                  checkEnergy,
+    const std::string&                                                                    stageName,
+    cudaStream_t                                                                          stream = nullptr,
+    std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::EnergyForceContribsHost>* cache  = nullptr);
+
+  //! \brief Backwards-compatible constructor that selects the BFGS path.
   DistGeomMinimizeStage(
     const std::vector<const RDKit::ROMol*>&                                               mols,
     const std::vector<EmbedArgs>&                                                         eargs,
@@ -64,7 +80,19 @@ class DistGeomMinimizeStage : public ETKDGStage {
     bool                                                                                  checkEnergy,
     const std::string&                                                                    stageName,
     cudaStream_t                                                                          stream = nullptr,
-    std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::EnergyForceContribsHost>* cache  = nullptr);
+    std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::EnergyForceContribsHost>* cache  = nullptr)
+      : DistGeomMinimizeStage(mols,
+                              eargs,
+                              embedParam,
+                              ctx,
+                              MinimizerHandle::forBfgs(minimizer),
+                              chiralWeight,
+                              fourthDimWeight,
+                              maxIters,
+                              checkEnergy,
+                              stageName,
+                              stream,
+                              cache) {}
 
   void executeImpl(ETKDGContext& ctx, double chiralWeight, double fourthDimWeight, int maxIters, bool checkEnergy);
 
@@ -80,7 +108,7 @@ class DistGeomMinimizeStage : public ETKDGStage {
   AsyncDeviceVector<double>                         grad_;
   AsyncDeviceVector<double>                         energyOuts_;
   const RDKit::DGeomHelpers::EmbedParameters&       embedParam_;
-  BfgsBatchMinimizer&                               minimizer_;
+  MinimizerHandle                                   minimizer_;
   double                                            chiralWeight_;
   double                                            fourthDimWeight_;
   int                                               maxIters_;

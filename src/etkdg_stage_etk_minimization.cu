@@ -106,7 +106,7 @@ ETKMinimizationStage::ETKMinimizationStage(
   const std::vector<EmbedArgs>&                                                           eargs,
   const RDKit::DGeomHelpers::EmbedParameters&                                             embedParam,
   const ETKDGContext&                                                                     ctx,
-  BfgsBatchMinimizer&                                                                     minimizer,
+  const MinimizerHandle&                                                                  minimizer,
   cudaStream_t                                                                            stream,
   std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::Energy3DForceContribsHost>* cache)
     : embedParam_(embedParam),
@@ -202,29 +202,42 @@ void ETKMinimizationStage::setReferenceValues(const ETKDGContext&               
 }
 
 void ETKMinimizationStage::execute(ETKDGContext& ctx) {
-  const auto effectiveBackend = minimizer_.resolveBackend(ctx.systemHost.atomStarts);
+  // FIRE always runs through the BATCHED BatchedForcefield path; only BFGS may
+  // resolve to PER_MOLECULE / HYBRID.
+  const bool useBatchedForcefield =
+    minimizer_.kind == MinimizerKind::FIRE ||
+    minimizer_.bfgs->resolveBackend(ctx.systemHost.atomStarts) == BfgsBackend::BATCHED;
 
-  // 1. Update reference positions for start of loop.
   constexpr int                             maxIters = 300;  // Taken from hard-coded RDKit value.
   DistGeom::BatchedMolecular3DDeviceBuffers molSystemDevice;
   std::optional<ETKBatchedForcefield>       forcefield;
   AsyncDeviceVector<double>*                planarEnergies = nullptr;
   const int*                                numImpropers   = nullptr;
 
-  if (effectiveBackend == BfgsBackend::BATCHED) {
+  if (useBatchedForcefield) {
     forcefield.emplace(molSystemHost, ctx.systemHost.atomStarts, embedParam_.useBasicKnowledge, metadata_, stream_);
     setReferenceValues(ctx, forcefield->contribs());
     grad_.resize(ctx.systemHost.positions.size());
     grad_.zero();
     energyOuts_.resize(ctx.systemHost.atomStarts.size() - 1);
     energyOuts_.zero();
-    minimizer_.minimize(maxIters,
-                        embedParam_.optimizerForceTol,
-                        *forcefield,
-                        ctx.systemDevice.positions,
-                        grad_,
-                        energyOuts_,
-                        ctx.activeThisStage.data());
+    if (minimizer_.kind == MinimizerKind::FIRE) {
+      minimizer_.fire->minimize(maxIters,
+                                embedParam_.optimizerForceTol,
+                                *forcefield,
+                                ctx.systemDevice.positions,
+                                grad_,
+                                energyOuts_,
+                                ctx.activeThisStage.data());
+    } else {
+      minimizer_.bfgs->minimize(maxIters,
+                                embedParam_.optimizerForceTol,
+                                *forcefield,
+                                ctx.systemDevice.positions,
+                                grad_,
+                                energyOuts_,
+                                ctx.activeThisStage.data());
+    }
     planarEnergies = &energyOuts_;
     numImpropers   = forcefield->contribs().improperTorsionTerms.numImpropers.data();
     if (embedParam_.useBasicKnowledge) {
@@ -241,13 +254,13 @@ void ETKMinimizationStage::execute(ETKDGContext& ctx) {
     DistGeom::sendContribsAndIndicesToDevice3D(molSystemHost, molSystemDevice);
     setReferenceValues(ctx, molSystemDevice.contribs);
 
-    minimizer_.minimizeWithETK(maxIters,
-                               embedParam_.optimizerForceTol,
-                               ctx.systemHost.atomStarts,
-                               ctx.systemDevice.atomStarts,
-                               ctx.systemDevice.positions,
-                               molSystemDevice,
-                               ctx.activeThisStage.data());
+    minimizer_.bfgs->minimizeWithETK(maxIters,
+                                     embedParam_.optimizerForceTol,
+                                     ctx.systemHost.atomStarts,
+                                     ctx.systemDevice.atomStarts,
+                                     ctx.systemDevice.positions,
+                                     molSystemDevice,
+                                     ctx.activeThisStage.data());
     planarEnergies = &molSystemDevice.energyOuts;
     numImpropers   = molSystemDevice.contribs.improperTorsionTerms.numImpropers.data();
     if (embedParam_.useBasicKnowledge) {

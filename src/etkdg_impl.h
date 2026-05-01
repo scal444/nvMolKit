@@ -33,6 +33,7 @@
 #include "dist_geom.h"
 #include "embedder_utils.h"
 #include "host_vector.h"
+#include "minimizer/bfgs_types.h"
 
 // forward declarations
 
@@ -45,7 +46,35 @@ struct EmbedParameters;
 
 namespace nvMolKit {
 
+struct BfgsBatchMinimizer;
+class FireBatchMinimizer;
+
 namespace detail {
+
+//! \brief Non-owning, type-tagged reference to the minimizer driving an ETKDG
+//! minimization stage.
+//!
+//! ETKDG runs both a 4D distance-geometry stage and (optionally) a 3D ETK
+//! refinement stage with the same algorithm choice. The driver constructs the
+//! concrete ::BfgsBatchMinimizer or ::FireBatchMinimizer instances per thread
+//! and hands references to them to each stage through this handle. The stages
+//! dispatch on @ref kind to pick which pointer to use.
+//!
+//! Exactly one of @ref bfgs / @ref fire is non-null for a given handle.
+struct MinimizerHandle {
+  MinimizerKind        kind = MinimizerKind::BFGS;
+  BfgsBatchMinimizer*  bfgs = nullptr;
+  FireBatchMinimizer*  fire = nullptr;
+
+  //! \brief Convenience constructor for the BFGS path.
+  static MinimizerHandle forBfgs(BfgsBatchMinimizer& minimizer) {
+    return MinimizerHandle{MinimizerKind::BFGS, &minimizer, nullptr};
+  }
+  //! \brief Convenience constructor for the FIRE path.
+  static MinimizerHandle forFire(FireBatchMinimizer& minimizer) {
+    return MinimizerHandle{MinimizerKind::FIRE, nullptr, &minimizer};
+  }
+};
 
 struct ETKDGSystemHost {
   //! Size n_molecules + 1, defines the start and end of each molecule in the batch

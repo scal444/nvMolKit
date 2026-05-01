@@ -24,6 +24,7 @@
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include "minimizer/bfgs_minimize.h"
+#include "minimizer/fire_minimizer.h"
 #include "test_utils.h"
 constexpr int DIM = 4;
 void          initTestComponentsCommon(const std::vector<RDKit::ROMol*>&         mols,
@@ -208,7 +209,12 @@ std::vector<double> getGPUEnergy(const std::vector<const RDKit::ROMol*>&    mols
   return getReferenceEnergy(mols, eargs, false, 0.001, hostPos3.data(), nullptr, useBasicKnowledge);
 }
 
-class ETKStageSingleMolTestFixture : public ::testing::TestWithParam<std::tuple<ETKDGOption, nvMolKit::BfgsBackend>> {
+// Test parameter: (ETKDG variant, BFGS backend, MinimizerKind). When kind==FIRE the BfgsBackend
+// axis is unused (FIRE always runs through the BATCHED BatchedForcefield path); the
+// instantiation below filters to BATCHED + FIRE so we don't generate duplicate runs.
+using ETKStageTestParam = std::tuple<ETKDGOption, nvMolKit::BfgsBackend, nvMolKit::MinimizerKind>;
+
+class ETKStageSingleMolTestFixture : public ::testing::TestWithParam<ETKStageTestParam> {
  public:
   ETKStageSingleMolTestFixture() { testDataFolderPath_ = getTestDataFolderPath(); }
 
@@ -238,9 +244,9 @@ class ETKStageSingleMolTestFixture : public ::testing::TestWithParam<std::tuple<
 
 TEST_P(ETKStageSingleMolTestFixture, MinimizeCompare) {
   // Set up embed parameters from test parameter
-  const auto [etkdgOption, backend] = GetParam();
-  embedParam_                       = getETKDGOption(etkdgOption);
-  embedParam_.useRandomCoords       = true;
+  const auto [etkdgOption, backend, kind] = GetParam();
+  embedParam_                             = getETKDGOption(etkdgOption);
+  embedParam_.useRandomCoords             = true;
 
   // Initialize test components after setting embedParam_
   initTestComponents();
@@ -249,7 +255,13 @@ TEST_P(ETKStageSingleMolTestFixture, MinimizeCompare) {
   const bool useBasicKnowledge = embedParam_.useBasicKnowledge;
 
   // Create minimizer for the test
-  nvMolKit::BfgsBatchMinimizer minimizer(4, nvMolKit::DebugLevel::NONE, true, nullptr, backend);
+  nvMolKit::BfgsBatchMinimizer  bfgsMinimizer(4, nvMolKit::DebugLevel::NONE, true, nullptr, backend);
+  nvMolKit::FireOptions         fireOptions{};
+  fireOptions.useMass = false;
+  nvMolKit::FireBatchMinimizer  fireMinimizer(4, fireOptions, nullptr);
+  const auto                    handle = kind == nvMolKit::MinimizerKind::FIRE
+                                           ? nvMolKit::detail::MinimizerHandle::forFire(fireMinimizer)
+                                           : nvMolKit::detail::MinimizerHandle::forBfgs(bfgsMinimizer);
 
   // Create FirstMinimizeStage
   std::vector<std::unique_ptr<ETKDGStage>> stages;
@@ -259,7 +271,7 @@ TEST_P(ETKStageSingleMolTestFixture, MinimizeCompare) {
                                                                         eargs_,
                                                                         embedParam_,
                                                                         context_,
-                                                                        minimizer,
+                                                                        handle,
                                                                         nullptr);
   const auto* stagePtr = stage.get();  // Store pointer before moving
   stages.push_back(std::move(stage));
@@ -294,26 +306,43 @@ TEST_P(ETKStageSingleMolTestFixture, MinimizeCompare) {
   EXPECT_THAT(refEnergies, ::testing::Pointwise(testing::Ge(), gpuEnergies));
 }
 
-// Instantiate parameterized tests for different ETKDG variants and backends
-INSTANTIATE_TEST_SUITE_P(ETKDGVariants,
-                         ETKStageSingleMolTestFixture,
-                         ::testing::Combine(::testing::Values(ETKDGOption::ETKDG,
-                                                              ETKDGOption::ETKDGv2,
-                                                              ETKDGOption::srETKDGv3,
-                                                              ETKDGOption::ETKDGv3,
-                                                              ETKDGOption::KDG,
-                                                              ETKDGOption::ETDG,
-                                                              ETKDGOption::DG),
-                                            ::testing::Values(nvMolKit::BfgsBackend::BATCHED,
-                                                              nvMolKit::BfgsBackend::PER_MOLECULE)),
-                         [](const ::testing::TestParamInfo<std::tuple<ETKDGOption, nvMolKit::BfgsBackend>>& info) {
-                           std::string name = getETKDGOptionName(std::get<0>(info.param));
-                           name +=
-                             std::get<1>(info.param) == nvMolKit::BfgsBackend::BATCHED ? "_Batched" : "_PerMolecule";
-                           return name;
-                         });
+namespace {
+// Build the BFGS sweep over (BATCHED, PER_MOLECULE) plus a single (BATCHED, FIRE) combination.
+// FIRE has no per-molecule kernel, so the (PER_MOLECULE, FIRE) combination is intentionally absent.
+std::vector<ETKStageTestParam> makeETKStageParams(const std::vector<ETKDGOption>& options) {
+  std::vector<ETKStageTestParam> params;
+  for (const auto option : options) {
+    params.emplace_back(option, nvMolKit::BfgsBackend::BATCHED, nvMolKit::MinimizerKind::BFGS);
+    params.emplace_back(option, nvMolKit::BfgsBackend::PER_MOLECULE, nvMolKit::MinimizerKind::BFGS);
+    params.emplace_back(option, nvMolKit::BfgsBackend::BATCHED, nvMolKit::MinimizerKind::FIRE);
+  }
+  return params;
+}
 
-class ETKStageMultiMolTestFixture : public ::testing::TestWithParam<std::tuple<ETKDGOption, nvMolKit::BfgsBackend>> {
+std::string makeETKStageName(const ETKStageTestParam& param) {
+  std::string name = getETKDGOptionName(std::get<0>(param));
+  if (std::get<2>(param) == nvMolKit::MinimizerKind::FIRE) {
+    name += "_Fire";
+  } else {
+    name += std::get<1>(param) == nvMolKit::BfgsBackend::BATCHED ? "_Batched" : "_PerMolecule";
+  }
+  return name;
+}
+}  // namespace
+
+INSTANTIATE_TEST_SUITE_P(
+  ETKDGVariants,
+  ETKStageSingleMolTestFixture,
+  ::testing::ValuesIn(makeETKStageParams({ETKDGOption::ETKDG,
+                                          ETKDGOption::ETKDGv2,
+                                          ETKDGOption::srETKDGv3,
+                                          ETKDGOption::ETKDGv3,
+                                          ETKDGOption::KDG,
+                                          ETKDGOption::ETDG,
+                                          ETKDGOption::DG})),
+  [](const ::testing::TestParamInfo<ETKStageTestParam>& info) { return makeETKStageName(info.param); });
+
+class ETKStageMultiMolTestFixture : public ::testing::TestWithParam<ETKStageTestParam> {
  public:
   ETKStageMultiMolTestFixture() { testDataFolderPath_ = getTestDataFolderPath(); }
 
@@ -343,9 +372,9 @@ class ETKStageMultiMolTestFixture : public ::testing::TestWithParam<std::tuple<E
 
 TEST_P(ETKStageMultiMolTestFixture, MinimizeCompare) {
   // Set up embed parameters from test parameter
-  const auto [etkdgOption, backend] = GetParam();
-  embedParam_                       = getETKDGOption(etkdgOption);
-  embedParam_.useRandomCoords       = true;
+  const auto [etkdgOption, backend, kind] = GetParam();
+  embedParam_                             = getETKDGOption(etkdgOption);
+  embedParam_.useRandomCoords             = true;
 
   // Initialize test components after setting embedParam_
   initTestComponents();
@@ -354,7 +383,13 @@ TEST_P(ETKStageMultiMolTestFixture, MinimizeCompare) {
   const bool useBasicKnowledge = embedParam_.useBasicKnowledge;
 
   // Create minimizer for the test
-  nvMolKit::BfgsBatchMinimizer minimizer(4, nvMolKit::DebugLevel::NONE, true, nullptr, backend);
+  nvMolKit::BfgsBatchMinimizer  bfgsMinimizer(4, nvMolKit::DebugLevel::NONE, true, nullptr, backend);
+  nvMolKit::FireOptions         fireOptions{};
+  fireOptions.useMass = false;
+  nvMolKit::FireBatchMinimizer  fireMinimizer(4, fireOptions, nullptr);
+  const auto                    handle = kind == nvMolKit::MinimizerKind::FIRE
+                                           ? nvMolKit::detail::MinimizerHandle::forFire(fireMinimizer)
+                                           : nvMolKit::detail::MinimizerHandle::forBfgs(bfgsMinimizer);
 
   // Create FirstMinimizeStage
   std::vector<std::unique_ptr<ETKDGStage>> stages;
@@ -368,7 +403,7 @@ TEST_P(ETKStageMultiMolTestFixture, MinimizeCompare) {
                                                                         eargs_,
                                                                         embedParam_,
                                                                         context_,
-                                                                        minimizer,
+                                                                        handle,
                                                                         nullptr);
   const auto* stagePtr = stage.get();  // Store pointer before moving
   stages.push_back(std::move(stage));
@@ -433,20 +468,14 @@ TEST_P(ETKStageMultiMolTestFixture, MinimizeCompare) {
 }
 
 // Instantiate parameterized tests for different ETKDG variants and backends
-INSTANTIATE_TEST_SUITE_P(ETKDGVariants,
-                         ETKStageMultiMolTestFixture,
-                         ::testing::Combine(::testing::Values(ETKDGOption::ETDG,
-                                                              ETKDGOption::ETKDG,
-                                                              ETKDGOption::ETKDGv2,
-                                                              ETKDGOption::srETKDGv3,
-                                                              ETKDGOption::ETKDGv3,
-                                                              ETKDGOption::KDG,
-                                                              ETKDGOption::DG),
-                                            ::testing::Values(nvMolKit::BfgsBackend::BATCHED,
-                                                              nvMolKit::BfgsBackend::PER_MOLECULE)),
-                         [](const ::testing::TestParamInfo<std::tuple<ETKDGOption, nvMolKit::BfgsBackend>>& info) {
-                           std::string name = getETKDGOptionName(std::get<0>(info.param));
-                           name +=
-                             std::get<1>(info.param) == nvMolKit::BfgsBackend::BATCHED ? "_Batched" : "_PerMolecule";
-                           return name;
-                         });
+INSTANTIATE_TEST_SUITE_P(
+  ETKDGVariants,
+  ETKStageMultiMolTestFixture,
+  ::testing::ValuesIn(makeETKStageParams({ETKDGOption::ETDG,
+                                          ETKDGOption::ETKDG,
+                                          ETKDGOption::ETKDGv2,
+                                          ETKDGOption::srETKDGv3,
+                                          ETKDGOption::ETKDGv3,
+                                          ETKDGOption::KDG,
+                                          ETKDGOption::DG})),
+  [](const ::testing::TestParamInfo<ETKStageTestParam>& info) { return makeETKStageName(info.param); });

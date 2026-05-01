@@ -24,10 +24,13 @@ if TYPE_CHECKING:
     from rdkit.Chem import Mol
     from rdkit.Chem.rdDistGeom import EmbedParameters
 
-__all__ = ["EmbedMolecules"]
+__all__ = ["EmbedMolecules", "MinimizerKind"]
 
 from nvmolkit.types import HardwareOptions
 from nvmolkit import _embedMolecules  # type: ignore
+
+#: Re-exported enum selecting the inner minimizer (``BFGS`` or ``FIRE``).
+MinimizerKind = _embedMolecules.MinimizerKind
 
 
 def EmbedMolecules(
@@ -36,6 +39,7 @@ def EmbedMolecules(
     confsPerMolecule: int = 1,
     maxIterations: int = -1,
     hardwareOptions: Optional[HardwareOptions] = None,
+    minimizerKind: "MinimizerKind" = MinimizerKind.BFGS,
 ) -> None:
     """Embed multiple molecules with multiple conformers on GPUs.
 
@@ -59,6 +63,10 @@ def EmbedMolecules(
         confsPerMolecule: Number of conformers to generate per molecule (default: 1)
         maxIterations: Maximum ETKDG iterations, -1 for automatic calculation (default: -1)
         hardwareOptions: HardwareOptions with hardware settings. If None, uses defaults.
+        minimizerKind: Selects the inner minimizer driving the distance-geometry and
+                      ETK refinement stages. ``MinimizerKind.BFGS`` (default) preserves
+                      historical behavior; ``MinimizerKind.FIRE`` swaps in the FIRE 2.0
+                      minimizer and always runs through the batched force-field path.
 
     Returns:
         None. Input molecules are modified in-place with generated conformers.
@@ -117,4 +125,11 @@ def EmbedMolecules(
     native_options = hardwareOptions._as_native()
 
     # Call the C++ implementation
-    _embedMolecules.EmbedMolecules(molecules, params, confsPerMolecule, maxIterations, native_options)
+    _embedMolecules.EmbedMolecules(
+        molecules,
+        params,
+        confsPerMolecule,
+        maxIterations,
+        native_options,
+        minimizerKind,
+    )

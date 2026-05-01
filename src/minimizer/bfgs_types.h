@@ -42,6 +42,17 @@ enum class BfgsBackend {
 //! Atom count threshold for HYBRID backend selection (use PER_MOLECULE if max atoms <= this value)
 constexpr int kHybridBackendAtomThreshold = 64;
 
+//! \brief Selects which minimization algorithm drives ETKDG's minimization stages.
+//!
+//! Orthogonal to ::BfgsBackend, which only chooses the kernel layout *within*
+//! the BFGS algorithm. ::BfgsBackend is consulted only when ::MinimizerKind is
+//! ::BFGS; the FIRE algorithm has no per-molecule kernel today and always runs
+//! through the BATCHED \ref BatchedForcefield path.
+enum class MinimizerKind {
+  BFGS = 0,  //!< RDKit-style batched BFGS with line search.
+  FIRE = 1,  //!< FIRE 2.0 (semi-implicit Euler with adaptive dt/alpha mixer).
+};
+
 }  // namespace nvMolKit
 
 #endif  // NVMOLKIT_BFGS_TYPES_H
