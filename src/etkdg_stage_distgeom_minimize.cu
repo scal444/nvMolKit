@@ -51,9 +51,9 @@ __global__ void checkMinimizedEnergiesKernel(const int     molNum,
 }
 
 template <typename MinimizeStep> void repeatUntilConverged(MinimizeStep&& minimizeStep) {
-  bool needsMore = minimizeStep();
-  while (needsMore) {
-    needsMore = minimizeStep();
+  bool converged = minimizeStep();
+  while (!converged) {
+    converged = minimizeStep();
   }
 }
 
@@ -196,6 +196,9 @@ void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
     grad_.zero();
     energyOuts_.resize(ctx.systemHost.atomStarts.size() - 1);
     energyOuts_.zero();
+    if (minimizer_.kind == MinimizerKind::FIRE) {
+      minimizer_.fire->resetContinuationCache();
+    }
     repeatUntilConverged([&]() {
       if (minimizer_.kind == MinimizerKind::FIRE) {
         return minimizer_.fire->minimize(maxIters,

@@ -1,0 +1,85 @@
+{
+  "config": {
+    "input_smiles": "/home/kboyd/data/enamine_real_10M.cxsmiles",
+    "num_molecules_requested": 1000,
+    "num_molecules_used": 1000,
+    "num_conformers": 10,
+    "max_attempts": 10,
+    "seed": 42
+  },
+  "smiles_parse_failures": 0,
+  "failures": {
+    "rdkit": {
+      "no_conformers": 0,
+      "partial_conformers": 0,
+      "mmff_param_failure": 0,
+      "nan_energies": 0
+    },
+    "nvmolkit_bfgs": {
+      "no_conformers": 3,
+      "partial_conformers": 92,
+      "mmff_param_failure": 0,
+      "nan_energies": 0
+    },
+    "nvmolkit_fire": {
+      "no_conformers": 982,
+      "partial_conformers": 17,
+      "mmff_param_failure": 0,
+      "nan_energies": 0
+    }
+  },
+  "delta_min_energy_summary": {
+    "nvm_bfgs - rdkit": {
+      "count": 997,
+      "mean": 0.2612473114298244,
+      "std": 21.790515477276024,
+      "median": -0.289656483562041,
+      "p10": -17.5768963031226,
+      "p90": 16.979752952014387,
+      "min": -123.26924960332077,
+      "max": 134.6731892584542
+    },
+    "nvm_fire - rdkit": {
+      "count": 18,
+      "mean": 61.421838753147476,
+      "std": 45.37071435461033,
+      "median": 50.91291381586204,
+      "p10": 10.752368466559883,
+      "p90": 117.30585362622793,
+      "min": 0.2551681057976083,
+      "max": 167.0017917656694
+    }
+  },
+  "intra_mol_delta_summary": {
+    "rdkit": {
+      "count": 10000,
+      "mean": 50.498939646486896,
+      "std": 83.9884738899009,
+      "median": 25.80986759659777,
+      "p10": 0.005976582774895327,
+      "p90": 126.41012936373804,
+      "min": 0.0,
+      "max": 2460.21434120301
+    },
+    "nvm_bfgs": {
+      "count": 9570,
+      "mean": 48.64273743203212,
+      "std": 86.19532774016861,
+      "median": 23.806550226149383,
+      "p10": 0.0,
+      "p90": 125.20085169389012,
+      "min": 0.0,
+      "max": 3958.328285769124
+    },
+    "nvm_fire": {
+      "count": 37,
+      "mean": 23.386654705140565,
+      "std": 29.65010981718066,
+      "median": 7.878699621398354,
+      "p10": 0.0,
+      "p90": 63.9319969734446,
+      "min": 0.0,
+      "max": 104.46657491532
+    }
+  }
+}

@@ -376,6 +376,7 @@ TEST(FireMinimizer, BatchedReferenceTrajectoryMatchesAseFire2) {
   HarmonicSystems systems(atomCounts, kPerSys, startingPositions, targets);
 
   nvMolKit::FireOptions options;
+  options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
   options.dtInit           = 0.001;
   options.dMax             = 0.0;  // no clip
   options.gradTol          = 1e-3;
@@ -457,6 +458,7 @@ TEST(FireMinimizer, AbcModeMatchesReference) {
   HarmonicSystems systems(atomCounts, kPerSys, startingPositions, targets);
 
   nvMolKit::FireOptions options;
+  options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
   options.dtInit           = 0.001;
   options.dMax             = 0.0;
   options.gradTol          = 1e-3;
@@ -508,6 +510,7 @@ TEST(FireMinimizer, MaxStepNormClipping) {
   HarmonicSystems systems(atomCounts, kPerSys, startingPositions, targets);
 
   nvMolKit::FireOptions options;
+  options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
   options.dtInit           = 0.001;
   options.dMax             = 0.05;
   options.gradTol          = 1e-3;
@@ -581,6 +584,7 @@ TEST(FireMinimizer, NegativePowerHalfStepBack) {
   HarmonicSystems     systems(atomCounts, kPerSys, startingPositions, targets);
 
   nvMolKit::FireOptions options;
+  options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
   options.dtInit           = 0.005;  // intentionally large -> overshoot -> negative power soon
   options.dtMinFactor      = 0.001;
   options.dtMaxFactor      = 10.0;
@@ -629,6 +633,7 @@ TEST(FireMinimizer, MmffPhysicalUnits) {
   HarmonicSystems     systems(atomCounts, kPerSys, startingPositions, targets);
 
   nvMolKit::FireOptions options;
+  options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
   options.dtInit          = 0.001;
   options.dMax            = 0.1;
   options.gradTol         = 1e-4;
@@ -668,6 +673,7 @@ TEST(FireMinimizer, MassWeightingScalesAcceleration) {
   auto runOneKick = [&](double mass) {
     HarmonicSystems       systems(atomCounts, kPerSys, startingPositions, targets);
     nvMolKit::FireOptions options;
+  options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
     options.dtInit           = 0.001;
     options.dMax             = 0.0;
     options.gradTol          = 0.0;
@@ -713,6 +719,7 @@ TEST(FireMinimizer, UseMassFalseEqualsAllOnesMass) {
   auto runFifty = [&](bool useMass, std::vector<double> masses) {
     HarmonicSystems       systems(atomCounts, kPerSys, startingPositions, targets);
     nvMolKit::FireOptions options;
+  options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
     options.dtInit          = 0.001;
     options.dMax            = 0.0;
     options.gradTol         = 0.0;
@@ -752,6 +759,7 @@ TEST(FireMinimizer, ParameterPropagation) {
   HarmonicSystems     systems(atomCounts, kPerSys, startingPositions, targets);
 
   nvMolKit::FireOptions options;
+  options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
   options.dtInit            = 0.002;
   options.dtMinFactor       = 0.01;
   options.dtMaxFactor       = 4.0;
@@ -805,6 +813,7 @@ TEST(FireMinimizer, ActiveSystemMaskRespected) {
   HarmonicSystems     systems(atomCounts, kPerSys, startingPositions, targets);
 
   nvMolKit::FireOptions options;
+  options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
   options.gradTol          = 1e-4;
   options.dMax             = 0.0;
   options.useMass          = false;
@@ -858,6 +867,7 @@ TEST(FireMinimizer, ActiveMaskMatchesBfgsContract) {
   std::vector<uint8_t> mask = {1, 0, 1, 1, 0, 1};
 
   nvMolKit::FireOptions options;
+  options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
   options.gradTol          = 1e-4;
   options.dMax             = 0.0;
   options.useMass          = false;
@@ -920,6 +930,7 @@ TEST(FireMinimizer, StaggeredConvergenceCount) {
   HarmonicSystems     systems(atomCounts, kPerSys, startingPositions, targets);
 
   nvMolKit::FireOptions options;
+  options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
   options.dtInit          = 0.001;
   options.gradTol         = 1e-3;
   options.dMax            = 0.0;

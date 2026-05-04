@@ -64,7 +64,8 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
                     std::vector<std::vector<int16_t>>*          failures,
                     const BatchHardwareOptions&                 hardwareOptions,
                     BfgsBackend                                 backend,
-                    MinimizerKind                               minimizerKind) {
+                    MinimizerKind                               minimizerKind,
+                    std::vector<std::string>*                   stageNames) {
   const ScopedNvtxRange fullRange("EmbedMolecules");
   if (!params.useRandomCoords) {
     throw std::runtime_error("ETKDG requires useRandomCoords to be true. Please set it in the EmbedParameters.");
@@ -144,6 +145,9 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
   // Initialize failures structure if needed (outer vector is per stage, inner is per conformer)
   if (failures != nullptr) {
     failures->clear();
+  }
+  if (stageNames != nullptr) {
+    stageNames->clear();
   }
 
   // Create mutex for thread-safe conformer updates and failure tracking
@@ -349,8 +353,13 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
         // Handle failures if requested
         if (failures != nullptr) {
           auto batchFailures = driver.getFailures(failuresScratch);
+          auto batchStageNames =
+            stageNames != nullptr ? driver.stageNames() : std::vector<std::string>{};
 
           const std::lock_guard<std::mutex> failureLock(failure_mutex);
+          if (stageNames != nullptr && stageNames->empty() && !batchStageNames.empty()) {
+            *stageNames = std::move(batchStageNames);
+          }
           // Initialize failures structure on first batch (outer vector is per stage, inner per conformer)
           if (failures->empty() && !batchFailures.empty()) {
             failures->resize(batchFailures.size());

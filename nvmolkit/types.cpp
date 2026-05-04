@@ -74,5 +74,9 @@ BOOST_PYTHON_MODULE(_types) {
     .def_readwrite("useMass", &nvMolKit::FireOptions::useMass)
     .def_readwrite("gradTol", &nvMolKit::FireOptions::gradTol)
     .def_readwrite("takeHalfStepBack", &nvMolKit::FireOptions::takeHalfStepBack)
-    .def_readwrite("abcCorrection", &nvMolKit::FireOptions::abcCorrection);
+    .def_readwrite("abcCorrection", &nvMolKit::FireOptions::abcCorrection)
+    .def_readwrite("stuckDetectionEnabled", &nvMolKit::FireOptions::stuckDetectionEnabled)
+    .def_readwrite("stuckEnergyRelTol", &nvMolKit::FireOptions::stuckEnergyRelTol)
+    .def_readwrite("stuckStreakLength", &nvMolKit::FireOptions::stuckStreakLength)
+    .def_readwrite("stuckEvalEveryNPolls", &nvMolKit::FireOptions::stuckEvalEveryNPolls);
 }

@@ -235,6 +235,15 @@ std::vector<std::vector<int16_t>> ETKDGDriver::getFailures(PinnedHostVector<int1
   return res;
 }
 
+std::vector<std::string> ETKDGDriver::stageNames() const {
+  std::vector<std::string> names;
+  names.reserve(stages_.size());
+  for (const auto& stage : stages_) {
+    names.push_back(stage->name());
+  }
+  return names;
+}
+
 std::vector<int16_t> ETKDGDriver::getFinishedOnIterations() const {
   std::vector<int16_t> res(totalConfs_);
   context_->finishedOnIteration.copyToHost(res);

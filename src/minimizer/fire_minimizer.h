@@ -66,6 +66,24 @@ struct FireOptions {
   //! \brief Apply the Accelerated Bias-Correction multiplier
   //! 1 / (1 - (1 - alpha)^(N+1)) to the mixer (ABC-FIRE).
   bool abcCorrection = false;
+
+  //! \brief Detect "stuck" systems via energy plateau and declare them converged.
+  //!
+  //! FIRE has no analog of BFGS's MOVETOL/FUNCTOL exits, so a system that oscillates
+  //! around a local minimum (or plateaus) without ever reaching @ref gradTol burns
+  //! the full iteration budget. When enabled, the minimizer evaluates the energy at
+  //! each convergence-poll boundary, tracks per-system min/max energy across a
+  //! sliding window of @ref stuckStreakLength polls, and declares the system
+  //! converged (status 0) once the windowed extrema satisfy
+  //! @code
+  //! (max - min) / max(|E_now|, 1) < stuckEnergyRelTol
+  //! @endcode
+  //! for @ref stuckStreakLength consecutive polls. Streak resets whenever a poll
+  //! sees a relative energy change above the tolerance.
+  bool   stuckDetectionEnabled = true;
+  double stuckEnergyRelTol     = 1e-3;  //!< Relative |windowed extrema| / max(|E|, 1) tolerance.
+  int    stuckStreakLength     = 3;     //!< Consecutive plateau polls required to declare stuck.
+  int    stuckEvalEveryNPolls  = 1;     //!< Sample energy every Nth convergence poll (1 = every poll).
 };
 
 //! \brief Per-system per-iteration debug snapshot recorded when the minimizer is
@@ -159,13 +177,24 @@ class FireBatchMinimizer final : public BatchMinimizer {
   //! \brief Number of currently-active systems (host-side cached).
   int numActiveSystemsHost() const { return lastKnownNumUnfinished_; }
 
+  //! \brief Forget any cached batch state so the next @c initialize() call resets all
+  //! per-system convergence state (statuses, streak counters, etc.). Use before starting
+  //! a new minimization session on the same minimizer instance when the active-mask
+  //! contents may have changed (the address comparison alone cannot detect that).
+  void resetContinuationCache();
+
  private:
-  void launchFireKernel(double                        gradTol,
-                        const AsyncDeviceVector<int>& atomStarts,
-                        AsyncDeviceVector<double>&    positions,
-                        AsyncDeviceVector<double>&    grad,
-                        int                           launchBlocks,
-                        bool                          isFirstStep);
+  void launchPreKick(double                        gradTol,
+                     const AsyncDeviceVector<int>& atomStarts,
+                     AsyncDeviceVector<double>&    positions,
+                     AsyncDeviceVector<double>&    grad,
+                     int                           launchBlocks,
+                     bool                          isFirstStep);
+  void launchPostKick(double                        gradTol,
+                      const AsyncDeviceVector<int>& atomStarts,
+                      AsyncDeviceVector<double>&    positions,
+                      AsyncDeviceVector<double>&    grad,
+                      int                           launchBlocks);
   void compactActiveAsync();
   int  readbackNumUnfinished();
 
@@ -196,6 +225,27 @@ class FireBatchMinimizer final : public BatchMinimizer {
 
   AsyncDeviceVector<double>    debugPowers_;
   std::vector<FireDebugOutput> debugOutputs_;
+
+  //! Cached last-call signature for detecting continuation calls (same batch + same active mask)
+  //! from helpers like @c repeatUntilConverged. When set, @c initialize() preserves
+  //! per-system convergence state (statuses, streak counters, convergeReason) so that
+  //! systems that already converged in the previous call are not re-run.
+  bool                       hasInitializedBatch_           = false;
+  int                        cachedNumSystems_              = -1;
+  int                        cachedTotalAtoms_              = -1;
+  const uint8_t*             cachedActiveThisStage_         = nullptr;
+  const double*              cachedMasses_                  = nullptr;
+
+  //! Per-system state for energy-plateau stuck detection. ``energyMinStreak_`` and
+  //! ``energyMaxStreak_`` track the windowed extrema while ``stuckStreak_`` counts
+  //! consecutive plateau polls; all reset when the relative tolerance is violated.
+  AsyncDeviceVector<double>  energyMinStreak_;
+  AsyncDeviceVector<double>  energyMaxStreak_;
+  AsyncDeviceVector<int32_t> stuckStreak_;
+  int                        pollsSinceLastEnergyEval_ = 0;
+
+  //! Per-system convergence reason for diagnostics: 0=active, 1=grad-tol, 2=stuck-plateau.
+  AsyncDeviceVector<uint8_t> convergeReason_;
 };
 
 }  // namespace nvMolKit

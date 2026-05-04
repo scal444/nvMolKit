@@ -194,6 +194,8 @@ class ETKDGDriver {
   //! so getFailures()[i][j] is the number of times that conformer j has failed stage i.
   //! Uses single pinned memory buffer for intermediate D2H transfer (all stages concatenated).
   std::vector<std::vector<int16_t>> getFailures(PinnedHostVector<int16_t>& failuresScratch) const;
+  //! Returns the ordered list of stage names matching getFailures()'s outer dimension.
+  std::vector<std::string>          stageNames() const;
   const ETKDGContext&               context() const { return *context_; }
 
   //! Iterate until all conformers are finished or maxIterations is reached. Does not reset iterations,

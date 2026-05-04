@@ -40,6 +40,8 @@ namespace nvMolKit {
 //! \param maxIterations Maximum ETKDG iterations; @c -1 selects an automatic value.
 //! \param debugMode Enable per-stage timing/output collection.
 //! \param failures Optional pointer to a per-stage / per-conformer failure tally.
+//! \param stageNames Optional pointer populated with the ordered stage names matching @p failures'
+//!        outer dimension. Useful for labeling failure-mode plots.
 //! \param hardwareOptions Batch and threading hardware configuration.
 //! \param backend BFGS kernel layout selector. Only consulted when
 //!        @p minimizerKind is ::MinimizerKind::BFGS; ignored for ::MinimizerKind::FIRE
@@ -55,7 +57,8 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
                     std::vector<std::vector<int16_t>>*          failures         = nullptr,
                     const BatchHardwareOptions&                 hardwareOptions  = {},
                     BfgsBackend                                 backend          = BfgsBackend::HYBRID,
-                    MinimizerKind                               minimizerKind    = MinimizerKind::BFGS);
+                    MinimizerKind                               minimizerKind    = MinimizerKind::BFGS,
+                    std::vector<std::string>*                   stageNames       = nullptr);
 
 }  // namespace nvMolKit
 

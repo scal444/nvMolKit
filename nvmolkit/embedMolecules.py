@@ -40,6 +40,7 @@ def EmbedMolecules(
     maxIterations: int = -1,
     hardwareOptions: Optional[HardwareOptions] = None,
     minimizerKind: "MinimizerKind" = MinimizerKind.BFGS,
+    failuresOut: Optional[dict] = None,
 ) -> None:
     """Embed multiple molecules with multiple conformers on GPUs.
 
@@ -67,6 +68,14 @@ def EmbedMolecules(
                       ETK refinement stages. ``MinimizerKind.BFGS`` (default) preserves
                       historical behavior; ``MinimizerKind.FIRE`` swaps in the FIRE 2.0
                       minimizer and always runs through the batched force-field path.
+        failuresOut: Optional dict. If provided, on return it contains:
+
+                ``stage_names``: list[str], pipeline-ordered stage names.
+                ``counts``: list[list[int]], per-stage per-conformer failure counts.
+                  ``counts[stage][mol_idx * confsPerMolecule]`` aggregates the failures
+                  observed at ``stage`` for ``molecules[mol_idx]`` across all attempted
+                  conformers. (Per-conformer breakdown is not currently distinguished by
+                  the underlying scheduler.)
 
     Returns:
         None. Input molecules are modified in-place with generated conformers.
@@ -132,4 +141,5 @@ def EmbedMolecules(
         maxIterations,
         native_options,
         minimizerKind,
+        failuresOut,
     )

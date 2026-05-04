@@ -222,6 +222,7 @@ void ETKMinimizationStage::execute(ETKDGContext& ctx) {
     energyOuts_.resize(ctx.systemHost.atomStarts.size() - 1);
     energyOuts_.zero();
     if (minimizer_.kind == MinimizerKind::FIRE) {
+      minimizer_.fire->resetContinuationCache();
       minimizer_.fire->minimize(maxIters,
                                 embedParam_.optimizerForceTol,
                                 *forcefield,
