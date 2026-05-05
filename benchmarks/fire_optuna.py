@@ -254,11 +254,19 @@ def _ase_fire_kwargs(options: FireOptions) -> dict:
     }
 
 
-def _ase_trial_worker(payload: dict) -> tuple[int, int, float]:
-    """Worker for tqdm.process_map. Returns (mol_idx, conf_id, final_energy_or_nan)."""
+def _ase_trial_worker(payload: dict) -> tuple[int, int, float, list[list[float]] | None]:
+    """Worker for tqdm.process_map.
+
+    Returns (mol_idx, conf_id, final_energy_or_nan, final_positions_or_none). Positions
+    are returned as a nested Python list so the main process can write them back into
+    the mol-with-conformers it owns; subsequent ``rdkit_per_system_metrics`` then sees
+    the optimized geometry rather than the original perturbed geometry.
+    """
+    mol_idx = payload["mol_idx"]
+    conf_id = payload["conf_id"]
     mol = Chem.MolFromMolBlock(payload["molblock"], removeHs=False)
     if mol is None:
-        return payload["mol_idx"], payload["conf_id"], float("nan")
+        return mol_idx, conf_id, float("nan"), None
     fire_kwargs = payload["fire_kwargs"]
     grad_tol = payload["grad_tol"]
     max_iters = payload["max_iters"]
@@ -270,13 +278,14 @@ def _ase_trial_worker(payload: dict) -> tuple[int, int, float]:
     try:
         optimizer.run(fmax=grad_tol, steps=max_iters)
     except Exception:
-        return payload["mol_idx"], payload["conf_id"], float("nan")
+        return mol_idx, conf_id, float("nan"), None
 
+    final_positions = atoms.get_positions().tolist()
     props = AllChem.MMFFGetMoleculeProperties(mol, mmffVariant="MMFF94")
     ff = AllChem.MMFFGetMoleculeForceField(mol, props, confId=0)
     if ff is None:
-        return payload["mol_idx"], payload["conf_id"], float("nan")
-    return payload["mol_idx"], payload["conf_id"], float(ff.CalcEnergy())
+        return mol_idx, conf_id, float("nan"), final_positions
+    return mol_idx, conf_id, float(ff.CalcEnergy()), final_positions
 
 
 def run_ase_trial(
@@ -316,8 +325,12 @@ def run_ase_trial(
     final_energies: list[list[float]] = [
         [float("nan")] * mol.GetNumConformers() for mol in mols
     ]
-    for mol_idx, conf_id, energy in results:
+    for mol_idx, conf_id, energy, positions in results:
         final_energies[mol_idx][conf_id] = energy
+        if positions is not None:
+            conf = mols[mol_idx].GetConformer(conf_id)
+            for atom_idx, xyz in enumerate(positions):
+                conf.SetAtomPosition(atom_idx, [float(c) for c in xyz])
 
     elapsed = time.perf_counter() - start
     return final_energies, elapsed
