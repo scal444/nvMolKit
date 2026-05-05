@@ -171,7 +171,6 @@ __global__ void firePreKickKernel(const cuda::std::span<const int>    atomStarts
     double newDt     = dtIn;
     double newAlpha  = alphaIn;
     int    newNsteps = nstepIn;
-    bool   negative  = false;
 
     if (powerShared >= 0.0) {
       newNsteps = nstepIn + 1;
@@ -180,7 +179,6 @@ __global__ void firePreKickKernel(const cuda::std::span<const int>    atomStarts
         newAlpha = alphaIn * params.alphaDecrementFactor;
       }
     } else {
-      negative  = true;
       newNsteps = 0;
       newAlpha  = params.alphaStart;
       newDt     = fmax(dtIn * params.dtDecrementFactor, params.minDt);
@@ -190,11 +188,6 @@ __global__ void firePreKickKernel(const cuda::std::span<const int>    atomStarts
     dts[sysIdx]            = newDt;
     alphas[sysIdx]         = newAlpha;
     nStepsPositive[sysIdx] = newNsteps;
-    // Encode "took the half-step-back this iter" into nStepsPositive bookkeeping for
-    // post-kick? No — post-kick re-reads nStepsPositive and dts; it does not need to
-    // know whether negative fired. The half-step-back only affects positions/velocities,
-    // both of which are persisted via xSys/vSys updates below.
-    (void)negative;
   }
   __syncthreads();
 

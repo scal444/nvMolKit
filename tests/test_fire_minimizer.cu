@@ -270,20 +270,6 @@ class HarmonicSystems {
     };
   }
 
-  std::vector<double> computeHostGradient(const std::vector<double>& positions) const {
-    std::vector<double> grad(totalCoords_);
-    for (int sysIdx = 0; sysIdx < numSystems_; ++sysIdx) {
-      const double k = kHost_[sysIdx];
-      for (int atomIdx = atomStarts_[sysIdx]; atomIdx < atomStarts_[sysIdx + 1]; ++atomIdx) {
-        for (int dim = 0; dim < kDim; ++dim) {
-          const int globalCoord = atomIdx * kDim + dim;
-          grad[globalCoord]     = k * (positions[globalCoord] - targetHost_[sysIdx * kDim + dim]);
-        }
-      }
-    }
-    return grad;
-  }
-
   std::vector<double> systemPositions(const std::vector<double>& positions, const int sysIdx) const {
     const int begin = atomStarts_[sysIdx] * kDim;
     const int end   = atomStarts_[sysIdx + 1] * kDim;
@@ -297,11 +283,7 @@ class HarmonicSystems {
     return result;
   }
 
-  void writePositions(const std::vector<double>& positions) { positionsDevice_.setFromVector(positions); }
-
   int                                  numSystems() const { return numSystems_; }
-  int                                  totalAtoms() const { return totalAtoms_; }
-  int                                  totalCoords() const { return totalCoords_; }
   const std::vector<int>&              atomStartsHost() const { return atomStarts_; }
   const std::vector<double>&           startingPositionsHost() const { return positionsHost_; }
   const std::vector<double>&           targetsHost() const { return targetHost_; }

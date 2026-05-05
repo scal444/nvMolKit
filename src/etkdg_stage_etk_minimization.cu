@@ -222,14 +222,29 @@ void ETKMinimizationStage::execute(ETKDGContext& ctx) {
     energyOuts_.resize(ctx.systemHost.atomStarts.size() - 1);
     energyOuts_.zero();
     if (minimizer_.kind == MinimizerKind::FIRE) {
+      // FIRE typically needs more steps than BFGS to drive the planar-improper energy
+      // below the tolerance checked at the end of this stage. Allow up to three
+      // additional 300-iteration extensions if the previous call did not converge
+      // (mirrors the repeatUntilConverged pattern used in the DG minimization stage,
+      // but bounded so a divergent system can't burn unbounded GPU time).
+      constexpr int kMaxFireExtensions = 3;
       minimizer_.fire->resetContinuationCache();
-      minimizer_.fire->minimize(maxIters,
-                                embedParam_.optimizerForceTol,
-                                *forcefield,
-                                ctx.systemDevice.positions,
-                                grad_,
-                                energyOuts_,
-                                ctx.activeThisStage.data());
+      bool converged = minimizer_.fire->minimize(maxIters,
+                                                 embedParam_.optimizerForceTol,
+                                                 *forcefield,
+                                                 ctx.systemDevice.positions,
+                                                 grad_,
+                                                 energyOuts_,
+                                                 ctx.activeThisStage.data());
+      for (int extension = 0; !converged && extension < kMaxFireExtensions; ++extension) {
+        converged = minimizer_.fire->minimize(maxIters,
+                                              embedParam_.optimizerForceTol,
+                                              *forcefield,
+                                              ctx.systemDevice.positions,
+                                              grad_,
+                                              energyOuts_,
+                                              ctx.activeThisStage.data());
+      }
     } else {
       minimizer_.bfgs->minimize(maxIters,
                                 embedParam_.optimizerForceTol,
