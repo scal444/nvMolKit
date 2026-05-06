@@ -109,7 +109,7 @@ TEST(FireMinimizerPerMolMMFF, ConvergesNearReference) {
                                          /*debugMode=*/false,
                                          nvMolKit::FireBackend::PER_MOLECULE);
   // Run several extension cycles since FIRE typically needs many more steps than BFGS.
-  bool converged = minimizer.minimizeWithMMFF(/*numIters=*/2000,
+  bool                         converged = minimizer.minimizeWithMMFF(/*numIters=*/2000,
                                               /*gradTol=*/options.gradTol,
                                               fixture.systemHost.indices.atomStarts,
                                               fixture.systemDevice);
@@ -153,7 +153,7 @@ TEST(FireMinimizerPerMolMMFF, ThrowsWhenStuckDetectionEnabled) {
 }
 
 TEST(FireMinimizerPerMolMMFF, ResolveBackendHybridSwitchesAtThreshold) {
-  nvMolKit::FireOptions        options{};
+  nvMolKit::FireOptions options{};
   options.stuckDetectionEnabled = false;
   nvMolKit::FireBatchMinimizer minimizer(/*dataDim=*/3,
                                          options,

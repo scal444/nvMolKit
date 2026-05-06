@@ -31,8 +31,10 @@ Usage:
 import argparse
 import gc
 import math
+import os
 import statistics
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import nvtx
 import torch
@@ -51,27 +53,38 @@ from rdkit import Chem
 from rdkit.Chem import AllChem, rdDistGeom
 
 
-def _embed_conformers(mols: list[Chem.Mol], confs_per_mol: int, seed: int) -> list[Chem.Mol]:
+def _embed_conformers(
+    mols: list[Chem.Mol],
+    confs_per_mol: int,
+    seed: int,
+    num_threads: int,
+) -> list[Chem.Mol]:
     """Generate ``confs_per_mol`` conformers per molecule using RDKit ETKDGv3.
 
-    Molecules where embedding fails to produce at least one conformer are
-    dropped; a count is printed.
+    Embedding is parallelized across molecules with a thread pool of size
+    ``num_threads`` (RDKit releases the GIL during embedding). Molecules where
+    embedding fails to produce at least one conformer are dropped; a count is
+    printed.
     """
     params = rdDistGeom.ETKDGv3()
     params.useRandomCoords = True
     params.randomSeed = seed
 
-    embedded: list[Chem.Mol] = []
-    drop_count = 0
-    for mol in mols:
+    def embed_one(mol: Chem.Mol) -> Chem.Mol | None:
         try:
             conf_ids = rdDistGeom.EmbedMultipleConfs(mol, numConfs=confs_per_mol, params=params)
-            if not conf_ids:
-                drop_count += 1
-                continue
-            embedded.append(mol)
         except Exception:
-            drop_count += 1
+            return None
+        return mol if conf_ids else None
+
+    if num_threads <= 1:
+        results = [embed_one(mol) for mol in mols]
+    else:
+        with ThreadPoolExecutor(max_workers=num_threads) as pool:
+            results = list(pool.map(embed_one, mols))
+
+    embedded = [mol for mol in results if mol is not None]
+    drop_count = len(mols) - len(embedded)
     if drop_count > 0:
         print(f"  Dropped {drop_count} molecules during embedding (no conformer generated)")
     return embedded
@@ -132,6 +145,7 @@ def bench_nvmolkit(
     runs: int,
     warmup: bool,
     fire_options: FireOptions,
+    backend: str,
 ) -> tuple[float, float, list[float]]:
     """Benchmark nvmolkit MMFF/UFF optimization; return ``(mean_ms, std_ms, energies)``.
 
@@ -139,6 +153,10 @@ def bench_nvmolkit(
 
     - ``bfgs``: route through ``MMFFOptimizeMoleculesConfs`` / ``UFFOptimizeMoleculesConfs``.
     - ``fire``: route through ``MMFFOptimizeMoleculesConfsFire``. Only valid for ``ff='mmff'``.
+
+    ``backend`` selects the inner kernel layout: ``"BATCHED"``, ``"PER_MOL"``,
+    or ``"HYBRID"``. Only honored for MMFF (BFGS or FIRE); UFF has no exposed
+    backend selector.
     """
     if ff == "mmff" and minimizer == "fire":
         from nvmolkit.mmffOptimization import MMFFOptimizeMoleculesConfsFire
@@ -149,14 +167,22 @@ def bench_nvmolkit(
         def run() -> None:
             cloned = clone_mols_with_conformers(mols)
             last_energies[0] = MMFFOptimizeMoleculesConfsFire(
-                cloned, maxIters=max_iters, fireOptions=fire_options, hardwareOptions=hardware_options
+                cloned,
+                maxIters=max_iters,
+                fireOptions=fire_options,
+                hardwareOptions=hardware_options,
+                backend=backend,
             )
 
         if warmup:
             warmup_mols = clone_mols_with_conformers(mols[: min(4, len(mols))])
             with nvtx.annotate("ff_nvmolkit_warmup", color="purple"):
                 MMFFOptimizeMoleculesConfsFire(
-                    warmup_mols, maxIters=max_iters, fireOptions=fire_options, hardwareOptions=hardware_options
+                    warmup_mols,
+                    maxIters=max_iters,
+                    fireOptions=fire_options,
+                    hardwareOptions=hardware_options,
+                    backend=backend,
                 )
             torch.cuda.synchronize()
 
@@ -165,8 +191,12 @@ def bench_nvmolkit(
 
     if ff == "mmff":
         from nvmolkit.mmffOptimization import MMFFOptimizeMoleculesConfs as _OptimizeConfs
+
+        extra_kwargs = {"backend": backend}
     elif ff == "uff":
         from nvmolkit.uffOptimization import UFFOptimizeMoleculesConfs as _OptimizeConfs
+
+        extra_kwargs = {}
     else:
         raise ValueError(f"Unknown ff: {ff!r}")
 
@@ -175,12 +205,12 @@ def bench_nvmolkit(
     @nvtx.annotate("ff_nvmolkit_run", color="orange")
     def run() -> None:
         cloned = clone_mols_with_conformers(mols)
-        last_energies[0] = _OptimizeConfs(cloned, maxIters=max_iters, hardwareOptions=hardware_options)
+        last_energies[0] = _OptimizeConfs(cloned, maxIters=max_iters, hardwareOptions=hardware_options, **extra_kwargs)
 
     if warmup:
         warmup_mols = clone_mols_with_conformers(mols[: min(4, len(mols))])
         with nvtx.annotate("ff_nvmolkit_warmup", color="purple"):
-            _OptimizeConfs(warmup_mols, maxIters=max_iters, hardwareOptions=hardware_options)
+            _OptimizeConfs(warmup_mols, maxIters=max_iters, hardwareOptions=hardware_options, **extra_kwargs)
         torch.cuda.synchronize()
 
     result = time_it(run, runs=runs, warmups=0, gpu_sync=True)
@@ -242,7 +272,7 @@ def _build_hardware_options(
 
 
 CSV_HEADER = (
-    "method,ff,minimizer,input_file,input_type,num_mols,confs_per_mol,max_iters,"
+    "method,ff,minimizer,backend,input_file,input_type,num_mols,confs_per_mol,max_iters,"
     "batch_size,batches_per_gpu,prep_threads,num_gpus,"
     "rdkit_threads,time_ms,std_ms,energies_compared,mean_abs_energy_diff,max_abs_energy_diff"
 )
@@ -282,6 +312,29 @@ def main() -> None:
         help="Conformers per molecule to embed before timing (default: 10)",
     )
     parser.add_argument("--max_iters", type=int, default=200, help="Maximum FF optimization iterations (default: 200)")
+    parser.add_argument(
+        "--backend",
+        choices=["BATCHED", "PER_MOL", "HYBRID"],
+        default="HYBRID",
+        help=(
+            "nvmolkit MMFF kernel backend: BATCHED, PER_MOL, or HYBRID (default). "
+            "Honored for ``--ff mmff`` with either BFGS or FIRE; ignored for UFF."
+        ),
+    )
+    parser.add_argument(
+        "--embed_threads",
+        type=int,
+        default=os.cpu_count() or 1,
+        help="Threads used to parallelize the up-front RDKit ETKDG embedding (default: nproc)",
+    )
+    parser.add_argument(
+        "--save_embedded_sdf",
+        default=None,
+        help=(
+            "Optional path to write the post-embedding, pre-minimization molecules (with all "
+            "embedded conformers) as an SDF. Written before any benchmark timing."
+        ),
+    )
 
     parser.add_argument("--runs", "-r", type=int, default=1, help="Number of timing runs (default: 1)")
     parser.add_argument("--warmup", action="store_true", dest="warmup", help="Perform a warmup run (default)")
@@ -344,6 +397,9 @@ def main() -> None:
     print(f"  Input: {input_file} ({input_type})")
     print(f"  Force field: {args.ff.upper()}")
     print(f"  Minimizer: {args.minimizer}")
+    if args.ff == "mmff":
+        print(f"  Backend: {args.backend}")
+    print(f"  Embed threads: {args.embed_threads}")
     print(f"  Max molecules: {args.num_mols if args.num_mols > 0 else 'all'}")
     print(f"  Conformers per mol: {args.confs_per_mol}")
     print(f"  Max FF iterations: {args.max_iters}")
@@ -379,13 +435,27 @@ def main() -> None:
         sys.exit(1)
     print(f"  {len(mols)} molecules ready")
 
-    print(f"\nEmbedding {args.confs_per_mol} conformer(s) per molecule with RDKit ETKDGv3...")
-    mols = _embed_conformers(mols, args.confs_per_mol, args.seed)
+    print(
+        f"\nEmbedding {args.confs_per_mol} conformer(s) per molecule with RDKit ETKDGv3 "
+        f"({args.embed_threads} thread(s))..."
+    )
+    mols = _embed_conformers(mols, args.confs_per_mol, args.seed, args.embed_threads)
     if not mols:
         print("Error: No molecules retained after embedding")
         sys.exit(1)
     total_confs = sum(m.GetNumConformers() for m in mols)
     print(f"  {len(mols)} molecules with {total_confs} conformers ready")
+
+    if args.save_embedded_sdf:
+        print(f"\nWriting pre-minimization embedded molecules to {args.save_embedded_sdf}...")
+        writer = Chem.SDWriter(args.save_embedded_sdf)
+        try:
+            for mol in mols:
+                for conf in mol.GetConformers():
+                    writer.write(mol, confId=conf.GetId())
+        finally:
+            writer.close()
+        print(f"  Wrote {total_confs} conformers across {len(mols)} molecules")
 
     results: dict[str, tuple[float, float, list[float]]] = {}
 
@@ -399,7 +469,15 @@ def main() -> None:
         fire_options = fire_options_from_args(args)
         print(f"\nRunning nvmolkit {args.ff.upper()} optimize benchmark ({args.minimizer})...")
         nv_avg, nv_std, nv_energies = bench_nvmolkit(
-            mols, args.ff, args.minimizer, args.max_iters, hardware_options, args.runs, args.warmup, fire_options
+            mols,
+            args.ff,
+            args.minimizer,
+            args.max_iters,
+            hardware_options,
+            args.runs,
+            args.warmup,
+            fire_options,
+            args.backend,
         )
         print(f"  nvmolkit:        {nv_avg:10.2f} ms (+/- {nv_std:.2f} ms)")
         results["nvmolkit"] = (nv_avg, nv_std, nv_energies)
@@ -460,12 +538,13 @@ def main() -> None:
         num_gpus = applied_num_gpus if is_nv else "N/A"
         rdkit_threads = args.rdkit_threads if name == "rdkit" else "N/A"
         minimizer_label = args.minimizer if is_nv else "N/A"
+        backend_label = args.backend if (is_nv and args.ff == "mmff") else "N/A"
         mean_diff = energy_mean if (args.validate and is_nv) else "N/A"
         max_diff = energy_max if (args.validate and is_nv) else "N/A"
         pairs = energy_pairs if (args.validate and is_nv) else "N/A"
         csv_rows.append(
-            f"{name},{args.ff},{minimizer_label},{input_file},{input_type},{len(mols)},{args.confs_per_mol},"
-            f"{args.max_iters},{batch_size},{batches_per_gpu},{prep_threads},{num_gpus},"
+            f"{name},{args.ff},{minimizer_label},{backend_label},{input_file},{input_type},{len(mols)},"
+            f"{args.confs_per_mol},{args.max_iters},{batch_size},{batches_per_gpu},{prep_threads},{num_gpus},"
             f"{rdkit_threads},{avg_ms:.2f},{std_ms:.2f},"
             f"{pairs},{mean_diff},{max_diff}"
         )

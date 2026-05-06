@@ -46,9 +46,9 @@ struct FireOptions {
   //! Defaults below are the optimum from the @c benchmarks/fire_optuna.py "gpu" study
   //! (stored in @c benchmarks/fire_optuna_gpu_v4.db) at @c maxIters=200 on the
   //! perturbed-MMFF dataset. They differ from the literal ASE FIRE2 reference values.
-  double dtInit      = 0.0035256954965291066;     //!< Initial time step in picoseconds.
-  double dtMinFactor = 0.00014570290330215527;    //!< Lower bound for dt as a fraction of dtInit.
-  double dtMaxFactor = 5.3536466978846375;        //!< Upper bound for dt as a fraction of dtInit.
+  double dtInit      = 0.0035256954965291066;   //!< Initial time step in picoseconds.
+  double dtMinFactor = 0.00014570290330215527;  //!< Lower bound for dt as a fraction of dtInit.
+  double dtMaxFactor = 5.3536466978846375;      //!< Upper bound for dt as a fraction of dtInit.
 
   //! \brief Maximum 2-norm of the per-step displacement vector dr = dt*v, in Å.
   //! Skipped when @ref abcCorrection is true (matches ASE FIRE2 behavior).
@@ -289,11 +289,11 @@ class FireBatchMinimizer final : public BatchMinimizer {
   //! from helpers like @c repeatUntilConverged. When set, @c initialize() preserves
   //! per-system convergence state (statuses, streak counters, convergeReason) so that
   //! systems that already converged in the previous call are not re-run.
-  bool                       hasInitializedBatch_           = false;
-  int                        cachedNumSystems_              = -1;
-  int                        cachedTotalAtoms_              = -1;
-  const uint8_t*             cachedActiveThisStage_         = nullptr;
-  const double*              cachedMasses_                  = nullptr;
+  bool           hasInitializedBatch_   = false;
+  int            cachedNumSystems_      = -1;
+  int            cachedTotalAtoms_      = -1;
+  const uint8_t* cachedActiveThisStage_ = nullptr;
+  const double*  cachedMasses_          = nullptr;
 
   //! Per-system state for energy-plateau stuck detection. ``energyMinStreak_`` and
   //! ``energyMaxStreak_`` track the windowed extrema while ``stuckStreak_`` counts
@@ -307,11 +307,11 @@ class FireBatchMinimizer final : public BatchMinimizer {
   AsyncDeviceVector<uint8_t> convergeReason_;
 
   // Per-molecule kernel data (used when backend_ == PER_MOLECULE / HYBRID resolves to it).
-  int                       maxAtomsInBatch_ = 0;     //!< Largest molecule in batch (for kernel dispatch).
-  std::vector<int>          activeMolIds_;            //!< Active molecule IDs (host).
-  AsyncDeviceVector<int>    activeMolIdsDevice_;      //!< Device copy of @c activeMolIds_.
-  PinnedHostVector<uint8_t> activeHost_;              //!< Pinned scratch for caller-supplied active mask.
-  PinnedHostVector<uint8_t> convergenceHost_;         //!< Pinned scratch for status readback.
+  int                       maxAtomsInBatch_ = 0;  //!< Largest molecule in batch (for kernel dispatch).
+  std::vector<int>          activeMolIds_;         //!< Active molecule IDs (host).
+  AsyncDeviceVector<int>    activeMolIdsDevice_;   //!< Device copy of @c activeMolIds_.
+  PinnedHostVector<uint8_t> activeHost_;           //!< Pinned scratch for caller-supplied active mask.
+  PinnedHostVector<uint8_t> convergenceHost_;      //!< Pinned scratch for status readback.
 };
 
 }  // namespace nvMolKit

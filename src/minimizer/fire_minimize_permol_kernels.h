@@ -16,8 +16,9 @@
 #ifndef NVMOLKIT_FIRE_MINIMIZE_PERMOL_KERNELS_H
 #define NVMOLKIT_FIRE_MINIMIZE_PERMOL_KERNELS_H
 
-#include <cstdint>
 #include <cuda_runtime.h>
+
+#include <cstdint>
 
 #include "dist_geom_kernels.h"
 #include "fire_minimizer.h"
@@ -32,11 +33,11 @@ namespace nvMolKit {
 //! kernel iterates the full FIRE 2.0 loop internally and writes a per-system
 //! status (0 = converged, 1 = active) into @p statuses.
 struct FirePerMolLaunchParams {
-  int            numIters       = 0;           //!< Maximum FIRE iterations to run inside the kernel.
-  double         gradTol        = 0.0;         //!< sqrt(sum(grad^2)) per-system convergence tolerance.
-  bool           takeHalfStepBack = true;      //!< When true and power<0, take a half step back and zero v.
-  bool           useAbc         = false;       //!< Apply ABC-FIRE mixer correction.
-  bool           useMass        = false;       //!< Mass-weight the force kick (requires non-null masses).
+  int    numIters         = 0;      //!< Maximum FIRE iterations to run inside the kernel.
+  double gradTol          = 0.0;    //!< sqrt(sum(grad^2)) per-system convergence tolerance.
+  bool   takeHalfStepBack = true;   //!< When true and power<0, take a half step back and zero v.
+  bool   useAbc           = false;  //!< Apply ABC-FIRE mixer correction.
+  bool   useMass          = false;  //!< Mass-weight the force kick (requires non-null masses).
 };
 
 //! \brief Launch per-molecule FIRE 2.0 minimization - MMFF specialization.

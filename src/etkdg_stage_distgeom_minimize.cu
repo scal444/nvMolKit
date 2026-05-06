@@ -181,9 +181,9 @@ void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
                                         int           maxIters,
                                         bool          checkEnergy) {
   const bool useBatchedForcefield =
-    minimizer_.kind == MinimizerKind::FIRE
-      ? minimizer_.fire->resolveBackend(ctx.systemHost.atomStarts) == FireBackend::BATCHED
-      : minimizer_.bfgs->resolveBackend(ctx.systemHost.atomStarts) == BfgsBackend::BATCHED;
+    minimizer_.kind == MinimizerKind::FIRE ?
+      minimizer_.fire->resolveBackend(ctx.systemHost.atomStarts) == FireBackend::BATCHED :
+      minimizer_.bfgs->resolveBackend(ctx.systemHost.atomStarts) == BfgsBackend::BATCHED;
 
   if (useBatchedForcefield) {
     DGBatchedForcefield forcefield(molSystemHost,

@@ -14,7 +14,6 @@
 // limitations under the License.
 
 #include <boost/python.hpp>
-
 #include <stdexcept>
 #include <string>
 

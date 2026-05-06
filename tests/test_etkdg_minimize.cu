@@ -171,17 +171,17 @@ class ETKDGMinimizeSingleMolTestFixture : public ::testing::TestWithParam<ETKDGM
     initTestComponents();
 
     // Construct both minimizers; the active one is selected through handle_.
-    minimizer_     = std::make_unique<nvMolKit::BfgsBatchMinimizer>(4, nvMolKit::DebugLevel::NONE, true, nullptr);
+    minimizer_ = std::make_unique<nvMolKit::BfgsBatchMinimizer>(4, nvMolKit::DebugLevel::NONE, true, nullptr);
     nvMolKit::FireOptions fireOptions{};
-    fireOptions.useMass    = false;
-    fireMinimizer_         = std::make_unique<nvMolKit::FireBatchMinimizer>(4,
+    fireOptions.useMass = false;
+    fireMinimizer_      = std::make_unique<nvMolKit::FireBatchMinimizer>(4,
                                                                     fireOptions,
                                                                     nullptr,
                                                                     /*debugMode=*/false,
                                                                     std::get<2>(GetParam()));
-    handle_                = std::get<1>(GetParam()) == nvMolKit::MinimizerKind::FIRE
-                              ? nvMolKit::detail::MinimizerHandle::forFire(*fireMinimizer_)
-                              : nvMolKit::detail::MinimizerHandle::forBfgs(*minimizer_);
+    handle_             = std::get<1>(GetParam()) == nvMolKit::MinimizerKind::FIRE ?
+                            nvMolKit::detail::MinimizerHandle::forFire(*fireMinimizer_) :
+                            nvMolKit::detail::MinimizerHandle::forBfgs(*minimizer_);
 
     // Pre-allocate scratch buffers for stages
     const size_t totalAtoms = context_.systemHost.atomStarts.back();
@@ -192,18 +192,18 @@ class ETKDGMinimizeSingleMolTestFixture : public ::testing::TestWithParam<ETKDGM
   void initTestComponents() { initTestComponentsCommon(mols_, molsPtrs_, context_, eargs_, embedParam_); }
 
  protected:
-  std::string                                    testDataFolderPath_;
-  std::unique_ptr<RDKit::RWMol>                  molPtr_;
-  std::vector<std::unique_ptr<RDKit::RWMol>>     molsPtrs_;
-  std::vector<const RDKit::ROMol*>               mols_;
-  ETKDGContext                                   context_;
-  std::vector<nvMolKit::detail::EmbedArgs>       eargs_;
-  RDKit::DGeomHelpers::EmbedParameters           embedParam_;
-  std::unique_ptr<nvMolKit::BfgsBatchMinimizer>  minimizer_;
-  std::unique_ptr<nvMolKit::FireBatchMinimizer>  fireMinimizer_;
-  nvMolKit::detail::MinimizerHandle              handle_;
-  nvMolKit::PinnedHostVector<double>             positionsScratch_;
-  nvMolKit::PinnedHostVector<uint8_t>            activeScratch_;
+  std::string                                   testDataFolderPath_;
+  std::unique_ptr<RDKit::RWMol>                 molPtr_;
+  std::vector<std::unique_ptr<RDKit::RWMol>>    molsPtrs_;
+  std::vector<const RDKit::ROMol*>              mols_;
+  ETKDGContext                                  context_;
+  std::vector<nvMolKit::detail::EmbedArgs>      eargs_;
+  RDKit::DGeomHelpers::EmbedParameters          embedParam_;
+  std::unique_ptr<nvMolKit::BfgsBatchMinimizer> minimizer_;
+  std::unique_ptr<nvMolKit::FireBatchMinimizer> fireMinimizer_;
+  nvMolKit::detail::MinimizerHandle             handle_;
+  nvMolKit::PinnedHostVector<double>            positionsScratch_;
+  nvMolKit::PinnedHostVector<uint8_t>           activeScratch_;
 };
 
 // BFGS Stage Tests
@@ -429,9 +429,9 @@ class ETKDGMinimizeMultiMolDiverseTestFixture : public ::testing::TestWithParam<
                                                                     nullptr,
                                                                     /*debugMode=*/false,
                                                                     std::get<2>(GetParam()));
-    handle_             = std::get<1>(GetParam()) == nvMolKit::MinimizerKind::FIRE
-                            ? nvMolKit::detail::MinimizerHandle::forFire(*fireMinimizer_)
-                            : nvMolKit::detail::MinimizerHandle::forBfgs(*minimizer_);
+    handle_             = std::get<1>(GetParam()) == nvMolKit::MinimizerKind::FIRE ?
+                            nvMolKit::detail::MinimizerHandle::forFire(*fireMinimizer_) :
+                            nvMolKit::detail::MinimizerHandle::forBfgs(*minimizer_);
 
     // Pre-allocate scratch buffers for stages
     const size_t totalAtoms = context_.systemHost.atomStarts.back();
@@ -442,17 +442,17 @@ class ETKDGMinimizeMultiMolDiverseTestFixture : public ::testing::TestWithParam<
   void initTestComponents() { initTestComponentsCommon(mols_, molsPtrs_, context_, eargs_, embedParam_); }
 
  protected:
-  std::string                                    testDataFolderPath_;
-  std::vector<std::unique_ptr<RDKit::RWMol>>     molsPtrs_;
-  std::vector<const RDKit::ROMol*>               mols_;
-  ETKDGContext                                   context_;
-  std::vector<nvMolKit::detail::EmbedArgs>       eargs_;
-  RDKit::DGeomHelpers::EmbedParameters           embedParam_;
-  std::unique_ptr<nvMolKit::BfgsBatchMinimizer>  minimizer_;
-  std::unique_ptr<nvMolKit::FireBatchMinimizer>  fireMinimizer_;
-  nvMolKit::detail::MinimizerHandle              handle_;
-  nvMolKit::PinnedHostVector<double>             positionsScratch_;
-  nvMolKit::PinnedHostVector<uint8_t>            activeScratch_;
+  std::string                                   testDataFolderPath_;
+  std::vector<std::unique_ptr<RDKit::RWMol>>    molsPtrs_;
+  std::vector<const RDKit::ROMol*>              mols_;
+  ETKDGContext                                  context_;
+  std::vector<nvMolKit::detail::EmbedArgs>      eargs_;
+  RDKit::DGeomHelpers::EmbedParameters          embedParam_;
+  std::unique_ptr<nvMolKit::BfgsBatchMinimizer> minimizer_;
+  std::unique_ptr<nvMolKit::FireBatchMinimizer> fireMinimizer_;
+  nvMolKit::detail::MinimizerHandle             handle_;
+  nvMolKit::PinnedHostVector<double>            positionsScratch_;
+  nvMolKit::PinnedHostVector<uint8_t>           activeScratch_;
 };
 
 // BFGS Stage Tests for diverse molecules
@@ -703,15 +703,14 @@ std::vector<ETKDGMinimizeParam> makeMinimizeParams(const std::vector<ETKDGOption
 }
 }  // namespace
 
-INSTANTIATE_TEST_SUITE_P(
-  ETKDGOptions,
-  ETKDGMinimizeSingleMolTestFixture,
-  ::testing::ValuesIn(
-    makeMinimizeParams({ETKDGOption::ETKDGv3, ETKDGOption::ETKDGv2, ETKDGOption::ETKDG, ETKDGOption::KDG})),
-  [](const ::testing::TestParamInfo<ETKDGMinimizeParam>& info) {
-    return getETKDGOptionName(std::get<0>(info.param)) + "_" +
-           minimizerKindName(std::get<1>(info.param), std::get<2>(info.param));
-  });
+INSTANTIATE_TEST_SUITE_P(ETKDGOptions,
+                         ETKDGMinimizeSingleMolTestFixture,
+                         ::testing::ValuesIn(makeMinimizeParams(
+                           {ETKDGOption::ETKDGv3, ETKDGOption::ETKDGv2, ETKDGOption::ETKDG, ETKDGOption::KDG})),
+                         [](const ::testing::TestParamInfo<ETKDGMinimizeParam>& info) {
+                           return getETKDGOptionName(std::get<0>(info.param)) + "_" +
+                                  minimizerKindName(std::get<1>(info.param), std::get<2>(info.param));
+                         });
 
 // TODO: Currently only testing ETKDGv3 due to non-deterministic failures when testing multiple options.
 // When multiple ETKDGOptions are tested together (even though each may pass individually),
@@ -719,11 +718,10 @@ INSTANTIATE_TEST_SUITE_P(
 // specifically in the setupRDKitFFWithPos call which ports RDKit's original ETKDG pipeline.
 // Previous attempts to resolve similar issues by cleaning up the RDKit porting were partially
 // successful but not definitive. Further investigation is needed
-INSTANTIATE_TEST_SUITE_P(
-  ETKDGOptions,
-  ETKDGMinimizeMultiMolDiverseTestFixture,
-  ::testing::ValuesIn(makeMinimizeParams({ETKDGOption::ETKDGv3})),
-  [](const ::testing::TestParamInfo<ETKDGMinimizeParam>& info) {
-    return getETKDGOptionName(std::get<0>(info.param)) + "_" +
-           minimizerKindName(std::get<1>(info.param), std::get<2>(info.param));
-  });
+INSTANTIATE_TEST_SUITE_P(ETKDGOptions,
+                         ETKDGMinimizeMultiMolDiverseTestFixture,
+                         ::testing::ValuesIn(makeMinimizeParams({ETKDGOption::ETKDGv3})),
+                         [](const ::testing::TestParamInfo<ETKDGMinimizeParam>& info) {
+                           return getETKDGOptionName(std::get<0>(info.param)) + "_" +
+                                  minimizerKindName(std::get<1>(info.param), std::get<2>(info.param));
+                         });

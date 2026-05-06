@@ -62,9 +62,9 @@ namespace detail {
 //!
 //! Exactly one of @ref bfgs / @ref fire is non-null for a given handle.
 struct MinimizerHandle {
-  MinimizerKind        kind = MinimizerKind::BFGS;
-  BfgsBatchMinimizer*  bfgs = nullptr;
-  FireBatchMinimizer*  fire = nullptr;
+  MinimizerKind       kind = MinimizerKind::BFGS;
+  BfgsBatchMinimizer* bfgs = nullptr;
+  FireBatchMinimizer* fire = nullptr;
 
   //! \brief Convenience constructor for the BFGS path.
   static MinimizerHandle forBfgs(BfgsBatchMinimizer& minimizer) {

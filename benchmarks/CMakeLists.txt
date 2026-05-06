@@ -74,3 +74,18 @@ target_link_libraries(
 add_executable(UpdateInverseHessianBench updateInverseHessianBench.cu)
 target_link_libraries(UpdateInverseHessianBench
                       PRIVATE CUDA::cudart cuda_error_check device_vector bfgs)
+
+add_executable(MMFFEFKernelBench mmff_ef_kernel_bench.cpp)
+target_link_libraries(
+  MMFFEFKernelBench
+  PRIVATE ${RDKit_LIBS}
+          mmff
+          rdkit_mmff_flattened
+          bfgs_common
+          bfgs_mmff
+          ff_utils
+          device_vector
+          cuda_error_check
+          nvtx
+          test_utils
+          OpenMP::OpenMP_CXX)

@@ -79,7 +79,9 @@ def make_etkdg_params(seed: int, max_attempts: int, num_conformers: int) -> ETKD
     return params
 
 
-def embed_and_minimize(smiles_list: list[str], num_conformers: int, params: ETKDGv3, mmff_iters: int) -> list[Chem.Mol]:
+def embed_and_minimize(
+    smiles_list: list[str], num_conformers: int, params: ETKDGv3, mmff_iters: int
+) -> list[Chem.Mol]:
     mols: list[Chem.Mol] = []
     for smiles in tqdm(smiles_list, desc="prep"):
         mol = Chem.MolFromSmiles(smiles)

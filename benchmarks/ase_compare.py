@@ -56,7 +56,9 @@ def parse_args() -> argparse.Namespace:
         default=Path("ase_compare"),
         help="Directory for output figures and CSV (default: ./ase_compare).",
     )
-    parser.add_argument("--max-steps", type=int, default=300, help="Maximum FIRE steps for both backends (default: 300).")
+    parser.add_argument(
+        "--max-steps", type=int, default=300, help="Maximum FIRE steps for both backends (default: 300)."
+    )
     parser.add_argument(
         "--mass-weighting",
         action="store_true",
@@ -162,8 +164,7 @@ def main() -> None:
     plt.xlabel("Step")
     plt.ylabel("Energy (kcal/mol)")
     plt.title(
-        f"FIRE 2.0 trajectory comparison "
-        f"(mass={args.mass_weighting}, abc={args.use_abc})",
+        f"FIRE 2.0 trajectory comparison (mass={args.mass_weighting}, abc={args.use_abc})",
     )
     plt.legend(fontsize=9)
     plt.tight_layout()
@@ -180,7 +181,9 @@ def main() -> None:
             nvm_val = nvm_energies[step] if step < len(nvm_energies) else ""
             writer.writerow([step, ase_val, nvm_val])
     print(f"Wrote {args.output_dir / 'trajectory.png'} and {csv_path}.")
-    print(f"Summary: ASE final={ase_energies[-1]:.4f}, nvmolkit final={nvm_energies[-1]:.4f}, RDKit ref={rdkit_ref:.4f} kcal/mol")
+    print(
+        f"Summary: ASE final={ase_energies[-1]:.4f}, nvmolkit final={nvm_energies[-1]:.4f}, RDKit ref={rdkit_ref:.4f} kcal/mol"
+    )
 
 
 if __name__ == "__main__":

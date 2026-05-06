@@ -204,9 +204,9 @@ void ETKMinimizationStage::setReferenceValues(const ETKDGContext&               
 
 void ETKMinimizationStage::execute(ETKDGContext& ctx) {
   const bool useBatchedForcefield =
-    minimizer_.kind == MinimizerKind::FIRE
-      ? minimizer_.fire->resolveBackend(ctx.systemHost.atomStarts) == FireBackend::BATCHED
-      : minimizer_.bfgs->resolveBackend(ctx.systemHost.atomStarts) == BfgsBackend::BATCHED;
+    minimizer_.kind == MinimizerKind::FIRE ?
+      minimizer_.fire->resolveBackend(ctx.systemHost.atomStarts) == FireBackend::BATCHED :
+      minimizer_.bfgs->resolveBackend(ctx.systemHost.atomStarts) == BfgsBackend::BATCHED;
 
   constexpr int                             maxIters = 300;  // Taken from hard-coded RDKit value.
   DistGeom::BatchedMolecular3DDeviceBuffers molSystemDevice;

@@ -95,8 +95,10 @@ def fire_options_from_optuna(storage: Path, study_name: str) -> FireOptions:
     storage_url = f"sqlite:///{storage.resolve()}"
     study = optuna.load_study(study_name=study_name, storage=storage_url)
     params = study.best_trial.params
-    print(f"FIRE params from study {study_name!r} best trial #{study.best_trial.number} "
-          f"(value={study.best_trial.value:.6g}):")
+    print(
+        f"FIRE params from study {study_name!r} best trial #{study.best_trial.number} "
+        f"(value={study.best_trial.value:.6g}):"
+    )
     for key, value in params.items():
         print(f"  {key}={value}")
 
@@ -331,7 +333,7 @@ def plot_delta_scatter_vs_rdkit(
         ax.scatter(x, y, s=4, alpha=0.4, edgecolors="none")
         ax.axhline(0.0, color="black", linestyle="--", linewidth=1.0, label="ΔE = 0")
         bias = float(np.mean(y))
-        rmse = float(np.sqrt(np.mean(y ** 2)))
+        rmse = float(np.sqrt(np.mean(y**2)))
         ax.set_xlabel("rdkit energy (kcal/mol)")
         ax.set_ylabel(f"({name} - rdkit) / atom (kcal/mol)")
         ax.set_ylim(*y_range)

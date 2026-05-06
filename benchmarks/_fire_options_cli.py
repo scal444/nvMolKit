@@ -35,39 +35,58 @@ def add_fire_options_args(parser: argparse.ArgumentParser, prefix: str = "fire")
     group.add_argument(f"{pfx}-dt-min-factor", type=float, default=None, dest=f"{prefix}_dtMinFactor")
     group.add_argument(f"{pfx}-dt-max-factor", type=float, default=None, dest=f"{prefix}_dtMaxFactor")
     group.add_argument(f"{pfx}-d-max", type=float, default=None, dest=f"{prefix}_dMax")
-    group.add_argument(f"{pfx}-time-step-increment", type=float, default=None,
-                       dest=f"{prefix}_timeStepIncrement")
-    group.add_argument(f"{pfx}-time-step-decrement", type=float, default=None,
-                       dest=f"{prefix}_timeStepDecrement")
-    group.add_argument(f"{pfx}-n-min-for-increase", type=int, default=None,
-                       dest=f"{prefix}_nMinForIncrease")
+    group.add_argument(f"{pfx}-time-step-increment", type=float, default=None, dest=f"{prefix}_timeStepIncrement")
+    group.add_argument(f"{pfx}-time-step-decrement", type=float, default=None, dest=f"{prefix}_timeStepDecrement")
+    group.add_argument(f"{pfx}-n-min-for-increase", type=int, default=None, dest=f"{prefix}_nMinForIncrease")
     group.add_argument(f"{pfx}-alpha-init", type=float, default=None, dest=f"{prefix}_alphaInit")
-    group.add_argument(f"{pfx}-alpha-decrement", type=float, default=None,
-                       dest=f"{prefix}_alphaDecrement")
+    group.add_argument(f"{pfx}-alpha-decrement", type=float, default=None, dest=f"{prefix}_alphaDecrement")
     group.add_argument(f"{pfx}-grad-tol", type=float, default=None, dest=f"{prefix}_gradTol")
-    group.add_argument(f"{pfx}-use-mass", action=argparse.BooleanOptionalAction, default=None,
-                       dest=f"{prefix}_useMass",
-                       help="Mass-weight the FIRE integrator (--no-fire-use-mass to disable).")
-    group.add_argument(f"{pfx}-take-half-step-back", action=argparse.BooleanOptionalAction,
-                       default=None, dest=f"{prefix}_takeHalfStepBack")
-    group.add_argument(f"{pfx}-abc-correction", action=argparse.BooleanOptionalAction,
-                       default=None, dest=f"{prefix}_abcCorrection")
-    group.add_argument(f"{pfx}-stuck-detection-enabled", action=argparse.BooleanOptionalAction,
-                       default=None, dest=f"{prefix}_stuckDetectionEnabled")
-    group.add_argument(f"{pfx}-stuck-energy-rel-tol", type=float, default=None,
-                       dest=f"{prefix}_stuckEnergyRelTol")
-    group.add_argument(f"{pfx}-stuck-streak-length", type=int, default=None,
-                       dest=f"{prefix}_stuckStreakLength")
-    group.add_argument(f"{pfx}-stuck-eval-every-n-polls", type=int, default=None,
-                       dest=f"{prefix}_stuckEvalEveryNPolls")
+    group.add_argument(
+        f"{pfx}-use-mass",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        dest=f"{prefix}_useMass",
+        help="Mass-weight the FIRE integrator (--no-fire-use-mass to disable).",
+    )
+    group.add_argument(
+        f"{pfx}-take-half-step-back",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        dest=f"{prefix}_takeHalfStepBack",
+    )
+    group.add_argument(
+        f"{pfx}-abc-correction", action=argparse.BooleanOptionalAction, default=None, dest=f"{prefix}_abcCorrection"
+    )
+    group.add_argument(
+        f"{pfx}-stuck-detection-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        dest=f"{prefix}_stuckDetectionEnabled",
+    )
+    group.add_argument(f"{pfx}-stuck-energy-rel-tol", type=float, default=None, dest=f"{prefix}_stuckEnergyRelTol")
+    group.add_argument(f"{pfx}-stuck-streak-length", type=int, default=None, dest=f"{prefix}_stuckStreakLength")
+    group.add_argument(
+        f"{pfx}-stuck-eval-every-n-polls", type=int, default=None, dest=f"{prefix}_stuckEvalEveryNPolls"
+    )
 
 
 _FIELDS = (
-    "dtInit", "dtMinFactor", "dtMaxFactor", "dMax",
-    "timeStepIncrement", "timeStepDecrement", "nMinForIncrease",
-    "alphaInit", "alphaDecrement", "gradTol",
-    "useMass", "takeHalfStepBack", "abcCorrection",
-    "stuckDetectionEnabled", "stuckEnergyRelTol", "stuckStreakLength",
+    "dtInit",
+    "dtMinFactor",
+    "dtMaxFactor",
+    "dMax",
+    "timeStepIncrement",
+    "timeStepDecrement",
+    "nMinForIncrease",
+    "alphaInit",
+    "alphaDecrement",
+    "gradTol",
+    "useMass",
+    "takeHalfStepBack",
+    "abcCorrection",
+    "stuckDetectionEnabled",
+    "stuckEnergyRelTol",
+    "stuckStreakLength",
     "stuckEvalEveryNPolls",
 )
 

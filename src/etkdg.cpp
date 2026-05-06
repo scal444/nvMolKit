@@ -207,15 +207,14 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
       // during 3D refinement), matching how the existing 4D BfgsBatchMinimizer is shared. The
       // instance allocates lazily on the first initialize() call so the BFGS-only path pays no
       // GPU cost.
-      FireOptions fireOptions{};
+      FireOptions      fireOptions{};
       fireOptions.useMass = false;  // ETKDG gradients are not physical forces; mass-weighting is meaningless here.
-      auto             fireMinimizer =
+      auto fireMinimizer =
         std::make_unique<FireBatchMinimizer>(4, fireOptions, streamPtr, /*debugMode=*/false, fireBackend);
-      const detail::MinimizerHandle distGeomMinimizerHandle =
-        minimizerKind == MinimizerKind::FIRE
-          ? detail::MinimizerHandle::forFire(*fireMinimizer)
-          : detail::MinimizerHandle::forBfgs(*bfgsMinimizer);
-      const detail::MinimizerHandle etkMinimizerHandle = distGeomMinimizerHandle;
+      const detail::MinimizerHandle distGeomMinimizerHandle = minimizerKind == MinimizerKind::FIRE ?
+                                                                detail::MinimizerHandle::forFire(*fireMinimizer) :
+                                                                detail::MinimizerHandle::forBfgs(*bfgsMinimizer);
+      const detail::MinimizerHandle etkMinimizerHandle      = distGeomMinimizerHandle;
       std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::EnergyForceContribsHost>   dgCache;
       std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::Energy3DForceContribsHost> etkCache;
       // Pinned reusable buffers for common copies.
@@ -354,9 +353,8 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
 
         // Handle failures if requested
         if (failures != nullptr) {
-          auto batchFailures = driver.getFailures(failuresScratch);
-          auto batchStageNames =
-            stageNames != nullptr ? driver.stageNames() : std::vector<std::string>{};
+          auto batchFailures   = driver.getFailures(failuresScratch);
+          auto batchStageNames = stageNames != nullptr ? driver.stageNames() : std::vector<std::string>{};
 
           const std::lock_guard<std::mutex> failureLock(failure_mutex);
           if (stageNames != nullptr && stageNames->empty() && !batchStageNames.empty()) {

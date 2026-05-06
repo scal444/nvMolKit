@@ -130,8 +130,10 @@ def main() -> None:
     print("\n--- Summary table ---")
     print(f"{'sigma':>8} {'mean':>12} {'median':>12} {'p90':>12} {'p99':>12} {'max':>14}")
     for sigma, stats in results.items():
-        print(f"{sigma:>8.3f} {stats['mean']:>12.3f} {stats['median']:>12.3f} {stats['p90']:>12.3f} "
-              f"{stats['p99']:>12.3f} {stats['max']:>14.3f}")
+        print(
+            f"{sigma:>8.3f} {stats['mean']:>12.3f} {stats['median']:>12.3f} {stats['p90']:>12.3f} "
+            f"{stats['p99']:>12.3f} {stats['max']:>14.3f}"
+        )
 
 
 if __name__ == "__main__":

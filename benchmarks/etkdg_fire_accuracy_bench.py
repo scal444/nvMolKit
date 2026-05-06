@@ -429,7 +429,9 @@ def main() -> None:
         if result.stage_names
     }
     if stage_failures:
-        plot_stage_failures(stage_failures, args.output_dir / "stage_failures.png", len(base_mols), args.num_conformers)
+        plot_stage_failures(
+            stage_failures, args.output_dir / "stage_failures.png", len(base_mols), args.num_conformers
+        )
 
     summary = {
         "config": {

@@ -92,14 +92,7 @@ __device__ __forceinline__ void evalMolGrad([[maybe_unused]] const TermsType&   
   } else if constexpr (FFType == ForceFieldType::ETK) {
     DistGeom::molGradETK(terms, systemIndices, molCoords, grad, molIdx, tid);
   } else {  // DG
-    DistGeom::molGradDG<dataDim>(terms,
-                                 systemIndices,
-                                 molCoords,
-                                 grad,
-                                 molIdx,
-                                 chiralWeight,
-                                 fourthDimWeight,
-                                 tid);
+    DistGeom::molGradDG<dataDim>(terms, systemIndices, molCoords, grad, molIdx, chiralWeight, fourthDimWeight, tid);
   }
 }
 
@@ -117,38 +110,32 @@ __device__ __forceinline__ double evalMolEnergy([[maybe_unused]] const TermsType
   } else if constexpr (FFType == ForceFieldType::ETK) {
     return DistGeom::molEnergyETK(terms, systemIndices, molCoords, molIdx, tid);
   } else {  // DG
-    return DistGeom::molEnergyDG<dataDim>(terms,
-                                          systemIndices,
-                                          molCoords,
-                                          molIdx,
-                                          chiralWeight,
-                                          fourthDimWeight,
-                                          tid);
+    return DistGeom::molEnergyDG<dataDim>(terms, systemIndices, molCoords, molIdx, chiralWeight, fourthDimWeight, tid);
   }
 }
 
 template <int MaxAtoms, bool UseSharedMem, ForceFieldType FFType, typename TermsType, typename IndicesType>
-__launch_bounds__(kFirePerMolBlockSize) __global__ void firePerMolKernel(
-  const int                     numIters,
-  const FirePerMolKernelParams  params,
-  const bool                    takeHalfStepBack,
-  const bool                    useAbc,
-  const bool                    useMass,
-  const TermsType*              terms,
-  const IndicesType*            systemIndices,
-  const int*                    molIdList,
-  const int*                    atomStarts,
-  double*                       positions,
-  double*                       grad,
-  double*                       velocities,
-  double*                       alphas,
-  double*                       dts,
-  int*                          nStepsPositive,
-  const double*                 masses,
-  double*                       energyOuts,
-  uint8_t*                      statuses,
-  [[maybe_unused]] const double chiralWeight,
-  [[maybe_unused]] const double fourthDimWeight) {
+__launch_bounds__(kFirePerMolBlockSize)
+  __global__ void firePerMolKernel(const int                     numIters,
+                                   const FirePerMolKernelParams  params,
+                                   const bool                    takeHalfStepBack,
+                                   const bool                    useAbc,
+                                   const bool                    useMass,
+                                   const TermsType*              terms,
+                                   const IndicesType*            systemIndices,
+                                   const int*                    molIdList,
+                                   const int*                    atomStarts,
+                                   double*                       positions,
+                                   double*                       grad,
+                                   double*                       velocities,
+                                   double*                       alphas,
+                                   double*                       dts,
+                                   int*                          nStepsPositive,
+                                   const double*                 masses,
+                                   double*                       energyOuts,
+                                   uint8_t*                      statuses,
+                                   [[maybe_unused]] const double chiralWeight,
+                                   [[maybe_unused]] const double fourthDimWeight) {
   const int molIdx = molIdList[blockIdx.x];
   const int tid    = threadIdx.x;
 
@@ -168,8 +155,8 @@ __launch_bounds__(kFirePerMolBlockSize) __global__ void firePerMolKernel(
   double*       localPos;
   double*       localVel;
   double*       localGrad;
-  double* const globalPos = positions + atomStart * dataDim;
-  double* const globalVel = velocities + atomStart * dataDim;
+  double* const globalPos  = positions + atomStart * dataDim;
+  double* const globalVel  = velocities + atomStart * dataDim;
   double* const globalGrad = grad + atomStart * dataDim;
 
   if constexpr (UseSharedMem) {
@@ -227,7 +214,8 @@ __launch_bounds__(kFirePerMolBlockSize) __global__ void firePerMolKernel(
       }
       __syncthreads();
     }
-    evalMolGrad<FFType, dataDim>(*terms, *systemIndices, localPos, localGrad, molIdx, tid, chiralWeight, fourthDimWeight);
+    evalMolGrad<FFType,
+                dataDim>(*terms, *systemIndices, localPos, localGrad, molIdx, tid, chiralWeight, fourthDimWeight);
     __syncthreads();
 
     // -------------------- pre-kick: convergence + dt/alpha state machine --------------------
@@ -256,8 +244,8 @@ __launch_bounds__(kFirePerMolBlockSize) __global__ void firePerMolKernel(
 
     if (tid == 0) {
       if (sqrt(gradSqShared) <= params.gradTol) {
-        sharedConverged   = true;
-        statuses[molIdx]  = 0;
+        sharedConverged  = true;
+        statuses[molIdx] = 0;
       }
     }
     __syncthreads();
@@ -306,14 +294,8 @@ __launch_bounds__(kFirePerMolBlockSize) __global__ void firePerMolKernel(
         localGrad[i] = 0.0;
       }
       __syncthreads();
-      evalMolGrad<FFType, dataDim>(*terms,
-                                   *systemIndices,
-                                   localPos,
-                                   localGrad,
-                                   molIdx,
-                                   tid,
-                                   chiralWeight,
-                                   fourthDimWeight);
+      evalMolGrad<FFType,
+                  dataDim>(*terms, *systemIndices, localPos, localGrad, molIdx, tid, chiralWeight, fourthDimWeight);
       __syncthreads();
     }
 
@@ -343,7 +325,7 @@ __launch_bounds__(kFirePerMolBlockSize) __global__ void firePerMolKernel(
       sharedScalar0 = vSqReduced;
     }
     __syncthreads();
-    const double vSqSum = sharedScalar0;
+    const double vSqSum        = sharedScalar0;
     const double gradSqReduced = BlockReduce(tempStorage).Sum(gradSqAccum);
     if (tid == 0) {
       sharedScalar0 = gradSqReduced;
@@ -419,13 +401,7 @@ __launch_bounds__(kFirePerMolBlockSize) __global__ void firePerMolKernel(
 
   // Final energy at the converged position.
   const double finalThreadEnergy =
-    evalMolEnergy<FFType, dataDim>(*terms,
-                                   *systemIndices,
-                                   localPos,
-                                   molIdx,
-                                   tid,
-                                   chiralWeight,
-                                   fourthDimWeight);
+    evalMolEnergy<FFType, dataDim>(*terms, *systemIndices, localPos, molIdx, tid, chiralWeight, fourthDimWeight);
   const double finalEnergy = BlockReduce(tempStorage).Sum(finalThreadEnergy);
   if (tid == 0) {
     energyOuts[molIdx] = finalEnergy;
@@ -433,28 +409,28 @@ __launch_bounds__(kFirePerMolBlockSize) __global__ void firePerMolKernel(
 }
 
 template <int MaxAtoms, bool UseSharedMem, ForceFieldType FFType, typename TermsType, typename IndicesType>
-cudaError_t launchKernelForSize(const int                            numMols,
-                                const int*                           molIdList,
-                                const FirePerMolKernelParams&        params,
-                                const bool                           takeHalfStepBack,
-                                const bool                           useAbc,
-                                const bool                           useMass,
-                                const TermsType*                     devTerms,
-                                const IndicesType*                   devSysIdx,
-                                const int*                           atomStarts,
-                                const int                            numIters,
-                                double*                              positions,
-                                double*                              grad,
-                                double*                              velocities,
-                                double*                              alphas,
-                                double*                              dts,
-                                int*                                 nStepsPositive,
-                                const double*                        masses,
-                                double*                              energyOuts,
-                                uint8_t*                             statuses,
-                                const double                         chiralWeight,
-                                const double                         fourthDimWeight,
-                                const cudaStream_t                   stream) {
+cudaError_t launchKernelForSize(const int                     numMols,
+                                const int*                    molIdList,
+                                const FirePerMolKernelParams& params,
+                                const bool                    takeHalfStepBack,
+                                const bool                    useAbc,
+                                const bool                    useMass,
+                                const TermsType*              devTerms,
+                                const IndicesType*            devSysIdx,
+                                const int*                    atomStarts,
+                                const int                     numIters,
+                                double*                       positions,
+                                double*                       grad,
+                                double*                       velocities,
+                                double*                       alphas,
+                                double*                       dts,
+                                int*                          nStepsPositive,
+                                const double*                 masses,
+                                double*                       energyOuts,
+                                uint8_t*                      statuses,
+                                const double                  chiralWeight,
+                                const double                  fourthDimWeight,
+                                const cudaStream_t            stream) {
   if (numMols == 0) {
     return cudaSuccess;
   }
@@ -507,8 +483,8 @@ cudaError_t dispatchByMaxAtoms(const int                     numMols,
                                const double                  fourthDimWeight,
                                const cudaStream_t            stream) {
   auto launchBucket = [&](auto bucketTag) {
-    constexpr int kBucket      = decltype(bucketTag)::value;
-    constexpr bool kUseShared  = (kBucket <= 128);
+    constexpr int  kBucket    = decltype(bucketTag)::value;
+    constexpr bool kUseShared = (kBucket <= 128);
     return launchKernelForSize<kBucket, kUseShared, FFType>(numMols,
                                                             molIds,
                                                             params,

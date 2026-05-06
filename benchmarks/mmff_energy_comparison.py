@@ -77,8 +77,7 @@ def discover_energies_npy(prefix: Path) -> Path:
         if cand.exists():
             return cand
     raise FileNotFoundError(
-        f"No final-energies .npy file found for prefix {prefix}. "
-        f"Looked for: {[str(c) for c in candidates]}"
+        f"No final-energies .npy file found for prefix {prefix}. Looked for: {[str(c) for c in candidates]}"
     )
 
 
@@ -109,7 +108,9 @@ def main() -> None:
 
     sizes = {len(run.energies) for run in runs}
     if len(sizes) != 1:
-        raise SystemExit(f"Run sizes differ: {[(r.label, len(r.energies)) for r in runs]}. Did the runs use the same SDF?")
+        raise SystemExit(
+            f"Run sizes differ: {[(r.label, len(r.energies)) for r in runs]}. Did the runs use the same SDF?"
+        )
     n_confs = sizes.pop()
     print(f"Loaded {len(runs)} runs of {n_confs} conformers each.")
 

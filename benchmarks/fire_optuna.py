@@ -322,9 +322,7 @@ def run_ase_trial(
         leave=False,
     )
 
-    final_energies: list[list[float]] = [
-        [float("nan")] * mol.GetNumConformers() for mol in mols
-    ]
+    final_energies: list[list[float]] = [[float("nan")] * mol.GetNumConformers() for mol in mols]
     for mol_idx, conf_id, energy, positions in results:
         final_energies[mol_idx][conf_id] = energy
         if positions is not None:
@@ -448,13 +446,13 @@ def main() -> None:
             sampler=optuna.samplers.TPESampler(seed=42),
         )
         studies[name] = study
-        objective = make_objective(
-            backend, base_mols, ref_energies, args.ase_subset, args.ase_workers, args.objective
-        )
+        objective = make_objective(backend, base_mols, ref_energies, args.ase_subset, args.ase_workers, args.objective)
         already = len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
         remaining = max(0, args.n_trials - already)
-        print(f"\n>>> Running study {name} (maxIters={MAX_ITERS}); "
-              f"already complete={already}, will run {remaining} more.")
+        print(
+            f"\n>>> Running study {name} (maxIters={MAX_ITERS}); "
+            f"already complete={already}, will run {remaining} more."
+        )
         if remaining > 0:
             study.optimize(objective, n_trials=remaining, gc_after_trial=True, show_progress_bar=True)
         report_best(study, name)

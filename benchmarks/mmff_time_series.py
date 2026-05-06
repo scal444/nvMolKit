@@ -127,9 +127,7 @@ def run_single_minimization(
     )
 
 
-def plot_runs_energy(
-    runs: list[FireRun], output_path: Path, *, rdkit_reference: float | None, title: str
-) -> None:
+def plot_runs_energy(runs: list[FireRun], output_path: Path, *, rdkit_reference: float | None, title: str) -> None:
     plt.figure(figsize=(9, 5))
     for run in runs:
         plt.plot(run.energies, label=run.label)
@@ -204,7 +202,9 @@ def parameter_sweep(mol: Chem.Mol, max_steps: int, output_dir: Path, rdkit_refer
             steps=max_steps,
             half_step=True,
             use_masses=True,
-            label="dt={dt_init}, finc={time_step_increment}, Nmin={n_min_for_increase}, abc={use_abc}".format(**kwargs),
+            label="dt={dt_init}, finc={time_step_increment}, Nmin={n_min_for_increase}, abc={use_abc}".format(
+                **kwargs
+            ),
             **kwargs,
         )
         if run.energies and run.energies[-1] < 1e4:

@@ -28,6 +28,7 @@
 #include "../forcefields/mmff_kernels.h"
 #include "fire_minimize_permol_kernels.h"
 #include "fire_minimizer.h"
+#include "nvtx.h"
 
 namespace nvMolKit {
 
@@ -260,7 +261,7 @@ __global__ void firePostKickKernel(const cuda::std::span<const int>    atomStart
   // to physical Å/ps^2 via kForceKcalMolPerAng_PerAmu_to_AngPerPs2 and divided by
   // per-atom mass. Without mass weighting we mirror ASE FIRE2: v += dt * F where F is
   // the raw force in the calculator's native units (no implicit unit conversion).
-  double vSqAccum = 0.0;
+  double vSqAccum    = 0.0;
   double gradSqAccum = 0.0;
   for (int i = threadIdx.x; i < static_cast<int>(vSys.size()); i += kFireBlockSize) {
     double accel;
@@ -281,7 +282,7 @@ __global__ void firePostKickKernel(const cuda::std::span<const int>    atomStart
     sharedScalar0 = vSqReduced;
   }
   __syncthreads();
-  const double vSqSum = sharedScalar0;
+  const double vSqSum        = sharedScalar0;
   const double gradSqReduced = BlockReduce(tempStorage).Sum(gradSqAccum);
   if (threadIdx.x == 0) {
     sharedScalar0 = gradSqReduced;
@@ -482,11 +483,8 @@ void FireBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
   statuses_.resize(numSystems);
   if (!isContinuation) {
     if (activeThisStage != nullptr) {
-      cudaCheckError(cudaMemcpyAsync(statuses_.data(),
-                                     activeThisStage,
-                                     numSystems * sizeof(uint8_t),
-                                     cudaMemcpyDefault,
-                                     stream_));
+      cudaCheckError(
+        cudaMemcpyAsync(statuses_.data(), activeThisStage, numSystems * sizeof(uint8_t), cudaMemcpyDefault, stream_));
     } else {
       setAll(statuses_, static_cast<uint8_t>(1));
     }
@@ -718,13 +716,26 @@ bool FireBatchMinimizer::step(const double                  gradTol,
                               AsyncDeviceVector<double>&    positions,
                               AsyncDeviceVector<double>&    grad,
                               const GradFunctor&            gFunc) {
-  grad.zero();
-  gFunc();
+  const ScopedNvtxRange stepRange("FireBatchMinimizer::step");
+  {
+    const ScopedNvtxRange gradRange("FIRE pre-kick gradient");
+    grad.zero();
+    gFunc();
+  }
   const bool isFirstStep = (step_ == 0);
-  launchPreKick(gradTol, atomStarts, positions, grad, lastKnownNumUnfinished_, isFirstStep);
-  grad.zero();
-  gFunc();
-  launchPostKick(gradTol, atomStarts, positions, grad, lastKnownNumUnfinished_);
+  {
+    const ScopedNvtxRange preKickRange("FIRE preKick");
+    launchPreKick(gradTol, atomStarts, positions, grad, lastKnownNumUnfinished_, isFirstStep);
+  }
+  {
+    const ScopedNvtxRange gradRange("FIRE post-kick gradient");
+    grad.zero();
+    gFunc();
+  }
+  {
+    const ScopedNvtxRange postKickRange("FIRE postKick");
+    launchPostKick(gradTol, atomStarts, positions, grad, lastKnownNumUnfinished_);
+  }
   compactActiveAsync();
   lastKnownNumUnfinished_ = readbackNumUnfinished();
   step_++;
@@ -756,6 +767,7 @@ bool FireBatchMinimizer::minimize(const int                                   nu
                                   EnergyFunctor                               eFunc,
                                   const GradFunctor                           gFunc,
                                   const uint8_t*                              activeThisStage) {
+  const ScopedNvtxRange minimizeRange("FireBatchMinimizer::minimize (batched)");
   initialize(atomStartsHost, nullptr, activeThisStage, FireBackend::BATCHED);
 
   for (int iter = 0; iter < numIters; ++iter) {
@@ -841,9 +853,8 @@ bool FireBatchMinimizer::minimize(const int                                   nu
         ++byStuck;
       }
     }
-    std::cerr << "[FIRE-diag] systems=" << numSystems_ << " iters=" << step_
-              << " converged_grad=" << byGrad << " converged_stuck=" << byStuck
-              << " unfinished=" << lastKnownNumUnfinished_ << '\n';
+    std::cerr << "[FIRE-diag] systems=" << numSystems_ << " iters=" << step_ << " converged_grad=" << byGrad
+              << " converged_stuck=" << byStuck << " unfinished=" << lastKnownNumUnfinished_ << '\n';
   }
 
   return lastKnownNumUnfinished_ == 0;
@@ -856,7 +867,8 @@ bool FireBatchMinimizer::minimize(const int                  numIters,
                                   AsyncDeviceVector<double>& grad,
                                   AsyncDeviceVector<double>& energyOuts,
                                   const uint8_t*             activeSystemMask) {
-  const auto& atomStartsHost = ff.atomStartsHost();
+  const ScopedNvtxRange minimizeRange("FireBatchMinimizer::minimize (BatchedForcefield)");
+  const auto&           atomStartsHost = ff.atomStartsHost();
 
   AsyncDeviceVector<double> energyBuffer;
   energyBuffer.setStream(stream_);
@@ -917,12 +929,14 @@ bool FireBatchMinimizer::minimizeWithMMFF(const int                            n
                                           const std::vector<int>&              atomStartsHost,
                                           MMFF::BatchedMolecularDeviceBuffers& systemDevice,
                                           const uint8_t*                       activeThisStage) {
+  const ScopedNvtxRange perMolRange("FireBatchMinimizer::perMoleculeMinimize");
   requireStuckDetectionDisabled(fireOptions_);
 
   const FireBackend effectiveBackend = resolveBackend(atomStartsHost);
   if (effectiveBackend == FireBackend::BATCHED) {
-    throw std::runtime_error("FireBatchMinimizer::minimizeWithMMFF requires PER_MOLECULE backend (or HYBRID resolving "
-                             "to PER_MOLECULE); use minimize(..., BatchedForcefield&) for batched MMFF minimization");
+    throw std::runtime_error(
+      "FireBatchMinimizer::minimizeWithMMFF requires PER_MOLECULE backend (or HYBRID resolving "
+      "to PER_MOLECULE); use minimize(..., BatchedForcefield&) for batched MMFF minimization");
   }
 
   initialize(atomStartsHost, /*masses=*/nullptr, activeThisStage, effectiveBackend);
@@ -966,12 +980,14 @@ bool FireBatchMinimizer::minimizeWithETK(const int                              
                                          AsyncDeviceVector<double>&                 positions,
                                          DistGeom::BatchedMolecular3DDeviceBuffers& systemDevice,
                                          const uint8_t*                             activeThisStage) {
+  const ScopedNvtxRange perMolRange("FireBatchMinimizer::perMoleculeMinimizeETK");
   requireStuckDetectionDisabled(fireOptions_);
 
   const FireBackend effectiveBackend = resolveBackend(atomStartsHost);
   if (effectiveBackend == FireBackend::BATCHED) {
-    throw std::runtime_error("FireBatchMinimizer::minimizeWithETK requires PER_MOLECULE backend (or HYBRID resolving "
-                             "to PER_MOLECULE); use minimize(..., BatchedForcefield&) for batched ETK minimization");
+    throw std::runtime_error(
+      "FireBatchMinimizer::minimizeWithETK requires PER_MOLECULE backend (or HYBRID resolving "
+      "to PER_MOLECULE); use minimize(..., BatchedForcefield&) for batched ETK minimization");
   }
 
   initialize(atomStartsHost, /*masses=*/nullptr, activeThisStage, effectiveBackend);
@@ -1017,6 +1033,7 @@ bool FireBatchMinimizer::minimizeWithDG(const int                               
                                         const double                             chiralWeight,
                                         const double                             fourthDimWeight,
                                         const uint8_t*                           activeThisStage) {
+  const ScopedNvtxRange perMolRange("FireBatchMinimizer::perMoleculeMinimizeDG");
   requireStuckDetectionDisabled(fireOptions_);
 
   if (dataDim_ != 4) {
@@ -1025,8 +1042,9 @@ bool FireBatchMinimizer::minimizeWithDG(const int                               
 
   const FireBackend effectiveBackend = resolveBackend(atomStartsHost);
   if (effectiveBackend == FireBackend::BATCHED) {
-    throw std::runtime_error("FireBatchMinimizer::minimizeWithDG requires PER_MOLECULE backend (or HYBRID resolving "
-                             "to PER_MOLECULE); use minimize(..., BatchedForcefield&) for batched DG minimization");
+    throw std::runtime_error(
+      "FireBatchMinimizer::minimizeWithDG requires PER_MOLECULE backend (or HYBRID resolving "
+      "to PER_MOLECULE); use minimize(..., BatchedForcefield&) for batched DG minimization");
   }
 
   initialize(atomStartsHost, /*masses=*/nullptr, activeThisStage, effectiveBackend);

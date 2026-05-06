@@ -359,13 +359,13 @@ TEST(FireMinimizer, BatchedReferenceTrajectoryMatchesAseFire2) {
 
   nvMolKit::FireOptions options;
   options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
-  options.dtInit           = 0.001;
-  options.dMax             = 0.0;  // no clip
-  options.gradTol          = 1e-3;
-  options.useMass          = false;
-  options.takeHalfStepBack = true;
-  options.abcCorrection    = false;
-  options.nMinForIncrease  = 5;
+  options.dtInit                = 0.001;
+  options.dMax                  = 0.0;  // no clip
+  options.gradTol               = 1e-3;
+  options.useMass               = false;
+  options.takeHalfStepBack      = true;
+  options.abcCorrection         = false;
+  options.nMinForIncrease       = 5;
 
   nvMolKit::FireBatchMinimizer minimizer(kDim, options);
   minimizer.setConvergencePollInterval(1);
@@ -441,13 +441,13 @@ TEST(FireMinimizer, AbcModeMatchesReference) {
 
   nvMolKit::FireOptions options;
   options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
-  options.dtInit           = 0.001;
-  options.dMax             = 0.0;
-  options.gradTol          = 1e-3;
-  options.useMass          = false;
-  options.takeHalfStepBack = true;
-  options.abcCorrection    = true;
-  options.nMinForIncrease  = 5;
+  options.dtInit                = 0.001;
+  options.dMax                  = 0.0;
+  options.gradTol               = 1e-3;
+  options.useMass               = false;
+  options.takeHalfStepBack      = true;
+  options.abcCorrection         = true;
+  options.nMinForIncrease       = 5;
 
   nvMolKit::FireBatchMinimizer minimizer(kDim, options);
   minimizer.setConvergencePollInterval(1);
@@ -493,12 +493,12 @@ TEST(FireMinimizer, MaxStepNormClipping) {
 
   nvMolKit::FireOptions options;
   options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
-  options.dtInit           = 0.001;
-  options.dMax             = 0.05;
-  options.gradTol          = 1e-3;
-  options.useMass          = false;
-  options.takeHalfStepBack = true;
-  options.abcCorrection    = false;
+  options.dtInit                = 0.001;
+  options.dMax                  = 0.05;
+  options.gradTol               = 1e-3;
+  options.useMass               = false;
+  options.takeHalfStepBack      = true;
+  options.abcCorrection         = false;
 
   nvMolKit::FireBatchMinimizer minimizer(kDim, options);
   minimizer.setConvergencePollInterval(1);
@@ -567,15 +567,15 @@ TEST(FireMinimizer, NegativePowerHalfStepBack) {
 
   nvMolKit::FireOptions options;
   options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
-  options.dtInit           = 0.005;  // intentionally large -> overshoot -> negative power soon
-  options.dtMinFactor      = 0.001;
-  options.dtMaxFactor      = 10.0;
-  options.dMax             = 0.0;
-  options.gradTol          = 1e-3;
-  options.useMass          = false;
-  options.takeHalfStepBack = true;
-  options.abcCorrection    = false;
-  options.nMinForIncrease  = 5;
+  options.dtInit                = 0.005;  // intentionally large -> overshoot -> negative power soon
+  options.dtMinFactor           = 0.001;
+  options.dtMaxFactor           = 10.0;
+  options.dMax                  = 0.0;
+  options.gradTol               = 1e-3;
+  options.useMass               = false;
+  options.takeHalfStepBack      = true;
+  options.abcCorrection         = false;
+  options.nMinForIncrease       = 5;
 
   nvMolKit::FireBatchMinimizer minimizer(kDim, options);
   minimizer.setConvergencePollInterval(1);
@@ -616,12 +616,12 @@ TEST(FireMinimizer, MmffPhysicalUnits) {
 
   nvMolKit::FireOptions options;
   options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
-  options.dtInit          = 0.001;
-  options.dMax            = 0.1;
-  options.gradTol         = 1e-4;
-  options.useMass         = true;
-  options.abcCorrection   = false;
-  options.nMinForIncrease = 5;
+  options.dtInit                = 0.001;
+  options.dMax                  = 0.1;
+  options.gradTol               = 1e-4;
+  options.useMass               = true;
+  options.abcCorrection         = false;
+  options.nMinForIncrease       = 5;
 
   nvMolKit::FireBatchMinimizer minimizer(kDim, options);
   std::vector<double>          masses(2, 12.0);  // carbon mass
@@ -655,13 +655,13 @@ TEST(FireMinimizer, MassWeightingScalesAcceleration) {
   auto runOneKick = [&](double mass) {
     HarmonicSystems       systems(atomCounts, kPerSys, startingPositions, targets);
     nvMolKit::FireOptions options;
-  options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
-    options.dtInit           = 0.001;
-    options.dMax             = 0.0;
-    options.gradTol          = 0.0;
-    options.useMass          = true;
-    options.takeHalfStepBack = true;
-    options.abcCorrection    = false;
+    options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
+    options.dtInit                = 0.001;
+    options.dMax                  = 0.0;
+    options.gradTol               = 0.0;
+    options.useMass               = true;
+    options.takeHalfStepBack      = true;
+    options.abcCorrection         = false;
     nvMolKit::FireBatchMinimizer minimizer(kDim, options);
     minimizer.setMasses({mass});
     minimizer.setConvergencePollInterval(1);
@@ -701,13 +701,13 @@ TEST(FireMinimizer, UseMassFalseEqualsAllOnesMass) {
   auto runFifty = [&](bool useMass, std::vector<double> masses) {
     HarmonicSystems       systems(atomCounts, kPerSys, startingPositions, targets);
     nvMolKit::FireOptions options;
-  options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
-    options.dtInit          = 0.001;
-    options.dMax            = 0.0;
-    options.gradTol         = 0.0;
-    options.useMass         = useMass;
-    options.abcCorrection   = false;
-    options.nMinForIncrease = 5;
+    options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
+    options.dtInit                = 0.001;
+    options.dMax                  = 0.0;
+    options.gradTol               = 0.0;
+    options.useMass               = useMass;
+    options.abcCorrection         = false;
+    options.nMinForIncrease       = 5;
     nvMolKit::FireBatchMinimizer minimizer(kDim, options);
     if (useMass) {
       minimizer.setMasses(masses);
@@ -742,19 +742,19 @@ TEST(FireMinimizer, ParameterPropagation) {
 
   nvMolKit::FireOptions options;
   options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
-  options.dtInit            = 0.002;
-  options.dtMinFactor       = 0.01;
-  options.dtMaxFactor       = 4.0;
-  options.alphaInit         = 0.4;
-  options.alphaDecrement    = 0.5;
-  options.timeStepIncrement = 1.5;
-  options.timeStepDecrement = 0.25;
-  options.nMinForIncrease   = 2;
-  options.dMax              = 0.0;
-  options.gradTol           = 1e-9;  // never converge during this test
-  options.useMass           = false;
-  options.takeHalfStepBack  = true;
-  options.abcCorrection     = false;
+  options.dtInit                = 0.002;
+  options.dtMinFactor           = 0.01;
+  options.dtMaxFactor           = 4.0;
+  options.alphaInit             = 0.4;
+  options.alphaDecrement        = 0.5;
+  options.timeStepIncrement     = 1.5;
+  options.timeStepDecrement     = 0.25;
+  options.nMinForIncrease       = 2;
+  options.dMax                  = 0.0;
+  options.gradTol               = 1e-9;  // never converge during this test
+  options.useMass               = false;
+  options.takeHalfStepBack      = true;
+  options.abcCorrection         = false;
 
   nvMolKit::FireBatchMinimizer minimizer(kDim, options);
   minimizer.setConvergencePollInterval(1);
@@ -796,12 +796,12 @@ TEST(FireMinimizer, ActiveSystemMaskRespected) {
 
   nvMolKit::FireOptions options;
   options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
-  options.gradTol          = 1e-4;
-  options.dMax             = 0.0;
-  options.useMass          = false;
-  options.takeHalfStepBack = true;
-  options.abcCorrection    = false;
-  options.nMinForIncrease  = 5;
+  options.gradTol               = 1e-4;
+  options.dMax                  = 0.0;
+  options.useMass               = false;
+  options.takeHalfStepBack      = true;
+  options.abcCorrection         = false;
+  options.nMinForIncrease       = 5;
 
   nvMolKit::FireBatchMinimizer minimizer(kDim, options);
   std::vector<uint8_t>         mask = {1, 0, 1};
@@ -850,12 +850,12 @@ TEST(FireMinimizer, ActiveMaskMatchesBfgsContract) {
 
   nvMolKit::FireOptions options;
   options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
-  options.gradTol          = 1e-4;
-  options.dMax             = 0.0;
-  options.useMass          = false;
-  options.takeHalfStepBack = true;
-  options.abcCorrection    = false;
-  options.nMinForIncrease  = 5;
+  options.gradTol               = 1e-4;
+  options.dMax                  = 0.0;
+  options.useMass               = false;
+  options.takeHalfStepBack      = true;
+  options.abcCorrection         = false;
+  options.nMinForIncrease       = 5;
   nvMolKit::FireBatchMinimizer minimizer(kDim, options);
   minimizer.setConvergencePollInterval(1);
   minimizer.initialize(systems.atomStartsHost(), nullptr, mask.data());
@@ -913,12 +913,12 @@ TEST(FireMinimizer, StaggeredConvergenceCount) {
 
   nvMolKit::FireOptions options;
   options.stuckDetectionEnabled = false;  // ASE FIRE2 reference has no stuck-plateau exit; keep parity.
-  options.dtInit          = 0.001;
-  options.gradTol         = 1e-3;
-  options.dMax            = 0.0;
-  options.useMass         = false;
-  options.abcCorrection   = false;
-  options.nMinForIncrease = 5;
+  options.dtInit                = 0.001;
+  options.gradTol               = 1e-3;
+  options.dMax                  = 0.0;
+  options.useMass               = false;
+  options.abcCorrection         = false;
+  options.nMinForIncrease       = 5;
 
   nvMolKit::FireBatchMinimizer minimizer(kDim, options);
   minimizer.setConvergencePollInterval(1);

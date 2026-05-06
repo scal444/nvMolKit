@@ -71,7 +71,7 @@ BOOST_PYTHON_MODULE(_embedMolecules) {
         const boost::python::object&                failuresOut) {
       auto molsVec = nvMolKit::extractMolecules(molecules);
 
-      std::vector<std::vector<int16_t>>* failuresPtr = nullptr;
+      std::vector<std::vector<int16_t>>* failuresPtr   = nullptr;
       std::vector<std::string>*          stageNamesPtr = nullptr;
       std::vector<std::vector<int16_t>>  failuresStorage;
       std::vector<std::string>           stageNamesStorage;
