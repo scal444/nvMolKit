@@ -25,7 +25,7 @@ target_include_directories(bfgs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 add_library(bfgs_common bfgs_common.cpp)
 target_link_libraries(
   bfgs_common
-  PUBLIC host_vector device conformer_types
+  PUBLIC host_vector device conformer_types gpu_scheduler
   PRIVATE ${RDKit_LIBS} OpenMP::OpenMP_CXX)
 target_include_directories(bfgs_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -35,6 +35,7 @@ target_link_libraries(
   PUBLIC bfgs
   PRIVATE ${RDKit_LIBS}
           bfgs_common
+          gpu_scheduler
           mmff_batched_forcefield
           rdkit_mmff_flattened
           forcefield_constraints
@@ -50,6 +51,7 @@ target_link_libraries(
   PUBLIC bfgs
   PRIVATE ${RDKit_LIBS}
           bfgs_common
+          gpu_scheduler
           uff_batched_forcefield
           rdkit_uff_flattened
           forcefield_constraints

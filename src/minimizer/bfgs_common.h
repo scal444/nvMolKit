@@ -20,8 +20,8 @@
 #include <vector>
 
 #include "../hardware_options.h"
+#include "config.h"
 #include "conformer_info.h"
-#include "device.h"
 #include "host_vector.h"
 
 namespace RDKit {
@@ -39,15 +39,16 @@ struct ThreadLocalBuffers {
   void ensureCapacity(size_t positionsSize, size_t energiesSize);
 };
 
-struct BatchExecutionContext {
-  size_t                    batchSize;
-  int                       numThreads;
-  std::vector<ScopedStream> streamPool;
-  std::vector<int>          devicesPerThread;
-};
+/// Translate the public BatchHardwareOptions surface to a gpu_scheduler::Config.
+/// Unset fields default to "all available GPUs", "spread host threads evenly
+/// across them", and "one in-flight slot per runner" (matching the legacy
+/// OpenMP behavior).
+gpu_scheduler::Config configFromHardwareOptions(const BatchHardwareOptions& perfOptions);
 
-/// Set up GPU streams, thread counts, and batch sizing from hardware options.
-BatchExecutionContext setupBatchExecution(const BatchHardwareOptions& perfOptions);
+/// Resolve the per-pipeline-batch conformer count from BatchHardwareOptions.
+/// Returns the total conformer count when batchSize is unset / non-positive,
+/// so the pipeline runs a single mini-batch per claim by default.
+int resolveBatchSize(const BatchHardwareOptions& perfOptions, int totalConformers);
 
 /// Flatten all conformers from all molecules into a single list, validating molecule pointers
 /// and initializing the per-molecule energy output vectors.

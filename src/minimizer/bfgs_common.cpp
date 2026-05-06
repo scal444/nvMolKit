@@ -19,9 +19,12 @@
 #include <GraphMol/ROMol.h>
 #include <omp.h>
 
+#include <algorithm>
 #include <numeric>
 #include <stdexcept>
 #include <string>
+
+#include "device.h"
 
 namespace nvMolKit {
 
@@ -39,33 +42,43 @@ void ThreadLocalBuffers::ensureCapacity(const size_t positionsSize, const size_t
   }
 }
 
-BatchExecutionContext setupBatchExecution(const BatchHardwareOptions& perfOptions) {
-  BatchExecutionContext ctx;
-  ctx.batchSize = perfOptions.batchSize == -1 ? 500 : static_cast<size_t>(perfOptions.batchSize);
-
-  std::vector<int> gpuIds = perfOptions.gpuIds;
-  if (gpuIds.empty()) {
+gpu_scheduler::Config configFromHardwareOptions(const BatchHardwareOptions& perfOptions) {
+  gpu_scheduler::Config config;
+  config.gpuIds = perfOptions.gpuIds;
+  if (config.gpuIds.empty()) {
     const int numDevices = countCudaDevices();
     if (numDevices == 0) {
       throw std::runtime_error("No CUDA devices found");
     }
-    gpuIds.resize(numDevices);
-    std::iota(gpuIds.begin(), gpuIds.end(), 0);
-  }
-  const int batchesPerGpu = perfOptions.batchesPerGpu == -1 ? 4 : perfOptions.batchesPerGpu;
-  ctx.numThreads =
-    perfOptions.batchesPerGpu > 0 ? batchesPerGpu * static_cast<int>(gpuIds.size()) : omp_get_max_threads();
-
-  ctx.streamPool.reserve(ctx.numThreads);
-  ctx.devicesPerThread.resize(ctx.numThreads);
-  for (int i = 0; i < ctx.numThreads; ++i) {
-    const int        gpuId = gpuIds[i % gpuIds.size()];
-    const WithDevice dev(gpuId);
-    ctx.streamPool.emplace_back();
-    ctx.devicesPerThread[i] = gpuId;
+    config.gpuIds.resize(numDevices);
+    std::iota(config.gpuIds.begin(), config.gpuIds.end(), 0);
   }
 
-  return ctx;
+  // workerThreadsPerGpu maps to BatchHardwareOptions::batchesPerGpu. When
+  // batchesPerGpu is unset, fall back to distributing all available host
+  // threads across the chosen GPUs (matches the legacy default).
+  if (perfOptions.batchesPerGpu > 0) {
+    config.workerThreadsPerGpu = perfOptions.batchesPerGpu;
+  } else {
+    const int hwThreads        = std::max(1, omp_get_max_threads());
+    const int numGpus          = static_cast<int>(config.gpuIds.size());
+    config.workerThreadsPerGpu = std::max(1, hwThreads / numGpus);
+  }
+
+  // The legacy OpenMP loop did not pipeline batches per worker (each
+  // iteration owned its GPU work end-to-end), so default slotsPerWorker to 1
+  // to preserve per-runner concurrency characteristics.
+  config.slotsPerWorker = 1;
+
+  if (perfOptions.preprocessingThreads > 0) {
+    config.globalPreprocessingThreads = perfOptions.preprocessingThreads;
+  }
+  return config;
+}
+
+int resolveBatchSize(const BatchHardwareOptions& perfOptions, const int totalConformers) {
+  const int requested = perfOptions.batchSize == -1 ? 500 : perfOptions.batchSize;
+  return requested <= 0 ? totalConformers : requested;
 }
 
 std::vector<ConformerInfo> flattenConformers(const std::vector<RDKit::ROMol*>& mols,
