@@ -67,6 +67,11 @@ target_link_libraries(test_work_splitting PRIVATE work_splitting)
 add_executable(test_thread_safe_queue test_thread_safe_queue.cpp)
 target_link_libraries(test_thread_safe_queue PRIVATE thread_safe_queue)
 
+add_executable(test_gpu_scheduler test_gpu_scheduler.cu)
+target_link_libraries(
+  test_gpu_scheduler PRIVATE gpu_scheduler device device_vector cuda_error_check
+                             CUDA::cudart)
+
 add_executable(test_openmp_helpers test_openmp_helpers.cpp)
 target_link_libraries(test_openmp_helpers PRIVATE openmp_helpers
                                                   OpenMP::OpenMP_CXX)
@@ -348,6 +353,7 @@ set(TEST_LIST
     test_substruct_label_integration
     test_similarity
     test_thread_safe_queue
+    test_gpu_scheduler
     test_work_splitting)
 
 # Auto populate the NVMOLKIT_TESTDATA environment variable for ctest.

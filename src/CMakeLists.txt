@@ -16,6 +16,7 @@
 add_subdirectory(conformer)
 add_subdirectory(data_structures)
 add_subdirectory(forcefields)
+add_subdirectory(gpu_scheduler)
 add_subdirectory(minimizer)
 add_subdirectory(substruct)
 add_subdirectory(testutils)
@@ -61,7 +62,7 @@ add_library(
                     morgan_fingerprint_cpu.cpp morgan_fingerprint_common.cpp)
 target_link_libraries(
   morganFingerprint
-  PRIVATE ${RDKit_LIBS} OpenMP::OpenMP_CXX device openmp_helpers
+  PRIVATE ${RDKit_LIBS} OpenMP::OpenMP_CXX device openmp_helpers gpu_scheduler
   PUBLIC morganFingerprintKernels)
 target_include_directories(morganFingerprint PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 

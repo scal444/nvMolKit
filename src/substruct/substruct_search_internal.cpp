@@ -21,6 +21,7 @@
 #include <mutex>
 #include <vector>
 
+#include "cpu_fallback_queue.h"
 #include "cuda_error_check.h"
 #include "gpu_executor.h"
 #include "nvtx.h"
@@ -175,90 +176,6 @@ void processWithRDKitFallback(const RDKit::ROMol*       target,
   }
 }
 
-RDKitFallbackQueue::RDKitFallbackQueue(const std::vector<const RDKit::ROMol*>* targets,
-                                       const std::vector<const RDKit::ROMol*>* queries,
-                                       SubstructSearchResults*                 results,
-                                       std::mutex*                             resultsMutex,
-                                       int                                     maxMatches,
-                                       HasSubstructMatchResults*               boolResults,
-                                       std::vector<int>*                       countResults)
-    : targets_(targets),
-      queries_(queries),
-      results_(results),
-      boolResults_(boolResults),
-      countResults_(countResults),
-      resultsMutex_(resultsMutex),
-      maxMatches_(maxMatches) {}
-
-void RDKitFallbackQueue::enqueue(const std::vector<RDKitFallbackEntry>& entries) {
-  if (entries.empty())
-    return;
-  queue_.pushBatch(entries);
-}
-
-void RDKitFallbackQueue::enqueue(const RDKitFallbackEntry& entry) {
-  queue_.push(entry);
-}
-
-void RDKitFallbackQueue::registerProducer() {
-  std::lock_guard<std::mutex> lock(producerMutex_);
-  ++activeProducers_;
-}
-
-void RDKitFallbackQueue::unregisterProducer() {
-  std::lock_guard<std::mutex> lock(producerMutex_);
-  --activeProducers_;
-  closeQueueIfDone();
-}
-
-void RDKitFallbackQueue::closeQueueIfDone() {
-  if (activeProducers_ == 0) {
-    queue_.close();
-  }
-}
-
-size_t RDKitFallbackQueue::processedCount() const {
-  return processedCount_.load(std::memory_order_relaxed);
-}
-
-std::mutex& RDKitFallbackQueue::getResultsMutex() {
-  return *resultsMutex_;
-}
-
-bool RDKitFallbackQueue::tryProcessOne() {
-  auto optEntry = queue_.tryPop();
-  if (!optEntry) {
-    return false;
-  }
-  processEntry(*optEntry);
-  return true;
-}
-
-bool RDKitFallbackQueue::hasWork() const {
-  return !queue_.empty();
-}
-
-void RDKitFallbackQueue::processEntry(const RDKitFallbackEntry& entry) {
-  ScopedNvtxRange pairRange("RDKit fallback T" + std::to_string(entry.originalTargetIdx) + "/Q" +
-                            std::to_string(entry.originalQueryIdx));
-
-  const RDKit::ROMol* target = (*targets_)[entry.originalTargetIdx];
-  const RDKit::ROMol* query  = (*queries_)[entry.originalQueryIdx];
-
-  const int effectiveMaxMatches = boolResults_ ? 1 : maxMatches_;
-  processWithRDKitFallback(target,
-                           query,
-                           entry.originalTargetIdx,
-                           entry.originalQueryIdx,
-                           *results_,
-                           *resultsMutex_,
-                           effectiveMaxMatches,
-                           boolResults_,
-                           countResults_);
-
-  processedCount_.fetch_add(1, std::memory_order_relaxed);
-}
-
 // =============================================================================
 // Batch Results Accumulation
 // =============================================================================
@@ -311,12 +228,12 @@ struct PairUpdate {
 
 }  // namespace
 
-void accumulateMiniBatchResults(GpuExecutor&               executor,
-                                const ThreadWorkerContext& ctx,
-                                SubstructSearchResults&    results,
-                                std::mutex&                resultsMutex,
-                                const PinnedHostBuffer&    hostBuffer,
-                                RDKitFallbackQueue*        fallbackQueue) {
+void accumulateMiniBatchResults(GpuExecutor&                                         executor,
+                                const ThreadWorkerContext&                           ctx,
+                                SubstructSearchResults&                              results,
+                                std::mutex&                                          resultsMutex,
+                                const PinnedHostBuffer&                              hostBuffer,
+                                gpu_scheduler::CpuFallbackQueue<RDKitFallbackEntry>* fallbackQueue) {
   ScopedNvtxRange accumRange("accumulateMiniBatchResults");
 
   std::vector<PairUpdate> updates;

@@ -45,9 +45,8 @@ class MorganFingerprintGpuGenerator {
     std::optional<FingerprintComputeOptions> computeOptions = std::nullopt);
 
  private:
-  std::vector<MorganPerThreadBuffers> perThreadCpuBuffers_;
-  std::uint32_t                       radius_;
-  std::uint32_t                       fpSize_;
+  std::uint32_t radius_;
+  std::uint32_t fpSize_;
 };
 
 }  // namespace nvMolKit

@@ -27,7 +27,6 @@
 #include <cuda_runtime.h>
 
 #include <array>
-#include <atomic>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -36,7 +35,6 @@
 #include "host_vector.h"
 #include "nvtx.h"
 #include "pinned_host_allocator.h"
-#include "thread_safe_queue.h"
 
 namespace RDKit {
 class ROMol;
@@ -52,6 +50,10 @@ namespace nvMolKit {
 
 // Forward declarations for friend function
 struct DeviceTimingsData;
+
+namespace gpu_scheduler {
+template <typename Entry> class CpuFallbackQueue;
+}  // namespace gpu_scheduler
 
 /**
  * @brief Mini-batch-local device-side storage for substructure match results.
@@ -207,72 +209,6 @@ void processWithRDKitFallback(const RDKit::ROMol*       target,
                               HasSubstructMatchResults* boolResults  = nullptr,
                               std::vector<int>*         countResults = nullptr);
 
-/**
- * @brief Thread-safe queue for RDKit fallback processing.
- *
- * Worker threads wait on a condition variable and consume entries as they arrive.
- * Supports concurrent producers (GPU batch accumulators) and consumers (RDKit workers).
- */
-class RDKitFallbackQueue {
- public:
-  RDKitFallbackQueue(const std::vector<const RDKit::ROMol*>* targets,
-                     const std::vector<const RDKit::ROMol*>* queries,
-                     SubstructSearchResults*                 results,
-                     std::mutex*                             resultsMutex,
-                     int                                     maxMatches,
-                     HasSubstructMatchResults*               boolResults  = nullptr,
-                     std::vector<int>*                       countResults = nullptr);
-
-  void enqueue(const std::vector<RDKitFallbackEntry>& entries);
-  void enqueue(const RDKitFallbackEntry& entry);
-
-  void registerProducer();
-  void unregisterProducer();
-
-  [[nodiscard]] size_t processedCount() const;
-  std::mutex&          getResultsMutex();
-  bool                 tryProcessOne();
-
-  [[nodiscard]] bool hasWork() const;
-
- private:
-  void processEntry(const RDKitFallbackEntry& entry);
-  void closeQueueIfDone();
-
-  const std::vector<const RDKit::ROMol*>* targets_;
-  const std::vector<const RDKit::ROMol*>* queries_;
-  SubstructSearchResults*                 results_;
-  HasSubstructMatchResults*               boolResults_;
-  std::vector<int>*                       countResults_;
-  std::mutex*                             resultsMutex_;
-  int                                     maxMatches_;
-
-  ThreadSafeQueue<RDKitFallbackEntry> queue_;
-  mutable std::mutex                  producerMutex_;
-  int                                 activeProducers_ = 0;
-  std::atomic<size_t>                 processedCount_{0};
-};
-
-/**
- * @brief RAII helper to register/unregister as a producer on the fallback queue.
- */
-class FallbackQueueProducerGuard {
- public:
-  explicit FallbackQueueProducerGuard(RDKitFallbackQueue* queue) : queue_(queue) {
-    if (queue_)
-      queue_->registerProducer();
-  }
-  ~FallbackQueueProducerGuard() {
-    if (queue_)
-      queue_->unregisterProducer();
-  }
-  FallbackQueueProducerGuard(const FallbackQueueProducerGuard&)            = delete;
-  FallbackQueueProducerGuard& operator=(const FallbackQueueProducerGuard&) = delete;
-
- private:
-  RDKitFallbackQueue* queue_;
-};
-
 // =============================================================================
 // Batch Results Accumulation
 // =============================================================================
@@ -292,13 +228,16 @@ void initiateCountsOnlyCopyToHost(GpuExecutor& executor, const PinnedHostBuffer&
 
 /**
  * @brief Accumulate full match results from a completed mini-batch.
+ *
+ * Routes overflow / oversize-result entries to the fallback queue when supplied,
+ * so RDKit picks them up. Pass nullptr to drop overflow entries silently.
  */
-void accumulateMiniBatchResults(GpuExecutor&               executor,
-                                const ThreadWorkerContext& ctx,
-                                SubstructSearchResults&    results,
-                                std::mutex&                resultsMutex,
-                                const PinnedHostBuffer&    hostBuffer,
-                                RDKitFallbackQueue*        fallbackQueue = nullptr);
+void accumulateMiniBatchResults(GpuExecutor&                                         executor,
+                                const ThreadWorkerContext&                           ctx,
+                                SubstructSearchResults&                              results,
+                                std::mutex&                                          resultsMutex,
+                                const PinnedHostBuffer&                              hostBuffer,
+                                gpu_scheduler::CpuFallbackQueue<RDKitFallbackEntry>* fallbackQueue);
 
 /**
  * @brief Accumulate boolean match results from a completed mini-batch.

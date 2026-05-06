@@ -37,6 +37,7 @@ target_include_directories(substruct_definitions
 add_library(
   substructure_search
   substruct_search.cu
+  substruct_workload.cu
   gpu_executor.cu
   recursive_preprocessor.cu
   minibatch_planner.cpp
@@ -55,6 +56,7 @@ target_link_libraries(
          device_timings
          device
          substruct_kernels
+         gpu_scheduler
          OpenMP::OpenMP_CXX
   PRIVATE ${RDKit_LIBS})
 target_compile_options(substructure_search

@@ -16,13 +16,9 @@
 #ifndef NVMOLKIT_MORGAN_FINGERPRINT_KERNELS_H
 #define NVMOLKIT_MORGAN_FINGERPRINT_KERNELS_H
 
-#include <memory>
-
-#include "device.h"
 #include "flat_bit_vect.h"
 #include "morgan_fingerprint_common.h"
 #include "utils/device_vector.h"
-#include "utils/host_vector.h"
 
 namespace nvMolKit {
 
@@ -39,51 +35,6 @@ struct MorganGPUBuffersBatch {
   AsyncDeviceVector<FlatBitVect<32>>  allSeenNeighborhoods32;   // Size = nMolecules * 32 * (maxRadius + 1)
   AsyncDeviceVector<FlatBitVect<64>>  allSeenNeighborhoods64;   // Size = nMolecules * 32 * (maxRadius + 1)
   AsyncDeviceVector<FlatBitVect<128>> allSeenNeighborhoods128;  // Size = nMolecules * 32 * (maxRadius + 1)
-};
-
-// Per CPU Thread buffers, including GPU buffers and synchronization structures.
-struct MorganPerThreadBuffers {
-  PinnedHostVector<std::int16_t>         nAtomsPerMol;
-  ScopedStream                           stream;
-  std::unique_ptr<MorganGPUBuffersBatch> gpuBuffers32;
-  std::unique_ptr<MorganGPUBuffersBatch> gpuBuffers64;
-  std::unique_ptr<MorganGPUBuffersBatch> gpuBuffers128;
-  ScopedCudaEvent                        prevMemcpyDoneEvent;
-
-  // Pre-allocated pinned host buffers for CPU->GPU transfers (avoid reallocations)
-  PinnedHostVector<std::uint32_t> h_atomInvariants32;
-  PinnedHostVector<std::uint32_t> h_bondInvariants32;
-  PinnedHostVector<std::int16_t>  h_bondIndices32;
-  PinnedHostVector<std::int16_t>  h_bondOtherAtomIndices32;
-
-  PinnedHostVector<std::uint32_t> h_atomInvariants64;
-  PinnedHostVector<std::uint32_t> h_bondInvariants64;
-  PinnedHostVector<std::int16_t>  h_bondIndices64;
-  PinnedHostVector<std::int16_t>  h_bondOtherAtomIndices64;
-
-  PinnedHostVector<std::uint32_t> h_atomInvariants128;
-  PinnedHostVector<std::uint32_t> h_bondInvariants128;
-  PinnedHostVector<std::int16_t>  h_bondIndices128;
-  PinnedHostVector<std::int16_t>  h_bondOtherAtomIndices128;
-
-  // Output indices for kernel results routing
-  PinnedHostVector<int> h_outputIndices;
-  ~MorganPerThreadBuffers() noexcept {
-    // Reset GPU buffers first, because they may depend on the stream
-    gpuBuffers32.reset();
-    gpuBuffers64.reset();
-    gpuBuffers128.reset();
-  }
-  MorganPerThreadBuffers() {
-    gpuBuffers32  = std::make_unique<MorganGPUBuffersBatch>();
-    gpuBuffers64  = std::make_unique<MorganGPUBuffersBatch>();
-    gpuBuffers128 = std::make_unique<MorganGPUBuffersBatch>();
-  }
-
-  MorganPerThreadBuffers(const MorganPerThreadBuffers&)             = delete;
-  MorganPerThreadBuffers& operator=(const MorganPerThreadBuffers&)  = delete;
-  MorganPerThreadBuffers(MorganPerThreadBuffers&& other)            = default;
-  MorganPerThreadBuffers& operator=(MorganPerThreadBuffers&& other) = default;
 };
 
 template <int fpSize>

@@ -101,6 +101,12 @@ struct GpuExecutor {
 
   cudaStream_t stream() const { return computeStream.stream(); }
 
+  /// Pipeline-contract accessors (see src/gpu_scheduler/pipeline.h).
+  /// The compute stream is the one Pipeline records its completion event on,
+  /// so the copyDoneEvent (recorded after the final D2H) is the natural choice.
+  cudaStream_t primaryStream() const { return computeStream.stream(); }
+  cudaEvent_t  completionEvent() const { return copyDoneEvent.event(); }
+
   void applyMiniBatchPlan(MiniBatchPlan&& plan);
 };
 
