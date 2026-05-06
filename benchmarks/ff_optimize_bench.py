@@ -36,6 +36,7 @@ import sys
 
 import nvtx
 import torch
+from _fire_options_cli import add_fire_options_args, fire_options_from_args
 from bench_utils import (
     clone_mols_with_conformers,
     load_pickle,
@@ -44,6 +45,7 @@ from bench_utils import (
     prep_mols,
     time_it,
 )
+from nvmolkit.mmffOptimization import FireOptions
 from nvmolkit.types import HardwareOptions
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdDistGeom
@@ -124,12 +126,43 @@ def _energy_diff_summary(
 def bench_nvmolkit(
     mols: list[Chem.Mol],
     ff: str,
+    minimizer: str,
     max_iters: int,
     hardware_options,
     runs: int,
     warmup: bool,
+    fire_options: FireOptions,
 ) -> tuple[float, float, list[float]]:
-    """Benchmark nvmolkit MMFF/UFF optimization; return ``(mean_ms, std_ms, energies)``."""
+    """Benchmark nvmolkit MMFF/UFF optimization; return ``(mean_ms, std_ms, energies)``.
+
+    ``minimizer`` selects the inner minimizer driving the optimization:
+
+    - ``bfgs``: route through ``MMFFOptimizeMoleculesConfs`` / ``UFFOptimizeMoleculesConfs``.
+    - ``fire``: route through ``MMFFOptimizeMoleculesConfsFire``. Only valid for ``ff='mmff'``.
+    """
+    if ff == "mmff" and minimizer == "fire":
+        from nvmolkit.mmffOptimization import MMFFOptimizeMoleculesConfsFire
+
+        last_energies: list[list[float]] = [[]]
+
+        @nvtx.annotate("ff_nvmolkit_run", color="orange")
+        def run() -> None:
+            cloned = clone_mols_with_conformers(mols)
+            last_energies[0] = MMFFOptimizeMoleculesConfsFire(
+                cloned, maxIters=max_iters, fireOptions=fire_options, hardwareOptions=hardware_options
+            )
+
+        if warmup:
+            warmup_mols = clone_mols_with_conformers(mols[: min(4, len(mols))])
+            with nvtx.annotate("ff_nvmolkit_warmup", color="purple"):
+                MMFFOptimizeMoleculesConfsFire(
+                    warmup_mols, maxIters=max_iters, fireOptions=fire_options, hardwareOptions=hardware_options
+                )
+            torch.cuda.synchronize()
+
+        result = time_it(run, runs=runs, warmups=0, gpu_sync=True)
+        return result.mean_ms, result.std_ms, _flatten_energies(last_energies[0])
+
     if ff == "mmff":
         from nvmolkit.mmffOptimization import MMFFOptimizeMoleculesConfs as _OptimizeConfs
     elif ff == "uff":
@@ -137,7 +170,7 @@ def bench_nvmolkit(
     else:
         raise ValueError(f"Unknown ff: {ff!r}")
 
-    last_energies: list[list[float]] = [[]]
+    last_energies = [[]]
 
     @nvtx.annotate("ff_nvmolkit_run", color="orange")
     def run() -> None:
@@ -209,7 +242,7 @@ def _build_hardware_options(
 
 
 CSV_HEADER = (
-    "method,ff,input_file,input_type,num_mols,confs_per_mol,max_iters,"
+    "method,ff,minimizer,input_file,input_type,num_mols,confs_per_mol,max_iters,"
     "batch_size,batches_per_gpu,prep_threads,num_gpus,"
     "rdkit_threads,time_ms,std_ms,energies_compared,mean_abs_energy_diff,max_abs_energy_diff"
 )
@@ -231,6 +264,16 @@ def main() -> None:
     parser.set_defaults(sanitize=True)
 
     parser.add_argument("--ff", choices=["mmff", "uff"], required=True, help="Force field to optimize: mmff or uff")
+    parser.add_argument(
+        "--minimizer",
+        choices=["bfgs", "fire"],
+        default="bfgs",
+        help=(
+            "Inner minimizer driving the FF optimization. ``fire`` is only valid with ``--ff mmff``; "
+            "no UFF FIRE entry point exists today."
+        ),
+    )
+    add_fire_options_args(parser)
     parser.add_argument(
         "--confs_per_mol",
         "-c",
@@ -286,6 +329,9 @@ def main() -> None:
     if args.no_nvmolkit and args.no_rdkit:
         print("Error: cannot disable both nvmolkit and RDKit")
         sys.exit(1)
+    if args.minimizer == "fire" and args.ff != "mmff":
+        print("Error: --minimizer fire is only supported with --ff mmff")
+        sys.exit(1)
     input_file = input_paths[0]
     if args.smiles:
         input_type = "smiles"
@@ -297,6 +343,7 @@ def main() -> None:
     print("\nConfiguration:")
     print(f"  Input: {input_file} ({input_type})")
     print(f"  Force field: {args.ff.upper()}")
+    print(f"  Minimizer: {args.minimizer}")
     print(f"  Max molecules: {args.num_mols if args.num_mols > 0 else 'all'}")
     print(f"  Conformers per mol: {args.confs_per_mol}")
     print(f"  Max FF iterations: {args.max_iters}")
@@ -349,9 +396,10 @@ def main() -> None:
         )
 
         torch.cuda.cudart().cudaProfilerStart()
-        print(f"\nRunning nvmolkit {args.ff.upper()} optimize benchmark...")
+        fire_options = fire_options_from_args(args)
+        print(f"\nRunning nvmolkit {args.ff.upper()} optimize benchmark ({args.minimizer})...")
         nv_avg, nv_std, nv_energies = bench_nvmolkit(
-            mols, args.ff, args.max_iters, hardware_options, args.runs, args.warmup
+            mols, args.ff, args.minimizer, args.max_iters, hardware_options, args.runs, args.warmup, fire_options
         )
         print(f"  nvmolkit:        {nv_avg:10.2f} ms (+/- {nv_std:.2f} ms)")
         results["nvmolkit"] = (nv_avg, nv_std, nv_energies)
@@ -411,11 +459,12 @@ def main() -> None:
         prep_threads = applied_prep_threads if is_nv else "N/A"
         num_gpus = applied_num_gpus if is_nv else "N/A"
         rdkit_threads = args.rdkit_threads if name == "rdkit" else "N/A"
+        minimizer_label = args.minimizer if is_nv else "N/A"
         mean_diff = energy_mean if (args.validate and is_nv) else "N/A"
         max_diff = energy_max if (args.validate and is_nv) else "N/A"
         pairs = energy_pairs if (args.validate and is_nv) else "N/A"
         csv_rows.append(
-            f"{name},{args.ff},{input_file},{input_type},{len(mols)},{args.confs_per_mol},"
+            f"{name},{args.ff},{minimizer_label},{input_file},{input_type},{len(mols)},{args.confs_per_mol},"
             f"{args.max_iters},{batch_size},{batches_per_gpu},{prep_threads},{num_gpus},"
             f"{rdkit_threads},{avg_ms:.2f},{std_ms:.2f},"
             f"{pairs},{mean_diff},{max_diff}"

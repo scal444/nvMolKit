@@ -75,26 +75,29 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfs(
 
 //! \brief Optimize conformers using the FIRE 2.0 minimizer instead of BFGS.
 //!
-//! Mirrors the API shape of the BFGS overloads but always runs through the
-//! batched-forcefield path (FIRE has no per-molecule kernel). Constraints are
-//! not applied yet (untested); pass an empty list.
+//! Mirrors the API shape of the BFGS overloads. Routes through either the
+//! batched-forcefield path or the per-molecule MMFF FIRE kernel based on
+//! @p backend. Constraints are not applied yet (untested); pass an empty list.
 //! \param mols Molecules to optimize (positions written back in-place).
 //! \param maxIters Maximum FIRE iterations.
 //! \param fireOptions Algorithm parameters; the @ref FireOptions::gradTol field
 //!        controls convergence.
 //! \param properties Per-molecule MMFF settings (one entry per molecule).
 //! \param perfOptions Hardware and batching configuration.
-//! \return Energies and per-system convergence flags.
 //! \param fireDebugOutput TODO(remove-before-pr): when non-null, populated with
 //!        per-iteration FIRE state (alpha, dt, power, energy) per system. Used
 //!        only by the experimental benchmark scripts and will be removed before
-//!        the FIRE work is opened as a PR.
+//!        the FIRE work is opened as a PR. Only supported for the BATCHED
+//!        backend; throws if combined with PER_MOLECULE.
+//! \param backend FIRE backend to use (BATCHED, PER_MOLECULE, or HYBRID which auto-selects).
+//! \return Energies and per-system convergence flags.
 MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&                mols,
                                                   int                                        maxIters        = 200,
                                                   const FireOptions&                         fireOptions     = {},
                                                   const std::vector<MMFFProperties>&         properties      = {},
                                                   const BatchHardwareOptions&                perfOptions     = {},
-                                                  std::vector<std::vector<FireDebugOutput>>* fireDebugOutput = nullptr);
+                                                  std::vector<std::vector<FireDebugOutput>>* fireDebugOutput = nullptr,
+                                                  FireBackend backend = FireBackend::HYBRID);
 
 //! \brief Convenience wrapper returning energies only.
 std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsFire(
@@ -103,7 +106,8 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsFire(
   const FireOptions&                         fireOptions     = {},
   const std::vector<MMFFProperties>&         properties      = {},
   const BatchHardwareOptions&                perfOptions     = {},
-  std::vector<std::vector<FireDebugOutput>>* fireDebugOutput = nullptr);
+  std::vector<std::vector<FireDebugOutput>>* fireDebugOutput = nullptr,
+  FireBackend                                backend         = FireBackend::HYBRID);
 
 }  // namespace nvMolKit::MMFF
 #endif  // NVMOLKIT_BFGS_MMFF_H

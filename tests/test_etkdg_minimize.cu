@@ -35,12 +35,15 @@
 using namespace ::nvMolKit::detail;
 
 using ETKDGStageTestParams = std::tuple<ETKDGOption, int>;
-using ETKDGMinimizeParam   = std::tuple<ETKDGOption, nvMolKit::MinimizerKind>;
+using ETKDGMinimizeParam   = std::tuple<ETKDGOption, nvMolKit::MinimizerKind, nvMolKit::FireBackend>;
 
 namespace {
 
-std::string minimizerKindName(nvMolKit::MinimizerKind kind) {
-  return kind == nvMolKit::MinimizerKind::FIRE ? "FIRE" : "BFGS";
+std::string minimizerKindName(nvMolKit::MinimizerKind kind, nvMolKit::FireBackend fireBackend) {
+  if (kind == nvMolKit::MinimizerKind::BFGS) {
+    return "BFGS";
+  }
+  return fireBackend == nvMolKit::FireBackend::PER_MOLECULE ? "FIREPerMol" : "FIRE";
 }
 
 }  // namespace
@@ -170,11 +173,15 @@ class ETKDGMinimizeSingleMolTestFixture : public ::testing::TestWithParam<ETKDGM
     // Construct both minimizers; the active one is selected through handle_.
     minimizer_     = std::make_unique<nvMolKit::BfgsBatchMinimizer>(4, nvMolKit::DebugLevel::NONE, true, nullptr);
     nvMolKit::FireOptions fireOptions{};
-    fireOptions.useMass = false;
-    fireMinimizer_      = std::make_unique<nvMolKit::FireBatchMinimizer>(4, fireOptions, nullptr);
-    handle_             = std::get<1>(GetParam()) == nvMolKit::MinimizerKind::FIRE
-                            ? nvMolKit::detail::MinimizerHandle::forFire(*fireMinimizer_)
-                            : nvMolKit::detail::MinimizerHandle::forBfgs(*minimizer_);
+    fireOptions.useMass    = false;
+    fireMinimizer_         = std::make_unique<nvMolKit::FireBatchMinimizer>(4,
+                                                                    fireOptions,
+                                                                    nullptr,
+                                                                    /*debugMode=*/false,
+                                                                    std::get<2>(GetParam()));
+    handle_                = std::get<1>(GetParam()) == nvMolKit::MinimizerKind::FIRE
+                              ? nvMolKit::detail::MinimizerHandle::forFire(*fireMinimizer_)
+                              : nvMolKit::detail::MinimizerHandle::forBfgs(*minimizer_);
 
     // Pre-allocate scratch buffers for stages
     const size_t totalAtoms = context_.systemHost.atomStarts.back();
@@ -417,7 +424,11 @@ class ETKDGMinimizeMultiMolDiverseTestFixture : public ::testing::TestWithParam<
     minimizer_ = std::make_unique<nvMolKit::BfgsBatchMinimizer>(4, nvMolKit::DebugLevel::NONE, true, nullptr);
     nvMolKit::FireOptions fireOptions{};
     fireOptions.useMass = false;
-    fireMinimizer_      = std::make_unique<nvMolKit::FireBatchMinimizer>(4, fireOptions, nullptr);
+    fireMinimizer_      = std::make_unique<nvMolKit::FireBatchMinimizer>(4,
+                                                                    fireOptions,
+                                                                    nullptr,
+                                                                    /*debugMode=*/false,
+                                                                    std::get<2>(GetParam()));
     handle_             = std::get<1>(GetParam()) == nvMolKit::MinimizerKind::FIRE
                             ? nvMolKit::detail::MinimizerHandle::forFire(*fireMinimizer_)
                             : nvMolKit::detail::MinimizerHandle::forBfgs(*minimizer_);
@@ -678,17 +689,28 @@ TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, FirstMinimizeStageBFGSWithInacti
   }
 }
 
-// Instantiate test suites for both fixtures
+namespace {
+// BFGS rows ignore FireBackend; only the two FIRE rows vary it. Listing tuples explicitly
+// avoids the duplicate (BFGS, BATCHED)/(BFGS, PER_MOLECULE) pair the cartesian product would emit.
+std::vector<ETKDGMinimizeParam> makeMinimizeParams(const std::vector<ETKDGOption>& etkdgOptions) {
+  std::vector<ETKDGMinimizeParam> params;
+  for (const ETKDGOption opt : etkdgOptions) {
+    params.emplace_back(opt, nvMolKit::MinimizerKind::BFGS, nvMolKit::FireBackend::BATCHED);
+    params.emplace_back(opt, nvMolKit::MinimizerKind::FIRE, nvMolKit::FireBackend::BATCHED);
+    params.emplace_back(opt, nvMolKit::MinimizerKind::FIRE, nvMolKit::FireBackend::PER_MOLECULE);
+  }
+  return params;
+}
+}  // namespace
+
 INSTANTIATE_TEST_SUITE_P(
   ETKDGOptions,
   ETKDGMinimizeSingleMolTestFixture,
-  ::testing::Combine(::testing::Values(ETKDGOption::ETKDGv3,
-                                       ETKDGOption::ETKDGv2,
-                                       ETKDGOption::ETKDG,
-                                       ETKDGOption::KDG),
-                     ::testing::Values(nvMolKit::MinimizerKind::BFGS, nvMolKit::MinimizerKind::FIRE)),
+  ::testing::ValuesIn(
+    makeMinimizeParams({ETKDGOption::ETKDGv3, ETKDGOption::ETKDGv2, ETKDGOption::ETKDG, ETKDGOption::KDG})),
   [](const ::testing::TestParamInfo<ETKDGMinimizeParam>& info) {
-    return getETKDGOptionName(std::get<0>(info.param)) + "_" + minimizerKindName(std::get<1>(info.param));
+    return getETKDGOptionName(std::get<0>(info.param)) + "_" +
+           minimizerKindName(std::get<1>(info.param), std::get<2>(info.param));
   });
 
 // TODO: Currently only testing ETKDGv3 due to non-deterministic failures when testing multiple options.
@@ -700,8 +722,8 @@ INSTANTIATE_TEST_SUITE_P(
 INSTANTIATE_TEST_SUITE_P(
   ETKDGOptions,
   ETKDGMinimizeMultiMolDiverseTestFixture,
-  ::testing::Combine(::testing::Values(ETKDGOption::ETKDGv3),
-                     ::testing::Values(nvMolKit::MinimizerKind::BFGS, nvMolKit::MinimizerKind::FIRE)),
+  ::testing::ValuesIn(makeMinimizeParams({ETKDGOption::ETKDGv3})),
   [](const ::testing::TestParamInfo<ETKDGMinimizeParam>& info) {
-    return getETKDGOptionName(std::get<0>(info.param)) + "_" + minimizerKindName(std::get<1>(info.param));
+    return getETKDGOptionName(std::get<0>(info.param)) + "_" +
+           minimizerKindName(std::get<1>(info.param), std::get<2>(info.param));
   });

@@ -217,7 +217,8 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&   
                                                   const FireOptions&                         fireOptions,
                                                   const std::vector<MMFFProperties>&         propertiesIn,
                                                   const BatchHardwareOptions&                perfOptions,
-                                                  std::vector<std::vector<FireDebugOutput>>* fireDebugOutput) {
+                                                  std::vector<std::vector<FireDebugOutput>>* fireDebugOutput,
+                                                  const FireBackend                          backend) {
   ScopedNvtxRange fullRange("FIRE MMFF Minimize Molecules Confs");
 
   std::vector<MMFFProperties> properties = propertiesIn;
@@ -239,6 +240,10 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&   
   // TODO(remove-before-pr): debug output is benchmark-only and will go away.
   const bool collectDebug = fireDebugOutput != nullptr;
   if (collectDebug) {
+    if (backend == FireBackend::PER_MOLECULE) {
+      throw std::runtime_error(
+        "fireDebugOutput is only supported with the BATCHED FIRE backend (per-molecule kernel does not record per-iteration state)");
+    }
     fireDebugOutput->assign(mols.size(), {});
     for (size_t i = 0; i < mols.size(); ++i) {
       (*fireDebugOutput)[i].resize(moleculeEnergies[i].size());
@@ -266,6 +271,7 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&   
                                                                                               threadBuffers,      \
                                                                                               collectDebug,       \
                                                                                               fireDebugOutput,    \
+                                                                                              backend,            \
                                                                                               exceptionHandler)
   for (size_t batchStart = 0; batchStart < totalConformers; batchStart += effectiveBatchSize) {
     try {
@@ -314,44 +320,65 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&   
       buffers.ensureCapacity(systemHost.positions.size(), batchConformers.size());
       std::copy(systemHost.positions.begin(), systemHost.positions.end(), buffers.initialPositions.begin());
 
-      MMFFBatchedForcefield     forcefield(systemHost, metadata, streamPtr);
-      AsyncDeviceVector<double> positionsDevice;
-      AsyncDeviceVector<double> gradDevice;
-      AsyncDeviceVector<double> energyOutsDevice;
-      positionsDevice.setStream(streamPtr);
-      gradDevice.setStream(streamPtr);
-      energyOutsDevice.setStream(streamPtr);
-      positionsDevice.resize(systemHost.positions.size());
-      positionsDevice.copyFromHost(buffers.initialPositions.data(), systemHost.positions.size());
-      gradDevice.resize(systemHost.positions.size());
-      gradDevice.zero();
-      energyOutsDevice.resize(batchConformers.size());
-      energyOutsDevice.zero();
-
-      FireBatchMinimizer fireMinimizer(/*dataDim=*/3, fireOptions, streamPtr, /*debugMode=*/collectDebug);
+      FireBatchMinimizer fireMinimizer(/*dataDim=*/3, fireOptions, streamPtr, /*debugMode=*/collectDebug, backend);
       if (fireOptions.useMass) {
         fireMinimizer.setMasses(massesPerAtom);
       }
+      const auto effectiveBackend = fireMinimizer.resolveBackend(systemHost.indices.atomStarts);
 
-      // The fire minimize entry that takes a BatchedForcefield runs without
-      // surfacing energies per step, so when collecting debug we instead drive
-      // the minimizer manually so we can record per-iteration energies through
-      // the energy functor that FireBatchMinimizer::minimize already invokes
-      // when debugMode_ is true.
-      const bool converged = fireMinimizer.minimize(maxIters,
-                                                    fireOptions.gradTol,
-                                                    forcefield,
-                                                    positionsDevice,
-                                                    gradDevice,
-                                                    energyOutsDevice);
-      (void)converged;
+      if (effectiveBackend == FireBackend::BATCHED) {
+        MMFFBatchedForcefield     forcefield(systemHost, metadata, streamPtr);
+        AsyncDeviceVector<double> positionsDevice;
+        AsyncDeviceVector<double> gradDevice;
+        AsyncDeviceVector<double> energyOutsDevice;
+        positionsDevice.setStream(streamPtr);
+        gradDevice.setStream(streamPtr);
+        energyOutsDevice.setStream(streamPtr);
+        positionsDevice.resize(systemHost.positions.size());
+        positionsDevice.copyFromHost(buffers.initialPositions.data(), systemHost.positions.size());
+        gradDevice.resize(systemHost.positions.size());
+        gradDevice.zero();
+        energyOutsDevice.resize(batchConformers.size());
+        energyOutsDevice.zero();
 
-      // Re-evaluate energies with the final positions.
-      forcefield.computeEnergy(energyOutsDevice.data(), positionsDevice.data(), nullptr, streamPtr);
+        // The fire minimize entry that takes a BatchedForcefield runs without
+        // surfacing energies per step, so when collecting debug we instead drive
+        // the minimizer manually so we can record per-iteration energies through
+        // the energy functor that FireBatchMinimizer::minimize already invokes
+        // when debugMode_ is true.
+        const bool converged = fireMinimizer.minimize(maxIters,
+                                                      fireOptions.gradTol,
+                                                      forcefield,
+                                                      positionsDevice,
+                                                      gradDevice,
+                                                      energyOutsDevice);
+        (void)converged;
 
-      positionsDevice.copyToHost(buffers.positions.data(), positionsDevice.size());
-      energyOutsDevice.copyToHost(buffers.energies.data(), energyOutsDevice.size());
-      cudaStreamSynchronize(streamPtr);
+        forcefield.computeEnergy(energyOutsDevice.data(), positionsDevice.data(), nullptr, streamPtr);
+
+        positionsDevice.copyToHost(buffers.positions.data(), positionsDevice.size());
+        energyOutsDevice.copyToHost(buffers.energies.data(), energyOutsDevice.size());
+        cudaStreamSynchronize(streamPtr);
+      } else {
+        BatchedMolecularDeviceBuffers systemDevice;
+        nvMolKit::MMFF::sendContribsAndIndicesToDevice(systemHost, systemDevice);
+        nvMolKit::MMFF::setStreams(systemDevice, streamPtr);
+        nvMolKit::MMFF::allocateIntermediateBuffers(systemHost, systemDevice);
+        systemDevice.positions.resize(systemHost.positions.size());
+        systemDevice.positions.copyFromHost(buffers.initialPositions.data(), systemHost.positions.size());
+        systemDevice.grad.resize(systemHost.positions.size());
+        systemDevice.grad.zero();
+
+        const bool converged = fireMinimizer.minimizeWithMMFF(maxIters,
+                                                              fireOptions.gradTol,
+                                                              systemHost.indices.atomStarts,
+                                                              systemDevice);
+        (void)converged;
+
+        systemDevice.positions.copyToHost(buffers.positions.data(), systemDevice.positions.size());
+        systemDevice.energyOuts.copyToHost(buffers.energies.data(), systemDevice.energyOuts.size());
+        cudaStreamSynchronize(streamPtr);
+      }
 
       const auto state = fireMinimizer.snapshotInternalState();
 
@@ -383,8 +410,10 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsFire(
   const FireOptions&                         fireOptions,
   const std::vector<MMFFProperties>&         properties,
   const BatchHardwareOptions&                perfOptions,
-  std::vector<std::vector<FireDebugOutput>>* fireDebugOutput) {
-  return MMFFMinimizeMoleculesConfsFire(mols, maxIters, fireOptions, properties, perfOptions, fireDebugOutput).energies;
+  std::vector<std::vector<FireDebugOutput>>* fireDebugOutput,
+  const FireBackend                          backend) {
+  return MMFFMinimizeMoleculesConfsFire(mols, maxIters, fireOptions, properties, perfOptions, fireDebugOutput, backend)
+    .energies;
 }
 
 }  // namespace nvMolKit::MMFF

@@ -22,6 +22,11 @@
 #include <stdexcept>
 
 #include "../forcefields/batched_forcefield.h"
+#include "../forcefields/dist_geom.h"
+#include "../forcefields/dist_geom_kernels.h"
+#include "../forcefields/mmff.h"
+#include "../forcefields/mmff_kernels.h"
+#include "fire_minimize_permol_kernels.h"
 #include "fire_minimizer.h"
 
 namespace nvMolKit {
@@ -385,11 +390,13 @@ __global__ void fireStuckCheckKernel(cuda::std::span<const int>    activeSystemI
 FireBatchMinimizer::FireBatchMinimizer(const int          dataDim,
                                        const FireOptions& options,
                                        cudaStream_t       stream,
-                                       const bool         debugMode)
+                                       const bool         debugMode,
+                                       const FireBackend  backend)
     : dataDim_(dataDim),
       fireOptions_(options),
       stream_(stream),
-      debugMode_(debugMode) {
+      debugMode_(debugMode),
+      backend_(backend) {
   velocities_.setStream(stream_);
   statuses_.setStream(stream_);
   dt_.setStream(stream_);
@@ -405,8 +412,21 @@ FireBatchMinimizer::FireBatchMinimizer(const int          dataDim,
   energyMaxStreak_.setStream(stream_);
   stuckStreak_.setStream(stream_);
   convergeReason_.setStream(stream_);
+  activeMolIdsDevice_.setStream(stream_);
   loopStatusHost_.resize(1);
   loopStatusHost_[0] = 0;
+}
+
+FireBackend FireBatchMinimizer::resolveBackend(const std::vector<int>& atomStartsHost) const {
+  if (backend_ != FireBackend::HYBRID) {
+    return backend_;
+  }
+  for (size_t i = 0; i + 1 < atomStartsHost.size(); ++i) {
+    if (atomStartsHost[i + 1] - atomStartsHost[i] > kHybridFireBackendAtomThreshold) {
+      return FireBackend::BATCHED;
+    }
+  }
+  return FireBackend::PER_MOLECULE;
 }
 
 void FireBatchMinimizer::setMasses(const std::vector<double>& masses) {
@@ -430,20 +450,19 @@ void FireBatchMinimizer::setConvergencePollInterval(const int interval) {
 
 void FireBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
                                     const double*           masses,
-                                    const uint8_t*          activeThisStage) {
+                                    const uint8_t*          activeThisStage,
+                                    const FireBackend       effectiveBackend) {
   step_                = 0;
   const int totalAtoms = atomStartsHost.back();
   const int numSystems = static_cast<int>(atomStartsHost.size()) - 1;
 
-  // Detect continuation: same batch shape, same active mask, same masses. When detected,
-  // we keep per-system convergence state (statuses_, streak buffers, convergeReason_)
-  // so already-converged systems aren't re-run. This is the common pattern when callers
-  // wrap minimize() in a loop (e.g. repeatUntilConverged in the ETKDG embed pipeline).
-  const bool isContinuation = hasInitializedBatch_ && cachedNumSystems_ == numSystems &&
-                              cachedTotalAtoms_ == totalAtoms && cachedActiveThisStage_ == activeThisStage &&
-                              cachedMasses_ == masses;
+  // Continuation cache only applies to the BATCHED backend; the per-mol path
+  // resets per-system state on every call (mirrors BFGS per-mol setHessianToIdentity).
+  const bool isContinuation = effectiveBackend == FireBackend::BATCHED && hasInitializedBatch_ &&
+                              cachedNumSystems_ == numSystems && cachedTotalAtoms_ == totalAtoms &&
+                              cachedActiveThisStage_ == activeThisStage && cachedMasses_ == masses;
 
-  numSystems_          = numSystems;
+  numSystems_ = numSystems;
 
   velocities_.resize(static_cast<size_t>(totalAtoms) * dataDim_);
   velocities_.zero();
@@ -473,19 +492,67 @@ void FireBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
     }
   }
 
-  activeSystemIndices_.resize(numSystems);
-  allSystemIndices_.resize(numSystems);
-  std::vector<int> indicesHost(numSystems);
-  std::iota(indicesHost.begin(), indicesHost.end(), 0);
-  allSystemIndices_.setFromVector(indicesHost);
-  activeSystemIndices_.setFromVector(indicesHost);
-
   numStepsWithPositivePower_.resize(numSystems);
   numStepsWithPositivePower_.zero();
   alpha_.resize(numSystems);
   setAll(alpha_, fireOptions_.alphaInit);
   dt_.resize(numSystems);
   setAll(dt_, fireOptions_.dtInit);
+
+  if (effectiveBackend == FireBackend::PER_MOLECULE) {
+    energyMinStreak_.resize(0);
+    energyMaxStreak_.resize(0);
+    stuckStreak_.resize(0);
+    convergeReason_.resize(0);
+    debugPowers_.resize(0);
+    debugOutputs_.clear();
+    activeSystemIndices_.resize(0);
+    allSystemIndices_.resize(0);
+    pollsSinceLastEnergyEval_ = 0;
+
+    activeHost_.resize(numSystems);
+    convergenceHost_.resize(numSystems);
+    std::fill_n(activeHost_.begin(), numSystems, 1);
+    if (activeThisStage != nullptr) {
+      cudaCheckError(cudaMemcpyAsync(activeHost_.data(),
+                                     activeThisStage,
+                                     numSystems * sizeof(uint8_t),
+                                     cudaMemcpyDeviceToHost,
+                                     stream_));
+      cudaCheckError(cudaStreamSynchronize(stream_));
+    }
+    activeMolIds_.clear();
+    maxAtomsInBatch_ = 0;
+    for (int sysIdx = 0; sysIdx < numSystems; ++sysIdx) {
+      if (activeHost_[sysIdx] == 0) {
+        continue;
+      }
+      activeMolIds_.push_back(sysIdx);
+      const int numAtoms = atomStartsHost[sysIdx + 1] - atomStartsHost[sysIdx];
+      if (numAtoms > maxAtomsInBatch_) {
+        maxAtomsInBatch_ = numAtoms;
+      }
+    }
+    if (!activeMolIds_.empty()) {
+      activeMolIdsDevice_.resize(activeMolIds_.size());
+      activeMolIdsDevice_.setFromVector(activeMolIds_);
+    }
+
+    hasInitializedBatch_    = false;
+    cachedNumSystems_       = -1;
+    cachedTotalAtoms_       = -1;
+    cachedActiveThisStage_  = nullptr;
+    cachedMasses_           = nullptr;
+    lastKnownNumUnfinished_ = static_cast<int>(activeMolIds_.size());
+    return;
+  }
+
+  activeSystemIndices_.resize(numSystems);
+  allSystemIndices_.resize(numSystems);
+  std::vector<int> indicesHost(numSystems);
+  std::iota(indicesHost.begin(), indicesHost.end(), 0);
+  allSystemIndices_.setFromVector(indicesHost);
+  activeSystemIndices_.setFromVector(indicesHost);
 
   if (fireOptions_.stuckDetectionEnabled) {
     energyMinStreak_.resize(numSystems);
@@ -689,7 +756,7 @@ bool FireBatchMinimizer::minimize(const int                                   nu
                                   EnergyFunctor                               eFunc,
                                   const GradFunctor                           gFunc,
                                   const uint8_t*                              activeThisStage) {
-  initialize(atomStartsHost, nullptr, activeThisStage);
+  initialize(atomStartsHost, nullptr, activeThisStage, FireBackend::BATCHED);
 
   for (int iter = 0; iter < numIters; ++iter) {
     if (debugMode_) {
@@ -820,6 +887,182 @@ bool FireBatchMinimizer::minimize(const int                  numIters,
                   eFunc,
                   gFunc,
                   activeSystemMask);
+}
+
+bool FireBatchMinimizer::checkPerMolConvergence() {
+  if (numSystems_ == 0) {
+    return true;
+  }
+  statuses_.copyToHost(convergenceHost_.data(), numSystems_);
+  cudaCheckError(cudaStreamSynchronize(stream_));
+  for (const int molIdx : activeMolIds_) {
+    if (convergenceHost_[molIdx] != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+namespace {
+void requireStuckDetectionDisabled(const FireOptions& options) {
+  if (options.stuckDetectionEnabled) {
+    throw std::runtime_error(
+      "FireBatchMinimizer per-molecule backend does not support FireOptions::stuckDetectionEnabled");
+  }
+}
+}  // namespace
+
+bool FireBatchMinimizer::minimizeWithMMFF(const int                            numIters,
+                                          const double                         gradTol,
+                                          const std::vector<int>&              atomStartsHost,
+                                          MMFF::BatchedMolecularDeviceBuffers& systemDevice,
+                                          const uint8_t*                       activeThisStage) {
+  requireStuckDetectionDisabled(fireOptions_);
+
+  const FireBackend effectiveBackend = resolveBackend(atomStartsHost);
+  if (effectiveBackend == FireBackend::BATCHED) {
+    throw std::runtime_error("FireBatchMinimizer::minimizeWithMMFF requires PER_MOLECULE backend (or HYBRID resolving "
+                             "to PER_MOLECULE); use minimize(..., BatchedForcefield&) for batched MMFF minimization");
+  }
+
+  initialize(atomStartsHost, /*masses=*/nullptr, activeThisStage, effectiveBackend);
+
+  if (activeMolIds_.empty()) {
+    return true;
+  }
+
+  auto terms         = MMFF::toEnergyForceContribsDevicePtr(systemDevice);
+  auto systemIndices = MMFF::toBatchedIndicesDevicePtr(systemDevice);
+
+  const cudaError_t err = launchFirePerMolKernel(static_cast<int>(activeMolIds_.size()),
+                                                 activeMolIdsDevice_.data(),
+                                                 maxAtomsInBatch_,
+                                                 systemDevice.indices.atomStarts.data(),
+                                                 fireOptions_,
+                                                 numIters,
+                                                 gradTol,
+                                                 terms,
+                                                 systemIndices,
+                                                 systemDevice.positions.data(),
+                                                 systemDevice.grad.data(),
+                                                 velocities_.data(),
+                                                 alpha_.data(),
+                                                 dt_.data(),
+                                                 numStepsWithPositivePower_.data(),
+                                                 masses_.size() > 0 ? masses_.data() : nullptr,
+                                                 systemDevice.energyOuts.data(),
+                                                 statuses_.data(),
+                                                 stream_);
+  if (err != cudaSuccess) {
+    throw std::runtime_error(std::string("Per-molecule FIRE MMFF kernel failed: ") + cudaGetErrorString(err));
+  }
+  return checkPerMolConvergence();
+}
+
+bool FireBatchMinimizer::minimizeWithETK(const int                                  numIters,
+                                         const double                               gradTol,
+                                         const std::vector<int>&                    atomStartsHost,
+                                         const AsyncDeviceVector<int>&              atomStarts,
+                                         AsyncDeviceVector<double>&                 positions,
+                                         DistGeom::BatchedMolecular3DDeviceBuffers& systemDevice,
+                                         const uint8_t*                             activeThisStage) {
+  requireStuckDetectionDisabled(fireOptions_);
+
+  const FireBackend effectiveBackend = resolveBackend(atomStartsHost);
+  if (effectiveBackend == FireBackend::BATCHED) {
+    throw std::runtime_error("FireBatchMinimizer::minimizeWithETK requires PER_MOLECULE backend (or HYBRID resolving "
+                             "to PER_MOLECULE); use minimize(..., BatchedForcefield&) for batched ETK minimization");
+  }
+
+  initialize(atomStartsHost, /*masses=*/nullptr, activeThisStage, effectiveBackend);
+
+  if (activeMolIds_.empty()) {
+    return true;
+  }
+
+  auto terms         = DistGeom::toEnergy3DForceContribsDevicePtr(systemDevice);
+  auto systemIndices = DistGeom::toBatchedIndices3DDevicePtr(systemDevice, atomStarts.data());
+
+  const cudaError_t err = launchFirePerMolKernelETK(static_cast<int>(activeMolIds_.size()),
+                                                    activeMolIdsDevice_.data(),
+                                                    maxAtomsInBatch_,
+                                                    atomStarts.data(),
+                                                    fireOptions_,
+                                                    numIters,
+                                                    gradTol,
+                                                    terms,
+                                                    systemIndices,
+                                                    positions.data(),
+                                                    systemDevice.grad.data(),
+                                                    velocities_.data(),
+                                                    alpha_.data(),
+                                                    dt_.data(),
+                                                    numStepsWithPositivePower_.data(),
+                                                    masses_.size() > 0 ? masses_.data() : nullptr,
+                                                    systemDevice.energyOuts.data(),
+                                                    statuses_.data(),
+                                                    stream_);
+  if (err != cudaSuccess) {
+    throw std::runtime_error(std::string("Per-molecule FIRE ETK kernel failed: ") + cudaGetErrorString(err));
+  }
+  return checkPerMolConvergence();
+}
+
+bool FireBatchMinimizer::minimizeWithDG(const int                                numIters,
+                                        const double                             gradTol,
+                                        const std::vector<int>&                  atomStartsHost,
+                                        const AsyncDeviceVector<int>&            atomStarts,
+                                        AsyncDeviceVector<double>&               positions,
+                                        DistGeom::BatchedMolecularDeviceBuffers& systemDevice,
+                                        const double                             chiralWeight,
+                                        const double                             fourthDimWeight,
+                                        const uint8_t*                           activeThisStage) {
+  requireStuckDetectionDisabled(fireOptions_);
+
+  if (dataDim_ != 4) {
+    throw std::runtime_error("FireBatchMinimizer::minimizeWithDG requires dataDim=4");
+  }
+
+  const FireBackend effectiveBackend = resolveBackend(atomStartsHost);
+  if (effectiveBackend == FireBackend::BATCHED) {
+    throw std::runtime_error("FireBatchMinimizer::minimizeWithDG requires PER_MOLECULE backend (or HYBRID resolving "
+                             "to PER_MOLECULE); use minimize(..., BatchedForcefield&) for batched DG minimization");
+  }
+
+  initialize(atomStartsHost, /*masses=*/nullptr, activeThisStage, effectiveBackend);
+
+  if (activeMolIds_.empty()) {
+    return true;
+  }
+
+  auto terms         = DistGeom::toEnergyForceContribsDevicePtr(systemDevice);
+  auto systemIndices = DistGeom::toBatchedIndicesDevicePtr(systemDevice, atomStarts.data());
+
+  const cudaError_t err = launchFirePerMolKernelDG(static_cast<int>(activeMolIds_.size()),
+                                                   activeMolIdsDevice_.data(),
+                                                   maxAtomsInBatch_,
+                                                   atomStarts.data(),
+                                                   fireOptions_,
+                                                   numIters,
+                                                   gradTol,
+                                                   terms,
+                                                   systemIndices,
+                                                   positions.data(),
+                                                   systemDevice.grad.data(),
+                                                   velocities_.data(),
+                                                   alpha_.data(),
+                                                   dt_.data(),
+                                                   numStepsWithPositivePower_.data(),
+                                                   masses_.size() > 0 ? masses_.data() : nullptr,
+                                                   systemDevice.energyOuts.data(),
+                                                   chiralWeight,
+                                                   fourthDimWeight,
+                                                   statuses_.data(),
+                                                   stream_);
+  if (err != cudaSuccess) {
+    throw std::runtime_error(std::string("Per-molecule FIRE DG kernel failed: ") + cudaGetErrorString(err));
+  }
+  return checkPerMolConvergence();
 }
 
 FireInternalState FireBatchMinimizer::snapshotInternalState() const {

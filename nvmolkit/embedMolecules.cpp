@@ -89,7 +89,8 @@ BOOST_PYTHON_MODULE(_embedMolecules) {
                                hardwareOptions,
                                nvMolKit::BfgsBackend::HYBRID,
                                minimizerKind,
-                               stageNamesPtr);
+                               stageNamesPtr,
+                               nvMolKit::FireBackend::HYBRID);
 
       if (failuresOut.ptr() != Py_None) {
         boost::python::dict outDict = boost::python::extract<boost::python::dict>(failuresOut);
@@ -125,7 +126,8 @@ BOOST_PYTHON_MODULE(_embedMolecules) {
     "    maxIterations: Maximum iterations, -1 for auto (default: -1)\n"
     "    hardwareOptions: BatchHardwareOptions object with hardware settings (default: default options)\n"
     "    minimizerKind: Selects the inner minimizer (BFGS or FIRE). Default BFGS preserves\n"
-    "                   historical behavior. FIRE always runs through the batched path.\n"
+    "                   historical behavior. The BFGS and FIRE backends both run with HYBRID\n"
+    "                   kernel selection (per-mol for small molecules, batched for large).\n"
     "    failuresOut: Optional dict; if provided, populated with keys 'stage_names' (list of\n"
     "                 stage names in pipeline order) and 'counts' (list of per-stage lists of\n"
     "                 per-conformer failure counts, indexed mol_id * confsPerMolecule).\n"

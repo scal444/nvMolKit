@@ -5,7 +5,8 @@ def MMFFOptimizeMoleculesConfs(
     molecules: List[Mol],
     maxIters: int = 200,
     properties: Any = None,
-    hardwareOptions: Any = None
+    hardwareOptions: Any = None,
+    backend: str = "HYBRID",
 ) -> List[List[float]]: ...
 
 def MMFFOptimizeMoleculesConfsFire(
@@ -15,4 +16,5 @@ def MMFFOptimizeMoleculesConfsFire(
     properties: Any = None,
     hardwareOptions: Any = None,
     fireDebugOutput: Any = None,
+    backend: str = "HYBRID",
 ) -> List[List[float]]: ...

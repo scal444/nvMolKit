@@ -65,7 +65,8 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
                     const BatchHardwareOptions&                 hardwareOptions,
                     BfgsBackend                                 backend,
                     MinimizerKind                               minimizerKind,
-                    std::vector<std::string>*                   stageNames) {
+                    std::vector<std::string>*                   stageNames,
+                    FireBackend                                 fireBackend) {
   const ScopedNvtxRange fullRange("EmbedMolecules");
   if (!params.useRandomCoords) {
     throw std::runtime_error("ETKDG requires useRandomCoords to be true. Please set it in the EmbedParameters.");
@@ -208,7 +209,8 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
       // GPU cost.
       FireOptions fireOptions{};
       fireOptions.useMass = false;  // ETKDG gradients are not physical forces; mass-weighting is meaningless here.
-      auto             fireMinimizer = std::make_unique<FireBatchMinimizer>(4, fireOptions, streamPtr);
+      auto             fireMinimizer =
+        std::make_unique<FireBatchMinimizer>(4, fireOptions, streamPtr, /*debugMode=*/false, fireBackend);
       const detail::MinimizerHandle distGeomMinimizerHandle =
         minimizerKind == MinimizerKind::FIRE
           ? detail::MinimizerHandle::forFire(*fireMinimizer)

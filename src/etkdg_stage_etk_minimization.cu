@@ -20,6 +20,7 @@
 #include "etk_batched_forcefield.h"
 #include "etkdg_stage_etk_minimization.h"
 #include "minimizer/bfgs_minimize.h"
+#include "minimizer/fire_minimizer.h"
 
 namespace nvMolKit {
 namespace detail {
@@ -202,11 +203,10 @@ void ETKMinimizationStage::setReferenceValues(const ETKDGContext&               
 }
 
 void ETKMinimizationStage::execute(ETKDGContext& ctx) {
-  // FIRE always runs through the BATCHED BatchedForcefield path; only BFGS may
-  // resolve to PER_MOLECULE / HYBRID.
   const bool useBatchedForcefield =
-    minimizer_.kind == MinimizerKind::FIRE ||
-    minimizer_.bfgs->resolveBackend(ctx.systemHost.atomStarts) == BfgsBackend::BATCHED;
+    minimizer_.kind == MinimizerKind::FIRE
+      ? minimizer_.fire->resolveBackend(ctx.systemHost.atomStarts) == FireBackend::BATCHED
+      : minimizer_.bfgs->resolveBackend(ctx.systemHost.atomStarts) == BfgsBackend::BATCHED;
 
   constexpr int                             maxIters = 300;  // Taken from hard-coded RDKit value.
   DistGeom::BatchedMolecular3DDeviceBuffers molSystemDevice;
@@ -270,13 +270,36 @@ void ETKMinimizationStage::execute(ETKDGContext& ctx) {
     DistGeom::sendContribsAndIndicesToDevice3D(molSystemHost, molSystemDevice);
     setReferenceValues(ctx, molSystemDevice.contribs);
 
-    minimizer_.bfgs->minimizeWithETK(maxIters,
-                                     embedParam_.optimizerForceTol,
-                                     ctx.systemHost.atomStarts,
-                                     ctx.systemDevice.atomStarts,
-                                     ctx.systemDevice.positions,
-                                     molSystemDevice,
-                                     ctx.activeThisStage.data());
+    if (minimizer_.kind == MinimizerKind::FIRE) {
+      // Match the BATCHED FIRE path: re-enter the per-mol kernel up to a bounded
+      // number of times when the planar-improper energy hasn't dropped below
+      // tolerance yet.
+      constexpr int kMaxFireExtensions = 3;
+      bool          converged          = minimizer_.fire->minimizeWithETK(maxIters,
+                                                        embedParam_.optimizerForceTol,
+                                                        ctx.systemHost.atomStarts,
+                                                        ctx.systemDevice.atomStarts,
+                                                        ctx.systemDevice.positions,
+                                                        molSystemDevice,
+                                                        ctx.activeThisStage.data());
+      for (int extension = 0; !converged && extension < kMaxFireExtensions; ++extension) {
+        converged = minimizer_.fire->minimizeWithETK(maxIters,
+                                                     embedParam_.optimizerForceTol,
+                                                     ctx.systemHost.atomStarts,
+                                                     ctx.systemDevice.atomStarts,
+                                                     ctx.systemDevice.positions,
+                                                     molSystemDevice,
+                                                     ctx.activeThisStage.data());
+      }
+    } else {
+      minimizer_.bfgs->minimizeWithETK(maxIters,
+                                       embedParam_.optimizerForceTol,
+                                       ctx.systemHost.atomStarts,
+                                       ctx.systemDevice.atomStarts,
+                                       ctx.systemDevice.positions,
+                                       molSystemDevice,
+                                       ctx.activeThisStage.data());
+    }
     planarEnergies = &molSystemDevice.energyOuts;
     numImpropers   = molSystemDevice.contribs.improperTorsionTerms.numImpropers.data();
     if (embedParam_.useBasicKnowledge) {

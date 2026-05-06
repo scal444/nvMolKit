@@ -23,6 +23,7 @@
 #include "etkdg_impl.h"
 #include "etkdg_stage_distgeom_minimize.h"
 #include "forcefields/kernel_utils.cuh"
+#include "minimizer/fire_minimizer.h"
 #include "nvtx.h"
 
 using ::nvMolKit::detail::ETKDGContext;
@@ -179,11 +180,10 @@ void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
                                         double        fourthDimWeight,
                                         int           maxIters,
                                         bool          checkEnergy) {
-  // FIRE always runs through the BATCHED BatchedForcefield path; only BFGS may
-  // resolve to PER_MOLECULE / HYBRID.
   const bool useBatchedForcefield =
-    minimizer_.kind == MinimizerKind::FIRE ||
-    minimizer_.bfgs->resolveBackend(ctx.systemHost.atomStarts) == BfgsBackend::BATCHED;
+    minimizer_.kind == MinimizerKind::FIRE
+      ? minimizer_.fire->resolveBackend(ctx.systemHost.atomStarts) == FireBackend::BATCHED
+      : minimizer_.bfgs->resolveBackend(ctx.systemHost.atomStarts) == BfgsBackend::BATCHED;
 
   if (useBatchedForcefield) {
     DGBatchedForcefield forcefield(molSystemHost,
@@ -239,6 +239,17 @@ void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
                                  static_cast<int>(ctx.systemHost.atomStarts.size() - 1));
 
     repeatUntilConverged([&]() {
+      if (minimizer_.kind == MinimizerKind::FIRE) {
+        return minimizer_.fire->minimizeWithDG(maxIters,
+                                               embedParam_.optimizerForceTol,
+                                               ctx.systemHost.atomStarts,
+                                               ctx.systemDevice.atomStarts,
+                                               ctx.systemDevice.positions,
+                                               molSystemDevice,
+                                               chiralWeight,
+                                               fourthDimWeight,
+                                               ctx.activeThisStage.data());
+      }
       return minimizer_.bfgs->minimizeWithDG(maxIters,
                                              embedParam_.optimizerForceTol,
                                              ctx.systemHost.atomStarts,

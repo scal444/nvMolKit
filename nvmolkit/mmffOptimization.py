@@ -41,6 +41,7 @@ def MMFFOptimizeMoleculesConfs(
     nonBondedThreshold: float | Sequence[float] = 100.0,
     ignoreInterfragInteractions: bool | Sequence[bool] = True,
     hardwareOptions: HardwareOptions | None = None,
+    backend: str = "HYBRID",
 ) -> list[list[float]]:
     """Optimize conformers for multiple molecules using MMFF force field with BFGS minimization.
 
@@ -59,6 +60,10 @@ def MMFFOptimizeMoleculesConfs(
         ignoreInterfragInteractions: If ``True``, omit non-bonded terms between
             fragments. May also be provided as a per-molecule sequence.
         hardwareOptions: Configures CPU and GPU batching, threading, and device selection. Will attempt to use reasonable defaults if not set.
+        backend: BFGS kernel backend selector for benchmarking. One of
+            ``"BATCHED"``, ``"PER_MOL"``, or ``"HYBRID"`` (default), which
+            auto-selects between batched and per-molecule kernels based on
+            the largest molecule in each batch.
 
     Returns:
         List of lists of energies, where each inner list contains the optimized energies
@@ -161,7 +166,9 @@ def MMFFOptimizeMoleculesConfs(
         )
         for props, threshold, ignore_interfrag in zip(properties_list, thresholds, interfrag_flags)
     ]
-    return _mmffOptimization.MMFFOptimizeMoleculesConfs(molecules, maxIters, native_properties, native_options)
+    return _mmffOptimization.MMFFOptimizeMoleculesConfs(
+        molecules, maxIters, native_properties, native_options, backend
+    )
 
 
 def MMFFOptimizeMoleculesConfsFire(
@@ -173,6 +180,7 @@ def MMFFOptimizeMoleculesConfsFire(
     ignoreInterfragInteractions: bool | Sequence[bool] = True,
     hardwareOptions: HardwareOptions | None = None,
     fireDebugOutput: list | None = None,
+    backend: str = "HYBRID",
 ) -> list[list[float]]:
     """Optimize MMFF conformers using the FIRE 2.0 minimizer.
 
@@ -191,7 +199,12 @@ def MMFFOptimizeMoleculesConfsFire(
         hardwareOptions: GPU/CPU batching settings.
         fireDebugOutput: Optional empty list. When provided, populated with
             per-iteration FIRE state for diagnostic benchmarking. EXPERIMENTAL
-            and slated for removal before PR; do not use in production.
+            and slated for removal before PR; do not use in production. Only
+            valid with ``backend="BATCHED"``.
+        backend: FIRE kernel backend selector for benchmarking. One of
+            ``"BATCHED"``, ``"PER_MOL"``, or ``"HYBRID"`` (default), which
+            auto-selects between batched and per-molecule kernels based on
+            the largest molecule in each batch.
 
     Returns:
         List of lists of energies, mirroring the BFGS variant.
@@ -261,6 +274,8 @@ def MMFFOptimizeMoleculesConfsFire(
             fireOptions,
             native_properties,
             native_options,
+            None,
+            backend,
         )
 
     if not isinstance(fireDebugOutput, list):
@@ -273,4 +288,5 @@ def MMFFOptimizeMoleculesConfsFire(
         native_properties,
         native_options,
         fireDebugOutput,
+        backend,
     )

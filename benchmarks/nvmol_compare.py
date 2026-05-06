@@ -31,6 +31,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from _fire_options_cli import add_fire_options_args, fire_options_from_args
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
@@ -47,15 +48,13 @@ def parse_args() -> argparse.Namespace:
         help="Directory for output figures (default: ./nvmol_compare).",
     )
     parser.add_argument("--max-iters", type=int, default=1000, help="Maximum iterations (default: 1000).")
-    parser.add_argument("--gradtol", type=float, default=1e-4, help="FIRE gradient tolerance (default: 1e-4).")
-    parser.add_argument("--mass-weighting", action="store_true", help="Enable FIRE mass weighting.")
-    parser.add_argument("--use-abc", action="store_true", help="Enable ABC-FIRE.")
     parser.add_argument(
         "--max-mols",
         type=int,
         default=None,
         help="Limit the number of molecules processed (default: all).",
     )
+    add_fire_options_args(parser)
     return parser.parse_args()
 
 
@@ -100,10 +99,7 @@ def main() -> None:
     total_confs = sum(mol.GetNumConformers() for mol in mols)
     print(f"Loaded {len(mols)} molecules with {total_confs} conformers from {args.input_sdf}.")
 
-    fire_opts = FireOptions()
-    fire_opts.gradTol = args.gradtol
-    fire_opts.useMass = args.mass_weighting
-    fire_opts.abcCorrection = args.use_abc
+    fire_opts = fire_options_from_args(args)
 
     t0 = time.perf_counter()
     rdkit_arr = rdkit_energies(mols, args.max_iters)

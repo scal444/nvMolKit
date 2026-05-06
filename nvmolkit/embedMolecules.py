@@ -67,7 +67,8 @@ def EmbedMolecules(
         minimizerKind: Selects the inner minimizer driving the distance-geometry and
                       ETK refinement stages. ``MinimizerKind.BFGS`` (default) preserves
                       historical behavior; ``MinimizerKind.FIRE`` swaps in the FIRE 2.0
-                      minimizer and always runs through the batched force-field path.
+                      minimizer. Both backends run with HYBRID kernel selection internally
+                      (per-molecule for small molecules, batched for large).
         failuresOut: Optional dict. If provided, on return it contains:
 
                 ``stage_names``: list[str], pipeline-ordered stage names.
@@ -76,7 +77,6 @@ def EmbedMolecules(
                   observed at ``stage`` for ``molecules[mol_idx]`` across all attempted
                   conformers. (Per-conformer breakdown is not currently distinguished by
                   the underlying scheduler.)
-
     Returns:
         None. Input molecules are modified in-place with generated conformers.
 
@@ -128,12 +128,10 @@ def EmbedMolecules(
     if not params.useRandomCoords:
         raise ValueError("ETKDG requires useRandomCoords=True in EmbedParameters")
 
-    # Use default hardware options if none provided
     if hardwareOptions is None:
         hardwareOptions = HardwareOptions()
     native_options = hardwareOptions._as_native()
 
-    # Call the C++ implementation
     _embedMolecules.EmbedMolecules(
         molecules,
         params,

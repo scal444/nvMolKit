@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+from _fire_options_cli import add_fire_options_args, fire_options_from_args
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
@@ -35,35 +36,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-iters", type=int, default=1000, help="Maximum FIRE iterations (default: 1000).")
     parser.add_argument(
-        "--gradtol",
-        type=float,
-        default=1e-4,
-        help="Gradient convergence tolerance for FIRE (default: 1e-4).",
-    )
-    parser.add_argument("--mass-weighting", action="store_true", help="Enable mass weighting in the FIRE kick.")
-    parser.add_argument("--use-abc", action="store_true", help="Enable the ABC-FIRE mixer correction.")
-    parser.add_argument(
-        "--no-half-step-back",
-        action="store_true",
-        help="Disable the half-step-back behavior on negative-power steps. ASE FIRE2 always half-steps; this is for ablation.",
-    )
-    parser.add_argument("--dt-init", type=float, default=0.001, help="Initial dt in picoseconds (default: 0.001).")
-    parser.add_argument("--dt-max-factor", type=float, default=10.0, help="dtmax / dtinit (default: 10.0).")
-    parser.add_argument("--dt-min-factor", type=float, default=0.002, help="dtmin / dtinit (default: 0.002).")
-    parser.add_argument(
-        "--n-min-for-increase",
-        type=int,
-        default=20,
-        help="Number of consecutive positive-power steps before dt grows (default: 20, ASE FIRE2 default).",
-    )
-    parser.add_argument("--alpha-init", type=float, default=0.25, help="Initial mixer alpha (default: 0.25).")
-    parser.add_argument(
-        "--max-step",
-        type=float,
-        default=0.2,
-        help="Maximum displacement per step in Angstroms (default: 0.2). 0 disables clipping.",
-    )
-    parser.add_argument(
         "--save-initial",
         action="store_true",
         help="Also compute and save initial MMFF energies before minimization.",
@@ -77,6 +49,7 @@ def parse_args() -> argparse.Namespace:
             "Slated for removal before PR; for diagnostic use only."
         ),
     )
+    add_fire_options_args(parser)
     return parser.parse_args()
 
 
@@ -99,21 +72,6 @@ def compute_initial_energies(mol: Chem.Mol) -> np.ndarray:
             continue
         energies[idx] = ff.CalcEnergy()
     return energies
-
-
-def fire_options_from_args(args: argparse.Namespace) -> FireOptions:
-    opts = FireOptions()
-    opts.gradTol = args.gradtol
-    opts.useMass = args.mass_weighting
-    opts.abcCorrection = args.use_abc
-    opts.takeHalfStepBack = not args.no_half_step_back
-    opts.dtInit = args.dt_init
-    opts.dtMaxFactor = args.dt_max_factor
-    opts.dtMinFactor = args.dt_min_factor
-    opts.nMinForIncrease = args.n_min_for_increase
-    opts.alphaInit = args.alpha_init
-    opts.dMax = args.max_step
-    return opts
 
 
 def minimize_molecules(

@@ -99,6 +99,7 @@ def bench_nvmolkit(
     hardware_options,
     runs: int,
     warmup: bool,
+    minimizer_kind,
 ) -> tuple[TimingResult, list[Chem.Mol]]:
     """Benchmark nvmolkit ``EmbedMolecules``; return ``(timing, last_run_mols)``."""
     from nvmolkit.embedMolecules import EmbedMolecules
@@ -108,13 +109,27 @@ def bench_nvmolkit(
     @nvtx.annotate("etkdg_nvmolkit_run", color="orange")
     def run() -> None:
         cloned = clone_mols_with_conformers(mols)
-        EmbedMolecules(cloned, params, confs_per_mol, max_iters, hardware_options)
+        EmbedMolecules(
+            cloned,
+            params,
+            confs_per_mol,
+            max_iters,
+            hardware_options,
+            minimizerKind=minimizer_kind,
+        )
         last_run_mols[0] = cloned
 
     if warmup:
         warmup_mols = clone_mols_with_conformers(mols[: min(4, len(mols))])
         with nvtx.annotate("etkdg_nvmolkit_warmup", color="purple"):
-            EmbedMolecules(warmup_mols, params, 1, max_iters, hardware_options)
+            EmbedMolecules(
+                warmup_mols,
+                params,
+                1,
+                max_iters,
+                hardware_options,
+                minimizerKind=minimizer_kind,
+            )
 
     timing = time_it(run, runs=runs, warmups=0, gpu_sync=True)
     return timing, last_run_mols[0]
@@ -227,6 +242,13 @@ def main() -> None:
     parser.add_argument("--num_gpus", type=int, default=1, help="Number of GPUs to use (default: 1)")
 
     parser.add_argument(
+        "--minimizer",
+        choices=("bfgs", "fire"),
+        default="bfgs",
+        help="Inner minimizer driving the ETKDG distance-geometry / ETK refinement stages (default: bfgs)",
+    )
+
+    parser.add_argument(
         "--validate", action="store_true", dest="validate", help="Compute MMFF energy diffs vs RDKit (default)"
     )
     parser.add_argument("--no_validate", action="store_false", dest="validate", help="Skip energy validation")
@@ -275,6 +297,7 @@ def main() -> None:
         print(f"    batches_per_gpu: {args.batches_per_gpu if args.batches_per_gpu > 0 else 'auto'}")
         print(f"    prep_threads: {args.prep_threads if args.prep_threads > 0 else 'auto'}")
         print(f"    num_gpus: {args.num_gpus}")
+        print(f"    minimizer: {args.minimizer}")
 
     print("\nLoading molecules...")
     if args.smiles:
@@ -319,6 +342,9 @@ def main() -> None:
 
             torch.cuda.cudart().cudaProfilerStart()
             print("\nRunning nvmolkit ETKDG benchmark...")
+            from nvmolkit.embedMolecules import MinimizerKind
+
+            minimizer_kind = MinimizerKind.FIRE if args.minimizer == "fire" else MinimizerKind.BFGS
             nv_timing, nv_mols = bench_nvmolkit(
                 mols,
                 params,
@@ -327,6 +353,7 @@ def main() -> None:
                 hardware_options,
                 args.runs,
                 args.warmup,
+                minimizer_kind,
             )
             print(f"  nvmolkit:        {nv_timing.mean_ms:10.2f} ms (+/- {nv_timing.std_ms:.2f} ms)")
             results["nvmolkit"] = (nv_timing, nv_mols)

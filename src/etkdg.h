@@ -44,11 +44,12 @@ namespace nvMolKit {
 //!        outer dimension. Useful for labeling failure-mode plots.
 //! \param hardwareOptions Batch and threading hardware configuration.
 //! \param backend BFGS kernel layout selector. Only consulted when
-//!        @p minimizerKind is ::MinimizerKind::BFGS; ignored for ::MinimizerKind::FIRE
-//!        (FIRE always runs through the BATCHED \ref BatchedForcefield path).
+//!        @p minimizerKind is ::MinimizerKind::BFGS.
 //! \param minimizerKind Selects which minimization algorithm drives the
 //!        distance-geometry and ETK refinement stages. Default ::MinimizerKind::BFGS
 //!        preserves historical behavior.
+//! \param fireBackend FIRE kernel layout selector. Only consulted when
+//!        @p minimizerKind is ::MinimizerKind::FIRE.
 void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
                     const RDKit::DGeomHelpers::EmbedParameters& params,
                     int                                         confsPerMolecule = 1,
@@ -58,7 +59,8 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
                     const BatchHardwareOptions&                 hardwareOptions  = {},
                     BfgsBackend                                 backend          = BfgsBackend::HYBRID,
                     MinimizerKind                               minimizerKind    = MinimizerKind::BFGS,
-                    std::vector<std::string>*                   stageNames       = nullptr);
+                    std::vector<std::string>*                   stageNames       = nullptr,
+                    FireBackend                                 fireBackend      = FireBackend::BATCHED);
 
 }  // namespace nvMolKit
 
