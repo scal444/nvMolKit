@@ -155,8 +155,8 @@ void processWithRDKitFallback(const RDKit::ROMol*       target,
   if (boolResults) {
     boolResults->setMatch(targetIdx, queryIdx, true);
   } else if (countResults) {
-    const int pairIdx        = targetIdx * results.numQueries + queryIdx;
-    (*countResults)[pairIdx] = matchCount;
+    const int64_t pairIdx = static_cast<int64_t>(targetIdx) * results.numQueries + queryIdx;
+    (*countResults)[static_cast<size_t>(pairIdx)] = matchCount;
   } else {
     std::vector<std::vector<int>> convertedMatches;
     convertedMatches.reserve(rdkitMatches.size());
@@ -400,8 +400,8 @@ void accumulateMiniBatchResultsCounts(GpuExecutor&               executor,
 
   for (int i = 0; i < executor.plan.numPairsInMiniBatch; ++i) {
     const auto [targetIdx, queryIdx] = resolvePairIndices(i, ctx, hostBuffer);
-    const int globalPairIdx          = targetIdx * ctx.numQueries + queryIdx;
-    counts[globalPairIdx]            = hostBuffer.matchCounts[i];
+    const int64_t globalPairIdx      = static_cast<int64_t>(targetIdx) * ctx.numQueries + queryIdx;
+    counts[static_cast<size_t>(globalPairIdx)] = hostBuffer.matchCounts[i];
   }
 }
 
