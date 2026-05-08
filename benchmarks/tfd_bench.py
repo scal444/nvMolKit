@@ -40,6 +40,7 @@ from typing import List, Tuple
 
 import pandas as pd
 import torch
+from bench_utils import load_smiles
 from rdkit import Chem
 from rdkit.Chem import AllChem, TorsionFingerprints
 
@@ -117,15 +118,15 @@ def _try_load_pickle(num_confs: int, max_mols: int, smiles_file: str = None) -> 
 
 
 def prepare_molecules(
-    smiles_list: List[str], num_confs: int, max_mols: int = 100, smiles_file: str = None
+    input_mols: List[Chem.Mol], num_confs: int, max_mols: int = 100, smiles_file: str = None
 ) -> List[Chem.Mol]:
     """Prepare molecules with conformers, using precomputed pickle if available.
 
     Args:
-        smiles_list: List of SMILES strings (fallback if no pickle)
+        input_mols: Parsed RDKit molecules (used when no precomputed pickle is found).
         num_confs: Number of conformers per molecule
         max_mols: Maximum number of molecules to prepare
-        smiles_file: Path to SMILES CSV (used to locate pickle files)
+        smiles_file: Path to SMILES file (used to locate sibling pickle files)
 
     Returns:
         List of molecules with conformers
@@ -136,15 +137,11 @@ def prepare_molecules(
 
     print(f"  No precomputed pickle found, generating from scratch...")
     mols = []
-    for i, smi in enumerate(smiles_list):
+    for i, mol in enumerate(input_mols):
         if len(mols) >= max_mols:
             break
 
-        mol = Chem.MolFromSmiles(smi)
-        if mol is None:
-            continue
-
-        if mol.GetNumAtoms() < 4:
+        if mol is None or mol.GetNumAtoms() < 4:
             continue
 
         mol_with_confs = generate_conformers(mol, num_confs, seed=42 + i)
@@ -224,7 +221,7 @@ def load_pkl_files(pkl_paths: List[str]) -> List[Chem.Mol]:
 
 
 def run_benchmarks(
-    smiles_list: List[str] | None = None,
+    input_mols: List[Chem.Mol] | None = None,
     skip_rdkit: bool = False,
     output_file: str = "tfd_results.csv",
     smiles_file: str = None,
@@ -235,14 +232,14 @@ def run_benchmarks(
     """Run TFD benchmarks with various configurations.
 
     Args:
-        smiles_list: List of SMILES strings (unused when preloaded_mols given)
+        input_mols: Parsed RDKit molecules without conformers (unused when preloaded_mols given).
         skip_rdkit: If True, skip RDKit benchmarks (faster for large runs)
         output_file: Output CSV file path
-        smiles_file: Path to SMILES CSV (used to locate pickle files)
+        smiles_file: Path to SMILES file (used to locate sibling pickle files)
         mol_counts: List of molecule counts to benchmark
         conformer_counts: List of conformer counts to benchmark
         preloaded_mols: Pre-loaded molecules with conformers (e.g. from --pkl-file).
-            When provided, smiles_list/smiles_file/conformer_counts are ignored and
+            When provided, input_mols/smiles_file/conformer_counts are ignored and
             the actual conformer count is read from the molecules.
 
     Returns:
@@ -273,7 +270,7 @@ def run_benchmarks(
         else:
             print(f"\n--- Preparing molecules with {num_confs} conformers ---")
             all_mols = prepare_molecules(
-                smiles_list, num_confs, max_mols=max(mol_counts) + 20, smiles_file=smiles_file
+                input_mols, num_confs, max_mols=max(mol_counts) + 20, smiles_file=smiles_file
             )
 
         if len(all_mols) < max(mol_counts):
@@ -427,7 +424,7 @@ def main():
     args = parser.parse_args()
 
     preloaded_mols = None
-    smiles_list = None
+    input_mols = None
 
     if args.pkl_file:
         print("Loading precomputed molecules from pickle file(s)...")
@@ -439,19 +436,18 @@ def main():
     else:
         print(f"Loading SMILES from: {args.smiles_file}")
         try:
-            df = pd.read_csv(args.smiles_file)
-            smiles_list = df.iloc[:, 0].tolist()
+            input_mols = load_smiles(args.smiles_file, max_count=max(args.num_mols) + 100)
         except Exception as e:
             print(f"Error loading SMILES file: {e}")
             sys.exit(1)
-        print(f"Loaded {len(smiles_list)} SMILES")
+        print(f"Loaded {len(input_mols)} molecules")
 
     if args.verify or args.verify_only:
         print("\nVerifying correctness...")
         if preloaded_mols is not None:
             test_mols = preloaded_mols[:50]
         else:
-            test_mols = prepare_molecules(smiles_list, num_confs=5, max_mols=50, smiles_file=args.smiles_file)
+            test_mols = prepare_molecules(input_mols, num_confs=5, max_mols=50, smiles_file=args.smiles_file)
         all_correct = True
         mismatches = 0
         for i, mol in enumerate(test_mols):
@@ -470,7 +466,7 @@ def main():
             sys.exit(0 if all_correct else 1)
 
     run_benchmarks(
-        smiles_list=smiles_list,
+        input_mols=input_mols,
         skip_rdkit=args.skip_rdkit,
         output_file=args.output,
         smiles_file=args.smiles_file,

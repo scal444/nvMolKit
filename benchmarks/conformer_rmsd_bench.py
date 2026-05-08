@@ -71,14 +71,21 @@ def benchmark_gpu(mol, n_warmup=2, n_iter=10):
     return result.median_s
 
 
-def run_benchmark(smiles, num_confs_list, seed=42):
-    """Run CPU vs GPU benchmark for a molecule at various conformer counts."""
+def run_benchmark(smiles, num_confs_list, seed=42, no_rdkit=False):
+    """Run CPU vs GPU benchmark for a molecule at various conformer counts.
+
+    When ``no_rdkit`` is True the RDKit CPU benchmark and the numpy-Kabsch
+    correctness check are both skipped; only the GPU timings are reported.
+    """
     mol_base = Chem.AddHs(Chem.MolFromSmiles(smiles))
     no_h_base = Chem.RemoveHs(Chem.AddHs(Chem.MolFromSmiles(smiles)))
     n_atoms = no_h_base.GetNumAtoms()
 
     print(f"\nMolecule: {smiles}  ({n_atoms} heavy atoms)")
-    print(f"{'Confs':>8}  {'Pairs':>10}  {'CPU (ms)':>10}  {'GPU (ms)':>10}  {'Speedup':>8}  {'Match':>6}")
+    if no_rdkit:
+        print(f"{'Confs':>8}  {'Pairs':>10}  {'GPU (ms)':>10}")
+    else:
+        print(f"{'Confs':>8}  {'Pairs':>10}  {'CPU (ms)':>10}  {'GPU (ms)':>10}  {'Speedup':>8}  {'Match':>6}")
     print("-" * 70)
 
     for num_confs in num_confs_list:
@@ -97,13 +104,14 @@ def run_benchmark(smiles, num_confs_list, seed=42):
         no_h = Chem.RemoveHs(mol)
         n_pairs = actual_confs * (actual_confs - 1) // 2
 
-        # CPU benchmark
-        cpu_time = benchmark_cpu(no_h)
-
-        # GPU benchmark
         gpu_time = benchmark_gpu(no_h)
 
-        # Correctness check against numpy Kabsch SVD (sample up to 500 pairs)
+        if no_rdkit:
+            print(f"{actual_confs:>8}  {n_pairs:>10}  {gpu_time * 1000:>10.2f}")
+            continue
+
+        cpu_time = benchmark_cpu(no_h)
+
         gpu_result = GetConformerRMSMatrix(no_h, prealigned=False)
         torch.cuda.synchronize()
         gpu_rms = gpu_result.numpy().tolist()
@@ -154,6 +162,11 @@ def main():
         default=[10, 50, 100, 200, 500],
         help="Number of conformers to generate",
     )
+    parser.add_argument(
+        "--no-rdkit",
+        action="store_true",
+        help="Skip the RDKit CPU benchmark and the numpy-Kabsch correctness check",
+    )
     args = parser.parse_args()
 
     device_name = torch.cuda.get_device_name(0)
@@ -161,7 +174,7 @@ def main():
     print(f"CUDA: {torch.version.cuda}")
 
     for smiles in args.smiles:
-        run_benchmark(smiles, args.num_confs)
+        run_benchmark(smiles, args.num_confs, no_rdkit=args.no_rdkit)
 
     print("\nDone.")
 
