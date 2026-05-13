@@ -54,7 +54,7 @@ def _default_embed_search_space(num_gpus: int, cpus: int) -> dict:
     """
     per_gpu_max = max(1, min(8, cpus // max(1, num_gpus)))
     return {
-        "batchSize": [512, 64, 128, 192, 256, 320, 384, 448, 768, 1024, 1536, 2048],
+        "batchSize": [512, 64, 128, 192, 256, 320, 384, 448, 768, 1024],
         "batchesPerGpu": (1, per_gpu_max),
         "preprocessingThreads": (1, cpus),
     }

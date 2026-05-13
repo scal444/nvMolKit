@@ -74,7 +74,7 @@ def _default_substruct_search_space(num_gpus: int, cpus: int) -> dict:
     """
     per_gpu_worker_max = max(1, min(8, cpus // max(1, num_gpus)))
     return {
-        "batchSize": [1024, 128, 256, 512, 768, 1536, 2048],
+        "batchSize": [1024, 128, 256, 512, 768],
         "workerThreads": (1, per_gpu_worker_max),
         "preprocessingThreads": (1, cpus),
     }

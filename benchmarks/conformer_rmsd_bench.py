@@ -71,12 +71,17 @@ def benchmark_gpu(mol, n_warmup=2, n_iter=10):
     return result.median_s
 
 
-def run_benchmark(smiles, num_confs_list, seed=42, no_rdkit=False):
+def run_benchmark(smiles, num_confs_list, seed=42, no_rdkit=False, no_nvmolkit=False):
     """Run CPU vs GPU benchmark for a molecule at various conformer counts.
 
     When ``no_rdkit`` is True the RDKit CPU benchmark and the numpy-Kabsch
     correctness check are both skipped; only the GPU timings are reported.
+    When ``no_nvmolkit`` is True the GPU benchmark and the correctness check
+    are both skipped; only the RDKit CPU timings are reported.
     """
+    if no_rdkit and no_nvmolkit:
+        raise ValueError("cannot disable both RDKit and nvMolKit")
+
     mol_base = Chem.AddHs(Chem.MolFromSmiles(smiles))
     no_h_base = Chem.RemoveHs(Chem.AddHs(Chem.MolFromSmiles(smiles)))
     n_atoms = no_h_base.GetNumAtoms()
@@ -84,6 +89,8 @@ def run_benchmark(smiles, num_confs_list, seed=42, no_rdkit=False):
     print(f"\nMolecule: {smiles}  ({n_atoms} heavy atoms)")
     if no_rdkit:
         print(f"{'Confs':>8}  {'Pairs':>10}  {'GPU (ms)':>10}")
+    elif no_nvmolkit:
+        print(f"{'Confs':>8}  {'Pairs':>10}  {'CPU (ms)':>10}")
     else:
         print(f"{'Confs':>8}  {'Pairs':>10}  {'CPU (ms)':>10}  {'GPU (ms)':>10}  {'Speedup':>8}  {'Match':>6}")
     print("-" * 70)
@@ -94,6 +101,7 @@ def run_benchmark(smiles, num_confs_list, seed=42, no_rdkit=False):
         params = rdDistGeom.ETKDGv3()
         params.randomSeed = seed
         params.useRandomCoords = True
+        params.numThreads = -1
         rdDistGeom.EmbedMultipleConfs(mol, numConfs=num_confs, params=params)
         actual_confs = mol.GetNumConformers()
 
@@ -103,6 +111,11 @@ def run_benchmark(smiles, num_confs_list, seed=42, no_rdkit=False):
 
         no_h = Chem.RemoveHs(mol)
         n_pairs = actual_confs * (actual_confs - 1) // 2
+
+        if no_nvmolkit:
+            cpu_time = benchmark_cpu(no_h)
+            print(f"{actual_confs:>8}  {n_pairs:>10}  {cpu_time * 1000:>10.2f}")
+            continue
 
         gpu_time = benchmark_gpu(no_h)
 
@@ -167,14 +180,23 @@ def main():
         action="store_true",
         help="Skip the RDKit CPU benchmark and the numpy-Kabsch correctness check",
     )
+    parser.add_argument(
+        "--no-nvmolkit",
+        action="store_true",
+        help="Skip the nvMolKit GPU benchmark and the correctness check (RDKit-only)",
+    )
     args = parser.parse_args()
 
-    device_name = torch.cuda.get_device_name(0)
-    print(f"GPU: {device_name}")
-    print(f"CUDA: {torch.version.cuda}")
+    if args.no_rdkit and args.no_nvmolkit:
+        parser.error("cannot pass both --no-rdkit and --no-nvmolkit")
+
+    if not args.no_nvmolkit:
+        device_name = torch.cuda.get_device_name(0)
+        print(f"GPU: {device_name}")
+        print(f"CUDA: {torch.version.cuda}")
 
     for smiles in args.smiles:
-        run_benchmark(smiles, args.num_confs, no_rdkit=args.no_rdkit)
+        run_benchmark(smiles, args.num_confs, no_rdkit=args.no_rdkit, no_nvmolkit=args.no_nvmolkit)
 
     print("\nDone.")
 

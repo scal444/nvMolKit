@@ -58,7 +58,7 @@ set -uo pipefail
 
 usage() {
   cat >&2 <<EOF
-Usage: $0 <1|8> --output-dir DIR [--data-dir DIR] [--include NAME [NAME ...]] [--no-rdkit]
+Usage: $0 <1|8> --output-dir DIR [--data-dir DIR] [--include NAME [NAME ...]] [--no-rdkit | --no-nvmolkit]
        $0 --list
 
   <1|8>             GPU mode (required)
@@ -68,6 +68,10 @@ Usage: $0 <1|8> --output-dir DIR [--data-dir DIR] [--include NAME [NAME ...]] [-
   --no-rdkit        Skip RDKit head-to-head on every bench. When NOT set,
                     validation/verification is enabled where the bench supports
                     it (etkdg, ff_optimize_*, substruct, tfd, conformer_rmsd).
+  --no-nvmolkit     RDKit-only mode: skip the nvMolKit side on every bench.
+                    Autotune is dropped (it requires nvMolKit) and the
+                    GPU-only benches still walk through their RDKit reference
+                    implementations. Mutually exclusive with --no-rdkit.
   --list            Print the bench names and exit
 EOF
 }
@@ -152,6 +156,7 @@ OUTPUT_DIR=""
 DATA_DIR="/data"
 INCLUDE_LIST=()
 SKIP_RDKIT=0
+SKIP_NVMOLKIT=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -186,6 +191,10 @@ while [ $# -gt 0 ]; do
       SKIP_RDKIT=1
       shift
       ;;
+    --no-nvmolkit)
+      SKIP_NVMOLKIT=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -197,6 +206,11 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+if [ "$SKIP_RDKIT" = "1" ] && [ "$SKIP_NVMOLKIT" = "1" ]; then
+  echo "Error: --no-rdkit and --no-nvmolkit are mutually exclusive" >&2
+  exit 2
+fi
 
 if [ "$LIST_ONLY" = "1" ]; then
   printf '%s\n' "${ALL_BENCH_NAMES[@]}"
@@ -308,8 +322,8 @@ FF_MAX_ITERS=200
 # state instead of tail/transient effects. Solve for mols:
 #   calibration_mols = 2 * batchSize_max * batchesPerGpu_max * num_gpus / confs_per_mol
 # Mirrors the autotune defaults in nvmolkit/autotune/_ff_common.py and
-# tune_embed_molecules.py: batchSize_max=2048, batchesPerGpu_max=8.
-AUTOTUNE_BS_MAX=2048
+# tune_embed_molecules.py: batchSize_max=1024, batchesPerGpu_max=8.
+AUTOTUNE_BS_MAX=1024
 AUTOTUNE_BPG_MAX=8
 ETKDG_CAL_SIZE=$(( 2 * AUTOTUNE_BS_MAX * AUTOTUNE_BPG_MAX * NUM_GPUS / ETKDG_CONFS_PER_MOL ))
 FF_CAL_SIZE=$(( 2 * AUTOTUNE_BS_MAX * AUTOTUNE_BPG_MAX * NUM_GPUS / FF_CONFS_PER_MOL ))
@@ -382,6 +396,7 @@ mkdir -p "$SYSINFO_DIR"
   echo "enamine_path: $ENAMINE_CXSMILES"
   echo "size_scan_dir: $SIZE_SCAN_DIR"
   echo "skip_rdkit: $SKIP_RDKIT"
+  echo "skip_nvmolkit: $SKIP_NVMOLKIT"
   echo "etkdg_num_mols: $ETKDG_NUM_MOLS"
   echo "etkdg_calibration_mols: $ETKDG_CAL_SIZE"
   echo "ff_num_mols: $FF_NUM_MOLS"
@@ -456,50 +471,114 @@ run_bench() {
   run_bench_inner "$@"
 }
 
-# Per-bench RDKit/validation flag sets. When --no-rdkit is on, we pass each
-# bench's "skip RDKit" flag and (since validation diffs against RDKit) its
-# "skip validation" flag if it has one. When RDKit is on we pass each bench's
-# "enable validation" flag where opt-in is required (currently only tfd).
-BUTINA_RDKIT_FLAGS=()
-CONFORMER_RMSD_RDKIT_FLAGS=()
-CROSS_SIMILARITY_RDKIT_FLAGS=()
+# Per-bench mode flags.
+#
+# Default (head-to-head): both implementations run; validation is opt-in.
+# --no-rdkit: skip every RDKit timing (and validation, which diffs vs RDKit).
+# --no-nvmolkit: RDKit-only mode. Skip every nvMolKit timing AND drop
+#   autotune (which requires nvMolKit). Butina additionally needs
+#   --include-tanimoto-matrix in this mode because its rdkit-with-dist-mat
+#   path normally builds the dist matrix on the GPU.
+#
 # Validation is currently disabled even when RDKit is on: the per-conformer
 # MMFF energy reconstruction in etkdg/ff/substruct is single-threaded and
 # blows up wall time on large workloads. Re-enable by dropping --no_validate
 # once those validators are parallelized.
-ETKDG_RDKIT_FLAGS=(--no_validate)
-FF_RDKIT_FLAGS=(--no_validate)
-SUBSTRUCT_RDKIT_FLAGS=(--no_validate)
-TFD_RDKIT_FLAGS=()
+BUTINA_MODE_FLAGS=()
+CONFORMER_RMSD_MODE_FLAGS=()
+CROSS_SIMILARITY_MODE_FLAGS=()
+ETKDG_MODE_FLAGS=(--no_validate)
+FF_MODE_FLAGS=(--no_validate)
+SUBSTRUCT_MODE_FLAGS=(--no_validate)
+TFD_MODE_FLAGS=()
+# Autotune flag set is added to the etkdg / ff / substruct bench invocations
+# verbatim and zeroed out in --no-nvmolkit mode (the bench scripts reject
+# --autotune when nvmolkit is disabled). When non-empty the per-bench
+# invocations also pass --autotune_save / --autotune_calibration_size /
+# --autotune_load to the matching argparse args; those calls live next to the
+# bench invocations below and are guarded by AUTOTUNE_ENABLED.
+AUTOTUNE_ENABLED=1
 if [ "$SKIP_RDKIT" = "1" ]; then
-  BUTINA_RDKIT_FLAGS=(--no-rdkit --no-rdkit-lowmem)
-  CONFORMER_RMSD_RDKIT_FLAGS=(--no-rdkit)
-  CROSS_SIMILARITY_RDKIT_FLAGS=(--no-rdkit)
-  ETKDG_RDKIT_FLAGS=(--no_rdkit --no_validate)
-  FF_RDKIT_FLAGS=(--no_rdkit --no_validate)
-  SUBSTRUCT_RDKIT_FLAGS=(--no_rdkit --no_validate)
-  TFD_RDKIT_FLAGS=(--skip-rdkit)
+  BUTINA_MODE_FLAGS=(--no-rdkit)
+  CONFORMER_RMSD_MODE_FLAGS=(--no-rdkit)
+  CROSS_SIMILARITY_MODE_FLAGS=(--no-rdkit)
+  ETKDG_MODE_FLAGS=(--no_rdkit --no_validate)
+  FF_MODE_FLAGS=(--no_rdkit --no_validate)
+  SUBSTRUCT_MODE_FLAGS=(--no_rdkit --no_validate)
+  TFD_MODE_FLAGS=(--skip-rdkit)
 fi
+if [ "$SKIP_NVMOLKIT" = "1" ]; then
+  BUTINA_MODE_FLAGS=(--no-nvmolkit --no-fused)
+  CONFORMER_RMSD_MODE_FLAGS=(--no-nvmolkit)
+  CROSS_SIMILARITY_MODE_FLAGS=(--no-nvmolkit)
+  ETKDG_MODE_FLAGS=(--no_nvmolkit --no_validate)
+  FF_MODE_FLAGS=(--no_nvmolkit --no_validate)
+  SUBSTRUCT_MODE_FLAGS=(--no_nvmolkit --no_validate)
+  TFD_MODE_FLAGS=(--skip-nvmolkit)
+  AUTOTUNE_ENABLED=0
+fi
+
+# Build autotune flag arrays per bench. Empty in --no-nvmolkit mode, since
+# autotune requires nvmolkit. The --autotune_save path is appended per
+# invocation because each call (top-level + every size-scan bin + every
+# substruct row) writes a different config file.
+ETKDG_AUTOTUNE_FLAGS=()
+FF_AUTOTUNE_FLAGS=()
+SUBSTRUCT_AUTOTUNE_FLAGS=()
+if [ "$AUTOTUNE_ENABLED" = "1" ]; then
+  ETKDG_AUTOTUNE_FLAGS=(
+    --autotune
+    --autotune_trials "$AUTOTUNE_TRIALS"
+    --autotune_time_budget "$AUTOTUNE_TIME_BUDGET"
+    --autotune_calibration_size "$ETKDG_CAL_SIZE"
+  )
+  FF_AUTOTUNE_FLAGS=(
+    --autotune
+    --autotune_trials "$AUTOTUNE_TRIALS"
+    --autotune_time_budget "$AUTOTUNE_TIME_BUDGET"
+    --autotune_calibration_size "$FF_CAL_SIZE"
+  )
+  SUBSTRUCT_AUTOTUNE_FLAGS=(
+    --autotune
+    --autotune_trials "$AUTOTUNE_TRIALS"
+    --autotune_time_budget "$AUTOTUNE_TIME_BUDGET"
+    --autotune_calibration_size "$SUBSTRUCT_CAL_SIZE"
+  )
+fi
+
+# Build the per-invocation "--autotune_save PATH" pair into the named array.
+# Empty when autotune is disabled. Pass the variable name (not the value) so
+# the caller's array gets populated; e.g. autotune_save_arg my_arr /path.json
+autotune_save_arg() {
+  local out_var="$1"
+  local path="$2"
+  if [ "$AUTOTUNE_ENABLED" = "1" ]; then
+    eval "$out_var=(--autotune_save \"\$path\")"
+  else
+    eval "$out_var=()"
+  fi
+}
 
 run_bench "butina_clustering" \
   "$RESULT_DIR/butina_clustering.csv" \
   python "$SCRIPT_DIR/butina_clustering_bench.py" \
   "$ENAMINE_CXSMILES" \
   --output "$RESULT_DIR/butina_clustering.csv" \
-  "${BUTINA_RDKIT_FLAGS[@]}"
+  "${BUTINA_MODE_FLAGS[@]}"
 
 run_bench "conformer_rmsd" \
   "$LOG_DIR/conformer_rmsd.log" \
   python "$SCRIPT_DIR/conformer_rmsd_bench.py" \
-  "${CONFORMER_RMSD_RDKIT_FLAGS[@]}"
+  "${CONFORMER_RMSD_MODE_FLAGS[@]}"
 
 run_bench "cross_similarity" \
   "$RESULT_DIR/cross_similarity.json" \
   python "$SCRIPT_DIR/cross_similarity_bench.py" \
   --input "$ENAMINE_CXSMILES" \
   --output "$RESULT_DIR/cross_similarity.json" \
-  "${CROSS_SIMILARITY_RDKIT_FLAGS[@]}"
+  "${CROSS_SIMILARITY_MODE_FLAGS[@]}"
 
+autotune_save_arg etkdg_save_flags "$AUTOTUNE_DIR/etkdg_hardware.json"
 run_bench "etkdg" \
   "$RESULT_DIR/etkdg.csv" \
   python "$SCRIPT_DIR/etkdg_bench.py" \
@@ -509,13 +588,10 @@ run_bench "etkdg" \
   --num_gpus "$NUM_GPUS" \
   --rdkit_threads "$RDKIT_THREADS" \
   --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
-  --autotune \
-  --autotune_trials "$AUTOTUNE_TRIALS" \
-  --autotune_time_budget "$AUTOTUNE_TIME_BUDGET" \
-  --autotune_calibration_size "$ETKDG_CAL_SIZE" \
-  --autotune_save "$AUTOTUNE_DIR/etkdg_hardware.json" \
+  "${ETKDG_AUTOTUNE_FLAGS[@]}" \
+  "${etkdg_save_flags[@]}" \
   --output "$RESULT_DIR/etkdg.csv" \
-  "${ETKDG_RDKIT_FLAGS[@]}"
+  "${ETKDG_MODE_FLAGS[@]}"
 
 if should_run "etkdg_size_scan"; then
   echo "[etkdg_size_scan] sweeping ${#SIZE_SCAN_BINS[@]} bins"
@@ -526,6 +602,7 @@ if should_run "etkdg_size_scan"; then
       continue
     fi
     bin_name="etkdg_size_scan_${bin}"
+    autotune_save_arg etkdg_bin_save_flags "$AUTOTUNE_DIR/etkdg_size_scan_${bin}_hardware.json"
     run_bench_inner "$bin_name" \
       "$RESULT_DIR/etkdg_size_scan_${bin}.csv" \
       python "$SCRIPT_DIR/etkdg_bench.py" \
@@ -535,13 +612,10 @@ if should_run "etkdg_size_scan"; then
       --num_gpus "$NUM_GPUS" \
       --rdkit_threads "$RDKIT_THREADS" \
       --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
-      --autotune \
-      --autotune_trials "$AUTOTUNE_TRIALS" \
-      --autotune_time_budget "$AUTOTUNE_TIME_BUDGET" \
-      --autotune_calibration_size "$ETKDG_CAL_SIZE" \
-      --autotune_save "$AUTOTUNE_DIR/etkdg_size_scan_${bin}_hardware.json" \
+      "${ETKDG_AUTOTUNE_FLAGS[@]}" \
+      "${etkdg_bin_save_flags[@]}" \
       --output "$RESULT_DIR/etkdg_size_scan_${bin}.csv" \
-      "${ETKDG_RDKIT_FLAGS[@]}"
+      "${ETKDG_MODE_FLAGS[@]}"
   done
 else
   echo "[etkdg_size_scan] skipped (not in --include)"
@@ -550,6 +624,7 @@ fi
 
 # UFF disabled; MMFF is the reference. Re-add "uff" to the list to run it.
 for ff in mmff; do
+  autotune_save_arg ff_save_flags "$AUTOTUNE_DIR/ff_optimize_${ff}_hardware.json"
   run_bench "ff_optimize_${ff}" \
     "$RESULT_DIR/ff_optimize_${ff}.csv" \
     python "$SCRIPT_DIR/ff_optimize_bench.py" \
@@ -561,13 +636,10 @@ for ff in mmff; do
     --num_gpus "$NUM_GPUS" \
     --rdkit_threads "$RDKIT_THREADS" \
     --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
-    --autotune \
-    --autotune_trials "$AUTOTUNE_TRIALS" \
-    --autotune_time_budget "$AUTOTUNE_TIME_BUDGET" \
-    --autotune_calibration_size "$FF_CAL_SIZE" \
-    --autotune_save "$AUTOTUNE_DIR/ff_optimize_${ff}_hardware.json" \
+    "${FF_AUTOTUNE_FLAGS[@]}" \
+    "${ff_save_flags[@]}" \
     --output "$RESULT_DIR/ff_optimize_${ff}.csv" \
-    "${FF_RDKIT_FLAGS[@]}"
+    "${FF_MODE_FLAGS[@]}"
 
   scan_name="ff_optimize_${ff}_size_scan"
   if should_run "$scan_name"; then
@@ -579,6 +651,7 @@ for ff in mmff; do
         continue
       fi
       bin_name="${scan_name}_${bin}"
+      autotune_save_arg ff_bin_save_flags "$AUTOTUNE_DIR/${bin_name}_hardware.json"
       run_bench_inner "$bin_name" \
         "$RESULT_DIR/${bin_name}.csv" \
         python "$SCRIPT_DIR/ff_optimize_bench.py" \
@@ -590,13 +663,10 @@ for ff in mmff; do
         --num_gpus "$NUM_GPUS" \
         --rdkit_threads "$RDKIT_THREADS" \
         --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
-        --autotune \
-        --autotune_trials "$AUTOTUNE_TRIALS" \
-        --autotune_time_budget "$AUTOTUNE_TIME_BUDGET" \
-        --autotune_calibration_size "$FF_CAL_SIZE" \
-        --autotune_save "$AUTOTUNE_DIR/${bin_name}_hardware.json" \
+        "${FF_AUTOTUNE_FLAGS[@]}" \
+        "${ff_bin_save_flags[@]}" \
         --output "$RESULT_DIR/${bin_name}.csv" \
-        "${FF_RDKIT_FLAGS[@]}"
+        "${FF_MODE_FLAGS[@]}"
     done
   else
     echo "[$scan_name] skipped (not in --include)"
@@ -610,6 +680,7 @@ for row in "${SUBSTRUCT_ROWS[@]}"; do
   smarts_path="$SMARTS_DIR/$smarts_file"
   smarts_stem="${smarts_file%.txt}"
   bench_name="substruct_${smarts_stem}"
+  autotune_save_arg substruct_save_flags "$AUTOTUNE_DIR/${bench_name}_config.json"
   run_bench "$bench_name" \
     "$LOG_DIR/${bench_name}.log" \
     python "$SCRIPT_DIR/substruct_bench.py" \
@@ -621,12 +692,10 @@ for row in "${SUBSTRUCT_ROWS[@]}"; do
     --num_gpus "$NUM_GPUS" \
     --rdkit_threads "$RDKIT_THREADS" \
     --rdkit_match_mode substructlib \
-    --autotune \
-    --autotune_trials "$AUTOTUNE_TRIALS" \
-    --autotune_time_budget "$AUTOTUNE_TIME_BUDGET" \
-    --autotune_calibration_size "$SUBSTRUCT_CAL_SIZE" \
-    --autotune_save "$AUTOTUNE_DIR/${bench_name}_config.json" \
-    "${SUBSTRUCT_RDKIT_FLAGS[@]}"
+    --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
+    "${SUBSTRUCT_AUTOTUNE_FLAGS[@]}" \
+    "${substruct_save_flags[@]}" \
+    "${SUBSTRUCT_MODE_FLAGS[@]}"
 done
 
 run_bench "tfd" \
@@ -634,7 +703,7 @@ run_bench "tfd" \
   python "$SCRIPT_DIR/tfd_bench.py" \
   --smiles-file "$ENAMINE_CXSMILES" \
   --output "$RESULT_DIR/tfd.csv" \
-  "${TFD_RDKIT_FLAGS[@]}"
+  "${TFD_MODE_FLAGS[@]}"
 
 echo
 echo "All benchmarks complete. Output: $OUTPUT_DIR"
