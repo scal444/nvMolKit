@@ -61,7 +61,7 @@ build = [
 # only re-emits it on success, which makes diagnosing scikit-build failures
 # painful.
 build-frontend = "build"
-environment-pass = ["RDKIT_VERSION"]
+environment-pass = ["RDKIT_VERSION", "CMAKE_BUILD_PARALLEL_LEVEL", "MAKEFLAGS", "CONAN_CPU_COUNT"]
 # container-engine (network mode + cache bind-mounts) is set at runtime by
 # admin/deploy/build_pip_wheels.sh so it can interpolate $HOME for the cache
 # paths. cibuildwheel's TOML config does not support env-var substitution in

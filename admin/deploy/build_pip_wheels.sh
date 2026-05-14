@@ -64,10 +64,16 @@ python -m pip install 'cibuildwheel>=2.16'
 #   - conan2       : conan package cache (saves boost rebuild on partial failure retry)
 #   - pip          : pip download cache (numpy, pillow, conan source dist, etc.)
 # All keyed on host $HOME so they survive reboots, unlike anything under /tmp.
+#
+# The conan2 cache is not safe for concurrent `conan export` of the same
+# recipe ref from multiple processes (races on .conan2/p/<hash>/s during
+# population). NVMOLKIT_CONAN_CACHE_ROOT lets a parallel driver point each
+# concurrent build at its own conan cache; default keeps single-build behavior.
 NVMOLKIT_CACHE_ROOT="${NVMOLKIT_CACHE_ROOT:-${HOME}/.cache/nvmolkit}"
+NVMOLKIT_CONAN_CACHE_ROOT="${NVMOLKIT_CONAN_CACHE_ROOT:-${NVMOLKIT_CACHE_ROOT}/conan2}"
 mkdir -p \
     "${NVMOLKIT_CACHE_ROOT}/rdkit_recipe" \
-    "${NVMOLKIT_CACHE_ROOT}/conan2" \
+    "${NVMOLKIT_CONAN_CACHE_ROOT}" \
     "${NVMOLKIT_CACHE_ROOT}/pip"
 
 # Configure cibuildwheel's container engine at runtime: --network=host plus
@@ -75,7 +81,7 @@ mkdir -p \
 # interpolate $HOME so we set this here.
 CIBW_CONTAINER_ENGINE="docker; create_args: --network=host \
 -v ${NVMOLKIT_CACHE_ROOT}/rdkit_recipe:/tmp/rdkit_recipe \
--v ${NVMOLKIT_CACHE_ROOT}/conan2:/root/.conan2 \
+-v ${NVMOLKIT_CONAN_CACHE_ROOT}:/root/.conan2 \
 -v ${NVMOLKIT_CACHE_ROOT}/pip:/root/.cache/pip"
 
 RDKIT_VERSION="${RDKIT_VERSION}" \
