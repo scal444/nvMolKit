@@ -73,8 +73,11 @@ awk '
 ' admin/distribute/rdkit_build_matrix.yaml > "$PAIRS_FILE"
 
 NUM_PAIRS=$(wc -l < "$PAIRS_FILE")
-RUN_STARTED_AT=$(date '+%Y-%m-%d %H:%M:%S %Z')
-echo "Run started: $RUN_STARTED_AT"
+# Use the awk-comparable form (no %Z) for filtering rows in this run; keep a
+# separate human-readable form including the timezone for the run header.
+RUN_STARTED_AT=$(date '+%Y-%m-%d %H:%M:%S')
+RUN_STARTED_DISPLAY=$(date '+%Y-%m-%d %H:%M:%S %Z')
+echo "Run started: $RUN_STARTED_DISPLAY"
 echo "Matrix has $NUM_PAIRS (rdkit, python) pairs."
 echo "Running $JOBS jobs in parallel, $THREADS_PER_JOB threads each."
 echo "Wheelhouse: $WHEELHOUSE"

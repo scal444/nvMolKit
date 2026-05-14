@@ -8,15 +8,20 @@
 #   mode = smoke    -> import + tiny GPU op (admin/test/smoke_check.py)
 #          full     -> smoke + full pytest from repo's nvmolkit/tests
 #
+# Intended to be invoked by admin/test/run.sh, which sets up envs and dispatches
+# pairs. Standalone invocation works as long as the required environment is set.
+#
 # Required environment:
-#   REPO              : repo root (provides smoke_check.py and nvmolkit/tests/)
-#   WHEELHOUSE        : where wheels live; reads <wheelhouse>/rdkit<X>/py<Y>/*.whl
-#   TEST_LOG_DIR      : per-pair log dir
-#   VENV_ROOT         : where to create throwaway venvs
-#   IFACE_ENV_PREFIX  : prefix for interpreter conda envs;
-#                       env name is "<prefix>py<version>" (e.g. nvmolkit_iface_py3.12)
-#   TIMINGS_TSV       : append-only timings log
-#                       (rdkit\tpy\tmode\tstatus\tstart\tend\telapsed_sec)
+#   REPO                       : repo root (provides smoke_check.py and nvmolkit/tests/)
+#   WHEELHOUSE                 : where wheels live; reads <wheelhouse>/rdkit<X>/py<Y>/*.whl
+#   TEST_LOG_DIR               : per-pair log dir
+#   VENV_ROOT                  : where to create throwaway venvs
+#   IFACE_ENV_PREFIX           : prefix for interpreter conda envs;
+#                                env name is "<prefix>py<version>" (e.g. nvmolkit_iface_py3.12)
+#   NVMOLKIT_CONDA_ENVS_ROOT   : conda envs directory (e.g. <conda-base>/envs)
+#                                interpreter resolves to <root>/<env_name>/bin/python
+#   TIMINGS_TSV                : append-only timings log
+#                                (rdkit\tpy\tmode\tstatus\tstart\tend\telapsed_sec)
 #
 # Exits 0 on pass, 1 on failure of any test step, 2 on usage error.
 
@@ -41,10 +46,11 @@ esac
 : "${TEST_LOG_DIR:?TEST_LOG_DIR must be set}"
 : "${VENV_ROOT:?VENV_ROOT must be set}"
 : "${IFACE_ENV_PREFIX:?IFACE_ENV_PREFIX must be set}"
+: "${NVMOLKIT_CONDA_ENVS_ROOT:?NVMOLKIT_CONDA_ENVS_ROOT must be set}"
 : "${TIMINGS_TSV:?TIMINGS_TSV must be set}"
 
 ifaceEnv=${IFACE_ENV_PREFIX}py${py}
-ifacePython=/home/kevin/programs/miniforge3/envs/${ifaceEnv}/bin/python
+ifacePython=$NVMOLKIT_CONDA_ENVS_ROOT/$ifaceEnv/bin/python
 if [ ! -x "$ifacePython" ]; then
     echo "Error: interpreter env not found at $ifacePython" >&2
     echo "       Create it with: conda create -y -n ${ifaceEnv} -c conda-forge python=${py}" >&2
