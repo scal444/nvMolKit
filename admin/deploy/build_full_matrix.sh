@@ -41,7 +41,7 @@ REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$REPO"
 
 WHEELHOUSE=${WHEELHOUSE:-$REPO/wheelhouse}
-WORKTREE_ROOT=${WORKTREE_ROOT:-/home/kevin/scratch/nvmolkit_wheels}
+WORKTREE_ROOT=${WORKTREE_ROOT:-$HOME/scratch/nvmolkit_wheels}
 LOG_DIR=$WHEELHOUSE/logs
 JOB_DIR=$WHEELHOUSE/jobs
 
@@ -52,10 +52,15 @@ export CMAKE_BUILD_PARALLEL_LEVEL=$THREADS_PER_JOB
 export MAKEFLAGS=-j$THREADS_PER_JOB
 export CONAN_CPU_COUNT=$THREADS_PER_JOB
 
-# Activate the host-side cibuildwheel driver env. cibuildwheel itself only
-# needs to launch docker; the actual builds run inside the manylinux image.
-source /home/kevin/programs/miniforge3/etc/profile.d/conda.sh
-conda activate nvmolkit_pip_build
+# cibuildwheel itself only needs to launch docker; the actual builds run
+# inside the manylinux image. Expect the caller to have already activated
+# a conda env that provides cibuildwheel (or to have it on PATH).
+if ! command -v cibuildwheel >/dev/null 2>&1; then
+    echo "Error: cibuildwheel not found on PATH." >&2
+    echo "       Activate the conda env that supplies it first, e.g." >&2
+    echo "       'conda activate nvmolkit_pip_build'." >&2
+    exit 1
+fi
 
 # Snapshot the working tree's pyproject.toml so each worktree picks up local
 # (uncommitted) changes like the extended environment-pass list.
