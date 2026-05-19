@@ -28,9 +28,16 @@
 #     THREADS_PER_JOB   default 2
 #
 # Environment overrides:
-#   CIBW_MANYLINUX_X86_64_IMAGE   default ghcr.io/.../nvmolkit-manylinux-cuda12:local
-#   WORKTREE_ROOT                 default /home/kevin/scratch/nvmolkit_wheels
+#   CIBW_MANYLINUX_X86_64_IMAGE   default ghcr.io/.../nvmolkit-manylinux-cuda12:2026.04.28
+#                                 (set to ...:local when iterating on the Dockerfile
+#                                 with a locally-built image)
+#   WORKTREE_ROOT                 default <repo>/nvmolkit_pip_build_worktrees
 #   WHEELHOUSE                    default <repo>/wheelhouse
+#   NVMOLKIT_CACHE_ROOT_BASE      default <repo>/nvmolkit_pip_build_cache (sibling
+#                                 of wheelhouse); the rdkit_recipe / pip / conan2
+#                                 bind-mounts live under
+#                                 $NVMOLKIT_CACHE_ROOT_BASE/py<X>/ and
+#                                 $NVMOLKIT_CACHE_ROOT_BASE/conan2/rdkit<X>_py<Y>/
 
 set -euo pipefail
 
@@ -41,13 +48,23 @@ REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$REPO"
 
 WHEELHOUSE=${WHEELHOUSE:-$REPO/wheelhouse}
-WORKTREE_ROOT=${WORKTREE_ROOT:-$HOME/scratch/nvmolkit_wheels}
+WORKTREE_ROOT=${WORKTREE_ROOT:-$REPO/nvmolkit_pip_build_worktrees}
+NVMOLKIT_CACHE_ROOT_BASE=${NVMOLKIT_CACHE_ROOT_BASE:-$REPO/nvmolkit_pip_build_cache}
 LOG_DIR=$WHEELHOUSE/logs
 JOB_DIR=$WHEELHOUSE/jobs
 
 mkdir -p "$WHEELHOUSE" "$LOG_DIR" "$JOB_DIR" "$WORKTREE_ROOT"
 
-export CIBW_MANYLINUX_X86_64_IMAGE=${CIBW_MANYLINUX_X86_64_IMAGE:-ghcr.io/nvidia-digital-bio/nvmolkit-manylinux-cuda12:local}
+export CIBW_MANYLINUX_X86_64_IMAGE=${CIBW_MANYLINUX_X86_64_IMAGE:-ghcr.io/nvidia-digital-bio/nvmolkit-manylinux-cuda12:2026.04.28}
+
+# Pull the manylinux+CUDA image once up front so the N parallel workers don't
+# each re-hit ghcr.io to verify the manifest. cibuildwheel's per-build `docker
+# create` is forced to `--pull=never` (via CIBW_CONTAINER_ENGINE.create_args
+# in build_pip_wheels.sh) so it uses this pre-cached image instead of pulling
+# again per job.
+echo "Pre-pulling $CIBW_MANYLINUX_X86_64_IMAGE ..."
+docker pull "$CIBW_MANYLINUX_X86_64_IMAGE"
+
 export CMAKE_BUILD_PARALLEL_LEVEL=$THREADS_PER_JOB
 export MAKEFLAGS=-j$THREADS_PER_JOB
 export CONAN_CPU_COUNT=$THREADS_PER_JOB
@@ -124,7 +141,8 @@ if [ ! -x "$WORKER" ]; then
     exit 1
 fi
 
-export REPO WHEELHOUSE LOG_DIR WORKTREE_ROOT PYPROJECT_SRC TIMINGS_TSV
+export REPO WHEELHOUSE LOG_DIR WORKTREE_ROOT PYPROJECT_SRC TIMINGS_TSV \
+    NVMOLKIT_CACHE_ROOT_BASE
 
 # Hand each pair to xargs as two args ($1=rdkit, $2=py). Don't let a single
 # failed build kill the whole matrix - we tally results at the end.

@@ -71,13 +71,16 @@ fi
 #   - rdkit_recipe : full reproduced rdkit + boost install tree (~30-50 min build)
 #   - conan2       : conan package cache (saves boost rebuild on partial failure retry)
 #   - pip          : pip download cache (numpy, pillow, conan source dist, etc.)
-# All keyed on host $HOME so they survive reboots, unlike anything under /tmp.
+# Defaults to <repo>/nvmolkit_pip_build_cache (sibling of wheelhouse) so the
+# bind-mount lives on the same filesystem as the repo (where dockerd is already
+# known to have access) and survives wholesale wheelhouse cleanups. Override
+# NVMOLKIT_CACHE_ROOT to point elsewhere.
 #
 # The conan2 cache is not safe for concurrent `conan export` of the same
 # recipe ref from multiple processes (races on .conan2/p/<hash>/s during
 # population). NVMOLKIT_CONAN_CACHE_ROOT lets a parallel driver point each
 # concurrent build at its own conan cache; default keeps single-build behavior.
-NVMOLKIT_CACHE_ROOT="${NVMOLKIT_CACHE_ROOT:-${HOME}/.cache/nvmolkit}"
+NVMOLKIT_CACHE_ROOT="${NVMOLKIT_CACHE_ROOT:-${REPO_ROOT}/nvmolkit_pip_build_cache}"
 NVMOLKIT_CONAN_CACHE_ROOT="${NVMOLKIT_CONAN_CACHE_ROOT:-${NVMOLKIT_CACHE_ROOT}/conan2}"
 mkdir -p \
     "${NVMOLKIT_CACHE_ROOT}/rdkit_recipe" \
@@ -87,7 +90,7 @@ mkdir -p \
 # Configure cibuildwheel's container engine at runtime: --network=host plus
 # the bind-mounts for the caches above. cibuildwheel's TOML config cannot
 # interpolate $HOME so we set this here.
-CIBW_CONTAINER_ENGINE="docker; create_args: --network=host \
+CIBW_CONTAINER_ENGINE="docker; create_args: --pull=never --network=host \
 -v ${NVMOLKIT_CACHE_ROOT}/rdkit_recipe:/tmp/rdkit_recipe \
 -v ${NVMOLKIT_CONAN_CACHE_ROOT}:/root/.conan2 \
 -v ${NVMOLKIT_CACHE_ROOT}/pip:/root/.cache/pip"

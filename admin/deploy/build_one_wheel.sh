@@ -36,6 +36,8 @@ py=$2
 : "${WORKTREE_ROOT:?WORKTREE_ROOT must be set}"
 : "${PYPROJECT_SRC:?PYPROJECT_SRC must be set}"
 : "${TIMINGS_TSV:?TIMINGS_TSV must be set}"
+: "${CIBW_MANYLINUX_X86_64_IMAGE:?CIBW_MANYLINUX_X86_64_IMAGE must be set}"
+: "${NVMOLKIT_CACHE_ROOT_BASE:?NVMOLKIT_CACHE_ROOT_BASE must be set}"
 
 pyTag=${py//./}
 outDir=$WHEELHOUSE/rdkit${rdkit}/py${py}
@@ -61,12 +63,22 @@ fi
 
 echo "[start $startedAt] rdkit=$rdkit py=$py worktree=$wt"
 
+# Stale worktree may contain root-owned files from a previous killed run
+# (container ran as root with $wt bind-mounted). Chown back via a throwaway
+# root container before the host-side rm, otherwise rm fails with EPERM.
+if [ -d "$wt" ]; then
+    docker run --rm -v "$wt:/wt" \
+        "$CIBW_MANYLINUX_X86_64_IMAGE" \
+        chown -R "$(id -u):$(id -g)" /wt > "$logFile" 2>&1 || true
+fi
 rm -rf "$wt"
 mkdir -p "$wt"
 rsync -a \
     --exclude '.git' \
     --exclude 'wheelhouse' \
     --exclude 'wheelhouse.backup' \
+    --exclude 'nvmolkit_pip_build_worktrees' \
+    --exclude 'nvmolkit_pip_build_cache' \
     --exclude '_skbuild' \
     --exclude 'build' \
     "$REPO"/ "$wt"/ > "$logFile" 2>&1
@@ -88,8 +100,8 @@ set +e
     # rdkit_recipe and pip caches are multi-process safe and shared per
     # python; conan2 is not concurrency-safe so each (rdkit, py) pair gets
     # its own conan cache to avoid races on shared recipe refs.
-    export NVMOLKIT_CACHE_ROOT=$HOME/.cache/nvmolkit/py${py}
-    export NVMOLKIT_CONAN_CACHE_ROOT=$HOME/.cache/nvmolkit/conan2/rdkit${rdkit}_py${py}
+    export NVMOLKIT_CACHE_ROOT=$NVMOLKIT_CACHE_ROOT_BASE/py${py}
+    export NVMOLKIT_CONAN_CACHE_ROOT=$NVMOLKIT_CACHE_ROOT_BASE/conan2/rdkit${rdkit}_py${py}
     bash admin/deploy/build_pip_wheels.sh "$rdkit" "$outDir"
 ) >> "$logFile" 2>&1
 rc=$?
@@ -109,7 +121,15 @@ elapsedHms=$(format_hms "$elapsed")
     echo "======================"
 } >> "$logFile"
 
-rm -rf "$wt"
+# cibuildwheel runs the manylinux container without --user, so build
+# artifacts under $wt (e.g. _skbuild/, build/) end up owned by root on the
+# host. Chown them back via a throwaway root container before rm -rf.
+if [ -d "$wt" ]; then
+    docker run --rm -v "$wt:/wt" \
+        "$CIBW_MANYLINUX_X86_64_IMAGE" \
+        chown -R "$(id -u):$(id -g)" /wt >> "$logFile" 2>&1 || true
+    rm -rf "$wt"
+fi
 
 if [ "$rc" -eq 0 ]; then
     status=ok
