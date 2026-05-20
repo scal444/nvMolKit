@@ -134,6 +134,23 @@ uploaded=$(gh release view "v${VERSION}" --repo NVIDIA-Digital-Bio/nvmolkit-whee
 test "${expected}" = "${uploaded}"
 ```
 
+The `gh release create` call will fail with "release already exists" on a
+re-run. To re-upload variant wheels into the same `v${VERSION}` release, skip
+the create step and re-run only the upload loop; `--clobber` overwrites
+existing assets in place:
+
+```bash
+find wheelhouse/variants -name '*.whl' -print0 |
+    xargs -0 -P 8 -n 1 gh release upload "v${VERSION}" \
+        --repo NVIDIA-Digital-Bio/nvmolkit-wheels --clobber
+```
+
+Unlike PyPI, GitHub Release assets can be replaced under the same filename,
+so the project version does not need to be bumped to re-cut a release. Note
+that the asset-count check above compares totals only; if the matrix has
+shrunk since the previous upload, stale assets from prior runs can mask a
+missing current wheel. Compare filename sets instead when re-uploading.
+
 ## 7. Publish the simple-repository indexes
 
 Commit the contents of `/tmp/nvmolkit-wheels-pages/` to the `gh-pages` branch
@@ -141,8 +158,41 @@ of `nvmolkit-wheels` (the repo's GitHub Pages source). The directory layout is
 `rdkit<X.Y.Z>/simple/nvmolkit/index.html`, which makes the per-variant URL
 `https://nvidia-digital-bio.github.io/nvmolkit-wheels/rdkit<X.Y.Z>/simple/`.
 
+If you don't already have a local clone of `nvmolkit-wheels`, clone it first
+(the `gh-pages` branch is what GitHub Pages serves from):
+
+```bash
+WHEELS_REPO=$(pwd)/nvmolkit-wheels
+git clone --branch gh-pages \
+    https://github.com/NVIDIA-Digital-Bio/nvmolkit-wheels.git \
+    "${WHEELS_REPO}"
+```
+
+Then sync the generated tree in and push:
+
+```bash
+git -C "${WHEELS_REPO}" fetch origin gh-pages:gh-pages
+git -C "${WHEELS_REPO}" checkout gh-pages
+rsync -a --delete \
+    --exclude '.git' \
+    /tmp/nvmolkit-wheels-pages/ "${WHEELS_REPO}/"
+git -C "${WHEELS_REPO}" checkout gh-pages
+git -C "${WHEELS_REPO}" add -A
+git -C "${WHEELS_REPO}" commit -m "Publish simple index for v${VERSION}"
+git -C "${WHEELS_REPO}" push origin gh-pages
+```
+
+The `--exclude '.git'` keeps `rsync --delete` from wiping the clone's own
+`.git` directory.
+
 A `.nojekyll` file at the root of the published tree prevents GitHub Pages
 from filtering out the `simple/` directories.
+
+The same commands re-publish on a re-upload: regenerate
+`/tmp/nvmolkit-wheels-pages/` (step 5) against the same `RELEASE_URL` and
+re-run the block above (the commit message is the only thing worth changing).
+The hashes in `index.html` change whenever wheels in step 6 are re-uploaded,
+so steps 6 and 7 should be re-run as a pair.
 
 ## 8. Upload the canonical wheel set to PyPI
 
