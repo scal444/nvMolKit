@@ -47,6 +47,10 @@ Usage:
     # Use SubstructLibrary with native threading:
     python substruct_bench.py --smiles <smiles_file> --smarts <smarts_file> --rdkit_match_mode substructlib --rdkit_threads 8
 
+    # Sweep multiple RDKit match modes and thread counts in one run:
+    python substruct_bench.py --smiles <smiles_file> --smarts <smarts_file> \
+        --rdkit_match_mode raw substructlib --rdkit_threads 1 4 16
+
     # Run multiple configurations from a dataframe (smarts, batch_size, workers, prep_threads, mode, num_gpus):
     python substruct_bench.py --smiles <smiles_file> --config <config.csv>
 
@@ -367,14 +371,23 @@ def main():
     parser.add_argument(
         "--rdkit_match_mode",
         choices=["raw", "substructlib"],
-        default="raw",
-        help="RDKit matching mode: raw (direct API) or substructlib (SubstructLibrary) (default: raw)",
+        nargs="+",
+        default=["raw"],
+        help=(
+            "RDKit matching mode(s) to benchmark. Pass one or more of 'raw' / 'substructlib'; "
+            "every mode is combined with every value of --rdkit_threads. (default: raw)"
+        ),
     )
     parser.add_argument(
         "--rdkit_threads",
         type=int,
-        default=1,
-        help="RDKit threads (multiprocessing for raw, native for substructlib) (default: 1)",
+        nargs="+",
+        default=[1],
+        help=(
+            "RDKit thread count(s) to benchmark (multiprocessing for raw, native for substructlib). "
+            "Pass multiple values to sweep; the cartesian product with --rdkit_match_mode is run. "
+            "(default: 1)"
+        ),
     )
     parser.add_argument(
         "--rdkit_max_seconds",
@@ -509,8 +522,8 @@ def main():
     print(f"  Run nvmolkit: {not args.no_nvmolkit}")
     print(f"  Run RDKit: {not args.no_rdkit}")
     if not args.no_rdkit:
-        print(f"  RDKit match mode: {args.rdkit_match_mode}")
-        print(f"  RDKit threads: {args.rdkit_threads}")
+        print(f"  RDKit match modes: {args.rdkit_match_mode}")
+        print(f"  RDKit thread counts: {args.rdkit_threads}")
     if args.config:
         print(f"  Config dataframe: {args.config}")
     else:
@@ -684,27 +697,32 @@ def main():
             except ImportError as e:
                 print(f"  nvmolkit: SKIPPED (import error: {e})")
 
+        rdkit_variants: list[tuple[str, str, int]] = []
         if not args.no_rdkit:
-            if args.rdkit_match_mode == "substructlib":
-                print("\nRunning RDKit SubstructLibrary benchmark...")
-                rdkit_avg, rdkit_std, rdkit_results, rdkit_pairs = bench_rdkit_substructlib(
-                    mols, queries, args.runs, mode, args.max_matches,
-                    args.rdkit_threads, args.rdkit_max_seconds,
-                )
-            else:
-                print("\nRunning RDKit SubstructMatch benchmark...")
-                rdkit_avg, rdkit_std, rdkit_results, rdkit_pairs = bench_rdkit_substruct(
-                    mols, queries, args.runs, mode, args.max_matches,
-                    args.rdkit_threads, args.rdkit_max_seconds,
-                )
             pairs_total = len(mols) * num_patterns
-            if rdkit_pairs < pairs_total:
-                print(
-                    f"  RDKit hit max_seconds budget: processed {rdkit_pairs}/{pairs_total} pairs "
-                    f"({100.0 * rdkit_pairs / pairs_total:.1f}%) in {rdkit_avg:.2f} ms"
-                )
-            print(f"  RDKit:           {rdkit_avg:10.2f} ms (± {rdkit_std:.2f} ms)")
-            results["rdkit"] = (rdkit_avg, rdkit_std, rdkit_results, rdkit_pairs)
+            for rdkit_mode in args.rdkit_match_mode:
+                for rdkit_threads in args.rdkit_threads:
+                    variant_key = f"rdkit_{rdkit_mode}_t{rdkit_threads}"
+                    if rdkit_mode == "substructlib":
+                        print(f"\nRunning RDKit SubstructLibrary benchmark (threads={rdkit_threads})...")
+                        rdkit_avg, rdkit_std, rdkit_results, rdkit_pairs = bench_rdkit_substructlib(
+                            mols, queries, args.runs, mode, args.max_matches,
+                            rdkit_threads, args.rdkit_max_seconds,
+                        )
+                    else:
+                        print(f"\nRunning RDKit SubstructMatch benchmark (threads={rdkit_threads})...")
+                        rdkit_avg, rdkit_std, rdkit_results, rdkit_pairs = bench_rdkit_substruct(
+                            mols, queries, args.runs, mode, args.max_matches,
+                            rdkit_threads, args.rdkit_max_seconds,
+                        )
+                    if rdkit_pairs < pairs_total:
+                        print(
+                            f"  RDKit hit max_seconds budget: processed {rdkit_pairs}/{pairs_total} pairs "
+                            f"({100.0 * rdkit_pairs / pairs_total:.1f}%) in {rdkit_avg:.2f} ms"
+                        )
+                    print(f"  {variant_key:24s}: {rdkit_avg:10.2f} ms (± {rdkit_std:.2f} ms)")
+                    results[variant_key] = (rdkit_avg, rdkit_std, rdkit_results, rdkit_pairs)
+                    rdkit_variants.append((variant_key, rdkit_mode, rdkit_threads))
 
         print("\n" + "=" * 70)
         print("Summary:")
@@ -714,36 +732,49 @@ def main():
             sys.exit(1)
 
         baseline = None
-        if "rdkit" in results:
-            rdkit_avg_ms = results["rdkit"][0]
-            rdkit_pairs_done = results["rdkit"][3]
-            rdkit_throughput = (rdkit_pairs_done * 1000.0 / rdkit_avg_ms) if rdkit_avg_ms > 0 else 0.0
-            baseline = ("RDKit", rdkit_avg_ms, rdkit_throughput)
+        baseline_key = None
+        best_rdkit_throughput = 0.0
+        for variant_key, _mode, _threads in rdkit_variants:
+            rdkit_avg_ms = results[variant_key][0]
+            rdkit_pairs_done = results[variant_key][3]
+            throughput = (rdkit_pairs_done * 1000.0 / rdkit_avg_ms) if rdkit_avg_ms > 0 else 0.0
+            if throughput > best_rdkit_throughput:
+                best_rdkit_throughput = throughput
+                baseline = (variant_key, rdkit_avg_ms, throughput)
+                baseline_key = variant_key
 
         for name, (avg_ms, std_ms, _, pairs_done) in results.items():
             speedup_str = ""
             throughput = (pairs_done * 1000.0 / avg_ms) if avg_ms > 0 else 0.0
-            if baseline and name != "rdkit":
+            if baseline and name != baseline_key and not name.startswith("rdkit_"):
                 speedup = throughput / baseline[2] if baseline[2] > 0 else 0
                 speedup_str = f", {speedup:.1f}x vs {baseline[0]} (throughput-normalised)"
             print(
-                f"  {name:20s}: {avg_ms:10.2f} ms (± {std_ms:.2f} ms), "
+                f"  {name:24s}: {avg_ms:10.2f} ms (± {std_ms:.2f} ms), "
                 f"{pairs_done:,} pairs, {throughput:,.0f} pairs/s{speedup_str}"
             )
 
-        if args.validate and "nvmolkit" in results and "rdkit" in results:
-            print("\nValidation:")
-            rdkit_pairs_done = results["rdkit"][3]
+        validation_key = None
+        if rdkit_variants:
             pairs_total = len(mols) * len(queries)
-            if rdkit_pairs_done < pairs_total:
+            for variant_key, _mode, _threads in rdkit_variants:
+                if results[variant_key][3] >= pairs_total:
+                    validation_key = variant_key
+                    break
+
+        if args.validate and "nvmolkit" in results and rdkit_variants:
+            print("\nValidation:")
+            pairs_total = len(mols) * len(queries)
+            if validation_key is None:
                 print(
-                    f"  Skipping validation: RDKit hit max_seconds budget after "
-                    f"{rdkit_pairs_done}/{pairs_total} pairs and the partial-result "
-                    "indices differ between substructlib (per-query) and raw (per-mol)."
+                    f"  Skipping validation: every RDKit variant hit max_seconds budget before "
+                    f"{pairs_total} pairs and the partial-result indices differ between "
+                    "substructlib (per-query) and raw (per-mol)."
                 )
             else:
+                print(f"  Validating against {validation_key}")
                 nvmolkit_data = results["nvmolkit"][2]
-                rdkit_data = results["rdkit"][2]
+                rdkit_data = results[validation_key][2]
                 if mode == "hasSubstructMatch":
                     matches = 0
                     total = 0
@@ -799,22 +830,23 @@ def main():
         else:
             config_source = "cli"
 
-        rdkit_throughput = 0.0
-        if "rdkit" in results:
-            rdkit_avg_ms = results["rdkit"][0]
-            rdkit_pairs_done = results["rdkit"][3]
-            rdkit_throughput = (rdkit_pairs_done * 1000.0 / rdkit_avg_ms) if rdkit_avg_ms > 0 else 0.0
+        rdkit_variant_meta = {key: (mode, threads) for key, mode, threads in rdkit_variants}
+        baseline_throughput = baseline[2] if baseline else 0.0
 
         for name, (avg_ms, std_ms, _, pairs_done) in results.items():
+            is_rdkit = name in rdkit_variant_meta
             batch_size = applied_batch_size if name == "nvmolkit" else "N/A"
             workers = applied_workers if name == "nvmolkit" else "N/A"
             prep_threads = applied_prep_threads if name == "nvmolkit" else "N/A"
             num_gpus = applied_num_gpus if name == "nvmolkit" else config_row["num_gpus"]
             nvmolkit_config_source = config_source if name == "nvmolkit" else "N/A"
-            rdkit_threads = args.rdkit_threads if name == "rdkit" else "N/A"
-            rdkit_match_mode = args.rdkit_match_mode if name == "rdkit" else "N/A"
+            if is_rdkit:
+                rdkit_match_mode, rdkit_threads = rdkit_variant_meta[name]
+            else:
+                rdkit_match_mode = "N/A"
+                rdkit_threads = "N/A"
             throughput = (pairs_done * 1000.0 / avg_ms) if avg_ms > 0 else 0.0
-            vs_rdkit = (throughput / rdkit_throughput) if (name != "rdkit" and rdkit_throughput > 0) else "N/A"
+            vs_rdkit = (throughput / baseline_throughput) if (not is_rdkit and baseline_throughput > 0) else "N/A"
             csv_rows.append(
                 (
                     name,

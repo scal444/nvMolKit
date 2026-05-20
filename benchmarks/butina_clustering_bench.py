@@ -230,7 +230,7 @@ if __name__ == "__main__":
         rdkit_fps = None
 
     output_path = args.output
-    cutoffs = [args.cutoff] if args.cutoff is not None else [1e-10, 0.1, 0.2, 0.35, 1.1]
+    cutoffs = [args.cutoff] if args.cutoff is not None else [1e-10, 0.1, 0.2, 0.35, 1.0]
     default_nl_sizes = [8, 16, 32, 64, 128]
     results = []
 
@@ -280,7 +280,7 @@ if __name__ == "__main__":
 
             for cutoff in cutoffs:
                 # Don't run large sizes for edge cases.
-                if cutoff in (1e-10, 1.1) and size > 20000:
+                if cutoff in (1e-10, 1.0) and size > 20000:
                     continue
 
                 rdkit_co_time, rdkit_co_std = float("nan"), float("nan")

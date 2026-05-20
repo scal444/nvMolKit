@@ -691,7 +691,7 @@ for row in "${SUBSTRUCT_ROWS[@]}"; do
     --mode "$mode" \
     --num_gpus "$NUM_GPUS" \
     --rdkit_threads "$RDKIT_THREADS" \
-    --rdkit_match_mode substructlib \
+    --rdkit_match_mode raw substructlib \
     --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
     "${SUBSTRUCT_AUTOTUNE_FLAGS[@]}" \
     "${substruct_save_flags[@]}" \
