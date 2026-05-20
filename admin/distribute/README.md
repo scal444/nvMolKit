@@ -13,9 +13,11 @@ End-to-end, each release produces two distinct artifact streams:
 2. **Variant index** — every wheel in `rdkit_build_matrix.yaml` rebuilt against
    its target RDKit version, retagged with a PEP 440 local segment
    (`+rdkit<X.Y.Z>`), and exposed via a PEP 503 simple index. The wheel files
-   themselves live as GitHub Release assets on the
-   [`nvmolkit-wheels`](https://github.com/NVIDIA-Digital-Bio/nvmolkit-wheels)
-   repo; the index pages are served from its GitHub Pages site.
+   themselves live as GitHub Release assets on the main
+   [`nvmolkit`](https://github.com/NVIDIA-Digital-Bio/nvmolkit) repo's per-version
+   release (e.g. `v0.5.0`); the index pages are served from the same repo's
+   GitHub Pages site under `wheels/`, alongside the Sphinx docs tree on the
+   `github_pages_host` branch.
 
 PyPI rejects local-version segments, so the same wheel cannot satisfy both
 streams. The canonical PyPI wheel is the unmodified build output; the variant
@@ -102,97 +104,84 @@ at after step 6.
 
 ```bash
 VERSION=0.5.0
-RELEASE_URL=https://github.com/NVIDIA-Digital-Bio/nvmolkit-wheels/releases/download/v${VERSION}
+RELEASE_URL=https://github.com/NVIDIA-Digital-Bio/nvmolkit/releases/download/v${VERSION}
 ./admin/distribute/generate_simple_index.sh \
     wheelhouse/variants \
     /tmp/nvmolkit-wheels-pages \
     "${RELEASE_URL}"
 ```
 
-## 6. Upload variant wheels to GitHub Releases
+## 6. Upload variant wheels to the main repo's GitHub Release
 
-Create the release on `nvmolkit-wheels` and attach every retagged wheel as an
-asset. PEP 440 `+` characters survive in filenames; `gh` URL-encodes them.
+Attach every retagged wheel as an asset on the existing `v${VERSION}` release
+on `NVIDIA-Digital-Bio/nvmolkit`. PEP 440 `+` characters survive in filenames;
+`gh` URL-encodes them. `--clobber` lets the upload loop be re-run safely if a
+name collides.
 
 ```bash
 VERSION=0.5.0
-gh release create "v${VERSION}" \
-    --repo NVIDIA-Digital-Bio/nvmolkit-wheels \
-    --title "nvmolkit ${VERSION} (variant wheels)" \
-    --notes "RDKit-pinned variant wheels for nvmolkit ${VERSION}. See https://nvidia-digital-bio.github.io/nvmolkit-wheels/ for install instructions."
-
 find wheelhouse/variants -name '*.whl' -print0 |
     xargs -0 -P 8 -n 1 gh release upload "v${VERSION}" \
-        --repo NVIDIA-Digital-Bio/nvmolkit-wheels --clobber
+        --repo NVIDIA-Digital-Bio/nvmolkit --clobber
 ```
+
+If the release does not yet exist, create it with `gh release create
+v${VERSION} --repo NVIDIA-Digital-Bio/nvmolkit ...` first. Uploading assets to
+an existing non-draft release does not change its tag, title, or notes.
 
 Verify the upload count matches the file count before publishing the index:
 
 ```bash
 expected=$(find wheelhouse/variants -name '*.whl' | wc -l)
-uploaded=$(gh release view "v${VERSION}" --repo NVIDIA-Digital-Bio/nvmolkit-wheels --json assets --jq '.assets | length')
+uploaded=$(gh release view "v${VERSION}" --repo NVIDIA-Digital-Bio/nvmolkit --json assets --jq '.assets | length')
 test "${expected}" = "${uploaded}"
 ```
 
-The `gh release create` call will fail with "release already exists" on a
-re-run. To re-upload variant wheels into the same `v${VERSION}` release, skip
-the create step and re-run only the upload loop; `--clobber` overwrites
-existing assets in place:
-
-```bash
-find wheelhouse/variants -name '*.whl' -print0 |
-    xargs -0 -P 8 -n 1 gh release upload "v${VERSION}" \
-        --repo NVIDIA-Digital-Bio/nvmolkit-wheels --clobber
-```
-
 Unlike PyPI, GitHub Release assets can be replaced under the same filename,
-so the project version does not need to be bumped to re-cut a release. Note
-that the asset-count check above compares totals only; if the matrix has
-shrunk since the previous upload, stale assets from prior runs can mask a
-missing current wheel. Compare filename sets instead when re-uploading.
+so the project version does not need to be bumped to re-cut a release. The
+asset-count check above compares totals only and will overcount if any
+non-variant assets are also attached to `v${VERSION}` (source tarballs, etc.);
+if the matrix has shrunk since the previous upload, stale assets from prior
+runs can also mask a missing current wheel. Compare filename sets instead
+when re-uploading.
 
 ## 7. Publish the simple-repository indexes
 
-Commit the contents of `/tmp/nvmolkit-wheels-pages/` to the `gh-pages` branch
-of `nvmolkit-wheels` (the repo's GitHub Pages source). The directory layout is
-`rdkit<X.Y.Z>/simple/nvmolkit/index.html`, which makes the per-variant URL
-`https://nvidia-digital-bio.github.io/nvmolkit-wheels/rdkit<X.Y.Z>/simple/`.
+The main `nvmolkit` repo's GitHub Pages site is served from `docs/` on the
+`github_pages_host` branch — the same tree that hosts the Sphinx docs. The
+wheel indexes live in a sibling subdirectory, `docs/wheels/`, so the
+per-variant URL is
+`https://nvidia-digital-bio.github.io/nvmolkit/wheels/rdkit<X.Y.Z>/simple/`.
+The existing `docs/.nojekyll` at the Pages root covers `docs/wheels/`, so
+the `simple/` subdirectories aren't filtered out.
 
-If you don't already have a local clone of `nvmolkit-wheels`, clone it first
-(the `gh-pages` branch is what GitHub Pages serves from):
-
-```bash
-WHEELS_REPO=$(pwd)/nvmolkit-wheels
-git clone --branch gh-pages \
-    https://github.com/NVIDIA-Digital-Bio/nvmolkit-wheels.git \
-    "${WHEELS_REPO}"
-```
-
-Then sync the generated tree in and push:
+Replace the wheel-index tree wholesale on `github_pages_host`:
 
 ```bash
-git -C "${WHEELS_REPO}" fetch origin gh-pages:gh-pages
-git -C "${WHEELS_REPO}" checkout gh-pages
-rsync -a --delete \
-    --exclude '.git' \
-    /tmp/nvmolkit-wheels-pages/ "${WHEELS_REPO}/"
-git -C "${WHEELS_REPO}" checkout gh-pages
-git -C "${WHEELS_REPO}" add -A
-git -C "${WHEELS_REPO}" commit -m "Publish simple index for v${VERSION}"
-git -C "${WHEELS_REPO}" push origin gh-pages
+git fetch origin github_pages_host
+git worktree add /tmp/nvmolkit-pages github_pages_host
+rm -rf /tmp/nvmolkit-pages/docs/wheels
+mkdir -p /tmp/nvmolkit-pages/docs/wheels
+cp -r /tmp/nvmolkit-wheels-pages/. /tmp/nvmolkit-pages/docs/wheels/
+git -C /tmp/nvmolkit-pages add docs/wheels
+git -C /tmp/nvmolkit-pages commit -m "Publish v${VERSION} variant wheel indexes"
+git -C /tmp/nvmolkit-pages push origin github_pages_host
+git worktree remove /tmp/nvmolkit-pages
 ```
 
-The `--exclude '.git'` keeps `rsync --delete` from wiping the clone's own
-`.git` directory.
+Re-running steps 5–7 against the same `v${VERSION}` is safe: the hashes in
+`index.html` change whenever wheels in step 6 are re-uploaded, so steps 6 and
+7 should be re-run as a pair.
 
-A `.nojekyll` file at the root of the published tree prevents GitHub Pages
-from filtering out the `simple/` directories.
+**Docs refresh interaction.** Sphinx doc updates on `github_pages_host`
+replace the contents of `docs/` with a fresh build. The refresh must preserve
+`docs/wheels/`, e.g. with
 
-The same commands re-publish on a re-upload: regenerate
-`/tmp/nvmolkit-wheels-pages/` (step 5) against the same `RELEASE_URL` and
-re-run the block above (the commit message is the only thing worth changing).
-The hashes in `index.html` change whenever wheels in step 6 are re-uploaded,
-so steps 6 and 7 should be re-run as a pair.
+```bash
+rsync -a --delete --exclude='wheels/' <sphinx-build>/ docs/
+```
+
+otherwise the next docs commit will silently drop the wheel indexes.
 
 ## 8. Upload the canonical wheel set to PyPI
 

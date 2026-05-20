@@ -11,8 +11,8 @@
 # Example:
 #   generate_simple_index.sh \
 #       wheelhouse/variants \
-#       /tmp/nvmolkit-wheels \
-#       https://github.com/nvidia-digital-bio/nvmolkit-wheels/releases/download/v0.5.0
+#       /tmp/nvmolkit-wheels-pages \
+#       https://github.com/NVIDIA-Digital-Bio/nvmolkit/releases/download/v0.5.0
 
 set -euo pipefail
 
