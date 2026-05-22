@@ -3,6 +3,10 @@
 ## Documentation
 Please see the official [NVIDIA nvMolKit Documentation](https://nvidia-digital-bio.github.io/nvMolKit/) for an overview of features, examples, and a detailed API reference.
 
+## Cursor / agent skill
+
+If you use [Cursor](https://cursor.com/) (or another agent that supports the `SKILL.md` format) to write code that calls nvMolKit, you can copy [`agent-skills/nvmolkit-usage/`](agent-skills/nvmolkit-usage/) into your project's `.cursor/skills/` (or `~/.cursor/skills/` for personal use). It gives the agent the public Python entry-point map, runtime requirements, and runnable recipes.
+
 ## Installation Guide
 
 **IMPORTANT**: nvMolKit requires an NVIDIA GPU with compute capability 7.0 (V100) or higher to run. Check your GPU's compute capability [here](https://developer.nvidia.com/cuda-gpus).
@@ -14,7 +18,7 @@ Conda is the recommended way to install nvMolKit, matching the recommended distr
 you have a variant of conda installed and activated, such as [Miniconda](https://docs.conda.io/en/latest/miniconda.html) 
 or [Miniforge](https://conda-forge.org/download/).
 
-nvMolKit v0.2.0 supports RDKit 2024.09.6 and 2025.03.1. To install:
+nvMolKit v0.5.0 supports RDKit 2025.03.1 through 2026.03.1. To install:
 
 ```bash
 conda install -c conda-forge nvmolkit
@@ -31,6 +35,34 @@ Choose a `cuda-version` that is **≤** the CUDA version reported by `nvidia-smi
 has a matching PyTorch build on conda-forge. See the
 [available PyTorch builds](https://anaconda.org/channels/conda-forge/packages/pytorch/files?file_q=cuda)
 to find supported CUDA versions.
+
+### Pip Installation
+
+```bash
+pip install nvmolkit
+```
+
+The wheel published to PyPI is built against a single RDKit release per
+nvMolKit version (RDKit 2026.03.1 for nvMolKit v0.5.0), due to versioning
+limitations in PyPI's dependency management system.
+
+Use this path if you do not have a constraint on which RDKit version to use;
+pip will pull a compatible RDKit from PyPI alongside nvMolKit.
+
+#### RDKit-pinned variants
+
+For projects that need to use a specific RDKit version, per-variant wheels are hosted on github.
+
+To install nvMolKit pinned to a particular RDKit:
+
+```bash
+RDKIT_VERSION=2025.9.6
+NVMOLKIT_VERSION=0.5.0
+pip install nvmolkit==${NVMOLKIT_VERSION}+rdkit${RDKIT_VERSION} \
+    --extra-index-url https://nvidia-digital-bio.github.io/nvMolKit/wheels/rdkit${RDKIT_VERSION}/simple/
+```
+
+Replace `2025.9.6` with the RDKit version you want. Variants published for nvMolKit v0.5.0 include every version between 2025.03.6 and 2026.03.1.
 
 
 ### Installation from Source
@@ -98,7 +130,7 @@ conda create --name nvmolkit_dev_py312 python=3.12.1
 conda activate nvmolkit_dev_py312
 
 # Install RDKit with development headers
-conda install -c conda-forge rdkit=2024.09.6 rdkit-dev=2024.09.6
+conda install -c conda-forge rdkit=2025.03.6 rdkit-dev=2025.03.6
 
 # Install Boost subpackages in case RDKit install did not include them transitively
 conda install -c conda-forge libboost libboost-python libboost-devel libboost-headers libboost-python-devel

@@ -122,7 +122,15 @@ if(CMAKE_CUDA_ARCHITECTURES STREQUAL "native")
   else()
     message(FATAL_ERROR "Failed to build detect_cuda_arch.cu")
   endif()
-  foreach(cc IN ITEMS 80 86 89 90 100 103 120)
+  foreach(
+    cc IN
+    ITEMS 80
+          86
+          89
+          90
+          100
+          103
+          120)
     if(_native_cc STREQUAL "${cc}")
       target_compile_definitions(nvmolkit_cuda_caps
                                  INTERFACE NVMOLKIT_CUDA_CC_${cc}=1)
@@ -132,7 +140,15 @@ if(CMAKE_CUDA_ARCHITECTURES STREQUAL "native")
     endif()
   endforeach()
 else()
-  foreach(cc IN ITEMS 80 86 89 90 100 103 120)
+  foreach(
+    cc IN
+    ITEMS 80
+          86
+          89
+          90
+          100
+          103
+          120)
     string(REPLACE ";" " " _cuda_arch_str "${CMAKE_CUDA_ARCHITECTURES}")
     string(REGEX MATCH "(^| )${cc}(-real)?( |$)" _match "${_cuda_arch_str}")
     if(_match)
