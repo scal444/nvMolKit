@@ -72,6 +72,9 @@ Usage: $0 <1|8> --output-dir DIR [--data-dir DIR] [--include NAME [NAME ...]] [-
                     Autotune is dropped (it requires nvMolKit) and the
                     GPU-only benches still walk through their RDKit reference
                     implementations. Mutually exclusive with --no-rdkit.
+  --continue        Resume from a previous run in --output-dir: skip every
+                    bench whose row in summary.tsv has status=ok (rows with
+                    status=fail or status=skipped are re-run).
   --list            Print the bench names and exit
 EOF
 }
@@ -157,6 +160,7 @@ DATA_DIR="/data"
 INCLUDE_LIST=()
 SKIP_RDKIT=0
 SKIP_NVMOLKIT=0
+CONTINUE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -193,6 +197,10 @@ while [ $# -gt 0 ]; do
       ;;
     --no-nvmolkit)
       SKIP_NVMOLKIT=1
+      shift
+      ;;
+    --continue)
+      CONTINUE=1
       shift
       ;;
     -h|--help)
@@ -305,6 +313,9 @@ ensure_pip_pkg() {
 }
 ensure_pip_pkg pyperf
 ensure_pip_pkg optuna
+ensure_pip_pkg nvtx
+ensure_pip_pkg pandas
+
 
 # RDKit's ETKDG/FF parallelize across conformers within a single mol, so
 # numThreads is capped in practice by confs_per_mol. confs_per_mol >= 128 keeps
@@ -350,9 +361,13 @@ BUTINA_NUM_MOLS=60000
 # substantial (tens of GB of parsed Mols); only safe on the fat 8-GPU node.
 SUBSTRUCT_NUM_MOLS=10000000
 
-# RDKit thread count for the head-to-head comparison. 1-GPU mode caps at 16
-# (or physical core count, whichever is smaller). 8-GPU mode uses all
-# physical cores on the assumption it's a fat multi-socket node.
+# RDKit thread count for the head-to-head comparison on the multi-GPU benches
+# (etkdg, ff_optimize, substruct). 1-GPU mode caps at 16 (or physical-core
+# count if smaller); 8-GPU mode uses every physical core on the assumption
+# it's a fat multi-socket node.
+#
+# Single-GPU benches (butina, conformer_rmsd, cross_similarity, tfd) compare
+# against single-threaded RDKit and ignore this variable.
 PHYSICAL_CORES="$(lscpu -p=Core,Socket 2>/dev/null | grep -v '^#' | sort -u | wc -l)"
 if [ -z "$PHYSICAL_CORES" ] || [ "$PHYSICAL_CORES" -lt 1 ]; then
   PHYSICAL_CORES=1
@@ -375,10 +390,10 @@ AUTOTUNE_TRIALS=20
 AUTOTUNE_TIME_BUDGET=60
 
 # Cap on the RDKit timed comparison for benches that operate on independent
-# items (etkdg, ff_optimize). Once exceeded, the bench breaks out of the
-# per-mol loop and reports throughput on the molecules actually processed.
-# Substruct, butina, conformer_rmsd, cross_similarity all run whole-batch
-# operations that aren't cleanly cuttable, so they ignore this cap.
+# items (etkdg, ff_optimize, conformer_rmsd). Once exceeded, the bench breaks
+# out of the per-mol loop and reports throughput on the molecules actually
+# processed. Butina and cross_similarity run whole-batch operations that
+# aren't cleanly cuttable, so they ignore this cap.
 RDKIT_MAX_SECONDS=300
 
 SYSINFO_DIR="$OUTPUT_DIR/sysinfo"
@@ -423,7 +438,32 @@ python -c "import torch; print('torch:', torch.__version__); print('cuda:', torc
 pip freeze > "$SYSINFO_DIR/pip_freeze.txt" 2>&1 || true
 
 SUMMARY="$OUTPUT_DIR/summary.tsv"
-printf "benchmark\tstatus\texit_code\tduration_s\tlog\tresult\n" > "$SUMMARY"
+COMPLETED_BENCHES=""
+if [ "$CONTINUE" = "1" ] && [ -f "$SUMMARY" ]; then
+  COMPLETED_BENCHES="$(awk -F'\t' 'NR>1 && $2=="ok" {print $1}' "$SUMMARY")"
+  if [ -n "$COMPLETED_BENCHES" ]; then
+    echo "[--continue] resuming from $SUMMARY; skipping previously-ok benches:"
+    printf '  %s\n' $COMPLETED_BENCHES
+  else
+    echo "[--continue] $SUMMARY has no ok rows; running everything"
+  fi
+else
+  if [ "$CONTINUE" = "1" ]; then
+    echo "[--continue] no prior $SUMMARY found; running everything"
+  fi
+  printf "benchmark\tstatus\texit_code\tduration_s\tlog\tresult\n" > "$SUMMARY"
+fi
+
+is_completed() {
+  local name="$1"
+  local entry
+  for entry in $COMPLETED_BENCHES; do
+    if [ "$entry" = "$name" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
 
 # Run one bench unconditionally and append its result to $SUMMARY. Used directly
 # for size-scan bins (parent scan does its own --include check) and via
@@ -434,7 +474,12 @@ run_bench_inner() {
   shift 2
   local log_path="$LOG_DIR/${name}.log"
 
-  echo "=========================================="
+  if is_completed "$name"; then
+    echo "[$name] skipped (--continue: already ok in $SUMMARY)"
+    return 0
+  fi
+
+  echo "==========================================" 
   echo "[$(date -Iseconds)] Running $name"
   echo "  cmd: $*"
   echo "  log: $log_path"
@@ -567,8 +612,13 @@ run_bench "butina_clustering" \
   "${BUTINA_MODE_FLAGS[@]}"
 
 run_bench "conformer_rmsd" \
-  "$LOG_DIR/conformer_rmsd.log" \
+  "$RESULT_DIR/conformer_rmsd.csv" \
   python "$SCRIPT_DIR/conformer_rmsd_bench.py" \
+  --smiles "$ENAMINE_CXSMILES" \
+  --num_mols 2000 \
+  --confs_per_mol 10 25 50 100 200 \
+  --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
+  --output "$RESULT_DIR/conformer_rmsd.csv" \
   "${CONFORMER_RMSD_MODE_FLAGS[@]}"
 
 run_bench "cross_similarity" \
