@@ -59,11 +59,10 @@ OPTUNA_AVAILABLE = nv_autotune.is_available()
 
 
 def _is_ff_typable(args_tuple: tuple[bytes, str]) -> bool:
-    """Return True iff the force field can construct on the embedded molecule.
+    """Return True iff RDKit can build the ``ff`` force field for the mol's first conformer.
 
-    Builds the MMFF/UFF force field for the first conformer of the mol. If
-    any atom is missing parameters, RDKit returns ``None`` and the mol is
-    rejected. The mol payload must already carry at least one conformer.
+    RDKit returns ``None`` when an atom lacks parameters; such mols return False.
+    Expects the mol to already carry a conformer.
     """
     mol_bytes, ff = args_tuple
     mol = Chem.Mol(mol_bytes)
@@ -85,12 +84,11 @@ def _is_ff_typable(args_tuple: tuple[bytes, str]) -> bool:
 
 
 def _filter_ff_typable(mols: list[Chem.Mol], ff: str, num_threads: int = 1) -> list[Chem.Mol]:
-    """Drop molecules whose force-field parameters can't be constructed.
+    """Drop molecules whose ``ff`` parameters can't be constructed.
 
-    Required because nvmolkit's batched FF APIs raise on the whole batch when
-    any single mol has missing parameters; the per-mol filter here lets the
-    benchmark proceed on the remainder. Operates on mols that already carry a
-    conformer (call this after embedding).
+    nvmolkit's batched FF APIs raise on the whole batch if any single mol has
+    missing parameters, so untypable mols must be removed before batching.
+    Expects mols that already carry a conformer.
     """
     if not mols:
         return []
