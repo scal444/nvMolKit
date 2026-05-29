@@ -53,8 +53,61 @@ from nvmolkit import autotune as nv_autotune
 from nvmolkit.types import HardwareOptions
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdDistGeom
+from tqdm.contrib.concurrent import process_map
 
 OPTUNA_AVAILABLE = nv_autotune.is_available()
+
+
+def _is_ff_typable(args_tuple: tuple[bytes, str]) -> bool:
+    """Return True iff the force field can construct on the embedded molecule.
+
+    Builds the MMFF/UFF force field for the first conformer of the mol. If
+    any atom is missing parameters, RDKit returns ``None`` and the mol is
+    rejected. The mol payload must already carry at least one conformer.
+    """
+    mol_bytes, ff = args_tuple
+    mol = Chem.Mol(mol_bytes)
+    if mol.GetNumConformers() == 0:
+        return False
+    try:
+        if ff == "mmff":
+            props = AllChem.MMFFGetMoleculeProperties(mol, mmffVariant="MMFF94")
+            if props is None:
+                return False
+            force_field = AllChem.MMFFGetMoleculeForceField(mol, props, confId=mol.GetConformer().GetId())
+        elif ff == "uff":
+            force_field = AllChem.UFFGetMoleculeForceField(mol, confId=mol.GetConformer().GetId())
+        else:
+            raise ValueError(f"Unknown ff: {ff!r}")
+    except Exception:
+        return False
+    return force_field is not None
+
+
+def _filter_ff_typable(mols: list[Chem.Mol], ff: str, num_threads: int = 1) -> list[Chem.Mol]:
+    """Drop molecules whose force-field parameters can't be constructed.
+
+    Required because nvmolkit's batched FF APIs raise on the whole batch when
+    any single mol has missing parameters; the per-mol filter here lets the
+    benchmark proceed on the remainder. Operates on mols that already carry a
+    conformer (call this after embedding).
+    """
+    if not mols:
+        return []
+    workers = max(1, num_threads)
+    binaries = [(mol.ToBinary(), ff) for mol in mols]
+    keep_mask = process_map(
+        _is_ff_typable,
+        binaries,
+        max_workers=workers,
+        chunksize=max(1, len(binaries) // (workers * 8) or 1),
+        desc=f"Filtering {ff.upper()}-untypable molecules",
+    )
+    kept = [mol for mol, keep in zip(mols, keep_mask) if keep]
+    dropped = len(mols) - len(kept)
+    if dropped > 0:
+        print(f"  Dropped {dropped} molecules lacking {ff.upper()} parameters")
+    return kept
 
 
 def _flatten_energies(per_mol: list[list[float]]) -> list[float]:
@@ -403,6 +456,13 @@ def main() -> None:
     if not mols:
         print("Error: No molecules retained after embedding")
         sys.exit(1)
+
+    print(f"\nFiltering molecules without {args.ff.upper()} parameters...")
+    mols = _filter_ff_typable(mols, args.ff, num_threads=args.rdkit_threads)
+    if not mols:
+        print(f"Error: No molecules retained after {args.ff.upper()} typability filter")
+        sys.exit(1)
+
     total_confs = sum(m.GetNumConformers() for m in mols)
     print(f"  {len(mols)} molecules with {total_confs} conformers ready")
 
