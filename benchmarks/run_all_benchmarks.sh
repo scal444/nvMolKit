@@ -492,7 +492,6 @@ run_bench_inner() {
   # log reflects what the bench is actually doing, not a stale 8 KB block.
   ( cd "$SCRIPT_DIR" && PYTHONUNBUFFERED=1 "$@" ) > "$log_path" 2>&1
   code=$?
-  set -e
   end_s=$(date +%s)
   duration=$((end_s - start_s))
   if [ "$code" -eq 0 ]; then
@@ -521,9 +520,7 @@ run_bench() {
 # Default (head-to-head): both implementations run; validation is opt-in.
 # --no-rdkit: skip every RDKit timing (and validation, which diffs vs RDKit).
 # --no-nvmolkit: RDKit-only mode. Skip every nvMolKit timing AND drop
-#   autotune (which requires nvMolKit). Butina additionally needs
-#   --include-tanimoto-matrix in this mode because its rdkit-with-dist-mat
-#   path normally builds the dist matrix on the GPU.
+#   autotune (which requires nvMolKit).
 #
 # Validation is currently disabled even when RDKit is on: the per-conformer
 # MMFF energy reconstruction in etkdg/ff/substruct is single-threaded and
