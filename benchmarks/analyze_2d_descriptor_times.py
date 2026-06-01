@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 #!/usr/bin/env python
 """Analyze per-descriptor timings produced by time_2d_descriptors.py.
 
@@ -38,7 +53,7 @@ def section_label(module):
     if not module:
         return "(unknown)"
     prefix = "rdkit.Chem."
-    return module[len(prefix):] if module.startswith(prefix) else module
+    return module[len(prefix) :] if module.startswith(prefix) else module
 
 
 def load_rows(path):
@@ -100,9 +115,7 @@ def main():
     print()
 
     by_section = summarize_sections(rows)
-    section_rows = sorted(
-        by_section.items(), key=lambda item: item[1]["total_seconds"], reverse=True
-    )
+    section_rows = sorted(by_section.items(), key=lambda item: item[1]["total_seconds"], reverse=True)
 
     print("=== Runtime by subsection ===")
     table = []
@@ -164,9 +177,7 @@ def main():
     if args.section_output:
         with open(args.section_output, "w", newline="") as handle:
             writer = csv.writer(handle)
-            writer.writerow(
-                ["section", "num_descriptors", "total_seconds", "share_percent", "ms_per_mol", "errors"]
-            )
+            writer.writerow(["section", "num_descriptors", "total_seconds", "share_percent", "ms_per_mol", "errors"])
             for section, stats in section_rows:
                 share = (stats["total_seconds"] / grand_total * 100) if grand_total else 0.0
                 per_mol_ms = (stats["total_seconds"] / processed * 1e3) if processed else 0.0

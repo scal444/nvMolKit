@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 #!/usr/bin/env python
 """Line-level profile of RDKit's QED computation.
 
@@ -50,13 +65,11 @@ def properties(mol):
     cost of every step separately.
     """
     if mol is None:
-        raise ValueError('You need to provide a mol argument.')
+        raise ValueError("You need to provide a mol argument.")
     mol = Chem.RemoveHs(mol)
     molecular_weight = rdmd._CalcMolWt(mol)
     alogp = Crippen.MolLogP(mol)
-    hba = sum(
-        len(mol.GetSubstructMatches(pattern)) for pattern in Acceptors
-        if mol.HasSubstructMatch(pattern))
+    hba = sum(len(mol.GetSubstructMatches(pattern)) for pattern in Acceptors if mol.HasSubstructMatch(pattern))
     hbd = rdmd.CalcNumHBD(mol)
     psa = MolSurf.TPSA(mol)
     rotatable_bonds = rdmd.CalcNumRotatableBonds(mol, rdmd.NumRotatableBondsOptions.Strict)
