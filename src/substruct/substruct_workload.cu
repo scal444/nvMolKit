@@ -13,17 +13,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "substruct_workload.h"
+#include "src/substruct/substruct_workload.h"
 
 #include <array>
 
-#include "cuda_error_check.h"
-#include "molecules_device.cuh"
-#include "nvtx.h"
-#include "recursive_preprocessor.h"
-#include "substruct_kernels.h"
-#include "substruct_search_internal.h"
-#include "thread_worker_context.h"
+#include "src/substruct/molecules_device.cuh"
+#include "src/substruct/recursive_preprocessor.h"
+#include "src/substruct/substruct_kernels.h"
+#include "src/substruct/substruct_search_internal.h"
+#include "src/substruct/thread_worker_context.h"
+#include "src/utils/cuda_error_check.h"
+#include "src/utils/nvtx.h"
 
 namespace nvMolKit {
 

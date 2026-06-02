@@ -16,24 +16,30 @@
 #ifndef NVMOLKIT_UFF_WORKLOAD_H
 #define NVMOLKIT_UFF_WORKLOAD_H
 
+#include <GraphMol/ROMol.h>
+
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <utility>
 #include <vector>
 
-#include "bfgs_common.h"
-#include "bfgs_minimize.h"
-#include "bfgs_types.h"
-#include "conformer_info.h"
-#include "device.h"
-#include "forcefield_constraints.h"
-#include "pipeline.h"
-#include "uff.h"
-#include "uff_batched_forcefield.h"
-
-namespace RDKit {
-class ROMol;
-}  // namespace RDKit
+#include "rdkit_extensions/uff_flattened_builder.h"
+#include "src/conformer/conformer_info.h"
+#include "src/conformer/device_coord_collector.h"
+#include "src/conformer/device_coord_result.h"
+#include "src/conformer/ff_device_collect.h"
+#include "src/forcefields/ff_utils.h"
+#include "src/forcefields/forcefield_constraints.h"
+#include "src/forcefields/uff.h"
+#include "src/forcefields/uff_batched_forcefield.h"
+#include "src/gpu_scheduler/pipeline.h"
+#include "src/minimizer/bfgs_common.h"
+#include "src/minimizer/bfgs_minimize.h"
+#include "src/minimizer/bfgs_types.h"
+#include "src/utils/device.h"
+#include "src/utils/nvtx.h"
 
 namespace nvMolKit::UFF {
 
@@ -56,7 +62,18 @@ struct UffInputs {
   /// Number of conformers per pipeline mini-batch.
   int batchSize = 0;
 
-  // Result sinks (mutex-protected).
+  /// See MmffInputs for the equivalent device-input / device-output fields;
+  /// UFF mirrors MMFF here, with no per-batch backend selection (UFF always
+  /// uses the BATCHED kernels).
+  CoordinateOutput                            output           = CoordinateOutput::RDKIT_CONFORMERS;
+  const DeviceCoordResult*                    deviceInput      = nullptr;
+  const detail::DeviceInputIndex*             deviceInputIndex = nullptr;
+  std::vector<detail::DeviceCoordCollector>*  deviceCollectors = nullptr;
+  /// See MmffInputs::runnerStreams. Same lifetime rules apply.
+  std::vector<std::unique_ptr<ScopedStream>>* runnerStreams = nullptr;
+  std::atomic<int>                            nextRunnerIdx{0};
+
+  // RDKIT_CONFORMERS-mode result sinks (mutex-protected).
   std::vector<std::vector<double>>* moleculeEnergies  = nullptr;
   std::vector<std::vector<int8_t>>* moleculeConverged = nullptr;
   std::mutex*                       outputMutex       = nullptr;
@@ -65,17 +82,22 @@ struct UffInputs {
 /**
  * @brief One UFF mini-batch: a contiguous slice of the flattened
  * conformer list plus the host-side batched system built for it.
- *
- * Built in preprocess and consumed in dispatchAndCopyBack.
  */
 struct UffBatch {
-  std::vector<ConformerInfo>    conformers;
-  std::vector<std::uint32_t>    conformerAtomStarts;
-  BatchedMolecularSystemHost    systemHost;
-  BatchedForcefieldMetadata     metadata;
+  std::vector<ConformerInfo> conformers;
+  std::vector<std::uint32_t> conformerAtomStarts;
+  BatchedMolecularSystemHost systemHost;
+  BatchedForcefieldMetadata  metadata;
   /// Per-conformer BFGS convergence statuses, populated by dispatch (queued
-  /// async D2H on the slot stream) and consumed by postprocess.
-  std::vector<int16_t>          statusesHost;
+  /// async D2H on the slot stream) and consumed by postprocess. Empty in
+  /// DEVICE output mode (the device-side collector reads statuses directly).
+  std::vector<int16_t> statusesHost;
+
+  /// Per-batch precomputed source-conformer indices and atom counts used for
+  /// device-input broadcasting; populated in preprocess only when
+  /// `Inputs.deviceInput != nullptr`.
+  std::vector<int> batchSrcIndices;
+  std::vector<int> batchAtomCounts;
 };
 
 /**
@@ -109,23 +131,71 @@ struct UffPerGpu {
  * shared outputMutex.
  */
 struct UffWorkload {
-  using Inputs               = UffInputs;
-  using PreparedBatch        = UffBatch;
-  using PerGpuState          = UffPerGpu;
-  using GpuSlotState         = UffSlot;
+  using Inputs        = UffInputs;
+  using PreparedBatch = UffBatch;
+  using PerGpuState   = UffPerGpu;
+  using GpuSlotState  = UffSlot;
   /// No per-thread preproc state needed.
   struct PreprocThreadContext {};
-  /// No per-thread runner state needed.
-  struct RunnerThreadContext {};
+  /// Per-runner-thread context. In DEVICE output mode, `collectorIdx` holds
+  /// the runner's exclusive slot into `Inputs.deviceCollectors`, claimed in
+  /// `makeRunnerCtx` via `Inputs.nextRunnerIdx`.
+  struct RunnerThreadContext {
+    int collectorIdx = -1;
+  };
 
   static int totalUnits(Inputs& inputs);
   static int unitsPerPreprocBatch(Inputs& inputs);
 
+  static RunnerThreadContext makeRunnerCtx(Inputs& inputs);
+
+  /// `preprocess` is the one trait method that has to be defined in the
+  /// header: the pipeline instantiates it per-runner with a caller-supplied
+  /// `PushFn` (a lambda type) that the pipeline owns.
   template <class PushFn>
-  static void preprocess(Inputs&                   inputs,
-                         gpu_scheduler::IndexRange range,
-                         PreprocThreadContext& /*ctx*/,
-                         PushFn pushBatch);
+  static void preprocess(Inputs& inputs, gpu_scheduler::IndexRange range, PreprocThreadContext&, PushFn pushBatch) {
+    ScopedNvtxRange preprocRange("UffWorkload::preprocess");
+
+    auto batch = std::make_unique<UffBatch>();
+    batch->conformers.assign(inputs.allConformers->begin() + range.start,
+                             inputs.allConformers->begin() + range.end);
+
+    std::uint32_t       currentAtomOffset = 0;
+    std::vector<double> pos;
+
+    for (const auto& confInfo : batch->conformers) {
+      const std::uint32_t numAtoms = confInfo.mol->getNumAtoms();
+      batch->conformerAtomStarts.push_back(currentAtomOffset);
+      currentAtomOffset += numAtoms;
+
+      confPosToVect(*confInfo.conformer, pos);
+      auto ffParams = constructForcefieldContribs(*confInfo.mol,
+                                                  (*inputs.vdwThresholds)[confInfo.molIdx],
+                                                  confInfo.conformerId,
+                                                  (*inputs.ignoreInterfragInteractions)[confInfo.molIdx]);
+      if (!inputs.constraints->empty()) {
+        (*inputs.constraints)[confInfo.molIdx].applyTo(ffParams, pos);
+      }
+      addMoleculeToBatch(ffParams,
+                         pos,
+                         batch->systemHost,
+                         batch->metadata,
+                         confInfo.molIdx,
+                         static_cast<int>(confInfo.confIdx));
+    }
+
+    if (inputs.deviceInput != nullptr) {
+      batch->batchSrcIndices.reserve(batch->conformers.size());
+      batch->batchAtomCounts.reserve(batch->conformers.size());
+      for (size_t k = 0; k < batch->conformers.size(); ++k) {
+        const size_t srcSlot = static_cast<size_t>(range.start) + k;
+        batch->batchSrcIndices.push_back(inputs.deviceInputIndex->conformerIndexBy[srcSlot]);
+        batch->batchAtomCounts.push_back(static_cast<int>(batch->conformers[k].mol->getNumAtoms()));
+      }
+    }
+
+    pushBatch(std::move(batch));
+  }
 
   static std::unique_ptr<PerGpuState>  makePerGpuState(Inputs& inputs, int gpuId);
   static std::unique_ptr<GpuSlotState> makeSlotState(Inputs& inputs, PerGpuState& pgs, int gpuId);
@@ -136,14 +206,9 @@ struct UffWorkload {
                                   Inputs&              inputs,
                                   RunnerThreadContext& ctx);
 
-  static void postprocess(GpuSlotState&        slot,
-                          PreparedBatch&       batch,
-                          Inputs&              inputs,
-                          RunnerThreadContext& ctx);
+  static void postprocess(GpuSlotState& slot, PreparedBatch& batch, Inputs& inputs, RunnerThreadContext& ctx);
 };
 
 }  // namespace nvMolKit::UFF
-
-#include "uff_workload_inl.h"
 
 #endif  // NVMOLKIT_UFF_WORKLOAD_H

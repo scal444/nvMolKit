@@ -16,17 +16,19 @@
 #ifndef NVMOLKIT_MORGAN_WORKLOAD_H
 #define NVMOLKIT_MORGAN_WORKLOAD_H
 
+#include <GraphMol/ROMol.h>
+
+#include <algorithm>
 #include <memory>
+#include <utility>
 #include <vector>
 
-#include "cpu_fallback_queue.h"
-#include "device.h"
-#include "morgan_fingerprint_kernels.h"
-#include "pipeline.h"
-
-namespace RDKit {
-class ROMol;
-}  // namespace RDKit
+#include "src/gpu_scheduler/cpu_fallback_queue.h"
+#include "src/gpu_scheduler/pipeline.h"
+#include "src/morgan_fingerprint_common.h"
+#include "src/morgan_fingerprint_kernels.h"
+#include "src/utils/device.h"
+#include "src/utils/nvtx.h"
 
 namespace nvMolKit {
 
@@ -40,6 +42,19 @@ enum class MorganBucket : int {
   kAtoms64  = 1,
   kAtoms128 = 2,
 };
+
+namespace detail {
+
+/**
+ * @brief Map a flat unit index to a (bucket, sliceIndex) pair.
+ *
+ * Units are laid out as [32-bucket batches][64-bucket batches][128-bucket batches].
+ */
+std::pair<MorganBucket, int> unitToBucketSlice(int unitIdx, int numBatches32, int numBatches64, int numBatches128);
+
+int bucketAtomCapacity(MorganBucket bucket);
+
+}  // namespace detail
 
 /**
  * @brief Inputs shared across all Morgan workload threads.
@@ -86,7 +101,7 @@ template <int fpSize> struct MorganInputs {
  * provides the device-side scratch (`MorganGPUBuffersBatch`).
  */
 struct MorganBatch {
-  MorganBucket bucket          = MorganBucket::kAtoms32;
+  MorganBucket bucket = MorganBucket::kAtoms32;
   /// Number of real mols. Host arrays are padded to dispatchChunkSize so the
   /// device-side spans line up with what the kernel expects, but only the
   /// first `scopedChunkSize` slots carry meaningful data.
@@ -157,29 +172,98 @@ struct MorganRunnerCtx {
  *     opportunistically here.
  */
 template <int fpSize> struct MorganWorkload {
-  using Inputs               = MorganInputs<fpSize>;
-  using PreparedBatch        = MorganBatch;
-  using PerGpuState          = MorganPerGpu;
-  using GpuSlotState         = MorganSlot;
+  using Inputs        = MorganInputs<fpSize>;
+  using PreparedBatch = MorganBatch;
+  using PerGpuState   = MorganPerGpu;
+  using GpuSlotState  = MorganSlot;
   /// No per-thread preproc state; preprocess only consumes inputs and
   /// produces batches. The empty type keeps the pipeline contract uniform.
   struct PreprocThreadContext {};
   using RunnerThreadContext = MorganRunnerCtx;
 
-  static int totalUnits(Inputs& inputs) {
-    return inputs.numMiniBatches32 + inputs.numMiniBatches64 + inputs.numMiniBatches128;
-  }
-
-  /// One unit per mini-batch.
-  static int unitsPerPreprocBatch(Inputs& /*inputs*/) { return 1; }
+  static int totalUnits(Inputs& inputs);
+  static int unitsPerPreprocBatch(Inputs& inputs);
 
   static RunnerThreadContext makeRunnerCtx(Inputs& inputs);
 
+  /// `preprocess` is the one trait method that has to be defined in the
+  /// header: the pipeline instantiates it per-runner with a caller-supplied
+  /// `PushFn` (a lambda type) that the pipeline owns. The non-template
+  /// MorganWorkload<fpSize> methods live in morgan_workload.cu with
+  /// explicit instantiations for the supported fpSize values.
   template <class PushFn>
-  static void preprocess(Inputs&                   inputs,
-                         gpu_scheduler::IndexRange range,
-                         PreprocThreadContext& /*ctx*/,
-                         PushFn pushBatch);
+  static void preprocess(Inputs& inputs, gpu_scheduler::IndexRange range, PreprocThreadContext&, PushFn pushBatch) {
+    ScopedNvtxRange claimRange("MorganWorkload::preprocess");
+
+    for (int unitIdx = range.start; unitIdx < range.end; ++unitIdx) {
+      auto [bucket, sliceIdx] = detail::unitToBucketSlice(unitIdx,
+                                                          inputs.numMiniBatches32,
+                                                          inputs.numMiniBatches64,
+                                                          inputs.numMiniBatches128);
+      const std::vector<int>* bucketWork = nullptr;
+      switch (bucket) {
+        case MorganBucket::kAtoms32:
+          bucketWork = &inputs.work32;
+          break;
+        case MorganBucket::kAtoms64:
+          bucketWork = &inputs.work64;
+          break;
+        case MorganBucket::kAtoms128:
+          bucketWork = &inputs.work128;
+          break;
+      }
+
+      const int chunkSize = inputs.dispatchChunkSize;
+      const int start     = sliceIdx * chunkSize;
+      const int end       = std::min(start + chunkSize, static_cast<int>(bucketWork->size()));
+      if (start >= end) {
+        continue;
+      }
+      const int numMolsInBatch = end - start;
+      const int atomCapacity   = detail::bucketAtomCapacity(bucket);
+      // The kernel reads `nAtomsPerMolArray.size()` to determine the batch
+      // extent and only early-exits on `nAtomsPerMol[i] == 0`. Other device
+      // buffers must therefore be sized to the same dispatchChunkSize so the
+      // span sizes line up. Trailing entries are zeroed and harmless.
+      const int paddedSize = inputs.dispatchChunkSize;
+
+      auto batch             = std::make_unique<MorganBatch>();
+      batch->bucket          = bucket;
+      batch->scopedChunkSize = numMolsInBatch;
+      batch->molIndices.assign(bucketWork->begin() + start, bucketWork->begin() + end);
+      // Pad mol indices to dispatchChunkSize so the H2D copy is uniform with
+      // the other arrays. Trailing slots are unused (nAtoms==0 early-exits).
+      batch->molIndices.resize(static_cast<size_t>(paddedSize), 0);
+
+      batch->atomInvariants.assign(static_cast<size_t>(atomCapacity * paddedSize), 0);
+      batch->bondInvariants.assign(static_cast<size_t>(atomCapacity * paddedSize), 0);
+      batch->bondIndices.assign(static_cast<size_t>(atomCapacity * paddedSize * kMaxBondsPerAtom),
+                                static_cast<std::int16_t>(-1));
+      batch->bondOtherAtomIndices.assign(static_cast<size_t>(atomCapacity * paddedSize * kMaxBondsPerAtom),
+                                         static_cast<std::int16_t>(-1));
+      batch->nAtomsPerMol.assign(static_cast<size_t>(paddedSize), 0);
+
+      std::vector<const RDKit::ROMol*> molsView;
+      molsView.reserve(static_cast<size_t>(numMolsInBatch));
+      for (int j = 0; j < numMolsInBatch; ++j) {
+        const RDKit::ROMol* mol = (*inputs.mols)[batch->molIndices[j]];
+        molsView.push_back(mol);
+        batch->nAtomsPerMol[j] = static_cast<std::int16_t>(mol->getNumAtoms());
+      }
+
+      {
+        ScopedNvtxRange invarsRange("Compute invariants");
+        MorganInvariantsGenerator::ComputeInvariantsInto(molsView,
+                                                         static_cast<size_t>(atomCapacity),
+                                                         batch->atomInvariants.data(),
+                                                         batch->bondInvariants.data(),
+                                                         batch->bondIndices.data(),
+                                                         batch->bondOtherAtomIndices.data());
+      }
+
+      pushBatch(std::move(batch));
+    }
+  }
 
   static std::unique_ptr<PerGpuState>  makePerGpuState(Inputs& inputs, int gpuId);
   static std::unique_ptr<GpuSlotState> makeSlotState(Inputs& inputs, PerGpuState& pgs, int gpuId);
@@ -190,14 +274,9 @@ template <int fpSize> struct MorganWorkload {
                                   Inputs&              inputs,
                                   RunnerThreadContext& ctx);
 
-  static void postprocess(GpuSlotState&        slot,
-                          PreparedBatch&       batch,
-                          Inputs&              inputs,
-                          RunnerThreadContext& ctx);
+  static void postprocess(GpuSlotState& slot, PreparedBatch& batch, Inputs& inputs, RunnerThreadContext& ctx);
 };
 
 }  // namespace nvMolKit
-
-#include "morgan_workload_inl.h"
 
 #endif  // NVMOLKIT_MORGAN_WORKLOAD_H

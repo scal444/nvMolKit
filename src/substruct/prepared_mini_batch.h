@@ -19,10 +19,10 @@
 #include <memory>
 #include <vector>
 
-#include "minibatch_planner.h"
-#include "molecules.h"
-#include "pinned_buffer_pool.h"
-#include "thread_worker_context.h"
+#include "src/substruct/minibatch_planner.h"
+#include "src/substruct/molecules.h"
+#include "src/substruct/pinned_buffer_pool.h"
+#include "src/substruct/thread_worker_context.h"
 
 namespace nvMolKit {
 

@@ -16,24 +16,30 @@
 #ifndef NVMOLKIT_SUBSTRUCT_WORKLOAD_H
 #define NVMOLKIT_SUBSTRUCT_WORKLOAD_H
 
+#include <GraphMol/ROMol.h>
+
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <utility>
 #include <vector>
 
-#include "cpu_fallback_queue.h"
-#include "gpu_executor.h"
-#include "molecules_device.cuh"
-#include "pinned_buffer_pool.h"
-#include "pipeline.h"
-#include "prepared_mini_batch.h"
-#include "recursive_preprocessor.h"
-#include "substruct_results.h"
-#include "substruct_search_internal.h"
-
-namespace RDKit {
-class ROMol;
-}
+#include "src/gpu_scheduler/cpu_fallback_queue.h"
+#include "src/gpu_scheduler/pipeline.h"
+#include "src/substruct/gpu_executor.h"
+#include "src/substruct/minibatch_planner.h"
+#include "src/substruct/molecules.h"
+#include "src/substruct/molecules_device.cuh"
+#include "src/substruct/pinned_buffer_pool.h"
+#include "src/substruct/prepared_mini_batch.h"
+#include "src/substruct/recursive_preprocessor.h"
+#include "src/substruct/substruct_kernels.h"
+#include "src/substruct/substruct_launch_config.h"
+#include "src/substruct/substruct_results.h"
+#include "src/substruct/substruct_search_internal.h"
+#include "src/substruct/thread_worker_context.h"
+#include "src/utils/nvtx.h"
 
 namespace nvMolKit {
 
@@ -136,8 +142,139 @@ struct SubstructWorkload {
 
   static RunnerThreadContext makeRunnerCtx(Inputs& inputs);
 
+  /// `preprocess` is the one trait method that has to live in the header:
+  /// the pipeline instantiates it per-runner with a caller-supplied `PushFn`
+  /// (a lambda type) that the pipeline owns. All other methods are defined
+  /// in substruct_workload.cu.
   template <class PushFn>
-  static void preprocess(Inputs& inputs, gpu_scheduler::IndexRange range, PreprocThreadContext& ctx, PushFn pushBatch);
+  static void preprocess(Inputs& inputs, gpu_scheduler::IndexRange range, PreprocThreadContext& ctx, PushFn pushBatch) {
+    ScopedNvtxRange  claimRange("SubstructWorkload::preprocess");
+    MiniBatchPlanner planner;
+
+    const auto& targets         = *inputs.targets;
+    const auto& queryContext    = *inputs.queryContext;
+    const int   numQueries      = queryContext.numQueries;
+    const auto& leafSubpatterns = inputs.recursivePreprocessor->leafSubpatterns();
+
+    ctx.batchTargets.clear();
+    ctx.batchOriginalIndices.clear();
+    ctx.fallbackEntries.clear();
+    ctx.batchTargets.reserve(static_cast<size_t>(range.size()));
+    ctx.batchOriginalIndices.reserve(static_cast<size_t>(range.size()));
+
+    for (int i = range.start; i < range.end; ++i) {
+      const RDKit::ROMol* target        = targets[i];
+      const unsigned int  atomCount     = target->getNumAtoms();
+      const bool          needsFallback = (atomCount > kMaxTargetAtoms) || requiresRDKitFallback(target);
+      if (needsFallback) {
+        for (int q = 0; q < numQueries; ++q) {
+          ctx.fallbackEntries.push_back({i, q});
+        }
+        continue;
+      }
+      ctx.batchTargets.push_back(target);
+      ctx.batchOriginalIndices.push_back(i);
+    }
+
+    if (!ctx.fallbackEntries.empty() && inputs.fallbackQueue != nullptr) {
+      inputs.fallbackQueue->enqueueBatch(std::move(ctx.fallbackEntries));
+      ctx.fallbackEntries.clear();
+    }
+
+    if (ctx.batchTargets.empty()) {
+      if (inputs.fallbackQueue != nullptr) {
+        inputs.fallbackQueue->tryProcessOne();
+      }
+      return;
+    }
+
+    MoleculesHost    targetsHost;
+    std::vector<int> emptySortOrder;
+    buildTargetBatchParallelInto(targetsHost, 1, ctx.batchTargets, emptySortOrder);
+
+    auto sharedTargetsHost     = std::make_shared<MoleculesHost>(std::move(targetsHost));
+    auto sharedOriginalIndices = std::make_shared<std::vector<int>>(std::move(ctx.batchOriginalIndices));
+    ctx.batchOriginalIndices.clear();
+    ctx.batchOriginalIndices.reserve(static_cast<size_t>(range.size()));
+
+    const int numBatchTargets  = static_cast<int>(sharedOriginalIndices->size());
+    auto      sharedAtomCounts = std::make_shared<std::vector<int>>(static_cast<size_t>(numBatchTargets));
+
+    int localMaxTargetAtoms  = 0;
+    int localMaxBondsPerAtom = 0;
+    for (int targetIdx = 0; targetIdx < numBatchTargets; ++targetIdx) {
+      const int atomStart            = sharedTargetsHost->batchAtomStarts[targetIdx];
+      const int atomEnd              = sharedTargetsHost->batchAtomStarts[targetIdx + 1];
+      const int atoms                = atomEnd - atomStart;
+      (*sharedAtomCounts)[targetIdx] = atoms;
+      localMaxTargetAtoms            = std::max(localMaxTargetAtoms, atoms);
+      for (int a = atomStart; a < atomEnd; ++a) {
+        localMaxBondsPerAtom =
+          std::max(localMaxBondsPerAtom, static_cast<int>(sharedTargetsHost->targetAtomBonds[a].degree));
+      }
+    }
+
+    const int totalPairs       = numBatchTargets * numQueries;
+    const int maxPairsPerBatch = inputs.maxPairsPerBatch;
+
+    // Releases the buffer back to the pool if we throw between acquire and push.
+    struct BufferReleaseGuard {
+      PinnedHostBufferPool* pool   = nullptr;
+      PinnedHostBuffer*     buffer = nullptr;
+      ~BufferReleaseGuard() {
+        if (pool && buffer) {
+          pool->release(buffer);
+        }
+      }
+      void release() { buffer = nullptr; }
+    };
+
+    for (int pairOffset = 0; pairOffset < totalPairs; pairOffset += maxPairsPerBatch) {
+      PinnedHostBuffer* buffer = nullptr;
+      {
+        ScopedNvtxRange waitRange("Wait for pinned buffer", NvtxColor::kRed);
+        buffer = inputs.bufferPool->acquire();
+      }
+      if (buffer == nullptr) {
+        // Pool was shutdown via onAbort; bail out cleanly.
+        return;
+      }
+      BufferReleaseGuard releaseGuard{inputs.bufferPool, buffer};
+
+      auto batch                   = std::make_unique<PreparedMiniBatch>();
+      batch->pinnedBuffer          = buffer;
+      batch->pool                  = inputs.bufferPool;
+      batch->targetsHost           = sharedTargetsHost;
+      batch->targetOriginalIndices = sharedOriginalIndices;
+      batch->targetAtomCounts      = sharedAtomCounts;
+
+      batch->ctx.queryAtomCounts       = queryContext.queryAtomCounts.data();
+      batch->ctx.queryPipelineDepths   = queryContext.queryPipelineDepths.data();
+      batch->ctx.queryMaxDepths        = queryContext.queryMaxDepths.data();
+      batch->ctx.queryHasPatterns      = queryContext.queryHasPatterns.data();
+      batch->ctx.targetAtomCounts      = sharedAtomCounts.get();
+      batch->ctx.targetOriginalIndices = sharedOriginalIndices.get();
+      batch->ctx.numTargets            = numBatchTargets;
+      batch->ctx.numQueries            = numQueries;
+      batch->ctx.maxTargetAtoms        = localMaxTargetAtoms;
+      batch->ctx.maxQueryAtoms         = queryContext.maxQueryAtoms;
+      batch->ctx.maxBondsPerAtom       = localMaxBondsPerAtom;
+      batch->ctx.maxMatches            = inputs.maxMatches;
+      batch->ctx.countOnly             = inputs.countOnly;
+      const int templateTargetAtoms    = std::max(localMaxTargetAtoms, queryContext.maxQueryAtoms);
+      batch->ctx.templateConfig =
+        selectTemplateConfig(templateTargetAtoms, queryContext.maxQueryAtoms, localMaxBondsPerAtom);
+
+      planner.prepareMiniBatch(batch->plan, *buffer, batch->ctx, leafSubpatterns, pairOffset, maxPairsPerBatch);
+
+      releaseGuard.release();
+      pushBatch(std::move(batch));
+    }
+
+    if (inputs.fallbackQueue != nullptr && inputs.fallbackQueue->hasWork()) {
+      inputs.fallbackQueue->tryProcessOne();
+    }
+  }
 
   static std::unique_ptr<PerGpuState>  makePerGpuState(Inputs& inputs, int gpuId);
   static std::unique_ptr<GpuSlotState> makeSlotState(Inputs& inputs, PerGpuState& pgs, int gpuId);
@@ -148,16 +285,11 @@ struct SubstructWorkload {
                                   Inputs&              inputs,
                                   RunnerThreadContext& ctx);
 
-  static void postprocess(GpuSlotState&        slot,
-                          PreparedBatch&       batch,
-                          Inputs&              inputs,
-                          RunnerThreadContext& ctx);
+  static void postprocess(GpuSlotState& slot, PreparedBatch& batch, Inputs& inputs, RunnerThreadContext& ctx);
 
   static void onAbort(Inputs& inputs);
 };
 
 }  // namespace nvMolKit
-
-#include "substruct_workload_inl.h"
 
 #endif  // NVMOLKIT_SUBSTRUCT_WORKLOAD_H

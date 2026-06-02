@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "morgan_fingerprint_gpu.h"
+#include "src/morgan_fingerprint_gpu.h"
 
 #include <DataStructs/ExplicitBitVect.h>
 #include <GraphMol/ROMol.h>
@@ -24,16 +24,16 @@
 #include <mutex>
 #include <vector>
 
-#include "config.h"
-#include "cpu_fallback_queue.h"
-#include "flat_bit_vect.h"
-#include "morgan_fingerprint_common.h"
-#include "morgan_fingerprint_cpu.h"
-#include "morgan_fingerprint_kernels.h"
-#include "morgan_workload.h"
-#include "nvtx.h"
-#include "openmp_helpers.h"
-#include "pipeline.h"
+#include "src/data_structures/flat_bit_vect.h"
+#include "src/gpu_scheduler/config.h"
+#include "src/gpu_scheduler/cpu_fallback_queue.h"
+#include "src/gpu_scheduler/pipeline.h"
+#include "src/morgan_fingerprint_common.h"
+#include "src/morgan_fingerprint_cpu.h"
+#include "src/morgan_fingerprint_kernels.h"
+#include "src/morgan_workload.h"
+#include "src/utils/nvtx.h"
+#include "src/utils/openmp_helpers.h"
 
 namespace nvMolKit {
 

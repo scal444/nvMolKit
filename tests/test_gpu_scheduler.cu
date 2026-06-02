@@ -27,12 +27,12 @@
 #include <thread>
 #include <vector>
 
-#include "cpu_fallback_queue.h"
-#include "cuda_error_check.h"
-#include "device.h"
-#include "device_vector.h"
-#include "exception_aggregator.h"
-#include "pipeline.h"
+#include "src/gpu_scheduler/cpu_fallback_queue.h"
+#include "src/gpu_scheduler/exception_aggregator.h"
+#include "src/gpu_scheduler/pipeline.h"
+#include "src/utils/cuda_error_check.h"
+#include "src/utils/device.h"
+#include "src/utils/device_vector.h"
 
 namespace {
 

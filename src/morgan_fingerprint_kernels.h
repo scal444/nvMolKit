@@ -16,9 +16,9 @@
 #ifndef NVMOLKIT_MORGAN_FINGERPRINT_KERNELS_H
 #define NVMOLKIT_MORGAN_FINGERPRINT_KERNELS_H
 
-#include "flat_bit_vect.h"
-#include "morgan_fingerprint_common.h"
-#include "utils/device_vector.h"
+#include "src/data_structures/flat_bit_vect.h"
+#include "src/morgan_fingerprint_common.h"
+#include "src/utils/device_vector.h"
 
 namespace nvMolKit {
 

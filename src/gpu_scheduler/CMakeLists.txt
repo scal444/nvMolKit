@@ -16,4 +16,3 @@
 add_library(gpu_scheduler INTERFACE)
 target_link_libraries(gpu_scheduler INTERFACE thread_safe_queue device
                                               cuda_error_check CUDA::cudart)
-target_include_directories(gpu_scheduler INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})

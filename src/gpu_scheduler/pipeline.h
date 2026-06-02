@@ -29,10 +29,11 @@
 #include <utility>
 #include <vector>
 
-#include "config.h"
-#include "device.h"
-#include "exception_aggregator.h"
-#include "thread_safe_queue.h"
+#include "src/gpu_scheduler/config.h"
+#include "src/gpu_scheduler/exception_aggregator.h"
+#include "src/utils/cuda_error_check.h"
+#include "src/utils/device.h"
+#include "src/utils/thread_safe_queue.h"
 
 namespace nvMolKit::gpu_scheduler {
 

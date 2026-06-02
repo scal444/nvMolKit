@@ -21,7 +21,7 @@
 #include <utility>
 #include <vector>
 
-#include "thread_safe_queue.h"
+#include "src/utils/thread_safe_queue.h"
 
 namespace nvMolKit::gpu_scheduler {
 
