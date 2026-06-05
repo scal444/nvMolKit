@@ -103,8 +103,14 @@ def perturb_conformer(
         )
 
 
-def _embed_one(args_tuple: tuple[int, bytes], seed: int, add_hs: bool, min_atoms: int) -> bytes | None:
-    """Embed a single ETKDGv3 conformer for one mol payload (multiprocessing worker)."""
+def _embed_one(
+    args_tuple: tuple[int, bytes], seed: int, add_hs: bool, min_atoms: int, confs_per_mol: int
+) -> bytes | None:
+    """Embed an ETKDGv3 base conformer for one mol payload, then jitter to ``confs_per_mol``.
+
+    Runs as a multiprocessing worker so both the embed and the (otherwise serial)
+    jitter expansion are parallelized across mols.
+    """
     idx, mol_bytes = args_tuple
     mol = Chem.Mol(mol_bytes)
     if mol.GetNumAtoms() < min_atoms:
@@ -122,6 +128,16 @@ def _embed_one(args_tuple: tuple[int, bytes], seed: int, add_hs: bool, min_atoms
         return None
     if add_hs:
         mol = Chem.RemoveHs(mol)
+
+    if confs_per_mol > 1:
+        base_conf_id = mol.GetConformer().GetId()
+        base_conf = mol.GetConformer(base_conf_id)
+        for conf_idx in range(1, confs_per_mol):
+            new_conf = Chem.Conformer(base_conf)
+            perturb_conformer(new_conf, seed=seed + idx * confs_per_mol + conf_idx)
+            mol.AddConformer(new_conf, assignId=True)
+        perturb_conformer(mol.GetConformer(base_conf_id), seed=seed + idx * confs_per_mol)
+
     return mol.ToBinary()
 
 
@@ -149,7 +165,7 @@ def embed_and_jitter(
     workers = max(1, num_workers)
     binaries = [(i, mol.ToBinary()) for i, mol in enumerate(mols)]
     embedded_binaries = process_map(
-        partial(_embed_one, seed=seed, add_hs=add_hs, min_atoms=min_atoms),
+        partial(_embed_one, seed=seed, add_hs=add_hs, min_atoms=min_atoms, confs_per_mol=confs_per_mol),
         binaries,
         max_workers=workers,
         chunksize=max(1, len(binaries) // (workers * 8) or 1),
@@ -165,15 +181,5 @@ def embed_and_jitter(
         out.append(Chem.Mol(raw))
     if drop_count > 0:
         print(f"  Dropped {drop_count} molecules during embedding (no conformer generated)")
-
-    if confs_per_mol > 1:
-        for mol_idx, mol in enumerate(out):
-            base_conf_id = mol.GetConformer().GetId()
-            base_conf = mol.GetConformer(base_conf_id)
-            for conf_idx in range(1, confs_per_mol):
-                new_conf = Chem.Conformer(base_conf)
-                perturb_conformer(new_conf, seed=seed + mol_idx * confs_per_mol + conf_idx)
-                mol.AddConformer(new_conf, assignId=True)
-            perturb_conformer(mol.GetConformer(base_conf_id), seed=seed + mol_idx * confs_per_mol)
 
     return out
