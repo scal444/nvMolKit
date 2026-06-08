@@ -69,8 +69,8 @@ target_link_libraries(test_thread_safe_queue PRIVATE thread_safe_queue)
 
 add_executable(test_gpu_scheduler test_gpu_scheduler.cu)
 target_link_libraries(
-  test_gpu_scheduler PRIVATE gpu_scheduler device device_vector cuda_error_check
-                             CUDA::cudart)
+  test_gpu_scheduler PRIVATE gpu_scheduler device device_vector
+                             cuda_error_check CUDA::cudart)
 
 add_executable(test_openmp_helpers test_openmp_helpers.cpp)
 target_link_libraries(test_openmp_helpers PRIVATE openmp_helpers

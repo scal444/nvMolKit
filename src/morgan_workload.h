@@ -68,10 +68,10 @@ template <int fpSize> struct MorganInputs {
   const std::vector<const RDKit::ROMol*>* mols   = nullptr;
   int                                     radius = 0;
   /// Pre-bucketed mol indices, computed by the caller before run().
-  std::vector<int> work32;
-  std::vector<int> work64;
-  std::vector<int> work128;
-  std::vector<int> workLarge;
+  std::vector<int>                        work32;
+  std::vector<int>                        work64;
+  std::vector<int>                        work128;
+  std::vector<int>                        workLarge;
 
   /// Maximum mols per mini-batch. Each "unit" handed to preprocess produces
   /// one mini-batch of up to this many mols from one bucket.
@@ -101,7 +101,7 @@ template <int fpSize> struct MorganInputs {
  * provides the device-side scratch (`MorganGPUBuffersBatch`).
  */
 struct MorganBatch {
-  MorganBucket bucket = MorganBucket::kAtoms32;
+  MorganBucket     bucket          = MorganBucket::kAtoms32;
   /// Number of real mols. Host arrays are padded to dispatchChunkSize so the
   /// device-side spans line up with what the kernel expects, but only the
   /// first `scopedChunkSize` slots carry meaningful data.
@@ -196,10 +196,8 @@ template <int fpSize> struct MorganWorkload {
     ScopedNvtxRange claimRange("MorganWorkload::preprocess");
 
     for (int unitIdx = range.start; unitIdx < range.end; ++unitIdx) {
-      auto [bucket, sliceIdx] = detail::unitToBucketSlice(unitIdx,
-                                                          inputs.numMiniBatches32,
-                                                          inputs.numMiniBatches64,
-                                                          inputs.numMiniBatches128);
+      auto [bucket, sliceIdx] =
+        detail::unitToBucketSlice(unitIdx, inputs.numMiniBatches32, inputs.numMiniBatches64, inputs.numMiniBatches128);
       const std::vector<int>* bucketWork = nullptr;
       switch (bucket) {
         case MorganBucket::kAtoms32:
@@ -225,7 +223,7 @@ template <int fpSize> struct MorganWorkload {
       // extent and only early-exits on `nAtomsPerMol[i] == 0`. Other device
       // buffers must therefore be sized to the same dispatchChunkSize so the
       // span sizes line up. Trailing entries are zeroed and harmless.
-      const int paddedSize = inputs.dispatchChunkSize;
+      const int paddedSize     = inputs.dispatchChunkSize;
 
       auto batch             = std::make_unique<MorganBatch>();
       batch->bucket          = bucket;

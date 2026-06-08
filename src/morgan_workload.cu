@@ -13,23 +13,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "src/morgan_workload.h"
-
 #include <memory>
 #include <stdexcept>
 #include <string>
 
 #include "src/morgan_fingerprint_kernels.h"
+#include "src/morgan_workload.h"
 #include "src/utils/cuda_error_check.h"
 
 namespace nvMolKit {
 
 namespace detail {
 
-std::pair<MorganBucket, int> unitToBucketSlice(int unitIdx,
-                                               int numBatches32,
-                                               int numBatches64,
-                                               int /*numBatches128*/) {
+std::pair<MorganBucket, int> unitToBucketSlice(int unitIdx, int numBatches32, int numBatches64, int /*numBatches128*/) {
   if (unitIdx < numBatches32) {
     return {MorganBucket::kAtoms32, unitIdx};
   }
@@ -82,10 +78,8 @@ std::unique_ptr<typename MorganWorkload<fpSize>::PerGpuState> MorganWorkload<fpS
 }
 
 template <int fpSize>
-std::unique_ptr<typename MorganWorkload<fpSize>::GpuSlotState> MorganWorkload<fpSize>::makeSlotState(
-  Inputs& inputs,
-  PerGpuState& /*pgs*/,
-  int /*gpuId*/) {
+std::unique_ptr<typename MorganWorkload<fpSize>::GpuSlotState>
+MorganWorkload<fpSize>::makeSlotState(Inputs& inputs, PerGpuState& /*pgs*/, int /*gpuId*/) {
   auto         slot   = std::make_unique<MorganSlot>();
   cudaStream_t stream = slot->stream.stream();
 
@@ -97,11 +91,9 @@ std::unique_ptr<typename MorganWorkload<fpSize>::GpuSlotState> MorganWorkload<fp
   const int    radius    = inputs.radius;
 
   auto allocate = [&](MorganGPUBuffersBatch& buffers, int atomCapacity) {
-    buffers.atomInvariants =
-      AsyncDeviceVector<std::uint32_t>(chunkSize * static_cast<size_t>(atomCapacity), stream);
-    buffers.bondInvariants =
-      AsyncDeviceVector<std::uint32_t>(chunkSize * static_cast<size_t>(atomCapacity), stream);
-    buffers.bondIndices          = AsyncDeviceVector<std::int16_t>(
+    buffers.atomInvariants = AsyncDeviceVector<std::uint32_t>(chunkSize * static_cast<size_t>(atomCapacity), stream);
+    buffers.bondInvariants = AsyncDeviceVector<std::uint32_t>(chunkSize * static_cast<size_t>(atomCapacity), stream);
+    buffers.bondIndices    = AsyncDeviceVector<std::int16_t>(
       chunkSize * static_cast<size_t>(atomCapacity) * static_cast<size_t>(kMaxBondsPerAtom),
       stream);
     buffers.bondOtherAtomIndices = AsyncDeviceVector<std::int16_t>(
@@ -138,8 +130,8 @@ std::unique_ptr<typename MorganWorkload<fpSize>::GpuSlotState> MorganWorkload<fp
 }
 
 template <int fpSize>
-void MorganWorkload<fpSize>::dispatchAndCopyBack(GpuSlotState&  slot,
-                                                 PerGpuState&   /*pgs*/,
+void MorganWorkload<fpSize>::dispatchAndCopyBack(GpuSlotState& slot,
+                                                 PerGpuState& /*pgs*/,
                                                  PreparedBatch& batch,
                                                  Inputs&        inputs,
                                                  RunnerThreadContext& /*ctx*/) {

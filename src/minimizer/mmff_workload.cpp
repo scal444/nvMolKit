@@ -53,8 +53,8 @@ std::unique_ptr<MmffWorkload::PerGpuState> MmffWorkload::makePerGpuState(Inputs&
 }
 
 std::unique_ptr<MmffWorkload::GpuSlotState> MmffWorkload::makeSlotState(Inputs& /*inputs*/,
-                                                                       PerGpuState& /*pgs*/,
-                                                                       int /*gpuId*/) {
+                                                                        PerGpuState& /*pgs*/,
+                                                                        int /*gpuId*/) {
   return std::make_unique<MmffSlot>();
 }
 
@@ -81,8 +81,8 @@ void MmffWorkload::dispatchAndCopyBack(GpuSlotState&        slot,
   if (deviceOutput) {
     auto& collector = (*inputs.deviceCollectors)[ctx.collectorIdx];
     if (collector.gpuId < 0) {
-      auto& runnerStream = (*inputs.runnerStreams)[ctx.collectorIdx];
-      runnerStream       = std::make_unique<ScopedStream>();
+      auto& runnerStream                 = (*inputs.runnerStreams)[ctx.collectorIdx];
+      runnerStream                       = std::make_unique<ScopedStream>();
       const cudaStream_t collectorStream = runnerStream->stream();
       collector.gpuId                    = pgs.deviceId;
       collector.stream                   = collectorStream;
@@ -189,10 +189,7 @@ void MmffWorkload::dispatchAndCopyBack(GpuSlotState&        slot,
   }
 }
 
-void MmffWorkload::postprocess(GpuSlotState&  slot,
-                               PreparedBatch& batch,
-                               Inputs&        inputs,
-                               RunnerThreadContext& /*ctx*/) {
+void MmffWorkload::postprocess(GpuSlotState& slot, PreparedBatch& batch, Inputs& inputs, RunnerThreadContext& /*ctx*/) {
   // In DEVICE output mode dispatch already appended into the collector and
   // there is no host-side state to merge per batch.
   if (inputs.output == CoordinateOutput::DEVICE) {
@@ -204,9 +201,8 @@ void MmffWorkload::postprocess(GpuSlotState&  slot,
   std::lock_guard<std::mutex> lock(*inputs.outputMutex);
   writeBackResults(batch.conformers, batch.conformerAtomStarts, slot.buffers, *inputs.moleculeEnergies);
   for (size_t i = 0; i < batch.conformers.size(); ++i) {
-    const auto& confInfo                                          = batch.conformers[i];
-    (*inputs.moleculeConverged)[confInfo.molIdx][confInfo.confIdx] =
-      static_cast<int8_t>(batch.statusesHost[i] == 0);
+    const auto& confInfo                                           = batch.conformers[i];
+    (*inputs.moleculeConverged)[confInfo.molIdx][confInfo.confIdx] = static_cast<int8_t>(batch.statusesHost[i] == 0);
   }
 }
 

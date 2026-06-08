@@ -258,8 +258,8 @@ template <class Workload> class Pipeline {
     }
     const int unitsPerClaim = std::max(1, Workload::unitsPerPreprocBatch(inputs_));
 
-    const int numGpus       = static_cast<int>(resolved.gpuIds.size());
-    const int totalRunners  = std::min(resolved.workerThreadsPerGpu * numGpus, totalUnits);
+    const int numGpus      = static_cast<int>(resolved.gpuIds.size());
+    const int totalRunners = std::min(resolved.workerThreadsPerGpu * numGpus, totalUnits);
     if (totalRunners <= 0) {
       return;
     }
@@ -280,23 +280,23 @@ template <class Workload> class Pipeline {
     std::vector<std::thread> coordinators;
     coordinators.reserve(static_cast<size_t>(numGpus));
     for (int gpuIdx = 0; gpuIdx < numGpus; ++gpuIdx) {
-      const int deviceId  = resolved.gpuIds[gpuIdx];
+      const int deviceId   = resolved.gpuIds[gpuIdx];
       const int numRunners = runnersPerGpu[gpuIdx];
       if (numRunners == 0) {
         continue;
       }
-      coordinators.emplace_back([this, deviceId, numRunners, slotsPerWorker = resolved.slotsPerWorker, &queue, &errors] {
-        runCoordinator(deviceId, numRunners, slotsPerWorker, queue, errors);
-      });
+      coordinators.emplace_back(
+        [this, deviceId, numRunners, slotsPerWorker = resolved.slotsPerWorker, &queue, &errors] {
+          runCoordinator(deviceId, numRunners, slotsPerWorker, queue, errors);
+        });
     }
 
     std::vector<std::thread> preprocessors;
     preprocessors.reserve(static_cast<size_t>(resolved.globalPreprocessingThreads));
     for (int i = 0; i < resolved.globalPreprocessingThreads; ++i) {
-      preprocessors.emplace_back(
-        [this, totalUnits, unitsPerClaim, &nextUnit, &queue, &errors] {
-          runPreprocessor(totalUnits, unitsPerClaim, nextUnit, queue, errors);
-        });
+      preprocessors.emplace_back([this, totalUnits, unitsPerClaim, &nextUnit, &queue, &errors] {
+        runPreprocessor(totalUnits, unitsPerClaim, nextUnit, queue, errors);
+      });
     }
 
     for (auto& thread : preprocessors) {
@@ -361,7 +361,7 @@ template <class Workload> class Pipeline {
       // Each runner owns slotsPerWorker GpuSlotState instances. Pre-allocate
       // them all on the coordinator so device construction order is
       // deterministic, then hand pointer slices to the runner threads.
-      const int totalSlots = numRunners * slotsPerWorker;
+      const int                                  totalSlots = numRunners * slotsPerWorker;
       std::vector<std::unique_ptr<GpuSlotState>> slots;
       slots.reserve(static_cast<size_t>(totalSlots));
       for (int s = 0; s < totalSlots; ++s) {
@@ -399,17 +399,17 @@ template <class Workload> class Pipeline {
                  ThreadSafeQueue<std::unique_ptr<PreparedBatch>>& queue,
                  ExceptionAggregator&                             errors) {
     try {
-      const WithDevice setDevice(deviceId);
+      const WithDevice    setDevice(deviceId);
       RunnerThreadContext ctx{};
       if constexpr (WorkloadHasMakeRunnerCtx<Workload>) {
         ctx = Workload::makeRunnerCtx(inputs_);
       }
 
-      const int                                  numSlots = static_cast<int>(slots.size());
+      const int                                   numSlots = static_cast<int>(slots.size());
       std::vector<detail::InFlightSlot<Workload>> pending(static_cast<size_t>(numSlots));
-      int pendingHead  = 0;
-      int pendingTail  = 0;
-      int pendingCount = 0;
+      int                                         pendingHead  = 0;
+      int                                         pendingTail  = 0;
+      int                                         pendingCount = 0;
 
       auto drainOne = [&]() {
         auto& head = pending[static_cast<size_t>(pendingHead)];

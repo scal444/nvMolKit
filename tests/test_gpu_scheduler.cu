@@ -147,16 +147,16 @@ struct AxpbBatch {
 };
 
 struct AxpbInputs {
-  std::vector<float>           x;             // total input vector (one element per unit)
-  std::vector<int>             outputIndices; // for sanity testing - normally implicit
-  float                        a = 0.0f;
-  float                        b = 0.0f;
-  int                          unitsPerClaim    = 32;
-  int                          maxBatchCapacity = 64;
+  std::vector<float> x;              // total input vector (one element per unit)
+  std::vector<int>   outputIndices;  // for sanity testing - normally implicit
+  float              a                = 0.0f;
+  float              b                = 0.0f;
+  int                unitsPerClaim    = 32;
+  int                maxBatchCapacity = 64;
 
-  PinnedBufferPool*            pool          = nullptr;
-  CpuFallbackQueue<FallbackEntry>* fallbackQueue = nullptr;
-  bool                         fallbackEvenIndices = false;
+  PinnedBufferPool*                pool                = nullptr;
+  CpuFallbackQueue<FallbackEntry>* fallbackQueue       = nullptr;
+  bool                             fallbackEvenIndices = false;
 
   // Faults to inject for negative testing.
   bool failInPreprocess = false;
@@ -177,11 +177,11 @@ struct AxpbPerGpu {
 };
 
 struct AxpbSlot {
-  ScopedStream                       stream;
-  ScopedCudaEvent                    completion;
-  AsyncDeviceVector<float>           devX;
-  AsyncDeviceVector<float>           devY;
-  std::vector<float>                 hostScratchY;  // back-buffer for sync D2H read
+  ScopedStream             stream;
+  ScopedCudaEvent          completion;
+  AsyncDeviceVector<float> devX;
+  AsyncDeviceVector<float> devY;
+  std::vector<float>       hostScratchY;  // back-buffer for sync D2H read
 
   AxpbSlot(int capacity) : devX(static_cast<size_t>(capacity)), devY(static_cast<size_t>(capacity)) {
     devX.setStream(stream.stream());
@@ -308,14 +308,11 @@ struct AxpbWorkload {
     }
   }
 
-  static void postprocess(GpuSlotState& /*slot*/,
-                          PreparedBatch&       batch,
-                          Inputs&              inputs,
-                          RunnerThreadContext& /*ctx*/) {
+  static void postprocess(GpuSlotState& /*slot*/, PreparedBatch& batch, Inputs& inputs, RunnerThreadContext& /*ctx*/) {
     {
       std::lock_guard<std::mutex> lock(inputs.outputMutex);
       for (int i = 0; i < batch.count; ++i) {
-        const int outIdx = batch.pinnedBuffer->hostIndices[static_cast<size_t>(i)];
+        const int outIdx                           = batch.pinnedBuffer->hostIndices[static_cast<size_t>(i)];
         inputs.output[static_cast<size_t>(outIdx)] = batch.pinnedBuffer->hostY[static_cast<size_t>(i)];
       }
     }
@@ -375,7 +372,7 @@ TEST(GpuSchedulerConfigTest, EmptyGpuIdsUsesCurrentDevice) {
 
 TEST(GpuSchedulerConfigTest, MultiGpuSplitsHardwareConcurrency) {
   Config config;
-  config.gpuIds = {0, 1, 2, 3};
+  config.gpuIds                 = {0, 1, 2, 3};
   const ResolvedConfig resolved = resolve(config, /*hardwareConcurrency=*/16, /*currentDevice=*/0);
   EXPECT_EQ(resolved.workerThreadsPerGpu, 4);
 }
@@ -415,7 +412,7 @@ TEST(GpuSchedulerExceptionAggregatorTest, RethrowFirstWhenMultiple) {
 }
 
 TEST(GpuSchedulerCpuFallbackQueueTest, ProducerGuardClosesQueue) {
-  int                          processed = 0;
+  int                             processed = 0;
   CpuFallbackQueue<FallbackEntry> queue([&processed](const FallbackEntry&) { ++processed; });
   {
     FallbackProducerGuard<FallbackEntry> guard(&queue);
@@ -430,8 +427,8 @@ TEST(GpuSchedulerCpuFallbackQueueTest, ProducerGuardClosesQueue) {
 }
 
 TEST_F(GpuSchedulerTest, RunsAxpbCorrectlySingleGpu) {
-  constexpr int                       N = 1024;
-  AxpbInputs                          inputs;
+  constexpr int N = 1024;
+  AxpbInputs    inputs;
   inputs.x.resize(N);
   inputs.output.assign(N, 0.0f);
   std::iota(inputs.x.begin(), inputs.x.end(), 1.0f);
@@ -508,8 +505,8 @@ TEST_F(GpuSchedulerTest, FallbackQueueDrainedOpportunistically) {
   PinnedBufferPool pool(/*poolSize=*/4, /*capacityPerBuffer=*/inputs.maxBatchCapacity);
   inputs.pool = &pool;
 
-  std::atomic<int>                   fallbackProcessed{0};
-  CpuFallbackQueue<FallbackEntry>    fallbackQueue([&](const FallbackEntry& entry) {
+  std::atomic<int>                fallbackProcessed{0};
+  CpuFallbackQueue<FallbackEntry> fallbackQueue([&](const FallbackEntry& entry) {
     const float value = inputs.a * inputs.x[static_cast<size_t>(entry.index)] + inputs.b;
     {
       std::lock_guard<std::mutex> lock(inputs.outputMutex);

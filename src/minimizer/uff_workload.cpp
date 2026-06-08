@@ -50,8 +50,8 @@ std::unique_ptr<UffWorkload::PerGpuState> UffWorkload::makePerGpuState(Inputs& /
 }
 
 std::unique_ptr<UffWorkload::GpuSlotState> UffWorkload::makeSlotState(Inputs& /*inputs*/,
-                                                                     PerGpuState& /*pgs*/,
-                                                                     int /*gpuId*/) {
+                                                                      PerGpuState& /*pgs*/,
+                                                                      int /*gpuId*/) {
   return std::make_unique<UffSlot>();
 }
 
@@ -131,10 +131,7 @@ void UffWorkload::dispatchAndCopyBack(GpuSlotState&        slot,
   }
 }
 
-void UffWorkload::postprocess(GpuSlotState&  slot,
-                              PreparedBatch& batch,
-                              Inputs&        inputs,
-                              RunnerThreadContext& /*ctx*/) {
+void UffWorkload::postprocess(GpuSlotState& slot, PreparedBatch& batch, Inputs& inputs, RunnerThreadContext& /*ctx*/) {
   if (inputs.output == CoordinateOutput::DEVICE) {
     return;
   }
@@ -144,9 +141,8 @@ void UffWorkload::postprocess(GpuSlotState&  slot,
   std::lock_guard<std::mutex> lock(*inputs.outputMutex);
   writeBackResults(batch.conformers, batch.conformerAtomStarts, slot.buffers, *inputs.moleculeEnergies);
   for (size_t i = 0; i < batch.conformers.size(); ++i) {
-    const auto& confInfo                                          = batch.conformers[i];
-    (*inputs.moleculeConverged)[confInfo.molIdx][confInfo.confIdx] =
-      static_cast<int8_t>(batch.statusesHost[i] == 0);
+    const auto& confInfo                                           = batch.conformers[i];
+    (*inputs.moleculeConverged)[confInfo.molIdx][confInfo.confIdx] = static_cast<int8_t>(batch.statusesHost[i] == 0);
   }
 }
 

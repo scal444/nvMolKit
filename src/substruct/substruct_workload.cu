@@ -13,14 +13,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "src/substruct/substruct_workload.h"
-
 #include <array>
 
 #include "src/substruct/molecules_device.cuh"
 #include "src/substruct/recursive_preprocessor.h"
 #include "src/substruct/substruct_kernels.h"
 #include "src/substruct/substruct_search_internal.h"
+#include "src/substruct/substruct_workload.h"
 #include "src/substruct/thread_worker_context.h"
 #include "src/utils/cuda_error_check.h"
 #include "src/utils/nvtx.h"
@@ -232,10 +231,10 @@ SubstructWorkload::RunnerThreadContext SubstructWorkload::makeRunnerCtx(Inputs& 
   return ctx;
 }
 
-void SubstructWorkload::dispatchAndCopyBack(GpuSlotState&        slot,
-                                            PerGpuState&         pgs,
-                                            PreparedBatch&       batch,
-                                            Inputs&              inputs,
+void SubstructWorkload::dispatchAndCopyBack(GpuSlotState&  slot,
+                                            PerGpuState&   pgs,
+                                            PreparedBatch& batch,
+                                            Inputs&        inputs,
                                             RunnerThreadContext& /*ctx*/) {
   ScopedNvtxRange dispatchRange("SubstructWorkload::dispatchAndCopyBack");
 
@@ -265,9 +264,9 @@ void SubstructWorkload::dispatchAndCopyBack(GpuSlotState&        slot,
   }
 }
 
-void SubstructWorkload::postprocess(GpuSlotState&        slot,
-                                    PreparedBatch&       batch,
-                                    Inputs&              inputs,
+void SubstructWorkload::postprocess(GpuSlotState&  slot,
+                                    PreparedBatch& batch,
+                                    Inputs&        inputs,
                                     RunnerThreadContext& /*ctx*/) {
   ScopedNvtxRange accumRange("SubstructWorkload::postprocess");
 

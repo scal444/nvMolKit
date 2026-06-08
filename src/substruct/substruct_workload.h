@@ -60,8 +60,8 @@ struct SubstructInputs {
   const RecursivePatternPreprocessor*     recursivePreprocessor = nullptr;  // primary GPU's view
   const QueryPreprocessContext*           queryContext          = nullptr;
   SubstructAlgorithm                      algorithm             = SubstructAlgorithm::VF2;
-  int                                     primaryDeviceId       = 0;        // device active when queriesDevice was built
-  int                                     batchSize             = 1024;     // pairs per GPU mini-batch
+  int                                     primaryDeviceId       = 0;     // device active when queriesDevice was built
+  int                                     batchSize             = 1024;  // pairs per GPU mini-batch
   int                                     maxMatches            = 0;
   bool                                    countOnly             = false;
 
@@ -79,9 +79,9 @@ struct SubstructInputs {
   gpu_scheduler::CpuFallbackQueue<RDKitFallbackEntry>* fallbackQueue = nullptr;
 
   // Per-mini-batch derived sizes (computed once at setup, read everywhere).
-  int targetsPerBatch       = 0;
-  int maxPairsPerBatch      = 0;
-  int maxPatternsPerDepth   = 0;
+  int targetsPerBatch     = 0;
+  int maxPairsPerBatch    = 0;
+  int maxPatternsPerDepth = 0;
 };
 
 /**

@@ -60,7 +60,7 @@ struct UffInputs {
   int                                                          maxIters                    = 200;
   double                                                       gradTol                     = 1e-4;
   /// Number of conformers per pipeline mini-batch.
-  int batchSize = 0;
+  int                                                          batchSize                   = 0;
 
   /// See MmffInputs for the equivalent device-input / device-output fields;
   /// UFF mirrors MMFF here, with no per-batch backend selection (UFF always
@@ -70,7 +70,7 @@ struct UffInputs {
   const detail::DeviceInputIndex*             deviceInputIndex = nullptr;
   std::vector<detail::DeviceCoordCollector>*  deviceCollectors = nullptr;
   /// See MmffInputs::runnerStreams. Same lifetime rules apply.
-  std::vector<std::unique_ptr<ScopedStream>>* runnerStreams = nullptr;
+  std::vector<std::unique_ptr<ScopedStream>>* runnerStreams    = nullptr;
   std::atomic<int>                            nextRunnerIdx{0};
 
   // RDKIT_CONFORMERS-mode result sinks (mutex-protected).
@@ -91,7 +91,7 @@ struct UffBatch {
   /// Per-conformer BFGS convergence statuses, populated by dispatch (queued
   /// async D2H on the slot stream) and consumed by postprocess. Empty in
   /// DEVICE output mode (the device-side collector reads statuses directly).
-  std::vector<int16_t> statusesHost;
+  std::vector<int16_t>       statusesHost;
 
   /// Per-batch precomputed source-conformer indices and atom counts used for
   /// device-input broadcasting; populated in preprocess only when
@@ -157,8 +157,7 @@ struct UffWorkload {
     ScopedNvtxRange preprocRange("UffWorkload::preprocess");
 
     auto batch = std::make_unique<UffBatch>();
-    batch->conformers.assign(inputs.allConformers->begin() + range.start,
-                             inputs.allConformers->begin() + range.end);
+    batch->conformers.assign(inputs.allConformers->begin() + range.start, inputs.allConformers->begin() + range.end);
 
     std::uint32_t       currentAtomOffset = 0;
     std::vector<double> pos;

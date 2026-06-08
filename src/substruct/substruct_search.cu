@@ -60,11 +60,11 @@ struct FallbackHandlerState {
 };
 
 void processFallbackEntry(const FallbackHandlerState& state, const RDKitFallbackEntry& entry) {
-  ScopedNvtxRange range("RDKit fallback T" + std::to_string(entry.originalTargetIdx) + "/Q" +
+  ScopedNvtxRange     range("RDKit fallback T" + std::to_string(entry.originalTargetIdx) + "/Q" +
                         std::to_string(entry.originalQueryIdx));
-  const RDKit::ROMol* target               = (*state.targets)[entry.originalTargetIdx];
-  const RDKit::ROMol* query                = (*state.queries)[entry.originalQueryIdx];
-  const int           effectiveMaxMatches  = state.boolResults ? 1 : state.maxMatches;
+  const RDKit::ROMol* target              = (*state.targets)[entry.originalTargetIdx];
+  const RDKit::ROMol* query               = (*state.queries)[entry.originalQueryIdx];
+  const int           effectiveMaxMatches = state.boolResults ? 1 : state.maxMatches;
   processWithRDKitFallback(target,
                            query,
                            entry.originalTargetIdx,
@@ -149,7 +149,7 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
     return;
   }
 
-  std::vector<int> gpuIds = config.gpuIds;
+  std::vector<int> gpuIds        = config.gpuIds;
   int              currentDevice = 0;
   cudaCheckError(cudaGetDevice(&currentDevice));
   if (gpuIds.empty()) {
@@ -238,8 +238,8 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
   std::mutex resultsMutex;
 
   // Build the workload-owned CPU fallback queue.
-  FallbackHandlerState handlerState{&targets,    &queries,     &results,    boolResults,
-                                    countResults, &resultsMutex, config.maxMatches};
+  FallbackHandlerState
+    handlerState{&targets, &queries, &results, boolResults, countResults, &resultsMutex, config.maxMatches};
   gpu_scheduler::CpuFallbackQueue<RDKitFallbackEntry> fallbackQueue(
     [handlerState](const RDKitFallbackEntry& entry) { processFallbackEntry(handlerState, entry); });
 
@@ -261,8 +261,8 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
   }
 
   // Compute per-mini-batch sizes (matches the original substructure logic).
-  const int targetsPerBatch  = std::max(1, config.batchSize / numQueries);
-  const int maxPairsPerBatch = std::max(1, config.batchSize);
+  const int targetsPerBatch     = std::max(1, config.batchSize / numQueries);
+  const int maxPairsPerBatch    = std::max(1, config.batchSize);
   int       maxPatternsPerDepth = 256;
   for (int d = 0; d <= kMaxSmartsNestingDepth; ++d) {
     int patternsAtThisDepth = 0;
@@ -272,8 +272,8 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
     maxPatternsPerDepth = std::max(maxPatternsPerDepth, patternsAtThisDepth);
   }
 
-  const bool   countOnly                  = (boolResults != nullptr) || (countResults != nullptr);
-  size_t       maxMatchIndicesPerMiniBatch;
+  const bool countOnly = (boolResults != nullptr) || (countResults != nullptr);
+  size_t     maxMatchIndicesPerMiniBatch;
   if (countOnly) {
     maxMatchIndicesPerMiniBatch = 0;
   } else if (config.maxMatches > 0) {
@@ -294,15 +294,14 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
     slotsPerWorker = config.executorsPerRunner;
   }
 
-  const int    poolSize          = std::max(1, effectivePreprocessingThreads) * 2;
-  const size_t perBufferSize     = computePinnedHostBufferBytes(maxPairsPerBatch,
-                                                            static_cast<int>(maxMatchIndicesPerMiniBatch),
-                                                            maxPatternsPerDepth);
-  const size_t totalPinnedBytes  = static_cast<size_t>(poolSize) * perBufferSize;
-  const long   pages             = sysconf(_SC_PHYS_PAGES);
-  const long   pageSize          = sysconf(_SC_PAGE_SIZE);
-  const size_t systemRam         = static_cast<size_t>(pages) * static_cast<size_t>(pageSize);
-  const size_t maxAllowed        = systemRam / 4;
+  const int    poolSize = std::max(1, effectivePreprocessingThreads) * 2;
+  const size_t perBufferSize =
+    computePinnedHostBufferBytes(maxPairsPerBatch, static_cast<int>(maxMatchIndicesPerMiniBatch), maxPatternsPerDepth);
+  const size_t totalPinnedBytes = static_cast<size_t>(poolSize) * perBufferSize;
+  const long   pages            = sysconf(_SC_PHYS_PAGES);
+  const long   pageSize         = sysconf(_SC_PAGE_SIZE);
+  const size_t systemRam        = static_cast<size_t>(pages) * static_cast<size_t>(pageSize);
+  const size_t maxAllowed       = systemRam / 4;
   if (totalPinnedBytes > maxAllowed) {
     throw std::runtime_error("Substructure search would require " + std::to_string(totalPinnedBytes / (1024 * 1024)) +
                              " MB of pinned memory, exceeding 1/4 of system RAM (" +
@@ -311,10 +310,7 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
   }
 
   PinnedHostBufferPool bufferPool;
-  bufferPool.initialize(poolSize,
-                        maxPairsPerBatch,
-                        static_cast<int>(maxMatchIndicesPerMiniBatch),
-                        maxPatternsPerDepth);
+  bufferPool.initialize(poolSize, maxPairsPerBatch, static_cast<int>(maxMatchIndicesPerMiniBatch), maxPatternsPerDepth);
 
   // Wire everything into the workload Inputs and run the pipeline.
   SubstructInputs inputs;

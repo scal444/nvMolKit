@@ -58,11 +58,8 @@ target_include_directories(morganFingerprintKernels SYSTEM
 
 add_library(
   morganFingerprint
-  morgan_fingerprint.cpp
-  morgan_fingerprint_gpu.cpp
-  morgan_fingerprint_cpu.cpp
-  morgan_fingerprint_common.cpp
-  morgan_workload.cu)
+  morgan_fingerprint.cpp morgan_fingerprint_gpu.cpp morgan_fingerprint_cpu.cpp
+  morgan_fingerprint_common.cpp morgan_workload.cu)
 target_link_libraries(
   morganFingerprint
   PRIVATE ${RDKit_LIBS} OpenMP::OpenMP_CXX device openmp_helpers gpu_scheduler

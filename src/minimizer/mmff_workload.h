@@ -62,7 +62,7 @@ struct MmffInputs {
   double                                                       gradTol       = 1e-4;
   BfgsBackend                                                  backend       = BfgsBackend::HYBRID;
   /// Number of conformers per pipeline mini-batch.
-  int batchSize = 0;
+  int                                                          batchSize     = 0;
 
   /// Output mode selector. RDKIT_CONFORMERS writes positions and energies back
   /// into RDKit conformers and `moleculeEnergies` / `moleculeConverged`. DEVICE
@@ -82,12 +82,12 @@ struct MmffInputs {
   /// the total number of runner threads (workerThreadsPerGpu * gpuIds.size()).
   /// Each runner claims a unique slot via `nextRunnerIdx` on first dispatch
   /// and appends its batch outputs there.
-  std::vector<detail::DeviceCoordCollector>* deviceCollectors = nullptr;
+  std::vector<detail::DeviceCoordCollector>*  deviceCollectors = nullptr;
   /// Per-runner-thread long-lived streams used as collector streams. Sized
   /// alongside `deviceCollectors` and declared in the caller frame *before*
   /// it, so the streams outlive the collectors during destruction (the
   /// collectors' AsyncDeviceVectors free async on these streams).
-  std::vector<std::unique_ptr<ScopedStream>>* runnerStreams = nullptr;
+  std::vector<std::unique_ptr<ScopedStream>>* runnerStreams    = nullptr;
   std::atomic<int>                            nextRunnerIdx{0};
 
   // RDKIT_CONFORMERS-mode result sinks (mutex-protected).
@@ -108,7 +108,7 @@ struct MmffBatch {
   /// Per-conformer BFGS convergence statuses, populated by dispatch (queued
   /// async D2H on the slot stream) and consumed by postprocess. Empty in
   /// DEVICE output mode (the device-side collector reads statuses directly).
-  std::vector<int16_t> statusesHost;
+  std::vector<int16_t>       statusesHost;
 
   /// Per-batch precomputed source-conformer indices and atom counts used for
   /// device-input broadcasting; populated in preprocess only when
@@ -194,8 +194,7 @@ struct MmffWorkload {
     std::unordered_map<RDKit::ROMol*, CachedMoleculeData> moleculeCache;
 
     auto batch = std::make_unique<MmffBatch>();
-    batch->conformers.assign(inputs.allConformers->begin() + range.start,
-                             inputs.allConformers->begin() + range.end);
+    batch->conformers.assign(inputs.allConformers->begin() + range.start, inputs.allConformers->begin() + range.end);
 
     std::uint32_t       currentAtomOffset = 0;
     std::vector<double> pos;
