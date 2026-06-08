@@ -20,8 +20,11 @@
 #include <omp.h>
 
 #include <algorithm>
+#include <exception>
 #include <memory>
 #include <mutex>
+#include <thread>
+#include <utility>
 #include <vector>
 
 #include "src/data_structures/flat_bit_vect.h"
@@ -110,6 +113,50 @@ inline int countMiniBatches(int numMols, int chunkSize) {
   return (numMols + chunkSize - 1) / chunkSize;
 }
 
+inline int resolveCpuThreadCount(int requestedThreads) {
+  if (requestedThreads > 0) {
+    return requestedThreads;
+  }
+  return std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+}
+
+void recordFirstException(std::exception_ptr ex, std::exception_ptr& firstException, std::mutex& exceptionMutex) {
+  std::lock_guard<std::mutex> lock(exceptionMutex);
+  if (!firstException) {
+    firstException = std::move(ex);
+  }
+}
+
+void drainFallbackQueue(gpu_scheduler::CpuFallbackQueue<int>& fallbackQueue,
+                        std::exception_ptr&                  firstException,
+                        std::mutex&                          exceptionMutex) {
+  try {
+    while (fallbackQueue.tryProcessOne()) {
+    }
+  } catch (...) {
+    recordFirstException(std::current_exception(), firstException, exceptionMutex);
+  }
+}
+
+std::vector<std::thread> startFallbackWorkers(gpu_scheduler::CpuFallbackQueue<int>& fallbackQueue,
+                                              int                                   requestedThreads,
+                                              size_t                                workCount,
+                                              std::exception_ptr&                   firstException,
+                                              std::mutex&                           exceptionMutex) {
+  std::vector<std::thread> workers;
+  if (workCount == 0) {
+    return workers;
+  }
+  const int workerCount = std::min(resolveCpuThreadCount(requestedThreads), static_cast<int>(workCount));
+  workers.reserve(static_cast<size_t>(workerCount));
+  for (int i = 0; i < workerCount; ++i) {
+    workers.emplace_back([&fallbackQueue, &firstException, &exceptionMutex] {
+      drainFallbackQueue(fallbackQueue, firstException, exceptionMutex);
+    });
+  }
+  return workers;
+}
+
 /**
  * @brief Run the pipeline iff there is any GPU work to do.
  *
@@ -134,6 +181,7 @@ template <int fpSize>
 AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vector<const RDKit::ROMol*>& mols,
                                                                  const int                               maxRadius,
                                                                  const size_t dispatchChunkSizeInit,
+                                                                 const int    numCpuThreads,
                                                                  cudaStream_t stream = nullptr) {
   ScopedNvtxRange allocRange("MorganFPBatchAllocation");
   const size_t    numMols           = mols.size();
@@ -147,6 +195,9 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
   int currentDevice = 0;
   cudaCheckError(cudaGetDevice(&currentDevice));
 
+  ScopedCudaEvent outputReadyEvent;
+  cudaCheckError(cudaEventRecord(outputReadyEvent.event(), stream));
+
   const int dispatchChunkSize = std::max(1, static_cast<int>(std::min(dispatchChunkSizeInit, numMols)));
 
   MorganInputs<fpSize> inputs;
@@ -155,6 +206,7 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
   inputs.dispatchChunkSize = dispatchChunkSize;
   inputs.outputAccumulator = &outputAccumulator;
   inputs.primaryStream     = stream;
+  inputs.outputReadyEvent  = outputReadyEvent.event();
   inputs.primaryDeviceId   = currentDevice;
 
   bucketMolecules(mols, inputs.work32, inputs.work64, inputs.work128, inputs.workLarge);
@@ -174,20 +226,45 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
   gpu_scheduler::CpuFallbackQueue<int> fallbackQueue(handler);
   inputs.fallbackQueue = &fallbackQueue;
 
-  // Seed the fallback queue with all large-mol indices. Runner threads drain
-  // entries opportunistically inside postprocess; whatever's left is drained
-  // on the calling thread after run() returns.
+  // Seed all large-mol work up front. Dedicated fallback workers drain this
+  // concurrently with GPU preprocessing/dispatch; runner postprocess still
+  // opportunistically helps when it has idle CPU time.
   for (const int molIdx : inputs.workLarge) {
     fallbackQueue.enqueue(molIdx);
   }
 
   allocRange.pop();
 
-  runPipelineIfAnyGpuWork<fpSize>(inputs);
+  std::exception_ptr fallbackException;
+  std::mutex         fallbackExceptionMutex;
+  auto fallbackWorkers = startFallbackWorkers(fallbackQueue,
+                                              numCpuThreads,
+                                              inputs.workLarge.size(),
+                                              fallbackException,
+                                              fallbackExceptionMutex);
 
-  // Drain any fallback entries that weren't claimed during runner waits.
-  // (When no runners ran at all - pure large-mol input - this is the only drain.)
-  while (fallbackQueue.tryProcessOne()) {
+  std::exception_ptr pipelineException;
+  try {
+    runPipelineIfAnyGpuWork<fpSize>(inputs);
+  } catch (...) {
+    pipelineException = std::current_exception();
+  }
+
+  for (auto& worker : fallbackWorkers) {
+    worker.join();
+  }
+
+  // Drain any fallback entries left after the worker pool and runner
+  // opportunistic drains finish.
+  if (!pipelineException && !fallbackException) {
+    drainFallbackQueue(fallbackQueue, fallbackException, fallbackExceptionMutex);
+  }
+
+  if (pipelineException) {
+    std::rethrow_exception(pipelineException);
+  }
+  if (fallbackException) {
+    std::rethrow_exception(fallbackException);
   }
 
   return outputAccumulator;
@@ -204,7 +281,7 @@ std::vector<std::unique_ptr<ExplicitBitVect>> getFingerprintsCu(const std::vecto
   // NOLINTBEGIN (cppcoreguidelines-avoid-magic-numbers)
   switch (fpSize) {
     case 4096: {
-      auto                           gpuResult = computeFingerprintsCuImpl<4096>(mols, maxRadius, batchSize);
+      auto                           gpuResult = computeFingerprintsCuImpl<4096>(mols, maxRadius, batchSize, numThreads);
       std::vector<FlatBitVect<4096>> resultsGpuVec(gpuResult.size());
       std::vector<std::unique_ptr<ExplicitBitVect>> results(gpuResult.size());
       cudaCheckError(cudaDeviceSynchronize());
@@ -214,7 +291,7 @@ std::vector<std::unique_ptr<ExplicitBitVect>> getFingerprintsCu(const std::vecto
       return results;
     }
     case 2048: {
-      auto                           gpuResult = computeFingerprintsCuImpl<2048>(mols, maxRadius, batchSize);
+      auto                           gpuResult = computeFingerprintsCuImpl<2048>(mols, maxRadius, batchSize, numThreads);
       std::vector<FlatBitVect<2048>> resultsGpuVec(gpuResult.size());
       std::vector<std::unique_ptr<ExplicitBitVect>> results(gpuResult.size());
       cudaCheckError(cudaDeviceSynchronize());
@@ -224,7 +301,7 @@ std::vector<std::unique_ptr<ExplicitBitVect>> getFingerprintsCu(const std::vecto
       return results;
     }
     case 1024: {
-      auto                           gpuResult = computeFingerprintsCuImpl<1024>(mols, maxRadius, batchSize);
+      auto                           gpuResult = computeFingerprintsCuImpl<1024>(mols, maxRadius, batchSize, numThreads);
       std::vector<FlatBitVect<1024>> resultsGpuVec(gpuResult.size());
       std::vector<std::unique_ptr<ExplicitBitVect>> results(gpuResult.size());
       cudaCheckError(cudaDeviceSynchronize());
@@ -234,7 +311,7 @@ std::vector<std::unique_ptr<ExplicitBitVect>> getFingerprintsCu(const std::vecto
       return results;
     }
     case 512: {
-      auto                          gpuResult = computeFingerprintsCuImpl<512>(mols, maxRadius, batchSize);
+      auto                          gpuResult = computeFingerprintsCuImpl<512>(mols, maxRadius, batchSize, numThreads);
       std::vector<FlatBitVect<512>> resultsGpuVec(gpuResult.size());
       std::vector<std::unique_ptr<ExplicitBitVect>> results(gpuResult.size());
       cudaCheckError(cudaDeviceSynchronize());
@@ -244,7 +321,7 @@ std::vector<std::unique_ptr<ExplicitBitVect>> getFingerprintsCu(const std::vecto
       return results;
     }
     case 256: {
-      auto                          gpuResult = computeFingerprintsCuImpl<256>(mols, maxRadius, batchSize);
+      auto                          gpuResult = computeFingerprintsCuImpl<256>(mols, maxRadius, batchSize, numThreads);
       std::vector<FlatBitVect<256>> resultsGpuVec(gpuResult.size());
       std::vector<std::unique_ptr<ExplicitBitVect>> results(gpuResult.size());
       cudaCheckError(cudaDeviceSynchronize());
@@ -254,7 +331,7 @@ std::vector<std::unique_ptr<ExplicitBitVect>> getFingerprintsCu(const std::vecto
       return results;
     }
     case 128: {
-      auto                          gpuResult = computeFingerprintsCuImpl<128>(mols, maxRadius, batchSize);
+      auto                          gpuResult = computeFingerprintsCuImpl<128>(mols, maxRadius, batchSize, numThreads);
       std::vector<FlatBitVect<128>> resultsGpuVec(gpuResult.size());
       std::vector<std::unique_ptr<ExplicitBitVect>> results(gpuResult.size());
       cudaCheckError(cudaDeviceSynchronize());
@@ -310,7 +387,11 @@ AsyncDeviceVector<FlatBitVect<nBits>> MorganFingerprintGpuGenerator::GetFingerpr
     return AsyncDeviceVector<FlatBitVect<nBits>>();
   }
   const size_t batchSize = options.gpuBatchSize.value_or(kDefaultGpuBatchSize);
-  return computeFingerprintsCuImpl<nBits>(mols, radius_, batchSize, stream);
+  return computeFingerprintsCuImpl<nBits>(mols,
+                                          radius_,
+                                          batchSize,
+                                          options.numCpuThreads.value_or(omp_get_max_threads()),
+                                          stream);
 }
 
 #define DEFINE_TEMPLATE(fpSize)                                                                                      \

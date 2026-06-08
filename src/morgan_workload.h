@@ -81,6 +81,9 @@ template <int fpSize> struct MorganInputs {
   /// when getFingerprintsCu was called) and on `primaryStream`.
   AsyncDeviceVector<FlatBitVect<fpSize>>* outputAccumulator = nullptr;
   cudaStream_t                            primaryStream     = nullptr;
+  /// Recorded on `primaryStream` after output allocation/zeroing. Scheduler
+  /// slot streams wait on it before writing into `outputAccumulator`.
+  cudaEvent_t                             outputReadyEvent  = nullptr;
   int                                     primaryDeviceId   = 0;
 
   /// Fallback queue of large-mol indices: those over the 128-atom budget that

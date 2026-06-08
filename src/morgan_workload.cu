@@ -82,6 +82,9 @@ std::unique_ptr<typename MorganWorkload<fpSize>::GpuSlotState>
 MorganWorkload<fpSize>::makeSlotState(Inputs& inputs, PerGpuState& /*pgs*/, int /*gpuId*/) {
   auto         slot   = std::make_unique<MorganSlot>();
   cudaStream_t stream = slot->stream.stream();
+  if (inputs.outputReadyEvent != nullptr) {
+    cudaCheckError(cudaStreamWaitEvent(stream, inputs.outputReadyEvent, 0));
+  }
 
   slot->gpuBuffers32  = std::make_unique<MorganGPUBuffersBatch>();
   slot->gpuBuffers64  = std::make_unique<MorganGPUBuffersBatch>();
