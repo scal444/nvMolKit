@@ -23,7 +23,7 @@
 namespace nvMolKit::gpu_scheduler {
 
 /**
- * @brief Orchestration-only knobs for Pipeline<Workload>.
+ * @brief Orchestration-only knobs for gpu_scheduler::Pipeline.
  *
  * Workload-specific sizing (batch size, max matches, force-field tolerances,
  * fingerprint radius, etc.) lives on the workload's own configuration struct
@@ -55,9 +55,9 @@ struct Config {
 /**
  * @brief Concrete (non-negative) values resolved from a Config.
  *
- * Pipeline<Workload> resolves once at the start of run() and stores the
- * resolved view internally; this struct is also exposed for unit testing
- * and for workloads that want to size their own pinned buffer pools.
+ * Pipeline resolves once at the start of run() and stores the resolved view
+ * internally; this struct is also exposed for unit testing and for workloads
+ * that want to size their own pinned buffer pools.
  */
 struct ResolvedConfig {
   int              workerThreadsPerGpu        = 0;

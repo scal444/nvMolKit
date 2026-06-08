@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -27,43 +28,103 @@
 
 namespace nvMolKit::MMFF {
 
-int MmffWorkload::totalUnits(Inputs& inputs) {
-  return static_cast<int>(inputs.allConformers->size());
+int MmffWorkload::totalUnits() const {
+  return static_cast<int>(inputs_.allConformers->size());
 }
 
-int MmffWorkload::unitsPerPreprocBatch(Inputs& inputs) {
-  return std::max(1, inputs.batchSize);
+int MmffWorkload::unitsPerPreprocBatch() const {
+  return std::max(1, inputs_.batchSize);
 }
 
-MmffWorkload::RunnerThreadContext MmffWorkload::makeRunnerCtx(Inputs& inputs) {
-  RunnerThreadContext ctx;
+std::unique_ptr<gpu_scheduler::RunnerThreadContext> MmffWorkload::makeRunnerCtx() {
+  auto ctx = std::make_unique<RunnerThreadContext>();
   // Each runner thread claims one exclusive collector slot when the workload
   // is producing device-side output; the slot is initialized lazily on the
   // first dispatch (where the GPU stream is known).
-  if (inputs.output == CoordinateOutput::DEVICE) {
-    ctx.collectorIdx = inputs.nextRunnerIdx.fetch_add(1, std::memory_order_relaxed);
+  if (inputs_.output == CoordinateOutput::DEVICE) {
+    ctx->collectorIdx = inputs_.nextRunnerIdx.fetch_add(1, std::memory_order_relaxed);
   }
   return ctx;
 }
 
-std::unique_ptr<MmffWorkload::PerGpuState> MmffWorkload::makePerGpuState(Inputs& /*inputs*/, int gpuId) {
+void MmffWorkload::preprocess(gpu_scheduler::IndexRange range,
+                              gpu_scheduler::PreprocThreadContext& /*ctx*/,
+                              const gpu_scheduler::PushBatch& pushBatch) {
+  ScopedNvtxRange preprocRange("MmffWorkload::preprocess");
+  auto&           inputs = inputs_;
+
+  // Cached MMFF contributions per molecule, scoped to this preprocess call.
+  // The same molecule may have multiple conformers in this batch; we build
+  // its contributions once and clone-with-positions per conformer.
+  struct CachedMoleculeData {
+    EnergyForceContribsHost ffParams;
+  };
+  std::unordered_map<RDKit::ROMol*, CachedMoleculeData> moleculeCache;
+
+  auto batch = std::make_unique<MmffBatch>();
+  batch->conformers.assign(inputs.allConformers->begin() + range.start, inputs.allConformers->begin() + range.end);
+
+  std::uint32_t       currentAtomOffset = 0;
+  std::vector<double> pos;
+
+  for (const auto& confInfo : batch->conformers) {
+    auto*               mol      = confInfo.mol;
+    const std::uint32_t numAtoms = mol->getNumAtoms();
+
+    auto it = moleculeCache.find(mol);
+    if (it == moleculeCache.end()) {
+      ScopedNvtxRange    cacheRange("Preprocess single molecule");
+      CachedMoleculeData cached;
+      cached.ffParams = constructForcefieldContribs(*mol, (*inputs.properties)[confInfo.molIdx]);
+      it              = moleculeCache.insert({mol, std::move(cached)}).first;
+    }
+
+    batch->conformerAtomStarts.push_back(currentAtomOffset);
+    currentAtomOffset += numAtoms;
+
+    confPosToVect(*confInfo.conformer, pos);
+
+    auto contribs = it->second.ffParams;
+    if (!inputs.constraints->empty()) {
+      (*inputs.constraints)[confInfo.molIdx].applyTo(contribs, pos);
+    }
+    addMoleculeToBatch(contribs, pos, batch->systemHost, &batch->metadata, confInfo.molIdx, confInfo.confIdx);
+  }
+
+  if (inputs.deviceInput != nullptr) {
+    batch->batchSrcIndices.reserve(batch->conformers.size());
+    batch->batchAtomCounts.reserve(batch->conformers.size());
+    for (size_t k = 0; k < batch->conformers.size(); ++k) {
+      const size_t srcSlot = static_cast<size_t>(range.start) + k;
+      batch->batchSrcIndices.push_back(inputs.deviceInputIndex->conformerIndexBy[srcSlot]);
+      batch->batchAtomCounts.push_back(static_cast<int>(batch->conformers[k].mol->getNumAtoms()));
+    }
+  }
+
+  pushBatch(std::move(batch));
+}
+
+std::unique_ptr<gpu_scheduler::PerGpuState> MmffWorkload::makePerGpuState(int gpuId) {
   auto pgs      = std::make_unique<MmffPerGpu>();
   pgs->deviceId = gpuId;
   return pgs;
 }
 
-std::unique_ptr<MmffWorkload::GpuSlotState> MmffWorkload::makeSlotState(Inputs& /*inputs*/,
-                                                                        PerGpuState& /*pgs*/,
-                                                                        int /*gpuId*/) {
+std::unique_ptr<gpu_scheduler::GpuSlotState> MmffWorkload::makeSlotState(gpu_scheduler::PerGpuState& /*pgs*/,
+                                                                         int /*gpuId*/) {
   return std::make_unique<MmffSlot>();
 }
 
-void MmffWorkload::dispatchAndCopyBack(GpuSlotState&        slot,
-                                       PerGpuState&         pgs,
-                                       PreparedBatch&       batch,
-                                       Inputs&              inputs,
-                                       RunnerThreadContext& ctx) {
+void MmffWorkload::dispatchAndCopyBack(gpu_scheduler::GpuSlotState&        slotBase,
+                                       gpu_scheduler::PerGpuState&         pgsBase,
+                                       gpu_scheduler::PreparedBatch&       batchBase,
+                                       gpu_scheduler::RunnerThreadContext& ctxBase) {
   ScopedNvtxRange dispatchRange("MmffWorkload::dispatchAndCopyBack");
+  auto&           slot   = static_cast<GpuSlotState&>(slotBase);
+  auto&           pgs    = static_cast<PerGpuState&>(pgsBase);
+  auto&           batch  = static_cast<PreparedBatch&>(batchBase);
+  auto&           ctx    = static_cast<RunnerThreadContext&>(ctxBase);
+  auto&           inputs = inputs_;
 
   const cudaStream_t stream         = slot.primaryStream();
   const size_t       numAtomsTotal  = batch.systemHost.positions.size();
@@ -189,7 +250,11 @@ void MmffWorkload::dispatchAndCopyBack(GpuSlotState&        slot,
   }
 }
 
-void MmffWorkload::postprocess(GpuSlotState& slot, PreparedBatch& batch, Inputs& inputs, RunnerThreadContext& /*ctx*/) {
+void MmffWorkload::postprocess(gpu_scheduler::GpuSlotState&  slotBase,
+                               gpu_scheduler::PreparedBatch& batchBase,
+                               gpu_scheduler::RunnerThreadContext& /*ctxBase*/) {
+  auto& batch  = static_cast<PreparedBatch&>(batchBase);
+  auto& inputs = inputs_;
   // In DEVICE output mode dispatch already appended into the collector and
   // there is no host-side state to merge per batch.
   if (inputs.output == CoordinateOutput::DEVICE) {
@@ -199,6 +264,7 @@ void MmffWorkload::postprocess(GpuSlotState& slot, PreparedBatch& batch, Inputs&
   ScopedNvtxRange writebackRange("MmffWorkload::postprocess");
 
   std::lock_guard<std::mutex> lock(*inputs.outputMutex);
+  auto&                       slot = static_cast<GpuSlotState&>(slotBase);
   writeBackResults(batch.conformers, batch.conformerAtomStarts, slot.buffers, *inputs.moleculeEnergies);
   for (size_t i = 0; i < batch.conformers.size(); ++i) {
     const auto& confInfo                                           = batch.conformers[i];

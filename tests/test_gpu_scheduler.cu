@@ -134,7 +134,7 @@ struct FallbackEntry {
 // One unit of work flowing through the pipeline. Holds a borrowed pinned
 // buffer; releases it back to the pool on destruction so abort paths don't
 // leak (postprocess clears pinnedBuffer to opt out of the auto-release).
-struct AxpbBatch {
+struct AxpbBatch : nvMolKit::gpu_scheduler::PreparedBatch {
   PinnedFloatBuffer* pinnedBuffer = nullptr;
   PinnedBufferPool*  pool         = nullptr;
   int                count        = 0;
@@ -171,12 +171,12 @@ struct AxpbInputs {
   std::atomic<int> numFallbackProcessed{0};
 };
 
-struct AxpbPerGpu {
+struct AxpbPerGpu : nvMolKit::gpu_scheduler::PerGpuState {
   int deviceId = -1;
   // Sanity check that PerGpuState is constructed with the device active.
 };
 
-struct AxpbSlot {
+struct AxpbSlot : nvMolKit::gpu_scheduler::GpuSlotState {
   ScopedStream             stream;
   ScopedCudaEvent          completion;
   AsyncDeviceVector<float> devX;
@@ -189,21 +189,22 @@ struct AxpbSlot {
     hostScratchY.assign(static_cast<size_t>(capacity), 0.0f);
   }
 
-  cudaStream_t primaryStream() const { return stream.stream(); }
-  cudaEvent_t  completionEvent() const { return completion.event(); }
+  cudaStream_t primaryStream() const override { return stream.stream(); }
+  cudaEvent_t  completionEvent() const override { return completion.event(); }
 };
 
 // Per-thread context: holds a producer guard for the fallback queue so the
 // queue closes only after every preprocessor and runner thread has exited.
-struct AxpbPreprocCtx {
+struct AxpbPreprocCtx : nvMolKit::gpu_scheduler::PreprocThreadContext {
   FallbackProducerGuard<FallbackEntry> guard{nullptr};
 };
 
-struct AxpbRunnerCtx {
+struct AxpbRunnerCtx : nvMolKit::gpu_scheduler::RunnerThreadContext {
   FallbackProducerGuard<FallbackEntry> guard{nullptr};
 };
 
-struct AxpbWorkload {
+class AxpbWorkload : public nvMolKit::gpu_scheduler::Workload {
+ public:
   using Inputs               = AxpbInputs;
   using PreparedBatch        = AxpbBatch;
   using PerGpuState          = AxpbPerGpu;
@@ -211,27 +212,31 @@ struct AxpbWorkload {
   using PreprocThreadContext = AxpbPreprocCtx;
   using RunnerThreadContext  = AxpbRunnerCtx;
 
-  static int totalUnits(Inputs& inputs) { return static_cast<int>(inputs.x.size()); }
-  static int unitsPerPreprocBatch(Inputs& inputs) { return inputs.unitsPerClaim; }
+  explicit AxpbWorkload(Inputs& inputs) : inputs_(inputs) {}
 
-  static PreprocThreadContext makePreprocCtx(Inputs& inputs) {
-    PreprocThreadContext ctx;
-    if (inputs.fallbackQueue != nullptr) {
-      ctx.guard = FallbackProducerGuard<FallbackEntry>(inputs.fallbackQueue);
+  int totalUnits() const override { return static_cast<int>(inputs_.x.size()); }
+  int unitsPerPreprocBatch() const override { return inputs_.unitsPerClaim; }
+
+  std::unique_ptr<nvMolKit::gpu_scheduler::PreprocThreadContext> makePreprocCtx() override {
+    auto ctx = std::make_unique<PreprocThreadContext>();
+    if (inputs_.fallbackQueue != nullptr) {
+      ctx->guard = FallbackProducerGuard<FallbackEntry>(inputs_.fallbackQueue);
     }
     return ctx;
   }
 
-  static RunnerThreadContext makeRunnerCtx(Inputs& inputs) {
-    RunnerThreadContext ctx;
-    if (inputs.fallbackQueue != nullptr) {
-      ctx.guard = FallbackProducerGuard<FallbackEntry>(inputs.fallbackQueue);
+  std::unique_ptr<nvMolKit::gpu_scheduler::RunnerThreadContext> makeRunnerCtx() override {
+    auto ctx = std::make_unique<RunnerThreadContext>();
+    if (inputs_.fallbackQueue != nullptr) {
+      ctx->guard = FallbackProducerGuard<FallbackEntry>(inputs_.fallbackQueue);
     }
     return ctx;
   }
 
-  template <class PushFn>
-  static void preprocess(Inputs& inputs, IndexRange range, PreprocThreadContext& /*ctx*/, PushFn pushBatch) {
+  void preprocess(IndexRange range,
+                  nvMolKit::gpu_scheduler::PreprocThreadContext& /*ctx*/,
+                  const nvMolKit::gpu_scheduler::PushBatch& pushBatch) override {
+    auto& inputs = inputs_;
     if (inputs.failInPreprocess) {
       throw std::runtime_error("preprocess fault");
     }
@@ -265,26 +270,32 @@ struct AxpbWorkload {
     pushBatch(std::move(batch));
   }
 
-  static std::unique_ptr<PerGpuState> makePerGpuState(Inputs& /*inputs*/, int gpuId) {
+  std::unique_ptr<nvMolKit::gpu_scheduler::PerGpuState> makePerGpuState(int gpuId) override {
     int current = -1;
     cudaCheckError(cudaGetDevice(&current));
     EXPECT_EQ(current, gpuId) << "PerGpuState must be constructed with the device active";
-    return std::make_unique<AxpbPerGpu>(AxpbPerGpu{gpuId});
+    auto state      = std::make_unique<AxpbPerGpu>();
+    state->deviceId = gpuId;
+    return state;
   }
 
-  static std::unique_ptr<GpuSlotState> makeSlotState(Inputs& inputs, PerGpuState& pgs, int gpuId) {
-    int current = -1;
+  std::unique_ptr<nvMolKit::gpu_scheduler::GpuSlotState> makeSlotState(nvMolKit::gpu_scheduler::PerGpuState& pgsBase,
+                                                                       int gpuId) override {
+    auto& pgs     = static_cast<PerGpuState&>(pgsBase);
+    int   current = -1;
     cudaCheckError(cudaGetDevice(&current));
     EXPECT_EQ(current, gpuId) << "GpuSlotState must be constructed with the device active";
     EXPECT_EQ(pgs.deviceId, gpuId);
-    return std::make_unique<AxpbSlot>(inputs.maxBatchCapacity);
+    return std::make_unique<AxpbSlot>(inputs_.maxBatchCapacity);
   }
 
-  static void dispatchAndCopyBack(GpuSlotState& slot,
-                                  PerGpuState& /*pgs*/,
-                                  PreparedBatch& batch,
-                                  Inputs&        inputs,
-                                  RunnerThreadContext& /*ctx*/) {
+  void dispatchAndCopyBack(nvMolKit::gpu_scheduler::GpuSlotState& slotBase,
+                           nvMolKit::gpu_scheduler::PerGpuState& /*pgsBase*/,
+                           nvMolKit::gpu_scheduler::PreparedBatch& batchBase,
+                           nvMolKit::gpu_scheduler::RunnerThreadContext& /*ctxBase*/) override {
+    auto& slot   = static_cast<GpuSlotState&>(slotBase);
+    auto& batch  = static_cast<PreparedBatch&>(batchBase);
+    auto& inputs = inputs_;
     if (inputs.failInDispatch) {
       throw std::runtime_error("dispatch fault");
     }
@@ -302,13 +313,17 @@ struct AxpbWorkload {
     slot.devY.copyToHost(batch.pinnedBuffer->hostY.data(), static_cast<size_t>(batch.count));
   }
 
-  static void onAbort(Inputs& inputs) {
-    if (inputs.pool != nullptr) {
-      inputs.pool->shutdown();
+  void onAbort() override {
+    if (inputs_.pool != nullptr) {
+      inputs_.pool->shutdown();
     }
   }
 
-  static void postprocess(GpuSlotState& /*slot*/, PreparedBatch& batch, Inputs& inputs, RunnerThreadContext& /*ctx*/) {
+  void postprocess(nvMolKit::gpu_scheduler::GpuSlotState& /*slotBase*/,
+                   nvMolKit::gpu_scheduler::PreparedBatch& batchBase,
+                   nvMolKit::gpu_scheduler::RunnerThreadContext& /*ctxBase*/) override {
+    auto& batch  = static_cast<PreparedBatch&>(batchBase);
+    auto& inputs = inputs_;
     {
       std::lock_guard<std::mutex> lock(inputs.outputMutex);
       for (int i = 0; i < batch.count; ++i) {
@@ -322,6 +337,9 @@ struct AxpbWorkload {
       inputs.fallbackQueue->tryProcessOne();
     }
   }
+
+ private:
+  Inputs& inputs_;
 };
 
 }  // namespace
@@ -446,7 +464,8 @@ TEST_F(GpuSchedulerTest, RunsAxpbCorrectlySingleGpu) {
   config.slotsPerWorker             = 2;
   config.gpuIds.push_back(0);
 
-  Pipeline<AxpbWorkload> pipeline(config, inputs);
+  AxpbWorkload workload(inputs);
+  Pipeline     pipeline(config, workload);
   pipeline.run();
 
   for (int i = 0; i < N; ++i) {
@@ -480,7 +499,8 @@ TEST_F(GpuSchedulerTest, BackpressureHonoredWhenPoolSmall) {
   config.slotsPerWorker             = 1;
   config.gpuIds.push_back(0);
 
-  Pipeline<AxpbWorkload> pipeline(config, inputs);
+  AxpbWorkload workload(inputs);
+  Pipeline     pipeline(config, workload);
   pipeline.run();
 
   for (int i = 0; i < N; ++i) {
@@ -522,7 +542,8 @@ TEST_F(GpuSchedulerTest, FallbackQueueDrainedOpportunistically) {
   config.slotsPerWorker             = 2;
   config.gpuIds.push_back(0);
 
-  Pipeline<AxpbWorkload> pipeline(config, inputs);
+  AxpbWorkload workload(inputs);
+  Pipeline     pipeline(config, workload);
   pipeline.run();
 
   // After all preprocessors and runners exit, the queue closes. Drain any
@@ -563,7 +584,8 @@ TEST_F(GpuSchedulerTest, MultipleGpusSplitWork) {
   config.slotsPerWorker             = 2;
   config.gpuIds                     = {0, 1};
 
-  Pipeline<AxpbWorkload> pipeline(config, inputs);
+  AxpbWorkload workload(inputs);
+  Pipeline     pipeline(config, workload);
   pipeline.run();
 
   for (int i = 0; i < N; ++i) {
@@ -591,7 +613,8 @@ TEST_F(GpuSchedulerTest, PreprocessExceptionRethrown) {
   config.slotsPerWorker             = 1;
   config.gpuIds.push_back(0);
 
-  Pipeline<AxpbWorkload> pipeline(config, inputs);
+  AxpbWorkload workload(inputs);
+  Pipeline     pipeline(config, workload);
   EXPECT_THROW(pipeline.run(), std::runtime_error);
 }
 
@@ -614,7 +637,8 @@ TEST_F(GpuSchedulerTest, DispatchExceptionRethrown) {
   config.slotsPerWorker             = 2;
   config.gpuIds.push_back(0);
 
-  Pipeline<AxpbWorkload> pipeline(config, inputs);
+  AxpbWorkload workload(inputs);
+  Pipeline     pipeline(config, workload);
   EXPECT_THROW(pipeline.run(), std::runtime_error);
 }
 
@@ -626,6 +650,7 @@ TEST_F(GpuSchedulerTest, ZeroInputUnitsIsNoOp) {
   inputs.pool = &pool;
   Config config;
   config.gpuIds.push_back(0);
-  Pipeline<AxpbWorkload> pipeline(config, inputs);
+  AxpbWorkload workload(inputs);
+  Pipeline     pipeline(config, workload);
   pipeline.run();  // should return immediately
 }

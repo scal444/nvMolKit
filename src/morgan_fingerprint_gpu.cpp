@@ -128,8 +128,8 @@ void recordFirstException(std::exception_ptr ex, std::exception_ptr& firstExcept
 }
 
 void drainFallbackQueue(gpu_scheduler::CpuFallbackQueue<int>& fallbackQueue,
-                        std::exception_ptr&                  firstException,
-                        std::mutex&                          exceptionMutex) {
+                        std::exception_ptr&                   firstException,
+                        std::mutex&                           exceptionMutex) {
   try {
     while (fallbackQueue.tryProcessOne()) {
     }
@@ -172,7 +172,8 @@ template <int fpSize> bool runPipelineIfAnyGpuWork(MorganInputs<fpSize>& inputs)
   // Single GPU for now (matches pre-port behavior). Multi-GPU support requires
   // per-device output aggregation and is left as a follow-up.
   config.gpuIds = {inputs.primaryDeviceId};
-  gpu_scheduler::Pipeline<MorganWorkload<fpSize>> pipeline(config, inputs);
+  MorganWorkload<fpSize>  workload(inputs);
+  gpu_scheduler::Pipeline pipeline(config, workload);
   pipeline.run();
   return true;
 }
@@ -237,7 +238,7 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
 
   std::exception_ptr fallbackException;
   std::mutex         fallbackExceptionMutex;
-  auto fallbackWorkers = startFallbackWorkers(fallbackQueue,
+  auto               fallbackWorkers = startFallbackWorkers(fallbackQueue,
                                               numCpuThreads,
                                               inputs.workLarge.size(),
                                               fallbackException,
@@ -281,8 +282,8 @@ std::vector<std::unique_ptr<ExplicitBitVect>> getFingerprintsCu(const std::vecto
   // NOLINTBEGIN (cppcoreguidelines-avoid-magic-numbers)
   switch (fpSize) {
     case 4096: {
-      auto                           gpuResult = computeFingerprintsCuImpl<4096>(mols, maxRadius, batchSize, numThreads);
-      std::vector<FlatBitVect<4096>> resultsGpuVec(gpuResult.size());
+      auto gpuResult = computeFingerprintsCuImpl<4096>(mols, maxRadius, batchSize, numThreads);
+      std::vector<FlatBitVect<4096>>                resultsGpuVec(gpuResult.size());
       std::vector<std::unique_ptr<ExplicitBitVect>> results(gpuResult.size());
       cudaCheckError(cudaDeviceSynchronize());
       extractResultsFromGPUBatch<4096>(gpuResult, resultsGpuVec);
@@ -291,8 +292,8 @@ std::vector<std::unique_ptr<ExplicitBitVect>> getFingerprintsCu(const std::vecto
       return results;
     }
     case 2048: {
-      auto                           gpuResult = computeFingerprintsCuImpl<2048>(mols, maxRadius, batchSize, numThreads);
-      std::vector<FlatBitVect<2048>> resultsGpuVec(gpuResult.size());
+      auto gpuResult = computeFingerprintsCuImpl<2048>(mols, maxRadius, batchSize, numThreads);
+      std::vector<FlatBitVect<2048>>                resultsGpuVec(gpuResult.size());
       std::vector<std::unique_ptr<ExplicitBitVect>> results(gpuResult.size());
       cudaCheckError(cudaDeviceSynchronize());
       extractResultsFromGPUBatch<2048>(gpuResult, resultsGpuVec);
@@ -301,8 +302,8 @@ std::vector<std::unique_ptr<ExplicitBitVect>> getFingerprintsCu(const std::vecto
       return results;
     }
     case 1024: {
-      auto                           gpuResult = computeFingerprintsCuImpl<1024>(mols, maxRadius, batchSize, numThreads);
-      std::vector<FlatBitVect<1024>> resultsGpuVec(gpuResult.size());
+      auto gpuResult = computeFingerprintsCuImpl<1024>(mols, maxRadius, batchSize, numThreads);
+      std::vector<FlatBitVect<1024>>                resultsGpuVec(gpuResult.size());
       std::vector<std::unique_ptr<ExplicitBitVect>> results(gpuResult.size());
       cudaCheckError(cudaDeviceSynchronize());
       extractResultsFromGPUBatch<1024>(gpuResult, resultsGpuVec);

@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/gpu_scheduler/workload.h"
 #include "src/substruct/minibatch_planner.h"
 #include "src/substruct/molecules_device.cuh"
 #include "src/substruct/pinned_buffer_pool.h"
@@ -73,7 +74,7 @@ class ConsolidatedDeviceBuffer {
 /**
  * @brief Owns CUDA resources and device buffers for a worker executor.
  */
-struct GpuExecutor {
+struct GpuExecutor : gpu_scheduler::GpuSlotState {
   MiniBatchPlan plan;
 
   // Streams and events (declared first so they're destroyed last)
@@ -104,8 +105,8 @@ struct GpuExecutor {
   /// Pipeline-contract accessors (see src/gpu_scheduler/pipeline.h).
   /// The compute stream is the one Pipeline records its completion event on,
   /// so the copyDoneEvent (recorded after the final D2H) is the natural choice.
-  cudaStream_t primaryStream() const { return computeStream.stream(); }
-  cudaEvent_t  completionEvent() const { return copyDoneEvent.event(); }
+  cudaStream_t primaryStream() const override { return computeStream.stream(); }
+  cudaEvent_t  completionEvent() const override { return copyDoneEvent.event(); }
 
   void applyMiniBatchPlan(MiniBatchPlan&& plan);
 };

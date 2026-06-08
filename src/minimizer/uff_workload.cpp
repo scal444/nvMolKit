@@ -27,40 +27,89 @@
 
 namespace nvMolKit::UFF {
 
-int UffWorkload::totalUnits(Inputs& inputs) {
-  return static_cast<int>(inputs.allConformers->size());
+int UffWorkload::totalUnits() const {
+  return static_cast<int>(inputs_.allConformers->size());
 }
 
-int UffWorkload::unitsPerPreprocBatch(Inputs& inputs) {
-  return std::max(1, inputs.batchSize);
+int UffWorkload::unitsPerPreprocBatch() const {
+  return std::max(1, inputs_.batchSize);
 }
 
-UffWorkload::RunnerThreadContext UffWorkload::makeRunnerCtx(Inputs& inputs) {
-  RunnerThreadContext ctx;
-  if (inputs.output == CoordinateOutput::DEVICE) {
-    ctx.collectorIdx = inputs.nextRunnerIdx.fetch_add(1, std::memory_order_relaxed);
+std::unique_ptr<gpu_scheduler::RunnerThreadContext> UffWorkload::makeRunnerCtx() {
+  auto ctx = std::make_unique<RunnerThreadContext>();
+  if (inputs_.output == CoordinateOutput::DEVICE) {
+    ctx->collectorIdx = inputs_.nextRunnerIdx.fetch_add(1, std::memory_order_relaxed);
   }
   return ctx;
 }
 
-std::unique_ptr<UffWorkload::PerGpuState> UffWorkload::makePerGpuState(Inputs& /*inputs*/, int gpuId) {
+void UffWorkload::preprocess(gpu_scheduler::IndexRange range,
+                             gpu_scheduler::PreprocThreadContext& /*ctx*/,
+                             const gpu_scheduler::PushBatch& pushBatch) {
+  ScopedNvtxRange preprocRange("UffWorkload::preprocess");
+  auto&           inputs = inputs_;
+
+  auto batch = std::make_unique<UffBatch>();
+  batch->conformers.assign(inputs.allConformers->begin() + range.start, inputs.allConformers->begin() + range.end);
+
+  std::uint32_t       currentAtomOffset = 0;
+  std::vector<double> pos;
+
+  for (const auto& confInfo : batch->conformers) {
+    const std::uint32_t numAtoms = confInfo.mol->getNumAtoms();
+    batch->conformerAtomStarts.push_back(currentAtomOffset);
+    currentAtomOffset += numAtoms;
+
+    confPosToVect(*confInfo.conformer, pos);
+    auto ffParams = constructForcefieldContribs(*confInfo.mol,
+                                                (*inputs.vdwThresholds)[confInfo.molIdx],
+                                                confInfo.conformerId,
+                                                (*inputs.ignoreInterfragInteractions)[confInfo.molIdx]);
+    if (!inputs.constraints->empty()) {
+      (*inputs.constraints)[confInfo.molIdx].applyTo(ffParams, pos);
+    }
+    addMoleculeToBatch(ffParams,
+                       pos,
+                       batch->systemHost,
+                       batch->metadata,
+                       confInfo.molIdx,
+                       static_cast<int>(confInfo.confIdx));
+  }
+
+  if (inputs.deviceInput != nullptr) {
+    batch->batchSrcIndices.reserve(batch->conformers.size());
+    batch->batchAtomCounts.reserve(batch->conformers.size());
+    for (size_t k = 0; k < batch->conformers.size(); ++k) {
+      const size_t srcSlot = static_cast<size_t>(range.start) + k;
+      batch->batchSrcIndices.push_back(inputs.deviceInputIndex->conformerIndexBy[srcSlot]);
+      batch->batchAtomCounts.push_back(static_cast<int>(batch->conformers[k].mol->getNumAtoms()));
+    }
+  }
+
+  pushBatch(std::move(batch));
+}
+
+std::unique_ptr<gpu_scheduler::PerGpuState> UffWorkload::makePerGpuState(int gpuId) {
   auto pgs      = std::make_unique<UffPerGpu>();
   pgs->deviceId = gpuId;
   return pgs;
 }
 
-std::unique_ptr<UffWorkload::GpuSlotState> UffWorkload::makeSlotState(Inputs& /*inputs*/,
-                                                                      PerGpuState& /*pgs*/,
-                                                                      int /*gpuId*/) {
+std::unique_ptr<gpu_scheduler::GpuSlotState> UffWorkload::makeSlotState(gpu_scheduler::PerGpuState& /*pgs*/,
+                                                                        int /*gpuId*/) {
   return std::make_unique<UffSlot>();
 }
 
-void UffWorkload::dispatchAndCopyBack(GpuSlotState&        slot,
-                                      PerGpuState&         pgs,
-                                      PreparedBatch&       batch,
-                                      Inputs&              inputs,
-                                      RunnerThreadContext& ctx) {
+void UffWorkload::dispatchAndCopyBack(gpu_scheduler::GpuSlotState&        slotBase,
+                                      gpu_scheduler::PerGpuState&         pgsBase,
+                                      gpu_scheduler::PreparedBatch&       batchBase,
+                                      gpu_scheduler::RunnerThreadContext& ctxBase) {
   ScopedNvtxRange dispatchRange("UffWorkload::dispatchAndCopyBack");
+  auto&           slot   = static_cast<GpuSlotState&>(slotBase);
+  auto&           pgs    = static_cast<PerGpuState&>(pgsBase);
+  auto&           batch  = static_cast<PreparedBatch&>(batchBase);
+  auto&           ctx    = static_cast<RunnerThreadContext&>(ctxBase);
+  auto&           inputs = inputs_;
 
   const cudaStream_t stream         = slot.primaryStream();
   const size_t       numAtomsTotal  = batch.systemHost.positions.size();
@@ -131,7 +180,12 @@ void UffWorkload::dispatchAndCopyBack(GpuSlotState&        slot,
   }
 }
 
-void UffWorkload::postprocess(GpuSlotState& slot, PreparedBatch& batch, Inputs& inputs, RunnerThreadContext& /*ctx*/) {
+void UffWorkload::postprocess(gpu_scheduler::GpuSlotState&  slotBase,
+                              gpu_scheduler::PreparedBatch& batchBase,
+                              gpu_scheduler::RunnerThreadContext& /*ctxBase*/) {
+  auto& slot   = static_cast<GpuSlotState&>(slotBase);
+  auto& batch  = static_cast<PreparedBatch&>(batchBase);
+  auto& inputs = inputs_;
   if (inputs.output == CoordinateOutput::DEVICE) {
     return;
   }

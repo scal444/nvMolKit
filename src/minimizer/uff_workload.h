@@ -34,7 +34,7 @@
 #include "src/forcefields/forcefield_constraints.h"
 #include "src/forcefields/uff.h"
 #include "src/forcefields/uff_batched_forcefield.h"
-#include "src/gpu_scheduler/pipeline.h"
+#include "src/gpu_scheduler/workload.h"
 #include "src/minimizer/bfgs_common.h"
 #include "src/minimizer/bfgs_minimize.h"
 #include "src/minimizer/bfgs_types.h"
@@ -47,7 +47,7 @@ namespace nvMolKit::UFF {
  * @brief Inputs shared across all UFF workload threads.
  *
  * Owned by `UFFMinimizeMoleculesConfs` and held by reference inside
- * Pipeline<UffWorkload>. Per-molecule UFF parameters (`vdwThresholds`,
+ * UffWorkload. Per-molecule UFF parameters (`vdwThresholds`,
  * `ignoreInterfragInteractions`, `constraints`) are read-only; the result
  * vectors are written under `outputMutex` from postprocess.
  */
@@ -83,7 +83,7 @@ struct UffInputs {
  * @brief One UFF mini-batch: a contiguous slice of the flattened
  * conformer list plus the host-side batched system built for it.
  */
-struct UffBatch {
+struct UffBatch : gpu_scheduler::PreparedBatch {
   std::vector<ConformerInfo> conformers;
   std::vector<std::uint32_t> conformerAtomStarts;
   BatchedMolecularSystemHost systemHost;
@@ -104,24 +104,24 @@ struct UffBatch {
  * @brief Per-runner-slot device state (stream + completion event + reusable
  * pinned host buffers for D2H transfers).
  */
-struct UffSlot {
+struct UffSlot : gpu_scheduler::GpuSlotState {
   ScopedStream       stream;
   ScopedCudaEvent    completion;
   ThreadLocalBuffers buffers;
 
-  cudaStream_t primaryStream() const { return stream.stream(); }
-  cudaEvent_t  completionEvent() const { return completion.event(); }
+  cudaStream_t primaryStream() const override { return stream.stream(); }
+  cudaEvent_t  completionEvent() const override { return completion.event(); }
 };
 
 /**
  * @brief Per-CUDA-device read-only state. Empty for UFF.
  */
-struct UffPerGpu {
+struct UffPerGpu : gpu_scheduler::PerGpuState {
   int deviceId = -1;
 };
 
 /**
- * @brief Trait struct wired into Pipeline<UffWorkload>.
+ * @brief Runtime-polymorphic UFF workload consumed by gpu_scheduler::Pipeline.
  *
  * Lifecycle mirrors MmffWorkload: preprocess builds the host system from a
  * conformer slice (UFF rebuilds parameters per conformer because they
@@ -130,82 +130,46 @@ struct UffPerGpu {
  * D2H copies, postprocess writes positions and statuses back under the
  * shared outputMutex.
  */
-struct UffWorkload {
+class UffWorkload : public gpu_scheduler::Workload {
+ public:
   using Inputs        = UffInputs;
   using PreparedBatch = UffBatch;
   using PerGpuState   = UffPerGpu;
   using GpuSlotState  = UffSlot;
   /// No per-thread preproc state needed.
-  struct PreprocThreadContext {};
+  struct PreprocThreadContext : gpu_scheduler::PreprocThreadContext {};
   /// Per-runner-thread context. In DEVICE output mode, `collectorIdx` holds
   /// the runner's exclusive slot into `Inputs.deviceCollectors`, claimed in
   /// `makeRunnerCtx` via `Inputs.nextRunnerIdx`.
-  struct RunnerThreadContext {
+  struct RunnerThreadContext : gpu_scheduler::RunnerThreadContext {
     int collectorIdx = -1;
   };
 
-  static int totalUnits(Inputs& inputs);
-  static int unitsPerPreprocBatch(Inputs& inputs);
+  explicit UffWorkload(Inputs& inputs) : inputs_(inputs) {}
 
-  static RunnerThreadContext makeRunnerCtx(Inputs& inputs);
+  int totalUnits() const override;
+  int unitsPerPreprocBatch() const override;
 
-  /// `preprocess` is the one trait method that has to be defined in the
-  /// header: the pipeline instantiates it per-runner with a caller-supplied
-  /// `PushFn` (a lambda type) that the pipeline owns.
-  template <class PushFn>
-  static void preprocess(Inputs& inputs, gpu_scheduler::IndexRange range, PreprocThreadContext&, PushFn pushBatch) {
-    ScopedNvtxRange preprocRange("UffWorkload::preprocess");
+  std::unique_ptr<gpu_scheduler::RunnerThreadContext> makeRunnerCtx() override;
 
-    auto batch = std::make_unique<UffBatch>();
-    batch->conformers.assign(inputs.allConformers->begin() + range.start, inputs.allConformers->begin() + range.end);
+  void preprocess(gpu_scheduler::IndexRange            range,
+                  gpu_scheduler::PreprocThreadContext& ctx,
+                  const gpu_scheduler::PushBatch&      pushBatch) override;
 
-    std::uint32_t       currentAtomOffset = 0;
-    std::vector<double> pos;
+  std::unique_ptr<gpu_scheduler::PerGpuState>  makePerGpuState(int gpuId) override;
+  std::unique_ptr<gpu_scheduler::GpuSlotState> makeSlotState(gpu_scheduler::PerGpuState& pgs, int gpuId) override;
 
-    for (const auto& confInfo : batch->conformers) {
-      const std::uint32_t numAtoms = confInfo.mol->getNumAtoms();
-      batch->conformerAtomStarts.push_back(currentAtomOffset);
-      currentAtomOffset += numAtoms;
+  void dispatchAndCopyBack(gpu_scheduler::GpuSlotState&        slot,
+                           gpu_scheduler::PerGpuState&         pgs,
+                           gpu_scheduler::PreparedBatch&       batch,
+                           gpu_scheduler::RunnerThreadContext& ctx) override;
 
-      confPosToVect(*confInfo.conformer, pos);
-      auto ffParams = constructForcefieldContribs(*confInfo.mol,
-                                                  (*inputs.vdwThresholds)[confInfo.molIdx],
-                                                  confInfo.conformerId,
-                                                  (*inputs.ignoreInterfragInteractions)[confInfo.molIdx]);
-      if (!inputs.constraints->empty()) {
-        (*inputs.constraints)[confInfo.molIdx].applyTo(ffParams, pos);
-      }
-      addMoleculeToBatch(ffParams,
-                         pos,
-                         batch->systemHost,
-                         batch->metadata,
-                         confInfo.molIdx,
-                         static_cast<int>(confInfo.confIdx));
-    }
+  void postprocess(gpu_scheduler::GpuSlotState&        slot,
+                   gpu_scheduler::PreparedBatch&       batch,
+                   gpu_scheduler::RunnerThreadContext& ctx) override;
 
-    if (inputs.deviceInput != nullptr) {
-      batch->batchSrcIndices.reserve(batch->conformers.size());
-      batch->batchAtomCounts.reserve(batch->conformers.size());
-      for (size_t k = 0; k < batch->conformers.size(); ++k) {
-        const size_t srcSlot = static_cast<size_t>(range.start) + k;
-        batch->batchSrcIndices.push_back(inputs.deviceInputIndex->conformerIndexBy[srcSlot]);
-        batch->batchAtomCounts.push_back(static_cast<int>(batch->conformers[k].mol->getNumAtoms()));
-      }
-    }
-
-    pushBatch(std::move(batch));
-  }
-
-  static std::unique_ptr<PerGpuState>  makePerGpuState(Inputs& inputs, int gpuId);
-  static std::unique_ptr<GpuSlotState> makeSlotState(Inputs& inputs, PerGpuState& pgs, int gpuId);
-
-  static void dispatchAndCopyBack(GpuSlotState&        slot,
-                                  PerGpuState&         pgs,
-                                  PreparedBatch&       batch,
-                                  Inputs&              inputs,
-                                  RunnerThreadContext& ctx);
-
-  static void postprocess(GpuSlotState& slot, PreparedBatch& batch, Inputs& inputs, RunnerThreadContext& ctx);
+ private:
+  Inputs& inputs_;
 };
 
 }  // namespace nvMolKit::UFF

@@ -138,7 +138,8 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfs(std::vector<RDKit::ROMol*>&       
   inputs.moleculeConverged = &moleculeConverged;
   inputs.outputMutex       = &outputMutex;
 
-  gpu_scheduler::Pipeline<MmffWorkload> pipeline(config, inputs);
+  MmffWorkload            workload(inputs);
+  gpu_scheduler::Pipeline pipeline(config, workload);
   pipeline.run();
 
   if (deviceOutput) {

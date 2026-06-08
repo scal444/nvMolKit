@@ -22,7 +22,6 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -36,7 +35,7 @@
 #include "src/forcefields/mmff.h"
 #include "src/forcefields/mmff_batched_forcefield.h"
 #include "src/forcefields/mmff_properties.h"
-#include "src/gpu_scheduler/pipeline.h"
+#include "src/gpu_scheduler/workload.h"
 #include "src/minimizer/bfgs_common.h"
 #include "src/minimizer/bfgs_minimize.h"
 #include "src/minimizer/bfgs_types.h"
@@ -49,8 +48,8 @@ namespace nvMolKit::MMFF {
  * @brief Inputs shared across all MMFF workload threads.
  *
  * Owned by `MMFFMinimizeMoleculesConfs` and held by reference inside
- * Pipeline<MmffWorkload>. The `mols` / `properties` / `constraints` fields
- * are read-only; the result vectors are written under `outputMutex` from
+ * MmffWorkload. The `mols` / `properties` / `constraints` fields are
+ * read-only; the result vectors are written under `outputMutex` from
  * postprocess.
  */
 struct MmffInputs {
@@ -100,7 +99,7 @@ struct MmffInputs {
  * @brief One MMFF mini-batch: a contiguous slice of the flattened
  * conformer list plus the host-side batched system built for it.
  */
-struct MmffBatch {
+struct MmffBatch : gpu_scheduler::PreparedBatch {
   std::vector<ConformerInfo> conformers;
   std::vector<std::uint32_t> conformerAtomStarts;
   BatchedMolecularSystemHost systemHost;
@@ -124,13 +123,13 @@ struct MmffBatch {
  * for D2H transfers; the BFGS minimizer and forcefield are constructed
  * fresh per batch (matching the pre-port code) but use this slot's stream.
  */
-struct MmffSlot {
+struct MmffSlot : gpu_scheduler::GpuSlotState {
   ScopedStream       stream;
   ScopedCudaEvent    completion;
   ThreadLocalBuffers buffers;
 
-  cudaStream_t primaryStream() const { return stream.stream(); }
-  cudaEvent_t  completionEvent() const { return completion.event(); }
+  cudaStream_t primaryStream() const override { return stream.stream(); }
+  cudaEvent_t  completionEvent() const override { return completion.event(); }
 };
 
 /**
@@ -138,12 +137,12 @@ struct MmffSlot {
  * self-contained (forcefield params live on the slot for the duration of
  * one dispatch).
  */
-struct MmffPerGpu {
+struct MmffPerGpu : gpu_scheduler::PerGpuState {
   int deviceId = -1;
 };
 
 /**
- * @brief Trait struct wired into Pipeline<MmffWorkload>.
+ * @brief Runtime-polymorphic MMFF workload consumed by gpu_scheduler::Pipeline.
  *
  * Lifecycle:
  *   - preprocess: takes a [start,end) slice of the flat conformer list,
@@ -159,93 +158,46 @@ struct MmffPerGpu {
  *   - postprocess: writes positions back into the RDKit conformers and
  *     records per-conformer energies / convergence flags under outputMutex.
  */
-struct MmffWorkload {
+class MmffWorkload : public gpu_scheduler::Workload {
+ public:
   using Inputs        = MmffInputs;
   using PreparedBatch = MmffBatch;
   using PerGpuState   = MmffPerGpu;
   using GpuSlotState  = MmffSlot;
   /// No per-thread preproc state needed.
-  struct PreprocThreadContext {};
+  struct PreprocThreadContext : gpu_scheduler::PreprocThreadContext {};
   /// Per-runner-thread context. In DEVICE output mode, `collectorIdx` holds
   /// the runner's exclusive slot into `Inputs.deviceCollectors`, claimed in
   /// `makeRunnerCtx` via `Inputs.nextRunnerIdx`.
-  struct RunnerThreadContext {
+  struct RunnerThreadContext : gpu_scheduler::RunnerThreadContext {
     int collectorIdx = -1;
   };
 
-  static int totalUnits(Inputs& inputs);
-  static int unitsPerPreprocBatch(Inputs& inputs);
+  explicit MmffWorkload(Inputs& inputs) : inputs_(inputs) {}
 
-  static RunnerThreadContext makeRunnerCtx(Inputs& inputs);
+  int totalUnits() const override;
+  int unitsPerPreprocBatch() const override;
 
-  /// `preprocess` is the one trait method that has to be defined in the
-  /// header: the pipeline instantiates it per-runner with a caller-supplied
-  /// `PushFn` (a lambda type) that the pipeline owns.
-  template <class PushFn>
-  static void preprocess(Inputs& inputs, gpu_scheduler::IndexRange range, PreprocThreadContext&, PushFn pushBatch) {
-    ScopedNvtxRange preprocRange("MmffWorkload::preprocess");
+  std::unique_ptr<gpu_scheduler::RunnerThreadContext> makeRunnerCtx() override;
 
-    // Cached MMFF contributions per molecule, scoped to this preprocess call.
-    // The same molecule may have multiple conformers in this batch; we build
-    // its contributions once and clone-with-positions per conformer.
-    struct CachedMoleculeData {
-      EnergyForceContribsHost ffParams;
-    };
-    std::unordered_map<RDKit::ROMol*, CachedMoleculeData> moleculeCache;
+  void preprocess(gpu_scheduler::IndexRange            range,
+                  gpu_scheduler::PreprocThreadContext& ctx,
+                  const gpu_scheduler::PushBatch&      pushBatch) override;
 
-    auto batch = std::make_unique<MmffBatch>();
-    batch->conformers.assign(inputs.allConformers->begin() + range.start, inputs.allConformers->begin() + range.end);
+  std::unique_ptr<gpu_scheduler::PerGpuState>  makePerGpuState(int gpuId) override;
+  std::unique_ptr<gpu_scheduler::GpuSlotState> makeSlotState(gpu_scheduler::PerGpuState& pgs, int gpuId) override;
 
-    std::uint32_t       currentAtomOffset = 0;
-    std::vector<double> pos;
+  void dispatchAndCopyBack(gpu_scheduler::GpuSlotState&        slot,
+                           gpu_scheduler::PerGpuState&         pgs,
+                           gpu_scheduler::PreparedBatch&       batch,
+                           gpu_scheduler::RunnerThreadContext& ctx) override;
 
-    for (const auto& confInfo : batch->conformers) {
-      auto*               mol      = confInfo.mol;
-      const std::uint32_t numAtoms = mol->getNumAtoms();
+  void postprocess(gpu_scheduler::GpuSlotState&        slot,
+                   gpu_scheduler::PreparedBatch&       batch,
+                   gpu_scheduler::RunnerThreadContext& ctx) override;
 
-      auto it = moleculeCache.find(mol);
-      if (it == moleculeCache.end()) {
-        ScopedNvtxRange    cacheRange("Preprocess single molecule");
-        CachedMoleculeData cached;
-        cached.ffParams = constructForcefieldContribs(*mol, (*inputs.properties)[confInfo.molIdx]);
-        it              = moleculeCache.insert({mol, std::move(cached)}).first;
-      }
-
-      batch->conformerAtomStarts.push_back(currentAtomOffset);
-      currentAtomOffset += numAtoms;
-
-      confPosToVect(*confInfo.conformer, pos);
-
-      auto contribs = it->second.ffParams;
-      if (!inputs.constraints->empty()) {
-        (*inputs.constraints)[confInfo.molIdx].applyTo(contribs, pos);
-      }
-      addMoleculeToBatch(contribs, pos, batch->systemHost, &batch->metadata, confInfo.molIdx, confInfo.confIdx);
-    }
-
-    if (inputs.deviceInput != nullptr) {
-      batch->batchSrcIndices.reserve(batch->conformers.size());
-      batch->batchAtomCounts.reserve(batch->conformers.size());
-      for (size_t k = 0; k < batch->conformers.size(); ++k) {
-        const size_t srcSlot = static_cast<size_t>(range.start) + k;
-        batch->batchSrcIndices.push_back(inputs.deviceInputIndex->conformerIndexBy[srcSlot]);
-        batch->batchAtomCounts.push_back(static_cast<int>(batch->conformers[k].mol->getNumAtoms()));
-      }
-    }
-
-    pushBatch(std::move(batch));
-  }
-
-  static std::unique_ptr<PerGpuState>  makePerGpuState(Inputs& inputs, int gpuId);
-  static std::unique_ptr<GpuSlotState> makeSlotState(Inputs& inputs, PerGpuState& pgs, int gpuId);
-
-  static void dispatchAndCopyBack(GpuSlotState&        slot,
-                                  PerGpuState&         pgs,
-                                  PreparedBatch&       batch,
-                                  Inputs&              inputs,
-                                  RunnerThreadContext& ctx);
-
-  static void postprocess(GpuSlotState& slot, PreparedBatch& batch, Inputs& inputs, RunnerThreadContext& ctx);
+ private:
+  Inputs& inputs_;
 };
 
 }  // namespace nvMolKit::MMFF

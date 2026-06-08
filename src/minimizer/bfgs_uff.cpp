@@ -125,7 +125,8 @@ UFFMinimizeResult UFFMinimizeMoleculesConfs(std::vector<RDKit::ROMol*>& mols,
   inputs.moleculeConverged           = &moleculeConverged;
   inputs.outputMutex                 = &outputMutex;
 
-  gpu_scheduler::Pipeline<UffWorkload> pipeline(config, inputs);
+  UffWorkload             workload(inputs);
+  gpu_scheduler::Pipeline pipeline(config, workload);
   pipeline.run();
 
   if (deviceOutput) {

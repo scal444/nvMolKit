@@ -13,7 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <algorithm>
 #include <array>
+#include <memory>
+#include <utility>
+#include <vector>
 
 #include "src/substruct/molecules_device.cuh"
 #include "src/substruct/recursive_preprocessor.h"
@@ -188,24 +192,24 @@ void uploadAndLaunchMiniBatchInternal(GpuExecutor&                        execut
 
 }  // namespace
 
-int SubstructWorkload::totalUnits(Inputs& inputs) {
-  return static_cast<int>(inputs.targets->size());
+int SubstructWorkload::totalUnits() const {
+  return static_cast<int>(inputs_.targets->size());
 }
 
-int SubstructWorkload::unitsPerPreprocBatch(Inputs& inputs) {
-  return inputs.targetsPerBatch;
+int SubstructWorkload::unitsPerPreprocBatch() const {
+  return inputs_.targetsPerBatch;
 }
 
-std::unique_ptr<SubstructWorkload::PerGpuState> SubstructWorkload::makePerGpuState(Inputs& inputs, int gpuId) {
+std::unique_ptr<gpu_scheduler::PerGpuState> SubstructWorkload::makePerGpuState(int gpuId) {
   auto state = std::make_unique<SubstructPerGpu>();
-  if (gpuId == inputs.primaryDeviceId) {
-    state->queriesDevice         = inputs.queriesDevice;
-    state->recursivePreprocessor = inputs.recursivePreprocessor;
+  if (gpuId == inputs_.primaryDeviceId) {
+    state->queriesDevice         = inputs_.queriesDevice;
+    state->recursivePreprocessor = inputs_.recursivePreprocessor;
   } else {
     state->localQueries = std::make_unique<MoleculesDevice>();
-    state->localQueries->copyFromHost(*inputs.queriesHost);
+    state->localQueries->copyFromHost(*inputs_.queriesHost);
     state->localPreprocessor = std::make_unique<RecursivePatternPreprocessor>();
-    state->localPreprocessor->buildPatterns(*inputs.queriesHost);
+    state->localPreprocessor->buildPatterns(*inputs_.queriesHost);
     state->localPreprocessor->syncToDevice(nullptr);
     state->queriesDevice         = state->localQueries.get();
     state->recursivePreprocessor = state->localPreprocessor.get();
@@ -213,9 +217,8 @@ std::unique_ptr<SubstructWorkload::PerGpuState> SubstructWorkload::makePerGpuSta
   return state;
 }
 
-std::unique_ptr<SubstructWorkload::GpuSlotState> SubstructWorkload::makeSlotState(Inputs& /*inputs*/,
-                                                                                  PerGpuState& /*pgs*/,
-                                                                                  int gpuId) {
+std::unique_ptr<gpu_scheduler::GpuSlotState> SubstructWorkload::makeSlotState(gpu_scheduler::PerGpuState& /*pgs*/,
+                                                                              int gpuId) {
   // Slot index isn't meaningful with the new pipeline (executors are pooled
   // per-coordinator); pass 0 for telemetry.
   auto executor = std::make_unique<GpuExecutor>(0, gpuId);
@@ -223,20 +226,160 @@ std::unique_ptr<SubstructWorkload::GpuSlotState> SubstructWorkload::makeSlotStat
   return executor;
 }
 
-SubstructWorkload::RunnerThreadContext SubstructWorkload::makeRunnerCtx(Inputs& inputs) {
-  RunnerThreadContext ctx;
-  if (inputs.fallbackQueue != nullptr) {
-    ctx.fallbackGuard = gpu_scheduler::FallbackProducerGuard<RDKitFallbackEntry>(inputs.fallbackQueue);
+std::unique_ptr<gpu_scheduler::PreprocThreadContext> SubstructWorkload::makePreprocCtx() {
+  return std::make_unique<PreprocThreadContext>();
+}
+
+std::unique_ptr<gpu_scheduler::RunnerThreadContext> SubstructWorkload::makeRunnerCtx() {
+  auto ctx = std::make_unique<RunnerThreadContext>();
+  if (inputs_.fallbackQueue != nullptr) {
+    ctx->fallbackGuard = gpu_scheduler::FallbackProducerGuard<RDKitFallbackEntry>(inputs_.fallbackQueue);
   }
   return ctx;
 }
 
-void SubstructWorkload::dispatchAndCopyBack(GpuSlotState&  slot,
-                                            PerGpuState&   pgs,
-                                            PreparedBatch& batch,
-                                            Inputs&        inputs,
-                                            RunnerThreadContext& /*ctx*/) {
+void SubstructWorkload::preprocess(gpu_scheduler::IndexRange            range,
+                                   gpu_scheduler::PreprocThreadContext& ctxBase,
+                                   const gpu_scheduler::PushBatch&      pushBatch) {
+  ScopedNvtxRange  claimRange("SubstructWorkload::preprocess");
+  MiniBatchPlanner planner;
+  auto&            inputs = inputs_;
+  auto&            ctx    = static_cast<PreprocThreadContext&>(ctxBase);
+
+  const auto& targets         = *inputs.targets;
+  const auto& queryContext    = *inputs.queryContext;
+  const int   numQueries      = queryContext.numQueries;
+  const auto& leafSubpatterns = inputs.recursivePreprocessor->leafSubpatterns();
+
+  ctx.batchTargets.clear();
+  ctx.batchOriginalIndices.clear();
+  ctx.fallbackEntries.clear();
+  ctx.batchTargets.reserve(static_cast<size_t>(range.size()));
+  ctx.batchOriginalIndices.reserve(static_cast<size_t>(range.size()));
+
+  for (int i = range.start; i < range.end; ++i) {
+    const RDKit::ROMol* target        = targets[i];
+    const unsigned int  atomCount     = target->getNumAtoms();
+    const bool          needsFallback = (atomCount > kMaxTargetAtoms) || requiresRDKitFallback(target);
+    if (needsFallback) {
+      for (int q = 0; q < numQueries; ++q) {
+        ctx.fallbackEntries.push_back({i, q});
+      }
+      continue;
+    }
+    ctx.batchTargets.push_back(target);
+    ctx.batchOriginalIndices.push_back(i);
+  }
+
+  if (!ctx.fallbackEntries.empty() && inputs.fallbackQueue != nullptr) {
+    inputs.fallbackQueue->enqueueBatch(std::move(ctx.fallbackEntries));
+    ctx.fallbackEntries.clear();
+  }
+
+  if (ctx.batchTargets.empty()) {
+    if (inputs.fallbackQueue != nullptr) {
+      inputs.fallbackQueue->tryProcessOne();
+    }
+    return;
+  }
+
+  MoleculesHost    targetsHost;
+  std::vector<int> emptySortOrder;
+  buildTargetBatchParallelInto(targetsHost, 1, ctx.batchTargets, emptySortOrder);
+
+  auto sharedTargetsHost     = std::make_shared<MoleculesHost>(std::move(targetsHost));
+  auto sharedOriginalIndices = std::make_shared<std::vector<int>>(std::move(ctx.batchOriginalIndices));
+  ctx.batchOriginalIndices.clear();
+  ctx.batchOriginalIndices.reserve(static_cast<size_t>(range.size()));
+
+  const int numBatchTargets  = static_cast<int>(sharedOriginalIndices->size());
+  auto      sharedAtomCounts = std::make_shared<std::vector<int>>(static_cast<size_t>(numBatchTargets));
+
+  int localMaxTargetAtoms  = 0;
+  int localMaxBondsPerAtom = 0;
+  for (int targetIdx = 0; targetIdx < numBatchTargets; ++targetIdx) {
+    const int atomStart            = sharedTargetsHost->batchAtomStarts[targetIdx];
+    const int atomEnd              = sharedTargetsHost->batchAtomStarts[targetIdx + 1];
+    const int atoms                = atomEnd - atomStart;
+    (*sharedAtomCounts)[targetIdx] = atoms;
+    localMaxTargetAtoms            = std::max(localMaxTargetAtoms, atoms);
+    for (int a = atomStart; a < atomEnd; ++a) {
+      localMaxBondsPerAtom =
+        std::max(localMaxBondsPerAtom, static_cast<int>(sharedTargetsHost->targetAtomBonds[a].degree));
+    }
+  }
+
+  const int totalPairs       = numBatchTargets * numQueries;
+  const int maxPairsPerBatch = inputs.maxPairsPerBatch;
+
+  // Releases the buffer back to the pool if we throw between acquire and push.
+  struct BufferReleaseGuard {
+    PinnedHostBufferPool* pool   = nullptr;
+    PinnedHostBuffer*     buffer = nullptr;
+    ~BufferReleaseGuard() {
+      if (pool && buffer) {
+        pool->release(buffer);
+      }
+    }
+    void release() { buffer = nullptr; }
+  };
+
+  for (int pairOffset = 0; pairOffset < totalPairs; pairOffset += maxPairsPerBatch) {
+    PinnedHostBuffer* buffer = nullptr;
+    {
+      ScopedNvtxRange waitRange("Wait for pinned buffer", NvtxColor::kRed);
+      buffer = inputs.bufferPool->acquire();
+    }
+    if (buffer == nullptr) {
+      // Pool was shutdown via onAbort; bail out cleanly.
+      return;
+    }
+    BufferReleaseGuard releaseGuard{inputs.bufferPool, buffer};
+
+    auto batch                   = std::make_unique<PreparedMiniBatch>();
+    batch->pinnedBuffer          = buffer;
+    batch->pool                  = inputs.bufferPool;
+    batch->targetsHost           = sharedTargetsHost;
+    batch->targetOriginalIndices = sharedOriginalIndices;
+    batch->targetAtomCounts      = sharedAtomCounts;
+
+    batch->ctx.queryAtomCounts       = queryContext.queryAtomCounts.data();
+    batch->ctx.queryPipelineDepths   = queryContext.queryPipelineDepths.data();
+    batch->ctx.queryMaxDepths        = queryContext.queryMaxDepths.data();
+    batch->ctx.queryHasPatterns      = queryContext.queryHasPatterns.data();
+    batch->ctx.targetAtomCounts      = sharedAtomCounts.get();
+    batch->ctx.targetOriginalIndices = sharedOriginalIndices.get();
+    batch->ctx.numTargets            = numBatchTargets;
+    batch->ctx.numQueries            = numQueries;
+    batch->ctx.maxTargetAtoms        = localMaxTargetAtoms;
+    batch->ctx.maxQueryAtoms         = queryContext.maxQueryAtoms;
+    batch->ctx.maxBondsPerAtom       = localMaxBondsPerAtom;
+    batch->ctx.maxMatches            = inputs.maxMatches;
+    batch->ctx.countOnly             = inputs.countOnly;
+    const int templateTargetAtoms    = std::max(localMaxTargetAtoms, queryContext.maxQueryAtoms);
+    batch->ctx.templateConfig =
+      selectTemplateConfig(templateTargetAtoms, queryContext.maxQueryAtoms, localMaxBondsPerAtom);
+
+    planner.prepareMiniBatch(batch->plan, *buffer, batch->ctx, leafSubpatterns, pairOffset, maxPairsPerBatch);
+
+    releaseGuard.release();
+    pushBatch(std::move(batch));
+  }
+
+  if (inputs.fallbackQueue != nullptr && inputs.fallbackQueue->hasWork()) {
+    inputs.fallbackQueue->tryProcessOne();
+  }
+}
+
+void SubstructWorkload::dispatchAndCopyBack(gpu_scheduler::GpuSlotState&  slotBase,
+                                            gpu_scheduler::PerGpuState&   pgsBase,
+                                            gpu_scheduler::PreparedBatch& batchBase,
+                                            gpu_scheduler::RunnerThreadContext& /*ctxBase*/) {
   ScopedNvtxRange dispatchRange("SubstructWorkload::dispatchAndCopyBack");
+  auto&           slot   = static_cast<GpuSlotState&>(slotBase);
+  auto&           pgs    = static_cast<PerGpuState&>(pgsBase);
+  auto&           batch  = static_cast<PreparedBatch&>(batchBase);
+  auto&           inputs = inputs_;
 
   slot.applyMiniBatchPlan(std::move(batch.plan));
   slot.recursiveScratch.setPinnedBuffer(batch.pinnedBuffer->patternsAtDepthHost,
@@ -264,11 +407,13 @@ void SubstructWorkload::dispatchAndCopyBack(GpuSlotState&  slot,
   }
 }
 
-void SubstructWorkload::postprocess(GpuSlotState&  slot,
-                                    PreparedBatch& batch,
-                                    Inputs&        inputs,
-                                    RunnerThreadContext& /*ctx*/) {
+void SubstructWorkload::postprocess(gpu_scheduler::GpuSlotState&  slotBase,
+                                    gpu_scheduler::PreparedBatch& batchBase,
+                                    gpu_scheduler::RunnerThreadContext& /*ctxBase*/) {
   ScopedNvtxRange accumRange("SubstructWorkload::postprocess");
+  auto&           slot   = static_cast<GpuSlotState&>(slotBase);
+  auto&           batch  = static_cast<PreparedBatch&>(batchBase);
+  auto&           inputs = inputs_;
 
   if (inputs.boolResults != nullptr) {
     accumulateMiniBatchResultsBoolean(slot, batch.ctx, *inputs.boolResults, *inputs.resultsMutex, *batch.pinnedBuffer);
@@ -298,9 +443,9 @@ void SubstructWorkload::postprocess(GpuSlotState&  slot,
   }
 }
 
-void SubstructWorkload::onAbort(Inputs& inputs) {
-  if (inputs.bufferPool != nullptr) {
-    inputs.bufferPool->shutdown();
+void SubstructWorkload::onAbort() {
+  if (inputs_.bufferPool != nullptr) {
+    inputs_.bufferPool->shutdown();
   }
 }
 

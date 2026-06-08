@@ -341,7 +341,8 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
   schedulerConfig.slotsPerWorker             = slotsPerWorker;
   schedulerConfig.gpuIds                     = gpuIds;
 
-  gpu_scheduler::Pipeline<SubstructWorkload> pipeline(schedulerConfig, inputs);
+  SubstructWorkload       workload(inputs);
+  gpu_scheduler::Pipeline pipeline(schedulerConfig, workload);
   pipeline.run();
 
   // Drain any residual fallback entries (e.g. depth-limit overflow that wasn't

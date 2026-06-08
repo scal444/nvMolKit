@@ -19,6 +19,7 @@
 #include <memory>
 #include <vector>
 
+#include "src/gpu_scheduler/workload.h"
 #include "src/substruct/minibatch_planner.h"
 #include "src/substruct/molecules.h"
 #include "src/substruct/pinned_buffer_pool.h"
@@ -39,7 +40,7 @@ namespace nvMolKit {
  * Postprocess opts out of the auto-release by clearing pinnedBuffer to nullptr
  * after handing the buffer back to the pool itself.
  */
-struct PreparedMiniBatch {
+struct PreparedMiniBatch : gpu_scheduler::PreparedBatch {
   std::shared_ptr<MoleculesHost>    targetsHost;
   std::shared_ptr<std::vector<int>> targetOriginalIndices;
   std::shared_ptr<std::vector<int>> targetAtomCounts;
