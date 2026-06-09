@@ -14,10 +14,54 @@
 // limitations under the License.
 
 #include <boost/python.hpp>
+#include <stdexcept>
+#include <string>
 
 #include "bfgs_mmff.h"
 #include "boost_python_utils.h"
+#include "minimizer/bfgs_types.h"
+#include "minimizer/fire_minimizer.h"
 #include "mmff_python_utils.h"
+
+namespace {
+
+nvMolKit::BfgsBackend parseBfgsBackend(const std::string& name) {
+  if (name == "BATCHED") {
+    return nvMolKit::BfgsBackend::BATCHED;
+  }
+  if (name == "PER_MOL" || name == "PER_MOLECULE") {
+    return nvMolKit::BfgsBackend::PER_MOLECULE;
+  }
+  if (name == "HYBRID") {
+    return nvMolKit::BfgsBackend::HYBRID;
+  }
+  throw std::invalid_argument("Unknown BFGS backend '" + name + "'. Expected 'BATCHED', 'PER_MOL', or 'HYBRID'.");
+}
+
+nvMolKit::FireBackend parseFireBackend(const std::string& name) {
+  if (name == "BATCHED") {
+    return nvMolKit::FireBackend::BATCHED;
+  }
+  if (name == "PER_MOL" || name == "PER_MOLECULE") {
+    return nvMolKit::FireBackend::PER_MOLECULE;
+  }
+  if (name == "HYBRID") {
+    return nvMolKit::FireBackend::HYBRID;
+  }
+  throw std::invalid_argument("Unknown FIRE backend '" + name + "'. Expected 'BATCHED', 'PER_MOL', or 'HYBRID'.");
+}
+
+nvMolKit::MinimizerKind parseMinimizerKind(const std::string& name) {
+  if (name == "BFGS" || name == "bfgs") {
+    return nvMolKit::MinimizerKind::BFGS;
+  }
+  if (name == "FIRE" || name == "fire") {
+    return nvMolKit::MinimizerKind::FIRE;
+  }
+  throw std::invalid_argument("Unknown minimizerKind '" + name + "'. Expected 'BFGS' or 'FIRE'.");
+}
+
+}  // namespace
 
 BOOST_PYTHON_MODULE(_mmffOptimization) {
   boost::python::def(
@@ -25,19 +69,36 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
     +[](const boost::python::list&            molecules,
         int                                   maxIters,
         const boost::python::list&            propertiesList,
-        const nvMolKit::BatchHardwareOptions& hardwareOptions) -> boost::python::list {
+        const nvMolKit::BatchHardwareOptions& hardwareOptions,
+        const std::string&                    backend,
+        const std::string&                    minimizerKind,
+        const nvMolKit::FireOptions&          fireOptions) -> boost::python::list {
       auto molsVec = nvMolKit::extractMolecules(molecules);
 
       const auto properties = nvMolKit::extractMMFFPropertiesList(propertiesList, static_cast<int>(molsVec.size()));
-      const auto result =
-        nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molsVec, maxIters, properties, hardwareOptions);
+      const auto kind       = parseMinimizerKind(minimizerKind);
+      const auto result     = kind == nvMolKit::MinimizerKind::FIRE ?
+                                nvMolKit::MMFF::MMFFOptimizeMoleculesConfsFire(molsVec,
+                                                                               maxIters,
+                                                                               fireOptions,
+                                                                               properties,
+                                                                               hardwareOptions,
+                                                                               parseFireBackend(backend)) :
+                                nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molsVec,
+                                                                               maxIters,
+                                                                               properties,
+                                                                               hardwareOptions,
+                                                                               parseBfgsBackend(backend));
 
       return nvMolKit::vectorOfVectorsToList(result);
     },
     (boost::python::arg("molecules"),
      boost::python::arg("maxIters")        = 200,
      boost::python::arg("properties")      = boost::python::list(),
-     boost::python::arg("hardwareOptions") = nvMolKit::BatchHardwareOptions()),
+     boost::python::arg("hardwareOptions") = nvMolKit::BatchHardwareOptions(),
+     boost::python::arg("backend")         = std::string("HYBRID"),
+     boost::python::arg("minimizerKind")   = std::string("BFGS"),
+     boost::python::arg("fireOptions")     = nvMolKit::FireOptions()),
     "Optimize conformers for multiple molecules using MMFF force field.\n"
     "\n"
     "Args:\n"
@@ -45,6 +106,9 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
     "    maxIters: Maximum number of optimization iterations (default: 200)\n"
     "    properties: MMFFProperties-compatible object with forcefield settings\n"
     "    hardwareOptions: BatchHardwareOptions object with hardware settings (default: default options)\n"
+    "    backend: Minimizer backend: 'BATCHED', 'PER_MOL', or 'HYBRID' (default: 'HYBRID')\n"
+    "    minimizerKind: 'BFGS' or 'FIRE' (default: 'BFGS')\n"
+    "    fireOptions: FireOptions used when minimizerKind='FIRE'\n"
     "\n"
     "Returns:\n"
     "    List of lists of energies, where each inner list contains energies for conformers of one molecule");

@@ -23,6 +23,7 @@ from rdkit.Chem import rdForceFieldHelpers
 if TYPE_CHECKING:
     from rdkit.Chem import Mol
 
+from nvmolkit._types import FireOptions  # noqa: F401  (re-export). Must precede _uffOptimization for converters.
 from nvmolkit import _uffOptimization
 from nvmolkit.types import HardwareOptions
 
@@ -33,6 +34,8 @@ def UFFOptimizeMoleculesConfs(
     vdwThreshold: float | Sequence[float] = 10.0,
     ignoreInterfragInteractions: bool | Sequence[bool] = True,
     hardwareOptions: HardwareOptions | None = None,
+    minimizerKind: str = "BFGS",
+    fireOptions: FireOptions | None = None,
 ) -> list[list[float]]:
     """Optimize conformers for multiple molecules using the UFF force field.
 
@@ -46,6 +49,8 @@ def UFFOptimizeMoleculesConfs(
             fragments. May be provided as a scalar or per-molecule sequence.
         hardwareOptions: Configures CPU and GPU batching, threading, and device
             selection. Defaults are chosen automatically when omitted.
+        minimizerKind: ``"BFGS"`` (default) or ``"FIRE"``.
+        fireOptions: FIRE algorithm options used when ``minimizerKind="FIRE"``.
 
     Returns:
         List of lists of energies, where each inner list contains optimized
@@ -91,10 +96,17 @@ def UFFOptimizeMoleculesConfs(
 
     if hardwareOptions is None:
         hardwareOptions = HardwareOptions()
+    minimizer_kind = str(minimizerKind).upper()
+    if minimizer_kind not in {"BFGS", "FIRE"}:
+        raise ValueError("minimizerKind must be 'BFGS' or 'FIRE'")
+    if fireOptions is None:
+        fireOptions = FireOptions()
     return _uffOptimization.UFFOptimizeMoleculesConfs(
         molecules,
         int(maxIters),
         thresholds,
         interfrag_flags,
         hardwareOptions._as_native(),
+        minimizer_kind,
+        fireOptions,
     )

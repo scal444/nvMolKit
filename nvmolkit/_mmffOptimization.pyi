@@ -5,5 +5,8 @@ def MMFFOptimizeMoleculesConfs(
     molecules: List[Mol],
     maxIters: int = 200,
     properties: Any = None,
-    hardwareOptions: Any = None
+    hardwareOptions: Any = None,
+    backend: str = "HYBRID",
+    minimizerKind: str = "BFGS",
+    fireOptions: Any = None,
 ) -> List[List[float]]: ...

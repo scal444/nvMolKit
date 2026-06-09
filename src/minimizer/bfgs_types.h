@@ -42,6 +42,30 @@ enum class BfgsBackend {
 //! Atom count threshold for HYBRID backend selection (use PER_MOLECULE if max atoms <= this value)
 constexpr int kHybridBackendAtomThreshold = 64;
 
+//! \brief Backend implementation type for FIRE minimization.
+//!
+//! Mirrors ::BfgsBackend: ::BATCHED runs streaming kernels over the batch with
+//! a host-driven loop; ::PER_MOLECULE runs the full FIRE iteration loop in a
+//! single CUDA kernel with one block per molecule (analogous to BFGS per-mol);
+//! ::HYBRID auto-selects based on the largest molecule in the batch.
+enum class FireBackend {
+  BATCHED      = 0,
+  PER_MOLECULE = 1,
+  HYBRID       = 2,
+};
+
+//! Atom count threshold for HYBRID FIRE backend selection (use PER_MOLECULE if max atoms <= this value).
+constexpr int kHybridFireBackendAtomThreshold = 64;
+
+//! \brief Selects which minimization algorithm drives ETKDG's minimization stages.
+//!
+//! Orthogonal to ::BfgsBackend / ::FireBackend, which select the kernel layout
+//! *within* the chosen algorithm.
+enum class MinimizerKind {
+  BFGS = 0,  //!< RDKit-style batched BFGS with line search.
+  FIRE = 1,  //!< FIRE 2.0 (semi-implicit Euler with adaptive dt/alpha mixer).
+};
+
 }  // namespace nvMolKit
 
 #endif  // NVMOLKIT_BFGS_TYPES_H

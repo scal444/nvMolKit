@@ -9,5 +9,6 @@ def EmbedMolecules(
     params: EmbedParameters,
     confsPerMolecule: int = 1,
     maxIterations: int = -1,
-    hardwareOptions: Optional[BatchHardwareOptions] = ...
+    hardwareOptions: Optional[BatchHardwareOptions] = ...,
+    failuresOut: Optional[dict] = ...,
 ) -> None: ...

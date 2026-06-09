@@ -29,10 +29,19 @@ target_link_libraries(
   PRIVATE ${RDKit_LIBS} OpenMP::OpenMP_CXX)
 target_include_directories(bfgs_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
+add_library(
+  fire_minimizer fire_minimizer.cu fire_minimizer.h
+                 fire_minimize_permol_kernels.cu fire_minimize_permol_kernels.h)
+target_link_libraries(
+  fire_minimizer
+  PUBLIC device_vector batched_forcefield
+  PRIVATE rdkit_mmff_flattened dist_geom cub_helpers cccl_interface)
+target_include_directories(fire_minimizer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
 add_library(bfgs_mmff bfgs_mmff.cpp)
 target_link_libraries(
   bfgs_mmff
-  PUBLIC bfgs
+  PUBLIC bfgs fire_minimizer
   PRIVATE ${RDKit_LIBS}
           bfgs_common
           mmff_batched_forcefield
@@ -47,7 +56,7 @@ target_include_directories(bfgs_mmff PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 add_library(bfgs_uff bfgs_uff.cpp)
 target_link_libraries(
   bfgs_uff
-  PUBLIC bfgs
+  PUBLIC bfgs fire_minimizer
   PRIVATE ${RDKit_LIBS}
           bfgs_common
           uff_batched_forcefield

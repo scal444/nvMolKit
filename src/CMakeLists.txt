@@ -119,6 +119,7 @@ target_link_libraries(
           rdkit_dist_geom_flattened
           etkdg_impl
           etkdg_stages
+          fire_minimizer
           openmp_helpers
           OpenMP::OpenMP_CXX)
 target_include_directories(etkdg PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

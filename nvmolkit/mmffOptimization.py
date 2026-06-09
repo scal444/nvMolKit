@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from rdkit.Chem import Mol
     from rdkit.ForceField.rdForceField import MMFFMolProperties
 
+from nvmolkit._types import FireOptions  # noqa: F401  (re-export). Must precede _mmffOptimization to register Boost.Python converters for FireOptions / BatchHardwareOptions used by the FIRE entry point.
 from nvmolkit import _mmffOptimization
 from nvmolkit._mmff_bridge import default_rdkit_mmff_properties, make_internal_mmff_properties
 from nvmolkit.types import HardwareOptions
@@ -40,8 +41,11 @@ def MMFFOptimizeMoleculesConfs(
     nonBondedThreshold: float | Sequence[float] = 100.0,
     ignoreInterfragInteractions: bool | Sequence[bool] = True,
     hardwareOptions: HardwareOptions | None = None,
+    backend: str = "HYBRID",
+    minimizerKind: str = "BFGS",
+    fireOptions: FireOptions | None = None,
 ) -> list[list[float]]:
-    """Optimize conformers for multiple molecules using MMFF force field with BFGS minimization.
+    """Optimize conformers for multiple molecules using MMFF force field.
 
     This function performs GPU-accelerated MMFF optimization on multiple molecules with
     multiple conformers each. It uses CUDA for GPU acceleration and OpenMP for CPU
@@ -50,7 +54,7 @@ def MMFFOptimizeMoleculesConfs(
     Args:
         molecules: List of RDKit molecules to optimize. Each molecule should have
                   conformers already generated.
-        maxIters: Maximum number of BFGS optimization iterations (default: 200)
+        maxIters: Maximum number of optimization iterations (default: 200)
         properties: RDKit ``MMFFMolProperties`` object, a per-molecule sequence
             of those objects, or ``None`` to use default MMFF94 settings.
         nonBondedThreshold: Radius threshold used to exclude long-range
@@ -58,6 +62,12 @@ def MMFFOptimizeMoleculesConfs(
         ignoreInterfragInteractions: If ``True``, omit non-bonded terms between
             fragments. May also be provided as a per-molecule sequence.
         hardwareOptions: Configures CPU and GPU batching, threading, and device selection. Will attempt to use reasonable defaults if not set.
+        backend: Kernel backend selector for benchmarking. One of
+            ``"BATCHED"``, ``"PER_MOL"``, or ``"HYBRID"`` (default), which
+            auto-selects between batched and per-molecule kernels based on
+            the largest molecule in each batch.
+        minimizerKind: ``"BFGS"`` (default) or ``"FIRE"``.
+        fireOptions: FIRE algorithm options used when ``minimizerKind="FIRE"``.
 
     Returns:
         List of lists of energies, where each inner list contains the optimized energies
@@ -152,6 +162,11 @@ def MMFFOptimizeMoleculesConfs(
     properties_list = _normalize_properties(properties)
     thresholds = _normalize_scalar_or_list(nonBondedThreshold, "nonBondedThreshold")
     interfrag_flags = _normalize_scalar_or_list(ignoreInterfragInteractions, "ignoreInterfragInteractions")
+    minimizer_kind = str(minimizerKind).upper()
+    if minimizer_kind not in {"BFGS", "FIRE"}:
+        raise ValueError("minimizerKind must be 'BFGS' or 'FIRE'")
+    if fireOptions is None:
+        fireOptions = FireOptions()
     native_properties = [
         make_internal_mmff_properties(
             props,
@@ -160,4 +175,12 @@ def MMFFOptimizeMoleculesConfs(
         )
         for props, threshold, ignore_interfrag in zip(properties_list, thresholds, interfrag_flags)
     ]
-    return _mmffOptimization.MMFFOptimizeMoleculesConfs(molecules, maxIters, native_properties, native_options)
+    return _mmffOptimization.MMFFOptimizeMoleculesConfs(
+        molecules,
+        maxIters,
+        native_properties,
+        native_options,
+        backend,
+        minimizer_kind,
+        fireOptions,
+    )

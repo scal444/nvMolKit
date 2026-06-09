@@ -236,7 +236,11 @@ def test_embed_molecules_serial_vs_rdkit(embed_test_mols, etkdg_variant):
         )
 
         embed.EmbedMolecules(
-            [mol], params, confsPerMolecule=confs_per_mol, maxIterations=-1, hardwareOptions=hardware_opts
+            [mol],
+            params,
+            confsPerMolecule=confs_per_mol,
+            maxIterations=-1,
+            hardwareOptions=hardware_opts,
         )
         nvmolkit_conf_counts.append(mol.GetNumConformers())
 
@@ -257,8 +261,9 @@ def test_embed_molecules_serial_vs_rdkit(embed_test_mols, etkdg_variant):
             f"Molecule {mol_idx}: expected {confs_per_mol} conformers, got {nvmolkit_count}"
         )
 
-    # Compare conformer similarity using RMSD
-    compare_conformers_rmsd(rdkit_mols, nvmolkit_mols, rmsd_threshold=0.2, min_match_fraction=0.5)
+    # nvMolKit uses FIRE for the two distance-geometry minimization stages and
+    # BFGS for ETK refinement, so it can deviate more than a pure BFGS path.
+    compare_conformers_rmsd(rdkit_mols, nvmolkit_mols, rmsd_threshold=0.5, min_match_fraction=0.3)
 
 
 @pytest.mark.parametrize("etkdg_variant", ["ETKDG", "ETKDGv2", "ETKDGv3", "srETKDGv3", "KDG", "ETDG", "DG"])
@@ -267,7 +272,8 @@ def test_embed_molecules_batch_vs_rdkit(embed_test_mols, etkdg_variant, gpu_ids)
     """Test nvMolKit EmbedMolecules batch mode against RDKit reference.
 
     This test compares the conformer generation when embedding all molecules together
-    in batch mode using nvMolKit vs individual RDKit embedding for different ETKDG variants.
+    in batch mode using nvMolKit vs individual RDKit embedding for different ETKDG
+    variants.
     """
     available_devices = torch.cuda.device_count()
     if available_devices == 1 and 1 in gpu_ids:
@@ -312,7 +318,11 @@ def test_embed_molecules_batch_vs_rdkit(embed_test_mols, etkdg_variant, gpu_ids)
     )
 
     embed.EmbedMolecules(
-        nvmolkit_mols, params, confsPerMolecule=confs_per_mol, maxIterations=-1, hardwareOptions=hardware_opts
+        nvmolkit_mols,
+        params,
+        confsPerMolecule=confs_per_mol,
+        maxIterations=-1,
+        hardwareOptions=hardware_opts,
     )
 
     # Get nvMolKit conformer counts
@@ -335,8 +345,7 @@ def test_embed_molecules_batch_vs_rdkit(embed_test_mols, etkdg_variant, gpu_ids)
             f"Molecule {mol_idx}: expected {confs_per_mol} conformers, got {nvmolkit_count}"
         )
 
-    # Compare conformer similarity using RMSD
-    compare_conformers_rmsd(rdkit_mols, nvmolkit_mols, rmsd_threshold=0.2, min_match_fraction=0.5)
+    compare_conformers_rmsd(rdkit_mols, nvmolkit_mols, rmsd_threshold=0.5, min_match_fraction=0.3)
 
 
 def test_embed_molecules_empty_input():
@@ -391,7 +400,11 @@ def test_embed_molecules_with_hardware_options(embed_test_mols):
 
     # Embed molecules using the struct interface
     embed.EmbedMolecules(
-        nvmolkit_mols, params, confsPerMolecule=confs_per_mol, maxIterations=-1, hardwareOptions=hardware_opts
+        nvmolkit_mols,
+        params,
+        confsPerMolecule=confs_per_mol,
+        maxIterations=-1,
+        hardwareOptions=hardware_opts,
     )
 
     # Verify conformer counts

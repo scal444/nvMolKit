@@ -678,10 +678,10 @@ bool checkConvergence(const std::vector<int>&     activeMolIds,
 
   for (const int molIdx : activeMolIds) {
     if (convergenceHost[molIdx] != 0) {
-      return true;
+      return false;
     }
   }
-  return false;
+  return true;
 }
 
 }  // namespace
@@ -1041,7 +1041,7 @@ bool BfgsBatchMinimizer::minimize(const int                  numIters,
 
   energyOuts.zero();
   eFunc(nullptr);
-  return compactAndCountConverged() == numSystems ? 0 : 1;
+  return compactAndCountConverged() == numSystems;
 }
 
 bool BfgsBatchMinimizer::minimize(const int                  numIters,

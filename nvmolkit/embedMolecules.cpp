@@ -61,23 +61,54 @@ BOOST_PYTHON_MODULE(_embedMolecules) {
         const RDKit::DGeomHelpers::EmbedParameters& params,
         int                                         confsPerMolecule,
         int                                         maxIterations,
-        const nvMolKit::BatchHardwareOptions&       hardwareOptions) {
+        const nvMolKit::BatchHardwareOptions&       hardwareOptions,
+        const boost::python::object&                failuresOut) {
       auto molsVec = nvMolKit::extractMolecules(molecules);
 
-      // Call the C++ function with nullptr for failures
+      std::vector<std::vector<int16_t>>* failuresPtr   = nullptr;
+      std::vector<std::string>*          stageNamesPtr = nullptr;
+      std::vector<std::vector<int16_t>>  failuresStorage;
+      std::vector<std::string>           stageNamesStorage;
+      if (failuresOut.ptr() != Py_None) {
+        failuresPtr   = &failuresStorage;
+        stageNamesPtr = &stageNamesStorage;
+      }
+
       nvMolKit::embedMolecules(molsVec,
                                params,
                                confsPerMolecule,
                                maxIterations,
-                               false,    // debugMode = false
-                               nullptr,  // failures = nullptr
-                               hardwareOptions);
+                               false,
+                               failuresPtr,
+                               hardwareOptions,
+                               nvMolKit::BfgsBackend::HYBRID,
+                               stageNamesPtr,
+                               nvMolKit::FireBackend::BATCHED);
+
+      if (failuresOut.ptr() != Py_None) {
+        boost::python::dict outDict = boost::python::extract<boost::python::dict>(failuresOut);
+        boost::python::list nameList;
+        for (const auto& name : stageNamesStorage) {
+          nameList.append(name);
+        }
+        boost::python::list perStageList;
+        for (const auto& stage : failuresStorage) {
+          boost::python::list perConfList;
+          for (const auto& count : stage) {
+            perConfList.append(static_cast<int>(count));
+          }
+          perStageList.append(perConfList);
+        }
+        outDict["stage_names"] = nameList;
+        outDict["counts"]      = perStageList;
+      }
     },
     (boost::python::arg("molecules"),
      boost::python::arg("params"),
      boost::python::arg("confsPerMolecule") = 1,
      boost::python::arg("maxIterations")    = -1,
-     boost::python::arg("hardwareOptions")  = nvMolKit::BatchHardwareOptions()),
+     boost::python::arg("hardwareOptions")  = nvMolKit::BatchHardwareOptions(),
+     boost::python::arg("failuresOut")      = boost::python::object()),
     "Embed multiple molecules with multiple conformers using ETKDG.\n"
     "\n"
     "Args:\n"
@@ -86,6 +117,9 @@ BOOST_PYTHON_MODULE(_embedMolecules) {
     "    confsPerMolecule: Number of conformers to generate per molecule (default: 1)\n"
     "    maxIterations: Maximum iterations, -1 for auto (default: -1)\n"
     "    hardwareOptions: BatchHardwareOptions object with hardware settings (default: default options)\n"
+    "    failuresOut: Optional dict; if provided, populated with keys 'stage_names' (list of\n"
+    "                 stage names in pipeline order) and 'counts' (list of per-stage lists of\n"
+    "                 per-conformer failure counts, indexed mol_id * confsPerMolecule).\n"
     "\n"
     "Returns:\n"
     "    None (molecules are modified in-place with generated conformers)");

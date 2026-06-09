@@ -29,6 +29,7 @@
 #include "etkdg_stage_stereochem_checks.h"
 #include "etkdg_stage_update_conformers.h"
 #include "host_vector.h"
+#include "minimizer/fire_minimizer.h"
 #include "nvtx.h"
 #include "openmp_helpers.h"
 
@@ -62,7 +63,9 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
                     bool                                        debugMode,
                     std::vector<std::vector<int16_t>>*          failures,
                     const BatchHardwareOptions&                 hardwareOptions,
-                    BfgsBackend                                 backend) {
+                    BfgsBackend                                 backend,
+                    std::vector<std::string>*                   stageNames,
+                    FireBackend                                 fireBackend) {
   const ScopedNvtxRange fullRange("EmbedMolecules");
   if (!params.useRandomCoords) {
     throw std::runtime_error("ETKDG requires useRandomCoords to be true. Please set it in the EmbedParameters.");
@@ -143,6 +146,9 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
   if (failures != nullptr) {
     failures->clear();
   }
+  if (stageNames != nullptr) {
+    stageNames->clear();
+  }
 
   // Create mutex for thread-safe conformer updates and failure tracking
   std::mutex                conformer_mutex;
@@ -190,11 +196,20 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
       cudaStream_t     streamPtr = streamsPerThread[omp_get_thread_num()].stream();
       const int        deviceId  = devicesPerThread[omp_get_thread_num()];
       const WithDevice dev(deviceId);
-      auto             minimizer = std::make_unique<BfgsBatchMinimizer>(4,  // dataDim for ETKDG (4D distance geometry)
-                                                            DebugLevel::NONE,
-                                                            true,  // scaleGrads
-                                                            streamPtr,
-                                                            backend);
+      auto             bfgsMinimizer = std::make_unique<BfgsBatchMinimizer>(4,  // 4D distance geometry
+                                                                DebugLevel::NONE,
+                                                                true,  // scaleGrads
+                                                                streamPtr,
+                                                                backend);
+      FireOptions      fireOptions{};
+      fireOptions.useMass = false;  // ETKDG gradients are not physical forces; mass-weighting is meaningless here.
+      fireOptions.stuckDetectionEnabled = true;
+      fireOptions.stuckEnergyRelTol     = 3e-4;
+      fireOptions.stuckStreakLength     = 5;
+      auto fireMinimizer =
+        std::make_unique<FireBatchMinimizer>(4, fireOptions, streamPtr, /*debugMode=*/false, fireBackend);
+      const detail::MinimizerHandle distGeomMinimizerHandle = detail::MinimizerHandle::forFire(*fireMinimizer);
+      const detail::MinimizerHandle etkMinimizerHandle      = detail::MinimizerHandle::forBfgs(*bfgsMinimizer);
       std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::EnergyForceContribsHost>   dgCache;
       std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::Energy3DForceContribsHost> etkCache;
       // Pinned reusable buffers for common copies.
@@ -256,7 +271,7 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
                                                                              batchEargs,
                                                                              paramsCopy,
                                                                              *context,
-                                                                             *minimizer,
+                                                                             distGeomMinimizerHandle,
                                                                              1.0,
                                                                              0.1,
                                                                              400,
@@ -290,7 +305,7 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
                                                                           batchEargs,
                                                                           paramsCopy,
                                                                           *context,
-                                                                          *minimizer,
+                                                                          etkMinimizerHandle,
                                                                           streamPtr,
                                                                           &etkCache));
         }
@@ -333,9 +348,13 @@ void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
 
         // Handle failures if requested
         if (failures != nullptr) {
-          auto batchFailures = driver.getFailures(failuresScratch);
+          auto batchFailures   = driver.getFailures(failuresScratch);
+          auto batchStageNames = stageNames != nullptr ? driver.stageNames() : std::vector<std::string>{};
 
           const std::lock_guard<std::mutex> failureLock(failure_mutex);
+          if (stageNames != nullptr && stageNames->empty() && !batchStageNames.empty()) {
+            *stageNames = std::move(batchStageNames);
+          }
           // Initialize failures structure on first batch (outer vector is per stage, inner per conformer)
           if (failures->empty() && !batchFailures.empty()) {
             failures->resize(batchFailures.size());

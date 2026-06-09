@@ -26,9 +26,8 @@ if TYPE_CHECKING:
 
 __all__ = ["EmbedMolecules"]
 
-from nvmolkit import _embedMolecules  # type: ignore
 from nvmolkit.types import HardwareOptions
-
+from nvmolkit import _embedMolecules  # type: ignore
 
 def EmbedMolecules(
     molecules: list["Mol"],
@@ -36,6 +35,7 @@ def EmbedMolecules(
     confsPerMolecule: int = 1,
     maxIterations: int = -1,
     hardwareOptions: Optional[HardwareOptions] = None,
+    failuresOut: Optional[dict] = None,
 ) -> None:
     """Embed multiple molecules with multiple conformers on GPUs.
 
@@ -59,7 +59,14 @@ def EmbedMolecules(
         confsPerMolecule: Number of conformers to generate per molecule (default: 1)
         maxIterations: Maximum ETKDG iterations, -1 for automatic calculation (default: -1)
         hardwareOptions: HardwareOptions with hardware settings. If None, uses defaults.
+        failuresOut: Optional dict. If provided, on return it contains:
 
+                ``stage_names``: list[str], pipeline-ordered stage names.
+                ``counts``: list[list[int]], per-stage per-conformer failure counts.
+                  ``counts[stage][mol_idx * confsPerMolecule]`` aggregates the failures
+                  observed at ``stage`` for ``molecules[mol_idx]`` across all attempted
+                  conformers. (Per-conformer breakdown is not currently distinguished by
+                  the underlying scheduler.)
     Returns:
         None. Input molecules are modified in-place with generated conformers.
 
@@ -111,10 +118,15 @@ def EmbedMolecules(
     if not params.useRandomCoords:
         raise ValueError("ETKDG requires useRandomCoords=True in EmbedParameters")
 
-    # Use default hardware options if none provided
     if hardwareOptions is None:
         hardwareOptions = HardwareOptions()
     native_options = hardwareOptions._as_native()
 
-    # Call the C++ implementation
-    _embedMolecules.EmbedMolecules(molecules, params, confsPerMolecule, maxIterations, native_options)
+    _embedMolecules.EmbedMolecules(
+        molecules,
+        params,
+        confsPerMolecule,
+        maxIterations,
+        native_options,
+        failuresOut,
+    )

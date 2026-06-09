@@ -24,6 +24,7 @@ from rdkit.Geometry import Point3D
 
 from nvmolkit.embedMolecules import EmbedMolecules
 import nvmolkit.mmffOptimization as nvmolkit_mmff
+from nvmolkit.mmffOptimization import FireOptions
 from nvmolkit.types import HardwareOptions
 
 
@@ -472,3 +473,97 @@ def test_error_case_throws_properly():
     with pytest.raises(ValueError, match="lacking MMFF atom types") as exc_info:
         nvmolkit_mmff.MMFFOptimizeMoleculesConfs([mol], maxIters=200)
     assert exc_info.value.args[1] == {"none": [], "no_params": [0]}
+
+
+def _make_fire_options(takeHalfStepBack: bool, useAbc: bool, useMass: bool) -> FireOptions:
+    options = FireOptions()
+    options.takeHalfStepBack = takeHalfStepBack
+    options.abcCorrection = useAbc
+    options.useMass = useMass
+    return options
+
+
+def _assert_energies_match(rdkit_energies, nvmolkit_energies, tolerance: float):
+    assert len(rdkit_energies) == len(nvmolkit_energies), (
+        f"Mismatch in number of molecules: RDKit={len(rdkit_energies)}, nvMolKit={len(nvmolkit_energies)}"
+    )
+    for mol_idx, (rdkit_mol_energies, nvmolkit_mol_energies) in enumerate(zip(rdkit_energies, nvmolkit_energies)):
+        assert len(rdkit_mol_energies) == len(nvmolkit_mol_energies), (
+            f"Molecule {mol_idx}: conformer count mismatch: "
+            f"RDKit={len(rdkit_mol_energies)}, nvMolKit={len(nvmolkit_mol_energies)}"
+        )
+        for conf_idx, (rdkit_energy, nvmolkit_energy) in enumerate(zip(rdkit_mol_energies, nvmolkit_mol_energies)):
+            energy_diff = abs(rdkit_energy - nvmolkit_energy)
+            rel_error = energy_diff / abs(rdkit_energy) if abs(rdkit_energy) > 1e-10 else energy_diff
+            assert rel_error < tolerance, (
+                f"Molecule {mol_idx}, Conformer {conf_idx}: energy mismatch: "
+                f"RDKit={rdkit_energy:.6f}, nvMolKit={nvmolkit_energy:.6f}, "
+                f"abs_diff={energy_diff:.6f}, rel_error={rel_error:.6f}"
+            )
+
+
+@pytest.mark.parametrize("takeHalfStepBack", [False, True])
+@pytest.mark.parametrize("useAbc", [False, True])
+@pytest.mark.parametrize("useMass", [False, True])
+def test_mmff_optimization_fire_vs_rdkit(mmff_test_mols, takeHalfStepBack, useAbc, useMass):
+    """Compare nvMolKit FIRE 2.0 minimizer per-conformer energies against RDKit MMFF.
+
+    FIRE converges to a comparable (not identical) minimum, so we use the looser
+    1e-2 relative tolerance also used by the BFGS batch test.
+    """
+    rdkit_mols = create_hard_copy_mols(mmff_test_mols)
+    nvmolkit_mols = create_hard_copy_mols(mmff_test_mols)
+
+    rdkit_energies = calculate_rdkit_mmff_energies(rdkit_mols)
+
+    fire_options = _make_fire_options(takeHalfStepBack, useAbc, useMass)
+    nvmolkit_energies = nvmolkit_mmff.MMFFOptimizeMoleculesConfs(
+        nvmolkit_mols,
+        maxIters=500,
+        minimizerKind="FIRE",
+        fireOptions=fire_options,
+    )
+
+    _assert_energies_match(rdkit_energies, nvmolkit_energies, tolerance=1e-2)
+
+
+@pytest.mark.parametrize("gpu_ids", [[0, 1], [0], [1]])
+@pytest.mark.parametrize("batchesize", [0, 2, 5])
+@pytest.mark.parametrize("batches_per_gpu", [1, 3])
+def test_mmff_optimization_fire_batch_vs_rdkit(mmff_test_mols, gpu_ids, batchesize, batches_per_gpu):
+    """Verify FIRE minimizer works under multi-GPU/multi-batch hardware configurations."""
+    available_devices = torch.cuda.device_count()
+    if available_devices == 1 and 1 in gpu_ids:
+        pytest.skip("Test requires at least 2 GPUs for batch mode comparison")
+
+    rdkit_mols = create_hard_copy_mols(mmff_test_mols)
+    nvmolkit_mols = create_hard_copy_mols(mmff_test_mols)
+
+    rdkit_energies = calculate_rdkit_mmff_energies(rdkit_mols)
+
+    hardware_options = HardwareOptions(
+        gpuIds=gpu_ids,
+        batchSize=batchesize,
+        batchesPerGpu=batches_per_gpu,
+    )
+    nvmolkit_energies = nvmolkit_mmff.MMFFOptimizeMoleculesConfs(
+        nvmolkit_mols,
+        maxIters=500,
+        hardwareOptions=hardware_options,
+        minimizerKind="FIRE",
+    )
+
+    _assert_energies_match(rdkit_energies, nvmolkit_energies, tolerance=1e-2)
+
+
+def test_mmff_optimization_fire_empty_input():
+    """FIRE entry point handles empty input symmetrically with the BFGS variant."""
+    result = nvmolkit_mmff.MMFFOptimizeMoleculesConfs([], minimizerKind="FIRE")
+    assert result == []
+
+
+def test_mmff_optimization_fire_invalid_input():
+    """FIRE entry point reports None molecules the same way the BFGS variant does."""
+    with pytest.raises(ValueError, match="None at indices") as exc_info:
+        nvmolkit_mmff.MMFFOptimizeMoleculesConfs([None], minimizerKind="FIRE")
+    assert exc_info.value.args[1] == {"none": [0], "no_params": []}

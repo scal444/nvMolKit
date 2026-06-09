@@ -21,6 +21,7 @@
 
 #include "../hardware_options.h"
 #include "bfgs_minimize.h"
+#include "fire_minimizer.h"
 #include "forcefield_constraints.h"
 
 namespace RDKit {
@@ -31,6 +32,13 @@ namespace nvMolKit::UFF {
 
 std::vector<std::vector<double>> UFFOptimizeMoleculesConfsBfgs(std::vector<RDKit::ROMol*>& mols,
                                                                int                         maxIters,
+                                                               const std::vector<double>&  vdwThresholds,
+                                                               const std::vector<bool>&    ignoreInterfragInteractions,
+                                                               const BatchHardwareOptions& perfOptions = {});
+
+std::vector<std::vector<double>> UFFOptimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>& mols,
+                                                               int                         maxIters,
+                                                               const FireOptions&          fireOptions,
                                                                const std::vector<double>&  vdwThresholds,
                                                                const std::vector<bool>&    ignoreInterfragInteractions,
                                                                const BatchHardwareOptions& perfOptions = {});

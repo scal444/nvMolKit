@@ -10,4 +10,6 @@ def UFFOptimizeMoleculesConfs(
     vdwThresholds: List[float] = ...,
     ignoreInterfragInteractions: List[bool] = ...,
     hardwareOptions: BatchHardwareOptions = ...,
+    minimizerKind: str = "BFGS",
+    fireOptions: object = ...,
 ) -> List[List[float]]: ...

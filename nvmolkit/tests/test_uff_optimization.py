@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import os
+import math
 
 import pytest
 from rdkit import Chem
@@ -154,6 +155,20 @@ def test_uff_optimization_batch_vs_rdkit(uff_test_mols):
 
 def test_uff_optimization_empty_input():
     assert nvmolkit_uff.UFFOptimizeMoleculesConfs([]) == []
+
+
+def test_uff_optimization_fire_selector(uff_test_mols):
+    nvmolkit_mols = create_hard_copy_mols(uff_test_mols)
+    energies = nvmolkit_uff.UFFOptimizeMoleculesConfs(
+        nvmolkit_mols,
+        maxIters=25,
+        minimizerKind="FIRE",
+    )
+
+    assert len(energies) == len(nvmolkit_mols)
+    for mol, mol_energies in zip(nvmolkit_mols, energies):
+        assert len(mol_energies) == mol.GetNumConformers()
+        assert all(math.isfinite(energy) for energy in mol_energies)
 
 
 def test_uff_optimization_invalid_input():
