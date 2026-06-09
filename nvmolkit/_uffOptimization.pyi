@@ -21,4 +21,6 @@ def UFFOptimizeMoleculesConfsDevice(
     ignoreInterfragInteractions: List[bool] = ...,
     hardwareOptions: BatchHardwareOptions = ...,
     targetGpu: int = -1,
+    minimizerKind: str = "BFGS",
+    fireOptions: object = ...,
 ) -> Any: ...

@@ -23,7 +23,8 @@ from rdkit.Chem import rdForceFieldHelpers
 if TYPE_CHECKING:
     from rdkit.Chem import Mol
 
-from nvmolkit._types import FireOptions  # noqa: F401  (re-export). Must precede _uffOptimization for converters.
+# Registers Boost.Python converters used by _uffOptimization.
+from nvmolkit._types import FireOptions  # noqa: F401
 from nvmolkit import _uffOptimization
 from nvmolkit._arrayHelpers import *  # noqa: F403  # registers PyArray for DEVICE-mode returns
 from nvmolkit.types import CoordinateOutput, Device3DResult, HardwareOptions
@@ -80,8 +81,7 @@ def UFFOptimizeMoleculesConfs(
         output: ``RDKIT_CONFORMERS`` (default) writes optimized coordinates back
             into RDKit conformers and returns nested host energy lists. ``DEVICE``
             keeps optimized coordinates and energies on GPU and returns a
-            :class:`Device3DResult`. DEVICE currently supports only
-            ``minimizerKind="BFGS"``.
+            :class:`Device3DResult`.
         targetGpu: In DEVICE mode, the GPU to consolidate the result onto. ``-1``
             selects the first configured execution GPU.
         minimizerKind: ``"BFGS"`` (default) or ``"FIRE"``.
@@ -140,8 +140,6 @@ def UFFOptimizeMoleculesConfs(
     if fireOptions is None:
         fireOptions = FireOptions()
     if output == CoordinateOutput.DEVICE:
-        if minimizer_kind != "BFGS":
-            raise ValueError("UFFOptimizeMoleculesConfs(output=DEVICE) currently supports only minimizerKind='BFGS'")
         return _uffOptimization.UFFOptimizeMoleculesConfsDevice(
             molecules,
             int(maxIters),
@@ -149,6 +147,8 @@ def UFFOptimizeMoleculesConfs(
             interfrag_flags,
             hardwareOptions._as_native(),
             int(targetGpu),
+            minimizer_kind,
+            fireOptions,
         )
     return _uffOptimization.UFFOptimizeMoleculesConfs(
         molecules,

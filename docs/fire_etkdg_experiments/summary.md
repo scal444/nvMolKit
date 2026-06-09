@@ -1,7 +1,7 @@
 # FIRE in the ETKDG Conformer Pipeline
 
-Date: 2026-06-09  
-Branch context: experiments preserved on `fire_etkdg_experiments_20260609`; PR cleanup branch is `fire_etkdg_dg_fire_pr`.  
+Date: 2026-06-09
+Branch context: experiments preserved on `fire_etkdg_experiments_20260609`; PR cleanup branch is `fire_etkdg_dg_fire_pr`.
 Pre-session checkpoint: `371171d` (`More work`). Local main merge-base for this work was `700cea4`.
 
 ## Executive Summary

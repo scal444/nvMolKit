@@ -18,4 +18,6 @@ def MMFFOptimizeMoleculesConfsDevice(
     hardwareOptions: Any = None,
     targetGpu: int = -1,
     backend: str = "HYBRID",
+    minimizerKind: str = "BFGS",
+    fireOptions: Any = None,
 ) -> Any: ...

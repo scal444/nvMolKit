@@ -139,13 +139,27 @@ bp::list computeBatchedGradients(nvMolKit::BatchedForcefield&         forcefield
   return reshapeGradientsToNested(perSystem, numConformersPerMol);
 }
 
-}  // namespace
+nvMolKit::MinimizerKind parseMinimizerKind(const std::string& name) {
+  if (name == "BFGS" || name == "bfgs") {
+    return nvMolKit::MinimizerKind::BFGS;
+  }
+  if (name == "FIRE" || name == "fire") {
+    return nvMolKit::MinimizerKind::FIRE;
+  }
+  throw std::invalid_argument("Unknown minimizerKind '" + name + "'. Expected 'BFGS' or 'FIRE'.");
+}
+
+nvMolKit::FireOptions fireOptionsWithGradTol(const nvMolKit::FireOptions& fireOptions, double gradTol) {
+  auto options    = fireOptions;
+  options.gradTol = gradTol;
+  return options;
+}
 
 template <typename Spec, typename Parser>
-static std::vector<std::vector<Spec>> extractConstraintLists(const bp::list&    outerList,
-                                                             const int          expectedSize,
-                                                             const Parser&      parser,
-                                                             const std::string& name) {
+std::vector<std::vector<Spec>> extractConstraintLists(const bp::list&    outerList,
+                                                      const int          expectedSize,
+                                                      const Parser&      parser,
+                                                      const std::string& name) {
   if (bp::len(outerList) != expectedSize) {
     throw std::invalid_argument("Expected " + std::to_string(expectedSize) + " entries for " + name + ", got " +
                                 std::to_string(bp::len(outerList)));
@@ -162,7 +176,7 @@ static std::vector<std::vector<Spec>> extractConstraintLists(const bp::list&    
   return allSpecs;
 }
 
-static nvMolKit::ForceFieldConstraints::DistanceConstraintSpec parseDistanceConstraintTuple(const bp::tuple& value) {
+nvMolKit::ForceFieldConstraints::DistanceConstraintSpec parseDistanceConstraintTuple(const bp::tuple& value) {
   if (bp::len(value) != 6) {
     throw std::invalid_argument("Distance constraint tuples must have 6 elements");
   }
@@ -174,14 +188,14 @@ static nvMolKit::ForceFieldConstraints::DistanceConstraintSpec parseDistanceCons
           bp::extract<double>(value[5])};
 }
 
-static nvMolKit::ForceFieldConstraints::PositionConstraintSpec parsePositionConstraintTuple(const bp::tuple& value) {
+nvMolKit::ForceFieldConstraints::PositionConstraintSpec parsePositionConstraintTuple(const bp::tuple& value) {
   if (bp::len(value) != 3) {
     throw std::invalid_argument("Position constraint tuples must have 3 elements");
   }
   return {bp::extract<int>(value[0]), bp::extract<double>(value[1]), bp::extract<double>(value[2])};
 }
 
-static nvMolKit::ForceFieldConstraints::AngleConstraintSpec parseAngleConstraintTuple(const bp::tuple& value) {
+nvMolKit::ForceFieldConstraints::AngleConstraintSpec parseAngleConstraintTuple(const bp::tuple& value) {
   if (bp::len(value) != 7) {
     throw std::invalid_argument("Angle constraint tuples must have 7 elements");
   }
@@ -194,7 +208,7 @@ static nvMolKit::ForceFieldConstraints::AngleConstraintSpec parseAngleConstraint
           bp::extract<double>(value[6])};
 }
 
-static nvMolKit::ForceFieldConstraints::TorsionConstraintSpec parseTorsionConstraintTuple(const bp::tuple& value) {
+nvMolKit::ForceFieldConstraints::TorsionConstraintSpec parseTorsionConstraintTuple(const bp::tuple& value) {
   if (bp::len(value) != 8) {
     throw std::invalid_argument("Torsion constraint tuples must have 8 elements");
   }
@@ -210,11 +224,11 @@ static nvMolKit::ForceFieldConstraints::TorsionConstraintSpec parseTorsionConstr
 
 namespace FC = nvMolKit::ForceFieldConstraints;
 
-static std::vector<FC::PerMolConstraints> extractAllConstraints(const bp::list& distanceConstraints,
-                                                                const bp::list& positionConstraints,
-                                                                const bp::list& angleConstraints,
-                                                                const bp::list& torsionConstraints,
-                                                                int             numMols) {
+std::vector<FC::PerMolConstraints> extractAllConstraints(const bp::list& distanceConstraints,
+                                                         const bp::list& positionConstraints,
+                                                         const bp::list& angleConstraints,
+                                                         const bp::list& torsionConstraints,
+                                                         int             numMols) {
   const auto distLists    = extractConstraintLists<FC::DistanceConstraintSpec>(distanceConstraints,
                                                                             numMols,
                                                                             parseDistanceConstraintTuple,
@@ -267,9 +281,21 @@ class NativeMMFFBatchedForcefield {
     return computeBatchedGradients(*forcefield_, positionsDevice_, gradDevice_, numConformersPerMol_);
   }
 
-  bp::tuple minimize(int maxIters, double gradTol) {
-    auto result =
-      nvMolKit::MMFF::MMFFMinimizeMoleculesConfs(mols_, maxIters, gradTol, properties_, constraints_, hwOpts_);
+  bp::tuple minimize(int                          maxIters,
+                     double                       gradTol,
+                     const std::string&           minimizerKind,
+                     const nvMolKit::FireOptions& fireOptions) {
+    const auto kind = parseMinimizerKind(minimizerKind);
+    auto       result =
+      kind == nvMolKit::MinimizerKind::FIRE ?
+              nvMolKit::MMFF::MMFFMinimizeMoleculesConfsFire(mols_,
+                                                       maxIters,
+                                                       fireOptionsWithGradTol(fireOptions, gradTol),
+                                                       properties_,
+                                                       constraints_,
+                                                       hwOpts_,
+                                                       nvMolKit::FireBackend::BATCHED) :
+              nvMolKit::MMFF::MMFFMinimizeMoleculesConfs(mols_, maxIters, gradTol, properties_, constraints_, hwOpts_);
 
     uploadConformerPositions(mols_, positionsDevice_);
 
@@ -277,7 +303,11 @@ class NativeMMFFBatchedForcefield {
                           nestedToList(result.converged, [](int8_t v) { return v != 0; }));
   }
 
-  bp::object minimizeDevice(int maxIters, double gradTol, int targetGpu) {
+  bp::object minimizeDevice(int                          maxIters,
+                            double                       gradTol,
+                            int                          targetGpu,
+                            const std::string&           minimizerKind,
+                            const nvMolKit::FireOptions& fireOptions) {
     if (targetGpu >= 0 && targetGpu != gpuId_) {
       throw std::invalid_argument(
         "MMFFBatchedForcefield.minimize(output=DEVICE) does not support target_gpu != wrapper GPU "
@@ -288,15 +318,26 @@ class NativeMMFFBatchedForcefield {
         "coordinates. Use the standalone MMFFOptimizeMoleculesConfs(output=DEVICE, targetGpu=...) "
         "API for cross-GPU consolidation, or construct the wrapper on the desired GPU.");
     }
-    auto result = nvMolKit::MMFF::MMFFMinimizeMoleculesConfs(mols_,
-                                                             maxIters,
-                                                             gradTol,
-                                                             properties_,
-                                                             constraints_,
-                                                             hwOpts_,
-                                                             nvMolKit::BfgsBackend::HYBRID,
-                                                             nvMolKit::CoordinateOutput::DEVICE,
-                                                             gpuId_);
+    const auto kind   = parseMinimizerKind(minimizerKind);
+    auto       result = kind == nvMolKit::MinimizerKind::FIRE ?
+                          nvMolKit::MMFF::MMFFMinimizeMoleculesConfsFire(mols_,
+                                                                   maxIters,
+                                                                   fireOptionsWithGradTol(fireOptions, gradTol),
+                                                                   properties_,
+                                                                   constraints_,
+                                                                   hwOpts_,
+                                                                   nvMolKit::FireBackend::BATCHED,
+                                                                   nvMolKit::CoordinateOutput::DEVICE,
+                                                                   gpuId_) :
+                          nvMolKit::MMFF::MMFFMinimizeMoleculesConfs(mols_,
+                                                               maxIters,
+                                                               gradTol,
+                                                               properties_,
+                                                               constraints_,
+                                                               hwOpts_,
+                                                               nvMolKit::BfgsBackend::HYBRID,
+                                                               nvMolKit::CoordinateOutput::DEVICE,
+                                                               gpuId_);
     if (!result.device.has_value()) {
       throw std::runtime_error("MMFFMinimizeMoleculesConfs(DEVICE) returned no device result");
     }
@@ -393,14 +434,26 @@ class NativeUFFBatchedForcefield {
     return computeBatchedGradients(*forcefield_, positionsDevice_, gradDevice_, numConformersPerMol_);
   }
 
-  bp::tuple minimize(int maxIters, double gradTol) {
-    auto result = nvMolKit::UFF::UFFMinimizeMoleculesConfs(mols_,
-                                                           maxIters,
-                                                           gradTol,
-                                                           vdwThresholds_,
-                                                           ignoreInterfragInteractions_,
-                                                           constraints_,
-                                                           hwOpts_);
+  bp::tuple minimize(int                          maxIters,
+                     double                       gradTol,
+                     const std::string&           minimizerKind,
+                     const nvMolKit::FireOptions& fireOptions) {
+    const auto kind   = parseMinimizerKind(minimizerKind);
+    auto       result = kind == nvMolKit::MinimizerKind::FIRE ?
+                          nvMolKit::UFF::UFFMinimizeMoleculesConfsFire(mols_,
+                                                                 maxIters,
+                                                                 fireOptionsWithGradTol(fireOptions, gradTol),
+                                                                 vdwThresholds_,
+                                                                 ignoreInterfragInteractions_,
+                                                                 constraints_,
+                                                                 hwOpts_) :
+                          nvMolKit::UFF::UFFMinimizeMoleculesConfs(mols_,
+                                                             maxIters,
+                                                             gradTol,
+                                                             vdwThresholds_,
+                                                             ignoreInterfragInteractions_,
+                                                             constraints_,
+                                                             hwOpts_);
 
     uploadConformerPositions(mols_, positionsDevice_);
 
@@ -408,7 +461,11 @@ class NativeUFFBatchedForcefield {
                           nestedToList(result.converged, [](int8_t v) { return v != 0; }));
   }
 
-  bp::object minimizeDevice(int maxIters, double gradTol, int targetGpu) {
+  bp::object minimizeDevice(int                          maxIters,
+                            double                       gradTol,
+                            int                          targetGpu,
+                            const std::string&           minimizerKind,
+                            const nvMolKit::FireOptions& fireOptions) {
     if (targetGpu >= 0 && targetGpu != gpuId_) {
       throw std::invalid_argument(
         "UFFBatchedForcefield.minimize(output=DEVICE) does not support target_gpu != wrapper GPU "
@@ -419,15 +476,26 @@ class NativeUFFBatchedForcefield {
         "coordinates. Use the standalone UFFOptimizeMoleculesConfs(output=DEVICE, targetGpu=...) "
         "API for cross-GPU consolidation, or construct the wrapper on the desired GPU.");
     }
-    auto result = nvMolKit::UFF::UFFMinimizeMoleculesConfs(mols_,
-                                                           maxIters,
-                                                           gradTol,
-                                                           vdwThresholds_,
-                                                           ignoreInterfragInteractions_,
-                                                           constraints_,
-                                                           hwOpts_,
-                                                           nvMolKit::CoordinateOutput::DEVICE,
-                                                           gpuId_);
+    const auto kind   = parseMinimizerKind(minimizerKind);
+    auto       result = kind == nvMolKit::MinimizerKind::FIRE ?
+                          nvMolKit::UFF::UFFMinimizeMoleculesConfsFire(mols_,
+                                                                 maxIters,
+                                                                 fireOptionsWithGradTol(fireOptions, gradTol),
+                                                                 vdwThresholds_,
+                                                                 ignoreInterfragInteractions_,
+                                                                 constraints_,
+                                                                 hwOpts_,
+                                                                 nvMolKit::CoordinateOutput::DEVICE,
+                                                                 gpuId_) :
+                          nvMolKit::UFF::UFFMinimizeMoleculesConfs(mols_,
+                                                             maxIters,
+                                                             gradTol,
+                                                             vdwThresholds_,
+                                                             ignoreInterfragInteractions_,
+                                                             constraints_,
+                                                             hwOpts_,
+                                                             nvMolKit::CoordinateOutput::DEVICE,
+                                                             gpuId_);
     if (!result.device.has_value()) {
       throw std::runtime_error("UFFMinimizeMoleculesConfs(DEVICE) returned no device result");
     }
@@ -492,6 +560,8 @@ class NativeUFFBatchedForcefield {
   std::vector<int>                                numConformersPerMol_;
   int                                             gpuId_ = 0;
 };
+
+}  // namespace
 
 BOOST_PYTHON_MODULE(_batchedForcefield) {
   bp::class_<nvMolKit::MMFFProperties>("MMFFProperties")

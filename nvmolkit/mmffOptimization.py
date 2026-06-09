@@ -28,7 +28,8 @@ if TYPE_CHECKING:
     from rdkit.Chem import Mol
     from rdkit.ForceField.rdForceField import MMFFMolProperties
 
-from nvmolkit._types import FireOptions  # noqa: F401  (re-export). Must precede _mmffOptimization to register Boost.Python converters for FireOptions / BatchHardwareOptions used by the FIRE entry point.
+# Registers Boost.Python converters used by _mmffOptimization.
+from nvmolkit._types import FireOptions  # noqa: F401
 from nvmolkit import _mmffOptimization
 from nvmolkit._arrayHelpers import *  # noqa: F403  # registers PyArray for DEVICE-mode returns
 from nvmolkit._mmff_bridge import default_rdkit_mmff_properties, make_internal_mmff_properties
@@ -97,7 +98,6 @@ def MMFFOptimizeMoleculesConfs(
         output: ``RDKIT_CONFORMERS`` (default) writes optimized coordinates back into each input
             molecule's RDKit conformers and returns nested host-side energy lists. ``DEVICE``
             keeps optimized coordinates and energies on GPU and returns a :class:`Device3DResult`.
-            DEVICE currently supports only ``minimizerKind="BFGS"``.
         targetGpu: In DEVICE mode, the GPU to consolidate the result onto. ``-1`` selects the
             first configured execution GPU.
         backend: Kernel backend selector for benchmarking. One of
@@ -217,10 +217,15 @@ def MMFFOptimizeMoleculesConfs(
         for props, threshold, ignore_interfrag in zip(properties_list, thresholds, interfrag_flags)
     ]
     if output == CoordinateOutput.DEVICE:
-        if minimizer_kind != "BFGS":
-            raise ValueError("MMFFOptimizeMoleculesConfs(output=DEVICE) currently supports only minimizerKind='BFGS'")
         return _mmffOptimization.MMFFOptimizeMoleculesConfsDevice(
-            molecules, maxIters, native_properties, native_options, targetGpu, backend
+            molecules,
+            maxIters,
+            native_properties,
+            native_options,
+            targetGpu,
+            backend,
+            minimizer_kind,
+            fireOptions,
         )
     return _mmffOptimization.MMFFOptimizeMoleculesConfs(
         molecules,

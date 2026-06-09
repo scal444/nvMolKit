@@ -51,6 +51,7 @@ cudaError_t launchFirePerMolKernel(int                                       num
                                    double                                    gradTol,
                                    const MMFF::EnergyForceContribsDevicePtr& terms,
                                    const MMFF::BatchedIndicesDevicePtr&      systemIndices,
+                                   bool                                      hasConstraints,
                                    double*                                   positions,
                                    double*                                   grad,
                                    double*                                   velocities,

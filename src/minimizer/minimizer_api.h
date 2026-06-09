@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,10 +16,10 @@
 #ifndef NVMOLKIT_MINIMIZER_API_H
 #define NVMOLKIT_MINIMIZER_API_H
 
-#include "src/utils/device_vector.h"
-
 #include <functional>
 #include <vector>
+
+#include "src/utils/device_vector.h"
 
 namespace nvMolKit {
 

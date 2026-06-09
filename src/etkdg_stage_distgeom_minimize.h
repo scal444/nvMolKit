@@ -85,7 +85,7 @@ class DistGeomMinimizeStage : public ETKDGStage {
                               eargs,
                               embedParam,
                               ctx,
-                              MinimizerHandle::forBfgs(minimizer),
+                              MinimizerHandle(minimizer),
                               chiralWeight,
                               fourthDimWeight,
                               maxIters,

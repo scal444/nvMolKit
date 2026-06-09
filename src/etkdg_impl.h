@@ -54,11 +54,9 @@ namespace detail {
 //! \brief Non-owning, type-tagged reference to the minimizer driving an ETKDG
 //! minimization stage.
 //!
-//! ETKDG runs both a 4D distance-geometry stage and (optionally) a 3D ETK
-//! refinement stage with the same algorithm choice. The driver constructs the
-//! concrete ::BfgsBatchMinimizer or ::FireBatchMinimizer instances per thread
-//! and hands references to them to each stage through this handle. The stages
-//! dispatch on @ref kind to pick which pointer to use.
+//! The driver constructs concrete ::BfgsBatchMinimizer and
+//! ::FireBatchMinimizer instances per thread and passes the appropriate one to
+//! each stage. The stages dispatch on @ref kind to pick which pointer to use.
 //!
 //! Exactly one of @ref bfgs / @ref fire is non-null for a given handle.
 struct MinimizerHandle {
@@ -66,14 +64,8 @@ struct MinimizerHandle {
   BfgsBatchMinimizer* bfgs = nullptr;
   FireBatchMinimizer* fire = nullptr;
 
-  //! \brief Convenience constructor for the BFGS path.
-  static MinimizerHandle forBfgs(BfgsBatchMinimizer& minimizer) {
-    return MinimizerHandle{MinimizerKind::BFGS, &minimizer, nullptr};
-  }
-  //! \brief Convenience constructor for the FIRE path.
-  static MinimizerHandle forFire(FireBatchMinimizer& minimizer) {
-    return MinimizerHandle{MinimizerKind::FIRE, nullptr, &minimizer};
-  }
+  explicit MinimizerHandle(BfgsBatchMinimizer& minimizer) : bfgs(&minimizer) {}
+  explicit MinimizerHandle(FireBatchMinimizer& minimizer) : kind(MinimizerKind::FIRE), fire(&minimizer) {}
 };
 
 struct ETKDGSystemHost {

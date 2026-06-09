@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -945,8 +945,9 @@ bool FireBatchMinimizer::minimizeWithMMFF(const int                            n
     return true;
   }
 
-  auto terms         = MMFF::toEnergyForceContribsDevicePtr(systemDevice);
-  auto systemIndices = MMFF::toBatchedIndicesDevicePtr(systemDevice);
+  auto       terms          = MMFF::toEnergyForceContribsDevicePtr(systemDevice);
+  auto       systemIndices  = MMFF::toBatchedIndicesDevicePtr(systemDevice);
+  const bool hasConstraints = MMFF::batchHasConstraints(systemDevice.contribs);
 
   const cudaError_t err = launchFirePerMolKernel(static_cast<int>(activeMolIds_.size()),
                                                  activeMolIdsDevice_.data(),
@@ -957,6 +958,7 @@ bool FireBatchMinimizer::minimizeWithMMFF(const int                            n
                                                  gradTol,
                                                  terms,
                                                  systemIndices,
+                                                 hasConstraints,
                                                  systemDevice.positions.data(),
                                                  systemDevice.grad.data(),
                                                  velocities_.data(),

@@ -258,13 +258,12 @@ TEST_P(ETKStageSingleMolTestFixture, MinimizeCompare) {
   std::vector<std::unique_ptr<ETKDGStage>> stages;
   std::vector<const RDKit::ROMol*>         molsPtrs;
   molsPtrs.push_back(molPtr_.get());
-  auto stage =
-    std::make_unique<nvMolKit::detail::ETKMinimizationStage>(molsPtrs,
-                                                             eargs_,
-                                                             embedParam_,
-                                                             context_,
-                                                             bfgsMinimizer,
-                                                             nullptr);
+  auto stage = std::make_unique<nvMolKit::detail::ETKMinimizationStage>(molsPtrs,
+                                                                        eargs_,
+                                                                        embedParam_,
+                                                                        context_,
+                                                                        bfgsMinimizer,
+                                                                        nullptr);
   stages.push_back(std::move(stage));
 
   // Create and run driver
@@ -378,13 +377,12 @@ TEST_P(ETKStageMultiMolTestFixture, MinimizeCompare) {
   }
   const int count = molsPtrs.size();
 
-  auto stage =
-    std::make_unique<nvMolKit::detail::ETKMinimizationStage>(molsPtrs,
-                                                             eargs_,
-                                                             embedParam_,
-                                                             context_,
-                                                             bfgsMinimizer,
-                                                             nullptr);
+  auto stage = std::make_unique<nvMolKit::detail::ETKMinimizationStage>(molsPtrs,
+                                                                        eargs_,
+                                                                        embedParam_,
+                                                                        context_,
+                                                                        bfgsMinimizer,
+                                                                        nullptr);
   stages.push_back(std::move(stage));
 
   // Create and run driver

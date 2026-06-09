@@ -51,7 +51,8 @@ def two_mols():
 
 
 @pytest.mark.parametrize("ff_cls", [MMFFBatchedForcefield, UFFBatchedForcefield])
-def test_minimize_device_returns_device3d_with_optimized_positions(ff_cls, two_mols):
+@pytest.mark.parametrize("minimizer_kind", ["BFGS", "FIRE"])
+def test_minimize_device_returns_device3d_with_optimized_positions(ff_cls, two_mols, minimizer_kind):
     """minimize(output=DEVICE) returns Device3DResult; values reflect updated coords."""
     mols_initial = [Chem.Mol(m) for m in two_mols]
     pos_initial_per_mol = []
@@ -63,7 +64,7 @@ def test_minimize_device_returns_device3d_with_optimized_positions(ff_cls, two_m
                 pos_initial_per_mol.extend([p.x, p.y, p.z])
 
     ff = ff_cls([Chem.Mol(m) for m in two_mols])
-    result = ff.minimize(maxIters=15, output=CoordinateOutput.DEVICE)
+    result = ff.minimize(maxIters=15, output=CoordinateOutput.DEVICE, minimizerKind=minimizer_kind)
     assert isinstance(result, Device3DResult)
     torch.cuda.synchronize()
     pos_after = result.values.torch().reshape(-1).tolist()
@@ -72,16 +73,17 @@ def test_minimize_device_returns_device3d_with_optimized_positions(ff_cls, two_m
 
 
 @pytest.mark.parametrize("ff_cls", [MMFFBatchedForcefield, UFFBatchedForcefield])
-def test_minimize_device_energies_match_host(ff_cls, two_mols):
+@pytest.mark.parametrize("minimizer_kind", ["BFGS", "FIRE"])
+def test_minimize_device_energies_match_host(ff_cls, two_mols, minimizer_kind):
     mols_host = [Chem.Mol(m) for m in two_mols]
     mols_device = [Chem.Mol(m) for m in two_mols]
 
     ff_host = ff_cls(mols_host)
-    energies_host_nested, _ = ff_host.minimize(maxIters=20)
+    energies_host_nested, _ = ff_host.minimize(maxIters=20, minimizerKind=minimizer_kind)
     energies_host = _flatten(energies_host_nested)
 
     ff_device = ff_cls(mols_device)
-    result = ff_device.minimize(maxIters=20, output=CoordinateOutput.DEVICE)
+    result = ff_device.minimize(maxIters=20, output=CoordinateOutput.DEVICE, minimizerKind=minimizer_kind)
     assert result.energies is not None
     assert result.converged is not None
     torch.cuda.synchronize()

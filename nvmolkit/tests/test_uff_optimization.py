@@ -216,17 +216,23 @@ def test_uff_optimization_threshold_and_interfrag_vs_rdkit():
             )
 
 
-def test_uff_optimization_device_output_matches_host(uff_test_mols):
+@pytest.mark.parametrize("minimizer_kind", ["BFGS", "FIRE"])
+def test_uff_optimization_device_output_matches_host(uff_test_mols, minimizer_kind):
     """UFFOptimizeMoleculesConfs(output=DEVICE) returns Device3DResult; energies match host path."""
     host_mols = create_hard_copy_mols(uff_test_mols)
     device_mols = create_hard_copy_mols(uff_test_mols)
 
-    host_energies = nvmolkit_uff.UFFOptimizeMoleculesConfs(host_mols, maxIters=200)
+    host_energies = nvmolkit_uff.UFFOptimizeMoleculesConfs(
+        host_mols,
+        maxIters=200,
+        minimizerKind=minimizer_kind,
+    )
 
     result = nvmolkit_uff.UFFOptimizeMoleculesConfs(
         device_mols,
         maxIters=200,
         output=CoordinateOutput.DEVICE,
+        minimizerKind=minimizer_kind,
     )
     assert isinstance(result, Device3DResult)
     torch.cuda.synchronize()
@@ -240,14 +246,3 @@ def test_uff_optimization_device_output_matches_host(uff_test_mols):
     for h, d in zip(host_flat, device_energies_flat):
         rel = abs(h - d) / max(abs(h), 1e-10)
         assert rel < 1e-2, f"host {h} vs device {d}"
-
-
-def test_uff_optimization_device_output_rejects_fire(uff_test_mols):
-    mols = create_hard_copy_mols(uff_test_mols)
-    with pytest.raises(ValueError, match="output=DEVICE.*minimizerKind='BFGS'"):
-        nvmolkit_uff.UFFOptimizeMoleculesConfs(
-            mols,
-            maxIters=10,
-            output=CoordinateOutput.DEVICE,
-            minimizerKind="FIRE",
-        )

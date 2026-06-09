@@ -78,7 +78,7 @@ template <> struct DataDimTraits<ForceFieldType::DG> {
 };
 
 //! Block-wide gradient evaluation dispatched on the force-field type.
-template <ForceFieldType FFType, int dataDim, typename TermsType, typename IndicesType>
+template <ForceFieldType FFType, bool HasConstraints, int dataDim, typename TermsType, typename IndicesType>
 __device__ __forceinline__ void evalMolGrad([[maybe_unused]] const TermsType&   terms,
                                             [[maybe_unused]] const IndicesType& systemIndices,
                                             [[maybe_unused]] const double*      molCoords,
@@ -88,7 +88,7 @@ __device__ __forceinline__ void evalMolGrad([[maybe_unused]] const TermsType&   
                                             [[maybe_unused]] const double       chiralWeight,
                                             [[maybe_unused]] const double       fourthDimWeight) {
   if constexpr (FFType == ForceFieldType::MMFF) {
-    MMFF::molGrad<kFirePerMolBlockSize, false>(terms, systemIndices, molCoords, grad, molIdx, tid);
+    MMFF::molGrad<kFirePerMolBlockSize, HasConstraints>(terms, systemIndices, molCoords, grad, molIdx, tid);
   } else if constexpr (FFType == ForceFieldType::ETK) {
     DistGeom::molGradETK(terms, systemIndices, molCoords, grad, molIdx, tid);
   } else {  // DG
@@ -97,7 +97,7 @@ __device__ __forceinline__ void evalMolGrad([[maybe_unused]] const TermsType&   
 }
 
 //! Block-wide energy evaluation dispatched on the force-field type.
-template <ForceFieldType FFType, int dataDim, typename TermsType, typename IndicesType>
+template <ForceFieldType FFType, bool HasConstraints, int dataDim, typename TermsType, typename IndicesType>
 __device__ __forceinline__ double evalMolEnergy([[maybe_unused]] const TermsType&   terms,
                                                 [[maybe_unused]] const IndicesType& systemIndices,
                                                 [[maybe_unused]] const double*      molCoords,
@@ -106,7 +106,7 @@ __device__ __forceinline__ double evalMolEnergy([[maybe_unused]] const TermsType
                                                 [[maybe_unused]] const double       chiralWeight,
                                                 [[maybe_unused]] const double       fourthDimWeight) {
   if constexpr (FFType == ForceFieldType::MMFF) {
-    return MMFF::molEnergy<kFirePerMolBlockSize, false>(terms, systemIndices, molCoords, molIdx, tid);
+    return MMFF::molEnergy<kFirePerMolBlockSize, HasConstraints>(terms, systemIndices, molCoords, molIdx, tid);
   } else if constexpr (FFType == ForceFieldType::ETK) {
     return DistGeom::molEnergyETK(terms, systemIndices, molCoords, molIdx, tid);
   } else {  // DG
@@ -114,7 +114,12 @@ __device__ __forceinline__ double evalMolEnergy([[maybe_unused]] const TermsType
   }
 }
 
-template <int MaxAtoms, bool UseSharedMem, ForceFieldType FFType, typename TermsType, typename IndicesType>
+template <int            MaxAtoms,
+          bool           UseSharedMem,
+          ForceFieldType FFType,
+          bool           HasConstraints,
+          typename TermsType,
+          typename IndicesType>
 __launch_bounds__(kFirePerMolBlockSize)
   __global__ void firePerMolKernel(const int                     numIters,
                                    const FirePerMolKernelParams  params,
@@ -214,8 +219,14 @@ __launch_bounds__(kFirePerMolBlockSize)
       }
       __syncthreads();
     }
-    evalMolGrad<FFType,
-                dataDim>(*terms, *systemIndices, localPos, localGrad, molIdx, tid, chiralWeight, fourthDimWeight);
+    evalMolGrad<FFType, HasConstraints, dataDim>(*terms,
+                                                 *systemIndices,
+                                                 localPos,
+                                                 localGrad,
+                                                 molIdx,
+                                                 tid,
+                                                 chiralWeight,
+                                                 fourthDimWeight);
     __syncthreads();
 
     // -------------------- pre-kick: convergence + dt/alpha state machine --------------------
@@ -294,8 +305,14 @@ __launch_bounds__(kFirePerMolBlockSize)
         localGrad[i] = 0.0;
       }
       __syncthreads();
-      evalMolGrad<FFType,
-                  dataDim>(*terms, *systemIndices, localPos, localGrad, molIdx, tid, chiralWeight, fourthDimWeight);
+      evalMolGrad<FFType, HasConstraints, dataDim>(*terms,
+                                                   *systemIndices,
+                                                   localPos,
+                                                   localGrad,
+                                                   molIdx,
+                                                   tid,
+                                                   chiralWeight,
+                                                   fourthDimWeight);
       __syncthreads();
     }
 
@@ -400,15 +417,25 @@ __launch_bounds__(kFirePerMolBlockSize)
   __syncthreads();
 
   // Final energy at the converged position.
-  const double finalThreadEnergy =
-    evalMolEnergy<FFType, dataDim>(*terms, *systemIndices, localPos, molIdx, tid, chiralWeight, fourthDimWeight);
-  const double finalEnergy = BlockReduce(tempStorage).Sum(finalThreadEnergy);
+  const double finalThreadEnergy = evalMolEnergy<FFType, HasConstraints, dataDim>(*terms,
+                                                                                  *systemIndices,
+                                                                                  localPos,
+                                                                                  molIdx,
+                                                                                  tid,
+                                                                                  chiralWeight,
+                                                                                  fourthDimWeight);
+  const double finalEnergy       = BlockReduce(tempStorage).Sum(finalThreadEnergy);
   if (tid == 0) {
     energyOuts[molIdx] = finalEnergy;
   }
 }
 
-template <int MaxAtoms, bool UseSharedMem, ForceFieldType FFType, typename TermsType, typename IndicesType>
+template <int            MaxAtoms,
+          bool           UseSharedMem,
+          ForceFieldType FFType,
+          bool           HasConstraints,
+          typename TermsType,
+          typename IndicesType>
 cudaError_t launchKernelForSize(const int                     numMols,
                                 const int*                    molIdList,
                                 const FirePerMolKernelParams& params,
@@ -434,7 +461,7 @@ cudaError_t launchKernelForSize(const int                     numMols,
   if (numMols == 0) {
     return cudaSuccess;
   }
-  firePerMolKernel<MaxAtoms, UseSharedMem, FFType, TermsType, IndicesType>
+  firePerMolKernel<MaxAtoms, UseSharedMem, FFType, HasConstraints, TermsType, IndicesType>
     <<<numMols, kFirePerMolBlockSize, 0, stream>>>(numIters,
                                                    params,
                                                    takeHalfStepBack,
@@ -458,7 +485,7 @@ cudaError_t launchKernelForSize(const int                     numMols,
   return cudaGetLastError();
 }
 
-template <ForceFieldType FFType, typename TermsType, typename IndicesType>
+template <ForceFieldType FFType, bool HasConstraints, typename TermsType, typename IndicesType>
 cudaError_t dispatchByMaxAtoms(const int                     numMols,
                                const int*                    molIds,
                                const int                     maxAtoms,
@@ -485,28 +512,28 @@ cudaError_t dispatchByMaxAtoms(const int                     numMols,
   auto launchBucket = [&](auto bucketTag) {
     constexpr int  kBucket    = decltype(bucketTag)::value;
     constexpr bool kUseShared = (kBucket <= 128);
-    return launchKernelForSize<kBucket, kUseShared, FFType>(numMols,
-                                                            molIds,
-                                                            params,
-                                                            takeHalfStepBack,
-                                                            useAbc,
-                                                            useMass,
-                                                            devTerms,
-                                                            devSysIdx,
-                                                            atomStarts,
-                                                            numIters,
-                                                            positions,
-                                                            grad,
-                                                            velocities,
-                                                            alphas,
-                                                            dts,
-                                                            nStepsPositive,
-                                                            masses,
-                                                            energyOuts,
-                                                            statuses,
-                                                            chiralWeight,
-                                                            fourthDimWeight,
-                                                            stream);
+    return launchKernelForSize<kBucket, kUseShared, FFType, HasConstraints>(numMols,
+                                                                            molIds,
+                                                                            params,
+                                                                            takeHalfStepBack,
+                                                                            useAbc,
+                                                                            useMass,
+                                                                            devTerms,
+                                                                            devSysIdx,
+                                                                            atomStarts,
+                                                                            numIters,
+                                                                            positions,
+                                                                            grad,
+                                                                            velocities,
+                                                                            alphas,
+                                                                            dts,
+                                                                            nStepsPositive,
+                                                                            masses,
+                                                                            energyOuts,
+                                                                            statuses,
+                                                                            chiralWeight,
+                                                                            fourthDimWeight,
+                                                                            stream);
   };
 
   if (maxAtoms <= 32) {
@@ -538,6 +565,7 @@ cudaError_t launchFirePerMolKernel(int                                       num
                                    double                                    gradTol,
                                    const MMFF::EnergyForceContribsDevicePtr& terms,
                                    const MMFF::BatchedIndicesDevicePtr&      systemIndices,
+                                   const bool                                hasConstraints,
                                    double*                                   positions,
                                    double*                                   grad,
                                    double*                                   velocities,
@@ -555,29 +583,54 @@ cudaError_t launchFirePerMolKernel(int                                       num
   const AsyncDevicePtr<MMFF::BatchedIndicesDevicePtr>      devSysIdx(systemIndices, stream);
   const FirePerMolKernelParams                             params  = buildKernelParams(fireOptions, gradTol);
   const bool                                               useMass = fireOptions.useMass && masses != nullptr;
-  return dispatchByMaxAtoms<ForceFieldType::MMFF>(numMols,
-                                                  molIds,
-                                                  maxAtoms,
-                                                  atomStarts,
-                                                  params,
-                                                  fireOptions.takeHalfStepBack,
-                                                  fireOptions.abcCorrection,
-                                                  useMass,
-                                                  devTerms.data(),
-                                                  devSysIdx.data(),
-                                                  numIters,
-                                                  positions,
-                                                  grad,
-                                                  velocities,
-                                                  alphas,
-                                                  dts,
-                                                  nStepsPositive,
-                                                  masses,
-                                                  energyOuts,
-                                                  statuses,
-                                                  /*chiralWeight=*/1.0,
-                                                  /*fourthDimWeight=*/1.0,
-                                                  stream);
+  if (hasConstraints) {
+    return dispatchByMaxAtoms<ForceFieldType::MMFF, true>(numMols,
+                                                          molIds,
+                                                          maxAtoms,
+                                                          atomStarts,
+                                                          params,
+                                                          fireOptions.takeHalfStepBack,
+                                                          fireOptions.abcCorrection,
+                                                          useMass,
+                                                          devTerms.data(),
+                                                          devSysIdx.data(),
+                                                          numIters,
+                                                          positions,
+                                                          grad,
+                                                          velocities,
+                                                          alphas,
+                                                          dts,
+                                                          nStepsPositive,
+                                                          masses,
+                                                          energyOuts,
+                                                          statuses,
+                                                          /*chiralWeight=*/1.0,
+                                                          /*fourthDimWeight=*/1.0,
+                                                          stream);
+  }
+  return dispatchByMaxAtoms<ForceFieldType::MMFF, false>(numMols,
+                                                         molIds,
+                                                         maxAtoms,
+                                                         atomStarts,
+                                                         params,
+                                                         fireOptions.takeHalfStepBack,
+                                                         fireOptions.abcCorrection,
+                                                         useMass,
+                                                         devTerms.data(),
+                                                         devSysIdx.data(),
+                                                         numIters,
+                                                         positions,
+                                                         grad,
+                                                         velocities,
+                                                         alphas,
+                                                         dts,
+                                                         nStepsPositive,
+                                                         masses,
+                                                         energyOuts,
+                                                         statuses,
+                                                         /*chiralWeight=*/1.0,
+                                                         /*fourthDimWeight=*/1.0,
+                                                         stream);
 }
 
 cudaError_t launchFirePerMolKernelETK(int                                             numMols,
@@ -606,29 +659,29 @@ cudaError_t launchFirePerMolKernelETK(int                                       
   const AsyncDevicePtr<DistGeom::BatchedIndices3DDevicePtr>      devSysIdx(systemIndices, stream);
   const FirePerMolKernelParams                                   params  = buildKernelParams(fireOptions, gradTol);
   const bool                                                     useMass = fireOptions.useMass && masses != nullptr;
-  return dispatchByMaxAtoms<ForceFieldType::ETK>(numMols,
-                                                 molIds,
-                                                 maxAtoms,
-                                                 atomStarts,
-                                                 params,
-                                                 fireOptions.takeHalfStepBack,
-                                                 fireOptions.abcCorrection,
-                                                 useMass,
-                                                 devTerms.data(),
-                                                 devSysIdx.data(),
-                                                 numIters,
-                                                 positions,
-                                                 grad,
-                                                 velocities,
-                                                 alphas,
-                                                 dts,
-                                                 nStepsPositive,
-                                                 masses,
-                                                 energyOuts,
-                                                 statuses,
-                                                 /*chiralWeight=*/1.0,
-                                                 /*fourthDimWeight=*/1.0,
-                                                 stream);
+  return dispatchByMaxAtoms<ForceFieldType::ETK, false>(numMols,
+                                                        molIds,
+                                                        maxAtoms,
+                                                        atomStarts,
+                                                        params,
+                                                        fireOptions.takeHalfStepBack,
+                                                        fireOptions.abcCorrection,
+                                                        useMass,
+                                                        devTerms.data(),
+                                                        devSysIdx.data(),
+                                                        numIters,
+                                                        positions,
+                                                        grad,
+                                                        velocities,
+                                                        alphas,
+                                                        dts,
+                                                        nStepsPositive,
+                                                        masses,
+                                                        energyOuts,
+                                                        statuses,
+                                                        /*chiralWeight=*/1.0,
+                                                        /*fourthDimWeight=*/1.0,
+                                                        stream);
 }
 
 cudaError_t launchFirePerMolKernelDG(int                                           numMols,
@@ -659,29 +712,29 @@ cudaError_t launchFirePerMolKernelDG(int                                        
   const AsyncDevicePtr<DistGeom::BatchedIndicesDevicePtr>      devSysIdx(systemIndices, stream);
   const FirePerMolKernelParams                                 params  = buildKernelParams(fireOptions, gradTol);
   const bool                                                   useMass = fireOptions.useMass && masses != nullptr;
-  return dispatchByMaxAtoms<ForceFieldType::DG>(numMols,
-                                                molIds,
-                                                maxAtoms,
-                                                atomStarts,
-                                                params,
-                                                fireOptions.takeHalfStepBack,
-                                                fireOptions.abcCorrection,
-                                                useMass,
-                                                devTerms.data(),
-                                                devSysIdx.data(),
-                                                numIters,
-                                                positions,
-                                                grad,
-                                                velocities,
-                                                alphas,
-                                                dts,
-                                                nStepsPositive,
-                                                masses,
-                                                energyOuts,
-                                                statuses,
-                                                chiralWeight,
-                                                fourthDimWeight,
-                                                stream);
+  return dispatchByMaxAtoms<ForceFieldType::DG, false>(numMols,
+                                                       molIds,
+                                                       maxAtoms,
+                                                       atomStarts,
+                                                       params,
+                                                       fireOptions.takeHalfStepBack,
+                                                       fireOptions.abcCorrection,
+                                                       useMass,
+                                                       devTerms.data(),
+                                                       devSysIdx.data(),
+                                                       numIters,
+                                                       positions,
+                                                       grad,
+                                                       velocities,
+                                                       alphas,
+                                                       dts,
+                                                       nStepsPositive,
+                                                       masses,
+                                                       energyOuts,
+                                                       statuses,
+                                                       chiralWeight,
+                                                       fourthDimWeight,
+                                                       stream);
 }
 
 }  // namespace nvMolKit

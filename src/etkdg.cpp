@@ -287,7 +287,7 @@ std::optional<DeviceCoordResult> embedMolecules(const std::vector<RDKit::ROMol*>
       fireOptions.stuckStreakLength     = 5;
       auto fireMinimizer =
         std::make_unique<FireBatchMinimizer>(4, fireOptions, streamPtr, /*debugMode=*/false, FireBackend::BATCHED);
-      const detail::MinimizerHandle distGeomMinimizerHandle = detail::MinimizerHandle::forFire(*fireMinimizer);
+      const detail::MinimizerHandle distGeomMinimizerHandle(*fireMinimizer);
       std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::EnergyForceContribsHost>   dgCache;
       std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::Energy3DForceContribsHost> etkCache;
       // Pinned reusable buffers for common copies.
