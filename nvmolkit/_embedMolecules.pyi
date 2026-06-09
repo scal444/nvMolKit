@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import Any, List, Optional
 from rdkit.Chem import Mol
 from rdkit.Chem.rdDistGeom import EmbedParameters
 
@@ -10,5 +10,13 @@ def EmbedMolecules(
     confsPerMolecule: int = 1,
     maxIterations: int = -1,
     hardwareOptions: Optional[BatchHardwareOptions] = ...,
-    failuresOut: Optional[dict] = ...,
 ) -> None: ...
+
+def EmbedMoleculesDevice(
+    molecules: List[Mol],
+    params: EmbedParameters,
+    confsPerMolecule: int = 1,
+    maxIterations: int = -1,
+    hardwareOptions: Optional[BatchHardwareOptions] = ...,
+    targetGpu: int = -1,
+) -> Any: ...

@@ -20,7 +20,7 @@ optimization for multiple molecules and conformers using CUDA and OpenMP.
 """
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, overload
 
 from rdkit.Chem import AllChem
 
@@ -30,10 +30,12 @@ if TYPE_CHECKING:
 
 from nvmolkit._types import FireOptions  # noqa: F401  (re-export). Must precede _mmffOptimization to register Boost.Python converters for FireOptions / BatchHardwareOptions used by the FIRE entry point.
 from nvmolkit import _mmffOptimization
+from nvmolkit._arrayHelpers import *  # noqa: F403  # registers PyArray for DEVICE-mode returns
 from nvmolkit._mmff_bridge import default_rdkit_mmff_properties, make_internal_mmff_properties
-from nvmolkit.types import HardwareOptions
+from nvmolkit.types import CoordinateOutput, Device3DResult, HardwareOptions
 
 
+@overload
 def MMFFOptimizeMoleculesConfs(
     molecules: list["Mol"],
     maxIters: int = 200,
@@ -41,10 +43,40 @@ def MMFFOptimizeMoleculesConfs(
     nonBondedThreshold: float | Sequence[float] = 100.0,
     ignoreInterfragInteractions: bool | Sequence[bool] = True,
     hardwareOptions: HardwareOptions | None = None,
+    output: Literal[CoordinateOutput.RDKIT_CONFORMERS] = CoordinateOutput.RDKIT_CONFORMERS,
+    targetGpu: int = -1,
     backend: str = "HYBRID",
     minimizerKind: str = "BFGS",
     fireOptions: FireOptions | None = None,
-) -> list[list[float]]:
+) -> list[list[float]]: ...
+@overload
+def MMFFOptimizeMoleculesConfs(
+    molecules: list["Mol"],
+    maxIters: int = 200,
+    properties: "MMFFMolProperties | Sequence[MMFFMolProperties | None] | None" = None,
+    nonBondedThreshold: float | Sequence[float] = 100.0,
+    ignoreInterfragInteractions: bool | Sequence[bool] = True,
+    hardwareOptions: HardwareOptions | None = None,
+    *,
+    output: Literal[CoordinateOutput.DEVICE],
+    targetGpu: int = -1,
+    backend: str = "HYBRID",
+    minimizerKind: str = "BFGS",
+    fireOptions: FireOptions | None = None,
+) -> Device3DResult: ...
+def MMFFOptimizeMoleculesConfs(
+    molecules: list["Mol"],
+    maxIters: int = 200,
+    properties: "MMFFMolProperties | Sequence[MMFFMolProperties | None] | None" = None,
+    nonBondedThreshold: float | Sequence[float] = 100.0,
+    ignoreInterfragInteractions: bool | Sequence[bool] = True,
+    hardwareOptions: HardwareOptions | None = None,
+    output: CoordinateOutput = CoordinateOutput.RDKIT_CONFORMERS,
+    targetGpu: int = -1,
+    backend: str = "HYBRID",
+    minimizerKind: str = "BFGS",
+    fireOptions: FireOptions | None = None,
+):
     """Optimize conformers for multiple molecules using MMFF force field.
 
     This function performs GPU-accelerated MMFF optimization on multiple molecules with
@@ -62,6 +94,12 @@ def MMFFOptimizeMoleculesConfs(
         ignoreInterfragInteractions: If ``True``, omit non-bonded terms between
             fragments. May also be provided as a per-molecule sequence.
         hardwareOptions: Configures CPU and GPU batching, threading, and device selection. Will attempt to use reasonable defaults if not set.
+        output: ``RDKIT_CONFORMERS`` (default) writes optimized coordinates back into each input
+            molecule's RDKit conformers and returns nested host-side energy lists. ``DEVICE``
+            keeps optimized coordinates and energies on GPU and returns a :class:`Device3DResult`.
+            DEVICE currently supports only ``minimizerKind="BFGS"``.
+        targetGpu: In DEVICE mode, the GPU to consolidate the result onto. ``-1`` selects the
+            first configured execution GPU.
         backend: Kernel backend selector for benchmarking. One of
             ``"BATCHED"``, ``"PER_MOL"``, or ``"HYBRID"`` (default), which
             auto-selects between batched and per-molecule kernels based on
@@ -70,9 +108,11 @@ def MMFFOptimizeMoleculesConfs(
         fireOptions: FIRE algorithm options used when ``minimizerKind="FIRE"``.
 
     Returns:
-        List of lists of energies, where each inner list contains the optimized energies
-        for all conformers of the corresponding molecule. The order matches the input
-        molecule order and conformer iteration order.
+        For ``RDKIT_CONFORMERS``: list of lists of energies, where each inner list contains the
+        optimized energies for all conformers of the corresponding molecule. The order matches
+        the input molecule order and conformer iteration order.
+        For ``DEVICE``: a :class:`Device3DResult` whose ``values`` field carries optimized
+        coordinates ``(total_atoms, 3)``, plus ``energies``, ``converged``, and CSR indices.
 
     Raises:
         ValueError: If any molecules in the input list are None or lack MMFF atom types.
@@ -114,8 +154,9 @@ def MMFFOptimizeMoleculesConfs(
     Note:
         - Input molecules are modified in-place with optimized conformer coordinates
     """
-    # Validate input
     if not molecules:
+        if output == CoordinateOutput.DEVICE:
+            raise ValueError("MMFFOptimizeMoleculesConfs(output=DEVICE) requires at least one molecule")
         return []
 
     none_indices = []
@@ -175,6 +216,12 @@ def MMFFOptimizeMoleculesConfs(
         )
         for props, threshold, ignore_interfrag in zip(properties_list, thresholds, interfrag_flags)
     ]
+    if output == CoordinateOutput.DEVICE:
+        if minimizer_kind != "BFGS":
+            raise ValueError("MMFFOptimizeMoleculesConfs(output=DEVICE) currently supports only minimizerKind='BFGS'")
+        return _mmffOptimization.MMFFOptimizeMoleculesConfsDevice(
+            molecules, maxIters, native_properties, native_options, targetGpu, backend
+        )
     return _mmffOptimization.MMFFOptimizeMoleculesConfs(
         molecules,
         maxIters,

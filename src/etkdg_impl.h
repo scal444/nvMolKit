@@ -29,11 +29,11 @@
 #include <unordered_map>
 #include <vector>
 
-#include "device_vector.h"
-#include "dist_geom.h"
-#include "embedder_utils.h"
-#include "host_vector.h"
-#include "minimizer/bfgs_types.h"
+#include "src/embedder_utils.h"
+#include "src/forcefields/dist_geom.h"
+#include "src/minimizer/bfgs_types.h"
+#include "src/utils/device_vector.h"
+#include "src/utils/host_vector.h"
 
 // forward declarations
 
@@ -194,8 +194,6 @@ class ETKDGDriver {
   //! so getFailures()[i][j] is the number of times that conformer j has failed stage i.
   //! Uses single pinned memory buffer for intermediate D2H transfer (all stages concatenated).
   std::vector<std::vector<int16_t>> getFailures(PinnedHostVector<int16_t>& failuresScratch) const;
-  //! Returns the ordered list of stage names matching getFailures()'s outer dimension.
-  std::vector<std::string>          stageNames() const;
   const ETKDGContext&               context() const { return *context_; }
 
   //! Iterate until all conformers are finished or maxIterations is reached. Does not reset iterations,

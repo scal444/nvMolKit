@@ -16,8 +16,8 @@
 #include <boost/python.hpp>
 #include <boost/python/stl_iterator.hpp>
 
-#include "hardware_options.h"
-#include "minimizer/fire_minimizer.h"
+#include "src/hardware_options.h"
+#include "src/minimizer/fire_minimizer.h"
 
 namespace {
 

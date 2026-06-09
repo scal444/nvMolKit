@@ -15,14 +15,14 @@
 
 #include <cub/cub.cuh>
 
-#include "bfgs_types.h"
-#include "cub_helpers.cuh"
-#include "device_vector.h"
-#include "dist_geom_kernels.h"
-#include "dist_geom_kernels_device.cuh"
-#include "fire_minimize_permol_kernels.h"
-#include "mmff_kernels.h"
-#include "mmff_kernels_device.cuh"
+#include "src/forcefields/dist_geom_kernels.h"
+#include "src/forcefields/dist_geom_kernels_device.cuh"
+#include "src/forcefields/mmff_kernels.h"
+#include "src/forcefields/mmff_kernels_device.cuh"
+#include "src/minimizer/bfgs_types.h"
+#include "src/minimizer/fire_minimize_permol_kernels.h"
+#include "src/utils/cub_helpers.cuh"
+#include "src/utils/device_vector.h"
 
 namespace nvMolKit {
 
@@ -88,7 +88,7 @@ __device__ __forceinline__ void evalMolGrad([[maybe_unused]] const TermsType&   
                                             [[maybe_unused]] const double       chiralWeight,
                                             [[maybe_unused]] const double       fourthDimWeight) {
   if constexpr (FFType == ForceFieldType::MMFF) {
-    MMFF::molGrad<kFirePerMolBlockSize>(terms, systemIndices, molCoords, grad, molIdx, tid);
+    MMFF::molGrad<kFirePerMolBlockSize, false>(terms, systemIndices, molCoords, grad, molIdx, tid);
   } else if constexpr (FFType == ForceFieldType::ETK) {
     DistGeom::molGradETK(terms, systemIndices, molCoords, grad, molIdx, tid);
   } else {  // DG
@@ -106,7 +106,7 @@ __device__ __forceinline__ double evalMolEnergy([[maybe_unused]] const TermsType
                                                 [[maybe_unused]] const double       chiralWeight,
                                                 [[maybe_unused]] const double       fourthDimWeight) {
   if constexpr (FFType == ForceFieldType::MMFF) {
-    return MMFF::molEnergy<kFirePerMolBlockSize>(terms, systemIndices, molCoords, molIdx, tid);
+    return MMFF::molEnergy<kFirePerMolBlockSize, false>(terms, systemIndices, molCoords, molIdx, tid);
   } else if constexpr (FFType == ForceFieldType::ETK) {
     return DistGeom::molEnergyETK(terms, systemIndices, molCoords, molIdx, tid);
   } else {  // DG

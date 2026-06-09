@@ -20,9 +20,9 @@
 
 #include <cstdint>
 
-#include "dist_geom_kernels.h"
-#include "fire_minimizer.h"
-#include "mmff_kernels.h"
+#include "src/forcefields/dist_geom_kernels.h"
+#include "src/forcefields/mmff_kernels.h"
+#include "src/minimizer/fire_minimizer.h"
 
 namespace nvMolKit {
 

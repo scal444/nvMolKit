@@ -25,7 +25,7 @@ from rdkit.Geometry import Point3D
 from nvmolkit.embedMolecules import EmbedMolecules
 import nvmolkit.mmffOptimization as nvmolkit_mmff
 from nvmolkit.mmffOptimization import FireOptions
-from nvmolkit.types import HardwareOptions
+from nvmolkit.types import CoordinateOutput, Device3DResult, HardwareOptions
 
 
 @pytest.fixture
@@ -567,3 +567,39 @@ def test_mmff_optimization_fire_invalid_input():
     with pytest.raises(ValueError, match="None at indices") as exc_info:
         nvmolkit_mmff.MMFFOptimizeMoleculesConfs([None], minimizerKind="FIRE")
     assert exc_info.value.args[1] == {"none": [0], "no_params": []}
+
+
+def test_mmff_optimization_device_output_matches_host(mmff_test_mols):
+    """MMFFOptimizeMoleculesConfs(output=DEVICE) returns Device3DResult; energies match host path."""
+    host_mols = create_hard_copy_mols(mmff_test_mols)
+    device_mols = create_hard_copy_mols(mmff_test_mols)
+
+    host_energies = nvmolkit_mmff.MMFFOptimizeMoleculesConfs(host_mols, maxIters=50)
+
+    result = nvmolkit_mmff.MMFFOptimizeMoleculesConfs(
+        device_mols,
+        maxIters=50,
+        output=CoordinateOutput.DEVICE,
+    )
+    assert isinstance(result, Device3DResult)
+    torch.cuda.synchronize()
+    device_energies_flat = result.energies.torch().tolist()
+    expected_n = sum(m.GetNumConformers() for m in device_mols)
+    assert len(device_energies_flat) == expected_n
+
+    host_flat = [e for inner in host_energies for e in inner]
+    assert len(host_flat) == len(device_energies_flat)
+    for h, d in zip(host_flat, device_energies_flat):
+        rel = abs(h - d) / max(abs(h), 1e-10)
+        assert rel < 1e-2, f"host {h} vs device {d}"
+
+
+def test_mmff_optimization_device_output_rejects_fire(mmff_test_mols):
+    mols = create_hard_copy_mols(mmff_test_mols)
+    with pytest.raises(ValueError, match="output=DEVICE.*minimizerKind='BFGS'"):
+        nvmolkit_mmff.MMFFOptimizeMoleculesConfs(
+            mols,
+            maxIters=10,
+            output=CoordinateOutput.DEVICE,
+            minimizerKind="FIRE",
+        )

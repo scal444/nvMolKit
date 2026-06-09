@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "morgan_fingerprint_gpu.h"
+#include "src/morgan_fingerprint_gpu.h"
 
 #include <DataStructs/ExplicitBitVect.h>
 #include <GraphMol/ROMol.h>
@@ -24,13 +24,13 @@
 #include <mutex>
 #include <vector>
 
-#include "flat_bit_vect.h"
-#include "morgan_fingerprint_common.h"
-#include "morgan_fingerprint_cpu.h"
-#include "morgan_fingerprint_kernels.h"
-#include "nvtx.h"
-#include "openmp_helpers.h"
-#include "utils/host_vector.h"
+#include "src/data_structures/flat_bit_vect.h"
+#include "src/morgan_fingerprint_common.h"
+#include "src/morgan_fingerprint_cpu.h"
+#include "src/morgan_fingerprint_kernels.h"
+#include "src/utils/host_vector.h"
+#include "src/utils/nvtx.h"
+#include "src/utils/openmp_helpers.h"
 namespace nvMolKit {
 
 namespace {
@@ -266,10 +266,18 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
       workLarge.push_back(i);
     }
   }
-  const size_t                    numThreads32    = (work32.size() + dispatchChunkSize - 1) / dispatchChunkSize;
-  const size_t                    numThreads64    = (work64.size() + dispatchChunkSize - 1) / dispatchChunkSize;
-  const size_t                    numThreads128   = (work128.size() + dispatchChunkSize - 1) / dispatchChunkSize;
-  const size_t                    numThreadsTotal = numThreads32 + numThreads64 + numThreads128;
+  const size_t numThreads32    = (work32.size() + dispatchChunkSize - 1) / dispatchChunkSize;
+  const size_t numThreads64    = (work64.size() + dispatchChunkSize - 1) / dispatchChunkSize;
+  const size_t numThreads128   = (work128.size() + dispatchChunkSize - 1) / dispatchChunkSize;
+  size_t       numThreadsTotal = numThreads32 + numThreads64 + numThreads128;
+  // Large molecules are drained from the shared workLarge queue inside the worker
+  // loop below, which only runs numThreadsTotal iterations. When every molecule is
+  // large there is no small/medium work, so without dedicated iterations the queue
+  // would never be drained and those molecules would get empty fingerprints. Spread
+  // the drain across the available threads in that case.
+  if (numThreadsTotal == 0) {
+    numThreadsTotal = std::min(workLarge.size(), static_cast<size_t>(nThreadsActual));
+  }
   detail::OpenMPExceptionRegistry exceptionRegistry;
 
 #pragma omp parallel for num_threads(nThreadsActual) default(none) shared(numThreadsTotal,     \

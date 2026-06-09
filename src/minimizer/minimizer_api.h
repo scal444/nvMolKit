@@ -16,7 +16,7 @@
 #ifndef NVMOLKIT_MINIMIZER_API_H
 #define NVMOLKIT_MINIMIZER_API_H
 
-#include <device_vector.h>
+#include "src/utils/device_vector.h"
 
 #include <functional>
 #include <vector>

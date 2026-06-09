@@ -20,13 +20,12 @@
 #include <filesystem>
 #include <random>
 
-#include "etkdg_impl.h"
-#include "etkdg_stage_etk_minimization.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
-#include "minimizer/bfgs_minimize.h"
-#include "minimizer/fire_minimizer.h"
-#include "test_utils.h"
+#include "src/etkdg_impl.h"
+#include "src/etkdg_stage_etk_minimization.h"
+#include "src/minimizer/bfgs_minimize.h"
+#include "tests/test_utils.h"
 constexpr int DIM = 4;
 void          initTestComponentsCommon(const std::vector<RDKit::ROMol*>&         mols,
                                        ETKDGContext&                             context,
@@ -210,11 +209,7 @@ std::vector<double> getGPUEnergy(const std::vector<const RDKit::ROMol*>&    mols
   return getReferenceEnergy(mols, eargs, false, 0.001, hostPos3.data(), nullptr, useBasicKnowledge);
 }
 
-// Test parameter: (ETKDG variant, BFGS backend, MinimizerKind, FIRE backend). When kind==BFGS
-// the FireBackend axis is unused; when kind==FIRE the BfgsBackend axis is unused. The
-// instantiation below filters out duplicate combinations.
-using ETKStageTestParam =
-  std::tuple<ETKDGOption, nvMolKit::BfgsBackend, nvMolKit::MinimizerKind, nvMolKit::FireBackend>;
+using ETKStageTestParam = std::tuple<ETKDGOption, nvMolKit::BfgsBackend>;
 
 class ETKStageSingleMolTestFixture : public ::testing::TestWithParam<ETKStageTestParam> {
  public:
@@ -246,9 +241,9 @@ class ETKStageSingleMolTestFixture : public ::testing::TestWithParam<ETKStageTes
 
 TEST_P(ETKStageSingleMolTestFixture, MinimizeCompare) {
   // Set up embed parameters from test parameter
-  const auto [etkdgOption, backend, kind, fireBackend] = GetParam();
-  embedParam_                                          = getETKDGOption(etkdgOption);
-  embedParam_.useRandomCoords                          = true;
+  const auto [etkdgOption, backend] = GetParam();
+  embedParam_                       = getETKDGOption(etkdgOption);
+  embedParam_.useRandomCoords       = true;
 
   // Initialize test components after setting embedParam_
   initTestComponents();
@@ -258,20 +253,18 @@ TEST_P(ETKStageSingleMolTestFixture, MinimizeCompare) {
 
   // Create minimizer for the test
   nvMolKit::BfgsBatchMinimizer bfgsMinimizer(4, nvMolKit::DebugLevel::NONE, true, nullptr, backend);
-  nvMolKit::FireOptions        fireOptions{};
-  fireOptions.useMass = false;
-  nvMolKit::FireBatchMinimizer fireMinimizer(4, fireOptions, nullptr, /*debugMode=*/false, fireBackend);
-  const auto                   handle = kind == nvMolKit::MinimizerKind::FIRE ?
-                                          nvMolKit::detail::MinimizerHandle::forFire(fireMinimizer) :
-                                          nvMolKit::detail::MinimizerHandle::forBfgs(bfgsMinimizer);
 
   // Create FirstMinimizeStage
   std::vector<std::unique_ptr<ETKDGStage>> stages;
   std::vector<const RDKit::ROMol*>         molsPtrs;
   molsPtrs.push_back(molPtr_.get());
   auto stage =
-    std::make_unique<nvMolKit::detail::ETKMinimizationStage>(molsPtrs, eargs_, embedParam_, context_, handle, nullptr);
-  const auto* stagePtr = stage.get();  // Store pointer before moving
+    std::make_unique<nvMolKit::detail::ETKMinimizationStage>(molsPtrs,
+                                                             eargs_,
+                                                             embedParam_,
+                                                             context_,
+                                                             bfgsMinimizer,
+                                                             nullptr);
   stages.push_back(std::move(stage));
 
   // Create and run driver
@@ -305,37 +298,18 @@ TEST_P(ETKStageSingleMolTestFixture, MinimizeCompare) {
 }
 
 namespace {
-// Build the BFGS sweep over (BATCHED, PER_MOLECULE) plus the FIRE sweep over its two backends.
 std::vector<ETKStageTestParam> makeETKStageParams(const std::vector<ETKDGOption>& options) {
   std::vector<ETKStageTestParam> params;
   for (const auto option : options) {
-    params.emplace_back(option,
-                        nvMolKit::BfgsBackend::BATCHED,
-                        nvMolKit::MinimizerKind::BFGS,
-                        nvMolKit::FireBackend::BATCHED);
-    params.emplace_back(option,
-                        nvMolKit::BfgsBackend::PER_MOLECULE,
-                        nvMolKit::MinimizerKind::BFGS,
-                        nvMolKit::FireBackend::BATCHED);
-    params.emplace_back(option,
-                        nvMolKit::BfgsBackend::BATCHED,
-                        nvMolKit::MinimizerKind::FIRE,
-                        nvMolKit::FireBackend::BATCHED);
-    params.emplace_back(option,
-                        nvMolKit::BfgsBackend::BATCHED,
-                        nvMolKit::MinimizerKind::FIRE,
-                        nvMolKit::FireBackend::PER_MOLECULE);
+    params.emplace_back(option, nvMolKit::BfgsBackend::BATCHED);
+    params.emplace_back(option, nvMolKit::BfgsBackend::PER_MOLECULE);
   }
   return params;
 }
 
 std::string makeETKStageName(const ETKStageTestParam& param) {
   std::string name = getETKDGOptionName(std::get<0>(param));
-  if (std::get<2>(param) == nvMolKit::MinimizerKind::FIRE) {
-    name += std::get<3>(param) == nvMolKit::FireBackend::BATCHED ? "_FireBatched" : "_FirePerMolecule";
-  } else {
-    name += std::get<1>(param) == nvMolKit::BfgsBackend::BATCHED ? "_Batched" : "_PerMolecule";
-  }
+  name += std::get<1>(param) == nvMolKit::BfgsBackend::BATCHED ? "_Batched" : "_PerMolecule";
   return name;
 }
 }  // namespace
@@ -383,9 +357,9 @@ class ETKStageMultiMolTestFixture : public ::testing::TestWithParam<ETKStageTest
 
 TEST_P(ETKStageMultiMolTestFixture, MinimizeCompare) {
   // Set up embed parameters from test parameter
-  const auto [etkdgOption, backend, kind, fireBackend] = GetParam();
-  embedParam_                                          = getETKDGOption(etkdgOption);
-  embedParam_.useRandomCoords                          = true;
+  const auto [etkdgOption, backend] = GetParam();
+  embedParam_                       = getETKDGOption(etkdgOption);
+  embedParam_.useRandomCoords       = true;
 
   // Initialize test components after setting embedParam_
   initTestComponents();
@@ -395,12 +369,6 @@ TEST_P(ETKStageMultiMolTestFixture, MinimizeCompare) {
 
   // Create minimizer for the test
   nvMolKit::BfgsBatchMinimizer bfgsMinimizer(4, nvMolKit::DebugLevel::NONE, true, nullptr, backend);
-  nvMolKit::FireOptions        fireOptions{};
-  fireOptions.useMass = false;
-  nvMolKit::FireBatchMinimizer fireMinimizer(4, fireOptions, nullptr, /*debugMode=*/false, fireBackend);
-  const auto                   handle = kind == nvMolKit::MinimizerKind::FIRE ?
-                                          nvMolKit::detail::MinimizerHandle::forFire(fireMinimizer) :
-                                          nvMolKit::detail::MinimizerHandle::forBfgs(bfgsMinimizer);
 
   // Create FirstMinimizeStage
   std::vector<std::unique_ptr<ETKDGStage>> stages;
@@ -411,8 +379,12 @@ TEST_P(ETKStageMultiMolTestFixture, MinimizeCompare) {
   const int count = molsPtrs.size();
 
   auto stage =
-    std::make_unique<nvMolKit::detail::ETKMinimizationStage>(molsPtrs, eargs_, embedParam_, context_, handle, nullptr);
-  const auto* stagePtr = stage.get();  // Store pointer before moving
+    std::make_unique<nvMolKit::detail::ETKMinimizationStage>(molsPtrs,
+                                                             eargs_,
+                                                             embedParam_,
+                                                             context_,
+                                                             bfgsMinimizer,
+                                                             nullptr);
   stages.push_back(std::move(stage));
 
   // Create and run driver
@@ -454,32 +426,21 @@ TEST_P(ETKStageMultiMolTestFixture, MinimizeCompare) {
   EXPECT_LE(totalFailsGpu, totalFailsRef * 1.05)
     << "GPU minimization failed more than 5% of reference failures: " << totalFailsGpu << " vs " << totalFailsRef;
 
-  // FIRE is a first-order integrator that lacks BFGS's line search, so it routinely converges to
-  // slightly higher (but still good) minima than the BFGS reference on the same starting geometry.
-  // For FIRE we therefore only count an "exception" when it converges to a *substantially* higher
-  // minimum than the BFGS reference (>50% of |ref|), and we allow a looser shrink floor in the
-  // backstop check. BFGS keeps the original tight thresholds.
-  const bool   isFire           = (kind == nvMolKit::MinimizerKind::FIRE);
-  const double exceptionGapFrac = isFire ? 0.5 : 0.0;
-  const double shrinkFloor      = isFire ? 0.2 : 0.1;
-
   std::vector<int> higherThanIndices;
   for (int i = 0; i < count; ++i) {
-    if (gpuEnergies[i] <= refEnergies[i]) {
-      continue;
-    }
-    const double absRef = std::abs(refEnergies[i]);
-    if ((gpuEnergies[i] - refEnergies[i]) > absRef * exceptionGapFrac) {
+    if (refEnergies[i] < gpuEnergies[i]) {
       higherThanIndices.push_back(i);
     }
   }
+  // Make sure ~80% of cases did better than reference energy.
   EXPECT_LE(higherThanIndices.size(), count / 5) << "Too many exceptions";
   for (int idx : higherThanIndices) {
-    // Pass if we're within 10% of the reference, or if we've shrunk enough from the starting energy.
+    // Check that we've shrunk the energy sufficiently, or that we're pretty close to the reference value.
+    // Pass if we're within 10%, or if we've shrunk by at least 90%.
     if ((gpuEnergies[idx] - refEnergies[idx]) / refEnergies[idx] < .1) {
       continue;
     }
-    EXPECT_LE(gpuEnergies[idx] / origGpuEnergy[idx], shrinkFloor)
+    EXPECT_LE(gpuEnergies[idx] / origGpuEnergy[idx], 0.1)
       << "Molecule " << idx << " energy did not shrink sufficiently: " << origGpuEnergy[idx] << " vs "
       << gpuEnergies[idx] << ", reference minimized: " << refEnergies[idx];
   }

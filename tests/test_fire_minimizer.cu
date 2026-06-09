@@ -21,8 +21,8 @@
 #include <functional>
 #include <vector>
 
-#include "cuda_error_check.h"
-#include "fire_minimizer.h"
+#include "src/minimizer/fire_minimizer.h"
+#include "src/utils/cuda_error_check.h"
 
 namespace {
 

@@ -18,10 +18,10 @@
 
 #include <vector>
 
-#include "bfgs_types.h"
-#include "device_vector.h"
-#include "host_vector.h"
-#include "minimizer_api.h"
+#include "src/minimizer/bfgs_types.h"
+#include "src/minimizer/minimizer_api.h"
+#include "src/utils/device_vector.h"
+#include "src/utils/host_vector.h"
 
 namespace nvMolKit {
 

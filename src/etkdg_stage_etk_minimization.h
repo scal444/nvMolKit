@@ -18,10 +18,9 @@
 
 #include <GraphMol/DistGeomHelpers/Embedder.h>
 
-#include "dist_geom.h"
-#include "etkdg_impl.h"
-#include "minimizer/bfgs_minimize.h"
-#include "minimizer/fire_minimizer.h"
+#include "src/etkdg_impl.h"
+#include "src/forcefields/dist_geom.h"
+#include "src/minimizer/bfgs_minimize.h"
 
 using ::nvMolKit::detail::EmbedArgs;
 using ::nvMolKit::detail::ETKDGContext;
@@ -37,20 +36,9 @@ class ETKMinimizationStage final : public ETKDGStage {
     const std::vector<EmbedArgs>&                                                           eargs,
     const RDKit::DGeomHelpers::EmbedParameters&                                             embedParam,
     const ETKDGContext&                                                                     ctx,
-    const MinimizerHandle&                                                                  minimizer,
-    cudaStream_t                                                                            stream = nullptr,
-    std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::Energy3DForceContribsHost>* cache  = nullptr);
-
-  //! \brief Backwards-compatible constructor that selects the BFGS path.
-  ETKMinimizationStage(
-    const std::vector<const RDKit::ROMol*>&                                                 mols,
-    const std::vector<EmbedArgs>&                                                           eargs,
-    const RDKit::DGeomHelpers::EmbedParameters&                                             embedParam,
-    const ETKDGContext&                                                                     ctx,
     BfgsBatchMinimizer&                                                                     minimizer,
     cudaStream_t                                                                            stream = nullptr,
-    std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::Energy3DForceContribsHost>* cache  = nullptr)
-      : ETKMinimizationStage(mols, eargs, embedParam, ctx, MinimizerHandle::forBfgs(minimizer), stream, cache) {}
+    std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::Energy3DForceContribsHost>* cache  = nullptr);
 
   void        execute(ETKDGContext& ctx) override;
   std::string name() const override { return "ETK 3D Minimization"; }
@@ -64,7 +52,7 @@ class ETKMinimizationStage final : public ETKDGStage {
   AsyncDeviceVector<double>                        grad_;
   AsyncDeviceVector<double>                        energyOuts_;
   const RDKit::DGeomHelpers::EmbedParameters&      embedParam_;
-  MinimizerHandle                                  minimizer_;
+  BfgsBatchMinimizer&                              minimizer_;
   cudaStream_t                                     stream_;
 };
 

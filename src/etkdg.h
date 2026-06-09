@@ -16,11 +16,12 @@
 #ifndef NVMOLKIT_ETKDG_H
 #define NVMOLKIT_ETKDG_H
 
+#include <optional>
 #include <vector>
 
-#include "bfgs_minimize.h"
-#include "etkdg_impl.h"
-#include "hardware_options.h"
+#include "src/conformer/device_coord_result.h"
+#include "src/hardware_options.h"
+#include "src/minimizer/bfgs_minimize.h"
 
 namespace RDKit {
 class ROMol;
@@ -32,29 +33,31 @@ struct EmbedParameters;
 
 namespace nvMolKit {
 
-//! \brief Run GPU-accelerated ETKDG conformer embedding on a batch of molecules.
-//!
-//! \param mols Molecules to embed. Conformers are appended in-place.
-//! \param params RDKit embed parameters; @c useRandomCoords must be true.
-//! \param confsPerMolecule Number of conformers to attempt per molecule.
-//! \param maxIterations Maximum ETKDG iterations; @c -1 selects an automatic value.
-//! \param debugMode Enable per-stage timing/output collection.
-//! \param failures Optional pointer to a per-stage / per-conformer failure tally.
-//! \param stageNames Optional pointer populated with the ordered stage names matching @p failures'
-//!        outer dimension. Useful for labeling failure-mode plots.
-//! \param hardwareOptions Batch and threading hardware configuration.
-//! \param backend BFGS kernel layout selector for ETK refinement.
-//! \param fireBackend FIRE kernel layout selector for the distance-geometry stages.
-void embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
-                    const RDKit::DGeomHelpers::EmbedParameters& params,
-                    int                                         confsPerMolecule = 1,
-                    int                                         maxIterations    = -1,
-                    bool                                        debugMode        = false,
-                    std::vector<std::vector<int16_t>>*          failures         = nullptr,
-                    const BatchHardwareOptions&                 hardwareOptions  = {},
-                    BfgsBackend                                 backend          = BfgsBackend::HYBRID,
-                    std::vector<std::string>*                   stageNames       = nullptr,
-                    FireBackend                                 fireBackend      = FireBackend::BATCHED);
+/**
+ * @brief Embed molecules using ETKDG, optionally returning coordinates on the GPU.
+ *
+ * In @c CoordinateOutput::RDKIT_CONFORMERS mode (default), optimized coordinates are written
+ * back to each input molecule's RDKit conformer list and the function returns @c std::nullopt.
+ *
+ * In @c CoordinateOutput::DEVICE mode, coordinates remain on the GPU and are returned as a
+ * @c DeviceCoordResult collected onto @p targetGpu (defaults to the first id in
+ * @c hardwareOptions.gpuIds, or device 0 when no ids are specified). RDKit conformer lists
+ * are left untouched in this mode. ETKDG conformer pruning (@c params.pruneRmsThresh) must be
+ * disabled when using DEVICE mode; an exception is thrown otherwise.
+ *
+ * The distance-geometry minimization stages run with FIRE; the ETK 3D refinement stage
+ * remains BFGS. There is intentionally no public ETKDG minimizer selector.
+ */
+std::optional<DeviceCoordResult> embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
+                                                const RDKit::DGeomHelpers::EmbedParameters& params,
+                                                int                                         confsPerMolecule = 1,
+                                                int                                         maxIterations    = -1,
+                                                bool                                        debugMode        = false,
+                                                std::vector<std::vector<int16_t>>*          failures         = nullptr,
+                                                const BatchHardwareOptions&                 hardwareOptions  = {},
+                                                BfgsBackend      backend   = BfgsBackend::HYBRID,
+                                                CoordinateOutput output    = CoordinateOutput::RDKIT_CONFORMERS,
+                                                int              targetGpu = -1);
 
 }  // namespace nvMolKit
 

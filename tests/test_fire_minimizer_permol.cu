@@ -24,11 +24,11 @@
 #include <random>
 #include <vector>
 
-#include "../rdkit_extensions/mmff_flattened_builder.h"
-#include "fire_minimizer.h"
-#include "mmff.h"
-#include "mmff_batched_forcefield.h"
-#include "test_utils.h"
+#include "rdkit_extensions/mmff_flattened_builder.h"
+#include "src/forcefields/mmff.h"
+#include "src/forcefields/mmff_batched_forcefield.h"
+#include "src/minimizer/fire_minimizer.h"
+#include "tests/test_utils.h"
 
 using ::nvMolKit::MMFF::BatchedMolecularDeviceBuffers;
 using ::nvMolKit::MMFF::BatchedMolecularSystemHost;

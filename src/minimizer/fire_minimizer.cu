@@ -21,14 +21,14 @@
 #include <numeric>
 #include <stdexcept>
 
-#include "../forcefields/batched_forcefield.h"
-#include "../forcefields/dist_geom.h"
-#include "../forcefields/dist_geom_kernels.h"
-#include "../forcefields/mmff.h"
-#include "../forcefields/mmff_kernels.h"
-#include "fire_minimize_permol_kernels.h"
-#include "fire_minimizer.h"
-#include "nvtx.h"
+#include "src/forcefields/batched_forcefield.h"
+#include "src/forcefields/dist_geom.h"
+#include "src/forcefields/dist_geom_kernels.h"
+#include "src/forcefields/mmff.h"
+#include "src/forcefields/mmff_kernels.h"
+#include "src/minimizer/fire_minimize_permol_kernels.h"
+#include "src/minimizer/fire_minimizer.h"
+#include "src/utils/nvtx.h"
 
 namespace nvMolKit {
 

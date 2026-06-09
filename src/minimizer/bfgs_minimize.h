@@ -16,13 +16,12 @@
 #ifndef NVMOLKIT_BFGS_MINIMIZE_H
 #define NVMOLKIT_BFGS_MINIMIZE_H
 
-#include <device_vector.h>
-
 #include <functional>
 #include <vector>
 
-#include "bfgs_types.h"
-#include "host_vector.h"
+#include "src/minimizer/bfgs_types.h"
+#include "src/utils/device_vector.h"
+#include "src/utils/host_vector.h"
 
 namespace nvMolKit {
 
@@ -71,7 +70,7 @@ struct BfgsBatchMinimizer {
   //! \param grad Gradient output buffer matching `positions`.
   //! \param energyOuts Per-system energy output buffer.
   //! \param activeSystemMask Optional per-system activity mask for staged minimization.
-  //! \return `false` when all systems converged and `true` when at least one system needs another cycle.
+  //! \return `true` when all active systems converged, `false` when at least one system needs another cycle.
   //! \note This overload is only valid for the batched backend.
   bool minimize(int                        numIters,
                 double                     gradTol,
@@ -87,7 +86,7 @@ struct BfgsBatchMinimizer {
   //! \param atomStartsHost Host-side atom offsets for the flattened systems.
   //! \param systemDevice MMFF device buffers used by the per-molecule kernels.
   //! \param activeThisStage Optional per-system activity mask for staged minimization.
-  //! \return `false` when all systems converged and `true` when at least one system needs another cycle.
+  //! \return `true` when all active systems converged, `false` when at least one system needs another cycle.
   bool minimizeWithMMFF(int                                  numIters,
                         double                               gradTol,
                         const std::vector<int>&              atomStartsHost,
@@ -102,7 +101,7 @@ struct BfgsBatchMinimizer {
   //! \param positions Flattened coordinate buffer for the batch.
   //! \param systemDevice ETK device buffers used by the per-molecule kernels.
   //! \param activeThisStage Optional per-system activity mask for staged minimization.
-  //! \return `false` when all systems converged and `true` when at least one system needs another cycle.
+  //! \return `true` when all active systems converged, `false` when at least one system needs another cycle.
   bool minimizeWithETK(int                                        numIters,
                        double                                     gradTol,
                        const std::vector<int>&                    atomStartsHost,
@@ -121,7 +120,7 @@ struct BfgsBatchMinimizer {
   //! \param chiralWeight Weight applied to the DG chirality term.
   //! \param fourthDimWeight Weight applied to the DG fourth-dimension term.
   //! \param activeThisStage Optional per-system activity mask for staged minimization.
-  //! \return `false` when all systems converged and `true` when at least one system needs another cycle.
+  //! \return `true` when all active systems converged, `false` when at least one system needs another cycle.
   bool minimizeWithDG(int                                      numIters,
                       double                                   gradTol,
                       const std::vector<int>&                  atomStartsHost,
