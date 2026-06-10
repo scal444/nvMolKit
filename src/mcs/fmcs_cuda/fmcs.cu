@@ -315,7 +315,8 @@ void launchTierAsync(
 
   std::uint8_t* dSubstructure = nullptr;
   const size_t substructureBytes =
-      static_cast<size_t>(numPairs) * 2u *
+      static_cast<size_t>(numPairs) *
+      static_cast<size_t>(kFmcsNumGroups) * 2u *
       static_cast<size_t>(kFmcsSubstructurePartialCapacity) *
       static_cast<size_t>(maxAtoms) * sizeof(std::uint8_t);
   checkCuda(cudaMallocAsync(reinterpret_cast<void**>(&dSubstructure),

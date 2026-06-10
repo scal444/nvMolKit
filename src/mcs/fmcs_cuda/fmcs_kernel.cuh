@@ -416,7 +416,6 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
     const TargetTopology& targetTopology,
     const PairMatchTablesDevice& tables,
     FmcsSubstructureScratch<maxAtoms, maxTA>& scratch,
-    int* scratchLock,
     std::uint8_t* partialStorage,
     int partialCapacity,
     bool* overflowedFlag,
@@ -446,20 +445,12 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
     if constexpr (kFmcsMeasure) {
       if (groupRank == 0) atomicAdd(&stats.fallbackCalls, 1u);
     }
-    if (groupRank == 0) {
-      while (atomicCAS(scratchLock, 0, 1) != 0) {}
-    }
-    group.sync();
     const bool overflowBefore =
         overflowedFlag != nullptr ? *overflowedFlag : false;
     ok = matchSeedSubstructureCooperative(
         group, candidate.seed, queryTopology, targetTopology, tables,
         candidate.match, scratch, partialStorage, partialCapacity,
         overflowedFlag);
-    group.sync();
-    if (groupRank == 0) {
-      atomicExch(scratchLock, 0);
-    }
     group.sync();
     if constexpr (kFmcsMeasure) {
       if (groupRank == 0) {
@@ -541,6 +532,30 @@ __device__ __forceinline__ bool popFrontCooperative(
     group.sync();
   }
   if (groupRank == 0) queue.setSizeWithinThread(oldSize - 1);
+  group.sync();
+  return true;
+}
+
+template<class GroupT, class QueuedT>
+__device__ __forceinline__ bool pushBackCooperative(
+    const GroupT& group,
+    SeedQueue<QueuedT, ThreadBlockScope>& queue,
+    const QueuedT& element) {
+  const int slot = queue.batchReserveCooperative(group, 1);
+  if (slot < 0) return false;
+  warpCopy(group, &queue.slot(slot), &element, sizeof(QueuedT));
+  group.sync();
+  return true;
+}
+
+template<class GroupT, class QueuedT>
+__device__ __forceinline__ bool popBackCooperative(
+    const GroupT& group,
+    SeedQueue<QueuedT, ThreadBlockScope>& queue,
+    QueuedT& outElement) {
+  const int oldTop = queue.popReserveCooperative(group);
+  if (oldTop < 0) return false;
+  warpCopy(group, &outElement, &queue.slot(oldTop - 1), sizeof(QueuedT));
   group.sync();
   return true;
 }
@@ -658,11 +673,10 @@ __device__ __forceinline__ void seedComputeRemainingSizeRdkitCooperative(
   group.sync();
 }
 
-/// Per-block sorted seed-set capacity.  The backing slab lives in global
-/// memory; only the cursor/header lives in shared memory.  The active
-/// RDKit-shaped kernel creates one initial seed per query bond and inserts
-/// accepted children into a bond-count-sorted worklist, so this no longer
-/// needs to cover queryBond * targetBond * orientation embeddings.
+/// Per-block seed worklist capacity.  The backing slab lives in global
+/// memory; only the cursor/header lives in shared memory.  Approach 1 uses
+/// atomic LIFO push/pop so multiple warp groups can own grow work
+/// concurrently.
 constexpr int kFmcsQueueCapacity = 4096;
 /// Per-block substructure fallback partial capacity, expressed as
 /// max-sized partial entries per ping-pong half.  The bodies live in
@@ -676,12 +690,10 @@ constexpr int kFmcsSubstructurePartialCapacity = 4096;
 constexpr int kFmcsCacheCapacity = 4096;
 static_assert((kFmcsCacheCapacity & (kFmcsCacheCapacity - 1)) == 0,
               "kFmcsCacheCapacity must be a power of two");
-/// Block / cooperative-group sizing.  The active RDKit-parity Phase 2
-/// serializes the sorted worklist through group 0 so pop order matches
-/// RDKit's SeedSet::pop/front behavior; lanes in that group still cooperate
-/// on matching, remaining-size checks, and seed copying.  The per-group shared
-/// arrays are kept because the helper layer supports cooperative groups, but
-/// only group 0 owns grow work in the current kernel.
+/// Block / cooperative-group sizing.  Phase 2 partitions each block into warp
+/// groups; each group pops one seed at a time from the block worklist and
+/// cooperates on matching, remaining-size checks, seed copying, and fallback
+/// substructure search.
 /// @c kFmcsGroupSize must evenly divide @c kFmcsBlockSize and (for the
 /// warp-shuffle / ballot primitives we use) be a power of two <= 32.
 constexpr int kFmcsBlockSize    = 128;
@@ -697,8 +709,8 @@ static_assert(kFmcsGroupSize <= 32,
 ///   seed at a time, run checkIfMatchAndAppend() via substructure search,
 ///   store one witness MatchResult, and carry RDKit's initial
 ///   ExcludedBonds prefix behavior.
-///   Phase 2: group 0 pops the front seed from the RDKit-style sorted queue
-///   and cooperatively processes the RDKit Seed::grow() stages:
+///   Phase 2: every warp group pops from the block worklist and cooperatively
+///   processes the RDKit Seed::grow() stages:
 ///   canGrowBiggerThan, fillNewBonds, Stage 0 all-outgoing-bonds child,
 ///   Stage 1 individual-bond pruning, and Stage 2 subset enumeration.
 ///   Exit on empty queue, timeout, or queue overflow.
@@ -761,14 +773,12 @@ __global__ void fmcsKernel(
   __shared__ DeviceCsrView targetView;
   __shared__ bool overflowed;
   __shared__ bool timedOut;
-  __shared__ SubstructureScratchT substructureScratch;
-  __shared__ int substructureScratchLock;
+  __shared__ SubstructureScratchT substructureScratch[kFmcsNumGroups];
   __shared__ FmcsMeasureStats measureStats;
 
-  // Cooperative Phase 2 working state.  Only group 0 currently owns RDKit
-  // grow work so the sorted queue is processed in the same order as RDKit;
-  // the arrays stay per-group to keep helper signatures group-local and to
-  // avoid local storage if we later add an explicitly measured parallel mode.
+  // Cooperative Phase 2 working state.  Approach 1 gives each warp group an
+  // independent seed workspace, fallback scratch, and global partial-storage
+  // slice so groups can pop and grow seeds concurrently.
   __shared__ __align__(16) unsigned char
       currentStorage[sizeof(QueuedT) * kFmcsNumGroups];
   __shared__ __align__(16) unsigned char
@@ -788,11 +798,18 @@ __global__ void fmcsKernel(
   __shared__ typename Seed<maxAtoms, maxBonds>::bond_word_type
       initialExcludedBonds[Seed<maxAtoms, maxBonds>::kBondWords];
 
+  auto group = cg::tiled_partition<kFmcsGroupSize>(block);
+  const int groupId   = static_cast<int>(block.thread_rank()) / kFmcsGroupSize;
+  const int groupRank = static_cast<int>(group.thread_rank());
+  SubstructureScratchT& mySubstructureScratch = substructureScratch[groupId];
+
   QueuedT* myQueueStorage =
       queueStorageAll + static_cast<size_t>(pairIdx) * queueCapacity;
   std::uint8_t* mySubstructureStorage =
       substructureStorageAll +
-      static_cast<size_t>(pairIdx) * 2u *
+      (static_cast<size_t>(pairIdx) * static_cast<size_t>(kFmcsNumGroups) +
+       static_cast<size_t>(groupId)) *
+      2u *
           static_cast<size_t>(substructurePartialCapacity) *
           static_cast<size_t>(maxAtoms);
 
@@ -802,7 +819,6 @@ __global__ void fmcsKernel(
     matchResultClearWithinThread(best.match);
     bestScore = 0;
     bestCopyLock = 0;
-    substructureScratchLock = 0;
     if constexpr (kFmcsMeasure) {
       measureStats = FmcsMeasureStats{};
     }
@@ -829,9 +845,6 @@ __global__ void fmcsKernel(
     }
   }
 
-  auto group = cg::tiled_partition<kFmcsGroupSize>(block);
-  const int groupId   = static_cast<int>(block.thread_rank()) / kFmcsGroupSize;
-  const int groupRank = static_cast<int>(group.thread_rank());
   QueuedT& myCurrent  = current[groupId];
   QueuedT& myBiggest  = biggest[groupId];
   NewBond* myNewBonds = newBondsArr[groupId];
@@ -886,13 +899,13 @@ __global__ void fmcsKernel(
 
       const bool matched = checkSeedMatchAndAppendCooperative(
           group, myCurrent, queryView, targetView, pair.tables,
-          substructureScratch, &substructureScratchLock,
+          mySubstructureScratch,
           mySubstructureStorage, substructurePartialCapacity, &overflowed,
           measureStats);
       if (matched) {
         updateIncumbentCooperative(
             group, myCurrent, best, &bestScore, &bestCopyLock);
-        if (!insertSortedByBondsCooperative(group, queue, myCurrent)) {
+        if (!pushBackCooperative(group, queue, myCurrent)) {
           overflowed = true;
         }
       } else if (groupRank == 0) {
@@ -928,10 +941,10 @@ __global__ void fmcsKernel(
 
   // ---- Phase 2: RDKit Seed::grow() analogue ----
 
-  // RDKit's growSeeds() repeatedly pops the front of a sorted SeedSet.
-  // To preserve that ordering, only group 0 pops and grows a seed.  The
-  // remaining groups still reach the block-level rendezvous each iteration so
-  // all shared-memory state stays synchronized.
+  // Approach 1 uses an atomic LIFO worklist so every warp group can pop and
+  // grow one seed per outer iteration.  This intentionally trades RDKit's
+  // sorted-front scheduling order for useful multi-warp work while preserving
+  // the full checkIfMatchAndAppend-style substructure validation.
   [[maybe_unused]] int debugIter = 0;
   while (true) {
     if (overflowed || timedOut) break;
@@ -953,8 +966,7 @@ __global__ void fmcsKernel(
       }
     }
 
-    const bool poppedThisGroup =
-        groupId == 0 ? popFrontCooperative(group, queue, myCurrent) : false;
+    const bool poppedThisGroup = popBackCooperative(group, queue, myCurrent);
     if (groupRank == 0) {
       popped[groupId] = poppedThisGroup;
       if constexpr (kFmcsMeasure) {
@@ -1072,7 +1084,7 @@ __global__ void fmcsKernel(
 
         const bool ok = checkSeedMatchAndAppendCooperative(
             group, myBiggest, queryView, targetView, pair.tables,
-            substructureScratch, &substructureScratchLock,
+            mySubstructureScratch,
             mySubstructureStorage, substructurePartialCapacity, &overflowed,
             measureStats);
         if (groupRank == 0) stage0Ok[groupId] = ok;
@@ -1090,7 +1102,7 @@ __global__ void fmcsKernel(
           }
           updateIncumbentCooperative(
               group, myBiggest, best, &bestScore, &bestCopyLock);
-          if (!insertSortedByBondsCooperative(group, queue, myBiggest)) {
+          if (!pushBackCooperative(group, queue, myBiggest)) {
             overflowed = true;
           }
           group.sync();
@@ -1099,7 +1111,7 @@ __global__ void fmcsKernel(
               myCurrent.seed.growingStage = kSeedGrowStageInner;
             }
             group.sync();
-            if (!insertSortedByBondsCooperative(group, queue, myCurrent)) {
+            if (!pushBackCooperative(group, queue, myCurrent)) {
               overflowed = true;
             }
             group.sync();
@@ -1151,7 +1163,7 @@ __global__ void fmcsKernel(
 
         const bool ok = checkSeedMatchAndAppendCooperative(
             group, myBiggest, queryView, targetView, pair.tables,
-            substructureScratch, &substructureScratchLock,
+            mySubstructureScratch,
             mySubstructureStorage, substructurePartialCapacity, &overflowed,
             measureStats);
         if constexpr (kFmcsMeasure) {
@@ -1160,7 +1172,7 @@ __global__ void fmcsKernel(
         if (ok) {
           updateIncumbentCooperative(
               group, myBiggest, best, &bestScore, &bestCopyLock);
-          if (!insertSortedByBondsCooperative(group, queue, myBiggest)) {
+          if (!pushBackCooperative(group, queue, myBiggest)) {
             overflowed = true;
           }
         } else if (groupRank == 0) {
@@ -1242,7 +1254,7 @@ __global__ void fmcsKernel(
 
           const bool ok = checkSeedMatchAndAppendCooperative(
               group, myBiggest, queryView, targetView, pair.tables,
-              substructureScratch, &substructureScratchLock,
+              mySubstructureScratch,
               mySubstructureStorage, substructurePartialCapacity, &overflowed,
               measureStats);
           if (ok) {
@@ -1251,7 +1263,7 @@ __global__ void fmcsKernel(
             }
             updateIncumbentCooperative(
                 group, myBiggest, best, &bestScore, &bestCopyLock);
-            if (!insertSortedByBondsCooperative(group, queue, myBiggest)) {
+            if (!pushBackCooperative(group, queue, myBiggest)) {
               overflowed = true;
             }
           }

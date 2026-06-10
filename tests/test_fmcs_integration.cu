@@ -235,6 +235,156 @@ bool mappingMatchesRdkitMCS(const std::vector<std::pair<int, int>>& gpuMapping,
   return false;
 }
 
+bool atomsCompatible(const RDKit::ROMol& molA,
+                     const RDKit::Atom&  atomA,
+                     const RDKit::ROMol& molB,
+                     const RDKit::Atom&  atomB,
+                     const MCSParameters& params) {
+  switch (params.atomCompare) {
+    case MCSAtomCompare::Any:
+      break;
+    case MCSAtomCompare::Elements:
+      if (atomA.getAtomicNum() != atomB.getAtomicNum()) return false;
+      break;
+    case MCSAtomCompare::Isotopes:
+      if (atomA.getIsotope() != atomB.getIsotope()) return false;
+      break;
+    case MCSAtomCompare::AnyHeavyAtom: {
+      const bool heavyA = atomA.getAtomicNum() != 1;
+      const bool heavyB = atomB.getAtomicNum() != 1;
+      if (heavyA != heavyB) return false;
+      break;
+    }
+  }
+
+  if (params.atomCompareParameters.matchIsotope && atomA.getIsotope() != atomB.getIsotope()) return false;
+  if (params.atomCompareParameters.matchValences && atomA.getTotalValence() != atomB.getTotalValence()) return false;
+  if (params.atomCompareParameters.matchFormalCharge && atomA.getFormalCharge() != atomB.getFormalCharge()) {
+    return false;
+  }
+  if (params.atomCompareParameters.ringMatchesRingOnly) {
+    const bool ringA = molA.getRingInfo()->numAtomRings(atomA.getIdx()) > 0;
+    const bool ringB = molB.getRingInfo()->numAtomRings(atomB.getIdx()) > 0;
+    if (ringA != ringB) return false;
+  }
+  return true;
+}
+
+int mappedBondOrderClass(const RDKit::Bond& bond, const MCSParameters& params) {
+  switch (params.bondCompare) {
+    case MCSBondCompare::Any:
+      return 0;
+    case MCSBondCompare::Order: {
+      const auto bondType = static_cast<int>(bond.getBondType());
+      if (bondType == static_cast<int>(RDKit::Bond::SINGLE) || bondType == static_cast<int>(RDKit::Bond::AROMATIC)) {
+        return 1;
+      }
+      return bondType;
+    }
+    case MCSBondCompare::OrderExact: {
+      const auto bondType = static_cast<int>(bond.getBondType());
+      if (bondType == static_cast<int>(RDKit::Bond::ONEANDAHALF) ||
+          bondType == static_cast<int>(RDKit::Bond::AROMATIC)) {
+        return static_cast<int>(RDKit::Bond::AROMATIC);
+      }
+      return bondType;
+    }
+  }
+  return 0;
+}
+
+bool bondsCompatible(const RDKit::ROMol& molA,
+                     const RDKit::Bond&  bondA,
+                     const RDKit::ROMol& molB,
+                     const RDKit::Bond&  bondB,
+                     const MCSParameters& params) {
+  if (mappedBondOrderClass(bondA, params) != mappedBondOrderClass(bondB, params)) return false;
+  if (params.bondCompareParameters.ringMatchesRingOnly) {
+    const bool ringA = molA.getRingInfo()->numBondRings(bondA.getIdx()) > 0;
+    const bool ringB = molB.getRingInfo()->numBondRings(bondB.getIdx()) > 0;
+    if (ringA != ringB) return false;
+  }
+  return true;
+}
+
+bool mappingIsValidCommonSubgraph(const nvMolKit::MCSResult& gpu,
+                                  const RDKit::ROMol&        molA,
+                                  const RDKit::ROMol&        molB,
+                                  const MCSParameters&       params) {
+  if (gpu.atomMapping.size() != gpu.numAtoms || gpu.bondMapping.size() != gpu.numBonds) return false;
+  if (!mappingHasUniqueAtoms(gpu.atomMapping)) return false;
+
+  std::vector<int> atomAToB(molA.getNumAtoms(), -1);
+  std::vector<int> atomAToMappingPos(molA.getNumAtoms(), -1);
+  for (size_t pos = 0; pos < gpu.atomMapping.size(); ++pos) {
+    const auto [atomAIdx, atomBIdx] = gpu.atomMapping[pos];
+    if (atomAIdx < 0 || atomAIdx >= static_cast<int>(molA.getNumAtoms()) || atomBIdx < 0 ||
+        atomBIdx >= static_cast<int>(molB.getNumAtoms())) {
+      return false;
+    }
+    const auto* atomA = molA.getAtomWithIdx(static_cast<unsigned int>(atomAIdx));
+    const auto* atomB = molB.getAtomWithIdx(static_cast<unsigned int>(atomBIdx));
+    if (!atomsCompatible(molA, *atomA, molB, *atomB, params)) return false;
+    atomAToB[static_cast<size_t>(atomAIdx)] = atomBIdx;
+    atomAToMappingPos[static_cast<size_t>(atomAIdx)] = static_cast<int>(pos);
+  }
+
+  std::set<int> bondsA;
+  std::set<int> bondsB;
+  std::vector<std::vector<int>> adjacency(gpu.atomMapping.size());
+  for (const auto& [bondAIdx, bondBIdx] : gpu.bondMapping) {
+    if (bondAIdx < 0 || bondAIdx >= static_cast<int>(molA.getNumBonds()) || bondBIdx < 0 ||
+        bondBIdx >= static_cast<int>(molB.getNumBonds())) {
+      return false;
+    }
+    if (!bondsA.insert(bondAIdx).second || !bondsB.insert(bondBIdx).second) return false;
+
+    const auto* bondA = molA.getBondWithIdx(static_cast<unsigned int>(bondAIdx));
+    const auto* bondB = molB.getBondWithIdx(static_cast<unsigned int>(bondBIdx));
+    if (!bondsCompatible(molA, *bondA, molB, *bondB, params)) return false;
+
+    const int aBegin = static_cast<int>(bondA->getBeginAtomIdx());
+    const int aEnd   = static_cast<int>(bondA->getEndAtomIdx());
+    const int bBegin = static_cast<int>(bondB->getBeginAtomIdx());
+    const int bEnd   = static_cast<int>(bondB->getEndAtomIdx());
+    if (aBegin < 0 || aBegin >= static_cast<int>(atomAToB.size()) || aEnd < 0 ||
+        aEnd >= static_cast<int>(atomAToB.size())) {
+      return false;
+    }
+    const bool sameOrientation = atomAToB[static_cast<size_t>(aBegin)] == bBegin &&
+                                 atomAToB[static_cast<size_t>(aEnd)] == bEnd;
+    const bool oppositeOrientation = atomAToB[static_cast<size_t>(aBegin)] == bEnd &&
+                                     atomAToB[static_cast<size_t>(aEnd)] == bBegin;
+    if (!sameOrientation && !oppositeOrientation) return false;
+
+    const int beginPos = atomAToMappingPos[static_cast<size_t>(aBegin)];
+    const int endPos   = atomAToMappingPos[static_cast<size_t>(aEnd)];
+    if (beginPos < 0 || endPos < 0) return false;
+    adjacency[static_cast<size_t>(beginPos)].push_back(endPos);
+    adjacency[static_cast<size_t>(endPos)].push_back(beginPos);
+  }
+
+  if (gpu.numAtoms <= 1) return gpu.numBonds == 0;
+  if (gpu.numBonds == 0) return false;
+
+  std::vector<char> visited(gpu.atomMapping.size(), 0);
+  std::vector<int> stack = {0};
+  visited[0]             = 1;
+  size_t seen            = 0;
+  while (!stack.empty()) {
+    const int cur = stack.back();
+    stack.pop_back();
+    ++seen;
+    for (const int next : adjacency[static_cast<size_t>(cur)]) {
+      if (!visited[static_cast<size_t>(next)]) {
+        visited[static_cast<size_t>(next)] = 1;
+        stack.push_back(next);
+      }
+    }
+  }
+  return seen == gpu.atomMapping.size();
+}
+
 void printMismatch(const std::vector<std::string>& smiles,
                    int                             pairIdx,
                    int                             idxA,
@@ -339,13 +489,14 @@ TEST_P(FMCSIntegrationTest, SeededChemblPairsMatchRDKit) {
 
     const bool sizeMatches = gpu.numAtoms == rd.NumAtoms && gpu.numBonds == rd.NumBonds;
     const bool mappingMatches = sizeMatches ? mappingMatchesRdkitMCS(gpu.atomMapping, molA, molB, rd) : false;
-    if (!sizeMatches || !mappingMatches) {
+    const bool mappingValid = sizeMatches ? mappingIsValidCommonSubgraph(gpu, molA, molB, params) : false;
+    if (!sizeMatches || (!mappingMatches && !mappingValid)) {
       printMismatch(data.smiles, static_cast<int>(i), indicesA[i], indicesB[i], gpu, rd);
       std::cout << "  seed=" << seed << " atomCompare=" << atomCompareName(atomCompare)
                 << " bondCompare=" << bondCompareName(bondCompare) << " ringConfig=" << ringConfig.name << "\n";
     }
     EXPECT_TRUE(sizeMatches);
-    EXPECT_TRUE(mappingMatches);
+    EXPECT_TRUE(mappingMatches || mappingValid);
   }
 }
 
