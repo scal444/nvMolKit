@@ -187,6 +187,7 @@ def findMCS(
     require_gpu: bool = False,
     timeout_seconds: int = 0,
     batch_size: int = 0,
+    executors_per_runner: int = 1,
 ) -> MCSBatchResult:
     """Find maximum common substructures for a batch of molecule pairs.
 
@@ -224,6 +225,8 @@ def findMCS(
         timeout_seconds: RDKit fallback timeout. Non-zero timeouts force RDKit.
         batch_size: Optional GPU batch chunk size. ``0`` lets the native layer
             choose.
+        executors_per_runner: Number of asynchronous GPU executor streams used
+            for chunked fMCS tier dispatch. ``1`` preserves serial chunking.
 
     Returns:
         :class:`MCSBatchResult` in generated-pair order.
@@ -290,6 +293,7 @@ def findMCS(
             "require_gpu": bool(require_gpu),
             "timeout_seconds": int(timeout_seconds),
             "batch_size": int(batch_size),
+            "executors_per_runner": int(executors_per_runner),
             "match_valences": bool(match_valences),
             "match_formal_charge": bool(match_formal_charge),
             "atom_ring_matches_ring_only": bool(atom_ring_matches_ring_only)

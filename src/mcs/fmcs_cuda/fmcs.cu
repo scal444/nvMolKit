@@ -25,11 +25,15 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+#include "src/utils/device.h"
+#include "src/utils/gpu_executor_ring.h"
 
 namespace mcs {
 namespace fmcs {
@@ -155,6 +159,34 @@ struct BatchDeviceBuffers {
   void* dSubstructureStorage = nullptr;
 };
 
+constexpr int kMaxFmcsExecutorsPerRunner = 8;
+
+struct FmcsExecutor {
+  std::unique_ptr<nvMolKit::ScopedStream> ownedStream;
+  cudaStream_t                            stream = nullptr;
+  nvMolKit::ScopedCudaEvent               copyDoneEvent;
+  BatchDeviceBuffers                      bufs;
+
+  FmcsExecutor(int executorIdx, cudaStream_t externalStream, bool useExternalStream) {
+    if (useExternalStream) {
+      stream = externalStream;
+      return;
+    }
+
+    const std::string streamName = "fmcs_executor_" + std::to_string(executorIdx);
+    ownedStream                  = std::make_unique<nvMolKit::ScopedStream>(streamName.c_str());
+    stream                       = ownedStream->stream();
+  }
+};
+
+int validateRequestedExecutorCount(const Parameters& params) {
+  if (params.executorsPerRunner < 1 || params.executorsPerRunner > kMaxFmcsExecutorsPerRunner) {
+    throw std::invalid_argument("fMCS executorsPerRunner must be between 1 and " +
+                                std::to_string(kMaxFmcsExecutorsPerRunner));
+  }
+  return params.executorsPerRunner;
+}
+
 void freeBatchBuffers(BatchDeviceBuffers& bufs, cudaStream_t stream) {
   if (bufs.matchTablesBuffer) {
     freePairMatchTablesBuffer(bufs.matchTablesBuffer, stream);
@@ -247,13 +279,14 @@ std::vector<DevicePerPairInput> uploadCsrAndAssemblePairInputs(
 }
 
 template<int maxAtoms, int maxBonds, class Policy>
-std::vector<DeviceMCSResult<maxAtoms, maxBonds>> launchTier(
+void launchTierAsync(
     const std::vector<DevicePerPairInput>& hostPairInputs,
     const Parameters& params,
     cudaStream_t stream,
-    BatchDeviceBuffers& bufs) {
+    BatchDeviceBuffers& bufs,
+    std::vector<DeviceMCSResult<maxAtoms, maxBonds>>& hostResults) {
   const int numPairs = static_cast<int>(hostPairInputs.size());
-  if (numPairs == 0) return {};
+  if (numPairs == 0) return;
 
   checkCuda(cudaMallocAsync(reinterpret_cast<void**>(&bufs.dPairInputs),
                             numPairs * sizeof(DevicePerPairInput), stream),
@@ -317,16 +350,13 @@ std::vector<DeviceMCSResult<maxAtoms, maxBonds>> launchTier(
     std::fprintf(stderr, "[fmcs][host] launch ok, synchronizing...\n");
   }
 
-  std::vector<DeviceMCSResult<maxAtoms, maxBonds>> hostResults(numPairs);
+  hostResults.resize(static_cast<size_t>(numPairs));
   checkCuda(cudaMemcpyAsync(hostResults.data(), dResults, resultsBytes,
                             cudaMemcpyDeviceToHost, stream),
             "cudaMemcpyAsync (results)");
-  checkCuda(cudaStreamSynchronize(stream),
-            "cudaStreamSynchronize (results)");
   if constexpr (kFmcsDebug) {
-    std::fprintf(stderr, "[fmcs][host] tier maxAtoms=%d sync done\n", maxAtoms);
+    std::fprintf(stderr, "[fmcs][host] tier maxAtoms=%d copy scheduled\n", maxAtoms);
   }
-  return hostResults;
 }
 
 /// Translate fixed-size DeviceMCSResult into MCSResult, un-swapping the
@@ -377,6 +407,34 @@ MCSResult expandDeviceResult(
 }
 
 template<int maxAtoms, int maxBonds, class Policy>
+struct TierChunk {
+  std::vector<int>                 resultIndices;
+  std::vector<HostPairDescriptor*> tierDescs;
+  std::vector<PairMatchTablesHost> hostTables;
+  std::vector<DevicePerPairInput>  hostPairInputs;
+  std::vector<DeviceMCSResult<maxAtoms, maxBonds>> hostResults;
+};
+
+template<int maxAtoms, int maxBonds, class Policy>
+std::unique_ptr<TierChunk<maxAtoms, maxBonds, Policy>> makeTierChunk(
+    const std::vector<HostPairDescriptor*>& descs,
+    const std::vector<int>& indices,
+    size_t begin,
+    size_t end) {
+  auto chunk = std::make_unique<TierChunk<maxAtoms, maxBonds, Policy>>();
+  chunk->resultIndices.reserve(end - begin);
+  chunk->tierDescs.reserve(end - begin);
+  chunk->hostTables.reserve(end - begin);
+  for (size_t pos = begin; pos < end; ++pos) {
+    const int idx = indices[pos];
+    chunk->resultIndices.push_back(idx);
+    chunk->tierDescs.push_back(descs[idx]);
+    chunk->hostTables.push_back(descs[idx]->tables);
+  }
+  return chunk;
+}
+
+template<int maxAtoms, int maxBonds, class Policy>
 void runTier(
     const std::vector<HostPairDescriptor*>& descs,
     const std::vector<int>& indices,
@@ -388,45 +446,67 @@ void runTier(
   const size_t chunkSize = params.batchSize > 0
       ? static_cast<size_t>(params.batchSize)
       : indices.size();
+  const size_t numChunks = (indices.size() + chunkSize - 1) / chunkSize;
+  const int executorCount =
+      static_cast<int>(std::min<size_t>(static_cast<size_t>(validateRequestedExecutorCount(params)), numChunks));
+  if (executorCount > 1 && stream != nullptr) {
+    throw std::invalid_argument("fMCS multi-executor dispatch does not support an external CUDA stream");
+  }
+
+  nvMolKit::ThreadSafeQueue<std::unique_ptr<TierChunk<maxAtoms, maxBonds, Policy>>> chunkQueue;
   for (size_t begin = 0; begin < indices.size(); begin += chunkSize) {
     const size_t end = std::min(begin + chunkSize, indices.size());
+    chunkQueue.push(makeTierChunk<maxAtoms, maxBonds, Policy>(descs, indices, begin, end));
+  }
+  chunkQueue.close();
 
-    std::vector<HostPairDescriptor*> tierDescs;
-    tierDescs.reserve(end - begin);
-    std::vector<PairMatchTablesHost> hostTables;
-    hostTables.reserve(end - begin);
-    for (size_t pos = begin; pos < end; ++pos) {
-      const int idx = indices[pos];
-      tierDescs.push_back(descs[idx]);
-      hostTables.push_back(descs[idx]->tables);
-    }
+  std::vector<std::unique_ptr<FmcsExecutor>> executorStorage;
+  executorStorage.reserve(static_cast<size_t>(executorCount));
+  std::vector<FmcsExecutor*> executors;
+  executors.reserve(static_cast<size_t>(executorCount));
+  const bool useExternalStream = executorCount == 1;
+  for (int i = 0; i < executorCount; ++i) {
+    auto executor = std::make_unique<FmcsExecutor>(i, stream, useExternalStream);
+    executors.push_back(executor.get());
+    executorStorage.push_back(std::move(executor));
+  }
 
-    BatchDeviceBuffers bufs;
+  auto launchChunk = [&](FmcsExecutor& executor, std::unique_ptr<TierChunk<maxAtoms, maxBonds, Policy>>& chunk) {
+    cudaStream_t executorStream = executor.stream;
     try {
       auto tablesDev = uploadPairMatchTables(
-          hostTables, stream,
-          &bufs.matchTablesBuffer, &bufs.matchTablesBufferBytes);
+          chunk->hostTables, executorStream,
+          &executor.bufs.matchTablesBuffer, &executor.bufs.matchTablesBufferBytes);
 
-      auto hostPairInputs = uploadCsrAndAssemblePairInputs(
-          tierDescs, tablesDev, stream,
-          &bufs.csrBuffer, &bufs.csrBufferBytes);
+      chunk->hostPairInputs = uploadCsrAndAssemblePairInputs(
+          chunk->tierDescs, tablesDev, executorStream,
+          &executor.bufs.csrBuffer, &executor.bufs.csrBufferBytes);
 
-      auto hostResults = launchTier<maxAtoms, maxBonds, Policy>(
-          hostPairInputs, params, stream, bufs);
+      launchTierAsync<maxAtoms, maxBonds, Policy>(
+          chunk->hostPairInputs, params, executorStream, executor.bufs, chunk->hostResults);
 
-      for (size_t k = 0; k < hostResults.size(); ++k) {
-        outResults[indices[begin + k]] = expandDeviceResult<maxAtoms, maxBonds>(
-            hostResults[k],
-            tierDescs[k]->packedQuery.bondEndpoints,
-            tierDescs[k]->packedTarget.bondEndpoints,
-            tierDescs[k]->swapped);
-      }
+      checkCuda(cudaEventRecord(executor.copyDoneEvent.event(), executorStream),
+                "cudaEventRecord (fMCS chunk copy done)");
     } catch (...) {
-      freeBatchBuffers(bufs, stream);
+      freeBatchBuffers(executor.bufs, executorStream);
       throw;
     }
-    freeBatchBuffers(bufs, stream);
-  }
+  };
+
+  auto drainChunk = [&](FmcsExecutor& executor, std::unique_ptr<TierChunk<maxAtoms, maxBonds, Policy>>& chunk) {
+    checkCuda(cudaEventSynchronize(executor.copyDoneEvent.event()),
+              "cudaEventSynchronize (fMCS chunk copy done)");
+    for (size_t k = 0; k < chunk->hostResults.size(); ++k) {
+      outResults[chunk->resultIndices[k]] = expandDeviceResult<maxAtoms, maxBonds>(
+          chunk->hostResults[k],
+          chunk->tierDescs[k]->packedQuery.bondEndpoints,
+          chunk->tierDescs[k]->packedTarget.bondEndpoints,
+          chunk->tierDescs[k]->swapped);
+    }
+    freeBatchBuffers(executor.bufs, executor.stream);
+  };
+
+  nvMolKit::runQueuedExecutorRing(executors, chunkQueue, launchChunk, drainChunk);
 }
 
 template<class Policy, class InputT>

@@ -55,6 +55,7 @@ struct MCSParameters {
   bool                     requireGpu     = false;
   unsigned int             timeoutSeconds = 0;
   int                      batchSize      = 0;
+  int                      executorsPerRunner = 1;
   MCSAtomCompare           atomCompare    = MCSAtomCompare::Elements;
   MCSBondCompare           bondCompare    = MCSBondCompare::Order;
   MCSAtomCompareParameters atomCompareParameters;

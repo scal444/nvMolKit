@@ -400,9 +400,10 @@ std::vector<MCSResult> findMCSBatch(const std::vector<const RDKit::ROMol*>& mols
 
   if (!gpuGraphsA.empty()) {
     mcs::fmcs::Parameters fmcsParams;
-    fmcsParams.batchSize         = params.batchSize;
-    fmcsParams.matchVertexLabels = usesAtomLabels(params);
-    fmcsParams.matchEdgeLabels   = usesBondLabels(params);
+    fmcsParams.batchSize          = params.batchSize;
+    fmcsParams.executorsPerRunner = params.executorsPerRunner;
+    fmcsParams.matchVertexLabels  = usesAtomLabels(params);
+    fmcsParams.matchEdgeLabels    = usesBondLabels(params);
 
     auto gpuResults = mcs::fmcs::findMCESfMCSBatchLabeled(gpuGraphsA, gpuGraphsB, fmcsParams, nullptr, stream);
     for (size_t gpuIdx = 0; gpuIdx < gpuResults.size(); ++gpuIdx) {

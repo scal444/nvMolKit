@@ -163,6 +163,7 @@ BOOST_PYTHON_MODULE(_mcs) {
       params.requireGpu                                       = optionValue<bool>(options, "require_gpu", false);
       params.timeoutSeconds                                   = optionValue<unsigned int>(options, "timeout_seconds", 0);
       params.batchSize                                        = optionValue<int>(options, "batch_size", 0);
+      params.executorsPerRunner                               = optionValue<int>(options, "executors_per_runner", 1);
       params.atomCompareParameters.matchValences              = optionValue<bool>(options, "match_valences", false);
       params.atomCompareParameters.matchFormalCharge          = optionValue<bool>(options, "match_formal_charge", false);
       params.atomCompareParameters.ringMatchesRingOnly        = optionValue<bool>(options, "atom_ring_matches_ring_only", false);

@@ -78,6 +78,17 @@ def test_pairs_mode_matches_rdkit_and_preserves_order():
     _assert_matches_rdkit(result, mols)
 
 
+def test_pairs_mode_chunked_multi_executor_matches_rdkit():
+    mols = _mols(["CCO", "CCN", "c1ccccc1", "c1ccc(O)cc1", "CC(C)O"])
+    pairs = [(0, 1), (2, 3), (4, 0), (1, 4), (3, 2)]
+
+    result = findMCS(mols, mode="pairs", pairs=pairs, batch_size=1, executors_per_runner=2)
+
+    assert result.pairs == tuple(pairs)
+    assert result.used_gpu.any()
+    _assert_matches_rdkit(result, mols)
+
+
 def test_all_pairs_default_is_upper_triangle_with_diagonal():
     mols = _mols(["CCO", "CCN", "c1ccccc1"])
 

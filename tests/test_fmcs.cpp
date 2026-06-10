@@ -829,6 +829,26 @@ TEST(FMCSBatch, HonorsBatchSizeChunksResults) {
   }
 }
 
+TEST(FMCSBatch, MultiExecutorChunksResults) {
+  std::vector<Graph> a{path(3), star(3), cycle(4), path(5), g(4, {})};
+  std::vector<Graph> b{path(6), star(4), cycle(4), path(7), path(3)};
+  Parameters params;
+  params.batchSize          = 1;
+  params.executorsPerRunner = 2;
+
+  auto rs = mcs::fmcs::findMCESfMCSBatch(a, b, params);
+  ASSERT_EQ(rs.size(), a.size());
+  EXPECT_EQ(rs[0].numCommonEdges, 2);
+  EXPECT_EQ(rs[1].numCommonEdges, 3);
+  EXPECT_EQ(rs[2].numCommonEdges, 4);
+  EXPECT_EQ(rs[3].numCommonEdges, 4);
+  EXPECT_EQ(rs[4].numCommonEdges, 0);
+  for (size_t i = 0; i < rs.size(); ++i) {
+    EXPECT_FALSE(rs[i].overflowed) << "pair " << i;
+    expectMappingsConsistent(rs[i], a[i], b[i]);
+  }
+}
+
 TEST(FMCSBatch, ManyTinyPairsReusePerBlockSlabs) {
   // This is intentionally moderate while kFmcsQueueCapacity is still
   // over-provisioned per pair.  It still creates far more blocks than

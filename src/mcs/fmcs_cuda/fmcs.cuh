@@ -59,6 +59,8 @@ struct Parameters {
   float timeoutMs        = 0;
   /// Max pairs per kernel launch in the batch API.  0 = auto from GPU memory.
   int   batchSize        = 0;
+  /// Number of asynchronous executor streams for tier sub-batches. 1 = serial.
+  int   executorsPerRunner = 1;
   /// Optional absolute wall deadline in seconds since epoch; pairs not
   /// started by this time are reported as timed out.  0 = disabled.
   double wallDeadlineSec = 0;

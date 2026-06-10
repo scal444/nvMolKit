@@ -110,6 +110,7 @@ def _bench_nvmolkit(mols: list[Chem.Mol], pairs: list[tuple[int, int]], args: ar
             require_gpu=args.require_gpu,
             timeout_seconds=args.timeout_seconds,
             batch_size=args.batch_size,
+            executors_per_runner=args.executors_per_runner,
         )
 
     timing = time_it(run, runs=args.runs, warmups=args.warmups, gpu_sync=True)
@@ -191,6 +192,7 @@ def main() -> None:
     parser.add_argument("--runs", type=int, default=3, help="Timed runs")
     parser.add_argument("--warmups", type=int, default=1, help="nvmolkit warmup runs")
     parser.add_argument("--batch_size", type=int, default=0, help="Native GPU batch chunk size; 0 auto-selects")
+    parser.add_argument("--executors_per_runner", type=int, default=1, help="Asynchronous fMCS executor streams")
     parser.add_argument("--atom_compare", choices=["any", "elements", "isotopes", "any_heavy_atom"], default="elements")
     parser.add_argument("--bond_compare", choices=["any", "order", "order_exact"], default="order")
     parser.add_argument("--match_valences", action="store_true")
