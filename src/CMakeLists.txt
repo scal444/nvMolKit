@@ -16,6 +16,7 @@
 add_subdirectory(conformer)
 add_subdirectory(data_structures)
 add_subdirectory(forcefields)
+add_subdirectory(mcs)
 add_subdirectory(minimizer)
 add_subdirectory(substruct)
 add_subdirectory(testutils)

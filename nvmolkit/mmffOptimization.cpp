@@ -38,14 +38,14 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
     (bp::arg("molecules"),
      bp::arg("maxIters")        = 200,
      bp::arg("properties")      = bp::list(),
-     bp::arg("hardwareOptions") = nvMolKit::BatchHardwareOptions()),
+     bp::arg("hardwareOptions")),
     "Optimize conformers for multiple molecules using MMFF force field.\n"
     "\n"
     "Args:\n"
     "    molecules: List of RDKit molecules to optimize\n"
     "    maxIters: Maximum number of optimization iterations (default: 200)\n"
     "    properties: MMFFProperties-compatible object with forcefield settings\n"
-    "    hardwareOptions: BatchHardwareOptions object with hardware settings (default: default options)\n"
+    "    hardwareOptions: BatchHardwareOptions object with hardware settings\n"
     "\n"
     "Returns:\n"
     "    List of lists of energies, where each inner list contains energies for conformers of one molecule");
@@ -76,7 +76,7 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
     (bp::arg("molecules"),
      bp::arg("maxIters")        = 200,
      bp::arg("properties")      = bp::list(),
-     bp::arg("hardwareOptions") = nvMolKit::BatchHardwareOptions(),
+     bp::arg("hardwareOptions"),
      bp::arg("targetGpu")       = -1),
     "Optimize conformers for multiple molecules using MMFF force field, returning device-resident "
     "results.\n"

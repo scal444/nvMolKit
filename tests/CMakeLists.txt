@@ -316,6 +316,18 @@ target_link_libraries(
   test_substruct_label_integration PRIVATE substructure_search molecules device
                                            test_utils molData ${RDKit_LIBS})
 
+add_executable(test_fmcs test_fmcs.cpp)
+target_link_libraries(test_fmcs PRIVATE mcs_fmcs_core)
+
+add_executable(test_fmcs_unit test_fmcs_unit.cu)
+target_link_libraries(test_fmcs_unit PRIVATE mcs_fmcs_core)
+target_compile_options(test_fmcs_unit
+                       PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
+
+add_executable(test_fmcs_integration test_fmcs_integration.cu)
+target_link_libraries(test_fmcs_integration PRIVATE mcs_search molData
+                                                    test_utils ${RDKit_LIBS})
+
 add_executable(test_tfd_cpu test_tfd_cpu.cpp)
 target_link_libraries(test_tfd_cpu PRIVATE ${RDKit_LIBS} tfd_cpu test_utils)
 
@@ -380,6 +392,9 @@ set(TEST_LIST
     test_substructure_search
     test_substructure_integration
     test_substruct_label_integration
+    test_fmcs
+    test_fmcs_unit
+    test_fmcs_integration
     test_similarity
     test_thread_safe_queue
     test_work_splitting)
