@@ -173,8 +173,13 @@ __device__ __forceinline__ bool matchIncrementalFastCooperative(
       const int queryBondIdx = wordIdx * kBondBitsPerWord + bitPosInWord;
       remainingBondBits &= remainingBondBits - 1;  // clear lowest set bit
 
-      // Skip bonds already mapped by the parent's recorded embedding.
-      if (match.targetBondIdx[queryBondIdx] != kUnmappedTargetIdx) continue;
+      // Skip bonds already mapped by the parent's recorded embedding.  Keep
+      // this control decision uniform across the group; diverging before the
+      // later ballot/shuffle would make the winning lane undefined.
+      int mappedTargetBond = kUnmappedTargetIdx;
+      if (laneRank == 0) mappedTargetBond = match.targetBondIdx[queryBondIdx];
+      mappedTargetBond = group.shfl(mappedTargetBond, 0);
+      if (mappedTargetBond != kUnmappedTargetIdx) continue;
 
       // Decode this bond's query endpoints from the packed (u<<16 | v).
       const std::uint32_t queryEndpoints =
@@ -187,8 +192,14 @@ __device__ __forceinline__ bool matchIncrementalFastCooperative(
       // Look up the parent's atom mapping for both endpoints; either
       // may already be mapped (from an earlier bond) or still unmapped
       // (this bond is the one bringing it in).
-      const std::uint8_t targetForQueryU = match.targetAtomIdx[queryEndpointU];
-      const std::uint8_t targetForQueryV = match.targetAtomIdx[queryEndpointV];
+      int targetForQueryU = kUnmappedTargetIdx;
+      int targetForQueryV = kUnmappedTargetIdx;
+      if (laneRank == 0) {
+        targetForQueryU = match.targetAtomIdx[queryEndpointU];
+        targetForQueryV = match.targetAtomIdx[queryEndpointV];
+      }
+      targetForQueryU = group.shfl(targetForQueryU, 0);
+      targetForQueryV = group.shfl(targetForQueryV, 0);
       const bool queryUIsMapped = targetForQueryU != kUnmappedTargetIdx;
       const bool queryVIsMapped = targetForQueryV != kUnmappedTargetIdx;
 
@@ -288,6 +299,16 @@ __device__ __forceinline__ bool matchIncrementalFastCooperative(
           group.shfl(chosenTargetBond, firstWinningLane);
       const int committedTargetAtom =
           group.shfl(chosenTargetAtomForUnmapped, firstWinningLane);
+      if (committedTargetBond < 0 ||
+          committedTargetBond >= targetTopology.numBonds ||
+          committedTargetBond >= maxTB) {
+        return false;
+      }
+      if (committedTargetAtom < -1 ||
+          committedTargetAtom >= targetTopology.numAtoms ||
+          committedTargetAtom >= maxTA) {
+        return false;
+      }
 
       // Lane 0 commits the new mapping into the shared MatchResult.
       // Subsequent bonds in this same call will read the updated

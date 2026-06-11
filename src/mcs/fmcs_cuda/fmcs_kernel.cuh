@@ -534,6 +534,25 @@ __device__ __forceinline__ bool popBackCooperative(
   return true;
 }
 
+template<class GroupT>
+__device__ __forceinline__ unsigned int readBestScoreCooperative(
+    const GroupT& group,
+    const unsigned int* bestScore) {
+  unsigned int score = 0;
+  if (group.thread_rank() == 0) score = *bestScore;
+  return group.shfl(score, 0);
+}
+
+template<class GroupT>
+__device__ __forceinline__ bool readFlagCooperative(
+    const GroupT& group,
+    const bool* flag) {
+  int value = 0;
+  if (group.thread_rank() == 0) value = *flag ? 1 : 0;
+  value = group.shfl(value, 0);
+  return value != 0;
+}
+
 template<int maxAtoms, int maxBonds, class QueryTopology, class GroupT>
 __device__ __forceinline__ void seedComputeRemainingSizeRdkitCooperative(
     const GroupT& group,
@@ -745,9 +764,9 @@ __global__ void fmcsKernel(
   constexpr int kNumGroups = FmcsBlockConfig<blockThreads>::numGroups;
 
   // Block-shared resources: the queue, the incumbent, and the early-exit
-  // flags are visible to every group.  Cross-group accesses use atomics
-  // for queue and incumbent updates; the bool flags tolerate benign races
-  // (stale reads only cause extra work or duplicate flag-true writes).
+  // flags are visible to every group.  Cross-group queue/incumbent updates use
+  // atomics; loop-control reads are made uniform before any branch that can
+  // skip a later block/group rendezvous.
   __shared__ SeedQueue<QueuedT, ThreadBlockScope> queue;
   __shared__ __align__(16) unsigned char bestStorage[sizeof(QueuedT)];
   QueuedT& best = *reinterpret_cast<QueuedT*>(bestStorage);
@@ -760,6 +779,7 @@ __global__ void fmcsKernel(
   __shared__ DeviceCsrView targetView;
   __shared__ bool overflowed;
   __shared__ bool timedOut;
+  __shared__ bool phase2Done;
   __shared__ unsigned long long startClock;
   __shared__ SubstructureScratchT substructureScratch[kNumGroups];
   __shared__ ExecutionStats measureStats;
@@ -812,6 +832,7 @@ __global__ void fmcsKernel(
     }
     overflowed = false;
     timedOut = false;
+    phase2Done = false;
     startClock = clock64();
 
     queryView.rowOffsets    = pair.queryRowOffsets;
@@ -943,7 +964,11 @@ __global__ void fmcsKernel(
   // the full checkIfMatchAndAppend-style substructure validation.
   [[maybe_unused]] int debugIter = 0;
   while (true) {
-    if (overflowed || timedOut) break;
+    if (block.thread_rank() == 0) {
+      phase2Done = overflowed || timedOut || queue.empty();
+    }
+    block.sync();
+    if (phase2Done) break;
 
     if constexpr (CollectStats || kFmcsMeasure) {
       if (block.thread_rank() == 0) {
@@ -970,6 +995,10 @@ __global__ void fmcsKernel(
       }
     }
     group.sync();
+    // All groups must finish popping before any group is allowed to push new
+    // work.  The queue reserves a slot before writing it, so pop/push overlap
+    // could expose an unwritten or stale queue entry.
+    block.sync();
 
     do {
       if (!popped[groupId]) break;
@@ -988,7 +1017,8 @@ __global__ void fmcsKernel(
         if (groupRank == 0) atomicAdd(&measureStats.expanded, 1u);
       }
 
-      const unsigned int scoreSnapshot = bestScore;
+      const unsigned int scoreSnapshot =
+          readBestScoreCooperative(group, &bestScore);
       const int bestBondsSnapshot = static_cast<int>(scoreSnapshot >> 16);
       const int bestAtomsSnapshot =
           static_cast<int>(scoreSnapshot & 0xFFFFu);
@@ -1065,7 +1095,8 @@ __global__ void fmcsKernel(
             myRemainingVisitedAtoms, myRemainingVisitedBonds,
             &remainingStackSize[groupId]);
 
-        const unsigned int childScoreSnapshot = bestScore;
+        const unsigned int childScoreSnapshot =
+            readBestScoreCooperative(group, &bestScore);
         const int childBestBonds =
             static_cast<int>(childScoreSnapshot >> 16);
         const int childBestAtoms =
@@ -1144,7 +1175,8 @@ __global__ void fmcsKernel(
           if (groupRank == 0) atomicAdd(&measureStats.stage1Attempts, 1u);
         }
 
-        const unsigned int childScoreSnapshot = bestScore;
+        const unsigned int childScoreSnapshot =
+            readBestScoreCooperative(group, &bestScore);
         const int childBestBonds =
             static_cast<int>(childScoreSnapshot >> 16);
         const int childBestAtoms =
@@ -1235,7 +1267,8 @@ __global__ void fmcsKernel(
           if constexpr (CollectStats || kFmcsMeasure) {
             if (groupRank == 0) atomicAdd(&measureStats.stage2Attempts, 1u);
           }
-          const unsigned int childScoreSnapshot = bestScore;
+          const unsigned int childScoreSnapshot =
+              readBestScoreCooperative(group, &bestScore);
           const int childBestBonds =
               static_cast<int>(childScoreSnapshot >> 16);
           const int childBestAtoms =
@@ -1264,7 +1297,7 @@ __global__ void fmcsKernel(
             }
           }
           group.sync();
-          if (overflowed) break;
+          if (readFlagCooperative(group, &overflowed)) break;
         }
       }
 
@@ -1298,7 +1331,11 @@ __global__ void fmcsKernel(
                debugIter, queue.size());
       }
     }
-    if (timedOut || queue.empty()) break;
+    if (block.thread_rank() == 0) {
+      phase2Done = overflowed || timedOut || queue.empty();
+    }
+    block.sync();
+    if (phase2Done) break;
 
     if constexpr (kFmcsDebug) {
       ++debugIter;
