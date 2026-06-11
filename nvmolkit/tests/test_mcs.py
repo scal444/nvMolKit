@@ -74,8 +74,37 @@ def test_pairs_mode_matches_rdkit_and_preserves_order():
     assert result.mode == "pairs"
     assert result.pairs == tuple(pairs)
     assert len(result) == len(pairs)
+    assert result.elapsed_ms is None
     assert result.used_gpu.any()
     _assert_matches_rdkit(result, mols)
+
+
+def test_collect_timings_reports_per_pair_elapsed_ms():
+    mols = _mols(["CCO", "CCN", "c1ccccc1", "c1ccc(O)cc1"])
+    pairs = [(0, 1), (2, 3), (0, 2)]
+
+    result = findMCS(mols, mode="pairs", pairs=pairs, collect_timings=True)
+
+    assert result.pairs == tuple(pairs)
+    assert result.elapsed_ms is not None
+    assert result.elapsed_ms.shape == (len(pairs),)
+    assert (result.elapsed_ms >= 0).all()
+    assert result[0].elapsed_ms == pytest.approx(float(result.elapsed_ms[0]))
+
+
+def test_collect_stats_reports_per_pair_fmcs_counters():
+    mols = _mols(["CCO", "CCN", "c1ccccc1", "c1ccc(O)cc1"])
+    pairs = [(0, 1), (2, 3), (0, 2)]
+
+    result = findMCS(mols, mode="pairs", pairs=pairs, collect_stats=True)
+
+    assert result.fmcs_stats is not None
+    assert result.fmcs_stats["phase2_iters"].shape == (len(pairs),)
+    assert result.fmcs_stats["initial_seeds"].shape == (len(pairs),)
+    assert (result.fmcs_stats["initial_seeds"] > 0).all()
+    assert (result.fmcs_stats["match_calls"] >= result.fmcs_stats["match_found"]).all()
+    assert result[0].fmcs_stats is not None
+    assert result[0].fmcs_stats["initial_seeds"] == int(result.fmcs_stats["initial_seeds"][0])
 
 
 def test_pairs_mode_chunked_multi_executor_matches_rdkit():

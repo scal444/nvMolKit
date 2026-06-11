@@ -53,6 +53,8 @@ struct MCSParameters {
   bool                     maximizeBonds  = true;
   bool                     connectedOnly  = true;
   bool                     requireGpu     = false;
+  bool                     collectTimings = false;
+  bool                     collectStats   = false;
   unsigned int             timeoutSeconds = 0;
   int                      batchSize      = 0;
   int                      blockSize      = 128;
@@ -66,6 +68,34 @@ struct MCSParameters {
   MCSBondCompareParameters bondCompareParameters;
 };
 
+struct MCSExecutionStats {
+  unsigned int phase2Iters = 0;
+  unsigned int initialSeeds = 0;
+  unsigned int mismatchedInitialSeeds = 0;
+  unsigned int popped = 0;
+  unsigned int seedChecks = 0;
+  unsigned int matchCalls = 0;
+  unsigned int matchFound = 0;
+  unsigned int boundRejected = 0;
+  unsigned int expanded = 0;
+  unsigned int fillZero = 0;
+  unsigned int stage0Attempts = 0;
+  unsigned int stage0Success = 0;
+  unsigned int stage1Attempts = 0;
+  unsigned int stage1Success = 0;
+  unsigned int stage2Attempts = 0;
+  unsigned int stage2Success = 0;
+  unsigned int individualBondExcluded = 0;
+  unsigned int fastAttempts = 0;
+  unsigned int fastSuccess = 0;
+  unsigned int fallbackCalls = 0;
+  unsigned int fallbackSuccess = 0;
+  unsigned int fallbackFail = 0;
+  unsigned int fallbackOverflow = 0;
+  unsigned int maxQueue = 0;
+  unsigned int forcedExit = 0;
+};
+
 struct MCSResult {
   unsigned int numAtoms = 0;
   unsigned int numBonds = 0;
@@ -73,6 +103,9 @@ struct MCSResult {
   bool         overflowed = false;
   bool         usedGpu = false;
   bool         usedFallback = false;
+  float        elapsedMs = 0.0f;
+  bool         hasExecutionStats = false;
+  MCSExecutionStats executionStats;
   std::string  smartsString;
 
   std::vector<std::pair<int, int>> atomMapping;

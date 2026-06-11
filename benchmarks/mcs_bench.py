@@ -16,6 +16,7 @@
 """Maximum common substructure benchmark comparing nvmolkit against RDKit."""
 
 import argparse
+import csv
 import random
 import time
 from multiprocessing import Pool
@@ -31,6 +32,34 @@ from nvmolkit.mcs import findMCS
 
 _worker_mols: list[Chem.Mol] | None = None
 _worker_params: rdFMCS.MCSParameters | None = None
+
+FMCS_STATS_COLUMNS = [
+    "phase2_iters",
+    "initial_seeds",
+    "mismatched_initial_seeds",
+    "popped",
+    "seed_checks",
+    "match_calls",
+    "match_found",
+    "bound_rejected",
+    "expanded",
+    "fill_zero",
+    "stage0_attempts",
+    "stage0_success",
+    "stage1_attempts",
+    "stage1_success",
+    "stage2_attempts",
+    "stage2_success",
+    "individual_bond_excluded",
+    "fast_attempts",
+    "fast_success",
+    "fallback_calls",
+    "fallback_success",
+    "fallback_fail",
+    "fallback_overflow",
+    "max_queue",
+    "forced_exit",
+]
 
 
 def _log(message: str) -> None:
@@ -71,11 +100,13 @@ def _rdkit_worker_init(mol_binaries: list[bytes], params: rdFMCS.MCSParameters) 
     _worker_params = params
 
 
-def _rdkit_worker_pair(pair: tuple[int, int]) -> tuple[int, int]:
+def _rdkit_worker_pair(pair: tuple[int, int]) -> tuple[int, int, float]:
     if _worker_mols is None or _worker_params is None:
         raise RuntimeError("RDKit MCS worker was not initialized")
+    start = time.perf_counter()
     result = rdFMCS.FindMCS([_worker_mols[pair[0]], _worker_mols[pair[1]]], _worker_params)
-    return int(result.numAtoms), int(result.numBonds)
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    return int(result.numAtoms), int(result.numBonds), elapsed_ms
 
 
 def _filter_molecules(mols: list[Chem.Mol], max_atoms: int, max_bonds: int) -> list[Chem.Mol]:
@@ -121,7 +152,8 @@ def _bench_nvmolkit(mols: list[Chem.Mol], pairs: list[tuple[int, int]], args: ar
         f"molecules={len(mols)} pairs={len(pairs)} runs={args.runs} warmups={args.warmups} "
         f"batch_size={args.batch_size} block_size={args.block_size} "
         f"workers={args.workers} prep_threads={args.prep_threads} "
-        f"num_gpus={args.num_gpus} executors_per_runner={args.executors_per_runner}"
+        f"num_gpus={args.num_gpus} executors_per_runner={args.executors_per_runner} "
+        f"collect_stats={args.collect_stats}"
     )
     last_result = None
     import torch
@@ -148,6 +180,8 @@ def _bench_nvmolkit(mols: list[Chem.Mol], pairs: list[tuple[int, int]], args: ar
                 preprocessing_threads=args.prep_threads,
                 executors_per_runner=args.executors_per_runner,
                 gpu_ids=list(range(args.num_gpus)),
+                collect_timings=True,
+                collect_stats=args.collect_stats,
             )
         _log(f"nvmolkit {label}: findMCS returned; synchronizing GPU")
         torch.cuda.synchronize()
@@ -186,6 +220,7 @@ def _bench_rdkit(mols: list[Chem.Mol], pairs: list[tuple[int, int]], args: argpa
     )
     params = _rdkit_params(args)
     sizes: list[tuple[int, int]] = []
+    times_ms: list[float] = []
     pairs_done = 0
     rdkit_run_idx = 0
 
@@ -196,16 +231,19 @@ def _bench_rdkit(mols: list[Chem.Mol], pairs: list[tuple[int, int]], args: argpa
         _log(f"RDKit: launching multiprocessing pool with chunksize={chunksize}")
 
         def run(deadline):
-            nonlocal sizes, pairs_done, rdkit_run_idx
+            nonlocal sizes, times_ms, pairs_done, rdkit_run_idx
             rdkit_run_idx += 1
             with nvtx.annotate(f"mcs_rdkit_run_{rdkit_run_idx}", color="yellow"):
                 sizes = []
+                times_ms = []
                 pairs_done = 0
                 with Pool(args.rdkit_threads, initializer=_rdkit_worker_init, initargs=(mol_binaries, params)) as pool:
                     iterator = pool.imap(_rdkit_worker_pair, pairs, chunksize=chunksize)
                     with tqdm(total=len(pairs), desc="RDKit MCS pairs", unit="pair") as progress:
-                        for size in iterator:
+                        for atoms, bonds, elapsed_ms in iterator:
+                            size = (atoms, bonds)
                             sizes.append(size)
+                            times_ms.append(elapsed_ms)
                             pairs_done += 1
                             progress.update(1)
                             if deadline.expired():
@@ -217,18 +255,22 @@ def _bench_rdkit(mols: list[Chem.Mol], pairs: list[tuple[int, int]], args: argpa
     else:
 
         def run(deadline):
-            nonlocal sizes, pairs_done, rdkit_run_idx
+            nonlocal sizes, times_ms, pairs_done, rdkit_run_idx
             rdkit_run_idx += 1
             with nvtx.annotate(f"mcs_rdkit_run_{rdkit_run_idx}", color="yellow"):
                 sizes = []
+                times_ms = []
                 pairs_done = 0
                 with tqdm(total=len(pairs), desc="RDKit MCS pairs", unit="pair") as progress:
                     for idx_a, idx_b in pairs:
                         if deadline.expired():
                             _log(f"RDKit: stopping early after {pairs_done}/{len(pairs)} pairs due to max_seconds")
                             break
+                        start = time.perf_counter()
                         result = rdFMCS.FindMCS([mols[idx_a], mols[idx_b]], params)
+                        elapsed_ms = (time.perf_counter() - start) * 1000.0
                         sizes.append((int(result.numAtoms), int(result.numBonds)))
+                        times_ms.append(elapsed_ms)
                         pairs_done += 1
                         progress.update(1)
 
@@ -236,7 +278,117 @@ def _bench_rdkit(mols: list[Chem.Mol], pairs: list[tuple[int, int]], args: argpa
         run, args.runs, args.rdkit_max_seconds, lambda: pairs_done, len(pairs)
     )
     _log(f"Finished RDKit MCS benchmark: pairs_completed={last_pairs}/{len(pairs)}")
-    return avg_ms, std_ms, sizes, last_pairs
+    return avg_ms, std_ms, sizes, times_ms, last_pairs
+
+
+def _format_float(value: float | None) -> str:
+    return "" if value is None else f"{value:.6f}"
+
+
+def _mol_prop(mol: Chem.Mol, key: str) -> str:
+    return mol.GetProp(key) if mol.HasProp(key) else ""
+
+
+def _mol_input_smiles(mol: Chem.Mol) -> str:
+    return _mol_prop(mol, "nvmolkit_input_smiles") or Chem.MolToSmiles(mol, canonical=True)
+
+
+def _write_pair_timings(
+    path: str,
+    mols: list[Chem.Mol],
+    pairs: list[tuple[int, int]],
+    nv_result,
+    rdkit_sizes: list[tuple[int, int]] | None,
+    rdkit_times_ms: list[float] | None,
+) -> None:
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "pair_index",
+        "mol_a_idx",
+        "mol_b_idx",
+        "input_line_a",
+        "input_line_b",
+        "input_smiles_a",
+        "input_smiles_b",
+        "smiles_a",
+        "smiles_b",
+        "atoms_a",
+        "bonds_a",
+        "atoms_b",
+        "bonds_b",
+        "nvmolkit_time_ms",
+        "rdkit_time_ms",
+        "nvmolkit_atoms",
+        "nvmolkit_bonds",
+        "rdkit_atoms",
+        "rdkit_bonds",
+        "rdkit_completed",
+        "nvmolkit_canceled",
+        "nvmolkit_overflowed",
+        "nvmolkit_used_gpu",
+        "nvmolkit_used_fallback",
+    ]
+    stats_columns = []
+    if nv_result is not None and getattr(nv_result, "fmcs_stats", None) is not None:
+        stats_columns = [f"nvmolkit_{name}" for name in FMCS_STATS_COLUMNS]
+        fieldnames.extend(stats_columns)
+
+    with output_path.open("w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        for pair_idx, (idx_a, idx_b) in enumerate(pairs):
+            mol_a = mols[idx_a]
+            mol_b = mols[idx_b]
+            rdkit_completed = rdkit_sizes is not None and pair_idx < len(rdkit_sizes)
+            row = {
+                "pair_index": pair_idx,
+                "mol_a_idx": idx_a,
+                "mol_b_idx": idx_b,
+                "input_line_a": _mol_prop(mol_a, "nvmolkit_input_line"),
+                "input_line_b": _mol_prop(mol_b, "nvmolkit_input_line"),
+                "input_smiles_a": _mol_input_smiles(mol_a),
+                "input_smiles_b": _mol_input_smiles(mol_b),
+                "smiles_a": Chem.MolToSmiles(mol_a, canonical=True),
+                "smiles_b": Chem.MolToSmiles(mol_b, canonical=True),
+                "atoms_a": mol_a.GetNumAtoms(),
+                "bonds_a": mol_a.GetNumBonds(),
+                "atoms_b": mol_b.GetNumAtoms(),
+                "bonds_b": mol_b.GetNumBonds(),
+                "nvmolkit_time_ms": "",
+                "rdkit_time_ms": "",
+                "nvmolkit_atoms": "",
+                "nvmolkit_bonds": "",
+                "rdkit_atoms": "",
+                "rdkit_bonds": "",
+                "rdkit_completed": int(rdkit_completed),
+                "nvmolkit_canceled": "",
+                "nvmolkit_overflowed": "",
+                "nvmolkit_used_gpu": "",
+                "nvmolkit_used_fallback": "",
+            }
+            for column in stats_columns:
+                row[column] = ""
+            if nv_result is not None:
+                if nv_result.elapsed_ms is not None:
+                    row["nvmolkit_time_ms"] = _format_float(float(nv_result.elapsed_ms[pair_idx]))
+                row["nvmolkit_atoms"] = int(nv_result.num_atoms[pair_idx])
+                row["nvmolkit_bonds"] = int(nv_result.num_bonds[pair_idx])
+                row["nvmolkit_canceled"] = int(nv_result.canceled[pair_idx])
+                row["nvmolkit_overflowed"] = int(nv_result.overflowed[pair_idx])
+                row["nvmolkit_used_gpu"] = int(nv_result.used_gpu[pair_idx])
+                row["nvmolkit_used_fallback"] = int(nv_result.used_fallback[pair_idx])
+                if nv_result.fmcs_stats is not None:
+                    for name in FMCS_STATS_COLUMNS:
+                        row[f"nvmolkit_{name}"] = int(nv_result.fmcs_stats[name][pair_idx])
+            if rdkit_completed:
+                rd_atoms, rd_bonds = rdkit_sizes[pair_idx]
+                row["rdkit_atoms"] = rd_atoms
+                row["rdkit_bonds"] = rd_bonds
+                if rdkit_times_ms is not None and pair_idx < len(rdkit_times_ms):
+                    row["rdkit_time_ms"] = _format_float(rdkit_times_ms[pair_idx])
+            writer.writerow(row)
+    _log(f"Wrote per-pair timings to {output_path}")
 
 
 def _validate(nv_result, rdkit_sizes: list[tuple[int, int]]) -> None:
@@ -354,9 +506,9 @@ def _build_parser(default_smiles: Path) -> argparse.ArgumentParser:
         legacy_flags=("--block_size",),
         dest="block_size",
         type=int,
-        choices=[64, 128, 256],
+        choices=[64, 128, 256, 512],
         default=128,
-        help="CUDA threads per fMCS pair block.",
+        help="CUDA threads per fMCS pair block. 512 is experimental and only supports maxSize tiers up to 64.",
     )
     _add_option(
         gpu_group,
@@ -393,6 +545,11 @@ def _build_parser(default_smiles: Path) -> argparse.ArgumentParser:
         type=int,
         default=-1,
         help="Asynchronous fMCS executor slots/streams per GPU worker; -1 autoselects, valid explicit range is 1-8.",
+    )
+    gpu_group.add_argument(
+        "--collect-stats",
+        action="store_true",
+        help="Collect diagnostic per-pair fMCS queue/search counters in --timings-csv.",
     )
     _add_option(
         parser,
@@ -478,6 +635,10 @@ def _build_parser(default_smiles: Path) -> argparse.ArgumentParser:
         help="Skip RDKit benchmark.",
     )
     parser.add_argument("--validate", action="store_true", help="Compare nvmolkit atom/bond counts against RDKit")
+    parser.add_argument(
+        "--timings-csv",
+        help="Write per-pair nvmolkit/RDKit timings and pair metadata to this CSV file.",
+    )
     _add_option(
         parser,
         "--rdkit-threads",
@@ -528,13 +689,17 @@ def main() -> None:
         )
 
     rdkit_sizes = None
+    rdkit_times_ms = None
     if not args.no_rdkit or args.validate:
-        avg_ms, std_ms, rdkit_sizes, rdkit_pairs = _bench_rdkit(mols, pairs, args)
+        avg_ms, std_ms, rdkit_sizes, rdkit_times_ms, rdkit_pairs = _bench_rdkit(mols, pairs, args)
         print(
             "RDKit: "
             f"mean={avg_ms:.3f} ms std={std_ms:.3f} ms pairs={rdkit_pairs}/{len(pairs)} "
             f"throughput={throughput_per_s(rdkit_pairs, avg_ms):.2f} pairs/s"
         )
+
+    if args.timings_csv:
+        _write_pair_timings(args.timings_csv, mols, pairs, nv_result, rdkit_sizes, rdkit_times_ms)
 
     if args.validate:
         if rdkit_sizes is None:

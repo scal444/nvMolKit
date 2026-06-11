@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <map>
@@ -306,8 +307,15 @@ void fillResultBondMapping(const RDKit::ROMol&                          molA,
 }
 
 MCSResult runRDKitFallback(const RDKit::ROMol& molA, const RDKit::ROMol& molB, const MCSParameters& params) {
+  const auto start = std::chrono::steady_clock::now();
   MCSResult result;
   result.usedFallback = true;
+  auto finish = [&]() {
+    const auto end = std::chrono::steady_clock::now();
+    result.elapsedMs =
+      static_cast<float>(std::chrono::duration<double, std::milli>(end - start).count());
+    return result;
+  };
 
   std::vector<RDKit::ROMOL_SPTR> mols;
   mols.emplace_back(new RDKit::ROMol(molA));
@@ -321,7 +329,7 @@ MCSResult runRDKitFallback(const RDKit::ROMol& molA, const RDKit::ROMol& molB, c
   result.smartsString = rdResult.SmartsString;
 
   if (rdResult.QueryMol == nullptr) {
-    return result;
+    return finish();
   }
 
   RDKit::SubstructMatchParameters matchParams;
@@ -330,7 +338,7 @@ MCSResult runRDKitFallback(const RDKit::ROMol& molA, const RDKit::ROMol& molB, c
   const auto matchesA    = RDKit::SubstructMatch(molA, *rdResult.QueryMol, matchParams);
   const auto matchesB    = RDKit::SubstructMatch(molB, *rdResult.QueryMol, matchParams);
   if (matchesA.empty() || matchesB.empty()) {
-    return result;
+    return finish();
   }
 
   std::vector<int> queryToA(rdResult.QueryMol->getNumAtoms(), -1);
@@ -348,7 +356,7 @@ MCSResult runRDKitFallback(const RDKit::ROMol& molA, const RDKit::ROMol& molB, c
     }
   }
   fillResultBondMapping(molA, molB, result.atomMapping, result.bondMapping);
-  return result;
+  return finish();
 }
 
 bool shouldFallbackToRDKit(const RDKit::ROMol& molA,
@@ -378,13 +386,52 @@ bool shouldFallbackToRDKit(const RDKit::ROMol& molA,
   return false;
 }
 
-MCSResult convertGpuResult(const RDKit::ROMol& molA, const RDKit::ROMol& molB, const mcs::MCSResult& gpuResult) {
+MCSExecutionStats convertExecutionStats(const mcs::fmcs::ExecutionStats& in) {
+  MCSExecutionStats out;
+  out.phase2Iters = in.phase2Iters;
+  out.initialSeeds = in.initialSeeds;
+  out.mismatchedInitialSeeds = in.mismatchedInitialSeeds;
+  out.popped = in.popped;
+  out.seedChecks = in.seedChecks;
+  out.matchCalls = in.matchCalls;
+  out.matchFound = in.matchFound;
+  out.boundRejected = in.boundRejected;
+  out.expanded = in.expanded;
+  out.fillZero = in.fillZero;
+  out.stage0Attempts = in.stage0Attempts;
+  out.stage0Success = in.stage0Success;
+  out.stage1Attempts = in.stage1Attempts;
+  out.stage1Success = in.stage1Success;
+  out.stage2Attempts = in.stage2Attempts;
+  out.stage2Success = in.stage2Success;
+  out.individualBondExcluded = in.individualBondExcluded;
+  out.fastAttempts = in.fastAttempts;
+  out.fastSuccess = in.fastSuccess;
+  out.fallbackCalls = in.fallbackCalls;
+  out.fallbackSuccess = in.fallbackSuccess;
+  out.fallbackFail = in.fallbackFail;
+  out.fallbackOverflow = in.fallbackOverflow;
+  out.maxQueue = in.maxQueue;
+  out.forcedExit = in.forcedExit;
+  return out;
+}
+
+MCSResult convertGpuResult(const RDKit::ROMol& molA,
+                           const RDKit::ROMol& molB,
+                           const mcs::MCSResult& gpuResult,
+                           float elapsedMs,
+                           const mcs::fmcs::ExecutionStats* executionStats) {
   MCSResult out;
   out.numAtoms  = static_cast<unsigned int>(gpuResult.numCommonVertices);
   out.numBonds  = static_cast<unsigned int>(gpuResult.numCommonEdges);
   out.canceled  = gpuResult.timedOut || gpuResult.killed;
   out.overflowed = gpuResult.overflowed;
   out.usedGpu   = true;
+  out.elapsedMs = elapsedMs;
+  if (executionStats != nullptr) {
+    out.hasExecutionStats = true;
+    out.executionStats = convertExecutionStats(*executionStats);
+  }
 
   const size_t numMappedAtoms = std::min(gpuResult.mappingA.size(), gpuResult.mappingB.size());
   out.atomMapping.reserve(numMappedAtoms);
@@ -562,18 +609,34 @@ void runGpuPairs(std::vector<PreparedGpuPair>& gpuPairs,
     fmcsParams.matchEdgeLabels    = usesBondLabels(params);
     fmcsParams.timeoutMs          = static_cast<float>(params.timeoutSeconds) * 1000.0f;
 
-    auto gpuResults = mcs::fmcs::findMCESfMCSBatchLabeled(gpuGraphsA, gpuGraphsB, fmcsParams, nullptr, stream);
+    std::vector<float> gpuTimesMs;
+    std::vector<mcs::fmcs::ExecutionStats> gpuStats;
+    auto* gpuTimesPtr = params.collectTimings ? &gpuTimesMs : nullptr;
+    auto* gpuStatsPtr = params.collectStats ? &gpuStats : nullptr;
+    auto gpuResults = mcs::fmcs::findMCESfMCSBatchLabeled(
+      gpuGraphsA, gpuGraphsB, fmcsParams, gpuTimesPtr, stream, gpuStatsPtr);
     for (size_t gpuIdx = 0; gpuIdx < gpuResults.size(); ++gpuIdx) {
       const size_t resultIdx = resultIndices[gpuIdx];
       const size_t idxA      = molIndicesA[gpuIdx];
       const size_t idxB      = molIndicesB[gpuIdx];
+      const float gpuElapsedMs =
+        gpuTimesPtr != nullptr && gpuIdx < gpuTimesMs.size() ? gpuTimesMs[gpuIdx] : 0.0f;
       if (gpuResults[gpuIdx].overflowed) {
         if (params.requireGpu) {
           throw std::runtime_error("GPU MCS path overflowed");
         }
-        results[resultIdx] = runRDKitFallback(*mols[idxA], *mols[idxB], params);
+        auto fallback = runRDKitFallback(*mols[idxA], *mols[idxB], params);
+        fallback.elapsedMs += gpuElapsedMs;
+        if (gpuStatsPtr != nullptr && gpuIdx < gpuStats.size()) {
+          fallback.hasExecutionStats = true;
+          fallback.executionStats = convertExecutionStats(gpuStats[gpuIdx]);
+        }
+        results[resultIdx] = std::move(fallback);
       } else {
-        results[resultIdx] = convertGpuResult(*mols[idxA], *mols[idxB], gpuResults[gpuIdx]);
+        const auto* statsPtr =
+          gpuStatsPtr != nullptr && gpuIdx < gpuStats.size() ? &gpuStats[gpuIdx] : nullptr;
+        results[resultIdx] =
+          convertGpuResult(*mols[idxA], *mols[idxB], gpuResults[gpuIdx], gpuElapsedMs, statsPtr);
       }
     }
   };

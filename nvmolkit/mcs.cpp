@@ -22,6 +22,7 @@
 #include <boost/python/numpy.hpp>
 #include <boost/python/stl_iterator.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
@@ -40,6 +41,32 @@ struct MCSResultBuffers {
   std::vector<std::uint8_t> overflowed;
   std::vector<std::uint8_t> usedGpu;
   std::vector<std::uint8_t> usedFallback;
+  std::vector<float>        elapsedMs;
+  std::vector<std::uint32_t> statsPhase2Iters;
+  std::vector<std::uint32_t> statsInitialSeeds;
+  std::vector<std::uint32_t> statsMismatchedInitialSeeds;
+  std::vector<std::uint32_t> statsPopped;
+  std::vector<std::uint32_t> statsSeedChecks;
+  std::vector<std::uint32_t> statsMatchCalls;
+  std::vector<std::uint32_t> statsMatchFound;
+  std::vector<std::uint32_t> statsBoundRejected;
+  std::vector<std::uint32_t> statsExpanded;
+  std::vector<std::uint32_t> statsFillZero;
+  std::vector<std::uint32_t> statsStage0Attempts;
+  std::vector<std::uint32_t> statsStage0Success;
+  std::vector<std::uint32_t> statsStage1Attempts;
+  std::vector<std::uint32_t> statsStage1Success;
+  std::vector<std::uint32_t> statsStage2Attempts;
+  std::vector<std::uint32_t> statsStage2Success;
+  std::vector<std::uint32_t> statsIndividualBondExcluded;
+  std::vector<std::uint32_t> statsFastAttempts;
+  std::vector<std::uint32_t> statsFastSuccess;
+  std::vector<std::uint32_t> statsFallbackCalls;
+  std::vector<std::uint32_t> statsFallbackSuccess;
+  std::vector<std::uint32_t> statsFallbackFail;
+  std::vector<std::uint32_t> statsFallbackOverflow;
+  std::vector<std::uint32_t> statsMaxQueue;
+  std::vector<std::uint32_t> statsForcedExit;
   std::vector<std::string>  smartsStrings;
 
   std::vector<std::int32_t> atomMapping;
@@ -160,6 +187,92 @@ boost::python::numpy::ndarray makePairArray(std::vector<std::int32_t>& values, c
                                          owner);
 }
 
+void reserveStats(MCSResultBuffers& buffers, std::size_t size) {
+  buffers.statsPhase2Iters.reserve(size);
+  buffers.statsInitialSeeds.reserve(size);
+  buffers.statsMismatchedInitialSeeds.reserve(size);
+  buffers.statsPopped.reserve(size);
+  buffers.statsSeedChecks.reserve(size);
+  buffers.statsMatchCalls.reserve(size);
+  buffers.statsMatchFound.reserve(size);
+  buffers.statsBoundRejected.reserve(size);
+  buffers.statsExpanded.reserve(size);
+  buffers.statsFillZero.reserve(size);
+  buffers.statsStage0Attempts.reserve(size);
+  buffers.statsStage0Success.reserve(size);
+  buffers.statsStage1Attempts.reserve(size);
+  buffers.statsStage1Success.reserve(size);
+  buffers.statsStage2Attempts.reserve(size);
+  buffers.statsStage2Success.reserve(size);
+  buffers.statsIndividualBondExcluded.reserve(size);
+  buffers.statsFastAttempts.reserve(size);
+  buffers.statsFastSuccess.reserve(size);
+  buffers.statsFallbackCalls.reserve(size);
+  buffers.statsFallbackSuccess.reserve(size);
+  buffers.statsFallbackFail.reserve(size);
+  buffers.statsFallbackOverflow.reserve(size);
+  buffers.statsMaxQueue.reserve(size);
+  buffers.statsForcedExit.reserve(size);
+}
+
+void appendStats(MCSResultBuffers& buffers, const nvMolKit::MCSExecutionStats& stats) {
+  buffers.statsPhase2Iters.push_back(stats.phase2Iters);
+  buffers.statsInitialSeeds.push_back(stats.initialSeeds);
+  buffers.statsMismatchedInitialSeeds.push_back(stats.mismatchedInitialSeeds);
+  buffers.statsPopped.push_back(stats.popped);
+  buffers.statsSeedChecks.push_back(stats.seedChecks);
+  buffers.statsMatchCalls.push_back(stats.matchCalls);
+  buffers.statsMatchFound.push_back(stats.matchFound);
+  buffers.statsBoundRejected.push_back(stats.boundRejected);
+  buffers.statsExpanded.push_back(stats.expanded);
+  buffers.statsFillZero.push_back(stats.fillZero);
+  buffers.statsStage0Attempts.push_back(stats.stage0Attempts);
+  buffers.statsStage0Success.push_back(stats.stage0Success);
+  buffers.statsStage1Attempts.push_back(stats.stage1Attempts);
+  buffers.statsStage1Success.push_back(stats.stage1Success);
+  buffers.statsStage2Attempts.push_back(stats.stage2Attempts);
+  buffers.statsStage2Success.push_back(stats.stage2Success);
+  buffers.statsIndividualBondExcluded.push_back(stats.individualBondExcluded);
+  buffers.statsFastAttempts.push_back(stats.fastAttempts);
+  buffers.statsFastSuccess.push_back(stats.fastSuccess);
+  buffers.statsFallbackCalls.push_back(stats.fallbackCalls);
+  buffers.statsFallbackSuccess.push_back(stats.fallbackSuccess);
+  buffers.statsFallbackFail.push_back(stats.fallbackFail);
+  buffers.statsFallbackOverflow.push_back(stats.fallbackOverflow);
+  buffers.statsMaxQueue.push_back(stats.maxQueue);
+  buffers.statsForcedExit.push_back(stats.forcedExit);
+}
+
+dict statsToPythonDict(MCSResultBuffers& buffers, const object& owner) {
+  dict out;
+  out["phase2_iters"] = make1dArray(buffers.statsPhase2Iters, owner);
+  out["initial_seeds"] = make1dArray(buffers.statsInitialSeeds, owner);
+  out["mismatched_initial_seeds"] = make1dArray(buffers.statsMismatchedInitialSeeds, owner);
+  out["popped"] = make1dArray(buffers.statsPopped, owner);
+  out["seed_checks"] = make1dArray(buffers.statsSeedChecks, owner);
+  out["match_calls"] = make1dArray(buffers.statsMatchCalls, owner);
+  out["match_found"] = make1dArray(buffers.statsMatchFound, owner);
+  out["bound_rejected"] = make1dArray(buffers.statsBoundRejected, owner);
+  out["expanded"] = make1dArray(buffers.statsExpanded, owner);
+  out["fill_zero"] = make1dArray(buffers.statsFillZero, owner);
+  out["stage0_attempts"] = make1dArray(buffers.statsStage0Attempts, owner);
+  out["stage0_success"] = make1dArray(buffers.statsStage0Success, owner);
+  out["stage1_attempts"] = make1dArray(buffers.statsStage1Attempts, owner);
+  out["stage1_success"] = make1dArray(buffers.statsStage1Success, owner);
+  out["stage2_attempts"] = make1dArray(buffers.statsStage2Attempts, owner);
+  out["stage2_success"] = make1dArray(buffers.statsStage2Success, owner);
+  out["individual_bond_excluded"] = make1dArray(buffers.statsIndividualBondExcluded, owner);
+  out["fast_attempts"] = make1dArray(buffers.statsFastAttempts, owner);
+  out["fast_success"] = make1dArray(buffers.statsFastSuccess, owner);
+  out["fallback_calls"] = make1dArray(buffers.statsFallbackCalls, owner);
+  out["fallback_success"] = make1dArray(buffers.statsFallbackSuccess, owner);
+  out["fallback_fail"] = make1dArray(buffers.statsFallbackFail, owner);
+  out["fallback_overflow"] = make1dArray(buffers.statsFallbackOverflow, owner);
+  out["max_queue"] = make1dArray(buffers.statsMaxQueue, owner);
+  out["forced_exit"] = make1dArray(buffers.statsForcedExit, owner);
+  return out;
+}
+
 }  // namespace
 
 BOOST_PYTHON_MODULE(_mcs) {
@@ -179,6 +292,8 @@ BOOST_PYTHON_MODULE(_mcs) {
       params.maximizeBonds                                    = optionValue<bool>(options, "maximize_bonds", true);
       params.connectedOnly                                    = optionValue<bool>(options, "connected_only", true);
       params.requireGpu                                       = optionValue<bool>(options, "require_gpu", false);
+      params.collectTimings                                   = optionValue<bool>(options, "collect_timings", false);
+      params.collectStats                                     = optionValue<bool>(options, "collect_stats", false);
       params.timeoutSeconds                                   = optionValue<unsigned int>(options, "timeout_seconds", 0);
       params.batchSize                                        = optionValue<int>(options, "batch_size", 0);
       params.blockSize                                        = optionValue<int>(options, "block_size", 128);
@@ -205,6 +320,10 @@ BOOST_PYTHON_MODULE(_mcs) {
       buffers->overflowed.reserve(results.size());
       buffers->usedGpu.reserve(results.size());
       buffers->usedFallback.reserve(results.size());
+      buffers->elapsedMs.reserve(results.size());
+      if (params.collectStats) {
+        reserveStats(*buffers, results.size());
+      }
       buffers->smartsStrings.reserve(results.size());
       buffers->atomMappingIndptr.reserve(results.size() + 1);
       buffers->bondMappingIndptr.reserve(results.size() + 1);
@@ -218,6 +337,10 @@ BOOST_PYTHON_MODULE(_mcs) {
         buffers->overflowed.push_back(result.overflowed ? 1 : 0);
         buffers->usedGpu.push_back(result.usedGpu ? 1 : 0);
         buffers->usedFallback.push_back(result.usedFallback ? 1 : 0);
+        buffers->elapsedMs.push_back(result.elapsedMs);
+        if (params.collectStats) {
+          appendStats(*buffers, result.hasExecutionStats ? result.executionStats : nvMolKit::MCSExecutionStats{});
+        }
         buffers->smartsStrings.push_back(result.smartsString);
 
         for (const auto& [a, b] : result.atomMapping) {
@@ -244,6 +367,10 @@ BOOST_PYTHON_MODULE(_mcs) {
       object owner{handle<>(cap)};
       buffers.release();
       auto* ptr = reinterpret_cast<MCSResultBuffers*>(PyCapsule_GetPointer(cap, "nvmolkit.mcs_results"));
+      object statsObject{handle<>(borrowed(Py_None))};
+      if (params.collectStats) {
+        statsObject = statsToPythonDict(*ptr, owner);
+      }
 
       nvMolKit::ScopedNvtxRange wrapRange("Python MCS: wrap results", nvMolKit::NvtxColor::kGreen);
       return make_tuple(make1dArray(ptr->numAtoms, owner),
@@ -252,11 +379,13 @@ BOOST_PYTHON_MODULE(_mcs) {
                         make1dArray(ptr->overflowed, owner),
                         make1dArray(ptr->usedGpu, owner),
                         make1dArray(ptr->usedFallback, owner),
+                        make1dArray(ptr->elapsedMs, owner),
                         stringsToPythonList(ptr->smartsStrings),
                         makePairArray(ptr->atomMapping, owner),
                         make1dArray(ptr->atomMappingIndptr, owner),
                         makePairArray(ptr->bondMapping, owner),
-                        make1dArray(ptr->bondMappingIndptr, owner));
+                        make1dArray(ptr->bondMappingIndptr, owner),
+                        statsObject);
     },
     (arg("mols"), arg("pairs"), arg("options") = dict()));
 }

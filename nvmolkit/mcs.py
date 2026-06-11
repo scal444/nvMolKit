@@ -64,6 +64,8 @@ class MCSResult:
     smarts_string: str
     atom_mapping: np.ndarray
     bond_mapping: np.ndarray
+    elapsed_ms: float | None = None
+    fmcs_stats: dict[str, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +85,8 @@ class MCSBatchResult:
     atom_mapping_indptr: np.ndarray
     bond_mapping: np.ndarray
     bond_mapping_indptr: np.ndarray
+    elapsed_ms: np.ndarray | None = None
+    fmcs_stats: dict[str, np.ndarray] | None = None
 
     def __len__(self) -> int:
         """Return the number of generated pair results."""
@@ -115,6 +119,10 @@ class MCSBatchResult:
             smarts_string=self.smarts_strings[pair_idx],
             atom_mapping=self.atom_mapping[atom_start:atom_end],
             bond_mapping=self.bond_mapping[bond_start:bond_end],
+            elapsed_ms=None if self.elapsed_ms is None else float(self.elapsed_ms[pair_idx]),
+            fmcs_stats=None
+            if self.fmcs_stats is None
+            else {key: int(values[pair_idx]) for key, values in self.fmcs_stats.items()},
         )
 
 
@@ -125,7 +133,8 @@ class MCSConfig:
         batchSize: Optional GPU batch chunk size. ``0`` lets the native layer
             choose.
         blockSize: CUDA threads per fMCS pair block. Supported values are
-            ``64``, ``128``, and ``256``.
+            ``64``, ``128``, and ``256``. ``512`` is experimental and only
+            supports maxSize tiers up to 64.
         workerThreads: GPU runner threads per GPU. ``-1`` autoselects.
         preprocessingThreads: CPU threads for pair preprocessing. ``-1``
             autoselects.
@@ -265,6 +274,8 @@ def findMCS(
     preprocessing_threads: int = -1,
     executors_per_runner: int = -1,
     gpu_ids: Sequence[int] | None = None,
+    collect_timings: bool = False,
+    collect_stats: bool = False,
 ) -> MCSBatchResult:
     """Find maximum common substructures for a batch of molecule pairs.
 
@@ -307,7 +318,8 @@ def findMCS(
         batch_size: Optional GPU batch chunk size. ``0`` lets the native layer
             choose.
         block_size: CUDA threads per fMCS pair block. Supported values are
-            ``64``, ``128``, and ``256``.
+            ``64``, ``128``, and ``256``. ``512`` is experimental and only
+            supports maxSize tiers up to 64.
         worker_threads: GPU runner threads per GPU. ``-1`` autoselects.
         preprocessing_threads: CPU threads for pair preprocessing. ``-1``
             autoselects.
@@ -315,6 +327,12 @@ def findMCS(
             for chunked fMCS tier dispatch. ``-1`` autoselects.
         gpu_ids: GPU device IDs to use. ``None`` or empty uses the current
             device.
+        collect_timings: When true, collect per-pair backend elapsed
+            milliseconds in ``MCSBatchResult.elapsed_ms``.
+        collect_stats: When true, collect per-pair fMCS search counters in
+            ``MCSBatchResult.fmcs_stats``. This launches an instrumented GPU
+            kernel and is intended for diagnostics, not throughput benchmark
+            numbers.
 
     Returns:
         :class:`MCSBatchResult` in generated-pair order.
@@ -389,11 +407,13 @@ def findMCS(
         overflowed,
         used_gpu,
         used_fallback,
+        elapsed_ms,
         smarts_strings,
         atom_mapping,
         atom_mapping_indptr,
         bond_mapping,
         bond_mapping_indptr,
+        fmcs_stats,
     ) = _findMCSBatch(
         native_mols,
         list(pair_list),
@@ -410,6 +430,8 @@ def findMCS(
             "preprocessing_threads": int(preprocessing_threads),
             "executors_per_runner": int(executors_per_runner),
             "gpu_ids": list(gpu_ids) if gpu_ids is not None else [],
+            "collect_timings": bool(collect_timings),
+            "collect_stats": bool(collect_stats),
             "match_valences": bool(match_valences),
             "match_formal_charge": bool(match_formal_charge),
             "atom_ring_matches_ring_only": bool(atom_ring_matches_ring_only)
@@ -437,9 +459,11 @@ def findMCS(
         overflowed=overflowed,
         used_gpu=used_gpu,
         used_fallback=used_fallback,
+        elapsed_ms=elapsed_ms if collect_timings else None,
         smarts_strings=tuple(smarts_strings),
         atom_mapping=atom_mapping,
         atom_mapping_indptr=atom_mapping_indptr,
         bond_mapping=bond_mapping,
         bond_mapping_indptr=bond_mapping_indptr,
+        fmcs_stats=fmcs_stats if collect_stats else None,
     )

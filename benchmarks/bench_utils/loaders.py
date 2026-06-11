@@ -66,19 +66,27 @@ def load_pickle(filepath: str, max_count: int = 0, seed: int | None = None) -> l
     return mols
 
 
-def _parse_smiles(smi: str, sanitize: bool) -> Chem.Mol | None:
+def _parse_smiles(record: tuple[str, int], sanitize: bool) -> Chem.Mol | None:
+    smi, _ = record
     return Chem.MolFromSmiles(smi, sanitize=sanitize)
 
 
-def _iter_smiles_tokens(filepath: str, sanitize: bool) -> Iterator[str]:
-    """Yield SMILES tokens from a file, dropping a parse-failing first line as a header."""
+def _set_smiles_source_props(mol: Chem.Mol, record: tuple[str, int]) -> None:
+    smi, line_number = record
+    mol.SetProp("nvmolkit_input_smiles", smi)
+    mol.SetProp("nvmolkit_input_line", str(line_number))
+
+
+def _iter_smiles_records(filepath: str, sanitize: bool) -> Iterator[tuple[str, int]]:
+    """Yield ``(smiles, line_number)`` records, dropping a parse-failing first line as a header."""
     with open(filepath, "r") as fh:
         first_data_seen = False
-        for line in fh:
+        for line_number, line in enumerate(fh, start=1):
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
-            smi = stripped.split()[0]
+            parts = stripped.split()
+            smi = parts[0]
             if not first_data_seen:
                 first_data_seen = True
                 RDLogger.DisableLog("rdApp.*")
@@ -86,7 +94,7 @@ def _iter_smiles_tokens(filepath: str, sanitize: bool) -> Iterator[str]:
                 RDLogger.EnableLog("rdApp.*")
                 if mol is None:
                     continue
-            yield smi
+            yield smi, line_number
 
 
 def load_smiles(
@@ -110,27 +118,28 @@ def load_smiles(
     rng = random.Random(seed)
 
     if read_limit > 0:
-        reservoir: list[str] = []
-        for index, smi in enumerate(_iter_smiles_tokens(filepath, sanitize)):
+        reservoir: list[tuple[str, int]] = []
+        for index, record in enumerate(_iter_smiles_records(filepath, sanitize)):
             if index < read_limit:
-                reservoir.append(smi)
+                reservoir.append(record)
             else:
                 replace_index = rng.randint(0, index)
                 if replace_index < read_limit:
-                    reservoir[replace_index] = smi
-        smiles_list = reservoir
+                    reservoir[replace_index] = record
+        smiles_records = reservoir
     else:
-        smiles_list = list(_iter_smiles_tokens(filepath, sanitize))
+        smiles_records = list(_iter_smiles_records(filepath, sanitize))
 
     mols: list[Chem.Mol] = []
-    if smiles_list:
+    if smiles_records:
         parse_func = partial(_parse_smiles, sanitize=sanitize)
-        parsed = process_map(parse_func, smiles_list, desc="Parsing molecules", chunksize=1000)
+        parsed = process_map(parse_func, smiles_records, desc="Parsing molecules", chunksize=1000)
         parse_failures = 0
-        for mol in parsed:
+        for mol, record in zip(parsed, smiles_records, strict=True):
             if mol is None:
                 parse_failures += 1
             else:
+                _set_smiles_source_props(mol, record)
                 mols.append(mol)
         if parse_failures > 0:
             print(f"    ({parse_failures} parse failures)")

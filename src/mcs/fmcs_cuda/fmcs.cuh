@@ -33,6 +33,7 @@
 // when ring membership is encoded in atom/bond labels.  `CompleteRingsOnly`,
 // chirality, fused-ring strictness, and Threshold < 1.0 are out of scope.
 
+#include "fmcs_cuda/fmcs_stats.cuh"
 #include "mcs_common/mcs_types.cuh"
 
 #include <cstddef>
@@ -54,6 +55,7 @@ namespace fmcs {
 /// mcs.cuh instead.
 struct Parameters {
   /// CUDA block size for the per-pair kernel. Supported: 64, 128, 256.
+  /// Experimental: 512 for maxSize tiers up to 64 only.
   int   blockSize        = 128;
   /// Per-pair wall timeout in milliseconds.  0 = no timeout.
   float timeoutMs        = 0;
@@ -84,7 +86,8 @@ std::vector<MCSResult> findMCESfMCSBatch(
     const std::vector<Graph>& graphsB,
     Parameters params = {},
     std::vector<float>* perPairTimesMs = nullptr,
-    cudaStream_t stream = nullptr);
+    cudaStream_t stream = nullptr,
+    std::vector<ExecutionStats>* perPairStats = nullptr);
 
 /// Labeled variant: optional exact vertex and edge label equality.
 ///
@@ -99,7 +102,8 @@ std::vector<MCSResult> findMCESfMCSBatchLabeled(
     const std::vector<benchmark::MiviaGraphData>& graphsB,
     Parameters params = {},
     std::vector<float>* perPairTimesMs = nullptr,
-    cudaStream_t stream = nullptr);
+    cudaStream_t stream = nullptr,
+    std::vector<ExecutionStats>* perPairStats = nullptr);
 
 }  // namespace fmcs
 }  // namespace mcs

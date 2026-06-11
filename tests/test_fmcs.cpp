@@ -245,6 +245,18 @@ TEST(FMCSDispatch, BatchOfThreeReturnsExpectedSizes) {
   }
 }
 
+TEST(FMCSDispatch, OptionalPerPairTimingsArePopulated) {
+  std::vector<Graph> graphs{path(4), cycle(6)};
+  std::vector<float> timesMs;
+  auto rs = mcs::fmcs::findMCESfMCSBatch(graphs, graphs, Parameters{}, &timesMs);
+
+  ASSERT_EQ(rs.size(), graphs.size());
+  ASSERT_EQ(timesMs.size(), graphs.size());
+  for (float timeMs : timesMs) {
+    EXPECT_GT(timeMs, 0.0f);
+  }
+}
+
 TEST(FMCSDispatch, MismatchedBatchSizesThrows) {
   std::vector<Graph> a{path(2)};
   std::vector<Graph> b{};
@@ -723,7 +735,7 @@ TEST(FMCSTiers, MaxSize128) {
 
 TEST(FMCSBlockSize, SupportedSpecializationsMatchDefault) {
   const auto p = path(32);
-  for (int blockSize : {64, 128, 256}) {
+  for (int blockSize : {64, 128, 256, 512}) {
     Parameters params;
     params.blockSize = blockSize;
     auto r = findSingleMCES(p, p, params);
@@ -735,6 +747,15 @@ TEST(FMCSBlockSize, RejectsOneWarpBlockSize) {
   const auto p = path(8);
   Parameters params;
   params.blockSize = 32;
+  EXPECT_THROW(
+      (void)mcs::fmcs::findMCESfMCSBatch({p}, {p}, params),
+      std::invalid_argument);
+}
+
+TEST(FMCSBlockSize, BlockSize512RejectsTier128) {
+  const auto p = path(128);
+  Parameters params;
+  params.blockSize = 512;
   EXPECT_THROW(
       (void)mcs::fmcs::findMCESfMCSBatch({p}, {p}, params),
       std::invalid_argument);
