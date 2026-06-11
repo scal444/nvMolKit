@@ -17,7 +17,7 @@ import pytest
 from rdkit import Chem
 from rdkit.Chem import rdFMCS
 
-from nvmolkit.mcs import findMCS
+from nvmolkit.mcs import MCSConfig, findMCS
 
 def _mols(smiles: list[str]):
     return [Chem.MolFromSmiles(smi) for smi in smiles]
@@ -82,11 +82,60 @@ def test_pairs_mode_chunked_multi_executor_matches_rdkit():
     mols = _mols(["CCO", "CCN", "c1ccccc1", "c1ccc(O)cc1", "CC(C)O"])
     pairs = [(0, 1), (2, 3), (4, 0), (1, 4), (3, 2)]
 
-    result = findMCS(mols, mode="pairs", pairs=pairs, batch_size=1, executors_per_runner=2)
+    result = findMCS(
+        mols,
+        mode="pairs",
+        pairs=pairs,
+        batch_size=1,
+        block_size=64,
+        executors_per_runner=2,
+    )
 
     assert result.pairs == tuple(pairs)
     assert result.used_gpu.any()
     _assert_matches_rdkit(result, mols)
+
+
+def test_pairs_mode_threaded_gpu_options_match_rdkit():
+    mols = _mols(["CCO", "CCN", "c1ccccc1", "c1ccc(O)cc1", "CC(C)O"])
+    pairs = [(0, 1), (2, 3), (4, 0), (1, 4), (3, 2)]
+
+    result = findMCS(
+        mols,
+        mode="pairs",
+        pairs=pairs,
+        batch_size=1,
+        block_size=256,
+        worker_threads=2,
+        preprocessing_threads=2,
+        executors_per_runner=1,
+        gpu_ids=[],
+    )
+
+    assert result.pairs == tuple(pairs)
+    assert result.used_gpu.any()
+    _assert_matches_rdkit(result, mols)
+
+
+def test_config_path_matches_rdkit_and_rejects_duplicate_execution_options():
+    mols = _mols(["CCO", "CCN", "c1ccccc1", "c1ccc(O)cc1"])
+    pairs = [(0, 1), (2, 3)]
+    config = MCSConfig(
+        batchSize=1,
+        blockSize=64,
+        workerThreads=1,
+        preprocessingThreads=1,
+        executorsPerRunner=1,
+    )
+
+    result = findMCS(mols, mode="pairs", pairs=pairs, config=config)
+
+    assert result.pairs == tuple(pairs)
+    assert result.used_gpu.any()
+    _assert_matches_rdkit(result, mols)
+
+    with pytest.raises(ValueError, match="config cannot be combined"):
+        findMCS(mols, mode="pairs", pairs=pairs, config=config, block_size=256)
 
 
 def test_all_pairs_default_is_upper_triangle_with_diagonal():
@@ -175,6 +224,8 @@ def test_invalid_mode_and_optional_arguments():
         findMCS(mols, mode="pairs", pairs=[(0, 1)], atom_compare="mass")
     with pytest.raises(ValueError, match="Unsupported bond_compare"):
         findMCS(mols, mode="pairs", pairs=[(0, 1)], bond_compare="shape")
+    with pytest.raises(ValueError, match="blockSize"):
+        findMCS(mols, mode="pairs", pairs=[(0, 1)], block_size=32)
 
 
 def test_out_of_range_pair_raises_from_native_layer():

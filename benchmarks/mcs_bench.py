@@ -17,17 +17,24 @@
 
 import argparse
 import random
+import time
 from multiprocessing import Pool
 from pathlib import Path
 
-from bench_utils import add_rdkit_max_seconds_arg, load_pickle, load_smiles, throughput_per_s, time_it, time_it_bounded
+import nvtx
+from bench_utils import TimingResult, load_pickle, load_smiles, throughput_per_s, time_it_bounded
 from rdkit import Chem
 from rdkit.Chem import rdFMCS
+from tqdm.auto import tqdm
 
 from nvmolkit.mcs import findMCS
 
 _worker_mols: list[Chem.Mol] | None = None
 _worker_params: rdFMCS.MCSParameters | None = None
+
+
+def _log(message: str) -> None:
+    print(message, flush=True)
 
 
 def _rdkit_params(args: argparse.Namespace) -> rdFMCS.MCSParameters:
@@ -91,60 +98,144 @@ def _sample_pairs(num_mols: int, num_pairs: int, seed: int) -> list[tuple[int, i
     return [(rng.randrange(num_mols), rng.randrange(num_mols)) for _ in range(num_pairs)]
 
 
-def _bench_nvmolkit(mols: list[Chem.Mol], pairs: list[tuple[int, int]], args: argparse.Namespace):
-    last_result = None
+def _summarize_selected_pairs(mols: list[Chem.Mol], pairs: list[tuple[int, int]], *, max_rows: int = 20) -> None:
+    if len(pairs) > max_rows:
+        _log(f"Selected pair summary: showing first {max_rows} of {len(pairs)} pairs")
+    else:
+        _log(f"Selected pair summary: showing all {len(pairs)} pairs")
 
-    def run():
-        nonlocal last_result
-        last_result = findMCS(
-            mols,
-            mode="pairs",
-            pairs=pairs,
-            atom_compare=args.atom_compare,
-            bond_compare=args.bond_compare,
-            match_valences=args.match_valences,
-            match_formal_charge=args.match_formal_charge,
-            ring_matches_ring_only=args.ring_matches_ring_only,
-            complete_rings_only=args.complete_rings_only,
-            match_isotope=args.match_isotope,
-            require_gpu=args.require_gpu,
-            timeout_seconds=args.timeout_seconds,
-            batch_size=args.batch_size,
-            executors_per_runner=args.executors_per_runner,
+    for pair_idx, (idx_a, idx_b) in enumerate(pairs[:max_rows]):
+        mol_a = mols[idx_a]
+        mol_b = mols[idx_b]
+        _log(
+            f"  pair {pair_idx}: ({idx_a}, {idx_b}) "
+            f"A={mol_a.GetNumAtoms()} atoms/{mol_a.GetNumBonds()} bonds "
+            f"B={mol_b.GetNumAtoms()} atoms/{mol_b.GetNumBonds()} bonds"
         )
 
-    timing = time_it(run, runs=args.runs, warmups=args.warmups, gpu_sync=True)
+
+@nvtx.annotate("bench_nvmolkit_mcs", color="red")
+def _bench_nvmolkit(mols: list[Chem.Mol], pairs: list[tuple[int, int]], args: argparse.Namespace):
+    _log(
+        "Starting nvmolkit MCS benchmark: "
+        f"molecules={len(mols)} pairs={len(pairs)} runs={args.runs} warmups={args.warmups} "
+        f"batch_size={args.batch_size} block_size={args.block_size} "
+        f"workers={args.workers} prep_threads={args.prep_threads} "
+        f"num_gpus={args.num_gpus} executors_per_runner={args.executors_per_runner}"
+    )
+    last_result = None
+    import torch
+
+    def run_find(label: str):
+        nonlocal last_result
+        _log(f"nvmolkit {label}: starting findMCS")
+        with nvtx.annotate(f"mcs_nvmolkit_findMCS_{label}", color="blue"):
+            last_result = findMCS(
+                mols,
+                mode="pairs",
+                pairs=pairs,
+                atom_compare=args.atom_compare,
+                bond_compare=args.bond_compare,
+                match_valences=args.match_valences,
+                match_formal_charge=args.match_formal_charge,
+                ring_matches_ring_only=args.ring_matches_ring_only,
+                complete_rings_only=args.complete_rings_only,
+                match_isotope=args.match_isotope,
+                timeout_seconds=args.timeout_seconds,
+                batch_size=args.batch_size,
+                block_size=args.block_size,
+                worker_threads=args.workers,
+                preprocessing_threads=args.prep_threads,
+                executors_per_runner=args.executors_per_runner,
+                gpu_ids=list(range(args.num_gpus)),
+            )
+        _log(f"nvmolkit {label}: findMCS returned; synchronizing GPU")
+        torch.cuda.synchronize()
+        _log(
+            f"nvmolkit {label}: finished "
+            f"gpu={int(last_result.used_gpu.sum())}/{len(last_result)} "
+            f"fallback={int(last_result.used_fallback.sum())}/{len(last_result)} "
+            f"overflow={int(last_result.overflowed.sum())}/{len(last_result)}"
+        )
+
+    for warmup_idx in range(args.warmups):
+        with nvtx.annotate(f"mcs_nvmolkit_warmup_{warmup_idx + 1}", color="purple"):
+            run_find(f"warmup {warmup_idx + 1}/{args.warmups}")
+
+    times_ms: list[float] = []
+    for run_idx in range(args.runs):
+        label = f"run {run_idx + 1}/{args.runs}"
+        with nvtx.annotate(f"mcs_nvmolkit_run_{run_idx + 1}", color="orange"):
+            _log(f"nvmolkit {label}: pre-run GPU synchronize")
+            torch.cuda.synchronize()
+            start = time.perf_counter()
+            run_find(label)
+            times_ms.append((time.perf_counter() - start) * 1000.0)
+
+    timing = TimingResult(times_ms=times_ms)
+    _log("Finished nvmolkit MCS benchmark")
     return timing, last_result
 
 
+@nvtx.annotate("bench_rdkit_mcs", color="green")
 def _bench_rdkit(mols: list[Chem.Mol], pairs: list[tuple[int, int]], args: argparse.Namespace):
+    _log(
+        "Starting RDKit MCS benchmark: "
+        f"molecules={len(mols)} pairs={len(pairs)} runs={args.runs} threads={args.rdkit_threads} "
+        f"max_seconds={args.rdkit_max_seconds}"
+    )
     params = _rdkit_params(args)
     sizes: list[tuple[int, int]] = []
     pairs_done = 0
+    rdkit_run_idx = 0
 
     if args.rdkit_threads > 1:
+        _log("RDKit: serializing molecules for multiprocessing workers")
         mol_binaries = [mol.ToBinary() for mol in mols]
+        chunksize = 1 if args.rdkit_max_seconds > 0 else max(1, len(pairs) // max(1, args.rdkit_threads * 8))
+        _log(f"RDKit: launching multiprocessing pool with chunksize={chunksize}")
 
-        def run(_deadline):
-            nonlocal sizes, pairs_done
-            with Pool(args.rdkit_threads, initializer=_rdkit_worker_init, initargs=(mol_binaries, params)) as pool:
-                sizes = pool.map(_rdkit_worker_pair, pairs)
-            pairs_done = len(pairs)
+        def run(deadline):
+            nonlocal sizes, pairs_done, rdkit_run_idx
+            rdkit_run_idx += 1
+            with nvtx.annotate(f"mcs_rdkit_run_{rdkit_run_idx}", color="yellow"):
+                sizes = []
+                pairs_done = 0
+                with Pool(args.rdkit_threads, initializer=_rdkit_worker_init, initargs=(mol_binaries, params)) as pool:
+                    iterator = pool.imap(_rdkit_worker_pair, pairs, chunksize=chunksize)
+                    with tqdm(total=len(pairs), desc="RDKit MCS pairs", unit="pair") as progress:
+                        for size in iterator:
+                            sizes.append(size)
+                            pairs_done += 1
+                            progress.update(1)
+                            if deadline.expired():
+                                _log(
+                                    f"RDKit: stopping early after {pairs_done}/{len(pairs)} pairs due to max_seconds"
+                                )
+                                break
 
     else:
 
         def run(deadline):
-            nonlocal sizes, pairs_done
-            sizes = []
-            pairs_done = 0
-            for idx_a, idx_b in pairs:
-                if deadline.expired():
-                    break
-                result = rdFMCS.FindMCS([mols[idx_a], mols[idx_b]], params)
-                sizes.append((int(result.numAtoms), int(result.numBonds)))
-                pairs_done += 1
+            nonlocal sizes, pairs_done, rdkit_run_idx
+            rdkit_run_idx += 1
+            with nvtx.annotate(f"mcs_rdkit_run_{rdkit_run_idx}", color="yellow"):
+                sizes = []
+                pairs_done = 0
+                with tqdm(total=len(pairs), desc="RDKit MCS pairs", unit="pair") as progress:
+                    for idx_a, idx_b in pairs:
+                        if deadline.expired():
+                            _log(f"RDKit: stopping early after {pairs_done}/{len(pairs)} pairs due to max_seconds")
+                            break
+                        result = rdFMCS.FindMCS([mols[idx_a], mols[idx_b]], params)
+                        sizes.append((int(result.numAtoms), int(result.numBonds)))
+                        pairs_done += 1
+                        progress.update(1)
 
-    avg_ms, std_ms, last_pairs = time_it_bounded(run, args.runs, args.rdkit_max_seconds, lambda: pairs_done, len(pairs))
+    avg_ms, std_ms, last_pairs = time_it_bounded(
+        run, args.runs, args.rdkit_max_seconds, lambda: pairs_done, len(pairs)
+    )
+    _log(f"Finished RDKit MCS benchmark: pairs_completed={last_pairs}/{len(pairs)}")
     return avg_ms, std_ms, sizes, last_pairs
 
 
@@ -158,7 +249,9 @@ def _validate(nv_result, rdkit_sizes: list[tuple[int, int]]) -> None:
     mismatches = []
     for i, (rd_atoms, rd_bonds) in enumerate(rdkit_sizes):
         if int(nv_result.num_atoms[i]) != rd_atoms or int(nv_result.num_bonds[i]) != rd_bonds:
-            mismatches.append((i, nv_result.pairs[i], int(nv_result.num_atoms[i]), int(nv_result.num_bonds[i]), rd_atoms, rd_bonds))
+            mismatches.append(
+                (i, nv_result.pairs[i], int(nv_result.num_atoms[i]), int(nv_result.num_bonds[i]), rd_atoms, rd_bonds)
+            )
             if len(mismatches) >= 10:
                 break
     if mismatches:
@@ -170,48 +263,260 @@ def _validate(nv_result, rdkit_sizes: list[tuple[int, int]]) -> None:
 
 
 def _load_molecules(args: argparse.Namespace) -> list[Chem.Mol]:
+    source = args.pickle if args.pickle else args.smiles
+    _log(
+        "Loading molecules: "
+        f"source={source} max_mols={args.max_mols} max_atoms={args.max_atoms} max_bonds={args.max_bonds}"
+    )
     if args.pickle:
         mols = load_pickle(args.pickle, max_count=args.max_mols, seed=args.seed)
     else:
         mols = load_smiles(args.smiles, max_count=args.max_mols, seed=args.seed)
-    return _filter_molecules(mols, args.max_atoms, args.max_bonds)
+    filtered = _filter_molecules(mols, args.max_atoms, args.max_bonds)
+    _log(f"Loaded {len(filtered)} molecules after filtering ({len(mols)} before filtering)")
+    return filtered
+
+
+def _add_option(parser: argparse.ArgumentParser, *flags: str, legacy_flags: tuple[str, ...] = (), **kwargs):
+    action = parser.add_argument(*flags, **kwargs)
+    for legacy_flag in legacy_flags:
+        legacy_kwargs = {key: value for key, value in kwargs.items() if key not in {"default", "help"}}
+        legacy_kwargs["default"] = argparse.SUPPRESS
+        legacy_kwargs["dest"] = action.dest
+        legacy_kwargs["help"] = argparse.SUPPRESS
+        parser.add_argument(legacy_flag, **legacy_kwargs)
+    return action
+
+
+def _build_parser(default_smiles: Path) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="MCS benchmark: nvmolkit GPU fMCS vs RDKit FindMCS",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    input_group = parser.add_mutually_exclusive_group()
+    input_group.add_argument(
+        "--smiles",
+        default=str(default_smiles),
+        help="Path to a SMILES file. --max-mols reservoir-samples across the whole file.",
+    )
+    input_group.add_argument(
+        "--pickle",
+        help="Path to pickled RDKit binary molecules. --max-mols samples across the whole file.",
+    )
+    _add_option(
+        parser,
+        "--max-mols",
+        legacy_flags=("--max_mols",),
+        dest="max_mols",
+        type=int,
+        default=1000,
+        help=(
+            "Number of molecules to sample from the input before atom/bond filtering; "
+            "0 loads all molecules."
+        ),
+    )
+    _add_option(
+        parser,
+        "--max-atoms",
+        legacy_flags=("--max_atoms",),
+        dest="max_atoms",
+        type=int,
+        default=128,
+        help="Maximum atoms per molecule; 0 disables the filter.",
+    )
+    _add_option(
+        parser,
+        "--max-bonds",
+        legacy_flags=("--max_bonds",),
+        dest="max_bonds",
+        type=int,
+        default=128,
+        help="Maximum bonds per molecule; 0 disables the filter.",
+    )
+    parser.add_argument("--pairs", type=int, default=1000, help="Number of random explicit index pairs")
+    parser.add_argument("--seed", type=int, default=42, help="Sampling seed for molecule and pair selection")
+    parser.add_argument("--runs", type=int, default=3, help="Timed runs")
+    parser.add_argument("--warmups", type=int, default=1, help="nvmolkit warmup runs")
+    gpu_group = parser.add_argument_group("nvmolkit GPU options")
+    _add_option(
+        gpu_group,
+        "--batch-size",
+        "-b",
+        legacy_flags=("--batch_size",),
+        dest="batch_size",
+        type=int,
+        default=0,
+        help="fMCS GPU tier chunk size in pairs; 0 processes each tier in one chunk.",
+    )
+    _add_option(
+        gpu_group,
+        "--block-size",
+        legacy_flags=("--block_size",),
+        dest="block_size",
+        type=int,
+        choices=[64, 128, 256],
+        default=128,
+        help="CUDA threads per fMCS pair block.",
+    )
+    _add_option(
+        gpu_group,
+        "--workers",
+        dest="workers",
+        type=int,
+        default=-1,
+        help="nvmolkit GPU worker threads per GPU; -1 autoselects.",
+    )
+    _add_option(
+        gpu_group,
+        "--prep-threads",
+        legacy_flags=("--prep_threads",),
+        dest="prep_threads",
+        type=int,
+        default=-1,
+        help="nvmolkit CPU preprocessing threads; -1 autoselects.",
+    )
+    _add_option(
+        gpu_group,
+        "--num-gpus",
+        legacy_flags=("--num_gpus",),
+        dest="num_gpus",
+        type=int,
+        default=1,
+        help="Number of GPUs to use; maps to device IDs [0, num_gpus).",
+    )
+    _add_option(
+        gpu_group,
+        "--slots-per-runner",
+        "--executors-per-runner",
+        legacy_flags=("--slots_per_runner", "--executors_per_runner"),
+        dest="executors_per_runner",
+        type=int,
+        default=-1,
+        help="Asynchronous fMCS executor slots/streams per GPU worker; -1 autoselects, valid explicit range is 1-8.",
+    )
+    _add_option(
+        parser,
+        "--atom-compare",
+        legacy_flags=("--atom_compare",),
+        dest="atom_compare",
+        choices=["any", "elements", "isotopes", "any_heavy_atom"],
+        default="elements",
+        help="Atom comparison rule.",
+    )
+    _add_option(
+        parser,
+        "--bond-compare",
+        legacy_flags=("--bond_compare",),
+        dest="bond_compare",
+        choices=["any", "order", "order_exact"],
+        default="order",
+        help="Bond comparison rule.",
+    )
+    _add_option(
+        parser,
+        "--match-valences",
+        legacy_flags=("--match_valences",),
+        dest="match_valences",
+        action="store_true",
+        help="Require matching atom total valence.",
+    )
+    _add_option(
+        parser,
+        "--match-formal-charge",
+        legacy_flags=("--match_formal_charge",),
+        dest="match_formal_charge",
+        action="store_true",
+        help="Require matching atom formal charge.",
+    )
+    _add_option(
+        parser,
+        "--ring-matches-ring-only",
+        legacy_flags=("--ring_matches_ring_only",),
+        dest="ring_matches_ring_only",
+        action="store_true",
+        help="Require ring atoms/bonds to match only ring atoms/bonds.",
+    )
+    _add_option(
+        parser,
+        "--complete-rings-only",
+        legacy_flags=("--complete_rings_only",),
+        dest="complete_rings_only",
+        action="store_true",
+        help="Require complete ring matches; this may use RDKit fallback.",
+    )
+    _add_option(
+        parser,
+        "--match-isotope",
+        legacy_flags=("--match_isotope",),
+        dest="match_isotope",
+        action="store_true",
+        help="Require matching isotope labels.",
+    )
+    _add_option(
+        parser,
+        "--timeout-seconds",
+        legacy_flags=("--timeout_seconds",),
+        dest="timeout_seconds",
+        type=int,
+        default=0,
+        help="Per-pair timeout in seconds for nvmolkit and RDKit fallback.",
+    )
+    _add_option(
+        parser,
+        "--no-nvmolkit",
+        legacy_flags=("--no_nvmolkit",),
+        dest="no_nvmolkit",
+        action="store_true",
+        help="Skip nvmolkit benchmark.",
+    )
+    _add_option(
+        parser,
+        "--no-rdkit",
+        legacy_flags=("--no_rdkit",),
+        dest="no_rdkit",
+        action="store_true",
+        help="Skip RDKit benchmark.",
+    )
+    parser.add_argument("--validate", action="store_true", help="Compare nvmolkit atom/bond counts against RDKit")
+    _add_option(
+        parser,
+        "--rdkit-threads",
+        legacy_flags=("--rdkit_threads",),
+        dest="rdkit_threads",
+        type=int,
+        default=1,
+        help="RDKit multiprocessing worker count.",
+    )
+    _add_option(
+        parser,
+        "--rdkit-max-seconds",
+        legacy_flags=("--rdkit_max_seconds",),
+        dest="rdkit_max_seconds",
+        type=float,
+        default=0.0,
+        help=(
+            "Stop the RDKit comparison after this many wall-clock seconds and report throughput on the work "
+            "actually completed. 0 disables the cap. For single-threaded RDKit MCS, the cap is checked "
+            "between pairs."
+        ),
+    )
+    return parser
 
 
 def main() -> None:
     repo_root = Path(__file__).resolve().parent.parent
     default_smiles = repo_root / "benchmarks" / "data" / "chembl_10k.smi"
 
-    parser = argparse.ArgumentParser(description="MCS benchmark: nvmolkit GPU fMCS vs RDKit FindMCS")
-    parser.add_argument("--smiles", default=str(default_smiles), help="Path to a SMILES file")
-    parser.add_argument("--pickle", help="Path to pickled RDKit binary molecules")
-    parser.add_argument("--max_mols", type=int, default=1000, help="Maximum molecules to load before filtering")
-    parser.add_argument("--max_atoms", type=int, default=128, help="Maximum atoms per molecule; 0 disables")
-    parser.add_argument("--max_bonds", type=int, default=128, help="Maximum bonds per molecule; 0 disables")
-    parser.add_argument("--pairs", type=int, default=1000, help="Number of random explicit index pairs")
-    parser.add_argument("--seed", type=int, default=42, help="Sampling seed")
-    parser.add_argument("--runs", type=int, default=3, help="Timed runs")
-    parser.add_argument("--warmups", type=int, default=1, help="nvmolkit warmup runs")
-    parser.add_argument("--batch_size", type=int, default=0, help="Native GPU batch chunk size; 0 auto-selects")
-    parser.add_argument("--executors_per_runner", type=int, default=1, help="Asynchronous fMCS executor streams")
-    parser.add_argument("--atom_compare", choices=["any", "elements", "isotopes", "any_heavy_atom"], default="elements")
-    parser.add_argument("--bond_compare", choices=["any", "order", "order_exact"], default="order")
-    parser.add_argument("--match_valences", action="store_true")
-    parser.add_argument("--match_formal_charge", action="store_true")
-    parser.add_argument("--ring_matches_ring_only", action="store_true")
-    parser.add_argument("--complete_rings_only", action="store_true")
-    parser.add_argument("--match_isotope", action="store_true")
-    parser.add_argument("--require_gpu", action="store_true", help="Fail instead of using RDKit fallback inside nvmolkit")
-    parser.add_argument("--timeout_seconds", type=int, default=0, help="RDKit fallback timeout in seconds")
-    parser.add_argument("--no_nvmolkit", action="store_true", help="Skip nvmolkit benchmark")
-    parser.add_argument("--no_rdkit", action="store_true", help="Skip RDKit benchmark")
-    parser.add_argument("--validate", action="store_true", help="Compare nvmolkit atom/bond counts against RDKit")
-    parser.add_argument("--rdkit_threads", type=int, default=1, help="RDKit multiprocessing worker count")
-    add_rdkit_max_seconds_arg(parser, extra_help="For single-threaded RDKit MCS, the cap is checked between pairs.")
+    parser = _build_parser(default_smiles)
     args = parser.parse_args()
+    if args.num_gpus <= 0:
+        parser.error("--num-gpus must be positive")
 
     mols = _load_molecules(args)
+    _log(f"Sampling {args.pairs} explicit MCS pairs with seed={args.seed}")
     pairs = _sample_pairs(len(mols), args.pairs, args.seed)
     print(f"Prepared {len(mols)} molecules and {len(pairs)} explicit MCS pairs")
+    _summarize_selected_pairs(mols, pairs)
 
     nv_result = None
     if not args.no_nvmolkit:
@@ -234,7 +539,9 @@ def main() -> None:
     if args.validate:
         if rdkit_sizes is None:
             raise ValueError("Validation requires RDKit results")
+        _log("Starting validation against RDKit atom/bond counts")
         _validate(nv_result, rdkit_sizes)
+        _log("Finished validation")
 
 
 if __name__ == "__main__":

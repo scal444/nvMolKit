@@ -18,14 +18,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 from rdkit.Chem import Mol
 
 from nvmolkit._mcs import _findMCSBatch
 
-__all__ = ["MCSBatchResult", "MCSResult", "findMCS"]
+__all__ = ["MCSBatchResult", "MCSConfig", "MCSResult", "findMCS"]
 
 
 Pair = tuple[int, int]
@@ -118,6 +118,78 @@ class MCSBatchResult:
         )
 
 
+class MCSConfig:
+    """Configuration for GPU MCS execution.
+
+    Args:
+        batchSize: Optional GPU batch chunk size. ``0`` lets the native layer
+            choose.
+        blockSize: CUDA threads per fMCS pair block. Supported values are
+            ``64``, ``128``, and ``256``.
+        workerThreads: GPU runner threads per GPU. ``-1`` autoselects.
+        preprocessingThreads: CPU threads for pair preprocessing. ``-1``
+            autoselects.
+        executorsPerRunner: Number of asynchronous GPU executor streams used
+            for chunked fMCS tier dispatch. ``-1`` autoselects.
+        gpuIds: GPU device IDs to use. ``None`` or empty uses the current
+            device.
+    """
+
+    def __init__(
+        self,
+        batchSize: int = 0,
+        blockSize: int = 128,
+        workerThreads: int = -1,
+        preprocessingThreads: int = -1,
+        executorsPerRunner: int = -1,
+        gpuIds: Sequence[int] | None = None,
+    ) -> None:
+        self.batchSize = int(batchSize)
+        self.blockSize = int(blockSize)
+        self.workerThreads = int(workerThreads)
+        self.preprocessingThreads = int(preprocessingThreads)
+        self.executorsPerRunner = int(executorsPerRunner)
+        self.gpuIds = list(gpuIds) if gpuIds is not None else []
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-serializable dictionary of this object's fields."""
+        return {
+            "batchSize": self.batchSize,
+            "blockSize": self.blockSize,
+            "workerThreads": self.workerThreads,
+            "preprocessingThreads": self.preprocessingThreads,
+            "executorsPerRunner": self.executorsPerRunner,
+            "gpuIds": list(self.gpuIds),
+        }
+
+    def to_kwargs(self) -> dict[str, Any]:
+        """Return keyword arguments accepted by :func:`findMCS`."""
+        return {
+            "batch_size": self.batchSize,
+            "block_size": self.blockSize,
+            "worker_threads": self.workerThreads,
+            "preprocessing_threads": self.preprocessingThreads,
+            "executors_per_runner": self.executorsPerRunner,
+            "gpu_ids": list(self.gpuIds),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "MCSConfig":
+        """Create an :class:`MCSConfig` from a dictionary produced by :meth:`to_dict`."""
+        known = {
+            "batchSize",
+            "blockSize",
+            "workerThreads",
+            "preprocessingThreads",
+            "executorsPerRunner",
+            "gpuIds",
+        }
+        unknown = set(data) - known
+        if unknown:
+            raise ValueError(f"Unknown MCSConfig keys: {sorted(unknown)}")
+        return cls(**{key: data[key] for key in known if key in data})
+
+
 def _normalize_mode(mode: str) -> str:
     normalized = mode.lower().replace("-", "_")
     if normalized not in {"all_pairs", "pairs", "paired_lists"}:
@@ -186,8 +258,13 @@ def findMCS(
     connected_only: bool = True,
     require_gpu: bool = False,
     timeout_seconds: int = 0,
+    config: MCSConfig | None = None,
     batch_size: int = 0,
-    executors_per_runner: int = 1,
+    block_size: int = 128,
+    worker_threads: int = -1,
+    preprocessing_threads: int = -1,
+    executors_per_runner: int = -1,
+    gpu_ids: Sequence[int] | None = None,
 ) -> MCSBatchResult:
     """Find maximum common substructures for a batch of molecule pairs.
 
@@ -222,17 +299,52 @@ def findMCS(
             ``require_gpu`` is true.
         require_gpu: Raise instead of using RDKit fallback for unsupported or
             overflowed pairs.
-        timeout_seconds: RDKit fallback timeout. Non-zero timeouts force RDKit.
+        timeout_seconds: Per-pair timeout in seconds. GPU results canceled by
+            timeout return the best partial MCS found so far; RDKit fallback
+            receives the same timeout.
+        config: Optional :class:`MCSConfig` with GPU execution settings. Cannot
+            be combined with explicit GPU execution keyword options.
         batch_size: Optional GPU batch chunk size. ``0`` lets the native layer
             choose.
+        block_size: CUDA threads per fMCS pair block. Supported values are
+            ``64``, ``128``, and ``256``.
+        worker_threads: GPU runner threads per GPU. ``-1`` autoselects.
+        preprocessing_threads: CPU threads for pair preprocessing. ``-1``
+            autoselects.
         executors_per_runner: Number of asynchronous GPU executor streams used
-            for chunked fMCS tier dispatch. ``1`` preserves serial chunking.
+            for chunked fMCS tier dispatch. ``-1`` autoselects.
+        gpu_ids: GPU device IDs to use. ``None`` or empty uses the current
+            device.
 
     Returns:
         :class:`MCSBatchResult` in generated-pair order.
     """
     mode = _normalize_mode(mode)
     mol_list = list(mols)
+
+    if config is not None:
+        explicit_options = []
+        if batch_size != 0:
+            explicit_options.append("batch_size")
+        if block_size != 128:
+            explicit_options.append("block_size")
+        if worker_threads != -1:
+            explicit_options.append("worker_threads")
+        if preprocessing_threads != -1:
+            explicit_options.append("preprocessing_threads")
+        if executors_per_runner != -1:
+            explicit_options.append("executors_per_runner")
+        if gpu_ids is not None:
+            explicit_options.append("gpu_ids")
+        if explicit_options:
+            joined = ", ".join(explicit_options)
+            raise ValueError(f"config cannot be combined with explicit GPU execution options: {joined}")
+        batch_size = config.batchSize
+        block_size = config.blockSize
+        worker_threads = config.workerThreads
+        preprocessing_threads = config.preprocessingThreads
+        executors_per_runner = config.executorsPerRunner
+        gpu_ids = config.gpuIds
 
     if mode == "all_pairs":
         if pairs is not None:
@@ -293,7 +405,11 @@ def findMCS(
             "require_gpu": bool(require_gpu),
             "timeout_seconds": int(timeout_seconds),
             "batch_size": int(batch_size),
+            "block_size": int(block_size),
+            "worker_threads": int(worker_threads),
+            "preprocessing_threads": int(preprocessing_threads),
             "executors_per_runner": int(executors_per_runner),
+            "gpu_ids": list(gpu_ids) if gpu_ids is not None else [],
             "match_valences": bool(match_valences),
             "match_formal_charge": bool(match_formal_charge),
             "atom_ring_matches_ring_only": bool(atom_ring_matches_ring_only)

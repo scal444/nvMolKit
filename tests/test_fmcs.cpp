@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <set>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -720,6 +721,25 @@ TEST(FMCSTiers, MaxSize128) {
   expectFullSelfPair(r, p);
 }
 
+TEST(FMCSBlockSize, SupportedSpecializationsMatchDefault) {
+  const auto p = path(32);
+  for (int blockSize : {64, 128, 256}) {
+    Parameters params;
+    params.blockSize = blockSize;
+    auto r = findSingleMCES(p, p, params);
+    expectFullSelfPair(r, p);
+  }
+}
+
+TEST(FMCSBlockSize, RejectsOneWarpBlockSize) {
+  const auto p = path(8);
+  Parameters params;
+  params.blockSize = 32;
+  EXPECT_THROW(
+      (void)mcs::fmcs::findMCESfMCSBatch({p}, {p}, params),
+      std::invalid_argument);
+}
+
 // ---------------------------------------------------------------------------
 // FMCSObjective: MaximizeBonds tie-break.
 // ---------------------------------------------------------------------------
@@ -976,15 +996,16 @@ TEST(FMCSOverflow, TargetTooLargeFlagSetEvenWhenQueryFits) {
   EXPECT_EQ(r.numCommonVertices, 0);
 }
 
-// ---------------------------------------------------------------------------
-// FMCSTimeout: hard to trigger reliably without a real timeout impl.
-// Skipped in v1 (Step 6 perf-polish item -- timeout via clock64() not
-// yet wired into the kernel).
-// ---------------------------------------------------------------------------
-
 TEST(FMCSTimeout, PartialResultReturned) {
-  GTEST_SKIP() << "Timeout enforcement is a Step 6 perf-polish item; the "
-                  "kernel doesn't currently honor params.timeoutMs.";
+  const auto p = path(128);
+  Parameters params;
+  params.timeoutMs = 0.0001f;
+
+  auto r = findSingleMCES(p, p, params);
+  EXPECT_TRUE(r.timedOut);
+  EXPECT_FALSE(r.overflowed);
+  EXPECT_LT(r.numCommonEdges, p.numEdges);
+  EXPECT_LT(r.numCommonVertices, p.numVertices);
 }
 
 // ---------------------------------------------------------------------------

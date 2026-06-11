@@ -55,7 +55,11 @@ struct MCSParameters {
   bool                     requireGpu     = false;
   unsigned int             timeoutSeconds = 0;
   int                      batchSize      = 0;
-  int                      executorsPerRunner = 1;
+  int                      blockSize      = 128;
+  int                      workerThreads  = -1;
+  int                      preprocessingThreads = -1;
+  int                      executorsPerRunner = -1;
+  std::vector<int>         gpuIds;
   MCSAtomCompare           atomCompare    = MCSAtomCompare::Elements;
   MCSBondCompare           bondCompare    = MCSBondCompare::Order;
   MCSAtomCompareParameters atomCompareParameters;

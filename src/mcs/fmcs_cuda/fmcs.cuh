@@ -53,7 +53,7 @@ namespace fmcs {
 /// who want a different objective should use the McSplit path in
 /// mcs.cuh instead.
 struct Parameters {
-  /// CUDA block size for the per-pair kernel.
+  /// CUDA block size for the per-pair kernel. Supported: 64, 128, 256.
   int   blockSize        = 128;
   /// Per-pair wall timeout in milliseconds.  0 = no timeout.
   float timeoutMs        = 0;

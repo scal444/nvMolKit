@@ -17,6 +17,7 @@
 
 #include "src/mcs/benchmark_data.h"
 #include "src/mcs/fmcs_cuda/fmcs.cuh"
+#include "src/utils/device.h"
 
 #include <GraphMol/Atom.h>
 #include <GraphMol/Bond.h>
@@ -26,11 +27,15 @@
 #include <GraphMol/Substruct/SubstructMatch.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
+#include <exception>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -39,6 +44,8 @@ namespace nvMolKit {
 namespace {
 
 using mcs::benchmark::MiviaGraphData;
+
+constexpr int kMaxMCSExecutorsPerRunner = 8;
 
 struct AtomLabelKey {
   int atomCompareValue = 0;
@@ -53,6 +60,54 @@ struct AtomLabelKey {
 
   bool operator<(const AtomLabelKey& other) const { return tie() < other.tie(); }
 };
+
+struct PreparedGpuPair {
+  size_t resultIdx = 0;
+  size_t molIdxA   = 0;
+  size_t molIdxB   = 0;
+  MiviaGraphData graphA;
+  MiviaGraphData graphB;
+};
+
+void checkCuda(cudaError_t err, const char* context) {
+  if (err != cudaSuccess) {
+    throw std::runtime_error(std::string("MCS dispatch CUDA error at ") + context + ": " + cudaGetErrorString(err));
+  }
+}
+
+std::vector<int> resolveGpuIds(const MCSParameters& params) {
+  std::vector<int> gpuIds = params.gpuIds;
+  if (gpuIds.empty()) {
+    int currentDevice = 0;
+    checkCuda(cudaGetDevice(&currentDevice), "cudaGetDevice");
+    gpuIds.push_back(currentDevice);
+  }
+  return gpuIds;
+}
+
+void computeEffectiveThreadCounts(const MCSParameters& params,
+                                  int                  numGpus,
+                                  int&                 effectivePreprocessingThreads,
+                                  int&                 effectiveWorkerThreads) {
+  const int hwThreads        = std::max(1, static_cast<int>(std::thread::hardware_concurrency()));
+  const int effectiveNumGpus = std::max(1, numGpus);
+
+  effectivePreprocessingThreads =
+    (params.preprocessingThreads == -1) ? hwThreads : std::max(1, params.preprocessingThreads);
+  effectiveWorkerThreads = (params.workerThreads == -1) ? std::min(4, std::max(1, hwThreads / effectiveNumGpus)) :
+                                                          std::max(1, params.workerThreads);
+}
+
+int effectiveExecutorsPerRunner(const MCSParameters& params, int totalRunners, cudaStream_t stream) {
+  if (params.executorsPerRunner == -1) {
+    return stream != nullptr ? 1 : (totalRunners == 1 ? 3 : 2);
+  }
+  if (params.executorsPerRunner < 1 || params.executorsPerRunner > kMaxMCSExecutorsPerRunner) {
+    throw std::invalid_argument("MCS executorsPerRunner must be -1 (auto) or between 1 and " +
+                                std::to_string(kMaxMCSExecutorsPerRunner));
+  }
+  return params.executorsPerRunner;
+}
 
 struct BondLabelKey {
   int bondCompareValue = 0;
@@ -308,10 +363,6 @@ bool shouldFallbackToRDKit(const RDKit::ROMol& molA,
     reason = "fMCS currently supports MaximizeBonds only";
     return true;
   }
-  if (params.timeoutSeconds > 0) {
-    reason = "timeout handling is delegated to RDKit";
-    return true;
-  }
   if (params.atomCompare == MCSAtomCompare::AnyHeavyAtom) {
     reason = "AtomCompareAnyHeavyAtom is delegated to RDKit";
     return true;
@@ -357,21 +408,30 @@ MCSResult convertGpuResult(const RDKit::ROMol& molA, const RDKit::ROMol& molB, c
   return out;
 }
 
-}  // namespace
+std::vector<PreparedGpuPair> prepareGpuPairs(const std::vector<const RDKit::ROMol*>& mols,
+                                             const std::vector<MCSPair>&             pairs,
+                                             const MCSParameters&                    params,
+                                             int                                     preprocessingThreads,
+                                             std::vector<MCSResult>&                 results) {
+  std::vector<std::unique_ptr<PreparedGpuPair>> prepared(pairs.size());
+  if (pairs.empty()) {
+    return {};
+  }
 
-std::vector<MCSResult> findMCSBatch(const std::vector<const RDKit::ROMol*>& mols,
-                                    const std::vector<MCSPair>&             pairs,
-                                    cudaStream_t                            stream,
-                                    const MCSParameters&                    params) {
-  std::vector<MCSResult> results(pairs.size());
-  std::vector<MiviaGraphData> gpuGraphsA;
-  std::vector<MiviaGraphData> gpuGraphsB;
-  std::vector<size_t> gpuResultIndices;
-  gpuGraphsA.reserve(pairs.size());
-  gpuGraphsB.reserve(pairs.size());
-  gpuResultIndices.reserve(pairs.size());
+  std::atomic<size_t> nextPair{0};
+  std::atomic<bool>   abort{false};
+  std::exception_ptr  firstException;
+  std::mutex          exceptionMutex;
 
-  for (size_t i = 0; i < pairs.size(); ++i) {
+  auto setException = [&](std::exception_ptr ex) {
+    std::lock_guard<std::mutex> lock(exceptionMutex);
+    if (!firstException) {
+      firstException = ex;
+    }
+    abort.store(true, std::memory_order_release);
+  };
+
+  auto prepareOne = [&](size_t i) {
     const auto [idxA, idxB] = pairs[i];
     if (idxA >= mols.size() || idxB >= mols.size()) {
       throw std::runtime_error("findMCSBatch pair index out of range");
@@ -388,27 +448,125 @@ std::vector<MCSResult> findMCSBatch(const std::vector<const RDKit::ROMol*>& mols
         throw std::runtime_error("GPU MCS path unavailable: " + fallbackReason);
       }
       results[i] = runRDKitFallback(*molA, *molB, params);
-      continue;
+      return;
     }
 
     std::map<AtomLabelKey, uint16_t> atomLabels;
     std::map<BondLabelKey, uint16_t> bondLabels;
-    gpuGraphsA.push_back(buildLabeledGraph(*molA, params, atomLabels, bondLabels));
-    gpuGraphsB.push_back(buildLabeledGraph(*molB, params, atomLabels, bondLabels));
-    gpuResultIndices.push_back(i);
+
+    auto item     = std::make_unique<PreparedGpuPair>();
+    item->resultIdx = i;
+    item->molIdxA   = idxA;
+    item->molIdxB   = idxB;
+    item->graphA    = buildLabeledGraph(*molA, params, atomLabels, bondLabels);
+    item->graphB    = buildLabeledGraph(*molB, params, atomLabels, bondLabels);
+    prepared[i]     = std::move(item);
+  };
+
+  const int threadCount =
+    std::min<int>(std::max(1, preprocessingThreads), static_cast<int>(pairs.size()));
+  std::vector<std::thread> workers;
+  workers.reserve(static_cast<size_t>(threadCount));
+  for (int t = 0; t < threadCount; ++t) {
+    workers.emplace_back([&]() {
+      while (!abort.load(std::memory_order_acquire)) {
+        const size_t i = nextPair.fetch_add(1, std::memory_order_relaxed);
+        if (i >= pairs.size()) {
+          break;
+        }
+        try {
+          prepareOne(i);
+        } catch (...) {
+          setException(std::current_exception());
+          break;
+        }
+      }
+    });
+  }
+  for (auto& worker : workers) {
+    worker.join();
+  }
+  if (firstException) {
+    std::rethrow_exception(firstException);
   }
 
-  if (!gpuGraphsA.empty()) {
+  std::vector<PreparedGpuPair> gpuPairs;
+  gpuPairs.reserve(pairs.size());
+  for (auto& item : prepared) {
+    if (item) {
+      gpuPairs.push_back(std::move(*item));
+    }
+  }
+  return gpuPairs;
+}
+
+void runGpuPairs(std::vector<PreparedGpuPair>& gpuPairs,
+                 const std::vector<const RDKit::ROMol*>& mols,
+                 const MCSParameters& params,
+                 const std::vector<int>& gpuIds,
+                 int effectiveWorkerThreads,
+                 int effectiveExecutorsPerRunner,
+                 cudaStream_t stream,
+                 std::vector<MCSResult>& results) {
+  if (gpuPairs.empty()) {
+    return;
+  }
+
+  const int numGpus      = static_cast<int>(gpuIds.size());
+  const int totalRunners = std::max(1, numGpus * std::max(1, effectiveWorkerThreads));
+  if (stream != nullptr && totalRunners > 1) {
+    throw std::invalid_argument("MCS multi-worker or multi-GPU dispatch does not support an external CUDA stream");
+  }
+
+  const size_t activeRunners = std::min<size_t>(static_cast<size_t>(totalRunners), gpuPairs.size());
+  std::vector<std::vector<PreparedGpuPair>> runnerWork(activeRunners);
+  for (size_t i = 0; i < gpuPairs.size(); ++i) {
+    runnerWork[i % activeRunners].push_back(std::move(gpuPairs[i]));
+  }
+
+  auto runOneRunner = [&](size_t runnerIdx) {
+    auto& work = runnerWork[runnerIdx];
+    if (work.empty()) {
+      return;
+    }
+
+    const int deviceId = gpuIds[runnerIdx % static_cast<size_t>(numGpus)];
+    std::unique_ptr<WithDevice> setDevice;
+    if (stream == nullptr) {
+      setDevice = std::make_unique<WithDevice>(deviceId);
+    }
+
+    std::vector<MiviaGraphData> gpuGraphsA;
+    std::vector<MiviaGraphData> gpuGraphsB;
+    std::vector<size_t>         resultIndices;
+    std::vector<size_t>         molIndicesA;
+    std::vector<size_t>         molIndicesB;
+    gpuGraphsA.reserve(work.size());
+    gpuGraphsB.reserve(work.size());
+    resultIndices.reserve(work.size());
+    molIndicesA.reserve(work.size());
+    molIndicesB.reserve(work.size());
+    for (auto& item : work) {
+      resultIndices.push_back(item.resultIdx);
+      molIndicesA.push_back(item.molIdxA);
+      molIndicesB.push_back(item.molIdxB);
+      gpuGraphsA.push_back(std::move(item.graphA));
+      gpuGraphsB.push_back(std::move(item.graphB));
+    }
+
     mcs::fmcs::Parameters fmcsParams;
     fmcsParams.batchSize          = params.batchSize;
-    fmcsParams.executorsPerRunner = params.executorsPerRunner;
+    fmcsParams.blockSize          = params.blockSize;
+    fmcsParams.executorsPerRunner = effectiveExecutorsPerRunner;
     fmcsParams.matchVertexLabels  = usesAtomLabels(params);
     fmcsParams.matchEdgeLabels    = usesBondLabels(params);
+    fmcsParams.timeoutMs          = static_cast<float>(params.timeoutSeconds) * 1000.0f;
 
     auto gpuResults = mcs::fmcs::findMCESfMCSBatchLabeled(gpuGraphsA, gpuGraphsB, fmcsParams, nullptr, stream);
     for (size_t gpuIdx = 0; gpuIdx < gpuResults.size(); ++gpuIdx) {
-      const size_t resultIdx = gpuResultIndices[gpuIdx];
-      const auto [idxA, idxB] = pairs[resultIdx];
+      const size_t resultIdx = resultIndices[gpuIdx];
+      const size_t idxA      = molIndicesA[gpuIdx];
+      const size_t idxB      = molIndicesB[gpuIdx];
       if (gpuResults[gpuIdx].overflowed) {
         if (params.requireGpu) {
           throw std::runtime_error("GPU MCS path overflowed");
@@ -418,7 +576,74 @@ std::vector<MCSResult> findMCSBatch(const std::vector<const RDKit::ROMol*>& mols
         results[resultIdx] = convertGpuResult(*mols[idxA], *mols[idxB], gpuResults[gpuIdx]);
       }
     }
+  };
+
+  if (activeRunners == 1) {
+    runOneRunner(0);
+    return;
   }
+
+  std::atomic<bool>  abort{false};
+  std::exception_ptr firstException;
+  std::mutex         exceptionMutex;
+  auto setException = [&](std::exception_ptr ex) {
+    std::lock_guard<std::mutex> lock(exceptionMutex);
+    if (!firstException) {
+      firstException = ex;
+    }
+    abort.store(true, std::memory_order_release);
+  };
+
+  std::vector<std::thread> runners;
+  runners.reserve(activeRunners);
+  for (size_t runnerIdx = 0; runnerIdx < activeRunners; ++runnerIdx) {
+    runners.emplace_back([&, runnerIdx]() {
+      if (abort.load(std::memory_order_acquire)) {
+        return;
+      }
+      try {
+        runOneRunner(runnerIdx);
+      } catch (...) {
+        setException(std::current_exception());
+      }
+    });
+  }
+  for (auto& runner : runners) {
+    runner.join();
+  }
+  if (firstException) {
+    std::rethrow_exception(firstException);
+  }
+}
+
+}  // namespace
+
+std::vector<MCSResult> findMCSBatch(const std::vector<const RDKit::ROMol*>& mols,
+                                    const std::vector<MCSPair>&             pairs,
+                                    cudaStream_t                            stream,
+                                    const MCSParameters&                    params) {
+  std::vector<MCSResult> results(pairs.size());
+  if (pairs.empty()) return results;
+
+  const auto gpuIds = resolveGpuIds(params);
+  int effectivePreprocessingThreads = 1;
+  int effectiveWorkerThreads        = 1;
+  computeEffectiveThreadCounts(params,
+                               static_cast<int>(gpuIds.size()),
+                               effectivePreprocessingThreads,
+                               effectiveWorkerThreads);
+  if (stream != nullptr) {
+    if ((params.workerThreads != -1 && effectiveWorkerThreads > 1) || gpuIds.size() > 1) {
+      throw std::invalid_argument("MCS multi-worker or multi-GPU dispatch does not support an external CUDA stream");
+    }
+    effectiveWorkerThreads = 1;
+  }
+
+  const int totalRunners = std::max(1, static_cast<int>(gpuIds.size()) * effectiveWorkerThreads);
+  const int effectiveExecutors = effectiveExecutorsPerRunner(params, totalRunners, stream);
+
+  auto gpuPairs = prepareGpuPairs(mols, pairs, params, effectivePreprocessingThreads, results);
+  runGpuPairs(gpuPairs, mols, params, gpuIds, effectiveWorkerThreads, effectiveExecutors, stream, results);
 
   return results;
 }

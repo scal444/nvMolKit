@@ -35,6 +35,8 @@ from nvmolkit.autotune._core import (
     collect_int_from_space,
     resolve_search_space,
     run_study,
+    spec_low_high,
+    suggest_preprocessing_threads_with_cpu_budget,
     suggest_from_space,
 )
 from nvmolkit.autotune._ff_common import resolve_cpu_budget, resolve_num_gpus
@@ -82,9 +84,7 @@ def _default_substruct_search_space(num_gpus: int, cpus: int) -> dict:
 
 def _spec_low_high(spec: Any) -> tuple[Optional[int], Optional[int]]:
     """Return ``(low, high)`` for a numeric range spec, or ``(None, None)``."""
-    if isinstance(spec, tuple) and len(spec) >= 2 and isinstance(spec[0], int) and isinstance(spec[1], int):
-        return int(spec[0]), int(spec[1])
-    return None, None
+    return spec_low_high(spec)
 
 
 def _suggest_preprocessing_threads(
@@ -101,14 +101,13 @@ def _suggest_preprocessing_threads(
     coordinators. Falls back to delegating to :func:`suggest_from_space` when
     ``spec`` is not a numeric range (e.g. a categorical override).
     """
-    low, high = _spec_low_high(spec)
-    if low is None or high is None:
-        return int(suggest_from_space(trial, "preprocessingThreads", spec))
-
-    remaining = max(1, cpus - num_gpus * max(1, worker_threads))
-    effective_high = max(low, min(high, remaining))
-    log = isinstance(spec, tuple) and len(spec) == 3 and spec[2] == "log"
-    return int(trial.suggest_int("preprocessingThreads", low, effective_high, log=log))
+    return suggest_preprocessing_threads_with_cpu_budget(
+        trial,
+        spec,
+        worker_threads=worker_threads,
+        num_gpus=num_gpus,
+        cpus=cpus,
+    )
 
 
 def tune_substructure(

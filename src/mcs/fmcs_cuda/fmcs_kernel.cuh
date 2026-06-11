@@ -693,16 +693,23 @@ static_assert((kFmcsCacheCapacity & (kFmcsCacheCapacity - 1)) == 0,
 /// Block / cooperative-group sizing.  Phase 2 partitions each block into warp
 /// groups; each group pops one seed at a time from the block worklist and
 /// cooperates on matching, remaining-size checks, seed copying, and fallback
-/// substructure search.
-/// @c kFmcsGroupSize must evenly divide @c kFmcsBlockSize and (for the
-/// warp-shuffle / ballot primitives we use) be a power of two <= 32.
-constexpr int kFmcsBlockSize    = 128;
-constexpr int kFmcsGroupSize    = 32;
-constexpr int kFmcsNumGroups    = kFmcsBlockSize / kFmcsGroupSize;
-static_assert(kFmcsBlockSize % kFmcsGroupSize == 0,
-              "kFmcsBlockSize must be a multiple of kFmcsGroupSize");
+/// substructure search.  Supported block sizes are compile-time kernel
+/// specializations selected at launch time.
+constexpr int kFmcsDefaultBlockSize = 128;
+constexpr int kFmcsGroupSize        = 32;
 static_assert(kFmcsGroupSize <= 32,
               "kFmcsGroupSize must be <= 32 (warp shuffle / ballot scope)");
+static_assert((kFmcsGroupSize & (kFmcsGroupSize - 1)) == 0,
+              "kFmcsGroupSize must be a power of two");
+
+template<int blockThreads>
+struct FmcsBlockConfig {
+  static_assert(blockThreads == 64 || blockThreads == 128 || blockThreads == 256,
+                "fMCS block size must be 64, 128, or 256");
+  static_assert(blockThreads % kFmcsGroupSize == 0,
+                "fMCS block size must be a multiple of kFmcsGroupSize");
+  static constexpr int numGroups = blockThreads / kFmcsGroupSize;
+};
 
 /// One CUDA block per pair.  Three-phase seed-grow search:
 ///   Phase 1: RDKit makeInitialSeeds() analogue.  Build one query-bond
@@ -723,7 +730,7 @@ static_assert(kFmcsGroupSize <= 32,
 /// @p cacheStorageAll and @p cacheCapacity are currently ignored.  They remain
 /// in the signature while the old cache scaffolding is still compiled for unit
 /// tests; the active RDKit-parity kernel does not allocate or probe it.
-template<int maxAtoms, int maxBonds, class Policy>
+template<int maxAtoms, int maxBonds, int blockThreads, class Policy>
 __global__ void fmcsKernel(
     const DevicePerPairInput* __restrict__ pairs,
     DeviceMCSResult<maxAtoms, maxBonds>* __restrict__ results,
@@ -734,8 +741,7 @@ __global__ void fmcsKernel(
     int cacheCapacity,
     int substructurePartialCapacity,
     int numPairs,
-    std::uint32_t timeoutUs) {
-  (void)timeoutUs;
+    unsigned long long timeoutClocks) {
   (void)cacheStorageAll;
   (void)cacheCapacity;
 
@@ -756,6 +762,7 @@ __global__ void fmcsKernel(
   using QueuedT = QueuedSeed<maxAtoms, maxBonds, maxAtoms, maxBonds>;
   using SubstructureScratchT = FmcsSubstructureScratch<maxAtoms, maxAtoms>;
   constexpr int kMaxNewBondsForTier = maxBonds;
+  constexpr int kNumGroups = FmcsBlockConfig<blockThreads>::numGroups;
 
   // Block-shared resources: the queue, the incumbent, and the early-exit
   // flags are visible to every group.  Cross-group accesses use atomics
@@ -773,28 +780,29 @@ __global__ void fmcsKernel(
   __shared__ DeviceCsrView targetView;
   __shared__ bool overflowed;
   __shared__ bool timedOut;
-  __shared__ SubstructureScratchT substructureScratch[kFmcsNumGroups];
+  __shared__ unsigned long long startClock;
+  __shared__ SubstructureScratchT substructureScratch[kNumGroups];
   __shared__ FmcsMeasureStats measureStats;
 
   // Cooperative Phase 2 working state.  Approach 1 gives each warp group an
   // independent seed workspace, fallback scratch, and global partial-storage
   // slice so groups can pop and grow seeds concurrently.
   __shared__ __align__(16) unsigned char
-      currentStorage[sizeof(QueuedT) * kFmcsNumGroups];
+      currentStorage[sizeof(QueuedT) * kNumGroups];
   __shared__ __align__(16) unsigned char
-      biggestStorage[sizeof(QueuedT) * kFmcsNumGroups];
+      biggestStorage[sizeof(QueuedT) * kNumGroups];
   QueuedT* current = reinterpret_cast<QueuedT*>(currentStorage);
   QueuedT* biggest = reinterpret_cast<QueuedT*>(biggestStorage);
-  __shared__ NewBond newBondsArr[kFmcsNumGroups][kMaxNewBondsForTier];
-  __shared__ int     newBondCount[kFmcsNumGroups];
-  __shared__ bool    popped[kFmcsNumGroups];
-  __shared__ bool    stage0Ok[kFmcsNumGroups];
-  __shared__ std::uint8_t remainingAtomStack[kFmcsNumGroups][maxAtoms];
+  __shared__ NewBond newBondsArr[kNumGroups][kMaxNewBondsForTier];
+  __shared__ int     newBondCount[kNumGroups];
+  __shared__ bool    popped[kNumGroups];
+  __shared__ bool    stage0Ok[kNumGroups];
+  __shared__ std::uint8_t remainingAtomStack[kNumGroups][maxAtoms];
   __shared__ typename Seed<maxAtoms, maxBonds>::atom_word_type
-      remainingVisitedAtoms[kFmcsNumGroups][Seed<maxAtoms, maxBonds>::kAtomWords];
+      remainingVisitedAtoms[kNumGroups][Seed<maxAtoms, maxBonds>::kAtomWords];
   __shared__ typename Seed<maxAtoms, maxBonds>::bond_word_type
-      remainingVisitedBonds[kFmcsNumGroups][Seed<maxAtoms, maxBonds>::kBondWords];
-  __shared__ int remainingStackSize[kFmcsNumGroups];
+      remainingVisitedBonds[kNumGroups][Seed<maxAtoms, maxBonds>::kBondWords];
+  __shared__ int remainingStackSize[kNumGroups];
   __shared__ typename Seed<maxAtoms, maxBonds>::bond_word_type
       initialExcludedBonds[Seed<maxAtoms, maxBonds>::kBondWords];
 
@@ -807,7 +815,7 @@ __global__ void fmcsKernel(
       queueStorageAll + static_cast<size_t>(pairIdx) * queueCapacity;
   std::uint8_t* mySubstructureStorage =
       substructureStorageAll +
-      (static_cast<size_t>(pairIdx) * static_cast<size_t>(kFmcsNumGroups) +
+      (static_cast<size_t>(pairIdx) * static_cast<size_t>(kNumGroups) +
        static_cast<size_t>(groupId)) *
       2u *
           static_cast<size_t>(substructurePartialCapacity) *
@@ -824,6 +832,7 @@ __global__ void fmcsKernel(
     }
     overflowed = false;
     timedOut = false;
+    startClock = clock64();
 
     queryView.rowOffsets    = pair.queryRowOffsets;
     queryView.colIndices    = pair.queryColIndices;
@@ -866,7 +875,9 @@ __global__ void fmcsKernel(
   block.sync();
 
   if (groupId == 0) {
-    for (int qBond = 0; qBond < pair.queryNumBonds && !overflowed; ++qBond) {
+    for (int qBond = 0;
+         qBond < pair.queryNumBonds && !overflowed && !timedOut;
+         ++qBond) {
       if (groupRank == 0) {
         seedClearWithinThread(myCurrent.seed);
         matchResultClearWithinThread(myCurrent.match);
@@ -930,6 +941,11 @@ __global__ void fmcsKernel(
     }
   }
 
+  block.sync();
+  if (block.thread_rank() == 0 && timeoutClocks > 0 &&
+      clock64() - startClock > timeoutClocks) {
+    timedOut = true;
+  }
   block.sync();
 
   if constexpr (kFmcsDebug) {
@@ -1290,6 +1306,11 @@ __global__ void fmcsKernel(
     // End-of-iteration rendezvous: every group must reach here before
     // group 0 decides whether the sorted queue is empty.
     block.sync();
+    if (block.thread_rank() == 0 && timeoutClocks > 0 &&
+        clock64() - startClock > timeoutClocks) {
+      timedOut = true;
+    }
+    block.sync();
 
     if constexpr (kFmcsDebug) {
       if (pairIdx == kFmcsDebugPairIdx && block.thread_rank() == 0) {
@@ -1297,7 +1318,7 @@ __global__ void fmcsKernel(
                debugIter, queue.size());
       }
     }
-    if (queue.empty()) break;
+    if (timedOut || queue.empty()) break;
 
     if constexpr (kFmcsDebug) {
       ++debugIter;

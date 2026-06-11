@@ -20,6 +20,7 @@
 
 #include <boost/python.hpp>
 #include <boost/python/numpy.hpp>
+#include <boost/python/stl_iterator.hpp>
 
 #include <cstdint>
 #include <memory>
@@ -113,6 +114,23 @@ T optionValue(const dict& options, const char* key, const T& defaultValue) {
   return extract<T>(options[key]);
 }
 
+template <typename T>
+std::vector<T> vectorFromIterable(const object& iterable) {
+  std::vector<T> converted;
+  stl_input_iterator<T> it(iterable), end;
+  for (; it != end; ++it) {
+    converted.push_back(*it);
+  }
+  return converted;
+}
+
+std::vector<int> optionIntVector(const dict& options, const char* key) {
+  if (PyMapping_HasKeyString(options.ptr(), key) == 0) {
+    return {};
+  }
+  return vectorFromIterable<int>(options[key]);
+}
+
 list stringsToPythonList(const std::vector<std::string>& values) {
   list out;
   for (const auto& value : values) {
@@ -163,7 +181,11 @@ BOOST_PYTHON_MODULE(_mcs) {
       params.requireGpu                                       = optionValue<bool>(options, "require_gpu", false);
       params.timeoutSeconds                                   = optionValue<unsigned int>(options, "timeout_seconds", 0);
       params.batchSize                                        = optionValue<int>(options, "batch_size", 0);
-      params.executorsPerRunner                               = optionValue<int>(options, "executors_per_runner", 1);
+      params.blockSize                                        = optionValue<int>(options, "block_size", 128);
+      params.workerThreads                                    = optionValue<int>(options, "worker_threads", -1);
+      params.preprocessingThreads                             = optionValue<int>(options, "preprocessing_threads", -1);
+      params.executorsPerRunner                               = optionValue<int>(options, "executors_per_runner", -1);
+      params.gpuIds                                           = optionIntVector(options, "gpu_ids");
       params.atomCompareParameters.matchValences              = optionValue<bool>(options, "match_valences", false);
       params.atomCompareParameters.matchFormalCharge          = optionValue<bool>(options, "match_formal_charge", false);
       params.atomCompareParameters.ringMatchesRingOnly        = optionValue<bool>(options, "atom_ring_matches_ring_only", false);

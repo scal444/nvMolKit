@@ -29,10 +29,12 @@ from rdkit.Chem.AllChem import ETKDGv3
 import nvmolkit.autotune as autotune
 from nvmolkit.autotune import _calibration, _core, _ff_common
 from nvmolkit.autotune.tune_embed_molecules import _default_embed_search_space
+from nvmolkit.autotune.tune_mcs import _default_mcs_search_space
 from nvmolkit.autotune.tune_substructure import (
     _default_substruct_search_space,
     _suggest_preprocessing_threads,
 )
+from nvmolkit.mcs import MCSConfig, findMCS
 from nvmolkit.substructure import (
     SubstructSearchConfig,
     countSubstructMatches,
@@ -101,6 +103,7 @@ def test_import_without_optuna_succeeds():
     importlib.reload(autotune)
     assert hasattr(autotune, "is_available")
     assert hasattr(autotune, "tune_embed_molecules")
+    assert hasattr(autotune, "tune_mcs")
 
 
 def test_tune_raises_clear_error_when_optuna_missing(monkeypatch):
@@ -182,6 +185,47 @@ def test_substruct_config_to_from_dict_roundtrip():
     assert restored.gpuIds == [0]
 
 
+def test_mcs_config_to_from_dict_roundtrip():
+    """``MCSConfig`` serializes losslessly through ``to_dict``/``from_dict``."""
+    config = MCSConfig(
+        batchSize=256,
+        blockSize=64,
+        workerThreads=2,
+        preprocessingThreads=4,
+        executorsPerRunner=3,
+        gpuIds=[0],
+    )
+    encoded = config.to_dict()
+    assert encoded == {
+        "batchSize": 256,
+        "blockSize": 64,
+        "workerThreads": 2,
+        "preprocessingThreads": 4,
+        "executorsPerRunner": 3,
+        "gpuIds": [0],
+    }
+    assert config.to_kwargs() == {
+        "batch_size": 256,
+        "block_size": 64,
+        "worker_threads": 2,
+        "preprocessing_threads": 4,
+        "executors_per_runner": 3,
+        "gpu_ids": [0],
+    }
+    restored = MCSConfig.from_dict(encoded)
+    assert restored.batchSize == 256
+    assert restored.blockSize == 64
+    assert restored.workerThreads == 2
+    assert restored.preprocessingThreads == 4
+    assert restored.executorsPerRunner == 3
+    assert restored.gpuIds == [0]
+
+
+def test_mcs_config_from_dict_rejects_unknown_keys():
+    with pytest.raises(ValueError, match="Unknown MCSConfig keys"):
+        MCSConfig.from_dict({"batchSize": 100, "bogus": 1})
+
+
 def test_save_load_hardware_options_roundtrip(tmp_path):
     """End-to-end JSON persistence works without optuna."""
     options = HardwareOptions(batchSize=128, batchesPerGpu=2, gpuIds=[0])
@@ -211,6 +255,19 @@ def test_save_load_substruct_config_roundtrip(tmp_path):
     assert loaded.preprocessingThreads == 8
     assert loaded.maxMatches == 4
     assert loaded.uniquify is True
+
+
+def test_save_load_mcs_config_roundtrip(tmp_path):
+    config = MCSConfig(batchSize=128, blockSize=256, workerThreads=2, preprocessingThreads=4, executorsPerRunner=2)
+    path = tmp_path / "mcs.json"
+    autotune.save(config, path)
+    loaded = autotune.load(path)
+    assert isinstance(loaded, MCSConfig)
+    assert loaded.batchSize == 128
+    assert loaded.blockSize == 256
+    assert loaded.workerThreads == 2
+    assert loaded.preprocessingThreads == 4
+    assert loaded.executorsPerRunner == 2
 
 
 def test_save_rejects_unsupported_type(tmp_path):
@@ -295,6 +352,22 @@ def test_default_substruct_search_space_caps_per_pool():
     assert low <= high
 
 
+def test_default_mcs_search_space_caps_cpu_pools_and_block_sizes():
+    """MCS exposes batch, block, runner, and preprocessing knobs without one-warp blocks."""
+    space_1gpu = _default_mcs_search_space(num_gpus=1, cpus=16)
+    space_4gpu = _default_mcs_search_space(num_gpus=4, cpus=16)
+    space_64gpu = _default_mcs_search_space(num_gpus=64, cpus=16)
+
+    assert space_1gpu["workerThreads"] == (1, 8)
+    assert space_4gpu["workerThreads"] == (1, 4)
+    assert space_64gpu["workerThreads"] == (1, 1)
+    assert space_1gpu["preprocessingThreads"] == (1, 16)
+    assert space_1gpu["executorsPerRunner"] == (1, 8)
+    assert space_1gpu["batchSize"][0] == 0
+    assert space_1gpu["blockSize"] == {"choices": [128, 64, 256]}
+    assert 32 not in space_1gpu["blockSize"]["choices"]
+
+
 class _RecordingTrial:
     """Stub Optuna trial that records the bounds passed to ``suggest_int``."""
 
@@ -305,6 +378,18 @@ class _RecordingTrial:
     def suggest_int(self, name: str, low: int, high: int, log: bool = False, step: int = 1) -> int:
         self.calls.append({"name": name, "low": low, "high": high, "log": log, "step": step})
         return int(self.picker(low, high))
+
+    def suggest_categorical(self, name: str, choices: list) -> object:
+        self.calls.append({"name": name, "choices": list(choices)})
+        return choices[0]
+
+
+def test_explicit_choices_search_space_supports_short_int_categories():
+    trial = _RecordingTrial()
+    value = _core.suggest_from_space(trial, "blockSize", {"choices": [128, 64, 256]})
+    assert value == 128
+    assert trial.calls == [{"name": "blockSize", "choices": [128, 64, 256]}]
+    assert _core.collect_int_from_space({"choices": [128, 64, 256]}) == 128
 
 
 def test_suggest_preprocessing_threads_clamps_to_remaining_cpu_budget():
@@ -530,6 +615,26 @@ def test_tune_substructure_rejects_empty_queries():
         autotune.tune_substructure(targets, [], n_trials=1)
 
 
+def test_tune_mcs_rejects_empty_mols():
+    pytest.importorskip("optuna")
+    with pytest.raises(ValueError, match="mols"):
+        autotune.tune_mcs([], [(0, 0)], n_trials=1)
+
+
+def test_tune_mcs_rejects_empty_pairs():
+    pytest.importorskip("optuna")
+    mols = [Chem.MolFromSmiles("CCO")]
+    with pytest.raises(ValueError, match="pairs"):
+        autotune.tune_mcs(mols, [], n_trials=1)
+
+
+def test_tune_mcs_rejects_out_of_range_pairs():
+    pytest.importorskip("optuna")
+    mols = [Chem.MolFromSmiles("CCO")]
+    with pytest.raises(IndexError, match="outside"):
+        autotune.tune_mcs(mols, [(0, 1)], n_trials=1)
+
+
 @pytest.mark.parametrize("api", [hasSubstructMatch, countSubstructMatches, getSubstructMatches])
 def test_tune_substructure_smoke(small_mols, api):
     pytest.importorskip("optuna")
@@ -553,6 +658,38 @@ def test_tune_substructure_smoke(small_mols, api):
     assert result.best_config.preprocessingThreads >= 1
 
     api(small_mols, queries, result.best_config)
+
+
+def test_tune_mcs_smoke(small_mols):
+    pytest.importorskip("optuna")
+    pairs = [(0, 1), (1, 2), (2, 3)]
+
+    result = autotune.tune_mcs(
+        small_mols,
+        pairs,
+        n_trials=2,
+        target_seconds_per_trial=30.0,
+        calibration_fraction=1.0,
+        calibration_max_size=len(pairs),
+        search_space_overrides={
+            "batchSize": {"choices": [0, 1]},
+            "blockSize": {"choices": [128, 64]},
+            "workerThreads": (1, 1),
+            "preprocessingThreads": (1, 1),
+            "executorsPerRunner": (1, 1),
+        },
+        seed=0,
+    )
+    assert isinstance(result.best_config, MCSConfig)
+    assert result.best_throughput > 0
+    assert result.n_trials_run == 2
+    assert result.best_config.blockSize in {64, 128}
+    assert result.best_config.workerThreads >= 1
+    assert result.best_config.preprocessingThreads >= 1
+    assert result.best_config.executorsPerRunner >= 1
+
+    mcs = findMCS(small_mols, mode="pairs", pairs=pairs, config=result.best_config)
+    assert len(mcs) == len(pairs)
 
 
 @pytest.fixture

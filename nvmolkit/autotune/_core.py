@@ -267,9 +267,10 @@ def run_study(
 def resolve_search_space(defaults: dict[str, Any], overrides: Optional[dict[str, Any]]) -> dict[str, Any]:
     """Merge user search-space overrides into the wrapper defaults.
 
-    Each value is either a tuple ``(low, high)`` (passed to ``suggest_int``) or
-    a list of categorical choices (passed to ``suggest_categorical``). The
-    merged dictionary keeps default keys not present in ``overrides``.
+    Each value is either a tuple ``(low, high)`` (passed to ``suggest_int``), a
+    list of categorical choices, or ``{"choices": [...]}`` for categorical
+    choices that would otherwise look like an int range. The merged dictionary
+    keeps default keys not present in ``overrides``.
     """
     result = dict(defaults)
     if overrides:
@@ -278,6 +279,38 @@ def resolve_search_space(defaults: dict[str, Any], overrides: Optional[dict[str,
                 raise KeyError(f"Unknown search-space override '{key}'. Known keys: {sorted(result.keys())}")
             result[key] = value
     return result
+
+
+def spec_low_high(spec: Any) -> tuple[Optional[int], Optional[int]]:
+    """Return ``(low, high)`` for a numeric range spec, or ``(None, None)``."""
+    if isinstance(spec, tuple) and len(spec) >= 2 and isinstance(spec[0], int) and isinstance(spec[1], int):
+        return int(spec[0]), int(spec[1])
+    return None, None
+
+
+def suggest_preprocessing_threads_with_cpu_budget(
+    trial: Any,
+    spec: Any,
+    *,
+    worker_threads: int,
+    num_gpus: int,
+    cpus: int,
+) -> int:
+    """Sample ``preprocessingThreads`` subject to a joint CPU budget.
+
+    The configured upper bound from ``spec`` is intersected with the cores
+    remaining after ``num_gpus * worker_threads`` are reserved for GPU
+    coordinator threads. Non-range specs, such as categorical overrides, are
+    delegated to :func:`suggest_from_space`.
+    """
+    low, high = spec_low_high(spec)
+    if low is None or high is None:
+        return int(suggest_from_space(trial, "preprocessingThreads", spec))
+
+    remaining = max(1, cpus - num_gpus * max(1, worker_threads))
+    effective_high = max(low, min(high, remaining))
+    log = isinstance(spec, tuple) and len(spec) == 3 and spec[2] == "log"
+    return int(trial.suggest_int("preprocessingThreads", low, effective_high, log=log))
 
 
 def suggest_from_space(trial, name: str, spec: Any) -> Any:
@@ -290,12 +323,23 @@ def suggest_from_space(trial, name: str, spec: Any) -> Any:
     - ``(low, high, step)`` tuple — uniform integer range restricted to
       multiples of ``step`` (preserves ordering for TPE, unlike a categorical
       list of the same values).
+    - ``{"choices": [...]}`` dictionary — explicit categorical search.
     - ``list`` of choices — categorical search.
 
     A literal scalar is returned unchanged (acts as a fixed value rather than
     a search dimension). A 2- or 3-element ``list`` shaped like a range raises
     :class:`TypeError` rather than being treated as categorical.
     """
+    if isinstance(spec, dict):
+        if set(spec) == {"choices"}:
+            choices = list(spec["choices"])
+            if not choices:
+                raise ValueError(f"Search-space override for {name!r}: choices must be non-empty.")
+            return trial.suggest_categorical(name, choices)
+        raise TypeError(
+            f"Search-space override for {name!r} is an unsupported dictionary; "
+            "expected {'choices': [...]}."
+        )
     if isinstance(spec, tuple) and len(spec) == 2 and all(isinstance(v, int) for v in spec):
         low, high = spec
         return trial.suggest_int(name, int(low), int(high))
@@ -338,10 +382,16 @@ def collect_int_from_space(spec: Any) -> int:
     midpoint is returned (rounded to the nearest int, clamped to ``[low,
     high]``). For a stepped range ``(low, high, step)`` the arithmetic
     midpoint snapped to the nearest multiple of ``step`` from ``low`` is
-    returned, clamped to ``[low, high]``. For a categorical list the first
-    listed choice is returned, on the convention that callers list their
-    preferred default first. A bare scalar is returned unchanged.
+    returned, clamped to ``[low, high]``. For a categorical list or
+    ``{"choices": [...]}``, the first listed choice is returned, on the
+    convention that callers list their preferred default first. A bare scalar
+    is returned unchanged.
     """
+    if isinstance(spec, dict) and "choices" in spec:
+        choices = list(spec["choices"])
+        if not choices:
+            raise ValueError(f"Categorical choices {spec!r} must be non-empty.")
+        return int(choices[0])
     if isinstance(spec, tuple) and len(spec) == 3 and spec[2] == "log":
         low, high, _ = spec
         low_int = int(low)
