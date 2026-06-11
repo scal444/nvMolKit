@@ -49,20 +49,24 @@ void checkCuda(cudaError_t err, const char* context) {
   }
 }
 
-/// uint32 host-side mirror of a CSR @ref Graph plus a packed
-/// @c bondEndpoints array matching @ref enumerateBonds ordering.
+/// uint32 host-side mirror of a CSR @ref Graph plus packed bond metadata
+/// matching @ref enumerateBonds ordering.
 struct PackedGraphHost {
   std::vector<uint32_t> rowOffsets;
   std::vector<uint32_t> colIndices;
+  /// Per-adjacency entry bond id, parallel to @c colIndices.
+  std::vector<uint32_t> bondIndices;
   std::vector<uint32_t> bondEndpoints;  // (u << 16) | v, u < v
 };
 
 PackedGraphHost packGraph(const Graph& g) {
+  constexpr uint32_t kUnsetBondIndex = 0xFFFFFFFFu;
   PackedGraphHost out;
   out.rowOffsets.reserve(g.rowOffsets.size());
   for (size_t v : g.rowOffsets) out.rowOffsets.push_back(static_cast<uint32_t>(v));
   out.colIndices.reserve(g.colIndices.size());
   for (size_t v : g.colIndices) out.colIndices.push_back(static_cast<uint32_t>(v));
+  out.bondIndices.assign(g.colIndices.size(), kUnsetBondIndex);
   out.bondEndpoints.reserve(static_cast<size_t>(g.numEdges));
   for (int u = 0; u < g.numVertices; ++u) {
     const size_t begin = g.rowOffsets[u];
@@ -70,10 +74,29 @@ PackedGraphHost packGraph(const Graph& g) {
     for (size_t k = begin; k < end; ++k) {
       const int v = static_cast<int>(g.colIndices[k]);
       if (u < v) {
+        const auto bondIdx =
+            static_cast<uint32_t>(out.bondEndpoints.size());
         out.bondEndpoints.push_back(
             (static_cast<uint32_t>(u) << 16) | static_cast<uint32_t>(v));
+        out.bondIndices[k] = bondIdx;
+
+        bool foundReverse = false;
+        for (size_t rk = g.rowOffsets[v]; rk < g.rowOffsets[v + 1]; ++rk) {
+          if (static_cast<int>(g.colIndices[rk]) == u &&
+              out.bondIndices[rk] == kUnsetBondIndex) {
+            out.bondIndices[rk] = bondIdx;
+            foundReverse = true;
+            break;
+          }
+        }
+        if (!foundReverse) {
+          throw std::runtime_error("fMCS CSR graph is missing reverse edge");
+        }
       }
     }
+  }
+  if (out.bondEndpoints.size() != static_cast<size_t>(g.numEdges)) {
+    throw std::runtime_error("fMCS CSR graph edge count is inconsistent");
   }
   return out;
 }
@@ -250,9 +273,11 @@ std::vector<DevicePerPairInput> uploadCsrAndAssemblePairInputs(
   for (auto* d : descs) {
     totalWords += d->packedQuery.rowOffsets.size();
     totalWords += d->packedQuery.colIndices.size();
+    totalWords += d->packedQuery.bondIndices.size();
     totalWords += d->packedQuery.bondEndpoints.size();
     totalWords += d->packedTarget.rowOffsets.size();
     totalWords += d->packedTarget.colIndices.size();
+    totalWords += d->packedTarget.bondIndices.size();
     totalWords += d->packedTarget.bondEndpoints.size();
   }
 
@@ -284,9 +309,11 @@ std::vector<DevicePerPairInput> uploadCsrAndAssemblePairInputs(
     p.targetNumBonds = d.targetGraph->numEdges;
     p.queryRowOffsets    = uploadVec(d.packedQuery.rowOffsets);
     p.queryColIndices    = uploadVec(d.packedQuery.colIndices);
+    p.queryBondIndices   = uploadVec(d.packedQuery.bondIndices);
     p.queryBondEndpoints = uploadVec(d.packedQuery.bondEndpoints);
     p.targetRowOffsets    = uploadVec(d.packedTarget.rowOffsets);
     p.targetColIndices    = uploadVec(d.packedTarget.colIndices);
+    p.targetBondIndices   = uploadVec(d.packedTarget.bondIndices);
     p.targetBondEndpoints = uploadVec(d.packedTarget.bondEndpoints);
     p.tables   = tablesDev[i];
     p.swapped  = d.swapped;

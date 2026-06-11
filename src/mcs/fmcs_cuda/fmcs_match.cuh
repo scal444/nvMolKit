@@ -253,39 +253,91 @@ __device__ __forceinline__ bool matchIncrementalFastCooperative(
         // place.  Scan target bonds incident to srcTargetAtom for one
         // whose other endpoint is unvisited, atom-table-compatible
         // with the unmapped query atom, and bond-table-compatible.
-        const int unmappedQueryAtom = queryUIsMapped ? queryEndpointV : queryEndpointU;
+        const int unmappedQueryAtom =
+            queryUIsMapped ? queryEndpointV : queryEndpointU;
         const int srcTargetAtom     = queryUIsMapped ? targetForQueryU
                                                      : targetForQueryV;
-        for (int targetBondIdx = laneRank;
-             targetBondIdx < targetTopology.numBonds && chosenTargetBond < 0;
-             targetBondIdx += laneCount) {
-          const TargetBondWord visitedBondsWord =
-              match.visitedTargetBonds[targetBondIdx / kTargetBondBitsPerWord];
-          if ((visitedBondsWord >> (targetBondIdx % kTargetBondBitsPerWord)) & 1) {
-            continue;
+        const bool scanAdjacency =
+            targetTopology.rowOffsets != nullptr &&
+            targetTopology.colIndices != nullptr &&
+            targetTopology.bondIndices != nullptr &&
+            srcTargetAtom >= 0 &&
+            srcTargetAtom < targetTopology.numAtoms;
+        if (scanAdjacency) {
+          const int begin =
+              static_cast<int>(targetTopology.rowOffsets[srcTargetAtom]);
+          const int end =
+              static_cast<int>(targetTopology.rowOffsets[srcTargetAtom + 1]);
+          for (int adjIdx = begin + laneRank;
+               adjIdx < end && chosenTargetBond < 0;
+               adjIdx += laneCount) {
+            const int targetBondIdx =
+                static_cast<int>(targetTopology.bondIndices[adjIdx]);
+            if (targetBondIdx < 0 ||
+                targetBondIdx >= targetTopology.numBonds ||
+                targetBondIdx >= maxTB) {
+              continue;
+            }
+            const TargetBondWord visitedBondsWord =
+                match.visitedTargetBonds[targetBondIdx / kTargetBondBitsPerWord];
+            if ((visitedBondsWord >> (targetBondIdx % kTargetBondBitsPerWord)) & 1) {
+              continue;
+            }
+            const int candidateTargetAtom =
+                static_cast<int>(targetTopology.colIndices[adjIdx]);
+            if (candidateTargetAtom < 0 ||
+                candidateTargetAtom >= targetTopology.numAtoms ||
+                candidateTargetAtom >= maxTA) {
+              continue;
+            }
+            const TargetAtomWord visitedAtomsWord =
+                match.visitedTargetAtoms[candidateTargetAtom / kTargetAtomBitsPerWord];
+            if ((visitedAtomsWord >>
+                 (candidateTargetAtom % kTargetAtomBitsPerWord)) & 1) {
+              continue;
+            }
+            if (!tables.bonds.testBit(queryBondIdx, targetBondIdx)) continue;
+            if (!tables.atoms.testBit(unmappedQueryAtom, candidateTargetAtom)) continue;
+            chosenTargetBond            = targetBondIdx;
+            chosenTargetAtomForUnmapped = candidateTargetAtom;
           }
-          const std::uint32_t targetEndpoints =
-              targetTopology.bondEndpoints[targetBondIdx];
-          const int targetEndpointU =
-              static_cast<int>(targetEndpoints >> kBondEndpointShift);
-          const int targetEndpointV =
-              static_cast<int>(targetEndpoints & kBondEndpointMask);
-          // Identify the candidate target atom on the far side of the
-          // bond from srcTargetAtom; skip bonds not incident to it.
-          int candidateTargetAtom;
-          if      (targetEndpointU == srcTargetAtom) candidateTargetAtom = targetEndpointV;
-          else if (targetEndpointV == srcTargetAtom) candidateTargetAtom = targetEndpointU;
-          else                                       continue;
-          // Candidate target atom must not already be in the embedding.
-          const TargetAtomWord visitedAtomsWord =
-              match.visitedTargetAtoms[candidateTargetAtom / kTargetAtomBitsPerWord];
-          if ((visitedAtomsWord >> (candidateTargetAtom % kTargetAtomBitsPerWord)) & 1) {
-            continue;
+        } else {
+          for (int targetBondIdx = laneRank;
+               targetBondIdx < targetTopology.numBonds && chosenTargetBond < 0;
+               targetBondIdx += laneCount) {
+            const TargetBondWord visitedBondsWord =
+                match.visitedTargetBonds[targetBondIdx / kTargetBondBitsPerWord];
+            if ((visitedBondsWord >> (targetBondIdx % kTargetBondBitsPerWord)) & 1) {
+              continue;
+            }
+            const std::uint32_t targetEndpoints =
+                targetTopology.bondEndpoints[targetBondIdx];
+            const int targetEndpointU =
+                static_cast<int>(targetEndpoints >> kBondEndpointShift);
+            const int targetEndpointV =
+                static_cast<int>(targetEndpoints & kBondEndpointMask);
+            // Identify the candidate target atom on the far side of the
+            // bond from srcTargetAtom; skip bonds not incident to it.
+            int candidateTargetAtom;
+            if (targetEndpointU == srcTargetAtom) {
+              candidateTargetAtom = targetEndpointV;
+            } else if (targetEndpointV == srcTargetAtom) {
+              candidateTargetAtom = targetEndpointU;
+            } else {
+              continue;
+            }
+            // Candidate target atom must not already be in the embedding.
+            const TargetAtomWord visitedAtomsWord =
+                match.visitedTargetAtoms[candidateTargetAtom / kTargetAtomBitsPerWord];
+            if ((visitedAtomsWord >>
+                 (candidateTargetAtom % kTargetAtomBitsPerWord)) & 1) {
+              continue;
+            }
+            if (!tables.bonds.testBit(queryBondIdx, targetBondIdx)) continue;
+            if (!tables.atoms.testBit(unmappedQueryAtom, candidateTargetAtom)) continue;
+            chosenTargetBond            = targetBondIdx;
+            chosenTargetAtomForUnmapped = candidateTargetAtom;
           }
-          if (!tables.bonds.testBit(queryBondIdx, targetBondIdx)) continue;
-          if (!tables.atoms.testBit(unmappedQueryAtom, candidateTargetAtom)) continue;
-          chosenTargetBond            = targetBondIdx;
-          chosenTargetAtomForUnmapped = candidateTargetAtom;
         }
       }
 

@@ -47,12 +47,15 @@ struct DevicePerPairInput {
 
   const std::uint32_t* queryRowOffsets = nullptr;
   const std::uint32_t* queryColIndices = nullptr;
+  /// Parallel to @c queryColIndices: undirected bond id for each CSR entry.
+  const std::uint32_t* queryBondIndices = nullptr;
   /// Packed (u << 16 | v), one entry per undirected bond, ordered to
   /// match the bond dimension of the match tables (@ref enumerateBonds).
   const std::uint32_t* queryBondEndpoints = nullptr;
 
   const std::uint32_t* targetRowOffsets = nullptr;
   const std::uint32_t* targetColIndices = nullptr;
+  const std::uint32_t* targetBondIndices = nullptr;
   const std::uint32_t* targetBondEndpoints = nullptr;
 
   PairMatchTablesDevice tables;
@@ -91,6 +94,7 @@ struct DeviceMCSResult {
 struct DeviceCsrView {
   const std::uint32_t* rowOffsets    = nullptr;
   const std::uint32_t* colIndices    = nullptr;
+  const std::uint32_t* bondIndices   = nullptr;
   const std::uint32_t* bondEndpoints = nullptr;
   int numAtoms = 0;
   int numBonds = 0;
@@ -837,12 +841,14 @@ __global__ void fmcsKernel(
 
     queryView.rowOffsets    = pair.queryRowOffsets;
     queryView.colIndices    = pair.queryColIndices;
+    queryView.bondIndices   = pair.queryBondIndices;
     queryView.bondEndpoints = pair.queryBondEndpoints;
     queryView.numAtoms      = pair.queryNumAtoms;
     queryView.numBonds      = pair.queryNumBonds;
 
     targetView.rowOffsets    = pair.targetRowOffsets;
     targetView.colIndices    = pair.targetColIndices;
+    targetView.bondIndices   = pair.targetBondIndices;
     targetView.bondEndpoints = pair.targetBondEndpoints;
     targetView.numAtoms      = pair.targetNumAtoms;
     targetView.numBonds      = pair.targetNumBonds;

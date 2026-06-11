@@ -851,13 +851,14 @@ using mcs::fmcs::MatchTableDevice;
 
 // Tiny CSR-view used by the match helpers via duck-typing; satisfies the
 // QueryTopology / TargetTopology template requirement (bondEndpoints +
-// numAtoms / numBonds).
+// numAtoms / numBonds), with optional CSR adjacency fields.
 struct TestCsrView {
   const std::uint32_t* bondEndpoints = nullptr;
   int numAtoms = 0;
   int numBonds = 0;
   const std::uint32_t* rowOffsets = nullptr;
   const std::uint32_t* colIndices = nullptr;
+  const std::uint32_t* bondIndices = nullptr;
 };
 
 // RAII wrapper for managed-memory match tables.  Both atom and bond
