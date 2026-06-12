@@ -1,0 +1,35 @@
+Loading molecules: source=/home/kevin/data/enamine_real_10M.csxmiles max_mols=1000 max_atoms=128 max_bonds=128
+Parsing molecules:   0%|          | 0/1100 [00:00<?, ?it/s]Parsing molecules: 100%|██████████| 1100/1100 [00:00<00:00, 15142.69it/s]
+  Loaded 1000 molecules from /home/kevin/data/enamine_real_10M.csxmiles
+Loaded 1000 molecules after filtering (1000 before filtering)
+Sampling 1 explicit MCS pairs with seed=42
+Prepared 1000 molecules and 1 explicit MCS pairs
+Selected pair summary: showing all 1 pairs
+  pair 0: (654, 114) A=27 atoms/28 bonds B=27 atoms/28 bonds
+Starting nvmolkit MCS benchmark: molecules=1000 pairs=1 runs=5 warmups=1 batch_size=1 block_size=128 workers=-1 prep_threads=-1 num_gpus=1 executors_per_runner=-1 collect_stats=True
+nvmolkit warmup 1/1: starting findMCS
+nvmolkit warmup 1/1: findMCS returned; synchronizing GPU
+nvmolkit warmup 1/1: finished gpu=1/1 fallback=0/1 overflow=0/1
+nvmolkit run 1/5: pre-run GPU synchronize
+nvmolkit run 1/5: starting findMCS
+nvmolkit run 1/5: findMCS returned; synchronizing GPU
+nvmolkit run 1/5: finished gpu=1/1 fallback=0/1 overflow=0/1
+nvmolkit run 2/5: pre-run GPU synchronize
+nvmolkit run 2/5: starting findMCS
+nvmolkit run 2/5: findMCS returned; synchronizing GPU
+nvmolkit run 2/5: finished gpu=1/1 fallback=0/1 overflow=0/1
+nvmolkit run 3/5: pre-run GPU synchronize
+nvmolkit run 3/5: starting findMCS
+nvmolkit run 3/5: findMCS returned; synchronizing GPU
+nvmolkit run 3/5: finished gpu=1/1 fallback=0/1 overflow=0/1
+nvmolkit run 4/5: pre-run GPU synchronize
+nvmolkit run 4/5: starting findMCS
+nvmolkit run 4/5: findMCS returned; synchronizing GPU
+nvmolkit run 4/5: finished gpu=1/1 fallback=0/1 overflow=0/1
+nvmolkit run 5/5: pre-run GPU synchronize
+nvmolkit run 5/5: starting findMCS
+nvmolkit run 5/5: findMCS returned; synchronizing GPU
+nvmolkit run 5/5: finished gpu=1/1 fallback=0/1 overflow=0/1
+Finished nvmolkit MCS benchmark
+nvmolkit: median=11.350 ms mean=11.532 ms std=0.469 ms throughput=88.10 pairs/s
+Wrote per-pair timings to /tmp/fmcs_racefix_current_stats_runs5.csv

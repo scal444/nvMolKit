@@ -398,35 +398,41 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
     FmcsSubstructureScratch<maxAtoms, maxTA>& scratch,
     std::uint8_t* partialStorage,
     int partialCapacity,
-    bool* overflowedFlag,
+    int* overflowedFlag,
     ExecutionStats& stats) {
   const int groupRank = static_cast<int>(group.thread_rank());
   if constexpr (CollectStats || kFmcsMeasure) {
     if (groupRank == 0) {
-      atomicAdd(&stats.seedChecks, 1u);
-      atomicAdd(&stats.matchCalls, 1u);
+      stats.seedChecks += 1u;
+      stats.matchCalls += 1u;
     }
   }
 
+  int hasStoredMatch = 0;
+  if (groupRank == 0) hasStoredMatch = candidate.match.empty ? 0 : 1;
+  hasStoredMatch = group.shfl(hasStoredMatch, 0);
+  group.sync();
+
   bool ok = false;
-  if (!candidate.match.empty) {
+  if (hasStoredMatch != 0) {
     if constexpr (CollectStats || kFmcsMeasure) {
-      if (groupRank == 0) atomicAdd(&stats.fastAttempts, 1u);
+      if (groupRank == 0) stats.fastAttempts += 1u;
     }
     ok = matchIncrementalFastCooperative(
         group, candidate.seed, queryTopology, targetTopology, tables,
         candidate.match);
+    group.sync();
     if constexpr (CollectStats || kFmcsMeasure) {
-      if (groupRank == 0 && ok) atomicAdd(&stats.fastSuccess, 1u);
+      if (groupRank == 0 && ok) stats.fastSuccess += 1u;
     }
   }
 
   if (!ok) {
     if constexpr (CollectStats || kFmcsMeasure) {
-      if (groupRank == 0) atomicAdd(&stats.fallbackCalls, 1u);
+      if (groupRank == 0) stats.fallbackCalls += 1u;
     }
     const bool overflowBefore =
-        overflowedFlag != nullptr ? *overflowedFlag : false;
+        overflowedFlag != nullptr ? atomicAdd(overflowedFlag, 0) != 0 : false;
     ok = matchSeedSubstructureCooperative(
         group, candidate.seed, queryTopology, targetTopology, tables,
         candidate.match, scratch, partialStorage, partialCapacity,
@@ -435,25 +441,55 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
     if constexpr (CollectStats || kFmcsMeasure) {
       if (groupRank == 0) {
         if (ok) {
-          atomicAdd(&stats.fallbackSuccess, 1u);
-        } else if (overflowedFlag != nullptr && *overflowedFlag &&
-                   !overflowBefore) {
-          atomicAdd(&stats.fallbackOverflow, 1u);
+          stats.fallbackSuccess += 1u;
+        } else if (overflowedFlag != nullptr &&
+                   atomicAdd(overflowedFlag, 0) != 0 && !overflowBefore) {
+          stats.fallbackOverflow += 1u;
         } else {
-          atomicAdd(&stats.fallbackFail, 1u);
+          stats.fallbackFail += 1u;
         }
       }
     }
   }
 
   if constexpr (CollectStats || kFmcsMeasure) {
-    if (groupRank == 0 && ok) atomicAdd(&stats.matchFound, 1u);
+    if (groupRank == 0 && ok) stats.matchFound += 1u;
   }
   return ok;
 }
 
 __device__ __forceinline__ bool isPowerOfTwo64(unsigned long long value) {
   return value != 0ULL && (value & (value - 1ULL)) == 0ULL;
+}
+
+__device__ __forceinline__ void addExecutionStatsWithinThread(
+    ExecutionStats& dst,
+    const ExecutionStats& src) {
+  dst.phase2Iters += src.phase2Iters;
+  dst.initialSeeds += src.initialSeeds;
+  dst.mismatchedInitialSeeds += src.mismatchedInitialSeeds;
+  dst.popped += src.popped;
+  dst.seedChecks += src.seedChecks;
+  dst.matchCalls += src.matchCalls;
+  dst.matchFound += src.matchFound;
+  dst.boundRejected += src.boundRejected;
+  dst.expanded += src.expanded;
+  dst.fillZero += src.fillZero;
+  dst.stage0Attempts += src.stage0Attempts;
+  dst.stage0Success += src.stage0Success;
+  dst.stage1Attempts += src.stage1Attempts;
+  dst.stage1Success += src.stage1Success;
+  dst.stage2Attempts += src.stage2Attempts;
+  dst.stage2Success += src.stage2Success;
+  dst.individualBondExcluded += src.individualBondExcluded;
+  dst.fastAttempts += src.fastAttempts;
+  dst.fastSuccess += src.fastSuccess;
+  dst.fallbackCalls += src.fallbackCalls;
+  dst.fallbackSuccess += src.fallbackSuccess;
+  dst.fallbackFail += src.fallbackFail;
+  dst.fallbackOverflow += src.fallbackOverflow;
+  if (src.maxQueue > dst.maxQueue) dst.maxQueue = src.maxQueue;
+  dst.forcedExit |= src.forcedExit;
 }
 
 template<class GroupT, class QueuedT>
@@ -552,9 +588,9 @@ __device__ __forceinline__ unsigned int readBestScoreCooperative(
 template<class GroupT>
 __device__ __forceinline__ bool readFlagCooperative(
     const GroupT& group,
-    const bool* flag) {
+    int* flag) {
   int value = 0;
-  if (group.thread_rank() == 0) value = *flag ? 1 : 0;
+  if (group.thread_rank() == 0) value = atomicAdd(flag, 0);
   value = group.shfl(value, 0);
   return value != 0;
 }
@@ -768,6 +804,7 @@ __global__ void fmcsKernel(
   using SubstructureScratchT = FmcsSubstructureScratch<maxAtoms, maxAtoms>;
   constexpr int kMaxNewBondsForTier = maxBonds;
   constexpr int kNumGroups = FmcsBlockConfig<blockThreads>::numGroups;
+  constexpr bool kStatsEnabled = CollectStats || kFmcsMeasure;
 
   // Block-shared resources: the queue, the incumbent, and the early-exit
   // flags are visible to every group.  Cross-group queue/incumbent updates use
@@ -783,11 +820,12 @@ __global__ void fmcsKernel(
   __shared__ int bestCopyLock;
   __shared__ DeviceCsrView queryView;
   __shared__ DeviceCsrView targetView;
-  __shared__ bool overflowed;
-  __shared__ bool timedOut;
-  __shared__ bool phase2Done;
+  __shared__ int overflowed;
+  __shared__ int timedOut;
+  __shared__ int phase2Done;
   __shared__ unsigned long long startClock;
   __shared__ SubstructureScratchT substructureScratch[kNumGroups];
+  __shared__ ExecutionStats groupStats[kStatsEnabled ? kNumGroups : 1];
   __shared__ ExecutionStats measureStats;
 
   // Cooperative Phase 2 working state.  Approach 1 gives each warp group an
@@ -816,6 +854,8 @@ __global__ void fmcsKernel(
   const int groupId   = static_cast<int>(block.thread_rank()) / kFmcsGroupSize;
   const int groupRank = static_cast<int>(group.thread_rank());
   SubstructureScratchT& mySubstructureScratch = substructureScratch[groupId];
+  ExecutionStats& myStats =
+      kStatsEnabled ? groupStats[groupId] : measureStats;
 
   QueuedT* myQueueStorage =
       queueStorageAll + static_cast<size_t>(pairIdx) * queueCapacity;
@@ -836,9 +876,9 @@ __global__ void fmcsKernel(
     if constexpr (CollectStats || kFmcsMeasure) {
       measureStats = ExecutionStats{};
     }
-    overflowed = false;
-    timedOut = false;
-    phase2Done = false;
+    overflowed = 0;
+    timedOut = 0;
+    phase2Done = 0;
     startClock = clock64();
 
     queryView.rowOffsets    = pair.queryRowOffsets;
@@ -854,6 +894,13 @@ __global__ void fmcsKernel(
     targetView.bondEndpoints = pair.targetBondEndpoints;
     targetView.numAtoms      = pair.targetNumAtoms;
     targetView.numBonds      = pair.targetNumBonds;
+  }
+  if constexpr (CollectStats || kFmcsMeasure) {
+    for (int statIdx = static_cast<int>(block.thread_rank());
+         statIdx < kNumGroups;
+         statIdx += static_cast<int>(blockDim.x)) {
+      groupStats[statIdx] = ExecutionStats{};
+    }
   }
   block.sync();
 
@@ -885,7 +932,7 @@ __global__ void fmcsKernel(
 
   if (groupId == 0) {
     for (int qBond = 0;
-         qBond < pair.queryNumBonds && !overflowed && !timedOut;
+         qBond < pair.queryNumBonds && overflowed == 0 && timedOut == 0;
          ++qBond) {
       if (groupRank == 0) {
         seedClearWithinThread(myCurrent.seed);
@@ -908,7 +955,7 @@ __global__ void fmcsKernel(
         seedAddAtomWithinThread(myCurrent.seed, queryEndpointV);
         myCurrent.seed.growingStage = kSeedGrowStageOuter;
         if constexpr (CollectStats || kFmcsMeasure) {
-          atomicAdd(&measureStats.initialSeeds, 1u);
+          myStats.initialSeeds += 1u;
         }
       }
       group.sync();
@@ -921,12 +968,12 @@ __global__ void fmcsKernel(
           group, myCurrent, queryView, targetView, pair.tables,
           mySubstructureScratch,
           mySubstructureStorage, substructurePartialCapacity, &overflowed,
-          measureStats);
+          myStats);
       if (matched) {
         updateIncumbentCooperative(
             group, myCurrent, best, &bestScore, &bestCopyLock);
         if (!pushBackCooperative(group, queue, myCurrent)) {
-          overflowed = true;
+          atomicExch(&overflowed, 1);
         }
       } else if (groupRank == 0) {
         const int queuedSeeds = queue.size();
@@ -934,7 +981,7 @@ __global__ void fmcsKernel(
           seedExcludeBondWithinThread(queue.slot(i).seed, qBond);
         }
         if constexpr (CollectStats || kFmcsMeasure) {
-          atomicAdd(&measureStats.mismatchedInitialSeeds, 1u);
+          myStats.mismatchedInitialSeeds += 1u;
         }
       }
       group.sync();
@@ -953,7 +1000,7 @@ __global__ void fmcsKernel(
   block.sync();
   if (block.thread_rank() == 0 && timeoutClocks > 0 &&
       clock64() - startClock > timeoutClocks) {
-    timedOut = true;
+    timedOut = 1;
   }
   block.sync();
 
@@ -973,16 +1020,16 @@ __global__ void fmcsKernel(
   [[maybe_unused]] int debugIter = 0;
   while (true) {
     if (block.thread_rank() == 0) {
-      phase2Done = overflowed || timedOut || queue.empty();
+      phase2Done = (overflowed != 0) || (timedOut != 0) || queue.empty();
     }
     block.sync();
     if (phase2Done) break;
 
     if constexpr (CollectStats || kFmcsMeasure) {
       if (block.thread_rank() == 0) {
-        measureStats.phase2Iters += 1;
+        groupStats[0].phase2Iters += 1;
         const unsigned int qsz = static_cast<unsigned int>(queue.size());
-        if (qsz > measureStats.maxQueue) measureStats.maxQueue = qsz;
+        if (qsz > groupStats[0].maxQueue) groupStats[0].maxQueue = qsz;
       }
     }
 
@@ -999,7 +1046,7 @@ __global__ void fmcsKernel(
     if (groupRank == 0) {
       popped[groupId] = poppedThisGroup;
       if constexpr (CollectStats || kFmcsMeasure) {
-        if (popped[groupId]) atomicAdd(&measureStats.popped, 1u);
+        if (popped[groupId]) myStats.popped += 1u;
       }
     }
     group.sync();
@@ -1022,7 +1069,7 @@ __global__ void fmcsKernel(
       // RDKit growSeeds() increments TotalSteps before Seed::grow(), then
       // Seed::grow() first checks canGrowBiggerThan().
       if constexpr (CollectStats || kFmcsMeasure) {
-        if (groupRank == 0) atomicAdd(&measureStats.expanded, 1u);
+        if (groupRank == 0) myStats.expanded += 1u;
       }
 
       const unsigned int scoreSnapshot =
@@ -1030,10 +1077,12 @@ __global__ void fmcsKernel(
       const int bestBondsSnapshot = static_cast<int>(scoreSnapshot >> 16);
       const int bestAtomsSnapshot =
           static_cast<int>(scoreSnapshot & 0xFFFFu);
-      if (!seedCanGrowBiggerThanWithinThread(
-              myCurrent.seed, bestBondsSnapshot, bestAtomsSnapshot)) {
+      const bool canGrowCurrent = seedCanGrowBiggerThanWithinThread(
+          myCurrent.seed, bestBondsSnapshot, bestAtomsSnapshot);
+      group.sync();
+      if (!canGrowCurrent) {
         if constexpr (CollectStats || kFmcsMeasure) {
-          if (groupRank == 0) atomicAdd(&measureStats.boundRejected, 1u);
+          if (groupRank == 0) myStats.boundRejected += 1u;
         }
         break;
       }
@@ -1053,7 +1102,7 @@ __global__ void fmcsKernel(
           &newBondCount[groupId], kMaxNewBondsForTier);
       group.sync();
       if (!fillOk) {
-        if (groupRank == 0) overflowed = true;
+        if (groupRank == 0) atomicExch(&overflowed, 1);
         break;
       }
 
@@ -1066,7 +1115,7 @@ __global__ void fmcsKernel(
       }
       if (newBondCount[groupId] == 0) {
         if constexpr (CollectStats || kFmcsMeasure) {
-          if (groupRank == 0) atomicAdd(&measureStats.fillZero, 1u);
+          if (groupRank == 0) myStats.fillZero += 1u;
         }
         break;
       }
@@ -1081,7 +1130,7 @@ __global__ void fmcsKernel(
       // outer grow loop resumes the parent at the singleton/subset stage.
       if (myCurrent.seed.growingStage == kSeedGrowStageOuter) {
         if constexpr (CollectStats || kFmcsMeasure) {
-          if (groupRank == 0) atomicAdd(&measureStats.stage0Attempts, 1u);
+          if (groupRank == 0) myStats.stage0Attempts += 1u;
         }
         if constexpr (kFmcsDebug) {
           if (pairIdx == kFmcsDebugPairIdx && groupRank == 0) {
@@ -1109,10 +1158,12 @@ __global__ void fmcsKernel(
             static_cast<int>(childScoreSnapshot >> 16);
         const int childBestAtoms =
             static_cast<int>(childScoreSnapshot & 0xFFFFu);
-        if (!seedCanGrowBiggerThanWithinThread(
-                myBiggest.seed, childBestBonds, childBestAtoms)) {
+        const bool canGrowChild = seedCanGrowBiggerThanWithinThread(
+            myBiggest.seed, childBestBonds, childBestAtoms);
+        group.sync();
+        if (!canGrowChild) {
           if constexpr (CollectStats || kFmcsMeasure) {
-            if (groupRank == 0) atomicAdd(&measureStats.boundRejected, 1u);
+            if (groupRank == 0) myStats.boundRejected += 1u;
           }
           break;
         }
@@ -1121,7 +1172,7 @@ __global__ void fmcsKernel(
             group, myBiggest, queryView, targetView, pair.tables,
             mySubstructureScratch,
             mySubstructureStorage, substructurePartialCapacity, &overflowed,
-            measureStats);
+            myStats);
         if (groupRank == 0) stage0Ok[groupId] = ok;
         group.sync();
 
@@ -1133,12 +1184,12 @@ __global__ void fmcsKernel(
         }
         if (stage0Ok[groupId]) {
           if constexpr (CollectStats || kFmcsMeasure) {
-            if (groupRank == 0) atomicAdd(&measureStats.stage0Success, 1u);
+            if (groupRank == 0) myStats.stage0Success += 1u;
           }
           updateIncumbentCooperative(
               group, myBiggest, best, &bestScore, &bestCopyLock);
           if (!pushBackCooperative(group, queue, myBiggest)) {
-            overflowed = true;
+            atomicExch(&overflowed, 1);
           }
           group.sync();
           if (newBondCount[groupId] > 1) {
@@ -1147,7 +1198,7 @@ __global__ void fmcsKernel(
             }
             group.sync();
             if (!pushBackCooperative(group, queue, myCurrent)) {
-              overflowed = true;
+              atomicExch(&overflowed, 1);
             }
             group.sync();
           }
@@ -1180,7 +1231,7 @@ __global__ void fmcsKernel(
             &remainingStackSize[groupId]);
 
         if constexpr (CollectStats || kFmcsMeasure) {
-          if (groupRank == 0) atomicAdd(&measureStats.stage1Attempts, 1u);
+          if (groupRank == 0) myStats.stage1Attempts += 1u;
         }
 
         const unsigned int childScoreSnapshot =
@@ -1189,10 +1240,12 @@ __global__ void fmcsKernel(
             static_cast<int>(childScoreSnapshot >> 16);
         const int childBestAtoms =
             static_cast<int>(childScoreSnapshot & 0xFFFFu);
-        if (!seedCanGrowBiggerThanWithinThread(
-                myBiggest.seed, childBestBonds, childBestAtoms)) {
+        const bool canGrowSingle = seedCanGrowBiggerThanWithinThread(
+            myBiggest.seed, childBestBonds, childBestAtoms);
+        group.sync();
+        if (!canGrowSingle) {
           if constexpr (CollectStats || kFmcsMeasure) {
-            if (groupRank == 0) atomicAdd(&measureStats.boundRejected, 1u);
+            if (groupRank == 0) myStats.boundRejected += 1u;
           }
           continue;
         }
@@ -1201,20 +1254,20 @@ __global__ void fmcsKernel(
             group, myBiggest, queryView, targetView, pair.tables,
             mySubstructureScratch,
             mySubstructureStorage, substructurePartialCapacity, &overflowed,
-            measureStats);
+            myStats);
         if constexpr (CollectStats || kFmcsMeasure) {
-          if (groupRank == 0 && ok) atomicAdd(&measureStats.stage1Success, 1u);
+          if (groupRank == 0 && ok) myStats.stage1Success += 1u;
         }
         if (ok) {
           updateIncumbentCooperative(
               group, myBiggest, best, &bestScore, &bestCopyLock);
           if (!pushBackCooperative(group, queue, myBiggest)) {
-            overflowed = true;
+            atomicExch(&overflowed, 1);
           }
         } else if (groupRank == 0) {
           myNewBonds[i].alive = false;
           if constexpr (CollectStats || kFmcsMeasure) {
-            atomicAdd(&measureStats.individualBondExcluded, 1u);
+            myStats.individualBondExcluded += 1u;
           }
         }
         group.sync();
@@ -1232,7 +1285,7 @@ __global__ void fmcsKernel(
           if (myNewBonds[i].alive) ++aliveCount;
         }
         aliveOverflow = aliveCount > 63 ? 1 : 0;
-        if (aliveOverflow) overflowed = true;
+        if (aliveOverflow) atomicExch(&overflowed, 1);
       }
       aliveCount = group.shfl(aliveCount, 0);
       aliveOverflow = group.shfl(aliveOverflow, 0);
@@ -1251,6 +1304,22 @@ __global__ void fmcsKernel(
              --composition) {
           if (isPowerOfTwo64(composition)) continue;
           if (erasedCount == 0 && composition == maxComposition) continue;
+
+          const unsigned int latestScoreSnapshot =
+              readBestScoreCooperative(group, &bestScore);
+          const int latestBestBonds =
+              static_cast<int>(latestScoreSnapshot >> 16);
+          const int latestBestAtoms =
+              static_cast<int>(latestScoreSnapshot & 0xFFFFu);
+          const bool canGrowRemaining = seedCanGrowBiggerThanWithinThread(
+              myCurrent.seed, latestBestBonds, latestBestAtoms);
+          group.sync();
+          if (!canGrowRemaining) {
+            if constexpr (CollectStats || kFmcsMeasure) {
+              if (groupRank == 0) myStats.boundRejected += 1u;
+            }
+            break;
+          }
 
           warpCopy(group, &myBiggest, &myCurrent, sizeof(QueuedT));
           group.sync();
@@ -1273,7 +1342,7 @@ __global__ void fmcsKernel(
               &remainingStackSize[groupId]);
 
           if constexpr (CollectStats || kFmcsMeasure) {
-            if (groupRank == 0) atomicAdd(&measureStats.stage2Attempts, 1u);
+            if (groupRank == 0) myStats.stage2Attempts += 1u;
           }
           const unsigned int childScoreSnapshot =
               readBestScoreCooperative(group, &bestScore);
@@ -1281,10 +1350,12 @@ __global__ void fmcsKernel(
               static_cast<int>(childScoreSnapshot >> 16);
           const int childBestAtoms =
               static_cast<int>(childScoreSnapshot & 0xFFFFu);
-          if (!seedCanGrowBiggerThanWithinThread(
-                  myBiggest.seed, childBestBonds, childBestAtoms)) {
+          const bool canGrowSubset = seedCanGrowBiggerThanWithinThread(
+              myBiggest.seed, childBestBonds, childBestAtoms);
+          group.sync();
+          if (!canGrowSubset) {
             if constexpr (CollectStats || kFmcsMeasure) {
-              if (groupRank == 0) atomicAdd(&measureStats.boundRejected, 1u);
+              if (groupRank == 0) myStats.boundRejected += 1u;
             }
             continue;
           }
@@ -1293,15 +1364,15 @@ __global__ void fmcsKernel(
               group, myBiggest, queryView, targetView, pair.tables,
               mySubstructureScratch,
               mySubstructureStorage, substructurePartialCapacity, &overflowed,
-              measureStats);
+              myStats);
           if (ok) {
             if constexpr (CollectStats || kFmcsMeasure) {
-              if (groupRank == 0) atomicAdd(&measureStats.stage2Success, 1u);
+              if (groupRank == 0) myStats.stage2Success += 1u;
             }
             updateIncumbentCooperative(
                 group, myBiggest, best, &bestScore, &bestCopyLock);
             if (!pushBackCooperative(group, queue, myBiggest)) {
-              overflowed = true;
+              atomicExch(&overflowed, 1);
             }
           }
           group.sync();
@@ -1329,7 +1400,7 @@ __global__ void fmcsKernel(
     block.sync();
     if (block.thread_rank() == 0 && timeoutClocks > 0 &&
         clock64() - startClock > timeoutClocks) {
-      timedOut = true;
+      timedOut = 1;
     }
     block.sync();
 
@@ -1340,10 +1411,11 @@ __global__ void fmcsKernel(
       }
     }
     if (block.thread_rank() == 0) {
-      phase2Done = overflowed || timedOut || queue.empty();
+      phase2Done = (overflowed != 0) || (timedOut != 0) || queue.empty();
     }
     block.sync();
     if (phase2Done) break;
+    block.sync();
 
     if constexpr (kFmcsDebug) {
       ++debugIter;
@@ -1359,12 +1431,23 @@ __global__ void fmcsKernel(
       ++debugIter;
       if (debugIter >= kFmcsMeasureMaxIters) {
         if (block.thread_rank() == 0) {
-          measureStats.forcedExit = 1;
-          timedOut = true;
+          groupStats[0].forcedExit = 1;
+          timedOut = 1;
         }
         break;
       }
     }
+  }
+
+  if constexpr (CollectStats || kFmcsMeasure) {
+    block.sync();
+    if (block.thread_rank() == 0) {
+      measureStats = ExecutionStats{};
+      for (int statIdx = 0; statIdx < kNumGroups; ++statIdx) {
+        addExecutionStatsWithinThread(measureStats, groupStats[statIdx]);
+      }
+    }
+    block.sync();
   }
 
   if constexpr (kFmcsDebug) {
@@ -1433,8 +1516,8 @@ __global__ void fmcsKernel(
     auto& dst = results[pairIdx];
     dst.numCommonVertices = best.seed.numAtoms;
     dst.numCommonEdges    = best.seed.numBonds;
-    dst.timedOut          = timedOut;
-    dst.overflowed        = overflowed;
+    dst.timedOut          = timedOut != 0;
+    dst.overflowed        = overflowed != 0;
 
     // Walk set bits of best.seed.atoms (in increasing query atom idx
     // order, via __ffs/__ffsll) to fill mappingA/B.

@@ -1,0 +1,38 @@
+Loading molecules: source=/home/kevin/data/enamine_real_10M.csxmiles max_mols=1000 max_atoms=128 max_bonds=128
+Parsing molecules:   0%|          | 0/1100 [00:00<?, ?it/s]Parsing molecules: 100%|██████████| 1100/1100 [00:00<00:00, 15152.19it/s]
+  Loaded 1000 molecules from /home/kevin/data/enamine_real_10M.csxmiles
+Loaded 1000 molecules after filtering (1000 before filtering)
+Sampling 1000 explicit MCS pairs with seed=42
+Prepared 1000 molecules and 1000 explicit MCS pairs
+Selected pair summary: showing first 20 of 1000 pairs
+  pair 0: (654, 114) A=27 atoms/28 bonds B=27 atoms/28 bonds
+  pair 1: (25, 759) A=28 atoms/32 bonds B=29 atoms/32 bonds
+  pair 2: (281, 250) A=28 atoms/31 bonds B=22 atoms/23 bonds
+  pair 3: (228, 142) A=26 atoms/27 bonds B=25 atoms/26 bonds
+  pair 4: (754, 104) A=31 atoms/34 bonds B=28 atoms/30 bonds
+  pair 5: (692, 758) A=24 atoms/27 bonds B=32 atoms/35 bonds
+  pair 6: (913, 558) A=32 atoms/35 bonds B=24 atoms/26 bonds
+  pair 7: (89, 604) A=18 atoms/18 bonds B=24 atoms/25 bonds
+  pair 8: (432, 32) A=26 atoms/27 bonds B=24 atoms/25 bonds
+  pair 9: (30, 95) A=31 atoms/33 bonds B=31 atoms/35 bonds
+  pair 10: (223, 238) A=26 atoms/28 bonds B=27 atoms/29 bonds
+  pair 11: (517, 616) A=29 atoms/32 bonds B=28 atoms/30 bonds
+  pair 12: (27, 574) A=28 atoms/30 bonds B=27 atoms/30 bonds
+  pair 13: (203, 733) A=27 atoms/29 bonds B=27 atoms/30 bonds
+  pair 14: (665, 718) A=28 atoms/31 bonds B=22 atoms/24 bonds
+  pair 15: (558, 429) A=24 atoms/26 bonds B=24 atoms/26 bonds
+  pair 16: (225, 459) A=33 atoms/37 bonds B=29 atoms/31 bonds
+  pair 17: (603, 284) A=24 atoms/25 bonds B=29 atoms/32 bonds
+  pair 18: (828, 890) A=27 atoms/29 bonds B=19 atoms/20 bonds
+  pair 19: (6, 777) A=32 atoms/35 bonds B=24 atoms/25 bonds
+Starting nvmolkit MCS benchmark: molecules=1000 pairs=1000 runs=1 warmups=1 batch_size=1000 block_size=128 workers=-1 prep_threads=-1 num_gpus=1 executors_per_runner=-1 collect_stats=True
+nvmolkit warmup 1/1: starting findMCS
+nvmolkit warmup 1/1: findMCS returned; synchronizing GPU
+nvmolkit warmup 1/1: finished gpu=1000/1000 fallback=0/1000 overflow=0/1000
+nvmolkit run 1/1: pre-run GPU synchronize
+nvmolkit run 1/1: starting findMCS
+nvmolkit run 1/1: findMCS returned; synchronizing GPU
+nvmolkit run 1/1: finished gpu=1000/1000 fallback=0/1000 overflow=0/1000
+Finished nvmolkit MCS benchmark
+nvmolkit: median=3109.726 ms mean=3109.726 ms std=0.000 ms throughput=321.57 pairs/s
+Wrote per-pair timings to /tmp/fmcs_racefix_current_1k_stats.csv

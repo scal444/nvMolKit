@@ -59,6 +59,14 @@ struct FmcsSubstructureScratch {
   int overflowed;
 };
 
+__device__ __forceinline__ void setOverflowedFlagWithinThread(int* flag) {
+  if (flag != nullptr) atomicExch(flag, 1);
+}
+
+__device__ __forceinline__ void setOverflowedFlagWithinThread(bool* flag) {
+  if (flag != nullptr) *flag = true;
+}
+
 template<int maxAtoms, int maxBonds>
 __device__ __forceinline__ bool seedContainsBondWithinThread(
     const Seed<maxAtoms, maxBonds>& seed,
@@ -489,9 +497,9 @@ __device__ __forceinline__ bool matchIncrementalFastCooperative(
         return false;
       }
 
-      // Lane 0 commits the new mapping into the shared MatchResult.
-      // Subsequent bonds in this same call will read the updated
-      // visited bitsets after group.sync below.
+      // Lane 0 commits the new mapping into the shared MatchResult after all
+      // lanes have finished reading the previous match state.
+      group.sync();
       if (laneRank == 0) {
         match.targetBondIdx[queryBondIdx] =
             static_cast<std::uint8_t>(committedTargetBond);
@@ -1267,7 +1275,8 @@ __device__ __forceinline__ bool substructurePartialEdgeConsistentWithinThread(
 }
 
 template<int maxAtoms, int maxBonds, int maxTA, int maxTB,
-         class QueryTopology, class TargetTopology, class GroupT>
+         class QueryTopology, class TargetTopology, class GroupT,
+         class OverflowFlagT>
 __device__ __forceinline__ bool matchSeedSubstructureCooperative(
     const GroupT& group,
     const Seed<maxAtoms, maxBonds>& seed,
@@ -1278,7 +1287,7 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(
     FmcsSubstructureScratch<maxAtoms, maxTA>& scratch,
     std::uint8_t* partialStorage,
     int partialCapacity,
-    bool* overflowedFlag) {
+    OverflowFlagT* overflowedFlag) {
   const int laneRank  = static_cast<int>(group.thread_rank());
   const int laneCount = static_cast<int>(group.num_threads());
 
@@ -1314,7 +1323,7 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(
   if (prepared == 2) return true;
   if (prepared < 0) {
     if (laneRank == 0 && scratch.overflowed && overflowedFlag != nullptr) {
-      *overflowedFlag = true;
+      setOverflowedFlagWithinThread(overflowedFlag);
     }
     return false;
   }
@@ -1460,7 +1469,7 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(
   if (laneRank == 0) {
     matchResultClearWithinThread(match);
     if (scratch.overflowed && overflowedFlag != nullptr) {
-      *overflowedFlag = true;
+      setOverflowedFlagWithinThread(overflowedFlag);
     }
   }
   group.sync();
@@ -1468,7 +1477,8 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(
 }
 
 template<int maxAtoms, int maxBonds, int maxTA, int maxTB,
-         class QueryTopology, class TargetTopology, class GroupT>
+         class QueryTopology, class TargetTopology, class GroupT,
+         class OverflowFlagT>
 __device__ __forceinline__ bool matchSeedWithSubstructureFallbackCooperative(
     const GroupT& group,
     const Seed<maxAtoms, maxBonds>& seed,
@@ -1480,9 +1490,11 @@ __device__ __forceinline__ bool matchSeedWithSubstructureFallbackCooperative(
     int* scratchLock,
     std::uint8_t* partialStorage,
     int partialCapacity,
-    bool* overflowedFlag) {
-  if (matchIncrementalFastCooperative(
-          group, seed, queryTopology, targetTopology, tables, match)) {
+    OverflowFlagT* overflowedFlag) {
+  const bool fastOk = matchIncrementalFastCooperative(
+      group, seed, queryTopology, targetTopology, tables, match);
+  group.sync();
+  if (fastOk) {
     return true;
   }
   if (group.thread_rank() == 0) {
