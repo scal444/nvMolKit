@@ -244,3 +244,72 @@ Decision:
 
 - Accepted. The runtime improvement was large enough to justify the small
   register increase, with no stack, spills, or shared-memory growth.
+
+## Experiment 004: split fallback adjacency expansion into 4-lane subwarps
+
+- Branch: `codex/fmcs-mcs-substruct-optimization`
+- Status: accepted
+- Benchmark CSV:
+  `/tmp/fmcs_mcs_substruct_opt004_subwarp4_nostats_bs512_seed42.csv`
+- SM89 resource build log:
+  `/tmp/fmcs_mcs_substruct_opt004_subwarp4_sm89_resource_build.log`
+- Python install log:
+  `/tmp/fmcs_mcs_substruct_opt004_subwarp4_pip_install.log`
+
+Optimization tried:
+
+- In fallback substructure expansion, keep the existing full-warp behavior for
+  non-hoisted/statistics code paths.
+- For the production adjacency-backed path, split each 32-lane cooperative
+  group into eight 4-lane subwarps.
+- Each subwarp owns one partial mapping at a time and scans that partial's
+  mapped-neighbor target adjacency list with four lanes.
+- This exposes more partial mappings concurrently when adjacency lists are
+  short, while preserving the existing shared counters, found flag, and
+  overflow handling.
+
+Benchmark result:
+
+- Median: `286.852 ms`
+- Mean: `288.066 ms`
+- Stddev: `5.958 ms`
+- Throughput: `3486.11 pairs/s`
+- GPU/fallback/overflow: `1000/0/0`
+- Delta vs accepted experiment 003 median: `-148.062 ms` (`-34.04%`)
+- Delta vs queue-lock baseline median: `-205.802 ms` (`-41.78%`)
+- Result/status comparison against experiment 003 CSV: `0/1000` rows differed
+  for MCS atom count, MCS bond count, cancellation, overflow, GPU use, or
+  fallback status.
+
+SM89 resource result:
+
+- fMCS kernel reports: `60`
+- Stack/spills: `0` stack, `0` spill stores, `0` spill loads in all reports
+- Shared memory: unchanged from accepted experiment 003
+- Stats registers: unchanged in all `30` stats variants
+- Product/no-stats registers:
+  - `+4` in `16` variants for 16- and 32-atom tiers
+  - `+2` in `14` variants for 64- and 128-atom tiers
+
+Validation:
+
+- Python MCS tests:
+  `python -m pytest /home/kevin/repos/nvmolkit/nvmolkit/tests/test_mcs.py --tb=short`
+  - Result: `14 passed`
+- C++ focused fMCS tests:
+  `ctest --test-dir /tmp/nvmolkit-build-nvmolkit-fmcs-mcs-substruct-tests -R "FMCS" -j 8 --output-on-failure`
+  - Result: `124/124 passed`
+- Racecheck:
+  `compute-sanitizer --tool racecheck --error-exitcode 1` on a single-pair
+  no-stats fMCS Python benchmark
+  - Result: `0 errors`, `0 warnings`
+- Synccheck:
+  `compute-sanitizer --tool synccheck --error-exitcode 1` on the same
+  single-pair no-stats fMCS Python benchmark
+  - Result: `0 errors`
+
+Decision:
+
+- Accepted. The performance gain is large enough to justify the no-stats
+  register increase, and validation did not expose correctness, race, or sync
+  issues.

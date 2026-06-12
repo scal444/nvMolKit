@@ -30,6 +30,7 @@ namespace fmcs {
 /// per index is plenty.
 constexpr int          kBondEndpointShift = 16;
 constexpr std::uint32_t kBondEndpointMask  = 0xFFFFu;
+constexpr int          kFallbackAdjacencySubwarpSize = 4;
 
 /// Resolved target endpoints for a successful single-(query bond, target
 /// bond, orientation) compatibility check.  Populated by
@@ -1287,6 +1288,58 @@ __device__ __forceinline__ bool substructurePartialEdgeConsistentWithinThread(
   }
 }
 
+template<int maxAtoms, int maxBonds, int maxTA,
+         class QueryTopology, class TargetTopology>
+__device__ __forceinline__ void tryExtendSubstructurePartialWithinThread(
+    const Seed<maxAtoms, maxBonds>& seed,
+    const QueryTopology& queryTopology,
+    const TargetTopology& targetTopology,
+    const PairMatchTablesDevice& tables,
+    FmcsSubstructureScratch<maxAtoms, maxTA>& scratch,
+    const std::uint8_t* partial,
+    const int depth,
+    const int numSeedAtoms,
+    const int queryAtomIdx,
+    const int targetAtomIdx,
+    const int stride,
+    std::uint8_t* nextPartials,
+    const int effectiveCapacity) {
+  if (scratch.targetDegree[targetAtomIdx] < scratch.seedDegree[queryAtomIdx]) {
+    return;
+  }
+  if (!tables.atoms.testBit(queryAtomIdx, targetAtomIdx)) return;
+  if (partialUsesTargetAtomWithinThread(partial, depth, targetAtomIdx)) {
+    return;
+  }
+  if (!substructurePartialEdgeConsistentWithinThread(
+          seed, queryTopology, targetTopology, tables, scratch,
+          partial, depth, queryAtomIdx, targetAtomIdx)) {
+    return;
+  }
+
+  if (depth == numSeedAtoms - 1) {
+    if (atomicCAS(&scratch.found, 0, 1) == 0) {
+      for (int orderPos = 0; orderPos < depth; ++orderPos) {
+        const int mappedQueryAtom = scratch.seedAtoms[orderPos];
+        scratch.targetAtomForQuery[mappedQueryAtom] = partial[orderPos];
+      }
+      scratch.targetAtomForQuery[queryAtomIdx] =
+          static_cast<std::uint8_t>(targetAtomIdx);
+    }
+  } else {
+    const int slot = atomicAdd(&scratch.nextCount, 1);
+    if (slot < effectiveCapacity) {
+      std::uint8_t* next = nextPartials + slot * stride;
+      for (int orderPos = 0; orderPos < depth; ++orderPos) {
+        next[orderPos] = partial[orderPos];
+      }
+      next[depth] = static_cast<std::uint8_t>(targetAtomIdx);
+    } else {
+      atomicExch(&scratch.overflowed, 1);
+    }
+  }
+}
+
 template<bool HoistNeighborOrder = true,
          int maxAtoms, int maxBonds, int maxTA, int maxTB,
          class QueryTopology, class TargetTopology, class GroupT,
@@ -1407,78 +1460,91 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(
       group.sync();
     }
 
-    for (int partialIdx = 0;
-         partialIdx < numPartials && scratch.found == 0;
-         ++partialIdx) {
-      const std::uint8_t* partial = currentPartials + partialIdx * stride;
-      int neighborOrderPos = -1;
-      bool scanAdjacency = false;
-      if constexpr (HoistNeighborOrder) {
-        neighborOrderPos =
-            static_cast<int>(scratch.orderedQueryAtom[queryAtomIdx]);
-        scanAdjacency = neighborOrderPos != kUnmappedTargetIdx;
+    int hoistedNeighborOrderPos = -1;
+    bool hoistedScanAdjacency = false;
+    if constexpr (HoistNeighborOrder) {
+      hoistedNeighborOrderPos =
+          static_cast<int>(scratch.orderedQueryAtom[queryAtomIdx]);
+      hoistedScanAdjacency = hoistedNeighborOrderPos != kUnmappedTargetIdx;
+    }
+
+    if constexpr (HoistNeighborOrder) {
+      if (hoistedScanAdjacency) {
+        constexpr int subwarpSize = kFallbackAdjacencySubwarpSize;
+        const int subwarpRank = laneRank / subwarpSize;
+        const int sublaneRank = laneRank - subwarpRank * subwarpSize;
+        const int subwarpCount = laneCount / subwarpSize;
+        for (int partialBase = 0;
+             partialBase < numPartials && scratch.found == 0;
+             partialBase += subwarpCount) {
+          const int partialIdx = partialBase + subwarpRank;
+          if (partialIdx >= numPartials) continue;
+          const std::uint8_t* partial = currentPartials + partialIdx * stride;
+          const int mappedTargetAtom = partial[hoistedNeighborOrderPos];
+          const int targetScanBegin =
+              static_cast<int>(targetTopology.rowOffsets[mappedTargetAtom]);
+          const int targetScanEnd =
+              static_cast<int>(targetTopology.rowOffsets[mappedTargetAtom + 1]);
+          for (int targetScanIdx = targetScanBegin + sublaneRank;
+               targetScanIdx < targetScanEnd && scratch.found == 0;
+               targetScanIdx += subwarpSize) {
+            const int targetAtomIdx =
+                static_cast<int>(targetTopology.colIndices[targetScanIdx]);
+            tryExtendSubstructurePartialWithinThread(
+                seed, queryTopology, targetTopology, tables, scratch,
+                partial, depth, numSeedAtoms, queryAtomIdx, targetAtomIdx,
+                stride, nextPartials, effectiveCapacity);
+          }
+        }
       } else {
+        for (int partialIdx = 0;
+             partialIdx < numPartials && scratch.found == 0;
+             ++partialIdx) {
+          const std::uint8_t* partial = currentPartials + partialIdx * stride;
+          for (int targetAtomIdx = laneRank;
+               targetAtomIdx < targetTopology.numAtoms && scratch.found == 0;
+               targetAtomIdx += laneCount) {
+            tryExtendSubstructurePartialWithinThread(
+                seed, queryTopology, targetTopology, tables, scratch,
+                partial, depth, numSeedAtoms, queryAtomIdx, targetAtomIdx,
+                stride, nextPartials, effectiveCapacity);
+          }
+        }
+      }
+    } else {
+      for (int partialIdx = 0;
+           partialIdx < numPartials && scratch.found == 0;
+           ++partialIdx) {
+        const std::uint8_t* partial = currentPartials + partialIdx * stride;
+        int neighborOrderPos = -1;
         const bool hasMappedNeighbor =
             findMappedQueryNeighborWithinThread(
                 seed, queryTopology, scratch, depth, queryAtomIdx,
                 neighborOrderPos);
-        scanAdjacency =
+        const bool scanAdjacency =
             hasMappedNeighbor &&
             targetTopology.rowOffsets != nullptr &&
             targetTopology.colIndices != nullptr;
-      }
-      const int targetScanBegin =
-          scanAdjacency ? static_cast<int>(
-                              targetTopology.rowOffsets[partial[neighborOrderPos]])
-                        : 0;
-      const int targetScanEnd =
-          scanAdjacency ? static_cast<int>(
-                              targetTopology.rowOffsets[partial[neighborOrderPos] + 1])
-                        : targetTopology.numAtoms;
+        const int targetScanBegin =
+            scanAdjacency ? static_cast<int>(
+                                targetTopology.rowOffsets[partial[neighborOrderPos]])
+                          : 0;
+        const int targetScanEnd =
+            scanAdjacency ? static_cast<int>(
+                                targetTopology.rowOffsets[partial[neighborOrderPos] + 1])
+                          : targetTopology.numAtoms;
 
-      for (int targetScanIdx = targetScanBegin + laneRank;
-           targetScanIdx < targetScanEnd && scratch.found == 0;
-           targetScanIdx += laneCount) {
-        const int targetAtomIdx =
-            scanAdjacency
-                ? static_cast<int>(targetTopology.colIndices[targetScanIdx])
-                : targetScanIdx;
-        if (scratch.targetDegree[targetAtomIdx] <
-            scratch.seedDegree[queryAtomIdx]) {
-          continue;
-        }
-        if (!tables.atoms.testBit(queryAtomIdx, targetAtomIdx)) continue;
-        if (partialUsesTargetAtomWithinThread(
-                partial, depth, targetAtomIdx)) {
-          continue;
-        }
-        if (!substructurePartialEdgeConsistentWithinThread(
-                seed, queryTopology, targetTopology, tables, scratch,
-                partial, depth, queryAtomIdx, targetAtomIdx)) {
-          continue;
-        }
-
-        if (depth == numSeedAtoms - 1) {
-          if (atomicCAS(&scratch.found, 0, 1) == 0) {
-            for (int orderPos = 0; orderPos < depth; ++orderPos) {
-              const int mappedQueryAtom = scratch.seedAtoms[orderPos];
-              scratch.targetAtomForQuery[mappedQueryAtom] =
-                  partial[orderPos];
-            }
-            scratch.targetAtomForQuery[queryAtomIdx] =
-                static_cast<std::uint8_t>(targetAtomIdx);
-          }
-        } else {
-          const int slot = atomicAdd(&scratch.nextCount, 1);
-          if (slot < effectiveCapacity) {
-            std::uint8_t* next = nextPartials + slot * stride;
-            for (int orderPos = 0; orderPos < depth; ++orderPos) {
-              next[orderPos] = partial[orderPos];
-            }
-            next[depth] = static_cast<std::uint8_t>(targetAtomIdx);
-          } else {
-            atomicExch(&scratch.overflowed, 1);
-          }
+        for (int targetScanIdx = targetScanBegin + laneRank;
+             targetScanIdx < targetScanEnd && scratch.found == 0;
+             targetScanIdx += laneCount) {
+          const int targetAtomIdx =
+              scanAdjacency
+                  ? static_cast<int>(targetTopology.colIndices[targetScanIdx])
+                  : targetScanIdx;
+          tryExtendSubstructurePartialWithinThread(
+              seed, queryTopology, targetTopology, tables, scratch,
+              partial, depth, numSeedAtoms, queryAtomIdx, targetAtomIdx,
+              stride, nextPartials, effectiveCapacity);
         }
       }
     }
