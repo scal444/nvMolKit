@@ -505,6 +505,84 @@ Decision:
 - Rejected. Do not carry forward; return to
   `codex/fmcs-opt-001-adj-fast-match`.
 
+## Experiment 009: cooperative fallback candidate counting
+
+- Branch: `codex/fmcs-opt-009-fallback-candidate-count`
+- Base commit: `7ea4cd7 Parallelize fMCS fallback prep initialization`
+- Status: accepted
+- Benchmark CSV: `/tmp/fmcs_opt009_candidate_count_syncfix.csv`
+- Python build log: `/tmp/nvmolkit-pybuild-fmcs-opt009-syncfix.log`
+- SM120 build log: `/tmp/nvmolkit_fmcs_opt009_sm120_build_syncfix.log`
+- SM89 build log: `/tmp/nvmolkit_fmcs_opt009_sm89_build_syncfix.log`
+
+Optimization tried:
+
+- Changed fallback substructure preparation so all lanes cooperatively count
+  compatible target atom candidates during query atom ordering.
+- Kept lane 0 responsible for seed atom-list construction, seed degree
+  accumulation, mapped-neighbor counting, and deterministic tie-breaking.
+- Used cooperative ballots/popcounts for exact candidate counts while keeping the
+  fallback witness ordering semantics intact.
+- Added a group sync after lane 0 fills shared seed-degree scratch before
+  cooperative lanes read it for candidate counting.
+
+Validation:
+
+- C++ CTest filter `FMCS|FMC`: `123` tests passed in `27.84 s`, including
+  `FMCSIntegrationTest.SeededChemblPairsMatchRDKit`.
+- Python MCS tests from `/tmp`: `22` selected tests passed in `0.86 s`
+  (`test_mcs.py` plus MCS-selected autotune/config tests).
+- `git diff --check`: passed.
+
+Benchmark result:
+
+- Wall time: `3211.794 ms`
+- Throughput: `311.35 pairs/s`
+- Delta vs accepted experiment 008 wall time: `-37.359 ms` (`-1.15%`)
+- Delta vs accepted experiment 008 throughput: `+1.16%`
+- Delta vs original baseline wall time: `-5544.115 ms` (`-63.32%`)
+- Delta vs original baseline throughput: `+172.61%`
+- Per-pair mean: `26.483 ms`
+- Per-pair median: `13.451 ms`
+- Per-pair p90: `49.107 ms`
+- Per-pair p95: `76.983 ms`
+- Per-pair p99: `177.158 ms`
+- Slowest pair: pair index `851`, `3097.165 ms`
+- GPU/fallback/overflow/canceled: `1000/0/0/0`
+
+Resource tracking:
+
+- SM120 block 128 tier128 non-stats:
+  - `80` registers/thread
+  - `13048 B` shared memory
+  - `0 B` stack
+  - `0 B` spill stores
+  - `0 B` spill loads
+- SM120 block 128 tier128 stats:
+  - `80` registers/thread
+  - `13144 B` shared memory
+  - `0 B` stack
+  - `0 B` spill stores
+  - `0 B` spill loads
+- SM89 block 128 tier128 non-stats:
+  - `88` registers/thread
+  - `13048 B` shared memory
+  - `0 B` stack
+  - `0 B` spill stores
+  - `0 B` spill loads
+- SM89 block 128 tier128 stats:
+  - `88` registers/thread
+  - `13144 B` shared memory
+  - `0 B` stack
+  - `0 B` spill stores
+  - `0 B` spill loads
+
+Decision:
+
+- Accepted. The fixed benchmark improved by `1.15%` over experiment 008, SM120
+  block-128 tier128 resources stayed unchanged, and SM89 block-128 tier128
+  register use improved from `90/90` to `88/88`, with no stack or spills.
+
 ## Experiment 003: adjacency target-bond lookup
 
 - Branch: `codex/fmcs-opt-003-adj-bond-lookup`
