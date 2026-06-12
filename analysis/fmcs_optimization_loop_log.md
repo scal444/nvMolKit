@@ -207,3 +207,76 @@ Decision:
 
 - Rejected. Do not carry forward; return to
   `codex/fmcs-opt-001-adj-fast-match`.
+
+## Experiment 003: adjacency target-bond lookup
+
+- Branch: `codex/fmcs-opt-003-adj-bond-lookup`
+- Base commit: `01ce7ea Record rejected fMCS remaining-bound experiment`
+- Status: accepted
+- Benchmark CSV: `/tmp/fmcs_opt003_adj_bond_lookup_block128_seed42_1k.csv`
+- Python build log: `/tmp/nvmolkit-pybuild-fmcs-opt003.log`
+- SM120 build log: `/tmp/nvmolkit_fmcs_opt003_sm120_build.log`
+- SM89 build log: `/tmp/nvmolkit_fmcs_opt003_sm89_build.log`
+
+Optimization tried:
+
+- Used target CSR adjacency bond ids for the fast incremental match
+  ring-closing case.
+- Used target CSR adjacency bond ids in
+  `findTargetBondBetweenAtomsWithinThread`, which feeds fallback rebuild and
+  substructure edge-consistency checks.
+- Preserved all-bond scans as fallbacks for topology views without adjacency
+  bond ids.
+
+Validation:
+
+- `test_fmcs_unit --gtest_brief=1`: `58` tests passed in `218 ms`.
+- `test_fmcs --gtest_brief=1`: `62` tests passed in `1502 ms`.
+- `git diff --check`: passed.
+
+Benchmark result:
+
+- Wall time: `7523.345 ms`
+- Throughput: `132.92 pairs/s`
+- Delta vs accepted experiment 001 wall time: `-590.017 ms` (`-7.27%`)
+- Delta vs accepted experiment 001 throughput: `+7.85%`
+- Delta vs original baseline wall time: `-1232.564 ms` (`-14.08%`)
+- Delta vs original baseline throughput: `+16.38%`
+- Per-pair mean: `53.157 ms`
+- Per-pair median: `22.112 ms`
+- Per-pair p90: `98.753 ms`
+- Per-pair p95: `161.680 ms`
+- Per-pair p99: `386.781 ms`
+- Slowest pair: pair index `851`, `7649.792 ms`
+- GPU/fallback/overflow/canceled: `1000/0/0/0`
+
+Resource tracking:
+
+- SM120 block 128 tier128 non-stats:
+  - `80` registers/thread
+  - `13048 B` shared memory
+  - `0 B` stack
+  - `0 B` spill stores
+  - `0 B` spill loads
+- SM120 block 128 tier128 stats:
+  - `80` registers/thread
+  - `13144 B` shared memory
+  - `0 B` stack
+  - `0 B` spill stores
+  - `0 B` spill loads
+- SM89 block 128 tier128 non-stats:
+  - `89` registers/thread
+  - `13048 B` shared memory
+  - `0 B` stack
+  - `0 B` spill stores
+  - `0 B` spill loads
+- SM89 block 128 tier128 stats:
+  - `89` registers/thread
+  - `13144 B` shared memory
+  - `0 B` stack
+  - `0 B` spill stores
+  - `0 B` spill loads
+
+Decision:
+
+- Accepted. Carry future experiment branches forward from this branch.

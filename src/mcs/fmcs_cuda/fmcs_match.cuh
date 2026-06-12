@@ -222,30 +222,64 @@ __device__ __forceinline__ bool matchIncrementalFastCooperative(
         // endpoints are exactly the pair { targetForQueryU, targetForQueryV }.
         const int srcTargetAtom = targetForQueryU;
         const int dstTargetAtom = targetForQueryV;
-        for (int targetBondIdx = laneRank;
-             targetBondIdx < targetTopology.numBonds && chosenTargetBond < 0;
-             targetBondIdx += laneCount) {
-          // Skip target bonds already used by the parent's match.
-          const TargetBondWord visitedBondsWord =
-              match.visitedTargetBonds[targetBondIdx / kTargetBondBitsPerWord];
-          if ((visitedBondsWord >> (targetBondIdx % kTargetBondBitsPerWord)) & 1) {
-            continue;
+        const bool scanAdjacency =
+            targetTopology.rowOffsets != nullptr &&
+            targetTopology.colIndices != nullptr &&
+            targetTopology.bondIndices != nullptr &&
+            srcTargetAtom >= 0 &&
+            srcTargetAtom < targetTopology.numAtoms;
+        if (scanAdjacency) {
+          const int begin =
+              static_cast<int>(targetTopology.rowOffsets[srcTargetAtom]);
+          const int end =
+              static_cast<int>(targetTopology.rowOffsets[srcTargetAtom + 1]);
+          for (int adjIdx = begin + laneRank;
+               adjIdx < end && chosenTargetBond < 0;
+               adjIdx += laneCount) {
+            const int otherTargetAtom =
+                static_cast<int>(targetTopology.colIndices[adjIdx]);
+            if (otherTargetAtom != dstTargetAtom) continue;
+            const int targetBondIdx =
+                static_cast<int>(targetTopology.bondIndices[adjIdx]);
+            if (targetBondIdx < 0 ||
+                targetBondIdx >= targetTopology.numBonds ||
+                targetBondIdx >= maxTB) {
+              continue;
+            }
+            const TargetBondWord visitedBondsWord =
+                match.visitedTargetBonds[targetBondIdx / kTargetBondBitsPerWord];
+            if ((visitedBondsWord >> (targetBondIdx % kTargetBondBitsPerWord)) & 1) {
+              continue;
+            }
+            if (!tables.bonds.testBit(queryBondIdx, targetBondIdx)) continue;
+            chosenTargetBond = targetBondIdx;
           }
-          const std::uint32_t targetEndpoints =
-              targetTopology.bondEndpoints[targetBondIdx];
-          const int targetEndpointU =
-              static_cast<int>(targetEndpoints >> kBondEndpointShift);
-          const int targetEndpointV =
-              static_cast<int>(targetEndpoints & kBondEndpointMask);
-          // Match either orientation -- target bonds are undirected.
-          const bool endpointsMatch =
-              (targetEndpointU == srcTargetAtom &&
-               targetEndpointV == dstTargetAtom) ||
-              (targetEndpointU == dstTargetAtom &&
-               targetEndpointV == srcTargetAtom);
-          if (!endpointsMatch) continue;
-          if (!tables.bonds.testBit(queryBondIdx, targetBondIdx)) continue;
-          chosenTargetBond = targetBondIdx;
+        } else {
+          for (int targetBondIdx = laneRank;
+               targetBondIdx < targetTopology.numBonds && chosenTargetBond < 0;
+               targetBondIdx += laneCount) {
+            // Skip target bonds already used by the parent's match.
+            const TargetBondWord visitedBondsWord =
+                match.visitedTargetBonds[targetBondIdx / kTargetBondBitsPerWord];
+            if ((visitedBondsWord >> (targetBondIdx % kTargetBondBitsPerWord)) & 1) {
+              continue;
+            }
+            const std::uint32_t targetEndpoints =
+                targetTopology.bondEndpoints[targetBondIdx];
+            const int targetEndpointU =
+                static_cast<int>(targetEndpoints >> kBondEndpointShift);
+            const int targetEndpointV =
+                static_cast<int>(targetEndpoints & kBondEndpointMask);
+            // Match either orientation -- target bonds are undirected.
+            const bool endpointsMatch =
+                (targetEndpointU == srcTargetAtom &&
+                 targetEndpointV == dstTargetAtom) ||
+                (targetEndpointU == dstTargetAtom &&
+                 targetEndpointV == srcTargetAtom);
+            if (!endpointsMatch) continue;
+            if (!tables.bonds.testBit(queryBondIdx, targetBondIdx)) continue;
+            chosenTargetBond = targetBondIdx;
+          }
         }
       } else {
         // Atom-adding: one query endpoint (`src`) is already mapped to
@@ -399,6 +433,31 @@ __device__ __forceinline__ bool findTargetBondBetweenAtomsWithinThread(
     const TargetTopology& targetTopology,
     const PairMatchTablesDevice& tables,
     int& outTargetBondIdx) {
+  const bool scanAdjacency =
+      targetTopology.rowOffsets != nullptr &&
+      targetTopology.colIndices != nullptr &&
+      targetTopology.bondIndices != nullptr &&
+      targetAtomA >= 0 &&
+      targetAtomA < targetTopology.numAtoms;
+  if (scanAdjacency) {
+    const int begin = static_cast<int>(targetTopology.rowOffsets[targetAtomA]);
+    const int end = static_cast<int>(targetTopology.rowOffsets[targetAtomA + 1]);
+    for (int adjIdx = begin; adjIdx < end; ++adjIdx) {
+      const int otherTargetAtom =
+          static_cast<int>(targetTopology.colIndices[adjIdx]);
+      if (otherTargetAtom != targetAtomB) continue;
+      const int targetBondIdx =
+          static_cast<int>(targetTopology.bondIndices[adjIdx]);
+      if (targetBondIdx < 0 || targetBondIdx >= targetTopology.numBonds) {
+        continue;
+      }
+      if (!tables.bonds.testBit(queryBondIdx, targetBondIdx)) continue;
+      outTargetBondIdx = targetBondIdx;
+      return true;
+    }
+    return false;
+  }
+
   for (int targetBondIdx = 0;
        targetBondIdx < targetTopology.numBonds;
        ++targetBondIdx) {
