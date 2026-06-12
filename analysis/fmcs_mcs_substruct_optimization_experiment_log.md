@@ -313,3 +313,53 @@ Decision:
 - Accepted. The performance gain is large enough to justify the no-stats
   register increase, and validation did not expose correctness, race, or sync
   issues.
+
+## Experiment 005: scan 8-lane fallback adjacency subwarps
+
+- Branch: `codex/fmcs-mcs-substruct-opt005-subwarp8-failed`
+- Status: rejected
+- Benchmark CSV:
+  `/tmp/fmcs_mcs_substruct_opt005_subwarp8_nostats_bs512_seed42.csv`
+- SM89 resource build log:
+  `/tmp/fmcs_mcs_substruct_opt005_subwarp8_sm89_resource_build.log`
+- Python install log:
+  `/tmp/fmcs_mcs_substruct_opt005_subwarp8_pip_install.log`
+
+Optimization tried:
+
+- Changed `kFallbackAdjacencySubwarpSize` from `4` to `8`.
+- This gives four 8-lane subwarps per 32-lane group instead of eight 4-lane
+  subwarps.
+- The intent was to trade less partial-mapping concurrency for more lanes per
+  adjacency scan.
+
+Benchmark result:
+
+- Median: `303.136 ms`
+- Mean: `301.173 ms`
+- Stddev: `6.374 ms`
+- Throughput: `3298.85 pairs/s`
+- GPU/fallback/overflow: `1000/0/0`
+- Delta vs accepted experiment 004 median: `+16.284 ms` (`+5.68%`)
+- Result/status comparison against experiment 004 CSV: `0/1000` rows differed
+  for MCS atom count, MCS bond count, cancellation, overflow, GPU use, or
+  fallback status.
+
+SM89 resource result:
+
+- fMCS kernel reports: `60`
+- Stack/spills: `0` stack, `0` spill stores, `0` spill loads in all reports
+- Registers: unchanged from accepted experiment 004 in all variants
+- Shared memory: unchanged from accepted experiment 004 in all variants
+
+Validation:
+
+- Full validation was not run because the benchmark regressed.
+- Resource and 1k output-equivalence checks were enough to reject the size
+  change.
+
+Decision:
+
+- Rejected. Eight-lane subwarps are resource-neutral and output-equivalent on
+  the benchmark sample, but slower than four-lane subwarps. Keep the accepted
+  4-lane setting.
