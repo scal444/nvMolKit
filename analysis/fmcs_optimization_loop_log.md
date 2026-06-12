@@ -287,6 +287,81 @@ Decision:
 - Accepted. It improves wall time and recovers most of experiment 004's SM89
   register regression while preserving zero stack/spills.
 
+## Experiment 006: target adjacency specialization
+
+- Branch: `codex/fmcs-opt-006-target-adj-specialize`
+- Base commit: `956abea Specialize fMCS adjacency-capable CSR views`
+- Status: accepted
+- Benchmark CSV: `/tmp/fmcs_opt006_target_adj_specialize_block128_seed42_1k.csv`
+- Python build log: `/tmp/nvmolkit-pybuild-fmcs-opt006.log`
+- SM120 build log: `/tmp/nvmolkit_fmcs_opt006_sm120_build.log`
+- SM89 build log: `/tmp/nvmolkit_fmcs_opt006_sm89_build.log`
+
+Optimization tried:
+
+- Specialized the remaining target-adjacency-capable production paths with
+  `if constexpr`:
+  - fast incremental ring-closing target-bond lookup
+  - fast incremental atom-adding target-bond lookup
+  - scalar `findTargetBondBetweenAtomsWithinThread`
+- Preserved the runtime adjacency/full-bond-scan fallback for fallback-capable
+  topology views.
+- Kept defensive atom/bond bounds checks on the adjacency-specialized paths.
+
+Validation:
+
+- `test_fmcs_unit --gtest_brief=1`: `58` tests passed in `214 ms`.
+- `test_fmcs --gtest_brief=1`: `62` tests passed in `1430 ms`.
+- `git diff --check`: passed.
+
+Benchmark result:
+
+- Wall time: `3312.570 ms`
+- Throughput: `301.88 pairs/s`
+- Delta vs accepted experiment 005 wall time: `-27.359 ms` (`-0.82%`)
+- Delta vs accepted experiment 005 throughput: `+0.82%`
+- Delta vs original baseline wall time: `-5443.339 ms` (`-62.17%`)
+- Delta vs original baseline throughput: `+164.32%`
+- Per-pair mean: `30.162 ms`
+- Per-pair median: `15.586 ms`
+- Per-pair p90: `56.741 ms`
+- Per-pair p95: `86.996 ms`
+- Per-pair p99: `199.614 ms`
+- Slowest pair: pair index `851`, `3305.392 ms`
+- GPU/fallback/overflow/canceled: `1000/0/0/0`
+
+Resource tracking:
+
+- SM120 block 128 tier128 non-stats:
+  - `80` registers/thread
+  - `13048 B` shared memory
+  - `0 B` stack
+  - `0 B` spill stores
+  - `0 B` spill loads
+- SM120 block 128 tier128 stats:
+  - `80` registers/thread
+  - `13144 B` shared memory
+  - `0 B` stack
+  - `0 B` spill stores
+  - `0 B` spill loads
+- SM89 block 128 tier128 non-stats:
+  - `90` registers/thread
+  - `13048 B` shared memory
+  - `0 B` stack
+  - `0 B` spill stores
+  - `0 B` spill loads
+- SM89 block 128 tier128 stats:
+  - `90` registers/thread
+  - `13144 B` shared memory
+  - `0 B` stack
+  - `0 B` spill stores
+  - `0 B` spill loads
+
+Decision:
+
+- Accepted. Wall time improved slightly and SM89 block-128 tier128 register
+  use improved from `91/92` to `90/90`, with no stack or spills.
+
 ## Experiment 002: adjacency walk for remaining-size bound
 
 - Branch: `codex/fmcs-opt-002-remaining-adj-bound`
