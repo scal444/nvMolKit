@@ -92,6 +92,8 @@ struct DeviceMCSResult {
 /// Non-owning view over one side's CSR + bond-endpoint arrays.  Passed to
 /// matcher/grow helpers as the @c TargetTopology / @c QueryTopology.
 struct DeviceCsrView {
+  static constexpr bool kHasAdjacencyBondIndices = true;
+
   const std::uint32_t* rowOffsets    = nullptr;
   const std::uint32_t* colIndices    = nullptr;
   const std::uint32_t* bondIndices   = nullptr;

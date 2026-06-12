@@ -853,6 +853,8 @@ using mcs::fmcs::MatchTableDevice;
 // QueryTopology / TargetTopology template requirement (bondEndpoints +
 // numAtoms / numBonds), with optional CSR adjacency fields.
 struct TestCsrView {
+  static constexpr bool kHasAdjacencyBondIndices = false;
+
   const std::uint32_t* bondEndpoints = nullptr;
   int numAtoms = 0;
   int numBonds = 0;
