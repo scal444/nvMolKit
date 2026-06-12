@@ -386,6 +386,29 @@ __device__ __forceinline__ void updateIncumbentCooperative(
   group.sync();
 }
 
+__device__ __forceinline__ unsigned int clockCycles1024(
+    unsigned long long clocks) {
+  const unsigned long long quanta = (clocks + 1023ULL) >> 10;
+  return quanta > 0xFFFFFFFFULL ? 0xFFFFFFFFu
+                                : static_cast<unsigned int>(quanta);
+}
+
+__device__ __forceinline__ void addClockCycles1024ValueWithinThread(
+    unsigned int& dst,
+    unsigned int quanta) {
+  const unsigned long long sum =
+      static_cast<unsigned long long>(dst) +
+      static_cast<unsigned long long>(quanta);
+  dst = sum > 0xFFFFFFFFULL ? 0xFFFFFFFFu
+                            : static_cast<unsigned int>(sum);
+}
+
+__device__ __forceinline__ void addClockCycles1024WithinThread(
+    unsigned int& dst,
+    unsigned long long clocks) {
+  addClockCycles1024ValueWithinThread(dst, clockCycles1024(clocks));
+}
+
 template<bool CollectStats,
          int maxAtoms, int maxBonds, int maxTA, int maxTB,
          class QueryTopology, class TargetTopology, class GroupT>
@@ -399,7 +422,8 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
     std::uint8_t* partialStorage,
     int partialCapacity,
     int* overflowedFlag,
-    ExecutionStats& stats) {
+    ExecutionStats& stats,
+    bool countPhase2MatchWork) {
   const int groupRank = static_cast<int>(group.thread_rank());
   if constexpr (CollectStats || kFmcsMeasure) {
     if (groupRank == 0) {
@@ -418,12 +442,24 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
     if constexpr (CollectStats || kFmcsMeasure) {
       if (groupRank == 0) stats.fastAttempts += 1u;
     }
+    unsigned long long matchStartClock = 0;
+    if constexpr (CollectStats || kFmcsMeasure) {
+      if (groupRank == 0) matchStartClock = clock64();
+    }
     ok = matchIncrementalFastCooperative(
         group, candidate.seed, queryTopology, targetTopology, tables,
         candidate.match);
     group.sync();
     if constexpr (CollectStats || kFmcsMeasure) {
-      if (groupRank == 0 && ok) stats.fastSuccess += 1u;
+      if (groupRank == 0) {
+        const unsigned long long elapsed = clock64() - matchStartClock;
+        addClockCycles1024WithinThread(stats.incrementalMatchCycles1024, elapsed);
+        if (countPhase2MatchWork) {
+          addClockCycles1024WithinThread(
+              stats.phase2ActiveMatchCycles1024, elapsed);
+        }
+        if (ok) stats.fastSuccess += 1u;
+      }
     }
   }
 
@@ -433,6 +469,10 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
     }
     const bool overflowBefore =
         overflowedFlag != nullptr ? atomicAdd(overflowedFlag, 0) != 0 : false;
+    unsigned long long matchStartClock = 0;
+    if constexpr (CollectStats || kFmcsMeasure) {
+      if (groupRank == 0) matchStartClock = clock64();
+    }
     ok = matchSeedSubstructureCooperative(
         group, candidate.seed, queryTopology, targetTopology, tables,
         candidate.match, scratch, partialStorage, partialCapacity,
@@ -440,6 +480,13 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
     group.sync();
     if constexpr (CollectStats || kFmcsMeasure) {
       if (groupRank == 0) {
+        const unsigned long long elapsed = clock64() - matchStartClock;
+        addClockCycles1024WithinThread(
+            stats.substructureMatchCycles1024, elapsed);
+        if (countPhase2MatchWork) {
+          addClockCycles1024WithinThread(
+              stats.phase2ActiveMatchCycles1024, elapsed);
+        }
         if (ok) {
           stats.fallbackSuccess += 1u;
         } else if (overflowedFlag != nullptr &&
@@ -490,6 +537,26 @@ __device__ __forceinline__ void addExecutionStatsWithinThread(
   dst.fallbackOverflow += src.fallbackOverflow;
   if (src.maxQueue > dst.maxQueue) dst.maxQueue = src.maxQueue;
   dst.forcedExit |= src.forcedExit;
+  dst.totalClocks += src.totalClocks;
+  dst.phase1Clocks += src.phase1Clocks;
+  dst.phase2Clocks += src.phase2Clocks;
+  addClockCycles1024ValueWithinThread(
+      dst.incrementalMatchCycles1024, src.incrementalMatchCycles1024);
+  addClockCycles1024ValueWithinThread(
+      dst.substructureMatchCycles1024, src.substructureMatchCycles1024);
+  addClockCycles1024ValueWithinThread(
+      dst.phase2PopSyncWaitCycles1024, src.phase2PopSyncWaitCycles1024);
+  addClockCycles1024ValueWithinThread(
+      dst.phase2SyncWaitCycles1024, src.phase2SyncWaitCycles1024);
+  addClockCycles1024ValueWithinThread(
+      dst.phase2IdleNoSeedWaitCycles1024, src.phase2IdleNoSeedWaitCycles1024);
+  addClockCycles1024ValueWithinThread(
+      dst.phase2IdleNoMatchWaitCycles1024, src.phase2IdleNoMatchWaitCycles1024);
+  addClockCycles1024ValueWithinThread(
+      dst.phase2ActiveWorkCycles1024, src.phase2ActiveWorkCycles1024);
+  addClockCycles1024ValueWithinThread(
+      dst.phase2ActiveMatchCycles1024,
+      src.phase2ActiveMatchCycles1024);
 }
 
 template<class GroupT, class QueuedT>
@@ -824,6 +891,8 @@ __global__ void fmcsKernel(
   __shared__ int timedOut;
   __shared__ int phase2Done;
   __shared__ unsigned long long startClock;
+  __shared__ unsigned long long phase1StartClock;
+  __shared__ unsigned long long phase2StartClock;
   __shared__ SubstructureScratchT substructureScratch[kNumGroups];
   __shared__ ExecutionStats groupStats[kStatsEnabled ? kNumGroups : 1];
   __shared__ ExecutionStats measureStats;
@@ -880,6 +949,8 @@ __global__ void fmcsKernel(
     timedOut = 0;
     phase2Done = 0;
     startClock = clock64();
+    phase1StartClock = startClock;
+    phase2StartClock = startClock;
 
     queryView.rowOffsets    = pair.queryRowOffsets;
     queryView.colIndices    = pair.queryColIndices;
@@ -902,6 +973,15 @@ __global__ void fmcsKernel(
       groupStats[statIdx] = ExecutionStats{};
     }
   }
+  // Publish block-shared kernel initialization and stats zeroing before any
+  // group enters phase 1.
+  block.sync();
+  if constexpr (CollectStats || kFmcsMeasure) {
+    if (block.thread_rank() == 0) {
+      phase1StartClock = clock64();
+    }
+  }
+  // Publish phase1StartClock for stats collection before phase-1 work begins.
   block.sync();
 
   if constexpr (kFmcsDebug) {
@@ -928,6 +1008,7 @@ __global__ void fmcsKernel(
   if (block.thread_rank() < Seed<maxAtoms, maxBonds>::kBondWords) {
     initialExcludedBonds[block.thread_rank()] = 0;
   }
+  // Publish initialExcludedBonds zeroing before group 0 builds initial seeds.
   block.sync();
 
   if (groupId == 0) {
@@ -967,8 +1048,8 @@ __global__ void fmcsKernel(
       const bool matched = checkSeedMatchAndAppendCooperative<CollectStats>(
           group, myCurrent, queryView, targetView, pair.tables,
           mySubstructureScratch,
-          mySubstructureStorage, substructurePartialCapacity, &overflowed,
-          myStats);
+          mySubstructureStorage, substructurePartialCapacity,
+          &overflowed, myStats, false);
       if (matched) {
         updateIncumbentCooperative(
             group, myCurrent, best, &bestScore, &bestCopyLock);
@@ -997,12 +1078,23 @@ __global__ void fmcsKernel(
     }
   }
 
+  // Phase-1/phase-2 handoff: every group must finish initial seed queue
+  // mutation before block thread 0 records phase-1 timing and checks timeout.
   block.sync();
+  if constexpr (CollectStats || kFmcsMeasure) {
+    if (block.thread_rank() == 0) {
+      groupStats[0].phase1Clocks = clock64() - phase1StartClock;
+    }
+  }
   if (block.thread_rank() == 0 && timeoutClocks > 0 &&
       clock64() - startClock > timeoutClocks) {
     timedOut = 1;
   }
-  block.sync();
+  if constexpr (CollectStats || kFmcsMeasure) {
+    if (block.thread_rank() == 0) {
+      phase2StartClock = clock64();
+    }
+  }
 
   if constexpr (kFmcsDebug) {
     if (pairIdx == kFmcsDebugPairIdx && block.thread_rank() == 0) {
@@ -1018,12 +1110,13 @@ __global__ void fmcsKernel(
   // sorted-front scheduling order for useful multi-warp work while preserving
   // the full checkIfMatchAndAppend-style substructure validation.
   [[maybe_unused]] int debugIter = 0;
-  while (true) {
-    if (block.thread_rank() == 0) {
-      phase2Done = (overflowed != 0) || (timedOut != 0) || queue.empty();
-    }
-    block.sync();
-    if (phase2Done) break;
+  if (block.thread_rank() == 0) {
+    phase2Done = (overflowed != 0) || (timedOut != 0) || queue.empty();
+  }
+  // Initial phase-2 entry decision.  All threads must agree whether they will
+  // enter the loop before any group can reach the later queue barriers.
+  block.sync();
+  while (!phase2Done) {
 
     if constexpr (CollectStats || kFmcsMeasure) {
       if (block.thread_rank() == 0) {
@@ -1053,7 +1146,25 @@ __global__ void fmcsKernel(
     // All groups must finish popping before any group is allowed to push new
     // work.  The queue reserves a slot before writing it, so pop/push overlap
     // could expose an unwritten or stale queue entry.
+    unsigned long long phase2PopBarrierStartClock = 0;
+    if constexpr (CollectStats || kFmcsMeasure) {
+      if (groupRank == 0) {
+        phase2PopBarrierStartClock = clock64();
+      }
+    }
     block.sync();
+    unsigned long long phase2GroupWorkStartClock = 0;
+    unsigned int phase2MatchCallsBefore = 0;
+    if constexpr (CollectStats || kFmcsMeasure) {
+      if (groupRank == 0) {
+        const unsigned long long afterPopBarrierClock = clock64();
+        addClockCycles1024WithinThread(
+            myStats.phase2PopSyncWaitCycles1024,
+            afterPopBarrierClock - phase2PopBarrierStartClock);
+        phase2GroupWorkStartClock = afterPopBarrierClock;
+        phase2MatchCallsBefore = myStats.matchCalls;
+      }
+    }
 
     do {
       if (!popped[groupId]) break;
@@ -1171,8 +1282,8 @@ __global__ void fmcsKernel(
         const bool ok = checkSeedMatchAndAppendCooperative<CollectStats>(
             group, myBiggest, queryView, targetView, pair.tables,
             mySubstructureScratch,
-            mySubstructureStorage, substructurePartialCapacity, &overflowed,
-            myStats);
+            mySubstructureStorage, substructurePartialCapacity,
+            &overflowed, myStats, true);
         if (groupRank == 0) stage0Ok[groupId] = ok;
         group.sync();
 
@@ -1253,8 +1364,8 @@ __global__ void fmcsKernel(
         const bool ok = checkSeedMatchAndAppendCooperative<CollectStats>(
             group, myBiggest, queryView, targetView, pair.tables,
             mySubstructureScratch,
-            mySubstructureStorage, substructurePartialCapacity, &overflowed,
-            myStats);
+            mySubstructureStorage, substructurePartialCapacity,
+            &overflowed, myStats, true);
         if constexpr (CollectStats || kFmcsMeasure) {
           if (groupRank == 0 && ok) myStats.stage1Success += 1u;
         }
@@ -1363,8 +1474,8 @@ __global__ void fmcsKernel(
           const bool ok = checkSeedMatchAndAppendCooperative<CollectStats>(
               group, myBiggest, queryView, targetView, pair.tables,
               mySubstructureScratch,
-              mySubstructureStorage, substructurePartialCapacity, &overflowed,
-              myStats);
+              mySubstructureStorage, substructurePartialCapacity,
+              &overflowed, myStats, true);
           if (ok) {
             if constexpr (CollectStats || kFmcsMeasure) {
               if (groupRank == 0) myStats.stage2Success += 1u;
@@ -1388,6 +1499,18 @@ __global__ void fmcsKernel(
       }
     } while (false);
 
+    unsigned long long phase2GroupWorkEndClock = 0;
+    if constexpr (CollectStats || kFmcsMeasure) {
+      if (groupRank == 0) {
+        phase2GroupWorkEndClock = clock64();
+        if (popped[groupId]) {
+          addClockCycles1024WithinThread(
+              myStats.phase2ActiveWorkCycles1024,
+              phase2GroupWorkEndClock - phase2GroupWorkStartClock);
+        }
+      }
+    }
+
     if constexpr (kFmcsDebug) {
       if (pairIdx == kFmcsDebugPairIdx && groupRank == 0) {
         printf("[fmcs][grp %d iter %d] L: reached end-of-iter block.sync\n",
@@ -1395,14 +1518,39 @@ __global__ void fmcsKernel(
       }
     }
 
-    // End-of-iteration rendezvous: every group must reach here before
-    // group 0 decides whether the sorted queue is empty.
+    // End-of-iteration rendezvous: every group must finish all queue pushes,
+    // incumbent updates, and overflow writes before group 0 can inspect the
+    // shared queue/flags to decide whether phase 2 is done.
+    unsigned long long phase2EndBarrierStartClock = 0;
+    if constexpr (CollectStats || kFmcsMeasure) {
+      if (groupRank == 0) {
+        phase2EndBarrierStartClock = clock64();
+      }
+    }
+    // Take the end-of-iteration rendezvous before sampling wait time and
+    // before block thread 0 checks timeout.
     block.sync();
+    if constexpr (CollectStats || kFmcsMeasure) {
+      if (groupRank == 0) {
+        const unsigned long long afterEndBarrierClock = clock64();
+        addClockCycles1024WithinThread(
+            myStats.phase2SyncWaitCycles1024,
+            afterEndBarrierClock - phase2EndBarrierStartClock);
+        if (!popped[groupId]) {
+          addClockCycles1024WithinThread(
+              myStats.phase2IdleNoSeedWaitCycles1024,
+              afterEndBarrierClock - phase2GroupWorkStartClock);
+        } else if (phase2MatchCallsBefore == myStats.matchCalls) {
+          addClockCycles1024WithinThread(
+              myStats.phase2IdleNoMatchWaitCycles1024,
+              afterEndBarrierClock - phase2GroupWorkEndClock);
+        }
+      }
+    }
     if (block.thread_rank() == 0 && timeoutClocks > 0 &&
         clock64() - startClock > timeoutClocks) {
       timedOut = 1;
     }
-    block.sync();
 
     if constexpr (kFmcsDebug) {
       if (pairIdx == kFmcsDebugPairIdx && block.thread_rank() == 0) {
@@ -1413,9 +1561,9 @@ __global__ void fmcsKernel(
     if (block.thread_rank() == 0) {
       phase2Done = (overflowed != 0) || (timedOut != 0) || queue.empty();
     }
+    // Publish phase2Done after the end-of-iteration queue/flag inspection.
     block.sync();
     if (phase2Done) break;
-    block.sync();
 
     if constexpr (kFmcsDebug) {
       ++debugIter;
@@ -1440,13 +1588,17 @@ __global__ void fmcsKernel(
   }
 
   if constexpr (CollectStats || kFmcsMeasure) {
+    // Stats reduction reads every group's final counters after all groups have
+    // left phase 2.
     block.sync();
     if (block.thread_rank() == 0) {
+      groupStats[0].phase2Clocks = clock64() - phase2StartClock;
       measureStats = ExecutionStats{};
       for (int statIdx = 0; statIdx < kNumGroups; ++statIdx) {
         addExecutionStatsWithinThread(measureStats, groupStats[statIdx]);
       }
     }
+    // Publish measureStats before later writeback copies it to statsOut.
     block.sync();
   }
 
@@ -1504,11 +1656,13 @@ __global__ void fmcsKernel(
   // ---- Phase 3: writeback ----
   block.sync();
   if (block.thread_rank() == 0) {
+    const unsigned long long totalElapsedClocks = clock64() - startClock;
     if (elapsedClocks != nullptr) {
-      elapsedClocks[pairIdx] = clock64() - startClock;
+      elapsedClocks[pairIdx] = totalElapsedClocks;
     }
     if constexpr (CollectStats) {
       if (statsOut != nullptr) {
+        measureStats.totalClocks = totalElapsedClocks;
         statsOut[pairIdx] = measureStats;
       }
     }

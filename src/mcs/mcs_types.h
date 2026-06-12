@@ -94,6 +94,17 @@ struct MCSExecutionStats {
   unsigned int fallbackOverflow = 0;
   unsigned int maxQueue = 0;
   unsigned int forcedExit = 0;
+  unsigned long long totalClocks = 0;
+  unsigned long long phase1Clocks = 0;
+  unsigned long long phase2Clocks = 0;
+  unsigned int incrementalMatchCycles1024 = 0;
+  unsigned int substructureMatchCycles1024 = 0;
+  unsigned int phase2PopSyncWaitCycles1024 = 0;
+  unsigned int phase2SyncWaitCycles1024 = 0;
+  unsigned int phase2IdleNoSeedWaitCycles1024 = 0;
+  unsigned int phase2IdleNoMatchWaitCycles1024 = 0;
+  unsigned int phase2ActiveWorkCycles1024 = 0;
+  unsigned int phase2ActiveMatchCycles1024 = 0;
 };
 
 struct MCSResult {

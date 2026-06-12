@@ -413,6 +413,18 @@ MCSExecutionStats convertExecutionStats(const mcs::fmcs::ExecutionStats& in) {
   out.fallbackOverflow = in.fallbackOverflow;
   out.maxQueue = in.maxQueue;
   out.forcedExit = in.forcedExit;
+  out.totalClocks = in.totalClocks;
+  out.phase1Clocks = in.phase1Clocks;
+  out.phase2Clocks = in.phase2Clocks;
+  out.incrementalMatchCycles1024 = in.incrementalMatchCycles1024;
+  out.substructureMatchCycles1024 = in.substructureMatchCycles1024;
+  out.phase2PopSyncWaitCycles1024 = in.phase2PopSyncWaitCycles1024;
+  out.phase2SyncWaitCycles1024 = in.phase2SyncWaitCycles1024;
+  out.phase2IdleNoSeedWaitCycles1024 = in.phase2IdleNoSeedWaitCycles1024;
+  out.phase2IdleNoMatchWaitCycles1024 = in.phase2IdleNoMatchWaitCycles1024;
+  out.phase2ActiveWorkCycles1024 = in.phase2ActiveWorkCycles1024;
+  out.phase2ActiveMatchCycles1024 =
+      in.phase2ActiveMatchCycles1024;
   return out;
 }
 

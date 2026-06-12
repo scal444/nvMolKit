@@ -59,6 +59,17 @@ FMCS_STATS_COLUMNS = [
     "fallback_overflow",
     "max_queue",
     "forced_exit",
+    "total_clocks",
+    "phase1_clocks",
+    "phase2_clocks",
+    "incremental_match_cycles_1024",
+    "substructure_match_cycles_1024",
+    "phase2_pop_sync_wait_cycles_1024",
+    "phase2_sync_wait_cycles_1024",
+    "phase2_idle_no_seed_wait_cycles_1024",
+    "phase2_idle_no_match_wait_cycles_1024",
+    "phase2_active_work_cycles_1024",
+    "phase2_active_match_cycles_1024",
 ]
 
 

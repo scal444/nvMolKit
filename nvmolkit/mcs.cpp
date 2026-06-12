@@ -67,6 +67,17 @@ struct MCSResultBuffers {
   std::vector<std::uint32_t> statsFallbackOverflow;
   std::vector<std::uint32_t> statsMaxQueue;
   std::vector<std::uint32_t> statsForcedExit;
+  std::vector<unsigned long long> statsTotalClocks;
+  std::vector<unsigned long long> statsPhase1Clocks;
+  std::vector<unsigned long long> statsPhase2Clocks;
+  std::vector<std::uint32_t> statsIncrementalMatchCycles1024;
+  std::vector<std::uint32_t> statsSubstructureMatchCycles1024;
+  std::vector<std::uint32_t> statsPhase2PopSyncWaitCycles1024;
+  std::vector<std::uint32_t> statsPhase2SyncWaitCycles1024;
+  std::vector<std::uint32_t> statsPhase2IdleNoSeedWaitCycles1024;
+  std::vector<std::uint32_t> statsPhase2IdleNoMatchWaitCycles1024;
+  std::vector<std::uint32_t> statsPhase2ActiveWorkCycles1024;
+  std::vector<std::uint32_t> statsPhase2ActiveMatchCycles1024;
   std::vector<std::string>  smartsStrings;
 
   std::vector<std::int32_t> atomMapping;
@@ -213,6 +224,17 @@ void reserveStats(MCSResultBuffers& buffers, std::size_t size) {
   buffers.statsFallbackOverflow.reserve(size);
   buffers.statsMaxQueue.reserve(size);
   buffers.statsForcedExit.reserve(size);
+  buffers.statsTotalClocks.reserve(size);
+  buffers.statsPhase1Clocks.reserve(size);
+  buffers.statsPhase2Clocks.reserve(size);
+  buffers.statsIncrementalMatchCycles1024.reserve(size);
+  buffers.statsSubstructureMatchCycles1024.reserve(size);
+  buffers.statsPhase2PopSyncWaitCycles1024.reserve(size);
+  buffers.statsPhase2SyncWaitCycles1024.reserve(size);
+  buffers.statsPhase2IdleNoSeedWaitCycles1024.reserve(size);
+  buffers.statsPhase2IdleNoMatchWaitCycles1024.reserve(size);
+  buffers.statsPhase2ActiveWorkCycles1024.reserve(size);
+  buffers.statsPhase2ActiveMatchCycles1024.reserve(size);
 }
 
 void appendStats(MCSResultBuffers& buffers, const nvMolKit::MCSExecutionStats& stats) {
@@ -241,6 +263,17 @@ void appendStats(MCSResultBuffers& buffers, const nvMolKit::MCSExecutionStats& s
   buffers.statsFallbackOverflow.push_back(stats.fallbackOverflow);
   buffers.statsMaxQueue.push_back(stats.maxQueue);
   buffers.statsForcedExit.push_back(stats.forcedExit);
+  buffers.statsTotalClocks.push_back(stats.totalClocks);
+  buffers.statsPhase1Clocks.push_back(stats.phase1Clocks);
+  buffers.statsPhase2Clocks.push_back(stats.phase2Clocks);
+  buffers.statsIncrementalMatchCycles1024.push_back(stats.incrementalMatchCycles1024);
+  buffers.statsSubstructureMatchCycles1024.push_back(stats.substructureMatchCycles1024);
+  buffers.statsPhase2PopSyncWaitCycles1024.push_back(stats.phase2PopSyncWaitCycles1024);
+  buffers.statsPhase2SyncWaitCycles1024.push_back(stats.phase2SyncWaitCycles1024);
+  buffers.statsPhase2IdleNoSeedWaitCycles1024.push_back(stats.phase2IdleNoSeedWaitCycles1024);
+  buffers.statsPhase2IdleNoMatchWaitCycles1024.push_back(stats.phase2IdleNoMatchWaitCycles1024);
+  buffers.statsPhase2ActiveWorkCycles1024.push_back(stats.phase2ActiveWorkCycles1024);
+  buffers.statsPhase2ActiveMatchCycles1024.push_back(stats.phase2ActiveMatchCycles1024);
 }
 
 dict statsToPythonDict(MCSResultBuffers& buffers, const object& owner) {
@@ -270,6 +303,17 @@ dict statsToPythonDict(MCSResultBuffers& buffers, const object& owner) {
   out["fallback_overflow"] = make1dArray(buffers.statsFallbackOverflow, owner);
   out["max_queue"] = make1dArray(buffers.statsMaxQueue, owner);
   out["forced_exit"] = make1dArray(buffers.statsForcedExit, owner);
+  out["total_clocks"] = make1dArray(buffers.statsTotalClocks, owner);
+  out["phase1_clocks"] = make1dArray(buffers.statsPhase1Clocks, owner);
+  out["phase2_clocks"] = make1dArray(buffers.statsPhase2Clocks, owner);
+  out["incremental_match_cycles_1024"] = make1dArray(buffers.statsIncrementalMatchCycles1024, owner);
+  out["substructure_match_cycles_1024"] = make1dArray(buffers.statsSubstructureMatchCycles1024, owner);
+  out["phase2_pop_sync_wait_cycles_1024"] = make1dArray(buffers.statsPhase2PopSyncWaitCycles1024, owner);
+  out["phase2_sync_wait_cycles_1024"] = make1dArray(buffers.statsPhase2SyncWaitCycles1024, owner);
+  out["phase2_idle_no_seed_wait_cycles_1024"] = make1dArray(buffers.statsPhase2IdleNoSeedWaitCycles1024, owner);
+  out["phase2_idle_no_match_wait_cycles_1024"] = make1dArray(buffers.statsPhase2IdleNoMatchWaitCycles1024, owner);
+  out["phase2_active_work_cycles_1024"] = make1dArray(buffers.statsPhase2ActiveWorkCycles1024, owner);
+  out["phase2_active_match_cycles_1024"] = make1dArray(buffers.statsPhase2ActiveMatchCycles1024, owner);
   return out;
 }
 

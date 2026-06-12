@@ -257,6 +257,24 @@ TEST(FMCSDispatch, OptionalPerPairTimingsArePopulated) {
   }
 }
 
+TEST(FMCSDispatch, OptionalExecutionStatsIncludeGranularTimings) {
+  std::vector<Graph> graphs{path(4), cycle(6)};
+  std::vector<mcs::fmcs::ExecutionStats> stats;
+  auto rs = mcs::fmcs::findMCESfMCSBatch(
+      graphs, graphs, Parameters{}, nullptr, nullptr, &stats);
+
+  ASSERT_EQ(rs.size(), graphs.size());
+  ASSERT_EQ(stats.size(), graphs.size());
+  for (const auto& item : stats) {
+    EXPECT_GT(item.totalClocks, 0ULL);
+    EXPECT_GT(item.phase1Clocks, 0ULL);
+    EXPECT_GT(item.phase2Clocks, 0ULL);
+    EXPECT_GT(item.incrementalMatchCycles1024 + item.substructureMatchCycles1024, 0u);
+    EXPECT_GT(item.phase2ActiveWorkCycles1024, 0u);
+    EXPECT_GT(item.phase2SyncWaitCycles1024, 0u);
+  }
+}
+
 TEST(FMCSDispatch, MismatchedBatchSizesThrows) {
   std::vector<Graph> a{path(2)};
   std::vector<Graph> b{};

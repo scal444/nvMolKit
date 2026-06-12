@@ -103,6 +103,28 @@ def test_collect_stats_reports_per_pair_fmcs_counters():
     assert result.fmcs_stats["initial_seeds"].shape == (len(pairs),)
     assert (result.fmcs_stats["initial_seeds"] > 0).all()
     assert (result.fmcs_stats["match_calls"] >= result.fmcs_stats["match_found"]).all()
+    for key in (
+        "total_clocks",
+        "phase1_clocks",
+        "phase2_clocks",
+        "incremental_match_cycles_1024",
+        "substructure_match_cycles_1024",
+        "phase2_pop_sync_wait_cycles_1024",
+        "phase2_sync_wait_cycles_1024",
+        "phase2_idle_no_seed_wait_cycles_1024",
+        "phase2_idle_no_match_wait_cycles_1024",
+        "phase2_active_work_cycles_1024",
+        "phase2_active_match_cycles_1024",
+    ):
+        assert result.fmcs_stats[key].shape == (len(pairs),)
+    assert (result.fmcs_stats["total_clocks"] > 0).all()
+    assert (result.fmcs_stats["phase1_clocks"] > 0).all()
+    assert (result.fmcs_stats["phase2_clocks"] > 0).all()
+    assert (
+        result.fmcs_stats["incremental_match_cycles_1024"]
+        + result.fmcs_stats["substructure_match_cycles_1024"]
+        > 0
+    ).all()
     assert result[0].fmcs_stats is not None
     assert result[0].fmcs_stats["initial_seeds"] == int(result.fmcs_stats["initial_seeds"][0])
 
