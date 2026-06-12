@@ -1274,7 +1274,8 @@ __device__ __forceinline__ bool substructurePartialEdgeConsistentWithinThread(
   }
 }
 
-template<int maxAtoms, int maxBonds, int maxTA, int maxTB,
+template<bool HoistNeighborOrder = true,
+         int maxAtoms, int maxBonds, int maxTA, int maxTB,
          class QueryTopology, class TargetTopology, class GroupT,
          class OverflowFlagT>
 __device__ __forceinline__ bool matchSeedSubstructureCooperative(
@@ -1376,20 +1377,43 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(
         scratch.currentCount < effectiveCapacity
             ? scratch.currentCount
             : effectiveCapacity;
+    if constexpr (HoistNeighborOrder) {
+      if (laneRank == 0) {
+        int neighborOrderPos = -1;
+        const bool hasMappedNeighbor =
+            findMappedQueryNeighborWithinThread(
+                seed, queryTopology, scratch, depth, queryAtomIdx,
+                neighborOrderPos);
+        scratch.orderedQueryAtom[queryAtomIdx] =
+            hasMappedNeighbor &&
+                    targetTopology.rowOffsets != nullptr &&
+                    targetTopology.colIndices != nullptr
+                ? static_cast<std::uint8_t>(neighborOrderPos)
+                : kUnmappedTargetIdx;
+      }
+      group.sync();
+    }
 
     for (int partialIdx = 0;
          partialIdx < numPartials && scratch.found == 0;
          ++partialIdx) {
       const std::uint8_t* partial = currentPartials + partialIdx * stride;
       int neighborOrderPos = -1;
-      const bool hasMappedNeighbor =
-          findMappedQueryNeighborWithinThread(
-              seed, queryTopology, scratch, depth, queryAtomIdx,
-              neighborOrderPos);
-      const bool scanAdjacency =
-          hasMappedNeighbor &&
-          targetTopology.rowOffsets != nullptr &&
-          targetTopology.colIndices != nullptr;
+      bool scanAdjacency = false;
+      if constexpr (HoistNeighborOrder) {
+        neighborOrderPos =
+            static_cast<int>(scratch.orderedQueryAtom[queryAtomIdx]);
+        scanAdjacency = neighborOrderPos != kUnmappedTargetIdx;
+      } else {
+        const bool hasMappedNeighbor =
+            findMappedQueryNeighborWithinThread(
+                seed, queryTopology, scratch, depth, queryAtomIdx,
+                neighborOrderPos);
+        scanAdjacency =
+            hasMappedNeighbor &&
+            targetTopology.rowOffsets != nullptr &&
+            targetTopology.colIndices != nullptr;
+      }
       const int targetScanBegin =
           scanAdjacency ? static_cast<int>(
                               targetTopology.rowOffsets[partial[neighborOrderPos]])
@@ -1501,7 +1525,7 @@ __device__ __forceinline__ bool matchSeedWithSubstructureFallbackCooperative(
     while (atomicCAS(scratchLock, 0, 1) != 0) {}
   }
   group.sync();
-  const bool ok = matchSeedSubstructureCooperative(
+  const bool ok = matchSeedSubstructureCooperative<true>(
       group, seed, queryTopology, targetTopology, tables, match, scratch,
       partialStorage, partialCapacity, overflowedFlag);
   group.sync();

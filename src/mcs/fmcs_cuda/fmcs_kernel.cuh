@@ -507,7 +507,7 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
     if constexpr (CollectStats || kFmcsMeasure) {
       if (groupRank == 0) matchStartClock = clock64();
     }
-    ok = matchSeedSubstructureCooperative(
+    ok = matchSeedSubstructureCooperative<!CollectStats && !kFmcsMeasure>(
         group, candidate.seed, queryTopology, targetTopology, tables,
         candidate.match, scratch, partialStorage, partialCapacity,
         overflowedFlag);
