@@ -138,6 +138,82 @@ Decision:
 
 - Accepted. Carry future experiment branches forward from this branch.
 
+## Experiment 004: fallback query adjacency scans
+
+- Branch: `codex/fmcs-opt-004-fallback-query-adj`
+- Base commit: `aad968b Optimize fMCS target bond lookups with adjacency`
+- Status: accepted
+- Benchmark CSV: `/tmp/fmcs_opt004_fallback_query_adj_block128_seed42_1k.csv`
+- Python build log: `/tmp/nvmolkit-pybuild-fmcs-opt004.log`
+- SM120 build log: `/tmp/nvmolkit_fmcs_opt004_sm120_build.log`
+- SM89 build log: `/tmp/nvmolkit_fmcs_opt004_sm89_build.log`
+
+Optimization tried:
+
+- Added a scalar `seedContainsBondWithinThread` bitset helper.
+- Used target CSR row lengths to compute fallback target degrees instead of
+  decoding all target bond endpoints.
+- Used query CSR adjacency bond ids for fallback mapped-neighbor counting,
+  mapped-neighbor selection, and partial edge-consistency checks.
+- Kept all previous seed-bond scans as fallbacks for topology views without
+  adjacency bond ids.
+
+Validation:
+
+- `test_fmcs_unit --gtest_brief=1`: `58` tests passed in `214 ms`.
+- `test_fmcs --gtest_brief=1`: `62` tests passed in `1446 ms`.
+- `git diff --check`: passed.
+
+Benchmark result:
+
+- Wall time: `3461.522 ms`
+- Throughput: `288.89 pairs/s`
+- Delta vs accepted experiment 003 wall time: `-4061.823 ms` (`-53.99%`)
+- Delta vs accepted experiment 003 throughput: `+117.34%`
+- Delta vs original baseline wall time: `-5294.387 ms` (`-60.47%`)
+- Delta vs original baseline throughput: `+152.94%`
+- Per-pair mean: `32.120 ms`
+- Per-pair median: `16.979 ms`
+- Per-pair p90: `59.595 ms`
+- Per-pair p95: `93.767 ms`
+- Per-pair p99: `205.574 ms`
+- Slowest pair: pair index `851`, `3459.965 ms`
+- GPU/fallback/overflow/canceled: `1000/0/0/0`
+
+Resource tracking:
+
+- SM120 block 128 tier128 non-stats:
+  - `80` registers/thread
+  - `13048 B` shared memory
+  - `0 B` stack
+  - `0 B` spill stores
+  - `0 B` spill loads
+- SM120 block 128 tier128 stats:
+  - `80` registers/thread
+  - `13144 B` shared memory
+  - `0 B` stack
+  - `0 B` spill stores
+  - `0 B` spill loads
+- SM89 block 128 tier128 non-stats:
+  - `98` registers/thread
+  - `13048 B` shared memory
+  - `0 B` stack
+  - `0 B` spill stores
+  - `0 B` spill loads
+- SM89 block 128 tier128 stats:
+  - `98` registers/thread
+  - `13144 B` shared memory
+  - `0 B` stack
+  - `0 B` spill stores
+  - `0 B` spill loads
+
+Decision:
+
+- Accepted despite the SM89 register regression because the fixed benchmark
+  wall time improved by `53.99%` from the previous accepted branch with no
+  stack or spills. Next resource-focused work should try to recover SM89
+  register pressure without giving back the adjacency fallback win.
+
 ## Experiment 002: adjacency walk for remaining-size bound
 
 - Branch: `codex/fmcs-opt-002-remaining-adj-bound`
