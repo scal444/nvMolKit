@@ -271,7 +271,7 @@ TEST(FMCSDispatch, OptionalExecutionStatsIncludeGranularTimings) {
     EXPECT_GT(item.phase2Clocks, 0ULL);
     EXPECT_GT(item.incrementalMatchCycles1024 + item.substructureMatchCycles1024, 0u);
     EXPECT_GT(item.phase2ActiveWorkCycles1024, 0u);
-    EXPECT_GT(item.phase2SyncWaitCycles1024, 0u);
+    EXPECT_EQ(item.phase2SyncWaitCycles1024, 0u);
   }
 }
 

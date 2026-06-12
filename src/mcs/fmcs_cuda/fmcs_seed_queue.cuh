@@ -164,11 +164,17 @@ class SeedQueue {
   __device__ __forceinline__ const Element& slot(int i) const { return storage_[i]; }
 
   __device__ __forceinline__ int size() const { return top_; }
+  __device__ __forceinline__ int sizeAtomic() const {
+    return atomicAdd(const_cast<int*>(&top_), 0);
+  }
   __device__ __forceinline__ bool empty() const { return top_ == 0; }
   __device__ __forceinline__ bool full() const { return top_ >= capacity_; }
   __device__ __forceinline__ int capacity() const { return capacity_; }
 
   __device__ __forceinline__ void setSizeWithinThread(int size) { top_ = size; }
+  __device__ __forceinline__ void setSizeAtomicWithinThread(int size) {
+    atomicExch(&top_, size);
+  }
   __device__ __forceinline__ void clear() { top_ = 0; }
 
  private:

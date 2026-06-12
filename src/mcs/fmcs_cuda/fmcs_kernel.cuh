@@ -342,6 +342,40 @@ __device__ __forceinline__ std::uint64_t mappingHashWithinThread(
   return hash == 0ULL ? 1ULL : hash;
 }
 
+template<class GroupT, class T>
+__device__ __forceinline__ void warpAtomicStoreWords(
+    const GroupT& group,
+    T* dst,
+    const T& src) {
+  static_assert(sizeof(T) % sizeof(unsigned int) == 0,
+                "atomic word copy requires 32-bit granularity");
+  auto* dstWords = reinterpret_cast<unsigned int*>(dst);
+  const auto* srcWords = reinterpret_cast<const unsigned int*>(&src);
+  constexpr int kWords = static_cast<int>(sizeof(T) / sizeof(unsigned int));
+  for (int i = static_cast<int>(group.thread_rank());
+       i < kWords;
+       i += static_cast<int>(group.num_threads())) {
+    atomicExch(&dstWords[i], srcWords[i]);
+  }
+}
+
+template<class GroupT, class T>
+__device__ __forceinline__ void warpAtomicLoadWords(
+    const GroupT& group,
+    T& dst,
+    T* src) {
+  static_assert(sizeof(T) % sizeof(unsigned int) == 0,
+                "atomic word copy requires 32-bit granularity");
+  auto* dstWords = reinterpret_cast<unsigned int*>(&dst);
+  auto* srcWords = reinterpret_cast<unsigned int*>(src);
+  constexpr int kWords = static_cast<int>(sizeof(T) / sizeof(unsigned int));
+  for (int i = static_cast<int>(group.thread_rank());
+       i < kWords;
+       i += static_cast<int>(group.num_threads())) {
+    dstWords[i] = atomicAdd(&srcWords[i], 0u);
+  }
+}
+
 template<class GroupT, class QueuedT>
 __device__ __forceinline__ void updateIncumbentCooperative(
     const GroupT& group,
@@ -376,7 +410,7 @@ __device__ __forceinline__ void updateIncumbentCooperative(
   locked = group.shfl(locked, 0);
   shouldCopy = group.shfl(shouldCopy, 0);
   if (shouldCopy) {
-    warpCopy(group, &best, &candidate, sizeof(QueuedT));
+    warpAtomicStoreWords(group, &best, candidate);
   }
   group.sync();
   if (groupRank == 0 && locked) {
@@ -644,6 +678,114 @@ __device__ __forceinline__ bool popBackCooperative(
 }
 
 template<class GroupT>
+__device__ __forceinline__ void acquireQueueLockCooperative(
+    const GroupT& group,
+    int* queueLock) {
+  if (group.thread_rank() == 0) {
+    while (atomicCAS(queueLock, 0, 1) != 0) {
+    }
+  }
+  group.sync();
+  __threadfence_block();
+  group.sync();
+}
+
+template<class GroupT>
+__device__ __forceinline__ void releaseQueueLockCooperative(
+    const GroupT& group,
+    int* queueLock) {
+  group.sync();
+  __threadfence_block();
+  group.sync();
+  if (group.thread_rank() == 0) {
+    atomicExch(queueLock, 0);
+  }
+  group.sync();
+}
+
+template<class GroupT, class QueuedT>
+__device__ __forceinline__ bool pushBackLockedCooperative(
+    const GroupT& group,
+    SeedQueue<QueuedT, ThreadBlockScope>& queue,
+    const QueuedT& element,
+    int* queueLock,
+    int* overflowedFlag,
+    int* timedOutFlag,
+    int* doneFlag) {
+  const int groupRank = static_cast<int>(group.thread_rank());
+  int oldSize = 0;
+  int ok = 1;
+  int skip = 0;
+  acquireQueueLockCooperative(group, queueLock);
+  if (groupRank == 0) {
+    skip = (atomicAdd(overflowedFlag, 0) != 0) ||
+           (atomicAdd(timedOutFlag, 0) != 0) ||
+           (atomicAdd(doneFlag, 0) != 0);
+    oldSize = queue.sizeAtomic();
+    ok = (!skip && oldSize < queue.capacity()) ? 1 : 0;
+  }
+  oldSize = group.shfl(oldSize, 0);
+  ok = group.shfl(ok, 0);
+  skip = group.shfl(skip, 0);
+  if (ok) {
+    warpAtomicStoreWords(group, &queue.slot(oldSize), element);
+    group.sync();
+    if (groupRank == 0) queue.setSizeAtomicWithinThread(oldSize + 1);
+  }
+  releaseQueueLockCooperative(group, queueLock);
+  return skip || ok;
+}
+
+template<class GroupT, class QueuedT>
+__device__ __forceinline__ bool popBackLockedOrFinishCooperative(
+    const GroupT& group,
+    SeedQueue<QueuedT, ThreadBlockScope>& queue,
+    QueuedT& outElement,
+    int* queueLock,
+    int* activeGroups,
+    int* doneFlag,
+    int* overflowedFlag,
+    int* timedOutFlag,
+    bool& doneOut) {
+  const int groupRank = static_cast<int>(group.thread_rank());
+  int oldTop = 0;
+  int popped = 0;
+  int done = 0;
+  acquireQueueLockCooperative(group, queueLock);
+  if (groupRank == 0) {
+    const bool aborted = (atomicAdd(overflowedFlag, 0) != 0) ||
+                         (atomicAdd(timedOutFlag, 0) != 0) ||
+                         (atomicAdd(doneFlag, 0) != 0);
+    if (aborted) {
+      atomicExch(doneFlag, 1);
+      done = 1;
+    } else {
+      oldTop = queue.sizeAtomic();
+      if (oldTop > 0) {
+        popped = 1;
+      } else if (atomicAdd(activeGroups, 0) == 0) {
+        atomicExch(doneFlag, 1);
+        done = 1;
+      }
+    }
+  }
+  oldTop = group.shfl(oldTop, 0);
+  popped = group.shfl(popped, 0);
+  done = group.shfl(done, 0);
+  if (popped) {
+    warpAtomicLoadWords(group, outElement, &queue.slot(oldTop - 1));
+    group.sync();
+    if (groupRank == 0) {
+      queue.setSizeAtomicWithinThread(oldTop - 1);
+      atomicAdd(activeGroups, 1);
+    }
+  }
+  releaseQueueLockCooperative(group, queueLock);
+  doneOut = done != 0;
+  return popped != 0;
+}
+
+template<class GroupT>
 __device__ __forceinline__ unsigned int readBestScoreCooperative(
     const GroupT& group,
     const unsigned int* bestScore) {
@@ -874,9 +1016,10 @@ __global__ void fmcsKernel(
   constexpr bool kStatsEnabled = CollectStats || kFmcsMeasure;
 
   // Block-shared resources: the queue, the incumbent, and the early-exit
-  // flags are visible to every group.  Cross-group queue/incumbent updates use
-  // atomics; loop-control reads are made uniform before any branch that can
-  // skip a later block/group rendezvous.
+  // flags are visible to every group.  Cross-group incumbent updates use
+  // atomics.  Phase-2 queue operations hold queueLock across the queue header
+  // update and the cooperative payload copy so pushes cannot expose unwritten
+  // slots to concurrent poppers.
   __shared__ SeedQueue<QueuedT, ThreadBlockScope> queue;
   __shared__ __align__(16) unsigned char bestStorage[sizeof(QueuedT)];
   QueuedT& best = *reinterpret_cast<QueuedT*>(bestStorage);
@@ -890,6 +1033,8 @@ __global__ void fmcsKernel(
   __shared__ int overflowed;
   __shared__ int timedOut;
   __shared__ int phase2Done;
+  __shared__ int phase2ActiveGroups;
+  __shared__ int queueLock;
   __shared__ unsigned long long startClock;
   __shared__ unsigned long long phase1StartClock;
   __shared__ unsigned long long phase2StartClock;
@@ -908,7 +1053,6 @@ __global__ void fmcsKernel(
   QueuedT* biggest = reinterpret_cast<QueuedT*>(biggestStorage);
   __shared__ NewBond newBondsArr[kNumGroups][kMaxNewBondsForTier];
   __shared__ int     newBondCount[kNumGroups];
-  __shared__ bool    popped[kNumGroups];
   __shared__ bool    stage0Ok[kNumGroups];
   __shared__ std::uint8_t remainingAtomStack[kNumGroups][maxAtoms];
   __shared__ typename Seed<maxAtoms, maxBonds>::atom_word_type
@@ -948,6 +1092,8 @@ __global__ void fmcsKernel(
     overflowed = 0;
     timedOut = 0;
     phase2Done = 0;
+    phase2ActiveGroups = 0;
+    queueLock = 0;
     startClock = clock64();
     phase1StartClock = startClock;
     phase2StartClock = startClock;
@@ -1088,7 +1234,7 @@ __global__ void fmcsKernel(
   }
   if (block.thread_rank() == 0 && timeoutClocks > 0 &&
       clock64() - startClock > timeoutClocks) {
-    timedOut = 1;
+    atomicExch(&timedOut, 1);
   }
   if constexpr (CollectStats || kFmcsMeasure) {
     if (block.thread_rank() == 0) {
@@ -1105,54 +1251,41 @@ __global__ void fmcsKernel(
 
   // ---- Phase 2: RDKit Seed::grow() analogue ----
 
-  // Approach 1 uses an atomic LIFO worklist so every warp group can pop and
-  // grow one seed per outer iteration.  This intentionally trades RDKit's
-  // sorted-front scheduling order for useful multi-warp work while preserving
-  // the full checkIfMatchAndAppend-style substructure validation.
+  // Each warp group independently pops, grows, and pushes seeds.  The queue
+  // lock serializes only queue mutation; activeGroups distinguishes a truly
+  // empty search from a transient empty queue while other groups may still
+  // push children.
   [[maybe_unused]] int debugIter = 0;
-  if (block.thread_rank() == 0) {
-    phase2Done = (overflowed != 0) || (timedOut != 0) || queue.empty();
-  }
-  // Initial phase-2 entry decision.  All threads must agree whether they will
-  // enter the loop before any group can reach the later queue barriers.
-  block.sync();
-  while (!phase2Done) {
+  while (true) {
+    if (readFlagCooperative(group, &phase2Done) ||
+        readFlagCooperative(group, &overflowed) ||
+        readFlagCooperative(group, &timedOut)) {
+      break;
+    }
 
     if constexpr (CollectStats || kFmcsMeasure) {
-      if (block.thread_rank() == 0) {
-        groupStats[0].phase2Iters += 1;
-        const unsigned int qsz = static_cast<unsigned int>(queue.size());
-        if (qsz > groupStats[0].maxQueue) groupStats[0].maxQueue = qsz;
-      }
+      if (groupRank == 0) myStats.phase2Iters += 1;
     }
 
     if constexpr (kFmcsDebug) {
-      if (pairIdx == kFmcsDebugPairIdx && block.thread_rank() == 0) {
-        printf("[fmcs][iter %d] queueSize=%d best=(b%d,a%d)\n",
-               debugIter, queue.size(),
+      if (pairIdx == kFmcsDebugPairIdx && groupRank == 0) {
+        printf("[fmcs][grp %d iter %d] best=(b%d,a%d)\n",
+               groupId, debugIter,
                static_cast<int>(best.seed.numBonds),
                static_cast<int>(best.seed.numAtoms));
       }
     }
 
-    const bool poppedThisGroup = popBackCooperative(group, queue, myCurrent);
-    if (groupRank == 0) {
-      popped[groupId] = poppedThisGroup;
-      if constexpr (CollectStats || kFmcsMeasure) {
-        if (popped[groupId]) myStats.popped += 1u;
-      }
-    }
-    group.sync();
-    // All groups must finish popping before any group is allowed to push new
-    // work.  The queue reserves a slot before writing it, so pop/push overlap
-    // could expose an unwritten or stale queue entry.
     unsigned long long phase2PopBarrierStartClock = 0;
     if constexpr (CollectStats || kFmcsMeasure) {
       if (groupRank == 0) {
         phase2PopBarrierStartClock = clock64();
       }
     }
-    block.sync();
+    bool phase2Finished = false;
+    const bool poppedThisGroup = popBackLockedOrFinishCooperative(
+        group, queue, myCurrent, &queueLock, &phase2ActiveGroups,
+        &phase2Done, &overflowed, &timedOut, phase2Finished);
     unsigned long long phase2GroupWorkStartClock = 0;
     unsigned int phase2MatchCallsBefore = 0;
     if constexpr (CollectStats || kFmcsMeasure) {
@@ -1163,12 +1296,13 @@ __global__ void fmcsKernel(
             afterPopBarrierClock - phase2PopBarrierStartClock);
         phase2GroupWorkStartClock = afterPopBarrierClock;
         phase2MatchCallsBefore = myStats.matchCalls;
+        if (poppedThisGroup) myStats.popped += 1u;
       }
     }
+    if (phase2Finished) break;
+    if (!poppedThisGroup) continue;
 
     do {
-      if (!popped[groupId]) break;
-
       if constexpr (kFmcsDebug) {
         if (pairIdx == kFmcsDebugPairIdx && groupRank == 0) {
           printf("[fmcs][grp %d iter %d] A: popped seed (b%d,a%d)\n",
@@ -1299,7 +1433,9 @@ __global__ void fmcsKernel(
           }
           updateIncumbentCooperative(
               group, myBiggest, best, &bestScore, &bestCopyLock);
-          if (!pushBackCooperative(group, queue, myBiggest)) {
+          if (!pushBackLockedCooperative(
+                  group, queue, myBiggest, &queueLock, &overflowed,
+                  &timedOut, &phase2Done)) {
             atomicExch(&overflowed, 1);
           }
           group.sync();
@@ -1308,7 +1444,9 @@ __global__ void fmcsKernel(
               myCurrent.seed.growingStage = kSeedGrowStageInner;
             }
             group.sync();
-            if (!pushBackCooperative(group, queue, myCurrent)) {
+            if (!pushBackLockedCooperative(
+                    group, queue, myCurrent, &queueLock, &overflowed,
+                    &timedOut, &phase2Done)) {
               atomicExch(&overflowed, 1);
             }
             group.sync();
@@ -1372,7 +1510,9 @@ __global__ void fmcsKernel(
         if (ok) {
           updateIncumbentCooperative(
               group, myBiggest, best, &bestScore, &bestCopyLock);
-          if (!pushBackCooperative(group, queue, myBiggest)) {
+          if (!pushBackLockedCooperative(
+                  group, queue, myBiggest, &queueLock, &overflowed,
+                  &timedOut, &phase2Done)) {
             atomicExch(&overflowed, 1);
           }
         } else if (groupRank == 0) {
@@ -1482,7 +1622,9 @@ __global__ void fmcsKernel(
             }
             updateIncumbentCooperative(
                 group, myBiggest, best, &bestScore, &bestCopyLock);
-            if (!pushBackCooperative(group, queue, myBiggest)) {
+            if (!pushBackLockedCooperative(
+                    group, queue, myBiggest, &queueLock, &overflowed,
+                    &timedOut, &phase2Done)) {
               atomicExch(&overflowed, 1);
             }
           }
@@ -1503,74 +1645,43 @@ __global__ void fmcsKernel(
     if constexpr (CollectStats || kFmcsMeasure) {
       if (groupRank == 0) {
         phase2GroupWorkEndClock = clock64();
-        if (popped[groupId]) {
+        addClockCycles1024WithinThread(
+            myStats.phase2ActiveWorkCycles1024,
+            phase2GroupWorkEndClock - phase2GroupWorkStartClock);
+        if (phase2MatchCallsBefore == myStats.matchCalls) {
           addClockCycles1024WithinThread(
-              myStats.phase2ActiveWorkCycles1024,
+              myStats.phase2IdleNoMatchWaitCycles1024,
               phase2GroupWorkEndClock - phase2GroupWorkStartClock);
         }
       }
     }
 
-    if constexpr (kFmcsDebug) {
-      if (pairIdx == kFmcsDebugPairIdx && groupRank == 0) {
-        printf("[fmcs][grp %d iter %d] L: reached end-of-iter block.sync\n",
-               groupId, debugIter);
+    group.sync();
+    if (groupRank == 0) {
+      if (timeoutClocks > 0 && clock64() - startClock > timeoutClocks) {
+        atomicExch(&timedOut, 1);
+        atomicExch(&phase2Done, 1);
       }
+      atomicSub(&phase2ActiveGroups, 1);
     }
+    group.sync();
 
-    // End-of-iteration rendezvous: every group must finish all queue pushes,
-    // incumbent updates, and overflow writes before group 0 can inspect the
-    // shared queue/flags to decide whether phase 2 is done.
-    unsigned long long phase2EndBarrierStartClock = 0;
-    if constexpr (CollectStats || kFmcsMeasure) {
-      if (groupRank == 0) {
-        phase2EndBarrierStartClock = clock64();
-      }
+    if (readFlagCooperative(group, &overflowed) ||
+        readFlagCooperative(group, &timedOut)) {
+      if (groupRank == 0) atomicExch(&phase2Done, 1);
+      break;
     }
-    // Take the end-of-iteration rendezvous before sampling wait time and
-    // before block thread 0 checks timeout.
-    block.sync();
-    if constexpr (CollectStats || kFmcsMeasure) {
-      if (groupRank == 0) {
-        const unsigned long long afterEndBarrierClock = clock64();
-        addClockCycles1024WithinThread(
-            myStats.phase2SyncWaitCycles1024,
-            afterEndBarrierClock - phase2EndBarrierStartClock);
-        if (!popped[groupId]) {
-          addClockCycles1024WithinThread(
-              myStats.phase2IdleNoSeedWaitCycles1024,
-              afterEndBarrierClock - phase2GroupWorkStartClock);
-        } else if (phase2MatchCallsBefore == myStats.matchCalls) {
-          addClockCycles1024WithinThread(
-              myStats.phase2IdleNoMatchWaitCycles1024,
-              afterEndBarrierClock - phase2GroupWorkEndClock);
-        }
-      }
-    }
-    if (block.thread_rank() == 0 && timeoutClocks > 0 &&
-        clock64() - startClock > timeoutClocks) {
-      timedOut = 1;
-    }
-
-    if constexpr (kFmcsDebug) {
-      if (pairIdx == kFmcsDebugPairIdx && block.thread_rank() == 0) {
-        printf("[fmcs][iter %d] M: passed end-of-iter block.sync, queueSize=%d\n",
-               debugIter, queue.size());
-      }
-    }
-    if (block.thread_rank() == 0) {
-      phase2Done = (overflowed != 0) || (timedOut != 0) || queue.empty();
-    }
-    // Publish phase2Done after the end-of-iteration queue/flag inspection.
-    block.sync();
-    if (phase2Done) break;
 
     if constexpr (kFmcsDebug) {
       ++debugIter;
       if (debugIter >= kFmcsDebugMaxIters) {
-        if (pairIdx == kFmcsDebugPairIdx && block.thread_rank() == 0) {
-          printf("[fmcs] WATCHDOG: hit %d iters, queueSize=%d -- forcing exit\n",
-                 debugIter, queue.size());
+        if (pairIdx == kFmcsDebugPairIdx && groupRank == 0) {
+          printf("[fmcs][grp %d] WATCHDOG: hit %d iters -- forcing exit\n",
+                 groupId, debugIter);
+        }
+        if (groupRank == 0) {
+          atomicExch(&timedOut, 1);
+          atomicExch(&phase2Done, 1);
         }
         break;
       }
@@ -1578,9 +1689,10 @@ __global__ void fmcsKernel(
     if constexpr (kFmcsMeasure) {
       ++debugIter;
       if (debugIter >= kFmcsMeasureMaxIters) {
-        if (block.thread_rank() == 0) {
-          groupStats[0].forcedExit = 1;
-          timedOut = 1;
+        if (groupRank == 0) {
+          myStats.forcedExit = 1;
+          atomicExch(&timedOut, 1);
+          atomicExch(&phase2Done, 1);
         }
         break;
       }
