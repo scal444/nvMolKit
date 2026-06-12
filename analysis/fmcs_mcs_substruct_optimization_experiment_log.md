@@ -115,3 +115,70 @@ Decision:
 - Accepted. It improves product/no-stats runtime and register pressure without
   stack, spills, or shared-memory growth, while keeping stats-resource behavior
   at baseline.
+
+## Experiment 002: skip rechecking primary adjacency edge
+
+- Branch: `codex/fmcs-mcs-substruct-optimization`
+- Status: rejected
+- Race-prone benchmark CSV:
+  `/tmp/fmcs_mcs_substruct_opt002b_nostats_bs512_seed42.csv`
+- Race-safe benchmark CSV:
+  `/tmp/fmcs_mcs_substruct_opt002c_nostats_bs512_seed42.csv`
+- Final SM89 resource build log:
+  `/tmp/fmcs_mcs_substruct_opt002c_sm89_resource_build.log`
+
+Optimization tried:
+
+- When fallback candidate generation scans target adjacency from a mapped
+  query neighbor, use the current target adjacency entry's bond id to test the
+  primary query bond directly.
+- Pass the primary query neighbor/order pair into
+  `substructurePartialEdgeConsistentWithinThread` so that edge is not found a
+  second time by scanning target adjacency from the candidate atom.
+- Initial version reused `scratch.targetAtomForQuery[queryAtomIdx]` for the
+  primary query bond id. Racecheck found warnings because successful lanes can
+  write `targetAtomForQuery` while other lanes are still reading it as scratch.
+- Final race-safe version used a dedicated per-group `primaryQueryBondIdx`
+  byte in `FmcsSubstructureScratch`.
+
+Race-prone benchmark result:
+
+- Median: `442.555 ms`
+- Mean: `441.805 ms`
+- Stddev: `4.293 ms`
+- GPU/fallback/overflow: `1000/0/0`
+- Rejected before acceptance because racecheck reported `4` warnings.
+
+Race-safe benchmark result:
+
+- Median: `453.086 ms`
+- Mean: `458.518 ms`
+- Stddev: `15.780 ms`
+- Throughput: `2207.08 pairs/s`
+- GPU/fallback/overflow: `1000/0/0`
+- Delta vs accepted experiment 001 median: `-0.415 ms` (`-0.09%`)
+
+SM89 resource result for race-safe version:
+
+- fMCS kernel reports: `60`
+- Stack/spills: `0` stack, `0` spill stores, `0` spill loads in all reports
+- Product/no-stats registers increased by `+2` in `28` variants and `+3` in
+  `2` variants.
+- Shared memory increased by small padding amounts:
+  - `+16 B` in `8` no-stats and `8` stats variants
+  - `+32 B` in `8` no-stats and `8` stats variants
+  - `+64 B` in `6` no-stats and `6` stats variants
+
+Validation:
+
+- Race-prone version:
+  - Python MCS tests: `14 passed`
+  - Focused C++ fMCS ctests: `124/124 passed`
+  - Racecheck: `4` warnings, rejected
+- Race-safe version:
+  - Rejected after resource and benchmark checks; full validation not run.
+
+Decision:
+
+- Rejected. The race-safe form loses the speedup and increases registers/shared
+  memory, so the accepted branch should continue from experiment 001.
