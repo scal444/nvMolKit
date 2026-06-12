@@ -683,6 +683,69 @@ __device__ __forceinline__ bool rebuildMatchFromSubstructureMappingWithinThread(
   return true;
 }
 
+template<int maxAtoms, int maxTA, class TargetTopology, class GroupT>
+__device__ __forceinline__ void initializeSeedSubstructureScratchCooperative(
+    const GroupT& group,
+    const TargetTopology& targetTopology,
+    FmcsSubstructureScratch<maxAtoms, maxTA>& scratch) {
+  const int laneRank  = static_cast<int>(group.thread_rank());
+  const int laneCount = static_cast<int>(group.num_threads());
+
+  for (int i = laneRank; i < maxAtoms; i += laneCount) {
+    scratch.seedDegree[i] = 0;
+    scratch.orderedQueryAtom[i] = 0;
+    scratch.queryOrderPos[i] = kUnmappedTargetIdx;
+    scratch.targetAtomForQuery[i] = kUnmappedTargetIdx;
+  }
+
+  if constexpr (topologyHasAdjacencyBondIndices<TargetTopology>()) {
+    for (int targetAtomIdx = laneRank;
+         targetAtomIdx < targetTopology.numAtoms;
+         targetAtomIdx += laneCount) {
+      scratch.targetDegree[targetAtomIdx] = static_cast<std::uint8_t>(
+          targetTopology.rowOffsets[targetAtomIdx + 1] -
+          targetTopology.rowOffsets[targetAtomIdx]);
+    }
+  } else {
+    if (targetTopology.rowOffsets != nullptr) {
+      for (int targetAtomIdx = laneRank;
+           targetAtomIdx < targetTopology.numAtoms;
+           targetAtomIdx += laneCount) {
+        scratch.targetDegree[targetAtomIdx] = static_cast<std::uint8_t>(
+            targetTopology.rowOffsets[targetAtomIdx + 1] -
+            targetTopology.rowOffsets[targetAtomIdx]);
+      }
+    } else {
+      for (int i = laneRank; i < maxTA; i += laneCount) {
+        scratch.targetDegree[i] = 0;
+      }
+      group.sync();
+      if (laneRank == 0) {
+        for (int targetBondIdx = 0;
+             targetBondIdx < targetTopology.numBonds;
+             ++targetBondIdx) {
+          const std::uint32_t targetEndpoints =
+              targetTopology.bondEndpoints[targetBondIdx];
+          const int targetEndpointU =
+              static_cast<int>(targetEndpoints >> kBondEndpointShift);
+          const int targetEndpointV =
+              static_cast<int>(targetEndpoints & kBondEndpointMask);
+          ++scratch.targetDegree[targetEndpointU];
+          ++scratch.targetDegree[targetEndpointV];
+        }
+      }
+    }
+  }
+
+  if (laneRank == 0) {
+    scratch.currentCount = 0;
+    scratch.nextCount = 0;
+    scratch.found = 0;
+    scratch.overflowed = 0;
+  }
+  group.sync();
+}
+
 template<int maxAtoms, int maxBonds, int maxTA,
          class QueryTopology, class TargetTopology>
 __device__ __forceinline__ bool prepareSeedSubstructureSearchWithinThread(
@@ -707,20 +770,6 @@ __device__ __forceinline__ bool prepareSeedSubstructureSearchWithinThread(
   }
 
   numSeedAtoms = 0;
-  for (int i = 0; i < maxAtoms; ++i) {
-    scratch.seedDegree[i] = 0;
-    scratch.orderedQueryAtom[i] = 0;
-    scratch.queryOrderPos[i] = kUnmappedTargetIdx;
-    scratch.targetAtomForQuery[i] = kUnmappedTargetIdx;
-  }
-  for (int i = 0; i < maxTA; ++i) {
-    scratch.targetDegree[i] = 0;
-  }
-  scratch.currentCount = 0;
-  scratch.nextCount = 0;
-  scratch.found = 0;
-  scratch.overflowed = 0;
-
   for (int wordIdx = 0; wordIdx < kAtomWords; ++wordIdx) {
     AtomWord remaining = seed.atoms[wordIdx];
     while (remaining != 0) {
@@ -760,38 +809,6 @@ __device__ __forceinline__ bool prepareSeedSubstructureSearchWithinThread(
           static_cast<int>(queryEndpoints & kBondEndpointMask);
       ++scratch.seedDegree[queryEndpointU];
       ++scratch.seedDegree[queryEndpointV];
-    }
-  }
-  if constexpr (topologyHasAdjacencyBondIndices<TargetTopology>()) {
-    for (int targetAtomIdx = 0;
-         targetAtomIdx < targetTopology.numAtoms;
-         ++targetAtomIdx) {
-      scratch.targetDegree[targetAtomIdx] = static_cast<std::uint8_t>(
-          targetTopology.rowOffsets[targetAtomIdx + 1] -
-          targetTopology.rowOffsets[targetAtomIdx]);
-    }
-  } else {
-    if (targetTopology.rowOffsets != nullptr) {
-      for (int targetAtomIdx = 0;
-           targetAtomIdx < targetTopology.numAtoms;
-           ++targetAtomIdx) {
-        scratch.targetDegree[targetAtomIdx] = static_cast<std::uint8_t>(
-            targetTopology.rowOffsets[targetAtomIdx + 1] -
-            targetTopology.rowOffsets[targetAtomIdx]);
-      }
-    } else {
-      for (int targetBondIdx = 0;
-           targetBondIdx < targetTopology.numBonds;
-           ++targetBondIdx) {
-        const std::uint32_t targetEndpoints =
-            targetTopology.bondEndpoints[targetBondIdx];
-        const int targetEndpointU =
-            static_cast<int>(targetEndpoints >> kBondEndpointShift);
-        const int targetEndpointV =
-            static_cast<int>(targetEndpoints & kBondEndpointMask);
-        ++scratch.targetDegree[targetEndpointU];
-        ++scratch.targetDegree[targetEndpointV];
-      }
     }
   }
 
@@ -1216,6 +1233,12 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(
   int prepared = 0;
   if (laneRank == 0) {
     matchResultClearWithinThread(match);
+  }
+  if (seed.numAtoms != 0) {
+    initializeSeedSubstructureScratchCooperative(
+        group, targetTopology, scratch);
+  }
+  if (laneRank == 0) {
     if (seed.numAtoms == 0) {
       prepared = (seed.numBonds == 0) ? 2 : -1;
     } else {
