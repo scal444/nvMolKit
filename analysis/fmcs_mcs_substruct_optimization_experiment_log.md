@@ -182,3 +182,65 @@ Decision:
 
 - Rejected. The race-safe form loses the speedup and increases registers/shared
   memory, so the accepted branch should continue from experiment 001.
+
+## Experiment 003: cache fallback ordering candidate counts
+
+- Branch: `codex/fmcs-mcs-substruct-optimization`
+- Status: accepted
+- Benchmark CSV: `/tmp/fmcs_mcs_substruct_opt003a_nostats_bs512_seed42.csv`
+- SM89 resource build log:
+  `/tmp/fmcs_mcs_substruct_opt003a_sm89_resource_build.log`
+- Python install log: `/tmp/fmcs_mcs_substruct_opt003a_pip_install.log`
+
+Optimization tried:
+
+- During fallback query-atom ordering, cache
+  `countCandidateTargetAtomsCooperative` per query atom.
+- Reused `scratch.targetAtomForQuery[queryAtomIdx]` as a lane-0-only
+  prepare-time cache. This is safe because actual target mappings are written
+  only after a full substructure mapping is found.
+- The candidate count is invariant across ordering rounds, so this avoids
+  repeated full target-atom scans for atoms that remain unordered for multiple
+  rounds.
+
+Benchmark result:
+
+- Median: `434.914 ms`
+- Mean: `434.826 ms`
+- Stddev: `9.773 ms`
+- Throughput: `2299.31 pairs/s`
+- GPU/fallback/overflow: `1000/0/0`
+- Delta vs accepted experiment 001 median: `-18.587 ms` (`-4.10%`)
+- Delta vs queue-lock baseline median: `-57.740 ms` (`-11.72%`)
+
+SM89 resource result:
+
+- fMCS kernel reports: `60`
+- Stack/spills: `0` stack, `0` spill stores, `0` spill loads in all reports
+- Shared memory: unchanged from accepted experiment 001
+- Product/no-stats registers increased by `+2` in `12` variants and `+3` in
+  `2` variants.
+- Stats registers changed by `-2` in `4` variants, `+1` in `4` variants, and
+  `+2` in `8` variants.
+
+Validation:
+
+- Python MCS tests:
+  `python -m pytest /home/kevin/repos/nvmolkit/nvmolkit/tests/test_mcs.py --tb=short`
+  - Result: `14 passed`
+- C++ focused fMCS tests:
+  `ctest --test-dir /tmp/nvmolkit-build-nvmolkit-fmcs-mcs-substruct-tests -R "FMCS" -j 8 --output-on-failure`
+  - Result: `124/124 passed`
+- Racecheck:
+  `compute-sanitizer --tool racecheck --error-exitcode 1` on a single-pair
+  no-stats fMCS Python benchmark
+  - Result: `0 errors`, `0 warnings`
+- Synccheck:
+  `compute-sanitizer --tool synccheck --error-exitcode 1` on the same
+  single-pair no-stats fMCS Python benchmark
+  - Result: `0 errors`
+
+Decision:
+
+- Accepted. The runtime improvement was large enough to justify the small
+  register increase, with no stack, spills, or shared-memory growth.

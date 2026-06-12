@@ -964,8 +964,21 @@ __device__ __forceinline__ bool prepareSeedSubstructureSearchCooperative(
       shouldCount = group.shfl(shouldCount, 0);
       if (!shouldCount) continue;
 
-      const int candidateCount = countCandidateTargetAtomsCooperative(
-          group, queryAtomIdx, targetTopology, tables, scratch);
+      int cachedCandidateCount = kUnmappedTargetIdx;
+      if (laneRank == 0) {
+        // Reused only during ordering; mappings are written after a match is found.
+        cachedCandidateCount = scratch.targetAtomForQuery[queryAtomIdx];
+      }
+      cachedCandidateCount = group.shfl(cachedCandidateCount, 0);
+      int candidateCount = cachedCandidateCount;
+      if (cachedCandidateCount == kUnmappedTargetIdx) {
+        candidateCount = countCandidateTargetAtomsCooperative(
+            group, queryAtomIdx, targetTopology, tables, scratch);
+        if (laneRank == 0) {
+          scratch.targetAtomForQuery[queryAtomIdx] =
+              static_cast<std::uint8_t>(candidateCount);
+        }
+      }
       if (laneRank == 0) {
         if (candidateCount == 0) {
           prepareOk = 0;
