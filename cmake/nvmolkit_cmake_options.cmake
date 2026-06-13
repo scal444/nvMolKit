@@ -24,6 +24,11 @@ option(NVMOLKIT_BUILD_TESTS "Whether or not to build tests" ON)
 option(NVMOLKIT_BUILD_BENCHMARKS "Whether or not to build benchmarks" ON)
 option(NVMOLKIT_BUILD_PYTHON_BINDINGS "Whether or not to build python bindings"
        OFF)
+option(NVMOLKIT_ENABLE_MCS_TIMINGS
+       "Whether or not to compile MCS per-pair timing collection support" ON)
+option(NVMOLKIT_ENABLE_MCS_STATS
+       "Whether or not to compile MCS diagnostic statistics collection support"
+       ON)
 
 set(NVMOLKIT_CUDA_TARGET_MODE
     "default"

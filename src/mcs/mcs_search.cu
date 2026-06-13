@@ -17,6 +17,7 @@
 
 #include "src/mcs/benchmark_data.h"
 #include "src/mcs/fmcs_cuda/fmcs.cuh"
+#include "src/mcs/mcs_compile_flags.h"
 #include "src/utils/device.h"
 
 #include <GraphMol/Atom.h>
@@ -307,13 +308,22 @@ void fillResultBondMapping(const RDKit::ROMol&                          molA,
 }
 
 MCSResult runRDKitFallback(const RDKit::ROMol& molA, const RDKit::ROMol& molB, const MCSParameters& params) {
-  const auto start = std::chrono::steady_clock::now();
+  std::chrono::steady_clock::time_point start;
+  if constexpr (kMCSCollectTimingsEnabled) {
+    if (params.collectTimings) {
+      start = std::chrono::steady_clock::now();
+    }
+  }
   MCSResult result;
   result.usedFallback = true;
   auto finish = [&]() {
-    const auto end = std::chrono::steady_clock::now();
-    result.elapsedMs =
-      static_cast<float>(std::chrono::duration<double, std::milli>(end - start).count());
+    if constexpr (kMCSCollectTimingsEnabled) {
+      if (params.collectTimings) {
+        const auto end = std::chrono::steady_clock::now();
+        result.elapsedMs =
+          static_cast<float>(std::chrono::duration<double, std::milli>(end - start).count());
+      }
+    }
     return result;
   };
 
@@ -623,8 +633,18 @@ void runGpuPairs(std::vector<PreparedGpuPair>& gpuPairs,
 
     std::vector<float> gpuTimesMs;
     std::vector<mcs::fmcs::ExecutionStats> gpuStats;
-    auto* gpuTimesPtr = params.collectTimings ? &gpuTimesMs : nullptr;
-    auto* gpuStatsPtr = params.collectStats ? &gpuStats : nullptr;
+    std::vector<float>* gpuTimesPtr = nullptr;
+    std::vector<mcs::fmcs::ExecutionStats>* gpuStatsPtr = nullptr;
+    if constexpr (kMCSCollectTimingsEnabled) {
+      if (params.collectTimings) {
+        gpuTimesPtr = &gpuTimesMs;
+      }
+    }
+    if constexpr (kMCSCollectStatsEnabled) {
+      if (params.collectStats) {
+        gpuStatsPtr = &gpuStats;
+      }
+    }
     auto gpuResults = mcs::fmcs::findMCESfMCSBatchLabeled(
       gpuGraphsA, gpuGraphsB, fmcsParams, gpuTimesPtr, stream, gpuStatsPtr);
     for (size_t gpuIdx = 0; gpuIdx < gpuResults.size(); ++gpuIdx) {
@@ -639,14 +659,18 @@ void runGpuPairs(std::vector<PreparedGpuPair>& gpuPairs,
         }
         auto fallback = runRDKitFallback(*mols[idxA], *mols[idxB], params);
         fallback.elapsedMs += gpuElapsedMs;
-        if (gpuStatsPtr != nullptr && gpuIdx < gpuStats.size()) {
-          fallback.hasExecutionStats = true;
-          fallback.executionStats = convertExecutionStats(gpuStats[gpuIdx]);
+        if constexpr (kMCSCollectStatsEnabled) {
+          if (gpuStatsPtr != nullptr && gpuIdx < gpuStats.size()) {
+            fallback.hasExecutionStats = true;
+            fallback.executionStats = convertExecutionStats(gpuStats[gpuIdx]);
+          }
         }
         results[resultIdx] = std::move(fallback);
       } else {
-        const auto* statsPtr =
-          gpuStatsPtr != nullptr && gpuIdx < gpuStats.size() ? &gpuStats[gpuIdx] : nullptr;
+        const mcs::fmcs::ExecutionStats* statsPtr = nullptr;
+        if constexpr (kMCSCollectStatsEnabled) {
+          statsPtr = gpuStatsPtr != nullptr && gpuIdx < gpuStats.size() ? &gpuStats[gpuIdx] : nullptr;
+        }
         results[resultIdx] =
           convertGpuResult(*mols[idxA], *mols[idxB], gpuResults[gpuIdx], gpuElapsedMs, statsPtr);
       }
@@ -697,6 +721,20 @@ std::vector<MCSResult> findMCSBatch(const std::vector<const RDKit::ROMol*>& mols
                                     const std::vector<MCSPair>&             pairs,
                                     cudaStream_t                            stream,
                                     const MCSParameters&                    params) {
+  if constexpr (!kMCSCollectTimingsEnabled) {
+    if (params.collectTimings) {
+      throw std::runtime_error(
+          "MCS timing collection was not compiled; rebuild with "
+          "-DNVMOLKIT_ENABLE_MCS_TIMINGS=ON");
+    }
+  }
+  if constexpr (!kMCSCollectStatsEnabled) {
+    if (params.collectStats) {
+      throw std::runtime_error(
+          "MCS statistics collection was not compiled; rebuild with "
+          "-DNVMOLKIT_ENABLE_MCS_STATS=ON");
+    }
+  }
   std::vector<MCSResult> results(pairs.size());
   if (pairs.empty()) return results;
 

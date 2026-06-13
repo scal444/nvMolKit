@@ -23,6 +23,10 @@ pyroot = os.getenv("CONDA_PREFIX")
 cmake_extra_args = []
 if pyroot:
     cmake_extra_args.append(f"-DCMAKE_PREFIX_PATH={pyroot}")
+for flag in ("NVMOLKIT_ENABLE_MCS_TIMINGS", "NVMOLKIT_ENABLE_MCS_STATS"):
+    value = os.getenv(flag)
+    if value is not None:
+        cmake_extra_args.append(f"-D{flag}={value}")
 
 # Detect if we're doing an install against pip rdkit
 nvmolkit_build_against_pip = os.getenv("NVMOLKIT_BUILD_AGAINST_PIP_RDKIT")

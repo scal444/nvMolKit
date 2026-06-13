@@ -23,9 +23,19 @@ from typing import Any, Sequence
 import numpy as np
 from rdkit.Chem import Mol
 
-from nvmolkit._mcs import _findMCSBatch
+from nvmolkit._mcs import _findMCSBatch, _MCS_STATS_ENABLED, _MCS_TIMINGS_ENABLED
 
-__all__ = ["MCSBatchResult", "MCSConfig", "MCSResult", "findMCS"]
+MCS_TIMINGS_ENABLED: bool = bool(_MCS_TIMINGS_ENABLED)
+MCS_STATS_ENABLED: bool = bool(_MCS_STATS_ENABLED)
+
+__all__ = [
+    "MCSBatchResult",
+    "MCSConfig",
+    "MCSResult",
+    "MCS_STATS_ENABLED",
+    "MCS_TIMINGS_ENABLED",
+    "findMCS",
+]
 
 
 Pair = tuple[int, int]
@@ -337,6 +347,17 @@ def findMCS(
     Returns:
         :class:`MCSBatchResult` in generated-pair order.
     """
+    if collect_timings and not MCS_TIMINGS_ENABLED:
+        raise RuntimeError(
+            "MCS timing collection was not compiled; rebuild with "
+            "-DNVMOLKIT_ENABLE_MCS_TIMINGS=ON"
+        )
+    if collect_stats and not MCS_STATS_ENABLED:
+        raise RuntimeError(
+            "MCS statistics collection was not compiled; rebuild with "
+            "-DNVMOLKIT_ENABLE_MCS_STATS=ON"
+        )
+
     mode = _normalize_mode(mode)
     mol_list = list(mols)
 

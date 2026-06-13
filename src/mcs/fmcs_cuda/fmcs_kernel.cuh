@@ -975,7 +975,7 @@ struct FmcsBlockConfig {
 /// @p cacheStorageAll and @p cacheCapacity are currently ignored.  They remain
 /// in the signature while the old cache scaffolding is still compiled for unit
 /// tests; the active RDKit-parity kernel does not allocate or probe it.
-template<int maxAtoms, int maxBonds, int blockThreads, class Policy, bool CollectStats>
+template<int maxAtoms, int maxBonds, int blockThreads, class Policy, bool CollectTimings, bool CollectStats>
 __global__ void fmcsKernel(
     const DevicePerPairInput* __restrict__ pairs,
     DeviceMCSResult<maxAtoms, maxBonds>* __restrict__ results,
@@ -991,6 +991,9 @@ __global__ void fmcsKernel(
     unsigned long long timeoutClocks) {
   (void)cacheStorageAll;
   (void)cacheCapacity;
+  if constexpr (!CollectTimings) {
+    (void)elapsedClocks;
+  }
   if constexpr (!CollectStats) {
     (void)statsOut;
   }
@@ -1094,7 +1097,11 @@ __global__ void fmcsKernel(
     phase2Done = 0;
     phase2ActiveGroups = 0;
     queueLock = 0;
-    startClock = clock64();
+    if constexpr (CollectTimings || kStatsEnabled) {
+      startClock = clock64();
+    } else {
+      startClock = timeoutClocks > 0 ? clock64() : 0;
+    }
     phase1StartClock = startClock;
     phase2StartClock = startClock;
 
@@ -1768,9 +1775,14 @@ __global__ void fmcsKernel(
   // ---- Phase 3: writeback ----
   block.sync();
   if (block.thread_rank() == 0) {
-    const unsigned long long totalElapsedClocks = clock64() - startClock;
-    if (elapsedClocks != nullptr) {
-      elapsedClocks[pairIdx] = totalElapsedClocks;
+    unsigned long long totalElapsedClocks = 0;
+    if constexpr (CollectTimings || CollectStats) {
+      totalElapsedClocks = clock64() - startClock;
+    }
+    if constexpr (CollectTimings) {
+      if (elapsedClocks != nullptr) {
+        elapsedClocks[pairIdx] = totalElapsedClocks;
+      }
     }
     if constexpr (CollectStats) {
       if (statsOut != nullptr) {

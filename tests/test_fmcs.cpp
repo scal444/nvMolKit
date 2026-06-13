@@ -16,6 +16,7 @@
 #include "benchmark_data.h"
 #include "fmcs_cuda/fmcs.cuh"
 #include "mcs_common/mcs_types.cuh"
+#include "src/mcs/mcs_compile_flags.h"
 
 #include <gtest/gtest.h>
 
@@ -248,6 +249,13 @@ TEST(FMCSDispatch, BatchOfThreeReturnsExpectedSizes) {
 TEST(FMCSDispatch, OptionalPerPairTimingsArePopulated) {
   std::vector<Graph> graphs{path(4), cycle(6)};
   std::vector<float> timesMs;
+  if constexpr (!nvMolKit::kMCSCollectTimingsEnabled) {
+    EXPECT_THROW(
+        (void)mcs::fmcs::findMCESfMCSBatch(
+            graphs, graphs, Parameters{}, &timesMs),
+        std::runtime_error);
+    return;
+  }
   auto rs = mcs::fmcs::findMCESfMCSBatch(graphs, graphs, Parameters{}, &timesMs);
 
   ASSERT_EQ(rs.size(), graphs.size());
@@ -260,6 +268,13 @@ TEST(FMCSDispatch, OptionalPerPairTimingsArePopulated) {
 TEST(FMCSDispatch, OptionalExecutionStatsIncludeGranularTimings) {
   std::vector<Graph> graphs{path(4), cycle(6)};
   std::vector<mcs::fmcs::ExecutionStats> stats;
+  if constexpr (!nvMolKit::kMCSCollectStatsEnabled) {
+    EXPECT_THROW(
+        (void)mcs::fmcs::findMCESfMCSBatch(
+            graphs, graphs, Parameters{}, nullptr, nullptr, &stats),
+        std::runtime_error);
+    return;
+  }
   auto rs = mcs::fmcs::findMCESfMCSBatch(
       graphs, graphs, Parameters{}, nullptr, nullptr, &stats);
 

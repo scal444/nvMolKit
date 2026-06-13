@@ -17,7 +17,7 @@ import pytest
 from rdkit import Chem
 from rdkit.Chem import rdFMCS
 
-from nvmolkit.mcs import MCSConfig, findMCS
+from nvmolkit.mcs import MCSConfig, MCS_STATS_ENABLED, MCS_TIMINGS_ENABLED, findMCS
 
 def _mols(smiles: list[str]):
     return [Chem.MolFromSmiles(smi) for smi in smiles]
@@ -83,6 +83,11 @@ def test_collect_timings_reports_per_pair_elapsed_ms():
     mols = _mols(["CCO", "CCN", "c1ccccc1", "c1ccc(O)cc1"])
     pairs = [(0, 1), (2, 3), (0, 2)]
 
+    if not MCS_TIMINGS_ENABLED:
+        with pytest.raises(RuntimeError, match="MCS timing collection was not compiled"):
+            findMCS(mols, mode="pairs", pairs=pairs, collect_timings=True)
+        return
+
     result = findMCS(mols, mode="pairs", pairs=pairs, collect_timings=True)
 
     assert result.pairs == tuple(pairs)
@@ -95,6 +100,11 @@ def test_collect_timings_reports_per_pair_elapsed_ms():
 def test_collect_stats_reports_per_pair_fmcs_counters():
     mols = _mols(["CCO", "CCN", "c1ccccc1", "c1ccc(O)cc1"])
     pairs = [(0, 1), (2, 3), (0, 2)]
+
+    if not MCS_STATS_ENABLED:
+        with pytest.raises(RuntimeError, match="MCS statistics collection was not compiled"):
+            findMCS(mols, mode="pairs", pairs=pairs, collect_stats=True)
+        return
 
     result = findMCS(mols, mode="pairs", pairs=pairs, collect_stats=True)
 

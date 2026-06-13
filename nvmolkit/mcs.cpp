@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include "src/mcs/mcs_search.h"
+#include "src/mcs/mcs_compile_flags.h"
 #include "src/utils/nvtx.h"
 
 #include <GraphMol/ROMol.h>
@@ -321,6 +322,8 @@ dict statsToPythonDict(MCSResultBuffers& buffers, const object& owner) {
 
 BOOST_PYTHON_MODULE(_mcs) {
   boost::python::numpy::initialize();
+  scope().attr("_MCS_TIMINGS_ENABLED") = nvMolKit::kMCSCollectTimingsEnabled;
+  scope().attr("_MCS_STATS_ENABLED")   = nvMolKit::kMCSCollectStatsEnabled;
 
   def(
     "_findMCSBatch",
@@ -338,6 +341,20 @@ BOOST_PYTHON_MODULE(_mcs) {
       params.requireGpu                                       = optionValue<bool>(options, "require_gpu", false);
       params.collectTimings                                   = optionValue<bool>(options, "collect_timings", false);
       params.collectStats                                     = optionValue<bool>(options, "collect_stats", false);
+      if constexpr (!nvMolKit::kMCSCollectTimingsEnabled) {
+        if (params.collectTimings) {
+          throw std::runtime_error(
+              "MCS timing collection was not compiled; rebuild with "
+              "-DNVMOLKIT_ENABLE_MCS_TIMINGS=ON");
+        }
+      }
+      if constexpr (!nvMolKit::kMCSCollectStatsEnabled) {
+        if (params.collectStats) {
+          throw std::runtime_error(
+              "MCS statistics collection was not compiled; rebuild with "
+              "-DNVMOLKIT_ENABLE_MCS_STATS=ON");
+        }
+      }
       params.timeoutSeconds                                   = optionValue<unsigned int>(options, "timeout_seconds", 0);
       params.batchSize                                        = optionValue<int>(options, "batch_size", 0);
       params.blockSize                                        = optionValue<int>(options, "block_size", 128);
@@ -364,9 +381,15 @@ BOOST_PYTHON_MODULE(_mcs) {
       buffers->overflowed.reserve(results.size());
       buffers->usedGpu.reserve(results.size());
       buffers->usedFallback.reserve(results.size());
-      buffers->elapsedMs.reserve(results.size());
-      if (params.collectStats) {
-        reserveStats(*buffers, results.size());
+      if constexpr (nvMolKit::kMCSCollectTimingsEnabled) {
+        if (params.collectTimings) {
+          buffers->elapsedMs.reserve(results.size());
+        }
+      }
+      if constexpr (nvMolKit::kMCSCollectStatsEnabled) {
+        if (params.collectStats) {
+          reserveStats(*buffers, results.size());
+        }
       }
       buffers->smartsStrings.reserve(results.size());
       buffers->atomMappingIndptr.reserve(results.size() + 1);
@@ -381,9 +404,15 @@ BOOST_PYTHON_MODULE(_mcs) {
         buffers->overflowed.push_back(result.overflowed ? 1 : 0);
         buffers->usedGpu.push_back(result.usedGpu ? 1 : 0);
         buffers->usedFallback.push_back(result.usedFallback ? 1 : 0);
-        buffers->elapsedMs.push_back(result.elapsedMs);
-        if (params.collectStats) {
-          appendStats(*buffers, result.hasExecutionStats ? result.executionStats : nvMolKit::MCSExecutionStats{});
+        if constexpr (nvMolKit::kMCSCollectTimingsEnabled) {
+          if (params.collectTimings) {
+            buffers->elapsedMs.push_back(result.elapsedMs);
+          }
+        }
+        if constexpr (nvMolKit::kMCSCollectStatsEnabled) {
+          if (params.collectStats) {
+            appendStats(*buffers, result.hasExecutionStats ? result.executionStats : nvMolKit::MCSExecutionStats{});
+          }
         }
         buffers->smartsStrings.push_back(result.smartsString);
 
@@ -411,9 +440,17 @@ BOOST_PYTHON_MODULE(_mcs) {
       object owner{handle<>(cap)};
       buffers.release();
       auto* ptr = reinterpret_cast<MCSResultBuffers*>(PyCapsule_GetPointer(cap, "nvmolkit.mcs_results"));
+      object elapsedObject{handle<>(borrowed(Py_None))};
+      if constexpr (nvMolKit::kMCSCollectTimingsEnabled) {
+        if (params.collectTimings) {
+          elapsedObject = make1dArray(ptr->elapsedMs, owner);
+        }
+      }
       object statsObject{handle<>(borrowed(Py_None))};
-      if (params.collectStats) {
-        statsObject = statsToPythonDict(*ptr, owner);
+      if constexpr (nvMolKit::kMCSCollectStatsEnabled) {
+        if (params.collectStats) {
+          statsObject = statsToPythonDict(*ptr, owner);
+        }
       }
 
       nvMolKit::ScopedNvtxRange wrapRange("Python MCS: wrap results", nvMolKit::NvtxColor::kGreen);
@@ -423,7 +460,7 @@ BOOST_PYTHON_MODULE(_mcs) {
                         make1dArray(ptr->overflowed, owner),
                         make1dArray(ptr->usedGpu, owner),
                         make1dArray(ptr->usedFallback, owner),
-                        make1dArray(ptr->elapsedMs, owner),
+                        elapsedObject,
                         stringsToPythonList(ptr->smartsStrings),
                         makePairArray(ptr->atomMapping, owner),
                         make1dArray(ptr->atomMappingIndptr, owner),

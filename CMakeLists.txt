@@ -83,6 +83,13 @@ include(python)
 include(rdkit)
 include(boost)
 
+add_library(nvmolkit_mcs_compile_flags INTERFACE)
+target_compile_definitions(
+  nvmolkit_mcs_compile_flags
+  INTERFACE
+    NVMOLKIT_ENABLE_MCS_TIMINGS=$<BOOL:${NVMOLKIT_ENABLE_MCS_TIMINGS}>
+    NVMOLKIT_ENABLE_MCS_STATS=$<BOOL:${NVMOLKIT_ENABLE_MCS_STATS}>)
+
 # --------------------------------
 # Conditional compilation features
 # --------------------------------
@@ -109,6 +116,18 @@ else()
   message(STATUS "NVMOLKIT_BUILD_BENCHMARKS set off, Not building benchmarks")
 endif()
 
+if(NVMOLKIT_ENABLE_MCS_TIMINGS)
+  message(STATUS "NVMOLKIT_ENABLE_MCS_TIMINGS set on, Compiling MCS timing collection")
+else()
+  message(STATUS "NVMOLKIT_ENABLE_MCS_TIMINGS set off, Omitting MCS timing collection")
+endif()
+
+if(NVMOLKIT_ENABLE_MCS_STATS)
+  message(STATUS "NVMOLKIT_ENABLE_MCS_STATS set on, Compiling MCS statistics collection")
+else()
+  message(STATUS "NVMOLKIT_ENABLE_MCS_STATS set off, Omitting MCS statistics collection")
+endif()
+
 # ------------------------
 # Subdirectory includes
 # ------------------------
@@ -116,7 +135,8 @@ endif()
 link_libraries(nvmolkit_include_root)
 
 # Apply project-wide compile options to every first-party target created in the subdirectories below.
-link_libraries(nvmolkit_warnings nvmolkit_release_opts nvmolkit_cuda_options nvmolkit_sanitizers nvmolkit_cuda_caps)
+link_libraries(nvmolkit_warnings nvmolkit_release_opts nvmolkit_cuda_options nvmolkit_sanitizers nvmolkit_cuda_caps
+               nvmolkit_mcs_compile_flags)
 add_subdirectory(rdkit_extensions)
 add_subdirectory(src)
 if(NVMOLKIT_BUILD_PYTHON_BINDINGS)
