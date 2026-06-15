@@ -404,7 +404,8 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
     int partialCapacity,
     int* overflowedFlag,
     ExecutionStats& stats,
-    bool countPhase2MatchWork) {
+    bool countPhase2MatchWork,
+    std::uint8_t* fallbackCandidateCountCache = nullptr) {
   const int groupRank = static_cast<int>(group.thread_rank());
   if constexpr (CollectStats || kFmcsMeasure) {
     if (groupRank == 0) {
@@ -457,7 +458,7 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
     ok = matchSeedSubstructureCooperative<!CollectStats && !kFmcsMeasure>(
         group, candidate.seed, queryTopology, targetTopology, tables,
         candidate.match, scratch, partialStorage, partialCapacity,
-        overflowedFlag);
+        overflowedFlag, fallbackCandidateCountCache);
     group.sync();
     if constexpr (CollectStats || kFmcsMeasure) {
       if (groupRank == 0) {
@@ -959,6 +960,9 @@ __global__ void fmcsKernel(
   constexpr int kMaxNewBondsForTier = maxBonds;
   constexpr int kNumGroups = FmcsBlockConfig<blockThreads>::numGroups;
   constexpr bool kStatsEnabled = CollectStats || kFmcsMeasure;
+  constexpr bool kUseFallbackCandidateCountCache = maxAtoms <= 64;
+  constexpr int kFallbackCandidateCountCacheEntries =
+      kUseFallbackCandidateCountCache ? maxAtoms * (maxAtoms + 1) : 1;
 
   // Block-shared resources: the queue, the incumbent, and the early-exit
   // flags are visible to every group.  Cross-group incumbent updates use
@@ -984,6 +988,8 @@ __global__ void fmcsKernel(
   __shared__ unsigned long long phase1StartClock;
   __shared__ unsigned long long phase2StartClock;
   __shared__ SubstructureScratchT substructureScratch[kNumGroups];
+  __shared__ std::uint8_t
+      fallbackCandidateCountCache[kFallbackCandidateCountCacheEntries];
   __shared__ ExecutionStats groupStats[kStatsEnabled ? kNumGroups : 1];
   __shared__ ExecutionStats measureStats;
 
@@ -1015,6 +1021,10 @@ __global__ void fmcsKernel(
   SubstructureScratchT& mySubstructureScratch = substructureScratch[groupId];
   ExecutionStats& myStats =
       kStatsEnabled ? groupStats[groupId] : measureStats;
+  std::uint8_t* fallbackCandidateCountCachePtr = nullptr;
+  if constexpr (kUseFallbackCandidateCountCache) {
+    fallbackCandidateCountCachePtr = fallbackCandidateCountCache;
+  }
 
   QueuedT* myQueueStorage =
       queueStorageAll + static_cast<size_t>(pairIdx) * queueCapacity;
@@ -1069,8 +1079,16 @@ __global__ void fmcsKernel(
       groupStats[statIdx] = ExecutionStats{};
     }
   }
-  // Publish block-shared kernel initialization and stats zeroing before any
-  // group enters phase 1.
+  if constexpr (kUseFallbackCandidateCountCache) {
+    for (int cacheIdx = static_cast<int>(block.thread_rank());
+         cacheIdx < kFallbackCandidateCountCacheEntries;
+         cacheIdx += static_cast<int>(blockDim.x)) {
+      fallbackCandidateCountCache[cacheIdx] =
+          kFallbackCandidateCountCacheEmpty;
+    }
+  }
+  // Publish block-shared kernel initialization, stats zeroing, and fallback
+  // candidate-count cache reset before any group enters phase 1.
   block.sync();
   if constexpr (CollectStats || kFmcsMeasure) {
     if (block.thread_rank() == 0) {
@@ -1145,7 +1163,7 @@ __global__ void fmcsKernel(
           group, myCurrent, queryView, targetView, pair.tables,
           mySubstructureScratch,
           mySubstructureStorage, substructurePartialCapacity,
-          &overflowed, myStats, false);
+          &overflowed, myStats, false, fallbackCandidateCountCachePtr);
       if (matched) {
         updateIncumbentCooperative(
             group, myCurrent, best, &bestScore, &bestCopyLock);
@@ -1376,7 +1394,7 @@ __global__ void fmcsKernel(
                 group, myBiggest, queryView, targetView, pair.tables,
                 mySubstructureScratch,
                 mySubstructureStorage, substructurePartialCapacity,
-                &overflowed, myStats, true)
+                &overflowed, myStats, true, fallbackCandidateCountCachePtr)
                 ? 1
                 : 0) != 0;
         if (groupRank == 0) stage0Ok[groupId] = ok;
@@ -1468,7 +1486,7 @@ __global__ void fmcsKernel(
                 group, myBiggest, queryView, targetView, pair.tables,
                 mySubstructureScratch,
                 mySubstructureStorage, substructurePartialCapacity,
-                &overflowed, myStats, true)
+                &overflowed, myStats, true, fallbackCandidateCountCachePtr)
                 ? 1
                 : 0) != 0;
         if constexpr (CollectStats || kFmcsMeasure) {
@@ -1589,7 +1607,7 @@ __global__ void fmcsKernel(
                   group, myBiggest, queryView, targetView, pair.tables,
                   mySubstructureScratch,
                   mySubstructureStorage, substructurePartialCapacity,
-                  &overflowed, myStats, true)
+                  &overflowed, myStats, true, fallbackCandidateCountCachePtr)
                   ? 1
                   : 0) != 0;
           if (ok) {
