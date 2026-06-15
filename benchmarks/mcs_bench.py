@@ -140,20 +140,6 @@ def _sample_pairs(num_mols: int, num_pairs: int, seed: int) -> list[tuple[int, i
     return [(rng.randrange(num_mols), rng.randrange(num_mols)) for _ in range(num_pairs)]
 
 
-def _summarize_selected_pairs(mols: list[Chem.Mol], pairs: list[tuple[int, int]], *, max_rows: int = 20) -> None:
-    if len(pairs) > max_rows:
-        _log(f"Selected pair summary: showing first {max_rows} of {len(pairs)} pairs")
-    else:
-        _log(f"Selected pair summary: showing all {len(pairs)} pairs")
-
-    for pair_idx, (idx_a, idx_b) in enumerate(pairs[:max_rows]):
-        mol_a = mols[idx_a]
-        mol_b = mols[idx_b]
-        _log(
-            f"  pair {pair_idx}: ({idx_a}, {idx_b}) "
-            f"A={mol_a.GetNumAtoms()} atoms/{mol_a.GetNumBonds()} bonds "
-            f"B={mol_b.GetNumAtoms()} atoms/{mol_b.GetNumBonds()} bonds"
-        )
 
 
 @nvtx.annotate("bench_nvmolkit_mcs", color="red")
@@ -164,7 +150,7 @@ def _bench_nvmolkit(mols: list[Chem.Mol], pairs: list[tuple[int, int]], args: ar
         f"batch_size={args.batch_size} block_size={args.block_size} "
         f"workers={args.workers} prep_threads={args.prep_threads} "
         f"num_gpus={args.num_gpus} executors_per_runner={args.executors_per_runner} "
-        f"collect_stats={args.collect_stats}"
+        f"collect_timings={args.collect_timings} collect_stats={args.collect_stats}"
     )
     last_result = None
     import torch
@@ -191,7 +177,7 @@ def _bench_nvmolkit(mols: list[Chem.Mol], pairs: list[tuple[int, int]], args: ar
                 preprocessing_threads=args.prep_threads,
                 executors_per_runner=args.executors_per_runner,
                 gpu_ids=list(range(args.num_gpus)),
-                collect_timings=True,
+                collect_timings=args.collect_timings,
                 collect_stats=args.collect_stats,
             )
         _log(f"nvmolkit {label}: findMCS returned; synchronizing GPU")
@@ -509,7 +495,7 @@ def _build_parser(default_smiles: Path) -> argparse.ArgumentParser:
         dest="batch_size",
         type=int,
         default=0,
-        help="fMCS GPU tier chunk size in pairs; 0 processes each tier in one chunk.",
+        help="fMCS GPU tier chunk size in pairs; 0 uses a default of 512 pairs per tier chunk.",
     )
     _add_option(
         gpu_group,
@@ -517,7 +503,7 @@ def _build_parser(default_smiles: Path) -> argparse.ArgumentParser:
         legacy_flags=("--block_size",),
         dest="block_size",
         type=int,
-        choices=[64, 128, 256, 512],
+        choices=[128, 512],
         default=128,
         help="CUDA threads per fMCS pair block. 512 is experimental and only supports maxSize tiers up to 64.",
     )
@@ -556,6 +542,11 @@ def _build_parser(default_smiles: Path) -> argparse.ArgumentParser:
         type=int,
         default=-1,
         help="Asynchronous fMCS executor slots/streams per GPU worker; -1 autoselects, valid explicit range is 1-8.",
+    )
+    gpu_group.add_argument(
+        "--collect-timings",
+        action="store_true",
+        help="Collect per-pair nvmolkit backend elapsed milliseconds in --timings-csv.",
     )
     gpu_group.add_argument(
         "--collect-stats",
@@ -688,7 +679,6 @@ def main() -> None:
     _log(f"Sampling {args.pairs} explicit MCS pairs with seed={args.seed}")
     pairs = _sample_pairs(len(mols), args.pairs, args.seed)
     print(f"Prepared {len(mols)} molecules and {len(pairs)} explicit MCS pairs")
-    _summarize_selected_pairs(mols, pairs)
 
     nv_result = None
     if not args.no_nvmolkit:

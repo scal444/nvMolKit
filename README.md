@@ -210,7 +210,7 @@ cd ../../ && rm -rf cppcheck-2.14.2 2.14.2.tar.gz
 nvMolKit supports building for multiple GPU architectures. Build behavior is controlled by the `NVMOLKIT_CUDA_TARGET_MODE` variable:
 
 - **`default`**: Uses `CMAKE_CUDA_ARCHITECTURES` if set, otherwise defaults to compute capability 7.0
-- **`native`**: Builds only for the GPU on your current system. Fastest for local development but not portable.
+- **`native`**: Builds only for the GPU on your current system. Fastest for local development but not portable. The architecture is detected at configure time and pinned, so a GPU must be visible to the build at configure time; configuration fails with an error if no device is detected.
 - **`full`**: Builds for all architectures >= 7.0, including Blackwell (if NVCC >= 12.8). Larger binaries, longer compile time, but works on all major GPUs.
 
 **Recommendation**: Use `native` for development, `full` for distribution.

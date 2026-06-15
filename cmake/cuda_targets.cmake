@@ -16,10 +16,62 @@
 # Options for CUDA build targets.
 
 if(NVMOLKIT_CUDA_TARGET_MODE STREQUAL "native")
-  set(CMAKE_CUDA_ARCHITECTURES native)
+  # Resolve the on-system GPU architecture at configure time instead of
+  # forwarding -arch=native to nvcc. nvcc only resolves -arch=native at compile
+  # time, and when no GPU is visible to the compiler process it silently falls
+  # back to its default SM (emitting a warning) and builds for the wrong
+  # architecture. Detecting here turns a missing device into a hard configure
+  # error and pins a concrete architecture for every translation unit.
+  file(
+    WRITE "${CMAKE_BINARY_DIR}/detect_cuda_arch.cu"
+    "
+  #include <cuda_runtime.h>
+  #include <cstdio>
+  int main() {
+      int deviceCount = 0;
+      if (cudaGetDeviceCount(&deviceCount) != cudaSuccess || deviceCount == 0) {
+          fprintf(stderr, \"no CUDA-capable device detected\\n\");
+          return 1;
+      }
+      cudaDeviceProp prop;
+      if (cudaGetDeviceProperties(&prop, 0) != cudaSuccess) {
+          fprintf(stderr, \"cudaGetDeviceProperties failed\\n\");
+          return 1;
+      }
+      printf(\"%d%d\\n\", prop.major, prop.minor);
+      return 0;
+  }
+  ")
+
+  execute_process(
+    COMMAND
+      ${CMAKE_CUDA_COMPILER} --disable-warnings
+      "${CMAKE_BINARY_DIR}/detect_cuda_arch.cu" -o
+      "${CMAKE_BINARY_DIR}/detect_cuda_arch"
+    RESULT_VARIABLE _detect_build_result)
+  if(NOT _detect_build_result EQUAL 0)
+    message(FATAL_ERROR
+            "Failed to build the CUDA native-architecture detection program")
+  endif()
+
+  execute_process(
+    COMMAND "${CMAKE_BINARY_DIR}/detect_cuda_arch"
+    OUTPUT_VARIABLE _native_cc
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE _detect_run_result)
+  if(NOT _detect_run_result EQUAL 0 OR NOT _native_cc MATCHES "^[0-9]+$")
+    message(
+      FATAL_ERROR
+        "NVMOLKIT_CUDA_TARGET_MODE=native requires a CUDA device visible to the "
+        "build at configure time, but none was detected. Build on a node with a "
+        "visible GPU, or use NVMOLKIT_CUDA_TARGET_MODE=full, or "
+        "NVMOLKIT_CUDA_TARGET_MODE=default with -DCMAKE_CUDA_ARCHITECTURES set.")
+  endif()
+
+  set(CMAKE_CUDA_ARCHITECTURES "${_native_cc}-real")
   message(
     STATUS
-      "NVMOLKIT_CUDA_TARGET_MODE=native: Using native CUDA architecture for fast local builds"
+      "NVMOLKIT_CUDA_TARGET_MODE=native: Detected native CUDA architecture ${CMAKE_CUDA_ARCHITECTURES}"
   )
 elseif(NVMOLKIT_CUDA_TARGET_MODE STREQUAL "full")
   set(_nvmolkit_cuda_arch_list
@@ -91,72 +143,22 @@ endif()
 # third-party translation units.
 add_library(nvmolkit_cuda_caps INTERFACE)
 
-if(CMAKE_CUDA_ARCHITECTURES STREQUAL "native")
-  # Write a small CUDA program to detect compute capability
-  file(
-    WRITE "${CMAKE_BINARY_DIR}/detect_cuda_arch.cu"
-    "
-  #include <cuda_runtime.h>
-  #include <cstdio>
-  int main() {
-      cudaDeviceProp prop;
-      cudaGetDeviceProperties(&prop, 0);
-      printf(\"%d%d\\n\", prop.major, prop.minor);
-      return 0;
-  }
-  ")
-
-  # Build the program
-  execute_process(
-    COMMAND
-      ${CMAKE_CUDA_COMPILER} --disable-warnings
-      "${CMAKE_BINARY_DIR}/detect_cuda_arch.cu" -o
-      "${CMAKE_BINARY_DIR}/detect_cuda_arch"
-    RESULT_VARIABLE _build_result)
-
-  if(_build_result EQUAL 0)
-    execute_process(
-      COMMAND "${CMAKE_BINARY_DIR}/detect_cuda_arch"
-      OUTPUT_VARIABLE _native_cc
-      OUTPUT_STRIP_TRAILING_WHITESPACE)
+foreach(
+  cc IN
+  ITEMS 80
+        86
+        89
+        90
+        100
+        103
+        120)
+  string(REPLACE ";" " " _cuda_arch_str "${CMAKE_CUDA_ARCHITECTURES}")
+  string(REGEX MATCH "(^| )${cc}(-real)?( |$)" _match "${_cuda_arch_str}")
+  if(_match)
+    target_compile_definitions(nvmolkit_cuda_caps
+                               INTERFACE NVMOLKIT_CUDA_CC_${cc}=1)
   else()
-    message(FATAL_ERROR "Failed to build detect_cuda_arch.cu")
+    target_compile_definitions(nvmolkit_cuda_caps
+                               INTERFACE NVMOLKIT_CUDA_CC_${cc}=0)
   endif()
-  foreach(
-    cc IN
-    ITEMS 80
-          86
-          89
-          90
-          100
-          103
-          120)
-    if(_native_cc STREQUAL "${cc}")
-      target_compile_definitions(nvmolkit_cuda_caps
-                                 INTERFACE NVMOLKIT_CUDA_CC_${cc}=1)
-    else()
-      target_compile_definitions(nvmolkit_cuda_caps
-                                 INTERFACE NVMOLKIT_CUDA_CC_${cc}=0)
-    endif()
-  endforeach()
-else()
-  foreach(
-    cc IN
-    ITEMS 80
-          86
-          89
-          90
-          100
-          103
-          120)
-    string(REPLACE ";" " " _cuda_arch_str "${CMAKE_CUDA_ARCHITECTURES}")
-    string(REGEX MATCH "(^| )${cc}(-real)?( |$)" _match "${_cuda_arch_str}")
-    if(_match)
-      target_compile_definitions(nvmolkit_cuda_caps
-                                 INTERFACE NVMOLKIT_CUDA_CC_${cc}=1)
-    else()
-      target_compile_definitions(nvmolkit_cuda_caps
-                                 INTERFACE NVMOLKIT_CUDA_CC_${cc}=0)
-    endif()
-  endforeach()
-endif()
+endforeach()

@@ -38,6 +38,7 @@
 #include "src/utils/device.h"
 #include "src/utils/device_vector.h"
 #include "src/utils/gpu_executor_ring.h"
+#include "src/utils/nvtx.h"
 #include "src/utils/pinned_host_allocator.h"
 
 namespace mcs {
@@ -66,6 +67,18 @@ void requireTransferCapacity(size_t required, size_t capacity, const char* conte
                              std::to_string(required) + " bytes, capacity " +
                              std::to_string(capacity) + " bytes");
   }
+}
+
+/// Grow a per-executor scratch slab to at least @p bytes, reusing it when it is
+/// already large enough.  Old contents are discarded (scratch is rewritten by
+/// each kernel), and the old allocation is released before the new one so the
+/// two never co-reside -- these slabs reach multiple GiB at large tiers.
+void ensureScratchCapacity(nvMolKit::AsyncDeviceVector<std::uint8_t>& buffer, size_t bytes) {
+  if (buffer.size() >= bytes) {
+    return;
+  }
+  buffer.resize(0);
+  buffer.resize(bytes);
 }
 
 struct FmcsOutputLayout {
@@ -205,12 +218,11 @@ HostPairDescriptor buildPairDescriptor(const InputT& sideA,
   return desc;
 }
 
-/// Owning device allocations for one tier sub-batch.  @c dResultsBuffer
-/// and @c dQueueStorage are typed at launch time (per @c maxAtoms /
-/// @c maxBonds), so they are held as opaque pointers here.  The queue
-/// storage is one contiguous global-memory slab of
-/// @c kFmcsQueueCapacity * numPairs QueuedSeed entries; per-block slices
-/// are taken inside the kernel via @c blockIdx.x.
+/// Non-owning device views for one tier sub-batch.  @c dResultsBuffer is
+/// typed at launch time (per @c maxAtoms / @c maxBonds), so it is held as an
+/// opaque pointer here.  All backing storage (inputs, results, queue, and
+/// substructure-fallback scratch) lives in executor-persistent
+/// @ref nvMolKit::AsyncDeviceVector buffers that are reused across chunks.
 struct BatchDeviceBuffers {
   // Non-owning pointers into executor-persistent input/output buffers.
   DevicePerPairInput* dPairInputs = nullptr;
@@ -218,14 +230,16 @@ struct BatchDeviceBuffers {
   unsigned long long* dElapsedClocks = nullptr;
   ExecutionStats* dStats = nullptr;
   FmcsOutputLayout outputLayout;
-
-  // Per-chunk scratch allocations.
-  void* dQueueStorage   = nullptr;
-  void* dCacheStorage   = nullptr;
-  void* dSubstructureStorage = nullptr;
 };
 
 constexpr int kMaxFmcsExecutorsPerRunner = 8;
+
+/// Default per-tier chunk size used when the caller does not request an
+/// explicit @c batchSize.  Per-pair device scratch (queue + substructure
+/// fallback storage) is multiple megabytes, so an unbounded chunk of all
+/// pairs exhausts device memory at large pair counts.  Bounding the chunk
+/// keeps peak resident scratch independent of the total pair count.
+constexpr size_t kDefaultFmcsChunkSize = 512;
 
 struct FmcsExecutor {
   std::unique_ptr<nvMolKit::ScopedStream> ownedStream;
@@ -238,6 +252,8 @@ struct FmcsExecutor {
   nvMolKit::PinnedHostView<std::uint8_t>  outputStaging;
   nvMolKit::AsyncDeviceVector<std::uint8_t> inputDevice;
   nvMolKit::AsyncDeviceVector<std::uint8_t> outputDevice;
+  nvMolKit::AsyncDeviceVector<std::uint8_t> queueDevice;
+  nvMolKit::AsyncDeviceVector<std::uint8_t> substructureDevice;
 
   FmcsExecutor(int executorIdx,
                cudaStream_t externalStream,
@@ -257,6 +273,11 @@ struct FmcsExecutor {
     outputStaging = outputStagingAllocator.allocate<std::uint8_t>(bufferSizing.outputBytes);
     inputDevice.setStream(stream);
     outputDevice.setStream(stream);
+    // Queue and substructure scratch are sized lazily on first use and grown
+    // only when a larger chunk arrives, so an executor never reserves more than
+    // the largest chunk it actually processes.
+    queueDevice.setStream(stream);
+    substructureDevice.setStream(stream);
     inputDevice.resize(bufferSizing.inputBytes);
     outputDevice.resize(bufferSizing.outputBytes);
   }
@@ -275,26 +296,6 @@ int validateRequestedBlockSize(const Parameters& params) {
     return params.blockSize;
   }
   throw std::invalid_argument("fMCS blockSize must be one of 128 or 512");
-}
-
-void freeBatchBuffers(BatchDeviceBuffers& bufs, cudaStream_t stream) {
-  if (bufs.dQueueStorage) {
-    cudaFreeAsync(bufs.dQueueStorage, stream);
-    bufs.dQueueStorage = nullptr;
-  }
-  if (bufs.dCacheStorage) {
-    cudaFreeAsync(bufs.dCacheStorage, stream);
-    bufs.dCacheStorage = nullptr;
-  }
-  if (bufs.dSubstructureStorage) {
-    cudaFreeAsync(bufs.dSubstructureStorage, stream);
-    bufs.dSubstructureStorage = nullptr;
-  }
-  bufs.dPairInputs = nullptr;
-  bufs.dResultsBuffer = nullptr;
-  bufs.dElapsedClocks = nullptr;
-  bufs.dStats = nullptr;
-  bufs.outputLayout = {};
 }
 
 size_t countChunkTransferWords(const std::vector<HostPairDescriptor*>& descs) {
@@ -340,6 +341,7 @@ StagedChunkInput stageChunkInput(
     nvMolKit::PinnedHostView<std::uint8_t>& hostStaging,
     nvMolKit::AsyncDeviceVector<std::uint8_t>& deviceStaging,
     cudaStream_t stream) {
+  nvMolKit::ScopedNvtxRange stageRange("fMCS: Stage chunk input (H2D)");
   const size_t numPairs = descs.size();
   const size_t bytes = computeChunkInputBytes(descs);
   requireTransferCapacity(bytes, hostStaging.size(), "input host");
@@ -410,9 +412,14 @@ void launchTierAsync(
     cudaStream_t stream,
     BatchDeviceBuffers& bufs,
     nvMolKit::PinnedHostView<std::uint8_t>& hostOutput,
-    nvMolKit::AsyncDeviceVector<std::uint8_t>& deviceOutput) {
+    nvMolKit::AsyncDeviceVector<std::uint8_t>& deviceOutput,
+    nvMolKit::AsyncDeviceVector<std::uint8_t>& queueStorage,
+    nvMolKit::AsyncDeviceVector<std::uint8_t>& substructureStorage) {
   const int numPairs = static_cast<int>(stagedInput.numPairs);
   if (numPairs == 0) return;
+
+  nvMolKit::ScopedNvtxRange launchRange("fMCS: Launch tier kernel maxAtoms=" + std::to_string(maxAtoms) +
+                                        " pairs=" + std::to_string(numPairs));
 
   auto layout = computeOutputLayout<maxAtoms, maxBonds>(stagedInput.numPairs);
   requireTransferCapacity(layout.totalBytes, hostOutput.size(), "output host");
@@ -425,22 +432,16 @@ void launchTierAsync(
   bufs.dResultsBuffer = dResults;
   bufs.outputLayout = layout;
 
-  void* dQueue = nullptr;
   const size_t queueBytes =
       fmcsQueueStorageBytes<maxAtoms, maxBonds>(stagedInput.numPairs);
-  checkCuda(cudaMallocAsync(&dQueue,
-                            queueBytes, stream),
-            "cudaMallocAsync (queue storage)");
-  bufs.dQueueStorage = dQueue;
+  ensureScratchCapacity(queueStorage, queueBytes);
+  void* dQueue = queueStorage.data();
 
-  std::uint8_t* dSubstructure = nullptr;
   const size_t substructureBytes =
       fmcsSubstructureStorageBytes<blockThreads, maxAtoms>(
           stagedInput.numPairs);
-  checkCuda(cudaMallocAsync(reinterpret_cast<void**>(&dSubstructure),
-                            substructureBytes, stream),
-            "cudaMallocAsync (substructure storage)");
-  bufs.dSubstructureStorage = dSubstructure;
+  ensureScratchCapacity(substructureStorage, substructureBytes);
+  std::uint8_t* dSubstructure = substructureStorage.data();
 
   unsigned long long timeoutClocks = 0;
   if (params.timeoutMs > 0.0f) {
@@ -597,25 +598,22 @@ void launchTierChunk(
     std::unique_ptr<TierChunk<maxAtoms, maxBonds, Policy>>& chunk,
     const Parameters& params) {
   cudaStream_t executorStream = executor.stream;
-  try {
-    StagedChunkInput stagedInput = stageChunkInput(
-        chunk->tierDescs, executor.inputStaging, executor.inputDevice,
-        executorStream);
+  StagedChunkInput stagedInput = stageChunkInput(
+      chunk->tierDescs, executor.inputStaging, executor.inputDevice,
+      executorStream);
 
-    launchTierAsync<blockThreads, maxAtoms, maxBonds>(
-        stagedInput,
-        params,
-        executorStream,
-        executor.bufs,
-        executor.outputStaging,
-        executor.outputDevice);
+  launchTierAsync<blockThreads, maxAtoms, maxBonds>(
+      stagedInput,
+      params,
+      executorStream,
+      executor.bufs,
+      executor.outputStaging,
+      executor.outputDevice,
+      executor.queueDevice,
+      executor.substructureDevice);
 
-    checkCuda(cudaEventRecord(executor.copyDoneEvent.event(), executorStream),
-              "cudaEventRecord (fMCS chunk copy done)");
-  } catch (...) {
-    freeBatchBuffers(executor.bufs, executorStream);
-    throw;
-  }
+  checkCuda(cudaEventRecord(executor.copyDoneEvent.event(), executorStream),
+            "cudaEventRecord (fMCS chunk copy done)");
 }
 
 template<int maxAtoms, int maxBonds, class Policy>
@@ -623,8 +621,12 @@ void drainTierChunk(
     FmcsExecutor& executor,
     std::unique_ptr<TierChunk<maxAtoms, maxBonds, Policy>>& chunk,
     std::vector<MCSResult>& outResults) {
+  nvMolKit::ScopedNvtxRange waitRange("Wait: fMCS chunk copy done", nvMolKit::NvtxColor::kRed);
   checkCuda(cudaEventSynchronize(executor.copyDoneEvent.event()),
             "cudaEventSynchronize (fMCS chunk copy done)");
+  waitRange.pop();
+
+  nvMolKit::ScopedNvtxRange expandRange("fMCS: Expand chunk results");
   const auto& layout = executor.bufs.outputLayout;
   const auto* hostResults =
       reinterpret_cast<const DeviceMCSResult<maxAtoms, maxBonds>*>(
@@ -637,7 +639,7 @@ void drainTierChunk(
         chunk->tierDescs[k]->packedTarget.bondEndpoints,
         chunk->tierDescs[k]->swapped);
   }
-  freeBatchBuffers(executor.bufs, executor.stream);
+  expandRange.pop();
 }
 
 template<int blockThreads, class Policy>
@@ -656,17 +658,24 @@ void runTierChunks(
     throw std::invalid_argument("fMCS multi-executor dispatch does not support an external CUDA stream");
   }
 
+  nvMolKit::ScopedNvtxRange allocRange("fMCS: Allocate executors n=" + std::to_string(executorCount));
   std::vector<std::unique_ptr<FmcsExecutor>> executorStorage;
   executorStorage.reserve(static_cast<size_t>(executorCount));
   std::vector<FmcsExecutor*> executors;
   executors.reserve(static_cast<size_t>(executorCount));
-  const bool useExternalStream = executorCount == 1;
+  // A null `stream` is the legacy default stream, not a caller-supplied
+  // stream: adopting it would funnel every worker thread onto one serializing
+  // queue.  Only adopt an external stream when the caller actually passed one;
+  // otherwise each executor gets its own non-blocking stream so concurrent
+  // workers overlap on the device.
+  const bool useExternalStream = executorCount == 1 && stream != nullptr;
   for (int i = 0; i < executorCount; ++i) {
     auto executor = std::make_unique<FmcsExecutor>(
         i, stream, useExternalStream, bufferSizing);
     executors.push_back(executor.get());
     executorStorage.push_back(std::move(executor));
   }
+  allocRange.pop();
 
   auto launchChunk = [&](FmcsExecutor& executor, TierChunkVariant<Policy>& chunk) {
     std::visit(
@@ -721,6 +730,7 @@ std::vector<MCSResult> runBatchWithBlockSize(
   std::vector<MCSResult> results(N);
   if (N == 0) return results;
 
+  nvMolKit::ScopedNvtxRange descRange("fMCS: Build pair descriptors N=" + std::to_string(N));
   std::vector<HostPairDescriptor> descs(N);
   std::array<std::vector<int>, 4> tierIndices;
   for (size_t i = 0; i < N; ++i) {
@@ -733,6 +743,7 @@ std::vector<MCSResult> runBatchWithBlockSize(
     }
     tierIndices[descs[i].tier].push_back(static_cast<int>(i));
   }
+  descRange.pop();
   if constexpr (blockThreads == 512) {
     if (!tierIndices[3].empty()) {
       throw std::invalid_argument(
@@ -745,7 +756,7 @@ std::vector<MCSResult> runBatchWithBlockSize(
 
   const size_t chunkSize = params.batchSize > 0
       ? static_cast<size_t>(params.batchSize)
-      : N;
+      : kDefaultFmcsChunkSize;
   size_t numChunks = 0;
   for (const auto& indices : tierIndices) {
     if (!indices.empty()) {
@@ -753,6 +764,7 @@ std::vector<MCSResult> runBatchWithBlockSize(
     }
   }
 
+  nvMolKit::ScopedNvtxRange                           enqueueRange("fMCS: Enqueue tier chunks");
   nvMolKit::ThreadSafeQueue<TierChunkVariant<Policy>> chunkQueue;
   FmcsExecutorBufferSizing bufferSizing;
   enqueueTierChunks<16, 16, Policy>(
@@ -764,6 +776,9 @@ std::vector<MCSResult> runBatchWithBlockSize(
   enqueueTierChunks<128, 128, Policy>(
       descPtrs, tierIndices[3], chunkSize, chunkQueue, bufferSizing);
   chunkQueue.close();
+  enqueueRange.pop();
+
+  nvMolKit::ScopedNvtxRange runRange("fMCS: Run tier chunks chunks=" + std::to_string(numChunks));
   runTierChunks<blockThreads, Policy>(
       chunkQueue, numChunks, bufferSizing, params, stream, results);
 
@@ -812,6 +827,9 @@ std::vector<MCSResult> findMCESfMCSBatch(
     std::vector<float>* perPairTimesMs,
     cudaStream_t stream,
     std::vector<ExecutionStats>* perPairStats) {
+  nvMolKit::ScopedNvtxRange entryRange("findMCESfMCSBatch N=" + std::to_string(graphsA.size()) +
+                                       " block=" + std::to_string(params.blockSize),
+                                       nvMolKit::NvtxColor::kCyan);
   return runBatchWithInstrumentation<NullFMCSPolicy, Graph>(
       graphsA, graphsB, params, perPairTimesMs, perPairStats, stream);
 }
@@ -823,6 +841,9 @@ std::vector<MCSResult> findMCESfMCSBatchLabeled(
     std::vector<float>* perPairTimesMs,
     cudaStream_t stream,
     std::vector<ExecutionStats>* perPairStats) {
+  nvMolKit::ScopedNvtxRange entryRange("findMCESfMCSBatchLabeled N=" + std::to_string(graphsA.size()) +
+                                       " block=" + std::to_string(params.blockSize),
+                                       nvMolKit::NvtxColor::kCyan);
   return runBatchWithInstrumentation<LabeledFMCSPolicy, benchmark::MiviaGraphData>(
       graphsA, graphsB, params, perPairTimesMs, perPairStats, stream);
 }

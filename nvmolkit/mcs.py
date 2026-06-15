@@ -140,8 +140,8 @@ class MCSConfig:
     """Configuration for GPU MCS execution.
 
     Args:
-        batchSize: Optional GPU batch chunk size. ``0`` lets the native layer
-            choose.
+        batchSize: GPU per-tier chunk size. ``0`` uses a default chunk size
+            of 512 pairs per tier, which bounds peak device scratch.
         blockSize: CUDA threads per fMCS pair block. Supported values are
             ``128`` and ``512``. ``512`` supports maxSize tiers up to 64.
         workerThreads: GPU runner threads per GPU. ``-1`` autoselects.
@@ -324,8 +324,8 @@ def findMCS(
             receives the same timeout.
         config: Optional :class:`MCSConfig` with GPU execution settings. Cannot
             be combined with explicit GPU execution keyword options.
-        batch_size: Optional GPU batch chunk size. ``0`` lets the native layer
-            choose.
+        batch_size: GPU per-tier chunk size. ``0`` uses a default chunk size
+            of 512 pairs per tier, which bounds peak device scratch.
         block_size: CUDA threads per fMCS pair block. Supported values are
             ``128`` and ``512``. ``512`` supports maxSize tiers up to 64.
         worker_threads: GPU runner threads per GPU. ``-1`` autoselects.

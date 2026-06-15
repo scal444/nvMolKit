@@ -19,6 +19,7 @@
 #include "src/mcs/fmcs_cuda/fmcs.cuh"
 #include "src/mcs/mcs_compile_flags.h"
 #include "src/utils/device.h"
+#include "src/utils/nvtx.h"
 
 #include <GraphMol/Atom.h>
 #include <GraphMol/Bond.h>
@@ -102,7 +103,7 @@ void computeEffectiveThreadCounts(const MCSParameters& params,
 
 int effectiveExecutorsPerRunner(const MCSParameters& params, int totalRunners, cudaStream_t stream) {
   if (params.executorsPerRunner == -1) {
-    return stream != nullptr ? 1 : (totalRunners == 1 ? 3 : 2);
+    return stream != nullptr ? 1 : (totalRunners == 1 ? 2 : 1);
   }
   if (params.executorsPerRunner < 1 || params.executorsPerRunner > kMaxMCSExecutorsPerRunner) {
     throw std::invalid_argument("MCS executorsPerRunner must be -1 (auto) or between 1 and " +
@@ -308,6 +309,7 @@ void fillResultBondMapping(const RDKit::ROMol&                          molA,
 }
 
 MCSResult runRDKitFallback(const RDKit::ROMol& molA, const RDKit::ROMol& molB, const MCSParameters& params) {
+  ScopedNvtxRange                       fallbackRange("RDKit fallback", NvtxColor::kOrange);
   std::chrono::steady_clock::time_point start;
   if constexpr (kMCSCollectTimingsEnabled) {
     if (params.collectTimings) {
@@ -487,6 +489,8 @@ std::vector<PreparedGpuPair> prepareGpuPairs(const std::vector<const RDKit::ROMo
     return {};
   }
 
+  ScopedNvtxRange prepareRange("CPU: Prepare GPU pairs P=" + std::to_string(pairs.size()));
+
   std::atomic<size_t> nextPair{0};
   std::atomic<bool>   abort{false};
   std::exception_ptr  firstException;
@@ -537,7 +541,8 @@ std::vector<PreparedGpuPair> prepareGpuPairs(const std::vector<const RDKit::ROMo
   std::vector<std::thread> workers;
   workers.reserve(static_cast<size_t>(threadCount));
   for (int t = 0; t < threadCount; ++t) {
-    workers.emplace_back([&]() {
+    workers.emplace_back([&, t]() {
+      ScopedNvtxRange threadRange("Prepare pairs thread " + std::to_string(t));
       while (!abort.load(std::memory_order_acquire)) {
         const size_t i = nextPair.fetch_add(1, std::memory_order_relaxed);
         if (i >= pairs.size()) {
@@ -581,6 +586,8 @@ void runGpuPairs(std::vector<PreparedGpuPair>& gpuPairs,
     return;
   }
 
+  ScopedNvtxRange dispatchRange("Dispatch GPU pairs P=" + std::to_string(gpuPairs.size()), NvtxColor::kGreen);
+
   const int numGpus      = static_cast<int>(gpuIds.size());
   const int totalRunners = std::max(1, numGpus * std::max(1, effectiveWorkerThreads));
   if (stream != nullptr && totalRunners > 1) {
@@ -600,6 +607,7 @@ void runGpuPairs(std::vector<PreparedGpuPair>& gpuPairs,
     }
 
     const int deviceId = gpuIds[runnerIdx % static_cast<size_t>(numGpus)];
+    ScopedNvtxRange runnerRange("MCS runner " + std::to_string(runnerIdx) + " GPU" + std::to_string(deviceId));
     std::unique_ptr<WithDevice> setDevice;
     if (stream == nullptr) {
       setDevice = std::make_unique<WithDevice>(deviceId);
@@ -647,6 +655,7 @@ void runGpuPairs(std::vector<PreparedGpuPair>& gpuPairs,
     }
     auto gpuResults = mcs::fmcs::findMCESfMCSBatchLabeled(
       gpuGraphsA, gpuGraphsB, fmcsParams, gpuTimesPtr, stream, gpuStatsPtr);
+    ScopedNvtxRange convertRange("Convert GPU results");
     for (size_t gpuIdx = 0; gpuIdx < gpuResults.size(); ++gpuIdx) {
       const size_t resultIdx = resultIndices[gpuIdx];
       const size_t idxA      = molIndicesA[gpuIdx];
@@ -744,6 +753,14 @@ std::vector<MCSResult> findMCSBatch(const std::vector<const RDKit::ROMol*>& mols
 
   const int totalRunners = std::max(1, static_cast<int>(gpuIds.size()) * effectiveWorkerThreads);
   const int effectiveExecutors = effectiveExecutorsPerRunner(params, totalRunners, stream);
+
+  ScopedNvtxRange entryRange("findMCSBatch P=" + std::to_string(pairs.size()) +
+                             " batch=" + std::to_string(params.batchSize) +
+                             " prep=" + std::to_string(effectivePreprocessingThreads) +
+                             " workers=" + std::to_string(effectiveWorkerThreads) +
+                             " gpus=" + std::to_string(gpuIds.size()) +
+                             " executors=" + std::to_string(effectiveExecutors),
+                             NvtxColor::kBlue);
 
   auto gpuPairs = prepareGpuPairs(mols, pairs, params, effectivePreprocessingThreads, results);
   runGpuPairs(gpuPairs, mols, params, gpuIds, effectiveWorkerThreads, effectiveExecutors, stream, results);

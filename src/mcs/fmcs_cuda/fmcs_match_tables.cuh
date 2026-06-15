@@ -80,17 +80,6 @@ struct PairMatchTablesDevice {
   MatchTableDevice bonds;
 };
 
-/// Upload a batch of per-pair host match tables into one contiguous device
-/// buffer.  The returned buffer is owned by the caller and must be released
-/// with @ref freePairMatchTablesBuffer on the same stream.
-std::vector<PairMatchTablesDevice> uploadPairMatchTables(
-    const std::vector<PairMatchTablesHost>& host,
-    cudaStream_t stream,
-    void** outDeviceBuffer,
-    std::size_t* outDeviceBufferBytes);
-
-void freePairMatchTablesBuffer(void* deviceBuffer, cudaStream_t stream);
-
 }  // namespace fmcs
 }  // namespace mcs
 

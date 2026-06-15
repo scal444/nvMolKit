@@ -59,7 +59,7 @@ struct Parameters {
   int   blockSize        = 128;
   /// Per-pair wall timeout in milliseconds.  0 = no timeout.
   float timeoutMs        = 0;
-  /// Max pairs per kernel launch in the batch API.  0 = auto from GPU memory.
+  /// Max pairs per tier chunk in the batch API.  0 = default chunk size.
   int   batchSize        = 0;
   /// Number of asynchronous executor streams for tier sub-batches. 1 = serial.
   int   executorsPerRunner = 1;
