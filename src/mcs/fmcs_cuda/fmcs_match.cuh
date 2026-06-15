@@ -75,6 +75,7 @@ struct FmcsSubstructureScratch {
   std::uint8_t seedAtomList[maxAtoms];
   std::uint8_t seedAtoms[maxAtoms];
   std::uint8_t seedDegree[maxAtoms];
+  std::uint8_t mappedSeedNeighborCount[maxAtoms];
   std::uint8_t targetDegree[maxTargetAtoms];
   std::uint8_t orderedQueryAtom[maxAtoms];
   std::uint8_t queryOrderPos[maxAtoms];
@@ -727,6 +728,7 @@ __device__ __forceinline__ void initializeSeedSubstructureScratchCooperative(
 
   for (int i = laneRank; i < maxAtoms; i += laneCount) {
     scratch.seedDegree[i] = 0;
+    scratch.mappedSeedNeighborCount[i] = 0;
     scratch.orderedQueryAtom[i] = 0;
     scratch.queryOrderPos[i] = kUnmappedTargetIdx;
     scratch.targetAtomForQuery[i] = kUnmappedTargetIdx;
@@ -778,6 +780,100 @@ __device__ __forceinline__ void initializeSeedSubstructureScratchCooperative(
     scratch.overflowed = 0;
   }
   group.sync();
+}
+
+template<int maxAtoms, int maxBonds, int maxTA, class QueryTopology>
+__device__ __forceinline__ void incrementMappedSeedNeighborCountsWithinThread(
+    const Seed<maxAtoms, maxBonds>& seed,
+    const QueryTopology& queryTopology,
+    FmcsSubstructureScratch<maxAtoms, maxTA>& scratch,
+    const int queryAtomIdx) {
+  using SeedT = Seed<maxAtoms, maxBonds>;
+  using BondWord = typename SeedT::bond_word_type;
+  constexpr int kBondBitsPerWord = SeedT::kBondBitsPerWord;
+  constexpr int kBondWords       = SeedT::kBondWords;
+
+  if constexpr (topologyHasAdjacencyBondIndices<QueryTopology>()) {
+    const int begin = static_cast<int>(queryTopology.rowOffsets[queryAtomIdx]);
+    const int end = static_cast<int>(queryTopology.rowOffsets[queryAtomIdx + 1]);
+    for (int adjIdx = begin; adjIdx < end; ++adjIdx) {
+      const int queryBondIdx =
+          static_cast<int>(queryTopology.bondIndices[adjIdx]);
+      if (queryBondIdx >= queryTopology.numBonds ||
+          !seedContainsBondWithinThread<maxAtoms, maxBonds>(
+              seed, queryBondIdx)) {
+        continue;
+      }
+      const int otherQueryAtom =
+          static_cast<int>(queryTopology.colIndices[adjIdx]);
+      if (otherQueryAtom >= 0 &&
+          otherQueryAtom < queryTopology.numAtoms &&
+          !scratch.orderedQueryAtom[otherQueryAtom]) {
+        ++scratch.mappedSeedNeighborCount[otherQueryAtom];
+      }
+    }
+  } else {
+    const bool scanQueryAdjacency =
+        queryTopology.rowOffsets != nullptr &&
+        queryTopology.colIndices != nullptr &&
+        queryTopology.bondIndices != nullptr &&
+        queryAtomIdx >= 0 &&
+        queryAtomIdx < queryTopology.numAtoms;
+    if (scanQueryAdjacency) {
+      const int begin = static_cast<int>(queryTopology.rowOffsets[queryAtomIdx]);
+      const int end = static_cast<int>(queryTopology.rowOffsets[queryAtomIdx + 1]);
+      for (int adjIdx = begin; adjIdx < end; ++adjIdx) {
+        const int queryBondIdx =
+            static_cast<int>(queryTopology.bondIndices[adjIdx]);
+        if (queryBondIdx >= queryTopology.numBonds ||
+            !seedContainsBondWithinThread<maxAtoms, maxBonds>(
+                seed, queryBondIdx)) {
+          continue;
+        }
+        const int otherQueryAtom =
+            static_cast<int>(queryTopology.colIndices[adjIdx]);
+        if (otherQueryAtom >= 0 &&
+            otherQueryAtom < queryTopology.numAtoms &&
+            !scratch.orderedQueryAtom[otherQueryAtom]) {
+          ++scratch.mappedSeedNeighborCount[otherQueryAtom];
+        }
+      }
+    } else {
+      for (int wordIdx = 0; wordIdx < kBondWords; ++wordIdx) {
+        BondWord remaining = seed.bonds[wordIdx];
+        while (remaining != 0) {
+          int bitPosInWord;
+          if constexpr (sizeof(BondWord) == 4) {
+            bitPosInWord =
+                __ffs(static_cast<unsigned int>(remaining)) - 1;
+          } else {
+            bitPosInWord =
+                __ffsll(static_cast<unsigned long long>(remaining)) - 1;
+          }
+          const int queryBondIdx =
+              wordIdx * kBondBitsPerWord + bitPosInWord;
+          remaining &= remaining - 1;
+
+          const std::uint32_t queryEndpoints =
+              queryTopology.bondEndpoints[queryBondIdx];
+          const int queryEndpointU =
+              static_cast<int>(queryEndpoints >> kBondEndpointShift);
+          const int queryEndpointV =
+              static_cast<int>(queryEndpoints & kBondEndpointMask);
+          int otherQueryAtom = -1;
+          if (queryEndpointU == queryAtomIdx) {
+            otherQueryAtom = queryEndpointV;
+          } else if (queryEndpointV == queryAtomIdx) {
+            otherQueryAtom = queryEndpointU;
+          }
+          if (otherQueryAtom >= 0 &&
+              !scratch.orderedQueryAtom[otherQueryAtom]) {
+            ++scratch.mappedSeedNeighborCount[otherQueryAtom];
+          }
+        }
+      }
+    }
+  }
 }
 
 template<int maxAtoms, int maxTA, class TargetTopology, class GroupT>
@@ -898,90 +994,8 @@ __device__ __forceinline__ bool prepareSeedSubstructureSearchCooperative(
       if (laneRank == 0) {
         queryAtomIdx = scratch.seedAtomList[atomListIdx];
         if (!scratch.orderedQueryAtom[queryAtomIdx]) {
-          if (orderPos > 0) {
-            if constexpr (topologyHasAdjacencyBondIndices<QueryTopology>()) {
-              const int begin =
-                  static_cast<int>(queryTopology.rowOffsets[queryAtomIdx]);
-              const int end =
-                  static_cast<int>(queryTopology.rowOffsets[queryAtomIdx + 1]);
-              for (int adjIdx = begin; adjIdx < end; ++adjIdx) {
-                const int queryBondIdx =
-                    static_cast<int>(queryTopology.bondIndices[adjIdx]);
-                if (queryBondIdx >= queryTopology.numBonds ||
-                    !seedContainsBondWithinThread<maxAtoms, maxBonds>(
-                        seed, queryBondIdx)) {
-                  continue;
-                }
-                const int otherQueryAtom =
-                    static_cast<int>(queryTopology.colIndices[adjIdx]);
-                if (otherQueryAtom >= 0 &&
-                    otherQueryAtom < queryTopology.numAtoms &&
-                    scratch.orderedQueryAtom[otherQueryAtom]) {
-                  ++mappedNeighborCount;
-                }
-              }
-            } else {
-              const bool scanQueryAdjacency =
-                  queryTopology.rowOffsets != nullptr &&
-                  queryTopology.colIndices != nullptr &&
-                  queryTopology.bondIndices != nullptr &&
-                  queryAtomIdx >= 0 &&
-                  queryAtomIdx < queryTopology.numAtoms;
-              if (scanQueryAdjacency) {
-                const int begin =
-                    static_cast<int>(queryTopology.rowOffsets[queryAtomIdx]);
-                const int end =
-                    static_cast<int>(queryTopology.rowOffsets[queryAtomIdx + 1]);
-                for (int adjIdx = begin; adjIdx < end; ++adjIdx) {
-                  const int queryBondIdx =
-                      static_cast<int>(queryTopology.bondIndices[adjIdx]);
-                  if (queryBondIdx >= queryTopology.numBonds ||
-                      !seedContainsBondWithinThread<maxAtoms, maxBonds>(
-                          seed, queryBondIdx)) {
-                    continue;
-                  }
-                  const int otherQueryAtom =
-                      static_cast<int>(queryTopology.colIndices[adjIdx]);
-                  if (otherQueryAtom >= 0 &&
-                      otherQueryAtom < queryTopology.numAtoms &&
-                      scratch.orderedQueryAtom[otherQueryAtom]) {
-                    ++mappedNeighborCount;
-                  }
-                }
-              } else {
-                for (int wordIdx = 0; wordIdx < kBondWords; ++wordIdx) {
-                  BondWord remaining = seed.bonds[wordIdx];
-                  while (remaining != 0) {
-                    int bitPosInWord;
-                    if constexpr (sizeof(BondWord) == 4) {
-                      bitPosInWord =
-                          __ffs(static_cast<unsigned int>(remaining)) - 1;
-                    } else {
-                      bitPosInWord =
-                          __ffsll(static_cast<unsigned long long>(remaining)) - 1;
-                    }
-                    const int queryBondIdx =
-                        wordIdx * kBondBitsPerWord + bitPosInWord;
-                    remaining &= remaining - 1;
-
-                    const std::uint32_t queryEndpoints =
-                        queryTopology.bondEndpoints[queryBondIdx];
-                    const int queryEndpointU =
-                        static_cast<int>(queryEndpoints >> kBondEndpointShift);
-                    const int queryEndpointV =
-                        static_cast<int>(queryEndpoints & kBondEndpointMask);
-                    if (queryEndpointU == queryAtomIdx &&
-                        scratch.orderedQueryAtom[queryEndpointV]) {
-                      ++mappedNeighborCount;
-                    } else if (queryEndpointV == queryAtomIdx &&
-                               scratch.orderedQueryAtom[queryEndpointU]) {
-                      ++mappedNeighborCount;
-                    }
-                  }
-                }
-              }
-            }
-          }
+          mappedNeighborCount =
+              scratch.mappedSeedNeighborCount[queryAtomIdx];
           shouldCount = orderPos == 0 || mappedNeighborCount != 0;
         }
       }
@@ -1051,6 +1065,8 @@ __device__ __forceinline__ bool prepareSeedSubstructureSearchCooperative(
         scratch.seedAtoms[orderPos] = static_cast<std::uint8_t>(bestAtom);
         scratch.orderedQueryAtom[bestAtom] = 1;
         scratch.queryOrderPos[bestAtom] = static_cast<std::uint8_t>(orderPos);
+        incrementMappedSeedNeighborCountsWithinThread(
+            seed, queryTopology, scratch, bestAtom);
       }
     }
     prepareOk = group.shfl(prepareOk, 0);
