@@ -32,6 +32,31 @@ constexpr int          kBondEndpointShift = 16;
 constexpr std::uint32_t kBondEndpointMask  = 0xFFFFu;
 constexpr int          kFallbackAdjacencySubwarpSize = 4;
 
+__device__ __forceinline__ int mark_warp_uniform(const int input) {
+  return __shfl_sync(0xffffffffu, input, 0);
+}
+
+__device__ __forceinline__ int reserveSharedCounterSlotWarpAggregated(
+    int* counter, int* overflowed, const int capacity) {
+  const unsigned int activeMask = __activemask();
+  const int lane = static_cast<int>(threadIdx.x) & 31;
+  const int leaderLane = __ffs(activeMask) - 1;
+  const unsigned int laneMaskLt =
+      lane == 0 ? 0u : ((1u << static_cast<unsigned int>(lane)) - 1u);
+  const int offset = __popc(activeMask & laneMaskLt);
+  int base = 0;
+  if (lane == leaderLane) {
+    base = atomicAdd(counter, __popc(activeMask));
+  }
+  base = __shfl_sync(activeMask, base, leaderLane);
+  const int slot = base + offset;
+  if (slot >= capacity) {
+    atomicExch(overflowed, 1);
+    return -1;
+  }
+  return slot;
+}
+
 /// Resolved target endpoints for a successful single-(query bond, target
 /// bond, orientation) compatibility check.  Populated by
 /// @ref matchSingleBondWithinThread on success only; contents are
@@ -1327,15 +1352,14 @@ __device__ __forceinline__ void tryExtendSubstructurePartialWithinThread(
           static_cast<std::uint8_t>(targetAtomIdx);
     }
   } else {
-    const int slot = atomicAdd(&scratch.nextCount, 1);
-    if (slot < effectiveCapacity) {
+    const int slot = reserveSharedCounterSlotWarpAggregated(
+        &scratch.nextCount, &scratch.overflowed, effectiveCapacity);
+    if (slot >= 0) {
       std::uint8_t* next = nextPartials + slot * stride;
       for (int orderPos = 0; orderPos < depth; ++orderPos) {
         next[orderPos] = partial[orderPos];
       }
       next[depth] = static_cast<std::uint8_t>(targetAtomIdx);
-    } else {
-      atomicExch(&scratch.overflowed, 1);
     }
   }
 }
@@ -1410,11 +1434,10 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(
     }
     if (!tables.atoms.testBit(firstQueryAtom, targetAtomIdx)) continue;
 
-    const int slot = atomicAdd(&scratch.currentCount, 1);
-    if (slot < effectiveCapacity) {
+    const int slot = reserveSharedCounterSlotWarpAggregated(
+        &scratch.currentCount, &scratch.overflowed, effectiveCapacity);
+    if (slot >= 0) {
       currentPartials[slot * stride] = static_cast<std::uint8_t>(targetAtomIdx);
-    } else {
-      atomicExch(&scratch.overflowed, 1);
     }
   }
   group.sync();

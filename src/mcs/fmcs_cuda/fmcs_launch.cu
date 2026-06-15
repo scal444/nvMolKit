@@ -5,9 +5,51 @@
 
 #include "fmcs_cuda/fmcs_kernel.cuh"
 
+#include <stdexcept>
+#include <string>
+
 namespace mcs {
 namespace fmcs {
 namespace {
+
+template <typename KernelFunc>
+void configureSharedMemCarveout(KernelFunc kernel, const char* name) {
+  const cudaError_t err =
+      cudaFuncSetAttribute(kernel,
+                           cudaFuncAttributePreferredSharedMemoryCarveout,
+                           cudaSharedmemCarveoutMaxShared);
+  if (err != cudaSuccess) {
+    throw std::runtime_error(std::string("fMCS CUDA error configuring ") +
+                             name + " shared-memory carveout: " +
+                             cudaGetErrorString(err));
+  }
+}
+
+inline bool& sharedMemCarveoutConfigured() {
+  static bool configured = false;
+  return configured;
+}
+
+void configureFmcsKernelsSharedMem() {
+  if (sharedMemCarveoutConfigured()) return;
+
+  configureSharedMemCarveout(
+      fmcsKernel<16, 16, 128, false, false>, "fmcsKernel<16,16,128>");
+  configureSharedMemCarveout(
+      fmcsKernel<32, 32, 128, false, false>, "fmcsKernel<32,32,128>");
+  configureSharedMemCarveout(
+      fmcsKernel<64, 64, 128, false, false>, "fmcsKernel<64,64,128>");
+  configureSharedMemCarveout(
+      fmcsKernel<128, 128, 128, false, false>, "fmcsKernel<128,128,128>");
+  configureSharedMemCarveout(
+      fmcsKernel<16, 16, 512, false, false>, "fmcsKernel<16,16,512>");
+  configureSharedMemCarveout(
+      fmcsKernel<32, 32, 512, false, false>, "fmcsKernel<32,32,512>");
+  configureSharedMemCarveout(
+      fmcsKernel<64, 64, 512, false, false>, "fmcsKernel<64,64,512>");
+
+  sharedMemCarveoutConfigured() = true;
+}
 
 template<int blockThreads, int maxAtoms, int maxBonds>
 void launchFmcsKernelNoInstrumentation(const DevicePerPairInput* pairs,
@@ -19,6 +61,7 @@ void launchFmcsKernelNoInstrumentation(const DevicePerPairInput* pairs,
                                        int numPairs,
                                        unsigned long long timeoutClocks,
                                        cudaStream_t stream) {
+  configureFmcsKernelsSharedMem();
   dim3 grid(static_cast<unsigned>(numPairs));
   dim3 block(static_cast<unsigned>(blockThreads));
   using QueuedT = QueuedSeed<maxAtoms, maxBonds, maxAtoms, maxBonds>;

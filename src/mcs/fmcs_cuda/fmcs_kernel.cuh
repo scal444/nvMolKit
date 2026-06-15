@@ -751,11 +751,11 @@ __device__ __forceinline__ bool readFlagCooperative(
   return value != 0;
 }
 
-template<int maxAtoms, int maxBonds, class QueryTopology, class GroupT>
-__device__ __forceinline__ void seedComputeRemainingSizeRdkitCooperative(
-    const GroupT& group,
+template<int maxAtoms, int maxBonds>
+__device__ __forceinline__ void seedVisitRemainingBondWithinThread(
     Seed<maxAtoms, maxBonds>& seed,
-    const QueryTopology& queryTopology,
+    const int bondIdx,
+    const int otherAtom,
     std::uint8_t* atomStack,
     typename Seed<maxAtoms, maxBonds>::atom_word_type* visitedAtoms,
     typename Seed<maxAtoms, maxBonds>::bond_word_type* visitedBonds,
@@ -765,6 +765,59 @@ __device__ __forceinline__ void seedComputeRemainingSizeRdkitCooperative(
   using BondWord = typename SeedT::bond_word_type;
   constexpr int kAtomBitsPerWord = SeedT::kAtomBitsPerWord;
   constexpr int kBondBitsPerWord = SeedT::kBondBitsPerWord;
+
+  const int bondWordIdx = bondIdx / kBondBitsPerWord;
+  const BondWord bondMask =
+      static_cast<BondWord>(1) << (bondIdx % kBondBitsPerWord);
+  if ((visitedBonds[bondWordIdx] & bondMask) != 0) return;
+
+  visitedBonds[bondWordIdx] |= bondMask;
+  seed.remainingBonds += 1;
+  const int atomWordIdx = otherAtom / kAtomBitsPerWord;
+  const AtomWord atomMask =
+      static_cast<AtomWord>(1) << (otherAtom % kAtomBitsPerWord);
+  if ((visitedAtoms[atomWordIdx] & atomMask) == 0) {
+    visitedAtoms[atomWordIdx] |= atomMask;
+    seed.remainingAtoms += 1;
+    atomStack[(*stackSize)++] = static_cast<std::uint8_t>(otherAtom);
+  }
+}
+
+template<int maxAtoms, int maxBonds>
+__device__ __forceinline__ void seedVisitRemainingIncidentBondsWithinThread(
+    Seed<maxAtoms, maxBonds>& seed,
+    const DeviceCsrView& queryTopology,
+    const int atomIdx,
+    std::uint8_t* atomStack,
+    typename Seed<maxAtoms, maxBonds>::atom_word_type* visitedAtoms,
+    typename Seed<maxAtoms, maxBonds>::bond_word_type* visitedBonds,
+    int* stackSize) {
+  const int begin = static_cast<int>(queryTopology.rowOffsets[atomIdx]);
+  const int end =
+      static_cast<int>(queryTopology.rowOffsets[atomIdx + 1]);
+  for (int edgeIdx = begin; edgeIdx < end; ++edgeIdx) {
+    const int bondIdx =
+        static_cast<int>(queryTopology.bondIndices[edgeIdx]);
+    const int otherAtom =
+        static_cast<int>(queryTopology.colIndices[edgeIdx]);
+    seedVisitRemainingBondWithinThread(
+        seed, bondIdx, otherAtom, atomStack, visitedAtoms, visitedBonds,
+        stackSize);
+  }
+}
+
+template<int maxAtoms, int maxBonds, class GroupT>
+__device__ __forceinline__ void seedComputeRemainingSizeRdkitCooperative(
+    const GroupT& group,
+    Seed<maxAtoms, maxBonds>& seed,
+    const DeviceCsrView& queryTopology,
+    std::uint8_t* atomStack,
+    typename Seed<maxAtoms, maxBonds>::atom_word_type* visitedAtoms,
+    typename Seed<maxAtoms, maxBonds>::bond_word_type* visitedBonds,
+    int* stackSize) {
+  using SeedT = Seed<maxAtoms, maxBonds>;
+  using AtomWord = typename SeedT::atom_word_type;
+  constexpr int kAtomBitsPerWord = SeedT::kAtomBitsPerWord;
 
   if (group.thread_rank() == 0) {
     seed.remainingAtoms = 0;
@@ -790,75 +843,17 @@ __device__ __forceinline__ void seedComputeRemainingSizeRdkitCooperative(
         const int atomIdx = wordIdx * kAtomBitsPerWord + bitPosInWord;
         remaining &= remaining - 1;
 
-        for (int bondIdx = 0; bondIdx < queryTopology.numBonds; ++bondIdx) {
-          const int bondWordIdx = bondIdx / kBondBitsPerWord;
-          const BondWord bondMask =
-              static_cast<BondWord>(1) << (bondIdx % kBondBitsPerWord);
-          if ((visitedBonds[bondWordIdx] & bondMask) != 0) continue;
-
-          const std::uint32_t endpoints =
-              queryTopology.bondEndpoints[bondIdx];
-          const int endpointU =
-              static_cast<int>(endpoints >> kBondEndpointShift);
-          const int endpointV =
-              static_cast<int>(endpoints & kBondEndpointMask);
-          int otherAtom = -1;
-          if (endpointU == atomIdx) {
-            otherAtom = endpointV;
-          } else if (endpointV == atomIdx) {
-            otherAtom = endpointU;
-          } else {
-            continue;
-          }
-
-          visitedBonds[bondWordIdx] |= bondMask;
-          seed.remainingBonds += 1;
-          const int atomWordIdx = otherAtom / kAtomBitsPerWord;
-          const AtomWord atomMask =
-              static_cast<AtomWord>(1) << (otherAtom % kAtomBitsPerWord);
-          if ((visitedAtoms[atomWordIdx] & atomMask) == 0) {
-            visitedAtoms[atomWordIdx] |= atomMask;
-            seed.remainingAtoms += 1;
-            atomStack[(*stackSize)++] = static_cast<std::uint8_t>(otherAtom);
-          }
-        }
+        seedVisitRemainingIncidentBondsWithinThread(
+            seed, queryTopology, atomIdx, atomStack, visitedAtoms,
+            visitedBonds, stackSize);
       }
     }
 
     while (*stackSize > 0) {
       const int atomIdx = atomStack[--(*stackSize)];
-      for (int bondIdx = 0; bondIdx < queryTopology.numBonds; ++bondIdx) {
-        const int bondWordIdx = bondIdx / kBondBitsPerWord;
-        const BondWord bondMask =
-            static_cast<BondWord>(1) << (bondIdx % kBondBitsPerWord);
-        if ((visitedBonds[bondWordIdx] & bondMask) != 0) continue;
-
-        const std::uint32_t endpoints =
-            queryTopology.bondEndpoints[bondIdx];
-        const int endpointU =
-            static_cast<int>(endpoints >> kBondEndpointShift);
-        const int endpointV =
-            static_cast<int>(endpoints & kBondEndpointMask);
-        int otherAtom = -1;
-        if (endpointU == atomIdx) {
-          otherAtom = endpointV;
-        } else if (endpointV == atomIdx) {
-          otherAtom = endpointU;
-        } else {
-          continue;
-        }
-
-        visitedBonds[bondWordIdx] |= bondMask;
-        seed.remainingBonds += 1;
-        const int atomWordIdx = otherAtom / kAtomBitsPerWord;
-        const AtomWord atomMask =
-            static_cast<AtomWord>(1) << (otherAtom % kAtomBitsPerWord);
-        if ((visitedAtoms[atomWordIdx] & atomMask) == 0) {
-          visitedAtoms[atomWordIdx] |= atomMask;
-          seed.remainingAtoms += 1;
-          atomStack[(*stackSize)++] = static_cast<std::uint8_t>(otherAtom);
-        }
-      }
+      seedVisitRemainingIncidentBondsWithinThread(
+          seed, queryTopology, atomIdx, atomStack, visitedAtoms,
+          visitedBonds, stackSize);
     }
   }
   group.sync();
@@ -1013,7 +1008,8 @@ __global__ void fmcsKernel(
       initialExcludedBonds[Seed<maxAtoms, maxBonds>::kBondWords];
 
   auto group = cg::tiled_partition<kFmcsGroupSize>(block);
-  const int groupId   = static_cast<int>(block.thread_rank()) / kFmcsGroupSize;
+  const int groupId =
+      mark_warp_uniform(static_cast<int>(block.thread_rank()) / kFmcsGroupSize);
   const int groupRank = static_cast<int>(group.thread_rank());
   SubstructureScratchT& mySubstructureScratch = substructureScratch[groupId];
   ExecutionStats& myStats =
@@ -1275,8 +1271,11 @@ __global__ void fmcsKernel(
       const int bestBondsSnapshot = static_cast<int>(scoreSnapshot >> 16);
       const int bestAtomsSnapshot =
           static_cast<int>(scoreSnapshot & 0xFFFFu);
-      const bool canGrowCurrent = seedCanGrowBiggerThanWithinThread(
-          myCurrent.seed, bestBondsSnapshot, bestAtomsSnapshot);
+      const bool canGrowCurrent = mark_warp_uniform(
+          seedCanGrowBiggerThanWithinThread(
+              myCurrent.seed, bestBondsSnapshot, bestAtomsSnapshot)
+              ? 1
+              : 0) != 0;
       group.sync();
       if (!canGrowCurrent) {
         if constexpr (CollectStats || kFmcsMeasure) {
@@ -1303,30 +1302,32 @@ __global__ void fmcsKernel(
         if (groupRank == 0) atomicExch(&overflowed, 1);
         break;
       }
+      const int myNewBondCount = mark_warp_uniform(newBondCount[groupId]);
 
       if constexpr (kFmcsDebug) {
         if (pairIdx == kFmcsDebugPairIdx && groupRank == 0) {
           printf("[fmcs][grp %d iter %d] C: after fillNewBonds, count=%d stage=%u\n",
-                 groupId, debugIter, newBondCount[groupId],
+                 groupId, debugIter, myNewBondCount,
                  static_cast<unsigned int>(myCurrent.seed.growingStage));
         }
       }
-      if (newBondCount[groupId] == 0) {
+      if (myNewBondCount == 0) {
         if constexpr (CollectStats || kFmcsMeasure) {
           if (groupRank == 0) myStats.fillZero += 1u;
         }
         break;
       }
 
-      bool runInnerStage =
-          myCurrent.seed.growingStage != kSeedGrowStageOuter;
+      const int currentGrowStage =
+          mark_warp_uniform(static_cast<int>(myCurrent.seed.growingStage));
+      bool runInnerStage = currentGrowStage != kSeedGrowStageOuter;
 
       // RDKit Seed::grow() stage 0: build the child containing all newly
       // discovered outgoing bonds and run checkIfMatchAndAppend().  If this
       // all-bonds child matches and there is more than one new bond, RDKit
       // returns immediately with the parent left at GrowingStage=1; the next
       // outer grow loop resumes the parent at the singleton/subset stage.
-      if (myCurrent.seed.growingStage == kSeedGrowStageOuter) {
+      if (currentGrowStage == kSeedGrowStageOuter) {
         if constexpr (CollectStats || kFmcsMeasure) {
           if (groupRank == 0) myStats.stage0Attempts += 1u;
         }
@@ -1340,7 +1341,7 @@ __global__ void fmcsKernel(
         if (groupRank == 0) {
           seedBeginGrowStepWithinThread(myBiggest.seed);
           myBiggest.seed.growingStage = kSeedGrowStageOuter;
-          for (int i = 0; i < newBondCount[groupId]; ++i) {
+          for (int i = 0; i < myNewBondCount; ++i) {
             seedAddNewBondWithinThread(myBiggest.seed, myNewBonds[i]);
           }
         }
@@ -1356,8 +1357,11 @@ __global__ void fmcsKernel(
             static_cast<int>(childScoreSnapshot >> 16);
         const int childBestAtoms =
             static_cast<int>(childScoreSnapshot & 0xFFFFu);
-        const bool canGrowChild = seedCanGrowBiggerThanWithinThread(
-            myBiggest.seed, childBestBonds, childBestAtoms);
+        const bool canGrowChild = mark_warp_uniform(
+            seedCanGrowBiggerThanWithinThread(
+                myBiggest.seed, childBestBonds, childBestAtoms)
+                ? 1
+                : 0) != 0;
         group.sync();
         if (!canGrowChild) {
           if constexpr (CollectStats || kFmcsMeasure) {
@@ -1366,11 +1370,14 @@ __global__ void fmcsKernel(
           break;
         }
 
-        const bool ok = checkSeedMatchAndAppendCooperative<CollectStats>(
-            group, myBiggest, queryView, targetView, pair.tables,
-            mySubstructureScratch,
-            mySubstructureStorage, substructurePartialCapacity,
-            &overflowed, myStats, true);
+        const bool ok = mark_warp_uniform(
+            checkSeedMatchAndAppendCooperative<CollectStats>(
+                group, myBiggest, queryView, targetView, pair.tables,
+                mySubstructureScratch,
+                mySubstructureStorage, substructurePartialCapacity,
+                &overflowed, myStats, true)
+                ? 1
+                : 0) != 0;
         if (groupRank == 0) stage0Ok[groupId] = ok;
         group.sync();
 
@@ -1392,7 +1399,7 @@ __global__ void fmcsKernel(
             atomicExch(&overflowed, 1);
           }
           group.sync();
-          if (newBondCount[groupId] > 1) {
+          if (myNewBondCount > 1) {
             if (groupRank == 0) {
               myCurrent.seed.growingStage = kSeedGrowStageInner;
             }
@@ -1406,7 +1413,7 @@ __global__ void fmcsKernel(
           }
           break;
         }
-        if (newBondCount[groupId] == 1) break;
+        if (myNewBondCount == 1) break;
         runInnerStage = true;
       }
 
@@ -1415,7 +1422,7 @@ __global__ void fmcsKernel(
       // RDKit Seed::grow() stage 1: try every individual outgoing bond.
       // A failed individual match excludes that NewBond from later subset
       // enumeration and increments IndividualBondExcluded.
-      for (int i = 0; i < newBondCount[groupId]; ++i) {
+      for (int i = 0; i < myNewBondCount; ++i) {
         if (!myNewBonds[i].alive) continue;
 
         warpCopy(group, &myBiggest, &myCurrent, sizeof(QueuedT));
@@ -1442,8 +1449,11 @@ __global__ void fmcsKernel(
             static_cast<int>(childScoreSnapshot >> 16);
         const int childBestAtoms =
             static_cast<int>(childScoreSnapshot & 0xFFFFu);
-        const bool canGrowSingle = seedCanGrowBiggerThanWithinThread(
-            myBiggest.seed, childBestBonds, childBestAtoms);
+        const bool canGrowSingle = mark_warp_uniform(
+            seedCanGrowBiggerThanWithinThread(
+                myBiggest.seed, childBestBonds, childBestAtoms)
+                ? 1
+                : 0) != 0;
         group.sync();
         if (!canGrowSingle) {
           if constexpr (CollectStats || kFmcsMeasure) {
@@ -1452,11 +1462,14 @@ __global__ void fmcsKernel(
           continue;
         }
 
-        const bool ok = checkSeedMatchAndAppendCooperative<CollectStats>(
-            group, myBiggest, queryView, targetView, pair.tables,
-            mySubstructureScratch,
-            mySubstructureStorage, substructurePartialCapacity,
-            &overflowed, myStats, true);
+        const bool ok = mark_warp_uniform(
+            checkSeedMatchAndAppendCooperative<CollectStats>(
+                group, myBiggest, queryView, targetView, pair.tables,
+                mySubstructureScratch,
+                mySubstructureStorage, substructurePartialCapacity,
+                &overflowed, myStats, true)
+                ? 1
+                : 0) != 0;
         if constexpr (CollectStats || kFmcsMeasure) {
           if (groupRank == 0 && ok) myStats.stage1Success += 1u;
         }
@@ -1485,7 +1498,7 @@ __global__ void fmcsKernel(
       int aliveCount = 0;
       int aliveOverflow = 0;
       if (groupRank == 0) {
-        for (int i = 0; i < newBondCount[groupId]; ++i) {
+        for (int i = 0; i < myNewBondCount; ++i) {
           if (myNewBonds[i].alive) ++aliveCount;
         }
         aliveOverflow = aliveCount > 63 ? 1 : 0;
@@ -1498,7 +1511,7 @@ __global__ void fmcsKernel(
         unsigned int erasedCount = 0;
         if (groupRank == 0) {
           erasedCount =
-              static_cast<unsigned int>(newBondCount[groupId] - aliveCount);
+              static_cast<unsigned int>(myNewBondCount - aliveCount);
         }
         erasedCount = group.shfl(erasedCount, 0);
         const unsigned long long maxComposition =
@@ -1515,8 +1528,11 @@ __global__ void fmcsKernel(
               static_cast<int>(latestScoreSnapshot >> 16);
           const int latestBestAtoms =
               static_cast<int>(latestScoreSnapshot & 0xFFFFu);
-          const bool canGrowRemaining = seedCanGrowBiggerThanWithinThread(
-              myCurrent.seed, latestBestBonds, latestBestAtoms);
+          const bool canGrowRemaining = mark_warp_uniform(
+              seedCanGrowBiggerThanWithinThread(
+                  myCurrent.seed, latestBestBonds, latestBestAtoms)
+                  ? 1
+                  : 0) != 0;
           group.sync();
           if (!canGrowRemaining) {
             if constexpr (CollectStats || kFmcsMeasure) {
@@ -1531,7 +1547,7 @@ __global__ void fmcsKernel(
             seedBeginGrowStepWithinThread(myBiggest.seed);
             myBiggest.seed.growingStage = kSeedGrowStageOuter;
             int aliveBit = 0;
-            for (int i = 0; i < newBondCount[groupId]; ++i) {
+            for (int i = 0; i < myNewBondCount; ++i) {
               if (!myNewBonds[i].alive) continue;
               if ((composition & (1ULL << aliveBit)) != 0ULL) {
                 seedAddNewBondWithinThread(myBiggest.seed, myNewBonds[i]);
@@ -1554,8 +1570,11 @@ __global__ void fmcsKernel(
               static_cast<int>(childScoreSnapshot >> 16);
           const int childBestAtoms =
               static_cast<int>(childScoreSnapshot & 0xFFFFu);
-          const bool canGrowSubset = seedCanGrowBiggerThanWithinThread(
-              myBiggest.seed, childBestBonds, childBestAtoms);
+          const bool canGrowSubset = mark_warp_uniform(
+              seedCanGrowBiggerThanWithinThread(
+                  myBiggest.seed, childBestBonds, childBestAtoms)
+                  ? 1
+                  : 0) != 0;
           group.sync();
           if (!canGrowSubset) {
             if constexpr (CollectStats || kFmcsMeasure) {
@@ -1564,11 +1583,14 @@ __global__ void fmcsKernel(
             continue;
           }
 
-          const bool ok = checkSeedMatchAndAppendCooperative<CollectStats>(
-              group, myBiggest, queryView, targetView, pair.tables,
-              mySubstructureScratch,
-              mySubstructureStorage, substructurePartialCapacity,
-              &overflowed, myStats, true);
+          const bool ok = mark_warp_uniform(
+              checkSeedMatchAndAppendCooperative<CollectStats>(
+                  group, myBiggest, queryView, targetView, pair.tables,
+                  mySubstructureScratch,
+                  mySubstructureStorage, substructurePartialCapacity,
+                  &overflowed, myStats, true)
+                  ? 1
+                  : 0) != 0;
           if (ok) {
             if constexpr (CollectStats || kFmcsMeasure) {
               if (groupRank == 0) myStats.stage2Success += 1u;

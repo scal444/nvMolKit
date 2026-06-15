@@ -1,0 +1,4 @@
+interface:
+  display_name: "NCU Line Analysis"
+  short_description: "Extract and analyze Nsight Compute source lines"
+  default_prompt: "Use $ncu-line-analysis to extract source-line metrics from an Nsight Compute report."
