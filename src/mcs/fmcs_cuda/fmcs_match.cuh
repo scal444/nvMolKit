@@ -650,7 +650,7 @@ __device__ __forceinline__ bool rebuildMatchFromSubstructureMappingWithinThread(
 
   matchResultClearWithinThread(match);
   for (int i = 0; i < seed.numAtoms; ++i) {
-    const int queryAtomIdx = scratch.seedAtomList[i];
+    const int queryAtomIdx = scratch.seedAtoms[i];
     const int targetAtomIdx = scratch.targetAtomForQuery[queryAtomIdx];
     if (targetAtomIdx == kUnmappedTargetIdx) return false;
     match.targetAtomIdx[queryAtomIdx] =
@@ -982,22 +982,23 @@ __device__ __forceinline__ bool prepareSeedSubstructureSearchCooperative(
 
   for (int orderPos = 0; orderPos < numSeedAtoms; ++orderPos) {
     int bestAtom = -1;
+    int bestListIdx = -1;
     int bestMappedNeighborCount = -1;
     int bestDegree = -1;
     int bestCandidateCount = maxTA + 1;
+    const int remainingSeedAtomCount = numSeedAtoms - orderPos;
 
-    for (int atomListIdx = 0; atomListIdx < numSeedAtoms; ++atomListIdx) {
+    for (int atomListIdx = 0; atomListIdx < remainingSeedAtomCount;
+         ++atomListIdx) {
       int queryAtomIdx = -1;
       int mappedNeighborCount = 0;
       int shouldCount = 0;
 
       if (laneRank == 0) {
         queryAtomIdx = scratch.seedAtomList[atomListIdx];
-        if (!scratch.orderedQueryAtom[queryAtomIdx]) {
-          mappedNeighborCount =
-              scratch.mappedSeedNeighborCount[queryAtomIdx];
-          shouldCount = orderPos == 0 || mappedNeighborCount != 0;
-        }
+        mappedNeighborCount =
+            scratch.mappedSeedNeighborCount[queryAtomIdx];
+        shouldCount = orderPos == 0 || mappedNeighborCount != 0;
       }
       queryAtomIdx = group.shfl(queryAtomIdx, 0);
       mappedNeighborCount = group.shfl(mappedNeighborCount, 0);
@@ -1038,6 +1039,7 @@ __device__ __forceinline__ bool prepareSeedSubstructureSearchCooperative(
                queryAtomIdx < bestAtom);
           if (better) {
             bestAtom = queryAtomIdx;
+            bestListIdx = atomListIdx;
             bestMappedNeighborCount = mappedNeighborCount;
             bestDegree = degree;
             bestCandidateCount = candidateCount;
@@ -1049,19 +1051,16 @@ __device__ __forceinline__ bool prepareSeedSubstructureSearchCooperative(
     }
     if (!prepareOk) break;
 
-    if (laneRank == 0 && bestAtom < 0) {
-      for (int atomListIdx = 0; atomListIdx < numSeedAtoms; ++atomListIdx) {
-        const int queryAtomIdx = scratch.seedAtomList[atomListIdx];
-        if (!scratch.orderedQueryAtom[queryAtomIdx]) {
-          bestAtom = queryAtomIdx;
-          break;
-        }
-      }
+    if (laneRank == 0 && bestAtom < 0 && remainingSeedAtomCount > 0) {
+      bestAtom = scratch.seedAtomList[0];
+      bestListIdx = 0;
     }
     if (laneRank == 0) {
       if (bestAtom < 0) {
         prepareOk = 0;
       } else {
+        scratch.seedAtomList[bestListIdx] =
+            scratch.seedAtomList[remainingSeedAtomCount - 1];
         scratch.seedAtoms[orderPos] = static_cast<std::uint8_t>(bestAtom);
         scratch.orderedQueryAtom[bestAtom] = 1;
         scratch.queryOrderPos[bestAtom] = static_cast<std::uint8_t>(orderPos);
