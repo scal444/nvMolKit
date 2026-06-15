@@ -13,15 +13,16 @@
 # License for the specific language governing permissions and limitations under
 # the License.
 
-add_library(mcs_fmcs_core fmcs_cuda/fmcs.cu fmcs_cuda/fmcs_match_tables.cu
+add_library(mcs_fmcs_core fmcs_cuda/fmcs.cpp fmcs_cuda/fmcs_launch.cu
                           mcs_graph.cpp)
 target_include_directories(mcs_fmcs_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
                                                 ${CMAKE_SOURCE_DIR})
-target_link_libraries(mcs_fmcs_core PUBLIC CUDA::cudart device nvtx)
+target_link_libraries(mcs_fmcs_core PUBLIC CUDA::cudart device device_vector
+                                           nvtx pinned_host_allocator)
 target_compile_options(
   mcs_fmcs_core
   PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--ptxas-options=-v;--extended-lambda>)
 
-add_library(mcs_search mcs_search.cu)
+add_library(mcs_search mcs_search.cpp)
 target_link_libraries(mcs_search PUBLIC mcs_fmcs_core ${RDKit_LIBS})
 target_include_directories(mcs_search PUBLIC ${CMAKE_SOURCE_DIR})

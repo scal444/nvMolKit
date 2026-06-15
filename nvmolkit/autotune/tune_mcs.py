@@ -51,7 +51,7 @@ def _default_mcs_search_space(num_gpus: int, cpus: int) -> dict:
     per_gpu_worker_max = max(1, min(8, cpus // max(1, num_gpus)))
     return {
         "batchSize": [0, 64, 128, 256, 512],
-        "blockSize": {"choices": [128, 64, 256]},
+        "blockSize": {"choices": [128, 512]},
         "workerThreads": (1, per_gpu_worker_max),
         "preprocessingThreads": (1, cpus),
         "executorsPerRunner": (1, 8),

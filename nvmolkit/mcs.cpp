@@ -341,19 +341,9 @@ BOOST_PYTHON_MODULE(_mcs) {
       params.requireGpu                                       = optionValue<bool>(options, "require_gpu", false);
       params.collectTimings                                   = optionValue<bool>(options, "collect_timings", false);
       params.collectStats                                     = optionValue<bool>(options, "collect_stats", false);
-      if constexpr (!nvMolKit::kMCSCollectTimingsEnabled) {
-        if (params.collectTimings) {
-          throw std::runtime_error(
-              "MCS timing collection was not compiled; rebuild with "
-              "-DNVMOLKIT_ENABLE_MCS_TIMINGS=ON");
-        }
-      }
-      if constexpr (!nvMolKit::kMCSCollectStatsEnabled) {
-        if (params.collectStats) {
-          throw std::runtime_error(
-              "MCS statistics collection was not compiled; rebuild with "
-              "-DNVMOLKIT_ENABLE_MCS_STATS=ON");
-        }
+      if (params.collectTimings || params.collectStats) {
+        throw std::runtime_error(
+            "fMCS timing/stat instrumentation is not instantiated in this build");
       }
       params.timeoutSeconds                                   = optionValue<unsigned int>(options, "timeout_seconds", 0);
       params.batchSize                                        = optionValue<int>(options, "batch_size", 0);

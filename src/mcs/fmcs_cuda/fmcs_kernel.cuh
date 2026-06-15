@@ -18,11 +18,13 @@
 
 #include "fmcs_cuda/fmcs_debug.cuh"
 #include "fmcs_cuda/fmcs_grow.cuh"
+#include "fmcs_cuda/fmcs_kernel_types.cuh"
 #include "fmcs_cuda/fmcs_match.cuh"
 #include "fmcs_cuda/fmcs_match_tables.cuh"
 #include "fmcs_cuda/fmcs_seed.cuh"
 #include "fmcs_cuda/fmcs_seed_queue.cuh"
 #include "fmcs_cuda/fmcs_stats.cuh"
+#include "fmcs_cuda/fmcs_tiers.cuh"
 #include "mcs_common/mcs_cooperative_copy.cuh"
 
 #include <cooperative_groups.h>
@@ -33,61 +35,6 @@ namespace mcs {
 namespace fmcs {
 
 namespace cg = cooperative_groups;
-
-/// Per-pair descriptor passed to the kernel.  Non-owning: pointers refer
-/// into host-uploaded device buffers.  The caller chooses the smaller
-/// input as the query (fMCS only enumerates subgraphs of the query) and
-/// records the choice in @c swapped so host-side expansion can un-swap
-/// the result mappings.
-struct DevicePerPairInput {
-  int queryNumAtoms = 0;
-  int queryNumBonds = 0;
-  int targetNumAtoms = 0;
-  int targetNumBonds = 0;
-
-  const std::uint32_t* queryRowOffsets = nullptr;
-  const std::uint32_t* queryColIndices = nullptr;
-  /// Parallel to @c queryColIndices: undirected bond id for each CSR entry.
-  const std::uint32_t* queryBondIndices = nullptr;
-  /// Packed (u << 16 | v), one entry per undirected bond, ordered to
-  /// match the bond dimension of the match tables (@ref enumerateBonds).
-  const std::uint32_t* queryBondEndpoints = nullptr;
-
-  const std::uint32_t* targetRowOffsets = nullptr;
-  const std::uint32_t* targetColIndices = nullptr;
-  const std::uint32_t* targetBondIndices = nullptr;
-  const std::uint32_t* targetBondEndpoints = nullptr;
-
-  PairMatchTablesDevice tables;
-
-  bool swapped = false;
-};
-
-/// Fixed-size device-writable result.  mcs::MCSResult uses std::vector and
-/// cannot be constructed on the device, so the kernel fills this POD and
-/// the host expands it.
-///
-/// @c bondMapA[i] / @c bondMapB[i] hold the query / target bond index of
-/// the i-th matched edge in the common subgraph.  The host recovers
-/// (u, v) endpoints by indexing the @c bondEndpoints arrays it already
-/// uploaded for each pair -- avoids duplicating endpoint data here at
-/// 4 * maxBonds bytes per result.
-template<int maxAtoms, int maxBonds>
-struct DeviceMCSResult {
-  int numCommonVertices = 0;
-  int numCommonEdges    = 0;
-  bool timedOut         = false;
-  bool overflowed       = false;
-
-  /// mappingA[i] = query atom idx, mappingB[i] = target atom idx of
-  /// the i-th matched vertex.
-  uint8_t mappingA[maxAtoms];
-  uint8_t mappingB[maxAtoms];
-  /// bondMapA[i] = query bond idx, bondMapB[i] = target bond idx of
-  /// the i-th matched edge.
-  uint8_t bondMapA[maxBonds];
-  uint8_t bondMapB[maxBonds];
-};
 
 /// Non-owning view over one side's CSR + bond-endpoint arrays.  Passed to
 /// matcher/grow helpers as the @c TargetTopology / @c QueryTopology.
@@ -948,9 +895,8 @@ static_assert((kFmcsGroupSize & (kFmcsGroupSize - 1)) == 0,
 
 template<int blockThreads>
 struct FmcsBlockConfig {
-  static_assert(blockThreads == 64 || blockThreads == 128 ||
-                    blockThreads == 256 || blockThreads == 512,
-                "fMCS block size must be 64, 128, 256, or 512");
+  static_assert(blockThreads == 128 || blockThreads == 512,
+                "fMCS block size must be 128 or 512");
   static_assert(blockThreads % kFmcsGroupSize == 0,
                 "fMCS block size must be a multiple of kFmcsGroupSize");
   static constexpr int numGroups = blockThreads / kFmcsGroupSize;
@@ -975,7 +921,7 @@ struct FmcsBlockConfig {
 /// @p cacheStorageAll and @p cacheCapacity are currently ignored.  They remain
 /// in the signature while the old cache scaffolding is still compiled for unit
 /// tests; the active RDKit-parity kernel does not allocate or probe it.
-template<int maxAtoms, int maxBonds, int blockThreads, class Policy, bool CollectTimings, bool CollectStats>
+template<int maxAtoms, int maxBonds, int blockThreads, bool CollectTimings, bool CollectStats>
 __global__ void fmcsKernel(
     const DevicePerPairInput* __restrict__ pairs,
     DeviceMCSResult<maxAtoms, maxBonds>* __restrict__ results,
@@ -1843,25 +1789,6 @@ __global__ void fmcsKernel(
       }
     }
   }
-}
-
-enum class MaxSizeTier {
-  k16,
-  k32,
-  k64,
-  k128,
-};
-
-/// Smallest tier whose bitset width covers both counts.  Returns -1 when
-/// the largest tier (128) does not fit; the caller must flag
-/// @ref MCSResult::overflowed.
-inline int pickMaxSizeTier(int numAtoms, int numBonds) {
-  const int need = numAtoms > numBonds ? numAtoms : numBonds;
-  if (need <= 16) return 0;
-  if (need <= 32) return 1;
-  if (need <= 64) return 2;
-  if (need <= 128) return 3;
-  return -1;
 }
 
 }  // namespace fmcs

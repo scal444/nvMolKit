@@ -143,8 +143,7 @@ class MCSConfig:
         batchSize: Optional GPU batch chunk size. ``0`` lets the native layer
             choose.
         blockSize: CUDA threads per fMCS pair block. Supported values are
-            ``64``, ``128``, and ``256``. ``512`` is experimental and only
-            supports maxSize tiers up to 64.
+            ``128`` and ``512``. ``512`` supports maxSize tiers up to 64.
         workerThreads: GPU runner threads per GPU. ``-1`` autoselects.
         preprocessingThreads: CPU threads for pair preprocessing. ``-1``
             autoselects.
@@ -328,8 +327,7 @@ def findMCS(
         batch_size: Optional GPU batch chunk size. ``0`` lets the native layer
             choose.
         block_size: CUDA threads per fMCS pair block. Supported values are
-            ``64``, ``128``, and ``256``. ``512`` is experimental and only
-            supports maxSize tiers up to 64.
+            ``128`` and ``512``. ``512`` supports maxSize tiers up to 64.
         worker_threads: GPU runner threads per GPU. ``-1`` autoselects.
         preprocessing_threads: CPU threads for pair preprocessing. ``-1``
             autoselects.
@@ -337,25 +335,19 @@ def findMCS(
             for chunked fMCS tier dispatch. ``-1`` autoselects.
         gpu_ids: GPU device IDs to use. ``None`` or empty uses the current
             device.
-        collect_timings: When true, collect per-pair backend elapsed
-            milliseconds in ``MCSBatchResult.elapsed_ms``.
+        collect_timings: Currently unavailable in the fast compile build
+            because instrumented fMCS kernels are not instantiated.
         collect_stats: When true, collect per-pair fMCS search counters in
-            ``MCSBatchResult.fmcs_stats``. This launches an instrumented GPU
-            kernel and is intended for diagnostics, not throughput benchmark
-            numbers.
+            ``MCSBatchResult.fmcs_stats``. Currently unavailable in the fast
+            compile build because instrumented fMCS kernels are not
+            instantiated.
 
     Returns:
         :class:`MCSBatchResult` in generated-pair order.
     """
-    if collect_timings and not MCS_TIMINGS_ENABLED:
+    if collect_timings or collect_stats:
         raise RuntimeError(
-            "MCS timing collection was not compiled; rebuild with "
-            "-DNVMOLKIT_ENABLE_MCS_TIMINGS=ON"
-        )
-    if collect_stats and not MCS_STATS_ENABLED:
-        raise RuntimeError(
-            "MCS statistics collection was not compiled; rebuild with "
-            "-DNVMOLKIT_ENABLE_MCS_STATS=ON"
+            "fMCS timing/stat instrumentation is not instantiated in this build"
         )
 
     mode = _normalize_mode(mode)

@@ -1,0 +1,19 @@
+{
+  "input": "/home/kboyd/omg/repos/nvmolkit/analysis/enamine_mcs_1k_pair_timings.csv",
+  "output_dir": "/home/kboyd/omg/repos/nvmolkit/analysis/mcs_1k_timing_analysis",
+  "rows": 1000,
+  "plots": [
+    "rings_hydrocarbons_vs_nvmolkit_time.png",
+    "size_vs_nvmolkit_time.png",
+    "slow_tail_top5_descriptor_lift.png",
+    "timing_scatter_nv_vs_rdkit.png",
+    "top_descriptor_correlations_nv_over_rdkit_ratio.png",
+    "top_descriptor_correlations_nvmolkit.png"
+  ],
+  "tables": [
+    "descriptor_correlations.csv",
+    "pair_descriptor_timings.csv",
+    "slow_tail_top5_lift.csv",
+    "slowest_nvmolkit_pairs.csv"
+  ]
+}

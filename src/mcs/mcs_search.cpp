@@ -721,19 +721,9 @@ std::vector<MCSResult> findMCSBatch(const std::vector<const RDKit::ROMol*>& mols
                                     const std::vector<MCSPair>&             pairs,
                                     cudaStream_t                            stream,
                                     const MCSParameters&                    params) {
-  if constexpr (!kMCSCollectTimingsEnabled) {
-    if (params.collectTimings) {
-      throw std::runtime_error(
-          "MCS timing collection was not compiled; rebuild with "
-          "-DNVMOLKIT_ENABLE_MCS_TIMINGS=ON");
-    }
-  }
-  if constexpr (!kMCSCollectStatsEnabled) {
-    if (params.collectStats) {
-      throw std::runtime_error(
-          "MCS statistics collection was not compiled; rebuild with "
-          "-DNVMOLKIT_ENABLE_MCS_STATS=ON");
-    }
+  if (params.collectTimings || params.collectStats) {
+    throw std::runtime_error(
+        "fMCS timing/stat instrumentation is not instantiated in this build");
   }
   std::vector<MCSResult> results(pairs.size());
   if (pairs.empty()) return results;

@@ -17,7 +17,7 @@ import pytest
 from rdkit import Chem
 from rdkit.Chem import rdFMCS
 
-from nvmolkit.mcs import MCSConfig, MCS_STATS_ENABLED, MCS_TIMINGS_ENABLED, findMCS
+from nvmolkit.mcs import MCSConfig, findMCS
 
 def _mols(smiles: list[str]):
     return [Chem.MolFromSmiles(smi) for smi in smiles]
@@ -79,64 +79,20 @@ def test_pairs_mode_matches_rdkit_and_preserves_order():
     _assert_matches_rdkit(result, mols)
 
 
-def test_collect_timings_reports_per_pair_elapsed_ms():
+def test_collect_timings_is_rejected():
     mols = _mols(["CCO", "CCN", "c1ccccc1", "c1ccc(O)cc1"])
     pairs = [(0, 1), (2, 3), (0, 2)]
 
-    if not MCS_TIMINGS_ENABLED:
-        with pytest.raises(RuntimeError, match="MCS timing collection was not compiled"):
-            findMCS(mols, mode="pairs", pairs=pairs, collect_timings=True)
-        return
-
-    result = findMCS(mols, mode="pairs", pairs=pairs, collect_timings=True)
-
-    assert result.pairs == tuple(pairs)
-    assert result.elapsed_ms is not None
-    assert result.elapsed_ms.shape == (len(pairs),)
-    assert (result.elapsed_ms >= 0).all()
-    assert result[0].elapsed_ms == pytest.approx(float(result.elapsed_ms[0]))
+    with pytest.raises(RuntimeError, match="instrumentation is not instantiated"):
+        findMCS(mols, mode="pairs", pairs=pairs, collect_timings=True)
 
 
-def test_collect_stats_reports_per_pair_fmcs_counters():
+def test_collect_stats_is_rejected():
     mols = _mols(["CCO", "CCN", "c1ccccc1", "c1ccc(O)cc1"])
     pairs = [(0, 1), (2, 3), (0, 2)]
 
-    if not MCS_STATS_ENABLED:
-        with pytest.raises(RuntimeError, match="MCS statistics collection was not compiled"):
-            findMCS(mols, mode="pairs", pairs=pairs, collect_stats=True)
-        return
-
-    result = findMCS(mols, mode="pairs", pairs=pairs, collect_stats=True)
-
-    assert result.fmcs_stats is not None
-    assert result.fmcs_stats["phase2_iters"].shape == (len(pairs),)
-    assert result.fmcs_stats["initial_seeds"].shape == (len(pairs),)
-    assert (result.fmcs_stats["initial_seeds"] > 0).all()
-    assert (result.fmcs_stats["match_calls"] >= result.fmcs_stats["match_found"]).all()
-    for key in (
-        "total_clocks",
-        "phase1_clocks",
-        "phase2_clocks",
-        "incremental_match_cycles_1024",
-        "substructure_match_cycles_1024",
-        "phase2_pop_sync_wait_cycles_1024",
-        "phase2_sync_wait_cycles_1024",
-        "phase2_idle_no_seed_wait_cycles_1024",
-        "phase2_idle_no_match_wait_cycles_1024",
-        "phase2_active_work_cycles_1024",
-        "phase2_active_match_cycles_1024",
-    ):
-        assert result.fmcs_stats[key].shape == (len(pairs),)
-    assert (result.fmcs_stats["total_clocks"] > 0).all()
-    assert (result.fmcs_stats["phase1_clocks"] > 0).all()
-    assert (result.fmcs_stats["phase2_clocks"] > 0).all()
-    assert (
-        result.fmcs_stats["incremental_match_cycles_1024"]
-        + result.fmcs_stats["substructure_match_cycles_1024"]
-        > 0
-    ).all()
-    assert result[0].fmcs_stats is not None
-    assert result[0].fmcs_stats["initial_seeds"] == int(result.fmcs_stats["initial_seeds"][0])
+    with pytest.raises(RuntimeError, match="instrumentation is not instantiated"):
+        findMCS(mols, mode="pairs", pairs=pairs, collect_stats=True)
 
 
 def test_pairs_mode_chunked_multi_executor_matches_rdkit():
@@ -148,7 +104,7 @@ def test_pairs_mode_chunked_multi_executor_matches_rdkit():
         mode="pairs",
         pairs=pairs,
         batch_size=1,
-        block_size=64,
+        block_size=128,
         executors_per_runner=2,
     )
 
@@ -166,7 +122,7 @@ def test_pairs_mode_threaded_gpu_options_match_rdkit():
         mode="pairs",
         pairs=pairs,
         batch_size=1,
-        block_size=256,
+        block_size=128,
         worker_threads=2,
         preprocessing_threads=2,
         executors_per_runner=1,
@@ -183,7 +139,7 @@ def test_config_path_matches_rdkit_and_rejects_duplicate_execution_options():
     pairs = [(0, 1), (2, 3)]
     config = MCSConfig(
         batchSize=1,
-        blockSize=64,
+        blockSize=128,
         workerThreads=1,
         preprocessingThreads=1,
         executorsPerRunner=1,
@@ -196,7 +152,7 @@ def test_config_path_matches_rdkit_and_rejects_duplicate_execution_options():
     _assert_matches_rdkit(result, mols)
 
     with pytest.raises(ValueError, match="config cannot be combined"):
-        findMCS(mols, mode="pairs", pairs=pairs, config=config, block_size=256)
+        findMCS(mols, mode="pairs", pairs=pairs, config=config, block_size=512)
 
 
 def test_all_pairs_default_is_upper_triangle_with_diagonal():
@@ -285,8 +241,9 @@ def test_invalid_mode_and_optional_arguments():
         findMCS(mols, mode="pairs", pairs=[(0, 1)], atom_compare="mass")
     with pytest.raises(ValueError, match="Unsupported bond_compare"):
         findMCS(mols, mode="pairs", pairs=[(0, 1)], bond_compare="shape")
-    with pytest.raises(ValueError, match="blockSize"):
-        findMCS(mols, mode="pairs", pairs=[(0, 1)], block_size=32)
+    for block_size in (32, 64, 256):
+        with pytest.raises(ValueError, match="blockSize"):
+            findMCS(mols, mode="pairs", pairs=[(0, 1)], block_size=block_size)
 
 
 def test_out_of_range_pair_raises_from_native_layer():

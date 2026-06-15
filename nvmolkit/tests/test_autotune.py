@@ -189,7 +189,7 @@ def test_mcs_config_to_from_dict_roundtrip():
     """``MCSConfig`` serializes losslessly through ``to_dict``/``from_dict``."""
     config = MCSConfig(
         batchSize=256,
-        blockSize=64,
+        blockSize=512,
         workerThreads=2,
         preprocessingThreads=4,
         executorsPerRunner=3,
@@ -198,7 +198,7 @@ def test_mcs_config_to_from_dict_roundtrip():
     encoded = config.to_dict()
     assert encoded == {
         "batchSize": 256,
-        "blockSize": 64,
+        "blockSize": 512,
         "workerThreads": 2,
         "preprocessingThreads": 4,
         "executorsPerRunner": 3,
@@ -206,7 +206,7 @@ def test_mcs_config_to_from_dict_roundtrip():
     }
     assert config.to_kwargs() == {
         "batch_size": 256,
-        "block_size": 64,
+        "block_size": 512,
         "worker_threads": 2,
         "preprocessing_threads": 4,
         "executors_per_runner": 3,
@@ -214,7 +214,7 @@ def test_mcs_config_to_from_dict_roundtrip():
     }
     restored = MCSConfig.from_dict(encoded)
     assert restored.batchSize == 256
-    assert restored.blockSize == 64
+    assert restored.blockSize == 512
     assert restored.workerThreads == 2
     assert restored.preprocessingThreads == 4
     assert restored.executorsPerRunner == 3
@@ -258,13 +258,13 @@ def test_save_load_substruct_config_roundtrip(tmp_path):
 
 
 def test_save_load_mcs_config_roundtrip(tmp_path):
-    config = MCSConfig(batchSize=128, blockSize=256, workerThreads=2, preprocessingThreads=4, executorsPerRunner=2)
+    config = MCSConfig(batchSize=128, blockSize=512, workerThreads=2, preprocessingThreads=4, executorsPerRunner=2)
     path = tmp_path / "mcs.json"
     autotune.save(config, path)
     loaded = autotune.load(path)
     assert isinstance(loaded, MCSConfig)
     assert loaded.batchSize == 128
-    assert loaded.blockSize == 256
+    assert loaded.blockSize == 512
     assert loaded.workerThreads == 2
     assert loaded.preprocessingThreads == 4
     assert loaded.executorsPerRunner == 2
@@ -364,7 +364,7 @@ def test_default_mcs_search_space_caps_cpu_pools_and_block_sizes():
     assert space_1gpu["preprocessingThreads"] == (1, 16)
     assert space_1gpu["executorsPerRunner"] == (1, 8)
     assert space_1gpu["batchSize"][0] == 0
-    assert space_1gpu["blockSize"] == {"choices": [128, 64, 256]}
+    assert space_1gpu["blockSize"] == {"choices": [128, 512]}
     assert 32 not in space_1gpu["blockSize"]["choices"]
 
 
@@ -386,10 +386,10 @@ class _RecordingTrial:
 
 def test_explicit_choices_search_space_supports_short_int_categories():
     trial = _RecordingTrial()
-    value = _core.suggest_from_space(trial, "blockSize", {"choices": [128, 64, 256]})
+    value = _core.suggest_from_space(trial, "blockSize", {"choices": [128, 512]})
     assert value == 128
-    assert trial.calls == [{"name": "blockSize", "choices": [128, 64, 256]}]
-    assert _core.collect_int_from_space({"choices": [128, 64, 256]}) == 128
+    assert trial.calls == [{"name": "blockSize", "choices": [128, 512]}]
+    assert _core.collect_int_from_space({"choices": [128, 512]}) == 128
 
 
 def test_suggest_preprocessing_threads_clamps_to_remaining_cpu_budget():
@@ -673,7 +673,7 @@ def test_tune_mcs_smoke(small_mols):
         calibration_max_size=len(pairs),
         search_space_overrides={
             "batchSize": {"choices": [0, 1]},
-            "blockSize": {"choices": [128, 64]},
+            "blockSize": {"choices": [128, 512]},
             "workerThreads": (1, 1),
             "preprocessingThreads": (1, 1),
             "executorsPerRunner": (1, 1),
@@ -683,7 +683,7 @@ def test_tune_mcs_smoke(small_mols):
     assert isinstance(result.best_config, MCSConfig)
     assert result.best_throughput > 0
     assert result.n_trials_run == 2
-    assert result.best_config.blockSize in {64, 128}
+    assert result.best_config.blockSize in {128, 512}
     assert result.best_config.workerThreads >= 1
     assert result.best_config.preprocessingThreads >= 1
     assert result.best_config.executorsPerRunner >= 1

@@ -1,0 +1,41 @@
+{
+  "pair_index": 851,
+  "nvmolkit_time_ms": 13987.898438,
+  "rdkit_time_ms": 284.914956,
+  "nvmolkit_over_rdkit_ratio": 49.09499534310161,
+  "input_line_a": 10051291,
+  "input_line_b": 9397592,
+  "input_smiles_a": "C[C@@]12CCC[C@H]1N(C(=O)C1=CC3=C(C=N1)NC=C3)CCN(C(=O)C1=CN=C3CCCCN13)C2",
+  "input_smiles_b": "CON1CCC(C(=O)N2CC(N3CCN(C(=O)C45CCCCC4CCC5)CC3)C2)CC1",
+  "canonical_smiles_a": "C[C@@]12CCC[C@H]1N(C(=O)c1cc3cc[nH]c3cn1)CCN(C(=O)c1cnc3n1CCCC3)C2",
+  "canonical_smiles_b": "CON1CCC(C(=O)N2CC(N3CCN(C(=O)C45CCCCC4CCC5)CC3)C2)CC1",
+  "mcs_atoms": 21,
+  "mcs_bonds": 20,
+  "mcs_smarts": "[#6]-[#6]-[#6](-[#6]-[#7](-[#6]-[#6]-[#7](-[#6]-[#6]-,:[#7]-,:[#6]-,:[#6]-,:[#6](-,:[#6]-,:[#6])-,:[#6])-[#6]-[#6])-[#6])-[#6]",
+  "mol_a": {
+    "atoms": 33,
+    "bonds": 38,
+    "formula": "C25H30N6O2",
+    "rings": 6,
+    "aromatic_rings": 3,
+    "aliphatic_rings": 3,
+    "ring_atoms": 28,
+    "fused_ring_atoms": 6,
+    "rotatable_bonds": 2,
+    "logp": 3.2527000000000017,
+    "tpsa": 87.12
+  },
+  "mol_b": {
+    "atoms": 31,
+    "bonds": 35,
+    "formula": "C24H40N4O3",
+    "rings": 5,
+    "aromatic_rings": 0,
+    "aliphatic_rings": 5,
+    "ring_atoms": 25,
+    "fused_ring_atoms": 2,
+    "rotatable_bonds": 4,
+    "logp": 1.9753000000000005,
+    "tpsa": 56.330000000000005
+  }
+}

@@ -54,8 +54,8 @@ namespace fmcs {
 /// who want a different objective should use the McSplit path in
 /// mcs.cuh instead.
 struct Parameters {
-  /// CUDA block size for the per-pair kernel. Supported: 64, 128, 256.
-  /// Experimental: 512 for maxSize tiers up to 64 only.
+  /// CUDA block size for the per-pair kernel. Supported: 128 and 512.
+  /// Block size 512 supports maxSize tiers up to 64 only.
   int   blockSize        = 128;
   /// Per-pair wall timeout in milliseconds.  0 = no timeout.
   float timeoutMs        = 0;
@@ -77,7 +77,8 @@ struct Parameters {
 /// Find the connected MCES for a batch of unlabeled graph pairs.
 ///
 /// `graphsA` and `graphsB` must have equal length.  Per-pair wall
-/// timings (ms) are written into `perPairTimesMs` when non-null.  For
+/// timing/stat output requests currently throw because instrumented kernel
+/// specializations are not instantiated in the fast compile build.  For
 /// unlabeled input, atom/bond compatibility is topology-only.  When a graph
 /// exceeds the maximum supported maxSize, that pair's result has `overflowed`
 /// set and all counts are zero.
