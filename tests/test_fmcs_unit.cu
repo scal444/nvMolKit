@@ -1414,7 +1414,7 @@ __global__ void matchSubstructureMaskDriver(
     int partialCapacity,
     SubstructureTestOut* out) {
   __shared__ QueuedT16 child;
-  __shared__ mcs::fmcs::FmcsSubstructureScratch<16, 16> scratch;
+  __shared__ mcs::fmcs::FmcsSubstructureScratch<16, 16, 16> scratch;
   if (threadIdx.x == 0) {
     addMaskSeed(child, atomMask, bondMask);
   }
@@ -1445,7 +1445,7 @@ __global__ void matchFallbackBadParentDriver(
     int partialCapacity,
     SubstructureTestOut* out) {
   __shared__ QueuedT16 child;
-  __shared__ mcs::fmcs::FmcsSubstructureScratch<16, 16> scratch;
+  __shared__ mcs::fmcs::FmcsSubstructureScratch<16, 16, 16> scratch;
   __shared__ int scratchLock;
   if (threadIdx.x == 0) {
     // Query seed is the 4-edge path inside the triangle-with-leaves

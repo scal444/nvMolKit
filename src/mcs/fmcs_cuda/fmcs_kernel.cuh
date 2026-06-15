@@ -399,7 +399,7 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
     const QueryTopology& queryTopology,
     const TargetTopology& targetTopology,
     const PairMatchTablesDevice& tables,
-    FmcsSubstructureScratch<maxAtoms, maxTA>& scratch,
+    FmcsSubstructureScratch<maxAtoms, maxBonds, maxTA>& scratch,
     std::uint8_t* partialStorage,
     int partialCapacity,
     int* overflowedFlag,
@@ -954,7 +954,8 @@ __global__ void fmcsKernel(
   }
 
   using QueuedT = QueuedSeed<maxAtoms, maxBonds, maxAtoms, maxBonds>;
-  using SubstructureScratchT = FmcsSubstructureScratch<maxAtoms, maxAtoms>;
+  using SubstructureScratchT =
+      FmcsSubstructureScratch<maxAtoms, maxBonds, maxAtoms>;
   constexpr int kMaxNewBondsForTier = maxBonds;
   constexpr int kNumGroups = FmcsBlockConfig<blockThreads>::numGroups;
   constexpr bool kStatsEnabled = CollectStats || kFmcsMeasure;
