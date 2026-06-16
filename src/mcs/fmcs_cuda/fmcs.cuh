@@ -76,12 +76,11 @@ struct Parameters {
 
 /// Find the connected MCES for a batch of unlabeled graph pairs.
 ///
-/// `graphsA` and `graphsB` must have equal length.  Per-pair wall
-/// timing/stat output requests currently throw because instrumented kernel
-/// specializations are not instantiated in the fast compile build.  For
-/// unlabeled input, atom/bond compatibility is topology-only.  When a graph
-/// exceeds the maximum supported maxSize, that pair's result has `overflowed`
-/// set and all counts are zero.
+/// `graphsA` and `graphsB` must have equal length.  For unlabeled input,
+/// atom/bond compatibility is topology-only.  When a graph exceeds the maximum
+/// supported maxSize, that pair's result has `overflowed` set and all counts
+/// are zero.  Per-pair timing/stat output is available when the corresponding
+/// NVMOLKIT_ENABLE_MCS_* compile option is enabled.
 std::vector<MCSResult> findMCESfMCSBatch(
     const std::vector<Graph>& graphsA,
     const std::vector<Graph>& graphsB,

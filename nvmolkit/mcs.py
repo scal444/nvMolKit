@@ -335,19 +335,23 @@ def findMCS(
             for chunked fMCS tier dispatch. ``-1`` autoselects.
         gpu_ids: GPU device IDs to use. ``None`` or empty uses the current
             device.
-        collect_timings: Currently unavailable in the fast compile build
-            because instrumented fMCS kernels are not instantiated.
+        collect_timings: When true, return per-pair fMCS backend elapsed
+            milliseconds in ``MCSBatchResult.elapsed_ms``. Requires a build
+            with ``NVMOLKIT_ENABLE_MCS_TIMINGS`` enabled.
         collect_stats: When true, collect per-pair fMCS search counters in
-            ``MCSBatchResult.fmcs_stats``. Currently unavailable in the fast
-            compile build because instrumented fMCS kernels are not
-            instantiated.
+            ``MCSBatchResult.fmcs_stats``. Requires a build with
+            ``NVMOLKIT_ENABLE_MCS_STATS`` enabled.
 
     Returns:
         :class:`MCSBatchResult` in generated-pair order.
     """
-    if collect_timings or collect_stats:
+    if collect_timings and not MCS_TIMINGS_ENABLED:
         raise RuntimeError(
-            "fMCS timing/stat instrumentation is not instantiated in this build"
+            "fMCS timing instrumentation is not instantiated in this build"
+        )
+    if collect_stats and not MCS_STATS_ENABLED:
+        raise RuntimeError(
+            "fMCS stat instrumentation is not instantiated in this build"
         )
 
     mode = _normalize_mode(mode)

@@ -17,7 +17,7 @@ import pytest
 from rdkit import Chem
 from rdkit.Chem import rdFMCS
 
-from nvmolkit.mcs import MCSConfig, findMCS
+from nvmolkit.mcs import MCSConfig, MCS_STATS_ENABLED, MCS_TIMINGS_ENABLED, findMCS
 
 def _mols(smiles: list[str]):
     return [Chem.MolFromSmiles(smi) for smi in smiles]
@@ -79,19 +79,37 @@ def test_pairs_mode_matches_rdkit_and_preserves_order():
     _assert_matches_rdkit(result, mols)
 
 
-def test_collect_timings_is_rejected():
+def test_collect_timings_follows_build_flag():
     mols = _mols(["CCO", "CCN", "c1ccccc1", "c1ccc(O)cc1"])
     pairs = [(0, 1), (2, 3), (0, 2)]
 
-    with pytest.raises(RuntimeError, match="instrumentation is not instantiated"):
+    if MCS_TIMINGS_ENABLED:
+        result = findMCS(mols, mode="pairs", pairs=pairs, collect_timings=True)
+        assert result.elapsed_ms is not None
+        assert result.elapsed_ms.shape == (len(pairs),)
+        assert (result.elapsed_ms >= 0.0).all()
+        assert result[0].elapsed_ms is not None
+        assert result.fmcs_stats is None
+        return
+
+    with pytest.raises(RuntimeError, match="timing instrumentation is not instantiated"):
         findMCS(mols, mode="pairs", pairs=pairs, collect_timings=True)
 
 
-def test_collect_stats_is_rejected():
+def test_collect_stats_follows_build_flag():
     mols = _mols(["CCO", "CCN", "c1ccccc1", "c1ccc(O)cc1"])
     pairs = [(0, 1), (2, 3), (0, 2)]
 
-    with pytest.raises(RuntimeError, match="instrumentation is not instantiated"):
+    if MCS_STATS_ENABLED:
+        result = findMCS(mols, mode="pairs", pairs=pairs, collect_stats=True)
+        assert result.elapsed_ms is None
+        assert result.fmcs_stats is not None
+        assert set(result.fmcs_stats) >= {"phase2_iters", "total_clocks"}
+        assert all(values.shape == (len(pairs),) for values in result.fmcs_stats.values())
+        assert result[0].fmcs_stats is not None
+        return
+
+    with pytest.raises(RuntimeError, match="stat instrumentation is not instantiated"):
         findMCS(mols, mode="pairs", pairs=pairs, collect_stats=True)
 
 

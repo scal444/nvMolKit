@@ -341,9 +341,13 @@ BOOST_PYTHON_MODULE(_mcs) {
       params.requireGpu                                       = optionValue<bool>(options, "require_gpu", false);
       params.collectTimings                                   = optionValue<bool>(options, "collect_timings", false);
       params.collectStats                                     = optionValue<bool>(options, "collect_stats", false);
-      if (params.collectTimings || params.collectStats) {
+      if (params.collectTimings && !nvMolKit::kMCSCollectTimingsEnabled) {
         throw std::runtime_error(
-            "fMCS timing/stat instrumentation is not instantiated in this build");
+            "fMCS timing instrumentation is not instantiated in this build");
+      }
+      if (params.collectStats && !nvMolKit::kMCSCollectStatsEnabled) {
+        throw std::runtime_error(
+            "fMCS stat instrumentation is not instantiated in this build");
       }
       params.timeoutSeconds                                   = optionValue<unsigned int>(options, "timeout_seconds", 0);
       params.batchSize                                        = optionValue<int>(options, "batch_size", 0);

@@ -31,6 +31,7 @@ namespace {
 
 using mcs::Graph;
 using mcs::MCSResult;
+using mcs::fmcs::ExecutionStats;
 using mcs::fmcs::Parameters;
 using mcs::benchmark::MiviaGraphData;
 
@@ -809,6 +810,42 @@ TEST(FMCSBatch, EmptyInputReturnsEmpty) {
   std::vector<Graph> b;
   auto rs = mcs::fmcs::findMCESfMCSBatch(a, b);
   EXPECT_TRUE(rs.empty());
+}
+
+TEST(FMCSBatch, CollectTimingsFollowsBuildFlag) {
+  const auto p = path(8);
+  std::vector<float> timesMs;
+
+  if constexpr (nvMolKit::kMCSCollectTimingsEnabled) {
+    auto rs = mcs::fmcs::findMCESfMCSBatch({p}, {p}, {}, &timesMs);
+    ASSERT_EQ(rs.size(), 1u);
+    ASSERT_EQ(timesMs.size(), 1u);
+    EXPECT_GE(timesMs[0], 0.0f);
+    expectFullSelfPair(rs[0], p);
+  } else {
+    EXPECT_THROW(
+        (void)mcs::fmcs::findMCESfMCSBatch({p}, {p}, {}, &timesMs),
+        std::runtime_error);
+  }
+}
+
+TEST(FMCSBatch, CollectStatsFollowsBuildFlag) {
+  const auto p = path(8);
+  std::vector<ExecutionStats> stats;
+
+  if constexpr (nvMolKit::kMCSCollectStatsEnabled) {
+    auto rs = mcs::fmcs::findMCESfMCSBatch(
+        {p}, {p}, {}, nullptr, nullptr, &stats);
+    ASSERT_EQ(rs.size(), 1u);
+    ASSERT_EQ(stats.size(), 1u);
+    EXPECT_GT(stats[0].totalClocks, 0u);
+    expectFullSelfPair(rs[0], p);
+  } else {
+    EXPECT_THROW(
+        (void)mcs::fmcs::findMCESfMCSBatch(
+            {p}, {p}, {}, nullptr, nullptr, &stats),
+        std::runtime_error);
+  }
 }
 
 TEST(FMCSBatch, TwoPairsDifferentAnswersSameTier) {

@@ -730,9 +730,13 @@ std::vector<MCSResult> findMCSBatch(const std::vector<const RDKit::ROMol*>& mols
                                     const std::vector<MCSPair>&             pairs,
                                     cudaStream_t                            stream,
                                     const MCSParameters&                    params) {
-  if (params.collectTimings || params.collectStats) {
+  if (params.collectTimings && !kMCSCollectTimingsEnabled) {
     throw std::runtime_error(
-        "fMCS timing/stat instrumentation is not instantiated in this build");
+        "fMCS timing instrumentation is not instantiated in this build");
+  }
+  if (params.collectStats && !kMCSCollectStatsEnabled) {
+    throw std::runtime_error(
+        "fMCS stat instrumentation is not instantiated in this build");
   }
   std::vector<MCSResult> results(pairs.size());
   if (pairs.empty()) return results;
