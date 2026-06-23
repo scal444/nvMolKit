@@ -1028,6 +1028,18 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
   const int precomputedSize      = static_cast<int>(leafSubpatterns.perQueryPatterns.size());
   const int perQueryMaxDepthSize = static_cast<int>(leafSubpatterns.perQueryMaxDepth.size());
 
+  for (int q = 0; q < numQueries; ++q) {
+    const bool queryHasRecursiveSmarts = hasRecursiveSmarts(queries[q]);
+    const bool extractedRecursivePatterns =
+      q < static_cast<int>(queriesHost.recursivePatterns.size()) && !queriesHost.recursivePatterns[q].empty();
+    if (queryHasRecursiveSmarts && !extractedRecursivePatterns) {
+      throw std::runtime_error(
+        "Recursive SMARTS query contains RecursiveStructure nodes, but nvMolKit extracted no "
+        "recursive subpatterns. Refusing to run the GPU recursive path because it would read "
+        "unset recursive match bits and silently return false negatives.");
+    }
+  }
+
   int maxQueryAtoms = 0;
 
 #pragma omp parallel num_threads(effectivePreprocessingThreads) reduction(max : maxQueryAtoms)
