@@ -109,6 +109,22 @@ run_step() {
     return $rc
 }
 
+run_step_in_dir() {
+    local label=$1
+    local workdir=$2
+    shift 2
+    {
+        echo
+        echo "--- $label ---"
+        echo "cwd: $workdir"
+        echo "+ $*"
+    } >> "$logFile"
+    (cd "$workdir" && "$@") >> "$logFile" 2>&1
+    local rc=$?
+    echo "--- $label exit=$rc ---" >> "$logFile"
+    return $rc
+}
+
 # Recreate venv from scratch so we don't carry state from prior test runs.
 rm -rf "$venv"
 if ! run_step "venv-create" "$ifacePython" -m venv "$venv"; then
@@ -129,11 +145,20 @@ elif [ "$mode" = "full" ]; then
             pandas pytest psutil optuna; then
         echo "[FAIL] rdkit=$rdkit py=$py mode=$mode step=install-test-deps (see $logFile)"
         rc=1
-    elif ! run_step "pytest" "$venv/bin/pytest" \
-            "$REPO/nvmolkit/tests" -k "not long" -v; then
+    else
+        testRoot=$VENV_ROOT/rdkit${rdkit}_py${py}_tests
+        testRunDir=$testRoot/run
+        rm -rf "$testRoot"
+        mkdir -p "$testRoot/nvmolkit" "$testRoot/tests" "$testRunDir"
+        cp -a "$REPO/nvmolkit/tests" "$testRoot/nvmolkit/"
+        cp -a "$REPO/tests/test_data" "$testRoot/tests/"
+        find "$testRoot" -type d -name __pycache__ -prune -exec rm -rf {} +
+    fi
+    if [ "${rc:-0}" -eq 0 ] && ! run_step_in_dir "pytest" "$testRunDir" "$venv/bin/pytest" \
+            "$testRoot/nvmolkit/tests" -k "not long" -v; then
         echo "[FAIL] rdkit=$rdkit py=$py mode=$mode step=pytest (see $logFile)"
         rc=1
-    else
+    elif [ "${rc:-0}" -eq 0 ]; then
         rc=0
     fi
 else
@@ -156,6 +181,9 @@ elapsedHms=$(format_hms "$elapsed")
 
 # Tear down venv. Keep the log.
 rm -rf "$venv"
+if [ -n "${testRoot:-}" ]; then
+    rm -rf "$testRoot"
+fi
 
 if [ "$rc" -eq 0 ]; then
     status=ok
