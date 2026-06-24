@@ -56,18 +56,32 @@ if [ -z "${CIBW_MANYLINUX_X86_64_IMAGE:-}" ]; then
     exit 1
 fi
 
-python -m pip install --upgrade pip
-python -m pip install 'cibuildwheel>=2.16'
+# Require cibuildwheel to be available on PATH (typically via an activated
+# conda env). Doing `pip install --upgrade pip / cibuildwheel` here races
+# fatally when build_full_matrix.sh fans this script out across parallel
+# workers sharing the same python env.
+if ! command -v cibuildwheel >/dev/null 2>&1; then
+    echo "Error: cibuildwheel not found on PATH." >&2
+    echo "       Activate a conda env that provides it (e.g." >&2
+    echo "       'conda activate nvmolkit_pip_build') before running." >&2
+    exit 1
+fi
 
 # Persistent caches across cibuildwheel invocations:
 #   - rdkit_recipe : full reproduced rdkit + boost install tree (~30-50 min build)
 #   - conan2       : conan package cache (saves boost rebuild on partial failure retry)
 #   - pip          : pip download cache (numpy, pillow, conan source dist, etc.)
 # All keyed on host $HOME so they survive reboots, unlike anything under /tmp.
+#
+# The conan2 cache is not safe for concurrent `conan export` of the same
+# recipe ref from multiple processes (races on .conan2/p/<hash>/s during
+# population). NVMOLKIT_CONAN_CACHE_ROOT lets a parallel driver point each
+# concurrent build at its own conan cache; default keeps single-build behavior.
 NVMOLKIT_CACHE_ROOT="${NVMOLKIT_CACHE_ROOT:-${HOME}/.cache/nvmolkit}"
+NVMOLKIT_CONAN_CACHE_ROOT="${NVMOLKIT_CONAN_CACHE_ROOT:-${NVMOLKIT_CACHE_ROOT}/conan2}"
 mkdir -p \
     "${NVMOLKIT_CACHE_ROOT}/rdkit_recipe" \
-    "${NVMOLKIT_CACHE_ROOT}/conan2" \
+    "${NVMOLKIT_CONAN_CACHE_ROOT}" \
     "${NVMOLKIT_CACHE_ROOT}/pip"
 
 # Configure cibuildwheel's container engine at runtime: --network=host plus
@@ -75,7 +89,7 @@ mkdir -p \
 # interpolate $HOME so we set this here.
 CIBW_CONTAINER_ENGINE="docker; create_args: --network=host \
 -v ${NVMOLKIT_CACHE_ROOT}/rdkit_recipe:/tmp/rdkit_recipe \
--v ${NVMOLKIT_CACHE_ROOT}/conan2:/root/.conan2 \
+-v ${NVMOLKIT_CONAN_CACHE_ROOT}:/root/.conan2 \
 -v ${NVMOLKIT_CACHE_ROOT}/pip:/root/.cache/pip"
 
 RDKIT_VERSION="${RDKIT_VERSION}" \
