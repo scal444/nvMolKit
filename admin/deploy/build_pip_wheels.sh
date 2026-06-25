@@ -46,7 +46,7 @@ fi
 RDKIT_VERSION=$1
 OUTPUT_DIR=${2:-wheelhouse}
 
-REPO_ROOT=$(git rev-parse --show-toplevel)
+REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "${REPO_ROOT}"
 
 if [ -z "${CIBW_MANYLINUX_X86_64_IMAGE:-}" ]; then
@@ -91,6 +91,22 @@ CIBW_CONTAINER_ENGINE="docker; create_args: --network=host \
 -v ${NVMOLKIT_CACHE_ROOT}/rdkit_recipe:/tmp/rdkit_recipe \
 -v ${NVMOLKIT_CONAN_CACHE_ROOT}:/root/.conan2 \
 -v ${NVMOLKIT_CACHE_ROOT}/pip:/root/.cache/pip"
+
+# Pin the rdkit dependency in the wheel's Requires-Dist to the exact RDKit
+# version this build links against. pyproject.toml keeps "rdkit" unpinned in
+# version control so the dependency list stays readable for source/conda
+# installs; we mutate the marker line below for the duration of the
+# cibuildwheel run and restore it on exit (success, error, or signal).
+if ! grep -q '# nvmolkit-rdkit-pin:' pyproject.toml; then
+    echo "Error: pyproject.toml is missing the nvmolkit-rdkit-pin marker" >&2
+    exit 1
+fi
+cp pyproject.toml pyproject.toml.bak
+restore_pyproject() {
+    mv pyproject.toml.bak pyproject.toml
+}
+trap restore_pyproject EXIT
+sed -i "s|^.*# nvmolkit-rdkit-pin:.*\$|    \"rdkit==${RDKIT_VERSION}\",  # nvmolkit-rdkit-pin: pinned to RDKIT_VERSION by admin/deploy/build_pip_wheels.sh during cibuildwheel|" pyproject.toml
 
 RDKIT_VERSION="${RDKIT_VERSION}" \
     CIBW_CONTAINER_ENGINE="${CIBW_CONTAINER_ENGINE}" \

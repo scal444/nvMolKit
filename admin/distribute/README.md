@@ -79,12 +79,17 @@ Outputs:
 ## 3. Stage canonical PyPI wheels
 
 Copy the canonical RDKit wheels without retagging them. These keep the plain
-project version, for example `0.5.1`.
+project version, for example `0.5.1`. The wheel metadata must still pin
+`Requires-Dist: rdkit==${CANONICAL_RDKIT}` because the native extensions link
+against RDKit's ABI. `build_pip_wheels.sh` applies that pin to each built wheel;
+verify it before uploading.
 
 ```bash
 mkdir -p "$WHEELHOUSE/pypi"
 cp "$WHEELHOUSE/rdkit${CANONICAL_RDKIT}"/py*/*.whl "$WHEELHOUSE/pypi/"
 
+python admin/distribute/pin_wheel_rdkit.py --check \
+    "$CANONICAL_RDKIT" "$WHEELHOUSE"/pypi/*.whl
 twine check "$WHEELHOUSE"/pypi/*.whl
 ```
 
@@ -94,7 +99,9 @@ PyPI upload is last because filenames cannot be overwritten on PyPI.
 
 Retag every raw matrix wheel into `nvmolkit-<version>+rdkit<X.Y.Z>`. The retag
 script rewrites `METADATA`, the `.dist-info` directory name, the auditwheel
-SBOM when present, and `RECORD`.
+SBOM when present, and `RECORD`. Because the raw matrix wheels are already
+pinned by `build_pip_wheels.sh`, each retagged variant keeps the matching
+`Requires-Dist: rdkit==<X.Y.Z>` ABI dependency.
 
 ```bash
 rm -rf "$WHEELHOUSE/variants"
@@ -110,6 +117,10 @@ for variant_dir in "$WHEELHOUSE"/rdkit*/; do
 done
 
 find "$WHEELHOUSE/variants" -name '*.whl' | wc -l
+for variant_dir in "$WHEELHOUSE"/variants/rdkit*/; do
+    v=$(basename "$variant_dir" | sed 's/^rdkit//')
+    python admin/distribute/pin_wheel_rdkit.py --check "$v" "$variant_dir"/*.whl
+done
 twine check "$WHEELHOUSE"/variants/rdkit*/*.whl
 ```
 
@@ -246,6 +257,8 @@ Build hooks and metadata:
 - `admin/distribute/lookup_rdkit_pypi_tag.py`: maps matrix entries to
 `rdkit-pypi` tags.
 - `admin/distribute/repair_wheel.sh`: auditwheel repair and repack step.
+- `admin/distribute/pin_wheel_rdkit.py`: checks or rewrites wheel metadata so
+`Requires-Dist: rdkit` is pinned to the RDKit ABI version.
 
 Post-build distribution:
 
