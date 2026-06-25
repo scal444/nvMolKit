@@ -176,7 +176,9 @@ indexes live under `docs/wheels/`, producing install URLs like:
 https://nvidia-bionemo.github.io/nvMolKit/wheels/rdkit2025.9.6/simple/
 ```
 
-Publish the generated index tree:
+Merge the generated index tree into the existing Pages wheel indexes. Do not
+replace `docs/wheels/`: each `simple/nvmolkit/index.html` page must retain
+links for older nvMolKit releases as well as the new release.
 
 ```bash
 REMOTE=origin
@@ -185,9 +187,9 @@ git fetch "$REMOTE" github_pages_host
 git worktree add -B "publish-v${VERSION}-wheels" "$PAGES_WORKTREE" \
     "$REMOTE/github_pages_host"
 
-rm -rf "$PAGES_WORKTREE/docs/wheels"
-mkdir -p "$PAGES_WORKTREE/docs/wheels"
-cp -r "$INDEX_DIR"/. "$PAGES_WORKTREE/docs/wheels/"
+python admin/distribute/merge_simple_index.py \
+    "$INDEX_DIR" \
+    "$PAGES_WORKTREE/docs/wheels"
 
 git -C "$PAGES_WORKTREE" add docs/wheels
 git -C "$PAGES_WORKTREE" diff --staged --stat
@@ -196,8 +198,12 @@ git -C "$PAGES_WORKTREE" push "$REMOTE" HEAD:github_pages_host
 git worktree remove "$PAGES_WORKTREE"
 ```
 
-Re-run index generation and Pages publication whenever variant wheels are
-re-uploaded, because the index includes wheel hashes.
+The staged diff should add or update links for `v${VERSION}` while keeping
+older release links in the same PEP 503 project pages. Re-run index generation
+and Pages publication whenever variant wheels are re-uploaded, because the
+index includes wheel hashes. The merge helper replaces links with the same wheel
+filename, so rerunning after rebuilding a wheel updates its hash without
+dropping links for other versions.
 
 When rebuilding Sphinx docs on `github_pages_host`, preserve `docs/wheels/`:
 
@@ -254,4 +260,3 @@ Post-build testing:
 - `admin/test/test_one_wheel.sh`: installs and tests one wheel pair.
 - `admin/test/smoke_check.py`: minimal import and CUDA smoke probe.
 - `admin/test/full_test_subset.txt`: curated full-test subset.
-
