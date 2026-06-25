@@ -8,10 +8,10 @@ simple-index generation live here.
 Each release produces two artifact streams:
 
 - **Canonical PyPI wheels**: plain `nvmolkit-<version>` wheels built against
-  the canonical RDKit version. These are uploaded to PyPI.
+the canonical RDKit version. These are uploaded to PyPI.
 - **RDKit-pinned variant wheels**: every matrix wheel retagged with a PEP 440
-  local version segment like `+rdkit2025.9.6`. These are uploaded as GitHub
-  Release assets and exposed through a PEP 503 simple index on GitHub Pages.
+local version segment like `+rdkit2025.9.6`. These are uploaded as GitHub
+Release assets and exposed through a PEP 503 simple index on GitHub Pages.
 
 PyPI rejects local-version segments, so do not upload the retagged variant
 wheels to PyPI.
@@ -27,7 +27,7 @@ cd /home/kevin/repos/nvmolkit
 VERSION=0.5.1
 WHEELHOUSE="$PWD/wheelhouse_v0_5_1"
 CANONICAL_RDKIT=2026.3.1
-GH_REPO=NVIDIA-Digital-Bio/nvMolKit
+GH_REPO=NVIDIA-BioNeMo/nvMolKit
 INDEX_DIR=/tmp/nvmolkit-wheels-pages-v0_5_1
 BUILD_WORKTREE_ROOT=/tmp/nvmolkit_wheels_v0_5_1
 PAGES_WORKTREE=/tmp/nvmolkit-pages-v0_5_1
@@ -36,8 +36,7 @@ PAGES_WORKTREE=/tmp/nvmolkit-pages-v0_5_1
 ## 1. Build the full wheel matrix
 
 `build_full_matrix.sh` reads `admin/distribute/rdkit_build_matrix.yaml`, skips
-RDKit `2025.3.1` through `2025.3.5`, and builds each supported `(rdkit,
-python)` pair in an isolated worktree with its own Conan cache. With `8 2`,
+RDKit `2025.3.1` through `2025.3.5`, and builds each supported `(rdkit, python)` pair in an isolated worktree with its own Conan cache. With `8 2`,
 the build runs 8 wheel jobs in parallel with 2 compile threads per job, for 16
 total compile threads.
 
@@ -124,7 +123,7 @@ Release assets that will be uploaded in the next step.
 ```bash
 rm -rf "$INDEX_DIR"
 
-RELEASE_URL="https://github.com/NVIDIA-Digital-Bio/nvMolKit/releases/download/v${VERSION}"
+RELEASE_URL="https://github.com/NVIDIA-BioNeMo/nvMolKit/releases/download/v${VERSION}"
 ./admin/distribute/generate_simple_index.sh \
     "$WHEELHOUSE/variants" \
     "$INDEX_DIR" \
@@ -174,7 +173,7 @@ The GitHub Pages site is served from `docs/` on `github_pages_host`. The wheel
 indexes live under `docs/wheels/`, producing install URLs like:
 
 ```text
-https://nvidia-digital-bio.github.io/nvMolKit/wheels/rdkit2025.9.6/simple/
+https://nvidia-bionemo.github.io/nvMolKit/wheels/rdkit2025.9.6/simple/
 ```
 
 Publish the generated index tree:
@@ -232,22 +231,22 @@ Build pipeline:
 - `admin/deploy/build_full_matrix.sh`: top-level parallel matrix driver.
 - `admin/deploy/build_one_wheel.sh`: per-pair worker used by the matrix driver.
 - `admin/deploy/build_pip_wheels.sh`: cibuildwheel driver for one RDKit
-  version.
+version.
 
 Build hooks and metadata:
 
 - `admin/distribute/rdkit_build_matrix.yaml`: supported RDKit/Python matrix.
 - `admin/distribute/cibuildwheel_before_build.sh`: manylinux before-build hook.
 - `admin/distribute/lookup_rdkit_pypi_tag.py`: maps matrix entries to
-  `rdkit-pypi` tags.
+`rdkit-pypi` tags.
 - `admin/distribute/repair_wheel.sh`: auditwheel repair and repack step.
 
 Post-build distribution:
 
 - `admin/distribute/retag_wheel.py`: adds the `+rdkit<X.Y.Z>` local version
-  segment to a wheel.
+segment to a wheel.
 - `admin/distribute/generate_simple_index.sh`: emits PEP 503 simple-index
-  pages from retagged variant wheels.
+pages from retagged variant wheels.
 
 Post-build testing:
 
@@ -255,3 +254,4 @@ Post-build testing:
 - `admin/test/test_one_wheel.sh`: installs and tests one wheel pair.
 - `admin/test/smoke_check.py`: minimal import and CUDA smoke probe.
 - `admin/test/full_test_subset.txt`: curated full-test subset.
+
