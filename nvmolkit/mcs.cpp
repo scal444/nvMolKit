@@ -43,6 +43,9 @@ struct MCSResultBuffers {
   std::vector<std::uint8_t> usedGpu;
   std::vector<std::uint8_t> usedFallback;
   std::vector<float>        elapsedMs;
+  std::vector<unsigned long long> timingTotalClocks;
+  std::vector<unsigned long long> timingPhase1Clocks;
+  std::vector<unsigned long long> timingPhase2Clocks;
   std::vector<std::uint32_t> statsPhase2Iters;
   std::vector<std::uint32_t> statsInitialSeeds;
   std::vector<std::uint32_t> statsMismatchedInitialSeeds;
@@ -238,6 +241,18 @@ void reserveStats(MCSResultBuffers& buffers, std::size_t size) {
   buffers.statsPhase2ActiveMatchCycles1024.reserve(size);
 }
 
+void reserveTimings(MCSResultBuffers& buffers, std::size_t size) {
+  buffers.timingTotalClocks.reserve(size);
+  buffers.timingPhase1Clocks.reserve(size);
+  buffers.timingPhase2Clocks.reserve(size);
+}
+
+void appendTimings(MCSResultBuffers& buffers, const nvMolKit::MCSExecutionStats& timings) {
+  buffers.timingTotalClocks.push_back(timings.totalClocks);
+  buffers.timingPhase1Clocks.push_back(timings.phase1Clocks);
+  buffers.timingPhase2Clocks.push_back(timings.phase2Clocks);
+}
+
 void appendStats(MCSResultBuffers& buffers, const nvMolKit::MCSExecutionStats& stats) {
   buffers.statsPhase2Iters.push_back(stats.phase2Iters);
   buffers.statsInitialSeeds.push_back(stats.initialSeeds);
@@ -275,6 +290,14 @@ void appendStats(MCSResultBuffers& buffers, const nvMolKit::MCSExecutionStats& s
   buffers.statsPhase2IdleNoMatchWaitCycles1024.push_back(stats.phase2IdleNoMatchWaitCycles1024);
   buffers.statsPhase2ActiveWorkCycles1024.push_back(stats.phase2ActiveWorkCycles1024);
   buffers.statsPhase2ActiveMatchCycles1024.push_back(stats.phase2ActiveMatchCycles1024);
+}
+
+dict timingsToPythonDict(MCSResultBuffers& buffers, const object& owner) {
+  dict out;
+  out["total_clocks"] = make1dArray(buffers.timingTotalClocks, owner);
+  out["phase1_clocks"] = make1dArray(buffers.timingPhase1Clocks, owner);
+  out["phase2_clocks"] = make1dArray(buffers.timingPhase2Clocks, owner);
+  return out;
 }
 
 dict statsToPythonDict(MCSResultBuffers& buffers, const object& owner) {
@@ -378,6 +401,7 @@ BOOST_PYTHON_MODULE(_mcs) {
       if constexpr (nvMolKit::kMCSCollectTimingsEnabled) {
         if (params.collectTimings) {
           buffers->elapsedMs.reserve(results.size());
+          reserveTimings(*buffers, results.size());
         }
       }
       if constexpr (nvMolKit::kMCSCollectStatsEnabled) {
@@ -401,6 +425,7 @@ BOOST_PYTHON_MODULE(_mcs) {
         if constexpr (nvMolKit::kMCSCollectTimingsEnabled) {
           if (params.collectTimings) {
             buffers->elapsedMs.push_back(result.elapsedMs);
+            appendTimings(*buffers, result.hasKernelTimings ? result.kernelTimings : nvMolKit::MCSExecutionStats{});
           }
         }
         if constexpr (nvMolKit::kMCSCollectStatsEnabled) {
@@ -440,6 +465,12 @@ BOOST_PYTHON_MODULE(_mcs) {
           elapsedObject = make1dArray(ptr->elapsedMs, owner);
         }
       }
+      object timingsObject{handle<>(borrowed(Py_None))};
+      if constexpr (nvMolKit::kMCSCollectTimingsEnabled) {
+        if (params.collectTimings) {
+          timingsObject = timingsToPythonDict(*ptr, owner);
+        }
+      }
       object statsObject{handle<>(borrowed(Py_None))};
       if constexpr (nvMolKit::kMCSCollectStatsEnabled) {
         if (params.collectStats) {
@@ -460,6 +491,7 @@ BOOST_PYTHON_MODULE(_mcs) {
                         make1dArray(ptr->atomMappingIndptr, owner),
                         makePairArray(ptr->bondMapping, owner),
                         make1dArray(ptr->bondMappingIndptr, owner),
+                        timingsObject,
                         statsObject);
     },
     (arg("mols"), arg("pairs"), arg("options") = dict()));

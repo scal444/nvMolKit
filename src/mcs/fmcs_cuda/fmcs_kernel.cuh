@@ -487,6 +487,104 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
   return ok;
 }
 
+template<bool CollectStats,
+         int maxAtoms, int maxBonds, int maxTA, int maxTB,
+         class QueryTopology, class TargetTopology, class GroupT>
+__device__ __forceinline__ bool matchInitialSeedBondCooperative(
+    const GroupT& group,
+    QueuedSeed<maxAtoms, maxBonds, maxTA, maxTB>& candidate,
+    int queryBondIdx,
+    const QueryTopology& queryTopology,
+    const TargetTopology& targetTopology,
+    const PairMatchTablesDevice& tables,
+    ExecutionStats& stats) {
+  if constexpr (!CollectStats && !kFmcsMeasure) {
+    (void)stats;
+  }
+  const int groupRank  = static_cast<int>(group.thread_rank());
+  const int groupCount = static_cast<int>(group.num_threads());
+
+  if constexpr (CollectStats || kFmcsMeasure) {
+    if (groupRank == 0) {
+      stats.seedChecks += 1u;
+      stats.matchCalls += 1u;
+    }
+  }
+
+  int chosenTargetBond = -1;
+  int chosenTargetAtomU = -1;
+  int chosenTargetAtomV = -1;
+  for (int targetBondIdx = groupRank;
+       targetBondIdx < targetTopology.numBonds && chosenTargetBond < 0;
+       targetBondIdx += groupCount) {
+    SingleBondMatch singleMatch{};
+    if (matchSingleBondWithinThread(
+            queryBondIdx, targetBondIdx, false, queryTopology,
+            targetTopology, tables, singleMatch)) {
+      chosenTargetBond = targetBondIdx;
+      chosenTargetAtomU = static_cast<int>(singleMatch.targetAtomU);
+      chosenTargetAtomV = static_cast<int>(singleMatch.targetAtomV);
+    } else if (matchSingleBondWithinThread(
+                   queryBondIdx, targetBondIdx, true, queryTopology,
+                   targetTopology, tables, singleMatch)) {
+      chosenTargetBond = targetBondIdx;
+      chosenTargetAtomU = static_cast<int>(singleMatch.targetAtomU);
+      chosenTargetAtomV = static_cast<int>(singleMatch.targetAtomV);
+    }
+  }
+
+  const unsigned int foundMask =
+      group.ballot(chosenTargetBond >= 0 ? 1u : 0u);
+  if (foundMask == 0u) {
+    return false;
+  }
+
+  const int winningLane = __ffs(foundMask) - 1;
+  const int targetBondIdx = group.shfl(chosenTargetBond, winningLane);
+  const int targetAtomU = group.shfl(chosenTargetAtomU, winningLane);
+  const int targetAtomV = group.shfl(chosenTargetAtomV, winningLane);
+
+  if (groupRank == 0) {
+    const std::uint32_t queryEndpoints =
+        queryTopology.bondEndpoints[queryBondIdx];
+    const int queryEndpointU =
+        static_cast<int>(queryEndpoints >> kBondEndpointShift);
+    const int queryEndpointV =
+        static_cast<int>(queryEndpoints & kBondEndpointMask);
+    using MatchT = MatchResult<maxAtoms, maxBonds, maxTA, maxTB>;
+    using TargetAtomWord = typename MatchT::target_atom_word;
+    using TargetBondWord = typename MatchT::target_bond_word;
+    constexpr int kTargetAtomBitsPerWord = MatchT::kTargetAtomBitsPerWord;
+    constexpr int kTargetBondBitsPerWord = MatchT::kTargetBondBitsPerWord;
+
+    matchResultClearWithinThread(candidate.match);
+    candidate.match.targetAtomIdx[queryEndpointU] =
+        static_cast<std::uint8_t>(targetAtomU);
+    candidate.match.targetAtomIdx[queryEndpointV] =
+        static_cast<std::uint8_t>(targetAtomV);
+    candidate.match.targetBondIdx[queryBondIdx] =
+        static_cast<std::uint8_t>(targetBondIdx);
+    candidate.match.visitedTargetAtoms[targetAtomU / kTargetAtomBitsPerWord] |=
+        static_cast<TargetAtomWord>(1)
+        << (targetAtomU % kTargetAtomBitsPerWord);
+    candidate.match.visitedTargetAtoms[targetAtomV / kTargetAtomBitsPerWord] |=
+        static_cast<TargetAtomWord>(1)
+        << (targetAtomV % kTargetAtomBitsPerWord);
+    candidate.match.visitedTargetBonds[targetBondIdx / kTargetBondBitsPerWord] |=
+        static_cast<TargetBondWord>(1)
+        << (targetBondIdx % kTargetBondBitsPerWord);
+    candidate.match.matchedAtomSize =
+        static_cast<std::uint16_t>(queryEndpointU == queryEndpointV ? 1 : 2);
+    candidate.match.matchedBondSize = 1;
+    candidate.match.empty = false;
+    if constexpr (CollectStats || kFmcsMeasure) {
+      stats.matchFound += 1u;
+    }
+  }
+  group.sync();
+  return true;
+}
+
 __device__ __forceinline__ bool isPowerOfTwo64(unsigned long long value) {
   return value != 0ULL && (value & (value - 1ULL)) == 0ULL;
 }
@@ -936,7 +1034,7 @@ __global__ void fmcsKernel(
   if constexpr (!CollectTimings) {
     (void)elapsedClocks;
   }
-  if constexpr (!CollectStats) {
+  if constexpr (!CollectTimings && !CollectStats) {
     (void)statsOut;
   }
 
@@ -960,7 +1058,10 @@ __global__ void fmcsKernel(
   constexpr int kMaxNewBondsForTier = maxBonds;
   constexpr int kNumGroups = FmcsBlockConfig<blockThreads>::numGroups;
   constexpr bool kStatsEnabled = CollectStats || kFmcsMeasure;
-  constexpr bool kUseFallbackCandidateCountCache = maxAtoms <= 64;
+  // The block-shared fallback candidate-count cache races when multiple warp
+  // groups enter fallback concurrently. Recompute counts per group instead of
+  // serializing a hot cross-group cache.
+  constexpr bool kUseFallbackCandidateCountCache = false;
   constexpr int kFallbackCandidateCountCacheEntries =
       kUseFallbackCandidateCountCache ? maxAtoms * (maxAtoms + 1) : 1;
 
@@ -1024,6 +1125,8 @@ __global__ void fmcsKernel(
   std::uint8_t* fallbackCandidateCountCachePtr = nullptr;
   if constexpr (kUseFallbackCandidateCountCache) {
     fallbackCandidateCountCachePtr = fallbackCandidateCountCache;
+  } else {
+    (void)fallbackCandidateCountCache;
   }
 
   QueuedT* myQueueStorage =
@@ -1042,7 +1145,7 @@ __global__ void fmcsKernel(
     matchResultClearWithinThread(best.match);
     bestScore = 0;
     bestCopyLock = 0;
-    if constexpr (CollectStats || kFmcsMeasure) {
+    if constexpr (CollectTimings || CollectStats || kFmcsMeasure) {
       measureStats = ExecutionStats{};
     }
     overflowed = 0;
@@ -1090,7 +1193,7 @@ __global__ void fmcsKernel(
   // Publish block-shared kernel initialization, stats zeroing, and fallback
   // candidate-count cache reset before any group enters phase 1.
   block.sync();
-  if constexpr (CollectStats || kFmcsMeasure) {
+  if constexpr (CollectTimings || CollectStats || kFmcsMeasure) {
     if (block.thread_rank() == 0) {
       phase1StartClock = clock64();
     }
@@ -1117,8 +1220,9 @@ __global__ void fmcsKernel(
   // runs substructure matching and stores one witness MatchResult on success.
   // Initial ExcludedBonds is prefix-like: later initial seeds exclude earlier
   // query bonds, and a mismatched initial bond is also excluded from seeds
-  // already admitted.  Group 0 handles this serial state; the substructure
-  // check remains cooperative across that group's lanes.
+  // already admitted.  Keep this serial qBond order for RDKit parity; the
+  // one-bond match itself is specialized below instead of going through the
+  // general fallback matcher.
   if (block.thread_rank() < Seed<maxAtoms, maxBonds>::kBondWords) {
     initialExcludedBonds[block.thread_rank()] = 0;
   }
@@ -1159,11 +1263,9 @@ __global__ void fmcsKernel(
           myRemainingVisitedAtoms, myRemainingVisitedBonds,
           &remainingStackSize[groupId]);
 
-      const bool matched = checkSeedMatchAndAppendCooperative<CollectStats>(
-          group, myCurrent, queryView, targetView, pair.tables,
-          mySubstructureScratch,
-          mySubstructureStorage, substructurePartialCapacity,
-          &overflowed, myStats, false, fallbackCandidateCountCachePtr);
+      const bool matched = matchInitialSeedBondCooperative<CollectStats>(
+          group, myCurrent, qBond, queryView, targetView, pair.tables,
+          myStats);
       if (matched) {
         updateIncumbentCooperative(
             group, myCurrent, best, &bestScore, &bestCopyLock);
@@ -1195,16 +1297,22 @@ __global__ void fmcsKernel(
   // Phase-1/phase-2 handoff: every group must finish initial seed queue
   // mutation before block thread 0 records phase-1 timing and checks timeout.
   block.sync();
-  if constexpr (CollectStats || kFmcsMeasure) {
+  if constexpr (CollectTimings || CollectStats || kFmcsMeasure) {
     if (block.thread_rank() == 0) {
-      groupStats[0].phase1Clocks = clock64() - phase1StartClock;
+      const unsigned long long phase1Clocks = clock64() - phase1StartClock;
+      if constexpr (CollectStats || kFmcsMeasure) {
+        groupStats[0].phase1Clocks = phase1Clocks;
+      }
+      if constexpr (CollectTimings) {
+        measureStats.phase1Clocks = phase1Clocks;
+      }
     }
   }
   if (block.thread_rank() == 0 && timeoutClocks > 0 &&
       clock64() - startClock > timeoutClocks) {
     atomicExch(&timedOut, 1);
   }
-  if constexpr (CollectStats || kFmcsMeasure) {
+  if constexpr (CollectTimings || CollectStats || kFmcsMeasure) {
     if (block.thread_rank() == 0) {
       phase2StartClock = clock64();
     }
@@ -1698,13 +1806,24 @@ __global__ void fmcsKernel(
     // left phase 2.
     block.sync();
     if (block.thread_rank() == 0) {
-      groupStats[0].phase2Clocks = clock64() - phase2StartClock;
+      const unsigned long long phase2Clocks = clock64() - phase2StartClock;
+      groupStats[0].phase2Clocks = phase2Clocks;
       measureStats = ExecutionStats{};
       for (int statIdx = 0; statIdx < kNumGroups; ++statIdx) {
         addExecutionStatsWithinThread(measureStats, groupStats[statIdx]);
       }
+      if constexpr (CollectTimings) {
+        measureStats.phase1Clocks = groupStats[0].phase1Clocks;
+        measureStats.phase2Clocks = phase2Clocks;
+      }
     }
     // Publish measureStats before later writeback copies it to statsOut.
+    block.sync();
+  } else if constexpr (CollectTimings) {
+    block.sync();
+    if (block.thread_rank() == 0) {
+      measureStats.phase2Clocks = clock64() - phase2StartClock;
+    }
     block.sync();
   }
 
@@ -1771,14 +1890,26 @@ __global__ void fmcsKernel(
         elapsedClocks[pairIdx] = totalElapsedClocks;
       }
     }
+    if constexpr (CollectTimings || CollectStats) {
+      measureStats.totalClocks = totalElapsedClocks;
+    }
     if constexpr (CollectStats) {
       if (statsOut != nullptr) {
-        measureStats.totalClocks = totalElapsedClocks;
+        statsOut[pairIdx] = measureStats;
+      }
+    } else if constexpr (CollectTimings) {
+      if (statsOut != nullptr) {
         statsOut[pairIdx] = measureStats;
       }
     }
 
     auto& dst = results[pairIdx];
+    auto* dstBytes = reinterpret_cast<unsigned char*>(&dst);
+    for (int byteIdx = 0;
+         byteIdx < static_cast<int>(sizeof(DeviceMCSResult<maxAtoms, maxBonds>));
+         ++byteIdx) {
+      dstBytes[byteIdx] = 0;
+    }
     dst.numCommonVertices = best.seed.numAtoms;
     dst.numCommonEdges    = best.seed.numBonds;
     dst.timedOut          = timedOut != 0;

@@ -33,6 +33,12 @@ from nvmolkit.mcs import findMCS
 _worker_mols: list[Chem.Mol] | None = None
 _worker_params: rdFMCS.MCSParameters | None = None
 
+FMCS_TIMING_COLUMNS = [
+    "total_clocks",
+    "phase1_clocks",
+    "phase2_clocks",
+]
+
 FMCS_STATS_COLUMNS = [
     "phase2_iters",
     "initial_seeds",
@@ -326,9 +332,17 @@ def _write_pair_timings(
         "nvmolkit_used_gpu",
         "nvmolkit_used_fallback",
     ]
+    timing_columns = []
+    timing_names = set()
+    if nv_result is not None and getattr(nv_result, "fmcs_timings", None) is not None:
+        timing_names = set(FMCS_TIMING_COLUMNS)
+        timing_columns = [f"nvmolkit_{name}" for name in FMCS_TIMING_COLUMNS]
+        fieldnames.extend(timing_columns)
     stats_columns = []
     if nv_result is not None and getattr(nv_result, "fmcs_stats", None) is not None:
-        stats_columns = [f"nvmolkit_{name}" for name in FMCS_STATS_COLUMNS]
+        stats_columns = [
+            f"nvmolkit_{name}" for name in FMCS_STATS_COLUMNS if name not in timing_names
+        ]
         fieldnames.extend(stats_columns)
 
     with output_path.open("w", newline="") as fh:
@@ -366,6 +380,8 @@ def _write_pair_timings(
             }
             for column in stats_columns:
                 row[column] = ""
+            for column in timing_columns:
+                row[column] = ""
             if nv_result is not None:
                 if nv_result.elapsed_ms is not None:
                     row["nvmolkit_time_ms"] = _format_float(float(nv_result.elapsed_ms[pair_idx]))
@@ -375,9 +391,13 @@ def _write_pair_timings(
                 row["nvmolkit_overflowed"] = int(nv_result.overflowed[pair_idx])
                 row["nvmolkit_used_gpu"] = int(nv_result.used_gpu[pair_idx])
                 row["nvmolkit_used_fallback"] = int(nv_result.used_fallback[pair_idx])
+                if nv_result.fmcs_timings is not None:
+                    for name in FMCS_TIMING_COLUMNS:
+                        row[f"nvmolkit_{name}"] = int(nv_result.fmcs_timings[name][pair_idx])
                 if nv_result.fmcs_stats is not None:
                     for name in FMCS_STATS_COLUMNS:
-                        row[f"nvmolkit_{name}"] = int(nv_result.fmcs_stats[name][pair_idx])
+                        if name not in timing_names:
+                            row[f"nvmolkit_{name}"] = int(nv_result.fmcs_stats[name][pair_idx])
             if rdkit_completed:
                 rd_atoms, rd_bonds = rdkit_sizes[pair_idx]
                 row["rdkit_atoms"] = rd_atoms

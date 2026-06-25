@@ -88,7 +88,11 @@ def test_collect_timings_follows_build_flag():
         assert result.elapsed_ms is not None
         assert result.elapsed_ms.shape == (len(pairs),)
         assert (result.elapsed_ms >= 0.0).all()
+        assert result.fmcs_timings is not None
+        assert set(result.fmcs_timings) == {"total_clocks", "phase1_clocks", "phase2_clocks"}
+        assert all(values.shape == (len(pairs),) for values in result.fmcs_timings.values())
         assert result[0].elapsed_ms is not None
+        assert result[0].fmcs_timings is not None
         assert result.fmcs_stats is None
         return
 

@@ -81,6 +81,7 @@ void launchFmcsKernelSelected(const DevicePerPairInput* pairs,
                               void* queueStorage,
                               std::uint8_t* substructureStorage,
                               unsigned long long* elapsedClocks,
+                              ExecutionStats* timingStatsOut,
                               ExecutionStats* statsOut,
                               int queueCapacity,
                               int substructurePartialCapacity,
@@ -103,7 +104,7 @@ void launchFmcsKernelSelected(const DevicePerPairInput* pairs,
     if constexpr (nvMolKit::kMCSCollectTimingsEnabled) {
       launchFmcsKernelSpecialization<blockThreads, maxAtoms, maxBonds, true, false>(
           pairs, results, queueStorage, substructureStorage, elapsedClocks,
-          nullptr, queueCapacity, substructurePartialCapacity, numPairs,
+          timingStatsOut, queueCapacity, substructurePartialCapacity, numPairs,
           timeoutClocks, stream);
       return;
     }
@@ -160,6 +161,7 @@ void launchFmcsKernel128(const DevicePerPairInput* pairs,
                          void* queueStorage,
                          std::uint8_t* substructureStorage,
                          unsigned long long* elapsedClocks,
+                         ExecutionStats* timingStatsOut,
                          ExecutionStats* statsOut,
                          int queueCapacity,
                          int substructurePartialCapacity,
@@ -172,6 +174,7 @@ void launchFmcsKernel128(const DevicePerPairInput* pairs,
       queueStorage,
       substructureStorage,
       elapsedClocks,
+      timingStatsOut,
       statsOut,
       queueCapacity,
       substructurePartialCapacity,
@@ -186,6 +189,7 @@ void launchFmcsKernel512(const DevicePerPairInput* pairs,
                          void* queueStorage,
                          std::uint8_t* substructureStorage,
                          unsigned long long* elapsedClocks,
+                         ExecutionStats* timingStatsOut,
                          ExecutionStats* statsOut,
                          int queueCapacity,
                          int substructurePartialCapacity,
@@ -198,6 +202,7 @@ void launchFmcsKernel512(const DevicePerPairInput* pairs,
       queueStorage,
       substructureStorage,
       elapsedClocks,
+      timingStatsOut,
       statsOut,
       queueCapacity,
       substructurePartialCapacity,
@@ -208,33 +213,33 @@ void launchFmcsKernel512(const DevicePerPairInput* pairs,
 
 template void launchFmcsKernel128<16, 16>(
     const DevicePerPairInput*, FmcsDeviceResult<16, 16>*, void*,
-    std::uint8_t*, unsigned long long*, ExecutionStats*, int, int, int,
-    unsigned long long, cudaStream_t);
+    std::uint8_t*, unsigned long long*, ExecutionStats*, ExecutionStats*, int,
+    int, int, unsigned long long, cudaStream_t);
 template void launchFmcsKernel128<32, 32>(
     const DevicePerPairInput*, FmcsDeviceResult<32, 32>*, void*,
-    std::uint8_t*, unsigned long long*, ExecutionStats*, int, int, int,
-    unsigned long long, cudaStream_t);
+    std::uint8_t*, unsigned long long*, ExecutionStats*, ExecutionStats*, int,
+    int, int, unsigned long long, cudaStream_t);
 template void launchFmcsKernel128<64, 64>(
     const DevicePerPairInput*, FmcsDeviceResult<64, 64>*, void*,
-    std::uint8_t*, unsigned long long*, ExecutionStats*, int, int, int,
-    unsigned long long, cudaStream_t);
+    std::uint8_t*, unsigned long long*, ExecutionStats*, ExecutionStats*, int,
+    int, int, unsigned long long, cudaStream_t);
 template void launchFmcsKernel128<128, 128>(
     const DevicePerPairInput*, FmcsDeviceResult<128, 128>*, void*,
-    std::uint8_t*, unsigned long long*, ExecutionStats*, int, int, int,
-    unsigned long long, cudaStream_t);
+    std::uint8_t*, unsigned long long*, ExecutionStats*, ExecutionStats*, int,
+    int, int, unsigned long long, cudaStream_t);
 
 template void launchFmcsKernel512<16, 16>(
     const DevicePerPairInput*, FmcsDeviceResult<16, 16>*, void*,
-    std::uint8_t*, unsigned long long*, ExecutionStats*, int, int, int,
-    unsigned long long, cudaStream_t);
+    std::uint8_t*, unsigned long long*, ExecutionStats*, ExecutionStats*, int,
+    int, int, unsigned long long, cudaStream_t);
 template void launchFmcsKernel512<32, 32>(
     const DevicePerPairInput*, FmcsDeviceResult<32, 32>*, void*,
-    std::uint8_t*, unsigned long long*, ExecutionStats*, int, int, int,
-    unsigned long long, cudaStream_t);
+    std::uint8_t*, unsigned long long*, ExecutionStats*, ExecutionStats*, int,
+    int, int, unsigned long long, cudaStream_t);
 template void launchFmcsKernel512<64, 64>(
     const DevicePerPairInput*, FmcsDeviceResult<64, 64>*, void*,
-    std::uint8_t*, unsigned long long*, ExecutionStats*, int, int, int,
-    unsigned long long, cudaStream_t);
+    std::uint8_t*, unsigned long long*, ExecutionStats*, ExecutionStats*, int,
+    int, int, unsigned long long, cudaStream_t);
 
 template std::size_t fmcsQueueStorageBytes<16, 16>(std::size_t);
 template std::size_t fmcsQueueStorageBytes<32, 32>(std::size_t);

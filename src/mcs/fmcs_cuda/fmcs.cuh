@@ -87,7 +87,8 @@ std::vector<MCSResult> findMCESfMCSBatch(
     Parameters params = {},
     std::vector<float>* perPairTimesMs = nullptr,
     cudaStream_t stream = nullptr,
-    std::vector<ExecutionStats>* perPairStats = nullptr);
+    std::vector<ExecutionStats>* perPairStats = nullptr,
+    std::vector<ExecutionStats>* perPairTimingStats = nullptr);
 
 /// Labeled variant: optional exact vertex and edge label equality.
 ///
@@ -103,7 +104,8 @@ std::vector<MCSResult> findMCESfMCSBatchLabeled(
     Parameters params = {},
     std::vector<float>* perPairTimesMs = nullptr,
     cudaStream_t stream = nullptr,
-    std::vector<ExecutionStats>* perPairStats = nullptr);
+    std::vector<ExecutionStats>* perPairStats = nullptr,
+    std::vector<ExecutionStats>* perPairTimingStats = nullptr);
 
 }  // namespace fmcs
 }  // namespace mcs

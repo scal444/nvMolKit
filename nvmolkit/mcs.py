@@ -75,6 +75,7 @@ class MCSResult:
     atom_mapping: np.ndarray
     bond_mapping: np.ndarray
     elapsed_ms: float | None = None
+    fmcs_timings: dict[str, int] | None = None
     fmcs_stats: dict[str, int] | None = None
 
 
@@ -96,6 +97,7 @@ class MCSBatchResult:
     bond_mapping: np.ndarray
     bond_mapping_indptr: np.ndarray
     elapsed_ms: np.ndarray | None = None
+    fmcs_timings: dict[str, np.ndarray] | None = None
     fmcs_stats: dict[str, np.ndarray] | None = None
 
     def __len__(self) -> int:
@@ -130,6 +132,9 @@ class MCSBatchResult:
             atom_mapping=self.atom_mapping[atom_start:atom_end],
             bond_mapping=self.bond_mapping[bond_start:bond_end],
             elapsed_ms=None if self.elapsed_ms is None else float(self.elapsed_ms[pair_idx]),
+            fmcs_timings=None
+            if self.fmcs_timings is None
+            else {key: int(values[pair_idx]) for key, values in self.fmcs_timings.items()},
             fmcs_stats=None
             if self.fmcs_stats is None
             else {key: int(values[pair_idx]) for key, values in self.fmcs_stats.items()},
@@ -336,8 +341,9 @@ def findMCS(
         gpu_ids: GPU device IDs to use. ``None`` or empty uses the current
             device.
         collect_timings: When true, return per-pair fMCS backend elapsed
-            milliseconds in ``MCSBatchResult.elapsed_ms``. Requires a build
-            with ``NVMOLKIT_ENABLE_MCS_TIMINGS`` enabled.
+            milliseconds in ``MCSBatchResult.elapsed_ms`` and kernel section
+            clocks in ``MCSBatchResult.fmcs_timings``. Requires a build with
+            ``NVMOLKIT_ENABLE_MCS_TIMINGS`` enabled.
         collect_stats: When true, collect per-pair fMCS search counters in
             ``MCSBatchResult.fmcs_stats``. Requires a build with
             ``NVMOLKIT_ENABLE_MCS_STATS`` enabled.
@@ -430,6 +436,7 @@ def findMCS(
         atom_mapping_indptr,
         bond_mapping,
         bond_mapping_indptr,
+        fmcs_timings,
         fmcs_stats,
     ) = _findMCSBatch(
         native_mols,
@@ -483,4 +490,5 @@ def findMCS(
         bond_mapping=bond_mapping,
         bond_mapping_indptr=bond_mapping_indptr,
         fmcs_stats=fmcs_stats if collect_stats else None,
+        fmcs_timings=fmcs_timings if collect_timings else None,
     )

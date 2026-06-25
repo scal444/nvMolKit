@@ -247,22 +247,36 @@ TEST(FMCSDispatch, BatchOfThreeReturnsExpectedSizes) {
   }
 }
 
-TEST(FMCSDispatch, OptionalPerPairTimingsAreRejected) {
+TEST(FMCSDispatch, OptionalPerPairTimingsFollowBuildFlag) {
   std::vector<Graph> graphs{path(4), cycle(6)};
   std::vector<float> timesMs;
-  EXPECT_THROW(
-      (void)mcs::fmcs::findMCESfMCSBatch(
-          graphs, graphs, Parameters{}, &timesMs),
-      std::runtime_error);
+  if constexpr (nvMolKit::kMCSCollectTimingsEnabled) {
+    auto rs = mcs::fmcs::findMCESfMCSBatch(
+        graphs, graphs, Parameters{}, &timesMs);
+    ASSERT_EQ(rs.size(), graphs.size());
+    ASSERT_EQ(timesMs.size(), graphs.size());
+  } else {
+    EXPECT_THROW(
+        (void)mcs::fmcs::findMCESfMCSBatch(
+            graphs, graphs, Parameters{}, &timesMs),
+        std::runtime_error);
+  }
 }
 
-TEST(FMCSDispatch, OptionalExecutionStatsAreRejected) {
+TEST(FMCSDispatch, OptionalExecutionStatsFollowBuildFlag) {
   std::vector<Graph> graphs{path(4), cycle(6)};
   std::vector<mcs::fmcs::ExecutionStats> stats;
-  EXPECT_THROW(
-      (void)mcs::fmcs::findMCESfMCSBatch(
-          graphs, graphs, Parameters{}, nullptr, nullptr, &stats),
-      std::runtime_error);
+  if constexpr (nvMolKit::kMCSCollectStatsEnabled) {
+    auto rs = mcs::fmcs::findMCESfMCSBatch(
+        graphs, graphs, Parameters{}, nullptr, nullptr, &stats);
+    ASSERT_EQ(rs.size(), graphs.size());
+    ASSERT_EQ(stats.size(), graphs.size());
+  } else {
+    EXPECT_THROW(
+        (void)mcs::fmcs::findMCESfMCSBatch(
+            graphs, graphs, Parameters{}, nullptr, nullptr, &stats),
+        std::runtime_error);
+  }
 }
 
 TEST(FMCSDispatch, MismatchedBatchSizesThrows) {
@@ -815,16 +829,23 @@ TEST(FMCSBatch, EmptyInputReturnsEmpty) {
 TEST(FMCSBatch, CollectTimingsFollowsBuildFlag) {
   const auto p = path(8);
   std::vector<float> timesMs;
+  std::vector<ExecutionStats> timingStats;
 
   if constexpr (nvMolKit::kMCSCollectTimingsEnabled) {
-    auto rs = mcs::fmcs::findMCESfMCSBatch({p}, {p}, {}, &timesMs);
+    auto rs = mcs::fmcs::findMCESfMCSBatch(
+        {p}, {p}, {}, &timesMs, nullptr, nullptr, &timingStats);
     ASSERT_EQ(rs.size(), 1u);
     ASSERT_EQ(timesMs.size(), 1u);
+    ASSERT_EQ(timingStats.size(), 1u);
     EXPECT_GE(timesMs[0], 0.0f);
+    EXPECT_GT(timingStats[0].totalClocks, 0u);
+    EXPECT_GT(timingStats[0].phase1Clocks, 0u);
+    EXPECT_GT(timingStats[0].phase2Clocks, 0u);
     expectFullSelfPair(rs[0], p);
   } else {
     EXPECT_THROW(
-        (void)mcs::fmcs::findMCESfMCSBatch({p}, {p}, {}, &timesMs),
+        (void)mcs::fmcs::findMCESfMCSBatch(
+            {p}, {p}, {}, &timesMs, nullptr, nullptr, &timingStats),
         std::runtime_error);
   }
 }

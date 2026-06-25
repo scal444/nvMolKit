@@ -849,7 +849,8 @@ __device__ __forceinline__ int countCandidateTargetAtomsCooperative(
   }
   candidateCount = group.shfl(candidateCount, 0);
   if (laneRank == 0 && cacheIdx >= 0) {
-    candidateCountCache[cacheIdx] = static_cast<std::uint8_t>(candidateCount);
+    candidateCountCache[cacheIdx] =
+        static_cast<std::uint8_t>(candidateCount);
   }
   return candidateCount;
 }

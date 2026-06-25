@@ -444,6 +444,7 @@ MCSResult convertGpuResult(const RDKit::ROMol& molA,
                            const RDKit::ROMol& molB,
                            const mcs::MCSResult& gpuResult,
                            float elapsedMs,
+                           const mcs::fmcs::ExecutionStats* kernelTimings,
                            const mcs::fmcs::ExecutionStats* executionStats) {
   MCSResult out;
   out.numAtoms  = static_cast<unsigned int>(gpuResult.numCommonVertices);
@@ -452,6 +453,10 @@ MCSResult convertGpuResult(const RDKit::ROMol& molA,
   out.overflowed = gpuResult.overflowed;
   out.usedGpu   = true;
   out.elapsedMs = elapsedMs;
+  if (kernelTimings != nullptr) {
+    out.hasKernelTimings = true;
+    out.kernelTimings = convertExecutionStats(*kernelTimings);
+  }
   if (executionStats != nullptr) {
     out.hasExecutionStats = true;
     out.executionStats = convertExecutionStats(*executionStats);
@@ -640,12 +645,15 @@ void runGpuPairs(std::vector<PreparedGpuPair>& gpuPairs,
     fmcsParams.timeoutMs          = static_cast<float>(params.timeoutSeconds) * 1000.0f;
 
     std::vector<float> gpuTimesMs;
+    std::vector<mcs::fmcs::ExecutionStats> gpuTimingStats;
     std::vector<mcs::fmcs::ExecutionStats> gpuStats;
     std::vector<float>* gpuTimesPtr = nullptr;
+    std::vector<mcs::fmcs::ExecutionStats>* gpuTimingStatsPtr = nullptr;
     std::vector<mcs::fmcs::ExecutionStats>* gpuStatsPtr = nullptr;
     if constexpr (kMCSCollectTimingsEnabled) {
       if (params.collectTimings) {
         gpuTimesPtr = &gpuTimesMs;
+        gpuTimingStatsPtr = &gpuTimingStats;
       }
     }
     if constexpr (kMCSCollectStatsEnabled) {
@@ -654,7 +662,8 @@ void runGpuPairs(std::vector<PreparedGpuPair>& gpuPairs,
       }
     }
     auto gpuResults = mcs::fmcs::findMCESfMCSBatchLabeled(
-      gpuGraphsA, gpuGraphsB, fmcsParams, gpuTimesPtr, stream, gpuStatsPtr);
+      gpuGraphsA, gpuGraphsB, fmcsParams, gpuTimesPtr, stream, gpuStatsPtr,
+      gpuTimingStatsPtr);
     ScopedNvtxRange convertRange("Convert GPU results");
     for (size_t gpuIdx = 0; gpuIdx < gpuResults.size(); ++gpuIdx) {
       const size_t resultIdx = resultIndices[gpuIdx];
@@ -674,14 +683,31 @@ void runGpuPairs(std::vector<PreparedGpuPair>& gpuPairs,
             fallback.executionStats = convertExecutionStats(gpuStats[gpuIdx]);
           }
         }
+        if constexpr (kMCSCollectTimingsEnabled) {
+          if (gpuTimingStatsPtr != nullptr && gpuIdx < gpuTimingStats.size()) {
+            fallback.hasKernelTimings = true;
+            fallback.kernelTimings = convertExecutionStats(gpuTimingStats[gpuIdx]);
+          }
+        }
         results[resultIdx] = std::move(fallback);
       } else {
+        const mcs::fmcs::ExecutionStats* timingStatsPtr = nullptr;
+        if constexpr (kMCSCollectTimingsEnabled) {
+          timingStatsPtr = gpuTimingStatsPtr != nullptr && gpuIdx < gpuTimingStats.size()
+              ? &gpuTimingStats[gpuIdx]
+              : nullptr;
+        }
         const mcs::fmcs::ExecutionStats* statsPtr = nullptr;
         if constexpr (kMCSCollectStatsEnabled) {
           statsPtr = gpuStatsPtr != nullptr && gpuIdx < gpuStats.size() ? &gpuStats[gpuIdx] : nullptr;
         }
         results[resultIdx] =
-          convertGpuResult(*mols[idxA], *mols[idxB], gpuResults[gpuIdx], gpuElapsedMs, statsPtr);
+          convertGpuResult(*mols[idxA],
+                           *mols[idxB],
+                           gpuResults[gpuIdx],
+                           gpuElapsedMs,
+                           timingStatsPtr,
+                           statsPtr);
       }
     }
   };

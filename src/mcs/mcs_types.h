@@ -115,6 +115,8 @@ struct MCSResult {
   bool         usedGpu = false;
   bool         usedFallback = false;
   float        elapsedMs = 0.0f;
+  bool         hasKernelTimings = false;
+  MCSExecutionStats kernelTimings;
   bool         hasExecutionStats = false;
   MCSExecutionStats executionStats;
   std::string  smartsString;

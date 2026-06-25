@@ -87,6 +87,8 @@ struct FmcsOutputLayout {
   size_t resultsBytes = 0;
   size_t elapsedOffset = 0;
   size_t elapsedBytes = 0;
+  size_t timingStatsOffset = 0;
+  size_t timingStatsBytes = 0;
   size_t statsOffset = 0;
   size_t statsBytes = 0;
   size_t totalBytes = 0;
@@ -229,6 +231,7 @@ struct BatchDeviceBuffers {
   DevicePerPairInput* dPairInputs = nullptr;
   void* dResultsBuffer  = nullptr;
   unsigned long long* dElapsedClocks = nullptr;
+  ExecutionStats* dTimingStats = nullptr;
   ExecutionStats* dStats = nullptr;
   FmcsOutputLayout outputLayout;
 };
@@ -340,6 +343,13 @@ FmcsOutputLayout computeOutputLayout(size_t numPairs,
     layout.elapsedOffset = offset;
     layout.elapsedBytes = numPairs * sizeof(unsigned long long);
     offset += layout.elapsedBytes;
+
+    if (!collectStats) {
+      offset = alignTransferOffset(offset);
+      layout.timingStatsOffset = offset;
+      layout.timingStatsBytes = numPairs * sizeof(ExecutionStats);
+      offset += layout.timingStatsBytes;
+    }
   }
 
   if (collectStats) {
@@ -366,6 +376,7 @@ StagedChunkInput stageChunkInput(
 
   auto* hostBase = hostStaging.data();
   auto* deviceBase = deviceStaging.data();
+  std::memset(hostBase, 0, bytes);
   auto* hostPairs = reinterpret_cast<DevicePerPairInput*>(hostBase);
   auto* devicePairs = reinterpret_cast<DevicePerPairInput*>(deviceBase);
   const size_t wordsOffset =
@@ -453,6 +464,9 @@ void launchTierAsync(
   bufs.dElapsedClocks = collectTimings
       ? reinterpret_cast<unsigned long long*>(outputBase + layout.elapsedOffset)
       : nullptr;
+  bufs.dTimingStats = layout.timingStatsBytes > 0
+      ? reinterpret_cast<ExecutionStats*>(outputBase + layout.timingStatsOffset)
+      : nullptr;
   bufs.dStats = collectStats
       ? reinterpret_cast<ExecutionStats*>(outputBase + layout.statsOffset)
       : nullptr;
@@ -490,13 +504,13 @@ void launchTierAsync(
   if constexpr (blockThreads == 128) {
     launchFmcsKernel128<maxAtoms, maxBonds>(
         bufs.dPairInputs, dResults, dQueue, dSubstructure,
-        bufs.dElapsedClocks, bufs.dStats,
+        bufs.dElapsedClocks, bufs.dTimingStats, bufs.dStats,
         fmcsQueueCapacity(), fmcsSubstructurePartialCapacity(),
         numPairs, timeoutClocks, stream);
   } else if constexpr (blockThreads == 512) {
     launchFmcsKernel512<maxAtoms, maxBonds>(
         bufs.dPairInputs, dResults, dQueue, dSubstructure,
-        bufs.dElapsedClocks, bufs.dStats,
+        bufs.dElapsedClocks, bufs.dTimingStats, bufs.dStats,
         fmcsQueueCapacity(), fmcsSubstructurePartialCapacity(),
         numPairs, timeoutClocks, stream);
   } else {
@@ -656,6 +670,7 @@ void drainTierChunk(
     std::unique_ptr<TierChunk<maxAtoms, maxBonds, Policy>>& chunk,
     std::vector<MCSResult>& outResults,
     std::vector<float>* perPairTimesMs,
+    std::vector<ExecutionStats>* perPairTimingStats,
     std::vector<ExecutionStats>* perPairStats,
     float clockRateKHz) {
   nvMolKit::ScopedNvtxRange waitRange("Wait: fMCS chunk copy done", nvMolKit::NvtxColor::kRed);
@@ -676,6 +691,10 @@ void drainTierChunk(
       ? reinterpret_cast<const ExecutionStats*>(
             executor.outputStaging.data() + layout.statsOffset)
       : nullptr;
+  const auto* hostTimingStats = layout.timingStatsBytes > 0
+      ? reinterpret_cast<const ExecutionStats*>(
+            executor.outputStaging.data() + layout.timingStatsOffset)
+      : hostStats;
 
   for (size_t k = 0; k < chunk->resultIndices.size(); ++k) {
     const int resultIdx = chunk->resultIndices[k];
@@ -688,6 +707,9 @@ void drainTierChunk(
       (*perPairTimesMs)[static_cast<size_t>(resultIdx)] =
           static_cast<float>(static_cast<double>(hostElapsedClocks[k]) /
                              static_cast<double>(clockRateKHz));
+    }
+    if (perPairTimingStats != nullptr && hostTimingStats != nullptr) {
+      (*perPairTimingStats)[static_cast<size_t>(resultIdx)] = hostTimingStats[k];
     }
     if (perPairStats != nullptr && hostStats != nullptr) {
       (*perPairStats)[static_cast<size_t>(resultIdx)] = hostStats[k];
@@ -705,10 +727,11 @@ void runTierChunks(
     cudaStream_t stream,
     std::vector<MCSResult>& outResults,
     std::vector<float>* perPairTimesMs,
+    std::vector<ExecutionStats>* perPairTimingStats,
     std::vector<ExecutionStats>* perPairStats) {
   if (numChunks == 0) return;
 
-  const bool collectTimings = perPairTimesMs != nullptr;
+  const bool collectTimings = perPairTimesMs != nullptr || perPairTimingStats != nullptr;
   const bool collectStats = perPairStats != nullptr;
   float clockRateKHz = 0.0f;
   if (collectTimings) {
@@ -777,7 +800,8 @@ void runTierChunks(
                   "fMCS blockSize 512 supports maxSize tiers up to 64");
             } else {
               drainTierChunk(executor, typedChunk, outResults,
-                             perPairTimesMs, perPairStats, clockRateKHz);
+                             perPairTimesMs, perPairTimingStats, perPairStats,
+                             clockRateKHz);
             }
           }
         },
@@ -793,6 +817,7 @@ std::vector<MCSResult> runBatchWithBlockSize(
     const std::vector<InputT>& b,
     Parameters params,
     std::vector<float>* perPairTimesMs,
+    std::vector<ExecutionStats>* perPairTimingStats,
     std::vector<ExecutionStats>* perPairStats,
     cudaStream_t stream) {
   if (a.size() != b.size()) {
@@ -803,6 +828,9 @@ std::vector<MCSResult> runBatchWithBlockSize(
   std::vector<MCSResult> results(N);
   if (perPairTimesMs != nullptr) {
     perPairTimesMs->assign(N, 0.0f);
+  }
+  if (perPairTimingStats != nullptr) {
+    perPairTimingStats->assign(N, ExecutionStats{});
   }
   if (perPairStats != nullptr) {
     perPairStats->assign(N, ExecutionStats{});
@@ -846,25 +874,26 @@ std::vector<MCSResult> runBatchWithBlockSize(
   nvMolKit::ScopedNvtxRange                           enqueueRange("fMCS: Enqueue tier chunks");
   nvMolKit::ThreadSafeQueue<TierChunkVariant<Policy>> chunkQueue;
   FmcsExecutorBufferSizing bufferSizing;
+  const bool collectTimings = perPairTimesMs != nullptr || perPairTimingStats != nullptr;
   enqueueTierChunks<16, 16, Policy>(
       descPtrs, tierIndices[0], chunkSize, chunkQueue, bufferSizing,
-      perPairTimesMs != nullptr, perPairStats != nullptr);
+      collectTimings, perPairStats != nullptr);
   enqueueTierChunks<32, 32, Policy>(
       descPtrs, tierIndices[1], chunkSize, chunkQueue, bufferSizing,
-      perPairTimesMs != nullptr, perPairStats != nullptr);
+      collectTimings, perPairStats != nullptr);
   enqueueTierChunks<64, 64, Policy>(
       descPtrs, tierIndices[2], chunkSize, chunkQueue, bufferSizing,
-      perPairTimesMs != nullptr, perPairStats != nullptr);
+      collectTimings, perPairStats != nullptr);
   enqueueTierChunks<128, 128, Policy>(
       descPtrs, tierIndices[3], chunkSize, chunkQueue, bufferSizing,
-      perPairTimesMs != nullptr, perPairStats != nullptr);
+      collectTimings, perPairStats != nullptr);
   chunkQueue.close();
   enqueueRange.pop();
 
   nvMolKit::ScopedNvtxRange runRange("fMCS: Run tier chunks chunks=" + std::to_string(numChunks));
   runTierChunks<blockThreads, Policy>(
       chunkQueue, numChunks, bufferSizing, params, stream, results,
-      perPairTimesMs, perPairStats);
+      perPairTimesMs, perPairTimingStats, perPairStats);
 
   return results;
 }
@@ -875,15 +904,18 @@ std::vector<MCSResult> runBatch(
     const std::vector<InputT>& b,
     Parameters params,
     std::vector<float>* perPairTimesMs,
+    std::vector<ExecutionStats>* perPairTimingStats,
     std::vector<ExecutionStats>* perPairStats,
     cudaStream_t stream) {
   switch (validateRequestedBlockSize(params)) {
     case 128:
       return runBatchWithBlockSize<128, Policy, InputT>(
-          a, b, params, perPairTimesMs, perPairStats, stream);
+          a, b, params, perPairTimesMs, perPairTimingStats, perPairStats,
+          stream);
     case 512:
       return runBatchWithBlockSize<512, Policy, InputT>(
-          a, b, params, perPairTimesMs, perPairStats, stream);
+          a, b, params, perPairTimesMs, perPairTimingStats, perPairStats,
+          stream);
   }
   throw std::logic_error("unreachable fMCS blockSize dispatch");
 }
@@ -895,8 +927,10 @@ std::vector<MCSResult> runBatchWithInstrumentation(
     Parameters params,
     std::vector<float>* perPairTimesMs,
     std::vector<ExecutionStats>* perPairStats,
+    std::vector<ExecutionStats>* perPairTimingStats,
     cudaStream_t stream) {
-  if (perPairTimesMs != nullptr && !nvMolKit::kMCSCollectTimingsEnabled) {
+  if ((perPairTimesMs != nullptr || perPairTimingStats != nullptr) &&
+      !nvMolKit::kMCSCollectTimingsEnabled) {
     throw std::runtime_error(
         "fMCS timing instrumentation is not instantiated in this build");
   }
@@ -906,7 +940,7 @@ std::vector<MCSResult> runBatchWithInstrumentation(
   }
 
   return runBatch<Policy, InputT>(
-      a, b, params, perPairTimesMs, perPairStats, stream);
+      a, b, params, perPairTimesMs, perPairTimingStats, perPairStats, stream);
 }
 
 }  // namespace
@@ -917,12 +951,14 @@ std::vector<MCSResult> findMCESfMCSBatch(
     Parameters params,
     std::vector<float>* perPairTimesMs,
     cudaStream_t stream,
-    std::vector<ExecutionStats>* perPairStats) {
+    std::vector<ExecutionStats>* perPairStats,
+    std::vector<ExecutionStats>* perPairTimingStats) {
   nvMolKit::ScopedNvtxRange entryRange("findMCESfMCSBatch N=" + std::to_string(graphsA.size()) +
                                        " block=" + std::to_string(params.blockSize),
                                        nvMolKit::NvtxColor::kCyan);
   return runBatchWithInstrumentation<NullFMCSPolicy, Graph>(
-      graphsA, graphsB, params, perPairTimesMs, perPairStats, stream);
+      graphsA, graphsB, params, perPairTimesMs, perPairStats,
+      perPairTimingStats, stream);
 }
 
 std::vector<MCSResult> findMCESfMCSBatchLabeled(
@@ -931,12 +967,14 @@ std::vector<MCSResult> findMCESfMCSBatchLabeled(
     Parameters params,
     std::vector<float>* perPairTimesMs,
     cudaStream_t stream,
-    std::vector<ExecutionStats>* perPairStats) {
+    std::vector<ExecutionStats>* perPairStats,
+    std::vector<ExecutionStats>* perPairTimingStats) {
   nvMolKit::ScopedNvtxRange entryRange("findMCESfMCSBatchLabeled N=" + std::to_string(graphsA.size()) +
                                        " block=" + std::to_string(params.blockSize),
                                        nvMolKit::NvtxColor::kCyan);
   return runBatchWithInstrumentation<LabeledFMCSPolicy, benchmark::MiviaGraphData>(
-      graphsA, graphsB, params, perPairTimesMs, perPairStats, stream);
+      graphsA, graphsB, params, perPairTimesMs, perPairStats,
+      perPairTimingStats, stream);
 }
 
 }  // namespace fmcs
