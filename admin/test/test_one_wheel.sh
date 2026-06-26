@@ -2,44 +2,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Test one nvmolkit wheel against its target rdkit version.
+# Test one nvmolkit wheel against its target RDKit version.
 #
-# Usage: test_one_wheel.sh <rdkit_version> <python_version> <mode>
-#   mode = smoke    -> import + tiny GPU op (admin/test/smoke_check.py)
-#          full     -> smoke + full pytest from repo's nvmolkit/tests
+# Usage: test_one_wheel.sh <rdkit_version> <python_version>
 #
-# Intended to be invoked by admin/test/run.sh, which sets up envs and dispatches
-# pairs. Standalone invocation works as long as the required environment is set.
-#
-# Required environment:
-#   REPO                       : repo root (provides smoke_check.py and nvmolkit/tests/)
-#   WHEELHOUSE                 : where wheels live; reads <wheelhouse>/rdkit<X>/py<Y>/*.whl
-#   TEST_LOG_DIR               : per-pair log dir
-#   VENV_ROOT                  : where to create throwaway venvs
-#   IFACE_ENV_PREFIX           : prefix for interpreter conda envs;
-#                                env name is "<prefix>py<version>" (e.g. nvmolkit_iface_py3.12)
-#   NVMOLKIT_CONDA_ENVS_ROOT   : conda envs directory (e.g. <conda-base>/envs)
-#                                interpreter resolves to <root>/<env_name>/bin/python
-#   TIMINGS_TSV                : append-only timings log
-#                                (rdkit\tpy\tmode\tstatus\tstart\tend\telapsed_sec)
-#
-# Exits 0 on pass, 1 on failure of any test step, 2 on usage error.
+# Required environment is set by admin/test/test_all_wheels.sh:
+#   REPO WHEELHOUSE TEST_LOG_DIR VENV_ROOT IFACE_ENV_PREFIX
+#   NVMOLKIT_CONDA_ENVS_ROOT TIMINGS_TSV
 
 set -uo pipefail
 
-if [ $# -ne 3 ]; then
-    echo "Usage: $0 <rdkit_version> <python_version> <smoke|full>" >&2
+if [ $# -ne 2 ]; then
+    echo "Usage: $0 <rdkit_version> <python_version>" >&2
     exit 2
 fi
 
 rdkit=$1
 py=$2
-mode=$3
-
-case "$mode" in
-    smoke|full) ;;
-    *) echo "Error: mode must be 'smoke' or 'full', got '$mode'" >&2; exit 2 ;;
-esac
 
 : "${REPO:?REPO must be set}"
 : "${WHEELHOUSE:?WHEELHOUSE must be set}"
@@ -49,51 +28,44 @@ esac
 : "${NVMOLKIT_CONDA_ENVS_ROOT:?NVMOLKIT_CONDA_ENVS_ROOT must be set}"
 : "${TIMINGS_TSV:?TIMINGS_TSV must be set}"
 
-ifaceEnv=${IFACE_ENV_PREFIX}py${py}
-ifacePython=$NVMOLKIT_CONDA_ENVS_ROOT/$ifaceEnv/bin/python
-if [ ! -x "$ifacePython" ]; then
-    echo "Error: interpreter env not found at $ifacePython" >&2
-    echo "       Create it with: conda create -y -n ${ifaceEnv} -c conda-forge python=${py}" >&2
+iface_python=$NVMOLKIT_CONDA_ENVS_ROOT/${IFACE_ENV_PREFIX}py${py}/bin/python
+if [ ! -x "$iface_python" ]; then
+    echo "Error: interpreter env not found at $iface_python" >&2
     exit 2
 fi
 
-wheelDir=$WHEELHOUSE/rdkit${rdkit}/py${py}
+wheel_dir=$WHEELHOUSE/rdkit${rdkit}/py${py}
 shopt -s nullglob
-wheelMatches=("$wheelDir"/nvmolkit-*-cp${py//./}-cp${py//./}-*.whl)
+wheel_matches=("$wheel_dir"/nvmolkit-*-cp${py//./}-cp${py//./}-*.whl)
 shopt -u nullglob
-if [ ${#wheelMatches[@]} -eq 0 ]; then
-    echo "[skip] rdkit=$rdkit py=$py mode=$mode (no wheel at $wheelDir)"
+if [ ${#wheel_matches[@]} -eq 0 ]; then
+    echo "[skip] rdkit=$rdkit py=$py (no wheel at $wheel_dir)"
     exit 0
 fi
-if [ ${#wheelMatches[@]} -gt 1 ]; then
-    echo "Error: multiple wheels in $wheelDir (${wheelMatches[*]})" >&2
+if [ ${#wheel_matches[@]} -gt 1 ]; then
+    echo "Error: multiple wheels in $wheel_dir (${wheel_matches[*]})" >&2
     exit 2
 fi
-wheel=${wheelMatches[0]}
+
+wheel=${wheel_matches[0]}
+venv=$VENV_ROOT/rdkit${rdkit}_py${py}
+test_root=$VENV_ROOT/rdkit${rdkit}_py${py}_tests
+log_file=$TEST_LOG_DIR/rdkit${rdkit}_py${py}.log
+started_at=$(date '+%Y-%m-%d %H:%M:%S')
+start_epoch=$(date +%s)
+rc=0
 
 mkdir -p "$TEST_LOG_DIR" "$VENV_ROOT"
-logFile=$TEST_LOG_DIR/rdkit${rdkit}_py${py}_${mode}.log
-venv=$VENV_ROOT/rdkit${rdkit}_py${py}
-
-startEpoch=$(date +%s)
-startedAt=$(date '+%Y-%m-%d %H:%M:%S')
-
-format_hms() {
-    local secs=$1
-    printf '%dh%02dm%02ds' $((secs / 3600)) $(((secs % 3600) / 60)) $((secs % 60))
-}
-
-echo "[start $startedAt] rdkit=$rdkit py=$py mode=$mode wheel=$(basename "$wheel")"
+rm -rf "$venv" "$test_root"
 
 {
     echo "=== nvmolkit wheel test ==="
-    echo "    rdkit=$rdkit py=$py mode=$mode"
-    echo "    started_at=$startedAt"
-    echo "    wheel=$wheel"
-    echo "    interpreter=$ifacePython ($($ifacePython --version 2>&1))"
-    echo "    venv=$venv"
-    echo "==========================="
-} > "$logFile"
+    echo "rdkit=$rdkit"
+    echo "python=$py"
+    echo "wheel=$wheel"
+    echo "interpreter=$iface_python ($($iface_python --version 2>&1))"
+    echo "venv=$venv"
+} > "$log_file"
 
 run_step() {
     local label=$1
@@ -102,98 +74,64 @@ run_step() {
         echo
         echo "--- $label ---"
         echo "+ $*"
-    } >> "$logFile"
-    "$@" >> "$logFile" 2>&1
-    local rc=$?
-    echo "--- $label exit=$rc ---" >> "$logFile"
-    return $rc
+    } >> "$log_file"
+    "$@" >> "$log_file" 2>&1
 }
 
 run_step_in_dir() {
     local label=$1
-    local workdir=$2
+    local dir=$2
     shift 2
     {
         echo
         echo "--- $label ---"
-        echo "cwd: $workdir"
+        echo "cwd: $dir"
         echo "+ $*"
-    } >> "$logFile"
-    (cd "$workdir" && "$@") >> "$logFile" 2>&1
-    local rc=$?
-    echo "--- $label exit=$rc ---" >> "$logFile"
-    return $rc
+    } >> "$log_file"
+    (cd "$dir" && "$@") >> "$log_file" 2>&1
 }
 
-# Recreate venv from scratch so we don't carry state from prior test runs.
-rm -rf "$venv"
-if ! run_step "venv-create" "$ifacePython" -m venv "$venv"; then
-    echo "[FAIL] rdkit=$rdkit py=$py mode=$mode step=venv-create (see $logFile)"
+if ! run_step "venv-create" "$iface_python" -m venv "$venv"; then
     rc=1
 elif ! run_step "pip-upgrade" "$venv/bin/pip" install --upgrade pip; then
-    echo "[FAIL] rdkit=$rdkit py=$py mode=$mode step=pip-upgrade (see $logFile)"
     rc=1
-elif ! run_step "install-wheel" "$venv/bin/pip" install \
-        "$wheel" "rdkit==${rdkit}"; then
-    echo "[FAIL] rdkit=$rdkit py=$py mode=$mode step=install-wheel (see $logFile)"
+elif ! run_step "install-wheel" "$venv/bin/pip" install "$wheel" "rdkit==${rdkit}"; then
     rc=1
-elif ! run_step "smoke-check" "$venv/bin/python" "$REPO/admin/test/smoke_check.py"; then
-    echo "[FAIL] rdkit=$rdkit py=$py mode=$mode step=smoke-check (see $logFile)"
+elif ! run_step "installed-wheel-check" "$venv/bin/python" "$REPO/admin/test/smoke_check.py"; then
     rc=1
-elif [ "$mode" = "full" ]; then
-    if ! run_step "install-test-deps" "$venv/bin/pip" install \
-            pandas pytest psutil optuna; then
-        echo "[FAIL] rdkit=$rdkit py=$py mode=$mode step=install-test-deps (see $logFile)"
-        rc=1
-    else
-        testRoot=$VENV_ROOT/rdkit${rdkit}_py${py}_tests
-        testRunDir=$testRoot/run
-        rm -rf "$testRoot"
-        mkdir -p "$testRoot/nvmolkit" "$testRoot/tests" "$testRunDir"
-        cp -a "$REPO/nvmolkit/tests" "$testRoot/nvmolkit/"
-        cp -a "$REPO/tests/test_data" "$testRoot/tests/"
-        find "$testRoot" -type d -name __pycache__ -prune -exec rm -rf {} +
-    fi
-    if [ "${rc:-0}" -eq 0 ] && ! run_step_in_dir "pytest" "$testRunDir" "$venv/bin/pytest" \
-            "$testRoot/nvmolkit/tests" -k "not long" -v; then
-        echo "[FAIL] rdkit=$rdkit py=$py mode=$mode step=pytest (see $logFile)"
-        rc=1
-    elif [ "${rc:-0}" -eq 0 ]; then
-        rc=0
-    fi
+elif ! run_step "install-test-deps" "$venv/bin/pip" install pandas pytest psutil optuna; then
+    rc=1
 else
-    rc=0
+    mkdir -p "$test_root/nvmolkit" "$test_root/tests" "$test_root/run"
+    cp -a "$REPO/nvmolkit/tests" "$test_root/nvmolkit/"
+    cp -a "$REPO/tests/test_data" "$test_root/tests/"
+    find "$test_root" -type d -name __pycache__ -prune -exec rm -rf {} +
+    run_step_in_dir "pytest" "$test_root/run" "$venv/bin/pytest" \
+        "$test_root/nvmolkit/tests" -k "not long" -v || rc=1
 fi
 
-endEpoch=$(date +%s)
-endedAt=$(date '+%Y-%m-%d %H:%M:%S')
-elapsed=$((endEpoch - startEpoch))
-elapsedHms=$(format_hms "$elapsed")
+ended_at=$(date '+%Y-%m-%d %H:%M:%S')
+elapsed=$(( $(date +%s) - start_epoch ))
 
 {
     echo
     echo "=== test finished ==="
-    echo "    rdkit=$rdkit py=$py mode=$mode rc=$rc"
-    echo "    ended_at=$endedAt"
-    echo "    elapsed=${elapsed}s ($elapsedHms)"
-    echo "====================="
-} >> "$logFile"
+    echo "rc=$rc"
+    echo "ended_at=$ended_at"
+    echo "elapsed_sec=$elapsed"
+} >> "$log_file"
 
-# Tear down venv. Keep the log.
-rm -rf "$venv"
-if [ -n "${testRoot:-}" ]; then
-    rm -rf "$testRoot"
-fi
+rm -rf "$venv" "$test_root"
 
 if [ "$rc" -eq 0 ]; then
     status=ok
-    printf '[ok %s] rdkit=%s py=%s mode=%s elapsed=%s\n' \
-        "$endedAt" "$rdkit" "$py" "$mode" "$elapsedHms"
+    printf '[ok %s] rdkit=%s py=%s elapsed=%ds\n' "$ended_at" "$rdkit" "$py" "$elapsed"
 else
     status=fail
+    printf '[FAIL %s] rdkit=%s py=%s elapsed=%ds (see %s)\n' \
+        "$ended_at" "$rdkit" "$py" "$elapsed" "$log_file"
 fi
-printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$rdkit" "$py" "$mode" "$status" "$startedAt" "$endedAt" "$elapsed" \
-    >> "$TIMINGS_TSV"
 
+printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$rdkit" "$py" "$status" "$started_at" "$ended_at" "$elapsed" >> "$TIMINGS_TSV"
 exit "$rc"

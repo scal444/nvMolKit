@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tiny ABI + kernel-launch smoke for an installed nvmolkit wheel.
+"""Tiny ABI + kernel-launch probe for an installed nvmolkit wheel.
 
 Imports nvmolkit, generates a Morgan fingerprint for a single small molecule
 on the GPU, materializes the result on the host and prints a one-line summary.
