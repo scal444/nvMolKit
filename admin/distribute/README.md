@@ -59,7 +59,9 @@ Outputs:
 
 Wheel tests install each wheel into a fresh pip venv, verify the installed
 package can import and launch a small CUDA operation, then run the Python test
-suite from outside the source checkout.
+suite from outside the source checkout. Run these tests from the source
+checkout or tag that produced the wheels; the pytest phase uses tests from the
+current checkout.
 
 ```bash
 conda activate nvmolkit_pip_build
@@ -71,7 +73,7 @@ bash admin/test/test_all_wheels.sh "$WHEELHOUSE"
 bash admin/test/test_all_wheels.sh "$WHEELHOUSE" "$WHEELHOUSE/jobs/pairs.txt"
 
 # Test one wheel combination.
-bash admin/test/test_all_wheels.sh "$WHEELHOUSE" 2026.3.1 3.13
+bash admin/test/test_one_wheel.sh "$WHEELHOUSE" 2026.3.1 3.13
 ```
 
 Outputs:
@@ -272,7 +274,7 @@ pages from retagged variant wheels.
 
 Post-build testing:
 
-- `admin/test/test_all_wheels.sh`: runs installed-wheel tests across wheel
-pairs.
+- `admin/test/test_all_wheels.sh`: runs installed-wheel tests across discovered
+wheel pairs or a pairs file.
 - `admin/test/test_one_wheel.sh`: installs and tests one wheel pair.
 - `admin/test/smoke_check.py`: minimal installed-wheel import and CUDA probe.
