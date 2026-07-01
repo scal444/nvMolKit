@@ -24,6 +24,10 @@
 namespace mcs {
 namespace fmcs {
 
+// ---------------------------------------------------------------------------
+// Shared matching primitives
+// ---------------------------------------------------------------------------
+
 /// Bond endpoints are stored across the kernel as a single uint32 with
 /// the u-endpoint atom index in the high 16 bits and the v-endpoint
 /// atom index in the low 16 bits.  Tiers cap maxAtoms at 128 so 16 bits
@@ -67,48 +71,6 @@ struct SingleBondMatch {
   uint8_t targetAtomV;
 };
 
-template<int maxAtoms, int maxBonds, int maxTargetAtoms>
-struct FmcsSubstructureScratch {
-  // Scratch for the RDKit checkIfMatchAndAppend fallback.  This is deliberately
-  // caller-owned shared memory, not function-local state: tier-128 scratch is
-  // too large to risk compiler-created stack/local memory in the matcher.
-  std::uint8_t seedAtomList[maxAtoms];
-  std::uint8_t seedAtoms[maxAtoms];
-  std::uint8_t seedDegree[maxAtoms];
-  std::uint8_t mappedSeedNeighborCount[maxAtoms];
-  std::uint16_t seedNeighborOffset[maxAtoms + 1];
-  std::uint8_t seedNeighborAtom[2 * maxBonds];
-  std::uint16_t seedNeighborBond[2 * maxBonds];
-  std::uint8_t targetDegree[maxTargetAtoms];
-  std::uint8_t orderedQueryAtom[maxAtoms];
-  std::uint8_t queryOrderPos[maxAtoms];
-  std::uint8_t targetAtomForQuery[maxAtoms];
-  int currentCount;
-  int nextCount;
-  int found;
-  int overflowed;
-};
-
-__device__ __forceinline__ void setOverflowedFlagWithinThread(int* flag) {
-  if (flag != nullptr) atomicExch(flag, 1);
-}
-
-__device__ __forceinline__ void setOverflowedFlagWithinThread(bool* flag) {
-  if (flag != nullptr) *flag = true;
-}
-
-template<int maxAtoms, int maxBonds>
-__device__ __forceinline__ bool seedContainsBondWithinThread(
-    const Seed<maxAtoms, maxBonds>& seed,
-    const int queryBondIdx) {
-  using SeedT = Seed<maxAtoms, maxBonds>;
-  using BondWord = typename SeedT::bond_word_type;
-  constexpr int kBondBitsPerWord = SeedT::kBondBitsPerWord;
-  if (queryBondIdx < 0 || queryBondIdx >= maxBonds) return false;
-  const BondWord word = seed.bonds[queryBondIdx / kBondBitsPerWord];
-  return ((word >> (queryBondIdx % kBondBitsPerWord)) & 1) != 0;
-}
-
 template<class Topology>
 __host__ __device__ constexpr bool topologyHasAdjacencyBondIndices() {
   if constexpr (requires { Topology::kHasAdjacencyBondIndices; }) {
@@ -117,6 +79,10 @@ __host__ __device__ constexpr bool topologyHasAdjacencyBondIndices() {
     return false;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Fast incremental matching
+// ---------------------------------------------------------------------------
 
 /// Within-thread: per-lane single-(query bond, target bond, orientation)
 /// compatibility check used by Phase 1 initial-seed enumeration.  Writes
@@ -554,6 +520,52 @@ __device__ __forceinline__ bool matchIncrementalFastCooperative(
     }
   }
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Full substructure fallback
+// ---------------------------------------------------------------------------
+
+template<int maxAtoms, int maxBonds, int maxTargetAtoms>
+struct FmcsSubstructureScratch {
+  // Scratch for the RDKit checkIfMatchAndAppend fallback.  This is deliberately
+  // caller-owned shared memory, not function-local state: tier-128 scratch is
+  // too large to risk compiler-created stack/local memory in the matcher.
+  std::uint8_t seedAtomList[maxAtoms];
+  std::uint8_t seedAtoms[maxAtoms];
+  std::uint8_t seedDegree[maxAtoms];
+  std::uint8_t mappedSeedNeighborCount[maxAtoms];
+  std::uint16_t seedNeighborOffset[maxAtoms + 1];
+  std::uint8_t seedNeighborAtom[2 * maxBonds];
+  std::uint16_t seedNeighborBond[2 * maxBonds];
+  std::uint8_t targetDegree[maxTargetAtoms];
+  std::uint8_t orderedQueryAtom[maxAtoms];
+  std::uint8_t queryOrderPos[maxAtoms];
+  std::uint8_t targetAtomForQuery[maxAtoms];
+  int currentCount;
+  int nextCount;
+  int found;
+  int overflowed;
+};
+
+__device__ __forceinline__ void setOverflowedFlagWithinThread(int* flag) {
+  if (flag != nullptr) atomicExch(flag, 1);
+}
+
+__device__ __forceinline__ void setOverflowedFlagWithinThread(bool* flag) {
+  if (flag != nullptr) *flag = true;
+}
+
+template<int maxAtoms, int maxBonds>
+__device__ __forceinline__ bool seedContainsBondWithinThread(
+    const Seed<maxAtoms, maxBonds>& seed,
+    const int queryBondIdx) {
+  using SeedT = Seed<maxAtoms, maxBonds>;
+  using BondWord = typename SeedT::bond_word_type;
+  constexpr int kBondBitsPerWord = SeedT::kBondBitsPerWord;
+  if (queryBondIdx < 0 || queryBondIdx >= maxBonds) return false;
+  const BondWord word = seed.bonds[queryBondIdx / kBondBitsPerWord];
+  return ((word >> (queryBondIdx % kBondBitsPerWord)) & 1) != 0;
 }
 
 template<class TargetTopology>
@@ -1495,42 +1507,6 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(
   }
   group.sync();
   return false;
-}
-
-template<int maxAtoms, int maxBonds, int maxTA, int maxTB,
-         class QueryTopology, class TargetTopology, class GroupT,
-         class OverflowFlagT>
-__device__ __forceinline__ bool matchSeedWithSubstructureFallbackCooperative(
-    const GroupT& group,
-    const Seed<maxAtoms, maxBonds>& seed,
-    const QueryTopology& queryTopology,
-    const TargetTopology& targetTopology,
-    const PairMatchTablesDevice& tables,
-    MatchResult<maxAtoms, maxBonds, maxTA, maxTB>& match,
-    FmcsSubstructureScratch<maxAtoms, maxBonds, maxTA>& scratch,
-    int* scratchLock,
-    std::uint8_t* partialStorage,
-    int partialCapacity,
-    OverflowFlagT* overflowedFlag) {
-  const bool fastOk = matchIncrementalFastCooperative(
-      group, seed, queryTopology, targetTopology, tables, match);
-  group.sync();
-  if (fastOk) {
-    return true;
-  }
-  if (group.thread_rank() == 0) {
-    while (atomicCAS(scratchLock, 0, 1) != 0) {}
-  }
-  group.sync();
-  const bool ok = matchSeedSubstructureCooperative<true>(
-      group, seed, queryTopology, targetTopology, tables, match, scratch,
-      partialStorage, partialCapacity, overflowedFlag);
-  group.sync();
-  if (group.thread_rank() == 0) {
-    atomicExch(scratchLock, 0);
-  }
-  group.sync();
-  return ok;
 }
 
 }  // namespace fmcs

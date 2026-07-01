@@ -19,6 +19,7 @@
 // file is populated incrementally as Steps 1-5 land real implementations.
 
 #include "fmcs_cuda/experimental/fmcs_match_cache.cuh"
+#include "fmcs_cuda/experimental/fmcs_match_with_fallback.cuh"
 #include "fmcs_cuda/experimental/fmcs_seed_mark.cuh"
 #include "fmcs_cuda/fmcs_grow.cuh"
 #include "fmcs_cuda/fmcs_kernel.cuh"
