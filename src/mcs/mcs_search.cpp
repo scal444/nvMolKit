@@ -440,16 +440,38 @@ MCSExecutionStats convertExecutionStats(const mcs::fmcs::ExecutionStats& in) {
   return out;
 }
 
+void addCompatibleSingletonIfEmpty(MCSResult&           result,
+                                   const RDKit::ROMol&  molA,
+                                   const RDKit::ROMol&  molB,
+                                   const MCSParameters& params) {
+  if (result.numAtoms != 0 || molA.getNumAtoms() == 0 || molB.getNumAtoms() == 0) {
+    return;
+  }
+
+  for (const auto* atomA : molA.atoms()) {
+    const auto keyA = makeAtomLabelKey(molA, *atomA, params);
+    for (const auto* atomB : molB.atoms()) {
+      const auto keyB = makeAtomLabelKey(molB, *atomB, params);
+      if (keyA.tie() == keyB.tie()) {
+        result.numAtoms = 1;
+        result.atomMapping.emplace_back(static_cast<int>(atomA->getIdx()), static_cast<int>(atomB->getIdx()));
+        return;
+      }
+    }
+  }
+}
+
 MCSResult convertGpuResult(const RDKit::ROMol& molA,
                            const RDKit::ROMol& molB,
                            const mcs::MCSResult& gpuResult,
+                           const MCSParameters& params,
                            float elapsedMs,
                            const mcs::fmcs::ExecutionStats* kernelTimings,
                            const mcs::fmcs::ExecutionStats* executionStats) {
   MCSResult out;
   out.numAtoms  = static_cast<unsigned int>(gpuResult.numCommonVertices);
   out.numBonds  = static_cast<unsigned int>(gpuResult.numCommonEdges);
-  out.canceled  = gpuResult.timedOut || gpuResult.killed;
+  out.canceled  = gpuResult.timedOut;
   out.overflowed = gpuResult.overflowed;
   out.usedGpu   = true;
   out.elapsedMs = elapsedMs;
@@ -481,6 +503,7 @@ MCSResult convertGpuResult(const RDKit::ROMol& molA,
       out.bondMapping.emplace_back(static_cast<int>(bondA->getIdx()), static_cast<int>(bondB->getIdx()));
     }
   }
+  addCompatibleSingletonIfEmpty(out, molA, molB, params);
   return out;
 }
 
@@ -705,6 +728,7 @@ void runGpuPairs(std::vector<PreparedGpuPair>& gpuPairs,
           convertGpuResult(*mols[idxA],
                            *mols[idxB],
                            gpuResults[gpuIdx],
+                           params,
                            gpuElapsedMs,
                            timingStatsPtr,
                            statsPtr);

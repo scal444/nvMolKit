@@ -537,6 +537,29 @@ TEST(FMCSDispatchRoutes, AllPairsUpperTriangleWrapperMatchesExplicitPairs) {
   expectSameResultShape(explicitResults, wrapperResults);
 }
 
+TEST(FMCSDispatchRoutes, SingletonOnlyOverlapMatchesRdkitMCS) {
+  const std::unique_ptr<RDKit::ROMol> methane(RDKit::SmilesToMol("C"));
+  const std::unique_ptr<RDKit::ROMol> ethane(RDKit::SmilesToMol("CC"));
+  ASSERT_NE(methane, nullptr);
+  ASSERT_NE(ethane, nullptr);
+
+  const std::vector<const RDKit::ROMol*> mols  = {methane.get(), ethane.get()};
+  const std::vector<MCSPair>             pairs = {
+    {0, 1}
+  };
+  MCSParameters params;
+  params.requireGpu  = true;
+  const auto results = nvMolKit::findMCSBatch(mols, pairs, nullptr, params);
+
+  ASSERT_EQ(results.size(), 1);
+  EXPECT_EQ(results[0].numAtoms, 1);
+  EXPECT_EQ(results[0].numBonds, 0);
+  EXPECT_TRUE(results[0].usedGpu);
+  EXPECT_FALSE(results[0].usedFallback);
+  ASSERT_EQ(results[0].atomMapping.size(), 1);
+  EXPECT_TRUE(results[0].bondMapping.empty());
+}
+
 constexpr RingConfig kNoRing{false, false, "NoRing"};
 
 std::string integrationParamName(const ::testing::TestParamInfo<FmcsIntegrationParams>& info) {

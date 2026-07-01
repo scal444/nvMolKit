@@ -98,42 +98,6 @@ class SeedQueue {
     return true;
   }
 
-  /// Within-thread: RDKit SeedSet::add analogue for single-producer code.
-  /// Inserts @p element before the first stored seed with fewer bonds, thereby
-  /// keeping the active prefix sorted by descending bond count while preserving
-  /// insertion order among equal-size seeds.  This is intentionally serial and
-  /// shifts global-memory queue entries; use only for RDKit-parity seed-grow
-  /// scheduling, not for concurrent stack-style work.
-  __device__ __forceinline__ bool insertSortedByBondsWithinThread(
-      const Element& element) {
-    if (top_ >= capacity_) return false;
-    int insertAt = top_;
-    for (int i = 0; i < top_; ++i) {
-      if (storage_[i].seed.numBonds < element.seed.numBonds) {
-        insertAt = i;
-        break;
-      }
-    }
-    for (int i = top_; i > insertAt; --i) {
-      storage_[i] = storage_[i - 1];
-    }
-    storage_[insertAt] = element;
-    ++top_;
-    return true;
-  }
-
-  /// Within-thread: pop the front seed from the RDKit-style sorted list.
-  /// Remaining entries are shifted left to preserve order.
-  __device__ __forceinline__ bool popFrontWithinThread(Element& outElement) {
-    if (top_ <= 0) return false;
-    outElement = storage_[0];
-    for (int i = 1; i < top_; ++i) {
-      storage_[i - 1] = storage_[i];
-    }
-    --top_;
-    return true;
-  }
-
   /// Mirrors mcsplit's @c ParallelStack::warpBatchReserve.  Despite
   /// the @c Cooperative suffix, the actual reservation work is lane-0
   /// serial: lane 0 runs the atomicCAS-loop on @c top_, and the only

@@ -18,6 +18,8 @@
 // helper, and copies results back to host memory for assertion.  This
 // file is populated incrementally as Steps 1-5 land real implementations.
 
+#include "fmcs_cuda/experimental/fmcs_match_cache.cuh"
+#include "fmcs_cuda/experimental/fmcs_seed_mark.cuh"
 #include "fmcs_cuda/fmcs_grow.cuh"
 #include "fmcs_cuda/fmcs_kernel.cuh"
 #include "fmcs_cuda/fmcs_match.cuh"
@@ -279,81 +281,6 @@ TEST(FMCSUnit, SeedCanGrowBiggerThanBoundCheck) {
 }
 
 // ---------------------------------------------------------------------------
-// seedComputeRemainingSizeWithinThread
-// ---------------------------------------------------------------------------
-
-namespace {
-
-struct FakeQueryTopology {
-  int numAtoms;
-  int numBonds;
-};
-
-__global__ void seedComputeRemainingDriverKernel16(Seed<16, 16>* out,
-                                                   FakeQueryTopology topo) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  Seed<16, 16> seed{};
-  mcs::fmcs::seedAddAtomWithinThread(seed, 0);
-  mcs::fmcs::seedAddAtomWithinThread(seed, 1);
-  // Three excluded bonds at indices 0, 2, 3.
-  mcs::fmcs::seedAddBondWithinThread(seed, 0);
-  mcs::fmcs::seedAddBondWithinThread(seed, 2);
-  mcs::fmcs::seedAddBondWithinThread(seed, 3);
-  mcs::fmcs::seedComputeRemainingSizeWithinThread(seed, topo);
-  *out = seed;
-}
-
-__global__ void seedComputeRemainingDriverKernel64(Seed<64, 64>* out,
-                                                   FakeQueryTopology topo) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  Seed<64, 64> seed{};
-  // Spread bond exclusions across the uint64 word (and into a second
-  // word would require maxBonds > 64; we exercise just the popcll path).
-  for (int b : {0, 17, 33, 60}) {
-    mcs::fmcs::seedAddBondWithinThread(seed, b);
-  }
-  for (int a : {0, 1, 5, 17, 32}) {
-    mcs::fmcs::seedAddAtomWithinThread(seed, a);
-  }
-  mcs::fmcs::seedComputeRemainingSizeWithinThread(seed, topo);
-  *out = seed;
-}
-
-}  // namespace
-
-TEST(FMCSUnit, SeedComputeRemainingSizeLooseBoundUint32Word) {
-  Seed<16, 16>* d_out = mallocManaged<Seed<16, 16>>();
-  ASSERT_NE(d_out, nullptr);
-
-  FakeQueryTopology topo{/*numAtoms=*/10, /*numBonds=*/15};
-  seedComputeRemainingDriverKernel16<<<1, 1>>>(d_out, topo);
-  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-
-  EXPECT_EQ(d_out->numAtoms, 2);
-  EXPECT_EQ(d_out->numBonds, 3);
-  EXPECT_EQ(d_out->remainingAtoms, 10 - 2);
-  EXPECT_EQ(d_out->remainingBonds, 15 - 3);
-
-  cudaFree(d_out);
-}
-
-TEST(FMCSUnit, SeedComputeRemainingSizeLooseBoundUint64Word) {
-  Seed<64, 64>* d_out = mallocManaged<Seed<64, 64>>();
-  ASSERT_NE(d_out, nullptr);
-
-  FakeQueryTopology topo{/*numAtoms=*/40, /*numBonds=*/50};
-  seedComputeRemainingDriverKernel64<<<1, 1>>>(d_out, topo);
-  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-
-  EXPECT_EQ(d_out->numAtoms, 5);
-  EXPECT_EQ(d_out->numBonds, 4);
-  EXPECT_EQ(d_out->remainingAtoms, 40 - 5);
-  EXPECT_EQ(d_out->remainingBonds, 50 - 4);
-
-  cudaFree(d_out);
-}
-
-// ---------------------------------------------------------------------------
 // Multi-word and boundary edge cases
 // ---------------------------------------------------------------------------
 
@@ -470,86 +397,6 @@ TEST(FMCSUnit, SeedCanGrowBiggerThanFromEmptyIncumbent) {
 
   EXPECT_TRUE(d_out->nonEmptyVsZero);
   EXPECT_FALSE(d_out->emptyVsZero);
-
-  cudaFree(d_out);
-}
-
-namespace {
-
-__global__ void seedComputeRemainingEmptyDriverKernel(Seed<16, 16>* out,
-                                                      FakeQueryTopology topo) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  Seed<16, 16> seed{};  // No atoms, no bonds, no excludedBonds.
-  mcs::fmcs::seedComputeRemainingSizeWithinThread(seed, topo);
-  *out = seed;
-}
-
-__global__ void seedComputeRemainingFullDriverKernel(Seed<16, 16>* out,
-                                                     FakeQueryTopology topo) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  Seed<16, 16> seed{};
-  // Exclude every bond up to topo.numBonds-1.
-  for (int b = 0; b < topo.numBonds; ++b) {
-    mcs::fmcs::seedAddBondWithinThread(seed, b);
-  }
-  mcs::fmcs::seedComputeRemainingSizeWithinThread(seed, topo);
-  *out = seed;
-}
-
-__global__ void seedComputeRemainingMultiWordDriverKernel(Seed<128, 128>* out,
-                                                          FakeQueryTopology topo) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  Seed<128, 128> seed{};
-  // One excluded bond in each of the two uint64 words.
-  mcs::fmcs::seedAddBondWithinThread(seed, 5);    // word 0
-  mcs::fmcs::seedAddBondWithinThread(seed, 100);  // word 1
-  mcs::fmcs::seedComputeRemainingSizeWithinThread(seed, topo);
-  *out = seed;
-}
-
-}  // namespace
-
-TEST(FMCSUnit, SeedComputeRemainingSizeEmptySeed) {
-  Seed<16, 16>* d_out = mallocManaged<Seed<16, 16>>();
-  ASSERT_NE(d_out, nullptr);
-
-  FakeQueryTopology topo{/*numAtoms=*/12, /*numBonds=*/9};
-  seedComputeRemainingEmptyDriverKernel<<<1, 1>>>(d_out, topo);
-  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-
-  EXPECT_EQ(d_out->remainingAtoms, 12);
-  EXPECT_EQ(d_out->remainingBonds, 9);
-
-  cudaFree(d_out);
-}
-
-TEST(FMCSUnit, SeedComputeRemainingSizeAllBondsExcluded) {
-  Seed<16, 16>* d_out = mallocManaged<Seed<16, 16>>();
-  ASSERT_NE(d_out, nullptr);
-
-  FakeQueryTopology topo{/*numAtoms=*/10, /*numBonds=*/12};
-  seedComputeRemainingFullDriverKernel<<<1, 1>>>(d_out, topo);
-  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-
-  EXPECT_EQ(d_out->numBonds, 12);
-  EXPECT_EQ(d_out->remainingBonds, 0);
-  // numAtoms still 0 since we only added bonds.
-  EXPECT_EQ(d_out->remainingAtoms, 10);
-
-  cudaFree(d_out);
-}
-
-TEST(FMCSUnit, SeedComputeRemainingSizeMultiWordPopcount) {
-  Seed<128, 128>* d_out = mallocManaged<Seed<128, 128>>();
-  ASSERT_NE(d_out, nullptr);
-
-  FakeQueryTopology topo{/*numAtoms=*/100, /*numBonds=*/120};
-  seedComputeRemainingMultiWordDriverKernel<<<1, 1>>>(d_out, topo);
-  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-
-  // Two excluded bonds total -- one in each word.
-  EXPECT_EQ(d_out->remainingBonds, 120 - 2);
-  EXPECT_EQ(d_out->remainingAtoms, 100);
 
   cudaFree(d_out);
 }

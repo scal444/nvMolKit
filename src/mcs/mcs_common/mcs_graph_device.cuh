@@ -28,23 +28,6 @@ namespace mcs {
 template<int maxSize>
 using BitWord = std::conditional_t<(maxSize <= 32), uint32_t, uint64_t>;
 
-/// Per-vertex adjacency stored as bitmasks.
-/// adj[v][wi] has bit i set iff vertex (wi*kBitsPerWord + i) is adjacent to v.
-template<int maxSize>
-struct AdjMatrix {
-  using word_type = BitWord<maxSize>;
-  static constexpr int kBitsPerWord = sizeof(word_type) * 8;
-  static constexpr int kWords = (maxSize + kBitsPerWord - 1) / kBitsPerWord;
-  word_type data[maxSize * kWords] = {};
-
-  __host__ __device__ const word_type* operator[](int v) const {
-    return data + v * kWords;
-  }
-  __host__ __device__ word_type* operator[](int v) {
-    return data + v * kWords;
-  }
-};
-
 }  // namespace mcs
 
 #endif  // MCS_COMMON_MCS_GRAPH_DEVICE_CUH

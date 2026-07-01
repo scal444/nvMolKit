@@ -183,22 +183,6 @@ __device__ __forceinline__ void seedAddAtomWithinThread(Seed<maxAtoms, maxBonds>
   seed.numAtoms += 1;
 }
 
-/// Within-thread: marks an existing seed atom as part of the next boundary
-/// without changing @c seed.atoms or @c numAtoms.  This is kept for targeted
-/// experiments, but the RDKit-shaped kernel does not use it: RDKit's
-/// LastAddedAtomsBeginIdx only scans atoms newly appended by the previous
-/// grow step.
-template<int maxAtoms, int maxBonds>
-__device__ __forceinline__ void seedMarkLastAddedAtomWithinThread(
-    Seed<maxAtoms, maxBonds>& seed,
-    const int atomIdx) {
-  using AtomWord = typename Seed<maxAtoms, maxBonds>::atom_word_type;
-  constexpr int kBitsPerWord = Seed<maxAtoms, maxBonds>::kAtomBitsPerWord;
-  const int      wordIdx = atomIdx / kBitsPerWord;
-  const AtomWord mask    = static_cast<AtomWord>(1) << (atomIdx % kBitsPerWord);
-  seed.lastAddedAtoms[wordIdx] |= mask;
-}
-
 /// Within-thread: sets bit @p bondIdx in @c seed.bonds AND
 /// @c seed.excludedBonds (excludedBonds prevents the same bond being
 /// re-added through a different grow path), and increments @c numBonds.
@@ -233,9 +217,8 @@ __device__ __forceinline__ void seedExcludeBondWithinThread(
 
 /// Within-thread: clear @c seed.lastAddedAtoms and snapshot the
 /// pre-grow-step @c numAtoms into @c lastAddedAtomsBegin.  Subsequent
-/// @ref seedAddAtomWithinThread and
-/// @ref seedMarkLastAddedAtomWithinThread calls in this step then
-/// populate @c lastAddedAtoms with the atoms touched by this grow step;
+/// @ref seedAddAtomWithinThread calls in this step then populate
+/// @c lastAddedAtoms with the atoms touched by this grow step;
 /// @ref fillNewBondsCooperative reads that bitset to decide which query
 /// bonds should be enumerated as new boundary candidates.
 template<int maxAtoms, int maxBonds>
@@ -252,7 +235,7 @@ __device__ __forceinline__ void seedBeginGrowStepWithinThread(
 /// the seed could still grow strictly larger than the
 /// (@p bestBonds, @p bestAtoms) incumbent under MaximizeBonds tie-break,
 /// using the cached @c remainingAtoms / @c remainingBonds upper bound
-/// populated by @ref seedComputeRemainingSizeWithinThread.
+/// populated by @ref seedComputeRemainingSizeRdkitCooperative.
 template<int maxAtoms, int maxBonds>
 __device__ __forceinline__ bool seedCanGrowBiggerThanWithinThread(
     const Seed<maxAtoms, maxBonds>& seed,
@@ -262,35 +245,6 @@ __device__ __forceinline__ bool seedCanGrowBiggerThanWithinThread(
   if (possibleBonds < bestBonds) return false;
   const int possibleAtoms = seed.numAtoms + seed.remainingAtoms;
   return possibleAtoms > bestAtoms;
-}
-
-/// Within-thread: caches a loose upper bound on additional atoms / bonds
-/// reachable from this seed into @c seed.remainingAtoms /
-/// @c seed.remainingBonds.  The bound is "all non-seed atoms / all
-/// non-excluded bonds" -- it ignores connectivity, so it over-estimates
-/// when the remaining query graph is fragmented.  Tightening to a
-/// connectivity-aware BFS bound is a Step 6 polish item.
-///
-/// @p queryTopology must expose @c numAtoms and @c numBonds fields.
-template<int maxAtoms, int maxBonds, typename QueryTopology>
-__device__ __forceinline__ void seedComputeRemainingSizeWithinThread(
-    Seed<maxAtoms, maxBonds>& seed,
-    const QueryTopology& queryTopology) {
-  using BondWord = typename Seed<maxAtoms, maxBonds>::bond_word_type;
-  int excludedBondCount = 0;
-  for (int i = 0; i < Seed<maxAtoms, maxBonds>::kBondWords; ++i) {
-    const BondWord word = seed.excludedBonds[i];
-    if constexpr (sizeof(BondWord) == 4) {
-      excludedBondCount += __popc(static_cast<unsigned int>(word));
-    } else {
-      excludedBondCount +=
-          __popcll(static_cast<unsigned long long>(word));
-    }
-  }
-  seed.remainingAtoms =
-      static_cast<uint16_t>(queryTopology.numAtoms - seed.numAtoms);
-  seed.remainingBonds =
-      static_cast<uint16_t>(queryTopology.numBonds - excludedBondCount);
 }
 
 /// Within-thread: zeroes a Seed in-place.  Tier-128 cost is ~58 B; well
