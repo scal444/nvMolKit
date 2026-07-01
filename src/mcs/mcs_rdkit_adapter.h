@@ -6,7 +6,6 @@
 
 #include <string>
 
-#include "src/mcs/benchmark_data.h"
 #include "src/mcs/fmcs_cuda/fmcs.cuh"
 #include "src/mcs/mcs_types.h"
 
@@ -17,8 +16,8 @@ class ROMol;
 namespace nvMolKit::mcs_detail {
 
 struct LabeledGraphPair {
-  mcs::benchmark::MiviaGraphData graphA;
-  mcs::benchmark::MiviaGraphData graphB;
+  mcs::fmcs::LabeledGraph graphA;
+  mcs::fmcs::LabeledGraph graphB;
 };
 
 bool usesAtomLabels(const MCSParameters& params);

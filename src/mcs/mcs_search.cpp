@@ -26,7 +26,6 @@
 #include <utility>
 #include <vector>
 
-#include "src/mcs/benchmark_data.h"
 #include "src/mcs/fmcs_cuda/fmcs.cuh"
 #include "src/mcs/mcs_compile_flags.h"
 #include "src/mcs/mcs_rdkit_adapter.h"
@@ -36,7 +35,7 @@
 namespace nvMolKit {
 namespace {
 
-using mcs::benchmark::MiviaGraphData;
+using mcs::fmcs::LabeledGraph;
 
 constexpr int kMaxMCSExecutorsPerRunner = 8;
 
@@ -44,8 +43,8 @@ struct PreparedGpuPair {
   size_t         resultIdx = 0;
   size_t         molIdxA   = 0;
   size_t         molIdxB   = 0;
-  MiviaGraphData graphA;
-  MiviaGraphData graphB;
+  LabeledGraph graphA;
+  LabeledGraph graphB;
 };
 
 void checkCuda(cudaError_t err, const char* context) {
@@ -220,8 +219,8 @@ void runGpuPairs(std::vector<PreparedGpuPair>&           gpuPairs,
       setDevice = std::make_unique<WithDevice>(deviceId);
     }
 
-    std::vector<MiviaGraphData> gpuGraphsA;
-    std::vector<MiviaGraphData> gpuGraphsB;
+    std::vector<LabeledGraph> gpuGraphsA;
+    std::vector<LabeledGraph> gpuGraphsB;
     std::vector<size_t>         resultIndices;
     std::vector<size_t>         molIndicesA;
     std::vector<size_t>         molIndicesB;

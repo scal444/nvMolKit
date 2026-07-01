@@ -13,7 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "benchmark_data.h"
 #include "fmcs_cuda/fmcs.cuh"
 #include "mcs_common/mcs_types.cuh"
 #include "src/mcs/mcs_compile_flags.h"
@@ -33,7 +32,7 @@ using mcs::Graph;
 using mcs::MCSResult;
 using mcs::fmcs::ExecutionStats;
 using mcs::fmcs::Parameters;
-using mcs::benchmark::MiviaGraphData;
+using mcs::fmcs::LabeledGraph;
 
 // ---------------------------------------------------------------------------
 // Construction helpers
@@ -126,15 +125,15 @@ Graph biphenyl() {
   });
 }
 
-// Build a labelled MiviaGraphData with the given topology, vertex
+// Build a labeled graph with the given topology, vertex
 // labels, and explicit (u, v, label) edge-label triples (symmetrized
 // into the dense edgeLabels matrix).
-MiviaGraphData buildLabeled(
+LabeledGraph buildLabeled(
     int numAtoms,
     std::vector<std::pair<int, int>> edges,
     std::vector<uint16_t> vertexLabels,
     std::vector<std::tuple<int, int, uint16_t>> edgeLabelTriples) {
-  MiviaGraphData out;
+  LabeledGraph out;
   std::vector<std::pair<std::size_t, std::size_t>> edgesPair;
   edgesPair.reserve(edges.size());
   for (const auto& e : edges) edgesPair.emplace_back(e.first, e.second);
@@ -554,7 +553,7 @@ TEST(FMCSRegression, FiveNodePathInsideTriangleWithLeaves) {
 // ---------------------------------------------------------------------------
 // FMCSLabels: vertex / edge label tests via findMCESfMCSBatchLabeled.
 //
-// The labelled API takes mcs::benchmark::MiviaGraphData with explicit
+// The labeled API takes mcs::fmcs::LabeledGraph with explicit
 // uint16 vertex labels and a dense uint16 edge-label matrix
 // (edgeLabels[u * N + v]).
 // ---------------------------------------------------------------------------
@@ -566,8 +565,8 @@ TEST(FMCSLabels, NullLabelTopology) {
       {{0, 1}, {1, 2}},
       /*vertexLabels=*/{0, 0, 0},
       /*edges=*/{{0, 1, 1}, {1, 2, 1}});
-  std::vector<MiviaGraphData> a{m};
-  std::vector<MiviaGraphData> b{m};
+  std::vector<LabeledGraph> a{m};
+  std::vector<LabeledGraph> b{m};
   auto rs = mcs::fmcs::findMCESfMCSBatchLabeled(a, b);
   ASSERT_EQ(rs.size(), 1u);
   EXPECT_EQ(rs[0].numCommonVertices, 3);
@@ -580,8 +579,8 @@ TEST(FMCSLabels, VertexLabelMatch) {
       {{0, 1}, {1, 2}},
       {7, 8, 9},
       {{0, 1, 1}, {1, 2, 1}});
-  std::vector<MiviaGraphData> a{m};
-  std::vector<MiviaGraphData> b{m};
+  std::vector<LabeledGraph> a{m};
+  std::vector<LabeledGraph> b{m};
   auto rs = mcs::fmcs::findMCESfMCSBatchLabeled(a, b);
   ASSERT_EQ(rs.size(), 1u);
   EXPECT_EQ(rs[0].numCommonVertices, 3);
@@ -599,8 +598,8 @@ TEST(FMCSLabels, VertexLabelMismatch) {
       {{0, 1}, {1, 2}},
       {7, 8, 10},
       {{0, 1, 1}, {1, 2, 1}});
-  std::vector<MiviaGraphData> as{a};
-  std::vector<MiviaGraphData> bs{b};
+  std::vector<LabeledGraph> as{a};
+  std::vector<LabeledGraph> bs{b};
   auto rs = mcs::fmcs::findMCESfMCSBatchLabeled(as, bs);
   ASSERT_EQ(rs.size(), 1u);
   EXPECT_EQ(rs[0].numCommonEdges, 1);
@@ -613,8 +612,8 @@ TEST(FMCSLabels, EdgeLabelMatch) {
       {{0, 1}, {1, 2}, {0, 2}},
       {0, 0, 0},
       {{0, 1, 5}, {1, 2, 5}, {0, 2, 5}});
-  std::vector<MiviaGraphData> a{m};
-  std::vector<MiviaGraphData> b{m};
+  std::vector<LabeledGraph> a{m};
+  std::vector<LabeledGraph> b{m};
   auto rs = mcs::fmcs::findMCESfMCSBatchLabeled(a, b);
   ASSERT_EQ(rs.size(), 1u);
   EXPECT_EQ(rs[0].numCommonVertices, 3);
@@ -632,8 +631,8 @@ TEST(FMCSLabels, EdgeLabelMismatch) {
       {{0, 1}, {1, 2}},
       {0, 0, 0},
       {{0, 1, 5}, {1, 2, 9}});
-  std::vector<MiviaGraphData> as{a};
-  std::vector<MiviaGraphData> bs{b};
+  std::vector<LabeledGraph> as{a};
+  std::vector<LabeledGraph> bs{b};
   auto rs = mcs::fmcs::findMCESfMCSBatchLabeled(as, bs);
   ASSERT_EQ(rs.size(), 1u);
   EXPECT_EQ(rs[0].numCommonEdges, 1);
@@ -651,8 +650,8 @@ TEST(FMCSLabels, BothLabelsPartialOverlap) {
       {{0, 1}, {1, 2}, {2, 3}},
       {1, 2, 3, 9},          // vertex 3 label diverges
       {{0, 1, 5}, {1, 2, 5}, {2, 3, 7}});  // and edge (2,3) too
-  std::vector<MiviaGraphData> as{a};
-  std::vector<MiviaGraphData> bs{b};
+  std::vector<LabeledGraph> as{a};
+  std::vector<LabeledGraph> bs{b};
   auto rs = mcs::fmcs::findMCESfMCSBatchLabeled(as, bs);
   ASSERT_EQ(rs.size(), 1u);
   EXPECT_EQ(rs[0].numCommonEdges, 2);
@@ -992,8 +991,8 @@ TEST(FMCSBatch, LabeledMixed) {
       {{0, 1}, {1, 2}, {2, 3}},
       {1, 2, 3, 4},
       {{0, 1, 7}, {1, 2, 7}, {2, 3, 7}});
-  std::vector<MiviaGraphData> as{m1, m2};
-  std::vector<MiviaGraphData> bs{m1, m2};
+  std::vector<LabeledGraph> as{m1, m2};
+  std::vector<LabeledGraph> bs{m1, m2};
   auto rs = mcs::fmcs::findMCESfMCSBatchLabeled(as, bs);
   ASSERT_EQ(rs.size(), 2u);
   EXPECT_EQ(rs[0].numCommonEdges, 2);
@@ -1014,8 +1013,8 @@ TEST(FMCSBatch, LabeledTwoPairsDifferentAnswersSameTier) {
       {1, 2, 9},
       {{0, 1, 5}, {1, 2, 7}});
 
-  std::vector<MiviaGraphData> as{full, partialA};
-  std::vector<MiviaGraphData> bs{full, partialB};
+  std::vector<LabeledGraph> as{full, partialA};
+  std::vector<LabeledGraph> bs{full, partialB};
   auto rs = mcs::fmcs::findMCESfMCSBatchLabeled(as, bs);
   ASSERT_EQ(rs.size(), 2u);
   EXPECT_EQ(rs[0].numCommonVertices, 4);

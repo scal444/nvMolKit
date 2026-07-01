@@ -16,7 +16,7 @@
 #ifndef FMCS_CUDA_FMCS_POLICY_CUH
 #define FMCS_CUDA_FMCS_POLICY_CUH
 
-#include "benchmark_data.h"
+#include "fmcs_cuda/fmcs_labeled_graph.h"
 #include "fmcs_cuda/fmcs_match_tables.cuh"
 #include "mcs_common/mcs_types.cuh"
 
@@ -72,8 +72,6 @@ inline std::vector<std::pair<int, int>> enumerateBonds(const Graph& g) {
 /// topology and connectivity enforcement happens in the device-side match
 /// walk, not in these tables.
 struct UnlabeledFmcsPolicy {
-  using graph_type = Graph;
-
   static void buildAtomMatchTable(const Graph& query,
                                   const Graph& target,
                                   MatchTableHost& out,
@@ -89,14 +87,12 @@ struct UnlabeledFmcsPolicy {
   }
 };
 
-/// Exact uint16_t vertex- and edge-label matching on MIVIA-style labeled
-/// graphs; 0 in @c edgeLabels means "no edge".  Bond indices follow
+/// Exact uint16_t vertex- and edge-label matching on labeled graphs;
+/// 0 in @c edgeLabels means "no edge".  Bond indices follow
 /// @ref enumerateBonds of the underlying topology.
 struct LabeledFmcsPolicy {
-  using graph_type = benchmark::MiviaGraphData;
-
-  static void buildAtomMatchTable(const benchmark::MiviaGraphData& query,
-                                  const benchmark::MiviaGraphData& target,
+  static void buildAtomMatchTable(const LabeledGraph& query,
+                                  const LabeledGraph& target,
                                   MatchTableHost& out,
                                   bool matchVertexLabels) {
     const int nQ = query.graph.numVertices;
@@ -118,8 +114,8 @@ struct LabeledFmcsPolicy {
     }
   }
 
-  static void buildBondMatchTable(const benchmark::MiviaGraphData& query,
-                                  const benchmark::MiviaGraphData& target,
+  static void buildBondMatchTable(const LabeledGraph& query,
+                                  const LabeledGraph& target,
                                   MatchTableHost& out,
                                   bool matchEdgeLabels) {
     const auto qBonds = enumerateBonds(query.graph);

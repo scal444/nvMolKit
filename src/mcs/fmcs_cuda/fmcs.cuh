@@ -33,6 +33,7 @@
 // when ring membership is encoded in atom/bond labels.  `CompleteRingsOnly`,
 // chirality, fused-ring strictness, and Threshold < 1.0 are out of scope.
 
+#include "fmcs_cuda/fmcs_labeled_graph.h"
 #include "fmcs_cuda/fmcs_stats.cuh"
 #include "mcs_common/mcs_types.cuh"
 
@@ -42,9 +43,6 @@
 #include <vector>
 
 namespace mcs {
-
-namespace benchmark { struct MiviaGraphData; }
-
 namespace fmcs {
 
 /// Algorithm-level parameters for the fMCS solver.
@@ -99,8 +97,8 @@ std::vector<MCSResult> findMCESfMCSBatch(
 /// or `Parameters::matchEdgeLabels` false for CompareAny-style matching on
 /// that axis.
 std::vector<MCSResult> findMCESfMCSBatchLabeled(
-    const std::vector<benchmark::MiviaGraphData>& graphsA,
-    const std::vector<benchmark::MiviaGraphData>& graphsB,
+    const std::vector<LabeledGraph>& graphsA,
+    const std::vector<LabeledGraph>& graphsB,
     Parameters params = {},
     std::vector<float>* perPairTimesMs = nullptr,
     cudaStream_t stream = nullptr,

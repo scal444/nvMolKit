@@ -962,8 +962,8 @@ std::vector<MCSResult> findMCESfMCSBatch(
 }
 
 std::vector<MCSResult> findMCESfMCSBatchLabeled(
-    const std::vector<benchmark::MiviaGraphData>& graphsA,
-    const std::vector<benchmark::MiviaGraphData>& graphsB,
+    const std::vector<LabeledGraph>& graphsA,
+    const std::vector<LabeledGraph>& graphsB,
     Parameters params,
     std::vector<float>* perPairTimesMs,
     cudaStream_t stream,
@@ -972,7 +972,7 @@ std::vector<MCSResult> findMCESfMCSBatchLabeled(
   nvMolKit::ScopedNvtxRange entryRange("findMCESfMCSBatchLabeled N=" + std::to_string(graphsA.size()) +
                                        " block=" + std::to_string(params.blockSize),
                                        nvMolKit::NvtxColor::kCyan);
-  return runBatchWithInstrumentation<LabeledFmcsPolicy, benchmark::MiviaGraphData>(
+  return runBatchWithInstrumentation<LabeledFmcsPolicy, LabeledGraph>(
       graphsA, graphsB, params, perPairTimesMs, perPairStats,
       perPairTimingStats, stream);
 }

@@ -25,7 +25,7 @@
 namespace nvMolKit::mcs_detail {
 namespace {
 
-using mcs::benchmark::MiviaGraphData;
+using mcs::fmcs::LabeledGraph;
 
 struct AtomLabelKey {
   int atomCompareValue = 0;
@@ -125,11 +125,11 @@ BondLabelKey makeBondLabelKey(const RDKit::Bond& bond, const MCSParameters& para
   return key;
 }
 
-MiviaGraphData buildLabeledGraph(const RDKit::ROMol&                    mol,
+LabeledGraph buildLabeledGraph(const RDKit::ROMol&                    mol,
                                  const MCSParameters&                   params,
                                  std::map<AtomLabelKey, std::uint16_t>& atomLabels,
                                  std::map<BondLabelKey, std::uint16_t>& bondLabels) {
-  MiviaGraphData                         out;
+  LabeledGraph                         out;
   std::vector<std::pair<size_t, size_t>> edges;
   edges.reserve(mol.getNumBonds());
 
