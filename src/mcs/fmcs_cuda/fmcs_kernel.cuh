@@ -16,11 +16,13 @@
 #ifndef FMCS_CUDA_FMCS_KERNEL_CUH
 #define FMCS_CUDA_FMCS_KERNEL_CUH
 
+#include "fmcs_cuda/fmcs_config.cuh"
 #include "fmcs_cuda/fmcs_debug.cuh"
 #include "fmcs_cuda/fmcs_grow.cuh"
 #include "fmcs_cuda/fmcs_kernel_types.cuh"
 #include "fmcs_cuda/fmcs_match.cuh"
 #include "fmcs_cuda/fmcs_match_tables.cuh"
+#include "fmcs_cuda/fmcs_queue_cooperative.cuh"
 #include "fmcs_cuda/fmcs_seed.cuh"
 #include "fmcs_cuda/fmcs_seed_queue.cuh"
 #include "fmcs_cuda/fmcs_stats.cuh"
@@ -35,53 +37,6 @@ namespace mcs {
 namespace fmcs {
 
 namespace cg = cooperative_groups;
-
-/// Non-owning view over one side's CSR + bond-endpoint arrays.  Passed to
-/// matcher/grow helpers as the @c TargetTopology / @c QueryTopology.
-struct DeviceCsrView {
-  static constexpr bool kHasAdjacencyBondIndices = true;
-
-  const std::uint32_t* rowOffsets    = nullptr;
-  const std::uint32_t* colIndices    = nullptr;
-  const std::uint32_t* bondIndices   = nullptr;
-  const std::uint32_t* bondEndpoints = nullptr;
-  int numAtoms = 0;
-  int numBonds = 0;
-};
-
-template<class GroupT, class T>
-__device__ __forceinline__ void warpAtomicStoreWords(
-    const GroupT& group,
-    T* dst,
-    const T& src) {
-  static_assert(sizeof(T) % sizeof(unsigned int) == 0,
-                "atomic word copy requires 32-bit granularity");
-  auto* dstWords = reinterpret_cast<unsigned int*>(dst);
-  const auto* srcWords = reinterpret_cast<const unsigned int*>(&src);
-  constexpr int kWords = static_cast<int>(sizeof(T) / sizeof(unsigned int));
-  for (int i = static_cast<int>(group.thread_rank());
-       i < kWords;
-       i += static_cast<int>(group.num_threads())) {
-    atomicExch(&dstWords[i], srcWords[i]);
-  }
-}
-
-template<class GroupT, class T>
-__device__ __forceinline__ void warpAtomicLoadWords(
-    const GroupT& group,
-    T& dst,
-    T* src) {
-  static_assert(sizeof(T) % sizeof(unsigned int) == 0,
-                "atomic word copy requires 32-bit granularity");
-  auto* dstWords = reinterpret_cast<unsigned int*>(&dst);
-  auto* srcWords = reinterpret_cast<unsigned int*>(src);
-  constexpr int kWords = static_cast<int>(sizeof(T) / sizeof(unsigned int));
-  for (int i = static_cast<int>(group.thread_rank());
-       i < kWords;
-       i += static_cast<int>(group.num_threads())) {
-    dstWords[i] = atomicAdd(&srcWords[i], 0u);
-  }
-}
 
 template<class GroupT, class QueuedT>
 __device__ __forceinline__ void updateIncumbentCooperative(
@@ -164,8 +119,7 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
     int partialCapacity,
     int* overflowedFlag,
     ExecutionStats& stats,
-    bool countPhase2MatchWork,
-    std::uint8_t* fallbackCandidateCountCache = nullptr) {
+    bool countPhase2MatchWork) {
   const int groupRank = static_cast<int>(group.thread_rank());
   if constexpr (CollectStats || kFmcsMeasure) {
     if (groupRank == 0) {
@@ -218,7 +172,7 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
     ok = matchSeedSubstructureCooperative<!CollectStats && !kFmcsMeasure>(
         group, candidate.seed, queryTopology, targetTopology, tables,
         candidate.match, scratch, partialStorage, partialCapacity,
-        overflowedFlag, fallbackCandidateCountCache);
+        overflowedFlag);
     group.sync();
     if constexpr (CollectStats || kFmcsMeasure) {
       if (groupRank == 0) {
@@ -399,145 +353,6 @@ __device__ __forceinline__ void addExecutionStatsWithinThread(
       src.phase2ActiveMatchCycles1024);
 }
 
-template<class GroupT, class QueuedT>
-__device__ __forceinline__ bool pushBackCooperative(
-    const GroupT& group,
-    SeedQueue<QueuedT, ThreadBlockScope>& queue,
-    const QueuedT& element) {
-  const int slot = queue.batchReserveCooperative(group, 1);
-  if (slot < 0) return false;
-  warpCopy(group, &queue.slot(slot), &element, sizeof(QueuedT));
-  group.sync();
-  return true;
-}
-
-template<class GroupT>
-__device__ __forceinline__ void acquireQueueLockCooperative(
-    const GroupT& group,
-    int* queueLock) {
-  if (group.thread_rank() == 0) {
-    while (atomicCAS(queueLock, 0, 1) != 0) {
-    }
-  }
-  group.sync();
-  __threadfence_block();
-  group.sync();
-}
-
-template<class GroupT>
-__device__ __forceinline__ void releaseQueueLockCooperative(
-    const GroupT& group,
-    int* queueLock) {
-  group.sync();
-  __threadfence_block();
-  group.sync();
-  if (group.thread_rank() == 0) {
-    atomicExch(queueLock, 0);
-  }
-  group.sync();
-}
-
-template<class GroupT, class QueuedT>
-__device__ __forceinline__ bool pushBackLockedCooperative(
-    const GroupT& group,
-    SeedQueue<QueuedT, ThreadBlockScope>& queue,
-    const QueuedT& element,
-    int* queueLock,
-    int* overflowedFlag,
-    int* timedOutFlag,
-    int* doneFlag) {
-  const int groupRank = static_cast<int>(group.thread_rank());
-  int oldSize = 0;
-  int ok = 1;
-  int skip = 0;
-  acquireQueueLockCooperative(group, queueLock);
-  if (groupRank == 0) {
-    skip = (atomicAdd(overflowedFlag, 0) != 0) ||
-           (atomicAdd(timedOutFlag, 0) != 0) ||
-           (atomicAdd(doneFlag, 0) != 0);
-    oldSize = queue.sizeAtomic();
-    ok = (!skip && oldSize < queue.capacity()) ? 1 : 0;
-  }
-  oldSize = group.shfl(oldSize, 0);
-  ok = group.shfl(ok, 0);
-  skip = group.shfl(skip, 0);
-  if (ok) {
-    warpAtomicStoreWords(group, &queue.slot(oldSize), element);
-    group.sync();
-    if (groupRank == 0) queue.setSizeAtomicWithinThread(oldSize + 1);
-  }
-  releaseQueueLockCooperative(group, queueLock);
-  return skip || ok;
-}
-
-template<class GroupT, class QueuedT>
-__device__ __forceinline__ bool popBackLockedOrFinishCooperative(
-    const GroupT& group,
-    SeedQueue<QueuedT, ThreadBlockScope>& queue,
-    QueuedT& outElement,
-    int* queueLock,
-    int* activeGroups,
-    int* doneFlag,
-    int* overflowedFlag,
-    int* timedOutFlag,
-    bool& doneOut) {
-  const int groupRank = static_cast<int>(group.thread_rank());
-  int oldTop = 0;
-  int popped = 0;
-  int done = 0;
-  acquireQueueLockCooperative(group, queueLock);
-  if (groupRank == 0) {
-    const bool aborted = (atomicAdd(overflowedFlag, 0) != 0) ||
-                         (atomicAdd(timedOutFlag, 0) != 0) ||
-                         (atomicAdd(doneFlag, 0) != 0);
-    if (aborted) {
-      atomicExch(doneFlag, 1);
-      done = 1;
-    } else {
-      oldTop = queue.sizeAtomic();
-      if (oldTop > 0) {
-        popped = 1;
-      } else if (atomicAdd(activeGroups, 0) == 0) {
-        atomicExch(doneFlag, 1);
-        done = 1;
-      }
-    }
-  }
-  oldTop = group.shfl(oldTop, 0);
-  popped = group.shfl(popped, 0);
-  done = group.shfl(done, 0);
-  if (popped) {
-    warpAtomicLoadWords(group, outElement, &queue.slot(oldTop - 1));
-    group.sync();
-    if (groupRank == 0) {
-      queue.setSizeAtomicWithinThread(oldTop - 1);
-      atomicAdd(activeGroups, 1);
-    }
-  }
-  releaseQueueLockCooperative(group, queueLock);
-  doneOut = done != 0;
-  return popped != 0;
-}
-
-template<class GroupT>
-__device__ __forceinline__ unsigned int readBestScoreCooperative(
-    const GroupT& group,
-    const unsigned int* bestScore) {
-  unsigned int score = 0;
-  if (group.thread_rank() == 0) score = *bestScore;
-  return group.shfl(score, 0);
-}
-
-template<class GroupT>
-__device__ __forceinline__ bool readFlagCooperative(
-    const GroupT& group,
-    int* flag) {
-  int value = 0;
-  if (group.thread_rank() == 0) value = atomicAdd(flag, 0);
-  value = group.shfl(value, 0);
-  return value != 0;
-}
-
 template<int maxAtoms, int maxBonds>
 __device__ __forceinline__ void seedVisitRemainingBondWithinThread(
     Seed<maxAtoms, maxBonds>& seed,
@@ -646,38 +461,6 @@ __device__ __forceinline__ void seedComputeRemainingSizeRdkitCooperative(
   group.sync();
 }
 
-/// Per-block seed worklist capacity.  The backing slab lives in global
-/// memory; only the cursor/header lives in shared memory.  Approach 1 uses
-/// atomic LIFO push/pop so multiple warp groups can own grow work
-/// concurrently.
-constexpr int kFmcsQueueCapacity = 4096;
-/// Per-block substructure fallback partial capacity, expressed as
-/// max-sized partial entries per ping-pong half.  The bodies live in
-/// global memory as raw uint8 mappings; runtime effective capacity is
-/// larger for smaller seeds because each partial uses only
-/// seed.numAtoms bytes.
-constexpr int kFmcsSubstructurePartialCapacity = 4096;
-/// Block / cooperative-group sizing.  Phase 2 partitions each block into warp
-/// groups; each group pops one seed at a time from the block worklist and
-/// cooperates on matching, remaining-size checks, seed copying, and fallback
-/// substructure search.  Supported block sizes are compile-time kernel
-/// specializations selected at launch time.
-constexpr int kFmcsDefaultBlockSize = 128;
-constexpr int kFmcsGroupSize        = 32;
-static_assert(kFmcsGroupSize <= 32,
-              "kFmcsGroupSize must be <= 32 (warp shuffle / ballot scope)");
-static_assert((kFmcsGroupSize & (kFmcsGroupSize - 1)) == 0,
-              "kFmcsGroupSize must be a power of two");
-
-template<int blockThreads>
-struct FmcsBlockConfig {
-  static_assert(blockThreads == 128 || blockThreads == 512,
-                "fMCS block size must be 128 or 512");
-  static_assert(blockThreads % kFmcsGroupSize == 0,
-                "fMCS block size must be a multiple of kFmcsGroupSize");
-  static constexpr int numGroups = blockThreads / kFmcsGroupSize;
-};
-
 /// One CUDA block per pair.  Three-phase seed-grow search:
 ///   Phase 1: RDKit makeInitialSeeds() analogue.  Build one query-bond
 ///   seed at a time, run checkIfMatchAndAppend() via substructure search,
@@ -694,25 +477,18 @@ struct FmcsBlockConfig {
 /// @p queueCapacity * numPairs @c QueuedSeed entries; this block uses
 /// the slice starting at @p queueStorageAll[blockIdx.x * queueCapacity].
 ///
-/// @p cacheStorageAll and @p cacheCapacity are currently ignored.  They remain
-/// in the signature while the old cache scaffolding is still compiled for unit
-/// tests; the active RDKit-parity kernel does not allocate or probe it.
 template<int maxAtoms, int maxBonds, int blockThreads, bool CollectTimings, bool CollectStats>
 __global__ void fmcsKernel(
     const DevicePerPairInput* __restrict__ pairs,
     DeviceMCSResult<maxAtoms, maxBonds>* __restrict__ results,
     QueuedSeed<maxAtoms, maxBonds, maxAtoms, maxBonds>* __restrict__ queueStorageAll,
-    std::uint64_t* __restrict__ cacheStorageAll,
     std::uint8_t* __restrict__ substructureStorageAll,
     unsigned long long* __restrict__ elapsedClocks,
     ExecutionStats* __restrict__ statsOut,
     int queueCapacity,
-    int cacheCapacity,
     int substructurePartialCapacity,
     int numPairs,
     unsigned long long timeoutClocks) {
-  (void)cacheStorageAll;
-  (void)cacheCapacity;
   if constexpr (!CollectTimings) {
     (void)elapsedClocks;
   }
@@ -740,13 +516,6 @@ __global__ void fmcsKernel(
   constexpr int kMaxNewBondsForTier = maxBonds;
   constexpr int kNumGroups = FmcsBlockConfig<blockThreads>::numGroups;
   constexpr bool kStatsEnabled = CollectStats || kFmcsMeasure;
-  // The block-shared fallback candidate-count cache races when multiple warp
-  // groups enter fallback concurrently. Recompute counts per group instead of
-  // serializing a hot cross-group cache.
-  constexpr bool kUseFallbackCandidateCountCache = false;
-  constexpr int kFallbackCandidateCountCacheEntries =
-      kUseFallbackCandidateCountCache ? maxAtoms * (maxAtoms + 1) : 1;
-
   // Block-shared resources: the queue, the incumbent, and the early-exit
   // flags are visible to every group.  Cross-group incumbent updates use
   // atomics.  Phase-2 queue operations hold queueLock across the queue header
@@ -771,8 +540,6 @@ __global__ void fmcsKernel(
   __shared__ unsigned long long phase1StartClock;
   __shared__ unsigned long long phase2StartClock;
   __shared__ SubstructureScratchT substructureScratch[kNumGroups];
-  __shared__ std::uint8_t
-      fallbackCandidateCountCache[kFallbackCandidateCountCacheEntries];
   __shared__ ExecutionStats groupStats[kStatsEnabled ? kNumGroups : 1];
   __shared__ ExecutionStats measureStats;
 
@@ -804,12 +571,6 @@ __global__ void fmcsKernel(
   SubstructureScratchT& mySubstructureScratch = substructureScratch[groupId];
   ExecutionStats& myStats =
       kStatsEnabled ? groupStats[groupId] : measureStats;
-  std::uint8_t* fallbackCandidateCountCachePtr = nullptr;
-  if constexpr (kUseFallbackCandidateCountCache) {
-    fallbackCandidateCountCachePtr = fallbackCandidateCountCache;
-  } else {
-    (void)fallbackCandidateCountCache;
-  }
 
   QueuedT* myQueueStorage =
       queueStorageAll + static_cast<size_t>(pairIdx) * queueCapacity;
@@ -864,16 +625,8 @@ __global__ void fmcsKernel(
       groupStats[statIdx] = ExecutionStats{};
     }
   }
-  if constexpr (kUseFallbackCandidateCountCache) {
-    for (int cacheIdx = static_cast<int>(block.thread_rank());
-         cacheIdx < kFallbackCandidateCountCacheEntries;
-         cacheIdx += static_cast<int>(blockDim.x)) {
-      fallbackCandidateCountCache[cacheIdx] =
-          kFallbackCandidateCountCacheEmpty;
-    }
-  }
-  // Publish block-shared kernel initialization, stats zeroing, and fallback
-  // candidate-count cache reset before any group enters phase 1.
+  // Publish block-shared kernel initialization and stats zeroing before any
+  // group enters phase 1.
   block.sync();
   if constexpr (CollectTimings || CollectStats || kFmcsMeasure) {
     if (block.thread_rank() == 0) {
@@ -1184,7 +937,7 @@ __global__ void fmcsKernel(
                 group, myBiggest, queryView, targetView, pair.tables,
                 mySubstructureScratch,
                 mySubstructureStorage, substructurePartialCapacity,
-                &overflowed, myStats, true, fallbackCandidateCountCachePtr)
+                &overflowed, myStats, true)
                 ? 1
                 : 0) != 0;
         if (groupRank == 0) stage0Ok[groupId] = ok;
@@ -1276,7 +1029,7 @@ __global__ void fmcsKernel(
                 group, myBiggest, queryView, targetView, pair.tables,
                 mySubstructureScratch,
                 mySubstructureStorage, substructurePartialCapacity,
-                &overflowed, myStats, true, fallbackCandidateCountCachePtr)
+                &overflowed, myStats, true)
                 ? 1
                 : 0) != 0;
         if constexpr (CollectStats || kFmcsMeasure) {
@@ -1397,7 +1150,7 @@ __global__ void fmcsKernel(
                   group, myBiggest, queryView, targetView, pair.tables,
                   mySubstructureScratch,
                   mySubstructureStorage, substructurePartialCapacity,
-                  &overflowed, myStats, true, fallbackCandidateCountCachePtr)
+                  &overflowed, myStats, true)
                   ? 1
                   : 0) != 0;
           if (ok) {

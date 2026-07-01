@@ -31,7 +31,6 @@ namespace fmcs {
 constexpr int          kBondEndpointShift = 16;
 constexpr std::uint32_t kBondEndpointMask  = 0xFFFFu;
 constexpr int          kFallbackAdjacencySubwarpSize = 4;
-constexpr std::uint8_t kFallbackCandidateCountCacheEmpty = 0xFFu;
 
 __device__ __forceinline__ int mark_warp_uniform(const int input) {
   return __shfl_sync(0xffffffffu, input, 0);
@@ -807,31 +806,11 @@ __device__ __forceinline__ int countCandidateTargetAtomsCooperative(
     const int queryAtomIdx,
     const TargetTopology& targetTopology,
     const PairMatchTablesDevice& tables,
-    const FmcsSubstructureScratch<maxAtoms, maxBonds, maxTA>& scratch,
-    std::uint8_t* candidateCountCache) {
+    const FmcsSubstructureScratch<maxAtoms, maxBonds, maxTA>& scratch) {
   const int laneRank  = static_cast<int>(group.thread_rank());
   const int laneCount = static_cast<int>(group.num_threads());
   const int requiredDegree =
       static_cast<int>(scratch.seedDegree[queryAtomIdx]);
-
-  int cacheIdx = -1;
-  if (candidateCountCache != nullptr &&
-      queryAtomIdx >= 0 &&
-      queryAtomIdx < maxAtoms &&
-      requiredDegree >= 0 &&
-      requiredDegree <= maxAtoms) {
-    cacheIdx = queryAtomIdx * (maxAtoms + 1) + requiredDegree;
-  }
-
-  int cachedCandidateCount = kFallbackCandidateCountCacheEmpty;
-  if (laneRank == 0 && cacheIdx >= 0) {
-    cachedCandidateCount =
-        static_cast<int>(candidateCountCache[cacheIdx]);
-  }
-  cachedCandidateCount = group.shfl(cachedCandidateCount, 0);
-  if (cachedCandidateCount != kFallbackCandidateCountCacheEmpty) {
-    return cachedCandidateCount;
-  }
 
   int candidateCount = 0;
   for (int targetBase = 0;
@@ -848,10 +827,6 @@ __device__ __forceinline__ int countCandidateTargetAtomsCooperative(
     if (laneRank == 0) candidateCount += __popc(ballot);
   }
   candidateCount = group.shfl(candidateCount, 0);
-  if (laneRank == 0 && cacheIdx >= 0) {
-    candidateCountCache[cacheIdx] =
-        static_cast<std::uint8_t>(candidateCount);
-  }
   return candidateCount;
 }
 
@@ -864,8 +839,7 @@ __device__ __forceinline__ bool prepareSeedSubstructureSearchCooperative(
     const TargetTopology& targetTopology,
     const PairMatchTablesDevice& tables,
     FmcsSubstructureScratch<maxAtoms, maxBonds, maxTA>& scratch,
-    int& numSeedAtoms,
-    std::uint8_t* candidateCountCache = nullptr) {
+    int& numSeedAtoms) {
   const int laneRank = static_cast<int>(group.thread_rank());
   using SeedT = Seed<maxAtoms, maxBonds>;
   using AtomWord = typename SeedT::atom_word_type;
@@ -1020,8 +994,7 @@ __device__ __forceinline__ bool prepareSeedSubstructureSearchCooperative(
       int candidateCount = cachedCandidateCount;
       if (cachedCandidateCount == kUnmappedTargetIdx) {
         candidateCount = countCandidateTargetAtomsCooperative(
-            group, queryAtomIdx, targetTopology, tables, scratch,
-            candidateCountCache);
+            group, queryAtomIdx, targetTopology, tables, scratch);
         if (laneRank == 0) {
           scratch.targetAtomForQuery[queryAtomIdx] =
               static_cast<std::uint8_t>(candidateCount);
@@ -1224,8 +1197,7 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(
     FmcsSubstructureScratch<maxAtoms, maxBonds, maxTA>& scratch,
     std::uint8_t* partialStorage,
     int partialCapacity,
-    OverflowFlagT* overflowedFlag,
-    std::uint8_t* candidateCountCache = nullptr) {
+    OverflowFlagT* overflowedFlag) {
   const int laneRank  = static_cast<int>(group.thread_rank());
   const int laneCount = static_cast<int>(group.num_threads());
 
@@ -1240,7 +1212,7 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(
         group, targetTopology, scratch);
     prepareOk = prepareSeedSubstructureSearchCooperative(
         group, seed, queryTopology, targetTopology, tables, scratch,
-        numSeedAtoms, candidateCountCache)
+        numSeedAtoms)
         ? 1
         : 0;
   }
@@ -1539,8 +1511,7 @@ __device__ __forceinline__ bool matchSeedWithSubstructureFallbackCooperative(
     int* scratchLock,
     std::uint8_t* partialStorage,
     int partialCapacity,
-    OverflowFlagT* overflowedFlag,
-    std::uint8_t* candidateCountCache = nullptr) {
+    OverflowFlagT* overflowedFlag) {
   const bool fastOk = matchIncrementalFastCooperative(
       group, seed, queryTopology, targetTopology, tables, match);
   group.sync();
@@ -1553,7 +1524,7 @@ __device__ __forceinline__ bool matchSeedWithSubstructureFallbackCooperative(
   group.sync();
   const bool ok = matchSeedSubstructureCooperative<true>(
       group, seed, queryTopology, targetTopology, tables, match, scratch,
-      partialStorage, partialCapacity, overflowedFlag, candidateCountCache);
+      partialStorage, partialCapacity, overflowedFlag);
   group.sync();
   if (group.thread_rank() == 0) {
     atomicExch(scratchLock, 0);

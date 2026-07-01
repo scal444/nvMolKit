@@ -13,8 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef MCS_COMMON_MCS_BITOPS_CUH
-#define MCS_COMMON_MCS_BITOPS_CUH
+// EXPERIMENTAL: generic host/device bit-mask helpers retained for possible
+// future MCS algorithms. No production MCS source currently includes them.
+
+#ifndef MCS_COMMON_EXPERIMENTAL_MCS_BITOPS_CUH
+#define MCS_COMMON_EXPERIMENTAL_MCS_BITOPS_CUH
 
 #include <cstdint>
 
@@ -103,4 +106,4 @@ __host__ __device__ int nthSetBit(const WordT* mask, int n) {
 }  // namespace detail
 }  // namespace mcs
 
-#endif  // MCS_COMMON_MCS_BITOPS_CUH
+#endif  // MCS_COMMON_EXPERIMENTAL_MCS_BITOPS_CUH

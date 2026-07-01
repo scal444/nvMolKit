@@ -956,7 +956,7 @@ std::vector<MCSResult> findMCESfMCSBatch(
   nvMolKit::ScopedNvtxRange entryRange("findMCESfMCSBatch N=" + std::to_string(graphsA.size()) +
                                        " block=" + std::to_string(params.blockSize),
                                        nvMolKit::NvtxColor::kCyan);
-  return runBatchWithInstrumentation<NullFMCSPolicy, Graph>(
+  return runBatchWithInstrumentation<UnlabeledFmcsPolicy, Graph>(
       graphsA, graphsB, params, perPairTimesMs, perPairStats,
       perPairTimingStats, stream);
 }
@@ -972,7 +972,7 @@ std::vector<MCSResult> findMCESfMCSBatchLabeled(
   nvMolKit::ScopedNvtxRange entryRange("findMCESfMCSBatchLabeled N=" + std::to_string(graphsA.size()) +
                                        " block=" + std::to_string(params.blockSize),
                                        nvMolKit::NvtxColor::kCyan);
-  return runBatchWithInstrumentation<LabeledFMCSPolicy, benchmark::MiviaGraphData>(
+  return runBatchWithInstrumentation<LabeledFmcsPolicy, benchmark::MiviaGraphData>(
       graphsA, graphsB, params, perPairTimesMs, perPairStats,
       perPairTimingStats, stream);
 }

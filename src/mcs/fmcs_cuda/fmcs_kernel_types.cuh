@@ -11,12 +11,24 @@
 namespace mcs {
 namespace fmcs {
 
+/// Non-owning view over one side's CSR and bond-endpoint arrays.
+struct DeviceCsrView {
+  static constexpr bool kHasAdjacencyBondIndices = true;
+
+  const std::uint32_t* rowOffsets    = nullptr;
+  const std::uint32_t* colIndices    = nullptr;
+  const std::uint32_t* bondIndices   = nullptr;
+  const std::uint32_t* bondEndpoints = nullptr;
+  int                  numAtoms      = 0;
+  int                  numBonds      = 0;
+};
+
 /// Per-pair descriptor passed to the kernel. Non-owning: pointers refer
 /// into host-uploaded device buffers. The caller chooses the smaller input
 /// as the query and records that choice in swapped for host-side expansion.
 struct DevicePerPairInput {
-  int queryNumAtoms = 0;
-  int queryNumBonds = 0;
+  int queryNumAtoms  = 0;
+  int queryNumBonds  = 0;
   int targetNumAtoms = 0;
   int targetNumBonds = 0;
 

@@ -3,6 +3,7 @@
 
 #include "fmcs_cuda/fmcs_launch.cuh"
 
+#include "fmcs_cuda/fmcs_config.cuh"
 #include "fmcs_cuda/fmcs_kernel.cuh"
 #include "src/mcs/mcs_compile_flags.h"
 
@@ -64,12 +65,10 @@ void launchFmcsKernelSpecialization(const DevicePerPairInput* pairs,
           pairs,
           results,
           static_cast<QueuedT*>(queueStorage),
-          nullptr,
           substructureStorage,
           elapsedClocks,
           statsOut,
           queueCapacity,
-          0,
           substructurePartialCapacity,
           numPairs,
           timeoutClocks);

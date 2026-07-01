@@ -114,16 +114,6 @@ class SeedQueue {
     return group.shfl(start, 0);
   }
 
-  /// Cooperative reservation for a single LIFO pop.  Returns the old top to
-  /// every lane, or -1 if the queue was empty.  Callers copy from
-  /// @c slot(oldTop - 1) after a successful reservation.
-  template<class GroupT>
-  __device__ __forceinline__ int popReserveCooperative(const GroupT& group) {
-    int oldTop = -1;
-    if (group.thread_rank() == 0) oldTop = adjustTopAtomic(-1);
-    return group.shfl(oldTop, 0);
-  }
-
   __device__ __forceinline__ Element& slot(int i) { return storage_[i]; }
   __device__ __forceinline__ const Element& slot(int i) const { return storage_[i]; }
 

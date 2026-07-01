@@ -71,7 +71,7 @@ inline std::vector<std::pair<int, int>> enumerateBonds(const Graph& g) {
 /// Unlabeled policy.  Every atom and every bond is compatible; real
 /// topology and connectivity enforcement happens in the device-side match
 /// walk, not in these tables.
-struct NullFMCSPolicy {
+struct UnlabeledFmcsPolicy {
   using graph_type = Graph;
 
   static void buildAtomMatchTable(const Graph& query,
@@ -92,7 +92,7 @@ struct NullFMCSPolicy {
 /// Exact uint16_t vertex- and edge-label matching on MIVIA-style labeled
 /// graphs; 0 in @c edgeLabels means "no edge".  Bond indices follow
 /// @ref enumerateBonds of the underlying topology.
-struct LabeledFMCSPolicy {
+struct LabeledFmcsPolicy {
   using graph_type = benchmark::MiviaGraphData;
 
   static void buildAtomMatchTable(const benchmark::MiviaGraphData& query,
