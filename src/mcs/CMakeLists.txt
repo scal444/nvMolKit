@@ -24,6 +24,6 @@ target_compile_options(
   mcs_fmcs_core
   PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--ptxas-options=-v;--extended-lambda>)
 
-add_library(mcs_search mcs_search.cpp)
+add_library(mcs_search mcs_rdkit_adapter.cpp mcs_search.cpp)
 target_link_libraries(mcs_search PUBLIC mcs_fmcs_core ${RDKit_LIBS})
 target_include_directories(mcs_search PUBLIC ${CMAKE_SOURCE_DIR})

@@ -15,33 +15,23 @@
 
 #include "src/mcs/mcs_search.h"
 
-#include "src/mcs/benchmark_data.h"
-#include "src/mcs/fmcs_cuda/fmcs.cuh"
-#include "src/mcs/mcs_compile_flags.h"
-#include "src/utils/device.h"
-#include "src/utils/nvtx.h"
-
-#include <GraphMol/Atom.h>
-#include <GraphMol/Bond.h>
-#include <GraphMol/FMCS/FMCS.h>
-#include <GraphMol/ROMol.h>
-#include <GraphMol/RingInfo.h>
-#include <GraphMol/Substruct/SubstructMatch.h>
-
 #include <algorithm>
 #include <atomic>
-#include <chrono>
-#include <cstdint>
 #include <exception>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <tuple>
 #include <utility>
 #include <vector>
+
+#include "src/mcs/benchmark_data.h"
+#include "src/mcs/fmcs_cuda/fmcs.cuh"
+#include "src/mcs/mcs_compile_flags.h"
+#include "src/mcs/mcs_rdkit_adapter.h"
+#include "src/utils/device.h"
+#include "src/utils/nvtx.h"
 
 namespace nvMolKit {
 namespace {
@@ -50,24 +40,10 @@ using mcs::benchmark::MiviaGraphData;
 
 constexpr int kMaxMCSExecutorsPerRunner = 8;
 
-struct AtomLabelKey {
-  int atomCompareValue = 0;
-  int isotope          = 0;
-  int totalValence     = 0;
-  int formalCharge     = 0;
-  int ringState        = 0;
-
-  [[nodiscard]] auto tie() const {
-    return std::tie(atomCompareValue, isotope, totalValence, formalCharge, ringState);
-  }
-
-  bool operator<(const AtomLabelKey& other) const { return tie() < other.tie(); }
-};
-
 struct PreparedGpuPair {
-  size_t resultIdx = 0;
-  size_t molIdxA   = 0;
-  size_t molIdxB   = 0;
+  size_t         resultIdx = 0;
+  size_t         molIdxA   = 0;
+  size_t         molIdxB   = 0;
   MiviaGraphData graphA;
   MiviaGraphData graphB;
 };
@@ -112,401 +88,6 @@ int effectiveExecutorsPerRunner(const MCSParameters& params, int totalRunners, c
   return params.executorsPerRunner;
 }
 
-struct BondLabelKey {
-  int bondCompareValue = 0;
-  int ringState        = 0;
-
-  [[nodiscard]] auto tie() const { return std::tie(bondCompareValue, ringState); }
-
-  bool operator<(const BondLabelKey& other) const { return tie() < other.tie(); }
-};
-
-template <typename Key>
-std::uint16_t internLabel(std::map<Key, std::uint16_t>& labels, const Key& key) {
-  const auto found = labels.find(key);
-  if (found != labels.end()) {
-    return found->second;
-  }
-  if (labels.size() >= static_cast<size_t>(UINT16_MAX)) {
-    throw std::runtime_error("MCS label table exceeded uint16_t capacity");
-  }
-  const auto label = static_cast<std::uint16_t>(labels.size() + 1);
-  labels.emplace(key, label);
-  return label;
-}
-
-bool usesAtomLabels(const MCSParameters& params) {
-  return params.atomCompare != MCSAtomCompare::Any || params.atomCompareParameters.matchValences ||
-         params.atomCompareParameters.matchFormalCharge || params.atomCompareParameters.ringMatchesRingOnly ||
-         params.atomCompareParameters.matchIsotope;
-}
-
-bool usesBondLabels(const MCSParameters& params) {
-  return params.bondCompare != MCSBondCompare::Any || params.bondCompareParameters.ringMatchesRingOnly;
-}
-
-AtomLabelKey makeAtomLabelKey(const RDKit::ROMol& mol, const RDKit::Atom& atom, const MCSParameters& params) {
-  AtomLabelKey key;
-  switch (params.atomCompare) {
-    case MCSAtomCompare::Any:
-      key.atomCompareValue = 0;
-      break;
-    case MCSAtomCompare::Elements:
-      key.atomCompareValue = atom.getAtomicNum();
-      break;
-    case MCSAtomCompare::Isotopes:
-      key.atomCompareValue = static_cast<int>(atom.getIsotope());
-      break;
-    case MCSAtomCompare::AnyHeavyAtom:
-      key.atomCompareValue = atom.getAtomicNum() == 1 ? 1 : 2;
-      break;
-  }
-
-  if (params.atomCompareParameters.matchIsotope) {
-    key.isotope = static_cast<int>(atom.getIsotope());
-  }
-  if (params.atomCompareParameters.matchValences) {
-    key.totalValence = static_cast<int>(atom.getTotalValence());
-  }
-  if (params.atomCompareParameters.matchFormalCharge) {
-    key.formalCharge = atom.getFormalCharge();
-  }
-  if (params.atomCompareParameters.ringMatchesRingOnly) {
-    key.ringState = mol.getRingInfo()->numAtomRings(atom.getIdx()) > 0 ? 1 : 2;
-  }
-  return key;
-}
-
-int bondOrderClass(const RDKit::Bond& bond, const MCSParameters& params) {
-  switch (params.bondCompare) {
-    case MCSBondCompare::Any:
-      return 0;
-    case MCSBondCompare::Order: {
-      const auto bondType = static_cast<int>(bond.getBondType());
-      if (bondType == static_cast<int>(RDKit::Bond::SINGLE) || bondType == static_cast<int>(RDKit::Bond::AROMATIC)) {
-        return 1;
-      }
-      return bondType;
-    }
-    case MCSBondCompare::OrderExact: {
-      const auto bondType = static_cast<int>(bond.getBondType());
-      if (bondType == static_cast<int>(RDKit::Bond::ONEANDAHALF) ||
-          bondType == static_cast<int>(RDKit::Bond::AROMATIC)) {
-        return static_cast<int>(RDKit::Bond::AROMATIC);
-      }
-      return bondType;
-    }
-  }
-  return 0;
-}
-
-BondLabelKey makeBondLabelKey(const RDKit::Bond& bond, const MCSParameters& params) {
-  BondLabelKey key;
-  key.bondCompareValue = bondOrderClass(bond, params);
-  if (params.bondCompareParameters.ringMatchesRingOnly) {
-    key.ringState = bond.getOwningMol().getRingInfo()->numBondRings(bond.getIdx()) > 0 ? 1 : 2;
-  }
-  return key;
-}
-
-MiviaGraphData buildLabeledGraph(const RDKit::ROMol&              mol,
-                                 const MCSParameters&             params,
-                                 std::map<AtomLabelKey, uint16_t>& atomLabels,
-                                 std::map<BondLabelKey, uint16_t>& bondLabels) {
-  MiviaGraphData out;
-  std::vector<std::pair<size_t, size_t>> edges;
-  edges.reserve(mol.getNumBonds());
-
-  for (const auto* bond : mol.bonds()) {
-    edges.emplace_back(bond->getBeginAtomIdx(), bond->getEndAtomIdx());
-  }
-  out.graph = mcs::buildGraphFromEdges(mol.getNumAtoms(), edges);
-
-  out.vertexLabels.reserve(mol.getNumAtoms());
-  for (const auto* atom : mol.atoms()) {
-    out.vertexLabels.push_back(internLabel(atomLabels, makeAtomLabelKey(mol, *atom, params)));
-  }
-
-  const auto numAtoms = static_cast<size_t>(mol.getNumAtoms());
-  out.edgeLabels.assign(numAtoms * numAtoms, 0);
-  for (const auto* bond : mol.bonds()) {
-    const auto label = internLabel(bondLabels, makeBondLabelKey(*bond, params));
-    const auto begin = static_cast<size_t>(bond->getBeginAtomIdx());
-    const auto end   = static_cast<size_t>(bond->getEndAtomIdx());
-    out.edgeLabels[begin * numAtoms + end] = label;
-    out.edgeLabels[end * numAtoms + begin] = label;
-  }
-
-  return out;
-}
-
-RDKit::MCSParameters buildRDKitParameters(const MCSParameters& params) {
-  RDKit::MCSParameters rdParams;
-  rdParams.MaximizeBonds = params.maximizeBonds;
-  rdParams.Timeout       = params.timeoutSeconds;
-
-  rdParams.AtomCompareParameters.MatchValences       = params.atomCompareParameters.matchValences;
-  rdParams.AtomCompareParameters.MatchFormalCharge   = params.atomCompareParameters.matchFormalCharge;
-  rdParams.AtomCompareParameters.RingMatchesRingOnly = params.atomCompareParameters.ringMatchesRingOnly;
-  rdParams.AtomCompareParameters.CompleteRingsOnly   = params.atomCompareParameters.completeRingsOnly;
-  rdParams.AtomCompareParameters.MatchIsotope        = params.atomCompareParameters.matchIsotope;
-  rdParams.BondCompareParameters.RingMatchesRingOnly = params.bondCompareParameters.ringMatchesRingOnly;
-  rdParams.BondCompareParameters.CompleteRingsOnly   = params.bondCompareParameters.completeRingsOnly;
-
-  switch (params.atomCompare) {
-    case MCSAtomCompare::Any:
-      rdParams.setMCSAtomTyperFromEnum(RDKit::AtomCompareAny);
-      break;
-    case MCSAtomCompare::Elements:
-      rdParams.setMCSAtomTyperFromEnum(RDKit::AtomCompareElements);
-      break;
-    case MCSAtomCompare::Isotopes:
-      rdParams.setMCSAtomTyperFromEnum(RDKit::AtomCompareIsotopes);
-      break;
-    case MCSAtomCompare::AnyHeavyAtom:
-      rdParams.setMCSAtomTyperFromEnum(RDKit::AtomCompareAnyHeavyAtom);
-      break;
-  }
-
-  switch (params.bondCompare) {
-    case MCSBondCompare::Any:
-      rdParams.setMCSBondTyperFromEnum(RDKit::BondCompareAny);
-      break;
-    case MCSBondCompare::Order:
-      rdParams.setMCSBondTyperFromEnum(RDKit::BondCompareOrder);
-      break;
-    case MCSBondCompare::OrderExact:
-      rdParams.setMCSBondTyperFromEnum(RDKit::BondCompareOrderExact);
-      break;
-  }
-
-  return rdParams;
-}
-
-void fillResultBondMapping(const RDKit::ROMol&                          molA,
-                           const RDKit::ROMol&                          molB,
-                           const std::vector<std::pair<int, int>>&      atomMapping,
-                           std::vector<std::pair<int, int>>&            bondMapping) {
-  std::vector<int> aToB(molA.getNumAtoms(), -1);
-  for (const auto& [aIdx, bIdx] : atomMapping) {
-    if (aIdx >= 0 && aIdx < static_cast<int>(aToB.size())) {
-      aToB[static_cast<size_t>(aIdx)] = bIdx;
-    }
-  }
-
-  bondMapping.clear();
-  for (const auto* bondA : molA.bonds()) {
-    const int aBegin = static_cast<int>(bondA->getBeginAtomIdx());
-    const int aEnd   = static_cast<int>(bondA->getEndAtomIdx());
-    if (aToB[static_cast<size_t>(aBegin)] < 0 || aToB[static_cast<size_t>(aEnd)] < 0) {
-      continue;
-    }
-    const auto* bondB = molB.getBondBetweenAtoms(aToB[static_cast<size_t>(aBegin)], aToB[static_cast<size_t>(aEnd)]);
-    if (bondB != nullptr) {
-      bondMapping.emplace_back(static_cast<int>(bondA->getIdx()), static_cast<int>(bondB->getIdx()));
-    }
-  }
-}
-
-MCSResult runRDKitFallback(const RDKit::ROMol& molA, const RDKit::ROMol& molB, const MCSParameters& params) {
-  ScopedNvtxRange                       fallbackRange("RDKit fallback", NvtxColor::kOrange);
-  std::chrono::steady_clock::time_point start;
-  if constexpr (kMCSCollectTimingsEnabled) {
-    if (params.collectTimings) {
-      start = std::chrono::steady_clock::now();
-    }
-  }
-  MCSResult result;
-  result.usedFallback = true;
-  auto finish = [&]() {
-    if constexpr (kMCSCollectTimingsEnabled) {
-      if (params.collectTimings) {
-        const auto end = std::chrono::steady_clock::now();
-        result.elapsedMs =
-          static_cast<float>(std::chrono::duration<double, std::milli>(end - start).count());
-      }
-    }
-    return result;
-  };
-
-  std::vector<RDKit::ROMOL_SPTR> mols;
-  mols.emplace_back(new RDKit::ROMol(molA));
-  mols.emplace_back(new RDKit::ROMol(molB));
-  auto rdParams = buildRDKitParameters(params);
-  const auto rdResult = RDKit::findMCS(mols, &rdParams);
-
-  result.numAtoms     = rdResult.NumAtoms;
-  result.numBonds     = rdResult.NumBonds;
-  result.canceled     = rdResult.Canceled;
-  result.smartsString = rdResult.SmartsString;
-
-  if (rdResult.QueryMol == nullptr) {
-    return finish();
-  }
-
-  RDKit::SubstructMatchParameters matchParams;
-  matchParams.uniquify   = false;
-  matchParams.maxMatches = 1;
-  const auto matchesA    = RDKit::SubstructMatch(molA, *rdResult.QueryMol, matchParams);
-  const auto matchesB    = RDKit::SubstructMatch(molB, *rdResult.QueryMol, matchParams);
-  if (matchesA.empty() || matchesB.empty()) {
-    return finish();
-  }
-
-  std::vector<int> queryToA(rdResult.QueryMol->getNumAtoms(), -1);
-  std::vector<int> queryToB(rdResult.QueryMol->getNumAtoms(), -1);
-  for (const auto& [queryAtomIdx, targetAtomIdx] : matchesA.front()) {
-    queryToA[static_cast<size_t>(queryAtomIdx)] = targetAtomIdx;
-  }
-  for (const auto& [queryAtomIdx, targetAtomIdx] : matchesB.front()) {
-    queryToB[static_cast<size_t>(queryAtomIdx)] = targetAtomIdx;
-  }
-
-  for (size_t queryIdx = 0; queryIdx < queryToA.size(); ++queryIdx) {
-    if (queryToA[queryIdx] >= 0 && queryToB[queryIdx] >= 0) {
-      result.atomMapping.emplace_back(queryToA[queryIdx], queryToB[queryIdx]);
-    }
-  }
-  fillResultBondMapping(molA, molB, result.atomMapping, result.bondMapping);
-  return finish();
-}
-
-bool shouldFallbackToRDKit(const RDKit::ROMol& molA,
-                           const RDKit::ROMol& molB,
-                           const MCSParameters& params,
-                           std::string&         reason) {
-  if (!params.connectedOnly) {
-    reason = "fMCS supports connected MCS only";
-    return true;
-  }
-  if (!params.maximizeBonds) {
-    reason = "fMCS currently supports MaximizeBonds only";
-    return true;
-  }
-  if (params.atomCompare == MCSAtomCompare::AnyHeavyAtom) {
-    reason = "AtomCompareAnyHeavyAtom is delegated to RDKit";
-    return true;
-  }
-  if (params.atomCompareParameters.completeRingsOnly || params.bondCompareParameters.completeRingsOnly) {
-    reason = "CompleteRingsOnly is delegated to RDKit";
-    return true;
-  }
-  if (std::max(molA.getNumAtoms(), molB.getNumAtoms()) > 128 || std::max(molA.getNumBonds(), molB.getNumBonds()) > 128) {
-    reason = "molecule exceeds fMCS tier-128 limits";
-    return true;
-  }
-  return false;
-}
-
-MCSExecutionStats convertExecutionStats(const mcs::fmcs::ExecutionStats& in) {
-  MCSExecutionStats out;
-  out.phase2Iters = in.phase2Iters;
-  out.initialSeeds = in.initialSeeds;
-  out.mismatchedInitialSeeds = in.mismatchedInitialSeeds;
-  out.popped = in.popped;
-  out.seedChecks = in.seedChecks;
-  out.matchCalls = in.matchCalls;
-  out.matchFound = in.matchFound;
-  out.boundRejected = in.boundRejected;
-  out.expanded = in.expanded;
-  out.fillZero = in.fillZero;
-  out.stage0Attempts = in.stage0Attempts;
-  out.stage0Success = in.stage0Success;
-  out.stage1Attempts = in.stage1Attempts;
-  out.stage1Success = in.stage1Success;
-  out.stage2Attempts = in.stage2Attempts;
-  out.stage2Success = in.stage2Success;
-  out.individualBondExcluded = in.individualBondExcluded;
-  out.fastAttempts = in.fastAttempts;
-  out.fastSuccess = in.fastSuccess;
-  out.fallbackCalls = in.fallbackCalls;
-  out.fallbackSuccess = in.fallbackSuccess;
-  out.fallbackFail = in.fallbackFail;
-  out.fallbackOverflow = in.fallbackOverflow;
-  out.maxQueue = in.maxQueue;
-  out.forcedExit = in.forcedExit;
-  out.totalClocks = in.totalClocks;
-  out.phase1Clocks = in.phase1Clocks;
-  out.phase2Clocks = in.phase2Clocks;
-  out.incrementalMatchCycles1024 = in.incrementalMatchCycles1024;
-  out.substructureMatchCycles1024 = in.substructureMatchCycles1024;
-  out.phase2PopSyncWaitCycles1024 = in.phase2PopSyncWaitCycles1024;
-  out.phase2SyncWaitCycles1024 = in.phase2SyncWaitCycles1024;
-  out.phase2IdleNoSeedWaitCycles1024 = in.phase2IdleNoSeedWaitCycles1024;
-  out.phase2IdleNoMatchWaitCycles1024 = in.phase2IdleNoMatchWaitCycles1024;
-  out.phase2ActiveWorkCycles1024 = in.phase2ActiveWorkCycles1024;
-  out.phase2ActiveMatchCycles1024 =
-      in.phase2ActiveMatchCycles1024;
-  return out;
-}
-
-void addCompatibleSingletonIfEmpty(MCSResult&           result,
-                                   const RDKit::ROMol&  molA,
-                                   const RDKit::ROMol&  molB,
-                                   const MCSParameters& params) {
-  if (result.numAtoms != 0 || molA.getNumAtoms() == 0 || molB.getNumAtoms() == 0) {
-    return;
-  }
-
-  for (const auto* atomA : molA.atoms()) {
-    const auto keyA = makeAtomLabelKey(molA, *atomA, params);
-    for (const auto* atomB : molB.atoms()) {
-      const auto keyB = makeAtomLabelKey(molB, *atomB, params);
-      if (keyA.tie() == keyB.tie()) {
-        result.numAtoms = 1;
-        result.atomMapping.emplace_back(static_cast<int>(atomA->getIdx()), static_cast<int>(atomB->getIdx()));
-        return;
-      }
-    }
-  }
-}
-
-MCSResult convertGpuResult(const RDKit::ROMol& molA,
-                           const RDKit::ROMol& molB,
-                           const mcs::MCSResult& gpuResult,
-                           const MCSParameters& params,
-                           float elapsedMs,
-                           const mcs::fmcs::ExecutionStats* kernelTimings,
-                           const mcs::fmcs::ExecutionStats* executionStats) {
-  MCSResult out;
-  out.numAtoms  = static_cast<unsigned int>(gpuResult.numCommonVertices);
-  out.numBonds  = static_cast<unsigned int>(gpuResult.numCommonEdges);
-  out.canceled  = gpuResult.timedOut;
-  out.overflowed = gpuResult.overflowed;
-  out.usedGpu   = true;
-  out.elapsedMs = elapsedMs;
-  if (kernelTimings != nullptr) {
-    out.hasKernelTimings = true;
-    out.kernelTimings = convertExecutionStats(*kernelTimings);
-  }
-  if (executionStats != nullptr) {
-    out.hasExecutionStats = true;
-    out.executionStats = convertExecutionStats(*executionStats);
-  }
-
-  const size_t numMappedAtoms = std::min(gpuResult.mappingA.size(), gpuResult.mappingB.size());
-  out.atomMapping.reserve(numMappedAtoms);
-  for (size_t i = 0; i < numMappedAtoms; ++i) {
-    out.atomMapping.emplace_back(static_cast<int>(gpuResult.mappingA[i]), static_cast<int>(gpuResult.mappingB[i]));
-  }
-
-  out.bondMapping.reserve(gpuResult.edgeMappingA.size());
-  const size_t numMappedBonds = std::min(gpuResult.edgeMappingA.size(), gpuResult.edgeMappingB.size());
-  for (size_t i = 0; i < numMappedBonds; ++i) {
-    const auto& edgeA = gpuResult.edgeMappingA[i];
-    const auto& edgeB = gpuResult.edgeMappingB[i];
-    const auto* bondA = molA.getBondBetweenAtoms(static_cast<unsigned int>(edgeA.first),
-                                                 static_cast<unsigned int>(edgeA.second));
-    const auto* bondB = molB.getBondBetweenAtoms(static_cast<unsigned int>(edgeB.first),
-                                                 static_cast<unsigned int>(edgeB.second));
-    if (bondA != nullptr && bondB != nullptr) {
-      out.bondMapping.emplace_back(static_cast<int>(bondA->getIdx()), static_cast<int>(bondB->getIdx()));
-    }
-  }
-  addCompatibleSingletonIfEmpty(out, molA, molB, params);
-  return out;
-}
-
 std::vector<PreparedGpuPair> prepareGpuPairs(const std::vector<const RDKit::ROMol*>& mols,
                                              const std::vector<MCSPair>&             pairs,
                                              const MCSParameters&                    params,
@@ -544,28 +125,26 @@ std::vector<PreparedGpuPair> prepareGpuPairs(const std::vector<const RDKit::ROMo
     }
 
     std::string fallbackReason;
-    if (shouldFallbackToRDKit(*molA, *molB, params, fallbackReason)) {
+    if (mcs_detail::shouldFallbackToRDKit(*molA, *molB, params, fallbackReason)) {
       if (params.requireGpu) {
         throw std::runtime_error("GPU MCS path unavailable: " + fallbackReason);
       }
-      results[i] = runRDKitFallback(*molA, *molB, params);
+      results[i] = mcs_detail::runRDKitFallback(*molA, *molB, params);
       return;
     }
 
-    std::map<AtomLabelKey, uint16_t> atomLabels;
-    std::map<BondLabelKey, uint16_t> bondLabels;
+    auto graphs = mcs_detail::buildLabeledGraphPair(*molA, *molB, params);
 
-    auto item     = std::make_unique<PreparedGpuPair>();
+    auto item       = std::make_unique<PreparedGpuPair>();
     item->resultIdx = i;
     item->molIdxA   = idxA;
     item->molIdxB   = idxB;
-    item->graphA    = buildLabeledGraph(*molA, params, atomLabels, bondLabels);
-    item->graphB    = buildLabeledGraph(*molB, params, atomLabels, bondLabels);
+    item->graphA    = std::move(graphs.graphA);
+    item->graphB    = std::move(graphs.graphB);
     prepared[i]     = std::move(item);
   };
 
-  const int threadCount =
-    std::min<int>(std::max(1, preprocessingThreads), static_cast<int>(pairs.size()));
+  const int threadCount = std::min<int>(std::max(1, preprocessingThreads), static_cast<int>(pairs.size()));
   std::vector<std::thread> workers;
   workers.reserve(static_cast<size_t>(threadCount));
   for (int t = 0; t < threadCount; ++t) {
@@ -602,14 +181,14 @@ std::vector<PreparedGpuPair> prepareGpuPairs(const std::vector<const RDKit::ROMo
   return gpuPairs;
 }
 
-void runGpuPairs(std::vector<PreparedGpuPair>& gpuPairs,
+void runGpuPairs(std::vector<PreparedGpuPair>&           gpuPairs,
                  const std::vector<const RDKit::ROMol*>& mols,
-                 const MCSParameters& params,
-                 const std::vector<int>& gpuIds,
-                 int effectiveWorkerThreads,
-                 int effectiveExecutorsPerRunner,
-                 cudaStream_t stream,
-                 std::vector<MCSResult>& results) {
+                 const MCSParameters&                    params,
+                 const std::vector<int>&                 gpuIds,
+                 int                                     effectiveWorkerThreads,
+                 int                                     effectiveExecutorsPerRunner,
+                 cudaStream_t                            stream,
+                 std::vector<MCSResult>&                 results) {
   if (gpuPairs.empty()) {
     return;
   }
@@ -634,7 +213,7 @@ void runGpuPairs(std::vector<PreparedGpuPair>& gpuPairs,
       return;
     }
 
-    const int deviceId = gpuIds[runnerIdx % static_cast<size_t>(numGpus)];
+    const int       deviceId = gpuIds[runnerIdx % static_cast<size_t>(numGpus)];
     ScopedNvtxRange runnerRange("MCS runner " + std::to_string(runnerIdx) + " GPU" + std::to_string(deviceId));
     std::unique_ptr<WithDevice> setDevice;
     if (stream == nullptr) {
@@ -663,19 +242,19 @@ void runGpuPairs(std::vector<PreparedGpuPair>& gpuPairs,
     fmcsParams.batchSize          = params.batchSize;
     fmcsParams.blockSize          = params.blockSize;
     fmcsParams.executorsPerRunner = effectiveExecutorsPerRunner;
-    fmcsParams.matchVertexLabels  = usesAtomLabels(params);
-    fmcsParams.matchEdgeLabels    = usesBondLabels(params);
+    fmcsParams.matchVertexLabels  = mcs_detail::usesAtomLabels(params);
+    fmcsParams.matchEdgeLabels    = mcs_detail::usesBondLabels(params);
     fmcsParams.timeoutMs          = static_cast<float>(params.timeoutSeconds) * 1000.0f;
 
-    std::vector<float> gpuTimesMs;
-    std::vector<mcs::fmcs::ExecutionStats> gpuTimingStats;
-    std::vector<mcs::fmcs::ExecutionStats> gpuStats;
-    std::vector<float>* gpuTimesPtr = nullptr;
+    std::vector<float>                      gpuTimesMs;
+    std::vector<mcs::fmcs::ExecutionStats>  gpuTimingStats;
+    std::vector<mcs::fmcs::ExecutionStats>  gpuStats;
+    std::vector<float>*                     gpuTimesPtr       = nullptr;
     std::vector<mcs::fmcs::ExecutionStats>* gpuTimingStatsPtr = nullptr;
-    std::vector<mcs::fmcs::ExecutionStats>* gpuStatsPtr = nullptr;
+    std::vector<mcs::fmcs::ExecutionStats>* gpuStatsPtr       = nullptr;
     if constexpr (kMCSCollectTimingsEnabled) {
       if (params.collectTimings) {
-        gpuTimesPtr = &gpuTimesMs;
+        gpuTimesPtr       = &gpuTimesMs;
         gpuTimingStatsPtr = &gpuTimingStats;
       }
     }
@@ -684,54 +263,55 @@ void runGpuPairs(std::vector<PreparedGpuPair>& gpuPairs,
         gpuStatsPtr = &gpuStats;
       }
     }
-    auto gpuResults = mcs::fmcs::findMCESfMCSBatchLabeled(
-      gpuGraphsA, gpuGraphsB, fmcsParams, gpuTimesPtr, stream, gpuStatsPtr,
-      gpuTimingStatsPtr);
+    auto            gpuResults = mcs::fmcs::findMCESfMCSBatchLabeled(gpuGraphsA,
+                                                          gpuGraphsB,
+                                                          fmcsParams,
+                                                          gpuTimesPtr,
+                                                          stream,
+                                                          gpuStatsPtr,
+                                                          gpuTimingStatsPtr);
     ScopedNvtxRange convertRange("Convert GPU results");
     for (size_t gpuIdx = 0; gpuIdx < gpuResults.size(); ++gpuIdx) {
-      const size_t resultIdx = resultIndices[gpuIdx];
-      const size_t idxA      = molIndicesA[gpuIdx];
-      const size_t idxB      = molIndicesB[gpuIdx];
-      const float gpuElapsedMs =
-        gpuTimesPtr != nullptr && gpuIdx < gpuTimesMs.size() ? gpuTimesMs[gpuIdx] : 0.0f;
+      const size_t resultIdx    = resultIndices[gpuIdx];
+      const size_t idxA         = molIndicesA[gpuIdx];
+      const size_t idxB         = molIndicesB[gpuIdx];
+      const float  gpuElapsedMs = gpuTimesPtr != nullptr && gpuIdx < gpuTimesMs.size() ? gpuTimesMs[gpuIdx] : 0.0f;
       if (gpuResults[gpuIdx].overflowed) {
         if (params.requireGpu) {
           throw std::runtime_error("GPU MCS path overflowed");
         }
-        auto fallback = runRDKitFallback(*mols[idxA], *mols[idxB], params);
+        auto fallback = mcs_detail::runRDKitFallback(*mols[idxA], *mols[idxB], params);
         fallback.elapsedMs += gpuElapsedMs;
         if constexpr (kMCSCollectStatsEnabled) {
           if (gpuStatsPtr != nullptr && gpuIdx < gpuStats.size()) {
             fallback.hasExecutionStats = true;
-            fallback.executionStats = convertExecutionStats(gpuStats[gpuIdx]);
+            fallback.executionStats    = mcs_detail::convertExecutionStats(gpuStats[gpuIdx]);
           }
         }
         if constexpr (kMCSCollectTimingsEnabled) {
           if (gpuTimingStatsPtr != nullptr && gpuIdx < gpuTimingStats.size()) {
             fallback.hasKernelTimings = true;
-            fallback.kernelTimings = convertExecutionStats(gpuTimingStats[gpuIdx]);
+            fallback.kernelTimings    = mcs_detail::convertExecutionStats(gpuTimingStats[gpuIdx]);
           }
         }
         results[resultIdx] = std::move(fallback);
       } else {
         const mcs::fmcs::ExecutionStats* timingStatsPtr = nullptr;
         if constexpr (kMCSCollectTimingsEnabled) {
-          timingStatsPtr = gpuTimingStatsPtr != nullptr && gpuIdx < gpuTimingStats.size()
-              ? &gpuTimingStats[gpuIdx]
-              : nullptr;
+          timingStatsPtr =
+            gpuTimingStatsPtr != nullptr && gpuIdx < gpuTimingStats.size() ? &gpuTimingStats[gpuIdx] : nullptr;
         }
         const mcs::fmcs::ExecutionStats* statsPtr = nullptr;
         if constexpr (kMCSCollectStatsEnabled) {
           statsPtr = gpuStatsPtr != nullptr && gpuIdx < gpuStats.size() ? &gpuStats[gpuIdx] : nullptr;
         }
-        results[resultIdx] =
-          convertGpuResult(*mols[idxA],
-                           *mols[idxB],
-                           gpuResults[gpuIdx],
-                           params,
-                           gpuElapsedMs,
-                           timingStatsPtr,
-                           statsPtr);
+        results[resultIdx] = mcs_detail::convertGpuResult(*mols[idxA],
+                                                          *mols[idxB],
+                                                          gpuResults[gpuIdx],
+                                                          params,
+                                                          gpuElapsedMs,
+                                                          timingStatsPtr,
+                                                          statsPtr);
       }
     }
   };
@@ -744,7 +324,7 @@ void runGpuPairs(std::vector<PreparedGpuPair>& gpuPairs,
   std::atomic<bool>  abort{false};
   std::exception_ptr firstException;
   std::mutex         exceptionMutex;
-  auto setException = [&](std::exception_ptr ex) {
+  auto               setException = [&](std::exception_ptr ex) {
     std::lock_guard<std::mutex> lock(exceptionMutex);
     if (!firstException) {
       firstException = ex;
@@ -781,19 +361,18 @@ std::vector<MCSResult> findMCSBatch(const std::vector<const RDKit::ROMol*>& mols
                                     cudaStream_t                            stream,
                                     const MCSParameters&                    params) {
   if (params.collectTimings && !kMCSCollectTimingsEnabled) {
-    throw std::runtime_error(
-        "fMCS timing instrumentation is not instantiated in this build");
+    throw std::runtime_error("fMCS timing instrumentation is not instantiated in this build");
   }
   if (params.collectStats && !kMCSCollectStatsEnabled) {
-    throw std::runtime_error(
-        "fMCS stat instrumentation is not instantiated in this build");
+    throw std::runtime_error("fMCS stat instrumentation is not instantiated in this build");
   }
   std::vector<MCSResult> results(pairs.size());
-  if (pairs.empty()) return results;
+  if (pairs.empty())
+    return results;
 
-  const auto gpuIds = resolveGpuIds(params);
-  int effectivePreprocessingThreads = 1;
-  int effectiveWorkerThreads        = 1;
+  const auto gpuIds                        = resolveGpuIds(params);
+  int        effectivePreprocessingThreads = 1;
+  int        effectiveWorkerThreads        = 1;
   computeEffectiveThreadCounts(params,
                                static_cast<int>(gpuIds.size()),
                                effectivePreprocessingThreads,
@@ -805,16 +384,14 @@ std::vector<MCSResult> findMCSBatch(const std::vector<const RDKit::ROMol*>& mols
     effectiveWorkerThreads = 1;
   }
 
-  const int totalRunners = std::max(1, static_cast<int>(gpuIds.size()) * effectiveWorkerThreads);
+  const int totalRunners       = std::max(1, static_cast<int>(gpuIds.size()) * effectiveWorkerThreads);
   const int effectiveExecutors = effectiveExecutorsPerRunner(params, totalRunners, stream);
 
-  ScopedNvtxRange entryRange("findMCSBatch P=" + std::to_string(pairs.size()) +
-                             " batch=" + std::to_string(params.batchSize) +
-                             " prep=" + std::to_string(effectivePreprocessingThreads) +
-                             " workers=" + std::to_string(effectiveWorkerThreads) +
-                             " gpus=" + std::to_string(gpuIds.size()) +
-                             " executors=" + std::to_string(effectiveExecutors),
-                             NvtxColor::kBlue);
+  ScopedNvtxRange entryRange(
+    "findMCSBatch P=" + std::to_string(pairs.size()) + " batch=" + std::to_string(params.batchSize) +
+      " prep=" + std::to_string(effectivePreprocessingThreads) + " workers=" + std::to_string(effectiveWorkerThreads) +
+      " gpus=" + std::to_string(gpuIds.size()) + " executors=" + std::to_string(effectiveExecutors),
+    NvtxColor::kBlue);
 
   auto gpuPairs = prepareGpuPairs(mols, pairs, params, effectivePreprocessingThreads, results);
   runGpuPairs(gpuPairs, mols, params, gpuIds, effectiveWorkerThreads, effectiveExecutors, stream, results);
@@ -844,11 +421,11 @@ std::vector<MCSResult> findMCSBatch(const std::vector<const RDKit::ROMol*>& mols
 }
 
 std::vector<MCSResult> findMCSAllPairs(const std::vector<const RDKit::ROMol*>& mols,
-                                       MCSAllPairsOptions                     options,
-                                       cudaStream_t                           stream,
-                                       const MCSParameters&                   params) {
+                                       MCSAllPairsOptions                      options,
+                                       cudaStream_t                            stream,
+                                       const MCSParameters&                    params) {
   std::vector<MCSPair> pairs;
-  const size_t n = mols.size();
+  const size_t         n = mols.size();
   if (options.upperTriangle) {
     const size_t maxPairs = options.includeDiagonal ? (n * (n + 1)) / 2 : (n > 1 ? (n * (n - 1)) / 2 : 0);
     pairs.reserve(maxPairs);
