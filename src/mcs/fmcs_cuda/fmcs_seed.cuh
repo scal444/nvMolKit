@@ -127,7 +127,7 @@ struct MatchResult {
 ///
 /// @c alignas(16) ensures every @c QueuedSeed in an array (whether in
 /// shared or global memory) starts on a 16-byte boundary, which is
-/// what the int4-granularity @c warpCopy / @c blockCopy paths require.
+/// what the int4-granularity @c warpCopy path requires.
 /// Without this, a sequence of two @c __shared__ @c QueuedSeed
 /// declarations or @c QueuedSeed[N] arrays at non-tier-128 sizes
 /// would put the second element at a 4- or 8-byte boundary and

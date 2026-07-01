@@ -556,18 +556,6 @@ __device__ __forceinline__ void setOverflowedFlagWithinThread(bool* flag) {
   if (flag != nullptr) *flag = true;
 }
 
-template<int maxAtoms, int maxBonds>
-__device__ __forceinline__ bool seedContainsBondWithinThread(
-    const Seed<maxAtoms, maxBonds>& seed,
-    const int queryBondIdx) {
-  using SeedT = Seed<maxAtoms, maxBonds>;
-  using BondWord = typename SeedT::bond_word_type;
-  constexpr int kBondBitsPerWord = SeedT::kBondBitsPerWord;
-  if (queryBondIdx < 0 || queryBondIdx >= maxBonds) return false;
-  const BondWord word = seed.bonds[queryBondIdx / kBondBitsPerWord];
-  return ((word >> (queryBondIdx % kBondBitsPerWord)) & 1) != 0;
-}
-
 template<class TargetTopology>
 __device__ __forceinline__ bool findTargetBondBetweenAtomsWithinThread(
     const int targetAtomA,

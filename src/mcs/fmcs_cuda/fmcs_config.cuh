@@ -15,9 +15,8 @@ constexpr int kFmcsQueueCapacity = 4096;
 /// entries per ping-pong half. Runtime capacity is larger for smaller seeds.
 constexpr int kFmcsSubstructurePartialCapacity = 4096;
 
-/// Supported block and cooperative-group sizing.
-constexpr int kFmcsDefaultBlockSize = 128;
-constexpr int kFmcsGroupSize        = 32;
+/// Cooperative-group sizing shared by all supported block sizes.
+constexpr int kFmcsGroupSize = 32;
 static_assert(kFmcsGroupSize <= 32, "kFmcsGroupSize must be <= 32 (warp shuffle / ballot scope)");
 static_assert((kFmcsGroupSize & (kFmcsGroupSize - 1)) == 0, "kFmcsGroupSize must be a power of two");
 

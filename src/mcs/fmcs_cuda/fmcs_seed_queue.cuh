@@ -25,16 +25,9 @@ namespace fmcs {
 
 namespace cg = cooperative_groups;
 
-/// Scope tag selecting the backing store + synchronization for
-/// @ref SeedQueue.  ThreadBlockScope is the only implemented variant;
-/// ClusterScope (distributed shared memory, CUDA cluster launch) and
-/// GridScope (device-global with work stealing) are reserved so the same
-/// queue API can be extended without changing call sites.
+/// Scope tag selecting the implemented block-local backing store and
+/// synchronization for @ref SeedQueue.
 struct ThreadBlockScope {};
-struct ClusterScope {};
-struct GridScope {};
-
-constexpr int kSeedQueueEmpty = -1;
 
 /// Cooperative-group-scoped seed queue.  LIFO semantics match fMCS's
 /// SEED_GROW_DEEP: grow the biggest child first, only backtrack on match

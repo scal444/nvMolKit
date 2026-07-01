@@ -7,13 +7,6 @@
 namespace mcs {
 namespace fmcs {
 
-enum class MaxSizeTier {
-  k16,
-  k32,
-  k64,
-  k128,
-};
-
 /// Smallest tier whose bitset width covers both counts. Returns -1 when
 /// the largest tier (128) does not fit; the caller must flag overflow.
 inline int pickMaxSizeTier(int numAtoms, int numBonds) {
