@@ -1252,6 +1252,7 @@ __device__ __forceinline__ void addMaskSeed(QueuedT16& child,
   }
 }
 
+template<bool HoistNeighborOrder = true>
 __global__ void matchSubstructureMaskDriver(
     const std::uint32_t* qBE, int qNumAtoms, int qNumBonds,
     const std::uint32_t* tBE, int tNumAtoms, int tNumBonds,
@@ -1273,7 +1274,7 @@ __global__ void matchSubstructureMaskDriver(
   TestCsrView qView{qBE, qNumAtoms, qNumBonds};
   TestCsrView tView{tBE, tNumAtoms, tNumBonds};
   bool overflowed = false;
-  bool ok = mcs::fmcs::matchSeedSubstructureCooperative(
+  bool ok = mcs::fmcs::matchSeedSubstructureCooperative<HoistNeighborOrder>(
       warp, child.seed, qView, tView, tables, child.match, scratch,
       partialStorage, partialCapacity, &overflowed);
   __syncthreads();
@@ -1516,6 +1517,103 @@ TEST(FMCSUnit, MatchSeedSubstructureFindsPathInsideTriangleWithLeaves) {
   cudaFree(partials);
   cudaFree(qBE);
   cudaFree(tBE);
+}
+
+// The stats/measure builds compile matchSeedSubstructureCooperative with
+// HoistNeighborOrder == false, a separate expansion skeleton from the
+// production (hoisted) one. The two must be behavior-identical; this test is
+// the only compile-time and behavioral coverage of the non-hoisted variant in
+// the normal test build. See analysis/fmcs_duplicated_match_impl.md.
+TEST(FMCSUnit, MatchSeedSubstructureHoistVariantsAgree) {
+  using namespace mcs_fmcs_substructure_test;
+
+  struct Case {
+    const char* name;
+    std::vector<std::pair<int, int>> qEdges;
+    std::vector<std::pair<int, int>> tEdges;
+    int qNumAtoms;
+    int tNumAtoms;
+    std::uint32_t atomMask;
+    std::uint32_t bondMask;
+    bool restrictAtomsToIdentity;  // forces a unique mapping
+  };
+  const std::vector<Case> cases = {
+      {"path4-into-path5",
+       {{0, 1}, {1, 2}, {2, 3}}, {{0, 1}, {1, 2}, {2, 3}, {3, 4}},
+       4, 5, 0xFu, 0x7u, false},
+      {"triangle-into-path3-nomatch",
+       {{0, 1}, {1, 2}, {0, 2}}, {{0, 1}, {1, 2}},
+       3, 3, 0x7u, 0x7u, false},
+      {"path3-identity-restricted",
+       {{0, 1}, {1, 2}}, {{0, 1}, {1, 2}},
+       3, 3, 0x7u, 0x3u, true},
+      {"path-inside-triangle-with-leaves",
+       {{0, 1}, {0, 2}, {0, 4}, {1, 2}, {1, 3}},
+       {{0, 3}, {1, 2}, {1, 4}, {2, 3}},
+       5, 5, 0x1Fu, 0x1Eu, false},
+  };
+
+  for (const Case& c : cases) {
+    SCOPED_TRACE(c.name);
+    std::uint32_t* qBE = allocBondEndpointsManaged(c.qEdges);
+    std::uint32_t* tBE = allocBondEndpointsManaged(c.tEdges);
+    const int qNumBonds = static_cast<int>(c.qEdges.size());
+    const int tNumBonds = static_cast<int>(c.tEdges.size());
+    ManagedMatchTables tables;
+    tables.allocate(c.qNumAtoms, c.tNumAtoms, qNumBonds, tNumBonds);
+    if (c.restrictAtomsToIdentity) {
+      for (int a = 0; a < c.qNumAtoms; ++a) tables.setAtomBit(a, a);
+    } else {
+      tables.setAllAtomBits();
+    }
+    tables.setAllBondBits();
+
+    SubstructureTestOut* outHoisted = nullptr;
+    SubstructureTestOut* outRecompute = nullptr;
+    ASSERT_EQ(cudaMallocManaged(&outHoisted, sizeof(SubstructureTestOut)),
+              cudaSuccess);
+    ASSERT_EQ(cudaMallocManaged(&outRecompute, sizeof(SubstructureTestOut)),
+              cudaSuccess);
+    std::uint8_t* partials = allocSubstructurePartialsManaged();
+
+    matchSubstructureMaskDriver<true><<<1, 32>>>(
+        qBE, c.qNumAtoms, qNumBonds, tBE, c.tNumAtoms, tNumBonds,
+        tables.device, c.atomMask, c.bondMask,
+        partials, kTestSubstructurePartialCapacity, outHoisted);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+    matchSubstructureMaskDriver<false><<<1, 32>>>(
+        qBE, c.qNumAtoms, qNumBonds, tBE, c.tNumAtoms, tNumBonds,
+        tables.device, c.atomMask, c.bondMask,
+        partials, kTestSubstructurePartialCapacity, outRecompute);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+    EXPECT_EQ(outHoisted->ok, outRecompute->ok);
+    EXPECT_EQ(outHoisted->overflowed, outRecompute->overflowed);
+    EXPECT_EQ(outHoisted->child.match.matchedAtomSize,
+              outRecompute->child.match.matchedAtomSize);
+    EXPECT_EQ(outHoisted->child.match.matchedBondSize,
+              outRecompute->child.match.matchedBondSize);
+    if (c.restrictAtomsToIdentity) {
+      // Unique valid mapping: the two variants must agree element-wise.
+      // (Unrestricted shapes can have several valid mappings, and which one
+      // wins the scratch.found race is timing-dependent even within a single
+      // variant, so only sizes are compared there.)
+      for (int q = 0; q < c.qNumAtoms; ++q) {
+        EXPECT_EQ(outHoisted->child.match.targetAtomIdx[q],
+                  outRecompute->child.match.targetAtomIdx[q]);
+      }
+      for (int q = 0; q < qNumBonds; ++q) {
+        EXPECT_EQ(outHoisted->child.match.targetBondIdx[q],
+                  outRecompute->child.match.targetBondIdx[q]);
+      }
+    }
+
+    cudaFree(outHoisted);
+    cudaFree(outRecompute);
+    cudaFree(partials);
+    cudaFree(qBE);
+    cudaFree(tBE);
+  }
 }
 
 TEST(FMCSUnit, MatchSeedFallbackRebuildsAfterGreedyFailure) {
