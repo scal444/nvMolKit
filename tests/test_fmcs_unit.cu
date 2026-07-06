@@ -19,8 +19,6 @@
 // file is populated incrementally as Steps 1-5 land real implementations.
 
 #include "fmcs_cuda/experimental/fmcs_match_cache.cuh"
-#include "fmcs_cuda/experimental/fmcs_match_with_fallback.cuh"
-#include "fmcs_cuda/experimental/fmcs_seed_mark.cuh"
 #include "fmcs_cuda/fmcs_grow.cuh"
 #include "fmcs_cuda/fmcs_kernel.cuh"
 #include "fmcs_cuda/fmcs_match.cuh"
@@ -192,39 +190,6 @@ TEST(FMCSUnit, SeedBeginGrowStepSnapshotsNumAtoms) {
 
   EXPECT_EQ(d_out->numAtoms, 5);
   EXPECT_EQ(d_out->lastAddedAtomsBegin, 3);
-
-  cudaFree(d_out);
-}
-
-// ---------------------------------------------------------------------------
-// seedMarkLastAddedAtomWithinThread
-// ---------------------------------------------------------------------------
-
-namespace {
-
-__global__ void seedMarkLastAddedAtomDriverKernel(Seed<16, 16>* out) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  Seed<16, 16> seed{};
-  mcs::fmcs::seedAddAtomWithinThread(seed, 0);
-  mcs::fmcs::seedAddAtomWithinThread(seed, 1);
-  mcs::fmcs::seedBeginGrowStepWithinThread(seed);
-  mcs::fmcs::seedMarkLastAddedAtomWithinThread(seed, 0);
-  *out = seed;
-}
-
-}  // namespace
-
-TEST(FMCSUnit, SeedMarkLastAddedAtomDoesNotChangeSeedAtomsOrCount) {
-  Seed<16, 16>* d_out = mallocManaged<Seed<16, 16>>();
-  ASSERT_NE(d_out, nullptr);
-
-  seedMarkLastAddedAtomDriverKernel<<<1, 1>>>(d_out);
-  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-
-  EXPECT_EQ(d_out->atoms[0], 0x3u);
-  EXPECT_EQ(d_out->lastAddedAtoms[0], 0x1u);
-  EXPECT_EQ(d_out->numAtoms, 2);
-  EXPECT_EQ(d_out->lastAddedAtomsBegin, 2);
 
   cudaFree(d_out);
 }
@@ -1286,60 +1251,6 @@ __global__ void matchSubstructureMaskDriver(
   }
 }
 
-__global__ void matchFallbackBadParentDriver(
-    const std::uint32_t* qBE, int qNumAtoms, int qNumBonds,
-    const std::uint32_t* tBE, int tNumAtoms, int tNumBonds,
-    PairMatchTablesDevice tables,
-    std::uint8_t* partialStorage,
-    int partialCapacity,
-    SubstructureTestOut* out) {
-  __shared__ QueuedT16 child;
-  __shared__ mcs::fmcs::FmcsSubstructureScratch<16, 16, 16> scratch;
-  __shared__ int scratchLock;
-  if (threadIdx.x == 0) {
-    // Query seed is the 4-edge path inside the triangle-with-leaves
-    // repro: query bonds 1,2,3,4 and all five atoms.  The stored parent
-    // match maps q bond 1 = (0,2) onto target bond 0 = (0,3), which is
-    // locally valid but blocks q bond 2 = (0,4) in the fast extender.
-    addMaskSeed(child, /*atomMask=*/0x1Fu, /*bondMask=*/0x1Eu);
-    mcs::fmcs::matchResultClearWithinThread(child.match);
-    using MatchT = decltype(child.match);
-    child.match.targetAtomIdx[0] = 0;
-    child.match.targetAtomIdx[2] = 3;
-    child.match.visitedTargetAtoms[0 / MatchT::kTargetAtomBitsPerWord] |=
-        typename MatchT::target_atom_word{1}
-        << (0 % MatchT::kTargetAtomBitsPerWord);
-    child.match.visitedTargetAtoms[3 / MatchT::kTargetAtomBitsPerWord] |=
-        typename MatchT::target_atom_word{1}
-        << (3 % MatchT::kTargetAtomBitsPerWord);
-    child.match.targetBondIdx[1] = 0;
-    child.match.visitedTargetBonds[0 / MatchT::kTargetBondBitsPerWord] |=
-        typename MatchT::target_bond_word{1}
-        << (0 % MatchT::kTargetBondBitsPerWord);
-    child.match.matchedAtomSize = 2;
-    child.match.matchedBondSize = 1;
-    child.match.empty = false;
-    scratchLock = 0;
-  }
-  __syncthreads();
-
-  auto block = cooperative_groups::this_thread_block();
-  auto warp = cooperative_groups::tiled_partition<32>(block);
-  TestCsrView qView{qBE, qNumAtoms, qNumBonds};
-  TestCsrView tView{tBE, tNumAtoms, tNumBonds};
-  bool overflowed = false;
-  bool ok = mcs::fmcs::matchSeedWithSubstructureFallbackCooperative(
-      warp, child.seed, qView, tView, tables, child.match, scratch,
-      &scratchLock, partialStorage, partialCapacity, &overflowed);
-  __syncthreads();
-
-  if (threadIdx.x == 0) {
-    out->ok = ok;
-    out->overflowed = overflowed;
-    out->child = child;
-  }
-}
-
 }  // namespace mcs_fmcs_substructure_test
 
 TEST(FMCSUnit, MatchSeedSubstructurePath) {
@@ -1614,43 +1525,6 @@ TEST(FMCSUnit, MatchSeedSubstructureHoistVariantsAgree) {
     cudaFree(qBE);
     cudaFree(tBE);
   }
-}
-
-TEST(FMCSUnit, MatchSeedFallbackRebuildsAfterGreedyFailure) {
-  using namespace mcs_fmcs_substructure_test;
-
-  std::uint32_t* qBE =
-      allocBondEndpointsManaged({{0, 1}, {0, 2}, {0, 4}, {1, 2}, {1, 3}});
-  std::uint32_t* tBE =
-      allocBondEndpointsManaged({{0, 3}, {1, 2}, {1, 4}, {2, 3}});
-  ManagedMatchTables tables;
-  tables.allocate(5, 5, 5, 4);
-  tables.setAllAtomBits();
-  tables.setAllBondBits();
-
-  SubstructureTestOut* out = nullptr;
-  ASSERT_EQ(cudaMallocManaged(&out, sizeof(SubstructureTestOut)), cudaSuccess);
-  std::uint8_t* partials = allocSubstructurePartialsManaged();
-  matchFallbackBadParentDriver<<<1, 32>>>(
-      qBE, 5, 5, tBE, 5, 4, tables.device,
-      partials, kTestSubstructurePartialCapacity, out);
-  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-
-  EXPECT_TRUE(out->ok);
-  EXPECT_FALSE(out->overflowed);
-  EXPECT_EQ(out->child.match.matchedAtomSize, 5);
-  EXPECT_EQ(out->child.match.matchedBondSize, 4);
-  for (int q = 0; q < 5; ++q) {
-    EXPECT_NE(out->child.match.targetAtomIdx[q], mcs::fmcs::kUnmappedTargetIdx);
-  }
-  for (int q : {1, 2, 3, 4}) {
-    EXPECT_NE(out->child.match.targetBondIdx[q], mcs::fmcs::kUnmappedTargetIdx);
-  }
-
-  cudaFree(out);
-  cudaFree(partials);
-  cudaFree(qBE);
-  cudaFree(tBE);
 }
 
 // ---------------------------------------------------------------------------
