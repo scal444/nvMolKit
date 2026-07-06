@@ -19,6 +19,7 @@ from rdkit.Chem import rdFMCS
 
 from nvmolkit.mcs import MCSConfig, MCS_STATS_ENABLED, MCS_TIMINGS_ENABLED, findMCS
 
+
 def _mols(smiles: list[str]):
     return [Chem.MolFromSmiles(smi) for smi in smiles]
 
@@ -63,6 +64,15 @@ def _assert_matches_rdkit(result, mol_table, *, atom_compare="elements", bond_co
         assert item.num_bonds == rd_result.numBonds
         assert item.atom_mapping.shape[1] == 2
         assert item.bond_mapping.shape[1] == 2
+        query = Chem.MolFromSmarts(item.smarts_string)
+        rd_query = Chem.MolFromSmarts(rd_result.smartsString)
+        assert query is not None
+        assert rd_query is not None
+        assert query.GetNumAtoms() == rd_query.GetNumAtoms()
+        assert query.GetNumBonds() == rd_query.GetNumBonds()
+        if item.num_atoms:
+            assert mol_table[idx_a].HasSubstructMatch(query)
+            assert mol_table[idx_b].HasSubstructMatch(query)
 
 
 def test_pairs_mode_matches_rdkit_and_preserves_order():

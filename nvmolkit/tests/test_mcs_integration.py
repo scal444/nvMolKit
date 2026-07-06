@@ -189,6 +189,21 @@ def _assert_batch_matches_rdkit(
             expected.numAtoms,
             expected.numBonds,
         ), f"pair {pair_idx}: molecule indices {(idx_a, idx_b)}"
+        query = Chem.MolFromSmarts(item.smarts_string)
+        expected_query = Chem.MolFromSmarts(expected.smartsString)
+        assert query is not None, f"pair {pair_idx}: invalid SMARTS {item.smarts_string!r}"
+        assert expected_query is not None
+        assert (query.GetNumAtoms(), query.GetNumBonds()) == (
+            expected_query.GetNumAtoms(),
+            expected_query.GetNumBonds(),
+        ), f"pair {pair_idx}: molecule indices {(idx_a, idx_b)}"
+        if item.num_atoms:
+            assert mols[idx_a].HasSubstructMatch(query), (
+                f"pair {pair_idx}: SMARTS does not match first molecule: {item.smarts_string}"
+            )
+            assert mols[idx_b].HasSubstructMatch(query), (
+                f"pair {pair_idx}: SMARTS does not match second molecule: {item.smarts_string}"
+            )
         _assert_mapping_is_common_subgraph(item, mols[idx_a], mols[idx_b])
 
 

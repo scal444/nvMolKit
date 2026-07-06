@@ -6,8 +6,13 @@
 #include <GraphMol/Atom.h>
 #include <GraphMol/Bond.h>
 #include <GraphMol/FMCS/FMCS.h>
+#include <GraphMol/QueryAtom.h>
+#include <GraphMol/QueryBond.h>
+#include <GraphMol/QueryOps.h>
 #include <GraphMol/RingInfo.h>
 #include <GraphMol/ROMol.h>
+#include <GraphMol/RWMol.h>
+#include <GraphMol/SmilesParse/SmartsWrite.h>
 #include <GraphMol/Substruct/SubstructMatch.h>
 
 #include <algorithm>
@@ -144,10 +149,10 @@ BondLabelKey makeBondLabelKey(const RDKit::Bond& bond, const MCSParameters& para
 }
 
 LabeledGraph buildLabeledGraph(const RDKit::ROMol&                    mol,
-                                 const MCSParameters&                   params,
-                                 std::map<AtomLabelKey, std::uint16_t>& atomLabels,
-                                 std::map<BondLabelKey, std::uint16_t>& bondLabels) {
-  LabeledGraph                         out;
+                               const MCSParameters&                   params,
+                               std::map<AtomLabelKey, std::uint16_t>& atomLabels,
+                               std::map<BondLabelKey, std::uint16_t>& bondLabels) {
+  LabeledGraph                           out;
   std::vector<std::pair<size_t, size_t>> edges;
   edges.reserve(mol.getNumBonds());
 
@@ -261,6 +266,119 @@ void addCompatibleSingletonIfEmpty(MCSResult&           result,
       }
     }
   }
+}
+
+template <typename Query, typename QueryExpression> void addAndQuery(Query& query, QueryExpression* expression) {
+  if (query.getQuery() == nullptr) {
+    query.setQuery(expression);
+  } else {
+    query.expandQuery(expression, Queries::CompositeQueryType::COMPOSITE_AND);
+  }
+}
+
+template <typename Query, typename QueryExpression> void addOrQuery(Query& query, QueryExpression* expression) {
+  query.expandQuery(expression, Queries::CompositeQueryType::COMPOSITE_OR);
+}
+
+RDKit::QueryAtom* makeMCSQueryAtom(const RDKit::ROMol&  molA,
+                                   const RDKit::Atom&   atomA,
+                                   const RDKit::Atom&   atomB,
+                                   const MCSParameters& params) {
+  auto* queryAtom = new RDKit::QueryAtom();
+  queryAtom->setAtomicNum(atomA.getAtomicNum());
+
+  switch (params.atomCompare) {
+    case MCSAtomCompare::Any:
+      addAndQuery(*queryAtom, RDKit::makeAtomNumQuery(atomA.getAtomicNum()));
+      if (atomB.getAtomicNum() != atomA.getAtomicNum()) {
+        addOrQuery(*queryAtom, RDKit::makeAtomNumQuery(atomB.getAtomicNum()));
+      }
+      break;
+    case MCSAtomCompare::Elements:
+      addAndQuery(*queryAtom, RDKit::makeAtomNumQuery(atomA.getAtomicNum()));
+      break;
+    case MCSAtomCompare::Isotopes:
+      addAndQuery(*queryAtom, RDKit::makeAtomIsotopeQuery(atomA.getIsotope()));
+      break;
+    case MCSAtomCompare::AnyHeavyAtom:
+      // This comparison mode currently takes the RDKit fallback path.
+      addAndQuery(*queryAtom, RDKit::makeAtomNumQuery(atomA.getAtomicNum()));
+      break;
+  }
+
+  if (params.atomCompareParameters.matchIsotope && params.atomCompare != MCSAtomCompare::Isotopes) {
+    addAndQuery(*queryAtom, RDKit::makeAtomIsotopeQuery(atomA.getIsotope()));
+  }
+  if (params.atomCompareParameters.matchValences) {
+    addAndQuery(*queryAtom, RDKit::makeAtomTotalValenceQuery(atomA.getTotalValence()));
+  }
+  if (params.atomCompareParameters.matchFormalCharge) {
+    addAndQuery(*queryAtom, RDKit::makeAtomFormalChargeQuery(atomA.getFormalCharge()));
+  }
+  if (params.atomCompareParameters.ringMatchesRingOnly) {
+    auto* ringQuery = RDKit::makeAtomInRingQuery();
+    if (molA.getRingInfo()->numAtomRings(atomA.getIdx()) == 0) {
+      ringQuery->setNegation(true);
+    }
+    addAndQuery(*queryAtom, ringQuery);
+  }
+
+  return queryAtom;
+}
+
+RDKit::QueryBond* makeMCSQueryBond(const RDKit::Bond& bondA, const RDKit::Bond& bondB, const MCSParameters& params) {
+  auto* queryBond = new RDKit::QueryBond();
+  queryBond->setBondType(bondA.getBondType());
+  queryBond->setQuery(RDKit::makeBondOrderEqualsQuery(bondA.getBondType()));
+
+  const bool includeBondB =
+    bondB.getBondType() != bondA.getBondType() && bondOrderClass(bondA, params) == bondOrderClass(bondB, params);
+  if (includeBondB) {
+    addOrQuery(*queryBond, RDKit::makeBondOrderEqualsQuery(bondB.getBondType()));
+  }
+
+  if (params.bondCompareParameters.ringMatchesRingOnly) {
+    auto* ringQuery = RDKit::makeBondIsInRingQuery();
+    if (bondA.getOwningMol().getRingInfo()->numBondRings(bondA.getIdx()) == 0) {
+      ringQuery->setNegation(true);
+    }
+    addAndQuery(*queryBond, ringQuery);
+  }
+  return queryBond;
+}
+
+std::string buildMCSQuerySmarts(const RDKit::ROMol&  molA,
+                                const RDKit::ROMol&  molB,
+                                const MCSResult&     result,
+                                const MCSParameters& params) {
+  if (result.atomMapping.empty()) {
+    return {};
+  }
+
+  RDKit::RWMol     query;
+  std::vector<int> atomAToQuery(molA.getNumAtoms(), -1);
+  for (const auto& [atomAIdx, atomBIdx] : result.atomMapping) {
+    const auto* atomA    = molA.getAtomWithIdx(static_cast<unsigned int>(atomAIdx));
+    const auto* atomB    = molB.getAtomWithIdx(static_cast<unsigned int>(atomBIdx));
+    const auto  queryIdx = query.addAtom(makeMCSQueryAtom(molA, *atomA, *atomB, params), true, true);
+    atomAToQuery[static_cast<size_t>(atomAIdx)] = static_cast<int>(queryIdx);
+  }
+
+  for (const auto& [bondAIdx, bondBIdx] : result.bondMapping) {
+    const auto* bondA = molA.getBondWithIdx(static_cast<unsigned int>(bondAIdx));
+    const auto* bondB = molB.getBondWithIdx(static_cast<unsigned int>(bondBIdx));
+    const int   begin = atomAToQuery[bondA->getBeginAtomIdx()];
+    const int   end   = atomAToQuery[bondA->getEndAtomIdx()];
+    if (begin < 0 || end < 0) {
+      throw std::runtime_error("MCS bond mapping references an unmapped atom");
+    }
+    auto* queryBond = makeMCSQueryBond(*bondA, *bondB, params);
+    queryBond->setBeginAtomIdx(static_cast<unsigned int>(begin));
+    queryBond->setEndAtomIdx(static_cast<unsigned int>(end));
+    query.addBond(queryBond, true);
+  }
+
+  return RDKit::MolToSmarts(query);
 }
 
 }  // namespace
@@ -460,6 +578,7 @@ MCSResult convertGpuResult(const RDKit::ROMol&              molA,
     }
   }
   addCompatibleSingletonIfEmpty(out, molA, molB, params);
+  out.smartsString = buildMCSQuerySmarts(molA, molB, out, params);
   return out;
 }
 
