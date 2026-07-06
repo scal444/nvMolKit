@@ -36,6 +36,16 @@ constexpr int          kBondEndpointShift = 16;
 constexpr std::uint32_t kBondEndpointMask  = 0xFFFFu;
 constexpr int          kFallbackAdjacencySubwarpSize = 4;
 
+// FIXME(group-size): this hardcodes the full 32-lane mask and broadcasts from
+// warp lane 0. That is correct ONLY while kFmcsGroupSize == 32 and the
+// cg::tiled_partition<32> groups are warp-aligned (one group == one warp), so
+// "lane 0 of the warp" == "rank 0 of the group". fmcs_config.cuh currently
+// allows kFmcsGroupSize to be any power of two <= 32; if it is ever reduced
+// (e.g. to 16, giving two sub-warp groups per warp), this would broadcast the
+// value from group 0's lane 0 to BOTH groups in the warp -> silent wrong
+// pruning/stage decisions with no error. Either add
+// static_assert(kFmcsGroupSize == 32) to pin the invariant, or route this
+// through group.shfl(input, 0) so it follows the actual group scope.
 __device__ __forceinline__ int mark_warp_uniform(const int input) {
   return __shfl_sync(0xffffffffu, input, 0);
 }

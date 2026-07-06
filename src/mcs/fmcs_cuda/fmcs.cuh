@@ -23,9 +23,9 @@
 // connected-subgraph lattice of the smaller input and matches each
 // candidate against the larger input on the device.
 //
-// Feature surface matches what the existing McSplit-based CUDA solver
-// supports: unlabeled topology, optional exact vertex/edge-label matching,
-// MaximizeBonds objective, Threshold=1.0, connected-only result.  RDKit
+// Supported feature surface: unlabeled topology, optional exact
+// vertex/edge-label matching, MaximizeBonds objective, Threshold=1.0,
+// connected-only result.  RDKit
 // atomCompare/bondCompare modes map to caller-provided labels: CompareAny
 // disables the corresponding table, while CompareElements/CompareIsotopes
 // and CompareOrder/CompareOrderExact require the caller to encode those
@@ -48,9 +48,10 @@ namespace fmcs {
 /// Algorithm-level parameters for the fMCS solver.
 ///
 /// The objective (connected MCES, MaximizeBonds, Threshold=1) is baked
-/// into the algorithm itself and is not exposed as a knob -- callers
-/// who want a different objective should use the McSplit path in
-/// mcs.cuh instead.
+/// into the algorithm itself and is not exposed as a knob.  Callers that
+/// need a different objective must use RDKit's CPU FMCS; the host dispatch
+/// layer (mcs_search / mcs_rdkit_adapter) already falls back to it for
+/// unsupported parameter combinations.
 struct Parameters {
   /// CUDA block size for the per-pair kernel. Supported: 128 and 512.
   /// Block size 512 supports maxSize tiers up to 64 only.
@@ -90,10 +91,10 @@ std::vector<MCSResult> findMCESfMCSBatch(
 
 /// Labeled variant: optional exact vertex and edge label equality.
 ///
-/// Label semantics mirror `mcs::findCommonSubgraphBatchLabeled` in mcs.cuh:
-/// with default parameters, two atoms may be paired iff their `vertexLabels`
-/// agree, and two bonds may be paired iff both endpoint pairs are compatible
-/// and the `edgeLabels` entries agree.  Set `Parameters::matchVertexLabels`
+/// Label semantics: with default parameters, two atoms may be paired iff
+/// their `vertexLabels` agree, and two bonds may be paired iff both endpoint
+/// pairs are compatible and the `edgeLabels` entries agree.  Set
+/// `Parameters::matchVertexLabels`
 /// or `Parameters::matchEdgeLabels` false for CompareAny-style matching on
 /// that axis.
 std::vector<MCSResult> findMCESfMCSBatchLabeled(

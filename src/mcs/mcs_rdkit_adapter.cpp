@@ -93,12 +93,28 @@ AtomLabelKey makeAtomLabelKey(const RDKit::ROMol& mol, const RDKit::Atom& atom, 
   return key;
 }
 
+// FIXME(bond-order-parity): this GPU bond-label classification does not fully
+// reproduce RDKit's BondMatchOrderMatrix used by the RDKit CPU fallback, so the
+// GPU and fallback paths can disagree for uncommon bond types. Known gaps:
+//   * Order: only SINGLE and AROMATIC are collapsed into one class. RDKit's
+//     order comparison also relates other order-equivalent types (e.g.
+//     ONEANDAHALF/TWOANDAHALF) and treats UNSPECIFIED/ZERO/dative bonds
+//     specially; here they fall through to the raw getBondType() value and end
+//     up comparing exact-only.
+//   * OrderExact: ONEANDAHALF is folded into AROMATIC, which RDKit's exact
+//     (non-ignore) matrix does not do.
+// Common inputs (single/double/triple/aromatic) are unaffected; the divergence
+// only bites molecules with dative/zero-order or explicit *-and-a-half bonds.
+// Fix: mirror RDKit's BondMatchOrderMatrix classification (or route affected
+// bond types to the RDKit fallback) so GPU and CPU results are identical.
 int bondOrderClass(const RDKit::Bond& bond, const MCSParameters& params) {
   switch (params.bondCompare) {
     case MCSBondCompare::Any:
       return 0;
     case MCSBondCompare::Order: {
       const auto bondType = static_cast<int>(bond.getBondType());
+      // FIXME(bond-order-parity): see note above -- only SINGLE/AROMATIC are
+      // merged; other order-equivalent and wildcard bond types are not.
       if (bondType == static_cast<int>(RDKit::Bond::SINGLE) || bondType == static_cast<int>(RDKit::Bond::AROMATIC)) {
         return 1;
       }
@@ -106,6 +122,8 @@ int bondOrderClass(const RDKit::Bond& bond, const MCSParameters& params) {
     }
     case MCSBondCompare::OrderExact: {
       const auto bondType = static_cast<int>(bond.getBondType());
+      // FIXME(bond-order-parity): folding ONEANDAHALF into AROMATIC diverges
+      // from RDKit's exact-order matrix.
       if (bondType == static_cast<int>(RDKit::Bond::ONEANDAHALF) ||
           bondType == static_cast<int>(RDKit::Bond::AROMATIC)) {
         return static_cast<int>(RDKit::Bond::AROMATIC);
