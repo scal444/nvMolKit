@@ -20,6 +20,13 @@ constexpr int kFmcsGroupSize = 32;
 static_assert(kFmcsGroupSize <= 32, "kFmcsGroupSize must be <= 32 (warp shuffle / ballot scope)");
 static_assert((kFmcsGroupSize & (kFmcsGroupSize - 1)) == 0, "kFmcsGroupSize must be a power of two");
 
+/// Placement of the per-group substructure fallback scratch.  @c Shared keeps
+/// the historical static __shared__ array; @c Global places it in a per-block
+/// global-memory slab, freeing static shared so 512-thread blocks fit the
+/// 48 KB cap at tier-128.  @c Auto is a host-only sentinel resolved in
+/// dispatch (fmcs.cpp); kernels are never instantiated on it.
+enum class FmcsScratchLocation { Shared, Global, Auto };
+
 template <int blockThreads> struct FmcsBlockConfig {
   static_assert(blockThreads == 128 || blockThreads == 512, "fMCS block size must be 128 or 512");
   static_assert(blockThreads % kFmcsGroupSize == 0, "fMCS block size must be a multiple of kFmcsGroupSize");

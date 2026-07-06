@@ -119,6 +119,19 @@ nvMolKit::MCSBondCompare parseBondCompare(const std::string& value) {
   throw std::invalid_argument("Unsupported bond_compare value: " + value);
 }
 
+nvMolKit::MCSScratchLocation parseScratchLocation(const std::string& value) {
+  if (value == "auto") {
+    return nvMolKit::MCSScratchLocation::Auto;
+  }
+  if (value == "shared") {
+    return nvMolKit::MCSScratchLocation::Shared;
+  }
+  if (value == "global") {
+    return nvMolKit::MCSScratchLocation::Global;
+  }
+  throw std::invalid_argument("Unsupported scratch_location value: " + value);
+}
+
 std::vector<const RDKit::ROMol*> molsFromPythonList(const list& mols) {
   nvMolKit::ScopedNvtxRange range("Python MCS: extract mol pointers", nvMolKit::NvtxColor::kYellow);
   std::vector<const RDKit::ROMol*> out;
@@ -375,6 +388,7 @@ BOOST_PYTHON_MODULE(_mcs) {
       params.timeoutSeconds                                   = optionValue<unsigned int>(options, "timeout_seconds", 0);
       params.batchSize                                        = optionValue<int>(options, "batch_size", 0);
       params.blockSize                                        = optionValue<int>(options, "block_size", 128);
+      params.scratchLocation                                  = parseScratchLocation(optionValue<std::string>(options, "scratch_location", "auto"));
       params.workerThreads                                    = optionValue<int>(options, "worker_threads", -1);
       params.preprocessingThreads                             = optionValue<int>(options, "preprocessing_threads", -1);
       params.executorsPerRunner                               = optionValue<int>(options, "executors_per_runner", -1);

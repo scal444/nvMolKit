@@ -52,6 +52,10 @@ def _default_mcs_search_space(num_gpus: int, cpus: int) -> dict:
     return {
         "batchSize": [0, 64, 128, 256, 512],
         "blockSize": {"choices": [128, 512]},
+        # "shared" is pruned to "auto" for blockSize 512 (see _make_config): the
+        # two are equivalent for tiers below 128, and "shared" is illegal at
+        # 512 @ tier-128, so tuning never wastes a trial on a guaranteed error.
+        "scratchLocation": {"choices": ["auto", "global"]},
         "workerThreads": (1, per_gpu_worker_max),
         "preprocessingThreads": (1, cpus),
         "executorsPerRunner": (1, 8),
@@ -166,9 +170,17 @@ def tune_mcs(
     space = resolve_search_space(_default_mcs_search_space(num_gpus, cpus), search_space_overrides)
 
     def _make_config(values: dict[str, Any]) -> MCSConfig:
+        block_size = int(values.get("blockSize", 128))
+        scratch_location = str(values.get("scratchLocation", "auto"))
+        # "shared" at blockSize 512 is illegal for tier-128 and equivalent to
+        # "auto" for smaller tiers, so coerce it to "auto" rather than risk a
+        # dispatch error on a dataset that happens to contain a tier-128 pair.
+        if block_size == 512 and scratch_location == "shared":
+            scratch_location = "auto"
         return MCSConfig(
             batchSize=int(values.get("batchSize", 0)),
-            blockSize=int(values.get("blockSize", 128)),
+            blockSize=block_size,
+            scratchLocation=scratch_location,
             workerThreads=int(values.get("workerThreads", -1)),
             preprocessingThreads=int(values.get("preprocessingThreads", -1)),
             executorsPerRunner=int(values.get("executorsPerRunner", -1)),
@@ -225,7 +237,13 @@ def tune_mcs(
         return _run_once(_make_config(values), state)
 
     def build_config(params_dict: dict[str, Any]) -> MCSConfig:
-        merged = {name: params_dict.get(name, collect_int_from_space(spec)) for name, spec in space.items()}
+        merged: dict[str, Any] = {}
+        for name, spec in space.items():
+            if name == "scratchLocation":
+                # String-valued categorical; collect_int_from_space is int-only.
+                merged[name] = params_dict.get(name, "auto")
+            else:
+                merged[name] = params_dict.get(name, collect_int_from_space(spec))
         return _make_config(merged)
 
     initial_state = CalibrationState(indices=list(indices))

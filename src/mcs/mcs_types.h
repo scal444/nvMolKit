@@ -36,6 +36,15 @@ enum class MCSBondCompare : std::uint8_t {
   OrderExact
 };
 
+/// Placement of the GPU substructure fallback scratch.  Auto (default) selects
+/// global memory only for blockSize 512 at the 128-atom tier, where static
+/// shared cannot fit, and keeps every other configuration on shared memory.
+enum class MCSScratchLocation : std::uint8_t {
+  Auto,
+  Shared,
+  Global
+};
+
 struct MCSAtomCompareParameters {
   bool matchValences       = false;
   bool matchFormalCharge   = false;
@@ -58,6 +67,7 @@ struct MCSParameters {
   unsigned int             timeoutSeconds = 0;
   int                      batchSize      = 0;
   int                      blockSize      = 128;
+  MCSScratchLocation       scratchLocation = MCSScratchLocation::Auto;
   int                      workerThreads  = -1;
   int                      preprocessingThreads = -1;
   int                      executorsPerRunner = -1;

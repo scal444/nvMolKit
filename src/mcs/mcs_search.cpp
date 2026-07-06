@@ -240,6 +240,17 @@ void runGpuPairs(std::vector<PreparedGpuPair>&           gpuPairs,
     mcs::fmcs::Parameters fmcsParams;
     fmcsParams.batchSize          = params.batchSize;
     fmcsParams.blockSize          = params.blockSize;
+    switch (params.scratchLocation) {
+      case MCSScratchLocation::Shared:
+        fmcsParams.scratchLocation = mcs::fmcs::FmcsScratchLocation::Shared;
+        break;
+      case MCSScratchLocation::Global:
+        fmcsParams.scratchLocation = mcs::fmcs::FmcsScratchLocation::Global;
+        break;
+      case MCSScratchLocation::Auto:
+        fmcsParams.scratchLocation = mcs::fmcs::FmcsScratchLocation::Auto;
+        break;
+    }
     fmcsParams.executorsPerRunner = effectiveExecutorsPerRunner;
     fmcsParams.matchVertexLabels  = mcs_detail::usesAtomLabels(params);
     fmcsParams.matchEdgeLabels    = mcs_detail::usesBondLabels(params);

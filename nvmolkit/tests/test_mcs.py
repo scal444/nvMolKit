@@ -273,9 +273,57 @@ def test_invalid_mode_and_optional_arguments():
         findMCS(mols, mode="pairs", pairs=[(0, 1)], atom_compare="mass")
     with pytest.raises(ValueError, match="Unsupported bond_compare"):
         findMCS(mols, mode="pairs", pairs=[(0, 1)], bond_compare="shape")
+    with pytest.raises(ValueError, match="Unsupported scratch_location"):
+        findMCS(mols, mode="pairs", pairs=[(0, 1)], scratch_location="l2")
     for block_size in (32, 64, 256):
         with pytest.raises(ValueError, match="blockSize"):
             findMCS(mols, mode="pairs", pairs=[(0, 1)], block_size=block_size)
+
+
+def test_scratch_location_invalid_value_rejected_in_config():
+    with pytest.raises(ValueError, match="Unsupported scratch_location"):
+        MCSConfig(scratchLocation="l2")
+
+
+def test_mcsconfig_roundtrip_with_and_without_scratch_location():
+    config = MCSConfig(blockSize=512, scratchLocation="global")
+    data = config.to_dict()
+    assert data["scratchLocation"] == "global"
+    restored = MCSConfig.from_dict(data)
+    assert restored.scratchLocation == "global"
+    assert restored.blockSize == 512
+
+    # Old-format dict (before scratchLocation existed) must still load,
+    # defaulting the missing key to "auto".
+    legacy = {
+        "batchSize": 0,
+        "blockSize": 128,
+        "workerThreads": -1,
+        "preprocessingThreads": -1,
+        "executorsPerRunner": -1,
+        "gpuIds": [],
+    }
+    restored_legacy = MCSConfig.from_dict(legacy)
+    assert restored_legacy.scratchLocation == "auto"
+
+
+def test_block_size_512_tier128_succeeds_on_gpu():
+    # A 128-carbon chain is a tier-128 molecule.  blockSize 512 now handles it
+    # via global substructure scratch (auto), so require_gpu must not fall back.
+    chain = Chem.MolFromSmiles("C" * 128)
+    assert chain is not None
+    mols = [chain, chain]
+    result = findMCS(
+        mols,
+        mode="pairs",
+        pairs=[(0, 1)],
+        require_gpu=True,
+        block_size=512,
+        scratch_location="auto",
+    )
+    assert result.used_gpu.tolist() == [1]
+    assert not bool(result.overflowed[0])
+    assert int(result.num_atoms[0]) == 128
 
 
 def test_out_of_range_pair_raises_from_native_layer():

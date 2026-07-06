@@ -477,18 +477,22 @@ __device__ __forceinline__ void seedComputeRemainingSizeRdkitCooperative(
 /// @p queueCapacity * numPairs @c QueuedSeed entries; this block uses
 /// the slice starting at @p queueStorageAll[blockIdx.x * queueCapacity].
 ///
-template<int maxAtoms, int maxBonds, int blockThreads, bool CollectTimings, bool CollectStats>
+template<int maxAtoms, int maxBonds, int blockThreads, bool CollectTimings, bool CollectStats,
+         FmcsScratchLocation ScratchLoc = FmcsScratchLocation::Shared>
 __global__ void fmcsKernel(
     const DevicePerPairInput* __restrict__ pairs,
     DeviceMCSResult<maxAtoms, maxBonds>* __restrict__ results,
     QueuedSeed<maxAtoms, maxBonds, maxAtoms, maxBonds>* __restrict__ queueStorageAll,
     std::uint8_t* __restrict__ substructureStorageAll,
+    FmcsSubstructureScratch<maxAtoms, maxBonds, maxAtoms>* __restrict__ scratchStorageAll,
     unsigned long long* __restrict__ elapsedClocks,
     ExecutionStats* __restrict__ statsOut,
     int queueCapacity,
     int substructurePartialCapacity,
     int numPairs,
     unsigned long long timeoutClocks) {
+  static_assert(ScratchLoc != FmcsScratchLocation::Auto,
+                "Auto is host-only; resolve to Shared or Global before kernel selection");
   if constexpr (!CollectTimings) {
     (void)elapsedClocks;
   }
@@ -539,7 +543,22 @@ __global__ void fmcsKernel(
   __shared__ unsigned long long startClock;
   __shared__ unsigned long long phase1StartClock;
   __shared__ unsigned long long phase2StartClock;
-  __shared__ SubstructureScratchT substructureScratch[kNumGroups];
+  // Substructure scratch placement: static shared (historical) or a slice of
+  // the per-block global slab.  A __shared__ declaration inside the
+  // if-constexpr block has static storage duration, so the pointer stays valid
+  // for the whole kernel; under Global no shared bytes are allocated at all.
+  // TODO(blockSize>512): extend this mechanism to newBondsArr and the
+  // current/biggest QueuedSeed copies (see
+  // analysis/fmcs_scratch_placement_plan.md section 6).
+  SubstructureScratchT* substructureScratch;
+  if constexpr (ScratchLoc == FmcsScratchLocation::Shared) {
+    (void)scratchStorageAll;
+    __shared__ SubstructureScratchT substructureScratchShared[kNumGroups];
+    substructureScratch = substructureScratchShared;
+  } else {
+    substructureScratch =
+        scratchStorageAll + static_cast<size_t>(pairIdx) * kNumGroups;
+  }
   __shared__ ExecutionStats groupStats[kStatsEnabled ? kNumGroups : 1];
   __shared__ ExecutionStats measureStats;
 

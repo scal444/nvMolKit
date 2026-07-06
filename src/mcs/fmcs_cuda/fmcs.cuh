@@ -33,6 +33,7 @@
 // when ring membership is encoded in atom/bond labels.  `CompleteRingsOnly`,
 // chirality, fused-ring strictness, and Threshold < 1.0 are out of scope.
 
+#include "fmcs_cuda/fmcs_config.cuh"
 #include "fmcs_cuda/fmcs_labeled_graph.h"
 #include "fmcs_cuda/fmcs_stats.cuh"
 #include "mcs_common/mcs_types.cuh"
@@ -54,8 +55,20 @@ namespace fmcs {
 /// unsupported parameter combinations.
 struct Parameters {
   /// CUDA block size for the per-pair kernel. Supported: 128 and 512.
-  /// Block size 512 supports maxSize tiers up to 64 only.
+  /// Block size 512 supports tier-128 when the substructure scratch is placed
+  /// in global memory (see scratchLocation); the default Auto policy selects
+  /// that automatically.
   int   blockSize        = 128;
+  /// Placement of the per-group substructure fallback scratch.  Auto keeps
+  /// small/hot configs on shared memory and only moves scratch to global for
+  /// 512 @ tier-128 (where static shared cannot fit).  Explicit Shared with
+  /// 512 @ tier-128 is rejected at dispatch.
+  FmcsScratchLocation scratchLocation = FmcsScratchLocation::Auto;
+  /// Dormant readiness flag for the extended-shared-memory carveout
+  /// (analysis/fmcs_scratch_placement_plan.md section 7).  Has no effect until
+  /// the dynamic-shared follow-on lands; kept here so that change need not
+  /// re-plumb the API.
+  bool  enableExtendedSharedCarveout = false;
   /// Per-pair wall timeout in milliseconds.  0 = no timeout.
   float timeoutMs        = 0;
   /// Max pairs per tier chunk in the batch API.  0 = default chunk size.

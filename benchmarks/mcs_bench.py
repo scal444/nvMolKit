@@ -13,7 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Maximum common substructure benchmark comparing nvmolkit against RDKit."""
+"""Maximum common substructure benchmark comparing nvmolkit against RDKit.
+
+Example: sweep block-size 512 with global substructure scratch (which unlocks
+tier-128) against the default block-128 baseline on a tier-128-containing
+dataset, writing a self-describing CSV::
+
+    python benchmarks/mcs_bench.py --block-size 512 --scratch-location global \\
+        --timings-csv mcs_512_global.csv
+    python benchmarks/mcs_bench.py --block-size 128 \\
+        --timings-csv mcs_128.csv
+"""
 
 import argparse
 import csv
@@ -154,6 +164,7 @@ def _bench_nvmolkit(mols: list[Chem.Mol], pairs: list[tuple[int, int]], args: ar
         "Starting nvmolkit MCS benchmark: "
         f"molecules={len(mols)} pairs={len(pairs)} runs={args.runs} warmups={args.warmups} "
         f"batch_size={args.batch_size} block_size={args.block_size} "
+        f"scratch_location={args.scratch_location} "
         f"workers={args.workers} prep_threads={args.prep_threads} "
         f"num_gpus={args.num_gpus} executors_per_runner={args.executors_per_runner} "
         f"collect_timings={args.collect_timings} collect_stats={args.collect_stats}"
@@ -179,6 +190,7 @@ def _bench_nvmolkit(mols: list[Chem.Mol], pairs: list[tuple[int, int]], args: ar
                 timeout_seconds=args.timeout_seconds,
                 batch_size=args.batch_size,
                 block_size=args.block_size,
+                scratch_location=args.scratch_location,
                 worker_threads=args.workers,
                 preprocessing_threads=args.prep_threads,
                 executors_per_runner=args.executors_per_runner,
@@ -303,6 +315,8 @@ def _write_pair_timings(
     nv_result,
     rdkit_sizes: list[tuple[int, int]] | None,
     rdkit_times_ms: list[float] | None,
+    block_size: int = 128,
+    scratch_location: str = "auto",
 ) -> None:
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -331,6 +345,8 @@ def _write_pair_timings(
         "nvmolkit_overflowed",
         "nvmolkit_used_gpu",
         "nvmolkit_used_fallback",
+        "nvmolkit_block_size",
+        "nvmolkit_scratch_location",
     ]
     timing_columns = []
     timing_names = set()
@@ -377,6 +393,8 @@ def _write_pair_timings(
                 "nvmolkit_overflowed": "",
                 "nvmolkit_used_gpu": "",
                 "nvmolkit_used_fallback": "",
+                "nvmolkit_block_size": block_size,
+                "nvmolkit_scratch_location": scratch_location,
             }
             for column in stats_columns:
                 row[column] = ""
@@ -525,7 +543,19 @@ def _build_parser(default_smiles: Path) -> argparse.ArgumentParser:
         type=int,
         choices=[128, 512],
         default=128,
-        help="CUDA threads per fMCS pair block. 512 is experimental and only supports maxSize tiers up to 64.",
+        help="CUDA threads per fMCS pair block. 512 supports tier-128 when "
+        "--scratch-location places scratch in global memory (auto does so).",
+    )
+    _add_option(
+        gpu_group,
+        "--scratch-location",
+        legacy_flags=("--scratch_location",),
+        dest="scratch_location",
+        choices=["auto", "shared", "global"],
+        default="auto",
+        help="fMCS substructure-scratch placement. auto picks global for "
+        "block-size 512 at tier-128; global forces global memory; shared "
+        "forces shared and errors for block-size 512 at tier-128.",
     )
     _add_option(
         gpu_group,
@@ -720,7 +750,10 @@ def main() -> None:
         )
 
     if args.timings_csv:
-        _write_pair_timings(args.timings_csv, mols, pairs, nv_result, rdkit_sizes, rdkit_times_ms)
+        _write_pair_timings(
+            args.timings_csv, mols, pairs, nv_result, rdkit_sizes, rdkit_times_ms,
+            block_size=args.block_size, scratch_location=args.scratch_location,
+        )
 
     if args.validate:
         if rdkit_sizes is None:

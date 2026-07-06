@@ -74,6 +74,26 @@ void requireTransferCapacity(size_t required, size_t capacity, const char* conte
 /// already large enough.  Old contents are discarded (scratch is rewritten by
 /// each kernel), and the old allocation is released before the new one so the
 /// two never co-reside -- these slabs reach multiple GiB at large tiers.
+/// Resolve the scratch-location policy for one (blockThreads, tier) pair.
+/// Auto puts only 512 @ tier-128 in global memory (where static shared cannot
+/// fit) and keeps every other config on fast shared memory.  Explicit Shared
+/// at 512 @ tier-128 is rejected here rather than hitting a missing kernel
+/// instantiation downstream.
+template<int blockThreads, int maxAtoms>
+FmcsScratchLocation resolveScratchLocation(FmcsScratchLocation requested) {
+  constexpr bool kTier128At512 = (blockThreads == 512 && maxAtoms == 128);
+  if (requested == FmcsScratchLocation::Auto) {
+    return kTier128At512 ? FmcsScratchLocation::Global
+                         : FmcsScratchLocation::Shared;
+  }
+  if (requested == FmcsScratchLocation::Shared && kTier128At512) {
+    throw std::invalid_argument(
+        "fMCS scratchLocation=shared cannot satisfy blockSize 512 at tier-128 "
+        "(needs ~70 KB static shared > 48 KB); use scratchLocation=global or auto");
+  }
+  return requested;
+}
+
 void ensureScratchCapacity(nvMolKit::AsyncDeviceVector<std::uint8_t>& buffer, size_t bytes) {
   if (buffer.size() >= bytes) {
     return;
@@ -258,6 +278,9 @@ struct FmcsExecutor {
   nvMolKit::AsyncDeviceVector<std::uint8_t> outputDevice;
   nvMolKit::AsyncDeviceVector<std::uint8_t> queueDevice;
   nvMolKit::AsyncDeviceVector<std::uint8_t> substructureDevice;
+  // Global substructure-scratch slab; size 0 (unused) unless a tier resolves
+  // to scratchLocation == Global.
+  nvMolKit::AsyncDeviceVector<std::uint8_t> scratchDevice;
 
   FmcsExecutor(int executorIdx,
                cudaStream_t externalStream,
@@ -282,6 +305,7 @@ struct FmcsExecutor {
     // the largest chunk it actually processes.
     queueDevice.setStream(stream);
     substructureDevice.setStream(stream);
+    scratchDevice.setStream(stream);
     inputDevice.resize(bufferSizing.inputBytes);
     outputDevice.resize(bufferSizing.outputBytes);
   }
@@ -443,10 +467,14 @@ void launchTierAsync(
     nvMolKit::AsyncDeviceVector<std::uint8_t>& deviceOutput,
     nvMolKit::AsyncDeviceVector<std::uint8_t>& queueStorage,
     nvMolKit::AsyncDeviceVector<std::uint8_t>& substructureStorage,
+    nvMolKit::AsyncDeviceVector<std::uint8_t>& scratchStorage,
     bool collectTimings,
     bool collectStats) {
   const int numPairs = static_cast<int>(stagedInput.numPairs);
   if (numPairs == 0) return;
+
+  const FmcsScratchLocation scratchLocation =
+      resolveScratchLocation<blockThreads, maxAtoms>(params.scratchLocation);
 
   nvMolKit::ScopedNvtxRange launchRange("fMCS: Launch tier kernel maxAtoms=" + std::to_string(maxAtoms) +
                                         " pairs=" + std::to_string(numPairs));
@@ -483,6 +511,15 @@ void launchTierAsync(
   ensureScratchCapacity(substructureStorage, substructureBytes);
   std::uint8_t* dSubstructure = substructureStorage.data();
 
+  void* dScratch = nullptr;
+  if (scratchLocation == FmcsScratchLocation::Global) {
+    const size_t scratchBytes =
+        fmcsScratchStorageBytes<blockThreads, maxAtoms, maxBonds>(
+            stagedInput.numPairs);
+    ensureScratchCapacity(scratchStorage, scratchBytes);
+    dScratch = scratchStorage.data();
+  }
+
   unsigned long long timeoutClocks = 0;
   if (params.timeoutMs > 0.0f) {
     int device = 0;
@@ -503,14 +540,14 @@ void launchTierAsync(
   }
   if constexpr (blockThreads == 128) {
     launchFmcsKernel128<maxAtoms, maxBonds>(
-        bufs.dPairInputs, dResults, dQueue, dSubstructure,
-        bufs.dElapsedClocks, bufs.dTimingStats, bufs.dStats,
+        bufs.dPairInputs, dResults, dQueue, dSubstructure, dScratch,
+        scratchLocation, bufs.dElapsedClocks, bufs.dTimingStats, bufs.dStats,
         fmcsQueueCapacity(), fmcsSubstructurePartialCapacity(),
         numPairs, timeoutClocks, stream);
   } else if constexpr (blockThreads == 512) {
     launchFmcsKernel512<maxAtoms, maxBonds>(
-        bufs.dPairInputs, dResults, dQueue, dSubstructure,
-        bufs.dElapsedClocks, bufs.dTimingStats, bufs.dStats,
+        bufs.dPairInputs, dResults, dQueue, dSubstructure, dScratch,
+        scratchLocation, bufs.dElapsedClocks, bufs.dTimingStats, bufs.dStats,
         fmcsQueueCapacity(), fmcsSubstructurePartialCapacity(),
         numPairs, timeoutClocks, stream);
   } else {
@@ -657,6 +694,7 @@ void launchTierChunk(
       executor.outputDevice,
       executor.queueDevice,
       executor.substructureDevice,
+      executor.scratchDevice,
       collectTimings,
       collectStats);
 
@@ -769,20 +807,14 @@ void runTierChunks(
   }
   allocRange.pop();
 
+  // Tier-128 at blockSize 512 is supported via global substructure scratch
+  // (resolved per tier in launchTierAsync), so no tier is gated here.
   auto launchChunk = [&](FmcsExecutor& executor, TierChunkVariant<Policy>& chunk) {
     std::visit(
         [&](auto& typedChunk) {
           if (typedChunk) {
-            using ChunkPtrT = std::decay_t<decltype(typedChunk)>;
-            using Tier128ChunkPtr = std::unique_ptr<TierChunk<128, 128, Policy>>;
-            if constexpr (blockThreads == 512 &&
-                          std::is_same_v<ChunkPtrT, Tier128ChunkPtr>) {
-              throw std::invalid_argument(
-                  "fMCS blockSize 512 supports maxSize tiers up to 64");
-            } else {
-              launchTierChunk<blockThreads>(
-                  executor, typedChunk, params, collectTimings, collectStats);
-            }
+            launchTierChunk<blockThreads>(
+                executor, typedChunk, params, collectTimings, collectStats);
           }
         },
         chunk);
@@ -792,17 +824,9 @@ void runTierChunks(
     std::visit(
         [&](auto& typedChunk) {
           if (typedChunk) {
-            using ChunkPtrT = std::decay_t<decltype(typedChunk)>;
-            using Tier128ChunkPtr = std::unique_ptr<TierChunk<128, 128, Policy>>;
-            if constexpr (blockThreads == 512 &&
-                          std::is_same_v<ChunkPtrT, Tier128ChunkPtr>) {
-              throw std::invalid_argument(
-                  "fMCS blockSize 512 supports maxSize tiers up to 64");
-            } else {
-              drainTierChunk(executor, typedChunk, outResults,
-                             perPairTimesMs, perPairTimingStats, perPairStats,
-                             clockRateKHz);
-            }
+            drainTierChunk(executor, typedChunk, outResults,
+                           perPairTimesMs, perPairTimingStats, perPairStats,
+                           clockRateKHz);
           }
         },
         chunk);
@@ -852,9 +876,14 @@ std::vector<MCSResult> runBatchWithBlockSize(
   }
   descRange.pop();
   if constexpr (blockThreads == 512) {
-    if (!tierIndices[3].empty()) {
+    // Tier-128 at 512 threads now runs via global substructure scratch
+    // (resolved per tier in launchTierAsync).  Only reject the one combination
+    // that cannot be satisfied: an explicit request for shared placement.
+    if (!tierIndices[3].empty() &&
+        params.scratchLocation == FmcsScratchLocation::Shared) {
       throw std::invalid_argument(
-          "fMCS blockSize 512 supports maxSize tiers up to 64");
+          "fMCS scratchLocation=shared cannot satisfy blockSize 512 at tier-128 "
+          "(needs ~70 KB static shared > 48 KB); use scratchLocation=global or auto");
     }
   }
 

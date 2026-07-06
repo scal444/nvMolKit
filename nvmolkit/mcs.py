@@ -59,6 +59,8 @@ _BOND_COMPARE_ALIASES = {
     "exact": "order_exact",
 }
 
+_SCRATCH_LOCATION_VALUES = {"auto", "shared", "global"}
+
 
 @dataclass(frozen=True)
 class MCSResult:
@@ -148,7 +150,16 @@ class MCSConfig:
         batchSize: GPU per-tier chunk size. ``0`` uses a default chunk size
             of 512 pairs per tier, which bounds peak device scratch.
         blockSize: CUDA threads per fMCS pair block. Supported values are
-            ``128`` and ``512``. ``512`` supports maxSize tiers up to 64.
+            ``128`` and ``512``. ``512`` supports tier-128 when
+            ``scratchLocation`` places the substructure scratch in global
+            memory; the default ``"auto"`` does this automatically.
+        scratchLocation: Placement of the fMCS substructure fallback scratch,
+            one of ``"auto"``, ``"shared"``, or ``"global"``. ``"auto"`` keeps
+            small/hot configs on fast shared memory and only moves scratch to
+            global memory for ``blockSize=512`` at tier-128, where static
+            shared cannot fit. ``"global"`` trades shared-memory pressure for
+            global-memory latency on the (cold) fallback path. ``"shared"``
+            with ``blockSize=512`` at tier-128 raises at dispatch.
         workerThreads: GPU runner threads per GPU. ``-1`` autoselects.
         preprocessingThreads: CPU threads for pair preprocessing. ``-1``
             autoselects.
@@ -162,6 +173,7 @@ class MCSConfig:
         self,
         batchSize: int = 0,
         blockSize: int = 128,
+        scratchLocation: str = "auto",
         workerThreads: int = -1,
         preprocessingThreads: int = -1,
         executorsPerRunner: int = -1,
@@ -169,6 +181,7 @@ class MCSConfig:
     ) -> None:
         self.batchSize = int(batchSize)
         self.blockSize = int(blockSize)
+        self.scratchLocation = _normalize_scratch_location(scratchLocation)
         self.workerThreads = int(workerThreads)
         self.preprocessingThreads = int(preprocessingThreads)
         self.executorsPerRunner = int(executorsPerRunner)
@@ -179,6 +192,7 @@ class MCSConfig:
         return {
             "batchSize": self.batchSize,
             "blockSize": self.blockSize,
+            "scratchLocation": self.scratchLocation,
             "workerThreads": self.workerThreads,
             "preprocessingThreads": self.preprocessingThreads,
             "executorsPerRunner": self.executorsPerRunner,
@@ -190,6 +204,7 @@ class MCSConfig:
         return {
             "batch_size": self.batchSize,
             "block_size": self.blockSize,
+            "scratch_location": self.scratchLocation,
             "worker_threads": self.workerThreads,
             "preprocessing_threads": self.preprocessingThreads,
             "executors_per_runner": self.executorsPerRunner,
@@ -198,10 +213,15 @@ class MCSConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MCSConfig":
-        """Create an :class:`MCSConfig` from a dictionary produced by :meth:`to_dict`."""
+        """Create an :class:`MCSConfig` from a dictionary produced by :meth:`to_dict`.
+
+        Missing keys fall back to defaults, so dictionaries serialized by older
+        versions (before ``scratchLocation`` existed) still load.
+        """
         known = {
             "batchSize",
             "blockSize",
+            "scratchLocation",
             "workerThreads",
             "preprocessingThreads",
             "executorsPerRunner",
@@ -232,6 +252,13 @@ def _normalize_bond_compare(value: str) -> str:
     if normalized not in _BOND_COMPARE_ALIASES:
         raise ValueError(f"Unsupported bond_compare value: {value!r}")
     return _BOND_COMPARE_ALIASES[normalized]
+
+
+def _normalize_scratch_location(value: str) -> str:
+    normalized = value.lower().replace("-", "_")
+    if normalized not in _SCRATCH_LOCATION_VALUES:
+        raise ValueError(f"Unsupported scratch_location value: {value!r}")
+    return normalized
 
 
 def _coerce_pairs(pairs: Sequence[Sequence[int]]) -> tuple[Pair, ...]:
@@ -284,6 +311,7 @@ def findMCS(
     config: MCSConfig | None = None,
     batch_size: int = 0,
     block_size: int = 128,
+    scratch_location: str = "auto",
     worker_threads: int = -1,
     preprocessing_threads: int = -1,
     executors_per_runner: int = -1,
@@ -332,7 +360,16 @@ def findMCS(
         batch_size: GPU per-tier chunk size. ``0`` uses a default chunk size
             of 512 pairs per tier, which bounds peak device scratch.
         block_size: CUDA threads per fMCS pair block. Supported values are
-            ``128`` and ``512``. ``512`` supports maxSize tiers up to 64.
+            ``128`` and ``512``. ``512`` supports tier-128 when
+            ``scratch_location`` places the substructure scratch in global
+            memory; the default ``"auto"`` does this automatically.
+        scratch_location: Placement of the fMCS substructure fallback scratch,
+            one of ``"auto"``, ``"shared"``, or ``"global"``. ``"auto"`` picks
+            global memory for ``block_size=512`` at tier-128 (where static
+            shared cannot fit) and shared memory otherwise. ``"global"`` trades
+            shared-memory pressure for global-memory latency on the cold
+            fallback path; ``"shared"`` with ``block_size=512`` at tier-128
+            raises at dispatch.
         worker_threads: GPU runner threads per GPU. ``-1`` autoselects.
         preprocessing_threads: CPU threads for pair preprocessing. ``-1``
             autoselects.
@@ -369,6 +406,8 @@ def findMCS(
             explicit_options.append("batch_size")
         if block_size != 128:
             explicit_options.append("block_size")
+        if scratch_location != "auto":
+            explicit_options.append("scratch_location")
         if worker_threads != -1:
             explicit_options.append("worker_threads")
         if preprocessing_threads != -1:
@@ -382,6 +421,7 @@ def findMCS(
             raise ValueError(f"config cannot be combined with explicit GPU execution options: {joined}")
         batch_size = config.batchSize
         block_size = config.blockSize
+        scratch_location = config.scratchLocation
         worker_threads = config.workerThreads
         preprocessing_threads = config.preprocessingThreads
         executors_per_runner = config.executorsPerRunner
@@ -450,6 +490,7 @@ def findMCS(
             "timeout_seconds": int(timeout_seconds),
             "batch_size": int(batch_size),
             "block_size": int(block_size),
+            "scratch_location": _normalize_scratch_location(scratch_location),
             "worker_threads": int(worker_threads),
             "preprocessing_threads": int(preprocessing_threads),
             "executors_per_runner": int(executors_per_runner),

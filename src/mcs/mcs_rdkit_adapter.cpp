@@ -429,6 +429,9 @@ bool shouldFallbackToRDKit(const RDKit::ROMol&  molA,
     reason = "molecule exceeds fMCS tier-128 limits";
     return true;
   }
+  // Do NOT add a blockSize gate here: blockSize 512 at tier-128 is now handled
+  // on the GPU via global substructure scratch (params.scratchLocation), so it
+  // no longer needs to fall back to RDKit.
   return false;
 }
 

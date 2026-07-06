@@ -460,7 +460,7 @@ __device__ __forceinline__ bool matchIncrementalFastCooperative(
 // ---------------------------------------------------------------------------
 
 template<int maxAtoms, int maxBonds, int maxTargetAtoms>
-struct FmcsSubstructureScratch {
+struct alignas(16) FmcsSubstructureScratch {
   // Scratch for the RDKit checkIfMatchAndAppend fallback.  This is deliberately
   // caller-owned shared memory, not function-local state: tier-128 scratch is
   // too large to risk compiler-created stack/local memory in the matcher.
