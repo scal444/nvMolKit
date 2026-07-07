@@ -1,0 +1,963 @@
+{
+  "configurations": {
+    "sm_100": {
+      "occupancy_model": "sm_100",
+      "resident_block_targets": {
+        "1": {
+          "common_block_size": 896,
+          "tiers": {
+            "128": {
+              "active_blocks_per_sm": 1,
+              "block_size": 896,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 72,
+              "scratch": "global",
+              "static_shared_bytes": 62624
+            },
+            "16": {
+              "active_blocks_per_sm": 1,
+              "block_size": 896,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 18176
+            },
+            "32": {
+              "active_blocks_per_sm": 1,
+              "block_size": 896,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 71,
+              "scratch": "shared",
+              "static_shared_bytes": 32096
+            },
+            "64": {
+              "active_blocks_per_sm": 1,
+              "block_size": 896,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 62000
+            }
+          }
+        },
+        "2": {
+          "common_block_size": 448,
+          "tiers": {
+            "128": {
+              "active_blocks_per_sm": 2,
+              "block_size": 448,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 60704
+            },
+            "16": {
+              "active_blocks_per_sm": 2,
+              "block_size": 448,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 9216
+            },
+            "32": {
+              "active_blocks_per_sm": 2,
+              "block_size": 448,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 71,
+              "scratch": "shared",
+              "static_shared_bytes": 16192
+            },
+            "64": {
+              "active_blocks_per_sm": 2,
+              "block_size": 448,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 31184
+            }
+          }
+        }
+      }
+    },
+    "sm_103": {
+      "occupancy_model": "sm_100",
+      "resident_block_targets": {
+        "1": {
+          "common_block_size": 896,
+          "tiers": {
+            "128": {
+              "active_blocks_per_sm": 1,
+              "block_size": 896,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 72,
+              "scratch": "global",
+              "static_shared_bytes": 62624
+            },
+            "16": {
+              "active_blocks_per_sm": 1,
+              "block_size": 896,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 18176
+            },
+            "32": {
+              "active_blocks_per_sm": 1,
+              "block_size": 896,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 71,
+              "scratch": "shared",
+              "static_shared_bytes": 32096
+            },
+            "64": {
+              "active_blocks_per_sm": 1,
+              "block_size": 896,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 62000
+            }
+          }
+        },
+        "2": {
+          "common_block_size": 448,
+          "tiers": {
+            "128": {
+              "active_blocks_per_sm": 2,
+              "block_size": 448,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 60704
+            },
+            "16": {
+              "active_blocks_per_sm": 2,
+              "block_size": 448,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 9216
+            },
+            "32": {
+              "active_blocks_per_sm": 2,
+              "block_size": 448,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 71,
+              "scratch": "shared",
+              "static_shared_bytes": 16192
+            },
+            "64": {
+              "active_blocks_per_sm": 2,
+              "block_size": 448,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 31184
+            }
+          }
+        }
+      }
+    },
+    "sm_120": {
+      "occupancy_model": "sm_120",
+      "resident_block_targets": {
+        "1": {
+          "common_block_size": 640,
+          "tiers": {
+            "128": {
+              "active_blocks_per_sm": 1,
+              "block_size": 640,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 41.666664123535156,
+              "registers_per_thread": 86,
+              "scratch": "global",
+              "static_shared_bytes": 44888
+            },
+            "16": {
+              "active_blocks_per_sm": 1,
+              "block_size": 896,
+              "limiters": [
+                "blocks",
+                "registers"
+              ],
+              "occupancy_percent": 58.33333206176758,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 18176
+            },
+            "32": {
+              "active_blocks_per_sm": 1,
+              "block_size": 896,
+              "limiters": [
+                "blocks",
+                "registers"
+              ],
+              "occupancy_percent": 58.33333206176758,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 32096
+            },
+            "64": {
+              "active_blocks_per_sm": 1,
+              "block_size": 768,
+              "limiters": [
+                "registers",
+                "shared_memory"
+              ],
+              "occupancy_percent": 50.0,
+              "registers_per_thread": 75,
+              "scratch": "shared",
+              "static_shared_bytes": 53184
+            }
+          }
+        },
+        "2": {
+          "common_block_size": 352,
+          "tiers": {
+            "128": {
+              "active_blocks_per_sm": 2,
+              "block_size": 352,
+              "limiters": [
+                "registers",
+                "shared_memory"
+              ],
+              "occupancy_percent": 45.833335876464844,
+              "registers_per_thread": 79,
+              "scratch": "shared",
+              "static_shared_bytes": 47824
+            },
+            "16": {
+              "active_blocks_per_sm": 2,
+              "block_size": 448,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 58.33333206176758,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 9216
+            },
+            "32": {
+              "active_blocks_per_sm": 2,
+              "block_size": 448,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 58.33333206176758,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 16192
+            },
+            "64": {
+              "active_blocks_per_sm": 2,
+              "block_size": 384,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 50.0,
+              "registers_per_thread": 75,
+              "scratch": "shared",
+              "static_shared_bytes": 26784
+            }
+          }
+        }
+      }
+    },
+    "sm_70": {
+      "occupancy_model": "sm_70",
+      "resident_block_targets": {
+        "1": {
+          "common_block_size": 768,
+          "tiers": {
+            "128": {
+              "active_blocks_per_sm": 1,
+              "block_size": 768,
+              "limiters": [
+                "registers",
+                "shared_memory"
+              ],
+              "occupancy_percent": 37.5,
+              "registers_per_thread": 76,
+              "scratch": "global",
+              "static_shared_bytes": 53752
+            },
+            "16": {
+              "active_blocks_per_sm": 1,
+              "block_size": 768,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 37.5,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 15616
+            },
+            "32": {
+              "active_blocks_per_sm": 1,
+              "block_size": 768,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 37.5,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 27552
+            },
+            "64": {
+              "active_blocks_per_sm": 1,
+              "block_size": 896,
+              "limiters": [
+                "registers",
+                "shared_memory"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 62000
+            }
+          }
+        },
+        "2": {
+          "common_block_size": 352,
+          "tiers": {
+            "128": {
+              "active_blocks_per_sm": 2,
+              "block_size": 352,
+              "limiters": [
+                "registers",
+                "shared_memory"
+              ],
+              "occupancy_percent": 34.375,
+              "registers_per_thread": 77,
+              "scratch": "shared",
+              "static_shared_bytes": 47824
+            },
+            "16": {
+              "active_blocks_per_sm": 2,
+              "block_size": 384,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 37.5,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 7920
+            },
+            "32": {
+              "active_blocks_per_sm": 2,
+              "block_size": 384,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 37.5,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 13904
+            },
+            "64": {
+              "active_blocks_per_sm": 2,
+              "block_size": 448,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 31184
+            }
+          }
+        }
+      }
+    },
+    "sm_75": {
+      "occupancy_model": "sm_75",
+      "resident_block_targets": {
+        "1": {
+          "common_block_size": 768,
+          "tiers": {
+            "128": {
+              "active_blocks_per_sm": 1,
+              "block_size": 768,
+              "limiters": [
+                "blocks",
+                "registers",
+                "shared_memory"
+              ],
+              "occupancy_percent": 75.0,
+              "registers_per_thread": 74,
+              "scratch": "global",
+              "static_shared_bytes": 53752
+            },
+            "16": {
+              "active_blocks_per_sm": 1,
+              "block_size": 768,
+              "limiters": [
+                "blocks",
+                "registers"
+              ],
+              "occupancy_percent": 75.0,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 15616
+            },
+            "32": {
+              "active_blocks_per_sm": 1,
+              "block_size": 768,
+              "limiters": [
+                "blocks",
+                "registers"
+              ],
+              "occupancy_percent": 75.0,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 27552
+            },
+            "64": {
+              "active_blocks_per_sm": 1,
+              "block_size": 896,
+              "limiters": [
+                "blocks",
+                "registers",
+                "shared_memory"
+              ],
+              "occupancy_percent": 87.5,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 62000
+            }
+          }
+        },
+        "2": {
+          "common_block_size": 224,
+          "tiers": {
+            "128": {
+              "active_blocks_per_sm": 2,
+              "block_size": 224,
+              "limiters": [
+                "shared_memory"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 77,
+              "scratch": "shared",
+              "static_shared_bytes": 30640
+            },
+            "16": {
+              "active_blocks_per_sm": 2,
+              "block_size": 384,
+              "limiters": [
+                "blocks",
+                "registers"
+              ],
+              "occupancy_percent": 75.0,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 7920
+            },
+            "32": {
+              "active_blocks_per_sm": 2,
+              "block_size": 384,
+              "limiters": [
+                "blocks",
+                "registers"
+              ],
+              "occupancy_percent": 75.0,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 13904
+            },
+            "64": {
+              "active_blocks_per_sm": 2,
+              "block_size": 448,
+              "limiters": [
+                "blocks",
+                "registers",
+                "shared_memory"
+              ],
+              "occupancy_percent": 87.5,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 31184
+            }
+          }
+        }
+      }
+    },
+    "sm_80": {
+      "occupancy_model": "sm_80",
+      "resident_block_targets": {
+        "1": {
+          "common_block_size": 768,
+          "tiers": {
+            "128": {
+              "active_blocks_per_sm": 1,
+              "block_size": 768,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 37.5,
+              "registers_per_thread": 75,
+              "scratch": "global",
+              "static_shared_bytes": 53752
+            },
+            "16": {
+              "active_blocks_per_sm": 1,
+              "block_size": 768,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 37.5,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 15616
+            },
+            "32": {
+              "active_blocks_per_sm": 1,
+              "block_size": 768,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 37.5,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 27552
+            },
+            "64": {
+              "active_blocks_per_sm": 1,
+              "block_size": 896,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 62000
+            }
+          }
+        },
+        "2": {
+          "common_block_size": 384,
+          "tiers": {
+            "128": {
+              "active_blocks_per_sm": 2,
+              "block_size": 384,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 37.5,
+              "registers_per_thread": 79,
+              "scratch": "shared",
+              "static_shared_bytes": 52112
+            },
+            "16": {
+              "active_blocks_per_sm": 2,
+              "block_size": 384,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 37.5,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 7920
+            },
+            "32": {
+              "active_blocks_per_sm": 2,
+              "block_size": 384,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 37.5,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 13904
+            },
+            "64": {
+              "active_blocks_per_sm": 2,
+              "block_size": 448,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 31184
+            }
+          }
+        }
+      }
+    },
+    "sm_86": {
+      "occupancy_model": "sm_86",
+      "resident_block_targets": {
+        "1": {
+          "common_block_size": 768,
+          "tiers": {
+            "128": {
+              "active_blocks_per_sm": 1,
+              "block_size": 768,
+              "limiters": [
+                "registers",
+                "shared_memory"
+              ],
+              "occupancy_percent": 50.0,
+              "registers_per_thread": 78,
+              "scratch": "global",
+              "static_shared_bytes": 53752
+            },
+            "16": {
+              "active_blocks_per_sm": 1,
+              "block_size": 768,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 50.0,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 15616
+            },
+            "32": {
+              "active_blocks_per_sm": 1,
+              "block_size": 768,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 50.0,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 27552
+            },
+            "64": {
+              "active_blocks_per_sm": 1,
+              "block_size": 896,
+              "limiters": [
+                "blocks",
+                "registers",
+                "shared_memory"
+              ],
+              "occupancy_percent": 58.33333206176758,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 62000
+            }
+          }
+        },
+        "2": {
+          "common_block_size": 352,
+          "tiers": {
+            "128": {
+              "active_blocks_per_sm": 2,
+              "block_size": 352,
+              "limiters": [
+                "registers",
+                "shared_memory"
+              ],
+              "occupancy_percent": 45.833335876464844,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 47824
+            },
+            "16": {
+              "active_blocks_per_sm": 2,
+              "block_size": 384,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 50.0,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 7920
+            },
+            "32": {
+              "active_blocks_per_sm": 2,
+              "block_size": 384,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 50.0,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 13904
+            },
+            "64": {
+              "active_blocks_per_sm": 2,
+              "block_size": 448,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 58.33333206176758,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 31184
+            }
+          }
+        }
+      }
+    },
+    "sm_89": {
+      "occupancy_model": "sm_89",
+      "resident_block_targets": {
+        "1": {
+          "common_block_size": 768,
+          "tiers": {
+            "128": {
+              "active_blocks_per_sm": 1,
+              "block_size": 768,
+              "limiters": [
+                "registers",
+                "shared_memory"
+              ],
+              "occupancy_percent": 50.0,
+              "registers_per_thread": 78,
+              "scratch": "global",
+              "static_shared_bytes": 53752
+            },
+            "16": {
+              "active_blocks_per_sm": 1,
+              "block_size": 768,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 50.0,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 15616
+            },
+            "32": {
+              "active_blocks_per_sm": 1,
+              "block_size": 768,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 50.0,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 27552
+            },
+            "64": {
+              "active_blocks_per_sm": 1,
+              "block_size": 896,
+              "limiters": [
+                "blocks",
+                "registers",
+                "shared_memory"
+              ],
+              "occupancy_percent": 58.33333206176758,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 62000
+            }
+          }
+        },
+        "2": {
+          "common_block_size": 352,
+          "tiers": {
+            "128": {
+              "active_blocks_per_sm": 2,
+              "block_size": 352,
+              "limiters": [
+                "registers",
+                "shared_memory"
+              ],
+              "occupancy_percent": 45.833335876464844,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 47824
+            },
+            "16": {
+              "active_blocks_per_sm": 2,
+              "block_size": 384,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 50.0,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 7920
+            },
+            "32": {
+              "active_blocks_per_sm": 2,
+              "block_size": 384,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 50.0,
+              "registers_per_thread": 80,
+              "scratch": "shared",
+              "static_shared_bytes": 13904
+            },
+            "64": {
+              "active_blocks_per_sm": 2,
+              "block_size": 448,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 58.33333206176758,
+              "registers_per_thread": 72,
+              "scratch": "shared",
+              "static_shared_bytes": 31184
+            }
+          }
+        }
+      }
+    },
+    "sm_90": {
+      "occupancy_model": "sm_90",
+      "resident_block_targets": {
+        "1": {
+          "common_block_size": 896,
+          "tiers": {
+            "128": {
+              "active_blocks_per_sm": 1,
+              "block_size": 896,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 43.75,
+              "registers_per_thread": 68,
+              "scratch": "global",
+              "static_shared_bytes": 62624
+            },
+            "16": {
+              "active_blocks_per_sm": 1,
+              "block_size": 1024,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 50.0,
+              "registers_per_thread": 64,
+              "scratch": "shared",
+              "static_shared_bytes": 20752
+            },
+            "32": {
+              "active_blocks_per_sm": 1,
+              "block_size": 1024,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 50.0,
+              "registers_per_thread": 64,
+              "scratch": "shared",
+              "static_shared_bytes": 36656
+            },
+            "64": {
+              "active_blocks_per_sm": 1,
+              "block_size": 1024,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 50.0,
+              "registers_per_thread": 63,
+              "scratch": "shared",
+              "static_shared_bytes": 70800
+            }
+          }
+        },
+        "2": {
+          "common_block_size": 480,
+          "tiers": {
+            "128": {
+              "active_blocks_per_sm": 2,
+              "block_size": 480,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 46.875,
+              "registers_per_thread": 64,
+              "scratch": "shared",
+              "static_shared_bytes": 65008
+            },
+            "16": {
+              "active_blocks_per_sm": 2,
+              "block_size": 512,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 50.0,
+              "registers_per_thread": 64,
+              "scratch": "shared",
+              "static_shared_bytes": 10496
+            },
+            "32": {
+              "active_blocks_per_sm": 2,
+              "block_size": 512,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 50.0,
+              "registers_per_thread": 64,
+              "scratch": "shared",
+              "static_shared_bytes": 18464
+            },
+            "64": {
+              "active_blocks_per_sm": 2,
+              "block_size": 512,
+              "limiters": [
+                "registers"
+              ],
+              "occupancy_percent": 50.0,
+              "registers_per_thread": 63,
+              "scratch": "shared",
+              "static_shared_bytes": 35584
+            }
+          }
+        }
+      }
+    }
+  },
+  "generator": "fmcs_occupancy_sweep.py",
+  "method": "Compile real fmcsKernel specializations with ptxas, then pass registers/thread, static shared memory, barriers, and threads/block to Nsight Compute's offline OccupancyCalculator. A target qualifies when get_resource_utilization()['allocated_blocks'] is at least the requested resident-block count.",
+  "regenerate_command": "python src/mcs/fmcs_cuda/fmcs_occupancy_sweep.py --architectures full --tiers 16 32 64 128 --scratch auto --min-block-size 32 --max-block-size 1024 --block-step 32 --resident-blocks 1 2 --search bisect --reject-stack-spills --config-json src/mcs/fmcs_cuda/fmcs_occupancy_config.json --config-header src/mcs/fmcs_cuda/fmcs_occupancy_config.cuh --production-architecture 120",
+  "requires_resident_gpu": false,
+  "schema_version": 1,
+  "search_assumption": "Resident blocks do not increase with block size inside one scratch-placement domain.",
+  "search_mode": "bisect"
+}

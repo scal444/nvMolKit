@@ -136,7 +136,7 @@ def test_pairs_mode_chunked_multi_executor_matches_rdkit():
         mode="pairs",
         pairs=pairs,
         batch_size=1,
-        block_size=128,
+        block_size=352,
         executors_per_runner=2,
     )
 
@@ -154,7 +154,7 @@ def test_pairs_mode_threaded_gpu_options_match_rdkit():
         mode="pairs",
         pairs=pairs,
         batch_size=1,
-        block_size=128,
+        block_size=352,
         worker_threads=2,
         preprocessing_threads=2,
         executors_per_runner=1,
@@ -171,7 +171,7 @@ def test_config_path_matches_rdkit_and_rejects_duplicate_execution_options():
     pairs = [(0, 1), (2, 3)]
     config = MCSConfig(
         batchSize=1,
-        blockSize=128,
+        blockSize=352,
         workerThreads=1,
         preprocessingThreads=1,
         executorsPerRunner=1,
@@ -184,7 +184,7 @@ def test_config_path_matches_rdkit_and_rejects_duplicate_execution_options():
     _assert_matches_rdkit(result, mols)
 
     with pytest.raises(ValueError, match="config cannot be combined"):
-        findMCS(mols, mode="pairs", pairs=pairs, config=config, block_size=512)
+        findMCS(mols, mode="pairs", pairs=pairs, config=config, block_size=640)
 
 
 def test_all_pairs_default_is_upper_triangle_with_diagonal():
@@ -301,7 +301,7 @@ def test_invalid_mode_and_optional_arguments():
         findMCS(mols, mode="pairs", pairs=[(0, 1)], bond_compare="shape")
     with pytest.raises(ValueError, match="Unsupported scratch_location"):
         findMCS(mols, mode="pairs", pairs=[(0, 1)], scratch_location="l2")
-    for block_size in (32, 64, 256):
+    for block_size in (32, 64, 384):
         with pytest.raises(ValueError, match="blockSize"):
             findMCS(mols, mode="pairs", pairs=[(0, 1)], block_size=block_size)
 
@@ -312,12 +312,12 @@ def test_scratch_location_invalid_value_rejected_in_config():
 
 
 def test_mcsconfig_roundtrip_with_and_without_scratch_location():
-    config = MCSConfig(blockSize=512, scratchLocation="global")
+    config = MCSConfig(blockSize=640, scratchLocation="global")
     data = config.to_dict()
     assert data["scratchLocation"] == "global"
     restored = MCSConfig.from_dict(data)
     assert restored.scratchLocation == "global"
-    assert restored.blockSize == 512
+    assert restored.blockSize == 640
 
     # Old-format dict (before scratchLocation existed) must still load,
     # defaulting the missing key to "auto".
@@ -333,8 +333,8 @@ def test_mcsconfig_roundtrip_with_and_without_scratch_location():
     assert restored_legacy.scratchLocation == "auto"
 
 
-def test_block_size_512_tier128_succeeds_on_gpu():
-    # A 128-carbon chain is a tier-128 molecule.  blockSize 512 now handles it
+def test_block_size_640_tier128_succeeds_on_gpu():
+    # A 128-carbon chain is a tier-128 molecule. blockSize 640 handles it
     # via global substructure scratch (auto), so fallback can be disallowed.
     chain = Chem.MolFromSmiles("C" * 128)
     assert chain is not None
@@ -344,7 +344,7 @@ def test_block_size_512_tier128_succeeds_on_gpu():
         mode="pairs",
         pairs=[(0, 1)],
         allow_rdkit_fallback=False,
-        block_size=512,
+        block_size=640,
         scratch_location="auto",
     )
     assert result.used_gpu.tolist() == [1]

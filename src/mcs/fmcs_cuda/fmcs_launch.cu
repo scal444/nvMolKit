@@ -192,8 +192,8 @@ std::size_t fmcsKernelStaticSharedBytes(FmcsScratchLocation scratchLocation) {
       cudaFuncGetAttributes(&attr,
                             fmcsKernel<maxAtoms, maxBonds, blockThreads, false, false, FmcsScratchLocation::Global>);
   } else {
-    if constexpr (blockThreads == 512 && maxAtoms == 128) {
-      throw std::invalid_argument("fMCS blockSize 512 at tier-128 has no shared-scratch kernel");
+    if constexpr (blockThreads == kFmcsMaxBlockSizeSingleOccupancy && maxAtoms == 128) {
+      throw std::invalid_argument("fMCS single-occupancy block size at tier-128 has no shared-scratch kernel");
     } else {
       err =
         cudaFuncGetAttributes(&attr,
@@ -222,255 +222,121 @@ template <int blockThreads, int maxAtoms, int maxBonds> std::size_t fmcsScratchS
          sizeof(FmcsSubstructureScratch<maxAtoms, maxBonds, maxAtoms>);
 }
 
-template <int maxAtoms, int maxBonds>
-void launchFmcsKernel128(const DevicePerPairInput*             pairs,
-                         FmcsDeviceResult<maxAtoms, maxBonds>* results,
-                         void*                                 queueStorage,
-                         std::uint8_t*                         substructureStorage,
-                         void*                                 scratchStorage,
-                         FmcsScratchLocation                   scratchLocation,
-                         unsigned long long*                   elapsedClocks,
-                         ExecutionStats*                       timingStatsOut,
-                         ExecutionStats*                       statsOut,
-                         int                                   queueCapacity,
-                         int                                   substructurePartialCapacity,
-                         int                                   numPairs,
-                         unsigned long long                    timeoutClocks,
-                         cudaStream_t                          stream) {
+template <int blockThreads, int maxAtoms, int maxBonds>
+void launchFmcsKernel(const DevicePerPairInput*             pairs,
+                      FmcsDeviceResult<maxAtoms, maxBonds>* results,
+                      void*                                 queueStorage,
+                      std::uint8_t*                         substructureStorage,
+                      void*                                 scratchStorage,
+                      FmcsScratchLocation                   scratchLocation,
+                      unsigned long long*                   elapsedClocks,
+                      ExecutionStats*                       timingStatsOut,
+                      ExecutionStats*                       statsOut,
+                      int                                   queueCapacity,
+                      int                                   substructurePartialCapacity,
+                      int                                   numPairs,
+                      unsigned long long                    timeoutClocks,
+                      cudaStream_t                          stream) {
   if (scratchLocation == FmcsScratchLocation::Global) {
-    // Global is instantiated at 128-block only for tier-128 (the A/B tier of
-    // interest); smaller 128-block tiers stay shared-only to bound kernel count.
-    if constexpr (maxAtoms == 128) {
-      launchFmcsKernelSelected<128, maxAtoms, maxBonds, FmcsScratchLocation::Global>(pairs,
-                                                                                     results,
-                                                                                     queueStorage,
-                                                                                     substructureStorage,
-                                                                                     scratchStorage,
-                                                                                     elapsedClocks,
-                                                                                     timingStatsOut,
-                                                                                     statsOut,
-                                                                                     queueCapacity,
-                                                                                     substructurePartialCapacity,
-                                                                                     numPairs,
-                                                                                     timeoutClocks,
-                                                                                     stream);
-      return;
+    if constexpr (blockThreads == kFmcsMaxBlockSizeTwoBlockOccupancy && maxAtoms != 128) {
+      throw std::invalid_argument(
+        "fMCS scratchLocation=global is only instantiated at the two-block size for tier-128; "
+        "use scratchLocation=auto or shared");
+    } else {
+      launchFmcsKernelSelected<blockThreads, maxAtoms, maxBonds, FmcsScratchLocation::Global>(
+        pairs,
+        results,
+        queueStorage,
+        substructureStorage,
+        scratchStorage,
+        elapsedClocks,
+        timingStatsOut,
+        statsOut,
+        queueCapacity,
+        substructurePartialCapacity,
+        numPairs,
+        timeoutClocks,
+        stream);
     }
-    throw std::invalid_argument(
-      "fMCS scratchLocation=global is not instantiated for blockSize 128 "
-      "below tier-128; use scratchLocation=auto or shared");
-  }
-  launchFmcsKernelSelected<128, maxAtoms, maxBonds, FmcsScratchLocation::Shared>(pairs,
-                                                                                 results,
-                                                                                 queueStorage,
-                                                                                 substructureStorage,
-                                                                                 nullptr,
-                                                                                 elapsedClocks,
-                                                                                 timingStatsOut,
-                                                                                 statsOut,
-                                                                                 queueCapacity,
-                                                                                 substructurePartialCapacity,
-                                                                                 numPairs,
-                                                                                 timeoutClocks,
-                                                                                 stream);
-}
-
-template <int maxAtoms, int maxBonds>
-void launchFmcsKernel512(const DevicePerPairInput*             pairs,
-                         FmcsDeviceResult<maxAtoms, maxBonds>* results,
-                         void*                                 queueStorage,
-                         std::uint8_t*                         substructureStorage,
-                         void*                                 scratchStorage,
-                         FmcsScratchLocation                   scratchLocation,
-                         unsigned long long*                   elapsedClocks,
-                         ExecutionStats*                       timingStatsOut,
-                         ExecutionStats*                       statsOut,
-                         int                                   queueCapacity,
-                         int                                   substructurePartialCapacity,
-                         int                                   numPairs,
-                         unsigned long long                    timeoutClocks,
-                         cudaStream_t                          stream) {
-  if (scratchLocation == FmcsScratchLocation::Global) {
-    launchFmcsKernelSelected<512, maxAtoms, maxBonds, FmcsScratchLocation::Global>(pairs,
-                                                                                   results,
-                                                                                   queueStorage,
-                                                                                   substructureStorage,
-                                                                                   scratchStorage,
-                                                                                   elapsedClocks,
-                                                                                   timingStatsOut,
-                                                                                   statsOut,
-                                                                                   queueCapacity,
-                                                                                   substructurePartialCapacity,
-                                                                                   numPairs,
-                                                                                   timeoutClocks,
-                                                                                   stream);
     return;
   }
-  if constexpr (maxAtoms == 128) {
-    // 512 threads x 16 groups of tier-128 scratch (~70 KB) cannot fit the
-    // 48 KB static-shared cap, so a Shared specialization does not exist.
+  if constexpr (blockThreads == kFmcsMaxBlockSizeSingleOccupancy && maxAtoms == 128) {
     throw std::invalid_argument(
-      "fMCS scratchLocation=shared cannot satisfy blockSize 512 at tier-128 "
-      "(needs ~70 KB static shared > 48 KB); use scratchLocation=global or auto");
+      "fMCS scratchLocation=shared cannot satisfy the single-occupancy block size at tier-128; "
+      "use scratchLocation=global or auto");
   } else {
-    launchFmcsKernelSelected<512, maxAtoms, maxBonds, FmcsScratchLocation::Shared>(pairs,
-                                                                                   results,
-                                                                                   queueStorage,
-                                                                                   substructureStorage,
-                                                                                   nullptr,
-                                                                                   elapsedClocks,
-                                                                                   timingStatsOut,
-                                                                                   statsOut,
-                                                                                   queueCapacity,
-                                                                                   substructurePartialCapacity,
-                                                                                   numPairs,
-                                                                                   timeoutClocks,
-                                                                                   stream);
+    launchFmcsKernelSelected<blockThreads, maxAtoms, maxBonds, FmcsScratchLocation::Shared>(pairs,
+                                                                                            results,
+                                                                                            queueStorage,
+                                                                                            substructureStorage,
+                                                                                            nullptr,
+                                                                                            elapsedClocks,
+                                                                                            timingStatsOut,
+                                                                                            statsOut,
+                                                                                            queueCapacity,
+                                                                                            substructurePartialCapacity,
+                                                                                            numPairs,
+                                                                                            timeoutClocks,
+                                                                                            stream);
   }
 }
 
-template void launchFmcsKernel128<16, 16>(const DevicePerPairInput*,
-                                          FmcsDeviceResult<16, 16>*,
-                                          void*,
-                                          std::uint8_t*,
-                                          void*,
-                                          FmcsScratchLocation,
-                                          unsigned long long*,
-                                          ExecutionStats*,
-                                          ExecutionStats*,
-                                          int,
-                                          int,
-                                          int,
-                                          unsigned long long,
-                                          cudaStream_t);
-template void launchFmcsKernel128<32, 32>(const DevicePerPairInput*,
-                                          FmcsDeviceResult<32, 32>*,
-                                          void*,
-                                          std::uint8_t*,
-                                          void*,
-                                          FmcsScratchLocation,
-                                          unsigned long long*,
-                                          ExecutionStats*,
-                                          ExecutionStats*,
-                                          int,
-                                          int,
-                                          int,
-                                          unsigned long long,
-                                          cudaStream_t);
-template void launchFmcsKernel128<64, 64>(const DevicePerPairInput*,
-                                          FmcsDeviceResult<64, 64>*,
-                                          void*,
-                                          std::uint8_t*,
-                                          void*,
-                                          FmcsScratchLocation,
-                                          unsigned long long*,
-                                          ExecutionStats*,
-                                          ExecutionStats*,
-                                          int,
-                                          int,
-                                          int,
-                                          unsigned long long,
-                                          cudaStream_t);
-template void launchFmcsKernel128<128, 128>(const DevicePerPairInput*,
-                                            FmcsDeviceResult<128, 128>*,
-                                            void*,
-                                            std::uint8_t*,
-                                            void*,
-                                            FmcsScratchLocation,
-                                            unsigned long long*,
-                                            ExecutionStats*,
-                                            ExecutionStats*,
-                                            int,
-                                            int,
-                                            int,
-                                            unsigned long long,
-                                            cudaStream_t);
+#define NVMOLKIT_INSTANTIATE_FMCS_LAUNCH(blockThreads, maxSize)                                       \
+  template void launchFmcsKernel<blockThreads, maxSize, maxSize>(const DevicePerPairInput*,           \
+                                                                 FmcsDeviceResult<maxSize, maxSize>*, \
+                                                                 void*,                               \
+                                                                 std::uint8_t*,                       \
+                                                                 void*,                               \
+                                                                 FmcsScratchLocation,                 \
+                                                                 unsigned long long*,                 \
+                                                                 ExecutionStats*,                     \
+                                                                 ExecutionStats*,                     \
+                                                                 int,                                 \
+                                                                 int,                                 \
+                                                                 int,                                 \
+                                                                 unsigned long long,                  \
+                                                                 cudaStream_t)
 
-template void launchFmcsKernel512<16, 16>(const DevicePerPairInput*,
-                                          FmcsDeviceResult<16, 16>*,
-                                          void*,
-                                          std::uint8_t*,
-                                          void*,
-                                          FmcsScratchLocation,
-                                          unsigned long long*,
-                                          ExecutionStats*,
-                                          ExecutionStats*,
-                                          int,
-                                          int,
-                                          int,
-                                          unsigned long long,
-                                          cudaStream_t);
-template void launchFmcsKernel512<32, 32>(const DevicePerPairInput*,
-                                          FmcsDeviceResult<32, 32>*,
-                                          void*,
-                                          std::uint8_t*,
-                                          void*,
-                                          FmcsScratchLocation,
-                                          unsigned long long*,
-                                          ExecutionStats*,
-                                          ExecutionStats*,
-                                          int,
-                                          int,
-                                          int,
-                                          unsigned long long,
-                                          cudaStream_t);
-template void launchFmcsKernel512<64, 64>(const DevicePerPairInput*,
-                                          FmcsDeviceResult<64, 64>*,
-                                          void*,
-                                          std::uint8_t*,
-                                          void*,
-                                          FmcsScratchLocation,
-                                          unsigned long long*,
-                                          ExecutionStats*,
-                                          ExecutionStats*,
-                                          int,
-                                          int,
-                                          int,
-                                          unsigned long long,
-                                          cudaStream_t);
-template void launchFmcsKernel512<128, 128>(const DevicePerPairInput*,
-                                            FmcsDeviceResult<128, 128>*,
-                                            void*,
-                                            std::uint8_t*,
-                                            void*,
-                                            FmcsScratchLocation,
-                                            unsigned long long*,
-                                            ExecutionStats*,
-                                            ExecutionStats*,
-                                            int,
-                                            int,
-                                            int,
-                                            unsigned long long,
-                                            cudaStream_t);
+#define NVMOLKIT_INSTANTIATE_FMCS_BLOCK(blockThreads) \
+  NVMOLKIT_INSTANTIATE_FMCS_LAUNCH(blockThreads, 16); \
+  NVMOLKIT_INSTANTIATE_FMCS_LAUNCH(blockThreads, 32); \
+  NVMOLKIT_INSTANTIATE_FMCS_LAUNCH(blockThreads, 64); \
+  NVMOLKIT_INSTANTIATE_FMCS_LAUNCH(blockThreads, 128)
+
+NVMOLKIT_INSTANTIATE_FMCS_BLOCK(kFmcsMaxBlockSizeTwoBlockOccupancy);
+NVMOLKIT_INSTANTIATE_FMCS_BLOCK(kFmcsMaxBlockSizeSingleOccupancy);
+
+#undef NVMOLKIT_INSTANTIATE_FMCS_BLOCK
+#undef NVMOLKIT_INSTANTIATE_FMCS_LAUNCH
 
 template std::size_t fmcsQueueStorageBytes<16, 16>(std::size_t);
 template std::size_t fmcsQueueStorageBytes<32, 32>(std::size_t);
 template std::size_t fmcsQueueStorageBytes<64, 64>(std::size_t);
 template std::size_t fmcsQueueStorageBytes<128, 128>(std::size_t);
 
-template std::size_t fmcsSubstructureStorageBytes<128, 16>(std::size_t);
-template std::size_t fmcsSubstructureStorageBytes<128, 32>(std::size_t);
-template std::size_t fmcsSubstructureStorageBytes<128, 64>(std::size_t);
-template std::size_t fmcsSubstructureStorageBytes<128, 128>(std::size_t);
-template std::size_t fmcsSubstructureStorageBytes<512, 16>(std::size_t);
-template std::size_t fmcsSubstructureStorageBytes<512, 32>(std::size_t);
-template std::size_t fmcsSubstructureStorageBytes<512, 64>(std::size_t);
-template std::size_t fmcsSubstructureStorageBytes<512, 128>(std::size_t);
+template std::size_t fmcsSubstructureStorageBytes<kFmcsMaxBlockSizeTwoBlockOccupancy, 16>(std::size_t);
+template std::size_t fmcsSubstructureStorageBytes<kFmcsMaxBlockSizeTwoBlockOccupancy, 32>(std::size_t);
+template std::size_t fmcsSubstructureStorageBytes<kFmcsMaxBlockSizeTwoBlockOccupancy, 64>(std::size_t);
+template std::size_t fmcsSubstructureStorageBytes<kFmcsMaxBlockSizeTwoBlockOccupancy, 128>(std::size_t);
+template std::size_t fmcsSubstructureStorageBytes<kFmcsMaxBlockSizeSingleOccupancy, 16>(std::size_t);
+template std::size_t fmcsSubstructureStorageBytes<kFmcsMaxBlockSizeSingleOccupancy, 32>(std::size_t);
+template std::size_t fmcsSubstructureStorageBytes<kFmcsMaxBlockSizeSingleOccupancy, 64>(std::size_t);
+template std::size_t fmcsSubstructureStorageBytes<kFmcsMaxBlockSizeSingleOccupancy, 128>(std::size_t);
 
-template std::size_t fmcsScratchStorageBytes<128, 16, 16>(std::size_t);
-template std::size_t fmcsScratchStorageBytes<128, 32, 32>(std::size_t);
-template std::size_t fmcsScratchStorageBytes<128, 64, 64>(std::size_t);
-template std::size_t fmcsScratchStorageBytes<128, 128, 128>(std::size_t);
-template std::size_t fmcsScratchStorageBytes<512, 16, 16>(std::size_t);
-template std::size_t fmcsScratchStorageBytes<512, 32, 32>(std::size_t);
-template std::size_t fmcsScratchStorageBytes<512, 64, 64>(std::size_t);
-template std::size_t fmcsScratchStorageBytes<512, 128, 128>(std::size_t);
+template std::size_t fmcsScratchStorageBytes<kFmcsMaxBlockSizeTwoBlockOccupancy, 16, 16>(std::size_t);
+template std::size_t fmcsScratchStorageBytes<kFmcsMaxBlockSizeTwoBlockOccupancy, 32, 32>(std::size_t);
+template std::size_t fmcsScratchStorageBytes<kFmcsMaxBlockSizeTwoBlockOccupancy, 64, 64>(std::size_t);
+template std::size_t fmcsScratchStorageBytes<kFmcsMaxBlockSizeTwoBlockOccupancy, 128, 128>(std::size_t);
+template std::size_t fmcsScratchStorageBytes<kFmcsMaxBlockSizeSingleOccupancy, 16, 16>(std::size_t);
+template std::size_t fmcsScratchStorageBytes<kFmcsMaxBlockSizeSingleOccupancy, 32, 32>(std::size_t);
+template std::size_t fmcsScratchStorageBytes<kFmcsMaxBlockSizeSingleOccupancy, 64, 64>(std::size_t);
+template std::size_t fmcsScratchStorageBytes<kFmcsMaxBlockSizeSingleOccupancy, 128, 128>(std::size_t);
 
-template std::size_t fmcsKernelStaticSharedBytes<128, 128, 128>(FmcsScratchLocation);
-template std::size_t fmcsKernelStaticSharedBytes<512, 16, 16>(FmcsScratchLocation);
-template std::size_t fmcsKernelStaticSharedBytes<512, 32, 32>(FmcsScratchLocation);
-template std::size_t fmcsKernelStaticSharedBytes<512, 64, 64>(FmcsScratchLocation);
-template std::size_t fmcsKernelStaticSharedBytes<512, 128, 128>(FmcsScratchLocation);
+template std::size_t fmcsKernelStaticSharedBytes<kFmcsMaxBlockSizeTwoBlockOccupancy, 128, 128>(FmcsScratchLocation);
+template std::size_t fmcsKernelStaticSharedBytes<kFmcsMaxBlockSizeSingleOccupancy, 16, 16>(FmcsScratchLocation);
+template std::size_t fmcsKernelStaticSharedBytes<kFmcsMaxBlockSizeSingleOccupancy, 32, 32>(FmcsScratchLocation);
+template std::size_t fmcsKernelStaticSharedBytes<kFmcsMaxBlockSizeSingleOccupancy, 64, 64>(FmcsScratchLocation);
+template std::size_t fmcsKernelStaticSharedBytes<kFmcsMaxBlockSizeSingleOccupancy, 128, 128>(FmcsScratchLocation);
 
 }  // namespace fmcs
 }  // namespace mcs

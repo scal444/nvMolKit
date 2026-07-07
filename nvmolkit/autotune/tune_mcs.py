@@ -37,7 +37,12 @@ from nvmolkit.autotune._core import (
     suggest_from_space,
 )
 from nvmolkit.autotune._ff_common import resolve_cpu_budget, resolve_num_gpus
-from nvmolkit.mcs import MCSConfig, findMCS
+from nvmolkit.mcs import (
+    FMCS_MAX_BLOCK_SIZE_SINGLE_OCCUPANCY,
+    FMCS_MAX_BLOCK_SIZE_TWO_BLOCK_OCCUPANCY,
+    MCSConfig,
+    findMCS,
+)
 
 
 def _default_mcs_search_space(num_gpus: int, cpus: int) -> dict:
@@ -51,10 +56,12 @@ def _default_mcs_search_space(num_gpus: int, cpus: int) -> dict:
     per_gpu_worker_max = max(1, min(8, cpus // max(1, num_gpus)))
     return {
         "batchSize": [0, 64, 128, 256, 512],
-        "blockSize": {"choices": [128, 512]},
-        # "shared" is pruned to "auto" for blockSize 512 (see _make_config): the
+        "blockSize": {
+            "choices": [FMCS_MAX_BLOCK_SIZE_TWO_BLOCK_OCCUPANCY, FMCS_MAX_BLOCK_SIZE_SINGLE_OCCUPANCY]
+        },
+        # "shared" is pruned to "auto" for blockSize 640 (see _make_config): the
         # two are equivalent for tiers below 128, and "shared" is illegal at
-        # 512 @ tier-128, so tuning never wastes a trial on a guaranteed error.
+        # 640 @ tier-128, so tuning never wastes a trial on a guaranteed error.
         "scratchLocation": {"choices": ["auto", "global"]},
         "workerThreads": (1, per_gpu_worker_max),
         "preprocessingThreads": (1, cpus),
@@ -175,12 +182,17 @@ def tune_mcs(
     space = resolve_search_space(_default_mcs_search_space(num_gpus, cpus), search_space_overrides)
 
     def _make_config(values: dict[str, Any]) -> MCSConfig:
-        block_size = int(values.get("blockSize", 128))
+        block_size = int(values.get("blockSize", FMCS_MAX_BLOCK_SIZE_TWO_BLOCK_OCCUPANCY))
         scratch_location = str(values.get("scratchLocation", "auto"))
-        # "shared" at blockSize 512 is illegal for tier-128 and equivalent to
-        # "auto" for smaller tiers, so coerce it to "auto" rather than risk a
-        # dispatch error on a dataset that happens to contain a tier-128 pair.
-        if block_size == 512 and scratch_location == "shared":
+        # Normalize scratch choices that are either illegal for one tier or
+        # redundant with Auto for every instantiated tier.
+        invalid_large_shared = (
+            block_size == FMCS_MAX_BLOCK_SIZE_SINGLE_OCCUPANCY and scratch_location == "shared"
+        )
+        invalid_small_global = (
+            block_size == FMCS_MAX_BLOCK_SIZE_TWO_BLOCK_OCCUPANCY and scratch_location == "global"
+        )
+        if invalid_large_shared or invalid_small_global:
             scratch_location = "auto"
         return MCSConfig(
             batchSize=int(values.get("batchSize", 0)),

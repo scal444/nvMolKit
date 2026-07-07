@@ -985,7 +985,7 @@ TEST(FMCSTiers, MaxSize128) {
 
 TEST(FMCSBlockSize, SupportedSpecializationsMatchDefault) {
   const auto p = path(32);
-  for (int blockSize : {128, 512}) {
+  for (int blockSize : {352, 640}) {
     Parameters params;
     params.blockSize = blockSize;
     auto r           = findSingleMCES(p, p, params);
@@ -995,28 +995,28 @@ TEST(FMCSBlockSize, SupportedSpecializationsMatchDefault) {
 
 TEST(FMCSBlockSize, RejectsOneWarpBlockSize) {
   const auto p = path(8);
-  for (int blockSize : {32, 64, 256}) {
+  for (int blockSize : {32, 64, 128, 256, 384, 512}) {
     Parameters params;
     params.blockSize = blockSize;
     EXPECT_THROW((void)mcs::fmcs::findMCESfMCSBatch({p}, {p}, params), std::invalid_argument);
   }
 }
 
-TEST(FMCSBlockSize, BlockSize512Tier128SucceedsWithGlobalScratch) {
-  // A 128-atom path is a tier-128 pair.  At blockSize 512 the substructure
+TEST(FMCSBlockSize, BlockSize640Tier128SucceedsWithGlobalScratch) {
+  // A 128-atom path is a tier-128 pair. At blockSize 640 the substructure
   // scratch is placed in global memory (Auto resolves to Global here), so the
   // pair now runs on the GPU instead of throwing, and must match the
-  // blockSize-128 result for the same pair.
+  // blockSize-352 result for the same pair.
   const auto p = path(128);
 
-  Parameters block128;
-  block128.blockSize  = 128;
-  const auto expected = findSingleMCES(p, p, block128);
+  Parameters block352;
+  block352.blockSize  = 352;
+  const auto expected = findSingleMCES(p, p, block352);
   expectFullSelfPair(expected, p);
 
   for (FmcsScratchLocation loc : {FmcsScratchLocation::Auto, FmcsScratchLocation::Global}) {
     Parameters params;
-    params.blockSize       = 512;
+    params.blockSize       = 640;
     params.scratchLocation = loc;
     const auto r           = findSingleMCES(p, p, params);
     EXPECT_FALSE(r.overflowed);
@@ -1026,13 +1026,13 @@ TEST(FMCSBlockSize, BlockSize512Tier128SucceedsWithGlobalScratch) {
   }
 }
 
-TEST(FMCSBlockSize, BlockSize512Tier128RejectsExplicitSharedScratch) {
+TEST(FMCSBlockSize, BlockSize640Tier128RejectsExplicitSharedScratch) {
   // Explicit shared placement cannot satisfy 512 @ tier-128 (>48 KB static
   // shared), so dispatch rejects it with a clear error rather than hitting a
   // missing kernel instantiation.
   const auto p = path(128);
   Parameters params;
-  params.blockSize       = 512;
+  params.blockSize       = 640;
   params.scratchLocation = FmcsScratchLocation::Shared;
   EXPECT_THROW((void)mcs::fmcs::findMCESfMCSBatch({p}, {p}, params), std::invalid_argument);
 }
@@ -1044,12 +1044,12 @@ TEST(FMCSBlockSize, ForcedGlobalScratchMatchesSharedAtSmallTier) {
   const std::vector<Graph> graphs{path(48), cycle(40), star(30)};
   for (const auto& gph : graphs) {
     Parameters shared;
-    shared.blockSize       = 512;
+    shared.blockSize       = 640;
     shared.scratchLocation = FmcsScratchLocation::Shared;
     const auto rShared     = findSingleMCES(gph, gph, shared);
 
     Parameters global;
-    global.blockSize       = 512;
+    global.blockSize       = 640;
     global.scratchLocation = FmcsScratchLocation::Global;
     const auto rGlobal     = findSingleMCES(gph, gph, global);
 
@@ -1060,14 +1060,14 @@ TEST(FMCSBlockSize, ForcedGlobalScratchMatchesSharedAtSmallTier) {
   }
 }
 
-TEST(FMCSBlockSize, BlockSize512MixedTierBatchPlacesPerTier) {
+TEST(FMCSBlockSize, BlockSize640MixedTierBatchPlacesPerTier) {
   // One pair per tier in a single 512-thread launch: tiers 16/32/64 stay on
   // shared scratch, tier-128 uses global.  Auto resolves placement per tier,
   // and no pair is dropped.
   std::vector<Graph> a{path(8), path(24), path(48), path(120)};
   std::vector<Graph> b = a;
   Parameters         params;
-  params.blockSize = 512;  // scratchLocation defaults to Auto
+  params.blockSize = 640;  // scratchLocation defaults to Auto
   auto rs          = mcs::fmcs::findMCESfMCSBatch(a, b, params);
   ASSERT_EQ(rs.size(), a.size());
   for (size_t i = 0; i < a.size(); ++i) {

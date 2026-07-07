@@ -340,14 +340,14 @@ def test_complete_rings_only_matches_rdkit_on_gpu(
             },
             id="threaded",
         ),
-        pytest.param({"batch_size": 7, "block_size": 512}, id="block-512"),
+        pytest.param({"batch_size": 7, "block_size": 640}, id="block-640"),
         pytest.param(
-            {"batch_size": 7, "block_size": 512, "scratch_location": "global"},
-            id="block-512-global-scratch",
+            {"batch_size": 7, "block_size": 640, "scratch_location": "global"},
+            id="block-640-global-scratch",
         ),
         pytest.param(
-            {"batch_size": 7, "block_size": 512, "scratch_location": "auto"},
-            id="block-512-auto-scratch",
+            {"batch_size": 7, "block_size": 640, "scratch_location": "auto"},
+            id="block-640-auto-scratch",
         ),
     ],
 )
@@ -400,7 +400,7 @@ def test_python_binding_dispatches_every_gpu_tier_boundary(num_atoms: int) -> No
         mode="pairs",
         pairs=[(0, 0)],
         allow_rdkit_fallback=False,
-        block_size=128,
+        block_size=352,
     )
 
     assert result.used_gpu.tolist() == [1]
@@ -411,8 +411,8 @@ def test_python_binding_dispatches_every_gpu_tier_boundary(num_atoms: int) -> No
 
 
 @pytest.mark.parametrize("scratch_location", ["auto", "global"])
-def test_block_size_512_runs_every_tier_including_128(scratch_location: str) -> None:
-    # block_size 512 must dispatch every tier, including tier-128, on the GPU
+def test_block_size_640_runs_every_tier_including_128(scratch_location: str) -> None:
+    # block_size 640 must dispatch every tier, including tier-128, on the GPU
     # when scratch is placed in global memory (auto does so for tier-128).
     for num_atoms in [16, 64, 128]:
         mol = Chem.MolFromSmiles("C" * num_atoms)
@@ -422,7 +422,7 @@ def test_block_size_512_runs_every_tier_including_128(scratch_location: str) -> 
             mode="pairs",
             pairs=[(0, 0)],
             allow_rdkit_fallback=False,
-            block_size=512,
+            block_size=640,
             scratch_location=scratch_location,
         )
         assert result.used_gpu.tolist() == [1], f"num_atoms={num_atoms}"

@@ -44,41 +44,23 @@ std::size_t fmcsKernelStaticSharedBytes(FmcsScratchLocation scratchLocation);
 void configureFmcsKernelMaxDynamicSharedMem(const void* kernelFunc, std::size_t bytes);
 
 /// @p scratchStorage / @p scratchLocation select substructure-scratch
-/// placement.  Pass nullptr / Shared for the historical static-shared layout.
-/// Global at blockSize 128 is instantiated only for tier-128.
-template <int maxAtoms, int maxBonds>
-void launchFmcsKernel128(const DevicePerPairInput*             pairs,
-                         FmcsDeviceResult<maxAtoms, maxBonds>* results,
-                         void*                                 queueStorage,
-                         std::uint8_t*                         substructureStorage,
-                         void*                                 scratchStorage,
-                         FmcsScratchLocation                   scratchLocation,
-                         unsigned long long*                   elapsedClocks,
-                         ExecutionStats*                       timingStatsOut,
-                         ExecutionStats*                       statsOut,
-                         int                                   queueCapacity,
-                         int                                   substructurePartialCapacity,
-                         int                                   numPairs,
-                         unsigned long long                    timeoutClocks,
-                         cudaStream_t                          stream);
-
-/// Tier-128 requires scratchLocation == Global (the shared layout exceeds the
-/// 48 KB static cap and is not instantiated); explicit Shared throws.
-template <int maxAtoms, int maxBonds>
-void launchFmcsKernel512(const DevicePerPairInput*             pairs,
-                         FmcsDeviceResult<maxAtoms, maxBonds>* results,
-                         void*                                 queueStorage,
-                         std::uint8_t*                         substructureStorage,
-                         void*                                 scratchStorage,
-                         FmcsScratchLocation                   scratchLocation,
-                         unsigned long long*                   elapsedClocks,
-                         ExecutionStats*                       timingStatsOut,
-                         ExecutionStats*                       statsOut,
-                         int                                   queueCapacity,
-                         int                                   substructurePartialCapacity,
-                         int                                   numPairs,
-                         unsigned long long                    timeoutClocks,
-                         cudaStream_t                          stream);
+/// placement. Pass nullptr / Shared for the static-shared layout. Tier-128
+/// blocks at 640 threads require Global placement.
+template <int blockThreads, int maxAtoms, int maxBonds>
+void launchFmcsKernel(const DevicePerPairInput*             pairs,
+                      FmcsDeviceResult<maxAtoms, maxBonds>* results,
+                      void*                                 queueStorage,
+                      std::uint8_t*                         substructureStorage,
+                      void*                                 scratchStorage,
+                      FmcsScratchLocation                   scratchLocation,
+                      unsigned long long*                   elapsedClocks,
+                      ExecutionStats*                       timingStatsOut,
+                      ExecutionStats*                       statsOut,
+                      int                                   queueCapacity,
+                      int                                   substructurePartialCapacity,
+                      int                                   numPairs,
+                      unsigned long long                    timeoutClocks,
+                      cudaStream_t                          stream);
 
 }  // namespace fmcs
 }  // namespace mcs

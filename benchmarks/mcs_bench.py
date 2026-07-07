@@ -15,14 +15,13 @@
 
 """Maximum common substructure benchmark comparing nvmolkit against RDKit.
 
-Example: sweep block-size 512 with global substructure scratch (which unlocks
-tier-128) against the default block-128 baseline on a tier-128-containing
-dataset, writing a self-describing CSV::
+Example: compare the generated one-block and two-block residency limits on a
+tier-128-containing dataset, writing a self-describing CSV::
 
-    python benchmarks/mcs_bench.py --block-size 512 --scratch-location global \\
-        --timings-csv mcs_512_global.csv
-    python benchmarks/mcs_bench.py --block-size 128 \\
-        --timings-csv mcs_128.csv
+    python benchmarks/mcs_bench.py --block-size 640 --scratch-location auto \\
+        --timings-csv mcs_640.csv
+    python benchmarks/mcs_bench.py --block-size 352 \\
+        --timings-csv mcs_352.csv
 """
 
 import argparse
@@ -38,7 +37,11 @@ from rdkit import Chem
 from rdkit.Chem import rdFMCS
 from tqdm.auto import tqdm
 
-from nvmolkit.mcs import findMCS
+from nvmolkit.mcs import (
+    FMCS_MAX_BLOCK_SIZE_TWO_BLOCK_OCCUPANCY,
+    FMCS_SUPPORTED_BLOCK_SIZES,
+    findMCS,
+)
 
 _worker_mols: list[Chem.Mol] | None = None
 _worker_params: rdFMCS.MCSParameters | None = None
@@ -311,7 +314,7 @@ def _write_pair_timings(
     nv_result,
     rdkit_sizes: list[tuple[int, int]] | None,
     rdkit_times_ms: list[float] | None,
-    block_size: int = 128,
+    block_size: int = FMCS_MAX_BLOCK_SIZE_TWO_BLOCK_OCCUPANCY,
     scratch_location: str = "auto",
 ) -> None:
     output_path = Path(path)
@@ -532,9 +535,9 @@ def _build_parser(default_smiles: Path) -> argparse.ArgumentParser:
         legacy_flags=("--block_size",),
         dest="block_size",
         type=int,
-        choices=[128, 512],
-        default=128,
-        help="CUDA threads per fMCS pair block. 512 supports tier-128 when "
+        choices=FMCS_SUPPORTED_BLOCK_SIZES,
+        default=FMCS_MAX_BLOCK_SIZE_TWO_BLOCK_OCCUPANCY,
+        help="CUDA threads per fMCS pair block. 640 supports tier-128 when "
         "--scratch-location places scratch in global memory (auto does so).",
     )
     _add_option(
@@ -545,8 +548,8 @@ def _build_parser(default_smiles: Path) -> argparse.ArgumentParser:
         choices=["auto", "shared", "global"],
         default="auto",
         help="fMCS substructure-scratch placement. auto picks global for "
-        "block-size 512 at tier-128; global forces global memory; shared "
-        "forces shared and errors for block-size 512 at tier-128.",
+        "block size 640 at tier-128; global forces global memory; shared "
+        "forces shared and errors for block size 640 at tier-128.",
     )
     _add_option(
         gpu_group,

@@ -71,18 +71,18 @@ void requireTransferCapacity(size_t required, size_t capacity, const char* conte
 /// each kernel), and the old allocation is released before the new one so the
 /// two never co-reside -- these slabs reach multiple GiB at large tiers.
 /// Resolve the scratch-location policy for one (blockThreads, tier) pair.
-/// Auto puts only 512 @ tier-128 in global memory (where static shared cannot
-/// fit) and keeps every other config on fast shared memory.  Explicit Shared
-/// at 512 @ tier-128 is rejected here rather than hitting a missing kernel
+/// Auto puts the generated single-occupancy block size @ tier-128 in global memory (where static
+/// shared cannot fit) and keeps every other config on fast shared memory.
+/// Explicit Shared at those configurations is rejected here rather than hitting a missing kernel
 /// instantiation downstream.
 template <int blockThreads, int maxAtoms> FmcsScratchLocation resolveScratchLocation(FmcsScratchLocation requested) {
-  constexpr bool kTier128At512 = (blockThreads == 512 && maxAtoms == 128);
+  constexpr bool kLargeTier128 = (blockThreads == kFmcsMaxBlockSizeSingleOccupancy && maxAtoms == 128);
   if (requested == FmcsScratchLocation::Auto) {
-    return kTier128At512 ? FmcsScratchLocation::Global : FmcsScratchLocation::Shared;
+    return kLargeTier128 ? FmcsScratchLocation::Global : FmcsScratchLocation::Shared;
   }
-  if (requested == FmcsScratchLocation::Shared && kTier128At512) {
+  if (requested == FmcsScratchLocation::Shared && kLargeTier128) {
     throw std::invalid_argument(
-      "fMCS scratchLocation=shared cannot satisfy blockSize 512 at tier-128 "
+      "fMCS scratchLocation=shared cannot satisfy the single-occupancy block size at tier-128 "
       "(needs ~70 KB static shared > 48 KB); use scratchLocation=global or auto");
   }
   return requested;
@@ -337,10 +337,11 @@ int validateRequestedExecutorCount(const Parameters& params) {
 }
 
 int validateRequestedBlockSize(const Parameters& params) {
-  if (params.blockSize == 128 || params.blockSize == 512) {
+  if (params.blockSize == kFmcsMaxBlockSizeTwoBlockOccupancy || params.blockSize == kFmcsMaxBlockSizeSingleOccupancy) {
     return params.blockSize;
   }
-  throw std::invalid_argument("fMCS blockSize must be one of 128 or 512");
+  throw std::invalid_argument("fMCS blockSize must be one of " + std::to_string(kFmcsMaxBlockSizeTwoBlockOccupancy) +
+                              " or " + std::to_string(kFmcsMaxBlockSizeSingleOccupancy));
 }
 
 size_t countChunkTransferWords(const std::vector<HostPairDescriptor*>& descs) {
@@ -529,39 +530,20 @@ void launchTierAsync(const StagedChunkInput&                    stagedInput,
                  maxBonds,
                  numPairs);
   }
-  if constexpr (blockThreads == 128) {
-    launchFmcsKernel128<maxAtoms, maxBonds>(bufs.dPairInputs,
-                                            dResults,
-                                            dQueue,
-                                            dSubstructure,
-                                            dScratch,
-                                            scratchLocation,
-                                            bufs.dElapsedClocks,
-                                            bufs.dTimingStats,
-                                            bufs.dStats,
-                                            fmcsQueueCapacity(),
-                                            fmcsSubstructurePartialCapacity(),
-                                            numPairs,
-                                            timeoutClocks,
-                                            stream);
-  } else if constexpr (blockThreads == 512) {
-    launchFmcsKernel512<maxAtoms, maxBonds>(bufs.dPairInputs,
-                                            dResults,
-                                            dQueue,
-                                            dSubstructure,
-                                            dScratch,
-                                            scratchLocation,
-                                            bufs.dElapsedClocks,
-                                            bufs.dTimingStats,
-                                            bufs.dStats,
-                                            fmcsQueueCapacity(),
-                                            fmcsSubstructurePartialCapacity(),
-                                            numPairs,
-                                            timeoutClocks,
-                                            stream);
-  } else {
-    static_assert(blockThreads == 128 || blockThreads == 512, "fMCS block size must be 128 or 512");
-  }
+  launchFmcsKernel<blockThreads, maxAtoms, maxBonds>(bufs.dPairInputs,
+                                                     dResults,
+                                                     dQueue,
+                                                     dSubstructure,
+                                                     dScratch,
+                                                     scratchLocation,
+                                                     bufs.dElapsedClocks,
+                                                     bufs.dTimingStats,
+                                                     bufs.dStats,
+                                                     fmcsQueueCapacity(),
+                                                     fmcsSubstructurePartialCapacity(),
+                                                     numPairs,
+                                                     timeoutClocks,
+                                                     stream);
   checkCuda(cudaGetLastError(), "fmcsKernel launch");
   if constexpr (kFmcsDebug) {
     std::fprintf(stderr, "[fmcs][host] launch ok, synchronizing...\n");
@@ -759,10 +741,10 @@ void runTierChunks(nvMolKit::ThreadSafeQueue<TierChunkVariant<Policy>>& chunkQue
   if (numChunks == 0)
     return;
 
-  const bool collectTimings = perPairTimesMs != nullptr || perPairTimingStats != nullptr;
-  const bool collectStats   = perPairStats != nullptr;
-  float              clockRateKHz = 0.0f;
-  unsigned long long timeoutClocks = 0;
+  const bool         collectTimings = perPairTimesMs != nullptr || perPairTimingStats != nullptr;
+  const bool         collectStats   = perPairStats != nullptr;
+  float              clockRateKHz   = 0.0f;
+  unsigned long long timeoutClocks  = 0;
   if (collectTimings || params.timeoutMs > 0.0f) {
     int device = 0;
     checkCuda(cudaGetDevice(&device), "cudaGetDevice (clock rate)");
@@ -801,8 +783,8 @@ void runTierChunks(nvMolKit::ThreadSafeQueue<TierChunkVariant<Policy>>& chunkQue
   }
   allocRange.pop();
 
-  // Tier-128 at blockSize 512 is supported via global substructure scratch
-  // (resolved per tier in launchTierAsync), so no tier is gated here.
+  // Tier-128 at large block sizes is supported via global substructure
+  // scratch (resolved per tier in launchTierAsync), so no tier is gated here.
   auto launchChunk = [&](FmcsExecutor& executor, TierChunkVariant<Policy>& chunk) {
     std::visit(
       [&](auto& typedChunk) {
@@ -871,13 +853,13 @@ std::vector<MCSResult> runBatchWithBlockSize(const std::vector<InputT>&   a,
     tierIndices[descs[i].tier].push_back(static_cast<int>(i));
   }
   descRange.pop();
-  if constexpr (blockThreads == 512) {
-    // Tier-128 at 512 threads now runs via global substructure scratch
+  if constexpr (blockThreads == kFmcsMaxBlockSizeSingleOccupancy) {
+    // Tier-128 at large block sizes runs via global substructure scratch
     // (resolved per tier in launchTierAsync).  Only reject the one combination
     // that cannot be satisfied: an explicit request for shared placement.
     if (!tierIndices[3].empty() && params.scratchLocation == FmcsScratchLocation::Shared) {
       throw std::invalid_argument(
-        "fMCS scratchLocation=shared cannot satisfy blockSize 512 at tier-128 "
+        "fMCS scratchLocation=shared cannot satisfy the single-occupancy block size at tier-128 "
         "(needs ~70 KB static shared > 48 KB); use scratchLocation=global or auto");
     }
   }
@@ -952,22 +934,22 @@ std::vector<MCSResult> runBatch(const std::vector<InputT>&   a,
                                 std::vector<ExecutionStats>* perPairStats,
                                 cudaStream_t                 stream) {
   switch (validateRequestedBlockSize(params)) {
-    case 128:
-      return runBatchWithBlockSize<128, Policy, InputT>(a,
-                                                        b,
-                                                        params,
-                                                        perPairTimesMs,
-                                                        perPairTimingStats,
-                                                        perPairStats,
-                                                        stream);
-    case 512:
-      return runBatchWithBlockSize<512, Policy, InputT>(a,
-                                                        b,
-                                                        params,
-                                                        perPairTimesMs,
-                                                        perPairTimingStats,
-                                                        perPairStats,
-                                                        stream);
+    case kFmcsMaxBlockSizeTwoBlockOccupancy:
+      return runBatchWithBlockSize<kFmcsMaxBlockSizeTwoBlockOccupancy, Policy, InputT>(a,
+                                                                                       b,
+                                                                                       params,
+                                                                                       perPairTimesMs,
+                                                                                       perPairTimingStats,
+                                                                                       perPairStats,
+                                                                                       stream);
+    case kFmcsMaxBlockSizeSingleOccupancy:
+      return runBatchWithBlockSize<kFmcsMaxBlockSizeSingleOccupancy, Policy, InputT>(a,
+                                                                                     b,
+                                                                                     params,
+                                                                                     perPairTimesMs,
+                                                                                     perPairTimingStats,
+                                                                                     perPairStats,
+                                                                                     stream);
   }
   throw std::logic_error("unreachable fMCS blockSize dispatch");
 }

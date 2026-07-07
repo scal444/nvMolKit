@@ -56,15 +56,15 @@ namespace fmcs {
 /// layer (mcs_search / mcs_rdkit_adapter) already falls back to it for
 /// unsupported parameter combinations.
 struct Parameters {
-  /// CUDA block size for the per-pair kernel. Supported: 128 and 512.
-  /// Block size 512 supports tier-128 when the substructure scratch is placed
+  /// CUDA block size for the per-pair kernel. Supported: 352 and 640.
+  /// Block size 640 supports tier-128 when the substructure scratch is placed
   /// in global memory (see scratchLocation); the default Auto policy selects
   /// that automatically.
-  int                 blockSize                    = 128;
+  int                 blockSize                    = kFmcsMaxBlockSizeTwoBlockOccupancy;
   /// Placement of the per-group substructure fallback scratch.  Auto keeps
   /// small/hot configs on shared memory and only moves scratch to global for
-  /// 512 @ tier-128 (where static shared cannot fit).  Explicit Shared with
-  /// 512 @ tier-128 is rejected at dispatch.
+  /// block size 640 @ tier-128 (where static shared cannot fit). Explicit
+  /// Shared with those configurations is rejected at dispatch.
   FmcsScratchLocation scratchLocation              = FmcsScratchLocation::Auto;
   /// Dormant readiness flag for the extended-shared-memory carveout
   /// (analysis/fmcs_scratch_placement_plan.md section 7).  Has no effect until

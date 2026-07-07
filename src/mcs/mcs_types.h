@@ -21,6 +21,8 @@
 #include <utility>
 #include <vector>
 
+#include "fmcs_cuda/fmcs_occupancy_config.cuh"
+
 namespace nvMolKit {
 
 enum class MCSAtomCompare : std::uint8_t {
@@ -36,9 +38,10 @@ enum class MCSBondCompare : std::uint8_t {
   OrderExact
 };
 
-/// Placement of the GPU substructure fallback scratch.  Auto (default) selects
-/// global memory only for blockSize 512 at the 128-atom tier, where static
-/// shared cannot fit, and keeps every other configuration on shared memory.
+/// Placement of the GPU substructure fallback scratch. Auto (default) selects
+/// global memory only for the generated single-occupancy block size at the
+/// 128-atom tier, where static shared cannot fit, and keeps every other
+/// configuration on shared memory.
 enum class MCSScratchLocation : std::uint8_t {
   Auto,
   Shared,
@@ -69,7 +72,7 @@ struct MCSParameters {
   bool                     collectStats         = false;
   unsigned int             timeoutSeconds       = 0;
   int                      batchSize            = 0;
-  int                      blockSize            = 128;
+  int                      blockSize            = mcs::fmcs::kFmcsMaxBlockSizeTwoBlockOccupancy;
   MCSScratchLocation       scratchLocation      = MCSScratchLocation::Auto;
   int                      workerThreads        = -1;
   int                      preprocessingThreads = -1;

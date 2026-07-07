@@ -23,10 +23,22 @@ from typing import Any, Sequence
 import numpy as np
 from rdkit.Chem import Mol
 
-from nvmolkit._mcs import _findMCSBatch, _MCS_STATS_ENABLED, _MCS_TIMINGS_ENABLED
+from nvmolkit._mcs import (
+    _findMCSBatch,
+    _FMCS_MAX_BLOCK_SIZE_SINGLE_OCCUPANCY,
+    _FMCS_MAX_BLOCK_SIZE_TWO_BLOCK_OCCUPANCY,
+    _MCS_STATS_ENABLED,
+    _MCS_TIMINGS_ENABLED,
+)
 
 MCS_TIMINGS_ENABLED: bool = bool(_MCS_TIMINGS_ENABLED)
 MCS_STATS_ENABLED: bool = bool(_MCS_STATS_ENABLED)
+FMCS_MAX_BLOCK_SIZE_TWO_BLOCK_OCCUPANCY: int = int(_FMCS_MAX_BLOCK_SIZE_TWO_BLOCK_OCCUPANCY)
+FMCS_MAX_BLOCK_SIZE_SINGLE_OCCUPANCY: int = int(_FMCS_MAX_BLOCK_SIZE_SINGLE_OCCUPANCY)
+FMCS_SUPPORTED_BLOCK_SIZES = (
+    FMCS_MAX_BLOCK_SIZE_TWO_BLOCK_OCCUPANCY,
+    FMCS_MAX_BLOCK_SIZE_SINGLE_OCCUPANCY,
+)
 
 __all__ = [
     "MCSBatchResult",
@@ -34,6 +46,9 @@ __all__ = [
     "MCSResult",
     "MCS_STATS_ENABLED",
     "MCS_TIMINGS_ENABLED",
+    "FMCS_MAX_BLOCK_SIZE_SINGLE_OCCUPANCY",
+    "FMCS_MAX_BLOCK_SIZE_TWO_BLOCK_OCCUPANCY",
+    "FMCS_SUPPORTED_BLOCK_SIZES",
     "findMCS",
 ]
 
@@ -150,16 +165,16 @@ class MCSConfig:
         batchSize: GPU per-tier chunk size. ``0`` uses a default chunk size
             of 512 pairs per tier, which bounds peak device scratch.
         blockSize: CUDA threads per fMCS pair block. Supported values are
-            ``128`` and ``512``. ``512`` supports tier-128 when
+            ``352`` and ``640``. ``640`` supports tier-128 when
             ``scratchLocation`` places the substructure scratch in global
             memory; the default ``"auto"`` does this automatically.
         scratchLocation: Placement of the fMCS substructure fallback scratch,
             one of ``"auto"``, ``"shared"``, or ``"global"``. ``"auto"`` keeps
             small/hot configs on fast shared memory and only moves scratch to
-            global memory for ``blockSize=512`` at tier-128, where static
+            global memory for ``blockSize=640`` at tier-128, where static
             shared cannot fit. ``"global"`` trades shared-memory pressure for
             global-memory latency on the (cold) fallback path. ``"shared"``
-            with ``blockSize=512`` at tier-128 raises at dispatch.
+            with ``blockSize=640`` at tier-128 raises at dispatch.
         workerThreads: GPU runner threads per GPU. ``-1`` autoselects.
         preprocessingThreads: CPU threads for pair preprocessing. ``-1``
             autoselects.
@@ -172,7 +187,7 @@ class MCSConfig:
     def __init__(
         self,
         batchSize: int = 0,
-        blockSize: int = 128,
+        blockSize: int = FMCS_MAX_BLOCK_SIZE_TWO_BLOCK_OCCUPANCY,
         scratchLocation: str = "auto",
         workerThreads: int = -1,
         preprocessingThreads: int = -1,
@@ -310,7 +325,7 @@ def findMCS(
     timeout_seconds: int = 0,
     config: MCSConfig | None = None,
     batch_size: int = 0,
-    block_size: int = 128,
+    block_size: int = FMCS_MAX_BLOCK_SIZE_TWO_BLOCK_OCCUPANCY,
     scratch_location: str = "auto",
     worker_threads: int = -1,
     preprocessing_threads: int = -1,
@@ -366,15 +381,15 @@ def findMCS(
         batch_size: GPU per-tier chunk size. ``0`` uses a default chunk size
             of 512 pairs per tier, which bounds peak device scratch.
         block_size: CUDA threads per fMCS pair block. Supported values are
-            ``128`` and ``512``. ``512`` supports tier-128 when
+            ``352`` and ``640``. ``640`` supports tier-128 when
             ``scratch_location`` places the substructure scratch in global
             memory; the default ``"auto"`` does this automatically.
         scratch_location: Placement of the fMCS substructure fallback scratch,
             one of ``"auto"``, ``"shared"``, or ``"global"``. ``"auto"`` picks
-            global memory for ``block_size=512`` at tier-128 (where static
+            global memory for ``block_size=640`` at tier-128 (where static
             shared cannot fit) and shared memory otherwise. ``"global"`` trades
             shared-memory pressure for global-memory latency on the cold
-            fallback path; ``"shared"`` with ``block_size=512`` at tier-128
+            fallback path; ``"shared"`` with ``block_size=640`` at tier-128
             raises at dispatch.
         worker_threads: GPU runner threads per GPU. ``-1`` autoselects.
         preprocessing_threads: CPU threads for pair preprocessing. ``-1``
@@ -406,7 +421,7 @@ def findMCS(
         explicit_options = []
         if batch_size != 0:
             explicit_options.append("batch_size")
-        if block_size != 128:
+        if block_size != FMCS_MAX_BLOCK_SIZE_TWO_BLOCK_OCCUPANCY:
             explicit_options.append("block_size")
         if scratch_location != "auto":
             explicit_options.append("scratch_location")

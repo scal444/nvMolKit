@@ -26,6 +26,7 @@
 #include <utility>
 #include <vector>
 
+#include "src/mcs/fmcs_cuda/fmcs_occupancy_config.cuh"
 #include "src/mcs/mcs_compile_flags.h"
 #include "src/mcs/mcs_search.h"
 #include "src/utils/nvtx.h"
@@ -354,8 +355,10 @@ dict statsToPythonDict(MCSResultBuffers& buffers, const object& owner) {
 
 BOOST_PYTHON_MODULE(_mcs) {
   boost::python::numpy::initialize();
-  scope().attr("_MCS_TIMINGS_ENABLED") = nvMolKit::kMCSCollectTimingsEnabled;
-  scope().attr("_MCS_STATS_ENABLED")   = nvMolKit::kMCSCollectStatsEnabled;
+  scope().attr("_MCS_TIMINGS_ENABLED")                     = nvMolKit::kMCSCollectTimingsEnabled;
+  scope().attr("_MCS_STATS_ENABLED")                       = nvMolKit::kMCSCollectStatsEnabled;
+  scope().attr("_FMCS_MAX_BLOCK_SIZE_TWO_BLOCK_OCCUPANCY") = mcs::fmcs::kFmcsMaxBlockSizeTwoBlockOccupancy;
+  scope().attr("_FMCS_MAX_BLOCK_SIZE_SINGLE_OCCUPANCY")    = mcs::fmcs::kFmcsMaxBlockSizeSingleOccupancy;
 
   def(
     "_findMCSBatch",
@@ -377,14 +380,14 @@ BOOST_PYTHON_MODULE(_mcs) {
       if (params.collectStats && !nvMolKit::kMCSCollectStatsEnabled) {
         throw std::runtime_error("fMCS stat instrumentation is not instantiated in this build");
       }
-      params.timeoutSeconds       = optionValue<unsigned int>(options, "timeout_seconds", 0);
-      params.batchSize            = optionValue<int>(options, "batch_size", 0);
-      params.blockSize            = optionValue<int>(options, "block_size", 128);
-      params.scratchLocation      = parseScratchLocation(optionValue<std::string>(options, "scratch_location", "auto"));
-      params.workerThreads        = optionValue<int>(options, "worker_threads", -1);
-      params.preprocessingThreads = optionValue<int>(options, "preprocessing_threads", -1);
-      params.executorsPerRunner   = optionValue<int>(options, "executors_per_runner", -1);
-      params.gpuIds               = optionIntVector(options, "gpu_ids");
+      params.timeoutSeconds  = optionValue<unsigned int>(options, "timeout_seconds", 0);
+      params.batchSize       = optionValue<int>(options, "batch_size", 0);
+      params.blockSize       = optionValue<int>(options, "block_size", mcs::fmcs::kFmcsMaxBlockSizeTwoBlockOccupancy);
+      params.scratchLocation = parseScratchLocation(optionValue<std::string>(options, "scratch_location", "auto"));
+      params.workerThreads   = optionValue<int>(options, "worker_threads", -1);
+      params.preprocessingThreads                    = optionValue<int>(options, "preprocessing_threads", -1);
+      params.executorsPerRunner                      = optionValue<int>(options, "executors_per_runner", -1);
+      params.gpuIds                                  = optionIntVector(options, "gpu_ids");
       params.atomCompareParameters.matchValences     = optionValue<bool>(options, "match_valences", false);
       params.atomCompareParameters.matchFormalCharge = optionValue<bool>(options, "match_formal_charge", false);
       params.atomCompareParameters.ringMatchesRingOnly =

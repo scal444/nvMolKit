@@ -4,6 +4,8 @@
 #ifndef FMCS_CUDA_FMCS_CONFIG_CUH
 #define FMCS_CUDA_FMCS_CONFIG_CUH
 
+#include "fmcs_cuda/fmcs_occupancy_config.cuh"
+
 namespace mcs {
 namespace fmcs {
 
@@ -22,7 +24,7 @@ static_assert((kFmcsGroupSize & (kFmcsGroupSize - 1)) == 0, "kFmcsGroupSize must
 
 /// Placement of the per-group substructure fallback scratch.  @c Shared keeps
 /// the historical static __shared__ array; @c Global places it in a per-block
-/// global-memory slab, freeing static shared so 512-thread blocks fit the
+/// global-memory slab, freeing static shared so the single-occupancy block fits the
 /// 48 KB cap at tier-128.  @c Auto is a host-only sentinel resolved in
 /// dispatch (fmcs.cpp); kernels are never instantiated on it.
 enum class FmcsScratchLocation {
@@ -32,7 +34,13 @@ enum class FmcsScratchLocation {
 };
 
 template <int blockThreads> struct FmcsBlockConfig {
-  static_assert(blockThreads == 128 || blockThreads == 512, "fMCS block size must be 128 or 512");
+#ifdef NVMOLKIT_FMCS_BLOCK_SIZE_PROBE
+  static_assert(blockThreads >= kFmcsGroupSize && blockThreads <= 1024,
+                "fMCS occupancy-probe block size must be between one warp and 1024 threads");
+#else
+  static_assert(blockThreads == kFmcsMaxBlockSizeTwoBlockOccupancy || blockThreads == kFmcsMaxBlockSizeSingleOccupancy,
+                "unsupported fMCS block size specialization");
+#endif
   static_assert(blockThreads % kFmcsGroupSize == 0, "fMCS block size must be a multiple of kFmcsGroupSize");
   static constexpr int numGroups = blockThreads / kFmcsGroupSize;
 };
