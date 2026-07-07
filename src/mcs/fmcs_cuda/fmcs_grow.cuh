@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,19 +16,17 @@
 #ifndef FMCS_CUDA_FMCS_GROW_CUH
 #define FMCS_CUDA_FMCS_GROW_CUH
 
+#include <cstdint>
+
 #include "fmcs_cuda/fmcs_match.cuh"
 #include "fmcs_cuda/fmcs_seed.cuh"
 #include "mcs_common/mcs_cooperative_copy.cuh"
 
-#include <cstdint>
-
 namespace mcs {
 namespace fmcs {
 
-template<int maxAtoms, int maxBonds>
-__device__ __forceinline__ void seedAddNewBondWithinThread(
-    Seed<maxAtoms, maxBonds>& seed,
-    const NewBond& bond) {
+template <int maxAtoms, int maxBonds>
+__device__ __forceinline__ void seedAddNewBondWithinThread(Seed<maxAtoms, maxBonds>& seed, const NewBond& bond) {
   seedAddBondWithinThread(seed, bond.bondIdx);
   if (bond.endAtomSeedIdx == NewBond::kNotInSeed) {
     seedAddAtomWithinThread(seed, bond.newAtomIdx);
@@ -69,60 +67,51 @@ __device__ __forceinline__ void seedAddNewBondWithinThread(
 /// and clamps @p outCount to @p maxNewBonds (slots beyond that bound
 /// are not written).  No I/O ordering on @p outBonds is guaranteed --
 /// the order depends on lane race outcomes.
-template<int maxAtoms, int maxBonds, class QueryTopology, class GroupT>
-__device__ __forceinline__ bool fillNewBondsCooperative(
-    const GroupT& group,
-    const Seed<maxAtoms, maxBonds>& seed,
-    const QueryTopology& queryTopology,
-    NewBond* outBonds,
-    int* outCount,
-    int maxNewBonds) {
-  using SeedT = Seed<maxAtoms, maxBonds>;
-  using AtomWord = typename SeedT::atom_word_type;
-  using BondWord = typename SeedT::bond_word_type;
+template <int maxAtoms, int maxBonds, class QueryTopology, class GroupT>
+__device__ __forceinline__ bool fillNewBondsCooperative(const GroupT&                   group,
+                                                        const Seed<maxAtoms, maxBonds>& seed,
+                                                        const QueryTopology&            queryTopology,
+                                                        NewBond*                        outBonds,
+                                                        int*                            outCount,
+                                                        int                             maxNewBonds) {
+  using SeedT                    = Seed<maxAtoms, maxBonds>;
+  using AtomWord                 = typename SeedT::atom_word_type;
+  using BondWord                 = typename SeedT::bond_word_type;
   constexpr int kAtomBitsPerWord = SeedT::kAtomBitsPerWord;
   constexpr int kBondBitsPerWord = SeedT::kBondBitsPerWord;
 
   const int laneRank  = static_cast<int>(group.thread_rank());
   const int laneCount = static_cast<int>(group.num_threads());
 
-  if (laneRank == 0) *outCount = 0;
+  if (laneRank == 0)
+    *outCount = 0;
   group.sync();
 
   for (int q = laneRank; q < queryTopology.numBonds; q += laneCount) {
     // Excluded check first (cheapest).
-    const BondWord excludedBondsWord =
-        seed.excludedBonds[q / kBondBitsPerWord];
-    if ((excludedBondsWord >> (q % kBondBitsPerWord)) & 1) continue;
+    const BondWord excludedBondsWord = seed.excludedBonds[q / kBondBitsPerWord];
+    if ((excludedBondsWord >> (q % kBondBitsPerWord)) & 1)
+      continue;
 
     // Decode this query bond's endpoints.
     const std::uint32_t queryEndpoints = queryTopology.bondEndpoints[q];
-    const int queryEndpointU =
-        static_cast<int>(queryEndpoints >> kBondEndpointShift);
-    const int queryEndpointV =
-        static_cast<int>(queryEndpoints & kBondEndpointMask);
+    const int           queryEndpointU = static_cast<int>(queryEndpoints >> kBondEndpointShift);
+    const int           queryEndpointV = static_cast<int>(queryEndpoints & kBondEndpointMask);
 
     // Bond is a "new boundary" candidate iff at least one endpoint
     // was added in the most recent grow step.
-    const AtomWord lastAddedWordU =
-        seed.lastAddedAtoms[queryEndpointU / kAtomBitsPerWord];
-    const AtomWord lastAddedWordV =
-        seed.lastAddedAtoms[queryEndpointV / kAtomBitsPerWord];
-    const bool uIsNewlyAdded =
-        (lastAddedWordU >> (queryEndpointU % kAtomBitsPerWord)) & 1;
-    const bool vIsNewlyAdded =
-        (lastAddedWordV >> (queryEndpointV % kAtomBitsPerWord)) & 1;
-    if (!uIsNewlyAdded && !vIsNewlyAdded) continue;
+    const AtomWord lastAddedWordU = seed.lastAddedAtoms[queryEndpointU / kAtomBitsPerWord];
+    const AtomWord lastAddedWordV = seed.lastAddedAtoms[queryEndpointV / kAtomBitsPerWord];
+    const bool     uIsNewlyAdded  = (lastAddedWordU >> (queryEndpointU % kAtomBitsPerWord)) & 1;
+    const bool     vIsNewlyAdded  = (lastAddedWordV >> (queryEndpointV % kAtomBitsPerWord)) & 1;
+    if (!uIsNewlyAdded && !vIsNewlyAdded)
+      continue;
 
     // Classify ring-closing vs atom-adding via seed.atoms membership.
-    const AtomWord seedAtomsWordU =
-        seed.atoms[queryEndpointU / kAtomBitsPerWord];
-    const AtomWord seedAtomsWordV =
-        seed.atoms[queryEndpointV / kAtomBitsPerWord];
-    const bool uInSeed =
-        (seedAtomsWordU >> (queryEndpointU % kAtomBitsPerWord)) & 1;
-    const bool vInSeed =
-        (seedAtomsWordV >> (queryEndpointV % kAtomBitsPerWord)) & 1;
+    const AtomWord seedAtomsWordU = seed.atoms[queryEndpointU / kAtomBitsPerWord];
+    const AtomWord seedAtomsWordV = seed.atoms[queryEndpointV / kAtomBitsPerWord];
+    const bool     uInSeed        = (seedAtomsWordU >> (queryEndpointU % kAtomBitsPerWord)) & 1;
+    const bool     vInSeed        = (seedAtomsWordV >> (queryEndpointV % kAtomBitsPerWord)) & 1;
 
     NewBond newBond;
     newBond.bondIdx = static_cast<uint16_t>(q);
@@ -135,10 +124,8 @@ __device__ __forceinline__ bool fillNewBondsCooperative(
       newBond.endAtomSeedIdx = static_cast<uint16_t>(queryEndpointU);
       newBond.seedAtomIdx    = static_cast<uint16_t>(queryEndpointU);
     } else {
-      newBond.newAtomIdx     =
-          static_cast<uint16_t>(uInSeed ? queryEndpointV : queryEndpointU);
-      newBond.seedAtomIdx    =
-          static_cast<uint16_t>(uInSeed ? queryEndpointU : queryEndpointV);
+      newBond.newAtomIdx     = static_cast<uint16_t>(uInSeed ? queryEndpointV : queryEndpointU);
+      newBond.seedAtomIdx    = static_cast<uint16_t>(uInSeed ? queryEndpointU : queryEndpointV);
       newBond.endAtomSeedIdx = NewBond::kNotInSeed;
     }
 
@@ -183,19 +170,19 @@ __device__ __forceinline__ bool fillNewBondsCooperative(
 /// @p childWorkspace must be a per-group shared slot the caller owns
 /// -- the kernel reuses the same buffer it already allocated for the
 /// Stage 0 biggest-child build.
-template<int maxAtoms, int maxBonds, int maxTA, int maxTB,
-         class GroupT, class MatchFn, class ChildSink>
+template <int maxAtoms, int maxBonds, int maxTA, int maxTB, class GroupT, class MatchFn, class ChildSink>
 __device__ __forceinline__ void pruneIndividualBondsCooperative(
-    const GroupT& group,
-    const QueuedSeed<maxAtoms, maxBonds, maxTA, maxTB>& parent,
-    QueuedSeed<maxAtoms, maxBonds, maxTA, maxTB>& childWorkspace,
-    const NewBond* bonds,
-    int nBonds,
-    MatchFn&& matchFn,
-    ChildSink&& childSink) {
+  const GroupT&                                       group,
+  const QueuedSeed<maxAtoms, maxBonds, maxTA, maxTB>& parent,
+  QueuedSeed<maxAtoms, maxBonds, maxTA, maxTB>&       childWorkspace,
+  const NewBond*                                      bonds,
+  int                                                 nBonds,
+  MatchFn&&                                           matchFn,
+  ChildSink&&                                         childSink) {
   using QueuedT = QueuedSeed<maxAtoms, maxBonds, maxTA, maxTB>;
   for (int i = 0; i < nBonds; ++i) {
-    if (!bonds[i].alive) continue;
+    if (!bonds[i].alive)
+      continue;
 
     // Reset the workspace to a copy of the parent (group-cooperative).
     warpCopy(group, &childWorkspace, &parent, sizeof(QueuedT));

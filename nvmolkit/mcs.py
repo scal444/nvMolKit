@@ -306,7 +306,7 @@ def findMCS(
     match_isotope: bool = False,
     maximize_bonds: bool = True,
     connected_only: bool = True,
-    require_gpu: bool = False,
+    allow_rdkit_fallback: bool = True,
     timeout_seconds: int = 0,
     config: MCSConfig | None = None,
     batch_size: int = 0,
@@ -343,15 +343,21 @@ def findMCS(
         bond_ring_matches_ring_only: Match ring bonds only to ring bonds.
         complete_rings_only: Convenience value applied to both atom and bond
             complete-ring settings unless axis-specific values are supplied.
-        atom_complete_rings_only: Delegate atom complete-ring matching to RDKit.
-        bond_complete_rings_only: Delegate bond complete-ring matching to RDKit.
+        atom_complete_rings_only: Apply RDKit ``CompleteRingsOnly`` semantics
+            for atom comparison.
+        bond_complete_rings_only: Apply RDKit ``CompleteRingsOnly`` semantics
+            for bond comparison.
         match_isotope: Match isotope labels in addition to ``atom_compare``.
         maximize_bonds: Maximize bonds, matching RDKit's default fMCS objective.
-        connected_only: Require connected MCS. The GPU path supports connected
-            MCS only; unsupported settings use RDKit fallback unless
-            ``require_gpu`` is true.
-        require_gpu: Raise instead of using RDKit fallback for unsupported or
-            overflowed pairs.
+        connected_only: Require connected MCS. Disconnected MCS requests are
+            handled by RDKit when ``allow_rdkit_fallback`` is true.
+        allow_rdkit_fallback: Permit RDKit CPU fallback for a pair when any of
+            these conditions applies: ``connected_only=False``;
+            ``maximize_bonds=False``; ``atom_compare="any_heavy_atom"``; either
+            molecule exceeds 128 atoms or 128 bonds; or the GPU search reports
+            an internal capacity overflow. When false, each condition raises
+            ``RuntimeError`` instead. This option does not make CUDA optional:
+            absence of an accessible GPU always raises.
         timeout_seconds: Per-pair timeout in seconds. GPU results canceled by
             timeout return the best partial MCS found so far; RDKit fallback
             receives the same timeout.
@@ -389,13 +395,9 @@ def findMCS(
         :class:`MCSBatchResult` in generated-pair order.
     """
     if collect_timings and not MCS_TIMINGS_ENABLED:
-        raise RuntimeError(
-            "fMCS timing instrumentation is not instantiated in this build"
-        )
+        raise RuntimeError("fMCS timing instrumentation is not instantiated in this build")
     if collect_stats and not MCS_STATS_ENABLED:
-        raise RuntimeError(
-            "fMCS stat instrumentation is not instantiated in this build"
-        )
+        raise RuntimeError("fMCS stat instrumentation is not instantiated in this build")
 
     mode = _normalize_mode(mode)
     mol_list = list(mols)
@@ -486,7 +488,7 @@ def findMCS(
             "bond_compare": _normalize_bond_compare(bond_compare),
             "maximize_bonds": bool(maximize_bonds),
             "connected_only": bool(connected_only),
-            "require_gpu": bool(require_gpu),
+            "allow_rdkit_fallback": bool(allow_rdkit_fallback),
             "timeout_seconds": int(timeout_seconds),
             "batch_size": int(batch_size),
             "block_size": int(block_size),

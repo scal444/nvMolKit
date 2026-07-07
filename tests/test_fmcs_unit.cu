@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,14 +18,6 @@
 // helper, and copies results back to host memory for assertion.  This
 // file is populated incrementally as Steps 1-5 land real implementations.
 
-#include "fmcs_cuda/experimental/fmcs_match_cache.cuh"
-#include "fmcs_cuda/fmcs_grow.cuh"
-#include "fmcs_cuda/fmcs_kernel.cuh"
-#include "fmcs_cuda/fmcs_match.cuh"
-#include "fmcs_cuda/fmcs_match_tables.cuh"
-#include "fmcs_cuda/fmcs_seed.cuh"
-#include "fmcs_cuda/fmcs_seed_queue.cuh"
-
 #include <cooperative_groups.h>
 #include <gtest/gtest.h>
 
@@ -34,15 +26,23 @@
 #include <set>
 #include <vector>
 
+#include "fmcs_cuda/experimental/fmcs_match_cache.cuh"
+#include "fmcs_cuda/fmcs_grow.cuh"
+#include "fmcs_cuda/fmcs_kernel.cuh"
+#include "fmcs_cuda/fmcs_match.cuh"
+#include "fmcs_cuda/fmcs_match_tables.cuh"
+#include "fmcs_cuda/fmcs_seed.cuh"
+#include "fmcs_cuda/fmcs_seed_queue.cuh"
+
 namespace {
 
 using mcs::fmcs::MatchResult;
 using mcs::fmcs::Seed;
 
-template<typename T>
-T* mallocManaged() {
+template <typename T> T* mallocManaged() {
   T* ptr = nullptr;
-  if (cudaMallocManaged(&ptr, sizeof(T)) != cudaSuccess) return nullptr;
+  if (cudaMallocManaged(&ptr, sizeof(T)) != cudaSuccess)
+    return nullptr;
   return ptr;
 }
 
@@ -50,18 +50,20 @@ T* mallocManaged() {
 // matchResultClearWithinThread
 // ---------------------------------------------------------------------------
 
-__global__ void matchResultClearDriverKernel(
-    MatchResult<16, 16, 16, 16>* out) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+__global__ void matchResultClearDriverKernel(MatchResult<16, 16, 16, 16>* out) {
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
   MatchResult<16, 16, 16, 16> m;
-  for (int i = 0; i < 16; ++i) m.targetAtomIdx[i] = 7;
-  for (int i = 0; i < 16; ++i) m.targetBondIdx[i] = 7;
+  for (int i = 0; i < 16; ++i)
+    m.targetAtomIdx[i] = 7;
+  for (int i = 0; i < 16; ++i)
+    m.targetBondIdx[i] = 7;
   // Pre-populate visited bitsets too so we can verify they're zeroed.
   m.visitedTargetAtoms[0] = 0xDEADBEEFu;
   m.visitedTargetBonds[0] = 0xCAFEBABEu;
-  m.matchedAtomSize = 13;
-  m.matchedBondSize = 11;
-  m.empty = false;
+  m.matchedAtomSize       = 13;
+  m.matchedBondSize       = 11;
+  m.empty                 = false;
   mcs::fmcs::matchResultClearWithinThread(m);
   *out = m;
 }
@@ -95,7 +97,8 @@ TEST(FMCSUnit, MatchResultClearZeroesEverything) {
 namespace {
 
 __global__ void seedAddAtomDriverKernel(Seed<16, 16>* out) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
   Seed<16, 16> seed{};
   mcs::fmcs::seedAddAtomWithinThread(seed, 3);
   mcs::fmcs::seedAddAtomWithinThread(seed, 5);
@@ -113,8 +116,7 @@ TEST(FMCSUnit, SeedAddAtomSetsBitsAndCount) {
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
   // Tier 16 packs the atom bitset into one uint32 word.
-  const std::uint32_t expected =
-      (1u << 3) | (1u << 5) | (1u << 12);
+  const std::uint32_t expected = (1u << 3) | (1u << 5) | (1u << 12);
   EXPECT_EQ(d_out->atoms[0], expected);
   EXPECT_EQ(d_out->numAtoms, 3);
   // No bond / excludedBonds touched.
@@ -132,7 +134,8 @@ TEST(FMCSUnit, SeedAddAtomSetsBitsAndCount) {
 namespace {
 
 __global__ void seedAddBondDriverKernel(Seed<16, 16>* out) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
   Seed<16, 16> seed{};
   mcs::fmcs::seedAddBondWithinThread(seed, 2);
   mcs::fmcs::seedAddBondWithinThread(seed, 7);
@@ -166,7 +169,8 @@ TEST(FMCSUnit, SeedAddBondSetsBondsAndExcludedAndCount) {
 namespace {
 
 __global__ void seedBeginGrowStepDriverKernel(Seed<16, 16>* out) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
   Seed<16, 16> seed{};
   mcs::fmcs::seedAddAtomWithinThread(seed, 0);
   mcs::fmcs::seedAddAtomWithinThread(seed, 1);
@@ -201,31 +205,27 @@ TEST(FMCSUnit, SeedBeginGrowStepSnapshotsNumAtoms) {
 namespace {
 
 struct CanGrowResults {
-  bool moreBonds;          // possible bonds 8 vs best 5: true
-  bool fewerBonds;         // possible bonds 5 vs best 8: false
-  bool tiedBondsMoreAtoms; // possible bonds 8 best 8, atoms tie-break: true
+  bool moreBonds;           // possible bonds 8 vs best 5: true
+  bool fewerBonds;          // possible bonds 5 vs best 8: false
+  bool tiedBondsMoreAtoms;  // possible bonds 8 best 8, atoms tie-break: true
   bool tiedBondsFewerAtoms;
   bool tiedBondsTiedAtoms;
 };
 
 __global__ void seedCanGrowDriverKernel(CanGrowResults* out) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
   Seed<16, 16> seed{};
   seed.numBonds       = 5;
-  seed.remainingBonds = 3;   // possibleBonds = 8
+  seed.remainingBonds = 3;  // possibleBonds = 8
   seed.numAtoms       = 4;
-  seed.remainingAtoms = 2;   // possibleAtoms = 6
+  seed.remainingAtoms = 2;  // possibleAtoms = 6
 
-  out->moreBonds =
-      mcs::fmcs::seedCanGrowBiggerThanWithinThread(seed, /*bestBonds=*/5, /*bestAtoms=*/0);
-  out->fewerBonds =
-      mcs::fmcs::seedCanGrowBiggerThanWithinThread(seed, /*bestBonds=*/9, /*bestAtoms=*/0);
-  out->tiedBondsMoreAtoms =
-      mcs::fmcs::seedCanGrowBiggerThanWithinThread(seed, /*bestBonds=*/8, /*bestAtoms=*/5);
-  out->tiedBondsFewerAtoms =
-      mcs::fmcs::seedCanGrowBiggerThanWithinThread(seed, /*bestBonds=*/8, /*bestAtoms=*/7);
-  out->tiedBondsTiedAtoms =
-      mcs::fmcs::seedCanGrowBiggerThanWithinThread(seed, /*bestBonds=*/8, /*bestAtoms=*/6);
+  out->moreBonds           = mcs::fmcs::seedCanGrowBiggerThanWithinThread(seed, /*bestBonds=*/5, /*bestAtoms=*/0);
+  out->fewerBonds          = mcs::fmcs::seedCanGrowBiggerThanWithinThread(seed, /*bestBonds=*/9, /*bestAtoms=*/0);
+  out->tiedBondsMoreAtoms  = mcs::fmcs::seedCanGrowBiggerThanWithinThread(seed, /*bestBonds=*/8, /*bestAtoms=*/5);
+  out->tiedBondsFewerAtoms = mcs::fmcs::seedCanGrowBiggerThanWithinThread(seed, /*bestBonds=*/8, /*bestAtoms=*/7);
+  out->tiedBondsTiedAtoms  = mcs::fmcs::seedCanGrowBiggerThanWithinThread(seed, /*bestBonds=*/8, /*bestAtoms=*/6);
 }
 
 }  // namespace
@@ -253,7 +253,8 @@ TEST(FMCSUnit, SeedCanGrowBiggerThanBoundCheck) {
 namespace {
 
 __global__ void seedAddAtomMultiWordDriverKernel(Seed<128, 128>* out) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
   Seed<128, 128> seed{};
   // Atoms at the four corners of the 2-uint64-word atom bitset:
   //   0 (word 0, bit 0), 63 (word 0, bit 63),
@@ -266,7 +267,8 @@ __global__ void seedAddAtomMultiWordDriverKernel(Seed<128, 128>* out) {
 }
 
 __global__ void seedAddBondMultiWordDriverKernel(Seed<128, 128>* out) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
   Seed<128, 128> seed{};
   mcs::fmcs::seedAddBondWithinThread(seed, 0);
   mcs::fmcs::seedAddBondWithinThread(seed, 63);
@@ -276,7 +278,8 @@ __global__ void seedAddBondMultiWordDriverKernel(Seed<128, 128>* out) {
 }
 
 __global__ void seedAddAtomBoundaryDriverKernel(Seed<16, 16>* out) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
   Seed<16, 16> seed{};
   mcs::fmcs::seedAddAtomWithinThread(seed, 0);
   mcs::fmcs::seedAddAtomWithinThread(seed, 15);  // tier-16 max valid atom idx
@@ -308,8 +311,8 @@ TEST(FMCSUnit, SeedAddBondCrossesWordBoundary) {
   seedAddBondMultiWordDriverKernel<<<1, 1>>>(d_out);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
-  const std::uint64_t bit0  = std::uint64_t{1} << 0;
-  const std::uint64_t bit63 = std::uint64_t{1} << 63;
+  const std::uint64_t bit0     = std::uint64_t{1} << 0;
+  const std::uint64_t bit63    = std::uint64_t{1} << 63;
   const std::uint64_t expected = bit0 | bit63;
   EXPECT_EQ(d_out->bonds[0], expected);
   EXPECT_EQ(d_out->bonds[1], expected);
@@ -341,15 +344,14 @@ struct CanGrowFromEmptyResults {
 };
 
 __global__ void seedCanGrowFromEmptyDriverKernel(CanGrowFromEmptyResults* out) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
   Seed<16, 16> live{};
   live.numBonds       = 1;
   live.remainingBonds = 1;
-  out->nonEmptyVsZero =
-      mcs::fmcs::seedCanGrowBiggerThanWithinThread(live, 0, 0);
+  out->nonEmptyVsZero = mcs::fmcs::seedCanGrowBiggerThanWithinThread(live, 0, 0);
   Seed<16, 16> empty{};
-  out->emptyVsZero =
-      mcs::fmcs::seedCanGrowBiggerThanWithinThread(empty, 0, 0);
+  out->emptyVsZero = mcs::fmcs::seedCanGrowBiggerThanWithinThread(empty, 0, 0);
 }
 
 }  // namespace
@@ -381,7 +383,8 @@ using mcs::fmcs::ThreadBlockScope;
 // Single-thread driver: push 5 ints, pop 5, record the popped order so
 // the host can verify LIFO.
 __global__ void queuePushPopLIFODriver(int* poppedOrder, int* outSizeAfterPushes) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
   __shared__ int storage[8];
   __shared__ SeedQueue<int, ThreadBlockScope> queue;
   queue.init(storage, 8);
@@ -391,14 +394,15 @@ __global__ void queuePushPopLIFODriver(int* poppedOrder, int* outSizeAfterPushes
   }
   *outSizeAfterPushes = queue.size();
   for (int i = 0; i < 5; ++i) {
-    int popped = -1;
-    bool ok = queue.popWithinThread(popped);
+    int  popped    = -1;
+    bool ok        = queue.popWithinThread(popped);
     poppedOrder[i] = ok ? popped : -1;
   }
 }
 
 __global__ void queueOverflowDriver(bool* pushOk, int* finalSize) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
   __shared__ int storage[4];
   __shared__ SeedQueue<int, ThreadBlockScope> queue;
   queue.init(storage, 4);
@@ -409,22 +413,23 @@ __global__ void queueOverflowDriver(bool* pushOk, int* finalSize) {
 }
 
 __global__ void queuePopFromEmptyDriver(bool* popOk, int* outVal) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
   __shared__ int storage[4];
   __shared__ SeedQueue<int, ThreadBlockScope> queue;
   queue.init(storage, 4);
-  int v = 12345;
-  *popOk = queue.popWithinThread(v);
+  int v   = 12345;
+  *popOk  = queue.popWithinThread(v);
   *outVal = v;
 }
 
 // Multi-thread (1 warp = 32 threads): each lane pushes its own payload.
 // Verifies CAS-based pushes don't lose any concurrent inserts.
-__global__ void queueConcurrentPushesDriver(int* outStorage,
-                                            int* outSize) {
+__global__ void queueConcurrentPushesDriver(int* outStorage, int* outSize) {
   __shared__ int storage[64];
   __shared__ SeedQueue<int, ThreadBlockScope> queue;
-  if (threadIdx.x == 0) queue.init(storage, 64);
+  if (threadIdx.x == 0)
+    queue.init(storage, 64);
   __syncthreads();
 
   bool ok = queue.pushWithinThread(1000 + static_cast<int>(threadIdx.x));
@@ -433,7 +438,8 @@ __global__ void queueConcurrentPushesDriver(int* outStorage,
 
   if (threadIdx.x == 0) {
     *outSize = queue.size();
-    for (int i = 0; i < queue.size(); ++i) outStorage[i] = storage[i];
+    for (int i = 0; i < queue.size(); ++i)
+      outStorage[i] = storage[i];
   }
 }
 
@@ -441,18 +447,17 @@ __global__ void queueConcurrentPushesDriver(int* outStorage,
 // each lane writes its own payload into the reserved slot.  Verifies
 // the cooperative reservation broadcasts correctly and all 32 slots
 // land contiguously.
-__global__ void queueBatchReserveDriver(int* outStorage,
-                                        int* outStart,
-                                        int* outSize) {
+__global__ void queueBatchReserveDriver(int* outStorage, int* outStart, int* outSize) {
   __shared__ int storage[64];
   __shared__ SeedQueue<int, ThreadBlockScope> queue;
-  if (threadIdx.x == 0) queue.init(storage, 64);
+  if (threadIdx.x == 0)
+    queue.init(storage, 64);
   __syncthreads();
 
-  auto block = cg::this_thread_block();
-  auto warp = cg::tiled_partition<32>(block);
+  auto      block  = cg::this_thread_block();
+  auto      warp   = cg::tiled_partition<32>(block);
   const int laneId = static_cast<int>(warp.thread_rank());
-  const int start = queue.batchReserveCooperative(warp, 32);
+  const int start  = queue.batchReserveCooperative(warp, 32);
   if (start >= 0) {
     queue.slot(start + laneId) = 2000 + laneId;
   }
@@ -461,51 +466,53 @@ __global__ void queueBatchReserveDriver(int* outStorage,
   if (threadIdx.x == 0) {
     *outStart = start;
     *outSize  = queue.size();
-    for (int i = 0; i < queue.size(); ++i) outStorage[i] = storage[i];
+    for (int i = 0; i < queue.size(); ++i)
+      outStorage[i] = storage[i];
   }
 }
 
 __global__ void queueBatchReserveOverflowDriver(int* outStart, int* outSize) {
   __shared__ int storage[10];
   __shared__ SeedQueue<int, ThreadBlockScope> queue;
-  if (threadIdx.x == 0) queue.init(storage, 10);
+  if (threadIdx.x == 0)
+    queue.init(storage, 10);
   __syncthreads();
 
-  auto block = cg::this_thread_block();
-  auto warp = cg::tiled_partition<32>(block);
+  auto      block = cg::this_thread_block();
+  auto      warp  = cg::tiled_partition<32>(block);
   const int start = queue.batchReserveCooperative(warp, 15);
   __syncthreads();
 
   if (threadIdx.x == 0) {
     *outStart = start;
-    *outSize = queue.size();
+    *outSize  = queue.size();
   }
 }
 
 // Capacity 10, pre-push 7 elements, then request 5 slots: only 3 free.
 // Reservation must fail atomically (no partial reservation, no slots
 // consumed) -- partial fit must be treated as a hard failure.
-__global__ void queueBatchReservePartialFitDriver(int* outStart,
-                                                  int* outSizeBefore,
-                                                  int* outSizeAfter) {
+__global__ void queueBatchReservePartialFitDriver(int* outStart, int* outSizeBefore, int* outSizeAfter) {
   __shared__ int storage[10];
   __shared__ SeedQueue<int, ThreadBlockScope> queue;
   if (threadIdx.x == 0) {
     queue.init(storage, 10);
-    for (int i = 0; i < 7; ++i) queue.pushWithinThread(i);
+    for (int i = 0; i < 7; ++i)
+      queue.pushWithinThread(i);
   }
   __syncthreads();
 
-  if (threadIdx.x == 0) *outSizeBefore = queue.size();
+  if (threadIdx.x == 0)
+    *outSizeBefore = queue.size();
   __syncthreads();
 
-  auto block = cg::this_thread_block();
-  auto warp = cg::tiled_partition<32>(block);
+  auto      block = cg::this_thread_block();
+  auto      warp  = cg::tiled_partition<32>(block);
   const int start = queue.batchReserveCooperative(warp, 5);
   __syncthreads();
 
   if (threadIdx.x == 0) {
-    *outStart = start;
+    *outStart     = start;
     *outSizeAfter = queue.size();
   }
 }
@@ -513,8 +520,8 @@ __global__ void queueBatchReservePartialFitDriver(int* outStart,
 }  // namespace
 
 TEST(FMCSUnit, QueuePushPopLIFO) {
-  int* d_order  = nullptr;
-  int* d_size   = nullptr;
+  int* d_order = nullptr;
+  int* d_size  = nullptr;
   ASSERT_EQ(cudaMallocManaged(&d_order, sizeof(int) * 5), cudaSuccess);
   ASSERT_EQ(cudaMallocManaged(&d_size, sizeof(int)), cudaSuccess);
 
@@ -546,7 +553,7 @@ TEST(FMCSUnit, QueuePushOverflowReturnsFalse) {
   EXPECT_TRUE(d_ok[1]);
   EXPECT_TRUE(d_ok[2]);
   EXPECT_TRUE(d_ok[3]);
-  EXPECT_FALSE(d_ok[4]);   // 5th push should fail; capacity == 4.
+  EXPECT_FALSE(d_ok[4]);  // 5th push should fail; capacity == 4.
   EXPECT_EQ(*d_size, 4);
 
   cudaFree(d_ok);
@@ -582,7 +589,8 @@ TEST(FMCSUnit, QueueConcurrentPushesAllLand) {
   // All 32 lanes' payloads should be present exactly once.  Order is
   // non-deterministic across CAS races; check by set membership.
   std::set<int> seen;
-  for (int i = 0; i < 32; ++i) seen.insert(d_storage[i]);
+  for (int i = 0; i < 32; ++i)
+    seen.insert(d_storage[i]);
   EXPECT_EQ(seen.size(), 32u);
   for (int i = 0; i < 32; ++i) {
     EXPECT_TRUE(seen.count(1000 + i)) << "missing lane " << i;
@@ -633,9 +641,9 @@ TEST(FMCSUnit, QueueBatchReserveOverflowReturnsNegativeOne) {
 }
 
 TEST(FMCSUnit, QueueBatchReservePartialFitFails) {
-  int* d_start       = nullptr;
-  int* d_sizeBefore  = nullptr;
-  int* d_sizeAfter   = nullptr;
+  int* d_start      = nullptr;
+  int* d_sizeBefore = nullptr;
+  int* d_sizeAfter  = nullptr;
   ASSERT_EQ(cudaMallocManaged(&d_start, sizeof(int)), cudaSuccess);
   ASSERT_EQ(cudaMallocManaged(&d_sizeBefore, sizeof(int)), cudaSuccess);
   ASSERT_EQ(cudaMallocManaged(&d_sizeAfter, sizeof(int)), cudaSuccess);
@@ -644,8 +652,8 @@ TEST(FMCSUnit, QueueBatchReservePartialFitFails) {
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
   EXPECT_EQ(*d_sizeBefore, 7);
-  EXPECT_EQ(*d_start, -1);    // Reservation must fail atomically.
-  EXPECT_EQ(*d_sizeAfter, 7); // No partial slots consumed; size unchanged.
+  EXPECT_EQ(*d_start, -1);     // Reservation must fail atomically.
+  EXPECT_EQ(*d_sizeAfter, 7);  // No partial slots consumed; size unchanged.
 
   cudaFree(d_start);
   cudaFree(d_sizeBefore);
@@ -658,9 +666,9 @@ TEST(FMCSUnit, QueueBatchReservePartialFitFails) {
 
 namespace {
 
-using mcs::fmcs::SingleBondMatch;
-using mcs::fmcs::PairMatchTablesDevice;
 using mcs::fmcs::MatchTableDevice;
+using mcs::fmcs::PairMatchTablesDevice;
+using mcs::fmcs::SingleBondMatch;
 
 // Tiny CSR-view used by the match helpers via duck-typing; satisfies the
 // QueryTopology / TargetTopology template requirement (bondEndpoints +
@@ -669,33 +677,29 @@ struct TestCsrView {
   static constexpr bool kHasAdjacencyBondIndices = false;
 
   const std::uint32_t* bondEndpoints = nullptr;
-  int numAtoms = 0;
-  int numBonds = 0;
-  const std::uint32_t* rowOffsets = nullptr;
-  const std::uint32_t* colIndices = nullptr;
-  const std::uint32_t* bondIndices = nullptr;
+  int                  numAtoms      = 0;
+  int                  numBonds      = 0;
+  const std::uint32_t* rowOffsets    = nullptr;
+  const std::uint32_t* colIndices    = nullptr;
+  const std::uint32_t* bondIndices   = nullptr;
 };
 
 // RAII wrapper for managed-memory match tables.  Both atom and bond
 // tables are 32-bit row-packed bitmasks (one bit per (q, t) pair).
 struct ManagedMatchTables {
-  std::uint32_t* atomData = nullptr;
-  std::uint32_t* bondData = nullptr;
+  std::uint32_t*        atomData = nullptr;
+  std::uint32_t*        bondData = nullptr;
   PairMatchTablesDevice device{};
-  int qNumAtoms = 0;
-  int qNumBonds = 0;
+  int                   qNumAtoms = 0;
+  int                   qNumBonds = 0;
 
   void allocate(int qAtoms, int tAtoms, int qBonds, int tBonds) {
-    qNumAtoms = qAtoms;
-    qNumBonds = qBonds;
+    qNumAtoms                 = qAtoms;
+    qNumBonds                 = qBonds;
     const int atomWordsPerRow = (tAtoms + 31) / 32;
     const int bondWordsPerRow = (tBonds + 31) / 32;
-    EXPECT_EQ(cudaMallocManaged(&atomData,
-                                qAtoms * atomWordsPerRow * sizeof(std::uint32_t)),
-              cudaSuccess);
-    EXPECT_EQ(cudaMallocManaged(&bondData,
-                                qBonds * bondWordsPerRow * sizeof(std::uint32_t)),
-              cudaSuccess);
+    EXPECT_EQ(cudaMallocManaged(&atomData, qAtoms * atomWordsPerRow * sizeof(std::uint32_t)), cudaSuccess);
+    EXPECT_EQ(cudaMallocManaged(&bondData, qBonds * bondWordsPerRow * sizeof(std::uint32_t)), cudaSuccess);
     std::memset(atomData, 0, qAtoms * atomWordsPerRow * sizeof(std::uint32_t));
     std::memset(bondData, 0, qBonds * bondWordsPerRow * sizeof(std::uint32_t));
     device.atoms = MatchTableDevice{atomData, qAtoms, tAtoms, atomWordsPerRow};
@@ -703,12 +707,10 @@ struct ManagedMatchTables {
   }
 
   void setAtomBit(int qAtom, int tAtom) {
-    atomData[qAtom * device.atoms.wordsPerRow + tAtom / 32] |=
-        (1u << (tAtom % 32));
+    atomData[qAtom * device.atoms.wordsPerRow + tAtom / 32] |= (1u << (tAtom % 32));
   }
   void setBondBit(int qBond, int tBond) {
-    bondData[qBond * device.bonds.wordsPerRow + tBond / 32] |=
-        (1u << (tBond % 32));
+    bondData[qBond * device.bonds.wordsPerRow + tBond / 32] |= (1u << (tBond % 32));
   }
   void setAllAtomBits() {
     for (int q = 0; q < device.atoms.nRows; ++q)
@@ -722,19 +724,18 @@ struct ManagedMatchTables {
   }
 
   ~ManagedMatchTables() {
-    if (atomData) cudaFree(atomData);
-    if (bondData) cudaFree(bondData);
+    if (atomData)
+      cudaFree(atomData);
+    if (bondData)
+      cudaFree(bondData);
   }
 };
 
-std::uint32_t* allocBondEndpointsManaged(
-    const std::vector<std::pair<int, int>>& edges) {
+std::uint32_t* allocBondEndpointsManaged(const std::vector<std::pair<int, int>>& edges) {
   std::uint32_t* p = nullptr;
-  EXPECT_EQ(cudaMallocManaged(&p, edges.size() * sizeof(std::uint32_t)),
-            cudaSuccess);
+  EXPECT_EQ(cudaMallocManaged(&p, edges.size() * sizeof(std::uint32_t)), cudaSuccess);
   for (size_t i = 0; i < edges.size(); ++i) {
-    p[i] = (static_cast<std::uint32_t>(edges[i].first)  << 16) |
-            static_cast<std::uint32_t>(edges[i].second);
+    p[i] = (static_cast<std::uint32_t>(edges[i].first) << 16) | static_cast<std::uint32_t>(edges[i].second);
   }
   return p;
 }
@@ -742,22 +743,27 @@ std::uint32_t* allocBondEndpointsManaged(
 // ---- matchSingleBondWithinThread ----
 
 struct SingleBondTestOut {
-  bool ok;
+  bool            ok;
   SingleBondMatch match;
 };
 
-__global__ void matchSingleBondDriver(
-    int qBondIdx, int tBondIdx, bool reversed,
-    const std::uint32_t* qBondEndpoints, int qNumAtoms, int qNumBonds,
-    const std::uint32_t* tBondEndpoints, int tNumAtoms, int tNumBonds,
-    PairMatchTablesDevice tables,
-    SingleBondTestOut* out) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  TestCsrView qView{qBondEndpoints, qNumAtoms, qNumBonds};
-  TestCsrView tView{tBondEndpoints, tNumAtoms, tNumBonds};
+__global__ void matchSingleBondDriver(int                   qBondIdx,
+                                      int                   tBondIdx,
+                                      bool                  reversed,
+                                      const std::uint32_t*  qBondEndpoints,
+                                      int                   qNumAtoms,
+                                      int                   qNumBonds,
+                                      const std::uint32_t*  tBondEndpoints,
+                                      int                   tNumAtoms,
+                                      int                   tNumBonds,
+                                      PairMatchTablesDevice tables,
+                                      SingleBondTestOut*    out) {
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
+  TestCsrView     qView{qBondEndpoints, qNumAtoms, qNumBonds};
+  TestCsrView     tView{tBondEndpoints, tNumAtoms, tNumBonds};
   SingleBondMatch sm{};
-  out->ok = mcs::fmcs::matchSingleBondWithinThread(
-      qBondIdx, tBondIdx, reversed, qView, tView, tables, sm);
+  out->ok    = mcs::fmcs::matchSingleBondWithinThread(qBondIdx, tBondIdx, reversed, qView, tView, tables, sm);
   out->match = sm;
 }
 
@@ -765,8 +771,12 @@ __global__ void matchSingleBondDriver(
 
 TEST(FMCSUnit, MatchSingleBondForwardOrientation) {
   // Query bond (0,1), target bond (0,1).  All atoms / bonds compatible.
-  std::uint32_t* qBE = allocBondEndpointsManaged({{0, 1}});
-  std::uint32_t* tBE = allocBondEndpointsManaged({{0, 1}});
+  std::uint32_t*     qBE = allocBondEndpointsManaged({
+    {0, 1}
+  });
+  std::uint32_t*     tBE = allocBondEndpointsManaged({
+    {0, 1}
+  });
   ManagedMatchTables tables;
   tables.allocate(2, 2, 1, 1);
   tables.setAllAtomBits();
@@ -774,8 +784,7 @@ TEST(FMCSUnit, MatchSingleBondForwardOrientation) {
 
   SingleBondTestOut* out = nullptr;
   ASSERT_EQ(cudaMallocManaged(&out, sizeof(SingleBondTestOut)), cudaSuccess);
-  matchSingleBondDriver<<<1, 1>>>(0, 0, /*reversed=*/false, qBE, 2, 1, tBE, 2, 1,
-                                  tables.device, out);
+  matchSingleBondDriver<<<1, 1>>>(0, 0, /*reversed=*/false, qBE, 2, 1, tBE, 2, 1, tables.device, out);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
   EXPECT_TRUE(out->ok);
@@ -788,8 +797,12 @@ TEST(FMCSUnit, MatchSingleBondForwardOrientation) {
 }
 
 TEST(FMCSUnit, MatchSingleBondReverseOrientation) {
-  std::uint32_t* qBE = allocBondEndpointsManaged({{0, 1}});
-  std::uint32_t* tBE = allocBondEndpointsManaged({{0, 1}});
+  std::uint32_t*     qBE = allocBondEndpointsManaged({
+    {0, 1}
+  });
+  std::uint32_t*     tBE = allocBondEndpointsManaged({
+    {0, 1}
+  });
   ManagedMatchTables tables;
   tables.allocate(2, 2, 1, 1);
   tables.setAllAtomBits();
@@ -797,8 +810,7 @@ TEST(FMCSUnit, MatchSingleBondReverseOrientation) {
 
   SingleBondTestOut* out = nullptr;
   ASSERT_EQ(cudaMallocManaged(&out, sizeof(SingleBondTestOut)), cudaSuccess);
-  matchSingleBondDriver<<<1, 1>>>(0, 0, /*reversed=*/true, qBE, 2, 1, tBE, 2, 1,
-                                  tables.device, out);
+  matchSingleBondDriver<<<1, 1>>>(0, 0, /*reversed=*/true, qBE, 2, 1, tBE, 2, 1, tables.device, out);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
   EXPECT_TRUE(out->ok);
@@ -811,8 +823,12 @@ TEST(FMCSUnit, MatchSingleBondReverseOrientation) {
 }
 
 TEST(FMCSUnit, MatchSingleBondBondTableRejection) {
-  std::uint32_t* qBE = allocBondEndpointsManaged({{0, 1}});
-  std::uint32_t* tBE = allocBondEndpointsManaged({{0, 1}});
+  std::uint32_t*     qBE = allocBondEndpointsManaged({
+    {0, 1}
+  });
+  std::uint32_t*     tBE = allocBondEndpointsManaged({
+    {0, 1}
+  });
   ManagedMatchTables tables;
   tables.allocate(2, 2, 1, 1);
   tables.setAllAtomBits();
@@ -820,8 +836,7 @@ TEST(FMCSUnit, MatchSingleBondBondTableRejection) {
 
   SingleBondTestOut* out = nullptr;
   ASSERT_EQ(cudaMallocManaged(&out, sizeof(SingleBondTestOut)), cudaSuccess);
-  matchSingleBondDriver<<<1, 1>>>(0, 0, /*reversed=*/false, qBE, 2, 1, tBE, 2, 1,
-                                  tables.device, out);
+  matchSingleBondDriver<<<1, 1>>>(0, 0, /*reversed=*/false, qBE, 2, 1, tBE, 2, 1, tables.device, out);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
   EXPECT_FALSE(out->ok);
@@ -832,8 +847,12 @@ TEST(FMCSUnit, MatchSingleBondBondTableRejection) {
 }
 
 TEST(FMCSUnit, MatchSingleBondAtomTableRejection) {
-  std::uint32_t* qBE = allocBondEndpointsManaged({{0, 1}});
-  std::uint32_t* tBE = allocBondEndpointsManaged({{0, 1}});
+  std::uint32_t*     qBE = allocBondEndpointsManaged({
+    {0, 1}
+  });
+  std::uint32_t*     tBE = allocBondEndpointsManaged({
+    {0, 1}
+  });
   ManagedMatchTables tables;
   tables.allocate(2, 2, 1, 1);
   tables.setAllBondBits();
@@ -846,8 +865,7 @@ TEST(FMCSUnit, MatchSingleBondAtomTableRejection) {
 
   SingleBondTestOut* out = nullptr;
   ASSERT_EQ(cudaMallocManaged(&out, sizeof(SingleBondTestOut)), cudaSuccess);
-  matchSingleBondDriver<<<1, 1>>>(0, 0, /*reversed=*/false, qBE, 2, 1, tBE, 2, 1,
-                                  tables.device, out);
+  matchSingleBondDriver<<<1, 1>>>(0, 0, /*reversed=*/false, qBE, 2, 1, tBE, 2, 1, tables.device, out);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
   EXPECT_FALSE(out->ok);
@@ -865,28 +883,31 @@ namespace {
 // {qAtom[i] -> tAtom[i]} and {qBond[i] -> tBond[i]} from caller-supplied
 // parallel arrays.  Used by the incremental tests to set up "what the
 // parent already had matched" before adding new bonds.
-template<int maxA, int maxB, int maxTA, int maxTB>
-__device__ __forceinline__ void buildParentMatch(
-    mcs::fmcs::MatchResult<maxA, maxB, maxTA, maxTB>& match,
-    const int* qAtoms, const int* tAtoms, int nAtomMaps,
-    const int* qBonds, const int* tBonds, int nBondMaps) {
+template <int maxA, int maxB, int maxTA, int maxTB>
+__device__ __forceinline__ void buildParentMatch(mcs::fmcs::MatchResult<maxA, maxB, maxTA, maxTB>& match,
+                                                 const int*                                        qAtoms,
+                                                 const int*                                        tAtoms,
+                                                 int                                               nAtomMaps,
+                                                 const int*                                        qBonds,
+                                                 const int*                                        tBonds,
+                                                 int                                               nBondMaps) {
   using MatchT = mcs::fmcs::MatchResult<maxA, maxB, maxTA, maxTB>;
   mcs::fmcs::matchResultClearWithinThread(match);
   for (int i = 0; i < nAtomMaps; ++i) {
     match.targetAtomIdx[qAtoms[i]] = static_cast<std::uint8_t>(tAtoms[i]);
-    const int t = tAtoms[i];
-    match.visitedTargetAtoms[t / MatchT::kTargetAtomBitsPerWord] |=
-        (typename MatchT::target_atom_word{1}) << (t % MatchT::kTargetAtomBitsPerWord);
+    const int t                    = tAtoms[i];
+    match.visitedTargetAtoms[t / MatchT::kTargetAtomBitsPerWord] |= (typename MatchT::target_atom_word{1})
+                                                                 << (t % MatchT::kTargetAtomBitsPerWord);
   }
   for (int i = 0; i < nBondMaps; ++i) {
     match.targetBondIdx[qBonds[i]] = static_cast<std::uint8_t>(tBonds[i]);
-    const int t = tBonds[i];
-    match.visitedTargetBonds[t / MatchT::kTargetBondBitsPerWord] |=
-        (typename MatchT::target_bond_word{1}) << (t % MatchT::kTargetBondBitsPerWord);
+    const int t                    = tBonds[i];
+    match.visitedTargetBonds[t / MatchT::kTargetBondBitsPerWord] |= (typename MatchT::target_bond_word{1})
+                                                                 << (t % MatchT::kTargetBondBitsPerWord);
   }
   match.matchedAtomSize = static_cast<std::uint16_t>(nAtomMaps);
   match.matchedBondSize = static_cast<std::uint16_t>(nBondMaps);
-  match.empty = (nAtomMaps == 0 && nBondMaps == 0);
+  match.empty           = (nAtomMaps == 0 && nBondMaps == 0);
 }
 
 }  // namespace
@@ -896,18 +917,21 @@ namespace mcs_fmcs_incremental_test {
 using QueuedT16 = mcs::fmcs::QueuedSeed<16, 16, 16, 16>;
 
 struct IncrementalTestOut {
-  bool ok;
+  bool      ok;
   QueuedT16 child;
 };
 
 // One-warp driver: builds parent match in shared mem, then constructs
 // the child seed (parent + new bonds) and runs
 // matchIncrementalFastCooperative on it.
-__global__ void matchIncrementalAtomAddingDriver(
-    const std::uint32_t* qBE, int qNumAtoms, int qNumBonds,
-    const std::uint32_t* tBE, int tNumAtoms, int tNumBonds,
-    PairMatchTablesDevice tables,
-    IncrementalTestOut* out) {
+__global__ void matchIncrementalAtomAddingDriver(const std::uint32_t*  qBE,
+                                                 int                   qNumAtoms,
+                                                 int                   qNumBonds,
+                                                 const std::uint32_t*  tBE,
+                                                 int                   tNumAtoms,
+                                                 int                   tNumBonds,
+                                                 PairMatchTablesDevice tables,
+                                                 IncrementalTestOut*   out) {
   __shared__ QueuedT16 child;
   if (threadIdx.x == 0) {
     mcs::fmcs::seedClearWithinThread(child.seed);
@@ -928,25 +952,27 @@ __global__ void matchIncrementalAtomAddingDriver(
   }
   __syncthreads();
 
-  auto block = cooperative_groups::this_thread_block();
-  auto warp = cooperative_groups::tiled_partition<32>(block);
+  auto        block = cooperative_groups::this_thread_block();
+  auto        warp  = cooperative_groups::tiled_partition<32>(block);
   TestCsrView qView{qBE, qNumAtoms, qNumBonds};
   TestCsrView tView{tBE, tNumAtoms, tNumBonds};
-  bool ok = mcs::fmcs::matchIncrementalFastCooperative(
-      warp, child.seed, qView, tView, tables, child.match);
+  bool        ok = mcs::fmcs::matchIncrementalFastCooperative(warp, child.seed, qView, tView, tables, child.match);
   __syncthreads();
 
   if (threadIdx.x == 0) {
-    out->ok = ok;
+    out->ok    = ok;
     out->child = child;
   }
 }
 
-__global__ void matchIncrementalRingClosingDriver(
-    const std::uint32_t* qBE, int qNumAtoms, int qNumBonds,
-    const std::uint32_t* tBE, int tNumAtoms, int tNumBonds,
-    PairMatchTablesDevice tables,
-    IncrementalTestOut* out) {
+__global__ void matchIncrementalRingClosingDriver(const std::uint32_t*  qBE,
+                                                  int                   qNumAtoms,
+                                                  int                   qNumBonds,
+                                                  const std::uint32_t*  tBE,
+                                                  int                   tNumAtoms,
+                                                  int                   tNumBonds,
+                                                  PairMatchTablesDevice tables,
+                                                  IncrementalTestOut*   out) {
   __shared__ QueuedT16 child;
   if (threadIdx.x == 0) {
     mcs::fmcs::seedClearWithinThread(child.seed);
@@ -958,30 +984,34 @@ __global__ void matchIncrementalRingClosingDriver(
     int qB[] = {0, 1, 2};
     int tB[] = {0, 1, 2};
     buildParentMatch(child.match, qA, tA, 4, qB, tB, 3);
-    for (int b : {0, 1, 2, 3}) mcs::fmcs::seedAddBondWithinThread(child.seed, b);
-    for (int a : {0, 1, 2, 3}) mcs::fmcs::seedAddAtomWithinThread(child.seed, a);
+    for (int b : {0, 1, 2, 3})
+      mcs::fmcs::seedAddBondWithinThread(child.seed, b);
+    for (int a : {0, 1, 2, 3})
+      mcs::fmcs::seedAddAtomWithinThread(child.seed, a);
   }
   __syncthreads();
 
-  auto block = cooperative_groups::this_thread_block();
-  auto warp = cooperative_groups::tiled_partition<32>(block);
+  auto        block = cooperative_groups::this_thread_block();
+  auto        warp  = cooperative_groups::tiled_partition<32>(block);
   TestCsrView qView{qBE, qNumAtoms, qNumBonds};
   TestCsrView tView{tBE, tNumAtoms, tNumBonds};
-  bool ok = mcs::fmcs::matchIncrementalFastCooperative(
-      warp, child.seed, qView, tView, tables, child.match);
+  bool        ok = mcs::fmcs::matchIncrementalFastCooperative(warp, child.seed, qView, tView, tables, child.match);
   __syncthreads();
 
   if (threadIdx.x == 0) {
-    out->ok = ok;
+    out->ok    = ok;
     out->child = child;
   }
 }
 
-__global__ void matchIncrementalVisitedConflictDriver(
-    const std::uint32_t* qBE, int qNumAtoms, int qNumBonds,
-    const std::uint32_t* tBE, int tNumAtoms, int tNumBonds,
-    PairMatchTablesDevice tables,
-    IncrementalTestOut* out) {
+__global__ void matchIncrementalVisitedConflictDriver(const std::uint32_t*  qBE,
+                                                      int                   qNumAtoms,
+                                                      int                   qNumBonds,
+                                                      const std::uint32_t*  tBE,
+                                                      int                   tNumAtoms,
+                                                      int                   tNumBonds,
+                                                      PairMatchTablesDevice tables,
+                                                      IncrementalTestOut*   out) {
   __shared__ QueuedT16 child;
   if (threadIdx.x == 0) {
     mcs::fmcs::seedClearWithinThread(child.seed);
@@ -1003,25 +1033,27 @@ __global__ void matchIncrementalVisitedConflictDriver(
   }
   __syncthreads();
 
-  auto block = cooperative_groups::this_thread_block();
-  auto warp = cooperative_groups::tiled_partition<32>(block);
+  auto        block = cooperative_groups::this_thread_block();
+  auto        warp  = cooperative_groups::tiled_partition<32>(block);
   TestCsrView qView{qBE, qNumAtoms, qNumBonds};
   TestCsrView tView{tBE, tNumAtoms, tNumBonds};
-  bool ok = mcs::fmcs::matchIncrementalFastCooperative(
-      warp, child.seed, qView, tView, tables, child.match);
+  bool        ok = mcs::fmcs::matchIncrementalFastCooperative(warp, child.seed, qView, tView, tables, child.match);
   __syncthreads();
 
   if (threadIdx.x == 0) {
-    out->ok = ok;
+    out->ok    = ok;
     out->child = child;
   }
 }
 
-__global__ void matchIncrementalTwoBondChainDriver(
-    const std::uint32_t* qBE, int qNumAtoms, int qNumBonds,
-    const std::uint32_t* tBE, int tNumAtoms, int tNumBonds,
-    PairMatchTablesDevice tables,
-    IncrementalTestOut* out) {
+__global__ void matchIncrementalTwoBondChainDriver(const std::uint32_t*  qBE,
+                                                   int                   qNumAtoms,
+                                                   int                   qNumBonds,
+                                                   const std::uint32_t*  tBE,
+                                                   int                   tNumAtoms,
+                                                   int                   tNumBonds,
+                                                   PairMatchTablesDevice tables,
+                                                   IncrementalTestOut*   out) {
   __shared__ QueuedT16 child;
   if (threadIdx.x == 0) {
     mcs::fmcs::seedClearWithinThread(child.seed);
@@ -1043,16 +1075,15 @@ __global__ void matchIncrementalTwoBondChainDriver(
   }
   __syncthreads();
 
-  auto block = cooperative_groups::this_thread_block();
-  auto warp = cooperative_groups::tiled_partition<32>(block);
+  auto        block = cooperative_groups::this_thread_block();
+  auto        warp  = cooperative_groups::tiled_partition<32>(block);
   TestCsrView qView{qBE, qNumAtoms, qNumBonds};
   TestCsrView tView{tBE, tNumAtoms, tNumBonds};
-  bool ok = mcs::fmcs::matchIncrementalFastCooperative(
-      warp, child.seed, qView, tView, tables, child.match);
+  bool        ok = mcs::fmcs::matchIncrementalFastCooperative(warp, child.seed, qView, tView, tables, child.match);
   __syncthreads();
 
   if (threadIdx.x == 0) {
-    out->ok = ok;
+    out->ok    = ok;
     out->child = child;
   }
 }
@@ -1064,8 +1095,14 @@ TEST(FMCSUnit, MatchIncrementalFastAtomAdding) {
   using mcs_fmcs_incremental_test::matchIncrementalAtomAddingDriver;
 
   // Query/target are both a 3-atom path 0-1-2 with bonds (0,1), (1,2).
-  std::uint32_t* qBE = allocBondEndpointsManaged({{0, 1}, {1, 2}});
-  std::uint32_t* tBE = allocBondEndpointsManaged({{0, 1}, {1, 2}});
+  std::uint32_t*     qBE = allocBondEndpointsManaged({
+    {0, 1},
+    {1, 2}
+  });
+  std::uint32_t*     tBE = allocBondEndpointsManaged({
+    {0, 1},
+    {1, 2}
+  });
   ManagedMatchTables tables;
   tables.allocate(3, 3, 2, 2);
   tables.setAllAtomBits();
@@ -1073,8 +1110,7 @@ TEST(FMCSUnit, MatchIncrementalFastAtomAdding) {
 
   IncrementalTestOut* out = nullptr;
   ASSERT_EQ(cudaMallocManaged(&out, sizeof(IncrementalTestOut)), cudaSuccess);
-  matchIncrementalAtomAddingDriver<<<1, 32>>>(qBE, 3, 2, tBE, 3, 2,
-                                              tables.device, out);
+  matchIncrementalAtomAddingDriver<<<1, 32>>>(qBE, 3, 2, tBE, 3, 2, tables.device, out);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
   EXPECT_TRUE(out->ok);
@@ -1094,8 +1130,18 @@ TEST(FMCSUnit, MatchIncrementalFastRingClosing) {
 
   // 4-atom square with one diagonal-free closure.  Bonds: (0,1) (1,2)
   // (2,3) (0,3).
-  std::uint32_t* qBE = allocBondEndpointsManaged({{0,1}, {1,2}, {2,3}, {0,3}});
-  std::uint32_t* tBE = allocBondEndpointsManaged({{0,1}, {1,2}, {2,3}, {0,3}});
+  std::uint32_t*     qBE = allocBondEndpointsManaged({
+    {0, 1},
+    {1, 2},
+    {2, 3},
+    {0, 3}
+  });
+  std::uint32_t*     tBE = allocBondEndpointsManaged({
+    {0, 1},
+    {1, 2},
+    {2, 3},
+    {0, 3}
+  });
   ManagedMatchTables tables;
   tables.allocate(4, 4, 4, 4);
   tables.setAllAtomBits();
@@ -1103,8 +1149,7 @@ TEST(FMCSUnit, MatchIncrementalFastRingClosing) {
 
   IncrementalTestOut* out = nullptr;
   ASSERT_EQ(cudaMallocManaged(&out, sizeof(IncrementalTestOut)), cudaSuccess);
-  matchIncrementalRingClosingDriver<<<1, 32>>>(qBE, 4, 4, tBE, 4, 4,
-                                               tables.device, out);
+  matchIncrementalRingClosingDriver<<<1, 32>>>(qBE, 4, 4, tBE, 4, 4, tables.device, out);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
   EXPECT_TRUE(out->ok);
@@ -1125,8 +1170,13 @@ TEST(FMCSUnit, MatchIncrementalFastVisitedConflictFails) {
   // Query: 3 atoms / 2 bonds.  Target: 2 atoms / 1 bond.  Parent has
   // bond (0,1) mapped; trying to extend with bond (0,2) forces atom 2
   // onto target atom 1, which is already visited.
-  std::uint32_t* qBE = allocBondEndpointsManaged({{0,1}, {0,2}});
-  std::uint32_t* tBE = allocBondEndpointsManaged({{0,1}});
+  std::uint32_t*     qBE = allocBondEndpointsManaged({
+    {0, 1},
+    {0, 2}
+  });
+  std::uint32_t*     tBE = allocBondEndpointsManaged({
+    {0, 1}
+  });
   ManagedMatchTables tables;
   tables.allocate(3, 2, 2, 1);
   tables.setAllAtomBits();
@@ -1134,8 +1184,7 @@ TEST(FMCSUnit, MatchIncrementalFastVisitedConflictFails) {
 
   IncrementalTestOut* out = nullptr;
   ASSERT_EQ(cudaMallocManaged(&out, sizeof(IncrementalTestOut)), cudaSuccess);
-  matchIncrementalVisitedConflictDriver<<<1, 32>>>(qBE, 3, 2, tBE, 2, 1,
-                                                   tables.device, out);
+  matchIncrementalVisitedConflictDriver<<<1, 32>>>(qBE, 3, 2, tBE, 2, 1, tables.device, out);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
   EXPECT_FALSE(out->ok);
@@ -1151,8 +1200,16 @@ TEST(FMCSUnit, MatchIncrementalFastTwoBondChain) {
 
   // Both sides are the 4-atom path 0-1-2-3 with bonds 0=(0,1), 1=(1,2),
   // 2=(2,3).
-  std::uint32_t* qBE = allocBondEndpointsManaged({{0,1}, {1,2}, {2,3}});
-  std::uint32_t* tBE = allocBondEndpointsManaged({{0,1}, {1,2}, {2,3}});
+  std::uint32_t*     qBE = allocBondEndpointsManaged({
+    {0, 1},
+    {1, 2},
+    {2, 3}
+  });
+  std::uint32_t*     tBE = allocBondEndpointsManaged({
+    {0, 1},
+    {1, 2},
+    {2, 3}
+  });
   ManagedMatchTables tables;
   tables.allocate(4, 4, 3, 3);
   tables.setAllAtomBits();
@@ -1160,8 +1217,7 @@ TEST(FMCSUnit, MatchIncrementalFastTwoBondChain) {
 
   IncrementalTestOut* out = nullptr;
   ASSERT_EQ(cudaMallocManaged(&out, sizeof(IncrementalTestOut)), cudaSuccess);
-  matchIncrementalTwoBondChainDriver<<<1, 32>>>(qBE, 4, 3, tBE, 4, 3,
-                                                tables.device, out);
+  matchIncrementalTwoBondChainDriver<<<1, 32>>>(qBE, 4, 3, tBE, 4, 3, tables.device, out);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
   EXPECT_TRUE(out->ok);
@@ -1184,8 +1240,8 @@ namespace mcs_fmcs_substructure_test {
 using QueuedT16 = mcs::fmcs::QueuedSeed<16, 16, 16, 16>;
 
 struct SubstructureTestOut {
-  bool ok;
-  bool overflowed;
+  bool      ok;
+  bool      overflowed;
   QueuedT16 child;
 };
 
@@ -1193,16 +1249,11 @@ constexpr int kTestSubstructurePartialCapacity = 64;
 
 std::uint8_t* allocSubstructurePartialsManaged() {
   std::uint8_t* p = nullptr;
-  EXPECT_EQ(cudaMallocManaged(
-                &p, 2 * kTestSubstructurePartialCapacity * 16 *
-                        sizeof(std::uint8_t)),
-            cudaSuccess);
+  EXPECT_EQ(cudaMallocManaged(&p, 2 * kTestSubstructurePartialCapacity * 16 * sizeof(std::uint8_t)), cudaSuccess);
   return p;
 }
 
-__device__ __forceinline__ void addMaskSeed(QueuedT16& child,
-                                            std::uint32_t atomMask,
-                                            std::uint32_t bondMask) {
+__device__ __forceinline__ void addMaskSeed(QueuedT16& child, std::uint32_t atomMask, std::uint32_t bondMask) {
   mcs::fmcs::seedClearWithinThread(child.seed);
   mcs::fmcs::matchResultClearWithinThread(child.match);
   for (int a = 0; a < 16; ++a) {
@@ -1217,16 +1268,19 @@ __device__ __forceinline__ void addMaskSeed(QueuedT16& child,
   }
 }
 
-template<bool HoistNeighborOrder = true>
-__global__ void matchSubstructureMaskDriver(
-    const std::uint32_t* qBE, int qNumAtoms, int qNumBonds,
-    const std::uint32_t* tBE, int tNumAtoms, int tNumBonds,
-    PairMatchTablesDevice tables,
-    std::uint32_t atomMask,
-    std::uint32_t bondMask,
-    std::uint8_t* partialStorage,
-    int partialCapacity,
-    SubstructureTestOut* out) {
+template <bool HoistNeighborOrder = true>
+__global__ void matchSubstructureMaskDriver(const std::uint32_t*  qBE,
+                                            int                   qNumAtoms,
+                                            int                   qNumBonds,
+                                            const std::uint32_t*  tBE,
+                                            int                   tNumAtoms,
+                                            int                   tNumBonds,
+                                            PairMatchTablesDevice tables,
+                                            std::uint32_t         atomMask,
+                                            std::uint32_t         bondMask,
+                                            std::uint8_t*         partialStorage,
+                                            int                   partialCapacity,
+                                            SubstructureTestOut*  out) {
   __shared__ QueuedT16 child;
   __shared__ mcs::fmcs::FmcsSubstructureScratch<16, 16, 16> scratch;
   if (threadIdx.x == 0) {
@@ -1234,20 +1288,27 @@ __global__ void matchSubstructureMaskDriver(
   }
   __syncthreads();
 
-  auto block = cooperative_groups::this_thread_block();
-  auto warp = cooperative_groups::tiled_partition<32>(block);
+  auto        block = cooperative_groups::this_thread_block();
+  auto        warp  = cooperative_groups::tiled_partition<32>(block);
   TestCsrView qView{qBE, qNumAtoms, qNumBonds};
   TestCsrView tView{tBE, tNumAtoms, tNumBonds};
-  bool overflowed = false;
-  bool ok = mcs::fmcs::matchSeedSubstructureCooperative<HoistNeighborOrder>(
-      warp, child.seed, qView, tView, tables, child.match, scratch,
-      partialStorage, partialCapacity, &overflowed);
+  bool        overflowed = false;
+  bool        ok         = mcs::fmcs::matchSeedSubstructureCooperative<HoistNeighborOrder>(warp,
+                                                                            child.seed,
+                                                                            qView,
+                                                                            tView,
+                                                                            tables,
+                                                                            child.match,
+                                                                            scratch,
+                                                                            partialStorage,
+                                                                            partialCapacity,
+                                                                            &overflowed);
   __syncthreads();
 
   if (threadIdx.x == 0) {
-    out->ok = ok;
+    out->ok         = ok;
     out->overflowed = overflowed;
-    out->child = child;
+    out->child      = child;
   }
 }
 
@@ -1256,10 +1317,17 @@ __global__ void matchSubstructureMaskDriver(
 TEST(FMCSUnit, MatchSeedSubstructurePath) {
   using namespace mcs_fmcs_substructure_test;
 
-  std::uint32_t* qBE =
-      allocBondEndpointsManaged({{0, 1}, {1, 2}, {2, 3}});
-  std::uint32_t* tBE =
-      allocBondEndpointsManaged({{0, 1}, {1, 2}, {2, 3}, {3, 4}});
+  std::uint32_t*     qBE = allocBondEndpointsManaged({
+    {0, 1},
+    {1, 2},
+    {2, 3}
+  });
+  std::uint32_t*     tBE = allocBondEndpointsManaged({
+    {0, 1},
+    {1, 2},
+    {2, 3},
+    {3, 4}
+  });
   ManagedMatchTables tables;
   tables.allocate(4, 5, 3, 4);
   tables.setAllAtomBits();
@@ -1268,10 +1336,18 @@ TEST(FMCSUnit, MatchSeedSubstructurePath) {
   SubstructureTestOut* out = nullptr;
   ASSERT_EQ(cudaMallocManaged(&out, sizeof(SubstructureTestOut)), cudaSuccess);
   std::uint8_t* partials = allocSubstructurePartialsManaged();
-  matchSubstructureMaskDriver<<<1, 32>>>(
-      qBE, 4, 3, tBE, 5, 4, tables.device,
-      /*atomMask=*/0xFu, /*bondMask=*/0x7u,
-      partials, kTestSubstructurePartialCapacity, out);
+  matchSubstructureMaskDriver<<<1, 32>>>(qBE,
+                                         4,
+                                         3,
+                                         tBE,
+                                         5,
+                                         4,
+                                         tables.device,
+                                         /*atomMask=*/0xFu,
+                                         /*bondMask=*/0x7u,
+                                         partials,
+                                         kTestSubstructurePartialCapacity,
+                                         out);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
   EXPECT_TRUE(out->ok);
@@ -1294,10 +1370,15 @@ TEST(FMCSUnit, MatchSeedSubstructurePath) {
 TEST(FMCSUnit, MatchSeedSubstructureRejectsNoMatch) {
   using namespace mcs_fmcs_substructure_test;
 
-  std::uint32_t* qBE =
-      allocBondEndpointsManaged({{0, 1}, {1, 2}, {0, 2}});
-  std::uint32_t* tBE =
-      allocBondEndpointsManaged({{0, 1}, {1, 2}});
+  std::uint32_t*     qBE = allocBondEndpointsManaged({
+    {0, 1},
+    {1, 2},
+    {0, 2}
+  });
+  std::uint32_t*     tBE = allocBondEndpointsManaged({
+    {0, 1},
+    {1, 2}
+  });
   ManagedMatchTables tables;
   tables.allocate(3, 3, 3, 2);
   tables.setAllAtomBits();
@@ -1306,10 +1387,18 @@ TEST(FMCSUnit, MatchSeedSubstructureRejectsNoMatch) {
   SubstructureTestOut* out = nullptr;
   ASSERT_EQ(cudaMallocManaged(&out, sizeof(SubstructureTestOut)), cudaSuccess);
   std::uint8_t* partials = allocSubstructurePartialsManaged();
-  matchSubstructureMaskDriver<<<1, 32>>>(
-      qBE, 3, 3, tBE, 3, 2, tables.device,
-      /*atomMask=*/0x7u, /*bondMask=*/0x7u,
-      partials, kTestSubstructurePartialCapacity, out);
+  matchSubstructureMaskDriver<<<1, 32>>>(qBE,
+                                         3,
+                                         3,
+                                         tBE,
+                                         3,
+                                         2,
+                                         tables.device,
+                                         /*atomMask=*/0x7u,
+                                         /*bondMask=*/0x7u,
+                                         partials,
+                                         kTestSubstructurePartialCapacity,
+                                         out);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
   EXPECT_FALSE(out->ok);
@@ -1325,10 +1414,14 @@ TEST(FMCSUnit, MatchSeedSubstructureRejectsNoMatch) {
 TEST(FMCSUnit, MatchSeedSubstructureRespectsAtomTable) {
   using namespace mcs_fmcs_substructure_test;
 
-  std::uint32_t* qBE =
-      allocBondEndpointsManaged({{0, 1}, {1, 2}});
-  std::uint32_t* tBE =
-      allocBondEndpointsManaged({{0, 1}, {1, 2}});
+  std::uint32_t*     qBE = allocBondEndpointsManaged({
+    {0, 1},
+    {1, 2}
+  });
+  std::uint32_t*     tBE = allocBondEndpointsManaged({
+    {0, 1},
+    {1, 2}
+  });
   ManagedMatchTables tables;
   tables.allocate(3, 3, 2, 2);
   tables.setAtomBit(0, 0);
@@ -1339,10 +1432,18 @@ TEST(FMCSUnit, MatchSeedSubstructureRespectsAtomTable) {
   SubstructureTestOut* out = nullptr;
   ASSERT_EQ(cudaMallocManaged(&out, sizeof(SubstructureTestOut)), cudaSuccess);
   std::uint8_t* partials = allocSubstructurePartialsManaged();
-  matchSubstructureMaskDriver<<<1, 32>>>(
-      qBE, 3, 2, tBE, 3, 2, tables.device,
-      /*atomMask=*/0x7u, /*bondMask=*/0x3u,
-      partials, kTestSubstructurePartialCapacity, out);
+  matchSubstructureMaskDriver<<<1, 32>>>(qBE,
+                                         3,
+                                         2,
+                                         tBE,
+                                         3,
+                                         2,
+                                         tables.device,
+                                         /*atomMask=*/0x7u,
+                                         /*bondMask=*/0x3u,
+                                         partials,
+                                         kTestSubstructurePartialCapacity,
+                                         out);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
   EXPECT_TRUE(out->ok);
@@ -1362,10 +1463,15 @@ TEST(FMCSUnit, MatchSeedSubstructureRespectsAtomTable) {
 TEST(FMCSUnit, MatchSeedSubstructureRespectsBondTable) {
   using namespace mcs_fmcs_substructure_test;
 
-  std::uint32_t* qBE =
-      allocBondEndpointsManaged({{0, 1}, {1, 2}});
-  std::uint32_t* tBE =
-      allocBondEndpointsManaged({{0, 1}, {1, 2}, {0, 2}});
+  std::uint32_t*     qBE = allocBondEndpointsManaged({
+    {0, 1},
+    {1, 2}
+  });
+  std::uint32_t*     tBE = allocBondEndpointsManaged({
+    {0, 1},
+    {1, 2},
+    {0, 2}
+  });
   ManagedMatchTables tables;
   tables.allocate(3, 3, 2, 3);
   tables.setAllAtomBits();
@@ -1375,10 +1481,18 @@ TEST(FMCSUnit, MatchSeedSubstructureRespectsBondTable) {
   SubstructureTestOut* out = nullptr;
   ASSERT_EQ(cudaMallocManaged(&out, sizeof(SubstructureTestOut)), cudaSuccess);
   std::uint8_t* partials = allocSubstructurePartialsManaged();
-  matchSubstructureMaskDriver<<<1, 32>>>(
-      qBE, 3, 2, tBE, 3, 3, tables.device,
-      /*atomMask=*/0x7u, /*bondMask=*/0x3u,
-      partials, kTestSubstructurePartialCapacity, out);
+  matchSubstructureMaskDriver<<<1, 32>>>(qBE,
+                                         3,
+                                         2,
+                                         tBE,
+                                         3,
+                                         3,
+                                         tables.device,
+                                         /*atomMask=*/0x7u,
+                                         /*bondMask=*/0x3u,
+                                         partials,
+                                         kTestSubstructurePartialCapacity,
+                                         out);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
   EXPECT_TRUE(out->ok);
@@ -1397,10 +1511,19 @@ TEST(FMCSUnit, MatchSeedSubstructureRespectsBondTable) {
 TEST(FMCSUnit, MatchSeedSubstructureFindsPathInsideTriangleWithLeaves) {
   using namespace mcs_fmcs_substructure_test;
 
-  std::uint32_t* qBE =
-      allocBondEndpointsManaged({{0, 1}, {0, 2}, {0, 4}, {1, 2}, {1, 3}});
-  std::uint32_t* tBE =
-      allocBondEndpointsManaged({{0, 3}, {1, 2}, {1, 4}, {2, 3}});
+  std::uint32_t*     qBE = allocBondEndpointsManaged({
+    {0, 1},
+    {0, 2},
+    {0, 4},
+    {1, 2},
+    {1, 3}
+  });
+  std::uint32_t*     tBE = allocBondEndpointsManaged({
+    {0, 3},
+    {1, 2},
+    {1, 4},
+    {2, 3}
+  });
   ManagedMatchTables tables;
   tables.allocate(5, 5, 5, 4);
   tables.setAllAtomBits();
@@ -1409,10 +1532,18 @@ TEST(FMCSUnit, MatchSeedSubstructureFindsPathInsideTriangleWithLeaves) {
   SubstructureTestOut* out = nullptr;
   ASSERT_EQ(cudaMallocManaged(&out, sizeof(SubstructureTestOut)), cudaSuccess);
   std::uint8_t* partials = allocSubstructurePartialsManaged();
-  matchSubstructureMaskDriver<<<1, 32>>>(
-      qBE, 5, 5, tBE, 5, 4, tables.device,
-      /*atomMask=*/0x1Fu, /*bondMask=*/0x1Eu,
-      partials, kTestSubstructurePartialCapacity, out);
+  matchSubstructureMaskDriver<<<1, 32>>>(qBE,
+                                         5,
+                                         5,
+                                         tBE,
+                                         5,
+                                         4,
+                                         tables.device,
+                                         /*atomMask=*/0x1Fu,
+                                         /*bondMask=*/0x1Eu,
+                                         partials,
+                                         kTestSubstructurePartialCapacity,
+                                         out);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
   EXPECT_TRUE(out->ok);
@@ -1439,83 +1570,90 @@ TEST(FMCSUnit, MatchSeedSubstructureHoistVariantsAgree) {
   using namespace mcs_fmcs_substructure_test;
 
   struct Case {
-    const char* name;
+    const char*                      name;
     std::vector<std::pair<int, int>> qEdges;
     std::vector<std::pair<int, int>> tEdges;
-    int qNumAtoms;
-    int tNumAtoms;
-    std::uint32_t atomMask;
-    std::uint32_t bondMask;
-    bool restrictAtomsToIdentity;  // forces a unique mapping
+    int                              qNumAtoms;
+    int                              tNumAtoms;
+    std::uint32_t                    atomMask;
+    std::uint32_t                    bondMask;
+    bool                             restrictAtomsToIdentity;  // forces a unique mapping
   };
   const std::vector<Case> cases = {
-      {"path4-into-path5",
-       {{0, 1}, {1, 2}, {2, 3}}, {{0, 1}, {1, 2}, {2, 3}, {3, 4}},
-       4, 5, 0xFu, 0x7u, false},
-      {"triangle-into-path3-nomatch",
-       {{0, 1}, {1, 2}, {0, 2}}, {{0, 1}, {1, 2}},
-       3, 3, 0x7u, 0x7u, false},
-      {"path3-identity-restricted",
-       {{0, 1}, {1, 2}}, {{0, 1}, {1, 2}},
-       3, 3, 0x7u, 0x3u, true},
-      {"path-inside-triangle-with-leaves",
-       {{0, 1}, {0, 2}, {0, 4}, {1, 2}, {1, 3}},
-       {{0, 3}, {1, 2}, {1, 4}, {2, 3}},
-       5, 5, 0x1Fu, 0x1Eu, false},
+    {                "path4-into-path5",{{0, 1}, {1, 2}, {2, 3}},{{0, 1}, {1, 2}, {2, 3}, {3, 4}},4, 5,0xFu,  0x7u,false                                                                                                                       },
+    {     "triangle-into-path3-nomatch", {{0, 1}, {1, 2}, {0, 2}},                 {{0, 1}, {1, 2}}, 3, 3, 0x7u,  0x7u, false},
+    {       "path3-identity-restricted",         {{0, 1}, {1, 2}},                 {{0, 1}, {1, 2}}, 3, 3, 0x7u,  0x3u,  true},
+    {"path-inside-triangle-with-leaves",
+     {{0, 1}, {0, 2}, {0, 4}, {1, 2}, {1, 3}},
+     {{0, 3}, {1, 2}, {1, 4}, {2, 3}},
+     5, 5,
+     0x1Fu, 0x1Eu,
+     false                                                                                                                   },
   };
 
   for (const Case& c : cases) {
     SCOPED_TRACE(c.name);
-    std::uint32_t* qBE = allocBondEndpointsManaged(c.qEdges);
-    std::uint32_t* tBE = allocBondEndpointsManaged(c.tEdges);
-    const int qNumBonds = static_cast<int>(c.qEdges.size());
-    const int tNumBonds = static_cast<int>(c.tEdges.size());
+    std::uint32_t*     qBE       = allocBondEndpointsManaged(c.qEdges);
+    std::uint32_t*     tBE       = allocBondEndpointsManaged(c.tEdges);
+    const int          qNumBonds = static_cast<int>(c.qEdges.size());
+    const int          tNumBonds = static_cast<int>(c.tEdges.size());
     ManagedMatchTables tables;
     tables.allocate(c.qNumAtoms, c.tNumAtoms, qNumBonds, tNumBonds);
     if (c.restrictAtomsToIdentity) {
-      for (int a = 0; a < c.qNumAtoms; ++a) tables.setAtomBit(a, a);
+      for (int a = 0; a < c.qNumAtoms; ++a)
+        tables.setAtomBit(a, a);
     } else {
       tables.setAllAtomBits();
     }
     tables.setAllBondBits();
 
-    SubstructureTestOut* outHoisted = nullptr;
+    SubstructureTestOut* outHoisted   = nullptr;
     SubstructureTestOut* outRecompute = nullptr;
-    ASSERT_EQ(cudaMallocManaged(&outHoisted, sizeof(SubstructureTestOut)),
-              cudaSuccess);
-    ASSERT_EQ(cudaMallocManaged(&outRecompute, sizeof(SubstructureTestOut)),
-              cudaSuccess);
+    ASSERT_EQ(cudaMallocManaged(&outHoisted, sizeof(SubstructureTestOut)), cudaSuccess);
+    ASSERT_EQ(cudaMallocManaged(&outRecompute, sizeof(SubstructureTestOut)), cudaSuccess);
     std::uint8_t* partials = allocSubstructurePartialsManaged();
 
-    matchSubstructureMaskDriver<true><<<1, 32>>>(
-        qBE, c.qNumAtoms, qNumBonds, tBE, c.tNumAtoms, tNumBonds,
-        tables.device, c.atomMask, c.bondMask,
-        partials, kTestSubstructurePartialCapacity, outHoisted);
+    matchSubstructureMaskDriver<true><<<1, 32>>>(qBE,
+                                                 c.qNumAtoms,
+                                                 qNumBonds,
+                                                 tBE,
+                                                 c.tNumAtoms,
+                                                 tNumBonds,
+                                                 tables.device,
+                                                 c.atomMask,
+                                                 c.bondMask,
+                                                 partials,
+                                                 kTestSubstructurePartialCapacity,
+                                                 outHoisted);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-    matchSubstructureMaskDriver<false><<<1, 32>>>(
-        qBE, c.qNumAtoms, qNumBonds, tBE, c.tNumAtoms, tNumBonds,
-        tables.device, c.atomMask, c.bondMask,
-        partials, kTestSubstructurePartialCapacity, outRecompute);
+    matchSubstructureMaskDriver<false><<<1, 32>>>(qBE,
+                                                  c.qNumAtoms,
+                                                  qNumBonds,
+                                                  tBE,
+                                                  c.tNumAtoms,
+                                                  tNumBonds,
+                                                  tables.device,
+                                                  c.atomMask,
+                                                  c.bondMask,
+                                                  partials,
+                                                  kTestSubstructurePartialCapacity,
+                                                  outRecompute);
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
     EXPECT_EQ(outHoisted->ok, outRecompute->ok);
     EXPECT_EQ(outHoisted->overflowed, outRecompute->overflowed);
-    EXPECT_EQ(outHoisted->child.match.matchedAtomSize,
-              outRecompute->child.match.matchedAtomSize);
-    EXPECT_EQ(outHoisted->child.match.matchedBondSize,
-              outRecompute->child.match.matchedBondSize);
+    EXPECT_EQ(outHoisted->child.match.matchedAtomSize, outRecompute->child.match.matchedAtomSize);
+    EXPECT_EQ(outHoisted->child.match.matchedBondSize, outRecompute->child.match.matchedBondSize);
     if (c.restrictAtomsToIdentity) {
       // Unique valid mapping: the two variants must agree element-wise.
       // (Unrestricted shapes can have several valid mappings, and which one
       // wins the scratch.found race is timing-dependent even within a single
       // variant, so only sizes are compared there.)
       for (int q = 0; q < c.qNumAtoms; ++q) {
-        EXPECT_EQ(outHoisted->child.match.targetAtomIdx[q],
-                  outRecompute->child.match.targetAtomIdx[q]);
+        EXPECT_EQ(outHoisted->child.match.targetAtomIdx[q], outRecompute->child.match.targetAtomIdx[q]);
       }
       for (int q = 0; q < qNumBonds; ++q) {
-        EXPECT_EQ(outHoisted->child.match.targetBondIdx[q],
-                  outRecompute->child.match.targetBondIdx[q]);
+        EXPECT_EQ(outHoisted->child.match.targetBondIdx[q], outRecompute->child.match.targetBondIdx[q]);
       }
     }
 
@@ -1534,7 +1672,7 @@ TEST(FMCSUnit, MatchSeedSubstructureHoistVariantsAgree) {
 namespace mcs_fmcs_grow_test {
 
 using mcs::fmcs::NewBond;
-using SeedT = mcs::fmcs::Seed<16, 16>;
+using SeedT   = mcs::fmcs::Seed<16, 16>;
 using QueuedT = mcs::fmcs::QueuedSeed<16, 16, 16, 16>;
 
 constexpr int kMaxNewBonds = 8;
@@ -1548,13 +1686,14 @@ struct FillNewBondsOut {
 // Driver: caller-provided seed-setup function fills the seed before
 // calling fillNewBondsCooperative.  Templated on the setup so each
 // test can hand-construct its own scenario.
-template<class SeedSetup>
-__device__ __forceinline__ void fillNewBondsRun(
-    SeedSetup&& setup,
-    const std::uint32_t* qBondEndpoints, int qNumAtoms, int qNumBonds,
-    int maxNewBonds,
-    FillNewBondsOut* out) {
-  __shared__ SeedT seed;
+template <class SeedSetup>
+__device__ __forceinline__ void fillNewBondsRun(SeedSetup&&          setup,
+                                                const std::uint32_t* qBondEndpoints,
+                                                int                  qNumAtoms,
+                                                int                  qNumBonds,
+                                                int                  maxNewBonds,
+                                                FillNewBondsOut*     out) {
+  __shared__ SeedT   seed;
   __shared__ NewBond bonds[kMaxNewBonds];
   __shared__ int     count;
 
@@ -1564,49 +1703,55 @@ __device__ __forceinline__ void fillNewBondsRun(
   }
   __syncthreads();
 
-  auto block = cooperative_groups::this_thread_block();
-  auto warp  = cooperative_groups::tiled_partition<32>(block);
+  auto        block = cooperative_groups::this_thread_block();
+  auto        warp  = cooperative_groups::tiled_partition<32>(block);
   TestCsrView qView{qBondEndpoints, qNumAtoms, qNumBonds};
-  bool ok = mcs::fmcs::fillNewBondsCooperative(warp, seed, qView,
-                                               bonds, &count, maxNewBonds);
+  bool        ok = mcs::fmcs::fillNewBondsCooperative(warp, seed, qView, bonds, &count, maxNewBonds);
   __syncthreads();
 
   if (threadIdx.x == 0) {
     out->ok    = ok;
     out->count = count;
-    for (int i = 0; i < kMaxNewBonds; ++i) out->bonds[i] = bonds[i];
+    for (int i = 0; i < kMaxNewBonds; ++i)
+      out->bonds[i] = bonds[i];
   }
 }
 
 // Test 1: 3-atom path query (atoms 0-1-2, bonds (0,1), (1,2)).  Seed
 // holds just atom 1, marked last-added.  Both bonds touch atom 1;
 // each should become an atom-adding NewBond.
-__global__ void fillNewBondsAtomAddingDriver(
-    const std::uint32_t* qBE, int qNumAtoms, int qNumBonds,
-    FillNewBondsOut* out) {
-  fillNewBondsRun(
-      [] __device__ (SeedT& seed) {
-        mcs::fmcs::seedAddAtomWithinThread(seed, 1);
-      },
-      qBE, qNumAtoms, qNumBonds, kMaxNewBonds, out);
+__global__ void fillNewBondsAtomAddingDriver(const std::uint32_t* qBE,
+                                             int                  qNumAtoms,
+                                             int                  qNumBonds,
+                                             FillNewBondsOut*     out) {
+  fillNewBondsRun([] __device__(SeedT & seed) { mcs::fmcs::seedAddAtomWithinThread(seed, 1); },
+                  qBE,
+                  qNumAtoms,
+                  qNumBonds,
+                  kMaxNewBonds,
+                  out);
 }
 
 // Test 2: same query, seed has bond 0 in excludedBonds.  Only bond 1
 // should appear in the output.
-__global__ void fillNewBondsExcludedSkippedDriver(
-    const std::uint32_t* qBE, int qNumAtoms, int qNumBonds,
-    FillNewBondsOut* out) {
+__global__ void fillNewBondsExcludedSkippedDriver(const std::uint32_t* qBE,
+                                                  int                  qNumAtoms,
+                                                  int                  qNumBonds,
+                                                  FillNewBondsOut*     out) {
   fillNewBondsRun(
-      [] __device__ (SeedT& seed) {
-        mcs::fmcs::seedAddAtomWithinThread(seed, 1);
-        // Mark bond 0 as excluded but DO NOT add it to seed.bonds.
-        // The exclusion alone is what fillNewBonds checks.
-        using BondWord = SeedT::bond_word_type;
-        constexpr int kBPW = SeedT::kBondBitsPerWord;
-        seed.excludedBonds[0 / kBPW] |=
-            static_cast<BondWord>(1) << (0 % kBPW);
-      },
-      qBE, qNumAtoms, qNumBonds, kMaxNewBonds, out);
+    [] __device__(SeedT & seed) {
+      mcs::fmcs::seedAddAtomWithinThread(seed, 1);
+      // Mark bond 0 as excluded but DO NOT add it to seed.bonds.
+      // The exclusion alone is what fillNewBonds checks.
+      using BondWord     = SeedT::bond_word_type;
+      constexpr int kBPW = SeedT::kBondBitsPerWord;
+      seed.excludedBonds[0 / kBPW] |= static_cast<BondWord>(1) << (0 % kBPW);
+    },
+    qBE,
+    qNumAtoms,
+    qNumBonds,
+    kMaxNewBonds,
+    out);
 }
 
 // Test 3: 3-atom triangle query (atoms 0,1,2; bonds (0,1), (1,2), (0,2)).
@@ -1616,55 +1761,67 @@ __global__ void fillNewBondsExcludedSkippedDriver(
 // only mark atom 1 as "last added" (atom 0 stays in seed.atoms but
 // NOT in lastAddedAtoms), bond (0,2) should NOT be reported because
 // neither endpoint is "newly added".  Bond (1,2) SHOULD be reported.
-__global__ void fillNewBondsLastAddedFilteringDriver(
-    const std::uint32_t* qBE, int qNumAtoms, int qNumBonds,
-    FillNewBondsOut* out) {
+__global__ void fillNewBondsLastAddedFilteringDriver(const std::uint32_t* qBE,
+                                                     int                  qNumAtoms,
+                                                     int                  qNumBonds,
+                                                     FillNewBondsOut*     out) {
   fillNewBondsRun(
-      [] __device__ (SeedT& seed) {
-        // Atom 0 is "old" (in seed but not last-added).
-        seed.atoms[0] |= 1u << 0;
-        seed.numAtoms = 1;
-        // Begin a grow step boundary.
-        mcs::fmcs::seedBeginGrowStepWithinThread(seed);
-        // Atom 1 is "newly added".
-        mcs::fmcs::seedAddAtomWithinThread(seed, 1);
-        // Bond 0 already mapped (in seed and excluded).
-        mcs::fmcs::seedAddBondWithinThread(seed, 0);
-      },
-      qBE, qNumAtoms, qNumBonds, kMaxNewBonds, out);
+    [] __device__(SeedT & seed) {
+      // Atom 0 is "old" (in seed but not last-added).
+      seed.atoms[0] |= 1u << 0;
+      seed.numAtoms = 1;
+      // Begin a grow step boundary.
+      mcs::fmcs::seedBeginGrowStepWithinThread(seed);
+      // Atom 1 is "newly added".
+      mcs::fmcs::seedAddAtomWithinThread(seed, 1);
+      // Bond 0 already mapped (in seed and excluded).
+      mcs::fmcs::seedAddBondWithinThread(seed, 0);
+    },
+    qBE,
+    qNumAtoms,
+    qNumBonds,
+    kMaxNewBonds,
+    out);
 }
 
 // Test 4: ring-closing.  Seed has atoms 0, 1, 2 all marked last-added,
 // bond 0 = (0,1) and bond 1 = (1,2) already in excludedBonds.  Bond 2
 // = (0,2) closes the ring: both endpoints in seed.
-__global__ void fillNewBondsRingClosingDriver(
-    const std::uint32_t* qBE, int qNumAtoms, int qNumBonds,
-    FillNewBondsOut* out) {
+__global__ void fillNewBondsRingClosingDriver(const std::uint32_t* qBE,
+                                              int                  qNumAtoms,
+                                              int                  qNumBonds,
+                                              FillNewBondsOut*     out) {
   fillNewBondsRun(
-      [] __device__ (SeedT& seed) {
-        mcs::fmcs::seedAddAtomWithinThread(seed, 0);
-        mcs::fmcs::seedAddAtomWithinThread(seed, 1);
-        mcs::fmcs::seedAddAtomWithinThread(seed, 2);
-        mcs::fmcs::seedAddBondWithinThread(seed, 0);
-        mcs::fmcs::seedAddBondWithinThread(seed, 1);
-        // Bond 2 = (0,2) is the only candidate; it's ring-closing
-        // since both 0 and 2 are in seed.atoms.
-      },
-      qBE, qNumAtoms, qNumBonds, kMaxNewBonds, out);
+    [] __device__(SeedT & seed) {
+      mcs::fmcs::seedAddAtomWithinThread(seed, 0);
+      mcs::fmcs::seedAddAtomWithinThread(seed, 1);
+      mcs::fmcs::seedAddAtomWithinThread(seed, 2);
+      mcs::fmcs::seedAddBondWithinThread(seed, 0);
+      mcs::fmcs::seedAddBondWithinThread(seed, 1);
+      // Bond 2 = (0,2) is the only candidate; it's ring-closing
+      // since both 0 and 2 are in seed.atoms.
+    },
+    qBE,
+    qNumAtoms,
+    qNumBonds,
+    kMaxNewBonds,
+    out);
 }
 
 // Test 5: overflow.  4-atom path with seed = {atom 0 newly-added}.
 // Query bonds 0..3 all touch atom 0 (star graph: bonds (0,1) (0,2)
 // (0,3) (0,4)).  maxNewBonds = 2 -> first 2 win the race, function
 // returns false, count clamped at 2.
-__global__ void fillNewBondsOverflowDriver(
-    const std::uint32_t* qBE, int qNumAtoms, int qNumBonds,
-    FillNewBondsOut* out) {
-  fillNewBondsRun(
-      [] __device__ (SeedT& seed) {
-        mcs::fmcs::seedAddAtomWithinThread(seed, 0);
-      },
-      qBE, qNumAtoms, qNumBonds, /*maxNewBonds=*/2, out);
+__global__ void fillNewBondsOverflowDriver(const std::uint32_t* qBE,
+                                           int                  qNumAtoms,
+                                           int                  qNumBonds,
+                                           FillNewBondsOut*     out) {
+  fillNewBondsRun([] __device__(SeedT & seed) { mcs::fmcs::seedAddAtomWithinThread(seed, 0); },
+                  qBE,
+                  qNumAtoms,
+                  qNumBonds,
+                  /*maxNewBonds=*/2,
+                  out);
 }
 
 }  // namespace mcs_fmcs_grow_test
@@ -1672,7 +1829,10 @@ __global__ void fillNewBondsOverflowDriver(
 TEST(FMCSUnit, FillNewBondsAtomAddingFromBoundary) {
   using namespace mcs_fmcs_grow_test;
   // Path 0-1-2: bonds (0,1), (1,2).
-  std::uint32_t* qBE = allocBondEndpointsManaged({{0, 1}, {1, 2}});
+  std::uint32_t*   qBE = allocBondEndpointsManaged({
+    {0, 1},
+    {1, 2}
+  });
   FillNewBondsOut* out = nullptr;
   ASSERT_EQ(cudaMallocManaged(&out, sizeof(FillNewBondsOut)), cudaSuccess);
 
@@ -1698,7 +1858,10 @@ TEST(FMCSUnit, FillNewBondsAtomAddingFromBoundary) {
 
 TEST(FMCSUnit, FillNewBondsExcludedSkipped) {
   using namespace mcs_fmcs_grow_test;
-  std::uint32_t* qBE = allocBondEndpointsManaged({{0, 1}, {1, 2}});
+  std::uint32_t*   qBE = allocBondEndpointsManaged({
+    {0, 1},
+    {1, 2}
+  });
   FillNewBondsOut* out = nullptr;
   ASSERT_EQ(cudaMallocManaged(&out, sizeof(FillNewBondsOut)), cudaSuccess);
 
@@ -1716,7 +1879,11 @@ TEST(FMCSUnit, FillNewBondsExcludedSkipped) {
 TEST(FMCSUnit, FillNewBondsLastAddedFiltering) {
   using namespace mcs_fmcs_grow_test;
   // Triangle: bonds 0=(0,1), 1=(1,2), 2=(0,2).
-  std::uint32_t* qBE = allocBondEndpointsManaged({{0, 1}, {1, 2}, {0, 2}});
+  std::uint32_t*   qBE = allocBondEndpointsManaged({
+    {0, 1},
+    {1, 2},
+    {0, 2}
+  });
   FillNewBondsOut* out = nullptr;
   ASSERT_EQ(cudaMallocManaged(&out, sizeof(FillNewBondsOut)), cudaSuccess);
 
@@ -1739,7 +1906,11 @@ TEST(FMCSUnit, FillNewBondsLastAddedFiltering) {
 TEST(FMCSUnit, FillNewBondsRingClosing) {
   using namespace mcs_fmcs_grow_test;
   // Triangle: bonds 0=(0,1), 1=(1,2), 2=(0,2).
-  std::uint32_t* qBE = allocBondEndpointsManaged({{0, 1}, {1, 2}, {0, 2}});
+  std::uint32_t*   qBE = allocBondEndpointsManaged({
+    {0, 1},
+    {1, 2},
+    {0, 2}
+  });
   FillNewBondsOut* out = nullptr;
   ASSERT_EQ(cudaMallocManaged(&out, sizeof(FillNewBondsOut)), cudaSuccess);
 
@@ -1760,8 +1931,12 @@ TEST(FMCSUnit, FillNewBondsRingClosing) {
 TEST(FMCSUnit, FillNewBondsOverflowReturnsFalse) {
   using namespace mcs_fmcs_grow_test;
   // Star graph: 4 bonds from atom 0 -> 1, 2, 3, 4.  numAtoms=5.
-  std::uint32_t* qBE =
-      allocBondEndpointsManaged({{0, 1}, {0, 2}, {0, 3}, {0, 4}});
+  std::uint32_t*   qBE = allocBondEndpointsManaged({
+    {0, 1},
+    {0, 2},
+    {0, 3},
+    {0, 4}
+  });
   FillNewBondsOut* out = nullptr;
   ASSERT_EQ(cudaMallocManaged(&out, sizeof(FillNewBondsOut)), cudaSuccess);
 
@@ -1780,9 +1955,9 @@ TEST(FMCSUnit, FillNewBondsOverflowReturnsFalse) {
 
 namespace mcs_fmcs_prune_test {
 
+using mcs::fmcs::NewBond;
 using mcs_fmcs_grow_test::QueuedT;
 using mcs_fmcs_grow_test::SeedT;
-using mcs::fmcs::NewBond;
 
 constexpr int kMaxNewBondsPrune = 8;
 
@@ -1791,21 +1966,19 @@ struct PruneOut {
   // We record the child seed's bondIdx-of-the-newly-added bond (the
   // first set bit beyond the parent's bond bitset).  That uniquely
   // identifies which NewBond the child was built from.
-  int     survivorBondIdx[kMaxNewBondsPrune];
-  int     numSurvivors;
-  int     numMatchAttempts;
+  int survivorBondIdx[kMaxNewBondsPrune];
+  int numSurvivors;
+  int numMatchAttempts;
 };
 
-__global__ void pruneStage1Driver(
-    const NewBond* hostBonds, int nBonds,
-    PruneOut* out) {
+__global__ void pruneStage1Driver(const NewBond* hostBonds, int nBonds, PruneOut* out) {
   __shared__ std::uint64_t parentStorage[(sizeof(QueuedT) + sizeof(std::uint64_t) - 1) / sizeof(std::uint64_t)];
   __shared__ std::uint64_t workspaceStorage[(sizeof(QueuedT) + sizeof(std::uint64_t) - 1) / sizeof(std::uint64_t)];
-  __shared__ NewBond bonds[kMaxNewBondsPrune];
-  __shared__ int matchAttempts;
-  __shared__ int survivorIdx;
-  QueuedT& parent    = *reinterpret_cast<QueuedT*>(parentStorage);
-  QueuedT& workspace = *reinterpret_cast<QueuedT*>(workspaceStorage);
+  __shared__ NewBond       bonds[kMaxNewBondsPrune];
+  __shared__ int           matchAttempts;
+  __shared__ int           survivorIdx;
+  QueuedT&                 parent    = *reinterpret_cast<QueuedT*>(parentStorage);
+  QueuedT&                 workspace = *reinterpret_cast<QueuedT*>(workspaceStorage);
 
   if (threadIdx.x == 0) {
     mcs::fmcs::seedClearWithinThread(parent.seed);
@@ -1815,7 +1988,8 @@ __global__ void pruneStage1Driver(
     mcs::fmcs::seedAddAtomWithinThread(parent.seed, 0);
     mcs::fmcs::seedAddAtomWithinThread(parent.seed, 1);
     mcs::fmcs::seedAddBondWithinThread(parent.seed, 0);
-    for (int i = 0; i < nBonds; ++i) bonds[i] = hostBonds[i];
+    for (int i = 0; i < nBonds; ++i)
+      bonds[i] = hostBonds[i];
     matchAttempts = 0;
     survivorIdx   = 0;
     for (int i = 0; i < kMaxNewBondsPrune; ++i) {
@@ -1829,37 +2003,42 @@ __global__ void pruneStage1Driver(
 
   // Stub matchFn: returns true iff the new bond's bondIdx is even.
   // Counts attempts so the test can verify every bond was tried.
-  auto matchFn = [&] __device__ (QueuedT& child) -> bool {
-    if (warp.thread_rank() == 0) ++matchAttempts;
+  auto matchFn = [&] __device__(QueuedT & child) -> bool {
+    if (warp.thread_rank() == 0)
+      ++matchAttempts;
     warp.sync();
     // Find which bondIdx the workspace's seed has beyond the parent's.
     // Parent has only bond 0 set; child has one more.
     int childBond = -1;
     for (int b = 0; b < 16; ++b) {
-      using BondWord = SeedT::bond_word_type;
-      const BondWord childWord = child.seed.bonds[0];
+      using BondWord            = SeedT::bond_word_type;
+      const BondWord childWord  = child.seed.bonds[0];
       const BondWord parentWord = parent.seed.bonds[0];
-      const BondWord newBits = childWord & ~parentWord;
-      if ((newBits >> b) & 1) { childBond = b; break; }
+      const BondWord newBits    = childWord & ~parentWord;
+      if ((newBits >> b) & 1) {
+        childBond = b;
+        break;
+      }
     }
     return (childBond % 2) == 0;
   };
-  auto childSink = [&] __device__ (QueuedT& child) {
+  auto childSink = [&] __device__(QueuedT & child) {
     if (warp.thread_rank() == 0) {
       // Record child's new-bond identity.
-      using BondWord = SeedT::bond_word_type;
-      const BondWord newBits =
-          child.seed.bonds[0] & ~parent.seed.bonds[0];
-      int childBond = -1;
+      using BondWord           = SeedT::bond_word_type;
+      const BondWord newBits   = child.seed.bonds[0] & ~parent.seed.bonds[0];
+      int            childBond = -1;
       for (int b = 0; b < 16; ++b) {
-        if ((newBits >> b) & 1) { childBond = b; break; }
+        if ((newBits >> b) & 1) {
+          childBond = b;
+          break;
+        }
       }
       out->survivorBondIdx[survivorIdx++] = childBond;
     }
     warp.sync();
   };
-  mcs::fmcs::pruneIndividualBondsCooperative(
-      warp, parent, workspace, bonds, nBonds, matchFn, childSink);
+  mcs::fmcs::pruneIndividualBondsCooperative(warp, parent, workspace, bonds, nBonds, matchFn, childSink);
 
   __syncthreads();
   if (threadIdx.x == 0) {
@@ -1916,9 +2095,11 @@ struct HashOut {
   std::uint64_t hash;
 };
 
-__device__ __forceinline__ void buildHashFixture(
-    HashSeedT& seed, HashMatchT& match,
-    const int* qBonds, const int* tBonds, int n) {
+__device__ __forceinline__ void buildHashFixture(HashSeedT&  seed,
+                                                 HashMatchT& match,
+                                                 const int*  qBonds,
+                                                 const int*  tBonds,
+                                                 int         n) {
   mcs::fmcs::seedClearWithinThread(seed);
   mcs::fmcs::matchResultClearWithinThread(match);
   for (int i = 0; i < n; ++i) {
@@ -1929,16 +2110,17 @@ __device__ __forceinline__ void buildHashFixture(
 }
 
 __global__ void hashOrderInvariantDriver(HashOut* outA, HashOut* outB) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  HashSeedT seedA, seedB;
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
+  HashSeedT  seedA, seedB;
   HashMatchT matchA, matchB;
   // Same set of (q, t) mappings, different addition order.  Hash
   // walks seed.bonds in q-increasing order via __ffs, so the
   // resulting hash should be identical.
-  int qsA[] = {3, 1, 5};
-  int tsA[] = {7, 2, 9};
-  int qsB[] = {1, 5, 3};
-  int tsB[] = {2, 9, 7};
+  int        qsA[] = {3, 1, 5};
+  int        tsA[] = {7, 2, 9};
+  int        qsB[] = {1, 5, 3};
+  int        tsB[] = {2, 9, 7};
   buildHashFixture(seedA, matchA, qsA, tsA, 3);
   buildHashFixture(seedB, matchB, qsB, tsB, 3);
   outA->hash = mcs::fmcs::mappingHashWithinThread(seedA, matchA);
@@ -1946,14 +2128,15 @@ __global__ void hashOrderInvariantDriver(HashOut* outA, HashOut* outB) {
 }
 
 __global__ void hashDistinctMappingsDiffer(HashOut* outA, HashOut* outB) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  HashSeedT seedA, seedB;
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
+  HashSeedT  seedA, seedB;
   HashMatchT matchA, matchB;
   // Same bonds, different target mappings -> hashes should differ.
-  int qsA[] = {0, 1, 2};
-  int tsA[] = {0, 1, 2};
-  int qsB[] = {0, 1, 2};
-  int tsB[] = {2, 1, 0};
+  int        qsA[] = {0, 1, 2};
+  int        tsA[] = {0, 1, 2};
+  int        qsB[] = {0, 1, 2};
+  int        tsB[] = {2, 1, 0};
   buildHashFixture(seedA, matchA, qsA, tsA, 3);
   buildHashFixture(seedB, matchB, qsB, tsB, 3);
   outA->hash = mcs::fmcs::mappingHashWithinThread(seedA, matchA);
@@ -1961,8 +2144,9 @@ __global__ void hashDistinctMappingsDiffer(HashOut* outA, HashOut* outB) {
 }
 
 __global__ void hashEmptyIsNonZero(HashOut* out) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  HashSeedT seed;
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
+  HashSeedT  seed;
   HashMatchT match;
   mcs::fmcs::seedClearWithinThread(seed);
   mcs::fmcs::matchResultClearWithinThread(match);
@@ -1978,9 +2162,9 @@ struct CacheInsertProbeOut {
   bool probeMissedOther;
 };
 
-__global__ void cacheInsertProbeBasicDriver(
-    std::uint64_t* keys, int capacity, CacheInsertProbeOut* out) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+__global__ void cacheInsertProbeBasicDriver(std::uint64_t* keys, int capacity, CacheInsertProbeOut* out) {
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
   __shared__ DeviceMatchCache cache;
   cache.init(keys, capacity);
   // Cooperative zero w/ a 1-thread "group" works because we already
@@ -1999,9 +2183,9 @@ struct CacheCollisionOut {
   // We test indirectly: both keys present and findable proves it.
 };
 
-__global__ void cacheLinearProbeCollisionDriver(
-    std::uint64_t* keys, int capacity, CacheCollisionOut* out) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+__global__ void cacheLinearProbeCollisionDriver(std::uint64_t* keys, int capacity, CacheCollisionOut* out) {
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
   __shared__ DeviceMatchCache cache;
   cache.init(keys, capacity);
   // Construct two keys that hash to the same initial slot.  The slot
@@ -2020,13 +2204,13 @@ __global__ void cacheLinearProbeCollisionDriver(
 
 struct CacheFullDropOut {
   int  successfulInserts;
-  bool finalInsertOk;     // expected: false (table full)
-  bool seenFirstAfterFull; // probe still finds the first insert
+  bool finalInsertOk;       // expected: false (table full)
+  bool seenFirstAfterFull;  // probe still finds the first insert
 };
 
-__global__ void cacheFullDropDriver(
-    std::uint64_t* keys, int capacity, CacheFullDropOut* out) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+__global__ void cacheFullDropDriver(std::uint64_t* keys, int capacity, CacheFullDropOut* out) {
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
   __shared__ DeviceMatchCache cache;
   cache.init(keys, capacity);
   int n = 0;
@@ -2034,11 +2218,12 @@ __global__ void cacheFullDropDriver(
     // Use distinct non-zero keys.  Note: distinctness in the *hash*
     // input space; the cache hashes internally.
     const std::uint64_t key = static_cast<std::uint64_t>(i) + 1;
-    if (cache.insertWithinThread(key)) ++n;
+    if (cache.insertWithinThread(key))
+      ++n;
   }
-  out->successfulInserts = n;
+  out->successfulInserts  = n;
   // Capacity is hit; one more must fail.
-  out->finalInsertOk = cache.insertWithinThread(0xFFFFFFFFFFFFFFFFULL);
+  out->finalInsertOk      = cache.insertWithinThread(0xFFFFFFFFFFFFFFFFULL);
   // First-key probe still works.
   out->seenFirstAfterFull = cache.probeWithinThread(1ULL);
 }
@@ -2047,7 +2232,8 @@ __global__ void cacheFullDropDriver(
 
 TEST(FMCSUnit, MappingHashOrderInvariant) {
   using namespace mcs_fmcs_cache_test;
-  HashOut* dA = nullptr; HashOut* dB = nullptr;
+  HashOut* dA = nullptr;
+  HashOut* dB = nullptr;
   ASSERT_EQ(cudaMallocManaged(&dA, sizeof(HashOut)), cudaSuccess);
   ASSERT_EQ(cudaMallocManaged(&dB, sizeof(HashOut)), cudaSuccess);
   hashOrderInvariantDriver<<<1, 1>>>(dA, dB);
@@ -2062,14 +2248,14 @@ TEST(FMCSUnit, MappingHashOrderInvariant) {
 
 TEST(FMCSUnit, MappingHashDistinctMappingsDiffer) {
   using namespace mcs_fmcs_cache_test;
-  HashOut* dA = nullptr; HashOut* dB = nullptr;
+  HashOut* dA = nullptr;
+  HashOut* dB = nullptr;
   ASSERT_EQ(cudaMallocManaged(&dA, sizeof(HashOut)), cudaSuccess);
   ASSERT_EQ(cudaMallocManaged(&dB, sizeof(HashOut)), cudaSuccess);
   hashDistinctMappingsDiffer<<<1, 1>>>(dA, dB);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
-  EXPECT_NE(dA->hash, dB->hash)
-      << "Different target mappings should not collide on a 64-bit hash.";
+  EXPECT_NE(dA->hash, dB->hash) << "Different target mappings should not collide on a 64-bit hash.";
 
   cudaFree(dA);
   cudaFree(dB);
@@ -2091,7 +2277,7 @@ TEST(FMCSUnit, MappingHashEmptySeedReturnsNonZero) {
 
 TEST(FMCSUnit, CacheInsertProbeBasic) {
   using namespace mcs_fmcs_cache_test;
-  constexpr int kCap = 16;
+  constexpr int  kCap = 16;
   std::uint64_t* keys = nullptr;
   ASSERT_EQ(cudaMallocManaged(&keys, sizeof(std::uint64_t) * kCap), cudaSuccess);
   std::memset(keys, 0, sizeof(std::uint64_t) * kCap);
@@ -2111,7 +2297,7 @@ TEST(FMCSUnit, CacheInsertProbeBasic) {
 
 TEST(FMCSUnit, CacheLinearProbeCollision) {
   using namespace mcs_fmcs_cache_test;
-  constexpr int kCap = 8;
+  constexpr int  kCap = 8;
   std::uint64_t* keys = nullptr;
   ASSERT_EQ(cudaMallocManaged(&keys, sizeof(std::uint64_t) * kCap), cudaSuccess);
   std::memset(keys, 0, sizeof(std::uint64_t) * kCap);
@@ -2132,8 +2318,10 @@ TEST(FMCSUnit, CacheLinearProbeCollision) {
   // Sanity: at least one slot in keys[] equals each inserted key.
   bool seenA = false, seenB = false;
   for (int i = 0; i < kCap; ++i) {
-    if (keys[i] == 0xAAAAAAAAAAAAAAAAULL) seenA = true;
-    if (keys[i] == 0xBBBBBBBBBBBBBBBBULL) seenB = true;
+    if (keys[i] == 0xAAAAAAAAAAAAAAAAULL)
+      seenA = true;
+    if (keys[i] == 0xBBBBBBBBBBBBBBBBULL)
+      seenB = true;
   }
   EXPECT_TRUE(seenA);
   EXPECT_TRUE(seenB);
@@ -2144,7 +2332,7 @@ TEST(FMCSUnit, CacheLinearProbeCollision) {
 
 TEST(FMCSUnit, CacheFullTableDropsAdditionalInsert) {
   using namespace mcs_fmcs_cache_test;
-  constexpr int kCap = 16;  // small but power-of-two
+  constexpr int  kCap = 16;  // small but power-of-two
   std::uint64_t* keys = nullptr;
   ASSERT_EQ(cudaMallocManaged(&keys, sizeof(std::uint64_t) * kCap), cudaSuccess);
   std::memset(keys, 0, sizeof(std::uint64_t) * kCap);
@@ -2154,12 +2342,9 @@ TEST(FMCSUnit, CacheFullTableDropsAdditionalInsert) {
   cacheFullDropDriver<<<1, 1>>>(keys, kCap, out);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
-  EXPECT_EQ(out->successfulInserts, kCap)
-      << "Distinct keys should fill all slots.";
-  EXPECT_FALSE(out->finalInsertOk)
-      << "Insert into a full table must return false.";
-  EXPECT_TRUE(out->seenFirstAfterFull)
-      << "Existing entries must remain visible after a failed insert.";
+  EXPECT_EQ(out->successfulInserts, kCap) << "Distinct keys should fill all slots.";
+  EXPECT_FALSE(out->finalInsertOk) << "Insert into a full table must return false.";
+  EXPECT_TRUE(out->seenFirstAfterFull) << "Existing entries must remain visible after a failed insert.";
 
   cudaFree(keys);
   cudaFree(out);
@@ -2186,8 +2371,9 @@ struct HashOut64 {
 // exercising the outer wordIdx loop AND __ffsll on each.  Place bonds
 // in BOTH words so the iteration must cross the word boundary.
 __global__ void hashMultiWordPathDriver(HashOut64* outA, HashOut64* outB) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  HashSeed128 seedA, seedB;
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
+  HashSeed128  seedA, seedB;
   HashMatch128 matchA, matchB;
   mcs::fmcs::seedClearWithinThread(seedA);
   mcs::fmcs::seedClearWithinThread(seedB);
@@ -2204,15 +2390,16 @@ __global__ void hashMultiWordPathDriver(HashOut64* outA, HashOut64* outB) {
   }
   matchA.empty = false;
   matchB.empty = false;
-  outA->hash = mcs::fmcs::mappingHashWithinThread(seedA, matchA);
-  outB->hash = mcs::fmcs::mappingHashWithinThread(seedB, matchB);
+  outA->hash   = mcs::fmcs::mappingHashWithinThread(seedA, matchA);
+  outB->hash   = mcs::fmcs::mappingHashWithinThread(seedB, matchB);
 }
 
 // Single-bond minimal seed.  Should produce a non-zero, deterministic
 // hash distinct from the empty-seed sentinel (1).
 __global__ void hashSingleBondDriver(HashOut64* outA, HashOut64* outB) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  HashSeed16 seedA, seedB;
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
+  HashSeed16  seedA, seedB;
   HashMatch16 matchA, matchB;
   mcs::fmcs::seedClearWithinThread(seedA);
   mcs::fmcs::seedClearWithinThread(seedB);
@@ -2221,21 +2408,21 @@ __global__ void hashSingleBondDriver(HashOut64* outA, HashOut64* outB) {
   // Determinism: two seeds with the same single (q=4, t=2) mapping.
   mcs::fmcs::seedAddBondWithinThread(seedA, 4);
   matchA.targetBondIdx[4] = 2;
-  matchA.empty = false;
+  matchA.empty            = false;
   mcs::fmcs::seedAddBondWithinThread(seedB, 4);
   matchB.targetBondIdx[4] = 2;
-  matchB.empty = false;
-  outA->hash = mcs::fmcs::mappingHashWithinThread(seedA, matchA);
-  outB->hash = mcs::fmcs::mappingHashWithinThread(seedB, matchB);
+  matchB.empty            = false;
+  outA->hash              = mcs::fmcs::mappingHashWithinThread(seedA, matchA);
+  outB->hash              = mcs::fmcs::mappingHashWithinThread(seedB, matchB);
 }
 
 // Same single query bond and target bond, opposite endpoint orientation.
 // These must hash differently or the success cache can prune one Phase-1
 // orientation because the other orientation was already seen.
-__global__ void hashSingleBondOrientationsDifferDriver(HashOut64* outA,
-                                                       HashOut64* outB) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  HashSeed16 seedA, seedB;
+__global__ void hashSingleBondOrientationsDifferDriver(HashOut64* outA, HashOut64* outB) {
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
+  HashSeed16  seedA, seedB;
   HashMatch16 matchA, matchB;
   mcs::fmcs::seedClearWithinThread(seedA);
   mcs::fmcs::seedClearWithinThread(seedB);
@@ -2248,7 +2435,7 @@ __global__ void hashSingleBondOrientationsDifferDriver(HashOut64* outA,
   matchA.targetAtomIdx[0] = 4;
   matchA.targetAtomIdx[1] = 5;
   matchA.targetBondIdx[0] = 3;
-  matchA.empty = false;
+  matchA.empty            = false;
 
   mcs::fmcs::seedAddAtomWithinThread(seedB, 0);
   mcs::fmcs::seedAddAtomWithinThread(seedB, 1);
@@ -2256,16 +2443,16 @@ __global__ void hashSingleBondOrientationsDifferDriver(HashOut64* outA,
   matchB.targetAtomIdx[0] = 5;
   matchB.targetAtomIdx[1] = 4;
   matchB.targetBondIdx[0] = 3;
-  matchB.empty = false;
+  matchB.empty            = false;
 
   outA->hash = mcs::fmcs::mappingHashWithinThread(seedA, matchA);
   outB->hash = mcs::fmcs::mappingHashWithinThread(seedB, matchB);
 }
 
-__global__ void hashLastAddedFrontierDiffersDriver(HashOut64* outA,
-                                                   HashOut64* outB) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  HashSeed16 seedA, seedB;
+__global__ void hashLastAddedFrontierDiffersDriver(HashOut64* outA, HashOut64* outB) {
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
+  HashSeed16  seedA, seedB;
   HashMatch16 matchA, matchB;
   mcs::fmcs::seedClearWithinThread(seedA);
   mcs::fmcs::seedClearWithinThread(seedB);
@@ -2290,17 +2477,17 @@ __global__ void hashLastAddedFrontierDiffersDriver(HashOut64* outA,
   }
   seedA.lastAddedAtoms[0] = static_cast<HashSeed16::atom_word_type>(1) << 1;
   seedB.lastAddedAtoms[0] = static_cast<HashSeed16::atom_word_type>(1) << 2;
-  matchA.empty = false;
-  matchB.empty = false;
+  matchA.empty            = false;
+  matchB.empty            = false;
 
   outA->hash = mcs::fmcs::mappingHashWithinThread(seedA, matchA);
   outB->hash = mcs::fmcs::mappingHashWithinThread(seedB, matchB);
 }
 
-__global__ void hashExcludedBondsDifferDriver(HashOut64* outA,
-                                              HashOut64* outB) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  HashSeed16 seedA, seedB;
+__global__ void hashExcludedBondsDifferDriver(HashOut64* outA, HashOut64* outB) {
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
+  HashSeed16  seedA, seedB;
   HashMatch16 matchA, matchB;
   mcs::fmcs::seedClearWithinThread(seedA);
   mcs::fmcs::seedClearWithinThread(seedB);
@@ -2319,8 +2506,7 @@ __global__ void hashExcludedBondsDifferDriver(HashOut64* outA,
     matchA.targetBondIdx[bond] = static_cast<std::uint8_t>(bond + 6);
     matchB.targetBondIdx[bond] = static_cast<std::uint8_t>(bond + 6);
   }
-  seedB.excludedBonds[0] |=
-      static_cast<HashSeed16::bond_word_type>(1) << 3;
+  seedB.excludedBonds[0] |= static_cast<HashSeed16::bond_word_type>(1) << 3;
   matchA.empty = false;
   matchB.empty = false;
 
@@ -2332,15 +2518,16 @@ __global__ void hashExcludedBondsDifferDriver(HashOut64* outA,
 // (tier-128 cap on maxBonds).  Verify the (q << 8 | t) packing
 // doesn't overflow and the high-q __ffsll iteration finds the bit.
 __global__ void hashExtremeIndicesDriver(HashOut64* out) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  HashSeed128 seed;
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
+  HashSeed128  seed;
   HashMatch128 match;
   mcs::fmcs::seedClearWithinThread(seed);
   mcs::fmcs::matchResultClearWithinThread(match);
   mcs::fmcs::seedAddBondWithinThread(seed, 127);
   match.targetBondIdx[127] = 127;
-  match.empty = false;
-  out->hash = mcs::fmcs::mappingHashWithinThread(seed, match);
+  match.empty              = false;
+  out->hash                = mcs::fmcs::mappingHashWithinThread(seed, match);
 }
 
 // The (q=0, t=0) bond packs to a zero token; with a zero-initialized
@@ -2348,10 +2535,10 @@ __global__ void hashExtremeIndicesDriver(HashOut64* out) {
 // seed that contains it onto one that omits it.  A strict superset that
 // adds the q0->t0 bond must therefore hash differently from the subset
 // without it.
-__global__ void hashZeroPairBondVisibleDriver(HashOut64* outWithout,
-                                              HashOut64* outWith) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
-  HashSeed16 seedWithout, seedWith;
+__global__ void hashZeroPairBondVisibleDriver(HashOut64* outWithout, HashOut64* outWith) {
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
+  HashSeed16  seedWithout, seedWith;
   HashMatch16 matchWithout, matchWith;
   mcs::fmcs::seedClearWithinThread(seedWithout);
   mcs::fmcs::seedClearWithinThread(seedWith);
@@ -2359,14 +2546,14 @@ __global__ void hashZeroPairBondVisibleDriver(HashOut64* outWithout,
   mcs::fmcs::matchResultClearWithinThread(matchWith);
   mcs::fmcs::seedAddBondWithinThread(seedWithout, 1);
   matchWithout.targetBondIdx[1] = 1;
-  matchWithout.empty = false;
+  matchWithout.empty            = false;
   mcs::fmcs::seedAddBondWithinThread(seedWith, 0);
   mcs::fmcs::seedAddBondWithinThread(seedWith, 1);
   matchWith.targetBondIdx[0] = 0;
   matchWith.targetBondIdx[1] = 1;
-  matchWith.empty = false;
-  outWithout->hash = mcs::fmcs::mappingHashWithinThread(seedWithout, matchWithout);
-  outWith->hash    = mcs::fmcs::mappingHashWithinThread(seedWith, matchWith);
+  matchWith.empty            = false;
+  outWithout->hash           = mcs::fmcs::mappingHashWithinThread(seedWithout, matchWithout);
+  outWith->hash              = mcs::fmcs::mappingHashWithinThread(seedWith, matchWith);
 }
 
 // ---- Cache idempotent insert ----
@@ -2377,16 +2564,18 @@ struct CacheIdempotentOut {
   int  occupiedSlots;  // post-state count of non-zero slots
 };
 
-__global__ void cacheIdempotentInsertDriver(
-    std::uint64_t* keys, int capacity, CacheIdempotentOut* out) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+__global__ void cacheIdempotentInsertDriver(std::uint64_t* keys, int capacity, CacheIdempotentOut* out) {
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
   __shared__ DeviceMatchCache cache;
   cache.init(keys, capacity);
   const std::uint64_t key = 0xC0FFEEC0FFEEC0FFULL;
-  out->firstInsert  = cache.insertWithinThread(key);
-  out->secondInsert = cache.insertWithinThread(key);
-  int occupied = 0;
-  for (int i = 0; i < capacity; ++i) if (keys[i] != 0ULL) ++occupied;
+  out->firstInsert        = cache.insertWithinThread(key);
+  out->secondInsert       = cache.insertWithinThread(key);
+  int occupied            = 0;
+  for (int i = 0; i < capacity; ++i)
+    if (keys[i] != 0ULL)
+      ++occupied;
   out->occupiedSlots = occupied;
 }
 
@@ -2397,9 +2586,9 @@ struct ProbeEmptyOut {
   bool probedNonZeroKey;
 };
 
-__global__ void cacheProbeEmptyDriver(
-    std::uint64_t* keys, int capacity, ProbeEmptyOut* out) {
-  if (threadIdx.x != 0 || blockIdx.x != 0) return;
+__global__ void cacheProbeEmptyDriver(std::uint64_t* keys, int capacity, ProbeEmptyOut* out) {
+  if (threadIdx.x != 0 || blockIdx.x != 0)
+    return;
   __shared__ DeviceMatchCache cache;
   cache.init(keys, capacity);
   // Cache was zero-initialized by the host.  Probing any key should
@@ -2410,10 +2599,10 @@ __global__ void cacheProbeEmptyDriver(
 
 // ---- Cooperative zero ----
 
-__global__ void cacheZeroCooperativeDriver(
-    std::uint64_t* keys, int capacity) {
+__global__ void cacheZeroCooperativeDriver(std::uint64_t* keys, int capacity) {
   __shared__ DeviceMatchCache cache;
-  if (threadIdx.x == 0) cache.init(keys, capacity);
+  if (threadIdx.x == 0)
+    cache.init(keys, capacity);
   __syncthreads();
   auto block = cooperative_groups::this_thread_block();
   cache.zeroCooperative(block);
@@ -2423,16 +2612,16 @@ __global__ void cacheZeroCooperativeDriver(
 
 TEST(FMCSUnit, MappingHashMultiWordPath) {
   using namespace mcs_fmcs_cache_gap_test;
-  HashOut64* dA = nullptr; HashOut64* dB = nullptr;
+  HashOut64* dA = nullptr;
+  HashOut64* dB = nullptr;
   ASSERT_EQ(cudaMallocManaged(&dA, sizeof(HashOut64)), cudaSuccess);
   ASSERT_EQ(cudaMallocManaged(&dB, sizeof(HashOut64)), cudaSuccess);
   hashMultiWordPathDriver<<<1, 1>>>(dA, dB);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
   EXPECT_NE(dA->hash, 0ULL);
-  EXPECT_EQ(dA->hash, dB->hash)
-      << "Multi-word seed.bonds must be canonicalized regardless of "
-         "addition order, even when bonds straddle a word boundary.";
+  EXPECT_EQ(dA->hash, dB->hash) << "Multi-word seed.bonds must be canonicalized regardless of "
+                                   "addition order, even when bonds straddle a word boundary.";
 
   cudaFree(dA);
   cudaFree(dB);
@@ -2440,7 +2629,8 @@ TEST(FMCSUnit, MappingHashMultiWordPath) {
 
 TEST(FMCSUnit, MappingHashSingleBondDeterministic) {
   using namespace mcs_fmcs_cache_gap_test;
-  HashOut64* dA = nullptr; HashOut64* dB = nullptr;
+  HashOut64* dA = nullptr;
+  HashOut64* dB = nullptr;
   ASSERT_EQ(cudaMallocManaged(&dA, sizeof(HashOut64)), cudaSuccess);
   ASSERT_EQ(cudaMallocManaged(&dB, sizeof(HashOut64)), cudaSuccess);
   hashSingleBondDriver<<<1, 1>>>(dA, dB);
@@ -2456,14 +2646,14 @@ TEST(FMCSUnit, MappingHashSingleBondDeterministic) {
 
 TEST(FMCSUnit, MappingHashSingleBondOrientationsDiffer) {
   using namespace mcs_fmcs_cache_gap_test;
-  HashOut64* dA = nullptr; HashOut64* dB = nullptr;
+  HashOut64* dA = nullptr;
+  HashOut64* dB = nullptr;
   ASSERT_EQ(cudaMallocManaged(&dA, sizeof(HashOut64)), cudaSuccess);
   ASSERT_EQ(cudaMallocManaged(&dB, sizeof(HashOut64)), cudaSuccess);
   hashSingleBondOrientationsDifferDriver<<<1, 1>>>(dA, dB);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
-  EXPECT_NE(dA->hash, dB->hash)
-      << "Opposite orientations of the same single bond must not alias.";
+  EXPECT_NE(dA->hash, dB->hash) << "Opposite orientations of the same single bond must not alias.";
 
   cudaFree(dA);
   cudaFree(dB);
@@ -2471,15 +2661,15 @@ TEST(FMCSUnit, MappingHashSingleBondOrientationsDiffer) {
 
 TEST(FMCSUnit, MappingHashLastAddedFrontierDiffers) {
   using namespace mcs_fmcs_cache_gap_test;
-  HashOut64* dA = nullptr; HashOut64* dB = nullptr;
+  HashOut64* dA = nullptr;
+  HashOut64* dB = nullptr;
   ASSERT_EQ(cudaMallocManaged(&dA, sizeof(HashOut64)), cudaSuccess);
   ASSERT_EQ(cudaMallocManaged(&dB, sizeof(HashOut64)), cudaSuccess);
   hashLastAddedFrontierDiffersDriver<<<1, 1>>>(dA, dB);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
-  EXPECT_NE(dA->hash, dB->hash)
-      << "Same mapped subgraph with different last-added frontier "
-         "must not cache-alias.";
+  EXPECT_NE(dA->hash, dB->hash) << "Same mapped subgraph with different last-added frontier "
+                                   "must not cache-alias.";
 
   cudaFree(dA);
   cudaFree(dB);
@@ -2487,15 +2677,15 @@ TEST(FMCSUnit, MappingHashLastAddedFrontierDiffers) {
 
 TEST(FMCSUnit, MappingHashExcludedBondsDiffer) {
   using namespace mcs_fmcs_cache_gap_test;
-  HashOut64* dA = nullptr; HashOut64* dB = nullptr;
+  HashOut64* dA = nullptr;
+  HashOut64* dB = nullptr;
   ASSERT_EQ(cudaMallocManaged(&dA, sizeof(HashOut64)), cudaSuccess);
   ASSERT_EQ(cudaMallocManaged(&dB, sizeof(HashOut64)), cudaSuccess);
   hashExcludedBondsDifferDriver<<<1, 1>>>(dA, dB);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
-  EXPECT_NE(dA->hash, dB->hash)
-      << "Same mapped subgraph with different excluded bonds must not "
-         "cache-alias.";
+  EXPECT_NE(dA->hash, dB->hash) << "Same mapped subgraph with different excluded bonds must not "
+                                   "cache-alias.";
 
   cudaFree(dA);
   cudaFree(dB);
@@ -2519,15 +2709,15 @@ TEST(FMCSUnit, MappingHashExtremeIndicesFitInPacking) {
 
 TEST(FMCSUnit, MappingHashZeroPairBondIsVisible) {
   using namespace mcs_fmcs_cache_gap_test;
-  HashOut64* without = nullptr; HashOut64* with = nullptr;
+  HashOut64* without = nullptr;
+  HashOut64* with    = nullptr;
   ASSERT_EQ(cudaMallocManaged(&without, sizeof(HashOut64)), cudaSuccess);
   ASSERT_EQ(cudaMallocManaged(&with, sizeof(HashOut64)), cudaSuccess);
   hashZeroPairBondVisibleDriver<<<1, 1>>>(without, with);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
-  EXPECT_NE(with->hash, without->hash)
-      << "A (q0->t0) bond must perturb the hash; otherwise a full seed "
-         "aliases onto a sub-seed and the success cache falsely dedups it.";
+  EXPECT_NE(with->hash, without->hash) << "A (q0->t0) bond must perturb the hash; otherwise a full seed "
+                                          "aliases onto a sub-seed and the success cache falsely dedups it.";
   EXPECT_NE(with->hash, 0ULL);
 
   cudaFree(without);
@@ -2536,7 +2726,7 @@ TEST(FMCSUnit, MappingHashZeroPairBondIsVisible) {
 
 TEST(FMCSUnit, CacheInsertIsIdempotent) {
   using namespace mcs_fmcs_cache_gap_test;
-  constexpr int kCap = 16;
+  constexpr int  kCap = 16;
   std::uint64_t* keys = nullptr;
   ASSERT_EQ(cudaMallocManaged(&keys, sizeof(std::uint64_t) * kCap), cudaSuccess);
   std::memset(keys, 0, sizeof(std::uint64_t) * kCap);
@@ -2548,8 +2738,7 @@ TEST(FMCSUnit, CacheInsertIsIdempotent) {
 
   EXPECT_TRUE(out->firstInsert);
   EXPECT_TRUE(out->secondInsert);
-  EXPECT_EQ(out->occupiedSlots, 1)
-      << "Repeated insert of the same key must not consume a second slot.";
+  EXPECT_EQ(out->occupiedSlots, 1) << "Repeated insert of the same key must not consume a second slot.";
 
   cudaFree(keys);
   cudaFree(out);
@@ -2557,7 +2746,7 @@ TEST(FMCSUnit, CacheInsertIsIdempotent) {
 
 TEST(FMCSUnit, CacheProbeEmptyCacheMisses) {
   using namespace mcs_fmcs_cache_gap_test;
-  constexpr int kCap = 16;
+  constexpr int  kCap = 16;
   std::uint64_t* keys = nullptr;
   ASSERT_EQ(cudaMallocManaged(&keys, sizeof(std::uint64_t) * kCap), cudaSuccess);
   std::memset(keys, 0, sizeof(std::uint64_t) * kCap);
@@ -2567,8 +2756,7 @@ TEST(FMCSUnit, CacheProbeEmptyCacheMisses) {
   cacheProbeEmptyDriver<<<1, 1>>>(keys, kCap, out);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
 
-  EXPECT_FALSE(out->probedZeroKey)
-      << "0 is the empty-slot sentinel; probing it must miss.";
+  EXPECT_FALSE(out->probedZeroKey) << "0 is the empty-slot sentinel; probing it must miss.";
   EXPECT_FALSE(out->probedNonZeroKey);
 
   cudaFree(keys);
@@ -2577,12 +2765,13 @@ TEST(FMCSUnit, CacheProbeEmptyCacheMisses) {
 
 TEST(FMCSUnit, CacheZeroCooperativeWipesAllSlots) {
   using namespace mcs_fmcs_cache_gap_test;
-  constexpr int kCap = 64;
+  constexpr int  kCap = 64;
   std::uint64_t* keys = nullptr;
   ASSERT_EQ(cudaMallocManaged(&keys, sizeof(std::uint64_t) * kCap), cudaSuccess);
   // Pre-fill with non-zero garbage so the cooperative zero has work
   // to do.
-  for (int i = 0; i < kCap; ++i) keys[i] = 0xDEADDEAD00000000ULL | i;
+  for (int i = 0; i < kCap; ++i)
+    keys[i] = 0xDEADDEAD00000000ULL | i;
 
   cacheZeroCooperativeDriver<<<1, 32>>>(keys, kCap);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);

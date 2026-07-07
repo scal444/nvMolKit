@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,12 +16,13 @@
 #ifndef FMCS_CUDA_FMCS_MATCH_TABLES_CUH
 #define FMCS_CUDA_FMCS_MATCH_TABLES_CUH
 
-#include "mcs_common/mcs_types.cuh"
+#include <cuda_runtime.h>
 
 #include <cstddef>
 #include <cstdint>
-#include <cuda_runtime.h>
 #include <vector>
+
+#include "mcs_common/mcs_types.cuh"
 
 namespace mcs {
 namespace fmcs {
@@ -31,42 +32,35 @@ namespace fmcs {
 /// uint32 words.  Used for both atoms and bonds so every per-seed
 /// compatibility check on the device is a single word load.
 struct MatchTableHost {
-  int nRows = 0;
-  int nCols = 0;
-  int wordsPerRow = 0;
+  int                   nRows       = 0;
+  int                   nCols       = 0;
+  int                   wordsPerRow = 0;
   std::vector<uint32_t> data;
 
-  static int computeWordsPerRow(int nCols) {
-    return (nCols + 31) / 32;
-  }
+  static int computeWordsPerRow(int nCols) { return (nCols + 31) / 32; }
 
   void resize(int rows, int cols) {
-    nRows = rows;
-    nCols = cols;
+    nRows       = rows;
+    nCols       = cols;
     wordsPerRow = computeWordsPerRow(cols);
     data.assign(static_cast<size_t>(rows) * wordsPerRow, 0u);
   }
 
-  void setBit(int row, int col) {
-    data[static_cast<size_t>(row) * wordsPerRow + col / 32]
-        |= (1u << (col % 32));
-  }
+  void setBit(int row, int col) { data[static_cast<size_t>(row) * wordsPerRow + col / 32] |= (1u << (col % 32)); }
 
   bool testBit(int row, int col) const {
-    return (data[static_cast<size_t>(row) * wordsPerRow + col / 32]
-            >> (col % 32)) & 1u;
+    return (data[static_cast<size_t>(row) * wordsPerRow + col / 32] >> (col % 32)) & 1u;
   }
 };
 
 struct MatchTableDevice {
-  const uint32_t* data = nullptr;
-  int nRows = 0;
-  int nCols = 0;
-  int wordsPerRow = 0;
+  const uint32_t* data        = nullptr;
+  int             nRows       = 0;
+  int             nCols       = 0;
+  int             wordsPerRow = 0;
 
   __host__ __device__ __forceinline__ bool testBit(int row, int col) const {
-    return (data[static_cast<size_t>(row) * wordsPerRow + col / 32]
-            >> (col % 32)) & 1u;
+    return (data[static_cast<size_t>(row) * wordsPerRow + col / 32] >> (col % 32)) & 1u;
   }
 };
 

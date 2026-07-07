@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,6 +16,10 @@
 #ifndef FMCS_CUDA_FMCS_KERNEL_CUH
 #define FMCS_CUDA_FMCS_KERNEL_CUH
 
+#include <cooperative_groups.h>
+
+#include <cstdint>
+
 #include "fmcs_cuda/fmcs_config.cuh"
 #include "fmcs_cuda/fmcs_debug.cuh"
 #include "fmcs_cuda/fmcs_grow.cuh"
@@ -29,34 +33,27 @@
 #include "fmcs_cuda/fmcs_tiers.cuh"
 #include "mcs_common/mcs_cooperative_copy.cuh"
 
-#include <cooperative_groups.h>
-
-#include <cstdint>
-
 namespace mcs {
 namespace fmcs {
 
 namespace cg = cooperative_groups;
 
-template<class GroupT, class QueuedT>
-__device__ __forceinline__ void updateIncumbentCooperative(
-    const GroupT& group,
-    const QueuedT& candidate,
-    QueuedT& best,
-    unsigned int* bestScore,
-    int* bestCopyLock) {
-  const int groupRank = static_cast<int>(group.thread_rank());
-  int locked = 0;
-  int shouldCopy = 0;
+template <class GroupT, class QueuedT>
+__device__ __forceinline__ void updateIncumbentCooperative(const GroupT&  group,
+                                                           const QueuedT& candidate,
+                                                           QueuedT&       best,
+                                                           unsigned int*  bestScore,
+                                                           int*           bestCopyLock) {
+  const int groupRank  = static_cast<int>(group.thread_rank());
+  int       locked     = 0;
+  int       shouldCopy = 0;
   if (groupRank == 0) {
     const unsigned int candidateScore =
-        (static_cast<unsigned int>(candidate.seed.numBonds) << 16) |
-         static_cast<unsigned int>(candidate.seed.numAtoms);
+      (static_cast<unsigned int>(candidate.seed.numBonds) << 16) | static_cast<unsigned int>(candidate.seed.numAtoms);
     unsigned int prev = *bestScore;
-    bool won = false;
+    bool         won  = false;
     while (candidateScore > prev) {
-      const unsigned int seen =
-          atomicCAS(bestScore, prev, candidateScore);
+      const unsigned int seen = atomicCAS(bestScore, prev, candidateScore);
       if (seen == prev) {
         won = true;
         break;
@@ -64,12 +61,13 @@ __device__ __forceinline__ void updateIncumbentCooperative(
       prev = seen;
     }
     if (won) {
-      while (atomicCAS(bestCopyLock, 0, 1) != 0) {}
-      locked = 1;
+      while (atomicCAS(bestCopyLock, 0, 1) != 0) {
+      }
+      locked     = 1;
       shouldCopy = (candidateScore == *bestScore) ? 1 : 0;
     }
   }
-  locked = group.shfl(locked, 0);
+  locked     = group.shfl(locked, 0);
   shouldCopy = group.shfl(shouldCopy, 0);
   if (shouldCopy) {
     warpAtomicStoreWords(group, &best, candidate);
@@ -82,145 +80,155 @@ __device__ __forceinline__ void updateIncumbentCooperative(
   group.sync();
 }
 
-template<class GroupT, class QueuedT>
+template <class GroupT, class QueuedT>
 __device__ __forceinline__ bool hasOnlyCompleteRingsCooperative(
-    const GroupT& group,
-    const QueuedT& candidate,
-    const DeviceCsrView& queryTopology,
-    const std::uint32_t* queryRingBondFlags,
-    const std::uint32_t* targetRingBondFlags,
-    typename decltype(candidate.seed)::atom_word_type* visitedAtoms,
-    int* changed) {
-  using SeedT = decltype(candidate.seed);
-  using AtomWord = typename SeedT::atom_word_type;
-  using BondWord = typename SeedT::bond_word_type;
+  const GroupT&                                      group,
+  const QueuedT&                                     candidate,
+  const DeviceCsrView&                               queryTopology,
+  const std::uint32_t*                               queryRingBondFlags,
+  const std::uint32_t*                               targetRingBondFlags,
+  typename decltype(candidate.seed)::atom_word_type* visitedAtoms,
+  int*                                               changed) {
+  using SeedT             = decltype(candidate.seed);
+  using AtomWord          = typename SeedT::atom_word_type;
+  using BondWord          = typename SeedT::bond_word_type;
   constexpr int kAtomBits = SeedT::kAtomBitsPerWord;
   constexpr int kBondBits = SeedT::kBondBitsPerWord;
-  const int rank = static_cast<int>(group.thread_rank());
-  const int width = static_cast<int>(group.size());
+  const int     rank      = static_cast<int>(group.thread_rank());
+  const int     width     = static_cast<int>(group.size());
 
   for (int excludedBond = 0; excludedBond < queryTopology.numBonds; ++excludedBond) {
     const BondWord excludedMask = static_cast<BondWord>(1) << (excludedBond % kBondBits);
-    if ((candidate.seed.bonds[excludedBond / kBondBits] & excludedMask) == 0) continue;
-    const std::uint8_t targetBond = candidate.match.targetBondIdx[excludedBond];
-    const bool isOriginalRingBond = queryRingBondFlags[excludedBond] != 0 ||
+    if ((candidate.seed.bonds[excludedBond / kBondBits] & excludedMask) == 0)
+      continue;
+    const std::uint8_t targetBond         = candidate.match.targetBondIdx[excludedBond];
+    const bool         isOriginalRingBond = queryRingBondFlags[excludedBond] != 0 ||
                                     (targetBond != kUnmappedTargetIdx && targetRingBondFlags[targetBond] != 0);
-    if (!isOriginalRingBond) continue;
+    if (!isOriginalRingBond)
+      continue;
 
-    for (int word = rank; word < SeedT::kAtomWords; word += width) visitedAtoms[word] = 0;
+    for (int word = rank; word < SeedT::kAtomWords; word += width)
+      visitedAtoms[word] = 0;
     group.sync();
     const std::uint32_t excludedEndpoints = queryTopology.bondEndpoints[excludedBond];
-    const int from = static_cast<int>(excludedEndpoints >> kBondEndpointShift);
-    const int goal = static_cast<int>(excludedEndpoints & kBondEndpointMask);
+    const int           from              = static_cast<int>(excludedEndpoints >> kBondEndpointShift);
+    const int           goal              = static_cast<int>(excludedEndpoints & kBondEndpointMask);
     if (rank == 0) {
       visitedAtoms[from / kAtomBits] |= static_cast<AtomWord>(1) << (from % kAtomBits);
     }
     group.sync();
 
     while (true) {
-      if (rank == 0) *changed = 0;
+      if (rank == 0)
+        *changed = 0;
       group.sync();
       for (int bondIdx = rank; bondIdx < queryTopology.numBonds; bondIdx += width) {
-        if (bondIdx == excludedBond) continue;
+        if (bondIdx == excludedBond)
+          continue;
         const BondWord bondMask = static_cast<BondWord>(1) << (bondIdx % kBondBits);
-        if ((candidate.seed.bonds[bondIdx / kBondBits] & bondMask) == 0) continue;
+        if ((candidate.seed.bonds[bondIdx / kBondBits] & bondMask) == 0)
+          continue;
         const std::uint32_t endpoints = queryTopology.bondEndpoints[bondIdx];
-        const int u = static_cast<int>(endpoints >> kBondEndpointShift);
-        const int v = static_cast<int>(endpoints & kBondEndpointMask);
-        const AtomWord uMask = static_cast<AtomWord>(1) << (u % kAtomBits);
-        const AtomWord vMask = static_cast<AtomWord>(1) << (v % kAtomBits);
-        const bool uSeen = (visitedAtoms[u / kAtomBits] & uMask) != 0;
-        const bool vSeen = (visitedAtoms[v / kAtomBits] & vMask) != 0;
-        if (uSeen == vSeen) continue;
-        AtomWord* dst = &visitedAtoms[(uSeen ? v : u) / kAtomBits];
+        const int           u         = static_cast<int>(endpoints >> kBondEndpointShift);
+        const int           v         = static_cast<int>(endpoints & kBondEndpointMask);
+        const AtomWord      uMask     = static_cast<AtomWord>(1) << (u % kAtomBits);
+        const AtomWord      vMask     = static_cast<AtomWord>(1) << (v % kAtomBits);
+        const bool          uSeen     = (visitedAtoms[u / kAtomBits] & uMask) != 0;
+        const bool          vSeen     = (visitedAtoms[v / kAtomBits] & vMask) != 0;
+        if (uSeen == vSeen)
+          continue;
+        AtomWord*      dst  = &visitedAtoms[(uSeen ? v : u) / kAtomBits];
         const AtomWord mask = uSeen ? vMask : uMask;
-        AtomWord old;
+        AtomWord       old;
         if constexpr (sizeof(AtomWord) == sizeof(unsigned int)) {
           old = static_cast<AtomWord>(atomicOr(reinterpret_cast<unsigned int*>(dst), static_cast<unsigned int>(mask)));
         } else {
-          old = static_cast<AtomWord>(atomicOr(reinterpret_cast<unsigned long long*>(dst),
-                                               static_cast<unsigned long long>(mask)));
+          old = static_cast<AtomWord>(
+            atomicOr(reinterpret_cast<unsigned long long*>(dst), static_cast<unsigned long long>(mask)));
         }
-        if ((old & mask) == 0) atomicExch(changed, 1);
+        if ((old & mask) == 0)
+          atomicExch(changed, 1);
       }
       group.sync();
-      if (*changed == 0) break;
+      if (*changed == 0)
+        break;
     }
-    const bool goalReached =
-        (visitedAtoms[goal / kAtomBits] & (static_cast<AtomWord>(1) << (goal % kAtomBits))) != 0;
+    const bool goalReached = (visitedAtoms[goal / kAtomBits] & (static_cast<AtomWord>(1) << (goal % kAtomBits))) != 0;
     group.sync();
-    if (!goalReached) return false;
+    if (!goalReached)
+      return false;
   }
   return true;
 }
 
-template<class GroupT, class QueuedT>
+template <class GroupT, class QueuedT>
 __device__ __forceinline__ void updateCompleteRingsIncumbentCooperative(
-    const GroupT& group,
-    const QueuedT& candidate,
-    QueuedT& best,
-    unsigned int* bestScore,
-    int* bestCopyLock,
-    bool completeRingsOnly,
-    const DeviceCsrView& queryTopology,
-    const std::uint32_t* queryRingBondFlags,
-    const std::uint32_t* targetRingBondFlags,
-    typename decltype(candidate.seed)::atom_word_type* visitedAtoms,
-    int* changed) {
+  const GroupT&                                      group,
+  const QueuedT&                                     candidate,
+  QueuedT&                                           best,
+  unsigned int*                                      bestScore,
+  int*                                               bestCopyLock,
+  bool                                               completeRingsOnly,
+  const DeviceCsrView&                               queryTopology,
+  const std::uint32_t*                               queryRingBondFlags,
+  const std::uint32_t*                               targetRingBondFlags,
+  typename decltype(candidate.seed)::atom_word_type* visitedAtoms,
+  int*                                               changed) {
   int canImprove = 0;
   if (group.thread_rank() == 0) {
     const unsigned int candidateScore =
-        (static_cast<unsigned int>(candidate.seed.numBonds) << 16) |
-        static_cast<unsigned int>(candidate.seed.numAtoms);
+      (static_cast<unsigned int>(candidate.seed.numBonds) << 16) | static_cast<unsigned int>(candidate.seed.numAtoms);
     canImprove = candidateScore > *bestScore ? 1 : 0;
   }
   canImprove = group.shfl(canImprove, 0);
-  if (!canImprove) return;
-  if (completeRingsOnly && !hasOnlyCompleteRingsCooperative(
-          group, candidate, queryTopology, queryRingBondFlags, targetRingBondFlags, visitedAtoms, changed)) {
+  if (!canImprove)
+    return;
+  if (completeRingsOnly && !hasOnlyCompleteRingsCooperative(group,
+                                                            candidate,
+                                                            queryTopology,
+                                                            queryRingBondFlags,
+                                                            targetRingBondFlags,
+                                                            visitedAtoms,
+                                                            changed)) {
     return;
   }
   updateIncumbentCooperative(group, candidate, best, bestScore, bestCopyLock);
 }
 
-__device__ __forceinline__ unsigned int clockCycles1024(
-    unsigned long long clocks) {
+__device__ __forceinline__ unsigned int clockCycles1024(unsigned long long clocks) {
   const unsigned long long quanta = (clocks + 1023ULL) >> 10;
-  return quanta > 0xFFFFFFFFULL ? 0xFFFFFFFFu
-                                : static_cast<unsigned int>(quanta);
+  return quanta > 0xFFFFFFFFULL ? 0xFFFFFFFFu : static_cast<unsigned int>(quanta);
 }
 
-__device__ __forceinline__ void addClockCycles1024ValueWithinThread(
-    unsigned int& dst,
-    unsigned int quanta) {
-  const unsigned long long sum =
-      static_cast<unsigned long long>(dst) +
-      static_cast<unsigned long long>(quanta);
-  dst = sum > 0xFFFFFFFFULL ? 0xFFFFFFFFu
-                            : static_cast<unsigned int>(sum);
+__device__ __forceinline__ void addClockCycles1024ValueWithinThread(unsigned int& dst, unsigned int quanta) {
+  const unsigned long long sum = static_cast<unsigned long long>(dst) + static_cast<unsigned long long>(quanta);
+  dst                          = sum > 0xFFFFFFFFULL ? 0xFFFFFFFFu : static_cast<unsigned int>(sum);
 }
 
-__device__ __forceinline__ void addClockCycles1024WithinThread(
-    unsigned int& dst,
-    unsigned long long clocks) {
+__device__ __forceinline__ void addClockCycles1024WithinThread(unsigned int& dst, unsigned long long clocks) {
   addClockCycles1024ValueWithinThread(dst, clockCycles1024(clocks));
 }
 
-template<bool CollectStats,
-         int maxAtoms, int maxBonds, int maxTA, int maxTB,
-         class QueryTopology, class TargetTopology, class GroupT>
+template <bool CollectStats,
+          int  maxAtoms,
+          int  maxBonds,
+          int  maxTA,
+          int  maxTB,
+          class QueryTopology,
+          class TargetTopology,
+          class GroupT>
 __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
-    const GroupT& group,
-    QueuedSeed<maxAtoms, maxBonds, maxTA, maxTB>& candidate,
-    const QueryTopology& queryTopology,
-    const TargetTopology& targetTopology,
-    const PairMatchTablesDevice& tables,
-    FmcsSubstructureScratch<maxAtoms, maxBonds, maxTA>& scratch,
-    std::uint8_t* partialStorage,
-    int partialCapacity,
-    int* overflowedFlag,
-    ExecutionStats& stats,
-    bool countPhase2MatchWork) {
+  const GroupT&                                       group,
+  QueuedSeed<maxAtoms, maxBonds, maxTA, maxTB>&       candidate,
+  const QueryTopology&                                queryTopology,
+  const TargetTopology&                               targetTopology,
+  const PairMatchTablesDevice&                        tables,
+  FmcsSubstructureScratch<maxAtoms, maxBonds, maxTA>& scratch,
+  std::uint8_t*                                       partialStorage,
+  int                                                 partialCapacity,
+  int*                                                overflowedFlag,
+  ExecutionStats&                                     stats,
+  bool                                                countPhase2MatchWork) {
   const int groupRank = static_cast<int>(group.thread_rank());
   if constexpr (CollectStats || kFmcsMeasure) {
     if (groupRank == 0) {
@@ -230,64 +238,69 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
   }
 
   int hasStoredMatch = 0;
-  if (groupRank == 0) hasStoredMatch = candidate.match.empty ? 0 : 1;
+  if (groupRank == 0)
+    hasStoredMatch = candidate.match.empty ? 0 : 1;
   hasStoredMatch = group.shfl(hasStoredMatch, 0);
   group.sync();
 
   bool ok = false;
   if (hasStoredMatch != 0) {
     if constexpr (CollectStats || kFmcsMeasure) {
-      if (groupRank == 0) stats.fastAttempts += 1u;
+      if (groupRank == 0)
+        stats.fastAttempts += 1u;
     }
     unsigned long long matchStartClock = 0;
     if constexpr (CollectStats || kFmcsMeasure) {
-      if (groupRank == 0) matchStartClock = clock64();
+      if (groupRank == 0)
+        matchStartClock = clock64();
     }
-    ok = matchIncrementalFastCooperative(
-        group, candidate.seed, queryTopology, targetTopology, tables,
-        candidate.match);
+    ok = matchIncrementalFastCooperative(group, candidate.seed, queryTopology, targetTopology, tables, candidate.match);
     group.sync();
     if constexpr (CollectStats || kFmcsMeasure) {
       if (groupRank == 0) {
         const unsigned long long elapsed = clock64() - matchStartClock;
         addClockCycles1024WithinThread(stats.incrementalMatchCycles1024, elapsed);
         if (countPhase2MatchWork) {
-          addClockCycles1024WithinThread(
-              stats.phase2ActiveMatchCycles1024, elapsed);
+          addClockCycles1024WithinThread(stats.phase2ActiveMatchCycles1024, elapsed);
         }
-        if (ok) stats.fastSuccess += 1u;
+        if (ok)
+          stats.fastSuccess += 1u;
       }
     }
   }
 
   if (!ok) {
     if constexpr (CollectStats || kFmcsMeasure) {
-      if (groupRank == 0) stats.fallbackCalls += 1u;
+      if (groupRank == 0)
+        stats.fallbackCalls += 1u;
     }
-    const bool overflowBefore =
-        overflowedFlag != nullptr ? atomicAdd(overflowedFlag, 0) != 0 : false;
+    const bool         overflowBefore  = overflowedFlag != nullptr ? atomicAdd(overflowedFlag, 0) != 0 : false;
     unsigned long long matchStartClock = 0;
     if constexpr (CollectStats || kFmcsMeasure) {
-      if (groupRank == 0) matchStartClock = clock64();
+      if (groupRank == 0)
+        matchStartClock = clock64();
     }
-    ok = matchSeedSubstructureCooperative<!CollectStats && !kFmcsMeasure>(
-        group, candidate.seed, queryTopology, targetTopology, tables,
-        candidate.match, scratch, partialStorage, partialCapacity,
-        overflowedFlag);
+    ok = matchSeedSubstructureCooperative < !CollectStats && !kFmcsMeasure > (group,
+                                                                              candidate.seed,
+                                                                              queryTopology,
+                                                                              targetTopology,
+                                                                              tables,
+                                                                              candidate.match,
+                                                                              scratch,
+                                                                              partialStorage,
+                                                                              partialCapacity,
+                                                                              overflowedFlag);
     group.sync();
     if constexpr (CollectStats || kFmcsMeasure) {
       if (groupRank == 0) {
         const unsigned long long elapsed = clock64() - matchStartClock;
-        addClockCycles1024WithinThread(
-            stats.substructureMatchCycles1024, elapsed);
+        addClockCycles1024WithinThread(stats.substructureMatchCycles1024, elapsed);
         if (countPhase2MatchWork) {
-          addClockCycles1024WithinThread(
-              stats.phase2ActiveMatchCycles1024, elapsed);
+          addClockCycles1024WithinThread(stats.phase2ActiveMatchCycles1024, elapsed);
         }
         if (ok) {
           stats.fallbackSuccess += 1u;
-        } else if (overflowedFlag != nullptr &&
-                   atomicAdd(overflowedFlag, 0) != 0 && !overflowBefore) {
+        } else if (overflowedFlag != nullptr && atomicAdd(overflowedFlag, 0) != 0 && !overflowBefore) {
           stats.fallbackOverflow += 1u;
         } else {
           stats.fallbackFail += 1u;
@@ -297,22 +310,27 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
   }
 
   if constexpr (CollectStats || kFmcsMeasure) {
-    if (groupRank == 0 && ok) stats.matchFound += 1u;
+    if (groupRank == 0 && ok)
+      stats.matchFound += 1u;
   }
   return ok;
 }
 
-template<bool CollectStats,
-         int maxAtoms, int maxBonds, int maxTA, int maxTB,
-         class QueryTopology, class TargetTopology, class GroupT>
-__device__ __forceinline__ bool matchInitialSeedBondCooperative(
-    const GroupT& group,
-    QueuedSeed<maxAtoms, maxBonds, maxTA, maxTB>& candidate,
-    int queryBondIdx,
-    const QueryTopology& queryTopology,
-    const TargetTopology& targetTopology,
-    const PairMatchTablesDevice& tables,
-    ExecutionStats& stats) {
+template <bool CollectStats,
+          int  maxAtoms,
+          int  maxBonds,
+          int  maxTA,
+          int  maxTB,
+          class QueryTopology,
+          class TargetTopology,
+          class GroupT>
+__device__ __forceinline__ bool matchInitialSeedBondCooperative(const GroupT&                                 group,
+                                                                QueuedSeed<maxAtoms, maxBonds, maxTA, maxTB>& candidate,
+                                                                int                          queryBondIdx,
+                                                                const QueryTopology&         queryTopology,
+                                                                const TargetTopology&        targetTopology,
+                                                                const PairMatchTablesDevice& tables,
+                                                                ExecutionStats&              stats) {
   if constexpr (!CollectStats && !kFmcsMeasure) {
     (void)stats;
   }
@@ -326,72 +344,68 @@ __device__ __forceinline__ bool matchInitialSeedBondCooperative(
     }
   }
 
-  int chosenTargetBond = -1;
+  int chosenTargetBond  = -1;
   int chosenTargetAtomU = -1;
   int chosenTargetAtomV = -1;
-  for (int targetBondIdx = groupRank;
-       targetBondIdx < targetTopology.numBonds && chosenTargetBond < 0;
+  for (int targetBondIdx = groupRank; targetBondIdx < targetTopology.numBonds && chosenTargetBond < 0;
        targetBondIdx += groupCount) {
     SingleBondMatch singleMatch{};
-    if (matchSingleBondWithinThread(
-            queryBondIdx, targetBondIdx, false, queryTopology,
-            targetTopology, tables, singleMatch)) {
-      chosenTargetBond = targetBondIdx;
+    if (matchSingleBondWithinThread(queryBondIdx,
+                                    targetBondIdx,
+                                    false,
+                                    queryTopology,
+                                    targetTopology,
+                                    tables,
+                                    singleMatch)) {
+      chosenTargetBond  = targetBondIdx;
       chosenTargetAtomU = static_cast<int>(singleMatch.targetAtomU);
       chosenTargetAtomV = static_cast<int>(singleMatch.targetAtomV);
-    } else if (matchSingleBondWithinThread(
-                   queryBondIdx, targetBondIdx, true, queryTopology,
-                   targetTopology, tables, singleMatch)) {
-      chosenTargetBond = targetBondIdx;
+    } else if (matchSingleBondWithinThread(queryBondIdx,
+                                           targetBondIdx,
+                                           true,
+                                           queryTopology,
+                                           targetTopology,
+                                           tables,
+                                           singleMatch)) {
+      chosenTargetBond  = targetBondIdx;
       chosenTargetAtomU = static_cast<int>(singleMatch.targetAtomU);
       chosenTargetAtomV = static_cast<int>(singleMatch.targetAtomV);
     }
   }
 
-  const unsigned int foundMask =
-      group.ballot(chosenTargetBond >= 0 ? 1u : 0u);
+  const unsigned int foundMask = group.ballot(chosenTargetBond >= 0 ? 1u : 0u);
   if (foundMask == 0u) {
     return false;
   }
 
-  const int winningLane = __ffs(foundMask) - 1;
+  const int winningLane   = __ffs(foundMask) - 1;
   const int targetBondIdx = group.shfl(chosenTargetBond, winningLane);
-  const int targetAtomU = group.shfl(chosenTargetAtomU, winningLane);
-  const int targetAtomV = group.shfl(chosenTargetAtomV, winningLane);
+  const int targetAtomU   = group.shfl(chosenTargetAtomU, winningLane);
+  const int targetAtomV   = group.shfl(chosenTargetAtomV, winningLane);
 
   if (groupRank == 0) {
-    const std::uint32_t queryEndpoints =
-        queryTopology.bondEndpoints[queryBondIdx];
-    const int queryEndpointU =
-        static_cast<int>(queryEndpoints >> kBondEndpointShift);
-    const int queryEndpointV =
-        static_cast<int>(queryEndpoints & kBondEndpointMask);
-    using MatchT = MatchResult<maxAtoms, maxBonds, maxTA, maxTB>;
-    using TargetAtomWord = typename MatchT::target_atom_word;
-    using TargetBondWord = typename MatchT::target_bond_word;
+    const std::uint32_t queryEndpoints   = queryTopology.bondEndpoints[queryBondIdx];
+    const int           queryEndpointU   = static_cast<int>(queryEndpoints >> kBondEndpointShift);
+    const int           queryEndpointV   = static_cast<int>(queryEndpoints & kBondEndpointMask);
+    using MatchT                         = MatchResult<maxAtoms, maxBonds, maxTA, maxTB>;
+    using TargetAtomWord                 = typename MatchT::target_atom_word;
+    using TargetBondWord                 = typename MatchT::target_bond_word;
     constexpr int kTargetAtomBitsPerWord = MatchT::kTargetAtomBitsPerWord;
     constexpr int kTargetBondBitsPerWord = MatchT::kTargetBondBitsPerWord;
 
     matchResultClearWithinThread(candidate.match);
-    candidate.match.targetAtomIdx[queryEndpointU] =
-        static_cast<std::uint8_t>(targetAtomU);
-    candidate.match.targetAtomIdx[queryEndpointV] =
-        static_cast<std::uint8_t>(targetAtomV);
-    candidate.match.targetBondIdx[queryBondIdx] =
-        static_cast<std::uint8_t>(targetBondIdx);
-    candidate.match.visitedTargetAtoms[targetAtomU / kTargetAtomBitsPerWord] |=
-        static_cast<TargetAtomWord>(1)
-        << (targetAtomU % kTargetAtomBitsPerWord);
-    candidate.match.visitedTargetAtoms[targetAtomV / kTargetAtomBitsPerWord] |=
-        static_cast<TargetAtomWord>(1)
-        << (targetAtomV % kTargetAtomBitsPerWord);
+    candidate.match.targetAtomIdx[queryEndpointU] = static_cast<std::uint8_t>(targetAtomU);
+    candidate.match.targetAtomIdx[queryEndpointV] = static_cast<std::uint8_t>(targetAtomV);
+    candidate.match.targetBondIdx[queryBondIdx]   = static_cast<std::uint8_t>(targetBondIdx);
+    candidate.match.visitedTargetAtoms[targetAtomU / kTargetAtomBitsPerWord] |= static_cast<TargetAtomWord>(1)
+                                                                             << (targetAtomU % kTargetAtomBitsPerWord);
+    candidate.match.visitedTargetAtoms[targetAtomV / kTargetAtomBitsPerWord] |= static_cast<TargetAtomWord>(1)
+                                                                             << (targetAtomV % kTargetAtomBitsPerWord);
     candidate.match.visitedTargetBonds[targetBondIdx / kTargetBondBitsPerWord] |=
-        static_cast<TargetBondWord>(1)
-        << (targetBondIdx % kTargetBondBitsPerWord);
-    candidate.match.matchedAtomSize =
-        static_cast<std::uint16_t>(queryEndpointU == queryEndpointV ? 1 : 2);
+      static_cast<TargetBondWord>(1) << (targetBondIdx % kTargetBondBitsPerWord);
+    candidate.match.matchedAtomSize = static_cast<std::uint16_t>(queryEndpointU == queryEndpointV ? 1 : 2);
     candidate.match.matchedBondSize = 1;
-    candidate.match.empty = false;
+    candidate.match.empty           = false;
     if constexpr (CollectStats || kFmcsMeasure) {
       stats.matchFound += 1u;
     }
@@ -404,9 +418,7 @@ __device__ __forceinline__ bool isPowerOfTwo64(unsigned long long value) {
   return value != 0ULL && (value & (value - 1ULL)) == 0ULL;
 }
 
-__device__ __forceinline__ void addExecutionStatsWithinThread(
-    ExecutionStats& dst,
-    const ExecutionStats& src) {
+__device__ __forceinline__ void addExecutionStatsWithinThread(ExecutionStats& dst, const ExecutionStats& src) {
   dst.phase2Iters += src.phase2Iters;
   dst.initialSeeds += src.initialSeeds;
   dst.mismatchedInitialSeeds += src.mismatchedInitialSeeds;
@@ -430,55 +442,46 @@ __device__ __forceinline__ void addExecutionStatsWithinThread(
   dst.fallbackSuccess += src.fallbackSuccess;
   dst.fallbackFail += src.fallbackFail;
   dst.fallbackOverflow += src.fallbackOverflow;
-  if (src.maxQueue > dst.maxQueue) dst.maxQueue = src.maxQueue;
+  if (src.maxQueue > dst.maxQueue)
+    dst.maxQueue = src.maxQueue;
   dst.forcedExit |= src.forcedExit;
   dst.totalClocks += src.totalClocks;
   dst.phase1Clocks += src.phase1Clocks;
   dst.phase2Clocks += src.phase2Clocks;
-  addClockCycles1024ValueWithinThread(
-      dst.incrementalMatchCycles1024, src.incrementalMatchCycles1024);
-  addClockCycles1024ValueWithinThread(
-      dst.substructureMatchCycles1024, src.substructureMatchCycles1024);
-  addClockCycles1024ValueWithinThread(
-      dst.phase2PopSyncWaitCycles1024, src.phase2PopSyncWaitCycles1024);
-  addClockCycles1024ValueWithinThread(
-      dst.phase2SyncWaitCycles1024, src.phase2SyncWaitCycles1024);
-  addClockCycles1024ValueWithinThread(
-      dst.phase2IdleNoSeedWaitCycles1024, src.phase2IdleNoSeedWaitCycles1024);
-  addClockCycles1024ValueWithinThread(
-      dst.phase2IdleNoMatchWaitCycles1024, src.phase2IdleNoMatchWaitCycles1024);
-  addClockCycles1024ValueWithinThread(
-      dst.phase2ActiveWorkCycles1024, src.phase2ActiveWorkCycles1024);
-  addClockCycles1024ValueWithinThread(
-      dst.phase2ActiveMatchCycles1024,
-      src.phase2ActiveMatchCycles1024);
+  addClockCycles1024ValueWithinThread(dst.incrementalMatchCycles1024, src.incrementalMatchCycles1024);
+  addClockCycles1024ValueWithinThread(dst.substructureMatchCycles1024, src.substructureMatchCycles1024);
+  addClockCycles1024ValueWithinThread(dst.phase2PopSyncWaitCycles1024, src.phase2PopSyncWaitCycles1024);
+  addClockCycles1024ValueWithinThread(dst.phase2SyncWaitCycles1024, src.phase2SyncWaitCycles1024);
+  addClockCycles1024ValueWithinThread(dst.phase2IdleNoSeedWaitCycles1024, src.phase2IdleNoSeedWaitCycles1024);
+  addClockCycles1024ValueWithinThread(dst.phase2IdleNoMatchWaitCycles1024, src.phase2IdleNoMatchWaitCycles1024);
+  addClockCycles1024ValueWithinThread(dst.phase2ActiveWorkCycles1024, src.phase2ActiveWorkCycles1024);
+  addClockCycles1024ValueWithinThread(dst.phase2ActiveMatchCycles1024, src.phase2ActiveMatchCycles1024);
 }
 
-template<int maxAtoms, int maxBonds>
+template <int maxAtoms, int maxBonds>
 __device__ __forceinline__ void seedVisitRemainingBondWithinThread(
-    Seed<maxAtoms, maxBonds>& seed,
-    const int bondIdx,
-    const int otherAtom,
-    std::uint8_t* atomStack,
-    typename Seed<maxAtoms, maxBonds>::atom_word_type* visitedAtoms,
-    typename Seed<maxAtoms, maxBonds>::bond_word_type* visitedBonds,
-    int* stackSize) {
-  using SeedT = Seed<maxAtoms, maxBonds>;
-  using AtomWord = typename SeedT::atom_word_type;
-  using BondWord = typename SeedT::bond_word_type;
+  Seed<maxAtoms, maxBonds>&                          seed,
+  const int                                          bondIdx,
+  const int                                          otherAtom,
+  std::uint8_t*                                      atomStack,
+  typename Seed<maxAtoms, maxBonds>::atom_word_type* visitedAtoms,
+  typename Seed<maxAtoms, maxBonds>::bond_word_type* visitedBonds,
+  int*                                               stackSize) {
+  using SeedT                    = Seed<maxAtoms, maxBonds>;
+  using AtomWord                 = typename SeedT::atom_word_type;
+  using BondWord                 = typename SeedT::bond_word_type;
   constexpr int kAtomBitsPerWord = SeedT::kAtomBitsPerWord;
   constexpr int kBondBitsPerWord = SeedT::kBondBitsPerWord;
 
-  const int bondWordIdx = bondIdx / kBondBitsPerWord;
-  const BondWord bondMask =
-      static_cast<BondWord>(1) << (bondIdx % kBondBitsPerWord);
-  if ((visitedBonds[bondWordIdx] & bondMask) != 0) return;
+  const int      bondWordIdx = bondIdx / kBondBitsPerWord;
+  const BondWord bondMask    = static_cast<BondWord>(1) << (bondIdx % kBondBitsPerWord);
+  if ((visitedBonds[bondWordIdx] & bondMask) != 0)
+    return;
 
   visitedBonds[bondWordIdx] |= bondMask;
   seed.remainingBonds += 1;
-  const int atomWordIdx = otherAtom / kAtomBitsPerWord;
-  const AtomWord atomMask =
-      static_cast<AtomWord>(1) << (otherAtom % kAtomBitsPerWord);
+  const int      atomWordIdx = otherAtom / kAtomBitsPerWord;
+  const AtomWord atomMask    = static_cast<AtomWord>(1) << (otherAtom % kAtomBitsPerWord);
   if ((visitedAtoms[atomWordIdx] & atomMask) == 0) {
     visitedAtoms[atomWordIdx] |= atomMask;
     seed.remainingAtoms += 1;
@@ -486,46 +489,41 @@ __device__ __forceinline__ void seedVisitRemainingBondWithinThread(
   }
 }
 
-template<int maxAtoms, int maxBonds>
+template <int maxAtoms, int maxBonds>
 __device__ __forceinline__ void seedVisitRemainingIncidentBondsWithinThread(
-    Seed<maxAtoms, maxBonds>& seed,
-    const DeviceCsrView& queryTopology,
-    const int atomIdx,
-    std::uint8_t* atomStack,
-    typename Seed<maxAtoms, maxBonds>::atom_word_type* visitedAtoms,
-    typename Seed<maxAtoms, maxBonds>::bond_word_type* visitedBonds,
-    int* stackSize) {
+  Seed<maxAtoms, maxBonds>&                          seed,
+  const DeviceCsrView&                               queryTopology,
+  const int                                          atomIdx,
+  std::uint8_t*                                      atomStack,
+  typename Seed<maxAtoms, maxBonds>::atom_word_type* visitedAtoms,
+  typename Seed<maxAtoms, maxBonds>::bond_word_type* visitedBonds,
+  int*                                               stackSize) {
   const int begin = static_cast<int>(queryTopology.rowOffsets[atomIdx]);
-  const int end =
-      static_cast<int>(queryTopology.rowOffsets[atomIdx + 1]);
+  const int end   = static_cast<int>(queryTopology.rowOffsets[atomIdx + 1]);
   for (int edgeIdx = begin; edgeIdx < end; ++edgeIdx) {
-    const int bondIdx =
-        static_cast<int>(queryTopology.bondIndices[edgeIdx]);
-    const int otherAtom =
-        static_cast<int>(queryTopology.colIndices[edgeIdx]);
-    seedVisitRemainingBondWithinThread(
-        seed, bondIdx, otherAtom, atomStack, visitedAtoms, visitedBonds,
-        stackSize);
+    const int bondIdx   = static_cast<int>(queryTopology.bondIndices[edgeIdx]);
+    const int otherAtom = static_cast<int>(queryTopology.colIndices[edgeIdx]);
+    seedVisitRemainingBondWithinThread(seed, bondIdx, otherAtom, atomStack, visitedAtoms, visitedBonds, stackSize);
   }
 }
 
-template<int maxAtoms, int maxBonds, class GroupT>
+template <int maxAtoms, int maxBonds, class GroupT>
 __device__ __forceinline__ void seedComputeRemainingSizeRdkitCooperative(
-    const GroupT& group,
-    Seed<maxAtoms, maxBonds>& seed,
-    const DeviceCsrView& queryTopology,
-    std::uint8_t* atomStack,
-    typename Seed<maxAtoms, maxBonds>::atom_word_type* visitedAtoms,
-    typename Seed<maxAtoms, maxBonds>::bond_word_type* visitedBonds,
-    int* stackSize) {
-  using SeedT = Seed<maxAtoms, maxBonds>;
-  using AtomWord = typename SeedT::atom_word_type;
+  const GroupT&                                      group,
+  Seed<maxAtoms, maxBonds>&                          seed,
+  const DeviceCsrView&                               queryTopology,
+  std::uint8_t*                                      atomStack,
+  typename Seed<maxAtoms, maxBonds>::atom_word_type* visitedAtoms,
+  typename Seed<maxAtoms, maxBonds>::bond_word_type* visitedBonds,
+  int*                                               stackSize) {
+  using SeedT                    = Seed<maxAtoms, maxBonds>;
+  using AtomWord                 = typename SeedT::atom_word_type;
   constexpr int kAtomBitsPerWord = SeedT::kAtomBitsPerWord;
 
   if (group.thread_rank() == 0) {
     seed.remainingAtoms = 0;
     seed.remainingBonds = 0;
-    *stackSize = 0;
+    *stackSize          = 0;
     for (int i = 0; i < SeedT::kAtomWords; ++i) {
       visitedAtoms[i] = seed.atoms[i];
     }
@@ -540,23 +538,30 @@ __device__ __forceinline__ void seedComputeRemainingSizeRdkitCooperative(
         if constexpr (sizeof(AtomWord) == 4) {
           bitPosInWord = __ffs(static_cast<unsigned int>(remaining)) - 1;
         } else {
-          bitPosInWord =
-              __ffsll(static_cast<unsigned long long>(remaining)) - 1;
+          bitPosInWord = __ffsll(static_cast<unsigned long long>(remaining)) - 1;
         }
         const int atomIdx = wordIdx * kAtomBitsPerWord + bitPosInWord;
         remaining &= remaining - 1;
 
-        seedVisitRemainingIncidentBondsWithinThread(
-            seed, queryTopology, atomIdx, atomStack, visitedAtoms,
-            visitedBonds, stackSize);
+        seedVisitRemainingIncidentBondsWithinThread(seed,
+                                                    queryTopology,
+                                                    atomIdx,
+                                                    atomStack,
+                                                    visitedAtoms,
+                                                    visitedBonds,
+                                                    stackSize);
       }
     }
 
     while (*stackSize > 0) {
       const int atomIdx = atomStack[--(*stackSize)];
-      seedVisitRemainingIncidentBondsWithinThread(
-          seed, queryTopology, atomIdx, atomStack, visitedAtoms,
-          visitedBonds, stackSize);
+      seedVisitRemainingIncidentBondsWithinThread(seed,
+                                                  queryTopology,
+                                                  atomIdx,
+                                                  atomStack,
+                                                  visitedAtoms,
+                                                  visitedBonds,
+                                                  stackSize);
     }
   }
   group.sync();
@@ -578,20 +583,23 @@ __device__ __forceinline__ void seedComputeRemainingSizeRdkitCooperative(
 /// @p queueCapacity * numPairs @c QueuedSeed entries; this block uses
 /// the slice starting at @p queueStorageAll[blockIdx.x * queueCapacity].
 ///
-template<int maxAtoms, int maxBonds, int blockThreads, bool CollectTimings, bool CollectStats,
-         FmcsScratchLocation ScratchLoc = FmcsScratchLocation::Shared>
-__global__ void fmcsKernel(
-    const DevicePerPairInput* __restrict__ pairs,
-    DeviceMCSResult<maxAtoms, maxBonds>* __restrict__ results,
-    QueuedSeed<maxAtoms, maxBonds, maxAtoms, maxBonds>* __restrict__ queueStorageAll,
-    std::uint8_t* __restrict__ substructureStorageAll,
-    FmcsSubstructureScratch<maxAtoms, maxBonds, maxAtoms>* __restrict__ scratchStorageAll,
-    unsigned long long* __restrict__ elapsedClocks,
-    ExecutionStats* __restrict__ statsOut,
-    int queueCapacity,
-    int substructurePartialCapacity,
-    int numPairs,
-    unsigned long long timeoutClocks) {
+template <int                 maxAtoms,
+          int                 maxBonds,
+          int                 blockThreads,
+          bool                CollectTimings,
+          bool                CollectStats,
+          FmcsScratchLocation ScratchLoc = FmcsScratchLocation::Shared>
+__global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
+                           DeviceMCSResult<maxAtoms, maxBonds>* __restrict__ results,
+                           QueuedSeed<maxAtoms, maxBonds, maxAtoms, maxBonds>* __restrict__ queueStorageAll,
+                           std::uint8_t* __restrict__ substructureStorageAll,
+                           FmcsSubstructureScratch<maxAtoms, maxBonds, maxAtoms>* __restrict__ scratchStorageAll,
+                           unsigned long long* __restrict__ elapsedClocks,
+                           ExecutionStats* __restrict__ statsOut,
+                           int                queueCapacity,
+                           int                substructurePartialCapacity,
+                           int                numPairs,
+                           unsigned long long timeoutClocks) {
   static_assert(ScratchLoc != FmcsScratchLocation::Auto,
                 "Auto is host-only; resolve to Shared or Global before kernel selection");
   if constexpr (!CollectTimings) {
@@ -602,25 +610,28 @@ __global__ void fmcsKernel(
   }
 
   const int pairIdx = blockIdx.x;
-  if (pairIdx >= numPairs) return;
+  if (pairIdx >= numPairs)
+    return;
 
-  auto block = cg::this_thread_block();
-  const DevicePerPairInput& pair = pairs[pairIdx];
+  auto                      block = cg::this_thread_block();
+  const DevicePerPairInput& pair  = pairs[pairIdx];
 
   if constexpr (kFmcsDebug) {
     if (pairIdx == kFmcsDebugPairIdx && block.thread_rank() == 0) {
       printf("[fmcs] kernel start: pair=%d q=(a%d,b%d) t=(a%d,b%d)\n",
-             pairIdx, pair.queryNumAtoms, pair.queryNumBonds,
-             pair.targetNumAtoms, pair.targetNumBonds);
+             pairIdx,
+             pair.queryNumAtoms,
+             pair.queryNumBonds,
+             pair.targetNumAtoms,
+             pair.targetNumBonds);
     }
   }
 
-  using QueuedT = QueuedSeed<maxAtoms, maxBonds, maxAtoms, maxBonds>;
-  using SubstructureScratchT =
-      FmcsSubstructureScratch<maxAtoms, maxBonds, maxAtoms>;
-  constexpr int kMaxNewBondsForTier = maxBonds;
-  constexpr int kNumGroups = FmcsBlockConfig<blockThreads>::numGroups;
-  constexpr bool kStatsEnabled = CollectStats || kFmcsMeasure;
+  using QueuedT                      = QueuedSeed<maxAtoms, maxBonds, maxAtoms, maxBonds>;
+  using SubstructureScratchT         = FmcsSubstructureScratch<maxAtoms, maxBonds, maxAtoms>;
+  constexpr int  kMaxNewBondsForTier = maxBonds;
+  constexpr int  kNumGroups          = FmcsBlockConfig<blockThreads>::numGroups;
+  constexpr bool kStatsEnabled       = CollectStats || kFmcsMeasure;
   // Block-shared resources: the queue, the incumbent, and the early-exit
   // flags are visible to every group.  Cross-group incumbent updates use
   // atomics.  Phase-2 queue operations hold queueLock across the queue header
@@ -628,22 +639,22 @@ __global__ void fmcsKernel(
   // slots to concurrent poppers.
   __shared__ SeedQueue<QueuedT, ThreadBlockScope> queue;
   __shared__ __align__(16) unsigned char bestStorage[sizeof(QueuedT)];
-  QueuedT& best = *reinterpret_cast<QueuedT*>(bestStorage);
+  QueuedT&                               best = *reinterpret_cast<QueuedT*>(bestStorage);
   // Atomic incumbent score: high 16 bits = numBonds, low 16 bits =
   // numAtoms.  Groups race through atomicCAS on this single int to
   // claim the right to write @c best.
-  __shared__ unsigned int bestScore;
-  __shared__ int bestCopyLock;
-  __shared__ DeviceCsrView queryView;
-  __shared__ DeviceCsrView targetView;
-  __shared__ int overflowed;
-  __shared__ int timedOut;
-  __shared__ int phase2Done;
-  __shared__ int phase2ActiveGroups;
-  __shared__ int queueLock;
-  __shared__ unsigned long long startClock;
-  __shared__ unsigned long long phase1StartClock;
-  __shared__ unsigned long long phase2StartClock;
+  __shared__ unsigned int                bestScore;
+  __shared__ int                         bestCopyLock;
+  __shared__ DeviceCsrView               queryView;
+  __shared__ DeviceCsrView               targetView;
+  __shared__ int                         overflowed;
+  __shared__ int                         timedOut;
+  __shared__ int                         phase2Done;
+  __shared__ int                         phase2ActiveGroups;
+  __shared__ int                         queueLock;
+  __shared__ unsigned long long          startClock;
+  __shared__ unsigned long long          phase1StartClock;
+  __shared__ unsigned long long          phase2StartClock;
   // Substructure scratch placement: static shared (historical) or a slice of
   // the per-block global slab.  A __shared__ declaration inside the
   // if-constexpr block has static storage duration, so the pointer stays valid
@@ -651,14 +662,13 @@ __global__ void fmcsKernel(
   // TODO(blockSize>512): extend this mechanism to newBondsArr and the
   // current/biggest QueuedSeed copies (see
   // analysis/fmcs_scratch_placement_plan.md section 6).
-  SubstructureScratchT* substructureScratch;
+  SubstructureScratchT*                  substructureScratch;
   if constexpr (ScratchLoc == FmcsScratchLocation::Shared) {
     (void)scratchStorageAll;
     __shared__ SubstructureScratchT substructureScratchShared[kNumGroups];
     substructureScratch = substructureScratchShared;
   } else {
-    substructureScratch =
-        scratchStorageAll + static_cast<size_t>(pairIdx) * kNumGroups;
+    substructureScratch = scratchStorageAll + static_cast<size_t>(pairIdx) * kNumGroups;
   }
   __shared__ ExecutionStats groupStats[kStatsEnabled ? kNumGroups : 1];
   __shared__ ExecutionStats measureStats;
@@ -666,56 +676,48 @@ __global__ void fmcsKernel(
   // Cooperative Phase 2 working state.  Approach 1 gives each warp group an
   // independent seed workspace, fallback scratch, and global partial-storage
   // slice so groups can pop and grow seeds concurrently.
-  __shared__ __align__(16) unsigned char
-      currentStorage[sizeof(QueuedT) * kNumGroups];
-  __shared__ __align__(16) unsigned char
-      biggestStorage[sizeof(QueuedT) * kNumGroups];
-  QueuedT* current = reinterpret_cast<QueuedT*>(currentStorage);
-  QueuedT* biggest = reinterpret_cast<QueuedT*>(biggestStorage);
-  __shared__ NewBond newBondsArr[kNumGroups][kMaxNewBondsForTier];
-  __shared__ int     newBondCount[kNumGroups];
-  __shared__ bool    stage0Ok[kNumGroups];
+  __shared__ __align__(16) unsigned char currentStorage[sizeof(QueuedT) * kNumGroups];
+  __shared__ __align__(16) unsigned char biggestStorage[sizeof(QueuedT) * kNumGroups];
+  QueuedT*                               current = reinterpret_cast<QueuedT*>(currentStorage);
+  QueuedT*                               biggest = reinterpret_cast<QueuedT*>(biggestStorage);
+  __shared__ NewBond                     newBondsArr[kNumGroups][kMaxNewBondsForTier];
+  __shared__ int                         newBondCount[kNumGroups];
+  __shared__ bool                        stage0Ok[kNumGroups];
   __shared__ std::uint8_t remainingAtomStack[kNumGroups][maxAtoms];
   __shared__ typename Seed<maxAtoms, maxBonds>::atom_word_type
-      remainingVisitedAtoms[kNumGroups][Seed<maxAtoms, maxBonds>::kAtomWords];
+    remainingVisitedAtoms[kNumGroups][Seed<maxAtoms, maxBonds>::kAtomWords];
   __shared__ typename Seed<maxAtoms, maxBonds>::bond_word_type
-      remainingVisitedBonds[kNumGroups][Seed<maxAtoms, maxBonds>::kBondWords];
+                 remainingVisitedBonds[kNumGroups][Seed<maxAtoms, maxBonds>::kBondWords];
   __shared__ int remainingStackSize[kNumGroups];
-  __shared__ typename Seed<maxAtoms, maxBonds>::bond_word_type
-      initialExcludedBonds[Seed<maxAtoms, maxBonds>::kBondWords];
+  __shared__
+    typename Seed<maxAtoms, maxBonds>::bond_word_type initialExcludedBonds[Seed<maxAtoms, maxBonds>::kBondWords];
 
-  auto group = cg::tiled_partition<kFmcsGroupSize>(block);
-  const int groupId =
-      mark_warp_uniform(static_cast<int>(block.thread_rank()) / kFmcsGroupSize);
-  const int groupRank = static_cast<int>(group.thread_rank());
+  auto                  group     = cg::tiled_partition<kFmcsGroupSize>(block);
+  const int             groupId   = mark_warp_uniform(static_cast<int>(block.thread_rank()) / kFmcsGroupSize);
+  const int             groupRank = static_cast<int>(group.thread_rank());
   SubstructureScratchT& mySubstructureScratch = substructureScratch[groupId];
-  ExecutionStats& myStats =
-      kStatsEnabled ? groupStats[groupId] : measureStats;
+  ExecutionStats&       myStats               = kStatsEnabled ? groupStats[groupId] : measureStats;
 
-  QueuedT* myQueueStorage =
-      queueStorageAll + static_cast<size_t>(pairIdx) * queueCapacity;
+  QueuedT*      myQueueStorage = queueStorageAll + static_cast<size_t>(pairIdx) * queueCapacity;
   std::uint8_t* mySubstructureStorage =
-      substructureStorageAll +
-      (static_cast<size_t>(pairIdx) * static_cast<size_t>(kNumGroups) +
-       static_cast<size_t>(groupId)) *
-      2u *
-          static_cast<size_t>(substructurePartialCapacity) *
-          static_cast<size_t>(maxAtoms);
+    substructureStorageAll +
+    (static_cast<size_t>(pairIdx) * static_cast<size_t>(kNumGroups) + static_cast<size_t>(groupId)) * 2u *
+      static_cast<size_t>(substructurePartialCapacity) * static_cast<size_t>(maxAtoms);
 
   if (block.thread_rank() == 0) {
     queue.init(myQueueStorage, queueCapacity);
     seedClearWithinThread(best.seed);
     matchResultClearWithinThread(best.match);
-    bestScore = 0;
+    bestScore    = 0;
     bestCopyLock = 0;
     if constexpr (CollectTimings || CollectStats || kFmcsMeasure) {
       measureStats = ExecutionStats{};
     }
-    overflowed = 0;
-    timedOut = 0;
-    phase2Done = 0;
+    overflowed         = 0;
+    timedOut           = 0;
+    phase2Done         = 0;
     phase2ActiveGroups = 0;
-    queueLock = 0;
+    queueLock          = 0;
     if constexpr (CollectTimings || kStatsEnabled) {
       startClock = clock64();
     } else {
@@ -739,8 +741,7 @@ __global__ void fmcsKernel(
     targetView.numBonds      = pair.targetNumBonds;
   }
   if constexpr (CollectStats || kFmcsMeasure) {
-    for (int statIdx = static_cast<int>(block.thread_rank());
-         statIdx < kNumGroups;
+    for (int statIdx = static_cast<int>(block.thread_rank()); statIdx < kNumGroups;
          statIdx += static_cast<int>(blockDim.x)) {
       groupStats[statIdx] = ExecutionStats{};
     }
@@ -762,12 +763,12 @@ __global__ void fmcsKernel(
     }
   }
 
-  QueuedT& myCurrent  = current[groupId];
-  QueuedT& myBiggest  = biggest[groupId];
-  NewBond* myNewBonds = newBondsArr[groupId];
-  std::uint8_t* myRemainingAtomStack = remainingAtomStack[groupId];
-  auto* myRemainingVisitedAtoms = remainingVisitedAtoms[groupId];
-  auto* myRemainingVisitedBonds = remainingVisitedBonds[groupId];
+  QueuedT&      myCurrent               = current[groupId];
+  QueuedT&      myBiggest               = biggest[groupId];
+  NewBond*      myNewBonds              = newBondsArr[groupId];
+  std::uint8_t* myRemainingAtomStack    = remainingAtomStack[groupId];
+  auto*         myRemainingVisitedAtoms = remainingVisitedAtoms[groupId];
+  auto*         myRemainingVisitedBonds = remainingVisitedBonds[groupId];
 
   // ---- Phase 1: RDKit makeInitialSeeds() analogue ----
   // RDKit creates one initial seed per query bond, not one per target
@@ -785,25 +786,17 @@ __global__ void fmcsKernel(
   block.sync();
 
   if (groupId == 0) {
-    for (int qBond = 0;
-         qBond < pair.queryNumBonds && overflowed == 0 && timedOut == 0;
-         ++qBond) {
+    for (int qBond = 0; qBond < pair.queryNumBonds && overflowed == 0 && timedOut == 0; ++qBond) {
       if (groupRank == 0) {
         seedClearWithinThread(myCurrent.seed);
         matchResultClearWithinThread(myCurrent.match);
-        for (int wordIdx = 0;
-             wordIdx < Seed<maxAtoms, maxBonds>::kBondWords;
-             ++wordIdx) {
-          myCurrent.seed.excludedBonds[wordIdx] =
-              initialExcludedBonds[wordIdx];
+        for (int wordIdx = 0; wordIdx < Seed<maxAtoms, maxBonds>::kBondWords; ++wordIdx) {
+          myCurrent.seed.excludedBonds[wordIdx] = initialExcludedBonds[wordIdx];
         }
 
-        const std::uint32_t queryEndpoints =
-            queryView.bondEndpoints[qBond];
-        const int queryEndpointU =
-            static_cast<int>(queryEndpoints >> kBondEndpointShift);
-        const int queryEndpointV =
-            static_cast<int>(queryEndpoints & kBondEndpointMask);
+        const std::uint32_t queryEndpoints = queryView.bondEndpoints[qBond];
+        const int           queryEndpointU = static_cast<int>(queryEndpoints >> kBondEndpointShift);
+        const int           queryEndpointV = static_cast<int>(queryEndpoints & kBondEndpointMask);
         seedAddBondWithinThread(myCurrent.seed, qBond);
         seedAddAtomWithinThread(myCurrent.seed, queryEndpointU);
         seedAddAtomWithinThread(myCurrent.seed, queryEndpointV);
@@ -813,19 +806,33 @@ __global__ void fmcsKernel(
         }
       }
       group.sync();
-      seedComputeRemainingSizeRdkitCooperative(
-          group, myCurrent.seed, queryView, myRemainingAtomStack,
-          myRemainingVisitedAtoms, myRemainingVisitedBonds,
-          &remainingStackSize[groupId]);
+      seedComputeRemainingSizeRdkitCooperative(group,
+                                               myCurrent.seed,
+                                               queryView,
+                                               myRemainingAtomStack,
+                                               myRemainingVisitedAtoms,
+                                               myRemainingVisitedBonds,
+                                               &remainingStackSize[groupId]);
 
-      const bool matched = matchInitialSeedBondCooperative<CollectStats>(
-          group, myCurrent, qBond, queryView, targetView, pair.tables,
-          myStats);
+      const bool matched = matchInitialSeedBondCooperative<CollectStats>(group,
+                                                                         myCurrent,
+                                                                         qBond,
+                                                                         queryView,
+                                                                         targetView,
+                                                                         pair.tables,
+                                                                         myStats);
       if (matched) {
-        updateCompleteRingsIncumbentCooperative(
-            group, myCurrent, best, &bestScore, &bestCopyLock,
-            pair.completeRingsOnly, queryView, pair.queryRingBondFlags, pair.targetRingBondFlags,
-            myRemainingVisitedAtoms, &remainingStackSize[groupId]);
+        updateCompleteRingsIncumbentCooperative(group,
+                                                myCurrent,
+                                                best,
+                                                &bestScore,
+                                                &bestCopyLock,
+                                                pair.completeRingsOnly,
+                                                queryView,
+                                                pair.queryRingBondFlags,
+                                                pair.targetRingBondFlags,
+                                                myRemainingVisitedAtoms,
+                                                &remainingStackSize[groupId]);
         if (!pushBackCooperative(group, queue, myCurrent)) {
           atomicExch(&overflowed, 1);
         }
@@ -841,10 +848,9 @@ __global__ void fmcsKernel(
       group.sync();
 
       if (groupRank == 0) {
-        const int wordIdx = qBond / Seed<maxAtoms, maxBonds>::kBondBitsPerWord;
-        const auto mask =
-            static_cast<typename Seed<maxAtoms, maxBonds>::bond_word_type>(1)
-            << (qBond % Seed<maxAtoms, maxBonds>::kBondBitsPerWord);
+        const int  wordIdx = qBond / Seed<maxAtoms, maxBonds>::kBondBitsPerWord;
+        const auto mask    = static_cast<typename Seed<maxAtoms, maxBonds>::bond_word_type>(1)
+                       << (qBond % Seed<maxAtoms, maxBonds>::kBondBitsPerWord);
         initialExcludedBonds[wordIdx] |= mask;
       }
       group.sync();
@@ -865,8 +871,7 @@ __global__ void fmcsKernel(
       }
     }
   }
-  if (block.thread_rank() == 0 && timeoutClocks > 0 &&
-      clock64() - startClock > timeoutClocks) {
+  if (block.thread_rank() == 0 && timeoutClocks > 0 && clock64() - startClock > timeoutClocks) {
     atomicExch(&timedOut, 1);
   }
   if constexpr (CollectTimings || CollectStats || kFmcsMeasure) {
@@ -878,7 +883,9 @@ __global__ void fmcsKernel(
   if constexpr (kFmcsDebug) {
     if (pairIdx == kFmcsDebugPairIdx && block.thread_rank() == 0) {
       printf("[fmcs] phase1 done: acceptedInitialSeeds=%d queryBonds=%d overflowed=%d\n",
-             queue.size(), pair.queryNumBonds, static_cast<int>(overflowed));
+             queue.size(),
+             pair.queryNumBonds,
+             static_cast<int>(overflowed));
     }
   }
 
@@ -890,20 +897,21 @@ __global__ void fmcsKernel(
   // push children.
   [[maybe_unused]] int debugIter = 0;
   while (true) {
-    if (readFlagCooperative(group, &phase2Done) ||
-        readFlagCooperative(group, &overflowed) ||
+    if (readFlagCooperative(group, &phase2Done) || readFlagCooperative(group, &overflowed) ||
         readFlagCooperative(group, &timedOut)) {
       break;
     }
 
     if constexpr (CollectStats || kFmcsMeasure) {
-      if (groupRank == 0) myStats.phase2Iters += 1;
+      if (groupRank == 0)
+        myStats.phase2Iters += 1;
     }
 
     if constexpr (kFmcsDebug) {
       if (pairIdx == kFmcsDebugPairIdx && groupRank == 0) {
         printf("[fmcs][grp %d iter %d] best=(b%d,a%d)\n",
-               groupId, debugIter,
+               groupId,
+               debugIter,
                static_cast<int>(best.seed.numBonds),
                static_cast<int>(best.seed.numAtoms));
       }
@@ -915,31 +923,41 @@ __global__ void fmcsKernel(
         phase2PopBarrierStartClock = clock64();
       }
     }
-    bool phase2Finished = false;
-    const bool poppedThisGroup = popBackLockedOrFinishCooperative(
-        group, queue, myCurrent, &queueLock, &phase2ActiveGroups,
-        &phase2Done, &overflowed, &timedOut, phase2Finished);
+    bool               phase2Finished            = false;
+    const bool         poppedThisGroup           = popBackLockedOrFinishCooperative(group,
+                                                                  queue,
+                                                                  myCurrent,
+                                                                  &queueLock,
+                                                                  &phase2ActiveGroups,
+                                                                  &phase2Done,
+                                                                  &overflowed,
+                                                                  &timedOut,
+                                                                  phase2Finished);
     unsigned long long phase2GroupWorkStartClock = 0;
-    unsigned int phase2MatchCallsBefore = 0;
+    unsigned int       phase2MatchCallsBefore    = 0;
     if constexpr (CollectStats || kFmcsMeasure) {
       if (groupRank == 0) {
         const unsigned long long afterPopBarrierClock = clock64();
-        addClockCycles1024WithinThread(
-            myStats.phase2PopSyncWaitCycles1024,
-            afterPopBarrierClock - phase2PopBarrierStartClock);
+        addClockCycles1024WithinThread(myStats.phase2PopSyncWaitCycles1024,
+                                       afterPopBarrierClock - phase2PopBarrierStartClock);
         phase2GroupWorkStartClock = afterPopBarrierClock;
-        phase2MatchCallsBefore = myStats.matchCalls;
-        if (poppedThisGroup) myStats.popped += 1u;
+        phase2MatchCallsBefore    = myStats.matchCalls;
+        if (poppedThisGroup)
+          myStats.popped += 1u;
       }
     }
-    if (phase2Finished) break;
-    if (!poppedThisGroup) continue;
+    if (phase2Finished)
+      break;
+    if (!poppedThisGroup)
+      continue;
 
     do {
       if constexpr (kFmcsDebug) {
         if (pairIdx == kFmcsDebugPairIdx && groupRank == 0) {
           printf("[fmcs][grp %d iter %d] A: popped seed (b%d,a%d)\n",
-                 groupId, debugIter, static_cast<int>(myCurrent.seed.numBonds),
+                 groupId,
+                 debugIter,
+                 static_cast<int>(myCurrent.seed.numBonds),
                  static_cast<int>(myCurrent.seed.numAtoms));
         }
       }
@@ -947,45 +965,53 @@ __global__ void fmcsKernel(
       // RDKit growSeeds() increments TotalSteps before Seed::grow(), then
       // Seed::grow() first checks canGrowBiggerThan().
       if constexpr (CollectStats || kFmcsMeasure) {
-        if (groupRank == 0) myStats.expanded += 1u;
+        if (groupRank == 0)
+          myStats.expanded += 1u;
       }
 
-      const unsigned int scoreSnapshot =
-          readBestScoreCooperative(group, &bestScore);
-      const int bestBondsSnapshot = static_cast<int>(scoreSnapshot >> 16);
-      const int bestAtomsSnapshot =
-          static_cast<int>(scoreSnapshot & 0xFFFFu);
-      const bool canGrowCurrent = mark_warp_uniform(
-          seedCanGrowBiggerThanWithinThread(
-              myCurrent.seed, bestBondsSnapshot, bestAtomsSnapshot)
-              ? 1
-              : 0) != 0;
+      const unsigned int scoreSnapshot     = readBestScoreCooperative(group, &bestScore);
+      const int          bestBondsSnapshot = static_cast<int>(scoreSnapshot >> 16);
+      const int          bestAtomsSnapshot = static_cast<int>(scoreSnapshot & 0xFFFFu);
+      const bool         canGrowCurrent =
+        mark_warp_uniform(
+          seedCanGrowBiggerThanWithinThread(myCurrent.seed, bestBondsSnapshot, bestAtomsSnapshot) ? 1 : 0) != 0;
       group.sync();
       if (!canGrowCurrent) {
         if constexpr (CollectStats || kFmcsMeasure) {
-          if (groupRank == 0) myStats.boundRejected += 1u;
+          if (groupRank == 0)
+            myStats.boundRejected += 1u;
         }
         break;
       }
 
-      updateCompleteRingsIncumbentCooperative(
-          group, myCurrent, best, &bestScore, &bestCopyLock,
-          pair.completeRingsOnly, queryView, pair.queryRingBondFlags, pair.targetRingBondFlags,
-          myRemainingVisitedAtoms, &remainingStackSize[groupId]);
+      updateCompleteRingsIncumbentCooperative(group,
+                                              myCurrent,
+                                              best,
+                                              &bestScore,
+                                              &bestCopyLock,
+                                              pair.completeRingsOnly,
+                                              queryView,
+                                              pair.queryRingBondFlags,
+                                              pair.targetRingBondFlags,
+                                              myRemainingVisitedAtoms,
+                                              &remainingStackSize[groupId]);
 
       if constexpr (kFmcsDebug) {
         if (pairIdx == kFmcsDebugPairIdx && groupRank == 0) {
-          printf("[fmcs][grp %d iter %d] B: after incumbent sync\n",
-                 groupId, debugIter);
+          printf("[fmcs][grp %d iter %d] B: after incumbent sync\n", groupId, debugIter);
         }
       }
 
-      const bool fillOk = fillNewBondsCooperative(
-          group, myCurrent.seed, queryView, myNewBonds,
-          &newBondCount[groupId], kMaxNewBondsForTier);
+      const bool fillOk = fillNewBondsCooperative(group,
+                                                  myCurrent.seed,
+                                                  queryView,
+                                                  myNewBonds,
+                                                  &newBondCount[groupId],
+                                                  kMaxNewBondsForTier);
       group.sync();
       if (!fillOk) {
-        if (groupRank == 0) atomicExch(&overflowed, 1);
+        if (groupRank == 0)
+          atomicExch(&overflowed, 1);
         break;
       }
       const int myNewBondCount = mark_warp_uniform(newBondCount[groupId]);
@@ -993,20 +1019,22 @@ __global__ void fmcsKernel(
       if constexpr (kFmcsDebug) {
         if (pairIdx == kFmcsDebugPairIdx && groupRank == 0) {
           printf("[fmcs][grp %d iter %d] C: after fillNewBonds, count=%d stage=%u\n",
-                 groupId, debugIter, myNewBondCount,
+                 groupId,
+                 debugIter,
+                 myNewBondCount,
                  static_cast<unsigned int>(myCurrent.seed.growingStage));
         }
       }
       if (myNewBondCount == 0) {
         if constexpr (CollectStats || kFmcsMeasure) {
-          if (groupRank == 0) myStats.fillZero += 1u;
+          if (groupRank == 0)
+            myStats.fillZero += 1u;
         }
         break;
       }
 
-      const int currentGrowStage =
-          mark_warp_uniform(static_cast<int>(myCurrent.seed.growingStage));
-      bool runInnerStage = currentGrowStage != kSeedGrowStageOuter;
+      const int currentGrowStage = mark_warp_uniform(static_cast<int>(myCurrent.seed.growingStage));
+      bool      runInnerStage    = currentGrowStage != kSeedGrowStageOuter;
 
       // RDKit Seed::grow() stage 0: build the child containing all newly
       // discovered outgoing bonds and run checkIfMatchAndAppend().  If this
@@ -1015,7 +1043,8 @@ __global__ void fmcsKernel(
       // outer grow loop resumes the parent at the singleton/subset stage.
       if (currentGrowStage == kSeedGrowStageOuter) {
         if constexpr (CollectStats || kFmcsMeasure) {
-          if (groupRank == 0) myStats.stage0Attempts += 1u;
+          if (groupRank == 0)
+            myStats.stage0Attempts += 1u;
         }
         if constexpr (kFmcsDebug) {
           if (pairIdx == kFmcsDebugPairIdx && groupRank == 0) {
@@ -1032,58 +1061,71 @@ __global__ void fmcsKernel(
           }
         }
         group.sync();
-        seedComputeRemainingSizeRdkitCooperative(
-            group, myBiggest.seed, queryView, myRemainingAtomStack,
-            myRemainingVisitedAtoms, myRemainingVisitedBonds,
-            &remainingStackSize[groupId]);
+        seedComputeRemainingSizeRdkitCooperative(group,
+                                                 myBiggest.seed,
+                                                 queryView,
+                                                 myRemainingAtomStack,
+                                                 myRemainingVisitedAtoms,
+                                                 myRemainingVisitedBonds,
+                                                 &remainingStackSize[groupId]);
 
-        const unsigned int childScoreSnapshot =
-            readBestScoreCooperative(group, &bestScore);
-        const int childBestBonds =
-            static_cast<int>(childScoreSnapshot >> 16);
-        const int childBestAtoms =
-            static_cast<int>(childScoreSnapshot & 0xFFFFu);
-        const bool canGrowChild = mark_warp_uniform(
-            seedCanGrowBiggerThanWithinThread(
-                myBiggest.seed, childBestBonds, childBestAtoms)
-                ? 1
-                : 0) != 0;
+        const unsigned int childScoreSnapshot = readBestScoreCooperative(group, &bestScore);
+        const int          childBestBonds     = static_cast<int>(childScoreSnapshot >> 16);
+        const int          childBestAtoms     = static_cast<int>(childScoreSnapshot & 0xFFFFu);
+        const bool         canGrowChild =
+          mark_warp_uniform(seedCanGrowBiggerThanWithinThread(myBiggest.seed, childBestBonds, childBestAtoms) ? 1 :
+                                                                                                                0) != 0;
         group.sync();
         if (!canGrowChild) {
           if constexpr (CollectStats || kFmcsMeasure) {
-            if (groupRank == 0) myStats.boundRejected += 1u;
+            if (groupRank == 0)
+              myStats.boundRejected += 1u;
           }
           break;
         }
 
-        const bool ok = mark_warp_uniform(
-            checkSeedMatchAndAppendCooperative<CollectStats>(
-                group, myBiggest, queryView, targetView, pair.tables,
-                mySubstructureScratch,
-                mySubstructureStorage, substructurePartialCapacity,
-                &overflowed, myStats, true)
-                ? 1
-                : 0) != 0;
-        if (groupRank == 0) stage0Ok[groupId] = ok;
+        const bool ok = mark_warp_uniform(checkSeedMatchAndAppendCooperative<CollectStats>(group,
+                                                                                           myBiggest,
+                                                                                           queryView,
+                                                                                           targetView,
+                                                                                           pair.tables,
+                                                                                           mySubstructureScratch,
+                                                                                           mySubstructureStorage,
+                                                                                           substructurePartialCapacity,
+                                                                                           &overflowed,
+                                                                                           myStats,
+                                                                                           true) ?
+                                            1 :
+                                            0) != 0;
+        if (groupRank == 0)
+          stage0Ok[groupId] = ok;
         group.sync();
 
         if constexpr (kFmcsDebug) {
           if (pairIdx == kFmcsDebugPairIdx && groupRank == 0) {
             printf("[fmcs][grp %d iter %d] E: stage0 after match, ok=%d\n",
-                   groupId, debugIter, static_cast<int>(stage0Ok[groupId]));
+                   groupId,
+                   debugIter,
+                   static_cast<int>(stage0Ok[groupId]));
           }
         }
         if (stage0Ok[groupId]) {
           if constexpr (CollectStats || kFmcsMeasure) {
-            if (groupRank == 0) myStats.stage0Success += 1u;
+            if (groupRank == 0)
+              myStats.stage0Success += 1u;
           }
-          updateCompleteRingsIncumbentCooperative(
-              group, myBiggest, best, &bestScore, &bestCopyLock,
-              pair.completeRingsOnly, queryView, pair.queryRingBondFlags, pair.targetRingBondFlags,
-              myRemainingVisitedAtoms, &remainingStackSize[groupId]);
-          if (!pushBackLockedCooperative(
-                  group, queue, myBiggest, &queueLock, &overflowed,
-                  &timedOut, &phase2Done)) {
+          updateCompleteRingsIncumbentCooperative(group,
+                                                  myBiggest,
+                                                  best,
+                                                  &bestScore,
+                                                  &bestCopyLock,
+                                                  pair.completeRingsOnly,
+                                                  queryView,
+                                                  pair.queryRingBondFlags,
+                                                  pair.targetRingBondFlags,
+                                                  myRemainingVisitedAtoms,
+                                                  &remainingStackSize[groupId]);
+          if (!pushBackLockedCooperative(group, queue, myBiggest, &queueLock, &overflowed, &timedOut, &phase2Done)) {
             atomicExch(&overflowed, 1);
           }
           group.sync();
@@ -1092,26 +1134,27 @@ __global__ void fmcsKernel(
               myCurrent.seed.growingStage = kSeedGrowStageInner;
             }
             group.sync();
-            if (!pushBackLockedCooperative(
-                    group, queue, myCurrent, &queueLock, &overflowed,
-                    &timedOut, &phase2Done)) {
+            if (!pushBackLockedCooperative(group, queue, myCurrent, &queueLock, &overflowed, &timedOut, &phase2Done)) {
               atomicExch(&overflowed, 1);
             }
             group.sync();
           }
           break;
         }
-        if (myNewBondCount == 1) break;
+        if (myNewBondCount == 1)
+          break;
         runInnerStage = true;
       }
 
-      if (!runInnerStage) break;
+      if (!runInnerStage)
+        break;
 
       // RDKit Seed::grow() stage 1: try every individual outgoing bond.
       // A failed individual match excludes that NewBond from later subset
       // enumeration and increments IndividualBondExcluded.
       for (int i = 0; i < myNewBondCount; ++i) {
-        if (!myNewBonds[i].alive) continue;
+        if (!myNewBonds[i].alive)
+          continue;
 
         warpCopy(group, &myBiggest, &myCurrent, sizeof(QueuedT));
         group.sync();
@@ -1122,53 +1165,64 @@ __global__ void fmcsKernel(
           seedAddNewBondWithinThread(myBiggest.seed, myNewBonds[i]);
         }
         group.sync();
-        seedComputeRemainingSizeRdkitCooperative(
-            group, myBiggest.seed, queryView, myRemainingAtomStack,
-            myRemainingVisitedAtoms, myRemainingVisitedBonds,
-            &remainingStackSize[groupId]);
+        seedComputeRemainingSizeRdkitCooperative(group,
+                                                 myBiggest.seed,
+                                                 queryView,
+                                                 myRemainingAtomStack,
+                                                 myRemainingVisitedAtoms,
+                                                 myRemainingVisitedBonds,
+                                                 &remainingStackSize[groupId]);
 
         if constexpr (CollectStats || kFmcsMeasure) {
-          if (groupRank == 0) myStats.stage1Attempts += 1u;
+          if (groupRank == 0)
+            myStats.stage1Attempts += 1u;
         }
 
-        const unsigned int childScoreSnapshot =
-            readBestScoreCooperative(group, &bestScore);
-        const int childBestBonds =
-            static_cast<int>(childScoreSnapshot >> 16);
-        const int childBestAtoms =
-            static_cast<int>(childScoreSnapshot & 0xFFFFu);
-        const bool canGrowSingle = mark_warp_uniform(
-            seedCanGrowBiggerThanWithinThread(
-                myBiggest.seed, childBestBonds, childBestAtoms)
-                ? 1
-                : 0) != 0;
+        const unsigned int childScoreSnapshot = readBestScoreCooperative(group, &bestScore);
+        const int          childBestBonds     = static_cast<int>(childScoreSnapshot >> 16);
+        const int          childBestAtoms     = static_cast<int>(childScoreSnapshot & 0xFFFFu);
+        const bool         canGrowSingle =
+          mark_warp_uniform(seedCanGrowBiggerThanWithinThread(myBiggest.seed, childBestBonds, childBestAtoms) ? 1 :
+                                                                                                                0) != 0;
         group.sync();
         if (!canGrowSingle) {
           if constexpr (CollectStats || kFmcsMeasure) {
-            if (groupRank == 0) myStats.boundRejected += 1u;
+            if (groupRank == 0)
+              myStats.boundRejected += 1u;
           }
           continue;
         }
 
-        const bool ok = mark_warp_uniform(
-            checkSeedMatchAndAppendCooperative<CollectStats>(
-                group, myBiggest, queryView, targetView, pair.tables,
-                mySubstructureScratch,
-                mySubstructureStorage, substructurePartialCapacity,
-                &overflowed, myStats, true)
-                ? 1
-                : 0) != 0;
+        const bool ok = mark_warp_uniform(checkSeedMatchAndAppendCooperative<CollectStats>(group,
+                                                                                           myBiggest,
+                                                                                           queryView,
+                                                                                           targetView,
+                                                                                           pair.tables,
+                                                                                           mySubstructureScratch,
+                                                                                           mySubstructureStorage,
+                                                                                           substructurePartialCapacity,
+                                                                                           &overflowed,
+                                                                                           myStats,
+                                                                                           true) ?
+                                            1 :
+                                            0) != 0;
         if constexpr (CollectStats || kFmcsMeasure) {
-          if (groupRank == 0 && ok) myStats.stage1Success += 1u;
+          if (groupRank == 0 && ok)
+            myStats.stage1Success += 1u;
         }
         if (ok) {
-          updateCompleteRingsIncumbentCooperative(
-              group, myBiggest, best, &bestScore, &bestCopyLock,
-              pair.completeRingsOnly, queryView, pair.queryRingBondFlags, pair.targetRingBondFlags,
-              myRemainingVisitedAtoms, &remainingStackSize[groupId]);
-          if (!pushBackLockedCooperative(
-                  group, queue, myBiggest, &queueLock, &overflowed,
-                  &timedOut, &phase2Done)) {
+          updateCompleteRingsIncumbentCooperative(group,
+                                                  myBiggest,
+                                                  best,
+                                                  &bestScore,
+                                                  &bestCopyLock,
+                                                  pair.completeRingsOnly,
+                                                  queryView,
+                                                  pair.queryRingBondFlags,
+                                                  pair.targetRingBondFlags,
+                                                  myRemainingVisitedAtoms,
+                                                  &remainingStackSize[groupId]);
+          if (!pushBackLockedCooperative(group, queue, myBiggest, &queueLock, &overflowed, &timedOut, &phase2Done)) {
             atomicExch(&overflowed, 1);
           }
         } else if (groupRank == 0) {
@@ -1185,48 +1239,45 @@ __global__ void fmcsKernel(
       // all-bonds subset was handled by Stage 0 unless Stage 1 erased one or
       // more individual bonds, in which case the all-surviving-bonds subset is
       // new work and must be checked.
-      int aliveCount = 0;
+      int aliveCount    = 0;
       int aliveOverflow = 0;
       if (groupRank == 0) {
         for (int i = 0; i < myNewBondCount; ++i) {
-          if (myNewBonds[i].alive) ++aliveCount;
+          if (myNewBonds[i].alive)
+            ++aliveCount;
         }
         aliveOverflow = aliveCount > 63 ? 1 : 0;
-        if (aliveOverflow) atomicExch(&overflowed, 1);
+        if (aliveOverflow)
+          atomicExch(&overflowed, 1);
       }
-      aliveCount = group.shfl(aliveCount, 0);
+      aliveCount    = group.shfl(aliveCount, 0);
       aliveOverflow = group.shfl(aliveOverflow, 0);
-      if (aliveOverflow) break;
+      if (aliveOverflow)
+        break;
       if (aliveCount > 1) {
         unsigned int erasedCount = 0;
         if (groupRank == 0) {
-          erasedCount =
-              static_cast<unsigned int>(myNewBondCount - aliveCount);
+          erasedCount = static_cast<unsigned int>(myNewBondCount - aliveCount);
         }
-        erasedCount = group.shfl(erasedCount, 0);
-        const unsigned long long maxComposition =
-            (1ULL << aliveCount) - 1ULL;
-        for (unsigned long long composition = maxComposition;
-             composition != 0ULL;
-             --composition) {
-          if (isPowerOfTwo64(composition)) continue;
-          if (erasedCount == 0 && composition == maxComposition) continue;
+        erasedCount                             = group.shfl(erasedCount, 0);
+        const unsigned long long maxComposition = (1ULL << aliveCount) - 1ULL;
+        for (unsigned long long composition = maxComposition; composition != 0ULL; --composition) {
+          if (isPowerOfTwo64(composition))
+            continue;
+          if (erasedCount == 0 && composition == maxComposition)
+            continue;
 
-          const unsigned int latestScoreSnapshot =
-              readBestScoreCooperative(group, &bestScore);
-          const int latestBestBonds =
-              static_cast<int>(latestScoreSnapshot >> 16);
-          const int latestBestAtoms =
-              static_cast<int>(latestScoreSnapshot & 0xFFFFu);
-          const bool canGrowRemaining = mark_warp_uniform(
-              seedCanGrowBiggerThanWithinThread(
-                  myCurrent.seed, latestBestBonds, latestBestAtoms)
-                  ? 1
-                  : 0) != 0;
+          const unsigned int latestScoreSnapshot = readBestScoreCooperative(group, &bestScore);
+          const int          latestBestBonds     = static_cast<int>(latestScoreSnapshot >> 16);
+          const int          latestBestAtoms     = static_cast<int>(latestScoreSnapshot & 0xFFFFu);
+          const bool         canGrowRemaining =
+            mark_warp_uniform(
+              seedCanGrowBiggerThanWithinThread(myCurrent.seed, latestBestBonds, latestBestAtoms) ? 1 : 0) != 0;
           group.sync();
           if (!canGrowRemaining) {
             if constexpr (CollectStats || kFmcsMeasure) {
-              if (groupRank == 0) myStats.boundRejected += 1u;
+              if (groupRank == 0)
+                myStats.boundRejected += 1u;
             }
             break;
           }
@@ -1236,9 +1287,10 @@ __global__ void fmcsKernel(
           if (groupRank == 0) {
             seedBeginGrowStepWithinThread(myBiggest.seed);
             myBiggest.seed.growingStage = kSeedGrowStageOuter;
-            int aliveBit = 0;
+            int aliveBit                = 0;
             for (int i = 0; i < myNewBondCount; ++i) {
-              if (!myNewBonds[i].alive) continue;
+              if (!myNewBonds[i].alive)
+                continue;
               if ((composition & (1ULL << aliveBit)) != 0ULL) {
                 seedAddNewBondWithinThread(myBiggest.seed, myNewBonds[i]);
               }
@@ -1246,64 +1298,76 @@ __global__ void fmcsKernel(
             }
           }
           group.sync();
-          seedComputeRemainingSizeRdkitCooperative(
-              group, myBiggest.seed, queryView, myRemainingAtomStack,
-              myRemainingVisitedAtoms, myRemainingVisitedBonds,
-              &remainingStackSize[groupId]);
+          seedComputeRemainingSizeRdkitCooperative(group,
+                                                   myBiggest.seed,
+                                                   queryView,
+                                                   myRemainingAtomStack,
+                                                   myRemainingVisitedAtoms,
+                                                   myRemainingVisitedBonds,
+                                                   &remainingStackSize[groupId]);
 
           if constexpr (CollectStats || kFmcsMeasure) {
-            if (groupRank == 0) myStats.stage2Attempts += 1u;
+            if (groupRank == 0)
+              myStats.stage2Attempts += 1u;
           }
-          const unsigned int childScoreSnapshot =
-              readBestScoreCooperative(group, &bestScore);
-          const int childBestBonds =
-              static_cast<int>(childScoreSnapshot >> 16);
-          const int childBestAtoms =
-              static_cast<int>(childScoreSnapshot & 0xFFFFu);
-          const bool canGrowSubset = mark_warp_uniform(
-              seedCanGrowBiggerThanWithinThread(
-                  myBiggest.seed, childBestBonds, childBestAtoms)
-                  ? 1
-                  : 0) != 0;
+          const unsigned int childScoreSnapshot = readBestScoreCooperative(group, &bestScore);
+          const int          childBestBonds     = static_cast<int>(childScoreSnapshot >> 16);
+          const int          childBestAtoms     = static_cast<int>(childScoreSnapshot & 0xFFFFu);
+          const bool         canGrowSubset =
+            mark_warp_uniform(
+              seedCanGrowBiggerThanWithinThread(myBiggest.seed, childBestBonds, childBestAtoms) ? 1 : 0) != 0;
           group.sync();
           if (!canGrowSubset) {
             if constexpr (CollectStats || kFmcsMeasure) {
-              if (groupRank == 0) myStats.boundRejected += 1u;
+              if (groupRank == 0)
+                myStats.boundRejected += 1u;
             }
             continue;
           }
 
-          const bool ok = mark_warp_uniform(
-              checkSeedMatchAndAppendCooperative<CollectStats>(
-                  group, myBiggest, queryView, targetView, pair.tables,
-                  mySubstructureScratch,
-                  mySubstructureStorage, substructurePartialCapacity,
-                  &overflowed, myStats, true)
-                  ? 1
-                  : 0) != 0;
+          const bool ok =
+            mark_warp_uniform(checkSeedMatchAndAppendCooperative<CollectStats>(group,
+                                                                               myBiggest,
+                                                                               queryView,
+                                                                               targetView,
+                                                                               pair.tables,
+                                                                               mySubstructureScratch,
+                                                                               mySubstructureStorage,
+                                                                               substructurePartialCapacity,
+                                                                               &overflowed,
+                                                                               myStats,
+                                                                               true) ?
+                                1 :
+                                0) != 0;
           if (ok) {
             if constexpr (CollectStats || kFmcsMeasure) {
-              if (groupRank == 0) myStats.stage2Success += 1u;
+              if (groupRank == 0)
+                myStats.stage2Success += 1u;
             }
-            updateCompleteRingsIncumbentCooperative(
-                group, myBiggest, best, &bestScore, &bestCopyLock,
-                pair.completeRingsOnly, queryView, pair.queryRingBondFlags, pair.targetRingBondFlags,
-                myRemainingVisitedAtoms, &remainingStackSize[groupId]);
-            if (!pushBackLockedCooperative(
-                    group, queue, myBiggest, &queueLock, &overflowed,
-                    &timedOut, &phase2Done)) {
+            updateCompleteRingsIncumbentCooperative(group,
+                                                    myBiggest,
+                                                    best,
+                                                    &bestScore,
+                                                    &bestCopyLock,
+                                                    pair.completeRingsOnly,
+                                                    queryView,
+                                                    pair.queryRingBondFlags,
+                                                    pair.targetRingBondFlags,
+                                                    myRemainingVisitedAtoms,
+                                                    &remainingStackSize[groupId]);
+            if (!pushBackLockedCooperative(group, queue, myBiggest, &queueLock, &overflowed, &timedOut, &phase2Done)) {
               atomicExch(&overflowed, 1);
             }
           }
           group.sync();
-          if (readFlagCooperative(group, &overflowed)) break;
+          if (readFlagCooperative(group, &overflowed))
+            break;
         }
       }
 
       if constexpr (kFmcsDebug) {
         if (pairIdx == kFmcsDebugPairIdx && groupRank == 0) {
-          printf("[fmcs][grp %d iter %d] K: inner stages done\n",
-                 groupId, debugIter);
+          printf("[fmcs][grp %d iter %d] K: inner stages done\n", groupId, debugIter);
         }
       }
     } while (false);
@@ -1312,13 +1376,11 @@ __global__ void fmcsKernel(
     if constexpr (CollectStats || kFmcsMeasure) {
       if (groupRank == 0) {
         phase2GroupWorkEndClock = clock64();
-        addClockCycles1024WithinThread(
-            myStats.phase2ActiveWorkCycles1024,
-            phase2GroupWorkEndClock - phase2GroupWorkStartClock);
+        addClockCycles1024WithinThread(myStats.phase2ActiveWorkCycles1024,
+                                       phase2GroupWorkEndClock - phase2GroupWorkStartClock);
         if (phase2MatchCallsBefore == myStats.matchCalls) {
-          addClockCycles1024WithinThread(
-              myStats.phase2IdleNoMatchWaitCycles1024,
-              phase2GroupWorkEndClock - phase2GroupWorkStartClock);
+          addClockCycles1024WithinThread(myStats.phase2IdleNoMatchWaitCycles1024,
+                                         phase2GroupWorkEndClock - phase2GroupWorkStartClock);
         }
       }
     }
@@ -1333,9 +1395,9 @@ __global__ void fmcsKernel(
     }
     group.sync();
 
-    if (readFlagCooperative(group, &overflowed) ||
-        readFlagCooperative(group, &timedOut)) {
-      if (groupRank == 0) atomicExch(&phase2Done, 1);
+    if (readFlagCooperative(group, &overflowed) || readFlagCooperative(group, &timedOut)) {
+      if (groupRank == 0)
+        atomicExch(&phase2Done, 1);
       break;
     }
 
@@ -1343,8 +1405,7 @@ __global__ void fmcsKernel(
       ++debugIter;
       if (debugIter >= kFmcsDebugMaxIters) {
         if (pairIdx == kFmcsDebugPairIdx && groupRank == 0) {
-          printf("[fmcs][grp %d] WATCHDOG: hit %d iters -- forcing exit\n",
-                 groupId, debugIter);
+          printf("[fmcs][grp %d] WATCHDOG: hit %d iters -- forcing exit\n", groupId, debugIter);
         }
         if (groupRank == 0) {
           atomicExch(&timedOut, 1);
@@ -1372,8 +1433,8 @@ __global__ void fmcsKernel(
     block.sync();
     if (block.thread_rank() == 0) {
       const unsigned long long phase2Clocks = clock64() - phase2StartClock;
-      groupStats[0].phase2Clocks = phase2Clocks;
-      measureStats = ExecutionStats{};
+      groupStats[0].phase2Clocks            = phase2Clocks;
+      measureStats                          = ExecutionStats{};
       for (int statIdx = 0; statIdx < kNumGroups; ++statIdx) {
         addExecutionStatsWithinThread(measureStats, groupStats[statIdx]);
       }
@@ -1394,52 +1455,56 @@ __global__ void fmcsKernel(
 
   if constexpr (kFmcsDebug) {
     if (pairIdx == kFmcsDebugPairIdx && block.thread_rank() == 0) {
-      printf("[fmcs] phase2 exit: iters=%d queueSize=%d overflowed=%d "
-             "timedOut=%d best=(b%d,a%d)\n",
-             debugIter, queue.size(), static_cast<int>(overflowed),
-             static_cast<int>(timedOut),
-             static_cast<int>(best.seed.numBonds),
-             static_cast<int>(best.seed.numAtoms));
+      printf(
+        "[fmcs] phase2 exit: iters=%d queueSize=%d overflowed=%d "
+        "timedOut=%d best=(b%d,a%d)\n",
+        debugIter,
+        queue.size(),
+        static_cast<int>(overflowed),
+        static_cast<int>(timedOut),
+        static_cast<int>(best.seed.numBonds),
+        static_cast<int>(best.seed.numAtoms));
     }
   }
   if constexpr (kFmcsMeasure) {
     if (pairIdx == kFmcsDebugPairIdx && block.thread_rank() == 0) {
-      printf("[fmcs][measure] iters=%u initial=%u/%u popped=%u expanded=%u "
-             "seedChecks=%u match=%u/%u boundReject=%u indivExcluded=%u "
-             "fillZero=%u stage0=%u/%u stage1=%u/%u stage2=%u/%u "
-             "fast=%u/%u slow=%u success=%u fail=%u overflow=%u "
-             "maxQueue=%u forcedExit=%u overflowed=%d timedOut=%d "
-             "best=(b%d,a%d) queue=%d\n",
-             measureStats.phase2Iters,
-             measureStats.initialSeeds - measureStats.mismatchedInitialSeeds,
-             measureStats.initialSeeds,
-             measureStats.popped,
-             measureStats.expanded,
-             measureStats.seedChecks,
-             measureStats.matchFound,
-             measureStats.matchCalls,
-             measureStats.boundRejected,
-             measureStats.individualBondExcluded,
-             measureStats.fillZero,
-             measureStats.stage0Success,
-             measureStats.stage0Attempts,
-             measureStats.stage1Success,
-             measureStats.stage1Attempts,
-             measureStats.stage2Success,
-             measureStats.stage2Attempts,
-             measureStats.fastSuccess,
-             measureStats.fastAttempts,
-             measureStats.fallbackCalls,
-             measureStats.fallbackSuccess,
-             measureStats.fallbackFail,
-             measureStats.fallbackOverflow,
-             measureStats.maxQueue,
-             measureStats.forcedExit,
-             static_cast<int>(overflowed),
-             static_cast<int>(timedOut),
-             static_cast<int>(best.seed.numBonds),
-             static_cast<int>(best.seed.numAtoms),
-             queue.size());
+      printf(
+        "[fmcs][measure] iters=%u initial=%u/%u popped=%u expanded=%u "
+        "seedChecks=%u match=%u/%u boundReject=%u indivExcluded=%u "
+        "fillZero=%u stage0=%u/%u stage1=%u/%u stage2=%u/%u "
+        "fast=%u/%u slow=%u success=%u fail=%u overflow=%u "
+        "maxQueue=%u forcedExit=%u overflowed=%d timedOut=%d "
+        "best=(b%d,a%d) queue=%d\n",
+        measureStats.phase2Iters,
+        measureStats.initialSeeds - measureStats.mismatchedInitialSeeds,
+        measureStats.initialSeeds,
+        measureStats.popped,
+        measureStats.expanded,
+        measureStats.seedChecks,
+        measureStats.matchFound,
+        measureStats.matchCalls,
+        measureStats.boundRejected,
+        measureStats.individualBondExcluded,
+        measureStats.fillZero,
+        measureStats.stage0Success,
+        measureStats.stage0Attempts,
+        measureStats.stage1Success,
+        measureStats.stage1Attempts,
+        measureStats.stage2Success,
+        measureStats.stage2Attempts,
+        measureStats.fastSuccess,
+        measureStats.fastAttempts,
+        measureStats.fallbackCalls,
+        measureStats.fallbackSuccess,
+        measureStats.fallbackFail,
+        measureStats.fallbackOverflow,
+        measureStats.maxQueue,
+        measureStats.forcedExit,
+        static_cast<int>(overflowed),
+        static_cast<int>(timedOut),
+        static_cast<int>(best.seed.numBonds),
+        static_cast<int>(best.seed.numAtoms),
+        queue.size());
     }
   }
 
@@ -1468,11 +1533,9 @@ __global__ void fmcsKernel(
       }
     }
 
-    auto& dst = results[pairIdx];
+    auto& dst      = results[pairIdx];
     auto* dstBytes = reinterpret_cast<unsigned char*>(&dst);
-    for (int byteIdx = 0;
-         byteIdx < static_cast<int>(sizeof(DeviceMCSResult<maxAtoms, maxBonds>));
-         ++byteIdx) {
+    for (int byteIdx = 0; byteIdx < static_cast<int>(sizeof(DeviceMCSResult<maxAtoms, maxBonds>)); ++byteIdx) {
       dstBytes[byteIdx] = 0;
     }
     dst.numCommonVertices = best.seed.numAtoms;
@@ -1482,11 +1545,11 @@ __global__ void fmcsKernel(
 
     // Walk set bits of best.seed.atoms (in increasing query atom idx
     // order, via __ffs/__ffsll) to fill mappingA/B.
-    using BestSeedT  = decltype(best.seed);
-    using AtomWord   = typename BestSeedT::atom_word_type;
+    using BestSeedT                = decltype(best.seed);
+    using AtomWord                 = typename BestSeedT::atom_word_type;
     constexpr int kAtomBitsPerWord = BestSeedT::kAtomBitsPerWord;
     constexpr int kAtomWords       = BestSeedT::kAtomWords;
-    int outIdx = 0;
+    int           outIdx           = 0;
     for (int wordIdx = 0; wordIdx < kAtomWords; ++wordIdx) {
       AtomWord remaining = best.seed.atoms[wordIdx];
       while (remaining != 0) {
@@ -1505,10 +1568,10 @@ __global__ void fmcsKernel(
     }
 
     // Walk set bits of best.seed.bonds to fill bondMapA/B.
-    using BondWord = typename BestSeedT::bond_word_type;
+    using BondWord                 = typename BestSeedT::bond_word_type;
     constexpr int kBondBitsPerWord = BestSeedT::kBondBitsPerWord;
     constexpr int kBondWords       = BestSeedT::kBondWords;
-    outIdx = 0;
+    outIdx                         = 0;
     for (int wordIdx = 0; wordIdx < kBondWords; ++wordIdx) {
       BondWord remaining = best.seed.bonds[wordIdx];
       while (remaining != 0) {

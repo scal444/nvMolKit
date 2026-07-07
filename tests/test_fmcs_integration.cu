@@ -13,10 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "src/mcs/mcs_search.h"
-#include "src/testutils/mol_data.h"
-#include "tests/test_utils.h"
-
 #include <GraphMol/FMCS/FMCS.h>
 #include <GraphMol/ROMol.h>
 #include <GraphMol/SmilesParse/SmilesParse.h>
@@ -35,6 +31,10 @@
 #include <utility>
 #include <vector>
 
+#include "src/mcs/mcs_search.h"
+#include "src/testutils/mol_data.h"
+#include "tests/test_utils.h"
+
 namespace {
 
 using nvMolKit::MCSAtomCompare;
@@ -43,15 +43,15 @@ using nvMolKit::MCSPair;
 using nvMolKit::MCSParameters;
 using nvMolKit::testing::readSmilesFileWithStrings;
 
-constexpr size_t kMaxAtoms                = 24;
-constexpr size_t kDefaultDatasetMolecules = 48;
-constexpr size_t kDefaultRandomPairs      = 1;
-constexpr unsigned int kDefaultSeed       = 1337;
+constexpr size_t       kMaxAtoms                = 24;
+constexpr size_t       kDefaultDatasetMolecules = 48;
+constexpr size_t       kDefaultRandomPairs      = 1;
+constexpr unsigned int kDefaultSeed             = 1337;
 
 struct RingConfig {
-  bool atomRingMatchesRingOnly = false;
-  bool bondRingMatchesRingOnly = false;
-  const char* name             = "NoRing";
+  bool        atomRingMatchesRingOnly = false;
+  bool        bondRingMatchesRingOnly = false;
+  const char* name                    = "NoRing";
 };
 
 using FmcsIntegrationParams = std::tuple<MCSAtomCompare, MCSBondCompare, RingConfig>;
@@ -104,17 +104,17 @@ const char* bondCompareName(MCSBondCompare compare) {
 
 MCSParameters makeParams(MCSAtomCompare atomCompare, MCSBondCompare bondCompare, RingConfig ringConfig) {
   MCSParameters params;
-  params.atomCompare                                           = atomCompare;
-  params.bondCompare                                           = bondCompare;
-  params.atomCompareParameters.ringMatchesRingOnly             = ringConfig.atomRingMatchesRingOnly;
-  params.bondCompareParameters.ringMatchesRingOnly             = ringConfig.bondRingMatchesRingOnly;
+  params.atomCompare                               = atomCompare;
+  params.bondCompare                               = bondCompare;
+  params.atomCompareParameters.ringMatchesRingOnly = ringConfig.atomRingMatchesRingOnly;
+  params.bondCompareParameters.ringMatchesRingOnly = ringConfig.bondRingMatchesRingOnly;
   return params;
 }
 
 RDKit::MCSParameters makeRdkitParams(const MCSParameters& params) {
   RDKit::MCSParameters rdParams;
-  rdParams.MaximizeBonds = params.maximizeBonds;
-  rdParams.Timeout       = params.timeoutSeconds;
+  rdParams.MaximizeBonds                             = params.maximizeBonds;
+  rdParams.Timeout                                   = params.timeoutSeconds;
   rdParams.AtomCompareParameters.MatchValences       = params.atomCompareParameters.matchValences;
   rdParams.AtomCompareParameters.MatchFormalCharge   = params.atomCompareParameters.matchFormalCharge;
   rdParams.AtomCompareParameters.RingMatchesRingOnly = params.atomCompareParameters.ringMatchesRingOnly;
@@ -184,8 +184,8 @@ bool mappingMatchesRdkitMCS(const std::vector<std::pair<int, int>>& gpuMapping,
   }
 
   RDKit::SubstructMatchParameters params;
-  params.uniquify   = false;
-  params.maxMatches = 0;
+  params.uniquify     = false;
+  params.maxMatches   = 0;
   const auto matchesA = RDKit::SubstructMatch(molA, *rdkitMCS.QueryMol, params);
   const auto matchesB = RDKit::SubstructMatch(molB, *rdkitMCS.QueryMol, params);
 
@@ -196,7 +196,7 @@ bool mappingMatchesRdkitMCS(const std::vector<std::pair<int, int>>& gpuMapping,
     }
 
     std::vector<int> requiredB(rdkitMCS.QueryMol->getNumAtoms(), -1);
-    bool compatibleWithA = true;
+    bool             compatibleWithA = true;
     for (const auto& [gpuAtomA, gpuAtomB] : gpuMapping) {
       if (gpuAtomA < 0 || gpuAtomA >= static_cast<int>(atomAToQuery.size())) {
         compatibleWithA = false;
@@ -235,37 +235,43 @@ bool mappingMatchesRdkitMCS(const std::vector<std::pair<int, int>>& gpuMapping,
   return false;
 }
 
-bool atomsCompatible(const RDKit::ROMol& molA,
-                     const RDKit::Atom&  atomA,
-                     const RDKit::ROMol& molB,
-                     const RDKit::Atom&  atomB,
+bool atomsCompatible(const RDKit::ROMol&  molA,
+                     const RDKit::Atom&   atomA,
+                     const RDKit::ROMol&  molB,
+                     const RDKit::Atom&   atomB,
                      const MCSParameters& params) {
   switch (params.atomCompare) {
     case MCSAtomCompare::Any:
       break;
     case MCSAtomCompare::Elements:
-      if (atomA.getAtomicNum() != atomB.getAtomicNum()) return false;
+      if (atomA.getAtomicNum() != atomB.getAtomicNum())
+        return false;
       break;
     case MCSAtomCompare::Isotopes:
-      if (atomA.getIsotope() != atomB.getIsotope()) return false;
+      if (atomA.getIsotope() != atomB.getIsotope())
+        return false;
       break;
     case MCSAtomCompare::AnyHeavyAtom: {
       const bool heavyA = atomA.getAtomicNum() != 1;
       const bool heavyB = atomB.getAtomicNum() != 1;
-      if (heavyA != heavyB) return false;
+      if (heavyA != heavyB)
+        return false;
       break;
     }
   }
 
-  if (params.atomCompareParameters.matchIsotope && atomA.getIsotope() != atomB.getIsotope()) return false;
-  if (params.atomCompareParameters.matchValences && atomA.getTotalValence() != atomB.getTotalValence()) return false;
+  if (params.atomCompareParameters.matchIsotope && atomA.getIsotope() != atomB.getIsotope())
+    return false;
+  if (params.atomCompareParameters.matchValences && atomA.getTotalValence() != atomB.getTotalValence())
+    return false;
   if (params.atomCompareParameters.matchFormalCharge && atomA.getFormalCharge() != atomB.getFormalCharge()) {
     return false;
   }
   if (params.atomCompareParameters.ringMatchesRingOnly) {
     const bool ringA = molA.getRingInfo()->numAtomRings(atomA.getIdx()) > 0;
     const bool ringB = molB.getRingInfo()->numAtomRings(atomB.getIdx()) > 0;
-    if (ringA != ringB) return false;
+    if (ringA != ringB)
+      return false;
   }
   return true;
 }
@@ -293,16 +299,18 @@ int mappedBondOrderClass(const RDKit::Bond& bond, const MCSParameters& params) {
   return 0;
 }
 
-bool bondsCompatible(const RDKit::ROMol& molA,
-                     const RDKit::Bond&  bondA,
-                     const RDKit::ROMol& molB,
-                     const RDKit::Bond&  bondB,
+bool bondsCompatible(const RDKit::ROMol&  molA,
+                     const RDKit::Bond&   bondA,
+                     const RDKit::ROMol&  molB,
+                     const RDKit::Bond&   bondB,
                      const MCSParameters& params) {
-  if (mappedBondOrderClass(bondA, params) != mappedBondOrderClass(bondB, params)) return false;
+  if (mappedBondOrderClass(bondA, params) != mappedBondOrderClass(bondB, params))
+    return false;
   if (params.bondCompareParameters.ringMatchesRingOnly) {
     const bool ringA = molA.getRingInfo()->numBondRings(bondA.getIdx()) > 0;
     const bool ringB = molB.getRingInfo()->numBondRings(bondB.getIdx()) > 0;
-    if (ringA != ringB) return false;
+    if (ringA != ringB)
+      return false;
   }
   return true;
 }
@@ -311,8 +319,10 @@ bool mappingIsValidCommonSubgraph(const nvMolKit::MCSResult& gpu,
                                   const RDKit::ROMol&        molA,
                                   const RDKit::ROMol&        molB,
                                   const MCSParameters&       params) {
-  if (gpu.atomMapping.size() != gpu.numAtoms || gpu.bondMapping.size() != gpu.numBonds) return false;
-  if (!mappingHasUniqueAtoms(gpu.atomMapping)) return false;
+  if (gpu.atomMapping.size() != gpu.numAtoms || gpu.bondMapping.size() != gpu.numBonds)
+    return false;
+  if (!mappingHasUniqueAtoms(gpu.atomMapping))
+    return false;
 
   std::vector<int> atomAToB(molA.getNumAtoms(), -1);
   std::vector<int> atomAToMappingPos(molA.getNumAtoms(), -1);
@@ -324,24 +334,27 @@ bool mappingIsValidCommonSubgraph(const nvMolKit::MCSResult& gpu,
     }
     const auto* atomA = molA.getAtomWithIdx(static_cast<unsigned int>(atomAIdx));
     const auto* atomB = molB.getAtomWithIdx(static_cast<unsigned int>(atomBIdx));
-    if (!atomsCompatible(molA, *atomA, molB, *atomB, params)) return false;
-    atomAToB[static_cast<size_t>(atomAIdx)] = atomBIdx;
+    if (!atomsCompatible(molA, *atomA, molB, *atomB, params))
+      return false;
+    atomAToB[static_cast<size_t>(atomAIdx)]          = atomBIdx;
     atomAToMappingPos[static_cast<size_t>(atomAIdx)] = static_cast<int>(pos);
   }
 
-  std::set<int> bondsA;
-  std::set<int> bondsB;
+  std::set<int>                 bondsA;
+  std::set<int>                 bondsB;
   std::vector<std::vector<int>> adjacency(gpu.atomMapping.size());
   for (const auto& [bondAIdx, bondBIdx] : gpu.bondMapping) {
     if (bondAIdx < 0 || bondAIdx >= static_cast<int>(molA.getNumBonds()) || bondBIdx < 0 ||
         bondBIdx >= static_cast<int>(molB.getNumBonds())) {
       return false;
     }
-    if (!bondsA.insert(bondAIdx).second || !bondsB.insert(bondBIdx).second) return false;
+    if (!bondsA.insert(bondAIdx).second || !bondsB.insert(bondBIdx).second)
+      return false;
 
     const auto* bondA = molA.getBondWithIdx(static_cast<unsigned int>(bondAIdx));
     const auto* bondB = molB.getBondWithIdx(static_cast<unsigned int>(bondBIdx));
-    if (!bondsCompatible(molA, *bondA, molB, *bondB, params)) return false;
+    if (!bondsCompatible(molA, *bondA, molB, *bondB, params))
+      return false;
 
     const int aBegin = static_cast<int>(bondA->getBeginAtomIdx());
     const int aEnd   = static_cast<int>(bondA->getEndAtomIdx());
@@ -351,26 +364,30 @@ bool mappingIsValidCommonSubgraph(const nvMolKit::MCSResult& gpu,
         aEnd >= static_cast<int>(atomAToB.size())) {
       return false;
     }
-    const bool sameOrientation = atomAToB[static_cast<size_t>(aBegin)] == bBegin &&
-                                 atomAToB[static_cast<size_t>(aEnd)] == bEnd;
-    const bool oppositeOrientation = atomAToB[static_cast<size_t>(aBegin)] == bEnd &&
-                                     atomAToB[static_cast<size_t>(aEnd)] == bBegin;
-    if (!sameOrientation && !oppositeOrientation) return false;
+    const bool sameOrientation =
+      atomAToB[static_cast<size_t>(aBegin)] == bBegin && atomAToB[static_cast<size_t>(aEnd)] == bEnd;
+    const bool oppositeOrientation =
+      atomAToB[static_cast<size_t>(aBegin)] == bEnd && atomAToB[static_cast<size_t>(aEnd)] == bBegin;
+    if (!sameOrientation && !oppositeOrientation)
+      return false;
 
     const int beginPos = atomAToMappingPos[static_cast<size_t>(aBegin)];
     const int endPos   = atomAToMappingPos[static_cast<size_t>(aEnd)];
-    if (beginPos < 0 || endPos < 0) return false;
+    if (beginPos < 0 || endPos < 0)
+      return false;
     adjacency[static_cast<size_t>(beginPos)].push_back(endPos);
     adjacency[static_cast<size_t>(endPos)].push_back(beginPos);
   }
 
-  if (gpu.numAtoms <= 1) return gpu.numBonds == 0;
-  if (gpu.numBonds == 0) return false;
+  if (gpu.numAtoms <= 1)
+    return gpu.numBonds == 0;
+  if (gpu.numBonds == 0)
+    return false;
 
   std::vector<char> visited(gpu.atomMapping.size(), 0);
-  std::vector<int> stack = {0};
-  visited[0]             = 1;
-  size_t seen            = 0;
+  std::vector<int>  stack = {0};
+  visited[0]              = 1;
+  size_t seen             = 0;
   while (!stack.empty()) {
     const int cur = stack.back();
     stack.pop_back();
@@ -401,7 +418,7 @@ void printMismatch(const std::vector<std::string>& smiles,
 
 struct Dataset {
   std::vector<std::unique_ptr<RDKit::ROMol>> mols;
-  std::vector<std::string> smiles;
+  std::vector<std::string>                   smiles;
 };
 
 Dataset loadDataset() {
@@ -423,7 +440,7 @@ const Dataset& dataset() {
 }
 
 std::vector<const RDKit::ROMol*> moleculeTable(const Dataset& data, size_t maxMols = 0) {
-  const size_t count = maxMols == 0 ? data.mols.size() : std::min(maxMols, data.mols.size());
+  const size_t                     count = maxMols == 0 ? data.mols.size() : std::min(maxMols, data.mols.size());
   std::vector<const RDKit::ROMol*> mols;
   mols.reserve(count);
   for (size_t i = 0; i < count; ++i) {
@@ -454,17 +471,16 @@ TEST_P(FMCSIntegrationTest, SeededChemblPairsMatchRDKit) {
   const auto ringConfig  = std::get<2>(GetParam());
   const auto params      = makeParams(atomCompare, bondCompare, ringConfig);
 
-  const unsigned int seed = integrationSeed() ^ (static_cast<unsigned int>(atomCompare) << 8) ^
-                            (static_cast<unsigned int>(bondCompare) << 16) ^
-                            (ringConfig.atomRingMatchesRingOnly ? 0x10000u : 0u) ^
-                            (ringConfig.bondRingMatchesRingOnly ? 0x20000u : 0u);
-  const size_t numPairs = envSize("NVMOLKIT_MCS_TEST_PAIRS", kDefaultRandomPairs);
-  std::mt19937 rng(seed);
+  const unsigned int seed =
+    integrationSeed() ^ (static_cast<unsigned int>(atomCompare) << 8) ^ (static_cast<unsigned int>(bondCompare) << 16) ^
+    (ringConfig.atomRingMatchesRingOnly ? 0x10000u : 0u) ^ (ringConfig.bondRingMatchesRingOnly ? 0x20000u : 0u);
+  const size_t                       numPairs = envSize("NVMOLKIT_MCS_TEST_PAIRS", kDefaultRandomPairs);
+  std::mt19937                       rng(seed);
   std::uniform_int_distribution<int> dist(0, static_cast<int>(data.mols.size() - 1));
 
-  const auto mols = moleculeTable(data);
-  std::vector<int> indicesA;
-  std::vector<int> indicesB;
+  const auto           mols = moleculeTable(data);
+  std::vector<int>     indicesA;
+  std::vector<int>     indicesB;
   std::vector<MCSPair> pairs;
   indicesA.reserve(numPairs);
   indicesB.reserve(numPairs);
@@ -484,12 +500,12 @@ TEST_P(FMCSIntegrationTest, SeededChemblPairsMatchRDKit) {
   for (size_t i = 0; i < numPairs; ++i) {
     const auto& molA = *data.mols[static_cast<size_t>(indicesA[i])];
     const auto& molB = *data.mols[static_cast<size_t>(indicesB[i])];
-    const auto rd    = findRdkitMCS(molA, molB, params);
+    const auto  rd   = findRdkitMCS(molA, molB, params);
     const auto& gpu  = gpuResults[i];
 
-    const bool sizeMatches = gpu.numAtoms == rd.NumAtoms && gpu.numBonds == rd.NumBonds;
+    const bool sizeMatches    = gpu.numAtoms == rd.NumAtoms && gpu.numBonds == rd.NumBonds;
     const bool mappingMatches = sizeMatches ? mappingMatchesRdkitMCS(gpu.atomMapping, molA, molB, rd) : false;
-    const bool mappingValid = sizeMatches ? mappingIsValidCommonSubgraph(gpu, molA, molB, params) : false;
+    const bool mappingValid   = sizeMatches ? mappingIsValidCommonSubgraph(gpu, molA, molB, params) : false;
     if (!sizeMatches || (!mappingMatches && !mappingValid)) {
       printMismatch(data.smiles, static_cast<int>(i), indicesA[i], indicesB[i], gpu, rd);
       std::cout << "  seed=" << seed << " atomCompare=" << atomCompareName(atomCompare)
@@ -518,8 +534,8 @@ TEST(FMCSDispatchRoutes, EqualListsWrapperMatchesExplicitPairs) {
   }
 
   MCSParameters params;
-  const auto explicitResults = nvMolKit::findMCSBatch(combined, pairs, nullptr, params);
-  const auto wrapperResults  = nvMolKit::findMCSBatch(molsA, molsB, nullptr, params);
+  const auto    explicitResults = nvMolKit::findMCSBatch(combined, pairs, nullptr, params);
+  const auto    wrapperResults  = nvMolKit::findMCSBatch(molsA, molsB, nullptr, params);
   expectSameResultShape(explicitResults, wrapperResults);
 }
 
@@ -527,13 +543,19 @@ TEST(FMCSDispatchRoutes, AllPairsUpperTriangleWrapperMatchesExplicitPairs) {
   const auto& data = dataset();
   ASSERT_GE(data.mols.size(), 3);
 
-  const auto mols = moleculeTable(data, 3);
-  const std::vector<MCSPair> pairs = {{0, 0}, {0, 1}, {0, 2}, {1, 1}, {1, 2}, {2, 2}};
+  const auto                 mols  = moleculeTable(data, 3);
+  const std::vector<MCSPair> pairs = {
+    {0, 0},
+    {0, 1},
+    {0, 2},
+    {1, 1},
+    {1, 2},
+    {2, 2}
+  };
 
   MCSParameters params;
-  const auto explicitResults = nvMolKit::findMCSBatch(mols, pairs, nullptr, params);
-  const auto wrapperResults =
-    nvMolKit::findMCSAllPairs(mols, nvMolKit::MCSAllPairsOptions{}, nullptr, params);
+  const auto    explicitResults = nvMolKit::findMCSBatch(mols, pairs, nullptr, params);
+  const auto    wrapperResults  = nvMolKit::findMCSAllPairs(mols, nvMolKit::MCSAllPairsOptions{}, nullptr, params);
   expectSameResultShape(explicitResults, wrapperResults);
 }
 
@@ -548,7 +570,7 @@ TEST(FMCSDispatchRoutes, SingletonOnlyOverlapMatchesRdkitMCS) {
     {0, 1}
   };
   MCSParameters params;
-  params.requireGpu  = true;
+  params.allowRDKitFallback = false;
   const auto results = nvMolKit::findMCSBatch(mols, pairs, nullptr, params);
 
   ASSERT_EQ(results.size(), 1);
@@ -562,11 +584,11 @@ TEST(FMCSDispatchRoutes, SingletonOnlyOverlapMatchesRdkitMCS) {
 
 TEST(FMCSDispatchRoutes, CompleteRingsOnlyRunsOnGpuAndMatchesRdkit) {
   const std::vector<std::pair<std::string, std::string>> smilesPairs = {
-    {"C1CCCCC1", "C1CCCCCC1"},
-    {"C1CCCCC1C", "C1CCCCC1N"},
-    {"C1CC1CCCCCC", "CCCCCC"},
-    {"Oc1ccccc1", "CCO"},
-    {"Oc1ccccc1", "COc1ncccc1"},
+    {   "C1CCCCC1",  "C1CCCCCC1"},
+    {  "C1CCCCC1C",  "C1CCCCC1N"},
+    {"C1CC1CCCCCC",     "CCCCCC"},
+    {  "Oc1ccccc1",        "CCO"},
+    {  "Oc1ccccc1", "COc1ncccc1"},
   };
 
   for (const auto& [smilesA, smilesB] : smilesPairs) {
@@ -575,16 +597,24 @@ TEST(FMCSDispatchRoutes, CompleteRingsOnlyRunsOnGpuAndMatchesRdkit) {
     ASSERT_NE(molA, nullptr);
     ASSERT_NE(molB, nullptr);
 
-    for (const auto& [atomComplete, bondComplete] :
-         {std::pair{true, false}, std::pair{false, true}, std::pair{true, true}}) {
+    for (const auto& [atomComplete, bondComplete] : {
+           std::pair{ true, false},
+           std::pair{false,  true},
+           std::pair{ true,  true}
+    }) {
       MCSParameters params;
-      params.requireGpu = true;
+      params.allowRDKitFallback                      = false;
       params.atomCompareParameters.completeRingsOnly = atomComplete;
       params.bondCompareParameters.completeRingsOnly = bondComplete;
-      const auto rd = findRdkitMCS(*molA, *molB, params);
-      const auto gpu = nvMolKit::findMCSBatch(
-          std::vector<const RDKit::ROMol*>{molA.get(), molB.get()},
-          std::vector<MCSPair>{{0, 1}}, nullptr, params);
+      const auto rd                                  = findRdkitMCS(*molA, *molB, params);
+      const auto gpu                                 = nvMolKit::findMCSBatch(
+        std::vector<const RDKit::ROMol*>{
+          molA.get(),
+          molB.get()
+      },
+        std::vector<MCSPair>{{0, 1}},
+        nullptr,
+        params);
 
       ASSERT_EQ(gpu.size(), 1);
       EXPECT_TRUE(gpu[0].usedGpu) << smilesA << " vs " << smilesB;
@@ -598,33 +628,29 @@ TEST(FMCSDispatchRoutes, CompleteRingsOnlyRunsOnGpuAndMatchesRdkit) {
 constexpr RingConfig kNoRing{false, false, "NoRing"};
 
 std::string integrationParamName(const ::testing::TestParamInfo<FmcsIntegrationParams>& info) {
-  return std::string(atomCompareName(std::get<0>(info.param))) + "_" + bondCompareName(std::get<1>(info.param)) +
-         "_" + std::get<2>(info.param).name;
+  return std::string(atomCompareName(std::get<0>(info.param))) + "_" + bondCompareName(std::get<1>(info.param)) + "_" +
+         std::get<2>(info.param).name;
 }
 
-INSTANTIATE_TEST_SUITE_P(AtomBondCompareSmoke,
-                         FMCSIntegrationTest,
-                         ::testing::Combine(::testing::Values(MCSAtomCompare::Any,
-                                                              MCSAtomCompare::Elements,
-                                                              MCSAtomCompare::Isotopes),
-                                            ::testing::Values(MCSBondCompare::Any,
-                                                              MCSBondCompare::Order,
-                                                              MCSBondCompare::OrderExact),
-                                            ::testing::Values(kNoRing)),
-                         integrationParamName);
+INSTANTIATE_TEST_SUITE_P(
+  AtomBondCompareSmoke,
+  FMCSIntegrationTest,
+  ::testing::Combine(::testing::Values(MCSAtomCompare::Any, MCSAtomCompare::Elements, MCSAtomCompare::Isotopes),
+                     ::testing::Values(MCSBondCompare::Any, MCSBondCompare::Order, MCSBondCompare::OrderExact),
+                     ::testing::Values(kNoRing)),
+  integrationParamName);
 
 INSTANTIATE_TEST_SUITE_P(
   RingCompareSmoke,
   FMCSIntegrationTest,
-  ::testing::Values(FmcsIntegrationParams{MCSAtomCompare::Elements, MCSBondCompare::Order, RingConfig{true,
-                                                                                                      false,
-                                                                                                      "AtomRing"}},
-                    FmcsIntegrationParams{MCSAtomCompare::Elements, MCSBondCompare::Order, RingConfig{false,
-                                                                                                      true,
-                                                                                                      "BondRing"}},
-                    FmcsIntegrationParams{MCSAtomCompare::Elements, MCSBondCompare::Order, RingConfig{true,
-                                                                                                      true,
-                                                                                                      "AtomBondRing"}}),
+  ::testing::Values(
+    FmcsIntegrationParams{
+      MCSAtomCompare::Elements,
+      MCSBondCompare::Order,
+      RingConfig{true, false, "AtomRing"}
+},
+    FmcsIntegrationParams{MCSAtomCompare::Elements, MCSBondCompare::Order, RingConfig{false, true, "BondRing"}},
+    FmcsIntegrationParams{MCSAtomCompare::Elements, MCSBondCompare::Order, RingConfig{true, true, "AtomBondRing"}}),
   integrationParamName);
 
 }  // namespace

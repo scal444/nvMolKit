@@ -34,6 +34,7 @@ from nvmolkit._arrayHelpers import *  # noqa: F403  # registers PyArray for DEVI
 from nvmolkit._mmff_bridge import default_rdkit_mmff_properties, make_internal_mmff_properties
 from nvmolkit.types import CoordinateOutput, Device3DResult, HardwareOptions
 
+
 @overload
 def MMFFOptimizeMoleculesConfs(
     molecules: list["Mol"],

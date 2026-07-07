@@ -13,18 +13,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "mcs_common/mcs_types.cuh"
-
 #include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "mcs_common/mcs_types.cuh"
+
 namespace mcs {
 
-Graph buildGraphFromEdges(size_t numVertices,
-                          const std::vector<std::pair<size_t, size_t>>& edges) {
+Graph buildGraphFromEdges(size_t numVertices, const std::vector<std::pair<size_t, size_t>>& edges) {
   Graph graph;
   graph.numVertices = static_cast<int>(numVertices);
   graph.numEdges    = static_cast<int>(edges.size());

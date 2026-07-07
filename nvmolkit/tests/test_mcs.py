@@ -233,21 +233,47 @@ def test_compare_and_ring_options_match_rdkit():
     _assert_matches_rdkit(result, mols, atom_compare="any", bond_compare="any", ring_matches_ring_only=True)
 
 
-def test_rdkit_fallback_path_is_reported():
+def test_complete_rings_only_gpu_path_is_reported():
     mols = _mols(["c1ccccc1", "c1ccc(O)cc1"])
 
     result = findMCS(mols, mode="pairs", pairs=[(0, 1)], complete_rings_only=True)
 
-    assert result.used_fallback.tolist() == [1]
-    assert result.used_gpu.tolist() == [0]
+    assert result.used_fallback.tolist() == [0]
+    assert result.used_gpu.tolist() == [1]
     _assert_matches_rdkit(result, mols, complete_rings_only=True)
 
 
-def test_require_gpu_rejects_rdkit_fallback_options():
+def test_complete_rings_only_runs_when_fallback_is_disallowed():
     mols = _mols(["c1ccccc1", "c1ccc(O)cc1"])
 
-    with pytest.raises(RuntimeError, match="GPU MCS path unavailable"):
-        findMCS(mols, mode="pairs", pairs=[(0, 1)], complete_rings_only=True, require_gpu=True)
+    result = findMCS(
+        mols,
+        mode="pairs",
+        pairs=[(0, 1)],
+        complete_rings_only=True,
+        allow_rdkit_fallback=False,
+    )
+
+    assert result.used_fallback.tolist() == [0]
+    assert result.used_gpu.tolist() == [1]
+    _assert_matches_rdkit(result, mols, complete_rings_only=True)
+
+
+def test_allow_rdkit_fallback_controls_unsupported_options():
+    mols = _mols(["CCO", "CCN"])
+
+    result = findMCS(mols, mode="pairs", pairs=[(0, 1)], connected_only=False)
+    assert result.used_fallback.tolist() == [1]
+    assert result.used_gpu.tolist() == [0]
+
+    with pytest.raises(RuntimeError, match="RDKit fallback is disabled: fMCS supports connected MCS only"):
+        findMCS(
+            mols,
+            mode="pairs",
+            pairs=[(0, 1)],
+            connected_only=False,
+            allow_rdkit_fallback=False,
+        )
 
 
 def test_invalid_mode_and_optional_arguments():
@@ -309,7 +335,7 @@ def test_mcsconfig_roundtrip_with_and_without_scratch_location():
 
 def test_block_size_512_tier128_succeeds_on_gpu():
     # A 128-carbon chain is a tier-128 molecule.  blockSize 512 now handles it
-    # via global substructure scratch (auto), so require_gpu must not fall back.
+    # via global substructure scratch (auto), so fallback can be disallowed.
     chain = Chem.MolFromSmiles("C" * 128)
     assert chain is not None
     mols = [chain, chain]
@@ -317,7 +343,7 @@ def test_block_size_512_tier128_succeeds_on_gpu():
         mols,
         mode="pairs",
         pairs=[(0, 1)],
-        require_gpu=True,
+        allow_rdkit_fallback=False,
         block_size=512,
         scratch_location="auto",
     )

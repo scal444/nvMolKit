@@ -156,8 +156,6 @@ def _sample_pairs(num_mols: int, num_pairs: int, seed: int) -> list[tuple[int, i
     return [(rng.randrange(num_mols), rng.randrange(num_mols)) for _ in range(num_pairs)]
 
 
-
-
 @nvtx.annotate("bench_nvmolkit_mcs", color="red")
 def _bench_nvmolkit(mols: list[Chem.Mol], pairs: list[tuple[int, int]], args: argparse.Namespace):
     _log(
@@ -262,9 +260,7 @@ def _bench_rdkit(mols: list[Chem.Mol], pairs: list[tuple[int, int]], args: argpa
                             pairs_done += 1
                             progress.update(1)
                             if deadline.expired():
-                                _log(
-                                    f"RDKit: stopping early after {pairs_done}/{len(pairs)} pairs due to max_seconds"
-                                )
+                                _log(f"RDKit: stopping early after {pairs_done}/{len(pairs)} pairs due to max_seconds")
                                 break
 
     else:
@@ -356,9 +352,7 @@ def _write_pair_timings(
         fieldnames.extend(timing_columns)
     stats_columns = []
     if nv_result is not None and getattr(nv_result, "fmcs_stats", None) is not None:
-        stats_columns = [
-            f"nvmolkit_{name}" for name in FMCS_STATS_COLUMNS if name not in timing_names
-        ]
+        stats_columns = [f"nvmolkit_{name}" for name in FMCS_STATS_COLUMNS if name not in timing_names]
         fieldnames.extend(stats_columns)
 
     with output_path.open("w", newline="") as fh:
@@ -497,10 +491,7 @@ def _build_parser(default_smiles: Path) -> argparse.ArgumentParser:
         dest="max_mols",
         type=int,
         default=1000,
-        help=(
-            "Number of molecules to sample from the input before atom/bond filtering; "
-            "0 loads all molecules."
-        ),
+        help=("Number of molecules to sample from the input before atom/bond filtering; 0 loads all molecules."),
     )
     _add_option(
         parser,
@@ -751,8 +742,14 @@ def main() -> None:
 
     if args.timings_csv:
         _write_pair_timings(
-            args.timings_csv, mols, pairs, nv_result, rdkit_sizes, rdkit_times_ms,
-            block_size=args.block_size, scratch_location=args.scratch_location,
+            args.timings_csv,
+            mols,
+            pairs,
+            nv_result,
+            rdkit_sizes,
+            rdkit_times_ms,
+            block_size=args.block_size,
+            scratch_location=args.scratch_location,
         )
 
     if args.validate:

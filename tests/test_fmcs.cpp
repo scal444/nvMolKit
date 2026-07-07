@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,10 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "fmcs_cuda/fmcs.cuh"
-#include "mcs_common/mcs_types.cuh"
-#include "src/mcs/mcs_compile_flags.h"
-
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -26,29 +22,29 @@
 #include <utility>
 #include <vector>
 
+#include "fmcs_cuda/fmcs.cuh"
+#include "mcs_common/mcs_types.cuh"
+#include "src/mcs/mcs_compile_flags.h"
+
 namespace {
 
 using mcs::Graph;
 using mcs::MCSResult;
 using mcs::fmcs::ExecutionStats;
 using mcs::fmcs::FmcsScratchLocation;
-using mcs::fmcs::Parameters;
 using mcs::fmcs::LabeledGraph;
+using mcs::fmcs::Parameters;
 
 // ---------------------------------------------------------------------------
 // Construction helpers
 // ---------------------------------------------------------------------------
 
-Graph g(std::size_t n,
-        std::vector<std::pair<std::size_t, std::size_t>> edges) {
+Graph g(std::size_t n, std::vector<std::pair<std::size_t, std::size_t>> edges) {
   return mcs::buildGraphFromEdges(n, std::move(edges));
 }
 
-MCSResult findSingleMCES(const Graph& a, const Graph& b,
-                         Parameters params = {},
-                         cudaStream_t stream = nullptr) {
-  const auto results =
-      mcs::fmcs::findMCESfMCSBatch({a}, {b}, params, nullptr, stream);
+MCSResult findSingleMCES(const Graph& a, const Graph& b, Parameters params = {}, cudaStream_t stream = nullptr) {
+  const auto results = mcs::fmcs::findMCESfMCSBatch({a}, {b}, params, nullptr, stream);
   EXPECT_EQ(results.size(), 1);
   return results.empty() ? MCSResult{} : results.front();
 }
@@ -59,33 +55,44 @@ Graph path(int numAtoms) {
   for (int i = 0; i + 1 < numAtoms; ++i) {
     edges.emplace_back(i, i + 1);
   }
-  return mcs::buildGraphFromEdges(static_cast<std::size_t>(numAtoms),
-                                  std::move(edges));
+  return mcs::buildGraphFromEdges(static_cast<std::size_t>(numAtoms), std::move(edges));
 }
 
 // Cycle graph: numAtoms vertices in a ring.
 Graph cycle(int numAtoms) {
   std::vector<std::pair<std::size_t, std::size_t>> edges;
-  for (int i = 0; i + 1 < numAtoms; ++i) edges.emplace_back(i, i + 1);
-  if (numAtoms >= 3) edges.emplace_back(0, numAtoms - 1);
-  return mcs::buildGraphFromEdges(static_cast<std::size_t>(numAtoms),
-                                  std::move(edges));
+  for (int i = 0; i + 1 < numAtoms; ++i)
+    edges.emplace_back(i, i + 1);
+  if (numAtoms >= 3)
+    edges.emplace_back(0, numAtoms - 1);
+  return mcs::buildGraphFromEdges(static_cast<std::size_t>(numAtoms), std::move(edges));
 }
 
 // Star K1,n: vertex 0 is the hub, vertices 1..n are leaves.
 Graph star(int numLeaves) {
   std::vector<std::pair<std::size_t, std::size_t>> edges;
-  for (int i = 1; i <= numLeaves; ++i) edges.emplace_back(0, i);
-  return mcs::buildGraphFromEdges(static_cast<std::size_t>(numLeaves + 1),
-                                  std::move(edges));
+  for (int i = 1; i <= numLeaves; ++i)
+    edges.emplace_back(0, i);
+  return mcs::buildGraphFromEdges(static_cast<std::size_t>(numLeaves + 1), std::move(edges));
 }
 
 // Standard six-membered ring (used as benzene topology).
-Graph benzene() { return cycle(6); }
+Graph benzene() {
+  return cycle(6);
+}
 
 // Toluene: benzene + a methyl substituent on atom 0 -> atom 6.
 Graph toluene() {
-  return g(7, {{0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {0, 5}, {0, 6}});
+  return g(7,
+           {
+             {0, 1},
+             {1, 2},
+             {2, 3},
+             {3, 4},
+             {4, 5},
+             {0, 5},
+             {0, 6}
+  });
 }
 
 // Naphthalene: two fused 6-rings sharing edge (4,5).
@@ -99,9 +106,19 @@ Graph toluene() {
 // Atoms: 0,1,2,3,4,5 (ring A), 5,4,6,7,8,9 (ring B sharing edge 4-5).
 // 10 atoms total.
 Graph naphthalene() {
-  return g(10, {
-    {0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {0, 5},  // ring A
-    {4, 6}, {6, 7}, {7, 8}, {8, 9}, {5, 9},          // ring B (shares 4-5)
+  return g(10,
+           {
+             {0, 1},
+             {1, 2},
+             {2, 3},
+             {3, 4},
+             {4, 5},
+             {0, 5}, // ring A
+             {4, 6},
+             {6, 7},
+             {7, 8},
+             {8, 9},
+             {5, 9}, // ring B (shares 4-5)
   });
 }
 
@@ -110,42 +127,66 @@ Graph naphthalene() {
 // Ring B: 4-5-6-7-8-9 (shares edge 4-5)
 // Ring C: 8-9-10-11-12-13 (shares edge 8-9)
 Graph phenanthrene() {
-  return g(14, {
-    {0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {0, 5},   // ring A
-    {4, 6}, {6, 7}, {7, 8}, {8, 9}, {5, 9},           // ring B
-    {8, 10}, {10, 11}, {11, 12}, {12, 13}, {9, 13},   // ring C
+  return g(14,
+           {
+             { 0,  1},
+             { 1,  2},
+             { 2,  3},
+             { 3,  4},
+             { 4,  5},
+             { 0,  5}, // ring A
+             { 4,  6},
+             { 6,  7},
+             { 7,  8},
+             { 8,  9},
+             { 5,  9}, // ring B
+             { 8, 10},
+             {10, 11},
+             {11, 12},
+             {12, 13},
+             { 9, 13}, // ring C
   });
 }
 
 // Biphenyl: two C6 rings linked by a single bond between atom 0 and atom 6.
 Graph biphenyl() {
-  return g(12, {
-    {0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {0, 5},     // ring A
-    {6, 7}, {7, 8}, {8, 9}, {9, 10}, {10, 11}, {6, 11}, // ring B
-    {0, 6},                                              // linker
+  return g(12,
+           {
+             { 0,  1},
+             { 1,  2},
+             { 2,  3},
+             { 3,  4},
+             { 4,  5},
+             { 0,  5}, // ring A
+             { 6,  7},
+             { 7,  8},
+             { 8,  9},
+             { 9, 10},
+             {10, 11},
+             { 6, 11}, // ring B
+             { 0,  6}, // linker
   });
 }
 
 // Build a labeled graph with the given topology, vertex
 // labels, and explicit (u, v, label) edge-label triples (symmetrized
 // into the dense edgeLabels matrix).
-LabeledGraph buildLabeled(
-    int numAtoms,
-    std::vector<std::pair<int, int>> edges,
-    std::vector<uint16_t> vertexLabels,
-    std::vector<std::tuple<int, int, uint16_t>> edgeLabelTriples) {
-  LabeledGraph out;
+LabeledGraph buildLabeled(int                                         numAtoms,
+                          std::vector<std::pair<int, int>>            edges,
+                          std::vector<uint16_t>                       vertexLabels,
+                          std::vector<std::tuple<int, int, uint16_t>> edgeLabelTriples) {
+  LabeledGraph                                     out;
   std::vector<std::pair<std::size_t, std::size_t>> edgesPair;
   edgesPair.reserve(edges.size());
-  for (const auto& e : edges) edgesPair.emplace_back(e.first, e.second);
-  out.graph = mcs::buildGraphFromEdges(static_cast<std::size_t>(numAtoms),
-                                       std::move(edgesPair));
+  for (const auto& e : edges)
+    edgesPair.emplace_back(e.first, e.second);
+  out.graph        = mcs::buildGraphFromEdges(static_cast<std::size_t>(numAtoms), std::move(edgesPair));
   out.vertexLabels = std::move(vertexLabels);
   out.edgeLabels.assign(static_cast<std::size_t>(numAtoms) * numAtoms, 0);
   for (const auto& t : edgeLabelTriples) {
-    const int u = std::get<0>(t);
-    const int v = std::get<1>(t);
-    const uint16_t lbl = std::get<2>(t);
+    const int      u                                           = std::get<0>(t);
+    const int      v                                           = std::get<1>(t);
+    const uint16_t lbl                                         = std::get<2>(t);
     out.edgeLabels[static_cast<std::size_t>(u) * numAtoms + v] = lbl;
     out.edgeLabels[static_cast<std::size_t>(v) * numAtoms + u] = lbl;
   }
@@ -169,9 +210,7 @@ void expectFullSelfPair(const MCSResult& r, const Graph& gph) {
 //   - For each (qBond, tBond) in (edgeMappingA[i], edgeMappingB[i]), the
 //     target endpoints are the targets that the query bond's endpoints
 //     mapped to.
-void expectMappingsConsistent(const MCSResult& r,
-                              const Graph& a,
-                              const Graph& b) {
+void expectMappingsConsistent(const MCSResult& r, const Graph& a, const Graph& b) {
   ASSERT_EQ(static_cast<int>(r.mappingA.size()), r.numCommonVertices);
   ASSERT_EQ(static_cast<int>(r.mappingB.size()), r.numCommonVertices);
   ASSERT_EQ(static_cast<int>(r.edgeMappingA.size()), r.numCommonEdges);
@@ -180,10 +219,8 @@ void expectMappingsConsistent(const MCSResult& r,
   // mappingA / mappingB are bijections within the matched subset.
   std::set<std::size_t> qAtoms(r.mappingA.begin(), r.mappingA.end());
   std::set<std::size_t> tAtoms(r.mappingB.begin(), r.mappingB.end());
-  EXPECT_EQ(qAtoms.size(), r.mappingA.size())
-      << "mappingA has duplicate query atoms";
-  EXPECT_EQ(tAtoms.size(), r.mappingB.size())
-      << "mappingB has duplicate target atoms";
+  EXPECT_EQ(qAtoms.size(), r.mappingA.size()) << "mappingA has duplicate query atoms";
+  EXPECT_EQ(tAtoms.size(), r.mappingB.size()) << "mappingB has duplicate target atoms";
 
   // Every query atom is in graph a; every target atom is in graph b.
   for (std::size_t qa : qAtoms) {
@@ -194,8 +231,7 @@ void expectMappingsConsistent(const MCSResult& r,
   }
 
   // Build atom-mapping lookup: query atom -> target atom.
-  std::vector<std::size_t> qToT(a.numVertices,
-                                static_cast<std::size_t>(-1));
+  std::vector<std::size_t> qToT(a.numVertices, static_cast<std::size_t>(-1));
   for (int i = 0; i < r.numCommonVertices; ++i) {
     qToT[r.mappingA[i]] = r.mappingB[i];
   }
@@ -213,12 +249,11 @@ void expectMappingsConsistent(const MCSResult& r,
     EXPECT_LT(tV, static_cast<std::size_t>(b.numVertices));
     const auto mappedU = qToT[qU];
     const auto mappedV = qToT[qV];
-    const bool fwd = (mappedU == tU && mappedV == tV);
-    const bool rev = (mappedU == tV && mappedV == tU);
-    EXPECT_TRUE(fwd || rev)
-        << "Edge mapping (" << qU << "," << qV << ") -> ("
-        << tU << "," << tV << ") inconsistent with atom mapping ("
-        << qU << "->" << mappedU << ", " << qV << "->" << mappedV << ")";
+    const bool fwd     = (mappedU == tU && mappedV == tV);
+    const bool rev     = (mappedU == tV && mappedV == tU);
+    EXPECT_TRUE(fwd || rev) << "Edge mapping (" << qU << "," << qV << ") -> (" << tU << "," << tV
+                            << ") inconsistent with atom mapping (" << qU << "->" << mappedU << ", " << qV << "->"
+                            << mappedV << ")";
   }
 }
 
@@ -230,14 +265,14 @@ void expectMappingsConsistent(const MCSResult& r,
 
 TEST(FMCSDispatch, BatchSingleEntrySelfPathReturnsFullPath) {
   const auto a = path(4);
-  auto r = findSingleMCES(a, a);
+  auto       r = findSingleMCES(a, a);
   expectFullSelfPair(r, a);
   expectMappingsConsistent(r, a, a);
 }
 
 TEST(FMCSDispatch, BatchOfThreeReturnsExpectedSizes) {
   std::vector<Graph> graphs{path(2), path(3), path(4)};
-  auto rs = mcs::fmcs::findMCESfMCSBatch(graphs, graphs);
+  auto               rs = mcs::fmcs::findMCESfMCSBatch(graphs, graphs);
   ASSERT_EQ(rs.size(), graphs.size());
   for (size_t i = 0; i < graphs.size(); ++i) {
     EXPECT_FALSE(rs[i].overflowed);
@@ -251,31 +286,24 @@ TEST(FMCSDispatch, OptionalPerPairTimingsFollowBuildFlag) {
   std::vector<Graph> graphs{path(4), cycle(6)};
   std::vector<float> timesMs;
   if constexpr (nvMolKit::kMCSCollectTimingsEnabled) {
-    auto rs = mcs::fmcs::findMCESfMCSBatch(
-        graphs, graphs, Parameters{}, &timesMs);
+    auto rs = mcs::fmcs::findMCESfMCSBatch(graphs, graphs, Parameters{}, &timesMs);
     ASSERT_EQ(rs.size(), graphs.size());
     ASSERT_EQ(timesMs.size(), graphs.size());
   } else {
-    EXPECT_THROW(
-        (void)mcs::fmcs::findMCESfMCSBatch(
-            graphs, graphs, Parameters{}, &timesMs),
-        std::runtime_error);
+    EXPECT_THROW((void)mcs::fmcs::findMCESfMCSBatch(graphs, graphs, Parameters{}, &timesMs), std::runtime_error);
   }
 }
 
 TEST(FMCSDispatch, OptionalExecutionStatsFollowBuildFlag) {
-  std::vector<Graph> graphs{path(4), cycle(6)};
+  std::vector<Graph>                     graphs{path(4), cycle(6)};
   std::vector<mcs::fmcs::ExecutionStats> stats;
   if constexpr (nvMolKit::kMCSCollectStatsEnabled) {
-    auto rs = mcs::fmcs::findMCESfMCSBatch(
-        graphs, graphs, Parameters{}, nullptr, nullptr, &stats);
+    auto rs = mcs::fmcs::findMCESfMCSBatch(graphs, graphs, Parameters{}, nullptr, nullptr, &stats);
     ASSERT_EQ(rs.size(), graphs.size());
     ASSERT_EQ(stats.size(), graphs.size());
   } else {
-    EXPECT_THROW(
-        (void)mcs::fmcs::findMCESfMCSBatch(
-            graphs, graphs, Parameters{}, nullptr, nullptr, &stats),
-        std::runtime_error);
+    EXPECT_THROW((void)mcs::fmcs::findMCESfMCSBatch(graphs, graphs, Parameters{}, nullptr, nullptr, &stats),
+                 std::runtime_error);
   }
 }
 
@@ -292,7 +320,7 @@ TEST(FMCSDispatch, MismatchedBatchSizesThrows) {
 TEST(FMCSDegenerate, EmptyGraphs) {
   const auto a = g(0, {});
   const auto b = g(0, {});
-  auto r = findSingleMCES(a, b);
+  auto       r = findSingleMCES(a, b);
   EXPECT_EQ(r.numCommonVertices, 0);
   EXPECT_EQ(r.numCommonEdges, 0);
 }
@@ -303,15 +331,21 @@ TEST(FMCSDegenerate, SingleVertex) {
   // as size zero.
   const auto a = g(1, {});
   const auto b = g(1, {});
-  auto r = findSingleMCES(a, b);
+  auto       r = findSingleMCES(a, b);
   EXPECT_EQ(r.numCommonVertices, 0);
   EXPECT_EQ(r.numCommonEdges, 0);
 }
 
 TEST(FMCSDegenerate, SingleEdge) {
-  const auto a = g(2, {{0, 1}});
-  const auto b = g(2, {{0, 1}});
-  auto r = findSingleMCES(a, b);
+  const auto a = g(2,
+                   {
+                     {0, 1}
+  });
+  const auto b = g(2,
+                   {
+                     {0, 1}
+  });
+  auto       r = findSingleMCES(a, b);
   EXPECT_EQ(r.numCommonVertices, 2);
   EXPECT_EQ(r.numCommonEdges, 1);
   expectMappingsConsistent(r, a, b);
@@ -320,7 +354,7 @@ TEST(FMCSDegenerate, SingleEdge) {
 TEST(FMCSDegenerate, OneSideEmpty) {
   const auto a = g(0, {});
   const auto b = path(3);
-  auto r = findSingleMCES(a, b);
+  auto       r = findSingleMCES(a, b);
   EXPECT_EQ(r.numCommonVertices, 0);
   EXPECT_EQ(r.numCommonEdges, 0);
 }
@@ -330,7 +364,7 @@ TEST(FMCSDegenerate, DisjointInputs) {
   // (q_bond, t_bond) pair compatible -> empty MCES.
   const auto a = cycle(3);
   const auto b = g(3, {});
-  auto r = findSingleMCES(a, b);
+  auto       r = findSingleMCES(a, b);
   EXPECT_EQ(r.numCommonVertices, 0);
   EXPECT_EQ(r.numCommonEdges, 0);
 }
@@ -341,7 +375,7 @@ TEST(FMCSDegenerate, DisjointInputs) {
 
 TEST(FMCSBasics, PathEqualLength) {
   const auto p = path(4);
-  auto r = findSingleMCES(p, p);
+  auto       r = findSingleMCES(p, p);
   expectFullSelfPair(r, p);
   expectMappingsConsistent(r, p, p);
 }
@@ -349,7 +383,7 @@ TEST(FMCSBasics, PathEqualLength) {
 TEST(FMCSBasics, PathShorterVsLonger) {
   const auto a = path(3);
   const auto b = path(6);
-  auto r = findSingleMCES(a, b);
+  auto       r = findSingleMCES(a, b);
   EXPECT_EQ(r.numCommonVertices, 3);
   EXPECT_EQ(r.numCommonEdges, 2);
   expectMappingsConsistent(r, a, b);
@@ -359,7 +393,7 @@ TEST(FMCSBasics, TreeVsTree) {
   // K1,3 vs K1,4: the smaller star is a connected subgraph of the larger.
   const auto a = star(3);
   const auto b = star(4);
-  auto r = findSingleMCES(a, b);
+  auto       r = findSingleMCES(a, b);
   EXPECT_EQ(r.numCommonVertices, 4);
   EXPECT_EQ(r.numCommonEdges, 3);
   expectMappingsConsistent(r, a, b);
@@ -370,7 +404,7 @@ TEST(FMCSBasics, HighFanoutStarSelfPair) {
   // one spoke, the hub exposes nine more spokes at once.  A too-small
   // new-bond buffer silently truncated this and missed the full star.
   const auto s = star(10);
-  auto r = findSingleMCES(s, s);
+  auto       r = findSingleMCES(s, s);
   expectFullSelfPair(r, s);
   expectMappingsConsistent(r, s, s);
 }
@@ -381,9 +415,16 @@ TEST(FMCSBasics, StarKeepsHubFrontierForSiblingSpokes) {
   // at either degree-3 diamond vertex.  If a singleton grow from one
   // spoke drops the hub from lastAddedAtoms, sibling spokes are never
   // considered and the search gets stuck at 2 bonds.
-  const auto diamond = g(4, {{0, 1}, {0, 2}, {1, 2}, {1, 3}, {2, 3}});
+  const auto diamond  = g(4,
+                          {
+                           {0, 1},
+                           {0, 2},
+                           {1, 2},
+                           {1, 3},
+                           {2, 3}
+  });
   const auto fourStar = star(4);
-  auto r = findSingleMCES(diamond, fourStar);
+  auto       r        = findSingleMCES(diamond, fourStar);
   EXPECT_EQ(r.numCommonVertices, 4);
   EXPECT_EQ(r.numCommonEdges, 3);
   EXPECT_FALSE(r.overflowed);
@@ -392,7 +433,7 @@ TEST(FMCSBasics, StarKeepsHubFrontierForSiblingSpokes) {
 
 TEST(FMCSBasics, CycleVsCycleSame) {
   const auto c = cycle(6);
-  auto r = findSingleMCES(c, c);
+  auto       r = findSingleMCES(c, c);
   expectFullSelfPair(r, c);
   expectMappingsConsistent(r, c, c);
 }
@@ -402,7 +443,7 @@ TEST(FMCSBasics, CycleVsCycleLarger) {
   // best connected common edge subgraph is a 2-bond path.
   const auto a = cycle(3);
   const auto b = cycle(4);
-  auto r = findSingleMCES(a, b);
+  auto       r = findSingleMCES(a, b);
   EXPECT_EQ(r.numCommonEdges, 2);
   EXPECT_EQ(r.numCommonVertices, 3);
   expectMappingsConsistent(r, a, b);
@@ -411,7 +452,7 @@ TEST(FMCSBasics, CycleVsCycleLarger) {
 TEST(FMCSCompleteRingsOnly, RejectsPartialCycle) {
   Parameters params;
   params.completeRingsOnly = true;
-  const auto result = findSingleMCES(cycle(6), cycle(7), params);
+  const auto result        = findSingleMCES(cycle(6), cycle(7), params);
   EXPECT_EQ(result.numCommonVertices, 0);
   EXPECT_EQ(result.numCommonEdges, 0);
 }
@@ -419,8 +460,8 @@ TEST(FMCSCompleteRingsOnly, RejectsPartialCycle) {
 TEST(FMCSCompleteRingsOnly, AcceptsCompletedCycle) {
   Parameters params;
   params.completeRingsOnly = true;
-  const auto ring = benzene();
-  const auto result = findSingleMCES(toluene(), ring, params);
+  const auto ring          = benzene();
+  const auto result        = findSingleMCES(toluene(), ring, params);
   EXPECT_EQ(result.numCommonVertices, 6);
   EXPECT_EQ(result.numCommonEdges, 6);
 }
@@ -428,8 +469,19 @@ TEST(FMCSCompleteRingsOnly, AcceptsCompletedCycle) {
 TEST(FMCSCompleteRingsOnly, KeepsNonRingTailGrowable) {
   Parameters params;
   params.completeRingsOnly = true;
-  const auto ringWithTail = g(9, {{0, 1}, {1, 2}, {0, 2}, {2, 3}, {3, 4}, {4, 5}, {5, 6}, {6, 7}, {7, 8}});
-  const auto result = findSingleMCES(ringWithTail, path(7), params);
+  const auto ringWithTail  = g(9,
+                               {
+                                {0, 1},
+                                {1, 2},
+                                {0, 2},
+                                {2, 3},
+                                {3, 4},
+                                {4, 5},
+                                {5, 6},
+                                {6, 7},
+                                {7, 8}
+  });
+  const auto result        = findSingleMCES(ringWithTail, path(7), params);
   EXPECT_EQ(result.numCommonVertices, 7);
   EXPECT_EQ(result.numCommonEdges, 6);
 }
@@ -437,7 +489,7 @@ TEST(FMCSCompleteRingsOnly, KeepsNonRingTailGrowable) {
 TEST(FMCSBasics, TreeVsCycle) {
   const auto a = path(3);
   const auto b = cycle(3);
-  auto r = findSingleMCES(a, b);
+  auto       r = findSingleMCES(a, b);
   EXPECT_EQ(r.numCommonEdges, 2);  // path-3 in C3
   EXPECT_EQ(r.numCommonVertices, 3);
   expectMappingsConsistent(r, a, b);
@@ -452,9 +504,17 @@ TEST(FMCSConnected, DisconnectedCommonGraphReturnsOnlyLargestConnected) {
   // Two disjoint edges on each side: 4 atoms / 2 bonds, no path between
   // the two components.  Connected MCES is therefore at most a single
   // edge (the largest connected subgraph of either component).
-  const auto a = g(4, {{0, 1}, {2, 3}});
-  const auto b = g(4, {{0, 1}, {2, 3}});
-  auto r = findSingleMCES(a, b);
+  const auto a = g(4,
+                   {
+                     {0, 1},
+                     {2, 3}
+  });
+  const auto b = g(4,
+                   {
+                     {0, 1},
+                     {2, 3}
+  });
+  auto       r = findSingleMCES(a, b);
   EXPECT_EQ(r.numCommonEdges, 1);
   EXPECT_EQ(r.numCommonVertices, 2);
   expectMappingsConsistent(r, a, b);
@@ -463,9 +523,19 @@ TEST(FMCSConnected, DisconnectedCommonGraphReturnsOnlyLargestConnected) {
 TEST(FMCSConnected, TwoComponentsEachReturnsOneComponent) {
   // Each side has a path-3 component and an isolated edge; connected
   // MCES is the larger component (path-3 -> 2 bonds).
-  const auto a = g(5, {{0, 1}, {1, 2}, {3, 4}});
-  const auto b = g(5, {{0, 1}, {1, 2}, {3, 4}});
-  auto r = findSingleMCES(a, b);
+  const auto a = g(5,
+                   {
+                     {0, 1},
+                     {1, 2},
+                     {3, 4}
+  });
+  const auto b = g(5,
+                   {
+                     {0, 1},
+                     {1, 2},
+                     {3, 4}
+  });
+  auto       r = findSingleMCES(a, b);
   EXPECT_EQ(r.numCommonEdges, 2);
   EXPECT_EQ(r.numCommonVertices, 3);
   expectMappingsConsistent(r, a, b);
@@ -480,7 +550,7 @@ TEST(FMCSConnected, TwoComponentsEachReturnsOneComponent) {
 
 TEST(FMCSMolecule, BenzeneVsBenzene) {
   const auto a = benzene();
-  auto r = findSingleMCES(a, a);
+  auto       r = findSingleMCES(a, a);
   expectFullSelfPair(r, a);
   expectMappingsConsistent(r, a, a);
 }
@@ -490,7 +560,7 @@ TEST(FMCSMolecule, BenzeneVsToluene) {
   // topology only, so aromatic-vs-single bond labelling is ignored).
   const auto a = benzene();
   const auto b = toluene();
-  auto r = findSingleMCES(a, b);
+  auto       r = findSingleMCES(a, b);
   EXPECT_EQ(r.numCommonVertices, 6);
   EXPECT_EQ(r.numCommonEdges, 6);
   expectMappingsConsistent(r, a, b);
@@ -501,7 +571,7 @@ TEST(FMCSMolecule, BenzeneVsCyclohexaneTopologyOnly) {
   // bond labels so both look like C6.
   const auto a = benzene();
   const auto b = cycle(6);  // cyclohexane topology = 6-cycle
-  auto r = findSingleMCES(a, b);
+  auto       r = findSingleMCES(a, b);
   EXPECT_EQ(r.numCommonVertices, 6);
   EXPECT_EQ(r.numCommonEdges, 6);
   expectMappingsConsistent(r, a, b);
@@ -512,7 +582,7 @@ TEST(FMCSMolecule, NaphthaleneVsPhenanthrene) {
   // terminal rings share an edge, matching naphthalene's topology).
   const auto a = naphthalene();
   const auto b = phenanthrene();
-  auto r = findSingleMCES(a, b);
+  auto       r = findSingleMCES(a, b);
   EXPECT_EQ(r.numCommonVertices, 10);
   EXPECT_EQ(r.numCommonEdges, 11);
   expectMappingsConsistent(r, a, b);
@@ -520,7 +590,7 @@ TEST(FMCSMolecule, NaphthaleneVsPhenanthrene) {
 
 TEST(FMCSMolecule, BiphenylVsBiphenyl) {
   const auto a = biphenyl();
-  auto r = findSingleMCES(a, a);
+  auto       r = findSingleMCES(a, a);
   expectFullSelfPair(r, a);
   expectMappingsConsistent(r, a, a);
 }
@@ -529,16 +599,51 @@ TEST(FMCSRegression, FixturePair00x03UnlabeledTopology) {
   // First non-overflow mismatch from tests/test_fmcs_parity.py:
   // sampled_smiles pair00x03, unlabeled.  RDKit's connected MCES is
   // the 17-bond subgraph of the first molecule that omits edge (2,3).
-  const auto a = g(17, {
-      {0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {5, 6},
-      {5, 7}, {7, 8}, {8, 9}, {9, 10}, {10, 11}, {11, 12},
-      {12, 13}, {12, 14}, {14, 15}, {4, 16}, {1, 16}, {9, 15}});
-  const auto b = g(18, {
-      {0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {5, 6},
-      {6, 7}, {7, 8}, {8, 9}, {8, 10}, {10, 11}, {11, 12},
-      {12, 13}, {13, 14}, {13, 15}, {15, 16}, {3, 17},
-      {1, 17}, {3, 6}, {10, 16}});
-  auto r = findSingleMCES(a, b);
+  const auto a = g(17,
+                   {
+                     { 0,  1},
+                     { 1,  2},
+                     { 2,  3},
+                     { 3,  4},
+                     { 4,  5},
+                     { 5,  6},
+                     { 5,  7},
+                     { 7,  8},
+                     { 8,  9},
+                     { 9, 10},
+                     {10, 11},
+                     {11, 12},
+                     {12, 13},
+                     {12, 14},
+                     {14, 15},
+                     { 4, 16},
+                     { 1, 16},
+                     { 9, 15}
+  });
+  const auto b = g(18,
+                   {
+                     { 0,  1},
+                     { 1,  2},
+                     { 2,  3},
+                     { 3,  4},
+                     { 4,  5},
+                     { 5,  6},
+                     { 6,  7},
+                     { 7,  8},
+                     { 8,  9},
+                     { 8, 10},
+                     {10, 11},
+                     {11, 12},
+                     {12, 13},
+                     {13, 14},
+                     {13, 15},
+                     {15, 16},
+                     { 3, 17},
+                     { 1, 17},
+                     { 3,  6},
+                     {10, 16}
+  });
+  auto       r = findSingleMCES(a, b);
   EXPECT_EQ(r.numCommonVertices, 17);
   EXPECT_EQ(r.numCommonEdges, 17);
   EXPECT_FALSE(r.overflowed);
@@ -548,17 +653,53 @@ TEST(FMCSRegression, FixturePair00x03UnlabeledTopology) {
 TEST(FMCSRegression, FixturePair01x03UnlabeledTopology) {
   // Current first non-overflow mismatch after restoring Stage 1 coverage:
   // sampled_smiles pair01x03, unlabeled.  RDKit's connected MCES is 17/17.
-  const auto a = g(19, {
-      {0, 1}, {1, 2}, {2, 3}, {2, 4}, {4, 5}, {5, 6},
-      {6, 7}, {7, 8}, {8, 9}, {9, 10}, {10, 11}, {11, 12},
-      {10, 13}, {13, 14}, {1, 15}, {15, 16}, {16, 17},
-      {16, 18}, {1, 18}, {8, 14}});
-  const auto b = g(18, {
-      {0, 1}, {1, 2}, {2, 3}, {3, 4}, {4, 5}, {5, 6},
-      {6, 7}, {7, 8}, {8, 9}, {8, 10}, {10, 11}, {11, 12},
-      {12, 13}, {13, 14}, {13, 15}, {15, 16}, {3, 17},
-      {1, 17}, {3, 6}, {10, 16}});
-  auto r = findSingleMCES(a, b);
+  const auto a = g(19,
+                   {
+                     { 0,  1},
+                     { 1,  2},
+                     { 2,  3},
+                     { 2,  4},
+                     { 4,  5},
+                     { 5,  6},
+                     { 6,  7},
+                     { 7,  8},
+                     { 8,  9},
+                     { 9, 10},
+                     {10, 11},
+                     {11, 12},
+                     {10, 13},
+                     {13, 14},
+                     { 1, 15},
+                     {15, 16},
+                     {16, 17},
+                     {16, 18},
+                     { 1, 18},
+                     { 8, 14}
+  });
+  const auto b = g(18,
+                   {
+                     { 0,  1},
+                     { 1,  2},
+                     { 2,  3},
+                     { 3,  4},
+                     { 4,  5},
+                     { 5,  6},
+                     { 6,  7},
+                     { 7,  8},
+                     { 8,  9},
+                     { 8, 10},
+                     {10, 11},
+                     {11, 12},
+                     {12, 13},
+                     {13, 14},
+                     {13, 15},
+                     {15, 16},
+                     { 3, 17},
+                     { 1, 17},
+                     { 3,  6},
+                     {10, 16}
+  });
+  auto       r = findSingleMCES(a, b);
   EXPECT_EQ(r.numCommonVertices, 17);
   EXPECT_EQ(r.numCommonEdges, 17);
   EXPECT_FALSE(r.overflowed);
@@ -568,9 +709,22 @@ TEST(FMCSRegression, FixturePair01x03UnlabeledTopology) {
 TEST(FMCSRegression, FiveNodePathInsideTriangleWithLeaves) {
   // Query contains a 4-edge path 4-0-2-1-3 plus the extra chord (0,1).
   // Target is exactly a 4-edge path 0-3-2-1-4.
-  const auto a = g(5, {{0, 1}, {0, 2}, {0, 4}, {1, 2}, {1, 3}});
-  const auto b = g(5, {{0, 3}, {1, 2}, {1, 4}, {2, 3}});
-  auto r = findSingleMCES(a, b);
+  const auto a = g(5,
+                   {
+                     {0, 1},
+                     {0, 2},
+                     {0, 4},
+                     {1, 2},
+                     {1, 3}
+  });
+  const auto b = g(5,
+                   {
+                     {0, 3},
+                     {1, 2},
+                     {1, 4},
+                     {2, 3}
+  });
+  auto       r = findSingleMCES(a, b);
   EXPECT_EQ(r.numCommonVertices, 5);
   EXPECT_EQ(r.numCommonEdges, 4);
   EXPECT_FALSE(r.overflowed);
@@ -588,13 +742,16 @@ TEST(FMCSRegression, FiveNodePathInsideTriangleWithLeaves) {
 TEST(FMCSLabels, NullLabelTopology) {
   // All-zero vertex labels; edge labels uniform.  Should match
   // identically to the topology-only case (path-3 self-pair).
-  auto m = buildLabeled(3,
-      {{0, 1}, {1, 2}},
-      /*vertexLabels=*/{0, 0, 0},
-      /*edges=*/{{0, 1, 1}, {1, 2, 1}});
+  auto                      m = buildLabeled(3,
+                                             {
+                          {0, 1},
+                          {1, 2}
+  },
+                        /*vertexLabels=*/{0, 0, 0},
+                        /*edges=*/{{0, 1, 1}, {1, 2, 1}});
   std::vector<LabeledGraph> a{m};
   std::vector<LabeledGraph> b{m};
-  auto rs = mcs::fmcs::findMCESfMCSBatchLabeled(a, b);
+  auto                      rs = mcs::fmcs::findMCESfMCSBatchLabeled(a, b);
   ASSERT_EQ(rs.size(), 1u);
   EXPECT_EQ(rs[0].numCommonVertices, 3);
   EXPECT_EQ(rs[0].numCommonEdges, 2);
@@ -602,13 +759,16 @@ TEST(FMCSLabels, NullLabelTopology) {
 
 TEST(FMCSLabels, VertexLabelMatch) {
   // Two paths with identical vertex labels at corresponding positions.
-  auto m = buildLabeled(3,
-      {{0, 1}, {1, 2}},
-      {7, 8, 9},
-      {{0, 1, 1}, {1, 2, 1}});
+  auto                      m = buildLabeled(3,
+                                             {
+                          {0, 1},
+                          {1, 2}
+  },
+                                             {7, 8, 9},
+                                             {{0, 1, 1}, {1, 2, 1}});
   std::vector<LabeledGraph> a{m};
   std::vector<LabeledGraph> b{m};
-  auto rs = mcs::fmcs::findMCESfMCSBatchLabeled(a, b);
+  auto                      rs = mcs::fmcs::findMCESfMCSBatchLabeled(a, b);
   ASSERT_EQ(rs.size(), 1u);
   EXPECT_EQ(rs[0].numCommonVertices, 3);
   EXPECT_EQ(rs[0].numCommonEdges, 2);
@@ -617,17 +777,23 @@ TEST(FMCSLabels, VertexLabelMatch) {
 TEST(FMCSLabels, VertexLabelMismatch) {
   // Labels {7, 8, 9} vs {7, 8, 10} -- atom 2 doesn't match across.
   // The connected MCES drops the edge (1,2) and ends at the (0,1) edge.
-  auto a = buildLabeled(3,
-      {{0, 1}, {1, 2}},
-      {7, 8, 9},
-      {{0, 1, 1}, {1, 2, 1}});
-  auto b = buildLabeled(3,
-      {{0, 1}, {1, 2}},
-      {7, 8, 10},
-      {{0, 1, 1}, {1, 2, 1}});
+  auto                      a = buildLabeled(3,
+                                             {
+                          {0, 1},
+                          {1, 2}
+  },
+                                             {7, 8, 9},
+                                             {{0, 1, 1}, {1, 2, 1}});
+  auto                      b = buildLabeled(3,
+                                             {
+                          {0, 1},
+                          {1, 2}
+  },
+                                             {7, 8, 10},
+                                             {{0, 1, 1}, {1, 2, 1}});
   std::vector<LabeledGraph> as{a};
   std::vector<LabeledGraph> bs{b};
-  auto rs = mcs::fmcs::findMCESfMCSBatchLabeled(as, bs);
+  auto                      rs = mcs::fmcs::findMCESfMCSBatchLabeled(as, bs);
   ASSERT_EQ(rs.size(), 1u);
   EXPECT_EQ(rs[0].numCommonEdges, 1);
   EXPECT_EQ(rs[0].numCommonVertices, 2);
@@ -635,13 +801,17 @@ TEST(FMCSLabels, VertexLabelMismatch) {
 
 TEST(FMCSLabels, EdgeLabelMatch) {
   // Two cycles with identical edge labels.
-  auto m = buildLabeled(3,
-      {{0, 1}, {1, 2}, {0, 2}},
-      {0, 0, 0},
-      {{0, 1, 5}, {1, 2, 5}, {0, 2, 5}});
+  auto                      m = buildLabeled(3,
+                                             {
+                          {0, 1},
+                          {1, 2},
+                          {0, 2}
+  },
+                                             {0, 0, 0},
+                                             {{0, 1, 5}, {1, 2, 5}, {0, 2, 5}});
   std::vector<LabeledGraph> a{m};
   std::vector<LabeledGraph> b{m};
-  auto rs = mcs::fmcs::findMCESfMCSBatchLabeled(a, b);
+  auto                      rs = mcs::fmcs::findMCESfMCSBatchLabeled(a, b);
   ASSERT_EQ(rs.size(), 1u);
   EXPECT_EQ(rs[0].numCommonVertices, 3);
   EXPECT_EQ(rs[0].numCommonEdges, 3);
@@ -650,17 +820,23 @@ TEST(FMCSLabels, EdgeLabelMatch) {
 TEST(FMCSLabels, EdgeLabelMismatch) {
   // Path-3, but one bond's label differs.  That edge can't appear in
   // the MCES; only the matching one survives.
-  auto a = buildLabeled(3,
-      {{0, 1}, {1, 2}},
-      {0, 0, 0},
-      {{0, 1, 5}, {1, 2, 7}});
-  auto b = buildLabeled(3,
-      {{0, 1}, {1, 2}},
-      {0, 0, 0},
-      {{0, 1, 5}, {1, 2, 9}});
+  auto                      a = buildLabeled(3,
+                                             {
+                          {0, 1},
+                          {1, 2}
+  },
+                                             {0, 0, 0},
+                                             {{0, 1, 5}, {1, 2, 7}});
+  auto                      b = buildLabeled(3,
+                                             {
+                          {0, 1},
+                          {1, 2}
+  },
+                                             {0, 0, 0},
+                                             {{0, 1, 5}, {1, 2, 9}});
   std::vector<LabeledGraph> as{a};
   std::vector<LabeledGraph> bs{b};
-  auto rs = mcs::fmcs::findMCESfMCSBatchLabeled(as, bs);
+  auto                      rs = mcs::fmcs::findMCESfMCSBatchLabeled(as, bs);
   ASSERT_EQ(rs.size(), 1u);
   EXPECT_EQ(rs[0].numCommonEdges, 1);
   EXPECT_EQ(rs[0].numCommonVertices, 2);
@@ -669,17 +845,25 @@ TEST(FMCSLabels, EdgeLabelMismatch) {
 TEST(FMCSLabels, BothLabelsPartialOverlap) {
   // Path-4 with labels diverging at vertex 3 AND edge (2,3) on side B.
   // MCES is the agreeing prefix: 3 atoms, 2 bonds.
-  auto a = buildLabeled(4,
-      {{0, 1}, {1, 2}, {2, 3}},
-      {1, 2, 3, 4},
-      {{0, 1, 5}, {1, 2, 5}, {2, 3, 5}});
-  auto b = buildLabeled(4,
-      {{0, 1}, {1, 2}, {2, 3}},
-      {1, 2, 3, 9},          // vertex 3 label diverges
-      {{0, 1, 5}, {1, 2, 5}, {2, 3, 7}});  // and edge (2,3) too
+  auto                      a = buildLabeled(4,
+                                             {
+                          {0, 1},
+                          {1, 2},
+                          {2, 3}
+  },
+                                             {1, 2, 3, 4},
+                                             {{0, 1, 5}, {1, 2, 5}, {2, 3, 5}});
+  auto                      b = buildLabeled(4,
+                                             {
+                          {0, 1},
+                          {1, 2},
+                          {2, 3}
+  },
+                                             {1, 2, 3, 9},                        // vertex 3 label diverges
+                                             {{0, 1, 5}, {1, 2, 5}, {2, 3, 7}});  // and edge (2,3) too
   std::vector<LabeledGraph> as{a};
   std::vector<LabeledGraph> bs{b};
-  auto rs = mcs::fmcs::findMCESfMCSBatchLabeled(as, bs);
+  auto                      rs = mcs::fmcs::findMCESfMCSBatchLabeled(as, bs);
   ASSERT_EQ(rs.size(), 1u);
   EXPECT_EQ(rs[0].numCommonEdges, 2);
   EXPECT_EQ(rs[0].numCommonVertices, 3);
@@ -687,18 +871,24 @@ TEST(FMCSLabels, BothLabelsPartialOverlap) {
 
 TEST(FMCSLabels, AtomCompareAnyIgnoresVertexLabels) {
   auto a = buildLabeled(3,
-      {{0, 1}, {1, 2}},
-      {1, 2, 3},
-      {{0, 1, 5}, {1, 2, 5}});
+                        {
+                          {0, 1},
+                          {1, 2}
+  },
+                        {1, 2, 3},
+                        {{0, 1, 5}, {1, 2, 5}});
   auto b = buildLabeled(3,
-      {{0, 1}, {1, 2}},
-      {7, 8, 9},
-      {{0, 1, 5}, {1, 2, 5}});
+                        {
+                          {0, 1},
+                          {1, 2}
+  },
+                        {7, 8, 9},
+                        {{0, 1, 5}, {1, 2, 5}});
 
   Parameters params;
   params.matchVertexLabels = false;
-  params.matchEdgeLabels = true;
-  auto rs = mcs::fmcs::findMCESfMCSBatchLabeled({a}, {b}, params);
+  params.matchEdgeLabels   = true;
+  auto rs                  = mcs::fmcs::findMCESfMCSBatchLabeled({a}, {b}, params);
   ASSERT_EQ(rs.size(), 1u);
   EXPECT_EQ(rs[0].numCommonEdges, 2);
   EXPECT_EQ(rs[0].numCommonVertices, 3);
@@ -707,18 +897,24 @@ TEST(FMCSLabels, AtomCompareAnyIgnoresVertexLabels) {
 
 TEST(FMCSLabels, BondCompareAnyIgnoresEdgeLabels) {
   auto a = buildLabeled(3,
-      {{0, 1}, {1, 2}},
-      {1, 2, 3},
-      {{0, 1, 5}, {1, 2, 7}});
+                        {
+                          {0, 1},
+                          {1, 2}
+  },
+                        {1, 2, 3},
+                        {{0, 1, 5}, {1, 2, 7}});
   auto b = buildLabeled(3,
-      {{0, 1}, {1, 2}},
-      {1, 2, 3},
-      {{0, 1, 11}, {1, 2, 13}});
+                        {
+                          {0, 1},
+                          {1, 2}
+  },
+                        {1, 2, 3},
+                        {{0, 1, 11}, {1, 2, 13}});
 
   Parameters params;
   params.matchVertexLabels = true;
-  params.matchEdgeLabels = false;
-  auto rs = mcs::fmcs::findMCESfMCSBatchLabeled({a}, {b}, params);
+  params.matchEdgeLabels   = false;
+  auto rs                  = mcs::fmcs::findMCESfMCSBatchLabeled({a}, {b}, params);
   ASSERT_EQ(rs.size(), 1u);
   EXPECT_EQ(rs[0].numCommonEdges, 2);
   EXPECT_EQ(rs[0].numCommonVertices, 3);
@@ -728,14 +924,21 @@ TEST(FMCSLabels, BondCompareAnyIgnoresEdgeLabels) {
 TEST(FMCSLabels, RingMembershipEncodedLabelsRestrictMatches) {
   constexpr uint16_t kRingAtom = static_cast<uint16_t>(6 | (1u << 9));
   constexpr uint16_t kRingBond = static_cast<uint16_t>(1 | (1u << 9));
-  auto ring = buildLabeled(3,
-      {{0, 1}, {1, 2}, {0, 2}},
-      {kRingAtom, kRingAtom, kRingAtom},
-      {{0, 1, kRingBond}, {1, 2, kRingBond}, {0, 2, kRingBond}});
-  auto chain = buildLabeled(3,
-      {{0, 1}, {1, 2}},
-      {6, 6, 6},
-      {{0, 1, 1}, {1, 2, 1}});
+  auto               ring      = buildLabeled(3,
+                                              {
+                             {0, 1},
+                             {1, 2},
+                             {0, 2}
+  },
+                                              {kRingAtom, kRingAtom, kRingAtom},
+                                              {{0, 1, kRingBond}, {1, 2, kRingBond}, {0, 2, kRingBond}});
+  auto               chain     = buildLabeled(3,
+                                              {
+                              {0, 1},
+                              {1, 2}
+  },
+                                              {6, 6, 6},
+                                              {{0, 1, 1}, {1, 2, 1}});
 
   auto strict = mcs::fmcs::findMCESfMCSBatchLabeled({ring}, {chain});
   ASSERT_EQ(strict.size(), 1u);
@@ -744,9 +947,8 @@ TEST(FMCSLabels, RingMembershipEncodedLabelsRestrictMatches) {
 
   Parameters compareAny;
   compareAny.matchVertexLabels = false;
-  compareAny.matchEdgeLabels = false;
-  auto topologyOnly = mcs::fmcs::findMCESfMCSBatchLabeled(
-      {ring}, {chain}, compareAny);
+  compareAny.matchEdgeLabels   = false;
+  auto topologyOnly            = mcs::fmcs::findMCESfMCSBatchLabeled({ring}, {chain}, compareAny);
   ASSERT_EQ(topologyOnly.size(), 1u);
   EXPECT_EQ(topologyOnly[0].numCommonEdges, 2);
   EXPECT_EQ(topologyOnly[0].numCommonVertices, 3);
@@ -759,25 +961,25 @@ TEST(FMCSLabels, RingMembershipEncodedLabelsRestrictMatches) {
 
 TEST(FMCSTiers, MaxSize16) {
   const auto p = path(16);
-  auto r = findSingleMCES(p, p);
+  auto       r = findSingleMCES(p, p);
   expectFullSelfPair(r, p);
 }
 
 TEST(FMCSTiers, MaxSize32) {
   const auto p = path(32);
-  auto r = findSingleMCES(p, p);
+  auto       r = findSingleMCES(p, p);
   expectFullSelfPair(r, p);
 }
 
 TEST(FMCSTiers, MaxSize64) {
   const auto p = path(64);
-  auto r = findSingleMCES(p, p);
+  auto       r = findSingleMCES(p, p);
   expectFullSelfPair(r, p);
 }
 
 TEST(FMCSTiers, MaxSize128) {
   const auto p = path(128);
-  auto r = findSingleMCES(p, p);
+  auto       r = findSingleMCES(p, p);
   expectFullSelfPair(r, p);
 }
 
@@ -786,7 +988,7 @@ TEST(FMCSBlockSize, SupportedSpecializationsMatchDefault) {
   for (int blockSize : {128, 512}) {
     Parameters params;
     params.blockSize = blockSize;
-    auto r = findSingleMCES(p, p, params);
+    auto r           = findSingleMCES(p, p, params);
     expectFullSelfPair(r, p);
   }
 }
@@ -796,9 +998,7 @@ TEST(FMCSBlockSize, RejectsOneWarpBlockSize) {
   for (int blockSize : {32, 64, 256}) {
     Parameters params;
     params.blockSize = blockSize;
-    EXPECT_THROW(
-        (void)mcs::fmcs::findMCESfMCSBatch({p}, {p}, params),
-        std::invalid_argument);
+    EXPECT_THROW((void)mcs::fmcs::findMCESfMCSBatch({p}, {p}, params), std::invalid_argument);
   }
 }
 
@@ -810,16 +1010,15 @@ TEST(FMCSBlockSize, BlockSize512Tier128SucceedsWithGlobalScratch) {
   const auto p = path(128);
 
   Parameters block128;
-  block128.blockSize = 128;
+  block128.blockSize  = 128;
   const auto expected = findSingleMCES(p, p, block128);
   expectFullSelfPair(expected, p);
 
-  for (FmcsScratchLocation loc :
-       {FmcsScratchLocation::Auto, FmcsScratchLocation::Global}) {
+  for (FmcsScratchLocation loc : {FmcsScratchLocation::Auto, FmcsScratchLocation::Global}) {
     Parameters params;
-    params.blockSize = 512;
+    params.blockSize       = 512;
     params.scratchLocation = loc;
-    const auto r = findSingleMCES(p, p, params);
+    const auto r           = findSingleMCES(p, p, params);
     EXPECT_FALSE(r.overflowed);
     EXPECT_EQ(r.numCommonVertices, expected.numCommonVertices);
     EXPECT_EQ(r.numCommonEdges, expected.numCommonEdges);
@@ -833,11 +1032,9 @@ TEST(FMCSBlockSize, BlockSize512Tier128RejectsExplicitSharedScratch) {
   // missing kernel instantiation.
   const auto p = path(128);
   Parameters params;
-  params.blockSize = 512;
+  params.blockSize       = 512;
   params.scratchLocation = FmcsScratchLocation::Shared;
-  EXPECT_THROW(
-      (void)mcs::fmcs::findMCESfMCSBatch({p}, {p}, params),
-      std::invalid_argument);
+  EXPECT_THROW((void)mcs::fmcs::findMCESfMCSBatch({p}, {p}, params), std::invalid_argument);
 }
 
 TEST(FMCSBlockSize, ForcedGlobalScratchMatchesSharedAtSmallTier) {
@@ -847,14 +1044,14 @@ TEST(FMCSBlockSize, ForcedGlobalScratchMatchesSharedAtSmallTier) {
   const std::vector<Graph> graphs{path(48), cycle(40), star(30)};
   for (const auto& gph : graphs) {
     Parameters shared;
-    shared.blockSize = 512;
+    shared.blockSize       = 512;
     shared.scratchLocation = FmcsScratchLocation::Shared;
-    const auto rShared = findSingleMCES(gph, gph, shared);
+    const auto rShared     = findSingleMCES(gph, gph, shared);
 
     Parameters global;
-    global.blockSize = 512;
+    global.blockSize       = 512;
     global.scratchLocation = FmcsScratchLocation::Global;
-    const auto rGlobal = findSingleMCES(gph, gph, global);
+    const auto rGlobal     = findSingleMCES(gph, gph, global);
 
     EXPECT_EQ(rShared.numCommonVertices, rGlobal.numCommonVertices);
     EXPECT_EQ(rShared.numCommonEdges, rGlobal.numCommonEdges);
@@ -869,9 +1066,9 @@ TEST(FMCSBlockSize, BlockSize512MixedTierBatchPlacesPerTier) {
   // and no pair is dropped.
   std::vector<Graph> a{path(8), path(24), path(48), path(120)};
   std::vector<Graph> b = a;
-  Parameters params;
+  Parameters         params;
   params.blockSize = 512;  // scratchLocation defaults to Auto
-  auto rs = mcs::fmcs::findMCESfMCSBatch(a, b, params);
+  auto rs          = mcs::fmcs::findMCESfMCSBatch(a, b, params);
   ASSERT_EQ(rs.size(), a.size());
   for (size_t i = 0; i < a.size(); ++i) {
     EXPECT_FALSE(rs[i].overflowed) << "pair " << i;
@@ -888,10 +1085,16 @@ TEST(FMCSObjective, MaximizeBondsPreferredOverVerticesWhenTie) {
   // 3-atom triangle (3 atoms, 3 bonds) as connected subgraphs.  Target
   // is just the triangle.  Both candidate MCSes have 3 atoms; the
   // triangle has more bonds, so MaximizeBonds picks it.
-  const auto a = g(4, {{0, 1}, {1, 2}, {0, 2}, {2, 3}});
+  const auto a = g(4,
+                   {
+                     {0, 1},
+                     {1, 2},
+                     {0, 2},
+                     {2, 3}
+  });
   // Triangle on a, plus a tail 2-3.
   const auto b = cycle(3);
-  auto r = findSingleMCES(a, b);
+  auto       r = findSingleMCES(a, b);
   EXPECT_EQ(r.numCommonVertices, 3);
   EXPECT_EQ(r.numCommonEdges, 3);
   expectMappingsConsistent(r, a, b);
@@ -904,8 +1107,8 @@ TEST(FMCSObjective, MaximizeBondsPreferredOverVerticesWhenTie) {
 TEST(FMCSBatch, MixedSizes) {
   // One pair per tier.
   std::vector<Graph> a{path(8), path(24), path(48), path(96)};
-  std::vector<Graph> b = a;
-  auto rs = mcs::fmcs::findMCESfMCSBatch(a, b);
+  std::vector<Graph> b  = a;
+  auto               rs = mcs::fmcs::findMCESfMCSBatch(a, b);
   ASSERT_EQ(rs.size(), 4u);
   for (size_t i = 0; i < a.size(); ++i) {
     EXPECT_FALSE(rs[i].overflowed) << "pair " << i;
@@ -916,18 +1119,17 @@ TEST(FMCSBatch, MixedSizes) {
 TEST(FMCSBatch, EmptyInputReturnsEmpty) {
   std::vector<Graph> a;
   std::vector<Graph> b;
-  auto rs = mcs::fmcs::findMCESfMCSBatch(a, b);
+  auto               rs = mcs::fmcs::findMCESfMCSBatch(a, b);
   EXPECT_TRUE(rs.empty());
 }
 
 TEST(FMCSBatch, CollectTimingsFollowsBuildFlag) {
-  const auto p = path(8);
-  std::vector<float> timesMs;
+  const auto                  p = path(8);
+  std::vector<float>          timesMs;
   std::vector<ExecutionStats> timingStats;
 
   if constexpr (nvMolKit::kMCSCollectTimingsEnabled) {
-    auto rs = mcs::fmcs::findMCESfMCSBatch(
-        {p}, {p}, {}, &timesMs, nullptr, nullptr, &timingStats);
+    auto rs = mcs::fmcs::findMCESfMCSBatch({p}, {p}, {}, &timesMs, nullptr, nullptr, &timingStats);
     ASSERT_EQ(rs.size(), 1u);
     ASSERT_EQ(timesMs.size(), 1u);
     ASSERT_EQ(timingStats.size(), 1u);
@@ -937,29 +1139,23 @@ TEST(FMCSBatch, CollectTimingsFollowsBuildFlag) {
     EXPECT_GT(timingStats[0].phase2Clocks, 0u);
     expectFullSelfPair(rs[0], p);
   } else {
-    EXPECT_THROW(
-        (void)mcs::fmcs::findMCESfMCSBatch(
-            {p}, {p}, {}, &timesMs, nullptr, nullptr, &timingStats),
-        std::runtime_error);
+    EXPECT_THROW((void)mcs::fmcs::findMCESfMCSBatch({p}, {p}, {}, &timesMs, nullptr, nullptr, &timingStats),
+                 std::runtime_error);
   }
 }
 
 TEST(FMCSBatch, CollectStatsFollowsBuildFlag) {
-  const auto p = path(8);
+  const auto                  p = path(8);
   std::vector<ExecutionStats> stats;
 
   if constexpr (nvMolKit::kMCSCollectStatsEnabled) {
-    auto rs = mcs::fmcs::findMCESfMCSBatch(
-        {p}, {p}, {}, nullptr, nullptr, &stats);
+    auto rs = mcs::fmcs::findMCESfMCSBatch({p}, {p}, {}, nullptr, nullptr, &stats);
     ASSERT_EQ(rs.size(), 1u);
     ASSERT_EQ(stats.size(), 1u);
     EXPECT_GT(stats[0].totalClocks, 0u);
     expectFullSelfPair(rs[0], p);
   } else {
-    EXPECT_THROW(
-        (void)mcs::fmcs::findMCESfMCSBatch(
-            {p}, {p}, {}, nullptr, nullptr, &stats),
-        std::runtime_error);
+    EXPECT_THROW((void)mcs::fmcs::findMCESfMCSBatch({p}, {p}, {}, nullptr, nullptr, &stats), std::runtime_error);
   }
 }
 
@@ -969,7 +1165,7 @@ TEST(FMCSBatch, TwoPairsDifferentAnswersSameTier) {
   // or vice versa.
   std::vector<Graph> a{path(3), star(3)};
   std::vector<Graph> b{path(6), star(4)};
-  auto rs = mcs::fmcs::findMCESfMCSBatch(a, b);
+  auto               rs = mcs::fmcs::findMCESfMCSBatch(a, b);
   ASSERT_EQ(rs.size(), 2u);
 
   EXPECT_EQ(rs[0].numCommonVertices, 3);
@@ -986,7 +1182,7 @@ TEST(FMCSBatch, NoCommonPairAdjacentToFullMatch) {
   // contaminate the full-match pair in the middle.
   std::vector<Graph> a{g(3, {}), path(5), path(2)};
   std::vector<Graph> b{path(4), path(5), g(2, {})};
-  auto rs = mcs::fmcs::findMCESfMCSBatch(a, b);
+  auto               rs = mcs::fmcs::findMCESfMCSBatch(a, b);
   ASSERT_EQ(rs.size(), 3u);
 
   EXPECT_EQ(rs[0].numCommonVertices, 0);
@@ -1004,8 +1200,8 @@ TEST(FMCSBatch, NoCommonPairAdjacentToFullMatch) {
 TEST(FMCSBatch, EmptyPairInBatch) {
   // Middle pair empty; flanking pairs should still produce results.
   std::vector<Graph> a{path(3), g(0, {}), path(5)};
-  std::vector<Graph> b = a;
-  auto rs = mcs::fmcs::findMCESfMCSBatch(a, b);
+  std::vector<Graph> b  = a;
+  auto               rs = mcs::fmcs::findMCESfMCSBatch(a, b);
   ASSERT_EQ(rs.size(), 3u);
   EXPECT_EQ(rs[0].numCommonEdges, 2);
   EXPECT_EQ(rs[1].numCommonEdges, 0);
@@ -1015,7 +1211,7 @@ TEST(FMCSBatch, EmptyPairInBatch) {
 TEST(FMCSBatch, HonorsBatchSizeChunksResults) {
   std::vector<Graph> a{path(3), star(3), cycle(4), path(5), g(4, {})};
   std::vector<Graph> b{path(6), star(4), cycle(4), path(7), path(3)};
-  Parameters params;
+  Parameters         params;
   params.batchSize = 2;
 
   auto rs = mcs::fmcs::findMCESfMCSBatch(a, b, params);
@@ -1034,7 +1230,7 @@ TEST(FMCSBatch, HonorsBatchSizeChunksResults) {
 TEST(FMCSBatch, MultiExecutorChunksResults) {
   std::vector<Graph> a{path(3), star(3), cycle(4), path(5), g(4, {})};
   std::vector<Graph> b{path(6), star(4), cycle(4), path(7), path(3)};
-  Parameters params;
+  Parameters         params;
   params.batchSize          = 1;
   params.executorsPerRunner = 2;
 
@@ -1056,7 +1252,7 @@ TEST(FMCSBatch, ManyTinyPairsReusePerBlockSlabs) {
   // over-provisioned per pair.  It still creates far more blocks than
   // the small correctness batches and exercises repeated queue/cache
   // slab slices within one tier launch.
-  constexpr int kNumPairs = 512;
+  constexpr int      kNumPairs = 512;
   std::vector<Graph> a;
   std::vector<Graph> b;
   a.reserve(kNumPairs);
@@ -1078,39 +1274,56 @@ TEST(FMCSBatch, ManyTinyPairsReusePerBlockSlabs) {
 
 TEST(FMCSBatch, LabeledMixed) {
   // Two labelled pairs in one batch.
-  auto m1 = buildLabeled(3,
-      {{0, 1}, {1, 2}},
-      {1, 2, 3},
-      {{0, 1, 7}, {1, 2, 7}});
-  auto m2 = buildLabeled(4,
-      {{0, 1}, {1, 2}, {2, 3}},
-      {1, 2, 3, 4},
-      {{0, 1, 7}, {1, 2, 7}, {2, 3, 7}});
+  auto                      m1 = buildLabeled(3,
+                                              {
+                           {0, 1},
+                           {1, 2}
+  },
+                                              {1, 2, 3},
+                                              {{0, 1, 7}, {1, 2, 7}});
+  auto                      m2 = buildLabeled(4,
+                                              {
+                           {0, 1},
+                           {1, 2},
+                           {2, 3}
+  },
+                                              {1, 2, 3, 4},
+                                              {{0, 1, 7}, {1, 2, 7}, {2, 3, 7}});
   std::vector<LabeledGraph> as{m1, m2};
   std::vector<LabeledGraph> bs{m1, m2};
-  auto rs = mcs::fmcs::findMCESfMCSBatchLabeled(as, bs);
+  auto                      rs = mcs::fmcs::findMCESfMCSBatchLabeled(as, bs);
   ASSERT_EQ(rs.size(), 2u);
   EXPECT_EQ(rs[0].numCommonEdges, 2);
   EXPECT_EQ(rs[1].numCommonEdges, 3);
 }
 
 TEST(FMCSBatch, LabeledTwoPairsDifferentAnswersSameTier) {
-  auto full = buildLabeled(4,
-      {{0, 1}, {1, 2}, {2, 3}},
-      {1, 2, 3, 4},
-      {{0, 1, 7}, {1, 2, 7}, {2, 3, 7}});
+  auto full     = buildLabeled(4,
+                               {
+                             {0, 1},
+                             {1, 2},
+                             {2, 3}
+  },
+                               {1, 2, 3, 4},
+                               {{0, 1, 7}, {1, 2, 7}, {2, 3, 7}});
   auto partialA = buildLabeled(3,
-      {{0, 1}, {1, 2}},
-      {1, 2, 3},
-      {{0, 1, 5}, {1, 2, 7}});
+                               {
+                                 {0, 1},
+                                 {1, 2}
+  },
+                               {1, 2, 3},
+                               {{0, 1, 5}, {1, 2, 7}});
   auto partialB = buildLabeled(3,
-      {{0, 1}, {1, 2}},
-      {1, 2, 9},
-      {{0, 1, 5}, {1, 2, 7}});
+                               {
+                                 {0, 1},
+                                 {1, 2}
+  },
+                               {1, 2, 9},
+                               {{0, 1, 5}, {1, 2, 7}});
 
   std::vector<LabeledGraph> as{full, partialA};
   std::vector<LabeledGraph> bs{full, partialB};
-  auto rs = mcs::fmcs::findMCESfMCSBatchLabeled(as, bs);
+  auto                      rs = mcs::fmcs::findMCESfMCSBatchLabeled(as, bs);
   ASSERT_EQ(rs.size(), 2u);
   EXPECT_EQ(rs[0].numCommonVertices, 4);
   EXPECT_EQ(rs[0].numCommonEdges, 3);
@@ -1140,8 +1353,8 @@ TEST(FMCSBatch, TargetLargerThanQueryUsesTargetTier) {
 
 TEST(FMCSBatch, OverflowPairDoesNotBlockNeighbors) {
   std::vector<Graph> a{path(4), path(200), path(3)};
-  std::vector<Graph> b = a;
-  auto rs = mcs::fmcs::findMCESfMCSBatch(a, b);
+  std::vector<Graph> b  = a;
+  auto               rs = mcs::fmcs::findMCESfMCSBatch(a, b);
   ASSERT_EQ(rs.size(), 3u);
 
   EXPECT_EQ(rs[0].numCommonEdges, 3);
@@ -1163,7 +1376,7 @@ TEST(FMCSOverflow, GraphTooLargeFlagSet) {
   // Tier cap is 128 atoms / 128 bonds.  Build a path with 200 atoms
   // (199 bonds) -- exceeds tier 128 in atoms AND bonds.
   const auto p = path(200);
-  auto r = findSingleMCES(p, p);
+  auto       r = findSingleMCES(p, p);
   EXPECT_TRUE(r.overflowed);
   EXPECT_EQ(r.numCommonEdges, 0);
   EXPECT_EQ(r.numCommonVertices, 0);
@@ -1172,7 +1385,7 @@ TEST(FMCSOverflow, GraphTooLargeFlagSet) {
 TEST(FMCSOverflow, TargetTooLargeFlagSetEvenWhenQueryFits) {
   const auto small = path(4);
   const auto large = path(200);
-  auto r = findSingleMCES(small, large);
+  auto       r     = findSingleMCES(small, large);
   EXPECT_TRUE(r.overflowed);
   EXPECT_EQ(r.numCommonEdges, 0);
   EXPECT_EQ(r.numCommonVertices, 0);
@@ -1199,7 +1412,7 @@ TEST(FMCSTimeout, PartialResultReturned) {
 
 TEST(FMCSMappingConsistency, SelfPairMappingsAreBijection) {
   const auto c = cycle(6);
-  auto r = findSingleMCES(c, c);
+  auto       r = findSingleMCES(c, c);
   expectFullSelfPair(r, c);
 
   // Bijection: every query atom mapped exactly once, every target atom
@@ -1217,16 +1430,14 @@ TEST(FMCSMappingConsistency, SelfPairMappingsAreBijection) {
 TEST(FMCSMappingConsistency, BondMappingsConnectMatchedAtoms) {
   const auto a = path(5);
   const auto b = path(5);
-  auto r = findSingleMCES(a, b);
+  auto       r = findSingleMCES(a, b);
   expectFullSelfPair(r, a);
   // expectMappingsConsistent does the structural check; we additionally
   // assert that every query bond appears in edgeMappingA exactly once.
   std::set<std::pair<std::size_t, std::size_t>> qBonds;
   for (const auto& e : r.edgeMappingA) {
-    auto canon = std::make_pair(std::min(e.first, e.second),
-                                std::max(e.first, e.second));
-    EXPECT_TRUE(qBonds.insert(canon).second)
-        << "duplicate query bond (" << e.first << "," << e.second << ")";
+    auto canon = std::make_pair(std::min(e.first, e.second), std::max(e.first, e.second));
+    EXPECT_TRUE(qBonds.insert(canon).second) << "duplicate query bond (" << e.first << "," << e.second << ")";
   }
   EXPECT_EQ(static_cast<int>(qBonds.size()), r.numCommonEdges);
   expectMappingsConsistent(r, a, b);
@@ -1238,14 +1449,10 @@ TEST(FMCSMappingConsistency, EdgeMappingArrayLengths) {
   // mappingA.size() and mappingB.size().
   const auto a = naphthalene();
   const auto b = phenanthrene();
-  auto r = findSingleMCES(a, b);
-  EXPECT_EQ(static_cast<int>(r.mappingA.size()),
-            r.numCommonVertices);
-  EXPECT_EQ(static_cast<int>(r.mappingB.size()),
-            r.numCommonVertices);
-  EXPECT_EQ(static_cast<int>(r.edgeMappingA.size()),
-            r.numCommonEdges);
-  EXPECT_EQ(static_cast<int>(r.edgeMappingB.size()),
-            r.numCommonEdges);
+  auto       r = findSingleMCES(a, b);
+  EXPECT_EQ(static_cast<int>(r.mappingA.size()), r.numCommonVertices);
+  EXPECT_EQ(static_cast<int>(r.mappingB.size()), r.numCommonVertices);
+  EXPECT_EQ(static_cast<int>(r.edgeMappingA.size()), r.numCommonEdges);
+  EXPECT_EQ(static_cast<int>(r.edgeMappingB.size()), r.numCommonEdges);
   expectMappingsConsistent(r, a, b);
 }

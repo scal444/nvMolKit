@@ -17,9 +17,9 @@ add_library(mcs_fmcs_core fmcs_cuda/fmcs.cpp fmcs_cuda/fmcs_launch.cu
                           mcs_graph.cpp)
 target_include_directories(mcs_fmcs_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
                                                 ${CMAKE_SOURCE_DIR})
-target_link_libraries(mcs_fmcs_core PUBLIC CUDA::cudart device device_vector
-                                           nvtx pinned_host_allocator
-                                           nvmolkit_mcs_compile_flags)
+target_link_libraries(
+  mcs_fmcs_core PUBLIC CUDA::cudart device device_vector nvtx
+                       pinned_host_allocator nvmolkit_mcs_compile_flags)
 target_compile_options(
   mcs_fmcs_core
   PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--ptxas-options=-v;--extended-lambda>)

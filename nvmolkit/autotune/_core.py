@@ -337,8 +337,7 @@ def suggest_from_space(trial, name: str, spec: Any) -> Any:
                 raise ValueError(f"Search-space override for {name!r}: choices must be non-empty.")
             return trial.suggest_categorical(name, choices)
         raise TypeError(
-            f"Search-space override for {name!r} is an unsupported dictionary; "
-            "expected {'choices': [...]}."
+            f"Search-space override for {name!r} is an unsupported dictionary; expected {{'choices': [...]}}."
         )
     if isinstance(spec, tuple) and len(spec) == 2 and all(isinstance(v, int) for v in spec):
         low, high = spec

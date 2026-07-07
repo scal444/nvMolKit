@@ -28,6 +28,7 @@ from nvmolkit import _uffOptimization
 from nvmolkit._arrayHelpers import *  # noqa: F403  # registers PyArray for DEVICE-mode returns
 from nvmolkit.types import CoordinateOutput, Device3DResult, HardwareOptions
 
+
 @overload
 def UFFOptimizeMoleculesConfs(
     molecules: list["Mol"],

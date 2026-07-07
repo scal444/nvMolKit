@@ -119,6 +119,8 @@ def _rdkit_params(
     *,
     atom_ring_matches_ring_only: bool = False,
     bond_ring_matches_ring_only: bool = False,
+    atom_complete_rings_only: bool = False,
+    bond_complete_rings_only: bool = False,
 ) -> rdFMCS.MCSParameters:
     params = rdFMCS.MCSParameters()
     params.MaximizeBonds = True
@@ -134,6 +136,8 @@ def _rdkit_params(
     }[bond_compare]
     params.AtomCompareParameters.RingMatchesRingOnly = atom_ring_matches_ring_only
     params.BondCompareParameters.RingMatchesRingOnly = bond_ring_matches_ring_only
+    params.AtomCompareParameters.CompleteRingsOnly = atom_complete_rings_only
+    params.BondCompareParameters.CompleteRingsOnly = bond_complete_rings_only
     return params
 
 
@@ -170,12 +174,16 @@ def _assert_batch_matches_rdkit(
     bond_compare: str = "order",
     atom_ring_matches_ring_only: bool = False,
     bond_ring_matches_ring_only: bool = False,
+    atom_complete_rings_only: bool = False,
+    bond_complete_rings_only: bool = False,
 ) -> None:
     params = _rdkit_params(
         atom_compare,
         bond_compare,
         atom_ring_matches_ring_only=atom_ring_matches_ring_only,
         bond_ring_matches_ring_only=bond_ring_matches_ring_only,
+        atom_complete_rings_only=atom_complete_rings_only,
+        bond_complete_rings_only=bond_complete_rings_only,
     )
     assert result.used_gpu.all()
     assert not result.used_fallback.any()
@@ -227,7 +235,7 @@ def test_chembl_pairs_match_rdkit_across_compare_modes(
         pairs=chembl_pairs,
         atom_compare=atom_compare,
         bond_compare=bond_compare,
-        require_gpu=True,
+        allow_rdkit_fallback=False,
     )
     _assert_batch_matches_rdkit(
         result,
@@ -257,7 +265,7 @@ def test_chembl_pairs_match_rdkit_across_ring_modes(
         pairs=chembl_pairs,
         atom_ring_matches_ring_only=atom_ring_matches_ring_only,
         bond_ring_matches_ring_only=bond_ring_matches_ring_only,
-        require_gpu=True,
+        allow_rdkit_fallback=False,
     )
     _assert_batch_matches_rdkit(
         result,
@@ -265,6 +273,55 @@ def test_chembl_pairs_match_rdkit_across_ring_modes(
         atom_ring_matches_ring_only=atom_ring_matches_ring_only,
         bond_ring_matches_ring_only=bond_ring_matches_ring_only,
     )
+
+
+@pytest.mark.parametrize(
+    ("api_options", "rdkit_options"),
+    [
+        pytest.param(
+            {"complete_rings_only": True},
+            {"atom_complete_rings_only": True, "bond_complete_rings_only": True},
+            id="combined-alias",
+        ),
+        pytest.param(
+            {"atom_complete_rings_only": True},
+            {"atom_complete_rings_only": True},
+            id="atom-only",
+        ),
+        pytest.param(
+            {"bond_complete_rings_only": True},
+            {"bond_complete_rings_only": True},
+            id="bond-only",
+        ),
+    ],
+)
+def test_complete_rings_only_matches_rdkit_on_gpu(
+    api_options: dict[str, bool],
+    rdkit_options: dict[str, bool],
+) -> None:
+    mols = [
+        Chem.MolFromSmiles(smiles)
+        for smiles in (
+            "C1CCCCC1",
+            "C1CCCCCC1",
+            "C1CCCCC1C",
+            "C1CCCCC1N",
+            "C1CC1CCCCCC",
+            "CCCCCC",
+            "Oc1ccccc1",
+            "COc1ncccc1",
+        )
+    ]
+    assert all(mol is not None for mol in mols)
+
+    result = findMCS(
+        mols,
+        mode="pairs",
+        pairs=[(0, 1), (2, 3), (4, 5), (6, 7)],
+        allow_rdkit_fallback=False,
+        **api_options,
+    )
+    _assert_batch_matches_rdkit(result, mols, **rdkit_options)
 
 
 @pytest.mark.parametrize(
@@ -303,7 +360,7 @@ def test_chembl_pairs_match_rdkit_across_dispatch_options(
         chembl_mols,
         mode="pairs",
         pairs=chembl_pairs,
-        require_gpu=True,
+        allow_rdkit_fallback=False,
         **execution_options,
     )
     _assert_batch_matches_rdkit(result, chembl_mols)
@@ -311,7 +368,7 @@ def test_chembl_pairs_match_rdkit_across_dispatch_options(
 
 def test_chembl_all_pairs_mode_matches_rdkit(chembl_mols: list[Chem.Mol]) -> None:
     mols = chembl_mols[:12]
-    result = findMCS(mols, require_gpu=True, batch_size=11)
+    result = findMCS(mols, allow_rdkit_fallback=False, batch_size=11)
     assert len(result) == 78
     _assert_batch_matches_rdkit(result, mols)
 
@@ -327,7 +384,7 @@ def test_chembl_paired_lists_mode_matches_rdkit(
         mols_a,
         mode="paired_lists",
         mols_b=mols_b,
-        require_gpu=True,
+        allow_rdkit_fallback=False,
         batch_size=7,
     )
     _assert_batch_matches_rdkit(result, combined)
@@ -342,7 +399,7 @@ def test_python_binding_dispatches_every_gpu_tier_boundary(num_atoms: int) -> No
         [mol],
         mode="pairs",
         pairs=[(0, 0)],
-        require_gpu=True,
+        allow_rdkit_fallback=False,
         block_size=128,
     )
 
@@ -364,7 +421,7 @@ def test_block_size_512_runs_every_tier_including_128(scratch_location: str) -> 
             [mol],
             mode="pairs",
             pairs=[(0, 0)],
-            require_gpu=True,
+            allow_rdkit_fallback=False,
             block_size=512,
             scratch_location=scratch_location,
         )

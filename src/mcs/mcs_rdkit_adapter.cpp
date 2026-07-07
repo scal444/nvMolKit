@@ -256,8 +256,8 @@ void addCompatibleSingletonIfEmpty(MCSResult&           result,
   }
 
   for (const auto* atomA : molA.atoms()) {
-    const bool completeRingsOnly = params.atomCompareParameters.completeRingsOnly ||
-                                   params.bondCompareParameters.completeRingsOnly;
+    const bool completeRingsOnly =
+      params.atomCompareParameters.completeRingsOnly || params.bondCompareParameters.completeRingsOnly;
     if (completeRingsOnly && molA.getRingInfo()->numAtomRings(atomA->getIdx()) > 0) {
       continue;
     }

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -45,18 +45,19 @@ struct ThreadBlockScope {};
 /// The default constructor leaves the queue empty with a null backing
 /// store so the class can be declared as a @c __shared__ variable; lane 0
 /// must call @ref init before any push/pop.
-template<class Element, class Scope>
-class SeedQueue {
+template <class Element, class Scope> class SeedQueue {
  public:
   __device__ __forceinline__ SeedQueue() = default;
 
   __device__ __forceinline__ SeedQueue(Element* storage, int capacity)
-      : storage_(storage), capacity_(capacity), top_(0) {}
+      : storage_(storage),
+        capacity_(capacity),
+        top_(0) {}
 
   __device__ __forceinline__ void init(Element* storage, int capacity) {
-    storage_ = storage;
+    storage_  = storage;
     capacity_ = capacity;
-    top_ = 0;
+    top_      = 0;
   }
 
   /// Within-thread: single lane atomically reserves one slot and writes
@@ -70,7 +71,8 @@ class SeedQueue {
   /// racing with a popper read of the same slot.
   __device__ __forceinline__ bool pushWithinThread(const Element& element) {
     const int slot = adjustTopAtomic(+1);
-    if (slot < 0) return false;
+    if (slot < 0)
+      return false;
     storage_[slot] = element;
     return true;
   }
@@ -86,7 +88,8 @@ class SeedQueue {
   /// CAS is therefore not racing with a pusher write to that slot.
   __device__ __forceinline__ bool popWithinThread(Element& outElement) {
     const int slot = adjustTopAtomic(-1);
-    if (slot < 0) return false;
+    if (slot < 0)
+      return false;
     outElement = storage_[slot - 1];
     return true;
   }
@@ -100,28 +103,24 @@ class SeedQueue {
   /// consumed.  Successful callers write directly into @ref slot
   /// starting at the returned offset; THOSE writes are the parallel
   /// part (one per lane).
-  template<class GroupT>
-  __device__ __forceinline__ int batchReserveCooperative(const GroupT& group, int count) {
+  template <class GroupT> __device__ __forceinline__ int batchReserveCooperative(const GroupT& group, int count) {
     int start = -1;
-    if (group.thread_rank() == 0) start = adjustTopAtomic(count);
+    if (group.thread_rank() == 0)
+      start = adjustTopAtomic(count);
     return group.shfl(start, 0);
   }
 
-  __device__ __forceinline__ Element& slot(int i) { return storage_[i]; }
+  __device__ __forceinline__ Element&       slot(int i) { return storage_[i]; }
   __device__ __forceinline__ const Element& slot(int i) const { return storage_[i]; }
 
-  __device__ __forceinline__ int size() const { return top_; }
-  __device__ __forceinline__ int sizeAtomic() const {
-    return atomicAdd(const_cast<int*>(&top_), 0);
-  }
+  __device__ __forceinline__ int  size() const { return top_; }
+  __device__ __forceinline__ int  sizeAtomic() const { return atomicAdd(const_cast<int*>(&top_), 0); }
   __device__ __forceinline__ bool empty() const { return top_ == 0; }
   __device__ __forceinline__ bool full() const { return top_ >= capacity_; }
-  __device__ __forceinline__ int capacity() const { return capacity_; }
+  __device__ __forceinline__ int  capacity() const { return capacity_; }
 
   __device__ __forceinline__ void setSizeWithinThread(int size) { top_ = size; }
-  __device__ __forceinline__ void setSizeAtomicWithinThread(int size) {
-    atomicExch(&top_, size);
-  }
+  __device__ __forceinline__ void setSizeAtomicWithinThread(int size) { atomicExch(&top_, size); }
   __device__ __forceinline__ void clear() { top_ = 0; }
 
  private:
@@ -135,9 +134,11 @@ class SeedQueue {
     int oldTop = top_;
     while (true) {
       const int newTop = oldTop + delta;
-      if (newTop < 0 || newTop > capacity_) return -1;
+      if (newTop < 0 || newTop > capacity_)
+        return -1;
       const int prev = atomicCAS(&top_, oldTop, newTop);
-      if (prev == oldTop) return oldTop;
+      if (prev == oldTop)
+        return oldTop;
       oldTop = prev;
     }
   }

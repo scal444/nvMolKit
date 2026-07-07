@@ -24,8 +24,7 @@
 
 namespace nvMolKit {
 
-template <typename ExecutorT, typename BatchT>
-struct InFlightExecutorBatch {
+template <typename ExecutorT, typename BatchT> struct InFlightExecutorBatch {
   ExecutorT* executor = nullptr;
   BatchT     batch{};
 };
@@ -90,7 +89,7 @@ void runQueuedExecutorRing(const std::vector<ExecutorT*>& executors,
     ExecutorT* executor = executors[static_cast<size_t>(pendingTail)];
     launch(*executor, batch);
 
-    auto& slot   = pending[static_cast<size_t>(pendingTail)];
+    auto& slot    = pending[static_cast<size_t>(pendingTail)];
     slot.executor = executor;
     slot.batch    = std::move(batch);
 

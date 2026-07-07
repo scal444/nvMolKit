@@ -25,7 +25,11 @@ static_assert((kFmcsGroupSize & (kFmcsGroupSize - 1)) == 0, "kFmcsGroupSize must
 /// global-memory slab, freeing static shared so 512-thread blocks fit the
 /// 48 KB cap at tier-128.  @c Auto is a host-only sentinel resolved in
 /// dispatch (fmcs.cpp); kernels are never instantiated on it.
-enum class FmcsScratchLocation { Shared, Global, Auto };
+enum class FmcsScratchLocation {
+  Shared,
+  Global,
+  Auto
+};
 
 template <int blockThreads> struct FmcsBlockConfig {
   static_assert(blockThreads == 128 || blockThreads == 512, "fMCS block size must be 128 or 512");

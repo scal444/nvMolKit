@@ -13,16 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "src/mcs/mcs_search.h"
-#include "src/mcs/mcs_compile_flags.h"
-#include "src/utils/nvtx.h"
-
 #include <GraphMol/ROMol.h>
 
 #include <boost/python.hpp>
 #include <boost/python/numpy.hpp>
 #include <boost/python/stl_iterator.hpp>
-
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -31,58 +26,62 @@
 #include <utility>
 #include <vector>
 
+#include "src/mcs/mcs_compile_flags.h"
+#include "src/mcs/mcs_search.h"
+#include "src/utils/nvtx.h"
+
 namespace {
 
 using namespace boost::python;
 
 struct MCSResultBuffers {
-  std::vector<unsigned int> numAtoms;
-  std::vector<unsigned int> numBonds;
-  std::vector<std::uint8_t> canceled;
-  std::vector<std::uint8_t> overflowed;
-  std::vector<std::uint8_t> usedGpu;
-  std::vector<std::uint8_t> usedFallback;
-  std::vector<float>        elapsedMs;
+  std::vector<unsigned int>       numAtoms;
+  std::vector<unsigned int>       numBonds;
+  std::vector<std::uint8_t>       canceled;
+  std::vector<std::uint8_t>       overflowed;
+  std::vector<std::uint8_t>       usedGpu;
+  std::vector<std::uint8_t>       usedFallback;
+  std::vector<float>              elapsedMs;
   std::vector<unsigned long long> timingTotalClocks;
   std::vector<unsigned long long> timingPhase1Clocks;
   std::vector<unsigned long long> timingPhase2Clocks;
-  std::vector<std::uint32_t> statsPhase2Iters;
-  std::vector<std::uint32_t> statsInitialSeeds;
-  std::vector<std::uint32_t> statsMismatchedInitialSeeds;
-  std::vector<std::uint32_t> statsPopped;
-  std::vector<std::uint32_t> statsSeedChecks;
-  std::vector<std::uint32_t> statsMatchCalls;
-  std::vector<std::uint32_t> statsMatchFound;
-  std::vector<std::uint32_t> statsBoundRejected;
-  std::vector<std::uint32_t> statsExpanded;
-  std::vector<std::uint32_t> statsFillZero;
-  std::vector<std::uint32_t> statsStage0Attempts;
-  std::vector<std::uint32_t> statsStage0Success;
-  std::vector<std::uint32_t> statsStage1Attempts;
-  std::vector<std::uint32_t> statsStage1Success;
-  std::vector<std::uint32_t> statsStage2Attempts;
-  std::vector<std::uint32_t> statsStage2Success;
-  std::vector<std::uint32_t> statsIndividualBondExcluded;
-  std::vector<std::uint32_t> statsFastAttempts;
-  std::vector<std::uint32_t> statsFastSuccess;
-  std::vector<std::uint32_t> statsFallbackCalls;
-  std::vector<std::uint32_t> statsFallbackSuccess;
-  std::vector<std::uint32_t> statsFallbackFail;
-  std::vector<std::uint32_t> statsFallbackOverflow;
-  std::vector<std::uint32_t> statsMaxQueue;
-  std::vector<std::uint32_t> statsForcedExit;
+  std::vector<std::uint32_t>      statsPhase2Iters;
+  std::vector<std::uint32_t>      statsInitialSeeds;
+  std::vector<std::uint32_t>      statsMismatchedInitialSeeds;
+  std::vector<std::uint32_t>      statsPopped;
+  std::vector<std::uint32_t>      statsSeedChecks;
+  std::vector<std::uint32_t>      statsMatchCalls;
+  std::vector<std::uint32_t>      statsMatchFound;
+  std::vector<std::uint32_t>      statsBoundRejected;
+  std::vector<std::uint32_t>      statsExpanded;
+  std::vector<std::uint32_t>      statsFillZero;
+  std::vector<std::uint32_t>      statsStage0Attempts;
+  std::vector<std::uint32_t>      statsStage0Success;
+  std::vector<std::uint32_t>      statsStage1Attempts;
+  std::vector<std::uint32_t>      statsStage1Success;
+  std::vector<std::uint32_t>      statsStage2Attempts;
+  std::vector<std::uint32_t>      statsStage2Success;
+  std::vector<std::uint32_t>      statsIndividualBondExcluded;
+  std::vector<std::uint32_t>      statsFastAttempts;
+  std::vector<std::uint32_t>      statsFastSuccess;
+  std::vector<std::uint32_t>      statsFallbackCalls;
+  std::vector<std::uint32_t>      statsFallbackSuccess;
+  std::vector<std::uint32_t>      statsFallbackFail;
+  std::vector<std::uint32_t>      statsFallbackOverflow;
+  std::vector<std::uint32_t>      statsMaxQueue;
+  std::vector<std::uint32_t>      statsForcedExit;
   std::vector<unsigned long long> statsTotalClocks;
   std::vector<unsigned long long> statsPhase1Clocks;
   std::vector<unsigned long long> statsPhase2Clocks;
-  std::vector<std::uint32_t> statsIncrementalMatchCycles1024;
-  std::vector<std::uint32_t> statsSubstructureMatchCycles1024;
-  std::vector<std::uint32_t> statsPhase2PopSyncWaitCycles1024;
-  std::vector<std::uint32_t> statsPhase2SyncWaitCycles1024;
-  std::vector<std::uint32_t> statsPhase2IdleNoSeedWaitCycles1024;
-  std::vector<std::uint32_t> statsPhase2IdleNoMatchWaitCycles1024;
-  std::vector<std::uint32_t> statsPhase2ActiveWorkCycles1024;
-  std::vector<std::uint32_t> statsPhase2ActiveMatchCycles1024;
-  std::vector<std::string>  smartsStrings;
+  std::vector<std::uint32_t>      statsIncrementalMatchCycles1024;
+  std::vector<std::uint32_t>      statsSubstructureMatchCycles1024;
+  std::vector<std::uint32_t>      statsPhase2PopSyncWaitCycles1024;
+  std::vector<std::uint32_t>      statsPhase2SyncWaitCycles1024;
+  std::vector<std::uint32_t>      statsPhase2IdleNoSeedWaitCycles1024;
+  std::vector<std::uint32_t>      statsPhase2IdleNoMatchWaitCycles1024;
+  std::vector<std::uint32_t>      statsPhase2ActiveWorkCycles1024;
+  std::vector<std::uint32_t>      statsPhase2ActiveMatchCycles1024;
+  std::vector<std::string>        smartsStrings;
 
   std::vector<std::int32_t> atomMapping;
   std::vector<std::int32_t> atomMappingIndptr;
@@ -133,7 +132,7 @@ nvMolKit::MCSScratchLocation parseScratchLocation(const std::string& value) {
 }
 
 std::vector<const RDKit::ROMol*> molsFromPythonList(const list& mols) {
-  nvMolKit::ScopedNvtxRange range("Python MCS: extract mol pointers", nvMolKit::NvtxColor::kYellow);
+  nvMolKit::ScopedNvtxRange        range("Python MCS: extract mol pointers", nvMolKit::NvtxColor::kYellow);
   std::vector<const RDKit::ROMol*> out;
   out.reserve(len(mols));
   for (int i = 0; i < len(mols); ++i) {
@@ -161,17 +160,15 @@ std::vector<nvMolKit::MCSPair> pairsFromPythonList(const list& pairs) {
   return out;
 }
 
-template <typename T>
-T optionValue(const dict& options, const char* key, const T& defaultValue) {
+template <typename T> T optionValue(const dict& options, const char* key, const T& defaultValue) {
   if (PyMapping_HasKeyString(options.ptr(), key) == 0) {
     return defaultValue;
   }
   return extract<T>(options[key]);
 }
 
-template <typename T>
-std::vector<T> vectorFromIterable(const object& iterable) {
-  std::vector<T> converted;
+template <typename T> std::vector<T> vectorFromIterable(const object& iterable) {
+  std::vector<T>        converted;
   stl_input_iterator<T> it(iterable), end;
   for (; it != end; ++it) {
     converted.push_back(*it);
@@ -194,8 +191,7 @@ list stringsToPythonList(const std::vector<std::string>& values) {
   return out;
 }
 
-template <typename T>
-boost::python::numpy::ndarray make1dArray(std::vector<T>& values, const object& owner) {
+template <typename T> boost::python::numpy::ndarray make1dArray(std::vector<T>& values, const object& owner) {
   const Py_intptr_t shape  = static_cast<Py_intptr_t>(values.size());
   const Py_intptr_t stride = static_cast<Py_intptr_t>(sizeof(T));
   return boost::python::numpy::from_data(values.data(),
@@ -307,7 +303,7 @@ void appendStats(MCSResultBuffers& buffers, const nvMolKit::MCSExecutionStats& s
 
 dict timingsToPythonDict(MCSResultBuffers& buffers, const object& owner) {
   dict out;
-  out["total_clocks"] = make1dArray(buffers.timingTotalClocks, owner);
+  out["total_clocks"]  = make1dArray(buffers.timingTotalClocks, owner);
   out["phase1_clocks"] = make1dArray(buffers.timingPhase1Clocks, owner);
   out["phase2_clocks"] = make1dArray(buffers.timingPhase2Clocks, owner);
   return out;
@@ -315,42 +311,42 @@ dict timingsToPythonDict(MCSResultBuffers& buffers, const object& owner) {
 
 dict statsToPythonDict(MCSResultBuffers& buffers, const object& owner) {
   dict out;
-  out["phase2_iters"] = make1dArray(buffers.statsPhase2Iters, owner);
-  out["initial_seeds"] = make1dArray(buffers.statsInitialSeeds, owner);
-  out["mismatched_initial_seeds"] = make1dArray(buffers.statsMismatchedInitialSeeds, owner);
-  out["popped"] = make1dArray(buffers.statsPopped, owner);
-  out["seed_checks"] = make1dArray(buffers.statsSeedChecks, owner);
-  out["match_calls"] = make1dArray(buffers.statsMatchCalls, owner);
-  out["match_found"] = make1dArray(buffers.statsMatchFound, owner);
-  out["bound_rejected"] = make1dArray(buffers.statsBoundRejected, owner);
-  out["expanded"] = make1dArray(buffers.statsExpanded, owner);
-  out["fill_zero"] = make1dArray(buffers.statsFillZero, owner);
-  out["stage0_attempts"] = make1dArray(buffers.statsStage0Attempts, owner);
-  out["stage0_success"] = make1dArray(buffers.statsStage0Success, owner);
-  out["stage1_attempts"] = make1dArray(buffers.statsStage1Attempts, owner);
-  out["stage1_success"] = make1dArray(buffers.statsStage1Success, owner);
-  out["stage2_attempts"] = make1dArray(buffers.statsStage2Attempts, owner);
-  out["stage2_success"] = make1dArray(buffers.statsStage2Success, owner);
-  out["individual_bond_excluded"] = make1dArray(buffers.statsIndividualBondExcluded, owner);
-  out["fast_attempts"] = make1dArray(buffers.statsFastAttempts, owner);
-  out["fast_success"] = make1dArray(buffers.statsFastSuccess, owner);
-  out["fallback_calls"] = make1dArray(buffers.statsFallbackCalls, owner);
-  out["fallback_success"] = make1dArray(buffers.statsFallbackSuccess, owner);
-  out["fallback_fail"] = make1dArray(buffers.statsFallbackFail, owner);
-  out["fallback_overflow"] = make1dArray(buffers.statsFallbackOverflow, owner);
-  out["max_queue"] = make1dArray(buffers.statsMaxQueue, owner);
-  out["forced_exit"] = make1dArray(buffers.statsForcedExit, owner);
-  out["total_clocks"] = make1dArray(buffers.statsTotalClocks, owner);
-  out["phase1_clocks"] = make1dArray(buffers.statsPhase1Clocks, owner);
-  out["phase2_clocks"] = make1dArray(buffers.statsPhase2Clocks, owner);
-  out["incremental_match_cycles_1024"] = make1dArray(buffers.statsIncrementalMatchCycles1024, owner);
-  out["substructure_match_cycles_1024"] = make1dArray(buffers.statsSubstructureMatchCycles1024, owner);
-  out["phase2_pop_sync_wait_cycles_1024"] = make1dArray(buffers.statsPhase2PopSyncWaitCycles1024, owner);
-  out["phase2_sync_wait_cycles_1024"] = make1dArray(buffers.statsPhase2SyncWaitCycles1024, owner);
-  out["phase2_idle_no_seed_wait_cycles_1024"] = make1dArray(buffers.statsPhase2IdleNoSeedWaitCycles1024, owner);
+  out["phase2_iters"]                          = make1dArray(buffers.statsPhase2Iters, owner);
+  out["initial_seeds"]                         = make1dArray(buffers.statsInitialSeeds, owner);
+  out["mismatched_initial_seeds"]              = make1dArray(buffers.statsMismatchedInitialSeeds, owner);
+  out["popped"]                                = make1dArray(buffers.statsPopped, owner);
+  out["seed_checks"]                           = make1dArray(buffers.statsSeedChecks, owner);
+  out["match_calls"]                           = make1dArray(buffers.statsMatchCalls, owner);
+  out["match_found"]                           = make1dArray(buffers.statsMatchFound, owner);
+  out["bound_rejected"]                        = make1dArray(buffers.statsBoundRejected, owner);
+  out["expanded"]                              = make1dArray(buffers.statsExpanded, owner);
+  out["fill_zero"]                             = make1dArray(buffers.statsFillZero, owner);
+  out["stage0_attempts"]                       = make1dArray(buffers.statsStage0Attempts, owner);
+  out["stage0_success"]                        = make1dArray(buffers.statsStage0Success, owner);
+  out["stage1_attempts"]                       = make1dArray(buffers.statsStage1Attempts, owner);
+  out["stage1_success"]                        = make1dArray(buffers.statsStage1Success, owner);
+  out["stage2_attempts"]                       = make1dArray(buffers.statsStage2Attempts, owner);
+  out["stage2_success"]                        = make1dArray(buffers.statsStage2Success, owner);
+  out["individual_bond_excluded"]              = make1dArray(buffers.statsIndividualBondExcluded, owner);
+  out["fast_attempts"]                         = make1dArray(buffers.statsFastAttempts, owner);
+  out["fast_success"]                          = make1dArray(buffers.statsFastSuccess, owner);
+  out["fallback_calls"]                        = make1dArray(buffers.statsFallbackCalls, owner);
+  out["fallback_success"]                      = make1dArray(buffers.statsFallbackSuccess, owner);
+  out["fallback_fail"]                         = make1dArray(buffers.statsFallbackFail, owner);
+  out["fallback_overflow"]                     = make1dArray(buffers.statsFallbackOverflow, owner);
+  out["max_queue"]                             = make1dArray(buffers.statsMaxQueue, owner);
+  out["forced_exit"]                           = make1dArray(buffers.statsForcedExit, owner);
+  out["total_clocks"]                          = make1dArray(buffers.statsTotalClocks, owner);
+  out["phase1_clocks"]                         = make1dArray(buffers.statsPhase1Clocks, owner);
+  out["phase2_clocks"]                         = make1dArray(buffers.statsPhase2Clocks, owner);
+  out["incremental_match_cycles_1024"]         = make1dArray(buffers.statsIncrementalMatchCycles1024, owner);
+  out["substructure_match_cycles_1024"]        = make1dArray(buffers.statsSubstructureMatchCycles1024, owner);
+  out["phase2_pop_sync_wait_cycles_1024"]      = make1dArray(buffers.statsPhase2PopSyncWaitCycles1024, owner);
+  out["phase2_sync_wait_cycles_1024"]          = make1dArray(buffers.statsPhase2SyncWaitCycles1024, owner);
+  out["phase2_idle_no_seed_wait_cycles_1024"]  = make1dArray(buffers.statsPhase2IdleNoSeedWaitCycles1024, owner);
   out["phase2_idle_no_match_wait_cycles_1024"] = make1dArray(buffers.statsPhase2IdleNoMatchWaitCycles1024, owner);
-  out["phase2_active_work_cycles_1024"] = make1dArray(buffers.statsPhase2ActiveWorkCycles1024, owner);
-  out["phase2_active_match_cycles_1024"] = make1dArray(buffers.statsPhase2ActiveMatchCycles1024, owner);
+  out["phase2_active_work_cycles_1024"]        = make1dArray(buffers.statsPhase2ActiveWorkCycles1024, owner);
+  out["phase2_active_match_cycles_1024"]       = make1dArray(buffers.statsPhase2ActiveMatchCycles1024, owner);
   return out;
 }
 
@@ -363,46 +359,44 @@ BOOST_PYTHON_MODULE(_mcs) {
 
   def(
     "_findMCSBatch",
-    +[](const list&        mols,
-        const list&        pairs,
-        const dict&        options) {
+    +[](const list& mols, const list& pairs, const dict& options) {
       auto molVec  = molsFromPythonList(mols);
       auto pairVec = pairsFromPythonList(pairs);
 
       nvMolKit::MCSParameters params;
-      params.atomCompare                                      = parseAtomCompare(optionValue<std::string>(options, "atom_compare", "elements"));
-      params.bondCompare                                      = parseBondCompare(optionValue<std::string>(options, "bond_compare", "order"));
-      params.maximizeBonds                                    = optionValue<bool>(options, "maximize_bonds", true);
-      params.connectedOnly                                    = optionValue<bool>(options, "connected_only", true);
-      params.requireGpu                                       = optionValue<bool>(options, "require_gpu", false);
-      params.collectTimings                                   = optionValue<bool>(options, "collect_timings", false);
-      params.collectStats                                     = optionValue<bool>(options, "collect_stats", false);
+      params.atomCompare    = parseAtomCompare(optionValue<std::string>(options, "atom_compare", "elements"));
+      params.bondCompare    = parseBondCompare(optionValue<std::string>(options, "bond_compare", "order"));
+      params.maximizeBonds  = optionValue<bool>(options, "maximize_bonds", true);
+      params.connectedOnly  = optionValue<bool>(options, "connected_only", true);
+      params.allowRDKitFallback = optionValue<bool>(options, "allow_rdkit_fallback", true);
+      params.collectTimings = optionValue<bool>(options, "collect_timings", false);
+      params.collectStats   = optionValue<bool>(options, "collect_stats", false);
       if (params.collectTimings && !nvMolKit::kMCSCollectTimingsEnabled) {
-        throw std::runtime_error(
-            "fMCS timing instrumentation is not instantiated in this build");
+        throw std::runtime_error("fMCS timing instrumentation is not instantiated in this build");
       }
       if (params.collectStats && !nvMolKit::kMCSCollectStatsEnabled) {
-        throw std::runtime_error(
-            "fMCS stat instrumentation is not instantiated in this build");
+        throw std::runtime_error("fMCS stat instrumentation is not instantiated in this build");
       }
-      params.timeoutSeconds                                   = optionValue<unsigned int>(options, "timeout_seconds", 0);
-      params.batchSize                                        = optionValue<int>(options, "batch_size", 0);
-      params.blockSize                                        = optionValue<int>(options, "block_size", 128);
-      params.scratchLocation                                  = parseScratchLocation(optionValue<std::string>(options, "scratch_location", "auto"));
-      params.workerThreads                                    = optionValue<int>(options, "worker_threads", -1);
-      params.preprocessingThreads                             = optionValue<int>(options, "preprocessing_threads", -1);
-      params.executorsPerRunner                               = optionValue<int>(options, "executors_per_runner", -1);
-      params.gpuIds                                           = optionIntVector(options, "gpu_ids");
-      params.atomCompareParameters.matchValences              = optionValue<bool>(options, "match_valences", false);
-      params.atomCompareParameters.matchFormalCharge          = optionValue<bool>(options, "match_formal_charge", false);
-      params.atomCompareParameters.ringMatchesRingOnly        = optionValue<bool>(options, "atom_ring_matches_ring_only", false);
-      params.atomCompareParameters.completeRingsOnly          = optionValue<bool>(options, "atom_complete_rings_only", false);
-      params.atomCompareParameters.matchIsotope               = optionValue<bool>(options, "match_isotope", false);
-      params.bondCompareParameters.ringMatchesRingOnly        = optionValue<bool>(options, "bond_ring_matches_ring_only", false);
-      params.bondCompareParameters.completeRingsOnly          = optionValue<bool>(options, "bond_complete_rings_only", false);
+      params.timeoutSeconds       = optionValue<unsigned int>(options, "timeout_seconds", 0);
+      params.batchSize            = optionValue<int>(options, "batch_size", 0);
+      params.blockSize            = optionValue<int>(options, "block_size", 128);
+      params.scratchLocation      = parseScratchLocation(optionValue<std::string>(options, "scratch_location", "auto"));
+      params.workerThreads        = optionValue<int>(options, "worker_threads", -1);
+      params.preprocessingThreads = optionValue<int>(options, "preprocessing_threads", -1);
+      params.executorsPerRunner   = optionValue<int>(options, "executors_per_runner", -1);
+      params.gpuIds               = optionIntVector(options, "gpu_ids");
+      params.atomCompareParameters.matchValences     = optionValue<bool>(options, "match_valences", false);
+      params.atomCompareParameters.matchFormalCharge = optionValue<bool>(options, "match_formal_charge", false);
+      params.atomCompareParameters.ringMatchesRingOnly =
+        optionValue<bool>(options, "atom_ring_matches_ring_only", false);
+      params.atomCompareParameters.completeRingsOnly = optionValue<bool>(options, "atom_complete_rings_only", false);
+      params.atomCompareParameters.matchIsotope      = optionValue<bool>(options, "match_isotope", false);
+      params.bondCompareParameters.ringMatchesRingOnly =
+        optionValue<bool>(options, "bond_ring_matches_ring_only", false);
+      params.bondCompareParameters.completeRingsOnly = optionValue<bool>(options, "bond_complete_rings_only", false);
 
       nvMolKit::ScopedNvtxRange mcsRange("Python MCS: findMCSBatch", nvMolKit::NvtxColor::kOrange);
-      auto results = nvMolKit::findMCSBatch(molVec, pairVec, nullptr, params);
+      auto                      results = nvMolKit::findMCSBatch(molVec, pairVec, nullptr, params);
       mcsRange.pop();
 
       auto buffers = std::make_unique<MCSResultBuffers>();
@@ -472,7 +466,7 @@ BOOST_PYTHON_MODULE(_mcs) {
       }
       object owner{handle<>(cap)};
       buffers.release();
-      auto* ptr = reinterpret_cast<MCSResultBuffers*>(PyCapsule_GetPointer(cap, "nvmolkit.mcs_results"));
+      auto*  ptr = reinterpret_cast<MCSResultBuffers*>(PyCapsule_GetPointer(cap, "nvmolkit.mcs_results"));
       object elapsedObject{handle<>(borrowed(Py_None))};
       if constexpr (nvMolKit::kMCSCollectTimingsEnabled) {
         if (params.collectTimings) {

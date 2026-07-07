@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,9 +21,9 @@
 #ifndef FMCS_CUDA_EXPERIMENTAL_FMCS_MATCH_CACHE_CUH
 #define FMCS_CUDA_EXPERIMENTAL_FMCS_MATCH_CACHE_CUH
 
-#include "fmcs_cuda/fmcs_seed.cuh"
-
 #include <cstdint>
+
+#include "fmcs_cuda/fmcs_seed.cuh"
 
 namespace mcs {
 namespace fmcs {
@@ -78,8 +78,7 @@ struct DeviceMatchCache {
   }
 
   /// Cooperative: zero the (global) table across @p group.
-  template<class GroupT>
-  __device__ __forceinline__ void zeroCooperative(const GroupT& group) {
+  template <class GroupT> __device__ __forceinline__ void zeroCooperative(const GroupT& group) {
     const int rank  = static_cast<int>(group.thread_rank());
     const int total = static_cast<int>(group.num_threads());
     for (int i = rank; i < capacity; i += total) {
@@ -105,16 +104,17 @@ struct DeviceMatchCache {
   /// observe the slot transitioning from empty -> @p key; both return
   /// true (idempotent).
   __device__ __forceinline__ bool insertWithinThread(std::uint64_t key) {
-    if (key == 0ULL) return false;
+    if (key == 0ULL)
+      return false;
     const int mask = capacity - 1;
-    int slot = static_cast<int>(splitMix64(key)) & mask;
+    int       slot = static_cast<int>(splitMix64(key)) & mask;
     for (int attempt = 0; attempt < capacity; ++attempt) {
-      const std::uint64_t prev = atomicCAS(
-          reinterpret_cast<unsigned long long*>(&keys[slot]),
-          0ULL,
-          static_cast<unsigned long long>(key));
-      if (prev == 0ULL) return true;   // claimed empty slot
-      if (prev == key)  return true;   // already present (idempotent)
+      const std::uint64_t prev =
+        atomicCAS(reinterpret_cast<unsigned long long*>(&keys[slot]), 0ULL, static_cast<unsigned long long>(key));
+      if (prev == 0ULL)
+        return true;  // claimed empty slot
+      if (prev == key)
+        return true;  // already present (idempotent)
       slot = (slot + 1) & mask;
     }
     return false;
@@ -126,13 +126,16 @@ struct DeviceMatchCache {
   /// Empty-slot termination is checked first so a probe of the
   /// reserved 0 sentinel doesn't false-hit on a fresh cache.
   __device__ __forceinline__ bool probeWithinThread(std::uint64_t key) const {
-    if (key == 0ULL) return false;
+    if (key == 0ULL)
+      return false;
     const int mask = capacity - 1;
-    int slot = static_cast<int>(splitMix64(key)) & mask;
+    int       slot = static_cast<int>(splitMix64(key)) & mask;
     for (int attempt = 0; attempt < capacity; ++attempt) {
       const std::uint64_t entry = keys[slot];
-      if (entry == 0ULL) return false;
-      if (entry == key)  return true;
+      if (entry == 0ULL)
+        return false;
+      if (entry == key)
+        return true;
       slot = (slot + 1) & mask;
     }
     return false;
@@ -165,23 +168,23 @@ struct DeviceMatchCache {
 /// The hash NEVER returns 0; if the natural mix produces 0 (rare:
 /// 1-in-2^64) we remap to 1 so the cache's empty-slot sentinel stays
 /// unambiguous.  See @ref DeviceMatchCache.
-template<int maxAtoms, int maxBonds, int maxTA, int maxTB>
+template <int maxAtoms, int maxBonds, int maxTA, int maxTB>
 __device__ __forceinline__ std::uint64_t mappingHashWithinThread(
-    const Seed<maxAtoms, maxBonds>& seed,
-    const MatchResult<maxAtoms, maxBonds, maxTA, maxTB>& match) {
-  using SeedT = Seed<maxAtoms, maxBonds>;
-  using AtomWord = typename SeedT::atom_word_type;
-  using BondWord = typename SeedT::bond_word_type;
+  const Seed<maxAtoms, maxBonds>&                      seed,
+  const MatchResult<maxAtoms, maxBonds, maxTA, maxTB>& match) {
+  using SeedT                    = Seed<maxAtoms, maxBonds>;
+  using AtomWord                 = typename SeedT::atom_word_type;
+  using BondWord                 = typename SeedT::bond_word_type;
   constexpr int kAtomBitsPerWord = SeedT::kAtomBitsPerWord;
   constexpr int kAtomWords       = SeedT::kAtomWords;
   constexpr int kBondBitsPerWord = SeedT::kBondBitsPerWord;
   constexpr int kBondWords       = SeedT::kBondWords;
 
-  std::uint64_t hash = 0;
-  constexpr std::uint64_t kAtomDomain = 0x9e3779b97f4a7c15ULL;
+  std::uint64_t           hash             = 0;
+  constexpr std::uint64_t kAtomDomain      = 0x9e3779b97f4a7c15ULL;
   constexpr std::uint64_t kLastAddedDomain = 0xd6e8feb86659fd93ULL;
-  constexpr std::uint64_t kBondDomain = 0xbf58476d1ce4e5b9ULL;
-  constexpr std::uint64_t kExcludedDomain = 0x94d049bb133111ebULL;
+  constexpr std::uint64_t kBondDomain      = 0xbf58476d1ce4e5b9ULL;
+  constexpr std::uint64_t kExcludedDomain  = 0x94d049bb133111ebULL;
 
   for (int wordIdx = 0; wordIdx < kAtomWords; ++wordIdx) {
     AtomWord remaining = seed.atoms[wordIdx];
@@ -196,11 +199,11 @@ __device__ __forceinline__ std::uint64_t mappingHashWithinThread(
       remaining &= remaining - 1;
 
       const std::uint8_t targetAtomIdx = match.targetAtomIdx[queryAtomIdx];
-      if (targetAtomIdx == kUnmappedTargetIdx) continue;
+      if (targetAtomIdx == kUnmappedTargetIdx)
+        continue;
 
       const std::uint64_t pair =
-          (static_cast<std::uint64_t>(queryAtomIdx + 1) << 8) |
-           static_cast<std::uint64_t>(targetAtomIdx);
+        (static_cast<std::uint64_t>(queryAtomIdx + 1) << 8) | static_cast<std::uint64_t>(targetAtomIdx);
       hash = splitMix64(hash + kAtomDomain + pair);
     }
   }
@@ -217,7 +220,7 @@ __device__ __forceinline__ std::uint64_t mappingHashWithinThread(
       const int queryAtomIdx = wordIdx * kAtomBitsPerWord + bitPosInWord;
       remaining &= remaining - 1;
       const std::uint64_t token = static_cast<std::uint64_t>(queryAtomIdx + 1);
-      hash = splitMix64(hash + kLastAddedDomain + token);
+      hash                      = splitMix64(hash + kLastAddedDomain + token);
     }
   }
 
@@ -234,7 +237,8 @@ __device__ __forceinline__ std::uint64_t mappingHashWithinThread(
       remaining &= remaining - 1;
 
       const std::uint8_t targetBondIdx = match.targetBondIdx[queryBondIdx];
-      if (targetBondIdx == kUnmappedTargetIdx) continue;
+      if (targetBondIdx == kUnmappedTargetIdx)
+        continue;
 
       // Pack (queryBondIdx, targetBondIdx) into a uint64 with no
       // overlap (target index is 8 bits; query index is 16-bit-safe
@@ -244,8 +248,7 @@ __device__ __forceinline__ std::uint64_t mappingHashWithinThread(
       // would produce) would leave the accumulator at 0 and make that
       // bond invisible, aliasing a seed onto one that omits it.
       const std::uint64_t pair =
-          (static_cast<std::uint64_t>(queryBondIdx + 1) << 8) |
-           static_cast<std::uint64_t>(targetBondIdx);
+        (static_cast<std::uint64_t>(queryBondIdx + 1) << 8) | static_cast<std::uint64_t>(targetBondIdx);
       hash = splitMix64(hash + kBondDomain + pair);
     }
   }
@@ -262,7 +265,7 @@ __device__ __forceinline__ std::uint64_t mappingHashWithinThread(
       const int queryBondIdx = wordIdx * kBondBitsPerWord + bitPosInWord;
       remaining &= remaining - 1;
       const std::uint64_t token = static_cast<std::uint64_t>(queryBondIdx + 1);
-      hash = splitMix64(hash + kExcludedDomain + token);
+      hash                      = splitMix64(hash + kExcludedDomain + token);
     }
   }
   return hash == 0ULL ? 1ULL : hash;
@@ -272,8 +275,7 @@ __device__ __forceinline__ std::uint64_t mappingHashWithinThread(
 /// kernel ignores the cache path; this constant remains for the standalone
 /// DeviceMatchCache unit tests until an RDKit-equivalent cache is added.
 constexpr int kFmcsCacheCapacity = 4096;
-static_assert((kFmcsCacheCapacity & (kFmcsCacheCapacity - 1)) == 0,
-              "kFmcsCacheCapacity must be a power of two");
+static_assert((kFmcsCacheCapacity & (kFmcsCacheCapacity - 1)) == 0, "kFmcsCacheCapacity must be a power of two");
 
 }  // namespace fmcs
 }  // namespace mcs

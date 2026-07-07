@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -29,8 +29,8 @@ namespace mcs {
  * in the adjacency structure: once under u and once under v.
  */
 struct Graph {
-  int              numVertices = 0;
-  int              numEdges    = 0;  ///< Count of undirected edges.
+  int                 numVertices = 0;
+  int                 numEdges    = 0;  ///< Count of undirected edges.
   std::vector<size_t> rowOffsets;       ///< Size = numVertices + 1.
   std::vector<size_t> colIndices;       ///< Size = 2 * numEdges (symmetric).
 };
@@ -38,17 +38,16 @@ struct Graph {
 /**
  * @brief Build a CSR Graph from a vertex count and undirected edge list.
  */
-Graph buildGraphFromEdges(size_t numVertices,
-                          const std::vector<std::pair<size_t, size_t>>& edges);
+Graph buildGraphFromEdges(size_t numVertices, const std::vector<std::pair<size_t, size_t>>& edges);
 
 /**
  * @brief Result of a maximum common substructure computation.
  */
 struct MCSResult {
-  int numCommonVertices = 0;
-  int numCommonEdges    = 0;
-  bool timedOut         = false;
-  bool overflowed       = false;
+  int  numCommonVertices = 0;
+  int  numCommonEdges    = 0;
+  bool timedOut          = false;
+  bool overflowed        = false;
 
   /// Vertex mappings: mappingA[i] <-> mappingB[i] in the common subgraph.
   std::vector<size_t> mappingA;

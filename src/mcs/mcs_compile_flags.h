@@ -14,10 +14,8 @@
 
 namespace nvMolKit {
 
-inline constexpr bool kMCSCollectTimingsEnabled =
-    NVMOLKIT_ENABLE_MCS_TIMINGS != 0;
-inline constexpr bool kMCSCollectStatsEnabled =
-    NVMOLKIT_ENABLE_MCS_STATS != 0;
+inline constexpr bool kMCSCollectTimingsEnabled = NVMOLKIT_ENABLE_MCS_TIMINGS != 0;
+inline constexpr bool kMCSCollectStatsEnabled   = NVMOLKIT_ENABLE_MCS_STATS != 0;
 
 }  // namespace nvMolKit
 

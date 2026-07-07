@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -33,12 +33,12 @@ namespace fmcs {
 /// insertion order among equal-size seeds.  This is intentionally serial and
 /// shifts global-memory queue entries; use only for RDKit-parity seed-grow
 /// scheduling, not for concurrent stack-style work.
-template<class Element>
-__device__ __forceinline__ bool insertSortedByBondsWithinThread(
-    SeedQueue<Element, ThreadBlockScope>& queue,
-    const Element& element) {
+template <class Element>
+__device__ __forceinline__ bool insertSortedByBondsWithinThread(SeedQueue<Element, ThreadBlockScope>& queue,
+                                                                const Element&                        element) {
   const int top = queue.size();
-  if (top >= queue.capacity()) return false;
+  if (top >= queue.capacity())
+    return false;
   int insertAt = top;
   for (int i = 0; i < top; ++i) {
     if (queue.slot(i).seed.numBonds < element.seed.numBonds) {
@@ -56,12 +56,11 @@ __device__ __forceinline__ bool insertSortedByBondsWithinThread(
 
 /// Within-thread: pop the front seed from the RDKit-style sorted list.
 /// Remaining entries are shifted left to preserve order.
-template<class Element>
-__device__ __forceinline__ bool popFrontWithinThread(
-    SeedQueue<Element, ThreadBlockScope>& queue,
-    Element& outElement) {
+template <class Element>
+__device__ __forceinline__ bool popFrontWithinThread(SeedQueue<Element, ThreadBlockScope>& queue, Element& outElement) {
   const int top = queue.size();
-  if (top <= 0) return false;
+  if (top <= 0)
+    return false;
   outElement = queue.slot(0);
   for (int i = 1; i < top; ++i) {
     queue.slot(i - 1) = queue.slot(i);
@@ -73,18 +72,17 @@ __device__ __forceinline__ bool popFrontWithinThread(
 /// Cooperative counterpart of @ref insertSortedByBondsWithinThread: lane 0
 /// locates the sorted insertion point, then the whole group shifts entries
 /// and writes @p element via @ref warpCopy.
-template<class GroupT, class QueuedT>
-__device__ __forceinline__ bool insertSortedByBondsCooperative(
-    const GroupT& group,
-    SeedQueue<QueuedT, ThreadBlockScope>& queue,
-    const QueuedT& element) {
+template <class GroupT, class QueuedT>
+__device__ __forceinline__ bool insertSortedByBondsCooperative(const GroupT&                         group,
+                                                               SeedQueue<QueuedT, ThreadBlockScope>& queue,
+                                                               const QueuedT&                        element) {
   const int groupRank = static_cast<int>(group.thread_rank());
-  int oldSize = 0;
-  int insertAt = 0;
-  int ok = 1;
+  int       oldSize   = 0;
+  int       insertAt  = 0;
+  int       ok        = 1;
   if (groupRank == 0) {
-    oldSize = queue.size();
-    ok = oldSize < queue.capacity() ? 1 : 0;
+    oldSize  = queue.size();
+    ok       = oldSize < queue.capacity() ? 1 : 0;
     insertAt = oldSize;
     if (ok) {
       for (int i = 0; i < oldSize; ++i) {
@@ -95,10 +93,11 @@ __device__ __forceinline__ bool insertSortedByBondsCooperative(
       }
     }
   }
-  oldSize = group.shfl(oldSize, 0);
+  oldSize  = group.shfl(oldSize, 0);
   insertAt = group.shfl(insertAt, 0);
-  ok = group.shfl(ok, 0);
-  if (!ok) return false;
+  ok       = group.shfl(ok, 0);
+  if (!ok)
+    return false;
 
   for (int i = oldSize; i > insertAt; --i) {
     warpCopy(group, &queue.slot(i), &queue.slot(i - 1), sizeof(QueuedT));
@@ -106,7 +105,8 @@ __device__ __forceinline__ bool insertSortedByBondsCooperative(
   }
   warpCopy(group, &queue.slot(insertAt), &element, sizeof(QueuedT));
   group.sync();
-  if (groupRank == 0) queue.setSizeWithinThread(oldSize + 1);
+  if (groupRank == 0)
+    queue.setSizeWithinThread(oldSize + 1);
   group.sync();
   return true;
 }
@@ -114,16 +114,17 @@ __device__ __forceinline__ bool insertSortedByBondsCooperative(
 /// Cooperative counterpart of @ref popFrontWithinThread: the whole group
 /// copies out the front entry via @ref warpCopy and shifts the remainder
 /// left.
-template<class GroupT, class QueuedT>
-__device__ __forceinline__ bool popFrontCooperative(
-    const GroupT& group,
-    SeedQueue<QueuedT, ThreadBlockScope>& queue,
-    QueuedT& outElement) {
+template <class GroupT, class QueuedT>
+__device__ __forceinline__ bool popFrontCooperative(const GroupT&                         group,
+                                                    SeedQueue<QueuedT, ThreadBlockScope>& queue,
+                                                    QueuedT&                              outElement) {
   const int groupRank = static_cast<int>(group.thread_rank());
-  int oldSize = 0;
-  if (groupRank == 0) oldSize = queue.size();
+  int       oldSize   = 0;
+  if (groupRank == 0)
+    oldSize = queue.size();
   oldSize = group.shfl(oldSize, 0);
-  if (oldSize <= 0) return false;
+  if (oldSize <= 0)
+    return false;
 
   warpCopy(group, &outElement, &queue.slot(0), sizeof(QueuedT));
   group.sync();
@@ -131,7 +132,8 @@ __device__ __forceinline__ bool popFrontCooperative(
     warpCopy(group, &queue.slot(i - 1), &queue.slot(i), sizeof(QueuedT));
     group.sync();
   }
-  if (groupRank == 0) queue.setSizeWithinThread(oldSize - 1);
+  if (groupRank == 0)
+    queue.setSizeWithinThread(oldSize - 1);
   group.sync();
   return true;
 }

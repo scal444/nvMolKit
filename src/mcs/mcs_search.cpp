@@ -40,9 +40,9 @@ using mcs::fmcs::LabeledGraph;
 constexpr int kMaxMCSExecutorsPerRunner = 8;
 
 struct PreparedGpuPair {
-  size_t         resultIdx = 0;
-  size_t         molIdxA   = 0;
-  size_t         molIdxB   = 0;
+  size_t       resultIdx = 0;
+  size_t       molIdxA   = 0;
+  size_t       molIdxB   = 0;
   LabeledGraph graphA;
   LabeledGraph graphB;
 };
@@ -125,8 +125,8 @@ std::vector<PreparedGpuPair> prepareGpuPairs(const std::vector<const RDKit::ROMo
 
     std::string fallbackReason;
     if (mcs_detail::shouldFallbackToRDKit(*molA, *molB, params, fallbackReason)) {
-      if (params.requireGpu) {
-        throw std::runtime_error("GPU MCS path unavailable: " + fallbackReason);
+      if (!params.allowRDKitFallback) {
+        throw std::runtime_error("RDKit fallback is disabled: " + fallbackReason);
       }
       results[i] = mcs_detail::runRDKitFallback(*molA, *molB, params);
       return;
@@ -221,9 +221,9 @@ void runGpuPairs(std::vector<PreparedGpuPair>&           gpuPairs,
 
     std::vector<LabeledGraph> gpuGraphsA;
     std::vector<LabeledGraph> gpuGraphsB;
-    std::vector<size_t>         resultIndices;
-    std::vector<size_t>         molIndicesA;
-    std::vector<size_t>         molIndicesB;
+    std::vector<size_t>       resultIndices;
+    std::vector<size_t>       molIndicesA;
+    std::vector<size_t>       molIndicesB;
     gpuGraphsA.reserve(work.size());
     gpuGraphsB.reserve(work.size());
     resultIndices.reserve(work.size());
@@ -238,8 +238,8 @@ void runGpuPairs(std::vector<PreparedGpuPair>&           gpuPairs,
     }
 
     mcs::fmcs::Parameters fmcsParams;
-    fmcsParams.batchSize          = params.batchSize;
-    fmcsParams.blockSize          = params.blockSize;
+    fmcsParams.batchSize = params.batchSize;
+    fmcsParams.blockSize = params.blockSize;
     switch (params.scratchLocation) {
       case MCSScratchLocation::Shared:
         fmcsParams.scratchLocation = mcs::fmcs::FmcsScratchLocation::Shared;
@@ -254,9 +254,9 @@ void runGpuPairs(std::vector<PreparedGpuPair>&           gpuPairs,
     fmcsParams.executorsPerRunner = effectiveExecutorsPerRunner;
     fmcsParams.matchVertexLabels  = mcs_detail::usesAtomLabels(params);
     fmcsParams.matchEdgeLabels    = mcs_detail::usesBondLabels(params);
-    fmcsParams.completeRingsOnly  = params.atomCompareParameters.completeRingsOnly ||
-                                    params.bondCompareParameters.completeRingsOnly;
-    fmcsParams.timeoutMs          = static_cast<float>(params.timeoutSeconds) * 1000.0f;
+    fmcsParams.completeRingsOnly =
+      params.atomCompareParameters.completeRingsOnly || params.bondCompareParameters.completeRingsOnly;
+    fmcsParams.timeoutMs = static_cast<float>(params.timeoutSeconds) * 1000.0f;
 
     std::vector<float>                      gpuTimesMs;
     std::vector<mcs::fmcs::ExecutionStats>  gpuTimingStats;
@@ -289,8 +289,8 @@ void runGpuPairs(std::vector<PreparedGpuPair>&           gpuPairs,
       const size_t idxB         = molIndicesB[gpuIdx];
       const float  gpuElapsedMs = gpuTimesPtr != nullptr && gpuIdx < gpuTimesMs.size() ? gpuTimesMs[gpuIdx] : 0.0f;
       if (gpuResults[gpuIdx].overflowed) {
-        if (params.requireGpu) {
-          throw std::runtime_error("GPU MCS path overflowed");
+        if (!params.allowRDKitFallback) {
+          throw std::runtime_error("RDKit fallback is disabled: GPU MCS path overflowed");
         }
         auto fallback = mcs_detail::runRDKitFallback(*mols[idxA], *mols[idxB], params);
         fallback.elapsedMs += gpuElapsedMs;

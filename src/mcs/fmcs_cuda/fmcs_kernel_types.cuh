@@ -4,9 +4,9 @@
 #ifndef FMCS_CUDA_FMCS_KERNEL_TYPES_CUH
 #define FMCS_CUDA_FMCS_KERNEL_TYPES_CUH
 
-#include "fmcs_cuda/fmcs_match_tables.cuh"
-
 #include <cstdint>
+
+#include "fmcs_cuda/fmcs_match_tables.cuh"
 
 namespace mcs {
 namespace fmcs {
@@ -32,31 +32,30 @@ struct DevicePerPairInput {
   int targetNumAtoms = 0;
   int targetNumBonds = 0;
 
-  const std::uint32_t* queryRowOffsets = nullptr;
-  const std::uint32_t* queryColIndices = nullptr;
-  const std::uint32_t* queryBondIndices = nullptr;
+  const std::uint32_t* queryRowOffsets    = nullptr;
+  const std::uint32_t* queryColIndices    = nullptr;
+  const std::uint32_t* queryBondIndices   = nullptr;
   const std::uint32_t* queryBondEndpoints = nullptr;
-  const std::uint32_t* queryRingBondFlags  = nullptr;
+  const std::uint32_t* queryRingBondFlags = nullptr;
 
-  const std::uint32_t* targetRowOffsets = nullptr;
-  const std::uint32_t* targetColIndices = nullptr;
-  const std::uint32_t* targetBondIndices = nullptr;
+  const std::uint32_t* targetRowOffsets    = nullptr;
+  const std::uint32_t* targetColIndices    = nullptr;
+  const std::uint32_t* targetBondIndices   = nullptr;
   const std::uint32_t* targetBondEndpoints = nullptr;
-  const std::uint32_t* targetRingBondFlags  = nullptr;
+  const std::uint32_t* targetRingBondFlags = nullptr;
 
   PairMatchTablesDevice tables;
 
-  bool swapped = false;
+  bool swapped           = false;
   bool completeRingsOnly = false;
 };
 
 /// Fixed-size device-writable result. The host expands this POD into MCSResult.
-template<int maxAtoms, int maxBonds>
-struct DeviceMCSResult {
-  int numCommonVertices = 0;
-  int numCommonEdges = 0;
-  bool timedOut = false;
-  bool overflowed = false;
+template <int maxAtoms, int maxBonds> struct DeviceMCSResult {
+  int  numCommonVertices = 0;
+  int  numCommonEdges    = 0;
+  bool timedOut          = false;
+  bool overflowed        = false;
 
   uint8_t mappingA[maxAtoms];
   uint8_t mappingB[maxAtoms];

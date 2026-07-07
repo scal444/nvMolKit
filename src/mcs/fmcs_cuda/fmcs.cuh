@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -34,15 +34,16 @@
 // enforced as a final-candidate condition while partial rings remain growable.
 // Chirality, fused-ring strictness, and Threshold < 1.0 are out of scope.
 
+#include <cuda_runtime.h>
+
+#include <cstddef>
+#include <utility>
+#include <vector>
+
 #include "fmcs_cuda/fmcs_config.cuh"
 #include "fmcs_cuda/fmcs_labeled_graph.h"
 #include "fmcs_cuda/fmcs_stats.cuh"
 #include "mcs_common/mcs_types.cuh"
-
-#include <cstddef>
-#include <cuda_runtime.h>
-#include <utility>
-#include <vector>
 
 namespace mcs {
 namespace fmcs {
@@ -59,36 +60,36 @@ struct Parameters {
   /// Block size 512 supports tier-128 when the substructure scratch is placed
   /// in global memory (see scratchLocation); the default Auto policy selects
   /// that automatically.
-  int   blockSize        = 128;
+  int                 blockSize                    = 128;
   /// Placement of the per-group substructure fallback scratch.  Auto keeps
   /// small/hot configs on shared memory and only moves scratch to global for
   /// 512 @ tier-128 (where static shared cannot fit).  Explicit Shared with
   /// 512 @ tier-128 is rejected at dispatch.
-  FmcsScratchLocation scratchLocation = FmcsScratchLocation::Auto;
+  FmcsScratchLocation scratchLocation              = FmcsScratchLocation::Auto;
   /// Dormant readiness flag for the extended-shared-memory carveout
   /// (analysis/fmcs_scratch_placement_plan.md section 7).  Has no effect until
   /// the dynamic-shared follow-on lands; kept here so that change need not
   /// re-plumb the API.
-  bool  enableExtendedSharedCarveout = false;
+  bool                enableExtendedSharedCarveout = false;
   /// Per-pair wall timeout in milliseconds.  0 = no timeout.
-  float timeoutMs        = 0;
+  float               timeoutMs                    = 0;
   /// Max pairs per tier chunk in the batch API.  0 = default chunk size.
-  int   batchSize        = 0;
+  int                 batchSize                    = 0;
   /// Number of asynchronous executor streams for tier sub-batches. 1 = serial.
-  int   executorsPerRunner = 1;
+  int                 executorsPerRunner           = 1;
   /// Optional absolute wall deadline in seconds since epoch; pairs not
   /// started by this time are reported as timed out.  0 = disabled.
-  double wallDeadlineSec = 0;
+  double              wallDeadlineSec              = 0;
   /// For labeled inputs, require exact vertex-label equality.  When false,
   /// atom compatibility is CompareAny-style.
-  bool matchVertexLabels = true;
+  bool                matchVertexLabels            = true;
   /// For labeled inputs, require exact edge-label equality.  When false,
   /// bond compatibility is CompareAny-style.
-  bool matchEdgeLabels   = true;
+  bool                matchEdgeLabels              = true;
   /// Require every selected bond that belongs to an input cycle to remain in
   /// a cycle in the selected subgraph. Partial-ring search states remain
   /// growable but cannot become the incumbent.
-  bool completeRingsOnly = false;
+  bool                completeRingsOnly            = false;
 };
 
 /// Find the connected MCES for a batch of unlabeled graph pairs.
@@ -98,14 +99,13 @@ struct Parameters {
 /// supported maxSize, that pair's result has `overflowed` set and all counts
 /// are zero.  Per-pair timing/stat output is available when the corresponding
 /// NVMOLKIT_ENABLE_MCS_* compile option is enabled.
-std::vector<MCSResult> findMCESfMCSBatch(
-    const std::vector<Graph>& graphsA,
-    const std::vector<Graph>& graphsB,
-    Parameters params = {},
-    std::vector<float>* perPairTimesMs = nullptr,
-    cudaStream_t stream = nullptr,
-    std::vector<ExecutionStats>* perPairStats = nullptr,
-    std::vector<ExecutionStats>* perPairTimingStats = nullptr);
+std::vector<MCSResult> findMCESfMCSBatch(const std::vector<Graph>&    graphsA,
+                                         const std::vector<Graph>&    graphsB,
+                                         Parameters                   params             = {},
+                                         std::vector<float>*          perPairTimesMs     = nullptr,
+                                         cudaStream_t                 stream             = nullptr,
+                                         std::vector<ExecutionStats>* perPairStats       = nullptr,
+                                         std::vector<ExecutionStats>* perPairTimingStats = nullptr);
 
 /// Labeled variant: optional exact vertex and edge label equality.
 ///
@@ -115,14 +115,13 @@ std::vector<MCSResult> findMCESfMCSBatch(
 /// `Parameters::matchVertexLabels`
 /// or `Parameters::matchEdgeLabels` false for CompareAny-style matching on
 /// that axis.
-std::vector<MCSResult> findMCESfMCSBatchLabeled(
-    const std::vector<LabeledGraph>& graphsA,
-    const std::vector<LabeledGraph>& graphsB,
-    Parameters params = {},
-    std::vector<float>* perPairTimesMs = nullptr,
-    cudaStream_t stream = nullptr,
-    std::vector<ExecutionStats>* perPairStats = nullptr,
-    std::vector<ExecutionStats>* perPairTimingStats = nullptr);
+std::vector<MCSResult> findMCESfMCSBatchLabeled(const std::vector<LabeledGraph>& graphsA,
+                                                const std::vector<LabeledGraph>& graphsB,
+                                                Parameters                       params             = {},
+                                                std::vector<float>*              perPairTimesMs     = nullptr,
+                                                cudaStream_t                     stream             = nullptr,
+                                                std::vector<ExecutionStats>*     perPairStats       = nullptr,
+                                                std::vector<ExecutionStats>*     perPairTimingStats = nullptr);
 
 }  // namespace fmcs
 }  // namespace mcs

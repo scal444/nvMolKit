@@ -85,10 +85,8 @@ include(boost)
 
 add_library(nvmolkit_mcs_compile_flags INTERFACE)
 target_compile_definitions(
-  nvmolkit_mcs_compile_flags
-  INTERFACE
-    NVMOLKIT_ENABLE_MCS_TIMINGS=$<BOOL:${NVMOLKIT_ENABLE_MCS_TIMINGS}>
-    NVMOLKIT_ENABLE_MCS_STATS=$<BOOL:${NVMOLKIT_ENABLE_MCS_STATS}>)
+  nvmolkit_mcs_compile_flags INTERFACE NVMOLKIT_ENABLE_MCS_TIMINGS=$<BOOL:${NVMOLKIT_ENABLE_MCS_TIMINGS}>
+                                       NVMOLKIT_ENABLE_MCS_STATS=$<BOOL:${NVMOLKIT_ENABLE_MCS_STATS}>)
 
 # --------------------------------
 # Conditional compilation features

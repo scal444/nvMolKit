@@ -50,8 +50,9 @@ if(NVMOLKIT_CUDA_TARGET_MODE STREQUAL "native")
       "${CMAKE_BINARY_DIR}/detect_cuda_arch"
     RESULT_VARIABLE _detect_build_result)
   if(NOT _detect_build_result EQUAL 0)
-    message(FATAL_ERROR
-            "Failed to build the CUDA native-architecture detection program")
+    message(
+      FATAL_ERROR
+        "Failed to build the CUDA native-architecture detection program")
   endif()
 
   execute_process(
@@ -65,7 +66,8 @@ if(NVMOLKIT_CUDA_TARGET_MODE STREQUAL "native")
         "NVMOLKIT_CUDA_TARGET_MODE=native requires a CUDA device visible to the "
         "build at configure time, but none was detected. Build on a node with a "
         "visible GPU, or use NVMOLKIT_CUDA_TARGET_MODE=full, or "
-        "NVMOLKIT_CUDA_TARGET_MODE=default with -DCMAKE_CUDA_ARCHITECTURES set.")
+        "NVMOLKIT_CUDA_TARGET_MODE=default with -DCMAKE_CUDA_ARCHITECTURES set."
+    )
   endif()
 
   set(CMAKE_CUDA_ARCHITECTURES "${_native_cc}-real")

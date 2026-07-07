@@ -16,13 +16,13 @@
 #ifndef NVMOLKIT_MCS_SEARCH_H
 #define NVMOLKIT_MCS_SEARCH_H
 
-#include "src/mcs/mcs_types.h"
-
 #include <cuda_runtime.h>
 
 #include <cstddef>
 #include <utility>
 #include <vector>
+
+#include "src/mcs/mcs_types.h"
 
 namespace RDKit {
 class ROMol;
@@ -54,9 +54,9 @@ struct MCSAllPairsOptions {
 /// Results are returned in generated-pair order. With the default options this
 /// is upper-triangular row-major order: (0,0), (0,1), ..., (1,1), ...
 std::vector<MCSResult> findMCSAllPairs(const std::vector<const RDKit::ROMol*>& mols,
-                                       MCSAllPairsOptions                     options = {},
-                                       cudaStream_t                           stream = nullptr,
-                                       const MCSParameters&                   params = MCSParameters{});
+                                       MCSAllPairsOptions                      options = {},
+                                       cudaStream_t                            stream  = nullptr,
+                                       const MCSParameters&                    params  = MCSParameters{});
 
 }  // namespace nvMolKit
 

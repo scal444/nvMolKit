@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,14 +16,14 @@
 #ifndef FMCS_CUDA_FMCS_POLICY_CUH
 #define FMCS_CUDA_FMCS_POLICY_CUH
 
-#include "fmcs_cuda/fmcs_labeled_graph.h"
-#include "fmcs_cuda/fmcs_match_tables.cuh"
-#include "mcs_common/mcs_types.cuh"
-
 #include <cstddef>
 #include <cstdint>
 #include <utility>
 #include <vector>
+
+#include "fmcs_cuda/fmcs_labeled_graph.h"
+#include "fmcs_cuda/fmcs_match_tables.cuh"
+#include "mcs_common/mcs_types.cuh"
 
 namespace mcs {
 namespace fmcs {
@@ -39,11 +39,8 @@ inline void fillAllCompatible(MatchTableHost& out, int nRows, int nCols) {
     if (out.wordsPerRow > 0) {
       const int tailBits = out.wordsPerRow * 32 - nCols;
       if (tailBits > 0) {
-        const uint32_t mask = (tailBits == 32)
-            ? 0u
-            : (0xFFFFFFFFu >> tailBits);
-        out.data[static_cast<std::size_t>(i) * out.wordsPerRow +
-                 out.wordsPerRow - 1] &= mask;
+        const uint32_t mask = (tailBits == 32) ? 0u : (0xFFFFFFFFu >> tailBits);
+        out.data[static_cast<std::size_t>(i) * out.wordsPerRow + out.wordsPerRow - 1] &= mask;
       }
     }
   }
@@ -62,7 +59,8 @@ inline std::vector<std::pair<int, int>> enumerateBonds(const Graph& g) {
     const std::size_t end   = g.rowOffsets[u + 1];
     for (std::size_t k = begin; k < end; ++k) {
       const int v = static_cast<int>(g.colIndices[k]);
-      if (u < v) out.emplace_back(u, v);
+      if (u < v)
+        out.emplace_back(u, v);
     }
   }
   return out;
@@ -72,15 +70,15 @@ inline std::vector<std::pair<int, int>> enumerateBonds(const Graph& g) {
 /// topology and connectivity enforcement happens in the device-side match
 /// walk, not in these tables.
 struct UnlabeledFmcsPolicy {
-  static void buildAtomMatchTable(const Graph& query,
-                                  const Graph& target,
+  static void buildAtomMatchTable(const Graph&    query,
+                                  const Graph&    target,
                                   MatchTableHost& out,
                                   bool /*matchVertexLabels*/) {
     fillAllCompatible(out, query.numVertices, target.numVertices);
   }
 
-  static void buildBondMatchTable(const Graph& query,
-                                  const Graph& target,
+  static void buildBondMatchTable(const Graph&    query,
+                                  const Graph&    target,
                                   MatchTableHost& out,
                                   bool /*matchEdgeLabels*/) {
     fillAllCompatible(out, query.numEdges, target.numEdges);
@@ -93,8 +91,8 @@ struct UnlabeledFmcsPolicy {
 struct LabeledFmcsPolicy {
   static void buildAtomMatchTable(const LabeledGraph& query,
                                   const LabeledGraph& target,
-                                  MatchTableHost& out,
-                                  bool matchVertexLabels) {
+                                  MatchTableHost&     out,
+                                  bool                matchVertexLabels) {
     const int nQ = query.graph.numVertices;
     const int nT = target.graph.numVertices;
     if (!matchVertexLabels) {
@@ -104,43 +102,39 @@ struct LabeledFmcsPolicy {
 
     out.resize(nQ, nT);
     for (int i = 0; i < nQ; ++i) {
-      const uint16_t lq = (i < static_cast<int>(query.vertexLabels.size()))
-                             ? query.vertexLabels[i] : 0;
+      const uint16_t lq = (i < static_cast<int>(query.vertexLabels.size())) ? query.vertexLabels[i] : 0;
       for (int j = 0; j < nT; ++j) {
-        const uint16_t lt = (j < static_cast<int>(target.vertexLabels.size()))
-                               ? target.vertexLabels[j] : 0;
-        if (lq == lt) out.setBit(i, j);
+        const uint16_t lt = (j < static_cast<int>(target.vertexLabels.size())) ? target.vertexLabels[j] : 0;
+        if (lq == lt)
+          out.setBit(i, j);
       }
     }
   }
 
   static void buildBondMatchTable(const LabeledGraph& query,
                                   const LabeledGraph& target,
-                                  MatchTableHost& out,
-                                  bool matchEdgeLabels) {
+                                  MatchTableHost&     out,
+                                  bool                matchEdgeLabels) {
     const auto qBonds = enumerateBonds(query.graph);
     const auto tBonds = enumerateBonds(target.graph);
-    out.resize(static_cast<int>(qBonds.size()),
-               static_cast<int>(tBonds.size()));
+    out.resize(static_cast<int>(qBonds.size()), static_cast<int>(tBonds.size()));
     if (!matchEdgeLabels) {
-      fillAllCompatible(out, static_cast<int>(qBonds.size()),
-                        static_cast<int>(tBonds.size()));
+      fillAllCompatible(out, static_cast<int>(qBonds.size()), static_cast<int>(tBonds.size()));
       return;
     }
 
     const int nQ = query.graph.numVertices;
     const int nT = target.graph.numVertices;
     for (std::size_t i = 0; i < qBonds.size(); ++i) {
-      const int u = qBonds[i].first;
-      const int v = qBonds[i].second;
-      const uint16_t lq = query.edgeLabels[
-          static_cast<std::size_t>(u) * nQ + v];
-      if (lq == 0) continue;
+      const int      u  = qBonds[i].first;
+      const int      v  = qBonds[i].second;
+      const uint16_t lq = query.edgeLabels[static_cast<std::size_t>(u) * nQ + v];
+      if (lq == 0)
+        continue;
       for (std::size_t j = 0; j < tBonds.size(); ++j) {
-        const int x = tBonds[j].first;
-        const int y = tBonds[j].second;
-        const uint16_t lt = target.edgeLabels[
-            static_cast<std::size_t>(x) * nT + y];
+        const int      x  = tBonds[j].first;
+        const int      y  = tBonds[j].second;
+        const uint16_t lt = target.edgeLabels[static_cast<std::size_t>(x) * nT + y];
         if (lt != 0 && lq == lt) {
           out.setBit(static_cast<int>(i), static_cast<int>(j));
         }
