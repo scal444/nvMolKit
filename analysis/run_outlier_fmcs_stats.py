@@ -30,7 +30,7 @@ def main() -> None:
             mols,
             mode="pairs",
             pairs=[(0, 1)],
-            require_gpu=True,
+            allow_rdkit_fallback=False,
             timeout_seconds=0,
             block_size=block_size,
             worker_threads=1,

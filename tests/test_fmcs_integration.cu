@@ -571,7 +571,7 @@ TEST(FMCSDispatchRoutes, SingletonOnlyOverlapMatchesRdkitMCS) {
   };
   MCSParameters params;
   params.allowRDKitFallback = false;
-  const auto results = nvMolKit::findMCSBatch(mols, pairs, nullptr, params);
+  const auto results        = nvMolKit::findMCSBatch(mols, pairs, nullptr, params);
 
   ASSERT_EQ(results.size(), 1);
   EXPECT_EQ(results[0].numAtoms, 1);

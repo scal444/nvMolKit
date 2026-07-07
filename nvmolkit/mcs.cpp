@@ -364,13 +364,13 @@ BOOST_PYTHON_MODULE(_mcs) {
       auto pairVec = pairsFromPythonList(pairs);
 
       nvMolKit::MCSParameters params;
-      params.atomCompare    = parseAtomCompare(optionValue<std::string>(options, "atom_compare", "elements"));
-      params.bondCompare    = parseBondCompare(optionValue<std::string>(options, "bond_compare", "order"));
-      params.maximizeBonds  = optionValue<bool>(options, "maximize_bonds", true);
-      params.connectedOnly  = optionValue<bool>(options, "connected_only", true);
+      params.atomCompare        = parseAtomCompare(optionValue<std::string>(options, "atom_compare", "elements"));
+      params.bondCompare        = parseBondCompare(optionValue<std::string>(options, "bond_compare", "order"));
+      params.maximizeBonds      = optionValue<bool>(options, "maximize_bonds", true);
+      params.connectedOnly      = optionValue<bool>(options, "connected_only", true);
       params.allowRDKitFallback = optionValue<bool>(options, "allow_rdkit_fallback", true);
-      params.collectTimings = optionValue<bool>(options, "collect_timings", false);
-      params.collectStats   = optionValue<bool>(options, "collect_stats", false);
+      params.collectTimings     = optionValue<bool>(options, "collect_timings", false);
+      params.collectStats       = optionValue<bool>(options, "collect_stats", false);
       if (params.collectTimings && !nvMolKit::kMCSCollectTimingsEnabled) {
         throw std::runtime_error("fMCS timing instrumentation is not instantiated in this build");
       }
