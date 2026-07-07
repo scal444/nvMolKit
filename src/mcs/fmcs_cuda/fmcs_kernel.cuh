@@ -150,7 +150,7 @@ __device__ __forceinline__ bool hasOnlyCompleteRingsCooperative(
           atomicExch(changed, 1);
       }
       group.sync();
-      if (*changed == 0)
+      if (!readFlagCooperative(group, changed))
         break;
     }
     const bool goalReached = (visitedAtoms[goal / kAtomBits] & (static_cast<AtomWord>(1) << (goal % kAtomBits))) != 0;
