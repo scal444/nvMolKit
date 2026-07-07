@@ -30,8 +30,9 @@
 // disables the corresponding table, while CompareElements/CompareIsotopes
 // and CompareOrder/CompareOrderExact require the caller to encode those
 // semantics as uint16 labels.  RingMatchesRingOnly is likewise supported
-// when ring membership is encoded in atom/bond labels.  `CompleteRingsOnly`,
-// chirality, fused-ring strictness, and Threshold < 1.0 are out of scope.
+// when ring membership is encoded in atom/bond labels. CompleteRingsOnly is
+// enforced as a final-candidate condition while partial rings remain growable.
+// Chirality, fused-ring strictness, and Threshold < 1.0 are out of scope.
 
 #include "fmcs_cuda/fmcs_config.cuh"
 #include "fmcs_cuda/fmcs_labeled_graph.h"
@@ -84,6 +85,10 @@ struct Parameters {
   /// For labeled inputs, require exact edge-label equality.  When false,
   /// bond compatibility is CompareAny-style.
   bool matchEdgeLabels   = true;
+  /// Require every selected bond that belongs to an input cycle to remain in
+  /// a cycle in the selected subgraph. Partial-ring search states remain
+  /// growable but cannot become the incumbent.
+  bool completeRingsOnly = false;
 };
 
 /// Find the connected MCES for a batch of unlabeled graph pairs.

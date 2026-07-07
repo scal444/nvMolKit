@@ -560,6 +560,41 @@ TEST(FMCSDispatchRoutes, SingletonOnlyOverlapMatchesRdkitMCS) {
   EXPECT_TRUE(results[0].bondMapping.empty());
 }
 
+TEST(FMCSDispatchRoutes, CompleteRingsOnlyRunsOnGpuAndMatchesRdkit) {
+  const std::vector<std::pair<std::string, std::string>> smilesPairs = {
+    {"C1CCCCC1", "C1CCCCCC1"},
+    {"C1CCCCC1C", "C1CCCCC1N"},
+    {"C1CC1CCCCCC", "CCCCCC"},
+    {"Oc1ccccc1", "CCO"},
+    {"Oc1ccccc1", "COc1ncccc1"},
+  };
+
+  for (const auto& [smilesA, smilesB] : smilesPairs) {
+    const std::unique_ptr<RDKit::ROMol> molA(RDKit::SmilesToMol(smilesA));
+    const std::unique_ptr<RDKit::ROMol> molB(RDKit::SmilesToMol(smilesB));
+    ASSERT_NE(molA, nullptr);
+    ASSERT_NE(molB, nullptr);
+
+    for (const auto& [atomComplete, bondComplete] :
+         {std::pair{true, false}, std::pair{false, true}, std::pair{true, true}}) {
+      MCSParameters params;
+      params.requireGpu = true;
+      params.atomCompareParameters.completeRingsOnly = atomComplete;
+      params.bondCompareParameters.completeRingsOnly = bondComplete;
+      const auto rd = findRdkitMCS(*molA, *molB, params);
+      const auto gpu = nvMolKit::findMCSBatch(
+          std::vector<const RDKit::ROMol*>{molA.get(), molB.get()},
+          std::vector<MCSPair>{{0, 1}}, nullptr, params);
+
+      ASSERT_EQ(gpu.size(), 1);
+      EXPECT_TRUE(gpu[0].usedGpu) << smilesA << " vs " << smilesB;
+      EXPECT_FALSE(gpu[0].usedFallback) << smilesA << " vs " << smilesB;
+      EXPECT_EQ(gpu[0].numAtoms, rd.NumAtoms) << smilesA << " vs " << smilesB;
+      EXPECT_EQ(gpu[0].numBonds, rd.NumBonds) << smilesA << " vs " << smilesB;
+    }
+  }
+}
+
 constexpr RingConfig kNoRing{false, false, "NoRing"};
 
 std::string integrationParamName(const ::testing::TestParamInfo<FmcsIntegrationParams>& info) {

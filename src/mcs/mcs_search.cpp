@@ -254,6 +254,8 @@ void runGpuPairs(std::vector<PreparedGpuPair>&           gpuPairs,
     fmcsParams.executorsPerRunner = effectiveExecutorsPerRunner;
     fmcsParams.matchVertexLabels  = mcs_detail::usesAtomLabels(params);
     fmcsParams.matchEdgeLabels    = mcs_detail::usesBondLabels(params);
+    fmcsParams.completeRingsOnly  = params.atomCompareParameters.completeRingsOnly ||
+                                    params.bondCompareParameters.completeRingsOnly;
     fmcsParams.timeoutMs          = static_cast<float>(params.timeoutSeconds) * 1000.0f;
 
     std::vector<float>                      gpuTimesMs;

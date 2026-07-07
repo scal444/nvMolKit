@@ -82,6 +82,107 @@ __device__ __forceinline__ void updateIncumbentCooperative(
   group.sync();
 }
 
+template<class GroupT, class QueuedT>
+__device__ __forceinline__ bool hasOnlyCompleteRingsCooperative(
+    const GroupT& group,
+    const QueuedT& candidate,
+    const DeviceCsrView& queryTopology,
+    const std::uint32_t* queryRingBondFlags,
+    const std::uint32_t* targetRingBondFlags,
+    typename decltype(candidate.seed)::atom_word_type* visitedAtoms,
+    int* changed) {
+  using SeedT = decltype(candidate.seed);
+  using AtomWord = typename SeedT::atom_word_type;
+  using BondWord = typename SeedT::bond_word_type;
+  constexpr int kAtomBits = SeedT::kAtomBitsPerWord;
+  constexpr int kBondBits = SeedT::kBondBitsPerWord;
+  const int rank = static_cast<int>(group.thread_rank());
+  const int width = static_cast<int>(group.size());
+
+  for (int excludedBond = 0; excludedBond < queryTopology.numBonds; ++excludedBond) {
+    const BondWord excludedMask = static_cast<BondWord>(1) << (excludedBond % kBondBits);
+    if ((candidate.seed.bonds[excludedBond / kBondBits] & excludedMask) == 0) continue;
+    const std::uint8_t targetBond = candidate.match.targetBondIdx[excludedBond];
+    const bool isOriginalRingBond = queryRingBondFlags[excludedBond] != 0 ||
+                                    (targetBond != kUnmappedTargetIdx && targetRingBondFlags[targetBond] != 0);
+    if (!isOriginalRingBond) continue;
+
+    for (int word = rank; word < SeedT::kAtomWords; word += width) visitedAtoms[word] = 0;
+    group.sync();
+    const std::uint32_t excludedEndpoints = queryTopology.bondEndpoints[excludedBond];
+    const int from = static_cast<int>(excludedEndpoints >> kBondEndpointShift);
+    const int goal = static_cast<int>(excludedEndpoints & kBondEndpointMask);
+    if (rank == 0) {
+      visitedAtoms[from / kAtomBits] |= static_cast<AtomWord>(1) << (from % kAtomBits);
+    }
+    group.sync();
+
+    while (true) {
+      if (rank == 0) *changed = 0;
+      group.sync();
+      for (int bondIdx = rank; bondIdx < queryTopology.numBonds; bondIdx += width) {
+        if (bondIdx == excludedBond) continue;
+        const BondWord bondMask = static_cast<BondWord>(1) << (bondIdx % kBondBits);
+        if ((candidate.seed.bonds[bondIdx / kBondBits] & bondMask) == 0) continue;
+        const std::uint32_t endpoints = queryTopology.bondEndpoints[bondIdx];
+        const int u = static_cast<int>(endpoints >> kBondEndpointShift);
+        const int v = static_cast<int>(endpoints & kBondEndpointMask);
+        const AtomWord uMask = static_cast<AtomWord>(1) << (u % kAtomBits);
+        const AtomWord vMask = static_cast<AtomWord>(1) << (v % kAtomBits);
+        const bool uSeen = (visitedAtoms[u / kAtomBits] & uMask) != 0;
+        const bool vSeen = (visitedAtoms[v / kAtomBits] & vMask) != 0;
+        if (uSeen == vSeen) continue;
+        AtomWord* dst = &visitedAtoms[(uSeen ? v : u) / kAtomBits];
+        const AtomWord mask = uSeen ? vMask : uMask;
+        AtomWord old;
+        if constexpr (sizeof(AtomWord) == sizeof(unsigned int)) {
+          old = static_cast<AtomWord>(atomicOr(reinterpret_cast<unsigned int*>(dst), static_cast<unsigned int>(mask)));
+        } else {
+          old = static_cast<AtomWord>(atomicOr(reinterpret_cast<unsigned long long*>(dst),
+                                               static_cast<unsigned long long>(mask)));
+        }
+        if ((old & mask) == 0) atomicExch(changed, 1);
+      }
+      group.sync();
+      if (*changed == 0) break;
+    }
+    const bool goalReached =
+        (visitedAtoms[goal / kAtomBits] & (static_cast<AtomWord>(1) << (goal % kAtomBits))) != 0;
+    group.sync();
+    if (!goalReached) return false;
+  }
+  return true;
+}
+
+template<class GroupT, class QueuedT>
+__device__ __forceinline__ void updateCompleteRingsIncumbentCooperative(
+    const GroupT& group,
+    const QueuedT& candidate,
+    QueuedT& best,
+    unsigned int* bestScore,
+    int* bestCopyLock,
+    bool completeRingsOnly,
+    const DeviceCsrView& queryTopology,
+    const std::uint32_t* queryRingBondFlags,
+    const std::uint32_t* targetRingBondFlags,
+    typename decltype(candidate.seed)::atom_word_type* visitedAtoms,
+    int* changed) {
+  int canImprove = 0;
+  if (group.thread_rank() == 0) {
+    const unsigned int candidateScore =
+        (static_cast<unsigned int>(candidate.seed.numBonds) << 16) |
+        static_cast<unsigned int>(candidate.seed.numAtoms);
+    canImprove = candidateScore > *bestScore ? 1 : 0;
+  }
+  canImprove = group.shfl(canImprove, 0);
+  if (!canImprove) return;
+  if (completeRingsOnly && !hasOnlyCompleteRingsCooperative(
+          group, candidate, queryTopology, queryRingBondFlags, targetRingBondFlags, visitedAtoms, changed)) {
+    return;
+  }
+  updateIncumbentCooperative(group, candidate, best, bestScore, bestCopyLock);
+}
+
 __device__ __forceinline__ unsigned int clockCycles1024(
     unsigned long long clocks) {
   const unsigned long long quanta = (clocks + 1023ULL) >> 10;
@@ -721,8 +822,10 @@ __global__ void fmcsKernel(
           group, myCurrent, qBond, queryView, targetView, pair.tables,
           myStats);
       if (matched) {
-        updateIncumbentCooperative(
-            group, myCurrent, best, &bestScore, &bestCopyLock);
+        updateCompleteRingsIncumbentCooperative(
+            group, myCurrent, best, &bestScore, &bestCopyLock,
+            pair.completeRingsOnly, queryView, pair.queryRingBondFlags, pair.targetRingBondFlags,
+            myRemainingVisitedAtoms, &remainingStackSize[groupId]);
         if (!pushBackCooperative(group, queue, myCurrent)) {
           atomicExch(&overflowed, 1);
         }
@@ -865,8 +968,10 @@ __global__ void fmcsKernel(
         break;
       }
 
-      updateIncumbentCooperative(
-          group, myCurrent, best, &bestScore, &bestCopyLock);
+      updateCompleteRingsIncumbentCooperative(
+          group, myCurrent, best, &bestScore, &bestCopyLock,
+          pair.completeRingsOnly, queryView, pair.queryRingBondFlags, pair.targetRingBondFlags,
+          myRemainingVisitedAtoms, &remainingStackSize[groupId]);
 
       if constexpr (kFmcsDebug) {
         if (pairIdx == kFmcsDebugPairIdx && groupRank == 0) {
@@ -972,8 +1077,10 @@ __global__ void fmcsKernel(
           if constexpr (CollectStats || kFmcsMeasure) {
             if (groupRank == 0) myStats.stage0Success += 1u;
           }
-          updateIncumbentCooperative(
-              group, myBiggest, best, &bestScore, &bestCopyLock);
+          updateCompleteRingsIncumbentCooperative(
+              group, myBiggest, best, &bestScore, &bestCopyLock,
+              pair.completeRingsOnly, queryView, pair.queryRingBondFlags, pair.targetRingBondFlags,
+              myRemainingVisitedAtoms, &remainingStackSize[groupId]);
           if (!pushBackLockedCooperative(
                   group, queue, myBiggest, &queueLock, &overflowed,
                   &timedOut, &phase2Done)) {
@@ -1055,8 +1162,10 @@ __global__ void fmcsKernel(
           if (groupRank == 0 && ok) myStats.stage1Success += 1u;
         }
         if (ok) {
-          updateIncumbentCooperative(
-              group, myBiggest, best, &bestScore, &bestCopyLock);
+          updateCompleteRingsIncumbentCooperative(
+              group, myBiggest, best, &bestScore, &bestCopyLock,
+              pair.completeRingsOnly, queryView, pair.queryRingBondFlags, pair.targetRingBondFlags,
+              myRemainingVisitedAtoms, &remainingStackSize[groupId]);
           if (!pushBackLockedCooperative(
                   group, queue, myBiggest, &queueLock, &overflowed,
                   &timedOut, &phase2Done)) {
@@ -1176,8 +1285,10 @@ __global__ void fmcsKernel(
             if constexpr (CollectStats || kFmcsMeasure) {
               if (groupRank == 0) myStats.stage2Success += 1u;
             }
-            updateIncumbentCooperative(
-                group, myBiggest, best, &bestScore, &bestCopyLock);
+            updateCompleteRingsIncumbentCooperative(
+                group, myBiggest, best, &bestScore, &bestCopyLock,
+                pair.completeRingsOnly, queryView, pair.queryRingBondFlags, pair.targetRingBondFlags,
+                myRemainingVisitedAtoms, &remainingStackSize[groupId]);
             if (!pushBackLockedCooperative(
                     group, queue, myBiggest, &queueLock, &overflowed,
                     &timedOut, &phase2Done)) {

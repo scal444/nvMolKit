@@ -408,6 +408,32 @@ TEST(FMCSBasics, CycleVsCycleLarger) {
   expectMappingsConsistent(r, a, b);
 }
 
+TEST(FMCSCompleteRingsOnly, RejectsPartialCycle) {
+  Parameters params;
+  params.completeRingsOnly = true;
+  const auto result = findSingleMCES(cycle(6), cycle(7), params);
+  EXPECT_EQ(result.numCommonVertices, 0);
+  EXPECT_EQ(result.numCommonEdges, 0);
+}
+
+TEST(FMCSCompleteRingsOnly, AcceptsCompletedCycle) {
+  Parameters params;
+  params.completeRingsOnly = true;
+  const auto ring = benzene();
+  const auto result = findSingleMCES(toluene(), ring, params);
+  EXPECT_EQ(result.numCommonVertices, 6);
+  EXPECT_EQ(result.numCommonEdges, 6);
+}
+
+TEST(FMCSCompleteRingsOnly, KeepsNonRingTailGrowable) {
+  Parameters params;
+  params.completeRingsOnly = true;
+  const auto ringWithTail = g(9, {{0, 1}, {1, 2}, {0, 2}, {2, 3}, {3, 4}, {4, 5}, {5, 6}, {6, 7}, {7, 8}});
+  const auto result = findSingleMCES(ringWithTail, path(7), params);
+  EXPECT_EQ(result.numCommonVertices, 7);
+  EXPECT_EQ(result.numCommonEdges, 6);
+}
+
 TEST(FMCSBasics, TreeVsCycle) {
   const auto a = path(3);
   const auto b = cycle(3);

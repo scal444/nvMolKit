@@ -92,7 +92,7 @@ AtomLabelKey makeAtomLabelKey(const RDKit::ROMol& mol, const RDKit::Atom& atom, 
   if (params.atomCompareParameters.matchFormalCharge) {
     key.formalCharge = atom.getFormalCharge();
   }
-  if (params.atomCompareParameters.ringMatchesRingOnly) {
+  if (params.atomCompareParameters.ringMatchesRingOnly || params.atomCompareParameters.completeRingsOnly) {
     key.ringState = mol.getRingInfo()->numAtomRings(atom.getIdx()) > 0 ? 1 : 2;
   }
   return key;
@@ -142,7 +142,7 @@ int bondOrderClass(const RDKit::Bond& bond, const MCSParameters& params) {
 BondLabelKey makeBondLabelKey(const RDKit::Bond& bond, const MCSParameters& params) {
   BondLabelKey key;
   key.bondCompareValue = bondOrderClass(bond, params);
-  if (params.bondCompareParameters.ringMatchesRingOnly) {
+  if (params.bondCompareParameters.ringMatchesRingOnly || params.bondCompareParameters.completeRingsOnly) {
     key.ringState = bond.getOwningMol().getRingInfo()->numBondRings(bond.getIdx()) > 0 ? 1 : 2;
   }
   return key;
@@ -256,8 +256,16 @@ void addCompatibleSingletonIfEmpty(MCSResult&           result,
   }
 
   for (const auto* atomA : molA.atoms()) {
+    const bool completeRingsOnly = params.atomCompareParameters.completeRingsOnly ||
+                                   params.bondCompareParameters.completeRingsOnly;
+    if (completeRingsOnly && molA.getRingInfo()->numAtomRings(atomA->getIdx()) > 0) {
+      continue;
+    }
     const auto keyA = makeAtomLabelKey(molA, *atomA, params);
     for (const auto* atomB : molB.atoms()) {
+      if (completeRingsOnly && molB.getRingInfo()->numAtomRings(atomB->getIdx()) > 0) {
+        continue;
+      }
       const auto keyB = makeAtomLabelKey(molB, *atomB, params);
       if (keyA.tie() == keyB.tie()) {
         result.numAtoms = 1;
@@ -315,7 +323,7 @@ RDKit::QueryAtom* makeMCSQueryAtom(const RDKit::ROMol&  molA,
   if (params.atomCompareParameters.matchFormalCharge) {
     addAndQuery(*queryAtom, RDKit::makeAtomFormalChargeQuery(atomA.getFormalCharge()));
   }
-  if (params.atomCompareParameters.ringMatchesRingOnly) {
+  if (params.atomCompareParameters.ringMatchesRingOnly || params.atomCompareParameters.completeRingsOnly) {
     auto* ringQuery = RDKit::makeAtomInRingQuery();
     if (molA.getRingInfo()->numAtomRings(atomA.getIdx()) == 0) {
       ringQuery->setNegation(true);
@@ -337,7 +345,7 @@ RDKit::QueryBond* makeMCSQueryBond(const RDKit::Bond& bondA, const RDKit::Bond& 
     addOrQuery(*queryBond, RDKit::makeBondOrderEqualsQuery(bondB.getBondType()));
   }
 
-  if (params.bondCompareParameters.ringMatchesRingOnly) {
+  if (params.bondCompareParameters.ringMatchesRingOnly || params.bondCompareParameters.completeRingsOnly) {
     auto* ringQuery = RDKit::makeBondIsInRingQuery();
     if (bondA.getOwningMol().getRingInfo()->numBondRings(bondA.getIdx()) == 0) {
       ringQuery->setNegation(true);
@@ -386,11 +394,12 @@ std::string buildMCSQuerySmarts(const RDKit::ROMol&  molA,
 bool usesAtomLabels(const MCSParameters& params) {
   return params.atomCompare != MCSAtomCompare::Any || params.atomCompareParameters.matchValences ||
          params.atomCompareParameters.matchFormalCharge || params.atomCompareParameters.ringMatchesRingOnly ||
-         params.atomCompareParameters.matchIsotope;
+         params.atomCompareParameters.completeRingsOnly || params.atomCompareParameters.matchIsotope;
 }
 
 bool usesBondLabels(const MCSParameters& params) {
-  return params.bondCompare != MCSBondCompare::Any || params.bondCompareParameters.ringMatchesRingOnly;
+  return params.bondCompare != MCSBondCompare::Any || params.bondCompareParameters.ringMatchesRingOnly ||
+         params.bondCompareParameters.completeRingsOnly;
 }
 
 LabeledGraphPair buildLabeledGraphPair(const RDKit::ROMol&  molA,
@@ -418,10 +427,6 @@ bool shouldFallbackToRDKit(const RDKit::ROMol&  molA,
   }
   if (params.atomCompare == MCSAtomCompare::AnyHeavyAtom) {
     reason = "AtomCompareAnyHeavyAtom is delegated to RDKit";
-    return true;
-  }
-  if (params.atomCompareParameters.completeRingsOnly || params.bondCompareParameters.completeRingsOnly) {
-    reason = "CompleteRingsOnly is delegated to RDKit";
     return true;
   }
   if (std::max(molA.getNumAtoms(), molB.getNumAtoms()) > 128 ||

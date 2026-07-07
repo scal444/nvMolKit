@@ -133,6 +133,7 @@ struct PackedGraphHost {
   /// Per-adjacency entry bond id, parallel to @c colIndices.
   std::vector<uint32_t> bondIndices;
   std::vector<uint32_t> bondEndpoints;  // (u << 16) | v, u < v
+  std::vector<uint32_t> ringBondFlags;  // 1 iff the bond belongs to a cycle
 };
 
 PackedGraphHost packGraph(const Graph& g) {
@@ -174,6 +175,32 @@ PackedGraphHost packGraph(const Graph& g) {
   if (out.bondEndpoints.size() != static_cast<size_t>(g.numEdges)) {
     throw std::runtime_error("fMCS CSR graph edge count is inconsistent");
   }
+  out.ringBondFlags.assign(out.bondEndpoints.size(), 0);
+  std::vector<unsigned char> visited(static_cast<size_t>(g.numVertices));
+  std::vector<int> stack;
+  stack.reserve(static_cast<size_t>(g.numVertices));
+  for (size_t excluded = 0; excluded < out.bondEndpoints.size(); ++excluded) {
+    std::fill(visited.begin(), visited.end(), 0);
+    stack.clear();
+    const uint32_t endpoints = out.bondEndpoints[excluded];
+    const int from = static_cast<int>(endpoints >> 16);
+    const int goal = static_cast<int>(endpoints & 0xFFFFu);
+    visited[static_cast<size_t>(from)] = 1;
+    stack.push_back(from);
+    while (!stack.empty() && !visited[static_cast<size_t>(goal)]) {
+      const int atom = stack.back();
+      stack.pop_back();
+      for (size_t k = g.rowOffsets[atom]; k < g.rowOffsets[atom + 1]; ++k) {
+        if (out.bondIndices[k] == excluded) continue;
+        const int next = static_cast<int>(g.colIndices[k]);
+        if (!visited[static_cast<size_t>(next)]) {
+          visited[static_cast<size_t>(next)] = 1;
+          stack.push_back(next);
+        }
+      }
+    }
+    out.ringBondFlags[excluded] = visited[static_cast<size_t>(goal)] ? 1u : 0u;
+  }
   return out;
 }
 
@@ -184,6 +211,7 @@ PackedGraphHost packGraph(const Graph& g) {
 struct HostPairDescriptor {
   bool swapped = false;
   bool overflowed = false;
+  bool completeRingsOnly = false;
 
   const Graph* queryGraph = nullptr;
   const Graph* targetGraph = nullptr;
@@ -201,6 +229,7 @@ HostPairDescriptor buildPairDescriptor(const InputT& sideA,
                                        const InputT& sideB,
                                        const Parameters& params) {
   HostPairDescriptor desc;
+  desc.completeRingsOnly = params.completeRingsOnly;
   const Graph& gA = [&]() -> const Graph& {
     if constexpr (std::is_same_v<InputT, Graph>) {
       return sideA;
@@ -335,10 +364,12 @@ size_t countChunkTransferWords(const std::vector<HostPairDescriptor*>& descs) {
     totalWords += d->packedQuery.colIndices.size();
     totalWords += d->packedQuery.bondIndices.size();
     totalWords += d->packedQuery.bondEndpoints.size();
+    totalWords += d->packedQuery.ringBondFlags.size();
     totalWords += d->packedTarget.rowOffsets.size();
     totalWords += d->packedTarget.colIndices.size();
     totalWords += d->packedTarget.bondIndices.size();
     totalWords += d->packedTarget.bondEndpoints.size();
+    totalWords += d->packedTarget.ringBondFlags.size();
   }
   return totalWords;
 }
@@ -441,11 +472,14 @@ StagedChunkInput stageChunkInput(
     p.queryColIndices    = stageVec(d.packedQuery.colIndices);
     p.queryBondIndices   = stageVec(d.packedQuery.bondIndices);
     p.queryBondEndpoints = stageVec(d.packedQuery.bondEndpoints);
+    p.queryRingBondFlags  = stageVec(d.packedQuery.ringBondFlags);
     p.targetRowOffsets    = stageVec(d.packedTarget.rowOffsets);
     p.targetColIndices    = stageVec(d.packedTarget.colIndices);
     p.targetBondIndices   = stageVec(d.packedTarget.bondIndices);
     p.targetBondEndpoints = stageVec(d.packedTarget.bondEndpoints);
+    p.targetRingBondFlags  = stageVec(d.packedTarget.ringBondFlags);
     p.swapped  = d.swapped;
+    p.completeRingsOnly = d.completeRingsOnly;
   }
 
   checkCuda(cudaMemcpyAsync(deviceBase,

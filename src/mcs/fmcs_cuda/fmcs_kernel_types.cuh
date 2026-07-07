@@ -36,15 +36,18 @@ struct DevicePerPairInput {
   const std::uint32_t* queryColIndices = nullptr;
   const std::uint32_t* queryBondIndices = nullptr;
   const std::uint32_t* queryBondEndpoints = nullptr;
+  const std::uint32_t* queryRingBondFlags  = nullptr;
 
   const std::uint32_t* targetRowOffsets = nullptr;
   const std::uint32_t* targetColIndices = nullptr;
   const std::uint32_t* targetBondIndices = nullptr;
   const std::uint32_t* targetBondEndpoints = nullptr;
+  const std::uint32_t* targetRingBondFlags  = nullptr;
 
   PairMatchTablesDevice tables;
 
   bool swapped = false;
+  bool completeRingsOnly = false;
 };
 
 /// Fixed-size device-writable result. The host expands this POD into MCSResult.
