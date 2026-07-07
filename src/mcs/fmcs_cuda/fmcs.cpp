@@ -480,6 +480,7 @@ void launchTierAsync(const StagedChunkInput&                    stagedInput,
                      nvMolKit::AsyncDeviceVector<std::uint8_t>& queueStorage,
                      nvMolKit::AsyncDeviceVector<std::uint8_t>& substructureStorage,
                      nvMolKit::AsyncDeviceVector<std::uint8_t>& scratchStorage,
+                     unsigned long long                         timeoutClocks,
                      bool                                       collectTimings,
                      bool                                       collectStats) {
   const int numPairs = static_cast<int>(stagedInput.numPairs);
@@ -519,17 +520,6 @@ void launchTierAsync(const StagedChunkInput&                    stagedInput,
     const size_t scratchBytes = fmcsScratchStorageBytes<blockThreads, maxAtoms, maxBonds>(stagedInput.numPairs);
     ensureScratchCapacity(scratchStorage, scratchBytes);
     dScratch = scratchStorage.data();
-  }
-
-  unsigned long long timeoutClocks = 0;
-  if (params.timeoutMs > 0.0f) {
-    int device = 0;
-    checkCuda(cudaGetDevice(&device), "cudaGetDevice (timeout)");
-    int clockRateKHz = 0;
-    checkCuda(cudaDeviceGetAttribute(&clockRateKHz, cudaDevAttrClockRate, device),
-              "cudaDeviceGetAttribute (clock rate)");
-    timeoutClocks = static_cast<unsigned long long>(
-      std::max(1.0, static_cast<double>(params.timeoutMs) * static_cast<double>(clockRateKHz)));
   }
 
   if constexpr (kFmcsDebug) {
@@ -683,6 +673,7 @@ template <int blockThreads, int maxAtoms, int maxBonds, class Policy>
 void launchTierChunk(FmcsExecutor&                                           executor,
                      std::unique_ptr<TierChunk<maxAtoms, maxBonds, Policy>>& chunk,
                      const Parameters&                                       params,
+                     unsigned long long                                      timeoutClocks,
                      bool                                                    collectTimings,
                      bool                                                    collectStats) {
   cudaStream_t     executorStream = executor.stream;
@@ -698,6 +689,7 @@ void launchTierChunk(FmcsExecutor&                                           exe
                                                     executor.queueDevice,
                                                     executor.substructureDevice,
                                                     executor.scratchDevice,
+                                                    timeoutClocks,
                                                     collectTimings,
                                                     collectStats);
 
@@ -769,14 +761,20 @@ void runTierChunks(nvMolKit::ThreadSafeQueue<TierChunkVariant<Policy>>& chunkQue
 
   const bool collectTimings = perPairTimesMs != nullptr || perPairTimingStats != nullptr;
   const bool collectStats   = perPairStats != nullptr;
-  float      clockRateKHz   = 0.0f;
-  if (collectTimings) {
+  float              clockRateKHz = 0.0f;
+  unsigned long long timeoutClocks = 0;
+  if (collectTimings || params.timeoutMs > 0.0f) {
     int device = 0;
-    checkCuda(cudaGetDevice(&device), "cudaGetDevice (timing conversion)");
+    checkCuda(cudaGetDevice(&device), "cudaGetDevice (clock rate)");
     int clockRateKHzInt = 0;
     checkCuda(cudaDeviceGetAttribute(&clockRateKHzInt, cudaDevAttrClockRate, device),
-              "cudaDeviceGetAttribute (timing conversion clock rate)");
-    clockRateKHz = static_cast<float>(clockRateKHzInt);
+              "cudaDeviceGetAttribute (clock rate)");
+    if (collectTimings)
+      clockRateKHz = static_cast<float>(clockRateKHzInt);
+    if (params.timeoutMs > 0.0f) {
+      timeoutClocks = static_cast<unsigned long long>(
+        std::max(1.0, static_cast<double>(params.timeoutMs) * static_cast<double>(clockRateKHzInt)));
+    }
   }
 
   const int executorCount =
@@ -809,7 +807,7 @@ void runTierChunks(nvMolKit::ThreadSafeQueue<TierChunkVariant<Policy>>& chunkQue
     std::visit(
       [&](auto& typedChunk) {
         if (typedChunk) {
-          launchTierChunk<blockThreads>(executor, typedChunk, params, collectTimings, collectStats);
+          launchTierChunk<blockThreads>(executor, typedChunk, params, timeoutClocks, collectTimings, collectStats);
         }
       },
       chunk);
