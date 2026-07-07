@@ -10,28 +10,6 @@
 namespace mcs {
 namespace fmcs {
 
-template <class GroupT, class T>
-__device__ __forceinline__ void warpAtomicStoreWords(const GroupT& group, T* dst, const T& src) {
-  static_assert(sizeof(T) % sizeof(unsigned int) == 0, "atomic word copy requires 32-bit granularity");
-  auto*         dstWords = reinterpret_cast<unsigned int*>(dst);
-  const auto*   srcWords = reinterpret_cast<const unsigned int*>(&src);
-  constexpr int kWords   = static_cast<int>(sizeof(T) / sizeof(unsigned int));
-  for (int i = static_cast<int>(group.thread_rank()); i < kWords; i += static_cast<int>(group.num_threads())) {
-    atomicExch(&dstWords[i], srcWords[i]);
-  }
-}
-
-template <class GroupT, class T>
-__device__ __forceinline__ void warpAtomicLoadWords(const GroupT& group, T& dst, T* src) {
-  static_assert(sizeof(T) % sizeof(unsigned int) == 0, "atomic word copy requires 32-bit granularity");
-  auto*         dstWords = reinterpret_cast<unsigned int*>(&dst);
-  auto*         srcWords = reinterpret_cast<unsigned int*>(src);
-  constexpr int kWords   = static_cast<int>(sizeof(T) / sizeof(unsigned int));
-  for (int i = static_cast<int>(group.thread_rank()); i < kWords; i += static_cast<int>(group.num_threads())) {
-    dstWords[i] = atomicAdd(&srcWords[i], 0u);
-  }
-}
-
 template <class GroupT, class QueuedT>
 __device__ __forceinline__ bool pushBackCooperative(const GroupT&                         group,
                                                     SeedQueue<QueuedT, ThreadBlockScope>& queue,
@@ -88,7 +66,7 @@ __device__ __forceinline__ bool pushBackLockedCooperative(const GroupT&         
   ok      = group.shfl(ok, 0);
   skip    = group.shfl(skip, 0);
   if (ok) {
-    warpAtomicStoreWords(group, &queue.slot(oldSize), element);
+    warpCopy(group, &queue.slot(oldSize), &element, sizeof(QueuedT));
     group.sync();
     if (groupRank == 0)
       queue.setSizeAtomicWithinThread(oldSize + 1);
@@ -132,7 +110,7 @@ __device__ __forceinline__ bool popBackLockedOrFinishCooperative(const GroupT&  
   popped = group.shfl(popped, 0);
   done   = group.shfl(done, 0);
   if (popped) {
-    warpAtomicLoadWords(group, outElement, &queue.slot(oldTop - 1));
+    warpCopy(group, &outElement, &queue.slot(oldTop - 1), sizeof(QueuedT));
     group.sync();
     if (groupRank == 0) {
       queue.setSizeAtomicWithinThread(oldTop - 1);

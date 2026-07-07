@@ -70,7 +70,7 @@ __device__ __forceinline__ void updateIncumbentCooperative(const GroupT&  group,
   locked     = group.shfl(locked, 0);
   shouldCopy = group.shfl(shouldCopy, 0);
   if (shouldCopy) {
-    warpAtomicStoreWords(group, &best, candidate);
+    warpCopy(group, &best, &candidate, sizeof(QueuedT));
   }
   group.sync();
   if (groupRank == 0 && locked) {
@@ -633,10 +633,10 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
   constexpr int  kNumGroups          = FmcsBlockConfig<blockThreads>::numGroups;
   constexpr bool kStatsEnabled       = CollectStats || kFmcsMeasure;
   // Block-shared resources: the queue, the incumbent, and the early-exit
-  // flags are visible to every group.  Cross-group incumbent updates use
-  // atomics.  Phase-2 queue operations hold queueLock across the queue header
-  // update and the cooperative payload copy so pushes cannot expose unwritten
-  // slots to concurrent poppers.
+  // flags are visible to every group.  Cross-group incumbent updates use an
+  // atomic score and a copy lock.  Phase-2 queue operations hold queueLock
+  // across the queue header update and the cooperative payload copy so pushes
+  // cannot expose unwritten slots to concurrent poppers.
   __shared__ SeedQueue<QueuedT, ThreadBlockScope> queue;
   __shared__ __align__(16) unsigned char bestStorage[sizeof(QueuedT)];
   QueuedT&                               best = *reinterpret_cast<QueuedT*>(bestStorage);
