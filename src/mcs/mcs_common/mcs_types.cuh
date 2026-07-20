@@ -36,6 +36,11 @@ struct Graph {
 };
 
 /**
+ * @brief Build a CSR Graph from a vertex count and undirected edge list.
+ */
+Graph buildGraphFromEdges(size_t numVertices, const std::vector<std::pair<size_t, size_t>>& edges);
+
+/**
  * @brief Result of a maximum common substructure computation.
  */
 struct MCSResult {
