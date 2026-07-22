@@ -68,7 +68,8 @@ add_executable(test_thread_safe_queue test_thread_safe_queue.cpp)
 target_link_libraries(test_thread_safe_queue PRIVATE thread_safe_queue)
 
 add_executable(test_fmcs_primitives test_fmcs_primitives.cu)
-target_include_directories(test_fmcs_primitives PRIVATE ${CMAKE_SOURCE_DIR}/src/mcs)
+target_include_directories(test_fmcs_primitives
+                           PRIVATE ${CMAKE_SOURCE_DIR}/src/mcs)
 target_link_libraries(test_fmcs_primitives PRIVATE CUDA::cudart)
 
 add_executable(test_openmp_helpers test_openmp_helpers.cpp)
