@@ -306,63 +306,90 @@ __device__ void updateDGrad(const int                                           
   __syncthreads();
 }
 
-__device__ void updateInverseHessian(const int                                                   numTerms,
-                                     double*                                                     invHessian,
-                                     double*                                                     dGrad,
-                                     double*                                                     xi,
-                                     double*                                                     hessDGrad,
-                                     double*                                                     grad,
-                                     typename cub::BlockReduce<double, BLOCK_SIZE>::TempStorage& tempStorage) {
+template <int DataDim>
+__device__ __forceinline__ void updateInverseHessian(
+  const int                                                   numTerms,
+  double*                                                     invHessian,
+  double*                                                     dGrad,
+  double*                                                     xi,
+  double*                                                     hessDGrad,
+  double*                                                     hessGrad,
+  const double*                                               grad,
+  typename cub::BlockReduce<double, BLOCK_SIZE>::TempStorage& tempStorage) {
   using BlockReduce = cub::BlockReduce<double, BLOCK_SIZE>;
 
-  // Compute hessDGrad = invHessian * dGrad
+  // Compute H*dGrad and H*grad together while each Hessian value is resident.
   for (int row = threadIdx.x; row < numTerms; row += blockDim.x) {
-    double dotProduct = 0.0;
-    for (int col = 0; col < numTerms; col++) {
-      dotProduct += invHessian[col * numTerms + row] * dGrad[col];
+    double hessDGradValue = 0.0;
+    double hessGradValue  = 0.0;
+    if constexpr (DataDim == 4) {
+      const double2* hessianPairs =
+        reinterpret_cast<const double2*>(invHessian + static_cast<long long>(row) * numTerms);
+      const double2* dGradPairs = reinterpret_cast<const double2*>(dGrad);
+      const double2* gradPairs  = reinterpret_cast<const double2*>(grad);
+      for (int colPair = 0; colPair < numTerms / 2; ++colPair) {
+        const double2 hessianValue = hessianPairs[colPair];
+        const double2 dGradValue   = dGradPairs[colPair];
+        const double2 gradValue    = gradPairs[colPair];
+        hessDGradValue             = fma(hessianValue.x, dGradValue.x, hessDGradValue);
+        hessDGradValue             = fma(hessianValue.y, dGradValue.y, hessDGradValue);
+        hessGradValue              = fma(hessianValue.x, gradValue.x, hessGradValue);
+        hessGradValue              = fma(hessianValue.y, gradValue.y, hessGradValue);
+      }
+    } else {
+      for (int col = 0; col < numTerms; ++col) {
+        const double hessianValue = invHessian[row * numTerms + col];
+        hessDGradValue            = fma(hessianValue, dGrad[col], hessDGradValue);
+        hessGradValue             = fma(hessianValue, grad[col], hessGradValue);
+      }
     }
-    hessDGrad[row] = dotProduct;
+    hessDGrad[row] = hessDGradValue;
+    hessGrad[row]  = hessGradValue;
   }
   __syncthreads();
 
   // Compute BFGS sums
-  __shared__ double fac, fae, fad, sumDGrad, sumXi;
+  __shared__ double fac, fae, inverseFae, alpha, xiGrad, hessDGradGrad, sumDGrad, sumXi;
   __shared__ bool   needUpdate;
 
-  double sumFac = 0.0;
+  double facLocal = 0.0;
   for (int i = threadIdx.x; i < numTerms; i += blockDim.x) {
-    sumFac += dGrad[i] * xi[i];
+    facLocal = fma(dGrad[i], xi[i], facLocal);
   }
-  double facReduced = BlockReduce(tempStorage).Sum(sumFac);
-  if (threadIdx.x == 0)
+  const double facReduced = BlockReduce(tempStorage).Sum(facLocal);
+  if (threadIdx.x == 0) {
     fac = facReduced;
+  }
   __syncthreads();
 
-  double sumFae = 0.0;
+  double faeLocal = 0.0;
   for (int i = threadIdx.x; i < numTerms; i += blockDim.x) {
-    sumFae += dGrad[i] * hessDGrad[i];
+    faeLocal = fma(dGrad[i], hessDGrad[i], faeLocal);
   }
-  double faeReduced = BlockReduce(tempStorage).Sum(sumFae);
-  if (threadIdx.x == 0)
+  const double faeReduced = BlockReduce(tempStorage).Sum(faeLocal);
+  if (threadIdx.x == 0) {
     fae = faeReduced;
+  }
   __syncthreads();
 
-  double sumDGradSq = 0.0;
+  double sumDGradLocal = 0.0;
   for (int i = threadIdx.x; i < numTerms; i += blockDim.x) {
-    sumDGradSq += dGrad[i] * dGrad[i];
+    sumDGradLocal = fma(dGrad[i], dGrad[i], sumDGradLocal);
   }
-  double sumDGradReduced = BlockReduce(tempStorage).Sum(sumDGradSq);
-  if (threadIdx.x == 0)
+  const double sumDGradReduced = BlockReduce(tempStorage).Sum(sumDGradLocal);
+  if (threadIdx.x == 0) {
     sumDGrad = sumDGradReduced;
+  }
   __syncthreads();
 
-  double sumXiSq = 0.0;
+  double sumXiLocal = 0.0;
   for (int i = threadIdx.x; i < numTerms; i += blockDim.x) {
-    sumXiSq += xi[i] * xi[i];
+    sumXiLocal = fma(xi[i], xi[i], sumXiLocal);
   }
-  double sumXiReduced = BlockReduce(tempStorage).Sum(sumXiSq);
-  if (threadIdx.x == 0)
+  const double sumXiReduced = BlockReduce(tempStorage).Sum(sumXiLocal);
+  if (threadIdx.x == 0) {
     sumXi = sumXiReduced;
+  }
   __syncthreads();
 
   if (threadIdx.x == 0) {
@@ -370,43 +397,57 @@ __device__ void updateInverseHessian(const int                                  
     needUpdate           = (fac > 0) && ((fac * fac) > (EPS * sumDGrad * sumXi));
 
     if (needUpdate) {
-      fac = 1.0 / fac;
-      fad = 1.0 / fae;
+      fac        = 1.0 / fac;
+      inverseFae = 1.0 / fae;
+      alpha      = fac + fae * fac * fac;
     }
   }
   __syncthreads();
 
   if (needUpdate) {
+    double xiGradLocal = 0.0;
+    for (int i = threadIdx.x; i < numTerms; i += blockDim.x) {
+      xiGradLocal = fma(xi[i], grad[i], xiGradLocal);
+    }
+    const double xiGradReduced = BlockReduce(tempStorage).Sum(xiGradLocal);
+    if (threadIdx.x == 0) {
+      xiGrad = xiGradReduced;
+    }
+    __syncthreads();
+
+    double hessDGradGradLocal = 0.0;
+    for (int i = threadIdx.x; i < numTerms; i += blockDim.x) {
+      hessDGradGradLocal = fma(hessDGrad[i], grad[i], hessDGradGradLocal);
+    }
+    const double hessDGradGradReduced = BlockReduce(tempStorage).Sum(hessDGradGradLocal);
+    if (threadIdx.x == 0) {
+      hessDGradGrad = hessDGradGradReduced;
+    }
+    __syncthreads();
+
     // Update dGrad for Hessian update
     for (int i = threadIdx.x; i < numTerms; i += blockDim.x) {
-      dGrad[i] = fac * xi[i] - fad * hessDGrad[i];
+      dGrad[i] = fac * xi[i] - inverseFae * hessDGrad[i];
     }
     __syncthreads();
 
-    // Update inverse Hessian
-    for (int row = threadIdx.x; row < numTerms; row += blockDim.x) {
-      double pxi  = fac * xi[row];
-      double hdgi = fad * hessDGrad[row];
-      double dgi  = fae * dGrad[row];
-
-      for (int col = 0; col < numTerms; col++) {
-        double pxj    = xi[col];
-        double hdgj   = hessDGrad[col];
-        double dgj    = dGrad[col];
-        double update = pxi * pxj - hdgi * hdgj + dgi * dgj;
-        invHessian[col * numTerms + row] += update;
-      }
+    // Apply the algebraically equivalent compact rank-2 update.
+    const int hessianSize = numTerms * numTerms;
+    for (int element = threadIdx.x; element < hessianSize; element += blockDim.x) {
+      const int row = element / numTerms;
+      const int col = element - row * numTerms;
+      invHessian[element] += alpha * (xi[row] * xi[col]) - fac * (hessDGrad[row] * xi[col] + xi[row] * hessDGrad[col]);
     }
     __syncthreads();
-  }
 
-  // Update xi = -invHessian * grad
-  for (int row = threadIdx.x; row < numTerms; row += blockDim.x) {
-    double dotProduct = 0.0;
-    for (int col = 0; col < numTerms; col++) {
-      dotProduct += invHessian[col * numTerms + row] * grad[col];
+    // Form -H_new*grad analytically from the old-H product computed above.
+    for (int i = threadIdx.x; i < numTerms; i += blockDim.x) {
+      xi[i] = -hessGrad[i] - alpha * xi[i] * xiGrad + fac * (xi[i] * hessDGradGrad + hessDGrad[i] * xiGrad);
     }
-    xi[row] = -dotProduct;
+  } else {
+    for (int i = threadIdx.x; i < numTerms; i += blockDim.x) {
+      xi[i] = -hessGrad[i];
+    }
   }
   __syncthreads();
 }
@@ -472,11 +513,11 @@ __launch_bounds__(BLOCK_SIZE) __global__ void bfgsMinimizeKernel(const int      
 
   if constexpr (UseSharedMem) {
     // Shared memory for small molecules (≤64 atoms)
-    __shared__ double sharedLocalPos[maxTerms];
-    __shared__ double sharedLocalGrad[maxTerms];
-    __shared__ double sharedLocalDir[maxTerms];
-    __shared__ double sharedScratchPos[maxTerms];
-    __shared__ double sharedDGrad[maxTerms];
+    __shared__ __align__(16) double sharedLocalPos[maxTerms];
+    __shared__ __align__(16) double sharedLocalGrad[maxTerms];
+    __shared__ __align__(16) double sharedLocalDir[maxTerms];
+    __shared__ __align__(16) double sharedScratchPos[maxTerms];
+    __shared__ __align__(16) double sharedDGrad[maxTerms];
 
     const int termStart = atomStart * dataDim;
     localPos            = sharedLocalPos;
@@ -720,8 +761,8 @@ __launch_bounds__(BLOCK_SIZE) __global__ void bfgsMinimizeKernel(const int      
       break;
     }
 
-    // Update Hessian and compute new direction (reuses scratchPos as hessDGrad)
-    updateInverseHessian(numTerms, invHessian, dGrad, localDir, scratchPos, localGrad, tempStorage);
+    // oldPos is dead until the next iteration, so reuse it for H*grad.
+    updateInverseHessian<dataDim>(numTerms, invHessian, dGrad, localDir, scratchPos, oldPos, localGrad, tempStorage);
 
     if (tid == 0) {
       currIter++;
