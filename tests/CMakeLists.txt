@@ -101,6 +101,9 @@ target_include_directories(test_fmcs_search_support
 target_link_libraries(test_fmcs_search_support PRIVATE mcs_fmcs_foundations
                                                        device_vector)
 
+add_executable(test_fmcs_core test_fmcs_core.cpp)
+target_link_libraries(test_fmcs_core PRIVATE mcs_fmcs_core)
+
 add_executable(test_openmp_helpers test_openmp_helpers.cpp)
 target_link_libraries(test_openmp_helpers PRIVATE openmp_helpers
                                                   OpenMP::OpenMP_CXX)
@@ -456,6 +459,7 @@ set(TEST_LIST
     test_fmcs_policy
     test_fmcs_substructure
     test_fmcs_search_support
+    test_fmcs_core
     test_work_splitting
     test_fire_minimizer
     test_fire_minimizer_permol)
