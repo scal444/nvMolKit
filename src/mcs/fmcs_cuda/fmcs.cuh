@@ -42,6 +42,8 @@
 
 namespace mcs {
 
+struct LabeledGraph;
+
 namespace fmcs {
 
 /// Algorithm-level parameters for the fMCS solver.
@@ -80,6 +82,12 @@ std::vector<MCSResult> findMCESfMCSBatch(const std::vector<Graph>& graphsA,
                                          const std::vector<Graph>& graphsB,
                                          Parameters                params = {},
                                          cudaStream_t              stream = nullptr);
+
+/// Labeled variant with optional exact vertex- and edge-label equality.
+std::vector<MCSResult> findMCESfMCSBatchLabeled(const std::vector<LabeledGraph>& graphsA,
+                                                const std::vector<LabeledGraph>& graphsB,
+                                                Parameters                       params = {},
+                                                cudaStream_t                     stream = nullptr);
 
 }  // namespace fmcs
 }  // namespace mcs
