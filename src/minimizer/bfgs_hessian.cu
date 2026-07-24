@@ -69,10 +69,34 @@ __device__ __forceinline__ void computeBfgsSums(const double*                   
   }
 }
 
+__device__ __forceinline__ void computeBfgsGradientSums(const double*                    xi,
+                                                        const double*                    hessDGrad,
+                                                        const double*                    grad,
+                                                        double*                          xiGradShared,
+                                                        double*                          hessDGradGradShared,
+                                                        cg::thread_block_tile<warpSize>& warp,
+                                                        int                              warpIdx,
+                                                        int                              laneIdx,
+                                                        int                              dim) {
+  double sumTerm = 0.0;
+  if (warpIdx == 4) {
+    for (int i = laneIdx; i < dim; i += warpSize) {
+      sumTerm += xi[i] * grad[i];
+    }
+    cg::reduce_store_async(warp, xiGradShared, sumTerm, cg::plus<double>{});
+  } else if (warpIdx == 5) {
+    for (int i = laneIdx; i < dim; i += warpSize) {
+      sumTerm += hessDGrad[i] * grad[i];
+    }
+    cg::reduce_store_async(warp, hessDGradGradShared, sumTerm, cg::plus<double>{});
+  }
+}
+
 __device__ __forceinline__ void computeUpdateFlag(int     idxWithinSystem,
                                                   double* facShared,
                                                   double* faeShared,
                                                   double* fadShared,
+                                                  double* alphaShared,
                                                   double* sumDGradShared,
                                                   double* sumXiShared,
                                                   bool*   needUpdateInverseHessian) {
@@ -86,6 +110,9 @@ __device__ __forceinline__ void computeUpdateFlag(int     idxWithinSystem,
     if (updateInverseHessian) {
       facShared[0] = 1.0 / fac;
       fadShared[0] = 1.0 / fae;
+      if (alphaShared != nullptr) {
+        alphaShared[0] = facShared[0] + fae * facShared[0] * facShared[0];
+      }
     }
     needUpdateInverseHessian[0] = updateInverseHessian;
   }
@@ -105,12 +132,16 @@ __global__ void updateInverseHessianBFGSBatchKernelShared(const int16_t* statuse
   __shared__ double facShared[1];
   __shared__ double faeShared[1];
   __shared__ double fadShared[1];
+  __shared__ double alphaShared[1];
   __shared__ double sumDGradShared[1];
   __shared__ double sumXiShared[1];
+  __shared__ double xiGradShared[1];
+  __shared__ double hessDGradGradShared[1];
   __shared__ bool   needUpdateInverseHessian[1];
 
   __shared__ double cachedDGrads[dataDim * maxAtom];
   __shared__ double cachedHessDGrads[dataDim * maxAtom];
+  __shared__ double cachedHessGrads[dataDim * maxAtom];
   __shared__ double cachedXis[dataDim * maxAtom];
   __shared__ double cachedGrads[dataDim * maxAtom];
 
@@ -147,14 +178,18 @@ __global__ void updateInverseHessianBFGSBatchKernelShared(const int16_t* statuse
   // Update hessDGrads
   // Update hessDGrads: Each warp processes different rows
   for (int row = warpIdx; row < dim; row += numWarp) {
-    double dotProduct = 0.0;
+    double hessDGrad = 0.0;
+    double hessGrad  = 0.0;
 
     // Update hessDGrads: Each thread in warp processes different columns
     for (int col = laneIdx; col < dim; col += warpSize) {
-      dotProduct += invHessianLocal[row * dim + col] * cachedDGrads[col];
+      const double hessianValue = invHessianLocal[row * dim + col];
+      hessDGrad += hessianValue * cachedDGrads[col];
+      hessGrad += hessianValue * cachedGrads[col];
     }
 
-    cg::reduce_store_async(warp, &cachedHessDGrads[row], dotProduct, cg::plus<double>{});
+    cg::reduce_store_async(warp, &cachedHessDGrads[row], hessDGrad, cg::plus<double>{});
+    cg::reduce_store_async(warp, &cachedHessGrads[row], hessGrad, cg::plus<double>{});
   }
 
   block.sync();
@@ -172,6 +207,16 @@ __global__ void updateInverseHessianBFGSBatchKernelShared(const int16_t* statuse
                   laneIdx,
                   dim);
 
+  computeBfgsGradientSums(cachedXis,
+                          cachedHessDGrads,
+                          cachedGrads,
+                          xiGradShared,
+                          hessDGradGradShared,
+                          warp,
+                          warpIdx,
+                          laneIdx,
+                          dim);
+
   block.sync();
 
   // Compute BFGS sums: compute the update flag
@@ -179,6 +224,7 @@ __global__ void updateInverseHessianBFGSBatchKernelShared(const int16_t* statuse
                     facShared,
                     faeShared,
                     fadShared,
+                    alphaShared,
                     sumDGradShared,
                     sumXiShared,
                     needUpdateInverseHessian);
@@ -187,12 +233,16 @@ __global__ void updateInverseHessianBFGSBatchKernelShared(const int16_t* statuse
 
   if (needUpdateInverseHessian[0]) {
     // Update dGrads, Inverse Hessian, and Xi
-    const double fac = facShared[0];
-    const double fae = faeShared[0];
-    const double fad = fadShared[0];
+    const double fac           = facShared[0];
+    const double fad           = fadShared[0];
+    const double alpha         = alphaShared[0];
+    const double xiGrad        = xiGradShared[0];
+    const double hessDGradGrad = hessDGradGradShared[0];
 
     for (int i = idxWithinSystem; i < dim; i += blockSize) {
       cachedDGrads[i] = fac * cachedXis[i] - fad * cachedHessDGrads[i];
+      localXi[i]      = -cachedHessGrads[i] - alpha * cachedXis[i] * xiGrad +
+                   fac * (cachedXis[i] * hessDGradGrad + cachedHessDGrads[i] * xiGrad);
     }
 
     block.sync();
@@ -203,37 +253,21 @@ __global__ void updateInverseHessianBFGSBatchKernelShared(const int16_t* statuse
     }
 
     for (int row = warpIdx; row < dim; row += numWarp) {
-      const double pxi        = fac * cachedXis[row];
-      const double hdgi       = fad * cachedHessDGrads[row];
-      const double dgi        = fae * cachedDGrads[row];
-      double       dotProduct = 0.0;
+      const double alphaXi      = alpha * cachedXis[row];
+      const double facHessDGrad = fac * cachedHessDGrads[row];
+      const double facXi        = fac * cachedXis[row];
 
       for (int col = laneIdx; col < dim; col += warpSize) {
-        const double pxj       = cachedXis[col];
-        const double hdgj      = cachedHessDGrads[col];
-        const double dgj       = cachedDGrads[col];
-        double       new_value = pxi * pxj - hdgi * hdgj + dgi * dgj;
-        new_value += invHessianLocal[row * dim + col];
-        dotProduct -= new_value * cachedGrads[col];
-        invHessianLocal[row * dim + col] = new_value;
+        const double xiCol        = cachedXis[col];
+        const double hessDGradCol = cachedHessDGrads[col];
+        invHessianLocal[row * dim + col] += alphaXi * xiCol - facHessDGrad * xiCol - facXi * hessDGradCol;
       }
-
-      cg::reduce_store_async(warp, &localXi[row], dotProduct, cg::plus<double>{});
     }
   } else {
     // Update Xi Only
-    if (idxWithinSystem < dim) {
-      localHessDGrad[idxWithinSystem] = cachedHessDGrads[idxWithinSystem];
-    }
-
-    for (int row = warpIdx; row < dim; row += numWarp) {
-      double dotProduct = 0.0;
-
-      for (int col = laneIdx; col < dim; col += warpSize) {
-        dotProduct -= invHessianLocal[row * dim + col] * cachedGrads[col];
-      }
-
-      cg::reduce_store_async(warp, &localXi[row], dotProduct, cg::plus<double>{});
+    for (int i = idxWithinSystem; i < dim; i += blockSize) {
+      localHessDGrad[i] = cachedHessDGrads[i];
+      localXi[i]        = -cachedHessGrads[i];
     }
   }
 }
@@ -309,6 +343,7 @@ __global__ void updateInverseHessianBFGSBatchKernelGlobal(const int16_t* statuse
                     facShared,
                     faeShared,
                     fadShared,
+                    nullptr,
                     sumDGradShared,
                     sumXiShared,
                     needUpdateInverseHessian);
