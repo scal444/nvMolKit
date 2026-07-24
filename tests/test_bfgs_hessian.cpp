@@ -174,6 +174,7 @@ TEST_P(BFGSHessianTest, SingleSystem) {
 
   // Run GPU version
   updateInverseHessianBFGSBatch(1,
+                                gpuInvHessian.size(),
                                 nullptr,
                                 hessianStarts.data(),
                                 atomStarts.data(),
@@ -248,6 +249,7 @@ TEST_P(BFGSHessianTest, SingleSystemLarge) {
 
   // Run GPU version
   updateInverseHessianBFGSBatch(1,
+                                gpuInvHessian.size(),
                                 nullptr,
                                 hessianStarts.data(),
                                 atomStarts.data(),
@@ -352,6 +354,7 @@ TEST_P(BFGSHessianTest, MultiSystem) {
 
   // Run GPU version
   updateInverseHessianBFGSBatch(activeSystemIndices.size(),
+                                gpuInvHessian.size(),
                                 nullptr,
                                 hessianStarts.data(),
                                 atomStarts.data(),
@@ -455,6 +458,7 @@ TEST_P(BFGSHessianTest, MultiSystemLarge) {
 
   // Run GPU version
   updateInverseHessianBFGSBatch(activeSystemIndices.size(),
+                                gpuInvHessian.size(),
                                 nullptr,
                                 hessianStarts.data(),
                                 atomStarts.data(),
@@ -556,6 +560,7 @@ TEST_P(BFGSHessianTest, SkipInvHessianUpdateDueToIncorrectSigns) {
 
   // Run GPU version
   updateInverseHessianBFGSBatch(activeSystemIndices.size(),
+                                gpuInvHessian.size(),
                                 nullptr,
                                 hessianStarts.data(),
                                 atomStarts.data(),

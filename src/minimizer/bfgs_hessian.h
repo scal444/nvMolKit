@@ -23,6 +23,7 @@ namespace nvMolKit {
 
 // Update the inverse Hessian matrix using BFGS formula for a batch of systems
 void updateInverseHessianBFGSBatch(int            numActiveSystems,
+                                   long long      numHessianElements,
                                    const int16_t* statuses,
                                    const int*     hessianStarts,
                                    const int*     atomStarts,

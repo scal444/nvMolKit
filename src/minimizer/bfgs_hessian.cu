@@ -432,9 +432,46 @@ __global__ void updateInverseHessianBFGSBatchKernelGlobal(const int16_t* statuse
   }
 }
 
+template <int dataDim>
+void launchSharedBfgsKernel(int            numActiveSystems,
+                            long long      averageHessianElements,
+                            const int16_t* statuses,
+                            const int*     atomStarts,
+                            const int*     hessianStarts,
+                            double*        invHessians,
+                            double*        dGrads,
+                            double*        xis,
+                            double*        hessDGrads,
+                            const double*  grads,
+                            const int*     activeSystemIndices,
+                            cudaStream_t   stream) {
+#define LAUNCH_SHARED_BFGS(blockThreads, groupWidth)                           \
+  updateInverseHessianBFGSBatchKernelShared<dataDim, blockThreads, groupWidth> \
+    <<<numActiveSystems, blockThreads, 0, stream>>>(statuses,                  \
+                                                    atomStarts,                \
+                                                    hessianStarts,             \
+                                                    invHessians,               \
+                                                    dGrads,                    \
+                                                    xis,                       \
+                                                    hessDGrads,                \
+                                                    grads,                     \
+                                                    activeSystemIndices)
+
+  if (numActiveSystems <= 512) {
+    LAUNCH_SHARED_BFGS(1024, 16);
+  } else if (averageHessianElements <= 12000) {
+    LAUNCH_SHARED_BFGS(128, 4);
+  } else {
+    LAUNCH_SHARED_BFGS(512, 8);
+  }
+
+#undef LAUNCH_SHARED_BFGS
+}
+
 }  // namespace
 
 void updateInverseHessianBFGSBatch(int            numActiveSystems,
+                                   long long      numHessianElements,
                                    const int16_t* statuses,
                                    const int*     hessianStarts,
                                    const int*     atomStarts,
@@ -447,8 +484,7 @@ void updateInverseHessianBFGSBatch(int            numActiveSystems,
                                    bool           hasLargeMolecule,
                                    const int*     activeSystemIndices,
                                    cudaStream_t   stream) {
-  // Row mapping parameters are computed and passed but not used yet
-  // They will be used when we implement true row-based processing
+  const long long averageHessianElements = numHessianElements / numActiveSystems;
 
   if (dataDim == 3) {
     if (hasLargeMolecule) {
@@ -462,16 +498,18 @@ void updateInverseHessianBFGSBatch(int            numActiveSystems,
                                                                                                grads,
                                                                                                activeSystemIndices);
     } else {
-      updateInverseHessianBFGSBatchKernelShared<3, blockSize, 16>
-        <<<numActiveSystems, blockSize, 0, stream>>>(statuses,
-                                                     atomStarts,
-                                                     hessianStarts,
-                                                     invHessians,
-                                                     dGrads,
-                                                     xis,
-                                                     hessDGrads,
-                                                     grads,
-                                                     activeSystemIndices);
+      launchSharedBfgsKernel<3>(numActiveSystems,
+                                averageHessianElements,
+                                statuses,
+                                atomStarts,
+                                hessianStarts,
+                                invHessians,
+                                dGrads,
+                                xis,
+                                hessDGrads,
+                                grads,
+                                activeSystemIndices,
+                                stream);
     }
   } else if (dataDim == 4) {
     if (hasLargeMolecule) {
@@ -485,16 +523,18 @@ void updateInverseHessianBFGSBatch(int            numActiveSystems,
                                                                                                grads,
                                                                                                activeSystemIndices);
     } else {
-      updateInverseHessianBFGSBatchKernelShared<4, blockSize, 16>
-        <<<numActiveSystems, blockSize, 0, stream>>>(statuses,
-                                                     atomStarts,
-                                                     hessianStarts,
-                                                     invHessians,
-                                                     dGrads,
-                                                     xis,
-                                                     hessDGrads,
-                                                     grads,
-                                                     activeSystemIndices);
+      launchSharedBfgsKernel<4>(numActiveSystems,
+                                averageHessianElements,
+                                statuses,
+                                atomStarts,
+                                hessianStarts,
+                                invHessians,
+                                dGrads,
+                                xis,
+                                hessDGrads,
+                                grads,
+                                activeSystemIndices,
+                                stream);
     }
   } else {
     throw std::runtime_error("Unsupported data dimension: " + std::to_string(dataDim));

@@ -943,6 +943,7 @@ void BfgsBatchMinimizer::updateHessian() {
   // Determine if any active system exceeds the shared-memory-optimized limit
   bool                  largeMol = hasLargeSystem_;
   nvMolKit::updateInverseHessianBFGSBatch(numUnfinishedSystems_,
+                                          inverseHessian_.size(),
                                           statuses_.data(),
                                           hessianStarts_.data(),
                                           atomStartsDevice,

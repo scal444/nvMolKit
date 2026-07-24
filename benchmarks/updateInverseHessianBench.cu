@@ -190,6 +190,7 @@ int main(int argc, char** argv) {
       cudaCheckError(cudaEventRecord(startEvent));
 
       nvMolKit::updateInverseHessianBFGSBatch(numSystems,
+                                              dInvHessian.size(),
                                               nullptr,
                                               dHessianStarts.data(),
                                               dAtomStarts.data(),
