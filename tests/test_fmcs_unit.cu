@@ -2130,7 +2130,7 @@ TEST(FMCSUnit, CacheZeroCooperativeWipesAllSlots) {
   AsyncDeviceVector<std::uint64_t> d_keys(kCap);
   // Pre-fill with non-zero garbage so the cooperative zero has work
   // to do.
-  std::vector<std::uint64_t> keys(kCap);
+  std::vector<std::uint64_t>       keys(kCap);
   for (int i = 0; i < kCap; ++i)
     keys[i] = 0xDEADDEAD00000000ULL | i;
   d_keys.copyFromHost(keys);
