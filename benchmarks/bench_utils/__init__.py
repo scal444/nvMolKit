@@ -20,7 +20,13 @@ so individual bench scripts can ``from bench_utils import time_it, load_smiles``
 """
 
 from bench_utils.loaders import load_pickle, load_sdf, load_smarts, load_smiles
-from bench_utils.molprep import clone_mols_with_conformers, embed_and_jitter, perturb_conformer, prep_mols
+from bench_utils.molprep import (
+    clone_mols_with_conformers,
+    embed_and_jitter,
+    filter_force_field_mols,
+    perturb_conformer,
+    prep_mols,
+)
 from bench_utils.timing import (
     Deadline,
     TimingResult,
@@ -36,6 +42,7 @@ __all__ = [
     "add_rdkit_max_seconds_arg",
     "clone_mols_with_conformers",
     "embed_and_jitter",
+    "filter_force_field_mols",
     "load_pickle",
     "load_sdf",
     "load_smarts",

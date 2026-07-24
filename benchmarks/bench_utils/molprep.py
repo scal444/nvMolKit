@@ -15,17 +15,26 @@
 
 """Molecule preparation helpers shared across nvMolKit benchmarks."""
 
+import os
 import random
 from functools import partial
 
 from rdkit import Chem
-from rdkit.Chem import rdDistGeom
+from rdkit.Chem import AllChem, rdDistGeom, rdForceFieldHelpers
 from rdkit.Geometry import Point3D
 from tqdm.contrib.concurrent import process_map
 
 # Manually tuned so the per-conformer jitter recreates an ETKDGv3-like pairwise RMSD spread
 JITTER_CENTER = 1.3
 JITTER_SPREAD = 0.6
+
+
+def _available_cpu_count() -> int:
+    """Return the CPUs available to this process, respecting affinity when possible."""
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except (AttributeError, OSError):
+        return max(1, os.cpu_count() or 1)
 
 
 def prep_mols(
@@ -63,6 +72,23 @@ def prep_mols(
     if drop_count > 0:
         print(f"  Dropped {drop_count} molecules during prep (None or sanitize failure)")
     return prepped
+
+
+def filter_force_field_mols(mols: list[Chem.Mol], force_field: str) -> list[Chem.Mol]:
+    """Keep only molecules with complete RDKit parameters for ``force_field``."""
+    force_field = force_field.lower()
+    if force_field == "mmff":
+        has_all_params = AllChem.MMFFHasAllMoleculeParams
+    elif force_field == "uff":
+        has_all_params = rdForceFieldHelpers.UFFHasAllMoleculeParams
+    else:
+        raise ValueError(f"Unknown force field: {force_field!r}")
+
+    filtered = [mol for mol in mols if has_all_params(mol)]
+    drop_count = len(mols) - len(filtered)
+    if drop_count > 0:
+        print(f"  Dropped {drop_count} molecules lacking {force_field.upper()} parameters")
+    return filtered
 
 
 def clone_mols_with_conformers(mols: list[Chem.Mol]) -> list[Chem.RWMol]:
@@ -129,31 +155,35 @@ def embed_and_jitter(
     mols: list[Chem.Mol],
     confs_per_mol: int,
     seed: int,
-    num_workers: int = 1,
+    num_workers: int = 0,
     add_hs: bool = False,
     min_atoms: int = 1,
     desc: str = "Embedding base conformers",
 ) -> list[Chem.Mol]:
     """Embed one ETKDGv3 base conformer per mol in parallel, then jitter to ``confs_per_mol``.
 
-    The embed step runs across mols via ``process_map``; the jitter step is
-    in-process and serial (cheap). Mols whose base embedding fails are
-    dropped with a printed count. When ``add_hs`` is true, hydrogens are
-    added before embedding and stripped from the returned mol.
+    The embed step runs across mols via ``process_map``; ``num_workers=0``
+    uses every CPU available to the process. The jitter step is in-process
+    and serial (cheap). Mols whose base embedding fails are dropped with a
+    printed count. When ``add_hs`` is true, hydrogens are added before
+    embedding and stripped from the returned mol.
     """
     if not mols:
         return []
     if confs_per_mol < 1:
         raise ValueError(f"confs_per_mol must be >= 1, got {confs_per_mol}")
 
-    workers = max(1, num_workers)
+    requested_workers = num_workers if num_workers > 0 else _available_cpu_count()
+    workers = min(len(mols), requested_workers)
     binaries = [(i, mol.ToBinary()) for i, mol in enumerate(mols)]
     embedded_binaries = process_map(
         partial(_embed_one, seed=seed, add_hs=add_hs, min_atoms=min_atoms),
         binaries,
         max_workers=workers,
-        chunksize=max(1, len(binaries) // (workers * 8) or 1),
-        desc=desc,
+        # ETKDG cost varies substantially by molecule. Keep chunks bounded so
+        # work is balanced and tqdm does not remain at 0% behind a huge chunk.
+        chunksize=max(1, min(256, len(binaries) // (workers * 8) or 1)),
+        desc=f"{desc} ({workers} workers)",
     )
 
     out: list[Chem.Mol] = []

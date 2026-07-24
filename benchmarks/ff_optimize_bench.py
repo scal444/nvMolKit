@@ -43,6 +43,7 @@ from bench_utils import (
     add_rdkit_max_seconds_arg,
     clone_mols_with_conformers,
     embed_and_jitter,
+    filter_force_field_mols,
     load_pickle,
     load_sdf,
     load_smiles,
@@ -50,10 +51,11 @@ from bench_utils import (
     throughput_per_s,
     time_it,
 )
+from rdkit import Chem
+from rdkit.Chem import AllChem
+
 from nvmolkit import autotune as nv_autotune
 from nvmolkit.types import HardwareOptions
-from rdkit import Chem
-from rdkit.Chem import AllChem, rdDistGeom
 
 OPTUNA_AVAILABLE = nv_autotune.is_available()
 
@@ -273,6 +275,12 @@ def main() -> None:
         default=1,
         help="Threads passed to RDKit FF optimizer via numThreads (default: 1)",
     )
+    parser.add_argument(
+        "--etkdg_workers",
+        type=int,
+        default=0,
+        help="Processes for ETKDG base embedding (0 = all available CPUs; default: 0)",
+    )
     add_rdkit_max_seconds_arg(
         parser,
         extra_help="The RDKit FF optimizer loop stops at the next molecule boundary once the budget is hit.",
@@ -391,6 +399,7 @@ def main() -> None:
     print(f"  Validate (energy diffs): {args.validate}")
     print(f"  Run nvmolkit: {not args.no_nvmolkit}")
     print(f"  Run RDKit: {not args.no_rdkit}")
+    print(f"  ETKDG workers: {args.etkdg_workers if args.etkdg_workers > 0 else 'auto (all available CPUs)'}")
     if not args.no_rdkit:
         print(f"  RDKit threads: {args.rdkit_threads}")
     if not args.no_nvmolkit:
@@ -418,8 +427,15 @@ def main() -> None:
         sys.exit(1)
     print(f"  {len(mols)} molecules ready")
 
-    print(f"\nEmbedding {args.confs_per_mol} conformer(s) per molecule with RDKit ETKDGv3...")
-    mols = embed_and_jitter(mols, args.confs_per_mol, seed=args.seed, num_workers=args.rdkit_threads)
+    print(f"\nFiltering molecules without complete {args.ff.upper()} parameters...")
+    mols = filter_force_field_mols(mols, args.ff)
+    if not mols:
+        print(f"Error: No molecules have complete {args.ff.upper()} parameters")
+        sys.exit(1)
+    print(f"  {len(mols)} molecules ready for {args.ff.upper()}")
+
+    print(f"\nEmbedding 1 ETKDGv3 base conformer per molecule, then jittering to {args.confs_per_mol} conformer(s)...")
+    mols = embed_and_jitter(mols, args.confs_per_mol, seed=args.seed, num_workers=args.etkdg_workers)
     if not mols:
         print("Error: No molecules retained after embedding")
         sys.exit(1)
@@ -464,16 +480,16 @@ def main() -> None:
                 rng = random.Random(args.autotune_seed)
                 size = min(args.autotune_calibration_size, len(mols))
                 explicit_calibration = rng.sample(range(len(mols)), size)
-            tune_kwargs = dict(
-                maxIters=args.max_iters,
-                minimizerKind=args.minimizer_kind,
-                gpuIds=gpu_ids,
-                n_trials=args.autotune_trials,
-                target_seconds_per_trial=args.autotune_time_budget,
-                calibration_set=explicit_calibration,
-                seed=args.autotune_seed,
-                verbose=True,
-            )
+            tune_kwargs = {
+                "maxIters": args.max_iters,
+                "minimizerKind": args.minimizer_kind,
+                "gpuIds": gpu_ids,
+                "n_trials": args.autotune_trials,
+                "target_seconds_per_trial": args.autotune_time_budget,
+                "calibration_set": explicit_calibration,
+                "seed": args.autotune_seed,
+                "verbose": True,
+            }
             if args.ff == "mmff":
                 tune_result = nv_autotune.tune_mmff_optimize(mols, **tune_kwargs)
             else:
