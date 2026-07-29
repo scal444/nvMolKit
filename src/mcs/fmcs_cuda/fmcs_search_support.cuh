@@ -25,6 +25,7 @@
 #include "src/mcs/fmcs_cuda/fmcs_match_tables.cuh"
 #include "src/mcs/fmcs_cuda/fmcs_seed.cuh"
 #include "src/mcs/fmcs_cuda/fmcs_seed_queue.cuh"
+#include "src/mcs/fmcs_cuda/fmcs_topology.cuh"
 #include "src/mcs/mcs_common/mcs_cooperative_copy.cuh"
 
 namespace mcs {
@@ -84,19 +85,6 @@ template <int maxAtoms, int maxBonds> struct DeviceMCSResult {
   /// the i-th matched edge.
   uint8_t bondMapA[maxBonds];
   uint8_t bondMapB[maxBonds];
-};
-
-/// Non-owning view over one side's CSR + bond-endpoint arrays.  Passed to
-/// matcher/grow helpers as the @c TargetTopology / @c QueryTopology.
-struct DeviceCsrView {
-  static constexpr bool kHasAdjacencyBondIndices = true;
-
-  const std::uint32_t* rowOffsets    = nullptr;
-  const std::uint32_t* colIndices    = nullptr;
-  const std::uint32_t* bondIndices   = nullptr;
-  const std::uint32_t* bondEndpoints = nullptr;
-  int                  numAtoms      = 0;
-  int                  numBonds      = 0;
 };
 
 /// Within-thread: standard SplitMix64 finalizer.  Used both as the
@@ -384,12 +372,12 @@ __device__ __forceinline__ void updateIncumbentCooperative(const GroupT&  group,
   group.sync();
 }
 
-template <int maxAtoms, int maxBonds, int maxTA, int maxTB, class QueryTopology, class TargetTopology, class GroupT>
+template <int maxAtoms, int maxBonds, int maxTA, int maxTB, class GroupT>
 __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
   const GroupT&                                 group,
   QueuedSeed<maxAtoms, maxBonds, maxTA, maxTB>& candidate,
-  const QueryTopology&                          queryTopology,
-  const TargetTopology&                         targetTopology,
+  const DeviceCsrView&                          queryTopology,
+  const DeviceCsrView&                          targetTopology,
   const PairMatchTablesDevice&                  tables,
   FmcsSubstructureScratch<maxAtoms, maxTA>&     scratch,
   std::uint8_t*                                 partialStorage,
@@ -397,7 +385,12 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
   bool*                                         overflowedFlag) {
   bool ok = false;
   if (!candidate.match.empty) {
-    ok = matchIncrementalFastCooperative(group, candidate.seed, queryTopology, targetTopology, tables, candidate.match);
+    ok = tryMatchIncrementalGreedyCooperative(group,
+                                              candidate.seed,
+                                              queryTopology,
+                                              targetTopology,
+                                              tables,
+                                              candidate.match);
   }
 
   if (!ok) {
@@ -522,11 +515,11 @@ template <class GroupT> __device__ __forceinline__ bool readFlagCooperative(cons
   return group.shfl(value, 0) != 0;
 }
 
-template <int maxAtoms, int maxBonds, class QueryTopology, class GroupT>
+template <int maxAtoms, int maxBonds, class GroupT>
 __device__ __forceinline__ void seedComputeRemainingSizeRdkitCooperative(
   const GroupT&                                      group,
   Seed<maxAtoms, maxBonds>&                          seed,
-  const QueryTopology&                               queryTopology,
+  const DeviceCsrView&                               queryTopology,
   std::uint8_t*                                      atomStack,
   typename Seed<maxAtoms, maxBonds>::atom_word_type* visitedAtoms,
   typename Seed<maxAtoms, maxBonds>::bond_word_type* visitedBonds,
