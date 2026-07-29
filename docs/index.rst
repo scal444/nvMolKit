@@ -63,7 +63,7 @@ For more fully-fledged examples, check out the Jupyter notebooks in the `example
 
 Source Code
 -----------
-nvMolKit is open source under the Apache License, and is available on `GitHub <https://github.com/NVIDIA-Digital-Bio/nvMolKit>`_.
+nvMolKit is open source under the Apache License, and is available on `GitHub <https://github.com/NVIDIA-BioNeMo/nvMolKit>`_.
 
 .. _installation:
 
@@ -74,6 +74,19 @@ Installation
 
    nvMolKit requires an NVIDIA GPU with compute capability 7.0 (V100) or higher. You can check your GPU's compute capability at the `NVIDIA CUDA GPUs page <https://developer.nvidia.com/cuda-gpus>`_.
    A CUDA Driver compatible with CUDA 12.6 or later is also required (driver version >=560.28). Some degree of backward compatibility may be available; for details, see the `CUDA compatibility guide <https://docs.nvidia.com/deploy/cuda-compatibility/index.html>`_.
+
+nvMolKit uses PyTorch for CUDA tensors, so the installed PyTorch CUDA backend
+must also be compatible with your driver. Package managers may otherwise select
+a CUDA backend that is newer than your host driver supports.
+
+* **Conda**: install the conda-forge ``pytorch-gpu`` metapackage and pin
+  ``cuda-version`` when needed.
+* **pip**: choose the CUDA backend from the `PyTorch local install selector
+  <https://pytorch.org/get-started/locally/>`_ or the `previous versions page
+  <https://pytorch.org/get-started/previous-versions/>`_, install that
+  ``torch`` wheel first, then install nvMolKit.
+* **uv**: pass ``--torch-backend`` during install, for example
+  ``uv pip install --torch-backend=cu128 nvmolkit``.
 
 Conda Forge
 ^^^^^^^^^^^
@@ -87,13 +100,30 @@ To install with conda, run::
 
     conda install -c conda-forge nvmolkit
 
+If your system's CUDA driver does not support CUDA 13, pin a CUDA 12 backend and
+include conda-forge's ``pytorch-gpu`` metapackage::
+
+    conda install -c conda-forge nvmolkit pytorch-gpu cuda-version=12.6
+
+Choose a ``cuda-version`` that is less than or equal to the CUDA version
+reported by ``nvidia-smi`` and that has a matching PyTorch build on conda-forge.
 
 Pip Installation
 ^^^^^^^^^^^^^^^^
 
+Published binary wheels are available for CPython 3.11-3.14. The nvMolKit pip
+wheels are built with CUDA Toolkit 12.9 and depend on CUDA 12 runtime packages.
+For pip environments, install a PyTorch CUDA 12 wheel supported by your driver
+before installing nvMolKit. For example, with PyTorch's CUDA 12.8 backend:
+
 .. code-block:: bash
 
-    pip install nvmolkit
+    python -m pip install torch --index-url https://download.pytorch.org/whl/cu128
+    python -m pip install nvmolkit
+    python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+
+Replace ``cu128`` with another CUDA 12 backend from the PyTorch install page if
+that is compatible with your driver.
 
 The wheel published to PyPI is built against a single RDKit release per
 nvMolKit version (RDKit 2026.03.1 for nvMolKit v0.5.0), due to versioning
@@ -115,7 +145,7 @@ To install nvMolKit pinned to a particular RDKit:
     RDKIT_VERSION=2025.9.6
     NVMOLKIT_VERSION=0.5.0
     pip install nvmolkit==${NVMOLKIT_VERSION}+rdkit${RDKIT_VERSION} \
-        --extra-index-url https://nvidia-digital-bio.github.io/nvMolKit/wheels/rdkit${RDKIT_VERSION}/simple/
+        --extra-index-url https://nvidia-bionemo.github.io/nvMolKit/wheels/rdkit${RDKIT_VERSION}/simple/
 
 Replace ``2025.9.6`` with the RDKit version you want. Variants published for
 nvMolKit v0.5.0 include every version between 2025.03.6 and 2026.03.1.
@@ -124,7 +154,7 @@ nvMolKit v0.5.0 include every version between 2025.03.6 and 2026.03.1.
 From Source
 ^^^^^^^^^^^
 
-nvMolKit can be installed from source using a C++ and CUDA compiler. See installation instructions in the `GitHub README <https://github.com/NVIDIA-Digital-Bio/nvMolKit>`_.
+nvMolKit can be installed from source using a C++ and CUDA compiler. See installation instructions in the `GitHub README <https://github.com/NVIDIA-BioNeMo/nvMolKit>`_.
 
 
 Features

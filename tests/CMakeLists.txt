@@ -67,6 +67,20 @@ target_link_libraries(test_work_splitting PRIVATE work_splitting)
 add_executable(test_thread_safe_queue test_thread_safe_queue.cpp)
 target_link_libraries(test_thread_safe_queue PRIVATE thread_safe_queue)
 
+add_executable(test_fmcs_primitives test_fmcs_primitives.cu)
+target_include_directories(test_fmcs_primitives
+                           PRIVATE ${CMAKE_SOURCE_DIR}/src/mcs)
+target_link_libraries(test_fmcs_primitives PRIVATE CUDA::cudart device_vector)
+
+add_executable(test_fmcs_grow test_fmcs_grow.cu)
+target_include_directories(test_fmcs_grow PRIVATE ${CMAKE_SOURCE_DIR}/src/mcs)
+target_link_libraries(test_fmcs_grow PRIVATE CUDA::cudart device_vector)
+target_compile_options(test_fmcs_grow
+                       PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
+
+add_executable(test_fmcs_foundations test_fmcs_foundations.cu)
+target_link_libraries(test_fmcs_foundations PRIVATE mcs_fmcs_foundations)
+
 add_executable(test_openmp_helpers test_openmp_helpers.cpp)
 target_link_libraries(test_openmp_helpers PRIVATE openmp_helpers
                                                   OpenMP::OpenMP_CXX)
@@ -78,7 +92,6 @@ target_link_libraries(
 
 add_executable(smarts_filter smarts_filter.cpp)
 target_link_libraries(smarts_filter PRIVATE molecules molData ${RDKit_LIBS})
-target_include_directories(smarts_filter PRIVATE ${PROJECT_SOURCE_DIR}/src)
 
 add_executable(test_flattened_builder test_flattened_builder.cu)
 target_link_libraries(
@@ -90,7 +103,7 @@ add_executable(test_mmff test_mmff.cu)
 target_link_libraries(
   test_mmff
   PRIVATE ${RDKit_LIBS}
-          bfgs_mmff
+          mmff_minimize
           rdkit_mmff_flattened
           mmff
           mmff_batched_forcefield
@@ -106,7 +119,12 @@ target_link_libraries(
   test_uff
   PRIVATE ${RDKit_LIBS}
           uff_batched_forcefield
+          uff_minimize
+          bfgs_common
           bfgs
+          ff_device_collect
+          fire_minimizer
+          forcefield_constraints
           uff
           rdkit_uff_flattened
           device_vector
@@ -189,8 +207,8 @@ target_link_libraries(
 add_executable(test_ff_device_output test_ff_device_output.cu)
 target_link_libraries(
   test_ff_device_output
-  PRIVATE bfgs_mmff
-          bfgs_uff
+  PRIVATE mmff_minimize
+          uff_minimize
           bfgs_common
           mmff
           uff
@@ -223,14 +241,39 @@ target_link_libraries(
   PRIVATE bfgs
           batched_forcefield
           mmff_batched_forcefield
+          rdkit_mmff_flattened
           device_vector
           ${RDKit_LIBS}
           test_utils
+          mmff_minimize
+          bfgs_common
+          ff_device_collect
+          ff_utils
+          forcefield_constraints
           mmff
           device)
 
 add_executable(test_bfgs_hessian test_bfgs_hessian.cpp)
 target_link_libraries(test_bfgs_hessian PRIVATE bfgs device_vector)
+
+add_executable(test_fire_minimizer test_fire_minimizer.cu)
+target_link_libraries(test_fire_minimizer PRIVATE fire_minimizer device_vector
+                                                  cuda_error_check)
+
+add_executable(test_fire_minimizer_permol test_fire_minimizer_permol.cu)
+target_link_libraries(
+  test_fire_minimizer_permol
+  PRIVATE fire_minimizer
+          batched_forcefield
+          mmff_batched_forcefield
+          rdkit_mmff_flattened
+          device_vector
+          cuda_error_check
+          ${RDKit_LIBS}
+          test_utils
+          mmff_minimize
+          mmff
+          device)
 
 add_executable(test_etkdg_etk_minimize test_etkdg_etk_minimize.cu)
 target_link_libraries(
@@ -382,7 +425,12 @@ set(TEST_LIST
     test_substruct_label_integration
     test_similarity
     test_thread_safe_queue
-    test_work_splitting)
+    test_fmcs_primitives
+    test_fmcs_foundations
+    test_fmcs_grow
+    test_work_splitting
+    test_fire_minimizer
+    test_fire_minimizer_permol)
 
 # Auto populate the NVMOLKIT_TESTDATA environment variable for ctest.
 foreach(arg ${TEST_LIST})

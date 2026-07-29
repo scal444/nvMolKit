@@ -25,22 +25,29 @@ target_link_libraries(
           cub_helpers
           cccl_interface
           nvmolkit_versions)
-target_include_directories(bfgs PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-
 add_library(bfgs_common bfgs_common.cpp)
 target_link_libraries(
   bfgs_common
   PUBLIC host_vector device conformer_types
   PRIVATE ${RDKit_LIBS} OpenMP::OpenMP_CXX)
-target_include_directories(bfgs_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-add_library(bfgs_mmff bfgs_mmff.cpp)
+add_library(
+  fire_minimizer fire_minimizer.cu fire_minimizer.h
+                 fire_minimize_permol_kernels.cu fire_minimize_permol_kernels.h)
 target_link_libraries(
-  bfgs_mmff
+  fire_minimizer
+  PUBLIC device_vector batched_forcefield
+  PRIVATE mmff cub_helpers cccl_interface)
+
+add_library(mmff_minimize mmff_minimize.cpp)
+target_link_libraries(
+  mmff_minimize
   PUBLIC bfgs conformer_types
   PRIVATE ${RDKit_LIBS}
           bfgs_common
           ff_device_collect
+          ff_utils
+          fire_minimizer
           mmff_batched_forcefield
           rdkit_mmff_flattened
           forcefield_constraints
@@ -48,16 +55,14 @@ target_link_libraries(
           OpenMP::OpenMP_CXX
           openmp_helpers
           cccl_interface)
-target_include_directories(bfgs_mmff PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
-                                            ${CMAKE_SOURCE_DIR}/src/forcefields)
-
-add_library(bfgs_uff bfgs_uff.cpp)
+add_library(uff_minimize uff_minimize.cpp)
 target_link_libraries(
-  bfgs_uff
-  PUBLIC bfgs conformer_types
+  uff_minimize
+  PUBLIC bfgs fire_minimizer conformer_types
   PRIVATE ${RDKit_LIBS}
           bfgs_common
           ff_device_collect
+          ff_utils
           uff_batched_forcefield
           rdkit_uff_flattened
           forcefield_constraints
@@ -65,5 +70,3 @@ target_link_libraries(
           OpenMP::OpenMP_CXX
           openmp_helpers
           cccl_interface)
-target_include_directories(bfgs_uff PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
-                                           ${CMAKE_SOURCE_DIR}/src/forcefields)

@@ -13,82 +13,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Benchmark: GPU vs single-threaded CPU pairwise conformer RMSD on Enamine.
+"""Benchmark: GPU vs single-threaded CPU pairwise conformer RMSD.
 
-Mirrors the sampling strategy used by the FF / TFD benches: load a slice of
-Enamine REAL, embed one ETKDGv3 base conformer per molecule in parallel, and
-derive the remaining conformers by jittering the base structure. The two
-implementations being compared then process the *batch* of molecules:
-
-* nvMolKit GPU: a single ``GetConformerRMSMatrixBatch`` call covers every mol.
-* RDKit CPU:    ``AllChem.GetConformerRMSMatrix`` called in a serial loop,
-  matching the head-to-head convention of the other single-GPU benches
-  (butina, cross_similarity, tfd) which all compare against single-threaded
-  RDKit.
-
-Throughput is reported in molecules/s and pair-RMSDs/s so configurations with
-different conformer counts can be compared apples-to-apples.
+Measures speedup of nvMolKit's GPU GetConformerRMSMatrix over RDKit's
+CPU GetConformerRMSMatrix across varying conformer counts.
 """
 
 import argparse
 import csv
 import multiprocessing as mp
+import statistics
 import time
-from functools import partial
 from pathlib import Path
 
-import numpy as np
 import torch
-from bench_utils import load_smiles
+from bench_utils import Deadline, add_rdkit_max_seconds_arg, embed_and_jitter, load_smiles
 from benchmark_timing import time_it
 from rdkit import Chem
-from rdkit.Chem import AllChem, rdDistGeom
-from tqdm.contrib.concurrent import process_map
+from rdkit.Chem import AllChem
 
 from nvmolkit.conformerRmsd import GetConformerRMSMatrixBatch
-
-
-def _embed_and_perturb(args_tuple: tuple[int, bytes], seed: int, confs_per_mol: int,
-                       delta: float) -> bytes | None:
-    """Worker: embed one ETKDGv3 conformer, then jitter to ``confs_per_mol``.
-
-    Doing the perturbation inside the worker keeps the entire prep pipeline
-    parallel; otherwise the main process spends seconds-to-minutes after
-    ``process_map`` returns building Conformer objects in pure Python.
-
-    Adds Hs before embedding so ETKDG sees a chemically reasonable graph,
-    then strips them so the returned mol carries heavy-atom-only coordinates
-    suitable for heavy-atom RMSD.
-    """
-    idx, mol_bytes = args_tuple
-    mol = Chem.Mol(mol_bytes)
-    if mol.GetNumAtoms() < 2:
-        return None
-    mol = Chem.AddHs(mol)
-    params = rdDistGeom.ETKDGv3()
-    params.useRandomCoords = True
-    params.randomSeed = seed + idx
-    try:
-        conf_id = rdDistGeom.EmbedMolecule(mol, params=params)
-    except Exception:
-        return None
-    if conf_id < 0 or mol.GetNumConformers() == 0:
-        return None
-    mol = Chem.RemoveHs(mol)
-
-    base_conf = mol.GetConformer()
-    base_pos = np.asarray(base_conf.GetPositions(), dtype=np.float64)
-    rng = np.random.default_rng(seed + idx)
-    jitter = delta * rng.uniform(-delta, delta, size=(confs_per_mol, base_pos.shape[0], 3))
-    new_positions = base_pos[None, :, :] + jitter
-
-    base_conf.SetPositions(new_positions[0])
-    for conf_idx in range(1, confs_per_mol):
-        extra = Chem.Conformer(base_conf.GetNumAtoms())
-        extra.SetPositions(new_positions[conf_idx])
-        mol.AddConformer(extra, assignId=True)
-
-    return mol.ToBinary()
 
 
 def prepare_mols(
@@ -97,73 +41,46 @@ def prepare_mols(
     seed: int,
     num_workers: int,
 ) -> list[Chem.Mol]:
-    """Embed one base conformer per mol, then perturb to ``confs_per_mol``.
-
-    Both stages run in worker processes so the main thread only does the
-    cheap deserialization. Molecules whose base embedding fails are dropped.
-    """
-    if not raw_mols:
-        return []
-    if confs_per_mol < 2:
-        raise ValueError(f"confs_per_mol must be >= 2, got {confs_per_mol}")
-
+    """Embed one base conformer per mol, then perturb to ``confs_per_mol``."""
     workers = num_workers if num_workers > 0 else max(1, mp.cpu_count() // 2)
-    binaries = [(i, mol.ToBinary()) for i, mol in enumerate(raw_mols)]
-    embedded = process_map(
-        partial(_embed_and_perturb, seed=seed, confs_per_mol=confs_per_mol, delta=0.5),
-        binaries,
-        max_workers=workers,
-        chunksize=max(1, len(binaries) // (workers * 8) or 1),
+    return embed_and_jitter(
+        raw_mols,
+        confs_per_mol=confs_per_mol,
+        seed=seed,
+        num_workers=workers,
+        add_hs=True,
+        min_atoms=2,
         desc=f"Embed + perturb ({confs_per_mol} confs)",
     )
 
-    out: list[Chem.Mol] = []
-    drops = 0
-    for raw in embedded:
-        if raw is None:
-            drops += 1
-            continue
-        out.append(Chem.Mol(raw))
-
-    if drops:
-        print(f"  Dropped {drops} molecules during embedding")
-    return out
-
 
 def bench_rdkit_batch(payloads: list[bytes], max_seconds: float) -> tuple[float, int]:
-    """One RDKit timing iteration: serial loop, returns ``(elapsed_s, n_done)``.
+    """One RDKit timing iteration over ``payloads``; returns ``(elapsed_s, n_done)``.
 
-    When ``max_seconds > 0`` the loop breaks after the deadline is exceeded;
-    callers compute throughput as ``n_done / elapsed_s`` so a truncated run
-    is still extrapolated to a fair pairs/s figure. ``GetConformerRMSMatrix``
-    mutates conformer coordinates in-place during Kabsch alignment, so each
-    call gets a fresh deserialization.
+    Stops once ``max_seconds`` is exceeded (``0`` means no cap). A fresh mol is
+    built per call because ``GetConformerRMSMatrix`` aligns conformers in place.
     """
-    deadline = time.perf_counter() + max_seconds if max_seconds > 0 else None
+    mols = [Chem.Mol(mol_bytes) for mol_bytes in payloads]
+    deadline = Deadline(max_seconds)
     start = time.perf_counter()
     n_done = 0
-    for mol_bytes in payloads:
-        mol = Chem.Mol(mol_bytes)
+    for mol in mols:
         AllChem.GetConformerRMSMatrix(mol, prealigned=False)
         n_done += 1
-        if deadline is not None and time.perf_counter() >= deadline:
+        if deadline.expired():
             break
     return time.perf_counter() - start, n_done
 
 
 def bench_gpu_batch(mols: list[Chem.Mol]) -> None:
     results = GetConformerRMSMatrixBatch(mols, prealigned=False)
-    for result in results:
-        result.torch()
     torch.cuda.synchronize()
 
 
 def validate(mols: list[Chem.Mol], num_check: int, tol: float) -> None:
-    """Diff GPU RMSD matrices against RDKit on the first ``num_check`` mols.
+    """Compare GPU RMSD matrices against RDKit on the first ``num_check`` mols.
 
-    Untimed; runs once before the sweep. Each pair of conformers in each mol
-    is compared element-wise; mismatches abort the benchmark so we never
-    publish a number for a broken kernel.
+    Raises ``RuntimeError`` on the first pair whose absolute diff exceeds ``tol``.
     """
     subset = mols[:num_check]
     if not subset:
@@ -178,8 +95,7 @@ def validate(mols: list[Chem.Mol], num_check: int, tol: float) -> None:
         gpu_rms = gpu_results[mol_idx].numpy().tolist()
         if len(gpu_rms) != len(rdkit_rms):
             raise RuntimeError(
-                f"validation: mol {mol_idx} pair count mismatch "
-                f"(gpu={len(gpu_rms)}, rdkit={len(rdkit_rms)})"
+                f"validation: mol {mol_idx} pair count mismatch (gpu={len(gpu_rms)}, rdkit={len(rdkit_rms)})"
             )
         for pair_idx, (gpu_val, rdkit_val) in enumerate(zip(gpu_rms, rdkit_rms)):
             diff = abs(float(gpu_val) - float(rdkit_val))
@@ -194,12 +110,7 @@ def validate(mols: list[Chem.Mol], num_check: int, tol: float) -> None:
 
 
 def _slice_to_confs(mols: list[Chem.Mol], target: int) -> list[Chem.Mol]:
-    """Return copies of ``mols`` keeping only the first ``target`` conformers each.
-
-    The shared base set is prepared once at the maximum conformer count; this
-    helper produces the per-sweep-point view without re-embedding so every
-    sweep row sees the exact same molecule selection and base geometries.
-    """
+    """Return copies of ``mols`` keeping only the first ``target`` conformers each."""
     out: list[Chem.Mol] = []
     for mol in mols:
         copy_mol = Chem.Mol(mol, True)  # quickCopy: keeps graph, drops conformers
@@ -255,10 +166,7 @@ def run(
         mols = _slice_to_confs(base_mols, target_confs)
         actual_confs = [mol.GetNumConformers() for mol in mols]
         total_pairs = sum(count * (count - 1) // 2 for count in actual_confs)
-        print(
-            f"\n=== confs_per_mol={target_confs}: {len(mols)} mols, "
-            f"{total_pairs} RMSD pairs ==="
-        )
+        print(f"\n=== confs_per_mol={target_confs}: {len(mols)} mols, {total_pairs} RMSD pairs ===")
 
         row: dict[str, float | int | str] = {
             "num_mols": len(mols),
@@ -273,22 +181,26 @@ def run(
             payloads = [mol.ToBinary() for mol in mols]
             cap_label = f"cap={rdkit_max_seconds:.0f}s" if rdkit_max_seconds > 0 else "no cap"
             print(f"  RDKit CPU (single-threaded, {cap_label}):")
+            # TODO: replace this hand-rolled warmup/sample/median loop with time_it once
+            # time_it can consume a Deadline and truncate a run mid-workload.
+            # https://github.com/NVIDIA-BioNeMo/nvMolKit/issues/186
             bench_rdkit_batch(payloads, rdkit_max_seconds)  # warmup
             samples = [bench_rdkit_batch(payloads, rdkit_max_seconds) for _ in range(3)]
             samples.sort(key=lambda pair: pair[0] / max(pair[1], 1))
             rdkit_time_s, rdkit_done = samples[len(samples) // 2]
-            pair_count_done = sum(
-                count * (count - 1) // 2 for count in actual_confs[:rdkit_done]
-            )
+            per_mol_times = [elapsed / max(done, 1) for elapsed, done in samples]
+            rdkit_std_s = statistics.stdev(per_mol_times) * rdkit_done if len(samples) > 1 else 0.0
+            pair_count_done = sum(count * (count - 1) // 2 for count in actual_confs[:rdkit_done])
             rdkit_mols_per_s = rdkit_done / rdkit_time_s
             rdkit_pairs_per_s = pair_count_done / rdkit_time_s
             truncated = rdkit_done < len(mols)
             suffix = f" [truncated at {rdkit_done}/{len(mols)} mols]" if truncated else ""
             print(
-                f"    median wall: {rdkit_time_s * 1000:.1f} ms over {rdkit_done} mols  "
+                f"    median wall: {rdkit_time_s * 1000:.1f} +/- {rdkit_std_s * 1000:.1f} ms over {rdkit_done} mols  "
                 f"({rdkit_mols_per_s:.1f} mols/s, {rdkit_pairs_per_s:.0f} pairs/s){suffix}"
             )
             row["rdkit_median_s"] = rdkit_time_s
+            row["rdkit_std_s"] = rdkit_std_s
             row["rdkit_mols_processed"] = rdkit_done
             row["rdkit_truncated"] = int(truncated)
             row["rdkit_mols_per_s"] = rdkit_mols_per_s
@@ -299,12 +211,14 @@ def run(
             print("  nvMolKit GPU (batched):")
             result = time_it(lambda: bench_gpu_batch(mols), runs=5, warmups=2, gpu_sync=True)
             gpu_time_s = result.median_s
+            gpu_std_s = result.std_ms / 1000.0
             gpu_pairs_per_s = total_pairs / gpu_time_s
             print(
-                f"    median wall: {gpu_time_s * 1000:.1f} ms  "
+                f"    median wall: {gpu_time_s * 1000:.1f} +/- {gpu_std_s * 1000:.1f} ms  "
                 f"({len(mols) / gpu_time_s:.1f} mols/s, {gpu_pairs_per_s:.0f} pairs/s)"
             )
             row["gpu_median_s"] = gpu_time_s
+            row["gpu_std_s"] = gpu_std_s
             row["gpu_mols_per_s"] = len(mols) / gpu_time_s
             row["gpu_pairs_per_s"] = gpu_pairs_per_s
 
@@ -322,40 +236,49 @@ def run(
             for key in row:
                 if key not in fieldnames:
                     fieldnames.append(key)
-        with out_path.open("w", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        with out_path.open("w", newline="") as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
             writer.writeheader()
             writer.writerows(rows)
         print(f"\nWrote {out_path}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Conformer RMSD batch benchmark vs Enamine")
-    parser.add_argument("--smiles", required=True, help="Path to Enamine (or any) SMILES/cxsmiles file")
+    parser = argparse.ArgumentParser(description="Conformer RMSD batch benchmark")
+    parser.add_argument("--smiles", required=True, help="Path to smiles file")
     parser.add_argument("--num_mols", type=int, default=2000, help="Number of molecules to sample")
-    parser.add_argument("--confs_per_mol", type=int, nargs="+", default=[10, 25, 50, 100, 200],
-                        help="Conformers-per-molecule sweep points (each >=2)")
-    parser.add_argument("--prep_workers", type=int, default=0,
-                        help="Workers for the embed-and-perturb prep step (0 = half of CPUs)")
-    parser.add_argument("--rdkit_max_seconds", type=float, default=0.0,
-                        help="Per-iteration wall-clock cap on the RDKit comparison "
-                             "(0 = no cap). When exceeded, throughput is reported "
-                             "over the molecules actually processed.")
-    parser.add_argument("--validate_count", type=int, default=8,
-                        help="Number of mols to compare GPU vs RDKit before timing "
-                             "(0 disables; requires both backends enabled)")
-    parser.add_argument("--validate_tol", type=float, default=0.05,
-                        help="Absolute tolerance (Angstroms) for per-pair RMSD diff")
-    parser.add_argument("--no_validate", action="store_true",
-                        help="Skip the GPU-vs-RDKit correctness check")
+    parser.add_argument(
+        "--confs_per_mol",
+        type=int,
+        nargs="+",
+        default=[10, 25, 50, 100, 200],
+        help="Conformers-per-molecule sweep points (each >=2)",
+    )
+    parser.add_argument(
+        "--prep_workers", type=int, default=0, help="Workers for the embed-and-perturb prep step (0 = half of CPUs)"
+    )
+    add_rdkit_max_seconds_arg(
+        parser,
+        extra_help="The cap applies per timing iteration and truncates at a molecule boundary.",
+    )
+    parser.add_argument(
+        "--validate_count",
+        type=int,
+        default=8,
+        help="Number of mols to compare GPU vs RDKit before timing (0 disables; requires both backends enabled)",
+    )
+    parser.add_argument(
+        "--validate_tol", type=float, default=0.05, help="Absolute tolerance (Angstroms) for per-pair RMSD diff"
+    )
+    parser.add_argument("--no_validate", action="store_true", help="Skip the GPU-vs-RDKit correctness check")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=str, default=None, help="Optional CSV output path")
-    parser.add_argument("--no-rdkit", action="store_true", help="Skip RDKit CPU benchmark")
-    parser.add_argument("--no-nvmolkit", action="store_true", help="Skip nvMolKit GPU benchmark")
+    parser.add_argument("--no_rdkit", action="store_true", help="Skip RDKit CPU benchmark")
+    parser.add_argument("--no_nvmolkit", action="store_true", help="Skip nvMolKit GPU benchmark")
     args = parser.parse_args()
 
     if args.no_rdkit and args.no_nvmolkit:
-        parser.error("cannot pass both --no-rdkit and --no-nvmolkit")
+        parser.error("cannot pass both --no_rdkit and --no_nvmolkit")
 
     run(
         smiles_path=args.smiles,

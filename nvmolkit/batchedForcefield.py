@@ -16,7 +16,7 @@
 """Batched forcefield wrappers with energy, gradient, and minimization support.
 
 This module provides :class:`MMFFBatchedForcefield` and
-:class:`UFFBatchedForcefield` for GPU-accelerated evaluation and BFGS
+:class:`UFFBatchedForcefield` for GPU-accelerated evaluation and BFGS/FIRE
 minimization of multiple molecules with multiple conformers each.
 
 All conformers of each molecule are evaluated as a batch.  Properties and
@@ -84,9 +84,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, overload
 
 from nvmolkit import _batchedForcefield  # type: ignore
-from nvmolkit._arrayHelpers import *  # noqa: F403  # registers PyArray for DEVICE-mode returns
 from nvmolkit._mmff_bridge import default_rdkit_mmff_properties, make_internal_mmff_properties
-from nvmolkit.types import CoordinateOutput, Device3DResult, HardwareOptions
+from nvmolkit.types import CoordinateOutput, Device3DResult, FireOptions, HardwareOptions
+
+from nvmolkit import _batchedForcefield  # type: ignore
 
 if TYPE_CHECKING:
     from rdkit.Chem import Mol
@@ -428,15 +429,29 @@ class _BatchedForcefieldBase:
         forceTol: float,
         output: CoordinateOutput = CoordinateOutput.RDKIT_CONFORMERS,
         target_gpu: int | None = None,
+        minimizerKind: str = "BFGS",
+        fireOptions: FireOptions | None = None,
     ):
         if not self._molecules:
             if output == CoordinateOutput.DEVICE:
                 raise ValueError("minimize(output=DEVICE) requires at least one molecule")
             return [], []
         self._ensure_built()
+        minimizer_kind = str(minimizerKind).upper()
+        if minimizer_kind not in {"BFGS", "FIRE"}:
+            raise ValueError("minimizerKind must be 'BFGS' or 'FIRE'")
+        if fireOptions is None:
+            fireOptions = FireOptions()
+            fireOptions.gradTol = forceTol
         if output == CoordinateOutput.DEVICE:
-            return self._native_ff.minimizeDevice(maxIters, forceTol, -1 if target_gpu is None else int(target_gpu))
-        energies, converged = self._native_ff.minimize(maxIters, forceTol)
+            return self._native_ff.minimizeDevice(
+                maxIters,
+                forceTol,
+                -1 if target_gpu is None else int(target_gpu),
+                minimizer_kind,
+                fireOptions,
+            )
+        energies, converged = self._native_ff.minimize(maxIters, forceTol, minimizer_kind, fireOptions)
         return energies, converged
 
 
@@ -552,6 +567,8 @@ class MMFFBatchedForcefield(_BatchedForcefieldBase):
         forceTol: float = 1e-4,
         output: Literal[CoordinateOutput.RDKIT_CONFORMERS] = CoordinateOutput.RDKIT_CONFORMERS,
         target_gpu: int | None = None,
+        minimizerKind: str = "BFGS",
+        fireOptions: FireOptions | None = None,
     ) -> tuple[list[list[float]], list[list[bool]]]: ...
     @overload
     def minimize(
@@ -561,6 +578,8 @@ class MMFFBatchedForcefield(_BatchedForcefieldBase):
         *,
         output: Literal[CoordinateOutput.DEVICE],
         target_gpu: int | None = None,
+        minimizerKind: str = "BFGS",
+        fireOptions: FireOptions | None = None,
     ) -> Device3DResult: ...
     def minimize(
         self,
@@ -568,8 +587,10 @@ class MMFFBatchedForcefield(_BatchedForcefieldBase):
         forceTol: float = 1e-4,
         output: CoordinateOutput = CoordinateOutput.RDKIT_CONFORMERS,
         target_gpu: int | None = None,
+        minimizerKind: str = "BFGS",
+        fireOptions: FireOptions | None = None,
     ):
-        """Run BFGS minimization on all conformers of all molecules.
+        """Run minimization on all conformers of all molecules.
 
         In ``RDKIT_CONFORMERS`` mode, optimized coordinates are written back
         into the RDKit conformers in-place. In ``DEVICE`` mode, optimized
@@ -578,8 +599,9 @@ class MMFFBatchedForcefield(_BatchedForcefieldBase):
         and a :class:`Device3DResult` is returned.
 
         Args:
-            maxIters: Maximum number of BFGS iterations.
-            forceTol: Gradient convergence tolerance.
+            maxIters: Maximum number of minimizer iterations.
+            forceTol: Gradient convergence tolerance. For FIRE, this value is
+                used only when ``fireOptions`` is ``None``.
             output: ``RDKIT_CONFORMERS`` (default) or ``DEVICE``.
             target_gpu: In DEVICE mode, the GPU to consolidate the result on.
                 ``None`` (the default) selects the wrapper's own GPU. The
@@ -588,6 +610,10 @@ class MMFFBatchedForcefield(_BatchedForcefieldBase):
                 ``invalid_argument``. For cross-GPU consolidation use the
                 standalone ``MMFFOptimizeMoleculesConfs(output=DEVICE,
                 targetGpu=...)`` API.
+            minimizerKind: ``"BFGS"`` (default) or ``"FIRE"``.
+            fireOptions: FIRE algorithm options used when
+                ``minimizerKind="FIRE"``. When provided, its ``gradTol``
+                takes precedence over ``forceTol``.
 
         Returns:
             For RDKit mode: ``(energies, converged)`` nested host lists.
@@ -595,7 +621,14 @@ class MMFFBatchedForcefield(_BatchedForcefieldBase):
             holds the optimized coordinates, ``energies`` holds final energies,
             and ``converged`` holds per-conformer convergence flags.
         """
-        return self._minimize(maxIters, forceTol, output=output, target_gpu=target_gpu)
+        return self._minimize(
+            maxIters,
+            forceTol,
+            output=output,
+            target_gpu=target_gpu,
+            minimizerKind=minimizerKind,
+            fireOptions=fireOptions,
+        )
 
 
 class UFFBatchedForcefield(_BatchedForcefieldBase):
@@ -668,6 +701,8 @@ class UFFBatchedForcefield(_BatchedForcefieldBase):
         forceTol: float = 1e-4,
         output: Literal[CoordinateOutput.RDKIT_CONFORMERS] = CoordinateOutput.RDKIT_CONFORMERS,
         target_gpu: int | None = None,
+        minimizerKind: str = "BFGS",
+        fireOptions: FireOptions | None = None,
     ) -> tuple[list[list[float]], list[list[bool]]]: ...
     @overload
     def minimize(
@@ -677,6 +712,8 @@ class UFFBatchedForcefield(_BatchedForcefieldBase):
         *,
         output: Literal[CoordinateOutput.DEVICE],
         target_gpu: int | None = None,
+        minimizerKind: str = "BFGS",
+        fireOptions: FireOptions | None = None,
     ) -> Device3DResult: ...
     def minimize(
         self,
@@ -684,8 +721,10 @@ class UFFBatchedForcefield(_BatchedForcefieldBase):
         forceTol: float = 1e-4,
         output: CoordinateOutput = CoordinateOutput.RDKIT_CONFORMERS,
         target_gpu: int | None = None,
+        minimizerKind: str = "BFGS",
+        fireOptions: FireOptions | None = None,
     ):
-        """Run BFGS minimization on all conformers of all molecules.
+        """Run minimization on all conformers of all molecules.
 
         In ``RDKIT_CONFORMERS`` mode, optimized coordinates are written back
         into the RDKit conformers in-place. In ``DEVICE`` mode, optimized
@@ -694,8 +733,9 @@ class UFFBatchedForcefield(_BatchedForcefieldBase):
         and a :class:`Device3DResult` is returned.
 
         Args:
-            maxIters: Maximum number of BFGS iterations.
-            forceTol: Gradient convergence tolerance.
+            maxIters: Maximum number of minimizer iterations.
+            forceTol: Gradient convergence tolerance. For FIRE, this value is
+                used only when ``fireOptions`` is ``None``.
             output: ``RDKIT_CONFORMERS`` (default) or ``DEVICE``.
             target_gpu: In DEVICE mode, the GPU to consolidate the result on.
                 ``None`` (the default) selects the wrapper's own GPU. The
@@ -704,6 +744,10 @@ class UFFBatchedForcefield(_BatchedForcefieldBase):
                 ``invalid_argument``. For cross-GPU consolidation use the
                 standalone ``UFFOptimizeMoleculesConfs(output=DEVICE,
                 targetGpu=...)`` API.
+            minimizerKind: ``"BFGS"`` (default) or ``"FIRE"``.
+            fireOptions: FIRE algorithm options used when
+                ``minimizerKind="FIRE"``. When provided, its ``gradTol``
+                takes precedence over ``forceTol``.
 
         Returns:
             For RDKit mode: ``(energies, converged)`` nested host lists.
@@ -711,4 +755,11 @@ class UFFBatchedForcefield(_BatchedForcefieldBase):
             holds the optimized coordinates, ``energies`` holds final energies,
             and ``converged`` holds per-conformer convergence flags.
         """
-        return self._minimize(maxIters, forceTol, output=output, target_gpu=target_gpu)
+        return self._minimize(
+            maxIters,
+            forceTol,
+            output=output,
+            target_gpu=target_gpu,
+            minimizerKind=minimizerKind,
+            fireOptions=fireOptions,
+        )

@@ -24,6 +24,7 @@ enabled) absolute energy deltas between the two implementations.
 
 Usage:
     python ff_optimize_bench.py --smiles data/chembl_10k.smi --ff mmff --num_mols 200 --confs_per_mol 5
+    python ff_optimize_bench.py --smiles data/chembl_10k.smi --ff mmff --minimizer_kind FIRE --autotune
     python ff_optimize_bench.py --sdf data/MPCONF196.sdf --ff uff --confs_per_mol 1 --no_rdkit
     python ff_optimize_bench.py --pickle prepared.pkl --ff mmff --batch_size 512 --batches_per_gpu 4
 """
@@ -34,170 +35,27 @@ import math
 import random
 import statistics
 import sys
-from functools import partial
 
 import nvtx
 import torch
 from bench_utils import (
+    Deadline,
+    add_rdkit_max_seconds_arg,
     clone_mols_with_conformers,
+    embed_and_jitter,
     load_pickle,
     load_sdf,
     load_smiles,
     prep_mols,
+    throughput_per_s,
     time_it,
 )
 from nvmolkit import autotune as nv_autotune
 from nvmolkit.types import HardwareOptions
 from rdkit import Chem
 from rdkit.Chem import AllChem, rdDistGeom
-from rdkit.Geometry import Point3D
-from tqdm.contrib.concurrent import process_map
 
 OPTUNA_AVAILABLE = nv_autotune.is_available()
-
-
-def _embed_one(args_tuple: tuple[int, bytes], seed: int) -> bytes | None:
-    """Embed a single ETKDGv3 conformer for one mol passed as a binary payload.
-
-    Returns the binary-serialized molecule with one conformer, or ``None``
-    when embedding fails. Byte-payload signature keeps the worker picklable
-    across multiprocessing boundaries.
-    """
-    idx, mol_bytes = args_tuple
-    mol = Chem.Mol(mol_bytes)
-    params = rdDistGeom.ETKDGv3()
-    params.useRandomCoords = True
-    params.randomSeed = seed + idx
-    try:
-        conf_id = rdDistGeom.EmbedMolecule(mol, params=params)
-    except Exception:
-        return None
-    if conf_id < 0 or mol.GetNumConformers() == 0:
-        return None
-    return mol.ToBinary()
-
-
-def _perturb_conformer(conf: Chem.Conformer, delta: float, seed: int) -> None:
-    """Apply per-atom Gaussian-like jitter of magnitude ``delta**2`` in-place.
-
-    Each x/y/z coordinate is shifted by ``delta * U(-delta, delta)``, so
-    ``delta=0.5`` produces displacements bounded by 0.25 A. Matches the
-    ``perturbConformer`` helper used by the C++ FF bench so the two benches
-    feed FF optimization comparable input distributions.
-    """
-    rng = random.Random(seed)
-    n_atoms = conf.GetNumAtoms()
-    for atom_idx in range(n_atoms):
-        pos = conf.GetAtomPosition(atom_idx)
-        conf.SetAtomPosition(
-            atom_idx,
-            Point3D(
-                pos.x + delta * rng.uniform(-delta, delta),
-                pos.y + delta * rng.uniform(-delta, delta),
-                pos.z + delta * rng.uniform(-delta, delta),
-            ),
-        )
-
-
-def _is_ff_typable(args_tuple: tuple[bytes, str]) -> bool:
-    """Return True iff the force field can construct on the embedded molecule.
-
-    Builds the MMFF/UFF force field for the first conformer of the mol. If
-    any atom is missing parameters, RDKit returns ``None`` and the mol is
-    rejected. The mol payload must already carry at least one conformer.
-    """
-    mol_bytes, ff = args_tuple
-    mol = Chem.Mol(mol_bytes)
-    if mol.GetNumConformers() == 0:
-        return False
-    try:
-        if ff == "mmff":
-            props = AllChem.MMFFGetMoleculeProperties(mol, mmffVariant="MMFF94")
-            if props is None:
-                return False
-            force_field = AllChem.MMFFGetMoleculeForceField(mol, props, confId=mol.GetConformer().GetId())
-        elif ff == "uff":
-            force_field = AllChem.UFFGetMoleculeForceField(mol, confId=mol.GetConformer().GetId())
-        else:
-            raise ValueError(f"Unknown ff: {ff!r}")
-    except Exception:
-        return False
-    return force_field is not None
-
-
-def _filter_ff_typable(mols: list[Chem.Mol], ff: str, num_threads: int = 1) -> list[Chem.Mol]:
-    """Drop molecules whose force-field parameters can't be constructed.
-
-    Required because nvmolkit's batched FF APIs raise on the whole batch when
-    any single mol has missing parameters; the per-mol filter here lets the
-    benchmark proceed on the remainder. Operates on mols that already carry a
-    conformer (call this after :func:`_embed_conformers`).
-    """
-    if not mols:
-        return []
-    workers = max(1, num_threads)
-    binaries = [(mol.ToBinary(), ff) for mol in mols]
-    keep_mask = process_map(
-        _is_ff_typable,
-        binaries,
-        max_workers=workers,
-        chunksize=max(1, len(binaries) // (workers * 8) or 1),
-        desc=f"Filtering {ff.upper()}-untypable molecules",
-    )
-    kept = [mol for mol, keep in zip(mols, keep_mask) if keep]
-    dropped = len(mols) - len(kept)
-    if dropped > 0:
-        print(f"  Dropped {dropped} molecules lacking {ff.upper()} parameters")
-    return kept
-
-
-def _embed_conformers(
-    mols: list[Chem.Mol],
-    confs_per_mol: int,
-    seed: int,
-    num_threads: int = 1,
-) -> list[Chem.Mol]:
-    """Embed one ETKDGv3 conformer per mol then jitter to ``confs_per_mol``.
-
-    Embedding runs in parallel across molecules. Each output conformer is an
-    independently-perturbed copy of the same base structure. Molecules whose
-    base embedding fails are dropped.
-    """
-    if not mols:
-        return []
-
-    workers = max(1, num_threads)
-
-    binaries = [(i, mol.ToBinary()) for i, mol in enumerate(mols)]
-    embedded_binaries = process_map(
-        partial(_embed_one, seed=seed),
-        binaries,
-        max_workers=workers,
-        chunksize=max(1, len(binaries) // (workers * 8) or 1),
-        desc="Embedding base conformers",
-    )
-
-    embedded: list[Chem.Mol] = []
-    drop_count = 0
-    for raw in embedded_binaries:
-        if raw is None:
-            drop_count += 1
-            continue
-        embedded.append(Chem.Mol(raw))
-    if drop_count > 0:
-        print(f"  Dropped {drop_count} molecules during embedding (no conformer generated)")
-
-    if confs_per_mol > 1:
-        for mol_idx, mol in enumerate(embedded):
-            base_conf_id = mol.GetConformer().GetId()
-            base_conf = mol.GetConformer(base_conf_id)
-            for conf_idx in range(1, confs_per_mol):
-                new_conf = Chem.Conformer(base_conf)
-                _perturb_conformer(new_conf, 0.5, seed=seed + mol_idx * confs_per_mol + conf_idx)
-                mol.AddConformer(new_conf, assignId=True)
-            _perturb_conformer(mol.GetConformer(base_conf_id), 0.5, seed=seed + mol_idx * confs_per_mol)
-
-    return embedded
 
 
 def _flatten_energies(per_mol: list[list[float]]) -> list[float]:
@@ -249,6 +107,7 @@ def _energy_diff_summary(
 def bench_nvmolkit(
     mols: list[Chem.Mol],
     ff: str,
+    minimizer_kind: str,
     max_iters: int,
     hardware_options,
     runs: int,
@@ -267,12 +126,22 @@ def bench_nvmolkit(
     @nvtx.annotate("ff_nvmolkit_run", color="orange")
     def run() -> None:
         cloned = clone_mols_with_conformers(mols)
-        last_energies[0] = _OptimizeConfs(cloned, maxIters=max_iters, hardwareOptions=hardware_options)
+        last_energies[0] = _OptimizeConfs(
+            cloned,
+            maxIters=max_iters,
+            hardwareOptions=hardware_options,
+            minimizerKind=minimizer_kind,
+        )
 
     if warmup:
         warmup_mols = clone_mols_with_conformers(mols[: min(4, len(mols))])
         with nvtx.annotate("ff_nvmolkit_warmup", color="purple"):
-            _OptimizeConfs(warmup_mols, maxIters=max_iters, hardwareOptions=hardware_options)
+            _OptimizeConfs(
+                warmup_mols,
+                maxIters=max_iters,
+                hardwareOptions=hardware_options,
+                minimizerKind=minimizer_kind,
+            )
         torch.cuda.synchronize()
 
     result = time_it(run, runs=runs, warmups=0, gpu_sync=True)
@@ -296,8 +165,6 @@ def bench_rdkit(
     as items / elapsed; the returned timing is over the molecules actually
     processed.
     """
-    import time as _time
-
     if ff == "mmff":
         rdkit_optimize = lambda mol: AllChem.MMFFOptimizeMoleculeConfs(  # noqa: E731
             mol, numThreads=num_threads, maxIters=max_iters
@@ -315,13 +182,13 @@ def bench_rdkit(
     @nvtx.annotate("ff_rdkit_run", color="yellow")
     def run() -> None:
         cloned = clone_mols_with_conformers(mols)
-        deadline = _time.perf_counter() + max_seconds if max_seconds > 0 else None
+        deadline = Deadline(max_seconds)
         out: list[list[tuple[int, float]]] = []
         n_done = 0
         for mol in cloned:
             out.append(rdkit_optimize(mol))
             n_done += 1
-            if deadline is not None and _time.perf_counter() >= deadline:
+            if deadline.expired():
                 break
         last_results[0] = out
         processed_count[0] = n_done
@@ -353,7 +220,7 @@ def _build_hardware_options(
 
 
 CSV_HEADER = (
-    "method,ff,input_file,input_type,num_mols,mols_processed,confs_per_mol,max_iters,"
+    "method,ff,minimizer_kind,input_file,input_type,num_mols,mols_processed,confs_per_mol,max_iters,"
     "batch_size,batches_per_gpu,prep_threads,num_gpus,nvmolkit_config_source,"
     "rdkit_threads,rdkit_max_seconds,time_ms,std_ms,"
     "confs_per_second,vs_rdkit_throughput_ratio,"
@@ -378,6 +245,13 @@ def main() -> None:
 
     parser.add_argument("--ff", choices=["mmff", "uff"], required=True, help="Force field to optimize: mmff or uff")
     parser.add_argument(
+        "--minimizer_kind",
+        choices=["BFGS", "FIRE"],
+        type=str.upper,
+        default="BFGS",
+        help="nvmolkit minimizer to benchmark: BFGS or FIRE (default: BFGS)",
+    )
+    parser.add_argument(
         "--confs_per_mol",
         "-c",
         type=int,
@@ -399,15 +273,9 @@ def main() -> None:
         default=1,
         help="Threads passed to RDKit FF optimizer via numThreads (default: 1)",
     )
-    parser.add_argument(
-        "--rdkit_max_seconds",
-        type=float,
-        default=0.0,
-        help=(
-            "Stop the RDKit comparison after this many wall-clock seconds and "
-            "report throughput on the molecules actually processed. 0 disables "
-            "the cap and runs the full workload (default: 0)."
-        ),
+    add_rdkit_max_seconds_arg(
+        parser,
+        extra_help="The RDKit FF optimizer loop stops at the next molecule boundary once the budget is hit.",
     )
 
     parser.add_argument("--batch_size", "-b", type=int, default=1024, help="nvmolkit batch size (default: 1024)")
@@ -514,6 +382,7 @@ def main() -> None:
     print("\nConfiguration:")
     print(f"  Input: {input_file} ({input_type})")
     print(f"  Force field: {args.ff.upper()}")
+    print(f"  nvmolkit minimizer: {args.minimizer_kind}")
     print(f"  Max molecules: {args.num_mols if args.num_mols > 0 else 'all'}")
     print(f"  Conformers per mol: {args.confs_per_mol}")
     print(f"  Max FF iterations: {args.max_iters}")
@@ -550,17 +419,10 @@ def main() -> None:
     print(f"  {len(mols)} molecules ready")
 
     print(f"\nEmbedding {args.confs_per_mol} conformer(s) per molecule with RDKit ETKDGv3...")
-    mols = _embed_conformers(mols, args.confs_per_mol, args.seed, num_threads=args.rdkit_threads)
+    mols = embed_and_jitter(mols, args.confs_per_mol, seed=args.seed, num_workers=args.rdkit_threads)
     if not mols:
         print("Error: No molecules retained after embedding")
         sys.exit(1)
-
-    print(f"\nFiltering molecules without {args.ff.upper()} parameters...")
-    mols = _filter_ff_typable(mols, args.ff, num_threads=args.rdkit_threads)
-    if not mols:
-        print(f"Error: No molecules retained after {args.ff.upper()} typability filter")
-        sys.exit(1)
-
     total_confs = sum(m.GetNumConformers() for m in mols)
     print(f"  {len(mols)} molecules with {total_confs} conformers ready")
 
@@ -604,6 +466,7 @@ def main() -> None:
                 explicit_calibration = rng.sample(range(len(mols)), size)
             tune_kwargs = dict(
                 maxIters=args.max_iters,
+                minimizerKind=args.minimizer_kind,
                 gpuIds=gpu_ids,
                 n_trials=args.autotune_trials,
                 target_seconds_per_trial=args.autotune_time_budget,
@@ -633,9 +496,9 @@ def main() -> None:
             )
 
         torch.cuda.cudart().cudaProfilerStart()
-        print(f"\nRunning nvmolkit {args.ff.upper()} optimize benchmark...")
+        print(f"\nRunning nvmolkit {args.ff.upper()} {args.minimizer_kind} optimize benchmark...")
         nv_avg, nv_std, nv_energies = bench_nvmolkit(
-            mols, args.ff, args.max_iters, hardware_options, args.runs, args.warmup
+            mols, args.ff, args.minimizer_kind, args.max_iters, hardware_options, args.runs, args.warmup
         )
         print(f"  nvmolkit:        {nv_avg:10.2f} ms (+/- {nv_std:.2f} ms)")
         results["nvmolkit"] = (nv_avg, nv_std, nv_energies)
@@ -645,7 +508,12 @@ def main() -> None:
     if not args.no_rdkit:
         print(f"\nRunning RDKit {args.ff.upper()} optimize benchmark...")
         rd_avg, rd_std, rd_energies, rdkit_processed_count = bench_rdkit(
-            mols, args.ff, args.max_iters, args.runs, args.warmup, args.rdkit_threads,
+            mols,
+            args.ff,
+            args.max_iters,
+            args.runs,
+            args.warmup,
+            args.rdkit_threads,
             max_seconds=args.rdkit_max_seconds,
         )
         print(
@@ -660,15 +528,13 @@ def main() -> None:
 
     print("\n" + "=" * 70)
     print("Summary:")
-    rdkit_throughput_per_s = None
-    if "rdkit" in results:
-        rd_avg = results["rdkit"][0]
-        if rd_avg > 0:
-            rdkit_throughput_per_s = (rdkit_processed_count * args.confs_per_mol) / (rd_avg / 1000.0)
+    rdkit_throughput_per_s: float | None = None
+    if "rdkit" in results and results["rdkit"][0] > 0:
+        rdkit_throughput_per_s = throughput_per_s(rdkit_processed_count * args.confs_per_mol, results["rdkit"][0])
     for name, (avg_ms, std_ms, _) in results.items():
         speedup = ""
         if rdkit_throughput_per_s is not None and name != "rdkit" and avg_ms > 0:
-            method_throughput = (len(mols) * args.confs_per_mol) / (avg_ms / 1000.0)
+            method_throughput = throughput_per_s(len(mols) * args.confs_per_mol, avg_ms)
             speedup = f", {method_throughput / rdkit_throughput_per_s:.1f}x vs RDKit (throughput)"
         print(f"  {name:20s}: {avg_ms:10.2f} ms (+/- {std_ms:.2f} ms){speedup}")
 
@@ -709,10 +575,7 @@ def main() -> None:
         rdkit_threads = args.rdkit_threads if is_rdkit else "N/A"
         rdkit_max_seconds = args.rdkit_max_seconds if is_rdkit else "N/A"
         mols_processed = rdkit_processed_count if is_rdkit else len(mols)
-        confs_per_second = (
-            (mols_processed * args.confs_per_mol) / (avg_ms / 1000.0)
-            if avg_ms > 0 else float("nan")
-        )
+        confs_per_second = throughput_per_s(mols_processed * args.confs_per_mol, avg_ms)
         if rdkit_throughput_per_s is not None and not is_rdkit and avg_ms > 0:
             vs_rdkit_throughput_ratio = f"{confs_per_second / rdkit_throughput_per_s:.4f}"
         else:
@@ -721,7 +584,8 @@ def main() -> None:
         max_diff = energy_max if (args.validate and is_nv) else "N/A"
         pairs = energy_pairs if (args.validate and is_nv) else "N/A"
         csv_rows.append(
-            f"{name},{args.ff},{input_file},{input_type},{len(mols)},{mols_processed},{args.confs_per_mol},"
+            f"{name},{args.ff},{args.minimizer_kind if is_nv else 'N/A'},{input_file},{input_type},"
+            f"{len(mols)},{mols_processed},{args.confs_per_mol},"
             f"{args.max_iters},{batch_size},{batches_per_gpu},{prep_threads},{num_gpus},"
             f"{nvmolkit_config_source},{rdkit_threads},{rdkit_max_seconds},"
             f"{avg_ms:.2f},{std_ms:.2f},"

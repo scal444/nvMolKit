@@ -1,6 +1,14 @@
 ---
 name: nvmolkit-usage
-description: Write code that calls the installed nvMolKit Python API for GPU-accelerated, batched RDKit-style operations - Morgan fingerprints, Tanimoto/cosine similarity, ETKDG conformer embedding, MMFF/UFF optimization, TFD, conformer RMSD, Butina clustering, and substructure search. Use when the user is importing `nvmolkit.*`, debugging an `nvmolkit` call, choosing between nvMolKit and RDKit for a batched cheminformatics workflow, or wiring nvMolKit results into a torch/numpy pipeline. Out of scope: building nvMolKit from source.
+description: >-
+  Write code that calls the installed nvMolKit Python API for GPU-accelerated,
+  batched RDKit-style operations - Morgan fingerprints, Tanimoto/cosine
+  similarity, ETKDG conformer embedding, MMFF/UFF optimization, TFD, conformer
+  RMSD, Butina clustering, and substructure search. Use when the user is
+  importing `nvmolkit.*`, debugging an `nvmolkit` call, choosing between
+  nvMolKit and RDKit for a batched cheminformatics workflow, or wiring nvMolKit
+  results into a torch/numpy pipeline. Out of scope: building nvMolKit from
+  source.
 license: Apache-2.0
 metadata:
   owner: Kevin Boyd (@scal444)
@@ -30,6 +38,12 @@ Plain RDKit is usually the better choice for single-molecule one-offs or workflo
 - A working `torch` install with CUDA support (nvMolKit returns GPU tensors via `torch`'s CUDA array interface).
 
 If CUDA is unavailable, nvMolKit calls raise. There is no CPU fallback - if the user needs one, use RDKit directly for that path.
+
+When helping with installation, make the user choose a PyTorch CUDA backend that the host driver supports before installing nvMolKit. nvMolKit's PyPI wheels are built with CUDA Toolkit 12.9 and depend on CUDA 12 runtime packages, but pip/uv can still select a CUDA 13 PyTorch wheel unless the install command says otherwise.
+
+- Conda: prefer conda-forge `pytorch-gpu`; pin `cuda-version=12.6` or another CUDA version supported by the driver.
+- pip: send the user to the PyTorch install selector (`https://pytorch.org/get-started/locally/`) or previous-versions page (`https://pytorch.org/get-started/previous-versions/`) to install `torch` for a CUDA 12.x backend before installing nvMolKit.
+- uv: install nvMolKit with an explicit backend, e.g. `uv pip install --torch-backend=cu128 nvmolkit`.
 
 ## Verify the install before writing real code
 
@@ -227,6 +241,36 @@ Inputs are `list[Mol]` with conformers already populated (typically by ETKDG, RD
 
 If any input molecule is `None` or lacks MMFF/UFF atom types, the call raises `ValueError`. The exception's `args[1]` is a dict with keys `"none"` and `"no_params"` listing the offending indices - useful for filtering a noisy input set.
 
+### Conformer RMSD and Butina clustering
+
+```python
+import torch
+from rdkit import Chem
+from rdkit.Chem.rdDistGeom import EmbedMultipleConfs
+from nvmolkit.clustering import butina
+from nvmolkit.conformerRmsd import GetConformerRMSMatrixBatch
+
+mols = [Chem.AddHs(Chem.MolFromSmiles(smi)) for smi in ["CCCCCC", "c1ccccc1"]]
+for mol in mols:
+    EmbedMultipleConfs(mol, numConfs=10)
+
+# Remove hydrogens after embedding for heavy-atom RMSD.
+heavy_mols = [Chem.RemoveHs(mol) for mol in mols]
+
+# Default RMSD output is RDKit-compatible condensed lower-triangle form.
+condensed = GetConformerRMSMatrixBatch(heavy_mols)
+
+# Butina expects a square distance matrix, so request square GPU tensors.
+square = GetConformerRMSMatrixBatch(heavy_mols, output_format="square")
+clusters = [butina(distance_matrix, cutoff=0.5).torch() for distance_matrix in square]
+
+torch.cuda.synchronize()
+for mol_clusters in clusters:
+    print(mol_clusters.cpu().tolist())
+```
+
+`GetConformerRMSMatrix(mol)` and `GetConformerRMSMatrixBatch(mols)` default to `output_format="condensed"`, returning `AsyncGpuResult` objects that wrap RDKit-style flat vectors of length `N * (N - 1) // 2`. Use `output_format="square"` when chaining into `butina()` or any other API that expects an `N x N` distance matrix. Both forms live on the GPU; call `.numpy()` on condensed results or synchronize before moving square tensors to the CPU.
+
 ### Custom forcefield options + constraints (`BatchedForcefield`)
 
 Reach for `MMFFBatchedForcefield` / `UFFBatchedForcefield` instead of the one-shot `MMFFOptimizeMoleculesConfs` / `UFFOptimizeMoleculesConfs` when you need any of:
@@ -264,6 +308,6 @@ All conformers of each input molecule are minimized in one batch. Constraints at
 
 ## Going deeper
 
-- Full feature list, API reference, and guides: <https://nvidia-digital-bio.github.io/nvMolKit/>
-- What changed in each release: <https://nvidia-digital-bio.github.io/nvMolKit/changelog.html>
+- Full feature list, API reference, and guides: <https://nvidia-bionemo.github.io/nvMolKit/>
+- What changed in each release: <https://nvidia-bionemo.github.io/nvMolKit/changelog.html>
 - Worked examples (Jupyter notebooks): the `examples/` directory in the GitHub repo

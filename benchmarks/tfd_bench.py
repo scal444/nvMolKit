@@ -35,19 +35,15 @@ import argparse
 import multiprocessing
 import os
 import pickle
-import random
 import sys
 import time
-from functools import partial
 from typing import List, Tuple
 
 import pandas as pd
 import torch
-from bench_utils import load_smiles
+from bench_utils import embed_and_jitter, load_smiles
 from rdkit import Chem
-from rdkit.Chem import TorsionFingerprints, rdDistGeom
-from rdkit.Geometry import Point3D
-from tqdm.contrib.concurrent import process_map
+from rdkit.Chem import TorsionFingerprints
 
 import nvmolkit.tfd as nvmol_tfd
 
@@ -78,53 +74,6 @@ def time_it(func, runs: int = 3, warmups: int = 1) -> Tuple[float, float]:
     return avg_time / 1.0e6, std_time / 1.0e6  # Return in milliseconds
 
 
-def _embed_one(args_tuple: Tuple[int, bytes], seed: int) -> bytes | None:
-    """Embed a single ETKDGv3 conformer for one mol passed as a binary payload.
-
-    Returns the binary-serialized molecule with one conformer, or ``None``
-    when embedding fails or the mol is too small to contribute torsion pairs.
-    Byte-payload signature keeps the worker picklable across multiprocessing
-    boundaries.
-    """
-    idx, mol_bytes = args_tuple
-    mol = Chem.Mol(mol_bytes)
-    if mol.GetNumAtoms() < 4:
-        return None
-    mol = Chem.AddHs(mol)
-    params = rdDistGeom.ETKDGv3()
-    params.useRandomCoords = True
-    params.randomSeed = seed + idx
-    try:
-        conf_id = rdDistGeom.EmbedMolecule(mol, params=params)
-    except Exception:
-        return None
-    if conf_id < 0 or mol.GetNumConformers() == 0:
-        return None
-    return mol.ToBinary()
-
-
-def _perturb_conformer(conf: Chem.Conformer, delta: float, seed: int) -> None:
-    """Apply per-atom uniform jitter of magnitude ``delta**2`` in-place.
-
-    Each x/y/z coordinate is shifted by ``delta * U(-delta, delta)``, so
-    ``delta=0.5`` produces displacements bounded by 0.25 A. This mirrors the
-    perturbation strategy in ``ff_optimize_bench.py`` and avoids running
-    ETKDG once per conformer.
-    """
-    rng = random.Random(seed)
-    n_atoms = conf.GetNumAtoms()
-    for atom_idx in range(n_atoms):
-        pos = conf.GetAtomPosition(atom_idx)
-        conf.SetAtomPosition(
-            atom_idx,
-            Point3D(
-                pos.x + delta * rng.uniform(-delta, delta),
-                pos.y + delta * rng.uniform(-delta, delta),
-                pos.z + delta * rng.uniform(-delta, delta),
-            ),
-        )
-
-
 def generate_conformers_batch(
     mols: List[Chem.Mol],
     num_confs: int,
@@ -133,49 +82,23 @@ def generate_conformers_batch(
 ) -> List[Chem.Mol]:
     """Generate ``num_confs`` conformers per mol via embed-once-then-perturb.
 
-    Embeds one ETKDGv3 base conformer per molecule in parallel across mols,
-    then derives the remaining conformers by jittering the base structure.
-    Hydrogens are added before embedding and stripped from the returned mols
-    so the output matches the format consumed by RDKit's TFD APIs.
-
-    Molecules whose base embedding fails are dropped. ``num_confs`` must be
-    >= 2 (TFD requires at least one pair).
+    Wraps the shared :func:`bench_utils.embed_and_jitter` with TFD-specific
+    constraints: requires ``num_confs >= 2`` (at least one torsion pair) and
+    drops mols with fewer than 4 atoms; hydrogens are added during embedding
+    and stripped from the returned mols.
     """
-    if not mols:
-        return []
     if num_confs < 2:
         raise ValueError(f"num_confs must be >= 2 for TFD, got {num_confs}")
-
     workers = num_workers if num_workers > 0 else max(1, multiprocessing.cpu_count() // 2)
-
-    binaries = [(i, mol.ToBinary()) for i, mol in enumerate(mols)]
-    embedded_binaries = process_map(
-        partial(_embed_one, seed=seed),
-        binaries,
-        max_workers=workers,
-        chunksize=max(1, len(binaries) // (workers * 8) or 1),
+    return embed_and_jitter(
+        mols,
+        confs_per_mol=num_confs,
+        seed=seed,
+        num_workers=workers,
+        add_hs=True,
+        min_atoms=4,
         desc=f"Embedding base conformer (1/{num_confs})",
     )
-
-    out: List[Chem.Mol] = []
-    drop_count = 0
-    for mol_idx, raw in enumerate(embedded_binaries):
-        if raw is None:
-            drop_count += 1
-            continue
-        mol = Chem.Mol(raw)
-        base_conf_id = mol.GetConformer().GetId()
-        base_conf = mol.GetConformer(base_conf_id)
-        for conf_idx in range(1, num_confs):
-            new_conf = Chem.Conformer(base_conf)
-            _perturb_conformer(new_conf, 0.5, seed=seed + mol_idx * num_confs + conf_idx)
-            mol.AddConformer(new_conf, assignId=True)
-        _perturb_conformer(mol.GetConformer(base_conf_id), 0.5, seed=seed + mol_idx * num_confs)
-        out.append(Chem.RemoveHs(mol))
-
-    if drop_count > 0:
-        print(f"  Dropped {drop_count} molecules during embedding (no conformer generated)")
-    return out
 
 
 def _try_load_pickle(num_confs: int, max_mols: int, smiles_file: str = None) -> List[Chem.Mol]:

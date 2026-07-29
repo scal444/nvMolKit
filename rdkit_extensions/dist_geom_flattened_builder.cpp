@@ -1,4 +1,4 @@
-#include "dist_geom_flattened_builder.h"
+#include "rdkit_extensions/dist_geom_flattened_builder.h"
 
 #include <DistGeom/BoundsMatrix.h>
 #include <DistGeom/ChiralSet.h>
@@ -8,6 +8,8 @@
 #include <boost/dynamic_bitset.hpp>
 #include <map>
 #include <sstream>
+
+#include "versions.h"
 
 // No clang-tidy for 1:1 RDKit ports.
 // NOLINTBEGIN
@@ -444,8 +446,8 @@ void addLongRangeDistanceConstraints(nvMolKit::DistGeom::Energy3DForceContribsHo
   for (unsigned int i = 1; i < numAtoms; ++i) {
     for (unsigned int j = 0; j < i; ++j) {
       if (!atomPairs[j * numAtoms + i]) {
-        const double l = mmat.getLowerBound(i, j);
-        const double u = mmat.getUpperBound(i, j);
+        double l = mmat.getLowerBound(i, j);
+        double u = mmat.getUpperBound(i, j);
 #if RDKIT_NEW_FLAG_API
         double fdist = etkdgDetails.boundsMatForceScaling * 10.0;
         if (!etkdgDetails.constrainedAtoms.empty() && etkdgDetails.constrainedAtoms[i] &&

@@ -21,10 +21,10 @@
 #include <cstdint>
 #include <vector>
 
-#include "conformer_info.h"
-#include "device_coord_collector.h"
-#include "device_coord_result.h"
-#include "device_vector.h"
+#include "src/conformer/conformer_info.h"
+#include "src/conformer/device_coord_collector.h"
+#include "src/conformer/device_coord_result.h"
+#include "src/utils/device_vector.h"
 
 namespace nvMolKit {
 namespace detail {
@@ -53,6 +53,13 @@ void appendBatch(const std::vector<ConformerInfo>& batchConformers,
                  const AsyncDeviceVector<double>&  positionsDevice,
                  const AsyncDeviceVector<double>&  energiesDevice,
                  const AsyncDeviceVector<int16_t>& statusesDevice,
+                 DeviceCoordCollector&             collector);
+
+//! \brief Append a batch using FIRE statuses (0 = converged).
+void appendBatch(const std::vector<ConformerInfo>& batchConformers,
+                 const AsyncDeviceVector<double>&  positionsDevice,
+                 const AsyncDeviceVector<double>&  energiesDevice,
+                 const AsyncDeviceVector<uint8_t>& statusesDevice,
                  DeviceCoordCollector&             collector);
 
 /**

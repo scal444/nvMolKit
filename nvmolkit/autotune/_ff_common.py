@@ -24,6 +24,7 @@ not consumed by the C++ batched-FF code path (threads come from
 from __future__ import annotations
 
 import os
+import re
 from typing import Iterable, Optional
 
 from rdkit.Chem import Mol
@@ -51,11 +52,7 @@ def coerce_gpu_ids(gpuIds: Optional[Iterable[int]]) -> list[int]:
 def cpu_count() -> int:
     """Return the usable physical CPU core count, with a floor of 1.
 
-    Parses ``/proc/cpuinfo`` for unique ``(physical id, core id)`` pairs so
-    SMT siblings don't double-count. Falls back to ``os.cpu_count()`` (logical
-    cores) when ``/proc/cpuinfo`` is unavailable or unparseable; that fallback
-    overcounts on SMT hardware but never undercounts, and is only hit on
-    non-Linux systems we don't currently target.
+    Falls back to ``os.cpu_count()`` (logical) if ``/proc/cpuinfo`` is missing.
     """
     physical = _physical_cpu_count_from_proc()
     if physical is not None:
@@ -66,33 +63,15 @@ def cpu_count() -> int:
 def _physical_cpu_count_from_proc() -> Optional[int]:
     """Return the number of distinct physical cores from ``/proc/cpuinfo``."""
     try:
-        with open("/proc/cpuinfo", "r") as cpuinfo:
+        with open("/proc/cpuinfo") as cpuinfo:
             text = cpuinfo.read()
     except OSError:
         return None
-
-    pairs: set[tuple[str, str]] = set()
-    physical_id: Optional[str] = None
-    core_id: Optional[str] = None
-    for line in text.splitlines():
-        if not line.strip():
-            if physical_id is not None and core_id is not None:
-                pairs.add((physical_id, core_id))
-            physical_id = None
-            core_id = None
-            continue
-        if ":" not in line:
-            continue
-        key, value = line.split(":", 1)
-        key = key.strip()
-        value = value.strip()
-        if key == "physical id":
-            physical_id = value
-        elif key == "core id":
-            core_id = value
-    if physical_id is not None and core_id is not None:
-        pairs.add((physical_id, core_id))
-    return len(pairs) if pairs else None
+    physical_ids = re.findall(r"^physical id\s*:\s*(\S+)", text, re.MULTILINE)
+    core_ids = re.findall(r"^core id\s*:\s*(\S+)", text, re.MULTILINE)
+    if not physical_ids or len(physical_ids) != len(core_ids):
+        return None
+    return len(set(zip(physical_ids, core_ids)))
 
 
 def resolve_cpu_budget(cpu_budget: Optional[int]) -> int:
@@ -131,15 +110,16 @@ def resolve_num_gpus(fixed_gpu_ids: list[int]) -> int:
 def default_ff_search_space(num_gpus: int, cpus: int) -> dict:
     """Return the default FF search space scaled to the active hardware.
 
-    ``batchSize`` is restricted to multiples of 64 (categorical) since the
-    underlying kernels are tile-tuned for those sizes. ``batchesPerGpu`` is
-    per-GPU and capped at ``min(8, cpus // num_gpus)``: 8 is the empirical
-    point of diminishing returns for the batched-FF dispatch, and the
-    physical-core floor prevents oversubscribing CPU coordinator threads
-    across all GPUs.
+    ``batchSize`` is a stepped integer range in multiples of 64 since the
+    underlying kernels are tile-tuned for those sizes; the stepped form
+    preserves numeric ordering for TPE (unlike a categorical list).
+    ``batchesPerGpu`` is per-GPU and capped at ``min(8, cpus // num_gpus)``:
+    8 is the empirical point of diminishing returns for the batched-FF
+    dispatch, and the physical-core floor prevents oversubscribing CPU
+    coordinator threads across all GPUs.
     """
     per_gpu_max = max(1, min(8, cpus // max(1, num_gpus)))
     return {
-        "batchSize": [512, 64, 128, 192, 256, 320, 384, 448, 768, 1024],
+        "batchSize": (64, 1024, 64),
         "batchesPerGpu": (1, per_gpu_max),
     }

@@ -13,17 +13,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef NVMOLKIT_BFGS_MMFF_H
-#define NVMOLKIT_BFGS_MMFF_H
+#ifndef NVMOLKIT_MMFF_MINIMIZE_H
+#define NVMOLKIT_MMFF_MINIMIZE_H
 
 #include <optional>
 #include <vector>
 
-#include "../hardware_options.h"
-#include "bfgs_minimize.h"
-#include "device_coord_result.h"
-#include "forcefield_constraints.h"
-#include "mmff_properties.h"
+#include "src/conformer/device_coord_result.h"
+#include "src/forcefields/forcefield_constraints.h"
+#include "src/forcefields/mmff_properties.h"
+#include "src/hardware_options.h"
+#include "src/minimizer/bfgs_minimize.h"
+#include "src/minimizer/fire_minimizer.h"
 
 namespace RDKit {
 class ROMol;
@@ -100,5 +101,42 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfs(
   int                                                          targetGpu   = -1,
   const DeviceCoordResult*                                     deviceInput = nullptr);
 
+//! \brief Minimize MMFF energies with FIRE 2.0 and report per-conformer convergence.
+//! \param mols Molecules whose conformers provide the initial coordinates. In
+//!             RDKIT_CONFORMERS mode, optimized coordinates are written back in place.
+//! \param maxIters Maximum FIRE iterations.
+//! \param fireOptions FIRE integration and convergence settings. A conformer converges when
+//!                    its gradient norm satisfies @ref FireOptions::gradTol. The batched backend
+//!                    can additionally use energy-plateau detection when enabled.
+//! \param properties Per-molecule MMFF settings (one entry per molecule).
+//! \param constraints Per-molecule constraint specifications (empty = no constraints).
+//! \param perfOptions Hardware and batching configuration.
+//! \param backend Execution backend. HYBRID selects a backend from the molecule sizes.
+//! \param output Whether to write coordinates back into RDKit conformers (default) or return them
+//!               on-device as a DeviceCoordResult.
+//! \param targetGpu In DEVICE mode, the GPU to consolidate the result onto. -1 selects the first
+//!                  configured execution GPU (or device 0).
+//! \return Final energies and convergence flags in RDKIT_CONFORMERS mode, or a device-resident
+//!         result in DEVICE mode. A convergence flag is false when @p maxIters is reached first.
+MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(
+  std::vector<RDKit::ROMol*>&                                  mols,
+  int                                                          maxIters    = 200,
+  const FireOptions&                                           fireOptions = {},
+  const std::vector<MMFFProperties>&                           properties  = {},
+  const std::vector<ForceFieldConstraints::PerMolConstraints>& constraints = {},
+  const BatchHardwareOptions&                                  perfOptions = {},
+  FireBackend                                                  backend     = FireBackend::HYBRID,
+  CoordinateOutput                                             output      = CoordinateOutput::RDKIT_CONFORMERS,
+  int                                                          targetGpu   = -1);
+
+//! \brief Minimize MMFF energies with FIRE 2.0 and return the final energy of each conformer.
+//! \note Use @ref MMFFMinimizeMoleculesConfsFire when convergence status is required.
+std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>&        mols,
+                                                                int                                maxIters    = 200,
+                                                                const FireOptions&                 fireOptions = {},
+                                                                const std::vector<MMFFProperties>& properties  = {},
+                                                                const BatchHardwareOptions&        perfOptions = {},
+                                                                FireBackend backend = FireBackend::HYBRID);
+
 }  // namespace nvMolKit::MMFF
-#endif  // NVMOLKIT_BFGS_MMFF_H
+#endif  // NVMOLKIT_MMFF_MINIMIZE_H

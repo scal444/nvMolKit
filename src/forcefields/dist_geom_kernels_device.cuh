@@ -18,7 +18,8 @@
 
 #include <cooperative_groups.h>
 
-#include "kernel_utils.cuh"
+#include "src/forcefields/dist_geom_kernels.h"
+#include "src/forcefields/kernel_utils.cuh"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -521,7 +522,7 @@ static __device__ __forceinline__ void torsionAngleGrad(const double* pos,
      3.0 * forceConstants[2] * signs[2] * (4.0 * cosPhi2 * sinPhi - sinPhi) -
      4.0 * forceConstants[3] * signs[3] * (8.0 * cosPhi3 * sinPhi - 4.0 * cosPhi * sinPhi) -
      5.0 * forceConstants[4] * signs[4] * (16.0 * cosPhi4 * sinPhi - 12.0 * cosPhi2 * sinPhi + sinPhi) -
-     6.0 * forceConstants[4] * signs[4] * (32.0 * cosPhi5 * sinPhi - 32.0 * cosPhi3 * sinPhi + 6.0 * sinPhi));
+     6.0 * forceConstants[5] * signs[5] * (32.0 * cosPhi5 * sinPhi - 32.0 * cosPhi3 * sinPhi + 6.0 * cosPhi * sinPhi));
 
   const double sinTerm = -dE_dPhi * (isDoubleZero(sinPhi) ? (1.0 / cosPhi) : (1.0 / sinPhi));
 

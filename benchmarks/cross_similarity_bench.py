@@ -44,12 +44,10 @@ def nvmolkit_sim_gpu_only(fps, sim_type):
     torch.cuda.synchronize()
 
 
-# Strip --no-rdkit / --no-nvmolkit from argv before handing the rest to
-# pyperf. pyperf's own argparser passes registered flags through correctly on
-# the parent's parse_args() but does not consistently propagate them to its
-# child worker processes (each child re-imports this module and re-parses
-# sys.argv). Doing the checks here once, at import time, gives every process
-# the same answer.
+# --no-rdkit / --no-nvmolkit gate the module-level fingerprint setup below,
+# which runs at import time before pyperf's Runner parses args. Read them
+# directly from argv and strip them so pyperf's argparser doesn't reject the
+# unknown flags.
 NO_RDKIT = "--no-rdkit" in sys.argv
 if NO_RDKIT:
     sys.argv = [a for a in sys.argv if a != "--no-rdkit"]
@@ -65,6 +63,7 @@ runner.argparser.add_argument(
     "--input", type=str, default="data/benchmark_smiles.csv", help="Path to input SMILES file (.smi/.csv/.cxsmiles)"
 )
 runner.argparser.add_argument("--cosine", action="store_true", help="Include cosine similarity benchmarks")
+runner.argparser.add_argument("--seed", type=int, default=42, help="Random seed for sampling SMILES (default: 42)")
 args = runner.parse_args()
 
 sim_types = ("tanimoto", "cosine") if args.cosine else ("tanimoto",)
@@ -72,7 +71,7 @@ fpsize = 1024
 max_size = max(SIZES)
 default_values = runner.args.values
 
-mols = load_smiles(args.input, max_count=max_size)
+mols = load_smiles(args.input, max_count=max_size, seed=args.seed)
 if not mols:
     raise ValueError(f"No molecules parsed from {args.input}")
 while len(mols) < max_size:

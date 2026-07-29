@@ -14,14 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Run the full set of nvMolKit Python benchmarks for either a 1-GPU or 8-GPU
-# hardware configuration and collect results plus system metadata into a
-# single output directory.
+# Run the full set of nvMolKit Python benchmarks and collect results plus
+# system metadata into a single output directory. Runs use one GPU by default;
+# multi-GPU benchmarking is opt-in with --num-gpus.
 #
 # Both modes run the full bench list. The benches that don't expose a
 # --num_gpus flag (butina_clustering, conformer_rmsd, cross_similarity, tfd)
-# always run on a single GPU regardless of the mode argument; the mode arg
-# only affects --num_gpus on the multi-GPU-aware benches:
+# always run on a single GPU. --num-gpus only affects the multi-GPU-aware
+# benches:
 #
 #   - butina_clustering_bench.py    (single-GPU library; --num_gpus N/A)
 #   - conformer_rmsd_bench.py       (single-GPU library; --num_gpus N/A)
@@ -47,7 +47,9 @@
 #   $DATA_DIR/chembl_size_splits/chembl_<lo>-<hi>.smi   (for size scans)
 #
 # Usage:
-#   ./run_all_benchmarks.sh <1|8> --output-dir DIR [--data-dir DIR] [--include NAME [NAME ...]]
+#   ./run_all_benchmarks.sh --output-dir DIR [--num-gpus N] [--gpu-ids LIST]
+#                           [--data-dir DIR] [--include NAME [NAME ...]]
+#   ./run_all_benchmarks.sh <N> --output-dir DIR ...  # legacy positional form
 #   ./run_all_benchmarks.sh --list
 #
 # --include restricts the run to the named benches (whitelist). Unknown names
@@ -58,10 +60,15 @@ set -uo pipefail
 
 usage() {
   cat >&2 <<EOF
-Usage: $0 <1|8> --output-dir DIR [--data-dir DIR] [--include NAME [NAME ...]] [--no-rdkit | --no-nvmolkit]
+Usage: $0 --output-dir DIR [--num-gpus N] [--gpu-ids LIST] [--data-dir DIR]
+          [--include NAME [NAME ...]] [--no-rdkit | --no-nvmolkit]
+       $0 <N> --output-dir DIR ...  (legacy positional GPU count)
        $0 --list
 
-  <1|8>             GPU mode (required)
+  --num-gpus N      GPUs for multi-GPU-aware benchmarks (default: 1)
+  --gpu-ids LIST    Comma-separated physical GPU IDs to expose. The number of
+                    IDs must match --num-gpus. By default, preserve the
+                    caller's CUDA_VISIBLE_DEVICES (if any).
   --output-dir DIR  Results directory (required for runs)
   --data-dir DIR    Input data directory (default: /data)
   --include NAME... Whitelist of bench names to run (run --list to see them)
@@ -79,35 +86,16 @@ Usage: $0 <1|8> --output-dir DIR [--data-dir DIR] [--include NAME [NAME ...]] [-
 EOF
 }
 
-if [ $# -lt 1 ]; then
-  usage
-  exit 2
-fi
+NUM_GPUS=1
+GPU_IDS=""
+LIST_ONLY=0
 
-case "$1" in
-  -h|--help)
-    usage
-    exit 0
-    ;;
-  --list)
-    LIST_ONLY=1
-    NUM_GPUS=""
-    shift
-    ;;
-  *)
-    NUM_GPUS="$1"
-    shift
-    case "$NUM_GPUS" in
-      1|8) ;;
-      *)
-        echo "Error: first argument must be 1 or 8 (got: $NUM_GPUS)" >&2
-        usage
-        exit 2
-        ;;
-    esac
-    LIST_ONLY=0
-    ;;
-esac
+# Preserve the original positional GPU-count interface, but no longer require
+# it. This makes the common single-GPU invocation the shortest one.
+if [ $# -gt 0 ] && [[ "$1" =~ ^[0-9]+$ ]]; then
+  NUM_GPUS="$1"
+  shift
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -126,8 +114,7 @@ SUBSTRUCT_ROWS=(
 
 # Heavy-atom-count bins for ETKDG / FF size scans, matching the file names
 # in $DATA_DIR/chembl_size_splits/chembl_<bin>.smi. Stops at 80-100 because
-# bins >=100 atoms are biological outliers (peptides etc.), have too few
-# molecules to saturate the 8-GPU calibration target, and aren't
+# bins >=100 atoms are biological outliers (peptides etc.) and aren't
 # representative of typical drug-discovery workloads.
 SIZE_SCAN_BINS=(
   "0-20"
@@ -144,10 +131,14 @@ ALL_BENCH_NAMES=(
   "cross_similarity"
   "etkdg"
   "etkdg_size_scan"
-  "ff_optimize_mmff"
-  "ff_optimize_mmff_size_scan"
-  # "ff_optimize_uff"            # disabled; MMFF is the reference
-  # "ff_optimize_uff_size_scan"  # disabled; MMFF is the reference
+  "ff_optimize_mmff_bfgs"
+  "ff_optimize_mmff_bfgs_size_scan"
+  "ff_optimize_mmff_fire"
+  "ff_optimize_mmff_fire_size_scan"
+  "ff_optimize_uff_bfgs"
+  "ff_optimize_uff_bfgs_size_scan"
+  "ff_optimize_uff_fire"
+  "ff_optimize_uff_fire_size_scan"
 )
 for row in "${SUBSTRUCT_ROWS[@]}"; do
   smarts_file="${row%%:*}"
@@ -164,6 +155,22 @@ CONTINUE=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
+    --num-gpus)
+      if [ $# -lt 2 ]; then
+        echo "Error: --num-gpus requires a value" >&2
+        exit 2
+      fi
+      NUM_GPUS="$2"
+      shift 2
+      ;;
+    --gpu-ids)
+      if [ $# -lt 2 ]; then
+        echo "Error: --gpu-ids requires a value" >&2
+        exit 2
+      fi
+      GPU_IDS="$2"
+      shift 2
+      ;;
     --output-dir)
       if [ $# -lt 2 ]; then
         echo "Error: --output-dir requires a value" >&2
@@ -203,6 +210,10 @@ while [ $# -gt 0 ]; do
       CONTINUE=1
       shift
       ;;
+    --list)
+      LIST_ONLY=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -214,6 +225,24 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+if ! [[ "$NUM_GPUS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Error: --num-gpus must be a positive integer (got: $NUM_GPUS)" >&2
+  exit 2
+fi
+
+if [ -n "$GPU_IDS" ]; then
+  if ! [[ "$GPU_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+    echo "Error: --gpu-ids must be a comma-separated list of non-negative integers" >&2
+    exit 2
+  fi
+  IFS=',' read -r -a REQUESTED_GPU_IDS <<< "$GPU_IDS"
+  if [ "${#REQUESTED_GPU_IDS[@]}" -ne "$NUM_GPUS" ]; then
+    echo "Error: --gpu-ids contains ${#REQUESTED_GPU_IDS[@]} IDs but --num-gpus is $NUM_GPUS" >&2
+    exit 2
+  fi
+  export CUDA_VISIBLE_DEVICES="$GPU_IDS"
+fi
 
 if [ "$SKIP_RDKIT" = "1" ] && [ "$SKIP_NVMOLKIT" = "1" ]; then
   echo "Error: --no-rdkit and --no-nvmolkit are mutually exclusive" >&2
@@ -271,7 +300,18 @@ RESULT_DIR="$OUTPUT_DIR/results"
 AUTOTUNE_DIR="$OUTPUT_DIR/autotune"
 mkdir -p "$LOG_DIR" "$RESULT_DIR" "$AUTOTUNE_DIR"
 
-if [ ! -d "$DATA_DIR" ]; then
+NEED_ENAMINE=0
+NEED_SIZE_SCAN=0
+for bench_name in "${ALL_BENCH_NAMES[@]}"; do
+  if should_run "$bench_name"; then
+    case "$bench_name" in
+      *_size_scan) NEED_SIZE_SCAN=1 ;;
+      *) NEED_ENAMINE=1 ;;
+    esac
+  fi
+done
+
+if { [ "$NEED_ENAMINE" = "1" ] || [ "$NEED_SIZE_SCAN" = "1" ]; } && [ ! -d "$DATA_DIR" ]; then
   echo "Error: --data-dir '$DATA_DIR' does not exist" >&2
   exit 1
 fi
@@ -279,26 +319,33 @@ fi
 ENAMINE_CXSMILES="$DATA_DIR/enamine_real_10M.cxsmiles"
 SIZE_SCAN_DIR="$DATA_DIR/chembl_size_splits"
 
-if [ ! -f "$ENAMINE_CXSMILES" ]; then
-  echo "Missing $ENAMINE_CXSMILES (used by butina/cross_similarity/etkdg/ff/substruct/tfd)" >&2
+if [ "$NEED_ENAMINE" = "1" ] && [ ! -f "$ENAMINE_CXSMILES" ]; then
+  echo "Missing $ENAMINE_CXSMILES (used by the selected non-size-scan benchmarks)" >&2
   exit 1
 fi
-if [ ! -d "$SIZE_SCAN_DIR" ]; then
-  echo "Missing $SIZE_SCAN_DIR (required for *_size_scan benches)" >&2
+if [ "$NEED_SIZE_SCAN" = "1" ] && [ ! -d "$SIZE_SCAN_DIR" ]; then
+  echo "Missing $SIZE_SCAN_DIR (required by the selected *_size_scan benchmarks)" >&2
   exit 1
 fi
 
-# Verify enough GPUs are visible before we burn time tuning configs that
-# request hardware we don't have.
-GPU_COUNT="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | wc -l)"
-if [ "$GPU_COUNT" -lt "$NUM_GPUS" ]; then
-  echo "Error: requested $NUM_GPUS GPUs but nvidia-smi reports $GPU_COUNT visible" >&2
-  exit 1
+# Verify enough CUDA devices are visible to the benchmark process before
+# spending time tuning. Unlike nvidia-smi, torch honors CUDA_VISIBLE_DEVICES.
+# RDKit-only runs intentionally do not require a GPU.
+GPU_COUNT="not_checked"
+if [ "$SKIP_NVMOLKIT" = "0" ]; then
+  if ! GPU_COUNT="$(python -c 'import torch; print(torch.cuda.device_count())' 2>/dev/null)"; then
+    echo "Error: could not query CUDA device count through torch" >&2
+    exit 1
+  fi
+  if [ "$GPU_COUNT" -lt "$NUM_GPUS" ]; then
+    echo "Error: requested $NUM_GPUS GPUs but torch reports $GPU_COUNT visible" >&2
+    echo "       CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}" >&2
+    exit 1
+  fi
 fi
 
 # Ensure runtime dependencies the bench scripts assume but the conda image may
-# not ship. pyperf is used by cross_similarity_bench.py; optuna is required for
-# autotune in etkdg/ff/substruct benches.
+# not ship. Dependency packaging is intentionally outside this script's scope.
 ensure_pip_pkg() {
   local import_name="$1"
   local pip_name="${2:-$1}"
@@ -315,7 +362,6 @@ ensure_pip_pkg pyperf
 ensure_pip_pkg optuna
 ensure_pip_pkg nvtx
 ensure_pip_pkg pandas
-
 
 # RDKit's ETKDG/FF parallelize across conformers within a single mol, so
 # numThreads is capped in practice by confs_per_mol. confs_per_mol >= 128 keeps
@@ -356,15 +402,18 @@ SIZE_SCAN_NUM_MOLS="$ETKDG_NUM_MOLS"
 # fingerprint construction stays bounded.
 BUTINA_NUM_MOLS=60000
 
-# Substruct full run scans the entire enamine_real_10M file. load_smiles with
-# max_count=10M effectively streams the whole file (10.35M lines). RAM cost is
-# substantial (tens of GB of parsed Mols); only safe on the fat 8-GPU node.
-SUBSTRUCT_NUM_MOLS=10000000
+# Keep the substructure workload proportional to the requested GPU count so a
+# one-GPU run is a practical primary workflow. Preserve the historical 10M cap
+# for larger systems.
+SUBSTRUCT_MOLS_PER_GPU=1250000
+SUBSTRUCT_NUM_MOLS=$(( SUBSTRUCT_MOLS_PER_GPU * NUM_GPUS ))
+if [ "$SUBSTRUCT_NUM_MOLS" -gt 10000000 ]; then
+  SUBSTRUCT_NUM_MOLS=10000000
+fi
 
-# RDKit thread count for the head-to-head comparison on the multi-GPU benches
-# (etkdg, ff_optimize, substruct). 1-GPU mode caps at 16 (or physical-core
-# count if smaller); 8-GPU mode uses every physical core on the assumption
-# it's a fat multi-socket node.
+# RDKit thread count for the head-to-head comparison on the multi-GPU benches.
+# A single-GPU run caps RDKit at 16 physical cores; multi-GPU runs use all
+# physical cores.
 #
 # Single-GPU benches (butina, conformer_rmsd, cross_similarity, tfd) compare
 # against single-threaded RDKit and ignore this variable.
@@ -372,18 +421,11 @@ PHYSICAL_CORES="$(lscpu -p=Core,Socket 2>/dev/null | grep -v '^#' | sort -u | wc
 if [ -z "$PHYSICAL_CORES" ] || [ "$PHYSICAL_CORES" -lt 1 ]; then
   PHYSICAL_CORES=1
 fi
-case "$NUM_GPUS" in
-  1)
-    if [ "$PHYSICAL_CORES" -lt 16 ]; then
-      RDKIT_THREADS="$PHYSICAL_CORES"
-    else
-      RDKIT_THREADS=16
-    fi
-    ;;
-  8)
-    RDKIT_THREADS="$PHYSICAL_CORES"
-    ;;
-esac
+if [ "$NUM_GPUS" -eq 1 ] && [ "$PHYSICAL_CORES" -gt 16 ]; then
+  RDKIT_THREADS=16
+else
+  RDKIT_THREADS="$PHYSICAL_CORES"
+fi
 
 # Autotune budget (per autotuned invocation).
 AUTOTUNE_TRIALS=20
@@ -405,6 +447,7 @@ mkdir -p "$SYSINFO_DIR"
   echo "uname: $(uname -a)"
   echo "num_gpus_requested: $NUM_GPUS"
   echo "num_gpus_visible: $GPU_COUNT"
+  echo "cuda_visible_devices: ${CUDA_VISIBLE_DEVICES:-<unset>}"
   echo "physical_cores: $PHYSICAL_CORES"
   echo "rdkit_threads: $RDKIT_THREADS"
   echo "data_dir: $DATA_DIR"
@@ -487,12 +530,10 @@ run_bench_inner() {
 
   local start_s end_s duration status code
   start_s=$(date +%s)
-  set +e
   # PYTHONUNBUFFERED=1 forces line-buffered stdout/stderr so the tail of the
   # log reflects what the bench is actually doing, not a stale 8 KB block.
   ( cd "$SCRIPT_DIR" && PYTHONUNBUFFERED=1 "$@" ) > "$log_path" 2>&1
   code=$?
-  set -e
   end_s=$(date +%s)
   duration=$((end_s - start_s))
   if [ "$code" -eq 0 ]; then
@@ -518,24 +559,17 @@ run_bench() {
 
 # Per-bench mode flags.
 #
-# Default (head-to-head): both implementations run; validation is opt-in.
+# Default (head-to-head): both implementations run with validation enabled.
 # --no-rdkit: skip every RDKit timing (and validation, which diffs vs RDKit).
 # --no-nvmolkit: RDKit-only mode. Skip every nvMolKit timing AND drop
-#   autotune (which requires nvMolKit). Butina additionally needs
-#   --include-tanimoto-matrix in this mode because its rdkit-with-dist-mat
-#   path normally builds the dist matrix on the GPU.
-#
-# Validation is currently disabled even when RDKit is on: the per-conformer
-# MMFF energy reconstruction in etkdg/ff/substruct is single-threaded and
-# blows up wall time on large workloads. Re-enable by dropping --no_validate
-# once those validators are parallelized.
+#   autotune (which requires nvMolKit).
 BUTINA_MODE_FLAGS=()
 CONFORMER_RMSD_MODE_FLAGS=()
 CROSS_SIMILARITY_MODE_FLAGS=()
-ETKDG_MODE_FLAGS=(--no_validate)
-FF_MODE_FLAGS=(--no_validate)
-SUBSTRUCT_MODE_FLAGS=(--no_validate)
-TFD_MODE_FLAGS=()
+ETKDG_MODE_FLAGS=()
+FF_MODE_FLAGS=()
+SUBSTRUCT_MODE_FLAGS=()
+TFD_MODE_FLAGS=(--verify)
 # Autotune flag set is added to the etkdg / ff / substruct bench invocations
 # verbatim and zeroed out in --no-nvmolkit mode (the bench scripts reject
 # --autotune when nvmolkit is disabled). When non-empty the per-bench
@@ -545,7 +579,7 @@ TFD_MODE_FLAGS=()
 AUTOTUNE_ENABLED=1
 if [ "$SKIP_RDKIT" = "1" ]; then
   BUTINA_MODE_FLAGS=(--no-rdkit)
-  CONFORMER_RMSD_MODE_FLAGS=(--no-rdkit)
+  CONFORMER_RMSD_MODE_FLAGS=(--no_rdkit --no_validate)
   CROSS_SIMILARITY_MODE_FLAGS=(--no-rdkit)
   ETKDG_MODE_FLAGS=(--no_rdkit --no_validate)
   FF_MODE_FLAGS=(--no_rdkit --no_validate)
@@ -554,7 +588,7 @@ if [ "$SKIP_RDKIT" = "1" ]; then
 fi
 if [ "$SKIP_NVMOLKIT" = "1" ]; then
   BUTINA_MODE_FLAGS=(--no-nvmolkit --no-fused)
-  CONFORMER_RMSD_MODE_FLAGS=(--no-nvmolkit)
+  CONFORMER_RMSD_MODE_FLAGS=(--no_nvmolkit --no_validate)
   CROSS_SIMILARITY_MODE_FLAGS=(--no-nvmolkit)
   ETKDG_MODE_FLAGS=(--no_nvmolkit --no_validate)
   FF_MODE_FLAGS=(--no_nvmolkit --no_validate)
@@ -608,6 +642,7 @@ run_bench "butina_clustering" \
   "$RESULT_DIR/butina_clustering.csv" \
   python "$SCRIPT_DIR/butina_clustering_bench.py" \
   "$ENAMINE_CXSMILES" \
+  --nvmolkit-reordering both \
   --output "$RESULT_DIR/butina_clustering.csv" \
   "${BUTINA_MODE_FLAGS[@]}"
 
@@ -625,6 +660,7 @@ run_bench "cross_similarity" \
   "$RESULT_DIR/cross_similarity.json" \
   python "$SCRIPT_DIR/cross_similarity_bench.py" \
   --input "$ENAMINE_CXSMILES" \
+  --cosine \
   --output "$RESULT_DIR/cross_similarity.json" \
   "${CROSS_SIMILARITY_MODE_FLAGS[@]}"
 
@@ -672,26 +708,39 @@ else
   printf "%s\t%s\t%d\t%d\t%s\t%s\n" "etkdg_size_scan" "skipped" 0 0 "" "" >> "$SUMMARY"
 fi
 
-# UFF disabled; MMFF is the reference. Re-add "uff" to the list to run it.
-for ff in mmff; do
-  autotune_save_arg ff_save_flags "$AUTOTUNE_DIR/ff_optimize_${ff}_hardware.json"
-  run_bench "ff_optimize_${ff}" \
-    "$RESULT_DIR/ff_optimize_${ff}.csv" \
+# Exercise every supported force-field/minimizer pairing. The minimizer kind
+# is part of the benchmark name because BFGS and FIRE have distinct tuning
+# optima and performance characteristics.
+FF_ROWS=(
+  "mmff:BFGS"
+  "mmff:FIRE"
+  "uff:BFGS"
+  "uff:FIRE"
+)
+for row in "${FF_ROWS[@]}"; do
+  ff="${row%%:*}"
+  minimizer_kind="${row##*:}"
+  minimizer_stem="${minimizer_kind,,}"
+  ff_name="ff_optimize_${ff}_${minimizer_stem}"
+  autotune_save_arg ff_save_flags "$AUTOTUNE_DIR/${ff_name}_hardware.json"
+  run_bench "$ff_name" \
+    "$RESULT_DIR/${ff_name}.csv" \
     python "$SCRIPT_DIR/ff_optimize_bench.py" \
     --smiles "$ENAMINE_CXSMILES" \
     --num_mols "$FF_NUM_MOLS" \
     --confs_per_mol "$FF_CONFS_PER_MOL" \
     --ff "$ff" \
+    --minimizer_kind "$minimizer_kind" \
     --max_iters "$FF_MAX_ITERS" \
     --num_gpus "$NUM_GPUS" \
     --rdkit_threads "$RDKIT_THREADS" \
     --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
     "${FF_AUTOTUNE_FLAGS[@]}" \
     "${ff_save_flags[@]}" \
-    --output "$RESULT_DIR/ff_optimize_${ff}.csv" \
+    --output "$RESULT_DIR/${ff_name}.csv" \
     "${FF_MODE_FLAGS[@]}"
 
-  scan_name="ff_optimize_${ff}_size_scan"
+  scan_name="${ff_name}_size_scan"
   if should_run "$scan_name"; then
     echo "[$scan_name] sweeping ${#SIZE_SCAN_BINS[@]} bins"
     for bin in "${SIZE_SCAN_BINS[@]}"; do
@@ -709,6 +758,7 @@ for ff in mmff; do
         --num_mols "$SIZE_SCAN_NUM_MOLS" \
         --confs_per_mol "$FF_CONFS_PER_MOL" \
         --ff "$ff" \
+        --minimizer_kind "$minimizer_kind" \
         --max_iters "$FF_MAX_ITERS" \
         --num_gpus "$NUM_GPUS" \
         --rdkit_threads "$RDKIT_THREADS" \
