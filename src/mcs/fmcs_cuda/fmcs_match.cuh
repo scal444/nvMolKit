@@ -21,6 +21,7 @@
 #include "src/mcs/fmcs_cuda/fmcs_match_tables.cuh"
 #include "src/mcs/fmcs_cuda/fmcs_seed.cuh"
 #include "src/mcs/fmcs_cuda/fmcs_topology.cuh"
+#include "src/subgraph/labeled_dfs.cuh"
 #include "src/subgraph/target_mask.cuh"
 #include "src/subgraph/warp_dfs.cuh"
 
@@ -32,7 +33,9 @@ namespace fmcs {
 /// alone -- the DFS stack depth is keyed on the query size -- so
 /// rectangular (query size != target size) tiers need no matcher changes.
 template <int maxTargetAtoms>
-using FmcsTargetMask = nvMolKit::TargetMask<(maxTargetAtoms <= 32 ? 32 : (maxTargetAtoms <= 64 ? 64 : 128))>;
+constexpr int kFmcsMaskAtoms = (maxTargetAtoms <= 32 ? 32 : (maxTargetAtoms <= 64 ? 64 : 128));
+
+template <int maxTargetAtoms> using FmcsTargetMask = nvMolKit::TargetMask<kFmcsMaskAtoms<maxTargetAtoms>>;
 
 /// Resolved target endpoints for a successful single-(query bond, target
 /// bond, orientation) compatibility check.  Populated by
@@ -60,6 +63,12 @@ template <int maxAtoms, int maxTargetAtoms> struct FmcsSubstructureScratch {
   std::uint8_t queryOrderPos[maxAtoms];       ///< Inverse of seedAtoms; kUnmappedTargetIdx if not in seed.
   std::uint8_t targetAtomForQuery[maxAtoms];  ///< The winning embedding, indexed by query atom.
   int          found;                         ///< Lanes race on this via atomicCAS; also the abort signal.
+
+  /// Back-edge table and per-depth candidates for the shared frontend
+  /// (src/subgraph/labeled_dfs.cuh).  One group per instance, hence a single
+  /// warp slot.  No adjacency tables: MCS keys edges on query bond index, so
+  /// keys are all distinct and the plan is always General.
+  nvMolKit::subgraph::WarpSharedState<kFmcsMaskAtoms<maxTargetAtoms>, maxAtoms, 1, false> tables;
 };
 
 template <int maxAtoms, int maxBonds>
@@ -628,6 +637,83 @@ __device__ __forceinline__ FmcsTargetMask<maxTA> atomRowMask(const MatchTableDev
   return mask;
 }
 
+/// Presents a seed inside its query molecule to the shared subgraph frontend
+/// (src/subgraph/labeled_dfs.cuh).
+///
+/// Depth is an order position in @c scratch.seedAtoms, the most-constrained-first
+/// permutation over the seed's atoms, so the frontend searches only the seed and
+/// in that order.  Query edges are the seed's bonds: a CSR slot whose bond is
+/// outside the seed, or whose far atom has no order position, reports
+/// @c kNoNeighborDepth and so constrains nothing.
+///
+/// The edge key is the query bond index, and @ref neighborsMatching resolves it
+/// through the (query bond, target bond) match table.  Because every bond index
+/// is distinct the plan is always General, which is why the scratch omits the
+/// adjacency tables.  Keying on the uint16 edge label instead would let
+/// Uniform/Dual precompute fire -- MCS queries carry few distinct labels -- but
+/// needs the labels uploaded to the device, which they are not today.
+///
+/// Precondition: no seed atom exceeds @c kMaxEdgeSlotsPerAtom CSR neighbours,
+/// which holds for molecular graphs (nvMolKit caps packed degree at 8).
+template <int maxAtoms, int maxBonds, int maxTA, int maxTB> struct McsSeedAdapter {
+  using Mask                              = FmcsTargetMask<maxTA>;
+  static constexpr bool kCachesTargetRows = false;
+
+  const Seed<maxAtoms, maxBonds>*                 seed;
+  const DeviceCsrView*                            queryTopology;
+  const DeviceCsrView*                            targetTopology;
+  const PairMatchTablesDevice*                    tables;
+  const FmcsSubstructureScratch<maxAtoms, maxTA>* scratch;
+
+  __device__ __forceinline__ int queryAtomAt(int depth) const { return scratch->seedAtoms[depth]; }
+
+  __device__ __forceinline__ int degreeAt(int depth) const {
+    const int queryAtomIdx = queryAtomAt(depth);
+    return static_cast<int>(queryTopology->rowOffsets[queryAtomIdx + 1]) -
+           static_cast<int>(queryTopology->rowOffsets[queryAtomIdx]);
+  }
+
+  __device__ __forceinline__ int neighborDepthAt(int depth, int slot) const {
+    const int adjIdx       = static_cast<int>(queryTopology->rowOffsets[queryAtomAt(depth)]) + slot;
+    const int queryBondIdx = static_cast<int>(queryTopology->bondIndices[adjIdx]);
+    if (queryBondIdx >= queryTopology->numBonds ||
+        !seedContainsBondWithinThread<maxAtoms, maxBonds>(*seed, queryBondIdx)) {
+      return nvMolKit::subgraph::kNoNeighborDepth;
+    }
+    const int otherQueryAtom = static_cast<int>(queryTopology->colIndices[adjIdx]);
+    if (otherQueryAtom < 0 || otherQueryAtom >= queryTopology->numAtoms) {
+      return nvMolKit::subgraph::kNoNeighborDepth;
+    }
+    const int orderPos = scratch->queryOrderPos[otherQueryAtom];
+    return orderPos == kUnmappedTargetIdx ? nvMolKit::subgraph::kNoNeighborDepth : orderPos;
+  }
+
+  __device__ __forceinline__ std::uint32_t edgeKeyAt(int depth, int slot) const {
+    return queryTopology->bondIndices[static_cast<int>(queryTopology->rowOffsets[queryAtomAt(depth)]) + slot];
+  }
+
+  __device__ __forceinline__ Mask neighborsMatching(int targetAtom, std::uint32_t queryBondIdx) const {
+    Mask mask;
+    mask.clear();
+    const int begin = static_cast<int>(targetTopology->rowOffsets[targetAtom]);
+    const int end   = static_cast<int>(targetTopology->rowOffsets[targetAtom + 1]);
+    for (int adjIdx = begin; adjIdx < end; ++adjIdx) {
+      const int targetBondIdx = static_cast<int>(targetTopology->bondIndices[adjIdx]);
+      if (targetBondIdx < 0 || targetBondIdx >= targetTopology->numBonds || targetBondIdx >= maxTB) {
+        continue;
+      }
+      if (!tables->bonds.testBit(static_cast<int>(queryBondIdx), targetBondIdx)) {
+        continue;
+      }
+      const int neighborTargetAtom = static_cast<int>(targetTopology->colIndices[adjIdx]);
+      if (neighborTargetAtom >= 0 && neighborTargetAtom < targetTopology->numAtoms && neighborTargetAtom < maxTA) {
+        mask.set(neighborTargetAtom);
+      }
+    }
+    return mask;
+  }
+};
+
 /// Exact seed-in-target substructure check: a lane-parallel DFS
 /// (nvMolKit::dfsFromRoots) racing for one embedding.
 ///
@@ -726,54 +812,28 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(const GroupT&  
     return prepared == 1;
   }
 
-  // The candidates oracle.  Back edges are re-derived per descent by walking
-  // the depth atom's CSR row: any seed bond to an atom at an earlier order
-  // position constrains the candidates to the compatible neighbours of that
-  // atom's mapped target.
-  auto candidatesAt = [&](int depth, const unsigned char* mapping, const Mask& used, int /*prevTargetAtom*/) -> Mask {
-    const int queryAtomIdx = scratch.seedAtoms[depth];
-    Mask      candidates   = atomRowMask<maxTA>(tables.atoms, queryAtomIdx);
-    candidates.andNotEq(used);
+  // Hand the seed to the shared frontend: fill the per-depth label term from
+  // the atom match table (already query-major, so no transpose), then build the
+  // back-edge table.  buildTargetAdjacency is a no-op for this adapter (always
+  // General, no row caching) but is called so the contract stays uniform.
+  const McsSeedAdapter<maxAtoms, maxBonds, maxTA, maxTB> adapter{&seed,
+                                                                 &queryTopology,
+                                                                 &targetTopology,
+                                                                 &tables,
+                                                                 &scratch};
 
-    const int begin = static_cast<int>(queryTopology.rowOffsets[queryAtomIdx]);
-    const int end   = static_cast<int>(queryTopology.rowOffsets[queryAtomIdx + 1]);
-    for (int adjIdx = begin; adjIdx < end && !candidates.empty(); ++adjIdx) {
-      const int queryBondIdx = static_cast<int>(queryTopology.bondIndices[adjIdx]);
-      if (queryBondIdx >= queryTopology.numBonds ||
-          !seedContainsBondWithinThread<maxAtoms, maxBonds>(seed, queryBondIdx)) {
-        continue;
-      }
-      const int otherQueryAtom = static_cast<int>(queryTopology.colIndices[adjIdx]);
-      if (otherQueryAtom < 0 || otherQueryAtom >= queryTopology.numAtoms) {
-        continue;
-      }
-      const int otherOrderPos = scratch.queryOrderPos[otherQueryAtom];
-      if (otherOrderPos == kUnmappedTargetIdx || otherOrderPos >= depth) {
-        continue;
-      }
-      const int mappedTargetAtom = mapping[otherOrderPos];
+  for (int depth = laneRank; depth < numSeedAtoms; depth += laneCount) {
+    scratch.tables.depthCandidates[0][depth] = atomRowMask<maxTA>(tables.atoms, scratch.seedAtoms[depth]);
+  }
+  group.sync();
 
-      // Neighbours of the mapped target atom reachable over a target bond
-      // compatible with this seed bond.
-      Mask neighborMask;
-      neighborMask.clear();
-      const int targetBegin = static_cast<int>(targetTopology.rowOffsets[mappedTargetAtom]);
-      const int targetEnd   = static_cast<int>(targetTopology.rowOffsets[mappedTargetAtom + 1]);
-      for (int targetAdjIdx = targetBegin; targetAdjIdx < targetEnd; ++targetAdjIdx) {
-        const int targetBondIdx = static_cast<int>(targetTopology.bondIndices[targetAdjIdx]);
-        if (targetBondIdx < 0 || targetBondIdx >= targetTopology.numBonds || targetBondIdx >= maxTB) {
-          continue;
-        }
-        if (!tables.bonds.testBit(queryBondIdx, targetBondIdx))
-          continue;
-        const int neighborTargetAtom = static_cast<int>(targetTopology.colIndices[targetAdjIdx]);
-        if (neighborTargetAtom >= 0 && neighborTargetAtom < targetTopology.numAtoms && neighborTargetAtom < maxTA) {
-          neighborMask.set(neighborTargetAtom);
-        }
-      }
-      candidates.andEq(neighborMask);
-    }
-    return candidates;
+  const nvMolKit::subgraph::QueryBondPlan plan =
+    nvMolKit::subgraph::analyzeQueryEdges(scratch.tables, 0, laneRank, adapter, numSeedAtoms);
+  nvMolKit::subgraph::buildTargetAdjacency(scratch.tables, 0, laneRank, adapter, targetTopology.numAtoms, plan);
+  group.sync();
+
+  auto candidatesAt = [&](int depth, const unsigned char* mapping, const Mask& used, int prevTargetAtom) -> Mask {
+    return nvMolKit::subgraph::buildCandidates(scratch.tables, 0, depth, mapping, used, adapter, plan, prevTargetAtom);
   };
 
   // First complete embedding wins scratch.found; the winner alone records

@@ -39,7 +39,11 @@
 //   using Mask = TargetMask<N>;                   // target-atom bitset
 //   static constexpr bool kCachesTargetRows;      // see below
 //
-//   int      degreeAt(int depth) const;           // edge slots at this depth
+//   int      degreeAt(int depth) const;           // edge slots at this depth;
+//                                                 // must not exceed
+//                                                 // kMaxEdgeSlotsPerAtom, or
+//                                                 // back edges are silently
+//                                                 // dropped
 //   int      neighborDepthAt(int depth, int slot) const;
 //                                                 // search depth of that
 //                                                 // neighbour, or
@@ -92,8 +96,29 @@ constexpr int kMaxEdgeSlotsPerAtom = 8;
 
 // Entry layout in WarpSharedState::backEdges. A back edge of depth d goes to a
 // depth smaller than d, i.e. one already mapped when d is chosen.
-constexpr unsigned char kBackEdgeDepthMask   = 63u;  ///< Low 6 bits: the earlier depth.
-constexpr unsigned char kBackEdgeAltMaskFlag = 64u;  ///< Bit 6 (Dual only): use the Alt adjacency table.
+constexpr unsigned char kBackEdgeDepthMask   = 127u;  ///< Low 7 bits: the earlier depth (0..127).
+constexpr unsigned char kBackEdgeAltMaskFlag = 128u;  ///< Bit 7 (Dual only): use the Alt adjacency table.
+
+/// Bitset over search depths, wide enough for the largest supported depth.
+/// Used for chain-depth flags and for deduplicating a depth's back edges.
+struct DepthBitset {
+  uint64_t words[2];
+
+  __device__ __forceinline__ void clear() { words[0] = words[1] = 0; }
+  __device__ __forceinline__ bool test(int depth) const { return ((words[depth >> 6] >> (depth & 63)) & 1ULL) != 0; }
+  __device__ __forceinline__ void set(int depth) { words[depth >> 6] |= 1ULL << (depth & 63); }
+};
+
+/// Warp-wide OR of a DepthBitset; the underlying reductions are 32-bit.
+__device__ __forceinline__ DepthBitset warpReduceOrDepths(const DepthBitset& lane) {
+  DepthBitset out;
+#pragma unroll
+  for (int w = 0; w < 2; ++w) {
+    out.words[w] = static_cast<uint64_t>(warpReduceOr(static_cast<uint32_t>(lane.words[w]))) |
+                   (static_cast<uint64_t>(warpReduceOr(static_cast<uint32_t>(lane.words[w] >> 32))) << 32);
+  }
+  return out;
+}
 
 /**
  * @brief How many distinct edge predicate keys the query's back edges carry.
@@ -109,15 +134,19 @@ enum class BondMaskCase {
 
 /// Classification of the query's edge constraints; identical in every lane.
 struct QueryBondPlan {
-  BondMaskCase maskCase       = BondMaskCase::General;
-  uint32_t     minBondMask    = 0;  ///< Smallest key on any back edge.
-  uint32_t     maxBondMask    = 0;  ///< Largest key on any back edge; equals minBondMask iff Uniform.
-  /// Bitset over depths: bit d set iff depth d's only back edge goes to depth
-  /// d-1 and resolves through targetAdjacency. Such a depth needs no back-edge
-  /// lookup, since the caller just chose depth d-1's target atom.
-  uint64_t     chainDepths    = 0;
+  BondMaskCase maskCase    = BondMaskCase::General;
+  uint32_t     minBondMask = 0;  ///< Smallest key on any back edge.
+  uint32_t     maxBondMask = 0;  ///< Largest key on any back edge; equals minBondMask iff Uniform.
+  /// Bit d set iff depth d's only back edge goes to depth d-1 and resolves
+  /// through targetAdjacency. Such a depth needs no back-edge lookup, since the
+  /// caller just chose depth d-1's target atom.
+  DepthBitset  chainDepths = {
+    {0, 0}
+  };
   /// As chainDepths, for depths resolving through targetAdjacencyAlt.
-  uint64_t     chainDepthsAlt = 0;
+  DepthBitset chainDepthsAlt = {
+    {0, 0}
+  };
 };
 
 /**
@@ -136,8 +165,14 @@ struct QueryBondPlan {
  *   General: with kCachesTargetRows, the tables cache the adapter's packed
  *            adjacency row instead; without it, they are unused.
  */
-template <std::size_t MaxTargetAtoms, std::size_t MaxSearchDepth, int WarpsPerBlock> struct WarpSharedState {
-  static_assert(MaxSearchDepth <= 64, "Back-edge depths pack into 6 bits and chain depths into a 64-bit mask");
+template <std::size_t MaxTargetAtoms, std::size_t MaxSearchDepth, int WarpsPerBlock, bool WithAdjacencyTables = true>
+struct WarpSharedState {
+  static_assert(MaxSearchDepth <= 128, "Back-edge depths pack into 7 bits");
+
+  /// An adapter that neither precomputes neighbour sets (always General) nor
+  /// caches packed rows never reads the adjacency tables; sizing them to one
+  /// entry keeps the shared footprint to the back-edge table and candidates.
+  static constexpr std::size_t kAdjacencyEntries = WithAdjacencyTables ? MaxTargetAtoms : 1;
 
   /// Roots each lane owns: lane, lane + 32, ... below MaxTargetAtoms.
   static constexpr int kRoots = static_cast<int>(MaxTargetAtoms / 32);
@@ -156,8 +191,8 @@ template <std::size_t MaxTargetAtoms, std::size_t MaxSearchDepth, int WarpsPerBl
     uint64_t packedRow;
   };
 
-  AdjacencyEntry targetAdjacency[WarpsPerBlock][MaxTargetAtoms];
-  AdjacencyEntry targetAdjacencyAlt[WarpsPerBlock][MaxTargetAtoms];
+  AdjacencyEntry targetAdjacency[WarpsPerBlock][kAdjacencyEntries];
+  AdjacencyEntry targetAdjacencyAlt[WarpsPerBlock][kAdjacencyEntries];
   /// Per depth, the label-compatible target atoms.
   Mask           depthCandidates[WarpsPerBlock][MaxSearchDepth];
   /// Per depth, its back edges, kBackEdge*-encoded.
@@ -179,31 +214,32 @@ template <std::size_t MaxTargetAtoms, std::size_t MaxSearchDepth, int WarpsPerBl
  *     demotes the pair to General.
  *  3. Uniform and Dual only: find the chain depths (see QueryBondPlan).
  */
-template <class Adapter, std::size_t MaxTargetAtoms, std::size_t MaxSearchDepth, int WarpsPerBlock>
+template <class Adapter, std::size_t MaxTargetAtoms, std::size_t MaxSearchDepth, int WarpsPerBlock, bool WithTables>
 __device__ __forceinline__ QueryBondPlan
-analyzeQueryEdges(WarpSharedState<MaxTargetAtoms, MaxSearchDepth, WarpsPerBlock>& shared,
-                  int                                                             warp,
-                  int                                                             lane,
-                  const Adapter&                                                  adapter,
-                  int                                                             numDepths) {
+analyzeQueryEdges(WarpSharedState<MaxTargetAtoms, MaxSearchDepth, WarpsPerBlock, WithTables>& shared,
+                  int                                                                         warp,
+                  int                                                                         lane,
+                  const Adapter&                                                              adapter,
+                  int                                                                         numDepths) {
   QueryBondPlan plan;
 
   uint32_t laneMin = 0xFFFFFFFFu;
   uint32_t laneMax = 0u;
 
   for (int depth = lane; depth < numDepths; depth += 32) {
-    const int degree = adapter.degreeAt(depth);
-    int       count  = 0;
-    uint64_t  seen   = 0;
+    const int   degree = adapter.degreeAt(depth);
+    int         count  = 0;
+    DepthBitset seen;
+    seen.clear();
     for (int slot = 0; slot < kMaxEdgeSlotsPerAtom && slot < degree; ++slot) {
       const int neighborDepth = adapter.neighborDepthAt(depth, slot);
       if (neighborDepth == kNoNeighborDepth || neighborDepth >= depth) {
         continue;
       }
-      if ((seen >> neighborDepth) & 1ULL) {
+      if (seen.test(neighborDepth)) {
         continue;
       }
-      seen |= 1ULL << neighborDepth;
+      seen.set(neighborDepth);
       const uint32_t key                   = adapter.edgeKeyAt(depth, slot);
       shared.backEdges[warp][depth][count] = static_cast<unsigned char>(neighborDepth);
       laneMin                              = min(laneMin, key);
@@ -223,18 +259,19 @@ analyzeQueryEdges(WarpSharedState<MaxTargetAtoms, MaxSearchDepth, WarpsPerBlock>
   uint32_t sawThirdMask = 0;
   if (!uniform) {
     for (int depth = lane; depth < numDepths; depth += 32) {
-      const int degree = adapter.degreeAt(depth);
-      int       count  = 0;
-      uint64_t  seen   = 0;
+      const int   degree = adapter.degreeAt(depth);
+      int         count  = 0;
+      DepthBitset seen;
+      seen.clear();
       for (int slot = 0; slot < kMaxEdgeSlotsPerAtom && slot < degree; ++slot) {
         const int neighborDepth = adapter.neighborDepthAt(depth, slot);
         if (neighborDepth == kNoNeighborDepth || neighborDepth >= depth) {
           continue;
         }
-        if ((seen >> neighborDepth) & 1ULL) {
+        if (seen.test(neighborDepth)) {
           continue;
         }
-        seen |= 1ULL << neighborDepth;
+        seen.set(neighborDepth);
         const uint32_t key = adapter.edgeKeyAt(depth, slot);
         if (key != plan.minBondMask && key != plan.maxBondMask) {
           sawThirdMask = 1;
@@ -247,29 +284,32 @@ analyzeQueryEdges(WarpSharedState<MaxTargetAtoms, MaxSearchDepth, WarpsPerBlock>
     }
   }
   const bool dual = !uniform && (__ballot_sync(kFullWarpMask, sawThirdMask) == 0u);
-  plan.maskCase   = uniform ? BondMaskCase::Uniform : (dual ? BondMaskCase::Dual : BondMaskCase::General);
+  // Without adjacency tables there is nowhere to precompute neighbour sets, so
+  // the plan must stay General however few distinct keys the query carries --
+  // Uniform/Dual would index tables sized for a single entry.
+  plan.maskCase   = !WithTables ? BondMaskCase::General :
+                                  (uniform ? BondMaskCase::Uniform : (dual ? BondMaskCase::Dual : BondMaskCase::General));
   __syncwarp();
 
   if (plan.maskCase != BondMaskCase::General) {
-    uint64_t lanePrimary = 0;
-    uint64_t laneAlt     = 0;
+    DepthBitset lanePrimary;
+    DepthBitset laneAlt;
+    lanePrimary.clear();
+    laneAlt.clear();
     for (int depth = lane; depth < numDepths; depth += 32) {
       if (depth >= 1 && shared.backEdgeCounts[warp][depth] == 1) {
         const uint32_t edge = shared.backEdges[warp][depth][0];
         if ((edge & kBackEdgeDepthMask) == static_cast<uint32_t>(depth - 1)) {
           if (edge & kBackEdgeAltMaskFlag) {
-            laneAlt |= 1ULL << depth;
+            laneAlt.set(depth);
           } else {
-            lanePrimary |= 1ULL << depth;
+            lanePrimary.set(depth);
           }
         }
       }
     }
-    // Two 32-bit OR reductions per 64-bit lane mask; the reductions are 32-bit.
-    plan.chainDepths = static_cast<uint64_t>(warpReduceOr(static_cast<uint32_t>(lanePrimary))) |
-                       (static_cast<uint64_t>(warpReduceOr(static_cast<uint32_t>(lanePrimary >> 32))) << 32);
-    plan.chainDepthsAlt = static_cast<uint64_t>(warpReduceOr(static_cast<uint32_t>(laneAlt))) |
-                          (static_cast<uint64_t>(warpReduceOr(static_cast<uint32_t>(laneAlt >> 32))) << 32);
+    plan.chainDepths    = warpReduceOrDepths(lanePrimary);
+    plan.chainDepthsAlt = warpReduceOrDepths(laneAlt);
   }
 
   return plan;
@@ -279,14 +319,14 @@ analyzeQueryEdges(WarpSharedState<MaxTargetAtoms, MaxSearchDepth, WarpsPerBlock>
  * @brief Fill the per-warp adjacency tables for the classified plan, target
  *        atoms striped across the warp. See WarpSharedState for the contents.
  */
-template <class Adapter, std::size_t MaxTargetAtoms, std::size_t MaxSearchDepth, int WarpsPerBlock>
+template <class Adapter, std::size_t MaxTargetAtoms, std::size_t MaxSearchDepth, int WarpsPerBlock, bool WithTables>
 __device__ __forceinline__ void buildTargetAdjacency(
-  WarpSharedState<MaxTargetAtoms, MaxSearchDepth, WarpsPerBlock>& shared,
-  int                                                             warp,
-  int                                                             lane,
-  const Adapter&                                                  adapter,
-  int                                                             numTargetAtoms,
-  const QueryBondPlan&                                            plan) {
+  WarpSharedState<MaxTargetAtoms, MaxSearchDepth, WarpsPerBlock, WithTables>& shared,
+  int                                                                         warp,
+  int                                                                         lane,
+  const Adapter&                                                              adapter,
+  int                                                                         numTargetAtoms,
+  const QueryBondPlan&                                                        plan) {
   for (int atom = lane; atom < numTargetAtoms; atom += 32) {
     if (plan.maskCase == BondMaskCase::Uniform) {
       shared.targetAdjacency[warp][atom].mask = adapter.neighborsMatching(atom, plan.maxBondMask);
@@ -320,27 +360,26 @@ __device__ __forceinline__ void buildTargetAdjacency(
  * neighbour twice, so it dedups against @p seen; the other cases read the
  * already-deduplicated back-edge table.
  */
-template <class Adapter, std::size_t MaxTargetAtoms, std::size_t MaxSearchDepth, int WarpsPerBlock>
+template <class Adapter, std::size_t MaxTargetAtoms, std::size_t MaxSearchDepth, int WarpsPerBlock, bool WithTables>
 __device__ __forceinline__ TargetMask<MaxTargetAtoms> buildCandidates(
-  const WarpSharedState<MaxTargetAtoms, MaxSearchDepth, WarpsPerBlock>& shared,
-  int                                                                   warp,
-  int                                                                   depth,
-  const unsigned char*                                                  mapping,
-  const TargetMask<MaxTargetAtoms>&                                     used,
-  const Adapter&                                                        adapter,
-  const QueryBondPlan&                                                  plan,
-  int                                                                   prevTargetAtom) {
+  const WarpSharedState<MaxTargetAtoms, MaxSearchDepth, WarpsPerBlock, WithTables>& shared,
+  int                                                                               warp,
+  int                                                                               depth,
+  const unsigned char*                                                              mapping,
+  const TargetMask<MaxTargetAtoms>&                                                 used,
+  const Adapter&                                                                    adapter,
+  const QueryBondPlan&                                                              plan,
+  int                                                                               prevTargetAtom) {
   using Mask = TargetMask<MaxTargetAtoms>;
 
   Mask candidates = shared.depthCandidates[warp][depth];
   candidates.andNotEq(used);
 
-  const uint64_t depthBit = 1ULL << depth;
-  if (plan.chainDepths & depthBit) {
+  if (plan.chainDepths.test(depth)) {
     candidates.andEq(shared.targetAdjacency[warp][prevTargetAtom].mask);
     return candidates;
   }
-  if (plan.chainDepthsAlt & depthBit) {
+  if (plan.chainDepthsAlt.test(depth)) {
     candidates.andEq(shared.targetAdjacencyAlt[warp][prevTargetAtom].mask);
     return candidates;
   }
@@ -365,17 +404,18 @@ __device__ __forceinline__ TargetMask<MaxTargetAtoms> buildCandidates(
     return candidates;
   }
 
-  const int degree = adapter.degreeAt(depth);
-  uint64_t  seen   = 0;
+  const int   degree = adapter.degreeAt(depth);
+  DepthBitset seen;
+  seen.clear();
   for (int slot = 0; slot < kMaxEdgeSlotsPerAtom && slot < degree && !candidates.empty(); ++slot) {
     const int neighborDepth = adapter.neighborDepthAt(depth, slot);
     if (neighborDepth == kNoNeighborDepth || neighborDepth >= depth) {
       continue;
     }
-    if ((seen >> neighborDepth) & 1ULL) {
+    if (seen.test(neighborDepth)) {
       continue;
     }
-    seen |= 1ULL << neighborDepth;
+    seen.set(neighborDepth);
     const int      mapped = mapping[neighborDepth];
     const uint32_t key    = adapter.edgeKeyAt(depth, slot);
     if constexpr (Adapter::kCachesTargetRows) {
