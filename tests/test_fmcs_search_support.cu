@@ -738,9 +738,9 @@ struct WorklistOut {
 
 __global__ void sortedWorklistDriver(WorklistOut* out) {
   __shared__ mcs::fmcs::SeedQueue<QueuedT, mcs::fmcs::ThreadBlockScope> queue;
-  __shared__ QueuedT                                                         storage[3];
-  __shared__ QueuedT                                                         candidate;
-  __shared__ QueuedT                                                         popped;
+  __shared__ QueuedT                                                    storage[3];
+  __shared__ QueuedT                                                    candidate;
+  __shared__ QueuedT                                                    popped;
 
   auto block = cooperative_groups::this_thread_block();
   auto warp  = cooperative_groups::tiled_partition<32>(block);
@@ -782,8 +782,8 @@ struct IncumbentOut {
 };
 
 __global__ void incumbentDriver(IncumbentOut* out) {
-  __shared__ QueuedT     best;
-  __shared__ QueuedT     candidate;
+  __shared__ QueuedT      best;
+  __shared__ QueuedT      candidate;
   __shared__ unsigned int bestScore;
   __shared__ int          lock;
 
