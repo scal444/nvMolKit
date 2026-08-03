@@ -145,6 +145,8 @@ void uploadAndLaunchMiniBatch(GpuExecutor&                        executor,
                               SubstructAlgorithm                  algorithm) {
   ScopedNvtxRange uploadRange("uploadAndLaunchMiniBatch");
 
+  // DFS keeps all per-pair state lane-local, so only GSI needs the ping-pong
+  // partial-match overflow slab.
   cudaStream_t executorStream     = executor.stream();
   const int    numBuffersPerBlock = (algorithm == SubstructAlgorithm::GSI) ? 2 : 1;
 
@@ -439,6 +441,11 @@ void runGpuCoordinator(int                                 deviceId,
       localPreprocessor = std::make_unique<RecursivePatternPreprocessor>();
       localPreprocessor->buildPatterns(queriesHost);
       localPreprocessor->syncToDevice(nullptr);
+
+      // The workers use independent non-blocking streams, so fully publish the
+      // secondary-device queries and patterns before any worker can consume them.
+      cudaCheckError(cudaStreamSynchronize(nullptr));
+
       queriesPtr      = localQueries.get();
       preprocessorPtr = localPreprocessor.get();
     }

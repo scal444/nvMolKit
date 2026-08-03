@@ -218,11 +218,8 @@ using QueuedT16 = mcs::fmcs::QueuedSeed<16, 16, 16, 16>;
 
 struct SubstructureTestOut {
   bool      ok;
-  bool      overflowed;
   QueuedT16 child;
 };
-
-constexpr int kTestSubstructurePartialCapacity = 64;
 
 __device__ __forceinline__ void addMaskSeed(QueuedT16& child, std::uint32_t atomMask, std::uint32_t bondMask) {
   mcs::fmcs::seedClearWithinThread(child.seed);
@@ -244,8 +241,6 @@ __global__ void matchSubstructureMaskDriver(DeviceCsrView         qView,
                                             PairMatchTablesDevice tables,
                                             std::uint32_t         atomMask,
                                             std::uint32_t         bondMask,
-                                            std::uint8_t*         partialStorage,
-                                            int                   partialCapacity,
                                             SubstructureTestOut*  out) {
   __shared__ QueuedT16 child;
   __shared__ mcs::fmcs::FmcsSubstructureScratch<16, 16> scratch;
@@ -254,33 +249,20 @@ __global__ void matchSubstructureMaskDriver(DeviceCsrView         qView,
   }
   __syncthreads();
 
-  auto block      = cooperative_groups::this_thread_block();
-  auto warp       = cooperative_groups::tiled_partition<32>(block);
-  bool overflowed = false;
-  bool ok         = mcs::fmcs::matchSeedSubstructureCooperative(warp,
-                                                        child.seed,
-                                                        qView,
-                                                        tView,
-                                                        tables,
-                                                        child.match,
-                                                        scratch,
-                                                        partialStorage,
-                                                        partialCapacity,
-                                                        &overflowed);
+  auto block = cooperative_groups::this_thread_block();
+  auto warp  = cooperative_groups::tiled_partition<32>(block);
+  bool ok = mcs::fmcs::matchSeedSubstructureCooperative(warp, child.seed, qView, tView, tables, child.match, scratch);
   __syncthreads();
 
   if (threadIdx.x == 0) {
-    out->ok         = ok;
-    out->overflowed = overflowed;
-    out->child      = child;
+    out->ok    = ok;
+    out->child = child;
   }
 }
 
 __global__ void matchFallbackBadParentDriver(DeviceCsrView         qView,
                                              DeviceCsrView         tView,
                                              PairMatchTablesDevice tables,
-                                             std::uint8_t*         partialStorage,
-                                             int                   partialCapacity,
                                              SubstructureTestOut*  out) {
   __shared__ QueuedT16 child;
   __shared__ mcs::fmcs::FmcsSubstructureScratch<16, 16> scratch;
@@ -309,26 +291,21 @@ __global__ void matchFallbackBadParentDriver(DeviceCsrView         qView,
   }
   __syncthreads();
 
-  auto block      = cooperative_groups::this_thread_block();
-  auto warp       = cooperative_groups::tiled_partition<32>(block);
-  bool overflowed = false;
-  bool ok         = mcs::fmcs::matchSeedWithSubstructureFallbackCooperative(warp,
+  auto block = cooperative_groups::this_thread_block();
+  auto warp  = cooperative_groups::tiled_partition<32>(block);
+  bool ok    = mcs::fmcs::matchSeedWithSubstructureFallbackCooperative(warp,
                                                                     child.seed,
                                                                     qView,
                                                                     tView,
                                                                     tables,
                                                                     child.match,
                                                                     scratch,
-                                                                    &scratchLock,
-                                                                    partialStorage,
-                                                                    partialCapacity,
-                                                                    &overflowed);
+                                                                    &scratchLock);
   __syncthreads();
 
   if (threadIdx.x == 0) {
-    out->ok         = ok;
-    out->overflowed = overflowed;
-    out->child      = child;
+    out->ok    = ok;
+    out->child = child;
   }
 }
 
@@ -356,21 +333,17 @@ TEST(FMCSUnit, MatchSeedSubstructurePath) {
   tables.setAllBondBits();
 
   AsyncDevicePtr<SubstructureTestOut> d_out;
-  AsyncDeviceVector<std::uint8_t>     partials(2 * kTestSubstructurePartialCapacity * 16);
   matchSubstructureMaskDriver<<<1, 32>>>(query.view(),
                                          target.view(),
                                          tables.device(),
                                          /*atomMask=*/0xFu,
                                          /*bondMask=*/0x7u,
-                                         partials.data(),
-                                         kTestSubstructurePartialCapacity,
                                          d_out.data());
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   SubstructureTestOut out{};
   d_out.get(out);
 
   EXPECT_TRUE(out.ok);
-  EXPECT_FALSE(out.overflowed);
   EXPECT_EQ(out.child.match.matchedAtomSize, 4);
   EXPECT_EQ(out.child.match.matchedBondSize, 3);
   for (int q = 0; q < 4; ++q) {
@@ -401,21 +374,17 @@ TEST(FMCSUnit, MatchSeedSubstructureRejectsNoMatch) {
   tables.setAllBondBits();
 
   AsyncDevicePtr<SubstructureTestOut> d_out;
-  AsyncDeviceVector<std::uint8_t>     partials(2 * kTestSubstructurePartialCapacity * 16);
   matchSubstructureMaskDriver<<<1, 32>>>(query.view(),
                                          target.view(),
                                          tables.device(),
                                          /*atomMask=*/0x7u,
                                          /*bondMask=*/0x7u,
-                                         partials.data(),
-                                         kTestSubstructurePartialCapacity,
                                          d_out.data());
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   SubstructureTestOut out{};
   d_out.get(out);
 
   EXPECT_FALSE(out.ok);
-  EXPECT_FALSE(out.overflowed);
   EXPECT_TRUE(out.child.match.empty);
 }
 
@@ -440,21 +409,17 @@ TEST(FMCSUnit, MatchSeedSubstructureRespectsAtomTable) {
   tables.setAllBondBits();
 
   AsyncDevicePtr<SubstructureTestOut> d_out;
-  AsyncDeviceVector<std::uint8_t>     partials(2 * kTestSubstructurePartialCapacity * 16);
   matchSubstructureMaskDriver<<<1, 32>>>(query.view(),
                                          target.view(),
                                          tables.device(),
                                          /*atomMask=*/0x7u,
                                          /*bondMask=*/0x3u,
-                                         partials.data(),
-                                         kTestSubstructurePartialCapacity,
                                          d_out.data());
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   SubstructureTestOut out{};
   d_out.get(out);
 
   EXPECT_TRUE(out.ok);
-  EXPECT_FALSE(out.overflowed);
   EXPECT_EQ(out.child.match.targetAtomIdx[0], 0u);
   EXPECT_EQ(out.child.match.targetAtomIdx[1], 1u);
   EXPECT_EQ(out.child.match.targetAtomIdx[2], 2u);
@@ -483,21 +448,17 @@ TEST(FMCSUnit, MatchSeedSubstructureRespectsBondTable) {
   tables.setBondBit(1, 1);
 
   AsyncDevicePtr<SubstructureTestOut> d_out;
-  AsyncDeviceVector<std::uint8_t>     partials(2 * kTestSubstructurePartialCapacity * 16);
   matchSubstructureMaskDriver<<<1, 32>>>(query.view(),
                                          target.view(),
                                          tables.device(),
                                          /*atomMask=*/0x7u,
                                          /*bondMask=*/0x3u,
-                                         partials.data(),
-                                         kTestSubstructurePartialCapacity,
                                          d_out.data());
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   SubstructureTestOut out{};
   d_out.get(out);
 
   EXPECT_TRUE(out.ok);
-  EXPECT_FALSE(out.overflowed);
   EXPECT_EQ(out.child.match.targetBondIdx[0], 0u);
   EXPECT_EQ(out.child.match.targetBondIdx[1], 1u);
   EXPECT_EQ(out.child.match.matchedAtomSize, 3);
@@ -528,21 +489,17 @@ TEST(FMCSUnit, MatchSeedSubstructureFindsPathInsideTriangleWithLeaves) {
   tables.setAllBondBits();
 
   AsyncDevicePtr<SubstructureTestOut> d_out;
-  AsyncDeviceVector<std::uint8_t>     partials(2 * kTestSubstructurePartialCapacity * 16);
   matchSubstructureMaskDriver<<<1, 32>>>(query.view(),
                                          target.view(),
                                          tables.device(),
                                          /*atomMask=*/0x1Fu,
                                          /*bondMask=*/0x1Eu,
-                                         partials.data(),
-                                         kTestSubstructurePartialCapacity,
                                          d_out.data());
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   SubstructureTestOut out{};
   d_out.get(out);
 
   EXPECT_TRUE(out.ok);
-  EXPECT_FALSE(out.overflowed);
   EXPECT_EQ(out.child.match.matchedAtomSize, 5);
   EXPECT_EQ(out.child.match.matchedBondSize, 4);
   EXPECT_EQ(out.child.match.targetBondIdx[0], mcs::fmcs::kUnmappedTargetIdx);
@@ -575,19 +532,12 @@ TEST(FMCSUnit, MatchSeedFallbackRebuildsAfterGreedyFailure) {
   tables.setAllBondBits();
 
   AsyncDevicePtr<SubstructureTestOut> d_out;
-  AsyncDeviceVector<std::uint8_t>     partials(2 * kTestSubstructurePartialCapacity * 16);
-  matchFallbackBadParentDriver<<<1, 32>>>(query.view(),
-                                          target.view(),
-                                          tables.device(),
-                                          partials.data(),
-                                          kTestSubstructurePartialCapacity,
-                                          d_out.data());
+  matchFallbackBadParentDriver<<<1, 32>>>(query.view(), target.view(), tables.device(), d_out.data());
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   SubstructureTestOut out{};
   d_out.get(out);
 
   EXPECT_TRUE(out.ok);
-  EXPECT_FALSE(out.overflowed);
   EXPECT_EQ(out.child.match.matchedAtomSize, 5);
   EXPECT_EQ(out.child.match.matchedBondSize, 4);
   for (int q = 0; q < 5; ++q) {

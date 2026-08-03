@@ -81,6 +81,9 @@ target_compile_options(test_fmcs_grow
 add_executable(test_fmcs_foundations test_fmcs_foundations.cu)
 target_link_libraries(test_fmcs_foundations PRIVATE mcs_fmcs_foundations)
 
+add_executable(test_fmcs_policy test_fmcs_policy.cpp)
+target_link_libraries(test_fmcs_policy PRIVATE mcs_fmcs_foundations)
+
 add_executable(test_fmcs_match test_fmcs_match.cu)
 target_include_directories(test_fmcs_match PRIVATE ${CMAKE_SOURCE_DIR}/src/mcs)
 target_link_libraries(test_fmcs_match PRIVATE mcs_fmcs_foundations
@@ -359,6 +362,9 @@ target_link_libraries(
   test_substruct_algos PRIVATE substruct_definitions molecules device
                                flatBitVect device_vector device_timings)
 
+add_executable(test_warp_dfs test_warp_dfs.cu)
+target_link_libraries(test_warp_dfs PRIVATE cuda_error_check CUDA::cudart)
+
 add_executable(test_substructure_integration test_substruct_integration.cu)
 target_link_libraries(
   test_substructure_integration
@@ -437,6 +443,7 @@ set(TEST_LIST
     test_rdkit_comp
     test_rdkit_bounds_matrix
     test_substruct_algos
+    test_warp_dfs
     test_substructure_search
     test_substructure_integration
     test_substruct_label_integration
@@ -446,6 +453,7 @@ set(TEST_LIST
     test_fmcs_foundations
     test_fmcs_grow
     test_fmcs_match
+    test_fmcs_policy
     test_fmcs_substructure
     test_fmcs_search_support
     test_work_splitting

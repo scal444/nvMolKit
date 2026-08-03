@@ -163,6 +163,7 @@ def test_substruct_config_to_from_dict_roundtrip():
         maxMatches=8,
         uniquify=True,
         gpuIds=[0],
+        algorithm="dfs",
     )
     encoded = config.to_dict()
     assert encoded == {
@@ -172,6 +173,7 @@ def test_substruct_config_to_from_dict_roundtrip():
         "maxMatches": 8,
         "uniquify": True,
         "gpuIds": [0],
+        "algorithm": "dfs",
     }
     restored = SubstructSearchConfig.from_dict(encoded)
     assert restored.batchSize == 512
@@ -180,6 +182,7 @@ def test_substruct_config_to_from_dict_roundtrip():
     assert restored.maxMatches == 8
     assert restored.uniquify is True
     assert restored.gpuIds == [0]
+    assert restored.algorithm == "dfs"
 
 
 def test_save_load_hardware_options_roundtrip(tmp_path):
@@ -289,10 +292,11 @@ def test_default_substruct_search_space_caps_per_pool():
     assert space_4gpu["preprocessingThreads"] == (1, 16)
     assert space_64gpu["preprocessingThreads"] == (1, 16)
 
-    low, high, step = space_1gpu["batchSize"]
-    assert step % 64 == 0
-    assert low % step == 0 and high % step == 0
-    assert low <= high
+    # Unlike the FF and embed spaces, substruct batchSize is log-uniform rather
+    # than a stepped range: the useful span is two orders of magnitude.
+    low, high, distribution = space_1gpu["batchSize"]
+    assert distribution == "log"
+    assert 0 < low <= high
 
 
 class _RecordingTrial:

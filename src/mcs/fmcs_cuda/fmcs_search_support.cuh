@@ -379,10 +379,7 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
   const DeviceCsrView&                          queryTopology,
   const DeviceCsrView&                          targetTopology,
   const PairMatchTablesDevice&                  tables,
-  FmcsSubstructureScratch<maxAtoms, maxTA>&     scratch,
-  std::uint8_t*                                 partialStorage,
-  int                                           partialCapacity,
-  bool*                                         overflowedFlag) {
+  FmcsSubstructureScratch<maxAtoms, maxTA>&     scratch) {
   bool ok = false;
   if (!candidate.match.empty) {
     ok = tryMatchIncrementalGreedyCooperative(group,
@@ -400,10 +397,7 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
                                           targetTopology,
                                           tables,
                                           candidate.match,
-                                          scratch,
-                                          partialStorage,
-                                          partialCapacity,
-                                          overflowedFlag);
+                                          scratch);
     group.sync();
   }
   return ok;
@@ -623,17 +617,11 @@ __device__ __forceinline__ void seedComputeRemainingSizeRdkitCooperative(
 /// memory; only the cursor/header lives in shared memory.  Approach 1 uses
 /// atomic LIFO push/pop so multiple warp groups can own grow work
 /// concurrently.
-constexpr int kFmcsQueueCapacity               = 4096;
-/// Per-block substructure fallback partial capacity, expressed as
-/// max-sized partial entries per ping-pong half.  The bodies live in
-/// global memory as raw uint8 mappings; runtime effective capacity is
-/// larger for smaller seeds because each partial uses only
-/// seed.numAtoms bytes.
-constexpr int kFmcsSubstructurePartialCapacity = 4096;
+constexpr int kFmcsQueueCapacity = 4096;
 /// Legacy success-only mapping cache capacity.  The active RDKit-parity
 /// kernel ignores the cache path; this constant remains for the standalone
 /// DeviceMatchCache unit tests until an RDKit-equivalent cache is added.
-constexpr int kFmcsCacheCapacity               = 4096;
+constexpr int kFmcsCacheCapacity = 4096;
 static_assert((kFmcsCacheCapacity & (kFmcsCacheCapacity - 1)) == 0, "kFmcsCacheCapacity must be a power of two");
 /// Block / cooperative-group sizing.  Phase 2 partitions each block into warp
 /// groups; each group pops one seed at a time from the block worklist and
