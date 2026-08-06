@@ -4,7 +4,7 @@
 import argparse
 
 import pytest
-from bench_utils.cli import add_backend_selection_args
+from bench_utils.cli import add_autotune_cpu_budget_arg, add_backend_selection_args
 
 
 @pytest.mark.parametrize("flag", ["--no-rdkit", "--no_rdkit", "--skip-rdkit"])
@@ -23,3 +23,19 @@ def test_backend_selection_accepts_nvmolkit_spellings(flag):
     args = parser.parse_args([flag])
     assert args.no_nvmolkit
     assert not args.no_rdkit
+
+
+def test_autotune_cpu_budget_accepts_positive_integer():
+    parser = argparse.ArgumentParser()
+    add_autotune_cpu_budget_arg(parser)
+
+    assert parser.parse_args(["--autotune_cpu_budget", "14"]).autotune_cpu_budget == 14
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_autotune_cpu_budget_rejects_non_positive_integer(value):
+    parser = argparse.ArgumentParser()
+    add_autotune_cpu_budget_arg(parser)
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--autotune_cpu_budget", value])

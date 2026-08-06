@@ -40,6 +40,7 @@ import nvtx
 import torch
 from bench_utils import (
     Deadline,
+    add_autotune_cpu_budget_arg,
     add_backend_selection_args,
     add_rdkit_max_seconds_arg,
     available_cpu_count,
@@ -322,6 +323,7 @@ def main() -> None:
         default=10.0,
         help="Target wall-clock seconds per Optuna trial (default: 10.0)",
     )
+    add_autotune_cpu_budget_arg(parser)
     parser.add_argument(
         "--autotune_calibration_size",
         type=int,
@@ -481,6 +483,7 @@ def main() -> None:
                 "n_trials": args.autotune_trials,
                 "target_seconds_per_trial": args.autotune_time_budget,
                 "calibration_set": explicit_calibration,
+                "cpu_budget": args.autotune_cpu_budget,
                 "seed": args.autotune_seed,
                 "verbose": True,
             }

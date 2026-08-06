@@ -19,7 +19,7 @@ Re-exports timing primitives, file loaders, and molecule preparation helpers
 so individual bench scripts can ``from bench_utils import time_it, load_smiles``.
 """
 
-from bench_utils.cli import add_backend_selection_args
+from bench_utils.cli import add_autotune_cpu_budget_arg, add_backend_selection_args
 from bench_utils.concurrent import BoundedProcessMapResult, process_map_bounded
 from bench_utils.loaders import load_pickle, load_sdf, load_smarts, load_smiles
 from bench_utils.molprep import (
@@ -44,6 +44,7 @@ __all__ = [
     "BoundedProcessMapResult",
     "Deadline",
     "TimingResult",
+    "add_autotune_cpu_budget_arg",
     "add_backend_selection_args",
     "add_rdkit_max_seconds_arg",
     "available_cpu_count",
