@@ -424,6 +424,15 @@ def main():
         help="Target wall-clock seconds per Optuna trial (default: 10.0)",
     )
     parser.add_argument(
+        "--autotune_cpu_budget",
+        type=int,
+        default=None,
+        help=(
+            "CPU-core budget used to bound the autotune search space. "
+            "Default: detected physical core count"
+        ),
+    )
+    parser.add_argument(
         "--autotune_calibration_size",
         type=int,
         default=0,
@@ -618,8 +627,14 @@ def main():
                     )
                     explicit_calibration = None
                     if args.autotune_calibration_size > 0:
+                        if args.autotune_calibration_size > len(mols):
+                            print(
+                                "Error: --autotune_calibration_size="
+                                f"{args.autotune_calibration_size} exceeds the {len(mols)} loaded molecules"
+                            )
+                            sys.exit(1)
                         rng = random.Random(args.autotune_seed)
-                        size = min(args.autotune_calibration_size, len(mols))
+                        size = args.autotune_calibration_size
                         explicit_calibration = rng.sample(range(len(mols)), size)
                     tune_result = nv_autotune.tune_substructure(
                         mols,
@@ -630,6 +645,7 @@ def main():
                         n_trials=args.autotune_trials,
                         target_seconds_per_trial=args.autotune_time_budget,
                         calibration_set=explicit_calibration,
+                        cpu_budget=args.autotune_cpu_budget,
                         seed=args.autotune_seed,
                         verbose=True,
                     )
