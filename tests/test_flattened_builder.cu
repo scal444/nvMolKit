@@ -17,6 +17,7 @@
 #include <gmock/gmock.h>
 #include <GraphMol/DistGeomHelpers/Embedder.h>
 #include <GraphMol/FileParsers/FileParsers.h>
+#include <GraphMol/SmilesParse/SmilesParse.h>
 #include <gtest/gtest.h>
 
 #include <filesystem>
@@ -37,6 +38,17 @@ TEST(FlattenedBuilderTest, NullMolecule) {
   EXPECT_EQ(ffParams.torsionTerms.idx1.size(), 0);
   EXPECT_EQ(ffParams.vdwTerms.idx1.size(), 0);
   EXPECT_EQ(ffParams.eleTerms.idx1.size(), 0);
+}
+
+TEST(FlattenedBuilderTest, RingFusedCyclophosphazene) {
+  std::unique_ptr<RDKit::RWMol> mol(RDKit::SmilesToMol("C1CNP2(=NP=NP=N2)NC1"));
+  ASSERT_NE(mol, nullptr);
+  RDKit::MolOps::addHs(*mol);
+  ASSERT_GE(RDKit::DGeomHelpers::EmbedMolecule(*mol), 0);
+
+  const auto ffParams = nvMolKit::MMFF::constructForcefieldContribs(*mol);
+  EXPECT_FALSE(ffParams.vdwTerms.idx1.empty());
+  EXPECT_FALSE(ffParams.eleTerms.idx1.empty());
 }
 
 class FlattenedBuilderTestFixture : public ::testing::Test {

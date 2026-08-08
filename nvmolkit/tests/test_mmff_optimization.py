@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import os
 
 import pytest
@@ -23,8 +24,8 @@ from rdkit.Chem.AllChem import ETKDGv3
 from rdkit.ForceField import rdForceField as _rdForceField  # noqa: F401
 from rdkit.Geometry import Point3D
 
-from nvmolkit.embedMolecules import EmbedMolecules
 import nvmolkit.mmffOptimization as nvmolkit_mmff
+from nvmolkit.embedMolecules import EmbedMolecules
 from nvmolkit.types import CoordinateOutput, Device3DResult, FireOptions, HardwareOptions
 
 
@@ -529,6 +530,17 @@ def test_error_case_throws_properly():
     with pytest.raises(ValueError, match="lacking MMFF atom types") as exc_info:
         nvmolkit_mmff.MMFFOptimizeMoleculesConfs([mol], maxIters=200)
     assert exc_info.value.args[1] == {"none": [], "no_params": [0]}
+
+
+def test_mmff_optimization_handles_ring_fused_cyclophosphazene():
+    mol = Chem.AddHs(Chem.MolFromSmiles("C1CNP2(=NP=NP=N2)NC1"))
+    assert rdDistGeom.EmbedMolecule(mol, randomSeed=0xF00D) == 0
+
+    energies = nvmolkit_mmff.MMFFOptimizeMoleculesConfs([mol], maxIters=1000)
+
+    assert len(energies) == 1
+    assert len(energies[0]) == 1
+    assert math.isfinite(energies[0][0])
 
 
 def test_mmff_optimization_device_output_matches_host(mmff_test_mols):
