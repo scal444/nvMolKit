@@ -76,12 +76,13 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
   __shared__ int                         newBondCount[kNumGroups];
   __shared__ bool                        popped[kNumGroups];
   __shared__ bool                        stage0Ok[kNumGroups];
-  __shared__ std::uint8_t remainingAtomStack[kNumGroups][maxAtoms];
+  __shared__ typename Seed<maxAtoms, maxBonds>::atom_word_type
+    remainingFrontierAtoms[kNumGroups][Seed<maxAtoms, maxBonds>::kAtomWords];
   __shared__ typename Seed<maxAtoms, maxBonds>::atom_word_type
     remainingVisitedAtoms[kNumGroups][Seed<maxAtoms, maxBonds>::kAtomWords];
   __shared__ typename Seed<maxAtoms, maxBonds>::bond_word_type
                  remainingVisitedBonds[kNumGroups][Seed<maxAtoms, maxBonds>::kBondWords];
-  __shared__ int remainingStackSize[kNumGroups];
+  __shared__ FmcsRemainingSerialScratch<maxAtoms> remainingSerialScratch[kNumGroups];
   __shared__ SingleBondMatch initialBondMatches[maxBonds];
 
   extern __shared__ __align__(16) unsigned char pairDataCacheStorage[];
@@ -132,9 +133,10 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
   QueuedT&      myCurrent               = current[groupId];
   QueuedT&      myBiggest               = biggest[groupId];
   NewBond*      myNewBonds              = newBondsArr[groupId];
-  std::uint8_t* myRemainingAtomStack    = remainingAtomStack[groupId];
+  auto*         myRemainingFrontierAtoms = remainingFrontierAtoms[groupId];
   auto*         myRemainingVisitedAtoms = remainingVisitedAtoms[groupId];
   auto*         myRemainingVisitedBonds = remainingVisitedBonds[groupId];
+  auto&         myRemainingSerialScratch = remainingSerialScratch[groupId];
 
   // ---- Phase 1: RDKit makeInitialSeeds() analogue ----
   // RDKit creates one initial seed per query bond, not one per target
@@ -177,10 +179,10 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
     seedComputeRemainingSizeRdkitCooperative(group,
                                              myCurrent.seed,
                                              queryView,
-                                             myRemainingAtomStack,
+                                             myRemainingFrontierAtoms,
                                              myRemainingVisitedAtoms,
                                              myRemainingVisitedBonds,
-                                             &remainingStackSize[groupId]);
+                                             myRemainingSerialScratch);
 
     int queueSlot = 0;
     if (groupRank == 0) {
@@ -294,10 +296,10 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
         seedComputeRemainingSizeRdkitCooperative(group,
                                                  myBiggest.seed,
                                                  queryView,
-                                                 myRemainingAtomStack,
+                                                 myRemainingFrontierAtoms,
                                                  myRemainingVisitedAtoms,
                                                  myRemainingVisitedBonds,
-                                                 &remainingStackSize[groupId]);
+                                                 myRemainingSerialScratch);
 
         const unsigned int childScoreSnapshot = readBestScoreCooperative(group, &bestScore);
         const int          childBestBonds     = static_cast<int>(childScoreSnapshot >> 16);
@@ -362,10 +364,10 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
         seedComputeRemainingSizeRdkitCooperative(group,
                                                  myBiggest.seed,
                                                  queryView,
-                                                 myRemainingAtomStack,
+                                                 myRemainingFrontierAtoms,
                                                  myRemainingVisitedAtoms,
                                                  myRemainingVisitedBonds,
-                                                 &remainingStackSize[groupId]);
+                                                 myRemainingSerialScratch);
 
         const unsigned int childScoreSnapshot = readBestScoreCooperative(group, &bestScore);
         const int          childBestBonds     = static_cast<int>(childScoreSnapshot >> 16);
@@ -444,10 +446,10 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
           seedComputeRemainingSizeRdkitCooperative(group,
                                                    myBiggest.seed,
                                                    queryView,
-                                                   myRemainingAtomStack,
+                                                   myRemainingFrontierAtoms,
                                                    myRemainingVisitedAtoms,
                                                    myRemainingVisitedBonds,
-                                                   &remainingStackSize[groupId]);
+                                                   myRemainingSerialScratch);
 
           const unsigned int childScoreSnapshot = readBestScoreCooperative(group, &bestScore);
           const int          childBestBonds     = static_cast<int>(childScoreSnapshot >> 16);

@@ -268,44 +268,76 @@ template <class GroupT> __device__ __forceinline__ bool readFlagCooperative(cons
   return group.shfl(value, 0) != 0;
 }
 
+template <int maxAtoms, bool useSerial = (maxAtoms > 64)> struct FmcsRemainingSerialScratch {
+  std::uint8_t unused;
+};
+
+template <int maxAtoms> struct FmcsRemainingSerialScratch<maxAtoms, true> {
+  std::uint8_t atomStack[maxAtoms];
+  int          stackSize;
+};
+
 template <int maxAtoms, int maxBonds, class GroupT>
 __device__ __forceinline__ void seedComputeRemainingSizeRdkitCooperative(
   const GroupT&                                      group,
   Seed<maxAtoms, maxBonds>&                          seed,
   const DeviceCsrView&                               queryTopology,
-  std::uint8_t*                                      atomStack,
+  typename Seed<maxAtoms, maxBonds>::atom_word_type* frontierAtoms,
   typename Seed<maxAtoms, maxBonds>::atom_word_type* visitedAtoms,
   typename Seed<maxAtoms, maxBonds>::bond_word_type* visitedBonds,
-  int*                                               stackSize) {
+  FmcsRemainingSerialScratch<maxAtoms>&              serialScratch) {
   using SeedT                    = Seed<maxAtoms, maxBonds>;
   using AtomWord                 = typename SeedT::atom_word_type;
   using BondWord                 = typename SeedT::bond_word_type;
   constexpr int kAtomBitsPerWord = SeedT::kAtomBitsPerWord;
   constexpr int kBondBitsPerWord = SeedT::kBondBitsPerWord;
+  static_assert(SeedT::kAtomWords <= 2 && SeedT::kBondWords <= 2,
+                "fMCS remaining-size frontier supports up to two bitset words");
 
-  if (group.thread_rank() == 0) {
-    seed.remainingAtoms = 0;
-    seed.remainingBonds = 0;
-    *stackSize          = 0;
-    for (int i = 0; i < SeedT::kAtomWords; ++i) {
-      visitedAtoms[i] = seed.atoms[i];
-    }
-    for (int i = 0; i < SeedT::kBondWords; ++i) {
-      visitedBonds[i] = seed.excludedBonds[i];
-    }
+  const int laneRank  = static_cast<int>(group.thread_rank());
+  const int laneCount = static_cast<int>(group.num_threads());
 
-    for (int wordIdx = 0; wordIdx < SeedT::kAtomWords; ++wordIdx) {
-      AtomWord remaining = seed.lastAddedAtoms[wordIdx];
-      while (remaining != 0) {
-        int bitPosInWord;
-        if constexpr (sizeof(AtomWord) == 4) {
-          bitPosInWord = __ffs(static_cast<unsigned int>(remaining)) - 1;
-        } else {
-          bitPosInWord = __ffsll(static_cast<unsigned long long>(remaining)) - 1;
+  if constexpr (maxAtoms > 64) {
+    if (laneRank == 0) {
+      seed.remainingAtoms  = 0;
+      seed.remainingBonds  = 0;
+      serialScratch.stackSize = 0;
+      for (int i = 0; i < SeedT::kAtomWords; ++i)
+        visitedAtoms[i] = seed.atoms[i];
+      for (int i = 0; i < SeedT::kBondWords; ++i)
+        visitedBonds[i] = seed.excludedBonds[i];
+
+      for (int wordIdx = 0; wordIdx < SeedT::kAtomWords; ++wordIdx) {
+        AtomWord remaining = seed.lastAddedAtoms[wordIdx];
+        while (remaining != 0) {
+          const int bitPosInWord = __ffsll(static_cast<unsigned long long>(remaining)) - 1;
+          const int atomIdx      = wordIdx * kAtomBitsPerWord + bitPosInWord;
+          remaining &= remaining - 1;
+
+          const int rowBegin = static_cast<int>(queryTopology.rowOffsets[atomIdx]);
+          const int rowEnd   = static_cast<int>(queryTopology.rowOffsets[atomIdx + 1]);
+          for (int adjacencyIdx = rowBegin; adjacencyIdx < rowEnd; ++adjacencyIdx) {
+            const int      bondIdx     = static_cast<int>(queryTopology.bondIndices[adjacencyIdx]);
+            const int      bondWordIdx = bondIdx / kBondBitsPerWord;
+            const BondWord bondMask    = static_cast<BondWord>(1) << (bondIdx % kBondBitsPerWord);
+            if ((visitedBonds[bondWordIdx] & bondMask) != 0)
+              continue;
+            const int otherAtom = static_cast<int>(queryTopology.colIndices[adjacencyIdx]);
+            visitedBonds[bondWordIdx] |= bondMask;
+            ++seed.remainingBonds;
+            const int      atomWordIdx = otherAtom / kAtomBitsPerWord;
+            const AtomWord atomMask    = static_cast<AtomWord>(1) << (otherAtom % kAtomBitsPerWord);
+            if ((visitedAtoms[atomWordIdx] & atomMask) == 0) {
+              visitedAtoms[atomWordIdx] |= atomMask;
+              ++seed.remainingAtoms;
+              serialScratch.atomStack[serialScratch.stackSize++] = static_cast<std::uint8_t>(otherAtom);
+            }
+          }
         }
-        const int atomIdx = wordIdx * kAtomBitsPerWord + bitPosInWord;
-        remaining &= remaining - 1;
+      }
 
+      while (serialScratch.stackSize > 0) {
+        const int atomIdx  = serialScratch.atomStack[--serialScratch.stackSize];
         const int rowBegin = static_cast<int>(queryTopology.rowOffsets[atomIdx]);
         const int rowEnd   = static_cast<int>(queryTopology.rowOffsets[atomIdx + 1]);
         for (int adjacencyIdx = rowBegin; adjacencyIdx < rowEnd; ++adjacencyIdx) {
@@ -316,20 +348,53 @@ __device__ __forceinline__ void seedComputeRemainingSizeRdkitCooperative(
             continue;
           const int otherAtom = static_cast<int>(queryTopology.colIndices[adjacencyIdx]);
           visitedBonds[bondWordIdx] |= bondMask;
-          seed.remainingBonds += 1;
+          ++seed.remainingBonds;
           const int      atomWordIdx = otherAtom / kAtomBitsPerWord;
           const AtomWord atomMask    = static_cast<AtomWord>(1) << (otherAtom % kAtomBitsPerWord);
           if ((visitedAtoms[atomWordIdx] & atomMask) == 0) {
             visitedAtoms[atomWordIdx] |= atomMask;
-            seed.remainingAtoms += 1;
-            atomStack[(*stackSize)++] = static_cast<std::uint8_t>(otherAtom);
+            ++seed.remainingAtoms;
+            serialScratch.atomStack[serialScratch.stackSize++] = static_cast<std::uint8_t>(otherAtom);
           }
         }
       }
     }
+    group.sync();
+    return;
+  }
 
-    while (*stackSize > 0) {
-      const int atomIdx = atomStack[--(*stackSize)];
+  if (laneRank == 0) {
+    seed.remainingAtoms = 0;
+    seed.remainingBonds = 0;
+  }
+  if (laneRank < SeedT::kAtomWords) {
+    visitedAtoms[laneRank] = seed.atoms[laneRank];
+    frontierAtoms[laneRank] = seed.lastAddedAtoms[laneRank];
+  }
+  if (laneRank < SeedT::kBondWords)
+    visitedBonds[laneRank] = seed.excludedBonds[laneRank];
+  group.sync();
+
+  while (true) {
+    int hasFrontier = 0;
+    if (laneRank == 0) {
+      for (int word = 0; word < SeedT::kAtomWords; ++word)
+        hasFrontier |= frontierAtoms[word] != 0;
+    }
+    hasFrontier = group.shfl(hasFrontier, 0);
+    if (!hasFrontier)
+      break;
+
+    AtomWord candidateAtoms0 = 0;
+    AtomWord candidateAtoms1 = 0;
+    BondWord candidateBonds0 = 0;
+    BondWord candidateBonds1 = 0;
+    for (int atomIdx = laneRank; atomIdx < queryTopology.numAtoms; atomIdx += laneCount) {
+      const int atomWordIdx = atomIdx / kAtomBitsPerWord;
+      const AtomWord atomMask = static_cast<AtomWord>(1) << (atomIdx % kAtomBitsPerWord);
+      if ((frontierAtoms[atomWordIdx] & atomMask) == 0)
+        continue;
+
       const int rowBegin = static_cast<int>(queryTopology.rowOffsets[atomIdx]);
       const int rowEnd   = static_cast<int>(queryTopology.rowOffsets[atomIdx + 1]);
       for (int adjacencyIdx = rowBegin; adjacencyIdx < rowEnd; ++adjacencyIdx) {
@@ -339,17 +404,53 @@ __device__ __forceinline__ void seedComputeRemainingSizeRdkitCooperative(
         if ((visitedBonds[bondWordIdx] & bondMask) != 0)
           continue;
         const int otherAtom = static_cast<int>(queryTopology.colIndices[adjacencyIdx]);
-        visitedBonds[bondWordIdx] |= bondMask;
-        seed.remainingBonds += 1;
-        const int      atomWordIdx = otherAtom / kAtomBitsPerWord;
-        const AtomWord atomMask    = static_cast<AtomWord>(1) << (otherAtom % kAtomBitsPerWord);
-        if ((visitedAtoms[atomWordIdx] & atomMask) == 0) {
-          visitedAtoms[atomWordIdx] |= atomMask;
-          seed.remainingAtoms += 1;
-          atomStack[(*stackSize)++] = static_cast<std::uint8_t>(otherAtom);
-        }
+        const AtomWord otherAtomMask = static_cast<AtomWord>(1) << (otherAtom % kAtomBitsPerWord);
+        if (bondWordIdx == 0)
+          candidateBonds0 |= bondMask;
+        else
+          candidateBonds1 |= bondMask;
+        if (otherAtom / kAtomBitsPerWord == 0)
+          candidateAtoms0 |= otherAtomMask;
+        else
+          candidateAtoms1 |= otherAtomMask;
       }
     }
+
+    for (int offset = laneCount / 2; offset > 0; offset >>= 1) {
+      candidateAtoms0 |= group.shfl_xor(candidateAtoms0, offset);
+      candidateAtoms1 |= group.shfl_xor(candidateAtoms1, offset);
+      candidateBonds0 |= group.shfl_xor(candidateBonds0, offset);
+      candidateBonds1 |= group.shfl_xor(candidateBonds1, offset);
+    }
+
+    if (laneRank == 0) {
+      const BondWord newBonds0 = candidateBonds0 & ~visitedBonds[0];
+      visitedBonds[0] |= newBonds0;
+      if constexpr (sizeof(BondWord) == 4)
+        seed.remainingBonds += __popc(static_cast<unsigned int>(newBonds0));
+      else
+        seed.remainingBonds += __popcll(static_cast<unsigned long long>(newBonds0));
+      if constexpr (SeedT::kBondWords == 2) {
+        const BondWord newBonds1 = candidateBonds1 & ~visitedBonds[1];
+        visitedBonds[1] |= newBonds1;
+        seed.remainingBonds += __popcll(static_cast<unsigned long long>(newBonds1));
+      }
+
+      const AtomWord newAtoms0 = candidateAtoms0 & ~visitedAtoms[0];
+      visitedAtoms[0] |= newAtoms0;
+      frontierAtoms[0] = newAtoms0;
+      if constexpr (sizeof(AtomWord) == 4)
+        seed.remainingAtoms += __popc(static_cast<unsigned int>(newAtoms0));
+      else
+        seed.remainingAtoms += __popcll(static_cast<unsigned long long>(newAtoms0));
+      if constexpr (SeedT::kAtomWords == 2) {
+        const AtomWord newAtoms1 = candidateAtoms1 & ~visitedAtoms[1];
+        visitedAtoms[1] |= newAtoms1;
+        frontierAtoms[1] = newAtoms1;
+        seed.remainingAtoms += __popcll(static_cast<unsigned long long>(newAtoms1));
+      }
+    }
+    group.sync();
   }
   group.sync();
 }
