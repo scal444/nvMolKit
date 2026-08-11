@@ -486,19 +486,12 @@ __device__ __forceinline__ FmcsTargetMask<maxTA> atomRowMask(const MatchTableDev
 }
 
 template <int maxAtoms, int maxTA, class GroupT>
-__device__ __forceinline__ void initializeSeedSubstructureScratchCooperative(
+__device__ __forceinline__ void initializePairSubstructureScratchCooperative(
   const GroupT&                             group,
   const DeviceCsrView&                      targetTopology,
   FmcsSubstructureScratch<maxAtoms, maxTA>& scratch) {
   const int laneRank  = static_cast<int>(group.thread_rank());
   const int laneCount = static_cast<int>(group.num_threads());
-
-  for (int i = laneRank; i < maxAtoms; i += laneCount) {
-    scratch.seedDegree[i]         = 0;
-    scratch.orderedQueryAtom[i]   = 0;
-    scratch.queryOrderPos[i]      = kUnmappedTargetIdx;
-    scratch.targetAtomForQuery[i] = kUnmappedTargetIdx;
-  }
 
   for (int targetAtomIdx = laneRank; targetAtomIdx < targetTopology.numAtoms; targetAtomIdx += laneCount) {
     scratch.targetDegree[targetAtomIdx] = static_cast<std::uint8_t>(targetTopology.rowOffsets[targetAtomIdx + 1] -
@@ -518,6 +511,24 @@ __device__ __forceinline__ void initializeSeedSubstructureScratchCooperative(
       }
     }
     scratch.degreeAtLeast[laneRank] = bucket;
+  }
+
+  group.sync();
+}
+
+template <int maxAtoms, int maxTA, class GroupT>
+__device__ __forceinline__ void initializeSeedSubstructureScratchCooperative(
+  const GroupT&                             group,
+  const DeviceCsrView&,
+  FmcsSubstructureScratch<maxAtoms, maxTA>& scratch) {
+  const int laneRank  = static_cast<int>(group.thread_rank());
+  const int laneCount = static_cast<int>(group.num_threads());
+
+  for (int i = laneRank; i < maxAtoms; i += laneCount) {
+    scratch.seedDegree[i]         = 0;
+    scratch.orderedQueryAtom[i]   = 0;
+    scratch.queryOrderPos[i]      = kUnmappedTargetIdx;
+    scratch.targetAtomForQuery[i] = kUnmappedTargetIdx;
   }
 
   if (laneRank == 0) {

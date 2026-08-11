@@ -116,6 +116,8 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
   }
   block.sync();
 
+  initializePairSubstructureScratchCooperative(group, targetView, mySubstructureScratch);
+
   QueuedT&      myCurrent               = current[groupId];
   QueuedT&      myBiggest               = biggest[groupId];
   NewBond*      myNewBonds              = newBondsArr[groupId];
