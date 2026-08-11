@@ -447,8 +447,13 @@ void launchTierAsync(std::span<const DevicePerPairInput> hostPairInputs,
   // kernel's per-group state arrays stay statically sized.
   dim3 grid(static_cast<unsigned>(numPairs));
   dim3 block(static_cast<unsigned>(blockThreads));
-  fmcsKernel<maxAtoms, maxBonds, blockThreads, Policy, kUseGlobalSubstructureScratch<blockThreads, maxAtoms>>
-    <<<grid, block, 0, stream>>>(bufs.pairInputs.data(),
+  constexpr size_t pairDataCacheBytes = sizeof(FmcsPairDataCache<maxAtoms, maxBonds>);
+  auto kernel = fmcsKernel<maxAtoms, maxBonds, blockThreads, Policy, kUseGlobalSubstructureScratch<blockThreads, maxAtoms>>;
+  checkCuda(cudaFuncSetAttribute(kernel,
+                                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 static_cast<int>(pairDataCacheBytes)),
+            "cudaFuncSetAttribute (fMCS pair-data cache)");
+  kernel<<<grid, block, pairDataCacheBytes, stream>>>(bufs.pairInputs.data(),
                                  dResults,
                                  dQueue,
                                  dScratch,

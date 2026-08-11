@@ -4,6 +4,7 @@
 #ifndef FMCS_CUDA_FMCS_KERNEL_CUH
 #define FMCS_CUDA_FMCS_KERNEL_CUH
 
+#include "src/mcs/fmcs_cuda/fmcs_pair_data_cache.cuh"
 #include "src/mcs/fmcs_cuda/fmcs_search_support.cuh"
 
 namespace mcs {
@@ -49,6 +50,7 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
   __shared__ int                         bestCopyLock;
   __shared__ DeviceCsrView               queryView;
   __shared__ DeviceCsrView               targetView;
+  __shared__ PairMatchTablesDevice       cachedTables;
   __shared__ FmcsPairMatchCache<maxBonds, maxAtoms> pairMatchCache;
   __shared__ bool                        overflowed;
   __shared__ bool                        timedOut;
@@ -83,6 +85,9 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
   __shared__
     typename Seed<maxAtoms, maxBonds>::bond_word_type initialExcludedBonds[Seed<maxAtoms, maxBonds>::kBondWords];
 
+  extern __shared__ __align__(16) unsigned char pairDataCacheStorage[];
+  auto& pairDataCache = *reinterpret_cast<FmcsPairDataCache<maxAtoms, maxBonds>*>(pairDataCacheStorage);
+
   auto                  group                 = cg::tiled_partition<kFmcsGroupSize>(block);
   const int             groupId               = static_cast<int>(block.thread_rank()) / kFmcsGroupSize;
   const int             groupRank             = static_cast<int>(group.thread_rank());
@@ -101,23 +106,29 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
     phase2Done   = false;
     startClock   = clock64();
 
-    queryView.rowOffsets    = pair.queryRowOffsets;
-    queryView.colIndices    = pair.queryColIndices;
-    queryView.bondIndices   = pair.queryBondIndices;
-    queryView.bondEndpoints = pair.queryBondEndpoints;
-    queryView.numAtoms      = pair.queryNumAtoms;
-    queryView.numBonds      = pair.queryNumBonds;
-
-    targetView.rowOffsets    = pair.targetRowOffsets;
-    targetView.colIndices    = pair.targetColIndices;
-    targetView.bondIndices   = pair.targetBondIndices;
-    targetView.bondEndpoints = pair.targetBondEndpoints;
-    targetView.numAtoms      = pair.targetNumAtoms;
-    targetView.numBonds      = pair.targetNumBonds;
   }
   block.sync();
 
-  initializePairMatchCacheCooperative(block, targetView, pair.tables, pairMatchCache);
+  initializePairDataCacheCooperative(block,
+                                     pair.queryNumAtoms,
+                                     pair.queryNumBonds,
+                                     pair.queryRowOffsets,
+                                     pair.queryColIndices,
+                                     pair.queryBondIndices,
+                                     pair.queryBondEndpoints,
+                                     pair.targetNumAtoms,
+                                     pair.targetNumBonds,
+                                     pair.targetRowOffsets,
+                                     pair.targetColIndices,
+                                     pair.targetBondIndices,
+                                     pair.targetBondEndpoints,
+                                     pair.tables,
+                                     pairDataCache,
+                                     queryView,
+                                     targetView,
+                                     cachedTables);
+
+  initializePairMatchCacheCooperative(block, targetView, cachedTables, pairMatchCache);
 
   initializePairSubstructureScratchCooperative(group, targetView, mySubstructureScratch);
 
@@ -168,7 +179,7 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
                                                &remainingStackSize[groupId]);
 
       const bool matched = matchInitialSingleBondCooperative(
-        group, qBond, queryView, targetView, pair.tables, myCurrent.match);
+        group, qBond, queryView, targetView, cachedTables, myCurrent.match);
       if (matched) {
         updateIncumbentCooperative(group, myCurrent, best, &bestScore, &bestCopyLock);
         if (!pushBackCooperative(group, queue, myCurrent)) {
@@ -288,7 +299,7 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
                                                            myBiggest,
                                                            queryView,
                                                            targetView,
-                                                           pair.tables,
+                                                           cachedTables,
                                                            mySubstructureScratch,
                                                            pairMatchCache);
         if (groupRank == 0)
@@ -356,7 +367,7 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
                                                            myBiggest,
                                                            queryView,
                                                            targetView,
-                                                           pair.tables,
+                                                           cachedTables,
                                                            mySubstructureScratch,
                                                            pairMatchCache);
         if (ok) {
@@ -438,7 +449,7 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
                                                              myBiggest,
                                                              queryView,
                                                              targetView,
-                                                             pair.tables,
+                                                             cachedTables,
                                                              mySubstructureScratch,
                                                              pairMatchCache);
           if (ok) {
