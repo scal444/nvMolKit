@@ -17,6 +17,7 @@
 #define FMCS_CUDA_FMCS_MATCH_CUH
 
 #include <cstdint>
+#include <type_traits>
 
 #include "src/mcs/fmcs_cuda/fmcs.cuh"
 #include "src/mcs/fmcs_cuda/fmcs_match_tables.cuh"
@@ -54,6 +55,15 @@ struct SingleBondMatch {
   uint8_t targetBond;
 };
 
+template <int maxAtoms, bool enabled = (maxAtoms == 32 || maxAtoms == 64)> struct FmcsKfExactScratch {
+  std::uint8_t unused;
+};
+
+template <int maxAtoms> struct FmcsKfExactScratch<maxAtoms, true> {
+  std::uint16_t backEdges[maxAtoms][kMaxNeighborsPerAtom];
+  std::uint8_t  backEdgeCounts[maxAtoms];
+};
+
 /// Scratch for the exact substructure fallback.  One instance per
 /// concurrently-searching group; all fields are written under the caller's
 /// scratch ownership rules (see matchSeedWithSubstructureFallbackCooperative).
@@ -70,6 +80,10 @@ template <int maxAtoms, int maxTargetAtoms> struct FmcsSubstructureScratch {
   std::uint8_t targetAtomForQuery[maxAtoms];  ///< The winning embedding, indexed by query atom.
   int          found;                         ///< Lanes race on this via atomicCAS; also the abort signal.
 
+  /// Kernel Factory's specialized exact-matcher frontend for tiers 32/64.
+  /// Each back edge packs the earlier depth and query bond into two bytes.
+  FmcsKfExactScratch<maxAtoms> kf;
+
   /// Back-edge table and per-depth candidates for the shared frontend
   /// (src/subgraph/candidate_tables.cuh).  One group per instance, hence a single
   /// warp slot.  No adjacency tables: MCS keys edges on query bond index, so
@@ -77,16 +91,16 @@ template <int maxAtoms, int maxTargetAtoms> struct FmcsSubstructureScratch {
   nvMolKit::subgraph::WarpSharedState<kFmcsMaskAtoms<maxTargetAtoms>, maxAtoms, 1, false> tables;
 };
 
-constexpr int kFmcsCachedBondClasses = 4;
-
 template <int maxBonds, int maxTargetAtoms> struct FmcsPairMatchCache {
   using QuerySeed    = Seed<maxTargetAtoms, maxBonds>;
   using QueryBondWord = typename QuerySeed::bond_word_type;
+  static constexpr int kNumCachedBondClasses =
+    (maxTargetAtoms == 32 || maxTargetAtoms == 64) ? 8 : 4;
 
   int          numBondClasses;
   std::uint8_t bondClass[maxBonds];
-  std::uint8_t representative[kFmcsCachedBondClasses];
-  FmcsTargetMask<maxTargetAtoms> neighbors[kFmcsCachedBondClasses][maxTargetAtoms];
+  std::uint8_t representative[kNumCachedBondClasses];
+  FmcsTargetMask<maxTargetAtoms> neighbors[kNumCachedBondClasses][maxTargetAtoms];
   QueryBondWord incidentQueryBonds[maxTargetAtoms][QuerySeed::kBondWords];
   /// degreeAtLeast[d] = target atoms whose full degree is at least d.  This is
   /// target-only pair state, shared by every concurrently searching group.
@@ -147,7 +161,7 @@ __device__ __forceinline__ void initializePairMatchCacheCooperative(
         }
       }
       if (matchedClass < 0) {
-        if (numClasses == kFmcsCachedBondClasses) {
+        if (numClasses == Cache::kNumCachedBondClasses) {
           numClasses = 0;
           break;
         }
@@ -874,6 +888,185 @@ __device__ __forceinline__ bool prepareSeedSubstructureSearchCooperative(
   return true;
 }
 
+template <int maxTargetAtoms>
+using FmcsKfWord = std::conditional_t<(maxTargetAtoms <= 32), std::uint32_t, std::uint64_t>;
+
+template <int maxTargetAtoms>
+__device__ __forceinline__ FmcsKfWord<maxTargetAtoms> fmcsKfMaskBits(const FmcsTargetMask<maxTargetAtoms>& mask) {
+  static_assert(maxTargetAtoms == 32 || maxTargetAtoms == 64);
+  if constexpr (maxTargetAtoms == 32)
+    return mask.bits;
+  else
+    return mask.lo;
+}
+
+template <class Word> __device__ __forceinline__ int fmcsKfLowestBit(Word value) {
+  if constexpr (sizeof(Word) == 4)
+    return __ffs(static_cast<int>(value)) - 1;
+  else
+    return __ffsll(static_cast<long long>(value)) - 1;
+}
+
+template <int maxAtoms, int maxBonds, int maxTA, class GroupT>
+__device__ __forceinline__ void prepareKfExactMatcherCooperative(
+  const GroupT&                                      group,
+  const Seed<maxAtoms, maxBonds>&                    seed,
+  const DeviceCsrView&                               queryTopology,
+  const PairMatchTablesDevice&                       tables,
+  const FmcsPairMatchCache<maxBonds, maxTA>&         pairCache,
+  FmcsSubstructureScratch<maxAtoms, maxTA>&          scratch,
+  int                                                numSeedAtoms) {
+  static_assert((maxAtoms == 32 || maxAtoms == 64) && maxAtoms == maxBonds && maxAtoms == maxTA);
+  const int laneRank  = static_cast<int>(group.thread_rank());
+  const int laneCount = static_cast<int>(group.num_threads());
+
+  for (int depth = laneRank; depth < numSeedAtoms; depth += laneCount) {
+    const int queryAtom = scratch.seedAtoms[depth];
+    auto candidates = atomRowMask<maxTA>(tables.atoms, queryAtom);
+    candidates.andEq(
+      pairCache.degreeAtLeast[min(static_cast<int>(scratch.seedDegree[queryAtom]), kFmcsMaxSeedDegree)]);
+    scratch.tables.depthCandidates[0][depth] = candidates;
+
+    int           count = 0;
+    std::uint64_t seen  = 0;
+    const int begin = static_cast<int>(queryTopology.rowOffsets[queryAtom]);
+    const int end   = static_cast<int>(queryTopology.rowOffsets[queryAtom + 1]);
+    for (int adjacency = begin; adjacency < end && count < kMaxNeighborsPerAtom; ++adjacency) {
+      const int queryBond = static_cast<int>(queryTopology.bondIndices[adjacency]);
+      if (!seedContainsBondWithinThread<maxAtoms, maxBonds>(seed, queryBond))
+        continue;
+      const int otherQueryAtom = static_cast<int>(queryTopology.colIndices[adjacency]);
+      const int otherDepth     = static_cast<int>(scratch.queryOrderPos[otherQueryAtom]);
+      if (otherDepth == kUnmappedTargetIdx || otherDepth >= depth)
+        continue;
+      const std::uint64_t depthMask = 1ULL << otherDepth;
+      if ((seen & depthMask) != 0)
+        continue;
+      seen |= depthMask;
+      scratch.kf.backEdges[depth][count++] =
+        static_cast<std::uint16_t>(otherDepth | (queryBond << 8));
+    }
+    scratch.kf.backEdgeCounts[depth] = static_cast<std::uint8_t>(count);
+  }
+  group.sync();
+}
+
+template <int maxAtoms, int maxBonds, int maxTA, int maxTB>
+__device__ __forceinline__ FmcsKfWord<maxTA> fmcsKfCandidatesAt(
+  int                                                depth,
+  const unsigned char*                               mapping,
+  FmcsKfWord<maxTA>                                  used,
+  const DeviceCsrView&                               targetTopology,
+  const PairMatchTablesDevice&                       tables,
+  const FmcsPairMatchCache<maxBonds, maxTA>&         pairCache,
+  const FmcsSubstructureScratch<maxAtoms, maxTA>&    scratch) {
+  using Word = FmcsKfWord<maxTA>;
+  Word candidates = fmcsKfMaskBits<maxTA>(scratch.tables.depthCandidates[0][depth]) & ~used;
+  const int backEdgeCount = scratch.kf.backEdgeCounts[depth];
+  for (int i = 0; i < backEdgeCount && candidates != 0; ++i) {
+    const std::uint16_t backEdge  = scratch.kf.backEdges[depth][i];
+    const int           mapped    = mapping[backEdge & 0xFFu];
+    const int           queryBond = backEdge >> 8;
+    const int           bondClass = pairCache.numBondClasses > 0 ? pairCache.bondClass[queryBond] : -1;
+    if (bondClass >= 0) {
+      candidates &= fmcsKfMaskBits<maxTA>(pairCache.neighbors[bondClass][mapped]);
+      continue;
+    }
+
+    Word neighbors = 0;
+    const int begin = static_cast<int>(targetTopology.rowOffsets[mapped]);
+    const int end   = static_cast<int>(targetTopology.rowOffsets[mapped + 1]);
+    for (int adjacency = begin; adjacency < end; ++adjacency) {
+      const int targetBond = static_cast<int>(targetTopology.bondIndices[adjacency]);
+      if (targetBond >= 0 && targetBond < maxTB && tables.bonds.testBit(queryBond, targetBond))
+        neighbors |= static_cast<Word>(1) << static_cast<int>(targetTopology.colIndices[adjacency]);
+    }
+    candidates &= neighbors;
+  }
+  return candidates;
+}
+
+template <int maxAtoms, int maxBonds, int maxTA, int maxTB, class GroupT>
+__device__ __forceinline__ bool runKfExactMatcherCooperative(
+  const GroupT&                                      group,
+  const Seed<maxAtoms, maxBonds>&                    seed,
+  const DeviceCsrView&                               targetTopology,
+  const PairMatchTablesDevice&                       tables,
+  const FmcsPairMatchCache<maxBonds, maxTA>&         pairCache,
+  FmcsSubstructureScratch<maxAtoms, maxTA>&          scratch,
+  int                                                numSeedAtoms) {
+  static_assert((maxAtoms == 32 || maxAtoms == 64) && maxAtoms == maxBonds && maxAtoms == maxTA && maxTA == maxTB);
+  using Word = FmcsKfWord<maxTA>;
+  const int laneRank  = static_cast<int>(group.thread_rank());
+  const int laneCount = static_cast<int>(group.num_threads());
+
+  Word laneStripe = 0;
+#pragma unroll
+  for (int atom = laneRank; atom < maxTA; atom += laneCount)
+    laneStripe |= static_cast<Word>(1) << atom;
+  Word roots = fmcsKfMaskBits<maxTA>(scratch.tables.depthCandidates[0][0]) & laneStripe;
+
+  if (numSeedAtoms == 1) {
+    int lowest = roots == 0 ? maxTA : fmcsKfLowestBit(roots);
+    for (int offset = laneCount / 2; offset > 0; offset >>= 1)
+      lowest = min(lowest, group.shfl_xor(lowest, offset));
+    if (lowest >= maxTA)
+      return false;
+    if (laneRank == 0) {
+      scratch.targetAtomForQuery[scratch.seedAtoms[0]] = static_cast<std::uint8_t>(lowest);
+      scratch.found = 1;
+    }
+    group.sync();
+    return true;
+  }
+
+  const int lastDepth = numSeedAtoms - 1;
+  Word remaining[maxAtoms];
+  unsigned char mapping[maxAtoms];
+  int poll = 0;
+
+  while (roots != 0) {
+    if (*reinterpret_cast<volatile int*>(&scratch.found) != 0)
+      break;
+    const int rootAtom = fmcsKfLowestBit(roots);
+    roots &= roots - 1;
+
+    Word used    = static_cast<Word>(1) << rootAtom;
+    mapping[0]   = static_cast<unsigned char>(rootAtom);
+    int depth    = 1;
+    remaining[1] = fmcsKfCandidatesAt<maxAtoms, maxBonds, maxTA, maxTB>(
+      1, mapping, used, targetTopology, tables, pairCache, scratch);
+
+    while (depth >= 1) {
+      if (depth == lastDepth && remaining[depth] != 0) {
+        if (atomicCAS(&scratch.found, 0, 1) == 0) {
+          for (int orderPos = 0; orderPos < lastDepth; ++orderPos)
+            scratch.targetAtomForQuery[scratch.seedAtoms[orderPos]] = mapping[orderPos];
+          scratch.targetAtomForQuery[scratch.seedAtoms[lastDepth]] =
+            static_cast<std::uint8_t>(fmcsKfLowestBit(remaining[depth]));
+        }
+        return true;
+      }
+      if (remaining[depth] == 0) {
+        --depth;
+        if (depth >= 1)
+          used &= ~(static_cast<Word>(1) << mapping[depth]);
+        continue;
+      }
+      if (((++poll) & 127) == 0 && *reinterpret_cast<volatile int*>(&scratch.found) != 0)
+        return false;
+      const int candidate = fmcsKfLowestBit(remaining[depth]);
+      remaining[depth] &= remaining[depth] - 1;
+      mapping[depth] = static_cast<unsigned char>(candidate);
+      used |= static_cast<Word>(1) << candidate;
+      ++depth;
+      remaining[depth] = fmcsKfCandidatesAt<maxAtoms, maxBonds, maxTA, maxTB>(
+        depth, mapping, used, targetTopology, tables, pairCache, scratch);
+    }
+  }
+  return false;
+}
+
 /// Presents a seed inside its query molecule to the shared subgraph frontend
 /// (src/subgraph/candidate_tables.cuh).
 ///
@@ -1012,6 +1205,29 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(const GroupT&  
   if (prepared == 2)
     return true;
   if (prepared < 0) {
+    return false;
+  }
+
+  if constexpr ((maxAtoms == 32 || maxAtoms == 64) && maxAtoms == maxBonds && maxAtoms == maxTA && maxTA == maxTB) {
+    prepareKfExactMatcherCooperative(
+      group, seed, queryTopology, tables, pairCache, scratch, numSeedAtoms);
+    runKfExactMatcherCooperative<maxAtoms, maxBonds, maxTA, maxTB>(
+      group, seed, targetTopology, tables, pairCache, scratch, numSeedAtoms);
+    group.sync();
+
+    int found = scratch.found;
+    if (found != 0) {
+      found = rebuildMatchFromSubstructureMappingCooperative(
+                group, seed, queryTopology, targetTopology, tables, match, scratch) ?
+                1 :
+                0;
+      found = group.shfl(found, 0);
+      return found != 0;
+    }
+
+    if (laneRank == 0)
+      matchResultClearWithinThread(match);
+    group.sync();
     return false;
   }
 

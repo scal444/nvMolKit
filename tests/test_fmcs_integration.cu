@@ -527,6 +527,8 @@ TEST(FMCSIntegration, CuratedHigherTierChemblPairsMatchRDKitExactly) {
   // exact RDKit comparison prohibitively expensive for a PR integration test.
   // clang-format off
   const TierCase cases[] = {
+    {"CCCCCCCCCCCCCCCCCCCC",
+     "CCO", 16, 32, true},
     {"CCCCCCCCCCCCCC(=O)NCc1ccc(C(=O)N[C@H](C(=O)O)[C@@H](C)CC)cc1",
      "CCO", 32, 64, true},
     {"C#C/C=C\\CCCCCCCCCCCCCC/C=C\\CCCCC(O)/C=C/CCCC#C[C@H](O)C#CCCCCCC/C=C/[C@@H](O)C#C",

@@ -16,6 +16,9 @@ namespace fmcs {
 template <int blockThreads, int maxAtoms>
 inline constexpr bool kUseGlobalSubstructureScratch = maxAtoms == 128 && blockThreads >= 256;
 
+template <int blockThreads, int maxAtoms>
+inline constexpr bool kUseDynamicSubstructureScratch = maxAtoms == 64 && blockThreads == 512;
+
 template <int maxAtoms, int maxBonds, int blockThreads, class Policy, bool GlobalSubstructureScratch = false>
 __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
                            DeviceMCSResult<maxAtoms, maxBonds>* __restrict__ results,
@@ -35,6 +38,12 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
   using SubstructureScratchT        = FmcsSubstructureScratch<maxAtoms, maxAtoms>;
   constexpr int kMaxNewBondsForTier = maxBonds;
   constexpr int kNumGroups          = FmcsBlockConfig<blockThreads>::numGroups;
+  constexpr size_t kPairDataCacheBytes = sizeof(FmcsPairDataCache<maxAtoms, maxBonds>);
+  constexpr size_t kScratchAlignment   = alignof(SubstructureScratchT);
+  constexpr size_t kDynamicScratchOffset =
+    (kPairDataCacheBytes + kScratchAlignment - 1) & ~(kScratchAlignment - 1);
+
+  extern __shared__ __align__(16) unsigned char dynamicSharedStorage[];
 
   // Block-shared resources: the queue, the incumbent, and the early-exit
   // flags are visible to every group. Cross-group queue/incumbent updates use
@@ -59,6 +68,9 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
   SubstructureScratchT*                  substructureScratch;
   if constexpr (GlobalSubstructureScratch) {
     substructureScratch = scratchStorageAll + static_cast<size_t>(pairIdx) * kNumGroups;
+  } else if constexpr (kUseDynamicSubstructureScratch<blockThreads, maxAtoms>) {
+    (void)scratchStorageAll;
+    substructureScratch = reinterpret_cast<SubstructureScratchT*>(dynamicSharedStorage + kDynamicScratchOffset);
   } else {
     (void)scratchStorageAll;
     __shared__ SubstructureScratchT sharedSubstructureScratch[kNumGroups];
@@ -85,8 +97,7 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
   __shared__ FmcsRemainingSerialScratch<maxAtoms> remainingSerialScratch[kNumGroups];
   __shared__ SingleBondMatch initialBondMatches[maxBonds];
 
-  extern __shared__ __align__(16) unsigned char pairDataCacheStorage[];
-  auto& pairDataCache = *reinterpret_cast<FmcsPairDataCache<maxAtoms, maxBonds>*>(pairDataCacheStorage);
+  auto& pairDataCache = *reinterpret_cast<FmcsPairDataCache<maxAtoms, maxBonds>*>(dynamicSharedStorage);
 
   auto                  group                 = cg::tiled_partition<kFmcsGroupSize>(block);
   const int             groupId               = static_cast<int>(block.thread_rank()) / kFmcsGroupSize;

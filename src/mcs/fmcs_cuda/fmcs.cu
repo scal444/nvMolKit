@@ -448,12 +448,20 @@ void launchTierAsync(std::span<const DevicePerPairInput> hostPairInputs,
   dim3 grid(static_cast<unsigned>(numPairs));
   dim3 block(static_cast<unsigned>(blockThreads));
   constexpr size_t pairDataCacheBytes = sizeof(FmcsPairDataCache<maxAtoms, maxBonds>);
+  using KernelScratchT = FmcsSubstructureScratch<maxAtoms, maxAtoms>;
+  constexpr size_t scratchAlignment = alignof(KernelScratchT);
+  constexpr size_t scratchOffset =
+    (pairDataCacheBytes + scratchAlignment - 1) & ~(scratchAlignment - 1);
+  constexpr size_t dynamicSharedBytes = kUseDynamicSubstructureScratch<blockThreads, maxAtoms> ?
+                                          scratchOffset +
+                                            FmcsBlockConfig<blockThreads>::numGroups * sizeof(KernelScratchT) :
+                                          pairDataCacheBytes;
   auto kernel = fmcsKernel<maxAtoms, maxBonds, blockThreads, Policy, kUseGlobalSubstructureScratch<blockThreads, maxAtoms>>;
   checkCuda(cudaFuncSetAttribute(kernel,
                                  cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                 static_cast<int>(pairDataCacheBytes)),
+                                 static_cast<int>(dynamicSharedBytes)),
             "cudaFuncSetAttribute (fMCS pair-data cache)");
-  kernel<<<grid, block, pairDataCacheBytes, stream>>>(bufs.pairInputs.data(),
+  kernel<<<grid, block, dynamicSharedBytes, stream>>>(bufs.pairInputs.data(),
                                  dResults,
                                  dQueue,
                                  dScratch,
