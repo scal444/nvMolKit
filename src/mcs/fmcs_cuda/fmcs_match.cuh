@@ -209,6 +209,65 @@ __device__ __forceinline__ bool matchSingleBondWithinThread(const int           
   return true;
 }
 
+template <int maxAtoms, int maxBonds, int maxTA, int maxTB, class GroupT>
+__device__ __forceinline__ bool matchInitialSingleBondCooperative(
+  const GroupT&                                  group,
+  const int                                      queryBondIdx,
+  const DeviceCsrView&                           queryTopology,
+  const DeviceCsrView&                           targetTopology,
+  const PairMatchTablesDevice&                   tables,
+  MatchResult<maxAtoms, maxBonds, maxTA, maxTB>& match) {
+  const int laneRank  = static_cast<int>(group.thread_rank());
+  const int laneCount = static_cast<int>(group.num_threads());
+
+  for (int base = 0; base < targetTopology.numBonds; base += laneCount) {
+    const int targetBondIdx = base + laneRank;
+    SingleBondMatch resolved{};
+    bool found = false;
+    if (targetBondIdx < targetTopology.numBonds) {
+      found = matchSingleBondWithinThread(
+        queryBondIdx, targetBondIdx, false, queryTopology, targetTopology, tables, resolved);
+      if (!found) {
+        found = matchSingleBondWithinThread(
+          queryBondIdx, targetBondIdx, true, queryTopology, targetTopology, tables, resolved);
+      }
+    }
+
+    const unsigned winners = group.ballot(found ? 1u : 0u);
+    if (winners == 0)
+      continue;
+
+    const int winnerLane  = __ffs(winners) - 1;
+    const int targetAtomU = group.shfl(static_cast<int>(resolved.targetAtomU), winnerLane);
+    const int targetAtomV = group.shfl(static_cast<int>(resolved.targetAtomV), winnerLane);
+    const int targetBond  = base + winnerLane;
+    if (laneRank == 0) {
+      const std::uint32_t queryEndpoints = queryTopology.bondEndpoints[queryBondIdx];
+      const int queryAtomU = static_cast<int>(queryEndpoints >> kBondEndpointShift);
+      const int queryAtomV = static_cast<int>(queryEndpoints & kBondEndpointMask);
+
+      match.targetAtomIdx[queryAtomU] = static_cast<std::uint8_t>(targetAtomU);
+      match.targetAtomIdx[queryAtomV] = static_cast<std::uint8_t>(targetAtomV);
+      match.targetBondIdx[queryBondIdx] = static_cast<std::uint8_t>(targetBond);
+      match.visitedTargetAtoms[targetAtomU / MatchResult<maxAtoms, maxBonds, maxTA, maxTB>::kTargetAtomBitsPerWord] |=
+        static_cast<typename MatchResult<maxAtoms, maxBonds, maxTA, maxTB>::target_atom_word>(1)
+        << (targetAtomU % MatchResult<maxAtoms, maxBonds, maxTA, maxTB>::kTargetAtomBitsPerWord);
+      match.visitedTargetAtoms[targetAtomV / MatchResult<maxAtoms, maxBonds, maxTA, maxTB>::kTargetAtomBitsPerWord] |=
+        static_cast<typename MatchResult<maxAtoms, maxBonds, maxTA, maxTB>::target_atom_word>(1)
+        << (targetAtomV % MatchResult<maxAtoms, maxBonds, maxTA, maxTB>::kTargetAtomBitsPerWord);
+      match.visitedTargetBonds[targetBond / MatchResult<maxAtoms, maxBonds, maxTA, maxTB>::kTargetBondBitsPerWord] |=
+        static_cast<typename MatchResult<maxAtoms, maxBonds, maxTA, maxTB>::target_bond_word>(1)
+        << (targetBond % MatchResult<maxAtoms, maxBonds, maxTA, maxTB>::kTargetBondBitsPerWord);
+      match.matchedAtomSize = 2;
+      match.matchedBondSize = 1;
+      match.empty           = false;
+    }
+    group.sync();
+    return true;
+  }
+  return false;
+}
+
 /// Cooperative greedy fast path: try to extend @p match by every query
 /// bond in @p seed.bonds whose @c match.targetBondIdx[q] is still
 /// @ref kUnmappedTargetIdx (i.e., unmapped by the parent's recorded

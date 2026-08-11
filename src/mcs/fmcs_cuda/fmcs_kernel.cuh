@@ -167,8 +167,8 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
                                                myRemainingVisitedBonds,
                                                &remainingStackSize[groupId]);
 
-      const bool matched = checkSeedMatchAndAppendCooperative(
-        group, myCurrent, queryView, targetView, pair.tables, mySubstructureScratch, pairMatchCache);
+      const bool matched = matchInitialSingleBondCooperative(
+        group, qBond, queryView, targetView, pair.tables, myCurrent.match);
       if (matched) {
         updateIncumbentCooperative(group, myCurrent, best, &bestScore, &bestCopyLock);
         if (!pushBackCooperative(group, queue, myCurrent)) {
