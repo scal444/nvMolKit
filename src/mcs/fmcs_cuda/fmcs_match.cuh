@@ -578,8 +578,9 @@ __device__ __forceinline__ bool findTargetBondBetweenAtomsWithinThread(const int
   return false;
 }
 
-template <int maxAtoms, int maxBonds, int maxTA, int maxTB>
-__device__ __forceinline__ bool rebuildMatchFromSubstructureMappingWithinThread(
+template <int maxAtoms, int maxBonds, int maxTA, int maxTB, class GroupT>
+__device__ __forceinline__ bool rebuildMatchFromSubstructureMappingCooperative(
+  const GroupT&                                  group,
   const Seed<maxAtoms, maxBonds>&                seed,
   const DeviceCsrView&                           queryTopology,
   const DeviceCsrView&                           targetTopology,
@@ -593,43 +594,74 @@ __device__ __forceinline__ bool rebuildMatchFromSubstructureMappingWithinThread(
   using TargetAtomWord = typename MatchT::target_atom_word;
 
   constexpr int kBondBitsPerWord       = SeedT::kBondBitsPerWord;
-  constexpr int kBondWords             = SeedT::kBondWords;
   constexpr int kTargetAtomBitsPerWord = MatchT::kTargetAtomBitsPerWord;
   constexpr int kTargetBondBitsPerWord = MatchT::kTargetBondBitsPerWord;
+  static_assert(MatchT::kTargetAtomWords <= 2 && MatchT::kTargetBondWords <= 2,
+                "cooperative fMCS match reconstruction supports up to two target bitset words");
 
-  matchResultClearWithinThread(match);
-  for (int i = 0; i < seed.numAtoms; ++i) {
+  const int laneRank  = static_cast<int>(group.thread_rank());
+  const int laneCount = static_cast<int>(group.num_threads());
+  if (laneRank == 0)
+    matchResultClearWithinThread(match);
+  group.sync();
+
+  TargetAtomWord visitedAtoms0 = 0;
+  TargetAtomWord visitedAtoms1 = 0;
+  bool           atomsOk       = true;
+  for (int i = laneRank; i < seed.numAtoms; i += laneCount) {
     const int queryAtomIdx  = scratch.seedAtomList[i];
     const int targetAtomIdx = scratch.targetAtomForQuery[queryAtomIdx];
-    if (targetAtomIdx == kUnmappedTargetIdx)
-      return false;
+    if (targetAtomIdx == kUnmappedTargetIdx) {
+      atomsOk = false;
+      continue;
+    }
     match.targetAtomIdx[queryAtomIdx] = static_cast<std::uint8_t>(targetAtomIdx);
-    match.visitedTargetAtoms[targetAtomIdx / kTargetAtomBitsPerWord] |= static_cast<TargetAtomWord>(1)
-                                                                     << (targetAtomIdx % kTargetAtomBitsPerWord);
+    const TargetAtomWord mask = static_cast<TargetAtomWord>(1) << (targetAtomIdx % kTargetAtomBitsPerWord);
+    if (targetAtomIdx / kTargetAtomBitsPerWord == 0)
+      visitedAtoms0 |= mask;
+    else
+      visitedAtoms1 |= mask;
   }
-  match.matchedAtomSize = seed.numAtoms;
+  for (int offset = laneCount / 2; offset > 0; offset >>= 1) {
+    visitedAtoms0 |= group.shfl_xor(visitedAtoms0, offset);
+    visitedAtoms1 |= group.shfl_xor(visitedAtoms1, offset);
+  }
+  int atomCount;
+  if constexpr (sizeof(TargetAtomWord) == 4)
+    atomCount = __popc(static_cast<unsigned int>(visitedAtoms0));
+  else
+    atomCount = __popcll(static_cast<unsigned long long>(visitedAtoms0));
+  if constexpr (MatchT::kTargetAtomWords == 2)
+    atomCount += __popcll(static_cast<unsigned long long>(visitedAtoms1));
+  if (group.ballot(atomsOk ? 0u : 1u) != 0 || atomCount != seed.numAtoms) {
+    if (laneRank == 0)
+      matchResultClearWithinThread(match);
+    group.sync();
+    return false;
+  }
+  if (laneRank == 0) {
+    match.visitedTargetAtoms[0] = visitedAtoms0;
+    if constexpr (MatchT::kTargetAtomWords == 2)
+      match.visitedTargetAtoms[1] = visitedAtoms1;
+    match.matchedAtomSize = seed.numAtoms;
+  }
+  group.sync();
 
-  int matchedBondCount = 0;
-  for (int wordIdx = 0; wordIdx < kBondWords; ++wordIdx) {
-    BondWord remaining = seed.bonds[wordIdx];
-    while (remaining != 0) {
-      int bitPosInWord;
-      if constexpr (sizeof(BondWord) == 4) {
-        bitPosInWord = __ffs(static_cast<unsigned int>(remaining)) - 1;
-      } else {
-        bitPosInWord = __ffsll(static_cast<unsigned long long>(remaining)) - 1;
-      }
-      const int queryBondIdx = wordIdx * kBondBitsPerWord + bitPosInWord;
-      remaining &= remaining - 1;
-
+  TargetBondWord visitedBonds0 = 0;
+  TargetBondWord visitedBonds1 = 0;
+  bool           bondsOk       = true;
+  for (int queryBondIdx = laneRank; queryBondIdx < queryTopology.numBonds; queryBondIdx += laneCount) {
+    const int      wordIdx = queryBondIdx / kBondBitsPerWord;
+    const BondWord mask    = static_cast<BondWord>(1) << (queryBondIdx % kBondBitsPerWord);
+    if ((seed.bonds[wordIdx] & mask) != 0) {
       const std::uint32_t queryEndpoints  = queryTopology.bondEndpoints[queryBondIdx];
       const int           queryEndpointU  = static_cast<int>(queryEndpoints >> kBondEndpointShift);
       const int           queryEndpointV  = static_cast<int>(queryEndpoints & kBondEndpointMask);
-      const int           targetEndpointU = match.targetAtomIdx[queryEndpointU];
-      const int           targetEndpointV = match.targetAtomIdx[queryEndpointV];
+      const int           targetEndpointU = scratch.targetAtomForQuery[queryEndpointU];
+      const int           targetEndpointV = scratch.targetAtomForQuery[queryEndpointV];
       if (targetEndpointU == kUnmappedTargetIdx || targetEndpointV == kUnmappedTargetIdx) {
-        matchResultClearWithinThread(match);
-        return false;
+        bondsOk = false;
+        continue;
       }
 
       int targetBondIdx = -1;
@@ -639,26 +671,43 @@ __device__ __forceinline__ bool rebuildMatchFromSubstructureMappingWithinThread(
                                                   targetTopology,
                                                   tables,
                                                   targetBondIdx)) {
-        matchResultClearWithinThread(match);
-        return false;
-      }
-      const TargetBondWord visitedWord = match.visitedTargetBonds[targetBondIdx / kTargetBondBitsPerWord];
-      if ((visitedWord >> (targetBondIdx % kTargetBondBitsPerWord)) & 1) {
-        matchResultClearWithinThread(match);
-        return false;
+        bondsOk = false;
+        continue;
       }
       match.targetBondIdx[queryBondIdx] = static_cast<std::uint8_t>(targetBondIdx);
-      match.visitedTargetBonds[targetBondIdx / kTargetBondBitsPerWord] |= static_cast<TargetBondWord>(1)
-                                                                       << (targetBondIdx % kTargetBondBitsPerWord);
-      ++matchedBondCount;
+      const TargetBondWord targetMask =
+        static_cast<TargetBondWord>(1) << (targetBondIdx % kTargetBondBitsPerWord);
+      if (targetBondIdx / kTargetBondBitsPerWord == 0)
+        visitedBonds0 |= targetMask;
+      else
+        visitedBonds1 |= targetMask;
     }
   }
-  match.matchedBondSize = static_cast<std::uint16_t>(matchedBondCount);
-  if (matchedBondCount != seed.numBonds) {
-    matchResultClearWithinThread(match);
+  for (int offset = laneCount / 2; offset > 0; offset >>= 1) {
+    visitedBonds0 |= group.shfl_xor(visitedBonds0, offset);
+    visitedBonds1 |= group.shfl_xor(visitedBonds1, offset);
+  }
+  int bondCount;
+  if constexpr (sizeof(TargetBondWord) == 4)
+    bondCount = __popc(static_cast<unsigned int>(visitedBonds0));
+  else
+    bondCount = __popcll(static_cast<unsigned long long>(visitedBonds0));
+  if constexpr (MatchT::kTargetBondWords == 2)
+    bondCount += __popcll(static_cast<unsigned long long>(visitedBonds1));
+  if (group.ballot(bondsOk ? 0u : 1u) != 0 || bondCount != seed.numBonds) {
+    if (laneRank == 0)
+      matchResultClearWithinThread(match);
+    group.sync();
     return false;
   }
-  match.empty = false;
+  if (laneRank == 0) {
+    match.visitedTargetBonds[0] = visitedBonds0;
+    if constexpr (MatchT::kTargetBondWords == 2)
+      match.visitedTargetBonds[1] = visitedBonds1;
+    match.matchedBondSize = static_cast<std::uint16_t>(bondCount);
+    match.empty           = false;
+  }
+  group.sync();
   return true;
 }
 
@@ -987,14 +1036,13 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(const GroupT&  
     }
     if (lowestRoot >= maxTA)
       return false;
-    if (laneRank == 0) {
+    if (laneRank == 0)
       scratch.targetAtomForQuery[firstQueryAtom] = static_cast<std::uint8_t>(lowestRoot);
-      prepared =
-        rebuildMatchFromSubstructureMappingWithinThread(seed, queryTopology, targetTopology, tables, match, scratch) ?
-          1 :
-          -1;
-    }
     group.sync();
+    const bool rebuilt =
+      rebuildMatchFromSubstructureMappingCooperative(group, seed, queryTopology, targetTopology, tables, match, scratch);
+    if (laneRank == 0)
+      prepared = rebuilt ? 1 : -1;
     prepared = group.shfl(prepared, 0);
     return prepared == 1;
   }
@@ -1047,13 +1095,10 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(const GroupT&  
 
   int found = scratch.found;
   if (found != 0) {
-    if (laneRank == 0) {
-      found =
-        rebuildMatchFromSubstructureMappingWithinThread(seed, queryTopology, targetTopology, tables, match, scratch) ?
-          1 :
-          0;
-    }
-    group.sync();
+    found = rebuildMatchFromSubstructureMappingCooperative(
+              group, seed, queryTopology, targetTopology, tables, match, scratch) ?
+              1 :
+              0;
     found = group.shfl(found, 0);
     return found != 0;
   }
