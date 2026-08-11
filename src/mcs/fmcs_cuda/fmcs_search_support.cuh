@@ -304,24 +304,15 @@ __device__ __forceinline__ void seedComputeRemainingSizeRdkitCooperative(
         const int atomIdx = wordIdx * kAtomBitsPerWord + bitPosInWord;
         remaining &= remaining - 1;
 
-        for (int bondIdx = 0; bondIdx < queryTopology.numBonds; ++bondIdx) {
+        const int rowBegin = static_cast<int>(queryTopology.rowOffsets[atomIdx]);
+        const int rowEnd   = static_cast<int>(queryTopology.rowOffsets[atomIdx + 1]);
+        for (int adjacencyIdx = rowBegin; adjacencyIdx < rowEnd; ++adjacencyIdx) {
+          const int      bondIdx     = static_cast<int>(queryTopology.bondIndices[adjacencyIdx]);
           const int      bondWordIdx = bondIdx / kBondBitsPerWord;
           const BondWord bondMask    = static_cast<BondWord>(1) << (bondIdx % kBondBitsPerWord);
           if ((visitedBonds[bondWordIdx] & bondMask) != 0)
             continue;
-
-          const std::uint32_t endpoints = queryTopology.bondEndpoints[bondIdx];
-          const int           endpointU = static_cast<int>(endpoints >> kBondEndpointShift);
-          const int           endpointV = static_cast<int>(endpoints & kBondEndpointMask);
-          int                 otherAtom = -1;
-          if (endpointU == atomIdx) {
-            otherAtom = endpointV;
-          } else if (endpointV == atomIdx) {
-            otherAtom = endpointU;
-          } else {
-            continue;
-          }
-
+          const int otherAtom = static_cast<int>(queryTopology.colIndices[adjacencyIdx]);
           visitedBonds[bondWordIdx] |= bondMask;
           seed.remainingBonds += 1;
           const int      atomWordIdx = otherAtom / kAtomBitsPerWord;
@@ -337,24 +328,15 @@ __device__ __forceinline__ void seedComputeRemainingSizeRdkitCooperative(
 
     while (*stackSize > 0) {
       const int atomIdx = atomStack[--(*stackSize)];
-      for (int bondIdx = 0; bondIdx < queryTopology.numBonds; ++bondIdx) {
+      const int rowBegin = static_cast<int>(queryTopology.rowOffsets[atomIdx]);
+      const int rowEnd   = static_cast<int>(queryTopology.rowOffsets[atomIdx + 1]);
+      for (int adjacencyIdx = rowBegin; adjacencyIdx < rowEnd; ++adjacencyIdx) {
+        const int      bondIdx     = static_cast<int>(queryTopology.bondIndices[adjacencyIdx]);
         const int      bondWordIdx = bondIdx / kBondBitsPerWord;
         const BondWord bondMask    = static_cast<BondWord>(1) << (bondIdx % kBondBitsPerWord);
         if ((visitedBonds[bondWordIdx] & bondMask) != 0)
           continue;
-
-        const std::uint32_t endpoints = queryTopology.bondEndpoints[bondIdx];
-        const int           endpointU = static_cast<int>(endpoints >> kBondEndpointShift);
-        const int           endpointV = static_cast<int>(endpoints & kBondEndpointMask);
-        int                 otherAtom = -1;
-        if (endpointU == atomIdx) {
-          otherAtom = endpointV;
-        } else if (endpointV == atomIdx) {
-          otherAtom = endpointU;
-        } else {
-          continue;
-        }
-
+        const int otherAtom = static_cast<int>(queryTopology.colIndices[adjacencyIdx]);
         visitedBonds[bondWordIdx] |= bondMask;
         seed.remainingBonds += 1;
         const int      atomWordIdx = otherAtom / kAtomBitsPerWord;
