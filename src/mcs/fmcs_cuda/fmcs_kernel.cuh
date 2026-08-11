@@ -127,7 +127,7 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
                                      targetView,
                                      cachedTables);
 
-  initializePairMatchCacheCooperative(block, targetView, cachedTables, pairMatchCache);
+  initializePairMatchCacheCooperative(block, queryView, targetView, cachedTables, pairMatchCache);
 
   initializePairSubstructureScratchCooperative(group, targetView, mySubstructureScratch);
 

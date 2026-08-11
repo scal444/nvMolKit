@@ -86,18 +86,40 @@ template <int maxAtoms, int maxTargetAtoms> struct FmcsSubstructureScratch {
 constexpr int kFmcsCachedBondClasses = 4;
 
 template <int maxBonds, int maxTargetAtoms> struct FmcsPairMatchCache {
+  using QuerySeed    = Seed<maxTargetAtoms, maxBonds>;
+  using QueryBondWord = typename QuerySeed::bond_word_type;
+
   int          numBondClasses;
   std::uint8_t bondClass[maxBonds];
   std::uint8_t representative[kFmcsCachedBondClasses];
   FmcsTargetMask<maxTargetAtoms> neighbors[kFmcsCachedBondClasses][maxTargetAtoms];
+  QueryBondWord incidentQueryBonds[maxTargetAtoms][QuerySeed::kBondWords];
 };
 
 template <int maxBonds, int maxTargetAtoms, class GroupT>
 __device__ __forceinline__ void initializePairMatchCacheCooperative(
   const GroupT&                                      group,
+  const DeviceCsrView&                               queryTopology,
   const DeviceCsrView&                               targetTopology,
   const PairMatchTablesDevice&                       tables,
   FmcsPairMatchCache<maxBonds, maxTargetAtoms>& cache) {
+  using Cache = FmcsPairMatchCache<maxBonds, maxTargetAtoms>;
+  using BondWord = typename Cache::QueryBondWord;
+  constexpr int kBondBitsPerWord = Cache::QuerySeed::kBondBitsPerWord;
+
+  for (int queryAtom = static_cast<int>(group.thread_rank()); queryAtom < queryTopology.numAtoms;
+       queryAtom += static_cast<int>(group.num_threads())) {
+    for (int word = 0; word < Cache::QuerySeed::kBondWords; ++word)
+      cache.incidentQueryBonds[queryAtom][word] = 0;
+    const int begin = static_cast<int>(queryTopology.rowOffsets[queryAtom]);
+    const int end   = static_cast<int>(queryTopology.rowOffsets[queryAtom + 1]);
+    for (int adjacency = begin; adjacency < end; ++adjacency) {
+      const int bond = static_cast<int>(queryTopology.bondIndices[adjacency]);
+      cache.incidentQueryBonds[queryAtom][bond / kBondBitsPerWord] |=
+        static_cast<BondWord>(1) << (bond % kBondBitsPerWord);
+    }
+  }
+
   if (group.thread_rank() == 0) {
     int numClasses = 0;
     for (int queryBond = 0; queryBond < tables.bonds.nRows; ++queryBond) {
@@ -707,6 +729,7 @@ __device__ __forceinline__ bool prepareSeedSubstructureSearchCooperative(
   const DeviceCsrView&                      queryTopology,
   const DeviceCsrView&                      targetTopology,
   const PairMatchTablesDevice&              tables,
+  const FmcsPairMatchCache<maxBonds, maxTA>& pairCache,
   FmcsSubstructureScratch<maxAtoms, maxTA>& scratch,
   int&                                      numSeedAtoms) {
   const int laneRank  = static_cast<int>(group.thread_rank());
@@ -731,19 +754,18 @@ __device__ __forceinline__ bool prepareSeedSubstructureSearchCooperative(
   if (!valid)
     return false;
 
-  // One lane owns each query atom and counts its incident seed bonds from the
-  // shared CSR topology.  This replaces the serial endpoint walk over every
-  // seed bond.
+  // One lane owns each query atom and intersects the seed with the incident
+  // bond mask cached once for this pair.
   for (int queryAtomIdx = laneRank; queryAtomIdx < queryTopology.numAtoms; queryAtomIdx += laneCount) {
     if (!seedContainsAtomWithinThread(seed, queryAtomIdx))
       continue;
     int seedDegree = 0;
-    const int begin = static_cast<int>(queryTopology.rowOffsets[queryAtomIdx]);
-    const int end   = static_cast<int>(queryTopology.rowOffsets[queryAtomIdx + 1]);
-    for (int adjIdx = begin; adjIdx < end; ++adjIdx) {
-      const int queryBondIdx = static_cast<int>(queryTopology.bondIndices[adjIdx]);
-      seedDegree += queryBondIdx < queryTopology.numBonds &&
-                    seedContainsBondWithinThread<maxAtoms, maxBonds>(seed, queryBondIdx);
+    for (int word = 0; word < Seed<maxAtoms, maxBonds>::kBondWords; ++word) {
+      const auto incidentSeedBonds = pairCache.incidentQueryBonds[queryAtomIdx][word] & seed.bonds[word];
+      if constexpr (sizeof(incidentSeedBonds) == 4)
+        seedDegree += __popc(static_cast<unsigned int>(incidentSeedBonds));
+      else
+        seedDegree += __popcll(static_cast<unsigned long long>(incidentSeedBonds));
     }
     scratch.seedDegree[queryAtomIdx] = static_cast<std::uint8_t>(seedDegree);
   }
@@ -952,7 +974,7 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(const GroupT&  
       prepared = (seed.numBonds == 0) ? 2 : -1;
   } else {
     prepared = prepareSeedSubstructureSearchCooperative(
-                 group, seed, queryTopology, targetTopology, tables, scratch, numSeedAtoms) ?
+                 group, seed, queryTopology, targetTopology, tables, pairCache, scratch, numSeedAtoms) ?
                  1 :
                  -1;
   }
