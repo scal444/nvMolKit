@@ -82,8 +82,7 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
   __shared__ typename Seed<maxAtoms, maxBonds>::bond_word_type
                  remainingVisitedBonds[kNumGroups][Seed<maxAtoms, maxBonds>::kBondWords];
   __shared__ int remainingStackSize[kNumGroups];
-  __shared__
-    typename Seed<maxAtoms, maxBonds>::bond_word_type initialExcludedBonds[Seed<maxAtoms, maxBonds>::kBondWords];
+  __shared__ SingleBondMatch initialBondMatches[maxBonds];
 
   extern __shared__ __align__(16) unsigned char pairDataCacheStorage[];
   auto& pairDataCache = *reinterpret_cast<FmcsPairDataCache<maxAtoms, maxBonds>*>(pairDataCacheStorage);
@@ -141,66 +140,80 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
 
   // ---- Phase 1: RDKit makeInitialSeeds() analogue ----
   // RDKit creates one initial seed per query bond, not one per target
-  // embedding.  Each candidate goes through checkIfMatchAndAppend(), which
-  // runs substructure matching and stores one witness MatchResult on success.
-  // Initial ExcludedBonds is prefix-like: later initial seeds exclude earlier
-  // query bonds, and a mismatched initial bond is also excluded from seeds
-  // already admitted.  Group 0 handles this serial state; the substructure
-  // check remains cooperative across that group's lanes.
-  if (block.thread_rank() < Seed<maxAtoms, maxBonds>::kBondWords) {
-    initialExcludedBonds[block.thread_rank()] = 0;
+  // embedding.  Test independent query bonds concurrently and retain the
+  // first target witness for each successful bond.
+  for (int qBond = groupId; qBond < pair.queryNumBonds; qBond += kNumGroups) {
+    SingleBondMatch resolved{};
+    const bool matched =
+      findInitialSingleBondCooperative(group, qBond, queryView, targetView, cachedTables, resolved);
+    if (groupRank == 0) {
+      resolved.targetBond = matched ? resolved.targetBond : kUnmappedTargetIdx;
+      initialBondMatches[qBond] = resolved;
+    }
+    group.sync();
   }
   block.sync();
 
-  if (groupId == 0) {
-    for (int qBond = 0; qBond < pair.queryNumBonds && !overflowed && !timedOut; ++qBond) {
-      if (groupRank == 0) {
-        seedClearWithinThread(myCurrent.seed);
-        matchResultClearWithinThread(myCurrent.match);
-        for (int wordIdx = 0; wordIdx < Seed<maxAtoms, maxBonds>::kBondWords; ++wordIdx) {
-          myCurrent.seed.excludedBonds[wordIdx] = initialExcludedBonds[wordIdx];
-        }
+  // Build successful seeds in deterministic query-bond order.  Prefix
+  // exclusions are installed before computing the RDKit remaining-size bound;
+  // later failed bonds are added afterward, matching the serial bookkeeping.
+  for (int qBond = groupId; qBond < pair.queryNumBonds; qBond += kNumGroups) {
+    if (initialBondMatches[qBond].targetBond == kUnmappedTargetIdx)
+      continue;
 
-        const std::uint32_t queryEndpoints = queryView.bondEndpoints[qBond];
-        const int           queryEndpointU = static_cast<int>(queryEndpoints >> kBondEndpointShift);
-        const int           queryEndpointV = static_cast<int>(queryEndpoints & kBondEndpointMask);
-        seedAddBondWithinThread(myCurrent.seed, qBond);
-        seedAddAtomWithinThread(myCurrent.seed, queryEndpointU);
-        seedAddAtomWithinThread(myCurrent.seed, queryEndpointV);
-        myCurrent.seed.growingStage = kSeedGrowStageOuter;
-      }
-      group.sync();
-      seedComputeRemainingSizeRdkitCooperative(group,
-                                               myCurrent.seed,
-                                               queryView,
-                                               myRemainingAtomStack,
-                                               myRemainingVisitedAtoms,
-                                               myRemainingVisitedBonds,
-                                               &remainingStackSize[groupId]);
+    if (groupRank == 0) {
+      seedClearWithinThread(myCurrent.seed);
+      matchResultClearWithinThread(myCurrent.match);
+      for (int excludedBond = 0; excludedBond < qBond; ++excludedBond)
+        seedExcludeBondWithinThread(myCurrent.seed, excludedBond);
 
-      const bool matched = matchInitialSingleBondCooperative(
-        group, qBond, queryView, targetView, cachedTables, myCurrent.match);
-      if (matched) {
-        updateIncumbentCooperative(group, myCurrent, best, &bestScore, &bestCopyLock);
-        if (!pushBackCooperative(group, queue, myCurrent)) {
-          overflowed = true;
-        }
-      } else if (groupRank == 0) {
-        const int queuedSeeds = queue.size();
-        for (int i = 0; i < queuedSeeds; ++i) {
-          seedExcludeBondWithinThread(queue.slot(i).seed, qBond);
-        }
-      }
-      group.sync();
-
-      if (groupRank == 0) {
-        const int  wordIdx = qBond / Seed<maxAtoms, maxBonds>::kBondBitsPerWord;
-        const auto mask    = static_cast<typename Seed<maxAtoms, maxBonds>::bond_word_type>(1)
-                       << (qBond % Seed<maxAtoms, maxBonds>::kBondBitsPerWord);
-        initialExcludedBonds[wordIdx] |= mask;
-      }
-      group.sync();
+      const std::uint32_t queryEndpoints = queryView.bondEndpoints[qBond];
+      const int           queryEndpointU = static_cast<int>(queryEndpoints >> kBondEndpointShift);
+      const int           queryEndpointV = static_cast<int>(queryEndpoints & kBondEndpointMask);
+      seedAddBondWithinThread(myCurrent.seed, qBond);
+      seedAddAtomWithinThread(myCurrent.seed, queryEndpointU);
+      seedAddAtomWithinThread(myCurrent.seed, queryEndpointV);
+      myCurrent.seed.growingStage = kSeedGrowStageOuter;
     }
+    group.sync();
+    seedComputeRemainingSizeRdkitCooperative(group,
+                                             myCurrent.seed,
+                                             queryView,
+                                             myRemainingAtomStack,
+                                             myRemainingVisitedAtoms,
+                                             myRemainingVisitedBonds,
+                                             &remainingStackSize[groupId]);
+
+    int queueSlot = 0;
+    if (groupRank == 0) {
+      for (int earlierBond = 0; earlierBond < qBond; ++earlierBond)
+        queueSlot += initialBondMatches[earlierBond].targetBond != kUnmappedTargetIdx;
+      for (int laterBond = qBond + 1; laterBond < pair.queryNumBonds; ++laterBond) {
+        if (initialBondMatches[laterBond].targetBond == kUnmappedTargetIdx)
+          seedExcludeBondWithinThread(myCurrent.seed, laterBond);
+      }
+      writeInitialSingleBondMatchWithinThread(
+        qBond, queryView, initialBondMatches[qBond], myCurrent.match);
+    }
+    queueSlot = group.shfl(queueSlot, 0);
+    warpCopy(group, &queue.slot(queueSlot), &myCurrent, sizeof(QueuedT));
+    group.sync();
+  }
+
+  block.sync();
+  if (block.thread_rank() == 0) {
+    int initialSeedCount = 0;
+    for (int qBond = 0; qBond < pair.queryNumBonds; ++qBond)
+      initialSeedCount += initialBondMatches[qBond].targetBond != kUnmappedTargetIdx;
+    queue.setSizeWithinThread(initialSeedCount);
+  }
+  block.sync();
+
+  // Preserve the serial Phase-1 incumbent tie-breaking order.
+  if (groupId == 0) {
+    const int initialSeedCount = queue.size();
+    for (int i = 0; i < initialSeedCount; ++i)
+      updateIncumbentCooperative(group, queue.slot(i), best, &bestScore, &bestCopyLock);
   }
 
   block.sync();

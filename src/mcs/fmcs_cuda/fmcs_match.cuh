@@ -51,6 +51,7 @@ template <int maxTargetAtoms> using FmcsTargetMask = nvMolKit::TargetMask<kFmcsM
 struct SingleBondMatch {
   uint8_t targetAtomU;
   uint8_t targetAtomV;
+  uint8_t targetBond;
 };
 
 /// Scratch for the exact substructure fallback.  One instance per
@@ -206,17 +207,17 @@ __device__ __forceinline__ bool matchSingleBondWithinThread(const int           
 
   outMatch.targetAtomU = static_cast<uint8_t>(targetForQueryU);
   outMatch.targetAtomV = static_cast<uint8_t>(targetForQueryV);
+  outMatch.targetBond  = static_cast<uint8_t>(targetBondIdx);
   return true;
 }
 
-template <int maxAtoms, int maxBonds, int maxTA, int maxTB, class GroupT>
-__device__ __forceinline__ bool matchInitialSingleBondCooperative(
-  const GroupT&                                  group,
-  const int                                      queryBondIdx,
-  const DeviceCsrView&                           queryTopology,
-  const DeviceCsrView&                           targetTopology,
-  const PairMatchTablesDevice&                   tables,
-  MatchResult<maxAtoms, maxBonds, maxTA, maxTB>& match) {
+template <class GroupT>
+__device__ __forceinline__ bool findInitialSingleBondCooperative(const GroupT&                  group,
+                                                                 const int                      queryBondIdx,
+                                                                 const DeviceCsrView&           queryTopology,
+                                                                 const DeviceCsrView&           targetTopology,
+                                                                 const PairMatchTablesDevice&   tables,
+                                                                 SingleBondMatch&               outMatch) {
   const int laneRank  = static_cast<int>(group.thread_rank());
   const int laneCount = static_cast<int>(group.num_threads());
 
@@ -237,35 +238,59 @@ __device__ __forceinline__ bool matchInitialSingleBondCooperative(
     if (winners == 0)
       continue;
 
-    const int winnerLane  = __ffs(winners) - 1;
-    const int targetAtomU = group.shfl(static_cast<int>(resolved.targetAtomU), winnerLane);
-    const int targetAtomV = group.shfl(static_cast<int>(resolved.targetAtomV), winnerLane);
-    const int targetBond  = base + winnerLane;
-    if (laneRank == 0) {
-      const std::uint32_t queryEndpoints = queryTopology.bondEndpoints[queryBondIdx];
-      const int queryAtomU = static_cast<int>(queryEndpoints >> kBondEndpointShift);
-      const int queryAtomV = static_cast<int>(queryEndpoints & kBondEndpointMask);
-
-      match.targetAtomIdx[queryAtomU] = static_cast<std::uint8_t>(targetAtomU);
-      match.targetAtomIdx[queryAtomV] = static_cast<std::uint8_t>(targetAtomV);
-      match.targetBondIdx[queryBondIdx] = static_cast<std::uint8_t>(targetBond);
-      match.visitedTargetAtoms[targetAtomU / MatchResult<maxAtoms, maxBonds, maxTA, maxTB>::kTargetAtomBitsPerWord] |=
-        static_cast<typename MatchResult<maxAtoms, maxBonds, maxTA, maxTB>::target_atom_word>(1)
-        << (targetAtomU % MatchResult<maxAtoms, maxBonds, maxTA, maxTB>::kTargetAtomBitsPerWord);
-      match.visitedTargetAtoms[targetAtomV / MatchResult<maxAtoms, maxBonds, maxTA, maxTB>::kTargetAtomBitsPerWord] |=
-        static_cast<typename MatchResult<maxAtoms, maxBonds, maxTA, maxTB>::target_atom_word>(1)
-        << (targetAtomV % MatchResult<maxAtoms, maxBonds, maxTA, maxTB>::kTargetAtomBitsPerWord);
-      match.visitedTargetBonds[targetBond / MatchResult<maxAtoms, maxBonds, maxTA, maxTB>::kTargetBondBitsPerWord] |=
-        static_cast<typename MatchResult<maxAtoms, maxBonds, maxTA, maxTB>::target_bond_word>(1)
-        << (targetBond % MatchResult<maxAtoms, maxBonds, maxTA, maxTB>::kTargetBondBitsPerWord);
-      match.matchedAtomSize = 2;
-      match.matchedBondSize = 1;
-      match.empty           = false;
-    }
-    group.sync();
+    const int winnerLane = __ffs(winners) - 1;
+    outMatch.targetAtomU = static_cast<std::uint8_t>(group.shfl(static_cast<int>(resolved.targetAtomU), winnerLane));
+    outMatch.targetAtomV = static_cast<std::uint8_t>(group.shfl(static_cast<int>(resolved.targetAtomV), winnerLane));
+    outMatch.targetBond  = static_cast<std::uint8_t>(base + winnerLane);
     return true;
   }
   return false;
+}
+
+template <int maxAtoms, int maxBonds, int maxTA, int maxTB>
+__device__ __forceinline__ void writeInitialSingleBondMatchWithinThread(
+  const int                                      queryBondIdx,
+  const DeviceCsrView&                           queryTopology,
+  const SingleBondMatch&                         resolved,
+  MatchResult<maxAtoms, maxBonds, maxTA, maxTB>& match) {
+  using MatchT = MatchResult<maxAtoms, maxBonds, maxTA, maxTB>;
+
+  const std::uint32_t queryEndpoints = queryTopology.bondEndpoints[queryBondIdx];
+  const int queryAtomU = static_cast<int>(queryEndpoints >> kBondEndpointShift);
+  const int queryAtomV = static_cast<int>(queryEndpoints & kBondEndpointMask);
+  const int targetAtomU = static_cast<int>(resolved.targetAtomU);
+  const int targetAtomV = static_cast<int>(resolved.targetAtomV);
+  const int targetBond  = static_cast<int>(resolved.targetBond);
+
+  match.targetAtomIdx[queryAtomU] = resolved.targetAtomU;
+  match.targetAtomIdx[queryAtomV] = resolved.targetAtomV;
+  match.targetBondIdx[queryBondIdx] = resolved.targetBond;
+  match.visitedTargetAtoms[targetAtomU / MatchT::kTargetAtomBitsPerWord] |=
+    static_cast<typename MatchT::target_atom_word>(1) << (targetAtomU % MatchT::kTargetAtomBitsPerWord);
+  match.visitedTargetAtoms[targetAtomV / MatchT::kTargetAtomBitsPerWord] |=
+    static_cast<typename MatchT::target_atom_word>(1) << (targetAtomV % MatchT::kTargetAtomBitsPerWord);
+  match.visitedTargetBonds[targetBond / MatchT::kTargetBondBitsPerWord] |=
+    static_cast<typename MatchT::target_bond_word>(1) << (targetBond % MatchT::kTargetBondBitsPerWord);
+  match.matchedAtomSize = 2;
+  match.matchedBondSize = 1;
+  match.empty           = false;
+}
+
+template <int maxAtoms, int maxBonds, int maxTA, int maxTB, class GroupT>
+__device__ __forceinline__ bool matchInitialSingleBondCooperative(
+  const GroupT&                                  group,
+  const int                                      queryBondIdx,
+  const DeviceCsrView&                           queryTopology,
+  const DeviceCsrView&                           targetTopology,
+  const PairMatchTablesDevice&                   tables,
+  MatchResult<maxAtoms, maxBonds, maxTA, maxTB>& match) {
+  SingleBondMatch resolved{};
+  const bool matched =
+    findInitialSingleBondCooperative(group, queryBondIdx, queryTopology, targetTopology, tables, resolved);
+  if (matched && group.thread_rank() == 0)
+    writeInitialSingleBondMatchWithinThread(queryBondIdx, queryTopology, resolved, match);
+  group.sync();
+  return matched;
 }
 
 /// Cooperative greedy fast path: try to extend @p match by every query

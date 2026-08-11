@@ -230,6 +230,7 @@ TEST(FMCSUnit, MatchSingleBondForwardOrientation) {
   EXPECT_TRUE(out.ok);
   EXPECT_EQ(out.match.targetAtomU, 0u);  // qU=0 -> tU=0
   EXPECT_EQ(out.match.targetAtomV, 1u);  // qV=1 -> tV=1
+  EXPECT_EQ(out.match.targetBond, 0u);
 }
 
 TEST(FMCSUnit, MatchSingleBondReverseOrientation) {
@@ -261,6 +262,7 @@ TEST(FMCSUnit, MatchSingleBondReverseOrientation) {
   EXPECT_TRUE(out.ok);
   EXPECT_EQ(out.match.targetAtomU, 1u);  // qU=0 -> tV=1 (reversed)
   EXPECT_EQ(out.match.targetAtomV, 0u);  // qV=1 -> tU=0
+  EXPECT_EQ(out.match.targetBond, 0u);
 }
 
 TEST(FMCSUnit, MatchSingleBondBondTableRejection) {
