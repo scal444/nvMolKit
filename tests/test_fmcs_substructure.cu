@@ -253,7 +253,6 @@ __global__ void matchSubstructureMaskDriver(DeviceCsrView         qView,
   auto block = cooperative_groups::this_thread_block();
   auto warp  = cooperative_groups::tiled_partition<32>(block);
   mcs::fmcs::initializePairMatchCacheCooperative(warp, qView, tView, tables, pairMatchCache);
-  mcs::fmcs::initializePairSubstructureScratchCooperative(warp, tView, scratch);
   bool ok = mcs::fmcs::matchSeedSubstructureCooperative(
     warp, child.seed, qView, tView, tables, child.match, scratch, pairMatchCache);
   __syncthreads();
@@ -299,7 +298,6 @@ __global__ void matchFallbackBadParentDriver(DeviceCsrView         qView,
   auto block = cooperative_groups::this_thread_block();
   auto warp  = cooperative_groups::tiled_partition<32>(block);
   mcs::fmcs::initializePairMatchCacheCooperative(warp, qView, tView, tables, pairMatchCache);
-  mcs::fmcs::initializePairSubstructureScratchCooperative(warp, tView, scratch);
   bool ok    = mcs::fmcs::matchSeedWithSubstructureFallbackCooperative(warp,
                                                                     child.seed,
                                                                     qView,

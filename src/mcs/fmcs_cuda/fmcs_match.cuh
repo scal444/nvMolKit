@@ -65,16 +65,10 @@ template <int maxAtoms, int maxTargetAtoms> struct FmcsSubstructureScratch {
   std::uint8_t seedAtomList[maxAtoms];        ///< Seed's query atoms in index order.
   std::uint8_t seedAtoms[maxAtoms];           ///< Search order: order position -> query atom.
   std::uint8_t seedDegree[maxAtoms];          ///< Per query atom, its degree within the seed.
-  std::uint8_t targetDegree[maxTargetAtoms];  ///< Per target atom, its full degree.
   std::uint8_t orderedQueryAtom[maxAtoms];    ///< 1 if the atom has been placed in the order.
   std::uint8_t queryOrderPos[maxAtoms];       ///< Inverse of seedAtoms; kUnmappedTargetIdx if not in seed.
   std::uint8_t targetAtomForQuery[maxAtoms];  ///< The winning embedding, indexed by query atom.
   int          found;                         ///< Lanes race on this via atomicCAS; also the abort signal.
-
-  /// degreeAtLeast[d] = target atoms whose degree is at least d.  Indexed by a
-  /// seed atom's degree (clamped), it turns "targets this atom could occupy"
-  /// into one mask intersection instead of a scan over every target atom.
-  FmcsTargetMask<maxTargetAtoms> degreeAtLeast[kFmcsMaxSeedDegree + 1];
 
   /// Back-edge table and per-depth candidates for the shared frontend
   /// (src/subgraph/candidate_tables.cuh).  One group per instance, hence a single
@@ -94,6 +88,9 @@ template <int maxBonds, int maxTargetAtoms> struct FmcsPairMatchCache {
   std::uint8_t representative[kFmcsCachedBondClasses];
   FmcsTargetMask<maxTargetAtoms> neighbors[kFmcsCachedBondClasses][maxTargetAtoms];
   QueryBondWord incidentQueryBonds[maxTargetAtoms][QuerySeed::kBondWords];
+  /// degreeAtLeast[d] = target atoms whose full degree is at least d.  This is
+  /// target-only pair state, shared by every concurrently searching group.
+  FmcsTargetMask<maxTargetAtoms> degreeAtLeast[kFmcsMaxSeedDegree + 1];
 };
 
 template <int maxBonds, int maxTargetAtoms, class GroupT>
@@ -118,6 +115,19 @@ __device__ __forceinline__ void initializePairMatchCacheCooperative(
       cache.incidentQueryBonds[queryAtom][bond / kBondBitsPerWord] |=
         static_cast<BondWord>(1) << (bond % kBondBitsPerWord);
     }
+  }
+
+  const int threadRank = static_cast<int>(group.thread_rank());
+  if (threadRank <= kFmcsMaxSeedDegree) {
+    FmcsTargetMask<maxTargetAtoms> bucket;
+    bucket.clear();
+    for (int targetAtom = 0; targetAtom < targetTopology.numAtoms; ++targetAtom) {
+      const int degree = static_cast<int>(targetTopology.rowOffsets[targetAtom + 1] -
+                                          targetTopology.rowOffsets[targetAtom]);
+      if (degree >= threadRank)
+        bucket.set(targetAtom);
+    }
+    cache.degreeAtLeast[threadRank] = bucket;
   }
 
   if (group.thread_rank() == 0) {
@@ -671,37 +681,6 @@ __device__ __forceinline__ FmcsTargetMask<maxTA> atomRowMask(const MatchTableDev
 }
 
 template <int maxAtoms, int maxTA, class GroupT>
-__device__ __forceinline__ void initializePairSubstructureScratchCooperative(
-  const GroupT&                             group,
-  const DeviceCsrView&                      targetTopology,
-  FmcsSubstructureScratch<maxAtoms, maxTA>& scratch) {
-  const int laneRank  = static_cast<int>(group.thread_rank());
-  const int laneCount = static_cast<int>(group.num_threads());
-
-  for (int targetAtomIdx = laneRank; targetAtomIdx < targetTopology.numAtoms; targetAtomIdx += laneCount) {
-    scratch.targetDegree[targetAtomIdx] = static_cast<std::uint8_t>(targetTopology.rowOffsets[targetAtomIdx + 1] -
-                                                                    targetTopology.rowOffsets[targetAtomIdx]);
-  }
-
-  group.sync();
-
-  // One lane per bucket, each scanning the target atoms once.  Cheaper than a
-  // masked reduction and it keeps every bucket's build independent.
-  if (laneRank <= kFmcsMaxSeedDegree) {
-    FmcsTargetMask<maxTA> bucket;
-    bucket.clear();
-    for (int targetAtomIdx = 0; targetAtomIdx < targetTopology.numAtoms && targetAtomIdx < maxTA; ++targetAtomIdx) {
-      if (scratch.targetDegree[targetAtomIdx] >= laneRank) {
-        bucket.set(targetAtomIdx);
-      }
-    }
-    scratch.degreeAtLeast[laneRank] = bucket;
-  }
-
-  group.sync();
-}
-
-template <int maxAtoms, int maxTA, class GroupT>
 __device__ __forceinline__ void initializeSeedSubstructureScratchCooperative(
   const GroupT&                             group,
   const DeviceCsrView&,
@@ -801,7 +780,7 @@ __device__ __forceinline__ bool prepareSeedSubstructureSearchCooperative(
 
       FmcsTargetMask<maxTA> candidates = atomRowMask<maxTA>(tables.atoms, queryAtomIdx);
       candidates.andEq(
-        scratch.degreeAtLeast[min(static_cast<int>(scratch.seedDegree[queryAtomIdx]), kFmcsMaxSeedDegree)]);
+        pairCache.degreeAtLeast[min(static_cast<int>(scratch.seedDegree[queryAtomIdx]), kFmcsMaxSeedDegree)]);
       const int candidateCount = candidates.popcount();
       if (candidateCount == 0) {
         impossible = 1;
@@ -996,7 +975,7 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(const GroupT&  
     laneStripe.set(targetAtomIdx);
   }
   Mask laneRoots = atomRowMask<maxTA>(tables.atoms, firstQueryAtom);
-  laneRoots.andEq(scratch.degreeAtLeast[min(static_cast<int>(scratch.seedDegree[firstQueryAtom]), kFmcsMaxSeedDegree)]);
+  laneRoots.andEq(pairCache.degreeAtLeast[min(static_cast<int>(scratch.seedDegree[firstQueryAtom]), kFmcsMaxSeedDegree)]);
   laneRoots.andEq(laneStripe);
 
   if (numSeedAtoms == 1) {
