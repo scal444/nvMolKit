@@ -49,6 +49,7 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
   __shared__ int                         bestCopyLock;
   __shared__ DeviceCsrView               queryView;
   __shared__ DeviceCsrView               targetView;
+  __shared__ FmcsPairMatchCache<maxBonds, maxAtoms> pairMatchCache;
   __shared__ bool                        overflowed;
   __shared__ bool                        timedOut;
   __shared__ bool                        phase2Done;
@@ -116,6 +117,8 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
   }
   block.sync();
 
+  initializePairMatchCacheCooperative(block, targetView, pair.tables, pairMatchCache);
+
   initializePairSubstructureScratchCooperative(group, targetView, mySubstructureScratch);
 
   QueuedT&      myCurrent               = current[groupId];
@@ -164,8 +167,8 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
                                                myRemainingVisitedBonds,
                                                &remainingStackSize[groupId]);
 
-      const bool matched =
-        checkSeedMatchAndAppendCooperative(group, myCurrent, queryView, targetView, pair.tables, mySubstructureScratch);
+      const bool matched = checkSeedMatchAndAppendCooperative(
+        group, myCurrent, queryView, targetView, pair.tables, mySubstructureScratch, pairMatchCache);
       if (matched) {
         updateIncumbentCooperative(group, myCurrent, best, &bestScore, &bestCopyLock);
         if (!pushBackCooperative(group, queue, myCurrent)) {
@@ -286,7 +289,8 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
                                                            queryView,
                                                            targetView,
                                                            pair.tables,
-                                                           mySubstructureScratch);
+                                                           mySubstructureScratch,
+                                                           pairMatchCache);
         if (groupRank == 0)
           stage0Ok[groupId] = ok;
         group.sync();
@@ -353,7 +357,8 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
                                                            queryView,
                                                            targetView,
                                                            pair.tables,
-                                                           mySubstructureScratch);
+                                                           mySubstructureScratch,
+                                                           pairMatchCache);
         if (ok) {
           updateIncumbentCooperative(group, myBiggest, best, &bestScore, &bestCopyLock);
           if (!pushBackCooperative(group, queue, myBiggest)) {
@@ -434,7 +439,8 @@ __global__ void fmcsKernel(const DevicePerPairInput* __restrict__ pairs,
                                                              queryView,
                                                              targetView,
                                                              pair.tables,
-                                                             mySubstructureScratch);
+                                                             mySubstructureScratch,
+                                                             pairMatchCache);
           if (ok) {
             updateIncumbentCooperative(group, myBiggest, best, &bestScore, &bestCopyLock);
             if (!pushBackCooperative(group, queue, myBiggest)) {

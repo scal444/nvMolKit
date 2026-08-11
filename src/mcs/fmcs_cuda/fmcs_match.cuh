@@ -82,6 +82,73 @@ template <int maxAtoms, int maxTargetAtoms> struct FmcsSubstructureScratch {
   nvMolKit::subgraph::WarpSharedState<kFmcsMaskAtoms<maxTargetAtoms>, maxAtoms, 1, false> tables;
 };
 
+constexpr int kFmcsCachedBondClasses = 4;
+
+template <int maxBonds, int maxTargetAtoms> struct FmcsPairMatchCache {
+  int          numBondClasses;
+  std::uint8_t bondClass[maxBonds];
+  std::uint8_t representative[kFmcsCachedBondClasses];
+  FmcsTargetMask<maxTargetAtoms> neighbors[kFmcsCachedBondClasses][maxTargetAtoms];
+};
+
+template <int maxBonds, int maxTargetAtoms, class GroupT>
+__device__ __forceinline__ void initializePairMatchCacheCooperative(
+  const GroupT&                                      group,
+  const DeviceCsrView&                               targetTopology,
+  const PairMatchTablesDevice&                       tables,
+  FmcsPairMatchCache<maxBonds, maxTargetAtoms>& cache) {
+  if (group.thread_rank() == 0) {
+    int numClasses = 0;
+    for (int queryBond = 0; queryBond < tables.bonds.nRows; ++queryBond) {
+      int matchedClass = -1;
+      for (int bondClass = 0; bondClass < numClasses; ++bondClass) {
+        const int representative = cache.representative[bondClass];
+        bool equal = true;
+        for (int word = 0; word < tables.bonds.wordsPerRow; ++word) {
+          equal &= tables.bonds.data[queryBond * tables.bonds.wordsPerRow + word] ==
+                   tables.bonds.data[representative * tables.bonds.wordsPerRow + word];
+        }
+        if (equal) {
+          matchedClass = bondClass;
+          break;
+        }
+      }
+      if (matchedClass < 0) {
+        if (numClasses == kFmcsCachedBondClasses) {
+          numClasses = 0;
+          break;
+        }
+        matchedClass = numClasses;
+        cache.representative[numClasses++] = static_cast<std::uint8_t>(queryBond);
+      }
+      cache.bondClass[queryBond] = static_cast<std::uint8_t>(matchedClass);
+    }
+    cache.numBondClasses = numClasses;
+  }
+  group.sync();
+
+  const int numClasses = cache.numBondClasses;
+  for (int index = static_cast<int>(group.thread_rank());
+       index < numClasses * targetTopology.numAtoms;
+       index += static_cast<int>(group.num_threads())) {
+    const int bondClass = index / targetTopology.numAtoms;
+    const int targetAtom = index - bondClass * targetTopology.numAtoms;
+    const int queryBond = cache.representative[bondClass];
+    FmcsTargetMask<maxTargetAtoms> mask;
+    mask.clear();
+    const int begin = static_cast<int>(targetTopology.rowOffsets[targetAtom]);
+    const int end   = static_cast<int>(targetTopology.rowOffsets[targetAtom + 1]);
+    for (int adjacency = begin; adjacency < end; ++adjacency) {
+      const int targetBond = static_cast<int>(targetTopology.bondIndices[adjacency]);
+      if (tables.bonds.testBit(queryBond, targetBond)) {
+        mask.set(static_cast<int>(targetTopology.colIndices[adjacency]));
+      }
+    }
+    cache.neighbors[bondClass][targetAtom] = mask;
+  }
+  group.sync();
+}
+
 template <int maxAtoms, int maxBonds>
 __device__ __forceinline__ bool seedContainsBondWithinThread(const Seed<maxAtoms, maxBonds>& seed,
                                                              const int                       queryBondIdx) {
@@ -678,12 +745,8 @@ __device__ __forceinline__ bool prepareSeedSubstructureSearchWithinThread(
 /// outside the seed, or whose far atom has no order position, reports
 /// @c kNoNeighborDepth and so constrains nothing.
 ///
-/// The edge key is the query bond index, and @ref neighborsMatching resolves it
-/// through the (query bond, target bond) match table.  Because every bond index
-/// is distinct the plan is always General, which is why the scratch omits the
-/// adjacency tables.  Keying on the uint16 edge label instead would let
-/// Uniform/Dual precompute fire -- MCS queries carry few distinct labels -- but
-/// needs the labels uploaded to the device, which they are not today.
+/// Equal bond-table rows are canonicalized once per pair.  The adapter uses
+/// their small class ids as edge keys and reads prebuilt neighbor masks.
 ///
 /// Precondition: no seed atom exceeds @c kMaxEdgeSlotsPerAtom CSR neighbours,
 /// which holds for molecular graphs (nvMolKit caps packed degree at 8).
@@ -696,6 +759,7 @@ template <int maxAtoms, int maxBonds, int maxTA, int maxTB> struct McsSeedAdapte
   const DeviceCsrView*                            targetTopology;
   const PairMatchTablesDevice*                    tables;
   const FmcsSubstructureScratch<maxAtoms, maxTA>* scratch;
+  const FmcsPairMatchCache<maxBonds, maxTA>*      pairCache;
 
   __device__ __forceinline__ int queryAtomAt(int depth) const { return scratch->seedAtoms[depth]; }
 
@@ -721,10 +785,15 @@ template <int maxAtoms, int maxBonds, int maxTA, int maxTB> struct McsSeedAdapte
   }
 
   __device__ __forceinline__ std::uint32_t edgeKeyAt(int depth, int slot) const {
-    return queryTopology->bondIndices[static_cast<int>(queryTopology->rowOffsets[queryAtomAt(depth)]) + slot];
+    const int queryBond = static_cast<int>(
+      queryTopology->bondIndices[static_cast<int>(queryTopology->rowOffsets[queryAtomAt(depth)]) + slot]);
+    return pairCache->numBondClasses > 0 ? pairCache->bondClass[queryBond] : static_cast<std::uint32_t>(queryBond);
   }
 
-  __device__ __forceinline__ Mask neighborsMatching(int targetAtom, std::uint32_t queryBondIdx) const {
+  __device__ __forceinline__ Mask neighborsMatching(int targetAtom, std::uint32_t edgeKey) const {
+    if (pairCache->numBondClasses > 0) {
+      return pairCache->neighbors[edgeKey][targetAtom];
+    }
     Mask mask;
     mask.clear();
     const int begin = static_cast<int>(targetTopology->rowOffsets[targetAtom]);
@@ -734,7 +803,7 @@ template <int maxAtoms, int maxBonds, int maxTA, int maxTB> struct McsSeedAdapte
       if (targetBondIdx < 0 || targetBondIdx >= targetTopology->numBonds || targetBondIdx >= maxTB) {
         continue;
       }
-      if (!tables->bonds.testBit(static_cast<int>(queryBondIdx), targetBondIdx)) {
+      if (!tables->bonds.testBit(static_cast<int>(edgeKey), targetBondIdx)) {
         continue;
       }
       const int neighborTargetAtom = static_cast<int>(targetTopology->colIndices[adjIdx]);
@@ -775,7 +844,8 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(const GroupT&  
                                                                  const DeviceCsrView&            targetTopology,
                                                                  const PairMatchTablesDevice&    tables,
                                                                  MatchResult<maxAtoms, maxBonds, maxTA, maxTB>& match,
-                                                                 FmcsSubstructureScratch<maxAtoms, maxTA>& scratch) {
+                                                                 FmcsSubstructureScratch<maxAtoms, maxTA>& scratch,
+                                                                 const FmcsPairMatchCache<maxBonds, maxTA>& pairCache) {
   using Mask = FmcsTargetMask<maxTA>;
 
   const int laneRank  = static_cast<int>(group.thread_rank());
@@ -849,7 +919,8 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(const GroupT&  
                                                                  &queryTopology,
                                                                  &targetTopology,
                                                                  &tables,
-                                                                 &scratch};
+                                                                 &scratch,
+                                                                 &pairCache};
 
   for (int depth = laneRank; depth < numSeedAtoms; depth += laneCount) {
     scratch.tables.depthCandidates[0][depth] = atomRowMask<maxTA>(tables.atoms, scratch.seedAtoms[depth]);
@@ -915,6 +986,7 @@ __device__ __forceinline__ bool matchSeedWithSubstructureFallbackCooperative(
   const PairMatchTablesDevice&                   tables,
   MatchResult<maxAtoms, maxBonds, maxTA, maxTB>& match,
   FmcsSubstructureScratch<maxAtoms, maxTA>&      scratch,
+  const FmcsPairMatchCache<maxBonds, maxTA>&     pairCache,
   int*                                           scratchLock) {
   if (tryMatchIncrementalGreedyCooperative(group, seed, queryTopology, targetTopology, tables, match)) {
     return true;
@@ -924,7 +996,8 @@ __device__ __forceinline__ bool matchSeedWithSubstructureFallbackCooperative(
     }
   }
   group.sync();
-  const bool ok = matchSeedSubstructureCooperative(group, seed, queryTopology, targetTopology, tables, match, scratch);
+  const bool ok = matchSeedSubstructureCooperative(
+    group, seed, queryTopology, targetTopology, tables, match, scratch, pairCache);
   group.sync();
   if (group.thread_rank() == 0) {
     atomicExch(scratchLock, 0);

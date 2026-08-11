@@ -136,7 +136,8 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
   const DeviceCsrView&                          queryTopology,
   const DeviceCsrView&                          targetTopology,
   const PairMatchTablesDevice&                  tables,
-  FmcsSubstructureScratch<maxAtoms, maxTA>&     scratch) {
+  FmcsSubstructureScratch<maxAtoms, maxTA>&     scratch,
+  const FmcsPairMatchCache<maxBonds, maxTA>&    pairCache) {
   bool ok = false;
   if (!candidate.match.empty) {
     ok = tryMatchIncrementalGreedyCooperative(group,
@@ -154,7 +155,8 @@ __device__ __forceinline__ bool checkSeedMatchAndAppendCooperative(
                                           targetTopology,
                                           tables,
                                           candidate.match,
-                                          scratch);
+                                          scratch,
+                                          pairCache);
     group.sync();
   }
   return ok;
