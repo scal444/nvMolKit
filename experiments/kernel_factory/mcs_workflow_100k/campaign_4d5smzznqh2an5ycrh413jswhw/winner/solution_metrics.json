@@ -1,0 +1,14 @@
+{
+  "candidate_id": "d9aee2ffeead7dcc064a1b9a4606b9fb0f69baa37cfd21307a5daeece9e02ee0",
+  "language": "cuda",
+  "campaign_id": "4d5smzznqh2an5ycrh413jswhw",
+  "round_number": 1,
+  "composite_score": 0.8458473056239646,
+  "performance_score": 0.8646182640599116,
+  "correctness_score": 1.0,
+  "efficiency_score": 1.0,
+  "novelty_score": 0.0,
+  "speedup": 6.386520737498431,
+  "execution_time_ms": 83.99152158906722,
+  "baseline_time_ms": 536.413594402625
+}
