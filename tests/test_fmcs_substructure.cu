@@ -244,6 +244,7 @@ __global__ void matchSubstructureMaskDriver(DeviceCsrView         qView,
                                             SubstructureTestOut*  out) {
   __shared__ QueuedT16 child;
   __shared__ mcs::fmcs::FmcsSubstructureScratch<16, 16> scratch;
+  __shared__ mcs::fmcs::FmcsPairMatchCache<16, 16> pairMatchCache;
   if (threadIdx.x == 0) {
     addMaskSeed(child, atomMask, bondMask);
   }
@@ -251,7 +252,10 @@ __global__ void matchSubstructureMaskDriver(DeviceCsrView         qView,
 
   auto block = cooperative_groups::this_thread_block();
   auto warp  = cooperative_groups::tiled_partition<32>(block);
-  bool ok = mcs::fmcs::matchSeedSubstructureCooperative(warp, child.seed, qView, tView, tables, child.match, scratch);
+  mcs::fmcs::initializePairMatchCacheCooperative(warp, tView, tables, pairMatchCache);
+  mcs::fmcs::initializePairSubstructureScratchCooperative(warp, tView, scratch);
+  bool ok = mcs::fmcs::matchSeedSubstructureCooperative(
+    warp, child.seed, qView, tView, tables, child.match, scratch, pairMatchCache);
   __syncthreads();
 
   if (threadIdx.x == 0) {
@@ -266,6 +270,7 @@ __global__ void matchFallbackBadParentDriver(DeviceCsrView         qView,
                                              SubstructureTestOut*  out) {
   __shared__ QueuedT16 child;
   __shared__ mcs::fmcs::FmcsSubstructureScratch<16, 16> scratch;
+  __shared__ mcs::fmcs::FmcsPairMatchCache<16, 16>      pairMatchCache;
   __shared__ int                                        scratchLock;
   if (threadIdx.x == 0) {
     // Query seed is the 4-edge path inside the triangle-with-leaves
@@ -293,6 +298,8 @@ __global__ void matchFallbackBadParentDriver(DeviceCsrView         qView,
 
   auto block = cooperative_groups::this_thread_block();
   auto warp  = cooperative_groups::tiled_partition<32>(block);
+  mcs::fmcs::initializePairMatchCacheCooperative(warp, tView, tables, pairMatchCache);
+  mcs::fmcs::initializePairSubstructureScratchCooperative(warp, tView, scratch);
   bool ok    = mcs::fmcs::matchSeedWithSubstructureFallbackCooperative(warp,
                                                                     child.seed,
                                                                     qView,
@@ -300,6 +307,7 @@ __global__ void matchFallbackBadParentDriver(DeviceCsrView         qView,
                                                                     tables,
                                                                     child.match,
                                                                     scratch,
+                                                                    pairMatchCache,
                                                                     &scratchLock);
   __syncthreads();
 
