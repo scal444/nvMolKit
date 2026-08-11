@@ -31,6 +31,7 @@
 
 #include "src/mcs/fmcs_cuda/fmcs.cuh"
 #include "src/mcs/fmcs_cuda/fmcs_kernel.cuh"
+#include "src/mcs/fmcs_cuda/kf_rewrite/fmcs_main_opt.cuh"
 #include "src/mcs/fmcs_cuda/fmcs_match_tables.cuh"
 #include "src/mcs/fmcs_cuda/fmcs_policy.cuh"
 #include "src/utils/device.h"
@@ -443,10 +444,34 @@ void launchTierAsync(std::span<const DevicePerPairInput> hostPairInputs,
       std::max(1.0, static_cast<double>(params.timeoutMs) * static_cast<double>(clockRateKHz)));
   }
 
-  // Block size is selected from compile-time kernel specializations so the
-  // kernel's per-group state arrays stay statically sized.
   dim3 grid(static_cast<unsigned>(numPairs));
   dim3 block(static_cast<unsigned>(blockThreads));
+
+  // The Kernel Factory winner is a complete 512-thread kernel rewrite for
+  // tiers 16, 32, and 64. Keep its device algorithm intact on that measured
+  // contract; use the production kernel for unsupported tiers, block sizes,
+  // and timeout-enabled searches.
+  if constexpr (blockThreads == fmcsopt::kBlockThreads && maxAtoms <= 64 && maxAtoms == maxBonds) {
+    if (timeoutClocks == 0) {
+      static_assert(sizeof(fmcsopt::QS<maxAtoms>) <= sizeof(QueuedT));
+      constexpr size_t kSharedBytes = sizeof(fmcsopt::BlockShared<maxAtoms>);
+      auto             kernel       = fmcsopt::fmcsOptKernel<maxAtoms>;
+      checkCuda(cudaFuncSetAttribute(kernel,
+                                     cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                     static_cast<int>(kSharedBytes)),
+                "cudaFuncSetAttribute (Kernel Factory fMCS rewrite)");
+      kernel<<<grid, block, kSharedBytes, stream>>>(bufs.pairInputs.data(),
+                                                    dResults,
+                                                    reinterpret_cast<unsigned char*>(dQueue),
+                                                    kFmcsQueueCapacity * sizeof(QueuedT),
+                                                    numPairs);
+      checkCuda(cudaGetLastError(), "Kernel Factory fMCS rewrite launch");
+      return;
+    }
+  }
+
+  // Block size is selected from compile-time kernel specializations so the
+  // kernel's per-group state arrays stay statically sized.
   constexpr size_t pairDataCacheBytes = sizeof(FmcsPairDataCache<maxAtoms, maxBonds>);
   using KernelScratchT = FmcsSubstructureScratch<maxAtoms, maxAtoms>;
   constexpr size_t scratchAlignment = alignof(KernelScratchT);
