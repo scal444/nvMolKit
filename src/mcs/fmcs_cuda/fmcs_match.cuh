@@ -151,6 +151,18 @@ __device__ __forceinline__ void initializePairMatchCacheCooperative(
 }
 
 template <int maxAtoms, int maxBonds>
+__device__ __forceinline__ bool seedContainsAtomWithinThread(const Seed<maxAtoms, maxBonds>& seed,
+                                                             const int                       queryAtomIdx) {
+  using SeedT                    = Seed<maxAtoms, maxBonds>;
+  using AtomWord                 = typename SeedT::atom_word_type;
+  constexpr int kAtomBitsPerWord = SeedT::kAtomBitsPerWord;
+  if (queryAtomIdx < 0 || queryAtomIdx >= maxAtoms)
+    return false;
+  const AtomWord word = seed.atoms[queryAtomIdx / kAtomBitsPerWord];
+  return ((word >> (queryAtomIdx % kAtomBitsPerWord)) & 1) != 0;
+}
+
+template <int maxAtoms, int maxBonds>
 __device__ __forceinline__ bool seedContainsBondWithinThread(const Seed<maxAtoms, maxBonds>& seed,
                                                              const int                       queryBondIdx) {
   using SeedT                    = Seed<maxAtoms, maxBonds>;
@@ -688,76 +700,63 @@ __device__ __forceinline__ void initializeSeedSubstructureScratchCooperative(
   group.sync();
 }
 
-template <int maxAtoms, int maxBonds, int maxTA>
-__device__ __forceinline__ bool prepareSeedSubstructureSearchWithinThread(
+template <int maxAtoms, int maxBonds, int maxTA, class GroupT>
+__device__ __forceinline__ bool prepareSeedSubstructureSearchCooperative(
+  const GroupT&                             group,
   const Seed<maxAtoms, maxBonds>&           seed,
   const DeviceCsrView&                      queryTopology,
   const DeviceCsrView&                      targetTopology,
   const PairMatchTablesDevice&              tables,
   FmcsSubstructureScratch<maxAtoms, maxTA>& scratch,
   int&                                      numSeedAtoms) {
-  using SeedT    = Seed<maxAtoms, maxBonds>;
-  using AtomWord = typename SeedT::atom_word_type;
-  using BondWord = typename SeedT::bond_word_type;
+  const int laneRank  = static_cast<int>(group.thread_rank());
+  const int laneCount = static_cast<int>(group.num_threads());
 
-  constexpr int kAtomBitsPerWord = SeedT::kAtomBitsPerWord;
-  constexpr int kAtomWords       = SeedT::kAtomWords;
-  constexpr int kBondBitsPerWord = SeedT::kBondBitsPerWord;
-  constexpr int kBondWords       = SeedT::kBondWords;
-
-  if (seed.numAtoms > targetTopology.numAtoms || seed.numBonds > targetTopology.numBonds) {
-    return false;
-  }
-
-  numSeedAtoms = 0;
-  for (int wordIdx = 0; wordIdx < kAtomWords; ++wordIdx) {
-    AtomWord remaining = seed.atoms[wordIdx];
-    while (remaining != 0) {
-      int bitPosInWord;
-      if constexpr (sizeof(AtomWord) == 4) {
-        bitPosInWord = __ffs(static_cast<unsigned int>(remaining)) - 1;
-      } else {
-        bitPosInWord = __ffsll(static_cast<unsigned long long>(remaining)) - 1;
+  int valid = 1;
+  if (laneRank == 0) {
+    if (seed.numAtoms > targetTopology.numAtoms || seed.numBonds > targetTopology.numBonds) {
+      valid = 0;
+      numSeedAtoms = 0;
+    } else {
+      numSeedAtoms = 0;
+      for (int queryAtomIdx = 0; queryAtomIdx < queryTopology.numAtoms; ++queryAtomIdx) {
+        if (seedContainsAtomWithinThread(seed, queryAtomIdx))
+          scratch.seedAtomList[numSeedAtoms++] = static_cast<std::uint8_t>(queryAtomIdx);
       }
-      const int queryAtomIdx = wordIdx * kAtomBitsPerWord + bitPosInWord;
-      remaining &= remaining - 1;
-      if (queryAtomIdx < queryTopology.numAtoms) {
-        scratch.seedAtomList[numSeedAtoms++] = static_cast<std::uint8_t>(queryAtomIdx);
-      }
+      valid = numSeedAtoms == seed.numAtoms;
     }
   }
-  if (numSeedAtoms != seed.numAtoms)
+  valid        = group.shfl(valid, 0);
+  numSeedAtoms = group.shfl(numSeedAtoms, 0);
+  if (!valid)
     return false;
 
-  for (int wordIdx = 0; wordIdx < kBondWords; ++wordIdx) {
-    BondWord remaining = seed.bonds[wordIdx];
-    while (remaining != 0) {
-      int bitPosInWord;
-      if constexpr (sizeof(BondWord) == 4) {
-        bitPosInWord = __ffs(static_cast<unsigned int>(remaining)) - 1;
-      } else {
-        bitPosInWord = __ffsll(static_cast<unsigned long long>(remaining)) - 1;
-      }
-      const int queryBondIdx = wordIdx * kBondBitsPerWord + bitPosInWord;
-      remaining &= remaining - 1;
-
-      const std::uint32_t queryEndpoints = queryTopology.bondEndpoints[queryBondIdx];
-      const int           queryEndpointU = static_cast<int>(queryEndpoints >> kBondEndpointShift);
-      const int           queryEndpointV = static_cast<int>(queryEndpoints & kBondEndpointMask);
-      ++scratch.seedDegree[queryEndpointU];
-      ++scratch.seedDegree[queryEndpointV];
+  // One lane owns each query atom and counts its incident seed bonds from the
+  // shared CSR topology.  This replaces the serial endpoint walk over every
+  // seed bond.
+  for (int queryAtomIdx = laneRank; queryAtomIdx < queryTopology.numAtoms; queryAtomIdx += laneCount) {
+    if (!seedContainsAtomWithinThread(seed, queryAtomIdx))
+      continue;
+    int seedDegree = 0;
+    const int begin = static_cast<int>(queryTopology.rowOffsets[queryAtomIdx]);
+    const int end   = static_cast<int>(queryTopology.rowOffsets[queryAtomIdx + 1]);
+    for (int adjIdx = begin; adjIdx < end; ++adjIdx) {
+      const int queryBondIdx = static_cast<int>(queryTopology.bondIndices[adjIdx]);
+      seedDegree += queryBondIdx < queryTopology.numBonds &&
+                    seedContainsBondWithinThread<maxAtoms, maxBonds>(seed, queryBondIdx);
     }
+    scratch.seedDegree[queryAtomIdx] = static_cast<std::uint8_t>(seedDegree);
   }
+  group.sync();
 
+  // Select the same most-constrained-first order as the serial implementation:
+  // most mapped neighbours, then highest seed degree, fewest target
+  // candidates, and finally lowest query-atom index.
   for (int orderPos = 0; orderPos < numSeedAtoms; ++orderPos) {
-    int bestAtom                = -1;
-    int bestMappedNeighborCount = -1;
-    int bestDegree              = -1;
-    int bestCandidateCount      = maxTA + 1;
-
-    for (int atomListIdx = 0; atomListIdx < numSeedAtoms; ++atomListIdx) {
-      const int queryAtomIdx = scratch.seedAtomList[atomListIdx];
-      if (scratch.orderedQueryAtom[queryAtomIdx])
+    unsigned int bestKey    = 0;
+    int          impossible = 0;
+    for (int queryAtomIdx = laneRank; queryAtomIdx < queryTopology.numAtoms; queryAtomIdx += laneCount) {
+      if (!seedContainsAtomWithinThread(seed, queryAtomIdx) || scratch.orderedQueryAtom[queryAtomIdx])
         continue;
 
       int mappedNeighborCount = 0;
@@ -771,10 +770,8 @@ __device__ __forceinline__ bool prepareSeedSubstructureSearchWithinThread(
             continue;
           }
           const int otherQueryAtom = static_cast<int>(queryTopology.colIndices[adjIdx]);
-          if (otherQueryAtom >= 0 && otherQueryAtom < queryTopology.numAtoms &&
-              scratch.orderedQueryAtom[otherQueryAtom]) {
-            ++mappedNeighborCount;
-          }
+          mappedNeighborCount += otherQueryAtom >= 0 && otherQueryAtom < queryTopology.numAtoms &&
+                                 scratch.orderedQueryAtom[otherQueryAtom];
         }
       }
       if (orderPos > 0 && mappedNeighborCount == 0)
@@ -784,38 +781,45 @@ __device__ __forceinline__ bool prepareSeedSubstructureSearchWithinThread(
       candidates.andEq(
         scratch.degreeAtLeast[min(static_cast<int>(scratch.seedDegree[queryAtomIdx]), kFmcsMaxSeedDegree)]);
       const int candidateCount = candidates.popcount();
-      if (candidateCount == 0)
-        return false;
-
-      const int  degree = scratch.seedDegree[queryAtomIdx];
-      const bool better = bestAtom < 0 || mappedNeighborCount > bestMappedNeighborCount ||
-                          (mappedNeighborCount == bestMappedNeighborCount && degree > bestDegree) ||
-                          (mappedNeighborCount == bestMappedNeighborCount && degree == bestDegree &&
-                           candidateCount < bestCandidateCount) ||
-                          (mappedNeighborCount == bestMappedNeighborCount && degree == bestDegree &&
-                           candidateCount == bestCandidateCount && queryAtomIdx < bestAtom);
-      if (better) {
-        bestAtom                = queryAtomIdx;
-        bestMappedNeighborCount = mappedNeighborCount;
-        bestDegree              = degree;
-        bestCandidateCount      = candidateCount;
+      if (candidateCount == 0) {
+        impossible = 1;
+        continue;
       }
+
+      const unsigned int degreePriority = static_cast<unsigned int>(scratch.seedDegree[queryAtomIdx]);
+      const unsigned int candidatePriority = static_cast<unsigned int>(maxTA - candidateCount);
+      const unsigned int atomPriority      = static_cast<unsigned int>(maxAtoms - queryAtomIdx);
+      const unsigned int key = (static_cast<unsigned int>(mappedNeighborCount) << 24) | (degreePriority << 20) |
+                               (candidatePriority << 8) | atomPriority;
+      bestKey = max(bestKey, key);
     }
 
-    if (bestAtom < 0) {
-      for (int atomListIdx = 0; atomListIdx < numSeedAtoms; ++atomListIdx) {
-        const int queryAtomIdx = scratch.seedAtomList[atomListIdx];
-        if (!scratch.orderedQueryAtom[queryAtomIdx]) {
-          bestAtom = queryAtomIdx;
-          break;
-        }
-      }
-    }
-    if (bestAtom < 0)
+    if (group.ballot(impossible ? 1u : 0u) != 0)
       return false;
-    scratch.seedAtoms[orderPos]        = static_cast<std::uint8_t>(bestAtom);
-    scratch.orderedQueryAtom[bestAtom] = 1;
-    scratch.queryOrderPos[bestAtom]    = static_cast<std::uint8_t>(orderPos);
+    for (int offset = laneCount / 2; offset > 0; offset >>= 1)
+      bestKey = max(bestKey, group.shfl_xor(bestKey, offset));
+
+    int bestAtom = -1;
+    if (bestKey != 0) {
+      bestAtom = maxAtoms - static_cast<int>(bestKey & 0xFFu);
+    } else {
+      bestAtom = maxAtoms;
+      for (int queryAtomIdx = laneRank; queryAtomIdx < queryTopology.numAtoms; queryAtomIdx += laneCount) {
+        if (seedContainsAtomWithinThread(seed, queryAtomIdx) && !scratch.orderedQueryAtom[queryAtomIdx])
+          bestAtom = min(bestAtom, queryAtomIdx);
+      }
+      for (int offset = laneCount / 2; offset > 0; offset >>= 1)
+        bestAtom = min(bestAtom, group.shfl_xor(bestAtom, offset));
+      if (bestAtom == maxAtoms)
+        return false;
+    }
+
+    if (laneRank == 0) {
+      scratch.seedAtoms[orderPos]        = static_cast<std::uint8_t>(bestAtom);
+      scratch.orderedQueryAtom[bestAtom] = 1;
+      scratch.queryOrderPos[bestAtom]    = static_cast<std::uint8_t>(orderPos);
+    }
+    group.sync();
   }
   return true;
 }
@@ -905,7 +909,7 @@ template <int maxAtoms, int maxBonds, int maxTA, int maxTB> struct McsSeedAdapte
 /// Lane L searches the subtrees rooted at compatible target atoms L,
 /// L+laneCount, ... for the seed atom at order position 0; the search order
 /// over seed atoms is the most-constrained-first permutation computed by
-/// @ref prepareSeedSubstructureSearchWithinThread.  The candidate set is
+/// @ref prepareSeedSubstructureSearchCooperative.  The candidate set is
 /// the canonical intersection (see src/subgraph/warp_dfs.cuh): the query
 /// atom's match-table row, minus used target atoms, intersected per seed
 /// back edge with the neighbours of the mapped target atom reachable over a
@@ -943,15 +947,14 @@ __device__ __forceinline__ bool matchSeedSubstructureCooperative(const GroupT&  
   if (seed.numAtoms != 0) {
     initializeSeedSubstructureScratchCooperative(group, targetTopology, scratch);
   }
-  if (laneRank == 0) {
-    if (seed.numAtoms == 0) {
+  if (seed.numAtoms == 0) {
+    if (laneRank == 0)
       prepared = (seed.numBonds == 0) ? 2 : -1;
-    } else {
-      prepared =
-        prepareSeedSubstructureSearchWithinThread(seed, queryTopology, targetTopology, tables, scratch, numSeedAtoms) ?
-          1 :
-          -1;
-    }
+  } else {
+    prepared = prepareSeedSubstructureSearchCooperative(
+                 group, seed, queryTopology, targetTopology, tables, scratch, numSeedAtoms) ?
+                 1 :
+                 -1;
   }
   group.sync();
   prepared     = group.shfl(prepared, 0);
