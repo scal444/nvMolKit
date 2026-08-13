@@ -22,26 +22,25 @@ import os
 import sys
 
 import pytest
-
 from rdkit import Chem
 from rdkit.Chem.AllChem import ETKDGv3
 
 import nvmolkit.autotune as autotune
 from nvmolkit.autotune import _calibration, _core, _ff_common
 from nvmolkit.autotune.tune_embed_molecules import _default_embed_search_space
+from nvmolkit.autotune.tune_mcs import _default_mcs_search_space
 from nvmolkit.autotune.tune_substructure import (
     _default_substruct_search_space,
     _suggest_preprocessing_threads,
 )
+from nvmolkit.mcs import MCSConfig, findMCS
 from nvmolkit.substructure import (
     SubstructSearchConfig,
     countSubstructMatches,
     getSubstructMatches,
     hasSubstructMatch,
 )
-
 from nvmolkit.types import HardwareOptions
-
 
 SDF_PATH = os.path.join(
     os.path.dirname(__file__),
@@ -163,6 +162,7 @@ def test_substruct_config_to_from_dict_roundtrip():
         maxMatches=8,
         uniquify=True,
         gpuIds=[0],
+        algorithm="dfs",
     )
     encoded = config.to_dict()
     assert encoded == {
@@ -172,6 +172,7 @@ def test_substruct_config_to_from_dict_roundtrip():
         "maxMatches": 8,
         "uniquify": True,
         "gpuIds": [0],
+        "algorithm": "dfs",
     }
     restored = SubstructSearchConfig.from_dict(encoded)
     assert restored.batchSize == 512
@@ -180,6 +181,7 @@ def test_substruct_config_to_from_dict_roundtrip():
     assert restored.maxMatches == 8
     assert restored.uniquify is True
     assert restored.gpuIds == [0]
+    assert restored.algorithm == "dfs"
 
 
 def test_save_load_hardware_options_roundtrip(tmp_path):
@@ -211,6 +213,37 @@ def test_save_load_substruct_config_roundtrip(tmp_path):
     assert loaded.preprocessingThreads == 8
     assert loaded.maxMatches == 4
     assert loaded.uniquify is True
+
+
+def test_mcs_config_to_from_dict_roundtrip():
+    config = MCSConfig(
+        batchSize=256,
+        workerThreads=2,
+        preprocessingThreads=4,
+        executorsPerRunner=3,
+        gpuIds=[0, 1],
+    )
+
+    restored = MCSConfig.from_dict(config.to_dict())
+
+    assert restored.to_dict() == config.to_dict()
+
+
+def test_save_load_mcs_config_roundtrip(tmp_path):
+    config = MCSConfig(
+        batchSize=128,
+        workerThreads=2,
+        preprocessingThreads=6,
+        executorsPerRunner=4,
+        gpuIds=[0],
+    )
+    path = tmp_path / "mcs.json"
+
+    autotune.save(config, path)
+    loaded = autotune.load(path)
+
+    assert isinstance(loaded, MCSConfig)
+    assert loaded.to_dict() == config.to_dict()
 
 
 def test_save_rejects_unsupported_type(tmp_path):
@@ -289,10 +322,20 @@ def test_default_substruct_search_space_caps_per_pool():
     assert space_4gpu["preprocessingThreads"] == (1, 16)
     assert space_64gpu["preprocessingThreads"] == (1, 16)
 
-    low, high, step = space_1gpu["batchSize"]
-    assert step % 64 == 0
-    assert low % step == 0 and high % step == 0
-    assert low <= high
+    # Unlike the FF and embed spaces, substruct batchSize is log-uniform rather
+    # than a stepped range: the useful span is two orders of magnitude.
+    low, high, distribution = space_1gpu["batchSize"]
+    assert distribution == "log"
+    assert 0 < low <= high
+
+
+def test_default_mcs_search_space_covers_supported_execution_settings():
+    space = _default_mcs_search_space(num_gpus=4, cpus=16)
+
+    assert space["batchSize"] == [0, 64, 128, 256, 512]
+    assert space["workerThreads"] == (1, 4)
+    assert space["preprocessingThreads"] == (1, 16)
+    assert space["executorsPerRunner"] == (1, 8)
 
 
 class _RecordingTrial:
@@ -528,6 +571,61 @@ def test_tune_substructure_rejects_empty_queries():
     targets = [Chem.MolFromSmiles("CCO")]
     with pytest.raises(ValueError, match="queries"):
         autotune.tune_substructure(targets, [], n_trials=1)
+
+
+def test_tune_mcs_rejects_empty_molecules():
+    pytest.importorskip("optuna")
+    with pytest.raises(ValueError, match="mols"):
+        autotune.tune_mcs([], [(0, 0)], n_trials=1)
+
+
+def test_tune_mcs_rejects_empty_pairs():
+    pytest.importorskip("optuna")
+    with pytest.raises(ValueError, match="pairs"):
+        autotune.tune_mcs([Chem.MolFromSmiles("CC")], [], n_trials=1)
+
+
+def test_tune_mcs_rejects_invalid_pair_indices():
+    pytest.importorskip("optuna")
+    mols = [Chem.MolFromSmiles("CC"), Chem.MolFromSmiles("CCC")]
+    with pytest.raises(IndexError, match="outside"):
+        autotune.tune_mcs(mols, [(0, 2)], n_trials=1)
+
+
+def test_tune_mcs_smoke():
+    pytest.importorskip("optuna")
+    mols = [
+        Chem.MolFromSmiles("CC"),
+        Chem.MolFromSmiles("CCC"),
+        Chem.MolFromSmiles("CCO"),
+    ]
+    pairs = [(0, 1), (0, 2), (1, 2)]
+
+    result = autotune.tune_mcs(
+        mols,
+        pairs,
+        gpuIds=[0],
+        n_trials=2,
+        target_seconds_per_trial=30.0,
+        calibration_fraction=1.0,
+        calibration_max_size=len(pairs),
+        search_space_overrides={
+            "batchSize": [0, 64, 128, 256],
+            "workerThreads": 1,
+            "preprocessingThreads": 1,
+            "executorsPerRunner": 1,
+        },
+        seed=0,
+    )
+
+    assert isinstance(result.best_config, MCSConfig)
+    assert result.best_throughput > 0
+    assert result.n_trials_run == 2
+    assert result.calibration_size == len(pairs)
+    assert result.best_config.gpuIds == [0]
+
+    final = findMCS(mols, mode="pairs", pairs=pairs, require_gpu=True, config=result.best_config)
+    assert len(final) == len(pairs)
 
 
 @pytest.mark.parametrize("api", [hasSubstructMatch, countSubstructMatches, getSubstructMatches])

@@ -81,6 +81,39 @@ target_compile_options(test_fmcs_grow
 add_executable(test_fmcs_foundations test_fmcs_foundations.cu)
 target_link_libraries(test_fmcs_foundations PRIVATE mcs_fmcs_foundations)
 
+add_executable(test_fmcs_policy test_fmcs_policy.cpp)
+target_link_libraries(test_fmcs_policy PRIVATE mcs_fmcs_foundations)
+
+add_executable(test_fmcs_match test_fmcs_match.cu)
+target_include_directories(test_fmcs_match PRIVATE ${CMAKE_SOURCE_DIR}/src/mcs)
+target_link_libraries(test_fmcs_match PRIVATE mcs_fmcs_foundations
+                                              device_vector)
+
+add_executable(test_fmcs_substructure test_fmcs_substructure.cu)
+target_include_directories(test_fmcs_substructure
+                           PRIVATE ${CMAKE_SOURCE_DIR}/src/mcs)
+target_link_libraries(test_fmcs_substructure PRIVATE mcs_fmcs_foundations
+                                                     device_vector)
+
+add_executable(test_fmcs_search_support test_fmcs_search_support.cu)
+target_include_directories(test_fmcs_search_support
+                           PRIVATE ${CMAKE_SOURCE_DIR}/src/mcs)
+target_link_libraries(test_fmcs_search_support PRIVATE mcs_fmcs_foundations
+                                                       device_vector)
+
+add_executable(test_fmcs_core test_fmcs_core.cpp)
+target_link_libraries(test_fmcs_core PRIVATE mcs_fmcs_core)
+
+add_executable(test_fmcs_engine_validation test_fmcs_engine_validation.cpp)
+target_link_libraries(test_fmcs_engine_validation PRIVATE mcs_fmcs_core)
+
+add_executable(test_fmcs_labeled test_fmcs_labeled.cpp)
+target_link_libraries(test_fmcs_labeled PRIVATE mcs_fmcs_core)
+
+add_executable(test_fmcs_integration test_fmcs_integration.cu)
+target_link_libraries(test_fmcs_integration PRIVATE mcs_search molData
+                                                    test_utils ${RDKit_LIBS})
+
 add_executable(test_openmp_helpers test_openmp_helpers.cpp)
 target_link_libraries(test_openmp_helpers PRIVATE openmp_helpers
                                                   OpenMP::OpenMP_CXX)
@@ -342,6 +375,9 @@ target_link_libraries(
   test_substruct_algos PRIVATE substruct_definitions molecules device
                                flatBitVect device_vector device_timings)
 
+add_executable(test_warp_dfs test_warp_dfs.cu)
+target_link_libraries(test_warp_dfs PRIVATE cuda_error_check CUDA::cudart)
+
 add_executable(test_substructure_integration test_substruct_integration.cu)
 target_link_libraries(
   test_substructure_integration
@@ -420,6 +456,7 @@ set(TEST_LIST
     test_rdkit_comp
     test_rdkit_bounds_matrix
     test_substruct_algos
+    test_warp_dfs
     test_substructure_search
     test_substructure_integration
     test_substruct_label_integration
@@ -428,6 +465,14 @@ set(TEST_LIST
     test_fmcs_primitives
     test_fmcs_foundations
     test_fmcs_grow
+    test_fmcs_match
+    test_fmcs_policy
+    test_fmcs_substructure
+    test_fmcs_search_support
+    test_fmcs_core
+    test_fmcs_engine_validation
+    test_fmcs_labeled
+    test_fmcs_integration
     test_work_splitting
     test_fire_minimizer
     test_fire_minimizer_permol)

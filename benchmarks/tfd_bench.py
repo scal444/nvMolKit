@@ -20,7 +20,7 @@ Compares:
 - nvMolKit GPU (CUDA) with different return types (list, numpy, tensor)
 
 Usage:
-    python tfd_bench.py [--smiles-file FILE] [--output FILE] [--skip-rdkit]
+    python tfd_bench.py [--smiles-file FILE] [--output FILE] [--no-rdkit]
     python tfd_bench.py --pkl-file data1.pkl data2.pkl [--output FILE]
 
 Example:
@@ -32,46 +32,27 @@ Example:
 """
 
 import argparse
-import multiprocessing
 import os
 import pickle
 import sys
-import time
-from typing import List, Tuple
+from typing import List
 
 import pandas as pd
 import torch
-from bench_utils import embed_and_jitter, load_smiles
+from bench_utils import (
+    add_backend_selection_args,
+    available_cpu_count,
+    embed_and_jitter,
+    load_smiles,
+    print_csv_rows,
+    slice_conformers,
+    time_it,
+    write_csv_rows,
+)
 from rdkit import Chem
 from rdkit.Chem import TorsionFingerprints
 
 import nvmolkit.tfd as nvmol_tfd
-
-
-def time_it(func, runs: int = 3, warmups: int = 1) -> Tuple[float, float]:
-    """Time a function with warmup runs.
-
-    Args:
-        func: Function to time (no arguments)
-        runs: Number of timed runs
-        warmups: Number of warmup runs
-
-    Returns:
-        Tuple of (average_time_ms, std_time_ms)
-    """
-    for _ in range(warmups):
-        func()
-
-    times = []
-    for _ in range(runs):
-        start = time.perf_counter_ns()
-        func()
-        end = time.perf_counter_ns()
-        times.append(end - start)
-
-    avg_time = sum(times) / runs
-    std_time = (sum((t - avg_time) ** 2 for t in times) / runs) ** 0.5
-    return avg_time / 1.0e6, std_time / 1.0e6  # Return in milliseconds
 
 
 def generate_conformers_batch(
@@ -89,7 +70,7 @@ def generate_conformers_batch(
     """
     if num_confs < 2:
         raise ValueError(f"num_confs must be >= 2 for TFD, got {num_confs}")
-    workers = num_workers if num_workers > 0 else max(1, multiprocessing.cpu_count() // 2)
+    workers = num_workers if num_workers > 0 else max(1, available_cpu_count() // 2)
     return embed_and_jitter(
         mols,
         confs_per_mol=num_confs,
@@ -101,48 +82,25 @@ def generate_conformers_batch(
     )
 
 
-def _try_load_pickle(num_confs: int, max_mols: int, smiles_file: str = None) -> List[Chem.Mol]:
-    """Try to load precomputed molecules from pickle file."""
-    search_dirs = []
-    if smiles_file:
-        search_dirs.append(os.path.dirname(os.path.abspath(smiles_file)))
-    search_dirs.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "data"))
-
-    for d in search_dirs:
-        pkl_path = os.path.join(d, f"prepared_mols_{num_confs}confs.pkl")
-        if os.path.exists(pkl_path):
-            with open(pkl_path, "rb") as f:
-                all_mols = pickle.load(f)
-            mols = all_mols[:max_mols]
-            print(f"  Loaded {len(mols)} molecules from {pkl_path}")
-            return mols
-    return None
-
-
 def prepare_molecules(
     input_mols: List[Chem.Mol],
     num_confs: int,
     max_mols: int = 100,
-    smiles_file: str = None,
     num_workers: int = 0,
+    seed: int = 42,
 ) -> List[Chem.Mol]:
-    """Prepare molecules with conformers, using precomputed pickle if available.
+    """Prepare molecules with conformers from the explicitly supplied inputs.
 
     Args:
-        input_mols: Parsed RDKit molecules (used when no precomputed pickle is found).
+        input_mols: Parsed RDKit molecules to prepare with conformers.
         num_confs: Number of conformers per molecule
         max_mols: Maximum number of molecules to prepare
-        smiles_file: Path to SMILES file (used to locate sibling pickle files)
         num_workers: Parallel workers for ETKDG embedding (0 = auto, half of CPUs)
+        seed: Seed for base embedding and conformer perturbations.
 
     Returns:
         List of molecules with conformers
     """
-    cached = _try_load_pickle(num_confs, max_mols, smiles_file)
-    if cached is not None:
-        return cached
-
-    print(f"  No precomputed pickle found, generating from scratch...")
     candidates: List[Chem.Mol] = []
     for mol in input_mols:
         if mol is None or mol.GetNumAtoms() < 4:
@@ -151,7 +109,7 @@ def prepare_molecules(
         if len(candidates) >= max_mols:
             break
 
-    return generate_conformers_batch(candidates, num_confs, seed=42, num_workers=num_workers)
+    return generate_conformers_batch(candidates, num_confs, seed=seed, num_workers=num_workers)
 
 
 def bench_rdkit_single(mol: Chem.Mol) -> None:
@@ -228,11 +186,13 @@ def run_benchmarks(
     skip_rdkit: bool = False,
     skip_nvmolkit: bool = False,
     output_file: str = "tfd_results.csv",
-    smiles_file: str = None,
-    mol_counts: List[int] = None,
-    conformer_counts: List[int] = None,
+    mol_counts: List[int] | None = None,
+    conformer_counts: List[int] | None = None,
     preloaded_mols: List[Chem.Mol] | None = None,
     num_workers: int = 0,
+    runs: int = 3,
+    warmups: int = 1,
+    seed: int = 42,
 ) -> pd.DataFrame:
     """Run TFD benchmarks with various configurations.
 
@@ -241,13 +201,15 @@ def run_benchmarks(
         skip_rdkit: If True, skip RDKit benchmarks (faster for large runs)
         skip_nvmolkit: If True, skip nvMolKit GPU benchmarks (RDKit-only mode)
         output_file: Output CSV file path
-        smiles_file: Path to SMILES file (used to locate sibling pickle files)
         mol_counts: List of molecule counts to benchmark
         conformer_counts: List of conformer counts to benchmark
         preloaded_mols: Pre-loaded molecules with conformers (e.g. from --pkl-file).
             When provided, input_mols/smiles_file/conformer_counts are ignored and
             the actual conformer count is read from the molecules.
         num_workers: Parallel workers for ETKDG embedding (0 = auto, half of CPUs).
+        runs: Number of timed repetitions per workload point.
+        warmups: Number of warmup repetitions per workload point.
+        seed: Sampling and conformer-preparation seed.
 
     Returns:
         DataFrame with benchmark results
@@ -266,7 +228,7 @@ def run_benchmarks(
     elif conformer_counts is None:
         conformer_counts = [5, 10, 20]
 
-    results = []
+    results: list[dict[str, object]] = []
 
     print("=" * 70)
     print("TFD Benchmark: RDKit vs nvMolKit (GPU)")
@@ -274,18 +236,24 @@ def run_benchmarks(
     print(f"Conformer counts: {conformer_counts}")
     print("=" * 70)
 
+    prepared_max: List[Chem.Mol] | None = None
+    if preloaded_mols is None:
+        max_confs = max(conformer_counts)
+        print(f"\n--- Preparing molecules once with {max_confs} conformers ---")
+        prepared_max = prepare_molecules(
+            input_mols,
+            max_confs,
+            max_mols=max(mol_counts) + 20,
+            num_workers=num_workers,
+            seed=seed,
+        )
+
     for num_confs in conformer_counts:
         if preloaded_mols is not None:
             all_mols = preloaded_mols[: max(mol_counts)]
         else:
-            print(f"\n--- Preparing molecules with {num_confs} conformers ---")
-            all_mols = prepare_molecules(
-                input_mols,
-                num_confs,
-                max_mols=max(mol_counts) + 20,
-                smiles_file=smiles_file,
-                num_workers=num_workers,
-            )
+            assert prepared_max is not None
+            all_mols = slice_conformers(prepared_max, num_confs)
 
         if len(all_mols) < max(mol_counts):
             print(f"Warning: Only {len(all_mols)} molecules available")
@@ -314,46 +282,33 @@ def run_benchmarks(
 
             # RDKit benchmark (single-threaded Python)
             if not skip_rdkit:
-                try:
-                    rdkit_time, rdkit_std = time_it(lambda: bench_rdkit_batch(mols))
-                    result["rdkit_time_ms"] = rdkit_time
-                    result["rdkit_std_ms"] = rdkit_std
-                    print(f"  RDKit (Python):     {rdkit_time:8.2f} ms (+/- {rdkit_std:.2f})")
-                except Exception as e:
-                    print(f"  RDKit failed: {e}")
-                    result["rdkit_time_ms"] = None
-                    result["rdkit_std_ms"] = None
+                timing = time_it(lambda: bench_rdkit_batch(mols), runs=runs, warmups=warmups)
+                rdkit_time, rdkit_std = timing.mean_ms, timing.std_ms
+                result["rdkit_time_ms"] = rdkit_time
+                result["rdkit_std_ms"] = rdkit_std
+                print(f"  RDKit (Python):     {rdkit_time:8.2f} ms (+/- {rdkit_std:.2f})")
             else:
                 result["rdkit_time_ms"] = None
                 result["rdkit_std_ms"] = None
 
             if not skip_nvmolkit:
-                try:
-                    t, s = time_it(lambda: bench_nvmol_gpu_list(mols))
-                    result["nvmol_gpu_list_time_ms"] = t
-                    result["nvmol_gpu_list_std_ms"] = s
-                    print(f"  nvMolKit (GPU list):  {t:8.2f} ms (+/- {s:.2f})")
-                except Exception as e:
-                    print(f"  nvMolKit GPU list failed: {e}")
-                    result["nvmol_gpu_list_time_ms"] = None
+                timing = time_it(lambda: bench_nvmol_gpu_list(mols), runs=runs, warmups=warmups)
+                t, s = timing.mean_ms, timing.std_ms
+                result["nvmol_gpu_list_time_ms"] = t
+                result["nvmol_gpu_list_std_ms"] = s
+                print(f"  nvMolKit (GPU list):  {t:8.2f} ms (+/- {s:.2f})")
 
-                try:
-                    t, s = time_it(lambda: bench_nvmol_gpu_numpy(mols))
-                    result["nvmol_gpu_numpy_time_ms"] = t
-                    result["nvmol_gpu_numpy_std_ms"] = s
-                    print(f"  nvMolKit (GPU numpy): {t:8.2f} ms (+/- {s:.2f})")
-                except Exception as e:
-                    print(f"  nvMolKit GPU numpy failed: {e}")
-                    result["nvmol_gpu_numpy_time_ms"] = None
+                timing = time_it(lambda: bench_nvmol_gpu_numpy(mols), runs=runs, warmups=warmups)
+                t, s = timing.mean_ms, timing.std_ms
+                result["nvmol_gpu_numpy_time_ms"] = t
+                result["nvmol_gpu_numpy_std_ms"] = s
+                print(f"  nvMolKit (GPU numpy): {t:8.2f} ms (+/- {s:.2f})")
 
-                try:
-                    t, s = time_it(lambda: bench_nvmol_gpu_tensor(mols))
-                    result["nvmol_gpu_tensor_time_ms"] = t
-                    result["nvmol_gpu_tensor_std_ms"] = s
-                    print(f"  nvMolKit (GPU ten):  {t:8.2f} ms (+/- {s:.2f})")
-                except Exception as e:
-                    print(f"  nvMolKit GPU tensor failed: {e}")
-                    result["nvmol_gpu_tensor_time_ms"] = None
+                timing = time_it(lambda: bench_nvmol_gpu_tensor(mols), runs=runs, warmups=warmups)
+                t, s = timing.mean_ms, timing.std_ms
+                result["nvmol_gpu_tensor_time_ms"] = t
+                result["nvmol_gpu_tensor_std_ms"] = s
+                print(f"  nvMolKit (GPU tensor): {t:8.2f} ms (+/- {s:.2f})")
 
                 speedups = {}
                 for key, label in [
@@ -373,9 +328,14 @@ def run_benchmarks(
 
             results.append(result)
 
+    if not results:
+        raise RuntimeError("no TFD workload points could be run with the available molecules")
+
     # Create DataFrame and save
     df = pd.DataFrame(results)
-    df.to_csv(output_file, index=False)
+    write_csv_rows(results, output_file)
+    print("\nCSV Results:")
+    print_csv_rows(results)
     print(f"\n{'=' * 70}")
     print(f"Results saved to: {output_file}")
     print(f"{'=' * 70}")
@@ -413,15 +373,12 @@ def main():
         default=[5, 10, 20, 50],
         help="Conformer counts to benchmark (default: 5 10 20 50)",
     )
-    parser.add_argument(
-        "--skip-rdkit",
-        action="store_true",
-        help="Skip RDKit benchmarks (faster)",
-    )
-    parser.add_argument(
-        "--skip-nvmolkit",
-        action="store_true",
-        help="Skip nvMolKit GPU benchmarks (RDKit-only mode)",
+    add_backend_selection_args(
+        parser,
+        rdkit_dest="skip_rdkit",
+        nvmolkit_dest="skip_nvmolkit",
+        rdkit_aliases=("--skip-rdkit",),
+        nvmolkit_aliases=("--skip-nvmolkit",),
     )
     parser.add_argument(
         "--pkl-file",
@@ -447,6 +404,9 @@ def main():
         default=0,
         help="Parallel workers for ETKDG embedding during prep (0 = auto, half of CPUs)",
     )
+    parser.add_argument("--runs", type=int, default=3, help="Number of timed repetitions (default: 3)")
+    parser.add_argument("--warmups", type=int, default=1, help="Number of warmup repetitions (default: 1)")
+    parser.add_argument("--seed", type=int, default=42, help="Sampling and conformer-generation seed (default: 42)")
     args = parser.parse_args()
 
     if args.skip_rdkit and args.skip_nvmolkit:
@@ -465,7 +425,7 @@ def main():
     else:
         print(f"Loading SMILES from: {args.smiles_file}")
         try:
-            input_mols = load_smiles(args.smiles_file, max_count=max(args.num_mols) + 100)
+            input_mols = load_smiles(args.smiles_file, max_count=max(args.num_mols) + 100, seed=args.seed)
         except Exception as e:
             print(f"Error loading SMILES file: {e}")
             sys.exit(1)
@@ -480,9 +440,12 @@ def main():
                 input_mols,
                 num_confs=5,
                 max_mols=50,
-                smiles_file=args.smiles_file,
                 num_workers=args.prep_workers,
+                seed=args.seed,
             )
+        if not test_mols:
+            print("Error: no molecules available for TFD verification", file=sys.stderr)
+            sys.exit(1)
         all_correct = True
         mismatches = 0
         for i, mol in enumerate(test_mols):
@@ -495,21 +458,27 @@ def main():
         if all_correct:
             print(f"All {len(test_mols)} molecules match RDKit.")
         else:
-            print(f"Warning: {mismatches}/{len(test_mols)} molecules did not match RDKit within tolerance")
+            print(
+                f"Error: {mismatches}/{len(test_mols)} molecules did not match RDKit within tolerance",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
         if args.verify_only:
-            sys.exit(0 if all_correct else 1)
+            sys.exit(0)
 
     run_benchmarks(
         input_mols=input_mols,
         skip_rdkit=args.skip_rdkit,
         skip_nvmolkit=args.skip_nvmolkit,
         output_file=args.output,
-        smiles_file=args.smiles_file,
         mol_counts=args.num_mols,
         conformer_counts=args.num_confs if not args.pkl_file else None,
         preloaded_mols=preloaded_mols,
         num_workers=args.prep_workers,
+        runs=args.runs,
+        warmups=args.warmups,
+        seed=args.seed,
     )
 
 

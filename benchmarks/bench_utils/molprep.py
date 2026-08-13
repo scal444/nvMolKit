@@ -15,6 +15,7 @@
 
 """Molecule preparation helpers shared across nvMolKit benchmarks."""
 
+import os
 import random
 from functools import partial
 
@@ -26,6 +27,17 @@ from tqdm.contrib.concurrent import process_map
 # Manually tuned so the per-conformer jitter recreates an ETKDGv3-like pairwise RMSD spread
 JITTER_CENTER = 1.3
 JITTER_SPREAD = 0.6
+
+
+def available_cpu_count() -> int:
+    """Return CPUs available to this process across supported Python versions."""
+    process_cpu_count = getattr(os, "process_cpu_count", None)
+    if process_cpu_count is not None:
+        return process_cpu_count() or 1
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:
+        return os.cpu_count() or 1
 
 
 def prep_mols(
@@ -73,6 +85,19 @@ def clone_mols_with_conformers(mols: list[Chem.Mol]) -> list[Chem.RWMol]:
     pristine input.
     """
     return [Chem.RWMol(mol) for mol in mols]
+
+
+def slice_conformers(mols: list[Chem.Mol], target: int) -> list[Chem.Mol]:
+    """Copy molecules while retaining at most the first ``target`` conformers."""
+    if target < 0:
+        raise ValueError(f"target must be non-negative, got {target}")
+    out: list[Chem.Mol] = []
+    for mol in mols:
+        copy_mol = Chem.Mol(mol, True)
+        for conf in list(mol.GetConformers())[:target]:
+            copy_mol.AddConformer(Chem.Conformer(conf), assignId=True)
+        out.append(copy_mol)
+    return out
 
 
 def perturb_conformer(
