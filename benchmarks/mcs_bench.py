@@ -368,6 +368,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Target wall-clock seconds per Optuna trial",
     )
     parser.add_argument(
+        "--autotune_cpu_budget",
+        type=int,
+        default=None,
+        help="CPU-core budget used to bound the autotune search space (default: detected physical cores)",
+    )
+    parser.add_argument(
         "--autotune_calibration_size",
         type=int,
         default=0,
@@ -521,6 +527,7 @@ def main() -> None:
                         calibration_set=explicit_calibration,
                         n_trials=args.autotune_trials,
                         target_seconds_per_trial=args.autotune_time_budget,
+                        cpu_budget=args.autotune_cpu_budget,
                         seed=args.autotune_seed,
                         verbose=True,
                     )

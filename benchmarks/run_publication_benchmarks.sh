@@ -28,7 +28,7 @@ Options:
 
 The suite runs the non-size-scan benchmarks from run_all_benchmarks.sh:
 Butina clustering, conformer RMSD, cross similarity, ETKDG, all MMFF/UFF x
-BFGS/FIRE combinations, all supported substructure sets, and TFD.
+BFGS/FIRE combinations, MCS, all supported substructure sets, and TFD.
 EOF
 }
 
@@ -231,12 +231,18 @@ FF_CAL_SIZE="$ETKDG_CAL_SIZE"
 # candidate eight full waves at the largest worker count.
 SUBSTRUCT_CAL_SIZE=$(( AUTOTUNE_PIPELINE_FILLS * AUTOTUNE_BATCH_SIZE_MAX * AUTOTUNE_BATCHES_PER_GPU_MAX ))
 
+# MCS searches batches as large as 4096 pairs. Give every candidate eight
+# complete fills, matching the publication autotune policy above.
+MCS_CAL_SIZE=$(( AUTOTUNE_PIPELINE_FILLS * 4096 ))
+
 # Timed ETKDG/FF inputs are three times the calibration set. Substructure uses
 # a larger steady-state workload while retaining the calibration set as a
 # proper subset.
 ETKDG_NUM_MOLS=$(( 3 * ETKDG_CAL_SIZE ))
 FF_NUM_MOLS=$(( 3 * FF_CAL_SIZE ))
 SUBSTRUCT_NUM_MOLS=1250000
+MCS_NUM_MOLS=10000
+MCS_NUM_PAIRS=$(( 3 * MCS_CAL_SIZE ))
 RDKIT_MAX_SECONDS=300
 FF_MAX_ITERS=200
 
@@ -267,9 +273,12 @@ fi
   echo "etkdg_calibration_mols: $ETKDG_CAL_SIZE"
   echo "ff_calibration_mols: $FF_CAL_SIZE"
   echo "substruct_calibration_mols: $SUBSTRUCT_CAL_SIZE"
+  echo "mcs_calibration_pairs: $MCS_CAL_SIZE"
   echo "etkdg_num_mols: $ETKDG_NUM_MOLS"
   echo "ff_num_mols: $FF_NUM_MOLS"
   echo "substruct_num_mols: $SUBSTRUCT_NUM_MOLS"
+  echo "mcs_num_mols: $MCS_NUM_MOLS"
+  echo "mcs_num_pairs: $MCS_NUM_PAIRS"
   echo "skip_rdkit: $SKIP_RDKIT"
   echo "skip_nvmolkit: $SKIP_NVMOLKIT"
   echo "git_commit: $(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -323,6 +332,7 @@ CONFORMER_RMSD_MODE_FLAGS=()
 CROSS_SIMILARITY_MODE_FLAGS=()
 ETKDG_MODE_FLAGS=()
 FF_MODE_FLAGS=()
+MCS_MODE_FLAGS=()
 SUBSTRUCT_MODE_FLAGS=()
 TFD_MODE_FLAGS=(--verify)
 if [ "$SKIP_RDKIT" = "1" ]; then
@@ -331,6 +341,7 @@ if [ "$SKIP_RDKIT" = "1" ]; then
   CROSS_SIMILARITY_MODE_FLAGS=(--no-rdkit)
   ETKDG_MODE_FLAGS=(--no_rdkit --no_validate)
   FF_MODE_FLAGS=(--no_rdkit --no_validate)
+  MCS_MODE_FLAGS=(--no_rdkit --no_validate)
   SUBSTRUCT_MODE_FLAGS=(--no_rdkit --no_validate)
   TFD_MODE_FLAGS=(--skip-rdkit)
 elif [ "$SKIP_NVMOLKIT" = "1" ]; then
@@ -339,12 +350,14 @@ elif [ "$SKIP_NVMOLKIT" = "1" ]; then
   CROSS_SIMILARITY_MODE_FLAGS=(--no-nvmolkit)
   ETKDG_MODE_FLAGS=(--no_nvmolkit --no_validate)
   FF_MODE_FLAGS=(--no_nvmolkit --no_validate)
+  MCS_MODE_FLAGS=(--no_nvmolkit --no_validate)
   SUBSTRUCT_MODE_FLAGS=(--no_nvmolkit --no_validate)
   TFD_MODE_FLAGS=(--skip-nvmolkit)
 fi
 
 ETKDG_AUTOTUNE_FLAGS=()
 FF_AUTOTUNE_FLAGS=()
+MCS_AUTOTUNE_FLAGS=()
 SUBSTRUCT_AUTOTUNE_FLAGS=()
 if [ "$AUTOTUNE_ENABLED" = "1" ]; then
   ETKDG_AUTOTUNE_FLAGS=(
@@ -360,6 +373,13 @@ if [ "$AUTOTUNE_ENABLED" = "1" ]; then
     --autotune_time_budget "$AUTOTUNE_TIME_BUDGET"
     --autotune_cpu_budget "$CPUS"
     --autotune_calibration_size "$FF_CAL_SIZE"
+  )
+  MCS_AUTOTUNE_FLAGS=(
+    --autotune
+    --autotune_trials "$AUTOTUNE_TRIALS"
+    --autotune_time_budget "$AUTOTUNE_TIME_BUDGET"
+    --autotune_cpu_budget "$CPUS"
+    --autotune_calibration_size "$MCS_CAL_SIZE"
   )
   SUBSTRUCT_AUTOTUNE_FLAGS=(
     --autotune
@@ -440,6 +460,20 @@ for row in "${FF_ROWS[@]}"; do
     "${FF_MODE_FLAGS[@]}"
 done
 
+autotune_save_arg "$AUTOTUNE_DIR/mcs_config.json"
+run_bench mcs "$RESULT_DIR/mcs.csv" \
+  python "$SCRIPT_DIR/mcs_bench.py" \
+  --smiles "$DATASET" \
+  --num_mols "$MCS_NUM_MOLS" \
+  --num_pairs "$MCS_NUM_PAIRS" \
+  --num_gpus 1 \
+  --rdkit_threads "$CPUS" \
+  --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
+  "${MCS_AUTOTUNE_FLAGS[@]}" \
+  "${AUTOTUNE_SAVE_FLAGS[@]}" \
+  --output "$RESULT_DIR/mcs.csv" \
+  "${MCS_MODE_FLAGS[@]}"
+
 SUBSTRUCT_ROWS=(
   "rdkit_fragment_descriptors_supported.txt:countSubstructMatches"
   "wehi_pains_supported.txt:hasSubstructMatch"
@@ -462,7 +496,6 @@ for row in "${SUBSTRUCT_ROWS[@]}"; do
     --mode "$mode" \
     --num_gpus 1 \
     --rdkit_threads "$CPUS" \
-    --rdkit_match_mode raw substructlib \
     --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
     "${SUBSTRUCT_AUTOTUNE_FLAGS[@]}" \
     "${AUTOTUNE_SAVE_FLAGS[@]}" \

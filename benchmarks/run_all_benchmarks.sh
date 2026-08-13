@@ -18,7 +18,8 @@
 # system metadata into a single output directory. Runs use one GPU by default;
 # multi-GPU benchmarking is opt-in with --num-gpus.
 #
-# Both modes run the full bench list. The benches that don't expose a
+# Both modes run the full non-size-scan bench list. Molecule-size sweeps live
+# in run_size_scan_benchmarks.sh. The benches that don't expose a
 # --num_gpus flag (butina_clustering, conformer_rmsd, cross_similarity, tfd)
 # always run on a single GPU. --num-gpus only affects the multi-GPU-aware
 # benches:
@@ -27,24 +28,19 @@
 #   - conformer_rmsd_bench.py       (single-GPU library; --num_gpus N/A)
 #   - cross_similarity_bench.py     (single-GPU library; --num_gpus N/A)
 #   - etkdg_bench.py                (autotuned, --num_gpus = mode arg)
-#   - etkdg_size_scan               (etkdg_bench.py looped over chembl_size_splits bins)
 #   - ff_optimize_bench.py          (autotuned, MMFF and UFF, --num_gpus = mode arg)
-#   - ff_optimize_{mmff,uff}_size_scan (looped over chembl_size_splits bins)
+#   - mcs_bench.py                  (autotuned, --num_gpus = mode arg)
 #   - substruct_bench.py            (autotuned, one row per SMARTS, --num_gpus = mode arg)
 #   - tfd_bench.py                  (single-GPU library; --num_gpus N/A)
 #
 # Autotune budget is fixed at 20 trials × 60 s/trial per autotuned invocation.
-# Size-scan benches autotune once per bin, so the total budget multiplies by
-# the number of bins.
-#
-# Tuned HardwareOptions / SubstructSearchConfig JSON files are saved under
+# Tuned HardwareOptions / MCSConfig / SubstructSearchConfig JSON files are saved under
 # $OUTPUT_DIR/autotune for reproducibility.
 #
 # Data inputs come from --data-dir (default /data, the in-container path; on
 # the host it is typically ~/data). Required layout:
 #
 #   $DATA_DIR/enamine_real_10M.cxsmiles
-#   $DATA_DIR/chembl_size_splits/chembl_<lo>-<hi>.smi   (for size scans)
 #
 # Usage:
 #   ./run_all_benchmarks.sh --output-dir DIR [--num-gpus N] [--gpu-ids LIST]
@@ -112,33 +108,17 @@ SUBSTRUCT_ROWS=(
   "rdkit_torsionPreferences_v2_supported.txt:getSubstructMatches"
 )
 
-# Heavy-atom-count bins for ETKDG / FF size scans, matching the file names
-# in $DATA_DIR/chembl_size_splits/chembl_<bin>.smi. Stops at 80-100 because
-# bins >=100 atoms are biological outliers (peptides etc.) and aren't
-# representative of typical drug-discovery workloads.
-SIZE_SCAN_BINS=(
-  "0-20"
-  "20-40"
-  "40-60"
-  "60-80"
-  "80-100"
-)
-
 # Enumerate every bench name this script can run, in the order they execute.
 ALL_BENCH_NAMES=(
   "butina_clustering"
   "conformer_rmsd"
   "cross_similarity"
   "etkdg"
-  "etkdg_size_scan"
   "ff_optimize_mmff_bfgs"
-  "ff_optimize_mmff_bfgs_size_scan"
   "ff_optimize_mmff_fire"
-  "ff_optimize_mmff_fire_size_scan"
   "ff_optimize_uff_bfgs"
-  "ff_optimize_uff_bfgs_size_scan"
   "ff_optimize_uff_fire"
-  "ff_optimize_uff_fire_size_scan"
+  "mcs"
 )
 for row in "${SUBSTRUCT_ROWS[@]}"; do
   smarts_file="${row%%:*}"
@@ -300,31 +280,14 @@ RESULT_DIR="$OUTPUT_DIR/results"
 AUTOTUNE_DIR="$OUTPUT_DIR/autotune"
 mkdir -p "$LOG_DIR" "$RESULT_DIR" "$AUTOTUNE_DIR"
 
-NEED_ENAMINE=0
-NEED_SIZE_SCAN=0
-for bench_name in "${ALL_BENCH_NAMES[@]}"; do
-  if should_run "$bench_name"; then
-    case "$bench_name" in
-      *_size_scan) NEED_SIZE_SCAN=1 ;;
-      *) NEED_ENAMINE=1 ;;
-    esac
-  fi
-done
-
-if { [ "$NEED_ENAMINE" = "1" ] || [ "$NEED_SIZE_SCAN" = "1" ]; } && [ ! -d "$DATA_DIR" ]; then
+if [ ! -d "$DATA_DIR" ]; then
   echo "Error: --data-dir '$DATA_DIR' does not exist" >&2
   exit 1
 fi
 
 ENAMINE_CXSMILES="$DATA_DIR/enamine_real_10M.cxsmiles"
-SIZE_SCAN_DIR="$DATA_DIR/chembl_size_splits"
-
-if [ "$NEED_ENAMINE" = "1" ] && [ ! -f "$ENAMINE_CXSMILES" ]; then
-  echo "Missing $ENAMINE_CXSMILES (used by the selected non-size-scan benchmarks)" >&2
-  exit 1
-fi
-if [ "$NEED_SIZE_SCAN" = "1" ] && [ ! -d "$SIZE_SCAN_DIR" ]; then
-  echo "Missing $SIZE_SCAN_DIR (required by the selected *_size_scan benchmarks)" >&2
+if [ ! -f "$ENAMINE_CXSMILES" ]; then
+  echo "Missing $ENAMINE_CXSMILES" >&2
   exit 1
 fi
 
@@ -380,7 +343,7 @@ FF_MAX_ITERS=200
 #   calibration_mols = 2 * batchSize_max * batchesPerGpu_max * num_gpus / confs_per_mol
 # Mirrors the autotune defaults in nvmolkit/autotune/_ff_common.py and
 # tune_embed_molecules.py: batchSize_max=1024, batchesPerGpu_max=8.
-AUTOTUNE_BS_MAX=1024
+AUTOTUNE_BS_MAX=4096
 AUTOTUNE_BPG_MAX=8
 ETKDG_CAL_SIZE=$(( 2 * AUTOTUNE_BS_MAX * AUTOTUNE_BPG_MAX * NUM_GPUS / ETKDG_CONFS_PER_MOL ))
 FF_CAL_SIZE=$(( 2 * AUTOTUNE_BS_MAX * AUTOTUNE_BPG_MAX * NUM_GPUS / FF_CONFS_PER_MOL ))
@@ -395,8 +358,12 @@ SUBSTRUCT_CAL_SIZE=$(( 2 * AUTOTUNE_BS_MAX * AUTOTUNE_BPG_MAX * NUM_GPUS ))
 RUNTIME_MULTIPLIER=10
 ETKDG_NUM_MOLS=$(( ETKDG_CAL_SIZE * RUNTIME_MULTIPLIER ))
 FF_NUM_MOLS=$(( FF_CAL_SIZE * RUNTIME_MULTIPLIER ))
-# Per-bin workload for the size scan: same formula.
-SIZE_SCAN_NUM_MOLS="$ETKDG_NUM_MOLS"
+
+# MCS searches batches as large as 4096 pairs. Use two complete fills per GPU
+# for tuning and the same runtime multiplier as the other autotuned benches.
+MCS_CAL_SIZE=$(( 2 * 4096 * NUM_GPUS ))
+MCS_NUM_PAIRS=$(( MCS_CAL_SIZE * RUNTIME_MULTIPLIER ))
+MCS_NUM_MOLS=10000
 
 # Butina needs >=40k molecules for its rdkit_lowmem variant. Cap at 60k so
 # fingerprint construction stays bounded.
@@ -452,13 +419,15 @@ mkdir -p "$SYSINFO_DIR"
   echo "rdkit_threads: $RDKIT_THREADS"
   echo "data_dir: $DATA_DIR"
   echo "enamine_path: $ENAMINE_CXSMILES"
-  echo "size_scan_dir: $SIZE_SCAN_DIR"
   echo "skip_rdkit: $SKIP_RDKIT"
   echo "skip_nvmolkit: $SKIP_NVMOLKIT"
   echo "etkdg_num_mols: $ETKDG_NUM_MOLS"
   echo "etkdg_calibration_mols: $ETKDG_CAL_SIZE"
   echo "ff_num_mols: $FF_NUM_MOLS"
   echo "ff_calibration_mols: $FF_CAL_SIZE"
+  echo "mcs_num_mols: $MCS_NUM_MOLS"
+  echo "mcs_num_pairs: $MCS_NUM_PAIRS"
+  echo "mcs_calibration_pairs: $MCS_CAL_SIZE"
   echo "runtime_multiplier: $RUNTIME_MULTIPLIER"
   echo "substruct_num_mols: $SUBSTRUCT_NUM_MOLS"
   echo "substruct_calibration_mols: $SUBSTRUCT_CAL_SIZE"
@@ -481,6 +450,7 @@ python -c "import torch; print('torch:', torch.__version__); print('cuda:', torc
 pip freeze > "$SYSINFO_DIR/pip_freeze.txt" 2>&1 || true
 
 SUMMARY="$OUTPUT_DIR/summary.tsv"
+FAILURES=0
 COMPLETED_BENCHES=""
 if [ "$CONTINUE" = "1" ] && [ -f "$SUMMARY" ]; then
   COMPLETED_BENCHES="$(awk -F'\t' 'NR>1 && $2=="ok" {print $1}' "$SUMMARY")"
@@ -508,9 +478,7 @@ is_completed() {
   return 1
 }
 
-# Run one bench unconditionally and append its result to $SUMMARY. Used directly
-# for size-scan bins (parent scan does its own --include check) and via
-# run_bench for top-level benches.
+# Run one bench unconditionally and append its result to $SUMMARY.
 run_bench_inner() {
   local name="$1"
   local result_path="$2"
@@ -540,6 +508,7 @@ run_bench_inner() {
     status="ok"
   else
     status="fail"
+    FAILURES=$(( FAILURES + 1 ))
   fi
   printf "%s\t%s\t%d\t%d\t%s\t%s\n" \
     "$name" "$status" "$code" "$duration" "$log_path" "$result_path" >> "$SUMMARY"
@@ -568,6 +537,7 @@ CONFORMER_RMSD_MODE_FLAGS=()
 CROSS_SIMILARITY_MODE_FLAGS=()
 ETKDG_MODE_FLAGS=()
 FF_MODE_FLAGS=()
+MCS_MODE_FLAGS=()
 SUBSTRUCT_MODE_FLAGS=()
 TFD_MODE_FLAGS=(--verify)
 # Autotune flag set is added to the etkdg / ff / substruct bench invocations
@@ -583,6 +553,7 @@ if [ "$SKIP_RDKIT" = "1" ]; then
   CROSS_SIMILARITY_MODE_FLAGS=(--no-rdkit)
   ETKDG_MODE_FLAGS=(--no_rdkit --no_validate)
   FF_MODE_FLAGS=(--no_rdkit --no_validate)
+  MCS_MODE_FLAGS=(--no_rdkit --no_validate)
   SUBSTRUCT_MODE_FLAGS=(--no_rdkit --no_validate)
   TFD_MODE_FLAGS=(--skip-rdkit)
 fi
@@ -592,6 +563,7 @@ if [ "$SKIP_NVMOLKIT" = "1" ]; then
   CROSS_SIMILARITY_MODE_FLAGS=(--no-nvmolkit)
   ETKDG_MODE_FLAGS=(--no_nvmolkit --no_validate)
   FF_MODE_FLAGS=(--no_nvmolkit --no_validate)
+  MCS_MODE_FLAGS=(--no_nvmolkit --no_validate)
   SUBSTRUCT_MODE_FLAGS=(--no_nvmolkit --no_validate)
   TFD_MODE_FLAGS=(--skip-nvmolkit)
   AUTOTUNE_ENABLED=0
@@ -603,6 +575,7 @@ fi
 # substruct row) writes a different config file.
 ETKDG_AUTOTUNE_FLAGS=()
 FF_AUTOTUNE_FLAGS=()
+MCS_AUTOTUNE_FLAGS=()
 SUBSTRUCT_AUTOTUNE_FLAGS=()
 if [ "$AUTOTUNE_ENABLED" = "1" ]; then
   ETKDG_AUTOTUNE_FLAGS=(
@@ -616,6 +589,12 @@ if [ "$AUTOTUNE_ENABLED" = "1" ]; then
     --autotune_trials "$AUTOTUNE_TRIALS"
     --autotune_time_budget "$AUTOTUNE_TIME_BUDGET"
     --autotune_calibration_size "$FF_CAL_SIZE"
+  )
+  MCS_AUTOTUNE_FLAGS=(
+    --autotune
+    --autotune_trials "$AUTOTUNE_TRIALS"
+    --autotune_time_budget "$AUTOTUNE_TIME_BUDGET"
+    --autotune_calibration_size "$MCS_CAL_SIZE"
   )
   SUBSTRUCT_AUTOTUNE_FLAGS=(
     --autotune
@@ -679,35 +658,6 @@ run_bench "etkdg" \
   --output "$RESULT_DIR/etkdg.csv" \
   "${ETKDG_MODE_FLAGS[@]}"
 
-if should_run "etkdg_size_scan"; then
-  echo "[etkdg_size_scan] sweeping ${#SIZE_SCAN_BINS[@]} bins"
-  for bin in "${SIZE_SCAN_BINS[@]}"; do
-    bin_smi="$SIZE_SCAN_DIR/chembl_${bin}.smi"
-    if [ ! -f "$bin_smi" ]; then
-      echo "  skipping bin $bin (missing $bin_smi)"
-      continue
-    fi
-    bin_name="etkdg_size_scan_${bin}"
-    autotune_save_arg etkdg_bin_save_flags "$AUTOTUNE_DIR/etkdg_size_scan_${bin}_hardware.json"
-    run_bench_inner "$bin_name" \
-      "$RESULT_DIR/etkdg_size_scan_${bin}.csv" \
-      python "$SCRIPT_DIR/etkdg_bench.py" \
-      --smiles "$bin_smi" \
-      --num_mols "$SIZE_SCAN_NUM_MOLS" \
-      --confs_per_mol "$ETKDG_CONFS_PER_MOL" \
-      --num_gpus "$NUM_GPUS" \
-      --rdkit_threads "$RDKIT_THREADS" \
-      --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
-      "${ETKDG_AUTOTUNE_FLAGS[@]}" \
-      "${etkdg_bin_save_flags[@]}" \
-      --output "$RESULT_DIR/etkdg_size_scan_${bin}.csv" \
-      "${ETKDG_MODE_FLAGS[@]}"
-  done
-else
-  echo "[etkdg_size_scan] skipped (not in --include)"
-  printf "%s\t%s\t%d\t%d\t%s\t%s\n" "etkdg_size_scan" "skipped" 0 0 "" "" >> "$SUMMARY"
-fi
-
 # Exercise every supported force-field/minimizer pairing. The minimizer kind
 # is part of the benchmark name because BFGS and FIRE have distinct tuning
 # optima and performance characteristics.
@@ -740,39 +690,22 @@ for row in "${FF_ROWS[@]}"; do
     --output "$RESULT_DIR/${ff_name}.csv" \
     "${FF_MODE_FLAGS[@]}"
 
-  scan_name="${ff_name}_size_scan"
-  if should_run "$scan_name"; then
-    echo "[$scan_name] sweeping ${#SIZE_SCAN_BINS[@]} bins"
-    for bin in "${SIZE_SCAN_BINS[@]}"; do
-      bin_smi="$SIZE_SCAN_DIR/chembl_${bin}.smi"
-      if [ ! -f "$bin_smi" ]; then
-        echo "  skipping bin $bin (missing $bin_smi)"
-        continue
-      fi
-      bin_name="${scan_name}_${bin}"
-      autotune_save_arg ff_bin_save_flags "$AUTOTUNE_DIR/${bin_name}_hardware.json"
-      run_bench_inner "$bin_name" \
-        "$RESULT_DIR/${bin_name}.csv" \
-        python "$SCRIPT_DIR/ff_optimize_bench.py" \
-        --smiles "$bin_smi" \
-        --num_mols "$SIZE_SCAN_NUM_MOLS" \
-        --confs_per_mol "$FF_CONFS_PER_MOL" \
-        --ff "$ff" \
-        --minimizer_kind "$minimizer_kind" \
-        --max_iters "$FF_MAX_ITERS" \
-        --num_gpus "$NUM_GPUS" \
-        --rdkit_threads "$RDKIT_THREADS" \
-        --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
-        "${FF_AUTOTUNE_FLAGS[@]}" \
-        "${ff_bin_save_flags[@]}" \
-        --output "$RESULT_DIR/${bin_name}.csv" \
-        "${FF_MODE_FLAGS[@]}"
-    done
-  else
-    echo "[$scan_name] skipped (not in --include)"
-    printf "%s\t%s\t%d\t%d\t%s\t%s\n" "$scan_name" "skipped" 0 0 "" "" >> "$SUMMARY"
-  fi
 done
+
+autotune_save_arg mcs_save_flags "$AUTOTUNE_DIR/mcs_config.json"
+run_bench "mcs" \
+  "$RESULT_DIR/mcs.csv" \
+  python "$SCRIPT_DIR/mcs_bench.py" \
+  --smiles "$ENAMINE_CXSMILES" \
+  --num_mols "$MCS_NUM_MOLS" \
+  --num_pairs "$MCS_NUM_PAIRS" \
+  --num_gpus "$NUM_GPUS" \
+  --rdkit_threads "$RDKIT_THREADS" \
+  --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
+  "${MCS_AUTOTUNE_FLAGS[@]}" \
+  "${mcs_save_flags[@]}" \
+  --output "$RESULT_DIR/mcs.csv" \
+  "${MCS_MODE_FLAGS[@]}"
 
 for row in "${SUBSTRUCT_ROWS[@]}"; do
   smarts_file="${row%%:*}"
@@ -791,7 +724,6 @@ for row in "${SUBSTRUCT_ROWS[@]}"; do
     --mode "$mode" \
     --num_gpus "$NUM_GPUS" \
     --rdkit_threads "$RDKIT_THREADS" \
-    --rdkit_match_mode raw substructlib \
     --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
     "${SUBSTRUCT_AUTOTUNE_FLAGS[@]}" \
     "${substruct_save_flags[@]}" \
@@ -809,3 +741,7 @@ echo
 echo "All benchmarks complete. Output: $OUTPUT_DIR"
 echo "Summary:"
 column -t -s $'\t' "$SUMMARY" || cat "$SUMMARY"
+if [ "$FAILURES" -ne 0 ]; then
+  echo "Error: $FAILURES benchmark(s) failed" >&2
+  exit 1
+fi
