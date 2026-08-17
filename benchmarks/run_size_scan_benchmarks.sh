@@ -213,14 +213,19 @@ fi
 
 CONFS_PER_MOL=200
 FF_MAX_ITERS=200
-AUTOTUNE_BS_MAX=1024
+ETKDG_AUTOTUNE_BS_MAX=1024
+FF_AUTOTUNE_BS_MAX=4096
 AUTOTUNE_BPG_MAX=8
 AUTOTUNE_TRIALS=20
-AUTOTUNE_TIME_BUDGET=60
-RUNTIME_MULTIPLIER=10
-CAL_SIZE=$(( 2 * AUTOTUNE_BS_MAX * AUTOTUNE_BPG_MAX * NUM_GPUS / CONFS_PER_MOL ))
-NUM_MOLS=$(( CAL_SIZE * RUNTIME_MULTIPLIER ))
+AUTOTUNE_TIME_BUDGET=10
+BENCHMARK_SEED=42
+TIMING_RUNS=3
 RDKIT_MAX_SECONDS=300
+
+etkdg_num_mols() { case "$1" in 0-20) echo 80000;; 20-40) echo 47700;; 40-60) echo 15600;; 60-80) echo 5940;; 80-100) echo 2590;; esac; }
+etkdg_cal_mols() { case "$1" in 0-20) echo 16000;; 20-40) echo 3980;; 40-60) echo 1300;; 60-80) echo 500;; 80-100) echo 220;; esac; }
+ff_num_mols() { case "$1" in 0-20) echo 80000;; 20-40) echo 73500;; 40-60) echo 42300;; 60-80) echo 26400;; 80-100) echo 18700;; esac; }
+ff_cal_mols() { case "$1" in 0-20) echo 14000;; 20-40) echo 6130;; 40-60) echo 3530;; 60-80) echo 2200;; 80-100) echo 1560;; esac; }
 
 PHYSICAL_CORES="$(lscpu -p=Core,Socket 2>/dev/null | awk -F, '!/^#/ {print $1 "," $2}' | sort -u | wc -l)"
 if [ -z "$PHYSICAL_CORES" ] || [ "$PHYSICAL_CORES" -lt 1 ]; then
@@ -242,10 +247,16 @@ fi
   echo "rdkit_threads: $RDKIT_THREADS"
   echo "size_scan_dir: $SIZE_SCAN_DIR"
   echo "size_scan_bins: ${SIZE_SCAN_BINS[*]}"
-  echo "num_mols_per_bin: $NUM_MOLS"
-  echo "calibration_mols_per_bin: $CAL_SIZE"
+  for bin in "${SIZE_SCAN_BINS[@]}"; do
+    echo "etkdg_${bin}_num_mols: $(etkdg_num_mols "$bin")"
+    echo "etkdg_${bin}_calibration_mols: $(etkdg_cal_mols "$bin")"
+    echo "ff_${bin}_num_mols: $(ff_num_mols "$bin")"
+    echo "ff_${bin}_calibration_mols: $(ff_cal_mols "$bin")"
+  done
   echo "autotune_trials: $AUTOTUNE_TRIALS"
   echo "autotune_seconds_per_trial: $AUTOTUNE_TIME_BUDGET"
+  echo "benchmark_seed: $BENCHMARK_SEED"
+  echo "timing_runs: $TIMING_RUNS"
 } > "$SYSINFO_DIR/run_info.txt"
 lscpu > "$SYSINFO_DIR/lscpu.txt" 2>&1 || true
 nvidia-smi > "$SYSINFO_DIR/nvidia-smi.txt" 2>&1 || true
@@ -310,16 +321,6 @@ elif [ "$SKIP_NVMOLKIT" = "1" ]; then
   AUTOTUNE_ENABLED=0
 fi
 
-AUTOTUNE_FLAGS=()
-if [ "$AUTOTUNE_ENABLED" = "1" ]; then
-  AUTOTUNE_FLAGS=(
-    --autotune
-    --autotune_trials "$AUTOTUNE_TRIALS"
-    --autotune_time_budget "$AUTOTUNE_TIME_BUDGET"
-    --autotune_calibration_size "$CAL_SIZE"
-  )
-fi
-
 autotune_save_arg() {
   local path="$1"
   if [ "$AUTOTUNE_ENABLED" = "1" ]; then
@@ -338,13 +339,20 @@ if should_run etkdg_size_scan; then
       continue
     fi
     name="etkdg_size_scan_${bin}"
+    num_mols="$(etkdg_num_mols "$bin")"
+    cal_mols="$(etkdg_cal_mols "$bin")"
+    ETKDG_AUTOTUNE_FLAGS=()
+    if [ "$AUTOTUNE_ENABLED" = "1" ]; then
+      ETKDG_AUTOTUNE_FLAGS=(--autotune --autotune_trials "$AUTOTUNE_TRIALS" --autotune_time_budget "$AUTOTUNE_TIME_BUDGET" --autotune_calibration_size "$cal_mols")
+    fi
     autotune_save_arg "$AUTOTUNE_DIR/${name}_hardware.json"
     run_bench "$name" "$RESULT_DIR/${name}.csv" \
       python "$SCRIPT_DIR/etkdg_bench.py" \
-      --smiles "$bin_smi" --num_mols "$NUM_MOLS" --confs_per_mol "$CONFS_PER_MOL" \
+      --smiles "$bin_smi" --num_mols "$num_mols" --seed "$BENCHMARK_SEED" \
+      --runs "$TIMING_RUNS" --confs_per_mol "$CONFS_PER_MOL" \
       --num_gpus "$NUM_GPUS" --rdkit_threads "$RDKIT_THREADS" \
       --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
-      "${AUTOTUNE_FLAGS[@]}" "${AUTOTUNE_SAVE_FLAGS[@]}" \
+      "${ETKDG_AUTOTUNE_FLAGS[@]}" "${AUTOTUNE_SAVE_FLAGS[@]}" \
       --output "$RESULT_DIR/${name}.csv" "${ETKDG_MODE_FLAGS[@]}"
   done
 fi
@@ -363,14 +371,21 @@ for row in "${FF_ROWS[@]}"; do
       printf "%s\tskipped\t0\t0\t\t\n" "$name" >> "$SUMMARY"
       continue
     fi
+    num_mols="$(ff_num_mols "$bin")"
+    cal_mols="$(ff_cal_mols "$bin")"
+    FF_AUTOTUNE_FLAGS=()
+    if [ "$AUTOTUNE_ENABLED" = "1" ]; then
+      FF_AUTOTUNE_FLAGS=(--autotune --autotune_trials "$AUTOTUNE_TRIALS" --autotune_time_budget "$AUTOTUNE_TIME_BUDGET" --autotune_calibration_size "$cal_mols")
+    fi
     autotune_save_arg "$AUTOTUNE_DIR/${name}_hardware.json"
     run_bench "$name" "$RESULT_DIR/${name}.csv" \
       python "$SCRIPT_DIR/ff_optimize_bench.py" \
-      --smiles "$bin_smi" --num_mols "$NUM_MOLS" --confs_per_mol "$CONFS_PER_MOL" \
+      --smiles "$bin_smi" --num_mols "$num_mols" --seed "$BENCHMARK_SEED" \
+      --runs "$TIMING_RUNS" --confs_per_mol "$CONFS_PER_MOL" \
       --ff "$ff" --minimizer_kind "$minimizer_kind" --max_iters "$FF_MAX_ITERS" \
       --num_gpus "$NUM_GPUS" --rdkit_threads "$RDKIT_THREADS" \
       --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
-      "${AUTOTUNE_FLAGS[@]}" "${AUTOTUNE_SAVE_FLAGS[@]}" \
+      "${FF_AUTOTUNE_FLAGS[@]}" "${AUTOTUNE_SAVE_FLAGS[@]}" \
       --output "$RESULT_DIR/${name}.csv" "${FF_MODE_FLAGS[@]}"
   done
 done

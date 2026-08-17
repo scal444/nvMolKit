@@ -22,13 +22,15 @@ Options:
   --no-rdkit           Run nvMolKit only; disables cross-implementation validation
   --no-nvmolkit        Run RDKit only; disables autotuning
   --no-autotune        Use benchmark defaults instead of autotuning nvMolKit
-  --autotune-trials N  Optuna trials per tuned benchmark (default: 40)
-  --autotune-seconds N Target seconds per autotune trial (default: 60)
+  --autotune-trials N  Optuna trials per tuned benchmark (default: 20)
+  --autotune-seconds N Target seconds per autotune trial (default: 10)
   -h, --help           Show this help
 
 The suite runs the non-size-scan benchmarks from run_all_benchmarks.sh:
 Butina clustering, conformer RMSD, cross similarity, ETKDG, all MMFF/UFF x
-BFGS/FIRE combinations, MCS, all supported substructure sets, and TFD.
+BFGS/FIRE combinations, the MCS atom/bond comparison matrix plus ring support,
+both GSI and DFS for every supported
+substructure set, and TFD.
 EOF
 }
 
@@ -43,8 +45,8 @@ REQUESTED_CPUS=""
 SKIP_RDKIT=0
 SKIP_NVMOLKIT=0
 AUTOTUNE_ENABLED=1
-AUTOTUNE_TRIALS=40
-AUTOTUNE_TIME_BUDGET=60
+AUTOTUNE_TRIALS=20
+AUTOTUNE_TIME_BUDGET=10
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -214,43 +216,42 @@ if ! mkdir -p "$LOG_DIR" "$RESULT_DIR" "$AUTOTUNE_DIR" "$SYSINFO_DIR"; then
   exit 1
 fi
 
-# The largest ETKDG/FF candidate has 1024 conformers/batch * 8 batches/GPU.
-# Eight complete pipeline fills keep even that candidate out of the short-tail
-# regime. Ceiling division is deliberate: the old two-fill formula rounded
-# down and could provide fewer conformers than its stated minimum.
+# Fixed single-GPU production workloads derived from the B300/H200 one-GPU
+# runs. Every workload uses three samples. BFGS and FIRE deliberately share the exact same per-force-field input
+# sample so their throughput and wall times are directly comparable.
 CONFS_PER_MOL=200
-AUTOTUNE_BATCH_SIZE_MAX=1024
-AUTOTUNE_BATCHES_PER_GPU_MAX=8
-AUTOTUNE_PIPELINE_FILLS=8
-MAX_INFLIGHT_CONFS=$(( AUTOTUNE_BATCH_SIZE_MAX * AUTOTUNE_BATCHES_PER_GPU_MAX ))
-AUTOTUNE_CONFS=$(( AUTOTUNE_PIPELINE_FILLS * MAX_INFLIGHT_CONFS ))
-ETKDG_CAL_SIZE=$(( (AUTOTUNE_CONFS + CONFS_PER_MOL - 1) / CONFS_PER_MOL ))
-FF_CAL_SIZE="$ETKDG_CAL_SIZE"
-
-# The substructure workers may each hold one maximum-sized batch. Give every
-# candidate eight full waves at the largest worker count.
-SUBSTRUCT_CAL_SIZE=$(( AUTOTUNE_PIPELINE_FILLS * AUTOTUNE_BATCH_SIZE_MAX * AUTOTUNE_BATCHES_PER_GPU_MAX ))
-
-# MCS searches batches as large as 4096 pairs. Give every candidate eight
-# complete fills, matching the publication autotune policy above.
-MCS_CAL_SIZE=$(( AUTOTUNE_PIPELINE_FILLS * 4096 ))
-
-# Timed ETKDG/FF inputs are three times the calibration set. Substructure uses
-# a larger steady-state workload while retaining the calibration set as a
-# proper subset.
-ETKDG_NUM_MOLS=$(( 3 * ETKDG_CAL_SIZE ))
-FF_NUM_MOLS=$(( 3 * FF_CAL_SIZE ))
+BENCHMARK_SEED=42
+TIMING_RUNS=3
+ETKDG_NUM_MOLS=810
+ETKDG_CAL_SIZE=72
+FF_MMFF_NUM_MOLS=1400
+FF_MMFF_BFGS_CAL_SIZE=115
+FF_MMFF_FIRE_CAL_SIZE=230
+FF_UFF_NUM_MOLS=700
+FF_UFF_BFGS_CAL_SIZE=60
+FF_UFF_FIRE_CAL_SIZE=100
 SUBSTRUCT_NUM_MOLS=1250000
 MCS_NUM_MOLS=10000
-MCS_NUM_PAIRS=$(( 3 * MCS_CAL_SIZE ))
+MCS_NUM_PAIRS=2800000
+MCS_AUTOTUNE_PAIRS=230000
 RDKIT_MAX_SECONDS=300
 FF_MAX_ITERS=200
 
+# MCS parameter rows: (benchmark name, atom compare, bond compare, ring-only).
+# Strict means element/order matching, without the additional comparison
+# variants exposed by mcs_bench.py.
+MCS_ROWS=(
+  "mcs_lax_lax:any:any:0"
+  "mcs_lax_strict:any:order:0"
+  "mcs_strict_lax:elements:any:0"
+  "mcs_strict_strict:elements:order:0"
+  "mcs_strict_strict_ring:elements:order:1"
+)
+
 DATASET_LINES="$(wc -l < "$DATASET")"
-if [ "$AUTOTUNE_ENABLED" = "1" ] && [ "$DATASET_LINES" -lt "$SUBSTRUCT_CAL_SIZE" ]; then
-  echo "Error: dataset has $DATASET_LINES lines; publication autotuning requires at least" >&2
-  echo "       $SUBSTRUCT_CAL_SIZE so the largest substructure configuration gets" >&2
-  echo "       $AUTOTUNE_PIPELINE_FILLS complete pipeline fills." >&2
+if [ "$AUTOTUNE_ENABLED" = "1" ] && [ "$DATASET_LINES" -lt "$SUBSTRUCT_NUM_MOLS" ]; then
+  echo "Error: dataset has $DATASET_LINES lines; publication runs require at least" >&2
+  echo "       $SUBSTRUCT_NUM_MOLS molecules for the fixed substructure workload." >&2
   exit 1
 fi
 
@@ -269,16 +270,17 @@ fi
   echo "autotune_enabled: $AUTOTUNE_ENABLED"
   echo "autotune_trials: $AUTOTUNE_TRIALS"
   echo "autotune_seconds_per_trial: $AUTOTUNE_TIME_BUDGET"
-  echo "autotune_pipeline_fills: $AUTOTUNE_PIPELINE_FILLS"
+  echo "benchmark_seed: $BENCHMARK_SEED"
+  echo "timing_runs: $TIMING_RUNS"
   echo "etkdg_calibration_mols: $ETKDG_CAL_SIZE"
-  echo "ff_calibration_mols: $FF_CAL_SIZE"
-  echo "substruct_calibration_mols: $SUBSTRUCT_CAL_SIZE"
-  echo "mcs_calibration_pairs: $MCS_CAL_SIZE"
+  echo "ff_mmff_num_mols: $FF_MMFF_NUM_MOLS"
+  echo "ff_uff_num_mols: $FF_UFF_NUM_MOLS"
+  echo "mcs_calibration_pairs: $MCS_AUTOTUNE_PAIRS"
   echo "etkdg_num_mols: $ETKDG_NUM_MOLS"
-  echo "ff_num_mols: $FF_NUM_MOLS"
   echo "substruct_num_mols: $SUBSTRUCT_NUM_MOLS"
   echo "mcs_num_mols: $MCS_NUM_MOLS"
   echo "mcs_num_pairs: $MCS_NUM_PAIRS"
+  echo "mcs_parameter_sets: ${MCS_ROWS[*]}"
   echo "skip_rdkit: $SKIP_RDKIT"
   echo "skip_nvmolkit: $SKIP_NVMOLKIT"
   echo "git_commit: $(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -356,9 +358,7 @@ elif [ "$SKIP_NVMOLKIT" = "1" ]; then
 fi
 
 ETKDG_AUTOTUNE_FLAGS=()
-FF_AUTOTUNE_FLAGS=()
 MCS_AUTOTUNE_FLAGS=()
-SUBSTRUCT_AUTOTUNE_FLAGS=()
 if [ "$AUTOTUNE_ENABLED" = "1" ]; then
   ETKDG_AUTOTUNE_FLAGS=(
     --autotune
@@ -367,28 +367,44 @@ if [ "$AUTOTUNE_ENABLED" = "1" ]; then
     --autotune_cpu_budget "$CPUS"
     --autotune_calibration_size "$ETKDG_CAL_SIZE"
   )
-  FF_AUTOTUNE_FLAGS=(
-    --autotune
-    --autotune_trials "$AUTOTUNE_TRIALS"
-    --autotune_time_budget "$AUTOTUNE_TIME_BUDGET"
-    --autotune_cpu_budget "$CPUS"
-    --autotune_calibration_size "$FF_CAL_SIZE"
-  )
   MCS_AUTOTUNE_FLAGS=(
     --autotune
     --autotune_trials "$AUTOTUNE_TRIALS"
     --autotune_time_budget "$AUTOTUNE_TIME_BUDGET"
     --autotune_cpu_budget "$CPUS"
-    --autotune_calibration_size "$MCS_CAL_SIZE"
-  )
-  SUBSTRUCT_AUTOTUNE_FLAGS=(
-    --autotune
-    --autotune_trials "$AUTOTUNE_TRIALS"
-    --autotune_time_budget "$AUTOTUNE_TIME_BUDGET"
-    --autotune_cpu_budget "$CPUS"
-    --autotune_calibration_size "$SUBSTRUCT_CAL_SIZE"
+    --autotune_calibration_size "$MCS_AUTOTUNE_PAIRS"
   )
 fi
+
+substruct_calibration_size() {
+  case "$1:$2" in
+    gsi:rdkit_fragment_descriptors_supported) echo 1250000 ;;
+    gsi:wehi_pains_supported) echo 475000 ;;
+    gsi:BMS_2006_filter_supported) echo 1050000 ;;
+    gsi:rdkit_tautomer_transforms_supported) echo 1250000 ;;
+    gsi:rdkit_torsionPreferences_v2_supported) echo 258000 ;;
+    dfs:rdkit_fragment_descriptors_supported) echo 1250000 ;;
+    dfs:wehi_pains_supported) echo 1000000 ;;
+    dfs:BMS_2006_filter_supported) echo 1250000 ;;
+    dfs:rdkit_tautomer_transforms_supported) echo 1250000 ;;
+    dfs:rdkit_torsionPreferences_v2_supported) echo 270000 ;;
+  esac
+}
+
+substruct_timing_runs() {
+  case "$1:$2" in
+    gsi:rdkit_fragment_descriptors_supported) echo 3 ;;
+    gsi:wehi_pains_supported) echo 3 ;;
+    gsi:BMS_2006_filter_supported) echo 3 ;;
+    gsi:rdkit_tautomer_transforms_supported) echo 3 ;;
+    gsi:rdkit_torsionPreferences_v2_supported) echo 3 ;;
+    dfs:rdkit_fragment_descriptors_supported) echo 3 ;;
+    dfs:wehi_pains_supported) echo 3 ;;
+    dfs:BMS_2006_filter_supported) echo 3 ;;
+    dfs:rdkit_tautomer_transforms_supported) echo 3 ;;
+    dfs:rdkit_torsionPreferences_v2_supported) echo 3 ;;
+  esac
+}
 
 autotune_save_arg() {
   local path="$1"
@@ -401,6 +417,7 @@ autotune_save_arg() {
 
 run_bench butina_clustering "$RESULT_DIR/butina_clustering.csv" \
   python "$SCRIPT_DIR/butina_clustering_bench.py" "$DATASET" \
+  --seed "$BENCHMARK_SEED" \
   --nvmolkit-reordering both \
   --output "$RESULT_DIR/butina_clustering.csv" \
   "${BUTINA_MODE_FLAGS[@]}"
@@ -408,7 +425,8 @@ run_bench butina_clustering "$RESULT_DIR/butina_clustering.csv" \
 run_bench conformer_rmsd "$RESULT_DIR/conformer_rmsd.csv" \
   python "$SCRIPT_DIR/conformer_rmsd_bench.py" \
   --smiles "$DATASET" \
-  --num_mols 2000 \
+  --num_mols 8000 \
+  --seed "$BENCHMARK_SEED" \
   --confs_per_mol 10 25 50 100 200 \
   --prep_workers "$CPUS" \
   --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
@@ -418,6 +436,7 @@ run_bench conformer_rmsd "$RESULT_DIR/conformer_rmsd.csv" \
 run_bench cross_similarity "$RESULT_DIR/cross_similarity.json" \
   python "$SCRIPT_DIR/cross_similarity_bench.py" \
   --input "$DATASET" \
+  --seed "$BENCHMARK_SEED" \
   --cosine \
   --output "$RESULT_DIR/cross_similarity.json" \
   "${CROSS_SIMILARITY_MODE_FLAGS[@]}"
@@ -427,6 +446,8 @@ run_bench etkdg "$RESULT_DIR/etkdg.csv" \
   python "$SCRIPT_DIR/etkdg_bench.py" \
   --smiles "$DATASET" \
   --num_mols "$ETKDG_NUM_MOLS" \
+  --seed "$BENCHMARK_SEED" \
+  --runs "$TIMING_RUNS" \
   --confs_per_mol "$CONFS_PER_MOL" \
   --num_gpus 1 \
   --rdkit_threads "$CPUS" \
@@ -442,11 +463,28 @@ for row in "${FF_ROWS[@]}"; do
   minimizer_kind="${row##*:}"
   minimizer_stem="${minimizer_kind,,}"
   bench_name="ff_optimize_${ff}_${minimizer_stem}"
+  num_mols_var="FF_${ff^^}_NUM_MOLS"
+  cal_size_var="FF_${ff^^}_${minimizer_kind}_CAL_SIZE"
+  ff_num_mols="${!num_mols_var}"
+  ff_cal_size="${!cal_size_var}"
+  ff_runs="$TIMING_RUNS"
+  FF_AUTOTUNE_FLAGS=()
+  if [ "$AUTOTUNE_ENABLED" = "1" ]; then
+    FF_AUTOTUNE_FLAGS=(
+      --autotune
+      --autotune_trials "$AUTOTUNE_TRIALS"
+      --autotune_time_budget "$AUTOTUNE_TIME_BUDGET"
+      --autotune_cpu_budget "$CPUS"
+      --autotune_calibration_size "$ff_cal_size"
+    )
+  fi
   autotune_save_arg "$AUTOTUNE_DIR/${bench_name}_hardware.json"
   run_bench "$bench_name" "$RESULT_DIR/${bench_name}.csv" \
     python "$SCRIPT_DIR/ff_optimize_bench.py" \
     --smiles "$DATASET" \
-    --num_mols "$FF_NUM_MOLS" \
+    --num_mols "$ff_num_mols" \
+    --seed "$BENCHMARK_SEED" \
+    --runs "$ff_runs" \
     --confs_per_mol "$CONFS_PER_MOL" \
     --ff "$ff" \
     --minimizer_kind "$minimizer_kind" \
@@ -460,19 +498,32 @@ for row in "${FF_ROWS[@]}"; do
     "${FF_MODE_FLAGS[@]}"
 done
 
-autotune_save_arg "$AUTOTUNE_DIR/mcs_config.json"
-run_bench mcs "$RESULT_DIR/mcs.csv" \
-  python "$SCRIPT_DIR/mcs_bench.py" \
-  --smiles "$DATASET" \
-  --num_mols "$MCS_NUM_MOLS" \
-  --num_pairs "$MCS_NUM_PAIRS" \
-  --num_gpus 1 \
-  --rdkit_threads "$CPUS" \
-  --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
-  "${MCS_AUTOTUNE_FLAGS[@]}" \
-  "${AUTOTUNE_SAVE_FLAGS[@]}" \
-  --output "$RESULT_DIR/mcs.csv" \
-  "${MCS_MODE_FLAGS[@]}"
+for row in "${MCS_ROWS[@]}"; do
+  IFS=: read -r mcs_name atom_compare bond_compare ring_only <<< "$row"
+  MCS_PARAMETER_FLAGS=(
+    --atom_compare "$atom_compare"
+    --bond_compare "$bond_compare"
+  )
+  if [ "$ring_only" = "1" ]; then
+    MCS_PARAMETER_FLAGS+=(--ring_matches_ring_only)
+  fi
+  autotune_save_arg "$AUTOTUNE_DIR/${mcs_name}_config.json"
+  run_bench "$mcs_name" "$RESULT_DIR/${mcs_name}.csv" \
+    python "$SCRIPT_DIR/mcs_bench.py" \
+    --smiles "$DATASET" \
+    --num_mols "$MCS_NUM_MOLS" \
+    --num_pairs "$MCS_NUM_PAIRS" \
+    --seed "$BENCHMARK_SEED" \
+    --runs "$TIMING_RUNS" \
+    --num_gpus 1 \
+    --rdkit_threads "$CPUS" \
+    --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
+    "${MCS_PARAMETER_FLAGS[@]}" \
+    "${MCS_AUTOTUNE_FLAGS[@]}" \
+    "${AUTOTUNE_SAVE_FLAGS[@]}" \
+    --output "$RESULT_DIR/${mcs_name}.csv" \
+    "${MCS_MODE_FLAGS[@]}"
+done
 
 SUBSTRUCT_ROWS=(
   "rdkit_fragment_descriptors_supported.txt:countSubstructMatches"
@@ -481,30 +532,49 @@ SUBSTRUCT_ROWS=(
   "rdkit_tautomer_transforms_supported.txt:getSubstructMatches"
   "rdkit_torsionPreferences_v2_supported.txt:getSubstructMatches"
 )
-for row in "${SUBSTRUCT_ROWS[@]}"; do
-  smarts_file="${row%%:*}"
-  mode="${row##*:}"
-  smarts_stem="${smarts_file%.txt}"
-  bench_name="substruct_${smarts_stem}"
-  autotune_save_arg "$AUTOTUNE_DIR/${bench_name}_config.json"
-  run_bench "$bench_name" "$LOG_DIR/${bench_name}.log" \
-    python "$SCRIPT_DIR/substruct_bench.py" \
-    --smiles "$DATASET" \
-    --num_mols "$SUBSTRUCT_NUM_MOLS" \
-    --sanitize \
-    --smarts "$SMARTS_DIR/$smarts_file" \
-    --mode "$mode" \
-    --num_gpus 1 \
-    --rdkit_threads "$CPUS" \
-    --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
-    "${SUBSTRUCT_AUTOTUNE_FLAGS[@]}" \
-    "${AUTOTUNE_SAVE_FLAGS[@]}" \
-    "${SUBSTRUCT_MODE_FLAGS[@]}"
+for algorithm in gsi dfs; do
+  for row in "${SUBSTRUCT_ROWS[@]}"; do
+    smarts_file="${row%%:*}"
+    mode="${row##*:}"
+    smarts_stem="${smarts_file%.txt}"
+    bench_name="substruct_${smarts_stem}_${algorithm}"
+    cal_size="$(substruct_calibration_size "$algorithm" "$smarts_stem")"
+    runs="$(substruct_timing_runs "$algorithm" "$smarts_stem")"
+    SUBSTRUCT_AUTOTUNE_FLAGS=()
+    if [ "$AUTOTUNE_ENABLED" = "1" ]; then
+      SUBSTRUCT_AUTOTUNE_FLAGS=(
+        --autotune
+        --autotune_trials "$AUTOTUNE_TRIALS"
+        --autotune_time_budget "$AUTOTUNE_TIME_BUDGET"
+        --autotune_cpu_budget "$CPUS"
+        --autotune_calibration_size "$cal_size"
+      )
+    fi
+    autotune_save_arg "$AUTOTUNE_DIR/${bench_name}_config.json"
+    run_bench "$bench_name" "$LOG_DIR/${bench_name}.log" \
+      python "$SCRIPT_DIR/substruct_bench.py" \
+      --smiles "$DATASET" \
+      --num_mols "$SUBSTRUCT_NUM_MOLS" \
+      --seed "$BENCHMARK_SEED" \
+      --runs "$runs" \
+      --sanitize \
+      --smarts "$SMARTS_DIR/$smarts_file" \
+      --mode "$mode" \
+      --algorithm "$algorithm" \
+      --num_gpus 1 \
+      --rdkit_threads "$CPUS" \
+      --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
+      "${SUBSTRUCT_AUTOTUNE_FLAGS[@]}" \
+      "${AUTOTUNE_SAVE_FLAGS[@]}" \
+      "${SUBSTRUCT_MODE_FLAGS[@]}"
+  done
 done
 
 run_bench tfd "$RESULT_DIR/tfd.csv" \
   python "$SCRIPT_DIR/tfd_bench.py" \
   --smiles-file "$DATASET" \
+  --seed "$BENCHMARK_SEED" \
+  --num-mols 100 1000 5000 \
   --prep-workers "$CPUS" \
   --output "$RESULT_DIR/tfd.csv" \
   "${TFD_MODE_FLAGS[@]}"

@@ -29,7 +29,6 @@ from typing import Iterable, Optional
 
 from rdkit.Chem import Mol
 
-
 def clone_with_confs(mols: list[Mol]) -> list[Mol]:
     """Return deep copies of ``mols`` preserving their conformers.
 
@@ -100,7 +99,7 @@ def resolve_num_gpus(fixed_gpu_ids: list[int]) -> int:
     if fixed_gpu_ids:
         return max(1, len(fixed_gpu_ids))
     try:
-        import torch  # noqa: PLC0415
+        import torch
 
         return max(1, int(torch.cuda.device_count()))
     except Exception:
@@ -120,6 +119,6 @@ def default_ff_search_space(num_gpus: int, cpus: int) -> dict:
     """
     per_gpu_max = max(1, min(8, cpus // max(1, num_gpus)))
     return {
-        "batchSize": (64, 1024, 64),
+        "batchSize": (64, 4096, 64),
         "batchesPerGpu": (1, per_gpu_max),
     }

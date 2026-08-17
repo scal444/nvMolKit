@@ -306,6 +306,7 @@ def test_default_ff_search_space_batch_size_is_stepped_multiples_of_64():
     assert step == 64
     assert low % 64 == 0 and high % 64 == 0
     assert low <= high
+    assert high == 4096
 
 
 def test_default_substruct_search_space_caps_per_pool():
@@ -332,7 +333,7 @@ def test_default_substruct_search_space_caps_per_pool():
 def test_default_mcs_search_space_covers_supported_execution_settings():
     space = _default_mcs_search_space(num_gpus=4, cpus=16)
 
-    assert space["batchSize"] == [128, 256, 512, 1024, 2048, 4096]
+    assert space["batchSize"] == [128, 256, 512, 1024, 2048, 4096, 8192]
     assert space["workerThreads"] == (1, 4)
     assert space["preprocessingThreads"] == (1, 16)
     assert space["executorsPerRunner"] == (1, 4)
