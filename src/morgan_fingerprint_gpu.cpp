@@ -253,14 +253,28 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
   WorkBag workLarge;
   for (int i = 0; i < mols.size(); i++) {
     const auto& mol = *mols[i];
-    if (mol.getNumAtoms() < 32 && mol.getNumBonds() < 32) {
+    if (mol.getNumAtoms() >= 128 || mol.getNumBonds() >= 128) {
+      workLarge.push_back(i);
+      continue;
+    }
+
+    bool hasUnsupportedDegree = false;
+    if (mol.getNumBonds() > kMaxBondsPerAtom) {
+      for (const RDKit::Atom* atom : mol.atoms()) {
+        if (atom->getDegree() > kMaxBondsPerAtom) {
+          hasUnsupportedDegree = true;
+          break;
+        }
+      }
+    }
+    if (hasUnsupportedDegree) {
+      workLarge.push_back(i);
+    } else if (mol.getNumAtoms() < 32 && mol.getNumBonds() < 32) {
       work32.push_back(i);
     } else if (mol.getNumAtoms() < 64 && mol.getNumBonds() < 64) {
       work64.push_back(i);
-    } else if (mol.getNumAtoms() < 128 && mol.getNumBonds() < 128) {
-      work128.push_back(i);
     } else {
-      workLarge.push_back(i);
+      work128.push_back(i);
     }
   }
   const size_t numThreads32    = (work32.size() + dispatchChunkSize - 1) / dispatchChunkSize;
