@@ -277,17 +277,17 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
   }
   detail::OpenMPExceptionRegistry exceptionRegistry;
 
-#pragma omp parallel for num_threads(nThreadsActual) default(none) shared(numThreadsTotal,     \
-                                                                            threadBuffers,     \
-                                                                            maxRadius,         \
-                                                                            dispatchChunkSize, \
-                                                                            mols,              \
-                                                                            outputAccumulator, \
-                                                                            workLarge,         \
-                                                                            work32,            \
-                                                                            work64,            \
-                                                                            work128,           \
-                                                                            exceptionRegistry)
+#pragma omp parallel for num_threads(nThreadsActual) default(none) schedule(dynamic, 1) shared(numThreadsTotal,     \
+                                                                                                 threadBuffers,     \
+                                                                                                 maxRadius,         \
+                                                                                                 dispatchChunkSize, \
+                                                                                                 mols,              \
+                                                                                                 outputAccumulator, \
+                                                                                                 workLarge,         \
+                                                                                                 work32,            \
+                                                                                                 work64,            \
+                                                                                                 work128,           \
+                                                                                                 exceptionRegistry)
   for (size_t i = 0; i < numThreadsTotal; i++) {
     try {
       std::vector<std::pair<FlatBitVect<fpSize>, int>> largeResults;
