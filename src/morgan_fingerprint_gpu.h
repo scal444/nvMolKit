@@ -26,6 +26,25 @@
 
 namespace nvMolKit {
 
+namespace detail {
+
+//! Return the smallest GPU bucket that can hold both molecule dimensions.
+//! A zero return value selects the CPU fallback for oversized molecules.
+constexpr int selectMorganGpuBucket(const unsigned int numAtoms, const unsigned int numBonds) noexcept {
+  if (numAtoms <= 32 && numBonds <= 32) {
+    return 32;
+  }
+  if (numAtoms <= 64 && numBonds <= 64) {
+    return 64;
+  }
+  if (numAtoms <= 128 && numBonds <= 128) {
+    return 128;
+  }
+  return 0;
+}
+
+}  // namespace detail
+
 class MorganFingerprintGpuGenerator {
  public:
   MorganFingerprintGpuGenerator(std::uint32_t radius, std::uint32_t fpSize);

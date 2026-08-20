@@ -66,7 +66,7 @@ void MorganInvariantsGenerator::ComputeInvariantsInto(const std::vector<const RD
 
   for (size_t molIdx = 0; molIdx < nMols; ++molIdx) {
     const RDKit::ROMol& mol = *mols[molIdx];
-    if (mol.getNumAtoms() >= maxAtoms || mol.getNumBonds() >= maxAtoms) {
+    if (mol.getNumAtoms() > maxAtoms || mol.getNumBonds() > maxAtoms) {
       continue;
     }
 

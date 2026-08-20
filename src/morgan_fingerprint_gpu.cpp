@@ -253,14 +253,19 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
   WorkBag workLarge;
   for (int i = 0; i < mols.size(); i++) {
     const auto& mol = *mols[i];
-    if (mol.getNumAtoms() < 32 && mol.getNumBonds() < 32) {
-      work32.push_back(i);
-    } else if (mol.getNumAtoms() < 64 && mol.getNumBonds() < 64) {
-      work64.push_back(i);
-    } else if (mol.getNumAtoms() < 128 && mol.getNumBonds() < 128) {
-      work128.push_back(i);
-    } else {
-      workLarge.push_back(i);
+    switch (detail::selectMorganGpuBucket(mol.getNumAtoms(), mol.getNumBonds())) {
+      case 32:
+        work32.push_back(i);
+        break;
+      case 64:
+        work64.push_back(i);
+        break;
+      case 128:
+        work128.push_back(i);
+        break;
+      default:
+        workLarge.push_back(i);
+        break;
     }
   }
   const size_t numThreads32    = (work32.size() + dispatchChunkSize - 1) / dispatchChunkSize;
