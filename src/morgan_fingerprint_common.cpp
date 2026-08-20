@@ -55,17 +55,27 @@ void MorganInvariantsGenerator::ComputeInvariantsInto(const std::vector<const RD
   if (nMols == 0 || maxAtoms == 0) {
     return;
   }
-  const size_t                                 molBondStride = maxAtoms * kMaxBondsPerAtom;
-  const size_t                                 molAtomStride = maxAtoms;
-  std::array<std::uint8_t, kMaxMorganGpuAtoms> bondCountsStorage;
-  std::array<std::uint8_t, kMaxMorganGpuAtoms> neighboringHydrogenCountsStorage;
-  std::vector<std::uint8_t>                    overflowStorage;
-  std::uint8_t*                                bondCounts                = bondCountsStorage.data();
-  std::uint8_t*                                neighboringHydrogenCounts = neighboringHydrogenCountsStorage.data();
+  const size_t                                       molBondStride = maxAtoms * kMaxBondsPerAtom;
+  const size_t                                       molAtomStride = maxAtoms;
+  std::array<std::uint8_t, kMaxMorganGpuAtoms>       bondCountsStorage;
+  std::array<std::uint8_t, kMaxMorganGpuAtoms>       neighboringHydrogenCountsStorage;
+  std::array<const RDKit::Atom*, kMaxMorganGpuAtoms> atomsStorage;
+  std::array<std::uint8_t, kMaxMorganGpuAtoms>       isHydrogenStorage;
+  std::vector<std::uint8_t>                          countOverflowStorage;
+  std::vector<const RDKit::Atom*>                    atomOverflowStorage;
+  std::vector<std::uint8_t>                          hydrogenOverflowStorage;
+  auto*                                              bondCounts = bondCountsStorage.data();
+  auto* neighboringHydrogenCounts                               = neighboringHydrogenCountsStorage.data();
+  auto* atoms                                                   = atomsStorage.data();
+  auto* isHydrogen                                              = isHydrogenStorage.data();
   if (maxAtoms > kMaxMorganGpuAtoms) {
-    overflowStorage.resize(2 * maxAtoms);
-    bondCounts                = overflowStorage.data();
-    neighboringHydrogenCounts = overflowStorage.data() + maxAtoms;
+    countOverflowStorage.resize(2 * maxAtoms);
+    atomOverflowStorage.resize(maxAtoms);
+    hydrogenOverflowStorage.resize(maxAtoms);
+    bondCounts                = countOverflowStorage.data();
+    neighboringHydrogenCounts = countOverflowStorage.data() + maxAtoms;
+    atoms                     = atomOverflowStorage.data();
+    isHydrogen                = hydrogenOverflowStorage.data();
   }
   const RDKit::PeriodicTable* periodicTable = RDKit::PeriodicTable::getTable();
 
@@ -85,11 +95,19 @@ void MorganInvariantsGenerator::ComputeInvariantsInto(const std::vector<const RD
     std::fill_n(bondCounts, numAtoms, std::uint8_t{0});
     std::fill_n(neighboringHydrogenCounts, numAtoms, std::uint8_t{0});
 
+    bool hasGraphHydrogens = false;
+    for (const RDKit::Atom* atom : mol.atoms()) {
+      const size_t atomIdx = atom->getIdx();
+      atoms[atomIdx]       = atom;
+      isHydrogen[atomIdx]  = atom->getAtomicNum() == 1;
+      hasGraphHydrogens |= isHydrogen[atomIdx];
+    }
+
     // Visit each bond once and populate both endpoint adjacency lists. The old
     // atom-centric traversal fetched every bond twice (once from each endpoint)
     // and recomputed its invariant twice.
     const size_t molBondOffset = molIdx * molBondStride;
-    for (const RDKit::Bond* bond : mol.bonds()) {
+    const auto   recordBond    = [&](const RDKit::Bond* bond) {
       const auto bondIdx   = static_cast<std::uint32_t>(bond->getIdx());
       const auto beginIdx  = static_cast<size_t>(bond->getBeginAtomIdx());
       const auto endIdx    = static_cast<size_t>(bond->getEndAtomIdx());
@@ -108,14 +126,25 @@ void MorganInvariantsGenerator::ComputeInvariantsInto(const std::vector<const RD
       bondAtomIndicesOut[endOffset]                       = static_cast<std::int16_t>(bondIdx);
       bondOtherAtomIndicesOut[endOffset]                  = static_cast<std::int16_t>(beginIdx);
       bondInvariantsOut[molAtomStride * molIdx + bondIdx] = static_cast<std::uint32_t>(bond->getBondType());
+    };
 
-      neighboringHydrogenCounts[beginIdx] += mol.getAtomWithIdx(endIdx)->getAtomicNum() == 1;
-      neighboringHydrogenCounts[endIdx] += mol.getAtomWithIdx(beginIdx)->getAtomicNum() == 1;
+    if (hasGraphHydrogens) {
+      for (const RDKit::Bond* bond : mol.bonds()) {
+        recordBond(bond);
+        const auto beginIdx = static_cast<size_t>(bond->getBeginAtomIdx());
+        const auto endIdx   = static_cast<size_t>(bond->getEndAtomIdx());
+        neighboringHydrogenCounts[beginIdx] += isHydrogen[endIdx];
+        neighboringHydrogenCounts[endIdx] += isHydrogen[beginIdx];
+      }
+    } else {
+      for (const RDKit::Bond* bond : mol.bonds()) {
+        recordBond(bond);
+      }
     }
 
     const RDKit::RingInfo* ringInfo = mol.getRingInfo();
     for (size_t atomIdx = 0; atomIdx < numAtoms; ++atomIdx) {
-      const RDKit::Atom* tAtom = mol.getAtomWithIdx(atomIdx);
+      const RDKit::Atom* tAtom = atoms[atomIdx];
 
       int deltaMass = 0;
       if (tAtom->getIsotope() != 0) {
