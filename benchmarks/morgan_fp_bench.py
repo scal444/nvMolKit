@@ -18,9 +18,10 @@ from bench_utils import (
     time_it,
     write_csv_rows,
 )
-from nvmolkit.fingerprints import MorganFingerprintGenerator, unpack_fingerprint
 from rdkit import Chem
 from rdkit.Chem import rdFingerprintGenerator
+
+from nvmolkit.fingerprints import MorganFingerprintGenerator, unpack_fingerprint
 
 SUPPORTED_FP_SIZES = (128, 256, 512, 1024, 2048)
 
@@ -51,8 +52,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--prep_threads",
         type=int,
-        default=0,
-        help="nvMolKit CPU preprocessing threads (default: 0 = all available)",
+        nargs="+",
+        default=[0],
+        metavar="N",
+        help="one or more nvMolKit CPU preprocessing thread counts (default: 0 = all available)",
     )
     parser.add_argument("--gpu_id", type=int, default=0, help="CUDA device for nvMolKit (default: 0)")
 
@@ -81,7 +84,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--radius must be non-negative")
     if args.rdkit_threads < 0:
         raise ValueError("--rdkit_threads must be non-negative")
-    if args.prep_threads < 0:
+    if any(prep_threads < 0 for prep_threads in args.prep_threads):
         raise ValueError("--prep_threads must be non-negative")
     if args.gpu_id < 0:
         raise ValueError("--gpu_id must be non-negative")
@@ -174,6 +177,7 @@ def _result_row(
     input_type: str,
     num_mols: int,
     args: argparse.Namespace,
+    prep_threads: int | None = None,
     rdkit_mols_per_second: float | None = None,
 ) -> dict[str, object]:
     is_rdkit = method == "rdkit"
@@ -191,7 +195,7 @@ def _result_row(
         "radius": args.radius,
         "fp_size": args.fp_size,
         "rdkit_threads": args.rdkit_threads if is_rdkit else "N/A",
-        "prep_threads": args.prep_threads if is_nvmolkit else "N/A",
+        "prep_threads": prep_threads if is_nvmolkit else "N/A",
         "gpu_id": args.gpu_id if is_nvmolkit else "N/A",
         "runs": args.runs,
         "warmups": args.warmups,
@@ -223,7 +227,8 @@ def main() -> None:
     if not args.no_rdkit:
         print(f"  RDKit threads: {args.rdkit_threads if args.rdkit_threads else 'all available'}")
     if not args.no_nvmolkit:
-        print(f"  nvMolKit preprocessing threads: {args.prep_threads if args.prep_threads else 'all available'}")
+        prep_threads = [str(value) if value else "all available" for value in args.prep_threads]
+        print(f"  nvMolKit preprocessing threads: {', '.join(prep_threads)}")
         print(f"  nvMolKit GPU ID: {args.gpu_id}")
 
     print("\nLoading molecules...")
@@ -231,64 +236,78 @@ def main() -> None:
     if not mols:
         parser.error("no valid molecules loaded")
 
-    results: dict[str, tuple[TimingResult, Sequence | torch.Tensor]] = {}
+    rdkit_result: tuple[TimingResult, Sequence] | None = None
     if not args.no_rdkit:
         print("\nRunning RDKit Morgan fingerprint benchmark...")
         rdkit_generator = rdFingerprintGenerator.GetMorganGenerator(radius=args.radius, fpSize=args.fp_size)
         timing, fingerprints = _bench_rdkit(rdkit_generator, mols, args.rdkit_threads, args.runs, args.warmups)
-        results["rdkit"] = (timing, fingerprints)
+        rdkit_result = (timing, fingerprints)
         print(
             f"  median {timing.median_ms:.3f} ms (+/- {timing.std_ms:.3f} ms), "
             f"{throughput_per_s(len(mols), timing.median_ms):.2f} mols/s"
         )
 
+    nvmolkit_results: list[tuple[int, TimingResult]] = []
+    validated = False
     if not args.no_nvmolkit:
-        print("\nRunning nvMolKit Morgan fingerprint benchmark...")
         nvmolkit_generator = MorganFingerprintGenerator(radius=args.radius, fpSize=args.fp_size)
-        timing, fingerprints = _bench_nvmolkit(
-            nvmolkit_generator,
-            mols,
-            args.prep_threads,
-            args.gpu_id,
-            args.runs,
-            args.warmups,
-        )
-        results["nvmolkit"] = (timing, fingerprints)
-        print(
-            f"  median {timing.median_ms:.3f} ms (+/- {timing.std_ms:.3f} ms), "
-            f"{throughput_per_s(len(mols), timing.median_ms):.2f} mols/s"
-        )
-
-    if args.validate:
-        if "rdkit" in results and "nvmolkit" in results:
-            checked = _validate_fingerprints(
-                results["rdkit"][1],
-                results["nvmolkit"][1],
-                args.validation_mols,
+        for prep_threads in args.prep_threads:
+            thread_label = prep_threads if prep_threads else "all available"
+            print(f"\nRunning nvMolKit Morgan fingerprint benchmark ({thread_label} preprocessing threads)...")
+            timing, fingerprints = _bench_nvmolkit(
+                nvmolkit_generator,
+                mols,
+                prep_threads,
+                args.gpu_id,
+                args.runs,
+                args.warmups,
             )
-            print(f"\nValidation passed for {checked} fingerprints")
-        else:
-            print("\nValidation skipped (both backends are required)")
+            nvmolkit_results.append((prep_threads, timing))
+            print(
+                f"  median {timing.median_ms:.3f} ms (+/- {timing.std_ms:.3f} ms), "
+                f"{throughput_per_s(len(mols), timing.median_ms):.2f} mols/s"
+            )
+            if args.validate and rdkit_result is not None:
+                checked = _validate_fingerprints(rdkit_result[1], fingerprints, args.validation_mols)
+                print(f"\nValidation passed for {checked} fingerprints (prep_threads={prep_threads})")
+                validated = True
+
+    if args.validate and not validated:
+        print("\nValidation skipped (both backends are required)")
 
     rdkit_mols_per_second = None
-    if "rdkit" in results:
-        rdkit_mols_per_second = throughput_per_s(len(mols), results["rdkit"][0].median_ms)
-    if "nvmolkit" in results and rdkit_mols_per_second is not None:
-        nvmolkit_mols_per_second = throughput_per_s(len(mols), results["nvmolkit"][0].median_ms)
-        print(f"\nnvMolKit throughput relative to RDKit: {nvmolkit_mols_per_second / rdkit_mols_per_second:.2f}x")
-
-    rows = [
-        _result_row(
-            method,
-            timing,
-            input_file=input_file,
-            input_type=input_type,
-            num_mols=len(mols),
-            args=args,
-            rdkit_mols_per_second=rdkit_mols_per_second,
+    rows = []
+    if rdkit_result is not None:
+        rdkit_mols_per_second = throughput_per_s(len(mols), rdkit_result[0].median_ms)
+        rows.append(
+            _result_row(
+                "rdkit",
+                rdkit_result[0],
+                input_file=input_file,
+                input_type=input_type,
+                num_mols=len(mols),
+                args=args,
+            )
         )
-        for method, (timing, _) in results.items()
-    ]
+    for prep_threads, timing in nvmolkit_results:
+        if rdkit_mols_per_second is not None:
+            nvmolkit_mols_per_second = throughput_per_s(len(mols), timing.median_ms)
+            print(
+                f"\nnvMolKit throughput relative to RDKit (prep_threads={prep_threads}): "
+                f"{nvmolkit_mols_per_second / rdkit_mols_per_second:.2f}x"
+            )
+        rows.append(
+            _result_row(
+                "nvmolkit",
+                timing,
+                prep_threads=prep_threads,
+                input_file=input_file,
+                input_type=input_type,
+                num_mols=len(mols),
+                args=args,
+                rdkit_mols_per_second=rdkit_mols_per_second,
+            )
+        )
     print("\nCSV Results:")
     print_csv_rows(rows)
     if args.output:
