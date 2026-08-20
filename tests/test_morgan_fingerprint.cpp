@@ -22,6 +22,7 @@
 #include <tuple>
 
 #include "src/morgan_fingerprint.h"
+#include "src/morgan_fingerprint_gpu.h"
 #include "src/testutils/mol_data.h"
 #include "src/utils/rdkit_ownership_wrap.h"
 
@@ -111,6 +112,58 @@ void PrintFPDiff(const ExplicitBitVect* refFingerprint, const ExplicitBitVect* f
 }
 
 class MorganFingerprintGpuTestFixture : public testing::TestWithParam<std::tuple<int, int, int>> {};
+
+TEST(MorganFingerprintGpuDispatchTest, BucketEndpointsAreInclusive) {
+  EXPECT_EQ(nvMolKit::detail::selectMorganGpuBucket(32, 32), 32);
+  EXPECT_EQ(nvMolKit::detail::selectMorganGpuBucket(32, 33), 64);
+  EXPECT_EQ(nvMolKit::detail::selectMorganGpuBucket(33, 32), 64);
+  EXPECT_EQ(nvMolKit::detail::selectMorganGpuBucket(64, 64), 64);
+  EXPECT_EQ(nvMolKit::detail::selectMorganGpuBucket(64, 65), 128);
+  EXPECT_EQ(nvMolKit::detail::selectMorganGpuBucket(65, 64), 128);
+  EXPECT_EQ(nvMolKit::detail::selectMorganGpuBucket(128, 128), 128);
+}
+
+TEST(MorganFingerprintGpuDispatchTest, DimensionsBeyondLargestBucketUseCpuFallback) {
+  EXPECT_EQ(nvMolKit::detail::selectMorganGpuBucket(128, 129), 0);
+  EXPECT_EQ(nvMolKit::detail::selectMorganGpuBucket(129, 128), 0);
+  EXPECT_EQ(nvMolKit::detail::selectMorganGpuBucket(129, 129), 0);
+}
+
+TEST(MorganFingerprintGpuDispatchTest, FingerprintsMatchAtBucketEndpointsAndFallback) {
+  constexpr unsigned int radius = 2;
+  constexpr unsigned int fpSize = 1024;
+
+  std::vector<std::unique_ptr<RDKit::ROMol>> mols;
+  for (const int ringSize : {32, 64, 128, 129}) {
+    const std::string smiles = "C1" + std::string(ringSize - 1, 'C') + "1";
+    mols.emplace_back(RDKit::SmilesToMol(smiles));
+    ASSERT_NE(mols.back(), nullptr) << "ring size " << ringSize;
+    ASSERT_EQ(mols.back()->getNumAtoms(), ringSize);
+    ASSERT_EQ(mols.back()->getNumBonds(), ringSize);
+  }
+
+  auto refGenerator = std::unique_ptr<RDKit::FingerprintGenerator<std::uint32_t>>(
+    RDKit::MorganFingerprint::getMorganGenerator<
+      std::uint32_t>(radius, false, false, true, false, nullptr, nullptr, fpSize, {1, 2, 4, 8}, false, false));
+  std::vector<std::unique_ptr<ExplicitBitVect>> expected;
+  std::vector<const RDKit::ROMol*>              molView;
+  for (const auto& mol : mols) {
+    expected.emplace_back(refGenerator->getFingerprint(*mol));
+    molView.push_back(mol.get());
+  }
+
+  auto                                generator = nvMolKit::MorganFingerprintGenerator(radius, fpSize);
+  nvMolKit::FingerprintComputeOptions options;
+  options.backend      = nvMolKit::FingerprintComputeBackend::GPU;
+  options.gpuBatchSize = 1;
+  const auto actual    = generator.GetFingerprints(molView, options);
+
+  ASSERT_EQ(actual.size(), expected.size());
+  for (size_t i = 0; i < actual.size(); ++i) {
+    ASSERT_NE(actual[i], nullptr);
+    ASSERT_EQ(*actual[i], *expected[i]) << "ring size " << mols[i]->getNumAtoms();
+  }
+}
 
 TEST_P(MorganFingerprintGpuTestFixture, CorrectParallelGpuMF) {
   const unsigned int radius    = std::get<0>(GetParam());
