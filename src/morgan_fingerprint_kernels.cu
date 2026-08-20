@@ -159,6 +159,7 @@ __global__ void morganFingerprintKernelBatch(const cuda::std::span<std::uint32_t
                                              cuda::std::span<FlatBitVect<maxAtoms>>     allSeenNeighborhoods,
                                              const cuda::std::span<FlatBitVect<fpSize>> outputAccumulator,
                                              const size_t                               maxRadius,
+                                             const int                                  nMolecules,
                                              const cuda::std::span<const int>           outputIndices) {
   static_assert(maxAtoms == 32 || maxAtoms == 64 || maxAtoms == 128, "maxAtoms must be 32, 64, or 128");
   using AccumTuple     = cuda::std::tuple<nvMolKit::FlatBitVect<maxAtoms>, std::uint32_t, std::uint32_t>;
@@ -182,7 +183,7 @@ __global__ void morganFingerprintKernelBatch(const cuda::std::span<std::uint32_t
   constexpr int tilesPerBlock    = kBlockSize / static_cast<int>(maxAtoms);
   const int     tileId           = tile.meta_group_rank();
   const int     atomIdx          = tile.thread_rank();
-  const int     nMolsInBatch     = nAtomsPerMolArray.size();
+  const int     nMolsInBatch     = nMolecules;
   const int     molIdx           = static_cast<int>(blockIdx.x) * tilesPerBlock + tileId;
   const bool    validTile        = molIdx < nMolsInBatch;
   const int     nAtomsInMolecule = validTile ? nAtomsPerMolArray[molIdx] : 0;
@@ -194,11 +195,13 @@ __global__ void morganFingerprintKernelBatch(const cuda::std::span<std::uint32_t
 
   assert(atomIdx < maxAtoms);
   assert(nAtomsInMolecule <= static_cast<int>(maxAtoms));
-  assert(atomInvariants.size() == maxAtoms * nMolsInBatch);
-  assert(bondInvariants.size() == maxAtoms * nMolsInBatch);
-  assert(bondIndices.size() == maxAtoms * nMolsInBatch * bondStride);
-  assert(bondOtherAtomIndices.size() == maxAtoms * nMolsInBatch * bondStride);
-  assert(allSeenNeighborhoods.size() == maxAtoms * nMolsInBatch * (maxRadius + 1));
+  assert(nAtomsPerMolArray.size() >= nMolsInBatch);
+  assert(outputIndices.size() >= nMolsInBatch);
+  assert(atomInvariants.size() >= maxAtoms * nMolsInBatch);
+  assert(bondInvariants.size() >= maxAtoms * nMolsInBatch);
+  assert(bondIndices.size() >= maxAtoms * nMolsInBatch * bondStride);
+  assert(bondOtherAtomIndices.size() >= maxAtoms * nMolsInBatch * bondStride);
+  assert(allSeenNeighborhoods.size() >= maxAtoms * nMolsInBatch * (maxRadius + 1));
   assert(outputAccumulator.size() > outputIdx);
   // Active in the sense that we have an atom to process.
   // All threads must take part in CUB sort - so no breaking out of the function/main loop, and
@@ -452,6 +455,7 @@ void launchMorganFingerprintKernelBatch(const MorganGPUBuffersBatch&            
                                                toSpan(buffers.allSeenNeighborhoods32),
                                                toSpan(outputAccumulator),
                                                maxRadius,
+                                               nMolecules,
                                                toSpan(buffers.outputIndices));
       break;
     case 64:
@@ -464,6 +468,7 @@ void launchMorganFingerprintKernelBatch(const MorganGPUBuffersBatch&            
                                                toSpan(buffers.allSeenNeighborhoods64),
                                                toSpan(outputAccumulator),
                                                maxRadius,
+                                               nMolecules,
                                                toSpan(buffers.outputIndices));
       break;
     case 128:
@@ -476,6 +481,7 @@ void launchMorganFingerprintKernelBatch(const MorganGPUBuffersBatch&            
                                                toSpan(buffers.allSeenNeighborhoods128),
                                                toSpan(outputAccumulator),
                                                maxRadius,
+                                               nMolecules,
                                                toSpan(buffers.outputIndices));
       break;
     default:
