@@ -323,8 +323,6 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
       const std::string rangemainName = "Main run processing mols: thread " + std::to_string(omp_get_thread_num());
       ScopedNvtxRange   rangeMain(rangemainName.c_str());
 
-      std::fill(threadCpuBuffers.nAtomsPerMol.begin(), threadCpuBuffers.nAtomsPerMol.end(), 0);
-
       ScopedNvtxRange rangeGetDispatch("Get mol ids from dispatcher");
 
       int thisRoundNumAtoms = 0;
@@ -423,7 +421,7 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
         }
 
         // nAtomsPerMol and output indices
-        buffersToUse->nAtomsPerMol.copyFromHost(threadCpuBuffers.nAtomsPerMol.data(), dispatchChunkSize);
+        buffersToUse->nAtomsPerMol.copyFromHost(threadCpuBuffers.nAtomsPerMol.data(), scopedChunkSize);
         buffersToUse->outputIndices.copyFromHost(threadCpuBuffers.h_outputIndices.data(), scopedChunkSize);
         cudaCheckError(cudaEventRecord(threadCpuBuffers.prevMemcpyDoneEvent.event(), stream));
         rangeMemcpy.pop();
