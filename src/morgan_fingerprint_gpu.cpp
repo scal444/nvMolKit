@@ -347,8 +347,9 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
       rangeGetDispatch.pop();
       if (scopedChunkSize > 0) {
         std::vector<const RDKit::ROMol*> molsView;
-        int                              relIdx = 0;
-        ScopedNvtxRange                  rangeComputeInvars("Compute invariants");
+        molsView.reserve(scopedChunkSize);
+        int             relIdx = 0;
+        ScopedNvtxRange rangeComputeInvars("Compute invariants");
         for (int j = 0; j < scopedChunkSize; j++) {
           const int idx = threadCpuBuffers.h_outputIndices[j];
           molsView.push_back(mols[idx]);
