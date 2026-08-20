@@ -111,11 +111,11 @@ __forceinline__ __device__ int populateThisRoundNeighborhoods(
   roundAtomNeighborhoods.clear();
   int numberOfBondsThisAtom = 0;
   for (size_t localBondAccessorIdx = 0; localBondAccessorIdx < bondStride; localBondAccessorIdx++) {
-    const int bondIdx      = atomBondIndices[localBondAccessorIdx];
-    const int otherAtomIdx = atomBondOtherAtomIndices[localBondAccessorIdx];
+    const int bondIdx = atomBondIndices[localBondAccessorIdx];
     if (bondIdx == -1) {
       break;
     }
+    const int otherAtomIdx = atomBondOtherAtomIndices[localBondAccessorIdx];
     roundAtomNeighborhoods.setBit(bondIdx, true);
     roundAtomNeighborhoods |= atomNeighborhoodsArray[otherAtomIdx];
 
@@ -265,7 +265,7 @@ __global__ void morganFingerprintKernelBatch(const cuda::std::span<std::uint32_t
   AccumTuple                                              accum[1];
 
   // Do loop 0
-  auto bit = atomInvariantsThisMol[atomIdx] % fpSize;
+  auto bit = currentInvariantsArray[sharedIdx] % fpSize;
   tile.sync();
   if (activeThread) {
     atomicSetBit(&localUpdateAccumulator[tileId], bit);

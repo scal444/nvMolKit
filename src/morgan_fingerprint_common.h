@@ -70,6 +70,14 @@ class MorganInvariantsGenerator {
                                               std::uint32_t*                          bondInvariantsOut,
                                               std::int16_t*                           bondAtomIndicesOut,
                                               std::int16_t*                           bondOtherAtomIndicesOut);
+  // GPU-only packing path. Overwrites every entry that the GPU kernel may read,
+  // but deliberately leaves padded entries untouched.
+  static void           ComputeGpuInvariantsInto(const std::vector<const RDKit::ROMol*>& mols,
+                                                 size_t                                  maxAtoms,
+                                                 std::uint32_t*                          atomInvariantsOut,
+                                                 std::uint32_t*                          bondInvariantsOut,
+                                                 std::int16_t*                           bondAtomIndicesOut,
+                                                 std::int16_t*                           bondOtherAtomIndicesOut);
 
  private:
   InvariantsInfo invariantsInfo_;

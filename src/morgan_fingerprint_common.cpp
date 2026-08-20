@@ -25,33 +25,14 @@ namespace nvMolKit {
 constexpr int kNumAtomInvariantMaxFeatures = 6;
 constexpr int kMaxMorganGpuAtoms           = 128;
 
-void MorganInvariantsGenerator::ComputeInvariants(const std::vector<const RDKit::ROMol*>& mols, size_t maxAtoms) {
-  const size_t nMols = mols.size();
-  invariantsInfo_.atomInvariants.resize(nMols * maxAtoms);
-  invariantsInfo_.bondInvariants.resize(nMols * maxAtoms);
-  invariantsInfo_.bondAtomIndices.clear();
-  invariantsInfo_.bondOtherAtomIndices.clear();
-  invariantsInfo_.bondAtomIndices.resize(nMols * maxAtoms * kMaxBondsPerAtom, -1);
-  invariantsInfo_.bondOtherAtomIndices.resize(nMols * maxAtoms * kMaxBondsPerAtom, -1);
+namespace {
 
-  ComputeInvariantsInto(mols,
-                        maxAtoms,
-                        invariantsInfo_.atomInvariants.data(),
-                        invariantsInfo_.bondInvariants.data(),
-                        invariantsInfo_.bondAtomIndices.data(),
-                        invariantsInfo_.bondOtherAtomIndices.data());
-}
-
-void MorganInvariantsGenerator::ComputeInvariantsInto(const std::vector<const RDKit::ROMol*>& mols,
-                                                      size_t                                  maxAtoms,
-                                                      std::uint32_t*                          atomInvariantsOut,
-                                                      std::uint32_t*                          bondInvariantsOut,
-                                                      std::int16_t*                           bondAtomIndicesOut,
-                                                      std::int16_t*                           bondOtherAtomIndicesOut) {
-  const size_t nMols = mols.size();
-  if (nMols == 0 || maxAtoms == 0) {
-    return;
-  }
+void computeInvariantsInto(const std::vector<const RDKit::ROMol*>& mols,
+                           const size_t                            maxAtoms,
+                           std::uint32_t*                          atomInvariantsOut,
+                           std::uint32_t*                          bondInvariantsOut,
+                           std::int16_t*                           bondAtomIndicesOut,
+                           std::int16_t*                           bondOtherAtomIndicesOut) {
   if (maxAtoms > kMaxMorganGpuAtoms) {
     throw std::invalid_argument("Morgan GPU invariant buffers support at most " + std::to_string(kMaxMorganGpuAtoms) +
                                 " atoms");
@@ -63,13 +44,7 @@ void MorganInvariantsGenerator::ComputeInvariantsInto(const std::vector<const RD
   std::array<std::uint8_t, kMaxMorganGpuAtoms> neighboringHydrogenCounts;
   const RDKit::PeriodicTable*                  periodicTable = RDKit::PeriodicTable::getTable();
 
-  // Initialize outputs
-  std::fill(atomInvariantsOut, atomInvariantsOut + nMols * maxAtoms, 0U);
-  std::fill(bondInvariantsOut, bondInvariantsOut + nMols * maxAtoms, 0U);
-  std::fill(bondAtomIndicesOut, bondAtomIndicesOut + nMols * molBondStride, static_cast<int16_t>(-1));
-  std::fill(bondOtherAtomIndicesOut, bondOtherAtomIndicesOut + nMols * molBondStride, static_cast<int16_t>(-1));
-
-  for (size_t molIdx = 0; molIdx < nMols; ++molIdx) {
+  for (size_t molIdx = 0; molIdx < mols.size(); ++molIdx) {
     const RDKit::ROMol& mol = *mols[molIdx];
     if (mol.getNumAtoms() > maxAtoms || mol.getNumBonds() > maxAtoms) {
       continue;
@@ -115,6 +90,12 @@ void MorganInvariantsGenerator::ComputeInvariantsInto(const std::vector<const RD
       if (tAtom->getIsotope() != 0) {
         deltaMass = static_cast<int>(tAtom->getMass() - periodicTable->getAtomicWeight(tAtom->getAtomicNum()));
       }
+      // A reused sparse buffer may contain a longer adjacency list from the
+      // previous batch, so terminate every non-full live list explicitly.
+      const auto degreeCount = bondCounts[atomIdx];
+      if (degreeCount < kMaxBondsPerAtom) {
+        bondAtomIndicesOut[molBondOffset + atomIdx * kMaxBondsPerAtom + degreeCount] = -1;
+      }
 
       const auto explicitImplicitHs  = static_cast<unsigned int>(tAtom->getNumExplicitHs() + tAtom->getNumImplicitHs());
       const unsigned int totalDegree = explicitImplicitHs + bondCounts[atomIdx];
@@ -133,6 +114,69 @@ void MorganInvariantsGenerator::ComputeInvariantsInto(const std::vector<const RD
         gboost::hash_range(atomInvariantComponents.begin(), atomInvariantComponents.begin() + numComponents);
     }
   }
+}
+
+}  // namespace
+
+void MorganInvariantsGenerator::ComputeInvariants(const std::vector<const RDKit::ROMol*>& mols, size_t maxAtoms) {
+  const size_t nMols = mols.size();
+  invariantsInfo_.atomInvariants.resize(nMols * maxAtoms);
+  invariantsInfo_.bondInvariants.resize(nMols * maxAtoms);
+  invariantsInfo_.bondAtomIndices.clear();
+  invariantsInfo_.bondOtherAtomIndices.clear();
+  invariantsInfo_.bondAtomIndices.resize(nMols * maxAtoms * kMaxBondsPerAtom, -1);
+  invariantsInfo_.bondOtherAtomIndices.resize(nMols * maxAtoms * kMaxBondsPerAtom, -1);
+
+  ComputeInvariantsInto(mols,
+                        maxAtoms,
+                        invariantsInfo_.atomInvariants.data(),
+                        invariantsInfo_.bondInvariants.data(),
+                        invariantsInfo_.bondAtomIndices.data(),
+                        invariantsInfo_.bondOtherAtomIndices.data());
+}
+
+void MorganInvariantsGenerator::ComputeInvariantsInto(const std::vector<const RDKit::ROMol*>& mols,
+                                                      size_t                                  maxAtoms,
+                                                      std::uint32_t*                          atomInvariantsOut,
+                                                      std::uint32_t*                          bondInvariantsOut,
+                                                      std::int16_t*                           bondAtomIndicesOut,
+                                                      std::int16_t*                           bondOtherAtomIndicesOut) {
+  const size_t nMols = mols.size();
+  if (nMols == 0 || maxAtoms == 0) {
+    return;
+  }
+
+  const size_t molBondStride = maxAtoms * kMaxBondsPerAtom;
+
+  // Initialize outputs
+  std::fill(atomInvariantsOut, atomInvariantsOut + nMols * maxAtoms, 0U);
+  std::fill(bondInvariantsOut, bondInvariantsOut + nMols * maxAtoms, 0U);
+  std::fill(bondAtomIndicesOut, bondAtomIndicesOut + nMols * molBondStride, static_cast<int16_t>(-1));
+  std::fill(bondOtherAtomIndicesOut, bondOtherAtomIndicesOut + nMols * molBondStride, static_cast<int16_t>(-1));
+
+  computeInvariantsInto(mols,
+                        maxAtoms,
+                        atomInvariantsOut,
+                        bondInvariantsOut,
+                        bondAtomIndicesOut,
+                        bondOtherAtomIndicesOut);
+}
+
+void MorganInvariantsGenerator::ComputeGpuInvariantsInto(const std::vector<const RDKit::ROMol*>& mols,
+                                                         const size_t                            maxAtoms,
+                                                         std::uint32_t*                          atomInvariantsOut,
+                                                         std::uint32_t*                          bondInvariantsOut,
+                                                         std::int16_t*                           bondAtomIndicesOut,
+                                                         std::int16_t* bondOtherAtomIndicesOut) {
+  if (mols.empty() || maxAtoms == 0) {
+    return;
+  }
+  computeInvariantsInto(mols,
+                        maxAtoms,
+                        atomInvariantsOut,
+                        bondInvariantsOut,
+                        bondAtomIndicesOut,
+                        bondOtherAtomIndicesOut);
 }
 
 }  // namespace nvMolKit

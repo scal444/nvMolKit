@@ -220,20 +220,20 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
                      maxRadius,
                      128);
     // Pre-allocate pinned host buffers (fixed-size, reused across batches)
-    perThreadBuffer.h_atomInvariants32.resize(dispatchChunkSize * 32);
-    perThreadBuffer.h_bondInvariants32.resize(dispatchChunkSize * 32);
-    perThreadBuffer.h_bondIndices32.resize(dispatchChunkSize * 32 * kMaxBondsPerAtom);
-    perThreadBuffer.h_bondOtherAtomIndices32.resize(dispatchChunkSize * 32 * kMaxBondsPerAtom);
+    perThreadBuffer.h_atomInvariants32.resize(dispatchChunkSize * 32, 0U);
+    perThreadBuffer.h_bondInvariants32.resize(dispatchChunkSize * 32, 0U);
+    perThreadBuffer.h_bondIndices32.resize(dispatchChunkSize * 32 * kMaxBondsPerAtom, -1);
+    perThreadBuffer.h_bondOtherAtomIndices32.resize(dispatchChunkSize * 32 * kMaxBondsPerAtom, -1);
 
-    perThreadBuffer.h_atomInvariants64.resize(dispatchChunkSize * 64);
-    perThreadBuffer.h_bondInvariants64.resize(dispatchChunkSize * 64);
-    perThreadBuffer.h_bondIndices64.resize(dispatchChunkSize * 64 * kMaxBondsPerAtom);
-    perThreadBuffer.h_bondOtherAtomIndices64.resize(dispatchChunkSize * 64 * kMaxBondsPerAtom);
+    perThreadBuffer.h_atomInvariants64.resize(dispatchChunkSize * 64, 0U);
+    perThreadBuffer.h_bondInvariants64.resize(dispatchChunkSize * 64, 0U);
+    perThreadBuffer.h_bondIndices64.resize(dispatchChunkSize * 64 * kMaxBondsPerAtom, -1);
+    perThreadBuffer.h_bondOtherAtomIndices64.resize(dispatchChunkSize * 64 * kMaxBondsPerAtom, -1);
 
-    perThreadBuffer.h_atomInvariants128.resize(dispatchChunkSize * 128);
-    perThreadBuffer.h_bondInvariants128.resize(dispatchChunkSize * 128);
-    perThreadBuffer.h_bondIndices128.resize(dispatchChunkSize * 128 * kMaxBondsPerAtom);
-    perThreadBuffer.h_bondOtherAtomIndices128.resize(dispatchChunkSize * 128 * kMaxBondsPerAtom);
+    perThreadBuffer.h_atomInvariants128.resize(dispatchChunkSize * 128, 0U);
+    perThreadBuffer.h_bondInvariants128.resize(dispatchChunkSize * 128, 0U);
+    perThreadBuffer.h_bondIndices128.resize(dispatchChunkSize * 128 * kMaxBondsPerAtom, -1);
+    perThreadBuffer.h_bondOtherAtomIndices128.resize(dispatchChunkSize * 128 * kMaxBondsPerAtom, -1);
 
     perThreadBuffer.h_outputIndices.resize(dispatchChunkSize);
     cudaCheckError(cudaEventRecord(perThreadBuffer.prevMemcpyDoneEvent.event(), perThreadBuffer.stream.stream()));
@@ -362,26 +362,26 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
         }
         // Compute invariants directly into pinned host buffers to avoid copies
         if (thisRoundNumAtoms == 32) {
-          MorganInvariantsGenerator::ComputeInvariantsInto(molsView,
-                                                           thisRoundNumAtoms,
-                                                           threadCpuBuffers.h_atomInvariants32.data(),
-                                                           threadCpuBuffers.h_bondInvariants32.data(),
-                                                           threadCpuBuffers.h_bondIndices32.data(),
-                                                           threadCpuBuffers.h_bondOtherAtomIndices32.data());
+          MorganInvariantsGenerator::ComputeGpuInvariantsInto(molsView,
+                                                              thisRoundNumAtoms,
+                                                              threadCpuBuffers.h_atomInvariants32.data(),
+                                                              threadCpuBuffers.h_bondInvariants32.data(),
+                                                              threadCpuBuffers.h_bondIndices32.data(),
+                                                              threadCpuBuffers.h_bondOtherAtomIndices32.data());
         } else if (thisRoundNumAtoms == 64) {
-          MorganInvariantsGenerator::ComputeInvariantsInto(molsView,
-                                                           thisRoundNumAtoms,
-                                                           threadCpuBuffers.h_atomInvariants64.data(),
-                                                           threadCpuBuffers.h_bondInvariants64.data(),
-                                                           threadCpuBuffers.h_bondIndices64.data(),
-                                                           threadCpuBuffers.h_bondOtherAtomIndices64.data());
+          MorganInvariantsGenerator::ComputeGpuInvariantsInto(molsView,
+                                                              thisRoundNumAtoms,
+                                                              threadCpuBuffers.h_atomInvariants64.data(),
+                                                              threadCpuBuffers.h_bondInvariants64.data(),
+                                                              threadCpuBuffers.h_bondIndices64.data(),
+                                                              threadCpuBuffers.h_bondOtherAtomIndices64.data());
         } else {  // 128
-          MorganInvariantsGenerator::ComputeInvariantsInto(molsView,
-                                                           thisRoundNumAtoms,
-                                                           threadCpuBuffers.h_atomInvariants128.data(),
-                                                           threadCpuBuffers.h_bondInvariants128.data(),
-                                                           threadCpuBuffers.h_bondIndices128.data(),
-                                                           threadCpuBuffers.h_bondOtherAtomIndices128.data());
+          MorganInvariantsGenerator::ComputeGpuInvariantsInto(molsView,
+                                                              thisRoundNumAtoms,
+                                                              threadCpuBuffers.h_atomInvariants128.data(),
+                                                              threadCpuBuffers.h_bondInvariants128.data(),
+                                                              threadCpuBuffers.h_bondIndices128.data(),
+                                                              threadCpuBuffers.h_bondOtherAtomIndices128.data());
         }
         rangeComputeInvars.pop();
         ScopedNvtxRange rangeMemcpy("Memcpy to GPU");

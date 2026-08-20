@@ -22,9 +22,9 @@
 #include <tuple>
 
 #include "src/morgan_fingerprint.h"
+#include "src/morgan_fingerprint_common.h"
 #include "src/morgan_fingerprint_gpu.h"
 #include "src/testutils/mol_data.h"
-#include "src/utils/rdkit_ownership_wrap.h"
 
 namespace {
 
@@ -84,6 +84,54 @@ TEST(MorganFingerprintTest, CpuImplWorks) {
     ASSERT_NE(refFingerprint, nullptr);
     EXPECT_EQ(*fingerprint, *refFingerprint) << "With smiles " << smiles[i];
   }
+}
+
+TEST(MorganInvariantsTest, SparseGpuPackingOverwritesOnlyLiveEntries) {
+  constexpr size_t maxAtoms   = 32;
+  constexpr auto   atomStale  = std::uint32_t{0xDEADBEEF};
+  constexpr auto   bondStale  = std::uint32_t{0xBAADF00D};
+  constexpr auto   indexStale = std::int16_t{123};
+
+  auto mol = std::unique_ptr<RDKit::ROMol>(RDKit::SmilesToMol("CC"));
+  ASSERT_NE(mol, nullptr);
+  const std::vector<const RDKit::ROMol*> mols{mol.get()};
+
+  std::vector<std::uint32_t> sparseAtoms(maxAtoms, atomStale);
+  std::vector<std::uint32_t> sparseBonds(maxAtoms, bondStale);
+  std::vector<std::int16_t>  sparseBondIndices(maxAtoms * nvMolKit::kMaxBondsPerAtom, indexStale);
+  std::vector<std::int16_t>  sparseOtherIndices(maxAtoms * nvMolKit::kMaxBondsPerAtom, indexStale);
+  nvMolKit::MorganInvariantsGenerator::ComputeGpuInvariantsInto(mols,
+                                                                maxAtoms,
+                                                                sparseAtoms.data(),
+                                                                sparseBonds.data(),
+                                                                sparseBondIndices.data(),
+                                                                sparseOtherIndices.data());
+
+  std::vector<std::uint32_t> denseAtoms(maxAtoms);
+  std::vector<std::uint32_t> denseBonds(maxAtoms);
+  std::vector<std::int16_t>  denseBondIndices(maxAtoms * nvMolKit::kMaxBondsPerAtom);
+  std::vector<std::int16_t>  denseOtherIndices(maxAtoms * nvMolKit::kMaxBondsPerAtom);
+  nvMolKit::MorganInvariantsGenerator::ComputeInvariantsInto(mols,
+                                                             maxAtoms,
+                                                             denseAtoms.data(),
+                                                             denseBonds.data(),
+                                                             denseBondIndices.data(),
+                                                             denseOtherIndices.data());
+
+  EXPECT_EQ(sparseAtoms[0], denseAtoms[0]);
+  EXPECT_EQ(sparseAtoms[1], denseAtoms[1]);
+  EXPECT_EQ(sparseBonds[0], denseBonds[0]);
+  for (size_t atomIdx = 0; atomIdx < 2; ++atomIdx) {
+    const size_t offset = atomIdx * nvMolKit::kMaxBondsPerAtom;
+    EXPECT_EQ(sparseBondIndices[offset], denseBondIndices[offset]);
+    EXPECT_EQ(sparseOtherIndices[offset], denseOtherIndices[offset]);
+    EXPECT_EQ(sparseBondIndices[offset + 1], -1);
+  }
+
+  EXPECT_EQ(sparseAtoms[2], atomStale);
+  EXPECT_EQ(sparseBonds[1], bondStale);
+  EXPECT_EQ(sparseBondIndices[2 * nvMolKit::kMaxBondsPerAtom], indexStale);
+  EXPECT_EQ(sparseOtherIndices[2 * nvMolKit::kMaxBondsPerAtom], indexStale);
 }
 
 void PrintFPDiff(const ExplicitBitVect* refFingerprint, const ExplicitBitVect* fingerprint) {
