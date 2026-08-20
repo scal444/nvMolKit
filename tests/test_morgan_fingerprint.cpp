@@ -323,6 +323,35 @@ TEST(MorganFingerprintGpuTest, GpuBufferSameResult) {
   }
 }
 
+TEST(MorganFingerprintGpuTest, HighDegreeMoleculeUsesCpuFallback) {
+  constexpr unsigned int              radius = 2;
+  constexpr unsigned int              fpSize = 1024;
+  const std::unique_ptr<RDKit::ROMol> regularMol(RDKit::SmilesToMol("CCO"));
+  const std::unique_ptr<RDKit::ROMol> highDegreeMol(RDKit::SmilesToMol("[Fe](C)(C)(C)(C)(C)(C)(C)(C)C"));
+  ASSERT_NE(regularMol, nullptr);
+  ASSERT_NE(highDegreeMol, nullptr);
+  ASSERT_GT(highDegreeMol->getAtomWithIdx(0)->getDegree(), nvMolKit::kMaxBondsPerAtom);
+
+  auto                                generator = nvMolKit::MorganFingerprintGenerator(radius, fpSize);
+  nvMolKit::FingerprintComputeOptions options;
+  options.backend = nvMolKit::FingerprintComputeBackend::GPU;
+
+  const std::vector<const RDKit::ROMol*> mols      = {regularMol.get(), highDegreeMol.get()};
+  auto                                   gpuResult = generator.GetFingerprintsGpuBuffer<fpSize>(mols, nullptr, options);
+  std::vector<nvMolKit::FlatBitVect<fpSize>> actual(gpuResult.size());
+  gpuResult.copyToHost(actual);
+
+  auto refGenerator = std::unique_ptr<RDKit::FingerprintGenerator<std::uint32_t>>(
+    RDKit::MorganFingerprint::getMorganGenerator<
+      std::uint32_t>(radius, false, false, true, false, nullptr, nullptr, fpSize, {1, 2, 4, 8}, false, false));
+  for (size_t molIdx = 0; molIdx < mols.size(); ++molIdx) {
+    const std::unique_ptr<ExplicitBitVect> expected(refGenerator->getFingerprint(*mols[molIdx]));
+    for (size_t bitId = 0; bitId < fpSize; ++bitId) {
+      EXPECT_EQ(actual[molIdx][bitId], expected->getBit(bitId)) << "molecule " << molIdx << ", bit " << bitId;
+    }
+  }
+}
+
 class MorganFingerprintParametrizedTest
     : public testing::TestWithParam<std::tuple<int, nvMolKit::FingerprintComputeBackend>> {};
 
