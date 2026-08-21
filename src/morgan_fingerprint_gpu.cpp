@@ -37,6 +37,18 @@ namespace {
 
 constexpr int kDefaultGpuBatchSize = 2048;
 
+bool hasUnsupportedMorganGpuDegree(const RDKit::ROMol& mol) {
+  if (mol.getNumBonds() <= kMaxBondsPerAtom) {
+    return false;
+  }
+  for (const RDKit::Atom* atom : mol.atoms()) {
+    if (atom->getDegree() > kMaxBondsPerAtom) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // A simple thread-safe bag of work items (not FIFO), supporting batched retrieval.
 // Important: Once the get_n function is called, do not add any more items to the bag. This is a drain-only class once
 // begun, This is to optimize for the case of repeated calls to empty bags not needing to fully lock.
@@ -255,20 +267,6 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
     const auto& mol = *mols[i];
     if (mol.getNumAtoms() >= 128 || mol.getNumBonds() >= 128) {
       workLarge.push_back(i);
-      continue;
-    }
-
-    bool hasUnsupportedDegree = false;
-    if (mol.getNumBonds() > kMaxBondsPerAtom) {
-      for (const RDKit::Atom* atom : mol.atoms()) {
-        if (atom->getDegree() > kMaxBondsPerAtom) {
-          hasUnsupportedDegree = true;
-          break;
-        }
-      }
-    }
-    if (hasUnsupportedDegree) {
-      workLarge.push_back(i);
     } else if (mol.getNumAtoms() < 32 && mol.getNumBonds() < 32) {
       work32.push_back(i);
     } else if (mol.getNumAtoms() < 64 && mol.getNumBonds() < 64) {
@@ -364,36 +362,50 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
         int                              relIdx = 0;
         ScopedNvtxRange                  rangeComputeInvars("Compute invariants");
         for (int j = 0; j < scopedChunkSize; j++) {
-          const int idx = threadCpuBuffers.h_outputIndices[j];
-          molsView.push_back(mols[idx]);
-          const RDKit::ROMol& mol               = *mols[idx];
+          const int           idx = threadCpuBuffers.h_outputIndices[j];
+          const RDKit::ROMol& mol = *mols[idx];
+          // Keep this data-dependent traversal in the parallel worker. Performing it during
+          // initial classification serializes preprocessing across the entire input.
+          if (hasUnsupportedMorganGpuDegree(mol)) {
+            auto fingerprint = processSingleLargeMolecule<fpSize>(mol, maxRadius);
+            largeResults.emplace_back(std::make_pair(std::move(fingerprint), idx));
+            continue;
+          }
+
+          threadCpuBuffers.h_outputIndices[relIdx] = idx;
+          molsView.push_back(&mol);
           threadCpuBuffers.nAtomsPerMol[relIdx] = std::int16_t(mol.getNumAtoms());
           relIdx++;
         }
+        scopedChunkSize = relIdx;
         // Compute invariants directly into pinned host buffers to avoid copies
-        if (thisRoundNumAtoms == 32) {
-          MorganInvariantsGenerator::ComputeInvariantsInto(molsView,
-                                                           thisRoundNumAtoms,
-                                                           threadCpuBuffers.h_atomInvariants32.data(),
-                                                           threadCpuBuffers.h_bondInvariants32.data(),
-                                                           threadCpuBuffers.h_bondIndices32.data(),
-                                                           threadCpuBuffers.h_bondOtherAtomIndices32.data());
-        } else if (thisRoundNumAtoms == 64) {
-          MorganInvariantsGenerator::ComputeInvariantsInto(molsView,
-                                                           thisRoundNumAtoms,
-                                                           threadCpuBuffers.h_atomInvariants64.data(),
-                                                           threadCpuBuffers.h_bondInvariants64.data(),
-                                                           threadCpuBuffers.h_bondIndices64.data(),
-                                                           threadCpuBuffers.h_bondOtherAtomIndices64.data());
-        } else {  // 128
-          MorganInvariantsGenerator::ComputeInvariantsInto(molsView,
-                                                           thisRoundNumAtoms,
-                                                           threadCpuBuffers.h_atomInvariants128.data(),
-                                                           threadCpuBuffers.h_bondInvariants128.data(),
-                                                           threadCpuBuffers.h_bondIndices128.data(),
-                                                           threadCpuBuffers.h_bondOtherAtomIndices128.data());
+        if (scopedChunkSize > 0) {
+          if (thisRoundNumAtoms == 32) {
+            MorganInvariantsGenerator::ComputeInvariantsInto(molsView,
+                                                             thisRoundNumAtoms,
+                                                             threadCpuBuffers.h_atomInvariants32.data(),
+                                                             threadCpuBuffers.h_bondInvariants32.data(),
+                                                             threadCpuBuffers.h_bondIndices32.data(),
+                                                             threadCpuBuffers.h_bondOtherAtomIndices32.data());
+          } else if (thisRoundNumAtoms == 64) {
+            MorganInvariantsGenerator::ComputeInvariantsInto(molsView,
+                                                             thisRoundNumAtoms,
+                                                             threadCpuBuffers.h_atomInvariants64.data(),
+                                                             threadCpuBuffers.h_bondInvariants64.data(),
+                                                             threadCpuBuffers.h_bondIndices64.data(),
+                                                             threadCpuBuffers.h_bondOtherAtomIndices64.data());
+          } else {  // 128
+            MorganInvariantsGenerator::ComputeInvariantsInto(molsView,
+                                                             thisRoundNumAtoms,
+                                                             threadCpuBuffers.h_atomInvariants128.data(),
+                                                             threadCpuBuffers.h_bondInvariants128.data(),
+                                                             threadCpuBuffers.h_bondIndices128.data(),
+                                                             threadCpuBuffers.h_bondOtherAtomIndices128.data());
+          }
         }
         rangeComputeInvars.pop();
+      }
+      if (scopedChunkSize > 0) {
         ScopedNvtxRange rangeMemcpy("Memcpy to GPU");
         auto&           buffersToUse = thisRoundNumAtoms == 32 ? threadCpuBuffers.gpuBuffers32 :
                                                                  (thisRoundNumAtoms == 64 ? threadCpuBuffers.gpuBuffers64 :
