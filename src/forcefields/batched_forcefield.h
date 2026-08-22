@@ -97,6 +97,18 @@ class BatchedForcefield {
                                        const uint8_t* activeSystemMask = nullptr,
                                        cudaStream_t   stream           = nullptr) = 0;
 
+  //! Float-coordinate counterparts used by the SINGLE storage profile.
+  //! Implementations that do not provide float coordinate kernels return
+  //! cudaErrorNotSupported.
+  virtual cudaError_t computeEnergyFloat(double*        energyOuts,
+                                         const float*   positions,
+                                         const uint8_t* activeSystemMask = nullptr,
+                                         cudaStream_t   stream           = nullptr);
+  virtual cudaError_t computeGradientsFloat(float*         grad,
+                                            const float*   positions,
+                                            const uint8_t* activeSystemMask = nullptr,
+                                            cudaStream_t   stream           = nullptr);
+
   //! Returns the number of concrete systems represented by this batch.
   int                              numMolecules() const;
   //! Returns the coordinate dimensionality stored per atom.

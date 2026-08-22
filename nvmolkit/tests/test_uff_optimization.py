@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 import os
 
 import pytest
@@ -23,7 +24,15 @@ from rdkit.ForceField import rdForceField as _rdForceField  # noqa: F401
 from rdkit.Geometry import Point3D
 
 import nvmolkit.uffOptimization as nvmolkit_uff
-from nvmolkit.types import CoordinateOutput, Device3DResult, FireOptions, HardwareOptions
+from nvmolkit.types import (
+    CoordinateOutput,
+    Device3DResult,
+    FireOptions,
+    HardwareOptions,
+    PrecisionMode,
+    PrecisionDType,
+    PrecisionOptions,
+)
 
 
 @pytest.fixture
@@ -60,6 +69,51 @@ def uff_test_mols(num_mols=5):
 
 def create_hard_copy_mols(molecules):
     return [Chem.Mol(mol) for mol in molecules]
+
+
+@pytest.mark.parametrize("minimizer_kind", ["BFGS", "FIRE"])
+def test_uff_single_precision_profile_executes(uff_test_mols, minimizer_kind):
+    """Exercise float forcefield buffers without applying float64 validation tolerances."""
+    mol = create_hard_copy_mols(uff_test_mols[:1])[0]
+    energies = nvmolkit_uff.UFFOptimizeMoleculesConfs(
+        [mol],
+        maxIters=5,
+        minimizerKind=minimizer_kind,
+        precisionOptions=PrecisionOptions(PrecisionMode.SINGLE),
+    )
+    assert energies and energies[0]
+    assert all(math.isfinite(energy) for energy in energies[0])
+
+
+@pytest.mark.parametrize("minimizer_kind", ["BFGS", "FIRE"])
+@pytest.mark.parametrize(
+    "precision_options",
+    [
+        PrecisionOptions(
+            forcefieldParameterStorage=PrecisionDType.FLOAT64,
+            forcefieldCoordinateStorage=PrecisionDType.FLOAT64,
+            forcefieldGradientStorage=PrecisionDType.FLOAT32,
+            forcefieldCompute=PrecisionDType.FLOAT32,
+            minimizerCompute=PrecisionDType.FLOAT64,
+            reductionCompute=PrecisionDType.FLOAT64,
+        ),
+        PrecisionOptions(
+            forcefieldParameterStorage=PrecisionDType.FLOAT32,
+            forcefieldCoordinateStorage=PrecisionDType.FLOAT32,
+            forcefieldGradientStorage=PrecisionDType.FLOAT64,
+            forcefieldCompute=PrecisionDType.FLOAT64,
+            minimizerCompute=PrecisionDType.FLOAT32,
+            reductionCompute=PrecisionDType.FLOAT32,
+        ),
+    ],
+    ids=["f32-compute-crossed-storage", "f64-compute-crossed-storage"],
+)
+def test_uff_precision_axes_execute_independently(uff_test_mols, minimizer_kind, precision_options):
+    mol = create_hard_copy_mols(uff_test_mols[:1])[0]
+    energies = nvmolkit_uff.UFFOptimizeMoleculesConfs(
+        [mol], maxIters=3, minimizerKind=minimizer_kind, precisionOptions=precision_options
+    )
+    assert energies and all(math.isfinite(energy) for energy in energies[0])
 
 
 def make_fragmented_mol():

@@ -86,6 +86,62 @@ TEST(BFGSMinimizerTest, AllocationAndIdentity) {
   EXPECT_THAT(hessianHost, ::testing::ElementsAreArray(want));
 }
 
+TEST(BFGSMinimizerTest, FloatHessianStorageAllocationAndIdentity) {
+  const nvMolKit::PrecisionOptions precision{nvMolKit::PrecisionMode::HESSIAN_F32};
+  nvMolKit::BfgsBatchMinimizer     minimizer(/*dataDim=*/3,
+                                         nvMolKit::DebugLevel::NONE,
+                                         /*scaleGrads=*/true,
+                                         /*stream=*/nullptr,
+                                         nvMolKit::BfgsBackend::BATCHED,
+                                         precision);
+
+  const std::vector<int>           atomStarts{0, 2, 5, 10, 12};
+  nvMolKit::AsyncDeviceVector<int> atomStartsDevice;
+  atomStartsDevice.setFromVector(atomStarts);
+  minimizer.initialize(atomStarts,
+                       atomStartsDevice.data(),
+                       nullptr,
+                       nullptr,
+                       nullptr,
+                       nvMolKit::BfgsBackend::BATCHED,
+                       nullptr);
+
+  constexpr int wantStorageSize = 378;
+  EXPECT_EQ(minimizer.inverseHessian_.size(), 0);
+  ASSERT_EQ(minimizer.inverseHessianFloat_.size(), wantStorageSize);
+
+  minimizer.setHessianToIdentity();
+  std::vector<float> hessianHost(wantStorageSize);
+  ASSERT_EQ(cudaMemcpy(hessianHost.data(),
+                       minimizer.inverseHessianFloat_.data(),
+                       wantStorageSize * sizeof(float),
+                       cudaMemcpyDeviceToHost),
+            cudaSuccess);
+
+  int offset = 0;
+  for (const int numAtoms : {2, 3, 5, 2}) {
+    const int dim = 3 * numAtoms;
+    for (int row = 0; row < dim; ++row) {
+      for (int col = 0; col < dim; ++col) {
+        EXPECT_EQ(hessianHost[offset + row * dim + col], row == col ? 1.0F : 0.0F);
+      }
+    }
+    offset += dim * dim;
+  }
+}
+
+TEST(BFGSMinimizerTest, AcceptsForcefieldPrecisionProfiles) {
+  for (const auto mode :
+       {nvMolKit::PrecisionMode::FORCEFIELD_F32, nvMolKit::PrecisionMode::MIXED, nvMolKit::PrecisionMode::SINGLE}) {
+    EXPECT_NO_THROW(nvMolKit::BfgsBatchMinimizer(/*dataDim=*/3,
+                                                 nvMolKit::DebugLevel::NONE,
+                                                 /*scaleGrads=*/true,
+                                                 /*stream=*/nullptr,
+                                                 nvMolKit::BfgsBackend::BATCHED,
+                                                 {mode}));
+  }
+}
+
 TEST(BFGSMinimizerTest, CountFinishedLineSearch) {
   // Create a BFGS minimizer
   nvMolKit::BfgsBatchMinimizer bfgsMinimizer;
@@ -551,6 +607,35 @@ TEST_F(BFGSMinimizerTestFixture, FullLineSearch) {
   EXPECT_THAT(gotPositions, ::testing::Pointwise(::testing::DoubleNear(1e-4), accumPositions));
   EXPECT_THAT(gotEnergies, ::testing::Pointwise(::testing::DoubleNear(1e-4), accumEnergies));
   EXPECT_THAT(gotStatuses, ::testing::Pointwise(::testing::Eq(), accumStatuses));
+}
+
+TEST_F(BFGSMinimizerTestFixture, FloatHessianE2EMinimizationUsesRelaxedTolerance) {
+  constexpr int numMols  = 1;
+  constexpr int maxIters = 50;
+  setUpMMFFSystems(numMols);
+
+  const nvMolKit::PrecisionOptions precision{nvMolKit::PrecisionMode::HESSIAN_F32};
+  nvMolKit::BfgsBatchMinimizer     minimizer(/*dataDim=*/3,
+                                         nvMolKit::DebugLevel::NONE,
+                                         /*scaleGrads=*/true,
+                                         /*stream=*/nullptr,
+                                         nvMolKit::BfgsBackend::BATCHED,
+                                         precision);
+  minimizeMMFF(minimizer, maxIters, 1e-4, systemHost, systemDevice);
+
+  std::vector<double> referenceEnergies;
+  for (auto& mol : mols) {
+    RDKit::MMFF::MMFFOptimizeMolecule(*mol, maxIters, "MMFF94", 100.0);
+    auto                                     props = std::make_unique<RDKit::MMFF::MMFFMolProperties>(*mol);
+    std::unique_ptr<ForceFields::ForceField> forcefield(RDKit::MMFF::constructForceField(*mol, props.get()));
+    referenceEnergies.push_back(forcefield->calcEnergy());
+  }
+
+  std::vector<double> gotEnergies(systemDevice.energyOuts.size());
+  systemDevice.energyOuts.copyToHost(gotEnergies);
+  constexpr double kFloatHessianEnergyTolerance = 5e-3;
+  EXPECT_THAT(gotEnergies,
+              ::testing::Pointwise(::testing::DoubleNear(kFloatHessianEnergyTolerance), referenceEnergies));
 }
 
 TEST_P(BFGSMinimizerBackendTest, E2EMinimizationSingleSystemUnconvergedMatches) {
@@ -1422,3 +1507,29 @@ INSTANTIATE_TEST_SUITE_P(BFGSBackends,
                                return "Unknown";
                            }
                          });
+TEST(PrecisionOptionsTest, PresetsAndExplicitAxesResolveIndependently) {
+  using nvMolKit::PrecisionDType;
+  using nvMolKit::PrecisionMode;
+
+  auto mixed = nvMolKit::resolvePrecisionOptions({PrecisionMode::MIXED});
+  EXPECT_EQ(mixed.forcefieldParameterStorage, PrecisionDType::FLOAT32);
+  EXPECT_EQ(mixed.forcefieldCoordinateStorage, PrecisionDType::FLOAT32);
+  EXPECT_EQ(mixed.forcefieldGradientStorage, PrecisionDType::FLOAT32);
+  EXPECT_EQ(mixed.hessianStorage, PrecisionDType::FLOAT32);
+  EXPECT_EQ(mixed.minimizerStateStorage, PrecisionDType::FLOAT32);
+  EXPECT_EQ(mixed.forcefieldCompute, PrecisionDType::FLOAT32);
+  EXPECT_EQ(mixed.minimizerCompute, PrecisionDType::FLOAT32);
+  EXPECT_EQ(mixed.reductionCompute, PrecisionDType::FLOAT64);
+
+  nvMolKit::PrecisionOptions custom{PrecisionMode::SINGLE};
+  custom.forcefieldParameterStorage  = PrecisionDType::FLOAT64;
+  custom.forcefieldCoordinateStorage = PrecisionDType::FLOAT64;
+  custom.minimizerCompute            = PrecisionDType::FLOAT64;
+  const auto resolved                = nvMolKit::resolvePrecisionOptions(custom);
+  EXPECT_EQ(resolved.forcefieldParameterStorage, PrecisionDType::FLOAT64);
+  EXPECT_EQ(resolved.forcefieldCoordinateStorage, PrecisionDType::FLOAT64);
+  EXPECT_EQ(resolved.forcefieldGradientStorage, PrecisionDType::FLOAT32);
+  EXPECT_EQ(resolved.forcefieldCompute, PrecisionDType::FLOAT32);
+  EXPECT_EQ(resolved.minimizerCompute, PrecisionDType::FLOAT64);
+  EXPECT_EQ(resolved.reductionCompute, PrecisionDType::FLOAT32);
+}

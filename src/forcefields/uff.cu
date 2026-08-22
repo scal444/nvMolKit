@@ -23,8 +23,9 @@ namespace nvMolKit {
 namespace UFF {
 namespace {
 
-EnergyForceContribsDevicePtr toPointerStruct(const EnergyForceContribsDevice& src) {
-  EnergyForceContribsDevicePtr dst;
+template <typename ParameterScalar>
+EnergyForceContribsDevicePtrT<ParameterScalar> toPointerStruct(const EnergyForceContribsDeviceT<ParameterScalar>& src) {
+  EnergyForceContribsDevicePtrT<ParameterScalar> dst;
   dst.bondTerms.idx1          = src.bondTerms.idx1.data();
   dst.bondTerms.idx2          = src.bondTerms.idx2.data();
   dst.bondTerms.restLen       = src.bondTerms.restLen.data();
@@ -137,7 +138,9 @@ template <typename T> void appendValues(std::vector<T>& dst, const std::vector<T
 
 }  // namespace
 
-void setStreams(BatchedMolecularDeviceBuffers& molSystemDevice, cudaStream_t stream) {
+template <typename ParameterScalar, typename CoordinateScalar>
+void setStreamsImpl(BatchedMolecularDeviceBuffersT<ParameterScalar, CoordinateScalar>& molSystemDevice,
+                    cudaStream_t                                                       stream) {
   molSystemDevice.positions.setStream(stream);
   molSystemDevice.grad.setStream(stream);
   molSystemDevice.energyOuts.setStream(stream);
@@ -225,8 +228,10 @@ void setStreams(BatchedMolecularDeviceBuffers& molSystemDevice, cudaStream_t str
   molSystemDevice.indices.torsionConstraintTermStarts.setStream(stream);
 }
 
-void sendContribsAndIndicesToDevice(const BatchedMolecularSystemHost& molSystemHost,
-                                    BatchedMolecularDeviceBuffers&    molSystemDevice) {
+template <typename ParameterScalar, typename CoordinateScalar>
+void sendContribsAndIndicesToDeviceImpl(
+  const BatchedMolecularSystemHost&                                  molSystemHost,
+  BatchedMolecularDeviceBuffersT<ParameterScalar, CoordinateScalar>& molSystemDevice) {
   const auto& hostContribs = molSystemHost.contribs;
   auto&       contribs     = molSystemDevice.contribs;
 
@@ -443,11 +448,45 @@ void addMoleculeToBatch(const EnergyForceContribsHost& contribs,
   addMoleculeToBatch(contribsCopy, positions, molSystem);
 }
 
-void allocateIntermediateBuffers(const BatchedMolecularSystemHost& molSystemHost,
-                                 BatchedMolecularDeviceBuffers&    molSystemDevice) {
+template <typename ParameterScalar, typename CoordinateScalar>
+void allocateIntermediateBuffersImpl(
+  const BatchedMolecularSystemHost&                                  molSystemHost,
+  BatchedMolecularDeviceBuffersT<ParameterScalar, CoordinateScalar>& molSystemDevice) {
   FFKernelUtils::allocateIntermediateBuffers(molSystemHost,
                                              molSystemDevice,
                                              molSystemHost.indices.atomStarts.size() - 1);
+}
+
+void setStreams(BatchedMolecularDeviceBuffers& buffers, cudaStream_t stream) {
+  setStreamsImpl(buffers, stream);
+}
+void setStreams(BatchedMolecularDeviceBuffersF32Params& buffers, cudaStream_t stream) {
+  setStreamsImpl(buffers, stream);
+}
+void setStreams(BatchedMolecularDeviceBuffersF32& buffers, cudaStream_t stream) {
+  setStreamsImpl(buffers, stream);
+}
+
+void sendContribsAndIndicesToDevice(const BatchedMolecularSystemHost& host, BatchedMolecularDeviceBuffers& buffers) {
+  sendContribsAndIndicesToDeviceImpl(host, buffers);
+}
+void sendContribsAndIndicesToDevice(const BatchedMolecularSystemHost&       host,
+                                    BatchedMolecularDeviceBuffersF32Params& buffers) {
+  sendContribsAndIndicesToDeviceImpl(host, buffers);
+}
+void sendContribsAndIndicesToDevice(const BatchedMolecularSystemHost& host, BatchedMolecularDeviceBuffersF32& buffers) {
+  sendContribsAndIndicesToDeviceImpl(host, buffers);
+}
+
+void allocateIntermediateBuffers(const BatchedMolecularSystemHost& host, BatchedMolecularDeviceBuffers& buffers) {
+  allocateIntermediateBuffersImpl(host, buffers);
+}
+void allocateIntermediateBuffers(const BatchedMolecularSystemHost&       host,
+                                 BatchedMolecularDeviceBuffersF32Params& buffers) {
+  allocateIntermediateBuffersImpl(host, buffers);
+}
+void allocateIntermediateBuffers(const BatchedMolecularSystemHost& host, BatchedMolecularDeviceBuffersF32& buffers) {
+  allocateIntermediateBuffersImpl(host, buffers);
 }
 
 cudaError_t computeEnergy(BatchedMolecularDeviceBuffers& molSystemDevice,
@@ -760,14 +799,56 @@ cudaError_t computeGradients(BatchedMolecularDeviceBuffers& molSystemDevice, cud
 
 cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDevice,
                                      const double*                  coords,
-                                     cudaStream_t                   stream) {
+                                     cudaStream_t                   stream,
+                                     bool                           computeInFloat,
+                                     bool                           reduceInFloat) {
   return launchBlockPerMolEnergyKernel(molSystemDevice.indices.atomStarts.size() - 1,
                                        toPointerStruct(molSystemDevice.contribs),
                                        toPointerStruct(molSystemDevice.indices),
                                        coords != nullptr ? coords : molSystemDevice.positions.data(),
                                        molSystemDevice.energyOuts.data(),
                                        batchHasConstraints(molSystemDevice.contribs),
+                                       computeInFloat,
+                                       reduceInFloat,
                                        stream);
+}
+
+cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffersF32Params& molSystemDevice,
+                                     double*                                 energyOuts,
+                                     const double*                           coords,
+                                     const uint8_t*                          activeSystemMask,
+                                     cudaStream_t                            stream,
+                                     bool                                    computeInFloat,
+                                     bool                                    reduceInFloat) {
+  return launchBlockPerMolEnergyKernel(molSystemDevice.indices.atomStarts.size() - 1,
+                                       toPointerStruct(molSystemDevice.contribs),
+                                       toPointerStruct(molSystemDevice.indices),
+                                       coords != nullptr ? coords : molSystemDevice.positions.data(),
+                                       energyOuts,
+                                       batchHasConstraints(molSystemDevice.contribs),
+                                       computeInFloat,
+                                       reduceInFloat,
+                                       stream,
+                                       activeSystemMask);
+}
+
+cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffersF32& molSystemDevice,
+                                     double*                           energyOuts,
+                                     const float*                      coords,
+                                     const uint8_t*                    activeSystemMask,
+                                     cudaStream_t                      stream,
+                                     bool                              computeInFloat,
+                                     bool                              reduceInFloat) {
+  return launchBlockPerMolEnergyKernel(molSystemDevice.indices.atomStarts.size() - 1,
+                                       toPointerStruct(molSystemDevice.contribs),
+                                       toPointerStruct(molSystemDevice.indices),
+                                       coords != nullptr ? coords : molSystemDevice.positions.data(),
+                                       energyOuts,
+                                       batchHasConstraints(molSystemDevice.contribs),
+                                       computeInFloat,
+                                       reduceInFloat,
+                                       stream,
+                                       activeSystemMask);
 }
 
 cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDevice, cudaStream_t stream) {
@@ -777,10 +858,50 @@ cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDevic
                                      molSystemDevice.positions.data(),
                                      molSystemDevice.grad.data(),
                                      batchHasConstraints(molSystemDevice.contribs),
+                                     false,
                                      stream);
 }
 
+cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffersF32Params& molSystemDevice,
+                                   const double*                           coords,
+                                   double*                                 grad,
+                                   const uint8_t*                          activeSystemMask,
+                                   cudaStream_t                            stream,
+                                   bool                                    computeInFloat) {
+  return launchBlockPerMolGradKernel(molSystemDevice.indices.atomStarts.size() - 1,
+                                     toPointerStruct(molSystemDevice.contribs),
+                                     toPointerStruct(molSystemDevice.indices),
+                                     coords,
+                                     grad,
+                                     batchHasConstraints(molSystemDevice.contribs),
+                                     computeInFloat,
+                                     stream,
+                                     activeSystemMask);
+}
+
+cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffersF32& molSystemDevice,
+                                   const float*                      coords,
+                                   float*                            grad,
+                                   const uint8_t*                    activeSystemMask,
+                                   cudaStream_t                      stream,
+                                   bool                              computeInFloat) {
+  return launchBlockPerMolGradKernel(molSystemDevice.indices.atomStarts.size() - 1,
+                                     toPointerStruct(molSystemDevice.contribs),
+                                     toPointerStruct(molSystemDevice.indices),
+                                     coords != nullptr ? coords : molSystemDevice.positions.data(),
+                                     grad != nullptr ? grad : molSystemDevice.grad.data(),
+                                     batchHasConstraints(molSystemDevice.contribs),
+                                     computeInFloat,
+                                     stream,
+                                     activeSystemMask);
+}
+
 EnergyForceContribsDevicePtr toEnergyForceContribsDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice) {
+  return toPointerStruct(molSystemDevice.contribs);
+}
+
+EnergyForceContribsDevicePtrF32 toEnergyForceContribsDevicePtr(
+  const BatchedMolecularDeviceBuffersF32Params& molSystemDevice) {
   return toPointerStruct(molSystemDevice.contribs);
 }
 
@@ -788,7 +909,16 @@ BatchedIndicesDevicePtr toBatchedIndicesDevicePtr(const BatchedMolecularDeviceBu
   return toPointerStruct(molSystemDevice.indices);
 }
 
+BatchedIndicesDevicePtr toBatchedIndicesDevicePtr(const BatchedMolecularDeviceBuffersF32Params& molSystemDevice) {
+  return toPointerStruct(molSystemDevice.indices);
+}
+
 bool batchHasConstraints(const EnergyForceContribsDevice& contribs) {
+  return contribs.distanceConstraintTerms.idx1.size() > 0 || contribs.positionConstraintTerms.idx.size() > 0 ||
+         contribs.angleConstraintTerms.idx1.size() > 0 || contribs.torsionConstraintTerms.idx1.size() > 0;
+}
+
+bool batchHasConstraints(const EnergyForceContribsDeviceF32& contribs) {
   return contribs.distanceConstraintTerms.idx1.size() > 0 || contribs.positionConstraintTerms.idx.size() > 0 ||
          contribs.angleConstraintTerms.idx1.size() > 0 || contribs.torsionConstraintTerms.idx1.size() > 0;
 }

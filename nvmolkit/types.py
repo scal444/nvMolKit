@@ -21,9 +21,9 @@ from typing import Any, Iterable, List, NamedTuple, Optional
 import numpy as np
 import torch
 
+from nvmolkit import _types
 from nvmolkit import _arrayHelpers  # noqa: F401
 from nvmolkit import _embedMolecules  # type: ignore
-from nvmolkit import _types
 
 
 class FireOptions:
@@ -292,6 +292,134 @@ class HardwareOptions:
         unknown = set(data) - known
         if unknown:
             raise KeyError(f"Unknown HardwareOptions keys: {sorted(unknown)}")
+        return cls(**{key: data[key] for key in known if key in data})
+
+
+class PrecisionMode(str, Enum):
+    """Preset profiles for the independent precision axes.
+
+    ``HESSIAN_F32`` changes Hessian storage only. ``MINIMIZER_F32`` selects
+    float32 minimizer compute and state storage. ``FORCEFIELD_F32`` selects
+    float32 forcefield parameter storage and compute. ``MIXED`` combines the
+    float32 storage/compute choices while retaining float64 reductions, and
+    ``SINGLE`` additionally selects float32 reductions. Explicit axes on
+    :class:`PrecisionOptions` override any preset value.
+    """
+
+    LEGACY = "LEGACY"
+    HESSIAN_F32 = "HESSIAN_F32"
+    MINIMIZER_F32 = "MINIMIZER_F32"
+    FORCEFIELD_F32 = "FORCEFIELD_F32"
+    MIXED = "MIXED"
+    SINGLE = "SINGLE"
+
+
+class PrecisionDType(str, Enum):
+    """Storage or arithmetic scalar for one precision axis."""
+
+    DEFAULT = "DEFAULT"
+    FLOAT32 = "FLOAT32"
+    FLOAT64 = "FLOAT64"
+
+
+class FloatMathMode(str, Enum):
+    """Float math implementation (the project currently builds with relaxed fast math)."""
+    DEFAULT = "DEFAULT"
+    RELAXED = "RELAXED"
+
+
+class PrecisionOptions:
+    """Select a preset and optionally override individual precision axes.
+
+    ``HESSIAN_F32`` changes only BFGS Hessian storage. ``MINIMIZER_F32`` uses
+    float32 minimizer arithmetic and persistent FIRE/BFGS state, including the
+    Hessian. ``FORCEFIELD_F32`` uses float32 MMFF/UFF parameter storage and
+    arithmetic. ``MIXED`` combines those choices with float32 force-field
+    coordinate/gradient staging but retains float64 reductions. ``SINGLE`` is
+    the same profile with float32 reductions.
+
+    Every keyword axis overrides its preset independently. Energies and the
+    public minimizer coordinate workspace remain float64 API boundaries;
+    float32 staging and arithmetic are performed on device. The current CUDA
+    build uses relaxed float math, represented by ``FloatMathMode.RELAXED``.
+    """
+
+    _dtype_axes = (
+        "forcefieldParameterStorage", "forcefieldCoordinateStorage", "forcefieldGradientStorage",
+        "hessianStorage", "minimizerStateStorage", "forcefieldCompute",
+        "minimizerCompute", "reductionCompute",
+    )
+
+    def __init__(
+        self,
+        mode: PrecisionMode | str = PrecisionMode.LEGACY,
+        *,
+        forcefieldParameterStorage: PrecisionDType | str = PrecisionDType.DEFAULT,
+        forcefieldCoordinateStorage: PrecisionDType | str = PrecisionDType.DEFAULT,
+        forcefieldGradientStorage: PrecisionDType | str = PrecisionDType.DEFAULT,
+        hessianStorage: PrecisionDType | str = PrecisionDType.DEFAULT,
+        minimizerStateStorage: PrecisionDType | str = PrecisionDType.DEFAULT,
+        forcefieldCompute: PrecisionDType | str = PrecisionDType.DEFAULT,
+        minimizerCompute: PrecisionDType | str = PrecisionDType.DEFAULT,
+        reductionCompute: PrecisionDType | str = PrecisionDType.DEFAULT,
+        floatMath: FloatMathMode | str = FloatMathMode.DEFAULT,
+    ) -> None:
+        self._native = _types.NativePrecisionOptions()
+        self.mode = mode
+        for name, value in locals().copy().items():
+            if name in self._dtype_axes:
+                setattr(self, name, value)
+        self.floatMath = floatMath
+
+    @property
+    def mode(self) -> PrecisionMode:
+        return PrecisionMode(self._native.mode)
+
+    @mode.setter
+    def mode(self, value: PrecisionMode | str) -> None:
+        try:
+            normalized = PrecisionMode(value)
+        except ValueError as exc:
+            supported = ", ".join(mode.value for mode in PrecisionMode)
+            raise ValueError(f"mode must be one of: {supported}") from exc
+        self._native.mode = normalized.value
+
+    def _as_native(self):
+        return self._native
+
+    def __getattr__(self, name: str):
+        if name in self._dtype_axes:
+            return PrecisionDType(getattr(self._native, name))
+        raise AttributeError(name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in self._dtype_axes and "_native" in self.__dict__:
+            try:
+                setattr(self._native, name, PrecisionDType(value).value)
+            except ValueError as exc:
+                raise ValueError(f"{name} must be DEFAULT, FLOAT32, or FLOAT64") from exc
+            return
+        object.__setattr__(self, name, value)
+
+    @property
+    def floatMath(self) -> FloatMathMode:
+        return FloatMathMode(self._native.floatMath)
+
+    @floatMath.setter
+    def floatMath(self, value: FloatMathMode | str) -> None:
+        self._native.floatMath = FloatMathMode(value).value
+
+    def to_dict(self) -> dict[str, str]:
+        result = {"mode": self.mode.value, "floatMath": self.floatMath.value}
+        result.update({name: getattr(self, name).value for name in self._dtype_axes})
+        return result
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PrecisionOptions":
+        known = {"mode", "floatMath", *cls._dtype_axes}
+        unknown = set(data) - known
+        if unknown:
+            raise KeyError(f"Unknown PrecisionOptions keys: {sorted(unknown)}")
         return cls(**{key: data[key] for key in known if key in data})
 
 

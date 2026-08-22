@@ -25,6 +25,10 @@ from nvmolkit.types import (
     Device3DResult,
     FireOptions,
     HardwareOptions,
+    FloatMathMode,
+    PrecisionDType,
+    PrecisionMode,
+    PrecisionOptions,
 )
 
 
@@ -115,6 +119,31 @@ def test_fire_options_exposes_native_defaults_and_mutators():
     assert options.useMass is True
     assert math.isclose(native.gradTol, 1e-3)
     assert native.useMass is True
+
+
+def test_precision_options_roundtrip_and_native_value():
+    options = PrecisionOptions(
+        PrecisionMode.HESSIAN_F32,
+        forcefieldCompute=PrecisionDType.FLOAT32,
+        forcefieldCoordinateStorage="FLOAT64",
+        reductionCompute="FLOAT32",
+        floatMath=FloatMathMode.RELAXED,
+    )
+    assert options.mode is PrecisionMode.HESSIAN_F32
+    assert options._as_native().mode == "HESSIAN_F32"
+    restored = PrecisionOptions.from_dict(options.to_dict())
+    assert restored.mode is PrecisionMode.HESSIAN_F32
+    assert restored.forcefieldCompute is PrecisionDType.FLOAT32
+    assert restored.forcefieldCoordinateStorage is PrecisionDType.FLOAT64
+    assert restored.reductionCompute is PrecisionDType.FLOAT32
+    assert restored.floatMath is FloatMathMode.RELAXED
+
+
+def test_precision_options_reject_invalid_values_and_keys():
+    with pytest.raises(ValueError, match="mode must be one of"):
+        PrecisionOptions("invalid")
+    with pytest.raises(KeyError, match="Unknown PrecisionOptions keys"):
+        PrecisionOptions.from_dict({"mode": "LEGACY", "bogus": True})
 
 
 def test_device_3d_result_num_conformers_matches_atom_starts():

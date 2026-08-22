@@ -795,6 +795,68 @@ TEST(FireMinimizer, ParameterPropagation) {
   }
 }
 
+TEST(FireMinimizer, FloatStateStorageTracksDoubleReference) {
+  const std::vector<int>    atomCounts = {1};
+  const std::vector<double> kPerSys    = {1.0};
+  std::vector<double>       startingPositions(kDim, 0.0);
+  startingPositions[0] = 0.5;
+  std::vector<double> targets(kDim, 0.0);
+  HarmonicSystems     systems(atomCounts, kPerSys, startingPositions, targets);
+
+  nvMolKit::FireOptions options;
+  options.stuckDetectionEnabled = false;
+  options.dtInit                = 0.002;
+  options.dtMinFactor           = 0.01;
+  options.dtMaxFactor           = 4.0;
+  options.alphaInit             = 0.4;
+  options.alphaDecrement        = 0.5;
+  options.timeStepIncrement     = 1.5;
+  options.timeStepDecrement     = 0.25;
+  options.nMinForIncrease       = 2;
+  options.dMax                  = 0.0;
+  options.gradTol               = 1e-9;
+  options.useMass               = false;
+
+  const nvMolKit::PrecisionOptions precision{nvMolKit::PrecisionMode::MINIMIZER_F32};
+  nvMolKit::FireBatchMinimizer     minimizer(kDim, options, nullptr, false, nvMolKit::FireBackend::BATCHED, precision);
+  minimizer.setConvergencePollInterval(1);
+  minimizer.initialize(systems.atomStartsHost());
+
+  ReferenceConfig              refCfg = referenceConfigFromOptions(options);
+  std::vector<ReferenceSystem> refs   = initializeReferenceSystems(systems, refCfg);
+  for (int iter = 0; iter < 30; ++iter) {
+    const bool isFirstStep = (iter == 0);
+    minimizer.step(options.gradTol,
+                   systems.atomStartsDevice(),
+                   systems.positionsDevice(),
+                   systems.gradDevice(),
+                   systems.gradFunctor());
+    runReferenceStep(refs, systems, refCfg, isFirstStep);
+
+    const auto state = minimizer.snapshotInternalState();
+    EXPECT_NEAR(state.dt[0], refs[0].dt, 1e-6) << "iter=" << iter;
+    EXPECT_NEAR(state.alpha[0], refs[0].alpha, 1e-6) << "iter=" << iter;
+    EXPECT_EQ(state.nStepsPositive[0], refs[0].nstep) << "iter=" << iter;
+  }
+
+  const auto positions = systems.readbackPositions();
+  ASSERT_EQ(positions.size(), refs[0].positions.size());
+  for (size_t coord = 0; coord < positions.size(); ++coord) {
+    EXPECT_NEAR(positions[coord], refs[0].positions[coord], 1e-6) << "coord=" << coord;
+  }
+}
+
+TEST(FireMinimizer, AcceptsAllPrecisionProfiles) {
+  const nvMolKit::FireOptions options;
+  for (const auto mode : {nvMolKit::PrecisionMode::HESSIAN_F32,
+                          nvMolKit::PrecisionMode::FORCEFIELD_F32,
+                          nvMolKit::PrecisionMode::MIXED,
+                          nvMolKit::PrecisionMode::SINGLE}) {
+    EXPECT_NO_THROW(
+      nvMolKit::FireBatchMinimizer(kDim, options, nullptr, false, nvMolKit::FireBackend::BATCHED, {mode}));
+  }
+}
+
 TEST(FireMinimizer, ActiveSystemMaskRespected) {
   const std::vector<int>    atomCounts = {1, 1, 1};
   const std::vector<double> kPerSys    = {2.0, 2.0, 2.0};

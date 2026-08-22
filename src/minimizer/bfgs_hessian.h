@@ -34,7 +34,26 @@ void updateInverseHessianBFGSBatch(int            numActiveSystems,
                                    int            dataDim,
                                    bool           hasLargeMolecule,
                                    const int*     activeSystemIndices,
-                                   cudaStream_t   stream = nullptr);
+                                   cudaStream_t   stream         = nullptr,
+                                   bool           computeInFloat = false,
+                                   bool           reduceInFloat  = false);
+
+//! Float-storage overload with independently selectable arithmetic and reduction widths.
+void updateInverseHessianBFGSBatch(int            numActiveSystems,
+                                   const int16_t* statuses,
+                                   const int*     hessianStarts,
+                                   const int*     atomStarts,
+                                   float*         invHessians,
+                                   double*        dGrads,
+                                   double*        xis,
+                                   double*        hessDGrads,
+                                   const double*  grads,
+                                   int            dataDim,
+                                   bool           hasLargeMolecule,
+                                   const int*     activeSystemIndices,
+                                   cudaStream_t   stream         = nullptr,
+                                   bool           computeInFloat = false,
+                                   bool           reduceInFloat  = false);
 
 }  // namespace nvMolKit
 

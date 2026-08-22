@@ -80,7 +80,8 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
         const nvMolKit::BatchHardwareOptions& hardwareOptions,
         const std::string&                    backend,
         const std::string&                    minimizerKind,
-        const nvMolKit::FireOptions&          fireOptions) -> bp::list {
+        const nvMolKit::FireOptions&          fireOptions,
+        const nvMolKit::PrecisionOptions&     precisionOptions) -> bp::list {
       auto       molsVec    = nvMolKit::extractMolecules(molecules);
       const auto properties = nvMolKit::extractMMFFPropertiesList(propertiesList, static_cast<int>(molsVec.size()));
       const auto kind       = parseMinimizerKind(minimizerKind);
@@ -90,21 +91,24 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
                                                                            fireOptions,
                                                                            properties,
                                                                            hardwareOptions,
-                                                                           parseFireBackend(backend)) :
+                                                                           parseFireBackend(backend),
+                                                                           precisionOptions) :
                                 nvMolKit::MMFF::MMFFOptimizeMoleculesConfsBfgs(molsVec,
                                                                            maxIters,
                                                                            properties,
                                                                            hardwareOptions,
-                                                                           parseBfgsBackend(backend));
+                                                                           parseBfgsBackend(backend),
+                                                                           precisionOptions);
       return nvMolKit::vectorOfVectorsToList(result);
     },
     (bp::arg("molecules"),
-     bp::arg("maxIters")        = 200,
-     bp::arg("properties")      = bp::list(),
-     bp::arg("hardwareOptions") = nvMolKit::BatchHardwareOptions(),
-     bp::arg("backend")         = std::string("HYBRID"),
-     bp::arg("minimizerKind")   = std::string("BFGS"),
-     bp::arg("fireOptions")     = nvMolKit::FireOptions()),
+     bp::arg("maxIters")         = 200,
+     bp::arg("properties")       = bp::list(),
+     bp::arg("hardwareOptions")  = nvMolKit::BatchHardwareOptions(),
+     bp::arg("backend")          = std::string("HYBRID"),
+     bp::arg("minimizerKind")    = std::string("BFGS"),
+     bp::arg("fireOptions")      = nvMolKit::FireOptions(),
+     bp::arg("precisionOptions") = nvMolKit::PrecisionOptions()),
     "Optimize conformers for multiple molecules using MMFF force field.\n"
     "\n"
     "Args:\n"
@@ -128,7 +132,8 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
         int                                   targetGpu,
         const std::string&                    backend,
         const std::string&                    minimizerKind,
-        const nvMolKit::FireOptions&          fireOptions) -> bp::object {
+        const nvMolKit::FireOptions&          fireOptions,
+        const nvMolKit::PrecisionOptions&     precisionOptions) -> bp::object {
       auto       molsVec    = nvMolKit::extractMolecules(molecules);
       const auto properties = nvMolKit::extractMMFFPropertiesList(propertiesList, static_cast<int>(molsVec.size()));
       const auto kind       = parseMinimizerKind(minimizerKind);
@@ -141,7 +146,8 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
                                                                      hardwareOptions,
                                                                      parseFireBackend(backend),
                                                                      nvMolKit::CoordinateOutput::DEVICE,
-                                                                     targetGpu) :
+                                                                     targetGpu,
+                                                                     precisionOptions) :
                                 nvMolKit::MMFF::MMFFMinimizeMoleculesConfs(molsVec,
                                                                  maxIters,
                                                                  /*gradTol=*/1e-4,
@@ -150,7 +156,9 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
                                                                  hardwareOptions,
                                                                  parseBfgsBackend(backend),
                                                                  nvMolKit::CoordinateOutput::DEVICE,
-                                                                 targetGpu);
+                                                                 targetGpu,
+                                                                 nullptr,
+                                                                 precisionOptions);
       if (!result.device.has_value()) {
         throw std::runtime_error("MMFFMinimizeMoleculesConfs(DEVICE) returned no device result");
       }
@@ -161,9 +169,10 @@ BOOST_PYTHON_MODULE(_mmffOptimization) {
      bp::arg("properties"),
      bp::arg("hardwareOptions"),
      bp::arg("targetGpu"),
-     bp::arg("backend")       = std::string("HYBRID"),
-     bp::arg("minimizerKind") = std::string("BFGS"),
-     bp::arg("fireOptions")   = nvMolKit::FireOptions()),
+     bp::arg("backend")          = std::string("HYBRID"),
+     bp::arg("minimizerKind")    = std::string("BFGS"),
+     bp::arg("fireOptions")      = nvMolKit::FireOptions(),
+     bp::arg("precisionOptions") = nvMolKit::PrecisionOptions()),
     "Optimize conformers for multiple molecules using MMFF force field, returning device-resident "
     "results.\n"
     "\n"

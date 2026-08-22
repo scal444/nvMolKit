@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "src/minimizer/bfgs_types.h"
+#include "src/precision_options.h"
 #include "src/utils/device_vector.h"
 #include "src/utils/host_vector.h"
 
@@ -29,7 +30,10 @@ class BatchedForcefield;
 
 // Forward declarations for forcefield types
 namespace MMFF {
-struct BatchedMolecularDeviceBuffers;
+template <typename ParameterScalar, typename CoordinateScalar, typename TorsionScalar>
+struct BatchedMolecularDeviceBuffersT;
+using BatchedMolecularDeviceBuffers          = BatchedMolecularDeviceBuffersT<double, double, float>;
+using BatchedMolecularDeviceBuffersF32Params = BatchedMolecularDeviceBuffersT<float, double, float>;
 }  // namespace MMFF
 
 namespace DistGeom {
@@ -55,11 +59,12 @@ using GradFunctor   = std::function<void()>;
 //!                   compatibility with RDKit forcefield calculations.
 //! TODO: Constructor should be parameter struct based, now that we have more parameters.
 struct BfgsBatchMinimizer {
-  explicit BfgsBatchMinimizer(int          dataDim    = 3,
-                              DebugLevel   debugLevel = DebugLevel::NONE,
-                              bool         scaleGrads = true,
-                              cudaStream_t stream     = nullptr,
-                              BfgsBackend  backend    = BfgsBackend::BATCHED);
+  explicit BfgsBatchMinimizer(int              dataDim    = 3,
+                              DebugLevel       debugLevel = DebugLevel::NONE,
+                              bool             scaleGrads = true,
+                              cudaStream_t     stream     = nullptr,
+                              BfgsBackend      backend    = BfgsBackend::BATCHED,
+                              PrecisionOptions precision  = {});
   ~BfgsBatchMinimizer();
 
   //! \brief Runs host-driven batched BFGS through the forcefield abstraction.
@@ -92,6 +97,11 @@ struct BfgsBatchMinimizer {
                         const std::vector<int>&              atomStartsHost,
                         MMFF::BatchedMolecularDeviceBuffers& systemDevice,
                         const uint8_t*                       activeThisStage = nullptr);
+  bool minimizeWithMMFF(int                                           numIters,
+                        double                                        gradTol,
+                        const std::vector<int>&                       atomStartsHost,
+                        MMFF::BatchedMolecularDeviceBuffersF32Params& systemDevice,
+                        const uint8_t*                                activeThisStage = nullptr);
 
   //! \brief Runs ETK minimization through the per-molecule CUDA kernels.
   //! \param numIters Maximum number of BFGS iterations to perform.
@@ -213,6 +223,7 @@ struct BfgsBatchMinimizer {
   AsyncDeviceVector<double> scratchGrad_;
   AsyncDeviceVector<double> gradScales_;
   AsyncDeviceVector<double> inverseHessian_;
+  AsyncDeviceVector<float>  inverseHessianFloat_;
   AsyncDeviceVector<double> hessDGrad_;
 
   int  dataDim_        = 3;      // Dimensionality of positions.
@@ -234,6 +245,7 @@ struct BfgsBatchMinimizer {
 
   DebugLevel                        debugLevel_ = DebugLevel::NONE;
   BfgsBackend                       backend_    = BfgsBackend::BATCHED;
+  PrecisionOptions                  precision_;
   std::vector<std::vector<int16_t>> stepwiseStatuses;
   std::vector<std::vector<double>>  stepwiseEnergies;
 
@@ -257,6 +269,12 @@ struct BfgsBatchMinimizer {
   cudaStream_t stream_ = nullptr;
 
  private:
+  template <typename DeviceBuffers>
+  bool minimizeWithMMFFImpl(int                     numIters,
+                            double                  gradTol,
+                            const std::vector<int>& atomStartsHost,
+                            DeviceBuffers&          systemDevice,
+                            const uint8_t*          activeThisStage);
   //! \brief Shared host-driven batched BFGS implementation used by the public overload.
   //! \param atomStartsHost Host-side atom offsets for the batch.
   //! \param atomStarts Device-side atom offsets for the batch.
