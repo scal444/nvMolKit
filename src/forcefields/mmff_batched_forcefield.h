@@ -16,8 +16,12 @@
 #ifndef NVMOLKIT_MMFF_BATCHED_FORCEFIELD_H
 #define NVMOLKIT_MMFF_BATCHED_FORCEFIELD_H
 
+#include <variant>
+
 #include "src/forcefields/batched_forcefield.h"
 #include "src/forcefields/mmff.h"
+#include "src/precision_options.h"
+#include "src/utils/device_vector.h"
 
 namespace nvMolKit {
 
@@ -33,8 +37,9 @@ class MMFFBatchedForcefield final : public BatchedForcefield {
   //! \param metadata Optional mapping from concrete systems back to logical molecules/conformers.
   //! \param stream CUDA stream used for internal device allocations and uploads.
   explicit MMFFBatchedForcefield(const MMFF::BatchedMolecularSystemHost& molSystemHost,
-                                 BatchedForcefieldMetadata               metadata = {},
-                                 cudaStream_t                            stream   = nullptr);
+                                 BatchedForcefieldMetadata               metadata  = {},
+                                 cudaStream_t                            stream    = nullptr,
+                                 PrecisionOptions                        precision = {});
 
   //! \brief Computes MMFF energies through the generic batched-forcefield API.
   cudaError_t computeEnergy(double*        energyOuts,
@@ -47,9 +52,23 @@ class MMFFBatchedForcefield final : public BatchedForcefield {
                                const double*  positions,
                                const uint8_t* activeSystemMask = nullptr,
                                cudaStream_t   stream           = nullptr) override;
+  cudaError_t computeEnergyFloat(double*        energyOuts,
+                                 const float*   positions,
+                                 const uint8_t* activeSystemMask = nullptr,
+                                 cudaStream_t   stream           = nullptr) override;
+  cudaError_t computeGradientsFloat(float*         grad,
+                                    const float*   positions,
+                                    const uint8_t* activeSystemMask = nullptr,
+                                    cudaStream_t   stream           = nullptr) override;
 
  private:
-  MMFF::BatchedMolecularDeviceBuffers systemDevice_;
+  std::variant<MMFF::BatchedMolecularDeviceBuffers, MMFF::BatchedMolecularDeviceBuffersF32Params> systemDevice_;
+  AsyncDeviceVector<float>                                                                        positionsFloat_;
+  AsyncDeviceVector<float>                                                                        gradientsFloat_;
+  bool forcefieldCoordinateStorageInFloat_ = false;
+  bool forcefieldGradientStorageInFloat_   = false;
+  bool computeInFloat_                     = false;
+  bool reduceInFloat_                      = false;
 };
 
 }  // namespace nvMolKit

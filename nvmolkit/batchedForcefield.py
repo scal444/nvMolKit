@@ -83,9 +83,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, overload
 
-from nvmolkit import _batchedForcefield  # type: ignore
 from nvmolkit._mmff_bridge import default_rdkit_mmff_properties, make_internal_mmff_properties
-from nvmolkit.types import CoordinateOutput, Device3DResult, FireOptions, HardwareOptions
+from nvmolkit.types import CoordinateOutput, Device3DResult, FireOptions, HardwareOptions, PrecisionOptions
 
 from nvmolkit import _batchedForcefield  # type: ignore
 
@@ -341,12 +340,14 @@ class _BatchedForcefieldBase:
         molecules: list["Mol"],
         ignoreInterfragInteractions,
         hardwareOptions: HardwareOptions | None,
+        precisionOptions: PrecisionOptions | None,
     ) -> None:
         self._molecules = molecules
         self._ignore_interfrag_interactions = _normalize_scalar_or_list(
             ignoreInterfragInteractions, len(molecules), "ignoreInterfragInteractions"
         )
         self._hardware_options = hardwareOptions if hardwareOptions is not None else HardwareOptions()
+        self._precision_options = precisionOptions if precisionOptions is not None else PrecisionOptions()
         self._distance_constraints: list[list[_DistanceConstraint]] = [[] for _ in molecules]
         self._position_constraints: list[list[_PositionConstraint]] = [[] for _ in molecules]
         self._angle_constraints: list[list[_AngleConstraint]] = [[] for _ in molecules]
@@ -490,6 +491,7 @@ class MMFFBatchedForcefield(_BatchedForcefieldBase):
         nonBondedThreshold: float | Sequence[float] = 100.0,
         ignoreInterfragInteractions: bool | Sequence[bool] = True,
         hardwareOptions: HardwareOptions | None = None,
+        precisionOptions: PrecisionOptions | None = None,
     ):
         """Create a batched MMFF forcefield wrapper.
 
@@ -507,8 +509,10 @@ class MMFFBatchedForcefield(_BatchedForcefieldBase):
                 non-bonded interactions, as a scalar or per-molecule list.
             hardwareOptions: GPU device and batching configuration.  Uses
                 reasonable defaults when ``None``.
+            precisionOptions: Precision preset and per-axis overrides. Defaults
+                to legacy float64 storage when omitted.
         """
-        self._init_common(molecules, ignoreInterfragInteractions, hardwareOptions)
+        self._init_common(molecules, ignoreInterfragInteractions, hardwareOptions, precisionOptions)
         self._properties = self._normalize_properties(properties)
         self._non_bonded_thresholds = _normalize_scalar_or_list(
             nonBondedThreshold, len(molecules), "nonBondedThreshold"
@@ -558,6 +562,7 @@ class MMFFBatchedForcefield(_BatchedForcefieldBase):
             ang,
             tor,
             self._hardware_options._as_native(),
+            self._precision_options._as_native(),
         )
 
     @overload
@@ -661,6 +666,7 @@ class UFFBatchedForcefield(_BatchedForcefieldBase):
         vdwThreshold: float | Sequence[float] = 10.0,
         ignoreInterfragInteractions: bool | Sequence[bool] = True,
         hardwareOptions: HardwareOptions | None = None,
+        precisionOptions: PrecisionOptions | None = None,
     ):
         """Create a batched UFF forcefield wrapper.
 
@@ -674,8 +680,10 @@ class UFFBatchedForcefield(_BatchedForcefieldBase):
                 non-bonded interactions, as a scalar or per-molecule list.
             hardwareOptions: GPU device and batching configuration.  Uses
                 reasonable defaults when ``None``.
+            precisionOptions: Precision preset and per-axis overrides. Defaults
+                to legacy float64 storage when omitted.
         """
-        self._init_common(molecules, ignoreInterfragInteractions, hardwareOptions)
+        self._init_common(molecules, ignoreInterfragInteractions, hardwareOptions, precisionOptions)
         self._vdw_thresholds = _normalize_scalar_or_list(vdwThreshold, len(molecules), "vdwThreshold")
 
     def __getitem__(self, idx: int) -> UFFBatchElement:
@@ -692,6 +700,7 @@ class UFFBatchedForcefield(_BatchedForcefieldBase):
             ang,
             tor,
             self._hardware_options._as_native(),
+            self._precision_options._as_native(),
         )
 
     @overload

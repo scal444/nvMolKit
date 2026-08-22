@@ -96,7 +96,8 @@ std::optional<DeviceCoordResult> embedMolecules(const std::vector<RDKit::ROMol*>
                                                 const BatchHardwareOptions&                 hardwareOptions,
                                                 BfgsBackend                                 backend,
                                                 CoordinateOutput                            output,
-                                                int                                         targetGpu) {
+                                                int                                         targetGpu,
+                                                PrecisionOptions                            precision) {
   const ScopedNvtxRange fullRange("EmbedMolecules");
   if (!params.useRandomCoords) {
     throw std::runtime_error("ETKDG requires useRandomCoords to be true. Please set it in the EmbedParameters.");
@@ -278,7 +279,8 @@ std::optional<DeviceCoordResult> embedMolecules(const std::vector<RDKit::ROMol*>
                                                             DebugLevel::NONE,
                                                             true,  // scaleGrads
                                                             streamPtr,
-                                                            backend);
+                                                            backend,
+                                                            precision);
       std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::EnergyForceContribsHost>   dgCache;
       std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::Energy3DForceContribsHost> etkCache;
       // Pinned reusable buffers for common copies.

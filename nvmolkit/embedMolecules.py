@@ -26,8 +26,8 @@ if TYPE_CHECKING:
 
 __all__ = ["EmbedMolecules"]
 
+from nvmolkit.types import CoordinateOutput, Device3DResult, HardwareOptions, PrecisionOptions
 from nvmolkit import _embedMolecules  # type: ignore
-from nvmolkit.types import CoordinateOutput, Device3DResult, HardwareOptions
 
 
 @overload
@@ -37,6 +37,7 @@ def EmbedMolecules(
     confsPerMolecule: int = 1,
     maxIterations: int = -1,
     hardwareOptions: Optional[HardwareOptions] = None,
+    precisionOptions: Optional[PrecisionOptions] = None,
     output: Literal[CoordinateOutput.RDKIT_CONFORMERS] = CoordinateOutput.RDKIT_CONFORMERS,
     targetGpu: int = -1,
 ) -> None: ...
@@ -47,6 +48,7 @@ def EmbedMolecules(
     confsPerMolecule: int = 1,
     maxIterations: int = -1,
     hardwareOptions: Optional[HardwareOptions] = None,
+    precisionOptions: Optional[PrecisionOptions] = None,
     *,
     output: Literal[CoordinateOutput.DEVICE],
     targetGpu: int = -1,
@@ -57,6 +59,7 @@ def EmbedMolecules(
     confsPerMolecule: int = 1,
     maxIterations: int = -1,
     hardwareOptions: Optional[HardwareOptions] = None,
+    precisionOptions: Optional[PrecisionOptions] = None,
     output: CoordinateOutput = CoordinateOutput.RDKIT_CONFORMERS,
     targetGpu: int = -1,
 ):
@@ -82,6 +85,8 @@ def EmbedMolecules(
         confsPerMolecule: Number of conformers to generate per molecule (default: 1)
         maxIterations: Maximum ETKDG iterations, -1 for automatic calculation (default: -1)
         hardwareOptions: HardwareOptions with hardware settings. If None, uses defaults.
+        precisionOptions: Precision preset and per-axis overrides. Defaults to
+            legacy float64 storage when omitted.
         output: ``RDKIT_CONFORMERS`` (default) writes generated conformers back into each input
             molecule in-place and returns ``None``. ``DEVICE`` retains conformer coordinates on
             GPU and returns a :class:`Device3DResult`; RDKit conformers are NOT modified.
@@ -148,10 +153,15 @@ def EmbedMolecules(
     if hardwareOptions is None:
         hardwareOptions = HardwareOptions()
     native_options = hardwareOptions._as_native()
+    if precisionOptions is None:
+        precisionOptions = PrecisionOptions()
+    native_precision = precisionOptions._as_native()
 
     if output == CoordinateOutput.DEVICE:
         return _embedMolecules.EmbedMoleculesDevice(
-            molecules, params, confsPerMolecule, maxIterations, native_options, int(targetGpu)
+            molecules, params, confsPerMolecule, maxIterations, native_options, int(targetGpu), native_precision
         )
-    _embedMolecules.EmbedMolecules(molecules, params, confsPerMolecule, maxIterations, native_options)
+    _embedMolecules.EmbedMolecules(
+        molecules, params, confsPerMolecule, maxIterations, native_options, native_precision
+    )
     return None

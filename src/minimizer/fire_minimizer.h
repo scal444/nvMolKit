@@ -21,6 +21,7 @@
 #include "src/minimizer/bfgs_types.h"
 #include "src/minimizer/fire_options.h"
 #include "src/minimizer/minimizer_api.h"
+#include "src/precision_options.h"
 #include "src/utils/device_vector.h"
 #include "src/utils/host_vector.h"
 
@@ -29,7 +30,10 @@ namespace nvMolKit {
 class BatchedForcefield;
 
 namespace MMFF {
-struct BatchedMolecularDeviceBuffers;
+template <typename ParameterScalar, typename CoordinateScalar, typename TorsionScalar>
+struct BatchedMolecularDeviceBuffersT;
+using BatchedMolecularDeviceBuffers          = BatchedMolecularDeviceBuffersT<double, double, float>;
+using BatchedMolecularDeviceBuffersF32Params = BatchedMolecularDeviceBuffersT<float, double, float>;
 }  // namespace MMFF
 
 //! \brief Per-system per-iteration debug snapshot recorded when the minimizer is
@@ -64,7 +68,8 @@ class FireBatchMinimizer final : public BatchMinimizer {
                               const FireOptions& options   = FireOptions(),
                               cudaStream_t       stream    = nullptr,
                               bool               debugMode = false,
-                              FireBackend        backend   = FireBackend::BATCHED);
+                              FireBackend        backend   = FireBackend::BATCHED,
+                              PrecisionOptions   precision = {});
   ~FireBatchMinimizer() override = default;
 
   //! \brief Resolve the effective backend for the provided batch under HYBRID selection.
@@ -125,6 +130,11 @@ class FireBatchMinimizer final : public BatchMinimizer {
                         const std::vector<int>&              atomStartsHost,
                         MMFF::BatchedMolecularDeviceBuffers& systemDevice,
                         const uint8_t*                       activeThisStage = nullptr);
+  bool minimizeWithMMFF(int                                           numIters,
+                        double                                        gradTol,
+                        const std::vector<int>&                       atomStartsHost,
+                        MMFF::BatchedMolecularDeviceBuffersF32Params& systemDevice,
+                        const uint8_t*                                activeThisStage = nullptr);
 
   const std::vector<FireDebugOutput>& debugOutputs() const { return debugOutputs_; }
 
@@ -150,6 +160,12 @@ class FireBatchMinimizer final : public BatchMinimizer {
   void resetContinuationCache();
 
  private:
+  template <typename DeviceBuffers>
+  bool minimizeWithMMFFImpl(int                     numIters,
+                            double                  gradTol,
+                            const std::vector<int>& atomStartsHost,
+                            DeviceBuffers&          systemDevice,
+                            const uint8_t*          activeThisStage);
   void launchPreKick(double                        gradTol,
                      const AsyncDeviceVector<int>& atomStarts,
                      AsyncDeviceVector<double>&    positions,
@@ -167,21 +183,25 @@ class FireBatchMinimizer final : public BatchMinimizer {
   //! \brief Copy per-molecule statuses to host and report whether all active systems converged.
   bool checkPerMolConvergence();
 
-  int          dataDim_;
-  FireOptions  fireOptions_;
-  cudaStream_t stream_;
-  int          step_                    = 0;
-  bool         debugMode_               = false;
-  int          numSystems_              = 0;
-  int          convergencePollInterval_ = 8;
-  int          lastKnownNumUnfinished_  = 0;
-  FireBackend  backend_                 = FireBackend::BATCHED;
+  int              dataDim_;
+  FireOptions      fireOptions_;
+  cudaStream_t     stream_;
+  int              step_                    = 0;
+  bool             debugMode_               = false;
+  int              numSystems_              = 0;
+  int              convergencePollInterval_ = 8;
+  int              lastKnownNumUnfinished_  = 0;
+  FireBackend      backend_                 = FireBackend::BATCHED;
+  PrecisionOptions precision_;
 
   AsyncDeviceVector<double> velocities_;
+  AsyncDeviceVector<float>  velocitiesFloat_;
   AsyncDeviceVector<double> masses_;
 
   AsyncDeviceVector<double>  dt_;
   AsyncDeviceVector<double>  alpha_;
+  AsyncDeviceVector<float>   dtFloat_;
+  AsyncDeviceVector<float>   alphaFloat_;
   AsyncDeviceVector<int>     numStepsWithPositivePower_;
   AsyncDeviceVector<uint8_t> statuses_;
 

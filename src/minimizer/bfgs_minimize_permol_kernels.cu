@@ -306,8 +306,9 @@ __device__ void updateDGrad(const int                                           
   __syncthreads();
 }
 
+template <typename storageT>
 __device__ void updateInverseHessian(const int                                                   numTerms,
-                                     double*                                                     invHessian,
+                                     storageT*                                                   invHessian,
                                      double*                                                     dGrad,
                                      double*                                                     xi,
                                      double*                                                     hessDGrad,
@@ -394,7 +395,8 @@ __device__ void updateInverseHessian(const int                                  
         double hdgj   = hessDGrad[col];
         double dgj    = dGrad[col];
         double update = pxi * pxj - hdgi * hdgj + dgi * dgj;
-        invHessian[col * numTerms + row] += update;
+        invHessian[col * numTerms + row] =
+          static_cast<storageT>(static_cast<double>(invHessian[col * numTerms + row]) + update);
       }
     }
     __syncthreads();
@@ -433,7 +435,8 @@ template <int            MaxAtoms,
           ForceFieldType FFType,
           bool           HasConstraints,
           typename TermsType,
-          typename IndicesType>
+          typename IndicesType,
+          typename storageT>
 __launch_bounds__(BLOCK_SIZE) __global__ void bfgsMinimizeKernel(const int               numIters,
                                                                  const double            gradTol,
                                                                  const bool              scaleGrads,
@@ -444,7 +447,7 @@ __launch_bounds__(BLOCK_SIZE) __global__ void bfgsMinimizeKernel(const int      
                                                                  const int*              hessianStarts,
                                                                  double*                 positions,
                                                                  double*                 grad,
-                                                                 double*                 inverseHessian,
+                                                                 storageT*               inverseHessian,
                                                                  double**                scratchBuffers,
                                                                  double*                 energyOuts,
                                                                  int16_t*                statuses,
@@ -512,7 +515,7 @@ __launch_bounds__(BLOCK_SIZE) __global__ void bfgsMinimizeKernel(const int      
 
   // Inverse Hessian in global memory (O(n^2), too large for shared)
   // Indexed by hessianStarts which stores cumulative (numTerms * numTerms) offsets
-  double* invHessian = inverseHessian + hessianStarts[molIdx];
+  storageT* invHessian = inverseHessian + hessianStarts[molIdx];
 
   // Initialize positions from global memory
   double* globalPos = positions + atomStart * dataDim;
@@ -754,7 +757,8 @@ template <int            MaxAtoms,
           ForceFieldType FFType,
           bool           HasConstraints,
           typename TermsType,
-          typename IndicesType>
+          typename IndicesType,
+          typename storageT>
 cudaError_t launchKernelForSize(int                numMols,
                                 const int*         molIdList,
                                 int                numIters,
@@ -766,7 +770,7 @@ cudaError_t launchKernelForSize(int                numMols,
                                 const int*         hessianStarts,
                                 double*            positions,
                                 double*            grad,
-                                double*            inverseHessian,
+                                storageT*          inverseHessian,
                                 double**           scratchBuffers,
                                 double*            energyOuts,
                                 int16_t*           statuses,
@@ -777,7 +781,7 @@ cudaError_t launchKernelForSize(int                numMols,
     return cudaSuccess;
   }
 
-  bfgsMinimizeKernel<MaxAtoms, UseSharedMem, FFType, HasConstraints, TermsType, IndicesType>
+  bfgsMinimizeKernel<MaxAtoms, UseSharedMem, FFType, HasConstraints, TermsType, IndicesType, storageT>
     <<<numMols, BLOCK_SIZE, 0, stream>>>(numIters,
                                          gradTol,
                                          scaleGrads,
@@ -798,7 +802,7 @@ cudaError_t launchKernelForSize(int                numMols,
   return cudaGetLastError();
 }
 
-template <ForceFieldType FFType, bool HasConstraints, typename TermsType, typename IndicesType>
+template <ForceFieldType FFType, bool HasConstraints, typename TermsType, typename IndicesType, typename storageT>
 cudaError_t dispatchByMaxAtoms(int                numMols,
                                const int*         molIdList,
                                int                maxAtoms,
@@ -811,7 +815,7 @@ cudaError_t dispatchByMaxAtoms(int                numMols,
                                const int*         hessianStarts,
                                double*            positions,
                                double*            grad,
-                               double*            inverseHessian,
+                               storageT*          inverseHessian,
                                double**           scratchBuffers,
                                double*            energyOuts,
                                int16_t*           statuses,
@@ -938,30 +942,31 @@ cudaError_t dispatchByMaxAtoms(int                numMols,
 
 }  // namespace
 
-cudaError_t launchBfgsMinimizePerMolKernel(int                                       numMols,
-                                           const int*                                molIds,
-                                           int                                       maxAtoms,
-                                           const int*                                atomStarts,
-                                           const int*                                hessianStarts,
-                                           int                                       numIters,
-                                           double                                    gradTol,
-                                           bool                                      scaleGrads,
-                                           const MMFF::EnergyForceContribsDevicePtr& terms,
-                                           const MMFF::BatchedIndicesDevicePtr&      systemIndices,
-                                           double*                                   positions,
-                                           double*                                   grad,
-                                           double*                                   inverseHessian,
-                                           double**                                  scratchBuffers,
-                                           double*                                   energyOuts,
-                                           bool                                      hasConstraints,
-                                           int16_t*                                  statuses,
-                                           cudaStream_t                              stream) {
+template <typename storageT, typename Terms>
+cudaError_t launchBfgsMinimizePerMolKernelImpl(int                                  numMols,
+                                               const int*                           molIds,
+                                               int                                  maxAtoms,
+                                               const int*                           atomStarts,
+                                               const int*                           hessianStarts,
+                                               int                                  numIters,
+                                               double                               gradTol,
+                                               bool                                 scaleGrads,
+                                               const Terms&                         terms,
+                                               const MMFF::BatchedIndicesDevicePtr& systemIndices,
+                                               double*                              positions,
+                                               double*                              grad,
+                                               storageT*                            inverseHessian,
+                                               double**                             scratchBuffers,
+                                               double*                              energyOuts,
+                                               bool                                 hasConstraints,
+                                               int16_t*                             statuses,
+                                               cudaStream_t                         stream) {
   if (numMols == 0) {
     return cudaSuccess;
   }
 
-  const AsyncDevicePtr<MMFF::EnergyForceContribsDevicePtr> devTerms(terms, stream);
-  const AsyncDevicePtr<MMFF::BatchedIndicesDevicePtr>      devSysIdx(systemIndices, stream);
+  const AsyncDevicePtr<Terms>                         devTerms(terms, stream);
+  const AsyncDevicePtr<MMFF::BatchedIndicesDevicePtr> devSysIdx(systemIndices, stream);
 
   if (hasConstraints) {
     return dispatchByMaxAtoms<ForceFieldType::MMFF, true>(numMols,
@@ -1004,23 +1009,24 @@ cudaError_t launchBfgsMinimizePerMolKernel(int                                  
                                                          1.0,
                                                          1.0);
 }
-cudaError_t launchBfgsMinimizePerMolKernelETK(int                                             numMols,
-                                              const int*                                      molIds,
-                                              int                                             maxAtoms,
-                                              const int*                                      atomStarts,
-                                              const int*                                      hessianStarts,
-                                              int                                             numIters,
-                                              double                                          gradTol,
-                                              bool                                            scaleGrads,
-                                              const DistGeom::Energy3DForceContribsDevicePtr& terms,
-                                              const DistGeom::BatchedIndices3DDevicePtr&      systemIndices,
-                                              double*                                         positions,
-                                              double*                                         grad,
-                                              double*                                         inverseHessian,
-                                              double**                                        scratchBuffers,
-                                              double*                                         energyOuts,
-                                              int16_t*                                        statuses,
-                                              cudaStream_t                                    stream) {
+template <typename storageT>
+cudaError_t launchBfgsMinimizePerMolKernelETKImpl(int                                             numMols,
+                                                  const int*                                      molIds,
+                                                  int                                             maxAtoms,
+                                                  const int*                                      atomStarts,
+                                                  const int*                                      hessianStarts,
+                                                  int                                             numIters,
+                                                  double                                          gradTol,
+                                                  bool                                            scaleGrads,
+                                                  const DistGeom::Energy3DForceContribsDevicePtr& terms,
+                                                  const DistGeom::BatchedIndices3DDevicePtr&      systemIndices,
+                                                  double*                                         positions,
+                                                  double*                                         grad,
+                                                  storageT*                                       inverseHessian,
+                                                  double**                                        scratchBuffers,
+                                                  double*                                         energyOuts,
+                                                  int16_t*                                        statuses,
+                                                  cudaStream_t                                    stream) {
   if (numMols == 0) {
     return cudaSuccess;
   }
@@ -1049,25 +1055,26 @@ cudaError_t launchBfgsMinimizePerMolKernelETK(int                               
                                                         1.0);
 }
 
-cudaError_t launchBfgsMinimizePerMolKernelDG(int                                           numMols,
-                                             const int*                                    molIds,
-                                             int                                           maxAtoms,
-                                             const int*                                    atomStarts,
-                                             const int*                                    hessianStarts,
-                                             int                                           numIters,
-                                             double                                        gradTol,
-                                             bool                                          scaleGrads,
-                                             const DistGeom::EnergyForceContribsDevicePtr& terms,
-                                             const DistGeom::BatchedIndicesDevicePtr&      systemIndices,
-                                             double*                                       positions,
-                                             double*                                       grad,
-                                             double*                                       inverseHessian,
-                                             double**                                      scratchBuffers,
-                                             double*                                       energyOuts,
-                                             double                                        chiralWeight,
-                                             double                                        fourthDimWeight,
-                                             int16_t*                                      statuses,
-                                             cudaStream_t                                  stream) {
+template <typename storageT>
+cudaError_t launchBfgsMinimizePerMolKernelDGImpl(int                                           numMols,
+                                                 const int*                                    molIds,
+                                                 int                                           maxAtoms,
+                                                 const int*                                    atomStarts,
+                                                 const int*                                    hessianStarts,
+                                                 int                                           numIters,
+                                                 double                                        gradTol,
+                                                 bool                                          scaleGrads,
+                                                 const DistGeom::EnergyForceContribsDevicePtr& terms,
+                                                 const DistGeom::BatchedIndicesDevicePtr&      systemIndices,
+                                                 double*                                       positions,
+                                                 double*                                       grad,
+                                                 storageT*                                     inverseHessian,
+                                                 double**                                      scratchBuffers,
+                                                 double*                                       energyOuts,
+                                                 double                                        chiralWeight,
+                                                 double                                        fourthDimWeight,
+                                                 int16_t*                                      statuses,
+                                                 cudaStream_t                                  stream) {
   if (numMols == 0) {
     return cudaSuccess;
   }
@@ -1095,5 +1102,135 @@ cudaError_t launchBfgsMinimizePerMolKernelDG(int                                
                                                        chiralWeight,
                                                        fourthDimWeight);
 }
+
+#define NVMOLKIT_DEFINE_MMFF_HESSIAN_OVERLOAD(HESSIAN_TYPE, TERMS_TYPE)                           \
+  cudaError_t launchBfgsMinimizePerMolKernel(int                                  numMols,        \
+                                             const int*                           molIds,         \
+                                             int                                  maxAtoms,       \
+                                             const int*                           atomStarts,     \
+                                             const int*                           hessianStarts,  \
+                                             int                                  numIters,       \
+                                             double                               gradTol,        \
+                                             bool                                 scaleGrads,     \
+                                             const TERMS_TYPE&                    terms,          \
+                                             const MMFF::BatchedIndicesDevicePtr& systemIndices,  \
+                                             double*                              positions,      \
+                                             double*                              grad,           \
+                                             HESSIAN_TYPE*                        inverseHessian, \
+                                             double**                             scratchBuffers, \
+                                             double*                              energyOuts,     \
+                                             bool                                 hasConstraints, \
+                                             int16_t*                             statuses,       \
+                                             cudaStream_t                         stream) {                               \
+    return launchBfgsMinimizePerMolKernelImpl(numMols,                                            \
+                                              molIds,                                             \
+                                              maxAtoms,                                           \
+                                              atomStarts,                                         \
+                                              hessianStarts,                                      \
+                                              numIters,                                           \
+                                              gradTol,                                            \
+                                              scaleGrads,                                         \
+                                              terms,                                              \
+                                              systemIndices,                                      \
+                                              positions,                                          \
+                                              grad,                                               \
+                                              inverseHessian,                                     \
+                                              scratchBuffers,                                     \
+                                              energyOuts,                                         \
+                                              hasConstraints,                                     \
+                                              statuses,                                           \
+                                              stream);                                            \
+  }
+
+#define NVMOLKIT_DEFINE_ETK_HESSIAN_OVERLOAD(HESSIAN_TYPE)                                                      \
+  cudaError_t launchBfgsMinimizePerMolKernelETK(int                                             numMols,        \
+                                                const int*                                      molIds,         \
+                                                int                                             maxAtoms,       \
+                                                const int*                                      atomStarts,     \
+                                                const int*                                      hessianStarts,  \
+                                                int                                             numIters,       \
+                                                double                                          gradTol,        \
+                                                bool                                            scaleGrads,     \
+                                                const DistGeom::Energy3DForceContribsDevicePtr& terms,          \
+                                                const DistGeom::BatchedIndices3DDevicePtr&      systemIndices,  \
+                                                double*                                         positions,      \
+                                                double*                                         grad,           \
+                                                HESSIAN_TYPE*                                   inverseHessian, \
+                                                double**                                        scratchBuffers, \
+                                                double*                                         energyOuts,     \
+                                                int16_t*                                        statuses,       \
+                                                cudaStream_t                                    stream) {                                          \
+    return launchBfgsMinimizePerMolKernelETKImpl(numMols,                                                       \
+                                                 molIds,                                                        \
+                                                 maxAtoms,                                                      \
+                                                 atomStarts,                                                    \
+                                                 hessianStarts,                                                 \
+                                                 numIters,                                                      \
+                                                 gradTol,                                                       \
+                                                 scaleGrads,                                                    \
+                                                 terms,                                                         \
+                                                 systemIndices,                                                 \
+                                                 positions,                                                     \
+                                                 grad,                                                          \
+                                                 inverseHessian,                                                \
+                                                 scratchBuffers,                                                \
+                                                 energyOuts,                                                    \
+                                                 statuses,                                                      \
+                                                 stream);                                                       \
+  }
+
+#define NVMOLKIT_DEFINE_DG_HESSIAN_OVERLOAD(HESSIAN_TYPE)                                                     \
+  cudaError_t launchBfgsMinimizePerMolKernelDG(int                                           numMols,         \
+                                               const int*                                    molIds,          \
+                                               int                                           maxAtoms,        \
+                                               const int*                                    atomStarts,      \
+                                               const int*                                    hessianStarts,   \
+                                               int                                           numIters,        \
+                                               double                                        gradTol,         \
+                                               bool                                          scaleGrads,      \
+                                               const DistGeom::EnergyForceContribsDevicePtr& terms,           \
+                                               const DistGeom::BatchedIndicesDevicePtr&      systemIndices,   \
+                                               double*                                       positions,       \
+                                               double*                                       grad,            \
+                                               HESSIAN_TYPE*                                 inverseHessian,  \
+                                               double**                                      scratchBuffers,  \
+                                               double*                                       energyOuts,      \
+                                               double                                        chiralWeight,    \
+                                               double                                        fourthDimWeight, \
+                                               int16_t*                                      statuses,        \
+                                               cudaStream_t                                  stream) {                                         \
+    return launchBfgsMinimizePerMolKernelDGImpl(numMols,                                                      \
+                                                molIds,                                                       \
+                                                maxAtoms,                                                     \
+                                                atomStarts,                                                   \
+                                                hessianStarts,                                                \
+                                                numIters,                                                     \
+                                                gradTol,                                                      \
+                                                scaleGrads,                                                   \
+                                                terms,                                                        \
+                                                systemIndices,                                                \
+                                                positions,                                                    \
+                                                grad,                                                         \
+                                                inverseHessian,                                               \
+                                                scratchBuffers,                                               \
+                                                energyOuts,                                                   \
+                                                chiralWeight,                                                 \
+                                                fourthDimWeight,                                              \
+                                                statuses,                                                     \
+                                                stream);                                                      \
+  }
+
+NVMOLKIT_DEFINE_MMFF_HESSIAN_OVERLOAD(double, MMFF::EnergyForceContribsDevicePtr)
+NVMOLKIT_DEFINE_MMFF_HESSIAN_OVERLOAD(float, MMFF::EnergyForceContribsDevicePtr)
+NVMOLKIT_DEFINE_MMFF_HESSIAN_OVERLOAD(double, MMFF::EnergyForceContribsDevicePtrF32)
+NVMOLKIT_DEFINE_MMFF_HESSIAN_OVERLOAD(float, MMFF::EnergyForceContribsDevicePtrF32)
+NVMOLKIT_DEFINE_ETK_HESSIAN_OVERLOAD(double)
+NVMOLKIT_DEFINE_ETK_HESSIAN_OVERLOAD(float)
+NVMOLKIT_DEFINE_DG_HESSIAN_OVERLOAD(double)
+NVMOLKIT_DEFINE_DG_HESSIAN_OVERLOAD(float)
+
+#undef NVMOLKIT_DEFINE_MMFF_HESSIAN_OVERLOAD
+#undef NVMOLKIT_DEFINE_ETK_HESSIAN_OVERLOAD
+#undef NVMOLKIT_DEFINE_DG_HESSIAN_OVERLOAD
 
 }  // namespace nvMolKit

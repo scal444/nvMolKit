@@ -25,6 +25,7 @@
 #include "src/hardware_options.h"
 #include "src/minimizer/bfgs_minimize.h"
 #include "src/minimizer/fire_minimizer.h"
+#include "src/precision_options.h"
 
 namespace RDKit {
 class ROMol;
@@ -36,14 +37,16 @@ std::vector<std::vector<double>> UFFOptimizeMoleculesConfsBfgs(std::vector<RDKit
                                                                int                         maxIters,
                                                                const std::vector<double>&  vdwThresholds,
                                                                const std::vector<bool>&    ignoreInterfragInteractions,
-                                                               const BatchHardwareOptions& perfOptions = {});
+                                                               const BatchHardwareOptions& perfOptions = {},
+                                                               PrecisionOptions            precision   = {});
 
 std::vector<std::vector<double>> UFFOptimizeMoleculesConfsFire(std::vector<RDKit::ROMol*>& mols,
                                                                int                         maxIters,
                                                                const FireOptions&          fireOptions,
                                                                const std::vector<double>&  vdwThresholds,
                                                                const std::vector<bool>&    ignoreInterfragInteractions,
-                                                               const BatchHardwareOptions& perfOptions = {});
+                                                               const BatchHardwareOptions& perfOptions = {},
+                                                               PrecisionOptions            precision   = {});
 
 //! \brief Result from constraint-aware UFF minimization.
 //!
@@ -93,7 +96,8 @@ UFFMinimizeResult UFFMinimizeMoleculesConfs(
   const BatchHardwareOptions&                                  perfOptions                 = {},
   CoordinateOutput                                             output      = CoordinateOutput::RDKIT_CONFORMERS,
   int                                                          targetGpu   = -1,
-  const DeviceCoordResult*                                     deviceInput = nullptr);
+  const DeviceCoordResult*                                     deviceInput = nullptr,
+  PrecisionOptions                                             precision   = {});
 
 //! \brief Minimize UFF energies with FIRE 2.0 and report per-conformer convergence.
 //! \param mols Molecules whose conformers provide the initial coordinates. In
@@ -121,7 +125,8 @@ UFFMinimizeResult UFFMinimizeMoleculesConfsFire(
   const std::vector<ForceFieldConstraints::PerMolConstraints>& constraints = {},
   const BatchHardwareOptions&                                  perfOptions = {},
   CoordinateOutput                                             output      = CoordinateOutput::RDKIT_CONFORMERS,
-  int                                                          targetGpu   = -1);
+  int                                                          targetGpu   = -1,
+  PrecisionOptions                                             precision   = {});
 
 }  // namespace nvMolKit::UFF
 

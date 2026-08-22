@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cuda/std/span>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 #include "src/utils/cuda_error_check.h"
@@ -112,6 +113,16 @@ template <typename T> class AsyncDeviceVector {
     if (size_ > 0) {
       copyFromHost(hostData);
     }
+  }
+
+  //! Converts host values while uploading when the device storage scalar differs.
+  //! This is intended for one-time parameter/state initialization, not hot-path
+  //! device conversions.
+  template <typename U>
+    requires(!std::is_same_v<T, U> && std::is_convertible_v<U, T>)
+  void setFromVector(const std::vector<U>& hostData) {
+    std::vector<T> converted(hostData.begin(), hostData.end());
+    setFromVector(converted);
   }
 
   void setFromArray(const T* hostData, size_t size) {

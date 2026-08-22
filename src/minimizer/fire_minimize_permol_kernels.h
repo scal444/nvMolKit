@@ -62,6 +62,71 @@ cudaError_t launchFirePerMolKernel(int                                       num
                                    uint8_t*                                  statuses,
                                    cudaStream_t                              stream = nullptr);
 
+cudaError_t launchFirePerMolKernel(int                                          numMols,
+                                   const int*                                   molIds,
+                                   int                                          maxAtoms,
+                                   const int*                                   atomStarts,
+                                   const FireOptions&                           fireOptions,
+                                   int                                          numIters,
+                                   double                                       gradTol,
+                                   const MMFF::EnergyForceContribsDevicePtrF32& terms,
+                                   const MMFF::BatchedIndicesDevicePtr&         systemIndices,
+                                   bool                                         hasConstraints,
+                                   double*                                      positions,
+                                   double*                                      grad,
+                                   double*                                      velocities,
+                                   double*                                      alphas,
+                                   double*                                      dts,
+                                   int*                                         nStepsPositive,
+                                   const double*                                masses,
+                                   double*                                      energyOuts,
+                                   uint8_t*                                     statuses,
+                                   cudaStream_t                                 stream = nullptr);
+
+cudaError_t launchFirePerMolKernel(int                                          numMols,
+                                   const int*                                   molIds,
+                                   int                                          maxAtoms,
+                                   const int*                                   atomStarts,
+                                   const FireOptions&                           fireOptions,
+                                   int                                          numIters,
+                                   double                                       gradTol,
+                                   const MMFF::EnergyForceContribsDevicePtrF32& terms,
+                                   const MMFF::BatchedIndicesDevicePtr&         systemIndices,
+                                   bool                                         hasConstraints,
+                                   double*                                      positions,
+                                   double*                                      grad,
+                                   float*                                       velocities,
+                                   float*                                       alphas,
+                                   float*                                       dts,
+                                   int*                                         nStepsPositive,
+                                   const double*                                masses,
+                                   double*                                      energyOuts,
+                                   uint8_t*                                     statuses,
+                                   cudaStream_t                                 stream = nullptr);
+
+//! Float-storage overload for FIRE velocity, alpha, and time-step state.
+//! Positions, gradients, forcefield parameters, reductions, and energies remain double precision.
+cudaError_t launchFirePerMolKernel(int                                       numMols,
+                                   const int*                                molIds,
+                                   int                                       maxAtoms,
+                                   const int*                                atomStarts,
+                                   const FireOptions&                        fireOptions,
+                                   int                                       numIters,
+                                   double                                    gradTol,
+                                   const MMFF::EnergyForceContribsDevicePtr& terms,
+                                   const MMFF::BatchedIndicesDevicePtr&      systemIndices,
+                                   bool                                      hasConstraints,
+                                   double*                                   positions,
+                                   double*                                   grad,
+                                   float*                                    velocities,
+                                   float*                                    alphas,
+                                   float*                                    dts,
+                                   int*                                      nStepsPositive,
+                                   const double*                             masses,
+                                   double*                                   energyOuts,
+                                   uint8_t*                                  statuses,
+                                   cudaStream_t                              stream = nullptr);
+
 }  // namespace nvMolKit
 
 #endif  // NVMOLKIT_FIRE_MINIMIZE_PERMOL_KERNELS_H

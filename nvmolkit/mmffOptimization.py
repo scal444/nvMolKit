@@ -26,7 +26,7 @@ from rdkit.Chem import AllChem
 
 from nvmolkit._arrayHelpers import *  # noqa: F403  # registers PyArray for DEVICE-mode returns
 from nvmolkit._mmff_bridge import default_rdkit_mmff_properties, make_internal_mmff_properties
-from nvmolkit.types import CoordinateOutput, Device3DResult, FireOptions, HardwareOptions
+from nvmolkit.types import CoordinateOutput, Device3DResult, FireOptions, HardwareOptions, PrecisionOptions
 
 if TYPE_CHECKING:
     from rdkit.Chem import Mol
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
 from nvmolkit import _mmffOptimization
 from nvmolkit._mmff_bridge import default_rdkit_mmff_properties, make_internal_mmff_properties
-from nvmolkit.types import CoordinateOutput, Device3DResult, HardwareOptions
+from nvmolkit.types import CoordinateOutput, Device3DResult, HardwareOptions, PrecisionOptions
 
 
 @overload
@@ -50,6 +50,7 @@ def MMFFOptimizeMoleculesConfs(
     backend: str = "HYBRID",
     minimizerKind: str = "BFGS",
     fireOptions: FireOptions | None = None,
+    precisionOptions: PrecisionOptions | None = None,
 ) -> list[list[float]]: ...
 @overload
 def MMFFOptimizeMoleculesConfs(
@@ -65,6 +66,7 @@ def MMFFOptimizeMoleculesConfs(
     backend: str = "HYBRID",
     minimizerKind: str = "BFGS",
     fireOptions: FireOptions | None = None,
+    precisionOptions: PrecisionOptions | None = None,
 ) -> Device3DResult: ...
 def MMFFOptimizeMoleculesConfs(
     molecules: list["Mol"],
@@ -78,6 +80,7 @@ def MMFFOptimizeMoleculesConfs(
     backend: str = "HYBRID",
     minimizerKind: str = "BFGS",
     fireOptions: FireOptions | None = None,
+    precisionOptions: PrecisionOptions | None = None,
 ):
     """Optimize conformers for multiple molecules using MMFF force field.
 
@@ -105,6 +108,8 @@ def MMFFOptimizeMoleculesConfs(
             or ``"HYBRID"``.
         minimizerKind: ``"BFGS"`` (default) or ``"FIRE"``.
         fireOptions: FIRE algorithm options used when ``minimizerKind="FIRE"``.
+        precisionOptions: Precision preset and per-axis overrides. Defaults to
+            legacy float64 storage when omitted.
 
     Returns:
         For ``RDKIT_CONFORMERS``: list of lists of energies, where each inner list contains the
@@ -211,6 +216,8 @@ def MMFFOptimizeMoleculesConfs(
         raise ValueError("minimizerKind must be 'BFGS' or 'FIRE'")
     if fireOptions is None:
         fireOptions = FireOptions()
+    if precisionOptions is None:
+        precisionOptions = PrecisionOptions()
     native_properties = [
         make_internal_mmff_properties(
             props,
@@ -229,6 +236,7 @@ def MMFFOptimizeMoleculesConfs(
             backend_name,
             minimizer_kind,
             fireOptions._as_native(),
+            precisionOptions._as_native(),
         )
     return _mmffOptimization.MMFFOptimizeMoleculesConfs(
         molecules,
@@ -238,4 +246,5 @@ def MMFFOptimizeMoleculesConfs(
         backend_name,
         minimizer_kind,
         fireOptions._as_native(),
+        precisionOptions._as_native(),
     )

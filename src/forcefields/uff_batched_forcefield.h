@@ -16,16 +16,21 @@
 #ifndef NVMOLKIT_UFF_BATCHED_FORCEFIELD_H
 #define NVMOLKIT_UFF_BATCHED_FORCEFIELD_H
 
+#include <variant>
+
 #include "src/forcefields/batched_forcefield.h"
 #include "src/forcefields/uff.h"
+#include "src/precision_options.h"
+#include "src/utils/device_vector.h"
 
 namespace nvMolKit {
 
 class UFFBatchedForcefield final : public BatchedForcefield {
  public:
   explicit UFFBatchedForcefield(const UFF::BatchedMolecularSystemHost& molSystemHost,
-                                BatchedForcefieldMetadata              metadata = {},
-                                cudaStream_t                           stream   = nullptr);
+                                BatchedForcefieldMetadata              metadata  = {},
+                                cudaStream_t                           stream    = nullptr,
+                                PrecisionOptions                       precision = {});
 
   cudaError_t computeEnergy(double*        energyOuts,
                             const double*  positions,
@@ -36,9 +41,23 @@ class UFFBatchedForcefield final : public BatchedForcefield {
                                const double*  positions,
                                const uint8_t* activeSystemMask = nullptr,
                                cudaStream_t   stream           = nullptr) override;
+  cudaError_t computeEnergyFloat(double*        energyOuts,
+                                 const float*   positions,
+                                 const uint8_t* activeSystemMask = nullptr,
+                                 cudaStream_t   stream           = nullptr) override;
+  cudaError_t computeGradientsFloat(float*         grad,
+                                    const float*   positions,
+                                    const uint8_t* activeSystemMask = nullptr,
+                                    cudaStream_t   stream           = nullptr) override;
 
  private:
-  UFF::BatchedMolecularDeviceBuffers systemDevice_;
+  std::variant<UFF::BatchedMolecularDeviceBuffers, UFF::BatchedMolecularDeviceBuffersF32Params> systemDevice_;
+  AsyncDeviceVector<float>                                                                      positionsFloat_;
+  AsyncDeviceVector<float>                                                                      gradientsFloat_;
+  bool forcefieldCoordinateStorageInFloat_ = false;
+  bool forcefieldGradientStorageInFloat_   = false;
+  bool computeInFloat_                     = false;
+  bool reduceInFloat_                      = false;
 };
 
 }  // namespace nvMolKit
