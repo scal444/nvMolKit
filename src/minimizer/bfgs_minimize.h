@@ -189,6 +189,10 @@ struct BfgsBatchMinimizer {
   //! \brief Captures per-iteration debug data when stepwise debugging is enabled.
   void collectDebugData();
 
+  //! Analysis-only controls. Production callers leave fixedSteps_ false.
+  bool                   fixedSteps_ = false;
+  AsyncDeviceVector<int> iterationCounts_;
+
   AsyncDeviceVector<int> allSystemIndices_;
   AsyncDeviceVector<int> activeSystemIndices_;  // Indices of systems that are active in the current iteration.
   mutable int            numUnfinishedSystems_ = 0;

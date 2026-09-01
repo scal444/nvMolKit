@@ -68,7 +68,9 @@ BOOST_PYTHON_MODULE(_embedMolecules) {
            bp::arg("stage"),
            bp::arg("backend")             = std::string("BATCHED"),
            bp::arg("precisionOptions")    = nvMolKit::PrecisionOptions(),
-           bp::arg("includeCpuReference") = true),
+           bp::arg("includeCpuReference") = true,
+           bp::arg("fixedSteps")          = -1,
+           bp::arg("maxSteps")            = -1),
           "Run one production ETKDG minimization stage from exact caller-provided coordinates.");
 
   bp::def(

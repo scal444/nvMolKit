@@ -827,7 +827,8 @@ __global__ void setDirectionKernel(const int*    atomStarts,
                                    double*       dGrads,
                                    int16_t*      statuses,
                                    const int*    activeSystemIndices,
-                                   const int     DIM) {
+                                   const int     DIM,
+                                   const bool    fixedSteps) {
   const int sysIdx          = activeSystemIndices[blockIdx.x];
   const int idxWithinSystem = threadIdx.x;
   const int numTerms        = DIM * (atomStarts[sysIdx + 1] - atomStarts[sysIdx]);
@@ -860,7 +861,7 @@ __global__ void setDirectionKernel(const int*    atomStarts,
   __shared__ typename cub::BlockReduce<reduceT, 128>::TempStorage tempStorage;
   const reduceT     blockMax = cub::BlockReduce<reduceT, 128>(tempStorage).Reduce(localMax, cubMax());
   constexpr reduceT TOLX     = static_cast<reduceT>(4. * 3e-8);
-  if (idxWithinSystem == 0 && blockMax < TOLX) {
+  if (!fixedSteps && idxWithinSystem == 0 && blockMax < TOLX) {
     // Converged
     statuses[sysIdx] = 0;
   }
@@ -877,7 +878,8 @@ void BfgsBatchMinimizer::setDirection() {
                                                                                 scratchGrad_.data(),         \
                                                                                 statuses_.data(),            \
                                                                                 activeSystemIndices_.data(), \
-                                                                                dataDim_)
+                                                                                dataDim_,                    \
+                                                                                fixedSteps_)
   if (usesFloatMinimizerCompute(precision_)) {
     if (usesFloatReduction(precision_))
       NVMOLKIT_LAUNCH_SET_DIRECTION(float, float);
@@ -1001,7 +1003,8 @@ __global__ void updateDGradKernel(const double  gradTol,
                                   double*       dGrads,
                                   int16_t*      statuses,
                                   const int*    activeSystemIndices,
-                                  const int     DIM) {
+                                  const int     DIM,
+                                  const bool    fixedSteps) {
   const int sysIdx          = activeSystemIndices[blockIdx.x];
   const int idxWithinSystem = threadIdx.x;
   const int numTerms        = DIM * (atomStarts[sysIdx + 1] - atomStarts[sysIdx]);
@@ -1040,7 +1043,7 @@ __global__ void updateDGradKernel(const double  gradTol,
     const real energyMag   = kRdkitHasGradDenomFix ? bfgsAbs(energyValue) : energyValue;
     const real term        = max(energyMag * static_cast<real>(gradScales[sysIdx]), real{1});
     blockMax /= term;
-    if (blockMax < static_cast<reduceT>(gradTol)) {
+    if (!fixedSteps && blockMax < static_cast<reduceT>(gradTol)) {
       // Converged
       statuses[sysIdx] = 0;
     }
@@ -1059,7 +1062,8 @@ void BfgsBatchMinimizer::updateDGrad() {
                                                                                scratchGrad_.data(),         \
                                                                                statuses_.data(),            \
                                                                                activeSystemIndices_.data(), \
-                                                                               dataDim_)
+                                                                               dataDim_,                    \
+                                                                               fixedSteps_)
   if (usesFloatMinimizerCompute(precision_)) {
     if (usesFloatReduction(precision_))
       NVMOLKIT_LAUNCH_UPDATE_DGRAD(float, float);
@@ -1138,6 +1142,15 @@ void BfgsBatchMinimizer::collectDebugData() {
   stepwiseEnergies.push_back(std::move(energiesHost));
 }
 
+__global__ void incrementIterationCountsKernel(const int  numActive,
+                                               const int* activeSystemIndices,
+                                               int*       iterationCounts) {
+  const int activeIdx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (activeIdx < numActive) {
+    ++iterationCounts[activeSystemIndices[activeIdx]];
+  }
+}
+
 bool BfgsBatchMinimizer::minimize(const int                  numIters,
                                   const double               gradTol,
                                   const std::vector<int>&    atomStartsHost,
@@ -1167,6 +1180,9 @@ bool BfgsBatchMinimizer::minimize(const int                  numIters,
                BfgsBackend::BATCHED,
                activeThisStage);
 
+    iterationCounts_.resize(numSystems);
+    iterationCounts_.zero();
+
     setHessianToIdentity();
 
     energyOuts.zero();
@@ -1181,6 +1197,10 @@ bool BfgsBatchMinimizer::minimize(const int                  numIters,
   }
 
   for (int currIter = 0; currIter < numIters && compactAndCountConverged() < numSystems; currIter++) {
+    const int countBlocks = (numUnfinishedSystems_ + 127) / 128;
+    incrementIterationCountsKernel<<<countBlocks, 128, 0, stream_>>>(numUnfinishedSystems_,
+                                                                     activeSystemIndices_.data(),
+                                                                     iterationCounts_.data());
     {
       const ScopedNvtxRange bfgsLineSearch("BfgsBatchMinimizer::lineSearch");
       doLineSearchSetup(energyOuts.data());

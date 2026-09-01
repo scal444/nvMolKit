@@ -40,6 +40,8 @@ def AnalyzeETKDGStage(
     backend: str = "BATCHED",
     precisionOptions: Optional[PrecisionOptions] = None,
     includeCpuReference: bool = True,
+    fixedSteps: Optional[int] = None,
+    maxSteps: Optional[int] = None,
 ) -> dict[str, Any]:
     """Run one ETKDGv3 minimization stage from exact input coordinates.
 
@@ -53,6 +55,12 @@ def AnalyzeETKDGStage(
     with the same RDKit stage force field. Native BFGS status is zero on
     convergence. ``stage_failed`` is the production stage's post-minimization
     check (currently meaningful for ``FIRST`` and ETK planarity checks).
+
+    ``fixedSteps=N`` disables convergence stopping on both reference and GPU
+    BFGS loops and executes exactly N outer updates. ``maxSteps=N`` retains
+    normal convergence stopping with a shared cap. The returned
+    ``cpu_iterations`` and ``gpu_iterations`` are per-system outer-update
+    counts. These two options are mutually exclusive.
     """
     normalized_stage = str(stage).upper()
     aliases = {"DG_FIRST": "FIRST", "DG_FOURTH": "FOURTH", "ETK_3D": "ETK"}
@@ -73,6 +81,12 @@ def AnalyzeETKDGStage(
         flattened.append(np.ascontiguousarray(array).ravel().tolist())
     if precisionOptions is None:
         precisionOptions = PrecisionOptions()
+    if fixedSteps is not None and (not isinstance(fixedSteps, int) or fixedSteps <= 0):
+        raise ValueError("fixedSteps must be a positive integer")
+    if maxSteps is not None and (not isinstance(maxSteps, int) or maxSteps <= 0):
+        raise ValueError("maxSteps must be a positive integer")
+    if fixedSteps is not None and maxSteps is not None:
+        raise ValueError("fixedSteps and maxSteps are mutually exclusive")
     return _embedMolecules.AnalyzeETKDGStage(
         molecules,
         flattened,
@@ -81,6 +95,8 @@ def AnalyzeETKDGStage(
         str(backend).upper(),
         precisionOptions._as_native(),
         bool(includeCpuReference),
+        -1 if fixedSteps is None else fixedSteps,
+        -1 if maxSteps is None else maxSteps,
     )
 
 

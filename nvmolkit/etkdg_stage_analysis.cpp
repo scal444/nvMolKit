@@ -7,12 +7,14 @@
 #include <ForceField/ForceField.h>
 #include <Geometry/point.h>
 #include <GraphMol/ROMol.h>
+#include <Numerics/Optimizer/BFGSOpt.h>
 
 #include <algorithm>
 #include <boost/dynamic_bitset.hpp>
 #include <boost/python.hpp>
 #include <boost/python/stl_iterator.hpp>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
@@ -178,6 +180,126 @@ std::vector<double> flattenPoints(const std::vector<std::unique_ptr<RDGeom::Poin
   return result;
 }
 
+struct ReferenceEnergy {
+  ForceFields::ForceField* field;
+  double                   operator()(double* pos) const { return field->calcEnergy(pos); }
+};
+
+struct ReferenceGradient {
+  ForceFields::ForceField* field;
+  double                   operator()(double* pos, double* grad) const {
+    const unsigned int dim = field->numPoints() * field->dimension();
+    std::fill(grad, grad + dim, 0.0);
+    field->calcGrad(pos, grad);
+    double maxGrad = 0.0;
+    double scale   = 0.1;
+    for (unsigned int i = 0; i < dim; ++i) {
+      grad[i] *= scale;
+      maxGrad = std::max(maxGrad, std::abs(grad[i]));
+    }
+    if (maxGrad > 10.0) {
+      while (maxGrad * scale > 10.0) {
+        scale *= 0.5;
+      }
+      for (unsigned int i = 0; i < dim; ++i) {
+        grad[i] *= scale;
+      }
+    }
+    return scale;
+  }
+};
+
+// RDKit's public ForceField API discards BFGS' iteration count and cannot
+// disable convergence. This analysis-only copy follows its scalar update loop,
+// with the two convergence returns conditional on fixedSteps.
+int minimizeReference(ForceFields::ForceField& field,
+                      std::vector<double>&     pos,
+                      double                   gradTol,
+                      unsigned int             maxIts,
+                      bool                     fixedSteps,
+                      unsigned int&            numIters) {
+  const unsigned int  dim = pos.size();
+  std::vector<double> grad(dim), dGrad(dim), hessDGrad(dim), xi(dim), newPos(dim);
+  std::vector<double> invHessian(static_cast<size_t>(dim) * dim, 0.0);
+  ReferenceEnergy     func{&field};
+  ReferenceGradient   gradFunc{&field};
+  double              fp = func(pos.data());
+  gradFunc(pos.data(), grad.data());
+  double sum = 0.0;
+  for (unsigned int i = 0; i < dim; ++i) {
+    invHessian[static_cast<size_t>(i) * dim + i] = 1.0;
+    xi[i]                                        = -grad[i];
+    sum += pos[i] * pos[i];
+  }
+  const double maxStep = BFGSOpt::MAXSTEP * std::max(std::sqrt(sum), static_cast<double>(dim));
+  numIters             = 0;
+  for (unsigned int iter = 1; iter <= maxIts; ++iter) {
+    numIters      = iter;
+    int    status = -1;
+    double funcVal;
+    BFGSOpt::linearSearch(dim, pos.data(), fp, grad.data(), xi.data(), newPos.data(), funcVal, func, maxStep, status);
+    if (status < 0 && fixedSteps) {
+      std::copy(pos.begin(), pos.end(), newPos.begin());
+      funcVal = fp;
+    } else {
+      CHECK_INVARIANT(status >= 0, "bad direction in analysis linearSearch");
+    }
+    fp          = funcVal;
+    double test = 0.0;
+    for (unsigned int i = 0; i < dim; ++i) {
+      xi[i]    = newPos[i] - pos[i];
+      pos[i]   = newPos[i];
+      test     = std::max(test, std::abs(xi[i]) / std::max(std::abs(pos[i]), 1.0));
+      dGrad[i] = grad[i];
+    }
+    if (!fixedSteps && test < BFGSOpt::TOLX) {
+      return 0;
+    }
+    const double gradScale = gradFunc(pos.data(), grad.data());
+    test                   = 0.0;
+    const double term      = std::max(std::abs(funcVal) * gradScale, 1.0);
+    for (unsigned int i = 0; i < dim; ++i) {
+      test     = std::max(test, std::abs(grad[i]) * std::max(std::abs(pos[i]), 1.0));
+      dGrad[i] = grad[i] - dGrad[i];
+    }
+    if (!fixedSteps && test / term < gradTol) {
+      return 0;
+    }
+    double fac = 0.0, fae = 0.0, sumDGrad = 0.0, sumXi = 0.0;
+    for (unsigned int i = 0; i < dim; ++i) {
+      hessDGrad[i] = 0.0;
+      for (unsigned int j = 0; j < dim; ++j) {
+        hessDGrad[i] += invHessian[static_cast<size_t>(i) * dim + j] * dGrad[j];
+      }
+      fac += dGrad[i] * xi[i];
+      fae += dGrad[i] * hessDGrad[i];
+      sumDGrad += dGrad[i] * dGrad[i];
+      sumXi += xi[i] * xi[i];
+    }
+    if (fac > std::sqrt(BFGSOpt::EPS * sumDGrad * sumXi)) {
+      fac              = 1.0 / fac;
+      const double fad = 1.0 / fae;
+      for (unsigned int i = 0; i < dim; ++i) {
+        dGrad[i] = fac * xi[i] - fad * hessDGrad[i];
+      }
+      for (unsigned int i = 0; i < dim; ++i) {
+        for (unsigned int j = i; j < dim; ++j) {
+          const double update = fac * xi[i] * xi[j] - fad * hessDGrad[i] * hessDGrad[j] + fae * dGrad[i] * dGrad[j];
+          invHessian[static_cast<size_t>(i) * dim + j] += update;
+          invHessian[static_cast<size_t>(j) * dim + i] = invHessian[static_cast<size_t>(i) * dim + j];
+        }
+      }
+    }
+    for (unsigned int i = 0; i < dim; ++i) {
+      xi[i] = 0.0;
+      for (unsigned int j = 0; j < dim; ++j) {
+        xi[i] -= invHessian[static_cast<size_t>(i) * dim + j] * grad[j];
+      }
+    }
+  }
+  return 1;
+}
+
 }  // namespace
 
 bp::object analyzeETKDGStage(const bp::list&                             molecules,
@@ -186,7 +308,9 @@ bp::object analyzeETKDGStage(const bp::list&                             molecul
                              const std::string&                          stageName,
                              const std::string&                          backendName,
                              const PrecisionOptions&                     precision,
-                             bool                                        includeCpuReference) {
+                             bool                                        includeCpuReference,
+                             int                                         fixedSteps,
+                             int                                         maxSteps) {
   auto mols = extractMolecules(molecules);
   if (mols.empty()) {
     throw std::invalid_argument("molecules must not be empty");
@@ -195,11 +319,23 @@ bp::object analyzeETKDGStage(const bp::list&                             molecul
     throw std::invalid_argument("coordinates must contain one array per molecule");
   }
 
-  const AnalysisStage stage      = parseStage(stageName);
-  const BfgsBackend   backend    = parseBackend(backendName);
-  const int           inputDim   = stage == AnalysisStage::ETK ? 3 : 4;
-  constexpr int       contextDim = 4;
-  auto                params     = paramsIn;
+  const AnalysisStage stage   = parseStage(stageName);
+  const BfgsBackend   backend = parseBackend(backendName);
+  if (backend != BfgsBackend::BATCHED) {
+    throw std::invalid_argument("stage iteration analysis requires backend='BATCHED'");
+  }
+  if (fixedSteps == 0 || fixedSteps < -1 || maxSteps == 0 || maxSteps < -1) {
+    throw std::invalid_argument("fixedSteps and maxSteps must be positive or -1");
+  }
+  if (fixedSteps > 0 && maxSteps > 0) {
+    throw std::invalid_argument("fixedSteps and maxSteps are mutually exclusive");
+  }
+  const bool    fixedMode     = fixedSteps > 0;
+  const int     defaultSteps  = stage == AnalysisStage::FIRST ? 400 : (stage == AnalysisStage::FOURTH ? 200 : 300);
+  const int     analysisSteps = fixedMode ? fixedSteps : (maxSteps > 0 ? maxSteps : defaultSteps);
+  const int     inputDim      = stage == AnalysisStage::ETK ? 3 : 4;
+  constexpr int contextDim    = 4;
+  auto          params        = paramsIn;
 
   detail::ETKDGContext             context;
   std::vector<detail::EmbedArgs>   eargs;
@@ -246,12 +382,12 @@ bp::object analyzeETKDGStage(const bp::list&                             molecul
   context.activeThisStage.copyFromHost(std::vector<uint8_t>(mols.size(), 1));
   context.failedThisStage.zero();
 
-  BfgsBatchMinimizer                  minimizer(contextDim, DebugLevel::NONE, true, nullptr, backend, precision);
-  std::unique_ptr<detail::ETKDGStage> stageRunner;
+  BfgsBatchMinimizer minimizer(contextDim, DebugLevel::NONE, true, nullptr, backend, precision);
   if (stage == AnalysisStage::ETK) {
-    stageRunner = std::make_unique<detail::ETKMinimizationStage>(constMols, eargs, params, context, minimizer, nullptr);
+    detail::ETKMinimizationStage stageRunner(constMols, eargs, params, context, minimizer, nullptr);
+    stageRunner.executeAnalysis(context, analysisSteps, fixedMode);
   } else {
-    stageRunner = std::make_unique<detail::DistGeomMinimizeStage>(
+    detail::DistGeomMinimizeStage stageRunner(
       constMols,
       eargs,
       params,
@@ -262,13 +398,15 @@ bp::object analyzeETKDGStage(const bp::list&                             molecul
       stage == AnalysisStage::FIRST ? 400 : 200,
       stage == AnalysisStage::FIRST,
       stage == AnalysisStage::FIRST ? "First Minimization" : "Fourth Dimension Minimization");
+    stageRunner.executeAnalysis(context, analysisSteps, fixedMode);
   }
-  stageRunner->execute(context);
 
   std::vector<double> gpuCoords(context.systemDevice.positions.size());
   context.systemDevice.positions.copyToHost(gpuCoords);
   std::vector<int16_t> gpuStatus(minimizer.statuses_.size());
   minimizer.statuses_.copyToHost(gpuStatus);
+  std::vector<int> gpuIterations(minimizer.iterationCounts_.size());
+  minimizer.iterationCounts_.copyToHost(gpuIterations);
   std::vector<uint8_t> stageFailed(mols.size());
   context.failedThisStage.copyToHost(stageFailed);
   cudaCheckError(cudaDeviceSynchronize());
@@ -277,12 +415,14 @@ bp::object analyzeETKDGStage(const bp::list&                             molecul
   std::vector<double> gpuEnergies;
   std::vector<double> cpuEnergies;
   std::vector<int>    cpuStatus;
+  std::vector<int>    cpuIterations;
   std::vector<double> cpuCoords;
   inputEnergies.reserve(mols.size());
   gpuEnergies.reserve(mols.size());
   if (includeCpuReference) {
     cpuEnergies.reserve(mols.size());
     cpuStatus.reserve(mols.size());
+    cpuIterations.reserve(mols.size());
   }
 
   for (size_t i = 0; i < mols.size(); ++i) {
@@ -302,14 +442,24 @@ bp::object analyzeETKDGStage(const bp::list&                             molecul
     gpuEnergies.push_back(referenceField->calcEnergy(gpuForScoring.data()));
 
     if (includeCpuReference) {
-      int       status   = 0;
-      const int maxIters = stage == AnalysisStage::FIRST ? 400 : (stage == AnalysisStage::FOURTH ? 200 : 300);
-      if (referenceField->calcEnergy() > 1e-5) {
-        do {
-          status = referenceField->minimize(maxIters, params.optimizerForceTol);
-        } while (stage != AnalysisStage::ETK && status != 0);
+      int          status     = 0;
+      unsigned int iterations = 0;
+      if (fixedMode || referenceField->calcEnergy() > 1e-5) {
+        auto systemCpuCoords = flattenPoints(referencePoints, inputDim);
+        status               = minimizeReference(*referenceField,
+                                   systemCpuCoords,
+                                   params.optimizerForceTol,
+                                   analysisSteps,
+                                   fixedMode,
+                                   iterations);
+        for (size_t atom = 0; atom < referencePoints.size(); ++atom) {
+          for (int axis = 0; axis < inputDim; ++axis) {
+            (*referencePoints[atom])[axis] = systemCpuCoords[atom * inputDim + axis];
+          }
+        }
       }
       cpuStatus.push_back(status);
+      cpuIterations.push_back(iterations);
       cpuEnergies.push_back(referenceField->calcEnergy());
       auto systemCpuCoords = flattenPoints(referencePoints, inputDim);
       cpuCoords.insert(cpuCoords.end(), systemCpuCoords.begin(), systemCpuCoords.end());
@@ -323,6 +473,9 @@ bp::object analyzeETKDGStage(const bp::list&                             molecul
   result["gpu_coordinates"] = nestedCoordinates(gpuCoords, context.systemHost.atomStarts, contextDim, inputDim);
   result["gpu_energies"]    = vectorList(gpuEnergies);
   result["gpu_status"]      = vectorList(gpuStatus);
+  result["gpu_iterations"]  = vectorList(gpuIterations);
+  result["fixed_steps"]     = fixedMode ? bp::object(fixedSteps) : bp::object();
+  result["max_steps"]       = analysisSteps;
   bp::list gpuConverged;
   for (const auto status : gpuStatus) {
     gpuConverged.append(status == 0);
@@ -333,6 +486,7 @@ bp::object analyzeETKDGStage(const bp::list&                             molecul
     result["cpu_coordinates"] = nestedCoordinates(cpuCoords, context.systemHost.atomStarts, inputDim, inputDim);
     result["cpu_energies"]    = vectorList(cpuEnergies);
     result["cpu_status"]      = vectorList(cpuStatus);
+    result["cpu_iterations"]  = vectorList(cpuIterations);
     bp::list cpuConverged;
     for (const auto status : cpuStatus) {
       cpuConverged.append(status == 0);
@@ -342,6 +496,7 @@ bp::object analyzeETKDGStage(const bp::list&                             molecul
     result["cpu_coordinates"] = bp::object();
     result["cpu_energies"]    = bp::object();
     result["cpu_status"]      = bp::object();
+    result["cpu_iterations"]  = bp::object();
     result["cpu_converged"]   = bp::object();
   }
   return result;

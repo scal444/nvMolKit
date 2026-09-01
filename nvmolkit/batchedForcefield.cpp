@@ -34,6 +34,7 @@
 #include "src/forcefields/mmff_properties.h"
 #include "src/forcefields/uff_batched_forcefield.h"
 #include "src/hardware_options.h"
+#include "src/minimizer/bfgs_minimize.h"
 #include "src/minimizer/fire_minimizer.h"
 #include "src/minimizer/mmff_minimize.h"
 #include "src/minimizer/uff_minimize.h"
@@ -61,7 +62,8 @@ std::vector<std::vector<double>> splitGradients(const std::vector<double>& flatG
   return result;
 }
 
-bp::list reshapeToNested(const std::vector<double>& flat, const std::vector<int>& numConformersPerMol) {
+template <typename T>
+bp::list reshapeToNested(const std::vector<T>& flat, const std::vector<int>& numConformersPerMol) {
   bp::list outer;
   size_t   idx = 0;
   for (const int nConfs : numConformersPerMol) {
@@ -72,6 +74,19 @@ bp::list reshapeToNested(const std::vector<double>& flat, const std::vector<int>
     outer.append(inner);
   }
   return outer;
+}
+
+void writeConformerPositions(const std::vector<RDKit::ROMol*>& mols, const std::vector<double>& flat) {
+  size_t offset = 0;
+  for (auto* mol : mols) {
+    for (auto confIter = mol->beginConformers(); confIter != mol->endConformers(); ++confIter) {
+      auto& conf = **confIter;
+      for (unsigned int atom = 0; atom < mol->getNumAtoms(); ++atom) {
+        conf.setAtomPos(atom, RDGeom::Point3D(flat[offset], flat[offset + 1], flat[offset + 2]));
+        offset += 3;
+      }
+    }
+  }
 }
 
 bp::list reshapeGradientsToNested(const std::vector<std::vector<double>>& perSystem,
@@ -290,10 +305,34 @@ class NativeMMFFBatchedForcefield {
   bp::tuple minimize(int                          maxIters,
                      double                       gradTol,
                      const std::string&           minimizerKind,
-                     const nvMolKit::FireOptions& fireOptions) {
-    const auto kind   = parseMinimizerKind(minimizerKind);
-    auto       result = kind == MinimizerKind::FIRE ?
-                          nvMolKit::MMFF::MMFFMinimizeMoleculesConfsFire(mols_,
+                     const nvMolKit::FireOptions& fireOptions,
+                     bool                         returnIterations) {
+    const auto kind = parseMinimizerKind(minimizerKind);
+    if (returnIterations) {
+      if (kind != MinimizerKind::BFGS) {
+        throw std::invalid_argument("returnIterations is currently supported only for BFGS");
+      }
+      nvMolKit::BfgsBatchMinimizer minimizer(3,
+                                             nvMolKit::DebugLevel::NONE,
+                                             true,
+                                             nullptr,
+                                             nvMolKit::BfgsBackend::BATCHED,
+                                             precision_);
+      minimizer.fixedSteps_ = gradTol <= 0.0;
+      minimizer.minimize(maxIters, gradTol, *forcefield_, positionsDevice_, gradDevice_, energyOutsDevice_);
+      auto positions  = copyDeviceVector(positionsDevice_);
+      auto energies   = copyDeviceVector(energyOutsDevice_);
+      auto statuses   = copyDeviceVector(minimizer.statuses_);
+      auto iterations = copyDeviceVector(minimizer.iterationCounts_);
+      writeConformerPositions(mols_, positions);
+      std::vector<int8_t> converged(statuses.size());
+      std::transform(statuses.begin(), statuses.end(), converged.begin(), [](int16_t value) { return value == 0; });
+      return bp::make_tuple(reshapeToNested(energies, numConformersPerMol_),
+                            reshapeToNested(converged, numConformersPerMol_),
+                            reshapeToNested(iterations, numConformersPerMol_));
+    }
+    auto result = kind == MinimizerKind::FIRE ?
+                    nvMolKit::MMFF::MMFFMinimizeMoleculesConfsFire(mols_,
                                                                    maxIters,
                                                                    fireOptions,
                                                                    properties_,
@@ -303,7 +342,7 @@ class NativeMMFFBatchedForcefield {
                                                                    nvMolKit::CoordinateOutput::RDKIT_CONFORMERS,
                                                                    -1,
                                                                    precision_) :
-                          nvMolKit::MMFF::MMFFMinimizeMoleculesConfs(mols_,
+                    nvMolKit::MMFF::MMFFMinimizeMoleculesConfs(mols_,
                                                                maxIters,
                                                                gradTol,
                                                                properties_,
@@ -461,10 +500,34 @@ class NativeUFFBatchedForcefield {
   bp::tuple minimize(int                          maxIters,
                      double                       gradTol,
                      const std::string&           minimizerKind,
-                     const nvMolKit::FireOptions& fireOptions) {
-    const auto kind   = parseMinimizerKind(minimizerKind);
-    auto       result = kind == MinimizerKind::FIRE ?
-                          nvMolKit::UFF::UFFMinimizeMoleculesConfsFire(mols_,
+                     const nvMolKit::FireOptions& fireOptions,
+                     bool                         returnIterations) {
+    const auto kind = parseMinimizerKind(minimizerKind);
+    if (returnIterations) {
+      if (kind != MinimizerKind::BFGS) {
+        throw std::invalid_argument("returnIterations is currently supported only for BFGS");
+      }
+      nvMolKit::BfgsBatchMinimizer minimizer(3,
+                                             nvMolKit::DebugLevel::NONE,
+                                             true,
+                                             nullptr,
+                                             nvMolKit::BfgsBackend::BATCHED,
+                                             precision_);
+      minimizer.fixedSteps_ = gradTol <= 0.0;
+      minimizer.minimize(maxIters, gradTol, *forcefield_, positionsDevice_, gradDevice_, energyOutsDevice_);
+      auto positions  = copyDeviceVector(positionsDevice_);
+      auto energies   = copyDeviceVector(energyOutsDevice_);
+      auto statuses   = copyDeviceVector(minimizer.statuses_);
+      auto iterations = copyDeviceVector(minimizer.iterationCounts_);
+      writeConformerPositions(mols_, positions);
+      std::vector<int8_t> converged(statuses.size());
+      std::transform(statuses.begin(), statuses.end(), converged.begin(), [](int16_t value) { return value == 0; });
+      return bp::make_tuple(reshapeToNested(energies, numConformersPerMol_),
+                            reshapeToNested(converged, numConformersPerMol_),
+                            reshapeToNested(iterations, numConformersPerMol_));
+    }
+    auto result = kind == MinimizerKind::FIRE ?
+                    nvMolKit::UFF::UFFMinimizeMoleculesConfsFire(mols_,
                                                                  maxIters,
                                                                  fireOptions,
                                                                  vdwThresholds_,
@@ -474,7 +537,7 @@ class NativeUFFBatchedForcefield {
                                                                  nvMolKit::CoordinateOutput::RDKIT_CONFORMERS,
                                                                  -1,
                                                                  precision_) :
-                          nvMolKit::UFF::UFFMinimizeMoleculesConfs(mols_,
+                    nvMolKit::UFF::UFFMinimizeMoleculesConfs(mols_,
                                                              maxIters,
                                                              gradTol,
                                                              vdwThresholds_,
@@ -627,7 +690,13 @@ BOOST_PYTHON_MODULE(_batchedForcefield) {
                                                                        const nvMolKit::PrecisionOptions&>())
     .def("computeEnergy", &NativeMMFFBatchedForcefield::computeEnergy)
     .def("computeGradients", &NativeMMFFBatchedForcefield::computeGradients)
-    .def("minimize", &NativeMMFFBatchedForcefield::minimize)
+    .def("minimize",
+         &NativeMMFFBatchedForcefield::minimize,
+         (bp::arg("maxIters"),
+          bp::arg("gradTol"),
+          bp::arg("minimizerKind"),
+          bp::arg("fireOptions"),
+          bp::arg("returnIterations") = false))
     .def("minimizeDevice", &NativeMMFFBatchedForcefield::minimizeDevice)
     .def("gpuId", &NativeMMFFBatchedForcefield::gpuId);
 
@@ -643,7 +712,13 @@ BOOST_PYTHON_MODULE(_batchedForcefield) {
                                                                       const nvMolKit::PrecisionOptions&>())
     .def("computeEnergy", &NativeUFFBatchedForcefield::computeEnergy)
     .def("computeGradients", &NativeUFFBatchedForcefield::computeGradients)
-    .def("minimize", &NativeUFFBatchedForcefield::minimize)
+    .def("minimize",
+         &NativeUFFBatchedForcefield::minimize,
+         (bp::arg("maxIters"),
+          bp::arg("gradTol"),
+          bp::arg("minimizerKind"),
+          bp::arg("fireOptions"),
+          bp::arg("returnIterations") = false))
     .def("minimizeDevice", &NativeUFFBatchedForcefield::minimizeDevice)
     .def("gpuId", &NativeUFFBatchedForcefield::gpuId);
 }

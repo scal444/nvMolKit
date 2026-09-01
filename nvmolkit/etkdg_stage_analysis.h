@@ -20,7 +20,9 @@ boost::python::object analyzeETKDGStage(const boost::python::list&              
                                         const std::string&                          stage,
                                         const std::string&                          backend,
                                         const PrecisionOptions&                     precision,
-                                        bool                                        includeCpuReference);
+                                        bool                                        includeCpuReference,
+                                        int                                         fixedSteps,
+                                        int                                         maxSteps);
 
 }  // namespace nvMolKit
 

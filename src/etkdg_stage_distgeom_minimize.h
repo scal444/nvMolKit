@@ -66,7 +66,17 @@ class DistGeomMinimizeStage : public ETKDGStage {
     cudaStream_t                                                                          stream = nullptr,
     std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::EnergyForceContribsHost>* cache  = nullptr);
 
-  void executeImpl(ETKDGContext& ctx, double chiralWeight, double fourthDimWeight, int maxIters, bool checkEnergy);
+  void executeImpl(ETKDGContext& ctx,
+                   double        chiralWeight,
+                   double        fourthDimWeight,
+                   int           maxIters,
+                   bool          checkEnergy,
+                   bool          repeat = true);
+
+  void executeAnalysis(ETKDGContext& ctx, int maxIters, bool fixedSteps) {
+    minimizer_.fixedSteps_ = fixedSteps;
+    executeImpl(ctx, chiralWeight_, fourthDimWeight_, maxIters, checkEnergy_, false);
+  }
 
   std::string name() const override { return stageName_; }
 

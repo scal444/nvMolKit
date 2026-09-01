@@ -178,7 +178,8 @@ void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
                                         double        chiralWeight,
                                         double        fourthDimWeight,
                                         int           maxIters,
-                                        bool          checkEnergy) {
+                                        bool          checkEnergy,
+                                        bool          repeat) {
   const auto effectiveBackend = minimizer_.resolveBackend(ctx.systemHost.atomStarts);
 
   if (effectiveBackend == BfgsBackend::BATCHED) {
@@ -192,7 +193,7 @@ void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
     grad_.zero();
     energyOuts_.resize(ctx.systemHost.atomStarts.size() - 1);
     energyOuts_.zero();
-    repeatUntilConverged([&]() {
+    auto minimize = [&]() {
       return minimizer_.minimize(maxIters,
                                  embedParam_.optimizerForceTol,
                                  forcefield,
@@ -200,7 +201,12 @@ void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
                                  grad_,
                                  energyOuts_,
                                  ctx.activeThisStage.data());
-    });
+    };
+    if (repeat) {
+      repeatUntilConverged(minimize);
+    } else {
+      minimize();
+    }
 
     if (checkEnergy) {
       energyOuts_.zero();
@@ -222,7 +228,7 @@ void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
                                  ctx.systemHost.positions,
                                  static_cast<int>(ctx.systemHost.atomStarts.size() - 1));
 
-    repeatUntilConverged([&]() {
+    auto minimize = [&]() {
       return minimizer_.minimizeWithDG(maxIters,
                                        embedParam_.optimizerForceTol,
                                        ctx.systemHost.atomStarts,
@@ -232,7 +238,12 @@ void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
                                        chiralWeight,
                                        fourthDimWeight,
                                        ctx.activeThisStage.data());
-    });
+    };
+    if (repeat) {
+      repeatUntilConverged(minimize);
+    } else {
+      minimize();
+    }
 
     if (checkEnergy) {
       nvMolKit::DistGeom::computeEnergy(molSystemDevice,

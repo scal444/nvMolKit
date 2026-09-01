@@ -124,6 +124,36 @@ def test_analyze_etkdg_stage_validates_coordinate_shape():
         embed.AnalyzeETKDGStage([mol], [np.zeros((mol.GetNumAtoms(), 3))], rdDistGeom.ETKDGv3(), "FIRST")
 
 
+@pytest.mark.parametrize("stage", ["FIRST", "FOURTH", "ETK"])
+@pytest.mark.parametrize("mode", list(PrecisionMode))
+def test_analyze_etkdg_stage_fixed_steps(stage, mode):
+    mol = Chem.AddHs(Chem.MolFromSmiles("CCO"))
+    params = rdDistGeom.ETKDGv3()
+    params.randomSeed = 0xF00D
+    assert rdDistGeom.EmbedMolecule(mol, params) == 0
+    xyz = np.asarray(mol.GetConformer().GetPositions(), dtype=np.float64)
+    if stage == "ETK":
+        coordinates = xyz
+    else:
+        coordinates = np.concatenate([xyz, np.full((mol.GetNumAtoms(), 1), 0.1)], axis=1)
+
+    result = embed.AnalyzeETKDGStage(
+        [mol],
+        [coordinates],
+        params,
+        stage,
+        precisionOptions=PrecisionOptions(mode),
+        fixedSteps=3,
+    )
+
+    assert result["fixed_steps"] == 3
+    assert result["max_steps"] == 3
+    assert result["gpu_iterations"] == [3]
+    assert result["cpu_iterations"] == [3]
+    assert result["gpu_status"] == [1]
+    assert result["cpu_status"] == [1]
+
+
 def embed_with_rdkit(molecules, confs_per_mol=5, params=None):
     """Embed molecules using RDKit's EmbedMultipleConfs for comparison.
 

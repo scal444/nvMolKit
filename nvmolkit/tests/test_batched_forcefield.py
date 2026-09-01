@@ -424,6 +424,22 @@ def test_batched_forcefield_metadata_and_element_view(ff_factory):
         pytest.param(lambda mols: UFFBatchedForcefield(mols), id="uff"),
     ],
 )
+def test_batched_forcefield_fixed_budget_returns_iterations(ff_factory):
+    forcefield = ff_factory([make_embedded_mol("CCO")])
+    energies, converged, iterations = forcefield.minimize(maxIters=3, forceTol=0.0, returnIterations=True)
+
+    assert len(energies[0]) == len(converged[0]) == len(iterations[0]) == 1
+    assert iterations == [[3]]
+    assert converged == [[False]]
+
+
+@pytest.mark.parametrize(
+    "ff_factory",
+    [
+        pytest.param(lambda mols: MMFFBatchedForcefield(mols), id="mmff"),
+        pytest.param(lambda mols: UFFBatchedForcefield(mols), id="uff"),
+    ],
+)
 def test_batched_forcefield_lazy_build_and_rebuild(ff_factory):
     mol = make_embedded_mol("CCO")
     forcefield = ff_factory([Chem.Mol(mol)])

@@ -41,11 +41,13 @@ class ETKMinimizationStage final : public ETKDGStage {
     std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::Energy3DForceContribsHost>* cache  = nullptr);
 
   void        execute(ETKDGContext& ctx) override;
+  void        executeAnalysis(ETKDGContext& ctx, int maxIters, bool fixedSteps);
   std::string name() const override { return "ETK 3D Minimization"; }
 
  private:
   //! Re-sets the bounds for distance constraints based on the current positions.
   void setReferenceValues(const ETKDGContext& ctx, const DistGeom::Energy3DForceContribsDevice& contribs);
+  void executeImpl(ETKDGContext& ctx, int maxIters);
 
   BatchedForcefieldMetadata                        metadata_;
   nvMolKit::DistGeom::BatchedMolecularSystem3DHost molSystemHost;

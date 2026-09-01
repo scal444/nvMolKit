@@ -432,11 +432,12 @@ class _BatchedForcefieldBase:
         target_gpu: int | None = None,
         minimizerKind: str = "BFGS",
         fireOptions: FireOptions | None = None,
+        returnIterations: bool = False,
     ):
         if not self._molecules:
             if output == CoordinateOutput.DEVICE:
                 raise ValueError("minimize(output=DEVICE) requires at least one molecule")
-            return [], []
+            return ([], [], []) if returnIterations else ([], [])
         self._ensure_built()
         minimizer_kind = str(minimizerKind).upper()
         if minimizer_kind not in {"BFGS", "FIRE"}:
@@ -445,6 +446,8 @@ class _BatchedForcefieldBase:
             fireOptions = FireOptions()
             fireOptions.gradTol = forceTol
         if output == CoordinateOutput.DEVICE:
+            if returnIterations:
+                raise ValueError("returnIterations is supported only with output=RDKIT_CONFORMERS")
             return self._native_ff.minimizeDevice(
                 maxIters,
                 forceTol,
@@ -452,8 +455,9 @@ class _BatchedForcefieldBase:
                 minimizer_kind,
                 fireOptions._as_native(),
             )
-        energies, converged = self._native_ff.minimize(maxIters, forceTol, minimizer_kind, fireOptions._as_native())
-        return energies, converged
+        return self._native_ff.minimize(
+            maxIters, forceTol, minimizer_kind, fireOptions._as_native(), bool(returnIterations)
+        )
 
 
 class MMFFBatchedForcefield(_BatchedForcefieldBase):
@@ -574,6 +578,7 @@ class MMFFBatchedForcefield(_BatchedForcefieldBase):
         target_gpu: int | None = None,
         minimizerKind: str = "BFGS",
         fireOptions: FireOptions | None = None,
+        returnIterations: bool = False,
     ) -> tuple[list[list[float]], list[list[bool]]]: ...
     @overload
     def minimize(
@@ -594,6 +599,7 @@ class MMFFBatchedForcefield(_BatchedForcefieldBase):
         target_gpu: int | None = None,
         minimizerKind: str = "BFGS",
         fireOptions: FireOptions | None = None,
+        returnIterations: bool = False,
     ):
         """Run minimization on all conformers of all molecules.
 
@@ -619,6 +625,9 @@ class MMFFBatchedForcefield(_BatchedForcefieldBase):
             fireOptions: FIRE algorithm options used when
                 ``minimizerKind="FIRE"``. When provided, its ``gradTol``
                 takes precedence over ``forceTol``.
+            returnIterations: Return per-conformer outer BFGS iteration counts
+                as a third nested list. With BFGS, ``forceTol <= 0`` then
+                selects exact-budget mode and disables convergence stopping.
 
         Returns:
             For RDKit mode: ``(energies, converged)`` nested host lists.
@@ -633,6 +642,7 @@ class MMFFBatchedForcefield(_BatchedForcefieldBase):
             target_gpu=target_gpu,
             minimizerKind=minimizerKind,
             fireOptions=fireOptions,
+            returnIterations=returnIterations,
         )
 
 
@@ -712,6 +722,7 @@ class UFFBatchedForcefield(_BatchedForcefieldBase):
         target_gpu: int | None = None,
         minimizerKind: str = "BFGS",
         fireOptions: FireOptions | None = None,
+        returnIterations: bool = False,
     ) -> tuple[list[list[float]], list[list[bool]]]: ...
     @overload
     def minimize(
@@ -732,6 +743,7 @@ class UFFBatchedForcefield(_BatchedForcefieldBase):
         target_gpu: int | None = None,
         minimizerKind: str = "BFGS",
         fireOptions: FireOptions | None = None,
+        returnIterations: bool = False,
     ):
         """Run minimization on all conformers of all molecules.
 
@@ -757,6 +769,9 @@ class UFFBatchedForcefield(_BatchedForcefieldBase):
             fireOptions: FIRE algorithm options used when
                 ``minimizerKind="FIRE"``. When provided, its ``gradTol``
                 takes precedence over ``forceTol``.
+            returnIterations: Return per-conformer outer BFGS iteration counts
+                as a third nested list. With BFGS, ``forceTol <= 0`` then
+                selects exact-budget mode and disables convergence stopping.
 
         Returns:
             For RDKit mode: ``(energies, converged)`` nested host lists.
@@ -771,4 +786,5 @@ class UFFBatchedForcefield(_BatchedForcefieldBase):
             target_gpu=target_gpu,
             minimizerKind=minimizerKind,
             fireOptions=fireOptions,
+            returnIterations=returnIterations,
         )

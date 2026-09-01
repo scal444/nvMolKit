@@ -202,10 +202,18 @@ void ETKMinimizationStage::setReferenceValues(const ETKDGContext&               
 }
 
 void ETKMinimizationStage::execute(ETKDGContext& ctx) {
+  executeImpl(ctx, 300);
+}
+
+void ETKMinimizationStage::executeAnalysis(ETKDGContext& ctx, int maxIters, bool fixedSteps) {
+  minimizer_.fixedSteps_ = fixedSteps;
+  executeImpl(ctx, maxIters);
+}
+
+void ETKMinimizationStage::executeImpl(ETKDGContext& ctx, int maxIters) {
   const auto effectiveBackend = minimizer_.resolveBackend(ctx.systemHost.atomStarts);
 
   // 1. Update reference positions for start of loop.
-  constexpr int                             maxIters = 300;  // Taken from hard-coded RDKit value.
   DistGeom::BatchedMolecular3DDeviceBuffers molSystemDevice;
   std::optional<ETKBatchedForcefield>       forcefield;
   AsyncDeviceVector<double>*                planarEnergies = nullptr;
