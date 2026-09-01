@@ -19,14 +19,19 @@
 #include <gmock/gmock.h>
 #include <GraphMol/DistGeomHelpers/Embedder.h>
 #include <GraphMol/FileParsers/FileParsers.h>
+#include <GraphMol/SmilesParse/SmilesParse.h>
+#include <GraphMol/SmilesParse/SmilesWrite.h>
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <fstream>
 
 #include "src/embedder_utils.h"
 #include "src/etkdg_impl.h"
+#include "src/etkdg_stage_aio_minimization.h"
 #include "src/etkdg_stage_coordgen.h"
 #include "src/etkdg_stage_distgeom_minimize.h"
+#include "src/etkdg_stage_etk_minimization.h"
 #include "src/forcefields/dist_geom.h"
 #include "src/utils/host_vector.h"
 #include "tests/test_utils.h"
@@ -650,6 +655,274 @@ TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, FirstMinimizeStageBFGSWithInacti
                                     << " should have low energy (<0.1) after successful minimization";
     }
   }
+}
+
+TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, AllInOneSmallBatchStatisticsAgainstLegacy) {
+  auto makeContext = [&]() {
+    ETKDGContext result;
+    result.nTotalSystems = context_.nTotalSystems;
+    result.systemHost    = context_.systemHost;
+    nvMolKit::DistGeom::sendContextToDevice(result.systemHost.positions,
+                                            result.systemDevice.positions,
+                                            result.systemHost.atomStarts,
+                                            result.systemDevice.atomStarts);
+    result.activeThisStage.setFromVector(std::vector<uint8_t>(result.nTotalSystems, 1));
+    result.failedThisStage.setFromVector(std::vector<uint8_t>(result.nTotalSystems, 0));
+    return result;
+  };
+  auto                         legacyContext   = makeContext();
+  auto                         allInOneContext = makeContext();
+  nvMolKit::BfgsBatchMinimizer legacyMinimizer(4, nvMolKit::DebugLevel::NONE, true, nullptr);
+
+  auto                         legacyFirst = std::make_unique<DistGeomMinimizeStage>(mols_,
+                                                             eargs_,
+                                                             embedParam_,
+                                                             legacyContext,
+                                                             legacyMinimizer,
+                                                             1.0,
+                                                             0.1,
+                                                             400,
+                                                             true,
+                                                             "First Minimization");
+  DistGeomMinimizeWrapperStage legacyFourth(*legacyFirst, 0.2, 1.0, 200, false, "Fourth Dimension Minimization");
+  ETKMinimizationStage         legacyETK(mols_, eargs_, embedParam_, legacyContext, legacyMinimizer);
+
+  // RDKit <=2025 generates the sequential constants. Normalize the prepared
+  // torsion details to the AIO constants so this directly exercises the new
+  // stage from the same initial coordinates without requiring the public flag.
+  for (auto& earg : eargs_) {
+    for (auto& torsion : earg.etkdgDetails.expTorsionAngles) {
+      auto&      forceConstants = torsion.second;
+      const bool isKRingTorsion =
+        forceConstants.size() > 1 && forceConstants[1] == 100.0 &&
+        static_cast<std::size_t>(std::count(forceConstants.begin(), forceConstants.end(), 0.0)) + 1 ==
+          forceConstants.size();
+      if (isKRingTorsion) {
+        forceConstants[1] = 2.15;
+      } else {
+        for (auto& forceConstant : forceConstants) {
+          forceConstant *= 0.1;
+        }
+      }
+    }
+  }
+  ETKDGAllInOneMinimizationStage allInOne(mols_, eargs_, embedParam_, allInOneContext);
+
+  legacyFirst->execute(legacyContext);
+  legacyFourth.execute(legacyContext);
+  legacyETK.execute(legacyContext);
+  allInOne.execute(allInOneContext);
+
+  std::vector<double> legacyPositions(legacyContext.systemDevice.positions.size());
+  std::vector<double> allInOnePositions(allInOneContext.systemDevice.positions.size());
+  legacyContext.systemDevice.positions.copyToHost(legacyPositions);
+  allInOneContext.systemDevice.positions.copyToHost(allInOnePositions);
+  std::vector<uint8_t> legacyFailed(legacyContext.nTotalSystems);
+  std::vector<uint8_t> allInOneFailed(allInOneContext.nTotalSystems);
+  legacyContext.failedThisStage.copyToHost(legacyFailed);
+  allInOneContext.failedThisStage.copyToHost(allInOneFailed);
+  CHECK_CUDA_RETURN(cudaDeviceSynchronize());
+
+  double rmsdSum                 = 0.0;
+  double legacyBoundsViolation   = 0.0;
+  double allInOneBoundsViolation = 0.0;
+  int    totalAtoms              = 0;
+  for (std::size_t systemIdx = 0; systemIdx < mols_.size(); ++systemIdx) {
+    const int atomStart            = context_.systemHost.atomStarts[systemIdx];
+    const int atomEnd              = context_.systemHost.atomStarts[systemIdx + 1];
+    double    moleculeRmsdSum      = 0.0;
+    double    moleculeLegacyBounds = 0.0;
+    double    moleculeAioBounds    = 0.0;
+    for (int atomIdx = atomStart; atomIdx < atomEnd; ++atomIdx) {
+      for (int dim = 0; dim < 3; ++dim) {
+        const double delta = legacyPositions[atomIdx * 4 + dim] - allInOnePositions[atomIdx * 4 + dim];
+        rmsdSum += delta * delta;
+        moleculeRmsdSum += delta * delta;
+      }
+      ++totalAtoms;
+    }
+    const auto& bounds = *eargs_[systemIdx].mmat;
+    for (unsigned int i = 1; i < bounds.numRows(); ++i) {
+      for (unsigned int j = 0; j < i; ++j) {
+        auto accumulateViolation = [&](const std::vector<double>& positions, double& sum) {
+          double distanceSquared = 0.0;
+          for (int dim = 0; dim < 3; ++dim) {
+            const double delta = positions[(atomStart + i) * 4 + dim] - positions[(atomStart + j) * 4 + dim];
+            distanceSquared += delta * delta;
+          }
+          const double distance = std::sqrt(distanceSquared);
+          if (distance < bounds.getLowerBound(i, j)) {
+            sum += bounds.getLowerBound(i, j) - distance;
+          } else if (distance > bounds.getUpperBound(i, j)) {
+            sum += distance - bounds.getUpperBound(i, j);
+          }
+        };
+        accumulateViolation(legacyPositions, moleculeLegacyBounds);
+        accumulateViolation(allInOnePositions, moleculeAioBounds);
+      }
+    }
+    legacyBoundsViolation += moleculeLegacyBounds;
+    allInOneBoundsViolation += moleculeAioBounds;
+    std::cout << "AIO molecule " << systemIdx << ": smiles=" << RDKit::MolToSmiles(*mols_[systemIdx])
+              << " atoms=" << atomEnd - atomStart
+              << " coordinate_rmsd=" << std::sqrt(moleculeRmsdSum / (atomEnd - atomStart))
+              << " legacy_bounds_violation=" << moleculeLegacyBounds << " aio_bounds_violation=" << moleculeAioBounds
+              << " legacy_failed=" << static_cast<int>(legacyFailed[systemIdx])
+              << " aio_failed=" << static_cast<int>(allInOneFailed[systemIdx]) << std::endl;
+  }
+  const double coordinateRmsd       = std::sqrt(rmsdSum / totalAtoms);
+  const int    legacyFailureCount   = std::accumulate(legacyFailed.begin(), legacyFailed.end(), 0);
+  const int    allInOneFailureCount = std::accumulate(allInOneFailed.begin(), allInOneFailed.end(), 0);
+  std::cout << "AIO comparison: molecules=" << mols_.size() << " coordinate_rmsd=" << coordinateRmsd
+            << " legacy_bounds_violation=" << legacyBoundsViolation
+            << " aio_bounds_violation=" << allInOneBoundsViolation << " legacy_failures=" << legacyFailureCount
+            << " aio_failures=" << allInOneFailureCount << std::endl;
+
+  EXPECT_LE(allInOneFailureCount, 2);
+  EXPECT_TRUE(std::isfinite(allInOneBoundsViolation));
+}
+
+TEST(AllInOneETKDG, BulkStatisticsAgainstLegacyFromIdenticalCoordinates) {
+  constexpr std::size_t targetMoleculeCount = 128;
+  std::ifstream         smilesInput(getTestDataFolderPath() + "/chembl_1k.smi");
+  ASSERT_TRUE(smilesInput.good());
+  std::vector<std::unique_ptr<RDKit::RWMol>> molOwners;
+  std::string                                smiles;
+  while (molOwners.size() < targetMoleculeCount && std::getline(smilesInput, smiles)) {
+    std::unique_ptr<RDKit::RWMol> mol(RDKit::SmilesToMol(smiles));
+    if (mol && mol->getNumAtoms() >= 8 && mol->getNumAtoms() <= 60) {
+      molOwners.push_back(std::move(mol));
+    }
+  }
+  ASSERT_EQ(molOwners.size(), targetMoleculeCount);
+  std::vector<const RDKit::ROMol*> mols;
+  mols.reserve(molOwners.size());
+  for (const auto& mol : molOwners) {
+    mols.push_back(mol.get());
+  }
+
+  auto params            = RDKit::DGeomHelpers::ETKDGv3;
+  params.useRandomCoords = true;
+  params.randomSeed      = 42;
+  ETKDGContext           initialContext;
+  std::vector<EmbedArgs> eargs;
+  initTestComponentsCommon(mols, molOwners, initialContext, eargs, params);
+  auto makeContext = [&]() {
+    ETKDGContext result;
+    result.nTotalSystems = initialContext.nTotalSystems;
+    result.systemHost    = initialContext.systemHost;
+    nvMolKit::DistGeom::sendContextToDevice(result.systemHost.positions,
+                                            result.systemDevice.positions,
+                                            result.systemHost.atomStarts,
+                                            result.systemDevice.atomStarts);
+    result.activeThisStage.setFromVector(std::vector<uint8_t>(result.nTotalSystems, 1));
+    result.failedThisStage.setFromVector(std::vector<uint8_t>(result.nTotalSystems, 0));
+    return result;
+  };
+  auto legacyContext = makeContext();
+  auto aioContext    = makeContext();
+
+  nvMolKit::BfgsBatchMinimizer legacyMinimizer(4, nvMolKit::DebugLevel::NONE, true, nullptr);
+  auto                         legacyFirst = std::make_unique<DistGeomMinimizeStage>(mols,
+                                                             eargs,
+                                                             params,
+                                                             legacyContext,
+                                                             legacyMinimizer,
+                                                             1.0,
+                                                             0.1,
+                                                             400,
+                                                             true,
+                                                             "First Minimization");
+  DistGeomMinimizeWrapperStage legacyFourth(*legacyFirst, 0.2, 1.0, 200, false, "Fourth Dimension Minimization");
+  ETKMinimizationStage         legacyETK(mols, eargs, params, legacyContext, legacyMinimizer);
+
+  for (auto& earg : eargs) {
+    for (auto& torsion : earg.etkdgDetails.expTorsionAngles) {
+      auto&      forceConstants = torsion.second;
+      const bool isKRingTorsion =
+        forceConstants.size() > 1 && forceConstants[1] == 100.0 &&
+        static_cast<std::size_t>(std::count(forceConstants.begin(), forceConstants.end(), 0.0)) + 1 ==
+          forceConstants.size();
+      if (isKRingTorsion) {
+        forceConstants[1] = 2.15;
+      } else {
+        for (auto& forceConstant : forceConstants) {
+          forceConstant *= 0.1;
+        }
+      }
+    }
+  }
+  ETKDGAllInOneMinimizationStage aio(mols, eargs, params, aioContext);
+  legacyFirst->execute(legacyContext);
+  legacyFourth.execute(legacyContext);
+  legacyETK.execute(legacyContext);
+  aio.execute(aioContext);
+
+  std::vector<double>  legacyPositions(legacyContext.systemDevice.positions.size());
+  std::vector<double>  aioPositions(aioContext.systemDevice.positions.size());
+  std::vector<uint8_t> legacyFailed(mols.size()), aioFailed(mols.size());
+  legacyContext.systemDevice.positions.copyToHost(legacyPositions);
+  aioContext.systemDevice.positions.copyToHost(aioPositions);
+  legacyContext.failedThisStage.copyToHost(legacyFailed);
+  aioContext.failedThisStage.copyToHost(aioFailed);
+  CHECK_CUDA_RETURN(cudaDeviceSynchronize());
+
+  auto boundsViolations = [&](const std::vector<double>& positions) {
+    std::vector<double> result(mols.size(), 0.0);
+    for (std::size_t systemIdx = 0; systemIdx < mols.size(); ++systemIdx) {
+      const int   atomStart = initialContext.systemHost.atomStarts[systemIdx];
+      const auto& bounds    = *eargs[systemIdx].mmat;
+      for (unsigned int i = 1; i < bounds.numRows(); ++i) {
+        for (unsigned int j = 0; j < i; ++j) {
+          double distanceSquared = 0.0;
+          for (int dim = 0; dim < 3; ++dim) {
+            const double delta = positions[(atomStart + i) * 4 + dim] - positions[(atomStart + j) * 4 + dim];
+            distanceSquared += delta * delta;
+          }
+          const double distance = std::sqrt(distanceSquared);
+          result[systemIdx] += std::max(bounds.getLowerBound(i, j) - distance, 0.0);
+          result[systemIdx] += std::max(distance - bounds.getUpperBound(i, j), 0.0);
+        }
+      }
+    }
+    return result;
+  };
+  auto legacyViolations = boundsViolations(legacyPositions);
+  auto aioViolations    = boundsViolations(aioPositions);
+  auto percentile       = [](std::vector<double> values, double fraction) {
+    std::sort(values.begin(), values.end());
+    return values[static_cast<std::size_t>(fraction * static_cast<double>(values.size() - 1))];
+  };
+  const int           legacyFailureCount = std::accumulate(legacyFailed.begin(), legacyFailed.end(), 0);
+  const int           aioFailureCount    = std::accumulate(aioFailed.begin(), aioFailed.end(), 0);
+  std::vector<double> pairedLegacyAccepted;
+  std::vector<double> aioAccepted;
+  for (std::size_t i = 0; i < mols.size(); ++i) {
+    if (!aioFailed[i]) {
+      pairedLegacyAccepted.push_back(legacyViolations[i]);
+      aioAccepted.push_back(aioViolations[i]);
+    }
+  }
+  std::cout << "AIO bulk comparison: molecules=" << mols.size() << " legacy_failures=" << legacyFailureCount
+            << " aio_failures=" << aioFailureCount << " legacy_bounds_p50=" << percentile(legacyViolations, 0.50)
+            << " aio_bounds_p50=" << percentile(aioViolations, 0.50)
+            << " legacy_bounds_p90=" << percentile(legacyViolations, 0.90)
+            << " aio_bounds_p90=" << percentile(aioViolations, 0.90)
+            << " legacy_bounds_p99=" << percentile(legacyViolations, 0.99)
+            << " aio_bounds_p99=" << percentile(aioViolations, 0.99)
+            << " accepted_legacy_bounds_p50=" << percentile(pairedLegacyAccepted, 0.50)
+            << " accepted_aio_bounds_p50=" << percentile(aioAccepted, 0.50)
+            << " accepted_legacy_bounds_p90=" << percentile(pairedLegacyAccepted, 0.90)
+            << " accepted_aio_bounds_p90=" << percentile(aioAccepted, 0.90)
+            << " accepted_legacy_bounds_p99=" << percentile(pairedLegacyAccepted, 0.99)
+            << " accepted_aio_bounds_p99=" << percentile(aioAccepted, 0.99) << std::endl;
+
+  // Individual attempts may be rejected and retried by the ETKDG driver. The
+  // accepted population should retain legacy-like distance-bound quality.
+  EXPECT_LE(aioFailureCount, 15);
+  EXPECT_LE(percentile(aioAccepted, 0.50), percentile(pairedLegacyAccepted, 0.50));
+  EXPECT_LE(percentile(aioAccepted, 0.90), percentile(pairedLegacyAccepted, 0.90) + 0.5);
+  EXPECT_LE(percentile(aioAccepted, 0.99), percentile(pairedLegacyAccepted, 0.99) + 1.0);
 }
 
 // Instantiate test suites for both fixtures

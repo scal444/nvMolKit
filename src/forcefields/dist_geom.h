@@ -129,6 +129,42 @@ struct Energy3DForceContribsHost {
   DistanceConstraintContribTerms longRangeDistTerms;
 };
 
+//! Harmonic out-of-plane terms used by RDKit's all-in-one ETKDG refinement.
+//!
+//! Each improper center contributes three permutations. Unlike the legacy
+//! CrystalFF inversion term, the AIO potential is 0.5 * k * chi^2, where chi
+//! is the out-of-plane angle in degrees.
+struct AIOPlanarityContribTerms {
+  std::vector<int>    idx1;
+  std::vector<int>    idx2;
+  std::vector<int>    idx3;
+  std::vector<int>    idx4;
+  std::vector<double> forceConstant;
+};
+
+//! Linear-angle terms present throughout RDKit's AIO minimization.
+struct AIOAngleContribTerms {
+  std::vector<int>    idx1;
+  std::vector<int>    idx2;
+  std::vector<int>    idx3;
+  std::vector<double> minAngle;
+  std::vector<double> maxAngle;
+  std::vector<double> forceConstant;
+};
+
+//! Host-side force-field bundle for RDKit's all-in-one ETKDG refinement.
+//!
+//! The distance-geometry and angle terms are active during both minimization
+//! phases. Experimental torsions and planarity terms are appended for the
+//! second phase, matching RDKit's minimizeAllInOne() ordering.
+struct AllInOneForceContribsHost {
+  EnergyForceContribsHost        distanceGeometry;
+  DistanceConstraintContribTerms harmonicDistanceTerms;
+  TorsionAngleContribTerms       experimentalTorsionTerms;
+  AIOAngleContribTerms           angleTerms;
+  AIOPlanarityContribTerms       planarityTerms;
+};
+
 struct BatchedIndicesHost {
   //! Defines the start of each molecule's energy buffer region that will be added to then reduced.
   std::vector<int> energyBufferStarts = {0};
