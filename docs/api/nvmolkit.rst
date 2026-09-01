@@ -72,14 +72,17 @@ UFF Optimization
    batchedForcefield.UFFBatchedForcefield
    batchedForcefield.UFFBatchElement
 
-Butina Clustering
------------------
+Clustering
+----------
 
 .. autosummary::
    :toctree: generated/
    :template: function_template.rst
 
    clustering.butina
+   clustering.fused_butina
+   clustering.aap_similarity
+   clustering.aap_similarity_clustering
 
 Substructure Search
 -------------------

@@ -13,7 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Contains GPU-accelerated Butina clustering implementations.
+"""Contains GPU-accelerated molecular clustering implementations.
+
+``aap_similarity_clustering()`` performs directed sphere-exclusion clustering
+directly from RDKit molecules using approximate Atom-Atom-Path similarity. It
+keeps only O(N) cluster state while constructing rooted-path descriptors on the
+CPU and evaluating atom assignments on the GPU.
 
 The standard ``butina()`` path accepts a full N x N distance matrix and
 materializes its neighbor relationships. This is the right choice when you
@@ -35,6 +40,89 @@ from nvmolkit._fingerprint_inputs import _prepare_packed_fingerprints
 from nvmolkit.types import ArrayInput, AsyncGpuResult, _as_cuda_tensor, _resolve_cuda_stream
 
 _VALID_NEIGHBORLIST_SIZES = (8, 16, 24, 32, 64, 128)
+
+
+def aap_similarity(
+    left,
+    right,
+    *,
+    max_path_length: int = 7,
+    histogram_bins: int = 2048,
+    sinkhorn_iterations: int = 8,
+    sinkhorn_temperature: float = 0.104,
+    stream: torch.cuda.Stream | None = None,
+) -> float:
+    """Compute directed approximate Atom-Atom-Path similarity.
+
+    Rooted paths are hashed into per-atom histograms and compatible atoms are
+    assigned with fixed-iteration Sinkhorn normalization on the GPU. Molecules
+    may currently contain at most 64 atoms.
+
+    Args:
+        left: Centroid-side RDKit molecule.
+        right: Candidate-side RDKit molecule.
+        max_path_length: Maximum rooted path length in bonds.
+        histogram_bins: Number of hashed path bins, at most 32767.
+        sinkhorn_iterations: Number of Sinkhorn normalization iterations.
+        sinkhorn_temperature: Positive Sinkhorn temperature.
+        stream: CUDA stream to use. If None, uses the current stream.
+
+    Returns:
+        Similarity in the interval ``[0, 1]``.
+    """
+    active_stream = _resolve_cuda_stream(stream)
+    return _clustering.aap_similarity(
+        left,
+        right,
+        max_path_length,
+        histogram_bins,
+        sinkhorn_iterations,
+        sinkhorn_temperature,
+        active_stream.cuda_stream,
+    )
+
+
+def aap_similarity_clustering(
+    molecules,
+    threshold: float = 0.217,
+    *,
+    max_path_length: int = 7,
+    histogram_bins: int = 2048,
+    sinkhorn_iterations: int = 8,
+    sinkhorn_temperature: float = 0.104,
+    stream: torch.cuda.Stream | None = None,
+) -> list[int]:
+    """Cluster RDKit molecules with AAP directed sphere exclusion.
+
+    The first unassigned molecule in input order becomes the next centroid and
+    claims all remaining molecules whose directed AAP similarity is at least
+    ``threshold``. Final one-based cluster IDs are ordered by descending
+    cluster size, with centroid order breaking ties. Working memory is O(N).
+
+    Args:
+        molecules: Sequence of RDKit molecules, each with at most 64 atoms.
+        threshold: Inclusive directed similarity threshold.
+        max_path_length: Maximum rooted path length in bonds.
+        histogram_bins: Number of hashed path bins, at most 32767.
+        sinkhorn_iterations: Number of Sinkhorn normalization iterations.
+        sinkhorn_temperature: Positive Sinkhorn temperature.
+        stream: CUDA stream to use. If None, uses the current stream.
+
+    Returns:
+        One one-based cluster ID per molecule.
+    """
+    if not 0 <= threshold <= 1:
+        raise ValueError(f"threshold must be in [0, 1], got {threshold}")
+    active_stream = _resolve_cuda_stream(stream)
+    return _clustering.aap_similarity_clustering(
+        list(molecules),
+        threshold,
+        max_path_length,
+        histogram_bins,
+        sinkhorn_iterations,
+        sinkhorn_temperature,
+        active_stream.cuda_stream,
+    )
 
 
 def _wrap_result(result, return_centroids: bool):

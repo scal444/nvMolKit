@@ -1,0 +1,53 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+#ifndef NVMOLKIT_AAP_H
+#define NVMOLKIT_AAP_H
+
+#include <cuda_runtime.h>
+
+#include <cstdint>
+#include <vector>
+
+namespace RDKit {
+class ROMol;
+}
+
+namespace nvMolKit {
+
+/** Configuration for approximate GPU Atom-Atom-Path similarity. */
+struct AapOptions {
+  int   maxPathLength       = 7;
+  int   histogramBins       = 2048;
+  int   sinkhornIterations  = 8;
+  float sinkhornTemperature = 0.104F;
+};
+
+/**
+ * Compute directed approximate Atom-Atom-Path similarity on the GPU.
+ *
+ * Rooted paths are hashed into per-atom histograms and compatible atoms are
+ * assigned with fixed-iteration Sinkhorn normalization. The current fused
+ * implementation supports molecules containing at most 64 atoms.
+ */
+float aapSimilarityGpu(const RDKit::ROMol& left,
+                       const RDKit::ROMol& right,
+                       const AapOptions&   options = {},
+                       cudaStream_t        stream  = nullptr);
+
+/**
+ * Cluster molecules with input-order directed sphere exclusion (DISE).
+ *
+ * The first unassigned molecule is selected as the next centroid and claims
+ * all remaining molecules whose directed AAP similarity meets @p threshold.
+ * Returned cluster IDs are one-based and renumbered by descending cluster
+ * size, with centroid order breaking ties.
+ */
+std::vector<int> aapSimilarityClustering(const std::vector<const RDKit::ROMol*>& molecules,
+                                         float                                   threshold = 0.217F,
+                                         const AapOptions&                       options   = {},
+                                         cudaStream_t                            stream    = nullptr);
+
+}  // namespace nvMolKit
+
+#endif  // NVMOLKIT_AAP_H

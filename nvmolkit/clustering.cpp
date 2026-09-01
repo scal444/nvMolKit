@@ -13,6 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <GraphMol/ROMol.h>
+
 #include <boost/python.hpp>
 #include <boost/python/manage_new_object.hpp>
 #include <cstddef>
@@ -21,6 +23,8 @@
 #include <string>
 
 #include "nvmolkit/array_helpers.h"
+#include "nvmolkit/boost_python_utils.h"
+#include "src/aap.h"
 #include "src/butina.h"
 #include "src/utils/device.h"
 
@@ -44,6 +48,56 @@ boost::python::object wrapButinaResult(nvMolKit::ButinaResult& result, const int
 }  // namespace
 
 BOOST_PYTHON_MODULE(_clustering) {
+  boost::python::def(
+    "aap_similarity",
+    +[](const RDKit::ROMol& left,
+        const RDKit::ROMol& right,
+        const int           maxPathLength,
+        const int           histogramBins,
+        const int           sinkhornIterations,
+        const float         sinkhornTemperature,
+        std::uintptr_t      streamPtr) {
+      auto streamOpt = nvMolKit::acquireExternalStream(streamPtr);
+      if (!streamOpt) {
+        throw std::invalid_argument("Invalid CUDA stream");
+      }
+      const nvMolKit::AapOptions options{maxPathLength, histogramBins, sinkhornIterations, sinkhornTemperature};
+      return nvMolKit::aapSimilarityGpu(left, right, options, *streamOpt);
+    },
+    (boost::python::arg("left"),
+     boost::python::arg("right"),
+     boost::python::arg("max_path_length")      = 7,
+     boost::python::arg("histogram_bins")       = 2048,
+     boost::python::arg("sinkhorn_iterations")  = 8,
+     boost::python::arg("sinkhorn_temperature") = 0.104F,
+     boost::python::arg("stream")               = 0));
+
+  boost::python::def(
+    "aap_similarity_clustering",
+    +[](const boost::python::list& molecules,
+        const float                threshold,
+        const int                  maxPathLength,
+        const int                  histogramBins,
+        const int                  sinkhornIterations,
+        const float                sinkhornTemperature,
+        std::uintptr_t             streamPtr) {
+      auto streamOpt = nvMolKit::acquireExternalStream(streamPtr);
+      if (!streamOpt) {
+        throw std::invalid_argument("Invalid CUDA stream");
+      }
+      const auto                             extracted = nvMolKit::extractMolecules(molecules);
+      const std::vector<const RDKit::ROMol*> mols(extracted.begin(), extracted.end());
+      const nvMolKit::AapOptions options{maxPathLength, histogramBins, sinkhornIterations, sinkhornTemperature};
+      return nvMolKit::vectorToList(nvMolKit::aapSimilarityClustering(mols, threshold, options, *streamOpt));
+    },
+    (boost::python::arg("molecules"),
+     boost::python::arg("threshold")            = 0.217F,
+     boost::python::arg("max_path_length")      = 7,
+     boost::python::arg("histogram_bins")       = 2048,
+     boost::python::arg("sinkhorn_iterations")  = 8,
+     boost::python::arg("sinkhorn_temperature") = 0.104F,
+     boost::python::arg("stream")               = 0));
+
   boost::python::def(
     "butina",
     +[](const boost::python::dict& distanceMatrix,
