@@ -171,6 +171,7 @@ target_link_libraries(
   PRIVATE ${RDKit_LIBS}
           rdkit_dist_geom_flattened
           batched_forcefield
+          aio_etkdg_batched_forcefield
           dg_batched_forcefield
           dist_geom
           device_vector

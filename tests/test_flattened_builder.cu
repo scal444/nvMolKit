@@ -225,3 +225,67 @@ TEST_F(FlattenedBuilderTestFixture, TestETKDGFlattenedBuilderMol1) {
 
   EXPECT_EQ(ffParams.fourthTerms.idx[0], 0);
 }
+
+TEST_F(FlattenedBuilderTestFixture, TestAllInOneETKDGContributionBundle) {
+  auto                                        options = RDKit::DGeomHelpers::ETKDGv3;
+  nvMolKit::detail::EmbedArgs                 eargs;
+  std::vector<std::unique_ptr<RDGeom::Point>> positions;
+  auto                                        field = nvMolKit::DGeomHelpers::generateRDKitFF(*mol_,
+                                                       options,
+                                                       eargs,
+                                                       positions,
+                                                       nvMolKit::DGeomHelpers::Dimensionality::DIM_4D);
+  ASSERT_NE(field, nullptr);
+
+  // Pin the supplemental terms so this test is independent of the torsion
+  // preference tables shipped by the installed RDKit version.
+  eargs.etkdgDetails.expTorsionAtoms = {
+    {0, 1, 2, 3}
+  };
+  eargs.etkdgDetails.expTorsionAngles = {
+    {{1, -1, 1, 1, 1, 1}, {0.2, 0.3, 0.0, 0.0, 0.0, 0.0}}
+  };
+  eargs.etkdgDetails.angles = {
+    {0, 1, 2, 1}
+  };
+  eargs.etkdgDetails.improperAtoms = {
+    {0, 1, 2, 3, 6, 0}
+  };
+  const double* topologicalDistanceMatrix = RDKit::MolOps::getDistanceMat(*mol_);
+
+  const auto contribs = nvMolKit::DistGeom::constructAllInOneForceFieldContribs(eargs.dim,
+                                                                                *eargs.mmat,
+                                                                                eargs.chiralCenters,
+                                                                                eargs.etkdgDetails,
+                                                                                topologicalDistanceMatrix,
+                                                                                true,
+                                                                                true);
+
+  ASSERT_FALSE(contribs.distanceGeometry.distTerms.weight.empty());
+  EXPECT_THAT(contribs.distanceGeometry.distTerms.weight,
+              testing::Each(nvMolKit::DistGeom::kAllInOneForceConstants.distance));
+  EXPECT_EQ(contribs.distanceGeometry.fourthTerms.idx.size(), mol_->getNumAtoms());
+  ASSERT_FALSE(contribs.harmonicDistanceTerms.forceConstant.empty());
+  EXPECT_THAT(contribs.harmonicDistanceTerms.forceConstant, testing::Each(10.0));
+
+  EXPECT_THAT(contribs.experimentalTorsionTerms.idx1, testing::ElementsAre(0));
+  EXPECT_THAT(contribs.experimentalTorsionTerms.idx2, testing::ElementsAre(1));
+  EXPECT_THAT(contribs.experimentalTorsionTerms.idx3, testing::ElementsAre(2));
+  EXPECT_THAT(contribs.experimentalTorsionTerms.idx4, testing::ElementsAre(3));
+  EXPECT_THAT(contribs.experimentalTorsionTerms.forceConstants, testing::ElementsAre(0.2, 0.3, 0.0, 0.0, 0.0, 0.0));
+
+  EXPECT_THAT(contribs.angleTerms.idx1, testing::ElementsAre(0));
+  EXPECT_THAT(contribs.angleTerms.idx2, testing::ElementsAre(1));
+  EXPECT_THAT(contribs.angleTerms.idx3, testing::ElementsAre(2));
+  EXPECT_THAT(contribs.angleTerms.minAngle, testing::ElementsAre(179.0));
+  EXPECT_THAT(contribs.angleTerms.maxAngle, testing::ElementsAre(180.0));
+  EXPECT_THAT(contribs.angleTerms.forceConstant,
+              testing::ElementsAre(nvMolKit::DistGeom::kAllInOneForceConstants.kTermAngle));
+
+  EXPECT_THAT(contribs.planarityTerms.idx1, testing::ElementsAre(0, 0, 2));
+  EXPECT_THAT(contribs.planarityTerms.idx2, testing::ElementsAre(1, 1, 1));
+  EXPECT_THAT(contribs.planarityTerms.idx3, testing::ElementsAre(2, 3, 3));
+  EXPECT_THAT(contribs.planarityTerms.idx4, testing::ElementsAre(3, 2, 0));
+  EXPECT_THAT(contribs.planarityTerms.forceConstant,
+              testing::Each(nvMolKit::DistGeom::kAllInOneForceConstants.kTermImproper));
+}

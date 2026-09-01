@@ -269,6 +269,10 @@ void initETKDG(const ROMol*                                mol,
                ForceFields::CrystalFF::CrystalFFDetails&   etkdgDetails) {
   PRECONDITION(mol, "bad molecule");
   const unsigned int nAtoms = mol->getNumAtoms();
+#if RDKIT_AIO_ETKDG_API
+  etkdgDetails.forceConsts = params.useLegacyImplementation ? ForceFields::CrystalFF::ETKDGForceConsts::SEQ::Cosine :
+                                                              ForceFields::CrystalFF::ETKDGForceConsts::AIO::Cosine;
+#endif
   if (params.useExpTorsionAnglePrefs || params.useBasicKnowledge) {
     ForceFields::CrystalFF::getExperimentalTorsions(*mol,
                                                     etkdgDetails,

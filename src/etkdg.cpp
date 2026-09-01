@@ -26,6 +26,7 @@
 #include "src/conformer/device_conformer_pruning.h"
 #include "src/conformer/etkdg_device_collect.h"
 #include "src/etkdg_impl.h"
+#include "src/etkdg_stage_aio_minimization.h"
 #include "src/etkdg_stage_coordgen.h"
 #include "src/etkdg_stage_distgeom_minimize.h"
 #include "src/etkdg_stage_etk_minimization.h"
@@ -35,6 +36,7 @@
 #include "src/utils/host_vector.h"
 #include "src/utils/nvtx.h"
 #include "src/utils/openmp_helpers.h"
+#include "versions.h"
 
 namespace nvMolKit {
 namespace {
@@ -131,6 +133,9 @@ std::optional<DeviceCoordResult> embedMolecules(const std::vector<RDKit::ROMol*>
   constexpr double randomCoordsBasinThresh = 1e8;
   constexpr int    dim                     = 4;  // ETKDG always uses 4D coordinates
   paramsCopy.basinThresh                   = randomCoordsBasinThresh;
+#if RDKIT_AIO_ETKDG_API
+  const bool useAllInOneETKDG = !paramsCopy.useLegacyImplementation;
+#endif
 
   ScopedNvtxRange coordsRange("Init ETKDG");
 
@@ -331,53 +336,80 @@ std::optional<DeviceCoordResult> embedMolecules(const std::vector<RDKit::ROMol*>
                                                                            activeScratch,
                                                                            streamPtr));
 
-        // First minimize, then first round of chiral checks.
-        auto                           firstMinStage    = std::make_unique<detail::DistGeomMinimizeStage>(constMolPtrs,
-                                                                             batchEargs,
-                                                                             paramsCopy,
-                                                                             *context,
-                                                                             *minimizer,
-                                                                             1.0,
-                                                                             0.1,
-                                                                             400,
-                                                                             true,
-                                                                             "First Minimization",
-                                                                             streamPtr,
-                                                                             &dgCache);
-        detail::DistGeomMinimizeStage* firstMinStagePtr = firstMinStage.get();
-        stages.push_back(std::move(firstMinStage));
-        stages.push_back(std::make_unique<detail::ETKDGTetrahedralCheckStage>(*context, batchEargs, dim, streamPtr));
-
-        // Only add first chiral check if enforceChirality is enabled
         detail::ETKDGFirstChiralCenterCheckStage* chiralStagePtr = nullptr;
-        if (paramsCopy.enforceChirality) {
-          auto chiralStage =
-            std::make_unique<detail::ETKDGFirstChiralCenterCheckStage>(*context, batchEargs, dim, streamPtr);
-          chiralStagePtr = chiralStage.get();
-          stages.push_back(std::move(chiralStage));
+        // Select RDKit's legacy sequential refinement or its all-in-one forcefield.
+#if RDKIT_AIO_ETKDG_API
+        if (useAllInOneETKDG) {
+          stages.push_back(std::make_unique<detail::ETKDGAllInOneMinimizationStage>(constMolPtrs,
+                                                                                    batchEargs,
+                                                                                    paramsCopy,
+                                                                                    *context,
+                                                                                    streamPtr));
+          if (paramsCopy.useBasicKnowledge) {
+            stages.push_back(std::make_unique<detail::ETKDGKTermCheckStage>(batchEargs, *context, streamPtr));
+          }
+          stages.push_back(std::make_unique<detail::ETKDGTetrahedralCheckStage>(*context, batchEargs, dim, streamPtr));
+          if (paramsCopy.enforceChirality) {
+            auto chiralStage =
+              std::make_unique<detail::ETKDGFirstChiralCenterCheckStage>(*context, batchEargs, dim, streamPtr);
+            chiralStagePtr = chiralStage.get();
+            stages.push_back(std::move(chiralStage));
+          }
+        } else
+#endif
+        {
+          // First minimize, then first round of chiral checks.
+          auto                           firstMinStage = std::make_unique<detail::DistGeomMinimizeStage>(constMolPtrs,
+                                                                               batchEargs,
+                                                                               paramsCopy,
+                                                                               *context,
+                                                                               *minimizer,
+                                                                               1.0,
+                                                                               0.1,
+                                                                               400,
+                                                                               true,
+                                                                               "First Minimization",
+                                                                               streamPtr,
+                                                                               &dgCache);
+          detail::DistGeomMinimizeStage* firstMinStagePtr = firstMinStage.get();
+          stages.push_back(std::move(firstMinStage));
+          stages.push_back(std::make_unique<detail::ETKDGTetrahedralCheckStage>(*context, batchEargs, dim, streamPtr));
+
+          // Only add first chiral check if enforceChirality is enabled
+          if (paramsCopy.enforceChirality) {
+            auto chiralStage =
+              std::make_unique<detail::ETKDGFirstChiralCenterCheckStage>(*context, batchEargs, dim, streamPtr);
+            chiralStagePtr = chiralStage.get();
+            stages.push_back(std::move(chiralStage));
+          }
+
+          // Second + 3rd minimize, then double bond checks.
+          stages.push_back(std::make_unique<detail::DistGeomMinimizeWrapperStage>(*firstMinStagePtr,
+                                                                                  0.2,
+                                                                                  1.0,
+                                                                                  200,
+                                                                                  false,
+                                                                                  "Fourth Dimension Minimization"));
+          // (ET)(K)DG: Add experimental torsion minimization stage only if needed to match RDKit's logic.
+          if (paramsCopy.useExpTorsionAnglePrefs || paramsCopy.useBasicKnowledge) {
+            stages.push_back(std::make_unique<detail::ETKMinimizationStage>(constMolPtrs,
+                                                                            batchEargs,
+                                                                            paramsCopy,
+                                                                            *context,
+                                                                            *minimizer,
+                                                                            streamPtr,
+                                                                            &etkCache));
+          }
         }
 
-        // Second + 3rd minimize, then double bond checks.
-        stages.push_back(std::make_unique<detail::DistGeomMinimizeWrapperStage>(*firstMinStagePtr,
-                                                                                0.2,
-                                                                                1.0,
-                                                                                200,
-                                                                                false,
-                                                                                "Fourth Dimension Minimization"));
-        // (ET)(K)DG: Add experimental torsion minimization stage only if needed to match RDKit's logic.
-        if (paramsCopy.useExpTorsionAnglePrefs || paramsCopy.useBasicKnowledge) {
-          stages.push_back(std::make_unique<detail::ETKMinimizationStage>(constMolPtrs,
-                                                                          batchEargs,
-                                                                          paramsCopy,
-                                                                          *context,
-                                                                          *minimizer,
-                                                                          streamPtr,
-                                                                          &etkCache));
+        // The legacy path performs this geometry check before the final chiral checks.
+#if RDKIT_AIO_ETKDG_API
+        if (!useAllInOneETKDG)
+#endif
+        {
+          stages.push_back(
+            std::make_unique<detail::ETKDGDoubleBondGeometryCheckStage>(*context, batchEargs, dim, streamPtr));
         }
-
-        // Final chiral and stereochem checks
-        stages.push_back(
-          std::make_unique<detail::ETKDGDoubleBondGeometryCheckStage>(*context, batchEargs, dim, streamPtr));
 
         if (paramsCopy.enforceChirality) {
           // This is a pass-through, don't need to set the stream
@@ -389,6 +421,18 @@ std::optional<DeviceCoordResult> embedMolecules(const std::vector<RDKit::ROMol*>
           stages.push_back(
             std::make_unique<detail::ETKDGDoubleBondStereoCheckStage>(*context, batchEargs, dim, streamPtr));
         }
+
+#if RDKIT_AIO_ETKDG_API
+        if (useAllInOneETKDG) {
+          stages.push_back(std::make_unique<detail::ETKDGClashCheckStage>(*context, batchEargs, streamPtr));
+          stages.push_back(std::make_unique<detail::ETKDGDoubleBondGeometryCheckStage>(*context,
+                                                                                       batchEargs,
+                                                                                       dim,
+                                                                                       streamPtr,
+                                                                                       3e-3,
+                                                                                       true));
+        }
+#endif
 
         // Writeback. In RDKIT_CONFORMERS mode we pack into the host conformers map; in DEVICE
         // mode we append the surviving conformers of this batch onto the thread-local

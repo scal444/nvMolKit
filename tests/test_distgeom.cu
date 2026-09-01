@@ -31,6 +31,7 @@
 
 #include "rdkit_extensions/dist_geom_flattened_builder.h"
 #include "src/embedder_utils.h"
+#include "src/forcefields/aio_etkdg_batched_forcefield.h"
 #include "src/forcefields/dg_batched_forcefield.h"
 #include "src/forcefields/dist_geom.h"
 #include "src/forcefields/dist_geom_kernels.h"
@@ -594,4 +595,68 @@ TEST_P(ETKDGFFGpuBatchEdgeCases, BatchTestWithActiveStage) {
   d_activeThisStage.setFromVector(activeStages_);
 
   runTestInBatch(mols_, ETKDGOption::ETKDGv3, 1e-6, 1e-4, activeStages_.data(), d_activeThisStage.data());
+}
+
+TEST(AllInOneETKDGForcefield, PhaseToggleAndPlanarityGradient) {
+  std::vector<int>           atomStarts = {0, 4};
+  EnergyForceContribsHost    dgContribs;
+  BatchedMolecularSystemHost dgSystem;
+  preallocateEstimatedBatch(dgContribs, dgSystem, 1);
+  addMoleculeToMolecularSystem(dgContribs, 4, 4, atomStarts, dgSystem);
+
+  AllInOneForceContribsHost contribs;
+  contribs.planarityTerms.idx1                     = {0};
+  contribs.planarityTerms.idx2                     = {1};
+  contribs.planarityTerms.idx3                     = {2};
+  contribs.planarityTerms.idx4                     = {3};
+  contribs.planarityTerms.forceConstant            = {0.001};
+  std::vector<AllInOneForceContribsHost>   systems = {contribs};
+  nvMolKit::AllInOneETKDGBatchedForcefield forcefield(dgSystem, systems, atomStarts);
+
+  std::vector<double> positions = {0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.2, 0.7, 0.0};
+  AsyncDeviceVector<double> positionsDevice;
+  AsyncDeviceVector<double> energyDevice(1);
+  AsyncDeviceVector<double> gradientDevice(positions.size());
+  positionsDevice.setFromVector(positions);
+
+  energyDevice.zero();
+  CHECK_CUDA_RETURN(forcefield.computeEnergy(energyDevice.data(), positionsDevice.data()));
+  std::vector<double> phaseOneEnergy(1);
+  energyDevice.copyToHost(phaseOneEnergy);
+  CHECK_CUDA_RETURN(cudaDeviceSynchronize());
+  EXPECT_DOUBLE_EQ(phaseOneEnergy[0], 0.0);
+
+  forcefield.setTorsionTermsEnabled(true);
+  energyDevice.zero();
+  gradientDevice.zero();
+  CHECK_CUDA_RETURN(forcefield.computeEnergy(energyDevice.data(), positionsDevice.data()));
+  CHECK_CUDA_RETURN(forcefield.computeGradients(gradientDevice.data(), positionsDevice.data()));
+  std::vector<double> phaseTwoEnergy(1);
+  std::vector<double> gradient(positions.size());
+  energyDevice.copyToHost(phaseTwoEnergy);
+  gradientDevice.copyToHost(gradient);
+  CHECK_CUDA_RETURN(cudaDeviceSynchronize());
+  EXPECT_GT(phaseTwoEnergy[0], 0.0);
+
+  constexpr double delta    = 1e-5;
+  auto             energyAt = [&](int coordinate, double value) {
+    positions[coordinate] = value;
+    positionsDevice.setFromVector(positions);
+    energyDevice.zero();
+    CHECK_CUDA_RETURN(forcefield.computeEnergy(energyDevice.data(), positionsDevice.data()));
+    std::vector<double> energy(1);
+    energyDevice.copyToHost(energy);
+    CHECK_CUDA_RETURN(cudaDeviceSynchronize());
+    return energy[0];
+  };
+  for (int atom = 0; atom < 4; ++atom) {
+    for (int dim = 0; dim < 3; ++dim) {
+      const int    coordinate = atom * 4 + dim;
+      const double original   = positions[coordinate];
+      const double numericGradient =
+        (energyAt(coordinate, original + delta) - energyAt(coordinate, original - delta)) / (2.0 * delta);
+      positions[coordinate] = original;
+      EXPECT_NEAR(gradient[coordinate], numericGradient, 2e-5) << "atom=" << atom << " dimension=" << dim;
+    }
+  }
 }
