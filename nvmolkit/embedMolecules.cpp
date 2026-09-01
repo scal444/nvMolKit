@@ -20,6 +20,7 @@
 
 #include "nvmolkit/boost_python_utils.h"
 #include "nvmolkit/device_result_python.h"
+#include "nvmolkit/etkdg_stage_analysis.h"
 #include "src/etkdg.h"
 #include "src/precision_options.h"
 
@@ -58,6 +59,17 @@ BOOST_PYTHON_MODULE(_embedMolecules) {
     .def_readwrite("batchSize", &nvMolKit::BatchHardwareOptions::batchSize)
     .def_readwrite("batchesPerGpu", &nvMolKit::BatchHardwareOptions::batchesPerGpu)
     .add_property("gpuIds", &getGpuIdsPy, &setGpuIds);
+
+  bp::def("AnalyzeETKDGStage",
+          &nvMolKit::analyzeETKDGStage,
+          (bp::arg("molecules"),
+           bp::arg("coordinates"),
+           bp::arg("params"),
+           bp::arg("stage"),
+           bp::arg("backend")             = std::string("BATCHED"),
+           bp::arg("precisionOptions")    = nvMolKit::PrecisionOptions(),
+           bp::arg("includeCpuReference") = true),
+          "Run one production ETKDG minimization stage from exact caller-provided coordinates.");
 
   bp::def(
     "EmbedMolecules",

@@ -14,15 +14,16 @@
 # limitations under the License.
 
 import os
+
+import numpy as np
 import pytest
 import torch
 from rdkit import Chem
-from rdkit.Chem import rdDistGeom, AllChem
+from rdkit.Chem import AllChem, rdDistGeom
 from rdkit.Chem.rdDistGeom import EmbedParameters
 
 import nvmolkit.embedMolecules as embed
-from nvmolkit.types import CoordinateOutput, Device3DResult, HardwareOptions
-
+from nvmolkit.types import CoordinateOutput, Device3DResult, HardwareOptions, PrecisionMode, PrecisionOptions
 
 @pytest.fixture
 def embed_test_mols(num_mols=5):
@@ -83,6 +84,44 @@ def create_hard_copy_mols(molecules):
         copied_mols.append(copied_mol)
 
     return copied_mols
+
+
+@pytest.mark.parametrize("stage", ["FIRST", "FOURTH", "ETK"])
+def test_analyze_etkdg_stage_exact_coordinates(stage):
+    mol = Chem.AddHs(Chem.MolFromSmiles("CCO"))
+    params = rdDistGeom.ETKDGv3()
+    params.randomSeed = 0xF00D
+    assert rdDistGeom.EmbedMolecule(mol, params) == 0
+    xyz = np.asarray(mol.GetConformer().GetPositions(), dtype=np.float64)
+    xyz += np.linspace(-0.15, 0.15, xyz.size).reshape(xyz.shape)
+    if stage == "ETK":
+        coordinates = xyz
+    else:
+        fourth = np.linspace(-0.2, 0.2, mol.GetNumAtoms())[:, None]
+        coordinates = np.concatenate([xyz, fourth], axis=1)
+
+    result = embed.AnalyzeETKDGStage(
+        [mol],
+        [coordinates],
+        params,
+        stage,
+        precisionOptions=PrecisionOptions(PrecisionMode.MIXED),
+    )
+
+    assert result["dimension"] == coordinates.shape[1]
+    assert np.asarray(result["gpu_coordinates"]).shape == (1, *coordinates.shape)
+    assert np.asarray(result["cpu_coordinates"]).shape == (1, *coordinates.shape)
+    assert np.isfinite(result["input_energies"]).all()
+    assert np.isfinite(result["gpu_energies"]).all()
+    assert np.isfinite(result["cpu_energies"]).all()
+    assert len(result["gpu_status"]) == len(result["gpu_converged"]) == 1
+    assert len(result["cpu_status"]) == len(result["cpu_converged"]) == 1
+
+
+def test_analyze_etkdg_stage_validates_coordinate_shape():
+    mol = Chem.AddHs(Chem.MolFromSmiles("CC"))
+    with pytest.raises(ValueError, match="expected"):
+        embed.AnalyzeETKDGStage([mol], [np.zeros((mol.GetNumAtoms(), 3))], rdDistGeom.ETKDGv3(), "FIRST")
 
 
 def embed_with_rdkit(molecules, confs_per_mol=5, params=None):

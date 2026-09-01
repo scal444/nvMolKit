@@ -80,7 +80,12 @@ inline std::vector<bool> extractBoolList(const boost::python::list& values,
   std::vector<bool> result;
   result.reserve(expectedSize);
   for (int i = 0; i < expectedSize; ++i) {
-    result.push_back(boost::python::extract<bool>(values[i]));
+    const boost::python::object value(values[i]);
+    const int                   truth = PyObject_IsTrue(value.ptr());
+    if (truth < 0) {
+      boost::python::throw_error_already_set();
+    }
+    result.push_back(truth != 0);
   }
   return result;
 }

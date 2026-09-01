@@ -18,16 +18,70 @@
 This module provides GPU-accelerated implementations of ETKDG (Experimental-Torsion-Knowledge Distance-Geometry) conformer generation for multiple molecules using CUDA and OpenMP.
 """
 
-from typing import TYPE_CHECKING, Literal, Optional, overload
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, Literal, Optional, overload
+
+import numpy as np
 
 if TYPE_CHECKING:
     from rdkit.Chem import Mol
     from rdkit.Chem.rdDistGeom import EmbedParameters
 
-__all__ = ["EmbedMolecules"]
+__all__ = ["AnalyzeETKDGStage", "EmbedMolecules"]
 
-from nvmolkit.types import CoordinateOutput, Device3DResult, HardwareOptions, PrecisionOptions
+from nvmolkit.types import CoordinateOutput, Device3DResult, HardwareOptions, PrecisionOptions  # noqa: I001
 from nvmolkit import _embedMolecules  # type: ignore
+
+def AnalyzeETKDGStage(
+    molecules: list["Mol"],
+    coordinates: Sequence[Any],
+    params: "EmbedParameters",
+    stage: str,
+    backend: str = "BATCHED",
+    precisionOptions: Optional[PrecisionOptions] = None,
+    includeCpuReference: bool = True,
+) -> dict[str, Any]:
+    """Run one ETKDGv3 minimization stage from exact input coordinates.
+
+    This analysis API bypasses coordinate generation while reusing nvMolKit's
+    production stage classes unchanged. ``FIRST`` and ``FOURTH`` accept one
+    ``(num_atoms, 4)`` array per molecule; ``ETK`` accepts ``(num_atoms, 3)``.
+    Each molecule represents one conformer, so callers comparing multiple
+    conformers should pass independent molecule copies.
+
+    Returned ``gpu_energies`` and optional ``cpu_energies`` are both rescored
+    with the same RDKit stage force field. Native BFGS status is zero on
+    convergence. ``stage_failed`` is the production stage's post-minimization
+    check (currently meaningful for ``FIRST`` and ETK planarity checks).
+    """
+    normalized_stage = str(stage).upper()
+    aliases = {"DG_FIRST": "FIRST", "DG_FOURTH": "FOURTH", "ETK_3D": "ETK"}
+    normalized_stage = aliases.get(normalized_stage, normalized_stage)
+    if normalized_stage not in {"FIRST", "FOURTH", "ETK"}:
+        raise ValueError("stage must be 'FIRST', 'FOURTH', or 'ETK'")
+    if len(molecules) != len(coordinates):
+        raise ValueError("coordinates must contain one array per molecule")
+    dim = 3 if normalized_stage == "ETK" else 4
+    flattened = []
+    for idx, (mol, values) in enumerate(zip(molecules, coordinates)):
+        if mol is None:
+            raise ValueError(f"Molecule at index {idx} is None")
+        array = np.asarray(values, dtype=np.float64)
+        expected_shape = (mol.GetNumAtoms(), dim)
+        if array.shape != expected_shape:
+            raise ValueError(f"coordinates[{idx}] has shape {array.shape}; expected {expected_shape}")
+        flattened.append(np.ascontiguousarray(array).ravel().tolist())
+    if precisionOptions is None:
+        precisionOptions = PrecisionOptions()
+    return _embedMolecules.AnalyzeETKDGStage(
+        molecules,
+        flattened,
+        params,
+        normalized_stage,
+        str(backend).upper(),
+        precisionOptions._as_native(),
+        bool(includeCpuReference),
+    )
 
 
 @overload
