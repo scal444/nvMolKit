@@ -191,25 +191,28 @@ TEST(FireMinimizerPerMolMMFF, DirectLauncherConvergesNearReference) {
 }
 
 TEST(FireMinimizerPerMolMMFF, DirectLauncherNoopsForEmptyBatch) {
-  nvMolKit::FireOptions options{};
-  const cudaError_t     err = nvMolKit::launchFirePerMolKernel(/*numMols=*/0,
+  nvMolKit::FireOptions                        options{};
+  nvMolKit::MMFF::EnergyForceContribsDevicePtr terms{};
+  nvMolKit::MMFF::BatchedIndicesDevicePtr      indices{};
+  double*                                      doubleBuffer = nullptr;
+  const cudaError_t                            err          = nvMolKit::launchFirePerMolKernel(/*numMols=*/0,
                                                            /*molIds=*/nullptr,
                                                            /*maxAtoms=*/0,
                                                            /*atomStarts=*/nullptr,
                                                            options,
                                                            /*numIters=*/10,
                                                            /*gradTol=*/options.gradTol,
-                                                           {},
-                                                           {},
+                                                           terms,
+                                                           indices,
                                                            /*hasConstraints=*/false,
-                                                           /*positions=*/nullptr,
-                                                           /*grad=*/nullptr,
-                                                           /*velocities=*/nullptr,
-                                                           /*alphas=*/nullptr,
-                                                           /*dts=*/nullptr,
+                                                           /*positions=*/doubleBuffer,
+                                                           /*grad=*/doubleBuffer,
+                                                           /*velocities=*/doubleBuffer,
+                                                           /*alphas=*/doubleBuffer,
+                                                           /*dts=*/doubleBuffer,
                                                            /*nStepsPositive=*/nullptr,
                                                            /*masses=*/nullptr,
-                                                           /*energyOuts=*/nullptr,
+                                                           /*energyOuts=*/doubleBuffer,
                                                            /*statuses=*/nullptr);
   EXPECT_EQ(err, cudaSuccess);
 }
