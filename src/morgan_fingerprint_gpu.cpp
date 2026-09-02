@@ -239,39 +239,39 @@ void ensureGpuBatchCapacity(MorganGPUBuffersBatch& buffers,
   }
 }
 
-void ensurePinnedBatchCapacity(MorganPerThreadBuffers& buffers, const size_t numMols) {
-  if (buffers.pinnedBatchCapacity >= numMols) {
+void ensurePinnedBatchCapacity(std::vector<MorganPerThreadBuffers>& threadBuffers, const size_t numMols) {
+  const bool hasCapacity = std::all_of(threadBuffers.begin(), threadBuffers.end(), [numMols](const auto& buffers) {
+    return buffers.pinnedBatchCapacity >= numMols;
+  });
+  if (hasCapacity) {
     return;
   }
 
-  // The old arena may still be the source of an asynchronous H2D copy from the
-  // preceding call. Wait only on growth; steady-state calls remain synchronization-free.
-  if (buffers.pinnedBatchCapacity > 0) {
-    cudaCheckError(cudaEventSynchronize(buffers.prevMemcpyDoneEvent.event()));
+  // The old reservoir may still be the source of asynchronous H2D copies from
+  // the preceding call. Wait only on growth; steady-state calls remain synchronization-free.
+  for (auto& buffers : threadBuffers) {
+    if (buffers.pinnedBatchCapacity > 0) {
+      cudaCheckError(cudaEventSynchronize(buffers.prevMemcpyDoneEvent.event()));
+    }
   }
 
   constexpr size_t kArenaAllocations = 6;
   const size_t     invariantCount    = numMols * 128;
   const size_t     bondCount         = invariantCount * kMaxBondsPerAtom;
-  const size_t     arenaBytes = invariantCount * sizeof(std::uint32_t) * 2 + bondCount * sizeof(std::int16_t) * 2 +
-                            numMols * sizeof(std::int16_t) + numMols * sizeof(int) + kArenaAllocations * 256;
+  const size_t     workerBytes = invariantCount * sizeof(std::uint32_t) * 2 + bondCount * sizeof(std::int16_t) * 2 +
+                             numMols * sizeof(std::int16_t) + numMols * sizeof(int) + kArenaAllocations * 256;
+  auto allocator = std::make_shared<PinnedHostAllocator>(workerBytes * threadBuffers.size());
 
-  auto allocator            = std::make_unique<PinnedHostAllocator>(arenaBytes);
-  auto nAtomsPerMol         = allocator->allocate<std::int16_t>(numMols);
-  auto atomInvariants       = allocator->allocate<std::uint32_t>(invariantCount);
-  auto bondInvariants       = allocator->allocate<std::uint32_t>(invariantCount);
-  auto bondIndices          = allocator->allocate<std::int16_t>(bondCount);
-  auto bondOtherAtomIndices = allocator->allocate<std::int16_t>(bondCount);
-  auto outputIndices        = allocator->allocate<int>(numMols);
-
-  buffers.nAtomsPerMol           = std::move(nAtomsPerMol);
-  buffers.h_atomInvariants       = std::move(atomInvariants);
-  buffers.h_bondInvariants       = std::move(bondInvariants);
-  buffers.h_bondIndices          = std::move(bondIndices);
-  buffers.h_bondOtherAtomIndices = std::move(bondOtherAtomIndices);
-  buffers.h_outputIndices        = std::move(outputIndices);
-  buffers.pinnedAllocator        = std::move(allocator);
-  buffers.pinnedBatchCapacity    = numMols;
+  for (auto& buffers : threadBuffers) {
+    buffers.nAtomsPerMol           = allocator->allocate<std::int16_t>(numMols);
+    buffers.h_atomInvariants       = allocator->allocate<std::uint32_t>(invariantCount);
+    buffers.h_bondInvariants       = allocator->allocate<std::uint32_t>(invariantCount);
+    buffers.h_bondIndices          = allocator->allocate<std::int16_t>(bondCount);
+    buffers.h_bondOtherAtomIndices = allocator->allocate<std::int16_t>(bondCount);
+    buffers.h_outputIndices        = allocator->allocate<int>(numMols);
+    buffers.pinnedAllocator        = allocator;
+    buffers.pinnedBatchCapacity    = numMols;
+  }
 }
 
 template <int fpSize>
@@ -350,6 +350,7 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
   threadBuffers.resize(nThreadsActual);
 
   const size_t dispatchChunkSize = std::min(dispatchChunkSizeInit, numMols);
+  ensurePinnedBatchCapacity(threadBuffers, dispatchChunkSize);
 
   for (auto& perThreadBuffer : threadBuffers) {
     ensureGpuBatchCapacity(*perThreadBuffer.gpuBuffers32,
@@ -367,7 +368,6 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
                            dispatchChunkSize,
                            maxRadius,
                            128);
-    ensurePinnedBatchCapacity(perThreadBuffer, dispatchChunkSize);
     cudaCheckError(cudaEventRecord(perThreadBuffer.prevMemcpyDoneEvent.event(), perThreadBuffer.stream.stream()));
   }
 

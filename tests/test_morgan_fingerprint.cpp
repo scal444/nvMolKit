@@ -435,19 +435,20 @@ TEST(MorganFingerprintGpuTest, ReusedWorkspaceHandlesGrowingAndShrinkingBatchSiz
 
   auto                                generator = nvMolKit::MorganFingerprintGenerator(radius, fpSize);
   nvMolKit::FingerprintComputeOptions options;
-  options.backend       = nvMolKit::FingerprintComputeBackend::GPU;
-  options.numCpuThreads = 4;
-
-  // Exercise initial allocation, growth, shrink-without-reallocation, and exact
-  // capacity reuse on the same persistent generator workspaces.
-  for (const int batchSize : {3, 41, 7, 41}) {
-    options.gpuBatchSize = batchSize;
-    const auto actual    = generator.GetFingerprints(molsView, options);
-    ASSERT_EQ(actual.size(), expected.size()) << "batch size " << batchSize;
+  options.backend = nvMolKit::FingerprintComputeBackend::GPU;
+  // Exercise initial allocation, batch and worker growth, shrink-without-reallocation,
+  // and exact capacity reuse on the same shared pinned reservoir.
+  for (const auto& [batchSize, numThreads] : std::array<std::pair<int, int>, 4>{
+         {{3, 2}, {41, 7}, {7, 3}, {41, 7}}
+  }) {
+    options.gpuBatchSize  = batchSize;
+    options.numCpuThreads = numThreads;
+    const auto actual     = generator.GetFingerprints(molsView, options);
+    ASSERT_EQ(actual.size(), expected.size()) << "batch size " << batchSize << ", threads " << numThreads;
     for (size_t molIdx = 0; molIdx < actual.size(); ++molIdx) {
       ASSERT_NE(actual[molIdx], nullptr);
-      EXPECT_EQ(*actual[molIdx], *expected[molIdx])
-        << "batch size " << batchSize << ", element " << molIdx << " with smiles " << smiles[molIdx];
+      EXPECT_EQ(*actual[molIdx], *expected[molIdx]) << "batch size " << batchSize << ", threads " << numThreads
+                                                    << ", element " << molIdx << " with smiles " << smiles[molIdx];
     }
   }
 }
