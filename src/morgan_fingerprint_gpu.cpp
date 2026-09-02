@@ -37,23 +37,44 @@ namespace nvMolKit {
 
 namespace detail {
 
+namespace {
+
+std::uint8_t getMorganMoleculeBucket(const RDKit::ROMol& mol) {
+  const auto numAtoms = mol.getNumAtoms();
+  const auto numBonds = mol.getNumBonds();
+  return numAtoms >= 128 || numBonds >= 128 ? 3 :
+         numAtoms < 32 && numBonds < 32     ? 0 :
+         numAtoms < 64 && numBonds < 64     ? 1 :
+                                              2;
+}
+
+}  // namespace
+
 MorganMoleculeBuckets classifyMorganMolecules(const std::vector<const RDKit::ROMol*>& mols, const int numThreads) {
-  constexpr size_t kNumBuckets = 4;
+  constexpr size_t kNumBuckets           = 4;
+  constexpr size_t kMinParallelMolecules = 4096;
 
   const size_t numMols = mols.size();
   if (numMols == 0) {
     return {};
   }
 
-  const int                                    requestedThreads = std::max(1, numThreads);
-  std::vector<std::uint8_t>                    bucketByMolecule(numMols);
+  MorganMoleculeBuckets                      result;
+  std::array<std::vector<int>*, kNumBuckets> buckets = {&result.work32,
+                                                        &result.work64,
+                                                        &result.work128,
+                                                        &result.workLarge};
+  if (numMols < kMinParallelMolecules || numThreads <= 1) {
+    for (size_t molIdx = 0; molIdx < numMols; ++molIdx) {
+      buckets[getMorganMoleculeBucket(*mols[molIdx])]->push_back(static_cast<int>(molIdx));
+    }
+    return result;
+  }
+
+  const int                 requestedThreads = static_cast<int>(std::min(numMols, static_cast<size_t>(numThreads)));
+  std::vector<std::uint8_t> bucketByMolecule(numMols);
   std::vector<std::array<size_t, kNumBuckets>> countsByThread(static_cast<size_t>(requestedThreads));
   std::vector<std::array<size_t, kNumBuckets>> offsetsByThread(static_cast<size_t>(requestedThreads));
-  MorganMoleculeBuckets                        result;
-  std::array<std::vector<int>*, kNumBuckets>   buckets = {&result.work32,
-                                                          &result.work64,
-                                                          &result.work128,
-                                                          &result.workLarge};
 
 #pragma omp parallel num_threads(requestedThreads) default(none) \
   shared(mols, bucketByMolecule, countsByThread, offsetsByThread, buckets, numMols)
@@ -65,14 +86,8 @@ MorganMoleculeBuckets classifyMorganMolecules(const std::vector<const RDKit::ROM
     std::array<size_t, kNumBuckets> counts{};
 
     for (size_t molIdx = begin; molIdx < end; ++molIdx) {
-      const RDKit::ROMol& mol      = *mols[molIdx];
-      const auto          numAtoms = mol.getNumAtoms();
-      const auto          numBonds = mol.getNumBonds();
-      const std::uint8_t  bucket   = numAtoms >= 128 || numBonds >= 128 ? 3 :
-                                     numAtoms < 32 && numBonds < 32     ? 0 :
-                                     numAtoms < 64 && numBonds < 64     ? 1 :
-                                                                          2;
-      bucketByMolecule[molIdx]     = bucket;
+      const std::uint8_t bucket = getMorganMoleculeBucket(*mols[molIdx]);
+      bucketByMolecule[molIdx]  = bucket;
       ++counts[bucket];
     }
     countsByThread[static_cast<size_t>(threadIdx)] = counts;
