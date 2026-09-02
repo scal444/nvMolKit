@@ -1490,6 +1490,102 @@ TEST_P(BFGSMinimizerBackendTest, ReuseMinimizer_VariedSizes) {
 
 INSTANTIATE_TEST_SUITE_P(BFGSMinimizer4DTest, BFGSMinimizerTest4DTest, ::testing::Values(false, true));
 
+TEST(BFGSPrecisionStateTest, PresetsAllocateResolvedStateAndHessianWidths) {
+  const std::vector<int>           atomStarts{0, 2, 5};
+  nvMolKit::AsyncDeviceVector<int> atomStartsDevice;
+  atomStartsDevice.setFromVector(atomStarts);
+
+  for (const auto mode : {nvMolKit::PrecisionMode::LEGACY,
+                          nvMolKit::PrecisionMode::HESSIAN_F32,
+                          nvMolKit::PrecisionMode::MINIMIZER_F32,
+                          nvMolKit::PrecisionMode::FORCEFIELD_F32,
+                          nvMolKit::PrecisionMode::MIXED,
+                          nvMolKit::PrecisionMode::SINGLE}) {
+    const nvMolKit::PrecisionOptions precision{mode};
+    const bool                       floatState   = nvMolKit::usesFloatMinimizerState(precision);
+    const bool                       floatHessian = nvMolKit::usesFloatHessian(precision);
+    nvMolKit::BfgsBatchMinimizer     minimizer(3,
+                                           nvMolKit::DebugLevel::NONE,
+                                           true,
+                                           nullptr,
+                                           nvMolKit::BfgsBackend::HYBRID,
+                                           precision);
+    minimizer
+      .initialize(atomStarts, atomStartsDevice.data(), nullptr, nullptr, nullptr, nvMolKit::BfgsBackend::BATCHED);
+
+    SCOPED_TRACE(nvMolKit::precisionModeName(mode));
+    EXPECT_EQ(
+      minimizer.resolveBackend(atomStarts),
+      mode == nvMolKit::PrecisionMode::LEGACY ? nvMolKit::BfgsBackend::PER_MOLECULE : nvMolKit::BfgsBackend::BATCHED);
+    EXPECT_EQ(minimizer.lineSearchDirFloat_.size() != 0, floatState);
+    EXPECT_EQ(minimizer.scratchPositionsFloat_.size() != 0, floatState);
+    EXPECT_EQ(minimizer.scratchGradFloat_.size() != 0, floatState);
+    EXPECT_EQ(minimizer.hessDGradFloat_.size() != 0, floatState);
+    EXPECT_EQ(minimizer.gradScalesFloat_.size() != 0, floatState);
+    EXPECT_EQ(minimizer.lineSearchLambdasFloat_.size() != 0, floatState);
+    EXPECT_EQ(minimizer.lineSearchSlopeFloat_.size() != 0, floatState);
+    EXPECT_EQ(minimizer.lineSearchMaxStepsFloat_.size() != 0, floatState);
+    EXPECT_EQ(minimizer.lineSearchStoredEnergyFloat_.size() != 0, floatState);
+    EXPECT_EQ(minimizer.lineSearchDir_.size() != 0, !floatState);
+    EXPECT_EQ(minimizer.scratchGrad_.size() != 0, !floatState);
+    EXPECT_EQ(minimizer.hessDGrad_.size() != 0, !floatState);
+    EXPECT_EQ(minimizer.gradScales_.size() != 0, !floatState);
+    EXPECT_EQ(minimizer.inverseHessianFloat_.size() != 0, floatHessian);
+    EXPECT_EQ(minimizer.inverseHessian_.size() != 0, !floatHessian);
+    // Required double ABI bridge exists even when candidate state is float.
+    EXPECT_EQ(minimizer.scratchPositions_.size(), 15);
+  }
+}
+
+TEST_F(BFGSMinimizerHarmonicTestFixture, AllPrecisionPresetsExecuteNumerically) {
+  for (const auto mode : {nvMolKit::PrecisionMode::LEGACY,
+                          nvMolKit::PrecisionMode::HESSIAN_F32,
+                          nvMolKit::PrecisionMode::MINIMIZER_F32,
+                          nvMolKit::PrecisionMode::FORCEFIELD_F32,
+                          nvMolKit::PrecisionMode::MIXED,
+                          nvMolKit::PrecisionMode::SINGLE}) {
+    SCOPED_TRACE(nvMolKit::precisionModeName(mode));
+    setUpSystems(/*computeLastDim=*/true, /*seed=*/42);
+    auto                         forcefield = makeForcefield();
+    nvMolKit::BfgsBatchMinimizer minimizer(dim_,
+                                           nvMolKit::DebugLevel::NONE,
+                                           false,
+                                           nullptr,
+                                           nvMolKit::BfgsBackend::BATCHED,
+                                           {mode});
+    EXPECT_NO_THROW(
+      minimizer.minimize(400, 1e-5, forcefield, positionsDevice_, gradDevice_, energyOutsDevice_, nullptr));
+    const auto positions = getPositionsFromDevice();
+    verifyPositions(positions, mode == nvMolKit::PrecisionMode::SINGLE ? 0.2 : 0.1);
+    const auto statuses = getStatusesFromDevice(minimizer);
+    EXPECT_THAT(statuses, ::testing::Each(0));
+  }
+}
+
+TEST_F(BFGSMinimizerHarmonicTestFixture, ExplicitStateAxisIsIndependentOfComputeReductionAndHessian) {
+  nvMolKit::PrecisionOptions precision;
+  precision.minimizerStateStorage = nvMolKit::PrecisionDType::FLOAT32;
+  precision.minimizerCompute      = nvMolKit::PrecisionDType::FLOAT64;
+  precision.reductionCompute      = nvMolKit::PrecisionDType::FLOAT64;
+  precision.hessianStorage        = nvMolKit::PrecisionDType::FLOAT64;
+
+  setUpSystems(/*computeLastDim=*/true, /*seed=*/7);
+  auto                         forcefield = makeForcefield();
+  nvMolKit::BfgsBatchMinimizer minimizer(dim_,
+                                         nvMolKit::DebugLevel::NONE,
+                                         false,
+                                         nullptr,
+                                         nvMolKit::BfgsBackend::HYBRID,
+                                         precision);
+  EXPECT_EQ(minimizer.resolveBackend(atomStarts_), nvMolKit::BfgsBackend::BATCHED);
+  EXPECT_NO_THROW(minimizer.minimize(400, 1e-5, forcefield, positionsDevice_, gradDevice_, energyOutsDevice_, nullptr));
+  EXPECT_NE(minimizer.lineSearchDirFloat_.size(), 0);
+  EXPECT_EQ(minimizer.lineSearchDir_.size(), 0);
+  EXPECT_NE(minimizer.inverseHessian_.size(), 0);
+  EXPECT_EQ(minimizer.inverseHessianFloat_.size(), 0);
+  verifyPositions(getPositionsFromDevice(), 0.1);
+}
+
 INSTANTIATE_TEST_SUITE_P(BFGSBackends,
                          BFGSMinimizerBackendTest,
                          ::testing::Values(nvMolKit::BfgsBackend::BATCHED,

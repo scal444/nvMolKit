@@ -197,20 +197,31 @@ struct BfgsBatchMinimizer {
   AsyncDeviceVector<int> activeSystemIndices_;  // Indices of systems that are active in the current iteration.
   mutable int            numUnfinishedSystems_ = 0;
 
+  // The forcefield callback ABI consumes double coordinates, so scratchPositions_
+  // is also the evaluation bridge when minimizer state is stored in float.
   AsyncDeviceVector<double>  scratchPositions_;
+  AsyncDeviceVector<float>   scratchPositionsFloat_;
   AsyncDeviceVector<int16_t> statuses_;
 
   // Intermediate buffers used for linear search
   AsyncDeviceVector<double>  lineSearchDir_;  // xi
+  AsyncDeviceVector<float>   lineSearchDirFloat_;
   AsyncDeviceVector<int16_t> lineSearchStatus_;
   AsyncDeviceVector<double>  lineSearchLambdaMins_;
+  AsyncDeviceVector<float>   lineSearchLambdaMinsFloat_;
   AsyncDeviceVector<double>  lineSearchLambdas_;
+  AsyncDeviceVector<float>   lineSearchLambdasFloat_;
   AsyncDeviceVector<double>  lineSearchLambdas2_;
+  AsyncDeviceVector<float>   lineSearchLambdas2Float_;
   AsyncDeviceVector<double>  lineSearchSlope_;
+  AsyncDeviceVector<float>   lineSearchSlopeFloat_;
   AsyncDeviceVector<double>  lineSearchMaxSteps_;
+  AsyncDeviceVector<float>   lineSearchMaxStepsFloat_;
 
   AsyncDeviceVector<double> lineSearchStoredEnergy_;
+  AsyncDeviceVector<float>  lineSearchStoredEnergyFloat_;
   AsyncDeviceVector<double> lineSearchEnergyScratch_;
+  AsyncDeviceVector<float>  lineSearchEnergyScratchFloat_;
   AsyncDeviceVector<double> lineSearchEnergyOut_;
 
   // Temporary buffers for counting finished systems. Mutable to all
@@ -225,10 +236,13 @@ struct BfgsBatchMinimizer {
   AsyncDeviceVector<int> hessianStarts_;
 
   AsyncDeviceVector<double> scratchGrad_;
+  AsyncDeviceVector<float>  scratchGradFloat_;
   AsyncDeviceVector<double> gradScales_;
+  AsyncDeviceVector<float>  gradScalesFloat_;
   AsyncDeviceVector<double> inverseHessian_;
   AsyncDeviceVector<float>  inverseHessianFloat_;
   AsyncDeviceVector<double> hessDGrad_;
+  AsyncDeviceVector<float>  hessDGradFloat_;
 
   int  dataDim_        = 3;      // Dimensionality of positions.
   bool scaleGrads_     = true;   // Whether to scale gradients to match RDKit forcefield.
@@ -301,6 +315,7 @@ struct BfgsBatchMinimizer {
 };
 
 void copyAndInvert(const AsyncDeviceVector<double>& src, AsyncDeviceVector<double>& dst);
+void copyAndInvert(const AsyncDeviceVector<double>& src, AsyncDeviceVector<float>& dst);
 
 }  // namespace nvMolKit
 
