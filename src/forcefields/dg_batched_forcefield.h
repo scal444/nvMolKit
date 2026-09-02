@@ -16,8 +16,11 @@
 #ifndef NVMOLKIT_DG_BATCHED_FORCEFIELD_H
 #define NVMOLKIT_DG_BATCHED_FORCEFIELD_H
 
+#include <variant>
+
 #include "src/forcefields/batched_forcefield.h"
 #include "src/forcefields/dist_geom.h"
+#include "src/precision_options.h"
 
 namespace nvMolKit {
 
@@ -39,8 +42,9 @@ class DGBatchedForcefield final : public BatchedForcefield {
                       const std::vector<int>&                     atomStartsHost,
                       double                                      chiralWeight,
                       double                                      fourthDimWeight,
-                      BatchedForcefieldMetadata                   metadata = {},
-                      cudaStream_t                                stream   = nullptr);
+                      BatchedForcefieldMetadata                   metadata  = {},
+                      cudaStream_t                                stream    = nullptr,
+                      PrecisionOptions                            precision = {});
 
   //! \brief Computes DG energies through the generic batched-forcefield API.
   cudaError_t computeEnergy(double*        energyOuts,
@@ -53,12 +57,22 @@ class DGBatchedForcefield final : public BatchedForcefield {
                                const double*  positions,
                                const uint8_t* activeSystemMask = nullptr,
                                cudaStream_t   stream           = nullptr) override;
+  cudaError_t computeEnergyFloat(double*, const float*, const uint8_t* = nullptr, cudaStream_t = nullptr) override;
+  cudaError_t computeGradientsFloat(float*, const float*, const uint8_t* = nullptr, cudaStream_t = nullptr) override;
 
  private:
-  DistGeom::BatchedMolecularDeviceBuffers systemDevice_;
-  AsyncDeviceVector<int>                  atomStartsDevice_;
-  double                                  chiralWeight_    = 1.0;
-  double                                  fourthDimWeight_ = 0.1;
+  std::variant<DistGeom::BatchedMolecularDeviceBuffers, DistGeom::BatchedMolecularDeviceBuffersF32Params> systemDevice_;
+  AsyncDeviceVector<int>    atomStartsDevice_;
+  AsyncDeviceVector<float>  positionsFloat_;
+  AsyncDeviceVector<float>  gradientsFloat_;
+  AsyncDeviceVector<double> positionsComputeDouble_;
+  AsyncDeviceVector<double> gradientsComputeDouble_;
+  bool                      coordinateStorageInFloat_ = false;
+  bool                      gradientStorageInFloat_   = false;
+  bool                      computeInFloat_           = false;
+  bool                      reduceInFloat_            = false;
+  double                    chiralWeight_             = 1.0;
+  double                    fourthDimWeight_          = 0.1;
 };
 
 }  // namespace nvMolKit

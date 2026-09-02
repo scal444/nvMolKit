@@ -16,8 +16,11 @@
 #ifndef NVMOLKIT_ETK_BATCHED_FORCEFIELD_H
 #define NVMOLKIT_ETK_BATCHED_FORCEFIELD_H
 
+#include <variant>
+
 #include "src/forcefields/batched_forcefield.h"
 #include "src/forcefields/dist_geom.h"
+#include "src/precision_options.h"
 
 namespace nvMolKit {
 
@@ -37,8 +40,9 @@ class ETKBatchedForcefield final : public BatchedForcefield {
   ETKBatchedForcefield(const DistGeom::BatchedMolecularSystem3DHost& molSystemHost,
                        const std::vector<int>&                       atomStartsHost,
                        bool                                          useBasicKnowledge,
-                       BatchedForcefieldMetadata                     metadata = {},
-                       cudaStream_t                                  stream   = nullptr);
+                       BatchedForcefieldMetadata                     metadata  = {},
+                       cudaStream_t                                  stream    = nullptr,
+                       PrecisionOptions                              precision = {});
 
   //! \brief Computes ETK energies through the generic batched-forcefield API.
   cudaError_t computeEnergy(double*        energyOuts,
@@ -51,6 +55,8 @@ class ETKBatchedForcefield final : public BatchedForcefield {
                                const double*  positions,
                                const uint8_t* activeSystemMask = nullptr,
                                cudaStream_t   stream           = nullptr) override;
+  cudaError_t computeEnergyFloat(double*, const float*, const uint8_t* = nullptr, cudaStream_t = nullptr) override;
+  cudaError_t computeGradientsFloat(float*, const float*, const uint8_t* = nullptr, cudaStream_t = nullptr) override;
 
   //! \brief Computes the planar ETK subset used by the post-minimization check.
   cudaError_t computePlanarEnergy(double*        energyOuts,
@@ -59,12 +65,23 @@ class ETKBatchedForcefield final : public BatchedForcefield {
                                   cudaStream_t   stream           = nullptr);
 
   //! \brief Returns the uploaded ETK contribution buffers for auxiliary kernels.
-  const DistGeom::Energy3DForceContribsDevice& contribs() const { return systemDevice_.contribs; }
+  template <typename Visitor> decltype(auto) visitContribs(Visitor&& visitor) const {
+    return std::visit([&](const auto& buffers) -> decltype(auto) { return visitor(buffers.contribs); }, systemDevice_);
+  }
 
  private:
-  DistGeom::BatchedMolecular3DDeviceBuffers systemDevice_;
-  AsyncDeviceVector<int>                    atomStartsDevice_;
-  DistGeom::ETKTerm                         term_ = DistGeom::ETKTerm::ALL;
+  std::variant<DistGeom::BatchedMolecular3DDeviceBuffers, DistGeom::BatchedMolecular3DDeviceBuffersF32Params>
+                            systemDevice_;
+  AsyncDeviceVector<int>    atomStartsDevice_;
+  AsyncDeviceVector<float>  positionsFloat_;
+  AsyncDeviceVector<float>  gradientsFloat_;
+  AsyncDeviceVector<double> positionsComputeDouble_;
+  AsyncDeviceVector<double> gradientsComputeDouble_;
+  bool                      coordinateStorageInFloat_ = false;
+  bool                      gradientStorageInFloat_   = false;
+  bool                      computeInFloat_           = false;
+  bool                      reduceInFloat_            = false;
+  DistGeom::ETKTerm         term_                     = DistGeom::ETKTerm::ALL;
 };
 
 }  // namespace nvMolKit

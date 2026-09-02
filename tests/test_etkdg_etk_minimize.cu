@@ -296,6 +296,56 @@ TEST_P(ETKStageSingleMolTestFixture, MinimizeCompare) {
   EXPECT_THAT(refEnergies, ::testing::Pointwise(testing::Ge(), gpuEnergies));
 }
 
+TEST(ETKPrecisionModes, FloatForcefieldPresetsMinimizeSmallMolecule) {
+  const std::string                       path = getTestDataFolderPath() + "/rdkit_smallmol_1.mol2";
+  std::vector<nvMolKit::PrecisionOptions> precisions(9);
+  precisions[0].mode                       = nvMolKit::PrecisionMode::FORCEFIELD_F32;
+  precisions[1].mode                       = nvMolKit::PrecisionMode::MIXED;
+  precisions[2].mode                       = nvMolKit::PrecisionMode::SINGLE;
+  precisions[3].forcefieldParameterStorage = nvMolKit::PrecisionDType::FLOAT32;
+  precisions[3].forcefieldCompute          = nvMolKit::PrecisionDType::FLOAT64;
+  for (int i = 0; i < 4; ++i) {
+    precisions[i + 4].forcefieldParameterStorage = nvMolKit::PrecisionDType::FLOAT64;
+    precisions[i + 4].forcefieldCompute          = nvMolKit::PrecisionDType::FLOAT32;
+    precisions[i + 4].forcefieldCoordinateStorage =
+      (i & 1) ? nvMolKit::PrecisionDType::FLOAT32 : nvMolKit::PrecisionDType::FLOAT64;
+    precisions[i + 4].forcefieldGradientStorage =
+      (i & 2) ? nvMolKit::PrecisionDType::FLOAT32 : nvMolKit::PrecisionDType::FLOAT64;
+  }
+  precisions[8].reductionCompute = nvMolKit::PrecisionDType::FLOAT32;
+  for (size_t precisionIdx = 0; precisionIdx < precisions.size(); ++precisionIdx) {
+    SCOPED_TRACE("precision case " + std::to_string(precisionIdx));
+    auto mol = std::unique_ptr<RDKit::RWMol>(RDKit::MolFileToMol(path, false));
+    ASSERT_NE(mol, nullptr);
+    RDKit::MolOps::sanitizeMol(*mol);
+    perturbConformer(mol->getConformer(), 0.5);
+    std::vector<RDKit::ROMol*>               mols{mol.get()};
+    ETKDGContext                             context;
+    std::vector<nvMolKit::detail::EmbedArgs> eargs;
+    auto                                     params = getETKDGOption(ETKDGOption::ETKDGv3);
+    params.useRandomCoords                          = true;
+    initTestComponentsCommon(mols, context, eargs, params);
+    const std::vector<const RDKit::ROMol*> constMols{mol.get()};
+    const auto                             initialEnergy =
+      getGPUEnergy(constMols, context.systemDevice.positions, eargs, params.useBasicKnowledge).front();
+    nvMolKit::BfgsBatchMinimizer             minimizer(4,
+                                           nvMolKit::DebugLevel::NONE,
+                                           true,
+                                           nullptr,
+                                           nvMolKit::BfgsBackend::BATCHED,
+                                           precisions[precisionIdx]);
+    std::vector<std::unique_ptr<ETKDGStage>> stages;
+    stages.push_back(
+      std::make_unique<nvMolKit::detail::ETKMinimizationStage>(constMols, eargs, params, context, minimizer, nullptr));
+    nvMolKit::detail::ETKDGDriver driver(std::make_unique<ETKDGContext>(std::move(context)), std::move(stages));
+    driver.run(1);
+    const auto finalEnergy =
+      getGPUEnergy(constMols, driver.context().systemDevice.positions, eargs, params.useBasicKnowledge).front();
+    EXPECT_TRUE(std::isfinite(finalEnergy));
+    EXPECT_LT(finalEnergy, initialEnergy);
+  }
+}
+
 namespace {
 std::vector<ETKStageTestParam> makeETKStageParams(const std::vector<ETKDGOption>& options) {
   std::vector<ETKStageTestParam> params;
