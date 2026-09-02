@@ -1629,3 +1629,35 @@ TEST(PrecisionOptionsTest, PresetsAndExplicitAxesResolveIndependently) {
   EXPECT_EQ(resolved.minimizerCompute, PrecisionDType::FLOAT64);
   EXPECT_EQ(resolved.reductionCompute, PrecisionDType::FLOAT32);
 }
+
+TEST(PrecisionOptionsTest, BfgsPerMoleculeDispatchCoversEveryUnsupportedPrecisionAxis) {
+  using nvMolKit::BfgsBackend;
+  using nvMolKit::PrecisionDType;
+  using nvMolKit::PrecisionOptions;
+
+  const std::vector<int> smallSystems{0, 5, 10};
+  const auto             resolvedBackend = [&](const PrecisionOptions& precision) {
+    nvMolKit::BfgsBatchMinimizer minimizer(/*dataDim=*/3,
+                                           nvMolKit::DebugLevel::NONE,
+                                           /*scaleGrads=*/true,
+                                           /*stream=*/nullptr,
+                                           BfgsBackend::PER_MOLECULE,
+                                           precision);
+    return minimizer.resolveBackend(smallSystems);
+  };
+  const auto withFloatAxis = [](PrecisionDType PrecisionOptions::*axis) {
+    PrecisionOptions precision;
+    precision.*axis = PrecisionDType::FLOAT32;
+    return precision;
+  };
+
+  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::forcefieldParameterStorage)), BfgsBackend::PER_MOLECULE);
+  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::hessianStorage)), BfgsBackend::PER_MOLECULE);
+
+  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::forcefieldCoordinateStorage)), BfgsBackend::BATCHED);
+  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::forcefieldGradientStorage)), BfgsBackend::BATCHED);
+  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::minimizerStateStorage)), BfgsBackend::BATCHED);
+  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::forcefieldCompute)), BfgsBackend::BATCHED);
+  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::minimizerCompute)), BfgsBackend::BATCHED);
+  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::reductionCompute)), BfgsBackend::BATCHED);
+}

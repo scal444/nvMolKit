@@ -153,6 +153,9 @@ inline bool usesFloatForcefield(const PrecisionOptions& o) {
 inline bool usesFloatForcefieldCoordinates(const PrecisionOptions& o) {
   return isFloat32(resolvePrecisionOptions(o).forcefieldCoordinateStorage);
 }
+inline bool usesFloatForcefieldGradients(const PrecisionOptions& o) {
+  return isFloat32(resolvePrecisionOptions(o).forcefieldGradientStorage);
+}
 inline bool usesFloatForcefieldCompute(const PrecisionOptions& o) {
   return isFloat32(resolvePrecisionOptions(o).forcefieldCompute);
 }
@@ -161,6 +164,24 @@ inline bool usesFloatMinimizerCompute(const PrecisionOptions& o) {
 }
 inline bool usesFloatReduction(const PrecisionOptions& o) {
   return isFloat32(resolvePrecisionOptions(o).reductionCompute);
+}
+//! The per-molecule BFGS kernels support float force-field parameters and
+//! float Hessian storage, but all other storage and arithmetic roles are the
+//! legacy double specializations.
+inline bool bfgsPrecisionRequiresBatchedBackend(const PrecisionOptions& o) {
+  const auto resolved = resolvePrecisionOptions(o);
+  return isFloat32(resolved.forcefieldCoordinateStorage) || isFloat32(resolved.forcefieldGradientStorage) ||
+         isFloat32(resolved.minimizerStateStorage) || isFloat32(resolved.forcefieldCompute) ||
+         isFloat32(resolved.minimizerCompute) || isFloat32(resolved.reductionCompute);
+}
+//! The per-molecule FIRE kernels additionally support float minimizer-state
+//! storage. Compute and reduction roles, and force-field coordinate/gradient
+//! storage, require the independently-dispatched batched kernels.
+inline bool firePrecisionRequiresBatchedBackend(const PrecisionOptions& o) {
+  const auto resolved = resolvePrecisionOptions(o);
+  return isFloat32(resolved.forcefieldCoordinateStorage) || isFloat32(resolved.forcefieldGradientStorage) ||
+         isFloat32(resolved.forcefieldCompute) || isFloat32(resolved.minimizerCompute) ||
+         isFloat32(resolved.reductionCompute);
 }
 inline PrecisionOptions withMode(PrecisionMode m) {
   PrecisionOptions o;
@@ -178,6 +199,9 @@ inline bool usesFloatForcefield(PrecisionMode m) {
 }
 inline bool usesFloatForcefieldCoordinates(PrecisionMode m) {
   return usesFloatForcefieldCoordinates(withMode(m));
+}
+inline bool usesFloatForcefieldGradients(PrecisionMode m) {
+  return usesFloatForcefieldGradients(withMode(m));
 }
 }  // namespace nvMolKit
 #endif

@@ -1055,3 +1055,94 @@ TEST(FireMinimizer, HybridBackendSelectionAndPerMolInitialization) {
     EXPECT_NEAR(state.alpha[i], options.alphaInit, 0.0);
   }
 }
+
+TEST(FireMinimizer, PerMoleculeDispatchCoversEveryUnsupportedPrecisionAxis) {
+  using nvMolKit::FireBackend;
+  using nvMolKit::PrecisionDType;
+  using nvMolKit::PrecisionOptions;
+
+  const std::vector<int> smallSystems{0, 5, 10};
+  const auto             resolvedBackend = [&](const PrecisionOptions& precision) {
+    nvMolKit::FireBatchMinimizer minimizer(kDim,
+                                           nvMolKit::FireOptions{},
+                                           /*stream=*/nullptr,
+                                           /*debugMode=*/false,
+                                           FireBackend::PER_MOLECULE,
+                                           precision);
+    return minimizer.resolveBackend(smallSystems);
+  };
+  const auto withFloatAxis = [](PrecisionDType PrecisionOptions::*axis) {
+    PrecisionOptions precision;
+    precision.*axis = PrecisionDType::FLOAT32;
+    return precision;
+  };
+
+  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::forcefieldParameterStorage)), FireBackend::PER_MOLECULE);
+  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::hessianStorage)), FireBackend::PER_MOLECULE);
+  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::minimizerStateStorage)), FireBackend::PER_MOLECULE);
+
+  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::forcefieldCoordinateStorage)), FireBackend::BATCHED);
+  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::forcefieldGradientStorage)), FireBackend::BATCHED);
+  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::forcefieldCompute)), FireBackend::BATCHED);
+  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::minimizerCompute)), FireBackend::BATCHED);
+  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::reductionCompute)), FireBackend::BATCHED);
+}
+
+TEST(FireMinimizer, BatchedPrecisionDispatchUsesResolvedStateComputeAndReductionTypes) {
+  using nvMolKit::FireBackend;
+  using nvMolKit::PrecisionDType;
+  using nvMolKit::PrecisionOptions;
+
+  for (const PrecisionDType stateType : {PrecisionDType::FLOAT64, PrecisionDType::FLOAT32}) {
+    for (const PrecisionDType computeType : {PrecisionDType::FLOAT64, PrecisionDType::FLOAT32}) {
+      for (const PrecisionDType reductionType : {PrecisionDType::FLOAT64, PrecisionDType::FLOAT32}) {
+        HarmonicSystems       systems(/*atomCounts=*/{2},
+                                /*kPerSystem=*/{3.25},
+                                /*startingPositions=*/{1.0, -0.5, 0.25, -0.75, 0.125, 0.5},
+                                /*targetPositions=*/{0.0, 0.0, 0.0});
+        nvMolKit::FireOptions options;
+        options.stuckDetectionEnabled = false;
+        options.dtInit                = 0.001234567890123;
+        options.alphaInit             = 0.234567890123;
+        options.gradTol               = 0.0;
+        options.dMax                  = 0.0;
+        options.abcCorrection         = true;
+
+        PrecisionOptions precision;
+        precision.minimizerStateStorage = stateType;
+        precision.minimizerCompute      = computeType;
+        precision.reductionCompute      = reductionType;
+        nvMolKit::FireBatchMinimizer minimizer(kDim,
+                                               options,
+                                               /*stream=*/nullptr,
+                                               /*debugMode=*/false,
+                                               FireBackend::BATCHED,
+                                               precision);
+        minimizer.initialize(systems.atomStartsHost(), nullptr, nullptr, FireBackend::BATCHED);
+        const auto initialState = minimizer.snapshotInternalState();
+        ASSERT_EQ(initialState.dt.size(), 1u);
+        ASSERT_EQ(initialState.alpha.size(), 1u);
+        if (stateType == PrecisionDType::FLOAT32) {
+          EXPECT_DOUBLE_EQ(initialState.dt[0], static_cast<double>(static_cast<float>(options.dtInit)));
+          EXPECT_DOUBLE_EQ(initialState.alpha[0], static_cast<double>(static_cast<float>(options.alphaInit)));
+        } else {
+          EXPECT_DOUBLE_EQ(initialState.dt[0], options.dtInit);
+          EXPECT_DOUBLE_EQ(initialState.alpha[0], options.alphaInit);
+        }
+
+        for (int step = 0; step < 3; ++step) {
+          minimizer.step(options.gradTol,
+                         systems.atomStartsDevice(),
+                         systems.positionsDevice(),
+                         systems.gradDevice(),
+                         systems.gradFunctor());
+        }
+        const auto positions = systems.readbackPositions();
+        for (const double position : positions) {
+          EXPECT_TRUE(std::isfinite(position));
+        }
+        EXPECT_NE(positions, systems.startingPositionsHost());
+      }
+    }
+  }
+}

@@ -70,6 +70,7 @@ __device__ __forceinline__ cuda::std::span<T> getSystemSpan(const cuda::std::spa
 }
 
 template <typename real> __device__ __forceinline__ real fireSqrt(real value) {
+  static_assert(cuda::std::is_same_v<real, float> || cuda::std::is_same_v<real, double>);
   if constexpr (cuda::std::is_same_v<real, float>)
     return sqrtf(value);
   else
@@ -77,6 +78,7 @@ template <typename real> __device__ __forceinline__ real fireSqrt(real value) {
 }
 
 template <typename real> __device__ __forceinline__ real firePow(real base, int exponent) {
+  static_assert(cuda::std::is_same_v<real, float> || cuda::std::is_same_v<real, double>);
   if constexpr (cuda::std::is_same_v<real, float>)
     return powf(base, static_cast<float>(exponent));
   else
@@ -190,7 +192,7 @@ __global__ void firePreKickKernel(const cuda::std::span<const int>    atomStarts
     real newAlpha  = alphaIn;
     int  newNsteps = nstepIn;
 
-    if (powerShared >= 0.0) {
+    if (powerShared >= reduceT{0}) {
       newNsteps = nstepIn + 1;
       if (newNsteps > params.nMinForIncrease) {
         newDt    = min(dtIn * static_cast<real>(params.dtIncrementFactor), static_cast<real>(params.maxDt));
@@ -213,7 +215,7 @@ __global__ void firePreKickKernel(const cuda::std::span<const int>    atomStarts
 
   // Negative-power half-step-back must read the freshly-updated nstepsPositive=0 marker
   // to decide if it fires. Equivalently: it fires iff power < 0 on a non-first step.
-  const bool negative = !isFirstStep && (powerShared < 0.0);
+  const bool negative = !isFirstStep && (powerShared < reduceT{0});
   if (negative) {
     for (int i = threadIdx.x; i < static_cast<int>(vSys.size()); i += kFireBlockSize) {
       if (takeHalfStepBack) {
@@ -268,6 +270,7 @@ __global__ void firePostKickKernel(const cuda::std::span<const int>      atomSta
 
   const real dt     = static_cast<real>(dts[sysIdx]);
   const real alpha  = static_cast<real>(alphas[sysIdx]);
+  const real dMax   = static_cast<real>(params.dMax);
   const int  nsteps = nStepsPositive[sysIdx];
 
   // Kick: v += dt * F. With mass weighting (real MD-style integration), F is converted
@@ -327,8 +330,8 @@ __global__ void firePostKickKernel(const cuda::std::span<const int>      atomSta
   // norm-clips dr (without modifying v) before the position update.
   real drScale = 1;
   if (useAbc) {
-    if (params.dMax > 0.0) {
-      const real maxV = static_cast<real>(params.dMax) / dt;
+    if (dMax > real{0}) {
+      const real maxV = dMax / dt;
       for (int i = threadIdx.x; i < static_cast<int>(vSys.size()); i += kFireBlockSize) {
         const real clamped = max(-maxV, min(maxV, static_cast<real>(vSys[i])));
         vSys[i]            = clamped;
@@ -336,7 +339,7 @@ __global__ void firePostKickKernel(const cuda::std::span<const int>      atomSta
       __syncthreads();
     }
   } else {
-    if (params.dMax > 0.0) {
+    if (dMax > real{0}) {
       reduceT drSqAccum = 0;
       for (int i = threadIdx.x; i < static_cast<int>(vSys.size()); i += kFireBlockSize) {
         const real dri = dt * static_cast<real>(vSys[i]);
@@ -348,8 +351,8 @@ __global__ void firePostKickKernel(const cuda::std::span<const int>      atomSta
       }
       __syncthreads();
       const real drNorm = static_cast<real>(fireSqrt(sharedScalar0));
-      if (drNorm > params.dMax) {
-        drScale = params.dMax / drNorm;
+      if (drNorm > dMax) {
+        drScale = dMax / drNorm;
       }
     }
   }
@@ -413,10 +416,7 @@ FireBatchMinimizer::FireBatchMinimizer(const int          dataDim,
       fireOptions_(options),
       stream_(stream),
       debugMode_(debugMode),
-      backend_((usesFloatForcefieldCoordinates(precision) || usesFloatMinimizerCompute(precision) ||
-                usesFloatForcefieldCompute(precision)) ?
-                 FireBackend::BATCHED :
-                 backend),
+      backend_(firePrecisionRequiresBatchedBackend(precision) ? FireBackend::BATCHED : backend),
       precision_(precision) {
   velocities_.setStream(stream_);
   velocitiesFloat_.setStream(stream_);

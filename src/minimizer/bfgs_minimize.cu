@@ -58,15 +58,6 @@ BfgsBackend resolveBackend(BfgsBackend backend, const std::vector<int>& atomStar
   return BfgsBackend::PER_MOLECULE;
 }
 
-bool requestsBfgsPrecisionPolicy(const PrecisionOptions& precision) {
-  return precision.mode != PrecisionMode::LEGACY || precision.forcefieldParameterStorage != PrecisionDType::DEFAULT ||
-         precision.forcefieldCoordinateStorage != PrecisionDType::DEFAULT ||
-         precision.forcefieldGradientStorage != PrecisionDType::DEFAULT ||
-         precision.hessianStorage != PrecisionDType::DEFAULT ||
-         precision.minimizerStateStorage != PrecisionDType::DEFAULT ||
-         precision.forcefieldCompute != PrecisionDType::DEFAULT ||
-         precision.minimizerCompute != PrecisionDType::DEFAULT || precision.reductionCompute != PrecisionDType::DEFAULT;
-}
 }  // namespace
 
 // TODO - consolidate this to device vector code. We don't want CUDA in the device vector
@@ -583,7 +574,7 @@ BfgsBatchMinimizer::BfgsBatchMinimizer(const int        dataDim,
   // The batched kernels carry independent real/reduceT/storageT dispatch.
   // The fused backend remains the legacy specialization until it gains the
   // same policy surface, so precision experiments use the complete path.
-  backend_    = requestsBfgsPrecisionPolicy(precision) ? BfgsBackend::BATCHED : backend;
+  backend_    = bfgsPrecisionRequiresBatchedBackend(precision) ? BfgsBackend::BATCHED : backend;
   precision_  = precision;
   // For HYBRID, we need to support both paths, so initialize for both
   if (backend_ == BfgsBackend::BATCHED || backend_ == BfgsBackend::HYBRID) {
