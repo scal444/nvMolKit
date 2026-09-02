@@ -94,7 +94,7 @@ TEST(MorganMoleculeClassificationTest, AtomAndBondBoundariesPreserveSemanticsAnd
   for (const auto& mol : mols) {
     molsView.push_back(mol.get());
   }
-  const auto buckets = nvMolKit::detail::classifyMorganMolecules(molsView, 5);
+  const auto buckets = nvMolKit::detail::classifyMorganMolecules(molsView, 64);
   EXPECT_EQ(buckets.work32, (std::vector<int>{0, 1, 10}));
   EXPECT_EQ(buckets.work64, (std::vector<int>{2, 3, 4}));
   EXPECT_EQ(buckets.work128, (std::vector<int>{5, 6, 7}));
