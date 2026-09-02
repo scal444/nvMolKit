@@ -1670,7 +1670,12 @@ TEST(PrecisionOptionsTest, BfgsPerMoleculeDispatchCoversEveryUnsupportedPrecisio
   explicitFloat64.forcefieldCompute           = PrecisionDType::FLOAT64;
   explicitFloat64.minimizerCompute            = PrecisionDType::FLOAT64;
   explicitFloat64.reductionCompute            = PrecisionDType::FLOAT64;
-  EXPECT_EQ(resolvedBackend(explicitFloat64), BfgsBackend::PER_MOLECULE);
+  EXPECT_EQ(resolvedBackend(explicitFloat64), BfgsBackend::BATCHED);
+
+  PrecisionOptions explicitSupportedFloat64;
+  explicitSupportedFloat64.forcefieldParameterStorage = PrecisionDType::FLOAT64;
+  explicitSupportedFloat64.hessianStorage             = PrecisionDType::FLOAT64;
+  EXPECT_EQ(resolvedBackend(explicitSupportedFloat64), BfgsBackend::PER_MOLECULE);
   EXPECT_EQ(resolvedBackend(nvMolKit::PrecisionOptions{nvMolKit::PrecisionMode::HESSIAN_F32}),
             BfgsBackend::PER_MOLECULE);
 }

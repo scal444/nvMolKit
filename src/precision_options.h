@@ -170,7 +170,14 @@ inline bool usesFloatReduction(const PrecisionOptions& o) {
 //! legacy double specializations.
 inline bool bfgsPrecisionRequiresBatchedBackend(const PrecisionOptions& o) {
   const auto resolved = resolvePrecisionOptions(o);
-  return isFloat32(resolved.forcefieldCoordinateStorage) || isFloat32(resolved.forcefieldGradientStorage) ||
+  const bool explicitUnsupportedAxis = o.forcefieldCoordinateStorage != PrecisionDType::DEFAULT ||
+                                       o.forcefieldGradientStorage != PrecisionDType::DEFAULT ||
+                                       o.minimizerStateStorage != PrecisionDType::DEFAULT ||
+                                       o.forcefieldCompute != PrecisionDType::DEFAULT ||
+                                       o.minimizerCompute != PrecisionDType::DEFAULT ||
+                                       o.reductionCompute != PrecisionDType::DEFAULT;
+  return explicitUnsupportedAxis || isFloat32(resolved.forcefieldCoordinateStorage) ||
+         isFloat32(resolved.forcefieldGradientStorage) ||
          isFloat32(resolved.minimizerStateStorage) || isFloat32(resolved.forcefieldCompute) ||
          isFloat32(resolved.minimizerCompute) || isFloat32(resolved.reductionCompute);
 }
@@ -186,7 +193,13 @@ inline bool bfgsDistGeomPrecisionRequiresBatchedBackend(const PrecisionOptions& 
 //! storage, require the independently-dispatched batched kernels.
 inline bool firePrecisionRequiresBatchedBackend(const PrecisionOptions& o) {
   const auto resolved = resolvePrecisionOptions(o);
-  return isFloat32(resolved.forcefieldCoordinateStorage) || isFloat32(resolved.forcefieldGradientStorage) ||
+  const bool explicitUnsupportedAxis = o.forcefieldCoordinateStorage != PrecisionDType::DEFAULT ||
+                                       o.forcefieldGradientStorage != PrecisionDType::DEFAULT ||
+                                       o.forcefieldCompute != PrecisionDType::DEFAULT ||
+                                       o.minimizerCompute != PrecisionDType::DEFAULT ||
+                                       o.reductionCompute != PrecisionDType::DEFAULT;
+  return explicitUnsupportedAxis || isFloat32(resolved.forcefieldCoordinateStorage) ||
+         isFloat32(resolved.forcefieldGradientStorage) ||
          isFloat32(resolved.forcefieldCompute) || isFloat32(resolved.minimizerCompute) ||
          isFloat32(resolved.reductionCompute);
 }
