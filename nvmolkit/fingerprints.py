@@ -15,6 +15,8 @@
 
 """GPU-accelerated fingerprint generation."""
 
+from collections.abc import Sequence
+
 import torch
 
 from nvmolkit._Fingerprints import MorganFingerprintGenerator as InternalFPGen
@@ -92,7 +94,7 @@ class MorganFingerprintGenerator:
         self._internal = InternalFPGen(radius, fpSize)
 
     def GetFingerprints(
-        self, mols: list, num_threads: int = 0, stream: torch.cuda.Stream | None = None
+        self, mols: Sequence, num_threads: int = 0, stream: torch.cuda.Stream | None = None
     ) -> AsyncGpuResult:
         """Compute Morgan fingerprints for a list of molecules.
 
@@ -104,7 +106,7 @@ class MorganFingerprintGenerator:
         via `unpack_fingerprint`.
 
         Args:
-            mols: List of RDKit molecules to generate fingerprints for
+            mols: Sequence of RDKit molecules to generate fingerprints for
             num_threads: Number of CPU threads to use for fingerprint generation. If 0, uses all available threads.
             stream: CUDA stream to use. If None, uses the current stream.
 
