@@ -368,10 +368,14 @@ __global__ void firePostKickKernel(const cuda::std::span<const int>      atomSta
 //! per-system streak state. When the windowed extrema relative spread falls below
 //! @p relTol, the streak counter increments; otherwise the window resets to the current
 //! sample. Reaching @p streakLimit declares the system converged (status = 0).
+//! @tparam real Arithmetic type selected by minimizerCompute.
+//! @tparam stateT Persistent extrema type selected by minimizerStateStorage. This
+//! single-thread check has no reduction role; its input energy remains a double API boundary.
+template <typename real, typename stateT>
 __global__ void fireStuckCheckKernel(cuda::std::span<const int>    activeSystemIndices,
                                      cuda::std::span<const double> energies,
-                                     cuda::std::span<double>       energyMinStreak,
-                                     cuda::std::span<double>       energyMaxStreak,
+                                     cuda::std::span<stateT>       energyMinStreak,
+                                     cuda::std::span<stateT>       energyMaxStreak,
                                      cuda::std::span<int32_t>      stuckStreak,
                                      uint8_t*                      statuses,
                                      uint8_t*                      convergeReason,
@@ -384,23 +388,26 @@ __global__ void fireStuckCheckKernel(cuda::std::span<const int>    activeSystemI
   if (statuses[sysIdx] == 0) {
     return;
   }
-  const double energy = energies[sysIdx];
-  double       newMin = fmin(energyMinStreak[sysIdx], energy);
-  double       newMax = fmax(energyMaxStreak[sysIdx], energy);
-  const double denom  = fmax(fabs(energy), 1.0);
-  if ((newMax - newMin) <= relTol * denom) {
+  const real energy    = static_cast<real>(energies[sysIdx]);
+  const real storedMin = static_cast<real>(energyMinStreak[sysIdx]);
+  const real storedMax = static_cast<real>(energyMaxStreak[sysIdx]);
+  const real newMin    = energy < storedMin ? energy : storedMin;
+  const real newMax    = energy > storedMax ? energy : storedMax;
+  const real energyAbs = energy < real{0} ? -energy : energy;
+  const real denom     = energyAbs > real{1} ? energyAbs : real{1};
+  if ((newMax - newMin) <= static_cast<real>(relTol) * denom) {
     const int32_t streak = stuckStreak[sysIdx] + 1;
     stuckStreak[sysIdx]  = streak;
     if (streak >= streakLimit) {
       statuses[sysIdx]       = 0;
       convergeReason[sysIdx] = 2;
     }
-    energyMinStreak[sysIdx] = newMin;
-    energyMaxStreak[sysIdx] = newMax;
+    energyMinStreak[sysIdx] = static_cast<stateT>(newMin);
+    energyMaxStreak[sysIdx] = static_cast<stateT>(newMax);
   } else {
     stuckStreak[sysIdx]     = 1;
-    energyMinStreak[sysIdx] = energy;
-    energyMaxStreak[sysIdx] = energy;
+    energyMinStreak[sysIdx] = static_cast<stateT>(energy);
+    energyMaxStreak[sysIdx] = static_cast<stateT>(energy);
   }
 }
 
@@ -434,6 +441,8 @@ FireBatchMinimizer::FireBatchMinimizer(const int          dataDim,
   debugPowers_.setStream(stream_);
   energyMinStreak_.setStream(stream_);
   energyMaxStreak_.setStream(stream_);
+  energyMinStreakFloat_.setStream(stream_);
+  energyMaxStreakFloat_.setStream(stream_);
   stuckStreak_.setStream(stream_);
   convergeReason_.setStream(stream_);
   activeMolIdsDevice_.setStream(stream_);
@@ -541,6 +550,8 @@ void FireBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
   if (effectiveBackend == FireBackend::PER_MOLECULE) {
     energyMinStreak_.resize(0);
     energyMaxStreak_.resize(0);
+    energyMinStreakFloat_.resize(0);
+    energyMaxStreakFloat_.resize(0);
     stuckStreak_.resize(0);
     convergeReason_.resize(0);
     debugPowers_.resize(0);
@@ -594,17 +605,34 @@ void FireBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
   activeSystemIndices_.setFromVector(indicesHost);
 
   if (fireOptions_.stuckDetectionEnabled) {
-    energyMinStreak_.resize(numSystems);
-    energyMaxStreak_.resize(numSystems);
+    if (usesFloatMinimizerState(precision_)) {
+      energyMinStreak_.resize(0);
+      energyMaxStreak_.resize(0);
+      energyMinStreakFloat_.resize(numSystems);
+      energyMaxStreakFloat_.resize(numSystems);
+      if (!isContinuation) {
+        setAll(energyMinStreakFloat_, std::numeric_limits<float>::infinity());
+        setAll(energyMaxStreakFloat_, -std::numeric_limits<float>::infinity());
+      }
+    } else {
+      energyMinStreakFloat_.resize(0);
+      energyMaxStreakFloat_.resize(0);
+      energyMinStreak_.resize(numSystems);
+      energyMaxStreak_.resize(numSystems);
+      if (!isContinuation) {
+        setAll(energyMinStreak_, std::numeric_limits<double>::infinity());
+        setAll(energyMaxStreak_, -std::numeric_limits<double>::infinity());
+      }
+    }
     stuckStreak_.resize(numSystems);
     if (!isContinuation) {
-      setAll(energyMinStreak_, std::numeric_limits<double>::infinity());
-      setAll(energyMaxStreak_, -std::numeric_limits<double>::infinity());
       stuckStreak_.zero();
     }
   } else {
     energyMinStreak_.resize(0);
     energyMaxStreak_.resize(0);
+    energyMinStreakFloat_.resize(0);
+    energyMaxStreakFloat_.resize(0);
     stuckStreak_.resize(0);
   }
   pollsSinceLastEnergyEval_ = 0;
@@ -932,16 +960,33 @@ bool FireBatchMinimizer::minimize(const int                                   nu
           pollsSinceLastEnergyEval_ = 0;
           energyOuts.zero();
           eFunc(nullptr);
-          fireStuckCheckKernel<<<activeBeforeStuckCheck, 1, 0, stream_>>>(
-            cuda::std::span<const int>(activeSystemIndices_.data(), activeSystemIndices_.size()),
-            cuda::std::span<const double>(energyOuts.data(), energyOuts.size()),
-            cuda::std::span<double>(energyMinStreak_.data(), energyMinStreak_.size()),
-            cuda::std::span<double>(energyMaxStreak_.data(), energyMaxStreak_.size()),
-            cuda::std::span<int32_t>(stuckStreak_.data(), stuckStreak_.size()),
-            statuses_.data(),
-            convergeReason_.data(),
-            fireOptions_.stuckEnergyRelTol,
-            fireOptions_.stuckStreakLength);
+#define NVMOLKIT_LAUNCH_FIRE_STUCK(real, stateT, MinState, MaxState)                      \
+  fireStuckCheckKernel<real, stateT><<<activeBeforeStuckCheck, 1, 0, stream_>>>(          \
+    cuda::std::span<const int>(activeSystemIndices_.data(), activeSystemIndices_.size()), \
+    cuda::std::span<const double>(energyOuts.data(), energyOuts.size()),                  \
+    MinState,                                                                             \
+    MaxState,                                                                             \
+    cuda::std::span<int32_t>(stuckStreak_.data(), stuckStreak_.size()),                   \
+    statuses_.data(),                                                                     \
+    convergeReason_.data(),                                                               \
+    fireOptions_.stuckEnergyRelTol,                                                       \
+    fireOptions_.stuckStreakLength)
+          if (usesFloatMinimizerState(precision_)) {
+            const auto minState = cuda::std::span<float>(energyMinStreakFloat_.data(), energyMinStreakFloat_.size());
+            const auto maxState = cuda::std::span<float>(energyMaxStreakFloat_.data(), energyMaxStreakFloat_.size());
+            if (usesFloatMinimizerCompute(precision_))
+              NVMOLKIT_LAUNCH_FIRE_STUCK(float, float, minState, maxState);
+            else
+              NVMOLKIT_LAUNCH_FIRE_STUCK(double, float, minState, maxState);
+          } else {
+            const auto minState = cuda::std::span<double>(energyMinStreak_.data(), energyMinStreak_.size());
+            const auto maxState = cuda::std::span<double>(energyMaxStreak_.data(), energyMaxStreak_.size());
+            if (usesFloatMinimizerCompute(precision_))
+              NVMOLKIT_LAUNCH_FIRE_STUCK(float, double, minState, maxState);
+            else
+              NVMOLKIT_LAUNCH_FIRE_STUCK(double, double, minState, maxState);
+          }
+#undef NVMOLKIT_LAUNCH_FIRE_STUCK
           cudaCheckError(cudaGetLastError());
           compactActiveAsync();
         }
@@ -1137,13 +1182,21 @@ bool FireBatchMinimizer::minimizeWithMMFF(const int                             
 FireInternalState FireBatchMinimizer::snapshotInternalState() const {
   FireInternalState snap;
   if (usesFloatMinimizerState(precision_)) {
-    snap.velocities = debugDump(velocitiesFloat_);
-    snap.dt         = debugDump(dtFloat_);
-    snap.alpha      = debugDump(alphaFloat_);
+    snap.velocities      = debugDump(velocitiesFloat_);
+    snap.dt              = debugDump(dtFloat_);
+    snap.alpha           = debugDump(alphaFloat_);
+    snap.energyMinStreak = debugDump(energyMinStreakFloat_);
+    snap.energyMaxStreak = debugDump(energyMaxStreakFloat_);
   } else {
-    snap.velocities = debugDump(velocities_);
-    snap.dt         = debugDump(dt_);
-    snap.alpha      = debugDump(alpha_);
+    snap.velocities      = debugDump(velocities_);
+    snap.dt              = debugDump(dt_);
+    snap.alpha           = debugDump(alpha_);
+    snap.energyMinStreak = debugDump(energyMinStreak_);
+    snap.energyMaxStreak = debugDump(energyMaxStreak_);
+  }
+  snap.stuckStreak.resize(stuckStreak_.size());
+  if (stuckStreak_.size() > 0) {
+    stuckStreak_.copyToHost(snap.stuckStreak);
   }
   snap.nStepsPositive.resize(numStepsWithPositivePower_.size());
   if (numStepsWithPositivePower_.size() > 0) {

@@ -1660,4 +1660,36 @@ TEST(PrecisionOptionsTest, BfgsPerMoleculeDispatchCoversEveryUnsupportedPrecisio
   EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::forcefieldCompute)), BfgsBackend::BATCHED);
   EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::minimizerCompute)), BfgsBackend::BATCHED);
   EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::reductionCompute)), BfgsBackend::BATCHED);
+
+  PrecisionOptions explicitFloat64;
+  explicitFloat64.forcefieldParameterStorage  = PrecisionDType::FLOAT64;
+  explicitFloat64.forcefieldCoordinateStorage = PrecisionDType::FLOAT64;
+  explicitFloat64.forcefieldGradientStorage   = PrecisionDType::FLOAT64;
+  explicitFloat64.hessianStorage              = PrecisionDType::FLOAT64;
+  explicitFloat64.minimizerStateStorage       = PrecisionDType::FLOAT64;
+  explicitFloat64.forcefieldCompute           = PrecisionDType::FLOAT64;
+  explicitFloat64.minimizerCompute            = PrecisionDType::FLOAT64;
+  explicitFloat64.reductionCompute            = PrecisionDType::FLOAT64;
+  EXPECT_EQ(resolvedBackend(explicitFloat64), BfgsBackend::PER_MOLECULE);
+  EXPECT_EQ(resolvedBackend(nvMolKit::PrecisionOptions{nvMolKit::PrecisionMode::HESSIAN_F32}),
+            BfgsBackend::PER_MOLECULE);
+}
+
+TEST(PrecisionOptionsTest, DistGeomPerMoleculeCapabilityRequiresDoubleForcefieldParameters) {
+  using nvMolKit::PrecisionDType;
+  using nvMolKit::PrecisionOptions;
+
+  PrecisionOptions floatParameters;
+  floatParameters.forcefieldParameterStorage = PrecisionDType::FLOAT32;
+  EXPECT_FALSE(nvMolKit::bfgsPrecisionRequiresBatchedBackend(floatParameters));
+  EXPECT_TRUE(nvMolKit::bfgsDistGeomPrecisionRequiresBatchedBackend(floatParameters));
+
+  PrecisionOptions floatHessian;
+  floatHessian.hessianStorage = PrecisionDType::FLOAT32;
+  EXPECT_FALSE(nvMolKit::bfgsPrecisionRequiresBatchedBackend(floatHessian));
+  EXPECT_FALSE(nvMolKit::bfgsDistGeomPrecisionRequiresBatchedBackend(floatHessian));
+
+  PrecisionOptions explicitDoubleParameters;
+  explicitDoubleParameters.forcefieldParameterStorage = PrecisionDType::FLOAT64;
+  EXPECT_FALSE(nvMolKit::bfgsDistGeomPrecisionRequiresBatchedBackend(explicitDoubleParameters));
 }

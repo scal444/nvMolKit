@@ -50,6 +50,9 @@ struct FireInternalState {
   std::vector<double>  velocities;
   std::vector<double>  dt;
   std::vector<double>  alpha;
+  std::vector<double>  energyMinStreak;
+  std::vector<double>  energyMaxStreak;
+  std::vector<int32_t> stuckStreak;
   std::vector<int>     nStepsPositive;
   std::vector<uint8_t> statuses;
 };
@@ -229,8 +232,11 @@ class FireBatchMinimizer final : public BatchMinimizer {
   //! Per-system state for energy-plateau stuck detection. ``energyMinStreak_`` and
   //! ``energyMaxStreak_`` track the windowed extrema while ``stuckStreak_`` counts
   //! consecutive plateau polls; all reset when the relative tolerance is violated.
+  //! Exactly one extrema pair is allocated according to minimizerStateStorage.
   AsyncDeviceVector<double>  energyMinStreak_;
   AsyncDeviceVector<double>  energyMaxStreak_;
+  AsyncDeviceVector<float>   energyMinStreakFloat_;
+  AsyncDeviceVector<float>   energyMaxStreakFloat_;
   AsyncDeviceVector<int32_t> stuckStreak_;
   int                        pollsSinceLastEnergyEval_ = 0;
 

@@ -174,6 +174,13 @@ inline bool bfgsPrecisionRequiresBatchedBackend(const PrecisionOptions& o) {
          isFloat32(resolved.minimizerStateStorage) || isFloat32(resolved.forcefieldCompute) ||
          isFloat32(resolved.minimizerCompute) || isFloat32(resolved.reductionCompute);
 }
+//! DG/ETK per-molecule BFGS kernels share the float-Hessian specialization,
+//! but unlike MMFF they do not have float force-field parameter buffers.
+//! Stage dispatch should use this predicate before entering those kernels.
+inline bool bfgsDistGeomPrecisionRequiresBatchedBackend(const PrecisionOptions& o) {
+  const auto resolved = resolvePrecisionOptions(o);
+  return bfgsPrecisionRequiresBatchedBackend(o) || isFloat32(resolved.forcefieldParameterStorage);
+}
 //! The per-molecule FIRE kernels additionally support float minimizer-state
 //! storage. Compute and reduction roles, and force-field coordinate/gradient
 //! storage, require the independently-dispatched batched kernels.

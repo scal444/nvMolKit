@@ -222,6 +222,12 @@ __global__ void harmonicGradKernel(const int     numSystems,
   }
 }
 
+__global__ void writeConstantEnergyKernel(double* energyOuts, const double energy) {
+  if (blockIdx.x == 0 && threadIdx.x == 0) {
+    energyOuts[0] = energy;
+  }
+}
+
 class HarmonicSystems {
  public:
   HarmonicSystems(const std::vector<int>&    atomCounts,
@@ -1142,6 +1148,79 @@ TEST(FireMinimizer, BatchedPrecisionDispatchUsesResolvedStateComputeAndReduction
           EXPECT_TRUE(std::isfinite(position));
         }
         EXPECT_NE(positions, systems.startingPositionsHost());
+      }
+    }
+  }
+}
+
+TEST(FireMinimizer, StuckDetectionUsesIndependentStateComputeAndReductionTypes) {
+  using nvMolKit::FireBackend;
+  using nvMolKit::PrecisionDType;
+  using nvMolKit::PrecisionOptions;
+
+  constexpr double inputEnergy = 1.00000006;
+  for (const PrecisionDType stateType : {PrecisionDType::FLOAT64, PrecisionDType::FLOAT32}) {
+    for (const PrecisionDType computeType : {PrecisionDType::FLOAT64, PrecisionDType::FLOAT32}) {
+      for (const PrecisionDType reductionType : {PrecisionDType::FLOAT64, PrecisionDType::FLOAT32}) {
+        SCOPED_TRACE(::testing::Message() << "state=" << nvMolKit::precisionDTypeName(stateType)
+                                          << " compute=" << nvMolKit::precisionDTypeName(computeType)
+                                          << " reduction=" << nvMolKit::precisionDTypeName(reductionType));
+        HarmonicSystems       systems(/*atomCounts=*/{1},
+                                /*kPerSystem=*/{1.0},
+                                /*startingPositions=*/{1.0, 0.5, -0.25},
+                                /*targetPositions=*/{0.0, 0.0, 0.0});
+        nvMolKit::FireOptions options;
+        options.stuckDetectionEnabled = true;
+        options.stuckEnergyRelTol     = 1e-6;
+        options.stuckStreakLength     = 2;
+        options.stuckEvalEveryNPolls  = 1;
+        options.gradTol               = 0.0;
+        options.dMax                  = 0.0;
+
+        PrecisionOptions precision;
+        precision.minimizerStateStorage = stateType;
+        precision.minimizerCompute      = computeType;
+        precision.reductionCompute      = reductionType;
+        nvMolKit::FireBatchMinimizer minimizer(kDim,
+                                               options,
+                                               /*stream=*/nullptr,
+                                               /*debugMode=*/false,
+                                               FireBackend::BATCHED,
+                                               precision);
+        minimizer.setConvergencePollInterval(1);
+        const auto energyFunctor = [&](const double*) {
+          writeConstantEnergyKernel<<<1, 1>>>(systems.energyOutsDevice().data(), inputEnergy);
+          cudaCheckError(cudaGetLastError());
+        };
+
+        const bool converged = minimizer.minimize(/*numIters=*/2,
+                                                  options.gradTol,
+                                                  systems.atomStartsHost(),
+                                                  systems.atomStartsDevice(),
+                                                  systems.positionsDevice(),
+                                                  systems.gradDevice(),
+                                                  systems.energyOutsDevice(),
+                                                  systems.energyBufferDevice(),
+                                                  energyFunctor,
+                                                  systems.gradFunctor());
+        EXPECT_TRUE(converged);
+
+        const auto state = minimizer.snapshotInternalState();
+        ASSERT_EQ(state.energyMinStreak.size(), 1u);
+        ASSERT_EQ(state.energyMaxStreak.size(), 1u);
+        ASSERT_EQ(state.stuckStreak.size(), 1u);
+        ASSERT_EQ(state.statuses.size(), 1u);
+        double expectedEnergy = inputEnergy;
+        if (computeType == PrecisionDType::FLOAT32) {
+          expectedEnergy = static_cast<double>(static_cast<float>(expectedEnergy));
+        }
+        if (stateType == PrecisionDType::FLOAT32) {
+          expectedEnergy = static_cast<double>(static_cast<float>(expectedEnergy));
+        }
+        EXPECT_DOUBLE_EQ(state.energyMinStreak[0], expectedEnergy);
+        EXPECT_DOUBLE_EQ(state.energyMaxStreak[0], expectedEnergy);
+        EXPECT_EQ(state.stuckStreak[0], options.stuckStreakLength);
+        EXPECT_EQ(state.statuses[0], 0);
       }
     }
   }
