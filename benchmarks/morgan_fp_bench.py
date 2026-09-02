@@ -6,6 +6,7 @@
 import argparse
 from collections.abc import Sequence
 
+import nvtx
 import torch
 from bench_utils import (
     TimingResult,
@@ -114,6 +115,7 @@ def _load_molecules(args: argparse.Namespace) -> tuple[list[Chem.Mol], str, str]
     return load_pickle(args.pickle, args.num_mols, seed=args.seed), args.pickle, "pickle"
 
 
+@nvtx.annotate("bench_rdkit_morgan", color="green")
 def _bench_rdkit(
     generator,
     mols: Sequence[Chem.Mol],
@@ -123,11 +125,18 @@ def _bench_rdkit(
 ) -> tuple[TimingResult, Sequence]:
     fingerprints = ()
 
-    def run() -> None:
+    def compute() -> None:
         nonlocal fingerprints
         fingerprints = generator.GetFingerprints(mols, numThreads=num_threads)
 
-    timing = time_it(run, runs=runs, warmups=warmups)
+    def production_run() -> None:
+        with nvtx.annotate("morgan_rdkit_production_run", color="yellow"):
+            compute()
+
+    for _ in range(warmups):
+        with nvtx.annotate("morgan_rdkit_warmup", color="purple"):
+            compute()
+    timing = time_it(production_run, runs=runs, warmups=0)
     return timing, fingerprints
 
 
@@ -143,11 +152,22 @@ def _bench_nvmolkit(
     with torch.cuda.device(gpu_id):
         stream = torch.cuda.Stream(device=gpu_id)
 
-        def run() -> None:
+        def compute() -> None:
             nonlocal fingerprints
             fingerprints = generator.GetFingerprints(mols, num_threads=prep_threads, stream=stream).torch()
 
-        timing = time_it(run, runs=runs, warmups=warmups, gpu_sync=True)
+        def production_run() -> None:
+            with nvtx.annotate("morgan_nvmolkit_production_run", color="orange"):
+                compute()
+
+        torch.cuda.cudart().cudaProfilerStart()
+        with nvtx.annotate("bench_nvmolkit_morgan", color="red"):
+            for _ in range(warmups):
+                with nvtx.annotate("morgan_nvmolkit_warmup", color="purple"):
+                    compute()
+                    torch.cuda.synchronize()
+            timing = time_it(production_run, runs=runs, warmups=0, gpu_sync=True)
+        torch.cuda.cudart().cudaProfilerStop()
 
     assert fingerprints is not None
     return timing, fingerprints
