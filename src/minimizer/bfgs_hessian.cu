@@ -109,14 +109,14 @@ __device__ __forceinline__ void computeUpdateFlag(int      idxWithinSystem,
 }
 
 // Shared-memory optimized kernel used when all systems have <= maxAtom atoms
-template <int dataDim, typename real, typename reduceT, typename storageT>
+template <int dataDim, typename real, typename reduceT, typename storageT, typename stateT>
 __global__ void updateInverseHessianBFGSBatchKernelShared(const int16_t* statuses,
                                                           const int*     atomStarts,
                                                           const int*     hessianStarts,
                                                           storageT*      invHessians,
-                                                          double*        dGrads,
-                                                          double*        xis,
-                                                          double*        hessDGrads,
+                                                          stateT*        dGrads,
+                                                          stateT*        xis,
+                                                          stateT*        hessDGrads,
                                                           const double*  grads,
                                                           const int*     activeSystemIndices) {
   __shared__ reduceT facShared[1];
@@ -147,9 +147,9 @@ __global__ void updateInverseHessianBFGSBatchKernelShared(const int16_t* statuse
   const int           dim             = dataDim * (atomStarts[sysIdx + 1] - atomOffset);
   storageT* const     invHessianLocal = &invHessians[hessianStarts[sysIdx]];
   const int           absAtomOffset   = atomOffset * dataDim;
-  double* const       localDGrad      = &dGrads[absAtomOffset];
-  double* const       localHessDGrad  = &hessDGrads[absAtomOffset];
-  double* const       localXi         = &xis[absAtomOffset];
+  stateT* const       localDGrad      = &dGrads[absAtomOffset];
+  stateT* const       localHessDGrad  = &hessDGrads[absAtomOffset];
+  stateT* const       localXi         = &xis[absAtomOffset];
   const double* const localGrad       = &grads[absAtomOffset];
 
   // Load dGrads, Xi, grads into shared memory
@@ -254,14 +254,14 @@ __global__ void updateInverseHessianBFGSBatchKernelShared(const int16_t* statuse
 }
 
 // Global-memory variant that avoids fixed-size shared arrays; safe for large molecules
-template <int dataDim, typename real, typename reduceT, typename storageT>
+template <int dataDim, typename real, typename reduceT, typename storageT, typename stateT>
 __global__ void updateInverseHessianBFGSBatchKernelGlobal(const int16_t* statuses,
                                                           const int*     atomStarts,
                                                           const int*     hessianStarts,
                                                           storageT*      invHessians,
-                                                          double*        dGrads,
-                                                          double*        xis,
-                                                          double*        hessDGrads,
+                                                          stateT*        dGrads,
+                                                          stateT*        xis,
+                                                          stateT*        hessDGrads,
                                                           const double*  grads,
                                                           const int*     activeSystemIndices) {
   __shared__ reduceT facShared[1];
@@ -287,9 +287,9 @@ __global__ void updateInverseHessianBFGSBatchKernelGlobal(const int16_t* statuse
   const int           dim             = dataDim * (atomStarts[sysIdx + 1] - atomOffset);
   storageT* const     invHessianLocal = &invHessians[hessianStarts[sysIdx]];
   const int           absAtomOffset   = atomOffset * dataDim;
-  double* const       localDGrad      = &dGrads[absAtomOffset];
-  double* const       localHessDGrad  = &hessDGrads[absAtomOffset];
-  double* const       localXi         = &xis[absAtomOffset];
+  stateT* const       localDGrad      = &dGrads[absAtomOffset];
+  stateT* const       localHessDGrad  = &hessDGrads[absAtomOffset];
+  stateT* const       localXi         = &xis[absAtomOffset];
   const double* const localGrad       = &grads[absAtomOffset];
 
   // Compute hessDGrads directly into global memory
@@ -388,15 +388,15 @@ __global__ void updateInverseHessianBFGSBatchKernelGlobal(const int16_t* statuse
 
 }  // namespace
 
-template <typename real, typename reduceT, typename storageT>
+template <typename real, typename reduceT, typename storageT, typename stateT>
 void updateInverseHessianBFGSBatchImpl(int            numActiveSystems,
                                        const int16_t* statuses,
                                        const int*     hessianStarts,
                                        const int*     atomStarts,
                                        storageT*      invHessians,
-                                       double*        dGrads,
-                                       double*        xis,
-                                       double*        hessDGrads,
+                                       stateT*        dGrads,
+                                       stateT*        xis,
+                                       stateT*        hessDGrads,
                                        const double*  grads,
                                        int            dataDim,
                                        bool           hasLargeMolecule,
@@ -407,7 +407,7 @@ void updateInverseHessianBFGSBatchImpl(int            numActiveSystems,
 
   if (dataDim == 3) {
     if (hasLargeMolecule) {
-      updateInverseHessianBFGSBatchKernelGlobal<3, real, reduceT, storageT>
+      updateInverseHessianBFGSBatchKernelGlobal<3, real, reduceT, storageT, stateT>
         <<<numActiveSystems, blockSize, 0, stream>>>(statuses,
                                                      atomStarts,
                                                      hessianStarts,
@@ -418,7 +418,7 @@ void updateInverseHessianBFGSBatchImpl(int            numActiveSystems,
                                                      grads,
                                                      activeSystemIndices);
     } else {
-      updateInverseHessianBFGSBatchKernelShared<3, real, reduceT, storageT>
+      updateInverseHessianBFGSBatchKernelShared<3, real, reduceT, storageT, stateT>
         <<<numActiveSystems, blockSize, 0, stream>>>(statuses,
                                                      atomStarts,
                                                      hessianStarts,
@@ -431,7 +431,7 @@ void updateInverseHessianBFGSBatchImpl(int            numActiveSystems,
     }
   } else if (dataDim == 4) {
     if (hasLargeMolecule) {
-      updateInverseHessianBFGSBatchKernelGlobal<4, real, reduceT, storageT>
+      updateInverseHessianBFGSBatchKernelGlobal<4, real, reduceT, storageT, stateT>
         <<<numActiveSystems, blockSize, 0, stream>>>(statuses,
                                                      atomStarts,
                                                      hessianStarts,
@@ -442,7 +442,7 @@ void updateInverseHessianBFGSBatchImpl(int            numActiveSystems,
                                                      grads,
                                                      activeSystemIndices);
     } else {
-      updateInverseHessianBFGSBatchKernelShared<4, real, reduceT, storageT>
+      updateInverseHessianBFGSBatchKernelShared<4, real, reduceT, storageT, stateT>
         <<<numActiveSystems, blockSize, 0, stream>>>(statuses,
                                                      atomStarts,
                                                      hessianStarts,
@@ -460,21 +460,22 @@ void updateInverseHessianBFGSBatchImpl(int            numActiveSystems,
   cudaCheckError(cudaGetLastError());
 }
 
-void updateInverseHessianBFGSBatch(int            numActiveSystems,
-                                   const int16_t* statuses,
-                                   const int*     hessianStarts,
-                                   const int*     atomStarts,
-                                   double*        invHessians,
-                                   double*        dGrads,
-                                   double*        xis,
-                                   double*        hessDGrads,
-                                   const double*  grads,
-                                   int            dataDim,
-                                   bool           hasLargeMolecule,
-                                   const int*     activeSystemIndices,
-                                   cudaStream_t   stream,
-                                   bool           computeInFloat,
-                                   bool           reduceInFloat) {
+template <typename hessianT, typename stateT>
+void updateInverseHessianBFGSBatchDispatch(int            numActiveSystems,
+                                           const int16_t* statuses,
+                                           const int*     hessianStarts,
+                                           const int*     atomStarts,
+                                           hessianT*      invHessians,
+                                           stateT*        dGrads,
+                                           stateT*        xis,
+                                           stateT*        hessDGrads,
+                                           const double*  grads,
+                                           int            dataDim,
+                                           bool           hasLargeMolecule,
+                                           const int*     activeSystemIndices,
+                                           cudaStream_t   stream,
+                                           bool           computeInFloat,
+                                           bool           reduceInFloat) {
   if (computeInFloat) {
     if (reduceInFloat)
       updateInverseHessianBFGSBatchImpl<float, float>(numActiveSystems,
@@ -535,79 +536,43 @@ void updateInverseHessianBFGSBatch(int            numActiveSystems,
   }
 }
 
-void updateInverseHessianBFGSBatch(int            numActiveSystems,
-                                   const int16_t* statuses,
-                                   const int*     hessianStarts,
-                                   const int*     atomStarts,
-                                   float*         invHessians,
-                                   double*        dGrads,
-                                   double*        xis,
-                                   double*        hessDGrads,
-                                   const double*  grads,
-                                   int            dataDim,
-                                   bool           hasLargeMolecule,
-                                   const int*     activeSystemIndices,
-                                   cudaStream_t   stream,
-                                   bool           computeInFloat,
-                                   bool           reduceInFloat) {
-  if (computeInFloat) {
-    if (reduceInFloat)
-      updateInverseHessianBFGSBatchImpl<float, float>(numActiveSystems,
-                                                      statuses,
-                                                      hessianStarts,
-                                                      atomStarts,
-                                                      invHessians,
-                                                      dGrads,
-                                                      xis,
-                                                      hessDGrads,
-                                                      grads,
-                                                      dataDim,
-                                                      hasLargeMolecule,
-                                                      activeSystemIndices,
-                                                      stream);
-    else
-      updateInverseHessianBFGSBatchImpl<float, double>(numActiveSystems,
-                                                       statuses,
-                                                       hessianStarts,
-                                                       atomStarts,
-                                                       invHessians,
-                                                       dGrads,
-                                                       xis,
-                                                       hessDGrads,
-                                                       grads,
-                                                       dataDim,
-                                                       hasLargeMolecule,
-                                                       activeSystemIndices,
-                                                       stream);
-  } else if (reduceInFloat) {
-    updateInverseHessianBFGSBatchImpl<double, float>(numActiveSystems,
-                                                     statuses,
-                                                     hessianStarts,
-                                                     atomStarts,
-                                                     invHessians,
-                                                     dGrads,
-                                                     xis,
-                                                     hessDGrads,
-                                                     grads,
-                                                     dataDim,
-                                                     hasLargeMolecule,
-                                                     activeSystemIndices,
-                                                     stream);
-  } else {
-    updateInverseHessianBFGSBatchImpl<double, double>(numActiveSystems,
-                                                      statuses,
-                                                      hessianStarts,
-                                                      atomStarts,
-                                                      invHessians,
-                                                      dGrads,
-                                                      xis,
-                                                      hessDGrads,
-                                                      grads,
-                                                      dataDim,
-                                                      hasLargeMolecule,
-                                                      activeSystemIndices,
-                                                      stream);
+#define NVMOLKIT_DEFINE_BFGS_HESSIAN_OVERLOAD(hessianT, stateT)          \
+  void updateInverseHessianBFGSBatch(int            numActiveSystems,    \
+                                     const int16_t* statuses,            \
+                                     const int*     hessianStarts,       \
+                                     const int*     atomStarts,          \
+                                     hessianT*      invHessians,         \
+                                     stateT*        dGrads,              \
+                                     stateT*        xis,                 \
+                                     stateT*        hessDGrads,          \
+                                     const double*  grads,               \
+                                     int            dataDim,             \
+                                     bool           hasLargeMolecule,    \
+                                     const int*     activeSystemIndices, \
+                                     cudaStream_t   stream,              \
+                                     bool           computeInFloat,      \
+                                     bool           reduceInFloat) {               \
+    updateInverseHessianBFGSBatchDispatch(numActiveSystems,              \
+                                          statuses,                      \
+                                          hessianStarts,                 \
+                                          atomStarts,                    \
+                                          invHessians,                   \
+                                          dGrads,                        \
+                                          xis,                           \
+                                          hessDGrads,                    \
+                                          grads,                         \
+                                          dataDim,                       \
+                                          hasLargeMolecule,              \
+                                          activeSystemIndices,           \
+                                          stream,                        \
+                                          computeInFloat,                \
+                                          reduceInFloat);                \
   }
-}
+
+NVMOLKIT_DEFINE_BFGS_HESSIAN_OVERLOAD(double, double)
+NVMOLKIT_DEFINE_BFGS_HESSIAN_OVERLOAD(double, float)
+NVMOLKIT_DEFINE_BFGS_HESSIAN_OVERLOAD(float, double)
+NVMOLKIT_DEFINE_BFGS_HESSIAN_OVERLOAD(float, float)
+#undef NVMOLKIT_DEFINE_BFGS_HESSIAN_OVERLOAD
 
 }  // namespace nvMolKit
