@@ -33,6 +33,10 @@ struct PythonMoleculeSequence {
 };
 
 PythonMoleculeSequence convertMolecules(const object& mols) {
+  if (!PySequence_Check(mols.ptr())) {
+    PyErr_SetString(PyExc_TypeError, "mols must be a sequence of RDKit molecules");
+    throw_error_already_set();
+  }
   PyObject* sequence = PySequence_Fast(mols.ptr(), "mols must be a sequence of RDKit molecules");
   if (sequence == nullptr) {
     throw_error_already_set();

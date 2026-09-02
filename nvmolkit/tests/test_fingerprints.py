@@ -20,6 +20,7 @@ from rdkit.Chem import rdFingerprintGenerator
 
 from nvmolkit.fingerprints import MorganFingerprintGenerator, pack_fingerprint, unpack_fingerprint
 
+
 def test_roundtrip_pack_unpack():
     n_fps = 10
     fp_size = 128
@@ -84,6 +85,13 @@ def test_invalid_input(mols):
     fpgen = MorganFingerprintGenerator(radius=3, fpSize=2048)
     invalid_index = mols.index(None)
     with pytest.raises(ValueError, match=rf"Invalid molecule at index {invalid_index}"):
+        fpgen.GetFingerprints(mols)
+
+
+@pytest.mark.parametrize("mols", (42, iter(())))
+def test_non_sequence_input(mols):
+    fpgen = MorganFingerprintGenerator(radius=3, fpSize=2048)
+    with pytest.raises(TypeError, match="mols must be a sequence of RDKit molecules"):
         fpgen.GetFingerprints(mols)
 
 
