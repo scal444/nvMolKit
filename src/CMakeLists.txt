@@ -62,6 +62,7 @@ add_library(
 target_link_libraries(
   morganFingerprint
   PRIVATE ${RDKit_LIBS} OpenMP::OpenMP_CXX device openmp_helpers
+          pinned_host_allocator
   PUBLIC morganFingerprintKernels)
 
 add_library(symmetricEigenSolver symmetric_eigensolver.cu)
