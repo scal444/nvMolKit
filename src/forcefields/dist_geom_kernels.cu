@@ -1048,13 +1048,65 @@ cudaError_t launchReduceEnergiesKernel(const int      numBlocks,
 constexpr int blockSizePerMol = 128;
 
 template <int dimension>
-__global__ void combinedEnergiesKernel(const EnergyForceContribsDevicePtr* terms,
-                                       const BatchedIndicesDevicePtr*      systemIndices,
-                                       const double*                       coords,
-                                       double*                             energies,
-                                       const double                        chiralWeight,
-                                       const double                        fourthDimWeight,
-                                       const uint8_t*                      activeThisStage) {
+__device__ double molEnergyDGDispatch(const EnergyForceContribsDevicePtr& terms,
+                                      const BatchedIndicesDevicePtr&      indices,
+                                      const double*                       coords,
+                                      int                                 molIdx,
+                                      double                              cw,
+                                      double                              fw,
+                                      int                                 tid) {
+  return fp64::molEnergyDG<dimension>(terms, indices, coords, molIdx, cw, fw, tid);
+}
+template <int dimension>
+__device__ double molEnergyDGDispatch(const EnergyForceContribsDevicePtrF32& terms,
+                                      const BatchedIndicesDevicePtr&         indices,
+                                      const double*                          coords,
+                                      int                                    molIdx,
+                                      double                                 cw,
+                                      double                                 fw,
+                                      int                                    tid) {
+  return fp64_params32::molEnergyDG<dimension>(terms, indices, coords, molIdx, cw, fw, tid);
+}
+template <int dimension, typename Terms>
+__device__ void molGradDGDispatch(const Terms&                   terms,
+                                  const BatchedIndicesDevicePtr& indices,
+                                  const double*                  coords,
+                                  double*                        grad,
+                                  int                            molIdx,
+                                  double                         cw,
+                                  double                         fw,
+                                  int                            tid);
+template <int dimension>
+__device__ void molGradDGDispatch(const EnergyForceContribsDevicePtr& terms,
+                                  const BatchedIndicesDevicePtr&      indices,
+                                  const double*                       coords,
+                                  double*                             grad,
+                                  int                                 molIdx,
+                                  double                              cw,
+                                  double                              fw,
+                                  int                                 tid) {
+  fp64::molGradDG<dimension>(terms, indices, coords, grad, molIdx, cw, fw, tid);
+}
+template <int dimension>
+__device__ void molGradDGDispatch(const EnergyForceContribsDevicePtrF32& terms,
+                                  const BatchedIndicesDevicePtr&         indices,
+                                  const double*                          coords,
+                                  double*                                grad,
+                                  int                                    molIdx,
+                                  double                                 cw,
+                                  double                                 fw,
+                                  int                                    tid) {
+  fp64_params32::molGradDG<dimension>(terms, indices, coords, grad, molIdx, cw, fw, tid);
+}
+
+template <int dimension, typename Terms, typename ReductionScalar = double>
+__global__ void combinedEnergiesKernel(const Terms*                   terms,
+                                       const BatchedIndicesDevicePtr* systemIndices,
+                                       const double*                  coords,
+                                       double*                        energies,
+                                       const double                   chiralWeight,
+                                       const double                   fourthDimWeight,
+                                       const uint8_t*                 activeThisStage) {
   const int molIdx = blockIdx.x;
   const int tid    = threadIdx.x;
 
@@ -1065,28 +1117,28 @@ __global__ void combinedEnergiesKernel(const EnergyForceContribsDevicePtr* terms
     return;
   }
 
-  using BlockReduce = cub::BlockReduce<double, blockSizePerMol>;
+  using BlockReduce = cub::BlockReduce<ReductionScalar, blockSizePerMol>;
   __shared__ typename BlockReduce::TempStorage tempStorage;
 
   const int     atomStart = systemIndices->atomStarts[molIdx];
   const double* molCoords = coords + atomStart * dimension;
   const double  threadEnergy =
-    molEnergyDG<dimension>(*terms, *systemIndices, molCoords, molIdx, chiralWeight, fourthDimWeight, tid);
-  const double blockEnergy = BlockReduce(tempStorage).Sum(threadEnergy);
+    molEnergyDGDispatch<dimension>(*terms, *systemIndices, molCoords, molIdx, chiralWeight, fourthDimWeight, tid);
+  const ReductionScalar blockEnergy = BlockReduce(tempStorage).Sum(static_cast<ReductionScalar>(threadEnergy));
 
   if (tid == 0) {
-    energies[molIdx] = blockEnergy;
+    energies[molIdx] = static_cast<double>(blockEnergy);
   }
 }
 
-template <int dimension>
-__global__ void combinedGradKernel(const EnergyForceContribsDevicePtr* terms,
-                                   const BatchedIndicesDevicePtr*      systemIndices,
-                                   const double*                       coords,
-                                   double*                             grad,
-                                   const double                        chiralWeight,
-                                   const double                        fourthDimWeight,
-                                   const uint8_t*                      activeThisStage) {
+template <int dimension, typename Terms>
+__global__ void combinedGradKernel(const Terms*                   terms,
+                                   const BatchedIndicesDevicePtr* systemIndices,
+                                   const double*                  coords,
+                                   double*                        grad,
+                                   const double                   chiralWeight,
+                                   const double                   fourthDimWeight,
+                                   const uint8_t*                 activeThisStage) {
   const int molIdx = blockIdx.x;
   const int tid    = threadIdx.x;
 
@@ -1110,7 +1162,14 @@ __global__ void combinedGradKernel(const EnergyForceContribsDevicePtr* terms,
   __syncthreads();
 
   const double* molCoords = coords + atomStart * dimension;
-  molGradDG<dimension>(*terms, *systemIndices, molCoords, molGradBase, molIdx, chiralWeight, fourthDimWeight, tid);
+  molGradDGDispatch<dimension>(*terms,
+                               *systemIndices,
+                               molCoords,
+                               molGradBase,
+                               molIdx,
+                               chiralWeight,
+                               fourthDimWeight,
+                               tid);
   __syncthreads();
 
   if (useSharedMem) {
@@ -1185,12 +1244,169 @@ cudaError_t launchBlockPerMolGradKernel(int                                 numM
   return cudaGetLastError();
 }
 
+cudaError_t launchBlockPerMolEnergyKernel(int                                    numMols,
+                                          const EnergyForceContribsDevicePtrF32& terms,
+                                          const BatchedIndicesDevicePtr&         indices,
+                                          const double*                          coords,
+                                          double*                                energies,
+                                          int                                    dimension,
+                                          double                                 cw,
+                                          double                                 fw,
+                                          const uint8_t*                         active,
+                                          cudaStream_t                           stream) {
+  const AsyncDevicePtr<EnergyForceContribsDevicePtrF32> devTerms(terms, stream);
+  const AsyncDevicePtr<BatchedIndicesDevicePtr>         devIndices(indices, stream);
+  if (dimension == 3)
+    combinedEnergiesKernel<3>
+      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, energies, cw, fw, active);
+  else
+    combinedEnergiesKernel<4>
+      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, energies, cw, fw, active);
+  return cudaGetLastError();
+}
+
+cudaError_t launchBlockPerMolGradKernel(int                                    numMols,
+                                        const EnergyForceContribsDevicePtrF32& terms,
+                                        const BatchedIndicesDevicePtr&         indices,
+                                        const double*                          coords,
+                                        double*                                grad,
+                                        int                                    dimension,
+                                        double                                 cw,
+                                        double                                 fw,
+                                        const uint8_t*                         active,
+                                        cudaStream_t                           stream) {
+  const AsyncDevicePtr<EnergyForceContribsDevicePtrF32> devTerms(terms, stream);
+  const AsyncDevicePtr<BatchedIndicesDevicePtr>         devIndices(indices, stream);
+  if (dimension == 3)
+    combinedGradKernel<3>
+      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, grad, cw, fw, active);
+  else
+    combinedGradKernel<4>
+      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, grad, cw, fw, active);
+  return cudaGetLastError();
+}
+
+template <typename Terms>
+cudaError_t launchBlockPerMolEnergyKernelTypedImpl(int                            numMols,
+                                                   const Terms&                   terms,
+                                                   const BatchedIndicesDevicePtr& indices,
+                                                   const double*                  coords,
+                                                   double*                        energies,
+                                                   int                            dimension,
+                                                   double                         cw,
+                                                   double                         fw,
+                                                   bool                           reduceInFloat,
+                                                   const uint8_t*                 active,
+                                                   cudaStream_t                   stream) {
+  const AsyncDevicePtr<Terms>                   devTerms(terms, stream);
+  const AsyncDevicePtr<BatchedIndicesDevicePtr> devIndices(indices, stream);
+#define NVMOLKIT_LAUNCH_DG_TYPED(DIM, REDUCE_T) \
+  combinedEnergiesKernel<DIM, Terms, REDUCE_T>  \
+    <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, energies, cw, fw, active)
+  if (dimension == 3) {
+    if (reduceInFloat)
+      NVMOLKIT_LAUNCH_DG_TYPED(3, float);
+    else
+      NVMOLKIT_LAUNCH_DG_TYPED(3, double);
+  } else {
+    if (reduceInFloat)
+      NVMOLKIT_LAUNCH_DG_TYPED(4, float);
+    else
+      NVMOLKIT_LAUNCH_DG_TYPED(4, double);
+  }
+#undef NVMOLKIT_LAUNCH_DG_TYPED
+  return cudaGetLastError();
+}
+
+cudaError_t launchBlockPerMolEnergyKernelTyped(int                                 numMols,
+                                               const EnergyForceContribsDevicePtr& terms,
+                                               const BatchedIndicesDevicePtr&      indices,
+                                               const double*                       coords,
+                                               double*                             energies,
+                                               int                                 dimension,
+                                               double                              cw,
+                                               double                              fw,
+                                               bool                                reduceInFloat,
+                                               const uint8_t*                      active,
+                                               cudaStream_t                        stream) {
+  return launchBlockPerMolEnergyKernelTypedImpl(numMols,
+                                                terms,
+                                                indices,
+                                                coords,
+                                                energies,
+                                                dimension,
+                                                cw,
+                                                fw,
+                                                reduceInFloat,
+                                                active,
+                                                stream);
+}
+cudaError_t launchBlockPerMolEnergyKernelTyped(int                                    numMols,
+                                               const EnergyForceContribsDevicePtrF32& terms,
+                                               const BatchedIndicesDevicePtr&         indices,
+                                               const double*                          coords,
+                                               double*                                energies,
+                                               int                                    dimension,
+                                               double                                 cw,
+                                               double                                 fw,
+                                               bool                                   reduceInFloat,
+                                               const uint8_t*                         active,
+                                               cudaStream_t                           stream) {
+  return launchBlockPerMolEnergyKernelTypedImpl(numMols,
+                                                terms,
+                                                indices,
+                                                coords,
+                                                energies,
+                                                dimension,
+                                                cw,
+                                                fw,
+                                                reduceInFloat,
+                                                active,
+                                                stream);
+}
+
 // ETK (3D) combined kernels
-__global__ void combinedEnergiesKernelETK(const Energy3DForceContribsDevicePtr* terms,
-                                          const BatchedIndices3DDevicePtr*      systemIndices,
-                                          const double*                         coords,
-                                          double*                               energies,
-                                          const uint8_t*                        activeThisStage) {
+__device__ double molEnergyETKDispatch(const Energy3DForceContribsDevicePtr& terms,
+                                       const BatchedIndices3DDevicePtr&      indices,
+                                       const double*                         coords,
+                                       int                                   molIdx,
+                                       int                                   tid) {
+  return fp64::molEnergyETK(terms, indices, coords, molIdx, tid);
+}
+__device__ double molEnergyETKDispatch(const Energy3DForceContribsDevicePtrF32& terms,
+                                       const BatchedIndices3DDevicePtr&         indices,
+                                       const double*                            coords,
+                                       int                                      molIdx,
+                                       int                                      tid) {
+  return fp64_params32::molEnergyETK(terms, indices, coords, molIdx, tid);
+}
+template <typename Terms>
+__device__ void molGradETKDispatch(const Terms&, const BatchedIndices3DDevicePtr&, const double*, double*, int, int);
+template <>
+__device__ void molGradETKDispatch(const Energy3DForceContribsDevicePtr& terms,
+                                   const BatchedIndices3DDevicePtr&      indices,
+                                   const double*                         coords,
+                                   double*                               grad,
+                                   int                                   molIdx,
+                                   int                                   tid) {
+  fp64::molGradETK(terms, indices, coords, grad, molIdx, tid);
+}
+template <>
+__device__ void molGradETKDispatch(const Energy3DForceContribsDevicePtrF32& terms,
+                                   const BatchedIndices3DDevicePtr&         indices,
+                                   const double*                            coords,
+                                   double*                                  grad,
+                                   int                                      molIdx,
+                                   int                                      tid) {
+  fp64_params32::molGradETK(terms, indices, coords, grad, molIdx, tid);
+}
+
+template <typename Terms, typename ReductionScalar = double>
+__global__ void combinedEnergiesKernelETK(const Terms*                     terms,
+                                          const BatchedIndices3DDevicePtr* systemIndices,
+                                          const double*                    coords,
+                                          double*                          energies,
+                                          const uint8_t*                   activeThisStage) {
   const int molIdx = blockIdx.x;
   const int tid    = threadIdx.x;
 
@@ -1201,16 +1417,16 @@ __global__ void combinedEnergiesKernelETK(const Energy3DForceContribsDevicePtr* 
     return;
   }
 
-  using BlockReduce = cub::BlockReduce<double, blockSizePerMol>;
+  using BlockReduce = cub::BlockReduce<ReductionScalar, blockSizePerMol>;
   __shared__ typename BlockReduce::TempStorage tempStorage;
 
-  const int     atomStart    = systemIndices->atomStarts[molIdx];
-  const double* molCoords    = coords + atomStart * 4;  // ETK uses 4D
-  const double  threadEnergy = molEnergyETK(*terms, *systemIndices, molCoords, molIdx, tid);
-  const double  blockEnergy  = BlockReduce(tempStorage).Sum(threadEnergy);
+  const int             atomStart    = systemIndices->atomStarts[molIdx];
+  const double*         molCoords    = coords + atomStart * 4;  // ETK uses 4D
+  const double          threadEnergy = molEnergyETKDispatch(*terms, *systemIndices, molCoords, molIdx, tid);
+  const ReductionScalar blockEnergy  = BlockReduce(tempStorage).Sum(static_cast<ReductionScalar>(threadEnergy));
 
   if (tid == 0) {
-    energies[molIdx] = blockEnergy;
+    energies[molIdx] = static_cast<double>(blockEnergy);
   }
 }
 
@@ -1232,11 +1448,12 @@ cudaError_t launchBlockPerMolEnergyKernelETK(int                                
 }
 
 // ETK (3D) combined gradient kernel
-__global__ void combinedGradKernelETK(const Energy3DForceContribsDevicePtr* terms,
-                                      const BatchedIndices3DDevicePtr*      systemIndices,
-                                      const double*                         coords,
-                                      double*                               grad,
-                                      const uint8_t*                        activeThisStage) {
+template <typename Terms>
+__global__ void combinedGradKernelETK(const Terms*                     terms,
+                                      const BatchedIndices3DDevicePtr* systemIndices,
+                                      const double*                    coords,
+                                      double*                          grad,
+                                      const uint8_t*                   activeThisStage) {
   const int molIdx = blockIdx.x;
   const int tid    = threadIdx.x;
 
@@ -1248,7 +1465,7 @@ __global__ void combinedGradKernelETK(const Energy3DForceContribsDevicePtr* term
   const double* molCoords = coords + atomStart * 4;  // ETK uses 4D
   double*       molGrad   = grad + atomStart * 4;    // Offset to molecule start for ETK (4D)
 
-  molGradETK(*terms, *systemIndices, molCoords, molGrad, molIdx, tid);
+  molGradETKDispatch(*terms, *systemIndices, molCoords, molGrad, molIdx, tid);
 }
 
 cudaError_t launchBlockPerMolGradKernelETK(int                                   numMols,
@@ -1265,6 +1482,639 @@ cudaError_t launchBlockPerMolGradKernelETK(int                                  
                                                                  coords,
                                                                  grad,
                                                                  activeThisStage);
+  return cudaGetLastError();
+}
+
+cudaError_t launchBlockPerMolEnergyKernelETK(int                                      numMols,
+                                             const Energy3DForceContribsDevicePtrF32& terms,
+                                             const BatchedIndices3DDevicePtr&         indices,
+                                             const double*                            coords,
+                                             double*                                  energies,
+                                             const uint8_t*                           active,
+                                             cudaStream_t                             stream) {
+  const AsyncDevicePtr<Energy3DForceContribsDevicePtrF32> devTerms(terms, stream);
+  const AsyncDevicePtr<BatchedIndices3DDevicePtr>         devIndices(indices, stream);
+  combinedEnergiesKernelETK<<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(),
+                                                                     devIndices.data(),
+                                                                     coords,
+                                                                     energies,
+                                                                     active);
+  return cudaGetLastError();
+}
+cudaError_t launchBlockPerMolGradKernelETK(int                                      numMols,
+                                           const Energy3DForceContribsDevicePtrF32& terms,
+                                           const BatchedIndices3DDevicePtr&         indices,
+                                           const double*                            coords,
+                                           double*                                  grad,
+                                           const uint8_t*                           active,
+                                           cudaStream_t                             stream) {
+  const AsyncDevicePtr<Energy3DForceContribsDevicePtrF32> devTerms(terms, stream);
+  const AsyncDevicePtr<BatchedIndices3DDevicePtr>         devIndices(indices, stream);
+  combinedGradKernelETK<<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(),
+                                                                 devIndices.data(),
+                                                                 coords,
+                                                                 grad,
+                                                                 active);
+  return cudaGetLastError();
+}
+
+template <typename Terms>
+cudaError_t launchBlockPerMolEnergyKernelETKTypedImpl(int                              numMols,
+                                                      const Terms&                     terms,
+                                                      const BatchedIndices3DDevicePtr& indices,
+                                                      const double*                    coords,
+                                                      double*                          energies,
+                                                      bool                             reduceInFloat,
+                                                      const uint8_t*                   active,
+                                                      cudaStream_t                     stream) {
+  const AsyncDevicePtr<Terms>                     devTerms(terms, stream);
+  const AsyncDevicePtr<BatchedIndices3DDevicePtr> devIndices(indices, stream);
+  if (reduceInFloat)
+    combinedEnergiesKernelETK<Terms, float>
+      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, energies, active);
+  else
+    combinedEnergiesKernelETK<Terms, double>
+      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, energies, active);
+  return cudaGetLastError();
+}
+
+cudaError_t launchBlockPerMolEnergyKernelETKTyped(int                                   numMols,
+                                                  const Energy3DForceContribsDevicePtr& terms,
+                                                  const BatchedIndices3DDevicePtr&      indices,
+                                                  const double*                         coords,
+                                                  double*                               energies,
+                                                  bool                                  reduceInFloat,
+                                                  const uint8_t*                        active,
+                                                  cudaStream_t                          stream) {
+  return launchBlockPerMolEnergyKernelETKTypedImpl(numMols,
+                                                   terms,
+                                                   indices,
+                                                   coords,
+                                                   energies,
+                                                   reduceInFloat,
+                                                   active,
+                                                   stream);
+}
+cudaError_t launchBlockPerMolEnergyKernelETKTyped(int                                      numMols,
+                                                  const Energy3DForceContribsDevicePtrF32& terms,
+                                                  const BatchedIndices3DDevicePtr&         indices,
+                                                  const double*                            coords,
+                                                  double*                                  energies,
+                                                  bool                                     reduceInFloat,
+                                                  const uint8_t*                           active,
+                                                  cudaStream_t                             stream) {
+  return launchBlockPerMolEnergyKernelETKTypedImpl(numMols,
+                                                   terms,
+                                                   indices,
+                                                   coords,
+                                                   energies,
+                                                   reduceInFloat,
+                                                   active,
+                                                   stream);
+}
+
+template <int dimension>
+__device__ float molEnergyDGF32Dispatch(const EnergyForceContribsDevicePtrF32& terms,
+                                        const BatchedIndicesDevicePtr&         indices,
+                                        const float*                           coords,
+                                        int                                    molIdx,
+                                        float                                  cw,
+                                        float                                  fw,
+                                        int                                    tid) {
+  return fp32::molEnergyDG<dimension>(terms, indices, coords, molIdx, cw, fw, tid);
+}
+template <int dimension>
+__device__ float molEnergyDGF32Dispatch(const EnergyForceContribsDevicePtr& terms,
+                                        const BatchedIndicesDevicePtr&      indices,
+                                        const float*                        coords,
+                                        int                                 molIdx,
+                                        float                               cw,
+                                        float                               fw,
+                                        int                                 tid) {
+  return fp32_params64::molEnergyDG<dimension>(terms, indices, coords, molIdx, cw, fw, tid);
+}
+template <int dimension>
+__device__ void molGradDGF32Dispatch(const EnergyForceContribsDevicePtrF32& terms,
+                                     const BatchedIndicesDevicePtr&         indices,
+                                     const float*                           coords,
+                                     float*                                 grad,
+                                     int                                    molIdx,
+                                     float                                  cw,
+                                     float                                  fw,
+                                     int                                    tid) {
+  fp32::molGradDG<dimension>(terms, indices, coords, grad, molIdx, cw, fw, tid);
+}
+template <int dimension>
+__device__ void molGradDGF32Dispatch(const EnergyForceContribsDevicePtr& terms,
+                                     const BatchedIndicesDevicePtr&      indices,
+                                     const float*                        coords,
+                                     float*                              grad,
+                                     int                                 molIdx,
+                                     float                               cw,
+                                     float                               fw,
+                                     int                                 tid) {
+  fp32_params64::molGradDG<dimension>(terms, indices, coords, grad, molIdx, cw, fw, tid);
+}
+
+template <int dimension, typename ReductionScalar, typename Terms>
+__global__ void combinedEnergiesKernelF32(const Terms*                   terms,
+                                          const BatchedIndicesDevicePtr* systemIndices,
+                                          const float*                   coords,
+                                          double*                        energies,
+                                          float                          chiralWeight,
+                                          float                          fourthDimWeight,
+                                          const uint8_t*                 activeThisStage) {
+  const int molIdx = blockIdx.x;
+  const int tid    = threadIdx.x;
+  if (activeThisStage != nullptr && activeThisStage[molIdx] == 0) {
+    if (tid == 0)
+      energies[molIdx] = 0.0;
+    return;
+  }
+  using BlockReduce = cub::BlockReduce<ReductionScalar, blockSizePerMol>;
+  __shared__ typename BlockReduce::TempStorage tempStorage;
+  const int                                    atomStart    = systemIndices->atomStarts[molIdx];
+  const float                                  threadEnergy = molEnergyDGF32Dispatch<dimension>(*terms,
+                                                               *systemIndices,
+                                                               coords + atomStart * dimension,
+                                                               molIdx,
+                                                               chiralWeight,
+                                                               fourthDimWeight,
+                                                               tid);
+  const ReductionScalar blockEnergy = BlockReduce(tempStorage).Sum(static_cast<ReductionScalar>(threadEnergy));
+  if (tid == 0)
+    energies[molIdx] = static_cast<double>(blockEnergy);
+}
+
+template <int dimension, typename Terms>
+__global__ void combinedGradKernelF32(const Terms*                   terms,
+                                      const BatchedIndicesDevicePtr* systemIndices,
+                                      const float*                   coords,
+                                      float*                         grad,
+                                      float                          chiralWeight,
+                                      float                          fourthDimWeight,
+                                      const uint8_t*                 activeThisStage) {
+  const int molIdx = blockIdx.x;
+  const int tid    = threadIdx.x;
+  if (activeThisStage != nullptr && activeThisStage[molIdx] == 0)
+    return;
+  const int        atomStart   = systemIndices->atomStarts[molIdx];
+  const int        numAtoms    = systemIndices->atomStarts[molIdx + 1] - atomStart;
+  constexpr int    maxAtomSize = 256;
+  __shared__ float accumGrad[maxAtomSize * 4];
+  const bool       useSharedMem = numAtoms * dimension <= maxAtomSize * 4;
+  float*           molGrad      = useSharedMem ? accumGrad : grad + atomStart * dimension;
+  for (int i = tid; i < numAtoms * dimension; i += blockSizePerMol)
+    molGrad[i] = 0.0f;
+  __syncthreads();
+  molGradDGF32Dispatch<dimension>(*terms,
+                                  *systemIndices,
+                                  coords + atomStart * dimension,
+                                  molGrad,
+                                  molIdx,
+                                  chiralWeight,
+                                  fourthDimWeight,
+                                  tid);
+  __syncthreads();
+  if (useSharedMem)
+    for (int i = tid; i < numAtoms * dimension; i += blockSizePerMol)
+      grad[atomStart * dimension + i] = molGrad[i];
+}
+
+cudaError_t launchBlockPerMolEnergyKernelF32(int                                    numMols,
+                                             const EnergyForceContribsDevicePtrF32& terms,
+                                             const BatchedIndicesDevicePtr&         systemIndices,
+                                             const float*                           coords,
+                                             double*                                energies,
+                                             int                                    dimension,
+                                             float                                  chiralWeight,
+                                             float                                  fourthDimWeight,
+                                             bool                                   reduceInFloat,
+                                             const uint8_t*                         activeThisStage,
+                                             cudaStream_t                           stream) {
+  const AsyncDevicePtr<EnergyForceContribsDevicePtrF32> devTerms(terms, stream);
+  const AsyncDevicePtr<BatchedIndicesDevicePtr>         devIndices(systemIndices, stream);
+#define NVMOLKIT_LAUNCH_DG_F32(DIM, REDUCE_T)                                                          \
+  combinedEnergiesKernelF32<DIM, REDUCE_T><<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(),   \
+                                                                                    devIndices.data(), \
+                                                                                    coords,            \
+                                                                                    energies,          \
+                                                                                    chiralWeight,      \
+                                                                                    fourthDimWeight,   \
+                                                                                    activeThisStage)
+  if (dimension == 3) {
+    if (reduceInFloat)
+      NVMOLKIT_LAUNCH_DG_F32(3, float);
+    else
+      NVMOLKIT_LAUNCH_DG_F32(3, double);
+  } else {
+    if (reduceInFloat)
+      NVMOLKIT_LAUNCH_DG_F32(4, float);
+    else
+      NVMOLKIT_LAUNCH_DG_F32(4, double);
+  }
+#undef NVMOLKIT_LAUNCH_DG_F32
+  return cudaGetLastError();
+}
+
+cudaError_t launchBlockPerMolGradKernelF32(int                                    numMols,
+                                           const EnergyForceContribsDevicePtrF32& terms,
+                                           const BatchedIndicesDevicePtr&         systemIndices,
+                                           const float*                           coords,
+                                           float*                                 grad,
+                                           int                                    dimension,
+                                           float                                  chiralWeight,
+                                           float                                  fourthDimWeight,
+                                           const uint8_t*                         activeThisStage,
+                                           cudaStream_t                           stream) {
+  const AsyncDevicePtr<EnergyForceContribsDevicePtrF32> devTerms(terms, stream);
+  const AsyncDevicePtr<BatchedIndicesDevicePtr>         devIndices(systemIndices, stream);
+  if (dimension == 3)
+    combinedGradKernelF32<3><<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(),
+                                                                      devIndices.data(),
+                                                                      coords,
+                                                                      grad,
+                                                                      chiralWeight,
+                                                                      fourthDimWeight,
+                                                                      activeThisStage);
+  else
+    combinedGradKernelF32<4><<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(),
+                                                                      devIndices.data(),
+                                                                      coords,
+                                                                      grad,
+                                                                      chiralWeight,
+                                                                      fourthDimWeight,
+                                                                      activeThisStage);
+  return cudaGetLastError();
+}
+
+cudaError_t launchBlockPerMolEnergyKernelF32(int                                 numMols,
+                                             const EnergyForceContribsDevicePtr& terms,
+                                             const BatchedIndicesDevicePtr&      indices,
+                                             const float*                        coords,
+                                             double*                             energies,
+                                             int                                 dimension,
+                                             float                               cw,
+                                             float                               fw,
+                                             bool                                reduceInFloat,
+                                             const uint8_t*                      active,
+                                             cudaStream_t                        stream) {
+  const AsyncDevicePtr<EnergyForceContribsDevicePtr> devTerms(terms, stream);
+  const AsyncDevicePtr<BatchedIndicesDevicePtr>      devIndices(indices, stream);
+#define NVMOLKIT_LAUNCH_DG_F32_F64PARAM(DIM, REDUCE_T) \
+  combinedEnergiesKernelF32<DIM, REDUCE_T>             \
+    <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, energies, cw, fw, active)
+  if (dimension == 3) {
+    if (reduceInFloat)
+      NVMOLKIT_LAUNCH_DG_F32_F64PARAM(3, float);
+    else
+      NVMOLKIT_LAUNCH_DG_F32_F64PARAM(3, double);
+  } else {
+    if (reduceInFloat)
+      NVMOLKIT_LAUNCH_DG_F32_F64PARAM(4, float);
+    else
+      NVMOLKIT_LAUNCH_DG_F32_F64PARAM(4, double);
+  }
+#undef NVMOLKIT_LAUNCH_DG_F32_F64PARAM
+  return cudaGetLastError();
+}
+
+cudaError_t launchBlockPerMolGradKernelF32(int                                 numMols,
+                                           const EnergyForceContribsDevicePtr& terms,
+                                           const BatchedIndicesDevicePtr&      indices,
+                                           const float*                        coords,
+                                           float*                              grad,
+                                           int                                 dimension,
+                                           float                               cw,
+                                           float                               fw,
+                                           const uint8_t*                      active,
+                                           cudaStream_t                        stream) {
+  const AsyncDevicePtr<EnergyForceContribsDevicePtr> devTerms(terms, stream);
+  const AsyncDevicePtr<BatchedIndicesDevicePtr>      devIndices(indices, stream);
+  if (dimension == 3)
+    combinedGradKernelF32<3>
+      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, grad, cw, fw, active);
+  else
+    combinedGradKernelF32<4>
+      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, grad, cw, fw, active);
+  return cudaGetLastError();
+}
+
+__device__ float molEnergyETKF32Dispatch(const Energy3DForceContribsDevicePtrF32& terms,
+                                         const BatchedIndices3DDevicePtr&         indices,
+                                         const float*                             coords,
+                                         int                                      molIdx,
+                                         int                                      tid) {
+  return fp32::molEnergyETK(terms, indices, coords, molIdx, tid);
+}
+__device__ float molEnergyETKF32Dispatch(const Energy3DForceContribsDevicePtr& terms,
+                                         const BatchedIndices3DDevicePtr&      indices,
+                                         const float*                          coords,
+                                         int                                   molIdx,
+                                         int                                   tid) {
+  return fp32_params64::molEnergyETK(terms, indices, coords, molIdx, tid);
+}
+template <typename Terms>
+__device__ void molGradETKF32Dispatch(const Terms&, const BatchedIndices3DDevicePtr&, const float*, float*, int, int);
+template <>
+__device__ void molGradETKF32Dispatch(const Energy3DForceContribsDevicePtrF32& terms,
+                                      const BatchedIndices3DDevicePtr&         indices,
+                                      const float*                             coords,
+                                      float*                                   grad,
+                                      int                                      molIdx,
+                                      int                                      tid) {
+  fp32::molGradETK(terms, indices, coords, grad, molIdx, tid);
+}
+template <>
+__device__ void molGradETKF32Dispatch(const Energy3DForceContribsDevicePtr& terms,
+                                      const BatchedIndices3DDevicePtr&      indices,
+                                      const float*                          coords,
+                                      float*                                grad,
+                                      int                                   molIdx,
+                                      int                                   tid) {
+  fp32_params64::molGradETK(terms, indices, coords, grad, molIdx, tid);
+}
+
+template <typename ReductionScalar, typename Terms>
+__global__ void combinedEnergiesKernelETKF32(const Terms*                     terms,
+                                             const BatchedIndices3DDevicePtr* indices,
+                                             const float*                     coords,
+                                             double*                          energies,
+                                             const uint8_t*                   activeThisStage) {
+  const int molIdx = blockIdx.x;
+  const int tid    = threadIdx.x;
+  if (activeThisStage != nullptr && activeThisStage[molIdx] == 0) {
+    if (tid == 0)
+      energies[molIdx] = 0.0;
+    return;
+  }
+  using BlockReduce = cub::BlockReduce<ReductionScalar, blockSizePerMol>;
+  __shared__ typename BlockReduce::TempStorage tempStorage;
+  const int                                    atomStart = indices->atomStarts[molIdx];
+  const float           value = molEnergyETKF32Dispatch(*terms, *indices, coords + atomStart * 4, molIdx, tid);
+  const ReductionScalar sum   = BlockReduce(tempStorage).Sum(static_cast<ReductionScalar>(value));
+  if (tid == 0)
+    energies[molIdx] = static_cast<double>(sum);
+}
+
+template <typename Terms>
+__global__ void combinedGradKernelETKF32(const Terms*                     terms,
+                                         const BatchedIndices3DDevicePtr* indices,
+                                         const float*                     coords,
+                                         float*                           grad,
+                                         const uint8_t*                   activeThisStage) {
+  const int molIdx = blockIdx.x;
+  if (activeThisStage != nullptr && activeThisStage[molIdx] == 0)
+    return;
+  const int atomStart = indices->atomStarts[molIdx];
+  molGradETKF32Dispatch(*terms, *indices, coords + atomStart * 4, grad + atomStart * 4, molIdx, threadIdx.x);
+}
+
+cudaError_t launchBlockPerMolEnergyKernelETKF32(int                                      numMols,
+                                                const Energy3DForceContribsDevicePtrF32& terms,
+                                                const BatchedIndices3DDevicePtr&         indices,
+                                                const float*                             coords,
+                                                double*                                  energies,
+                                                bool                                     reduceInFloat,
+                                                const uint8_t*                           activeThisStage,
+                                                cudaStream_t                             stream) {
+  const AsyncDevicePtr<Energy3DForceContribsDevicePtrF32> devTerms(terms, stream);
+  const AsyncDevicePtr<BatchedIndices3DDevicePtr>         devIndices(indices, stream);
+  if (reduceInFloat)
+    combinedEnergiesKernelETKF32<float>
+      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, energies, activeThisStage);
+  else
+    combinedEnergiesKernelETKF32<double>
+      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, energies, activeThisStage);
+  return cudaGetLastError();
+}
+
+cudaError_t launchBlockPerMolGradKernelETKF32(int                                      numMols,
+                                              const Energy3DForceContribsDevicePtrF32& terms,
+                                              const BatchedIndices3DDevicePtr&         indices,
+                                              const float*                             coords,
+                                              float*                                   grad,
+                                              const uint8_t*                           activeThisStage,
+                                              cudaStream_t                             stream) {
+  const AsyncDevicePtr<Energy3DForceContribsDevicePtrF32> devTerms(terms, stream);
+  const AsyncDevicePtr<BatchedIndices3DDevicePtr>         devIndices(indices, stream);
+  combinedGradKernelETKF32<<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(),
+                                                                    devIndices.data(),
+                                                                    coords,
+                                                                    grad,
+                                                                    activeThisStage);
+  return cudaGetLastError();
+}
+
+cudaError_t launchBlockPerMolEnergyKernelETKF32(int                                   numMols,
+                                                const Energy3DForceContribsDevicePtr& terms,
+                                                const BatchedIndices3DDevicePtr&      indices,
+                                                const float*                          coords,
+                                                double*                               energies,
+                                                bool                                  reduceInFloat,
+                                                const uint8_t*                        active,
+                                                cudaStream_t                          stream) {
+  const AsyncDevicePtr<Energy3DForceContribsDevicePtr> devTerms(terms, stream);
+  const AsyncDevicePtr<BatchedIndices3DDevicePtr>      devIndices(indices, stream);
+  if (reduceInFloat)
+    combinedEnergiesKernelETKF32<float>
+      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, energies, active);
+  else
+    combinedEnergiesKernelETKF32<double>
+      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, energies, active);
+  return cudaGetLastError();
+}
+
+cudaError_t launchBlockPerMolGradKernelETKF32(int                                   numMols,
+                                              const Energy3DForceContribsDevicePtr& terms,
+                                              const BatchedIndices3DDevicePtr&      indices,
+                                              const float*                          coords,
+                                              float*                                grad,
+                                              const uint8_t*                        active,
+                                              cudaStream_t                          stream) {
+  const AsyncDevicePtr<Energy3DForceContribsDevicePtr> devTerms(terms, stream);
+  const AsyncDevicePtr<BatchedIndices3DDevicePtr>      devIndices(indices, stream);
+  combinedGradKernelETKF32<<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(),
+                                                                    devIndices.data(),
+                                                                    coords,
+                                                                    grad,
+                                                                    active);
+  return cudaGetLastError();
+}
+
+template <typename ReductionScalar, typename Terms>
+__global__ void planarEnergyKernelETKTyped(const Terms*                     terms,
+                                           const BatchedIndices3DDevicePtr* indices,
+                                           const double*                    coords,
+                                           double*                          energies,
+                                           const uint8_t*                   activeThisStage) {
+  const int molIdx = blockIdx.x;
+  const int tid    = threadIdx.x;
+  if (activeThisStage != nullptr && activeThisStage[molIdx] == 0) {
+    if (tid == 0)
+      energies[molIdx] = 0.0;
+    return;
+  }
+  const int     atomStart = indices->atomStarts[molIdx];
+  const double* molCoords = coords + atomStart * 4;
+  double        energy    = 0.0;
+  for (int termIdx = indices->improperTorsionTermStarts[molIdx] + tid;
+       termIdx < indices->improperTorsionTermStarts[molIdx + 1];
+       termIdx += blockSizePerMol) {
+    const auto& t = terms->improperTorsionTerms;
+    energy += fp64::inversionEnergy(molCoords,
+                                    t.idx1[termIdx] - atomStart,
+                                    t.idx2[termIdx] - atomStart,
+                                    t.idx3[termIdx] - atomStart,
+                                    t.idx4[termIdx] - atomStart,
+                                    t.C0[termIdx],
+                                    t.C1[termIdx],
+                                    t.C2[termIdx],
+                                    t.forceConstant[termIdx]);
+  }
+  for (int termIdx = indices->angle13TermStarts[molIdx] + tid; termIdx < indices->angle13TermStarts[molIdx + 1];
+       termIdx += blockSizePerMol) {
+    const auto& t = terms->angle13Terms;
+    energy += fp64::angleConstraintEnergy(molCoords,
+                                          t.idx1[termIdx] - atomStart,
+                                          t.idx2[termIdx] - atomStart,
+                                          t.idx3[termIdx] - atomStart,
+                                          t.minAngle[termIdx],
+                                          t.maxAngle[termIdx],
+                                          10.0);
+  }
+  using BlockReduce = cub::BlockReduce<ReductionScalar, blockSizePerMol>;
+  __shared__ typename BlockReduce::TempStorage tempStorage;
+  const ReductionScalar                        sum = BlockReduce(tempStorage).Sum(static_cast<ReductionScalar>(energy));
+  if (tid == 0)
+    energies[molIdx] = static_cast<double>(sum);
+}
+
+template <typename Terms>
+cudaError_t launchPlanarEnergyKernelETKTypedImpl(int                              numMols,
+                                                 const Terms&                     terms,
+                                                 const BatchedIndices3DDevicePtr& indices,
+                                                 const double*                    coords,
+                                                 double*                          energies,
+                                                 bool                             reduceInFloat,
+                                                 const uint8_t*                   active,
+                                                 cudaStream_t                     stream) {
+  const AsyncDevicePtr<Terms>                     devTerms(terms, stream);
+  const AsyncDevicePtr<BatchedIndices3DDevicePtr> devIndices(indices, stream);
+  if (reduceInFloat)
+    planarEnergyKernelETKTyped<float>
+      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, energies, active);
+  else
+    planarEnergyKernelETKTyped<double>
+      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, energies, active);
+  return cudaGetLastError();
+}
+
+cudaError_t launchPlanarEnergyKernelETKTyped(int                                   numMols,
+                                             const Energy3DForceContribsDevicePtr& terms,
+                                             const BatchedIndices3DDevicePtr&      indices,
+                                             const double*                         coords,
+                                             double*                               energies,
+                                             bool                                  reduceInFloat,
+                                             const uint8_t*                        active,
+                                             cudaStream_t                          stream) {
+  return launchPlanarEnergyKernelETKTypedImpl(numMols, terms, indices, coords, energies, reduceInFloat, active, stream);
+}
+
+cudaError_t launchPlanarEnergyKernelETKTyped(int                                      numMols,
+                                             const Energy3DForceContribsDevicePtrF32& terms,
+                                             const BatchedIndices3DDevicePtr&         indices,
+                                             const double*                            coords,
+                                             double*                                  energies,
+                                             bool                                     reduceInFloat,
+                                             const uint8_t*                           active,
+                                             cudaStream_t                             stream) {
+  return launchPlanarEnergyKernelETKTypedImpl(numMols, terms, indices, coords, energies, reduceInFloat, active, stream);
+}
+
+template <typename ReductionScalar, typename Terms>
+__global__ void planarEnergyKernelETKF32(const Terms*                     terms,
+                                         const BatchedIndices3DDevicePtr* indices,
+                                         const float*                     coords,
+                                         double*                          energies,
+                                         const uint8_t*                   activeThisStage) {
+  const int molIdx = blockIdx.x;
+  const int tid    = threadIdx.x;
+  if (activeThisStage != nullptr && activeThisStage[molIdx] == 0) {
+    if (tid == 0)
+      energies[molIdx] = 0.0;
+    return;
+  }
+  const int    atomStart = indices->atomStarts[molIdx];
+  const float* molCoords = coords + atomStart * 4;
+  float        energy    = 0.0f;
+  for (int termIdx = indices->improperTorsionTermStarts[molIdx] + tid;
+       termIdx < indices->improperTorsionTermStarts[molIdx + 1];
+       termIdx += blockSizePerMol) {
+    const auto& t = terms->improperTorsionTerms;
+    energy += fp32::inversionEnergy(molCoords,
+                                    t.idx1[termIdx] - atomStart,
+                                    t.idx2[termIdx] - atomStart,
+                                    t.idx3[termIdx] - atomStart,
+                                    t.idx4[termIdx] - atomStart,
+                                    t.C0[termIdx],
+                                    t.C1[termIdx],
+                                    t.C2[termIdx],
+                                    t.forceConstant[termIdx]);
+  }
+  for (int termIdx = indices->angle13TermStarts[molIdx] + tid; termIdx < indices->angle13TermStarts[molIdx + 1];
+       termIdx += blockSizePerMol) {
+    const auto& t = terms->angle13Terms;
+    energy += fp32::angleConstraintEnergy(molCoords,
+                                          t.idx1[termIdx] - atomStart,
+                                          t.idx2[termIdx] - atomStart,
+                                          t.idx3[termIdx] - atomStart,
+                                          t.minAngle[termIdx],
+                                          t.maxAngle[termIdx],
+                                          10.0f);
+  }
+  using BlockReduce = cub::BlockReduce<ReductionScalar, blockSizePerMol>;
+  __shared__ typename BlockReduce::TempStorage tempStorage;
+  const ReductionScalar                        sum = BlockReduce(tempStorage).Sum(static_cast<ReductionScalar>(energy));
+  if (tid == 0)
+    energies[molIdx] = static_cast<double>(sum);
+}
+
+cudaError_t launchPlanarEnergyKernelETKF32(int                                      numMols,
+                                           const Energy3DForceContribsDevicePtrF32& terms,
+                                           const BatchedIndices3DDevicePtr&         indices,
+                                           const float*                             coords,
+                                           double*                                  energies,
+                                           bool                                     reduceInFloat,
+                                           const uint8_t*                           activeThisStage,
+                                           cudaStream_t                             stream) {
+  const AsyncDevicePtr<Energy3DForceContribsDevicePtrF32> devTerms(terms, stream);
+  const AsyncDevicePtr<BatchedIndices3DDevicePtr>         devIndices(indices, stream);
+  if (reduceInFloat)
+    planarEnergyKernelETKF32<float>
+      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, energies, activeThisStage);
+  else
+    planarEnergyKernelETKF32<double>
+      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, energies, activeThisStage);
+  return cudaGetLastError();
+}
+
+cudaError_t launchPlanarEnergyKernelETKF32(int                                   numMols,
+                                           const Energy3DForceContribsDevicePtr& terms,
+                                           const BatchedIndices3DDevicePtr&      indices,
+                                           const float*                          coords,
+                                           double*                               energies,
+                                           bool                                  reduceInFloat,
+                                           const uint8_t*                        active,
+                                           cudaStream_t                          stream) {
+  const AsyncDevicePtr<Energy3DForceContribsDevicePtr> devTerms(terms, stream);
+  const AsyncDevicePtr<BatchedIndices3DDevicePtr>      devIndices(indices, stream);
+  if (reduceInFloat)
+    planarEnergyKernelETKF32<float>
+      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, energies, active);
+  else
+    planarEnergyKernelETKF32<double>
+      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, energies, active);
   return cudaGetLastError();
 }
 }  // namespace DistGeom

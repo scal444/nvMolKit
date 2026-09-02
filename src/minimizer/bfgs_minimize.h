@@ -37,8 +37,10 @@ using BatchedMolecularDeviceBuffersF32Params = BatchedMolecularDeviceBuffersT<fl
 }  // namespace MMFF
 
 namespace DistGeom {
-struct BatchedMolecularDeviceBuffers;
-struct BatchedMolecular3DDeviceBuffers;
+template <typename ParameterScalar> struct BatchedMolecularDeviceBuffersT;
+template <typename ParameterScalar> struct BatchedMolecular3DDeviceBuffersT;
+using BatchedMolecularDeviceBuffers   = BatchedMolecularDeviceBuffersT<double>;
+using BatchedMolecular3DDeviceBuffers = BatchedMolecular3DDeviceBuffersT<double>;
 }  // namespace DistGeom
 
 //! \brief Computes energies, optionally on an external set of positions.
@@ -66,6 +68,8 @@ struct BfgsBatchMinimizer {
                               BfgsBackend      backend    = BfgsBackend::BATCHED,
                               PrecisionOptions precision  = {});
   ~BfgsBatchMinimizer();
+
+  const PrecisionOptions& precisionOptions() const { return precision_; }
 
   //! \brief Runs host-driven batched BFGS through the forcefield abstraction.
   //! \param numIters Maximum number of BFGS iterations to perform.

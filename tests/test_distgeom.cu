@@ -335,7 +335,8 @@ void runTestInBatch(const std::vector<std::unique_ptr<RDKit::ROMol>>& mols,
                     double                                            energyTolerance   = 1e-4,
                     double                                            gradTolerance     = 1e-4,
                     const uint8_t*                                    h_activeThisStage = nullptr,
-                    const uint8_t*                                    d_activeThisStage = nullptr) {
+                    const uint8_t*                                    d_activeThisStage = nullptr,
+                    nvMolKit::PrecisionOptions                        precision         = {}) {
   const int                        numMols = mols.size();
   std::vector<ValidationFailures>  failures;
   std::vector<ValidationFailures>  gradFailures;
@@ -378,7 +379,7 @@ void runTestInBatch(const std::vector<std::unique_ptr<RDKit::ROMol>>& mols,
   }
 
   sendContextToDevice(positionsHost, positionsDevice, atomStartsHost, atomStartsDevice);
-  nvMolKit::DGBatchedForcefield forcefield(systemHost, atomStartsHost, 1.0, 0.1);
+  nvMolKit::DGBatchedForcefield forcefield(systemHost, atomStartsHost, 1.0, 0.1, {}, nullptr, precision);
   AsyncDeviceVector<double>     energyOutsDevice;
   AsyncDeviceVector<double>     gradDevice;
   energyOutsDevice.resize(atomStartsHost.size() - 1);
@@ -594,4 +595,33 @@ TEST_P(ETKDGFFGpuBatchEdgeCases, BatchTestWithActiveStage) {
   d_activeThisStage.setFromVector(activeStages_);
 
   runTestInBatch(mols_, ETKDGOption::ETKDGv3, 1e-6, 1e-4, activeStages_.data(), d_activeThisStage.data());
+}
+
+TEST(DGPrecisionModes, FloatForcefieldPresetsProduceFiniteAccurateEnergyAndGradients) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> mols;
+  getMols(getTestDataFolderPath() + "/MMFF94_dative.sdf", mols, 2);
+  for (const auto mode :
+       {nvMolKit::PrecisionMode::FORCEFIELD_F32, nvMolKit::PrecisionMode::MIXED, nvMolKit::PrecisionMode::SINGLE}) {
+    nvMolKit::PrecisionOptions precision;
+    precision.mode = mode;
+    SCOPED_TRACE(nvMolKit::precisionModeName(mode));
+    runTestInBatch(mols, ETKDGOption::ETKDGv3, 2e-3, 2e-3, nullptr, nullptr, precision);
+  }
+
+  std::vector<nvMolKit::PrecisionOptions> crossed(6);
+  crossed[0].forcefieldParameterStorage = nvMolKit::PrecisionDType::FLOAT32;
+  crossed[0].forcefieldCompute          = nvMolKit::PrecisionDType::FLOAT64;
+  for (int i = 0; i < 4; ++i) {
+    crossed[i + 1].forcefieldParameterStorage = nvMolKit::PrecisionDType::FLOAT64;
+    crossed[i + 1].forcefieldCompute          = nvMolKit::PrecisionDType::FLOAT32;
+    crossed[i + 1].forcefieldCoordinateStorage =
+      (i & 1) ? nvMolKit::PrecisionDType::FLOAT32 : nvMolKit::PrecisionDType::FLOAT64;
+    crossed[i + 1].forcefieldGradientStorage =
+      (i & 2) ? nvMolKit::PrecisionDType::FLOAT32 : nvMolKit::PrecisionDType::FLOAT64;
+  }
+  crossed[5].reductionCompute = nvMolKit::PrecisionDType::FLOAT32;
+  for (size_t i = 0; i < crossed.size(); ++i) {
+    SCOPED_TRACE("crossed axes " + std::to_string(i));
+    runTestInBatch(mols, ETKDGOption::ETKDGv3, 2e-3, 2e-3, nullptr, nullptr, crossed[i]);
+  }
 }
