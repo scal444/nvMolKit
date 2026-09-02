@@ -44,9 +44,10 @@ PythonMoleculeSequence convertMolecules(const object& mols) {
 
   PythonMoleculeSequence result{object(handle<>(sequence)), {}};
   const Py_ssize_t       numMols = PySequence_Fast_GET_SIZE(sequence);
+  PyObject* const*       items   = PySequence_Fast_ITEMS(sequence);
   result.molecules.reserve(static_cast<std::size_t>(numMols));
   for (Py_ssize_t i = 0; i < numMols; ++i) {
-    const RDKit::ROMol* mol = extract<const RDKit::ROMol*>(PySequence_Fast_GET_ITEM(sequence, i));
+    const RDKit::ROMol* mol = extract<const RDKit::ROMol*>(items[i]);
     if (mol == nullptr) {
       throw std::invalid_argument("Invalid molecule at index " + std::to_string(i));
     }
