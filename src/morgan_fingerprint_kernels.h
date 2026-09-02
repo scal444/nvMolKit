@@ -50,10 +50,9 @@ struct MorganPerThreadBuffers {
   std::unique_ptr<MorganGPUBuffersBatch> gpuBuffers128;
   ScopedCudaEvent                        prevMemcpyDoneEvent;
 
-  // One grow-only pinned arena backs all host staging views. A worker processes only
-  // one tier at a time, so sizing these views for the largest tier avoids fourteen
-  // independent cudaMallocHost calls without increasing the live staging footprint.
-  std::unique_ptr<PinnedHostAllocator> pinnedAllocator;
+  // One grow-only pinned reservoir is shared by every worker. A worker processes
+  // only one tier at a time, so each worker needs one set of largest-tier views.
+  std::shared_ptr<PinnedHostAllocator> pinnedAllocator;
   size_t                               pinnedBatchCapacity = 0;
   PinnedHostView<std::int16_t>         nAtomsPerMol;
   PinnedHostView<std::uint32_t>        h_atomInvariants;
