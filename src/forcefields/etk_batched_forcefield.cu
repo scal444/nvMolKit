@@ -33,6 +33,8 @@ ETKBatchedForcefield::ETKBatchedForcefield(const DistGeom::BatchedMolecularSyste
                                            BatchedForcefieldMetadata                     metadata,
                                            const cudaStream_t                            stream,
                                            const PrecisionOptions                        precision)
+    // ETK evaluates xyz terms, but the ETKDG minimization stage retains the
+    // four-strided coordinate buffer until minimization is complete.
     : BatchedForcefield(ForceFieldType::ETK, 4, atomStartsHost, nullptr, std::move(metadata)),
       term_(useBasicKnowledge ? DistGeom::ETKTerm::ALL : DistGeom::ETKTerm::PLAIN) {
   const auto resolved       = resolvePrecisionOptions(precision);
@@ -104,6 +106,7 @@ cudaError_t ETKBatchedForcefield::computeGradients(double*        grad,
     auto err = detail::convertDeviceArray(positionsFloat_.data(), positions, totalPositions(), stream);
     if (err != cudaSuccess)
       return err;
+    gradientsFloat_.zero();
     err = computeGradientsFloat(gradientsFloat_.data(), positionsFloat_.data(), activeSystemMask, stream);
     return err == cudaSuccess ? detail::convertDeviceArray(grad, gradientsFloat_.data(), totalPositions(), stream) :
                                 err;
@@ -229,6 +232,7 @@ cudaError_t ETKBatchedForcefield::computeGradientsFloat(float*         grad,
     auto err = detail::convertDeviceArray(positionsComputeDouble_.data(), positions, totalPositions(), stream);
     if (err != cudaSuccess)
       return err;
+    gradientsComputeDouble_.zero();
     err = std::visit(
       [&](const auto& buffers) {
         return DistGeom::launchBlockPerMolGradKernelETK(
