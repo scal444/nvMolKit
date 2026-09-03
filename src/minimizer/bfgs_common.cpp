@@ -53,8 +53,10 @@ BatchExecutionContext setupBatchExecution(const BatchHardwareOptions& perfOption
     std::iota(gpuIds.begin(), gpuIds.end(), 0);
   }
   const int batchesPerGpu = perfOptions.batchesPerGpu == -1 ? 4 : perfOptions.batchesPerGpu;
-  ctx.numThreads =
-    perfOptions.batchesPerGpu > 0 ? batchesPerGpu * static_cast<int>(gpuIds.size()) : omp_get_max_threads();
+  ctx.numThreads          = perfOptions.batchesPerGpu > 0 ? batchesPerGpu * static_cast<int>(gpuIds.size()) :
+                                                            perfOptions.preprocessingThreads == -1
+                                                              ? omp_get_max_threads()
+                                                              : perfOptions.preprocessingThreads;
 
   ctx.streamPool.reserve(ctx.numThreads);
   ctx.devicesPerThread.resize(ctx.numThreads);
