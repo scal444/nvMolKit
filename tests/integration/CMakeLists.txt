@@ -19,3 +19,9 @@ target_link_libraries(
   PRIVATE ${RDKit_LIBS} morganFingerprint Similarity molData)
 
 register_gtest_tests(integration_test_fingerprint_similarity)
+
+add_executable(integration_test_bitbirch test_bitbirch_workflow.cpp)
+target_link_libraries(integration_test_bitbirch
+                      PRIVATE ${RDKit_LIBS} morganFingerprint bitbirch molData)
+
+register_gtest_tests(integration_test_bitbirch)
