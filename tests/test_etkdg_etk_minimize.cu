@@ -296,9 +296,9 @@ TEST_P(ETKStageSingleMolTestFixture, MinimizeCompare) {
   EXPECT_THAT(refEnergies, ::testing::Pointwise(testing::Ge(), gpuEnergies));
 }
 
-TEST(ETKPrecisionModes, FloatForcefieldPresetsMinimizeSmallMolecule) {
+TEST(ETKPrecisionModes, FloatForcefieldPresetsMinimizeBatchedSmallMolecules) {
   const std::string                       path = getTestDataFolderPath() + "/rdkit_smallmol_1.mol2";
-  std::vector<nvMolKit::PrecisionOptions> precisions(9);
+  std::vector<nvMolKit::PrecisionOptions> precisions(10);
   precisions[0].mode                       = nvMolKit::PrecisionMode::FORCEFIELD_F32;
   precisions[1].mode                       = nvMolKit::PrecisionMode::MIXED;
   precisions[2].mode                       = nvMolKit::PrecisionMode::SINGLE;
@@ -313,21 +313,26 @@ TEST(ETKPrecisionModes, FloatForcefieldPresetsMinimizeSmallMolecule) {
       (i & 2) ? nvMolKit::PrecisionDType::FLOAT32 : nvMolKit::PrecisionDType::FLOAT64;
   }
   precisions[8].reductionCompute = nvMolKit::PrecisionDType::FLOAT32;
+  precisions[9].mode             = nvMolKit::PrecisionMode::LEGACY;
   for (size_t precisionIdx = 0; precisionIdx < precisions.size(); ++precisionIdx) {
     SCOPED_TRACE("precision case " + std::to_string(precisionIdx));
-    auto mol = std::unique_ptr<RDKit::RWMol>(RDKit::MolFileToMol(path, false));
-    ASSERT_NE(mol, nullptr);
-    RDKit::MolOps::sanitizeMol(*mol);
-    perturbConformer(mol->getConformer(), 0.5);
-    std::vector<RDKit::ROMol*>               mols{mol.get()};
+    std::vector<std::unique_ptr<RDKit::RWMol>> ownedMols;
+    std::vector<RDKit::ROMol*>                 mols;
+    for (int molIdx = 0; molIdx < 8; ++molIdx) {
+      auto mol = std::unique_ptr<RDKit::RWMol>(RDKit::MolFileToMol(path, false));
+      ASSERT_NE(mol, nullptr);
+      RDKit::MolOps::sanitizeMol(*mol);
+      perturbConformer(mol->getConformer(), 0.5, molIdx);
+      mols.push_back(mol.get());
+      ownedMols.push_back(std::move(mol));
+    }
     ETKDGContext                             context;
     std::vector<nvMolKit::detail::EmbedArgs> eargs;
     auto                                     params = getETKDGOption(ETKDGOption::ETKDGv3);
     params.useRandomCoords                          = true;
     initTestComponentsCommon(mols, context, eargs, params);
-    const std::vector<const RDKit::ROMol*> constMols{mol.get()};
-    const auto                             initialEnergy =
-      getGPUEnergy(constMols, context.systemDevice.positions, eargs, params.useBasicKnowledge).front();
+    const std::vector<const RDKit::ROMol*> constMols(mols.begin(), mols.end());
+    const auto initialEnergy = getGPUEnergy(constMols, context.systemDevice.positions, eargs, params.useBasicKnowledge);
     nvMolKit::BfgsBatchMinimizer             minimizer(4,
                                            nvMolKit::DebugLevel::NONE,
                                            true,
@@ -340,9 +345,17 @@ TEST(ETKPrecisionModes, FloatForcefieldPresetsMinimizeSmallMolecule) {
     nvMolKit::detail::ETKDGDriver driver(std::make_unique<ETKDGContext>(std::move(context)), std::move(stages));
     driver.run(1);
     const auto finalEnergy =
-      getGPUEnergy(constMols, driver.context().systemDevice.positions, eargs, params.useBasicKnowledge).front();
-    EXPECT_TRUE(std::isfinite(finalEnergy));
-    EXPECT_LT(finalEnergy, initialEnergy);
+      getGPUEnergy(constMols, driver.context().systemDevice.positions, eargs, params.useBasicKnowledge);
+    nvMolKit::PinnedHostVector<int16_t> failuresScratch;
+    const auto                          failureCounts = driver.getFailures(failuresScratch);
+    ASSERT_EQ(failureCounts.size(), 1);
+    EXPECT_THAT(failureCounts[0], testing::Each(0));
+    ASSERT_EQ(finalEnergy.size(), initialEnergy.size());
+    for (size_t molIdx = 0; molIdx < finalEnergy.size(); ++molIdx) {
+      SCOPED_TRACE("molecule " + std::to_string(molIdx));
+      EXPECT_TRUE(std::isfinite(finalEnergy[molIdx]));
+      EXPECT_LT(finalEnergy[molIdx], initialEnergy[molIdx]);
+    }
   }
 }
 
