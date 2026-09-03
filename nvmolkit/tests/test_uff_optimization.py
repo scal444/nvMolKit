@@ -85,6 +85,23 @@ def test_uff_single_precision_profile_executes(uff_test_mols, minimizer_kind):
     assert all(math.isfinite(energy) for energy in energies[0])
 
 
+@pytest.mark.parametrize(
+    "precision_mode",
+    [PrecisionMode.MINIMIZER_F32, PrecisionMode.FORCEFIELD_F32, PrecisionMode.SINGLE],
+    ids=["fp32-fire", "fp32-forcefield", "fp32-fire-and-forcefield"],
+)
+def test_uff_fire_and_forcefield_precision_are_independent(uff_test_mols, precision_mode):
+    mol = create_hard_copy_mols(uff_test_mols[:1])[0]
+    energies = nvmolkit_uff.UFFOptimizeMoleculesConfs(
+        [mol],
+        maxIters=5,
+        minimizerKind="FIRE",
+        precisionOptions=PrecisionOptions(precision_mode),
+    )
+    assert energies and energies[0]
+    assert all(math.isfinite(energy) for energy in energies[0])
+
+
 @pytest.mark.parametrize("minimizer_kind", ["BFGS", "FIRE"])
 @pytest.mark.parametrize(
     "precision_options",
