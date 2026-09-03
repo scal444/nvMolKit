@@ -40,9 +40,8 @@ from nvmolkit.autotune._ff_common import (
     resolve_num_gpus,
     total_conformers,
 )
-from nvmolkit.types import FireOptions, HardwareOptions
+from nvmolkit.types import FireOptions, HardwareOptions, PrecisionOptions
 from nvmolkit.uffOptimization import UFFOptimizeMoleculesConfs
-
 
 def tune_uff_optimize(
     molecules: list[Mol],
@@ -52,6 +51,7 @@ def tune_uff_optimize(
     ignoreInterfragInteractions: bool | Sequence[bool] = True,
     minimizerKind: str = "BFGS",
     fireOptions: FireOptions | None = None,
+    precisionOptions: PrecisionOptions | None = None,
     gpuIds: Optional[Iterable[int]] = None,
     calibration_set: Optional[Iterable[int]] = None,
     calibration_fraction: float = 0.1,
@@ -77,6 +77,7 @@ def tune_uff_optimize(
         minimizerKind: ``"BFGS"`` or ``"FIRE"``, forwarded to each trial.
         fireOptions: FIRE algorithm options forwarded to each trial when
             ``minimizerKind="FIRE"``.
+        precisionOptions: Precision profile forwarded to each trial.
         gpuIds: GPU device IDs to use. Fixed across the study.
         calibration_set: Optional explicit indices into ``molecules``.
         calibration_fraction: Fraction of the workload to auto-sample.
@@ -141,6 +142,7 @@ def tune_uff_optimize(
             hardwareOptions=options,
             minimizerKind=minimizerKind,
             fireOptions=fireOptions,
+            precisionOptions=precisionOptions,
         )
         return total_conformers(cloned)
 

@@ -20,11 +20,13 @@ Pre-embeds molecules with RDKit ETKDG, then times either
 :func:`nvmolkit.uffOptimization.UFFOptimizeMoleculesConfs` versus their RDKit
 ``AllChem.MMFFOptimizeMoleculeConfs`` / ``AllChem.UFFOptimizeMoleculeConfs``
 counterparts. Reports per-method wall-clock timings and (when validation is
-enabled) absolute energy deltas between the two implementations.
+enabled) absolute energy deltas between the two implementations. Multiple
+minimizer/precision modes can be compared against one RDKit reference run.
 
 Usage:
     python ff_optimize_bench.py --smiles data/chembl_10k.smi --ff mmff --num_mols 200 --confs_per_mol 5
-    python ff_optimize_bench.py --smiles data/chembl_10k.smi --ff mmff --minimizer_kind FIRE --autotune
+    python ff_optimize_bench.py --smiles data/chembl_10k.smi --ff mmff --modes bfgs_full bfgs_fp32_hessian
+    python ff_optimize_bench.py --smiles data/chembl_10k.smi --ff mmff --modes fire_full fire_single --autotune
     python ff_optimize_bench.py --sdf data/MPCONF196.sdf --ff uff --confs_per_mol 1 --no_rdkit
     python ff_optimize_bench.py --pickle prepared.pkl --ff mmff --batch_size 512 --batches_per_gpu 4
 """
@@ -35,6 +37,7 @@ import math
 import random
 import statistics
 import sys
+from typing import NamedTuple
 
 import nvtx
 import torch
@@ -59,9 +62,29 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 
 from nvmolkit import autotune as nv_autotune
-from nvmolkit.types import HardwareOptions
+from nvmolkit.types import HardwareOptions, PrecisionMode, PrecisionOptions
 
 OPTUNA_AVAILABLE = nv_autotune.is_available()
+
+
+class BenchmarkMode(NamedTuple):
+    """Resolved minimizer and precision profile for one benchmark mode."""
+
+    minimizer_kind: str
+    precision_mode: PrecisionMode
+
+
+BENCHMARK_MODES: dict[str, BenchmarkMode] = {
+    "bfgs_full": BenchmarkMode("BFGS", PrecisionMode.LEGACY),
+    "bfgs_fp32_hessian": BenchmarkMode("BFGS", PrecisionMode.HESSIAN_F32),
+    "bfgs_fp32_minimizer": BenchmarkMode("BFGS", PrecisionMode.MINIMIZER_F32),
+    "bfgs_fp32_forcefield": BenchmarkMode("BFGS", PrecisionMode.FORCEFIELD_F32),
+    "bfgs_single": BenchmarkMode("BFGS", PrecisionMode.SINGLE),
+    "fire_full": BenchmarkMode("FIRE", PrecisionMode.LEGACY),
+    "fire_single": BenchmarkMode("FIRE", PrecisionMode.MINIMIZER_F32),
+    "fire_single_forcefield": BenchmarkMode("FIRE", PrecisionMode.FORCEFIELD_F32),
+    "fire_single_both": BenchmarkMode("FIRE", PrecisionMode.SINGLE),
+}
 
 
 def _flatten_energies(per_mol: list[list[float]]) -> list[float]:
@@ -114,6 +137,7 @@ def bench_nvmolkit(
     mols: list[Chem.Mol],
     ff: str,
     minimizer_kind: str,
+    precision_options: PrecisionOptions,
     max_iters: int,
     hardware_options,
     runs: int,
@@ -137,6 +161,7 @@ def bench_nvmolkit(
             maxIters=max_iters,
             hardwareOptions=hardware_options,
             minimizerKind=minimizer_kind,
+            precisionOptions=precision_options,
         )
 
     if warmup:
@@ -147,6 +172,7 @@ def bench_nvmolkit(
                 maxIters=max_iters,
                 hardwareOptions=hardware_options,
                 minimizerKind=minimizer_kind,
+                precisionOptions=precision_options,
             )
         torch.cuda.synchronize()
 
@@ -252,8 +278,16 @@ def main() -> None:
         "--minimizer_kind",
         choices=["BFGS", "FIRE"],
         type=str.upper,
-        default="BFGS",
-        help="nvmolkit minimizer to benchmark: BFGS or FIRE (default: BFGS)",
+        default=None,
+        help="Deprecated compatibility option; use --modes (selects the corresponding full mode)",
+    )
+    parser.add_argument(
+        "--modes",
+        "--mode",
+        nargs="+",
+        choices=sorted(BENCHMARK_MODES),
+        default=None,
+        help="One or more nvmolkit minimizer/precision modes (default: bfgs_full)",
     )
     parser.add_argument(
         "--confs_per_mol",
@@ -358,6 +392,16 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    if args.modes is not None and args.minimizer_kind is not None:
+        parser.error("--modes and --minimizer_kind are mutually exclusive")
+    if args.modes is not None:
+        selected_mode_names = list(dict.fromkeys(args.modes))
+    elif args.minimizer_kind == "FIRE":
+        selected_mode_names = ["fire_full"]
+    else:
+        selected_mode_names = ["bfgs_full"]
+    selected_modes = [(name, BENCHMARK_MODES[name]) for name in selected_mode_names]
+
     input_paths = [p for p in (args.smiles, args.sdf, args.pickle) if p]
     if not input_paths:
         print("Error: One of --smiles, --sdf, or --pickle is required")
@@ -391,7 +435,9 @@ def main() -> None:
     print("\nConfiguration:")
     print(f"  Input: {input_file} ({input_type})")
     print(f"  Force field: {args.ff.upper()}")
-    print(f"  nvmolkit minimizer: {args.minimizer_kind}")
+    print("  nvmolkit modes:")
+    for mode_name, mode in selected_modes:
+        print(f"    {mode_name}: minimizer={mode.minimizer_kind}, precision={mode.precision_mode.value}")
     print(f"  Max molecules: {args.num_mols if args.num_mols > 0 else 'all'}")
     print(f"  Conformers per mol: {args.confs_per_mol}")
     print(f"  Max FF iterations: {args.max_iters}")
@@ -476,7 +522,7 @@ def main() -> None:
                 )
                 sys.exit(1)
             print(
-                f"\nAutotuning HardwareOptions for {args.ff.upper()} "
+                f"\nAutotuning HardwareOptions for {args.ff.upper()} {selected_mode_names[0]} "
                 f"(n_trials={args.autotune_trials}, per-trial target={args.autotune_time_budget:.1f}s)..."
             )
             explicit_calibration = None
@@ -486,7 +532,8 @@ def main() -> None:
                 explicit_calibration = rng.sample(range(len(mols)), size)
             tune_kwargs = {
                 "maxIters": args.max_iters,
-                "minimizerKind": args.minimizer_kind,
+                "minimizerKind": selected_modes[0][1].minimizer_kind,
+                "precisionOptions": PrecisionOptions(selected_modes[0][1].precision_mode),
                 "gpuIds": gpu_ids,
                 "n_trials": args.autotune_trials,
                 "target_seconds_per_trial": args.autotune_time_budget,
@@ -516,12 +563,20 @@ def main() -> None:
             )
 
         torch.cuda.cudart().cudaProfilerStart()
-        print(f"\nRunning nvmolkit {args.ff.upper()} {args.minimizer_kind} optimize benchmark...")
-        nv_avg, nv_std, nv_energies = bench_nvmolkit(
-            mols, args.ff, args.minimizer_kind, args.max_iters, hardware_options, args.runs, args.warmup
-        )
-        print(f"  nvmolkit:        {nv_avg:10.2f} ms (+/- {nv_std:.2f} ms)")
-        results["nvmolkit"] = (nv_avg, nv_std, nv_energies)
+        for mode_name, mode in selected_modes:
+            print(f"\nRunning nvmolkit {args.ff.upper()} {mode_name} optimize benchmark...")
+            nv_avg, nv_std, nv_energies = bench_nvmolkit(
+                mols,
+                args.ff,
+                mode.minimizer_kind,
+                PrecisionOptions(mode.precision_mode),
+                args.max_iters,
+                hardware_options,
+                args.runs,
+                args.warmup,
+            )
+            print(f"  {mode_name}: {nv_avg:10.2f} ms (+/- {nv_std:.2f} ms)")
+            results[mode_name] = (nv_avg, nv_std, nv_energies)
         torch.cuda.cudart().cudaProfilerStop()
 
     rdkit_processed_count = len(mols)
@@ -558,21 +613,24 @@ def main() -> None:
             speedup = f", {method_throughput / rdkit_throughput_per_s:.1f}x vs RDKit (throughput)"
         print(f"  {name:20s}: {avg_ms:10.2f} ms (+/- {std_ms:.2f} ms){speedup}")
 
-    energy_mean = float("nan")
-    energy_max = float("nan")
-    energy_pairs = 0
-    if args.validate and "nvmolkit" in results and "rdkit" in results:
+    energy_summaries: dict[str, tuple[float, float, int]] = {}
+    if args.validate and "rdkit" in results:
         print(f"\nValidation ({args.ff.upper()} energies)...")
-        energy_mean, energy_max, energy_pairs = _energy_diff_summary(results["rdkit"][2], results["nvmolkit"][2])
-        if energy_pairs > 0:
-            print(
-                f"  |RDKit - nvmolkit|: mean={energy_mean:.4f}, max={energy_max:.4f} "
-                f"kcal/mol over {energy_pairs} paired conformers"
-            )
-        else:
-            print("  No paired conformers with finite energies on both sides")
+        for mode_name, _ in selected_modes:
+            if mode_name not in results:
+                continue
+            summary = _energy_diff_summary(results["rdkit"][2], results[mode_name][2])
+            energy_summaries[mode_name] = summary
+            energy_mean, energy_max, energy_pairs = summary
+            if energy_pairs > 0:
+                print(
+                    f"  {mode_name}: |RDKit - nvmolkit| mean={energy_mean:.4f}, max={energy_max:.4f} "
+                    f"kcal/mol over {energy_pairs} paired conformers"
+                )
+            else:
+                print(f"  {mode_name}: no paired conformers with finite energies on both sides")
 
-    if "nvmolkit" in results and hardware_options is not None:
+    if any(name in results for name, _ in selected_modes) and hardware_options is not None:
         applied_batch_size = int(hardware_options.batchSize)
         applied_batches_per_gpu = int(hardware_options.batchesPerGpu)
         applied_prep_threads = int(hardware_options.preprocessingThreads)
@@ -585,8 +643,9 @@ def main() -> None:
 
     csv_rows: list[dict[str, object]] = []
     for name, (avg_ms, std_ms, energies) in results.items():
-        is_nv = name == "nvmolkit"
+        is_nv = name in BENCHMARK_MODES
         is_rdkit = name == "rdkit"
+        mode = BENCHMARK_MODES[name] if is_nv else None
         batch_size = applied_batch_size if is_nv else "N/A"
         batches_per_gpu = applied_batches_per_gpu if is_nv else "N/A"
         prep_threads = applied_prep_threads if is_nv else "N/A"
@@ -600,14 +659,17 @@ def main() -> None:
             vs_rdkit_throughput_ratio = f"{confs_per_second / rdkit_throughput_per_s:.4f}"
         else:
             vs_rdkit_throughput_ratio = "N/A"
-        mean_diff = energy_mean if (args.validate and is_nv) else "N/A"
-        max_diff = energy_max if (args.validate and is_nv) else "N/A"
-        pairs = energy_pairs if (args.validate and is_nv) else "N/A"
+        energy_summary = energy_summaries.get(name)
+        mean_diff = energy_summary[0] if energy_summary is not None else "N/A"
+        max_diff = energy_summary[1] if energy_summary is not None else "N/A"
+        pairs = energy_summary[2] if energy_summary is not None else "N/A"
         csv_rows.append(
             {
                 "method": name,
+                "benchmark_mode": name if is_nv else "rdkit_reference",
                 "ff": args.ff,
-                "minimizer_kind": args.minimizer_kind if is_nv else "N/A",
+                "minimizer_kind": mode.minimizer_kind if mode is not None else "N/A",
+                "precision_mode": mode.precision_mode.value if mode is not None else "N/A",
                 "input_file": input_file,
                 "input_type": input_type,
                 "num_mols": len(mols),
