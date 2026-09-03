@@ -336,6 +336,9 @@ target_link_libraries(test_etkdg_result_tracker PRIVATE etkdg_impl)
 add_executable(test_butina test_butina.cpp)
 target_link_libraries(test_butina PRIVATE butina device)
 
+add_executable(test_bitbirch_primitives test_bitbirch_primitives.cu)
+target_link_libraries(test_bitbirch_primitives PRIVATE bitbirch device_vector)
+
 add_executable(test_boolean_tree test_boolean_tree.cu)
 target_link_libraries(test_boolean_tree PRIVATE substruct_definitions device)
 
@@ -414,6 +417,7 @@ target_link_libraries(test_tfd PRIVATE ${RDKit_LIBS} tfd_gpu tfd_cpu
 
 set(TEST_LIST
     test_boolean_tree
+    test_bitbirch_primitives
     test_butina
     test_bfgs_hessian
     test_tfd_cpu

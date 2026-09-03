@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- Add native BitBIRCH clustering for word-aligned packed binary fingerprints, including a deterministic serial tree, concurrent ordered partial trees with a Bit Feature merge round, automatic or explicit partitioning, diameter and serial tolerance-diameter criteria, runtime fingerprint widths and branching factors, dynamically sized component storage, optional packed majority centroids, and independent paper-derived differential and molecular-workflow tests.
+
 ## 0.6.0 - 2026-08-13
 
 ### Summary

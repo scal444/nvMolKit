@@ -21,6 +21,7 @@
 #include <string>
 
 #include "nvmolkit/array_helpers.h"
+#include "src/bitbirch.h"
 #include "src/butina.h"
 #include "src/utils/device.h"
 
@@ -38,6 +39,18 @@ boost::python::object wrapButinaResult(nvMolKit::ButinaResult& result, const int
   }
 
   auto centroidArray = nvMolKit::makePyArray(result.centroids, boost::python::make_tuple(result.numClusters));
+  return boost::python::make_tuple(toOwnedPyArray(clusterArray), toOwnedPyArray(centroidArray));
+}
+
+boost::python::object wrapBitBirchResult(nvMolKit::BitBirchResult& result,
+                                         const int                 numItems,
+                                         const bool                returnCentroids) {
+  auto clusterArray = nvMolKit::makePyArray(result.clusterIds, boost::python::make_tuple(numItems));
+  if (!returnCentroids) {
+    return toOwnedPyArray(clusterArray);
+  }
+  auto centroidArray =
+    nvMolKit::makePyArray(result.centroids, boost::python::make_tuple(result.numClusters, result.numWords));
   return boost::python::make_tuple(toOwnedPyArray(clusterArray), toOwnedPyArray(centroidArray));
 }
 
@@ -118,5 +131,59 @@ BOOST_PYTHON_MODULE(_clustering) {
      boost::python::arg("cutoff"),
      boost::python::arg("return_centroids") = false,
      boost::python::arg("metric")           = "tanimoto",
+     boost::python::arg("stream")           = 0));
+
+  boost::python::def(
+    "bitbirch",
+    +[](const boost::python::dict& fingerprints,
+        const double               threshold,
+        const int                  branchingFactor,
+        const std::string&         mergeCriterion,
+        const double               tolerance,
+        const int                  numPartitions,
+        const bool                 returnCentroids,
+        std::uintptr_t             streamPtr) -> boost::python::object {
+      auto streamOpt = nvMolKit::acquireExternalStream(streamPtr);
+      if (!streamOpt) {
+        throw std::invalid_argument("Invalid CUDA stream");
+      }
+      const auto           stream = *streamOpt;
+      boost::python::tuple shape  = boost::python::extract<boost::python::tuple>(fingerprints["shape"]);
+      if (len(shape) != 2) {
+        throw std::invalid_argument("fingerprints must be a 2D matrix");
+      }
+      const int            n           = boost::python::extract<int>(shape[0]);
+      const int            numWords    = boost::python::extract<int>(shape[1]);
+      boost::python::tuple data        = boost::python::extract<boost::python::tuple>(fingerprints["data"]);
+      const std::size_t    dataPointer = boost::python::extract<std::size_t>(data[0]);
+      const auto span = nvMolKit::getSpanFromDictElems<std::uint32_t>(reinterpret_cast<void*>(dataPointer), shape);
+
+      nvMolKit::BitBirchMergeCriterion parsedCriterion;
+      if (mergeCriterion == "diameter") {
+        parsedCriterion = nvMolKit::BitBirchMergeCriterion::Diameter;
+      } else if (mergeCriterion == "tolerance-diameter") {
+        parsedCriterion = nvMolKit::BitBirchMergeCriterion::ToleranceDiameter;
+      } else {
+        throw std::invalid_argument("merge_criterion must be one of ['diameter', 'tolerance-diameter']");
+      }
+      auto result = nvMolKit::bitBirchGpu(span,
+                                          n,
+                                          numWords,
+                                          threshold,
+                                          branchingFactor,
+                                          parsedCriterion,
+                                          tolerance,
+                                          numPartitions,
+                                          returnCentroids,
+                                          stream);
+      return wrapBitBirchResult(result, n, returnCentroids);
+    },
+    (boost::python::arg("fingerprints"),
+     boost::python::arg("threshold"),
+     boost::python::arg("branching_factor") = 254,
+     boost::python::arg("merge_criterion")  = "diameter",
+     boost::python::arg("tolerance")        = 0.05,
+     boost::python::arg("num_partitions")   = 1,
+     boost::python::arg("return_centroids") = false,
      boost::python::arg("stream")           = 0));
 }

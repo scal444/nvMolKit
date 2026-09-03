@@ -72,8 +72,8 @@ UFF Optimization
    batchedForcefield.UFFBatchedForcefield
    batchedForcefield.UFFBatchElement
 
-Butina Clustering
------------------
+Fingerprint Clustering
+----------------------
 
 .. autosummary::
    :toctree: generated/
@@ -81,6 +81,7 @@ Butina Clustering
 
    clustering.butina
    clustering.fused_butina
+   clustering.bitbirch
 
 Maximum Common Substructure (MCS)
 ---------------------------------

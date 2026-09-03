@@ -26,7 +26,13 @@ CUDA kernels that fuse popcount-based fingerprint similarity with the
 neighbor-count and cluster-extraction steps. This trades extra compute for
 drastically lower memory: usage is O(N) rather than O(N^2), making it the
 better choice for large N where the full matrix would be prohibitively large.
+
+``bitbirch()`` also uses linear storage, but incrementally builds ordered trees
+from binary-fingerprint summaries. It can construct independent partial trees
+concurrently and merge their Bit Features without an all-pairs matrix.
 """
+
+import math
 
 import torch
 
@@ -155,5 +161,92 @@ def fused_butina(
     with torch.cuda.stream(active_stream):
         result = _clustering.fused_butina(
             x.__cuda_array_interface__, cutoff, return_centroids, metric, active_stream.cuda_stream
+        )
+        return _wrap_result(result, return_centroids)
+
+
+def bitbirch(
+    x: ArrayInput,
+    threshold: float,
+    *,
+    branching_factor: int = 254,
+    merge_criterion: str = "diameter",
+    tolerance: float = 0.05,
+    num_partitions: int | None = None,
+    return_centroids: bool = False,
+    stream: torch.cuda.Stream | None = None,
+) -> AsyncGpuResult | tuple[AsyncGpuResult, AsyncGpuResult]:
+    """Cluster packed binary fingerprints with an ordered BitBIRCH tree.
+
+    The operation uses linear device storage and avoids pairwise similarity
+    matrices. With multiple partitions, independent ordered trees are built
+    concurrently and their leaf Bit Features are inserted into a final tree.
+
+    Args:
+        x: Shape ``(N, W)`` packed int32 or uint32 fingerprints. Host inputs
+           are copied to CUDA through the standard nvMolKit input path.
+        threshold: Minimum combined-cluster iSIM Jaccard--Tanimoto similarity.
+        branching_factor: Maximum entries per tree node. Must be at least 3.
+        merge_criterion: ``"diameter"`` or ``"tolerance-diameter"``.
+        tolerance: Maximum permitted degradation for tolerance-diameter merge.
+        num_partitions: Number of contiguous partial trees. ``None`` selects
+                        one tree below 512 inputs and roughly one tree per 256
+                        inputs otherwise, capped at four per GPU multiprocessor
+                        and 128 total. Tolerance-diameter mode selects one tree.
+                        Set to 1 for exact deterministic serial-tree semantics.
+        return_centroids: Return packed majority centroids with shape
+                          ``(num_clusters, W)`` in addition to labels.
+        stream: CUDA stream to use. If None, uses the current stream.
+
+    Returns:
+        One cluster ID per input fingerprint. Cluster IDs are ordered by the
+        earliest input member. If requested, also returns packed uint32
+        majority centroids in cluster-ID order.
+
+    Notes:
+        Fingerprints must be word-aligned; a row represents exactly
+        ``32 * W`` logical bits. Results are deterministic for fixed input,
+        options, and GPU architecture, but changing ``num_partitions`` can
+        change the partition. The call currently waits for tree-status and
+        cluster-count metadata on the host before returning; labels and
+        centroids remain device-resident.
+    """
+    if not math.isfinite(threshold) or not 0 <= threshold <= 1:
+        raise ValueError(f"threshold must be in [0, 1], got {threshold}")
+    if branching_factor < 3:
+        raise ValueError(f"branching_factor must be at least 3, got {branching_factor}")
+    if merge_criterion not in ("diameter", "tolerance-diameter"):
+        raise ValueError(f"merge_criterion must be one of ['diameter', 'tolerance-diameter'], got {merge_criterion}")
+    if not math.isfinite(tolerance) or tolerance < 0:
+        raise ValueError(f"tolerance must be nonnegative, got {tolerance}")
+    if num_partitions is not None and num_partitions < 1:
+        raise ValueError(f"num_partitions must be positive, got {num_partitions}")
+
+    (x,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
+    num_fingerprints = x.shape[0]
+    if num_partitions is None:
+        if num_fingerprints < 512 or merge_criterion == "tolerance-diameter":
+            num_partitions = 1
+        else:
+            multiprocessors = torch.cuda.get_device_properties(x.device).multi_processor_count
+            num_partitions = min(128, 4 * multiprocessors, (num_fingerprints + 255) // 256)
+    if num_fingerprints > 0 and num_partitions > num_fingerprints:
+        raise ValueError(
+            f"num_partitions must not exceed the number of fingerprints ({num_fingerprints}), got {num_partitions}"
+        )
+    if num_fingerprints == 0:
+        num_partitions = 1
+    if merge_criterion == "tolerance-diameter" and num_partitions > 1:
+        raise ValueError("tolerance-diameter merging currently requires num_partitions=1")
+    with torch.cuda.stream(active_stream):
+        result = _clustering.bitbirch(
+            x.__cuda_array_interface__,
+            threshold,
+            branching_factor,
+            merge_criterion,
+            tolerance,
+            num_partitions,
+            return_centroids,
+            active_stream.cuda_stream,
         )
         return _wrap_result(result, return_centroids)
