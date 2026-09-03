@@ -14,6 +14,7 @@ from rdkit import Chem
 
 from nvmolkit.types import PrecisionMode, PrecisionOptions
 
+
 def _load_benchmark_module():
     benchmark_dir = Path(__file__).resolve().parents[2] / "benchmarks"
     sys.path.insert(0, str(benchmark_dir))

@@ -170,16 +170,15 @@ inline bool usesFloatReduction(const PrecisionOptions& o) {
 //! legacy double specializations.
 inline bool bfgsPrecisionRequiresBatchedBackend(const PrecisionOptions& o) {
   const auto resolved = resolvePrecisionOptions(o);
-  const bool explicitUnsupportedAxis = o.forcefieldCoordinateStorage != PrecisionDType::DEFAULT ||
-                                       o.forcefieldGradientStorage != PrecisionDType::DEFAULT ||
-                                       o.minimizerStateStorage != PrecisionDType::DEFAULT ||
-                                       o.forcefieldCompute != PrecisionDType::DEFAULT ||
-                                       o.minimizerCompute != PrecisionDType::DEFAULT ||
-                                       o.reductionCompute != PrecisionDType::DEFAULT;
+  const bool explicitUnsupportedAxis =
+    o.forcefieldCoordinateStorage != PrecisionDType::DEFAULT ||
+    o.forcefieldGradientStorage != PrecisionDType::DEFAULT || o.minimizerStateStorage != PrecisionDType::DEFAULT ||
+    o.forcefieldCompute != PrecisionDType::DEFAULT || o.minimizerCompute != PrecisionDType::DEFAULT ||
+    o.reductionCompute != PrecisionDType::DEFAULT;
   return explicitUnsupportedAxis || isFloat32(resolved.forcefieldCoordinateStorage) ||
-         isFloat32(resolved.forcefieldGradientStorage) ||
-         isFloat32(resolved.minimizerStateStorage) || isFloat32(resolved.forcefieldCompute) ||
-         isFloat32(resolved.minimizerCompute) || isFloat32(resolved.reductionCompute);
+         isFloat32(resolved.forcefieldGradientStorage) || isFloat32(resolved.minimizerStateStorage) ||
+         isFloat32(resolved.forcefieldCompute) || isFloat32(resolved.minimizerCompute) ||
+         isFloat32(resolved.reductionCompute);
 }
 //! DG/ETK per-molecule BFGS kernels share the float-Hessian specialization,
 //! but unlike MMFF they do not have float force-field parameter buffers.
@@ -193,15 +192,13 @@ inline bool bfgsDistGeomPrecisionRequiresBatchedBackend(const PrecisionOptions& 
 //! storage, require the independently-dispatched batched kernels.
 inline bool firePrecisionRequiresBatchedBackend(const PrecisionOptions& o) {
   const auto resolved = resolvePrecisionOptions(o);
-  const bool explicitUnsupportedAxis = o.forcefieldCoordinateStorage != PrecisionDType::DEFAULT ||
-                                       o.forcefieldGradientStorage != PrecisionDType::DEFAULT ||
-                                       o.forcefieldCompute != PrecisionDType::DEFAULT ||
-                                       o.minimizerCompute != PrecisionDType::DEFAULT ||
-                                       o.reductionCompute != PrecisionDType::DEFAULT;
+  const bool explicitUnsupportedAxis =
+    o.forcefieldCoordinateStorage != PrecisionDType::DEFAULT ||
+    o.forcefieldGradientStorage != PrecisionDType::DEFAULT || o.forcefieldCompute != PrecisionDType::DEFAULT ||
+    o.minimizerCompute != PrecisionDType::DEFAULT || o.reductionCompute != PrecisionDType::DEFAULT;
   return explicitUnsupportedAxis || isFloat32(resolved.forcefieldCoordinateStorage) ||
-         isFloat32(resolved.forcefieldGradientStorage) ||
-         isFloat32(resolved.forcefieldCompute) || isFloat32(resolved.minimizerCompute) ||
-         isFloat32(resolved.reductionCompute);
+         isFloat32(resolved.forcefieldGradientStorage) || isFloat32(resolved.forcefieldCompute) ||
+         isFloat32(resolved.minimizerCompute) || isFloat32(resolved.reductionCompute);
 }
 inline PrecisionOptions withMode(PrecisionMode m) {
   PrecisionOptions o;

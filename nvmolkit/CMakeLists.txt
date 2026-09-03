@@ -90,7 +90,8 @@ installpythontarget(_batchedForcefield ./)
 add_library(_embedMolecules MODULE embedMolecules.cpp etkdg_stage_analysis.cpp)
 target_link_libraries(_embedMolecules PUBLIC ${Boost_LIBRARIES}
                                              ${PYTHON_LIBRARIES} device_vector)
-target_link_libraries(_embedMolecules PRIVATE ${RDKit_LIBS} dist_geom etkdg OpenMP::OpenMP_CXX)
+target_link_libraries(_embedMolecules PRIVATE ${RDKit_LIBS} dist_geom etkdg
+                                              OpenMP::OpenMP_CXX)
 target_include_directories(_embedMolecules PUBLIC ${Python_INCLUDE_DIRS})
 target_include_directories(_embedMolecules SYSTEM PUBLIC ${Boost_INCLUDE_DIRS})
 installpythontarget(_embedMolecules ./)

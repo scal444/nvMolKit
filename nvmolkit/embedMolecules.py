@@ -32,6 +32,7 @@ __all__ = ["AnalyzeETKDGStage", "EmbedMolecules"]
 from nvmolkit.types import CoordinateOutput, Device3DResult, HardwareOptions, PrecisionOptions  # noqa: I001
 from nvmolkit import _embedMolecules  # type: ignore
 
+
 def AnalyzeETKDGStage(
     molecules: list["Mol"],
     coordinates: Sequence[Any],

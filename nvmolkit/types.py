@@ -324,6 +324,7 @@ class PrecisionDType(str, Enum):
 
 class FloatMathMode(str, Enum):
     """Float math implementation (the project currently builds with relaxed fast math)."""
+
     DEFAULT = "DEFAULT"
     RELAXED = "RELAXED"
 
@@ -345,9 +346,14 @@ class PrecisionOptions:
     """
 
     _dtype_axes = (
-        "forcefieldParameterStorage", "forcefieldCoordinateStorage", "forcefieldGradientStorage",
-        "hessianStorage", "minimizerStateStorage", "forcefieldCompute",
-        "minimizerCompute", "reductionCompute",
+        "forcefieldParameterStorage",
+        "forcefieldCoordinateStorage",
+        "forcefieldGradientStorage",
+        "hessianStorage",
+        "minimizerStateStorage",
+        "forcefieldCompute",
+        "minimizerCompute",
+        "reductionCompute",
     )
 
     def __init__(
