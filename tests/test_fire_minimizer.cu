@@ -863,6 +863,32 @@ TEST(FireMinimizer, AcceptsAllPrecisionProfiles) {
   }
 }
 
+TEST(FireMinimizer, FireAndForcefieldPrecisionProfilesResolveIndependently) {
+  using nvMolKit::PrecisionDType;
+  using nvMolKit::PrecisionMode;
+
+  const auto fireOnly = nvMolKit::resolvePrecisionOptions({PrecisionMode::MINIMIZER_F32});
+  EXPECT_EQ(fireOnly.minimizerCompute, PrecisionDType::FLOAT32);
+  EXPECT_EQ(fireOnly.minimizerStateStorage, PrecisionDType::FLOAT32);
+  EXPECT_EQ(fireOnly.forcefieldCompute, PrecisionDType::FLOAT64);
+  EXPECT_EQ(fireOnly.forcefieldParameterStorage, PrecisionDType::FLOAT64);
+  EXPECT_EQ(fireOnly.reductionCompute, PrecisionDType::FLOAT64);
+
+  const auto forcefieldOnly = nvMolKit::resolvePrecisionOptions({PrecisionMode::FORCEFIELD_F32});
+  EXPECT_EQ(forcefieldOnly.minimizerCompute, PrecisionDType::FLOAT64);
+  EXPECT_EQ(forcefieldOnly.minimizerStateStorage, PrecisionDType::FLOAT64);
+  EXPECT_EQ(forcefieldOnly.forcefieldCompute, PrecisionDType::FLOAT32);
+  EXPECT_EQ(forcefieldOnly.forcefieldParameterStorage, PrecisionDType::FLOAT32);
+  EXPECT_EQ(forcefieldOnly.reductionCompute, PrecisionDType::FLOAT64);
+
+  const auto both = nvMolKit::resolvePrecisionOptions({PrecisionMode::SINGLE});
+  EXPECT_EQ(both.minimizerCompute, PrecisionDType::FLOAT32);
+  EXPECT_EQ(both.minimizerStateStorage, PrecisionDType::FLOAT32);
+  EXPECT_EQ(both.forcefieldCompute, PrecisionDType::FLOAT32);
+  EXPECT_EQ(both.forcefieldParameterStorage, PrecisionDType::FLOAT32);
+  EXPECT_EQ(both.reductionCompute, PrecisionDType::FLOAT32);
+}
+
 TEST(FireMinimizer, ActiveSystemMaskRespected) {
   const std::vector<int>    atomCounts = {1, 1, 1};
   const std::vector<double> kPerSys    = {2.0, 2.0, 2.0};

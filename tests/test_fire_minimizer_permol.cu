@@ -311,3 +311,54 @@ TEST(FireMinimizerPerMolMMFF, PublicMMFFWrapperConvergesNearReference) {
     EXPECT_NEAR(result.energies[i][0], refEnergies[i], tolerance) << "system " << i;
   }
 }
+
+TEST(FireMinimizerPerMolMMFF, PublicWrapperSupportsIndependentFloatFireAndForcefield) {
+  const std::vector<nvMolKit::PrecisionMode> modes = {
+    nvMolKit::PrecisionMode::MINIMIZER_F32,
+    nvMolKit::PrecisionMode::FORCEFIELD_F32,
+    nvMolKit::PrecisionMode::SINGLE,
+  };
+
+  for (const auto mode : modes) {
+    SCOPED_TRACE(nvMolKit::precisionModeName(mode));
+    PerMolFireFixture fixture;
+    fixture.setup(/*numMols=*/2);
+    const std::vector<double> refEnergies = computeReferenceEnergies(fixture.mols);
+
+    std::vector<RDKit::ROMol*> molPtrs;
+    molPtrs.reserve(fixture.mols.size());
+    for (const auto& mol : fixture.mols) {
+      molPtrs.push_back(mol.get());
+    }
+
+    nvMolKit::FireOptions options{};
+    options.useMass               = false;
+    options.stuckDetectionEnabled = false;
+    options.gradTol               = 1e-3;
+    options.dtInit                = 0.05;
+    options.dMax                  = 0.2;
+
+    const auto result = nvMolKit::MMFF::MMFFMinimizeMoleculesConfsFire(molPtrs,
+                                                                       /*maxIters=*/10000,
+                                                                       options,
+                                                                       /*properties=*/{},
+                                                                       /*constraints=*/{},
+                                                                       /*perfOptions=*/{},
+                                                                       nvMolKit::FireBackend::PER_MOLECULE,
+                                                                       nvMolKit::CoordinateOutput::RDKIT_CONFORMERS,
+                                                                       /*targetGpu=*/-1,
+                                                                       nvMolKit::PrecisionOptions{mode});
+
+    ASSERT_FALSE(result.device.has_value());
+    ASSERT_EQ(result.energies.size(), fixture.mols.size());
+    ASSERT_EQ(result.converged.size(), fixture.mols.size());
+    for (size_t i = 0; i < result.energies.size(); ++i) {
+      ASSERT_EQ(result.energies[i].size(), 1u);
+      ASSERT_EQ(result.converged[i].size(), 1u);
+      EXPECT_EQ(result.converged[i][0], 1);
+      EXPECT_TRUE(std::isfinite(result.energies[i][0]));
+      const double tolerance = 1.0 + 0.05 * std::abs(refEnergies[i]);
+      EXPECT_NEAR(result.energies[i][0], refEnergies[i], tolerance) << "system " << i;
+    }
+  }
+}
