@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -343,18 +344,43 @@ bp::object analyzeETKDGStage(const bp::list&                             molecul
   std::vector<const RDKit::ROMol*> constMols(mols.begin(), mols.end());
   context.nTotalSystems         = static_cast<int>(mols.size());
   context.systemHost.atomStarts = {0};
-  eargs.reserve(mols.size());
-  inputs.reserve(mols.size());
+  eargs.resize(mols.size());
+  inputs.resize(mols.size());
+
+  // Extract Python-owned coordinate objects while holding the GIL. The
+  // independent RDKit bounds/embedding preparation below is pure C++ and is
+  // the dominant host-side cost for production-size analysis batches.
+  for (size_t i = 0; i < mols.size(); ++i) {
+    const size_t expected = static_cast<size_t>(mols[i]->getNumAtoms()) * inputDim;
+    inputs[i]             = extractFlatCoordinates(coordinates[i], expected, i);
+  }
+
+  std::vector<std::string> preparationErrors(mols.size());
+#pragma omp parallel for schedule(dynamic)
+  for (std::int64_t index = 0; index < static_cast<std::int64_t>(mols.size()); ++index) {
+    const size_t i = static_cast<size_t>(index);
+    try {
+      detail::EmbedArgs args;
+      auto              localParams = params;
+      if (!DGeomHelpers::prepareEmbedderArgs(*mols[i], localParams, args, true)) {
+        preparationErrors[i] = "bounds smoothing failed";
+        continue;
+      }
+      args.dim = contextDim;
+      eargs[i] = std::move(args);
+    } catch (const std::exception& error) {
+      preparationErrors[i] = error.what();
+    } catch (...) {
+      preparationErrors[i] = "unknown preparation error";
+    }
+  }
 
   for (size_t i = 0; i < mols.size(); ++i) {
-    const size_t      expected = static_cast<size_t>(mols[i]->getNumAtoms()) * inputDim;
-    auto              input    = extractFlatCoordinates(coordinates[i], expected, i);
-    detail::EmbedArgs args;
-    if (!DGeomHelpers::prepareEmbedderArgs(*mols[i], params, args, true)) {
-      throw std::runtime_error("bounds smoothing failed for molecule " + std::to_string(i));
+    if (!preparationErrors[i].empty()) {
+      throw std::runtime_error("embedding preparation failed for molecule " + std::to_string(i) + ": " +
+                               preparationErrors[i]);
     }
-    args.dim = contextDim;
-
+    const auto&         input = inputs[i];
     std::vector<double> coords4;
     if (inputDim == contextDim) {
       coords4 = input;
@@ -369,8 +395,6 @@ bp::object analyzeETKDGStage(const bp::list&                             molecul
                                                 contextDim,
                                                 context.systemHost.atomStarts,
                                                 context.systemHost.positions);
-    inputs.push_back(std::move(input));
-    eargs.push_back(std::move(args));
   }
 
   DistGeom::sendContextToDevice(context.systemHost.positions,
@@ -417,52 +441,71 @@ bp::object analyzeETKDGStage(const bp::list&                             molecul
   std::vector<int>    cpuStatus;
   std::vector<int>    cpuIterations;
   std::vector<double> cpuCoords;
-  inputEnergies.reserve(mols.size());
-  gpuEnergies.reserve(mols.size());
+  inputEnergies.resize(mols.size());
+  gpuEnergies.resize(mols.size());
   if (includeCpuReference) {
-    cpuEnergies.reserve(mols.size());
-    cpuStatus.reserve(mols.size());
-    cpuIterations.reserve(mols.size());
+    cpuEnergies.resize(mols.size());
+    cpuStatus.resize(mols.size());
+    cpuIterations.resize(mols.size());
+    cpuCoords.resize(static_cast<size_t>(context.systemHost.atomStarts.back()) * inputDim);
   }
 
-  for (size_t i = 0; i < mols.size(); ++i) {
-    const int atomBegin       = context.systemHost.atomStarts[i];
-    const int atomEnd         = context.systemHost.atomStarts[i + 1];
-    auto      referencePoints = makePoints(inputs[i], inputDim);
-    auto      referenceField  = makeReferenceField(stage, eargs[i], params, referencePoints);
-    inputEnergies.push_back(referenceField->calcEnergy());
+  std::vector<std::string> scoringErrors(mols.size());
+#pragma omp parallel for schedule(dynamic)
+  for (std::int64_t index = 0; index < static_cast<std::int64_t>(mols.size()); ++index) {
+    const size_t i = static_cast<size_t>(index);
+    try {
+      const int atomBegin       = context.systemHost.atomStarts[i];
+      const int atomEnd         = context.systemHost.atomStarts[i + 1];
+      auto      referencePoints = makePoints(inputs[i], inputDim);
+      auto      localParams     = params;
+      auto      referenceField  = makeReferenceField(stage, eargs[i], localParams, referencePoints);
+      inputEnergies[i]          = referenceField->calcEnergy();
 
-    std::vector<double> gpuForScoring;
-    gpuForScoring.reserve(static_cast<size_t>(atomEnd - atomBegin) * inputDim);
-    for (int atom = atomBegin; atom < atomEnd; ++atom) {
-      for (int axis = 0; axis < inputDim; ++axis) {
-        gpuForScoring.push_back(gpuCoords[static_cast<size_t>(atom) * contextDim + axis]);
-      }
-    }
-    gpuEnergies.push_back(referenceField->calcEnergy(gpuForScoring.data()));
-
-    if (includeCpuReference) {
-      int          status     = 0;
-      unsigned int iterations = 0;
-      if (fixedMode || referenceField->calcEnergy() > 1e-5) {
-        auto systemCpuCoords = flattenPoints(referencePoints, inputDim);
-        status               = minimizeReference(*referenceField,
-                                   systemCpuCoords,
-                                   params.optimizerForceTol,
-                                   analysisSteps,
-                                   fixedMode,
-                                   iterations);
-        for (size_t atom = 0; atom < referencePoints.size(); ++atom) {
-          for (int axis = 0; axis < inputDim; ++axis) {
-            (*referencePoints[atom])[axis] = systemCpuCoords[atom * inputDim + axis];
-          }
+      std::vector<double> gpuForScoring;
+      gpuForScoring.reserve(static_cast<size_t>(atomEnd - atomBegin) * inputDim);
+      for (int atom = atomBegin; atom < atomEnd; ++atom) {
+        for (int axis = 0; axis < inputDim; ++axis) {
+          gpuForScoring.push_back(gpuCoords[static_cast<size_t>(atom) * contextDim + axis]);
         }
       }
-      cpuStatus.push_back(status);
-      cpuIterations.push_back(iterations);
-      cpuEnergies.push_back(referenceField->calcEnergy());
-      auto systemCpuCoords = flattenPoints(referencePoints, inputDim);
-      cpuCoords.insert(cpuCoords.end(), systemCpuCoords.begin(), systemCpuCoords.end());
+      gpuEnergies[i] = referenceField->calcEnergy(gpuForScoring.data());
+
+      if (includeCpuReference) {
+        int          status     = 0;
+        unsigned int iterations = 0;
+        if (fixedMode || referenceField->calcEnergy() > 1e-5) {
+          auto systemCpuCoords = flattenPoints(referencePoints, inputDim);
+          status               = minimizeReference(*referenceField,
+                                     systemCpuCoords,
+                                     localParams.optimizerForceTol,
+                                     analysisSteps,
+                                     fixedMode,
+                                     iterations);
+          for (size_t atom = 0; atom < referencePoints.size(); ++atom) {
+            for (int axis = 0; axis < inputDim; ++axis) {
+              (*referencePoints[atom])[axis] = systemCpuCoords[atom * inputDim + axis];
+            }
+          }
+        }
+        cpuStatus[i]         = status;
+        cpuIterations[i]     = iterations;
+        cpuEnergies[i]       = referenceField->calcEnergy();
+        auto systemCpuCoords = flattenPoints(referencePoints, inputDim);
+        std::copy(systemCpuCoords.begin(),
+                  systemCpuCoords.end(),
+                  cpuCoords.begin() + static_cast<size_t>(atomBegin) * inputDim);
+      }
+    } catch (const std::exception& error) {
+      scoringErrors[i] = error.what();
+    } catch (...) {
+      scoringErrors[i] = "unknown scoring error";
+    }
+  }
+  for (size_t i = 0; i < scoringErrors.size(); ++i) {
+    if (!scoringErrors[i].empty()) {
+      throw std::runtime_error("CPU reference/scoring failed for molecule " + std::to_string(i) + ": " +
+                               scoringErrors[i]);
     }
   }
 
