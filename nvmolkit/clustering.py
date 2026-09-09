@@ -77,20 +77,23 @@ def _wrap_cluster_arrays(result) -> tuple[AsyncGpuResult, AsyncGpuResult]:
 
 def _wrap_device_result(result) -> ButinaDeviceResult:
     cluster_ids, centroids = _wrap_cluster_arrays(result)
-    cluster_sizes = torch.bincount(
-        cluster_ids.torch().to(torch.int64),
-        minlength=centroids.torch().numel(),
-    )
+    cluster_ids_int64 = cluster_ids.torch().to(torch.int64)
+    cluster_sizes = torch.zeros_like(centroids.torch(), dtype=torch.int64)
+    cluster_sizes.index_add_(0, cluster_ids_int64, torch.ones_like(cluster_ids_int64))
     return ButinaDeviceResult(cluster_ids, centroids, AsyncGpuResult(cluster_sizes))
 
 
 def _to_rdkit_clusters(cluster_ids: AsyncGpuResult, centroids: AsyncGpuResult) -> _RDKitClusters:
     cluster_ids_array = cluster_ids.numpy()
     centroids_array = centroids.numpy()
+    member_order = np.argsort(cluster_ids_array, kind="stable")
+    sorted_cluster_ids = cluster_ids_array[member_order]
+    cluster_offsets = np.searchsorted(sorted_cluster_ids, np.arange(centroids_array.size + 1))
+
     clusters = []
     for cluster_id, centroid_value in enumerate(centroids_array):
         centroid = int(centroid_value)
-        members = np.flatnonzero(cluster_ids_array == cluster_id)
+        members = member_order[cluster_offsets[cluster_id] : cluster_offsets[cluster_id + 1]]
         clusters.append(tuple([centroid] + [int(member) for member in members if member != centroid]))
     return tuple(clusters)
 

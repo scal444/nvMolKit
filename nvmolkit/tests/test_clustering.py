@@ -18,6 +18,7 @@ import pytest
 import torch
 from rdkit.ML.Cluster.Butina import ClusterData
 
+import nvmolkit.clustering as clustering
 from nvmolkit.clustering import ButinaDeviceResult, ButinaOutputMode, butina, fused_butina
 from nvmolkit.types import AsyncGpuResult
 
@@ -204,6 +205,13 @@ def test_butina_device_output_has_fixed_result_type(explicit_output):
     torch.testing.assert_close(result.cluster_sizes.torch(), torch.tensor([2, 2], device="cuda"))
     assert result.cluster_ids.torch().shape == (4,)
     assert result.centroids.torch().shape == (2,)
+
+
+def test_to_rdkit_clusters_preserves_cluster_and_member_order():
+    cluster_ids = AsyncGpuResult(torch.tensor([1, 0, 1, 2, 0, 2], dtype=torch.int32, device="cuda"))
+    centroids = AsyncGpuResult(torch.tensor([4, 2, 5], dtype=torch.int32, device="cuda"))
+
+    assert clustering._to_rdkit_clusters(cluster_ids, centroids) == ((4, 1), (2, 0), (5, 3))
 
 
 @pytest.mark.parametrize("input_kind", ["async", "cpu_tensor", "numpy"])

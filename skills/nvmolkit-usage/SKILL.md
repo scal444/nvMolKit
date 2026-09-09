@@ -277,7 +277,7 @@ If any input molecule is `None` or lacks MMFF/UFF atom types, the call raises `V
 import torch
 from rdkit import Chem
 from rdkit.Chem.rdDistGeom import EmbedMultipleConfs
-from nvmolkit.clustering import butina
+from nvmolkit.clustering import ButinaOutputMode, butina
 from nvmolkit.conformerRmsd import GetConformerRMSMatrixBatch
 
 mols = [Chem.AddHs(Chem.MolFromSmiles(smi)) for smi in ["CCCCCC", "c1ccccc1"]]
@@ -292,7 +292,10 @@ condensed = GetConformerRMSMatrixBatch(heavy_mols)
 
 # Butina expects a square distance matrix, so request square GPU tensors.
 square = GetConformerRMSMatrixBatch(heavy_mols, output_format="square")
-results = [butina(distance_matrix, cutoff=0.5) for distance_matrix in square]
+results = [
+    butina(distance_matrix, cutoff=0.5, output=ButinaOutputMode.DEVICE)
+    for distance_matrix in square
+]
 
 torch.cuda.synchronize()
 for result in results:
