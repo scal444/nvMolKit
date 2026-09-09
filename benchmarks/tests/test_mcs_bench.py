@@ -6,11 +6,13 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
+from bench_utils import TimingResult
 from mcs_bench import (
     _build_parser,
     _load_config_dataframe,
     _normalize_config_row,
     _validate_results,
+    bench_rdkit_mcs,
     sample_pairs,
 )
 
@@ -131,3 +133,44 @@ def test_parser_matches_substructure_autotune_conventions():
     assert args.autotune_time_budget == 2.5
     assert args.autotune_calibration_size == 20
     assert args.autotune_seed == 9
+
+
+def test_rdkit_mcs_keeps_complete_results_when_later_run_is_partial(monkeypatch):
+    class CompleteDeadline:
+        def expired(self):
+            return False
+
+    class PartialDeadline:
+        def expired(self):
+            return True
+
+    calls = [0]
+
+    def find_mcs(_mols, _params):
+        calls[0] += 1
+        return SimpleNamespace(numAtoms=calls[0], numBonds=calls[0] + 10)
+
+    def fake_time_it(run, **kwargs):
+        run(CompleteDeadline())
+        run(PartialDeadline())
+        return TimingResult(
+            times_ms=[5.0],
+            progress=kwargs["progress_target"],
+            progress_target=kwargs["progress_target"],
+        )
+
+    monkeypatch.setattr("mcs_bench._rdkit_params", lambda _config: object())
+    monkeypatch.setattr("mcs_bench.rdFMCS.FindMCS", find_mcs)
+    monkeypatch.setattr("mcs_bench._time_it", fake_time_it)
+
+    avg_ms, std_ms, results, measured_pairs = bench_rdkit_mcs(
+        mols=[object(), object(), object()],
+        pairs=[(0, 1), (0, 2)],
+        runs=2,
+        threads=1,
+        max_seconds=1.0,
+        config_row={},
+    )
+
+    assert (avg_ms, std_ms, measured_pairs) == (5.0, 0.0, 2)
+    assert results == [(1, 11), (2, 12)]

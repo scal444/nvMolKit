@@ -20,13 +20,12 @@ CPU GetConformerRMSMatrix across varying conformer counts.
 """
 
 import argparse
-import statistics
-import time
 from pathlib import Path
 
 import torch
 from bench_utils import (
     Deadline,
+    TimingResult,
     add_backend_selection_args,
     add_rdkit_max_seconds_arg,
     available_cpu_count,
@@ -62,22 +61,46 @@ def prepare_mols(
     )
 
 
-def bench_rdkit_batch(payloads: list[bytes], max_seconds: float) -> tuple[float, int]:
-    """One RDKit timing iteration over ``payloads``; returns ``(elapsed_s, n_done)``.
+def bench_rdkit_batch(
+    payloads: list[bytes],
+    runs: int = 3,
+    warmup: bool = True,
+    max_seconds: float = 0.0,
+) -> tuple[TimingResult, int]:
+    """Benchmark RDKit conformer RMSD; return timing and matching progress.
 
-    Stops once ``max_seconds`` is exceeded (``0`` means no cap). A fresh mol is
-    built per call because ``GetConformerRMSMatrix`` aligns conformers in place.
+    The deadline is shared across timed runs and polled between molecules. A
+    fresh molecule is built for every measurement because RDKit aligns its
+    conformers in place. If a run is truncated, the timing helper either keeps
+    earlier complete samples or reports that partial sample together with its
+    actual molecule count.
     """
-    mols = [Chem.Mol(mol_bytes) for mol_bytes in payloads]
-    deadline = Deadline(max_seconds)
-    start = time.perf_counter()
-    n_done = 0
-    for mol in mols:
-        AllChem.GetConformerRMSMatrix(mol, prealigned=False)
-        n_done += 1
-        if deadline.expired():
-            break
-    return time.perf_counter() - start, n_done
+    processed_count = [0]
+
+    def run(deadline: Deadline) -> None:
+        processed_count[0] = 0
+        for payload in payloads:
+            mol = Chem.Mol(payload)
+            AllChem.GetConformerRMSMatrix(mol, prealigned=False)
+            processed_count[0] += 1
+            if deadline.expired():
+                break
+
+    if warmup and payloads:
+        warmup_mol = Chem.Mol(payloads[0])
+        AllChem.GetConformerRMSMatrix(warmup_mol, prealigned=False)
+
+    timing = time_it(
+        run,
+        runs=runs,
+        warmups=0,
+        max_seconds=max_seconds,
+        progress_getter=lambda: processed_count[0],
+        progress_target=len(payloads),
+    )
+    if timing.progress is None:
+        raise RuntimeError("bounded timing did not report progress")
+    return timing, timing.progress
 
 
 def bench_gpu_batch(mols: list[Chem.Mol]) -> None:
@@ -177,15 +200,14 @@ def run(
             payloads = [mol.ToBinary() for mol in mols]
             cap_label = f"cap={rdkit_max_seconds:.0f}s" if rdkit_max_seconds > 0 else "no cap"
             print(f"  RDKit CPU (single-threaded, {cap_label}):")
-            # TODO: replace this hand-rolled warmup/sample/median loop with time_it once
-            # time_it can consume a Deadline and truncate a run mid-workload.
-            # https://github.com/NVIDIA-BioNeMo/nvMolKit/issues/186
-            bench_rdkit_batch(payloads, rdkit_max_seconds)  # warmup
-            samples = [bench_rdkit_batch(payloads, rdkit_max_seconds) for _ in range(3)]
-            samples.sort(key=lambda pair: pair[0] / max(pair[1], 1))
-            rdkit_time_s, rdkit_done = samples[len(samples) // 2]
-            per_mol_times = [elapsed / max(done, 1) for elapsed, done in samples]
-            rdkit_std_s = statistics.stdev(per_mol_times) * rdkit_done if len(samples) > 1 else 0.0
+            rdkit_timing, rdkit_done = bench_rdkit_batch(
+                payloads,
+                runs=3,
+                warmup=True,
+                max_seconds=rdkit_max_seconds,
+            )
+            rdkit_time_s = rdkit_timing.median_s
+            rdkit_std_s = rdkit_timing.std_ms / 1000.0
             pair_count_done = sum(count * (count - 1) // 2 for count in actual_confs[:rdkit_done])
             rdkit_mols_per_s = rdkit_done / rdkit_time_s
             rdkit_pairs_per_s = pair_count_done / rdkit_time_s

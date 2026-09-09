@@ -7,7 +7,7 @@ import math
 import time
 
 import pytest
-from bench_utils.timing import Deadline, throughput_per_s, time_it_bounded, time_it_bounded_result
+from bench_utils.timing import Deadline, throughput_per_s, time_it, time_it_bounded, time_it_bounded_result
 
 
 @pytest.mark.parametrize("max_seconds", [0.0, -1.0])
@@ -49,6 +49,118 @@ def test_throughput_per_s_simple_conversion():
 @pytest.mark.parametrize("elapsed_ms", [0.0, -5.0])
 def test_throughput_per_s_non_positive_elapsed_returns_nan(elapsed_ms):
     assert math.isnan(throughput_per_s(100, elapsed_ms))
+
+
+def test_time_it_deadline_mode_reports_complete_progress():
+    seen_deadlines = []
+    progress = [0]
+
+    def run(deadline):
+        seen_deadlines.append(deadline)
+        progress[0] = 4
+
+    timing = time_it(
+        run,
+        runs=3,
+        warmups=0,
+        max_seconds=0.0,
+        progress_getter=lambda: progress[0],
+        progress_target=4,
+    )
+
+    assert len(timing.times_ms) == 3
+    assert timing.progress == timing.progress_target == 4
+    assert not timing.truncated
+    assert len({id(deadline) for deadline in seen_deadlines}) == 1
+
+
+def test_time_it_deadline_mode_retains_first_partial_sample():
+    progress = [0]
+    calls = [0]
+
+    def run(_deadline):
+        calls[0] += 1
+        progress[0] = 2
+
+    timing = time_it(
+        run,
+        runs=3,
+        warmups=0,
+        max_seconds=0.0,
+        progress_getter=lambda: progress[0],
+        progress_target=4,
+    )
+
+    assert calls[0] == 1
+    assert len(timing.times_ms) == 1
+    assert timing.progress == 2
+    assert timing.progress_target == 4
+    assert timing.truncated
+
+
+def test_time_it_deadline_mode_discards_later_partial_sample():
+    progresses = iter([4, 4, 2])
+    progress = [0]
+
+    def run(_deadline):
+        progress[0] = next(progresses)
+
+    timing = time_it(
+        run,
+        runs=3,
+        warmups=0,
+        max_seconds=0.0,
+        progress_getter=lambda: progress[0],
+        progress_target=4,
+    )
+
+    assert len(timing.times_ms) == 2
+    assert timing.progress == 4
+    assert not timing.truncated
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_seconds": 1.0},
+        {"progress_getter": lambda: 1},
+        {"progress_target": 1},
+        {"max_seconds": 1.0, "progress_getter": lambda: 1},
+    ],
+)
+def test_time_it_rejects_incomplete_deadline_configuration(kwargs):
+    with pytest.raises(ValueError, match="must be provided together"):
+        time_it(lambda: None, runs=1, warmups=0, **kwargs)
+
+
+def test_time_it_rejects_negative_warmups():
+    with pytest.raises(ValueError, match="warmups must be non-negative"):
+        time_it(lambda: None, runs=1, warmups=-1)
+
+
+def test_time_it_rejects_negative_progress_target():
+    with pytest.raises(ValueError, match="progress_target must be non-negative"):
+        time_it(
+            lambda _deadline: None,
+            runs=1,
+            warmups=0,
+            max_seconds=0.0,
+            progress_getter=lambda: 0,
+            progress_target=-1,
+        )
+
+
+@pytest.mark.parametrize("progress", [-1, 3])
+def test_time_it_rejects_progress_outside_target(progress):
+    with pytest.raises(ValueError, match="progress must be between"):
+        time_it(
+            lambda _deadline: None,
+            runs=1,
+            warmups=0,
+            max_seconds=0.0,
+            progress_getter=lambda: progress,
+            progress_target=2,
+        )
 
 
 def test_time_it_bounded_runs_to_completion_when_progress_full():
