@@ -40,10 +40,7 @@ from typing import List
 import pandas as pd
 import torch
 from bench_utils import (
-    Deadline,
-    TimingResult,
     add_backend_selection_args,
-    add_rdkit_max_seconds_arg,
     available_cpu_count,
     embed_and_jitter,
     load_smiles,
@@ -120,35 +117,10 @@ def bench_rdkit_single(mol: Chem.Mol) -> None:
     TorsionFingerprints.GetTFDMatrix(mol, useWeights=True, maxDev="equal")
 
 
-def bench_rdkit_batch(
-    mols: List[Chem.Mol],
-    runs: int = 3,
-    warmups: int = 1,
-    max_seconds: float = 0.0,
-) -> TimingResult:
-    """Benchmark RDKit TFD, stopping at molecule boundaries when bounded."""
-    processed_count = [0]
-
-    def run(deadline: Deadline) -> None:
-        processed_count[0] = 0
-        for mol in mols:
-            TorsionFingerprints.GetTFDMatrix(mol, useWeights=True, maxDev="equal")
-            processed_count[0] += 1
-            if deadline.expired():
-                break
-
-    if mols:
-        for _ in range(warmups):
-            bench_rdkit_single(mols[0])
-
-    return time_it(
-        run,
-        runs=runs,
-        warmups=0,
-        max_seconds=max_seconds,
-        progress_getter=lambda: processed_count[0],
-        progress_target=len(mols),
-    )
+def bench_rdkit_batch(mols: List[Chem.Mol]) -> None:
+    """Benchmark RDKit TFD for multiple molecules (sequential)."""
+    for mol in mols:
+        TorsionFingerprints.GetTFDMatrix(mol, useWeights=True, maxDev="equal")
 
 
 def bench_nvmol_gpu_single(mol: Chem.Mol) -> None:
@@ -221,7 +193,6 @@ def run_benchmarks(
     runs: int = 3,
     warmups: int = 1,
     seed: int = 42,
-    rdkit_max_seconds: float = 0.0,
 ) -> pd.DataFrame:
     """Run TFD benchmarks with various configurations.
 
@@ -239,8 +210,6 @@ def run_benchmarks(
         runs: Number of timed repetitions per workload point.
         warmups: Number of warmup repetitions per workload point.
         seed: Sampling and conformer-preparation seed.
-        rdkit_max_seconds: Total time budget for each RDKit workload point;
-            non-positive values disable the budget.
 
     Returns:
         DataFrame with benchmark results
@@ -313,32 +282,14 @@ def run_benchmarks(
 
             # RDKit benchmark (single-threaded Python)
             if not skip_rdkit:
-                timing = bench_rdkit_batch(
-                    mols,
-                    runs=runs,
-                    warmups=warmups,
-                    max_seconds=rdkit_max_seconds,
-                )
-                if timing.progress is None:
-                    raise RuntimeError("bounded timing did not report progress")
-                rdkit_mols_processed = timing.progress
-                rdkit_pairs_processed = sum(c * (c - 1) // 2 for c in actual_confs[:rdkit_mols_processed])
+                timing = time_it(lambda: bench_rdkit_batch(mols), runs=runs, warmups=warmups)
                 rdkit_time, rdkit_std = timing.mean_ms, timing.std_ms
                 result["rdkit_time_ms"] = rdkit_time
                 result["rdkit_std_ms"] = rdkit_std
-                result["rdkit_molecules_processed"] = rdkit_mols_processed
-                result["rdkit_pairs_processed"] = rdkit_pairs_processed
-                result["rdkit_truncated"] = int(timing.truncated)
-                result["rdkit_max_seconds"] = rdkit_max_seconds
-                suffix = f" [truncated at {rdkit_mols_processed}/{len(mols)} mols]" if timing.truncated else ""
-                print(f"  RDKit (Python):     {rdkit_time:8.2f} ms (+/- {rdkit_std:.2f}){suffix}")
+                print(f"  RDKit (Python):     {rdkit_time:8.2f} ms (+/- {rdkit_std:.2f})")
             else:
                 result["rdkit_time_ms"] = None
                 result["rdkit_std_ms"] = None
-                result["rdkit_molecules_processed"] = None
-                result["rdkit_pairs_processed"] = None
-                result["rdkit_truncated"] = None
-                result["rdkit_max_seconds"] = None
 
             if not skip_nvmolkit:
                 timing = time_it(lambda: bench_nvmol_gpu_list(mols), runs=runs, warmups=warmups)
@@ -360,19 +311,13 @@ def run_benchmarks(
                 print(f"  nvMolKit (GPU tensor): {t:8.2f} ms (+/- {s:.2f})")
 
                 speedups = {}
-                rdkit_pairs_per_ms = (
-                    result["rdkit_pairs_processed"] / result["rdkit_time_ms"]
-                    if result.get("rdkit_time_ms") and result.get("rdkit_pairs_processed")
-                    else None
-                )
                 for key, label in [
                     ("nvmol_gpu_list_time_ms", "GPU list"),
                     ("nvmol_gpu_numpy_time_ms", "GPU numpy"),
                     ("nvmol_gpu_tensor_time_ms", "GPU tensor"),
                 ]:
-                    if rdkit_pairs_per_ms and result.get(key):
-                        gpu_pairs_per_ms = total_pairs / result[key]
-                        speedups[label] = gpu_pairs_per_ms / rdkit_pairs_per_ms
+                    if result.get("rdkit_time_ms") and result.get(key):
+                        speedups[label] = result["rdkit_time_ms"] / result[key]
 
                 for label, val in speedups.items():
                     print(f"  Speedup {label:>10s} vs RDKit: {val:.1f}x")
@@ -461,10 +406,6 @@ def main():
     )
     parser.add_argument("--runs", type=int, default=3, help="Number of timed repetitions (default: 3)")
     parser.add_argument("--warmups", type=int, default=1, help="Number of warmup repetitions (default: 1)")
-    add_rdkit_max_seconds_arg(
-        parser,
-        extra_help="The RDKit TFD loop stops at the next molecule boundary once the budget is hit.",
-    )
     parser.add_argument("--seed", type=int, default=42, help="Sampling and conformer-generation seed (default: 42)")
     args = parser.parse_args()
 
@@ -538,7 +479,6 @@ def main():
         runs=args.runs,
         warmups=args.warmups,
         seed=args.seed,
-        rdkit_max_seconds=args.rdkit_max_seconds,
     )
 
 
