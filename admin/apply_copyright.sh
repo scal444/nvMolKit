@@ -65,7 +65,7 @@ find_included_files() {
 
 get_file_year() {
     local file="$1"
-    local relative_path="${file#${REPO_ROOT}/}"
+    local relative_path="${file#"${REPO_ROOT}"/}"
     local commit_year
 
     commit_year=$(git log --diff-filter=A --follow --format=%ad --date=format:%Y -- "${relative_path}" | tail -n 1 || true)

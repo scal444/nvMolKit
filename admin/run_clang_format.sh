@@ -34,15 +34,15 @@ while getopts ":d" opt; do
 done
 
 
-ROOT=$(dirname $(dirname $(realpath $0)))
+ROOT=$(dirname "$(dirname "$(realpath "$0")")")
 
 
 echo "Running clang-format:"
-find $ROOT/src $ROOT/tests $ROOT/benchmarks $ROOT/nvmolkit  \
+find "$ROOT/src" "$ROOT/tests" "$ROOT/benchmarks" "$ROOT/nvmolkit"  \
   -regex '.*\.\(cpp\|h\|cu\|cuh\)$'  \
   -print0                            \
 | xargs -0 clang-format-17           \
   -style=file                        \
   -Werror                            \
   --verbose                          \
-  $DRY_RUN
+  "$DRY_RUN"

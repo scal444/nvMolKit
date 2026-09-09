@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,16 +14,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+set -euo pipefail
 
-set -ex
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "${REPO_ROOT}"
 
-# Find all yaml files in the current directory
-find . -type f -name "*.yml" -exec python hpccm_build.py --config_file="{}" \;
+mapfile -d '' -t shell_files < <(git ls-files -z -- '*.sh' '*.bash')
+if [ "${#shell_files[@]}" -eq 0 ]; then
+    echo "No tracked shell scripts found"
+    exit 0
+fi
 
-prefix=gitlab-master.nvidia.com:5005/clara-discovery/rdcu/ci_images
-
-
-while IFS= read -r -d '' file; do
-  name=$(basename "$file" .Dockerfile)
-  docker build --progress=plain -t "$prefix/$name" --network host -f "$file" .
-done < <(find . -type f -name "*.Dockerfile" -print0)
+shellcheck --format=gcc "${shell_files[@]}"

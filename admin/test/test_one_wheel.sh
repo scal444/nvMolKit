@@ -41,7 +41,7 @@ fi
 
 wheelDir=$WHEELHOUSE/rdkit${rdkit}/py${py}
 shopt -s nullglob
-wheelMatches=("$wheelDir"/nvmolkit-*-cp${py//./}-cp${py//./}-*.whl)
+wheelMatches=("$wheelDir"/nvmolkit-*-cp"${py//./}"-cp"${py//./}"-*.whl)
 shopt -u nullglob
 if [ ${#wheelMatches[@]} -eq 0 ]; then
     echo "Error: no matching wheel for requested pair rdkit=$rdkit py=$py at $wheelDir" >&2

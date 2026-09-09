@@ -35,8 +35,19 @@ done
 ROOT_DIR=$(git rev-parse --show-toplevel)
 
 # Find all CMakeLists.txt and *.cmake files
-files=$(find $ROOT_DIR/CMakeLists.txt $ROOT_DIR/nvmolkit $ROOT_DIR/src $ROOT_DIR/tests $ROOT_DIR/cmake $ROOT_DIR/benchmarks -name CMakeLists.txt -o -name '*.cmake' -not -path "*/_deps/*")
+mapfile -d '' -t files < <(
+  find \
+    "$ROOT_DIR/CMakeLists.txt" \
+    "$ROOT_DIR/nvmolkit" \
+    "$ROOT_DIR/src" \
+    "$ROOT_DIR/tests" \
+    "$ROOT_DIR/cmake" \
+    "$ROOT_DIR/benchmarks" \
+    \( -name CMakeLists.txt -o -name '*.cmake' \) \
+    -not -path "*/_deps/*" \
+    -print0
+)
 
 # Iterate over each file
-cmake-format $DRY_RUN $files --autosort --line-width 120
-cmake-lint $files --autosort --line-width 120 --suppress-decorations
+cmake-format "$DRY_RUN" "${files[@]}" --autosort --line-width 120
+cmake-lint "${files[@]}" --autosort --line-width 120 --suppress-decorations

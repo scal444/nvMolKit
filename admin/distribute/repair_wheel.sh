@@ -91,7 +91,7 @@ unzip -q "${REPAIRED_WHEEL}" -d "${WORK}"
 # inside rdkit.libs/ have no rpath of their own and rely on RPATH inheritance
 # from the entry-point module to find their rdkit.libs/ siblings - rdkit's
 # own python bindings work the same way.
-NEW_RPATH='$ORIGIN/../nvmolkit.libs:$ORIGIN/../rdkit.libs:$ORIGIN/../nvidia/cuda_runtime/lib'
+NEW_RPATH="\$ORIGIN/../nvmolkit.libs:\$ORIGIN/../rdkit.libs:\$ORIGIN/../nvidia/cuda_runtime/lib"
 find "${WORK}/nvmolkit" -maxdepth 1 -name '_*.so' -type f | while read -r so; do
     patchelf --force-rpath --set-rpath "${NEW_RPATH}" "${so}"
 done
