@@ -24,9 +24,18 @@ namespace nvMolKit {
 namespace detail {
 
 ETKDGCoordGenStage::ETKDGCoordGenStage(const RDKit::DGeomHelpers::EmbedParameters& params,
-                                       const std::vector<const RDKit::ROMol*>&     mols)
+                                       const std::vector<const RDKit::ROMol*>&     mols,
+                                       int                                         coordinateDim,
+                                       cudaStream_t                                stream,
+                                       std::vector<int>                            attemptIds,
+                                       std::vector<int>                            coordinateDimensions)
     : params_(params),
-      mols_(mols) {}
+      mols_(mols),
+      coordinateDim_(coordinateDim),
+      coordGenerator_(stream),
+      stream_(stream),
+      attemptIds_(std::move(attemptIds)),
+      coordinateDimensions_(std::move(coordinateDimensions)) {}
 
 __global__ void updateFailedStageKernel(const int      nSystems,
                                         uint8_t*       failedThisStageGlobal,
@@ -49,21 +58,21 @@ void ETKDGCoordGenStage::execute(ETKDGContext& ctx) {
   }
   if (numSystems != coordGenerator_.numSystemsPrepared()) {
     std::vector<ForceFields::CrystalFF::CrystalFFDetails> details(numSystems);
-    coordGenerator_.computeBoundsMatrices(mols_, params_, details);
+    coordGenerator_.computeBoundsMatrices(mols_, params_, details, attemptIds_, coordinateDimensions_);
   }
 
   ctx.systemDevice.positions.zero();
   double*    deviceCoords     = ctx.systemDevice.positions.data();
   const int* deviceAtomStarts = ctx.systemDevice.atomStarts.data();
 
-  coordGenerator_.computeInitialCoordinates(deviceCoords, deviceAtomStarts, ctx.activeThisStage.data());
+  coordGenerator_.computeInitialCoordinates(deviceCoords, deviceAtomStarts, coordinateDim_, ctx.activeThisStage.data());
   const auto*   passedThisStageLocal = coordGenerator_.getPassFail();
   constexpr int blockSize            = 128;
   const int     numBlocks            = (numSystems + blockSize - 1) / blockSize;
-  updateFailedStageKernel<<<numBlocks, blockSize>>>(numSystems,
-                                                    ctx.failedThisStage.data(),
-                                                    passedThisStageLocal,
-                                                    ctx.activeThisStage.data());
+  updateFailedStageKernel<<<numBlocks, blockSize, 0, stream_>>>(numSystems,
+                                                                ctx.failedThisStage.data(),
+                                                                passedThisStageLocal,
+                                                                ctx.activeThisStage.data());
   cudaCheckError(cudaGetLastError());
 }
 
@@ -105,7 +114,7 @@ void ETKDGCoordGenRDKitStage::execute(ETKDGContext& ctx) {
   } else {
     boxSize = -1 * params_.boxSizeMult;
   }
-  cudaStreamSynchronize(stream_);  // for status check
+  cudaCheckError(cudaStreamSynchronize(stream_));  // for status check
   // First pass: Generate coordinates for each active molecule
   for (size_t molIdx = 0; molIdx < ctx.systemHost.atomStarts.size() - 1; ++molIdx) {
     if (!activeScratch_[molIdx]) {

@@ -19,6 +19,7 @@
 #include <gmock/gmock.h>
 #include <GraphMol/DistGeomHelpers/Embedder.h>
 #include <GraphMol/ForceFieldHelpers/CrystalFF/TorsionPreferences.h>
+#include <GraphMol/SmilesParse/SmilesParse.h>
 #include <gtest/gtest.h>
 #include <Numerics/EigenSolvers/PowerEigenSolver.h>
 #include <Numerics/SymmMatrix.h>
@@ -133,6 +134,108 @@ TEST(SymmetricEigenSolverTest, SimplePassing) {
   }
 }
 
+TEST(SymmetricEigenSolverTest, MixedPaddedDimensions) {
+  constexpr int                          matrixDim       = 5;
+  constexpr int                          numEigs         = 4;
+  const std::vector<int>                 dimensions      = {1, 3, 5};
+  const std::vector<int>                 eigenDimensions = {1, 2, 4};
+  const std::vector<std::vector<double>> diagonals       = {
+    {4.0},
+    {100.0, 10.0, 1.0},
+    {10000.0, 1000.0, 100.0, 10.0, 1.0}
+  };
+
+  std::vector<double> matrices(dimensions.size() * matrixDim * matrixDim, 0.0);
+  for (size_t systemIdx = 0; systemIdx < dimensions.size(); ++systemIdx) {
+    for (int row = 0; row < dimensions[systemIdx]; ++row) {
+      matrices[systemIdx * matrixDim * matrixDim + row * matrixDim + row] = diagonals[systemIdx][row];
+    }
+  }
+  std::vector<int>    seeds(dimensions.size(), 42);
+  std::vector<double> eigenvalues(dimensions.size() * numEigs, 0.0);
+  std::vector<double> eigenvectors(dimensions.size() * matrixDim * matrixDim, 0.0);
+
+  AsyncDeviceVector<double> dMatrices(matrices.size());
+  AsyncDeviceVector<double> dEigenvalues(eigenvalues.size());
+  AsyncDeviceVector<double> dEigenvectors(eigenvectors.size());
+  AsyncDeviceVector<int>    dDimensions(dimensions.size());
+  AsyncDeviceVector<int>    dSeeds(seeds.size());
+  AsyncDeviceVector<int>    dEigenDimensions(eigenDimensions.size());
+  dMatrices.copyFromHost(matrices);
+  dEigenvalues.zero();
+  dEigenvectors.zero();
+  dDimensions.copyFromHost(dimensions);
+  dSeeds.copyFromHost(seeds);
+  dEigenDimensions.copyFromHost(eigenDimensions);
+
+  nvMolKit::BatchedEigenSolver        solver;
+  nvMolKit::BatchedEigenSolverOptions solverOptions;
+  solverOptions.matrixDimensions = dDimensions.data();
+  solverOptions.randomSeeds      = dSeeds.data();
+  solverOptions.eigenDimensions  = dEigenDimensions.data();
+  solver.solve(numEigs,
+               matrixDim,
+               static_cast<int>(dimensions.size()),
+               dMatrices.data(),
+               dEigenvalues.data(),
+               dEigenvectors.data(),
+               solverOptions);
+  dEigenvalues.copyToHost(eigenvalues);
+  dEigenvectors.copyToHost(eigenvectors);
+  std::vector<uint8_t> converged(dimensions.size());
+  cudaCheckError(cudaMemcpy(converged.data(), solver.converged(), converged.size(), cudaMemcpyDeviceToHost));
+  cudaCheckError(cudaDeviceSynchronize());
+
+  EXPECT_THAT(converged, testing::Each(testing::Eq(1)));
+  for (size_t systemIdx = 0; systemIdx < dimensions.size(); ++systemIdx) {
+    const int computedEigs = std::min(eigenDimensions[systemIdx], dimensions[systemIdx]);
+    for (int eigIdx = 0; eigIdx < computedEigs; ++eigIdx) {
+      EXPECT_NEAR(eigenvalues[systemIdx * numEigs + eigIdx],
+                  diagonals[systemIdx][eigIdx],
+                  5e-4 * diagonals[systemIdx][eigIdx]);
+      double vectorNormSquared = 0.0;
+      for (int row = 0; row < dimensions[systemIdx]; ++row) {
+        const double component = eigenvectors[systemIdx * matrixDim * matrixDim + eigIdx * matrixDim + row];
+        vectorNormSquared += component * component;
+      }
+      EXPECT_NEAR(vectorNormSquared, 1.0, 1e-6);
+      for (int row = dimensions[systemIdx]; row < matrixDim; ++row) {
+        EXPECT_DOUBLE_EQ(eigenvectors[systemIdx * matrixDim * matrixDim + eigIdx * matrixDim + row], 0.0);
+      }
+    }
+    for (int eigIdx = computedEigs; eigIdx < numEigs; ++eigIdx) {
+      EXPECT_DOUBLE_EQ(eigenvalues[systemIdx * numEigs + eigIdx], 0.0);
+    }
+  }
+}
+
+TEST(InitialCoordinateGeneratorTest, InactiveSmallSystemRemainsFailed) {
+  std::unique_ptr<RDKit::ROMol> mol(RDKit::SmilesToMol("CC"));
+  ASSERT_NE(mol, nullptr);
+  std::vector<const RDKit::ROMol*> mols = {mol.get()};
+
+  auto                                                  params = RDKit::DGeomHelpers::ETKDGv3;
+  std::vector<ForceFields::CrystalFF::CrystalFFDetails> details(mols.size());
+  nvMolKit::detail::InitialCoordinateGenerator          coordgen;
+  coordgen.computeBoundsMatrices(mols, params, details);
+
+  constexpr int              coordinateDim = 3;
+  std::vector<int>           atomStarts    = {0, static_cast<int>(mol->getNumAtoms())};
+  std::vector<uint8_t>       active        = {0};
+  AsyncDeviceVector<int>     dAtomStarts(atomStarts.size());
+  AsyncDeviceVector<uint8_t> dActive(active.size());
+  AsyncDeviceVector<double>  dPositions(static_cast<size_t>(atomStarts.back()) * coordinateDim);
+  dAtomStarts.copyFromHost(atomStarts);
+  dActive.copyFromHost(active);
+  dPositions.zero();
+
+  coordgen.computeInitialCoordinates(dPositions.data(), dAtomStarts.data(), coordinateDim, dActive.data());
+
+  std::vector<uint8_t> passed(mols.size(), 1);
+  cudaCheckError(cudaMemcpy(passed.data(), coordgen.getPassFail(), passed.size(), cudaMemcpyDeviceToHost));
+  EXPECT_THAT(passed, testing::ElementsAre(0));
+}
+
 class SymmetricEigenSolverSyntheticTestFixture : public ::testing::TestWithParam<std::tuple<int, int>> {};
 
 TEST_P(SymmetricEigenSolverSyntheticTestFixture, SyntheticData) {
@@ -218,8 +321,6 @@ INSTANTIATE_TEST_SUITE_P(SymmetricEigenSolverSyntheticTest,
                                           testing::Values(1, 10)));  // num matrices
 
 TEST(SymmetricEigenSolverIntegrationTest, MMFF94Data) {
-  // Flaky test, functionality currently unused
-  GTEST_SKIP();
   // Load MMFF molecules
   std::string                                testDataFolderPath = getTestDataFolderPath();
   std::vector<std::unique_ptr<RDKit::ROMol>> mols;
@@ -260,7 +361,7 @@ TEST(SymmetricEigenSolverIntegrationTest, MMFF94Data) {
   for (size_t i = 0; i < numMatrices; ++i) {
     RDNumeric::DoubleVector eigenvalues(distanceMatrices[i].numRows());
     expectConverged.push_back(
-      RDNumeric::EigenSolvers::powerEigenSolver(3, distanceMatrices[i], eigenvalues, &eigenvectorsRef[i]));
+      RDNumeric::EigenSolvers::powerEigenSolver(3, distanceMatrices[i], eigenvalues, &eigenvectorsRef[i], /*seed=*/42));
     for (size_t j = 0; j < eigenvalues.size(); j++) {
       expectedEigenValues[i].push_back(eigenvalues[j]);
     }
@@ -468,7 +569,7 @@ TEST_P(CoordGenIntegrationTestFixture, MMFF94Data) {
 
   nvMolKit::detail::InitialCoordinateGenerator coordgen;
   coordgen.computeBoundsMatrices(mols, params, details);
-  coordgen.computeInitialCoordinates(positions.data(), atomStartsDevice.data());
+  coordgen.computeInitialCoordinates(positions.data(), atomStartsDevice.data(), dim);
   std::vector<uint8_t> converged(mols.size());
   cudaCheckError(
     cudaMemcpy(converged.data(), coordgen.getPassFail(), mols.size() * sizeof(uint8_t), cudaMemcpyDeviceToHost));

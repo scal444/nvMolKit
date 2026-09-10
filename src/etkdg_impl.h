@@ -23,6 +23,7 @@
 #include <GraphMol/ForceFieldHelpers/CrystalFF/TorsionPreferences.h>
 
 #include <chrono>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -240,9 +241,16 @@ class Scheduler {
    * unique molecules are available to fill the batch size.
    *
    * @param batchSize Maximum number of molecule IDs to return
+   * @param attemptIds Optional output populated with each molecule's zero-based attempt number
    * @return Vector of molecule IDs to process (may be smaller than batchSize if insufficient work remains)
    */
-  std::vector<int> dispatch(int batchSize);
+  std::vector<int> dispatch(int batchSize, std::vector<int>* attemptIds = nullptr);
+
+  //! Dispatch work, waiting when the current retry round is fully reserved by other workers.
+  std::vector<int> dispatchBlocking(int batchSize, std::vector<int>* attemptIds = nullptr);
+
+  //! Wake blocked dispatchers and prevent additional work after an external failure.
+  void cancel();
 
   /**
    * @brief Record the results of conformer generation attempts
@@ -267,7 +275,8 @@ class Scheduler {
 
  private:
   //!
-  mutable std::mutex mutex_;
+  mutable std::mutex      mutex_;
+  std::condition_variable progressCondition_;
 
   int    numConfsPerMol_;
   int    maxIterations_;
@@ -277,6 +286,11 @@ class Scheduler {
 
   std::vector<int> completedConformers_;
   std::vector<int> totalAttempts_;
+  int              attemptsInFlight_ = 0;
+  bool             canceled_         = false;
+
+  std::vector<int> dispatchCurrentRoundLocked(int batchSize, std::vector<int>* attemptIds);
+  bool             hasRetriesRemainingLocked() const;
 };
 
 }  // namespace detail

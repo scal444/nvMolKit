@@ -17,6 +17,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
+#include <future>
 #include <thread>
 #include <unordered_set>
 #include <vector>
@@ -180,6 +182,48 @@ TEST_F(SchedulerTest, BatchSizeEdgeCases) {
   // Batch size of 1
   auto singleBatch = tracker.dispatch(1);
   EXPECT_EQ(singleBatch.size(), 1);
+}
+
+TEST_F(SchedulerTest, ReportsStablePerMoleculeAttemptIds) {
+  Scheduler        tracker(2, 3, 2);
+  std::vector<int> attemptIds;
+
+  EXPECT_THAT(tracker.dispatch(4, &attemptIds), testing::ElementsAre(0, 0, 0, 1));
+  EXPECT_THAT(attemptIds, testing::ElementsAre(0, 1, 2, 0));
+
+  EXPECT_THAT(tracker.dispatch(4, &attemptIds), testing::ElementsAre(1, 1, 0, 0));
+  EXPECT_THAT(attemptIds, testing::ElementsAre(1, 2, 3, 4));
+}
+
+TEST_F(SchedulerTest, BlockingDispatchWaitsForInFlightRetryResults) {
+  Scheduler scheduler(1, 1, 2);
+
+  auto firstAttempt = scheduler.dispatchBlocking(1);
+  ASSERT_THAT(firstAttempt, testing::ElementsAre(0));
+
+  auto nextDispatch = std::async(std::launch::async, [&scheduler]() { return scheduler.dispatchBlocking(1); });
+  EXPECT_EQ(nextDispatch.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+
+  scheduler.record(firstAttempt, {-1});
+  ASSERT_EQ(nextDispatch.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  auto secondAttempt = nextDispatch.get();
+  EXPECT_THAT(secondAttempt, testing::ElementsAre(0));
+  scheduler.record(secondAttempt, {0});
+
+  EXPECT_TRUE(scheduler.dispatchBlocking(1).empty());
+  EXPECT_TRUE(scheduler.allFinished());
+}
+
+TEST_F(SchedulerTest, CancelWakesBlockingDispatch) {
+  Scheduler scheduler(1, 1, 2);
+  ASSERT_THAT(scheduler.dispatchBlocking(1), testing::ElementsAre(0));
+
+  auto blockedDispatch = std::async(std::launch::async, [&scheduler]() { return scheduler.dispatchBlocking(1); });
+  EXPECT_EQ(blockedDispatch.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+
+  scheduler.cancel();
+  ASSERT_EQ(blockedDispatch.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  EXPECT_TRUE(blockedDispatch.get().empty());
 }
 
 // Test thread safety (basic concurrent access)

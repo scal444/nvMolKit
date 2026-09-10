@@ -29,7 +29,12 @@ namespace detail {
 
 class ETKDGCoordGenStage : public ETKDGStage {
  public:
-  ETKDGCoordGenStage(const RDKit::DGeomHelpers::EmbedParameters& params, const std::vector<const RDKit::ROMol*>& mols);
+  ETKDGCoordGenStage(const RDKit::DGeomHelpers::EmbedParameters& params,
+                     const std::vector<const RDKit::ROMol*>&     mols,
+                     int                                         coordinateDim        = 3,
+                     cudaStream_t                                stream               = nullptr,
+                     std::vector<int>                            attemptIds           = {},
+                     std::vector<int>                            coordinateDimensions = {});
   ~ETKDGCoordGenStage() override = default;
 
   void        execute(ETKDGContext& ctx) override final;
@@ -37,8 +42,12 @@ class ETKDGCoordGenStage : public ETKDGStage {
 
  private:
   const RDKit::DGeomHelpers::EmbedParameters& params_;
-  const std::vector<const RDKit::ROMol*>&     mols_;
+  std::vector<const RDKit::ROMol*>            mols_;
+  int                                         coordinateDim_;
   InitialCoordinateGenerator                  coordGenerator_;
+  cudaStream_t                                stream_;
+  std::vector<int>                            attemptIds_;
+  std::vector<int>                            coordinateDimensions_;
 };
 
 class ETKDGCoordGenRDKitStage final : public ETKDGStage {
