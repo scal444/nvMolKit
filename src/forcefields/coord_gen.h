@@ -17,6 +17,7 @@
 #define NVMOLKIT_COORD_GEN_H
 
 #include <cuda_runtime_api.h>
+#include <DistGeom/BoundsMatrix.h>
 
 #include <memory>
 #include <vector>
@@ -48,6 +49,12 @@ class InitialCoordinateGenerator {
                              std::vector<ForceFields::CrystalFF::CrystalFFDetails>& etkdgDetails,
                              const std::vector<int>&                                attemptIds           = {},
                              const std::vector<int>&                                coordinateDimensions = {});
+
+  //! Use bounds matrices already prepared by the ETKDG driver.
+  void setBoundsMatrices(const std::vector<::DistGeom::BoundsMatPtr>& boundsMatrices,
+                         const RDKit::DGeomHelpers::EmbedParameters&  params,
+                         const std::vector<int>&                      attemptIds           = {},
+                         const std::vector<int>&                      coordinateDimensions = {});
 
   //! Check if the bounds matrices are set up for n molecules.
   int numSystemsPrepared();

@@ -134,6 +134,34 @@ TEST(SymmetricEigenSolverTest, SimplePassing) {
   }
 }
 
+TEST(SymmetricEigenSolverTest, BlockSizeBoundaries) {
+  for (const int matrixDim : {32, 33, 64, 65, 128, 129, 256}) {
+    std::vector<double> matrix(static_cast<size_t>(matrixDim) * matrixDim, 0.0);
+    matrix[0] = 1000.0;
+    for (int idx = 1; idx < matrixDim; ++idx) {
+      matrix[static_cast<size_t>(idx) * matrixDim + idx] = 1.0 / idx;
+    }
+
+    AsyncDeviceVector<double> dMatrix(matrix.size());
+    AsyncDeviceVector<double> dEigenvalue(1);
+    AsyncDeviceVector<double> dEigenvectors(static_cast<size_t>(matrixDim) * matrixDim);
+    dMatrix.copyFromHost(matrix);
+    dEigenvalue.zero();
+    dEigenvectors.zero();
+
+    nvMolKit::BatchedEigenSolver solver;
+    solver.solve(1, matrixDim, 1, dMatrix.data(), dEigenvalue.data(), dEigenvectors.data());
+
+    std::vector<double>  eigenvalue(1);
+    std::vector<uint8_t> converged(1);
+    dEigenvalue.copyToHost(eigenvalue);
+    cudaCheckError(cudaMemcpy(converged.data(), solver.converged(), 1, cudaMemcpyDeviceToHost));
+    cudaCheckError(cudaDeviceSynchronize());
+    EXPECT_EQ(converged[0], 1) << "matrix dimension " << matrixDim;
+    EXPECT_NEAR(eigenvalue[0], 1000.0, 0.001) << "matrix dimension " << matrixDim;
+  }
+}
+
 TEST(SymmetricEigenSolverTest, MixedPaddedDimensions) {
   constexpr int                          matrixDim       = 5;
   constexpr int                          numEigs         = 4;
@@ -234,6 +262,50 @@ TEST(InitialCoordinateGeneratorTest, InactiveSmallSystemRemainsFailed) {
   std::vector<uint8_t> passed(mols.size(), 1);
   cudaCheckError(cudaMemcpy(passed.data(), coordgen.getPassFail(), passed.size(), cudaMemcpyDeviceToHost));
   EXPECT_THAT(passed, testing::ElementsAre(0));
+}
+
+TEST(InitialCoordinateGeneratorTest, ReusedBoundsMatchFreshBounds) {
+  std::unique_ptr<RDKit::ROMol> mol(RDKit::SmilesToMol("CCO"));
+  ASSERT_NE(mol, nullptr);
+  std::vector<const RDKit::ROMol*> mols = {mol.get()};
+
+  auto params       = RDKit::DGeomHelpers::ETKDGv3;
+  params.randomSeed = 42;
+  params.randNegEig = true;
+  std::vector<ForceFields::CrystalFF::CrystalFFDetails> freshDetails(mols.size());
+  std::vector<ForceFields::CrystalFF::CrystalFFDetails> reusedDetails(mols.size());
+  auto reusedBounds = nvMolKit::getBoundsMatrices(mols, params, reusedDetails);
+
+  constexpr int          coordinateDim = 3;
+  const std::vector<int> atomStarts    = {0, static_cast<int>(mol->getNumAtoms())};
+  AsyncDeviceVector<int> dAtomStarts(atomStarts.size());
+  dAtomStarts.copyFromHost(atomStarts);
+  AsyncDeviceVector<double> freshPositions(static_cast<size_t>(atomStarts.back()) * coordinateDim);
+  AsyncDeviceVector<double> reusedPositions(static_cast<size_t>(atomStarts.back()) * coordinateDim);
+
+  nvMolKit::detail::InitialCoordinateGenerator freshGenerator;
+  freshGenerator.computeBoundsMatrices(mols, params, freshDetails);
+  freshGenerator.computeInitialCoordinates(freshPositions.data(), dAtomStarts.data(), coordinateDim);
+
+  nvMolKit::detail::InitialCoordinateGenerator reusedGenerator;
+  reusedGenerator.setBoundsMatrices(reusedBounds, params);
+  reusedGenerator.computeInitialCoordinates(reusedPositions.data(), dAtomStarts.data(), coordinateDim);
+
+  std::vector<uint8_t> freshPassed(1);
+  std::vector<uint8_t> reusedPassed(1);
+  std::vector<double>  freshHost(freshPositions.size());
+  std::vector<double>  reusedHost(reusedPositions.size());
+  cudaCheckError(cudaMemcpy(freshPassed.data(), freshGenerator.getPassFail(), 1, cudaMemcpyDeviceToHost));
+  cudaCheckError(cudaMemcpy(reusedPassed.data(), reusedGenerator.getPassFail(), 1, cudaMemcpyDeviceToHost));
+  freshPositions.copyToHost(freshHost);
+  reusedPositions.copyToHost(reusedHost);
+  cudaCheckError(cudaDeviceSynchronize());
+
+  EXPECT_EQ(reusedPassed, freshPassed);
+  ASSERT_EQ(reusedHost.size(), freshHost.size());
+  for (size_t idx = 0; idx < freshHost.size(); ++idx) {
+    EXPECT_DOUBLE_EQ(reusedHost[idx], freshHost[idx]);
+  }
 }
 
 class SymmetricEigenSolverSyntheticTestFixture : public ::testing::TestWithParam<std::tuple<int, int>> {};

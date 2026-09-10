@@ -32,6 +32,16 @@ namespace nvMolKit {
 
 namespace {
 
+__global__ void combineActiveAndValidKernel(const int      numSystems,
+                                            const uint8_t* active,
+                                            const uint8_t* validDistanceMatrices,
+                                            uint8_t*       eigensolverActive) {
+  const int systemIdx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (systemIdx < numSystems) {
+    eigensolverActive[systemIdx] = validDistanceMatrices[systemIdx] && (active == nullptr || active[systemIdx]);
+  }
+}
+
 std::vector<double> packedNMatrices(const std::vector<RDNumeric::SymmMatrix<double>>& matrices, int& maxDimension) {
   // Compute maximum dimension of input matrices
   int N = 0;
@@ -162,6 +172,7 @@ class InitialCoordinateGenerator::Impl {
     eigenSeedsDevice_.setStream(stream);
     coordinateDimensionsDevice_.setStream(stream);
     randomCoordinatesDevice_.setStream(stream);
+    eigensolverActive_.setStream(stream);
   }
 
   void computeBoundsMatrices(const std::vector<const RDKit::ROMol*>&                mols,
@@ -172,24 +183,45 @@ class InitialCoordinateGenerator::Impl {
     randNegEig_     = params.randNegEig;
     numZeroFail_    = params.numZeroFail;
     boundsMatrices_ = getBoundsMatrices(mols, params, etkdgDetails);
+    initializeBatch(params, attemptIds, coordinateDimensions);
+  }
+
+  void setBoundsMatrices(const std::vector<::DistGeom::BoundsMatPtr>& boundsMatrices,
+                         const RDKit::DGeomHelpers::EmbedParameters&  params,
+                         const std::vector<int>&                      attemptIds,
+                         const std::vector<int>&                      coordinateDimensions) {
+    randNegEig_     = params.randNegEig;
+    numZeroFail_    = params.numZeroFail;
+    boundsMatrices_ = boundsMatrices;
+    initializeBatch(params, attemptIds, coordinateDimensions);
+  }
+
+ private:
+  void initializeBatch(const RDKit::DGeomHelpers::EmbedParameters& params,
+                       const std::vector<int>&                     attemptIds,
+                       const std::vector<int>&                     coordinateDimensions) {
     atomCountsHost_.clear();
-    atomCountsHost_.reserve(mols.size());
-    for (const auto* mol : mols) {
-      atomCountsHost_.push_back(static_cast<int>(mol->getNumAtoms()));
+    atomCountsHost_.reserve(boundsMatrices_.size());
+    for (const auto& boundsMatrix : boundsMatrices_) {
+      if (boundsMatrix == nullptr) {
+        throw std::invalid_argument("Bounds matrices must not contain null entries");
+      }
+      atomCountsHost_.push_back(static_cast<int>(boundsMatrix->numRows()));
     }
     atomCountsDevice_.setFromVector(atomCountsHost_);
 
-    if (!attemptIds.empty() && attemptIds.size() != mols.size()) {
+    if (!attemptIds.empty() && attemptIds.size() != boundsMatrices_.size()) {
       throw std::invalid_argument("Attempt IDs must match the molecule batch size");
     }
     attemptIds_ = attemptIds;
-    if (!coordinateDimensions.empty() && coordinateDimensions.size() != mols.size()) {
+    if (!coordinateDimensions.empty() && coordinateDimensions.size() != boundsMatrices_.size()) {
       throw std::invalid_argument("Coordinate dimensions must match the molecule batch size");
     }
     coordinateDimensionsHost_ = coordinateDimensions;
     baseSeed_ = params.randomSeed >= 0 ? static_cast<unsigned int>(params.randomSeed) : std::random_device{}();
   }
 
+ public:
   void computeInitialCoordinates(double*        deviceCoords,
                                  const int*     deviceAtomStarts,
                                  int            coordinateDim,
@@ -251,8 +283,16 @@ class InitialCoordinateGenerator::Impl {
     eigenvectorsDevice_.resize(maxDimension_ * maxDimension_ * batchSize);
     eigenvectorsDevice_.zero();
     passFail_.resize(batchSize);
+    eigensolverActive_.resize(batchSize);
+    constexpr int maskBlockSize = 128;
+    combineActiveAndValidKernel<<<(batchSize + maskBlockSize - 1) / maskBlockSize, maskBlockSize, 0, stream_>>>(
+      batchSize,
+      active,
+      validDistanceMatricesDevice_.data(),
+      eigensolverActive_.data());
+    cudaCheckError(cudaGetLastError());
     BatchedEigenSolverOptions solverOptions;
-    solverOptions.active           = active;
+    solverOptions.active           = eigensolverActive_.data();
     solverOptions.matrixDimensions = atomCountsDevice_.data();
     solverOptions.randomSeeds      = eigenSeedsDevice_.data();
     solverOptions.eigenDimensions  = coordinateDimensionsDevice_.data();
@@ -316,6 +356,7 @@ class InitialCoordinateGenerator::Impl {
   AsyncDeviceVector<int>                coordinateDimensionsDevice_;
   std::vector<double>                   randomCoordinatesHost_;
   AsyncDeviceVector<double>             randomCoordinatesDevice_;
+  AsyncDeviceVector<uint8_t>            eigensolverActive_;
   std::vector<int>                      attemptIds_;
   unsigned int                          baseSeed_     = 0;
   int                                   maxDimension_ = 0;
@@ -334,6 +375,13 @@ void InitialCoordinateGenerator::computeBoundsMatrices(
   const std::vector<int>&                                attemptIds,
   const std::vector<int>&                                coordinateDimensions) {
   return impl_->computeBoundsMatrices(mols, params, etkdgDetails, attemptIds, coordinateDimensions);
+}
+
+void InitialCoordinateGenerator::setBoundsMatrices(const std::vector<::DistGeom::BoundsMatPtr>& boundsMatrices,
+                                                   const RDKit::DGeomHelpers::EmbedParameters&  params,
+                                                   const std::vector<int>&                      attemptIds,
+                                                   const std::vector<int>&                      coordinateDimensions) {
+  impl_->setBoundsMatrices(boundsMatrices, params, attemptIds, coordinateDimensions);
 }
 
 void InitialCoordinateGenerator::computeInitialCoordinates(double*        deviceCoords,

@@ -60,6 +60,7 @@ struct MaxFunctor {
 
 // Port of RDKit power eigensolver. Original code:
 // https://github.com/rdkit/rdkit/blob/master/Code/Numerics/EigenSolvers/PowerEigenSolver.cpp
+template <int BLOCK_SIZE>
 __global__ void batchEigensolverKernel(const int      numEigs,
                                        const int      matrixDim,
                                        double*        mutableBoundsMatrices,
@@ -76,12 +77,12 @@ __global__ void batchEigensolverKernel(const int      numEigs,
   constexpr double       TOLERANCE      = 0.001;
   constexpr double       TINY_EIGVAL    = 1.0e-10;
 
-  using BlockReduce = cub::BlockReduce<double, 256>;
+  using BlockReduce = cub::BlockReduce<double, BLOCK_SIZE>;
   // Used for reducing to largest element in z
-  __shared__ BlockReduce::TempStorage temp_storage;
+  __shared__ typename BlockReduce::TempStorage temp_storage;
   // Shared memory for v and z vectors.
-  __shared__ double                   v[256];
-  __shared__ double                   z[256];
+  __shared__ double                            v[BLOCK_SIZE];
+  __shared__ double                            z[BLOCK_SIZE];
 
   __shared__ double localEig;
   __shared__ bool   localConverged;
@@ -217,23 +218,63 @@ void launchBatchEigensolverKernel(const int      numEigs,
                                   const int*     randomSeeds,
                                   const int*     eigenDimensions,
                                   cudaStream_t   stream) {
-  const int numBlocks          = numSystems;
-  const int numThreadsPerBlock = 256;
+  const int numBlocks = numSystems;
   if (matrixDim > 256) {
     throw std::runtime_error("Matrix dimension is too large for the kernel");
   }
-  batchEigensolverKernel<<<numBlocks, numThreadsPerBlock, 0, stream>>>(numEigs,
-                                                                       matrixDim,
-                                                                       mutableBoundsMatrices,
-                                                                       eigenvaluesOut,
-                                                                       eigenvectorsOut,
-                                                                       converged,
-                                                                       states,
-                                                                       active,
-                                                                       seed,
-                                                                       matrixDimensions,
-                                                                       randomSeeds,
-                                                                       eigenDimensions);
+  if (matrixDim <= 32) {
+    batchEigensolverKernel<32><<<numBlocks, 32, 0, stream>>>(numEigs,
+                                                             matrixDim,
+                                                             mutableBoundsMatrices,
+                                                             eigenvaluesOut,
+                                                             eigenvectorsOut,
+                                                             converged,
+                                                             states,
+                                                             active,
+                                                             seed,
+                                                             matrixDimensions,
+                                                             randomSeeds,
+                                                             eigenDimensions);
+  } else if (matrixDim <= 64) {
+    batchEigensolverKernel<64><<<numBlocks, 64, 0, stream>>>(numEigs,
+                                                             matrixDim,
+                                                             mutableBoundsMatrices,
+                                                             eigenvaluesOut,
+                                                             eigenvectorsOut,
+                                                             converged,
+                                                             states,
+                                                             active,
+                                                             seed,
+                                                             matrixDimensions,
+                                                             randomSeeds,
+                                                             eigenDimensions);
+  } else if (matrixDim <= 128) {
+    batchEigensolverKernel<128><<<numBlocks, 128, 0, stream>>>(numEigs,
+                                                               matrixDim,
+                                                               mutableBoundsMatrices,
+                                                               eigenvaluesOut,
+                                                               eigenvectorsOut,
+                                                               converged,
+                                                               states,
+                                                               active,
+                                                               seed,
+                                                               matrixDimensions,
+                                                               randomSeeds,
+                                                               eigenDimensions);
+  } else {
+    batchEigensolverKernel<256><<<numBlocks, 256, 0, stream>>>(numEigs,
+                                                               matrixDim,
+                                                               mutableBoundsMatrices,
+                                                               eigenvaluesOut,
+                                                               eigenvectorsOut,
+                                                               converged,
+                                                               states,
+                                                               active,
+                                                               seed,
+                                                               matrixDimensions,
+                                                               randomSeeds,
+                                                               eigenDimensions);
+  }
   cudaCheckError(cudaGetLastError());
 }
 

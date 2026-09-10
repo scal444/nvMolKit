@@ -24,18 +24,21 @@ namespace nvMolKit {
 namespace detail {
 
 ETKDGCoordGenStage::ETKDGCoordGenStage(const RDKit::DGeomHelpers::EmbedParameters& params,
-                                       const std::vector<const RDKit::ROMol*>&     mols,
+                                       const std::vector<EmbedArgs>&               eargs,
                                        int                                         coordinateDim,
                                        cudaStream_t                                stream,
                                        std::vector<int>                            attemptIds,
                                        std::vector<int>                            coordinateDimensions)
-    : params_(params),
-      mols_(mols),
-      coordinateDim_(coordinateDim),
+    : coordinateDim_(coordinateDim),
       coordGenerator_(stream),
-      stream_(stream),
-      attemptIds_(std::move(attemptIds)),
-      coordinateDimensions_(std::move(coordinateDimensions)) {}
+      stream_(stream) {
+  std::vector<::DistGeom::BoundsMatPtr> boundsMatrices;
+  boundsMatrices.reserve(eargs.size());
+  for (const auto& embedArgs : eargs) {
+    boundsMatrices.push_back(embedArgs.mmat);
+  }
+  coordGenerator_.setBoundsMatrices(boundsMatrices, params, attemptIds, coordinateDimensions);
+}
 
 __global__ void updateFailedStageKernel(const int      nSystems,
                                         uint8_t*       failedThisStageGlobal,
@@ -57,8 +60,7 @@ void ETKDGCoordGenStage::execute(ETKDGContext& ctx) {
     return;
   }
   if (numSystems != coordGenerator_.numSystemsPrepared()) {
-    std::vector<ForceFields::CrystalFF::CrystalFFDetails> details(numSystems);
-    coordGenerator_.computeBoundsMatrices(mols_, params_, details, attemptIds_, coordinateDimensions_);
+    throw std::runtime_error("Coordinate generator batch size does not match the ETKDG context");
   }
 
   ctx.systemDevice.positions.zero();
