@@ -62,7 +62,7 @@ format_hms() {
 
 shopt -s nullglob
 existingWheels=("$outDir"/*.whl)
-matchingWheels=("$outDir"/nvmolkit-*-cp${pyTag}-cp${pyTag}-*.whl)
+matchingWheels=("$outDir"/nvmolkit-*-cp"${pyTag}"-cp"${pyTag}"-*.whl)
 shopt -u nullglob
 recordedBuildCommit=
 if [ -f "$commitFile" ]; then
@@ -112,7 +112,7 @@ rc=$?
 
 if [ "$rc" -eq 0 ]; then
     shopt -s nullglob
-    builtWheels=("$outDir"/nvmolkit-*-cp${pyTag}-cp${pyTag}-*.whl)
+    builtWheels=("$outDir"/nvmolkit-*-cp"${pyTag}"-cp"${pyTag}"-*.whl)
     shopt -u nullglob
     if [ ${#builtWheels[@]} -ne 1 ]; then
         echo "Error: expected one cp${pyTag} wheel in $outDir, found ${#builtWheels[@]}" >> "$logFile"
