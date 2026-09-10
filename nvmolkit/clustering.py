@@ -32,11 +32,11 @@ from binary-fingerprint summaries. It can construct independent partial trees
 concurrently and merge their Bit Features without an all-pairs matrix.
 """
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 from typing import Literal, overload
 
-import math
 import numpy as np
 import torch
 
