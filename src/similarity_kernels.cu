@@ -434,8 +434,13 @@ void launchTanimotoTensorKernel(const cuda::std::span<const std::uint32_t> bitsO
                                 cudaStream_t                               stream) {
   constexpr unsigned int kBlockTileSizeK  = 32U;
   constexpr unsigned int kThreadsPerBlock = 32U * NUM_WARP_X * NUM_WARP_Y;
-  const size_t           m                = bitsOne.size() / numBitsPerMolecule;
-  const size_t           n                = bitsTwo.size() / numBitsPerMolecule;
+  constexpr size_t       kSharedStorageBytes =
+    2 * (BLOCK_TILE_SIZE_X + BLOCK_TILE_SIZE_Y) * (kBlockTileSizeK + 1) * sizeof(std::uint32_t);
+  constexpr size_t kOutputTileBytes = BLOCK_TILE_SIZE_Y * (BLOCK_TILE_SIZE_X + 1) * sizeof(float);
+  static_assert(kSharedStorageBytes >= kOutputTileBytes, "Shared memory is too small for the output tile");
+
+  const size_t m = bitsOne.size() / numBitsPerMolecule;
+  const size_t n = bitsTwo.size() / numBitsPerMolecule;
 
   constexpr unsigned int kBlockTileSizeX = static_cast<unsigned int>(BLOCK_TILE_SIZE_X);
   constexpr unsigned int kBlockTileSizeY = static_cast<unsigned int>(BLOCK_TILE_SIZE_Y);
