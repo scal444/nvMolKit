@@ -9,7 +9,7 @@ import pytest
 import torch
 from rdkit import Chem
 
-from nvmolkit.clustering import aap_similarity, aap_similarity_clustering
+from nvmolkit.clustering import aap_dise_clustering, aap_similarity, aap_similarity_clustering
 
 
 def _mol(smiles):
@@ -193,6 +193,27 @@ def test_aap_clustering_threshold_zero_assigns_every_molecule_to_first_centroid(
     molecules = [_mol(smiles) for smiles in ("CCO", "c1ccccc1", "[NH4+]", "ClCCCl")]
 
     assert aap_similarity_clustering(molecules, threshold=0.0) == [1, 1, 1, 1]
+
+
+def test_aap_dise_clustering_handles_empty_singleton_duplicates_and_generator():
+    ethanol = _mol("CCO")
+    benzene = _mol("c1ccccc1")
+
+    assert aap_dise_clustering([]) == []
+    assert aap_dise_clustering([ethanol]) == [1]
+    molecules = (molecule for molecule in (ethanol, ethanol, benzene))
+    assert aap_dise_clustering(molecules, threshold=1.0) == [1, 1, 2]
+
+
+def test_aap_dise_clustering_reassigns_noncentroids_to_the_nearest_centroid():
+    molecules = [_mol(smiles) for smiles in ("CCCC", "CCCO", "CCOC")]
+
+    # The selection pass absorbs CCCO into the first sphere, while CCOC becomes
+    # a second centroid. The complete DISE workflow then assigns CCCO to CCOC,
+    # because that selected centroid is more similar.
+    assert aap_similarity_clustering(molecules, threshold=0.2) == [1, 1, 2]
+    assert aap_similarity(molecules[2], molecules[1]) > aap_similarity(molecules[0], molecules[1])
+    assert aap_dise_clustering(molecules, threshold=0.2) == [2, 1, 1]
 
 
 def test_aap_similarity_and_clustering_are_deterministic_across_streams():

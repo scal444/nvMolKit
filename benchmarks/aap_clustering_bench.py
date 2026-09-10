@@ -8,12 +8,14 @@ import importlib
 import math
 import random
 import sys
+import time
 import warnings
 from pathlib import Path
 
 import numpy as np
 from bench_utils import (
     add_backend_selection_args,
+    load_sdf,
     load_smiles,
     print_csv_rows,
     throughput_per_s,
@@ -21,8 +23,9 @@ from bench_utils import (
     write_csv_rows,
 )
 from rdkit import Chem
+from rdkit.SimDivFilters import rdSimDivPickers
 
-from nvmolkit.clustering import aap_similarity, aap_similarity_clustering
+from nvmolkit.clustering import aap_dise_clustering, aap_similarity, aap_similarity_clustering
 
 
 SUPPORTED_BOND_TYPES = {
@@ -136,6 +139,88 @@ def _ligand_clustering_cpu_cluster(molecules, threshold, max_path_length, refere
     return _remap_clusters_by_size(labels, cluster_id)
 
 
+def _priority_order(molecules, sort_tag):
+    indexed = list(enumerate(molecules))
+    if sort_tag:
+
+        def priority(item):
+            molecule = item[1]
+            raw_value = molecule.GetProp(sort_tag) if molecule.HasProp(sort_tag) else ""
+            cleaned = raw_value.replace("<", "")
+            return (not bool(cleaned), float(cleaned) if cleaned else 0.0)
+
+        indexed.sort(key=priority)
+    return indexed
+
+
+def _rdkit_aap_dise_cluster(molecules, threshold, max_path_length, sort_tag, reference, phase_timings=None):
+    """Run the complete RDKit AAP sphere-exclusion workflow.
+
+    This follows RDKit's documented workflow: use ``LeaderPicker`` to select
+    sphere-exclusion centroids, then assign every non-centroid to its nearest
+    centroid. Priority cleanup and sorting intentionally happen in this timed
+    function because input direction is part of DISE.
+    """
+    start = time.perf_counter()
+    indexed = _priority_order(molecules, sort_tag)
+    ordering_done = time.perf_counter()
+    ordered_molecules = [molecule for _, molecule in indexed]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        descriptors = [reference.getpathintegers(molecule, max_path_length) for molecule in ordered_molecules]
+    descriptors_done = time.perf_counter()
+    similarity_cache = {}
+
+    def similarity(left, right):
+        if left == right:
+            return 1.0
+        key = (left, right) if left < right else (right, left)
+        if key not in similarity_cache:
+            similarity_cache[key] = reference.AtomAtomPathSimilarity(
+                ordered_molecules[key[0]],
+                ordered_molecules[key[1]],
+                descriptors[key[0]],
+                descriptors[key[1]],
+            )
+        return similarity_cache[key]
+
+    picker = rdSimDivPickers.LeaderPicker()
+    centroids = list(
+        picker.LazyPick(
+            lambda left, right: 1.0 - similarity(left, right),
+            len(ordered_molecules),
+            1.0 - threshold,
+        )
+    )
+    selection_done = time.perf_counter()
+    centroid_set = set(centroids)
+    ordered_labels = [-1] * len(ordered_molecules)
+    for cluster_id, centroid in enumerate(centroids):
+        ordered_labels[centroid] = cluster_id
+    for molecule_index in range(len(ordered_molecules)):
+        if molecule_index in centroid_set:
+            continue
+        ordered_labels[molecule_index] = max(
+            range(len(centroids)),
+            key=lambda cluster_id: similarity(centroids[cluster_id], molecule_index),
+        )
+
+    labels = [-1] * len(molecules)
+    for (input_index, _), label in zip(indexed, ordered_labels, strict=True):
+        labels[input_index] = label
+    assignment_done = time.perf_counter()
+    if phase_timings is not None:
+        phase_timings.append(
+            {
+                "ordering_time_ms": (ordering_done - start) * 1000.0,
+                "descriptor_time_ms": (descriptors_done - ordering_done) * 1000.0,
+                "centroid_selection_time_ms": (selection_done - descriptors_done) * 1000.0,
+                "nearest_assignment_time_ms": (assignment_done - selection_done) * 1000.0,
+            }
+        )
+    return labels
+
+
 def _cluster_agreement(left, right):
     agreements = 0
     comparisons = 0
@@ -175,7 +260,7 @@ def _base_row(args, operation, method, count, timing, molecules, status="ok"):
         "operation": operation,
         "status": status,
         "timing_scope": "from_preparsed_rdkit_molecules",
-        "input_file": str(args.smiles),
+        "input_file": str(args.sdf or args.smiles),
         "num_mols": len(molecules),
         "num_pairs": count if is_pair else "N/A",
         "mols_processed": count if not is_pair else "N/A",
@@ -184,10 +269,7 @@ def _base_row(args, operation, method, count, timing, molecules, status="ok"):
         "pairs_per_second": (
             round(throughput_per_s(count, timing.mean_ms), 2) if is_pair and timing is not None else ""
         ),
-        "molecules_per_second": (
-            round(throughput_per_s(count, timing.mean_ms), 2) if not is_pair and timing is not None else ""
-        ),
-        "vs_ligand_clustering_cpu_throughput_ratio": "",
+        "vs_ligand_clustering_cpu_pair_throughput_ratio": "",
         "threshold": args.threshold,
         "max_path_length": args.max_path_length,
         "histogram_bins": args.histogram_bins if is_nvmolkit else "",
@@ -269,7 +351,7 @@ def _benchmark_pairs(args, molecules, rdkit_reference, ligand_clustering_cpu_ref
     _set_pair_comparison(rows, outputs, "ligand_clustering_cpu", "vs_ligand_clustering_cpu")
     by_method = {row["method"]: row for row in rows}
     if "nvmolkit_gpu" in outputs and "ligand_clustering_cpu" in outputs:
-        by_method["nvmolkit_gpu"]["vs_ligand_clustering_cpu_throughput_ratio"] = round(
+        by_method["nvmolkit_gpu"]["vs_ligand_clustering_cpu_pair_throughput_ratio"] = round(
             by_method["nvmolkit_gpu"]["pairs_per_second"] / by_method["ligand_clustering_cpu"]["pairs_per_second"],
             4,
         )
@@ -352,9 +434,111 @@ def _benchmark_clustering(args, molecules, ligand_clustering_cpu_reference):
         agreement = _cluster_agreement(outputs["nvmolkit_gpu"], outputs["ligand_clustering_cpu"])
         for method in ("nvmolkit_gpu", "ligand_clustering_cpu"):
             by_method[method]["vs_ligand_clustering_cpu_cluster_agreement"] = agreement
-        by_method["nvmolkit_gpu"]["vs_ligand_clustering_cpu_throughput_ratio"] = round(
-            by_method["nvmolkit_gpu"]["molecules_per_second"]
-            / by_method["ligand_clustering_cpu"]["molecules_per_second"],
+        by_method["nvmolkit_gpu"]["vs_ligand_clustering_cpu_time_speedup"] = round(
+            by_method["ligand_clustering_cpu"]["time_ms"]
+            / by_method["nvmolkit_gpu"]["time_ms"],
+            4,
+        )
+    return rows
+
+
+def _benchmark_dise(args, molecules, rdkit_reference):
+    rows = []
+    outputs = {}
+    ordering_scope = "activity_order" if args.sort_tag else "input_order"
+    timing_scope = f"{ordering_scope}+aap_descriptors+centroid_selection+nearest_assignment"
+    if not args.no_nvmolkit:
+        gpu_labels = None
+
+        def run_gpu_workflow():
+            nonlocal gpu_labels
+            indexed = _priority_order(molecules, args.sort_tag)
+            ordered_labels = aap_dise_clustering(
+                [molecule for _, molecule in indexed],
+                threshold=args.threshold,
+                **_aap_kwargs(args),
+            )
+            gpu_labels = [-1] * len(molecules)
+            for (input_index, _), label in zip(indexed, ordered_labels, strict=True):
+                gpu_labels[input_index] = label
+
+        timing, _ = _time_callable(
+            run_gpu_workflow,
+            args.runs,
+            args.warmup,
+            gpu_sync=True,
+        )
+        row = _base_row(args, "dise", "nvmolkit_gpu", len(molecules), timing, molecules)
+        row["timing_scope"] = timing_scope
+        row["num_clusters"] = len(set(gpu_labels))
+        row["priority_sort"] = args.sort_tag or "none"
+        rows.append(row)
+        outputs["nvmolkit_gpu"] = gpu_labels
+    if args.no_rdkit:
+        return rows
+    if rdkit_reference is None:
+        rows.append(
+            _base_row(
+                args,
+                "dise",
+                "rdkit_contrib_aap_leader",
+                len(molecules),
+                None,
+                molecules,
+                "unavailable",
+            )
+        )
+    elif len(molecules) > args.rdkit_workflow_max_size:
+        rows.append(
+            _base_row(
+                args,
+                "dise",
+                "rdkit_contrib_aap_leader",
+                len(molecules),
+                None,
+                molecules,
+                "size_limit",
+            )
+        )
+    else:
+        phase_timings = []
+        timing, labels = _time_callable(
+            lambda: _rdkit_aap_dise_cluster(
+                molecules,
+                args.threshold,
+                args.max_path_length,
+                args.sort_tag,
+                rdkit_reference,
+                phase_timings,
+            ),
+            args.runs,
+            args.warmup,
+        )
+        row = _base_row(
+            args,
+            "dise",
+            "rdkit_contrib_aap_leader",
+            len(molecules),
+            timing,
+            molecules,
+        )
+        row["timing_scope"] = timing_scope
+        row["num_clusters"] = len(set(labels))
+        row["priority_sort"] = args.sort_tag or "none"
+        measured_phases = phase_timings[-args.runs :]
+        for field in measured_phases[0]:
+            row[field] = round(float(np.mean([sample[field] for sample in measured_phases])), 4)
+        rows.append(row)
+        outputs["rdkit_contrib_aap_leader"] = labels
+
+    by_method = {row["method"]: row for row in rows}
+    if "nvmolkit_gpu" in outputs and "rdkit_contrib_aap_leader" in outputs:
+        agreement = _cluster_agreement(outputs["nvmolkit_gpu"], outputs["rdkit_contrib_aap_leader"])
+        for method in ("nvmolkit_gpu", "rdkit_contrib_aap_leader"):
+            by_method[method]["vs_rdkit_cluster_agreement"] = agreement
+        by_method["nvmolkit_gpu"]["vs_rdkit_time_speedup"] = round(
+            by_method["rdkit_contrib_aap_leader"]["time_ms"]
+            / by_method["nvmolkit_gpu"]["time_ms"],
             4,
         )
     return rows
@@ -363,11 +547,16 @@ def _benchmark_clustering(args, molecules, ligand_clustering_cpu_reference):
 def _build_parser():
     parser = argparse.ArgumentParser(description="AAP similarity and directed sphere-exclusion clustering benchmark")
     parser.add_argument("--smiles", "-s", default=str(DEFAULT_INPUT), help="Input SMILES file")
+    parser.add_argument("--sdf", help="Input SDF file; overrides --smiles")
     parser.add_argument("--sizes", type=int, nargs="+", default=[32, 128, 512], help="Clustering sizes")
     parser.add_argument("--num_pairs", type=int, default=128, help="Random molecule pairs for similarity timing")
     parser.add_argument("--runs", "-r", type=int, default=3, help="Number of timing runs")
     parser.add_argument("--seed", type=int, default=42, help="Molecule and pair sampling seed")
     parser.add_argument("--threshold", type=float, default=0.217, help="Inclusive clustering similarity threshold")
+    parser.add_argument(
+        "--sort-tag",
+        help="Numeric priority property cleaned and sorted ascending inside timed DISE runs",
+    )
     parser.add_argument("--max_atoms", type=int, default=64, help="Maximum atoms retained, at most 64")
     parser.add_argument("--max_path_length", type=int, default=7)
     parser.add_argument("--histogram_bins", type=int, default=2048)
@@ -380,7 +569,17 @@ def _build_parser():
         default=128,
         help="Largest clustering size run with ligand_clustering CPU",
     )
-    parser.add_argument("--operation", choices=["similarity", "clustering", "both"], default="both")
+    parser.add_argument(
+        "--rdkit-workflow-max-size",
+        type=int,
+        default=512,
+        help="Largest full RDKit AAP+DISE workflow size (default: 512)",
+    )
+    parser.add_argument(
+        "--operation",
+        choices=["similarity", "clustering", "dise", "both", "all"],
+        default="both",
+    )
     parser.add_argument("--warmup", action="store_true", dest="warmup", help="Perform one warmup run (default)")
     parser.add_argument("--no_warmup", action="store_false", dest="warmup", help="Skip warmup")
     parser.set_defaults(warmup=True)
@@ -412,6 +611,9 @@ def main():
     if args.cpu_max_size < 0:
         print("Error: --cpu-max-size must be non-negative", file=sys.stderr)
         sys.exit(1)
+    if args.rdkit_workflow_max_size < 0:
+        print("Error: --rdkit-workflow-max-size must be non-negative", file=sys.stderr)
+        sys.exit(1)
     if args.no_nvmolkit and args.no_rdkit and args.no_ligand_clustering_cpu:
         print("Error: cannot disable every benchmark backend", file=sys.stderr)
         sys.exit(1)
@@ -427,7 +629,10 @@ def main():
 
     largest_size = max(args.sizes)
     requested = max(largest_size * 3, args.num_pairs * 2)
-    loaded = load_smiles(args.smiles, max_count=requested, sanitize=True, seed=args.seed)
+    if args.sdf:
+        loaded = load_sdf(args.sdf, max_count=requested, sanitize=True, seed=args.seed)
+    else:
+        loaded = load_smiles(args.smiles, max_count=requested, sanitize=True, seed=args.seed)
     molecules = _filter_supported_molecules(loaded, args.max_atoms)
     if len(molecules) < max(largest_size, 2):
         print(
@@ -437,12 +642,13 @@ def main():
         sys.exit(1)
 
     print("\nConfiguration:")
-    print(f"  Input: {args.smiles}")
+    print(f"  Input: {args.sdf or args.smiles}")
     print(f"  Retained molecules: {len(molecules)}")
     print(f"  Clustering sizes: {args.sizes}")
     print(f"  Pair count: {args.num_pairs}")
     print(f"  Runs: {args.runs}")
     print(f"  Threshold: {args.threshold}")
+    print(f"  DISE priority sort: {args.sort_tag or 'none'}")
     print(f"  Run nvMolKit GPU: {not args.no_nvmolkit}")
     print(f"  Run RDKit Contrib similarity: {rdkit_reference is not None and not args.no_rdkit}")
     print(
@@ -451,7 +657,7 @@ def main():
     )
 
     rows = []
-    if args.operation in ("similarity", "both"):
+    if args.operation in ("similarity", "both", "all"):
         print(f"\nBenchmarking {args.num_pairs} pair similarities...")
         rows.extend(
             _benchmark_pairs(
@@ -461,10 +667,14 @@ def main():
                 ligand_clustering_cpu_reference,
             )
         )
-    if args.operation in ("clustering", "both"):
+    if args.operation in ("clustering", "both", "all"):
         for size in args.sizes:
             print(f"\nBenchmarking clustering for {size} molecules...")
             rows.extend(_benchmark_clustering(args, molecules[:size], ligand_clustering_cpu_reference))
+    if args.operation in ("dise", "all"):
+        for size in args.sizes:
+            print(f"\nBenchmarking complete RDKit AAP+DISE workflow for {size} molecules...")
+            rows.extend(_benchmark_dise(args, molecules[:size], rdkit_reference))
 
     if not rows:
         print("Error: no benchmark rows were produced", file=sys.stderr)

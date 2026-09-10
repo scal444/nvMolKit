@@ -99,6 +99,32 @@ BOOST_PYTHON_MODULE(_clustering) {
      boost::python::arg("stream")               = 0));
 
   boost::python::def(
+    "aap_dise_clustering",
+    +[](const boost::python::list& molecules,
+        const float                threshold,
+        const int                  maxPathLength,
+        const int                  histogramBins,
+        const int                  sinkhornIterations,
+        const float                sinkhornTemperature,
+        std::uintptr_t             streamPtr) {
+      auto streamOpt = nvMolKit::acquireExternalStream(streamPtr);
+      if (!streamOpt) {
+        throw std::invalid_argument("Invalid CUDA stream");
+      }
+      const auto                             extracted = nvMolKit::extractMolecules(molecules);
+      const std::vector<const RDKit::ROMol*> mols(extracted.begin(), extracted.end());
+      const nvMolKit::AapOptions options{maxPathLength, histogramBins, sinkhornIterations, sinkhornTemperature};
+      return nvMolKit::vectorToList(nvMolKit::aapDiseClustering(mols, threshold, options, *streamOpt));
+    },
+    (boost::python::arg("molecules"),
+     boost::python::arg("threshold")            = 0.217F,
+     boost::python::arg("max_path_length")      = 7,
+     boost::python::arg("histogram_bins")       = 2048,
+     boost::python::arg("sinkhorn_iterations")  = 8,
+     boost::python::arg("sinkhorn_temperature") = 0.104F,
+     boost::python::arg("stream")               = 0));
+
+  boost::python::def(
     "butina",
     +[](const boost::python::dict& distanceMatrix,
         const double               cutoff,

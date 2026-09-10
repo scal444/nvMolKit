@@ -48,6 +48,12 @@ std::vector<int> aapSimilarityClustering(const std::vector<const RDKit::ROMol*>&
                                          const AapOptions&                       options   = {},
                                          cudaStream_t                            stream    = nullptr);
 
+/** Run full two-stage DISE: select centroids, then assign to the nearest centroid. */
+std::vector<int> aapDiseClustering(const std::vector<const RDKit::ROMol*>& molecules,
+                                   float                                   threshold = 0.217F,
+                                   const AapOptions&                       options   = {},
+                                   cudaStream_t                            stream    = nullptr);
+
 }  // namespace nvMolKit
 
 #endif  // NVMOLKIT_AAP_H
