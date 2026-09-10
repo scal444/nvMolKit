@@ -471,4 +471,100 @@ std::vector<int> aapSimilarityClustering(const std::vector<const RDKit::ROMol*>&
   return remapClustersBySize(labels, clusterId);
 }
 
+std::vector<int> aapDiseClustering(const std::vector<const RDKit::ROMol*>& molecules,
+                                   const float                             threshold,
+                                   const AapOptions&                       options,
+                                   cudaStream_t                            stream) {
+  validateOptions(options);
+  if (!(threshold >= 0.0F && threshold <= 1.0F)) {
+    throw std::invalid_argument("threshold must be between 0 and 1");
+  }
+  if (molecules.empty()) {
+    return {};
+  }
+
+  const auto                 hostDescriptors = buildDescriptors(molecules, options);
+  const AapDeviceDescriptors descriptors(hostDescriptors, stream);
+  const int                  numMolecules = static_cast<int>(molecules.size());
+  AsyncDeviceVector<int>     candidates(numMolecules, stream);
+  AsyncDeviceVector<float>   output(numMolecules, stream);
+  PinnedHostVector<int>      candidateHost(numMolecules);
+  PinnedHostVector<float>    outputHost(numMolecules);
+  std::vector<int>           selectionLabels(numMolecules, -1);
+  std::vector<int>           centroids;
+
+  for (int centroid = 0; centroid < numMolecules; ++centroid) {
+    if (selectionLabels[centroid] >= 0) {
+      continue;
+    }
+    const int clusterId       = static_cast<int>(centroids.size());
+    selectionLabels[centroid] = clusterId;
+    centroids.push_back(centroid);
+    int candidateCount = 0;
+    for (int moleculeIdx = 0; moleculeIdx < numMolecules; ++moleculeIdx) {
+      if (selectionLabels[moleculeIdx] < 0) {
+        if (sameMoleculeDescriptor(hostDescriptors, centroid, moleculeIdx)) {
+          selectionLabels[moleculeIdx] = clusterId;
+        } else {
+          candidateHost[candidateCount++] = moleculeIdx;
+        }
+      }
+    }
+    if (candidateCount > 0) {
+      candidates.copyFromHost(candidateHost.data(), candidateCount);
+      launchSimilarity(descriptors, candidates, candidateCount, centroid, options, output, stream);
+      output.copyToHost(outputHost.data(), candidateCount);
+      cudaCheckError(cudaStreamSynchronize(stream));
+      for (int position = 0; position < candidateCount; ++position) {
+        if (outputHost[position] >= threshold) {
+          selectionLabels[candidateHost[position]] = clusterId;
+        }
+      }
+    }
+  }
+
+  std::vector<std::uint8_t> isCentroid(numMolecules, 0);
+  std::vector<int>          labels(numMolecules, -1);
+  std::vector<float>        bestSimilarity(numMolecules, -1.0F);
+  for (int clusterId = 0; clusterId < static_cast<int>(centroids.size()); ++clusterId) {
+    isCentroid[centroids[clusterId]]     = 1;
+    labels[centroids[clusterId]]         = clusterId;
+    bestSimilarity[centroids[clusterId]] = 1.0F;
+  }
+
+  for (int clusterId = 0; clusterId < static_cast<int>(centroids.size()); ++clusterId) {
+    const int centroid       = centroids[clusterId];
+    int       candidateCount = 0;
+    for (int moleculeIdx = 0; moleculeIdx < numMolecules; ++moleculeIdx) {
+      if (isCentroid[moleculeIdx]) {
+        continue;
+      }
+      if (sameMoleculeDescriptor(hostDescriptors, centroid, moleculeIdx)) {
+        if (1.0F > bestSimilarity[moleculeIdx]) {
+          bestSimilarity[moleculeIdx] = 1.0F;
+          labels[moleculeIdx]         = clusterId;
+        }
+      } else {
+        candidateHost[candidateCount++] = moleculeIdx;
+      }
+    }
+    if (candidateCount == 0) {
+      continue;
+    }
+    candidates.copyFromHost(candidateHost.data(), candidateCount);
+    launchSimilarity(descriptors, candidates, candidateCount, centroid, options, output, stream);
+    output.copyToHost(outputHost.data(), candidateCount);
+    cudaCheckError(cudaStreamSynchronize(stream));
+    for (int position = 0; position < candidateCount; ++position) {
+      const int moleculeIdx = candidateHost[position];
+      if (outputHost[position] > bestSimilarity[moleculeIdx]) {
+        bestSimilarity[moleculeIdx] = outputHost[position];
+        labels[moleculeIdx]         = clusterId;
+      }
+    }
+  }
+
+  return remapClustersBySize(labels, static_cast<int>(centroids.size()));
+}
+
 }  // namespace nvMolKit

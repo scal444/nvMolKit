@@ -9,11 +9,14 @@ import math
 import random
 import sys
 import warnings
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
 from bench_utils import (
+    TimingResult,
     add_backend_selection_args,
+    load_sdf,
     load_smiles,
     print_csv_rows,
     throughput_per_s,
@@ -22,7 +25,13 @@ from bench_utils import (
 )
 from rdkit import Chem
 
-from nvmolkit.clustering import aap_similarity, aap_similarity_clustering
+from nvmolkit.clustering import aap_dise_clustering, aap_similarity, aap_similarity_clustering
+from reference.gcheminfo_aap.gcheminfo_aap import (
+    compile_runner as compile_gcheminfo_runner,
+    read_assignments as read_gcheminfo_assignments,
+    run_benchmark as run_gcheminfo_benchmark,
+    write_graphs as write_gcheminfo_graphs,
+)
 
 
 SUPPORTED_BOND_TYPES = {
@@ -137,13 +146,20 @@ def _ligand_clustering_cpu_cluster(molecules, threshold, max_path_length, refere
 
 
 def _cluster_agreement(left, right):
-    agreements = 0
-    comparisons = 0
-    for first in range(len(left)):
-        for second in range(first + 1, len(left)):
-            agreements += (left[first] == left[second]) == (right[first] == right[second])
-            comparisons += 1
-    return agreements / comparisons if comparisons else 1.0
+    if len(left) != len(right):
+        raise ValueError("cluster label vectors must have equal length")
+    total_pairs = len(left) * (len(left) - 1) // 2
+    if total_pairs == 0:
+        return 1.0
+    left_counts = Counter(left)
+    right_counts = Counter(right)
+    joint_counts = Counter(zip(left, right, strict=True))
+    choose_two = lambda count: count * (count - 1) // 2
+    same_left = sum(choose_two(count) for count in left_counts.values())
+    same_right = sum(choose_two(count) for count in right_counts.values())
+    same_both = sum(choose_two(count) for count in joint_counts.values())
+    different_both = total_pairs - same_left - same_right + same_both
+    return (same_both + different_both) / total_pairs
 
 
 def _time_callable(function, runs, warmup, gpu_sync=False):
@@ -169,13 +185,13 @@ def _aap_kwargs(args):
 def _base_row(args, operation, method, count, timing, molecules, status="ok"):
     atom_counts = [molecule.GetNumAtoms() for molecule in molecules]
     is_pair = operation == "similarity"
-    is_nvmolkit = method == "nvmolkit_gpu"
+    is_nvmolkit = method.startswith("nvmolkit_gpu")
     return {
         "method": method,
         "operation": operation,
         "status": status,
         "timing_scope": "from_preparsed_rdkit_molecules",
-        "input_file": str(args.smiles),
+        "input_file": str(args.sdf or args.smiles),
         "num_mols": len(molecules),
         "num_pairs": count if is_pair else "N/A",
         "mols_processed": count if not is_pair else "N/A",
@@ -360,9 +376,143 @@ def _benchmark_clustering(args, molecules, ligand_clustering_cpu_reference):
     return rows
 
 
+def _parse_gcheminfo_benchmark(stdout):
+    samples = []
+    phase_samples = {
+        "ordering_ms": [],
+        "descriptors_ms": [],
+        "selection_ms": [],
+        "assignment_ms": [],
+    }
+    centroids = None
+    for line in stdout.splitlines():
+        if not line.startswith("BENCHMARK "):
+            continue
+        values = dict(field.split("=", 1) for field in line.split()[1:])
+        samples.append(float(values["workflow_ms"]))
+        for field in phase_samples:
+            phase_samples[field].append(float(values[field]))
+        centroids = int(values["centroids"])
+    if len(samples) == 0:
+        raise RuntimeError(f"Java AAP benchmark produced no measured samples:\n{stdout}")
+    return TimingResult(times_ms=samples), phase_samples, centroids
+
+
+def _benchmark_dise(args, molecules, java_classpath):
+    kwargs = _aap_kwargs(args)
+    rows = []
+    outputs = {}
+
+    def ordered_molecules_with_indices():
+        indexed = list(enumerate(molecules))
+        if args.sort_tag:
+            def priority(item):
+                value = (
+                    item[1].GetProp(args.sort_tag).replace("<", "")
+                    if item[1].HasProp(args.sort_tag)
+                    else ""
+                )
+                return (not bool(value), float(value) if value else 0.0)
+
+            indexed.sort(key=priority)
+        return indexed
+
+    if not args.no_nvmolkit:
+        gpu_labels = None
+
+        def run_gpu_workflow():
+            nonlocal gpu_labels
+            indexed = ordered_molecules_with_indices()
+            ordered_labels = aap_dise_clustering(
+                [molecule for _, molecule in indexed], threshold=args.threshold, **kwargs
+            )
+            gpu_labels = [None] * len(molecules)
+            for (input_index, _), label in zip(indexed, ordered_labels, strict=True):
+                gpu_labels[input_index] = label
+
+        timing, labels = _time_callable(
+            run_gpu_workflow,
+            args.runs,
+            args.warmup,
+            gpu_sync=True,
+        )
+        labels = gpu_labels
+        outputs["nvmolkit_gpu_dise"] = gpu_labels
+        row = _base_row(args, "dise", "nvmolkit_gpu_dise", len(molecules), timing, molecules)
+        row["num_clusters"] = len(set(labels))
+        rows.append(row)
+
+    if java_classpath is not None:
+        work_dir = Path(args.gcheminfo_java_work_dir)
+        work_dir.mkdir(parents=True, exist_ok=True)
+        graph_path = work_dir / f"gcheminfo_{len(molecules)}_graphs.tsv"
+        assignment_path = work_dir / f"gcheminfo_{len(molecules)}_assignments.tsv"
+        # Molecular conversion is shared preparation and intentionally untimed.
+        priorities = (
+            [
+                molecule.GetProp(args.sort_tag) if molecule.HasProp(args.sort_tag) else ""
+                for molecule in molecules
+            ]
+            if args.sort_tag
+            else None
+        )
+        write_gcheminfo_graphs(molecules, graph_path, priorities=priorities)
+        completed = run_gcheminfo_benchmark(
+            graph_path,
+            assignment_path,
+            classpath=java_classpath,
+            threshold=args.threshold,
+            max_path_length=args.max_path_length,
+            threads=args.gcheminfo_java_threads,
+            warmups=1 if args.warmup else 0,
+            runs=args.runs,
+            order_by_priority=bool(args.sort_tag),
+        )
+        timing, phases, centroids = _parse_gcheminfo_benchmark(completed.stdout)
+        assignment_rows = read_gcheminfo_assignments(assignment_path)
+        labels = [None] * len(molecules)
+        for assignment in assignment_rows:
+            labels[int(assignment["input_index"])] = int(assignment["cluster_index"])
+        outputs["gcheminfo_java_default8_dise"] = labels
+        row = _base_row(
+            args,
+            "dise",
+            "gcheminfo_java_default8_dise",
+            len(molecules),
+            timing,
+            molecules,
+        )
+        row["timing_scope"] = "from_preparsed_molecular_graphs"
+        row["ordering_time_ms"] = round(float(np.mean(phases["ordering_ms"])), 4)
+        row["num_clusters"] = centroids
+        row["descriptor_time_ms"] = round(float(np.mean(phases["descriptors_ms"])), 4)
+        row["centroid_selection_time_ms"] = round(float(np.mean(phases["selection_ms"])), 4)
+        row["nearest_assignment_time_ms"] = round(float(np.mean(phases["assignment_ms"])), 4)
+        rows.append(row)
+
+    if "nvmolkit_gpu_dise" in outputs and "gcheminfo_java_default8_dise" in outputs:
+        agreement = _cluster_agreement(
+            outputs["nvmolkit_gpu_dise"], outputs["gcheminfo_java_default8_dise"]
+        )
+        by_method = {row["method"]: row for row in rows}
+        for method in outputs:
+            by_method[method]["vs_gcheminfo_java_cluster_agreement"] = agreement
+        by_method["nvmolkit_gpu_dise"]["vs_gcheminfo_java_throughput_ratio"] = round(
+            by_method["nvmolkit_gpu_dise"]["molecules_per_second"]
+            / by_method["gcheminfo_java_default8_dise"]["molecules_per_second"],
+            4,
+        )
+    return rows
+
+
 def _build_parser():
     parser = argparse.ArgumentParser(description="AAP similarity and directed sphere-exclusion clustering benchmark")
     parser.add_argument("--smiles", "-s", default=str(DEFAULT_INPUT), help="Input SMILES file")
+    parser.add_argument("--sdf", help="Input SDF file; overrides --smiles")
+    parser.add_argument(
+        "--sort-tag",
+        help="Numeric priority property sorted ascending inside each timed DISE workflow",
+    )
     parser.add_argument("--sizes", type=int, nargs="+", default=[32, 128, 512], help="Clustering sizes")
     parser.add_argument("--num_pairs", type=int, default=128, help="Random molecule pairs for similarity timing")
     parser.add_argument("--runs", "-r", type=int, default=3, help="Number of timing runs")
@@ -380,7 +530,12 @@ def _build_parser():
         default=128,
         help="Largest clustering size run with ligand_clustering CPU",
     )
-    parser.add_argument("--operation", choices=["similarity", "clustering", "both"], default="both")
+    parser.add_argument(
+        "--operation",
+        choices=["similarity", "clustering", "dise", "both", "all"],
+        default="both",
+        help="'clustering' is selection-only; 'dise' adds nearest-centroid reassignment",
+    )
     parser.add_argument("--warmup", action="store_true", dest="warmup", help="Perform one warmup run (default)")
     parser.add_argument("--no_warmup", action="store_false", dest="warmup", help="Skip warmup")
     parser.set_defaults(warmup=True)
@@ -390,6 +545,22 @@ def _build_parser():
         "--no_ligand_clustering_cpu",
         action="store_true",
         help="Skip the ligand_clustering CPU reference",
+    )
+    parser.add_argument(
+        "--gcheminfo-java",
+        action="store_true",
+        help="Run the validated gCheminfoCommands DEFAULT8 full-DISE Java reference",
+    )
+    parser.add_argument(
+        "--gcheminfo-java-threads",
+        type=int,
+        default=2,
+        help="Threads for the Java nearest-centroid stage (selection stays sequential)",
+    )
+    parser.add_argument(
+        "--gcheminfo-java-work-dir",
+        default="aap_gcheminfo_java_bench",
+        help="Directory for untimed Java graph and assignment interchange files",
     )
     parser.add_argument("--output", "-o", help="Optional path to write CSV results")
     return parser
@@ -412,6 +583,9 @@ def main():
     if args.cpu_max_size < 0:
         print("Error: --cpu-max-size must be non-negative", file=sys.stderr)
         sys.exit(1)
+    if args.gcheminfo_java_threads <= 0:
+        print("Error: --gcheminfo-java-threads must be positive", file=sys.stderr)
+        sys.exit(1)
     if args.no_nvmolkit and args.no_rdkit and args.no_ligand_clustering_cpu:
         print("Error: cannot disable every benchmark backend", file=sys.stderr)
         sys.exit(1)
@@ -420,6 +594,11 @@ def main():
     ligand_clustering_cpu_reference = (
         None if args.no_ligand_clustering_cpu else _load_ligand_clustering_cpu_reference()
     )
+    java_classpath = None
+    if args.gcheminfo_java:
+        java_classpath = compile_gcheminfo_runner(
+            Path(args.gcheminfo_java_work_dir) / "classes"
+        )
     if rdkit_reference is None and not args.no_rdkit:
         print("RDKit Contrib AAP unavailable; its timing fields will be empty")
     if ligand_clustering_cpu_reference is None and not args.no_ligand_clustering_cpu:
@@ -427,7 +606,10 @@ def main():
 
     largest_size = max(args.sizes)
     requested = max(largest_size * 3, args.num_pairs * 2)
-    loaded = load_smiles(args.smiles, max_count=requested, sanitize=True, seed=args.seed)
+    if args.sdf:
+        loaded = load_sdf(args.sdf, max_count=requested, sanitize=True, seed=args.seed)
+    else:
+        loaded = load_smiles(args.smiles, max_count=requested, sanitize=True, seed=args.seed)
     molecules = _filter_supported_molecules(loaded, args.max_atoms)
     if len(molecules) < max(largest_size, 2):
         print(
@@ -437,7 +619,8 @@ def main():
         sys.exit(1)
 
     print("\nConfiguration:")
-    print(f"  Input: {args.smiles}")
+    print(f"  Input: {args.sdf or args.smiles}")
+    print(f"  Timed priority sort: {args.sort_tag or 'none'}")
     print(f"  Retained molecules: {len(molecules)}")
     print(f"  Clustering sizes: {args.sizes}")
     print(f"  Pair count: {args.num_pairs}")
@@ -449,9 +632,10 @@ def main():
         "  Run ligand_clustering CPU: "
         f"{ligand_clustering_cpu_reference is not None and not args.no_ligand_clustering_cpu}"
     )
+    print(f"  Run gCheminfoCommands Java DISE: {args.gcheminfo_java}")
 
     rows = []
-    if args.operation in ("similarity", "both"):
+    if args.operation in ("similarity", "both", "all"):
         print(f"\nBenchmarking {args.num_pairs} pair similarities...")
         rows.extend(
             _benchmark_pairs(
@@ -461,10 +645,14 @@ def main():
                 ligand_clustering_cpu_reference,
             )
         )
-    if args.operation in ("clustering", "both"):
+    if args.operation in ("clustering", "both", "all"):
         for size in args.sizes:
             print(f"\nBenchmarking clustering for {size} molecules...")
             rows.extend(_benchmark_clustering(args, molecules[:size], ligand_clustering_cpu_reference))
+    if args.operation in ("dise", "all"):
+        for size in args.sizes:
+            print(f"\nBenchmarking full DISE workflow for {size} molecules...")
+            rows.extend(_benchmark_dise(args, molecules[:size], java_classpath))
 
     if not rows:
         print("Error: no benchmark rows were produced", file=sys.stderr)

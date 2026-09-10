@@ -9,7 +9,7 @@ import pytest
 import torch
 from rdkit import Chem
 
-from nvmolkit.clustering import aap_similarity, aap_similarity_clustering
+from nvmolkit.clustering import aap_dise_clustering, aap_similarity, aap_similarity_clustering
 
 
 def _mol(smiles):
@@ -150,6 +150,26 @@ def test_aap_clustering_handles_empty_singleton_and_generator_inputs():
     assert aap_similarity_clustering([ethanol]) == [1]
     molecules = (molecule for molecule in (ethanol, ethanol, benzene))
     assert aap_similarity_clustering(molecules, threshold=1.0) == [1, 1, 2]
+
+
+def test_aap_dise_clustering_handles_empty_singleton_duplicates_and_generator_inputs():
+    ethanol = _mol("CCO")
+    benzene = _mol("c1ccccc1")
+
+    assert aap_dise_clustering([]) == []
+    assert aap_dise_clustering([ethanol]) == [1]
+    molecules = (molecule for molecule in (ethanol, ethanol, benzene))
+    assert aap_dise_clustering(molecules, threshold=1.0) == [1, 1, 2]
+
+
+def test_aap_dise_reassigns_members_to_the_nearest_selected_centroid():
+    molecules = [_mol(smiles) for smiles in ("CCCC", "CCCO", "CCOC")]
+
+    # Butane initially claims propanol, while ethyl methyl ether becomes a centroid.
+    assert aap_similarity_clustering(molecules, threshold=0.2) == [1, 1, 2]
+    # The second stage moves propanol to the more similar ether centroid.
+    assert aap_similarity(molecules[2], molecules[1]) > aap_similarity(molecules[0], molecules[1])
+    assert aap_dise_clustering(molecules, threshold=0.2) == [2, 1, 1]
 
 
 def test_aap_clustering_threshold_is_inclusive():

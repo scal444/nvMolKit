@@ -125,6 +125,38 @@ def aap_similarity_clustering(
     )
 
 
+def aap_dise_clustering(
+    molecules,
+    threshold: float = 0.217,
+    *,
+    max_path_length: int = 7,
+    histogram_bins: int = 2048,
+    sinkhorn_iterations: int = 8,
+    sinkhorn_temperature: float = 0.104,
+    stream: torch.cuda.Stream | None = None,
+) -> list[int]:
+    """Run complete AAP directed sphere exclusion with nearest-seed assignment.
+
+    This follows the two-stage workflow from Gobbi et al. (2015): input-order
+    sphere exclusion first selects the centroids, then every non-centroid is
+    reassigned to its most similar centroid. Molecular parsing is performed by
+    the caller; descriptor construction and both clustering stages execute in
+    this call.
+    """
+    if not 0 <= threshold <= 1:
+        raise ValueError(f"threshold must be in [0, 1], got {threshold}")
+    active_stream = _resolve_cuda_stream(stream)
+    return _clustering.aap_dise_clustering(
+        list(molecules),
+        threshold,
+        max_path_length,
+        histogram_bins,
+        sinkhorn_iterations,
+        sinkhorn_temperature,
+        active_stream.cuda_stream,
+    )
+
+
 def _wrap_result(result, return_centroids: bool):
     if return_centroids:
         cluster_ids, centroids = result

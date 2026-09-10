@@ -48,6 +48,18 @@ std::vector<int> aapSimilarityClustering(const std::vector<const RDKit::ROMol*>&
                                          const AapOptions&                       options   = {},
                                          cudaStream_t                            stream    = nullptr);
 
+/**
+ * Run the complete two-stage DISE workflow used by Gobbi et al. (2015).
+ *
+ * Centroids are selected by input-order sphere exclusion, then every
+ * non-centroid molecule is reassigned to its most similar centroid. Returned
+ * cluster IDs use the same size-based numbering as aapSimilarityClustering.
+ */
+std::vector<int> aapDiseClustering(const std::vector<const RDKit::ROMol*>& molecules,
+                                   float                                   threshold = 0.217F,
+                                   const AapOptions&                       options   = {},
+                                   cudaStream_t                            stream    = nullptr);
+
 }  // namespace nvMolKit
 
 #endif  // NVMOLKIT_AAP_H
