@@ -74,6 +74,23 @@ def test_time_it_deadline_mode_reports_complete_progress():
     assert len({id(deadline) for deadline in seen_deadlines}) == 1
 
 
+def test_time_it_runs_setup_before_each_iteration_outside_timing(monkeypatch):
+    events = []
+    clock = iter([10.0, 10.25])
+
+    monkeypatch.setattr("bench_utils.timing.time.perf_counter", lambda: next(clock))
+
+    timing = time_it(
+        lambda: events.append("run"),
+        runs=1,
+        warmups=1,
+        setup=lambda: events.append("setup"),
+    )
+
+    assert events == ["setup", "run", "setup", "run"]
+    assert timing.times_ms == [250.0]
+
+
 def test_time_it_deadline_mode_retains_first_partial_sample():
     progress = [0]
     calls = [0]

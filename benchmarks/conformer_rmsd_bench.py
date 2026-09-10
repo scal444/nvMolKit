@@ -76,11 +76,15 @@ def bench_rdkit_batch(
     actual molecule count.
     """
     processed_count = [0]
+    run_mols: list[Chem.Mol] = []
+
+    def setup() -> None:
+        nonlocal run_mols
+        run_mols = [Chem.Mol(payload) for payload in payloads]
 
     def run(deadline: Deadline) -> None:
         processed_count[0] = 0
-        for payload in payloads:
-            mol = Chem.Mol(payload)
+        for mol in run_mols:
             AllChem.GetConformerRMSMatrix(mol, prealigned=False)
             processed_count[0] += 1
             if deadline.expired():
@@ -94,6 +98,7 @@ def bench_rdkit_batch(
         run,
         runs=runs,
         warmups=0,
+        setup=setup,
         max_seconds=max_seconds,
         progress_getter=lambda: processed_count[0],
         progress_target=len(payloads),

@@ -64,6 +64,7 @@ def time_it(
     warmups: int = 1,
     gpu_sync: bool = False,
     *,
+    setup: Callable[[], None] | None = None,
     max_seconds: float | None = None,
     progress_getter: Callable[[], int] | None = None,
     progress_target: int | None = None,
@@ -78,6 +79,8 @@ def time_it(
         warmups: Number of untimed warmup iterations.
         gpu_sync: If True, call torch.cuda.synchronize() before and after each
                   timed iteration to ensure GPU work is included in the measurement.
+        setup: Optional preparation called before every warmup and timed
+               iteration, outside the measured interval.
         max_seconds: Total wall-clock budget shared by all timed iterations.
                      ``0`` disables expiry while retaining progress tracking.
         progress_getter: Returns the work completed by the latest iteration.
@@ -114,6 +117,8 @@ def time_it(
 
     warmup_deadline = Deadline(0.0)
     for _ in range(warmups):
+        if setup is not None:
+            setup()
         if bounded:
             func(warmup_deadline)
         else:
@@ -127,6 +132,8 @@ def time_it(
     for run_idx in range(runs):
         if run_idx > 0 and deadline is not None and deadline.expired():
             break
+        if setup is not None:
+            setup()
         sync()
         t0 = time.perf_counter()
         if deadline is not None:
