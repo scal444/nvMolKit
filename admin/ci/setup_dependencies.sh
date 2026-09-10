@@ -44,6 +44,7 @@ conda activate base
 
 conda config --add channels conda-forge --add channels nvidia
 conda install -q -y \
+    mamba \
     "python=${PYTHON_VERSION}" \
     "rdkit=${RDKIT_VERSION}" \
     "gcc=13.*" \
