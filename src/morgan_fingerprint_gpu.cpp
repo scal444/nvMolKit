@@ -20,7 +20,9 @@
 #include <omp.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <vector>
 
@@ -32,6 +34,90 @@
 #include "src/utils/nvtx.h"
 #include "src/utils/openmp_helpers.h"
 namespace nvMolKit {
+
+namespace detail {
+
+namespace {
+
+std::uint8_t getMorganMoleculeBucket(const RDKit::ROMol& mol) {
+  const auto numAtoms = mol.getNumAtoms();
+  const auto numBonds = mol.getNumBonds();
+  return numAtoms >= 128 || numBonds >= 128 ? 3 :
+         numAtoms < 32 && numBonds < 32     ? 0 :
+         numAtoms < 64 && numBonds < 64     ? 1 :
+                                              2;
+}
+
+}  // namespace
+
+MorganMoleculeBuckets classifyMorganMolecules(const std::vector<const RDKit::ROMol*>& mols, const int numThreads) {
+  constexpr size_t kNumBuckets           = 4;
+  constexpr size_t kMinParallelMolecules = 4096;
+
+  const size_t numMols = mols.size();
+  if (numMols == 0) {
+    return {};
+  }
+
+  MorganMoleculeBuckets                      result;
+  std::array<std::vector<int>*, kNumBuckets> buckets = {&result.work32,
+                                                        &result.work64,
+                                                        &result.work128,
+                                                        &result.workLarge};
+  if (numMols < kMinParallelMolecules || numThreads <= 1) {
+    for (size_t molIdx = 0; molIdx < numMols; ++molIdx) {
+      buckets[getMorganMoleculeBucket(*mols[molIdx])]->push_back(static_cast<int>(molIdx));
+    }
+    return result;
+  }
+
+  const int                 requestedThreads = static_cast<int>(std::min(numMols, static_cast<size_t>(numThreads)));
+  std::vector<std::uint8_t> bucketByMolecule(numMols);
+  std::vector<std::array<size_t, kNumBuckets>> countsByThread(static_cast<size_t>(requestedThreads));
+  std::vector<std::array<size_t, kNumBuckets>> offsetsByThread(static_cast<size_t>(requestedThreads));
+
+#pragma omp parallel num_threads(requestedThreads) default(none) \
+  shared(mols, bucketByMolecule, countsByThread, offsetsByThread, buckets, numMols)
+  {
+    const int                       threadIdx = omp_get_thread_num();
+    const size_t                    teamSize  = static_cast<size_t>(omp_get_num_threads());
+    const size_t                    begin     = numMols * static_cast<size_t>(threadIdx) / teamSize;
+    const size_t                    end       = numMols * static_cast<size_t>(threadIdx + 1) / teamSize;
+    std::array<size_t, kNumBuckets> counts{};
+
+    for (size_t molIdx = begin; molIdx < end; ++molIdx) {
+      const std::uint8_t bucket = getMorganMoleculeBucket(*mols[molIdx]);
+      bucketByMolecule[molIdx]  = bucket;
+      ++counts[bucket];
+    }
+    countsByThread[static_cast<size_t>(threadIdx)] = counts;
+
+#pragma omp barrier
+#pragma omp single
+    {
+      std::array<size_t, kNumBuckets> bucketSizes{};
+      for (size_t currentThread = 0; currentThread < teamSize; ++currentThread) {
+        for (size_t bucket = 0; bucket < kNumBuckets; ++bucket) {
+          offsetsByThread[currentThread][bucket] = bucketSizes[bucket];
+          bucketSizes[bucket] += countsByThread[currentThread][bucket];
+        }
+      }
+      for (size_t bucket = 0; bucket < kNumBuckets; ++bucket) {
+        buckets[bucket]->resize(bucketSizes[bucket]);
+      }
+    }
+
+#pragma omp barrier
+    auto offsets = offsetsByThread[static_cast<size_t>(threadIdx)];
+    for (size_t molIdx = begin; molIdx < end; ++molIdx) {
+      const auto bucket                     = bucketByMolecule[molIdx];
+      (*buckets[bucket])[offsets[bucket]++] = static_cast<int>(molIdx);
+    }
+  }
+  return result;
+}
+
+}  // namespace detail
 
 namespace {
 
@@ -281,24 +367,13 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
   }
   range1.pop();
 
-  WorkBag         work32;
-  WorkBag         work64;
-  WorkBag         work128;
-  WorkBag         workLarge;
   ScopedNvtxRange rangeClassify("MorganFPClassifyMolecules");
-  for (int i = 0; i < mols.size(); i++) {
-    const auto& mol = *mols[i];
-    if (mol.getNumAtoms() < 32 && mol.getNumBonds() < 32) {
-      work32.push_back(i);
-    } else if (mol.getNumAtoms() < 64 && mol.getNumBonds() < 64) {
-      work64.push_back(i);
-    } else if (mol.getNumAtoms() < 128 && mol.getNumBonds() < 128) {
-      work128.push_back(i);
-    } else {
-      workLarge.push_back(i);
-    }
-  }
+  auto            buckets = detail::classifyMorganMolecules(mols, nThreadsActual);
   rangeClassify.pop();
+  WorkBag      work32(std::move(buckets.work32));
+  WorkBag      work64(std::move(buckets.work64));
+  WorkBag      work128(std::move(buckets.work128));
+  WorkBag      workLarge(std::move(buckets.workLarge));
   const size_t numThreads32    = (work32.size() + dispatchChunkSize - 1) / dispatchChunkSize;
   const size_t numThreads64    = (work64.size() + dispatchChunkSize - 1) / dispatchChunkSize;
   const size_t numThreads128   = (work128.size() + dispatchChunkSize - 1) / dispatchChunkSize;
