@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include <cassert>
+#include <type_traits>
 #include <vector>
 
 #include "src/forcefields/kernel_utils.cuh"
@@ -23,6 +24,16 @@
 namespace nvMolKit {
 namespace MMFF {
 namespace {
+template <typename ParameterScalar>
+void uploadWithPrecisionConversion(AsyncDeviceVector<ParameterScalar>& destination, const std::vector<double>& source) {
+  if constexpr (std::is_same_v<ParameterScalar, double>) {
+    destination.setFromVector(source);
+  } else {
+    static_assert(std::is_same_v<ParameterScalar, float>);
+    destination.setFromVector(std::vector<float>(source.begin(), source.end()));
+  }
+}
+
 template <typename ParameterScalar, typename TorsionScalar>
 EnergyForceContribsDevicePtrT<ParameterScalar, TorsionScalar> toPointerStruct(
   const EnergyForceContribsDeviceT<ParameterScalar, TorsionScalar>& src) {
@@ -257,32 +268,32 @@ void sendContribsAndIndicesToDeviceImpl(
   // Bond terms
   deviceContribs.bondTerms.idx1.setFromVector(hostContribs.bondTerms.idx1);
   deviceContribs.bondTerms.idx2.setFromVector(hostContribs.bondTerms.idx2);
-  deviceContribs.bondTerms.r0.setFromVector(hostContribs.bondTerms.r0);
-  deviceContribs.bondTerms.kb.setFromVector(hostContribs.bondTerms.kb);
+  uploadWithPrecisionConversion(deviceContribs.bondTerms.r0, hostContribs.bondTerms.r0);
+  uploadWithPrecisionConversion(deviceContribs.bondTerms.kb, hostContribs.bondTerms.kb);
   // Angle terms
   deviceContribs.angleTerms.idx1.setFromVector(hostContribs.angleTerms.idx1);
   deviceContribs.angleTerms.idx2.setFromVector(hostContribs.angleTerms.idx2);
   deviceContribs.angleTerms.idx3.setFromVector(hostContribs.angleTerms.idx3);
-  deviceContribs.angleTerms.theta0.setFromVector(hostContribs.angleTerms.theta0);
-  deviceContribs.angleTerms.ka.setFromVector(hostContribs.angleTerms.ka);
+  uploadWithPrecisionConversion(deviceContribs.angleTerms.theta0, hostContribs.angleTerms.theta0);
+  uploadWithPrecisionConversion(deviceContribs.angleTerms.ka, hostContribs.angleTerms.ka);
   deviceContribs.angleTerms.isLinear.setFromVector(hostContribs.angleTerms.isLinear);
 
   // Bend terms
   deviceContribs.bendTerms.idx1.setFromVector(hostContribs.bendTerms.idx1);
   deviceContribs.bendTerms.idx2.setFromVector(hostContribs.bendTerms.idx2);
   deviceContribs.bendTerms.idx3.setFromVector(hostContribs.bendTerms.idx3);
-  deviceContribs.bendTerms.theta0.setFromVector(hostContribs.bendTerms.theta0);
-  deviceContribs.bendTerms.restLen1.setFromVector(hostContribs.bendTerms.restLen1);
-  deviceContribs.bendTerms.restLen2.setFromVector(hostContribs.bendTerms.restLen2);
-  deviceContribs.bendTerms.forceConst1.setFromVector(hostContribs.bendTerms.forceConst1);
-  deviceContribs.bendTerms.forceConst2.setFromVector(hostContribs.bendTerms.forceConst2);
+  uploadWithPrecisionConversion(deviceContribs.bendTerms.theta0, hostContribs.bendTerms.theta0);
+  uploadWithPrecisionConversion(deviceContribs.bendTerms.restLen1, hostContribs.bendTerms.restLen1);
+  uploadWithPrecisionConversion(deviceContribs.bendTerms.restLen2, hostContribs.bendTerms.restLen2);
+  uploadWithPrecisionConversion(deviceContribs.bendTerms.forceConst1, hostContribs.bendTerms.forceConst1);
+  uploadWithPrecisionConversion(deviceContribs.bendTerms.forceConst2, hostContribs.bendTerms.forceConst2);
 
   // Oop terms
   deviceContribs.oopTerms.idx1.setFromVector(hostContribs.oopTerms.idx1);
   deviceContribs.oopTerms.idx2.setFromVector(hostContribs.oopTerms.idx2);
   deviceContribs.oopTerms.idx3.setFromVector(hostContribs.oopTerms.idx3);
   deviceContribs.oopTerms.idx4.setFromVector(hostContribs.oopTerms.idx4);
-  deviceContribs.oopTerms.koop.setFromVector(hostContribs.oopTerms.koop);
+  uploadWithPrecisionConversion(deviceContribs.oopTerms.koop, hostContribs.oopTerms.koop);
 
   // Torsion terms
   deviceContribs.torsionTerms.idx1.setFromVector(hostContribs.torsionTerms.idx1);
@@ -296,47 +307,54 @@ void sendContribsAndIndicesToDeviceImpl(
   // Vdw terms
   deviceContribs.vdwTerms.idx1.setFromVector(hostContribs.vdwTerms.idx1);
   deviceContribs.vdwTerms.idx2.setFromVector(hostContribs.vdwTerms.idx2);
-  deviceContribs.vdwTerms.R_ij_star.setFromVector(hostContribs.vdwTerms.R_ij_star);
-  deviceContribs.vdwTerms.wellDepth.setFromVector(hostContribs.vdwTerms.wellDepth);
+  uploadWithPrecisionConversion(deviceContribs.vdwTerms.R_ij_star, hostContribs.vdwTerms.R_ij_star);
+  uploadWithPrecisionConversion(deviceContribs.vdwTerms.wellDepth, hostContribs.vdwTerms.wellDepth);
 
   // Ele terms
   deviceContribs.eleTerms.idx1.setFromVector(hostContribs.eleTerms.idx1);
   deviceContribs.eleTerms.idx2.setFromVector(hostContribs.eleTerms.idx2);
-  deviceContribs.eleTerms.chargeTerm.setFromVector(hostContribs.eleTerms.chargeTerm);
+  uploadWithPrecisionConversion(deviceContribs.eleTerms.chargeTerm, hostContribs.eleTerms.chargeTerm);
   deviceContribs.eleTerms.dielModel.setFromVector(hostContribs.eleTerms.dielModel);
   deviceContribs.eleTerms.is1_4.setFromVector(hostContribs.eleTerms.is1_4);
 
   deviceContribs.distanceConstraintTerms.idx1.setFromVector(hostContribs.distanceConstraintTerms.idx1);
   deviceContribs.distanceConstraintTerms.idx2.setFromVector(hostContribs.distanceConstraintTerms.idx2);
-  deviceContribs.distanceConstraintTerms.minLen.setFromVector(hostContribs.distanceConstraintTerms.minLen);
-  deviceContribs.distanceConstraintTerms.maxLen.setFromVector(hostContribs.distanceConstraintTerms.maxLen);
-  deviceContribs.distanceConstraintTerms.forceConstant.setFromVector(
-    hostContribs.distanceConstraintTerms.forceConstant);
+  uploadWithPrecisionConversion(deviceContribs.distanceConstraintTerms.minLen,
+                                hostContribs.distanceConstraintTerms.minLen);
+  uploadWithPrecisionConversion(deviceContribs.distanceConstraintTerms.maxLen,
+                                hostContribs.distanceConstraintTerms.maxLen);
+  uploadWithPrecisionConversion(deviceContribs.distanceConstraintTerms.forceConstant,
+                                hostContribs.distanceConstraintTerms.forceConstant);
 
   deviceContribs.positionConstraintTerms.idx.setFromVector(hostContribs.positionConstraintTerms.idx);
-  deviceContribs.positionConstraintTerms.refX.setFromVector(hostContribs.positionConstraintTerms.refX);
-  deviceContribs.positionConstraintTerms.refY.setFromVector(hostContribs.positionConstraintTerms.refY);
-  deviceContribs.positionConstraintTerms.refZ.setFromVector(hostContribs.positionConstraintTerms.refZ);
-  deviceContribs.positionConstraintTerms.maxDispl.setFromVector(hostContribs.positionConstraintTerms.maxDispl);
-  deviceContribs.positionConstraintTerms.forceConstant.setFromVector(
-    hostContribs.positionConstraintTerms.forceConstant);
+  uploadWithPrecisionConversion(deviceContribs.positionConstraintTerms.refX, hostContribs.positionConstraintTerms.refX);
+  uploadWithPrecisionConversion(deviceContribs.positionConstraintTerms.refY, hostContribs.positionConstraintTerms.refY);
+  uploadWithPrecisionConversion(deviceContribs.positionConstraintTerms.refZ, hostContribs.positionConstraintTerms.refZ);
+  uploadWithPrecisionConversion(deviceContribs.positionConstraintTerms.maxDispl,
+                                hostContribs.positionConstraintTerms.maxDispl);
+  uploadWithPrecisionConversion(deviceContribs.positionConstraintTerms.forceConstant,
+                                hostContribs.positionConstraintTerms.forceConstant);
 
   deviceContribs.angleConstraintTerms.idx1.setFromVector(hostContribs.angleConstraintTerms.idx1);
   deviceContribs.angleConstraintTerms.idx2.setFromVector(hostContribs.angleConstraintTerms.idx2);
   deviceContribs.angleConstraintTerms.idx3.setFromVector(hostContribs.angleConstraintTerms.idx3);
-  deviceContribs.angleConstraintTerms.minAngleDeg.setFromVector(hostContribs.angleConstraintTerms.minAngleDeg);
-  deviceContribs.angleConstraintTerms.maxAngleDeg.setFromVector(hostContribs.angleConstraintTerms.maxAngleDeg);
-  deviceContribs.angleConstraintTerms.forceConstant.setFromVector(hostContribs.angleConstraintTerms.forceConstant);
+  uploadWithPrecisionConversion(deviceContribs.angleConstraintTerms.minAngleDeg,
+                                hostContribs.angleConstraintTerms.minAngleDeg);
+  uploadWithPrecisionConversion(deviceContribs.angleConstraintTerms.maxAngleDeg,
+                                hostContribs.angleConstraintTerms.maxAngleDeg);
+  uploadWithPrecisionConversion(deviceContribs.angleConstraintTerms.forceConstant,
+                                hostContribs.angleConstraintTerms.forceConstant);
 
   deviceContribs.torsionConstraintTerms.idx1.setFromVector(hostContribs.torsionConstraintTerms.idx1);
   deviceContribs.torsionConstraintTerms.idx2.setFromVector(hostContribs.torsionConstraintTerms.idx2);
   deviceContribs.torsionConstraintTerms.idx3.setFromVector(hostContribs.torsionConstraintTerms.idx3);
   deviceContribs.torsionConstraintTerms.idx4.setFromVector(hostContribs.torsionConstraintTerms.idx4);
-  deviceContribs.torsionConstraintTerms.minDihedralDeg.setFromVector(
-    hostContribs.torsionConstraintTerms.minDihedralDeg);
-  deviceContribs.torsionConstraintTerms.maxDihedralDeg.setFromVector(
-    hostContribs.torsionConstraintTerms.maxDihedralDeg);
-  deviceContribs.torsionConstraintTerms.forceConstant.setFromVector(hostContribs.torsionConstraintTerms.forceConstant);
+  uploadWithPrecisionConversion(deviceContribs.torsionConstraintTerms.minDihedralDeg,
+                                hostContribs.torsionConstraintTerms.minDihedralDeg);
+  uploadWithPrecisionConversion(deviceContribs.torsionConstraintTerms.maxDihedralDeg,
+                                hostContribs.torsionConstraintTerms.maxDihedralDeg);
+  uploadWithPrecisionConversion(deviceContribs.torsionConstraintTerms.forceConstant,
+                                hostContribs.torsionConstraintTerms.forceConstant);
 
   // Indices
   molSystemDevice.indices.atomStarts.setFromVector(molSystemHost.indices.atomStarts);

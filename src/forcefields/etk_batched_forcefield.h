@@ -20,7 +20,7 @@
 
 #include "src/forcefields/batched_forcefield.h"
 #include "src/forcefields/dist_geom.h"
-#include "src/precision_mode.h"
+#include "src/precision/precision_mode.h"
 
 namespace nvMolKit {
 
@@ -29,7 +29,7 @@ namespace nvMolKit {
 //! This wrapper exposes ETK host-side data through the generic
 //! `BatchedForcefield` interface so batched BFGS can evaluate ETK energies and
 //! gradients without ETK-specific dispatch in the minimizer.
-class ETKBatchedForcefield final : public BatchedForcefield {
+class ETKBatchedForcefield final : public BatchedForcefield, public SinglePrecisionBatchedForcefield {
  public:
   //! \brief Builds a generic batched-forcefield view over ETK host data.
   //! \param molSystemHost Flattened ETK host-side system description.
@@ -55,8 +55,8 @@ class ETKBatchedForcefield final : public BatchedForcefield {
                                const double*  positions,
                                const uint8_t* activeSystemMask = nullptr,
                                cudaStream_t   stream           = nullptr) override;
-  cudaError_t computeEnergyFloat(double*, const float*, const uint8_t* = nullptr, cudaStream_t = nullptr) override;
-  cudaError_t computeGradientsFloat(float*, const float*, const uint8_t* = nullptr, cudaStream_t = nullptr) override;
+  cudaError_t computeEnergy(double*, const float*, const uint8_t* = nullptr, cudaStream_t = nullptr) override;
+  cudaError_t computeGradients(float*, const float*, const uint8_t* = nullptr, cudaStream_t = nullptr) override;
 
   //! \brief Computes the planar ETK subset used by the post-minimization check.
   cudaError_t computePlanarEnergy(double*        energyOuts,

@@ -21,7 +21,7 @@
 #include "src/minimizer/bfgs_types.h"
 #include "src/minimizer/fire_options.h"
 #include "src/minimizer/minimizer_api.h"
-#include "src/precision_mode.h"
+#include "src/precision/precision_mode.h"
 #include "src/utils/device_vector.h"
 #include "src/utils/host_vector.h"
 
@@ -58,6 +58,38 @@ struct FireInternalState {
   std::vector<int>     nStepsPositive;
   std::vector<uint8_t> statuses;
 };
+
+//! Precision-dependent device state for the batched FIRE implementation.
+template <typename real, typename reduceT, typename storageT> struct FireWorkspace {
+  using ComputeScalar   = real;
+  using ReductionScalar = reduceT;
+  using StorageScalar   = storageT;
+
+  AsyncDeviceVector<storageT> velocities;
+  AsyncDeviceVector<storageT> masses;
+  AsyncDeviceVector<storageT> positions;
+  AsyncDeviceVector<storageT> grad;
+  AsyncDeviceVector<storageT> energy;
+  AsyncDeviceVector<storageT> dt;
+  AsyncDeviceVector<storageT> alpha;
+  AsyncDeviceVector<storageT> energyMinStreak;
+  AsyncDeviceVector<storageT> energyMaxStreak;
+
+  void setStream(cudaStream_t stream) {
+    velocities.setStream(stream);
+    masses.setStream(stream);
+    positions.setStream(stream);
+    grad.setStream(stream);
+    energy.setStream(stream);
+    dt.setStream(stream);
+    alpha.setStream(stream);
+    energyMinStreak.setStream(stream);
+    energyMaxStreak.setStream(stream);
+  }
+};
+
+using FullFireWorkspace   = FireWorkspace<double, double, double>;
+using SingleFireWorkspace = FireWorkspace<float, float, float>;
 
 //! \brief Batched FIRE 2.0 minimizer.
 //!
@@ -208,18 +240,9 @@ class FireBatchMinimizer final : public BatchMinimizer {
   FireBackend   backend_                 = FireBackend::BATCHED;
   PrecisionMode precision_;
 
-  AsyncDeviceVector<double> velocities_;
-  AsyncDeviceVector<float>  velocitiesFloat_;
-  AsyncDeviceVector<double> masses_;
-  AsyncDeviceVector<float>  massesFloat_;
-  AsyncDeviceVector<float>  positionsFloat_;
-  AsyncDeviceVector<float>  gradFloat_;
-  AsyncDeviceVector<float>  energyFloat_;
+  FullFireWorkspace   fullWorkspace_;
+  SingleFireWorkspace singleWorkspace_;
 
-  AsyncDeviceVector<double>  dt_;
-  AsyncDeviceVector<double>  alpha_;
-  AsyncDeviceVector<float>   dtFloat_;
-  AsyncDeviceVector<float>   alphaFloat_;
   AsyncDeviceVector<int>     numStepsWithPositivePower_;
   AsyncDeviceVector<uint8_t> statuses_;
 
@@ -244,14 +267,10 @@ class FireBatchMinimizer final : public BatchMinimizer {
   const uint8_t* cachedActiveThisStage_ = nullptr;
   const double*  cachedMasses_          = nullptr;
 
-  //! Per-system state for energy-plateau stuck detection. ``energyMinStreak_`` and
-  //! ``energyMaxStreak_`` track the windowed extrema while ``stuckStreak_`` counts
+  //! Per-system state for energy-plateau stuck detection. The workspace extrema
+  //! track the window while ``stuckStreak_`` counts
   //! consecutive plateau polls; all reset when the relative tolerance is violated.
-  //! Exactly one extrema pair is allocated according to minimizerStateStorage.
-  AsyncDeviceVector<double>  energyMinStreak_;
-  AsyncDeviceVector<double>  energyMaxStreak_;
-  AsyncDeviceVector<float>   energyMinStreakFloat_;
-  AsyncDeviceVector<float>   energyMaxStreakFloat_;
+  //! Exactly one workspace's extrema pair is allocated for the selected precision.
   AsyncDeviceVector<int32_t> stuckStreak_;
   int                        pollsSinceLastEnergyEval_ = 0;
 

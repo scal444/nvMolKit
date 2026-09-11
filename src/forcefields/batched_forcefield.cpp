@@ -66,14 +66,6 @@ BatchedForcefieldMetadata makeIdentityBatchedForcefieldMetadata(const int numSys
 
 BatchedForcefield::~BatchedForcefield() = default;
 
-cudaError_t BatchedForcefield::computeEnergyFloat(double*, const float*, const uint8_t*, cudaStream_t) {
-  return cudaErrorNotSupported;
-}
-
-cudaError_t BatchedForcefield::computeGradientsFloat(float*, const float*, const uint8_t*, cudaStream_t) {
-  return cudaErrorNotSupported;
-}
-
 BatchedForcefield::BatchedForcefield(ForceFieldType            type,
                                      int                       dataDim,
                                      std::vector<int>          atomStartsHost,

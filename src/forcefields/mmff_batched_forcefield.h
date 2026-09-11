@@ -20,7 +20,7 @@
 
 #include "src/forcefields/batched_forcefield.h"
 #include "src/forcefields/mmff.h"
-#include "src/precision_mode.h"
+#include "src/precision/precision_mode.h"
 #include "src/utils/device_vector.h"
 
 namespace nvMolKit {
@@ -30,7 +30,7 @@ namespace nvMolKit {
 //! This wrapper exposes an `MMFF::BatchedMolecularSystemHost` through the
 //! generic `BatchedForcefield` interface so host-driven batched BFGS can
 //! evaluate MMFF energies and gradients without MMFF-specific dispatch code.
-class MMFFBatchedForcefield final : public BatchedForcefield {
+class MMFFBatchedForcefield final : public BatchedForcefield, public SinglePrecisionBatchedForcefield {
  public:
   //! \brief Builds a generic batched-forcefield view over MMFF host data.
   //! \param molSystemHost Flattened MMFF host-side system description.
@@ -52,14 +52,14 @@ class MMFFBatchedForcefield final : public BatchedForcefield {
                                const double*  positions,
                                const uint8_t* activeSystemMask = nullptr,
                                cudaStream_t   stream           = nullptr) override;
-  cudaError_t computeEnergyFloat(double*        energyOuts,
-                                 const float*   positions,
-                                 const uint8_t* activeSystemMask = nullptr,
-                                 cudaStream_t   stream           = nullptr) override;
-  cudaError_t computeGradientsFloat(float*         grad,
-                                    const float*   positions,
-                                    const uint8_t* activeSystemMask = nullptr,
-                                    cudaStream_t   stream           = nullptr) override;
+  cudaError_t computeEnergy(double*        energyOuts,
+                            const float*   positions,
+                            const uint8_t* activeSystemMask = nullptr,
+                            cudaStream_t   stream           = nullptr) override;
+  cudaError_t computeGradients(float*         grad,
+                               const float*   positions,
+                               const uint8_t* activeSystemMask = nullptr,
+                               cudaStream_t   stream           = nullptr) override;
 
  private:
   std::variant<MMFF::BatchedMolecularDeviceBuffers, MMFF::BatchedMolecularDeviceBuffersF32> systemDevice_;

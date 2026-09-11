@@ -64,7 +64,7 @@ using real = float;
 }  // namespace nvMolKit::MMFF::fp32
 
 namespace nvMolKit::MMFF {
-// Preserve the legacy unqualified API while new dispatch chooses fp32/fp64.
+// Preserve the existing unqualified API while new dispatch chooses fp32/fp64.
 using namespace fp64;
 }  // namespace nvMolKit::MMFF
 #endif  // NVMOLKIT_MMFF_KERNELS_DEVICE_DISPATCH_CUH

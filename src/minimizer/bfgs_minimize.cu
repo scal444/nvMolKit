@@ -210,37 +210,39 @@ void BfgsBatchMinimizer::doLineSearchSetup(const double* srcEnergies) {
                                                             activeSystemIndices_.data(),             \
                                                             dataDim_)
   if (usesSinglePrecision(precision_)) {
-    const float* positions = positionsFloat_.data();
-    const float* grads     = gradFloat_.data();
-    setLineStatusAndEnergyFromGlobalKernel<float><<<numblocks, 128, 0, stream_>>>(numSystems_,
-                                                                                  statuses_.data(),
-                                                                                  lineSearchStatus_.data(),
-                                                                                  energyFloat_.data(),
-                                                                                  lineSearchStoredEnergyFloat_.data(),
-                                                                                  lineSearchLambdasFloat_.data());
+    const float* positions = singleWorkspace_.positions.data();
+    const float* grads     = singleWorkspace_.grad.data();
+    setLineStatusAndEnergyFromGlobalKernel<float>
+      <<<numblocks, 128, 0, stream_>>>(numSystems_,
+                                       statuses_.data(),
+                                       lineSearchStatus_.data(),
+                                       singleWorkspace_.energy.data(),
+                                       singleWorkspace_.lineSearchStoredEnergy.data(),
+                                       singleWorkspace_.lineSearchLambdas.data());
     NVMOLKIT_LAUNCH_BFGS_LINE_SETUP(float,
                                     float,
                                     float,
-                                    lineSearchMaxStepsFloat_.data(),
-                                    lineSearchDirFloat_.data(),
-                                    lineSearchSlopeFloat_.data(),
-                                    lineSearchLambdaMinsFloat_.data());
+                                    singleWorkspace_.lineSearchMaxSteps.data(),
+                                    singleWorkspace_.lineSearchDir.data(),
+                                    singleWorkspace_.lineSearchSlope.data(),
+                                    singleWorkspace_.lineSearchLambdaMins.data());
   } else {
     const double* positions = positionsDevice;
     const double* grads     = gradDevice;
-    setLineStatusAndEnergyFromGlobalKernel<double><<<numblocks, 128, 0, stream_>>>(numSystems_,
-                                                                                   statuses_.data(),
-                                                                                   lineSearchStatus_.data(),
-                                                                                   srcEnergies,
-                                                                                   lineSearchStoredEnergy_.data(),
-                                                                                   lineSearchLambdas_.data());
+    setLineStatusAndEnergyFromGlobalKernel<double>
+      <<<numblocks, 128, 0, stream_>>>(numSystems_,
+                                       statuses_.data(),
+                                       lineSearchStatus_.data(),
+                                       srcEnergies,
+                                       fullWorkspace_.lineSearchStoredEnergy.data(),
+                                       fullWorkspace_.lineSearchLambdas.data());
     NVMOLKIT_LAUNCH_BFGS_LINE_SETUP(double,
                                     double,
                                     double,
-                                    lineSearchMaxSteps_.data(),
-                                    lineSearchDir_.data(),
-                                    lineSearchSlope_.data(),
-                                    lineSearchLambdaMins_.data());
+                                    fullWorkspace_.lineSearchMaxSteps.data(),
+                                    fullWorkspace_.lineSearchDir.data(),
+                                    fullWorkspace_.lineSearchSlope.data(),
+                                    fullWorkspace_.lineSearchLambdaMins.data());
   }
 #undef NVMOLKIT_LAUNCH_BFGS_LINE_SETUP
   cudaCheckError(cudaGetLastError());
@@ -290,27 +292,29 @@ __global__ void lineSearchPerturbKernel(const int*      atomStarts,
 
 void BfgsBatchMinimizer::doLineSearchPerturb() {
   if (usesSinglePrecision(precision_))
-    lineSearchPerturbKernel<float, float><<<numUnfinishedSystems_, 128, 0, stream_>>>(atomStartsDevice,
-                                                                                      positionsFloat_.data(),
-                                                                                      lineSearchDirFloat_.data(),
-                                                                                      lineSearchLambdasFloat_.data(),
-                                                                                      lineSearchLambdaMinsFloat_.data(),
-                                                                                      scratchPositionsFloat_.data(),
-                                                                                      scratchPositionsFloat_.data(),
-                                                                                      lineSearchStatus_.data(),
-                                                                                      activeSystemIndices_.data(),
-                                                                                      dataDim_);
+    lineSearchPerturbKernel<float, float>
+      <<<numUnfinishedSystems_, 128, 0, stream_>>>(atomStartsDevice,
+                                                   singleWorkspace_.positions.data(),
+                                                   singleWorkspace_.lineSearchDir.data(),
+                                                   singleWorkspace_.lineSearchLambdas.data(),
+                                                   singleWorkspace_.lineSearchLambdaMins.data(),
+                                                   singleWorkspace_.scratchPositions.data(),
+                                                   singleWorkspace_.scratchPositions.data(),
+                                                   lineSearchStatus_.data(),
+                                                   activeSystemIndices_.data(),
+                                                   dataDim_);
   else
-    lineSearchPerturbKernel<double, double><<<numUnfinishedSystems_, 128, 0, stream_>>>(atomStartsDevice,
-                                                                                        positionsDevice,
-                                                                                        lineSearchDir_.data(),
-                                                                                        lineSearchLambdas_.data(),
-                                                                                        lineSearchLambdaMins_.data(),
-                                                                                        scratchPositions_.data(),
-                                                                                        scratchPositions_.data(),
-                                                                                        lineSearchStatus_.data(),
-                                                                                        activeSystemIndices_.data(),
-                                                                                        dataDim_);
+    lineSearchPerturbKernel<double, double>
+      <<<numUnfinishedSystems_, 128, 0, stream_>>>(atomStartsDevice,
+                                                   positionsDevice,
+                                                   fullWorkspace_.lineSearchDir.data(),
+                                                   fullWorkspace_.lineSearchLambdas.data(),
+                                                   fullWorkspace_.lineSearchLambdaMins.data(),
+                                                   fullWorkspace_.scratchPositions.data(),
+                                                   fullWorkspace_.scratchPositions.data(),
+                                                   lineSearchStatus_.data(),
+                                                   activeSystemIndices_.data(),
+                                                   dataDim_);
   cudaCheckError(cudaGetLastError());
 }
 
@@ -391,21 +395,21 @@ void BfgsBatchMinimizer::doLineSearchPostEnergy(const int iter) {
   if (usesSinglePrecision(precision_))
     NVMOLKIT_LAUNCH_LINE_POST(float,
                               float,
-                              energyFloat_.data(),
-                              lineSearchStoredEnergyFloat_.data(),
-                              lineSearchSlopeFloat_.data(),
-                              lineSearchEnergyScratchFloat_.data(),
-                              lineSearchLambdasFloat_.data(),
-                              lineSearchLambdas2Float_.data());
+                              singleWorkspace_.energy.data(),
+                              singleWorkspace_.lineSearchStoredEnergy.data(),
+                              singleWorkspace_.lineSearchSlope.data(),
+                              singleWorkspace_.lineSearchEnergyScratch.data(),
+                              singleWorkspace_.lineSearchLambdas.data(),
+                              singleWorkspace_.lineSearchLambdas2.data());
   else
     NVMOLKIT_LAUNCH_LINE_POST(double,
                               double,
                               energyOutsDevice,
-                              lineSearchStoredEnergy_.data(),
-                              lineSearchSlope_.data(),
-                              lineSearchEnergyScratch_.data(),
-                              lineSearchLambdas_.data(),
-                              lineSearchLambdas2_.data());
+                              fullWorkspace_.lineSearchStoredEnergy.data(),
+                              fullWorkspace_.lineSearchSlope.data(),
+                              fullWorkspace_.lineSearchEnergyScratch.data(),
+                              fullWorkspace_.lineSearchLambdas.data(),
+                              fullWorkspace_.lineSearchLambdas2.data());
 #undef NVMOLKIT_LAUNCH_LINE_POST
   cudaCheckError(cudaGetLastError());
 }
@@ -447,19 +451,20 @@ __global__ void lineSearchPostLoopKernel(const int*      atomStarts,
 
 void BfgsBatchMinimizer::doLineSearchPostLoop() {
   if (usesSinglePrecision(precision_))
-    lineSearchPostLoopKernel<float><<<numUnfinishedSystems_, 128, 0, stream_>>>(atomStartsDevice,
-                                                                                lineSearchStatus_.data(),
-                                                                                positionsFloat_.data(),
-                                                                                scratchPositionsFloat_.data(),
-                                                                                scratchPositionsFloat_.data(),
-                                                                                activeSystemIndices_.data(),
-                                                                                dataDim_);
+    lineSearchPostLoopKernel<float>
+      <<<numUnfinishedSystems_, 128, 0, stream_>>>(atomStartsDevice,
+                                                   lineSearchStatus_.data(),
+                                                   singleWorkspace_.positions.data(),
+                                                   singleWorkspace_.scratchPositions.data(),
+                                                   singleWorkspace_.scratchPositions.data(),
+                                                   activeSystemIndices_.data(),
+                                                   dataDim_);
   else
     lineSearchPostLoopKernel<double><<<numUnfinishedSystems_, 128, 0, stream_>>>(atomStartsDevice,
                                                                                  lineSearchStatus_.data(),
                                                                                  positionsDevice,
-                                                                                 scratchPositions_.data(),
-                                                                                 scratchPositions_.data(),
+                                                                                 fullWorkspace_.scratchPositions.data(),
+                                                                                 fullWorkspace_.scratchPositions.data(),
                                                                                  activeSystemIndices_.data(),
                                                                                  dataDim_);
   cudaCheckError(cudaGetLastError());
@@ -485,9 +490,9 @@ BfgsBatchMinimizer::BfgsBatchMinimizer(const int     dataDim,
   scaleGrads_ = scaleGrads;
   stream_     = stream;
   // The batched kernels carry the real/reduceT/storageT precision profile.
-  // The fused backend remains the legacy specialization, so SINGLE uses the
-  // complete typed path.
-  backend_    = bfgsPrecisionRequiresBatchedBackend(precision) ? BfgsBackend::BATCHED : backend;
+  // The fused backends are full-precision specializations, so SINGLE uses the
+  // complete typed batched path.
+  backend_    = usesSinglePrecision(precision) ? BfgsBackend::BATCHED : backend;
   precision_  = precision;
   // For HYBRID, we need to support both paths, so initialize for both
   if (backend_ == BfgsBackend::BATCHED || backend_ == BfgsBackend::HYBRID) {
@@ -498,45 +503,18 @@ BfgsBatchMinimizer::BfgsBatchMinimizer(const int     dataDim,
     activeSystemIndices_.setStream(stream_);
     allSystemIndices_.setStream(stream_);
 
-    scratchPositions_.setStream(stream_);
-    scratchPositionsFloat_.setStream(stream_);
-    positionsFloat_.setStream(stream_);
-    gradFloat_.setStream(stream_);
+    fullWorkspace_.setStream(stream_);
+    singleWorkspace_.setStream(stream_);
     statuses_.setStream(stream_);
 
-    lineSearchDir_.setStream(stream_);
-    lineSearchDirFloat_.setStream(stream_);
     lineSearchStatus_.setStream(stream_);
-    lineSearchLambdaMins_.setStream(stream_);
-    lineSearchLambdaMinsFloat_.setStream(stream_);
-    lineSearchLambdas_.setStream(stream_);
-    lineSearchLambdasFloat_.setStream(stream_);
-    lineSearchLambdas2_.setStream(stream_);
-    lineSearchLambdas2Float_.setStream(stream_);
-    lineSearchSlope_.setStream(stream_);
-    lineSearchSlopeFloat_.setStream(stream_);
-    lineSearchMaxSteps_.setStream(stream_);
-    lineSearchMaxStepsFloat_.setStream(stream_);
     countTempStorage_.setStream(stream_);
     countFinished_.setStream(stream_);
-    lineSearchStoredEnergy_.setStream(stream_);
-    lineSearchStoredEnergyFloat_.setStream(stream_);
-    lineSearchEnergyScratch_.setStream(stream_);
-    lineSearchEnergyScratchFloat_.setStream(stream_);
     lineSearchEnergyOut_.setStream(stream_);
 
     finalEnergies_.setStream(stream_);
-    energyFloat_.setStream(stream_);
 
     hessianStarts_.setStream(stream_);
-    scratchGrad_.setStream(stream_);
-    scratchGradFloat_.setStream(stream_);
-    gradScales_.setStream(stream_);
-    gradScalesFloat_.setStream(stream_);
-    inverseHessian_.setStream(stream_);
-    inverseHessianFloat_.setStream(stream_);
-    hessDGrad_.setStream(stream_);
-    hessDGradFloat_.setStream(stream_);
     scratchBuffersDevice_.setStream(stream_);
     activeMolIdsDevice_.setStream(stream_);
   }
@@ -650,85 +628,85 @@ void BfgsBatchMinimizer::initialize(const std::vector<int>& atomStartsHost,
   hessianStarts_.resize(numSystems + 1);
   hessianStarts_.setFromVector(hessianStartsHost_);
   if (usesSinglePrecision(precision_)) {
-    energyFloat_.resize(numSystems);
-    inverseHessian_.resize(0);
-    inverseHessianFloat_.resize(hessianStartsHost_.back());
-    inverseHessianFloat_.zero();
+    singleWorkspace_.energy.resize(numSystems);
+    fullWorkspace_.inverseHessian.resize(0);
+    singleWorkspace_.inverseHessian.resize(hessianStartsHost_.back());
+    singleWorkspace_.inverseHessian.zero();
   } else {
-    energyFloat_.resize(0);
-    inverseHessianFloat_.resize(0);
-    inverseHessian_.resize(hessianStartsHost_.back());
-    inverseHessian_.zero();
+    singleWorkspace_.energy.resize(0);
+    singleWorkspace_.inverseHessian.resize(0);
+    fullWorkspace_.inverseHessian.resize(hessianStartsHost_.back());
+    fullWorkspace_.inverseHessian.zero();
   }
 
   const int numStateTerms = atomStartsHost.back() * dataDim_;
   lineSearchStatus_.resize(numSystems);
   if (usesSinglePrecision(precision_)) {
-    scratchPositions_.resize(0);
-    positionsFloat_.resize(numStateTerms);
-    gradFloat_.resize(numStateTerms);
+    fullWorkspace_.scratchPositions.resize(0);
+    singleWorkspace_.positions.resize(numStateTerms);
+    singleWorkspace_.grad.resize(numStateTerms);
     if (positions != nullptr) {
-      cudaCheckError(detail::convertDeviceArray(positionsFloat_.data(), positions, numStateTerms, stream_));
+      cudaCheckError(detail::convertDeviceArray(singleWorkspace_.positions.data(), positions, numStateTerms, stream_));
     } else {
-      positionsFloat_.zero();
+      singleWorkspace_.positions.zero();
     }
-    gradFloat_.zero();
-    scratchPositionsFloat_.resize(numStateTerms);
-    scratchPositionsFloat_.zero();
-    lineSearchDirFloat_.resize(numStateTerms);
-    scratchGradFloat_.resize(numStateTerms);
-    hessDGradFloat_.resize(numStateTerms);
-    hessDGradFloat_.zero();
-    gradScalesFloat_.resize(numSystems);
-    lineSearchLambdaMinsFloat_.resize(numSystems);
-    lineSearchLambdasFloat_.resize(numSystems);
-    lineSearchLambdas2Float_.resize(numSystems);
-    lineSearchSlopeFloat_.resize(numSystems);
-    lineSearchMaxStepsFloat_.resize(numSystems);
-    lineSearchStoredEnergyFloat_.resize(numSystems);
-    lineSearchEnergyScratchFloat_.resize(numSystems);
+    singleWorkspace_.grad.zero();
+    singleWorkspace_.scratchPositions.resize(numStateTerms);
+    singleWorkspace_.scratchPositions.zero();
+    singleWorkspace_.lineSearchDir.resize(numStateTerms);
+    singleWorkspace_.scratchGrad.resize(numStateTerms);
+    singleWorkspace_.hessDGrad.resize(numStateTerms);
+    singleWorkspace_.hessDGrad.zero();
+    singleWorkspace_.gradScales.resize(numSystems);
+    singleWorkspace_.lineSearchLambdaMins.resize(numSystems);
+    singleWorkspace_.lineSearchLambdas.resize(numSystems);
+    singleWorkspace_.lineSearchLambdas2.resize(numSystems);
+    singleWorkspace_.lineSearchSlope.resize(numSystems);
+    singleWorkspace_.lineSearchMaxSteps.resize(numSystems);
+    singleWorkspace_.lineSearchStoredEnergy.resize(numSystems);
+    singleWorkspace_.lineSearchEnergyScratch.resize(numSystems);
 
-    lineSearchDir_.resize(0);
-    scratchGrad_.resize(0);
-    hessDGrad_.resize(0);
-    gradScales_.resize(0);
-    lineSearchLambdaMins_.resize(0);
-    lineSearchLambdas_.resize(0);
-    lineSearchLambdas2_.resize(0);
-    lineSearchSlope_.resize(0);
-    lineSearchMaxSteps_.resize(0);
-    lineSearchStoredEnergy_.resize(0);
-    lineSearchEnergyScratch_.resize(0);
+    fullWorkspace_.lineSearchDir.resize(0);
+    fullWorkspace_.scratchGrad.resize(0);
+    fullWorkspace_.hessDGrad.resize(0);
+    fullWorkspace_.gradScales.resize(0);
+    fullWorkspace_.lineSearchLambdaMins.resize(0);
+    fullWorkspace_.lineSearchLambdas.resize(0);
+    fullWorkspace_.lineSearchLambdas2.resize(0);
+    fullWorkspace_.lineSearchSlope.resize(0);
+    fullWorkspace_.lineSearchMaxSteps.resize(0);
+    fullWorkspace_.lineSearchStoredEnergy.resize(0);
+    fullWorkspace_.lineSearchEnergyScratch.resize(0);
   } else {
-    scratchPositions_.resize(numStateTerms);
-    scratchPositions_.zero();
-    positionsFloat_.resize(0);
-    gradFloat_.resize(0);
-    scratchPositionsFloat_.resize(0);
-    lineSearchDirFloat_.resize(0);
-    scratchGradFloat_.resize(0);
-    hessDGradFloat_.resize(0);
-    gradScalesFloat_.resize(0);
-    lineSearchLambdaMinsFloat_.resize(0);
-    lineSearchLambdasFloat_.resize(0);
-    lineSearchLambdas2Float_.resize(0);
-    lineSearchSlopeFloat_.resize(0);
-    lineSearchMaxStepsFloat_.resize(0);
-    lineSearchStoredEnergyFloat_.resize(0);
-    lineSearchEnergyScratchFloat_.resize(0);
+    fullWorkspace_.scratchPositions.resize(numStateTerms);
+    fullWorkspace_.scratchPositions.zero();
+    singleWorkspace_.positions.resize(0);
+    singleWorkspace_.grad.resize(0);
+    singleWorkspace_.scratchPositions.resize(0);
+    singleWorkspace_.lineSearchDir.resize(0);
+    singleWorkspace_.scratchGrad.resize(0);
+    singleWorkspace_.hessDGrad.resize(0);
+    singleWorkspace_.gradScales.resize(0);
+    singleWorkspace_.lineSearchLambdaMins.resize(0);
+    singleWorkspace_.lineSearchLambdas.resize(0);
+    singleWorkspace_.lineSearchLambdas2.resize(0);
+    singleWorkspace_.lineSearchSlope.resize(0);
+    singleWorkspace_.lineSearchMaxSteps.resize(0);
+    singleWorkspace_.lineSearchStoredEnergy.resize(0);
+    singleWorkspace_.lineSearchEnergyScratch.resize(0);
 
-    lineSearchDir_.resize(numStateTerms);
-    scratchGrad_.resize(numStateTerms);
-    hessDGrad_.resize(numStateTerms);
-    hessDGrad_.zero();
-    gradScales_.resize(numSystems);
-    lineSearchLambdaMins_.resize(numSystems);
-    lineSearchLambdas_.resize(numSystems);
-    lineSearchLambdas2_.resize(numSystems);
-    lineSearchSlope_.resize(numSystems);
-    lineSearchMaxSteps_.resize(numSystems);
-    lineSearchStoredEnergy_.resize(numSystems);
-    lineSearchEnergyScratch_.resize(numSystems);
+    fullWorkspace_.lineSearchDir.resize(numStateTerms);
+    fullWorkspace_.scratchGrad.resize(numStateTerms);
+    fullWorkspace_.hessDGrad.resize(numStateTerms);
+    fullWorkspace_.hessDGrad.zero();
+    fullWorkspace_.gradScales.resize(numSystems);
+    fullWorkspace_.lineSearchLambdaMins.resize(numSystems);
+    fullWorkspace_.lineSearchLambdas.resize(numSystems);
+    fullWorkspace_.lineSearchLambdas2.resize(numSystems);
+    fullWorkspace_.lineSearchSlope.resize(numSystems);
+    fullWorkspace_.lineSearchMaxSteps.resize(numSystems);
+    fullWorkspace_.lineSearchStoredEnergy.resize(numSystems);
+    fullWorkspace_.lineSearchEnergyScratch.resize(numSystems);
   }
 
   // Compute needed reduction storage.
@@ -782,16 +760,16 @@ void BfgsBatchMinimizer::setHessianToIdentity() {
   constexpr int blockDim  = 128;
   const int     numBlocks = hessianStarts_.size() - 1;
   if (usesSinglePrecision(precision_)) {
-    inverseHessianFloat_.zero();
+    singleWorkspace_.inverseHessian.zero();
     populateHessianIdentityKernel<<<numBlocks, blockDim, 0, stream_>>>(hessianStarts_.data(),
                                                                        atomStartsDevice,
-                                                                       inverseHessianFloat_.data(),
+                                                                       singleWorkspace_.inverseHessian.data(),
                                                                        dataDim_);
   } else {
-    inverseHessian_.zero();
+    fullWorkspace_.inverseHessian.zero();
     populateHessianIdentityKernel<<<numBlocks, blockDim, 0, stream_>>>(hessianStarts_.data(),
                                                                        atomStartsDevice,
-                                                                       inverseHessian_.data(),
+                                                                       fullWorkspace_.inverseHessian.data(),
                                                                        dataDim_);
   }
   cudaCheckError(cudaGetLastError());
@@ -828,9 +806,13 @@ void BfgsBatchMinimizer::setMaxStep() {
   setMaxStepKernel<real, reduceT, storageT>                                  \
     <<<numSystems_, 128, 0, stream_>>>(atomStartsDevice, positions, output, dataDim_)
   if (usesSinglePrecision(precision_))
-    NVMOLKIT_LAUNCH_MAX_STEP(float, float, float, positionsFloat_.data(), lineSearchMaxStepsFloat_.data());
+    NVMOLKIT_LAUNCH_MAX_STEP(float,
+                             float,
+                             float,
+                             singleWorkspace_.positions.data(),
+                             singleWorkspace_.lineSearchMaxSteps.data());
   else
-    NVMOLKIT_LAUNCH_MAX_STEP(double, double, double, positionsDevice, lineSearchMaxSteps_.data());
+    NVMOLKIT_LAUNCH_MAX_STEP(double, double, double, positionsDevice, fullWorkspace_.lineSearchMaxSteps.data());
 #undef NVMOLKIT_LAUNCH_MAX_STEP
   cudaCheckError(cudaGetLastError());
 }
@@ -990,20 +972,20 @@ void BfgsBatchMinimizer::setDirection() {
     NVMOLKIT_LAUNCH_SET_DIRECTION(float,
                                   float,
                                   float,
-                                  scratchPositionsFloat_.data(),
-                                  gradFloat_.data(),
-                                  lineSearchDirFloat_.data(),
-                                  positionsFloat_.data(),
-                                  scratchGradFloat_.data());
+                                  singleWorkspace_.scratchPositions.data(),
+                                  singleWorkspace_.grad.data(),
+                                  singleWorkspace_.lineSearchDir.data(),
+                                  singleWorkspace_.positions.data(),
+                                  singleWorkspace_.scratchGrad.data());
   else
     NVMOLKIT_LAUNCH_SET_DIRECTION(double,
                                   double,
                                   double,
-                                  scratchPositions_.data(),
+                                  fullWorkspace_.scratchPositions.data(),
                                   gradDevice,
-                                  lineSearchDir_.data(),
+                                  fullWorkspace_.lineSearchDir.data(),
                                   positionsDevice,
-                                  scratchGrad_.data());
+                                  fullWorkspace_.scratchGrad.data());
 #undef NVMOLKIT_LAUNCH_SET_DIRECTION
   cudaCheckError(cudaGetLastError());
 }
@@ -1082,14 +1064,24 @@ void BfgsBatchMinimizer::scaleGrad(const bool preLoop) {
                                                                                    dataDim_)
   if (usesSinglePrecision(precision_)) {
     if (scaleGrads_)
-      NVMOLKIT_LAUNCH_SCALE_GRAD(true, float, float, float, gradFloat_.data(), gradScalesFloat_.data());
+      NVMOLKIT_LAUNCH_SCALE_GRAD(true,
+                                 float,
+                                 float,
+                                 float,
+                                 singleWorkspace_.grad.data(),
+                                 singleWorkspace_.gradScales.data());
     else
-      NVMOLKIT_LAUNCH_SCALE_GRAD(false, float, float, float, gradFloat_.data(), gradScalesFloat_.data());
+      NVMOLKIT_LAUNCH_SCALE_GRAD(false,
+                                 float,
+                                 float,
+                                 float,
+                                 singleWorkspace_.grad.data(),
+                                 singleWorkspace_.gradScales.data());
   } else {
     if (scaleGrads_)
-      NVMOLKIT_LAUNCH_SCALE_GRAD(true, double, double, double, gradDevice, gradScales_.data());
+      NVMOLKIT_LAUNCH_SCALE_GRAD(true, double, double, double, gradDevice, fullWorkspace_.gradScales.data());
     else
-      NVMOLKIT_LAUNCH_SCALE_GRAD(false, double, double, double, gradDevice, gradScales_.data());
+      NVMOLKIT_LAUNCH_SCALE_GRAD(false, double, double, double, gradDevice, fullWorkspace_.gradScales.data());
   }
 #undef NVMOLKIT_LAUNCH_SCALE_GRAD
 }
@@ -1167,11 +1159,11 @@ void BfgsBatchMinimizer::updateDGrad() {
     NVMOLKIT_LAUNCH_UPDATE_DGRAD(float,
                                  float,
                                  float,
-                                 energyFloat_.data(),
-                                 gradFloat_.data(),
-                                 positionsFloat_.data(),
-                                 gradScalesFloat_.data(),
-                                 scratchGradFloat_.data());
+                                 singleWorkspace_.energy.data(),
+                                 singleWorkspace_.grad.data(),
+                                 singleWorkspace_.positions.data(),
+                                 singleWorkspace_.gradScales.data(),
+                                 singleWorkspace_.scratchGrad.data());
   else
     NVMOLKIT_LAUNCH_UPDATE_DGRAD(double,
                                  double,
@@ -1179,8 +1171,8 @@ void BfgsBatchMinimizer::updateDGrad() {
                                  energyOutsDevice,
                                  gradDevice,
                                  positionsDevice,
-                                 gradScales_.data(),
-                                 scratchGrad_.data());
+                                 fullWorkspace_.gradScales.data(),
+                                 fullWorkspace_.scratchGrad.data());
 #undef NVMOLKIT_LAUNCH_UPDATE_DGRAD
   cudaCheckError(cudaGetLastError());
 }
@@ -1233,16 +1225,16 @@ void BfgsBatchMinimizer::updateHessian() {
                      activeSystemIndices_.data(),                         \
                      stream_)
   if (usesSinglePrecision(precision_))
-    NVMOLKIT_UPDATE_HESSIAN(inverseHessianFloat_.data(),
-                            scratchGradFloat_.data(),
-                            lineSearchDirFloat_.data(),
-                            hessDGradFloat_.data(),
-                            gradFloat_.data());
+    NVMOLKIT_UPDATE_HESSIAN(singleWorkspace_.inverseHessian.data(),
+                            singleWorkspace_.scratchGrad.data(),
+                            singleWorkspace_.lineSearchDir.data(),
+                            singleWorkspace_.hessDGrad.data(),
+                            singleWorkspace_.grad.data());
   else
-    NVMOLKIT_UPDATE_HESSIAN(inverseHessian_.data(),
-                            scratchGrad_.data(),
-                            lineSearchDir_.data(),
-                            hessDGrad_.data(),
+    NVMOLKIT_UPDATE_HESSIAN(fullWorkspace_.inverseHessian.data(),
+                            fullWorkspace_.scratchGrad.data(),
+                            fullWorkspace_.lineSearchDir.data(),
+                            fullWorkspace_.hessDGrad.data(),
                             gradDevice);
 #undef NVMOLKIT_UPDATE_HESSIAN
 }
@@ -1306,8 +1298,8 @@ bool BfgsBatchMinimizer::minimize(const int                  numIters,
 
     energyOuts.zero();
     if (usesSinglePrecision(precision_)) {
-      eFuncFloat(positionsFloat_.data());
-      gradFloat_.zero();
+      eFuncFloat(singleWorkspace_.positions.data());
+      singleWorkspace_.grad.zero();
       gFuncFloat();
     } else {
       eFunc(nullptr);
@@ -1318,9 +1310,9 @@ bool BfgsBatchMinimizer::minimize(const int                  numIters,
 
     collectDebugData();
     if (usesSinglePrecision(precision_))
-      copyAndInvert(gradFloat_, lineSearchDirFloat_);
+      copyAndInvert(singleWorkspace_.grad, singleWorkspace_.lineSearchDir);
     else
-      copyAndInvert(grad, lineSearchDir_);
+      copyAndInvert(grad, fullWorkspace_.lineSearchDir);
     setMaxStep();
   }
 
@@ -1335,9 +1327,9 @@ bool BfgsBatchMinimizer::minimize(const int                  numIters,
         doLineSearchPerturb();
         energyOuts.zero();
         if (usesSinglePrecision(precision_))
-          eFuncFloat(scratchPositionsFloat_.data());
+          eFuncFloat(singleWorkspace_.scratchPositions.data());
         else
-          eFunc(scratchPositions_.data());
+          eFunc(fullWorkspace_.scratchPositions.data());
         doLineSearchPostEnergy(lineSearchIter);
         lineSearchIter++;
       }
@@ -1348,7 +1340,7 @@ bool BfgsBatchMinimizer::minimize(const int                  numIters,
     {
       const ScopedNvtxRange bfgsGetAndScaleGrad("BfgsBatchMinimizer::getAndScaleGrad");
       if (usesSinglePrecision(precision_)) {
-        gradFloat_.zero();
+        singleWorkspace_.grad.zero();
         gFuncFloat();
       } else {
         grad.zero();
@@ -1364,9 +1356,10 @@ bool BfgsBatchMinimizer::minimize(const int                  numIters,
 
   energyOuts.zero();
   if (usesSinglePrecision(precision_)) {
-    eFuncFloat(positionsFloat_.data());
-    cudaCheckError(detail::convertDeviceArray(positions.data(), positionsFloat_.data(), positions.size(), stream_));
-    cudaCheckError(detail::convertDeviceArray(grad.data(), gradFloat_.data(), grad.size(), stream_));
+    eFuncFloat(singleWorkspace_.positions.data());
+    cudaCheckError(
+      detail::convertDeviceArray(positions.data(), singleWorkspace_.positions.data(), positions.size(), stream_));
+    cudaCheckError(detail::convertDeviceArray(grad.data(), singleWorkspace_.grad.data(), grad.size(), stream_));
   } else {
     eFunc(nullptr);
   }
@@ -1386,31 +1379,36 @@ bool BfgsBatchMinimizer::minimize(const int                  numIters,
     throw std::runtime_error("BatchedForcefield minimization is only supported on the BATCHED backend");
   }
 
+  auto* singlePrecisionForcefield = dynamic_cast<SinglePrecisionBatchedForcefield*>(&ff);
+
   auto eFunc = [&](const double* evalPositions) {
     const double* positionsToEvaluate = evalPositions != nullptr ? evalPositions : positions.data();
     ff.computeEnergy(energyOuts.data(), positionsToEvaluate, activeSystemMask, stream_);
   };
   auto gFunc      = [&]() { ff.computeGradients(grad.data(), positions.data(), activeSystemMask, stream_); };
   auto eFuncFloat = [&](const float* evalPositions) {
-    const cudaError_t err = ff.computeEnergyFloat(energyOuts.data(), evalPositions, activeSystemMask, stream_);
-    if (err == cudaErrorNotSupported) {
+    if (singlePrecisionForcefield == nullptr) {
       cudaCheckError(detail::convertDeviceArray(positions.data(), evalPositions, positions.size(), stream_));
-      ff.computeEnergy(energyOuts.data(), positions.data(), activeSystemMask, stream_);
+      cudaCheckError(ff.computeEnergy(energyOuts.data(), positions.data(), activeSystemMask, stream_));
     } else {
-      cudaCheckError(err);
+      cudaCheckError(
+        singlePrecisionForcefield->computeEnergy(energyOuts.data(), evalPositions, activeSystemMask, stream_));
     }
-    cudaCheckError(detail::convertDeviceArray(energyFloat_.data(), energyOuts.data(), energyOuts.size(), stream_));
+    cudaCheckError(
+      detail::convertDeviceArray(singleWorkspace_.energy.data(), energyOuts.data(), energyOuts.size(), stream_));
   };
   auto gFuncFloat = [&]() {
-    const cudaError_t err =
-      ff.computeGradientsFloat(gradFloat_.data(), positionsFloat_.data(), activeSystemMask, stream_);
-    if (err == cudaErrorNotSupported) {
-      cudaCheckError(detail::convertDeviceArray(positions.data(), positionsFloat_.data(), positions.size(), stream_));
+    if (singlePrecisionForcefield == nullptr) {
+      cudaCheckError(
+        detail::convertDeviceArray(positions.data(), singleWorkspace_.positions.data(), positions.size(), stream_));
       grad.zero();
       cudaCheckError(ff.computeGradients(grad.data(), positions.data(), activeSystemMask, stream_));
-      cudaCheckError(detail::convertDeviceArray(gradFloat_.data(), grad.data(), grad.size(), stream_));
+      cudaCheckError(detail::convertDeviceArray(singleWorkspace_.grad.data(), grad.data(), grad.size(), stream_));
     } else {
-      cudaCheckError(err);
+      cudaCheckError(singlePrecisionForcefield->computeGradients(singleWorkspace_.grad.data(),
+                                                                 singleWorkspace_.positions.data(),
+                                                                 activeSystemMask,
+                                                                 stream_));
     }
   };
 
@@ -1454,10 +1452,10 @@ bool BfgsBatchMinimizer::minimizeWithMMFFImpl(const int               numIters,
   const ScopedNvtxRange bfgsPerMolecule("BfgsBatchMinimizer::perMoleculeMinimize");
 
   prepareScratchBuffers(systemDevice.grad,
-                        lineSearchDir_,
-                        scratchPositions_,
-                        hessDGrad_,
-                        scratchGrad_,
+                        fullWorkspace_.lineSearchDir,
+                        fullWorkspace_.scratchPositions,
+                        fullWorkspace_.hessDGrad,
+                        fullWorkspace_.scratchGrad,
                         scratchBuffersDevice_,
                         scratchBufferPointersHost_,
                         stream_);
@@ -1477,7 +1475,7 @@ bool BfgsBatchMinimizer::minimizeWithMMFFImpl(const int               numIters,
                                                          systemIndices,
                                                          systemDevice.positions.data(),
                                                          systemDevice.grad.data(),
-                                                         inverseHessian_.data(),
+                                                         fullWorkspace_.inverseHessian.data(),
                                                          scratchBuffersDevice_.data(),
                                                          systemDevice.energyOuts.data(),
                                                          MMFF::batchHasConstraints(systemDevice.contribs),
@@ -1526,10 +1524,10 @@ bool BfgsBatchMinimizer::minimizeWithETK(const int                              
   const ScopedNvtxRange bfgsPerMoleculeETK("BfgsBatchMinimizer::perMoleculeMinimizeETK");
 
   prepareScratchBuffers(systemDevice.grad,
-                        lineSearchDir_,
-                        scratchPositions_,
-                        hessDGrad_,
-                        scratchGrad_,
+                        fullWorkspace_.lineSearchDir,
+                        fullWorkspace_.scratchPositions,
+                        fullWorkspace_.hessDGrad,
+                        fullWorkspace_.scratchGrad,
                         scratchBuffersDevice_,
                         scratchBufferPointersHost_,
                         stream_);
@@ -1549,7 +1547,7 @@ bool BfgsBatchMinimizer::minimizeWithETK(const int                              
                                                             systemIndices,
                                                             positions.data(),
                                                             systemDevice.grad.data(),
-                                                            inverseHessian_.data(),
+                                                            fullWorkspace_.inverseHessian.data(),
                                                             scratchBuffersDevice_.data(),
                                                             systemDevice.energyOuts.data(),
                                                             statuses_.data(),
@@ -1596,10 +1594,10 @@ bool BfgsBatchMinimizer::minimizeWithDG(const int                               
   const ScopedNvtxRange bfgsPerMoleculeDG("BfgsBatchMinimizer::perMoleculeMinimizeDG");
 
   prepareScratchBuffers(systemDevice.grad,
-                        lineSearchDir_,
-                        scratchPositions_,
-                        hessDGrad_,
-                        scratchGrad_,
+                        fullWorkspace_.lineSearchDir,
+                        fullWorkspace_.scratchPositions,
+                        fullWorkspace_.hessDGrad,
+                        fullWorkspace_.scratchGrad,
                         scratchBuffersDevice_,
                         scratchBufferPointersHost_,
                         stream_);
@@ -1619,7 +1617,7 @@ bool BfgsBatchMinimizer::minimizeWithDG(const int                               
                                                            systemIndices,
                                                            positions.data(),
                                                            systemDevice.grad.data(),
-                                                           inverseHessian_.data(),
+                                                           fullWorkspace_.inverseHessian.data(),
                                                            scratchBuffersDevice_.data(),
                                                            systemDevice.energyOuts.data(),
                                                            chiralWeight,

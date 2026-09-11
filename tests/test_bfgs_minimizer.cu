@@ -63,13 +63,13 @@ TEST(BFGSMinimizerTest, AllocationAndIdentity) {
                            nvMolKit::BfgsBackend::BATCHED,
                            nullptr);
   // expect (2 * 3)^2 + (3 * 3)^2 + (5*3)^2 (2*3)^2 = 378
-  int           hessianStorageSize = bfgsMinimizer.inverseHessian_.size();
+  int           hessianStorageSize = bfgsMinimizer.fullWorkspace_.inverseHessian.size();
   constexpr int wantStorageSize    = 378;
   ASSERT_EQ(hessianStorageSize, wantStorageSize);
 
   bfgsMinimizer.setHessianToIdentity();
 
-  const double*       hessian = bfgsMinimizer.inverseHessian_.data();
+  const double*       hessian = bfgsMinimizer.fullWorkspace_.inverseHessian.data();
   std::vector<double> hessianHost(hessianStorageSize);
   ASSERT_EQ(cudaMemcpy(hessianHost.data(), hessian, hessianStorageSize * sizeof(double), cudaMemcpyDeviceToHost), 0);
 
@@ -107,13 +107,13 @@ TEST(BFGSMinimizerTest, SinglePrecisionStorageAllocationAndIdentity) {
                        nullptr);
 
   constexpr int wantStorageSize = 378;
-  EXPECT_EQ(minimizer.inverseHessian_.size(), 0);
-  ASSERT_EQ(minimizer.inverseHessianFloat_.size(), wantStorageSize);
+  EXPECT_EQ(minimizer.fullWorkspace_.inverseHessian.size(), 0);
+  ASSERT_EQ(minimizer.singleWorkspace_.inverseHessian.size(), wantStorageSize);
 
   minimizer.setHessianToIdentity();
   std::vector<float> hessianHost(wantStorageSize);
   ASSERT_EQ(cudaMemcpy(hessianHost.data(),
-                       minimizer.inverseHessianFloat_.data(),
+                       minimizer.singleWorkspace_.inverseHessian.data(),
                        wantStorageSize * sizeof(float),
                        cudaMemcpyDeviceToHost),
             cudaSuccess);
@@ -290,9 +290,15 @@ class BFGSMinimizerTestFixture : public ::testing::Test {
   BatchedMolecularDeviceBuffers              systemDevice;
 };
 
-// Parameterized test for both BFGS backends
+struct BfgsBackendPrecisionCase {
+  nvMolKit::BfgsBackend   backend;
+  nvMolKit::PrecisionMode precision;
+};
+
+// Full precision exercises every backend. Single precision uses the typed
+// batched backend and runs the same behavioral test bodies.
 class BFGSMinimizerBackendTest : public BFGSMinimizerTestFixture,
-                                 public ::testing::WithParamInterface<nvMolKit::BfgsBackend> {};
+                                 public ::testing::WithParamInterface<BfgsBackendPrecisionCase> {};
 
 namespace {
 
@@ -304,7 +310,7 @@ void minimizeMMFF(nvMolKit::BfgsBatchMinimizer&     minimizer,
                   cudaStream_t                      stream          = nullptr,
                   const uint8_t*                    activeThisStage = nullptr) {
   if (minimizer.resolveBackend(systemHost.indices.atomStarts) == nvMolKit::BfgsBackend::BATCHED) {
-    nvMolKit::MMFFBatchedForcefield forcefield(systemHost, {}, stream);
+    nvMolKit::MMFFBatchedForcefield forcefield(systemHost, {}, stream, minimizer.precision());
     minimizer.minimize(numIters,
                        gradTol,
                        forcefield,
@@ -406,29 +412,29 @@ TEST_F(BFGSMinimizerTestFixture, LineSearchSetup) {
 
   std::vector<double> accumDirs(accumGrads.size());
   std::transform(accumGrads.begin(), accumGrads.end(), accumDirs.begin(), std::negate<double>());
-  bfgsMinimizer.lineSearchDir_.setFromVector(accumDirs);
+  bfgsMinimizer.fullWorkspace_.lineSearchDir.setFromVector(accumDirs);
 
   std::vector<double> maxStepsHost(numMols, 0.1);
-  bfgsMinimizer.lineSearchMaxSteps_.setFromVector(maxStepsHost);
+  bfgsMinimizer.fullWorkspace_.lineSearchMaxSteps.setFromVector(maxStepsHost);
   bfgsMinimizer.doLineSearchSetup(systemDevice.energyOuts.data());
 
-  ASSERT_EQ(bfgsMinimizer.lineSearchDir_.size(), wantDirs.size());
+  ASSERT_EQ(bfgsMinimizer.fullWorkspace_.lineSearchDir.size(), wantDirs.size());
   std::vector<double> gotDirs(wantDirs.size());
   ASSERT_EQ(0,
             cudaMemcpy(gotDirs.data(),
-                       bfgsMinimizer.lineSearchDir_.data(),
+                       bfgsMinimizer.fullWorkspace_.lineSearchDir.data(),
                        wantDirs.size() * sizeof(double),
                        cudaMemcpyDeviceToHost));
   std::vector<double> gotSlopes(numMols);
   ASSERT_EQ(0,
             cudaMemcpy(gotSlopes.data(),
-                       bfgsMinimizer.lineSearchSlope_.data(),
+                       bfgsMinimizer.fullWorkspace_.lineSearchSlope.data(),
                        wantSlopes.size() * sizeof(double),
                        cudaMemcpyDeviceToHost));
   std::vector<double> gotLambdaMins(numMols);
   ASSERT_EQ(0,
             cudaMemcpy(gotLambdaMins.data(),
-                       bfgsMinimizer.lineSearchLambdaMins_.data(),
+                       bfgsMinimizer.fullWorkspace_.lineSearchLambdaMins.data(),
                        wantLambdaMins.size() * sizeof(double),
                        cudaMemcpyDeviceToHost));
   EXPECT_THAT(gotDirs, ::testing::Pointwise(::testing::DoubleNear(1e-4), wantDirs));
@@ -474,7 +480,7 @@ TEST_F(BFGSMinimizerTestFixture, ComputeMaxSteps) {
   std::vector<double> gotMaxSteps(numMols);
   ASSERT_EQ(0,
             cudaMemcpy(gotMaxSteps.data(),
-                       bfgsMinimizer.lineSearchMaxSteps_.data(),
+                       bfgsMinimizer.fullWorkspace_.lineSearchMaxSteps.data(),
                        gotMaxSteps.size() * sizeof(double),
                        cudaMemcpyDeviceToHost));
   EXPECT_THAT(gotMaxSteps, ::testing::Pointwise(::testing::DoubleNear(1e-4), wantMaxSteps));
@@ -565,7 +571,7 @@ TEST_F(BFGSMinimizerTestFixture, FullLineSearch) {
 
   eFunc(nullptr);
   nvMolKit::MMFF::computeGradients(systemDevice);
-  nvMolKit::copyAndInvert(systemDevice.grad, bfgsMinimizer.lineSearchDir_);
+  nvMolKit::copyAndInvert(systemDevice.grad, bfgsMinimizer.fullWorkspace_.lineSearchDir);
   bfgsMinimizer.doLineSearchSetup(systemDevice.energyOuts.data());
   auto             res                    = debugDump(bfgsMinimizer.lineSearchStatus_, "statuses");
   int              lineSearchIter         = 0;
@@ -576,8 +582,8 @@ TEST_F(BFGSMinimizerTestFixture, FullLineSearch) {
 
     systemDevice.energyOuts.zero();
     systemDevice.energyBuffer.zero();
-    auto res2 = debugDump(bfgsMinimizer.scratchPositions_, "scratchpos");
-    eFunc(bfgsMinimizer.scratchPositions_.data());
+    auto res2 = debugDump(bfgsMinimizer.fullWorkspace_.scratchPositions, "scratchpos");
+    eFunc(bfgsMinimizer.fullWorkspace_.scratchPositions.data());
     auto res3 = debugDump(systemDevice.energyOuts, "energyOuts");
     bfgsMinimizer.doLineSearchPostEnergy(lineSearchIter);
     lineSearchIter++;
@@ -587,7 +593,7 @@ TEST_F(BFGSMinimizerTestFixture, FullLineSearch) {
   std::vector<double> gotPositions(accumPositions.size());
   ASSERT_EQ(0,
             cudaMemcpy(gotPositions.data(),
-                       bfgsMinimizer.scratchPositions_.data(),
+                       bfgsMinimizer.fullWorkspace_.scratchPositions.data(),
                        gotPositions.size() * sizeof(double),
                        cudaMemcpyDeviceToHost));
   std::vector<double> gotEnergies(accumEnergies.size());
@@ -638,10 +644,10 @@ TEST_F(BFGSMinimizerTestFixture, SinglePrecisionE2EMinimizationUsesRelaxedTolera
 }
 
 TEST_P(BFGSMinimizerBackendTest, E2EMinimizationSingleSystemUnconvergedMatches) {
-  const nvMolKit::BfgsBackend backend = GetParam();
-  nvMolKit::ScopedStream      stream;
-  const int                   numMols  = 1;
-  const int                   maxIters = 10;
+  const auto [backend, precision] = GetParam();
+  nvMolKit::ScopedStream stream;
+  const int              numMols  = 1;
+  const int              maxIters = 10;
   setUpMMFFSystems(numMols);
 
   cudaStreamSynchronize(nullptr);
@@ -650,7 +656,8 @@ TEST_P(BFGSMinimizerBackendTest, E2EMinimizationSingleSystemUnconvergedMatches) 
                                              nvMolKit::DebugLevel::STEPWISE,
                                              true,
                                              stream.stream(),
-                                             backend);
+                                             backend,
+                                             precision);
 
   minimizeMMFF(bfgsMinimizer, maxIters, 1e-4, systemHost, systemDevice, stream.stream());
 
@@ -682,12 +689,18 @@ TEST_P(BFGSMinimizerBackendTest, E2EMinimizationSingleSystemUnconvergedMatches) 
 }
 
 TEST_P(BFGSMinimizerBackendTest, E2EMinimizationSingleSystemConvergedMatches) {
-  const nvMolKit::BfgsBackend backend  = GetParam();
-  const int                   numMols  = 1;
-  const int                   maxIters = 50;
+  const auto [backend, precision] = GetParam();
+  const int numMols               = 1;
+  const int maxIters              = 50;
   setUpMMFFSystems(numMols);
 
-  nvMolKit::BfgsBatchMinimizer bfgsMinimizer(/*dataDim=*/3, nvMolKit::DebugLevel::STEPWISE, true, nullptr, backend);
+  nvMolKit::BfgsBatchMinimizer bfgsMinimizer(
+    /*dataDim=*/3,
+    nvMolKit::DebugLevel::STEPWISE,
+    true,
+    nullptr,
+    backend,
+    precision);
 
   minimizeMMFF(bfgsMinimizer, maxIters, 1e-4, systemHost, systemDevice);
 
@@ -719,12 +732,18 @@ TEST_P(BFGSMinimizerBackendTest, E2EMinimizationSingleSystemConvergedMatches) {
 }
 
 TEST_P(BFGSMinimizerBackendTest, E2EMinimizationSingleSystemConstrainedMatches) {
-  const nvMolKit::BfgsBackend backend  = GetParam();
-  const int                   numMols  = 1;
-  const int                   maxIters = 200;
+  const auto [backend, precision] = GetParam();
+  const int numMols               = 1;
+  const int maxIters              = 200;
   setUpConstrainedMMFFSystems(numMols);
 
-  nvMolKit::BfgsBatchMinimizer bfgsMinimizer(/*dataDim=*/3, nvMolKit::DebugLevel::STEPWISE, true, nullptr, backend);
+  nvMolKit::BfgsBatchMinimizer bfgsMinimizer(
+    /*dataDim=*/3,
+    nvMolKit::DebugLevel::STEPWISE,
+    true,
+    nullptr,
+    backend,
+    precision);
 
   minimizeMMFF(bfgsMinimizer, maxIters, 1e-4, systemHost, systemDevice);
 
@@ -754,12 +773,18 @@ TEST_P(BFGSMinimizerBackendTest, E2EMinimizationSingleSystemConstrainedMatches) 
 }
 
 TEST_P(BFGSMinimizerBackendTest, E2EMinimizationMultiSystemSameMolMatchesUnconverged) {
-  const nvMolKit::BfgsBackend backend  = GetParam();
-  const int                   numMols  = 10;
-  const int                   maxIters = 10;
+  const auto [backend, precision] = GetParam();
+  const int numMols               = 10;
+  const int maxIters              = 10;
   setUpMMFFSystems(numMols, true);
 
-  nvMolKit::BfgsBatchMinimizer bfgsMinimizer(/*dim=*/3, nvMolKit::DebugLevel::STEPWISE, true, nullptr, backend);
+  nvMolKit::BfgsBatchMinimizer bfgsMinimizer(
+    /*dim=*/3,
+    nvMolKit::DebugLevel::STEPWISE,
+    true,
+    nullptr,
+    backend,
+    precision);
 
   minimizeMMFF(bfgsMinimizer, maxIters, 1e-4, systemHost, systemDevice);
 
@@ -791,12 +816,18 @@ TEST_P(BFGSMinimizerBackendTest, E2EMinimizationMultiSystemSameMolMatchesUnconve
 }
 
 TEST_P(BFGSMinimizerBackendTest, E2EMinimizationMultiSystemSameMolMatchesConverged) {
-  const nvMolKit::BfgsBackend backend  = GetParam();
-  const int                   numMols  = 10;
-  const int                   maxIters = 100;
+  const auto [backend, precision] = GetParam();
+  const int numMols               = 10;
+  const int maxIters              = 100;
   setUpMMFFSystems(numMols, true);
 
-  nvMolKit::BfgsBatchMinimizer bfgsMinimizer(/*dim=*/3, nvMolKit::DebugLevel::STEPWISE, true, nullptr, backend);
+  nvMolKit::BfgsBatchMinimizer bfgsMinimizer(
+    /*dim=*/3,
+    nvMolKit::DebugLevel::STEPWISE,
+    true,
+    nullptr,
+    backend,
+    precision);
 
   minimizeMMFF(bfgsMinimizer, maxIters, 1e-4, systemHost, systemDevice);
 
@@ -827,12 +858,18 @@ TEST_P(BFGSMinimizerBackendTest, E2EMinimizationMultiSystemSameMolMatchesConverg
 }
 
 TEST_P(BFGSMinimizerBackendTest, E2EMinimizationMultiSystemMultiMolsMatchesConverged) {
-  const nvMolKit::BfgsBackend backend  = GetParam();
-  const int                   numMols  = 250;
-  const int                   maxIters = 1000;
+  const auto [backend, precision] = GetParam();
+  const int numMols               = 250;
+  const int maxIters              = 1000;
   setUpMMFFSystems(numMols, false);
 
-  nvMolKit::BfgsBatchMinimizer bfgsMinimizer(/*dim=*/3, nvMolKit::DebugLevel::STEPWISE, true, nullptr, backend);
+  nvMolKit::BfgsBatchMinimizer bfgsMinimizer(
+    /*dim=*/3,
+    nvMolKit::DebugLevel::STEPWISE,
+    true,
+    nullptr,
+    backend,
+    precision);
 
   minimizeMMFF(bfgsMinimizer, maxIters, 1e-4, systemHost, systemDevice);
 
@@ -870,7 +907,7 @@ TEST_P(BFGSMinimizerBackendTest, E2EMinimizationMultiSystemMultiMolsMatchesConve
 }
 
 TEST_P(BFGSMinimizerBackendTest, E2EMinimizationLargePathMatches) {
-  const nvMolKit::BfgsBackend backend = GetParam();
+  const auto [backend, precision] = GetParam();
   getMols(getTestDataFolderPath() + "/60plus_atom_mols.sdf", mols, 1);
   setUpCommon();
 
@@ -881,14 +918,20 @@ TEST_P(BFGSMinimizerBackendTest, E2EMinimizationLargePathMatches) {
     refStartEnergies.push_back(molFF->calcEnergy());
   }
 
-  nvMolKit::MMFFBatchedForcefield forcefield(systemHost);
+  nvMolKit::MMFFBatchedForcefield forcefield(systemHost, {}, nullptr, precision);
   ASSERT_EQ(forcefield.computeEnergy(systemDevice.energyOuts.data(), systemDevice.positions.data()), cudaSuccess);
   std::vector<double> gotStartEnergies(systemDevice.energyOuts.size());
   systemDevice.energyOuts.copyToHost(gotStartEnergies);
   ASSERT_EQ(cudaStreamSynchronize(systemDevice.energyOuts.stream()), cudaSuccess);
 
   const int                    maxIters = 400;
-  nvMolKit::BfgsBatchMinimizer bfgsMinimizer(/*dim=*/3, nvMolKit::DebugLevel::STEPWISE, true, nullptr, backend);
+  nvMolKit::BfgsBatchMinimizer bfgsMinimizer(
+    /*dim=*/3,
+    nvMolKit::DebugLevel::STEPWISE,
+    true,
+    nullptr,
+    backend,
+    precision);
 
   minimizeMMFF(bfgsMinimizer, maxIters, 1e-4, systemHost, systemDevice);
 
@@ -1347,7 +1390,7 @@ TEST_F(BFGSMinimizerHarmonicTestFixture, MultipleMinimizeCallsEquivalentToSingle
 }
 
 TEST_P(BFGSMinimizerBackendTest, ReuseMinimizer_VariedSizes) {
-  const nvMolKit::BfgsBackend backend = GetParam();
+  const auto [backend, precision] = GetParam();
 
   // System 1: Small (1 molecule)
   setUpMMFFSystems(1, false);
@@ -1378,7 +1421,7 @@ TEST_P(BFGSMinimizerBackendTest, ReuseMinimizer_VariedSizes) {
 
   // Reference for system 1
   {
-    nvMolKit::BfgsBatchMinimizer minimizer(3, nvMolKit::DebugLevel::NONE, true, nullptr, backend);
+    nvMolKit::BfgsBatchMinimizer minimizer(3, nvMolKit::DebugLevel::NONE, true, nullptr, backend, precision);
     minimizeMMFF(minimizer, maxIters, 1e-4, system1Host, system1Device);
     referenceEnergies[0].resize(system1Device.energyOuts.size());
     system1Device.energyOuts.copyToHost(referenceEnergies[0]);
@@ -1388,7 +1431,7 @@ TEST_P(BFGSMinimizerBackendTest, ReuseMinimizer_VariedSizes) {
 
   // Reference for system 2
   {
-    nvMolKit::BfgsBatchMinimizer minimizer(3, nvMolKit::DebugLevel::NONE, true, nullptr, backend);
+    nvMolKit::BfgsBatchMinimizer minimizer(3, nvMolKit::DebugLevel::NONE, true, nullptr, backend, precision);
     minimizeMMFF(minimizer, maxIters, 1e-4, system2Host, system2Device);
     referenceEnergies[1].resize(system2Device.energyOuts.size());
     system2Device.energyOuts.copyToHost(referenceEnergies[1]);
@@ -1398,7 +1441,7 @@ TEST_P(BFGSMinimizerBackendTest, ReuseMinimizer_VariedSizes) {
 
   // Reference for system 3
   {
-    nvMolKit::BfgsBatchMinimizer minimizer(3, nvMolKit::DebugLevel::NONE, true, nullptr, backend);
+    nvMolKit::BfgsBatchMinimizer minimizer(3, nvMolKit::DebugLevel::NONE, true, nullptr, backend, precision);
     minimizeMMFF(minimizer, maxIters, 1e-4, system3Host, system3Device);
     referenceEnergies[2].resize(system3Device.energyOuts.size());
     system3Device.energyOuts.copyToHost(referenceEnergies[2]);
@@ -1432,7 +1475,7 @@ TEST_P(BFGSMinimizerBackendTest, ReuseMinimizer_VariedSizes) {
   system3Device = std::move(systemDevice);
 
   // Reused minimizer: small -> medium -> large -> medium -> small
-  nvMolKit::BfgsBatchMinimizer reusedMinimizer(3, nvMolKit::DebugLevel::NONE, true, nullptr, backend);
+  nvMolKit::BfgsBatchMinimizer reusedMinimizer(3, nvMolKit::DebugLevel::NONE, true, nullptr, backend, precision);
 
   // Minimize system 1 (small)
   minimizeMMFF(reusedMinimizer, maxIters, 1e-4, system1Host, system1Device);
@@ -1510,26 +1553,26 @@ TEST(BFGSPrecisionStateTest, PresetsAllocateResolvedStateAndHessianWidths) {
     EXPECT_EQ(
       minimizer.resolveBackend(atomStarts),
       mode == nvMolKit::PrecisionMode::FULL ? nvMolKit::BfgsBackend::PER_MOLECULE : nvMolKit::BfgsBackend::BATCHED);
-    EXPECT_EQ(minimizer.lineSearchDirFloat_.size() != 0, singlePrecision);
-    EXPECT_EQ(minimizer.scratchPositionsFloat_.size() != 0, singlePrecision);
-    EXPECT_EQ(minimizer.positionsFloat_.size() != 0, singlePrecision);
-    EXPECT_EQ(minimizer.gradFloat_.size() != 0, singlePrecision);
-    EXPECT_EQ(minimizer.energyFloat_.size() != 0, singlePrecision);
-    EXPECT_EQ(minimizer.scratchGradFloat_.size() != 0, singlePrecision);
-    EXPECT_EQ(minimizer.hessDGradFloat_.size() != 0, singlePrecision);
-    EXPECT_EQ(minimizer.gradScalesFloat_.size() != 0, singlePrecision);
-    EXPECT_EQ(minimizer.lineSearchLambdasFloat_.size() != 0, singlePrecision);
-    EXPECT_EQ(minimizer.lineSearchSlopeFloat_.size() != 0, singlePrecision);
-    EXPECT_EQ(minimizer.lineSearchMaxStepsFloat_.size() != 0, singlePrecision);
-    EXPECT_EQ(minimizer.lineSearchStoredEnergyFloat_.size() != 0, singlePrecision);
-    EXPECT_EQ(minimizer.lineSearchDir_.size() != 0, !singlePrecision);
-    EXPECT_EQ(minimizer.scratchGrad_.size() != 0, !singlePrecision);
-    EXPECT_EQ(minimizer.hessDGrad_.size() != 0, !singlePrecision);
-    EXPECT_EQ(minimizer.gradScales_.size() != 0, !singlePrecision);
-    EXPECT_EQ(minimizer.inverseHessianFloat_.size() != 0, singlePrecision);
-    EXPECT_EQ(minimizer.inverseHessian_.size() != 0, !singlePrecision);
+    EXPECT_EQ(minimizer.singleWorkspace_.lineSearchDir.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.singleWorkspace_.scratchPositions.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.singleWorkspace_.positions.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.singleWorkspace_.grad.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.singleWorkspace_.energy.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.singleWorkspace_.scratchGrad.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.singleWorkspace_.hessDGrad.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.singleWorkspace_.gradScales.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.singleWorkspace_.lineSearchLambdas.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.singleWorkspace_.lineSearchSlope.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.singleWorkspace_.lineSearchMaxSteps.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.singleWorkspace_.lineSearchStoredEnergy.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.fullWorkspace_.lineSearchDir.size() != 0, !singlePrecision);
+    EXPECT_EQ(minimizer.fullWorkspace_.scratchGrad.size() != 0, !singlePrecision);
+    EXPECT_EQ(minimizer.fullWorkspace_.hessDGrad.size() != 0, !singlePrecision);
+    EXPECT_EQ(minimizer.fullWorkspace_.gradScales.size() != 0, !singlePrecision);
+    EXPECT_EQ(minimizer.singleWorkspace_.inverseHessian.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.fullWorkspace_.inverseHessian.size() != 0, !singlePrecision);
     // Required double ABI bridge exists even when candidate state is float.
-    EXPECT_EQ(minimizer.scratchPositions_.size() != 0, !singlePrecision);
+    EXPECT_EQ(minimizer.fullWorkspace_.scratchPositions.size() != 0, !singlePrecision);
   }
 }
 
@@ -1553,20 +1596,23 @@ TEST_F(BFGSMinimizerHarmonicTestFixture, AllPrecisionPresetsExecuteNumerically) 
   }
 }
 
-INSTANTIATE_TEST_SUITE_P(BFGSBackends,
-                         BFGSMinimizerBackendTest,
-                         ::testing::Values(nvMolKit::BfgsBackend::BATCHED,
-                                           nvMolKit::BfgsBackend::PER_MOLECULE,
-                                           nvMolKit::BfgsBackend::HYBRID),
-                         [](const ::testing::TestParamInfo<nvMolKit::BfgsBackend>& info) {
-                           switch (info.param) {
-                             case nvMolKit::BfgsBackend::BATCHED:
-                               return "Batched";
-                             case nvMolKit::BfgsBackend::PER_MOLECULE:
-                               return "PerMolecule";
-                             case nvMolKit::BfgsBackend::HYBRID:
-                               return "Hybrid";
-                             default:
-                               return "Unknown";
-                           }
-                         });
+INSTANTIATE_TEST_SUITE_P(
+  BFGSBackends,
+  BFGSMinimizerBackendTest,
+  ::testing::Values(BfgsBackendPrecisionCase{nvMolKit::BfgsBackend::BATCHED, nvMolKit::PrecisionMode::FULL},
+                    BfgsBackendPrecisionCase{nvMolKit::BfgsBackend::PER_MOLECULE, nvMolKit::PrecisionMode::FULL},
+                    BfgsBackendPrecisionCase{nvMolKit::BfgsBackend::HYBRID, nvMolKit::PrecisionMode::FULL},
+                    BfgsBackendPrecisionCase{nvMolKit::BfgsBackend::BATCHED, nvMolKit::PrecisionMode::SINGLE}),
+  [](const ::testing::TestParamInfo<BfgsBackendPrecisionCase>& info) {
+    std::string name = nvMolKit::precisionModeName(info.param.precision);
+    switch (info.param.backend) {
+      case nvMolKit::BfgsBackend::BATCHED:
+        return name + "Batched";
+      case nvMolKit::BfgsBackend::PER_MOLECULE:
+        return name + "PerMolecule";
+      case nvMolKit::BfgsBackend::HYBRID:
+        return name + "Hybrid";
+      default:
+        return name + "Unknown";
+    }
+  });

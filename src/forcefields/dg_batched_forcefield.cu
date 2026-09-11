@@ -66,7 +66,7 @@ cudaError_t DGBatchedForcefield::computeEnergy(double*        energyOuts,
   if (singlePrecision_) {
     positionsFloat_.resize(totalPositions());
     const auto err = detail::convertDeviceArray(positionsFloat_.data(), positions, totalPositions(), stream);
-    return err == cudaSuccess ? computeEnergyFloat(energyOuts, positionsFloat_.data(), activeSystemMask, stream) : err;
+    return err == cudaSuccess ? computeEnergy(energyOuts, positionsFloat_.data(), activeSystemMask, stream) : err;
   }
   auto& buffers = std::get<DistGeom::BatchedMolecularDeviceBuffers>(systemDevice_);
   return DistGeom::computeEnergy(buffers,
@@ -91,7 +91,7 @@ cudaError_t DGBatchedForcefield::computeGradients(double*        grad,
     if (err != cudaSuccess)
       return err;
     gradientsFloat_.zero();
-    err = computeGradientsFloat(gradientsFloat_.data(), positionsFloat_.data(), activeSystemMask, stream);
+    err = computeGradients(gradientsFloat_.data(), positionsFloat_.data(), activeSystemMask, stream);
     return err == cudaSuccess ? detail::convertDeviceArray(grad, gradientsFloat_.data(), totalPositions(), stream) :
                                 err;
   }
@@ -106,10 +106,10 @@ cudaError_t DGBatchedForcefield::computeGradients(double*        grad,
                                     stream);
 }
 
-cudaError_t DGBatchedForcefield::computeEnergyFloat(double*        energyOuts,
-                                                    const float*   positions,
-                                                    const uint8_t* activeSystemMask,
-                                                    cudaStream_t   stream) {
+cudaError_t DGBatchedForcefield::computeEnergy(double*        energyOuts,
+                                               const float*   positions,
+                                               const uint8_t* activeSystemMask,
+                                               cudaStream_t   stream) {
   if (!singlePrecision_) {
     positionsComputeDouble_.resize(totalPositions());
     const auto err = detail::convertDeviceArray(positionsComputeDouble_.data(), positions, totalPositions(), stream);
@@ -131,10 +131,10 @@ cudaError_t DGBatchedForcefield::computeEnergyFloat(double*        energyOuts,
     stream);
 }
 
-cudaError_t DGBatchedForcefield::computeGradientsFloat(float*         grad,
-                                                       const float*   positions,
-                                                       const uint8_t* activeSystemMask,
-                                                       cudaStream_t   stream) {
+cudaError_t DGBatchedForcefield::computeGradients(float*         grad,
+                                                  const float*   positions,
+                                                  const uint8_t* activeSystemMask,
+                                                  cudaStream_t   stream) {
   if (!singlePrecision_) {
     positionsComputeDouble_.resize(totalPositions());
     gradientsComputeDouble_.resize(totalPositions());

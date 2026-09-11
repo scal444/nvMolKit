@@ -16,7 +16,7 @@
 #include <boost/python.hpp>
 
 #include "src/minimizer/fire_options.h"
-#include "src/precision_mode.h"
+#include "src/precision/precision_mode.h"
 
 BOOST_PYTHON_MODULE(_types) {
   boost::python::enum_<nvMolKit::PrecisionMode>("PrecisionMode")

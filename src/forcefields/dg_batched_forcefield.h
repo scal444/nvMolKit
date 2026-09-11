@@ -20,7 +20,7 @@
 
 #include "src/forcefields/batched_forcefield.h"
 #include "src/forcefields/dist_geom.h"
-#include "src/precision_mode.h"
+#include "src/precision/precision_mode.h"
 
 namespace nvMolKit {
 
@@ -29,7 +29,7 @@ namespace nvMolKit {
 //! This wrapper exposes DG host-side data through the generic
 //! `BatchedForcefield` interface so batched BFGS can call into DG energy and
 //! gradient evaluation without keeping DG-specific dispatch in the minimizer.
-class DGBatchedForcefield final : public BatchedForcefield {
+class DGBatchedForcefield final : public BatchedForcefield, public SinglePrecisionBatchedForcefield {
  public:
   //! \brief Builds a generic batched-forcefield view over DG host data.
   //! \param molSystemHost Flattened DG host-side system description.
@@ -57,8 +57,8 @@ class DGBatchedForcefield final : public BatchedForcefield {
                                const double*  positions,
                                const uint8_t* activeSystemMask = nullptr,
                                cudaStream_t   stream           = nullptr) override;
-  cudaError_t computeEnergyFloat(double*, const float*, const uint8_t* = nullptr, cudaStream_t = nullptr) override;
-  cudaError_t computeGradientsFloat(float*, const float*, const uint8_t* = nullptr, cudaStream_t = nullptr) override;
+  cudaError_t computeEnergy(double*, const float*, const uint8_t* = nullptr, cudaStream_t = nullptr) override;
+  cudaError_t computeGradients(float*, const float*, const uint8_t* = nullptr, cudaStream_t = nullptr) override;
 
  private:
   std::variant<DistGeom::BatchedMolecularDeviceBuffers, DistGeom::BatchedMolecularDeviceBuffersF32Params> systemDevice_;

@@ -21,7 +21,7 @@
 #include "nvmolkit/boost_python_utils.h"
 #include "nvmolkit/device_result_python.h"
 #include "src/etkdg.h"
-#include "src/precision_mode.h"
+#include "src/precision/precision_mode.h"
 
 namespace bp = boost::python;
 

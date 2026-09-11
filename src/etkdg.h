@@ -22,7 +22,7 @@
 #include "src/conformer/device_coord_result.h"
 #include "src/hardware_options.h"
 #include "src/minimizer/bfgs_minimize.h"
-#include "src/precision_mode.h"
+#include "src/precision/precision_mode.h"
 
 namespace RDKit {
 class ROMol;

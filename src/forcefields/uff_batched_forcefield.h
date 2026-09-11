@@ -20,12 +20,12 @@
 
 #include "src/forcefields/batched_forcefield.h"
 #include "src/forcefields/uff.h"
-#include "src/precision_mode.h"
+#include "src/precision/precision_mode.h"
 #include "src/utils/device_vector.h"
 
 namespace nvMolKit {
 
-class UFFBatchedForcefield final : public BatchedForcefield {
+class UFFBatchedForcefield final : public BatchedForcefield, public SinglePrecisionBatchedForcefield {
  public:
   explicit UFFBatchedForcefield(const UFF::BatchedMolecularSystemHost& molSystemHost,
                                 BatchedForcefieldMetadata              metadata  = {},
@@ -41,14 +41,14 @@ class UFFBatchedForcefield final : public BatchedForcefield {
                                const double*  positions,
                                const uint8_t* activeSystemMask = nullptr,
                                cudaStream_t   stream           = nullptr) override;
-  cudaError_t computeEnergyFloat(double*        energyOuts,
-                                 const float*   positions,
-                                 const uint8_t* activeSystemMask = nullptr,
-                                 cudaStream_t   stream           = nullptr) override;
-  cudaError_t computeGradientsFloat(float*         grad,
-                                    const float*   positions,
-                                    const uint8_t* activeSystemMask = nullptr,
-                                    cudaStream_t   stream           = nullptr) override;
+  cudaError_t computeEnergy(double*        energyOuts,
+                            const float*   positions,
+                            const uint8_t* activeSystemMask = nullptr,
+                            cudaStream_t   stream           = nullptr) override;
+  cudaError_t computeGradients(float*         grad,
+                               const float*   positions,
+                               const uint8_t* activeSystemMask = nullptr,
+                               cudaStream_t   stream           = nullptr) override;
 
  private:
   std::variant<UFF::BatchedMolecularDeviceBuffers, UFF::BatchedMolecularDeviceBuffersF32> systemDevice_;

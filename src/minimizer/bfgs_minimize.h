@@ -20,7 +20,7 @@
 #include <vector>
 
 #include "src/minimizer/bfgs_types.h"
-#include "src/precision_mode.h"
+#include "src/precision/precision_mode.h"
 #include "src/utils/device_vector.h"
 #include "src/utils/host_vector.h"
 
@@ -50,6 +50,52 @@ using EnergyFunctor      = std::function<void(const double*)>;
 using GradFunctor        = std::function<void()>;
 using FloatEnergyFunctor = std::function<void(const float*)>;
 using FloatGradFunctor   = std::function<void()>;
+
+//! Precision-dependent device state for the batched BFGS implementation.
+template <typename real, typename reduceT, typename storageT> struct BfgsWorkspace {
+  using ComputeScalar   = real;
+  using ReductionScalar = reduceT;
+  using StorageScalar   = storageT;
+
+  AsyncDeviceVector<storageT> scratchPositions;
+  AsyncDeviceVector<storageT> positions;
+  AsyncDeviceVector<storageT> grad;
+  AsyncDeviceVector<storageT> lineSearchDir;
+  AsyncDeviceVector<storageT> lineSearchLambdaMins;
+  AsyncDeviceVector<storageT> lineSearchLambdas;
+  AsyncDeviceVector<storageT> lineSearchLambdas2;
+  AsyncDeviceVector<storageT> lineSearchSlope;
+  AsyncDeviceVector<storageT> lineSearchMaxSteps;
+  AsyncDeviceVector<storageT> lineSearchStoredEnergy;
+  AsyncDeviceVector<storageT> lineSearchEnergyScratch;
+  AsyncDeviceVector<storageT> energy;
+  AsyncDeviceVector<storageT> scratchGrad;
+  AsyncDeviceVector<storageT> gradScales;
+  AsyncDeviceVector<storageT> inverseHessian;
+  AsyncDeviceVector<storageT> hessDGrad;
+
+  void setStream(cudaStream_t stream) {
+    scratchPositions.setStream(stream);
+    positions.setStream(stream);
+    grad.setStream(stream);
+    lineSearchDir.setStream(stream);
+    lineSearchLambdaMins.setStream(stream);
+    lineSearchLambdas.setStream(stream);
+    lineSearchLambdas2.setStream(stream);
+    lineSearchSlope.setStream(stream);
+    lineSearchMaxSteps.setStream(stream);
+    lineSearchStoredEnergy.setStream(stream);
+    lineSearchEnergyScratch.setStream(stream);
+    energy.setStream(stream);
+    scratchGrad.setStream(stream);
+    gradScales.setStream(stream);
+    inverseHessian.setStream(stream);
+    hessDGrad.setStream(stream);
+  }
+};
+
+using FullBfgsWorkspace   = BfgsWorkspace<double, double, double>;
+using SingleBfgsWorkspace = BfgsWorkspace<float, float, float>;
 
 //! BFGS Batch Minimizer
 //!
@@ -192,34 +238,15 @@ struct BfgsBatchMinimizer {
   AsyncDeviceVector<int> activeSystemIndices_;  // Indices of systems that are active in the current iteration.
   mutable int            numUnfinishedSystems_ = 0;
 
-  // Line-search candidates and the SINGLE profile's persistent working arrays.
-  // Public coordinates and gradients remain double precision at the API boundary.
-  AsyncDeviceVector<double>  scratchPositions_;
-  AsyncDeviceVector<float>   scratchPositionsFloat_;
-  AsyncDeviceVector<float>   positionsFloat_;
-  AsyncDeviceVector<float>   gradFloat_;
+  // Precision-dependent working state. Public coordinates, gradients, and
+  // energies remain double precision at the API boundary.
+  FullBfgsWorkspace          fullWorkspace_;
+  SingleBfgsWorkspace        singleWorkspace_;
   AsyncDeviceVector<int16_t> statuses_;
 
-  // Intermediate buffers used for linear search
-  AsyncDeviceVector<double>  lineSearchDir_;  // xi
-  AsyncDeviceVector<float>   lineSearchDirFloat_;
+  // Precision-independent line-search status and public energy output.
   AsyncDeviceVector<int16_t> lineSearchStatus_;
-  AsyncDeviceVector<double>  lineSearchLambdaMins_;
-  AsyncDeviceVector<float>   lineSearchLambdaMinsFloat_;
-  AsyncDeviceVector<double>  lineSearchLambdas_;
-  AsyncDeviceVector<float>   lineSearchLambdasFloat_;
-  AsyncDeviceVector<double>  lineSearchLambdas2_;
-  AsyncDeviceVector<float>   lineSearchLambdas2Float_;
-  AsyncDeviceVector<double>  lineSearchSlope_;
-  AsyncDeviceVector<float>   lineSearchSlopeFloat_;
-  AsyncDeviceVector<double>  lineSearchMaxSteps_;
-  AsyncDeviceVector<float>   lineSearchMaxStepsFloat_;
-
-  AsyncDeviceVector<double> lineSearchStoredEnergy_;
-  AsyncDeviceVector<float>  lineSearchStoredEnergyFloat_;
-  AsyncDeviceVector<double> lineSearchEnergyScratch_;
-  AsyncDeviceVector<float>  lineSearchEnergyScratchFloat_;
-  AsyncDeviceVector<double> lineSearchEnergyOut_;
+  AsyncDeviceVector<double>  lineSearchEnergyOut_;
 
   // Temporary buffers for counting finished systems. Mutable to all
   // for const counting methods.
@@ -228,19 +255,9 @@ struct BfgsBatchMinimizer {
   mutable PinnedHostVector<int>      loopStatusHost_;
 
   AsyncDeviceVector<double> finalEnergies_;
-  AsyncDeviceVector<float>  energyFloat_;
 
   // Hessian approximation and scratch buffers.
   AsyncDeviceVector<int> hessianStarts_;
-
-  AsyncDeviceVector<double> scratchGrad_;
-  AsyncDeviceVector<float>  scratchGradFloat_;
-  AsyncDeviceVector<double> gradScales_;
-  AsyncDeviceVector<float>  gradScalesFloat_;
-  AsyncDeviceVector<double> inverseHessian_;
-  AsyncDeviceVector<float>  inverseHessianFloat_;
-  AsyncDeviceVector<double> hessDGrad_;
-  AsyncDeviceVector<float>  hessDGradFloat_;
 
   int  dataDim_        = 3;      // Dimensionality of positions.
   bool scaleGrads_     = true;   // Whether to scale gradients to match RDKit forcefield.

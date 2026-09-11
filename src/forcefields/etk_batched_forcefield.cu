@@ -64,7 +64,7 @@ cudaError_t ETKBatchedForcefield::computeEnergy(double*        energyOuts,
   if (singlePrecision_) {
     positionsFloat_.resize(totalPositions());
     const auto err = detail::convertDeviceArray(positionsFloat_.data(), positions, totalPositions(), stream);
-    return err == cudaSuccess ? computeEnergyFloat(energyOuts, positionsFloat_.data(), activeSystemMask, stream) : err;
+    return err == cudaSuccess ? computeEnergy(energyOuts, positionsFloat_.data(), activeSystemMask, stream) : err;
   }
   auto& buffers = std::get<DistGeom::BatchedMolecular3DDeviceBuffers>(systemDevice_);
   return DistGeom::computeEnergyETK(buffers,
@@ -88,7 +88,7 @@ cudaError_t ETKBatchedForcefield::computeGradients(double*        grad,
     if (err != cudaSuccess)
       return err;
     gradientsFloat_.zero();
-    err = computeGradientsFloat(gradientsFloat_.data(), positionsFloat_.data(), activeSystemMask, stream);
+    err = computeGradients(gradientsFloat_.data(), positionsFloat_.data(), activeSystemMask, stream);
     return err == cudaSuccess ? detail::convertDeviceArray(grad, gradientsFloat_.data(), totalPositions(), stream) :
                                 err;
   }
@@ -131,10 +131,10 @@ cudaError_t ETKBatchedForcefield::computePlanarEnergy(double*        energyOuts,
                                        stream);
 }
 
-cudaError_t ETKBatchedForcefield::computeEnergyFloat(double*        energyOuts,
-                                                     const float*   positions,
-                                                     const uint8_t* activeSystemMask,
-                                                     cudaStream_t   stream) {
+cudaError_t ETKBatchedForcefield::computeEnergy(double*        energyOuts,
+                                                const float*   positions,
+                                                const uint8_t* activeSystemMask,
+                                                cudaStream_t   stream) {
   if (!singlePrecision_) {
     positionsComputeDouble_.resize(totalPositions());
     const auto err = detail::convertDeviceArray(positionsComputeDouble_.data(), positions, totalPositions(), stream);
@@ -153,10 +153,10 @@ cudaError_t ETKBatchedForcefield::computeEnergyFloat(double*        energyOuts,
     stream);
 }
 
-cudaError_t ETKBatchedForcefield::computeGradientsFloat(float*         grad,
-                                                        const float*   positions,
-                                                        const uint8_t* activeSystemMask,
-                                                        cudaStream_t   stream) {
+cudaError_t ETKBatchedForcefield::computeGradients(float*         grad,
+                                                   const float*   positions,
+                                                   const uint8_t* activeSystemMask,
+                                                   cudaStream_t   stream) {
   if (!singlePrecision_) {
     positionsComputeDouble_.resize(totalPositions());
     gradientsComputeDouble_.resize(totalPositions());

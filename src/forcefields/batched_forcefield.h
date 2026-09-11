@@ -97,18 +97,6 @@ class BatchedForcefield {
                                        const uint8_t* activeSystemMask = nullptr,
                                        cudaStream_t   stream           = nullptr) = 0;
 
-  //! Float-coordinate counterparts used by the SINGLE storage profile.
-  //! Implementations that do not provide float coordinate kernels return
-  //! cudaErrorNotSupported.
-  virtual cudaError_t computeEnergyFloat(double*        energyOuts,
-                                         const float*   positions,
-                                         const uint8_t* activeSystemMask = nullptr,
-                                         cudaStream_t   stream           = nullptr);
-  virtual cudaError_t computeGradientsFloat(float*         grad,
-                                            const float*   positions,
-                                            const uint8_t* activeSystemMask = nullptr,
-                                            cudaStream_t   stream           = nullptr);
-
   //! Returns the number of concrete systems represented by this batch.
   int                              numMolecules() const;
   //! Returns the coordinate dimensionality stored per atom.
@@ -158,6 +146,23 @@ class BatchedForcefield {
   const int*                atomStartsDevice_ = nullptr;
   BatchedForcefieldMetadata metadata_;
   ForceFieldType            type_;
+};
+
+//! Optional capability implemented by batched force fields with native
+//! single-precision coordinate kernels. Keeping this separate preserves the
+//! established BatchedForcefield virtual interface for double-only clients.
+class SinglePrecisionBatchedForcefield {
+ public:
+  virtual ~SinglePrecisionBatchedForcefield() = default;
+
+  virtual cudaError_t computeEnergy(double*        energyOuts,
+                                    const float*   positions,
+                                    const uint8_t* activeSystemMask = nullptr,
+                                    cudaStream_t   stream           = nullptr)    = 0;
+  virtual cudaError_t computeGradients(float*         grad,
+                                       const float*   positions,
+                                       const uint8_t* activeSystemMask = nullptr,
+                                       cudaStream_t   stream           = nullptr) = 0;
 };
 
 }  // namespace nvMolKit
