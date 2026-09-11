@@ -1,0 +1,70 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+#ifndef NVMOLKIT_MMFF_KERNELS_DEVICE_DISPATCH_CUH
+#define NVMOLKIT_MMFF_KERNELS_DEVICE_DISPATCH_CUH
+#include "src/forcefields/kernel_utils.cuh"
+
+// The implementation is instantiated from one source for both arithmetic
+// widths. Keeping the namespace in the type makes accidental promotion at a
+// dispatch site visible in generated symbols and source inspection.
+namespace nvMolKit::MMFF::fp64 {
+using real = double;
+#define NVMOLKIT_FMOD    fmod
+#define NVMOLKIT_FMIN    fmin
+#define NVMOLKIT_FMAX    fmax
+#define NVMOLKIT_RSQRT   rsqrt
+#define NVMOLKIT_SQRT    sqrt
+#define NVMOLKIT_ACOS    acos
+#define NVMOLKIT_ASIN    asin
+#define NVMOLKIT_COS     cos
+#define NVMOLKIT_ATAN2   atan2
+#define NVMOLKIT_EXP     exp
+#define NVMOLKIT_IS_ZERO isDoubleZero
+#include "src/forcefields/mmff_kernels_device.cuh"
+#undef NVMOLKIT_FMOD
+#undef NVMOLKIT_FMIN
+#undef NVMOLKIT_FMAX
+#undef NVMOLKIT_RSQRT
+#undef NVMOLKIT_SQRT
+#undef NVMOLKIT_ACOS
+#undef NVMOLKIT_ASIN
+#undef NVMOLKIT_COS
+#undef NVMOLKIT_ATAN2
+#undef NVMOLKIT_EXP
+#undef NVMOLKIT_IS_ZERO
+
+}  // namespace nvMolKit::MMFF::fp64
+
+namespace nvMolKit::MMFF::fp32 {
+using real = float;
+#define NVMOLKIT_FMOD    fmodf
+#define NVMOLKIT_FMIN    fminf
+#define NVMOLKIT_FMAX    fmaxf
+#define NVMOLKIT_RSQRT   rsqrtf
+#define NVMOLKIT_SQRT    sqrtf
+#define NVMOLKIT_ACOS    acosf
+#define NVMOLKIT_ASIN    asinf
+#define NVMOLKIT_COS     cosf
+#define NVMOLKIT_ATAN2   atan2f
+#define NVMOLKIT_EXP     expf
+#define NVMOLKIT_IS_ZERO isFloatZero
+#include "src/forcefields/mmff_kernels_device.cuh"
+#undef NVMOLKIT_FMOD
+#undef NVMOLKIT_FMIN
+#undef NVMOLKIT_FMAX
+#undef NVMOLKIT_RSQRT
+#undef NVMOLKIT_SQRT
+#undef NVMOLKIT_ACOS
+#undef NVMOLKIT_ASIN
+#undef NVMOLKIT_COS
+#undef NVMOLKIT_ATAN2
+#undef NVMOLKIT_EXP
+#undef NVMOLKIT_IS_ZERO
+
+}  // namespace nvMolKit::MMFF::fp32
+
+namespace nvMolKit::MMFF {
+// Preserve the legacy unqualified API while new dispatch chooses fp32/fp64.
+using namespace fp64;
+}  // namespace nvMolKit::MMFF
+#endif  // NVMOLKIT_MMFF_KERNELS_DEVICE_DISPATCH_CUH
