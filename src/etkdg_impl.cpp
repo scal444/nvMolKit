@@ -329,7 +329,7 @@ std::vector<int> Scheduler::dispatchAvailableLocked(const int batchSize, std::ve
     while (completedConformers_[i] + attemptsInFlightByMolecule_[i] < numConfsPerMol_ &&
            totalAttempts_[i] < maxTriesPerMolecule_) {
       if (static_cast<int>(molIds.size()) >= batchSize) {
-        break;
+        return molIds;
       }
       molIds.push_back(static_cast<int>(i));
       if (attemptIds != nullptr) {
