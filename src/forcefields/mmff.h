@@ -372,9 +372,8 @@ struct BatchedMolecularDeviceBuffersT {
   nvMolKit::AsyncDeviceVector<double>                        energyOuts;
 };
 
-using BatchedMolecularDeviceBuffers          = BatchedMolecularDeviceBuffersT<double, double, float>;
-using BatchedMolecularDeviceBuffersF32Params = BatchedMolecularDeviceBuffersT<float, double, float>;
-using BatchedMolecularDeviceBuffersF32       = BatchedMolecularDeviceBuffersT<float, float, float>;
+using BatchedMolecularDeviceBuffers    = BatchedMolecularDeviceBuffersT<double, double, float>;
+using BatchedMolecularDeviceBuffersF32 = BatchedMolecularDeviceBuffersT<float, float, float>;
 
 //! \brief Adds a molecule to the batched MMFF system.
 //! \param contribs MMFF terms for the molecule before flattening into the batch.
@@ -397,22 +396,17 @@ void addMoleculeToBatch(const EnergyForceContribsHost& contribs,
 //! Send the batched molecular system to the device.
 void sendContribsAndIndicesToDevice(const BatchedMolecularSystemHost& molSystemHost,
                                     BatchedMolecularDeviceBuffers&    molSystemDevice);
-void sendContribsAndIndicesToDevice(const BatchedMolecularSystemHost&       molSystemHost,
-                                    BatchedMolecularDeviceBuffersF32Params& molSystemDevice);
 void sendContribsAndIndicesToDevice(const BatchedMolecularSystemHost& molSystemHost,
                                     BatchedMolecularDeviceBuffersF32& molSystemDevice);
 
 //! Sets all device vector streams
 void setStreams(BatchedMolecularDeviceBuffers& molSystemDevice, cudaStream_t stream);
-void setStreams(BatchedMolecularDeviceBuffersF32Params& molSystemDevice, cudaStream_t stream);
 void setStreams(BatchedMolecularDeviceBuffersF32& molSystemDevice, cudaStream_t stream);
 
 //! Allocate intermediate buffers on the device for the batched molecular system.
 //! These include the gradients, energy buffer, and energy outs.
 void allocateIntermediateBuffers(const BatchedMolecularSystemHost& molSystemHost,
                                  BatchedMolecularDeviceBuffers&    molSystemDevice);
-void allocateIntermediateBuffers(const BatchedMolecularSystemHost&       molSystemHost,
-                                 BatchedMolecularDeviceBuffersF32Params& molSystemDevice);
 void allocateIntermediateBuffers(const BatchedMolecularSystemHost& molSystemHost,
                                  BatchedMolecularDeviceBuffersF32& molSystemDevice);
 
@@ -434,24 +428,13 @@ cudaError_t computeEnergy(BatchedMolecularDeviceBuffers& molSystemDevice,
                           cudaStream_t                   stream = nullptr);
 
 cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDevice,
-                                     const double*                  coords         = nullptr,
-                                     cudaStream_t                   stream         = nullptr,
-                                     bool                           computeInFloat = false,
-                                     bool                           reduceInFloat  = false);
-cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffersF32Params& molSystemDevice,
-                                     double*                                 energyOuts,
-                                     const double*                           coords,
-                                     const uint8_t*                          activeSystemMask = nullptr,
-                                     cudaStream_t                            stream           = nullptr,
-                                     bool                                    computeInFloat   = false,
-                                     bool                                    reduceInFloat    = false);
+                                     const double*                  coords = nullptr,
+                                     cudaStream_t                   stream = nullptr);
 cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffersF32& molSystemDevice,
                                      double*                           energyOuts,
                                      const float*                      coords,
                                      const uint8_t*                    activeSystemMask = nullptr,
-                                     cudaStream_t                      stream           = nullptr,
-                                     bool                              computeInFloat   = true,
-                                     bool                              reduceInFloat    = false);
+                                     cudaStream_t                      stream           = nullptr);
 //! Compute the gradients of the batched molecular system. This will populate the grad buffer on device.
 //! grad must be zeroed before calling this function.
 cudaError_t computeGradients(BatchedMolecularDeviceBuffers& molSystemDevice,
@@ -463,27 +446,19 @@ cudaError_t computeGradients(BatchedMolecularDeviceBuffers& molSystemDevice,
 cudaError_t computeGradients(BatchedMolecularDeviceBuffers& molSystemDevice, cudaStream_t stream = nullptr);
 
 cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDevice, cudaStream_t stream = nullptr);
-cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffersF32Params& molSystemDevice,
-                                   const double*                           coords,
-                                   double*                                 grad,
-                                   const uint8_t*                          activeSystemMask = nullptr,
-                                   cudaStream_t                            stream           = nullptr,
-                                   bool                                    computeInFloat   = false);
 cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffersF32& molSystemDevice,
                                    const float*                      coords,
                                    float*                            grad,
                                    const uint8_t*                    activeSystemMask = nullptr,
-                                   cudaStream_t                      stream           = nullptr,
-                                   bool                              computeInFloat   = true);
+                                   cudaStream_t                      stream           = nullptr);
 
 //! Create pointer struct from device buffers for use in per-molecule kernels
 EnergyForceContribsDevicePtr    toEnergyForceContribsDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice);
-EnergyForceContribsDevicePtrF32 toEnergyForceContribsDevicePtr(
-  const BatchedMolecularDeviceBuffersF32Params& molSystemDevice);
+EnergyForceContribsDevicePtrF32 toEnergyForceContribsDevicePtr(const BatchedMolecularDeviceBuffersF32& molSystemDevice);
 
 //! Create pointer struct from device indices for use in per-molecule kernels
 BatchedIndicesDevicePtr toBatchedIndicesDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice);
-BatchedIndicesDevicePtr toBatchedIndicesDevicePtr(const BatchedMolecularDeviceBuffersF32Params& molSystemDevice);
+BatchedIndicesDevicePtr toBatchedIndicesDevicePtr(const BatchedMolecularDeviceBuffersF32& molSystemDevice);
 
 //! Returns true if any molecule in the batch contributes a distance, position, angle, or torsion
 //! constraint term. Used by per-molecule kernels to dispatch to a specialization that compiles out

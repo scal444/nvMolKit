@@ -67,12 +67,9 @@ class DGBatchedForcefield final : public BatchedForcefield {
   AsyncDeviceVector<float>  gradientsFloat_;
   AsyncDeviceVector<double> positionsComputeDouble_;
   AsyncDeviceVector<double> gradientsComputeDouble_;
-  bool                      coordinateStorageInFloat_ = false;
-  bool                      gradientStorageInFloat_   = false;
-  bool                      computeInFloat_           = false;
-  bool                      reduceInFloat_            = false;
-  double                    chiralWeight_             = 1.0;
-  double                    fourthDimWeight_          = 0.1;
+  bool                      singlePrecision_ = false;
+  double                    chiralWeight_    = 1.0;
+  double                    fourthDimWeight_ = 0.1;
 };
 
 }  // namespace nvMolKit

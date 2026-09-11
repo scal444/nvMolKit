@@ -297,7 +297,7 @@ TEST_P(ETKStageSingleMolTestFixture, MinimizeCompare) {
 }
 
 TEST(ETKPrecisionModes, SupportedPrecisionsMinimizeBatchedSmallMolecules) {
-  const std::string                       path = getTestDataFolderPath() + "/rdkit_smallmol_1.mol2";
+  const std::string                             path       = getTestDataFolderPath() + "/rdkit_smallmol_1.mol2";
   const std::vector<nvMolKit::PrecisionOptions> precisions = {
     {nvMolKit::PrecisionMode::LEGACY},
     {nvMolKit::PrecisionMode::SINGLE},

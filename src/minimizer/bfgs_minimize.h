@@ -32,8 +32,7 @@ class BatchedForcefield;
 namespace MMFF {
 template <typename ParameterScalar, typename CoordinateScalar, typename TorsionScalar>
 struct BatchedMolecularDeviceBuffersT;
-using BatchedMolecularDeviceBuffers          = BatchedMolecularDeviceBuffersT<double, double, float>;
-using BatchedMolecularDeviceBuffersF32Params = BatchedMolecularDeviceBuffersT<float, double, float>;
+using BatchedMolecularDeviceBuffers = BatchedMolecularDeviceBuffersT<double, double, float>;
 }  // namespace MMFF
 
 namespace DistGeom {
@@ -46,9 +45,11 @@ using BatchedMolecular3DDeviceBuffers = BatchedMolecular3DDeviceBuffersT<double>
 //! \brief Computes energies, optionally on an external set of positions.
 //! \param positions Optional flattened coordinate buffer to evaluate.
 //!        When null, the implementation uses its internal position storage.
-using EnergyFunctor = std::function<void(const double*)>;
+using EnergyFunctor      = std::function<void(const double*)>;
 //! \brief Computes gradients on the internal position buffer.
-using GradFunctor   = std::function<void()>;
+using GradFunctor        = std::function<void()>;
+using FloatEnergyFunctor = std::function<void(const float*)>;
+using FloatGradFunctor   = std::function<void()>;
 
 //! BFGS Batch Minimizer
 //!
@@ -101,12 +102,6 @@ struct BfgsBatchMinimizer {
                         const std::vector<int>&              atomStartsHost,
                         MMFF::BatchedMolecularDeviceBuffers& systemDevice,
                         const uint8_t*                       activeThisStage = nullptr);
-  bool minimizeWithMMFF(int                                           numIters,
-                        double                                        gradTol,
-                        const std::vector<int>&                       atomStartsHost,
-                        MMFF::BatchedMolecularDeviceBuffersF32Params& systemDevice,
-                        const uint8_t*                                activeThisStage = nullptr);
-
   //! \brief Runs ETK minimization through the per-molecule CUDA kernels.
   //! \param numIters Maximum number of BFGS iterations to perform.
   //! \param gradTol Convergence tolerance applied to the scaled gradients.
@@ -197,10 +192,12 @@ struct BfgsBatchMinimizer {
   AsyncDeviceVector<int> activeSystemIndices_;  // Indices of systems that are active in the current iteration.
   mutable int            numUnfinishedSystems_ = 0;
 
-  // The forcefield callback ABI consumes double coordinates, so scratchPositions_
-  // is also the evaluation bridge when minimizer state is stored in float.
+  // Line-search candidates and the SINGLE profile's persistent working arrays.
+  // Public coordinates and gradients remain double precision at the API boundary.
   AsyncDeviceVector<double>  scratchPositions_;
   AsyncDeviceVector<float>   scratchPositionsFloat_;
+  AsyncDeviceVector<float>   positionsFloat_;
+  AsyncDeviceVector<float>   gradFloat_;
   AsyncDeviceVector<int16_t> statuses_;
 
   // Intermediate buffers used for linear search
@@ -231,6 +228,7 @@ struct BfgsBatchMinimizer {
   mutable PinnedHostVector<int>      loopStatusHost_;
 
   AsyncDeviceVector<double> finalEnergies_;
+  AsyncDeviceVector<float>  energyFloat_;
 
   // Hessian approximation and scratch buffers.
   AsyncDeviceVector<int> hessianStarts_;
@@ -311,11 +309,13 @@ struct BfgsBatchMinimizer {
                 AsyncDeviceVector<double>& energyOuts,
                 EnergyFunctor              eFunc,
                 GradFunctor                gFunc,
+                FloatEnergyFunctor         eFuncFloat,
+                FloatGradFunctor           gFuncFloat,
                 const uint8_t*             activeThisStage = nullptr);
 };
 
 void copyAndInvert(const AsyncDeviceVector<double>& src, AsyncDeviceVector<double>& dst);
-void copyAndInvert(const AsyncDeviceVector<double>& src, AsyncDeviceVector<float>& dst);
+void copyAndInvert(const AsyncDeviceVector<float>& src, AsyncDeviceVector<float>& dst);
 
 }  // namespace nvMolKit
 

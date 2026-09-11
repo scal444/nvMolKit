@@ -14,14 +14,15 @@
 # limitations under the License.
 
 import os
+
 import pytest
 import torch
 from rdkit import Chem
-from rdkit.Chem import rdDistGeom, AllChem
+from rdkit.Chem import AllChem, rdDistGeom
 from rdkit.Chem.rdDistGeom import EmbedParameters
 
 import nvmolkit.embedMolecules as embed
-from nvmolkit.types import CoordinateOutput, Device3DResult, HardwareOptions
+from nvmolkit.types import CoordinateOutput, Device3DResult, HardwareOptions, PrecisionMode, PrecisionOptions
 
 
 @pytest.fixture
@@ -346,6 +347,21 @@ def test_embed_molecules_empty_input():
 
     # Should not raise any errors
     embed.EmbedMolecules([], params)
+
+
+def test_embed_molecules_single_precision_executes():
+    mol = Chem.AddHs(Chem.MolFromSmiles("CCO"))
+    params = rdDistGeom.ETKDGv3()
+    params.useRandomCoords = True
+    params.randomSeed = 42
+
+    embed.EmbedMolecules(
+        [mol],
+        params,
+        precisionOptions=PrecisionOptions(PrecisionMode.SINGLE),
+    )
+
+    assert mol.GetNumConformers() == 1
 
 
 def test_embed_molecules_invalid_input():

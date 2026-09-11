@@ -460,9 +460,6 @@ void allocateIntermediateBuffersImpl(
 void setStreams(BatchedMolecularDeviceBuffers& buffers, cudaStream_t stream) {
   setStreamsImpl(buffers, stream);
 }
-void setStreams(BatchedMolecularDeviceBuffersF32Params& buffers, cudaStream_t stream) {
-  setStreamsImpl(buffers, stream);
-}
 void setStreams(BatchedMolecularDeviceBuffersF32& buffers, cudaStream_t stream) {
   setStreamsImpl(buffers, stream);
 }
@@ -470,19 +467,11 @@ void setStreams(BatchedMolecularDeviceBuffersF32& buffers, cudaStream_t stream) 
 void sendContribsAndIndicesToDevice(const BatchedMolecularSystemHost& host, BatchedMolecularDeviceBuffers& buffers) {
   sendContribsAndIndicesToDeviceImpl(host, buffers);
 }
-void sendContribsAndIndicesToDevice(const BatchedMolecularSystemHost&       host,
-                                    BatchedMolecularDeviceBuffersF32Params& buffers) {
-  sendContribsAndIndicesToDeviceImpl(host, buffers);
-}
 void sendContribsAndIndicesToDevice(const BatchedMolecularSystemHost& host, BatchedMolecularDeviceBuffersF32& buffers) {
   sendContribsAndIndicesToDeviceImpl(host, buffers);
 }
 
 void allocateIntermediateBuffers(const BatchedMolecularSystemHost& host, BatchedMolecularDeviceBuffers& buffers) {
-  allocateIntermediateBuffersImpl(host, buffers);
-}
-void allocateIntermediateBuffers(const BatchedMolecularSystemHost&       host,
-                                 BatchedMolecularDeviceBuffersF32Params& buffers) {
   allocateIntermediateBuffersImpl(host, buffers);
 }
 void allocateIntermediateBuffers(const BatchedMolecularSystemHost& host, BatchedMolecularDeviceBuffersF32& buffers) {
@@ -799,54 +788,27 @@ cudaError_t computeGradients(BatchedMolecularDeviceBuffers& molSystemDevice, cud
 
 cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDevice,
                                      const double*                  coords,
-                                     cudaStream_t                   stream,
-                                     bool                           computeInFloat,
-                                     bool                           reduceInFloat) {
+                                     cudaStream_t                   stream) {
   return launchBlockPerMolEnergyKernel(molSystemDevice.indices.atomStarts.size() - 1,
                                        toPointerStruct(molSystemDevice.contribs),
                                        toPointerStruct(molSystemDevice.indices),
                                        coords != nullptr ? coords : molSystemDevice.positions.data(),
                                        molSystemDevice.energyOuts.data(),
                                        batchHasConstraints(molSystemDevice.contribs),
-                                       computeInFloat,
-                                       reduceInFloat,
                                        stream);
-}
-
-cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffersF32Params& molSystemDevice,
-                                     double*                                 energyOuts,
-                                     const double*                           coords,
-                                     const uint8_t*                          activeSystemMask,
-                                     cudaStream_t                            stream,
-                                     bool                                    computeInFloat,
-                                     bool                                    reduceInFloat) {
-  return launchBlockPerMolEnergyKernel(molSystemDevice.indices.atomStarts.size() - 1,
-                                       toPointerStruct(molSystemDevice.contribs),
-                                       toPointerStruct(molSystemDevice.indices),
-                                       coords != nullptr ? coords : molSystemDevice.positions.data(),
-                                       energyOuts,
-                                       batchHasConstraints(molSystemDevice.contribs),
-                                       computeInFloat,
-                                       reduceInFloat,
-                                       stream,
-                                       activeSystemMask);
 }
 
 cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffersF32& molSystemDevice,
                                      double*                           energyOuts,
                                      const float*                      coords,
                                      const uint8_t*                    activeSystemMask,
-                                     cudaStream_t                      stream,
-                                     bool                              computeInFloat,
-                                     bool                              reduceInFloat) {
+                                     cudaStream_t                      stream) {
   return launchBlockPerMolEnergyKernel(molSystemDevice.indices.atomStarts.size() - 1,
                                        toPointerStruct(molSystemDevice.contribs),
                                        toPointerStruct(molSystemDevice.indices),
                                        coords != nullptr ? coords : molSystemDevice.positions.data(),
                                        energyOuts,
                                        batchHasConstraints(molSystemDevice.contribs),
-                                       computeInFloat,
-                                       reduceInFloat,
                                        stream,
                                        activeSystemMask);
 }
@@ -858,40 +820,20 @@ cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDevic
                                      molSystemDevice.positions.data(),
                                      molSystemDevice.grad.data(),
                                      batchHasConstraints(molSystemDevice.contribs),
-                                     false,
                                      stream);
-}
-
-cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffersF32Params& molSystemDevice,
-                                   const double*                           coords,
-                                   double*                                 grad,
-                                   const uint8_t*                          activeSystemMask,
-                                   cudaStream_t                            stream,
-                                   bool                                    computeInFloat) {
-  return launchBlockPerMolGradKernel(molSystemDevice.indices.atomStarts.size() - 1,
-                                     toPointerStruct(molSystemDevice.contribs),
-                                     toPointerStruct(molSystemDevice.indices),
-                                     coords,
-                                     grad,
-                                     batchHasConstraints(molSystemDevice.contribs),
-                                     computeInFloat,
-                                     stream,
-                                     activeSystemMask);
 }
 
 cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffersF32& molSystemDevice,
                                    const float*                      coords,
                                    float*                            grad,
                                    const uint8_t*                    activeSystemMask,
-                                   cudaStream_t                      stream,
-                                   bool                              computeInFloat) {
+                                   cudaStream_t                      stream) {
   return launchBlockPerMolGradKernel(molSystemDevice.indices.atomStarts.size() - 1,
                                      toPointerStruct(molSystemDevice.contribs),
                                      toPointerStruct(molSystemDevice.indices),
                                      coords != nullptr ? coords : molSystemDevice.positions.data(),
                                      grad != nullptr ? grad : molSystemDevice.grad.data(),
                                      batchHasConstraints(molSystemDevice.contribs),
-                                     computeInFloat,
                                      stream,
                                      activeSystemMask);
 }
@@ -901,7 +843,7 @@ EnergyForceContribsDevicePtr toEnergyForceContribsDevicePtr(const BatchedMolecul
 }
 
 EnergyForceContribsDevicePtrF32 toEnergyForceContribsDevicePtr(
-  const BatchedMolecularDeviceBuffersF32Params& molSystemDevice) {
+  const BatchedMolecularDeviceBuffersF32& molSystemDevice) {
   return toPointerStruct(molSystemDevice.contribs);
 }
 
@@ -909,7 +851,7 @@ BatchedIndicesDevicePtr toBatchedIndicesDevicePtr(const BatchedMolecularDeviceBu
   return toPointerStruct(molSystemDevice.indices);
 }
 
-BatchedIndicesDevicePtr toBatchedIndicesDevicePtr(const BatchedMolecularDeviceBuffersF32Params& molSystemDevice) {
+BatchedIndicesDevicePtr toBatchedIndicesDevicePtr(const BatchedMolecularDeviceBuffersF32& molSystemDevice) {
   return toPointerStruct(molSystemDevice.indices);
 }
 

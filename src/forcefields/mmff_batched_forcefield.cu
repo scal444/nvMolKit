@@ -26,42 +26,36 @@ void allocateEnergyScratch(const MMFF::BatchedMolecularSystemHost& molSystemHost
   systemDevice.energyBuffer.zero();
 }
 
-template <typename Buffers, typename coordinateT>
-cudaError_t launchEnergy(Buffers&           buffers,
-                         int                numMols,
-                         const coordinateT* positions,
-                         double*            energies,
-                         const uint8_t*     activeSystemMask,
-                         bool               computeInFloat,
-                         bool               reduceInFloat,
-                         cudaStream_t       stream) {
+template <typename Buffers, typename storageT>
+cudaError_t launchEnergy(Buffers&        buffers,
+                         int             numMols,
+                         const storageT* positions,
+                         double*         energies,
+                         const uint8_t*  activeSystemMask,
+                         cudaStream_t    stream) {
   return MMFF::launchBlockPerMolEnergyKernel(numMols,
                                              MMFF::toEnergyForceContribsDevicePtr(buffers),
                                              MMFF::toBatchedIndicesDevicePtr(buffers),
                                              positions,
                                              energies,
                                              MMFF::batchHasConstraints(buffers.contribs),
-                                             computeInFloat,
-                                             reduceInFloat,
                                              stream,
                                              activeSystemMask);
 }
 
-template <typename Buffers, typename coordinateT, typename storageT>
-cudaError_t launchGrad(Buffers&           buffers,
-                       int                numMols,
-                       const coordinateT* positions,
-                       storageT*          gradients,
-                       const uint8_t*     activeSystemMask,
-                       bool               computeInFloat,
-                       cudaStream_t       stream) {
+template <typename Buffers, typename storageT>
+cudaError_t launchGrad(Buffers&        buffers,
+                       int             numMols,
+                       const storageT* positions,
+                       storageT*       gradients,
+                       const uint8_t*  activeSystemMask,
+                       cudaStream_t    stream) {
   return MMFF::launchBlockPerMolGradKernel(numMols,
                                            MMFF::toEnergyForceContribsDevicePtr(buffers),
                                            MMFF::toBatchedIndicesDevicePtr(buffers),
                                            positions,
                                            gradients,
                                            MMFF::batchHasConstraints(buffers.contribs),
-                                           computeInFloat,
                                            stream,
                                            activeSystemMask);
 }
@@ -72,18 +66,13 @@ MMFFBatchedForcefield::MMFFBatchedForcefield(const MMFF::BatchedMolecularSystemH
                                              const cudaStream_t                      stream,
                                              const PrecisionOptions                  precision)
     : BatchedForcefield(ForceFieldType::MMFF, 3, molSystemHost.indices.atomStarts, nullptr, std::move(metadata)) {
-  forcefieldCoordinateStorageInFloat_ = usesFloatForcefieldCoordinates(precision);
-  forcefieldGradientStorageInFloat_   = usesFloatForcefieldGradients(precision);
-  computeInFloat_                     = usesFloatForcefieldCompute(precision);
-  reduceInFloat_                      = usesFloatReduction(precision);
+  singlePrecision_ = usesSinglePrecision(precision);
   positionsFloat_.setStream(stream);
   gradientsFloat_.setStream(stream);
-  if (forcefieldCoordinateStorageInFloat_)
-    positionsFloat_.resize(totalPositions());
-  if (forcefieldGradientStorageInFloat_)
-    gradientsFloat_.resize(totalPositions());
-  if (usesFloatForcefield(precision)) {
-    auto& buffers = systemDevice_.emplace<MMFF::BatchedMolecularDeviceBuffersF32Params>();
+  positionsDouble_.setStream(stream);
+  gradientsDouble_.setStream(stream);
+  if (singlePrecision_) {
+    auto& buffers = systemDevice_.emplace<MMFF::BatchedMolecularDeviceBuffersF32>();
     MMFF::setStreams(buffers, stream);
     MMFF::sendContribsAndIndicesToDevice(molSystemHost, buffers);
     setAtomStartsDevice(buffers.indices.atomStarts.data());
@@ -100,96 +89,63 @@ cudaError_t MMFFBatchedForcefield::computeEnergyFloat(double*        energyOuts,
                                                       const float*   positions,
                                                       const uint8_t* activeSystemMask,
                                                       cudaStream_t   stream) {
-  return std::visit(
-    [&](auto& buffers) {
-      return launchEnergy(buffers,
-                          numMolecules(),
-                          positions,
-                          energyOuts,
-                          activeSystemMask,
-                          computeInFloat_,
-                          reduceInFloat_,
-                          stream);
-    },
-    systemDevice_);
+  if (!singlePrecision_) {
+    positionsDouble_.resize(totalPositions());
+    const auto err = detail::convertDeviceArray(positionsDouble_.data(), positions, totalPositions(), stream);
+    return err == cudaSuccess ? computeEnergy(energyOuts, positionsDouble_.data(), activeSystemMask, stream) : err;
+  }
+  auto& buffers = std::get<MMFF::BatchedMolecularDeviceBuffersF32>(systemDevice_);
+  return launchEnergy(buffers, numMolecules(), positions, energyOuts, activeSystemMask, stream);
 }
 
 cudaError_t MMFFBatchedForcefield::computeGradientsFloat(float*         grad,
                                                          const float*   positions,
                                                          const uint8_t* activeSystemMask,
                                                          cudaStream_t   stream) {
-  return std::visit(
-    [&](auto& buffers) {
-      return launchGrad(buffers, numMolecules(), positions, grad, activeSystemMask, computeInFloat_, stream);
-    },
-    systemDevice_);
+  if (!singlePrecision_) {
+    positionsDouble_.resize(totalPositions());
+    gradientsDouble_.resize(totalPositions());
+    auto err = detail::convertDeviceArray(positionsDouble_.data(), positions, totalPositions(), stream);
+    if (err == cudaSuccess)
+      err = computeGradients(gradientsDouble_.data(), positionsDouble_.data(), activeSystemMask, stream);
+    return err == cudaSuccess ? detail::convertDeviceArray(grad, gradientsDouble_.data(), totalPositions(), stream) :
+                                err;
+  }
+  auto& buffers = std::get<MMFF::BatchedMolecularDeviceBuffersF32>(systemDevice_);
+  return launchGrad(buffers, numMolecules(), positions, grad, activeSystemMask, stream);
 }
 
 cudaError_t MMFFBatchedForcefield::computeEnergy(double*        energyOuts,
                                                  const double*  positions,
                                                  const uint8_t* activeSystemMask,
                                                  cudaStream_t   stream) {
-  if (forcefieldCoordinateStorageInFloat_) {
-    const auto err = detail::convertDeviceArray(positionsFloat_.data(), positions, totalPositions(), stream);
+  if (singlePrecision_) {
+    positionsFloat_.resize(totalPositions());
+    auto err = detail::convertDeviceArray(positionsFloat_.data(), positions, totalPositions(), stream);
     return err == cudaSuccess ? computeEnergyFloat(energyOuts, positionsFloat_.data(), activeSystemMask, stream) : err;
   }
-  return std::visit(
-    [&](auto& buffers) {
-      return launchEnergy(buffers,
-                          numMolecules(),
-                          positions,
-                          energyOuts,
-                          activeSystemMask,
-                          computeInFloat_,
-                          reduceInFloat_,
-                          stream);
-    },
-    systemDevice_);
+  auto& buffers = std::get<MMFF::BatchedMolecularDeviceBuffers>(systemDevice_);
+  return launchEnergy(buffers, numMolecules(), positions, energyOuts, activeSystemMask, stream);
 }
 
 cudaError_t MMFFBatchedForcefield::computeGradients(double*        grad,
                                                     const double*  positions,
                                                     const uint8_t* activeSystemMask,
                                                     cudaStream_t   stream) {
-  const float* positionsF = nullptr;
-  if (forcefieldCoordinateStorageInFloat_) {
-    const auto err = detail::convertDeviceArray(positionsFloat_.data(), positions, totalPositions(), stream);
+  if (singlePrecision_) {
+    positionsFloat_.resize(totalPositions());
+    gradientsFloat_.resize(totalPositions());
+    auto err = detail::convertDeviceArray(positionsFloat_.data(), positions, totalPositions(), stream);
     if (err != cudaSuccess)
       return err;
-    positionsF = positionsFloat_.data();
-  }
-  cudaError_t err;
-  if (forcefieldGradientStorageInFloat_) {
-    err = std::visit(
-      [&](auto& buffers) {
-        return positionsF != nullptr ? launchGrad(buffers,
-                                                  numMolecules(),
-                                                  positionsF,
-                                                  gradientsFloat_.data(),
-                                                  activeSystemMask,
-                                                  computeInFloat_,
-                                                  stream) :
-                                       launchGrad(buffers,
-                                                  numMolecules(),
-                                                  positions,
-                                                  gradientsFloat_.data(),
-                                                  activeSystemMask,
-                                                  computeInFloat_,
-                                                  stream);
-      },
-      systemDevice_);
+    auto& buffers = std::get<MMFF::BatchedMolecularDeviceBuffersF32>(systemDevice_);
+    err = launchGrad(buffers, numMolecules(), positionsFloat_.data(), gradientsFloat_.data(), activeSystemMask, stream);
     if (err == cudaSuccess)
       err = detail::convertDeviceArray(grad, gradientsFloat_.data(), totalPositions(), stream);
-  } else {
-    err = std::visit(
-      [&](auto& buffers) {
-        return positionsF != nullptr ?
-                 launchGrad(buffers, numMolecules(), positionsF, grad, activeSystemMask, computeInFloat_, stream) :
-                 launchGrad(buffers, numMolecules(), positions, grad, activeSystemMask, computeInFloat_, stream);
-      },
-      systemDevice_);
+    return err;
   }
-  return err;
+  auto& buffers = std::get<MMFF::BatchedMolecularDeviceBuffers>(systemDevice_);
+  return launchGrad(buffers, numMolecules(), positions, grad, activeSystemMask, stream);
 }
 
 }  // namespace nvMolKit

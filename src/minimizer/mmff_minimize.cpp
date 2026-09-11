@@ -215,15 +215,12 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfs(std::vector<RDKit::ROMol*>&       
 
       cudaStream_t streamPtr = ctx.streamPool[threadId].stream();
 
-      BatchedMolecularSystemHost                                                          systemHost;
-      std::variant<BatchedMolecularDeviceBuffers, BatchedMolecularDeviceBuffersF32Params> systemDevice;
-      if (usesFloatForcefield(precision)) {
-        systemDevice.emplace<BatchedMolecularDeviceBuffersF32Params>();
-      }
-      BatchedForcefieldMetadata metadata;
-      std::vector<double>       pos;
-      std::vector<uint32_t>     conformerAtomStarts;
-      uint32_t                  currentAtomOffset = 0;
+      BatchedMolecularSystemHost    systemHost;
+      BatchedMolecularDeviceBuffers systemDevice;
+      BatchedForcefieldMetadata     metadata;
+      std::vector<double>           pos;
+      std::vector<uint32_t>         conformerAtomStarts;
+      uint32_t                      currentAtomOffset = 0;
 
       for (const auto& confInfo : batchConformers) {
         auto*          mol      = confInfo.mol;
@@ -311,38 +308,35 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfs(std::vector<RDKit::ROMol*>&       
           cudaStreamSynchronize(streamPtr);
         }
       } else {
-        std::visit(
-          [&](auto& device) {
-            nvMolKit::MMFF::setStreams(device, streamPtr);
-            nvMolKit::MMFF::sendContribsAndIndicesToDevice(systemHost, device);
-            nvMolKit::MMFF::allocateIntermediateBuffers(systemHost, device);
-            device.positions.resize(systemHost.positions.size());
-            device.positions.copyFromHost(buffers.initialPositions.data(), systemHost.positions.size());
-            if (useDeviceInput) {
-              detail::broadcastDeviceInputBatch(*deviceInput,
-                                                deviceInputIndex,
-                                                batchSrcIndices,
-                                                batchAtomCounts,
-                                                executingGpu,
-                                                streamPtr,
-                                                device.positions);
-            }
-            device.grad.resize(systemHost.positions.size());
-            device.grad.zero();
+        auto& device = systemDevice;
+        nvMolKit::MMFF::setStreams(device, streamPtr);
+        nvMolKit::MMFF::sendContribsAndIndicesToDevice(systemHost, device);
+        nvMolKit::MMFF::allocateIntermediateBuffers(systemHost, device);
+        device.positions.resize(systemHost.positions.size());
+        device.positions.copyFromHost(buffers.initialPositions.data(), systemHost.positions.size());
+        if (useDeviceInput) {
+          detail::broadcastDeviceInputBatch(*deviceInput,
+                                            deviceInputIndex,
+                                            batchSrcIndices,
+                                            batchAtomCounts,
+                                            executingGpu,
+                                            streamPtr,
+                                            device.positions);
+        }
+        device.grad.resize(systemHost.positions.size());
+        device.grad.zero();
 
-            bfgsMinimizer.minimizeWithMMFF(maxIters, gradTol, systemHost.indices.atomStarts, device);
+        bfgsMinimizer.minimizeWithMMFF(maxIters, gradTol, systemHost.indices.atomStarts, device);
 
-            finalPositions = &device.positions;
-            finalEnergies  = &device.energyOuts;
+        finalPositions = &device.positions;
+        finalEnergies  = &device.energyOuts;
 
-            if (!deviceOutput) {
-              ScopedNvtxRange finalizeBatchRange("OpenMP loop finalizing batch");
-              device.positions.copyToHost(buffers.positions.data(), device.positions.size());
-              device.energyOuts.copyToHost(buffers.energies.data(), device.energyOuts.size());
-              cudaStreamSynchronize(streamPtr);
-            }
-          },
-          systemDevice);
+        if (!deviceOutput) {
+          ScopedNvtxRange finalizeBatchRange("OpenMP loop finalizing batch");
+          device.positions.copyToHost(buffers.positions.data(), device.positions.size());
+          device.energyOuts.copyToHost(buffers.energies.data(), device.energyOuts.size());
+          cudaStreamSynchronize(streamPtr);
+        }
       }
 
       if (deviceOutput) {
@@ -553,15 +547,12 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(
       const auto effectiveBackend = fireMinimizer.resolveBackend(systemHost.indices.atomStarts);
       setupBatchRange.pop();
 
-      const AsyncDeviceVector<double>*                                                    finalPositions = nullptr;
-      const AsyncDeviceVector<double>*                                                    finalEnergies  = nullptr;
-      AsyncDeviceVector<double>                                                           positionsDevice;
-      AsyncDeviceVector<double>                                                           gradDevice;
-      AsyncDeviceVector<double>                                                           energyOutsDevice;
-      std::variant<BatchedMolecularDeviceBuffers, BatchedMolecularDeviceBuffersF32Params> systemDevice;
-      if (usesFloatForcefield(precision)) {
-        systemDevice.emplace<BatchedMolecularDeviceBuffersF32Params>();
-      }
+      const AsyncDeviceVector<double>* finalPositions = nullptr;
+      const AsyncDeviceVector<double>* finalEnergies  = nullptr;
+      AsyncDeviceVector<double>        positionsDevice;
+      AsyncDeviceVector<double>        gradDevice;
+      AsyncDeviceVector<double>        energyOutsDevice;
+      BatchedMolecularDeviceBuffers    systemDevice;
 
       if (effectiveBackend == FireBackend::BATCHED) {
         MMFFBatchedForcefield forcefield(systemHost, metadata, streamPtr, precision);
@@ -590,29 +581,26 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(
           cudaStreamSynchronize(streamPtr);
         }
       } else {
-        std::visit(
-          [&](auto& device) {
-            nvMolKit::MMFF::setStreams(device, streamPtr);
-            nvMolKit::MMFF::sendContribsAndIndicesToDevice(systemHost, device);
-            nvMolKit::MMFF::allocateIntermediateBuffers(systemHost, device);
-            device.positions.resize(systemHost.positions.size());
-            device.positions.copyFromHost(buffers.initialPositions.data(), systemHost.positions.size());
-            device.grad.resize(systemHost.positions.size());
-            device.grad.zero();
+        auto& device = systemDevice;
+        nvMolKit::MMFF::setStreams(device, streamPtr);
+        nvMolKit::MMFF::sendContribsAndIndicesToDevice(systemHost, device);
+        nvMolKit::MMFF::allocateIntermediateBuffers(systemHost, device);
+        device.positions.resize(systemHost.positions.size());
+        device.positions.copyFromHost(buffers.initialPositions.data(), systemHost.positions.size());
+        device.grad.resize(systemHost.positions.size());
+        device.grad.zero();
 
-            fireMinimizer.minimizeWithMMFF(maxIters, fireOptions.gradTol, systemHost.indices.atomStarts, device);
+        fireMinimizer.minimizeWithMMFF(maxIters, fireOptions.gradTol, systemHost.indices.atomStarts, device);
 
-            finalPositions = &device.positions;
-            finalEnergies  = &device.energyOuts;
+        finalPositions = &device.positions;
+        finalEnergies  = &device.energyOuts;
 
-            if (!deviceOutput) {
-              ScopedNvtxRange finalizeBatchRange("OpenMP loop finalizing batch");
-              device.positions.copyToHost(buffers.positions.data(), device.positions.size());
-              device.energyOuts.copyToHost(buffers.energies.data(), device.energyOuts.size());
-              cudaStreamSynchronize(streamPtr);
-            }
-          },
-          systemDevice);
+        if (!deviceOutput) {
+          ScopedNvtxRange finalizeBatchRange("OpenMP loop finalizing batch");
+          device.positions.copyToHost(buffers.positions.data(), device.positions.size());
+          device.energyOuts.copyToHost(buffers.energies.data(), device.energyOuts.size());
+          cudaStreamSynchronize(streamPtr);
+        }
       }
 
       if (deviceOutput) {

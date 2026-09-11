@@ -77,11 +77,8 @@ class ETKBatchedForcefield final : public BatchedForcefield {
   AsyncDeviceVector<float>  gradientsFloat_;
   AsyncDeviceVector<double> positionsComputeDouble_;
   AsyncDeviceVector<double> gradientsComputeDouble_;
-  bool                      coordinateStorageInFloat_ = false;
-  bool                      gradientStorageInFloat_   = false;
-  bool                      computeInFloat_           = false;
-  bool                      reduceInFloat_            = false;
-  DistGeom::ETKTerm         term_                     = DistGeom::ETKTerm::ALL;
+  bool                      singlePrecision_ = false;
+  DistGeom::ETKTerm         term_            = DistGeom::ETKTerm::ALL;
 };
 
 }  // namespace nvMolKit

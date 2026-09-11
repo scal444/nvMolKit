@@ -600,11 +600,5 @@ TEST_P(ETKDGFFGpuBatchEdgeCases, BatchTestWithActiveStage) {
 TEST(DGPrecisionModes, SinglePrecisionProducesFiniteAccurateEnergyAndGradients) {
   std::vector<std::unique_ptr<RDKit::ROMol>> mols;
   getMols(getTestDataFolderPath() + "/MMFF94_dative.sdf", mols, 2);
-  runTestInBatch(mols,
-                 ETKDGOption::ETKDGv3,
-                 2e-3,
-                 2e-3,
-                 nullptr,
-                 nullptr,
-                 {nvMolKit::PrecisionMode::SINGLE});
+  runTestInBatch(mols, ETKDGOption::ETKDGv3, 2e-3, 2e-3, nullptr, nullptr, {nvMolKit::PrecisionMode::SINGLE});
 }

@@ -62,13 +62,12 @@ class MMFFBatchedForcefield final : public BatchedForcefield {
                                     cudaStream_t   stream           = nullptr) override;
 
  private:
-  std::variant<MMFF::BatchedMolecularDeviceBuffers, MMFF::BatchedMolecularDeviceBuffersF32Params> systemDevice_;
-  AsyncDeviceVector<float>                                                                        positionsFloat_;
-  AsyncDeviceVector<float>                                                                        gradientsFloat_;
-  bool forcefieldCoordinateStorageInFloat_ = false;
-  bool forcefieldGradientStorageInFloat_   = false;
-  bool computeInFloat_                     = false;
-  bool reduceInFloat_                      = false;
+  std::variant<MMFF::BatchedMolecularDeviceBuffers, MMFF::BatchedMolecularDeviceBuffersF32> systemDevice_;
+  AsyncDeviceVector<float>                                                                  positionsFloat_;
+  AsyncDeviceVector<float>                                                                  gradientsFloat_;
+  AsyncDeviceVector<double>                                                                 positionsDouble_;
+  AsyncDeviceVector<double>                                                                 gradientsDouble_;
+  bool                                                                                      singlePrecision_ = false;
 };
 
 }  // namespace nvMolKit

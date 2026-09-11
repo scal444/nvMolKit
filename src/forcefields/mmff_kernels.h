@@ -454,8 +454,6 @@ cudaError_t launchBlockPerMolEnergyKernel(int                                 nu
                                           const double*                       coords,
                                           double*                             energies,
                                           bool                                hasConstraints,
-                                          bool                                computeInFloat,
-                                          bool                                reduceInFloat,
                                           cudaStream_t                        stream           = nullptr,
                                           const uint8_t*                      activeSystemMask = nullptr);
 
@@ -465,89 +463,8 @@ cudaError_t launchBlockPerMolGradKernel(int                                 numM
                                         const double*                       coords,
                                         double*                             grad,
                                         bool                                hasConstraints,
-                                        bool                                computeInFloat,
                                         cudaStream_t                        stream           = nullptr,
                                         const uint8_t*                      activeSystemMask = nullptr);
-
-cudaError_t launchBlockPerMolEnergyKernel(int                                 numMols,
-                                          const EnergyForceContribsDevicePtr& terms,
-                                          const BatchedIndicesDevicePtr&      sytemIndices,
-                                          const float*                        coords,
-                                          double*                             energies,
-                                          bool                                hasConstraints,
-                                          bool                                computeInFloat,
-                                          bool                                reduceInFloat,
-                                          cudaStream_t                        stream           = nullptr,
-                                          const uint8_t*                      activeSystemMask = nullptr);
-
-cudaError_t launchBlockPerMolGradKernel(int                                 numMols,
-                                        const EnergyForceContribsDevicePtr& terms,
-                                        const BatchedIndicesDevicePtr&      sytemIndices,
-                                        const float*                        coords,
-                                        float*                              grad,
-                                        bool                                hasConstraints,
-                                        bool                                computeInFloat,
-                                        cudaStream_t                        stream           = nullptr,
-                                        const uint8_t*                      activeSystemMask = nullptr);
-
-cudaError_t launchBlockPerMolEnergyKernel(int                                    numMols,
-                                          const EnergyForceContribsDevicePtrF32& terms,
-                                          const BatchedIndicesDevicePtr&         sytemIndices,
-                                          const double*                          coords,
-                                          double*                                energies,
-                                          bool                                   hasConstraints,
-                                          bool                                   computeInFloat,
-                                          bool                                   reduceInFloat,
-                                          cudaStream_t                           stream           = nullptr,
-                                          const uint8_t*                         activeSystemMask = nullptr);
-
-cudaError_t launchBlockPerMolGradKernel(int                                    numMols,
-                                        const EnergyForceContribsDevicePtrF32& terms,
-                                        const BatchedIndicesDevicePtr&         sytemIndices,
-                                        const double*                          coords,
-                                        double*                                grad,
-                                        bool                                   hasConstraints,
-                                        bool                                   computeInFloat,
-                                        cudaStream_t                           stream           = nullptr,
-                                        const uint8_t*                         activeSystemMask = nullptr);
-
-// Coordinate and gradient storage use the selected precision profile.
-cudaError_t launchBlockPerMolGradKernel(int                                 numMols,
-                                        const EnergyForceContribsDevicePtr& terms,
-                                        const BatchedIndicesDevicePtr&      sytemIndices,
-                                        const double*                       coords,
-                                        float*                              grad,
-                                        bool                                hasConstraints,
-                                        bool                                computeInFloat,
-                                        cudaStream_t                        stream           = nullptr,
-                                        const uint8_t*                      activeSystemMask = nullptr);
-cudaError_t launchBlockPerMolGradKernel(int                                 numMols,
-                                        const EnergyForceContribsDevicePtr& terms,
-                                        const BatchedIndicesDevicePtr&      sytemIndices,
-                                        const float*                        coords,
-                                        double*                             grad,
-                                        bool                                hasConstraints,
-                                        bool                                computeInFloat,
-                                        cudaStream_t                        stream           = nullptr,
-                                        const uint8_t*                      activeSystemMask = nullptr);
-cudaError_t launchBlockPerMolGradKernel(int                                    numMols,
-                                        const EnergyForceContribsDevicePtrF32& terms,
-                                        const BatchedIndicesDevicePtr&         sytemIndices,
-                                        const double*                          coords,
-                                        float*                                 grad,
-                                        bool                                   hasConstraints,
-                                        bool                                   computeInFloat,
-                                        cudaStream_t                           stream           = nullptr,
-                                        const uint8_t*                         activeSystemMask = nullptr);
-cudaError_t launchBlockPerMolGradKernel(int                                    numMols,
-                                        const EnergyForceContribsDevicePtrF32& terms,
-                                        const BatchedIndicesDevicePtr&         sytemIndices,
-                                        const float*                           coords,
-                                        double*                                grad,
-                                        bool                                   hasConstraints,
-                                        bool                                   computeInFloat,
-                                        cudaStream_t                           stream           = nullptr,
-                                        const uint8_t*                         activeSystemMask = nullptr);
 
 cudaError_t launchBlockPerMolEnergyKernel(int                                    numMols,
                                           const EnergyForceContribsDevicePtrF32& terms,
@@ -555,8 +472,6 @@ cudaError_t launchBlockPerMolEnergyKernel(int                                   
                                           const float*                           coords,
                                           double*                                energies,
                                           bool                                   hasConstraints,
-                                          bool                                   computeInFloat,
-                                          bool                                   reduceInFloat,
                                           cudaStream_t                           stream           = nullptr,
                                           const uint8_t*                         activeSystemMask = nullptr);
 
@@ -566,7 +481,6 @@ cudaError_t launchBlockPerMolGradKernel(int                                    n
                                         const float*                           coords,
                                         float*                                 grad,
                                         bool                                   hasConstraints,
-                                        bool                                   computeInFloat,
                                         cudaStream_t                           stream           = nullptr,
                                         const uint8_t*                         activeSystemMask = nullptr);
 

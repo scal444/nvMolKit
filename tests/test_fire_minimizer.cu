@@ -794,7 +794,7 @@ TEST(FireMinimizer, ParameterPropagation) {
   }
 }
 
-TEST(FireMinimizer, FloatStateStorageTracksDoubleReference) {
+TEST(FireMinimizer, SinglePrecisionTracksDoubleReference) {
   const std::vector<int>    atomCounts = {1};
   const std::vector<double> kPerSys    = {1.0};
   std::vector<double>       startingPositions(kDim, 0.0);
@@ -852,7 +852,6 @@ TEST(FireMinimizer, AcceptsSupportedPrecisionModes) {
       nvMolKit::FireBatchMinimizer(kDim, options, nullptr, false, nvMolKit::FireBackend::BATCHED, {mode}));
   }
 }
-
 
 TEST(FireMinimizer, ActiveSystemMaskRespected) {
   const std::vector<int>    atomCounts = {1, 1, 1};

@@ -29,11 +29,13 @@ namespace nvMolKit {
 
 class BatchedForcefield;
 
+using FireFloatEnergyFunctor = std::function<void(const float*)>;
+using FireFloatGradFunctor   = std::function<void()>;
+
 namespace MMFF {
 template <typename ParameterScalar, typename CoordinateScalar, typename TorsionScalar>
 struct BatchedMolecularDeviceBuffersT;
-using BatchedMolecularDeviceBuffers          = BatchedMolecularDeviceBuffersT<double, double, float>;
-using BatchedMolecularDeviceBuffersF32Params = BatchedMolecularDeviceBuffersT<float, double, float>;
+using BatchedMolecularDeviceBuffers = BatchedMolecularDeviceBuffersT<double, double, float>;
 }  // namespace MMFF
 
 //! \brief Per-system per-iteration debug snapshot recorded when the minimizer is
@@ -128,17 +130,11 @@ class FireBatchMinimizer final : public BatchMinimizer {
   //!      to PER_MOLECULE for this batch.
   //! \pre ::FireOptions::stuckDetectionEnabled must be false; the per-molecule path does
   //!      not support FIRE energy-plateau detection.
-  bool minimizeWithMMFF(int                                  numIters,
-                        double                               gradTol,
-                        const std::vector<int>&              atomStartsHost,
-                        MMFF::BatchedMolecularDeviceBuffers& systemDevice,
-                        const uint8_t*                       activeThisStage = nullptr);
-  bool minimizeWithMMFF(int                                           numIters,
-                        double                                        gradTol,
-                        const std::vector<int>&                       atomStartsHost,
-                        MMFF::BatchedMolecularDeviceBuffersF32Params& systemDevice,
-                        const uint8_t*                                activeThisStage = nullptr);
-
+  bool                                minimizeWithMMFF(int                                  numIters,
+                                                       double                               gradTol,
+                                                       const std::vector<int>&              atomStartsHost,
+                                                       MMFF::BatchedMolecularDeviceBuffers& systemDevice,
+                                                       const uint8_t*                       activeThisStage = nullptr);
   const std::vector<FireDebugOutput>& debugOutputs() const { return debugOutputs_; }
 
   //! \brief Cadence (in iterations) at which the minimize() loop reads the
@@ -169,16 +165,31 @@ class FireBatchMinimizer final : public BatchMinimizer {
                             const std::vector<int>& atomStartsHost,
                             DeviceBuffers&          systemDevice,
                             const uint8_t*          activeThisStage);
+  bool minimizeImpl(int                           numIters,
+                    double                        gradTol,
+                    const std::vector<int>&       atomStartsHost,
+                    const AsyncDeviceVector<int>& atomStarts,
+                    AsyncDeviceVector<double>&    positions,
+                    AsyncDeviceVector<double>&    grad,
+                    AsyncDeviceVector<double>&    energyOuts,
+                    AsyncDeviceVector<double>&    energyBuffer,
+                    EnergyFunctor                 eFunc,
+                    GradFunctor                   gFunc,
+                    FireFloatEnergyFunctor        eFuncFloat,
+                    FireFloatGradFunctor          gFuncFloat,
+                    const uint8_t*                activeThisStage);
+  template <typename storageT>
   void launchPreKick(double                        gradTol,
                      const AsyncDeviceVector<int>& atomStarts,
-                     AsyncDeviceVector<double>&    positions,
-                     AsyncDeviceVector<double>&    grad,
+                     AsyncDeviceVector<storageT>&  positions,
+                     AsyncDeviceVector<storageT>&  grad,
                      int                           launchBlocks,
                      bool                          isFirstStep);
+  template <typename storageT>
   void launchPostKick(double                        gradTol,
                       const AsyncDeviceVector<int>& atomStarts,
-                      AsyncDeviceVector<double>&    positions,
-                      AsyncDeviceVector<double>&    grad,
+                      AsyncDeviceVector<storageT>&  positions,
+                      AsyncDeviceVector<storageT>&  grad,
                       int                           launchBlocks);
   void compactActiveAsync();
   int  readbackNumUnfinished();
@@ -200,6 +211,10 @@ class FireBatchMinimizer final : public BatchMinimizer {
   AsyncDeviceVector<double> velocities_;
   AsyncDeviceVector<float>  velocitiesFloat_;
   AsyncDeviceVector<double> masses_;
+  AsyncDeviceVector<float>  massesFloat_;
+  AsyncDeviceVector<float>  positionsFloat_;
+  AsyncDeviceVector<float>  gradFloat_;
+  AsyncDeviceVector<float>  energyFloat_;
 
   AsyncDeviceVector<double>  dt_;
   AsyncDeviceVector<double>  alpha_;

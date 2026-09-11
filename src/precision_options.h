@@ -10,8 +10,8 @@ namespace nvMolKit {
 
 //! Precision profiles supported by the 3D minimizers and force fields.
 enum class PrecisionMode {
-  LEGACY = 0,  //!< Full double precision.
-  SINGLE      //!< Full single precision for device storage, compute, and reductions.
+  LEGACY = 0,  //!< Existing full-precision device path.
+  SINGLE       //!< Full single precision for device storage, compute, and reductions.
 };
 
 struct PrecisionOptions {
@@ -40,32 +40,7 @@ inline bool usesSinglePrecision(const PrecisionOptions& options) {
   return options.mode == PrecisionMode::SINGLE;
 }
 
-inline bool usesFloatHessian(const PrecisionOptions& options) {
-  return usesSinglePrecision(options);
-}
-inline bool usesFloatMinimizerState(const PrecisionOptions& options) {
-  return usesSinglePrecision(options);
-}
-inline bool usesFloatForcefield(const PrecisionOptions& options) {
-  return usesSinglePrecision(options);
-}
-inline bool usesFloatForcefieldCoordinates(const PrecisionOptions& options) {
-  return usesSinglePrecision(options);
-}
-inline bool usesFloatForcefieldGradients(const PrecisionOptions& options) {
-  return usesSinglePrecision(options);
-}
-inline bool usesFloatForcefieldCompute(const PrecisionOptions& options) {
-  return usesSinglePrecision(options);
-}
-inline bool usesFloatMinimizerCompute(const PrecisionOptions& options) {
-  return usesSinglePrecision(options);
-}
-inline bool usesFloatReduction(const PrecisionOptions& options) {
-  return usesSinglePrecision(options);
-}
-
-//! Full FP32 requires the independently typed batched kernels.
+//! Full FP32 requires the typed batched kernels; fused per-molecule kernels remain legacy-only.
 inline bool bfgsPrecisionRequiresBatchedBackend(const PrecisionOptions& options) {
   return usesSinglePrecision(options);
 }
@@ -74,25 +49,6 @@ inline bool bfgsDistGeomPrecisionRequiresBatchedBackend(const PrecisionOptions& 
 }
 inline bool firePrecisionRequiresBatchedBackend(const PrecisionOptions& options) {
   return usesSinglePrecision(options);
-}
-
-inline PrecisionOptions withMode(PrecisionMode mode) {
-  return {mode};
-}
-inline bool usesFloatHessian(PrecisionMode mode) {
-  return usesFloatHessian(withMode(mode));
-}
-inline bool usesFloatMinimizerState(PrecisionMode mode) {
-  return usesFloatMinimizerState(withMode(mode));
-}
-inline bool usesFloatForcefield(PrecisionMode mode) {
-  return usesFloatForcefield(withMode(mode));
-}
-inline bool usesFloatForcefieldCoordinates(PrecisionMode mode) {
-  return usesFloatForcefieldCoordinates(withMode(mode));
-}
-inline bool usesFloatForcefieldGradients(PrecisionMode mode) {
-  return usesFloatForcefieldGradients(withMode(mode));
 }
 
 }  // namespace nvMolKit

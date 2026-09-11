@@ -13,16 +13,16 @@ static __device__ __forceinline__ DG_REAL distViolationEnergy(const DG_REAL* pos
   const int     posIdx1   = idx1 * dimension;
   const int     posIdx2   = idx2 * dimension;
   const DG_REAL distance2 = distanceSquaredPosIdx<dimension>(pos, posIdx1, posIdx2);
-  DG_REAL       val       = 0.0;
+  DG_REAL       val       = DG_REAL(0.0);
   if (distance2 > ub2) {
-    val = (distance2 / ub2) - 1.0;
+    val = (distance2 / ub2) - DG_REAL(1.0);
   } else if (distance2 < lb2) {
-    val = ((2 * lb2) / (lb2 + distance2)) - 1.0;
+    val = ((2 * lb2) / (lb2 + distance2)) - DG_REAL(1.0);
   }
-  if (val > 0.0) {
+  if (val > DG_REAL(0.0)) {
     return weight * val * val;
   }
-  return 0.0;
+  return DG_REAL(0.0);
 }
 
 template <int dimension>
@@ -36,7 +36,7 @@ static __device__ __forceinline__ void distViolationGrad(const DG_REAL* pos,
   const int   posIdx1   = idx1 * dimension;
   const int   posIdx2   = idx2 * dimension;
   const float distance2 = distanceSquaredPosIdx<dimension>(pos, posIdx1, posIdx2);
-  float       preFactor = 0.0;
+  float       preFactor = 0.0f;
   if (distance2 > ub2) {
     preFactor = 4.f * ((distance2 / ub2) - 1.0f) / ub2;
   } else if (distance2 < lb2) {
@@ -120,7 +120,7 @@ static __device__ __forceinline__ DG_REAL chiralViolationEnergy(const DG_REAL* p
   if (vol > ub) {
     return weight * (vol - ub) * (vol - ub);
   }
-  return 0.0;
+  return DG_REAL(0.0);
 }
 
 template <int dimension>
@@ -179,7 +179,7 @@ static __device__ __forceinline__ void chiralViolationGrad(const DG_REAL* pos,
 template <int dimension>
 static __device__ __forceinline__ DG_REAL fourthDimEnergy(const DG_REAL* pos, const int idx, const DG_REAL weight) {
   if constexpr (dimension != 4) {
-    return 0.0;
+    return DG_REAL(0.0);
   }
   const int     posIdx    = idx * dimension;
   const DG_REAL fourthVal = pos[posIdx + 3];
@@ -252,7 +252,7 @@ calcTorsionCosPhi(const DG_REAL* pos, const int posIdx1, const int posIdx2, cons
   const DG_REAL lenSquaredCombined = t1_lenSquared * t2_lenSquared;
 
   if (DG_IS_ZERO(lenSquaredCombined)) {
-    return 0.0;
+    return DG_REAL(0.0);
   }
   const DG_REAL invLenComb = DG_RSQRTF(lenSquaredCombined);
   DG_REAL       cosPhi     = dotProduct(t1x, t1y, t1z, t2x, t2y, t2z) * invLenComb;
@@ -335,9 +335,9 @@ static __device__ __forceinline__ DG_REAL inversionEnergy(const DG_REAL* pos,
 
   DG_REAL cosY = calcInversionCosY(pos, posIdx1, posIdx2, posIdx3, posIdx4);
 
-  const DG_REAL sinYSq = 1.0 - cosY * cosY;
-  const DG_REAL sinY   = ((sinYSq > 0.0) ? DG_SQRTF(sinYSq) : 0.0);
-  const DG_REAL cos2W  = 2.0 * sinY * sinY - 1.0;
+  const DG_REAL sinYSq = DG_REAL(1.0) - cosY * cosY;
+  const DG_REAL sinY   = ((sinYSq > DG_REAL(0.0)) ? DG_SQRTF(sinYSq) : DG_REAL(0.0));
+  const DG_REAL cos2W  = DG_REAL(2.0) * sinY * sinY - DG_REAL(1.0);
 
   return forceConstant * (C0 + C1 * sinY + C2 * cos2W);
 }
@@ -355,22 +355,22 @@ static __device__ __forceinline__ DG_REAL distanceConstraintEnergy(const DG_REAL
   const DG_REAL minLen2 = minLen * minLen;
   const DG_REAL maxLen2 = maxLen * maxLen;
 
-  DG_REAL difference = 0.0;
+  DG_REAL difference = DG_REAL(0.0);
   if (distance2 < minLen2) {
     difference = minLen - DG_SQRTF(distance2);
   } else if (distance2 > maxLen2) {
     difference = DG_SQRTF(distance2) - maxLen;
   } else {
-    return 0.0;
+    return DG_REAL(0.0);
   }
 
-  return 0.5 * forceConstant * difference * difference;
+  return DG_REAL(0.5) * forceConstant * difference * difference;
 }
 
 static __device__ __forceinline__ DG_REAL computeAngleTerm(const DG_REAL angle,
                                                            const DG_REAL minAngle,
                                                            const DG_REAL maxAngle) {
-  DG_REAL angleTerm = 0.0;
+  DG_REAL angleTerm = DG_REAL(0.0);
   if (angle < minAngle) {
     angleTerm = angle - minAngle;
   } else if (angle > maxAngle) {
@@ -402,12 +402,12 @@ static __device__ __forceinline__ DG_REAL angleConstraintEnergy(const DG_REAL* p
   const DG_REAL dist2Sq  = dx2 * dx2 + dy2 * dy2 + dz2 * dz2;
   const DG_REAL distTerm = dist1Sq * dist2Sq;
   if (DG_IS_ZERO(distTerm)) {
-    return 0.0;
+    return DG_REAL(0.0);
   }
 
   const DG_REAL dot      = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
   // This DG_REAL precision DG_SQRT is sensitive, can't downcast.
-  const DG_REAL cosTheta = clamp(dot * DG_RSQRT(distTerm), -1.0, 1.0);
+  const DG_REAL cosTheta = clamp(dot * DG_RSQRT(distTerm), -DG_REAL(1.0), DG_REAL(1.0));
   const DG_REAL angle    = RAD2DEG * DG_ACOS(cosTheta);
 
   const DG_REAL angleTerm = computeAngleTerm(angle, minAngle, maxAngle);
@@ -473,8 +473,8 @@ static __device__ __forceinline__ void torsionAngleGrad(const DG_REAL*       pos
   clipToOne(cosPhi);
 
   // Calculate sinPhi
-  const DG_REAL sinPhiSq = 1.0 - cosPhi * cosPhi;
-  const DG_REAL sinPhi   = (sinPhiSq > 0.0) ? DG_SQRTF(sinPhiSq) : 0.0;
+  const DG_REAL sinPhiSq = DG_REAL(1.0) - cosPhi * cosPhi;
+  const DG_REAL sinPhi   = (sinPhiSq > DG_REAL(0.0)) ? DG_SQRTF(sinPhiSq) : DG_REAL(0.0);
 
   // Calculate derivatives for dE/dPhi
   const DG_REAL cosPhi2 = cosPhi * cosPhi;
@@ -483,13 +483,16 @@ static __device__ __forceinline__ void torsionAngleGrad(const DG_REAL*       pos
   const DG_REAL cosPhi5 = cosPhi * cosPhi4;
 
   const DG_REAL dE_dPhi =
-    (-forceConstants[0] * signs[0] * sinPhi - 2.0 * forceConstants[1] * signs[1] * (2.0 * cosPhi * sinPhi) -
-     3.0 * forceConstants[2] * signs[2] * (4.0 * cosPhi2 * sinPhi - sinPhi) -
-     4.0 * forceConstants[3] * signs[3] * (8.0 * cosPhi3 * sinPhi - 4.0 * cosPhi * sinPhi) -
-     5.0 * forceConstants[4] * signs[4] * (16.0 * cosPhi4 * sinPhi - 12.0 * cosPhi2 * sinPhi + sinPhi) -
-     6.0 * forceConstants[5] * signs[5] * (32.0 * cosPhi5 * sinPhi - 32.0 * cosPhi3 * sinPhi + 6.0 * cosPhi * sinPhi));
+    (-forceConstants[0] * signs[0] * sinPhi -
+     DG_REAL(2.0) * forceConstants[1] * signs[1] * (DG_REAL(2.0) * cosPhi * sinPhi) -
+     DG_REAL(3.0) * forceConstants[2] * signs[2] * (DG_REAL(4.0) * cosPhi2 * sinPhi - sinPhi) -
+     DG_REAL(4.0) * forceConstants[3] * signs[3] * (DG_REAL(8.0) * cosPhi3 * sinPhi - DG_REAL(4.0) * cosPhi * sinPhi) -
+     DG_REAL(5.0) * forceConstants[4] * signs[4] *
+       (DG_REAL(16.0) * cosPhi4 * sinPhi - DG_REAL(12.0) * cosPhi2 * sinPhi + sinPhi) -
+     DG_REAL(6.0) * forceConstants[5] * signs[5] *
+       (DG_REAL(32.0) * cosPhi5 * sinPhi - DG_REAL(32.0) * cosPhi3 * sinPhi + DG_REAL(6.0) * cosPhi * sinPhi));
 
-  const DG_REAL sinTerm = -dE_dPhi * (DG_IS_ZERO(sinPhi) ? (1.0 / cosPhi) : (1.0 / sinPhi));
+  const DG_REAL sinTerm = -dE_dPhi * (DG_IS_ZERO(sinPhi) ? (DG_REAL(1.0) / cosPhi) : (DG_REAL(1.0) / sinPhi));
 
   // Calculate dCos_dT components on-the-fly and compute gradients directly
   const DG_REAL dCos_dT0x = inv_d0 * (t1x - cosPhi * t0x);
@@ -606,19 +609,21 @@ static __device__ __forceinline__ void inversionGrad(const DG_REAL* pos,
   clipToOne(cosY);
 
   // Calculate sinY
-  const DG_REAL sinYSq = 1.0 - cosY * cosY;
-  const DG_REAL sinY   = fmaxf(DG_SQRTF(sinYSq), 1.0e-8f);
+  const DG_REAL sinYSq  = DG_REAL(1.0) - cosY * cosY;
+  const DG_REAL rawSinY = DG_SQRTF(sinYSq);
+  const DG_REAL sinY    = rawSinY > DG_REAL(1.0e-8) ? rawSinY : DG_REAL(1.0e-8);
 
   // Calculate cosTheta and clamp
   DG_REAL cosTheta = dotProduct(rJIx, rJIy, rJIz, rJKx, rJKy, rJKz);
   clipToOne(cosTheta);
 
   // Calculate sinTheta
-  const DG_REAL sinThetaSq = 1.0 - cosTheta * cosTheta;
-  const DG_REAL sinTheta   = fmaxf(DG_SQRTF(sinThetaSq), 1.0e-8f);
+  const DG_REAL sinThetaSq  = DG_REAL(1.0) - cosTheta * cosTheta;
+  const DG_REAL rawSinTheta = DG_SQRTF(sinThetaSq);
+  const DG_REAL sinTheta    = rawSinTheta > DG_REAL(1.0e-8) ? rawSinTheta : DG_REAL(1.0e-8);
 
   // Calculate dE_dW
-  const DG_REAL dE_dW = -forceConstant * (C1 * cosY - 4.0 * C2 * cosY * sinY);
+  const DG_REAL dE_dW = -forceConstant * (C1 * cosY - DG_REAL(4.0) * C2 * cosY * sinY);
 
   // Calculate cross products for gradient terms
   DG_REAL t1x, t1y, t1z;  // rJL × rJK
@@ -631,7 +636,7 @@ static __device__ __forceinline__ void inversionGrad(const DG_REAL* pos,
   crossProduct(rJKx, rJKy, rJKz, rJIx, rJIy, rJIz, t3x, t3y, t3z);
 
   // Calculate terms for gradient
-  const DG_REAL inverseTerm1   = 1.0 / (sinY * sinTheta);
+  const DG_REAL inverseTerm1   = DG_REAL(1.0) / (sinY * sinTheta);
   const DG_REAL term2          = cosY / (sinY * sinThetaSq);
   const DG_REAL cosY_over_sinY = cosY / sinY;
 
@@ -688,10 +693,10 @@ static __device__ __forceinline__ void distanceConstraintGrad(const DG_REAL* pos
   DG_REAL preFactor;
   if (distance2 < minLen2) {
     const DG_REAL distance = DG_SQRT(distance2);
-    preFactor              = forceConstant * (distance - minLen) / DG_FMAX(1.0e-8, distance);
+    preFactor              = forceConstant * (distance - minLen) / DG_FMAX(DG_REAL(1.0e-8), distance);
   } else if (distance2 > maxLen2) {
     const DG_REAL distance = DG_SQRT(distance2);
-    preFactor              = forceConstant * (distance - maxLen) / DG_FMAX(1.0e-8, distance);
+    preFactor              = forceConstant * (distance - maxLen) / DG_FMAX(DG_REAL(1.0e-8), distance);
   } else {
     return;  // Distance within bounds, no gradient contribution
   }
@@ -728,8 +733,8 @@ static __device__ __forceinline__ void angleConstraintGrad(const DG_REAL* pos,
   DG_REAL r2z = pos[posIdx3 + 2] - pos[posIdx2 + 2];
 
   // Calculate squared lengths and take max with 1.0e-5 as in RDKit
-  const DG_REAL r1LengthSq = DG_FMAX(1.0e-5, r1x * r1x + r1y * r1y + r1z * r1z);
-  const DG_REAL r2LengthSq = DG_FMAX(1.0e-5, r2x * r2x + r2y * r2y + r2z * r2z);
+  const DG_REAL r1LengthSq = DG_FMAX(DG_REAL(1.0e-5), r1x * r1x + r1y * r1y + r1z * r1z);
+  const DG_REAL r2LengthSq = DG_FMAX(DG_REAL(1.0e-5), r2x * r2x + r2y * r2y + r2z * r2z);
   const DG_REAL denom      = DG_RSQRT(r1LengthSq * r2LengthSq);
 
   // Calculate cosine of angle using dot product
@@ -745,7 +750,7 @@ static __device__ __forceinline__ void angleConstraintGrad(const DG_REAL* pos,
   const DG_REAL angleTerm = computeAngleTerm(angle, minAngle, maxAngle);
 
   // Calculate dE_dTheta
-  const DG_REAL dE_dTheta = 2.0 * RAD2DEG * forceConstant * angleTerm;
+  const DG_REAL dE_dTheta = DG_REAL(2.0) * RAD2DEG * forceConstant * angleTerm;
 
   // Calculate cross product rp = r2 × r1
   DG_REAL rpx, rpy, rpz;
@@ -805,7 +810,7 @@ static __device__ __inline__ DG_REAL molEnergyDG(const EnergyForceContribsDevice
                                                  const int                           tid) {
   const int atomStart = systemIndices.atomStarts[molIdx];
 
-  DG_REAL energy = 0.0;
+  DG_REAL energy = DG_REAL(0.0);
 
   namespace cg            = cooperative_groups;
   constexpr int WARP_SIZE = 32;
@@ -988,7 +993,7 @@ static __device__ __inline__ DG_REAL molEnergyETK(const Energy3DForceContribsDev
                                                   const int                             tid) {
   const int atomStart = systemIndices.atomStarts[molIdx];
 
-  DG_REAL energy = 0.0;
+  DG_REAL energy = DG_REAL(0.0);
 
   namespace cg            = cooperative_groups;
   constexpr int WARP_SIZE = 32;
@@ -1028,7 +1033,7 @@ static __device__ __inline__ DG_REAL molEnergyETK(const Energy3DForceContribsDev
   const auto& [a13_idx1s, a13_idx2s, a13_idx3s, a13_minAngle, a13_maxAngle]     = terms.angle13Terms;
   const auto& [dlr_idx1s, dlr_idx2s, dlr_minLen, dlr_maxLen, dlr_forceConstant] = terms.longRangeDistTerms;
 
-  constexpr DG_REAL defaultAngleForceConstant = 1.0;
+  constexpr DG_REAL defaultAngleForceConstant = DG_REAL(1.0);
 
   // Calculate number of warps needed for each term type
   const int warpsForTorsion  = (numTorsion + WARP_SIZE - 1) / WARP_SIZE;
@@ -1195,7 +1200,7 @@ static __device__ __inline__ void molGradETK(const Energy3DForceContribsDevicePt
   const auto& [a13_idx1s, a13_idx2s, a13_idx3s, a13_minAngle, a13_maxAngle]     = terms.angle13Terms;
   const auto& [dlr_idx1s, dlr_idx2s, dlr_minLen, dlr_maxLen, dlr_forceConstant] = terms.longRangeDistTerms;
 
-  constexpr DG_REAL defaultAngleForceConstant = 1.0;
+  constexpr DG_REAL defaultAngleForceConstant = DG_REAL(1.0);
 
   // Calculate number of warps needed for each term type
   const int warpsForTorsion  = (numTorsion + WARP_SIZE - 1) / WARP_SIZE;

@@ -384,9 +384,6 @@ cudaError_t launchFirePerMolKernelImpl(const int                            numM
   }
 
 NVMOLKIT_DEFINE_FIRE_STATE_OVERLOAD(double, MMFF::EnergyForceContribsDevicePtr)
-NVMOLKIT_DEFINE_FIRE_STATE_OVERLOAD(float, MMFF::EnergyForceContribsDevicePtr)
-NVMOLKIT_DEFINE_FIRE_STATE_OVERLOAD(double, MMFF::EnergyForceContribsDevicePtrF32)
-NVMOLKIT_DEFINE_FIRE_STATE_OVERLOAD(float, MMFF::EnergyForceContribsDevicePtrF32)
 
 #undef NVMOLKIT_DEFINE_FIRE_STATE_OVERLOAD
 

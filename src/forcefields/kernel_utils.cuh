@@ -45,29 +45,28 @@ distanceSquared(const Scalar* pos, const int idx1, const int idx2, const int dim
   return dist;
 }
 
-__device__ __forceinline__ double distanceSquaredPosIdx(const auto* pos,
-                                                        const int   posIdx1,
-                                                        const int   posIdx2,
-                                                        const int   dim) {
-  const double dx   = pos[posIdx1 + 0] - pos[posIdx2 + 0];
-  const double dy   = pos[posIdx1 + 1] - pos[posIdx2 + 1];
-  const double dz   = pos[posIdx1 + 2] - pos[posIdx2 + 2];
-  double       dist = dx * dx + dy * dy + dz * dz;
+template <typename Scalar>
+__device__ __forceinline__ Scalar
+distanceSquaredPosIdx(const Scalar* pos, const int posIdx1, const int posIdx2, const int dim) {
+  const Scalar dx   = pos[posIdx1 + 0] - pos[posIdx2 + 0];
+  const Scalar dy   = pos[posIdx1 + 1] - pos[posIdx2 + 1];
+  const Scalar dz   = pos[posIdx1 + 2] - pos[posIdx2 + 2];
+  Scalar       dist = dx * dx + dy * dy + dz * dz;
   if (dim == 4) {
-    const double dw = pos[posIdx1 + 3] - pos[posIdx2 + 3];
+    const Scalar dw = pos[posIdx1 + 3] - pos[posIdx2 + 3];
     dist += dw * dw;
   }
   return dist;
 }
 
-template <int fixedDimension, typename floatType = double>
-__device__ __forceinline__ floatType distanceSquaredPosIdx(const auto* pos, const int posIdx1, const int posIdx2) {
-  const floatType dx   = pos[posIdx1 + 0] - pos[posIdx2 + 0];
-  const floatType dy   = pos[posIdx1 + 1] - pos[posIdx2 + 1];
-  const floatType dz   = pos[posIdx1 + 2] - pos[posIdx2 + 2];
-  floatType       dist = dx * dx + dy * dy + dz * dz;
+template <int fixedDimension, typename Scalar>
+__device__ __forceinline__ Scalar distanceSquaredPosIdx(const Scalar* pos, const int posIdx1, const int posIdx2) {
+  const Scalar dx   = pos[posIdx1 + 0] - pos[posIdx2 + 0];
+  const Scalar dy   = pos[posIdx1 + 1] - pos[posIdx2 + 1];
+  const Scalar dz   = pos[posIdx1 + 2] - pos[posIdx2 + 2];
+  Scalar       dist = dx * dx + dy * dy + dz * dz;
   if constexpr (fixedDimension == 4) {
-    const floatType dw = pos[posIdx1 + 3] - pos[posIdx2 + 3];
+    const Scalar dw = pos[posIdx1 + 3] - pos[posIdx2 + 3];
     dist += dw * dw;
   }
   return dist;

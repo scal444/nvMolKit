@@ -86,7 +86,7 @@ TEST(BFGSMinimizerTest, AllocationAndIdentity) {
   EXPECT_THAT(hessianHost, ::testing::ElementsAreArray(want));
 }
 
-TEST(BFGSMinimizerTest, FloatHessianStorageAllocationAndIdentity) {
+TEST(BFGSMinimizerTest, SinglePrecisionStorageAllocationAndIdentity) {
   const nvMolKit::PrecisionOptions precision{nvMolKit::PrecisionMode::SINGLE};
   nvMolKit::BfgsBatchMinimizer     minimizer(/*dataDim=*/3,
                                          nvMolKit::DebugLevel::NONE,
@@ -608,7 +608,7 @@ TEST_F(BFGSMinimizerTestFixture, FullLineSearch) {
   EXPECT_THAT(gotStatuses, ::testing::Pointwise(::testing::Eq(), accumStatuses));
 }
 
-TEST_F(BFGSMinimizerTestFixture, FloatHessianE2EMinimizationUsesRelaxedTolerance) {
+TEST_F(BFGSMinimizerTestFixture, SinglePrecisionE2EMinimizationUsesRelaxedTolerance) {
   constexpr int numMols  = 1;
   constexpr int maxIters = 50;
   setUpMMFFSystems(numMols);
@@ -632,9 +632,9 @@ TEST_F(BFGSMinimizerTestFixture, FloatHessianE2EMinimizationUsesRelaxedTolerance
 
   std::vector<double> gotEnergies(systemDevice.energyOuts.size());
   systemDevice.energyOuts.copyToHost(gotEnergies);
-  constexpr double kFloatHessianEnergyTolerance = 5e-3;
+  constexpr double kSinglePrecisionEnergyTolerance = 5e-3;
   EXPECT_THAT(gotEnergies,
-              ::testing::Pointwise(::testing::DoubleNear(kFloatHessianEnergyTolerance), referenceEnergies));
+              ::testing::Pointwise(::testing::DoubleNear(kSinglePrecisionEnergyTolerance), referenceEnergies));
 }
 
 TEST_P(BFGSMinimizerBackendTest, E2EMinimizationSingleSystemUnconvergedMatches) {
@@ -1496,8 +1496,7 @@ TEST(BFGSPrecisionStateTest, PresetsAllocateResolvedStateAndHessianWidths) {
 
   for (const auto mode : {nvMolKit::PrecisionMode::LEGACY, nvMolKit::PrecisionMode::SINGLE}) {
     const nvMolKit::PrecisionOptions precision{mode};
-    const bool                       floatState   = nvMolKit::usesFloatMinimizerState(precision);
-    const bool                       floatHessian = nvMolKit::usesFloatHessian(precision);
+    const bool                       singlePrecision = nvMolKit::usesSinglePrecision(precision);
     nvMolKit::BfgsBatchMinimizer     minimizer(3,
                                            nvMolKit::DebugLevel::NONE,
                                            true,
@@ -1511,23 +1510,26 @@ TEST(BFGSPrecisionStateTest, PresetsAllocateResolvedStateAndHessianWidths) {
     EXPECT_EQ(
       minimizer.resolveBackend(atomStarts),
       mode == nvMolKit::PrecisionMode::LEGACY ? nvMolKit::BfgsBackend::PER_MOLECULE : nvMolKit::BfgsBackend::BATCHED);
-    EXPECT_EQ(minimizer.lineSearchDirFloat_.size() != 0, floatState);
-    EXPECT_EQ(minimizer.scratchPositionsFloat_.size() != 0, floatState);
-    EXPECT_EQ(minimizer.scratchGradFloat_.size() != 0, floatState);
-    EXPECT_EQ(minimizer.hessDGradFloat_.size() != 0, floatState);
-    EXPECT_EQ(minimizer.gradScalesFloat_.size() != 0, floatState);
-    EXPECT_EQ(minimizer.lineSearchLambdasFloat_.size() != 0, floatState);
-    EXPECT_EQ(minimizer.lineSearchSlopeFloat_.size() != 0, floatState);
-    EXPECT_EQ(minimizer.lineSearchMaxStepsFloat_.size() != 0, floatState);
-    EXPECT_EQ(minimizer.lineSearchStoredEnergyFloat_.size() != 0, floatState);
-    EXPECT_EQ(minimizer.lineSearchDir_.size() != 0, !floatState);
-    EXPECT_EQ(minimizer.scratchGrad_.size() != 0, !floatState);
-    EXPECT_EQ(minimizer.hessDGrad_.size() != 0, !floatState);
-    EXPECT_EQ(minimizer.gradScales_.size() != 0, !floatState);
-    EXPECT_EQ(minimizer.inverseHessianFloat_.size() != 0, floatHessian);
-    EXPECT_EQ(minimizer.inverseHessian_.size() != 0, !floatHessian);
+    EXPECT_EQ(minimizer.lineSearchDirFloat_.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.scratchPositionsFloat_.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.positionsFloat_.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.gradFloat_.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.energyFloat_.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.scratchGradFloat_.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.hessDGradFloat_.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.gradScalesFloat_.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.lineSearchLambdasFloat_.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.lineSearchSlopeFloat_.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.lineSearchMaxStepsFloat_.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.lineSearchStoredEnergyFloat_.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.lineSearchDir_.size() != 0, !singlePrecision);
+    EXPECT_EQ(minimizer.scratchGrad_.size() != 0, !singlePrecision);
+    EXPECT_EQ(minimizer.hessDGrad_.size() != 0, !singlePrecision);
+    EXPECT_EQ(minimizer.gradScales_.size() != 0, !singlePrecision);
+    EXPECT_EQ(minimizer.inverseHessianFloat_.size() != 0, singlePrecision);
+    EXPECT_EQ(minimizer.inverseHessian_.size() != 0, !singlePrecision);
     // Required double ABI bridge exists even when candidate state is float.
-    EXPECT_EQ(minimizer.scratchPositions_.size(), 15);
+    EXPECT_EQ(minimizer.scratchPositions_.size() != 0, !singlePrecision);
   }
 }
 
