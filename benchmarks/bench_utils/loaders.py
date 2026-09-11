@@ -23,12 +23,57 @@ source contains more entries than requested.
 import csv
 import pickle
 import random
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import partial
 from math import ceil
-from typing import Iterator
+from typing import Any, Callable, Iterable, Iterator, TypeVar
 
 from rdkit import Chem, RDLogger
-from tqdm.contrib.concurrent import process_map
+from tqdm.auto import tqdm
+
+_PROCESS_BATCH_SIZE = 1000
+_T = TypeVar("_T")
+
+
+def _apply_batch(function: Callable[[Any], Any], batch: list[Any]) -> list[Any]:
+    """Apply ``function`` to one process-pool batch."""
+    return [function(item) for item in batch]
+
+
+def _process_map_batches(
+    function: Callable[[Any], Any],
+    values: list[Any],
+    *,
+    desc: str,
+    batch_size: int = _PROCESS_BATCH_SIZE,
+) -> list[Any]:
+    """Process values in batches while reporting batches as they complete.
+
+    ``tqdm.contrib.concurrent.process_map`` yields batches in submission order,
+    then exposes their items one at a time. For fast per-item work this makes
+    tqdm calculate its first rate from one item even though an entire batch has
+    completed. Tracking futures directly lets the bar advance by the actual
+    number of completed items without sacrificing batching efficiency.
+    """
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
+    if not values:
+        return []
+
+    results: list[Any] = [None] * len(values)
+    with ProcessPoolExecutor() as executor, tqdm(total=len(values), desc=desc) as progress:
+        futures = {}
+        for start in range(0, len(values), batch_size):
+            end = min(start + batch_size, len(values))
+            future = executor.submit(_apply_batch, function, values[start:end])
+            futures[future] = (start, end)
+
+        for future in as_completed(futures):
+            start, end = futures[future]
+            results[start:end] = future.result()
+            progress.update(end - start)
+
+    return results
 
 
 def _mol_from_binary(binary_mol: bytes) -> Chem.Mol:
@@ -38,6 +83,22 @@ def _mol_from_binary(binary_mol: bytes) -> Chem.Mol:
 def _buffered_count(max_count: int) -> int:
     """Return a 10% candidate reserve for a positive requested count."""
     return max_count + max(1, ceil(max_count * 0.1)) if max_count > 0 else 0
+
+
+def _reservoir_sample(values: Iterable[_T], max_count: int, rng: random.Random) -> list[_T]:
+    """Return a uniform reservoir sample, or all values when uncapped."""
+    if max_count <= 0:
+        return list(values)
+
+    reservoir: list[_T] = []
+    for index, value in enumerate(values):
+        if index < max_count:
+            reservoir.append(value)
+            continue
+        replace_index = rng.randint(0, index)
+        if replace_index < max_count:
+            reservoir[replace_index] = value
+    return reservoir
 
 
 def load_pickle(
@@ -70,11 +131,10 @@ def load_pickle(
     else:
         binary_mols = list(binary_mols)
         rng.shuffle(binary_mols)
-    mols = process_map(
+    mols = _process_map_batches(
         _mol_from_binary,
         binary_mols,
         desc="Unpickling molecules",
-        chunksize=1000,
     )
     print(f"  Loaded {len(mols)} molecules from {filepath}")
     return mols
@@ -131,23 +191,12 @@ def load_smiles(
     read_limit = _buffered_count(max_count)
     rng = random.Random(seed)
 
-    if read_limit > 0:
-        reservoir: list[str] = []
-        for index, smi in enumerate(_iter_smiles_tokens(filepath, sanitize)):
-            if index < read_limit:
-                reservoir.append(smi)
-            else:
-                replace_index = rng.randint(0, index)
-                if replace_index < read_limit:
-                    reservoir[replace_index] = smi
-        smiles_list = reservoir
-    else:
-        smiles_list = list(_iter_smiles_tokens(filepath, sanitize))
+    smiles_list = _reservoir_sample(_iter_smiles_tokens(filepath, sanitize), read_limit, rng)
 
     mols: list[Chem.Mol] = []
     if smiles_list:
         parse_func = partial(_parse_smiles, sanitize=sanitize)
-        parsed = process_map(parse_func, smiles_list, desc="Parsing molecules", chunksize=1000)
+        parsed = _process_map_batches(parse_func, smiles_list, desc="Parsing molecules")
         parse_failures = 0
         for mol in parsed:
             if mol is None:
@@ -184,8 +233,6 @@ def load_csv(
     properties = property_columns or []
     read_limit = _buffered_count(max_count)
     rng = random.Random(seed)
-    reservoir: list[dict[str, str]] = []
-
     with open(filepath, "r", newline="") as fh:
         reader = csv.DictReader(fh)
         if reader.fieldnames is None:
@@ -194,24 +241,16 @@ def load_csv(
         missing = [column for column in required if column not in reader.fieldnames]
         if missing:
             raise ValueError(f"CSV is missing required columns: {', '.join(missing)}")
-        valid_index = 0
-        for row in reader:
-            if not row[smiles_column].strip():
-                continue
-            selected = {column: row[column] for column in required}
-            if read_limit <= 0:
-                reservoir.append(selected)
-            elif valid_index < read_limit:
-                reservoir.append(selected)
-            else:
-                replace_index = rng.randint(0, valid_index)
-                if replace_index < read_limit:
-                    reservoir[replace_index] = selected
-            valid_index += 1
+        selected_rows = (
+            {column: row[column] for column in required}
+            for row in reader
+            if row[smiles_column].strip()
+        )
+        reservoir = _reservoir_sample(selected_rows, read_limit, rng)
 
     smiles_list = [row[smiles_column] for row in reservoir]
     parse_func = partial(_parse_smiles, sanitize=sanitize)
-    parsed = process_map(parse_func, smiles_list, desc="Parsing molecules", chunksize=1000)
+    parsed = _process_map_batches(parse_func, smiles_list, desc="Parsing molecules")
     mols: list[Chem.Mol] = []
     parse_failures = 0
     for mol, row in zip(parsed, reservoir, strict=True):

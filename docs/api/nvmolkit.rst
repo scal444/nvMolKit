@@ -83,6 +83,31 @@ Clustering
    clustering.fused_butina
    clustering.aap_similarity
    clustering.aap_similarity_clustering
+   clustering.aap_dise_clustering
+
+.. autosummary::
+   :toctree: generated/
+   :template: class_template.rst
+
+   clustering.ButinaOutputMode
+   clustering.ButinaDeviceResult
+
+Maximum Common Substructure (MCS)
+---------------------------------
+
+.. autosummary::
+   :toctree: generated/
+   :template: function_template.rst
+
+   mcs.findMCS
+
+.. autosummary::
+   :toctree: generated/
+   :template: class_template.rst
+
+   mcs.MCSConfig
+   mcs.MCSBatchResult
+   mcs.MCSResult
 
 Substructure Search
 -------------------
@@ -146,6 +171,7 @@ Hardware Autotuning (optional ``optuna`` extra)
    autotune.tune_uff_optimize
    autotune.tune_batched_forcefield
    autotune.tune_substructure
+   autotune.tune_mcs
    autotune.save
    autotune.load
 

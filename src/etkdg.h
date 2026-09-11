@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -42,8 +42,7 @@ namespace nvMolKit {
  * In @c CoordinateOutput::DEVICE mode, coordinates remain on the GPU and are returned as a
  * @c DeviceCoordResult collected onto @p targetGpu (defaults to the first id in
  * @c hardwareOptions.gpuIds, or device 0 when no ids are specified). RDKit conformer lists
- * are left untouched in this mode. ETKDG conformer pruning (@c params.pruneRmsThresh) must be
- * disabled when using DEVICE mode; an exception is thrown otherwise.
+ * are left untouched in this mode.
  */
 std::optional<DeviceCoordResult> embedMolecules(const std::vector<RDKit::ROMol*>&           mols,
                                                 const RDKit::DGeomHelpers::EmbedParameters& params,

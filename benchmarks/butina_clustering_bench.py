@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,8 +25,8 @@ from rdkit.Chem import AllChem
 from rdkit.DataStructs import BulkTanimotoSimilarity
 from rdkit.ML.Cluster.Butina import ClusterData
 
+from nvmolkit.clustering import ButinaOutputMode, fused_butina
 from nvmolkit.clustering import butina as butina_nvmol
-from nvmolkit.clustering import fused_butina
 from nvmolkit.fingerprints import MorganFingerprintGenerator as nvmolMorganGen
 from nvmolkit.similarity import crossTanimotoSimilarity
 
@@ -273,7 +273,12 @@ if __name__ == "__main__":
                 if "fused" in runs:
                     print(f"Running fused_butina size {size} cutoff {cutoff}")
                     fused_result = time_it(
-                        lambda: fused_butina(fps_mat, cutoff=cutoff, metric="tanimoto"),
+                        lambda: fused_butina(
+                            fps_mat,
+                            cutoff=cutoff,
+                            metric="tanimoto",
+                            output=ButinaOutputMode.DEVICE,
+                        ),
                         gpu_sync=True,
                         runs=n_runs,
                     )

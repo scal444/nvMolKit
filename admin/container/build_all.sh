@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,7 +23,7 @@ find . -type f -name "*.yml" -exec python hpccm_build.py --config_file="{}" \;
 prefix=gitlab-master.nvidia.com:5005/clara-discovery/rdcu/ci_images
 
 
-for file in $(find . -type f -name "*.Dockerfile"); do
+while IFS= read -r -d '' file; do
   name=$(basename "$file" .Dockerfile)
   docker build --progress=plain -t "$prefix/$name" --network host -f "$file" .
-done
+done < <(find . -type f -name "*.Dockerfile" -print0)

@@ -1,5 +1,5 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
-# All rights reserved. SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION &
+# AFFILIATES. All rights reserved. SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may not
 # use this file except in compliance with the License. You may obtain a copy of
@@ -62,6 +62,7 @@ add_library(
 target_link_libraries(
   morganFingerprint
   PRIVATE ${RDKit_LIBS} OpenMP::OpenMP_CXX device openmp_helpers
+          pinned_host_allocator
   PUBLIC morganFingerprintKernels)
 
 add_library(symmetricEigenSolver symmetric_eigensolver.cu)
@@ -100,12 +101,13 @@ target_link_libraries(
           nvmolkit_versions
           etkdg)
 
-add_library(etkdg etkdg.cpp)
+add_library(etkdg etkdg.cpp conformer/device_conformer_pruning.cpp)
 target_link_libraries(
   etkdg
   PUBLIC bfgs conformer_types
   PRIVATE ${RDKit_LIBS}
           conformer_pruning
+          conformer_rmsd
           device
           device_coord_collector
           device_vector

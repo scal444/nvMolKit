@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,13 +17,13 @@
 
 set -ex
 
-ROOT=$(dirname $(dirname $(realpath $0)))
+ROOT=$(dirname "$(dirname "$(realpath "$0")")")
 
 mkdir -p iwyu_build
 
 cd iwyu_build
 
-CC=clang-15 CXX=clang++-15 cmake $ROOT -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_PREFIX_PATH=$RDKIT_PATH -DNVMOLKIT_BUILD_TESTS=ON -DNVMOLKIT_BUILD_BENCHMARKS=ON
+CC=clang-15 CXX=clang++-15 cmake "$ROOT" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_PREFIX_PATH="$RDKIT_PATH" -DNVMOLKIT_BUILD_TESTS=ON -DNVMOLKIT_BUILD_BENCHMARKS=ON
 
 # Prune out dep compile commands and cuda
 python << EOF
@@ -59,4 +59,4 @@ RET=$?
 
 cd ..
 
-exit $RET
+exit "$RET"

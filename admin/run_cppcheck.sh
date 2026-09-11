@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,21 +20,21 @@
 set -ex
 
 
-CPPCHECK_VERSION_MATCH=$(cppcheck --version | grep "2.14" | wc -l)
-if [ "$CPPCHECK_VERSION_MATCH" -ne 1 ]; then
-  echo "cppcheck version 2.14 is required, got $(cppcheck --version | cut -d " " -f 2)"
+CPPCHECK_VERSION=$(cppcheck --version)
+if [[ "${CPPCHECK_VERSION}" != "Cppcheck 2.14"* ]]; then
+  echo "cppcheck version 2.14 is required, got ${CPPCHECK_VERSION#Cppcheck }"
   exit 1
 fi
 
 
 
-ROOT=$(dirname $(dirname $(realpath $0)))
+ROOT=$(dirname "$(dirname "$(realpath "$0")")")
 
 mkdir -p cppcheck_build
 
 cd cppcheck_build
 
-CXX=clang++-17 cmake $ROOT -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_PREFIX_PATH=$RDKIT_PATH -DNVMOLKIT_BUILD_TESTS=OFF -DNVMOLKIT_BUILD_BENCHMARKS=OFF
+CXX=clang++-17 cmake "$ROOT" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_PREFIX_PATH="$RDKIT_PATH" -DNVMOLKIT_BUILD_TESTS=OFF -DNVMOLKIT_BUILD_BENCHMARKS=OFF
 
 cppcheck \
   --check-level=exhaustive \
@@ -59,4 +59,4 @@ RET=$?
 
 cd ..
 
-exit $RET
+exit "$RET"

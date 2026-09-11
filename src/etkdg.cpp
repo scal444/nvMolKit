@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,6 +23,7 @@
 #include <unordered_map>
 
 #include "rdkit_extensions/conformer_pruning.h"
+#include "src/conformer/device_conformer_pruning.h"
 #include "src/conformer/etkdg_device_collect.h"
 #include "src/etkdg_impl.h"
 #include "src/etkdg_stage_coordgen.h"
@@ -103,11 +104,6 @@ std::optional<DeviceCoordResult> embedMolecules(const std::vector<RDKit::ROMol*>
   }
 
   const bool deviceOutput = output == CoordinateOutput::DEVICE;
-  if (deviceOutput && params.pruneRmsThresh > 0.0) {
-    throw std::invalid_argument(
-      "ETKDG conformer pruning (params.pruneRmsThresh > 0) is not supported with CoordinateOutput::DEVICE. "
-      "Set pruneRmsThresh to a non-positive value or use CoordinateOutput::RDKIT_CONFORMERS.");
-  }
 
   // Validate inputs
   for (size_t i = 0; i < mols.size(); ++i) {
@@ -459,11 +455,16 @@ std::optional<DeviceCoordResult> embedMolecules(const std::vector<RDKit::ROMol*>
       }
     } catch (...) {
       dispatchExceptionRegistry.store(std::current_exception());
+      Scheduler.cancel();
+      workComplete.store(true);
     }
   }
+  dispatchExceptionRegistry.rethrow();
 
   if (deviceOutput) {
-    return detail::finalizeOnTarget(collectorsPerThread, targetGpu, static_cast<int>(mols.size()));
+    // Gather the results on one GPU before pruning.
+    auto result = detail::finalizeOnTarget(collectorsPerThread, targetGpu, static_cast<int>(mols.size()));
+    return detail::pruneDeviceConformers(std::move(result), mols, params);
   }
 
   detail::OpenMPExceptionRegistry updateExceptionRegistry;

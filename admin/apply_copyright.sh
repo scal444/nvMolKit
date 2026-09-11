@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -65,18 +65,42 @@ find_included_files() {
 
 get_file_year() {
     local file="$1"
-    local relative_path="${file#${REPO_ROOT}/}"
-    local commit_year
+    local relative_path="${file#"${REPO_ROOT}"/}"
+    local commit_years
+    local current_year
+    local first_year
+    local last_year
 
-    commit_year=$(git log --diff-filter=A --follow --format=%ad --date=format:%Y -- "${relative_path}" | tail -n 1 || true)
-    if [ -z "${commit_year}" ]; then
-        commit_year=$(date +%Y)
+    commit_years=$(git log --follow --format=%ad --date=format:%Y -- "${relative_path}" || true)
+    current_year=$(date +%Y)
+
+    # A fixer normally runs before the pending change is committed. Include
+    # that working-tree change so its header matches what CI will expect once
+    # the commit becomes part of the file's history.
+    if ! git diff --quiet HEAD -- "${relative_path}"; then
+        commit_years=$(printf '%s\n%s' "${commit_years}" "${current_year}")
     fi
 
-    if [ "${commit_year}" -le 2025 ]; then
-        echo "2025"
+    if [ -z "${commit_years}" ]; then
+        commit_years="${current_year}"
+    fi
+
+    first_year=$(printf '%s\n' "${commit_years}" | sed '/^$/d' | sort -n | head -n 1)
+    last_year=$(printf '%s\n' "${commit_years}" | sed '/^$/d' | sort -n | tail -n 1)
+
+    # nvMolKit's copyright baseline is 2025, even for files whose imported
+    # history predates the project.
+    if [ "${first_year}" -lt 2025 ]; then
+        first_year=2025
+    fi
+    if [ "${last_year}" -lt 2025 ]; then
+        last_year=2025
+    fi
+
+    if [ "${first_year}" = "${last_year}" ]; then
+        echo "${first_year}"
     else
-        echo "2026"
+        echo "${first_year}-${last_year}"
     fi
 }
 
@@ -84,7 +108,7 @@ get_existing_header_year() {
     local file="$1"
     local year_match
 
-    year_match=$(sed -nE 's/^.*SPDX-FileCopyrightText: Copyright \(c\) ([0-9]{4}).*$/\1/p' "${file}" | head -n 1)
+    year_match=$(sed -nE 's/^.*SPDX-FileCopyrightText: Copyright \(c\) ([0-9]{4}(-[0-9]{4})?).*$/\1/p' "${file}" | head -n 1)
     if [ -n "${year_match}" ]; then
         echo "${year_match}"
     fi
@@ -118,7 +142,7 @@ replace_year() {
     local year="$2"
 
     sed -i -E \
-        "0,/SPDX-FileCopyrightText: Copyright \\(c\\) [0-9]{4}/s//SPDX-FileCopyrightText: Copyright (c) ${year}/" \
+        "0,/SPDX-FileCopyrightText: Copyright \\(c\\) [0-9]{4}(-[0-9]{4})?/s//SPDX-FileCopyrightText: Copyright (c) ${year}/" \
         "${file}"
 }
 
