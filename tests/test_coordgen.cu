@@ -264,6 +264,31 @@ TEST(InitialCoordinateGeneratorTest, InactiveSmallSystemRemainsFailed) {
   EXPECT_THAT(passed, testing::ElementsAre(0));
 }
 
+TEST(InitialCoordinateGeneratorTest, EigensolverFailureFailsSmallSystems) {
+  constexpr int coordinateDim = 3;
+  auto          params        = RDKit::DGeomHelpers::ETKDGv3;
+
+  std::vector<DistGeom::BoundsMatPtr> boundsMatrices;
+  for (int matrixDim = 1; matrixDim <= 3; ++matrixDim) {
+    boundsMatrices.emplace_back(new DistGeom::BoundsMatrix(matrixDim));
+  }
+
+  nvMolKit::detail::InitialCoordinateGenerator coordgen;
+  coordgen.setBoundsMatrices(boundsMatrices, params);
+
+  const std::vector<int>    atomStarts = {0, 1, 3, 6};
+  AsyncDeviceVector<int>    dAtomStarts(atomStarts.size());
+  AsyncDeviceVector<double> dPositions(static_cast<size_t>(atomStarts.back()) * coordinateDim);
+  dAtomStarts.copyFromHost(atomStarts);
+  dPositions.zero();
+
+  coordgen.computeInitialCoordinates(dPositions.data(), dAtomStarts.data(), coordinateDim);
+
+  std::vector<uint8_t> passed(boundsMatrices.size(), 1);
+  cudaCheckError(cudaMemcpy(passed.data(), coordgen.getPassFail(), passed.size(), cudaMemcpyDeviceToHost));
+  EXPECT_THAT(passed, testing::ElementsAre(0, 0, 0));
+}
+
 TEST(InitialCoordinateGeneratorTest, ReusedBoundsMatchFreshBounds) {
   std::unique_ptr<RDKit::ROMol> mol(RDKit::SmilesToMol("CCO"));
   ASSERT_NE(mol, nullptr);

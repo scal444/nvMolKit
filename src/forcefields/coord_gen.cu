@@ -120,6 +120,7 @@ __global__ void finalizeEigenvaluesKernel(const int          numSystems,
                                           double*            vals,
                                           uint8_t*           passFail,
                                           const uint8_t*     validDistanceMatrices,
+                                          const uint8_t*     eigensolverConverged,
                                           const int*         matrixDimensions,
                                           const int*         coordinateDimensions,
                                           const uint8_t*     active,
@@ -134,7 +135,7 @@ __global__ void finalizeEigenvaluesKernel(const int          numSystems,
     }
     const int    matrixDim     = matrixDimensions[systemIdx];
     const int    systemNumEigs = min(numEigs, min(matrixDim, coordinateDimensions[systemIdx]));
-    bool         passed        = validDistanceMatrices[systemIdx] != 0;
+    bool         passed        = validDistanceMatrices[systemIdx] != 0 && eigensolverConverged[systemIdx] != 0;
     unsigned int zeroEigs      = 0;
     for (int eigIdx = 0; eigIdx < systemNumEigs; ++eigIdx) {
       double&      val         = vals[systemIdx * numEigs + eigIdx];
@@ -312,6 +313,7 @@ class InitialCoordinateGenerator::Impl {
                                                                           eigenvaluesDevice_.data(),
                                                                           passFail_.data(),
                                                                           validDistanceMatricesDevice_.data(),
+                                                                          solver_.converged(),
                                                                           atomCountsDevice_.data(),
                                                                           coordinateDimensionsDevice_.data(),
                                                                           active,
