@@ -100,6 +100,10 @@ def test_aap_similarity_options_change_the_computation(option, value):
         ({"sinkhorn_temperature": 0.0}, "sinkhornTemperature must be finite and positive"),
         ({"sinkhorn_temperature": float("nan")}, "sinkhornTemperature must be finite and positive"),
         ({"sinkhorn_temperature": float("inf")}, "sinkhornTemperature must be finite and positive"),
+        (
+            {"sinkhorn_temperature": 1e-40},
+            "sinkhornTemperature must be at least the smallest positive normal float",
+        ),
     ],
 )
 def test_aap_options_are_validated_for_pair_and_empty_clustering(kwargs, message):
@@ -109,6 +113,17 @@ def test_aap_options_are_validated_for_pair_and_empty_clustering(kwargs, message
         aap_similarity(molecule, molecule, **kwargs)
     with pytest.raises(ValueError, match=message):
         aap_similarity_clustering([], **kwargs)
+
+
+def test_aap_accepts_smallest_positive_normal_sinkhorn_temperature():
+    temperature = float(np.finfo(np.float32).tiny)
+    molecules = [_mol("CCO"), _mol("CCN")]
+
+    score = aap_similarity(*molecules, sinkhorn_temperature=temperature)
+
+    assert math.isfinite(score)
+    assert 0.0 <= score <= 1.0
+    assert aap_similarity_clustering(molecules, sinkhorn_temperature=temperature)
 
 
 @pytest.mark.parametrize("threshold", [-0.01, 1.01, float("nan"), float("inf"), -float("inf")])

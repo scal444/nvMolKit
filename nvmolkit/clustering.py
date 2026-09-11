@@ -76,7 +76,8 @@ def aap_similarity(
         max_path_length: Maximum rooted path length in bonds.
         histogram_bins: Number of hashed path bins, at most 32767.
         sinkhorn_iterations: Number of Sinkhorn normalization iterations.
-        sinkhorn_temperature: Positive Sinkhorn temperature.
+        sinkhorn_temperature: Sinkhorn temperature, at least the smallest
+            positive normal single-precision value.
         stream: CUDA stream to use. If None, uses the current stream.
 
     Returns:
@@ -126,7 +127,8 @@ def aap_similarity_clustering(
         max_path_length: Maximum rooted path length in bonds.
         histogram_bins: Number of hashed path bins, at most 32767.
         sinkhorn_iterations: Number of Sinkhorn normalization iterations.
-        sinkhorn_temperature: Positive Sinkhorn temperature.
+        sinkhorn_temperature: Sinkhorn temperature, at least the smallest
+            positive normal single-precision value.
         stream: CUDA stream to use. If None, uses the current stream.
 
     Returns:
@@ -180,7 +182,8 @@ def aap_dise_clustering(
         max_path_length: Maximum rooted path length in bonds.
         histogram_bins: Number of hashed path bins, at most 32767.
         sinkhorn_iterations: Number of Sinkhorn normalization iterations.
-        sinkhorn_temperature: Positive Sinkhorn temperature.
+        sinkhorn_temperature: Sinkhorn temperature, at least the smallest
+            positive normal single-precision value.
         stream: CUDA stream to use. If None, uses the current stream.
 
     Returns:

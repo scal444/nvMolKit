@@ -24,6 +24,7 @@ namespace nvMolKit {
 namespace {
 
 constexpr int           kMaxAtoms        = 64;
+constexpr int           kSharedStride    = kMaxAtoms + 1;
 constexpr int           kThreads         = 256;
 constexpr std::uint64_t kFnvOffset       = 1469598103934665603ULL;
 constexpr std::uint64_t kFnvPrime        = 1099511628211ULL;
@@ -131,6 +132,9 @@ void validateOptions(const AapOptions& options) {
   if (!(options.sinkhornTemperature > 0.0F) || !std::isfinite(options.sinkhornTemperature)) {
     throw std::invalid_argument("sinkhornTemperature must be finite and positive");
   }
+  if (options.sinkhornTemperature < std::numeric_limits<float>::min()) {
+    throw std::invalid_argument("sinkhornTemperature must be at least the smallest positive normal float");
+  }
 }
 
 AapHostDescriptors buildDescriptors(const std::vector<const RDKit::ROMol*>& molecules, const AapOptions& options) {
@@ -233,11 +237,11 @@ bool sameMoleculeDescriptor(const AapHostDescriptors& descriptors, const int lef
 __device__ __forceinline__ float rowLogSumExp(const float* values, const int row, const int size) {
   float maximum = -INFINITY;
   for (int column = 0; column < size; ++column) {
-    maximum = fmaxf(maximum, values[row * kMaxAtoms + column]);
+    maximum = fmaxf(maximum, values[row * kSharedStride + column]);
   }
   float sum = 0.0F;
   for (int column = 0; column < size; ++column) {
-    sum += expf(values[row * kMaxAtoms + column] - maximum);
+    sum += expf(values[row * kSharedStride + column] - maximum);
   }
   return maximum + logf(sum);
 }
@@ -245,11 +249,11 @@ __device__ __forceinline__ float rowLogSumExp(const float* values, const int row
 __device__ __forceinline__ float columnLogSumExp(const float* values, const int column, const int size) {
   float maximum = -INFINITY;
   for (int row = 0; row < size; ++row) {
-    maximum = fmaxf(maximum, values[row * kMaxAtoms + column]);
+    maximum = fmaxf(maximum, values[row * kSharedStride + column]);
   }
   float sum = 0.0F;
   for (int row = 0; row < size; ++row) {
-    sum += expf(values[row * kMaxAtoms + column] - maximum);
+    sum += expf(values[row * kSharedStride + column] - maximum);
   }
   return maximum + logf(sum);
 }
@@ -272,8 +276,8 @@ __global__ void aapSimilarityKernel(const std::int64_t* moleculeAtomOffsets,
     return;
   }
 
-  __shared__ float affinity[kMaxAtoms * kMaxAtoms];
-  __shared__ float transport[kMaxAtoms * kMaxAtoms];
+  __shared__ float affinity[kMaxAtoms * kSharedStride];
+  __shared__ float transport[kMaxAtoms * kSharedStride];
 
   const int candidate      = candidates[candidatePosition];
   const int leftStart      = static_cast<int>(moleculeAtomOffsets[centroid]);
@@ -310,8 +314,8 @@ __global__ void aapSimilarityKernel(const std::int64_t* moleculeAtomOffsets,
       const auto largestPathCount = max(atomPathLengths[leftStart + row], atomPathLengths[rightStart + column]);
       score = static_cast<float>(overlap + 1) / static_cast<float>(2 * largestPathCount - overlap + 1);
     }
-    affinity[row * kMaxAtoms + column]  = score;
-    transport[row * kMaxAtoms + column] = score / temperature;
+    affinity[row * kSharedStride + column]  = score;
+    transport[row * kSharedStride + column] = score / temperature;
   }
   __syncthreads();
 
@@ -320,7 +324,7 @@ __global__ void aapSimilarityKernel(const std::int64_t* moleculeAtomOffsets,
       const int   row        = static_cast<int>(threadIdx.x);
       const float normalizer = rowLogSumExp(transport, row, squareSize);
       for (int column = 0; column < squareSize; ++column) {
-        transport[row * kMaxAtoms + column] -= normalizer;
+        transport[row * kSharedStride + column] -= normalizer;
       }
     }
     __syncthreads();
@@ -328,7 +332,7 @@ __global__ void aapSimilarityKernel(const std::int64_t* moleculeAtomOffsets,
       const int   column     = static_cast<int>(threadIdx.x);
       const float normalizer = columnLogSumExp(transport, column, squareSize);
       for (int row = 0; row < squareSize; ++row) {
-        transport[row * kMaxAtoms + column] -= normalizer;
+        transport[row * kSharedStride + column] -= normalizer;
       }
     }
     __syncthreads();
@@ -338,7 +342,7 @@ __global__ void aapSimilarityKernel(const std::int64_t* moleculeAtomOffsets,
     float matched = 0.0F;
     for (int row = 0; row < leftCount; ++row) {
       for (int column = 0; column < candidateAtoms; ++column) {
-        matched += expf(transport[row * kMaxAtoms + column]) * affinity[row * kMaxAtoms + column];
+        matched += expf(transport[row * kSharedStride + column]) * affinity[row * kSharedStride + column];
       }
     }
     output[candidatePosition] =
@@ -370,6 +374,58 @@ void launchSimilarity(const AapDeviceDescriptors&   descriptors,
                                                                options.sinkhornIterations,
                                                                output.data());
   cudaCheckError(cudaGetLastError());
+}
+
+struct CentroidSelection {
+  std::vector<int> labels;
+  std::vector<int> centroids;
+};
+
+CentroidSelection selectCentroids(const AapHostDescriptors&   hostDescriptors,
+                                  const AapDeviceDescriptors& descriptors,
+                                  const int                   numMolecules,
+                                  const float                 threshold,
+                                  const AapOptions&           options,
+                                  AsyncDeviceVector<int>&     candidates,
+                                  AsyncDeviceVector<float>&   output,
+                                  PinnedHostVector<int>&      candidateHost,
+                                  PinnedHostVector<float>&    outputHost,
+                                  cudaStream_t                stream) {
+  CentroidSelection result{std::vector<int>(numMolecules, -1), {}};
+
+  for (int centroid = 0; centroid < numMolecules; ++centroid) {
+    if (result.labels[centroid] >= 0) {
+      continue;
+    }
+    const int clusterId     = static_cast<int>(result.centroids.size());
+    result.labels[centroid] = clusterId;
+    result.centroids.push_back(centroid);
+
+    int candidateCount = 0;
+    for (int moleculeIdx = 0; moleculeIdx < numMolecules; ++moleculeIdx) {
+      if (result.labels[moleculeIdx] < 0) {
+        if (sameMoleculeDescriptor(hostDescriptors, centroid, moleculeIdx)) {
+          result.labels[moleculeIdx] = clusterId;
+        } else {
+          candidateHost[candidateCount++] = moleculeIdx;
+        }
+      }
+    }
+    if (candidateCount == 0) {
+      continue;
+    }
+
+    candidates.copyFromHost(candidateHost.data(), candidateCount);
+    launchSimilarity(descriptors, candidates, candidateCount, centroid, options, output, stream);
+    output.copyToHost(outputHost.data(), candidateCount);
+    cudaCheckError(cudaStreamSynchronize(stream));
+    for (int position = 0; position < candidateCount; ++position) {
+      if (outputHost[position] >= threshold) {
+        result.labels[candidateHost[position]] = clusterId;
+      }
+    }
+  }
+  return result;
 }
 
 std::vector<int> remapClustersBySize(const std::vector<int>& labels, const int numClusters) {
@@ -435,40 +491,18 @@ std::vector<int> aapSimilarityClustering(const std::vector<const RDKit::ROMol*>&
   AsyncDeviceVector<float>   output(numMolecules, stream);
   PinnedHostVector<int>      candidateHost(numMolecules);
   PinnedHostVector<float>    outputHost(numMolecules);
-  std::vector<int>           labels(numMolecules, -1);
-  int                        clusterId = 0;
 
-  for (int centroid = 0; centroid < numMolecules; ++centroid) {
-    if (labels[centroid] >= 0) {
-      continue;
-    }
-    labels[centroid]   = clusterId;
-    int candidateCount = 0;
-    for (int moleculeIdx = 0; moleculeIdx < numMolecules; ++moleculeIdx) {
-      if (labels[moleculeIdx] < 0) {
-        if (sameMoleculeDescriptor(hostDescriptors, centroid, moleculeIdx)) {
-          labels[moleculeIdx] = clusterId;
-        } else {
-          candidateHost[candidateCount++] = moleculeIdx;
-        }
-      }
-    }
-    if (candidateCount > 0) {
-      candidates.copyFromHost(candidateHost.data(), candidateCount);
-      launchSimilarity(descriptors, candidates, candidateCount, centroid, options, output, stream);
-      output.copyToHost(outputHost.data(), candidateCount);
-      cudaCheckError(cudaStreamSynchronize(stream));
-
-      for (int position = 0; position < candidateCount; ++position) {
-        if (outputHost[position] >= threshold) {
-          labels[candidateHost[position]] = clusterId;
-        }
-      }
-    }
-    ++clusterId;
-  }
-
-  return remapClustersBySize(labels, clusterId);
+  const auto selection = selectCentroids(hostDescriptors,
+                                         descriptors,
+                                         numMolecules,
+                                         threshold,
+                                         options,
+                                         candidates,
+                                         output,
+                                         candidateHost,
+                                         outputHost,
+                                         stream);
+  return remapClustersBySize(selection.labels, static_cast<int>(selection.centroids.size()));
 }
 
 std::vector<int> aapDiseClustering(const std::vector<const RDKit::ROMol*>& molecules,
@@ -490,38 +524,18 @@ std::vector<int> aapDiseClustering(const std::vector<const RDKit::ROMol*>& molec
   AsyncDeviceVector<float>   output(numMolecules, stream);
   PinnedHostVector<int>      candidateHost(numMolecules);
   PinnedHostVector<float>    outputHost(numMolecules);
-  std::vector<int>           selectionLabels(numMolecules, -1);
-  std::vector<int>           centroids;
 
-  for (int centroid = 0; centroid < numMolecules; ++centroid) {
-    if (selectionLabels[centroid] >= 0) {
-      continue;
-    }
-    const int clusterId       = static_cast<int>(centroids.size());
-    selectionLabels[centroid] = clusterId;
-    centroids.push_back(centroid);
-    int candidateCount = 0;
-    for (int moleculeIdx = 0; moleculeIdx < numMolecules; ++moleculeIdx) {
-      if (selectionLabels[moleculeIdx] < 0) {
-        if (sameMoleculeDescriptor(hostDescriptors, centroid, moleculeIdx)) {
-          selectionLabels[moleculeIdx] = clusterId;
-        } else {
-          candidateHost[candidateCount++] = moleculeIdx;
-        }
-      }
-    }
-    if (candidateCount > 0) {
-      candidates.copyFromHost(candidateHost.data(), candidateCount);
-      launchSimilarity(descriptors, candidates, candidateCount, centroid, options, output, stream);
-      output.copyToHost(outputHost.data(), candidateCount);
-      cudaCheckError(cudaStreamSynchronize(stream));
-      for (int position = 0; position < candidateCount; ++position) {
-        if (outputHost[position] >= threshold) {
-          selectionLabels[candidateHost[position]] = clusterId;
-        }
-      }
-    }
-  }
+  const auto  selection = selectCentroids(hostDescriptors,
+                                         descriptors,
+                                         numMolecules,
+                                         threshold,
+                                         options,
+                                         candidates,
+                                         output,
+                                         candidateHost,
+                                         outputHost,
+                                         stream);
+  const auto& centroids = selection.centroids;
 
   std::vector<std::uint8_t> isCentroid(numMolecules, 0);
   std::vector<int>          labels(numMolecules, -1);

@@ -241,12 +241,19 @@ def load_csv(
         missing = [column for column in required if column not in reader.fieldnames]
         if missing:
             raise ValueError(f"CSV is missing required columns: {', '.join(missing)}")
-        selected_rows = (
-            {column: row[column] for column in required}
-            for row in reader
-            if row[smiles_column].strip()
-        )
-        reservoir = _reservoir_sample(selected_rows, read_limit, rng)
+
+        def selected_rows():
+            for row_number, row in enumerate(reader, start=2):
+                missing_values = [column for column in required if row[column] is None]
+                if missing_values:
+                    raise ValueError(
+                        f"CSV row {row_number} is missing required values for: {', '.join(missing_values)}"
+                    )
+                selected = {column: row[column] for column in required}
+                if selected[smiles_column].strip():
+                    yield selected
+
+        reservoir = _reservoir_sample(selected_rows(), read_limit, rng)
 
     smiles_list = [row[smiles_column] for row in reservoir]
     parse_func = partial(_parse_smiles, sanitize=sanitize)
