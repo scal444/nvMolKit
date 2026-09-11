@@ -201,6 +201,7 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
                                                                  const int    nThreads,
                                                                  std::vector<MorganPerThreadBuffers>& threadBuffers,
                                                                  cudaStream_t stream = nullptr) {
+  nvMolKit::ScopedNvtxRange rangeE2E("MorganFPComputeGpuBuffer");
   nvMolKit::ScopedNvtxRange range1("MorganFPBatchAllocation");
   const size_t              numMols           = mols.size();
   auto                      outputAccumulator = AsyncDeviceVector<FlatBitVect<fpSize>>(numMols, stream);
@@ -247,10 +248,11 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
   }
   range1.pop();
 
-  WorkBag work32;
-  WorkBag work64;
-  WorkBag work128;
-  WorkBag workLarge;
+  WorkBag         work32;
+  WorkBag         work64;
+  WorkBag         work128;
+  WorkBag         workLarge;
+  ScopedNvtxRange rangeClassify("MorganFPClassifyMolecules");
   for (int i = 0; i < mols.size(); i++) {
     const auto& mol = *mols[i];
     if (mol.getNumAtoms() < 32 && mol.getNumBonds() < 32) {
@@ -263,6 +265,7 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
       workLarge.push_back(i);
     }
   }
+  rangeClassify.pop();
   const size_t numThreads32    = (work32.size() + dispatchChunkSize - 1) / dispatchChunkSize;
   const size_t numThreads64    = (work64.size() + dispatchChunkSize - 1) / dispatchChunkSize;
   const size_t numThreads128   = (work128.size() + dispatchChunkSize - 1) / dispatchChunkSize;
@@ -276,6 +279,7 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
     numThreadsTotal = std::min(workLarge.size(), static_cast<size_t>(nThreadsActual));
   }
   detail::OpenMPExceptionRegistry exceptionRegistry;
+  ScopedNvtxRange                 rangeParallel("MorganFPParallelPreprocessAndLaunch");
 
 #pragma omp parallel for num_threads(nThreadsActual) default(none) shared(numThreadsTotal,     \
                                                                             threadBuffers,     \
@@ -459,13 +463,16 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
     }
   }
   exceptionRegistry.rethrow();
+  rangeParallel.pop();
 
   // Make external stream wait on all per-thread work completion
+  ScopedNvtxRange rangeJoin("MorganFPJoinWorkerStreams");
   for (const auto& buf : threadBuffers) {
     ScopedCudaEvent workDone;
     cudaCheckError(cudaEventRecord(workDone.event(), buf.stream.stream()));
     cudaCheckError(cudaStreamWaitEvent(stream, workDone.event(), 0));
   }
+  rangeJoin.pop();
 
   return outputAccumulator;
 }
