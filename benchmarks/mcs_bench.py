@@ -39,7 +39,6 @@ from bench_utils import (
     load_smiles,
     print_csv_rows,
     throughput_per_s,
-    time_it_bounded,
     write_csv_rows,
 )
 from bench_utils import (
@@ -204,6 +203,7 @@ def bench_rdkit_mcs(
     """Benchmark RDKit FindMCS."""
     params = _rdkit_params(config_row)
     results_data: list[tuple[int, int]] = []
+    complete_results_data: list[tuple[int, int]] | None = None
     pairs_done = 0
 
     if threads > 1:
@@ -212,7 +212,7 @@ def bench_rdkit_mcs(
 
         @nvtx.annotate("mcs_rdkit_run_mp", color="yellow")
         def run(deadline: Deadline) -> None:
-            nonlocal pairs_done, results_data
+            nonlocal complete_results_data, pairs_done, results_data
             results_data = []
             pairs_done = 0
             with Pool(threads, initializer=_rdkit_worker_init, initargs=(mol_binaries, params)) as pool:
@@ -221,12 +221,14 @@ def bench_rdkit_mcs(
                     pairs_done += 1
                     if deadline.expired():
                         break
+            if pairs_done == len(pairs):
+                complete_results_data = results_data
 
     else:
 
         @nvtx.annotate("mcs_rdkit_run", color="yellow")
         def run(deadline: Deadline) -> None:
-            nonlocal pairs_done, results_data
+            nonlocal complete_results_data, pairs_done, results_data
             results_data = []
             pairs_done = 0
             for idx_a, idx_b in pairs:
@@ -235,15 +237,23 @@ def bench_rdkit_mcs(
                 pairs_done += 1
                 if deadline.expired():
                     break
+            if pairs_done == len(pairs):
+                complete_results_data = results_data
 
-    avg_ms, std_ms, measured_pairs = time_it_bounded(
+    timing = _time_it(
         run,
-        runs,
-        max_seconds,
-        lambda: pairs_done,
-        len(pairs),
+        runs=runs,
+        warmups=0,
+        max_seconds=max_seconds,
+        progress_getter=lambda: pairs_done,
+        progress_target=len(pairs),
     )
-    return avg_ms, std_ms, results_data, measured_pairs
+    if timing.progress is None:
+        raise RuntimeError("bounded timing did not report progress")
+    measured_pairs = timing.progress
+    if measured_pairs == len(pairs) and complete_results_data is not None:
+        results_data = complete_results_data
+    return timing.mean_ms, timing.std_ms, results_data, measured_pairs
 
 
 @nvtx.annotate("bench_nvmolkit_mcs", color="red")

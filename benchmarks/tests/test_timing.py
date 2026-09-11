@@ -7,7 +7,7 @@ import math
 import time
 
 import pytest
-from bench_utils.timing import Deadline, throughput_per_s, time_it_bounded, time_it_bounded_result
+from bench_utils.timing import Deadline, throughput_per_s, time_it
 
 
 @pytest.mark.parametrize("max_seconds", [0.0, -1.0])
@@ -51,42 +51,136 @@ def test_throughput_per_s_non_positive_elapsed_returns_nan(elapsed_ms):
     assert math.isnan(throughput_per_s(100, elapsed_ms))
 
 
-def test_time_it_bounded_runs_to_completion_when_progress_full():
-    call_count = [0]
+def test_time_it_deadline_mode_reports_complete_progress():
+    seen_deadlines = []
+    progress = [0]
 
-    def run(_deadline):
-        call_count[0] += 1
-        time.sleep(0.001)
+    def run(deadline):
+        seen_deadlines.append(deadline)
+        progress[0] = 4
 
-    avg_ms, std_ms, progress = time_it_bounded(
-        run, runs=3, max_seconds=0.0, progress_getter=lambda: 10, progress_target=10
+    timing = time_it(
+        run,
+        runs=3,
+        warmups=0,
+        max_seconds=0.0,
+        progress_getter=lambda: progress[0],
+        progress_target=4,
     )
 
-    assert call_count[0] == 3
-    assert avg_ms > 0
-    assert std_ms >= 0
-    assert progress == 10
+    assert len(timing.times_ms) == 3
+    assert timing.progress == timing.progress_target == 4
+    assert not timing.truncated
+    assert len({id(deadline) for deadline in seen_deadlines}) == 1
 
 
-def test_time_it_bounded_stops_after_partial_run():
-    call_count = [0]
-    progress = [10]
+def test_time_it_runs_setup_before_each_iteration_outside_timing(monkeypatch):
+    events = []
+    clock = iter([10.0, 10.25])
 
-    def run(_deadline):
-        call_count[0] += 1
-        progress[0] = 3
+    monkeypatch.setattr("bench_utils.timing.time.perf_counter", lambda: next(clock))
 
-    avg_ms, std_ms, last_progress = time_it_bounded(
-        run, runs=5, max_seconds=0.0, progress_getter=lambda: progress[0], progress_target=10
+    timing = time_it(
+        lambda: events.append("run"),
+        runs=1,
+        warmups=1,
+        setup=lambda: events.append("setup"),
     )
 
-    assert call_count[0] == 1
-    assert last_progress == 3
-    assert std_ms == 0.0
-    assert avg_ms > 0
+    assert events == ["setup", "run", "setup", "run"]
+    assert timing.times_ms == [250.0]
 
 
-def test_time_it_bounded_stops_when_budget_exhausted_between_runs():
+def test_time_it_deadline_mode_retains_first_partial_sample():
+    progress = [0]
+    calls = [0]
+
+    def run(_deadline):
+        calls[0] += 1
+        progress[0] = 2
+
+    timing = time_it(
+        run,
+        runs=3,
+        warmups=0,
+        max_seconds=0.0,
+        progress_getter=lambda: progress[0],
+        progress_target=4,
+    )
+
+    assert calls[0] == 1
+    assert len(timing.times_ms) == 1
+    assert timing.progress == 2
+    assert timing.progress_target == 4
+    assert timing.truncated
+
+
+def test_time_it_deadline_mode_discards_later_partial_sample():
+    progresses = iter([4, 4, 2])
+    progress = [0]
+
+    def run(_deadline):
+        progress[0] = next(progresses)
+
+    timing = time_it(
+        run,
+        runs=3,
+        warmups=0,
+        max_seconds=0.0,
+        progress_getter=lambda: progress[0],
+        progress_target=4,
+    )
+
+    assert len(timing.times_ms) == 2
+    assert timing.progress == 4
+    assert not timing.truncated
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"max_seconds": 1.0},
+        {"progress_getter": lambda: 1},
+        {"progress_target": 1},
+        {"max_seconds": 1.0, "progress_getter": lambda: 1},
+    ],
+)
+def test_time_it_rejects_incomplete_deadline_configuration(kwargs):
+    with pytest.raises(ValueError, match="must be provided together"):
+        time_it(lambda: None, runs=1, warmups=0, **kwargs)
+
+
+def test_time_it_rejects_negative_warmups():
+    with pytest.raises(ValueError, match="warmups must be non-negative"):
+        time_it(lambda: None, runs=1, warmups=-1)
+
+
+def test_time_it_rejects_negative_progress_target():
+    with pytest.raises(ValueError, match="progress_target must be non-negative"):
+        time_it(
+            lambda _deadline: None,
+            runs=1,
+            warmups=0,
+            max_seconds=0.0,
+            progress_getter=lambda: 0,
+            progress_target=-1,
+        )
+
+
+@pytest.mark.parametrize("progress", [-1, 3])
+def test_time_it_rejects_progress_outside_target(progress):
+    with pytest.raises(ValueError, match="progress must be between"):
+        time_it(
+            lambda _deadline: None,
+            runs=1,
+            warmups=0,
+            max_seconds=0.0,
+            progress_getter=lambda: progress,
+            progress_target=2,
+        )
+
+
+def test_time_it_stops_when_budget_exhausted_between_runs():
     call_count = [0]
 
     def run(_deadline):
@@ -96,30 +190,30 @@ def test_time_it_bounded_stops_when_budget_exhausted_between_runs():
     # 5 runs * 50ms = 250ms total, but budget is only 60ms.
     # Run 1 completes at ~50ms (deadline check before run 2 still passes), run 2
     # completes at ~100ms, and the deadline check before run 3 stops the loop.
-    avg_ms, _std_ms, _progress = time_it_bounded(
-        run, runs=5, max_seconds=0.06, progress_getter=lambda: 1, progress_target=1
+    timing = time_it(
+        run,
+        runs=5,
+        warmups=0,
+        max_seconds=0.06,
+        progress_getter=lambda: 1,
+        progress_target=1,
     )
 
     assert 1 <= call_count[0] < 5
-    assert avg_ms > 0
+    assert timing.mean_ms > 0
 
 
-@pytest.mark.parametrize("timing_func", [time_it_bounded, time_it_bounded_result])
-def test_time_it_bounded_rejects_non_positive_runs(timing_func):
-    with pytest.raises(ValueError, match="runs must be positive"):
-        timing_func(lambda _deadline: None, runs=0, max_seconds=0.0, progress_getter=lambda: 0, progress_target=1)
-
-
-def test_time_it_bounded_result_runs_first_sample_when_deadline_already_expired(monkeypatch):
+def test_time_it_runs_first_sample_when_deadline_already_expired(monkeypatch):
     monkeypatch.setattr(Deadline, "expired", lambda _self: True)
     call_count = [0]
 
     def run(_deadline):
         call_count[0] += 1
 
-    timing, reported_progress = time_it_bounded_result(
+    timing = time_it(
         run,
         runs=3,
+        warmups=0,
         max_seconds=1.0,
         progress_getter=lambda: call_count[0],
         progress_target=1,
@@ -127,69 +221,28 @@ def test_time_it_bounded_result_runs_first_sample_when_deadline_already_expired(
 
     assert call_count[0] == 1
     assert len(timing.times_ms) == 1
-    assert reported_progress == 1
+    assert timing.progress == 1
 
 
-def test_time_it_bounded_stddev_positive_for_multiple_completed_runs():
+def test_time_it_stddev_positive_for_multiple_completed_runs():
     delays = iter([0.001, 0.02, 0.001])
 
     def run(_deadline):
         time.sleep(next(delays))
 
-    _avg_ms, std_ms, _progress = time_it_bounded(
-        run, runs=3, max_seconds=0.0, progress_getter=lambda: 1, progress_target=1
-    )
-    assert std_ms > 0.0
-
-
-def test_time_it_bounded_does_not_pair_full_timing_with_partial_progress():
-    progresses = iter([10, 3])
-    progress = [0]
-
-    def run(_deadline):
-        progress[0] = next(progresses)
-
-    avg_ms, std_ms, reported_progress = time_it_bounded(
-        run, runs=3, max_seconds=0.0, progress_getter=lambda: progress[0], progress_target=10
-    )
-
-    assert avg_ms >= 0.0
-    assert std_ms == 0.0
-    assert reported_progress == 10
-
-
-def test_time_it_bounded_result_retains_complete_samples_not_later_partial():
-    progresses = iter([10, 10, 3])
-    progress = [0]
-
-    def run(_deadline):
-        progress[0] = next(progresses)
-
-    timing, reported_progress = time_it_bounded_result(
-        run, runs=3, max_seconds=0.0, progress_getter=lambda: progress[0], progress_target=10
-    )
-
-    assert len(timing.times_ms) == 2
-    assert reported_progress == 10
-
-
-def test_time_it_bounded_result_returns_first_partial_sample_and_progress():
-    progress = [3]
-
-    timing, reported_progress = time_it_bounded_result(
-        lambda _deadline: None,
+    timing = time_it(
+        run,
         runs=3,
+        warmups=0,
         max_seconds=0.0,
-        progress_getter=lambda: progress[0],
-        progress_target=10,
+        progress_getter=lambda: 1,
+        progress_target=1,
     )
-
-    assert len(timing.times_ms) == 1
-    assert reported_progress == 3
+    assert timing.std_ms > 0.0
 
 
-def test_time_it_bounded_shared_deadline_caps_inner_loop():
-    """Verify ``time_it_bounded`` exposes a single shared :class:`Deadline`.
+def test_time_it_shared_deadline_caps_inner_loop():
+    """Verify ``time_it`` exposes a single shared :class:`Deadline`.
 
     The ``run`` callback honours the budget mid-iteration, and a second call
     receives the same (already-elapsed) deadline rather than a fresh one,
@@ -208,11 +261,17 @@ def test_time_it_bounded_shared_deadline_caps_inner_loop():
         iterations_per_run.append(n_done)
         progress[0] = n_done
 
-    _avg_ms, _std_ms, _progress = time_it_bounded(
-        run, runs=5, max_seconds=0.05, progress_getter=lambda: progress[0], progress_target=1000
+    timing = time_it(
+        run,
+        runs=5,
+        warmups=0,
+        max_seconds=0.05,
+        progress_getter=lambda: progress[0],
+        progress_target=1000,
     )
 
     assert iterations_per_run, "run should have been invoked at least once"
+    assert timing.truncated
     # The first run consumes essentially the whole budget; any subsequent call
     # must see an already-expired deadline and exit immediately.
     for later_count in iterations_per_run[1:]:
