@@ -438,45 +438,48 @@ void launchMorganFingerprintKernelBatch(const MorganGPUBuffersBatch&            
                                         const int                               maxAtoms,
                                         const int                               nMolecules,
                                         cudaStream_t                            stream) {
-  const int tilesPerBlock = kBlockSize / maxAtoms;
-  const int numBlocks     = (nMolecules + tilesPerBlock - 1) / tilesPerBlock;  // ceil division
+  const int    tilesPerBlock = kBlockSize / maxAtoms;
+  const int    numBlocks     = (nMolecules + tilesPerBlock - 1) / tilesPerBlock;  // ceil division
+  const size_t atomCount     = static_cast<size_t>(maxAtoms) * nMolecules;
+  const size_t bondCount     = atomCount * bondStride;
+  const size_t scratchCount  = atomCount * (maxRadius + 1);
 
   switch (maxAtoms) {
     case 32:
       morganFingerprintKernelBatch<32, fpSize>
-        <<<numBlocks, kBlockSize, 0, stream>>>(toSpan(buffers.atomInvariants),
-                                               toSpan(buffers.bondInvariants),
-                                               toSpan(buffers.bondIndices),
-                                               toSpan(buffers.bondOtherAtomIndices),
-                                               toSpan(buffers.nAtomsPerMol),
-                                               toSpan(buffers.allSeenNeighborhoods32),
+        <<<numBlocks, kBlockSize, 0, stream>>>(toSpan(buffers.atomInvariants).first(atomCount),
+                                               toSpan(buffers.bondInvariants).first(atomCount),
+                                               toSpan(buffers.bondIndices).first(bondCount),
+                                               toSpan(buffers.bondOtherAtomIndices).first(bondCount),
+                                               toSpan(buffers.nAtomsPerMol).first(nMolecules),
+                                               toSpan(buffers.allSeenNeighborhoods32).first(scratchCount),
                                                toSpan(outputAccumulator),
                                                maxRadius,
-                                               toSpan(buffers.outputIndices));
+                                               toSpan(buffers.outputIndices).first(nMolecules));
       break;
     case 64:
       morganFingerprintKernelBatch<64, fpSize>
-        <<<numBlocks, kBlockSize, 0, stream>>>(toSpan(buffers.atomInvariants),
-                                               toSpan(buffers.bondInvariants),
-                                               toSpan(buffers.bondIndices),
-                                               toSpan(buffers.bondOtherAtomIndices),
-                                               toSpan(buffers.nAtomsPerMol),
-                                               toSpan(buffers.allSeenNeighborhoods64),
+        <<<numBlocks, kBlockSize, 0, stream>>>(toSpan(buffers.atomInvariants).first(atomCount),
+                                               toSpan(buffers.bondInvariants).first(atomCount),
+                                               toSpan(buffers.bondIndices).first(bondCount),
+                                               toSpan(buffers.bondOtherAtomIndices).first(bondCount),
+                                               toSpan(buffers.nAtomsPerMol).first(nMolecules),
+                                               toSpan(buffers.allSeenNeighborhoods64).first(scratchCount),
                                                toSpan(outputAccumulator),
                                                maxRadius,
-                                               toSpan(buffers.outputIndices));
+                                               toSpan(buffers.outputIndices).first(nMolecules));
       break;
     case 128:
       morganFingerprintKernelBatch<128, fpSize>
-        <<<numBlocks, kBlockSize, 0, stream>>>(toSpan(buffers.atomInvariants),
-                                               toSpan(buffers.bondInvariants),
-                                               toSpan(buffers.bondIndices),
-                                               toSpan(buffers.bondOtherAtomIndices),
-                                               toSpan(buffers.nAtomsPerMol),
-                                               toSpan(buffers.allSeenNeighborhoods128),
+        <<<numBlocks, kBlockSize, 0, stream>>>(toSpan(buffers.atomInvariants).first(atomCount),
+                                               toSpan(buffers.bondInvariants).first(atomCount),
+                                               toSpan(buffers.bondIndices).first(bondCount),
+                                               toSpan(buffers.bondOtherAtomIndices).first(bondCount),
+                                               toSpan(buffers.nAtomsPerMol).first(nMolecules),
+                                               toSpan(buffers.allSeenNeighborhoods128).first(scratchCount),
                                                toSpan(outputAccumulator),
                                                maxRadius,
-                                               toSpan(buffers.outputIndices));
+                                               toSpan(buffers.outputIndices).first(nMolecules));
       break;
     default:
       throw std::runtime_error("maxAtoms must be 32, 64, or 128");

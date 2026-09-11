@@ -23,6 +23,7 @@
 #include "src/utils/device.h"
 #include "src/utils/device_vector.h"
 #include "src/utils/host_vector.h"
+#include "src/utils/pinned_host_allocator.h"
 
 namespace nvMolKit {
 
@@ -43,31 +44,22 @@ struct MorganGPUBuffersBatch {
 
 // Per CPU Thread buffers, including GPU buffers and synchronization structures.
 struct MorganPerThreadBuffers {
-  PinnedHostVector<std::int16_t>         nAtomsPerMol;
   ScopedStream                           stream;
   std::unique_ptr<MorganGPUBuffersBatch> gpuBuffers32;
   std::unique_ptr<MorganGPUBuffersBatch> gpuBuffers64;
   std::unique_ptr<MorganGPUBuffersBatch> gpuBuffers128;
   ScopedCudaEvent                        prevMemcpyDoneEvent;
 
-  // Pre-allocated pinned host buffers for CPU->GPU transfers (avoid reallocations)
-  PinnedHostVector<std::uint32_t> h_atomInvariants32;
-  PinnedHostVector<std::uint32_t> h_bondInvariants32;
-  PinnedHostVector<std::int16_t>  h_bondIndices32;
-  PinnedHostVector<std::int16_t>  h_bondOtherAtomIndices32;
-
-  PinnedHostVector<std::uint32_t> h_atomInvariants64;
-  PinnedHostVector<std::uint32_t> h_bondInvariants64;
-  PinnedHostVector<std::int16_t>  h_bondIndices64;
-  PinnedHostVector<std::int16_t>  h_bondOtherAtomIndices64;
-
-  PinnedHostVector<std::uint32_t> h_atomInvariants128;
-  PinnedHostVector<std::uint32_t> h_bondInvariants128;
-  PinnedHostVector<std::int16_t>  h_bondIndices128;
-  PinnedHostVector<std::int16_t>  h_bondOtherAtomIndices128;
-
-  // Output indices for kernel results routing
-  PinnedHostVector<int> h_outputIndices;
+  // One grow-only pinned reservoir is shared by every worker. A worker processes
+  // only one tier at a time, so each worker needs one set of largest-tier views.
+  std::shared_ptr<PinnedHostAllocator> pinnedAllocator;
+  size_t                               pinnedBatchCapacity = 0;
+  PinnedHostView<std::int16_t>         nAtomsPerMol;
+  PinnedHostView<std::uint32_t>        h_atomInvariants;
+  PinnedHostView<std::uint32_t>        h_bondInvariants;
+  PinnedHostView<std::int16_t>         h_bondIndices;
+  PinnedHostView<std::int16_t>         h_bondOtherAtomIndices;
+  PinnedHostView<int>                  h_outputIndices;
   ~MorganPerThreadBuffers() noexcept {
     // Reset GPU buffers first, because they may depend on the stream
     gpuBuffers32.reset();
