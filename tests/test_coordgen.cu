@@ -264,7 +264,7 @@ TEST(InitialCoordinateGeneratorTest, InactiveSmallSystemRemainsFailed) {
   EXPECT_THAT(passed, testing::ElementsAre(0));
 }
 
-TEST(InitialCoordinateGeneratorTest, EigensolverFailureFailsSmallSystems) {
+TEST(InitialCoordinateGeneratorTest, EigensolverExhaustionPassesSmallSystems) {
   constexpr int coordinateDim = 3;
   auto          params        = RDKit::DGeomHelpers::ETKDGv3;
 
@@ -284,9 +284,14 @@ TEST(InitialCoordinateGeneratorTest, EigensolverFailureFailsSmallSystems) {
 
   coordgen.computeInitialCoordinates(dPositions.data(), dAtomStarts.data(), coordinateDim);
 
-  std::vector<uint8_t> passed(boundsMatrices.size(), 1);
+  std::vector<uint8_t> passed(boundsMatrices.size(), 0);
+  std::vector<double>  positions(dPositions.size());
   cudaCheckError(cudaMemcpy(passed.data(), coordgen.getPassFail(), passed.size(), cudaMemcpyDeviceToHost));
-  EXPECT_THAT(passed, testing::ElementsAre(0, 0, 0));
+  dPositions.copyToHost(positions);
+  cudaCheckError(cudaDeviceSynchronize());
+
+  EXPECT_THAT(passed, testing::ElementsAre(1, 1, 1));
+  EXPECT_THAT(positions, testing::Each(0.0));
 }
 
 TEST(InitialCoordinateGeneratorTest, ReusedBoundsMatchFreshBounds) {

@@ -133,10 +133,10 @@ __global__ void finalizeEigenvaluesKernel(const int          numSystems,
       passFail[systemIdx] = 0;
       return;
     }
-    const int    matrixDim     = matrixDimensions[systemIdx];
-    const int    systemNumEigs = min(numEigs, min(matrixDim, coordinateDimensions[systemIdx]));
-    bool         passed        = validDistanceMatrices[systemIdx] != 0 && eigensolverConverged[systemIdx] != 0;
-    unsigned int zeroEigs      = 0;
+    const int matrixDim     = matrixDimensions[systemIdx];
+    const int systemNumEigs = min(numEigs, min(matrixDim, coordinateDimensions[systemIdx]));
+    bool passed = validDistanceMatrices[systemIdx] != 0 && (eigensolverConverged[systemIdx] != 0 || matrixDim <= 3);
+    unsigned int zeroEigs = 0;
     for (int eigIdx = 0; eigIdx < systemNumEigs; ++eigIdx) {
       double&      val         = vals[systemIdx * numEigs + eigIdx];
       const double existingVal = val;
