@@ -9,7 +9,8 @@ import pytest
 import torch
 from rdkit import Chem
 
-from nvmolkit.clustering import aap_dise_clustering, aap_similarity, aap_similarity_clustering
+from nvmolkit.clustering import aap_dise, aap_dise_clustering, aap_similarity_clustering
+from nvmolkit.similarity import aap_similarity
 
 
 def _mol(smiles):
@@ -229,6 +230,24 @@ def test_aap_dise_clustering_reassigns_noncentroids_to_the_nearest_centroid():
     assert aap_similarity_clustering(molecules, threshold=0.2) == [1, 1, 2]
     assert aap_similarity(molecules[2], molecules[1]) > aap_similarity(molecules[0], molecules[1])
     assert aap_dise_clustering(molecules, threshold=0.2) == [2, 1, 1]
+
+
+@pytest.mark.parametrize(
+    "assignment, compatibility_function",
+    [("first", aap_similarity_clustering), ("nearest", aap_dise_clustering)],
+)
+def test_aap_dise_assignment_modes_match_compatibility_functions(assignment, compatibility_function):
+    molecules = [_mol(smiles) for smiles in ("CCCC", "CCCO", "CCOC", "c1ccccc1")]
+
+    assert aap_dise(molecules, similarity_threshold=0.2, assignment=assignment) == compatibility_function(
+        molecules, threshold=0.2
+    )
+
+
+@pytest.mark.parametrize("assignment", ["", "closest", None])
+def test_aap_dise_rejects_invalid_assignment(assignment):
+    with pytest.raises(ValueError, match="assignment must be one of"):
+        aap_dise([], assignment=assignment)
 
 
 def test_aap_similarity_and_clustering_are_deterministic_across_streams():

@@ -29,6 +29,7 @@ Similarity Calculations
    similarity.crossTanimotoSimilarityMemoryConstrained
    similarity.crossCosineSimilarity
    similarity.crossCosineSimilarityMemoryConstrained
+   similarity.aap_similarity
 
 
 ETKDG Conformer Generation
@@ -81,9 +82,7 @@ Clustering
 
    clustering.butina
    clustering.fused_butina
-   clustering.aap_similarity
-   clustering.aap_similarity_clustering
-   clustering.aap_dise_clustering
+   clustering.aap_dise
 
 .. autosummary::
    :toctree: generated/

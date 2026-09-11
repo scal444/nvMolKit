@@ -15,10 +15,10 @@
 
 """Contains GPU-accelerated molecular clustering implementations.
 
-``aap_similarity_clustering()`` performs directed sphere-exclusion clustering
-directly from RDKit molecules using approximate Atom-Atom-Path similarity. It
-keeps only O(N) cluster state while constructing rooted-path descriptors on the
-CPU and evaluating atom assignments on the GPU.
+``aap_dise()`` performs directed sphere-exclusion clustering directly from
+RDKit molecules using approximate Atom-Atom-Path similarity. It keeps only
+O(N) cluster state while constructing rooted-path descriptors on the CPU and
+evaluating atom assignments on the GPU.
 
 The standard ``butina()`` path accepts a full N x N distance matrix and
 materializes its neighbor relationships. This is the right choice when you
@@ -42,6 +42,7 @@ import torch
 
 from nvmolkit import _clustering
 from nvmolkit._fingerprint_inputs import _prepare_packed_fingerprints
+from nvmolkit.similarity import aap_similarity  # noqa: F401 - compatibility re-export
 from nvmolkit.types import ArrayInput, AsyncGpuResult, _as_cuda_tensor, _resolve_cuda_stream
 
 _VALID_NEIGHBORLIST_SIZES = (8, 16, 24, 32, 64, 128)
@@ -49,44 +50,50 @@ _VALID_NEIGHBORLIST_SIZES = (8, 16, 24, 32, 64, 128)
 _RDKitClusters = tuple[tuple[int, ...], ...]
 
 
-def aap_similarity(
-    left,
-    right,
+# TODO: Revisit a GPU-resident DISE control loop and device result after it
+# demonstrates representative end-to-end gains, especially for small inputs.
+def aap_dise(
+    molecules,
+    similarity_threshold: float = 0.217,
     *,
+    assignment: Literal["first", "nearest"] = "nearest",
     max_path_length: int = 7,
     histogram_bins: int = 2048,
     sinkhorn_iterations: int = 8,
     sinkhorn_temperature: float = 0.104,
     stream: torch.cuda.Stream | None = None,
-) -> float:
-    """Compute directed approximate Atom-Atom-Path similarity.
+) -> list[int]:
+    """Cluster ordered RDKit molecules with AAP-backed DISE.
 
-    Rooted paths are hashed into per-atom histograms and compatible atoms are
-    assigned with fixed-iteration Sinkhorn normalization on the GPU. The score
-    is directed: swapping ``left`` and ``right`` can change the result.
-
-    Molecules may currently contain at most 64 RDKit atoms, including explicit
-    hydrogens, and must not be empty. Supported bond types are single, double,
-    triple, and aromatic. Rooted-path descriptors are constructed on the CPU.
-    This function synchronizes ``stream`` before returning the Python scalar.
+    Input order supplies the direction: the first unassigned molecule becomes
+    the next centroid. ``assignment="first"`` retains the first qualifying
+    centroid assignment made during sphere exclusion; ``"nearest"`` performs
+    the complete second pass and assigns every non-centroid to its most similar
+    selected centroid.
 
     Args:
-        left: Centroid-side RDKit molecule.
-        right: Candidate-side RDKit molecule.
+        molecules: RDKit molecules in priority order, each with at most 64 atoms.
+        similarity_threshold: Inclusive AAP threshold used to select centroids.
+        assignment: Assignment rule for non-centroid molecules.
         max_path_length: Maximum rooted path length in bonds.
         histogram_bins: Number of hashed path bins, at most 32767.
         sinkhorn_iterations: Number of Sinkhorn normalization iterations.
-        sinkhorn_temperature: Sinkhorn temperature, at least the smallest
-            positive normal single-precision value.
+        sinkhorn_temperature: Sinkhorn temperature.
         stream: CUDA stream to use. If None, uses the current stream.
 
     Returns:
-        Similarity in the interval ``[0, 1]``.
+        One one-based cluster ID per molecule, ordered by descending cluster size.
     """
+    if not 0 <= similarity_threshold <= 1:
+        raise ValueError(f"similarity_threshold must be in [0, 1], got {similarity_threshold}")
+    if assignment not in ("first", "nearest"):
+        raise ValueError(f"assignment must be one of ['first', 'nearest'], got {assignment!r}")
+
     active_stream = _resolve_cuda_stream(stream)
-    return _clustering.aap_similarity(
-        left,
-        right,
+    function = _clustering.aap_similarity_clustering if assignment == "first" else _clustering.aap_dise_clustering
+    return function(
+        list(molecules),
+        similarity_threshold,
         max_path_length,
         histogram_bins,
         sinkhorn_iterations,
@@ -134,17 +141,15 @@ def aap_similarity_clustering(
     Returns:
         One one-based cluster ID per molecule.
     """
-    if not 0 <= threshold <= 1:
-        raise ValueError(f"threshold must be in [0, 1], got {threshold}")
-    active_stream = _resolve_cuda_stream(stream)
-    return _clustering.aap_similarity_clustering(
-        list(molecules),
-        threshold,
-        max_path_length,
-        histogram_bins,
-        sinkhorn_iterations,
-        sinkhorn_temperature,
-        active_stream.cuda_stream,
+    return aap_dise(
+        molecules,
+        similarity_threshold=threshold,
+        assignment="first",
+        max_path_length=max_path_length,
+        histogram_bins=histogram_bins,
+        sinkhorn_iterations=sinkhorn_iterations,
+        sinkhorn_temperature=sinkhorn_temperature,
+        stream=stream,
     )
 
 
@@ -189,17 +194,15 @@ def aap_dise_clustering(
     Returns:
         One one-based cluster ID per molecule.
     """
-    if not 0 <= threshold <= 1:
-        raise ValueError(f"threshold must be in [0, 1], got {threshold}")
-    active_stream = _resolve_cuda_stream(stream)
-    return _clustering.aap_dise_clustering(
-        list(molecules),
-        threshold,
-        max_path_length,
-        histogram_bins,
-        sinkhorn_iterations,
-        sinkhorn_temperature,
-        active_stream.cuda_stream,
+    return aap_dise(
+        molecules,
+        similarity_threshold=threshold,
+        assignment="nearest",
+        max_path_length=max_path_length,
+        histogram_bins=histogram_bins,
+        sinkhorn_iterations=sinkhorn_iterations,
+        sinkhorn_temperature=sinkhorn_temperature,
+        stream=stream,
     )
 
 
