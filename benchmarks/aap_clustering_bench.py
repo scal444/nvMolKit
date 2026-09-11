@@ -164,6 +164,7 @@ def _filter_sortable_molecules(molecules, sort_tag):
 def _priority_order(molecules, sort_tag, descending=False):
     indexed = list(enumerate(molecules))
     if sort_tag:
+
         def priority(item):
             value = _parse_priority_value(item[1].GetProp(sort_tag))
             return -value if descending else value
@@ -473,8 +474,7 @@ def _benchmark_clustering(args, molecules, ligand_clustering_cpu_reference):
         for method in ("nvmolkit_gpu", "ligand_clustering_cpu"):
             by_method[method]["vs_ligand_clustering_cpu_cluster_agreement"] = agreement
         by_method["nvmolkit_gpu"]["vs_ligand_clustering_cpu_time_speedup"] = round(
-            by_method["ligand_clustering_cpu"]["time_ms"]
-            / by_method["nvmolkit_gpu"]["time_ms"],
+            by_method["ligand_clustering_cpu"]["time_ms"] / by_method["nvmolkit_gpu"]["time_ms"],
             4,
         )
     return rows
@@ -576,8 +576,7 @@ def _benchmark_dise(args, molecules, rdkit_reference):
         for method in ("nvmolkit_gpu", "rdkit_contrib_aap_leader"):
             by_method[method]["vs_rdkit_cluster_agreement"] = agreement
         by_method["nvmolkit_gpu"]["vs_rdkit_time_speedup"] = round(
-            by_method["rdkit_contrib_aap_leader"]["time_ms"]
-            / by_method["nvmolkit_gpu"]["time_ms"],
+            by_method["rdkit_contrib_aap_leader"]["time_ms"] / by_method["nvmolkit_gpu"]["time_ms"],
             4,
         )
     return rows
@@ -673,8 +672,7 @@ def main():
         sys.exit(1)
     if args.operation in ("dise", "all") and not args.sort_tag:
         print(
-            "Error: the complete clustering workflow requires --sort-tag; "
-            "unordered DISE benchmarks are invalid",
+            "Error: the complete clustering workflow requires --sort-tag; unordered DISE benchmarks are invalid",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -716,8 +714,7 @@ def main():
             print(f"  Dropped {dropped_count} molecules without a valid {args.sort_tag!r} priority value")
     if len(molecules) < max(largest_size, 2):
         print(
-            f"Error: need {max(largest_size, 2)} supported molecules with sortable data, "
-            f"retained {len(molecules)}",
+            f"Error: need {max(largest_size, 2)} supported molecules with sortable data, retained {len(molecules)}",
             file=sys.stderr,
         )
         sys.exit(1)
