@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,11 +20,31 @@
 #include <GraphMol/ROMol.h>
 
 #include <memory>
+#include <vector>
 
 #include "src/morgan_fingerprint_common.h"
 #include "src/morgan_fingerprint_kernels.h"
 
 namespace nvMolKit {
+
+namespace detail {
+
+//! Stable molecule-index buckets used by the Morgan GPU dispatcher.
+struct MorganMoleculeBuckets {
+  std::vector<int> work32;
+  std::vector<int> work64;
+  std::vector<int> work128;
+  std::vector<int> workLarge;
+};
+
+//! Classify molecules by the atom/bond capacity required by the GPU kernels.
+//!
+//! Molecules with both counts below 32, 64, or 128 are assigned to the
+//! corresponding GPU bucket. All remaining molecules use the CPU fallback.
+//! Indices within every bucket retain their input order.
+MorganMoleculeBuckets classifyMorganMolecules(const std::vector<const RDKit::ROMol*>& mols, int numThreads);
+
+}  // namespace detail
 
 class MorganFingerprintGpuGenerator {
  public:

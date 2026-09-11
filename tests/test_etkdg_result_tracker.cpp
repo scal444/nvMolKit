@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -52,13 +52,21 @@ TEST_F(SchedulerTest, BasicDispatchOversubscribe) {
   ASSERT_THAT(molIds2, ::testing::ElementsAreArray({1, 2, 2, 2, 3}));
   auto molIds3 = tracker.dispatch(numMols);
   ASSERT_THAT(molIds3, ::testing::ElementsAreArray({3, 3, 4, 4, 4}));
-  // oversubscribe in the same round robin format.
+  const std::vector<int16_t> failedResults(numMols, -1);
+  tracker.record(molIds, failedResults);
+  tracker.record(molIds2, failedResults);
+  tracker.record(molIds3, failedResults);
+
+  // Failed attempts open replacement slots without exceeding the per-molecule limit.
   molIds = tracker.dispatch(numMols);
   ASSERT_THAT(molIds, ::testing::ElementsAreArray({0, 0, 0, 1, 1}));
   molIds2 = tracker.dispatch(numMols);
   ASSERT_THAT(molIds2, ::testing::ElementsAreArray({1, 2, 2, 2, 3}));
   molIds3 = tracker.dispatch(numMols);
   ASSERT_THAT(molIds3, ::testing::ElementsAreArray({3, 3, 4, 4, 4}));
+  tracker.record(molIds, failedResults);
+  tracker.record(molIds2, failedResults);
+  tracker.record(molIds3, failedResults);
 
   // We've dispatched max attempts.
   auto molIds4 = tracker.dispatch(numMols);
@@ -100,16 +108,12 @@ TEST_F(SchedulerTest, BasicDispatchPartialCompleteNoErrors) {
   auto molIds3 = tracker.dispatch(numMols);
   ASSERT_THAT(molIds3, ::testing::ElementsAreArray({3, 3, 4, 4, 4}));
 
-  // Second round, we skip 0 since it's finished already.
-  auto molIds4 = tracker.dispatch(numMols);
-  ASSERT_THAT(molIds4, ::testing::ElementsAreArray({1, 1, 1, 2, 2}));
-
   tracker.record(molIds2, goodResults);
   tracker.record(molIds3, goodResults);
 
   // We've recorded passes on everything
-  auto molIds5 = tracker.dispatch(numMols);
-  EXPECT_THAT(molIds5, testing::IsEmpty());
+  auto molIds4 = tracker.dispatch(numMols);
+  EXPECT_THAT(molIds4, testing::IsEmpty());
 }
 
 // Test basic dispatch functionality
@@ -129,13 +133,19 @@ TEST_F(SchedulerTest, BasicDispatchFullWithSomeFails) {
   tracker.record(molIds2, mixedResults);
   tracker.record(molIds3, goodResults);
 
-  // Systems 0, 3 and 4 are done.
+  // Systems 0, 3 and 4 are done. Molecules 1 and 2 each need one replacement.
   auto molIds4 = tracker.dispatch(numMols);
-  EXPECT_THAT(molIds4, ::testing::ElementsAreArray({1, 1, 1, 2, 2}));
+  EXPECT_THAT(molIds4, ::testing::ElementsAreArray({1, 2}));
+  tracker.record(molIds4, {0, -1});
+
   auto molIds5 = tracker.dispatch(numMols);
   EXPECT_THAT(molIds5, ::testing::ElementsAreArray({2}));
+  tracker.record(molIds5, {-1});
+
   auto molIds6 = tracker.dispatch(numMols);
-  EXPECT_THAT(molIds6, ::testing::IsEmpty());
+  EXPECT_THAT(molIds6, ::testing::ElementsAreArray({2}));
+  tracker.record(molIds6, {0});
+  EXPECT_THAT(tracker.dispatch(numMols), ::testing::IsEmpty());
 }
 
 // Test dispatch with batch size larger than number of molecules
@@ -144,7 +154,7 @@ TEST_F(SchedulerTest, DispatchLargeBatchSize) {
 
   constexpr int largeBatchSize = 100;
   auto          molIds         = tracker.dispatch(largeBatchSize);
-  EXPECT_THAT(molIds, ::testing::ElementsAreArray({0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1}));
+  EXPECT_THAT(molIds, ::testing::ElementsAreArray({0, 0, 1, 1}));
 }
 
 // Test record validation - mismatched vector sizes
@@ -191,17 +201,32 @@ TEST_F(SchedulerTest, ReportsStablePerMoleculeAttemptIds) {
   EXPECT_THAT(tracker.dispatch(4, &attemptIds), testing::ElementsAre(0, 0, 0, 1));
   EXPECT_THAT(attemptIds, testing::ElementsAre(0, 1, 2, 0));
 
-  EXPECT_THAT(tracker.dispatch(4, &attemptIds), testing::ElementsAre(1, 1, 0, 0));
-  EXPECT_THAT(attemptIds, testing::ElementsAre(1, 2, 3, 4));
+  auto remainingInitialAttempts = tracker.dispatch(4, &attemptIds);
+  EXPECT_THAT(remainingInitialAttempts, testing::ElementsAre(1, 1));
+  EXPECT_THAT(attemptIds, testing::ElementsAre(1, 2));
+
+  tracker.record({0, 0, 0}, {-1, -1, -1});
+  auto moleculeZeroRetries = tracker.dispatch(4, &attemptIds);
+  EXPECT_THAT(moleculeZeroRetries, testing::ElementsAre(0, 0, 0));
+  EXPECT_THAT(attemptIds, testing::ElementsAre(3, 4, 5));
+  tracker.record(moleculeZeroRetries, {-1, -1, -1});
+  tracker.record({1}, {-1});
+  tracker.record(remainingInitialAttempts, {-1, -1});
+
+  auto moleculeOneRetries = tracker.dispatch(4, &attemptIds);
+  EXPECT_THAT(moleculeOneRetries, testing::ElementsAre(1, 1, 1));
+  EXPECT_THAT(attemptIds, testing::ElementsAre(3, 4, 5));
+  tracker.record(moleculeOneRetries, {-1, -1, -1});
+  EXPECT_TRUE(tracker.dispatch(1).empty());
 }
 
-TEST_F(SchedulerTest, BlockingDispatchWaitsForInFlightRetryResults) {
+TEST_F(SchedulerTest, DispatchWaitsForInFlightRetryResults) {
   Scheduler scheduler(1, 1, 2);
 
-  auto firstAttempt = scheduler.dispatchBlocking(1);
+  auto firstAttempt = scheduler.dispatch(1);
   ASSERT_THAT(firstAttempt, testing::ElementsAre(0));
 
-  auto nextDispatch = std::async(std::launch::async, [&scheduler]() { return scheduler.dispatchBlocking(1); });
+  auto nextDispatch = std::async(std::launch::async, [&scheduler]() { return scheduler.dispatch(1); });
   EXPECT_EQ(nextDispatch.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
 
   scheduler.record(firstAttempt, {-1});
@@ -210,15 +235,33 @@ TEST_F(SchedulerTest, BlockingDispatchWaitsForInFlightRetryResults) {
   EXPECT_THAT(secondAttempt, testing::ElementsAre(0));
   scheduler.record(secondAttempt, {0});
 
-  EXPECT_TRUE(scheduler.dispatchBlocking(1).empty());
+  EXPECT_TRUE(scheduler.dispatch(1).empty());
   EXPECT_TRUE(scheduler.allFinished());
+}
+
+TEST_F(SchedulerTest, ResolvedFailureRetriesWhileUnrelatedAttemptIsInFlight) {
+  Scheduler scheduler(2, 1, 2);
+
+  auto initialAttempts = scheduler.dispatch(2);
+  ASSERT_THAT(initialAttempts, testing::ElementsAre(0, 1));
+  scheduler.record({0}, {-1});
+
+  auto retry = std::async(std::launch::async, [&scheduler]() { return scheduler.dispatch(1); });
+  if (retry.wait_for(std::chrono::seconds(1)) != std::future_status::ready) {
+    scheduler.cancel();
+  }
+  ASSERT_EQ(retry.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  EXPECT_THAT(retry.get(), testing::ElementsAre(0));
+
+  scheduler.record({0, 1}, {0, 0});
+  EXPECT_TRUE(scheduler.dispatch(1).empty());
 }
 
 TEST_F(SchedulerTest, CancelWakesBlockingDispatch) {
   Scheduler scheduler(1, 1, 2);
-  ASSERT_THAT(scheduler.dispatchBlocking(1), testing::ElementsAre(0));
+  ASSERT_THAT(scheduler.dispatch(1), testing::ElementsAre(0));
 
-  auto blockedDispatch = std::async(std::launch::async, [&scheduler]() { return scheduler.dispatchBlocking(1); });
+  auto blockedDispatch = std::async(std::launch::async, [&scheduler]() { return scheduler.dispatch(1); });
   EXPECT_EQ(blockedDispatch.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
 
   scheduler.cancel();

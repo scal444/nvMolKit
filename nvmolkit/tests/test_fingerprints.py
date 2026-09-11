@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -75,14 +75,47 @@ def test_nvmolkit_fingerprint_throws_on_invalid_fpsize(fpSize, size_limited_mols
 
 def test_empty_input():
     fpgen = MorganFingerprintGenerator(radius=3, fpSize=2048)
-    fps = fpgen.GetFingerprints([]).torch()
-    assert fps.shape == (0, 2048 // 32)
+    for mols in ([], ()):
+        fps = fpgen.GetFingerprints(mols).torch()
+        assert fps.shape == (0, 2048 // 32)
 
 
-def test_invalid_input():
+@pytest.mark.parametrize("mols", ([None], (Chem.MolFromSmiles("CC"), None)))
+def test_invalid_input(mols):
     fpgen = MorganFingerprintGenerator(radius=3, fpSize=2048)
-    with pytest.raises(ValueError, match="Invalid molecule at index 0"):
-        fpgen.GetFingerprints([None])
+    invalid_index = mols.index(None)
+    with pytest.raises(ValueError, match=rf"Invalid molecule at index {invalid_index}"):
+        fpgen.GetFingerprints(mols)
+
+
+@pytest.mark.parametrize("mols", (42, iter(())))
+def test_non_sequence_input(mols):
+    fpgen = MorganFingerprintGenerator(radius=3, fpSize=2048)
+    with pytest.raises(TypeError, match="mols must be a sequence of RDKit molecules"):
+        fpgen.GetFingerprints(mols)
+
+
+def test_fingerprints_accept_tuple_input(size_limited_mols):
+    mols = size_limited_mols[:8]
+    reordered = tuple(reversed(mols))
+    gen = MorganFingerprintGenerator(radius=2, fpSize=256)
+
+    actual = gen.GetFingerprints(reordered, num_threads=2).torch()
+    expected = gen.GetFingerprints(list(reversed(mols)), num_threads=2).torch()
+
+    torch.testing.assert_close(actual, expected)
+
+
+def test_fingerprints_large_sequence_preserves_every_row(size_limited_mols):
+    source = size_limited_mols[:16]
+    mols = tuple(source * 32)
+    gen = MorganFingerprintGenerator(radius=2, fpSize=256)
+
+    actual = gen.GetFingerprints(mols, num_threads=2).torch()
+    expected = gen.GetFingerprints(source, num_threads=2).torch().repeat((32, 1))
+
+    assert actual.shape == (512, 256 // 32)
+    torch.testing.assert_close(actual, expected)
 
 
 @pytest.mark.parametrize("fpSize", (128, 1024, 2048))

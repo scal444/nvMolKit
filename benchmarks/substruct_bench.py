@@ -69,7 +69,6 @@ from bench_utils import (
     load_smiles,
     print_csv_rows,
     process_map_bounded,
-    time_it_bounded,
     write_csv_rows,
 )
 from bench_utils import (
@@ -221,10 +220,20 @@ def bench_rdkit_substruct(
             if pairs_done_this_run == pairs_total:
                 complete_results_data = results_data
 
-    avg_ms, std_ms, last_pairs = time_it_bounded(run, runs, max_seconds, lambda: pairs_done_this_run, pairs_total)
+    timing = _time_it(
+        run,
+        runs=runs,
+        warmups=0,
+        max_seconds=max_seconds,
+        progress_getter=lambda: pairs_done_this_run,
+        progress_target=pairs_total,
+    )
+    if timing.progress is None:
+        raise RuntimeError("bounded timing did not report progress")
+    last_pairs = timing.progress
     if last_pairs == pairs_total and complete_results_data is not None:
         results_data = complete_results_data
-    return avg_ms, std_ms, results_data, last_pairs
+    return timing.mean_ms, timing.std_ms, results_data, last_pairs
 
 
 @nvtx.annotate("bench_nvmolkit", color="red")

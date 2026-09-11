@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -281,44 +281,27 @@ Scheduler::Scheduler(const int numUniqueMols, const int numConfsPerMol, const in
   maxTriesPerMolecule_ = maxIterations_ * numConfsPerMol_;
   completedConformers_.resize(numUniqueMols, 0);
   totalAttempts_.resize(numUniqueMols, 0);
+  attemptsInFlightByMolecule_.resize(numUniqueMols, 0);
 }
 
 std::vector<int> Scheduler::dispatch(const int batchSize, std::vector<int>* attemptIds) {
-  const std::lock_guard lock(mutex_);
-  std::vector<int>      result;
-  std::vector<int>      roundAttemptIds;
+  std::unique_lock lock(mutex_);
   if (attemptIds != nullptr) {
     attemptIds->clear();
   }
-  while (static_cast<int>(result.size()) < batchSize) {
-    auto round = dispatchCurrentRoundLocked(batchSize - static_cast<int>(result.size()),
-                                            attemptIds == nullptr ? nullptr : &roundAttemptIds);
-    result.insert(result.end(), round.begin(), round.end());
-    if (attemptIds != nullptr) {
-      attemptIds->insert(attemptIds->end(), roundAttemptIds.begin(), roundAttemptIds.end());
-    }
-    if (static_cast<int>(result.size()) == batchSize || !hasRetriesRemainingLocked()) {
-      break;
-    }
-    ++roundRobinIter_;
+  if (batchSize <= 0) {
+    return {};
   }
-  return result;
-}
-
-std::vector<int> Scheduler::dispatchBlocking(const int batchSize, std::vector<int>* attemptIds) {
-  std::unique_lock lock(mutex_);
   while (true) {
     if (canceled_) {
       return {};
     }
-    auto molIds = dispatchCurrentRoundLocked(batchSize, attemptIds);
+    auto molIds = dispatchAvailableLocked(batchSize, attemptIds);
     if (!molIds.empty()) {
       return molIds;
     }
     if (attemptsInFlight_ > 0) {
       progressCondition_.wait(lock);
-    } else if (hasRetriesRemainingLocked()) {
-      ++roundRobinIter_;
     } else {
       return {};
     }
@@ -333,37 +316,31 @@ void Scheduler::cancel() {
   progressCondition_.notify_all();
 }
 
-std::vector<int> Scheduler::dispatchCurrentRoundLocked(const int batchSize, std::vector<int>* attemptIds) {
+std::vector<int> Scheduler::dispatchAvailableLocked(const int batchSize, std::vector<int>* attemptIds) {
   std::vector<int> molIds;
   molIds.reserve(batchSize);
   if (attemptIds != nullptr) {
     attemptIds->clear();
     attemptIds->reserve(batchSize);
   }
-  const int maxIter = std::min(maxTriesPerMolecule_, numConfsPerMol_ * roundRobinIter_);
-  for (size_t i = 0; i < numUniqueMolecules_ && static_cast<int>(molIds.size()) < batchSize; i++) {
-    while (completedConformers_[i] < numConfsPerMol_ && totalAttempts_[i] < maxIter &&
-           static_cast<int>(molIds.size()) < batchSize) {
+  for (size_t i = 0; i < numUniqueMolecules_; i++) {
+    // Keep one attempt in flight for each conformer still needed. Recording a
+    // failure immediately reopens its slot without waiting on other molecules.
+    while (completedConformers_[i] + attemptsInFlightByMolecule_[i] < numConfsPerMol_ &&
+           totalAttempts_[i] < maxTriesPerMolecule_) {
+      if (static_cast<int>(molIds.size()) >= batchSize) {
+        return molIds;
+      }
       molIds.push_back(static_cast<int>(i));
       if (attemptIds != nullptr) {
         attemptIds->push_back(totalAttempts_[i]);
       }
       totalAttempts_[i]++;
+      attemptsInFlightByMolecule_[i]++;
+      attemptsInFlight_++;
     }
   }
-
-  attemptsInFlight_ += static_cast<int>(molIds.size());
-
   return molIds;
-}
-
-bool Scheduler::hasRetriesRemainingLocked() const {
-  for (size_t i = 0; i < numUniqueMolecules_; ++i) {
-    if (completedConformers_[i] < numConfsPerMol_ && totalAttempts_[i] < maxTriesPerMolecule_) {
-      return true;
-    }
-  }
-  return false;
 }
 
 void Scheduler::record(const std::vector<int>& molIds, const std::vector<int16_t>& finishedOnIteration) {
@@ -372,12 +349,15 @@ void Scheduler::record(const std::vector<int>& molIds, const std::vector<int16_t
   }
   {
     const std::lock_guard lock(mutex_);
-    for (size_t i = 0; i < molIds.size(); i++) {
-      const int molId = molIds[i];
-      if (molId < 0 || molId >= numUniqueMolecules_) {
+    for (const int molId : molIds) {
+      if (molId < 0 || static_cast<size_t>(molId) >= numUniqueMolecules_) {
         throw std::out_of_range("molId is out of range: " + std::to_string(molId));
       }
+    }
+    for (size_t i = 0; i < molIds.size(); i++) {
+      const int molId = molIds[i];
       completedConformers_[molId] += finishedOnIteration[i] == -1 ? 0 : 1;
+      attemptsInFlightByMolecule_[molId]--;
     }
     attemptsInFlight_ -= static_cast<int>(molIds.size());
   }

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -237,17 +237,15 @@ class Scheduler {
    *
    * Returns a vector of molecule IDs that need conformer generation attempts.
    * Prioritizes molecules that haven't reached their target conformer count
-   * and haven't exceeded the maximum attempt limit. Will return duplicates if not enough
-   * unique molecules are available to fill the batch size.
+   * and haven't exceeded the maximum attempt limit. Will return duplicates when a
+   * molecule needs multiple conformers. If all safe work is currently in flight,
+   * waits until recording a result makes more work available or completes the search.
    *
    * @param batchSize Maximum number of molecule IDs to return
    * @param attemptIds Optional output populated with each molecule's zero-based attempt number
    * @return Vector of molecule IDs to process (may be smaller than batchSize if insufficient work remains)
    */
   std::vector<int> dispatch(int batchSize, std::vector<int>* attemptIds = nullptr);
-
-  //! Dispatch work, waiting when the current retry round is fully reserved by other workers.
-  std::vector<int> dispatchBlocking(int batchSize, std::vector<int>* attemptIds = nullptr);
 
   //! Wake blocked dispatchers and prevent additional work after an external failure.
   void cancel();
@@ -282,15 +280,14 @@ class Scheduler {
   int    maxIterations_;
   size_t numUniqueMolecules_;
   int    maxTriesPerMolecule_;
-  int    roundRobinIter_ = 1;
 
   std::vector<int> completedConformers_;
   std::vector<int> totalAttempts_;
+  std::vector<int> attemptsInFlightByMolecule_;
   int              attemptsInFlight_ = 0;
   bool             canceled_         = false;
 
-  std::vector<int> dispatchCurrentRoundLocked(int batchSize, std::vector<int>* attemptIds);
-  bool             hasRetriesRemainingLocked() const;
+  std::vector<int> dispatchAvailableLocked(int batchSize, std::vector<int>* attemptIds);
 };
 
 }  // namespace detail
