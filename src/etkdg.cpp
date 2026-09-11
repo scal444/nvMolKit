@@ -455,8 +455,11 @@ std::optional<DeviceCoordResult> embedMolecules(const std::vector<RDKit::ROMol*>
       }
     } catch (...) {
       dispatchExceptionRegistry.store(std::current_exception());
+      Scheduler.cancel();
+      workComplete.store(true);
     }
   }
+  dispatchExceptionRegistry.rethrow();
 
   if (deviceOutput) {
     // Gather the results on one GPU before pruning.
