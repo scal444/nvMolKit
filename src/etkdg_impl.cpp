@@ -341,11 +341,9 @@ std::vector<int> Scheduler::dispatchCurrentRoundLocked(const int batchSize, std:
     attemptIds->reserve(batchSize);
   }
   const int maxIter = std::min(maxTriesPerMolecule_, numConfsPerMol_ * roundRobinIter_);
-  for (size_t i = 0; i < numUniqueMolecules_; i++) {
-    while (completedConformers_[i] < numConfsPerMol_ && totalAttempts_[i] < maxIter) {
-      if (static_cast<int>(molIds.size()) >= batchSize) {
-        break;
-      }
+  for (size_t i = 0; i < numUniqueMolecules_ && static_cast<int>(molIds.size()) < batchSize; i++) {
+    while (completedConformers_[i] < numConfsPerMol_ && totalAttempts_[i] < maxIter &&
+           static_cast<int>(molIds.size()) < batchSize) {
       molIds.push_back(static_cast<int>(i));
       if (attemptIds != nullptr) {
         attemptIds->push_back(totalAttempts_[i]);
