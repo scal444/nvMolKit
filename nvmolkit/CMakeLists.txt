@@ -30,6 +30,7 @@ target_link_libraries(
   ${RDKit_LIBS}
   morganFingerprint
   device
+  nvtx
   CUDA::cudart)
 target_include_directories(_Fingerprints PRIVATE ${Python_INCLUDE_DIRS})
 installpythontarget(_Fingerprints ./)
