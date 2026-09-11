@@ -277,7 +277,6 @@ Guides
    :maxdepth: 1
 
    similarity
-   clustering
    forcefield
    fire_minimizer
    autotune

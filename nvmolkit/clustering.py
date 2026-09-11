@@ -62,8 +62,13 @@ def aap_similarity(
     """Compute directed approximate Atom-Atom-Path similarity.
 
     Rooted paths are hashed into per-atom histograms and compatible atoms are
-    assigned with fixed-iteration Sinkhorn normalization on the GPU. Molecules
-    may currently contain at most 64 atoms.
+    assigned with fixed-iteration Sinkhorn normalization on the GPU. The score
+    is directed: swapping ``left`` and ``right`` can change the result.
+
+    Molecules may currently contain at most 64 RDKit atoms, including explicit
+    hydrogens, and must not be empty. Supported bond types are single, double,
+    triple, and aromatic. Rooted-path descriptors are constructed on the CPU.
+    This function synchronizes ``stream`` before returning the Python scalar.
 
     Args:
         left: Centroid-side RDKit molecule.
@@ -106,9 +111,18 @@ def aap_similarity_clustering(
     ``threshold``. Final one-based cluster IDs are ordered by descending
     cluster size, with centroid order breaking ties. Working memory is O(N).
 
+    Each provided molecule must be non-empty and may currently contain at most
+    64 RDKit atoms, including explicit hydrogens. Supported bond types are
+    single, double, triple, and aromatic. Rooted-path descriptors are constructed
+    on the CPU, while atom assignments are evaluated on the GPU. Changing the
+    descriptor or Sinkhorn options can change cluster assignments. This function
+    synchronizes ``stream`` before returning the Python list.
+
     Args:
         molecules: Sequence of RDKit molecules, each with at most 64 atoms.
-        threshold: Inclusive directed similarity threshold.
+        threshold: Inclusive directed similarity threshold. The ``0.217``
+            default is provided for compatibility and should be validated for
+            the intended chemical series.
         max_path_length: Maximum rooted path length in bonds.
         histogram_bins: Number of hashed path bins, at most 32767.
         sinkhorn_iterations: Number of Sinkhorn normalization iterations.
@@ -146,7 +160,31 @@ def aap_dise_clustering(
 
     The caller supplies molecules in priority order. The first stage selects
     centroids with input-order sphere exclusion; the second assigns every
-    non-centroid to its most similar selected centroid.
+    non-centroid to its most similar selected centroid. Final one-based cluster
+    IDs are ordered by descending cluster size, with centroid order breaking
+    ties. Working memory is O(N).
+
+    Each provided molecule must be non-empty and may currently contain at most
+    64 RDKit atoms, including explicit hydrogens. Supported bond types are
+    single, double, triple, and aromatic. Rooted-path descriptors are constructed
+    on the CPU, while atom assignments are evaluated on the GPU. Changing the
+    descriptor or Sinkhorn options can change cluster assignments. This function
+    synchronizes ``stream`` before returning the Python list.
+
+    Args:
+        molecules: Sequence of RDKit molecules in the desired priority order,
+            each with at most 64 atoms.
+        threshold: Inclusive directed similarity threshold used during centroid
+            selection. The ``0.217`` default is provided for compatibility and
+            should be validated for the intended chemical series.
+        max_path_length: Maximum rooted path length in bonds.
+        histogram_bins: Number of hashed path bins, at most 32767.
+        sinkhorn_iterations: Number of Sinkhorn normalization iterations.
+        sinkhorn_temperature: Positive Sinkhorn temperature.
+        stream: CUDA stream to use. If None, uses the current stream.
+
+    Returns:
+        One one-based cluster ID per molecule.
     """
     if not 0 <= threshold <= 1:
         raise ValueError(f"threshold must be in [0, 1], got {threshold}")
