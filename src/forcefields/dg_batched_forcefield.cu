@@ -38,11 +38,10 @@ DGBatchedForcefield::DGBatchedForcefield(const DistGeom::BatchedMolecularSystemH
     : BatchedForcefield(ForceFieldType::DG, molSystemHost.dimension, atomStartsHost, nullptr, std::move(metadata)),
       chiralWeight_(chiralWeight),
       fourthDimWeight_(fourthDimWeight) {
-  const auto resolved       = resolvePrecisionOptions(precision);
-  coordinateStorageInFloat_ = isFloat32(resolved.forcefieldCoordinateStorage);
-  gradientStorageInFloat_   = isFloat32(resolved.forcefieldGradientStorage);
-  computeInFloat_           = isFloat32(resolved.forcefieldCompute);
-  reduceInFloat_            = isFloat32(resolved.reductionCompute);
+  coordinateStorageInFloat_ = usesFloatForcefieldCoordinates(precision);
+  gradientStorageInFloat_   = usesFloatForcefieldGradients(precision);
+  computeInFloat_           = usesFloatForcefieldCompute(precision);
+  reduceInFloat_            = usesFloatReduction(precision);
   atomStartsDevice_.setStream(stream);
   positionsFloat_.setStream(stream);
   gradientsFloat_.setStream(stream);
@@ -52,7 +51,7 @@ DGBatchedForcefield::DGBatchedForcefield(const DistGeom::BatchedMolecularSystemH
   gradientsFloat_.resize(totalPositions());
   positionsComputeDouble_.resize(totalPositions());
   gradientsComputeDouble_.resize(totalPositions());
-  if (isFloat32(resolved.forcefieldParameterStorage)) {
+  if (usesFloatForcefield(precision)) {
     auto& buffers = systemDevice_.emplace<DistGeom::BatchedMolecularDeviceBuffersF32Params>();
     DistGeom::setStreams(buffers, stream);
     DistGeom::sendContribsAndIndicesToDevice(molSystemHost, buffers);

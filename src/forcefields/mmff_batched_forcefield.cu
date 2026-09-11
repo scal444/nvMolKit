@@ -73,7 +73,7 @@ MMFFBatchedForcefield::MMFFBatchedForcefield(const MMFF::BatchedMolecularSystemH
                                              const PrecisionOptions                  precision)
     : BatchedForcefield(ForceFieldType::MMFF, 3, molSystemHost.indices.atomStarts, nullptr, std::move(metadata)) {
   forcefieldCoordinateStorageInFloat_ = usesFloatForcefieldCoordinates(precision);
-  forcefieldGradientStorageInFloat_   = isFloat32(resolvePrecisionOptions(precision).forcefieldGradientStorage);
+  forcefieldGradientStorageInFloat_   = usesFloatForcefieldGradients(precision);
   computeInFloat_                     = usesFloatForcefieldCompute(precision);
   reduceInFloat_                      = usesFloatReduction(precision);
   positionsFloat_.setStream(stream);

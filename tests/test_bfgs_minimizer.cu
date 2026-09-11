@@ -87,7 +87,7 @@ TEST(BFGSMinimizerTest, AllocationAndIdentity) {
 }
 
 TEST(BFGSMinimizerTest, FloatHessianStorageAllocationAndIdentity) {
-  const nvMolKit::PrecisionOptions precision{nvMolKit::PrecisionMode::HESSIAN_F32};
+  const nvMolKit::PrecisionOptions precision{nvMolKit::PrecisionMode::SINGLE};
   nvMolKit::BfgsBatchMinimizer     minimizer(/*dataDim=*/3,
                                          nvMolKit::DebugLevel::NONE,
                                          /*scaleGrads=*/true,
@@ -130,9 +130,8 @@ TEST(BFGSMinimizerTest, FloatHessianStorageAllocationAndIdentity) {
   }
 }
 
-TEST(BFGSMinimizerTest, AcceptsForcefieldPrecisionProfiles) {
-  for (const auto mode :
-       {nvMolKit::PrecisionMode::FORCEFIELD_F32, nvMolKit::PrecisionMode::MIXED, nvMolKit::PrecisionMode::SINGLE}) {
+TEST(BFGSMinimizerTest, AcceptsSupportedPrecisionModes) {
+  for (const auto mode : {nvMolKit::PrecisionMode::LEGACY, nvMolKit::PrecisionMode::SINGLE}) {
     EXPECT_NO_THROW(nvMolKit::BfgsBatchMinimizer(/*dataDim=*/3,
                                                  nvMolKit::DebugLevel::NONE,
                                                  /*scaleGrads=*/true,
@@ -614,7 +613,7 @@ TEST_F(BFGSMinimizerTestFixture, FloatHessianE2EMinimizationUsesRelaxedTolerance
   constexpr int maxIters = 50;
   setUpMMFFSystems(numMols);
 
-  const nvMolKit::PrecisionOptions precision{nvMolKit::PrecisionMode::HESSIAN_F32};
+  const nvMolKit::PrecisionOptions precision{nvMolKit::PrecisionMode::SINGLE};
   nvMolKit::BfgsBatchMinimizer     minimizer(/*dataDim=*/3,
                                          nvMolKit::DebugLevel::NONE,
                                          /*scaleGrads=*/true,
@@ -1495,12 +1494,7 @@ TEST(BFGSPrecisionStateTest, PresetsAllocateResolvedStateAndHessianWidths) {
   nvMolKit::AsyncDeviceVector<int> atomStartsDevice;
   atomStartsDevice.setFromVector(atomStarts);
 
-  for (const auto mode : {nvMolKit::PrecisionMode::LEGACY,
-                          nvMolKit::PrecisionMode::HESSIAN_F32,
-                          nvMolKit::PrecisionMode::MINIMIZER_F32,
-                          nvMolKit::PrecisionMode::FORCEFIELD_F32,
-                          nvMolKit::PrecisionMode::MIXED,
-                          nvMolKit::PrecisionMode::SINGLE}) {
+  for (const auto mode : {nvMolKit::PrecisionMode::LEGACY, nvMolKit::PrecisionMode::SINGLE}) {
     const nvMolKit::PrecisionOptions precision{mode};
     const bool                       floatState   = nvMolKit::usesFloatMinimizerState(precision);
     const bool                       floatHessian = nvMolKit::usesFloatHessian(precision);
@@ -1538,12 +1532,7 @@ TEST(BFGSPrecisionStateTest, PresetsAllocateResolvedStateAndHessianWidths) {
 }
 
 TEST_F(BFGSMinimizerHarmonicTestFixture, AllPrecisionPresetsExecuteNumerically) {
-  for (const auto mode : {nvMolKit::PrecisionMode::LEGACY,
-                          nvMolKit::PrecisionMode::HESSIAN_F32,
-                          nvMolKit::PrecisionMode::MINIMIZER_F32,
-                          nvMolKit::PrecisionMode::FORCEFIELD_F32,
-                          nvMolKit::PrecisionMode::MIXED,
-                          nvMolKit::PrecisionMode::SINGLE}) {
+  for (const auto mode : {nvMolKit::PrecisionMode::LEGACY, nvMolKit::PrecisionMode::SINGLE}) {
     SCOPED_TRACE(nvMolKit::precisionModeName(mode));
     setUpSystems(/*computeLastDim=*/true, /*seed=*/42);
     auto                         forcefield = makeForcefield();
@@ -1560,30 +1549,6 @@ TEST_F(BFGSMinimizerHarmonicTestFixture, AllPrecisionPresetsExecuteNumerically) 
     const auto statuses = getStatusesFromDevice(minimizer);
     EXPECT_THAT(statuses, ::testing::Each(0));
   }
-}
-
-TEST_F(BFGSMinimizerHarmonicTestFixture, ExplicitStateAxisIsIndependentOfComputeReductionAndHessian) {
-  nvMolKit::PrecisionOptions precision;
-  precision.minimizerStateStorage = nvMolKit::PrecisionDType::FLOAT32;
-  precision.minimizerCompute      = nvMolKit::PrecisionDType::FLOAT64;
-  precision.reductionCompute      = nvMolKit::PrecisionDType::FLOAT64;
-  precision.hessianStorage        = nvMolKit::PrecisionDType::FLOAT64;
-
-  setUpSystems(/*computeLastDim=*/true, /*seed=*/7);
-  auto                         forcefield = makeForcefield();
-  nvMolKit::BfgsBatchMinimizer minimizer(dim_,
-                                         nvMolKit::DebugLevel::NONE,
-                                         false,
-                                         nullptr,
-                                         nvMolKit::BfgsBackend::HYBRID,
-                                         precision);
-  EXPECT_EQ(minimizer.resolveBackend(atomStarts_), nvMolKit::BfgsBackend::BATCHED);
-  EXPECT_NO_THROW(minimizer.minimize(400, 1e-5, forcefield, positionsDevice_, gradDevice_, energyOutsDevice_, nullptr));
-  EXPECT_NE(minimizer.lineSearchDirFloat_.size(), 0);
-  EXPECT_EQ(minimizer.lineSearchDir_.size(), 0);
-  EXPECT_NE(minimizer.inverseHessian_.size(), 0);
-  EXPECT_EQ(minimizer.inverseHessianFloat_.size(), 0);
-  verifyPositions(getPositionsFromDevice(), 0.1);
 }
 
 INSTANTIATE_TEST_SUITE_P(BFGSBackends,
@@ -1603,98 +1568,3 @@ INSTANTIATE_TEST_SUITE_P(BFGSBackends,
                                return "Unknown";
                            }
                          });
-TEST(PrecisionOptionsTest, PresetsAndExplicitAxesResolveIndependently) {
-  using nvMolKit::PrecisionDType;
-  using nvMolKit::PrecisionMode;
-
-  auto mixed = nvMolKit::resolvePrecisionOptions({PrecisionMode::MIXED});
-  EXPECT_EQ(mixed.forcefieldParameterStorage, PrecisionDType::FLOAT32);
-  EXPECT_EQ(mixed.forcefieldCoordinateStorage, PrecisionDType::FLOAT32);
-  EXPECT_EQ(mixed.forcefieldGradientStorage, PrecisionDType::FLOAT32);
-  EXPECT_EQ(mixed.hessianStorage, PrecisionDType::FLOAT32);
-  EXPECT_EQ(mixed.minimizerStateStorage, PrecisionDType::FLOAT32);
-  EXPECT_EQ(mixed.forcefieldCompute, PrecisionDType::FLOAT32);
-  EXPECT_EQ(mixed.minimizerCompute, PrecisionDType::FLOAT32);
-  EXPECT_EQ(mixed.reductionCompute, PrecisionDType::FLOAT64);
-
-  nvMolKit::PrecisionOptions custom{PrecisionMode::SINGLE};
-  custom.forcefieldParameterStorage  = PrecisionDType::FLOAT64;
-  custom.forcefieldCoordinateStorage = PrecisionDType::FLOAT64;
-  custom.minimizerCompute            = PrecisionDType::FLOAT64;
-  const auto resolved                = nvMolKit::resolvePrecisionOptions(custom);
-  EXPECT_EQ(resolved.forcefieldParameterStorage, PrecisionDType::FLOAT64);
-  EXPECT_EQ(resolved.forcefieldCoordinateStorage, PrecisionDType::FLOAT64);
-  EXPECT_EQ(resolved.forcefieldGradientStorage, PrecisionDType::FLOAT32);
-  EXPECT_EQ(resolved.forcefieldCompute, PrecisionDType::FLOAT32);
-  EXPECT_EQ(resolved.minimizerCompute, PrecisionDType::FLOAT64);
-  EXPECT_EQ(resolved.reductionCompute, PrecisionDType::FLOAT32);
-}
-
-TEST(PrecisionOptionsTest, BfgsPerMoleculeDispatchCoversEveryUnsupportedPrecisionAxis) {
-  using nvMolKit::BfgsBackend;
-  using nvMolKit::PrecisionDType;
-  using nvMolKit::PrecisionOptions;
-
-  const std::vector<int> smallSystems{0, 5, 10};
-  const auto             resolvedBackend = [&](const PrecisionOptions& precision) {
-    nvMolKit::BfgsBatchMinimizer minimizer(/*dataDim=*/3,
-                                           nvMolKit::DebugLevel::NONE,
-                                           /*scaleGrads=*/true,
-                                           /*stream=*/nullptr,
-                                           BfgsBackend::PER_MOLECULE,
-                                           precision);
-    return minimizer.resolveBackend(smallSystems);
-  };
-  const auto withFloatAxis = [](PrecisionDType PrecisionOptions::*axis) {
-    PrecisionOptions precision;
-    precision.*axis = PrecisionDType::FLOAT32;
-    return precision;
-  };
-
-  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::forcefieldParameterStorage)), BfgsBackend::PER_MOLECULE);
-  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::hessianStorage)), BfgsBackend::PER_MOLECULE);
-
-  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::forcefieldCoordinateStorage)), BfgsBackend::BATCHED);
-  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::forcefieldGradientStorage)), BfgsBackend::BATCHED);
-  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::minimizerStateStorage)), BfgsBackend::BATCHED);
-  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::forcefieldCompute)), BfgsBackend::BATCHED);
-  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::minimizerCompute)), BfgsBackend::BATCHED);
-  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::reductionCompute)), BfgsBackend::BATCHED);
-
-  PrecisionOptions explicitFloat64;
-  explicitFloat64.forcefieldParameterStorage  = PrecisionDType::FLOAT64;
-  explicitFloat64.forcefieldCoordinateStorage = PrecisionDType::FLOAT64;
-  explicitFloat64.forcefieldGradientStorage   = PrecisionDType::FLOAT64;
-  explicitFloat64.hessianStorage              = PrecisionDType::FLOAT64;
-  explicitFloat64.minimizerStateStorage       = PrecisionDType::FLOAT64;
-  explicitFloat64.forcefieldCompute           = PrecisionDType::FLOAT64;
-  explicitFloat64.minimizerCompute            = PrecisionDType::FLOAT64;
-  explicitFloat64.reductionCompute            = PrecisionDType::FLOAT64;
-  EXPECT_EQ(resolvedBackend(explicitFloat64), BfgsBackend::BATCHED);
-
-  PrecisionOptions explicitSupportedFloat64;
-  explicitSupportedFloat64.forcefieldParameterStorage = PrecisionDType::FLOAT64;
-  explicitSupportedFloat64.hessianStorage             = PrecisionDType::FLOAT64;
-  EXPECT_EQ(resolvedBackend(explicitSupportedFloat64), BfgsBackend::PER_MOLECULE);
-  EXPECT_EQ(resolvedBackend(nvMolKit::PrecisionOptions{nvMolKit::PrecisionMode::HESSIAN_F32}),
-            BfgsBackend::PER_MOLECULE);
-}
-
-TEST(PrecisionOptionsTest, DistGeomPerMoleculeCapabilityRequiresDoubleForcefieldParameters) {
-  using nvMolKit::PrecisionDType;
-  using nvMolKit::PrecisionOptions;
-
-  PrecisionOptions floatParameters;
-  floatParameters.forcefieldParameterStorage = PrecisionDType::FLOAT32;
-  EXPECT_FALSE(nvMolKit::bfgsPrecisionRequiresBatchedBackend(floatParameters));
-  EXPECT_TRUE(nvMolKit::bfgsDistGeomPrecisionRequiresBatchedBackend(floatParameters));
-
-  PrecisionOptions floatHessian;
-  floatHessian.hessianStorage = PrecisionDType::FLOAT32;
-  EXPECT_FALSE(nvMolKit::bfgsPrecisionRequiresBatchedBackend(floatHessian));
-  EXPECT_FALSE(nvMolKit::bfgsDistGeomPrecisionRequiresBatchedBackend(floatHessian));
-
-  PrecisionOptions explicitDoubleParameters;
-  explicitDoubleParameters.forcefieldParameterStorage = PrecisionDType::FLOAT64;
-  EXPECT_FALSE(nvMolKit::bfgsDistGeomPrecisionRequiresBatchedBackend(explicitDoubleParameters));
-}

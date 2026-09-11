@@ -74,7 +74,6 @@ void initReferenceSystem(ReferenceSystem&           sys,
   sys.nstep     = 0;
   sys.converged = false;
 }
-
 void referenceStep(ReferenceSystem&           sys,
                    const std::vector<double>& grad,
                    const ReferenceConfig&     cfg,
@@ -219,12 +218,6 @@ __global__ void harmonicGradKernel(const int     numSystems,
     const int globalCoord = atomBegin * dataDim + i;
     const int coordInSys  = i % dataDim;
     grad[globalCoord]     = k * (positions[globalCoord] - targetPerCoord[sysIdx * dataDim + coordInSys]);
-  }
-}
-
-__global__ void writeConstantEnergyKernel(double* energyOuts, const double energy) {
-  if (blockIdx.x == 0 && threadIdx.x == 0) {
-    energyOuts[0] = energy;
   }
 }
 
@@ -823,7 +816,7 @@ TEST(FireMinimizer, FloatStateStorageTracksDoubleReference) {
   options.gradTol               = 1e-9;
   options.useMass               = false;
 
-  const nvMolKit::PrecisionOptions precision{nvMolKit::PrecisionMode::MINIMIZER_F32};
+  const nvMolKit::PrecisionOptions precision{nvMolKit::PrecisionMode::SINGLE};
   nvMolKit::FireBatchMinimizer     minimizer(kDim, options, nullptr, false, nvMolKit::FireBackend::BATCHED, precision);
   minimizer.setConvergencePollInterval(1);
   minimizer.initialize(systems.atomStartsHost());
@@ -852,42 +845,14 @@ TEST(FireMinimizer, FloatStateStorageTracksDoubleReference) {
   }
 }
 
-TEST(FireMinimizer, AcceptsAllPrecisionProfiles) {
+TEST(FireMinimizer, AcceptsSupportedPrecisionModes) {
   const nvMolKit::FireOptions options;
-  for (const auto mode : {nvMolKit::PrecisionMode::HESSIAN_F32,
-                          nvMolKit::PrecisionMode::FORCEFIELD_F32,
-                          nvMolKit::PrecisionMode::MIXED,
-                          nvMolKit::PrecisionMode::SINGLE}) {
+  for (const auto mode : {nvMolKit::PrecisionMode::LEGACY, nvMolKit::PrecisionMode::SINGLE}) {
     EXPECT_NO_THROW(
       nvMolKit::FireBatchMinimizer(kDim, options, nullptr, false, nvMolKit::FireBackend::BATCHED, {mode}));
   }
 }
 
-TEST(FireMinimizer, FireAndForcefieldPrecisionProfilesResolveIndependently) {
-  using nvMolKit::PrecisionDType;
-  using nvMolKit::PrecisionMode;
-
-  const auto fireOnly = nvMolKit::resolvePrecisionOptions({PrecisionMode::MINIMIZER_F32});
-  EXPECT_EQ(fireOnly.minimizerCompute, PrecisionDType::FLOAT32);
-  EXPECT_EQ(fireOnly.minimizerStateStorage, PrecisionDType::FLOAT32);
-  EXPECT_EQ(fireOnly.forcefieldCompute, PrecisionDType::FLOAT64);
-  EXPECT_EQ(fireOnly.forcefieldParameterStorage, PrecisionDType::FLOAT64);
-  EXPECT_EQ(fireOnly.reductionCompute, PrecisionDType::FLOAT64);
-
-  const auto forcefieldOnly = nvMolKit::resolvePrecisionOptions({PrecisionMode::FORCEFIELD_F32});
-  EXPECT_EQ(forcefieldOnly.minimizerCompute, PrecisionDType::FLOAT64);
-  EXPECT_EQ(forcefieldOnly.minimizerStateStorage, PrecisionDType::FLOAT64);
-  EXPECT_EQ(forcefieldOnly.forcefieldCompute, PrecisionDType::FLOAT32);
-  EXPECT_EQ(forcefieldOnly.forcefieldParameterStorage, PrecisionDType::FLOAT32);
-  EXPECT_EQ(forcefieldOnly.reductionCompute, PrecisionDType::FLOAT64);
-
-  const auto both = nvMolKit::resolvePrecisionOptions({PrecisionMode::SINGLE});
-  EXPECT_EQ(both.minimizerCompute, PrecisionDType::FLOAT32);
-  EXPECT_EQ(both.minimizerStateStorage, PrecisionDType::FLOAT32);
-  EXPECT_EQ(both.forcefieldCompute, PrecisionDType::FLOAT32);
-  EXPECT_EQ(both.forcefieldParameterStorage, PrecisionDType::FLOAT32);
-  EXPECT_EQ(both.reductionCompute, PrecisionDType::FLOAT32);
-}
 
 TEST(FireMinimizer, ActiveSystemMaskRespected) {
   const std::vector<int>    atomCounts = {1, 1, 1};
@@ -1085,169 +1050,5 @@ TEST(FireMinimizer, HybridBackendSelectionAndPerMolInitialization) {
     EXPECT_EQ(state.nStepsPositive[i], 0);
     EXPECT_NEAR(state.dt[i], options.dtInit, 0.0);
     EXPECT_NEAR(state.alpha[i], options.alphaInit, 0.0);
-  }
-}
-
-TEST(FireMinimizer, PerMoleculeDispatchCoversEveryUnsupportedPrecisionAxis) {
-  using nvMolKit::FireBackend;
-  using nvMolKit::PrecisionDType;
-  using nvMolKit::PrecisionOptions;
-
-  const std::vector<int> smallSystems{0, 5, 10};
-  const auto             resolvedBackend = [&](const PrecisionOptions& precision) {
-    nvMolKit::FireBatchMinimizer minimizer(kDim,
-                                           nvMolKit::FireOptions{},
-                                           /*stream=*/nullptr,
-                                           /*debugMode=*/false,
-                                           FireBackend::PER_MOLECULE,
-                                           precision);
-    return minimizer.resolveBackend(smallSystems);
-  };
-  const auto withFloatAxis = [](PrecisionDType PrecisionOptions::*axis) {
-    PrecisionOptions precision;
-    precision.*axis = PrecisionDType::FLOAT32;
-    return precision;
-  };
-
-  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::forcefieldParameterStorage)), FireBackend::PER_MOLECULE);
-  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::hessianStorage)), FireBackend::PER_MOLECULE);
-  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::minimizerStateStorage)), FireBackend::PER_MOLECULE);
-
-  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::forcefieldCoordinateStorage)), FireBackend::BATCHED);
-  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::forcefieldGradientStorage)), FireBackend::BATCHED);
-  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::forcefieldCompute)), FireBackend::BATCHED);
-  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::minimizerCompute)), FireBackend::BATCHED);
-  EXPECT_EQ(resolvedBackend(withFloatAxis(&PrecisionOptions::reductionCompute)), FireBackend::BATCHED);
-}
-
-TEST(FireMinimizer, BatchedPrecisionDispatchUsesResolvedStateComputeAndReductionTypes) {
-  using nvMolKit::FireBackend;
-  using nvMolKit::PrecisionDType;
-  using nvMolKit::PrecisionOptions;
-
-  for (const PrecisionDType stateType : {PrecisionDType::FLOAT64, PrecisionDType::FLOAT32}) {
-    for (const PrecisionDType computeType : {PrecisionDType::FLOAT64, PrecisionDType::FLOAT32}) {
-      for (const PrecisionDType reductionType : {PrecisionDType::FLOAT64, PrecisionDType::FLOAT32}) {
-        HarmonicSystems       systems(/*atomCounts=*/{2},
-                                /*kPerSystem=*/{3.25},
-                                /*startingPositions=*/{1.0, -0.5, 0.25, -0.75, 0.125, 0.5},
-                                /*targetPositions=*/{0.0, 0.0, 0.0});
-        nvMolKit::FireOptions options;
-        options.stuckDetectionEnabled = false;
-        options.dtInit                = 0.001234567890123;
-        options.alphaInit             = 0.234567890123;
-        options.gradTol               = 0.0;
-        options.dMax                  = 0.0;
-        options.abcCorrection         = true;
-
-        PrecisionOptions precision;
-        precision.minimizerStateStorage = stateType;
-        precision.minimizerCompute      = computeType;
-        precision.reductionCompute      = reductionType;
-        nvMolKit::FireBatchMinimizer minimizer(kDim,
-                                               options,
-                                               /*stream=*/nullptr,
-                                               /*debugMode=*/false,
-                                               FireBackend::BATCHED,
-                                               precision);
-        minimizer.initialize(systems.atomStartsHost(), nullptr, nullptr, FireBackend::BATCHED);
-        const auto initialState = minimizer.snapshotInternalState();
-        ASSERT_EQ(initialState.dt.size(), 1u);
-        ASSERT_EQ(initialState.alpha.size(), 1u);
-        if (stateType == PrecisionDType::FLOAT32) {
-          EXPECT_DOUBLE_EQ(initialState.dt[0], static_cast<double>(static_cast<float>(options.dtInit)));
-          EXPECT_DOUBLE_EQ(initialState.alpha[0], static_cast<double>(static_cast<float>(options.alphaInit)));
-        } else {
-          EXPECT_DOUBLE_EQ(initialState.dt[0], options.dtInit);
-          EXPECT_DOUBLE_EQ(initialState.alpha[0], options.alphaInit);
-        }
-
-        for (int step = 0; step < 3; ++step) {
-          minimizer.step(options.gradTol,
-                         systems.atomStartsDevice(),
-                         systems.positionsDevice(),
-                         systems.gradDevice(),
-                         systems.gradFunctor());
-        }
-        const auto positions = systems.readbackPositions();
-        for (const double position : positions) {
-          EXPECT_TRUE(std::isfinite(position));
-        }
-        EXPECT_NE(positions, systems.startingPositionsHost());
-      }
-    }
-  }
-}
-
-TEST(FireMinimizer, StuckDetectionUsesIndependentStateComputeAndReductionTypes) {
-  using nvMolKit::FireBackend;
-  using nvMolKit::PrecisionDType;
-  using nvMolKit::PrecisionOptions;
-
-  constexpr double inputEnergy = 1.00000006;
-  for (const PrecisionDType stateType : {PrecisionDType::FLOAT64, PrecisionDType::FLOAT32}) {
-    for (const PrecisionDType computeType : {PrecisionDType::FLOAT64, PrecisionDType::FLOAT32}) {
-      for (const PrecisionDType reductionType : {PrecisionDType::FLOAT64, PrecisionDType::FLOAT32}) {
-        SCOPED_TRACE(::testing::Message() << "state=" << nvMolKit::precisionDTypeName(stateType)
-                                          << " compute=" << nvMolKit::precisionDTypeName(computeType)
-                                          << " reduction=" << nvMolKit::precisionDTypeName(reductionType));
-        HarmonicSystems       systems(/*atomCounts=*/{1},
-                                /*kPerSystem=*/{1.0},
-                                /*startingPositions=*/{1.0, 0.5, -0.25},
-                                /*targetPositions=*/{0.0, 0.0, 0.0});
-        nvMolKit::FireOptions options;
-        options.stuckDetectionEnabled = true;
-        options.stuckEnergyRelTol     = 1e-6;
-        options.stuckStreakLength     = 2;
-        options.stuckEvalEveryNPolls  = 1;
-        options.gradTol               = 0.0;
-        options.dMax                  = 0.0;
-
-        PrecisionOptions precision;
-        precision.minimizerStateStorage = stateType;
-        precision.minimizerCompute      = computeType;
-        precision.reductionCompute      = reductionType;
-        nvMolKit::FireBatchMinimizer minimizer(kDim,
-                                               options,
-                                               /*stream=*/nullptr,
-                                               /*debugMode=*/false,
-                                               FireBackend::BATCHED,
-                                               precision);
-        minimizer.setConvergencePollInterval(1);
-        const auto energyFunctor = [&](const double*) {
-          writeConstantEnergyKernel<<<1, 1>>>(systems.energyOutsDevice().data(), inputEnergy);
-          cudaCheckError(cudaGetLastError());
-        };
-
-        const bool converged = minimizer.minimize(/*numIters=*/2,
-                                                  options.gradTol,
-                                                  systems.atomStartsHost(),
-                                                  systems.atomStartsDevice(),
-                                                  systems.positionsDevice(),
-                                                  systems.gradDevice(),
-                                                  systems.energyOutsDevice(),
-                                                  systems.energyBufferDevice(),
-                                                  energyFunctor,
-                                                  systems.gradFunctor());
-        EXPECT_TRUE(converged);
-
-        const auto state = minimizer.snapshotInternalState();
-        ASSERT_EQ(state.energyMinStreak.size(), 1u);
-        ASSERT_EQ(state.energyMaxStreak.size(), 1u);
-        ASSERT_EQ(state.stuckStreak.size(), 1u);
-        ASSERT_EQ(state.statuses.size(), 1u);
-        double expectedEnergy = inputEnergy;
-        if (computeType == PrecisionDType::FLOAT32) {
-          expectedEnergy = static_cast<double>(static_cast<float>(expectedEnergy));
-        }
-        if (stateType == PrecisionDType::FLOAT32) {
-          expectedEnergy = static_cast<double>(static_cast<float>(expectedEnergy));
-        }
-        EXPECT_DOUBLE_EQ(state.energyMinStreak[0], expectedEnergy);
-        EXPECT_DOUBLE_EQ(state.energyMaxStreak[0], expectedEnergy);
-        EXPECT_EQ(state.stuckStreak[0], options.stuckStreakLength);
-        EXPECT_EQ(state.statuses[0], 0);
-      }
-    }
   }
 }

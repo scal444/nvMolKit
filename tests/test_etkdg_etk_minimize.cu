@@ -296,24 +296,12 @@ TEST_P(ETKStageSingleMolTestFixture, MinimizeCompare) {
   EXPECT_THAT(refEnergies, ::testing::Pointwise(testing::Ge(), gpuEnergies));
 }
 
-TEST(ETKPrecisionModes, FloatForcefieldPresetsMinimizeBatchedSmallMolecules) {
+TEST(ETKPrecisionModes, SupportedPrecisionsMinimizeBatchedSmallMolecules) {
   const std::string                       path = getTestDataFolderPath() + "/rdkit_smallmol_1.mol2";
-  std::vector<nvMolKit::PrecisionOptions> precisions(10);
-  precisions[0].mode                       = nvMolKit::PrecisionMode::FORCEFIELD_F32;
-  precisions[1].mode                       = nvMolKit::PrecisionMode::MIXED;
-  precisions[2].mode                       = nvMolKit::PrecisionMode::SINGLE;
-  precisions[3].forcefieldParameterStorage = nvMolKit::PrecisionDType::FLOAT32;
-  precisions[3].forcefieldCompute          = nvMolKit::PrecisionDType::FLOAT64;
-  for (int i = 0; i < 4; ++i) {
-    precisions[i + 4].forcefieldParameterStorage = nvMolKit::PrecisionDType::FLOAT64;
-    precisions[i + 4].forcefieldCompute          = nvMolKit::PrecisionDType::FLOAT32;
-    precisions[i + 4].forcefieldCoordinateStorage =
-      (i & 1) ? nvMolKit::PrecisionDType::FLOAT32 : nvMolKit::PrecisionDType::FLOAT64;
-    precisions[i + 4].forcefieldGradientStorage =
-      (i & 2) ? nvMolKit::PrecisionDType::FLOAT32 : nvMolKit::PrecisionDType::FLOAT64;
-  }
-  precisions[8].reductionCompute = nvMolKit::PrecisionDType::FLOAT32;
-  precisions[9].mode             = nvMolKit::PrecisionMode::LEGACY;
+  const std::vector<nvMolKit::PrecisionOptions> precisions = {
+    {nvMolKit::PrecisionMode::LEGACY},
+    {nvMolKit::PrecisionMode::SINGLE},
+  };
   for (size_t precisionIdx = 0; precisionIdx < precisions.size(); ++precisionIdx) {
     SCOPED_TRACE("precision case " + std::to_string(precisionIdx));
     std::vector<std::unique_ptr<RDKit::RWMol>> ownedMols;

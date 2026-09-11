@@ -25,8 +25,6 @@ from nvmolkit.types import (
     Device3DResult,
     FireOptions,
     HardwareOptions,
-    FloatMathMode,
-    PrecisionDType,
     PrecisionMode,
     PrecisionOptions,
 )
@@ -122,21 +120,12 @@ def test_fire_options_exposes_native_defaults_and_mutators():
 
 
 def test_precision_options_roundtrip_and_native_value():
-    options = PrecisionOptions(
-        PrecisionMode.HESSIAN_F32,
-        forcefieldCompute=PrecisionDType.FLOAT32,
-        forcefieldCoordinateStorage="FLOAT64",
-        reductionCompute="FLOAT32",
-        floatMath=FloatMathMode.RELAXED,
-    )
-    assert options.mode is PrecisionMode.HESSIAN_F32
-    assert options._as_native().mode == "HESSIAN_F32"
+    options = PrecisionOptions(PrecisionMode.SINGLE)
+    assert options.mode is PrecisionMode.SINGLE
+    assert options._as_native().mode == "SINGLE"
+    assert options.to_dict() == {"mode": "SINGLE"}
     restored = PrecisionOptions.from_dict(options.to_dict())
-    assert restored.mode is PrecisionMode.HESSIAN_F32
-    assert restored.forcefieldCompute is PrecisionDType.FLOAT32
-    assert restored.forcefieldCoordinateStorage is PrecisionDType.FLOAT64
-    assert restored.reductionCompute is PrecisionDType.FLOAT32
-    assert restored.floatMath is FloatMathMode.RELAXED
+    assert restored.mode is PrecisionMode.SINGLE
 
 
 def test_precision_options_reject_invalid_values_and_keys():

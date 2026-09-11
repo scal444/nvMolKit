@@ -37,11 +37,10 @@ ETKBatchedForcefield::ETKBatchedForcefield(const DistGeom::BatchedMolecularSyste
     // four-strided coordinate buffer until minimization is complete.
     : BatchedForcefield(ForceFieldType::ETK, 4, atomStartsHost, nullptr, std::move(metadata)),
       term_(useBasicKnowledge ? DistGeom::ETKTerm::ALL : DistGeom::ETKTerm::PLAIN) {
-  const auto resolved       = resolvePrecisionOptions(precision);
-  computeInFloat_           = isFloat32(resolved.forcefieldCompute);
-  reduceInFloat_            = isFloat32(resolved.reductionCompute);
-  coordinateStorageInFloat_ = isFloat32(resolved.forcefieldCoordinateStorage);
-  gradientStorageInFloat_   = isFloat32(resolved.forcefieldGradientStorage);
+  computeInFloat_           = usesFloatForcefieldCompute(precision);
+  reduceInFloat_            = usesFloatReduction(precision);
+  coordinateStorageInFloat_ = usesFloatForcefieldCoordinates(precision);
+  gradientStorageInFloat_   = usesFloatForcefieldGradients(precision);
   atomStartsDevice_.setStream(stream);
   positionsFloat_.setStream(stream);
   gradientsFloat_.setStream(stream);
@@ -51,7 +50,7 @@ ETKBatchedForcefield::ETKBatchedForcefield(const DistGeom::BatchedMolecularSyste
   gradientsFloat_.resize(totalPositions());
   positionsComputeDouble_.resize(totalPositions());
   gradientsComputeDouble_.resize(totalPositions());
-  if (isFloat32(resolved.forcefieldParameterStorage)) {
+  if (usesFloatForcefield(precision)) {
     auto& buffers = systemDevice_.emplace<DistGeom::BatchedMolecular3DDeviceBuffersF32Params>();
     DistGeom::setStreams(buffers, stream);
     DistGeom::sendContribsAndIndicesToDevice3D(molSystemHost, buffers);

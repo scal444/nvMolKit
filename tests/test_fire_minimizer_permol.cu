@@ -312,12 +312,8 @@ TEST(FireMinimizerPerMolMMFF, PublicMMFFWrapperConvergesNearReference) {
   }
 }
 
-TEST(FireMinimizerPerMolMMFF, PublicWrapperSupportsIndependentFloatFireAndForcefield) {
-  const std::vector<nvMolKit::PrecisionMode> modes = {
-    nvMolKit::PrecisionMode::MINIMIZER_F32,
-    nvMolKit::PrecisionMode::FORCEFIELD_F32,
-    nvMolKit::PrecisionMode::SINGLE,
-  };
+TEST(FireMinimizerPerMolMMFF, PublicWrapperSupportsSinglePrecision) {
+  const std::vector<nvMolKit::PrecisionMode> modes = {nvMolKit::PrecisionMode::SINGLE};
 
   for (const auto mode : modes) {
     SCOPED_TRACE(nvMolKit::precisionModeName(mode));

@@ -85,8 +85,8 @@ def EmbedMolecules(
         confsPerMolecule: Number of conformers to generate per molecule (default: 1)
         maxIterations: Maximum ETKDG iterations, -1 for automatic calculation (default: -1)
         hardwareOptions: HardwareOptions with hardware settings. If None, uses defaults.
-        precisionOptions: Precision preset and per-axis overrides. Defaults to
-            legacy float64 storage when omitted.
+        precisionOptions: Full double- or single-precision profile. Defaults
+            to full double precision when omitted.
         output: ``RDKIT_CONFORMERS`` (default) writes generated conformers back into each input
             molecule in-place and returns ``None``. ``DEVICE`` retains conformer coordinates on
             GPU and returns a :class:`Device3DResult`; RDKit conformers are NOT modified. When

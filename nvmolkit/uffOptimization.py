@@ -89,8 +89,8 @@ def UFFOptimizeMoleculesConfs(
             selects the first configured execution GPU.
         minimizerKind: ``"BFGS"`` (default) or ``"FIRE"``.
         fireOptions: FIRE algorithm options used when ``minimizerKind="FIRE"``.
-        precisionOptions: Precision preset and per-axis overrides. Defaults to
-            legacy float64 storage when omitted.
+        precisionOptions: Full double- or single-precision profile. Defaults
+            to full double precision when omitted.
 
     Returns:
         For ``RDKIT_CONFORMERS``: list of lists of optimized conformer energies.

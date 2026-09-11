@@ -32,7 +32,6 @@ from nvmolkit.types import (
     FireOptions,
     HardwareOptions,
     PrecisionMode,
-    PrecisionDType,
     PrecisionOptions,
 )
 
@@ -107,55 +106,6 @@ def test_mmff_single_precision_profile_executes(mmff_test_mols, minimizer_kind):
     )
     assert energies and energies[0]
     assert all(math.isfinite(energy) for energy in energies[0])
-
-
-@pytest.mark.parametrize(
-    "precision_mode",
-    [PrecisionMode.MINIMIZER_F32, PrecisionMode.FORCEFIELD_F32, PrecisionMode.SINGLE],
-    ids=["fp32-fire", "fp32-forcefield", "fp32-fire-and-forcefield"],
-)
-def test_mmff_fire_and_forcefield_precision_are_independent(mmff_test_mols, precision_mode):
-    mol = create_hard_copy_mols(mmff_test_mols[:1])[0]
-    energies = nvmolkit_mmff.MMFFOptimizeMoleculesConfs(
-        [mol],
-        maxIters=5,
-        backend="PER_MOLECULE",  # Typed FIRE/forcefield profiles must redirect to the batched path.
-        minimizerKind="FIRE",
-        precisionOptions=PrecisionOptions(precision_mode),
-    )
-    assert energies and energies[0]
-    assert all(math.isfinite(energy) for energy in energies[0])
-
-
-@pytest.mark.parametrize("minimizer_kind", ["BFGS", "FIRE"])
-@pytest.mark.parametrize(
-    "precision_options",
-    [
-        PrecisionOptions(
-            forcefieldParameterStorage=PrecisionDType.FLOAT64,
-            forcefieldCoordinateStorage=PrecisionDType.FLOAT64,
-            forcefieldGradientStorage=PrecisionDType.FLOAT32,
-            forcefieldCompute=PrecisionDType.FLOAT32,
-            minimizerCompute=PrecisionDType.FLOAT64,
-            reductionCompute=PrecisionDType.FLOAT64,
-        ),
-        PrecisionOptions(
-            forcefieldParameterStorage=PrecisionDType.FLOAT32,
-            forcefieldCoordinateStorage=PrecisionDType.FLOAT32,
-            forcefieldGradientStorage=PrecisionDType.FLOAT64,
-            forcefieldCompute=PrecisionDType.FLOAT64,
-            minimizerCompute=PrecisionDType.FLOAT32,
-            reductionCompute=PrecisionDType.FLOAT32,
-        ),
-    ],
-    ids=["f32-compute-crossed-storage", "f64-compute-crossed-storage"],
-)
-def test_mmff_precision_axes_execute_independently(mmff_test_mols, minimizer_kind, precision_options):
-    mol = create_hard_copy_mols(mmff_test_mols[:1])[0]
-    energies = nvmolkit_mmff.MMFFOptimizeMoleculesConfs(
-        [mol], maxIters=3, minimizerKind=minimizer_kind, precisionOptions=precision_options
-    )
-    assert energies and all(math.isfinite(energy) for energy in energies[0])
 
 
 def make_fragmented_mol():

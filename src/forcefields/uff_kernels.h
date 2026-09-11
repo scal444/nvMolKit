@@ -298,7 +298,7 @@ cudaError_t launchBlockPerMolGradKernel(int                                    n
                                         cudaStream_t                           stream           = nullptr,
                                         const uint8_t*                         activeSystemMask = nullptr);
 
-// Coordinate and gradient storage are independent precision axes.
+// Coordinate and gradient storage use the selected precision profile.
 cudaError_t launchBlockPerMolGradKernel(int                                 numMols,
                                         const EnergyForceContribsDevicePtr& terms,
                                         const BatchedIndicesDevicePtr&      sytemIndices,

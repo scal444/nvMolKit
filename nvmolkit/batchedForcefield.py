@@ -509,8 +509,8 @@ class MMFFBatchedForcefield(_BatchedForcefieldBase):
                 non-bonded interactions, as a scalar or per-molecule list.
             hardwareOptions: GPU device and batching configuration.  Uses
                 reasonable defaults when ``None``.
-            precisionOptions: Precision preset and per-axis overrides. Defaults
-                to legacy float64 storage when omitted.
+            precisionOptions: Full double- or single-precision profile.
+                Defaults to full double precision when omitted.
         """
         self._init_common(molecules, ignoreInterfragInteractions, hardwareOptions, precisionOptions)
         self._properties = self._normalize_properties(properties)
@@ -680,8 +680,8 @@ class UFFBatchedForcefield(_BatchedForcefieldBase):
                 non-bonded interactions, as a scalar or per-molecule list.
             hardwareOptions: GPU device and batching configuration.  Uses
                 reasonable defaults when ``None``.
-            precisionOptions: Precision preset and per-axis overrides. Defaults
-                to legacy float64 storage when omitted.
+            precisionOptions: Full double- or single-precision profile.
+                Defaults to full double precision when omitted.
         """
         self._init_common(molecules, ignoreInterfragInteractions, hardwareOptions, precisionOptions)
         self._vdw_thresholds = _normalize_scalar_or_list(vdwThreshold, len(molecules), "vdwThreshold")

@@ -28,45 +28,12 @@ void setPrecisionMode(nvMolKit::PrecisionOptions& options, const std::string& mo
   options.mode = nvMolKit::parsePrecisionMode(mode);
 }
 
-#define DTYPE_PROPERTY(Name, Member)                                        \
-  std::string get##Name(const nvMolKit::PrecisionOptions& o) {              \
-    return nvMolKit::precisionDTypeName(o.Member);                          \
-  }                                                                         \
-  void set##Name(nvMolKit::PrecisionOptions& o, const std::string& value) { \
-    o.Member = nvMolKit::parsePrecisionDType(value);                        \
-  }
-DTYPE_PROPERTY(ForcefieldParameterStorage, forcefieldParameterStorage)
-DTYPE_PROPERTY(CoordinateStorage, forcefieldCoordinateStorage)
-DTYPE_PROPERTY(GradientStorage, forcefieldGradientStorage)
-DTYPE_PROPERTY(HessianStorage, hessianStorage)
-DTYPE_PROPERTY(MinimizerStateStorage, minimizerStateStorage)
-DTYPE_PROPERTY(ForcefieldCompute, forcefieldCompute)
-DTYPE_PROPERTY(MinimizerCompute, minimizerCompute)
-DTYPE_PROPERTY(ReductionCompute, reductionCompute)
-#undef DTYPE_PROPERTY
-
-std::string getFloatMath(const nvMolKit::PrecisionOptions& o) {
-  return nvMolKit::floatMathModeName(o.floatMath);
-}
-void setFloatMath(nvMolKit::PrecisionOptions& o, const std::string& value) {
-  o.floatMath = nvMolKit::parseFloatMathMode(value);
-}
-
 }  // namespace
 
 BOOST_PYTHON_MODULE(_types) {
   boost::python::class_<nvMolKit::PrecisionOptions>("NativePrecisionOptions")
     .def(boost::python::init<>())
-    .add_property("mode", &getPrecisionMode, &setPrecisionMode)
-    .add_property("forcefieldParameterStorage", &getForcefieldParameterStorage, &setForcefieldParameterStorage)
-    .add_property("forcefieldCoordinateStorage", &getCoordinateStorage, &setCoordinateStorage)
-    .add_property("forcefieldGradientStorage", &getGradientStorage, &setGradientStorage)
-    .add_property("hessianStorage", &getHessianStorage, &setHessianStorage)
-    .add_property("minimizerStateStorage", &getMinimizerStateStorage, &setMinimizerStateStorage)
-    .add_property("forcefieldCompute", &getForcefieldCompute, &setForcefieldCompute)
-    .add_property("minimizerCompute", &getMinimizerCompute, &setMinimizerCompute)
-    .add_property("reductionCompute", &getReductionCompute, &setReductionCompute)
-    .add_property("floatMath", &getFloatMath, &setFloatMath);
+    .add_property("mode", &getPrecisionMode, &setPrecisionMode);
 
   boost::python::class_<nvMolKit::FireOptions>("FireOptions")
     .def(boost::python::init<>())
