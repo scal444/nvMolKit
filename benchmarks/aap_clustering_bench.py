@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 from bench_utils import (
     add_backend_selection_args,
+    load_csv,
     load_sdf,
     load_smiles,
     print_csv_rows,
@@ -139,21 +140,41 @@ def _ligand_clustering_cpu_cluster(molecules, threshold, max_path_length, refere
     return _remap_clusters_by_size(labels, cluster_id)
 
 
-def _priority_order(molecules, sort_tag):
+def _parse_priority_value(raw_value):
+    cleaned = raw_value.strip().lstrip("<>").strip()
+    value = float(cleaned)
+    if not math.isfinite(value):
+        raise ValueError(f"non-finite priority value: {raw_value!r}")
+    return value
+
+
+def _filter_sortable_molecules(molecules, sort_tag):
+    sortable = []
+    for molecule in molecules:
+        if not molecule.HasProp(sort_tag):
+            continue
+        try:
+            _parse_priority_value(molecule.GetProp(sort_tag))
+        except (TypeError, ValueError):
+            continue
+        sortable.append(molecule)
+    return sortable
+
+
+def _priority_order(molecules, sort_tag, descending=False):
     indexed = list(enumerate(molecules))
     if sort_tag:
-
         def priority(item):
-            molecule = item[1]
-            raw_value = molecule.GetProp(sort_tag) if molecule.HasProp(sort_tag) else ""
-            cleaned = raw_value.replace("<", "")
-            return (not bool(cleaned), float(cleaned) if cleaned else 0.0)
+            value = _parse_priority_value(item[1].GetProp(sort_tag))
+            return -value if descending else value
 
         indexed.sort(key=priority)
     return indexed
 
 
-def _rdkit_aap_dise_cluster(molecules, threshold, max_path_length, sort_tag, reference, phase_timings=None):
+def _rdkit_aap_dise_cluster(
+    molecules, threshold, max_path_length, sort_tag, sort_descending, reference, phase_timings=None
+):
     """Run the complete RDKit AAP sphere-exclusion workflow.
 
     This follows RDKit's documented workflow: use ``LeaderPicker`` to select
@@ -162,7 +183,7 @@ def _rdkit_aap_dise_cluster(molecules, threshold, max_path_length, sort_tag, ref
     function because input direction is part of DISE.
     """
     start = time.perf_counter()
-    indexed = _priority_order(molecules, sort_tag)
+    indexed = _priority_order(molecules, sort_tag, sort_descending)
     ordering_done = time.perf_counter()
     ordered_molecules = [molecule for _, molecule in indexed]
     with warnings.catch_warnings():
@@ -216,6 +237,7 @@ def _rdkit_aap_dise_cluster(molecules, threshold, max_path_length, sort_tag, ref
                 "descriptor_time_ms": (descriptors_done - ordering_done) * 1000.0,
                 "centroid_selection_time_ms": (selection_done - descriptors_done) * 1000.0,
                 "nearest_assignment_time_ms": (assignment_done - selection_done) * 1000.0,
+                "similarity_evaluations": len(similarity_cache),
             }
         )
     return labels
@@ -229,6 +251,22 @@ def _cluster_agreement(left, right):
             agreements += (left[first] == left[second]) == (right[first] == right[second])
             comparisons += 1
     return agreements / comparisons if comparisons else 1.0
+
+
+def _add_cluster_stats(row, labels):
+    _, sizes = np.unique(labels, return_counts=True)
+    row["num_clusters"] = len(sizes)
+    row["largest_cluster_size"] = int(np.max(sizes))
+    row["median_cluster_size"] = float(np.median(sizes))
+    row["singleton_cluster_fraction"] = float(np.mean(sizes == 1))
+
+
+def _add_priority_stats(row, molecules, sort_tag, descending):
+    values = [_parse_priority_value(molecule.GetProp(sort_tag)) for molecule in molecules]
+    row["priority_sort"] = sort_tag
+    row["priority_direction"] = "descending" if descending else "ascending"
+    row["priority_distinct_values"] = len(set(values))
+    row["priority_tie_fraction"] = 1.0 - len(set(values)) / len(values)
 
 
 def _time_callable(function, runs, warmup, gpu_sync=False):
@@ -260,7 +298,7 @@ def _base_row(args, operation, method, count, timing, molecules, status="ok"):
         "operation": operation,
         "status": status,
         "timing_scope": "from_preparsed_rdkit_molecules",
-        "input_file": str(args.sdf or args.smiles),
+        "input_file": str(args.sdf or args.csv or args.smiles),
         "num_mols": len(molecules),
         "num_pairs": count if is_pair else "N/A",
         "mols_processed": count if not is_pair else "N/A",
@@ -372,7 +410,7 @@ def _benchmark_clustering(args, molecules, ligand_clustering_cpu_reference):
         )
         outputs["nvmolkit_gpu"] = labels
         row = _base_row(args, "clustering", "nvmolkit_gpu", len(molecules), timing, molecules)
-        row["num_clusters"] = len(set(labels))
+        _add_cluster_stats(row, labels)
         rows.append(row)
 
     if not args.no_rdkit:
@@ -426,7 +464,7 @@ def _benchmark_clustering(args, molecules, ligand_clustering_cpu_reference):
             )
             outputs["ligand_clustering_cpu"] = labels
             row = _base_row(args, "clustering", "ligand_clustering_cpu", len(molecules), timing, molecules)
-            row["num_clusters"] = len(set(labels))
+            _add_cluster_stats(row, labels)
             rows.append(row)
 
     by_method = {row["method"]: row for row in rows}
@@ -452,7 +490,7 @@ def _benchmark_dise(args, molecules, rdkit_reference):
 
         def run_gpu_workflow():
             nonlocal gpu_labels
-            indexed = _priority_order(molecules, args.sort_tag)
+            indexed = _priority_order(molecules, args.sort_tag, args.sort_descending)
             ordered_labels = aap_dise_clustering(
                 [molecule for _, molecule in indexed],
                 threshold=args.threshold,
@@ -470,8 +508,8 @@ def _benchmark_dise(args, molecules, rdkit_reference):
         )
         row = _base_row(args, "dise", "nvmolkit_gpu", len(molecules), timing, molecules)
         row["timing_scope"] = timing_scope
-        row["num_clusters"] = len(set(gpu_labels))
-        row["priority_sort"] = args.sort_tag or "none"
+        _add_cluster_stats(row, gpu_labels)
+        _add_priority_stats(row, molecules, args.sort_tag, args.sort_descending)
         rows.append(row)
         outputs["nvmolkit_gpu"] = gpu_labels
     if args.no_rdkit:
@@ -508,6 +546,7 @@ def _benchmark_dise(args, molecules, rdkit_reference):
                 args.threshold,
                 args.max_path_length,
                 args.sort_tag,
+                args.sort_descending,
                 rdkit_reference,
                 phase_timings,
             ),
@@ -523,8 +562,8 @@ def _benchmark_dise(args, molecules, rdkit_reference):
             molecules,
         )
         row["timing_scope"] = timing_scope
-        row["num_clusters"] = len(set(labels))
-        row["priority_sort"] = args.sort_tag or "none"
+        _add_cluster_stats(row, labels)
+        _add_priority_stats(row, molecules, args.sort_tag, args.sort_descending)
         measured_phases = phase_timings[-args.runs :]
         for field in measured_phases[0]:
             row[field] = round(float(np.mean([sample[field] for sample in measured_phases])), 4)
@@ -547,8 +586,15 @@ def _benchmark_dise(args, molecules, rdkit_reference):
 def _build_parser():
     parser = argparse.ArgumentParser(description="AAP similarity and directed sphere-exclusion clustering benchmark")
     parser.add_argument("--smiles", "-s", default=str(DEFAULT_INPUT), help="Input SMILES file")
-    parser.add_argument("--sdf", help="Input SDF file; overrides --smiles")
+    parser.add_argument("--sdf", help="Input SDF file; overrides --csv and --smiles")
+    parser.add_argument("--csv", help="Input scored CSV file; overrides --smiles")
+    parser.add_argument("--smiles-column", default="smiles", help="SMILES column used with --csv")
     parser.add_argument("--sizes", type=int, nargs="+", default=[32, 128, 512], help="Clustering sizes")
+    parser.add_argument(
+        "--sample-pool-size",
+        type=int,
+        help="Deterministic sampled input pool shared across separate benchmark invocations",
+    )
     parser.add_argument("--num_pairs", type=int, default=128, help="Random molecule pairs for similarity timing")
     parser.add_argument("--runs", "-r", type=int, default=3, help="Number of timing runs")
     parser.add_argument("--seed", type=int, default=42, help="Molecule and pair sampling seed")
@@ -556,6 +602,11 @@ def _build_parser():
     parser.add_argument(
         "--sort-tag",
         help="Numeric priority property cleaned and sorted ascending inside timed DISE runs",
+    )
+    parser.add_argument(
+        "--sort-descending",
+        action="store_true",
+        help="Sort larger priority values first inside timed DISE runs",
     )
     parser.add_argument("--max_atoms", type=int, default=64, help="Maximum atoms retained, at most 64")
     parser.add_argument("--max_path_length", type=int, default=7)
@@ -602,6 +653,9 @@ def main():
     if not args.sizes or any(size <= 0 for size in args.sizes):
         print("Error: --sizes must contain positive values", file=sys.stderr)
         sys.exit(1)
+    if args.sample_pool_size is not None and args.sample_pool_size < max(args.sizes):
+        print("Error: --sample-pool-size must be at least the largest requested size", file=sys.stderr)
+        sys.exit(1)
     if not 1 <= args.max_atoms <= 64:
         print("Error: --max_atoms must be between 1 and 64", file=sys.stderr)
         sys.exit(1)
@@ -617,6 +671,13 @@ def main():
     if args.no_nvmolkit and args.no_rdkit and args.no_ligand_clustering_cpu:
         print("Error: cannot disable every benchmark backend", file=sys.stderr)
         sys.exit(1)
+    if args.operation in ("dise", "all") and not args.sort_tag:
+        print(
+            "Error: the complete clustering workflow requires --sort-tag; "
+            "unordered DISE benchmarks are invalid",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     rdkit_reference = None if args.no_rdkit else _load_rdkit_reference()
     ligand_clustering_cpu_reference = (
@@ -628,27 +689,48 @@ def main():
         print("ligand_clustering CPU unavailable; its timing fields will be empty")
 
     largest_size = max(args.sizes)
-    requested = max(largest_size * 3, args.num_pairs * 2)
-    if args.sdf:
-        loaded = load_sdf(args.sdf, max_count=requested, sanitize=True, seed=args.seed)
-    else:
-        loaded = load_smiles(args.smiles, max_count=requested, sanitize=True, seed=args.seed)
+    requested = args.sample_pool_size or max(largest_size * 3, args.num_pairs * 2)
+    try:
+        if args.sdf:
+            loaded = load_sdf(args.sdf, max_count=requested, sanitize=True, seed=args.seed)
+        elif args.csv:
+            loaded = load_csv(
+                args.csv,
+                smiles_column=args.smiles_column,
+                property_columns=[args.sort_tag] if args.sort_tag else [],
+                max_count=requested,
+                sanitize=True,
+                seed=args.seed,
+            )
+        else:
+            loaded = load_smiles(args.smiles, max_count=requested, sanitize=True, seed=args.seed)
+    except (OSError, ValueError) as error:
+        print(f"Error loading input: {error}", file=sys.stderr)
+        sys.exit(1)
     molecules = _filter_supported_molecules(loaded, args.max_atoms)
+    if args.operation in ("dise", "all"):
+        supported_count = len(molecules)
+        molecules = _filter_sortable_molecules(molecules, args.sort_tag)
+        dropped_count = supported_count - len(molecules)
+        if dropped_count:
+            print(f"  Dropped {dropped_count} molecules without a valid {args.sort_tag!r} priority value")
     if len(molecules) < max(largest_size, 2):
         print(
-            f"Error: need {max(largest_size, 2)} supported molecules, retained {len(molecules)}",
+            f"Error: need {max(largest_size, 2)} supported molecules with sortable data, "
+            f"retained {len(molecules)}",
             file=sys.stderr,
         )
         sys.exit(1)
 
     print("\nConfiguration:")
-    print(f"  Input: {args.sdf or args.smiles}")
+    print(f"  Input: {args.sdf or args.csv or args.smiles}")
     print(f"  Retained molecules: {len(molecules)}")
     print(f"  Clustering sizes: {args.sizes}")
     print(f"  Pair count: {args.num_pairs}")
     print(f"  Runs: {args.runs}")
     print(f"  Threshold: {args.threshold}")
     print(f"  DISE priority sort: {args.sort_tag or 'none'}")
+    print(f"  DISE priority direction: {'descending' if args.sort_descending else 'ascending'}")
     print(f"  Run nvMolKit GPU: {not args.no_nvmolkit}")
     print(f"  Run RDKit Contrib similarity: {rdkit_reference is not None and not args.no_rdkit}")
     print(
@@ -671,10 +753,12 @@ def main():
         for size in args.sizes:
             print(f"\nBenchmarking clustering for {size} molecules...")
             rows.extend(_benchmark_clustering(args, molecules[:size], ligand_clustering_cpu_reference))
+            write_csv_rows(rows, args.output)
     if args.operation in ("dise", "all"):
         for size in args.sizes:
             print(f"\nBenchmarking complete RDKit AAP+DISE workflow for {size} molecules...")
             rows.extend(_benchmark_dise(args, molecules[:size], rdkit_reference))
+            write_csv_rows(rows, args.output)
 
     if not rows:
         print("Error: no benchmark rows were produced", file=sys.stderr)
