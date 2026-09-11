@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -84,7 +84,7 @@ class WorkBag {
 
   // Copies up to n items from the end into a pinned host vector, removing them from the bag.
   // Returns the number of items copied. Retains shrinking/drain behavior.
-  size_t copy_n(PinnedHostVector<int>& outPinned, size_t n) {
+  size_t copy_n(PinnedHostView<int>& outPinned, size_t n) {
     if (drained_.load(std::memory_order_relaxed)) {
       return 0;
     }
@@ -99,7 +99,7 @@ class WorkBag {
     const size_t take    = std::min({n, available, outPinned.size()});
     auto         startIt = items_.end() - static_cast<std::ptrdiff_t>(take);
     // Copy into pinned host memory
-    std::copy(startIt, items_.end(), outPinned.begin());
+    std::copy(startIt, items_.end(), outPinned.data());
     items_.erase(startIt, items_.end());
     if (items_.empty()) {
       drained_.store(true, std::memory_order_relaxed);
@@ -119,30 +119,72 @@ class WorkBag {
   std::atomic<bool>  drained_{false};
 };
 
-void allocateGpuBatch(MorganGPUBuffersBatch& buffers,
-                      cudaStream_t           stream,
-                      const size_t           numMols,
-                      const int              radius,
-                      const int              maxAtoms) {
-  buffers.atomInvariants       = AsyncDeviceVector<std::uint32_t>(maxAtoms * numMols, stream);
-  buffers.bondInvariants       = AsyncDeviceVector<std::uint32_t>(maxAtoms * numMols, stream);
-  buffers.bondIndices          = AsyncDeviceVector<std::int16_t>(maxAtoms * numMols * kMaxBondsPerAtom, stream);
-  buffers.bondOtherAtomIndices = AsyncDeviceVector<std::int16_t>(maxAtoms * numMols * kMaxBondsPerAtom, stream);
-  buffers.nAtomsPerMol         = AsyncDeviceVector<std::int16_t>(numMols, stream);
-  buffers.outputIndices        = AsyncDeviceVector<int>(numMols, stream);
+template <typename T> void growDeviceBuffer(AsyncDeviceVector<T>& buffer, const size_t size, cudaStream_t stream) {
+  if (buffer.size() < size) {
+    buffer.setStream(stream);
+    buffer.resize(size);
+  }
+}
+
+void ensureGpuBatchCapacity(MorganGPUBuffersBatch& buffers,
+                            cudaStream_t           stream,
+                            const size_t           numMols,
+                            const int              radius,
+                            const int              maxAtoms) {
+  growDeviceBuffer(buffers.atomInvariants, maxAtoms * numMols, stream);
+  growDeviceBuffer(buffers.bondInvariants, maxAtoms * numMols, stream);
+  growDeviceBuffer(buffers.bondIndices, maxAtoms * numMols * kMaxBondsPerAtom, stream);
+  growDeviceBuffer(buffers.bondOtherAtomIndices, maxAtoms * numMols * kMaxBondsPerAtom, stream);
+  growDeviceBuffer(buffers.nAtomsPerMol, numMols, stream);
+  growDeviceBuffer(buffers.outputIndices, numMols, stream);
 
   switch (maxAtoms) {
     case 32:
-      buffers.allSeenNeighborhoods32 = AsyncDeviceVector<FlatBitVect<32>>(numMols * 32 * (radius + 1), stream);
+      growDeviceBuffer(buffers.allSeenNeighborhoods32, numMols * 32 * (radius + 1), stream);
       break;
     case 64:
-      buffers.allSeenNeighborhoods64 = AsyncDeviceVector<FlatBitVect<64>>(numMols * 64 * (radius + 1), stream);
+      growDeviceBuffer(buffers.allSeenNeighborhoods64, numMols * 64 * (radius + 1), stream);
       break;
     case 128:
-      buffers.allSeenNeighborhoods128 = AsyncDeviceVector<FlatBitVect<128>>(numMols * 128 * (radius + 1), stream);
+      growDeviceBuffer(buffers.allSeenNeighborhoods128, numMols * 128 * (radius + 1), stream);
       break;
     default:
       throw std::runtime_error("Unsupported max atoms for Morgan fingerprint GPU: " + std::to_string(maxAtoms));
+  }
+}
+
+void ensurePinnedBatchCapacity(std::vector<MorganPerThreadBuffers>& threadBuffers, const size_t numMols) {
+  const bool hasCapacity = std::all_of(threadBuffers.begin(), threadBuffers.end(), [numMols](const auto& buffers) {
+    return buffers.pinnedBatchCapacity >= numMols;
+  });
+  if (hasCapacity) {
+    return;
+  }
+
+  // The old reservoir may still be the source of asynchronous H2D copies from
+  // the preceding call. Wait only on growth; steady-state calls remain synchronization-free.
+  for (auto& buffers : threadBuffers) {
+    if (buffers.pinnedBatchCapacity > 0) {
+      cudaCheckError(cudaEventSynchronize(buffers.prevMemcpyDoneEvent.event()));
+    }
+  }
+
+  constexpr size_t kArenaAllocations = 6;
+  const size_t     invariantCount    = numMols * 128;
+  const size_t     bondCount         = invariantCount * kMaxBondsPerAtom;
+  const size_t     workerBytes = invariantCount * sizeof(std::uint32_t) * 2 + bondCount * sizeof(std::int16_t) * 2 +
+                             numMols * sizeof(std::int16_t) + numMols * sizeof(int) + kArenaAllocations * 256;
+  auto allocator = std::make_shared<PinnedHostAllocator>(workerBytes * threadBuffers.size());
+
+  for (auto& buffers : threadBuffers) {
+    buffers.nAtomsPerMol           = allocator->allocate<std::int16_t>(numMols);
+    buffers.h_atomInvariants       = allocator->allocate<std::uint32_t>(invariantCount);
+    buffers.h_bondInvariants       = allocator->allocate<std::uint32_t>(invariantCount);
+    buffers.h_bondIndices          = allocator->allocate<std::int16_t>(bondCount);
+    buffers.h_bondOtherAtomIndices = allocator->allocate<std::int16_t>(bondCount);
+    buffers.h_outputIndices        = allocator->allocate<int>(numMols);
+    buffers.pinnedAllocator        = allocator;
+    buffers.pinnedBatchCapacity    = numMols;
   }
 }
 
@@ -213,6 +255,7 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
                                                                  const int    nThreads,
                                                                  std::vector<MorganPerThreadBuffers>& threadBuffers,
                                                                  cudaStream_t stream = nullptr) {
+  nvMolKit::ScopedNvtxRange rangeE2E("MorganFPComputeGpuBuffer");
   nvMolKit::ScopedNvtxRange range1("MorganFPBatchAllocation");
   const size_t              numMols           = mols.size();
   auto                      outputAccumulator = AsyncDeviceVector<FlatBitVect<fpSize>>(numMols, stream);
@@ -221,33 +264,24 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
   threadBuffers.resize(nThreadsActual);
 
   const size_t dispatchChunkSize = std::min(dispatchChunkSizeInit, numMols);
+  ensurePinnedBatchCapacity(threadBuffers, dispatchChunkSize);
 
   for (auto& perThreadBuffer : threadBuffers) {
-    perThreadBuffer.nAtomsPerMol.resize(dispatchChunkSize);
-    allocateGpuBatch(*perThreadBuffer.gpuBuffers32, perThreadBuffer.stream.stream(), dispatchChunkSize, maxRadius, 32);
-    allocateGpuBatch(*perThreadBuffer.gpuBuffers64, perThreadBuffer.stream.stream(), dispatchChunkSize, maxRadius, 64);
-    allocateGpuBatch(*perThreadBuffer.gpuBuffers128,
-                     perThreadBuffer.stream.stream(),
-                     dispatchChunkSize,
-                     maxRadius,
-                     128);
-    // Pre-allocate pinned host buffers (fixed-size, reused across batches)
-    perThreadBuffer.h_atomInvariants32.resize(dispatchChunkSize * 32);
-    perThreadBuffer.h_bondInvariants32.resize(dispatchChunkSize * 32);
-    perThreadBuffer.h_bondIndices32.resize(dispatchChunkSize * 32 * kMaxBondsPerAtom);
-    perThreadBuffer.h_bondOtherAtomIndices32.resize(dispatchChunkSize * 32 * kMaxBondsPerAtom);
-
-    perThreadBuffer.h_atomInvariants64.resize(dispatchChunkSize * 64);
-    perThreadBuffer.h_bondInvariants64.resize(dispatchChunkSize * 64);
-    perThreadBuffer.h_bondIndices64.resize(dispatchChunkSize * 64 * kMaxBondsPerAtom);
-    perThreadBuffer.h_bondOtherAtomIndices64.resize(dispatchChunkSize * 64 * kMaxBondsPerAtom);
-
-    perThreadBuffer.h_atomInvariants128.resize(dispatchChunkSize * 128);
-    perThreadBuffer.h_bondInvariants128.resize(dispatchChunkSize * 128);
-    perThreadBuffer.h_bondIndices128.resize(dispatchChunkSize * 128 * kMaxBondsPerAtom);
-    perThreadBuffer.h_bondOtherAtomIndices128.resize(dispatchChunkSize * 128 * kMaxBondsPerAtom);
-
-    perThreadBuffer.h_outputIndices.resize(dispatchChunkSize);
+    ensureGpuBatchCapacity(*perThreadBuffer.gpuBuffers32,
+                           perThreadBuffer.stream.stream(),
+                           dispatchChunkSize,
+                           maxRadius,
+                           32);
+    ensureGpuBatchCapacity(*perThreadBuffer.gpuBuffers64,
+                           perThreadBuffer.stream.stream(),
+                           dispatchChunkSize,
+                           maxRadius,
+                           64);
+    ensureGpuBatchCapacity(*perThreadBuffer.gpuBuffers128,
+                           perThreadBuffer.stream.stream(),
+                           dispatchChunkSize,
+                           maxRadius,
+                           128);
     cudaCheckError(cudaEventRecord(perThreadBuffer.prevMemcpyDoneEvent.event(), perThreadBuffer.stream.stream()));
   }
 
@@ -259,10 +293,11 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
   }
   range1.pop();
 
-  WorkBag work32;
-  WorkBag work64;
-  WorkBag work128;
-  WorkBag workLarge;
+  WorkBag         work32;
+  WorkBag         work64;
+  WorkBag         work128;
+  WorkBag         workLarge;
+  ScopedNvtxRange rangeClassify("MorganFPClassifyMolecules");
   for (int i = 0; i < mols.size(); i++) {
     const auto& mol = *mols[i];
     if (mol.getNumAtoms() >= 128 || mol.getNumBonds() >= 128) {
@@ -275,6 +310,7 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
       work128.push_back(i);
     }
   }
+  rangeClassify.pop();
   const size_t numThreads32    = (work32.size() + dispatchChunkSize - 1) / dispatchChunkSize;
   const size_t numThreads64    = (work64.size() + dispatchChunkSize - 1) / dispatchChunkSize;
   const size_t numThreads128   = (work128.size() + dispatchChunkSize - 1) / dispatchChunkSize;
@@ -288,6 +324,7 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
     numThreadsTotal = std::min(workLarge.size(), static_cast<size_t>(nThreadsActual));
   }
   detail::OpenMPExceptionRegistry exceptionRegistry;
+  ScopedNvtxRange                 rangeParallel("MorganFPParallelPreprocessAndLaunch");
 
 #pragma omp parallel for num_threads(nThreadsActual) default(none) shared(numThreadsTotal,     \
                                                                             threadBuffers,     \
@@ -330,7 +367,7 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
       const std::string rangemainName = "Main run processing mols: thread " + std::to_string(omp_get_thread_num());
       ScopedNvtxRange   rangeMain(rangemainName.c_str());
 
-      std::fill(threadCpuBuffers.nAtomsPerMol.begin(), threadCpuBuffers.nAtomsPerMol.end(), 0);
+      std::fill_n(threadCpuBuffers.nAtomsPerMol.data(), dispatchChunkSize, 0);
 
       ScopedNvtxRange rangeGetDispatch("Get mol ids from dispatcher");
 
@@ -380,28 +417,12 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
         scopedChunkSize = relIdx;
         // Compute invariants directly into pinned host buffers to avoid copies
         if (scopedChunkSize > 0) {
-          if (thisRoundNumAtoms == 32) {
-            MorganInvariantsGenerator::ComputeInvariantsInto(molsView,
-                                                             thisRoundNumAtoms,
-                                                             threadCpuBuffers.h_atomInvariants32.data(),
-                                                             threadCpuBuffers.h_bondInvariants32.data(),
-                                                             threadCpuBuffers.h_bondIndices32.data(),
-                                                             threadCpuBuffers.h_bondOtherAtomIndices32.data());
-          } else if (thisRoundNumAtoms == 64) {
-            MorganInvariantsGenerator::ComputeInvariantsInto(molsView,
-                                                             thisRoundNumAtoms,
-                                                             threadCpuBuffers.h_atomInvariants64.data(),
-                                                             threadCpuBuffers.h_bondInvariants64.data(),
-                                                             threadCpuBuffers.h_bondIndices64.data(),
-                                                             threadCpuBuffers.h_bondOtherAtomIndices64.data());
-          } else {  // 128
-            MorganInvariantsGenerator::ComputeInvariantsInto(molsView,
-                                                             thisRoundNumAtoms,
-                                                             threadCpuBuffers.h_atomInvariants128.data(),
-                                                             threadCpuBuffers.h_bondInvariants128.data(),
-                                                             threadCpuBuffers.h_bondIndices128.data(),
-                                                             threadCpuBuffers.h_bondOtherAtomIndices128.data());
-          }
+          MorganInvariantsGenerator::ComputeInvariantsInto(molsView,
+                                                           thisRoundNumAtoms,
+                                                           threadCpuBuffers.h_atomInvariants.data(),
+                                                           threadCpuBuffers.h_bondInvariants.data(),
+                                                           threadCpuBuffers.h_bondIndices.data(),
+                                                           threadCpuBuffers.h_bondOtherAtomIndices.data());
         }
         rangeComputeInvars.pop();
       }
@@ -412,35 +433,15 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
                                                                                             threadCpuBuffers.gpuBuffers128);
         cudaStream_t    stream       = threadCpuBuffers.stream.stream();
 
-        // Send using pinned host buffers
-        if (thisRoundNumAtoms == 32) {
-          buffersToUse->atomInvariants.copyFromHost(threadCpuBuffers.h_atomInvariants32.data(),
-                                                    thisRoundNumAtoms * scopedChunkSize);
-          buffersToUse->bondInvariants.copyFromHost(threadCpuBuffers.h_bondInvariants32.data(),
-                                                    thisRoundNumAtoms * scopedChunkSize);
-          buffersToUse->bondIndices.copyFromHost(threadCpuBuffers.h_bondIndices32.data(),
-                                                 thisRoundNumAtoms * scopedChunkSize * kMaxBondsPerAtom);
-          buffersToUse->bondOtherAtomIndices.copyFromHost(threadCpuBuffers.h_bondOtherAtomIndices32.data(),
-                                                          thisRoundNumAtoms * scopedChunkSize * kMaxBondsPerAtom);
-        } else if (thisRoundNumAtoms == 64) {
-          buffersToUse->atomInvariants.copyFromHost(threadCpuBuffers.h_atomInvariants64.data(),
-                                                    thisRoundNumAtoms * scopedChunkSize);
-          buffersToUse->bondInvariants.copyFromHost(threadCpuBuffers.h_bondInvariants64.data(),
-                                                    thisRoundNumAtoms * scopedChunkSize);
-          buffersToUse->bondIndices.copyFromHost(threadCpuBuffers.h_bondIndices64.data(),
-                                                 thisRoundNumAtoms * scopedChunkSize * kMaxBondsPerAtom);
-          buffersToUse->bondOtherAtomIndices.copyFromHost(threadCpuBuffers.h_bondOtherAtomIndices64.data(),
-                                                          thisRoundNumAtoms * scopedChunkSize * kMaxBondsPerAtom);
-        } else {
-          buffersToUse->atomInvariants.copyFromHost(threadCpuBuffers.h_atomInvariants128.data(),
-                                                    thisRoundNumAtoms * scopedChunkSize);
-          buffersToUse->bondInvariants.copyFromHost(threadCpuBuffers.h_bondInvariants128.data(),
-                                                    thisRoundNumAtoms * scopedChunkSize);
-          buffersToUse->bondIndices.copyFromHost(threadCpuBuffers.h_bondIndices128.data(),
-                                                 thisRoundNumAtoms * scopedChunkSize * kMaxBondsPerAtom);
-          buffersToUse->bondOtherAtomIndices.copyFromHost(threadCpuBuffers.h_bondOtherAtomIndices128.data(),
-                                                          thisRoundNumAtoms * scopedChunkSize * kMaxBondsPerAtom);
-        }
+        // Send using the worker's shared pinned staging arena.
+        buffersToUse->atomInvariants.copyFromHost(threadCpuBuffers.h_atomInvariants.data(),
+                                                  thisRoundNumAtoms * scopedChunkSize);
+        buffersToUse->bondInvariants.copyFromHost(threadCpuBuffers.h_bondInvariants.data(),
+                                                  thisRoundNumAtoms * scopedChunkSize);
+        buffersToUse->bondIndices.copyFromHost(threadCpuBuffers.h_bondIndices.data(),
+                                               thisRoundNumAtoms * scopedChunkSize * kMaxBondsPerAtom);
+        buffersToUse->bondOtherAtomIndices.copyFromHost(threadCpuBuffers.h_bondOtherAtomIndices.data(),
+                                                        thisRoundNumAtoms * scopedChunkSize * kMaxBondsPerAtom);
 
         // nAtomsPerMol and output indices
         buffersToUse->nAtomsPerMol.copyFromHost(threadCpuBuffers.nAtomsPerMol.data(), dispatchChunkSize);
@@ -485,13 +486,16 @@ AsyncDeviceVector<FlatBitVect<fpSize>> computeFingerprintsCuImpl(const std::vect
     }
   }
   exceptionRegistry.rethrow();
+  rangeParallel.pop();
 
   // Make external stream wait on all per-thread work completion
+  ScopedNvtxRange rangeJoin("MorganFPJoinWorkerStreams");
   for (const auto& buf : threadBuffers) {
     ScopedCudaEvent workDone;
     cudaCheckError(cudaEventRecord(workDone.event(), buf.stream.stream()));
     cudaCheckError(cudaStreamWaitEvent(stream, workDone.event(), 0));
   }
+  rangeJoin.pop();
 
   return outputAccumulator;
 }

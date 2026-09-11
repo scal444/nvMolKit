@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -340,6 +340,41 @@ TEST(MorganFingerprintTest, GpuConsistentAcrossDispatchRounds) {
   for (size_t i = 0; i < mols.size(); i++) {
     ASSERT_NE(newResults[i], nullptr);
     ASSERT_EQ(*newResults[i], *refResults[i]) << "on element " << i << " with smiles " << smiles[i];
+  }
+}
+
+TEST(MorganFingerprintGpuTest, ReusedWorkspaceHandlesGrowingAndShrinkingBatchSizes) {
+  constexpr unsigned int radius = 3;
+  constexpr unsigned int fpSize = 1024;
+  auto [mols, smiles]           = loadNChemblMolecules(100, 128);
+  auto molsView                 = makeMolsView(mols);
+
+  auto refGenerator = std::unique_ptr<RDKit::FingerprintGenerator<std::uint32_t>>(
+    RDKit::MorganFingerprint::getMorganGenerator<
+      std::uint32_t>(radius, false, false, true, false, nullptr, nullptr, fpSize, {1, 2, 4, 8}, false, false));
+  std::vector<std::unique_ptr<ExplicitBitVect>> expected;
+  expected.reserve(mols.size());
+  for (const auto& mol : mols) {
+    expected.emplace_back(refGenerator->getFingerprint(*mol));
+  }
+
+  auto                                generator = nvMolKit::MorganFingerprintGenerator(radius, fpSize);
+  nvMolKit::FingerprintComputeOptions options;
+  options.backend = nvMolKit::FingerprintComputeBackend::GPU;
+  // Exercise initial allocation, batch and worker growth, shrink-without-reallocation,
+  // and exact capacity reuse on the same shared pinned reservoir.
+  for (const auto& [batchSize, numThreads] : std::array<std::pair<int, int>, 4>{
+         {{3, 2}, {41, 7}, {7, 3}, {41, 7}}
+  }) {
+    options.gpuBatchSize  = batchSize;
+    options.numCpuThreads = numThreads;
+    const auto actual     = generator.GetFingerprints(molsView, options);
+    ASSERT_EQ(actual.size(), expected.size()) << "batch size " << batchSize << ", threads " << numThreads;
+    for (size_t molIdx = 0; molIdx < actual.size(); ++molIdx) {
+      ASSERT_NE(actual[molIdx], nullptr);
+      EXPECT_EQ(*actual[molIdx], *expected[molIdx]) << "batch size " << batchSize << ", threads " << numThreads
+                                                    << ", element " << molIdx << " with smiles " << smiles[molIdx];
+    }
   }
 }
 
