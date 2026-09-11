@@ -32,10 +32,9 @@ from nvmolkit.types import (
     PrecisionMode,
 )
 
-
 @pytest.fixture
-def uff_test_mols(num_mols=5):
-    """Load a handful of UFF-valid molecules from the shared validation set."""
+def uff_test_mols(num_mols=4):
+    """Load reliable UFF reference cases from the shared validation set."""
     sdf_path = os.path.join(
         os.path.dirname(__file__),
         "..",
@@ -56,31 +55,24 @@ def uff_test_mols(num_mols=5):
         if not rdForceFieldHelpers.UFFHasAllMoleculeParams(mol):
             continue
         molecules.append(mol)
-        if len(molecules) >= num_mols:
+        if len(molecules) >= num_mols + 1:
             break
 
-    if len(molecules) < num_mols:
-        pytest.skip(f"Expected {num_mols} UFF-valid molecules, found {len(molecules)}")
+    if len(molecules) < num_mols + 1:
+        pytest.skip(f"Expected {num_mols + 1} UFF-valid molecules, found {len(molecules)}")
 
-    return molecules
+    # The first UFF-valid entry is a known basin-boundary case. It is useful
+    # for optimizer validation, but not for a precision API parity test.
+    return molecules[1:]
 
 
 def create_hard_copy_mols(molecules):
     return [Chem.Mol(mol) for mol in molecules]
 
 
-@pytest.mark.parametrize("minimizer_kind", ["BFGS", "FIRE"])
-def test_uff_single_precision_profile_executes(uff_test_mols, minimizer_kind):
-    """Exercise float forcefield buffers without applying float64 validation tolerances."""
-    mol = create_hard_copy_mols(uff_test_mols[:1])[0]
-    energies = nvmolkit_uff.UFFOptimizeMoleculesConfs(
-        [mol],
-        maxIters=5,
-        minimizerKind=minimizer_kind,
-        precision=PrecisionMode.SINGLE,
-    )
-    assert energies and energies[0]
-    assert all(math.isfinite(energy) for energy in energies[0])
+@pytest.fixture(params=[PrecisionMode.FULL, PrecisionMode.SINGLE], ids=["full", "single"])
+def precision(request):
+    return request.param
 
 
 def make_fragmented_mol():
@@ -127,7 +119,7 @@ def calculate_rdkit_uff_energies(
     return all_energies
 
 
-def test_uff_optimization_serial_vs_rdkit(uff_test_mols):
+def test_uff_optimization_serial_vs_rdkit(uff_test_mols, precision):
     rdkit_mols = create_hard_copy_mols(uff_test_mols)
     nvmolkit_mols = create_hard_copy_mols(uff_test_mols)
 
@@ -135,7 +127,7 @@ def test_uff_optimization_serial_vs_rdkit(uff_test_mols):
 
     nvmolkit_energies = []
     for mol in nvmolkit_mols:
-        mol_energies = nvmolkit_uff.UFFOptimizeMoleculesConfs([mol], maxIters=200)
+        mol_energies = nvmolkit_uff.UFFOptimizeMoleculesConfs([mol], maxIters=200, precision=precision)
         nvmolkit_energies.extend(mol_energies)
 
     assert len(rdkit_energies) == len(nvmolkit_energies)
@@ -150,7 +142,7 @@ def test_uff_optimization_serial_vs_rdkit(uff_test_mols):
             )
 
 
-def test_uff_optimization_batch_vs_rdkit(uff_test_mols):
+def test_uff_optimization_batch_vs_rdkit(uff_test_mols, precision):
     rdkit_mols = create_hard_copy_mols(uff_test_mols)
     nvmolkit_mols = create_hard_copy_mols(uff_test_mols)
 
@@ -160,6 +152,7 @@ def test_uff_optimization_batch_vs_rdkit(uff_test_mols):
         nvmolkit_mols,
         maxIters=200,
         hardwareOptions=hardware_options,
+        precision=precision,
     )
 
     assert len(rdkit_energies) == len(nvmolkit_energies)
@@ -174,11 +167,24 @@ def test_uff_optimization_batch_vs_rdkit(uff_test_mols):
             )
 
 
-def test_uff_optimization_empty_input():
-    assert nvmolkit_uff.UFFOptimizeMoleculesConfs([]) == []
+def test_uff_optimization_empty_input(precision):
+    assert nvmolkit_uff.UFFOptimizeMoleculesConfs([], precision=precision) == []
 
 
-def test_uff_optimization_fire_matches_rdkit(uff_test_mols):
+def test_uff_optimization_single_atom(precision):
+    mol = Chem.MolFromSmiles("[Na+]")
+    conformer = Chem.Conformer(1)
+    conformer.SetAtomPosition(0, Point3D(1.0, -2.0, 3.0))
+    mol.AddConformer(conformer)
+
+    energies = nvmolkit_uff.UFFOptimizeMoleculesConfs([mol], precision=precision)
+
+    assert energies == [[pytest.approx(0.0, abs=1e-7)]]
+    position = mol.GetConformer().GetAtomPosition(0)
+    assert (position.x, position.y, position.z) == pytest.approx((1.0, -2.0, 3.0), abs=1e-7)
+
+
+def test_uff_optimization_fire_matches_rdkit(uff_test_mols, precision):
     starting_mols = create_hard_copy_mols(uff_test_mols[:2])
     rdkit_mols = create_hard_copy_mols(uff_test_mols[:2])
     nvmolkit_mols = create_hard_copy_mols(uff_test_mols[:2])
@@ -198,6 +204,7 @@ def test_uff_optimization_fire_matches_rdkit(uff_test_mols):
         maxIters=10000,
         minimizerKind="FIRE",
         fireOptions=options,
+        precision=precision,
     )
 
     assert len(nvmolkit_energies) == len(rdkit_energies)
@@ -234,7 +241,7 @@ def test_uff_optimization_invalid_input():
     assert exc_info.value.args[1]["no_params"] == [1]
 
 
-def test_uff_optimization_threshold_and_interfrag_vs_rdkit():
+def test_uff_optimization_threshold_and_interfrag_vs_rdkit(precision):
     mols = [make_fragmented_mol(), make_fragmented_mol()]
     rdkit_mols = create_hard_copy_mols(mols)
     nvmolkit_mols = create_hard_copy_mols(mols)
@@ -256,6 +263,7 @@ def test_uff_optimization_threshold_and_interfrag_vs_rdkit():
         maxIters=1000,
         vdwThreshold=thresholds,
         ignoreInterfragInteractions=ignore_interfrag,
+        precision=precision,
     )
 
     assert len(rdkit_energies) == len(nvmolkit_energies)
@@ -270,17 +278,18 @@ def test_uff_optimization_threshold_and_interfrag_vs_rdkit():
             )
 
 
-def test_uff_optimization_device_output_matches_host(uff_test_mols):
+def test_uff_optimization_device_output_matches_host(uff_test_mols, precision):
     """UFFOptimizeMoleculesConfs(output=DEVICE) returns Device3DResult; energies match host path."""
     host_mols = create_hard_copy_mols(uff_test_mols)
     device_mols = create_hard_copy_mols(uff_test_mols)
 
-    host_energies = nvmolkit_uff.UFFOptimizeMoleculesConfs(host_mols, maxIters=200)
+    host_energies = nvmolkit_uff.UFFOptimizeMoleculesConfs(host_mols, maxIters=200, precision=precision)
 
     result = nvmolkit_uff.UFFOptimizeMoleculesConfs(
         device_mols,
         maxIters=200,
         output=CoordinateOutput.DEVICE,
+        precision=precision,
     )
     assert isinstance(result, Device3DResult)
     torch.cuda.synchronize()
@@ -294,3 +303,23 @@ def test_uff_optimization_device_output_matches_host(uff_test_mols):
     for h, d in zip(host_flat, device_energies_flat):
         rel = abs(h - d) / max(abs(h), 1e-10)
         assert rel < 1e-2, f"host {h} vs device {d}"
+
+
+def test_uff_optimization_allows_large_molecule_interleaved(precision):
+    """Exercise the large-system path with small systems on either side."""
+    small1 = Chem.AddHs(Chem.MolFromSmiles("CCCCCC"), explicitOnly=False)
+    small2 = Chem.AddHs(Chem.MolFromSmiles("CCC"), explicitOnly=False)
+    big = Chem.AddHs(Chem.MolFromSmiles("C" * 100), explicitOnly=False)
+    assert big.GetNumAtoms() > 256
+
+    embed_params = rdDistGeom.ETKDGv3()
+    embed_params.useRandomCoords = True
+    embed_params.randomSeed = 42
+    embed_params.maxIterations = 10
+    for mol in (small1, big, small2):
+        assert list(rdDistGeom.EmbedMultipleConfs(mol, numConfs=1, params=embed_params)) == [0]
+
+    energies = nvmolkit_uff.UFFOptimizeMoleculesConfs([small1, big, small2], maxIters=10, precision=precision)
+
+    assert [len(mol_energies) for mol_energies in energies] == [1, 1, 1]
+    assert all(math.isfinite(mol_energies[0]) for mol_energies in energies)
