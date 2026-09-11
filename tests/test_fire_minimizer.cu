@@ -816,8 +816,8 @@ TEST(FireMinimizer, SinglePrecisionTracksDoubleReference) {
   options.gradTol               = 1e-9;
   options.useMass               = false;
 
-  const nvMolKit::PrecisionOptions precision{nvMolKit::PrecisionMode::SINGLE};
-  nvMolKit::FireBatchMinimizer     minimizer(kDim, options, nullptr, false, nvMolKit::FireBackend::BATCHED, precision);
+  const nvMolKit::PrecisionMode precision{nvMolKit::PrecisionMode::SINGLE};
+  nvMolKit::FireBatchMinimizer  minimizer(kDim, options, nullptr, false, nvMolKit::FireBackend::BATCHED, precision);
   minimizer.setConvergencePollInterval(1);
   minimizer.initialize(systems.atomStartsHost());
 
@@ -847,7 +847,7 @@ TEST(FireMinimizer, SinglePrecisionTracksDoubleReference) {
 
 TEST(FireMinimizer, AcceptsSupportedPrecisionModes) {
   const nvMolKit::FireOptions options;
-  for (const auto mode : {nvMolKit::PrecisionMode::LEGACY, nvMolKit::PrecisionMode::SINGLE}) {
+  for (const auto mode : {nvMolKit::PrecisionMode::FULL, nvMolKit::PrecisionMode::SINGLE}) {
     EXPECT_NO_THROW(
       nvMolKit::FireBatchMinimizer(kDim, options, nullptr, false, nvMolKit::FireBackend::BATCHED, {mode}));
   }

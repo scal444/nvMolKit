@@ -1,7 +1,6 @@
-class NativePrecisionOptions:
-    mode: str
-
-    def __init__(self) -> None: ...
+class PrecisionMode:
+    FULL: "PrecisionMode"
+    SINGLE: "PrecisionMode"
 
 
 class FireOptions:

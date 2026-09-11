@@ -22,7 +22,7 @@ from rdkit.Chem import AllChem, rdDistGeom
 from rdkit.Chem.rdDistGeom import EmbedParameters
 
 import nvmolkit.embedMolecules as embed
-from nvmolkit.types import CoordinateOutput, Device3DResult, HardwareOptions, PrecisionMode, PrecisionOptions
+from nvmolkit.types import CoordinateOutput, Device3DResult, HardwareOptions, PrecisionMode
 
 
 @pytest.fixture
@@ -358,7 +358,7 @@ def test_embed_molecules_single_precision_executes():
     embed.EmbedMolecules(
         [mol],
         params,
-        precisionOptions=PrecisionOptions(PrecisionMode.SINGLE),
+        precision=PrecisionMode.SINGLE,
     )
 
     assert mol.GetNumConformers() == 1

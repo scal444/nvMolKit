@@ -16,24 +16,12 @@
 #include <boost/python.hpp>
 
 #include "src/minimizer/fire_options.h"
-#include "src/precision_options.h"
-
-namespace {
-
-std::string getPrecisionMode(const nvMolKit::PrecisionOptions& options) {
-  return nvMolKit::precisionModeName(options.mode);
-}
-
-void setPrecisionMode(nvMolKit::PrecisionOptions& options, const std::string& mode) {
-  options.mode = nvMolKit::parsePrecisionMode(mode);
-}
-
-}  // namespace
+#include "src/precision_mode.h"
 
 BOOST_PYTHON_MODULE(_types) {
-  boost::python::class_<nvMolKit::PrecisionOptions>("NativePrecisionOptions")
-    .def(boost::python::init<>())
-    .add_property("mode", &getPrecisionMode, &setPrecisionMode);
+  boost::python::enum_<nvMolKit::PrecisionMode>("PrecisionMode")
+    .value("FULL", nvMolKit::PrecisionMode::FULL)
+    .value("SINGLE", nvMolKit::PrecisionMode::SINGLE);
 
   boost::python::class_<nvMolKit::FireOptions>("FireOptions")
     .def(boost::python::init<>())

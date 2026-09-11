@@ -98,7 +98,7 @@ std::optional<DeviceCoordResult> embedMolecules(const std::vector<RDKit::ROMol*>
                                                 BfgsBackend                                 backend,
                                                 CoordinateOutput                            output,
                                                 int                                         targetGpu,
-                                                PrecisionOptions                            precision) {
+                                                PrecisionMode                               precision) {
   const ScopedNvtxRange fullRange("EmbedMolecules");
   if (!params.useRandomCoords) {
     throw std::runtime_error("ETKDG requires useRandomCoords to be true. Please set it in the EmbedParameters.");

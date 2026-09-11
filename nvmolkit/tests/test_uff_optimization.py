@@ -30,7 +30,6 @@ from nvmolkit.types import (
     FireOptions,
     HardwareOptions,
     PrecisionMode,
-    PrecisionOptions,
 )
 
 
@@ -78,7 +77,7 @@ def test_uff_single_precision_profile_executes(uff_test_mols, minimizer_kind):
         [mol],
         maxIters=5,
         minimizerKind=minimizer_kind,
-        precisionOptions=PrecisionOptions(PrecisionMode.SINGLE),
+        precision=PrecisionMode.SINGLE,
     )
     assert energies and energies[0]
     assert all(math.isfinite(energy) for energy in energies[0])

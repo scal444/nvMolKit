@@ -20,7 +20,7 @@
 
 #include "src/forcefields/batched_forcefield.h"
 #include "src/forcefields/mmff.h"
-#include "src/precision_options.h"
+#include "src/precision_mode.h"
 #include "src/utils/device_vector.h"
 
 namespace nvMolKit {
@@ -39,7 +39,7 @@ class MMFFBatchedForcefield final : public BatchedForcefield {
   explicit MMFFBatchedForcefield(const MMFF::BatchedMolecularSystemHost& molSystemHost,
                                  BatchedForcefieldMetadata               metadata  = {},
                                  cudaStream_t                            stream    = nullptr,
-                                 PrecisionOptions                        precision = {});
+                                 PrecisionMode                           precision = PrecisionMode::FULL);
 
   //! \brief Computes MMFF energies through the generic batched-forcefield API.
   cudaError_t computeEnergy(double*        energyOuts,

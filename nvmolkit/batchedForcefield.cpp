@@ -266,7 +266,7 @@ class NativeMMFFBatchedForcefield {
                               const bp::list&                       angleConstraints,
                               const bp::list&                       torsionConstraints,
                               const nvMolKit::BatchHardwareOptions& hwOpts,
-                              const nvMolKit::PrecisionOptions&     precision)
+                              const nvMolKit::PrecisionMode&        precision)
       : hwOpts_(hwOpts),
         precision_(precision) {
     throwIfCudaError(cudaGetDevice(&gpuId_), "MMFF wrapper/cudaGetDevice");
@@ -415,7 +415,7 @@ class NativeMMFFBatchedForcefield {
   std::vector<nvMolKit::MMFFProperties> properties_;
   std::vector<FC::PerMolConstraints>    constraints_;
   nvMolKit::BatchHardwareOptions        hwOpts_;
-  nvMolKit::PrecisionOptions            precision_;
+  nvMolKit::PrecisionMode               precision_;
 
   std::unique_ptr<nvMolKit::MMFFBatchedForcefield> forcefield_;
   nvMolKit::AsyncDeviceVector<double>              positionsDevice_;
@@ -435,7 +435,7 @@ class NativeUFFBatchedForcefield {
                              const bp::list&                       angleConstraints,
                              const bp::list&                       torsionConstraints,
                              const nvMolKit::BatchHardwareOptions& hwOpts,
-                             const nvMolKit::PrecisionOptions&     precision)
+                             const nvMolKit::PrecisionMode&        precision)
       : hwOpts_(hwOpts),
         precision_(precision) {
     throwIfCudaError(cudaGetDevice(&gpuId_), "UFF wrapper/cudaGetDevice");
@@ -586,7 +586,7 @@ class NativeUFFBatchedForcefield {
   std::vector<bool>                  ignoreInterfragInteractions_;
   std::vector<FC::PerMolConstraints> constraints_;
   nvMolKit::BatchHardwareOptions     hwOpts_;
-  nvMolKit::PrecisionOptions         precision_;
+  nvMolKit::PrecisionMode            precision_;
 
   std::unique_ptr<nvMolKit::UFFBatchedForcefield> forcefield_;
   nvMolKit::AsyncDeviceVector<double>             positionsDevice_;
@@ -624,7 +624,7 @@ BOOST_PYTHON_MODULE(_batchedForcefield) {
                                                                        const bp::list&,
                                                                        const bp::list&,
                                                                        const nvMolKit::BatchHardwareOptions&,
-                                                                       const nvMolKit::PrecisionOptions&>())
+                                                                       const nvMolKit::PrecisionMode&>())
     .def("computeEnergy", &NativeMMFFBatchedForcefield::computeEnergy)
     .def("computeGradients", &NativeMMFFBatchedForcefield::computeGradients)
     .def("minimize", &NativeMMFFBatchedForcefield::minimize)
@@ -640,7 +640,7 @@ BOOST_PYTHON_MODULE(_batchedForcefield) {
                                                                       const bp::list&,
                                                                       const bp::list&,
                                                                       const nvMolKit::BatchHardwareOptions&,
-                                                                      const nvMolKit::PrecisionOptions&>())
+                                                                      const nvMolKit::PrecisionMode&>())
     .def("computeEnergy", &NativeUFFBatchedForcefield::computeEnergy)
     .def("computeGradients", &NativeUFFBatchedForcefield::computeGradients)
     .def("minimize", &NativeUFFBatchedForcefield::minimize)

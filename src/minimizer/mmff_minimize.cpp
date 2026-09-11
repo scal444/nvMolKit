@@ -71,7 +71,7 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
                                                                 const MMFFProperties&       properties,
                                                                 const BatchHardwareOptions& perfOptions,
                                                                 const BfgsBackend           backend,
-                                                                PrecisionOptions            precision) {
+                                                                PrecisionMode               precision) {
   return MMFFOptimizeMoleculesConfsBfgs(mols,
                                         maxIters,
                                         std::vector<MMFFProperties>(mols.size(), properties),
@@ -90,7 +90,7 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfs(std::vector<RDKit::ROMol*>&       
                                               const CoordinateOutput                                       output,
                                               int                                                          targetGpu,
                                               const DeviceCoordResult*                                     deviceInput,
-                                              PrecisionOptions                                             precision) {
+                                              PrecisionMode                                                precision) {
   ScopedNvtxRange fullRange("BFGS MMFF Minimize Molecules Confs");
 
   if (properties.size() != mols.size()) {
@@ -373,7 +373,7 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsBfgs(std::vector<RDKi
                                                                 const std::vector<MMFFProperties>& properties,
                                                                 const BatchHardwareOptions&        perfOptions,
                                                                 const BfgsBackend                  backend,
-                                                                PrecisionOptions                   precision) {
+                                                                PrecisionMode                      precision) {
   return MMFFMinimizeMoleculesConfs(mols,
                                     maxIters,
                                     1e-4,
@@ -398,7 +398,7 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(
   const FireBackend                                            backend,
   const CoordinateOutput                                       output,
   int                                                          targetGpu,
-  PrecisionOptions                                             precision) {
+  PrecisionMode                                                precision) {
   ScopedNvtxRange fullRange("FIRE MMFF Minimize Molecules Confs");
 
   std::vector<MMFFProperties> properties = propertiesIn;
@@ -639,7 +639,7 @@ std::vector<std::vector<double>> MMFFOptimizeMoleculesConfsFire(std::vector<RDKi
                                                                 const std::vector<MMFFProperties>& properties,
                                                                 const BatchHardwareOptions&        perfOptions,
                                                                 const FireBackend                  backend,
-                                                                PrecisionOptions                   precision) {
+                                                                PrecisionMode                      precision) {
   return MMFFMinimizeMoleculesConfsFire(mols,
                                         maxIters,
                                         fireOptions,

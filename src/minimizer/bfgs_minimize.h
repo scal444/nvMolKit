@@ -20,7 +20,7 @@
 #include <vector>
 
 #include "src/minimizer/bfgs_types.h"
-#include "src/precision_options.h"
+#include "src/precision_mode.h"
 #include "src/utils/device_vector.h"
 #include "src/utils/host_vector.h"
 
@@ -62,15 +62,15 @@ using FloatGradFunctor   = std::function<void()>;
 //!                   compatibility with RDKit forcefield calculations.
 //! TODO: Constructor should be parameter struct based, now that we have more parameters.
 struct BfgsBatchMinimizer {
-  explicit BfgsBatchMinimizer(int              dataDim    = 3,
-                              DebugLevel       debugLevel = DebugLevel::NONE,
-                              bool             scaleGrads = true,
-                              cudaStream_t     stream     = nullptr,
-                              BfgsBackend      backend    = BfgsBackend::BATCHED,
-                              PrecisionOptions precision  = {});
+  explicit BfgsBatchMinimizer(int           dataDim    = 3,
+                              DebugLevel    debugLevel = DebugLevel::NONE,
+                              bool          scaleGrads = true,
+                              cudaStream_t  stream     = nullptr,
+                              BfgsBackend   backend    = BfgsBackend::BATCHED,
+                              PrecisionMode precision  = PrecisionMode::FULL);
   ~BfgsBatchMinimizer();
 
-  const PrecisionOptions& precisionOptions() const { return precision_; }
+  const PrecisionMode& precision() const { return precision_; }
 
   //! \brief Runs host-driven batched BFGS through the forcefield abstraction.
   //! \param numIters Maximum number of BFGS iterations to perform.
@@ -261,7 +261,7 @@ struct BfgsBatchMinimizer {
 
   DebugLevel                        debugLevel_ = DebugLevel::NONE;
   BfgsBackend                       backend_    = BfgsBackend::BATCHED;
-  PrecisionOptions                  precision_;
+  PrecisionMode                     precision_;
   std::vector<std::vector<int16_t>> stepwiseStatuses;
   std::vector<std::vector<double>>  stepwiseEnergies;
 

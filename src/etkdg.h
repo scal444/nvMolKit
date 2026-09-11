@@ -22,7 +22,7 @@
 #include "src/conformer/device_coord_result.h"
 #include "src/hardware_options.h"
 #include "src/minimizer/bfgs_minimize.h"
-#include "src/precision_options.h"
+#include "src/precision_mode.h"
 
 namespace RDKit {
 class ROMol;
@@ -55,7 +55,7 @@ std::optional<DeviceCoordResult> embedMolecules(const std::vector<RDKit::ROMol*>
                                                 BfgsBackend      backend   = BfgsBackend::HYBRID,
                                                 CoordinateOutput output    = CoordinateOutput::RDKIT_CONFORMERS,
                                                 int              targetGpu = -1,
-                                                PrecisionOptions precision = {});
+                                                PrecisionMode    precision = PrecisionMode::FULL);
 
 }  // namespace nvMolKit
 

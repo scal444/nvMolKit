@@ -23,7 +23,7 @@ from rdkit.ForceField import rdForceField as _rdForceField  # noqa: F401
 from rdkit.Geometry import Point3D
 
 from nvmolkit.batchedForcefield import MMFFBatchedForcefield, UFFBatchedForcefield
-from nvmolkit.types import HardwareOptions, PrecisionMode, PrecisionOptions
+from nvmolkit.types import HardwareOptions, PrecisionMode
 
 
 def load_reference_mol():
@@ -423,7 +423,7 @@ def test_batched_forcefield_metadata_and_element_view(ff_factory):
 )
 def test_batched_forcefield_single_precision_executes(ff_type):
     mol = make_embedded_mol("CCO")
-    forcefield = ff_type([mol], precisionOptions=PrecisionOptions(PrecisionMode.SINGLE))
+    forcefield = ff_type([mol], precision=PrecisionMode.SINGLE)
 
     energies = forcefield.compute_energy()
     gradients = forcefield.compute_gradients()

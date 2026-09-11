@@ -20,7 +20,7 @@
 
 #include "src/forcefields/batched_forcefield.h"
 #include "src/forcefields/dist_geom.h"
-#include "src/precision_options.h"
+#include "src/precision_mode.h"
 
 namespace nvMolKit {
 
@@ -42,7 +42,7 @@ class ETKBatchedForcefield final : public BatchedForcefield {
                        bool                                          useBasicKnowledge,
                        BatchedForcefieldMetadata                     metadata  = {},
                        cudaStream_t                                  stream    = nullptr,
-                       PrecisionOptions                              precision = {});
+                       PrecisionMode                                 precision = PrecisionMode::FULL);
 
   //! \brief Computes ETK energies through the generic batched-forcefield API.
   cudaError_t computeEnergy(double*        energyOuts,

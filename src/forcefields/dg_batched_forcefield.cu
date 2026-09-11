@@ -34,7 +34,7 @@ DGBatchedForcefield::DGBatchedForcefield(const DistGeom::BatchedMolecularSystemH
                                          const double                                fourthDimWeight,
                                          BatchedForcefieldMetadata                   metadata,
                                          const cudaStream_t                          stream,
-                                         const PrecisionOptions                      precision)
+                                         const PrecisionMode                         precision)
     : BatchedForcefield(ForceFieldType::DG, molSystemHost.dimension, atomStartsHost, nullptr, std::move(metadata)),
       chiralWeight_(chiralWeight),
       fourthDimWeight_(fourthDimWeight) {

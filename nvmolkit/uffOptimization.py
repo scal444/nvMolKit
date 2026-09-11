@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Literal, overload
 from rdkit.Chem import rdForceFieldHelpers
 
 from nvmolkit._arrayHelpers import *  # noqa: F403  # registers PyArray for DEVICE-mode returns
-from nvmolkit.types import CoordinateOutput, Device3DResult, FireOptions, HardwareOptions, PrecisionOptions
+from nvmolkit.types import CoordinateOutput, Device3DResult, FireOptions, HardwareOptions, PrecisionMode
 
 if TYPE_CHECKING:
     from rdkit.Chem import Mol
@@ -40,7 +40,7 @@ def UFFOptimizeMoleculesConfs(
     targetGpu: int = -1,
     minimizerKind: str = "BFGS",
     fireOptions: FireOptions | None = None,
-    precisionOptions: PrecisionOptions | None = None,
+    precision: PrecisionMode = PrecisionMode.FULL,
 ) -> list[list[float]]: ...
 @overload
 def UFFOptimizeMoleculesConfs(
@@ -54,7 +54,7 @@ def UFFOptimizeMoleculesConfs(
     targetGpu: int = -1,
     minimizerKind: str = "BFGS",
     fireOptions: FireOptions | None = None,
-    precisionOptions: PrecisionOptions | None = None,
+    precision: PrecisionMode = PrecisionMode.FULL,
 ) -> Device3DResult: ...
 def UFFOptimizeMoleculesConfs(
     molecules: list["Mol"],
@@ -66,7 +66,7 @@ def UFFOptimizeMoleculesConfs(
     targetGpu: int = -1,
     minimizerKind: str = "BFGS",
     fireOptions: FireOptions | None = None,
-    precisionOptions: PrecisionOptions | None = None,
+    precision: PrecisionMode = PrecisionMode.FULL,
 ):
     """Optimize conformers for multiple molecules using the UFF force field.
 
@@ -88,8 +88,8 @@ def UFFOptimizeMoleculesConfs(
             selects the first configured execution GPU.
         minimizerKind: ``"BFGS"`` (default) or ``"FIRE"``.
         fireOptions: FIRE algorithm options used when ``minimizerKind="FIRE"``.
-        precisionOptions: Full double- or single-precision profile. Defaults
-            to full double precision when omitted.
+        precision: ``PrecisionMode.FULL`` (default) or
+            ``PrecisionMode.SINGLE``.
 
     Returns:
         For ``RDKIT_CONFORMERS``: list of lists of optimized conformer energies.
@@ -143,8 +143,6 @@ def UFFOptimizeMoleculesConfs(
         raise ValueError("minimizerKind must be 'BFGS' or 'FIRE'")
     if fireOptions is None:
         fireOptions = FireOptions()
-    if precisionOptions is None:
-        precisionOptions = PrecisionOptions()
     if output == CoordinateOutput.DEVICE:
         return _uffOptimization.UFFOptimizeMoleculesConfsDevice(
             molecules,
@@ -155,7 +153,7 @@ def UFFOptimizeMoleculesConfs(
             int(targetGpu),
             minimizer_kind,
             fireOptions._as_native(),
-            precisionOptions._as_native(),
+            precision,
         )
     return _uffOptimization.UFFOptimizeMoleculesConfs(
         molecules,
@@ -165,5 +163,5 @@ def UFFOptimizeMoleculesConfs(
         hardwareOptions._as_native(),
         minimizer_kind,
         fireOptions._as_native(),
-        precisionOptions._as_native(),
+        precision,
     )

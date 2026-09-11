@@ -21,7 +21,7 @@
 #include "src/minimizer/bfgs_types.h"
 #include "src/minimizer/fire_options.h"
 #include "src/minimizer/minimizer_api.h"
-#include "src/precision_options.h"
+#include "src/precision_mode.h"
 #include "src/utils/device_vector.h"
 #include "src/utils/host_vector.h"
 
@@ -74,7 +74,7 @@ class FireBatchMinimizer final : public BatchMinimizer {
                               cudaStream_t       stream    = nullptr,
                               bool               debugMode = false,
                               FireBackend        backend   = FireBackend::BATCHED,
-                              PrecisionOptions   precision = {});
+                              PrecisionMode      precision = PrecisionMode::FULL);
   ~FireBatchMinimizer() override = default;
 
   //! \brief Resolve the effective backend for the provided batch under HYBRID selection.
@@ -197,16 +197,16 @@ class FireBatchMinimizer final : public BatchMinimizer {
   //! \brief Copy per-molecule statuses to host and report whether all active systems converged.
   bool checkPerMolConvergence();
 
-  int              dataDim_;
-  FireOptions      fireOptions_;
-  cudaStream_t     stream_;
-  int              step_                    = 0;
-  bool             debugMode_               = false;
-  int              numSystems_              = 0;
-  int              convergencePollInterval_ = 8;
-  int              lastKnownNumUnfinished_  = 0;
-  FireBackend      backend_                 = FireBackend::BATCHED;
-  PrecisionOptions precision_;
+  int           dataDim_;
+  FireOptions   fireOptions_;
+  cudaStream_t  stream_;
+  int           step_                    = 0;
+  bool          debugMode_               = false;
+  int           numSystems_              = 0;
+  int           convergencePollInterval_ = 8;
+  int           lastKnownNumUnfinished_  = 0;
+  FireBackend   backend_                 = FireBackend::BATCHED;
+  PrecisionMode precision_;
 
   AsyncDeviceVector<double> velocities_;
   AsyncDeviceVector<float>  velocitiesFloat_;

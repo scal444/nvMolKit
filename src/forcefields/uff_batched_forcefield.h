@@ -20,7 +20,7 @@
 
 #include "src/forcefields/batched_forcefield.h"
 #include "src/forcefields/uff.h"
-#include "src/precision_options.h"
+#include "src/precision_mode.h"
 #include "src/utils/device_vector.h"
 
 namespace nvMolKit {
@@ -30,7 +30,7 @@ class UFFBatchedForcefield final : public BatchedForcefield {
   explicit UFFBatchedForcefield(const UFF::BatchedMolecularSystemHost& molSystemHost,
                                 BatchedForcefieldMetadata              metadata  = {},
                                 cudaStream_t                           stream    = nullptr,
-                                PrecisionOptions                       precision = {});
+                                PrecisionMode                          precision = PrecisionMode::FULL);
 
   cudaError_t computeEnergy(double*        energyOuts,
                             const double*  positions,

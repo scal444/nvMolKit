@@ -32,7 +32,6 @@ from nvmolkit.types import (
     FireOptions,
     HardwareOptions,
     PrecisionMode,
-    PrecisionOptions,
 )
 
 
@@ -102,7 +101,7 @@ def test_mmff_single_precision_profile_executes(mmff_test_mols, minimizer_kind):
         maxIters=5,
         backend="PER_MOLECULE",  # SINGLE selects its typed batched boundary.
         minimizerKind=minimizer_kind,
-        precisionOptions=PrecisionOptions(PrecisionMode.SINGLE),
+        precision=PrecisionMode.SINGLE,
     )
     assert energies and energies[0]
     assert all(math.isfinite(energy) for energy in energies[0])

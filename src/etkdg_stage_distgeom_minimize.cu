@@ -188,7 +188,7 @@ void DistGeomMinimizeStage::executeImpl(ETKDGContext& ctx,
                                    fourthDimWeight,
                                    metadata_,
                                    stream_,
-                                   minimizer_.precisionOptions());
+                                   minimizer_.precision());
     grad_.resize(ctx.systemHost.positions.size());
     grad_.zero();
     energyOuts_.resize(ctx.systemHost.atomStarts.size() - 1);

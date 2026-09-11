@@ -419,7 +419,7 @@ FireBatchMinimizer::FireBatchMinimizer(const int          dataDim,
                                        cudaStream_t       stream,
                                        const bool         debugMode,
                                        const FireBackend  backend,
-                                       PrecisionOptions   precision)
+                                       PrecisionMode      precision)
     : dataDim_(dataDim),
       fireOptions_(options),
       stream_(stream),

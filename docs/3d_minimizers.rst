@@ -130,25 +130,24 @@ Single-precision BFGS
 
 Use ``PrecisionMode.SINGLE`` to run the complete BFGS device pipeline in
 single precision, including force-field data and arithmetic, minimizer state,
-the inverse Hessian, and reductions. ``PrecisionMode.LEGACY`` is the default
+the inverse Hessian, and reductions. ``PrecisionMode.FULL`` is the default
 full double-precision mode. Partial and per-component precision combinations
 are not supported.
 
 .. code-block:: python
 
     from nvmolkit.mmffOptimization import MMFFOptimizeMoleculesConfs
-    from nvmolkit.types import PrecisionMode, PrecisionOptions
+    from nvmolkit.types import PrecisionMode
 
     energies = MMFFOptimizeMoleculesConfs(
         mols,
         maxIters=200,
-        precisionOptions=PrecisionOptions(PrecisionMode.SINGLE),
+        precision=PrecisionMode.SINGLE,
     )
 
-The same ``precisionOptions`` argument is available for UFF, FIRE, embedding,
+The same ``precision`` argument is available for UFF, FIRE, embedding,
 and batched force-field minimization. Public coordinates and energies retain
 their float64 API representation; ``SINGLE`` controls storage and computation
 inside the GPU pipeline. Single precision uses the typed batched backend even
 when another backend is requested.
-
 

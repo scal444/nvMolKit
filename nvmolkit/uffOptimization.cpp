@@ -54,7 +54,7 @@ BOOST_PYTHON_MODULE(_uffOptimization) {
         const nvMolKit::BatchHardwareOptions& hardwareOptions,
         const std::string&                    minimizerKind,
         const nvMolKit::FireOptions&          fireOptions,
-        const nvMolKit::PrecisionOptions&     precisionOptions) -> bp::list {
+        const nvMolKit::PrecisionMode&        precision) -> bp::list {
       auto       molsVec      = nvMolKit::extractMolecules(molecules);
       const int  numMols      = static_cast<int>(molsVec.size());
       const auto thresholdVec = nvMolKit::extractDoubleList(vdwThresholds, numMols, "vdwThreshold");
@@ -67,23 +67,23 @@ BOOST_PYTHON_MODULE(_uffOptimization) {
                                                                                                      thresholdVec,
                                                                                                      ignoreVec,
                                                                                                      hardwareOptions,
-                                                                                                     precisionOptions) :
+                                                                                                     precision) :
                                                         nvMolKit::UFF::UFFOptimizeMoleculesConfsBfgs(molsVec,
                                                                                                      maxIters,
                                                                                                      thresholdVec,
                                                                                                      ignoreVec,
                                                                                                      hardwareOptions,
-                                                                                                     precisionOptions);
+                                                                                                     precision);
       return nvMolKit::vectorOfVectorsToList(result);
     },
     (bp::arg("molecules"),
      bp::arg("maxIters"),
      bp::arg("vdwThresholds"),
      bp::arg("ignoreInterfragInteractions"),
-     bp::arg("hardwareOptions")  = nvMolKit::BatchHardwareOptions(),
-     bp::arg("minimizerKind")    = std::string("BFGS"),
-     bp::arg("fireOptions")      = nvMolKit::FireOptions(),
-     bp::arg("precisionOptions") = nvMolKit::PrecisionOptions()),
+     bp::arg("hardwareOptions") = nvMolKit::BatchHardwareOptions(),
+     bp::arg("minimizerKind")   = std::string("BFGS"),
+     bp::arg("fireOptions")     = nvMolKit::FireOptions(),
+     bp::arg("precision")       = nvMolKit::PrecisionMode::FULL),
     "Optimize conformers for multiple molecules using UFF force field.\n"
     "\n"
     "Args:\n"
@@ -108,7 +108,7 @@ BOOST_PYTHON_MODULE(_uffOptimization) {
         int                                   targetGpu,
         const std::string&                    minimizerKind,
         const nvMolKit::FireOptions&          fireOptions,
-        const nvMolKit::PrecisionOptions&     precisionOptions) -> bp::object {
+        const nvMolKit::PrecisionMode&        precision) -> bp::object {
       auto       molsVec      = nvMolKit::extractMolecules(molecules);
       const int  numMols      = static_cast<int>(molsVec.size());
       const auto thresholdVec = nvMolKit::extractDoubleList(vdwThresholds, numMols, "vdwThreshold");
@@ -125,7 +125,7 @@ BOOST_PYTHON_MODULE(_uffOptimization) {
                                                                    hardwareOptions,
                                                                    nvMolKit::CoordinateOutput::DEVICE,
                                                                    targetGpu,
-                                                                   precisionOptions) :
+                                                                   precision) :
                             nvMolKit::UFF::UFFMinimizeMoleculesConfs(molsVec,
                                                                maxIters,
                                                                /*gradTol=*/1e-4,
@@ -136,7 +136,7 @@ BOOST_PYTHON_MODULE(_uffOptimization) {
                                                                nvMolKit::CoordinateOutput::DEVICE,
                                                                targetGpu,
                                                                nullptr,
-                                                               precisionOptions);
+                                                               precision);
       if (!result.device.has_value()) {
         throw std::runtime_error("UFFMinimizeMoleculesConfs(DEVICE) returned no device result");
       }
@@ -148,9 +148,9 @@ BOOST_PYTHON_MODULE(_uffOptimization) {
      bp::arg("ignoreInterfragInteractions"),
      bp::arg("hardwareOptions"),
      bp::arg("targetGpu"),
-     bp::arg("minimizerKind")    = std::string("BFGS"),
-     bp::arg("fireOptions")      = nvMolKit::FireOptions(),
-     bp::arg("precisionOptions") = nvMolKit::PrecisionOptions()),
+     bp::arg("minimizerKind") = std::string("BFGS"),
+     bp::arg("fireOptions")   = nvMolKit::FireOptions(),
+     bp::arg("precision")     = nvMolKit::PrecisionMode::FULL),
     "Optimize conformers for multiple molecules using UFF force field, returning device-resident "
     "results.\n"
     "\n"

@@ -336,7 +336,7 @@ void runTestInBatch(const std::vector<std::unique_ptr<RDKit::ROMol>>& mols,
                     double                                            gradTolerance     = 1e-4,
                     const uint8_t*                                    h_activeThisStage = nullptr,
                     const uint8_t*                                    d_activeThisStage = nullptr,
-                    nvMolKit::PrecisionOptions                        precision         = {}) {
+                    nvMolKit::PrecisionMode                           precision = nvMolKit::PrecisionMode::FULL) {
   const int                        numMols = mols.size();
   std::vector<ValidationFailures>  failures;
   std::vector<ValidationFailures>  gradFailures;

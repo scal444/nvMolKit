@@ -26,7 +26,6 @@ from nvmolkit.types import (
     FireOptions,
     HardwareOptions,
     PrecisionMode,
-    PrecisionOptions,
 )
 
 
@@ -119,20 +118,8 @@ def test_fire_options_exposes_native_defaults_and_mutators():
     assert native.useMass is True
 
 
-def test_precision_options_roundtrip_and_native_value():
-    options = PrecisionOptions(PrecisionMode.SINGLE)
-    assert options.mode is PrecisionMode.SINGLE
-    assert options._as_native().mode == "SINGLE"
-    assert options.to_dict() == {"mode": "SINGLE"}
-    restored = PrecisionOptions.from_dict(options.to_dict())
-    assert restored.mode is PrecisionMode.SINGLE
-
-
-def test_precision_options_reject_invalid_values_and_keys():
-    with pytest.raises(ValueError, match="mode must be one of"):
-        PrecisionOptions("invalid")
-    with pytest.raises(KeyError, match="Unknown PrecisionOptions keys"):
-        PrecisionOptions.from_dict({"mode": "LEGACY", "bogus": True})
+def test_precision_modes_are_distinct():
+    assert PrecisionMode.FULL != PrecisionMode.SINGLE
 
 
 def test_device_3d_result_num_conformers_matches_atom_starts():

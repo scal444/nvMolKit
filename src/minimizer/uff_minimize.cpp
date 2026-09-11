@@ -43,7 +43,7 @@ UFFMinimizeResult UFFMinimizeMoleculesConfs(std::vector<RDKit::ROMol*>& mols,
                                             const CoordinateOutput                                       output,
                                             int                                                          targetGpu,
                                             const DeviceCoordResult*                                     deviceInput,
-                                            PrecisionOptions                                             precision) {
+                                            PrecisionMode                                                precision) {
   ScopedNvtxRange fullRange("BFGS UFF Minimize Molecules Confs");
 
   if (vdwThresholds.size() != mols.size()) {
@@ -261,7 +261,7 @@ std::vector<std::vector<double>> UFFOptimizeMoleculesConfsBfgs(std::vector<RDKit
                                                                const std::vector<double>&  vdwThresholds,
                                                                const std::vector<bool>&    ignoreInterfragInteractions,
                                                                const BatchHardwareOptions& perfOptions,
-                                                               PrecisionOptions            precision) {
+                                                               PrecisionMode               precision) {
   return UFFMinimizeMoleculesConfs(mols,
                                    maxIters,
                                    1e-4,
@@ -286,7 +286,7 @@ UFFMinimizeResult UFFMinimizeMoleculesConfsFire(
   const BatchHardwareOptions&                                  perfOptions,
   const CoordinateOutput                                       output,
   int                                                          targetGpu,
-  PrecisionOptions                                             precision) {
+  PrecisionMode                                                precision) {
   ScopedNvtxRange fullRange("FIRE UFF Minimize Molecules Confs");
 
   if (vdwThresholds.size() != mols.size()) {
@@ -468,7 +468,7 @@ std::vector<std::vector<double>> UFFOptimizeMoleculesConfsFire(std::vector<RDKit
                                                                const std::vector<double>&  vdwThresholds,
                                                                const std::vector<bool>&    ignoreInterfragInteractions,
                                                                const BatchHardwareOptions& perfOptions,
-                                                               PrecisionOptions            precision) {
+                                                               PrecisionMode               precision) {
   return UFFMinimizeMoleculesConfsFire(mols,
                                        maxIters,
                                        fireOptions,

@@ -87,8 +87,8 @@ TEST(BFGSMinimizerTest, AllocationAndIdentity) {
 }
 
 TEST(BFGSMinimizerTest, SinglePrecisionStorageAllocationAndIdentity) {
-  const nvMolKit::PrecisionOptions precision{nvMolKit::PrecisionMode::SINGLE};
-  nvMolKit::BfgsBatchMinimizer     minimizer(/*dataDim=*/3,
+  const nvMolKit::PrecisionMode precision{nvMolKit::PrecisionMode::SINGLE};
+  nvMolKit::BfgsBatchMinimizer  minimizer(/*dataDim=*/3,
                                          nvMolKit::DebugLevel::NONE,
                                          /*scaleGrads=*/true,
                                          /*stream=*/nullptr,
@@ -131,7 +131,7 @@ TEST(BFGSMinimizerTest, SinglePrecisionStorageAllocationAndIdentity) {
 }
 
 TEST(BFGSMinimizerTest, AcceptsSupportedPrecisionModes) {
-  for (const auto mode : {nvMolKit::PrecisionMode::LEGACY, nvMolKit::PrecisionMode::SINGLE}) {
+  for (const auto mode : {nvMolKit::PrecisionMode::FULL, nvMolKit::PrecisionMode::SINGLE}) {
     EXPECT_NO_THROW(nvMolKit::BfgsBatchMinimizer(/*dataDim=*/3,
                                                  nvMolKit::DebugLevel::NONE,
                                                  /*scaleGrads=*/true,
@@ -613,8 +613,8 @@ TEST_F(BFGSMinimizerTestFixture, SinglePrecisionE2EMinimizationUsesRelaxedTolera
   constexpr int maxIters = 50;
   setUpMMFFSystems(numMols);
 
-  const nvMolKit::PrecisionOptions precision{nvMolKit::PrecisionMode::SINGLE};
-  nvMolKit::BfgsBatchMinimizer     minimizer(/*dataDim=*/3,
+  const nvMolKit::PrecisionMode precision{nvMolKit::PrecisionMode::SINGLE};
+  nvMolKit::BfgsBatchMinimizer  minimizer(/*dataDim=*/3,
                                          nvMolKit::DebugLevel::NONE,
                                          /*scaleGrads=*/true,
                                          /*stream=*/nullptr,
@@ -1494,10 +1494,10 @@ TEST(BFGSPrecisionStateTest, PresetsAllocateResolvedStateAndHessianWidths) {
   nvMolKit::AsyncDeviceVector<int> atomStartsDevice;
   atomStartsDevice.setFromVector(atomStarts);
 
-  for (const auto mode : {nvMolKit::PrecisionMode::LEGACY, nvMolKit::PrecisionMode::SINGLE}) {
-    const nvMolKit::PrecisionOptions precision{mode};
-    const bool                       singlePrecision = nvMolKit::usesSinglePrecision(precision);
-    nvMolKit::BfgsBatchMinimizer     minimizer(3,
+  for (const auto mode : {nvMolKit::PrecisionMode::FULL, nvMolKit::PrecisionMode::SINGLE}) {
+    const nvMolKit::PrecisionMode precision{mode};
+    const bool                    singlePrecision = nvMolKit::usesSinglePrecision(precision);
+    nvMolKit::BfgsBatchMinimizer  minimizer(3,
                                            nvMolKit::DebugLevel::NONE,
                                            true,
                                            nullptr,
@@ -1509,7 +1509,7 @@ TEST(BFGSPrecisionStateTest, PresetsAllocateResolvedStateAndHessianWidths) {
     SCOPED_TRACE(nvMolKit::precisionModeName(mode));
     EXPECT_EQ(
       minimizer.resolveBackend(atomStarts),
-      mode == nvMolKit::PrecisionMode::LEGACY ? nvMolKit::BfgsBackend::PER_MOLECULE : nvMolKit::BfgsBackend::BATCHED);
+      mode == nvMolKit::PrecisionMode::FULL ? nvMolKit::BfgsBackend::PER_MOLECULE : nvMolKit::BfgsBackend::BATCHED);
     EXPECT_EQ(minimizer.lineSearchDirFloat_.size() != 0, singlePrecision);
     EXPECT_EQ(minimizer.scratchPositionsFloat_.size() != 0, singlePrecision);
     EXPECT_EQ(minimizer.positionsFloat_.size() != 0, singlePrecision);
@@ -1534,7 +1534,7 @@ TEST(BFGSPrecisionStateTest, PresetsAllocateResolvedStateAndHessianWidths) {
 }
 
 TEST_F(BFGSMinimizerHarmonicTestFixture, AllPrecisionPresetsExecuteNumerically) {
-  for (const auto mode : {nvMolKit::PrecisionMode::LEGACY, nvMolKit::PrecisionMode::SINGLE}) {
+  for (const auto mode : {nvMolKit::PrecisionMode::FULL, nvMolKit::PrecisionMode::SINGLE}) {
     SCOPED_TRACE(nvMolKit::precisionModeName(mode));
     setUpSystems(/*computeLastDim=*/true, /*seed=*/42);
     auto                         forcefield = makeForcefield();

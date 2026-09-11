@@ -63,7 +63,7 @@ cudaError_t launchGrad(Buffers&        buffers,
 UFFBatchedForcefield::UFFBatchedForcefield(const UFF::BatchedMolecularSystemHost& molSystemHost,
                                            BatchedForcefieldMetadata              metadata,
                                            const cudaStream_t                     stream,
-                                           const PrecisionOptions                 precision)
+                                           const PrecisionMode                    precision)
     : BatchedForcefield(ForceFieldType::UFF, 3, molSystemHost.indices.atomStarts, nullptr, std::move(metadata)) {
   singlePrecision_ = usesSinglePrecision(precision);
   positionsFloat_.setStream(stream);

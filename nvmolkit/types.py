@@ -21,7 +21,7 @@ from typing import Any, Iterable, List, NamedTuple, Optional
 import numpy as np
 import torch
 
-# PrecisionOptions must be registered before extensions that expose it as a
+# PrecisionMode must be registered before extensions that expose it as a
 # default argument.
 from nvmolkit import _types
 from nvmolkit import _arrayHelpers  # noqa: F401
@@ -297,59 +297,8 @@ class HardwareOptions:
         return cls(**{key: data[key] for key in known if key in data})
 
 
-class PrecisionMode(str, Enum):
-    """Precision profiles for 3D force fields and minimizers."""
-
-    LEGACY = "LEGACY"
-    SINGLE = "SINGLE"
-
-
-class PrecisionOptions:
-    """Select the existing full-precision path or full single precision.
-
-    ``LEGACY`` is the default full-precision path. ``SINGLE`` uses float32 for
-    device-side force-field parameters, coordinates, gradients, minimizer
-    state, Hessian storage, compute, and reductions. Public coordinates and
-    energies retain their existing float64 API representation.
-    """
-
-    def __init__(
-        self,
-        mode: PrecisionMode | str = PrecisionMode.LEGACY,
-    ) -> None:
-        """Create precision options for the selected profile."""
-        self._native = _types.NativePrecisionOptions()
-        self.mode = mode
-
-    @property
-    def mode(self) -> PrecisionMode:
-        """Selected precision profile."""
-        return PrecisionMode(self._native.mode)
-
-    @mode.setter
-    def mode(self, value: PrecisionMode | str) -> None:
-        try:
-            normalized = PrecisionMode(value)
-        except ValueError as exc:
-            supported = ", ".join(mode.value for mode in PrecisionMode)
-            raise ValueError(f"mode must be one of: {supported}") from exc
-        self._native.mode = normalized.value
-
-    def _as_native(self):
-        return self._native
-
-    def to_dict(self) -> dict[str, str]:
-        """Return a JSON-serializable representation."""
-        return {"mode": self.mode.value}
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "PrecisionOptions":
-        """Create precision options from :meth:`to_dict` output."""
-        known = {"mode"}
-        unknown = set(data) - known
-        if unknown:
-            raise KeyError(f"Unknown PrecisionOptions keys: {sorted(unknown)}")
-        return cls(**{key: data[key] for key in known if key in data})
+PrecisionMode = _types.PrecisionMode
+"""Precision profile: :attr:`FULL` or :attr:`SINGLE`."""
 
 
 class AsyncGpuResult:

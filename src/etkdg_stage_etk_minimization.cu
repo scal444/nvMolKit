@@ -219,7 +219,7 @@ void ETKMinimizationStage::execute(ETKDGContext& ctx) {
                        embedParam_.useBasicKnowledge,
                        metadata_,
                        stream_,
-                       minimizer_.precisionOptions());
+                       minimizer_.precision());
     forcefield->visitContribs([&](const auto& contribs) { setReferenceValues(ctx, contribs); });
     grad_.resize(ctx.systemHost.positions.size());
     grad_.zero();

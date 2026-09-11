@@ -21,7 +21,7 @@
 #include "nvmolkit/boost_python_utils.h"
 #include "nvmolkit/device_result_python.h"
 #include "src/etkdg.h"
-#include "src/precision_options.h"
+#include "src/precision_mode.h"
 
 namespace bp = boost::python;
 
@@ -66,7 +66,7 @@ BOOST_PYTHON_MODULE(_embedMolecules) {
         int                                         confsPerMolecule,
         int                                         maxIterations,
         const nvMolKit::BatchHardwareOptions&       hardwareOptions,
-        const nvMolKit::PrecisionOptions&           precisionOptions) {
+        const nvMolKit::PrecisionMode&              precision) {
       auto molsVec = nvMolKit::extractMolecules(molecules);
       nvMolKit::embedMolecules(molsVec,
                                params,
@@ -78,14 +78,14 @@ BOOST_PYTHON_MODULE(_embedMolecules) {
                                nvMolKit::BfgsBackend::HYBRID,
                                nvMolKit::CoordinateOutput::RDKIT_CONFORMERS,
                                -1,
-                               precisionOptions);
+                               precision);
     },
     (bp::arg("molecules"),
      bp::arg("params"),
      bp::arg("confsPerMolecule") = 1,
      bp::arg("maxIterations")    = -1,
      bp::arg("hardwareOptions")  = nvMolKit::BatchHardwareOptions(),
-     bp::arg("precisionOptions") = nvMolKit::PrecisionOptions()),
+     bp::arg("precision")        = nvMolKit::PrecisionMode::FULL),
     "Embed multiple molecules with multiple conformers using ETKDG.\n"
     "\n"
     "Args:\n"
@@ -106,7 +106,7 @@ BOOST_PYTHON_MODULE(_embedMolecules) {
         int                                         maxIterations,
         const nvMolKit::BatchHardwareOptions&       hardwareOptions,
         int                                         targetGpu,
-        const nvMolKit::PrecisionOptions&           precisionOptions) -> bp::object {
+        const nvMolKit::PrecisionMode&              precision) -> bp::object {
       auto molsVec = nvMolKit::extractMolecules(molecules);
       auto result  = nvMolKit::embedMolecules(molsVec,
                                              params,
@@ -118,7 +118,7 @@ BOOST_PYTHON_MODULE(_embedMolecules) {
                                              nvMolKit::BfgsBackend::HYBRID,
                                              nvMolKit::CoordinateOutput::DEVICE,
                                              targetGpu,
-                                             precisionOptions);
+                                             precision);
       if (!result.has_value()) {
         throw std::runtime_error("embedMolecules(DEVICE) returned no device result");
       }
@@ -130,7 +130,7 @@ BOOST_PYTHON_MODULE(_embedMolecules) {
      bp::arg("maxIterations")    = -1,
      bp::arg("hardwareOptions")  = nvMolKit::BatchHardwareOptions(),
      bp::arg("targetGpu")        = -1,
-     bp::arg("precisionOptions") = nvMolKit::PrecisionOptions()),
+     bp::arg("precision")        = nvMolKit::PrecisionMode::FULL),
     "Embed multiple molecules with multiple conformers using ETKDG, returning device-resident "
     "coordinates.\n"
     "\n"

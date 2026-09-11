@@ -343,7 +343,7 @@ TEST(FireMinimizerPerMolMMFF, PublicWrapperSupportsSinglePrecision) {
                                                                        nvMolKit::FireBackend::PER_MOLECULE,
                                                                        nvMolKit::CoordinateOutput::RDKIT_CONFORMERS,
                                                                        /*targetGpu=*/-1,
-                                                                       nvMolKit::PrecisionOptions{mode});
+                                                                       nvMolKit::PrecisionMode{mode});
 
     ASSERT_FALSE(result.device.has_value());
     ASSERT_EQ(result.energies.size(), fixture.mols.size());

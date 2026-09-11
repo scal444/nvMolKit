@@ -32,7 +32,7 @@ ETKBatchedForcefield::ETKBatchedForcefield(const DistGeom::BatchedMolecularSyste
                                            const bool                                    useBasicKnowledge,
                                            BatchedForcefieldMetadata                     metadata,
                                            const cudaStream_t                            stream,
-                                           const PrecisionOptions                        precision)
+                                           const PrecisionMode                           precision)
     // ETK evaluates xyz terms, but the ETKDG minimization stage retains the
     // four-strided coordinate buffer until minimization is complete.
     : BatchedForcefield(ForceFieldType::ETK, 4, atomStartsHost, nullptr, std::move(metadata)),

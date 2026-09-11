@@ -297,9 +297,9 @@ TEST_P(ETKStageSingleMolTestFixture, MinimizeCompare) {
 }
 
 TEST(ETKPrecisionModes, SupportedPrecisionsMinimizeBatchedSmallMolecules) {
-  const std::string                             path       = getTestDataFolderPath() + "/rdkit_smallmol_1.mol2";
-  const std::vector<nvMolKit::PrecisionOptions> precisions = {
-    {nvMolKit::PrecisionMode::LEGACY},
+  const std::string                          path       = getTestDataFolderPath() + "/rdkit_smallmol_1.mol2";
+  const std::vector<nvMolKit::PrecisionMode> precisions = {
+    {nvMolKit::PrecisionMode::FULL},
     {nvMolKit::PrecisionMode::SINGLE},
   };
   for (size_t precisionIdx = 0; precisionIdx < precisions.size(); ++precisionIdx) {

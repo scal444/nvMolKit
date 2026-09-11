@@ -473,12 +473,12 @@ struct EqualsZeroFunctor {
   __host__ __device__ int operator()(const int16_t& x) const { return x == 0; }
 };
 
-BfgsBatchMinimizer::BfgsBatchMinimizer(const int        dataDim,
-                                       DebugLevel       debugLevel,
-                                       bool             scaleGrads,
-                                       cudaStream_t     stream,
-                                       BfgsBackend      backend,
-                                       PrecisionOptions precision)
+BfgsBatchMinimizer::BfgsBatchMinimizer(const int     dataDim,
+                                       DebugLevel    debugLevel,
+                                       bool          scaleGrads,
+                                       cudaStream_t  stream,
+                                       BfgsBackend   backend,
+                                       PrecisionMode precision)
     : countFinished_(0, stream) {
   debugLevel_ = debugLevel;
   dataDim_    = dataDim;
