@@ -21,9 +21,11 @@ from typing import Any, Iterable, List, NamedTuple, Optional
 import numpy as np
 import torch
 
+# PrecisionMode must be registered before extensions that expose it as a
+# default argument.
+from nvmolkit import _types
 from nvmolkit import _arrayHelpers  # noqa: F401
 from nvmolkit import _embedMolecules  # type: ignore
-from nvmolkit import _types
 
 
 class FireOptions:
@@ -293,6 +295,10 @@ class HardwareOptions:
         if unknown:
             raise KeyError(f"Unknown HardwareOptions keys: {sorted(unknown)}")
         return cls(**{key: data[key] for key in known if key in data})
+
+
+PrecisionMode = _types.PrecisionMode
+"""Device precision mode: :attr:`FULL` or :attr:`SINGLE`."""
 
 
 class AsyncGpuResult:
