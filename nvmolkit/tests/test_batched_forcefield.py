@@ -25,6 +25,7 @@ from rdkit.Geometry import Point3D
 from nvmolkit.batchedForcefield import MMFFBatchedForcefield, UFFBatchedForcefield
 from nvmolkit.types import HardwareOptions, PrecisionMode
 
+
 @pytest.fixture(params=[PrecisionMode.FULL, PrecisionMode.SINGLE], ids=["full", "single"])
 def precision(request):
     return request.param
