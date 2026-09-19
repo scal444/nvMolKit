@@ -1,5 +1,6 @@
 [build-system]
 requires = [
+    "nanobind>=2,<3",
     "scikit-build>=0.18",
     "setuptools>=42",
     "wheel",

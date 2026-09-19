@@ -105,16 +105,46 @@ def test_coordinate_output_enum_values():
 
 def test_fire_options_exposes_native_defaults_and_mutators():
     options = FireOptions()
-    native = options._as_native()
     assert math.isclose(options.gradTol, 1e-4)
     assert options.stuckDetectionEnabled is False
 
-    options.gradTol = 1e-3
-    options.useMass = True
-    assert math.isclose(options.gradTol, 1e-3)
-    assert options.useMass is True
-    assert math.isclose(native.gradTol, 1e-3)
-    assert native.useMass is True
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "dtInit",
+        "dtMinFactor",
+        "dtMaxFactor",
+        "dMax",
+        "timeStepIncrement",
+        "timeStepDecrement",
+        "alphaInit",
+        "alphaDecrement",
+        "gradTol",
+        "stuckEnergyRelTol",
+    ],
+)
+def test_fire_options_float_members_round_trip_to_native(field):
+    options = FireOptions()
+    setattr(options, field, 1.25)
+    assert getattr(options, field) == pytest.approx(1.25)
+    assert getattr(options._as_native(), field) == pytest.approx(1.25)
+
+
+@pytest.mark.parametrize("field", ["nMinForIncrease", "stuckStreakLength", "stuckEvalEveryNPolls"])
+def test_fire_options_integer_members_round_trip_to_native(field):
+    options = FireOptions()
+    setattr(options, field, 7)
+    assert getattr(options, field) == 7
+    assert getattr(options._as_native(), field) == 7
+
+
+@pytest.mark.parametrize("field", ["useMass", "takeHalfStepBack", "abcCorrection", "stuckDetectionEnabled"])
+def test_fire_options_boolean_members_round_trip_to_native(field):
+    options = FireOptions()
+    setattr(options, field, True)
+    assert getattr(options, field) is True
+    assert getattr(options._as_native(), field) is True
 
 
 def test_device_3d_result_num_conformers_matches_atom_starts():

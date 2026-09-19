@@ -340,18 +340,19 @@ class _BatchedForcefieldBase:
         ignoreInterfragInteractions,
         hardwareOptions: HardwareOptions | None,
     ) -> None:
-        self._molecules = molecules
+        self._molecules = list(molecules)
+        molecule_count = len(self._molecules)
         self._ignore_interfrag_interactions = _normalize_scalar_or_list(
-            ignoreInterfragInteractions, len(molecules), "ignoreInterfragInteractions"
+            ignoreInterfragInteractions, molecule_count, "ignoreInterfragInteractions"
         )
         self._hardware_options = hardwareOptions if hardwareOptions is not None else HardwareOptions()
-        self._distance_constraints: list[list[_DistanceConstraint]] = [[] for _ in molecules]
-        self._position_constraints: list[list[_PositionConstraint]] = [[] for _ in molecules]
-        self._angle_constraints: list[list[_AngleConstraint]] = [[] for _ in molecules]
-        self._torsion_constraints: list[list[_TorsionConstraint]] = [[] for _ in molecules]
+        self._distance_constraints: list[list[_DistanceConstraint]] = [[] for _ in self._molecules]
+        self._position_constraints: list[list[_PositionConstraint]] = [[] for _ in self._molecules]
+        self._angle_constraints: list[list[_AngleConstraint]] = [[] for _ in self._molecules]
+        self._torsion_constraints: list[list[_TorsionConstraint]] = [[] for _ in self._molecules]
         self._native_ff = None
         self._dirty = True
-        self.num_molecules = len(molecules)
+        self.num_molecules = molecule_count
         self.data_dim = 3
 
     def __len__(self) -> int:

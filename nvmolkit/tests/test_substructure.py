@@ -36,7 +36,7 @@ NUM_SMILES = 300
 
 def get_rdkit_matches(target: Chem.Mol, query: Chem.Mol, uniquify: bool = False) -> list[tuple[int, ...]]:
     """Get RDKit substructure matches for comparison."""
-    return list(target.GetSubstructMatches(query, uniquify=uniquify))
+    return [tuple(match) for match in target.GetSubstructMatches(query, uniquify=uniquify)]
 
 
 def matches_equal(gpu_matches: list, rdkit_matches: list[tuple[int, ...]]) -> bool:

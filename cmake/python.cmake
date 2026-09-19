@@ -14,5 +14,37 @@
 # the License.
 
 if(NVMOLKIT_BUILD_PYTHON_BINDINGS)
-  find_package(Python REQUIRED COMPONENTS Development.Module)
+  find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
+
+  execute_process(
+    COMMAND
+      "${Python_EXECUTABLE}" -c
+      "from rdkit import rdBase; print(getattr(rdBase, '_wrapperType', 'boost'))"
+    RESULT_VARIABLE _nvmolkit_rdkit_wrapper_result
+    OUTPUT_VARIABLE _nvmolkit_rdkit_wrapper
+    ERROR_VARIABLE _nvmolkit_rdkit_wrapper_error
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(NOT _nvmolkit_rdkit_wrapper_result EQUAL 0)
+    message(
+      FATAL_ERROR
+        "Could not determine the installed RDKit Python binding backend: "
+        "${_nvmolkit_rdkit_wrapper_error}")
+  endif()
+
+  string(TOUPPER "${_nvmolkit_rdkit_wrapper}" _nvmolkit_rdkit_wrapper_backend)
+  if(NOT _nvmolkit_rdkit_wrapper_backend STREQUAL
+     NVMOLKIT_PYTHON_BINDING_BACKEND)
+    message(
+      FATAL_ERROR
+        "nvMolKit binding backend ${NVMOLKIT_PYTHON_BINDING_BACKEND} does not "
+        "match the installed RDKit backend ${_nvmolkit_rdkit_wrapper_backend}")
+  endif()
+  message(
+    STATUS
+      "Building ${NVMOLKIT_PYTHON_BINDING_BACKEND} Python bindings against "
+      "${_nvmolkit_rdkit_wrapper_backend} RDKit bindings")
+
+  if(NVMOLKIT_PYTHON_BINDING_BACKEND STREQUAL "NANOBIND")
+    include(nanobind)
+  endif()
 endif()
