@@ -129,8 +129,7 @@ installpythontarget(_substructure ./)
 add_library(_substructLibrary MODULE substructLibrary.cpp)
 target_link_libraries(_substructLibrary PUBLIC ${Boost_LIBRARIES}
                                                ${PYTHON_LIBRARIES})
-target_link_libraries(_substructLibrary PRIVATE ${RDKit_LIBS}
-                                                substruct_library)
+target_link_libraries(_substructLibrary PRIVATE ${RDKit_LIBS} substruct_library)
 target_include_directories(_substructLibrary PUBLIC ${Boost_INCLUDE_DIRS}
                                                     ${Python_INCLUDE_DIRS})
 installpythontarget(_substructLibrary ./)
