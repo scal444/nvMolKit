@@ -26,10 +26,7 @@ if pyroot:
 
 binding_backend = os.getenv("NVMOLKIT_PYTHON_BINDING_BACKEND", "BOOST").upper()
 if binding_backend not in {"BOOST", "NANOBIND"}:
-    raise ValueError(
-        "NVMOLKIT_PYTHON_BINDING_BACKEND must be BOOST or NANOBIND "
-        f"(got: {binding_backend!r})"
-    )
+    raise ValueError(f"NVMOLKIT_PYTHON_BINDING_BACKEND must be BOOST or NANOBIND (got: {binding_backend!r})")
 
 # Detect if we're doing an install against pip rdkit
 nvmolkit_build_against_pip = os.getenv("NVMOLKIT_BUILD_AGAINST_PIP_RDKIT")
