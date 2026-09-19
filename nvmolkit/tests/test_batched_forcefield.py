@@ -449,6 +449,23 @@ def test_batched_forcefield_metadata_and_element_view(ff_factory):
         pytest.param(lambda mols, precision: UFFBatchedForcefield(mols, precision=precision), id="uff"),
     ],
 )
+def test_batched_forcefield_owns_input_molecule_references(ff_factory, precision):
+    molecules = [make_embedded_mol("CCO")]
+    forcefield = ff_factory(molecules, precision)
+
+    molecules.clear()
+
+    assert len(forcefield) == 1
+    assert len(forcefield.compute_energy()) == 1
+
+
+@pytest.mark.parametrize(
+    "ff_factory",
+    [
+        pytest.param(lambda mols, precision: MMFFBatchedForcefield(mols, precision=precision), id="mmff"),
+        pytest.param(lambda mols, precision: UFFBatchedForcefield(mols, precision=precision), id="uff"),
+    ],
+)
 def test_batched_forcefield_lazy_build_and_rebuild(ff_factory, precision):
     mol = make_embedded_mol("CCO")
     forcefield = ff_factory([Chem.Mol(mol)], precision)

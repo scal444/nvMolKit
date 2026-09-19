@@ -80,8 +80,9 @@ def test_empty_input():
         assert fps.shape == (0, 2048 // 32)
 
 
-@pytest.mark.parametrize("mols", ([None], (Chem.MolFromSmiles("CC"), None)))
-def test_invalid_input(mols):
+@pytest.mark.parametrize("valid_prefix", (False, True), ids=("first", "second"))
+def test_invalid_input(valid_prefix):
+    mols = (Chem.MolFromSmiles("CC"), None) if valid_prefix else [None]
     fpgen = MorganFingerprintGenerator(radius=3, fpSize=2048)
     invalid_index = mols.index(None)
     with pytest.raises(ValueError, match=rf"Invalid molecule at index {invalid_index}"):

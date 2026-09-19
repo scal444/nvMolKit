@@ -24,6 +24,13 @@ cmake_extra_args = []
 if pyroot:
     cmake_extra_args.append(f"-DCMAKE_PREFIX_PATH={pyroot}")
 
+binding_backend = os.getenv("NVMOLKIT_PYTHON_BINDING_BACKEND", "BOOST").upper()
+if binding_backend not in {"BOOST", "NANOBIND"}:
+    raise ValueError(
+        "NVMOLKIT_PYTHON_BINDING_BACKEND must be BOOST or NANOBIND "
+        f"(got: {binding_backend!r})"
+    )
+
 # Detect if we're doing an install against pip rdkit
 nvmolkit_build_against_pip = os.getenv("NVMOLKIT_BUILD_AGAINST_PIP_RDKIT")
 if nvmolkit_build_against_pip:
@@ -72,6 +79,7 @@ if __name__ == "__main__":
             "-DNVMOLKIT_BUILD_PYTHON_BINDINGS=ON",
             "-DNVMOLKIT_BUILD_TESTS=OFF",
             "-DNVMOLKIT_BUILD_BENCHMARKS=OFF",
+            f"-DNVMOLKIT_PYTHON_BINDING_BACKEND={binding_backend}",
             f"-DNVMOLKIT_CUDA_TARGET_MODE={os.getenv('NVMOLKIT_CUDA_TARGET_MODE', 'full')}",
             f"-DCMAKE_BUILD_TYPE={os.getenv('CMAKE_BUILD_TYPE', 'Release')}",
             # "-DBoost_NO_BOOST_CMAKE=TRUE"

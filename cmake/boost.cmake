@@ -16,7 +16,8 @@
 # cmake-lint: disable=C0103
 
 set(BOOST_TARGET_LIBS serialization iostreams)
-if(NVMOLKIT_BUILD_PYTHON_BINDINGS)
+if(NVMOLKIT_BUILD_PYTHON_BINDINGS AND NVMOLKIT_PYTHON_BINDING_BACKEND STREQUAL
+                                      "BOOST")
   list(APPEND BOOST_TARGET_LIBS
        "python${Python_VERSION_MAJOR}${Python_VERSION_MINOR}")
   # Link Boost.Python.Numpy as we use boost::python::numpy in DataStructs.cpp

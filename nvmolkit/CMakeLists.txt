@@ -15,6 +15,11 @@
 
 set(CMAKE_SHARED_MODULE_PREFIX "")
 
+if(NVMOLKIT_PYTHON_BINDING_BACKEND STREQUAL "NANOBIND")
+  add_subdirectory(nanobind)
+  return()
+endif()
+
 add_library(_DataStructs MODULE DataStructs.cpp)
 target_link_libraries(
   _DataStructs PUBLIC ${Boost_LIBRARIES} ${PYTHON_LIBRARIES} ${RDKit_LIBS}

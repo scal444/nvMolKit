@@ -25,6 +25,21 @@ option(NVMOLKIT_BUILD_BENCHMARKS "Whether or not to build benchmarks" ON)
 option(NVMOLKIT_BUILD_PYTHON_BINDINGS "Whether or not to build python bindings"
        OFF)
 
+set(NVMOLKIT_PYTHON_BINDING_BACKEND
+    "BOOST"
+    CACHE STRING "Python binding backend: BOOST or NANOBIND")
+set_property(CACHE NVMOLKIT_PYTHON_BINDING_BACKEND PROPERTY STRINGS BOOST
+                                                            NANOBIND)
+string(TOUPPER "${NVMOLKIT_PYTHON_BINDING_BACKEND}"
+               NVMOLKIT_PYTHON_BINDING_BACKEND)
+if(NOT NVMOLKIT_PYTHON_BINDING_BACKEND STREQUAL "BOOST"
+   AND NOT NVMOLKIT_PYTHON_BINDING_BACKEND STREQUAL "NANOBIND")
+  message(
+    FATAL_ERROR
+      "NVMOLKIT_PYTHON_BINDING_BACKEND must be BOOST or NANOBIND, got: "
+      "${NVMOLKIT_PYTHON_BINDING_BACKEND}")
+endif()
+
 set(NVMOLKIT_CUDA_TARGET_MODE
     "default"
     CACHE STRING "CUDA target mode: native, full, or default")
