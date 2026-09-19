@@ -28,6 +28,9 @@ class ROMol;
 
 namespace nvMolKit {
 
+struct MoleculesHost;
+class MoleculesDevice;
+
 /**
  * @brief Perform batch substructure matching on GPU.
  *
@@ -80,6 +83,23 @@ void hasSubstructMatch(const std::vector<const RDKit::ROMol*>& targets,
                        SubstructAlgorithm                      algorithm,
                        cudaStream_t                            stream,
                        const SubstructSearchConfig&            config = SubstructSearchConfig{});
+
+/**
+ * @brief Check one query against targets whose packed representation is already resident on the GPU.
+ *
+ * The target pointers and packed target batches must describe the same molecules
+ * in the same order. This entry point is intended for persistent collections;
+ * callers retain ownership of all three target representations for the duration
+ * of the synchronous call.
+ */
+void hasSubstructMatchResident(const std::vector<const RDKit::ROMol*>& targets,
+                               const MoleculesHost&                    targetsHost,
+                               const MoleculesDevice&                  targetsDevice,
+                               const RDKit::ROMol&                     query,
+                               std::vector<uint8_t>&                   results,
+                               SubstructAlgorithm                      algorithm,
+                               cudaStream_t                            stream,
+                               const SubstructSearchConfig&            config = SubstructSearchConfig{});
 
 }  // namespace nvMolKit
 
