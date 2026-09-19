@@ -51,3 +51,12 @@ target_link_libraries(
   PRIVATE ${RDKit_LIBS})
 target_compile_options(substructure_search
                        PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp>)
+
+add_library(resident_target_chunk resident_target_chunk.cpp)
+target_link_libraries(resident_target_chunk PUBLIC molecules device
+                                             PRIVATE ${RDKit_LIBS})
+
+add_library(substruct_library substruct_library.cpp)
+target_link_libraries(
+  substruct_library PUBLIC substructure_search resident_target_chunk
+                    PRIVATE ${RDKit_LIBS} cuda_error_check device)
