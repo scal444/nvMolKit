@@ -44,6 +44,7 @@ void MiniBatchResultsDevice::setStream(cudaStream_t stream) {
   overflowBuffer_.setStream(stream);
   recursiveMatchBits_.setStream(stream);
   labelMatrixBuffer_.setStream(stream);
+  targetWinners_.setStream(stream);
 }
 
 void MiniBatchResultsDevice::allocateMiniBatch(int        miniBatchSize,
@@ -53,7 +54,9 @@ void MiniBatchResultsDevice::allocateMiniBatch(int        miniBatchSize,
                                                int        maxTargetAtoms,
                                                int        numBuffersPerBlock,
                                                int        maxMatchesToFind,
-                                               bool       countOnly) {
+                                               bool       countOnly,
+                                               int        numTargets,
+                                               bool       firstMatchMode) {
   ScopedNvtxRange allocRange("MiniBatchResultsDevice::allocateMiniBatch");
 
   miniBatchSize_              = miniBatchSize;
@@ -63,6 +66,7 @@ void MiniBatchResultsDevice::allocateMiniBatch(int        miniBatchSize,
   overflowBuffersPerBlock_    = numBuffersPerBlock;
   maxMatchesToFind_           = maxMatchesToFind;
   countOnly_                  = countOnly;
+  firstMatchMode_             = firstMatchMode;
   pairMatchStarts_            = pairMatchStartsDevice;
 
   if (matchCounts_.size() < static_cast<size_t>(miniBatchSize)) {
@@ -96,6 +100,14 @@ void MiniBatchResultsDevice::allocateMiniBatch(int        miniBatchSize,
 
   if (overflowFlags_.size() < static_cast<size_t>(miniBatchSize)) {
     overflowFlags_.resize(static_cast<size_t>(miniBatchSize * 1.5));
+  }
+
+  if (firstMatchMode) {
+    if (targetWinners_.size() < static_cast<size_t>(numTargets)) {
+      targetWinners_.resize(static_cast<size_t>(numTargets));
+    }
+    cudaCheckError(
+      cudaMemsetAsync(targetWinners_.data(), 0x7f, static_cast<size_t>(numTargets) * sizeof(int), stream_));
   }
 }
 
@@ -136,7 +148,8 @@ void processWithRDKitFallback(const RDKit::ROMol*       target,
                               std::mutex&               resultsMutex,
                               int                       maxMatches,
                               HasSubstructMatchResults* boolResults,
-                              std::vector<int>*         countResults) {
+                              std::vector<int>*         countResults,
+                              std::vector<int>*         firstResults) {
   RDKit::SubstructMatchParameters params;
   params.uniquify             = false;
   params.maxMatches           = (maxMatches > 0) ? static_cast<unsigned int>(maxMatches) : 0;
@@ -154,6 +167,11 @@ void processWithRDKitFallback(const RDKit::ROMol*       target,
 
   if (boolResults) {
     boolResults->setMatch(targetIdx, queryIdx, true);
+  } else if (firstResults) {
+    int& winner = (*firstResults)[static_cast<size_t>(targetIdx)];
+    if (winner < 0 || queryIdx < winner) {
+      winner = queryIdx;
+    }
   } else if (countResults) {
     const int64_t pairIdx                         = static_cast<int64_t>(targetIdx) * results.numQueries + queryIdx;
     (*countResults)[static_cast<size_t>(pairIdx)] = matchCount;
@@ -181,12 +199,14 @@ RDKitFallbackQueue::RDKitFallbackQueue(const std::vector<const RDKit::ROMol*>* t
                                        std::mutex*                             resultsMutex,
                                        int                                     maxMatches,
                                        HasSubstructMatchResults*               boolResults,
-                                       std::vector<int>*                       countResults)
+                                       std::vector<int>*                       countResults,
+                                       std::vector<int>*                       firstResults)
     : targets_(targets),
       queries_(queries),
       results_(results),
       boolResults_(boolResults),
       countResults_(countResults),
+      firstResults_(firstResults),
       resultsMutex_(resultsMutex),
       maxMatches_(maxMatches) {}
 
@@ -245,7 +265,7 @@ void RDKitFallbackQueue::processEntry(const RDKitFallbackEntry& entry) {
   const RDKit::ROMol* target = (*targets_)[entry.originalTargetIdx];
   const RDKit::ROMol* query  = (*queries_)[entry.originalQueryIdx];
 
-  const int effectiveMaxMatches = boolResults_ ? 1 : maxMatches_;
+  const int effectiveMaxMatches = (boolResults_ || firstResults_) ? 1 : maxMatches_;
   processWithRDKitFallback(target,
                            query,
                            entry.originalTargetIdx,
@@ -254,7 +274,8 @@ void RDKitFallbackQueue::processEntry(const RDKitFallbackEntry& entry) {
                            *resultsMutex_,
                            effectiveMaxMatches,
                            boolResults_,
-                           countResults_);
+                           countResults_,
+                           firstResults_);
 
   processedCount_.fetch_add(1, std::memory_order_relaxed);
 }
@@ -402,6 +423,25 @@ void accumulateMiniBatchResultsCounts(GpuExecutor&               executor,
     const auto [targetIdx, queryIdx]           = resolvePairIndices(i, ctx, hostBuffer);
     const int64_t globalPairIdx                = static_cast<int64_t>(targetIdx) * ctx.numQueries + queryIdx;
     counts[static_cast<size_t>(globalPairIdx)] = hostBuffer.matchCounts[i];
+  }
+}
+
+void accumulateMiniBatchFirstMatches(GpuExecutor&               executor,
+                                     const ThreadWorkerContext& ctx,
+                                     std::vector<int>&          firstMatches,
+                                     std::mutex&                resultsMutex,
+                                     const PinnedHostBuffer&    hostBuffer) {
+  ScopedNvtxRange             accumRange("accumulateMiniBatchFirstMatches");
+  std::lock_guard<std::mutex> lock(resultsMutex);
+  for (int i = 0; i < executor.plan.numPairsInMiniBatch; ++i) {
+    if (hostBuffer.matchCounts[i] == 0) {
+      continue;
+    }
+    const auto [targetIdx, queryIdx] = resolvePairIndices(i, ctx, hostBuffer);
+    int& winner                      = firstMatches[static_cast<size_t>(targetIdx)];
+    if (winner < 0 || queryIdx < winner) {
+      winner = queryIdx;
+    }
   }
 }
 

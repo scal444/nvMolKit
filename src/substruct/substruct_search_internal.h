@@ -84,7 +84,9 @@ class MiniBatchResultsDevice {
                          int        maxTargetAtoms,
                          int        numBuffersPerBlock,
                          int        maxMatchesToFind = -1,
-                         bool       countOnly        = false);
+                         bool       countOnly        = false,
+                         int        numTargets       = 0,
+                         bool       firstMatchMode   = false);
 
   void setStream(cudaStream_t stream);
 
@@ -134,6 +136,7 @@ class MiniBatchResultsDevice {
   [[nodiscard]] uint32_t*     recursiveMatchBits() const { return recursiveMatchBits_.data(); }
   [[nodiscard]] uint32_t*     labelMatrixBuffer() const { return labelMatrixBuffer_.data(); }
   [[nodiscard]] uint8_t*      overflowFlags() const { return overflowFlags_.data(); }
+  [[nodiscard]] int*          targetWinners() const { return firstMatchMode_ ? targetWinners_.data() : nullptr; }
 
  private:
   cudaStream_t stream_ = nullptr;
@@ -156,6 +159,8 @@ class MiniBatchResultsDevice {
   AsyncDeviceVector<uint32_t> labelMatrixBuffer_;
 
   AsyncDeviceVector<uint8_t> overflowFlags_;  ///< Per-pair overflow detection
+  AsyncDeviceVector<int>     targetWinners_;
+  bool                       firstMatchMode_ = false;
 
   int totalMiniBatchMatchIndices_ = 0;
 
@@ -205,7 +210,8 @@ void processWithRDKitFallback(const RDKit::ROMol*       target,
                               std::mutex&               resultsMutex,
                               int                       maxMatches,
                               HasSubstructMatchResults* boolResults  = nullptr,
-                              std::vector<int>*         countResults = nullptr);
+                              std::vector<int>*         countResults = nullptr,
+                              std::vector<int>*         firstResults = nullptr);
 
 /**
  * @brief Thread-safe queue for RDKit fallback processing.
@@ -221,7 +227,8 @@ class RDKitFallbackQueue {
                      std::mutex*                             resultsMutex,
                      int                                     maxMatches,
                      HasSubstructMatchResults*               boolResults  = nullptr,
-                     std::vector<int>*                       countResults = nullptr);
+                     std::vector<int>*                       countResults = nullptr,
+                     std::vector<int>*                       firstResults = nullptr);
 
   void enqueue(const std::vector<RDKitFallbackEntry>& entries);
   void enqueue(const RDKitFallbackEntry& entry);
@@ -244,6 +251,7 @@ class RDKitFallbackQueue {
   SubstructSearchResults*                 results_;
   HasSubstructMatchResults*               boolResults_;
   std::vector<int>*                       countResults_;
+  std::vector<int>*                       firstResults_;
   std::mutex*                             resultsMutex_;
   int                                     maxMatches_;
 
@@ -317,6 +325,13 @@ void accumulateMiniBatchResultsCounts(GpuExecutor&               executor,
                                       std::vector<int>&          counts,
                                       std::mutex&                resultsMutex,
                                       const PinnedHostBuffer&    hostBuffer);
+
+/** Merge matching pairs into a lowest-query-ID result with one entry per target. */
+void accumulateMiniBatchFirstMatches(GpuExecutor&               executor,
+                                     const ThreadWorkerContext& ctx,
+                                     std::vector<int>&          firstMatches,
+                                     std::mutex&                resultsMutex,
+                                     const PinnedHostBuffer&    hostBuffer);
 
 }  // namespace nvMolKit
 
