@@ -46,6 +46,7 @@ struct ThreadWorkerContext {
   int                     maxBondsPerAtom       = 0;
   int                     maxMatches            = 0;
   bool                    countOnly             = false;  ///< If true, count matches only (for hasSubstructMatch)
+  bool                    firstMatchMode        = false;  ///< Track lowest matching query per target for early exit
   SubstructTemplateConfig templateConfig        = SubstructTemplateConfig::Config_T128_Q64_B8;
 };
 
