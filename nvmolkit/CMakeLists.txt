@@ -129,6 +129,14 @@ target_include_directories(_substructLibrary PUBLIC ${Boost_INCLUDE_DIRS}
                                                     ${Python_INCLUDE_DIRS})
 installpythontarget(_substructLibrary ./)
 
+add_library(_filterCatalog MODULE filterCatalog.cpp)
+target_link_libraries(_filterCatalog PUBLIC ${Boost_LIBRARIES}
+                                            ${PYTHON_LIBRARIES})
+target_link_libraries(_filterCatalog PRIVATE ${RDKit_LIBS} filter_catalog)
+target_include_directories(_filterCatalog PUBLIC ${Boost_INCLUDE_DIRS}
+                                                 ${Python_INCLUDE_DIRS})
+installpythontarget(_filterCatalog ./)
+
 add_library(_mcs MODULE mcs.cpp)
 target_link_libraries(_mcs PUBLIC ${Boost_LIBRARIES} ${PYTHON_LIBRARIES})
 target_link_libraries(_mcs PRIVATE ${RDKit_LIBS} mcs_search CUDA::cudart)
