@@ -387,6 +387,9 @@ add_executable(test_substruct_library test_substruct_library.cu)
 target_link_libraries(test_substruct_library PRIVATE substruct_library
                                                      ${RDKit_LIBS})
 
+add_executable(test_filter_catalog test_filter_catalog.cu)
+target_link_libraries(test_filter_catalog PRIVATE filter_catalog ${RDKit_LIBS})
+
 add_executable(test_substruct_algos test_substruct_algos.cu)
 target_link_libraries(
   test_substruct_algos PRIVATE substruct_definitions molecules device
@@ -496,6 +499,7 @@ set(TEST_LIST
     test_substructure_search
     test_pattern_screen
     test_substruct_library
+    test_filter_catalog
     test_substructure_integration
     test_substruct_label_integration
     test_similarity

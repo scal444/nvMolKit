@@ -64,3 +64,9 @@ target_link_libraries(
   PUBLIC substructure_search molecules pattern_screen
   PRIVATE ${RDKit_LIBS} cuda_error_check device nvtx OpenMP::OpenMP_CXX
           openmp_helpers)
+
+add_library(filter_catalog filter_catalog.cpp)
+target_link_libraries(
+  filter_catalog
+  PUBLIC substructure_search
+  PRIVATE ${RDKit_LIBS} cuda_error_check device)
