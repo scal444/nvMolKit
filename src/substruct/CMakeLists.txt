@@ -63,3 +63,9 @@ target_link_libraries(
   substruct_library
   PUBLIC substructure_search resident_target_chunk
   PRIVATE ${RDKit_LIBS} cuda_error_check device)
+
+add_library(filter_catalog filter_catalog.cpp)
+target_link_libraries(
+  filter_catalog
+  PUBLIC substructure_search
+  PRIVATE ${RDKit_LIBS} cuda_error_check device)
