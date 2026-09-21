@@ -302,19 +302,19 @@ def test_parser_exposes_catalog_lifecycle_workload_controls():
 
 
 def test_argument_validation_rejects_incoherent_backend_selection():
-    base = dict(
-        no_rdkit=False,
-        no_nvmolkit=False,
-        runs=1,
-        reuse_count=10,
-        num_mols=0,
-        max_entries=0,
-        batch_size=1024,
-        workers=-1,
-        prep_threads=-1,
-        gpu=0,
-        validate=True,
-    )
+    base = {
+        "no_rdkit": False,
+        "no_nvmolkit": False,
+        "runs": 1,
+        "reuse_count": 10,
+        "num_mols": 0,
+        "max_entries": 0,
+        "batch_size": 1024,
+        "workers": -1,
+        "prep_threads": -1,
+        "gpu": 0,
+        "validate": True,
+    }
     with pytest.raises(ValueError, match="disable both"):
         _validate_args(SimpleNamespace(**(base | {"no_rdkit": True, "no_nvmolkit": True})))
     with pytest.raises(ValueError, match="requires both"):

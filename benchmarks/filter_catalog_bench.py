@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Benchmark persistent nvMolKit and RDKit filter catalogs.
+r"""Benchmark persistent nvMolKit and RDKit filter catalogs.
 
 The benchmark reports catalog staging, nvMolKit finalization, steady-state
 search, and end-to-end amortized timings separately. Search throughput is
