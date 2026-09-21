@@ -10,7 +10,7 @@ import substruct_library_bench as benchmark
 from bench_utils import TimingResult
 
 
-class FakeNvLibrary:
+class _FakeNvLibrary:
     def __init__(self):
         self.calls = []
 
@@ -27,7 +27,7 @@ class FakeNvLibrary:
         return range(min(len(query), maxResults if maxResults >= 0 else len(query)))
 
 
-class FakeRdkitLibrary:
+class _FakeRdkitLibrary:
     def __init__(self):
         self.calls = []
 
@@ -50,7 +50,7 @@ class FakeRdkitLibrary:
     [("has", [True, False]), ("count", [3, 2]), ("get", [[0, 1], [0, 1]])],
 )
 def test_nvmolkit_operations_dispatch_and_preserve_query_order(operation, expected):
-    library = FakeNvLibrary()
+    library = _FakeNvLibrary()
 
     result = benchmark._run_nvmolkit_queries(library, ["hit", "zz"], operation, max_results=2)
 
@@ -64,7 +64,7 @@ def test_nvmolkit_operations_dispatch_and_preserve_query_order(operation, expect
     [("has", [True, False]), ("count", [3, 2]), ("get", [[0], [0]])],
 )
 def test_rdkit_operations_forward_threads_and_max_results(operation, expected):
-    library = FakeRdkitLibrary()
+    library = _FakeRdkitLibrary()
 
     result = benchmark._run_rdkit_queries(library, ["hit", "zz"], operation, max_results=1, num_threads=7)
 
@@ -169,7 +169,7 @@ def test_validation_checks_all_queries_and_get_order():
 
 
 def test_reference_uses_single_threaded_mol_holder(monkeypatch):
-    library = FakeRdkitLibrary()
+    library = _FakeRdkitLibrary()
     added = []
     library.AddMol = added.append
     monkeypatch.setattr(benchmark, "_make_rdkit_library", lambda holder: library)
