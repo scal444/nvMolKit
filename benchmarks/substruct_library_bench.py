@@ -50,10 +50,12 @@ class LifecycleMeasurement:
 
     @property
     def amortized_ms(self) -> float:
+        """Total staging, finalization, and repeated-query time."""
         return self.staging_ms + self.finalize_ms + self.steady_ms
 
     @property
     def amortized_std_ms(self) -> float:
+        """Combined standard deviation for the amortized measurement."""
         return math.sqrt(self.staging_std_ms**2 + self.finalize_std_ms**2 + self.steady_std_ms**2)
 
 
