@@ -4,6 +4,72 @@
 import bitbirch_clustering_bench as bench
 import pytest
 
+
+@pytest.mark.parametrize("flag", ["--no-bblean", "--no_bblean"])
+def test_backend_selection_accepts_bblean_disable_spellings(flag):
+    args = bench._build_parser().parse_args(["--smiles", "input.smi", flag])
+
+    assert args.no_bblean
+    assert not args.no_nvmolkit
+
+
+@pytest.mark.parametrize("flag", ["--no-nvmolkit", "--no_nvmolkit"])
+def test_backend_selection_accepts_nvmolkit_disable_spellings(flag):
+    args = bench._build_parser().parse_args(["--smiles", "input.smi", flag])
+
+    assert args.no_nvmolkit
+    assert not args.no_bblean
+
+
+def test_timing_fields_use_standard_mean_schema():
+    timing = bench.time_it(lambda: None, runs=2, warmups=0)
+
+    fields = bench._timing_fields(timing)
+
+    assert set(fields) == {"time_ms", "std_ms", "runs_completed"}
+    assert fields["time_ms"] == timing.mean_ms
+    assert fields["std_ms"] == timing.std_ms
+    assert fields["runs_completed"] == 2
+
+
+def test_bblean_deadline_accepts_standard_spellings():
+    parser = bench._build_parser()
+
+    hyphenated = parser.parse_args(["--smiles", "input.smi", "--bblean-max-seconds", "12.5"])
+    underscored = parser.parse_args(["--smiles", "input.smi", "--bblean_max_seconds", "7.5"])
+
+    assert hyphenated.bblean_max_seconds == 12.5
+    assert underscored.bblean_max_seconds == 7.5
+
+
+def test_parser_uses_standard_input_and_workload_options():
+    args = bench._build_parser().parse_args(
+        [
+            "--smiles",
+            "input.smi",
+            "--num_mols",
+            "10",
+            "20",
+            "--branching_factor",
+            "64",
+            "--num_partitions",
+            "4",
+            "--fp_size",
+            "512",
+            "-r",
+            "2",
+        ]
+    )
+
+    assert args.smiles == "input.smi"
+    assert args.num_mols == [10, 20]
+    assert args.branching_factor == 64
+    assert args.num_partitions == 4
+    assert args.fp_size == 512
+    assert args.runs == 2
+    assert args.output is None
+
+
 def test_bblean_is_not_imported_when_disabled(monkeypatch):
     def unexpected_import(_name):
         raise AssertionError("bblean import should not be attempted")

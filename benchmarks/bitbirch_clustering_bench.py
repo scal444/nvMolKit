@@ -17,13 +17,21 @@ import time
 from types import ModuleType
 
 import numpy as np
+import nvtx
 import torch
-from bench_utils import load_smiles, print_csv_rows, time_it, write_csv_rows
+from bench_utils import (
+    load_smiles,
+    print_csv_rows,
+    throughput_per_s,
+    time_it,
+    time_it_bounded_result,
+    write_csv_rows,
+)
 
 from nvmolkit.clustering import bitbirch
 from nvmolkit.fingerprints import MorganFingerprintGenerator
 
-DEFAULT_SIZES = [1_000, 10_000, 50_000, 100_000, 250_000, 500_000, 1_000_000]
+DEFAULT_NUM_MOLS = [1_000, 10_000, 50_000, 100_000, 250_000, 500_000, 1_000_000]
 
 
 def _load_bblean(enabled: bool) -> tuple[ModuleType | None, str, str]:
@@ -44,6 +52,7 @@ def _cluster_count(labels: torch.Tensor) -> int:
     return int(labels.max().item()) + 1 if labels.numel() else 0
 
 
+@nvtx.annotate("bench_nvmolkit_bitbirch", color="red")
 def _bench_nvmolkit(
     fingerprints: torch.Tensor,
     *,
@@ -55,6 +64,7 @@ def _bench_nvmolkit(
 ) -> tuple[object, int]:
     holder: dict[str, torch.Tensor] = {}
 
+    @nvtx.annotate("bitbirch_nvmolkit_run", color="orange")
     def run() -> None:
         holder["labels"] = bitbirch(
             fingerprints,
@@ -67,6 +77,7 @@ def _bench_nvmolkit(
     return timing, _cluster_count(holder["labels"])
 
 
+@nvtx.annotate("bench_bblean_bitbirch", color="green")
 def _bench_bblean(
     bblean: ModuleType,
     fingerprints: np.ndarray,
@@ -75,10 +86,13 @@ def _bench_bblean(
     branching_factor: int,
     runs: int,
     warmups: int,
+    max_seconds: float,
 ) -> tuple[object, dict[str, float | int]]:
     holder: dict[str, object] = {}
+    completed = [0]
 
-    def run() -> None:
+    @nvtx.annotate("bitbirch_bblean_run", color="yellow")
+    def run(_deadline=None) -> None:
         tree = bblean.BitBirch(
             threshold=threshold,
             branching_factor=branching_factor,
@@ -86,8 +100,17 @@ def _bench_bblean(
         )
         tree.fit(fingerprints)
         holder["tree"] = tree
+        completed[0] = 1
 
-    timing = time_it(run, runs=runs, warmups=warmups)
+    for _ in range(warmups):
+        run()
+    timing, _ = time_it_bounded_result(
+        run,
+        runs=runs,
+        max_seconds=max_seconds,
+        progress_getter=lambda: completed[0],
+        progress_target=1,
+    )
     tree = holder["tree"]
     return timing, _cluster_distribution(tree.get_cluster_mol_ids(), len(fingerprints))
 
@@ -121,26 +144,26 @@ def _cluster_distribution(clusters, num_fingerprints: int) -> dict[str, float | 
     }
 
 
-def _empty_timing_fields(prefix: str) -> dict[str, float]:
+def _timing_fields(timing) -> dict[str, float | int]:
     return {
-        f"{prefix}_mean_ms": math.nan,
-        f"{prefix}_median_ms": math.nan,
-        f"{prefix}_std_ms": math.nan,
+        "time_ms": timing.mean_ms,
+        "std_ms": timing.std_ms,
+        "runs_completed": len(timing.times_ms),
     }
 
 
-def _timing_fields(prefix: str, timing) -> dict[str, float]:
-    return {
-        f"{prefix}_mean_ms": timing.mean_ms,
-        f"{prefix}_median_ms": timing.median_ms,
-        f"{prefix}_std_ms": timing.std_ms,
-    }
-
-
-def main() -> None:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("input_smiles_file", help="Path to a real SMILES/CXSMILES input file")
-    parser.add_argument("--sizes", type=int, nargs="+", default=DEFAULT_SIZES)
+    parser.add_argument("--smiles", "-s", required=True, help="Path to a real SMILES/CXSMILES input file")
+    parser.add_argument(
+        "--num_mols",
+        "--num-mols",
+        "-n",
+        type=int,
+        nargs="+",
+        default=DEFAULT_NUM_MOLS,
+        help="Molecule counts to benchmark",
+    )
     parser.add_argument("--threshold", type=float, default=0.55)
     parser.add_argument(
         "--thresholds",
@@ -149,120 +172,168 @@ def main() -> None:
         default=None,
         help="Sweep multiple thresholds; overrides --threshold",
     )
-    parser.add_argument("--branching-factor", type=int, default=254)
+    parser.add_argument("--branching_factor", "--branching-factor", type=int, default=254)
     parser.add_argument(
+        "--num_partitions",
         "--num-partitions",
         type=int,
         default=0,
         help="nvMolKit partitions; 0 uses automatic selection (default: 0)",
     )
     parser.add_argument("--radius", type=int, default=2)
-    parser.add_argument("--fp-size", type=int, default=1024)
-    parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--fp_size", "--fp-size", type=int, default=1024)
+    parser.add_argument("--runs", "-r", type=int, default=3)
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--bblean", action="store_true", help="Benchmark the optional bblean CPU backend")
     parser.add_argument(
-        "--nvmolkit-max-size",
-        type=int,
-        default=0,
-        help="Skip nvMolKit above this size; 0 disables the limit",
+        "--no-bblean",
+        "--no_bblean",
+        dest="no_bblean",
+        action="store_true",
+        help="Skip the bblean benchmark",
     )
     parser.add_argument(
-        "--bblean-max-size",
-        type=int,
-        default=0,
-        help="Skip bblean above this size; 0 disables the limit",
+        "--no-nvmolkit",
+        "--no_nvmolkit",
+        dest="no_nvmolkit",
+        action="store_true",
+        help="Skip the nvMolKit benchmark",
     )
-    parser.add_argument("--no-nvmolkit", action="store_true")
-    parser.add_argument("-o", "--output", default="bitbirch_results.csv")
+    parser.add_argument(
+        "--bblean-max-seconds",
+        "--bblean_max_seconds",
+        dest="bblean_max_seconds",
+        type=float,
+        default=0.0,
+        help=(
+            "Stop starting bblean timing repetitions after this many wall-clock seconds per configuration; "
+            "0 disables the limit"
+        ),
+    )
+    parser.add_argument("--output", "-o", default=None, help="Optional path to write CSV results")
+    return parser
+
+
+def main() -> None:
+    parser = _build_parser()
     args = parser.parse_args()
     thresholds = args.thresholds if args.thresholds is not None else [args.threshold]
 
-    if not args.sizes or any(size <= 0 for size in args.sizes):
-        parser.error("--sizes must contain positive integers")
+    if not args.num_mols or any(num_mols <= 0 for num_mols in args.num_mols):
+        parser.error("--num_mols must contain positive integers")
     if args.runs <= 0 or args.warmups < 0:
         parser.error("--runs must be positive and --warmups must be nonnegative")
     if args.num_partitions < 0:
         parser.error("--num-partitions must be nonnegative")
-    if args.nvmolkit_max_size < 0 or args.bblean_max_size < 0:
-        parser.error("backend maximum sizes must be nonnegative")
+    if args.bblean_max_seconds < 0:
+        parser.error("--bblean-max-seconds must be nonnegative")
     if any(not math.isfinite(threshold) or not 0 <= threshold <= 1 for threshold in thresholds):
         parser.error("thresholds must be finite and in [0, 1]")
-    if args.no_nvmolkit and not args.bblean:
+    if args.no_nvmolkit and args.no_bblean:
         parser.error("no benchmark backend selected")
 
-    sizes = sorted(set(args.sizes))
-    max_size = sizes[-1]
-    bblean, bblean_status, bblean_version = _load_bblean(args.bblean)
-    if args.bblean and bblean is None:
+    molecule_counts = sorted(set(args.num_mols))
+    max_size = molecule_counts[-1]
+    bblean, bblean_status, bblean_version = _load_bblean(not args.no_bblean)
+    if not args.no_bblean and bblean is None:
         print(f"bblean unavailable ({bblean_status}): {bblean_version}", file=sys.stderr)
+    if args.no_nvmolkit and bblean is None:
+        parser.error("bblean is unavailable and nvMolKit is disabled")
 
-    molecules = load_smiles(args.input_smiles_file, max_count=max_size + 100, sanitize=True, seed=args.seed)
+    print(
+        f"Scanning {args.smiles} and sampling molecules for a maximum benchmark size of {max_size:,}",
+        flush=True,
+    )
+    molecule_load_start = time.perf_counter()
+    with nvtx.annotate("bitbirch_molecule_loading", color="cyan"):
+        molecules = load_smiles(args.smiles, max_count=max_size + 100, sanitize=True, seed=args.seed)
+    molecule_load_seconds = time.perf_counter() - molecule_load_start
+    print(f"Molecule loading finished in {molecule_load_seconds:.3f} s", flush=True)
     if len(molecules) < max_size:
         parser.error(f"requested {max_size} molecules, but only {len(molecules)} valid molecules were loaded")
 
-    print(f"Generating {max_size} Morgan fingerprints with all available CPU threads")
+    print(f"Generating {max_size:,} Morgan fingerprints with all available CPU threads", flush=True)
     fingerprint_start = time.perf_counter()
-    fingerprints = (
-        MorganFingerprintGenerator(args.radius, args.fp_size)
-        .GetFingerprints(molecules[:max_size], num_threads=0)
-        .torch()
-    )
-    torch.cuda.synchronize()
+    with nvtx.annotate("bitbirch_fingerprint_generation", color="blue"):
+        fingerprints = (
+            MorganFingerprintGenerator(args.radius, args.fp_size)
+            .GetFingerprints(molecules[:max_size], num_threads=0)
+            .torch()
+        )
+        torch.cuda.synchronize()
     fingerprint_seconds = time.perf_counter() - fingerprint_start
-    print(f"Fingerprint generation finished in {fingerprint_seconds:.3f} s")
+    print(f"Fingerprint generation finished in {fingerprint_seconds:.3f} s", flush=True)
 
     results = []
     num_partitions = args.num_partitions or None
     try:
-        for size in sizes:
+        for size in molecule_counts:
             device_fps = fingerprints[:size].contiguous()
             host_fps = (
                 device_fps.cpu().numpy().view(np.uint8).reshape(size, -1).copy() if bblean is not None else None
             )
             for threshold in thresholds:
-                print(f"Benchmarking {size} real fingerprints at threshold {threshold}")
-                row = {
-                    "size": size,
+                print(f"\nConfiguration: {size:,} fingerprints, threshold={threshold}", flush=True)
+                common_fields = {
+                    "num_mols": size,
                     "threshold": threshold,
                     "branching_factor": args.branching_factor,
-                    "num_partitions": "auto" if num_partitions is None else num_partitions,
                     "radius": args.radius,
                     "fp_size": args.fp_size,
                     "runs": args.runs,
                     "warmups": args.warmups,
                     "seed": args.seed,
                     "fingerprint_total_seconds": fingerprint_seconds,
-                    "device": torch.cuda.get_device_name(device_fps.device),
-                    "bblean_version": bblean_version if bblean is not None else "",
+                    "input_file": args.smiles,
+                    "input_type": "smiles",
                 }
+                configuration_rows = []
 
-                if args.no_nvmolkit:
-                    row.update(_empty_timing_fields("nvmolkit"))
-                    row.update({"nvmolkit_status": "disabled", "nvmolkit_num_clusters": math.nan})
-                elif args.nvmolkit_max_size and size > args.nvmolkit_max_size:
-                    row.update(_empty_timing_fields("nvmolkit"))
-                    row.update({"nvmolkit_status": "size_limit", "nvmolkit_num_clusters": math.nan})
-                else:
-                    timing, num_clusters = _bench_nvmolkit(
-                        device_fps,
-                        threshold=threshold,
-                        branching_factor=args.branching_factor,
-                        num_partitions=num_partitions,
-                        runs=args.runs,
-                        warmups=args.warmups,
+                if not args.no_nvmolkit:
+                    partitions = "auto" if num_partitions is None else str(num_partitions)
+                    print(
+                        f"  Starting nvMolKit GPU: {args.warmups} warmup(s), {args.runs} timed run(s), "
+                        f"partitions={partitions}",
+                        flush=True,
                     )
-                    row.update(_timing_fields("nvmolkit", timing))
-                    row.update({"nvmolkit_status": "ok", "nvmolkit_num_clusters": num_clusters})
+                    torch.cuda.cudart().cudaProfilerStart()
+                    try:
+                        timing, num_clusters = _bench_nvmolkit(
+                            device_fps,
+                            threshold=threshold,
+                            branching_factor=args.branching_factor,
+                            num_partitions=num_partitions,
+                            runs=args.runs,
+                            warmups=args.warmups,
+                        )
+                    finally:
+                        torch.cuda.cudart().cudaProfilerStop()
+                    print(
+                        f"  Finished nvMolKit GPU: {timing.mean_ms:.3f} +/- {timing.std_ms:.3f} ms "
+                        f"({num_clusters:,} clusters)",
+                        flush=True,
+                    )
+                    configuration_rows.append(
+                        {
+                            "method": "nvmolkit",
+                            **common_fields,
+                            "num_partitions": "auto" if num_partitions is None else num_partitions,
+                            "device": torch.cuda.get_device_name(device_fps.device),
+                            **_timing_fields(timing),
+                            "num_clusters": num_clusters,
+                        }
+                    )
 
-                if bblean is None:
-                    row.update(_empty_timing_fields("bblean"))
-                    row.update({"bblean_status": bblean_status})
-                elif args.bblean_max_size and size > args.bblean_max_size:
-                    row.update(_empty_timing_fields("bblean"))
-                    row.update({"bblean_status": "size_limit"})
-                else:
+                if bblean is not None:
+                    budget = (
+                        f", {args.bblean_max_seconds:g} s timing budget"
+                        if args.bblean_max_seconds > 0
+                        else ""
+                    )
+                    print(
+                        f"  Starting bblean CPU: {args.warmups} warmup(s), up to {args.runs} timed run(s){budget}",
+                        flush=True,
+                    )
                     timing, distribution = _bench_bblean(
                         bblean,
                         host_fps,
@@ -270,26 +341,43 @@ def main() -> None:
                         branching_factor=args.branching_factor,
                         runs=args.runs,
                         warmups=args.warmups,
+                        max_seconds=args.bblean_max_seconds,
                     )
-                    row.update(_timing_fields("bblean", timing))
-                    row.update({f"bblean_{key}": value for key, value in distribution.items()})
-                    row["bblean_status"] = "ok"
+                    print(
+                        f"  Finished bblean CPU: {timing.mean_ms:.3f} +/- {timing.std_ms:.3f} ms "
+                        f"over {len(timing.times_ms)} run(s) ({distribution['num_clusters']:,} clusters)",
+                        flush=True,
+                    )
+                    configuration_rows.append(
+                        {
+                            "method": "bblean",
+                            **common_fields,
+                            "num_partitions": "N/A",
+                            "device": "CPU",
+                            "version": bblean_version,
+                            **_timing_fields(timing),
+                            **distribution,
+                        }
+                    )
 
-                nvmolkit_ms = row["nvmolkit_median_ms"]
-                bblean_ms = row["bblean_median_ms"]
-                row["nvmolkit_fingerprints_per_second"] = (
-                    size * 1000.0 / nvmolkit_ms if math.isfinite(nvmolkit_ms) else math.nan
+                bblean_throughput = next(
+                    (
+                        throughput_per_s(size, result_row["time_ms"])
+                        for result_row in configuration_rows
+                        if result_row["method"] == "bblean"
+                    ),
+                    math.nan,
                 )
-                row["bblean_fingerprints_per_second"] = (
-                    size * 1000.0 / bblean_ms if math.isfinite(bblean_ms) else math.nan
-                )
-                row["bblean_speedup_vs_nvmolkit"] = (
-                    nvmolkit_ms / bblean_ms
-                    if math.isfinite(nvmolkit_ms) and math.isfinite(bblean_ms)
-                    else math.nan
-                )
+                for result_row in configuration_rows:
+                    throughput = throughput_per_s(size, result_row["time_ms"])
+                    result_row["fingerprints_per_second"] = throughput
+                    result_row["vs_bblean_throughput_ratio"] = (
+                        throughput / bblean_throughput
+                        if result_row["method"] == "nvmolkit" and math.isfinite(bblean_throughput)
+                        else "N/A"
+                    )
 
-                results.append(row)
+                results.extend(configuration_rows)
                 write_csv_rows(results, args.output)
     except Exception:
         write_csv_rows(results, args.output)
@@ -297,6 +385,8 @@ def main() -> None:
 
     print("\nCSV Results:")
     print_csv_rows(results)
+    if args.output:
+        print(f"\nWrote results to {args.output}")
 
 
 if __name__ == "__main__":
