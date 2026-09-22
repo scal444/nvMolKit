@@ -314,6 +314,12 @@ def fused_butina(
         return _resolve_output(result, output)
 
 
+def _automatic_bitbirch_partitions(num_fingerprints: int) -> int:
+    if num_fingerprints < 512:
+        return 1
+    return (num_fingerprints + 254) // 255
+
+
 def bitbirch(
     x: ArrayInput,
     threshold: float,
@@ -340,9 +346,10 @@ def bitbirch(
         tolerance: Maximum permitted degradation for tolerance-diameter merge.
         num_partitions: Number of contiguous partial trees. ``None`` selects
                         one tree below 512 inputs and roughly one tree per 256
-                        inputs otherwise, capped at four per GPU multiprocessor
-                        and 128 total. Tolerance-diameter mode selects one tree.
-                        Set to 1 for exact deterministic serial-tree semantics.
+                        inputs otherwise, keeping partial-tree counts in an
+                        8-bit representation. Tolerance-diameter mode selects
+                        one tree. Set to 1 for exact deterministic serial-tree
+                        semantics.
         return_centroids: Return packed majority centroids with shape
                           ``(num_clusters, W)`` in addition to labels.
         stream: CUDA stream to use. If None, uses the current stream.
@@ -374,11 +381,10 @@ def bitbirch(
     (x,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
     num_fingerprints = x.shape[0]
     if num_partitions is None:
-        if num_fingerprints < 512 or merge_criterion == "tolerance-diameter":
+        if merge_criterion == "tolerance-diameter":
             num_partitions = 1
         else:
-            multiprocessors = torch.cuda.get_device_properties(x.device).multi_processor_count
-            num_partitions = min(128, 4 * multiprocessors, (num_fingerprints + 255) // 256)
+            num_partitions = _automatic_bitbirch_partitions(num_fingerprints)
     if num_fingerprints > 0 and num_partitions > num_fingerprints:
         raise ValueError(
             f"num_partitions must not exceed the number of fingerprints ({num_fingerprints}), got {num_partitions}"

@@ -197,6 +197,37 @@ TEST(BitBirchPartitioned, SplitHeavyPartitionsAssignEveryInput) {
   }
 }
 
+TEST(BitBirchPartitioned, SparseIntermediateForestReturnsDenseLabelsAndCentroids) {
+  std::vector<std::uint32_t> fingerprints(24);
+  for (int index = 0; index < 24; ++index) {
+    fingerprints[index] = std::uint32_t{1} << index;
+  }
+  nvMolKit::AsyncDeviceVector<std::uint32_t> deviceFingerprints(fingerprints.size());
+  deviceFingerprints.copyFromHost(fingerprints);
+
+  auto                       result = nvMolKit::bitBirchGpu({deviceFingerprints.data(), deviceFingerprints.size()},
+                                      24,
+                                      1,
+                                      0.9,
+                                      3,
+                                      nvMolKit::BitBirchMergeCriterion::Diameter,
+                                      0.05,
+                                      17,
+                                      true);
+  std::vector<int>           labels(24);
+  std::vector<std::uint32_t> centroids(result.centroids.size());
+  result.clusterIds.copyToHost(labels);
+  result.centroids.copyToHost(centroids);
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+  ASSERT_EQ(result.numClusters, 24);
+  ASSERT_EQ(centroids.size(), 24);
+  for (int index = 0; index < 24; ++index) {
+    EXPECT_EQ(labels[index], index);
+    EXPECT_EQ(centroids[index], fingerprints[index]);
+  }
+}
+
 TEST(BitBirchSerial, BalancedSplitsStayWithinLinearPoolOnDeepSingletonTree) {
   constexpr int              numFingerprints = 512;
   constexpr int              numWords        = numFingerprints / 32;

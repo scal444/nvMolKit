@@ -13,7 +13,6 @@ from typing import Optional
 
 import numpy as np
 
-
 def _validate_bits(bits: np.ndarray) -> np.ndarray:
     result = np.asarray(bits)
     if result.ndim != 2:
@@ -286,7 +285,7 @@ def partitioned_tree_reference(
     tolerance: float | None = None,
     num_partitions: int,
 ) -> tuple[np.ndarray, list[BitFeature], TreeNode | None]:
-    """Reference contiguous partial trees followed by one Bit Feature merge round."""
+    """Reference contiguous partial trees followed by bounded fan-in merge rounds."""
     fingerprints = _validate_bits(bits)
     if num_partitions < 1 or (fingerprints.shape[0] and num_partitions > fingerprints.shape[0]):
         raise ValueError("invalid partition count")
@@ -296,7 +295,7 @@ def partitioned_tree_reference(
         raise ValueError("tolerance-diameter summary merging is not defined")
 
     partition_size = (fingerprints.shape[0] + num_partitions - 1) // num_partitions
-    partial_features: list[BitFeature] = []
+    partial_feature_groups: list[list[BitFeature]] = []
     for begin in range(0, fingerprints.shape[0], partition_size):
         end = min(begin + partition_size, fingerprints.shape[0])
         _, features, _ = serial_tree_reference(
@@ -307,11 +306,43 @@ def partitioned_tree_reference(
         )
         for feature in features:
             feature.members = [member + begin for member in feature.members]
-        partial_features.extend(features)
+        partial_feature_groups.append(features)
+
+    merge_fan_in = 4 if num_partitions > 128 else 2
+    if num_partitions > merge_fan_in:
+        total_partial_features = sum(len(features) for features in partial_feature_groups)
+        if total_partial_features * 10 >= fingerprints.shape[0] * 9:
+            features = [feature for feature_group in partial_feature_groups for feature in feature_group]
+            labels = np.empty(fingerprints.shape[0], dtype=np.int32)
+            for cluster_id, feature in enumerate(features):
+                labels[feature.members] = cluster_id
+            return labels, features, None
+
+        intermediate_feature_groups = []
+        for group_begin in range(0, len(partial_feature_groups), merge_fan_in):
+            intermediate_root = TreeNode(True, [])
+            for features in partial_feature_groups[group_begin : group_begin + merge_fan_in]:
+                for feature in features:
+                    intermediate_root = _insert_feature(
+                        intermediate_root, feature, threshold, branching_factor, tolerance
+                    )
+            intermediate_feature_groups.append(
+                sorted(_leaf_features(intermediate_root), key=lambda feature: min(feature.members))
+            )
+        partial_feature_groups = intermediate_feature_groups
+
+        total_intermediate_features = sum(len(features) for features in partial_feature_groups)
+        if total_intermediate_features * 2 >= fingerprints.shape[0]:
+            features = [feature for feature_group in partial_feature_groups for feature in feature_group]
+            labels = np.empty(fingerprints.shape[0], dtype=np.int32)
+            for cluster_id, feature in enumerate(features):
+                labels[feature.members] = cluster_id
+            return labels, features, None
 
     root = TreeNode(True, [])
-    for feature in partial_features:
-        root = _insert_feature(root, feature, threshold, branching_factor, tolerance)
+    for feature_group in partial_feature_groups:
+        for feature in feature_group:
+            root = _insert_feature(root, feature, threshold, branching_factor, tolerance)
     features = sorted(_leaf_features(root), key=lambda feature: min(feature.members))
     labels = np.empty(fingerprints.shape[0], dtype=np.int32)
     for cluster_id, feature in enumerate(features):

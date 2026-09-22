@@ -84,20 +84,25 @@ split semantics.
 The public implementation retains a one-thread ordered tree as the exact
 reference and small-workload path. For larger inputs, or when selected with
 ``num_partitions``, contiguous ordered partitions build independent trees in
-separate CUDA blocks. A second kernel scans each partial leaf Bit Feature once,
-in first-member order, and inserts its count and linear sum into a final tree.
-Labels retain the stable order of the earliest original member. The Python
-default selects one partition below 512 inputs and approximately one partition
-per 256 inputs above that, capped at four trees per GPU multiprocessor and 128
-total. Tolerance-diameter mode automatically selects one partition; callers
-can also explicitly select one for serial semantics. Partial and final summary
-slabs independently dispatch to 8-, 16-, or 32-bit components according to
-their maximum represented counts.
+separate CUDA blocks. One or two merge kernels scan each partial leaf Bit
+Feature once, in first-member order, and insert its count and linear sum into a
+larger tree. Labels retain the stable order of the earliest original member.
+Groups of two partial trees are merged concurrently for at most 128 partitions;
+groups of four are used above that point to limit the number of summaries sent
+to the cooperative final merge. The Python default selects one partition below
+512 inputs and enough partitions above that to keep each partial tree at no
+more than 255 inputs. This keeps partial sums in 8-bit components and prevents
+per-tree work from growing superlinearly with the full input.
+Tolerance-diameter mode automatically selects one partition; callers can also
+explicitly select one for serial semantics. Partial and final summary arenas
+independently dispatch to 8-, 16-, or 32-bit components according to their
+maximum represented counts. A cooperative final merge is limited to 65,535
+source summaries; larger merge forests are finalized in parallel.
 
-This is the first parallel occupancy prototype, not the final performance
-kernel. Each partial-tree block currently has one active thread and the final
-merge is serial. The next tuning step is cooperative word/entry work within
-each block followed by hierarchical merge rounds. Tolerance-diameter mode
+Partial-tree construction and merge-tree insertion use 256-thread cooperative
+blocks. Entry searches, Bit Feature updates, ancestor summaries, diameter
+evaluation, and split-seed selection distribute their word, component, or
+entry work across the block. Tolerance-diameter mode
 currently requires one partition because
 refinement Equation 5 is defined for singleton insertion; applying it to a
 weighted incoming Bit Feature requires an independently specified criterion.
@@ -142,13 +147,18 @@ is introduced.
 
 ## Prototype resource and timing record
 
-The initial build was compiled explicitly for ``sm_89`` on an NVIDIA RTX 1000
-Ada Generation Laptop GPU. Ptxas reported 56 registers for each serial
-component-width specialization, 80 registers for the 32-bit partial-tree
-kernel, and 56 registers for the final merge kernel. Every kernel reported a
-zero-byte stack frame, zero spills, zero barriers, and no dynamic shared
-memory. The partial kernel's register count must be revisited when a full
-cooperative block replaces its single active thread.
+The current build was compiled explicitly for ``sm_89`` on an NVIDIA RTX 1000
+Ada Generation Laptop GPU. Ptxas reported 66 registers for the serial kernels,
+69 for final merge, and 77--92 for partial and intermediate merge variants.
+Every BitBIRCH kernel reported a zero-byte stack frame and zero spills. The
+cooperative kernels use one barrier and approximately 9.3 KiB of static shared
+memory.
+
+On the committed 1,000-molecule Morgan/ECFP comparison workload (1,024 bits,
+radius 2, threshold 0.55, branching factor 254), the pre-redesign GPU path took
+8,947.58 ms. The redesigned path took 258.35 +/- 0.04 ms after one warm-up over
+three runs, a 34.6x speedup. The recorded BitBIRCH-Lean result is 36.30 ms, so
+this GPU path remains about 7.1x slower on this nearly all-singleton workload.
 
 An end-to-end probe used 4,096 three-word fingerprints drawn from
 32 repeated random bases at threshold 0.95. After warm-up, 16 partitions took
@@ -179,12 +189,20 @@ Morgan fingerprints.
 
 ## Memory scaling
 
-For `N` inputs and `W` packed words, serial storage reserves `2N + 8` nodes,
-`3N + 8` entries, and `(3N + 8) * 32W` summary components. Component width is
-one, two, or four bytes according to `N`. Partitioned execution holds a partial
-workspace of the same linear form over `P * ceil(N/P)` inputs plus one final
-workspace; the partial and final component widths are selected independently.
-Labels, mapping arrays, and optional packed centroids are also linear in `N`.
+For `N` inputs and `W` packed words, topology reserves conservative linear
+pools of `2N + O(P)` nodes and `3N + O(P)` entries. A singleton Bit Feature
+stores only its original fingerprint index; it neither copies a linear sum nor
+allocates a centroid. On the first merge, the entry receives a slot from a
+paged summary arena. Serial, partial, and intermediate construction grow these
+arenas between bounded kernel launches from the observed summary cursor rather
+than reserving one `32W`-component vector for every possible entry.
+
+Consequently summary storage is `O(E * 32W)` for the `E` materialized Bit
+Features actually created, plus at most one bounded growth batch and page
+rounding, while topology and mappings remain `O(N)`. Partial, intermediate,
+and final component widths are selected independently. Cached packed
+centroids exist only for materialized summaries. Labels, mapping arrays, and
+optional output centroids are linear in `N`.
 No pairwise matrix, recursive device state, device allocation, or storage
 proportional to `N^2` is used.
 
@@ -196,6 +214,6 @@ still required before release. This validation record covers one workstation
 GPU (``sm_89``); the supported architecture matrix still needs CI or hardware
 coverage on at least one data-center GPU. Refinement, out-of-core operation,
 multi-GPU scheduling, weighted summaries, non-word-aligned logical bit counts,
-cooperative within-tree kernels, and hierarchical merge rounds are not part of
-this initial API. The included benchmarks expose the current useful and
-adverse regimes rather than asserting a universal speedup.
+and weighted merge criteria are not part of this initial API. The included
+benchmarks expose the current useful and adverse regimes rather than asserting
+a universal speedup.

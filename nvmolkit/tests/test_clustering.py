@@ -691,6 +691,14 @@ def test_bitbirch_partitioned_partial_trees_merge_summaries_deterministically():
     torch.testing.assert_close(second_centroids.torch(), first_centroids.torch())
 
 
+@pytest.mark.parametrize(
+    "num_fingerprints, expected_partitions",
+    [(0, 1), (511, 1), (512, 3), (65_535, 257), (1_000_000, 3_922)],
+)
+def test_bitbirch_automatic_partition_count_bounds_partial_width(num_fingerprints, expected_partitions):
+    assert clustering._automatic_bitbirch_partitions(num_fingerprints) == expected_partitions
+
+
 def test_bitbirch_automatic_partitioning_above_small_workload_cutoff():
     x = torch.full((512, 1), 0xA5A5A5A5, dtype=torch.uint32, device="cuda")
     labels, centroids = bitbirch(x, threshold=1.0, return_centroids=True)
@@ -698,7 +706,7 @@ def test_bitbirch_automatic_partitioning_above_small_workload_cutoff():
     torch.testing.assert_close(centroids.torch(), torch.tensor([[0xA5A5A5A5]], dtype=torch.uint32, device="cuda"))
 
 
-@pytest.mark.parametrize("num_partitions", [2, 3, 7])
+@pytest.mark.parametrize("num_partitions", [2, 3, 7, 8, 9, 17])
 @pytest.mark.parametrize("branching_factor", [3, 7])
 def test_bitbirch_partitioned_matches_bit_feature_merge_reference(num_partitions, branching_factor):
     rng = np.random.default_rng(8100 + 10 * num_partitions + branching_factor)

@@ -52,8 +52,10 @@ BitBirchResult bitBirchSerialGpu(cuda::std::span<const std::uint32_t> fingerprin
  * Build ordered partial trees concurrently and merge their Bit Features.
  *
  * A value of one preserves the serial-tree result. Larger values partition
- * the ordered input into contiguous ranges, build one tree per CUDA block,
- * and insert the resulting leaf summaries into a final tree.
+ * the ordered input into contiguous ranges and build one tree per cooperative
+ * CUDA block. Groups of partial trees merge concurrently; forests with at
+ * most 65,535 summaries receive a cooperative final merge, while larger
+ * forests retain their parallel-tree boundaries.
  */
 BitBirchResult bitBirchGpu(cuda::std::span<const std::uint32_t> fingerprints,
                            int                                  numFingerprints,
