@@ -701,6 +701,15 @@ def test_bitbirch_partitioned_merge_reinitializes_scratch_between_batches():
     np.testing.assert_array_equal(labels, np.tile(np.arange(9, dtype=np.int32), 4))
 
 
+def test_bitbirch_sparse_scaling_path_reconciles_adjacent_partial_forests():
+    partition_pairs = np.arange(1, 41, dtype=np.uint32).reshape(20, 2)
+    packed = np.repeat(partition_pairs, 2, axis=0).reshape(-1, 1)
+
+    labels = bitbirch(packed, threshold=1.0, branching_factor=254, num_partitions=40).numpy()
+
+    np.testing.assert_array_equal(labels, packed[:, 0].astype(np.int32) - 1)
+
+
 @pytest.mark.parametrize(
     "num_fingerprints, expected_partitions",
     [(0, 1), (511, 1), (512, 3), (65_535, 257), (1_000_000, 3_922)],

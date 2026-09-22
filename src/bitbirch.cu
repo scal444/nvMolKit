@@ -30,8 +30,17 @@ enum class BitBirchStatus : int {
   InvalidTree
 };
 
-constexpr int summaryEntriesPerPage = 4096;
-constexpr int summaryBuildBatchSize = 32;
+constexpr int summaryEntriesPerPage     = 4096;
+constexpr int summaryBuildBatchSize     = 32;
+// Preserve block-level parallelism across hierarchy rounds. A smaller tail is
+// worthwhile only when the remaining summaries fit a bounded global merge.
+constexpr int minimumParallelMergeTrees = 32;
+constexpr int serialTailSummaryBudget   = 4096;
+
+bool hierarchyRoundFitsWorkBudget(const int numTrees, const int totalClusters, const int mergeFanIn) {
+  const int nextNumTrees = (numTrees + mergeFanIn - 1) / mergeFanIn;
+  return nextNumTrees >= minimumParallelMergeTrees || totalClusters <= serialTailSummaryBudget;
+}
 
 template <typename Component> class PagedSummaryArena {
  public:
@@ -1989,7 +1998,6 @@ BitBirchResult launchPartitioned(const cuda::std::span<const std::uint32_t> fing
                                                partialSummaryArena.capacity(),
                                                numWords,
                                                numBits};
-  constexpr int                 mergeFanIn = 4;
   std::vector<BitBirchStatus>   hostPartialStatuses(numPartitions);
   std::vector<int>              hostPartialClusterCounts(numPartitions);
   int                           totalPartialClusters = 0;
@@ -2053,6 +2061,13 @@ BitBirchResult launchPartitioned(const cuda::std::span<const std::uint32_t> fing
     }
   }
 
+  constexpr int scalableForestTreeThreshold = 32;
+  // Pairwise reconciliation bounds per-tree work when partial construction
+  // reveals that at least half of the inputs remain as distinct summaries.
+  const bool    sparseScalingPath           = numPartitions >= scalableForestTreeThreshold &&
+                                 static_cast<std::int64_t>(totalPartialClusters) * 2 >= numFingerprints;
+  const int mergeFanIn = sparseScalingPath ? 2 : 4;
+
   auto current = mergeForestRound<Component, PartialComponent>(fingerprints.data(),
                                                                numFingerprints,
                                                                numWords,
@@ -2085,8 +2100,11 @@ BitBirchResult launchPartitioned(const cuda::std::span<const std::uint32_t> fing
   partialStatuses                = AsyncDeviceVector<BitBirchStatus>();
   partialSummaryArena.clear();
 
-  int previousClusters = totalPartialClusters;
-  while (current->numTrees > 1 && current->totalClusters < previousClusters) {
+  int        previousClusters = totalPartialClusters;
+  const bool stopSparseHierarchy =
+    sparseScalingPath && static_cast<std::int64_t>(current->totalClusters) * 2 >= numFingerprints;
+  while (current->numTrees > 1 && current->totalClusters < previousClusters && !stopSparseHierarchy &&
+         hierarchyRoundFitsWorkBudget(current->numTrees, current->totalClusters, mergeFanIn)) {
     previousClusters = current->totalClusters;
     auto next        = mergeForestRound<Component, Component>(fingerprints.data(),
                                                        numFingerprints,
