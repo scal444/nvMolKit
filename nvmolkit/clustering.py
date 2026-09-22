@@ -516,8 +516,8 @@ def butina(
     reordering: bool = True,
     stream: torch.cuda.Stream | None = None,
     *,
-    output: Literal[ButinaOutputMode.DEVICE] = ButinaOutputMode.DEVICE,
-) -> ButinaDeviceResult: ...
+    output: Literal[OutputMode.DEVICE] = OutputMode.DEVICE,
+) -> ClusterDeviceResult: ...
 
 
 @overload
@@ -528,7 +528,7 @@ def butina(
     reordering: bool = True,
     stream: torch.cuda.Stream | None = None,
     *,
-    output: Literal[ButinaOutputMode.RDKIT],
+    output: Literal[OutputMode.RDKIT],
 ) -> _RDKitClusters: ...
 
 
@@ -539,8 +539,8 @@ def butina(
     reordering: bool = True,
     stream: torch.cuda.Stream | None = None,
     *,
-    output: ButinaOutputMode = ButinaOutputMode.DEVICE,
-) -> _RDKitClusters | ButinaDeviceResult:
+    output: OutputMode = OutputMode.DEVICE,
+) -> _RDKitClusters | ClusterDeviceResult:
     """Perform Butina clustering on a distance matrix.
 
     The Butina algorithm is a deterministic clustering method that groups items based
@@ -565,17 +565,17 @@ def butina(
                     after each cluster is formed. Defaults to True, while
                     RDKit's ``Butina.ClusterData`` defaults to False.
         stream: CUDA stream to use. If None, uses the current stream.
-        output: Output representation. Defaults to ``ButinaOutputMode.DEVICE``.
+        output: Output representation. Defaults to ``OutputMode.DEVICE``.
 
     Returns:
         The representation selected by ``output``.
 
-        ``ButinaOutputMode.RDKIT`` returns a tuple containing one tuple per
+        ``OutputMode.RDKIT`` returns a tuple containing one tuple per
         cluster. Each cluster tuple contains input indices, with the centroid
         first. Constructing this representation synchronizes the CUDA work and
         copies the clustering result to the host.
 
-        ``ButinaOutputMode.DEVICE`` returns a :class:`ButinaDeviceResult`
+        ``OutputMode.DEVICE`` returns a :class:`ClusterDeviceResult`
         containing three :class:`AsyncGpuResult` objects on the active CUDA
         device. ``cluster_ids`` is int32 with shape ``(N,)`` and maps each input
         index to a cluster ID. Cluster IDs are contiguous from zero through
@@ -618,8 +618,8 @@ def fused_butina(
     metric: PackedSimilarityMetric = "tanimoto",
     stream: torch.cuda.Stream | None = None,
     *,
-    output: Literal[ButinaOutputMode.DEVICE] = ButinaOutputMode.DEVICE,
-) -> ButinaDeviceResult: ...
+    output: Literal[OutputMode.DEVICE] = OutputMode.DEVICE,
+) -> ClusterDeviceResult: ...
 
 
 @overload
@@ -629,7 +629,7 @@ def fused_butina(
     metric: PackedSimilarityMetric = "tanimoto",
     stream: torch.cuda.Stream | None = None,
     *,
-    output: Literal[ButinaOutputMode.RDKIT],
+    output: Literal[OutputMode.RDKIT],
 ) -> _RDKitClusters: ...
 
 
@@ -639,8 +639,8 @@ def fused_butina(
     metric: PackedSimilarityMetric = "tanimoto",
     stream: torch.cuda.Stream | None = None,
     *,
-    output: ButinaOutputMode = ButinaOutputMode.DEVICE,
-) -> _RDKitClusters | ButinaDeviceResult:
+    output: OutputMode = OutputMode.DEVICE,
+) -> _RDKitClusters | ClusterDeviceResult:
     """Perform fused Butina clustering on a set of fingerprints.
 
     This function uses a fused implementation of Butina clustering that computes
@@ -656,17 +656,17 @@ def fused_butina(
         metric: Tanimoto or cosine provider configuration/string. Directed AAP
                 is intentionally unsupported by Butina.
         stream: CUDA stream to use. If None, uses the current stream.
-        output: Output representation. Defaults to ``ButinaOutputMode.DEVICE``.
+        output: Output representation. Defaults to ``OutputMode.DEVICE``.
 
     Returns:
         The representation selected by ``output``.
 
-        ``ButinaOutputMode.RDKIT`` returns a tuple containing one tuple per
+        ``OutputMode.RDKIT`` returns a tuple containing one tuple per
         cluster. Each cluster tuple contains input indices, with the centroid
         first. Constructing this representation synchronizes the CUDA work and
         copies the clustering result to the host.
 
-        ``ButinaOutputMode.DEVICE`` returns a :class:`ButinaDeviceResult`
+        ``OutputMode.DEVICE`` returns a :class:`ClusterDeviceResult`
         containing three :class:`AsyncGpuResult` objects on the active CUDA
         device. ``cluster_ids`` is int32 with shape ``(N,)`` and maps each input
         index to a cluster ID. Cluster IDs are contiguous from zero through
