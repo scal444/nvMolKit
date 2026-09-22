@@ -10,11 +10,11 @@ import torch
 from rdkit import Chem
 
 from nvmolkit.clustering import (
-    DISEDeviceResult,
-    DISEOutputMode,
-    aap_dise,
+    ClusterDeviceResult,
+    OutputMode,
+    fused_dise,
 )
-from nvmolkit.similarity import aap_similarity
+from nvmolkit.similarity import AAPSimilarity, aap_similarity
 
 
 def _mol(smiles):
@@ -23,12 +23,13 @@ def _mol(smiles):
     return molecule
 
 
-def _cluster_ids(molecules, similarity_threshold=0.217, assignment="first", **options):
-    result = aap_dise(
+def _cluster_ids(molecules, similarity_threshold=0.217, assignment="first", stream=None, **options):
+    result = fused_dise(
         molecules,
-        similarity_threshold=similarity_threshold,
+        cutoff=1.0 - similarity_threshold,
+        metric=AAPSimilarity(**options),
         assignment=assignment,
-        **options,
+        stream=stream,
     )
     return result.cluster_ids.numpy().tolist()
 
@@ -99,7 +100,7 @@ def test_aap_similarity_options_change_the_computation(option, value):
     left = _mol("CCO")
     right = _mol("CCN")
     baseline = aap_similarity(left, right)
-    configured = aap_similarity(left, right, **{option: value})
+    configured = aap_similarity(left, right, metric=AAPSimilarity(**{option: value}))
 
     assert 0.0 <= configured <= 1.0
     assert configured != pytest.approx(baseline, abs=1e-3)
@@ -125,16 +126,17 @@ def test_aap_options_are_validated_for_pair_and_empty_clustering(kwargs, message
     molecule = _mol("CCO")
 
     with pytest.raises(ValueError, match=message):
-        aap_similarity(molecule, molecule, **kwargs)
+        aap_similarity(molecule, molecule, metric=AAPSimilarity(**kwargs))
     with pytest.raises(ValueError, match=message):
-        aap_dise([], **kwargs)
+        fused_dise([], cutoff=1.0 - 0.217, metric=AAPSimilarity(**kwargs))
 
 
 def test_aap_accepts_smallest_positive_normal_sinkhorn_temperature():
     temperature = float(np.finfo(np.float32).tiny)
     molecules = [_mol("CCO"), _mol("CCN")]
 
-    score = aap_similarity(*molecules, sinkhorn_temperature=temperature)
+    metric = AAPSimilarity(sinkhorn_temperature=temperature)
+    score = aap_similarity(*molecules, metric=metric)
 
     assert math.isfinite(score)
     assert 0.0 <= score <= 1.0
@@ -144,15 +146,15 @@ def test_aap_accepts_smallest_positive_normal_sinkhorn_temperature():
 def test_aap_supports_paths_beyond_the_reference_default():
     molecules = [_mol("CCCCCCCCC"), _mol("CCCCCCCCO")]
 
-    score = aap_similarity(*molecules, max_path_length=8)
+    score = aap_similarity(*molecules, metric=AAPSimilarity(max_path_length=8))
 
     assert 0.0 <= score <= 1.0
 
 
 @pytest.mark.parametrize("threshold", [-0.01, 1.01, float("nan"), float("inf"), -float("inf")])
 def test_aap_clustering_rejects_invalid_thresholds(threshold):
-    with pytest.raises(ValueError, match="threshold must be in"):
-        aap_dise([], similarity_threshold=threshold)
+    with pytest.raises(ValueError, match="cutoff must be in"):
+        fused_dise([], cutoff=1.0 - threshold, metric=AAPSimilarity())
 
 
 def test_aap_rejects_empty_oversized_null_and_unsupported_molecules():
@@ -169,7 +171,7 @@ def test_aap_rejects_empty_oversized_null_and_unsupported_molecules():
     with pytest.raises(ValueError, match="at most 64 atoms"):
         aap_similarity(oversized, oversized)
     with pytest.raises(ValueError, match="Invalid molecule at index 0"):
-        aap_dise([None])
+        fused_dise([None], cutoff=1.0 - 0.217, metric=AAPSimilarity())
     with pytest.raises(ValueError, match="supports only single, double, triple, and aromatic bonds"):
         aap_similarity(unsupported.GetMol(), molecule)
 
@@ -266,15 +268,16 @@ def test_aap_dise_output_modes_share_one_cluster_contract(
 ):
     molecules = [_mol(smiles) for smiles in ("CCCC", "CCCO", "CCOC")]
 
-    device = aap_dise(molecules, similarity_threshold=0.2, assignment=assignment)
-    rdkit = aap_dise(
+    device = fused_dise(molecules, cutoff=0.8, metric=AAPSimilarity(), assignment=assignment)
+    rdkit = fused_dise(
         molecules,
-        similarity_threshold=0.2,
+        cutoff=0.8,
+        metric=AAPSimilarity(),
         assignment=assignment,
-        output=DISEOutputMode.RDKIT,
+        output=OutputMode.RDKIT,
     )
 
-    assert isinstance(device, DISEDeviceResult)
+    assert isinstance(device, ClusterDeviceResult)
     assert device.cluster_ids.torch().dtype == torch.int32
     assert device.centroids.torch().dtype == torch.int32
     assert device.cluster_sizes.torch().dtype == torch.int64
@@ -285,24 +288,24 @@ def test_aap_dise_output_modes_share_one_cluster_contract(
 
 
 def test_aap_dise_output_modes_handle_empty_input():
-    device = aap_dise([])
+    device = fused_dise([], cutoff=1.0 - 0.217, metric=AAPSimilarity())
 
     assert device.cluster_ids.torch().shape == (0,)
     assert device.centroids.torch().shape == (0,)
     assert device.cluster_sizes.torch().shape == (0,)
-    assert aap_dise([], output=DISEOutputMode.RDKIT) == ()
+    assert fused_dise([], cutoff=1.0 - 0.217, metric=AAPSimilarity(), output=OutputMode.RDKIT) == ()
 
 
-@pytest.mark.parametrize("output", ["device", None, DISEDeviceResult])
+@pytest.mark.parametrize("output", ["device", None, ClusterDeviceResult])
 def test_aap_dise_rejects_invalid_output(output):
-    with pytest.raises(TypeError, match="output must be a DISEOutputMode"):
-        aap_dise([], output=output)
+    with pytest.raises(TypeError, match="output must be an OutputMode"):
+        fused_dise([], cutoff=1.0 - 0.217, metric=AAPSimilarity(), output=output)
 
 
 @pytest.mark.parametrize("assignment", ["", "closest", None])
 def test_aap_dise_rejects_invalid_assignment(assignment):
     with pytest.raises(ValueError, match="assignment must be one of"):
-        aap_dise([], assignment=assignment)
+        fused_dise([], cutoff=1.0 - 0.217, metric=AAPSimilarity(), assignment=assignment)
 
 
 def test_aap_similarity_and_clustering_are_deterministic_across_streams():
@@ -319,10 +322,10 @@ def test_aap_similarity_and_clustering_are_deterministic_across_streams():
 
 def test_aap_dise_device_output_on_explicit_stream_matches_default():
     molecules = [_mol(smiles) for smiles in ("CCCC", "CCCO", "CCOC", "c1ccccc1")]
-    expected = aap_dise(molecules, similarity_threshold=0.2)
+    expected = fused_dise(molecules, cutoff=0.8, metric=AAPSimilarity())
     stream = torch.cuda.Stream()
 
-    actual = aap_dise(molecules, similarity_threshold=0.2, stream=stream)
+    actual = fused_dise(molecules, cutoff=0.8, metric=AAPSimilarity(), stream=stream)
 
     assert actual.cluster_ids.device == stream.device
     assert actual.centroids.device == stream.device

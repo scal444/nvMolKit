@@ -26,8 +26,8 @@ from bench_utils import (
 from rdkit import Chem
 from rdkit.SimDivFilters import rdSimDivPickers
 
-from nvmolkit.clustering import aap_dise
-from nvmolkit.similarity import aap_similarity
+from nvmolkit.clustering import fused_dise
+from nvmolkit.similarity import AAPSimilarity, aap_similarity
 
 SUPPORTED_BOND_TYPES = {
     Chem.BondType.SINGLE,
@@ -277,13 +277,13 @@ def _time_callable(function, runs, warmup, gpu_sync=False):
     return timing, result
 
 
-def _aap_kwargs(args):
-    return {
-        "max_path_length": args.max_path_length,
-        "histogram_bins": args.histogram_bins,
-        "sinkhorn_iterations": args.sinkhorn_iterations,
-        "sinkhorn_temperature": args.sinkhorn_temperature,
-    }
+def _aap_metric(args):
+    return AAPSimilarity(
+        max_path_length=args.max_path_length,
+        histogram_bins=args.histogram_bins,
+        sinkhorn_iterations=args.sinkhorn_iterations,
+        sinkhorn_temperature=args.sinkhorn_temperature,
+    )
 
 
 def _base_row(args, operation, method, count, timing, molecules, status="ok"):
@@ -332,13 +332,13 @@ def _set_pair_comparison(rows, outputs, reference_method, field_prefix):
 
 def _benchmark_pairs(args, molecules, rdkit_reference, ligand_clustering_cpu_reference):
     pairs = _sample_pairs(len(molecules), args.num_pairs, args.seed)
-    kwargs = _aap_kwargs(args)
+    metric = _aap_metric(args)
     rows = []
     outputs = {}
 
     if not args.no_nvmolkit:
         timing, scores = _time_callable(
-            lambda: [aap_similarity(molecules[left], molecules[right], **kwargs) for left, right in pairs],
+            lambda: [aap_similarity(molecules[left], molecules[right], metric=metric) for left, right in pairs],
             args.runs,
             args.warmup,
             gpu_sync=True,
@@ -394,17 +394,17 @@ def _benchmark_pairs(args, molecules, rdkit_reference, ligand_clustering_cpu_ref
 
 
 def _benchmark_clustering(args, molecules, ligand_clustering_cpu_reference):
-    kwargs = _aap_kwargs(args)
+    metric = _aap_metric(args)
     rows = []
     outputs = {}
 
     if not args.no_nvmolkit:
         timing, result = _time_callable(
-            lambda: aap_dise(
+            lambda: fused_dise(
                 molecules,
-                similarity_threshold=args.threshold,
+                cutoff=1.0 - args.threshold,
+                metric=metric,
                 assignment="first",
-                **kwargs,
             ),
             args.runs,
             args.warmup,
@@ -493,11 +493,11 @@ def _benchmark_dise(args, molecules, rdkit_reference):
         def run_gpu_workflow():
             nonlocal gpu_labels
             indexed = _priority_order(molecules, args.sort_tag, args.sort_descending)
-            result = aap_dise(
+            result = fused_dise(
                 [molecule for _, molecule in indexed],
-                similarity_threshold=args.threshold,
+                cutoff=1.0 - args.threshold,
+                metric=_aap_metric(args),
                 assignment="nearest",
-                **_aap_kwargs(args),
             )
             ordered_labels = result.cluster_ids.numpy().tolist()
             gpu_labels = [-1] * len(molecules)

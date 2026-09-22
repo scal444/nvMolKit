@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "src/clustering_result.h"
+
 namespace RDKit {
 class ROMol;
 }
@@ -23,13 +25,6 @@ struct AapOptions {
   float sinkhornTemperature = 0.104F;
 };
 
-/** Clustering assignments and metadata, ordered by descending cluster size. */
-struct AapClusteringResult {
-  std::vector<int>          clusterIds;
-  std::vector<int>          centroids;
-  std::vector<std::int64_t> clusterSizes;
-};
-
 /**
  * Compute directed approximate Atom-Atom Path (AAP) similarity on the GPU.
  *
@@ -42,6 +37,14 @@ float aapSimilarityGpu(const RDKit::ROMol& left,
                        const AapOptions&   options = {},
                        cudaStream_t        stream  = nullptr);
 
+/** Select input-order Leader centroids using directed AAP similarity. */
+std::vector<int> aapLeaderPick(const std::vector<const RDKit::ROMol*>& molecules,
+                               float                                   threshold  = 0.217F,
+                               const AapOptions&                       options    = {},
+                               int                                     pickSize   = 0,
+                               const std::vector<int>&                 firstPicks = {},
+                               cudaStream_t                            stream     = nullptr);
+
 /**
  * Cluster molecules with input-order directed sphere exclusion (DISE).
  *
@@ -52,16 +55,16 @@ float aapSimilarityGpu(const RDKit::ROMol& left,
  * centroid order breaking ties. Centroids and sizes use the same cluster-ID
  * order.
  */
-AapClusteringResult aapSimilarityClustering(const std::vector<const RDKit::ROMol*>& molecules,
-                                            float                                   threshold = 0.217F,
-                                            const AapOptions&                       options   = {},
-                                            cudaStream_t                            stream    = nullptr);
+ClusteringResult aapSimilarityClustering(const std::vector<const RDKit::ROMol*>& molecules,
+                                         float                                   threshold = 0.217F,
+                                         const AapOptions&                       options   = {},
+                                         cudaStream_t                            stream    = nullptr);
 
 /** Run full two-stage directed sphere exclusion (DISE) with nearest-centroid assignment. */
-AapClusteringResult aapDiseClustering(const std::vector<const RDKit::ROMol*>& molecules,
-                                      float                                   threshold = 0.217F,
-                                      const AapOptions&                       options   = {},
-                                      cudaStream_t                            stream    = nullptr);
+ClusteringResult aapDiseClustering(const std::vector<const RDKit::ROMol*>& molecules,
+                                   float                                   threshold = 0.217F,
+                                   const AapOptions&                       options   = {},
+                                   cudaStream_t                            stream    = nullptr);
 
 }  // namespace nvMolKit
 

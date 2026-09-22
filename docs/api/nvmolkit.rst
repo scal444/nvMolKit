@@ -82,16 +82,23 @@ Clustering
 
    clustering.butina
    clustering.fused_butina
-   clustering.aap_dise
+   clustering.leader
+   clustering.fused_leader
+   clustering.maxmin
+   clustering.fused_maxmin
+   clustering.dise
+   clustering.fused_dise
 
 .. autosummary::
    :toctree: generated/
    :template: class_template.rst
 
-   clustering.ButinaOutputMode
-   clustering.ButinaDeviceResult
-   clustering.DISEOutputMode
-   clustering.DISEDeviceResult
+   clustering.OutputMode
+   clustering.ClusterDeviceResult
+   clustering.SelectionDeviceResult
+   similarity.TanimotoSimilarity
+   similarity.CosineSimilarity
+   similarity.AAPSimilarity
 
 Maximum Common Substructure (MCS)
 ---------------------------------

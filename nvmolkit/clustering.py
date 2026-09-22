@@ -17,14 +17,20 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Literal, overload
+from typing import Literal, Sequence, overload
 
 import numpy as np
 import torch
 
 from nvmolkit import _clustering
 from nvmolkit._fingerprint_inputs import _prepare_packed_fingerprints
-from nvmolkit.similarity import aap_similarity  # noqa: F401 - compatibility re-export
+from nvmolkit.similarity import (
+    AAPSimilarity,
+    FusedSimilarityMetric,
+    PackedSimilarityMetric,
+    _packed_metric_name,
+    aap_similarity,  # noqa: F401 - compatibility re-export
+)
 from nvmolkit.types import ArrayInput, AsyncGpuResult, _as_cuda_tensor, _resolve_cuda_stream
 
 _VALID_NEIGHBORLIST_SIZES = (8, 16, 24, 32, 64, 128)
@@ -32,16 +38,16 @@ _VALID_NEIGHBORLIST_SIZES = (8, 16, 24, 32, 64, 128)
 _RDKitClusters = tuple[tuple[int, ...], ...]
 
 
-class DISEOutputMode(Enum):
-    """Output format for directed sphere exclusion (DISE) clustering."""
+class OutputMode(Enum):
+    """Host-compatible or device-resident algorithm output."""
 
     RDKIT = "rdkit"
     DEVICE = "device"
 
 
 @dataclass(frozen=True)
-class DISEDeviceResult:
-    """GPU-resident directed sphere exclusion (DISE) clustering result.
+class ClusterDeviceResult:
+    """GPU-resident clustering result shared by clustering algorithms.
 
     Attributes:
         cluster_ids: One zero-based int32 cluster ID per input molecule.
@@ -54,9 +60,29 @@ class DISEDeviceResult:
     cluster_sizes: AsyncGpuResult
 
 
-def _validate_dise_output(output: DISEOutputMode) -> None:
-    if not isinstance(output, DISEOutputMode):
-        raise TypeError(f"output must be a DISEOutputMode, got {type(output).__name__}")
+@dataclass(frozen=True)
+class SelectionDeviceResult:
+    """GPU-resident ordered selection result.
+
+    ``last_distance`` is populated by MaxMin and is ``None`` for Leader.
+    """
+
+    indices: AsyncGpuResult
+    last_distance: float | None = None
+
+
+# Compatibility names for the output types introduced alongside the original
+# Butina and AAP APIs. They intentionally refer to the common types rather than
+# defining algorithm-specific wrappers.
+ButinaOutputMode = OutputMode
+DISEOutputMode = OutputMode
+ButinaDeviceResult = ClusterDeviceResult
+DISEDeviceResult = ClusterDeviceResult
+
+
+def _validate_output(output: OutputMode) -> None:
+    if not isinstance(output, OutputMode):
+        raise TypeError(f"output must be an OutputMode, got {type(output).__name__}")
 
 
 def _cluster_arrays_to_rdkit(cluster_ids_array, centroids_array) -> _RDKitClusters:
@@ -74,10 +100,10 @@ def _cluster_arrays_to_rdkit(cluster_ids_array, centroids_array) -> _RDKitCluste
     return tuple(clusters)
 
 
-def _resolve_dise_output(result, output: DISEOutputMode) -> _RDKitClusters | DISEDeviceResult:
+def _resolve_cluster_output(result, output: OutputMode) -> _RDKitClusters | ClusterDeviceResult:
     cluster_ids_obj, centroids_obj, cluster_sizes_obj = result
-    if output is DISEOutputMode.DEVICE:
-        return DISEDeviceResult(
+    if output is OutputMode.DEVICE:
+        return ClusterDeviceResult(
             AsyncGpuResult(cluster_ids_obj),
             AsyncGpuResult(centroids_obj),
             AsyncGpuResult(cluster_sizes_obj),
@@ -85,155 +111,38 @@ def _resolve_dise_output(result, output: DISEOutputMode) -> _RDKitClusters | DIS
     return _cluster_arrays_to_rdkit(cluster_ids_obj, centroids_obj)
 
 
-@overload
-def aap_dise(
-    molecules,
-    similarity_threshold: float = 0.217,
-    *,
-    assignment: Literal["first", "nearest"] = "nearest",
-    max_path_length: int = 7,
-    histogram_bins: int = 2048,
-    sinkhorn_iterations: int = 8,
-    sinkhorn_temperature: float = 0.104,
-    stream: torch.cuda.Stream | None = None,
-    output: Literal[DISEOutputMode.DEVICE] = DISEOutputMode.DEVICE,
-) -> DISEDeviceResult: ...
-
-
-@overload
-def aap_dise(
-    molecules,
-    similarity_threshold: float = 0.217,
-    *,
-    assignment: Literal["first", "nearest"] = "nearest",
-    max_path_length: int = 7,
-    histogram_bins: int = 2048,
-    sinkhorn_iterations: int = 8,
-    sinkhorn_temperature: float = 0.104,
-    stream: torch.cuda.Stream | None = None,
-    output: Literal[DISEOutputMode.RDKIT],
-) -> _RDKitClusters: ...
-
-
-# TODO: Explore a GPU-resident directed sphere exclusion control loop and asynchronous result production.
-def aap_dise(
-    molecules,
-    similarity_threshold: float = 0.217,
-    *,
-    assignment: Literal["first", "nearest"] = "nearest",
-    max_path_length: int = 7,
-    histogram_bins: int = 2048,
-    sinkhorn_iterations: int = 8,
-    sinkhorn_temperature: float = 0.104,
-    stream: torch.cuda.Stream | None = None,
-    output: DISEOutputMode = DISEOutputMode.DEVICE,
-) -> _RDKitClusters | DISEDeviceResult:
-    """Cluster ordered RDKit molecules with directed sphere exclusion.
-
-    Atom-Atom Path (AAP) similarity drives directed sphere exclusion (DISE).
-
-    Input order supplies the direction: the first unassigned molecule becomes
-    the next centroid. ``assignment="first"`` retains the first qualifying
-    centroid assignment made during sphere exclusion; ``"nearest"`` performs
-    the complete second pass and assigns every non-centroid to its most similar
-    selected centroid.
-
-    Args:
-        molecules: RDKit molecules in priority order, each with at most 64 atoms.
-        similarity_threshold: Inclusive AAP threshold used to select centroids.
-        assignment: Assignment rule for non-centroid molecules.
-        max_path_length: Maximum rooted path length in bonds.
-        histogram_bins: Number of hashed path bins, at most 32767.
-        sinkhorn_iterations: Number of Sinkhorn normalization iterations.
-        sinkhorn_temperature: Sinkhorn temperature.
-        stream: CUDA stream to use. If None, uses the current stream.
-        output: Output representation. Defaults to ``DISEOutputMode.DEVICE``.
-
-    Returns:
-        ``DISEOutputMode.DEVICE`` returns zero-based cluster IDs, centroids,
-        and cluster sizes on the GPU. ``DISEOutputMode.RDKIT`` returns a tuple
-        of centroid-first cluster tuples on the host. Both representations
-        order clusters by descending size, with centroid order breaking ties.
-
-    Note:
-        The current DISE control loop makes host-side decisions and therefore
-        completes its CUDA stream work before returning either output mode.
-        For method details, see `Gobbi et al. (2015)
-        <https://doi.org/10.1186/s13321-015-0056-8>`_.
-    """
-    _validate_dise_output(output)
-    if not 0 <= similarity_threshold <= 1:
-        raise ValueError(f"similarity_threshold must be in [0, 1], got {similarity_threshold}")
-    if assignment not in ("first", "nearest"):
-        raise ValueError(f"assignment must be one of ['first', 'nearest'], got {assignment!r}")
-
-    active_stream = _resolve_cuda_stream(stream)
-    function = _clustering.aap_similarity_clustering if assignment == "first" else _clustering.aap_dise_clustering
-    native_result = function(
-        list(molecules),
-        similarity_threshold,
-        max_path_length,
-        histogram_bins,
-        sinkhorn_iterations,
-        sinkhorn_temperature,
-        output is DISEOutputMode.DEVICE,
-        active_stream.cuda_stream,
-    )
-    return _resolve_dise_output(native_result, output)
-
-
-class ButinaOutputMode(Enum):
-    """Output format for :func:`butina` and :func:`fused_butina`.
-
-    ``RDKIT`` returns the same tuple of clusters as RDKit's
-    ``Butina.ClusterData``. ``DEVICE`` returns a :class:`ButinaDeviceResult`.
-    """
-
-    RDKIT = "rdkit"
-    DEVICE = "device"
-
-
-@dataclass(frozen=True)
-class ButinaDeviceResult:
-    """GPU-resident Butina clustering result.
-
-    Attributes:
-        cluster_ids: One int32 cluster ID per input item, shape ``(N,)``.
-        centroids: Centroid indices by cluster ID, int32 and shape ``(num_clusters,)``.
-        cluster_sizes: Member counts by cluster ID, int64 and shape ``(num_clusters,)``.
-    """
-
-    cluster_ids: AsyncGpuResult
-    centroids: AsyncGpuResult
-    cluster_sizes: AsyncGpuResult
-
-
 def _wrap_cluster_arrays(result) -> tuple[AsyncGpuResult, AsyncGpuResult]:
     cluster_ids_obj, centroids_obj = result
     return AsyncGpuResult(cluster_ids_obj), AsyncGpuResult(centroids_obj)
 
 
-def _wrap_device_result(result) -> ButinaDeviceResult:
+def _wrap_butina_device_result(result) -> ClusterDeviceResult:
     cluster_ids, centroids = _wrap_cluster_arrays(result)
     cluster_ids_int64 = cluster_ids.torch().to(torch.int64)
     cluster_sizes = torch.zeros_like(centroids.torch(), dtype=torch.int64)
     cluster_sizes.index_add_(0, cluster_ids_int64, torch.ones_like(cluster_ids_int64))
-    return ButinaDeviceResult(cluster_ids, centroids, AsyncGpuResult(cluster_sizes))
+    return ClusterDeviceResult(cluster_ids, centroids, AsyncGpuResult(cluster_sizes))
 
 
 def _to_rdkit_clusters(cluster_ids: AsyncGpuResult, centroids: AsyncGpuResult) -> _RDKitClusters:
     return _cluster_arrays_to_rdkit(cluster_ids.numpy(), centroids.numpy())
 
 
-def _resolve_output(result, output: ButinaOutputMode) -> _RDKitClusters | ButinaDeviceResult:
-    if output is ButinaOutputMode.DEVICE:
-        return _wrap_device_result(result)
+def _resolve_butina_output(result, output: OutputMode) -> _RDKitClusters | ClusterDeviceResult:
+    if output is OutputMode.DEVICE:
+        return _wrap_butina_device_result(result)
     return _to_rdkit_clusters(*_wrap_cluster_arrays(result))
 
 
-def _validate_output(output: ButinaOutputMode) -> None:
-    if not isinstance(output, ButinaOutputMode):
-        raise TypeError(f"output must be a ButinaOutputMode, got {type(output).__name__}")
+def _resolve_selection_output(result, output: OutputMode, *, maxmin: bool):
+    indices_obj, last_distance = result
+    indices = AsyncGpuResult(indices_obj)
+    if output is OutputMode.DEVICE:
+        return SelectionDeviceResult(indices, float(last_distance) if maxmin else None)
+    host_indices = tuple(int(index) for index in indices.numpy())
+    if maxmin:
+        return host_indices, float(last_distance)
+    return host_indices
 
 
 def _check_distance_matrix(name: str, x: torch.Tensor) -> torch.Tensor:
@@ -242,6 +151,223 @@ def _check_distance_matrix(name: str, x: torch.Tensor) -> torch.Tensor:
     if x.dtype != torch.float64:
         raise ValueError(f"{name} must have dtype float64")
     return x.contiguous()
+
+
+def _prepare_distance_matrix(distance_matrix: ArrayInput, stream: torch.cuda.Stream | None):
+    active_stream = _resolve_cuda_stream(stream, distance_matrix)
+    with torch.cuda.stream(active_stream):
+        tensor = _as_cuda_tensor("distance_matrix", distance_matrix, stream=active_stream)
+        tensor = _check_distance_matrix("distance_matrix", tensor)
+    return tensor, active_stream
+
+
+def leader(
+    distance_matrix: ArrayInput,
+    cutoff: float,
+    pick_size: int = 0,
+    first_picks: Sequence[int] = (),
+    stream: torch.cuda.Stream | None = None,
+    *,
+    output: OutputMode = OutputMode.DEVICE,
+) -> SelectionDeviceResult | tuple[int, ...]:
+    """Select ordered sphere-exclusion leaders from a distance matrix.
+
+    Matrix row ``i`` is interpreted as distances from selected leader ``i``
+    to the remaining candidates, so directed matrices are supported. Items at
+    distance ``<= cutoff`` are excluded. ``pick_size=0`` selects until no
+    candidates remain.
+    """
+    _validate_output(output)
+    matrix, active_stream = _prepare_distance_matrix(distance_matrix, stream)
+    with torch.cuda.stream(active_stream):
+        result = _clustering.leader(
+            matrix.__cuda_array_interface__,
+            cutoff,
+            pick_size,
+            tuple(first_picks),
+            active_stream.cuda_stream,
+        )
+    return _resolve_selection_output(result, output, maxmin=False)
+
+
+def fused_leader(
+    x,
+    cutoff: float,
+    metric: FusedSimilarityMetric = "tanimoto",
+    pick_size: int = 0,
+    first_picks: Sequence[int] = (),
+    stream: torch.cuda.Stream | None = None,
+    *,
+    output: OutputMode = OutputMode.DEVICE,
+) -> SelectionDeviceResult | tuple[int, ...]:
+    """Select ordered leaders while computing similarities on demand.
+
+    Packed fingerprints support Tanimoto and cosine similarity. RDKit
+    molecules use :class:`~nvmolkit.similarity.AAPSimilarity`, whose directed
+    score is evaluated from each selected leader to each candidate.
+    """
+    _validate_output(output)
+    if not 0 <= cutoff <= 1:
+        raise ValueError(f"cutoff must be in [0, 1], got {cutoff}")
+
+    if isinstance(metric, AAPSimilarity):
+        active_stream = _resolve_cuda_stream(stream)
+        result = _clustering.aap_leader(
+            list(x),
+            1.0 - cutoff,
+            pick_size,
+            tuple(first_picks),
+            metric.max_path_length,
+            metric.histogram_bins,
+            metric.sinkhorn_iterations,
+            metric.sinkhorn_temperature,
+            active_stream.cuda_stream,
+        )
+        return _resolve_selection_output(result, output, maxmin=False)
+
+    metric_name = _packed_metric_name(metric)
+    (fingerprints,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
+    with torch.cuda.stream(active_stream):
+        result = _clustering.fused_leader(
+            fingerprints.__cuda_array_interface__,
+            cutoff,
+            metric_name,
+            pick_size,
+            tuple(first_picks),
+            active_stream.cuda_stream,
+        )
+    return _resolve_selection_output(result, output, maxmin=False)
+
+
+def maxmin(
+    distance_matrix: ArrayInput,
+    pick_size: int,
+    first_picks: Sequence[int] = (),
+    seed: int = -1,
+    threshold: float | None = None,
+    stream: torch.cuda.Stream | None = None,
+    *,
+    output: OutputMode = OutputMode.DEVICE,
+) -> SelectionDeviceResult | tuple[tuple[int, ...], float]:
+    """Select a diverse subset with RDKit-compatible greedy MaxMin picking.
+
+    The first pick uses RDKit's Boost MT19937 behavior when ``first_picks`` is
+    empty. If ``threshold`` is provided, selection stops when the next item's
+    distance to its nearest pick is at most that value.
+    """
+    _validate_output(output)
+    matrix, active_stream = _prepare_distance_matrix(distance_matrix, stream)
+    native_threshold = -1.0 if threshold is None else threshold
+    with torch.cuda.stream(active_stream):
+        result = _clustering.maxmin(
+            matrix.__cuda_array_interface__,
+            pick_size,
+            tuple(first_picks),
+            seed,
+            native_threshold,
+            active_stream.cuda_stream,
+        )
+    return _resolve_selection_output(result, output, maxmin=True)
+
+
+def fused_maxmin(
+    x: ArrayInput,
+    pick_size: int,
+    metric: PackedSimilarityMetric = "tanimoto",
+    first_picks: Sequence[int] = (),
+    seed: int = -1,
+    threshold: float | None = None,
+    stream: torch.cuda.Stream | None = None,
+    *,
+    output: OutputMode = OutputMode.DEVICE,
+) -> SelectionDeviceResult | tuple[tuple[int, ...], float]:
+    """Run MaxMin directly on packed fingerprints without an NxN matrix."""
+    _validate_output(output)
+    metric_name = _packed_metric_name(metric)
+    native_threshold = -1.0 if threshold is None else threshold
+    (fingerprints,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
+    with torch.cuda.stream(active_stream):
+        result = _clustering.fused_maxmin(
+            fingerprints.__cuda_array_interface__,
+            pick_size,
+            metric_name,
+            tuple(first_picks),
+            seed,
+            native_threshold,
+            active_stream.cuda_stream,
+        )
+    return _resolve_selection_output(result, output, maxmin=True)
+
+
+def dise(
+    distance_matrix: ArrayInput,
+    cutoff: float,
+    assignment: Literal["first", "nearest"] = "nearest",
+    stream: torch.cuda.Stream | None = None,
+    *,
+    output: OutputMode = OutputMode.DEVICE,
+) -> ClusterDeviceResult | _RDKitClusters:
+    """Cluster an ordered distance matrix with directed sphere exclusion."""
+    _validate_output(output)
+    if assignment not in ("first", "nearest"):
+        raise ValueError(f"assignment must be one of ['first', 'nearest'], got {assignment!r}")
+    matrix, active_stream = _prepare_distance_matrix(distance_matrix, stream)
+    result = _clustering.dise(
+        matrix.__cuda_array_interface__,
+        cutoff,
+        assignment == "nearest",
+        output is OutputMode.DEVICE,
+        active_stream.cuda_stream,
+    )
+    return _resolve_cluster_output(result, output)
+
+
+def fused_dise(
+    x,
+    cutoff: float,
+    metric: FusedSimilarityMetric = "tanimoto",
+    assignment: Literal["first", "nearest"] = "nearest",
+    stream: torch.cuda.Stream | None = None,
+    *,
+    output: OutputMode = OutputMode.DEVICE,
+) -> ClusterDeviceResult | _RDKitClusters:
+    """Cluster ordered inputs with on-demand directed sphere exclusion.
+
+    Input order defines centroid priority. AAP is directed; packed Tanimoto and
+    cosine providers are symmetric.
+    """
+    _validate_output(output)
+    if not 0 <= cutoff <= 1:
+        raise ValueError(f"cutoff must be in [0, 1], got {cutoff}")
+    if assignment not in ("first", "nearest"):
+        raise ValueError(f"assignment must be one of ['first', 'nearest'], got {assignment!r}")
+
+    if isinstance(metric, AAPSimilarity):
+        active_stream = _resolve_cuda_stream(stream)
+        function = _clustering.aap_similarity_clustering if assignment == "first" else _clustering.aap_dise_clustering
+        result = function(
+            list(x),
+            1.0 - cutoff,
+            metric.max_path_length,
+            metric.histogram_bins,
+            metric.sinkhorn_iterations,
+            metric.sinkhorn_temperature,
+            output is OutputMode.DEVICE,
+            active_stream.cuda_stream,
+        )
+        return _resolve_cluster_output(result, output)
+
+    metric_name = _packed_metric_name(metric)
+    (fingerprints,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
+    result = _clustering.fused_dise(
+        fingerprints.__cuda_array_interface__,
+        cutoff,
+        metric_name,
+        assignment == "nearest",
+        output is OutputMode.DEVICE,
+        active_stream.cuda_stream,
+    )
+    return _resolve_cluster_output(result, output)
 
 
 @overload
@@ -344,14 +470,14 @@ def butina(
             reordering,
             active_stream.cuda_stream,
         )
-        return _resolve_output(result, output)
+        return _resolve_butina_output(result, output)
 
 
 @overload
 def fused_butina(
     x: ArrayInput,
     cutoff: float,
-    metric: str = "tanimoto",
+    metric: PackedSimilarityMetric = "tanimoto",
     stream: torch.cuda.Stream | None = None,
     *,
     output: Literal[ButinaOutputMode.DEVICE] = ButinaOutputMode.DEVICE,
@@ -362,7 +488,7 @@ def fused_butina(
 def fused_butina(
     x: ArrayInput,
     cutoff: float,
-    metric: str = "tanimoto",
+    metric: PackedSimilarityMetric = "tanimoto",
     stream: torch.cuda.Stream | None = None,
     *,
     output: Literal[ButinaOutputMode.RDKIT],
@@ -372,7 +498,7 @@ def fused_butina(
 def fused_butina(
     x: ArrayInput,
     cutoff: float,
-    metric: str = "tanimoto",
+    metric: PackedSimilarityMetric = "tanimoto",
     stream: torch.cuda.Stream | None = None,
     *,
     output: ButinaOutputMode = ButinaOutputMode.DEVICE,
@@ -417,13 +543,14 @@ def fused_butina(
 
     """
     _validate_output(output)
-    if metric not in ("tanimoto", "cosine"):
-        raise ValueError(f"metric must be one of ['tanimoto', 'cosine'], got {metric}")
+    metric_name = _packed_metric_name(metric)
 
     if not 0 <= cutoff <= 1:
         raise ValueError(f"cutoff must be in [0, 1], got {cutoff}")
 
     (x,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
     with torch.cuda.stream(active_stream):
-        result = _clustering.fused_butina(x.__cuda_array_interface__, cutoff, True, metric, active_stream.cuda_stream)
-        return _resolve_output(result, output)
+        result = _clustering.fused_butina(
+            x.__cuda_array_interface__, cutoff, True, metric_name, active_stream.cuda_stream
+        )
+        return _resolve_butina_output(result, output)

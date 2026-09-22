@@ -273,7 +273,7 @@ def test_butina_invalid_neighborlist_max_size(invalid_size):
 
 def test_butina_rejects_invalid_output():
     dists = torch.zeros(2, 2, dtype=torch.float64)
-    with pytest.raises(TypeError, match="output must be a ButinaOutputMode"):
+    with pytest.raises(TypeError, match="output must be an OutputMode"):
         butina(dists, 0.1, output="device")
 
 
@@ -497,7 +497,7 @@ def test_fused_butina_empty_fingerprints(metric, expected_cluster_count):
 
 def test_fused_butina_invalid_metric():
     x = torch.randint(-(2**31 - 1), 2**31 - 1, (10, 32), dtype=torch.int32).cuda()
-    with pytest.raises(ValueError, match="metric must be one of"):
+    with pytest.raises(ValueError, match="metric must be"):
         fused_butina(x, cutoff=0.5, metric="euclidean")
 
 

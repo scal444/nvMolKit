@@ -19,6 +19,9 @@ This module provides GPU-accelerated implementations of common RDKit operations
 found in the DataStructs module, along with molecular similarity methods.
 """
 
+from dataclasses import dataclass
+from typing import Literal, TypeAlias
+
 import numpy as np
 import torch
 
@@ -27,14 +30,48 @@ from nvmolkit._fingerprint_inputs import _prepare_packed_fingerprints
 from nvmolkit.types import ArrayInput, AsyncGpuResult, _resolve_cuda_stream
 
 
+@dataclass(frozen=True)
+class TanimotoSimilarity:
+    """Packed-bit Tanimoto similarity provider configuration."""
+
+
+@dataclass(frozen=True)
+class CosineSimilarity:
+    """Packed-bit cosine similarity provider configuration."""
+
+
+@dataclass(frozen=True)
+class AAPSimilarity:
+    """Directed approximate Atom-Atom Path similarity provider configuration."""
+
+    max_path_length: int = 7
+    histogram_bins: int = 2048
+    sinkhorn_iterations: int = 8
+    sinkhorn_temperature: float = 0.104
+
+
+_DEFAULT_AAP_SIMILARITY = AAPSimilarity()
+
+
+PackedSimilarityMetric: TypeAlias = Literal["tanimoto", "cosine"] | TanimotoSimilarity | CosineSimilarity
+FusedSimilarityMetric: TypeAlias = PackedSimilarityMetric | AAPSimilarity
+
+
+def _packed_metric_name(metric: PackedSimilarityMetric) -> str:
+    if metric == "tanimoto" or isinstance(metric, TanimotoSimilarity):
+        return "tanimoto"
+    if metric == "cosine" or isinstance(metric, CosineSimilarity):
+        return "cosine"
+    if isinstance(metric, AAPSimilarity):
+        raise ValueError("AAPSimilarity is directed and is not supported by this algorithm")
+    raise ValueError("metric must be 'tanimoto', 'cosine', TanimotoSimilarity(), or CosineSimilarity()")
+
+
 def aap_similarity(
     left,
     right,
     *,
-    max_path_length: int = 7,
-    histogram_bins: int = 2048,
-    sinkhorn_iterations: int = 8,
-    sinkhorn_temperature: float = 0.104,
+    metric: AAPSimilarity = _DEFAULT_AAP_SIMILARITY,
     stream: torch.cuda.Stream | None = None,
 ) -> float:
     """Compute directed approximate Atom-Atom Path (AAP) molecular similarity.
@@ -51,11 +88,7 @@ def aap_similarity(
     Args:
         left: Centroid-side RDKit molecule.
         right: Candidate-side RDKit molecule.
-        max_path_length: Maximum rooted path length in bonds.
-        histogram_bins: Number of hashed path bins, at most 32767.
-        sinkhorn_iterations: Number of Sinkhorn normalization iterations.
-        sinkhorn_temperature: Sinkhorn temperature, at least the smallest
-            positive normal single-precision value.
+        metric: AAP provider configuration.
         stream: CUDA stream to use. If None, uses the current stream.
 
     Returns:
@@ -65,14 +98,16 @@ def aap_similarity(
         For method details, see `Gobbi et al. (2015)
         <https://doi.org/10.1186/s13321-015-0056-8>`_.
     """
+    if not isinstance(metric, AAPSimilarity):
+        raise TypeError(f"metric must be an AAPSimilarity, got {type(metric).__name__}")
     active_stream = _resolve_cuda_stream(stream)
     return _clustering.aap_similarity(
         left,
         right,
-        max_path_length,
-        histogram_bins,
-        sinkhorn_iterations,
-        sinkhorn_temperature,
+        metric.max_path_length,
+        metric.histogram_bins,
+        metric.sinkhorn_iterations,
+        metric.sinkhorn_temperature,
         active_stream.cuda_stream,
     )
 

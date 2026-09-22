@@ -382,6 +382,47 @@ struct CentroidSelection {
   std::vector<int> centroids;
 };
 
+void selectCentroid(const AapHostDescriptors&   hostDescriptors,
+                    const AapDeviceDescriptors& descriptors,
+                    const int                   numMolecules,
+                    const int                   centroid,
+                    const float                 threshold,
+                    const AapOptions&           options,
+                    CentroidSelection&          selection,
+                    AsyncDeviceVector<int>&     candidates,
+                    AsyncDeviceVector<float>&   output,
+                    PinnedHostVector<int>&      candidateHost,
+                    PinnedHostVector<float>&    outputHost,
+                    cudaStream_t                stream) {
+  const int clusterId        = static_cast<int>(selection.centroids.size());
+  selection.labels[centroid] = clusterId;
+  selection.centroids.push_back(centroid);
+
+  int candidateCount = 0;
+  for (int moleculeIdx = 0; moleculeIdx < numMolecules; ++moleculeIdx) {
+    if (selection.labels[moleculeIdx] < 0) {
+      if (sameMoleculeDescriptor(hostDescriptors, centroid, moleculeIdx)) {
+        selection.labels[moleculeIdx] = clusterId;
+      } else {
+        candidateHost[candidateCount++] = moleculeIdx;
+      }
+    }
+  }
+  if (candidateCount == 0) {
+    return;
+  }
+
+  candidates.copyFromHost(candidateHost.data(), candidateCount);
+  launchSimilarity(descriptors, candidates, candidateCount, centroid, options, output, stream);
+  output.copyToHost(outputHost.data(), candidateCount);
+  cudaCheckError(cudaStreamSynchronize(stream));
+  for (int position = 0; position < candidateCount; ++position) {
+    if (outputHost[position] >= threshold) {
+      selection.labels[candidateHost[position]] = clusterId;
+    }
+  }
+}
+
 CentroidSelection selectCentroids(const AapHostDescriptors&   hostDescriptors,
                                   const AapDeviceDescriptors& descriptors,
                                   const int                   numMolecules,
@@ -391,45 +432,58 @@ CentroidSelection selectCentroids(const AapHostDescriptors&   hostDescriptors,
                                   AsyncDeviceVector<float>&   output,
                                   PinnedHostVector<int>&      candidateHost,
                                   PinnedHostVector<float>&    outputHost,
-                                  cudaStream_t                stream) {
+                                  cudaStream_t                stream,
+                                  const std::vector<int>&     firstPicks = {},
+                                  const int                   pickSize   = 0) {
   CentroidSelection result{std::vector<int>(numMolecules, -1), {}};
 
+  std::vector<std::uint8_t> seen(numMolecules, 0);
+  for (const int centroid : firstPicks) {
+    if (centroid < 0 || centroid >= numMolecules) {
+      throw std::invalid_argument("first_picks contains an index outside the input pool");
+    }
+    if (seen[centroid]) {
+      throw std::invalid_argument("first_picks must not contain duplicate indices");
+    }
+    seen[centroid] = 1;
+    selectCentroid(hostDescriptors,
+                   descriptors,
+                   numMolecules,
+                   centroid,
+                   threshold,
+                   options,
+                   result,
+                   candidates,
+                   output,
+                   candidateHost,
+                   outputHost,
+                   stream);
+  }
+
   for (int centroid = 0; centroid < numMolecules; ++centroid) {
+    if (pickSize > 0 && static_cast<int>(result.centroids.size()) >= pickSize) {
+      break;
+    }
     if (result.labels[centroid] >= 0) {
       continue;
     }
-    const int clusterId     = static_cast<int>(result.centroids.size());
-    result.labels[centroid] = clusterId;
-    result.centroids.push_back(centroid);
-
-    int candidateCount = 0;
-    for (int moleculeIdx = 0; moleculeIdx < numMolecules; ++moleculeIdx) {
-      if (result.labels[moleculeIdx] < 0) {
-        if (sameMoleculeDescriptor(hostDescriptors, centroid, moleculeIdx)) {
-          result.labels[moleculeIdx] = clusterId;
-        } else {
-          candidateHost[candidateCount++] = moleculeIdx;
-        }
-      }
-    }
-    if (candidateCount == 0) {
-      continue;
-    }
-
-    candidates.copyFromHost(candidateHost.data(), candidateCount);
-    launchSimilarity(descriptors, candidates, candidateCount, centroid, options, output, stream);
-    output.copyToHost(outputHost.data(), candidateCount);
-    cudaCheckError(cudaStreamSynchronize(stream));
-    for (int position = 0; position < candidateCount; ++position) {
-      if (outputHost[position] >= threshold) {
-        result.labels[candidateHost[position]] = clusterId;
-      }
-    }
+    selectCentroid(hostDescriptors,
+                   descriptors,
+                   numMolecules,
+                   centroid,
+                   threshold,
+                   options,
+                   result,
+                   candidates,
+                   output,
+                   candidateHost,
+                   outputHost,
+                   stream);
   }
   return result;
 }
 
-AapClusteringResult buildClusteringResult(const std::vector<int>& labels, const std::vector<int>& centroids) {
+ClusteringResult buildClusteringResult(const std::vector<int>& labels, const std::vector<int>& centroids) {
   const int        numClusters = static_cast<int>(centroids.size());
   std::vector<int> sizes(numClusters, 0);
   for (const int label : labels) {
@@ -444,7 +498,7 @@ AapClusteringResult buildClusteringResult(const std::vector<int>& labels, const 
   for (int newId = 0; newId < numClusters; ++newId) {
     remap[order[newId]] = newId;
   }
-  AapClusteringResult result;
+  ClusteringResult result;
   result.clusterIds.resize(labels.size());
   result.centroids.resize(numClusters);
   result.clusterSizes.resize(numClusters);
@@ -484,10 +538,53 @@ float aapSimilarityGpu(const RDKit::ROMol& left,
   return outputHost[0];
 }
 
-AapClusteringResult aapSimilarityClustering(const std::vector<const RDKit::ROMol*>& molecules,
-                                            const float                             threshold,
-                                            const AapOptions&                       options,
-                                            cudaStream_t                            stream) {
+std::vector<int> aapLeaderPick(const std::vector<const RDKit::ROMol*>& molecules,
+                               const float                             threshold,
+                               const AapOptions&                       options,
+                               const int                               pickSize,
+                               const std::vector<int>&                 firstPicks,
+                               cudaStream_t                            stream) {
+  validateOptions(options);
+  if (!(threshold >= 0.0F && threshold <= 1.0F)) {
+    throw std::invalid_argument("threshold must be between 0 and 1");
+  }
+  if (pickSize < 0 || pickSize > static_cast<int>(molecules.size())) {
+    throw std::invalid_argument("pick_size must be between 0 and the input size");
+  }
+  if (molecules.empty()) {
+    if (!firstPicks.empty()) {
+      throw std::invalid_argument("first_picks cannot be used with empty input");
+    }
+    return {};
+  }
+
+  const auto                 hostDescriptors = buildDescriptors(molecules, options);
+  const AapDeviceDescriptors descriptors(hostDescriptors, stream);
+  const int                  numMolecules = static_cast<int>(molecules.size());
+  AsyncDeviceVector<int>     candidates(numMolecules, stream);
+  AsyncDeviceVector<float>   output(numMolecules, stream);
+  PinnedHostVector<int>      candidateHost(numMolecules);
+  PinnedHostVector<float>    outputHost(numMolecules);
+
+  return selectCentroids(hostDescriptors,
+                         descriptors,
+                         numMolecules,
+                         threshold,
+                         options,
+                         candidates,
+                         output,
+                         candidateHost,
+                         outputHost,
+                         stream,
+                         firstPicks,
+                         pickSize)
+    .centroids;
+}
+
+ClusteringResult aapSimilarityClustering(const std::vector<const RDKit::ROMol*>& molecules,
+                                         const float                             threshold,
+                                         const AapOptions&                       options,
+                                         cudaStream_t                            stream) {
   validateOptions(options);
   if (!(threshold >= 0.0F && threshold <= 1.0F)) {
     throw std::invalid_argument("threshold must be between 0 and 1");
@@ -517,10 +614,10 @@ AapClusteringResult aapSimilarityClustering(const std::vector<const RDKit::ROMol
   return buildClusteringResult(selection.labels, selection.centroids);
 }
 
-AapClusteringResult aapDiseClustering(const std::vector<const RDKit::ROMol*>& molecules,
-                                      const float                             threshold,
-                                      const AapOptions&                       options,
-                                      cudaStream_t                            stream) {
+ClusteringResult aapDiseClustering(const std::vector<const RDKit::ROMol*>& molecules,
+                                   const float                             threshold,
+                                   const AapOptions&                       options,
+                                   cudaStream_t                            stream) {
   validateOptions(options);
   if (!(threshold >= 0.0F && threshold <= 1.0F)) {
     throw std::invalid_argument("threshold must be between 0 and 1");

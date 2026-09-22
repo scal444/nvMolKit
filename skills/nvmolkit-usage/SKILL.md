@@ -86,7 +86,7 @@ If this fails, point the user at the [installation guide](https://nvidia-bionemo
 | Forcefield with custom options + constraints | `nvmolkit.batchedForcefield` | `MMFFBatchedForcefield(mols, properties=..., nonBondedThreshold=..., ignoreInterfragInteractions=..., hardwareOptions=...)`, `UFFBatchedForcefield(mols, vdwThreshold=..., ...)`. Per-molecule view `ff[i]` exposes `add_distance_constraint`, `add_position_constraint`, `add_angle_constraint`, `add_torsion_constraint`. Methods: `.compute_energy()`, `.compute_gradients()`, `.minimize(maxIters, forceTol, minimizerKind=..., fireOptions=...)` |
 | Pairwise conformer RMSD | `nvmolkit.conformerRmsd` | `GetConformerRMSMatrix(mol)`, `GetConformerRMSMatrixBatch(mols)` |
 | Torsion Fingerprint Deviation (TFD) | `nvmolkit.tfd` | `GetTFDMatrix(mol)`, `GetTFDMatrices(mols)` |
-| Butina clustering | `nvmolkit.clustering` | `butina(distance_matrix, cutoff)` (precomputed matrix), `fused_butina(fingerprints, cutoff)` (memory-efficient, on-the-fly); both support explicit RDKit and device output modes |
+| Clustering and diversity selection | `nvmolkit.clustering` | Matrix/fused pairs: `butina`/`fused_butina`, `leader`/`fused_leader`, `maxmin`/`fused_maxmin`, and `dise`/`fused_dise`. Fused calls accept provider configurations such as `TanimotoSimilarity()`, `CosineSimilarity()`, and, for directed Leader/DISE, `AAPSimilarity()` |
 | Substructure search | `nvmolkit.substructure` | `hasSubstructMatch`, `countSubstructMatches`, `getSubstructMatches` |
 | Maximum common substructure | `nvmolkit.mcs` | `findMCS(mols, ...)` for all pairs, explicit pairs, or two paired molecule lists |
 | Hardware tuning (batch size, GPU IDs) | `nvmolkit.types` | `HardwareOptions(...)` passed to ETKDG / MMFF / UFF |
@@ -322,15 +322,17 @@ clustering provides device and RDKit-style output modes:
 
 ```python
 from rdkit import Chem
-from nvmolkit.clustering import DISEOutputMode, aap_dise
+from nvmolkit.clustering import OutputMode, fused_dise
+from nvmolkit.similarity import AAPSimilarity
 
 molecules = [Chem.MolFromSmiles(smiles) for smiles in ["CCCC", "CCCO", "CCOC"]]
-device_result = aap_dise(molecules)
-rdkit_clusters = aap_dise(molecules, output=DISEOutputMode.RDKIT)
+metric = AAPSimilarity()
+device_result = fused_dise(molecules, cutoff=1.0 - 0.217, metric=metric)
+rdkit_clusters = fused_dise(molecules, cutoff=1.0 - 0.217, metric=metric, output=OutputMode.RDKIT)
 ```
 
 `device_result` has `cluster_ids`, `centroids`, and `cluster_sizes` fields;
-cluster IDs are zero-based and contiguous. `DISEOutputMode.RDKIT` describes
+cluster IDs are zero-based and contiguous. `OutputMode.RDKIT` describes
 the centroid-first RDKit cluster representation, not an RDKit implementation
 of the AAP+DISE algorithm. The current DISE control loop synchronizes before
 returning either mode; `DEVICE` describes the stable schema and where the
