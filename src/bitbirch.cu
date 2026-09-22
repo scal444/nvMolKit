@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -30,6 +31,7 @@ enum class BitBirchStatus : int {
 };
 
 constexpr int summaryEntriesPerPage = 4096;
+constexpr int summaryBuildBatchSize = 32;
 
 template <typename Component> class PagedSummaryArena {
  public:
@@ -68,6 +70,13 @@ template <typename Component> class PagedSummaryArena {
   std::uint32_t** centroidPages() const noexcept { return centroidPagePointers_.data(); }
   int             capacity() const noexcept { return static_cast<int>(linearSumPages_.size()) * summaryEntriesPerPage; }
 
+  void clear() {
+    linearSumPages_.clear();
+    centroidPages_.clear();
+    linearSumPagePointers_ = AsyncDeviceVector<Component*>();
+    centroidPagePointers_  = AsyncDeviceVector<std::uint32_t*>();
+  }
+
  private:
   int                                           numBits_;
   int                                           numWords_;
@@ -105,6 +114,107 @@ template <typename Component> struct TreeStorage {
   int                  maxSummaries;
   int                  numWords;
   int                  numBits;
+};
+
+template <typename Component> struct PartitionedForest {
+  PartitionedForest(const std::uint32_t* fingerprints,
+                    int*                 labels,
+                    const int            numFingerprints,
+                    const int            numTrees,
+                    const int            partitionSize,
+                    const int            numWords,
+                    const cudaStream_t   stream)
+      : numTrees(numTrees),
+        partitionSize(partitionSize),
+        nodeStride(2 * partitionSize + 8),
+        entryStride(3 * partitionSize + 8),
+        totalNodes(static_cast<std::size_t>(numTrees) * nodeStride),
+        totalEntries(static_cast<std::size_t>(numTrees) * entryStride),
+        nodeHeads(totalNodes, stream),
+        nodeSizes(totalNodes, stream),
+        nodeParents(totalNodes, stream),
+        nodeLeaves(totalNodes, stream),
+        entryNext(totalEntries, stream),
+        entryChildren(totalEntries, stream),
+        entryCounts(totalEntries, stream),
+        entrySummarySlots(totalEntries, stream),
+        entryFingerprintIndices(totalEntries, stream),
+        entryClusterIds(totalEntries, stream),
+        roots(numTrees, stream),
+        nodeCursors(numTrees, stream),
+        entryCursors(numTrees, stream),
+        clusterCounts(numTrees, stream),
+        statuses(numTrees, stream),
+        summaryCursor(0, stream),
+        summaryArena(numWords * 32, numWords, stream),
+        fingerprints(fingerprints),
+        labels(labels),
+        numFingerprints(numFingerprints),
+        numWords(numWords) {
+    if (totalEntries > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+      throw std::invalid_argument("BitBIRCH merge workspace exceeds the supported index range");
+    }
+    summaryArena.reserve(summaryEntriesPerPage);
+  }
+
+  TreeStorage<Component> storage() {
+    return {fingerprints,
+            nodeHeads.data(),
+            nodeSizes.data(),
+            nodeParents.data(),
+            nodeLeaves.data(),
+            entryNext.data(),
+            entryChildren.data(),
+            entryCounts.data(),
+            entrySummarySlots.data(),
+            entryFingerprintIndices.data(),
+            summaryArena.linearSumPages(),
+            summaryArena.centroidPages(),
+            entryClusterIds.data(),
+            labels,
+            nullptr,
+            roots.data(),
+            nodeCursors.data(),
+            entryCursors.data(),
+            summaryCursor.data(),
+            clusterCounts.data(),
+            statuses.data(),
+            nodeStride,
+            entryStride,
+            summaryArena.capacity(),
+            numWords,
+            numWords * 32};
+  }
+
+  int                               numTrees;
+  int                               partitionSize;
+  int                               nodeStride;
+  int                               entryStride;
+  std::size_t                       totalNodes;
+  std::size_t                       totalEntries;
+  AsyncDeviceVector<int>            nodeHeads;
+  AsyncDeviceVector<int>            nodeSizes;
+  AsyncDeviceVector<int>            nodeParents;
+  AsyncDeviceVector<std::uint8_t>   nodeLeaves;
+  AsyncDeviceVector<int>            entryNext;
+  AsyncDeviceVector<int>            entryChildren;
+  AsyncDeviceVector<std::uint32_t>  entryCounts;
+  AsyncDeviceVector<int>            entrySummarySlots;
+  AsyncDeviceVector<int>            entryFingerprintIndices;
+  AsyncDeviceVector<int>            entryClusterIds;
+  AsyncDeviceVector<int>            roots;
+  AsyncDeviceVector<int>            nodeCursors;
+  AsyncDeviceVector<int>            entryCursors;
+  AsyncDeviceVector<int>            clusterCounts;
+  AsyncDeviceVector<BitBirchStatus> statuses;
+  AsyncDevicePtr<int>               summaryCursor;
+  PagedSummaryArena<Component>      summaryArena;
+  const std::uint32_t*              fingerprints;
+  int*                              labels;
+  int                               numFingerprints;
+  int                               numWords;
+  std::vector<int>                  hostClusterCounts;
+  int                               totalClusters = 0;
 };
 
 template <typename Component>
@@ -1391,159 +1501,91 @@ __device__ int cooperativeInsertSummary(TreeStorage<Component>&              sto
   return insertedEntry;
 }
 
-template <typename Component, typename PartialComponent>
-__global__ void bitBirchMergePartialTreesKernel(const int                     numFingerprints,
-                                                const int                     partitionSize,
-                                                const int                     partialEntryStride,
-                                                const int                     totalPartialEntries,
-                                                TreeStorage<PartialComponent> sourceStorage,
-                                                const double                  threshold,
-                                                const int                     branchingFactor,
-                                                int*                          partialToFinal,
-                                                int*                          uniqueSourceEntries,
-                                                TreeStorage<Component>        storage) {
-  if (blockIdx.x != 0) {
-    return;
-  }
-  __shared__ CooperativeScratch scratch;
-  if (threadIdx.x == 0) {
-    *storage.status      = BitBirchStatus::Success;
-    *storage.nodeCursor  = 0;
-    *storage.entryCursor = 0;
-    *storage.numClusters = 0;
-    *storage.root        = allocateNode(storage, true, -1);
-    scratch.success      = *storage.root >= 0;
-  }
-  for (int entry = threadIdx.x; entry < totalPartialEntries; entry += blockDim.x) {
-    partialToFinal[entry] = -1;
-  }
-  __syncthreads();
-
-  __shared__ int numUniqueSources;
-  if (threadIdx.x == 0) {
-    numUniqueSources = 0;
-    for (int fingerprintIndex = 0; fingerprintIndex < numFingerprints; ++fingerprintIndex) {
-      const int partition   = fingerprintIndex / partitionSize;
-      const int localEntry  = storage.labels[fingerprintIndex];
-      const int sourceEntry = partition * partialEntryStride + localEntry;
-      if (partialToFinal[sourceEntry] == -1) {
-        partialToFinal[sourceEntry]             = -2;
-        uniqueSourceEntries[numUniqueSources++] = sourceEntry;
-      }
+template <typename Component>
+__global__ void bitBirchCollectForestEntriesKernel(const int              entryStride,
+                                                   const int*             clusterOffsets,
+                                                   int*                   sourceEntries,
+                                                   TreeStorage<Component> storage) {
+  const int tree  = blockIdx.x;
+  auto      local = partitionStorage(storage, tree, 0, entryStride);
+  for (int entry = threadIdx.x; entry < *local.entryCursor; entry += blockDim.x) {
+    const int cluster = local.entryClusterIds[entry];
+    if (cluster >= 0) {
+      sourceEntries[clusterOffsets[tree] + cluster] = tree * entryStride + entry;
     }
   }
+}
+
+template <typename Component, typename SourceComponent>
+__global__ void bitBirchMergeIndexedTreeGroupsKernel(const int                    numInputTrees,
+                                                     const int                    mergeFanIn,
+                                                     const int                    sourceOffset,
+                                                     const int                    batchSize,
+                                                     const bool                   initialize,
+                                                     const int*                   sourceClusterOffsets,
+                                                     const int*                   sourceEntries,
+                                                     TreeStorage<SourceComponent> sourceStorage,
+                                                     const double                 threshold,
+                                                     const int                    branchingFactor,
+                                                     int*                         sourceToOutput,
+                                                     const int                    outputNodeStride,
+                                                     const int                    outputEntryStride,
+                                                     TreeStorage<Component>       outputStorage) {
+  __shared__ CooperativeScratch scratch;
+  const int                     outputTree        = blockIdx.x;
+  const int                     firstInputTree    = outputTree * mergeFanIn;
+  const int                     pastLastInputTree = min(firstInputTree + mergeFanIn, numInputTrees);
+  const int                     groupBegin        = sourceClusterOffsets[firstInputTree];
+  const int                     groupEnd          = sourceClusterOffsets[pastLastInputTree];
+  const int                     begin             = min(groupBegin + sourceOffset, groupEnd);
+  const int                     end               = min(begin + batchSize, groupEnd);
+  auto local = partitionStorage(outputStorage, outputTree, outputNodeStride, outputEntryStride);
+
+  if (initialize && threadIdx.x == 0) {
+    *local.status      = BitBirchStatus::Success;
+    *local.nodeCursor  = 0;
+    *local.entryCursor = 0;
+    *local.numClusters = 0;
+    *local.root        = allocateNode(local, true, -1);
+    scratch.success    = *local.root >= 0;
+  }
   __syncthreads();
 
-  for (int uniqueIndex = 0; uniqueIndex < numUniqueSources; ++uniqueIndex) {
+  for (int sourceIndex = begin; sourceIndex < end; ++sourceIndex) {
     if (threadIdx.x == 0) {
-      scratch.sourceEntry = uniqueSourceEntries[uniqueIndex];
+      scratch.sourceEntry = sourceEntries[sourceIndex];
     }
     __syncthreads();
-    const int finalEntry = cooperativeInsertSummary(storage,
-                                                    sourceStorage,
-                                                    scratch.sourceEntry,
-                                                    sourceStorage.entryCounts[scratch.sourceEntry],
-                                                    threshold,
-                                                    branchingFactor,
-                                                    scratch);
+    const int outputEntry = cooperativeInsertSummary(local,
+                                                     sourceStorage,
+                                                     scratch.sourceEntry,
+                                                     sourceStorage.entryCounts[scratch.sourceEntry],
+                                                     threshold,
+                                                     branchingFactor,
+                                                     scratch);
     if (threadIdx.x == 0) {
-      scratch.selectedEntry = finalEntry;
+      scratch.selectedEntry = outputEntry;
     }
     __syncthreads();
     if (scratch.selectedEntry < 0) {
       return;
     }
     if (threadIdx.x == 0) {
-      partialToFinal[scratch.sourceEntry] = scratch.selectedEntry;
+      sourceToOutput[scratch.sourceEntry] = scratch.selectedEntry;
     }
-  }
-  __syncthreads();
-  for (int fingerprintIndex = threadIdx.x; fingerprintIndex < numFingerprints; fingerprintIndex += blockDim.x) {
-    const int partition              = fingerprintIndex / partitionSize;
-    const int localEntry             = storage.labels[fingerprintIndex];
-    const int sourceEntry            = partition * partialEntryStride + localEntry;
-    storage.labels[fingerprintIndex] = partialToFinal[sourceEntry];
-  }
-  __syncthreads();
-  if (threadIdx.x == 0) {
-    compactLabels(0, numFingerprints, storage);
   }
 }
 
-template <typename Component, typename InputComponent>
-__global__ void bitBirchMergeTreeGroupsKernel(const int                   numFingerprints,
-                                              const int                   inputPartitionSize,
-                                              const int                   inputEntryStride,
-                                              const int                   numInputTrees,
-                                              const int                   mergeFanIn,
-                                              const int                   partitionOffset,
-                                              const int                   batchSize,
-                                              const bool                  initialize,
-                                              TreeStorage<InputComponent> inputStorage,
-                                              const double                threshold,
-                                              const int                   branchingFactor,
-                                              int*                        inputToOutput,
-                                              const int                   outputNodeStride,
-                                              const int                   outputEntryStride,
-                                              TreeStorage<Component>      outputStorage) {
-  __shared__ CooperativeScratch scratch;
-  const int                     outputTree        = blockIdx.x;
-  const int                     firstInputTree    = outputTree * mergeFanIn;
-  const int                     pastLastInputTree = min(firstInputTree + mergeFanIn, numInputTrees);
-  const int                     groupBegin        = firstInputTree * inputPartitionSize;
-  const int                     groupEnd          = min(pastLastInputTree * inputPartitionSize, numFingerprints);
-  const int                     begin             = groupBegin + partitionOffset;
-  const int                     end               = min(begin + batchSize, groupEnd);
-  auto local = partitionStorage(outputStorage, outputTree, outputNodeStride, outputEntryStride);
-
-  if (initialize) {
-    if (threadIdx.x == 0) {
-      *local.status      = BitBirchStatus::Success;
-      *local.nodeCursor  = 0;
-      *local.entryCursor = 0;
-      *local.numClusters = 0;
-      *local.root        = allocateNode(local, true, -1);
-      scratch.success    = *local.root >= 0;
-    }
-    for (int inputEntry = firstInputTree * inputEntryStride + threadIdx.x;
-         inputEntry < pastLastInputTree * inputEntryStride;
-         inputEntry += blockDim.x) {
-      inputToOutput[inputEntry] = -1;
-    }
-  }
-  __syncthreads();
-
-  for (int fingerprintIndex = begin; fingerprintIndex < end; ++fingerprintIndex) {
-    if (threadIdx.x == 0) {
-      const int inputTree   = fingerprintIndex / inputPartitionSize;
-      const int localEntry  = local.labels[fingerprintIndex];
-      scratch.sourceEntry   = inputTree * inputEntryStride + localEntry;
-      scratch.selectedEntry = inputToOutput[scratch.sourceEntry];
-    }
-    __syncthreads();
-    if (scratch.selectedEntry < 0) {
-      const int outputEntry = cooperativeInsertSummary(local,
-                                                       inputStorage,
-                                                       scratch.sourceEntry,
-                                                       inputStorage.entryCounts[scratch.sourceEntry],
-                                                       threshold,
-                                                       branchingFactor,
-                                                       scratch);
-      if (threadIdx.x == 0) {
-        scratch.selectedEntry = outputEntry;
-      }
-      __syncthreads();
-      if (scratch.selectedEntry < 0) {
-        return;
-      }
-      if (threadIdx.x == 0) {
-        inputToOutput[scratch.sourceEntry] = scratch.selectedEntry;
-      }
-    }
-    if (threadIdx.x == 0) {
-      local.labels[fingerprintIndex] = scratch.selectedEntry;
-    }
-    __syncthreads();
+__global__ void bitBirchRemapForestLabelsKernel(const int  numFingerprints,
+                                                const int  inputPartitionSize,
+                                                const int  inputEntryStride,
+                                                const int* sourceToOutput,
+                                                int*       labels) {
+  for (int fingerprintIndex = blockIdx.x * blockDim.x + threadIdx.x; fingerprintIndex < numFingerprints;
+       fingerprintIndex += blockDim.x * gridDim.x) {
+    const int inputTree      = fingerprintIndex / inputPartitionSize;
+    const int sourceEntry    = inputTree * inputEntryStride + labels[fingerprintIndex];
+    labels[fingerprintIndex] = sourceToOutput[sourceEntry];
   }
 }
 
@@ -1607,6 +1649,164 @@ __global__ void bitBirchFinalizeForestKernel(const int              numFingerpri
         centroidWord(local, entry, word);
     }
   }
+}
+
+template <typename Component, typename SourceComponent>
+std::unique_ptr<PartitionedForest<Component>> mergeForestRound(const std::uint32_t*         fingerprints,
+                                                               const int                    numFingerprints,
+                                                               const int                    numWords,
+                                                               const double                 threshold,
+                                                               const int                    branchingFactor,
+                                                               const int                    mergeFanIn,
+                                                               const int                    sourceNumTrees,
+                                                               const int                    sourcePartitionSize,
+                                                               const int                    sourceEntryStride,
+                                                               const std::size_t            sourceTotalEntries,
+                                                               const std::vector<int>&      sourceClusterCounts,
+                                                               TreeStorage<SourceComponent> sourceStorage,
+                                                               int*                         labels,
+                                                               const cudaStream_t           stream) {
+  const ScopedNvtxRange range("BitBIRCH hierarchical merge round");
+  std::vector<int>      sourceClusterOffsets(sourceNumTrees + 1);
+  int                   totalSourceClusters = 0;
+  for (int tree = 0; tree < sourceNumTrees; ++tree) {
+    sourceClusterOffsets[tree] = totalSourceClusters;
+    totalSourceClusters += sourceClusterCounts[tree];
+  }
+  sourceClusterOffsets[sourceNumTrees] = totalSourceClusters;
+
+  AsyncDeviceVector<int> deviceSourceClusterOffsets(sourceNumTrees + 1, stream);
+  AsyncDeviceVector<int> sourceEntries(totalSourceClusters, stream);
+  AsyncDeviceVector<int> sourceToOutput(sourceTotalEntries, stream);
+  deviceSourceClusterOffsets.copyFromHost(sourceClusterOffsets);
+  bitBirchCollectForestEntriesKernel<<<sourceNumTrees, cooperativeBlockSize, 0, stream>>>(
+    sourceEntryStride,
+    deviceSourceClusterOffsets.data(),
+    sourceEntries.data(),
+    sourceStorage);
+  cudaCheckError(cudaGetLastError());
+
+  const int outputNumTrees      = (sourceNumTrees + mergeFanIn - 1) / mergeFanIn;
+  const int outputPartitionSize = static_cast<int>(
+    std::min<std::int64_t>(numFingerprints, static_cast<std::int64_t>(sourcePartitionSize) * mergeFanIn));
+  auto output = std::make_unique<PartitionedForest<Component>>(fingerprints,
+                                                               labels,
+                                                               numFingerprints,
+                                                               outputNumTrees,
+                                                               outputPartitionSize,
+                                                               numWords,
+                                                               stream);
+
+  int maxGroupClusters = 0;
+  for (int outputTree = 0; outputTree < outputNumTrees; ++outputTree) {
+    const int firstInputTree    = outputTree * mergeFanIn;
+    const int pastLastInputTree = std::min(firstInputTree + mergeFanIn, sourceNumTrees);
+    maxGroupClusters =
+      std::max(maxGroupClusters, sourceClusterOffsets[pastLastInputTree] - sourceClusterOffsets[firstInputTree]);
+  }
+
+  constexpr int               reservedSummarySlotsPerInput = 8;
+  int                         hostSummaryCursor            = 0;
+  std::vector<BitBirchStatus> hostStatuses(outputNumTrees);
+  for (int sourceOffset = 0; sourceOffset < maxGroupClusters; sourceOffset += summaryBuildBatchSize) {
+    int batchInputs = 0;
+    for (int outputTree = 0; outputTree < outputNumTrees; ++outputTree) {
+      const int firstInputTree    = outputTree * mergeFanIn;
+      const int pastLastInputTree = std::min(firstInputTree + mergeFanIn, sourceNumTrees);
+      const int groupClusters     = sourceClusterOffsets[pastLastInputTree] - sourceClusterOffsets[firstInputTree];
+      batchInputs += std::max(0, std::min(summaryBuildBatchSize, groupClusters - sourceOffset));
+    }
+    const auto requiredSummaries = static_cast<std::int64_t>(hostSummaryCursor) +
+                                   static_cast<std::int64_t>(reservedSummarySlotsPerInput) * batchInputs +
+                                   4 * outputNumTrees;
+    if (requiredSummaries > std::numeric_limits<int>::max()) {
+      throw std::invalid_argument("BitBIRCH hierarchical summary workspace exceeds the supported index range");
+    }
+    output->summaryArena.reserve(static_cast<int>(requiredSummaries));
+    auto outputStorage = output->storage();
+    bitBirchMergeIndexedTreeGroupsKernel<Component, SourceComponent>
+      <<<outputNumTrees, cooperativeBlockSize, 0, stream>>>(sourceNumTrees,
+                                                            mergeFanIn,
+                                                            sourceOffset,
+                                                            summaryBuildBatchSize,
+                                                            sourceOffset == 0,
+                                                            deviceSourceClusterOffsets.data(),
+                                                            sourceEntries.data(),
+                                                            sourceStorage,
+                                                            threshold,
+                                                            branchingFactor,
+                                                            sourceToOutput.data(),
+                                                            output->nodeStride,
+                                                            output->entryStride,
+                                                            outputStorage);
+    cudaCheckError(cudaGetLastError());
+    output->summaryCursor.get(hostSummaryCursor);
+    output->statuses.copyToHost(hostStatuses);
+    cudaCheckError(cudaStreamSynchronize(stream));
+    for (const auto status : hostStatuses) {
+      if (status != BitBirchStatus::Success) {
+        throw std::runtime_error("BitBIRCH hierarchical merge capacity or structural failure (status " +
+                                 std::to_string(static_cast<int>(status)) + ")");
+      }
+    }
+  }
+
+  constexpr int labelBlockSize = 256;
+  const int     labelBlocks    = std::min(4096, (numFingerprints + labelBlockSize - 1) / labelBlockSize);
+  bitBirchRemapForestLabelsKernel<<<labelBlocks, labelBlockSize, 0, stream>>>(numFingerprints,
+                                                                              sourcePartitionSize,
+                                                                              sourceEntryStride,
+                                                                              sourceToOutput.data(),
+                                                                              labels);
+  cudaCheckError(cudaGetLastError());
+  auto outputStorage = output->storage();
+  bitBirchIndexForestClustersKernel<<<outputNumTrees, 1, 0, stream>>>(numFingerprints,
+                                                                      outputPartitionSize,
+                                                                      output->nodeStride,
+                                                                      output->entryStride,
+                                                                      outputStorage);
+  cudaCheckError(cudaGetLastError());
+  output->hostClusterCounts.resize(outputNumTrees);
+  output->clusterCounts.copyToHost(output->hostClusterCounts);
+  output->statuses.copyToHost(hostStatuses);
+  cudaCheckError(cudaStreamSynchronize(stream));
+  for (int tree = 0; tree < outputNumTrees; ++tree) {
+    if (hostStatuses[tree] != BitBirchStatus::Success) {
+      throw std::runtime_error("BitBIRCH hierarchical merge capacity or structural failure (status " +
+                               std::to_string(static_cast<int>(hostStatuses[tree])) + ")");
+    }
+    output->totalClusters += output->hostClusterCounts[tree];
+  }
+  return output;
+}
+
+template <typename Component>
+void finalizeForest(const int               numFingerprints,
+                    const int               partitionSize,
+                    const int               nodeStride,
+                    const int               entryStride,
+                    const std::vector<int>& clusterCounts,
+                    std::uint32_t*          outputCentroids,
+                    TreeStorage<Component>  storage,
+                    const cudaStream_t      stream) {
+  std::vector<int> clusterOffsets(clusterCounts.size());
+  int              offset = 0;
+  for (std::size_t tree = 0; tree < clusterCounts.size(); ++tree) {
+    clusterOffsets[tree] = offset;
+    offset += clusterCounts[tree];
+  }
+  AsyncDeviceVector<int> deviceClusterOffsets(clusterOffsets.size(), stream);
+  deviceClusterOffsets.copyFromHost(clusterOffsets);
+  bitBirchFinalizeForestKernel<<<static_cast<int>(clusterCounts.size()), cooperativeBlockSize, 0, stream>>>(
+    numFingerprints,
+    partitionSize,
+    nodeStride,
+    entryStride,
+    deviceClusterOffsets.data(),
+    outputCentroids,
+    storage);
+  cudaCheckError(cudaGetLastError());
+  cudaCheckError(cudaStreamSynchronize(stream));
 }
 
 template <typename Component>
@@ -1717,7 +1917,7 @@ BitBirchResult launchSerial(const cuda::std::span<const std::uint32_t> fingerpri
   return result;
 }
 
-template <typename PartialComponent, typename MergeComponent, typename Component>
+template <typename PartialComponent, typename Component>
 BitBirchResult launchPartitioned(const cuda::std::span<const std::uint32_t> fingerprints,
                                  const int                                  numFingerprints,
                                  const int                                  numWords,
@@ -1790,21 +1990,20 @@ BitBirchResult launchPartitioned(const cuda::std::span<const std::uint32_t> fing
                                                partialSummaryArena.capacity(),
                                                numWords,
                                                numBits};
-  const int                     mergeFanIn           = numPartitions > 128 ? 4 : 2;
-  const bool                    useIntermediateMerge = numPartitions > mergeFanIn;
+  constexpr int                 mergeFanIn = 4;
   std::vector<BitBirchStatus>   hostPartialStatuses(numPartitions);
   std::vector<int>              hostPartialClusterCounts(numPartitions);
   int                           totalPartialClusters = 0;
   {
     const ScopedNvtxRange partialRange("BitBIRCH partial-tree construction");
-    constexpr int         buildBatchSize               = 256;
     constexpr int         reservedSummarySlotsPerInput = 8;
     int                   hostPartialSummaryCursor     = 0;
-    for (int partitionOffset = 0; partitionOffset < partitionSize; partitionOffset += buildBatchSize) {
+    for (int partitionOffset = 0; partitionOffset < partitionSize; partitionOffset += summaryBuildBatchSize) {
       int batchInputs = 0;
       for (int partition = 0; partition < numPartitions; ++partition) {
         const int begin = partition * partitionSize + partitionOffset;
-        const int end   = std::min(std::min(begin + buildBatchSize, (partition + 1) * partitionSize), numFingerprints);
+        const int end =
+          std::min(std::min(begin + summaryBuildBatchSize, (partition + 1) * partitionSize), numFingerprints);
         batchInputs += std::max(0, end - begin);
       }
       const auto requiredSummaries = static_cast<std::int64_t>(hostPartialSummaryCursor) +
@@ -1821,7 +2020,7 @@ BitBirchResult launchPartitioned(const cuda::std::span<const std::uint32_t> fing
                                                                                      numFingerprints,
                                                                                      partitionSize,
                                                                                      partitionOffset,
-                                                                                     buildBatchSize,
+                                                                                     summaryBuildBatchSize,
                                                                                      partitionOffset == 0,
                                                                                      nodeStride,
                                                                                      entryStride,
@@ -1853,344 +2052,73 @@ BitBirchResult launchPartitioned(const cuda::std::span<const std::uint32_t> fing
     for (const int clusterCount : hostPartialClusterCounts) {
       totalPartialClusters += clusterCount;
     }
-    constexpr int earlyForestNumerator   = 9;
-    constexpr int earlyForestDenominator = 10;
-    const bool    earlySparseForest =
-      useIntermediateMerge && static_cast<std::int64_t>(totalPartialClusters) * earlyForestDenominator >=
-                                static_cast<std::int64_t>(numFingerprints) * earlyForestNumerator;
-    if (earlySparseForest) {
-      const ScopedNvtxRange finalizeRange("BitBIRCH early sparse-forest finalization");
-      std::vector<int>      clusterOffsets(numPartitions);
-      int                   offset = 0;
-      for (int tree = 0; tree < numPartitions; ++tree) {
-        clusterOffsets[tree] = offset;
-        offset += hostPartialClusterCounts[tree];
-      }
-      AsyncDeviceVector<int> deviceClusterOffsets(numPartitions, stream);
-      deviceClusterOffsets.copyFromHost(clusterOffsets);
-      bitBirchFinalizeForestKernel<<<numPartitions, cooperativeBlockSize, 0, stream>>>(
-        numFingerprints,
-        partitionSize,
-        nodeStride,
-        entryStride,
-        deviceClusterOffsets.data(),
-        returnCentroids ? result.centroids.data() : nullptr,
-        partialStorage);
-      cudaCheckError(cudaGetLastError());
-      cudaCheckError(cudaStreamSynchronize(stream));
-      result.numClusters = totalPartialClusters;
-      return result;
-    }
   }
 
-  const int  numMergeTrees      = useIntermediateMerge ? (numPartitions + mergeFanIn - 1) / mergeFanIn : numPartitions;
-  const int  mergePartitionSize = useIntermediateMerge ? partitionSize * mergeFanIn : partitionSize;
-  const int  mergeNodeStride    = 2 * mergePartitionSize + 8;
-  const int  mergeEntryStride   = 3 * mergePartitionSize + 8;
-  const auto mergeTotalNodes    = static_cast<std::size_t>(numMergeTrees) * mergeNodeStride;
-  const auto mergeTotalEntries  = static_cast<std::size_t>(numMergeTrees) * mergeEntryStride;
-  if (mergeTotalEntries > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-    throw std::invalid_argument("BitBIRCH intermediate merge workspace exceeds the supported index range");
+  auto current = mergeForestRound<Component, PartialComponent>(fingerprints.data(),
+                                                               numFingerprints,
+                                                               numWords,
+                                                               threshold,
+                                                               branchingFactor,
+                                                               mergeFanIn,
+                                                               numPartitions,
+                                                               partitionSize,
+                                                               entryStride,
+                                                               totalEntries,
+                                                               hostPartialClusterCounts,
+                                                               partialStorage,
+                                                               result.clusterIds.data(),
+                                                               stream);
+
+  partialNodeHeads               = AsyncDeviceVector<int>();
+  partialNodeSizes               = AsyncDeviceVector<int>();
+  partialNodeParents             = AsyncDeviceVector<int>();
+  partialNodeLeaves              = AsyncDeviceVector<std::uint8_t>();
+  partialEntryNext               = AsyncDeviceVector<int>();
+  partialEntryChildren           = AsyncDeviceVector<int>();
+  partialEntryCounts             = AsyncDeviceVector<std::uint32_t>();
+  partialEntrySummarySlots       = AsyncDeviceVector<int>();
+  partialEntryFingerprintIndices = AsyncDeviceVector<int>();
+  partialEntryClusterIds         = AsyncDeviceVector<int>();
+  partialRoots                   = AsyncDeviceVector<int>();
+  partialNodeCursors             = AsyncDeviceVector<int>();
+  partialEntryCursors            = AsyncDeviceVector<int>();
+  partialClusterCounts           = AsyncDeviceVector<int>();
+  partialStatuses                = AsyncDeviceVector<BitBirchStatus>();
+  partialSummaryArena.clear();
+
+  int previousClusters = totalPartialClusters;
+  while (current->numTrees > 1 && current->totalClusters < previousClusters) {
+    previousClusters = current->totalClusters;
+    auto next        = mergeForestRound<Component, Component>(fingerprints.data(),
+                                                       numFingerprints,
+                                                       numWords,
+                                                       threshold,
+                                                       branchingFactor,
+                                                       mergeFanIn,
+                                                       current->numTrees,
+                                                       current->partitionSize,
+                                                       current->entryStride,
+                                                       current->totalEntries,
+                                                       current->hostClusterCounts,
+                                                       current->storage(),
+                                                       result.clusterIds.data(),
+                                                       stream);
+    current          = std::move(next);
   }
 
-  AsyncDeviceVector<int>            mergeNodeHeads(useIntermediateMerge ? mergeTotalNodes : 0, stream);
-  AsyncDeviceVector<int>            mergeNodeSizes(useIntermediateMerge ? mergeTotalNodes : 0, stream);
-  AsyncDeviceVector<int>            mergeNodeParents(useIntermediateMerge ? mergeTotalNodes : 0, stream);
-  AsyncDeviceVector<std::uint8_t>   mergeNodeLeaves(useIntermediateMerge ? mergeTotalNodes : 0, stream);
-  AsyncDeviceVector<int>            mergeEntryNext(useIntermediateMerge ? mergeTotalEntries : 0, stream);
-  AsyncDeviceVector<int>            mergeEntryChildren(useIntermediateMerge ? mergeTotalEntries : 0, stream);
-  AsyncDeviceVector<std::uint32_t>  mergeEntryCounts(useIntermediateMerge ? mergeTotalEntries : 0, stream);
-  AsyncDeviceVector<int>            mergeEntrySummarySlots(useIntermediateMerge ? mergeTotalEntries : 0, stream);
-  AsyncDeviceVector<int>            mergeEntryFingerprintIndices(useIntermediateMerge ? mergeTotalEntries : 0, stream);
-  AsyncDeviceVector<int>            mergeEntryClusterIds(useIntermediateMerge ? mergeTotalEntries : 0, stream);
-  AsyncDeviceVector<int>            mergeRoots(useIntermediateMerge ? numMergeTrees : 0, stream);
-  AsyncDeviceVector<int>            mergeNodeCursors(useIntermediateMerge ? numMergeTrees : 0, stream);
-  AsyncDeviceVector<int>            mergeEntryCursors(useIntermediateMerge ? numMergeTrees : 0, stream);
-  AsyncDeviceVector<int>            mergeClusterCounts(useIntermediateMerge ? numMergeTrees : 0, stream);
-  AsyncDeviceVector<BitBirchStatus> mergeStatuses(useIntermediateMerge ? numMergeTrees : 0, stream);
-  AsyncDeviceVector<int>            partialToMerge(useIntermediateMerge ? totalEntries : 0, stream);
-  AsyncDevicePtr<int>               mergeSummaryCursor(0, stream);
-  PagedSummaryArena<MergeComponent> mergeSummaryArena(numBits, numWords, stream);
-  int                               totalMergeClusters = 0;
-  if (useIntermediateMerge) {
-    mergeSummaryArena.reserve(summaryEntriesPerPage);
-  }
-  TreeStorage<MergeComponent> mergeStorage{fingerprints.data(),
-                                           mergeNodeHeads.data(),
-                                           mergeNodeSizes.data(),
-                                           mergeNodeParents.data(),
-                                           mergeNodeLeaves.data(),
-                                           mergeEntryNext.data(),
-                                           mergeEntryChildren.data(),
-                                           mergeEntryCounts.data(),
-                                           mergeEntrySummarySlots.data(),
-                                           mergeEntryFingerprintIndices.data(),
-                                           mergeSummaryArena.linearSumPages(),
-                                           mergeSummaryArena.centroidPages(),
-                                           mergeEntryClusterIds.data(),
-                                           result.clusterIds.data(),
-                                           nullptr,
-                                           mergeRoots.data(),
-                                           mergeNodeCursors.data(),
-                                           mergeEntryCursors.data(),
-                                           mergeSummaryCursor.data(),
-                                           mergeClusterCounts.data(),
-                                           mergeStatuses.data(),
-                                           mergeNodeStride,
-                                           mergeEntryStride,
-                                           mergeSummaryArena.capacity(),
-                                           numWords,
-                                           numBits};
-  if (useIntermediateMerge) {
-    const ScopedNvtxRange       intermediateRange("BitBIRCH merge round 1");
-    constexpr int               buildBatchSize               = 256;
-    constexpr int               reservedSummarySlotsPerInput = 8;
-    int                         hostMergeSummaryCursor       = 0;
-    std::vector<BitBirchStatus> hostMergeStatuses(numMergeTrees);
-    for (int partitionOffset = 0; partitionOffset < mergePartitionSize; partitionOffset += buildBatchSize) {
-      int batchInputs = 0;
-      for (int tree = 0; tree < numMergeTrees; ++tree) {
-        const int begin = tree * mergePartitionSize + partitionOffset;
-        const int end   = std::min(std::min(begin + buildBatchSize, (tree + 1) * mergePartitionSize), numFingerprints);
-        batchInputs += std::max(0, end - begin);
-      }
-      const auto requiredSummaries = static_cast<std::int64_t>(hostMergeSummaryCursor) +
-                                     static_cast<std::int64_t>(reservedSummarySlotsPerInput) * batchInputs +
-                                     4 * numMergeTrees;
-      if (requiredSummaries > std::numeric_limits<int>::max()) {
-        throw std::invalid_argument("BitBIRCH merge summary workspace exceeds the supported index range");
-      }
-      mergeSummaryArena.reserve(static_cast<int>(requiredSummaries));
-      mergeStorage.linearSumPages = mergeSummaryArena.linearSumPages();
-      mergeStorage.centroidPages  = mergeSummaryArena.centroidPages();
-      mergeStorage.maxSummaries   = mergeSummaryArena.capacity();
-      bitBirchMergeTreeGroupsKernel<MergeComponent, PartialComponent>
-        <<<numMergeTrees, cooperativeBlockSize, 0, stream>>>(numFingerprints,
-                                                             partitionSize,
-                                                             entryStride,
-                                                             numPartitions,
-                                                             mergeFanIn,
-                                                             partitionOffset,
-                                                             buildBatchSize,
-                                                             partitionOffset == 0,
-                                                             partialStorage,
-                                                             threshold,
-                                                             branchingFactor,
-                                                             partialToMerge.data(),
-                                                             mergeNodeStride,
-                                                             mergeEntryStride,
-                                                             mergeStorage);
-      cudaCheckError(cudaGetLastError());
-      mergeSummaryCursor.get(hostMergeSummaryCursor);
-      mergeStatuses.copyToHost(hostMergeStatuses);
-      cudaCheckError(cudaStreamSynchronize(stream));
-      for (const auto status : hostMergeStatuses) {
-        if (status != BitBirchStatus::Success) {
-          throw std::runtime_error("BitBIRCH intermediate merge-tree capacity or structural failure (status " +
-                                   std::to_string(static_cast<int>(status)) + ")");
-        }
-      }
-    }
-    bitBirchIndexForestClustersKernel<<<numMergeTrees, 1, 0, stream>>>(numFingerprints,
-                                                                       mergePartitionSize,
-                                                                       mergeNodeStride,
-                                                                       mergeEntryStride,
-                                                                       mergeStorage);
-    cudaCheckError(cudaGetLastError());
-    std::vector<int> hostMergeClusterCounts(numMergeTrees);
-    mergeStatuses.copyToHost(hostMergeStatuses);
-    mergeClusterCounts.copyToHost(hostMergeClusterCounts);
-    cudaCheckError(cudaStreamSynchronize(stream));
-    for (const auto status : hostMergeStatuses) {
-      if (status != BitBirchStatus::Success) {
-        throw std::runtime_error("BitBIRCH intermediate merge-tree capacity or structural failure (status " +
-                                 std::to_string(static_cast<int>(status)) + ")");
-      }
-    }
-    std::vector<int> clusterOffsets(numMergeTrees);
-    for (int tree = 0; tree < numMergeTrees; ++tree) {
-      clusterOffsets[tree] = totalMergeClusters;
-      totalMergeClusters += hostMergeClusterCounts[tree];
-    }
-    constexpr int sparseForestNumerator   = 1;
-    constexpr int sparseForestDenominator = 2;
-    const bool    sparseForest            = totalMergeClusters > std::numeric_limits<std::uint16_t>::max() ||
-                              static_cast<std::int64_t>(totalMergeClusters) * sparseForestDenominator >=
-                                static_cast<std::int64_t>(numFingerprints) * sparseForestNumerator;
-    if (sparseForest) {
-      const ScopedNvtxRange  finalizeRange("BitBIRCH sparse-forest finalization");
-      AsyncDeviceVector<int> deviceClusterOffsets(numMergeTrees, stream);
-      deviceClusterOffsets.copyFromHost(clusterOffsets);
-      bitBirchFinalizeForestKernel<<<numMergeTrees, cooperativeBlockSize, 0, stream>>>(
-        numFingerprints,
-        mergePartitionSize,
-        mergeNodeStride,
-        mergeEntryStride,
-        deviceClusterOffsets.data(),
-        returnCentroids ? result.centroids.data() : nullptr,
-        mergeStorage);
-      cudaCheckError(cudaGetLastError());
-      cudaCheckError(cudaStreamSynchronize(stream));
-      result.numClusters = totalMergeClusters;
-      return result;
-    }
-  }
-
-  const int                        finalMaxNodes   = 2 * numFingerprints + 8;
-  const int                        finalMaxEntries = 3 * numFingerprints + 8;
-  AsyncDeviceVector<int>           finalNodeHeads(finalMaxNodes, stream);
-  AsyncDeviceVector<int>           finalNodeSizes(finalMaxNodes, stream);
-  AsyncDeviceVector<int>           finalNodeParents(finalMaxNodes, stream);
-  AsyncDeviceVector<std::uint8_t>  finalNodeLeaves(finalMaxNodes, stream);
-  AsyncDeviceVector<int>           finalEntryNext(finalMaxEntries, stream);
-  AsyncDeviceVector<int>           finalEntryChildren(finalMaxEntries, stream);
-  AsyncDeviceVector<std::uint32_t> finalEntryCounts(finalMaxEntries, stream);
-  AsyncDeviceVector<int>           finalEntrySummarySlots(finalMaxEntries, stream);
-  AsyncDeviceVector<int>           finalEntryFingerprintIndices(finalMaxEntries, stream);
-  AsyncDeviceVector<int>           finalEntryClusterIds(finalMaxEntries, stream);
-  AsyncDeviceVector<int>           partialToFinal(useIntermediateMerge ? mergeTotalEntries : totalEntries, stream);
-  AsyncDeviceVector<int>           uniqueSourceEntries(numFingerprints, stream);
-  AsyncDevicePtr<int>              finalRoot(0, stream);
-  AsyncDevicePtr<int>              finalNodeCursor(0, stream);
-  AsyncDevicePtr<int>              finalEntryCursor(0, stream);
-  AsyncDevicePtr<int>              finalSummaryCursor(0, stream);
-  AsyncDevicePtr<int>              finalClusterCount(0, stream);
-  AsyncDevicePtr<BitBirchStatus>   finalStatus(BitBirchStatus::Success, stream);
-  PagedSummaryArena<Component>     finalSummaryArena(numBits, numWords, stream);
-  const int  finalSourceClusters = useIntermediateMerge ? totalMergeClusters : totalPartialClusters;
-  const auto finalSummaryCapacity =
-    std::min<std::size_t>(finalMaxEntries, 2 * static_cast<std::size_t>(finalSourceClusters) + 4);
-  finalSummaryArena.reserve(static_cast<int>(finalSummaryCapacity));
-  TreeStorage<Component> finalStorage{fingerprints.data(),
-                                      finalNodeHeads.data(),
-                                      finalNodeSizes.data(),
-                                      finalNodeParents.data(),
-                                      finalNodeLeaves.data(),
-                                      finalEntryNext.data(),
-                                      finalEntryChildren.data(),
-                                      finalEntryCounts.data(),
-                                      finalEntrySummarySlots.data(),
-                                      finalEntryFingerprintIndices.data(),
-                                      finalSummaryArena.linearSumPages(),
-                                      finalSummaryArena.centroidPages(),
-                                      finalEntryClusterIds.data(),
-                                      result.clusterIds.data(),
-                                      returnCentroids ? result.centroids.data() : nullptr,
-                                      finalRoot.data(),
-                                      finalNodeCursor.data(),
-                                      finalEntryCursor.data(),
-                                      finalSummaryCursor.data(),
-                                      finalClusterCount.data(),
-                                      finalStatus.data(),
-                                      finalMaxNodes,
-                                      finalMaxEntries,
-                                      finalSummaryArena.capacity(),
-                                      numWords,
-                                      numBits};
-  BitBirchStatus         hostFinalStatus{};
   {
-    const ScopedNvtxRange mergeRange(useIntermediateMerge ? "BitBIRCH merge round 2" : "BitBIRCH merge round 1");
-    if (useIntermediateMerge) {
-      bitBirchMergePartialTreesKernel<Component, MergeComponent>
-        <<<1, cooperativeBlockSize, 0, stream>>>(numFingerprints,
-                                                 mergePartitionSize,
-                                                 mergeEntryStride,
-                                                 static_cast<int>(mergeTotalEntries),
-                                                 mergeStorage,
-                                                 threshold,
-                                                 branchingFactor,
-                                                 partialToFinal.data(),
-                                                 uniqueSourceEntries.data(),
-                                                 finalStorage);
-    } else {
-      bitBirchMergePartialTreesKernel<Component, PartialComponent>
-        <<<1, cooperativeBlockSize, 0, stream>>>(numFingerprints,
-                                                 partitionSize,
-                                                 entryStride,
-                                                 static_cast<int>(totalEntries),
-                                                 partialStorage,
-                                                 threshold,
-                                                 branchingFactor,
-                                                 partialToFinal.data(),
-                                                 uniqueSourceEntries.data(),
-                                                 finalStorage);
-    }
-    cudaCheckError(cudaGetLastError());
-    finalStatus.get(hostFinalStatus);
-    finalClusterCount.get(result.numClusters);
-    cudaCheckError(cudaStreamSynchronize(stream));
+    const ScopedNvtxRange finalizeRange("BitBIRCH forest finalization");
+    finalizeForest(numFingerprints,
+                   current->partitionSize,
+                   current->nodeStride,
+                   current->entryStride,
+                   current->hostClusterCounts,
+                   returnCentroids ? result.centroids.data() : nullptr,
+                   current->storage(),
+                   stream);
   }
-  if (hostFinalStatus != BitBirchStatus::Success) {
-    throw std::runtime_error("BitBIRCH merge-tree capacity or structural failure (status " +
-                             std::to_string(static_cast<int>(hostFinalStatus)) + ")");
-  }
+  result.numClusters = current->totalClusters;
   return result;
-}
-
-template <typename PartialComponent, typename Component>
-BitBirchResult launchPartitionedForMerge(const cuda::std::span<const std::uint32_t> fingerprints,
-                                         const int                                  numFingerprints,
-                                         const int                                  numWords,
-                                         const double                               threshold,
-                                         const int                                  branchingFactor,
-                                         const BitBirchMergeCriterion               mergeCriterion,
-                                         const double                               tolerance,
-                                         const int                                  numPartitions,
-                                         const bool                                 returnCentroids,
-                                         const cudaStream_t                         stream) {
-  const int partitionSize = (numFingerprints + numPartitions - 1) / numPartitions;
-  const int mergeFanIn    = numPartitions > 128 ? 4 : 2;
-  const int maxMergeCount = std::min(numFingerprints, partitionSize * mergeFanIn);
-  if constexpr (sizeof(Component) == sizeof(std::uint8_t)) {
-    return launchPartitioned<PartialComponent, std::uint8_t, Component>(fingerprints,
-                                                                        numFingerprints,
-                                                                        numWords,
-                                                                        threshold,
-                                                                        branchingFactor,
-                                                                        mergeCriterion,
-                                                                        tolerance,
-                                                                        numPartitions,
-                                                                        returnCentroids,
-                                                                        stream);
-  }
-  if (maxMergeCount <= std::numeric_limits<std::uint8_t>::max()) {
-    return launchPartitioned<PartialComponent, std::uint8_t, Component>(fingerprints,
-                                                                        numFingerprints,
-                                                                        numWords,
-                                                                        threshold,
-                                                                        branchingFactor,
-                                                                        mergeCriterion,
-                                                                        tolerance,
-                                                                        numPartitions,
-                                                                        returnCentroids,
-                                                                        stream);
-  }
-  if (maxMergeCount <= std::numeric_limits<std::uint16_t>::max()) {
-    return launchPartitioned<PartialComponent, std::uint16_t, Component>(fingerprints,
-                                                                         numFingerprints,
-                                                                         numWords,
-                                                                         threshold,
-                                                                         branchingFactor,
-                                                                         mergeCriterion,
-                                                                         tolerance,
-                                                                         numPartitions,
-                                                                         returnCentroids,
-                                                                         stream);
-  }
-  if constexpr (sizeof(Component) == sizeof(std::uint16_t)) {
-    throw std::logic_error("BitBIRCH merge component dispatch exceeded the final component width");
-  } else {
-    return launchPartitioned<PartialComponent, std::uint32_t, Component>(fingerprints,
-                                                                         numFingerprints,
-                                                                         numWords,
-                                                                         threshold,
-                                                                         branchingFactor,
-                                                                         mergeCriterion,
-                                                                         tolerance,
-                                                                         numPartitions,
-                                                                         returnCentroids,
-                                                                         stream);
-  }
 }
 
 template <typename Component>
@@ -2206,63 +2134,63 @@ BitBirchResult launchPartitionedForFinal(const cuda::std::span<const std::uint32
                                          const cudaStream_t                         stream) {
   const int partitionSize = (numFingerprints + numPartitions - 1) / numPartitions;
   if constexpr (sizeof(Component) == sizeof(std::uint8_t)) {
-    return launchPartitionedForMerge<std::uint8_t, Component>(fingerprints,
-                                                              numFingerprints,
-                                                              numWords,
-                                                              threshold,
-                                                              branchingFactor,
-                                                              mergeCriterion,
-                                                              tolerance,
-                                                              numPartitions,
-                                                              returnCentroids,
-                                                              stream);
+    return launchPartitioned<std::uint8_t, Component>(fingerprints,
+                                                      numFingerprints,
+                                                      numWords,
+                                                      threshold,
+                                                      branchingFactor,
+                                                      mergeCriterion,
+                                                      tolerance,
+                                                      numPartitions,
+                                                      returnCentroids,
+                                                      stream);
   } else {
     if (partitionSize <= std::numeric_limits<std::uint8_t>::max()) {
-      return launchPartitionedForMerge<std::uint8_t, Component>(fingerprints,
-                                                                numFingerprints,
-                                                                numWords,
-                                                                threshold,
-                                                                branchingFactor,
-                                                                mergeCriterion,
-                                                                tolerance,
-                                                                numPartitions,
-                                                                returnCentroids,
-                                                                stream);
+      return launchPartitioned<std::uint8_t, Component>(fingerprints,
+                                                        numFingerprints,
+                                                        numWords,
+                                                        threshold,
+                                                        branchingFactor,
+                                                        mergeCriterion,
+                                                        tolerance,
+                                                        numPartitions,
+                                                        returnCentroids,
+                                                        stream);
     }
     if constexpr (sizeof(Component) == sizeof(std::uint16_t)) {
-      return launchPartitionedForMerge<std::uint16_t, Component>(fingerprints,
-                                                                 numFingerprints,
-                                                                 numWords,
-                                                                 threshold,
-                                                                 branchingFactor,
-                                                                 mergeCriterion,
-                                                                 tolerance,
-                                                                 numPartitions,
-                                                                 returnCentroids,
-                                                                 stream);
+      return launchPartitioned<std::uint16_t, Component>(fingerprints,
+                                                         numFingerprints,
+                                                         numWords,
+                                                         threshold,
+                                                         branchingFactor,
+                                                         mergeCriterion,
+                                                         tolerance,
+                                                         numPartitions,
+                                                         returnCentroids,
+                                                         stream);
     } else {
       if (partitionSize <= std::numeric_limits<std::uint16_t>::max()) {
-        return launchPartitionedForMerge<std::uint16_t, Component>(fingerprints,
-                                                                   numFingerprints,
-                                                                   numWords,
-                                                                   threshold,
-                                                                   branchingFactor,
-                                                                   mergeCriterion,
-                                                                   tolerance,
-                                                                   numPartitions,
-                                                                   returnCentroids,
-                                                                   stream);
+        return launchPartitioned<std::uint16_t, Component>(fingerprints,
+                                                           numFingerprints,
+                                                           numWords,
+                                                           threshold,
+                                                           branchingFactor,
+                                                           mergeCriterion,
+                                                           tolerance,
+                                                           numPartitions,
+                                                           returnCentroids,
+                                                           stream);
       }
-      return launchPartitionedForMerge<std::uint32_t, Component>(fingerprints,
-                                                                 numFingerprints,
-                                                                 numWords,
-                                                                 threshold,
-                                                                 branchingFactor,
-                                                                 mergeCriterion,
-                                                                 tolerance,
-                                                                 numPartitions,
-                                                                 returnCentroids,
-                                                                 stream);
+      return launchPartitioned<std::uint32_t, Component>(fingerprints,
+                                                         numFingerprints,
+                                                         numWords,
+                                                         threshold,
+                                                         branchingFactor,
+                                                         mergeCriterion,
+                                                         tolerance,
+                                                         numPartitions,
+                                                         returnCentroids,
+                                                         stream);
     }
   }
 }

@@ -221,3 +221,35 @@ linearly from 100k to 1M. The sparse and singleton-heavy cases scale by 15.9x
 and 15.0x respectively for 10x more inputs; further work should focus on page
 allocation overhead and the parallel forest finalization path without restoring
 speculative `N * bits` summary slabs.
+
+## Post-commit memory correction
+
+The preceding 1M paged results do not describe the committed allocation path
+and must not be used as its baseline. Automatic partitioning limits a partial
+tree to 255 inputs, while the committed incremental builder used a 256-input
+batch and reserved eight possible materialized summaries per input before each
+launch. At 1M inputs the first partial launch therefore attempted to reserve
+about eight million 1024-bit 8-bit summaries (roughly 9.2 GB) and failed before
+useful kernel work. Nsight Systems recorded the CUDA pool reaching 5.91 GB
+before `cudaMallocAsync` returned out of memory.
+
+Reducing the partial and intermediate construction batch to 32 makes page
+growth depend on observed materialization between launches. A successful 1M,
+threshold-0.25 Nsight Systems run peaked at a 2.85 GB CUDA pool and took 5.54 s
+under profiling. NVTX attribution was 0.664 s for partial-tree construction,
+4.871 s for the intermediate merge, and 13 microseconds for sparse-forest
+finalization. The intermediate merge accounted for 88.4% of GPU kernel time.
+The sm89 resource report remained at zero stack and zero spills.
+
+An observed-partial-compression experiment selected merge fan-in 2 when the
+partial forest retained at least half of the inputs. At 1M it produced
+673.040/9,501.791/3,351.413/5,174.188 ms and
+1/7,595/618,075/1,000,000 clusters for thresholds 0.10/0.15/0.25/0.99. A later
+fixed-four-tree run produced 679.786/9,681.396/5,495.668/5,174.305 ms and
+1/7,772/577,093/1,000,000 clusters. Thus fan-in 2 improved the threshold-0.25
+runtime but changed its clustering result by about 7%; it was not uniquely
+responsible for the slow threshold-0.15 case. The experiment was rejected
+because data-dependent fan-in changes algorithmic behavior and cannot provide
+a generic scaling rule. The current uncommitted work replaces both paths with
+repeated fixed-width hierarchical merge rounds; it has not yet produced a
+valid performance baseline.
