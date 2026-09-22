@@ -273,7 +273,7 @@ same selector.
 
 If any input molecule is `None` or lacks MMFF/UFF atom types, the call raises `ValueError`. The exception's `args[1]` is a dict with keys `"none"` and `"no_params"` listing the offending indices - useful for filtering a noisy input set.
 
-### Conformer RMSD and Butina clustering
+### Conformer RMSD and matrix clustering
 
 ```python
 import torch
@@ -314,6 +314,30 @@ their CUDA tensors without a host copy or `.numpy()` to synchronize and copy a
 field to the host.
 
 `GetConformerRMSMatrix(mol)` and `GetConformerRMSMatrixBatch(mols)` default to `output_format="condensed"`, returning `AsyncGpuResult` objects that wrap RDKit-style flat vectors of length `N * (N - 1) // 2`. Use `output_format="square"` when chaining into `butina()` or any other API that expects an `N x N` distance matrix. Both forms live on the GPU; call `.numpy()` on condensed results or synchronize before moving square tensors to the CPU.
+
+The same full-square float64 matrix convention applies to `leader`, `maxmin`,
+and `dise`. Their fused counterparts avoid the matrix: `fused_leader`,
+`fused_maxmin`, and `fused_dise` compute packed-fingerprint similarity on
+demand. Use provider objects from `nvmolkit.similarity` when configuration
+should be explicit:
+
+```python
+from nvmolkit.clustering import OutputMode, fused_maxmin
+from nvmolkit.similarity import TanimotoSimilarity
+
+indices, last_distance = fused_maxmin(
+    packed_fingerprints,
+    pick_size=100,
+    metric=TanimotoSimilarity(),
+    seed=23,
+    output=OutputMode.RDKIT,
+)
+```
+
+All cutoffs are distances. Fused providers convert with
+`distance = 1 - similarity`. Tanimoto and cosine providers work with every
+fused clustering/selection API. Directed `AAPSimilarity` works only with
+`fused_leader` and `fused_dise`; do not pass it to Butina or MaxMin.
 
 ### Atom-Atom Path similarity and directed sphere exclusion clustering
 

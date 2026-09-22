@@ -39,7 +39,12 @@ _RDKitClusters = tuple[tuple[int, ...], ...]
 
 
 class OutputMode(Enum):
-    """Host-compatible or device-resident algorithm output."""
+    """Select a host-compatible or device-resident algorithm result.
+
+    ``RDKIT`` materializes tuples of input indices on the host. ``DEVICE``
+    returns result objects containing :class:`~nvmolkit.types.AsyncGpuResult`
+    buffers on the active CUDA device.
+    """
 
     RDKIT = "rdkit"
     DEVICE = "device"
@@ -64,7 +69,11 @@ class ClusterDeviceResult:
 class SelectionDeviceResult:
     """GPU-resident ordered selection result.
 
-    ``last_distance`` is populated by MaxMin and is ``None`` for Leader.
+    Attributes:
+        indices: Ordered selected indices as an int32 GPU buffer.
+        last_distance: Separation of the last MaxMin addition, or ``None`` for
+            Leader. MaxMin uses ``-1`` when no candidate was added after the
+            initial selection.
     """
 
     indices: AsyncGpuResult
@@ -176,6 +185,22 @@ def leader(
     to the remaining candidates, so directed matrices are supported. Items at
     distance ``<= cutoff`` are excluded. ``pick_size=0`` selects until no
     candidates remain.
+
+    Args:
+        distance_matrix: Full square float64 distance matrix. CPU inputs are
+            copied to CUDA.
+        cutoff: Inclusive exclusion distance. Must be finite and non-negative.
+        pick_size: Maximum number of leaders, or zero for no explicit limit.
+        first_picks: Leader indices to process first, in the supplied order.
+        stream: CUDA stream to use. If omitted, uses the current stream.
+        output: Device-resident or RDKit-compatible host output.
+
+    Returns:
+        A :class:`SelectionDeviceResult` in device mode, or an ordered tuple of
+        selected indices in RDKit mode.
+
+    Note:
+        The control loop synchronizes ``stream`` between selection passes.
     """
     _validate_output(output)
     matrix, active_stream = _prepare_distance_matrix(distance_matrix, stream)
@@ -205,6 +230,24 @@ def fused_leader(
     Packed fingerprints support Tanimoto and cosine similarity. RDKit
     molecules use :class:`~nvmolkit.similarity.AAPSimilarity`, whose directed
     score is evaluated from each selected leader to each candidate.
+
+    Args:
+        x: Packed fingerprints for Tanimoto/cosine, or RDKit molecules for AAP.
+        cutoff: Inclusive distance cutoff in ``[0, 1]``.
+        metric: Similarity provider configuration or packed-provider string.
+        pick_size: Maximum number of leaders, or zero for no explicit limit.
+        first_picks: Leader indices to process first, in the supplied order.
+        stream: CUDA stream to use. If omitted, uses the current stream.
+        output: Device-resident or RDKit-compatible host output.
+
+    Returns:
+        A :class:`SelectionDeviceResult` in device mode, or an ordered tuple of
+        selected indices in RDKit mode.
+
+    Note:
+        This function stores ``O(N)`` algorithm state and does not materialize
+        an ``N x N`` distance matrix. The control loop synchronizes ``stream``
+        between selection passes.
     """
     _validate_output(output)
     if not 0 <= cutoff <= 1:
@@ -254,6 +297,27 @@ def maxmin(
     The first pick uses RDKit's Boost MT19937 behavior when ``first_picks`` is
     empty. If ``threshold`` is provided, selection stops when the next item's
     distance to its nearest pick is at most that value.
+
+    Args:
+        distance_matrix: Full square float64 distance matrix. CPU inputs are
+            copied to CUDA.
+        pick_size: Target number of picks. Must be positive and no larger than
+            the input size.
+        first_picks: Initial picks in the supplied order.
+        seed: RDKit-compatible random seed used when ``first_picks`` is empty.
+            A negative value seeds from system entropy.
+        threshold: Optional early-stop distance. The next candidate is not
+            added when its nearest-pick distance is at most this value.
+        stream: CUDA stream to use. If omitted, uses the current stream.
+        output: Device-resident or RDKit-compatible host output.
+
+    Returns:
+        A :class:`SelectionDeviceResult` in device mode. RDKit mode returns
+        ``(indices, last_distance)``.
+
+    Note:
+        MaxMin normally assumes symmetric distances. The control loop
+        synchronizes ``stream`` between selection passes.
     """
     _validate_output(output)
     matrix, active_stream = _prepare_distance_matrix(distance_matrix, stream)
@@ -281,7 +345,28 @@ def fused_maxmin(
     *,
     output: OutputMode = OutputMode.DEVICE,
 ) -> SelectionDeviceResult | tuple[tuple[int, ...], float]:
-    """Run MaxMin directly on packed fingerprints without an NxN matrix."""
+    """Run MaxMin directly on packed fingerprints without an ``N x N`` matrix.
+
+    Args:
+        x: Packed int32 or uint32 fingerprints with shape ``(N, num_words)``.
+        pick_size: Target number of picks. Must be positive and no larger than
+            the input size.
+        metric: Tanimoto or cosine provider configuration/string. Directed AAP
+            is not supported by MaxMin.
+        first_picks: Initial picks in the supplied order.
+        seed: RDKit-compatible random seed used when ``first_picks`` is empty.
+        threshold: Optional early-stop distance in ``[0, 1]``.
+        stream: CUDA stream to use. If omitted, uses the current stream.
+        output: Device-resident or RDKit-compatible host output.
+
+    Returns:
+        A :class:`SelectionDeviceResult` in device mode. RDKit mode returns
+        ``(indices, last_distance)``.
+
+    Note:
+        This function stores ``O(N)`` algorithm state. The control loop
+        synchronizes ``stream`` between selection passes.
+    """
     _validate_output(output)
     metric_name = _packed_metric_name(metric)
     native_threshold = -1.0 if threshold is None else threshold
@@ -307,7 +392,30 @@ def dise(
     *,
     output: OutputMode = OutputMode.DEVICE,
 ) -> ClusterDeviceResult | _RDKitClusters:
-    """Cluster an ordered distance matrix with directed sphere exclusion."""
+    """Cluster an ordered distance matrix with directed sphere exclusion.
+
+    Rows are interpreted as distances from a selected centroid to candidates,
+    so the matrix may be directed. Centroids are selected in input order using
+    inclusive Leader exclusion.
+
+    Args:
+        distance_matrix: Full square float64 distance matrix. CPU inputs are
+            copied to CUDA.
+        cutoff: Inclusive sphere-exclusion distance. Must be finite and
+            non-negative.
+        assignment: ``"first"`` keeps the first qualifying centroid;
+            ``"nearest"`` assigns each non-centroid to its nearest centroid.
+        stream: CUDA stream to use. If omitted, uses the current stream.
+        output: Device-resident or RDKit-compatible host output.
+
+    Returns:
+        A :class:`ClusterDeviceResult` in device mode, or centroid-first
+        cluster tuples ordered by descending size in RDKit mode.
+
+    Note:
+        The implementation synchronizes ``stream`` during centroid selection
+        and while constructing the result.
+    """
     _validate_output(output)
     if assignment not in ("first", "nearest"):
         raise ValueError(f"assignment must be one of ['first', 'nearest'], got {assignment!r}")
@@ -335,6 +443,24 @@ def fused_dise(
 
     Input order defines centroid priority. AAP is directed; packed Tanimoto and
     cosine providers are symmetric.
+
+    Args:
+        x: Packed fingerprints for Tanimoto/cosine, or RDKit molecules for AAP.
+        cutoff: Inclusive distance cutoff in ``[0, 1]``.
+        metric: Similarity provider configuration or packed-provider string.
+        assignment: ``"first"`` keeps the first qualifying centroid;
+            ``"nearest"`` assigns each non-centroid to its nearest centroid.
+        stream: CUDA stream to use. If omitted, uses the current stream.
+        output: Device-resident or RDKit-compatible host output.
+
+    Returns:
+        A :class:`ClusterDeviceResult` in device mode, or centroid-first
+        cluster tuples ordered by descending size in RDKit mode.
+
+    Note:
+        This function avoids an ``N x N`` matrix and stores ``O(N)`` algorithm
+        state. The implementation currently synchronizes ``stream`` during its
+        host-controlled selection and result construction.
     """
     _validate_output(output)
     if not 0 <= cutoff <= 1:
@@ -515,8 +641,8 @@ def fused_butina(
            CPU tensors and NumPy arrays are copied to CUDA.
         cutoff: Distance threshold for clustering. Items are neighbors if their
                 distance is at most this cutoff (i.e. similarity >= 1 - cutoff).
-        metric: Metric to use for similarity computation. Currently only "tanimoto"
-                and "cosine" are supported.
+        metric: Tanimoto or cosine provider configuration/string. Directed AAP
+                is intentionally unsupported by Butina.
         stream: CUDA stream to use. If None, uses the current stream.
         output: Output representation. Defaults to ``ButinaOutputMode.DEVICE``.
 

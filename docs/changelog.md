@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- Add GPU Leader and MaxMin diversity selection with paired full-distance-matrix and fused packed-fingerprint APIs. Fused selection supports Tanimoto and cosine providers without materializing an O(N²) matrix.
+- Add directed sphere exclusion (DISE) clustering in matrix and fused forms, with first-qualifying and nearest-centroid assignment modes.
+- Add directed approximate Atom-Atom Path (AAP) similarity for RDKit molecules and integrate it as a provider for fused Leader and DISE.
+- Standardize clustering output modes, device result types, distance-cutoff conventions, and fused similarity-provider configuration across Butina, Leader, MaxMin, and DISE.
+
 ## 0.6.0 - 2026-08-13
 
 ### Summary

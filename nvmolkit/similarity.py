@@ -32,17 +32,37 @@ from nvmolkit.types import ArrayInput, AsyncGpuResult, _resolve_cuda_stream
 
 @dataclass(frozen=True)
 class TanimotoSimilarity:
-    """Packed-bit Tanimoto similarity provider configuration."""
+    """Configure fused packed-bit Tanimoto similarity.
+
+    Pass this stateless configuration to fused Butina, Leader, MaxMin, or DISE.
+    The string ``"tanimoto"`` is an equivalent shorthand.
+    """
 
 
 @dataclass(frozen=True)
 class CosineSimilarity:
-    """Packed-bit cosine similarity provider configuration."""
+    """Configure fused packed-bit cosine similarity.
+
+    Pass this stateless configuration to fused Butina, Leader, MaxMin, or DISE.
+    The string ``"cosine"`` is an equivalent shorthand.
+    """
 
 
 @dataclass(frozen=True)
 class AAPSimilarity:
-    """Directed approximate Atom-Atom Path similarity provider configuration."""
+    """Configure directed approximate Atom-Atom Path similarity.
+
+    AAP accepts RDKit molecules and is supported by fused Leader and DISE. It
+    is not supported by Butina or MaxMin because those algorithms require a
+    symmetric distance relation.
+
+    Attributes:
+        max_path_length: Maximum rooted path length in bonds.
+        histogram_bins: Number of hashed path bins, from 1 through 32767.
+        sinkhorn_iterations: Number of Sinkhorn normalization iterations.
+        sinkhorn_temperature: Positive Sinkhorn temperature, at least the
+            smallest positive normal float32 value.
+    """
 
     max_path_length: int = 7
     histogram_bins: int = 2048

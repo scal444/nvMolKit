@@ -180,9 +180,10 @@ nvMolKit currently supports the following features:
     * Batch optimization of multiple molecules and conformers
     * Supports multiple GPUs
 
-* **Butina clustering**: GPU-accelerated clustering via the Taylor-Butina method
-    * Supports generic dense similarity matrix inputs from Tanimoto or other methods
-    * Supports fused in-loop Tanimoto/Cosine similarity for large datasets
+* **Clustering and diversity selection**: GPU-accelerated Butina, Leader, MaxMin, and directed sphere exclusion (see :doc:`clustering`)
+    * Paired distance-matrix and memory-efficient fused APIs
+    * Fused Tanimoto and cosine providers for packed fingerprints
+    * Directed Atom-Atom Path (AAP) similarity for Leader and sphere exclusion
 
 * **Substructure Search**: GPU-accelerated substructure matching against batches of molecules
     * Supports SMILES and recursive SMARTS-based query molecules via RDKit
@@ -276,6 +277,7 @@ Guides
    :maxdepth: 1
 
    similarity
+   clustering
    forcefield
    fire_minimizer
    autotune
