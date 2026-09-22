@@ -363,7 +363,9 @@ def bitbirch(
         Fingerprints must be word-aligned; a row represents exactly
         ``32 * W`` logical bits. Results are deterministic for fixed input,
         options, and GPU architecture, but changing ``num_partitions`` can
-        change the partition. The call currently waits for tree-status and
+        change the partition. Automatic inputs above one million fingerprints
+        use bounded ordered shards, which conservatively keep shard boundaries.
+        The call currently waits for tree-status and
         cluster-count metadata on the host before returning; labels and
         centroids remain device-resident.
     """
