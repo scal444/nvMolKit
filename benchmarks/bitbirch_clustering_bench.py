@@ -269,9 +269,7 @@ def main() -> None:
     try:
         for size in molecule_counts:
             device_fps = fingerprints[:size].contiguous()
-            host_fps = (
-                device_fps.cpu().numpy().view(np.uint8).reshape(size, -1).copy() if bblean is not None else None
-            )
+            host_fps = device_fps.cpu().numpy().view(np.uint8).reshape(size, -1).copy() if bblean is not None else None
             for threshold in thresholds:
                 print(f"\nConfiguration: {size:,} fingerprints, threshold={threshold}", flush=True)
                 common_fields = {
@@ -325,11 +323,7 @@ def main() -> None:
                     )
 
                 if bblean is not None:
-                    budget = (
-                        f", {args.bblean_max_seconds:g} s timing budget"
-                        if args.bblean_max_seconds > 0
-                        else ""
-                    )
+                    budget = f", {args.bblean_max_seconds:g} s timing budget" if args.bblean_max_seconds > 0 else ""
                     print(
                         f"  Starting bblean CPU: {args.warmups} warmup(s), up to {args.runs} timed run(s){budget}",
                         flush=True,

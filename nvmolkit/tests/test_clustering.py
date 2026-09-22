@@ -29,6 +29,7 @@ from nvmolkit.clustering import (
 )
 from nvmolkit.types import AsyncGpuResult
 
+
 def check_butina_correctness(hit_mat, clusts):
     hit_mat = hit_mat.clone()
     seen = set()

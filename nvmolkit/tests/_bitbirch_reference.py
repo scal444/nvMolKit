@@ -13,6 +13,7 @@ from typing import Optional
 
 import numpy as np
 
+
 def _validate_bits(bits: np.ndarray) -> np.ndarray:
     result = np.asarray(bits)
     if result.ndim != 2:
