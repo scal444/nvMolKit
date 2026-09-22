@@ -1548,18 +1548,17 @@ __global__ void bitBirchMergeIndexedTreeGroupsKernel(const int                  
     *local.numClusters = 0;
     *local.root        = allocateNode(local, true, -1);
     scratch.success    = *local.root >= 0;
+  } else if (threadIdx.x == 0) {
+    scratch.success = *local.status == BitBirchStatus::Success;
   }
   __syncthreads();
 
   for (int sourceIndex = begin; sourceIndex < end; ++sourceIndex) {
-    if (threadIdx.x == 0) {
-      scratch.sourceEntry = sourceEntries[sourceIndex];
-    }
-    __syncthreads();
+    const int sourceEntry = sourceEntries[sourceIndex];
     const int outputEntry = cooperativeInsertSummary(local,
                                                      sourceStorage,
-                                                     scratch.sourceEntry,
-                                                     sourceStorage.entryCounts[scratch.sourceEntry],
+                                                     sourceEntry,
+                                                     sourceStorage.entryCounts[sourceEntry],
                                                      threshold,
                                                      branchingFactor,
                                                      scratch);
@@ -1571,7 +1570,7 @@ __global__ void bitBirchMergeIndexedTreeGroupsKernel(const int                  
       return;
     }
     if (threadIdx.x == 0) {
-      sourceToOutput[scratch.sourceEntry] = scratch.selectedEntry;
+      sourceToOutput[sourceEntry] = scratch.selectedEntry;
     }
   }
 }

@@ -692,6 +692,15 @@ def test_bitbirch_partitioned_partial_trees_merge_summaries_deterministically():
     torch.testing.assert_close(second_centroids.torch(), first_centroids.torch())
 
 
+def test_bitbirch_partitioned_merge_reinitializes_scratch_between_batches():
+    unique = (np.uint32(1) << np.arange(9, dtype=np.uint32)).reshape(-1, 1)
+    packed = np.tile(unique, (4, 1))
+
+    labels = bitbirch(packed, threshold=1.0, branching_factor=254, num_partitions=4).numpy()
+
+    np.testing.assert_array_equal(labels, np.tile(np.arange(9, dtype=np.int32), 4))
+
+
 @pytest.mark.parametrize(
     "num_fingerprints, expected_partitions",
     [(0, 1), (511, 1), (512, 3), (65_535, 257), (1_000_000, 3_922)],
