@@ -74,8 +74,12 @@ __global__ void suppressMatrixCandidatesKernel(cuda::std::span<const double> dis
                                                const int                     leader,
                                                const double                  cutoff) {
   const int candidate = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
-  if (candidate < numItems && active[candidate] &&
-      distanceMatrix[static_cast<std::size_t>(leader) * numItems + candidate] <= cutoff) {
+  if (candidate >= numItems || !active[candidate]) {
+    return;
+  }
+  // Selection uniqueness is an algorithm invariant and must not depend on a
+  // caller-provided matrix having an exact zero on its diagonal.
+  if (candidate == leader || distanceMatrix[static_cast<std::size_t>(leader) * numItems + candidate] <= cutoff) {
     active[candidate] = 0;
   }
 }
@@ -90,6 +94,13 @@ __global__ void suppressFingerprintCandidatesKernel(cuda::std::span<const std::u
                                                     const double                         similarityThreshold) {
   const int candidate = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
   if (candidate >= numItems || !active[candidate]) {
+    return;
+  }
+  // A selected leader must always leave the active set.  This cannot be
+  // inferred from the metric: cosine similarity deliberately defines two
+  // empty fingerprints as zero similarity.
+  if (candidate == leader) {
+    active[candidate] = 0;
     return;
   }
   const double similarity = fingerprintPairSimilarity<Metric>(fingerprints, bitCounts, leader, candidate, numWords);
@@ -256,6 +267,15 @@ void validateFingerprintInput(const cuda::std::span<const std::uint32_t> fingerp
   if (numItems < 0 || numWords <= 0 ||
       fingerprints.size() != static_cast<std::size_t>(numItems) * static_cast<std::size_t>(numWords)) {
     throw std::invalid_argument("Fingerprint buffer size does not match its shape");
+  }
+}
+
+void validateMaxMinThreshold(const double threshold, const double maximum) {
+  if (threshold == -1.0) {
+    return;
+  }
+  if (!std::isfinite(threshold) || threshold < 0.0 || threshold > maximum) {
+    throw std::invalid_argument("threshold must be finite and in the supported distance range");
   }
 }
 
@@ -663,6 +683,7 @@ PickerResult maxMinFromDistanceMatrix(const cuda::std::span<const double> distan
                                       const double                        threshold,
                                       cudaStream_t                        stream) {
   validateDistanceMatrix(distanceMatrix, numItems);
+  validateMaxMinThreshold(threshold, std::numeric_limits<double>::max());
   return maxMinImpl(MatrixDistanceProvider(distanceMatrix, numItems),
                     numItems,
                     pickSize,
@@ -682,9 +703,7 @@ PickerResult fusedMaxMinGpu(const cuda::std::span<const std::uint32_t> fingerpri
                             const double                               threshold,
                             cudaStream_t                               stream) {
   validateFingerprintInput(fingerprints, numFingerprints, numWords);
-  if (threshold > 1.0) {
-    throw std::invalid_argument("threshold must be at most 1 for fingerprint distances");
-  }
+  validateMaxMinThreshold(threshold, 1.0);
   if (metric == FingerprintSimilarityMetric::Tanimoto) {
     return fusedMaxMinImpl<FingerprintSimilarityMetric::Tanimoto>(fingerprints,
                                                                   numFingerprints,

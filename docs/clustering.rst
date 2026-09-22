@@ -123,7 +123,9 @@ Leader selection
 Leader examines candidates in input order. Each selected leader excludes every
 remaining candidate at distance ``<= cutoff``. ``first_picks`` forces initial
 leaders in the supplied order, and ``pick_size=0`` means continue until no
-candidate remains.
+candidate remains. Forced indices must be unique and in range. A leader is
+always removed from further consideration, so uniqueness does not depend on
+the distance-matrix diagonal or on a metric's empty-fingerprint convention.
 
 .. code-block:: python
 
@@ -156,7 +158,9 @@ When ``first_picks`` is empty, ``seed`` controls the random first pick. Supplyin
 is set, selection stops before adding a candidate whose nearest-pick distance
 is at most that threshold. The returned ``last_distance`` is the separation of
 the last candidate that was actually added, or ``-1`` when no additional
-candidate was selected.
+candidate was selected. Forced indices must be unique and in range. Matrix
+thresholds must be finite and non-negative; packed-fingerprint thresholds must
+also be at most ``1``.
 
 DISE clustering
 ---------------

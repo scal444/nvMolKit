@@ -94,6 +94,15 @@ def _validate_output(output: OutputMode) -> None:
         raise TypeError(f"output must be an OutputMode, got {type(output).__name__}")
 
 
+def _validate_maxmin_threshold(threshold: float | None, *, maximum: float | None = None) -> float:
+    if threshold is None:
+        return -1.0
+    if not np.isfinite(threshold) or threshold < 0 or (maximum is not None and threshold > maximum):
+        distance_range = "non-negative" if maximum is None else f"in [0, {maximum:g}]"
+        raise ValueError(f"threshold must be finite and {distance_range}, got {threshold}")
+    return float(threshold)
+
+
 def _cluster_arrays_to_rdkit(cluster_ids_array, centroids_array) -> _RDKitClusters:
     cluster_ids_array = np.asarray(cluster_ids_array)
     centroids_array = np.asarray(centroids_array)
@@ -191,7 +200,8 @@ def leader(
             copied to CUDA.
         cutoff: Inclusive exclusion distance. Must be finite and non-negative.
         pick_size: Maximum number of leaders, or zero for no explicit limit.
-        first_picks: Leader indices to process first, in the supplied order.
+        first_picks: Unique in-range leader indices to process first, in the
+            supplied order.
         stream: CUDA stream to use. If omitted, uses the current stream.
         output: Device-resident or RDKit-compatible host output.
 
@@ -236,7 +246,8 @@ def fused_leader(
         cutoff: Inclusive distance cutoff in ``[0, 1]``.
         metric: Similarity provider configuration or packed-provider string.
         pick_size: Maximum number of leaders, or zero for no explicit limit.
-        first_picks: Leader indices to process first, in the supplied order.
+        first_picks: Unique in-range leader indices to process first, in the
+            supplied order.
         stream: CUDA stream to use. If omitted, uses the current stream.
         output: Device-resident or RDKit-compatible host output.
 
@@ -303,11 +314,12 @@ def maxmin(
             copied to CUDA.
         pick_size: Target number of picks. Must be positive and no larger than
             the input size.
-        first_picks: Initial picks in the supplied order.
+        first_picks: Unique in-range initial picks in the supplied order.
         seed: RDKit-compatible random seed used when ``first_picks`` is empty.
             A negative value seeds from system entropy.
-        threshold: Optional early-stop distance. The next candidate is not
-            added when its nearest-pick distance is at most this value.
+        threshold: Optional finite, non-negative early-stop distance. The next
+            candidate is not added when its nearest-pick distance is at most
+            this value.
         stream: CUDA stream to use. If omitted, uses the current stream.
         output: Device-resident or RDKit-compatible host output.
 
@@ -321,7 +333,7 @@ def maxmin(
     """
     _validate_output(output)
     matrix, active_stream = _prepare_distance_matrix(distance_matrix, stream)
-    native_threshold = -1.0 if threshold is None else threshold
+    native_threshold = _validate_maxmin_threshold(threshold)
     with torch.cuda.stream(active_stream):
         result = _clustering.maxmin(
             matrix.__cuda_array_interface__,
@@ -353,7 +365,7 @@ def fused_maxmin(
             the input size.
         metric: Tanimoto or cosine provider configuration/string. Directed AAP
             is not supported by MaxMin.
-        first_picks: Initial picks in the supplied order.
+        first_picks: Unique in-range initial picks in the supplied order.
         seed: RDKit-compatible random seed used when ``first_picks`` is empty.
         threshold: Optional early-stop distance in ``[0, 1]``.
         stream: CUDA stream to use. If omitted, uses the current stream.
@@ -369,7 +381,7 @@ def fused_maxmin(
     """
     _validate_output(output)
     metric_name = _packed_metric_name(metric)
-    native_threshold = -1.0 if threshold is None else threshold
+    native_threshold = _validate_maxmin_threshold(threshold, maximum=1.0)
     (fingerprints,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
     with torch.cuda.stream(active_stream):
         result = _clustering.fused_maxmin(
