@@ -30,13 +30,12 @@ enum class BitBirchStatus : int {
   InvalidTree
 };
 
-constexpr int summaryEntriesPerPage       = 4096;
-constexpr int summaryBuildBatchSize       = 32;
+constexpr int summaryEntriesPerPage     = 4096;
+constexpr int summaryBuildBatchSize     = 32;
 // Preserve block-level parallelism across hierarchy rounds. A smaller tail is
 // worthwhile only when the remaining summaries fit a bounded global merge.
-constexpr int minimumParallelMergeTrees   = 32;
-constexpr int serialTailSummaryBudget     = 4096;
-constexpr int maximumResidentFingerprints = 1'000'000;
+constexpr int minimumParallelMergeTrees = 32;
+constexpr int serialTailSummaryBudget   = 4096;
 
 bool hierarchyRoundFitsWorkBudget(const int numTrees, const int totalClusters, const int mergeFanIn) {
   const int nextNumTrees = (numTrees + mergeFanIn - 1) / mergeFanIn;
@@ -1598,12 +1597,6 @@ __global__ void bitBirchRemapForestLabelsKernel(const int  numFingerprints,
   }
 }
 
-__global__ void addClusterOffsetKernel(int* labels, const int numLabels, const int clusterOffset) {
-  for (int index = blockIdx.x * blockDim.x + threadIdx.x; index < numLabels; index += blockDim.x * gridDim.x) {
-    labels[index] += clusterOffset;
-  }
-}
-
 template <typename Component>
 __global__ void bitBirchIndexForestClustersKernel(const int              numFingerprints,
                                                   const int              partitionSize,
@@ -2011,17 +2004,13 @@ BitBirchResult launchPartitioned(const cuda::std::span<const std::uint32_t> fing
   {
     const ScopedNvtxRange partialRange("BitBIRCH partial-tree construction");
     constexpr int         reservedSummarySlotsPerInput = 8;
-    constexpr int         targetReservedSummarySlots   = 1'000'000;
-    const int             partialBuildBatchSize        = std::max(
-      1,
-      std::min(summaryBuildBatchSize, targetReservedSummarySlots / (reservedSummarySlotsPerInput * numPartitions)));
-    int hostPartialSummaryCursor = 0;
-    for (int partitionOffset = 0; partitionOffset < partitionSize; partitionOffset += partialBuildBatchSize) {
+    int                   hostPartialSummaryCursor     = 0;
+    for (int partitionOffset = 0; partitionOffset < partitionSize; partitionOffset += summaryBuildBatchSize) {
       int batchInputs = 0;
       for (int partition = 0; partition < numPartitions; ++partition) {
         const int begin = partition * partitionSize + partitionOffset;
         const int end =
-          std::min(std::min(begin + partialBuildBatchSize, (partition + 1) * partitionSize), numFingerprints);
+          std::min(std::min(begin + summaryBuildBatchSize, (partition + 1) * partitionSize), numFingerprints);
         batchInputs += std::max(0, end - begin);
       }
       const auto requiredSummaries = static_cast<std::int64_t>(hostPartialSummaryCursor) +
@@ -2038,7 +2027,7 @@ BitBirchResult launchPartitioned(const cuda::std::span<const std::uint32_t> fing
                                                                                      numFingerprints,
                                                                                      partitionSize,
                                                                                      partitionOffset,
-                                                                                     partialBuildBatchSize,
+                                                                                     summaryBuildBatchSize,
                                                                                      partitionOffset == 0,
                                                                                      nodeStride,
                                                                                      entryStride,
@@ -2072,25 +2061,11 @@ BitBirchResult launchPartitioned(const cuda::std::span<const std::uint32_t> fing
     }
   }
 
-  constexpr int scalableForestTreeThreshold     = 32;
-  constexpr int directSparseForestTreeThreshold = 1024;
+  constexpr int scalableForestTreeThreshold = 32;
   // Pairwise reconciliation bounds per-tree work when partial construction
   // reveals that at least half of the inputs remain as distinct summaries.
-  const bool    sparseScalingPath               = numPartitions >= scalableForestTreeThreshold &&
+  const bool    sparseScalingPath           = numPartitions >= scalableForestTreeThreshold &&
                                  static_cast<std::int64_t>(totalPartialClusters) * 2 >= numFingerprints;
-  if (sparseScalingPath && numPartitions >= directSparseForestTreeThreshold) {
-    const ScopedNvtxRange finalizeRange("BitBIRCH sparse forest finalization");
-    finalizeForest(numFingerprints,
-                   partitionSize,
-                   nodeStride,
-                   entryStride,
-                   hostPartialClusterCounts,
-                   returnCentroids ? result.centroids.data() : nullptr,
-                   partialStorage,
-                   stream);
-    result.numClusters = totalPartialClusters;
-    return result;
-  }
   const int mergeFanIn = sparseScalingPath ? 2 : 4;
 
   auto current = mergeForestRound<Component, PartialComponent>(fingerprints.data(),
@@ -2125,8 +2100,10 @@ BitBirchResult launchPartitioned(const cuda::std::span<const std::uint32_t> fing
   partialStatuses                = AsyncDeviceVector<BitBirchStatus>();
   partialSummaryArena.clear();
 
-  int previousClusters = totalPartialClusters;
-  while (current->numTrees > 1 && current->totalClusters < previousClusters &&
+  int        previousClusters = totalPartialClusters;
+  const bool stopSparseHierarchy =
+    sparseScalingPath && static_cast<std::int64_t>(current->totalClusters) * 2 >= numFingerprints;
+  while (current->numTrees > 1 && current->totalClusters < previousClusters && !stopSparseHierarchy &&
          hierarchyRoundFitsWorkBudget(current->numTrees, current->totalClusters, mergeFanIn)) {
     previousClusters = current->totalClusters;
     auto next        = mergeForestRound<Component, Component>(fingerprints.data(),
@@ -2235,61 +2212,6 @@ BitBirchResult launchPartitionedForFinal(const cuda::std::span<const std::uint32
   }
 }
 
-BitBirchResult launchSharded(const cuda::std::span<const std::uint32_t> fingerprints,
-                             const int                                  numFingerprints,
-                             const int                                  numWords,
-                             const double                               threshold,
-                             const int                                  branchingFactor,
-                             const BitBirchMergeCriterion               mergeCriterion,
-                             const double                               tolerance,
-                             const bool                                 returnCentroids,
-                             const cudaStream_t                         stream) {
-  BitBirchResult result{
-    AsyncDeviceVector<int>(numFingerprints, stream),
-    AsyncDeviceVector<std::uint32_t>(returnCentroids ? static_cast<std::size_t>(numFingerprints) * numWords : 0,
-                                     stream),
-    0,
-    numWords};
-  constexpr int labelBlockSize = 256;
-  for (int begin = 0; begin < numFingerprints; begin += maximumResidentFingerprints) {
-    const int  shardSize       = std::min(maximumResidentFingerprints, numFingerprints - begin);
-    const int  shardPartitions = (shardSize + 254) / 255;
-    const auto shardFingerprints =
-      fingerprints.subspan(static_cast<std::size_t>(begin) * numWords, static_cast<std::size_t>(shardSize) * numWords);
-    auto shard = bitBirchGpu(shardFingerprints,
-                             shardSize,
-                             numWords,
-                             threshold,
-                             branchingFactor,
-                             mergeCriterion,
-                             tolerance,
-                             shardPartitions,
-                             returnCentroids,
-                             stream);
-    if (result.numClusters != 0) {
-      const int labelBlocks = std::min(4096, (shardSize + labelBlockSize - 1) / labelBlockSize);
-      addClusterOffsetKernel<<<labelBlocks, labelBlockSize, 0, stream>>>(shard.clusterIds.data(),
-                                                                         shardSize,
-                                                                         result.numClusters);
-      cudaCheckError(cudaGetLastError());
-    }
-    cudaCheckError(cudaMemcpyAsync(result.clusterIds.data() + begin,
-                                   shard.clusterIds.data(),
-                                   static_cast<std::size_t>(shardSize) * sizeof(int),
-                                   cudaMemcpyDeviceToDevice,
-                                   stream));
-    if (returnCentroids && shard.numClusters > 0) {
-      cudaCheckError(cudaMemcpyAsync(result.centroids.data() + static_cast<std::size_t>(result.numClusters) * numWords,
-                                     shard.centroids.data(),
-                                     static_cast<std::size_t>(shard.numClusters) * numWords * sizeof(std::uint32_t),
-                                     cudaMemcpyDeviceToDevice,
-                                     stream));
-    }
-    result.numClusters += shard.numClusters;
-  }
-  return result;
-}
-
 }  // namespace
 
 BitBirchResult bitBirchSerialGpu(const cuda::std::span<const std::uint32_t> fingerprints,
@@ -2396,18 +2318,6 @@ BitBirchResult bitBirchGpu(const cuda::std::span<const std::uint32_t> fingerprin
   if (!std::isfinite(threshold) || threshold < 0.0 || threshold > 1.0 || branchingFactor < 3 ||
       !std::isfinite(tolerance) || tolerance < 0.0) {
     throw std::invalid_argument("BitBIRCH clustering options are invalid");
-  }
-  const int automaticPartitions = (numFingerprints + 254) / 255;
-  if (numFingerprints > maximumResidentFingerprints && numPartitions == automaticPartitions) {
-    return launchSharded(fingerprints,
-                         numFingerprints,
-                         numWords,
-                         threshold,
-                         branchingFactor,
-                         mergeCriterion,
-                         tolerance,
-                         returnCentroids,
-                         stream);
   }
   if (numFingerprints <= std::numeric_limits<std::uint8_t>::max()) {
     return launchPartitionedForFinal<std::uint8_t>(fingerprints,

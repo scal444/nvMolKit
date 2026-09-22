@@ -53,9 +53,9 @@ BitBirchResult bitBirchSerialGpu(cuda::std::span<const std::uint32_t> fingerprin
  *
  * A value of one preserves the serial-tree result. Larger values partition
  * the ordered input into contiguous ranges and build one tree per cooperative
- * CUDA block. Automatic inputs above one million fingerprints use bounded
- * ordered shards, and very sparse large forests retain their parallel-tree
- * boundaries instead of allocating a low-yield duplicate merge forest.
+ * CUDA block. Groups of partial trees merge concurrently; forests with at
+ * most 65,535 summaries receive a cooperative final merge, while larger
+ * forests retain their parallel-tree boundaries.
  */
 BitBirchResult bitBirchGpu(cuda::std::span<const std::uint32_t> fingerprints,
                            int                                  numFingerprints,

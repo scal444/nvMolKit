@@ -84,30 +84,20 @@ split semantics.
 The public implementation retains a one-thread ordered tree as the exact
 reference and small-workload path. For larger inputs, or when selected with
 ``num_partitions``, contiguous ordered partitions build independent trees in
-separate CUDA blocks. Hierarchical merge kernels scan each partial leaf Bit
+separate CUDA blocks. One or two merge kernels scan each partial leaf Bit
 Feature once, in first-member order, and insert its count and linear sum into a
 larger tree. Labels retain the stable order of the earliest original member.
-The Python default selects one partition below 512 inputs and enough partitions
-above that to keep each partial tree at no more than 255 inputs. This keeps
-partial sums in 8-bit components and prevents per-tree work from growing
-superlinearly with the full input.
-
-Automatic inputs above one million fingerprints execute as ordered, bounded
-one-million-fingerprint shards. Cluster IDs are offset between shards, and
-optional centroids are gathered into the single public result. This keeps
-temporary tree and summary storage independent of total input size. Within a
-shard, a sparse forest with at least 1,024 trees is finalized directly when at
-least half of the inputs remain distinct summaries. Smaller sparse forests
-retain one pairwise reconciliation round. These boundaries intentionally favor
-bounded work and conservative under-merging over parity with a fully reconciled
-serial tree.
-
+Groups of two partial trees are merged concurrently for at most 128 partitions;
+groups of four are used above that point to limit the number of summaries sent
+to the cooperative final merge. The Python default selects one partition below
+512 inputs and enough partitions above that to keep each partial tree at no
+more than 255 inputs. This keeps partial sums in 8-bit components and prevents
+per-tree work from growing superlinearly with the full input.
 Tolerance-diameter mode automatically selects one partition; callers can also
 explicitly select one for serial semantics. Partial and final summary arenas
 independently dispatch to 8-, 16-, or 32-bit components according to their
-maximum represented counts. Hierarchy rounds continue while they reduce
-cluster count and retain enough parallel trees, or while the remaining summary
-set fits a bounded final merge.
+maximum represented counts. A cooperative final merge is limited to 65,535
+source summaries; larger merge forests are finalized in parallel.
 
 Partial-tree construction and merge-tree insertion use 256-thread cooperative
 blocks. Entry searches, Bit Feature updates, ancestor summaries, diameter
@@ -116,7 +106,7 @@ entry work across the block. Tolerance-diameter mode
 currently requires one partition because
 refinement Equation 5 is defined for singleton insertion; applying it to a
 weighted incoming Bit Feature requires an independently specified criterion.
-Refinement and input streaming from host storage remain future work.
+Refinement and out-of-core execution also remain future work.
 
 ## Public API and supported range
 
@@ -144,8 +134,7 @@ lengths are not represented separately. ``threshold`` must be finite and in
 ``branching_factor`` must be at least three. ``num_partitions`` is either
 automatic or an integer in ``[1, N]`` for nonempty input. Empty input is
 accepted. Native indexing limits ``N`` to ``(INT_MAX - 8) / 3`` and ``W`` to
-``INT_MAX / 32``; practical device-memory capacity is lower and still includes
-the resident fingerprint matrix and output arrays.
+``INT_MAX / 32``; practical device-memory capacity is much lower.
 
 Diameter mode supports serial and partitioned execution. Tolerance-diameter
 mode currently requires ``num_partitions=1``. Labels are deterministic for a
