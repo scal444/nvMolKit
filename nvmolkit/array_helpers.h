@@ -20,7 +20,6 @@
 #include <optional>
 
 #include "src/utils/device_vector.h"
-#include "src/utils/host_vector.h"
 
 namespace nvMolKit {
 
@@ -50,19 +49,6 @@ struct PyArray {
   //! When true, the destructor frees devicePtr. When false, the underlying allocation is owned
   //! elsewhere (e.g. by a long-lived AsyncDeviceVector) and this PyArray is a non-owning view.
   bool                owned     = true;
-};
-
-struct PyHostArray {
-  PyHostArray() = default;
-  ~PyHostArray() {
-    if (hostPtr != nullptr) {
-      cudaFreeHost(hostPtr);
-    }
-    hostPtr = nullptr;
-  }
-
-  boost::python::dict __array_interface__;
-  void*               hostPtr = nullptr;
 };
 
 template <typename T> std::string getNumpyType() {
@@ -112,26 +98,6 @@ PyArray* makePyArray(AsyncDeviceVector<T>& deviceVector, const std::string& dTyp
 template <typename T, typename = std::enable_if_t<std::is_integral_v<T> || std::is_floating_point_v<T>>>
 PyArray* makePyArray(AsyncDeviceVector<T>& deviceVector, std::optional<boost::python::tuple> shape = std::nullopt) {
   return makePyArray(deviceVector, getNumpyType<T>(), shape.value_or(boost::python::make_tuple(deviceVector.size())));
-}
-
-template <typename T>
-PyHostArray* makePyHostArray(PinnedHostVector<T>& hostVector, const std::string& dTypeStr, boost::python::tuple shape) {
-  auto thisPyArray                 = new PyHostArray();
-  thisPyArray->__array_interface__ = boost::python::dict();
-  auto& dict                       = thisPyArray->__array_interface__;
-  T*    releasedPtr                = hostVector.release();
-  thisPyArray->hostPtr             = releasedPtr;
-  dict["shape"]                    = shape;
-  dict["typestr"]                  = boost::python::str("|" + dTypeStr);
-  dict["data"]    = boost::python::make_tuple(reinterpret_cast<std::size_t>(releasedPtr), /*readOnly=*/false);
-  dict["version"] = 3;
-  return thisPyArray;
-}
-
-template <typename T, typename = std::enable_if_t<std::is_integral_v<T> || std::is_floating_point_v<T>>>
-PyHostArray* makePyHostArray(PinnedHostVector<T>&                hostVector,
-                             std::optional<boost::python::tuple> shape = std::nullopt) {
-  return makePyHostArray(hostVector, getNumpyType<T>(), shape.value_or(boost::python::make_tuple(hostVector.size())));
 }
 
 /**

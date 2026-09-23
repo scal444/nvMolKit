@@ -88,12 +88,10 @@ def _wrap_device_result(result) -> ButinaDeviceResult:
     return ButinaDeviceResult(cluster_ids, centroids, AsyncGpuResult(cluster_sizes))
 
 
-def _wrap_bitbirch_result(result, return_centroids: bool, host_output: bool = False):
-    if return_centroids:
-        cluster_ids, centroids = result
-        labels = np.asarray(cluster_ids) if host_output else AsyncGpuResult(cluster_ids)
-        return labels, AsyncGpuResult(centroids)
-    return np.asarray(result) if host_output else AsyncGpuResult(result)
+def _wrap_bitbirch_result(result, return_centroids: bool, host_labels: np.ndarray | None):
+    cluster_ids, centroids = result
+    labels = host_labels if host_labels is not None else AsyncGpuResult(cluster_ids)
+    return (labels, AsyncGpuResult(centroids)) if return_centroids else labels
 
 
 def _to_rdkit_clusters(cluster_ids: AsyncGpuResult, centroids: AsyncGpuResult) -> _RDKitClusters:
@@ -346,8 +344,8 @@ def bitbirch(
         fingerprint_cache_bytes: GPU cache budget for singleton fingerprints
                                  retained from NumPy input. Zero keeps them on
                                  the GPU. This option requires NumPy input.
-        host_output: Keep labels in mapped pinned host memory and return a
-                     NumPy array instead of a device result.
+        host_output: Return labels as a NumPy array. Only one batch of labels
+                     is held on the GPU; finished batches are copied to the host.
         return_centroids: Return packed majority centroids with shape
                           ``(num_clusters, W)`` in addition to labels.
         stream: CUDA stream to use. If None, uses the current stream.
@@ -385,6 +383,7 @@ def bitbirch(
             raise ValueError("fingerprint_cache_bytes requires NumPy input")
         (x,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
         interface = x.__cuda_array_interface__
+    host_labels = np.empty(x.shape[0], dtype=np.int32) if host_output else None
     with torch.cuda.stream(active_stream):
         result = _clustering.bitbirch(
             interface,
@@ -394,8 +393,8 @@ def bitbirch(
             summary_cache_bytes,
             fingerprint_cache_bytes,
             host_input,
-            host_output,
+            host_labels.ctypes.data if host_labels is not None else 0,
             return_centroids,
             active_stream.cuda_stream,
         )
-        return _wrap_bitbirch_result(result, return_centroids, host_output)
+        return _wrap_bitbirch_result(result, return_centroids, host_labels)

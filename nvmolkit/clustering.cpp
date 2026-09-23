@@ -32,11 +32,6 @@ boost::python::object toOwnedPyArray(nvMolKit::PyArray* array) {
   return boost::python::object(boost::python::handle<>(Converter()(array)));
 }
 
-boost::python::object toOwnedPyArray(nvMolKit::PyHostArray* array) {
-  using Converter = boost::python::manage_new_object::apply<nvMolKit::PyHostArray*>::type;
-  return boost::python::object(boost::python::handle<>(Converter()(array)));
-}
-
 boost::python::object wrapButinaResult(nvMolKit::ButinaResult& result, const int numItems, const bool returnCentroids) {
   auto clusterArray = nvMolKit::makePyArray(result.clusterIds, boost::python::make_tuple(numItems));
   if (!returnCentroids) {
@@ -47,19 +42,21 @@ boost::python::object wrapButinaResult(nvMolKit::ButinaResult& result, const int
   return boost::python::make_tuple(toOwnedPyArray(clusterArray), toOwnedPyArray(centroidArray));
 }
 
+//! Returns (labels, centroids); labels is None when written to a host array, centroids None unless requested.
 boost::python::object wrapBitBirchResult(nvMolKit::BitBirchResult& result,
                                          const int                 numItems,
+                                         const bool                hostLabels,
                                          const bool                returnCentroids) {
-  auto clusterArray =
-    result.clusterIdsOnHost ?
-      toOwnedPyArray(nvMolKit::makePyHostArray(result.hostClusterIds, boost::python::make_tuple(numItems))) :
-      toOwnedPyArray(nvMolKit::makePyArray(result.clusterIds, boost::python::make_tuple(numItems)));
-  if (!returnCentroids) {
-    return clusterArray;
+  boost::python::object labels;
+  if (!hostLabels) {
+    labels = toOwnedPyArray(nvMolKit::makePyArray(result.clusterIds, boost::python::make_tuple(numItems)));
   }
-  auto centroidArray =
-    nvMolKit::makePyArray(result.centroids, boost::python::make_tuple(result.numClusters, result.numWords));
-  return boost::python::make_tuple(clusterArray, toOwnedPyArray(centroidArray));
+  boost::python::object centroids;
+  if (returnCentroids) {
+    centroids = toOwnedPyArray(
+      nvMolKit::makePyArray(result.centroids, boost::python::make_tuple(result.numClusters, result.numWords)));
+  }
+  return boost::python::make_tuple(labels, centroids);
 }
 
 boost::python::object bitBirch(const boost::python::dict& fingerprints,
@@ -69,7 +66,7 @@ boost::python::object bitBirch(const boost::python::dict& fingerprints,
                                const std::size_t          summaryCacheBytes,
                                const std::size_t          fingerprintCacheBytes,
                                const bool                 fingerprintsOnHost,
-                               const bool                 clusterIdsOnHost,
+                               const std::uintptr_t       hostLabelsPtr,
                                const bool                 returnCentroids,
                                const std::uintptr_t       streamPtr) {
   auto stream = nvMolKit::acquireExternalStream(streamPtr);
@@ -91,10 +88,10 @@ boost::python::object bitBirch(const boost::python::dict& fingerprints,
   options.summaryCacheBytes     = summaryCacheBytes;
   options.fingerprintCacheBytes = fingerprintCacheBytes;
   options.fingerprintsOnHost    = fingerprintsOnHost;
-  options.clusterIdsOnHost      = clusterIdsOnHost;
+  options.hostClusterIds        = reinterpret_cast<int*>(hostLabelsPtr);
   options.returnCentroids       = returnCentroids;
   auto result                   = nvMolKit::bitBirchGpu(span, count, words, threshold, options, *stream);
-  return wrapBitBirchResult(result, count, returnCentroids);
+  return wrapBitBirchResult(result, count, hostLabelsPtr != 0, returnCentroids);
 }
 
 }  // namespace
@@ -109,7 +106,7 @@ BOOST_PYTHON_MODULE(_clustering) {
                       boost::python::arg("summary_cache_bytes")     = 0,
                       boost::python::arg("fingerprint_cache_bytes") = 0,
                       boost::python::arg("host_input")              = false,
-                      boost::python::arg("host_output")             = false,
+                      boost::python::arg("host_labels")             = 0,
                       boost::python::arg("return_centroids")        = false,
                       boost::python::arg("stream")                  = 0));
   boost::python::def(

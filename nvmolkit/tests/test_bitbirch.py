@@ -144,12 +144,14 @@ def test_memory_mapped_input_preserves_labels_and_centroids(tmp_path):
     np.testing.assert_array_equal(centroids.numpy(), expected_centroids.numpy())
 
 
-def test_host_output_preserves_labels_and_centroids():
+@pytest.mark.parametrize("device_input", [False, True])
+def test_host_output_preserves_labels_and_centroids(device_input):
     packed = np.random.default_rng(421).integers(0, 2**32, (529, 3), dtype=np.uint32)
     packed[430:500] = packed[:70]
     expected, expected_centroids = bitbirch(packed, 0.4, branching_factor=7, batch_size=32, return_centroids=True)
+    source = torch.from_numpy(packed.view(np.int32)).cuda() if device_input else packed
     labels, centroids = bitbirch(
-        packed, 0.4, branching_factor=7, batch_size=32, host_output=True, return_centroids=True
+        source, 0.4, branching_factor=7, batch_size=32, host_output=True, return_centroids=True
     )
     assert isinstance(labels, np.ndarray)
     assert labels.dtype == np.int32

@@ -21,8 +21,6 @@ using namespace boost::python;
 BOOST_PYTHON_MODULE(_arrayHelpers) {
   class_<nvMolKit::PyArray, boost::noncopyable>("_arrayHelpers")
     .def_readonly("__cuda_array_interface__", &nvMolKit::PyArray::__cuda_array_interface__);
-  class_<nvMolKit::PyHostArray, boost::noncopyable>("_hostArrayHelpers")
-    .def_readonly("__array_interface__", &nvMolKit::PyHostArray::__array_interface__);
 }
 
 }  // namespace

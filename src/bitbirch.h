@@ -17,7 +17,6 @@
 #include <cuda/std/span>
 
 #include "src/utils/device_vector.h"
-#include "src/utils/host_vector.h"
 
 namespace nvMolKit {
 
@@ -26,8 +25,6 @@ struct BitBirchResult {
   AsyncDeviceVector<std::uint32_t> centroids;
   int                              numClusters = 0;
   int                              numWords    = 0;
-  PinnedHostVector<int>            hostClusterIds{};
-  bool                             clusterIdsOnHost = false;
 };
 
 //! Tree shape, batching, and memory-placement options for bitBirchGpu.
@@ -37,7 +34,9 @@ struct BitBirchOptions {
   std::size_t summaryCacheBytes     = 0;      //!< GPU cache budget for Bit Feature sums; zero keeps all on the GPU.
   std::size_t fingerprintCacheBytes = 0;      //!< GPU cache budget for retained singletons; needs fingerprintsOnHost.
   bool        fingerprintsOnHost    = false;  //!< Fingerprints are host memory, streamed to the GPU per batch.
-  bool        clusterIdsOnHost      = false;  //!< Write labels to mapped pinned host memory.
+  //! When set, labels go to this host array of numFingerprints ints instead of clusterIds. Only one batch of labels is
+  //! kept on the GPU; each finished batch is staged through a small pinned buffer.
+  int*        hostClusterIds        = nullptr;
   bool        returnCentroids       = false;  //!< Also return packed majority centroids in cluster-ID order.
 };
 
