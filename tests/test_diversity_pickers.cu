@@ -69,6 +69,33 @@ TEST(DiversityPickerLeader, HonorsInclusiveCutoffDirectedRowsAndFirstPicks) {
   EXPECT_THAT(downloadPicks(result, stream), ::testing::ElementsAre(0, 1, 2));
 }
 
+TEST(DiversityPickerDISE, DistinguishesFirstAndNearestAssignmentAndOrdersBySize) {
+  nvMolKit::ScopedStream const streamOwner;
+  const auto                   stream    = streamOwner.stream();
+  const std::vector<double>    distances = {
+    0.0,
+    0.2,
+    0.8,
+    0.2,
+    0.0,
+    0.1,
+    0.8,
+    0.1,
+    0.0,
+  };
+  auto device = upload(distances, stream);
+
+  const auto first = nvMolKit::diseFromDistanceMatrix(toSpan(device), 3, 0.3, false, stream);
+  EXPECT_THAT(first.clusterIds, ::testing::ElementsAre(0, 0, 1));
+  EXPECT_THAT(first.centroids, ::testing::ElementsAre(0, 2));
+  EXPECT_THAT(first.clusterSizes, ::testing::ElementsAre(2, 1));
+
+  const auto nearest = nvMolKit::diseFromDistanceMatrix(toSpan(device), 3, 0.3, true, stream);
+  EXPECT_THAT(nearest.clusterIds, ::testing::ElementsAre(1, 0, 0));
+  EXPECT_THAT(nearest.centroids, ::testing::ElementsAre(2, 0));
+  EXPECT_THAT(nearest.clusterSizes, ::testing::ElementsAre(2, 1));
+}
+
 TEST(DiversityPickerFused, CosineZeroFingerprintIsSelectedOnlyOnce) {
   nvMolKit::ScopedStream const     streamOwner;
   const auto                       stream       = streamOwner.stream();
@@ -78,15 +105,26 @@ TEST(DiversityPickerFused, CosineZeroFingerprintIsSelectedOnlyOnce) {
   const auto result =
     nvMolKit::fusedLeaderGpu(toSpan(device), 4, 1, 0.5, FingerprintSimilarityMetric::Cosine, 0, {}, stream);
   EXPECT_THAT(downloadPicks(result, stream), ::testing::ElementsAre(0, 1, 3));
+
+  const auto clusters =
+    nvMolKit::fusedDiseGpu(toSpan(device), 4, 1, 0.5, FingerprintSimilarityMetric::Cosine, true, stream);
+  EXPECT_THAT(clusters.clusterIds, ::testing::ElementsAre(1, 0, 0, 2));
+  EXPECT_THAT(clusters.centroids, ::testing::ElementsAre(1, 0, 3));
+  EXPECT_THAT(clusters.clusterSizes, ::testing::ElementsAre(2, 1, 1));
 }
 
 TEST(DiversityPickerEdges, HandlesEmptyAndSingletonInputs) {
-  nvMolKit::ScopedStream const streamOwner;
-  const auto                   stream = streamOwner.stream();
-  AsyncDeviceVector<double>    emptyMatrix(0, stream);
+  nvMolKit::ScopedStream const     streamOwner;
+  const auto                       stream = streamOwner.stream();
+  AsyncDeviceVector<double>        emptyMatrix(0, stream);
+  AsyncDeviceVector<std::uint32_t> emptyFingerprints(0, stream);
 
   auto picks = nvMolKit::leaderFromDistanceMatrix(toSpan(emptyMatrix), 0, 0.1, 0, {}, stream);
   EXPECT_TRUE(downloadPicks(picks, stream).empty());
+  EXPECT_TRUE(nvMolKit::diseFromDistanceMatrix(toSpan(emptyMatrix), 0, 0.1, true, stream).clusterIds.empty());
+  EXPECT_TRUE(
+    nvMolKit::fusedDiseGpu(toSpan(emptyFingerprints), 0, 1, 0.1, FingerprintSimilarityMetric::Tanimoto, true, stream)
+      .clusterIds.empty());
 
   auto singleton = upload(std::vector<double>{0.0}, stream);
   picks          = nvMolKit::leaderFromDistanceMatrix(toSpan(singleton), 1, 0.0, 0, {}, stream);

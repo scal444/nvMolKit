@@ -29,15 +29,7 @@ import torch
 
 from nvmolkit import _clustering
 from nvmolkit._fingerprint_inputs import _prepare_packed_fingerprints
-from nvmolkit.similarity import (
-    _DEFAULT_AAP_METRIC,
-    AAPMetric,
-    CosineMetric,
-    Metric,
-    TanimotoMetric,
-    _resolve_aap_metric,
-    _resolve_metric,
-)
+from nvmolkit.similarity import AAPMetric, CosineMetric, Metric, TanimotoMetric, _resolve_metric
 from nvmolkit.types import ArrayInput, AsyncGpuResult, _as_cuda_tensor, _resolve_cuda_stream
 
 _VALID_NEIGHBORLIST_SIZES = (8, 16, 24, 32, 64, 128)
@@ -183,10 +175,10 @@ def _prepare_distance_matrix(distance_matrix: ArrayInput, stream: torch.cuda.Str
     return tensor, active_stream
 
 
-def _prepare_fused_input(x, metric: Metric, stream: torch.cuda.Stream | None, name: str):
+def _prepare_fused_input(x, metric: Metric, stream: torch.cuda.Stream | None):
     resolved = _resolve_metric(metric)
     if isinstance(resolved, AAPMetric):
-        raise NotImplementedError(f"{name} does not yet support AAPMetric")
+        return resolved, list(x), _resolve_cuda_stream(stream)
     (fingerprints,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
     return resolved, fingerprints.__cuda_array_interface__, active_stream
 
@@ -248,10 +240,10 @@ def fused_leader(
     with memory that scales as ``O(N)``.
 
     Args:
-        x: Packed int32 or uint32 fingerprints of shape ``(N, num_words)``.
+        x: Packed int32 or uint32 fingerprints of shape ``(N, num_words)`` for
+            Tanimoto and cosine, or a sequence of RDKit molecules for AAP.
         cutoff: Inclusive exclusion distance in ``[0, 1]``.
-        metric: Similarity metric. :class:`~nvmolkit.similarity.AAPMetric` is not
-            yet supported.
+        metric: Similarity metric.
         pick_size: Maximum number of leaders, or ``0`` for no limit.
         first_picks: Unique indices selected as leaders, in order, before the
             input-order pass.
@@ -263,38 +255,81 @@ def fused_leader(
         of selected indices for ``OutputMode.RDKIT``.
     """
     _validate_output(output)
-    resolved, inputs, active_stream = _prepare_fused_input(x, metric, stream, "fused_leader")
+    resolved, inputs, active_stream = _prepare_fused_input(x, metric, stream)
     pick_size = operator.index(pick_size)
     first_picks = _index_tuple("first_picks", first_picks)
-    result = _clustering.fused_leader(
-        inputs, cutoff, _packed_metric_name(resolved), pick_size, first_picks, active_stream.cuda_stream
-    )
+    if isinstance(resolved, AAPMetric):
+        result = _clustering.aap_leader(
+            inputs, cutoff, pick_size, first_picks, *_aap_args(resolved), active_stream.cuda_stream
+        )
+    else:
+        result = _clustering.fused_leader(
+            inputs, cutoff, _packed_metric_name(resolved), pick_size, first_picks, active_stream.cuda_stream
+        )
     return _resolve_selection_output(result, output)
 
 
-def aap_dise(
-    molecules,
-    similarity_threshold: float = 0.217,
+def dise(
+    distance_matrix: ArrayInput,
+    cutoff: float,
     *,
     assignment: Literal["first", "nearest"] = "nearest",
-    metric: Literal["aap"] | AAPMetric = _DEFAULT_AAP_METRIC,
     stream: torch.cuda.Stream | None = None,
     output: OutputMode = OutputMode.DEVICE,
 ) -> ClusterDeviceResult | _RDKitClusters:
-    """Cluster ordered RDKit molecules by directed sphere exclusion (DISE) with AAP similarity.
+    """Cluster a distance matrix by directed sphere exclusion (DISE).
 
-    Molecules are visited in input order. Each molecule not yet assigned becomes
-    a centroid and claims every remaining molecule whose similarity from it is at
-    least ``similarity_threshold``. With ``assignment="first"`` each molecule
-    keeps that centroid; with ``"nearest"`` each non-centroid joins its most
-    similar centroid. Clusters are ordered by descending size, then by centroid
-    order.
+    Centroids are the leaders selected by :func:`leader`. With
+    ``assignment="first"``, each item joins the first centroid that excluded
+    it; with ``"nearest"``, each non-centroid joins its nearest centroid, with
+    ties going to the earlier centroid. Clusters are ordered by descending
+    size, then by centroid selection order.
 
     Args:
-        molecules: RDKit molecules in priority order.
-        similarity_threshold: Inclusive similarity threshold in ``[0, 1]``.
+        distance_matrix: Square float32 or float64 matrix of shape ``(N, N)``.
+            Element ``[i, j]`` is the distance from item ``i`` to item ``j``.
+        cutoff: Inclusive exclusion distance. Must be finite and non-negative.
         assignment: ``"first"`` or ``"nearest"``.
-        metric: AAP parameters, or ``"aap"`` for the defaults.
+        stream: CUDA stream to use. If None, uses the current stream.
+        output: Result representation.
+
+    Returns:
+        A :class:`ClusterDeviceResult` for ``OutputMode.DEVICE``, or
+        centroid-first tuples of input indices for ``OutputMode.RDKIT``.
+    """
+    _validate_output(output)
+    _validate_assignment(assignment)
+    matrix, active_stream = _prepare_distance_matrix(distance_matrix, stream)
+    result = _clustering.dise(
+        matrix.__cuda_array_interface__,
+        cutoff,
+        assignment == "nearest",
+        output is OutputMode.DEVICE,
+        active_stream.cuda_stream,
+    )
+    return _resolve_cluster_output(result, output)
+
+
+def fused_dise(
+    x,
+    cutoff: float,
+    *,
+    metric: Metric = "tanimoto",
+    assignment: Literal["first", "nearest"] = "nearest",
+    stream: torch.cuda.Stream | None = None,
+    output: OutputMode = OutputMode.DEVICE,
+) -> ClusterDeviceResult | _RDKitClusters:
+    """Cluster by directed sphere exclusion (DISE), computing distances as needed.
+
+    Equivalent to :func:`dise` on the matrix of ``1 - similarity`` values,
+    with memory that scales as ``O(N)``.
+
+    Args:
+        x: Packed int32 or uint32 fingerprints of shape ``(N, num_words)`` for
+            Tanimoto and cosine, or a sequence of RDKit molecules for AAP.
+        cutoff: Inclusive exclusion distance in ``[0, 1]``.
+        metric: Similarity metric.
+        assignment: ``"first"`` or ``"nearest"``.
         stream: CUDA stream to use. If None, uses the current stream.
         output: Result representation.
 
@@ -308,19 +343,17 @@ def aap_dise(
     """
     _validate_output(output)
     _validate_assignment(assignment)
-    if not 0 <= similarity_threshold <= 1:
-        raise ValueError(f"similarity_threshold must be in [0, 1], got {similarity_threshold}")
-    metric = _resolve_aap_metric(metric)
-
-    active_stream = _resolve_cuda_stream(stream)
-    function = _clustering.aap_similarity_clustering if assignment == "first" else _clustering.aap_dise_clustering
-    result = function(
-        list(molecules),
-        similarity_threshold,
-        *_aap_args(metric),
-        output is OutputMode.DEVICE,
-        active_stream.cuda_stream,
-    )
+    resolved, inputs, active_stream = _prepare_fused_input(x, metric, stream)
+    nearest = assignment == "nearest"
+    device_output = output is OutputMode.DEVICE
+    if isinstance(resolved, AAPMetric):
+        result = _clustering.aap_dise(
+            inputs, cutoff, nearest, *_aap_args(resolved), device_output, active_stream.cuda_stream
+        )
+    else:
+        result = _clustering.fused_dise(
+            inputs, cutoff, _packed_metric_name(resolved), nearest, device_output, active_stream.cuda_stream
+        )
     return _resolve_cluster_output(result, output)
 
 
