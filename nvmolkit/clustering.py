@@ -331,6 +331,7 @@ def bitbirch_shared(
     ordered_prefix_size: int = 0,
     routing_width: int = 1,
     summary_cache_bytes: int = 0,
+    fingerprint_cache_bytes: int = 0,
     host_input: bool = False,
     host_output: bool = False,
     return_centroids: bool = False,
@@ -359,9 +360,11 @@ def bitbirch_shared(
     batch to the GPU, and retains packed singleton fingerprints with the tree.
     ``host_output=True`` keeps labels in mapped pinned CPU memory during
     insertion and returns them as a NumPy array, removing the remaining N-wide
-    GPU allocation. The cache cap covers BF sums only: centroids, topology,
-    singleton storage, and scratch remain GPU resident. This is not yet a fully
-    bounded-memory interface or a persistent append API.
+    GPU allocation. A positive ``fingerprint_cache_bytes`` similarly puts
+    retained singleton fingerprints in pinned CPU memory with a capped GPU page
+    cache; it requires ``host_input=True``. Centroids, topology, and scratch
+    remain GPU resident. This is not yet a fully bounded-memory interface or a
+    persistent append API.
     """
     if not math.isfinite(threshold) or not 0 <= threshold <= 1:
         raise ValueError("threshold must be finite and in [0, 1]")
@@ -375,6 +378,10 @@ def bitbirch_shared(
         raise ValueError("routing_width must be 1, or 2 with filtered-group insertion")
     if summary_cache_bytes < 0:
         raise ValueError("summary_cache_bytes must be nonnegative")
+    if fingerprint_cache_bytes < 0:
+        raise ValueError("fingerprint_cache_bytes must be nonnegative")
+    if fingerprint_cache_bytes and not host_input:
+        raise ValueError("fingerprint_cache_bytes requires host_input=True")
     if host_input:
         if not isinstance(x, np.ndarray) or x.ndim != 2 or x.dtype not in (np.int32, np.uint32):
             raise ValueError("host_input requires a packed 2D NumPy int32 or uint32 array")
@@ -396,6 +403,7 @@ def bitbirch_shared(
             ordered_prefix_size,
             routing_width,
             summary_cache_bytes,
+            fingerprint_cache_bytes,
             host_input,
             host_output,
             return_centroids,

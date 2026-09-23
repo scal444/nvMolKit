@@ -70,6 +70,7 @@ boost::python::object bitBirchShared(const boost::python::dict& fingerprints,
                                      const int                  orderedPrefixSize,
                                      const int                  routingWidth,
                                      const std::size_t          summaryCacheBytes,
+                                     const std::size_t          fingerprintCacheBytes,
                                      const bool                 fingerprintsOnHost,
                                      const bool                 clusterIdsOnHost,
                                      const bool                 returnCentroids,
@@ -103,7 +104,8 @@ boost::python::object bitBirchShared(const boost::python::dict& fingerprints,
                                             fingerprintsOnHost,
                                             clusterIdsOnHost,
                                             returnCentroids,
-                                            *stream);
+                                            *stream,
+                                            fingerprintCacheBytes);
   return wrapBitBirchResult(result, count, returnCentroids);
 }
 
@@ -114,16 +116,17 @@ BOOST_PYTHON_MODULE(_clustering) {
                      bitBirchShared,
                      (boost::python::arg("fingerprints"),
                       boost::python::arg("threshold"),
-                      boost::python::arg("branching_factor")     = 254,
-                      boost::python::arg("insertion_batch_size") = 1024,
-                      boost::python::arg("insertion_policy")     = "ordered-leaf",
-                      boost::python::arg("ordered_prefix_size")  = 0,
-                      boost::python::arg("routing_width")        = 1,
-                      boost::python::arg("summary_cache_bytes")  = 0,
-                      boost::python::arg("host_input")           = false,
-                      boost::python::arg("host_output")          = false,
-                      boost::python::arg("return_centroids")     = false,
-                      boost::python::arg("stream")               = 0));
+                      boost::python::arg("branching_factor")        = 254,
+                      boost::python::arg("insertion_batch_size")    = 1024,
+                      boost::python::arg("insertion_policy")        = "ordered-leaf",
+                      boost::python::arg("ordered_prefix_size")     = 0,
+                      boost::python::arg("routing_width")           = 1,
+                      boost::python::arg("summary_cache_bytes")     = 0,
+                      boost::python::arg("fingerprint_cache_bytes") = 0,
+                      boost::python::arg("host_input")              = false,
+                      boost::python::arg("host_output")             = false,
+                      boost::python::arg("return_centroids")        = false,
+                      boost::python::arg("stream")                  = 0));
   boost::python::def(
     "butina",
     +[](const boost::python::dict& distanceMatrix,

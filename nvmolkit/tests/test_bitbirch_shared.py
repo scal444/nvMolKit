@@ -244,6 +244,30 @@ def test_cpu_backed_summary_rotation_preserves_partition(words, routes):
         np.testing.assert_array_equal(centroids.numpy(), expected_centroids.numpy())
 
 
+def test_cpu_backed_singleton_rotation_preserves_partition():
+    rng = np.random.default_rng(2903)
+    packed = rng.integers(0, 2**32, (10000, 1), dtype=np.uint32)
+    options = dict(
+        branching_factor=7,
+        insertion_batch_size=512,
+        insertion_policy="filtered-group",
+        routing_width=2,
+        return_centroids=True,
+    )
+    expected, expected_centroids = bitbirch_shared(packed, 1.0, **options)
+    page_bytes = 4096 * packed.shape[1] * np.dtype(np.uint32).itemsize
+    for pages in (1, 2):
+        labels, centroids = bitbirch_shared(
+            packed,
+            1.0,
+            host_input=True,
+            fingerprint_cache_bytes=pages * page_bytes,
+            **options,
+        )
+        np.testing.assert_array_equal(labels.numpy(), expected.numpy())
+        np.testing.assert_array_equal(centroids.numpy(), expected_centroids.numpy())
+
+
 @pytest.mark.parametrize("policy,routes", [("ordered-leaf", 1), ("filtered-group", 1), ("filtered-group", 2)])
 @pytest.mark.parametrize("prefix", [0, 33])
 def test_host_input_tiles_preserve_labels_and_centroids(policy, routes, prefix, tmp_path):
@@ -326,6 +350,9 @@ def test_host_output_preserves_labels_with_host_input_cache_and_centroids():
         {"threshold": 0.5, "routing_width": 2},
         {"threshold": 0.5, "summary_cache_bytes": -1},
         {"threshold": 0.5, "summary_cache_bytes": 1},
+        {"threshold": 0.5, "fingerprint_cache_bytes": -1},
+        {"threshold": 0.5, "fingerprint_cache_bytes": 4096},
+        {"threshold": 0.5, "fingerprint_cache_bytes": 1, "host_input": True},
         {"threshold": 0.5, "insertion_batch_size": 0},
     ],
 )

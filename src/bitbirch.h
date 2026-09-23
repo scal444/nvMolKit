@@ -47,12 +47,13 @@ BitBirchResult bitBirchSharedGpu(cuda::std::span<const std::uint32_t> fingerprin
                                  int                                  insertionBatchSize,
                                  bool                                 filteredGroups,
                                  int                                  orderedPrefixSize,
-                                 int                                  routingWidth       = 1,
-                                 std::size_t                          summaryCacheBytes  = 0,
-                                 bool                                 fingerprintsOnHost = false,
-                                 bool                                 clusterIdsOnHost   = false,
-                                 bool                                 returnCentroids    = false,
-                                 cudaStream_t                         stream             = nullptr);
+                                 int                                  routingWidth          = 1,
+                                 std::size_t                          summaryCacheBytes     = 0,
+                                 bool                                 fingerprintsOnHost    = false,
+                                 bool                                 clusterIdsOnHost      = false,
+                                 bool                                 returnCentroids       = false,
+                                 cudaStream_t                         stream                = nullptr,
+                                 std::size_t                          fingerprintCacheBytes = 0);
 
 /**
  * Correctness-first ordered BitBIRCH tree construction on one GPU thread.

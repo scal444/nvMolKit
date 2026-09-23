@@ -237,34 +237,153 @@ template <typename Component> class PagedSummaryArena {
 // grows with live entry IDs instead of retaining all N input fingerprints.
 class PagedFingerprintArena {
  public:
-  PagedFingerprintArena(const int words, const cudaStream_t stream) : words_(words), stream_(stream) {
+  PagedFingerprintArena(const int words, const cudaStream_t stream, const std::size_t cacheBytes = 0)
+      : words_(words),
+        stream_(stream),
+        cachePages_(cacheBytes / (sizeof(std::uint32_t) * static_cast<std::size_t>(summaryEntriesPerPage) * words)) {
+    if (cacheBytes > 0 && cachePages_ == 0) {
+      throw std::invalid_argument("fingerprint_cache_bytes must fit at least one packed-fingerprint page");
+    }
     pointers_.setStream(stream);
+    pageHits_.setStream(stream);
+  }
+
+  ~PagedFingerprintArena() {
+    if (cachePages_ > 0) {
+      cudaStreamSynchronize(stream_);
+    }
   }
 
   void reserve(const int entries) {
-    const auto required = (static_cast<std::size_t>(entries) + summaryEntriesPerPage - 1) / summaryEntriesPerPage;
-    if (required <= pages_.size()) {
+    const auto required     = (static_cast<std::size_t>(entries) + summaryEntriesPerPage - 1) / summaryEntriesPerPage;
+    const auto oldPages     = pageToCache_.size();
+    const auto currentPages = cachePages_ == 0 ? devicePages_.size() : hostPages_.size();
+    if (required <= currentPages) {
       return;
     }
-    while (pages_.size() < required) {
-      pages_.emplace_back(static_cast<std::size_t>(summaryEntriesPerPage) * words_, stream_);
+    while ((cachePages_ == 0 ? devicePages_.size() : hostPages_.size()) < required) {
+      if (cachePages_ == 0) {
+        devicePages_.emplace_back(pageElements(), stream_);
+      } else {
+        hostPages_.emplace_back(pageElements(), std::uint32_t{0});
+        std::uint32_t* mapped = nullptr;
+        cudaCheckError(cudaHostGetDevicePointer(&mapped, hostPages_.back().data(), 0));
+        mappedHostPages_.push_back(mapped);
+        pageToCache_.push_back(-1);
+        pageScores_.push_back(0);
+        if (devicePages_.size() < cachePages_) {
+          const int slot = static_cast<int>(devicePages_.size());
+          const int page = static_cast<int>(hostPages_.size() - 1);
+          devicePages_.emplace_back(pageElements(), stream_);
+          pageToCache_[page] = slot;
+          cacheToPage_.push_back(page);
+          cudaCheckError(cudaMemcpyAsync(devicePages_.back().data(),
+                                         hostPages_.back().data(),
+                                         pageBytes(),
+                                         cudaMemcpyHostToDevice,
+                                         stream_));
+        }
+      }
     }
+    if (cachePages_ > 0) {
+      pageHits_.resize(required);
+      cudaCheckError(
+        cudaMemsetAsync(pageHits_.data() + oldPages, 0, (required - oldPages) * sizeof(std::uint32_t), stream_));
+    }
+    updatePointers();
+  }
+
+  void rotate() {
+    if (cachePages_ == 0 || hostPages_.size() <= cachePages_) {
+      return;
+    }
+    std::vector<std::uint32_t> hits(hostPages_.size());
+    pageHits_.copyToHost(hits);
+    cudaCheckError(cudaStreamSynchronize(stream_));
+    cudaCheckError(cudaMemsetAsync(pageHits_.data(), 0, hits.size() * sizeof(std::uint32_t), stream_));
+    std::vector<int> order(hits.size());
+    std::iota(order.begin(), order.end(), 0);
+    for (std::size_t page = 0; page < hits.size(); ++page) {
+      pageScores_[page] = pageScores_[page] / 2 + hits[page];
+    }
+    std::stable_sort(order.begin(), order.end(), [this](const int left, const int right) {
+      if (pageScores_[left] != pageScores_[right]) {
+        return pageScores_[left] > pageScores_[right];
+      }
+      return pageToCache_[left] >= 0 && pageToCache_[right] < 0;
+    });
+    order.resize(devicePages_.size());
+    std::vector<bool> retain(hits.size(), false);
+    for (const int page : order) {
+      retain[page] = true;
+    }
+    bool changed = false;
+    for (const int page : order) {
+      if (pageToCache_[page] >= 0) {
+        continue;
+      }
+      int slot = 0;
+      while (retain[cacheToPage_[slot]]) {
+        ++slot;
+      }
+      const int oldPage = cacheToPage_[slot];
+      cudaCheckError(cudaMemcpyAsync(hostPages_[oldPage].data(),
+                                     devicePages_[slot].data(),
+                                     pageBytes(),
+                                     cudaMemcpyDeviceToHost,
+                                     stream_));
+      cudaCheckError(cudaMemcpyAsync(devicePages_[slot].data(),
+                                     hostPages_[page].data(),
+                                     pageBytes(),
+                                     cudaMemcpyHostToDevice,
+                                     stream_));
+      pageToCache_[oldPage] = -1;
+      pageToCache_[page]    = slot;
+      cacheToPage_[slot]    = page;
+      changed               = true;
+    }
+    if (changed) {
+      updatePointers();
+    }
+  }
+
+  std::uint32_t* pageHits() const noexcept {
+    return cachePages_ > 0 && hostPages_.size() > cachePages_ ? pageHits_.data() : nullptr;
+  }
+  std::uint32_t** data() const noexcept { return pointers_.data(); }
+
+ private:
+  std::size_t pageElements() const noexcept { return static_cast<std::size_t>(summaryEntriesPerPage) * words_; }
+  std::size_t pageBytes() const noexcept { return pageElements() * sizeof(std::uint32_t); }
+
+  void updatePointers() {
     std::vector<std::uint32_t*> pointers;
-    pointers.reserve(pages_.size());
-    for (auto& page : pages_) {
-      pointers.push_back(page.data());
+    const auto                  pages = cachePages_ == 0 ? devicePages_.size() : hostPages_.size();
+    pointers.reserve(pages);
+    for (std::size_t page = 0; page < pages; ++page) {
+      if (cachePages_ == 0) {
+        pointers.push_back(devicePages_[page].data());
+      } else {
+        const int slot = pageToCache_[page];
+        pointers.push_back(slot >= 0 ? devicePages_[slot].data() : mappedHostPages_[page]);
+      }
     }
     pointers_.setFromVector(pointers);
     // Keep the temporary host pointer table alive until its upload completes.
     cudaCheckError(cudaStreamSynchronize(stream_));
   }
 
-  std::uint32_t** data() const noexcept { return pointers_.data(); }
-
  private:
   int                                           words_;
   cudaStream_t                                  stream_;
-  std::vector<AsyncDeviceVector<std::uint32_t>> pages_;
+  std::size_t                                   cachePages_;
+  std::vector<AsyncDeviceVector<std::uint32_t>> devicePages_;
+  std::vector<PinnedHostVector<std::uint32_t>>  hostPages_;
+  std::vector<std::uint32_t*>                   mappedHostPages_;
+  std::vector<int>                              pageToCache_;
+  std::vector<int>                              cacheToPage_;
+  std::vector<std::uint64_t>                    pageScores_;
+  AsyncDeviceVector<std::uint32_t>              pageHits_;
   AsyncDeviceVector<std::uint32_t*>             pointers_;
 };
 
@@ -297,6 +416,7 @@ template <typename Component> struct TreeStorage {
   int                  numBits;
   std::uint32_t*       summaryPageHits           = nullptr;
   std::uint32_t**      singletonFingerprintPages = nullptr;
+  std::uint32_t*       singletonPageHits         = nullptr;
   int                  queryBegin                = 0;
 };
 
@@ -449,6 +569,9 @@ __device__ __forceinline__ std::uint32_t singletonWord(const TreeStorage<Compone
                                                        const int                     index,
                                                        const int                     word) {
   if (storage.singletonFingerprintPages != nullptr) {
+    if (storage.singletonPageHits != nullptr && word == 0 && (threadIdx.x & 31) == 0) {
+      atomicAdd(storage.singletonPageHits + index / summaryEntriesPerPage, 1U);
+    }
     return storage
       .singletonFingerprintPages[index / summaryEntriesPerPage]
                                 [static_cast<std::size_t>(index % summaryEntriesPerPage) * storage.numWords + word];
@@ -2755,6 +2878,7 @@ BitBirchResult launchShared(const cuda::std::span<const std::uint32_t> fingerpri
                             const int                                  orderedPrefixSize,
                             const int                                  routingWidth,
                             const std::size_t                          summaryCacheBytes,
+                            const std::size_t                          fingerprintCacheBytes,
                             const bool                                 fingerprintsOnHost,
                             const bool                                 clusterIdsOnHost,
                             const bool                                 returnCentroids,
@@ -2776,7 +2900,7 @@ BitBirchResult launchShared(const cuda::std::span<const std::uint32_t> fingerpri
   AsyncDeviceVector<std::uint32_t> inputTile(
     fingerprintsOnHost ? static_cast<std::size_t>(batchCapacity) * numWords : 0,
     stream);
-  PagedFingerprintArena        ownedFingerprints(numWords, stream);
+  PagedFingerprintArena        ownedFingerprints(numWords, stream, fingerprintCacheBytes);
   // Balanced splits leave every non-root node with at least m entries. With
   // K leaf entries and V nodes, the tree has K + V - 1 total entries, hence
   // (m - 1)*(V - 1) <= K <= N. Padding also covers transient split allocations.
@@ -2908,6 +3032,7 @@ BitBirchResult launchShared(const cuda::std::span<const std::uint32_t> fingerpri
       if (fingerprintsOnHost) {
         ownedFingerprints.reserve(static_cast<int>(tree.totalEntries));
         storage.singletonFingerprintPages = ownedFingerprints.data();
+        storage.singletonPageHits         = ownedFingerprints.pageHits();
         storage.queryBegin                = begin;
       }
       bitBirchSharedRouteKernel<<<count, cooperativeBlockSize, 0, stream>>>(begin,
@@ -3011,6 +3136,7 @@ BitBirchResult launchShared(const cuda::std::span<const std::uint32_t> fingerpri
     }
     begin += count;
     tree.summaryArena.rotate();
+    ownedFingerprints.rotate();
   }
   if (returnCentroids) {
     const int clusters = hostControl[5] - hostControl[1] + 1;
@@ -3548,7 +3674,8 @@ BitBirchResult bitBirchSharedGpu(const cuda::std::span<const std::uint32_t> fing
                                  const bool                                 fingerprintsOnHost,
                                  const bool                                 clusterIdsOnHost,
                                  const bool                                 returnCentroids,
-                                 const cudaStream_t                         stream) {
+                                 const cudaStream_t                         stream,
+                                 const std::size_t                          fingerprintCacheBytes) {
   const ScopedNvtxRange range("BitBIRCH shared tree");
   if (numFingerprints < 0 || numFingerprints > std::numeric_limits<int>::max() - cooperativeBlockSize ||
       numWords <= 0 || numWords > std::numeric_limits<int>::max() / 32 ||
@@ -3556,7 +3683,10 @@ BitBirchResult bitBirchSharedGpu(const cuda::std::span<const std::uint32_t> fing
     throw std::invalid_argument("BitBIRCH fingerprints shape or dimensions are invalid");
   }
   if (!std::isfinite(threshold) || threshold < 0 || threshold > 1 || branchingFactor < 3 || insertionBatchSize < 1 ||
-      orderedPrefixSize < 0 || (routingWidth != 1 && routingWidth != 2) || (!filteredGroups && routingWidth != 1)) {
+      orderedPrefixSize < 0 || (routingWidth != 1 && routingWidth != 2) || (!filteredGroups && routingWidth != 1) ||
+      (fingerprintCacheBytes > 0 &&
+       (!fingerprintsOnHost ||
+        fingerprintCacheBytes < sizeof(std::uint32_t) * static_cast<std::size_t>(summaryEntriesPerPage) * numWords))) {
     throw std::invalid_argument("BitBIRCH shared clustering options are invalid");
   }
   const auto minimumNodeSize = branchingFactor / 2 + branchingFactor % 2;
@@ -3580,6 +3710,7 @@ BitBirchResult bitBirchSharedGpu(const cuda::std::span<const std::uint32_t> fing
                                        orderedPrefixSize,
                                        routingWidth,
                                        summaryCacheBytes,
+                                       fingerprintCacheBytes,
                                        fingerprintsOnHost,
                                        clusterIdsOnHost,
                                        returnCentroids,
@@ -3595,6 +3726,7 @@ BitBirchResult bitBirchSharedGpu(const cuda::std::span<const std::uint32_t> fing
                                      orderedPrefixSize,
                                      routingWidth,
                                      summaryCacheBytes,
+                                     fingerprintCacheBytes,
                                      fingerprintsOnHost,
                                      clusterIdsOnHost,
                                      returnCentroids,
