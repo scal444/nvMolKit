@@ -3,11 +3,35 @@
 
 import numpy as np
 import torch
+from _bitbirch_batched_reference import BatchedBitBirch
 from _bitbirch_reference import partitioned_tree_reference, serial_tree_reference
 from rdkit.Chem import rdFingerprintGenerator
 
-from nvmolkit.clustering import bitbirch
+from nvmolkit.clustering import bitbirch, bitbirch_shared
 from nvmolkit.fingerprints import MorganFingerprintGenerator, unpack_fingerprint
+
+
+def test_morgan_fingerprints_to_shared_tree_matches_independent_schedule(size_limited_mols):
+    mols = size_limited_mols[:80]
+    generator = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=1024)
+    bits = np.asarray([generator.GetFingerprint(mol).ToList() for mol in mols], dtype=np.uint8)
+    packed = np.packbits(bits, axis=1, bitorder="little")
+    reference = BatchedBitBirch(0.25, 7, 32, commit_policy="filtered", ordered_prefix_size=17).fit(packed)
+    reference.audit()
+    fingerprints = MorganFingerprintGenerator(radius=2, fpSize=1024).GetFingerprints(mols, num_threads=1)
+    labels, centroids = bitbirch_shared(
+        fingerprints,
+        0.25,
+        branching_factor=7,
+        insertion_batch_size=32,
+        insertion_policy="filtered-group",
+        ordered_prefix_size=17,
+        return_centroids=True,
+    )
+    np.testing.assert_array_equal(labels.numpy(), reference.labels())
+    np.testing.assert_array_equal(
+        centroids.numpy(), np.stack([entry.packed for entry in reference.clusters()]).view(np.uint32)
+    )
 
 
 def test_morgan_fingerprint_to_partitioned_bitbirch_matches_reference(size_limited_mols):

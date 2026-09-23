@@ -320,6 +320,85 @@ def _automatic_bitbirch_partitions(num_fingerprints: int) -> int:
     return (num_fingerprints + 254) // 255
 
 
+def bitbirch_shared(
+    x: ArrayInput,
+    threshold: float,
+    *,
+    branching_factor: int = 254,
+    insertion_batch_size: int = 1024,
+    insertion_policy: str = "ordered-leaf",
+    ordered_prefix_size: int = 0,
+    routing_width: int = 1,
+    summary_cache_bytes: int = 0,
+    host_input: bool = False,
+    return_centroids: bool = False,
+    stream: torch.cuda.Stream | None = None,
+) -> AsyncGpuResult | tuple[AsyncGpuResult, AsyncGpuResult]:
+    """Experimental single-tree insertion, with frozen parent routing per batch.
+
+    With ``ordered-leaf``, each leaf has one ordered writer. ``filtered-group``
+    first tests snapshot proposals individually and commits jointly admissible
+    groups to disjoint entries, then handles residuals with ordered leaf writers.
+    With ``filtered-group``, ``ordered_prefix_size`` optionally builds the first
+    input rows using ordered leaf writers before enabling grouped insertion.
+    For grouped insertion, ``routing_width=2`` retains the two closest child
+    BFs per directory level and chooses the closest entry across both final
+    leaves. This changes routing, not diameter admission or split rules. The
+    ordered prefix always uses single-path routing.
+    Splits occur at barriers and unprocessed inputs are rerouted. This is not the
+    independent-trees-plus-merge algorithm. Batch size one with single-path
+    routing preserves native serial-tree semantics. Larger batches can change
+    clustering; grouped insertion can do so even before the first split.
+    Only the diameter criterion is supported. A positive ``summary_cache_bytes``
+    puts materialized BF sums in pinned CPU memory with a capped GPU page cache;
+    cold pages use mapped host memory and cache rotation occurs between batches.
+    Zero keeps BF sums entirely on the GPU. ``host_input=True`` accepts a packed
+    NumPy matrix (including a memory map), copies only the current insertion
+    batch to the GPU, and retains packed singleton fingerprints with the tree.
+    The cache cap covers BF sums only: centroids, topology, singleton storage,
+    output labels, and scratch remain GPU resident. This is not yet a fully
+    bounded-memory interface or a persistent append API.
+    """
+    if not math.isfinite(threshold) or not 0 <= threshold <= 1:
+        raise ValueError("threshold must be finite and in [0, 1]")
+    if branching_factor < 3 or insertion_batch_size < 1:
+        raise ValueError("branching_factor must be at least 3 and insertion_batch_size positive")
+    if insertion_policy not in ("ordered-leaf", "filtered-group"):
+        raise ValueError("insertion_policy must be ordered-leaf or filtered-group")
+    if ordered_prefix_size < 0:
+        raise ValueError("ordered_prefix_size must be nonnegative")
+    if routing_width not in (1, 2) or (routing_width != 1 and insertion_policy != "filtered-group"):
+        raise ValueError("routing_width must be 1, or 2 with filtered-group insertion")
+    if summary_cache_bytes < 0:
+        raise ValueError("summary_cache_bytes must be nonnegative")
+    if host_input:
+        if not isinstance(x, np.ndarray) or x.ndim != 2 or x.dtype not in (np.int32, np.uint32):
+            raise ValueError("host_input requires a packed 2D NumPy int32 or uint32 array")
+        if x.shape[1] == 0:
+            raise ValueError("x must contain at least one fingerprint word")
+        x = np.ascontiguousarray(x)
+        interface = x.__array_interface__
+        active_stream = _resolve_cuda_stream(stream)
+    else:
+        (x,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
+        interface = x.__cuda_array_interface__
+    with torch.cuda.stream(active_stream):
+        result = _clustering.bitbirch_shared(
+            interface,
+            threshold,
+            branching_factor,
+            insertion_batch_size,
+            insertion_policy,
+            ordered_prefix_size,
+            routing_width,
+            summary_cache_bytes,
+            host_input,
+            return_centroids,
+            active_stream.cuda_stream,
+        )
+        return _wrap_bitbirch_result(result, return_centroids)
+
+
 def bitbirch(
     x: ArrayInput,
     threshold: float,

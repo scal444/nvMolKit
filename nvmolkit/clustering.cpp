@@ -54,9 +54,65 @@ boost::python::object wrapBitBirchResult(nvMolKit::BitBirchResult& result,
   return boost::python::make_tuple(toOwnedPyArray(clusterArray), toOwnedPyArray(centroidArray));
 }
 
+boost::python::object bitBirchShared(const boost::python::dict& fingerprints,
+                                     const double               threshold,
+                                     const int                  branchingFactor,
+                                     const int                  insertionBatchSize,
+                                     const std::string&         insertionPolicy,
+                                     const int                  orderedPrefixSize,
+                                     const int                  routingWidth,
+                                     const std::size_t          summaryCacheBytes,
+                                     const bool                 fingerprintsOnHost,
+                                     const bool                 returnCentroids,
+                                     const std::uintptr_t       streamPtr) {
+  auto stream = nvMolKit::acquireExternalStream(streamPtr);
+  if (!stream) {
+    throw std::invalid_argument("Invalid CUDA stream");
+  }
+  boost::python::tuple shape = boost::python::extract<boost::python::tuple>(fingerprints["shape"]);
+  if (len(shape) != 2) {
+    throw std::invalid_argument("fingerprints must be a 2D matrix");
+  }
+  const int                  count   = boost::python::extract<int>(shape[0]);
+  const int                  words   = boost::python::extract<int>(shape[1]);
+  const boost::python::tuple data    = boost::python::extract<boost::python::tuple>(fingerprints["data"]);
+  const auto                 pointer = boost::python::extract<std::size_t>(data[0])();
+  const auto span = nvMolKit::getSpanFromDictElems<std::uint32_t>(reinterpret_cast<void*>(pointer), shape);
+  if (insertionPolicy != "ordered-leaf" && insertionPolicy != "filtered-group") {
+    throw std::invalid_argument("insertion_policy must be ordered-leaf or filtered-group");
+  }
+  auto result = nvMolKit::bitBirchSharedGpu(span,
+                                            count,
+                                            words,
+                                            threshold,
+                                            branchingFactor,
+                                            insertionBatchSize,
+                                            insertionPolicy == "filtered-group",
+                                            orderedPrefixSize,
+                                            routingWidth,
+                                            summaryCacheBytes,
+                                            fingerprintsOnHost,
+                                            returnCentroids,
+                                            *stream);
+  return wrapBitBirchResult(result, count, returnCentroids);
+}
+
 }  // namespace
 
 BOOST_PYTHON_MODULE(_clustering) {
+  boost::python::def("bitbirch_shared",
+                     bitBirchShared,
+                     (boost::python::arg("fingerprints"),
+                      boost::python::arg("threshold"),
+                      boost::python::arg("branching_factor")     = 254,
+                      boost::python::arg("insertion_batch_size") = 1024,
+                      boost::python::arg("insertion_policy")     = "ordered-leaf",
+                      boost::python::arg("ordered_prefix_size")  = 0,
+                      boost::python::arg("routing_width")        = 1,
+                      boost::python::arg("summary_cache_bytes")  = 0,
+                      boost::python::arg("host_input")           = false,
+                      boost::python::arg("return_centroids")     = false,
+                      boost::python::arg("stream")               = 0));
   boost::python::def(
     "butina",
     +[](const boost::python::dict& distanceMatrix,

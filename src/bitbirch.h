@@ -12,6 +12,7 @@
 
 #include <cuda_runtime.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <cuda/std/span>
 
@@ -30,6 +31,24 @@ struct BitBirchResult {
   int                              numClusters = 0;
   int                              numWords    = 0;
 };
+
+/** Experimental shared-tree insertion with snapshot parent routing and ordered leaf owners.
+ * Batch size changes routing freshness, not the number of independent trees.
+ * Structural changes occur after all leaf owners finish. Diameter only.
+ */
+BitBirchResult bitBirchSharedGpu(cuda::std::span<const std::uint32_t> fingerprints,
+                                 int                                  numFingerprints,
+                                 int                                  numWords,
+                                 double                               threshold,
+                                 int                                  branchingFactor,
+                                 int                                  insertionBatchSize,
+                                 bool                                 filteredGroups,
+                                 int                                  orderedPrefixSize,
+                                 int                                  routingWidth       = 1,
+                                 std::size_t                          summaryCacheBytes  = 0,
+                                 bool                                 fingerprintsOnHost = false,
+                                 bool                                 returnCentroids    = false,
+                                 cudaStream_t                         stream             = nullptr);
 
 /**
  * Correctness-first ordered BitBIRCH tree construction on one GPU thread.
