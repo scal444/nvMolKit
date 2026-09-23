@@ -439,6 +439,11 @@ def main() -> None:
                             max_results=max_results,
                         )
                     )
+                    print(
+                        f"PROGRESS completed backend=rdkit operation={operation} "
+                        f"holder={holder} threads={num_threads}",
+                        flush=True,
+                    )
 
         if not args.no_nvmolkit:
             for algorithm in args.algorithms:
@@ -479,6 +484,11 @@ def main() -> None:
                             num_gpus=len(gpu_ids),
                             max_results=max_results,
                         )
+                    )
+                    print(
+                        f"PROGRESS completed backend=nvmolkit operation={operation} "
+                        f"algorithm={algorithm} chunk_size={chunk_size} gpu_ids={gpu_ids}",
+                        flush=True,
                     )
 
     print_csv_rows(rows)
