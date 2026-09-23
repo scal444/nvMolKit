@@ -7,6 +7,9 @@
 #include <cuda_runtime.h>
 
 #include <cstdint>
+#include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "src/clustering_result.h"
@@ -26,12 +29,32 @@ struct AapOptions {
   float sinkhornTemperature = 0.104F;
 };
 
+/** Molecules that AAP cannot process, grouped by reason as input indices. */
+class AapInvalidMoleculesError : public std::invalid_argument {
+ public:
+  AapInvalidMoleculesError(const std::string& message,
+                           std::vector<int>   none,
+                           std::vector<int>   empty,
+                           std::vector<int>   tooManyAtoms,
+                           std::vector<int>   unsupportedBonds)
+      : std::invalid_argument(message),
+        none(std::move(none)),
+        empty(std::move(empty)),
+        tooManyAtoms(std::move(tooManyAtoms)),
+        unsupportedBonds(std::move(unsupportedBonds)) {}
+
+  std::vector<int> none;
+  std::vector<int> empty;
+  std::vector<int> tooManyAtoms;
+  std::vector<int> unsupportedBonds;
+};
+
 /**
  * Compute approximate Atom-Atom Path (AAP) similarity from @p left to @p right on the GPU.
  *
  * Rooted paths are hashed into per-atom histograms and compatible atoms are
  * assigned with fixed-iteration Sinkhorn normalization. Molecules may contain
- * at most 64 atoms.
+ * at most 64 atoms. Invalid molecules raise AapInvalidMoleculesError.
  */
 float aapSimilarityGpu(const RDKit::ROMol& left,
                        const RDKit::ROMol& right,

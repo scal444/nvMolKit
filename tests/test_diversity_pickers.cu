@@ -94,11 +94,11 @@ TEST(DiversityPickerMaxMin, HonorsOrderTieBreakAndInclusiveThreshold) {
 
   auto result = nvMolKit::maxMinFromDistanceMatrix(toSpan(device), 4, 4, {0}, 42, -1.0, stream);
   EXPECT_THAT(downloadPicks(result, stream), ::testing::ElementsAre(0, 3, 2, 1));
-  EXPECT_DOUBLE_EQ(result.lastDistance, 0.1);
+  EXPECT_FLOAT_EQ(result.lastDistance, 0.1F);
 
   result = nvMolKit::maxMinFromDistanceMatrix(toSpan(device), 4, 4, {0}, 42, 0.4, stream);
   EXPECT_THAT(downloadPicks(result, stream), ::testing::ElementsAre(0, 3));
-  EXPECT_DOUBLE_EQ(result.lastDistance, 0.9);
+  EXPECT_FLOAT_EQ(result.lastDistance, 0.9F);
 
   const std::vector<double> tiedDistances = {
     0.0,
@@ -169,7 +169,7 @@ TEST(DiversityPickerFused, TanimotoMaxMinMatchesKnownSequence) {
   const auto result =
     nvMolKit::fusedMaxMinGpu(toSpan(device), 4, 1, 4, FingerprintSimilarityMetric::Tanimoto, {0}, 42, -1.0, stream);
   EXPECT_THAT(downloadPicks(result, stream), ::testing::ElementsAre(0, 2, 1, 3));
-  EXPECT_DOUBLE_EQ(result.lastDistance, 0.5);
+  EXPECT_FLOAT_EQ(result.lastDistance, 0.5F);
 }
 
 TEST(DiversityPickerEdges, HandlesEmptyAndSingletonInputs) {
@@ -190,7 +190,7 @@ TEST(DiversityPickerEdges, HandlesEmptyAndSingletonInputs) {
   EXPECT_THAT(downloadPicks(picks, stream), ::testing::ElementsAre(0));
   picks = nvMolKit::maxMinFromDistanceMatrix(toSpan(singleton), 1, 1, {}, 7, -1.0, stream);
   EXPECT_THAT(downloadPicks(picks, stream), ::testing::ElementsAre(0));
-  EXPECT_DOUBLE_EQ(picks.lastDistance, -1.0);
+  EXPECT_FLOAT_EQ(picks.lastDistance, -1.0F);
 }
 
 TEST(DiversityPickerValidation, RejectsMalformedArguments) {

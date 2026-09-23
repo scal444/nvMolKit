@@ -2,13 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from functools import cache
-from pathlib import Path
 
 import numpy as np
 import pytest
 import torch
-from rdkit import Chem, DataStructs
-from rdkit.Chem import rdFingerprintGenerator
+from rdkit import Chem
 from rdkit.SimDivFilters import rdSimDivPickers
 
 from nvmolkit.clustering import (
@@ -27,34 +25,6 @@ from nvmolkit.similarity import AAPMetric, CosineMetric, TanimotoMetric, aap_sim
 from nvmolkit.types import AsyncGpuResult
 
 RDKIT = OutputMode.RDKIT
-CHEMBL_PATH = Path(__file__).resolve().parents[2] / "tests" / "test_data" / "chembl_1k.smi"
-
-
-@pytest.fixture(scope="module")
-def chembl_molecules():
-    lines = [line.split()[0] for line in CHEMBL_PATH.read_text().splitlines() if line and not line.startswith("#")]
-    molecules = [Chem.MolFromSmiles(smiles) for smiles in lines]
-    return [molecule for molecule in molecules if molecule is not None]
-
-
-@pytest.fixture(scope="module")
-def chembl_fingerprints(chembl_molecules):
-    """RDKit bit vectors and the same bits packed as ``(N, 32)`` uint32 words."""
-    generator = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=1024)
-    bit_vectors = [generator.GetFingerprint(molecule) for molecule in chembl_molecules]
-    bits = np.zeros((len(bit_vectors), 1024), dtype=np.uint8)
-    for row, bit_vector in enumerate(bit_vectors):
-        DataStructs.ConvertToNumpyArray(bit_vector, bits[row])
-    return bit_vectors, np.packbits(bits, axis=1, bitorder="little").view(np.uint32)
-
-
-@pytest.fixture(scope="module")
-def chembl_distances(chembl_fingerprints):
-    bit_vectors, _ = chembl_fingerprints
-    bulk = {"tanimoto": DataStructs.BulkTanimotoSimilarity, "cosine": DataStructs.BulkCosineSimilarity}
-    return {
-        name: 1.0 - np.asarray([function(fp, bit_vectors) for fp in bit_vectors]) for name, function in bulk.items()
-    }
 
 
 @pytest.fixture(scope="module")
@@ -70,6 +40,7 @@ def aap_molecules(chembl_molecules):
 
 def _reference_dise(distances, cutoff, assignment):
     """Direct NumPy DISE in RDKit cluster format."""
+    cutoff = distances.dtype.type(cutoff)
     num_items = len(distances)
     active = np.ones(num_items, dtype=bool)
     labels = np.full(num_items, -1)
@@ -118,25 +89,27 @@ def _fingerprint_distance_matrix(fingerprints, metric):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("cutoff", [0.0, 0.2, 0.3, 0.5, 0.65, 1.0])
+# Distinct Tanimoto values keep their order in float32, so results equal RDKit's double-precision pickers except
+# where a distance equals a cutoff that float32 cannot represent exactly. RDKit parity tests use dyadic cutoffs.
+@pytest.mark.parametrize("cutoff", [0.0, 0.25, 0.5, 0.625, 1.0])
 def test_fused_leader_matches_rdkit_on_chembl(chembl_fingerprints, cutoff):
-    # 0.3 has pairs at exactly Tanimoto 0.7, where "1 - s <= cutoff" and "s >= 1 - cutoff" disagree in floating point.
     bit_vectors, packed = chembl_fingerprints
     expected = tuple(rdSimDivPickers.LeaderPicker().LazyBitVectorPick(bit_vectors, len(bit_vectors), cutoff))
 
     assert fused_leader(packed, cutoff, output=RDKIT) == expected
 
 
-def test_fused_leader_first_picks_and_pick_size_match_rdkit_on_chembl(chembl_fingerprints):
+@pytest.mark.parametrize("num_first_picks", [3, 40])
+def test_fused_leader_first_picks_and_pick_size_match_rdkit_on_chembl(chembl_fingerprints, num_first_picks):
     bit_vectors, packed = chembl_fingerprints
-    first_picks = [500, 10, len(bit_vectors) - 1]
+    first_picks = [int(index) for index in np.random.default_rng(5).permutation(len(bit_vectors))[:num_first_picks]]
     expected = tuple(
         rdSimDivPickers.LeaderPicker().LazyBitVectorPick(
-            bit_vectors, len(bit_vectors), 0.4, pickSize=50, firstPicks=first_picks
+            bit_vectors, len(bit_vectors), 0.5, pickSize=50, firstPicks=first_picks
         )
     )
 
-    assert fused_leader(packed, 0.4, pick_size=50, first_picks=first_picks, output=RDKIT) == expected
+    assert fused_leader(packed, 0.5, pick_size=50, first_picks=first_picks, output=RDKIT) == expected
 
 
 @pytest.mark.parametrize(
@@ -156,7 +129,7 @@ def test_fused_maxmin_matches_rdkit_on_chembl(chembl_fingerprints, pick_size, fi
     assert actual == expected
 
 
-@pytest.mark.parametrize("threshold", [0.5, 0.7, 0.9])
+@pytest.mark.parametrize("threshold", [0.5, 0.75, 0.875])
 def test_fused_maxmin_threshold_matches_rdkit_on_chembl(chembl_fingerprints, threshold):
     bit_vectors, packed = chembl_fingerprints
     expected, expected_last = rdSimDivPickers.MaxMinPicker().LazyBitVectorPickWithThreshold(
@@ -166,7 +139,7 @@ def test_fused_maxmin_threshold_matches_rdkit_on_chembl(chembl_fingerprints, thr
     actual, actual_last = fused_maxmin(packed, len(bit_vectors), seed=11, threshold=threshold, output=RDKIT)
 
     assert actual == tuple(expected)
-    assert actual_last == expected_last
+    assert actual_last == pytest.approx(expected_last, rel=1e-6)
 
 
 @pytest.mark.parametrize("metric", ["tanimoto", "cosine"])
@@ -183,6 +156,15 @@ def test_fused_algorithms_match_matrix_forms_on_chembl(chembl_fingerprints, chem
         assert fused_dise(packed, cutoff, metric=metric, assignment=assignment, output=RDKIT) == dise(
             distances, cutoff, assignment=assignment, output=RDKIT
         )
+
+
+def test_float32_and_float64_matrices_agree_on_chembl(chembl_distances):
+    distances = chembl_distances["tanimoto"]
+    widened = distances.astype(np.float64)
+
+    assert leader(widened, 0.3, output=RDKIT) == leader(distances, 0.3, output=RDKIT)
+    assert maxmin(widened, 100, seed=2, output=RDKIT) == maxmin(distances, 100, seed=2, output=RDKIT)
+    assert dise(widened, 0.3, output=RDKIT) == dise(distances, 0.3, output=RDKIT)
 
 
 @pytest.mark.parametrize("assignment", ["first", "nearest"])
@@ -207,6 +189,32 @@ def test_dise_device_result_is_consistent_on_chembl(chembl_fingerprints):
     assert np.array_equal(np.bincount(cluster_ids, minlength=len(centroids)), sizes)
     assert np.array_equal(cluster_ids[centroids], np.arange(len(centroids)))
     assert np.all(np.diff(sizes) <= 0)
+
+
+@pytest.mark.parametrize("num_words", [3, 260])
+@pytest.mark.parametrize("metric", ["tanimoto", "cosine"])
+def test_fused_forms_match_matrix_forms_for_unusual_widths(float32_distances, num_words, metric):
+    # 3 words cannot use vector loads; 260 words exceed the shared-memory source tile.
+    rng = np.random.default_rng(num_words)
+    bits = rng.random((300, num_words * 32)) < 0.03
+    bits[:40] = bits[40:80] | (rng.random((40, num_words * 32)) < 0.01)
+    packed = np.packbits(bits, axis=1, bitorder="little").view(np.uint32)
+    distances = float32_distances(packed, metric)
+
+    assert fused_leader(packed, 0.9, metric=metric, output=RDKIT) == leader(distances, 0.9, output=RDKIT)
+    assert fused_maxmin(packed, 40, metric=metric, seed=4, output=RDKIT) == maxmin(distances, 40, seed=4, output=RDKIT)
+    assert fused_dise(packed, 0.9, metric=metric, output=RDKIT) == dise(distances, 0.9, output=RDKIT)
+
+
+def test_fused_forms_handle_buffers_not_aligned_for_vector_loads(chembl_fingerprints):
+    _, packed = chembl_fingerprints
+    storage = torch.zeros(packed.size + 1, dtype=torch.int32, device="cuda")
+    shifted = storage[1:].view(packed.shape)
+    shifted.copy_(torch.from_numpy(packed.view(np.int32)))
+    assert shifted.data_ptr() % 16 != 0
+
+    assert fused_leader(shifted, 0.4, output=RDKIT) == fused_leader(packed, 0.4, output=RDKIT)
+    assert fused_dise(shifted, 0.4, output=RDKIT) == fused_dise(packed, 0.4, output=RDKIT)
 
 
 @pytest.mark.parametrize("form", ["int32", "torch_cpu", "torch_cuda", "async", "non_contiguous"])
@@ -326,7 +334,9 @@ def test_matrix_rows_are_distances_from_the_selected_item():
 
     assert leader(distances, 0.2, output=RDKIT) == (0, 2)
     # From pick 0, item 2 is farthest by row 0 even though column 0 says otherwise.
-    assert maxmin(distances, 2, first_picks=(0,), output=RDKIT) == ((0, 2), 0.8)
+    picks, last_distance = maxmin(distances, 2, first_picks=(0,), output=RDKIT)
+    assert picks == (0, 2)
+    assert last_distance == pytest.approx(0.8)
     assert dise(distances, 0.2, assignment="first", output=RDKIT) == ((0, 1), (2,))
 
 
@@ -477,7 +487,8 @@ def test_fused_sphere_exclusion_rejects_invalid_cutoffs(function, metric, cutoff
     [
         (np.zeros(3), "square 2D"),
         (np.zeros((2, 3)), "square 2D"),
-        (np.zeros((2, 2), dtype=np.float32), "float64"),
+        (np.zeros((2, 2), dtype=np.float16), "float32 or float64"),
+        (np.zeros((2, 2), dtype=np.int32), "float32 or float64"),
     ],
 )
 def test_matrix_shape_and_dtype_are_validated(matrix, message):

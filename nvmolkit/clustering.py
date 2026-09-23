@@ -183,7 +183,11 @@ def _prepare_distance_matrix(distance_matrix: ArrayInput, stream: torch.cuda.Str
     active_stream = _resolve_cuda_stream(stream, distance_matrix)
     with torch.cuda.stream(active_stream):
         tensor = _as_cuda_tensor("distance_matrix", distance_matrix, stream=active_stream)
-        tensor = _check_distance_matrix("distance_matrix", tensor)
+        if tensor.ndim != 2 or tensor.shape[0] != tensor.shape[1]:
+            raise ValueError(f"distance_matrix must be a square 2D matrix, got shape={tuple(tensor.shape)}")
+        if tensor.dtype not in (torch.float32, torch.float64):
+            raise ValueError("distance_matrix must have dtype float32 or float64")
+        tensor = tensor.contiguous()
     return tensor, active_stream
 
 
@@ -208,11 +212,11 @@ def leader(
 
     Candidates are visited in input order. Each candidate that has not been
     excluded becomes a leader and excludes every remaining candidate within
-    ``cutoff`` of it. Results match RDKit's ``LeaderPicker``.
+    ``cutoff`` of it, as in RDKit's ``LeaderPicker``.
 
     Args:
-        distance_matrix: Square float64 matrix of shape ``(N, N)``. Element
-            ``[i, j]`` is the distance from item ``i`` to item ``j``.
+        distance_matrix: Square float32 or float64 matrix of shape ``(N, N)``.
+            Element ``[i, j]`` is the distance from item ``i`` to item ``j``.
         cutoff: Inclusive exclusion distance. Must be finite and non-negative.
         pick_size: Maximum number of leaders, or ``0`` for no limit.
         first_picks: Unique indices selected as leaders, in order, before the
@@ -294,12 +298,12 @@ def maxmin(
     """Select a diverse subset from a distance matrix by greedy MaxMin.
 
     Each step adds the candidate whose distance to its nearest pick is largest,
-    breaking ties by lowest index. Results match RDKit's ``MaxMinPicker``,
-    including the seeded first pick.
+    breaking ties by lowest index, as in RDKit's ``MaxMinPicker``. A given
+    ``seed`` selects the same random first pick as RDKit.
 
     Args:
-        distance_matrix: Square float64 matrix of shape ``(N, N)``. Element
-            ``[i, j]`` is the distance from item ``i`` to item ``j``.
+        distance_matrix: Square float32 or float64 matrix of shape ``(N, N)``.
+            Element ``[i, j]`` is the distance from item ``i`` to item ``j``.
         pick_size: Number of items to select, from 1 through ``N``.
         first_picks: Unique indices that start the selection, in order. If
             empty, the first pick is drawn at random.
@@ -402,8 +406,8 @@ def dise(
     size, then by centroid selection order.
 
     Args:
-        distance_matrix: Square float64 matrix of shape ``(N, N)``. Element
-            ``[i, j]`` is the distance from item ``i`` to item ``j``.
+        distance_matrix: Square float32 or float64 matrix of shape ``(N, N)``.
+            Element ``[i, j]`` is the distance from item ``i`` to item ``j``.
         cutoff: Inclusive exclusion distance. Must be finite and non-negative.
         assignment: ``"first"`` or ``"nearest"``.
         stream: CUDA stream to use. If None, uses the current stream.

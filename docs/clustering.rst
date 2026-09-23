@@ -28,9 +28,10 @@ sphere exclusion (DISE). Each algorithm has two forms:
 Matrix and fused forms
 ----------------------
 
-The matrix form takes a precomputed square ``float64`` distance matrix, where
-element ``[i, j]`` is the distance from item ``i`` to item ``j``. Memory scales
-as ``O(N^2)``.
+The matrix form takes a precomputed square distance matrix, where element
+``[i, j]`` is the distance from item ``i`` to item ``j``. Memory scales as
+``O(N^2)``. Leader, MaxMin, and DISE accept ``float32`` or ``float64`` matrices;
+Butina requires ``float64``.
 
 The fused form takes fingerprints or molecules and a similarity metric, and
 computes distances as the algorithm needs them. Memory scales as ``O(N)``.
@@ -38,7 +39,9 @@ Given the same distances, both forms return the same result.
 
 All cutoffs and thresholds are distances. Fused forms use
 ``distance = 1 - similarity``, so a similarity threshold of ``0.7`` is
-``cutoff=0.3``.
+``cutoff=0.3``. Leader, MaxMin, and DISE compare distances in single precision,
+so a distance within rounding of the cutoff can be classified differently than
+by a double-precision implementation such as RDKit's.
 
 Metrics
 -------

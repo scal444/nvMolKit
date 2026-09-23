@@ -157,7 +157,7 @@ def test_aap_clustering_rejects_invalid_thresholds(threshold):
         fused_dise([], cutoff=1.0 - threshold, metric=AAPMetric())
 
 
-def test_aap_rejects_empty_oversized_null_and_unsupported_molecules():
+def test_aap_reports_every_invalid_molecule_by_reason():
     molecule = _mol("CCO")
     empty = Chem.RWMol().GetMol()
     oversized = _mol("C" * 65)
@@ -165,14 +165,15 @@ def test_aap_rejects_empty_oversized_null_and_unsupported_molecules():
     unsupported.AddAtom(Chem.Atom(6))
     unsupported.AddAtom(Chem.Atom(6))
     unsupported.AddBond(0, 1, Chem.BondType.UNSPECIFIED)
+    molecules = [molecule, None, empty, oversized, unsupported.GetMol(), None, molecule]
 
-    with pytest.raises(ValueError, match="does not support empty molecules"):
+    with pytest.raises(ValueError, match="more than 64 atoms at indices \\[3\\]") as caught:
+        fused_dise(molecules, cutoff=0.5, metric=AAPMetric())
+
+    assert caught.value.args[1] == {"none": [1, 5], "empty": [2], "too_many_atoms": [3], "unsupported_bond": [4]}
+    with pytest.raises(ValueError, match="empty molecules"):
         aap_similarity(empty, molecule)
-    with pytest.raises(ValueError, match="at most 64 atoms"):
-        aap_similarity(oversized, oversized)
-    with pytest.raises(ValueError, match="Invalid molecule at index 0"):
-        fused_dise([None], cutoff=1.0 - 0.217, metric=AAPMetric())
-    with pytest.raises(ValueError, match="supports only single, double, triple, and aromatic bonds"):
+    with pytest.raises(ValueError, match="bonds other than single, double, triple, or aromatic"):
         aap_similarity(unsupported.GetMol(), molecule)
 
 

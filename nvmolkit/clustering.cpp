@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <variant>
 #include <vector>
 
 #include "nvmolkit/array_helpers.h"
@@ -86,16 +87,35 @@ cudaStream_t requireStream(const std::uintptr_t streamPtr) {
 }
 
 struct MatrixInput {
-  cuda::std::span<const double> distances;
-  int                           numItems;
+  std::variant<cuda::std::span<const float>, cuda::std::span<const double>> distances;
+  int                                                                       numItems;
 };
 
+//! Parses a float32 or float64 square matrix from its CUDA array interface.
 MatrixInput parseDistanceMatrix(const boost::python::dict& matrix) {
   boost::python::tuple shape       = boost::python::extract<boost::python::tuple>(matrix["shape"]);
   boost::python::tuple data        = boost::python::extract<boost::python::tuple>(matrix["data"]);
   const std::size_t    dataPointer = boost::python::extract<std::size_t>(data[0]);
-  return {nvMolKit::getSpanFromDictElems<double>(reinterpret_cast<void*>(dataPointer), shape),
-          boost::python::extract<int>(shape[0])};
+  const std::string    typestr     = boost::python::extract<std::string>(matrix["typestr"]);
+  const int            numItems    = boost::python::extract<int>(shape[0]);
+  auto*                pointer     = reinterpret_cast<void*>(dataPointer);
+  if (typestr == "<f4") {
+    return {nvMolKit::getSpanFromDictElems<float>(pointer, shape), numItems};
+  }
+  if (typestr == "<f8") {
+    return {nvMolKit::getSpanFromDictElems<double>(pointer, shape), numItems};
+  }
+  throw std::invalid_argument("distance_matrix must have dtype float32 or float64");
+}
+
+void translateAapInvalidMolecules(const nvMolKit::AapInvalidMoleculesError& error) {
+  boost::python::dict indices;
+  indices["none"]                      = nvMolKit::vectorToList(error.none);
+  indices["empty"]                     = nvMolKit::vectorToList(error.empty);
+  indices["too_many_atoms"]            = nvMolKit::vectorToList(error.tooManyAtoms);
+  indices["unsupported_bond"]          = nvMolKit::vectorToList(error.unsupportedBonds);
+  const boost::python::tuple arguments = boost::python::make_tuple(std::string(error.what()), indices);
+  PyErr_SetObject(PyExc_ValueError, arguments.ptr());
 }
 
 struct FingerprintInput {
@@ -113,9 +133,15 @@ FingerprintInput parseFingerprints(const boost::python::dict& fingerprints) {
           boost::python::extract<int>(shape[1])};
 }
 
+//! Converts molecules for AAP, keeping None as nullptr so AAP can report every invalid input together.
 std::vector<const RDKit::ROMol*> moleculePointers(const boost::python::list& molecules) {
-  const auto extracted = nvMolKit::extractMolecules(molecules);
-  return {extracted.begin(), extracted.end()};
+  const auto                       count = boost::python::len(molecules);
+  std::vector<const RDKit::ROMol*> result;
+  result.reserve(count);
+  for (int index = 0; index < count; ++index) {
+    result.push_back(boost::python::extract<RDKit::ROMol*>(boost::python::object(molecules[index]))());
+  }
+  return result;
 }
 
 std::vector<int> extractIndices(const boost::python::object& values) {
@@ -141,6 +167,8 @@ nvMolKit::FingerprintSimilarityMetric parseFingerprintMetric(const std::string& 
 }  // namespace
 
 BOOST_PYTHON_MODULE(_clustering) {
+  boost::python::register_exception_translator<nvMolKit::AapInvalidMoleculesError>(translateAapInvalidMolecules);
+
   boost::python::def(
     "aap_similarity",
     +[](const RDKit::ROMol& left,
@@ -262,12 +290,16 @@ BOOST_PYTHON_MODULE(_clustering) {
         const boost::python::object& firstPicks,
         const std::uintptr_t         streamPtr) {
       const auto input  = parseDistanceMatrix(distanceMatrix);
-      auto       result = nvMolKit::leaderFromDistanceMatrix(input.distances,
-                                                       input.numItems,
-                                                       cutoff,
-                                                       pickSize,
-                                                       extractIndices(firstPicks),
-                                                       requireStream(streamPtr));
+      auto       result = std::visit(
+        [&](const auto distances) {
+          return nvMolKit::leaderFromDistanceMatrix(distances,
+                                                    input.numItems,
+                                                    cutoff,
+                                                    pickSize,
+                                                    extractIndices(firstPicks),
+                                                    requireStream(streamPtr));
+        },
+        input.distances);
       return wrapPickerResult(result);
     },
     (boost::python::arg("distance_matrix"),
@@ -311,13 +343,17 @@ BOOST_PYTHON_MODULE(_clustering) {
         const double                 threshold,
         const std::uintptr_t         streamPtr) {
       const auto input  = parseDistanceMatrix(distanceMatrix);
-      auto       result = nvMolKit::maxMinFromDistanceMatrix(input.distances,
-                                                       input.numItems,
-                                                       pickSize,
-                                                       extractIndices(firstPicks),
-                                                       seed,
-                                                       threshold,
-                                                       requireStream(streamPtr));
+      auto       result = std::visit(
+        [&](const auto distances) {
+          return nvMolKit::maxMinFromDistanceMatrix(distances,
+                                                    input.numItems,
+                                                    pickSize,
+                                                    extractIndices(firstPicks),
+                                                    seed,
+                                                    threshold,
+                                                    requireStream(streamPtr));
+        },
+        input.distances);
       return wrapPickerResult(result);
     },
     (boost::python::arg("distance_matrix"),
@@ -365,10 +401,12 @@ BOOST_PYTHON_MODULE(_clustering) {
         const std::uintptr_t       streamPtr) {
       const auto stream = requireStream(streamPtr);
       const auto input  = parseDistanceMatrix(distanceMatrix);
-      return wrapClusteringResult(
-        nvMolKit::diseFromDistanceMatrix(input.distances, input.numItems, cutoff, nearestAssignment, stream),
-        deviceOutput,
-        stream);
+      auto       result = std::visit(
+        [&](const auto distances) {
+          return nvMolKit::diseFromDistanceMatrix(distances, input.numItems, cutoff, nearestAssignment, stream);
+        },
+        input.distances);
+      return wrapClusteringResult(result, deviceOutput, stream);
     },
     (boost::python::arg("distance_matrix"),
      boost::python::arg("cutoff"),

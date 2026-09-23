@@ -53,6 +53,12 @@ class AAPMetric:
     ``metric="aap"`` is equivalent to ``AAPMetric()``. Fused clustering and
     selection score each selected molecule against the candidates.
 
+    Molecules must be nonempty, contain at most 64 atoms including explicit
+    hydrogens, and use only single, double, triple, and aromatic bonds. Other
+    inputs raise :class:`ValueError` whose second argument maps ``"none"``,
+    ``"empty"``, ``"too_many_atoms"``, and ``"unsupported_bond"`` to lists of
+    input indices.
+
     Attributes:
         max_path_length: Maximum rooted path length in bonds.
         histogram_bins: Number of hashed path bins, from 1 through 32767.
@@ -94,8 +100,7 @@ def aap_similarity(
     """Compute approximate Atom-Atom Path (AAP) similarity between two molecules.
 
     The score is directed: ``aap_similarity(a, b)`` and ``aap_similarity(b, a)``
-    can differ. Molecules must be nonempty, contain at most 64 atoms including
-    explicit hydrogens, and use only single, double, triple, and aromatic bonds.
+    can differ. Input requirements are described in :class:`AAPMetric`.
 
     Args:
         left: Reference RDKit molecule.
