@@ -169,7 +169,7 @@ def test_validation_checks_all_queries_and_get_order():
         benchmark._validate_results([True], [True, False], "has")
 
 
-def test_reference_uses_single_threaded_mol_holder(monkeypatch):
+def test_reference_uses_all_threads(monkeypatch):
     library = _FakeRdkitLibrary()
     added = []
     library.AddMol = added.append
@@ -180,7 +180,7 @@ def test_reference_uses_single_threaded_mol_holder(monkeypatch):
     assert added == ["mol-a", "mol-b"]
     assert results == [[0, 1, 2]]
     _, _, kwargs = library.calls[0]
-    assert kwargs["numThreads"] == 1
+    assert kwargs["numThreads"] == -1
     assert kwargs["maxResults"] == 4
 
 
@@ -346,7 +346,6 @@ def test_main_runs_requested_cross_product_and_validates_each_gpu_result(monkeyp
     rdkit_calls = []
     nvmolkit_calls = []
     validation_calls = []
-    reference_calls = []
     emitted_rows = []
 
     monkeypatch.setattr(
@@ -393,11 +392,6 @@ def test_main_runs_requested_cross_product_and_validates_each_gpu_result(monkeyp
         "_validate_results",
         lambda *args: validation_calls.append(args),
     )
-    monkeypatch.setattr(
-        benchmark,
-        "_rdkit_reference_results",
-        lambda *args: reference_calls.append(args) or [True],
-    )
     monkeypatch.setattr(benchmark, "print_csv_rows", emitted_rows.extend)
     monkeypatch.setattr(benchmark, "write_csv_rows", lambda rows, output: None)
 
@@ -415,8 +409,8 @@ def test_main_runs_requested_cross_product_and_validates_each_gpu_result(monkeyp
         ("dfs", 8),
         ("dfs", 16),
     }
-    assert len(validation_calls) == len(nvmolkit_calls) == 4
-    assert len(reference_calls) == 1
+    assert len(validation_calls) == 7
+    assert len(nvmolkit_calls) == 4
     assert all(call["max_results"] == -1 for call in rdkit_calls + nvmolkit_calls)
     assert all(call["gpu_ids"] == [0, 1] for call in nvmolkit_calls)
     assert len(emitted_rows) == 8

@@ -203,7 +203,7 @@ def _rdkit_reference_results(
     library = _make_rdkit_library("mol")
     for mol in mols:
         library.AddMol(mol)
-    return _run_rdkit_queries(library, queries, operation, max_results, num_threads=1)
+    return _run_rdkit_queries(library, queries, operation, max_results, num_threads=-1)
 
 
 def benchmark_nvmolkit(
@@ -406,7 +406,7 @@ def main() -> None:
 
     rows: list[dict[str, Any]] = []
     for operation in args.operations:
-        reference_results = _rdkit_reference_results(mols, queries, operation, max_results) if args.validate else None
+        reference_results = None
         if not args.no_rdkit:
             for holder in args.rdkit_holders:
                 for num_threads in args.rdkit_threads:
@@ -421,6 +421,11 @@ def main() -> None:
                         warmups=args.warmups,
                         repetitions=args.repetitions,
                     )
+                    if args.validate:
+                        if reference_results is None:
+                            reference_results = measurement.results
+                        else:
+                            _validate_results(measurement.results, reference_results, operation)
                     rows.append(
                         _result_row(
                             backend="rdkit-substruct-library",
@@ -454,6 +459,8 @@ def main() -> None:
                         repetitions=args.repetitions,
                     )
                     if args.validate:
+                        if reference_results is None:
+                            raise RuntimeError("validation requires an RDKit reference result")
                         _validate_results(measurement.results, reference_results, operation)
                     rows.append(
                         _result_row(
