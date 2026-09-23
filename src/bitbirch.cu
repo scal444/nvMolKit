@@ -830,6 +830,7 @@ struct CooperativeScratch {
   double    otherValues[cooperativeBlockSize];
   int       next;
   int       count;
+  int       stagedCount;
   int       bestEntry;
   int       selectedEntry;
   int       sourceEntry;
@@ -1018,8 +1019,13 @@ __device__ __forceinline__ bitbirch::ISimTanimotoTerms cooperativeCombinedISimTe
   }
   __syncthreads();
   const auto combinedCount = static_cast<std::uint64_t>(storage.entryCounts[entry]) + 1;
-  for (int base = 0; base < storage.numBits; base += blockDim.x) {
-    const int bit         = base + threadIdx.x;
+  const int  numWarps      = (blockDim.x + warpSize - 1) / warpSize;
+  const int  numChunks     = (storage.numBits + blockDim.x - 1) / blockDim.x;
+  // Stage every warp partial and sum them once. The chunk-major, warp-minor
+  // order matches per-chunk block reductions, so the FP64 result is identical.
+  const bool stagePartials = numChunks * numWarps <= cooperativeBlockSize;
+  for (int chunk = 0; chunk < numChunks; ++chunk) {
+    const int bit         = chunk * blockDim.x + threadIdx.x;
     double    commonPairs = 0.0;
     double    mismatches  = 0.0;
     if (bit < storage.numBits) {
@@ -1030,7 +1036,28 @@ __device__ __forceinline__ bitbirch::ISimTanimotoTerms cooperativeCombinedISimTe
       commonPairs = terms.commonPairs;
       mismatches  = terms.mismatches;
     }
-    cooperativeAccumulateISimTerms(commonPairs, mismatches, scratch);
+    if (!stagePartials) {
+      cooperativeAccumulateISimTerms(commonPairs, mismatches, scratch);
+      continue;
+    }
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+      commonPairs += __shfl_down_sync(0xffffffffU, commonPairs, offset);
+      mismatches += __shfl_down_sync(0xffffffffU, mismatches, offset);
+    }
+    if (threadIdx.x % warpSize == 0) {
+      scratch.values[chunk * numWarps + threadIdx.x / warpSize]      = commonPairs;
+      scratch.otherValues[chunk * numWarps + threadIdx.x / warpSize] = mismatches;
+    }
+  }
+  if (stagePartials) {
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      for (int index = 0; index < numChunks * numWarps; ++index) {
+        scratch.accumulatedValue += scratch.values[index];
+        scratch.accumulatedOtherValue += scratch.otherValues[index];
+      }
+    }
+    __syncthreads();
   }
   return {scratch.accumulatedValue, scratch.accumulatedOtherValue};
 }
@@ -1041,18 +1068,20 @@ __device__ __forceinline__ void cooperativeRefreshCentroid(TreeStorage<Component
     __syncthreads();
     return;
   }
-  const auto count = static_cast<std::uint64_t>(storage.entryCounts[entry]);
-  for (int word = threadIdx.x; word < storage.numWords; word += blockDim.x) {
-    std::uint32_t result = 0;
-    for (int bitInWord = 0; bitInWord < 32; ++bitInWord) {
-      const int bit = word * 32 + bitInWord;
-      if (bitbirch::majorityCentroidBit(static_cast<std::uint64_t>(linearSum(storage, entry, bit)), count)) {
-        result |= std::uint32_t{1} << bitInWord;
-      }
+  const auto count    = static_cast<std::uint64_t>(storage.entryCounts[entry]);
+  const int  slot     = storage.entrySummarySlots[entry];
+  auto*      centroid = storage.centroidPages[slot / summaryEntriesPerPage] +
+                   static_cast<std::size_t>(slot % summaryEntriesPerPage) * storage.numWords;
+  // One thread per bit keeps sum reads coalesced; each warp covers one word.
+  for (int base = 0; base < storage.numBits; base += blockDim.x) {
+    const int  bit = base + threadIdx.x;
+    const bool set = bit < storage.numBits &&
+                     bitbirch::majorityCentroidBit(static_cast<std::uint64_t>(materializedLinearSum(storage, entry, bit)),
+                                                   count);
+    const std::uint32_t word = __ballot_sync(0xffffffffU, set);
+    if (threadIdx.x % warpSize == 0 && bit < storage.numBits) {
+      centroid[bit / 32] = word;
     }
-    const int slot = storage.entrySummarySlots[entry];
-    storage.centroidPages[slot / summaryEntriesPerPage]
-                         [static_cast<std::size_t>(slot % summaryEntriesPerPage) * storage.numWords + word] = result;
   }
   __syncthreads();
 }
@@ -1078,12 +1107,12 @@ __device__ __forceinline__ void cooperativeInitializeLeafEntry(TreeStorage<Compo
 }
 
 template <typename Component>
-__device__ __forceinline__ void cooperativeAddFingerprint(TreeStorage<Component>& storage,
+__device__ __forceinline__ bool cooperativeAddFingerprint(TreeStorage<Component>& storage,
                                                           const int               entry,
                                                           const std::uint32_t*    fingerprint,
                                                           CooperativeScratch&     scratch) {
   if (!cooperativeMaterializeEntry(storage, entry, scratch)) {
-    return;
+    return false;
   }
   if (threadIdx.x == 0) {
     ++storage.entryCounts[entry];
@@ -1093,6 +1122,7 @@ __device__ __forceinline__ void cooperativeAddFingerprint(TreeStorage<Component>
   }
   __syncthreads();
   cooperativeRefreshCentroid(storage, entry);
+  return true;
 }
 
 template <typename Component>
@@ -1103,17 +1133,40 @@ __device__ __forceinline__ void cooperativeSummarizeNode(TreeStorage<Component>&
   if (!cooperativeMaterializeEntry(storage, targetEntry, scratch)) {
     return;
   }
+  // Walk the entry list once and stage each entry's storage location. Every
+  // thread then sums its bits from shared memory instead of re-chasing links.
   if (threadIdx.x == 0) {
-    std::uint32_t count = 0;
-    for (int entry = storage.nodeHeads[node]; entry >= 0; entry = storage.entryNext[entry]) {
+    std::uint32_t count   = 0;
+    int           entries = 0;
+    for (int entry = storage.nodeHeads[node]; entry >= 0; entry = storage.entryNext[entry], ++entries) {
       count += storage.entryCounts[entry];
+      if (entries < cooperativeBlockSize) {
+        scratch.entries[entries]      = storage.entryFingerprintIndices[entry];
+        scratch.otherEntries[entries] = storage.entrySummarySlots[entry];
+      }
     }
     storage.entryCounts[targetEntry] = count;
+    scratch.stagedCount        = entries;
   }
+  __syncthreads();
+  const int numEntries = scratch.stagedCount;
   for (int bit = threadIdx.x; bit < storage.numBits; bit += blockDim.x) {
     Component sum = 0;
-    for (int entry = storage.nodeHeads[node]; entry >= 0; entry = storage.entryNext[entry]) {
-      sum += linearSum(storage, entry, bit);
+    if (numEntries <= cooperativeBlockSize) {
+      for (int index = 0; index < numEntries; ++index) {
+        const int fingerprintIndex = scratch.entries[index];
+        if (fingerprintIndex >= 0) {
+          sum += static_cast<Component>((singletonWord(storage, fingerprintIndex, bit / 32) >> (bit % 32)) & 1U);
+        } else {
+          const int slot = scratch.otherEntries[index];
+          sum += storage.linearSumPages[slot / summaryEntriesPerPage]
+                                       [static_cast<std::size_t>(slot % summaryEntriesPerPage) * storage.numBits + bit];
+        }
+      }
+    } else {
+      for (int entry = storage.nodeHeads[node]; entry >= 0; entry = storage.entryNext[entry]) {
+        sum += linearSum(storage, entry, bit);
+      }
     }
     materializedLinearSum(storage, targetEntry, bit) = sum;
   }
@@ -1297,8 +1350,6 @@ __global__ void bitBirchRouteKernel(const int                    begin,
                                     int*                         keys,
                                     int*                         values,
                                     int*                         groupKeys,
-                                    BitBirchStatus*              ownerStatuses,
-                                    BitBirchStatus*              groupStatuses,
                                     const bool                   enableGroups,
                                     const double                 threshold,
                                     const TreeStorage<Component> storage) {
@@ -1310,12 +1361,10 @@ __global__ void bitBirchRouteKernel(const int                    begin,
   }
   const int molecule = begin + offset;
   if (threadIdx.x == 0) {
-    values[offset]        = molecule;
-    ownerStatuses[offset] = BitBirchStatus::Success;
-    groupStatuses[offset] = BitBirchStatus::Success;
-    scratch.node          = *storage.root;
-    keys[offset]          = INT_MAX;
-    groupKeys[offset]     = INT_MAX;
+    values[offset]    = molecule;
+    scratch.node      = *storage.root;
+    keys[offset]      = INT_MAX;
+    groupKeys[offset] = INT_MAX;
   }
   __syncthreads();
   if (storage.labels[molecule] >= 0) {
@@ -1349,19 +1398,15 @@ __global__ void bitBirchGroupsKernel(const int                    count,
                                      const int*                   values,
                                      const double                 threshold,
                                      Component*                   proposalSums,
-                                     BitBirchStatus*              groupStatuses,
-                                     const TreeStorage<Component> tree) {
+                                     TreeStorage<Component>       storage) {
   const int first = blockIdx.x;
   if (first >= count || keys[first] == INT_MAX || (first > 0 && keys[first - 1] == keys[first])) {
     return;
   }
   __shared__ CooperativeScratch scratch;
-  __shared__ TreeStorage<Component> storage;
-  const int                         entry = keys[first];
+  const int                     entry = keys[first];
   if (threadIdx.x == 0) {
-    storage        = tree;
-    storage.status = groupStatuses + first;
-    int end        = first + 1;
+    int end = first + 1;
     while (end < count && keys[end] == entry) {
       ++end;
     }
@@ -1419,7 +1464,9 @@ __global__ void bitBirchGroupsKernel(const int                    count,
     }
     __syncthreads();
     if (scratch.count) {
-      cooperativeAddFingerprint(storage, entry, fingerprint, scratch);
+      if (!cooperativeAddFingerprint(storage, entry, fingerprint, scratch)) {
+        return;
+      }
       if (threadIdx.x == 0) {
         storage.labels[molecule]       = entry;
         storage.entryClusterIds[entry] = min(storage.entryClusterIds[entry], molecule);
@@ -1450,23 +1497,18 @@ __global__ void bitBirchLeafOwnersKernel(const int                    count,
                                          const int*                   values,
                                          const double                 threshold,
                                          const int                    branchingFactor,
+                                         const int                    leafDepth,
                                          int*                         dirtyNodes,
-                                         BitBirchStatus*              ownerStatuses,
-                                         const TreeStorage<Component> tree) {
+                                         int*                         levelNodes,
+                                         int*                         levelCounts,
+                                         const int                    levelCapacity,
+                                         TreeStorage<Component>       storage) {
   const int first = blockIdx.x;
   if (first >= count || keys[first] == INT_MAX || (first > 0 && keys[first - 1] == keys[first])) {
     return;
   }
   __shared__ CooperativeScratch scratch;
-  __shared__ TreeStorage<Component> storage;
-  const int                         node = keys[first];
-  // Each owner has independent error storage as well as exclusive leaf data.
-  if (threadIdx.x == 0) {
-    storage         = tree;
-    storage.status  = ownerStatuses + first;
-    scratch.success = true;
-  }
-  __syncthreads();
+  const int                     node = keys[first];
   for (int offset = first; offset < count && keys[offset] == node; ++offset) {
     const int molecule = values[offset];
     if (storage.labels[molecule] >= 0) {
@@ -1491,7 +1533,9 @@ __global__ void bitBirchLeafOwnersKernel(const int                    count,
       merge = scratch.count;
     }
     if (merge) {
-      cooperativeAddFingerprint(storage, selected, fingerprint, scratch);
+      if (!cooperativeAddFingerprint(storage, selected, fingerprint, scratch)) {
+        return;
+      }
     } else {
       if (threadIdx.x == 0) {
         scratch.selectedEntry = allocateConcurrentLeafEntry(storage);
@@ -1509,9 +1553,6 @@ __global__ void bitBirchLeafOwnersKernel(const int                    count,
       }
       __syncthreads();
     }
-    if (*storage.status != BitBirchStatus::Success) {
-      return;
-    }
     if (threadIdx.x == 0) {
       storage.labels[molecule]          = selected;
       // A parked earlier query can reach an entry created later in its batch.
@@ -1524,44 +1565,38 @@ __global__ void bitBirchLeafOwnersKernel(const int                    count,
       break;
     }
   }
+  // Every leaf has the same depth, so each ancestor's level is known here. The
+  // first owner to dirty a node lists it, keeping refresh work proportional to
+  // the touched paths instead of the whole tree.
   if (threadIdx.x == 0) {
-    for (int changed = node; storage.nodeParents[changed] >= 0; changed = storage.nodeParents[changed]) {
-      atomicExch(dirtyNodes + changed, 1);
+    int level = leafDepth;
+    for (int changed = node; storage.nodeParents[changed] >= 0; changed = storage.nodeParents[changed], --level) {
+      if (atomicExch(dirtyNodes + changed, 1) == 0) {
+        levelNodes[level * levelCapacity + atomicAdd(levelCounts + level, 1)] = changed;
+      }
     }
   }
 }
 
 template <typename Component>
-__global__ void bitBirchRefreshLevelKernel(const int                    numNodes,
-                                           const int                    depth,
-                                           const int                    count,
-                                           const int*                   keys,
-                                           const int*                   values,
-                                           int*                         dirtyNodes,
-                                           int*                         deltaSlots,
-                                           int*                         deltaCursor,
-                                           const int                    deltaCapacity,
-                                           Component*                   deltaSums,
-                                           std::uint32_t*               deltaCounts,
-                                           BitBirchStatus*              nodeStatuses,
-                                           const TreeStorage<Component> tree) {
-  const int node = blockIdx.x;
-  if (node >= numNodes || !dirtyNodes[node]) {
+__global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
+                                           const int*             levelCount,
+                                           const int              count,
+                                           const int*             keys,
+                                           const int*             values,
+                                           int*                   dirtyNodes,
+                                           int*                   deltaSlots,
+                                           int*                   deltaCursor,
+                                           const int              deltaCapacity,
+                                           Component*             deltaSums,
+                                           std::uint32_t*         deltaCounts,
+                                           TreeStorage<Component> storage) {
+  if (blockIdx.x >= *levelCount) {
     return;
   }
-  int nodeDepth = 0;
-  for (int ancestor = node; tree.nodeParents[ancestor] >= 0; ancestor = tree.nodeParents[ancestor]) {
-    ++nodeDepth;
-  }
-  if (nodeDepth != depth) {
-    return;
-  }
+  const int                     node = levelNodes[blockIdx.x];
   __shared__ CooperativeScratch scratch;
-  __shared__ TreeStorage<Component> storage;
   if (threadIdx.x == 0) {
-    storage               = tree;
-    storage.status        = nodeStatuses + node;
-    *storage.status       = BitBirchStatus::Success;
     scratch.selectedEntry = parentEntry(storage, node);
     scratch.sourceEntry   = atomicAdd(deltaCursor, 1);
     scratch.success       = scratch.selectedEntry >= 0 && scratch.sourceEntry < deltaCapacity;
@@ -1581,19 +1616,33 @@ __global__ void bitBirchRefreshLevelKernel(const int                    numNodes
             end = middle;
           }
         }
+        // Stage accepted molecules once; labels may live in mapped host memory.
         scratch.next = first;
         while (end < count && keys[end] == node) {
-          addedCount += storage.labels[values[end]] >= 0;
+          if (storage.labels[values[end]] >= 0) {
+            if (addedCount < cooperativeBlockSize) {
+              scratch.entries[addedCount] = values[end];
+            }
+            ++addedCount;
+          }
           ++end;
         }
-        scratch.count = end;
+        scratch.count       = end;
+        scratch.stagedCount = static_cast<int>(addedCount);
       } else {
+        // Stage the refreshed children's delta slots for the per-bit sum.
+        int dirtyChildren = 0;
         for (int entry = storage.nodeHeads[node]; entry >= 0; entry = storage.entryNext[entry]) {
           const int slot = deltaSlots[storage.entryChildren[entry]];
           if (slot >= 0) {
             addedCount += deltaCounts[slot];
+            if (dirtyChildren < cooperativeBlockSize) {
+              scratch.entries[dirtyChildren] = slot;
+            }
+            ++dirtyChildren;
           }
         }
+        scratch.stagedCount = dirtyChildren;
       }
       deltaCounts[scratch.sourceEntry] = addedCount;
     }
@@ -1610,15 +1659,26 @@ __global__ void bitBirchRefreshLevelKernel(const int                    numNodes
   // Entry owners already updated leaf payloads. Propagate only this epoch's
   // accepted fingerprints, rather than rereading every old BF in each subtree.
   // One CTA owns each parent entry; no per-bit atomics or shared ancestor writes.
+  const bool leaf   = storage.nodeLeaves[node];
+  const bool staged = scratch.stagedCount <= cooperativeBlockSize;
   for (int bit = threadIdx.x; bit < storage.numBits; bit += blockDim.x) {
     Component added = 0;
-    if (storage.nodeLeaves[node]) {
+    if (leaf && staged) {
+      for (int index = 0; index < scratch.stagedCount; ++index) {
+        const auto word = queryFingerprint(storage, scratch.entries[index])[bit / 32];
+        added += static_cast<Component>((word >> (bit % 32)) & 1U);
+      }
+    } else if (leaf) {
       for (int offset = scratch.next; offset < scratch.count; ++offset) {
         const int molecule = values[offset];
         if (storage.labels[molecule] >= 0) {
           const auto word = queryFingerprint(storage, molecule)[bit / 32];
           added += static_cast<Component>((word >> (bit % 32)) & 1U);
         }
+      }
+    } else if (staged) {
+      for (int index = 0; index < scratch.stagedCount; ++index) {
+        added += deltaSums[static_cast<std::size_t>(scratch.entries[index]) * storage.numBits + bit];
       }
     } else {
       for (int entry = storage.nodeHeads[node]; entry >= 0; entry = storage.entryNext[entry]) {
@@ -1689,26 +1749,22 @@ __global__ void bitBirchRepairKernel(const int              begin,
                                      const int*             splitLeft,
                                      const int*             splitRight,
                                      const std::int8_t*     splitAffinity,
-                                     const BitBirchStatus*  ownerStatuses,
-                                     const BitBirchStatus*  nodeStatuses,
                                      const int              branchingFactor,
+                                     const int              leafDepth,
+                                     const int*             levelNodes,
+                                     const int*             levelCounts,
+                                     const int              levelCapacity,
+                                     int*                   deltaSlots,
                                      int*                   control,
                                      TreeStorage<Component> storage) {
   __shared__ CooperativeScratch scratch;
-  if (threadIdx.x == 0) {
-    *storage.status = BitBirchStatus::Success;
-    for (int index = 0; index < count; ++index) {
-      if (ownerStatuses[index] != BitBirchStatus::Success) {
-        *storage.status = ownerStatuses[index];
-      }
-    }
-    for (int node = 0; node < *storage.nodeCursor; ++node) {
-      if (nodeStatuses[node] != BitBirchStatus::Success) {
-        *storage.status = nodeStatuses[node];
-      }
+  __shared__ int                pending;
+  // Refresh consumed this epoch's delta slots; restore them for the next one.
+  for (int level = 1; level <= leafDepth; ++level) {
+    for (int index = threadIdx.x; index < levelCounts[level]; index += blockDim.x) {
+      deltaSlots[levelNodes[level * levelCapacity + index]] = -1;
     }
   }
-  __syncthreads();
   for (int index = 0; index < count; ++index) {
     const int node = keys[index];
     // Immutable keys can be skipped without a barrier, unlike mutable topology.
@@ -1728,10 +1784,16 @@ __global__ void bitBirchRepairKernel(const int              begin,
     __syncthreads();
   }
   if (threadIdx.x == 0) {
-    int pending = 0;
-    for (int molecule = begin; molecule < begin + count; ++molecule) {
-      pending += storage.labels[molecule] < 0;
-    }
+    pending = 0;
+  }
+  __syncthreads();
+  int localPending = 0;
+  for (int molecule = begin + threadIdx.x; molecule < begin + count; molecule += blockDim.x) {
+    localPending += storage.labels[molecule] < 0;
+  }
+  atomicAdd(&pending, localPending);
+  __syncthreads();
+  if (threadIdx.x == 0) {
     int depth = 0;
     // Node zero remains a leaf; every leaf in this tree has equal depth.
     for (int node = 0; storage.nodeParents[node] >= 0; node = storage.nodeParents[node]) {
@@ -1848,12 +1910,13 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
   AsyncDeviceVector<int>            deltaCursor(1, stream);
   AsyncDeviceVector<Component>      deltaSums(0, stream);
   AsyncDeviceVector<std::uint32_t>  deltaCounts(0, stream);
-  AsyncDeviceVector<BitBirchStatus> nodeStatuses(tree.nodeCapacity, stream);
-  AsyncDeviceVector<BitBirchStatus> ownerStatuses(batchCapacity, stream);
-  AsyncDeviceVector<BitBirchStatus> groupStatuses(batchCapacity, stream);
+  // Dirty nodes per tree level for one epoch. Each level holds at most one
+  // node per distinct routed leaf, so capacity is batch size times height.
+  AsyncDeviceVector<int>            levelNodes(0, stream);
+  AsyncDeviceVector<int>            levelCounts(0, stream);
   AsyncDeviceVector<int>            control(6, stream);
   cudaCheckError(cudaMemsetAsync(dirtyNodes.data(), 0, tree.nodeCapacity * sizeof(int), stream));
-  cudaCheckError(cudaMemsetAsync(nodeStatuses.data(), 0, tree.nodeCapacity * sizeof(BitBirchStatus), stream));
+  cudaCheckError(cudaMemsetAsync(deltaSlots.data(), 0xff, tree.nodeCapacity * sizeof(int), stream));
   auto storage = tree.storage();
   bitBirchInitializeKernel<<<1, 1, 0, stream>>>(storage);
   cudaCheckError(cudaGetLastError());
@@ -1906,16 +1969,21 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
       if (tree.nodeCapacity > oldNodeCapacity) {
         dirtyNodes.resize(tree.nodeCapacity);
         deltaSlots.resize(tree.nodeCapacity);
-        nodeStatuses.resize(tree.nodeCapacity);
         cudaCheckError(cudaMemsetAsync(dirtyNodes.data() + oldNodeCapacity,
                                        0,
                                        (tree.nodeCapacity - oldNodeCapacity) * sizeof(int),
                                        stream));
-        cudaCheckError(cudaMemsetAsync(nodeStatuses.data() + oldNodeCapacity,
-                                       0,
-                                       (tree.nodeCapacity - oldNodeCapacity) * sizeof(BitBirchStatus),
+        cudaCheckError(cudaMemsetAsync(deltaSlots.data() + oldNodeCapacity,
+                                       0xff,
+                                       (tree.nodeCapacity - oldNodeCapacity) * sizeof(int),
                                        stream));
       }
+      const int leafDepth = hostControl[4];
+      if (levelCounts.size() < static_cast<std::size_t>(leafDepth) + 1) {
+        levelCounts.resize(leafDepth + 1);
+        levelNodes.resize(static_cast<std::size_t>(leafDepth + 1) * batchCapacity);
+      }
+      cudaCheckError(cudaMemsetAsync(levelCounts.data(), 0, levelCounts.size() * sizeof(int), stream));
       if (splitAffinity.size() < static_cast<std::size_t>(tree.entryCapacity)) {
         splitAffinity.resize(tree.entryCapacity);
       }
@@ -1934,10 +2002,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
         deltaCounts.resize(deltaCapacity);
         deltaSums.resize(deltaCapacity * numWords * 32);
       }
-      if (deltaCapacity > 0) {
-        cudaCheckError(cudaMemsetAsync(deltaSlots.data(), 0xff, hostControl[1] * sizeof(int), stream));
-        cudaCheckError(cudaMemsetAsync(deltaCursor.data(), 0, sizeof(int), stream));
-      }
+      cudaCheckError(cudaMemsetAsync(deltaCursor.data(), 0, sizeof(int), stream));
       storage = tree.storage();
       if (fingerprintsOnHost) {
         ownedFingerprints.reserve(tree.entryCapacity);
@@ -1950,8 +2015,6 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                                                       keys.data(),
                                                                       values.data(),
                                                                       groupKeys.data(),
-                                                                      ownerStatuses.data(),
-                                                                      groupStatuses.data(),
                                                                       enableGroups,
                                                                       threshold,
                                                                       storage);
@@ -1972,7 +2035,6 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                                                          sortedGroupValues.data(),
                                                                          threshold,
                                                                          proposalSums.data(),
-                                                                         groupStatuses.data(),
                                                                          storage);
         cudaCheckError(cudaGetLastError());
       }
@@ -1991,24 +2053,28 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                                                            sortedValues.data(),
                                                                            threshold,
                                                                            branchingFactor,
+                                                                           leafDepth,
                                                                            dirtyNodes.data(),
-                                                                           ownerStatuses.data(),
+                                                                           levelNodes.data(),
+                                                                           levelCounts.data(),
+                                                                           batchCapacity,
                                                                            storage);
       cudaCheckError(cudaGetLastError());
-      for (int depth = hostControl[4]; depth > 0; --depth) {
-        bitBirchRefreshLevelKernel<<<hostControl[1], cooperativeBlockSize, 0, stream>>>(hostControl[1],
-                                                                                        depth,
-                                                                                        count,
-                                                                                        sortedKeys.data(),
-                                                                                        sortedValues.data(),
-                                                                                        dirtyNodes.data(),
-                                                                                        deltaSlots.data(),
-                                                                                        deltaCursor.data(),
-                                                                                        static_cast<int>(deltaCapacity),
-                                                                                        deltaSums.data(),
-                                                                                        deltaCounts.data(),
-                                                                                        nodeStatuses.data(),
-                                                                                        storage);
+      // Each level lists at most one node per routed leaf, so count blocks suffice.
+      for (int level = leafDepth; level > 0; --level) {
+        bitBirchRefreshLevelKernel<<<count, cooperativeBlockSize, 0, stream>>>(
+          levelNodes.data() + static_cast<std::size_t>(level) * batchCapacity,
+          levelCounts.data() + level,
+          count,
+          sortedKeys.data(),
+          sortedValues.data(),
+          dirtyNodes.data(),
+          deltaSlots.data(),
+          deltaCursor.data(),
+          static_cast<int>(deltaCapacity),
+          deltaSums.data(),
+          deltaCounts.data(),
+          storage);
         cudaCheckError(cudaGetLastError());
       }
       bitBirchSplitSeedsKernel<<<count, cooperativeBlockSize, splitCacheBytes, stream>>>(count,
@@ -2025,9 +2091,12 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                                                    splitLeft.data(),
                                                                    splitRight.data(),
                                                                    splitAffinity.data(),
-                                                                   ownerStatuses.data(),
-                                                                   nodeStatuses.data(),
                                                                    branchingFactor,
+                                                                   leafDepth,
+                                                                   levelNodes.data(),
+                                                                   levelCounts.data(),
+                                                                   batchCapacity,
+                                                                   deltaSlots.data(),
                                                                    control.data(),
                                                                    storage);
       cudaCheckError(cudaGetLastError());
