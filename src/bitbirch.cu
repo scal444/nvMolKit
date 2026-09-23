@@ -384,6 +384,8 @@ template <typename Component> struct TreeStorage {
   int*                 nodeSizes;
   int*                 nodeParents;
   std::uint8_t*        nodeLeaves;
+  int*                 nodeTails;
+  int*                 nodeParentEntries;
   int*                 entryNext;
   int*                 entryChildren;
   std::uint32_t*       entryCounts;
@@ -426,6 +428,8 @@ template <typename Component> class TreeWorkspace {
         nodeSizes(nodeCapacity, stream),
         nodeParents(nodeCapacity, stream),
         nodeLeaves(nodeCapacity, stream),
+        nodeTails(nodeCapacity, stream),
+        nodeParentEntries(nodeCapacity, stream),
         entryNext(entryCapacity, stream),
         entryChildren(entryCapacity, stream),
         entryCounts(entryCapacity, stream),
@@ -451,6 +455,8 @@ template <typename Component> class TreeWorkspace {
             nodeSizes.data(),
             nodeParents.data(),
             nodeLeaves.data(),
+            nodeTails.data(),
+            nodeParentEntries.data(),
             entryNext.data(),
             entryChildren.data(),
             entryCounts.data(),
@@ -481,6 +487,8 @@ template <typename Component> class TreeWorkspace {
       nodeSizes.resize(nodes);
       nodeParents.resize(nodes);
       nodeLeaves.resize(nodes);
+      nodeTails.resize(nodes);
+      nodeParentEntries.resize(nodes);
       nodeCapacity = nodes;
     }
     if (entries > entryCapacity) {
@@ -500,6 +508,8 @@ template <typename Component> class TreeWorkspace {
   AsyncDeviceVector<int>           nodeSizes;
   AsyncDeviceVector<int>           nodeParents;
   AsyncDeviceVector<std::uint8_t>  nodeLeaves;
+  AsyncDeviceVector<int>           nodeTails;
+  AsyncDeviceVector<int>           nodeParentEntries;
   AsyncDeviceVector<int>           entryNext;
   AsyncDeviceVector<int>           entryChildren;
   AsyncDeviceVector<std::uint32_t> entryCounts;
@@ -592,10 +602,12 @@ __device__ __forceinline__ int allocateNode(TreeStorage<Component>& storage, con
     *storage.status = BitBirchStatus::NodeCapacity;
     return -1;
   }
-  storage.nodeHeads[node]   = -1;
-  storage.nodeSizes[node]   = 0;
-  storage.nodeParents[node] = parent;
-  storage.nodeLeaves[node]  = leaf;
+  storage.nodeHeads[node]         = -1;
+  storage.nodeTails[node]         = -1;
+  storage.nodeSizes[node]         = 0;
+  storage.nodeParents[node]       = parent;
+  storage.nodeParentEntries[node] = -1;
+  storage.nodeLeaves[node]        = leaf;
   return node;
 }
 
@@ -615,16 +627,14 @@ template <typename Component> __device__ __forceinline__ int allocateEntry(TreeS
 
 template <typename Component>
 __device__ __forceinline__ void appendEntry(TreeStorage<Component>& storage, const int node, const int entry) {
-  if (storage.nodeHeads[node] < 0) {
+  const int tail = storage.nodeTails[node];
+  if (tail < 0) {
     storage.nodeHeads[node] = entry;
   } else {
-    int tail = storage.nodeHeads[node];
-    while (storage.entryNext[tail] >= 0) {
-      tail = storage.entryNext[tail];
-    }
     storage.entryNext[tail] = entry;
   }
   storage.entryNext[entry] = -1;
+  storage.nodeTails[node]  = entry;
   ++storage.nodeSizes[node];
 }
 
@@ -702,16 +712,9 @@ __device__ __forceinline__ double entrySimilarity(const TreeStorage<Component>& 
 
 template <typename Component>
 __device__ __forceinline__ int parentEntry(const TreeStorage<Component>& storage, const int node) {
-  const int parent = storage.nodeParents[node];
-  if (parent < 0) {
-    return -1;
-  }
-  for (int entry = storage.nodeHeads[parent]; entry >= 0; entry = storage.entryNext[entry]) {
-    if (storage.entryChildren[entry] == node) {
-      return entry;
-    }
-  }
-  return -1;
+  // Splits move directory entries between nodes but never change which entry
+  // points to a child, so the mapping is fixed when the child is linked.
+  return storage.nodeParents[node] < 0 ? -1 : storage.nodeParentEntries[node];
 }
 
 template <typename Component>
@@ -777,9 +780,11 @@ __device__ __forceinline__ int splitNodeWithSeeds(TreeStorage<Component>& storag
   }
   storage.entryNext[lhsSeed] = storage.nodeHeads[node];
   storage.nodeHeads[node]    = lhsSeed;
+  storage.nodeTails[node]    = lhsTail >= 0 ? lhsTail : lhsSeed;
   ++storage.nodeSizes[node];
   storage.entryNext[rhsSeed] = storage.nodeHeads[sibling];
   storage.nodeHeads[sibling] = rhsSeed;
+  storage.nodeTails[sibling] = rhsTail >= 0 ? rhsTail : rhsSeed;
   ++storage.nodeSizes[sibling];
   if (!storage.nodeLeaves[node]) {
     for (int entry = storage.nodeHeads[node]; entry >= 0; entry = storage.entryNext[entry]) {
@@ -798,10 +803,12 @@ __device__ __forceinline__ int splitNodeWithSeeds(TreeStorage<Component>& storag
     if (newRoot < 0 || lhsEntry < 0 || rhsEntry < 0) {
       return -1;
     }
-    storage.nodeParents[node]       = newRoot;
-    storage.nodeParents[sibling]    = newRoot;
-    storage.entryChildren[lhsEntry] = node;
-    storage.entryChildren[rhsEntry] = sibling;
+    storage.nodeParents[node]             = newRoot;
+    storage.nodeParents[sibling]          = newRoot;
+    storage.nodeParentEntries[node]       = lhsEntry;
+    storage.nodeParentEntries[sibling]    = rhsEntry;
+    storage.entryChildren[lhsEntry]       = node;
+    storage.entryChildren[rhsEntry]       = sibling;
     appendEntry(storage, newRoot, lhsEntry);
     appendEntry(storage, newRoot, rhsEntry);
     *storage.root = newRoot;
@@ -815,6 +822,7 @@ __device__ __forceinline__ int splitNodeWithSeeds(TreeStorage<Component>& storag
     return -1;
   }
   storage.entryChildren[siblingEntry] = sibling;
+  storage.nodeParentEntries[sibling]  = siblingEntry;
   appendEntry(storage, parent, siblingEntry);
   return parent;
 }
