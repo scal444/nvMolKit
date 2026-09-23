@@ -70,12 +70,20 @@ TEST(BitBirchPrimitives, HostEdgeCaseConventionsAreExplicit) {
   EXPECT_LT(nvMolKit::bitbirch::isimTanimoto(large, count), 1.0);
 }
 
+nvMolKit::BitBirchOptions treeOptions(const int branchingFactor, const int batchSize, const bool centroids = false) {
+  nvMolKit::BitBirchOptions options;
+  options.branchingFactor = branchingFactor;
+  options.batchSize       = batchSize;
+  options.returnCentroids = centroids;
+  return options;
+}
+
 TEST(BitBirchValidation, RejectsInvalidOptionsBeforeLaunching) {
   const cuda::std::span<const std::uint32_t> empty;
-  EXPECT_THROW(nvMolKit::bitBirchGpu(empty, 0, 1, std::numeric_limits<double>::quiet_NaN(), 3, 1),
+  EXPECT_THROW(nvMolKit::bitBirchGpu(empty, 0, 1, std::numeric_limits<double>::quiet_NaN(), treeOptions(3, 1)),
                std::invalid_argument);
-  EXPECT_THROW(nvMolKit::bitBirchGpu(empty, 0, 1, 0.5, 2, 1), std::invalid_argument);
-  EXPECT_THROW(nvMolKit::bitBirchGpu(empty, 0, 1, 0.5, 3, 0), std::invalid_argument);
+  EXPECT_THROW(nvMolKit::bitBirchGpu(empty, 0, 1, 0.5, treeOptions(2, 1)), std::invalid_argument);
+  EXPECT_THROW(nvMolKit::bitBirchGpu(empty, 0, 1, 0.5, treeOptions(3, 0)), std::invalid_argument);
 }
 
 TEST(BitBirch, MergesAtThresholdAndReturnsMajorityCentroids) {
@@ -87,12 +95,7 @@ TEST(BitBirch, MergesAtThresholdAndReturnsMajorityCentroids) {
                                       4,
                                       1,
                                       0.5,
-                                      3,
-                                      4,
-                                      0,
-                                      false,
-                                      false,
-                                      true);
+                                      treeOptions(3, 4, /*centroids=*/true));
   std::vector<int>           labels(4);
   std::vector<std::uint32_t> centroids(result.centroids.size());
   result.clusterIds.copyToHost(labels);
@@ -112,7 +115,8 @@ TEST(BitBirch, CascadingSplitsPreserveDenseDeterministicLabels) {
   nvMolKit::AsyncDeviceVector<std::uint32_t> deviceFingerprints(fingerprints.size());
   deviceFingerprints.copyFromHost(fingerprints);
 
-  auto result = nvMolKit::bitBirchGpu({deviceFingerprints.data(), deviceFingerprints.size()}, 24, 1, 0.9, 3, 7);
+  auto result =
+    nvMolKit::bitBirchGpu({deviceFingerprints.data(), deviceFingerprints.size()}, 24, 1, 0.9, treeOptions(3, 7));
   std::vector<int> labels(24);
   result.clusterIds.copyToHost(labels);
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);

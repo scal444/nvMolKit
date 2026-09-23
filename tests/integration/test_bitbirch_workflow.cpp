@@ -36,8 +36,11 @@ TEST(BitBirchIntegration, MorganFingerprintsRemainDeviceResidentThroughClusterin
   const auto* packed             = reinterpret_cast<const std::uint32_t*>(deviceFingerprints.data());
   const cuda::std::span<const std::uint32_t> packedSpan{packed, molecules.size() * numWords};
 
-  auto result =
-    nvMolKit::bitBirchGpu(packedSpan, static_cast<int>(molecules.size()), numWords, 0.0, 7, 32, 0, false, false, true);
+  nvMolKit::BitBirchOptions treeOptions;
+  treeOptions.branchingFactor = 7;
+  treeOptions.batchSize       = 32;
+  treeOptions.returnCentroids = true;
+  auto result = nvMolKit::bitBirchGpu(packedSpan, static_cast<int>(molecules.size()), numWords, 0.0, treeOptions);
   std::vector<int>           labels(molecules.size());
   std::vector<std::uint32_t> centroid(numWords);
   std::vector<std::uint32_t> hostPacked(molecules.size() * numWords);
@@ -77,8 +80,11 @@ TEST(BitBirchIntegration, MorganClusteringIsDeterministicAndLabelsAreDense) {
   const auto* packed             = reinterpret_cast<const std::uint32_t*>(deviceFingerprints.data());
   const cuda::std::span<const std::uint32_t> packedSpan{packed, molecules.size() * numWords};
 
-  auto first  = nvMolKit::bitBirchGpu(packedSpan, static_cast<int>(molecules.size()), numWords, 0.55, 7, 32);
-  auto second = nvMolKit::bitBirchGpu(packedSpan, static_cast<int>(molecules.size()), numWords, 0.55, 7, 32);
+  nvMolKit::BitBirchOptions treeOptions;
+  treeOptions.branchingFactor = 7;
+  treeOptions.batchSize       = 32;
+  auto first  = nvMolKit::bitBirchGpu(packedSpan, static_cast<int>(molecules.size()), numWords, 0.55, treeOptions);
+  auto second = nvMolKit::bitBirchGpu(packedSpan, static_cast<int>(molecules.size()), numWords, 0.55, treeOptions);
   std::vector<int> firstLabels(molecules.size());
   std::vector<int> secondLabels(molecules.size());
   first.clusterIds.copyToHost(firstLabels);

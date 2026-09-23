@@ -84,19 +84,16 @@ boost::python::object bitBirch(const boost::python::dict& fingerprints,
   const int                  words   = boost::python::extract<int>(shape[1]);
   const boost::python::tuple data    = boost::python::extract<boost::python::tuple>(fingerprints["data"]);
   const auto                 pointer = boost::python::extract<std::size_t>(data[0])();
-  const auto span   = nvMolKit::getSpanFromDictElems<std::uint32_t>(reinterpret_cast<void*>(pointer), shape);
-  auto       result = nvMolKit::bitBirchGpu(span,
-                                      count,
-                                      words,
-                                      threshold,
-                                      branchingFactor,
-                                      batchSize,
-                                      summaryCacheBytes,
-                                      fingerprintsOnHost,
-                                      clusterIdsOnHost,
-                                      returnCentroids,
-                                      *stream,
-                                      fingerprintCacheBytes);
+  const auto span = nvMolKit::getSpanFromDictElems<std::uint32_t>(reinterpret_cast<void*>(pointer), shape);
+  nvMolKit::BitBirchOptions options;
+  options.branchingFactor       = branchingFactor;
+  options.batchSize             = batchSize;
+  options.summaryCacheBytes     = summaryCacheBytes;
+  options.fingerprintCacheBytes = fingerprintCacheBytes;
+  options.fingerprintsOnHost    = fingerprintsOnHost;
+  options.clusterIdsOnHost      = clusterIdsOnHost;
+  options.returnCentroids       = returnCentroids;
+  auto result                   = nvMolKit::bitBirchGpu(span, count, words, threshold, options, *stream);
   return wrapBitBirchResult(result, count, returnCentroids);
 }
 

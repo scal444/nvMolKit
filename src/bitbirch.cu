@@ -35,7 +35,18 @@ enum class BitBirchStatus : int {
 };
 
 constexpr int summaryEntriesPerPage = 4096;
-constexpr int orderedWarmupSize     = 16384;
+
+//! Epoch state the host reads back after each insertion epoch.
+enum EpochControl : int {
+  PendingInputs,
+  NodeCount,
+  SummaryCount,
+  TreeStatus,
+  LeafDepth,
+  EntryCount,
+  NumEpochControls
+};
+constexpr int orderedWarmupSize = 16384;
 
 template <typename Component> class PagedSummaryArena {
  public:
@@ -2088,12 +2099,12 @@ __global__ void bitBirchControlKernel(const int begin, const int count, int* con
     for (int node = 0; storage.nodeParents[node] >= 0; node = storage.nodeParents[node]) {
       ++depth;
     }
-    control[0] = pending;
-    control[1] = *storage.nodeCursor;
-    control[2] = *storage.summaryCursor;
-    control[3] = static_cast<int>(*storage.status);
-    control[4] = depth;
-    control[5] = *storage.entryCursor;
+    control[PendingInputs] = pending;
+    control[NodeCount]     = *storage.nodeCursor;
+    control[SummaryCount]  = *storage.summaryCursor;
+    control[TreeStatus]    = static_cast<int>(*storage.status);
+    control[LeafDepth]     = depth;
+    control[EntryCount]    = *storage.entryCursor;
   }
 }
 
@@ -2136,23 +2147,26 @@ template <typename Component> __global__ void bitBirchFinalizeKernel(const int c
   }
 }
 
+//! Every non-root node has one directory entry, so leaf entries are E - V + 1.
+int liveClusters(const std::vector<int>& control) {
+  return control[EntryCount] - control[NodeCount] + 1;
+}
+
 template <typename Component>
 BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerprints,
                               const int                                  numFingerprints,
                               const int                                  numWords,
                               const double                               threshold,
-                              const int                                  branchingFactor,
-                              const int                                  batchSize,
-                              const std::size_t                          summaryCacheBytes,
-                              const std::size_t                          fingerprintCacheBytes,
-                              const bool                                 fingerprintsOnHost,
-                              const bool                                 clusterIdsOnHost,
-                              const bool                                 returnCentroids,
+                              const BitBirchOptions&                     options,
                               const cudaStream_t                         stream) {
-  const int         batchCapacity   = std::min(batchSize, numFingerprints);
-  const std::size_t splitCacheBytes = numWords <= 32 && branchingFactor < cooperativeBlockSize ?
-                                        sizeof(std::uint32_t) * (cooperativeBlockSize + 1) * numWords :
-                                        0;
+  const int         branchingFactor    = options.branchingFactor;
+  const bool        fingerprintsOnHost = options.fingerprintsOnHost;
+  const bool        clusterIdsOnHost   = options.clusterIdsOnHost;
+  const bool        returnCentroids    = options.returnCentroids;
+  const int         batchCapacity      = std::min(options.batchSize, numFingerprints);
+  const std::size_t splitCacheBytes    = numWords <= 32 && branchingFactor < cooperativeBlockSize ?
+                                           sizeof(std::uint32_t) * (cooperativeBlockSize + 1) * numWords :
+                                           0;
   BitBirchResult    result{AsyncDeviceVector<int>(clusterIdsOnHost ? 0 : numFingerprints, stream),
                         AsyncDeviceVector<std::uint32_t>(0, stream),
                         0,
@@ -2166,7 +2180,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
   AsyncDeviceVector<std::uint32_t> inputTile(
     fingerprintsOnHost ? static_cast<std::size_t>(batchCapacity) * numWords : 0,
     stream);
-  PagedFingerprintArena    ownedFingerprints(numWords, stream, fingerprintCacheBytes);
+  PagedFingerprintArena    ownedFingerprints(numWords, stream, options.fingerprintCacheBytes);
   // Balanced splits leave every non-root node with at least m entries. With
   // K leaf entries and V nodes, the tree has K + V - 1 total entries, hence
   // (m - 1)*(V - 1) <= K <= N. Padding also covers transient split allocations.
@@ -2183,7 +2197,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                 branchingFactor,
                                 numWords,
                                 stream,
-                                summaryCacheBytes);
+                                options.summaryCacheBytes);
   AsyncDeviceVector<int>         keys(batchCapacity, stream);
   AsyncDeviceVector<int>         sortedKeys(batchCapacity, stream);
   AsyncDeviceVector<int>         values(batchCapacity, stream);
@@ -2213,7 +2227,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
   AsyncDeviceVector<int>           summaryNodes(2 * static_cast<std::size_t>(batchCapacity), stream);
   AsyncDeviceVector<int>           summaryEntries(2 * static_cast<std::size_t>(batchCapacity), stream);
   AsyncDeviceVector<int>           summaryCount(1, stream);
-  AsyncDeviceVector<int>           control(6, stream);
+  AsyncDeviceVector<int>           control(NumEpochControls, stream);
   cudaCheckError(cudaMemsetAsync(dirtyNodes.data(), 0, tree.nodeCapacity * sizeof(int), stream));
   cudaCheckError(cudaMemsetAsync(deltaSlots.data(), 0xff, tree.nodeCapacity * sizeof(int), stream));
   auto storage = tree.storage();
@@ -2231,7 +2245,8 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                                  32,
                                                  stream));
   AsyncDeviceVector<std::byte> sortScratch(sortBytes, stream);
-  std::vector<int>             hostControl{0, 1, 0, 0, 0, 0};
+  std::vector<int>             hostControl(NumEpochControls, 0);
+  hostControl[NodeCount] = 1;
   for (int begin = 0; begin < numFingerprints;) {
     const bool enableGroups = begin >= orderedWarmupSize;
     const int  boundary = begin < orderedWarmupSize ? std::min(orderedWarmupSize, numFingerprints) : numFingerprints;
@@ -2250,7 +2265,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
       // At most pending new leaf entries can be created before the next barrier.
       // Apply the same balanced-node bound to live K instead of allocating for
       // the all-singleton N worst case. Stable integer IDs survive buffer growth.
-      const int clusterBound    = hostControl[5] - hostControl[1] + 1 + pending;
+      const int clusterBound    = liveClusters(hostControl) + pending;
       const int requiredNodes   = clusterBound / (minimumNodeSize - 1) + 8;
       const int requiredEntries = clusterBound + requiredNodes;
       const int nodeCapacity =
@@ -2277,7 +2292,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                        (tree.nodeCapacity - oldNodeCapacity) * sizeof(int),
                                        stream));
       }
-      const int leafDepth = hostControl[4];
+      const int leafDepth = hostControl[LeafDepth];
       if (levelCounts.size() < static_cast<std::size_t>(leafDepth) + 1) {
         levelCounts.resize(leafDepth + 1);
         levelNodes.resize(static_cast<std::size_t>(leafDepth + 1) * batchCapacity);
@@ -2287,16 +2302,16 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
         splitAffinity.resize(tree.entryCapacity);
       }
       // Bound lazy materialization plus two summaries per possible split level.
-      const auto required =
-        static_cast<std::int64_t>(hostControl[2]) + static_cast<std::int64_t>(pending) * (2 * hostControl[4] + 5) + 4;
+      const auto required = static_cast<std::int64_t>(hostControl[SummaryCount]) +
+                            static_cast<std::int64_t>(pending) * (2 * hostControl[LeafDepth] + 5) + 4;
       if (required > std::numeric_limits<int>::max()) {
         throw std::invalid_argument("BitBIRCH summary workspace exceeds index capacity");
       }
       tree.summaryArena.reserve(static_cast<int>(required));
       // At most one ancestor per depth for each pending molecule. Scratch is
       // bounded by batch size times tree height, not by total cluster count.
-      const auto deltaCapacity =
-        std::min(static_cast<std::size_t>(tree.nodeCapacity), static_cast<std::size_t>(pending) * hostControl[4]);
+      const auto deltaCapacity = std::min(static_cast<std::size_t>(tree.nodeCapacity),
+                                          static_cast<std::size_t>(pending) * hostControl[LeafDepth]);
       if (deltaCounts.size() < deltaCapacity) {
         deltaCounts.resize(deltaCapacity);
         deltaSums.resize(deltaCapacity * numWords * 32);
@@ -2414,28 +2429,28 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
       cudaCheckError(cudaGetLastError());
       control.copyToHost(hostControl);
       cudaCheckError(cudaStreamSynchronize(stream));
-      if (hostControl[3] != static_cast<int>(BitBirchStatus::Success)) {
-        throw std::runtime_error("BitBIRCH tree failure (status " + std::to_string(hostControl[3]) + ")");
+      if (hostControl[TreeStatus] != static_cast<int>(BitBirchStatus::Success)) {
+        throw std::runtime_error("BitBIRCH tree failure (status " + std::to_string(hostControl[TreeStatus]) + ")");
       }
-      if (hostControl[0] >= pending) {
+      if (hostControl[PendingInputs] >= pending) {
         throw std::runtime_error("BitBIRCH insertion failed to make progress");
       }
-      pending = hostControl[0];
+      pending = hostControl[PendingInputs];
     }
     begin += count;
     tree.summaryArena.rotate();
     ownedFingerprints.rotate();
   }
   if (returnCentroids) {
-    const int clusters = hostControl[5] - hostControl[1] + 1;
+    const int clusters = liveClusters(hostControl);
     result.centroids.resize(static_cast<std::size_t>(clusters) * numWords);
   }
   storage.centroids                  = returnCentroids ? result.centroids.data() : nullptr;
   // Entry owners retain their minimum input index. Sort only the K live leaf
   // entries by that index to preserve first-member label numbering without an N-wide
   // first-member scan and its additional device workspace.
-  const int              clusters    = hostControl[5] - hostControl[1] + 1;
-  const int              liveEntries = hostControl[5];
+  const int              clusters    = liveClusters(hostControl);
+  const int              liveEntries = hostControl[EntryCount];
   AsyncDeviceVector<int> firstMembers(clusters, stream);
   AsyncDeviceVector<int> leafEntries(clusters, stream);
   AsyncDeviceVector<int> sortedFirstMembers(clusters, stream);
@@ -2492,23 +2507,19 @@ BitBirchResult bitBirchGpu(const cuda::std::span<const std::uint32_t> fingerprin
                            const int                                  numFingerprints,
                            const int                                  numWords,
                            const double                               threshold,
-                           const int                                  branchingFactor,
-                           const int                                  batchSize,
-                           const std::size_t                          summaryCacheBytes,
-                           const bool                                 fingerprintsOnHost,
-                           const bool                                 clusterIdsOnHost,
-                           const bool                                 returnCentroids,
-                           const cudaStream_t                         stream,
-                           const std::size_t                          fingerprintCacheBytes) {
+                           const BitBirchOptions&                     options,
+                           const cudaStream_t                         stream) {
   const ScopedNvtxRange range("BitBIRCH tree construction");
+  const int             branchingFactor       = options.branchingFactor;
+  const std::size_t     fingerprintCacheBytes = options.fingerprintCacheBytes;
   if (numFingerprints < 0 || numFingerprints > std::numeric_limits<int>::max() - cooperativeBlockSize ||
       numWords <= 0 || numWords > std::numeric_limits<int>::max() / 32 ||
       fingerprints.size() != static_cast<std::size_t>(numFingerprints) * numWords) {
     throw std::invalid_argument("BitBIRCH fingerprints shape or dimensions are invalid");
   }
-  if (!std::isfinite(threshold) || threshold < 0 || threshold > 1 || branchingFactor < 3 || batchSize < 1 ||
+  if (!std::isfinite(threshold) || threshold < 0 || threshold > 1 || branchingFactor < 3 || options.batchSize < 1 ||
       (fingerprintCacheBytes > 0 &&
-       (!fingerprintsOnHost ||
+       (!options.fingerprintsOnHost ||
         fingerprintCacheBytes < sizeof(std::uint32_t) * static_cast<std::size_t>(summaryEntriesPerPage) * numWords))) {
     throw std::invalid_argument("BitBIRCH clustering options are invalid");
   }
@@ -2519,35 +2530,13 @@ BitBirchResult bitBirchGpu(const cuda::std::span<const std::uint32_t> fingerprin
   }
   if (numFingerprints == 0) {
     BitBirchResult result{AsyncDeviceVector<int>(0, stream), AsyncDeviceVector<std::uint32_t>(0, stream), 0, numWords};
-    result.clusterIdsOnHost = clusterIdsOnHost;
+    result.clusterIdsOnHost = options.clusterIdsOnHost;
     return result;
   }
   if (numFingerprints <= std::numeric_limits<std::uint16_t>::max()) {
-    return launchBitBirch<std::uint16_t>(fingerprints,
-                                         numFingerprints,
-                                         numWords,
-                                         threshold,
-                                         branchingFactor,
-                                         batchSize,
-                                         summaryCacheBytes,
-                                         fingerprintCacheBytes,
-                                         fingerprintsOnHost,
-                                         clusterIdsOnHost,
-                                         returnCentroids,
-                                         stream);
+    return launchBitBirch<std::uint16_t>(fingerprints, numFingerprints, numWords, threshold, options, stream);
   }
-  return launchBitBirch<std::uint32_t>(fingerprints,
-                                       numFingerprints,
-                                       numWords,
-                                       threshold,
-                                       branchingFactor,
-                                       batchSize,
-                                       summaryCacheBytes,
-                                       fingerprintCacheBytes,
-                                       fingerprintsOnHost,
-                                       clusterIdsOnHost,
-                                       returnCentroids,
-                                       stream);
+  return launchBitBirch<std::uint32_t>(fingerprints, numFingerprints, numWords, threshold, options, stream);
 }
 
 }  // namespace nvMolKit

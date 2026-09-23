@@ -30,6 +30,17 @@ struct BitBirchResult {
   bool                             clusterIdsOnHost = false;
 };
 
+//! Tree shape, batching, and memory-placement options for bitBirchGpu.
+struct BitBirchOptions {
+  int         branchingFactor       = 254;    //!< Maximum entries per tree node; at least 3.
+  int         batchSize             = 1024;   //!< Fingerprints routed per insertion epoch.
+  std::size_t summaryCacheBytes     = 0;      //!< GPU cache budget for Bit Feature sums; zero keeps all on the GPU.
+  std::size_t fingerprintCacheBytes = 0;      //!< GPU cache budget for retained singletons; needs fingerprintsOnHost.
+  bool        fingerprintsOnHost    = false;  //!< Fingerprints are host memory, streamed to the GPU per batch.
+  bool        clusterIdsOnHost      = false;  //!< Write labels to mapped pinned host memory.
+  bool        returnCentroids       = false;  //!< Also return packed majority centroids in cluster-ID order.
+};
+
 /**
  * Build one BitBIRCH tree using snapshot routing and ordered leaf owners.
  * Structural changes occur only between insertion epochs, avoiding concurrent
@@ -39,14 +50,8 @@ BitBirchResult bitBirchGpu(cuda::std::span<const std::uint32_t> fingerprints,
                            int                                  numFingerprints,
                            int                                  numWords,
                            double                               threshold,
-                           int                                  branchingFactor,
-                           int                                  batchSize,
-                           std::size_t                          summaryCacheBytes     = 0,
-                           bool                                 fingerprintsOnHost    = false,
-                           bool                                 clusterIdsOnHost      = false,
-                           bool                                 returnCentroids       = false,
-                           cudaStream_t                         stream                = nullptr,
-                           std::size_t                          fingerprintCacheBytes = 0);
+                           const BitBirchOptions&               options = BitBirchOptions(),
+                           cudaStream_t                         stream  = nullptr);
 
 }  // namespace nvMolKit
 
