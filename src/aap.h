@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "src/clustering_result.h"
+#include "src/diversity_pickers.h"
 
 namespace RDKit {
 class ROMol;
@@ -26,45 +27,40 @@ struct AapOptions {
 };
 
 /**
- * Compute directed approximate Atom-Atom Path (AAP) similarity on the GPU.
+ * Compute approximate Atom-Atom Path (AAP) similarity from @p left to @p right on the GPU.
  *
  * Rooted paths are hashed into per-atom histograms and compatible atoms are
- * assigned with fixed-iteration Sinkhorn normalization. The current fused
- * implementation supports molecules containing at most 64 atoms.
+ * assigned with fixed-iteration Sinkhorn normalization. Molecules may contain
+ * at most 64 atoms.
  */
 float aapSimilarityGpu(const RDKit::ROMol& left,
                        const RDKit::ROMol& right,
                        const AapOptions&   options = {},
                        cudaStream_t        stream  = nullptr);
 
-/** Select input-order Leader centroids using directed AAP similarity. */
-std::vector<int> aapLeaderPick(const std::vector<const RDKit::ROMol*>& molecules,
-                               float                                   threshold  = 0.217F,
-                               const AapOptions&                       options    = {},
-                               int                                     pickSize   = 0,
-                               const std::vector<int>&                 firstPicks = {},
-                               cudaStream_t                            stream     = nullptr);
+// AAP distance is 1 - aapSimilarityGpu(selected, candidate). Leader, MaxMin, and DISE follow the conventions of the
+// matching functions in src/diversity_pickers.h.
 
-/**
- * Cluster molecules with input-order directed sphere exclusion (DISE).
- *
- * The first unassigned molecule is selected as the next centroid and claims
- * all remaining molecules whose directed Atom-Atom Path (AAP) similarity
- * meets @p threshold.
- * Cluster IDs are zero-based and renumbered by descending cluster size, with
- * centroid order breaking ties. Centroids and sizes use the same cluster-ID
- * order.
- */
-ClusteringResult aapSimilarityClustering(const std::vector<const RDKit::ROMol*>& molecules,
-                                         float                                   threshold = 0.217F,
-                                         const AapOptions&                       options   = {},
-                                         cudaStream_t                            stream    = nullptr);
+PickerResult aapLeader(const std::vector<const RDKit::ROMol*>& molecules,
+                       double                                  cutoff,
+                       const AapOptions&                       options    = {},
+                       int                                     pickSize   = 0,
+                       const std::vector<int>&                 firstPicks = {},
+                       cudaStream_t                            stream     = nullptr);
 
-/** Run full two-stage directed sphere exclusion (DISE) with nearest-centroid assignment. */
-ClusteringResult aapDiseClustering(const std::vector<const RDKit::ROMol*>& molecules,
-                                   float                                   threshold = 0.217F,
-                                   const AapOptions&                       options   = {},
-                                   cudaStream_t                            stream    = nullptr);
+PickerResult aapMaxMin(const std::vector<const RDKit::ROMol*>& molecules,
+                       int                                     pickSize,
+                       const AapOptions&                       options    = {},
+                       const std::vector<int>&                 firstPicks = {},
+                       int                                     seed       = -1,
+                       double                                  threshold  = -1.0,
+                       cudaStream_t                            stream     = nullptr);
+
+ClusteringResult aapDise(const std::vector<const RDKit::ROMol*>& molecules,
+                         double                                  cutoff,
+                         const AapOptions&                       options,
+                         bool                                    nearestAssignment,
+                         cudaStream_t                            stream = nullptr);
 
 }  // namespace nvMolKit
 

@@ -31,6 +31,14 @@ Similarity Calculations
    similarity.crossCosineSimilarityMemoryConstrained
    similarity.aap_similarity
 
+.. autosummary::
+   :toctree: generated/
+   :template: class_template.rst
+
+   similarity.TanimotoMetric
+   similarity.CosineMetric
+   similarity.AAPMetric
+
 
 ETKDG Conformer Generation
 --------------------------
@@ -96,9 +104,6 @@ Clustering
    clustering.OutputMode
    clustering.ClusterDeviceResult
    clustering.SelectionDeviceResult
-   similarity.TanimotoSimilarity
-   similarity.CosineSimilarity
-   similarity.AAPSimilarity
 
 Maximum Common Substructure (MCS)
 ---------------------------------

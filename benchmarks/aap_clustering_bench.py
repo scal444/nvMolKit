@@ -27,7 +27,7 @@ from rdkit import Chem
 from rdkit.SimDivFilters import rdSimDivPickers
 
 from nvmolkit.clustering import fused_dise
-from nvmolkit.similarity import AAPSimilarity, aap_similarity
+from nvmolkit.similarity import AAPMetric, aap_similarity
 
 SUPPORTED_BOND_TYPES = {
     Chem.BondType.SINGLE,
@@ -278,7 +278,7 @@ def _time_callable(function, runs, warmup, gpu_sync=False):
 
 
 def _aap_metric(args):
-    return AAPSimilarity(
+    return AAPMetric(
         max_path_length=args.max_path_length,
         histogram_bins=args.histogram_bins,
         sinkhorn_iterations=args.sinkhorn_iterations,

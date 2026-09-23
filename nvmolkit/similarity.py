@@ -31,30 +31,27 @@ from nvmolkit.types import ArrayInput, AsyncGpuResult, _resolve_cuda_stream
 
 
 @dataclass(frozen=True)
-class TanimotoSimilarity:
-    """Configure fused packed-bit Tanimoto similarity.
+class TanimotoMetric:
+    """Tanimoto similarity on packed fingerprints for fused clustering and selection.
 
-    Pass this stateless configuration to fused Butina, Leader, MaxMin, or DISE.
-    The string ``"tanimoto"`` is an equivalent shorthand.
+    ``metric="tanimoto"`` is equivalent.
     """
 
 
 @dataclass(frozen=True)
-class CosineSimilarity:
-    """Configure fused packed-bit cosine similarity.
+class CosineMetric:
+    """Cosine similarity on packed fingerprints for fused clustering and selection.
 
-    Pass this stateless configuration to fused Butina, Leader, MaxMin, or DISE.
-    The string ``"cosine"`` is an equivalent shorthand.
+    ``metric="cosine"`` is equivalent.
     """
 
 
 @dataclass(frozen=True)
-class AAPSimilarity:
-    """Configure directed approximate Atom-Atom Path similarity.
+class AAPMetric:
+    """Approximate Atom-Atom Path (AAP) similarity on RDKit molecules.
 
-    AAP accepts RDKit molecules and is supported by fused Leader and DISE. It
-    is not supported by Butina or MaxMin because those algorithms require a
-    symmetric distance relation.
+    ``metric="aap"`` is equivalent to ``AAPMetric()``. Fused clustering and
+    selection score each selected molecule against the candidates.
 
     Attributes:
         max_path_length: Maximum rooted path length in bonds.
@@ -70,45 +67,40 @@ class AAPSimilarity:
     sinkhorn_temperature: float = 0.104
 
 
-_DEFAULT_AAP_SIMILARITY = AAPSimilarity()
+Metric: TypeAlias = Literal["tanimoto", "cosine", "aap"] | TanimotoMetric | CosineMetric | AAPMetric
+
+_DEFAULT_AAP_METRIC = AAPMetric()
+_NAMED_METRICS = {"tanimoto": TanimotoMetric(), "cosine": CosineMetric(), "aap": _DEFAULT_AAP_METRIC}
 
 
-PackedSimilarityMetric: TypeAlias = Literal["tanimoto", "cosine"] | TanimotoSimilarity | CosineSimilarity
-FusedSimilarityMetric: TypeAlias = PackedSimilarityMetric | AAPSimilarity
-
-
-def _packed_metric_name(metric: PackedSimilarityMetric) -> str:
-    if metric == "tanimoto" or isinstance(metric, TanimotoSimilarity):
-        return "tanimoto"
-    if metric == "cosine" or isinstance(metric, CosineSimilarity):
-        return "cosine"
-    if isinstance(metric, AAPSimilarity):
-        raise ValueError("AAPSimilarity is directed and is not supported by this algorithm")
-    raise ValueError("metric must be 'tanimoto', 'cosine', TanimotoSimilarity(), or CosineSimilarity()")
+def _resolve_metric(metric: Metric) -> TanimotoMetric | CosineMetric | AAPMetric:
+    if isinstance(metric, (TanimotoMetric, CosineMetric, AAPMetric)):
+        return metric
+    if isinstance(metric, str) and metric in _NAMED_METRICS:
+        return _NAMED_METRICS[metric]
+    raise ValueError(
+        "metric must be 'tanimoto', 'cosine', 'aap', or a TanimotoMetric, CosineMetric, or AAPMetric instance, "
+        f"got {metric!r}"
+    )
 
 
 def aap_similarity(
     left,
     right,
     *,
-    metric: AAPSimilarity = _DEFAULT_AAP_SIMILARITY,
+    metric: AAPMetric = _DEFAULT_AAP_METRIC,
     stream: torch.cuda.Stream | None = None,
 ) -> float:
-    """Compute directed approximate Atom-Atom Path (AAP) molecular similarity.
+    """Compute approximate Atom-Atom Path (AAP) similarity between two molecules.
 
-    Rooted paths are hashed into per-atom histograms and compatible atoms are
-    assigned with fixed-iteration Sinkhorn normalization on the GPU. The score
-    is directed: swapping ``left`` and ``right`` can change the result.
-
-    Molecules may currently contain at most 64 RDKit atoms, including explicit
-    hydrogens, and must not be empty. Supported bond types are single, double,
-    triple, and aromatic. Rooted-path descriptors are constructed on the CPU.
-    This function synchronizes ``stream`` before returning the Python scalar.
+    The score is directed: ``aap_similarity(a, b)`` and ``aap_similarity(b, a)``
+    can differ. Molecules must be nonempty, contain at most 64 atoms including
+    explicit hydrogens, and use only single, double, triple, and aromatic bonds.
 
     Args:
-        left: Centroid-side RDKit molecule.
-        right: Candidate-side RDKit molecule.
-        metric: AAP provider configuration.
+        left: Reference RDKit molecule.
+        right: Candidate RDKit molecule.
+        metric: AAP parameters.
         stream: CUDA stream to use. If None, uses the current stream.
 
     Returns:
@@ -118,8 +110,8 @@ def aap_similarity(
         For method details, see `Gobbi et al. (2015)
         <https://doi.org/10.1186/s13321-015-0056-8>`_.
     """
-    if not isinstance(metric, AAPSimilarity):
-        raise TypeError(f"metric must be an AAPSimilarity, got {type(metric).__name__}")
+    if not isinstance(metric, AAPMetric):
+        raise TypeError(f"metric must be an AAPMetric, got {type(metric).__name__}")
     active_stream = _resolve_cuda_stream(stream)
     return _clustering.aap_similarity(
         left,

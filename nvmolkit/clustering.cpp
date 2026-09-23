@@ -73,19 +73,49 @@ boost::python::tuple wrapClusteringResult(const nvMolKit::ClusteringResult& resu
 }
 
 boost::python::tuple wrapPickerResult(nvMolKit::PickerResult& result) {
-  auto indices = nvMolKit::makePyArray(result.indices, boost::python::make_tuple(result.count));
+  auto indices = nvMolKit::makePyArray(result.indices);
   return boost::python::make_tuple(toOwnedPyArray(indices), result.lastDistance);
 }
 
-boost::python::tuple wrapHostPickerResult(const std::vector<int>& indices, cudaStream_t stream) {
-  nvMolKit::PickerResult result{nvMolKit::AsyncDeviceVector<int>(indices.size(), stream),
-                                static_cast<int>(indices.size()),
-                                -1.0};
-  if (!indices.empty()) {
-    result.indices.copyFromHost(indices);
-    nvMolKit::checkReturnCode<true>(cudaStreamSynchronize(stream), __FILE__, __LINE__);
+cudaStream_t requireStream(const std::uintptr_t streamPtr) {
+  auto streamOpt = nvMolKit::acquireExternalStream(streamPtr);
+  if (!streamOpt) {
+    throw std::invalid_argument("Invalid CUDA stream");
   }
-  return wrapPickerResult(result);
+  return *streamOpt;
+}
+
+struct MatrixInput {
+  cuda::std::span<const double> distances;
+  int                           numItems;
+};
+
+MatrixInput parseDistanceMatrix(const boost::python::dict& matrix) {
+  boost::python::tuple shape       = boost::python::extract<boost::python::tuple>(matrix["shape"]);
+  boost::python::tuple data        = boost::python::extract<boost::python::tuple>(matrix["data"]);
+  const std::size_t    dataPointer = boost::python::extract<std::size_t>(data[0]);
+  return {nvMolKit::getSpanFromDictElems<double>(reinterpret_cast<void*>(dataPointer), shape),
+          boost::python::extract<int>(shape[0])};
+}
+
+struct FingerprintInput {
+  cuda::std::span<const std::uint32_t> fingerprints;
+  int                                  numItems;
+  int                                  numWords;
+};
+
+FingerprintInput parseFingerprints(const boost::python::dict& fingerprints) {
+  boost::python::tuple shape       = boost::python::extract<boost::python::tuple>(fingerprints["shape"]);
+  boost::python::tuple data        = boost::python::extract<boost::python::tuple>(fingerprints["data"]);
+  const std::size_t    dataPointer = boost::python::extract<std::size_t>(data[0]);
+  return {nvMolKit::getSpanFromDictElems<std::uint32_t>(reinterpret_cast<void*>(dataPointer), shape),
+          boost::python::extract<int>(shape[0]),
+          boost::python::extract<int>(shape[1])};
+}
+
+std::vector<const RDKit::ROMol*> moleculePointers(const boost::python::list& molecules) {
+  const auto extracted = nvMolKit::extractMolecules(molecules);
+  return {extracted.begin(), extracted.end()};
 }
 
 std::vector<int> extractIndices(const boost::python::object& values) {
@@ -136,95 +166,93 @@ BOOST_PYTHON_MODULE(_clustering) {
      boost::python::arg("stream")               = 0));
 
   boost::python::def(
-    "aap_similarity_clustering",
-    +[](const boost::python::list& molecules,
-        const float                threshold,
-        const int                  maxPathLength,
-        const int                  histogramBins,
-        const int                  sinkhornIterations,
-        const float                sinkhornTemperature,
-        const bool                 deviceOutput,
-        std::uintptr_t             streamPtr) {
-      auto streamOpt = nvMolKit::acquireExternalStream(streamPtr);
-      if (!streamOpt) {
-        throw std::invalid_argument("Invalid CUDA stream");
-      }
-      const auto                             extracted = nvMolKit::extractMolecules(molecules);
-      const std::vector<const RDKit::ROMol*> mols(extracted.begin(), extracted.end());
-      const nvMolKit::AapOptions options{maxPathLength, histogramBins, sinkhornIterations, sinkhornTemperature};
-      return wrapClusteringResult(nvMolKit::aapSimilarityClustering(mols, threshold, options, *streamOpt),
-                                  deviceOutput,
-                                  *streamOpt);
-    },
-    (boost::python::arg("molecules"),
-     boost::python::arg("threshold")            = 0.217F,
-     boost::python::arg("max_path_length")      = 7,
-     boost::python::arg("histogram_bins")       = 2048,
-     boost::python::arg("sinkhorn_iterations")  = 8,
-     boost::python::arg("sinkhorn_temperature") = 0.104F,
-     boost::python::arg("device_output")        = true,
-     boost::python::arg("stream")               = 0));
-
-  boost::python::def(
     "aap_leader",
     +[](const boost::python::list&   molecules,
-        const float                  threshold,
+        const double                 cutoff,
         const int                    pickSize,
         const boost::python::object& firstPicks,
         const int                    maxPathLength,
         const int                    histogramBins,
         const int                    sinkhornIterations,
         const float                  sinkhornTemperature,
-        std::uintptr_t               streamPtr) {
-      auto streamOpt = nvMolKit::acquireExternalStream(streamPtr);
-      if (!streamOpt) {
-        throw std::invalid_argument("Invalid CUDA stream");
-      }
-      const auto                             extracted = nvMolKit::extractMolecules(molecules);
-      const std::vector<const RDKit::ROMol*> mols(extracted.begin(), extracted.end());
+        const std::uintptr_t         streamPtr) {
+      const auto                 stream = requireStream(streamPtr);
       const nvMolKit::AapOptions options{maxPathLength, histogramBins, sinkhornIterations, sinkhornTemperature};
-      auto picks = nvMolKit::aapLeaderPick(mols, threshold, options, pickSize, extractIndices(firstPicks), *streamOpt);
-      return wrapHostPickerResult(picks, *streamOpt);
+      auto                       result =
+        nvMolKit::aapLeader(moleculePointers(molecules), cutoff, options, pickSize, extractIndices(firstPicks), stream);
+      return wrapPickerResult(result);
     },
     (boost::python::arg("molecules"),
-     boost::python::arg("threshold")            = 0.217F,
-     boost::python::arg("pick_size")            = 0,
-     boost::python::arg("first_picks")          = boost::python::tuple(),
-     boost::python::arg("max_path_length")      = 7,
-     boost::python::arg("histogram_bins")       = 2048,
-     boost::python::arg("sinkhorn_iterations")  = 8,
-     boost::python::arg("sinkhorn_temperature") = 0.104F,
-     boost::python::arg("stream")               = 0));
+     boost::python::arg("cutoff"),
+     boost::python::arg("pick_size"),
+     boost::python::arg("first_picks"),
+     boost::python::arg("max_path_length"),
+     boost::python::arg("histogram_bins"),
+     boost::python::arg("sinkhorn_iterations"),
+     boost::python::arg("sinkhorn_temperature"),
+     boost::python::arg("stream")));
 
   boost::python::def(
-    "aap_dise_clustering",
+    "aap_maxmin",
+    +[](const boost::python::list&   molecules,
+        const int                    pickSize,
+        const boost::python::object& firstPicks,
+        const int                    seed,
+        const double                 threshold,
+        const int                    maxPathLength,
+        const int                    histogramBins,
+        const int                    sinkhornIterations,
+        const float                  sinkhornTemperature,
+        const std::uintptr_t         streamPtr) {
+      const auto                 stream = requireStream(streamPtr);
+      const nvMolKit::AapOptions options{maxPathLength, histogramBins, sinkhornIterations, sinkhornTemperature};
+      auto                       result = nvMolKit::aapMaxMin(moleculePointers(molecules),
+                                        pickSize,
+                                        options,
+                                        extractIndices(firstPicks),
+                                        seed,
+                                        threshold,
+                                        stream);
+      return wrapPickerResult(result);
+    },
+    (boost::python::arg("molecules"),
+     boost::python::arg("pick_size"),
+     boost::python::arg("first_picks"),
+     boost::python::arg("seed"),
+     boost::python::arg("threshold"),
+     boost::python::arg("max_path_length"),
+     boost::python::arg("histogram_bins"),
+     boost::python::arg("sinkhorn_iterations"),
+     boost::python::arg("sinkhorn_temperature"),
+     boost::python::arg("stream")));
+
+  boost::python::def(
+    "aap_dise",
     +[](const boost::python::list& molecules,
-        const float                threshold,
+        const double               cutoff,
+        const bool                 nearestAssignment,
         const int                  maxPathLength,
         const int                  histogramBins,
         const int                  sinkhornIterations,
         const float                sinkhornTemperature,
         const bool                 deviceOutput,
-        std::uintptr_t             streamPtr) {
-      auto streamOpt = nvMolKit::acquireExternalStream(streamPtr);
-      if (!streamOpt) {
-        throw std::invalid_argument("Invalid CUDA stream");
-      }
-      const auto                             extracted = nvMolKit::extractMolecules(molecules);
-      const std::vector<const RDKit::ROMol*> mols(extracted.begin(), extracted.end());
+        const std::uintptr_t       streamPtr) {
+      const auto                 stream = requireStream(streamPtr);
       const nvMolKit::AapOptions options{maxPathLength, histogramBins, sinkhornIterations, sinkhornTemperature};
-      return wrapClusteringResult(nvMolKit::aapDiseClustering(mols, threshold, options, *streamOpt),
-                                  deviceOutput,
-                                  *streamOpt);
+      return wrapClusteringResult(
+        nvMolKit::aapDise(moleculePointers(molecules), cutoff, options, nearestAssignment, stream),
+        deviceOutput,
+        stream);
     },
     (boost::python::arg("molecules"),
-     boost::python::arg("threshold")            = 0.217F,
-     boost::python::arg("max_path_length")      = 7,
-     boost::python::arg("histogram_bins")       = 2048,
-     boost::python::arg("sinkhorn_iterations")  = 8,
-     boost::python::arg("sinkhorn_temperature") = 0.104F,
-     boost::python::arg("device_output")        = true,
-     boost::python::arg("stream")               = 0));
+     boost::python::arg("cutoff"),
+     boost::python::arg("nearest_assignment"),
+     boost::python::arg("max_path_length"),
+     boost::python::arg("histogram_bins"),
+     boost::python::arg("sinkhorn_iterations"),
+     boost::python::arg("sinkhorn_temperature"),
+     boost::python::arg("device_output"),
+     boost::python::arg("stream")));
 
   boost::python::def(
     "leader",
@@ -232,26 +260,21 @@ BOOST_PYTHON_MODULE(_clustering) {
         const double                 cutoff,
         const int                    pickSize,
         const boost::python::object& firstPicks,
-        std::uintptr_t               streamPtr) {
-      auto streamOpt = nvMolKit::acquireExternalStream(streamPtr);
-      if (!streamOpt) {
-        throw std::invalid_argument("Invalid CUDA stream");
-      }
-      const auto           stream      = *streamOpt;
-      boost::python::tuple shape       = boost::python::extract<boost::python::tuple>(distanceMatrix["shape"]);
-      const int            n           = boost::python::extract<int>(shape[0]);
-      boost::python::tuple data        = boost::python::extract<boost::python::tuple>(distanceMatrix["data"]);
-      const std::size_t    dataPointer = boost::python::extract<std::size_t>(data[0]);
-      const auto           pointer     = reinterpret_cast<void*>(dataPointer);
-      const auto           span        = nvMolKit::getSpanFromDictElems<double>(pointer, shape);
-      auto result = nvMolKit::leaderFromDistanceMatrix(span, n, cutoff, pickSize, extractIndices(firstPicks), stream);
+        const std::uintptr_t         streamPtr) {
+      const auto input  = parseDistanceMatrix(distanceMatrix);
+      auto       result = nvMolKit::leaderFromDistanceMatrix(input.distances,
+                                                       input.numItems,
+                                                       cutoff,
+                                                       pickSize,
+                                                       extractIndices(firstPicks),
+                                                       requireStream(streamPtr));
       return wrapPickerResult(result);
     },
     (boost::python::arg("distance_matrix"),
      boost::python::arg("cutoff"),
-     boost::python::arg("pick_size")   = 0,
-     boost::python::arg("first_picks") = boost::python::tuple(),
-     boost::python::arg("stream")      = 0));
+     boost::python::arg("pick_size"),
+     boost::python::arg("first_picks"),
+     boost::python::arg("stream")));
 
   boost::python::def(
     "fused_leader",
@@ -260,35 +283,24 @@ BOOST_PYTHON_MODULE(_clustering) {
         const std::string&           metric,
         const int                    pickSize,
         const boost::python::object& firstPicks,
-        std::uintptr_t               streamPtr) {
-      auto streamOpt = nvMolKit::acquireExternalStream(streamPtr);
-      if (!streamOpt) {
-        throw std::invalid_argument("Invalid CUDA stream");
-      }
-      const auto           stream      = *streamOpt;
-      boost::python::tuple shape       = boost::python::extract<boost::python::tuple>(fingerprints["shape"]);
-      const int            n           = boost::python::extract<int>(shape[0]);
-      const int            numWords    = boost::python::extract<int>(shape[1]);
-      boost::python::tuple data        = boost::python::extract<boost::python::tuple>(fingerprints["data"]);
-      const std::size_t    dataPointer = boost::python::extract<std::size_t>(data[0]);
-      const auto           pointer     = reinterpret_cast<void*>(dataPointer);
-      const auto           span        = nvMolKit::getSpanFromDictElems<std::uint32_t>(pointer, shape);
-      auto                 result      = nvMolKit::fusedLeaderGpu(span,
-                                             n,
-                                             numWords,
+        const std::uintptr_t         streamPtr) {
+      const auto input  = parseFingerprints(fingerprints);
+      auto       result = nvMolKit::fusedLeaderGpu(input.fingerprints,
+                                             input.numItems,
+                                             input.numWords,
                                              cutoff,
                                              parseFingerprintMetric(metric),
                                              pickSize,
                                              extractIndices(firstPicks),
-                                             stream);
+                                             requireStream(streamPtr));
       return wrapPickerResult(result);
     },
     (boost::python::arg("fingerprints"),
      boost::python::arg("cutoff"),
-     boost::python::arg("metric")      = "tanimoto",
-     boost::python::arg("pick_size")   = 0,
-     boost::python::arg("first_picks") = boost::python::tuple(),
-     boost::python::arg("stream")      = 0));
+     boost::python::arg("metric"),
+     boost::python::arg("pick_size"),
+     boost::python::arg("first_picks"),
+     boost::python::arg("stream")));
 
   boost::python::def(
     "maxmin",
@@ -297,28 +309,23 @@ BOOST_PYTHON_MODULE(_clustering) {
         const boost::python::object& firstPicks,
         const int                    seed,
         const double                 threshold,
-        std::uintptr_t               streamPtr) {
-      auto streamOpt = nvMolKit::acquireExternalStream(streamPtr);
-      if (!streamOpt) {
-        throw std::invalid_argument("Invalid CUDA stream");
-      }
-      const auto           stream      = *streamOpt;
-      boost::python::tuple shape       = boost::python::extract<boost::python::tuple>(distanceMatrix["shape"]);
-      const int            n           = boost::python::extract<int>(shape[0]);
-      boost::python::tuple data        = boost::python::extract<boost::python::tuple>(distanceMatrix["data"]);
-      const std::size_t    dataPointer = boost::python::extract<std::size_t>(data[0]);
-      const auto           pointer     = reinterpret_cast<void*>(dataPointer);
-      const auto           span        = nvMolKit::getSpanFromDictElems<double>(pointer, shape);
-      auto                 result =
-        nvMolKit::maxMinFromDistanceMatrix(span, n, pickSize, extractIndices(firstPicks), seed, threshold, stream);
+        const std::uintptr_t         streamPtr) {
+      const auto input  = parseDistanceMatrix(distanceMatrix);
+      auto       result = nvMolKit::maxMinFromDistanceMatrix(input.distances,
+                                                       input.numItems,
+                                                       pickSize,
+                                                       extractIndices(firstPicks),
+                                                       seed,
+                                                       threshold,
+                                                       requireStream(streamPtr));
       return wrapPickerResult(result);
     },
     (boost::python::arg("distance_matrix"),
      boost::python::arg("pick_size"),
-     boost::python::arg("first_picks") = boost::python::tuple(),
-     boost::python::arg("seed")        = -1,
-     boost::python::arg("threshold")   = -1.0,
-     boost::python::arg("stream")      = 0));
+     boost::python::arg("first_picks"),
+     boost::python::arg("seed"),
+     boost::python::arg("threshold"),
+     boost::python::arg("stream")));
 
   boost::python::def(
     "fused_maxmin",
@@ -328,37 +335,26 @@ BOOST_PYTHON_MODULE(_clustering) {
         const boost::python::object& firstPicks,
         const int                    seed,
         const double                 threshold,
-        std::uintptr_t               streamPtr) {
-      auto streamOpt = nvMolKit::acquireExternalStream(streamPtr);
-      if (!streamOpt) {
-        throw std::invalid_argument("Invalid CUDA stream");
-      }
-      const auto           stream      = *streamOpt;
-      boost::python::tuple shape       = boost::python::extract<boost::python::tuple>(fingerprints["shape"]);
-      const int            n           = boost::python::extract<int>(shape[0]);
-      const int            numWords    = boost::python::extract<int>(shape[1]);
-      boost::python::tuple data        = boost::python::extract<boost::python::tuple>(fingerprints["data"]);
-      const std::size_t    dataPointer = boost::python::extract<std::size_t>(data[0]);
-      const auto           pointer     = reinterpret_cast<void*>(dataPointer);
-      const auto           span        = nvMolKit::getSpanFromDictElems<std::uint32_t>(pointer, shape);
-      auto                 result      = nvMolKit::fusedMaxMinGpu(span,
-                                             n,
-                                             numWords,
+        const std::uintptr_t         streamPtr) {
+      const auto input  = parseFingerprints(fingerprints);
+      auto       result = nvMolKit::fusedMaxMinGpu(input.fingerprints,
+                                             input.numItems,
+                                             input.numWords,
                                              pickSize,
                                              parseFingerprintMetric(metric),
                                              extractIndices(firstPicks),
                                              seed,
                                              threshold,
-                                             stream);
+                                             requireStream(streamPtr));
       return wrapPickerResult(result);
     },
     (boost::python::arg("fingerprints"),
      boost::python::arg("pick_size"),
-     boost::python::arg("metric")      = "tanimoto",
-     boost::python::arg("first_picks") = boost::python::tuple(),
-     boost::python::arg("seed")        = -1,
-     boost::python::arg("threshold")   = -1.0,
-     boost::python::arg("stream")      = 0));
+     boost::python::arg("metric"),
+     boost::python::arg("first_picks"),
+     boost::python::arg("seed"),
+     boost::python::arg("threshold"),
+     boost::python::arg("stream")));
 
   boost::python::def(
     "dise",
@@ -366,27 +362,19 @@ BOOST_PYTHON_MODULE(_clustering) {
         const double               cutoff,
         const bool                 nearestAssignment,
         const bool                 deviceOutput,
-        std::uintptr_t             streamPtr) {
-      auto streamOpt = nvMolKit::acquireExternalStream(streamPtr);
-      if (!streamOpt) {
-        throw std::invalid_argument("Invalid CUDA stream");
-      }
-      const auto           stream      = *streamOpt;
-      boost::python::tuple shape       = boost::python::extract<boost::python::tuple>(distanceMatrix["shape"]);
-      const int            n           = boost::python::extract<int>(shape[0]);
-      boost::python::tuple data        = boost::python::extract<boost::python::tuple>(distanceMatrix["data"]);
-      const std::size_t    dataPointer = boost::python::extract<std::size_t>(data[0]);
-      const auto           pointer     = reinterpret_cast<void*>(dataPointer);
-      const auto           span        = nvMolKit::getSpanFromDictElems<double>(pointer, shape);
-      return wrapClusteringResult(nvMolKit::diseFromDistanceMatrix(span, n, cutoff, nearestAssignment, stream),
-                                  deviceOutput,
-                                  stream);
+        const std::uintptr_t       streamPtr) {
+      const auto stream = requireStream(streamPtr);
+      const auto input  = parseDistanceMatrix(distanceMatrix);
+      return wrapClusteringResult(
+        nvMolKit::diseFromDistanceMatrix(input.distances, input.numItems, cutoff, nearestAssignment, stream),
+        deviceOutput,
+        stream);
     },
     (boost::python::arg("distance_matrix"),
      boost::python::arg("cutoff"),
-     boost::python::arg("nearest_assignment") = true,
-     boost::python::arg("device_output")      = true,
-     boost::python::arg("stream")             = 0));
+     boost::python::arg("nearest_assignment"),
+     boost::python::arg("device_output"),
+     boost::python::arg("stream")));
 
   boost::python::def(
     "fused_dise",
@@ -395,30 +383,25 @@ BOOST_PYTHON_MODULE(_clustering) {
         const std::string&         metric,
         const bool                 nearestAssignment,
         const bool                 deviceOutput,
-        std::uintptr_t             streamPtr) {
-      auto streamOpt = nvMolKit::acquireExternalStream(streamPtr);
-      if (!streamOpt) {
-        throw std::invalid_argument("Invalid CUDA stream");
-      }
-      const auto           stream      = *streamOpt;
-      boost::python::tuple shape       = boost::python::extract<boost::python::tuple>(fingerprints["shape"]);
-      const int            n           = boost::python::extract<int>(shape[0]);
-      const int            numWords    = boost::python::extract<int>(shape[1]);
-      boost::python::tuple data        = boost::python::extract<boost::python::tuple>(fingerprints["data"]);
-      const std::size_t    dataPointer = boost::python::extract<std::size_t>(data[0]);
-      const auto           pointer     = reinterpret_cast<void*>(dataPointer);
-      const auto           span        = nvMolKit::getSpanFromDictElems<std::uint32_t>(pointer, shape);
-      return wrapClusteringResult(
-        nvMolKit::fusedDiseGpu(span, n, numWords, cutoff, parseFingerprintMetric(metric), nearestAssignment, stream),
-        deviceOutput,
-        stream);
+        const std::uintptr_t       streamPtr) {
+      const auto stream = requireStream(streamPtr);
+      const auto input  = parseFingerprints(fingerprints);
+      return wrapClusteringResult(nvMolKit::fusedDiseGpu(input.fingerprints,
+                                                         input.numItems,
+                                                         input.numWords,
+                                                         cutoff,
+                                                         parseFingerprintMetric(metric),
+                                                         nearestAssignment,
+                                                         stream),
+                                  deviceOutput,
+                                  stream);
     },
     (boost::python::arg("fingerprints"),
      boost::python::arg("cutoff"),
-     boost::python::arg("metric")             = "tanimoto",
-     boost::python::arg("nearest_assignment") = true,
-     boost::python::arg("device_output")      = true,
-     boost::python::arg("stream")             = 0));
+     boost::python::arg("metric"),
+     boost::python::arg("nearest_assignment"),
+     boost::python::arg("device_output"),
+     boost::python::arg("stream")));
 
   boost::python::def(
     "butina",

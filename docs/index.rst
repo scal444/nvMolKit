@@ -181,9 +181,8 @@ nvMolKit currently supports the following features:
     * Supports multiple GPUs
 
 * **Clustering and diversity selection**: GPU-accelerated Butina, Leader, MaxMin, and directed sphere exclusion (see :doc:`clustering`)
-    * Paired distance-matrix and memory-efficient fused APIs
-    * Fused Tanimoto and cosine providers for packed fingerprints
-    * Directed Atom-Atom Path (AAP) similarity for Leader and sphere exclusion
+    * Supports dense distance matrix inputs
+    * Supports fused Tanimoto, cosine, and Atom-Atom Path (AAP) similarity for large datasets
 
 * **Substructure Search**: GPU-accelerated substructure matching against batches of molecules
     * Supports SMILES and recursive SMARTS-based query molecules via RDKit

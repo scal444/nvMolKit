@@ -16,12 +16,19 @@
 
 namespace nvMolKit {
 
-/** Device-resident picker indices and MaxMin's final selected separation. */
+/**
+ * Ordered picks. @c lastDistance is the nearest-pick distance of the last MaxMin addition, or -1 when none was added
+ * after the initial picks.
+ */
 struct PickerResult {
   AsyncDeviceVector<int> indices;
-  int                    count        = 0;
   double                 lastDistance = -1.0;
 };
+
+// Distance matrices are square and row-major; element [i, j] is the distance from selected item i to candidate j.
+// Fingerprints are packed row-major with shape (num items, num words); distance is 1 - similarity.
+// pickSize == 0 means no limit for Leader. A negative MaxMin seed seeds from system entropy, and a negative
+// threshold disables the MaxMin early stop.
 
 PickerResult leaderFromDistanceMatrix(cuda::std::span<const double> distanceMatrix,
                                       int                           numItems,

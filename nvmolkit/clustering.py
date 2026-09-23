@@ -13,8 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GPU-accelerated clustering from distance matrices, fingerprints, or ordered RDKit molecules."""
+"""GPU-accelerated clustering and diversity selection.
 
+Each algorithm has a matrix form that takes a precomputed distance matrix and a
+``fused_`` form that computes distances from fingerprints or molecules as needed.
+"""
+
+import operator
 from dataclasses import dataclass
 from enum import Enum
 from typing import Literal, Sequence, overload
@@ -24,13 +29,7 @@ import torch
 
 from nvmolkit import _clustering
 from nvmolkit._fingerprint_inputs import _prepare_packed_fingerprints
-from nvmolkit.similarity import (
-    AAPSimilarity,
-    FusedSimilarityMetric,
-    PackedSimilarityMetric,
-    _packed_metric_name,
-    aap_similarity,  # noqa: F401 - compatibility re-export
-)
+from nvmolkit.similarity import AAPMetric, CosineMetric, Metric, TanimotoMetric, _resolve_metric
 from nvmolkit.types import ArrayInput, AsyncGpuResult, _as_cuda_tensor, _resolve_cuda_stream
 
 _VALID_NEIGHBORLIST_SIZES = (8, 16, 24, 32, 64, 128)
@@ -39,11 +38,10 @@ _RDKitClusters = tuple[tuple[int, ...], ...]
 
 
 class OutputMode(Enum):
-    """Select a host-compatible or device-resident algorithm result.
+    """Result representation for clustering and selection functions.
 
-    ``RDKIT`` materializes tuples of input indices on the host. ``DEVICE``
-    returns result objects containing :class:`~nvmolkit.types.AsyncGpuResult`
-    buffers on the active CUDA device.
+    ``DEVICE`` returns :class:`~nvmolkit.types.AsyncGpuResult` buffers on the
+    GPU. ``RDKIT`` returns host tuples of input indices in RDKit's format.
     """
 
     RDKIT = "rdkit"
@@ -52,12 +50,15 @@ class OutputMode(Enum):
 
 @dataclass(frozen=True)
 class ClusterDeviceResult:
-    """GPU-resident clustering result shared by clustering algorithms.
+    """Device-resident clustering result.
 
     Attributes:
-        cluster_ids: One zero-based int32 cluster ID per input molecule.
-        centroids: Centroid indices by cluster ID, int32 and shape ``(num_clusters,)``.
-        cluster_sizes: Member counts by cluster ID, int64 and shape ``(num_clusters,)``.
+        cluster_ids: int32 cluster ID of each input, shape ``(N,)``. IDs are
+            contiguous from zero.
+        centroids: int32 input index of each cluster's centroid, shape
+            ``(num_clusters,)``.
+        cluster_sizes: int64 member count of each cluster, shape
+            ``(num_clusters,)``.
     """
 
     cluster_ids: AsyncGpuResult
@@ -67,26 +68,17 @@ class ClusterDeviceResult:
 
 @dataclass(frozen=True)
 class SelectionDeviceResult:
-    """GPU-resident ordered selection result.
+    """Device-resident ordered selection.
 
     Attributes:
-        indices: Ordered selected indices as an int32 GPU buffer.
-        last_distance: Separation of the last MaxMin addition, or ``None`` for
-            Leader. MaxMin uses ``-1`` when no candidate was added after the
-            initial selection.
+        indices: int32 selected input indices in selection order.
+        last_distance: For MaxMin, the nearest-pick distance of the last item
+            added, or ``-1`` if none was added after ``first_picks``. ``None``
+            for Leader.
     """
 
     indices: AsyncGpuResult
     last_distance: float | None = None
-
-
-# Compatibility names for the output types introduced alongside the original
-# Butina and AAP APIs. They intentionally refer to the common types rather than
-# defining algorithm-specific wrappers.
-ButinaOutputMode = OutputMode
-DISEOutputMode = OutputMode
-ButinaDeviceResult = ClusterDeviceResult
-DISEDeviceResult = ClusterDeviceResult
 
 
 def _validate_output(output: OutputMode) -> None:
@@ -94,13 +86,32 @@ def _validate_output(output: OutputMode) -> None:
         raise TypeError(f"output must be an OutputMode, got {type(output).__name__}")
 
 
-def _validate_maxmin_threshold(threshold: float | None, *, maximum: float | None = None) -> float:
+def _validate_assignment(assignment: str) -> None:
+    if assignment not in ("first", "nearest"):
+        raise ValueError(f"assignment must be one of ['first', 'nearest'], got {assignment!r}")
+
+
+def _validate_maxmin_threshold(threshold: float | None) -> float:
     if threshold is None:
         return -1.0
-    if not np.isfinite(threshold) or threshold < 0 or (maximum is not None and threshold > maximum):
-        distance_range = "non-negative" if maximum is None else f"in [0, {maximum:g}]"
-        raise ValueError(f"threshold must be finite and {distance_range}, got {threshold}")
+    if not np.isfinite(threshold) or threshold < 0:
+        raise ValueError(f"threshold must be finite and non-negative, got {threshold}")
     return float(threshold)
+
+
+def _index_tuple(name: str, values: Sequence[int]) -> tuple[int, ...]:
+    try:
+        return tuple(operator.index(value) for value in values)
+    except TypeError:
+        raise TypeError(f"{name} must be a sequence of integers") from None
+
+
+def _aap_args(metric: AAPMetric) -> tuple:
+    return (metric.max_path_length, metric.histogram_bins, metric.sinkhorn_iterations, metric.sinkhorn_temperature)
+
+
+def _packed_metric_name(metric: TanimotoMetric | CosineMetric) -> str:
+    return "tanimoto" if isinstance(metric, TanimotoMetric) else "cosine"
 
 
 def _cluster_arrays_to_rdkit(cluster_ids_array, centroids_array) -> _RDKitClusters:
@@ -142,14 +153,11 @@ def _wrap_butina_device_result(result) -> ClusterDeviceResult:
     return ClusterDeviceResult(cluster_ids, centroids, AsyncGpuResult(cluster_sizes))
 
 
-def _to_rdkit_clusters(cluster_ids: AsyncGpuResult, centroids: AsyncGpuResult) -> _RDKitClusters:
-    return _cluster_arrays_to_rdkit(cluster_ids.numpy(), centroids.numpy())
-
-
 def _resolve_butina_output(result, output: OutputMode) -> _RDKitClusters | ClusterDeviceResult:
     if output is OutputMode.DEVICE:
         return _wrap_butina_device_result(result)
-    return _to_rdkit_clusters(*_wrap_cluster_arrays(result))
+    cluster_ids, centroids = _wrap_cluster_arrays(result)
+    return _cluster_arrays_to_rdkit(cluster_ids.numpy(), centroids.numpy())
 
 
 def _resolve_selection_output(result, output: OutputMode, *, maxmin: bool):
@@ -179,116 +187,96 @@ def _prepare_distance_matrix(distance_matrix: ArrayInput, stream: torch.cuda.Str
     return tensor, active_stream
 
 
+def _prepare_fused_input(x, metric: Metric, stream: torch.cuda.Stream | None):
+    resolved = _resolve_metric(metric)
+    if isinstance(resolved, AAPMetric):
+        return resolved, list(x), _resolve_cuda_stream(stream)
+    (fingerprints,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
+    return resolved, fingerprints.__cuda_array_interface__, active_stream
+
+
 def leader(
     distance_matrix: ArrayInput,
     cutoff: float,
+    *,
     pick_size: int = 0,
     first_picks: Sequence[int] = (),
     stream: torch.cuda.Stream | None = None,
-    *,
     output: OutputMode = OutputMode.DEVICE,
 ) -> SelectionDeviceResult | tuple[int, ...]:
-    """Select ordered sphere-exclusion leaders from a distance matrix.
+    """Select leaders from a distance matrix by sphere exclusion.
 
-    Matrix row ``i`` is interpreted as distances from selected leader ``i``
-    to the remaining candidates, so directed matrices are supported. Items at
-    distance ``<= cutoff`` are excluded. ``pick_size=0`` selects until no
-    candidates remain.
+    Candidates are visited in input order. Each candidate that has not been
+    excluded becomes a leader and excludes every remaining candidate within
+    ``cutoff`` of it. Results match RDKit's ``LeaderPicker``.
 
     Args:
-        distance_matrix: Full square float64 distance matrix. CPU inputs are
-            copied to CUDA.
+        distance_matrix: Square float64 matrix of shape ``(N, N)``. Element
+            ``[i, j]`` is the distance from item ``i`` to item ``j``.
         cutoff: Inclusive exclusion distance. Must be finite and non-negative.
-        pick_size: Maximum number of leaders, or zero for no explicit limit.
-        first_picks: Unique in-range leader indices to process first, in the
-            supplied order.
-        stream: CUDA stream to use. If omitted, uses the current stream.
-        output: Device-resident or RDKit-compatible host output.
+        pick_size: Maximum number of leaders, or ``0`` for no limit.
+        first_picks: Unique indices selected as leaders, in order, before the
+            input-order pass.
+        stream: CUDA stream to use. If None, uses the current stream.
+        output: Result representation.
 
     Returns:
-        A :class:`SelectionDeviceResult` in device mode, or an ordered tuple of
-        selected indices in RDKit mode.
-
-    Note:
-        The control loop synchronizes ``stream`` between selection passes.
+        A :class:`SelectionDeviceResult` for ``OutputMode.DEVICE``, or a tuple
+        of selected indices for ``OutputMode.RDKIT``.
     """
     _validate_output(output)
     matrix, active_stream = _prepare_distance_matrix(distance_matrix, stream)
-    with torch.cuda.stream(active_stream):
-        result = _clustering.leader(
-            matrix.__cuda_array_interface__,
-            cutoff,
-            pick_size,
-            tuple(first_picks),
-            active_stream.cuda_stream,
-        )
+    result = _clustering.leader(
+        matrix.__cuda_array_interface__,
+        cutoff,
+        operator.index(pick_size),
+        _index_tuple("first_picks", first_picks),
+        active_stream.cuda_stream,
+    )
     return _resolve_selection_output(result, output, maxmin=False)
 
 
 def fused_leader(
     x,
     cutoff: float,
-    metric: FusedSimilarityMetric = "tanimoto",
+    *,
+    metric: Metric = "tanimoto",
     pick_size: int = 0,
     first_picks: Sequence[int] = (),
     stream: torch.cuda.Stream | None = None,
-    *,
     output: OutputMode = OutputMode.DEVICE,
 ) -> SelectionDeviceResult | tuple[int, ...]:
-    """Select ordered leaders while computing similarities on demand.
+    """Select leaders by sphere exclusion, computing distances as needed.
 
-    Packed fingerprints support Tanimoto and cosine similarity. RDKit
-    molecules use :class:`~nvmolkit.similarity.AAPSimilarity`, whose directed
-    score is evaluated from each selected leader to each candidate.
+    Equivalent to :func:`leader` on the matrix of ``1 - similarity`` values,
+    with memory that scales as ``O(N)``.
 
     Args:
-        x: Packed fingerprints for Tanimoto/cosine, or RDKit molecules for AAP.
-        cutoff: Inclusive distance cutoff in ``[0, 1]``.
-        metric: Similarity provider configuration or packed-provider string.
-        pick_size: Maximum number of leaders, or zero for no explicit limit.
-        first_picks: Unique in-range leader indices to process first, in the
-            supplied order.
-        stream: CUDA stream to use. If omitted, uses the current stream.
-        output: Device-resident or RDKit-compatible host output.
+        x: Packed int32 or uint32 fingerprints of shape ``(N, num_words)`` for
+            Tanimoto and cosine, or a sequence of RDKit molecules for AAP.
+        cutoff: Inclusive exclusion distance in ``[0, 1]``.
+        metric: Similarity metric.
+        pick_size: Maximum number of leaders, or ``0`` for no limit.
+        first_picks: Unique indices selected as leaders, in order, before the
+            input-order pass.
+        stream: CUDA stream to use. If None, uses the current stream.
+        output: Result representation.
 
     Returns:
-        A :class:`SelectionDeviceResult` in device mode, or an ordered tuple of
-        selected indices in RDKit mode.
-
-    Note:
-        This function stores ``O(N)`` algorithm state and does not materialize
-        an ``N x N`` distance matrix. The control loop synchronizes ``stream``
-        between selection passes.
+        A :class:`SelectionDeviceResult` for ``OutputMode.DEVICE``, or a tuple
+        of selected indices for ``OutputMode.RDKIT``.
     """
     _validate_output(output)
-    if not 0 <= cutoff <= 1:
-        raise ValueError(f"cutoff must be in [0, 1], got {cutoff}")
-
-    if isinstance(metric, AAPSimilarity):
-        active_stream = _resolve_cuda_stream(stream)
+    resolved, inputs, active_stream = _prepare_fused_input(x, metric, stream)
+    pick_size = operator.index(pick_size)
+    first_picks = _index_tuple("first_picks", first_picks)
+    if isinstance(resolved, AAPMetric):
         result = _clustering.aap_leader(
-            list(x),
-            1.0 - cutoff,
-            pick_size,
-            tuple(first_picks),
-            metric.max_path_length,
-            metric.histogram_bins,
-            metric.sinkhorn_iterations,
-            metric.sinkhorn_temperature,
-            active_stream.cuda_stream,
+            inputs, cutoff, pick_size, first_picks, *_aap_args(resolved), active_stream.cuda_stream
         )
-        return _resolve_selection_output(result, output, maxmin=False)
-
-    metric_name = _packed_metric_name(metric)
-    (fingerprints,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
-    with torch.cuda.stream(active_stream):
+    else:
         result = _clustering.fused_leader(
-            fingerprints.__cuda_array_interface__,
-            cutoff,
-            metric_name,
-            pick_size,
-            tuple(first_picks),
-            active_stream.cuda_stream,
+            inputs, cutoff, _packed_metric_name(resolved), pick_size, first_picks, active_stream.cuda_stream
         )
     return _resolve_selection_output(result, output, maxmin=False)
 
@@ -296,99 +284,100 @@ def fused_leader(
 def maxmin(
     distance_matrix: ArrayInput,
     pick_size: int,
+    *,
     first_picks: Sequence[int] = (),
     seed: int = -1,
     threshold: float | None = None,
     stream: torch.cuda.Stream | None = None,
-    *,
     output: OutputMode = OutputMode.DEVICE,
 ) -> SelectionDeviceResult | tuple[tuple[int, ...], float]:
-    """Select a diverse subset with RDKit-compatible greedy MaxMin picking.
+    """Select a diverse subset from a distance matrix by greedy MaxMin.
 
-    The first pick uses RDKit's Boost MT19937 behavior when ``first_picks`` is
-    empty. If ``threshold`` is provided, selection stops when the next item's
-    distance to its nearest pick is at most that value.
+    Each step adds the candidate whose distance to its nearest pick is largest,
+    breaking ties by lowest index. Results match RDKit's ``MaxMinPicker``,
+    including the seeded first pick.
 
     Args:
-        distance_matrix: Full square float64 distance matrix. CPU inputs are
-            copied to CUDA.
-        pick_size: Target number of picks. Must be positive and no larger than
-            the input size.
-        first_picks: Unique in-range initial picks in the supplied order.
-        seed: RDKit-compatible random seed used when ``first_picks`` is empty.
-            A negative value seeds from system entropy.
-        threshold: Optional finite, non-negative early-stop distance. The next
-            candidate is not added when its nearest-pick distance is at most
-            this value.
-        stream: CUDA stream to use. If omitted, uses the current stream.
-        output: Device-resident or RDKit-compatible host output.
+        distance_matrix: Square float64 matrix of shape ``(N, N)``. Element
+            ``[i, j]`` is the distance from item ``i`` to item ``j``.
+        pick_size: Number of items to select, from 1 through ``N``.
+        first_picks: Unique indices that start the selection, in order. If
+            empty, the first pick is drawn at random.
+        seed: Seed for the random first pick. Negative values use system
+            entropy.
+        threshold: Stop before adding a candidate whose nearest-pick distance
+            is at most this value.
+        stream: CUDA stream to use. If None, uses the current stream.
+        output: Result representation.
 
     Returns:
-        A :class:`SelectionDeviceResult` in device mode. RDKit mode returns
-        ``(indices, last_distance)``.
-
-    Note:
-        MaxMin normally assumes symmetric distances. The control loop
-        synchronizes ``stream`` between selection passes.
+        A :class:`SelectionDeviceResult` for ``OutputMode.DEVICE``, or
+        ``(indices, last_distance)`` for ``OutputMode.RDKIT``.
     """
     _validate_output(output)
     matrix, active_stream = _prepare_distance_matrix(distance_matrix, stream)
-    native_threshold = _validate_maxmin_threshold(threshold)
-    with torch.cuda.stream(active_stream):
-        result = _clustering.maxmin(
-            matrix.__cuda_array_interface__,
-            pick_size,
-            tuple(first_picks),
-            seed,
-            native_threshold,
-            active_stream.cuda_stream,
-        )
+    result = _clustering.maxmin(
+        matrix.__cuda_array_interface__,
+        operator.index(pick_size),
+        _index_tuple("first_picks", first_picks),
+        operator.index(seed),
+        _validate_maxmin_threshold(threshold),
+        active_stream.cuda_stream,
+    )
     return _resolve_selection_output(result, output, maxmin=True)
 
 
 def fused_maxmin(
-    x: ArrayInput,
+    x,
     pick_size: int,
-    metric: PackedSimilarityMetric = "tanimoto",
+    *,
+    metric: Metric = "tanimoto",
     first_picks: Sequence[int] = (),
     seed: int = -1,
     threshold: float | None = None,
     stream: torch.cuda.Stream | None = None,
-    *,
     output: OutputMode = OutputMode.DEVICE,
 ) -> SelectionDeviceResult | tuple[tuple[int, ...], float]:
-    """Run MaxMin directly on packed fingerprints without an ``N x N`` matrix.
+    """Select a diverse subset by greedy MaxMin, computing distances as needed.
+
+    Equivalent to :func:`maxmin` on the matrix of ``1 - similarity`` values,
+    with memory that scales as ``O(N)``.
 
     Args:
-        x: Packed int32 or uint32 fingerprints with shape ``(N, num_words)``.
-        pick_size: Target number of picks. Must be positive and no larger than
-            the input size.
-        metric: Tanimoto or cosine provider configuration/string. Directed AAP
-            is not supported by MaxMin.
-        first_picks: Unique in-range initial picks in the supplied order.
-        seed: RDKit-compatible random seed used when ``first_picks`` is empty.
-        threshold: Optional early-stop distance in ``[0, 1]``.
-        stream: CUDA stream to use. If omitted, uses the current stream.
-        output: Device-resident or RDKit-compatible host output.
+        x: Packed int32 or uint32 fingerprints of shape ``(N, num_words)`` for
+            Tanimoto and cosine, or a sequence of RDKit molecules for AAP.
+        pick_size: Number of items to select, from 1 through ``N``.
+        metric: Similarity metric.
+        first_picks: Unique indices that start the selection, in order. If
+            empty, the first pick is drawn at random.
+        seed: Seed for the random first pick. Negative values use system
+            entropy.
+        threshold: Stop before adding a candidate whose nearest-pick distance
+            is at most this value. Must be in ``[0, 1]``.
+        stream: CUDA stream to use. If None, uses the current stream.
+        output: Result representation.
 
     Returns:
-        A :class:`SelectionDeviceResult` in device mode. RDKit mode returns
-        ``(indices, last_distance)``.
-
-    Note:
-        This function stores ``O(N)`` algorithm state. The control loop
-        synchronizes ``stream`` between selection passes.
+        A :class:`SelectionDeviceResult` for ``OutputMode.DEVICE``, or
+        ``(indices, last_distance)`` for ``OutputMode.RDKIT``.
     """
     _validate_output(output)
-    metric_name = _packed_metric_name(metric)
-    native_threshold = _validate_maxmin_threshold(threshold, maximum=1.0)
-    (fingerprints,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
-    with torch.cuda.stream(active_stream):
+    resolved, inputs, active_stream = _prepare_fused_input(x, metric, stream)
+    args = (
+        operator.index(pick_size),
+        _index_tuple("first_picks", first_picks),
+        operator.index(seed),
+        _validate_maxmin_threshold(threshold),
+    )
+    if isinstance(resolved, AAPMetric):
+        result = _clustering.aap_maxmin(inputs, *args, *_aap_args(resolved), active_stream.cuda_stream)
+    else:
+        pick_size, first_picks, seed, native_threshold = args
         result = _clustering.fused_maxmin(
-            fingerprints.__cuda_array_interface__,
+            inputs,
             pick_size,
-            metric_name,
-            tuple(first_picks),
+            _packed_metric_name(resolved),
+            first_picks,
             seed,
             native_threshold,
             active_stream.cuda_stream,
@@ -399,38 +388,33 @@ def fused_maxmin(
 def dise(
     distance_matrix: ArrayInput,
     cutoff: float,
+    *,
     assignment: Literal["first", "nearest"] = "nearest",
     stream: torch.cuda.Stream | None = None,
-    *,
     output: OutputMode = OutputMode.DEVICE,
 ) -> ClusterDeviceResult | _RDKitClusters:
-    """Cluster an ordered distance matrix with directed sphere exclusion.
+    """Cluster a distance matrix by directed sphere exclusion (DISE).
 
-    Rows are interpreted as distances from a selected centroid to candidates,
-    so the matrix may be directed. Centroids are selected in input order using
-    inclusive Leader exclusion.
+    Centroids are the leaders selected by :func:`leader`. With
+    ``assignment="first"``, each item joins the first centroid that excluded
+    it; with ``"nearest"``, each non-centroid joins its nearest centroid, with
+    ties going to the earlier centroid. Clusters are ordered by descending
+    size, then by centroid selection order.
 
     Args:
-        distance_matrix: Full square float64 distance matrix. CPU inputs are
-            copied to CUDA.
-        cutoff: Inclusive sphere-exclusion distance. Must be finite and
-            non-negative.
-        assignment: ``"first"`` keeps the first qualifying centroid;
-            ``"nearest"`` assigns each non-centroid to its nearest centroid.
-        stream: CUDA stream to use. If omitted, uses the current stream.
-        output: Device-resident or RDKit-compatible host output.
+        distance_matrix: Square float64 matrix of shape ``(N, N)``. Element
+            ``[i, j]`` is the distance from item ``i`` to item ``j``.
+        cutoff: Inclusive exclusion distance. Must be finite and non-negative.
+        assignment: ``"first"`` or ``"nearest"``.
+        stream: CUDA stream to use. If None, uses the current stream.
+        output: Result representation.
 
     Returns:
-        A :class:`ClusterDeviceResult` in device mode, or centroid-first
-        cluster tuples ordered by descending size in RDKit mode.
-
-    Note:
-        The implementation synchronizes ``stream`` during centroid selection
-        and while constructing the result.
+        A :class:`ClusterDeviceResult` for ``OutputMode.DEVICE``, or
+        centroid-first tuples of input indices for ``OutputMode.RDKIT``.
     """
     _validate_output(output)
-    if assignment not in ("first", "nearest"):
-        raise ValueError(f"assignment must be one of ['first', 'nearest'], got {assignment!r}")
+    _validate_assignment(assignment)
     matrix, active_stream = _prepare_distance_matrix(distance_matrix, stream)
     result = _clustering.dise(
         matrix.__cuda_array_interface__,
@@ -445,66 +429,47 @@ def dise(
 def fused_dise(
     x,
     cutoff: float,
-    metric: FusedSimilarityMetric = "tanimoto",
+    *,
+    metric: Metric = "tanimoto",
     assignment: Literal["first", "nearest"] = "nearest",
     stream: torch.cuda.Stream | None = None,
-    *,
     output: OutputMode = OutputMode.DEVICE,
 ) -> ClusterDeviceResult | _RDKitClusters:
-    """Cluster ordered inputs with on-demand directed sphere exclusion.
+    """Cluster by directed sphere exclusion (DISE), computing distances as needed.
 
-    Input order defines centroid priority. AAP is directed; packed Tanimoto and
-    cosine providers are symmetric.
+    Equivalent to :func:`dise` on the matrix of ``1 - similarity`` values,
+    with memory that scales as ``O(N)``.
 
     Args:
-        x: Packed fingerprints for Tanimoto/cosine, or RDKit molecules for AAP.
-        cutoff: Inclusive distance cutoff in ``[0, 1]``.
-        metric: Similarity provider configuration or packed-provider string.
-        assignment: ``"first"`` keeps the first qualifying centroid;
-            ``"nearest"`` assigns each non-centroid to its nearest centroid.
-        stream: CUDA stream to use. If omitted, uses the current stream.
-        output: Device-resident or RDKit-compatible host output.
+        x: Packed int32 or uint32 fingerprints of shape ``(N, num_words)`` for
+            Tanimoto and cosine, or a sequence of RDKit molecules for AAP.
+        cutoff: Inclusive exclusion distance in ``[0, 1]``.
+        metric: Similarity metric.
+        assignment: ``"first"`` or ``"nearest"``.
+        stream: CUDA stream to use. If None, uses the current stream.
+        output: Result representation.
 
     Returns:
-        A :class:`ClusterDeviceResult` in device mode, or centroid-first
-        cluster tuples ordered by descending size in RDKit mode.
+        A :class:`ClusterDeviceResult` for ``OutputMode.DEVICE``, or
+        centroid-first tuples of input indices for ``OutputMode.RDKIT``.
 
     Note:
-        This function avoids an ``N x N`` matrix and stores ``O(N)`` algorithm
-        state. The implementation currently synchronizes ``stream`` during its
-        host-controlled selection and result construction.
+        For the method, see `Gobbi et al. (2015)
+        <https://doi.org/10.1186/s13321-015-0056-8>`_.
     """
     _validate_output(output)
-    if not 0 <= cutoff <= 1:
-        raise ValueError(f"cutoff must be in [0, 1], got {cutoff}")
-    if assignment not in ("first", "nearest"):
-        raise ValueError(f"assignment must be one of ['first', 'nearest'], got {assignment!r}")
-
-    if isinstance(metric, AAPSimilarity):
-        active_stream = _resolve_cuda_stream(stream)
-        function = _clustering.aap_similarity_clustering if assignment == "first" else _clustering.aap_dise_clustering
-        result = function(
-            list(x),
-            1.0 - cutoff,
-            metric.max_path_length,
-            metric.histogram_bins,
-            metric.sinkhorn_iterations,
-            metric.sinkhorn_temperature,
-            output is OutputMode.DEVICE,
-            active_stream.cuda_stream,
+    _validate_assignment(assignment)
+    resolved, inputs, active_stream = _prepare_fused_input(x, metric, stream)
+    nearest = assignment == "nearest"
+    device_output = output is OutputMode.DEVICE
+    if isinstance(resolved, AAPMetric):
+        result = _clustering.aap_dise(
+            inputs, cutoff, nearest, *_aap_args(resolved), device_output, active_stream.cuda_stream
         )
-        return _resolve_cluster_output(result, output)
-
-    metric_name = _packed_metric_name(metric)
-    (fingerprints,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
-    result = _clustering.fused_dise(
-        fingerprints.__cuda_array_interface__,
-        cutoff,
-        metric_name,
-        assignment == "nearest",
-        output is OutputMode.DEVICE,
-        active_stream.cuda_stream,
-    )
+    else:
+        result = _clustering.fused_dise(
+            inputs, cutoff, _packed_metric_name(resolved), nearest, device_output, active_stream.cuda_stream
+        )
     return _resolve_cluster_output(result, output)
 
 
@@ -565,28 +530,12 @@ def butina(
                     after each cluster is formed. Defaults to True, while
                     RDKit's ``Butina.ClusterData`` defaults to False.
         stream: CUDA stream to use. If None, uses the current stream.
-        output: Output representation. Defaults to ``OutputMode.DEVICE``.
+        output: Result representation.
 
     Returns:
-        The representation selected by ``output``.
-
-        ``OutputMode.RDKIT`` returns a tuple containing one tuple per
-        cluster. Each cluster tuple contains input indices, with the centroid
-        first. Constructing this representation synchronizes the CUDA work and
-        copies the clustering result to the host.
-
-        ``OutputMode.DEVICE`` returns a :class:`ClusterDeviceResult`
-        containing three :class:`AsyncGpuResult` objects on the active CUDA
-        device. ``cluster_ids`` is int32 with shape ``(N,)`` and maps each input
-        index to a cluster ID. Cluster IDs are contiguous from zero through
-        ``num_clusters - 1``. ``centroids`` is int32 with shape
-        ``(num_clusters,)``; element ``k`` is an input index whose cluster ID is
-        ``k``. ``cluster_sizes`` is int64 with shape ``(num_clusters,)``;
-        element ``k`` equals the number of entries in ``cluster_ids`` that are
-        equal to ``k``, and the sizes sum to ``N``. The return is
-        asynchronous: each field's ``.torch()`` method exposes its CUDA tensor
-        without a host copy, while ``.numpy()`` synchronizes and copies that
-        field to the host.
+        A :class:`ClusterDeviceResult` for ``OutputMode.DEVICE``, or the
+        centroid-first cluster tuples returned by RDKit's
+        ``Butina.ClusterData`` for ``OutputMode.RDKIT``.
 
     Note:
         The distance matrix should be symmetric and have zeros on the diagonal.
@@ -615,7 +564,7 @@ def butina(
 def fused_butina(
     x: ArrayInput,
     cutoff: float,
-    metric: PackedSimilarityMetric = "tanimoto",
+    metric: Metric = "tanimoto",
     stream: torch.cuda.Stream | None = None,
     *,
     output: Literal[OutputMode.DEVICE] = OutputMode.DEVICE,
@@ -626,7 +575,7 @@ def fused_butina(
 def fused_butina(
     x: ArrayInput,
     cutoff: float,
-    metric: PackedSimilarityMetric = "tanimoto",
+    metric: Metric = "tanimoto",
     stream: torch.cuda.Stream | None = None,
     *,
     output: Literal[OutputMode.RDKIT],
@@ -636,52 +585,35 @@ def fused_butina(
 def fused_butina(
     x: ArrayInput,
     cutoff: float,
-    metric: PackedSimilarityMetric = "tanimoto",
+    metric: Metric = "tanimoto",
     stream: torch.cuda.Stream | None = None,
     *,
     output: OutputMode = OutputMode.DEVICE,
 ) -> _RDKitClusters | ClusterDeviceResult:
-    """Perform fused Butina clustering on a set of fingerprints.
+    """Perform Butina clustering on fingerprints, computing distances as needed.
 
-    This function uses a fused implementation of Butina clustering that computes
-    similarities and neighbors on-the-fly, avoiding the need to compute and store
-    the full distance matrix. This makes it suitable for large datasets.
+    Equivalent to :func:`butina` on the matrix of ``1 - similarity`` values,
+    without forming the ``N x N`` matrix.
 
     Args:
-        x: Tensor-like object of shape (N, D) containing packed int32 or uint32 fingerprints
-           to cluster. Can be an AsyncGpuResult, torch.Tensor, or numpy.ndarray.
-           CPU tensors and NumPy arrays are copied to CUDA.
-        cutoff: Distance threshold for clustering. Items are neighbors if their
-                distance is at most this cutoff (i.e. similarity >= 1 - cutoff).
-        metric: Tanimoto or cosine provider configuration/string. Directed AAP
-                is intentionally unsupported by Butina.
+        x: Packed int32 or uint32 fingerprints of shape ``(N, num_words)``. Can
+           be an AsyncGpuResult, torch.Tensor, or numpy.ndarray. CPU tensors
+           and NumPy arrays are copied to CUDA.
+        cutoff: Inclusive neighbor distance in ``[0, 1]``.
+        metric: Similarity metric. :class:`~nvmolkit.similarity.AAPMetric` is
+            not yet supported.
         stream: CUDA stream to use. If None, uses the current stream.
-        output: Output representation. Defaults to ``OutputMode.DEVICE``.
+        output: Result representation.
 
     Returns:
-        The representation selected by ``output``.
-
-        ``OutputMode.RDKIT`` returns a tuple containing one tuple per
-        cluster. Each cluster tuple contains input indices, with the centroid
-        first. Constructing this representation synchronizes the CUDA work and
-        copies the clustering result to the host.
-
-        ``OutputMode.DEVICE`` returns a :class:`ClusterDeviceResult`
-        containing three :class:`AsyncGpuResult` objects on the active CUDA
-        device. ``cluster_ids`` is int32 with shape ``(N,)`` and maps each input
-        index to a cluster ID. Cluster IDs are contiguous from zero through
-        ``num_clusters - 1``. ``centroids`` is int32 with shape
-        ``(num_clusters,)``; element ``k`` is an input index whose cluster ID is
-        ``k``. ``cluster_sizes`` is int64 with shape ``(num_clusters,)``;
-        element ``k`` equals the number of entries in ``cluster_ids`` that are
-        equal to ``k``, and the sizes sum to ``N``. The return is
-        asynchronous: each field's ``.torch()`` method exposes its CUDA tensor
-        without a host copy, while ``.numpy()`` synchronizes and copies that
-        field to the host.
-
+        A :class:`ClusterDeviceResult` for ``OutputMode.DEVICE``, or the
+        centroid-first cluster tuples returned by RDKit's
+        ``Butina.ClusterData`` for ``OutputMode.RDKIT``.
     """
     _validate_output(output)
-    metric_name = _packed_metric_name(metric)
+    resolved = _resolve_metric(metric)
+    if isinstance(resolved, AAPMetric):
+        raise NotImplementedError("fused_butina does not yet support AAPMetric")
 
     if not 0 <= cutoff <= 1:
         raise ValueError(f"cutoff must be in [0, 1], got {cutoff}")
@@ -689,6 +621,6 @@ def fused_butina(
     (x,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
     with torch.cuda.stream(active_stream):
         result = _clustering.fused_butina(
-            x.__cuda_array_interface__, cutoff, True, metric_name, active_stream.cuda_stream
+            x.__cuda_array_interface__, cutoff, True, _packed_metric_name(resolved), active_stream.cuda_stream
         )
         return _resolve_butina_output(result, output)

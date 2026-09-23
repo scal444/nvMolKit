@@ -25,7 +25,7 @@ template <typename T> AsyncDeviceVector<T> upload(const std::vector<T>& host, cu
 }
 
 std::vector<int> downloadPicks(const nvMolKit::PickerResult& result, cudaStream_t stream) {
-  std::vector<int> host(result.count);
+  std::vector<int> host(result.indices.size());
   result.indices.copyToHost(host);
   cudaStreamSynchronize(stream);
   return host;

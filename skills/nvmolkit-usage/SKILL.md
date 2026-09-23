@@ -86,7 +86,7 @@ If this fails, point the user at the [installation guide](https://nvidia-bionemo
 | Forcefield with custom options + constraints | `nvmolkit.batchedForcefield` | `MMFFBatchedForcefield(mols, properties=..., nonBondedThreshold=..., ignoreInterfragInteractions=..., hardwareOptions=...)`, `UFFBatchedForcefield(mols, vdwThreshold=..., ...)`. Per-molecule view `ff[i]` exposes `add_distance_constraint`, `add_position_constraint`, `add_angle_constraint`, `add_torsion_constraint`. Methods: `.compute_energy()`, `.compute_gradients()`, `.minimize(maxIters, forceTol, minimizerKind=..., fireOptions=...)` |
 | Pairwise conformer RMSD | `nvmolkit.conformerRmsd` | `GetConformerRMSMatrix(mol)`, `GetConformerRMSMatrixBatch(mols)` |
 | Torsion Fingerprint Deviation (TFD) | `nvmolkit.tfd` | `GetTFDMatrix(mol)`, `GetTFDMatrices(mols)` |
-| Clustering and diversity selection | `nvmolkit.clustering` | Matrix/fused pairs: `butina`/`fused_butina`, `leader`/`fused_leader`, `maxmin`/`fused_maxmin`, and `dise`/`fused_dise`. Fused calls accept provider configurations such as `TanimotoSimilarity()`, `CosineSimilarity()`, and, for directed Leader/DISE, `AAPSimilarity()` |
+| Butina clustering | `nvmolkit.clustering` | `butina(distance_matrix, cutoff)` (precomputed matrix), `fused_butina(fingerprints, cutoff)` (memory-efficient, on-the-fly); both support explicit RDKit and device output modes |
 | Substructure search | `nvmolkit.substructure` | `hasSubstructMatch`, `countSubstructMatches`, `getSubstructMatches` |
 | Maximum common substructure | `nvmolkit.mcs` | `findMCS(mols, ...)` for all pairs, explicit pairs, or two paired molecule lists |
 | Hardware tuning (batch size, GPU IDs) | `nvmolkit.types` | `HardwareOptions(...)` passed to ETKDG / MMFF / UFF |
@@ -273,13 +273,13 @@ same selector.
 
 If any input molecule is `None` or lacks MMFF/UFF atom types, the call raises `ValueError`. The exception's `args[1]` is a dict with keys `"none"` and `"no_params"` listing the offending indices - useful for filtering a noisy input set.
 
-### Conformer RMSD and matrix clustering
+### Conformer RMSD and Butina clustering
 
 ```python
 import torch
 from rdkit import Chem
 from rdkit.Chem.rdDistGeom import EmbedMultipleConfs
-from nvmolkit.clustering import ButinaOutputMode, butina
+from nvmolkit.clustering import OutputMode, butina
 from nvmolkit.conformerRmsd import GetConformerRMSMatrixBatch
 
 mols = [Chem.AddHs(Chem.MolFromSmiles(smi)) for smi in ["CCCCCC", "c1ccccc1"]]
@@ -295,7 +295,7 @@ condensed = GetConformerRMSMatrixBatch(heavy_mols)
 # Butina expects a square distance matrix, so request square GPU tensors.
 square = GetConformerRMSMatrixBatch(heavy_mols, output_format="square")
 results = [
-    butina(distance_matrix, cutoff=0.5, output=ButinaOutputMode.DEVICE)
+    butina(distance_matrix, cutoff=0.5, output=OutputMode.DEVICE)
     for distance_matrix in square
 ]
 
@@ -306,38 +306,14 @@ for result in results:
 
 Both Butina functions return GPU-resident results by default:
 
-- The default, `output=ButinaOutputMode.DEVICE`, returns cluster IDs, centroids, and sizes.
-- `output=ButinaOutputMode.RDKIT` returns RDKit cluster tuples on the host. The first element of each cluster is its centroid.
+- The default, `output=OutputMode.DEVICE`, returns cluster IDs, centroids, and sizes.
+- `output=OutputMode.RDKIT` returns RDKit cluster tuples on the host. The first element of each cluster is its centroid.
 
 The device output fields are `AsyncGpuResult` objects. Use `.torch()` to access
 their CUDA tensors without a host copy or `.numpy()` to synchronize and copy a
 field to the host.
 
 `GetConformerRMSMatrix(mol)` and `GetConformerRMSMatrixBatch(mols)` default to `output_format="condensed"`, returning `AsyncGpuResult` objects that wrap RDKit-style flat vectors of length `N * (N - 1) // 2`. Use `output_format="square"` when chaining into `butina()` or any other API that expects an `N x N` distance matrix. Both forms live on the GPU; call `.numpy()` on condensed results or synchronize before moving square tensors to the CPU.
-
-The same full-square float64 matrix convention applies to `leader`, `maxmin`,
-and `dise`. Their fused counterparts avoid the matrix: `fused_leader`,
-`fused_maxmin`, and `fused_dise` compute packed-fingerprint similarity on
-demand. Use provider objects from `nvmolkit.similarity` when configuration
-should be explicit:
-
-```python
-from nvmolkit.clustering import OutputMode, fused_maxmin
-from nvmolkit.similarity import TanimotoSimilarity
-
-indices, last_distance = fused_maxmin(
-    packed_fingerprints,
-    pick_size=100,
-    metric=TanimotoSimilarity(),
-    seed=23,
-    output=OutputMode.RDKIT,
-)
-```
-
-All cutoffs are distances. Fused providers convert with
-`distance = 1 - similarity`. Tanimoto and cosine providers work with every
-fused clustering/selection API. Directed `AAPSimilarity` works only with
-`fused_leader` and `fused_dise`; do not pass it to Butina or MaxMin.
 
 ### Atom-Atom Path similarity and directed sphere exclusion clustering
 
@@ -347,12 +323,10 @@ clustering provides device and RDKit-style output modes:
 ```python
 from rdkit import Chem
 from nvmolkit.clustering import OutputMode, fused_dise
-from nvmolkit.similarity import AAPSimilarity
 
 molecules = [Chem.MolFromSmiles(smiles) for smiles in ["CCCC", "CCCO", "CCOC"]]
-metric = AAPSimilarity()
-device_result = fused_dise(molecules, cutoff=1.0 - 0.217, metric=metric)
-rdkit_clusters = fused_dise(molecules, cutoff=1.0 - 0.217, metric=metric, output=OutputMode.RDKIT)
+device_result = fused_dise(molecules, 1 - 0.217, metric="aap")
+rdkit_clusters = fused_dise(molecules, 1 - 0.217, metric="aap", output=OutputMode.RDKIT)
 ```
 
 `device_result` has `cluster_ids`, `centroids`, and `cluster_sizes` fields;

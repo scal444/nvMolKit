@@ -3,10 +3,7 @@
 Molecular similarity on GPU
 ===========================
 
-nvMolKit provides GPU-accelerated Tanimoto and cosine similarities for packed
-fingerprints, plus directed approximate Atom-Atom Path (AAP) similarity for
-RDKit molecules. The packed-fingerprint calls return an ``n x m`` matrix
-between two batches, or an all-to-all matrix when the second batch is omitted.
+nvMolKit provides GPU-accelerated Tanimoto and cosine similarities. Each call returns an ``n × m`` matrix between two batches (or all-to-all if the second batch is omitted).
 
 Inputs and format
 -----------------
@@ -91,41 +88,22 @@ Generating packed fingerprints from RDKit has extra CPU overhead; for large coll
 
     sims = crossTanimotoSimilarity(packed).torch()  # [n, n]
 
-Directed AAP similarity
------------------------
+Atom-Atom Path similarity
+-------------------------
 
-:func:`nvmolkit.similarity.aap_similarity` compares two RDKit molecules using
-approximate Atom-Atom Path similarity. The score is directed: swapping the
-centroid-side ``left`` molecule and candidate-side ``right`` molecule can
-change the result.
-
-Algorithm parameters live in an :class:`nvmolkit.similarity.AAPSimilarity`
-provider configuration. The same object can be passed to fused Leader and DISE
-clustering, so pair scoring and clustering share one configuration contract.
+:func:`nvmolkit.similarity.aap_similarity` compares two RDKit molecules with
+approximate Atom-Atom Path (AAP) similarity. Parameters are set with
+:class:`nvmolkit.similarity.AAPMetric`, which is also the ``metric`` accepted by
+the fused clustering functions (see :doc:`clustering`).
 
 .. code-block:: python
 
     from rdkit import Chem
 
-    from nvmolkit.similarity import AAPSimilarity, aap_similarity
+    from nvmolkit.similarity import AAPMetric, aap_similarity
 
-    centroid = Chem.MolFromSmiles("CCC")
-    candidate = Chem.MolFromSmiles("CC")
-    metric = AAPSimilarity(max_path_length=7)
-
-    centroid_to_candidate = aap_similarity(centroid, candidate, metric=metric)
-    candidate_to_centroid = aap_similarity(candidate, centroid, metric=metric)
-    assert centroid_to_candidate != candidate_to_centroid
-
-AAP currently accepts nonempty molecules with at most 64 atoms, including
-explicit hydrogens. Supported bonds are single, double, triple, and aromatic.
-Rooted-path descriptors are built on the CPU and scored on the GPU. The pair
-API returns a Python scalar and therefore synchronizes its CUDA stream.
-
-For clustering, use the same provider with
-:func:`nvmolkit.clustering.fused_leader` or
-:func:`nvmolkit.clustering.fused_dise`. Those APIs take a distance cutoff, so
-convert an AAP similarity threshold ``t`` with ``cutoff = 1 - t``. See
-:doc:`clustering` for the full provider compatibility matrix and examples.
-
-
+    score = aap_similarity(
+        Chem.MolFromSmiles("CCCO"),
+        Chem.MolFromSmiles("CCCN"),
+        metric=AAPMetric(max_path_length=7),
+    )

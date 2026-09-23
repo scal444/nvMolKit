@@ -10,12 +10,13 @@
 #include <cstdint>
 #include <limits>
 #include <map>
-#include <numeric>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "src/aap.h"
+#include "src/diversity_picker_algorithms.cuh"
 #include "src/utils/cuda_error_check.h"
 #include "src/utils/device_vector.h"
 #include "src/utils/host_vector.h"
@@ -259,259 +260,242 @@ __device__ __forceinline__ float columnLogSumExp(const float* values, const int 
   return maximum + logf(sum);
 }
 
-__global__ void aapSimilarityKernel(const std::int64_t* moleculeAtomOffsets,
-                                    const std::int64_t* atomBinOffsets,
-                                    const std::int64_t* atomPathLengths,
-                                    const std::int16_t* atomNumbers,
-                                    const std::uint8_t* aromatic,
-                                    const std::int16_t* binIds,
-                                    const std::int32_t* binCounts,
-                                    const int*          candidates,
-                                    const int           candidateCount,
-                                    const int           centroid,
-                                    const float         temperature,
-                                    const int           iterations,
-                                    float*              output) {
-  const int candidatePosition = static_cast<int>(blockIdx.x);
-  if (candidatePosition >= candidateCount) {
+//! Identical descriptor multisets score exactly 1 regardless of Sinkhorn convergence. Groups are keyed by their first
+//! member so every pair lookup on the device is a single comparison.
+std::vector<int> descriptorGroups(const AapHostDescriptors& descriptors) {
+  const auto mix = [](std::uint64_t hash, const std::uint64_t value) { return (hash ^ value) * kFnvPrime; };
+
+  const int        numMolecules = static_cast<int>(descriptors.moleculeAtomOffsets.size()) - 1;
+  std::vector<int> groups(numMolecules);
+  std::unordered_map<std::uint64_t, std::vector<int>> representatives;
+  std::vector<std::uint64_t>                          atomHashes;
+  for (int molecule = 0; molecule < numMolecules; ++molecule) {
+    atomHashes.clear();
+    for (auto atom = descriptors.moleculeAtomOffsets[molecule]; atom < descriptors.moleculeAtomOffsets[molecule + 1];
+         ++atom) {
+      std::uint64_t hash = kFnvOffset;
+      hash               = mix(hash, static_cast<std::uint64_t>(descriptors.atomNumbers[atom]));
+      hash               = mix(hash, descriptors.aromatic[atom]);
+      hash               = mix(hash, static_cast<std::uint64_t>(descriptors.atomPathLengths[atom]));
+      for (auto bin = descriptors.atomBinOffsets[atom]; bin < descriptors.atomBinOffsets[atom + 1]; ++bin) {
+        hash = mix(hash, static_cast<std::uint64_t>(descriptors.binIds[bin]));
+        hash = mix(hash, static_cast<std::uint64_t>(descriptors.binCounts[bin]));
+      }
+      atomHashes.push_back(hash);
+    }
+    std::sort(atomHashes.begin(), atomHashes.end());
+    std::uint64_t moleculeHash = kFnvOffset;
+    for (const auto atomHash : atomHashes) {
+      moleculeHash = mix(moleculeHash, atomHash);
+    }
+
+    auto& candidates = representatives[moleculeHash];
+    groups[molecule] = molecule;
+    const auto match = std::find_if(candidates.begin(), candidates.end(), [&](const int representative) {
+      return sameMoleculeDescriptor(descriptors, representative, molecule);
+    });
+    if (match != candidates.end()) {
+      groups[molecule] = *match;
+    } else {
+      candidates.push_back(molecule);
+    }
+  }
+  return groups;
+}
+
+struct AapDeviceView {
+  const std::int64_t* moleculeAtomOffsets;
+  const std::int64_t* atomBinOffsets;
+  const std::int64_t* atomPathLengths;
+  const std::int16_t* atomNumbers;
+  const std::uint8_t* aromatic;
+  const std::int16_t* binIds;
+  const std::int32_t* binCounts;
+  const int*          groups;
+};
+
+template <typename Op>
+__global__ void compactCandidatesKernel(const int  numItems,
+                                        const int* sourcePtr,
+                                        const Op   op,
+                                        int*       candidates,
+                                        int*       count) {
+  const int source    = *sourcePtr;
+  const int candidate = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+  if (source < 0 || source >= numItems || candidate >= numItems || op.skip(candidate)) {
     return;
   }
+  candidates[atomicAdd(count, 1)] = candidate;
+}
 
+template <typename Op>
+__global__ void aapDistanceKernel(const AapDeviceView view,
+                                  const int*          candidates,
+                                  const int*          candidateCount,
+                                  const int*          sourcePtr,
+                                  const float         temperature,
+                                  const int           iterations,
+                                  const Op            op) {
   __shared__ float affinity[kMaxAtoms * kSharedStride];
   __shared__ float transport[kMaxAtoms * kSharedStride];
 
-  const int candidate      = candidates[candidatePosition];
-  const int leftStart      = static_cast<int>(moleculeAtomOffsets[centroid]);
-  const int rightStart     = static_cast<int>(moleculeAtomOffsets[candidate]);
-  const int leftCount      = static_cast<int>(moleculeAtomOffsets[centroid + 1]) - leftStart;
-  const int candidateAtoms = static_cast<int>(moleculeAtomOffsets[candidate + 1]) - rightStart;
-  const int squareSize     = max(leftCount, candidateAtoms);
-
-  for (int linear = static_cast<int>(threadIdx.x); linear < squareSize * squareSize; linear += blockDim.x) {
-    const int row    = linear / squareSize;
-    const int column = linear % squareSize;
-    float     score  = 0.0F;
-    if (row < leftCount && column < candidateAtoms &&
-        atomNumbers[leftStart + row] == atomNumbers[rightStart + column] &&
-        aromatic[leftStart + row] == aromatic[rightStart + column]) {
-      std::int64_t leftPosition  = atomBinOffsets[leftStart + row];
-      const auto   leftEnd       = atomBinOffsets[leftStart + row + 1];
-      std::int64_t rightPosition = atomBinOffsets[rightStart + column];
-      const auto   rightEnd      = atomBinOffsets[rightStart + column + 1];
-      std::int64_t overlap       = 0;
-      while (leftPosition < leftEnd && rightPosition < rightEnd) {
-        const auto leftBin  = binIds[leftPosition];
-        const auto rightBin = binIds[rightPosition];
-        if (leftBin == rightBin) {
-          overlap += min(binCounts[leftPosition], binCounts[rightPosition]);
-          ++leftPosition;
-          ++rightPosition;
-        } else if (leftBin < rightBin) {
-          ++leftPosition;
-        } else {
-          ++rightPosition;
-        }
+  const int count  = *candidateCount;
+  const int source = count > 0 ? *sourcePtr : 0;
+  for (int position = static_cast<int>(blockIdx.x); position < count; position += static_cast<int>(gridDim.x)) {
+    const int candidate = candidates[position];
+    if (view.groups[candidate] == view.groups[source]) {
+      if (threadIdx.x == 0) {
+        op.apply(candidate, 0.0);
       }
-      const auto largestPathCount = max(atomPathLengths[leftStart + row], atomPathLengths[rightStart + column]);
-      score = static_cast<float>(overlap + 1) / static_cast<float>(2 * largestPathCount - overlap + 1);
-    }
-    affinity[row * kSharedStride + column]  = score;
-    transport[row * kSharedStride + column] = score / temperature;
-  }
-  __syncthreads();
-
-  for (int iteration = 0; iteration < iterations; ++iteration) {
-    if (threadIdx.x < squareSize) {
-      const int   row        = static_cast<int>(threadIdx.x);
-      const float normalizer = rowLogSumExp(transport, row, squareSize);
-      for (int column = 0; column < squareSize; ++column) {
-        transport[row * kSharedStride + column] -= normalizer;
-      }
-    }
-    __syncthreads();
-    if (threadIdx.x < squareSize) {
-      const int   column     = static_cast<int>(threadIdx.x);
-      const float normalizer = columnLogSumExp(transport, column, squareSize);
-      for (int row = 0; row < squareSize; ++row) {
-        transport[row * kSharedStride + column] -= normalizer;
-      }
-    }
-    __syncthreads();
-  }
-
-  if (threadIdx.x == 0) {
-    float matched = 0.0F;
-    for (int row = 0; row < leftCount; ++row) {
-      for (int column = 0; column < candidateAtoms; ++column) {
-        matched += expf(transport[row * kSharedStride + column]) * affinity[row * kSharedStride + column];
-      }
-    }
-    output[candidatePosition] =
-      candidate == centroid ? 1.0F : matched / (2.0F * static_cast<float>(leftCount) - matched + 1e-10F);
-  }
-}
-
-void launchSimilarity(const AapDeviceDescriptors&   descriptors,
-                      const AsyncDeviceVector<int>& candidates,
-                      const int                     candidateCount,
-                      const int                     centroid,
-                      const AapOptions&             options,
-                      AsyncDeviceVector<float>&     output,
-                      cudaStream_t                  stream) {
-  if (candidateCount == 0) {
-    return;
-  }
-  aapSimilarityKernel<<<candidateCount, kThreads, 0, stream>>>(descriptors.moleculeAtomOffsets.data(),
-                                                               descriptors.atomBinOffsets.data(),
-                                                               descriptors.atomPathLengths.data(),
-                                                               descriptors.atomNumbers.data(),
-                                                               descriptors.aromatic.data(),
-                                                               descriptors.binIds.data(),
-                                                               descriptors.binCounts.data(),
-                                                               candidates.data(),
-                                                               candidateCount,
-                                                               centroid,
-                                                               options.sinkhornTemperature,
-                                                               options.sinkhornIterations,
-                                                               output.data());
-  cudaCheckError(cudaGetLastError());
-}
-
-struct CentroidSelection {
-  std::vector<int> labels;
-  std::vector<int> centroids;
-};
-
-void selectCentroid(const AapHostDescriptors&   hostDescriptors,
-                    const AapDeviceDescriptors& descriptors,
-                    const int                   numMolecules,
-                    const int                   centroid,
-                    const float                 threshold,
-                    const AapOptions&           options,
-                    CentroidSelection&          selection,
-                    AsyncDeviceVector<int>&     candidates,
-                    AsyncDeviceVector<float>&   output,
-                    PinnedHostVector<int>&      candidateHost,
-                    PinnedHostVector<float>&    outputHost,
-                    cudaStream_t                stream) {
-  const int clusterId        = static_cast<int>(selection.centroids.size());
-  selection.labels[centroid] = clusterId;
-  selection.centroids.push_back(centroid);
-
-  int candidateCount = 0;
-  for (int moleculeIdx = 0; moleculeIdx < numMolecules; ++moleculeIdx) {
-    if (selection.labels[moleculeIdx] < 0) {
-      if (sameMoleculeDescriptor(hostDescriptors, centroid, moleculeIdx)) {
-        selection.labels[moleculeIdx] = clusterId;
-      } else {
-        candidateHost[candidateCount++] = moleculeIdx;
-      }
-    }
-  }
-  if (candidateCount == 0) {
-    return;
-  }
-
-  candidates.copyFromHost(candidateHost.data(), candidateCount);
-  launchSimilarity(descriptors, candidates, candidateCount, centroid, options, output, stream);
-  output.copyToHost(outputHost.data(), candidateCount);
-  cudaCheckError(cudaStreamSynchronize(stream));
-  for (int position = 0; position < candidateCount; ++position) {
-    if (outputHost[position] >= threshold) {
-      selection.labels[candidateHost[position]] = clusterId;
-    }
-  }
-}
-
-CentroidSelection selectCentroids(const AapHostDescriptors&   hostDescriptors,
-                                  const AapDeviceDescriptors& descriptors,
-                                  const int                   numMolecules,
-                                  const float                 threshold,
-                                  const AapOptions&           options,
-                                  AsyncDeviceVector<int>&     candidates,
-                                  AsyncDeviceVector<float>&   output,
-                                  PinnedHostVector<int>&      candidateHost,
-                                  PinnedHostVector<float>&    outputHost,
-                                  cudaStream_t                stream,
-                                  const std::vector<int>&     firstPicks = {},
-                                  const int                   pickSize   = 0) {
-  CentroidSelection result{std::vector<int>(numMolecules, -1), {}};
-
-  std::vector<std::uint8_t> seen(numMolecules, 0);
-  for (const int centroid : firstPicks) {
-    if (centroid < 0 || centroid >= numMolecules) {
-      throw std::invalid_argument("first_picks contains an index outside the input pool");
-    }
-    if (seen[centroid]) {
-      throw std::invalid_argument("first_picks must not contain duplicate indices");
-    }
-    seen[centroid] = 1;
-    selectCentroid(hostDescriptors,
-                   descriptors,
-                   numMolecules,
-                   centroid,
-                   threshold,
-                   options,
-                   result,
-                   candidates,
-                   output,
-                   candidateHost,
-                   outputHost,
-                   stream);
-  }
-
-  for (int centroid = 0; centroid < numMolecules; ++centroid) {
-    if (pickSize > 0 && static_cast<int>(result.centroids.size()) >= pickSize) {
-      break;
-    }
-    if (result.labels[centroid] >= 0) {
       continue;
     }
-    selectCentroid(hostDescriptors,
-                   descriptors,
-                   numMolecules,
-                   centroid,
-                   threshold,
-                   options,
-                   result,
-                   candidates,
-                   output,
-                   candidateHost,
-                   outputHost,
-                   stream);
+
+    const int leftStart      = static_cast<int>(view.moleculeAtomOffsets[source]);
+    const int rightStart     = static_cast<int>(view.moleculeAtomOffsets[candidate]);
+    const int leftCount      = static_cast<int>(view.moleculeAtomOffsets[source + 1]) - leftStart;
+    const int candidateAtoms = static_cast<int>(view.moleculeAtomOffsets[candidate + 1]) - rightStart;
+    const int squareSize     = max(leftCount, candidateAtoms);
+
+    for (int linear = static_cast<int>(threadIdx.x); linear < squareSize * squareSize; linear += blockDim.x) {
+      const int row    = linear / squareSize;
+      const int column = linear % squareSize;
+      float     score  = 0.0F;
+      if (row < leftCount && column < candidateAtoms &&
+          view.atomNumbers[leftStart + row] == view.atomNumbers[rightStart + column] &&
+          view.aromatic[leftStart + row] == view.aromatic[rightStart + column]) {
+        std::int64_t leftPosition  = view.atomBinOffsets[leftStart + row];
+        const auto   leftEnd       = view.atomBinOffsets[leftStart + row + 1];
+        std::int64_t rightPosition = view.atomBinOffsets[rightStart + column];
+        const auto   rightEnd      = view.atomBinOffsets[rightStart + column + 1];
+        std::int64_t overlap       = 0;
+        while (leftPosition < leftEnd && rightPosition < rightEnd) {
+          const auto leftBin  = view.binIds[leftPosition];
+          const auto rightBin = view.binIds[rightPosition];
+          if (leftBin == rightBin) {
+            overlap += min(view.binCounts[leftPosition], view.binCounts[rightPosition]);
+            ++leftPosition;
+            ++rightPosition;
+          } else if (leftBin < rightBin) {
+            ++leftPosition;
+          } else {
+            ++rightPosition;
+          }
+        }
+        const auto largestPathCount =
+          max(view.atomPathLengths[leftStart + row], view.atomPathLengths[rightStart + column]);
+        score = static_cast<float>(overlap + 1) / static_cast<float>(2 * largestPathCount - overlap + 1);
+      }
+      affinity[row * kSharedStride + column]  = score;
+      transport[row * kSharedStride + column] = score / temperature;
+    }
+    __syncthreads();
+
+    for (int iteration = 0; iteration < iterations; ++iteration) {
+      if (threadIdx.x < squareSize) {
+        const int   row        = static_cast<int>(threadIdx.x);
+        const float normalizer = rowLogSumExp(transport, row, squareSize);
+        for (int column = 0; column < squareSize; ++column) {
+          transport[row * kSharedStride + column] -= normalizer;
+        }
+      }
+      __syncthreads();
+      if (threadIdx.x < squareSize) {
+        const int   column     = static_cast<int>(threadIdx.x);
+        const float normalizer = columnLogSumExp(transport, column, squareSize);
+        for (int row = 0; row < squareSize; ++row) {
+          transport[row * kSharedStride + column] -= normalizer;
+        }
+      }
+      __syncthreads();
+    }
+
+    if (threadIdx.x == 0) {
+      float matched = 0.0F;
+      for (int row = 0; row < leftCount; ++row) {
+        for (int column = 0; column < candidateAtoms; ++column) {
+          matched += expf(transport[row * kSharedStride + column]) * affinity[row * kSharedStride + column];
+        }
+      }
+      const float similarity = matched / (2.0F * static_cast<float>(leftCount) - matched + 1e-10F);
+      op.apply(candidate, 1.0 - static_cast<double>(similarity));
+    }
+    // The next candidate overwrites shared memory that thread 0 just read.
+    __syncthreads();
   }
-  return result;
 }
 
-ClusteringResult buildClusteringResult(const std::vector<int>& labels, const std::vector<int>& centroids) {
-  const int        numClusters = static_cast<int>(centroids.size());
-  std::vector<int> sizes(numClusters, 0);
-  for (const int label : labels) {
-    ++sizes[label];
+class AapDistanceProvider {
+ public:
+  AapDistanceProvider(const std::vector<const RDKit::ROMol*>& molecules, const AapOptions& options, cudaStream_t stream)
+      : options_(options),
+        numItems_(static_cast<int>(molecules.size())),
+        hostDescriptors_(buildDescriptors(molecules, options)),
+        descriptors_(hostDescriptors_, stream),
+        groups_(numItems_, stream),
+        candidates_(numItems_, stream),
+        candidateCount_(0, stream) {
+    groups_.copyFromHost(descriptorGroups(hostDescriptors_));
+    int device = 0;
+    int numSms = 0;
+    cudaCheckError(cudaGetDevice(&device));
+    cudaCheckError(cudaDeviceGetAttribute(&numSms, cudaDevAttrMultiProcessorCount, device));
+    gridSize_ = std::max(1, std::min(numItems_, numSms * kBlocksPerSm));
   }
-  std::vector<int> order(numClusters);
-  std::iota(order.begin(), order.end(), 0);
-  std::stable_sort(order.begin(), order.end(), [&sizes](const int left, const int right) {
-    return sizes[left] > sizes[right];
-  });
-  std::vector<int> remap(numClusters);
-  for (int newId = 0; newId < numClusters; ++newId) {
-    remap[order[newId]] = newId;
+
+  int size() const { return numItems_; }
+
+  template <typename Op> void forEachDistance(const int* source, const Op& op, cudaStream_t stream) {
+    if (numItems_ == 0) {
+      return;
+    }
+    cudaCheckError(cudaMemsetAsync(candidateCount_.data(), 0, sizeof(int), stream));
+    compactCandidatesKernel<<<(numItems_ + kThreads - 1) / kThreads, kThreads, 0, stream>>>(numItems_,
+                                                                                            source,
+                                                                                            op,
+                                                                                            candidates_.data(),
+                                                                                            candidateCount_.data());
+    cudaCheckError(cudaGetLastError());
+    const AapDeviceView view{descriptors_.moleculeAtomOffsets.data(),
+                             descriptors_.atomBinOffsets.data(),
+                             descriptors_.atomPathLengths.data(),
+                             descriptors_.atomNumbers.data(),
+                             descriptors_.aromatic.data(),
+                             descriptors_.binIds.data(),
+                             descriptors_.binCounts.data(),
+                             groups_.data()};
+    aapDistanceKernel<<<gridSize_, kThreads, 0, stream>>>(view,
+                                                          candidates_.data(),
+                                                          candidateCount_.data(),
+                                                          source,
+                                                          options_.sinkhornTemperature,
+                                                          options_.sinkhornIterations,
+                                                          op);
+    cudaCheckError(cudaGetLastError());
   }
-  ClusteringResult result;
-  result.clusterIds.resize(labels.size());
-  result.centroids.resize(numClusters);
-  result.clusterSizes.resize(numClusters);
-  std::transform(labels.begin(), labels.end(), result.clusterIds.begin(), [&remap](const int label) {
-    return remap[label];
-  });
-  for (int newId = 0; newId < numClusters; ++newId) {
-    const int oldId            = order[newId];
-    result.centroids[newId]    = centroids[oldId];
-    result.clusterSizes[newId] = sizes[oldId];
+
+ private:
+  static constexpr int kBlocksPerSm = 4;
+
+  AapOptions             options_;
+  int                    numItems_;
+  AapHostDescriptors     hostDescriptors_;
+  AapDeviceDescriptors   descriptors_;
+  AsyncDeviceVector<int> groups_;
+  AsyncDeviceVector<int> candidates_;
+  AsyncDevicePtr<int>    candidateCount_;
+  int                    gridSize_ = 1;
+};
+
+//! Stores the similarity of one candidate to the source.
+struct PairSimilarityOp {
+  float* similarity;
+  int    target;
+
+  __device__ bool skip(const int candidate) const { return candidate != target; }
+  __device__ void apply(const int /*candidate*/, const double distance) const {
+    *similarity = static_cast<float>(1.0 - distance);
   }
-  return result;
-}
+};
 
 }  // namespace
 
@@ -520,174 +504,51 @@ float aapSimilarityGpu(const RDKit::ROMol& left,
                        const AapOptions&   options,
                        cudaStream_t        stream) {
   validateOptions(options);
-  const std::vector<const RDKit::ROMol*> molecules{&left, &right};
-  const auto                             hostDescriptors = buildDescriptors(molecules, options);
-  if (sameMoleculeDescriptor(hostDescriptors, 0, 1)) {
-    return 1.0F;
-  }
-  const AapDeviceDescriptors descriptors(hostDescriptors, stream);
-  AsyncDeviceVector<int>     candidates(1, stream);
-  AsyncDeviceVector<float>   output(1, stream);
-  PinnedHostVector<int>      candidateHost(1);
-  PinnedHostVector<float>    outputHost(1);
-  candidateHost[0] = 1;
-  candidates.copyFromHost(candidateHost.data(), 1);
-  launchSimilarity(descriptors, candidates, 1, 0, options, output, stream);
-  outputHost.copyFromDevice(output, stream);
+  AapDistanceProvider     provider({&left, &right}, options, stream);
+  AsyncDevicePtr<int>     source(0, stream);
+  AsyncDevicePtr<float>   similarity(0.0F, stream);
+  PinnedHostVector<float> similarityHost(1);
+  provider.forEachDistance(source.data(), PairSimilarityOp{similarity.data(), 1}, stream);
+  cudaCheckError(
+    cudaMemcpyAsync(similarityHost.data(), similarity.data(), sizeof(float), cudaMemcpyDeviceToHost, stream));
   cudaCheckError(cudaStreamSynchronize(stream));
-  return outputHost[0];
+  return similarityHost[0];
 }
 
-std::vector<int> aapLeaderPick(const std::vector<const RDKit::ROMol*>& molecules,
-                               const float                             threshold,
-                               const AapOptions&                       options,
-                               const int                               pickSize,
-                               const std::vector<int>&                 firstPicks,
-                               cudaStream_t                            stream) {
+PickerResult aapLeader(const std::vector<const RDKit::ROMol*>& molecules,
+                       const double                            cutoff,
+                       const AapOptions&                       options,
+                       const int                               pickSize,
+                       const std::vector<int>&                 firstPicks,
+                       cudaStream_t                            stream) {
   validateOptions(options);
-  if (!(threshold >= 0.0F && threshold <= 1.0F)) {
-    throw std::invalid_argument("threshold must be between 0 and 1");
-  }
-  if (pickSize < 0 || pickSize > static_cast<int>(molecules.size())) {
-    throw std::invalid_argument("pick_size must be between 0 and the input size");
-  }
-  if (molecules.empty()) {
-    if (!firstPicks.empty()) {
-      throw std::invalid_argument("first_picks cannot be used with empty input");
-    }
-    return {};
-  }
-
-  const auto                 hostDescriptors = buildDescriptors(molecules, options);
-  const AapDeviceDescriptors descriptors(hostDescriptors, stream);
-  const int                  numMolecules = static_cast<int>(molecules.size());
-  AsyncDeviceVector<int>     candidates(numMolecules, stream);
-  AsyncDeviceVector<float>   output(numMolecules, stream);
-  PinnedHostVector<int>      candidateHost(numMolecules);
-  PinnedHostVector<float>    outputHost(numMolecules);
-
-  return selectCentroids(hostDescriptors,
-                         descriptors,
-                         numMolecules,
-                         threshold,
-                         options,
-                         candidates,
-                         output,
-                         candidateHost,
-                         outputHost,
-                         stream,
-                         firstPicks,
-                         pickSize)
-    .centroids;
+  detail::validateUnitCutoff(cutoff);
+  AapDistanceProvider provider(molecules, options, stream);
+  return detail::leaderPick(provider, cutoff, pickSize, firstPicks, nullptr, stream);
 }
 
-ClusteringResult aapSimilarityClustering(const std::vector<const RDKit::ROMol*>& molecules,
-                                         const float                             threshold,
-                                         const AapOptions&                       options,
-                                         cudaStream_t                            stream) {
+PickerResult aapMaxMin(const std::vector<const RDKit::ROMol*>& molecules,
+                       const int                               pickSize,
+                       const AapOptions&                       options,
+                       const std::vector<int>&                 firstPicks,
+                       const int                               seed,
+                       const double                            threshold,
+                       cudaStream_t                            stream) {
   validateOptions(options);
-  if (!(threshold >= 0.0F && threshold <= 1.0F)) {
-    throw std::invalid_argument("threshold must be between 0 and 1");
-  }
-  if (molecules.empty()) {
-    return {};
-  }
-
-  const auto                 hostDescriptors = buildDescriptors(molecules, options);
-  const AapDeviceDescriptors descriptors(hostDescriptors, stream);
-  const int                  numMolecules = static_cast<int>(molecules.size());
-  AsyncDeviceVector<int>     candidates(numMolecules, stream);
-  AsyncDeviceVector<float>   output(numMolecules, stream);
-  PinnedHostVector<int>      candidateHost(numMolecules);
-  PinnedHostVector<float>    outputHost(numMolecules);
-
-  const auto selection = selectCentroids(hostDescriptors,
-                                         descriptors,
-                                         numMolecules,
-                                         threshold,
-                                         options,
-                                         candidates,
-                                         output,
-                                         candidateHost,
-                                         outputHost,
-                                         stream);
-  return buildClusteringResult(selection.labels, selection.centroids);
+  detail::validateMaxMinThreshold(threshold, 1.0);
+  AapDistanceProvider provider(molecules, options, stream);
+  return detail::maxMinPick(provider, pickSize, firstPicks, seed, threshold, stream);
 }
 
-ClusteringResult aapDiseClustering(const std::vector<const RDKit::ROMol*>& molecules,
-                                   const float                             threshold,
-                                   const AapOptions&                       options,
-                                   cudaStream_t                            stream) {
+ClusteringResult aapDise(const std::vector<const RDKit::ROMol*>& molecules,
+                         const double                            cutoff,
+                         const AapOptions&                       options,
+                         const bool                              nearestAssignment,
+                         cudaStream_t                            stream) {
   validateOptions(options);
-  if (!(threshold >= 0.0F && threshold <= 1.0F)) {
-    throw std::invalid_argument("threshold must be between 0 and 1");
-  }
-  if (molecules.empty()) {
-    return {};
-  }
-
-  const auto                 hostDescriptors = buildDescriptors(molecules, options);
-  const AapDeviceDescriptors descriptors(hostDescriptors, stream);
-  const int                  numMolecules = static_cast<int>(molecules.size());
-  AsyncDeviceVector<int>     candidates(numMolecules, stream);
-  AsyncDeviceVector<float>   output(numMolecules, stream);
-  PinnedHostVector<int>      candidateHost(numMolecules);
-  PinnedHostVector<float>    outputHost(numMolecules);
-
-  const auto  selection = selectCentroids(hostDescriptors,
-                                         descriptors,
-                                         numMolecules,
-                                         threshold,
-                                         options,
-                                         candidates,
-                                         output,
-                                         candidateHost,
-                                         outputHost,
-                                         stream);
-  const auto& centroids = selection.centroids;
-
-  std::vector<std::uint8_t> isCentroid(numMolecules, 0);
-  std::vector<int>          labels(numMolecules, -1);
-  std::vector<float>        bestSimilarity(numMolecules, -1.0F);
-  for (int clusterId = 0; clusterId < static_cast<int>(centroids.size()); ++clusterId) {
-    isCentroid[centroids[clusterId]]     = 1;
-    labels[centroids[clusterId]]         = clusterId;
-    bestSimilarity[centroids[clusterId]] = 1.0F;
-  }
-
-  for (int clusterId = 0; clusterId < static_cast<int>(centroids.size()); ++clusterId) {
-    const int centroid       = centroids[clusterId];
-    int       candidateCount = 0;
-    for (int moleculeIdx = 0; moleculeIdx < numMolecules; ++moleculeIdx) {
-      if (isCentroid[moleculeIdx]) {
-        continue;
-      }
-      if (sameMoleculeDescriptor(hostDescriptors, centroid, moleculeIdx)) {
-        if (1.0F > bestSimilarity[moleculeIdx]) {
-          bestSimilarity[moleculeIdx] = 1.0F;
-          labels[moleculeIdx]         = clusterId;
-        }
-      } else {
-        candidateHost[candidateCount++] = moleculeIdx;
-      }
-    }
-    if (candidateCount == 0) {
-      continue;
-    }
-    candidates.copyFromHost(candidateHost.data(), candidateCount);
-    launchSimilarity(descriptors, candidates, candidateCount, centroid, options, output, stream);
-    output.copyToHost(outputHost.data(), candidateCount);
-    cudaCheckError(cudaStreamSynchronize(stream));
-    for (int position = 0; position < candidateCount; ++position) {
-      const int moleculeIdx = candidateHost[position];
-      if (outputHost[position] > bestSimilarity[moleculeIdx]) {
-        bestSimilarity[moleculeIdx] = outputHost[position];
-        labels[moleculeIdx]         = clusterId;
-      }
-    }
-  }
-
-  return buildClusteringResult(labels, centroids);
+  detail::validateUnitCutoff(cutoff);
+  AapDistanceProvider provider(molecules, options, stream);
+  return detail::diseCluster(provider, cutoff, nearestAssignment, stream);
 }
 
 }  // namespace nvMolKit
