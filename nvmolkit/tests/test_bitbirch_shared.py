@@ -8,7 +8,6 @@ import pytest
 import torch
 
 from _bitbirch_batched_reference import BatchedBitBirch
-from _bitbirch_beam_reference import BeamBitBirch
 from nvmolkit.clustering import bitbirch, bitbirch_shared
 
 
@@ -160,53 +159,10 @@ def test_ordered_prefix_matches_reference_including_partial_batches(prefix):
     np.testing.assert_array_equal(centroids.numpy(), expected_centroids)
 
 
-@pytest.mark.parametrize("branching,words", [(3, 2), (7, 3), (254, 32), (257, 1)])
-@pytest.mark.parametrize("threshold", [0.3, 0.55, 1.0])
-def test_two_path_routing_matches_independent_reference(branching, words, threshold):
-    packed = np.random.default_rng(991).integers(0, 2**32, (529, words), dtype=np.uint32)
-    packed[510:520] = packed[:10]
-    tree = BeamBitBirch(threshold, branching, 128, ordered_prefix_size=33).fit(
-        packed.view(np.uint8).reshape(len(packed), -1)
-    )
-    tree.audit()
-    expected_centroids = np.stack([entry.packed for entry in tree.clusters()]).view(np.uint32).reshape(-1, words)
-    for _ in range(2):
-        labels, centroids = bitbirch_shared(
-            packed,
-            threshold,
-            branching_factor=branching,
-            insertion_batch_size=128,
-            insertion_policy="filtered-group",
-            ordered_prefix_size=33,
-            routing_width=2,
-            return_centroids=True,
-        )
-        np.testing.assert_array_equal(labels.numpy(), tree.labels())
-        np.testing.assert_array_equal(centroids.numpy(), expected_centroids)
-
-
-def test_two_path_sanitizer_smoke():
-    packed = np.random.default_rng(743).integers(0, 2**32, (43, 2), dtype=np.uint32)
-    packed[30:36] = packed[:6]
-    tree = BeamBitBirch(0.4, 3, 16, ordered_prefix_size=5).fit(packed.view(np.uint8).reshape(len(packed), -1))
-    tree.audit()
-    labels = bitbirch_shared(
-        packed,
-        0.4,
-        branching_factor=3,
-        insertion_batch_size=16,
-        insertion_policy="filtered-group",
-        ordered_prefix_size=5,
-        routing_width=2,
-    )
-    np.testing.assert_array_equal(labels.numpy(), tree.labels())
-
-
 def test_host_output_sanitizer_smoke():
     packed = np.random.default_rng(857).integers(0, 2**32, (43, 2), dtype=np.uint32)
     packed[30:36] = packed[:6]
-    tree = BeamBitBirch(0.4, 3, 16, ordered_prefix_size=5).fit(packed.view(np.uint8).reshape(len(packed), -1))
-    tree.audit()
+    expected, _ = reference(packed, 0.4, 3, 16, "filtered-group", 5)
     labels = bitbirch_shared(
         packed,
         0.4,
@@ -214,16 +170,15 @@ def test_host_output_sanitizer_smoke():
         insertion_batch_size=16,
         insertion_policy="filtered-group",
         ordered_prefix_size=5,
-        routing_width=2,
         host_input=True,
         host_output=True,
     )
     assert isinstance(labels, np.ndarray)
-    np.testing.assert_array_equal(labels, tree.labels())
+    np.testing.assert_array_equal(labels, expected)
 
 
-@pytest.mark.parametrize("words,routes", [(1, 1), (1, 2), (32, 2)])
-def test_cpu_backed_summary_rotation_preserves_partition(words, routes):
+@pytest.mark.parametrize("words", [1, 32])
+def test_cpu_backed_summary_rotation_preserves_partition(words):
     rng = np.random.default_rng(1591)
     unique = rng.integers(0, 2**32, (5000, words), dtype=np.uint32)
     packed = np.concatenate([unique, unique[rng.permutation(len(unique))]])
@@ -231,7 +186,6 @@ def test_cpu_backed_summary_rotation_preserves_partition(words, routes):
         branching_factor=7,
         insertion_batch_size=512,
         insertion_policy="filtered-group",
-        routing_width=routes,
         return_centroids=True,
     )
     expected, expected_centroids = bitbirch_shared(packed, 1.0, **options)
@@ -252,7 +206,6 @@ def test_cpu_backed_singleton_rotation_preserves_partition(words):
         branching_factor=7,
         insertion_batch_size=512,
         insertion_policy="filtered-group",
-        routing_width=2,
         return_centroids=True,
     )
     expected, expected_centroids = bitbirch_shared(packed, 1.0, **options)
@@ -269,9 +222,9 @@ def test_cpu_backed_singleton_rotation_preserves_partition(words):
         np.testing.assert_array_equal(centroids.numpy(), expected_centroids.numpy())
 
 
-@pytest.mark.parametrize("policy,routes", [("ordered-leaf", 1), ("filtered-group", 1), ("filtered-group", 2)])
+@pytest.mark.parametrize("policy", ["ordered-leaf", "filtered-group"])
 @pytest.mark.parametrize("prefix", [0, 33])
-def test_host_input_tiles_preserve_labels_and_centroids(policy, routes, prefix, tmp_path):
+def test_host_input_tiles_preserve_labels_and_centroids(policy, prefix, tmp_path):
     packed = np.random.default_rng(871).integers(0, 2**32, (529, 3), dtype=np.uint32)
     packed[250:300] = packed[:50]
     packed[480:520] = packed[300:340]
@@ -283,7 +236,6 @@ def test_host_input_tiles_preserve_labels_and_centroids(policy, routes, prefix, 
         insertion_batch_size=32,
         insertion_policy=policy,
         ordered_prefix_size=prefix,
-        routing_width=routes,
         return_centroids=True,
     )
     expected, expected_centroids = bitbirch_shared(packed, 0.4, **options)
@@ -298,7 +250,7 @@ def test_host_input_empty_and_uint32_summary_dispatch():
     assert labels.numpy().shape == (0,)
     assert centroids.numpy().shape == (0, 1)
     packed = np.zeros((65537, 1), dtype=np.uint32)
-    labels = bitbirch_shared(packed, 1.0, host_input=True, insertion_policy="filtered-group", routing_width=2)
+    labels = bitbirch_shared(packed, 1.0, host_input=True, insertion_policy="filtered-group")
     np.testing.assert_array_equal(labels.numpy(), np.zeros(len(packed), dtype=np.int32))
 
 
@@ -311,7 +263,6 @@ def test_host_output_preserves_labels_with_host_input_cache_and_centroids():
         insertion_batch_size=32,
         insertion_policy="filtered-group",
         ordered_prefix_size=33,
-        routing_width=2,
         return_centroids=True,
     )
     expected, expected_centroids = bitbirch_shared(packed, 0.4, **options)
@@ -346,9 +297,6 @@ def test_host_output_preserves_labels_with_host_input_cache_and_centroids():
         {"threshold": -1},
         {"threshold": 0.5, "branching_factor": 2},
         {"threshold": 0.5, "ordered_prefix_size": -1},
-        {"threshold": 0.5, "routing_width": 0},
-        {"threshold": 0.5, "routing_width": 3, "insertion_policy": "filtered-group"},
-        {"threshold": 0.5, "routing_width": 2},
         {"threshold": 0.5, "summary_cache_bytes": -1},
         {"threshold": 0.5, "summary_cache_bytes": 1},
         {"threshold": 0.5, "fingerprint_cache_bytes": -1},

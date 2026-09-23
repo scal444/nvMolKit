@@ -1768,19 +1768,10 @@ __global__ void bitBirchSharedRouteKernel(const int                    begin,
                                           BitBirchStatus*              ownerStatuses,
                                           BitBirchStatus*              groupStatuses,
                                           const bool                   filteredGroups,
-                                          const int                    routingWidth,
                                           const double                 threshold,
                                           const TreeStorage<Component> storage) {
   // One cooperative block per query; all tree reads precede any leaf writes.
   __shared__ CooperativeScratch scratch;
-  // A two-path beam uses bounded CTA-owned shared state, not per-thread arrays.
-  // Candidate order is stable: prior beam order, then entry order within a node.
-  __shared__ int                beamNodes[2];
-  __shared__ int                candidateEntries[4];
-  __shared__ int                candidateNodes[4];
-  __shared__ double             candidateScores[4];
-  __shared__ int                beamSize;
-  __shared__ int                candidateCount;
   const int                     offset = blockIdx.x;
   if (offset >= count) {
     return;
@@ -1799,67 +1790,12 @@ __global__ void bitBirchSharedRouteKernel(const int                    begin,
     return;
   }
   const auto* fingerprint = queryFingerprint(storage, molecule);
-  if (routingWidth == 2 && !storage.nodeLeaves[scratch.node]) {
+  while (!storage.nodeLeaves[scratch.node]) {
+    const int selected = cooperativeClosestEntry(storage, scratch.node, fingerprint, scratch);
     if (threadIdx.x == 0) {
-      beamNodes[0] = scratch.node;
-      beamSize     = 1;
+      scratch.node = storage.entryChildren[selected];
     }
     __syncthreads();
-    while (true) {
-      const bool leafLevel = storage.nodeLeaves[beamNodes[0]];
-      const int  width     = beamSize;
-      if (threadIdx.x == 0) {
-        candidateCount = 0;
-      }
-      __syncthreads();
-      for (int index = 0; index < width; ++index) {
-        int excluded = -1;
-        for (int rank = 0; rank < (leafLevel ? 1 : 2); ++rank) {
-          const int selected = cooperativeClosestEntry(storage, beamNodes[index], fingerprint, scratch, excluded);
-          // Capture the returned shared value before another warp reuses it.
-          __syncthreads();
-          if (selected < 0) {
-            break;
-          }
-          if (threadIdx.x == 0) {
-            candidateEntries[candidateCount]  = selected;
-            candidateNodes[candidateCount]    = beamNodes[index];
-            candidateScores[candidateCount++] = scratch.bestValue;
-          }
-          excluded = selected;
-          __syncthreads();
-        }
-      }
-      if (threadIdx.x == 0) {
-        beamSize = min(2, candidateCount);
-        for (int rank = 0; rank < (leafLevel ? 1 : beamSize); ++rank) {
-          int best = 0;
-          for (int index = 1; index < candidateCount; ++index) {
-            if (candidateScores[index] > candidateScores[best]) {
-              best = index;
-            }
-          }
-          if (leafLevel) {
-            scratch.node = candidateNodes[best];
-          } else {
-            beamNodes[rank] = storage.entryChildren[candidateEntries[best]];
-          }
-          candidateScores[best] = -1.0;
-        }
-      }
-      __syncthreads();
-      if (leafLevel) {
-        break;
-      }
-    }
-  } else {
-    while (!storage.nodeLeaves[scratch.node]) {
-      const int selected = cooperativeClosestEntry(storage, scratch.node, fingerprint, scratch);
-      if (threadIdx.x == 0) {
-        scratch.node = storage.entryChildren[selected];
-      }
-      __syncthreads();
-    }
   }
   if (threadIdx.x == 0) {
     keys[offset] = scratch.node;
@@ -2918,7 +2854,6 @@ BitBirchResult launchShared(const cuda::std::span<const std::uint32_t> fingerpri
                             const int                                  insertionBatchSize,
                             const bool                                 filteredGroups,
                             const int                                  orderedPrefixSize,
-                            const int                                  routingWidth,
                             const std::size_t                          summaryCacheBytes,
                             const std::size_t                          fingerprintCacheBytes,
                             const bool                                 fingerprintsOnHost,
@@ -3085,7 +3020,6 @@ BitBirchResult launchShared(const cuda::std::span<const std::uint32_t> fingerpri
                                                                             ownerStatuses.data(),
                                                                             groupStatuses.data(),
                                                                             useGroups,
-                                                                            useGroups ? routingWidth : 1,
                                                                             threshold,
                                                                             storage);
       cudaCheckError(cudaGetLastError());
@@ -3711,7 +3645,6 @@ BitBirchResult bitBirchSharedGpu(const cuda::std::span<const std::uint32_t> fing
                                  const int                                  insertionBatchSize,
                                  const bool                                 filteredGroups,
                                  const int                                  orderedPrefixSize,
-                                 const int                                  routingWidth,
                                  const std::size_t                          summaryCacheBytes,
                                  const bool                                 fingerprintsOnHost,
                                  const bool                                 clusterIdsOnHost,
@@ -3725,7 +3658,7 @@ BitBirchResult bitBirchSharedGpu(const cuda::std::span<const std::uint32_t> fing
     throw std::invalid_argument("BitBIRCH fingerprints shape or dimensions are invalid");
   }
   if (!std::isfinite(threshold) || threshold < 0 || threshold > 1 || branchingFactor < 3 || insertionBatchSize < 1 ||
-      orderedPrefixSize < 0 || (routingWidth != 1 && routingWidth != 2) || (!filteredGroups && routingWidth != 1) ||
+      orderedPrefixSize < 0 ||
       (fingerprintCacheBytes > 0 &&
        (!fingerprintsOnHost ||
         fingerprintCacheBytes < sizeof(std::uint32_t) * static_cast<std::size_t>(summaryEntriesPerPage) * numWords))) {
@@ -3750,7 +3683,6 @@ BitBirchResult bitBirchSharedGpu(const cuda::std::span<const std::uint32_t> fing
                                        insertionBatchSize,
                                        filteredGroups,
                                        orderedPrefixSize,
-                                       routingWidth,
                                        summaryCacheBytes,
                                        fingerprintCacheBytes,
                                        fingerprintsOnHost,
@@ -3766,7 +3698,6 @@ BitBirchResult bitBirchSharedGpu(const cuda::std::span<const std::uint32_t> fing
                                      insertionBatchSize,
                                      filteredGroups,
                                      orderedPrefixSize,
-                                     routingWidth,
                                      summaryCacheBytes,
                                      fingerprintCacheBytes,
                                      fingerprintsOnHost,

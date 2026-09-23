@@ -47,7 +47,6 @@ BitBirchResult bitBirchSharedGpu(cuda::std::span<const std::uint32_t> fingerprin
                                  int                                  insertionBatchSize,
                                  bool                                 filteredGroups,
                                  int                                  orderedPrefixSize,
-                                 int                                  routingWidth          = 1,
                                  std::size_t                          summaryCacheBytes     = 0,
                                  bool                                 fingerprintsOnHost    = false,
                                  bool                                 clusterIdsOnHost      = false,

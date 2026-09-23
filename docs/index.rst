@@ -284,7 +284,6 @@ Guides
    similarity
    forcefield
    fire_minimizer
-   bitbirch_design
    autotune
    agent_skill
 

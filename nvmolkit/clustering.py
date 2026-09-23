@@ -329,7 +329,6 @@ def bitbirch_shared(
     insertion_batch_size: int = 1024,
     insertion_policy: str = "ordered-leaf",
     ordered_prefix_size: int = 0,
-    routing_width: int = 1,
     summary_cache_bytes: int = 0,
     fingerprint_cache_bytes: int = 0,
     host_input: bool = False,
@@ -344,10 +343,6 @@ def bitbirch_shared(
     groups to disjoint entries, then handles residuals with ordered leaf writers.
     With ``filtered-group``, ``ordered_prefix_size`` optionally builds the first
     input rows using ordered leaf writers before enabling grouped insertion.
-    For grouped insertion, ``routing_width=2`` retains the two closest child
-    BFs per directory level and chooses the closest entry across both final
-    leaves. This changes routing, not diameter admission or split rules. The
-    ordered prefix always uses single-path routing.
     Splits occur at barriers and unprocessed inputs are rerouted. This is not the
     independent-trees-plus-merge algorithm. Batch size one with single-path
     routing preserves native serial-tree semantics. Larger batches can change
@@ -374,8 +369,6 @@ def bitbirch_shared(
         raise ValueError("insertion_policy must be ordered-leaf or filtered-group")
     if ordered_prefix_size < 0:
         raise ValueError("ordered_prefix_size must be nonnegative")
-    if routing_width not in (1, 2) or (routing_width != 1 and insertion_policy != "filtered-group"):
-        raise ValueError("routing_width must be 1, or 2 with filtered-group insertion")
     if summary_cache_bytes < 0:
         raise ValueError("summary_cache_bytes must be nonnegative")
     if fingerprint_cache_bytes < 0:
@@ -401,7 +394,6 @@ def bitbirch_shared(
             insertion_batch_size,
             insertion_policy,
             ordered_prefix_size,
-            routing_width,
             summary_cache_bytes,
             fingerprint_cache_bytes,
             host_input,
