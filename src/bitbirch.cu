@@ -411,6 +411,13 @@ template <typename Component> struct TreeStorage {
   std::uint32_t**      singletonFingerprintPages = nullptr;
   std::uint32_t*       singletonPageHits         = nullptr;
   int                  queryBegin                = 0;
+  // Contiguous ordered entry copies for internal nodes, which change only in
+  // Repair. Routing reads them instead of walking directory lists.
+  int*                 nodeDirectories           = nullptr;
+  int*                 directoryEntries          = nullptr;
+  int*                 directoryCursor           = nullptr;
+  int                  maxDirectories            = 0;
+  int                  directoryStride           = 0;
 };
 
 template <typename Component> class TreeWorkspace {
@@ -419,10 +426,13 @@ template <typename Component> class TreeWorkspace {
                 int*                 labels,
                 const int            nodeCapacity,
                 const int            entryCapacity,
+                const int            branchingFactor,
                 const int            numWords,
                 const cudaStream_t   stream,
                 const std::size_t    summaryCacheBytes)
       : nodeCapacity(nodeCapacity),
+        directoryStride(branchingFactor + 1),
+        minimumNodeSize(branchingFactor / 2 + branchingFactor % 2),
         entryCapacity(entryCapacity),
         nodeHeads(nodeCapacity, stream),
         nodeSizes(nodeCapacity, stream),
@@ -430,6 +440,8 @@ template <typename Component> class TreeWorkspace {
         nodeLeaves(nodeCapacity, stream),
         nodeTails(nodeCapacity, stream),
         nodeParentEntries(nodeCapacity, stream),
+        nodeDirectories(nodeCapacity, stream),
+        directoryEntries(static_cast<std::size_t>(directoryCapacity(nodeCapacity)) * directoryStride, stream),
         entryNext(entryCapacity, stream),
         entryChildren(entryCapacity, stream),
         entryCounts(entryCapacity, stream),
@@ -442,6 +454,7 @@ template <typename Component> class TreeWorkspace {
         summaryCursor(0, stream),
         clusterCount(0, stream),
         status(BitBirchStatus::Success, stream),
+        directoryCursor(0, stream),
         summaryArena(numWords * 32, numWords, stream, summaryCacheBytes),
         fingerprints(fingerprints),
         labels(labels),
@@ -450,7 +463,7 @@ template <typename Component> class TreeWorkspace {
   }
 
   TreeStorage<Component> storage() {
-    return {fingerprints,
+    TreeStorage<Component> result{fingerprints,
             nodeHeads.data(),
             nodeSizes.data(),
             nodeParents.data(),
@@ -479,6 +492,12 @@ template <typename Component> class TreeWorkspace {
             numWords,
             numWords * 32,
             summaryArena.pageHits()};
+    result.nodeDirectories  = nodeDirectories.data();
+    result.directoryEntries = directoryEntries.data();
+    result.directoryCursor  = directoryCursor.data();
+    result.maxDirectories   = directoryCapacity(nodeCapacity);
+    result.directoryStride  = directoryStride;
+    return result;
   }
 
   void grow(const int nodes, const int entries) {
@@ -489,6 +508,8 @@ template <typename Component> class TreeWorkspace {
       nodeLeaves.resize(nodes);
       nodeTails.resize(nodes);
       nodeParentEntries.resize(nodes);
+      nodeDirectories.resize(nodes);
+      directoryEntries.resize(static_cast<std::size_t>(directoryCapacity(nodes)) * directoryStride);
       nodeCapacity = nodes;
     }
     if (entries > entryCapacity) {
@@ -502,7 +523,12 @@ template <typename Component> class TreeWorkspace {
     }
   }
 
+  // Every non-root internal node has at least minimumNodeSize children.
+  int directoryCapacity(const int nodes) const noexcept { return nodes / minimumNodeSize + 2; }
+
   int                              nodeCapacity;
+  int                              directoryStride;
+  int                              minimumNodeSize;
   int                              entryCapacity;
   AsyncDeviceVector<int>           nodeHeads;
   AsyncDeviceVector<int>           nodeSizes;
@@ -510,6 +536,8 @@ template <typename Component> class TreeWorkspace {
   AsyncDeviceVector<std::uint8_t>  nodeLeaves;
   AsyncDeviceVector<int>           nodeTails;
   AsyncDeviceVector<int>           nodeParentEntries;
+  AsyncDeviceVector<int>           nodeDirectories;
+  AsyncDeviceVector<int>           directoryEntries;
   AsyncDeviceVector<int>           entryNext;
   AsyncDeviceVector<int>           entryChildren;
   AsyncDeviceVector<std::uint32_t> entryCounts;
@@ -522,6 +550,7 @@ template <typename Component> class TreeWorkspace {
   AsyncDevicePtr<int>              summaryCursor;
   AsyncDevicePtr<int>              clusterCount;
   AsyncDevicePtr<BitBirchStatus>   status;
+  AsyncDevicePtr<int>              directoryCursor;
   PagedSummaryArena<Component>     summaryArena;
   const std::uint32_t*             fingerprints;
   int*                             labels;
@@ -602,13 +631,29 @@ __device__ __forceinline__ int allocateNode(TreeStorage<Component>& storage, con
     *storage.status = BitBirchStatus::NodeCapacity;
     return -1;
   }
+  int directory = -1;
+  if (!leaf) {
+    directory = (*storage.directoryCursor)++;
+    if (directory >= storage.maxDirectories) {
+      *storage.status = BitBirchStatus::NodeCapacity;
+      return -1;
+    }
+  }
   storage.nodeHeads[node]         = -1;
   storage.nodeTails[node]         = -1;
   storage.nodeSizes[node]         = 0;
   storage.nodeParents[node]       = parent;
   storage.nodeParentEntries[node] = -1;
+  storage.nodeDirectories[node]   = directory;
   storage.nodeLeaves[node]        = leaf;
   return node;
+}
+
+template <typename Component>
+__device__ __forceinline__ int* nodeDirectory(const TreeStorage<Component>& storage, const int node) {
+  const int directory = storage.nodeDirectories[node];
+  return directory < 0 ? nullptr :
+                         storage.directoryEntries + static_cast<std::size_t>(directory) * storage.directoryStride;
 }
 
 template <typename Component> __device__ __forceinline__ int allocateEntry(TreeStorage<Component>& storage) {
@@ -635,6 +680,9 @@ __device__ __forceinline__ void appendEntry(TreeStorage<Component>& storage, con
   }
   storage.entryNext[entry] = -1;
   storage.nodeTails[node]  = entry;
+  if (int* directory = nodeDirectory(storage, node)) {
+    directory[storage.nodeSizes[node]] = entry;
+  }
   ++storage.nodeSizes[node];
 }
 
@@ -823,11 +871,17 @@ __device__ __forceinline__ int splitNodeWithSeeds(TreeStorage<Component>& storag
   storage.nodeTails[sibling] = rhsTail >= 0 ? rhsTail : rhsSeed;
   ++storage.nodeSizes[sibling];
   if (!storage.nodeLeaves[node]) {
+    int* nodeEntries    = nodeDirectory(storage, node);
+    int* siblingEntries = nodeDirectory(storage, sibling);
+    int  position       = 0;
     for (int entry = storage.nodeHeads[node]; entry >= 0; entry = storage.entryNext[entry]) {
       storage.nodeParents[storage.entryChildren[entry]] = node;
+      nodeEntries[position++]                           = entry;
     }
+    position = 0;
     for (int entry = storage.nodeHeads[sibling]; entry >= 0; entry = storage.entryNext[entry]) {
       storage.nodeParents[storage.entryChildren[entry]] = sibling;
+      siblingEntries[position++]                        = entry;
     }
   }
   return linkSplitSibling(storage, node, sibling);
@@ -1388,7 +1442,9 @@ __global__ void bitBirchRouteKernel(const int                    begin,
   }
   const auto* fingerprint = queryFingerprint(storage, molecule);
   while (!storage.nodeLeaves[scratch.node]) {
-    const int selected = cooperativeClosestEntry(storage, scratch.node, fingerprint, scratch);
+    const int node = scratch.node;
+    const int selected =
+      cooperativeClosestEntry(storage, node, fingerprint, scratch, nodeDirectory(storage, node), storage.nodeSizes[node]);
     if (threadIdx.x == 0) {
       scratch.node = storage.entryChildren[selected];
     }
@@ -2079,6 +2135,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                 labels,
                                 initialNodes,
                                 initialEntries,
+                                branchingFactor,
                                 numWords,
                                 stream,
                                 summaryCacheBytes);
