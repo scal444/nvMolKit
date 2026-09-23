@@ -1,375 +1,323 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Independent BitBIRCH reference used by differential tests.
+"""Independent semantic model of nvMolKit's concurrent BitBIRCH schedule.
 
-This follows the publication equations and is not derived from either GPL
-BitBIRCH software implementation. It includes both an unbounded-leaf reference
-and a complete ordered tree with deterministic split propagation.
+This CPU semantic model is intentionally not a scalable storage implementation.
+It uses unpacked input and uint64 sums to make membership auditing straightforward.
+Logical batches and structural subrounds define the algorithm. No bblean
+implementation is used here.
 """
 
-from dataclasses import dataclass
-from typing import Optional
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 
 import numpy as np
 
-
-def _validate_bits(bits: np.ndarray) -> np.ndarray:
-    result = np.asarray(bits)
-    if result.ndim != 2:
-        raise ValueError("bits must be a 2D matrix")
-    if not np.all((result == 0) | (result == 1)):
-        raise ValueError("bits must contain only zero and one")
-    return result.astype(np.uint8, copy=False)
+POPCOUNT = np.asarray([value.bit_count() for value in range(256)], dtype=np.uint8)
+ORDERED_WARMUP_SIZE = 16384
 
 
-def isim_tanimoto(linear_sum: np.ndarray, count: int) -> float:
-    """Evaluate the publication's iSIM Jaccard--Tanimoto equation."""
-    if count <= 1:
-        return 1.0
-    ls = np.asarray(linear_sum, dtype=np.float64)
-    common_pairs = np.sum(ls * (ls - 1.0) * 0.5, dtype=np.float64)
-    mismatches = np.sum(ls * (float(count) - ls), dtype=np.float64)
-    denominator = common_pairs + mismatches
-    return float(common_pairs / denominator) if denominator > 0.0 else 1.0
+def isim(sums: np.ndarray, count: int) -> float:
+    values = sums.astype(np.float64)
+    common = np.sum(values * (values - 1) * 0.5)
+    mismatch = np.sum(values * (count - values))
+    return float(common / (common + mismatch)) if common + mismatch else 1.0
 
 
-def majority_centroid(linear_sum: np.ndarray, count: int) -> np.ndarray:
-    """Return floor(LS / N + 1/2), including one-valued exact ties."""
-    if count <= 0:
-        raise ValueError("count must be positive")
-    ls = np.asarray(linear_sum, dtype=np.uint64)
-    return (ls >= count // 2 + count % 2).astype(np.uint8)
+def centroid(sums: np.ndarray, count: int) -> np.ndarray:
+    return np.packbits(sums >= (count + 1) // 2)
 
 
-def tanimoto(lhs: np.ndarray, rhs: np.ndarray) -> float:
-    intersection = int(np.count_nonzero(lhs & rhs))
-    union = int(np.count_nonzero(lhs | rhs))
-    return intersection / union if union else 1.0
+def similarities(queries: np.ndarray, candidates: np.ndarray) -> np.ndarray:
+    intersection = POPCOUNT[queries[:, None, :] & candidates[None, :, :]].sum(axis=2)
+    union = POPCOUNT[queries[:, None, :] | candidates[None, :, :]].sum(axis=2)
+    return np.divide(intersection, union, out=np.ones_like(intersection, dtype=float), where=union != 0)
 
 
-@dataclass
-class BitFeature:
+@dataclass(eq=False)
+class Entry:
+    uid: int
     count: int
-    linear_sum: np.ndarray
-    members: list[int]
-
-    @classmethod
-    def from_fingerprint(cls, fingerprint: np.ndarray, index: int) -> "BitFeature":
-        return cls(1, fingerprint.astype(np.uint64, copy=True), [index])
-
-    @property
-    def centroid(self) -> np.ndarray:
-        return majority_centroid(self.linear_sum, self.count)
-
-    @property
-    def isim(self) -> float:
-        return isim_tanimoto(self.linear_sum, self.count)
-
-    def combined_isim(self, fingerprint: np.ndarray) -> float:
-        return isim_tanimoto(self.linear_sum + fingerprint, self.count + 1)
-
-    def add(self, fingerprint: np.ndarray, index: int) -> None:
-        self.count += 1
-        self.linear_sum += fingerprint
-        self.members.append(index)
-
-    def merged(self, other: "BitFeature") -> "BitFeature":
-        return BitFeature(
-            self.count + other.count,
-            self.linear_sum + other.linear_sum,
-            self.members + other.members,
-        )
+    sums: np.ndarray
+    packed: np.ndarray
+    members: list[int] = field(default_factory=list)
+    child: "Node | None" = None
 
 
-@dataclass
-class TreeEntry:
-    feature: BitFeature
-    child: Optional["TreeNode"] = None
-
-
-@dataclass
-class TreeNode:
+@dataclass(eq=False)
+class Node:
+    uid: int
     leaf: bool
-    entries: list[TreeEntry]
-    parent: Optional["TreeNode"] = None
+    entries: list[Entry] = field(default_factory=list)
+    parent: "Node | None" = None
+    cached_centroids: np.ndarray | None = None
+
+    def matrix(self) -> np.ndarray:
+        if self.cached_centroids is None:
+            self.cached_centroids = np.stack([entry.packed for entry in self.entries])
+        return self.cached_centroids
 
 
-def _summarize_node(node: TreeNode) -> BitFeature:
-    if not node.entries:
-        raise ValueError("cannot summarize an empty node")
-    summary = node.entries[0].feature
-    for entry in node.entries[1:]:
-        summary = summary.merged(entry.feature)
-    return BitFeature(summary.count, summary.linear_sum.copy(), summary.members.copy())
+class BatchedBitBirch:
+    def __init__(
+        self,
+        threshold=0.25,
+        branching_factor=254,
+        batch_size=256,
+    ):
+        if not np.isfinite(threshold) or not 0 <= threshold <= 1:
+            raise ValueError("threshold must be finite and in [0, 1]")
+        if branching_factor < 3 or batch_size < 1:
+            raise ValueError("branching factor >= 3 and positive batch size required")
+        self.threshold = threshold
+        self.branching_factor = branching_factor
+        self.batch_size = batch_size
+        self.root = Node(0, True)
+        self.next_node = 1
+        self.stats = Counter()
+        self.bits = np.empty((0, 0), dtype=np.uint8)
+        self.packed = np.empty((0, 0), dtype=np.uint8)
 
+    def _node(self, leaf: bool, entries: list[Entry], parent=None) -> Node:
+        result = Node(self.next_node, leaf, entries, parent)
+        self.next_node += 1
+        for entry in entries:
+            if entry.child is not None:
+                entry.child.parent = result
+        return result
 
-def _closest_entry(entries: list[TreeEntry], centroid: np.ndarray) -> int:
-    similarities = [tanimoto(centroid, entry.feature.centroid) for entry in entries]
-    return int(np.argmax(similarities))
+    def _summary(self, node: Node) -> Entry:
+        sums = np.sum([entry.sums for entry in node.entries], axis=0, dtype=np.uint64)
+        count = sum(entry.count for entry in node.entries)
+        return Entry(-node.uid - 1, count, sums, centroid(sums, count), child=node)
 
+    def _refresh(self, node: Node) -> None:
+        if not node.leaf:
+            for index, entry in enumerate(node.entries):
+                self._refresh(entry.child)
+                node.entries[index] = self._summary(entry.child)
+        node.cached_centroids = None
 
-def _split_seeds(entries: list[TreeEntry]) -> tuple[int, int]:
-    if len(entries) < 2:
-        raise ValueError("a split requires at least two entries")
-    best_pair = (0, 1)
-    best_similarity = tanimoto(entries[0].feature.centroid, entries[1].feature.centroid)
-    for lhs in range(len(entries)):
-        for rhs in range(lhs + 1, len(entries)):
-            similarity = tanimoto(entries[lhs].feature.centroid, entries[rhs].feature.centroid)
-            if similarity < best_similarity:
-                best_similarity = similarity
-                best_pair = (lhs, rhs)
-    return best_pair
+    def _route(self, molecule_ids: np.ndarray):
+        pending = [(self.root, molecule_ids)]
+        groups = defaultdict(list)
+        leaves = {}
+        entries = {}
+        while pending:
+            node, ids = pending.pop()
+            leaves[node.uid] = node
+            if not node.entries:
+                groups[(node.uid, None)].extend(ids.tolist())
+                continue
+            choices = np.argmax(similarities(self.packed[ids], node.matrix()), axis=1)
+            for choice in np.unique(choices):
+                selected = ids[choices == choice]
+                entry = node.entries[int(choice)]
+                if node.leaf:
+                    groups[(node.uid, entry.uid)].extend(selected.tolist())
+                    entries[entry.uid] = entry
+                else:
+                    pending.append((entry.child, selected))
+        self.stats["route_attempts"] += len(molecule_ids)
+        self.stats["max_cluster_queue"] = max(self.stats["max_cluster_queue"], max(map(len, groups.values())))
+        return groups, leaves, entries
 
+    def _commit(self, entry: Entry, ids: list[int], sums: np.ndarray) -> None:
+        entry.sums = sums
+        entry.count += len(ids)
+        entry.packed = centroid(sums, entry.count)
+        entry.members.extend(ids)
 
-def _replace_parent_summary(node: TreeNode) -> None:
-    if node.parent is None:
-        return
-    for entry in node.parent.entries:
-        if entry.child is node:
-            entry.feature = _summarize_node(node)
-            return
-    raise RuntimeError("parent does not reference child")
+    def _try_group(self, entry: Entry, ids: list[int]) -> list[int]:
+        residual = []
+        eligible = []
+        for molecule in ids:
+            if isim(entry.sums + self.bits[molecule], entry.count + 1) >= self.threshold:
+                eligible.append(molecule)
+            else:
+                residual.append(molecule)
+        if not eligible:
+            return residual
+        combined = entry.sums + self.bits[eligible].sum(axis=0, dtype=np.uint64)
+        if isim(combined, entry.count + len(eligible)) >= self.threshold:
+            self._commit(entry, eligible, combined)
+            return residual
+        for molecule in eligible:
+            combined = entry.sums + self.bits[molecule]
+            if isim(combined, entry.count + 1) >= self.threshold:
+                self._commit(entry, [molecule], combined)
+            else:
+                residual.append(molecule)
+        return residual
 
+    def _insert_residual(self, node: Node, molecule: int) -> None:
+        if node.entries:
+            selected = int(np.argmax(similarities(self.packed[molecule : molecule + 1], node.matrix())[0]))
+            entry = node.entries[selected]
+            combined = entry.sums + self.bits[molecule]
+            self.stats["residual_checks"] += 1
+            if isim(combined, entry.count + 1) >= self.threshold:
+                self._commit(entry, [molecule], combined)
+                node.cached_centroids = None
+                self.stats["residual_committed"] += 1
+                return
+        sums = self.bits[molecule].astype(np.uint64)
+        node.entries.append(Entry(molecule, 1, sums, self.packed[molecule].copy(), [molecule]))
+        node.cached_centroids = None
+        self.stats["created_clusters"] += 1
 
-def _split_node(node: TreeNode, branching_factor: int) -> TreeNode:
-    seed_lhs, seed_rhs = _split_seeds(node.entries)
-    lhs_seed = node.entries[seed_lhs]
-    rhs_seed = node.entries[seed_rhs]
-    lhs_entries = [lhs_seed]
-    rhs_entries = [rhs_seed]
-    max_group = (len(node.entries) + 1) // 2
-    for index, entry in enumerate(node.entries):
-        if index in (seed_lhs, seed_rhs):
-            continue
-        lhs_similarity = tanimoto(entry.feature.centroid, lhs_seed.feature.centroid)
-        rhs_similarity = tanimoto(entry.feature.centroid, rhs_seed.feature.centroid)
-        assign_left = lhs_similarity > rhs_similarity or (
-            lhs_similarity == rhs_similarity and len(lhs_entries) <= len(rhs_entries)
-        )
-        if len(lhs_entries) >= max_group:
-            assign_left = False
-        elif len(rhs_entries) >= max_group:
-            assign_left = True
-        if assign_left:
-            lhs_entries.append(entry)
+    def _split(self, node: Node) -> None:
+        count = len(node.entries)
+        assert count == self.branching_factor + 1
+        centroids = node.matrix()
+        distances = similarities(centroids, centroids)
+        distances[np.tril_indices(count)] = np.inf
+        lhs, rhs = np.unravel_index(np.argmin(distances), distances.shape)
+        seeds = similarities(centroids, centroids[[lhs, rhs]])
+        left = [node.entries[lhs]]
+        right = [node.entries[rhs]]
+        capacity = (count + 1) // 2
+        for index, entry in enumerate(node.entries):
+            if index == lhs or index == rhs:
+                continue
+            take_left = seeds[index, 0] > seeds[index, 1] or (
+                seeds[index, 0] == seeds[index, 1] and len(left) <= len(right)
+            )
+            if len(left) >= capacity:
+                take_left = False
+            elif len(right) >= capacity:
+                take_left = True
+            if take_left:
+                left.append(entry)
+            else:
+                right.append(entry)
+        node.entries = left
+        node.cached_centroids = None
+        for entry in left:
+            if entry.child is not None:
+                entry.child.parent = node
+        sibling = self._node(node.leaf, right, node.parent)
+        if node.parent is None:
+            self.root = self._node(False, [self._summary(node), self._summary(sibling)])
         else:
-            rhs_entries.append(entry)
+            parent = node.parent
+            for index, entry in enumerate(parent.entries):
+                if entry.child is node:
+                    parent.entries[index] = self._summary(node)
+                    break
+            parent.entries.append(self._summary(sibling))
+            parent.cached_centroids = None
+            if len(parent.entries) > self.branching_factor:
+                self._split(parent)
+        self.stats["splits"] += 1
 
-    # An overflow contains branching_factor + 1 entries and each side owns a
-    # seed, so neither side can remain over capacity.
-    assert len(lhs_entries) <= branching_factor
-    assert len(rhs_entries) <= branching_factor
-    node.entries = lhs_entries
-    sibling = TreeNode(node.leaf, rhs_entries, node.parent)
-    for entry in node.entries:
-        if entry.child is not None:
-            entry.child.parent = node
-    for entry in sibling.entries:
-        if entry.child is not None:
-            entry.child.parent = sibling
+    def _epoch(self, ids: np.ndarray) -> None:
+        ordered_leaf = ids[0] < ORDERED_WARMUP_SIZE
+        pending = ids
+        while len(pending):
+            self.stats["subrounds"] += 1
+            groups, nodes, entries = self._route(pending)
+            residual = defaultdict(list)
+            # All routing has finished. Leaf owners touch disjoint data.
+            keys = sorted(groups)
+            for node_id, entry_id in keys:
+                ids = groups[(node_id, entry_id)]
+                if entry_id is None or ordered_leaf:
+                    residual[node_id].extend(ids)
+                else:
+                    residual[node_id].extend(self._try_group(entries[entry_id], ids))
+                nodes[node_id].cached_centroids = None
+            overflow = []
+            parked = []
+            for node_id in sorted(residual):
+                node = nodes[node_id]
+                ids = sorted(residual[node_id])
+                self.stats["max_residual_leaf_queue"] = max(self.stats["max_residual_leaf_queue"], len(ids))
+                for offset, molecule in enumerate(ids):
+                    self._insert_residual(node, molecule)
+                    if len(node.entries) > self.branching_factor:
+                        overflow.append(node)
+                        parked.extend(ids[offset + 1 :])
+                        break
+            # All payload updates finish before topology changes. Refresh first so
+            # cascading splits see current summaries of every sibling.
+            self._refresh(self.root)
+            for node in sorted(overflow, key=node_uid):
+                self._split(node)
+                # A previous split may have created/moved an ancestor of the next.
+                self._refresh(self.root)
+            pending = np.asarray(sorted(parked), dtype=np.int64)
+            self.stats["parked_for_split"] += len(pending)
 
-    if node.parent is None:
-        root = TreeNode(
-            False,
-            [TreeEntry(_summarize_node(node), node), TreeEntry(_summarize_node(sibling), sibling)],
-        )
-        node.parent = root
-        sibling.parent = root
-        return root
+    def fit(self, packed: np.ndarray):
+        data = np.asarray(packed)
+        if data.ndim != 2 or data.dtype != np.uint8 or data.shape[1] == 0:
+            raise ValueError("expected packed uint8 matrix with nonzero width")
+        if self.root.entries:
+            raise ValueError("reference fit requires a fresh tree")
+        self.packed = data
+        self.bits = np.unpackbits(data, axis=1)
+        begin = 0
+        while begin < len(data):
+            boundary = min(ORDERED_WARMUP_SIZE, len(data)) if begin < ORDERED_WARMUP_SIZE else len(data)
+            end = min(begin + self.batch_size, boundary)
+            self.stats["epochs"] += 1
+            self._epoch(np.arange(begin, end, dtype=np.int64))
+            begin = end
+        return self
 
-    parent = node.parent
-    _replace_parent_summary(node)
-    parent.entries.append(TreeEntry(_summarize_node(sibling), sibling))
-    if len(parent.entries) > branching_factor:
-        return _split_node(parent, branching_factor)
-    _replace_parent_summary(parent)
-    while parent.parent is not None:
-        parent = parent.parent
-        _replace_parent_summary(parent)
-    return parent
+    def clusters(self) -> list[Entry]:
+        pending = [self.root]
+        result = []
+        while pending:
+            node = pending.pop()
+            if node.leaf:
+                result.extend(node.entries)
+            else:
+                pending.extend(entry.child for entry in node.entries)
+        return sorted(result, key=first_member)
 
+    def labels(self) -> np.ndarray:
+        labels = np.full(len(self.packed), -1, dtype=np.int64)
+        for label, entry in enumerate(self.clusters()):
+            labels[entry.members] = label
+        return labels
 
-def _leaf_features(root: TreeNode) -> list[BitFeature]:
-    pending = [root]
-    result: list[BitFeature] = []
-    while pending:
-        node = pending.pop()
-        if node.leaf:
-            result.extend(entry.feature for entry in node.entries)
-        else:
-            pending.extend(reversed([entry.child for entry in node.entries if entry.child is not None]))
-    return result
-
-
-def _insert_feature(
-    root: TreeNode,
-    incoming: BitFeature,
-    threshold: float,
-    branching_factor: int,
-    tolerance: float | None,
-) -> TreeNode:
-    node = root
-    while not node.leaf:
-        child = node.entries[_closest_entry(node.entries, incoming.centroid)].child
-        if child is None:
-            raise RuntimeError("internal entry has no child")
-        node = child
-
-    if not node.entries:
-        node.entries.append(TreeEntry(incoming))
-    else:
-        entry_index = _closest_entry(node.entries, incoming.centroid)
-        entry = node.entries[entry_index]
-        combined = entry.feature.merged(incoming)
-        merge = combined.isim >= threshold
-        if merge and tolerance is not None and entry.feature.count > 1:
-            if incoming.count != 1:
-                raise ValueError("tolerance-diameter summary merging is not defined")
-            n = float(entry.feature.count)
-            affinity = ((n + 1.0) * combined.isim - (n - 1.0) * entry.feature.isim) * 0.5
-            merge = affinity >= entry.feature.isim - tolerance
-        if merge:
-            entry.feature = combined
-        else:
-            node.entries.append(TreeEntry(incoming))
-
-    current = node
-    while current.parent is not None:
-        _replace_parent_summary(current)
-        current = current.parent
-    if len(node.entries) > branching_factor:
-        return _split_node(node, branching_factor)
-    return root
-
-
-def serial_tree_reference(
-    bits: np.ndarray,
-    threshold: float,
-    *,
-    branching_factor: int = 254,
-    tolerance: float | None = None,
-) -> tuple[np.ndarray, list[BitFeature], TreeNode | None]:
-    """Complete ordered serial-tree reference with split propagation."""
-    fingerprints = _validate_bits(bits)
-    if not 0.0 <= threshold <= 1.0:
-        raise ValueError("threshold must be in [0, 1]")
-    if branching_factor < 2:
-        raise ValueError("branching_factor must be at least 2")
-    if tolerance is not None and tolerance < 0.0:
-        raise ValueError("tolerance must be nonnegative")
-    if fingerprints.shape[0] == 0:
-        return np.empty(0, dtype=np.int32), [], None
-    root = TreeNode(True, [])
-    for index, fingerprint in enumerate(fingerprints):
-        root = _insert_feature(
-            root,
-            BitFeature.from_fingerprint(fingerprint, index),
-            threshold,
-            branching_factor,
-            tolerance,
-        )
-
-    features = sorted(_leaf_features(root), key=lambda feature: min(feature.members))
-    labels = np.empty(fingerprints.shape[0], dtype=np.int32)
-    for cluster_id, feature in enumerate(features):
-        labels[feature.members] = cluster_id
-    return labels, features, root
+    def audit(self) -> dict:
+        """Recompute from actual members, independently of incremental updates."""
+        members = []
+        scores = []
+        pending = [self.root]
+        while pending:
+            node = pending.pop()
+            assert len(node.entries) <= self.branching_factor
+            if node is not self.root:
+                assert len(node.entries) >= 2
+            for entry in node.entries:
+                if node.leaf:
+                    assert entry.child is None
+                    assert entry.count == len(entry.members)
+                    expected = self.bits[entry.members].sum(axis=0, dtype=np.uint64)
+                    members.extend(entry.members)
+                    value = isim(expected, entry.count)
+                    assert value + 1e-12 >= self.threshold
+                    scores.append(value)
+                else:
+                    assert entry.child.parent is node
+                    assert not entry.members
+                    assert entry.count == sum(child.count for child in entry.child.entries)
+                    expected = np.sum([child.sums for child in entry.child.entries], axis=0, dtype=np.uint64)
+                    pending.append(entry.child)
+                np.testing.assert_array_equal(entry.sums, expected)
+                np.testing.assert_array_equal(entry.packed, centroid(expected, entry.count))
+        assert sorted(members) == list(range(len(self.packed)))
+        return {"audited_molecules": len(members), "minimum_isim": min(scores, default=1.0)}
 
 
-def partitioned_tree_reference(
-    bits: np.ndarray,
-    threshold: float,
-    *,
-    branching_factor: int = 254,
-    tolerance: float | None = None,
-    num_partitions: int,
-) -> tuple[np.ndarray, list[BitFeature], TreeNode | None]:
-    """Reference contiguous partial trees followed by bounded fan-in merge rounds."""
-    fingerprints = _validate_bits(bits)
-    if num_partitions < 1 or (fingerprints.shape[0] and num_partitions > fingerprints.shape[0]):
-        raise ValueError("invalid partition count")
-    if fingerprints.shape[0] == 0:
-        return np.empty(0, dtype=np.int32), [], None
-    if tolerance is not None and num_partitions > 1:
-        raise ValueError("tolerance-diameter summary merging is not defined")
-
-    partition_size = (fingerprints.shape[0] + num_partitions - 1) // num_partitions
-    partial_feature_groups: list[list[BitFeature]] = []
-    for begin in range(0, fingerprints.shape[0], partition_size):
-        end = min(begin + partition_size, fingerprints.shape[0])
-        _, features, _ = serial_tree_reference(
-            fingerprints[begin:end],
-            threshold,
-            branching_factor=branching_factor,
-            tolerance=tolerance,
-        )
-        for feature in features:
-            feature.members = [member + begin for member in feature.members]
-        partial_feature_groups.append(features)
-
-    merge_fan_in = 4
-    previous_feature_count = sum(len(features) for features in partial_feature_groups)
-    final_root = None
-    while len(partial_feature_groups) > 1:
-        merged_feature_groups = []
-        for group_begin in range(0, len(partial_feature_groups), merge_fan_in):
-            merged_root = TreeNode(True, [])
-            for features in partial_feature_groups[group_begin : group_begin + merge_fan_in]:
-                for feature in features:
-                    merged_root = _insert_feature(merged_root, feature, threshold, branching_factor, tolerance)
-            merged_feature_groups.append(sorted(_leaf_features(merged_root), key=lambda feature: min(feature.members)))
-        partial_feature_groups = merged_feature_groups
-        merged_feature_count = sum(len(features) for features in partial_feature_groups)
-        final_root = merged_root if len(partial_feature_groups) == 1 else None
-        if merged_feature_count >= previous_feature_count:
-            break
-        previous_feature_count = merged_feature_count
-
-    features = [feature for feature_group in partial_feature_groups for feature in feature_group]
-    labels = np.empty(fingerprints.shape[0], dtype=np.int32)
-    for cluster_id, feature in enumerate(features):
-        labels[feature.members] = cluster_id
-    return labels, features, final_root
+def node_uid(node: Node) -> int:
+    return node.uid
 
 
-def serial_leaf_reference(
-    bits: np.ndarray,
-    threshold: float,
-    *,
-    tolerance: float | None = None,
-) -> tuple[np.ndarray, list[BitFeature]]:
-    """Reference ordered insertion into one unbounded BitBIRCH leaf."""
-    fingerprints = _validate_bits(bits)
-    if not 0.0 <= threshold <= 1.0:
-        raise ValueError("threshold must be in [0, 1]")
-    if tolerance is not None and tolerance < 0.0:
-        raise ValueError("tolerance must be nonnegative")
-
-    labels = np.empty(fingerprints.shape[0], dtype=np.int32)
-    features: list[BitFeature] = []
-    for index, fingerprint in enumerate(fingerprints):
-        if not features:
-            features.append(BitFeature.from_fingerprint(fingerprint, index))
-            labels[index] = 0
-            continue
-
-        similarities = [tanimoto(fingerprint, feature.centroid) for feature in features]
-        feature_index = int(np.argmax(similarities))
-        feature = features[feature_index]
-        combined_isim = feature.combined_isim(fingerprint)
-        merge = combined_isim >= threshold
-        if merge and tolerance is not None and feature.count > 1:
-            n = float(feature.count)
-            affinity = ((n + 1.0) * combined_isim - (n - 1.0) * feature.isim) * 0.5
-            merge = affinity >= feature.isim - tolerance
-
-        if merge:
-            feature.add(fingerprint, index)
-        else:
-            feature_index = len(features)
-            features.append(BitFeature.from_fingerprint(fingerprint, index))
-        labels[index] = feature_index
-
-    return labels, features
+def first_member(entry: Entry) -> int:
+    return min(entry.members)

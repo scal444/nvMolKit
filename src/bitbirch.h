@@ -21,11 +21,6 @@
 
 namespace nvMolKit {
 
-enum class BitBirchMergeCriterion : std::uint8_t {
-  Diameter,
-  ToleranceDiameter
-};
-
 struct BitBirchResult {
   AsyncDeviceVector<int>           clusterIds;
   AsyncDeviceVector<std::uint32_t> centroids;
@@ -35,61 +30,23 @@ struct BitBirchResult {
   bool                             clusterIdsOnHost = false;
 };
 
-/** Experimental shared-tree insertion with snapshot parent routing and ordered leaf owners.
- * Batch size changes routing freshness, not the number of independent trees.
- * Structural changes occur after all leaf owners finish. Diameter only.
- */
-BitBirchResult bitBirchSharedGpu(cuda::std::span<const std::uint32_t> fingerprints,
-                                 int                                  numFingerprints,
-                                 int                                  numWords,
-                                 double                               threshold,
-                                 int                                  branchingFactor,
-                                 int                                  insertionBatchSize,
-                                 bool                                 filteredGroups,
-                                 int                                  orderedPrefixSize,
-                                 std::size_t                          summaryCacheBytes     = 0,
-                                 bool                                 fingerprintsOnHost    = false,
-                                 bool                                 clusterIdsOnHost      = false,
-                                 bool                                 returnCentroids       = false,
-                                 cudaStream_t                         stream                = nullptr,
-                                 std::size_t                          fingerprintCacheBytes = 0);
-
 /**
- * Correctness-first ordered BitBIRCH tree construction on one GPU thread.
- *
- * This serial path supplies deterministic small-workload behavior and a native
- * differential target for the parallel partial-tree implementation. Tree and
- * scratch state are index-based global allocations owned by AsyncDeviceVector.
- */
-BitBirchResult bitBirchSerialGpu(cuda::std::span<const std::uint32_t> fingerprints,
-                                 int                                  numFingerprints,
-                                 int                                  numWords,
-                                 double                               threshold,
-                                 int                                  branchingFactor = 254,
-                                 BitBirchMergeCriterion               mergeCriterion = BitBirchMergeCriterion::Diameter,
-                                 double                               tolerance      = 0.05,
-                                 bool                                 returnCentroids = false,
-                                 cudaStream_t                         stream          = nullptr);
-
-/**
- * Build ordered partial trees concurrently and merge their Bit Features.
- *
- * A value of one preserves the serial-tree result. Larger values partition
- * the ordered input into contiguous ranges and build one tree per cooperative
- * CUDA block. Groups of partial trees merge concurrently; forests with at
- * most 65,535 summaries receive a cooperative final merge, while larger
- * forests retain their parallel-tree boundaries.
+ * Build one BitBIRCH tree using snapshot routing and ordered leaf owners.
+ * Structural changes occur only between insertion epochs, avoiding concurrent
+ * topology mutation without constructing independent trees and merging them.
  */
 BitBirchResult bitBirchGpu(cuda::std::span<const std::uint32_t> fingerprints,
                            int                                  numFingerprints,
                            int                                  numWords,
                            double                               threshold,
                            int                                  branchingFactor,
-                           BitBirchMergeCriterion               mergeCriterion,
-                           double                               tolerance,
-                           int                                  numPartitions,
-                           bool                                 returnCentroids = false,
-                           cudaStream_t                         stream          = nullptr);
+                           int                                  batchSize,
+                           std::size_t                          summaryCacheBytes     = 0,
+                           bool                                 fingerprintsOnHost    = false,
+                           bool                                 clusterIdsOnHost      = false,
+                           bool                                 returnCentroids       = false,
+                           cudaStream_t                         stream                = nullptr,
+                           std::size_t                          fingerprintCacheBytes = 0);
 
 }  // namespace nvMolKit
 

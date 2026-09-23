@@ -16,7 +16,6 @@
 import numpy as np
 import pytest
 import torch
-from _bitbirch_reference import partitioned_tree_reference, serial_tree_reference
 from rdkit.ML.Cluster.Butina import ClusterData
 
 import nvmolkit.clustering as clustering
@@ -584,36 +583,6 @@ def test_bitbirch_explicit_stream():
     torch.testing.assert_close(labels, torch.tensor([0, 0, 1, 1], dtype=torch.int32, device="cuda"))
 
 
-@pytest.mark.parametrize("branching_factor", [3, 4, 7])
-@pytest.mark.parametrize("threshold", [0.35, 0.6, 0.85])
-def test_bitbirch_matches_serial_tree_reference(branching_factor, threshold):
-    rng = np.random.default_rng(2026 + branching_factor)
-    packed = rng.integers(0, 2**32, size=(40, 3), dtype=np.uint32)
-    bits = np.unpackbits(packed.view(np.uint8).reshape(40, 12), axis=1, bitorder="little")
-    expected, _, _ = serial_tree_reference(bits, threshold, branching_factor=branching_factor)
-
-    x = torch.from_numpy(packed.view(np.int32)).cuda()
-    actual = bitbirch(x, threshold=threshold, branching_factor=branching_factor).numpy()
-    np.testing.assert_array_equal(actual, expected)
-
-
-def test_bitbirch_tolerance_diameter_matches_reference():
-    rng = np.random.default_rng(771)
-    packed = rng.integers(0, 2**32, size=(48, 2), dtype=np.uint32)
-    bits = np.unpackbits(packed.view(np.uint8).reshape(48, 8), axis=1, bitorder="little")
-    expected, _, _ = serial_tree_reference(bits, 0.3, branching_factor=4, tolerance=0.02)
-
-    x = torch.from_numpy(packed.view(np.int32)).cuda()
-    actual = bitbirch(
-        x,
-        threshold=0.3,
-        branching_factor=4,
-        merge_criterion="tolerance-diameter",
-        tolerance=0.02,
-    ).numpy()
-    np.testing.assert_array_equal(actual, expected)
-
-
 def test_bitbirch_empty_and_all_zero_fingerprints():
     empty = torch.empty((0, 3), dtype=torch.uint32, device="cuda")
     empty_labels, empty_centroids = bitbirch(empty, threshold=0.5, return_centroids=True)
@@ -650,128 +619,14 @@ def test_bitbirch_accepts_noncontiguous_packed_input():
     torch.testing.assert_close(labels, torch.tensor([0, 0, 1, 1], dtype=torch.int32, device="cuda"))
 
 
-def test_bitbirch_component_width_dispatch_above_uint8():
-    x = torch.zeros((300, 1), dtype=torch.uint32, device="cuda")
-    x[:150, 0] = 0x0000FFFF
-    x[150:, 0] = 0xFFFF0000
-    packed = x.cpu().numpy()
-    bits = np.unpackbits(packed.view(np.uint8).reshape(300, 4), axis=1, bitorder="little")
-    expected, _, _ = serial_tree_reference(bits, 0.9, branching_factor=3)
-    labels = bitbirch(x, threshold=0.9, branching_factor=3).numpy()
-    np.testing.assert_array_equal(labels, expected)
-
-
-def test_bitbirch_partitioned_component_width_dispatch_uint8_to_uint16():
-    rng = np.random.default_rng(7301)
-    packed = rng.integers(0, 2**32, size=(300, 2), dtype=np.uint32)
-    bits = np.unpackbits(packed.view(np.uint8).reshape(300, 8), axis=1, bitorder="little")
-    expected, _, _ = partitioned_tree_reference(bits, 0.6, branching_factor=4, num_partitions=3)
-    labels = bitbirch(packed, threshold=0.6, branching_factor=4, num_partitions=3).numpy()
-    np.testing.assert_array_equal(labels, expected)
-
-
-def test_bitbirch_partitioned_component_width_dispatch_uint16_to_uint32():
-    x = torch.full((65536, 1), 0x5A5A5A5A, dtype=torch.uint32, device="cuda")
-    labels, centroids = bitbirch(x, threshold=1.0, num_partitions=257, return_centroids=True)
-    torch.testing.assert_close(labels.torch(), torch.zeros(65536, dtype=torch.int32, device="cuda"))
-    torch.testing.assert_close(centroids.torch(), torch.tensor([[0x5A5A5A5A]], dtype=torch.uint32, device="cuda"))
-
-
-def test_bitbirch_partitioned_partial_trees_merge_summaries_deterministically():
-    x = torch.tensor([[0b0011], [0b1100], [0b0001], [0b0100]], dtype=torch.uint32, device="cuda")
-    first_labels, first_centroids = bitbirch(
-        x, threshold=0.5, branching_factor=3, num_partitions=2, return_centroids=True
-    )
-    second_labels, second_centroids = bitbirch(
-        x, threshold=0.5, branching_factor=3, num_partitions=2, return_centroids=True
-    )
-
-    torch.testing.assert_close(first_labels.torch(), torch.tensor([0, 1, 0, 1], dtype=torch.int32, device="cuda"))
-    torch.testing.assert_close(first_centroids.torch(), torch.tensor([[3], [12]], dtype=torch.uint32, device="cuda"))
-    torch.testing.assert_close(second_labels.torch(), first_labels.torch())
-    torch.testing.assert_close(second_centroids.torch(), first_centroids.torch())
-
-
-def test_bitbirch_partitioned_merge_reinitializes_scratch_between_batches():
-    unique = (np.uint32(1) << np.arange(9, dtype=np.uint32)).reshape(-1, 1)
-    packed = np.tile(unique, (4, 1))
-
-    labels = bitbirch(packed, threshold=1.0, branching_factor=254, num_partitions=4).numpy()
-
-    np.testing.assert_array_equal(labels, np.tile(np.arange(9, dtype=np.int32), 4))
-
-
-def test_bitbirch_sparse_scaling_path_reconciles_adjacent_partial_forests():
-    partition_pairs = np.arange(1, 41, dtype=np.uint32).reshape(20, 2)
-    packed = np.repeat(partition_pairs, 2, axis=0).reshape(-1, 1)
-
-    labels = bitbirch(packed, threshold=1.0, branching_factor=254, num_partitions=40).numpy()
-
-    np.testing.assert_array_equal(labels, packed[:, 0].astype(np.int32) - 1)
-
-
-@pytest.mark.parametrize(
-    "num_fingerprints, expected_partitions",
-    [(0, 1), (511, 1), (512, 3), (65_535, 257), (1_000_000, 3_922)],
-)
-def test_bitbirch_automatic_partition_count_bounds_partial_width(num_fingerprints, expected_partitions):
-    assert clustering._automatic_bitbirch_partitions(num_fingerprints) == expected_partitions
-
-
-def test_bitbirch_automatic_partitioning_above_small_workload_cutoff():
-    x = torch.full((512, 1), 0xA5A5A5A5, dtype=torch.uint32, device="cuda")
-    labels, centroids = bitbirch(x, threshold=1.0, return_centroids=True)
-    torch.testing.assert_close(labels.torch(), torch.zeros(512, dtype=torch.int32, device="cuda"))
-    torch.testing.assert_close(centroids.torch(), torch.tensor([[0xA5A5A5A5]], dtype=torch.uint32, device="cuda"))
-
-
-@pytest.mark.parametrize("num_partitions", [2, 3, 7, 8, 9, 17])
-@pytest.mark.parametrize("branching_factor", [3, 7])
-def test_bitbirch_partitioned_matches_bit_feature_merge_reference(num_partitions, branching_factor):
-    rng = np.random.default_rng(8100 + 10 * num_partitions + branching_factor)
-    packed = rng.integers(0, 2**32, size=(40, 3), dtype=np.uint32)
-    bits = np.unpackbits(packed.view(np.uint8).reshape(40, 12), axis=1, bitorder="little")
-    expected_labels, expected_features, _ = partitioned_tree_reference(
-        bits,
-        0.55,
-        branching_factor=branching_factor,
-        num_partitions=num_partitions,
-    )
-    labels, centroids = bitbirch(
-        packed,
-        threshold=0.55,
-        branching_factor=branching_factor,
-        num_partitions=num_partitions,
-        return_centroids=True,
-    )
-    expected_centroids = np.packbits(
-        np.stack([feature.centroid for feature in expected_features]), axis=1, bitorder="little"
-    ).view(np.uint32)
-
-    np.testing.assert_array_equal(labels.numpy(), expected_labels)
-    np.testing.assert_array_equal(centroids.numpy(), expected_centroids)
-
-
 @pytest.mark.parametrize(
     "kwargs,error",
     [
-        ({"threshold": -0.1}, r"threshold must be in \[0, 1\]"),
-        ({"threshold": np.nan}, r"threshold must be in \[0, 1\]"),
-        ({"threshold": np.inf}, r"threshold must be in \[0, 1\]"),
+        ({"threshold": -0.1}, r"threshold must be finite and in \[0, 1\]"),
+        ({"threshold": np.nan}, r"threshold must be finite and in \[0, 1\]"),
+        ({"threshold": np.inf}, r"threshold must be finite and in \[0, 1\]"),
         ({"threshold": 0.5, "branching_factor": 2}, "branching_factor must be at least 3"),
-        ({"threshold": 0.5, "merge_criterion": "radius"}, "merge_criterion must be one of"),
-        ({"threshold": 0.5, "tolerance": -0.1}, "tolerance must be nonnegative"),
-        ({"threshold": 0.5, "tolerance": np.nan}, "tolerance must be nonnegative"),
-        ({"threshold": 0.5, "tolerance": np.inf}, "tolerance must be nonnegative"),
-        ({"threshold": 0.5, "num_partitions": 0}, "num_partitions must be positive"),
-        (
-            {"threshold": 0.5, "num_partitions": 3},
-            "num_partitions must not exceed the number of fingerprints",
-        ),
-        (
-            {"threshold": 0.5, "merge_criterion": "tolerance-diameter", "num_partitions": 2},
-            "tolerance-diameter merging currently requires num_partitions=1",
-        ),
+        ({"threshold": 0.5, "batch_size": 0}, "batch_size must be positive"),
     ],
 )
 def test_bitbirch_validation(kwargs, error):

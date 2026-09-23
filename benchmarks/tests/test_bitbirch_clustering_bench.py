@@ -52,8 +52,8 @@ def test_parser_uses_standard_input_and_workload_options():
             "20",
             "--branching_factor",
             "64",
-            "--num_partitions",
-            "4",
+            "--batch_size",
+            "512",
             "--fp_size",
             "512",
             "-r",
@@ -64,7 +64,7 @@ def test_parser_uses_standard_input_and_workload_options():
     assert args.smiles == "input.smi"
     assert args.num_mols == [10, 20]
     assert args.branching_factor == 64
-    assert args.num_partitions == 4
+    assert args.batch_size == 512
     assert args.fp_size == 512
     assert args.runs == 2
     assert args.output is None

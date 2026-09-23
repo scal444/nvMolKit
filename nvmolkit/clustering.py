@@ -27,9 +27,9 @@ neighbor-count and cluster-extraction steps. This trades extra compute for
 drastically lower memory: usage is O(N) rather than O(N^2), making it the
 better choice for large N where the full matrix would be prohibitively large.
 
-``bitbirch()`` also uses linear storage, but incrementally builds ordered trees
-from binary-fingerprint summaries. It can construct independent partial trees
-concurrently and merge their Bit Features without an all-pairs matrix.
+``bitbirch()`` also uses linear storage, but incrementally builds one ordered
+tree from binary-fingerprint summaries. Batched snapshot routing allows
+concurrent work without an all-pairs matrix.
 """
 
 import math
@@ -315,125 +315,39 @@ def fused_butina(
         return _resolve_output(result, output)
 
 
-def _automatic_bitbirch_partitions(num_fingerprints: int) -> int:
-    if num_fingerprints < 512:
-        return 1
-    return (num_fingerprints + 254) // 255
-
-
-def bitbirch_shared(
-    x: ArrayInput,
-    threshold: float,
-    *,
-    branching_factor: int = 254,
-    insertion_batch_size: int = 1024,
-    insertion_policy: str = "ordered-leaf",
-    ordered_prefix_size: int = 0,
-    summary_cache_bytes: int = 0,
-    fingerprint_cache_bytes: int = 0,
-    host_input: bool = False,
-    host_output: bool = False,
-    return_centroids: bool = False,
-    stream: torch.cuda.Stream | None = None,
-) -> AsyncGpuResult | np.ndarray | tuple[AsyncGpuResult | np.ndarray, AsyncGpuResult]:
-    """Experimental single-tree insertion, with frozen parent routing per batch.
-
-    With ``ordered-leaf``, each leaf has one ordered writer. ``filtered-group``
-    first tests snapshot proposals individually and commits jointly admissible
-    groups to disjoint entries, then handles residuals with ordered leaf writers.
-    With ``filtered-group``, ``ordered_prefix_size`` optionally builds the first
-    input rows using ordered leaf writers before enabling grouped insertion.
-    Splits occur at barriers and unprocessed inputs are rerouted. This is not the
-    independent-trees-plus-merge algorithm. Batch size one with single-path
-    routing preserves native serial-tree semantics. Larger batches can change
-    clustering; grouped insertion can do so even before the first split.
-    Only the diameter criterion is supported. A positive ``summary_cache_bytes``
-    puts materialized BF sums in pinned CPU memory with a capped GPU page cache;
-    cold pages use mapped host memory and cache rotation occurs between batches.
-    Zero keeps BF sums entirely on the GPU. ``host_input=True`` accepts a packed
-    NumPy matrix (including a memory map), copies only the current insertion
-    batch to the GPU, and retains packed singleton fingerprints with the tree.
-    ``host_output=True`` keeps labels in mapped pinned CPU memory during
-    insertion and returns them as a NumPy array, removing the remaining N-wide
-    GPU allocation. A positive ``fingerprint_cache_bytes`` similarly puts
-    retained singleton fingerprints in pinned CPU memory with a capped GPU page
-    cache; it requires ``host_input=True``. Centroids, topology, and scratch
-    remain GPU resident. This is not yet a fully bounded-memory interface or a
-    persistent append API.
-    """
-    if not math.isfinite(threshold) or not 0 <= threshold <= 1:
-        raise ValueError("threshold must be finite and in [0, 1]")
-    if branching_factor < 3 or insertion_batch_size < 1:
-        raise ValueError("branching_factor must be at least 3 and insertion_batch_size positive")
-    if insertion_policy not in ("ordered-leaf", "filtered-group"):
-        raise ValueError("insertion_policy must be ordered-leaf or filtered-group")
-    if ordered_prefix_size < 0:
-        raise ValueError("ordered_prefix_size must be nonnegative")
-    if summary_cache_bytes < 0:
-        raise ValueError("summary_cache_bytes must be nonnegative")
-    if fingerprint_cache_bytes < 0:
-        raise ValueError("fingerprint_cache_bytes must be nonnegative")
-    if fingerprint_cache_bytes and not host_input:
-        raise ValueError("fingerprint_cache_bytes requires host_input=True")
-    if host_input:
-        if not isinstance(x, np.ndarray) or x.ndim != 2 or x.dtype not in (np.int32, np.uint32):
-            raise ValueError("host_input requires a packed 2D NumPy int32 or uint32 array")
-        if x.shape[1] == 0:
-            raise ValueError("x must contain at least one fingerprint word")
-        x = np.ascontiguousarray(x)
-        interface = x.__array_interface__
-        active_stream = _resolve_cuda_stream(stream)
-    else:
-        (x,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
-        interface = x.__cuda_array_interface__
-    with torch.cuda.stream(active_stream):
-        result = _clustering.bitbirch_shared(
-            interface,
-            threshold,
-            branching_factor,
-            insertion_batch_size,
-            insertion_policy,
-            ordered_prefix_size,
-            summary_cache_bytes,
-            fingerprint_cache_bytes,
-            host_input,
-            host_output,
-            return_centroids,
-            active_stream.cuda_stream,
-        )
-        return _wrap_bitbirch_result(result, return_centroids, host_output)
-
-
 def bitbirch(
     x: ArrayInput,
     threshold: float,
     *,
     branching_factor: int = 254,
-    merge_criterion: str = "diameter",
-    tolerance: float = 0.05,
-    num_partitions: int | None = None,
+    batch_size: int = 1024,
+    summary_cache_bytes: int = 0,
+    fingerprint_cache_bytes: int = 0,
+    host_output: bool = False,
     return_centroids: bool = False,
     stream: torch.cuda.Stream | None = None,
-) -> AsyncGpuResult | tuple[AsyncGpuResult, AsyncGpuResult]:
-    """Cluster packed binary fingerprints with an ordered BitBIRCH tree.
+) -> AsyncGpuResult | np.ndarray | tuple[AsyncGpuResult | np.ndarray, AsyncGpuResult]:
+    """Cluster packed binary fingerprints in one concurrent BitBIRCH tree.
 
-    The operation uses linear device storage and avoids pairwise similarity
-    matrices. With multiple partitions, independent ordered trees are built
-    concurrently and their leaf Bit Features are inserted into a final tree.
+    Each insertion epoch routes against a stable tree snapshot. One ordered
+    owner updates each leaf, then summaries and splits are repaired at barriers.
+    The implementation therefore avoids concurrent topology mutation without
+    changing the algorithm into independent clustering followed by a merge.
 
     Args:
-        x: Shape ``(N, W)`` packed int32 or uint32 fingerprints. Host inputs
-           are copied to CUDA through the standard nvMolKit input path.
+        x: Shape ``(N, W)`` packed int32 or uint32 fingerprints. NumPy arrays,
+           including memory maps, are streamed to the GPU one batch at a time.
         threshold: Minimum combined-cluster iSIM Jaccard--Tanimoto similarity.
         branching_factor: Maximum entries per tree node. Must be at least 3.
-        merge_criterion: ``"diameter"`` or ``"tolerance-diameter"``.
-        tolerance: Maximum permitted degradation for tolerance-diameter merge.
-        num_partitions: Number of contiguous partial trees. ``None`` selects
-                        one tree below 512 inputs and roughly one tree per 256
-                        inputs otherwise, keeping partial-tree counts in an
-                        8-bit representation. Tolerance-diameter mode selects
-                        one tree. Set to 1 for exact deterministic serial-tree
-                        semantics.
+        batch_size: Fingerprints routed per insertion epoch. Larger batches
+                    expose more parallelism but use an older routing snapshot.
+        summary_cache_bytes: GPU cache budget for Bit Feature sums. Zero keeps
+                             all sums on the GPU.
+        fingerprint_cache_bytes: GPU cache budget for singleton fingerprints
+                                 retained from NumPy input. Zero keeps them on
+                                 the GPU. This option requires NumPy input.
+        host_output: Keep labels in mapped pinned host memory and return a
+                     NumPy array instead of a device result.
         return_centroids: Return packed majority centroids with shape
                           ``(num_clusters, W)`` in addition to labels.
         stream: CUDA stream to use. If None, uses the current stream.
@@ -444,48 +358,44 @@ def bitbirch(
         majority centroids in cluster-ID order.
 
     Notes:
-        Fingerprints must be word-aligned; a row represents exactly
-        ``32 * W`` logical bits. Results are deterministic for fixed input,
-        options, and GPU architecture, but changing ``num_partitions`` can
-        change the partition. The call currently waits for tree-status and
-        cluster-count metadata on the host before returning; labels and
-        centroids remain device-resident.
+        Fingerprints must be word-aligned; a row represents exactly ``32 * W``
+        logical bits. Results are deterministic for fixed input, options, and
+        GPU architecture. Changing ``batch_size`` can change the clustering.
     """
     if not math.isfinite(threshold) or not 0 <= threshold <= 1:
-        raise ValueError(f"threshold must be in [0, 1], got {threshold}")
+        raise ValueError("threshold must be finite and in [0, 1]")
     if branching_factor < 3:
         raise ValueError(f"branching_factor must be at least 3, got {branching_factor}")
-    if merge_criterion not in ("diameter", "tolerance-diameter"):
-        raise ValueError(f"merge_criterion must be one of ['diameter', 'tolerance-diameter'], got {merge_criterion}")
-    if not math.isfinite(tolerance) or tolerance < 0:
-        raise ValueError(f"tolerance must be nonnegative, got {tolerance}")
-    if num_partitions is not None and num_partitions < 1:
-        raise ValueError(f"num_partitions must be positive, got {num_partitions}")
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
+    if summary_cache_bytes < 0 or fingerprint_cache_bytes < 0:
+        raise ValueError("cache sizes must be nonnegative")
 
-    (x,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
-    num_fingerprints = x.shape[0]
-    if num_partitions is None:
-        if merge_criterion == "tolerance-diameter":
-            num_partitions = 1
-        else:
-            num_partitions = _automatic_bitbirch_partitions(num_fingerprints)
-    if num_fingerprints > 0 and num_partitions > num_fingerprints:
-        raise ValueError(
-            f"num_partitions must not exceed the number of fingerprints ({num_fingerprints}), got {num_partitions}"
-        )
-    if num_fingerprints == 0:
-        num_partitions = 1
-    if merge_criterion == "tolerance-diameter" and num_partitions > 1:
-        raise ValueError("tolerance-diameter merging currently requires num_partitions=1")
+    host_input = isinstance(x, np.ndarray)
+    if host_input:
+        if x.ndim != 2 or x.dtype not in (np.int32, np.uint32):
+            raise ValueError("NumPy input must be a packed 2D int32 or uint32 array")
+        if x.shape[1] == 0:
+            raise ValueError("x must contain at least one fingerprint word")
+        x = np.ascontiguousarray(x)
+        interface = x.__array_interface__
+        active_stream = _resolve_cuda_stream(stream)
+    else:
+        if fingerprint_cache_bytes:
+            raise ValueError("fingerprint_cache_bytes requires NumPy input")
+        (x,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
+        interface = x.__cuda_array_interface__
     with torch.cuda.stream(active_stream):
         result = _clustering.bitbirch(
-            x.__cuda_array_interface__,
+            interface,
             threshold,
             branching_factor,
-            merge_criterion,
-            tolerance,
-            num_partitions,
+            batch_size,
+            summary_cache_bytes,
+            fingerprint_cache_bytes,
+            host_input,
+            host_output,
             return_centroids,
             active_stream.cuda_stream,
         )
-        return _wrap_bitbirch_result(result, return_centroids)
+        return _wrap_bitbirch_result(result, return_centroids, host_output)

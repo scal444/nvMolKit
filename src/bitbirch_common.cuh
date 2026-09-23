@@ -57,21 +57,6 @@ __host__ __device__ __forceinline__ bool isimTanimotoAtLeast(const ISimTanimotoT
   return denominator > 0.0 ? terms.commonPairs >= threshold * denominator : threshold <= 1.0;
 }
 
-/** Refinement-paper Equation 5 for inserting one fingerprint into a Bit Feature. */
-__host__ __device__ __forceinline__ bool singletonToleranceAllows(const double        oldISim,
-                                                                  const double        combinedISim,
-                                                                  const std::uint64_t oldCount,
-                                                                  const double        tolerance) {
-  // A singleton has no old pairwise diversity to preserve. The combined
-  // feature must still pass its primary diameter threshold independently.
-  if (oldCount <= 1) {
-    return true;
-  }
-  const double n        = static_cast<double>(oldCount);
-  const double affinity = ((n + 1.0) * combinedISim - (n - 1.0) * oldISim) * 0.5;
-  return affinity >= oldISim - tolerance;
-}
-
 }  // namespace nvMolKit::bitbirch
 
 #endif  // NVMOLKIT_BITBIRCH_COMMON_CUH

@@ -57,7 +57,7 @@ def _bench_nvmolkit(
     *,
     threshold: float,
     branching_factor: int,
-    num_partitions: int | None,
+    batch_size: int,
     runs: int,
     warmups: int,
 ) -> tuple[object, int]:
@@ -69,7 +69,7 @@ def _bench_nvmolkit(
             fingerprints,
             threshold,
             branching_factor=branching_factor,
-            num_partitions=num_partitions,
+            batch_size=batch_size,
         ).torch()
 
     timing = time_it(run, runs=runs, warmups=warmups, gpu_sync=True)
@@ -172,11 +172,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--branching_factor", "--branching-factor", type=int, default=254)
     parser.add_argument(
-        "--num_partitions",
-        "--num-partitions",
+        "--batch_size",
+        "--batch-size",
         type=int,
-        default=0,
-        help="nvMolKit partitions; 0 uses automatic selection (default: 0)",
+        default=1024,
+        help="nvMolKit insertion batch size (default: 1024)",
     )
     parser.add_argument("--radius", type=int, default=2)
     parser.add_argument("--fp_size", "--fp-size", type=int, default=1024)
@@ -221,8 +221,8 @@ def main() -> None:
         parser.error("--num_mols must contain positive integers")
     if args.runs <= 0 or args.warmups < 0:
         parser.error("--runs must be positive and --warmups must be nonnegative")
-    if args.num_partitions < 0:
-        parser.error("--num-partitions must be nonnegative")
+    if args.batch_size <= 0:
+        parser.error("--batch-size must be positive")
     if args.bblean_max_seconds < 0:
         parser.error("--bblean-max-seconds must be nonnegative")
     if any(not math.isfinite(threshold) or not 0 <= threshold <= 1 for threshold in thresholds):
@@ -263,7 +263,6 @@ def main() -> None:
     print(f"Fingerprint generation finished in {fingerprint_seconds:.3f} s", flush=True)
 
     results = []
-    num_partitions = args.num_partitions or None
     try:
         for size in molecule_counts:
             device_fps = fingerprints[:size].contiguous()
@@ -286,10 +285,9 @@ def main() -> None:
                 configuration_rows = []
 
                 if not args.no_nvmolkit:
-                    partitions = "auto" if num_partitions is None else str(num_partitions)
                     print(
                         f"  Starting nvMolKit GPU: {args.warmups} warmup(s), {args.runs} timed run(s), "
-                        f"partitions={partitions}",
+                        f"batch_size={args.batch_size}",
                         flush=True,
                     )
                     torch.cuda.cudart().cudaProfilerStart()
@@ -298,7 +296,7 @@ def main() -> None:
                             device_fps,
                             threshold=threshold,
                             branching_factor=args.branching_factor,
-                            num_partitions=num_partitions,
+                            batch_size=args.batch_size,
                             runs=args.runs,
                             warmups=args.warmups,
                         )
@@ -313,7 +311,7 @@ def main() -> None:
                         {
                             "method": "nvmolkit",
                             **common_fields,
-                            "num_partitions": "auto" if num_partitions is None else num_partitions,
+                            "batch_size": args.batch_size,
                             "device": torch.cuda.get_device_name(device_fps.device),
                             **_timing_fields(timing),
                             "num_clusters": num_clusters,
@@ -344,7 +342,7 @@ def main() -> None:
                         {
                             "method": "bblean",
                             **common_fields,
-                            "num_partitions": "N/A",
+                            "batch_size": "N/A",
                             "device": "CPU",
                             "version": bblean_version,
                             **_timing_fields(timing),
