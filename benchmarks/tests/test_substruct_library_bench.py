@@ -8,6 +8,7 @@ from unittest.mock import ANY
 import pytest
 import substruct_library_bench as benchmark
 from bench_utils import TimingResult
+from rdkit import Chem
 
 
 class _FakeNvLibrary:
@@ -190,6 +191,7 @@ def _args(**overrides):
         "batch_size": 1024,
         "workers": -1,
         "prep_threads": -1,
+        "gpu_ids": None,
         "gpu_id": 0,
         "rdkit_threads": [-1],
         "max_results": -1,
@@ -211,7 +213,8 @@ def _args(**overrides):
         ({"batch_size": 0}, "batch_size"),
         ({"workers": -2}, "workers"),
         ({"prep_threads": -2}, "prep_threads"),
-        ({"gpu_id": -1}, "gpu_id"),
+        ({"gpu_id": -1}, "gpu_ids"),
+        ({"gpu_ids": [0, 0], "gpu_id": None}, "unique"),
         ({"rdkit_threads": [0]}, "rdkit_threads"),
         ({"max_results": -2}, "max_results"),
         ({"repetitions": 0}, "repetitions"),
@@ -247,6 +250,9 @@ def test_parser_exposes_backend_sweeps_and_lifecycle_controls():
             "--rdkit_threads",
             "1",
             "8",
+            "--gpu_ids",
+            "0",
+            "1",
             "--maxResults",
             "20",
             "--repetitions",
@@ -259,8 +265,20 @@ def test_parser_exposes_backend_sweeps_and_lifecycle_controls():
     assert args.chunk_sizes == [8192, 65536]
     assert args.rdkit_holders == ["mol", "cached-pattern"]
     assert args.rdkit_threads == [1, 8]
+    assert args.gpu_ids == [0, 1]
     assert args.max_results == 20
     assert args.repetitions == 5
+
+
+def test_query_smiles_are_molecules_with_stereochemistry_removed(tmp_path):
+    query_path = tmp_path / "queries.smi"
+    query_path.write_text("N[C@@H](C)C(=O)O\n")
+    args = benchmark._build_parser().parse_args(["--smiles", "mols.smi", "--query_smiles", str(query_path)])
+
+    queries = benchmark._load_queries(args)
+
+    assert len(queries) == 1
+    assert all(atom.GetChiralTag() == Chem.ChiralType.CHI_UNSPECIFIED for atom in queries[0].GetAtoms())
 
 
 def test_nvmolkit_benchmark_constructs_requested_config_and_library(monkeypatch):
@@ -302,7 +320,7 @@ def test_nvmolkit_benchmark_constructs_requested_config_and_library(monkeypatch)
         batch_size=512,
         worker_threads=3,
         preprocessing_threads=4,
-        gpu_id=2,
+        gpu_ids=[2, 3],
         max_results=10,
         runs=2,
         warmups=1,
@@ -316,7 +334,7 @@ def test_nvmolkit_benchmark_constructs_requested_config_and_library(monkeypatch)
             "batchSize": 512,
             "workerThreads": 3,
             "preprocessingThreads": 4,
-            "gpuIds": [2],
+            "gpuIds": [2, 3],
             "algorithm": "dfs",
         }
     ]
@@ -351,12 +369,15 @@ def test_main_runs_requested_cross_product_and_validates_each_gpu_result(monkeyp
             "--chunk_sizes",
             "8",
             "16",
+            "--gpu_ids",
+            "0",
+            "1",
             "--max_results",
             "0",
         ],
     )
     monkeypatch.setattr(benchmark, "_load_molecules", lambda args: [object(), object()])
-    monkeypatch.setattr(benchmark, "load_smarts", lambda path: ([object()], ["C"]))
+    monkeypatch.setattr(benchmark, "_load_queries", lambda args: [object()])
     monkeypatch.setattr(
         benchmark,
         "benchmark_rdkit",
@@ -397,6 +418,7 @@ def test_main_runs_requested_cross_product_and_validates_each_gpu_result(monkeyp
     assert len(validation_calls) == len(nvmolkit_calls) == 4
     assert len(reference_calls) == 1
     assert all(call["max_results"] == -1 for call in rdkit_calls + nvmolkit_calls)
+    assert all(call["gpu_ids"] == [0, 1] for call in nvmolkit_calls)
     assert len(emitted_rows) == 8
     assert {row["backend"] for row in emitted_rows} == {
         "rdkit-substruct-library",

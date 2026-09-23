@@ -33,6 +33,7 @@ from bench_utils import (
     time_it,
     write_csv_rows,
 )
+from rdkit import Chem
 from rdkit.Chem import rdSubstructLibrary
 
 
@@ -215,7 +216,7 @@ def benchmark_nvmolkit(
     batch_size: int,
     worker_threads: int,
     preprocessing_threads: int,
-    gpu_id: int,
+    gpu_ids: Sequence[int],
     max_results: int,
     runs: int,
     warmups: int,
@@ -226,12 +227,12 @@ def benchmark_nvmolkit(
     from nvmolkit.substruct_library import SubstructLibrary
     from nvmolkit.substructure import SubstructSearchConfig
 
-    torch.cuda.set_device(gpu_id)
+    torch.cuda.set_device(gpu_ids[0])
     config = SubstructSearchConfig(
         batchSize=batch_size,
         workerThreads=worker_threads,
         preprocessingThreads=preprocessing_threads,
-        gpuIds=[gpu_id],
+        gpuIds=list(gpu_ids),
         algorithm=algorithm,
     )
     return _benchmark_lifecycle(
@@ -310,7 +311,9 @@ def _build_parser() -> argparse.ArgumentParser:
     inputs = parser.add_mutually_exclusive_group(required=True)
     inputs.add_argument("--smiles", "-s", help="SMILES input file")
     inputs.add_argument("--pickle", help="Pickled RDKit molecule binaries")
-    parser.add_argument("--smarts", "-q", required=True, help="SMARTS query file")
+    queries = parser.add_mutually_exclusive_group(required=True)
+    queries.add_argument("--smarts", "-q", help="SMARTS query file")
+    queries.add_argument("--query_smiles", help="SMILES molecule-query file; stereochemistry is ignored")
     parser.add_argument("--num_mols", "-n", type=int, default=0, help="Maximum target molecules; 0 means all")
     parser.add_argument("--seed", type=int, default=42, help="Molecule sampling seed")
     parser.add_argument("--no_sanitize", dest="sanitize", action="store_false", default=True)
@@ -320,7 +323,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch_size", type=int, default=1024)
     parser.add_argument("--workers", type=int, default=-1)
     parser.add_argument("--prep_threads", type=int, default=-1)
-    parser.add_argument("--gpu_id", type=int, default=0)
+    gpu_selection = parser.add_mutually_exclusive_group()
+    gpu_selection.add_argument("--gpu_ids", nargs="+", type=int, help="GPU IDs used by one internally sharded library")
+    gpu_selection.add_argument("--gpu_id", type=int, help="Deprecated single-GPU spelling")
     parser.add_argument("--rdkit_holders", nargs="+", choices=["mol", "cached-pattern"], default=["mol"])
     parser.add_argument("--rdkit_threads", nargs="+", type=int, default=[-1])
     parser.add_argument(
@@ -350,8 +355,11 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("workers must be -1 or non-negative")
     if args.prep_threads < -1:
         raise ValueError("prep_threads must be -1 or non-negative")
-    if args.gpu_id < 0:
-        raise ValueError("gpu_id must be non-negative")
+    gpu_ids = args.gpu_ids if args.gpu_ids is not None else [0 if args.gpu_id is None else args.gpu_id]
+    if not gpu_ids or any(gpu_id < 0 for gpu_id in gpu_ids):
+        raise ValueError("gpu_ids must be non-empty and non-negative")
+    if len(set(gpu_ids)) != len(gpu_ids):
+        raise ValueError("gpu_ids must be unique")
     if any(num_threads == 0 or num_threads < -1 for num_threads in args.rdkit_threads):
         raise ValueError("rdkit_threads entries must be -1 or positive")
     if args.max_results < -1:
@@ -374,16 +382,27 @@ def _load_molecules(args: argparse.Namespace) -> list[Any]:
     return load_smiles(args.smiles, args.num_mols, args.sanitize, seed=args.seed)
 
 
+def _load_queries(args: argparse.Namespace) -> list[Any]:
+    if args.smarts:
+        queries, _ = load_smarts(args.smarts)
+        return queries
+    queries = load_smiles(args.query_smiles, 0, args.sanitize, seed=args.seed)
+    for query in queries:
+        Chem.RemoveStereochemistry(query)
+    return queries
+
+
 def main() -> None:
     args = _build_parser().parse_args()
     _validate_args(args)
     mols = _load_molecules(args)
-    queries, _ = load_smarts(args.smarts)
+    queries = _load_queries(args)
     if not mols:
         raise ValueError("no valid target molecules loaded")
     if not queries:
-        raise ValueError("no valid SMARTS queries loaded")
+        raise ValueError("no valid queries loaded")
     max_results = -1 if args.max_results == 0 else args.max_results
+    gpu_ids = args.gpu_ids if args.gpu_ids is not None else [0 if args.gpu_id is None else args.gpu_id]
 
     rows: list[dict[str, Any]] = []
     for operation in args.operations:
@@ -428,7 +447,7 @@ def main() -> None:
                         batch_size=args.batch_size,
                         worker_threads=args.workers,
                         preprocessing_threads=args.prep_threads,
-                        gpu_id=args.gpu_id,
+                        gpu_ids=gpu_ids,
                         max_results=max_results,
                         runs=args.runs,
                         warmups=args.warmups,
@@ -449,7 +468,8 @@ def main() -> None:
                             batch_size=args.batch_size,
                             workers=args.workers,
                             prep_threads=args.prep_threads,
-                            gpu_id=args.gpu_id,
+                            gpu_ids=",".join(str(gpu_id) for gpu_id in gpu_ids),
+                            num_gpus=len(gpu_ids),
                             max_results=max_results,
                         )
                     )

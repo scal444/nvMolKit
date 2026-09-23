@@ -5,11 +5,13 @@
 
 #include <GraphMol/ROMol.h>
 
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
 #include "src/substruct/substruct_constants.h"
 #include "src/utils/cuda_error_check.h"
+#include "src/utils/openmp_helpers.h"
 
 namespace nvMolKit {
 
@@ -195,6 +197,70 @@ MoleculeId TargetChunkBuilder::addMol(const RDKit::ROMol& mol) {
     fallbackGlobalIds_.push_back(id);
   }
   return id;
+}
+
+void TargetChunkBuilder::addMols(const std::vector<const RDKit::ROMol*>& molecules, int numThreads) {
+  if (sealed_) {
+    throw std::logic_error("Cannot add molecules to a sealed target chunk builder");
+  }
+  if (!empty()) {
+    throw std::logic_error("Parallel target chunk construction requires a fresh builder");
+  }
+  if (molecules.size() > maxMolecules_) {
+    throw std::length_error("Target chunk capacity exceeded");
+  }
+  if (molecules.empty()) {
+    return;
+  }
+
+  numThreads = std::max(1, numThreads);
+  sourceMolecules_.resize(molecules.size());
+  gpuSupported_.resize(molecules.size(), 0);
+  detail::OpenMPExceptionRegistry exceptionRegistry;
+
+#pragma omp parallel for num_threads(numThreads) schedule(static)
+  for (std::int64_t index = 0; index < static_cast<std::int64_t>(molecules.size()); ++index) {
+    try {
+      const RDKit::ROMol* molecule = molecules[static_cast<std::size_t>(index)];
+      if (molecule == nullptr) {
+        throw std::invalid_argument("Substructure library molecule cannot be null");
+      }
+      auto       owned     = std::make_unique<RDKit::ROMol>(*molecule);
+      const bool supported = owned->getNumAtoms() <= kMaxTargetAtoms && !requiresRDKitFallback(owned.get());
+      sourceMolecules_[static_cast<std::size_t>(index)] = std::move(owned);
+      gpuSupported_[static_cast<std::size_t>(index)]    = static_cast<std::uint8_t>(supported);
+    } catch (const std::runtime_error&) {
+      // Match addMol(): representation-limit failures remain available via
+      // the RDKit fallback rather than failing library construction.
+      try {
+        const auto position = static_cast<std::size_t>(index);
+        if (sourceMolecules_[position] == nullptr && molecules[position] != nullptr) {
+          sourceMolecules_[position] = std::make_unique<RDKit::ROMol>(*molecules[position]);
+        }
+        gpuSupported_[position] = 0;
+      } catch (...) {
+        exceptionRegistry.store(std::current_exception());
+      }
+    } catch (...) {
+      exceptionRegistry.store(std::current_exception());
+    }
+  }
+  exceptionRegistry.rethrow();
+
+  std::vector<const RDKit::ROMol*> supportedMolecules;
+  supportedMolecules.reserve(molecules.size());
+  packedGlobalIds_.reserve(molecules.size());
+  fallbackGlobalIds_.reserve(molecules.size());
+  for (std::size_t index = 0; index < molecules.size(); ++index) {
+    const MoleculeId id = firstId_ + index;
+    if (gpuSupported_[index] != 0) {
+      supportedMolecules.push_back(sourceMolecules_[index].get());
+      packedGlobalIds_.push_back(id);
+    } else {
+      fallbackGlobalIds_.push_back(id);
+    }
+  }
+  buildTargetBatchParallelInto(packedHost_, numThreads, supportedMolecules, {});
 }
 
 std::unique_ptr<ResidentTargetChunk> TargetChunkBuilder::seal() {

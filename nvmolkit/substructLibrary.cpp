@@ -41,12 +41,9 @@ list addMolecules(nvMolKit::SubstructLibrary& library, const object& molecules) 
   }
 
   std::vector<unsigned int> ids;
-  ids.reserve(pointers.size());
   {
     const ScopedGilRelease release;
-    for (const RDKit::ROMol* molecule : pointers) {
-      ids.push_back(library.addMol(*molecule));
-    }
+    ids = library.addMols(pointers);
   }
 
   list result;

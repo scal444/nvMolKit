@@ -70,6 +70,21 @@ class TestBasicSubstructureSearch:
         rdkit_matches = get_rdkit_matches(targets[0], queries[0])
         assert len(results[0][0]) == len(rdkit_matches)
 
+    @pytest.mark.parametrize("algorithm", ["gsi", "dfs"])
+    def test_plain_molecule_query_preserves_atom_constraints(self, algorithm: str):
+        """Plain molecule queries must not be packed as wildcard atoms."""
+        targets = [
+            Chem.MolFromSmiles("CCC(C)CNc1cccc2c1COCC2"),
+            Chem.MolFromSmiles("CC[C@H](CO)NCc1cccc2c1OCCO2"),
+            Chem.MolFromSmiles("C[C@@H]1CCN(c2ncnc3c2OCCO3)C1"),
+        ]
+        query = Chem.MolFromSmiles("CCC(C)CNc1cccc2c1COCC2")
+        config = SubstructSearchConfig(algorithm=algorithm, workerThreads=1, preprocessingThreads=2)
+
+        expected = [target.HasSubstructMatch(query, useChirality=False) for target in targets]
+        assert expected == [True, False, False]
+        assert hasSubstructMatch(targets, [query], config=config).reshape(-1).tolist() == expected
+
     def test_multiple_targets_single_query(self):
         """Test multiple targets with single query."""
         targets = [

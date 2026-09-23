@@ -131,6 +131,12 @@ class TargetChunkBuilder {
    */
   MoleculeId addMol(const RDKit::ROMol& mol);
 
+  /**
+   * Copy and pack a fresh builder's molecules with the requested CPU thread
+   * count while preserving their contiguous stable IDs.
+   */
+  void addMols(const std::vector<const RDKit::ROMol*>& molecules, int numThreads);
+
   /** Seal the builder and transfer its storage into a resident chunk. */
   [[nodiscard]] std::unique_ptr<ResidentTargetChunk> seal();
 
