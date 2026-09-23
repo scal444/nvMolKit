@@ -2756,16 +2756,23 @@ BitBirchResult launchShared(const cuda::std::span<const std::uint32_t> fingerpri
                             const int                                  routingWidth,
                             const std::size_t                          summaryCacheBytes,
                             const bool                                 fingerprintsOnHost,
+                            const bool                                 clusterIdsOnHost,
                             const bool                                 returnCentroids,
                             const cudaStream_t                         stream) {
-  const int                        batchCapacity   = std::min(insertionBatchSize, numFingerprints);
-  const std::size_t                splitCacheBytes = numWords <= 32 && branchingFactor < cooperativeBlockSize ?
-                                                       sizeof(std::uint32_t) * (cooperativeBlockSize + 1) * numWords :
-                                                       0;
-  BitBirchResult                   result{AsyncDeviceVector<int>(numFingerprints, stream),
+  const int         batchCapacity   = std::min(insertionBatchSize, numFingerprints);
+  const std::size_t splitCacheBytes = numWords <= 32 && branchingFactor < cooperativeBlockSize ?
+                                        sizeof(std::uint32_t) * (cooperativeBlockSize + 1) * numWords :
+                                        0;
+  BitBirchResult    result{AsyncDeviceVector<int>(clusterIdsOnHost ? 0 : numFingerprints, stream),
                         AsyncDeviceVector<std::uint32_t>(0, stream),
                         0,
                         numWords};
+  int*              labels = result.clusterIds.data();
+  if (clusterIdsOnHost) {
+    result.hostClusterIds   = PinnedHostVector<int>(numFingerprints);
+    result.clusterIdsOnHost = true;
+    cudaCheckError(cudaHostGetDevicePointer(&labels, result.hostClusterIds.data(), 0));
+  }
   AsyncDeviceVector<std::uint32_t> inputTile(
     fingerprintsOnHost ? static_cast<std::size_t>(batchCapacity) * numWords : 0,
     stream);
@@ -2780,7 +2787,7 @@ BitBirchResult launchShared(const cuda::std::span<const std::uint32_t> fingerpri
   const int                    initialNodes    = std::min(maxNodes, batchCapacity / (minimumNodeSize - 1) + 8);
   const int                    initialEntries  = std::min(maxEntries, batchCapacity + initialNodes);
   PartitionedForest<Component> tree(fingerprintsOnHost ? inputTile.data() : fingerprints.data(),
-                                    result.clusterIds.data(),
+                                    labels,
                                     numFingerprints,
                                     1,
                                     numFingerprints,
@@ -2841,7 +2848,7 @@ BitBirchResult launchShared(const cuda::std::span<const std::uint32_t> fingerpri
                                      cudaMemcpyHostToDevice,
                                      stream));
     }
-    cudaCheckError(cudaMemsetAsync(result.clusterIds.data() + begin, 0xff, count * sizeof(int), stream));
+    cudaCheckError(cudaMemsetAsync(labels + begin, 0xff, count * sizeof(int), stream));
     int pending = count;
     while (pending > 0) {
       // Every non-root node has exactly one directory entry, so K = E - V + 1.
@@ -3539,6 +3546,7 @@ BitBirchResult bitBirchSharedGpu(const cuda::std::span<const std::uint32_t> fing
                                  const int                                  routingWidth,
                                  const std::size_t                          summaryCacheBytes,
                                  const bool                                 fingerprintsOnHost,
+                                 const bool                                 clusterIdsOnHost,
                                  const bool                                 returnCentroids,
                                  const cudaStream_t                         stream) {
   const ScopedNvtxRange range("BitBIRCH shared tree");
@@ -3557,7 +3565,9 @@ BitBirchResult bitBirchSharedGpu(const cuda::std::span<const std::uint32_t> fing
     throw std::invalid_argument("BitBIRCH shared metadata exceeds supported index capacity");
   }
   if (numFingerprints == 0) {
-    return {AsyncDeviceVector<int>(0, stream), AsyncDeviceVector<std::uint32_t>(0, stream), 0, numWords};
+    BitBirchResult result{AsyncDeviceVector<int>(0, stream), AsyncDeviceVector<std::uint32_t>(0, stream), 0, numWords};
+    result.clusterIdsOnHost = clusterIdsOnHost;
+    return result;
   }
   if (numFingerprints <= std::numeric_limits<std::uint16_t>::max()) {
     return launchShared<std::uint16_t>(fingerprints,
@@ -3571,6 +3581,7 @@ BitBirchResult bitBirchSharedGpu(const cuda::std::span<const std::uint32_t> fing
                                        routingWidth,
                                        summaryCacheBytes,
                                        fingerprintsOnHost,
+                                       clusterIdsOnHost,
                                        returnCentroids,
                                        stream);
   }
@@ -3585,6 +3596,7 @@ BitBirchResult bitBirchSharedGpu(const cuda::std::span<const std::uint32_t> fing
                                      routingWidth,
                                      summaryCacheBytes,
                                      fingerprintsOnHost,
+                                     clusterIdsOnHost,
                                      returnCentroids,
                                      stream);
 }

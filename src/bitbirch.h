@@ -17,6 +17,7 @@
 #include <cuda/std/span>
 
 #include "src/utils/device_vector.h"
+#include "src/utils/host_vector.h"
 
 namespace nvMolKit {
 
@@ -30,6 +31,8 @@ struct BitBirchResult {
   AsyncDeviceVector<std::uint32_t> centroids;
   int                              numClusters = 0;
   int                              numWords    = 0;
+  PinnedHostVector<int>            hostClusterIds{};
+  bool                             clusterIdsOnHost = false;
 };
 
 /** Experimental shared-tree insertion with snapshot parent routing and ordered leaf owners.
@@ -47,6 +50,7 @@ BitBirchResult bitBirchSharedGpu(cuda::std::span<const std::uint32_t> fingerprin
                                  int                                  routingWidth       = 1,
                                  std::size_t                          summaryCacheBytes  = 0,
                                  bool                                 fingerprintsOnHost = false,
+                                 bool                                 clusterIdsOnHost   = false,
                                  bool                                 returnCentroids    = false,
                                  cudaStream_t                         stream             = nullptr);
 

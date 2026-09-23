@@ -32,6 +32,11 @@ boost::python::object toOwnedPyArray(nvMolKit::PyArray* array) {
   return boost::python::object(boost::python::handle<>(Converter()(array)));
 }
 
+boost::python::object toOwnedPyArray(nvMolKit::PyHostArray* array) {
+  using Converter = boost::python::manage_new_object::apply<nvMolKit::PyHostArray*>::type;
+  return boost::python::object(boost::python::handle<>(Converter()(array)));
+}
+
 boost::python::object wrapButinaResult(nvMolKit::ButinaResult& result, const int numItems, const bool returnCentroids) {
   auto clusterArray = nvMolKit::makePyArray(result.clusterIds, boost::python::make_tuple(numItems));
   if (!returnCentroids) {
@@ -45,13 +50,16 @@ boost::python::object wrapButinaResult(nvMolKit::ButinaResult& result, const int
 boost::python::object wrapBitBirchResult(nvMolKit::BitBirchResult& result,
                                          const int                 numItems,
                                          const bool                returnCentroids) {
-  auto clusterArray = nvMolKit::makePyArray(result.clusterIds, boost::python::make_tuple(numItems));
+  auto clusterArray =
+    result.clusterIdsOnHost ?
+      toOwnedPyArray(nvMolKit::makePyHostArray(result.hostClusterIds, boost::python::make_tuple(numItems))) :
+      toOwnedPyArray(nvMolKit::makePyArray(result.clusterIds, boost::python::make_tuple(numItems)));
   if (!returnCentroids) {
-    return toOwnedPyArray(clusterArray);
+    return clusterArray;
   }
   auto centroidArray =
     nvMolKit::makePyArray(result.centroids, boost::python::make_tuple(result.numClusters, result.numWords));
-  return boost::python::make_tuple(toOwnedPyArray(clusterArray), toOwnedPyArray(centroidArray));
+  return boost::python::make_tuple(clusterArray, toOwnedPyArray(centroidArray));
 }
 
 boost::python::object bitBirchShared(const boost::python::dict& fingerprints,
@@ -63,6 +71,7 @@ boost::python::object bitBirchShared(const boost::python::dict& fingerprints,
                                      const int                  routingWidth,
                                      const std::size_t          summaryCacheBytes,
                                      const bool                 fingerprintsOnHost,
+                                     const bool                 clusterIdsOnHost,
                                      const bool                 returnCentroids,
                                      const std::uintptr_t       streamPtr) {
   auto stream = nvMolKit::acquireExternalStream(streamPtr);
@@ -92,6 +101,7 @@ boost::python::object bitBirchShared(const boost::python::dict& fingerprints,
                                             routingWidth,
                                             summaryCacheBytes,
                                             fingerprintsOnHost,
+                                            clusterIdsOnHost,
                                             returnCentroids,
                                             *stream);
   return wrapBitBirchResult(result, count, returnCentroids);
@@ -111,6 +121,7 @@ BOOST_PYTHON_MODULE(_clustering) {
                       boost::python::arg("routing_width")        = 1,
                       boost::python::arg("summary_cache_bytes")  = 0,
                       boost::python::arg("host_input")           = false,
+                      boost::python::arg("host_output")          = false,
                       boost::python::arg("return_centroids")     = false,
                       boost::python::arg("stream")               = 0));
   boost::python::def(

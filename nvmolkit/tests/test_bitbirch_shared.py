@@ -202,6 +202,26 @@ def test_two_path_sanitizer_smoke():
     np.testing.assert_array_equal(labels.numpy(), tree.labels())
 
 
+def test_host_output_sanitizer_smoke():
+    packed = np.random.default_rng(857).integers(0, 2**32, (43, 2), dtype=np.uint32)
+    packed[30:36] = packed[:6]
+    tree = BeamBitBirch(0.4, 3, 16, ordered_prefix_size=5).fit(packed.view(np.uint8).reshape(len(packed), -1))
+    tree.audit()
+    labels = bitbirch_shared(
+        packed,
+        0.4,
+        branching_factor=3,
+        insertion_batch_size=16,
+        insertion_policy="filtered-group",
+        ordered_prefix_size=5,
+        routing_width=2,
+        host_input=True,
+        host_output=True,
+    )
+    assert isinstance(labels, np.ndarray)
+    np.testing.assert_array_equal(labels, tree.labels())
+
+
 @pytest.mark.parametrize("words,routes", [(1, 1), (1, 2), (32, 2)])
 def test_cpu_backed_summary_rotation_preserves_partition(words, routes):
     rng = np.random.default_rng(1591)
@@ -255,6 +275,43 @@ def test_host_input_empty_and_uint32_summary_dispatch():
     packed = np.zeros((65537, 1), dtype=np.uint32)
     labels = bitbirch_shared(packed, 1.0, host_input=True, insertion_policy="filtered-group", routing_width=2)
     np.testing.assert_array_equal(labels.numpy(), np.zeros(len(packed), dtype=np.int32))
+
+
+def test_host_output_preserves_labels_with_host_input_cache_and_centroids():
+    rng = np.random.default_rng(421)
+    packed = rng.integers(0, 2**32, (529, 3), dtype=np.uint32)
+    packed[430:500] = packed[:70]
+    options = dict(
+        branching_factor=7,
+        insertion_batch_size=32,
+        insertion_policy="filtered-group",
+        ordered_prefix_size=33,
+        routing_width=2,
+        return_centroids=True,
+    )
+    expected, expected_centroids = bitbirch_shared(packed, 0.4, **options)
+    device_input_labels, device_input_centroids = bitbirch_shared(packed, 0.4, host_output=True, **options)
+    assert isinstance(device_input_labels, np.ndarray)
+    np.testing.assert_array_equal(device_input_labels, expected.numpy())
+    np.testing.assert_array_equal(device_input_centroids.numpy(), expected_centroids.numpy())
+
+    page_bytes = 4096 * packed.shape[1] * 32 * 2
+    labels, centroids = bitbirch_shared(
+        packed,
+        0.4,
+        host_input=True,
+        host_output=True,
+        summary_cache_bytes=page_bytes,
+        **options,
+    )
+    assert isinstance(labels, np.ndarray)
+    assert labels.dtype == np.int32
+    np.testing.assert_array_equal(labels, expected.numpy())
+    np.testing.assert_array_equal(centroids.numpy(), expected_centroids.numpy())
+
+    empty = bitbirch_shared(np.zeros((0, 1), dtype=np.uint32), 0.5, host_input=True, host_output=True)
+    assert isinstance(empty, np.ndarray)
+    assert empty.shape == (0,)
 
 
 @pytest.mark.parametrize(

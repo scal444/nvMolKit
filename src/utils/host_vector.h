@@ -150,6 +150,13 @@ template <typename T> class PinnedHostVector {
 
   void zero() { std::memset(data_, 0, size_ * sizeof(T)); }
 
+  T* release() noexcept {
+    T* result = data_;
+    data_     = nullptr;
+    size_     = 0;
+    return result;
+  }
+
   // Compatibility with AsyncDeviceVector
   template <typename U>
   void copyFromDevice(const AsyncDeviceVector<U>& deviceVec, const cudaStream_t stream = nullptr) {

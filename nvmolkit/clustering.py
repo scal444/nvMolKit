@@ -88,11 +88,12 @@ def _wrap_device_result(result) -> ButinaDeviceResult:
     return ButinaDeviceResult(cluster_ids, centroids, AsyncGpuResult(cluster_sizes))
 
 
-def _wrap_bitbirch_result(result, return_centroids: bool):
+def _wrap_bitbirch_result(result, return_centroids: bool, host_output: bool = False):
     if return_centroids:
         cluster_ids, centroids = result
-        return AsyncGpuResult(cluster_ids), AsyncGpuResult(centroids)
-    return AsyncGpuResult(result)
+        labels = np.asarray(cluster_ids) if host_output else AsyncGpuResult(cluster_ids)
+        return labels, AsyncGpuResult(centroids)
+    return np.asarray(result) if host_output else AsyncGpuResult(result)
 
 
 def _to_rdkit_clusters(cluster_ids: AsyncGpuResult, centroids: AsyncGpuResult) -> _RDKitClusters:
@@ -331,9 +332,10 @@ def bitbirch_shared(
     routing_width: int = 1,
     summary_cache_bytes: int = 0,
     host_input: bool = False,
+    host_output: bool = False,
     return_centroids: bool = False,
     stream: torch.cuda.Stream | None = None,
-) -> AsyncGpuResult | tuple[AsyncGpuResult, AsyncGpuResult]:
+) -> AsyncGpuResult | np.ndarray | tuple[AsyncGpuResult | np.ndarray, AsyncGpuResult]:
     """Experimental single-tree insertion, with frozen parent routing per batch.
 
     With ``ordered-leaf``, each leaf has one ordered writer. ``filtered-group``
@@ -355,8 +357,10 @@ def bitbirch_shared(
     Zero keeps BF sums entirely on the GPU. ``host_input=True`` accepts a packed
     NumPy matrix (including a memory map), copies only the current insertion
     batch to the GPU, and retains packed singleton fingerprints with the tree.
-    The cache cap covers BF sums only: centroids, topology, singleton storage,
-    output labels, and scratch remain GPU resident. This is not yet a fully
+    ``host_output=True`` keeps labels in mapped pinned CPU memory during
+    insertion and returns them as a NumPy array, removing the remaining N-wide
+    GPU allocation. The cache cap covers BF sums only: centroids, topology,
+    singleton storage, and scratch remain GPU resident. This is not yet a fully
     bounded-memory interface or a persistent append API.
     """
     if not math.isfinite(threshold) or not 0 <= threshold <= 1:
@@ -393,10 +397,11 @@ def bitbirch_shared(
             routing_width,
             summary_cache_bytes,
             host_input,
+            host_output,
             return_centroids,
             active_stream.cuda_stream,
         )
-        return _wrap_bitbirch_result(result, return_centroids)
+        return _wrap_bitbirch_result(result, return_centroids, host_output)
 
 
 def bitbirch(
