@@ -1,11 +1,5 @@
 # Changelog
 
-## Unreleased
-
-### Features
-
-- Add native BitBIRCH clustering for word-aligned packed binary fingerprints. A batched single-tree implementation uses snapshot routing and ordered leaf owners, supports bounded caches for host-resident inputs and summaries, and can return packed majority centroids. Independent paper-derived differential and molecular-workflow tests cover the implementation.
-
 ## 0.6.0 - 2026-08-13
 
 ### Summary
