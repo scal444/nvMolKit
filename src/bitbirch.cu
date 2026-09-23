@@ -2121,37 +2121,44 @@ __global__ void bitBirchSharedRepairKernel(const int              begin,
 }
 
 template <typename Component>
-__global__ void bitBirchSharedFirstMembersKernel(const int count, int* flags, const TreeStorage<Component> storage) {
-  const int molecule = blockIdx.x * blockDim.x + threadIdx.x;
-  if (molecule < count) {
-    flags[molecule] = storage.entryClusterIds[storage.labels[molecule]] == molecule;
-  }
-}
-
-template <typename Component>
-__global__ void bitBirchSharedClusterMapKernel(const int count, const int* prefix, TreeStorage<Component> storage) {
+__global__ void bitBirchSharedCollectLeavesKernel(const int                    count,
+                                                  int*                         firstMembers,
+                                                  int*                         leafEntries,
+                                                  int*                         cursor,
+                                                  const TreeStorage<Component> storage) {
   const int entry = blockIdx.x * blockDim.x + threadIdx.x;
-  if (entry < *storage.entryCursor && storage.entryChildren[entry] < 0) {
-    storage.entryClusterIds[entry] = prefix[storage.entryClusterIds[entry]] - 1;
-  }
-  if (entry == 0) {
-    *storage.numClusters = prefix[count - 1];
+  if (entry < count && storage.entryChildren[entry] < 0) {
+    const int slot     = atomicAdd(cursor, 1);
+    firstMembers[slot] = storage.entryClusterIds[entry];
+    leafEntries[slot]  = entry;
   }
 }
 
 template <typename Component>
-__global__ void bitBirchSharedFinalizeKernel(const int count, const int* prefix, TreeStorage<Component> storage) {
-  const int molecule = blockIdx.x * blockDim.x + threadIdx.x;
-  if (molecule < count) {
-    const int entry   = storage.labels[molecule];
-    const int cluster = storage.entryClusterIds[entry];
-    if (storage.centroids != nullptr && (molecule == 0 || prefix[molecule] != prefix[molecule - 1])) {
+__global__ void bitBirchSharedClusterMapKernel(const int              count,
+                                               const int*             leafEntries,
+                                               TreeStorage<Component> storage) {
+  const int cluster = blockIdx.x * blockDim.x + threadIdx.x;
+  if (cluster < count) {
+    const int entry                = leafEntries[cluster];
+    storage.entryClusterIds[entry] = cluster;
+    if (storage.centroids != nullptr) {
       for (int word = 0; word < storage.numWords; ++word) {
         storage.centroids[static_cast<std::size_t>(cluster) * storage.numWords + word] =
           centroidWord(storage, entry, word);
       }
     }
-    storage.labels[molecule] = cluster;
+  }
+  if (cluster == 0) {
+    *storage.numClusters = count;
+  }
+}
+
+template <typename Component>
+__global__ void bitBirchSharedFinalizeKernel(const int count, TreeStorage<Component> storage) {
+  const int molecule = blockIdx.x * blockDim.x + threadIdx.x;
+  if (molecule < count) {
+    storage.labels[molecule] = storage.entryClusterIds[storage.labels[molecule]];
   }
 }
 
@@ -3002,33 +3009,54 @@ BitBirchResult launchShared(const cuda::std::span<const std::uint32_t> fingerpri
     const int clusters = hostControl[5] - hostControl[1] + 1;
     result.centroids.resize(static_cast<std::size_t>(clusters) * numWords);
   }
-  storage.centroids = returnCentroids ? result.centroids.data() : nullptr;
-  // Entry owners record the minimum input index without per-molecule atomics.
-  // Scan first-member flags to retain serial label numbering in parallel.
-  AsyncDeviceVector<int> labelPrefix(numFingerprints, stream);
-  const int              labelBlocks = (numFingerprints + cooperativeBlockSize - 1) / cooperativeBlockSize;
-  bitBirchSharedFirstMembersKernel<<<labelBlocks, cooperativeBlockSize, 0, stream>>>(numFingerprints,
-                                                                                     labelPrefix.data(),
+  storage.centroids                  = returnCentroids ? result.centroids.data() : nullptr;
+  // Entry owners retain their minimum input index. Sort only the K live leaf
+  // entries by that index to preserve serial label numbering without an N-wide
+  // first-member scan and its additional device workspace.
+  const int              clusters    = hostControl[5] - hostControl[1] + 1;
+  const int              liveEntries = hostControl[5];
+  AsyncDeviceVector<int> firstMembers(clusters, stream);
+  AsyncDeviceVector<int> leafEntries(clusters, stream);
+  AsyncDeviceVector<int> sortedFirstMembers(clusters, stream);
+  AsyncDeviceVector<int> sortedLeafEntries(clusters, stream);
+  AsyncDeviceVector<int> leafCursor(1, stream);
+  cudaCheckError(cudaMemsetAsync(leafCursor.data(), 0, sizeof(int), stream));
+  const int entryBlocks = (liveEntries + cooperativeBlockSize - 1) / cooperativeBlockSize;
+  bitBirchSharedCollectLeavesKernel<<<entryBlocks, cooperativeBlockSize, 0, stream>>>(liveEntries,
+                                                                                      firstMembers.data(),
+                                                                                      leafEntries.data(),
+                                                                                      leafCursor.data(),
+                                                                                      storage);
+  cudaCheckError(cudaGetLastError());
+  std::size_t clusterSortBytes = 0;
+  cudaCheckError(cub::DeviceRadixSort::SortPairs(nullptr,
+                                                 clusterSortBytes,
+                                                 firstMembers.data(),
+                                                 sortedFirstMembers.data(),
+                                                 leafEntries.data(),
+                                                 sortedLeafEntries.data(),
+                                                 clusters,
+                                                 0,
+                                                 32,
+                                                 stream));
+  AsyncDeviceVector<std::byte> clusterSortScratch(clusterSortBytes, stream);
+  cudaCheckError(cub::DeviceRadixSort::SortPairs(clusterSortScratch.data(),
+                                                 clusterSortBytes,
+                                                 firstMembers.data(),
+                                                 sortedFirstMembers.data(),
+                                                 leafEntries.data(),
+                                                 sortedLeafEntries.data(),
+                                                 clusters,
+                                                 0,
+                                                 32,
+                                                 stream));
+  const int clusterBlocks = (clusters + cooperativeBlockSize - 1) / cooperativeBlockSize;
+  bitBirchSharedClusterMapKernel<<<clusterBlocks, cooperativeBlockSize, 0, stream>>>(clusters,
+                                                                                     sortedLeafEntries.data(),
                                                                                      storage);
   cudaCheckError(cudaGetLastError());
-  std::size_t scanBytes = 0;
-  cudaCheckError(
-    cub::DeviceScan::InclusiveSum(nullptr, scanBytes, labelPrefix.data(), labelPrefix.data(), numFingerprints, stream));
-  AsyncDeviceVector<std::byte> scanScratch(scanBytes, stream);
-  cudaCheckError(cub::DeviceScan::InclusiveSum(scanScratch.data(),
-                                               scanBytes,
-                                               labelPrefix.data(),
-                                               labelPrefix.data(),
-                                               numFingerprints,
-                                               stream));
-  const int entryBlocks = (tree.totalEntries + cooperativeBlockSize - 1) / cooperativeBlockSize;
-  bitBirchSharedClusterMapKernel<<<entryBlocks, cooperativeBlockSize, 0, stream>>>(numFingerprints,
-                                                                                   labelPrefix.data(),
-                                                                                   storage);
-  cudaCheckError(cudaGetLastError());
-  bitBirchSharedFinalizeKernel<<<labelBlocks, cooperativeBlockSize, 0, stream>>>(numFingerprints,
-                                                                                 labelPrefix.data(),
-                                                                                 storage);
+  const int labelBlocks = (numFingerprints + cooperativeBlockSize - 1) / cooperativeBlockSize;
+  bitBirchSharedFinalizeKernel<<<labelBlocks, cooperativeBlockSize, 0, stream>>>(numFingerprints, storage);
   cudaCheckError(cudaGetLastError());
   std::vector<int> clusterCounts(1);
   tree.clusterCounts.copyToHost(clusterCounts);
