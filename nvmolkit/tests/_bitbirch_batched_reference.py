@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-
 POPCOUNT = np.asarray([value.bit_count() for value in range(256)], dtype=np.uint8)
 
 

@@ -6,8 +6,8 @@
 import numpy as np
 import pytest
 import torch
-
 from _bitbirch_batched_reference import BatchedBitBirch
+
 from nvmolkit.clustering import bitbirch, bitbirch_shared
 
 
@@ -182,12 +182,12 @@ def test_cpu_backed_summary_rotation_preserves_partition(words):
     rng = np.random.default_rng(1591)
     unique = rng.integers(0, 2**32, (5000, words), dtype=np.uint32)
     packed = np.concatenate([unique, unique[rng.permutation(len(unique))]])
-    options = dict(
-        branching_factor=7,
-        insertion_batch_size=512,
-        insertion_policy="filtered-group",
-        return_centroids=True,
-    )
+    options = {
+        "branching_factor": 7,
+        "insertion_batch_size": 512,
+        "insertion_policy": "filtered-group",
+        "return_centroids": True,
+    }
     expected, expected_centroids = bitbirch_shared(packed, 1.0, **options)
     # 4096 uint16 summaries per page: duplicates force more than one page,
     # in addition to internal-node summaries. One and two slots force eviction.
@@ -202,12 +202,12 @@ def test_cpu_backed_summary_rotation_preserves_partition(words):
 def test_cpu_backed_singleton_rotation_preserves_partition(words):
     rng = np.random.default_rng(2903)
     packed = rng.integers(0, 2**32, (10000, words), dtype=np.uint32)
-    options = dict(
-        branching_factor=7,
-        insertion_batch_size=512,
-        insertion_policy="filtered-group",
-        return_centroids=True,
-    )
+    options = {
+        "branching_factor": 7,
+        "insertion_batch_size": 512,
+        "insertion_policy": "filtered-group",
+        "return_centroids": True,
+    }
     expected, expected_centroids = bitbirch_shared(packed, 1.0, **options)
     page_bytes = 4096 * packed.shape[1] * np.dtype(np.uint32).itemsize
     for pages in (1, 2):
@@ -231,13 +231,13 @@ def test_host_input_tiles_preserve_labels_and_centroids(policy, prefix, tmp_path
     path = tmp_path / "fingerprints.npy"
     np.save(path, packed)
     mapped = np.load(path, mmap_mode="r")
-    options = dict(
-        branching_factor=3,
-        insertion_batch_size=32,
-        insertion_policy=policy,
-        ordered_prefix_size=prefix,
-        return_centroids=True,
-    )
+    options = {
+        "branching_factor": 3,
+        "insertion_batch_size": 32,
+        "insertion_policy": policy,
+        "ordered_prefix_size": prefix,
+        "return_centroids": True,
+    }
     expected, expected_centroids = bitbirch_shared(packed, 0.4, **options)
     for cache in (0, 4096 * 3 * 32 * 2):
         labels, centroids = bitbirch_shared(mapped, 0.4, host_input=True, summary_cache_bytes=cache, **options)
@@ -258,13 +258,13 @@ def test_host_output_preserves_labels_with_host_input_cache_and_centroids():
     rng = np.random.default_rng(421)
     packed = rng.integers(0, 2**32, (529, 3), dtype=np.uint32)
     packed[430:500] = packed[:70]
-    options = dict(
-        branching_factor=7,
-        insertion_batch_size=32,
-        insertion_policy="filtered-group",
-        ordered_prefix_size=33,
-        return_centroids=True,
-    )
+    options = {
+        "branching_factor": 7,
+        "insertion_batch_size": 32,
+        "insertion_policy": "filtered-group",
+        "ordered_prefix_size": 33,
+        "return_centroids": True,
+    }
     expected, expected_centroids = bitbirch_shared(packed, 0.4, **options)
     device_input_labels, device_input_centroids = bitbirch_shared(packed, 0.4, host_output=True, **options)
     assert isinstance(device_input_labels, np.ndarray)

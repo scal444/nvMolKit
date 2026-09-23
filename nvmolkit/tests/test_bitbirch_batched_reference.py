@@ -5,7 +5,6 @@
 
 import numpy as np
 import pytest
-
 from _bitbirch_batched_reference import BatchedBitBirch, Entry, centroid, isim
 
 
