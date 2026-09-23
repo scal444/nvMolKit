@@ -90,6 +90,7 @@ Clustering
 
    clustering.butina
    clustering.fused_butina
+   clustering.leader
    clustering.aap_dise
 
 .. autosummary::
@@ -98,6 +99,7 @@ Clustering
 
    clustering.OutputMode
    clustering.ClusterDeviceResult
+   clustering.SelectionDeviceResult
 
 Maximum Common Substructure (MCS)
 ---------------------------------

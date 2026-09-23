@@ -15,9 +15,10 @@
 
 """GPU-accelerated clustering from distance matrices, fingerprints, or ordered RDKit molecules."""
 
+import operator
 from dataclasses import dataclass
 from enum import Enum
-from typing import Literal, overload
+from typing import Literal, Sequence, overload
 
 import numpy as np
 import torch
@@ -69,6 +70,17 @@ class ClusterDeviceResult:
     cluster_sizes: AsyncGpuResult
 
 
+@dataclass(frozen=True)
+class SelectionDeviceResult:
+    """Device-resident ordered selection.
+
+    Attributes:
+        indices: int32 selected input indices in selection order.
+    """
+
+    indices: AsyncGpuResult
+
+
 def _validate_output(output: OutputMode) -> None:
     if not isinstance(output, OutputMode):
         raise TypeError(f"output must be an OutputMode, got {type(output).__name__}")
@@ -77,6 +89,13 @@ def _validate_output(output: OutputMode) -> None:
 def _validate_assignment(assignment: str) -> None:
     if assignment not in ("first", "nearest"):
         raise ValueError(f"assignment must be one of ['first', 'nearest'], got {assignment!r}")
+
+
+def _index_tuple(name: str, values: Sequence[int]) -> tuple[int, ...]:
+    try:
+        return tuple(operator.index(value) for value in values)
+    except TypeError:
+        raise TypeError(f"{name} must be a sequence of integers") from None
 
 
 def _aap_args(metric: AAPMetric) -> tuple:
@@ -133,12 +152,72 @@ def _resolve_butina_output(result, output: OutputMode) -> _RDKitClusters | Clust
     return _cluster_arrays_to_rdkit(cluster_ids.numpy(), centroids.numpy())
 
 
+def _resolve_selection_output(result, output: OutputMode):
+    indices = AsyncGpuResult(result)
+    if output is OutputMode.DEVICE:
+        return SelectionDeviceResult(indices)
+    return tuple(int(index) for index in indices.numpy())
+
+
 def _check_distance_matrix(name: str, x: torch.Tensor) -> torch.Tensor:
     if x.ndim != 2 or x.shape[0] != x.shape[1]:
         raise ValueError(f"{name} must be a square 2D matrix, got shape={tuple(x.shape)}")
     if x.dtype != torch.float64:
         raise ValueError(f"{name} must have dtype float64")
     return x.contiguous()
+
+
+def _prepare_distance_matrix(distance_matrix: ArrayInput, stream: torch.cuda.Stream | None):
+    active_stream = _resolve_cuda_stream(stream, distance_matrix)
+    with torch.cuda.stream(active_stream):
+        tensor = _as_cuda_tensor("distance_matrix", distance_matrix, stream=active_stream)
+        if tensor.ndim != 2 or tensor.shape[0] != tensor.shape[1]:
+            raise ValueError(f"distance_matrix must be a square 2D matrix, got shape={tuple(tensor.shape)}")
+        if tensor.dtype not in (torch.float32, torch.float64):
+            raise ValueError("distance_matrix must have dtype float32 or float64")
+        tensor = tensor.contiguous()
+    return tensor, active_stream
+
+
+def leader(
+    distance_matrix: ArrayInput,
+    cutoff: float,
+    *,
+    pick_size: int = 0,
+    first_picks: Sequence[int] = (),
+    stream: torch.cuda.Stream | None = None,
+    output: OutputMode = OutputMode.DEVICE,
+) -> SelectionDeviceResult | tuple[int, ...]:
+    """Select leaders from a distance matrix by sphere exclusion.
+
+    Candidates are visited in input order. Each candidate that has not been
+    excluded becomes a leader and excludes every remaining candidate within
+    ``cutoff`` of it, as in RDKit's ``LeaderPicker``.
+
+    Args:
+        distance_matrix: Square float32 or float64 matrix of shape ``(N, N)``.
+            Element ``[i, j]`` is the distance from item ``i`` to item ``j``.
+        cutoff: Inclusive exclusion distance. Must be finite and non-negative.
+        pick_size: Maximum number of leaders, or ``0`` for no limit.
+        first_picks: Unique indices selected as leaders, in order, before the
+            input-order pass.
+        stream: CUDA stream to use. If None, uses the current stream.
+        output: Result representation.
+
+    Returns:
+        A :class:`SelectionDeviceResult` for ``OutputMode.DEVICE``, or a tuple
+        of selected indices for ``OutputMode.RDKIT``.
+    """
+    _validate_output(output)
+    matrix, active_stream = _prepare_distance_matrix(distance_matrix, stream)
+    result = _clustering.leader(
+        matrix.__cuda_array_interface__,
+        cutoff,
+        operator.index(pick_size),
+        _index_tuple("first_picks", first_picks),
+        active_stream.cuda_stream,
+    )
+    return _resolve_selection_output(result, output)
 
 
 def aap_dise(
