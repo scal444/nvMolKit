@@ -244,9 +244,10 @@ def test_cpu_backed_summary_rotation_preserves_partition(words, routes):
         np.testing.assert_array_equal(centroids.numpy(), expected_centroids.numpy())
 
 
-def test_cpu_backed_singleton_rotation_preserves_partition():
+@pytest.mark.parametrize("words", [1, 32])
+def test_cpu_backed_singleton_rotation_preserves_partition(words):
     rng = np.random.default_rng(2903)
-    packed = rng.integers(0, 2**32, (10000, 1), dtype=np.uint32)
+    packed = rng.integers(0, 2**32, (10000, words), dtype=np.uint32)
     options = dict(
         branching_factor=7,
         insertion_batch_size=512,

@@ -580,6 +580,31 @@ __device__ __forceinline__ std::uint32_t singletonWord(const TreeStorage<Compone
 }
 
 template <typename Component>
+__device__ __forceinline__ const std::uint32_t* singletonFingerprint(const TreeStorage<Component>& storage,
+                                                                     const int                     index) {
+  if (storage.singletonFingerprintPages != nullptr) {
+    if (storage.singletonPageHits != nullptr && (threadIdx.x & 31) == 0) {
+      atomicAdd(storage.singletonPageHits + index / summaryEntriesPerPage, 1U);
+    }
+    return storage.singletonFingerprintPages[index / summaryEntriesPerPage] +
+           static_cast<std::size_t>(index % summaryEntriesPerPage) * storage.numWords;
+  }
+  return storage.fingerprints + static_cast<std::size_t>(index) * storage.numWords;
+}
+
+template <typename Component>
+__device__ __forceinline__ const std::uint32_t* centroidFingerprint(const TreeStorage<Component>& storage,
+                                                                    const int                     entry) {
+  const int fingerprintIndex = storage.entryFingerprintIndices[entry];
+  if (fingerprintIndex >= 0) {
+    return singletonFingerprint(storage, fingerprintIndex);
+  }
+  const int slot = storage.entrySummarySlots[entry];
+  return storage.centroidPages[slot / summaryEntriesPerPage] +
+         static_cast<std::size_t>(slot % summaryEntriesPerPage) * storage.numWords;
+}
+
+template <typename Component>
 __device__ __forceinline__ Component linearSum(const TreeStorage<Component>& storage, const int entry, const int bit) {
   const int fingerprintIndex = storage.entryFingerprintIndices[entry];
   if (fingerprintIndex >= 0) {
@@ -717,12 +742,29 @@ template <typename Component>
 __device__ __forceinline__ double entryToFingerprintSimilarity(const TreeStorage<Component>& storage,
                                                                const int                     entry,
                                                                const std::uint32_t*          fingerprint) {
-  int intersection = 0;
-  int unionCount   = 0;
+  int         intersection = 0;
+  int         unionCount   = 0;
+  const auto* centroid     = centroidFingerprint(storage, entry);
+  if (storage.numWords % 4 == 0) {
+    const auto* centroidVectors    = reinterpret_cast<const uint4*>(centroid);
+    const auto* fingerprintVectors = reinterpret_cast<const uint4*>(fingerprint);
+    for (int vector = 0; vector < storage.numWords / 4; ++vector) {
+      const uint4 centroidWords    = centroidVectors[vector];
+      const uint4 fingerprintWords = fingerprintVectors[vector];
+      intersection += __popc(centroidWords.x & fingerprintWords.x);
+      intersection += __popc(centroidWords.y & fingerprintWords.y);
+      intersection += __popc(centroidWords.z & fingerprintWords.z);
+      intersection += __popc(centroidWords.w & fingerprintWords.w);
+      unionCount += __popc(centroidWords.x | fingerprintWords.x);
+      unionCount += __popc(centroidWords.y | fingerprintWords.y);
+      unionCount += __popc(centroidWords.z | fingerprintWords.z);
+      unionCount += __popc(centroidWords.w | fingerprintWords.w);
+    }
+    return routingSimilarity(intersection, unionCount, storage.numBits);
+  }
   for (int word = 0; word < storage.numWords; ++word) {
-    const std::uint32_t centroid = centroidWord(storage, entry, word);
-    intersection += __popc(centroid & fingerprint[word]);
-    unionCount += __popc(centroid | fingerprint[word]);
+    intersection += __popc(centroid[word] & fingerprint[word]);
+    unionCount += __popc(centroid[word] | fingerprint[word]);
   }
   return routingSimilarity(intersection, unionCount, storage.numBits);
 }
