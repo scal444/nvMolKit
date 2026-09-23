@@ -12,8 +12,9 @@ description: >-
   source.
 license: Apache-2.0
 metadata:
+  author: Kevin Boyd (@scal444)
   owner: Kevin Boyd (@scal444)
-  risk_tier: skill
+  risk-tier: skill
 ---
 
 # nvMolKit usage
@@ -43,10 +44,12 @@ If CUDA is unavailable, nvMolKit calls raise. There is no CPU fallback - if the 
 When helping with installation, make the user choose a PyTorch CUDA backend that the host driver supports before installing nvMolKit. nvMolKit's PyPI wheels are built with CUDA Toolkit 12.9 and depend on CUDA 12 runtime packages, but pip/uv can still select a CUDA 13 PyTorch wheel unless the install command says otherwise.
 
 - Conda: prefer conda-forge `pytorch-gpu`; pin `cuda-version=12.6` or another CUDA version supported by the driver.
-- pip: send the user to the PyTorch install selector (`https://pytorch.org/get-started/locally/`) or previous-versions page (`https://pytorch.org/get-started/previous-versions/`) to install `torch` for a CUDA 12.x backend before installing nvMolKit.
+- pip: send the user to the [PyTorch install selector](https://pytorch.org/get-started/locally/) or [previous-versions page](https://pytorch.org/get-started/previous-versions/) to install `torch` for a CUDA 12.x backend before installing nvMolKit.
 - uv: install nvMolKit with an explicit backend, e.g. `uv pip install --torch-backend=cu128 nvmolkit`.
 
-## Verify the install before writing real code
+## Instructions
+
+### Verify the install before writing real code
 
 Run this once to confirm nvMolKit is importable and a GPU op works end to end:
 
@@ -69,7 +72,7 @@ print("fps shape:", tuple(fps.shape), "dtype:", fps.dtype)
 # Expected: shape (3, 32), dtype torch.int32  (1024 bits packed into 32 int32s per row)
 ```
 
-If this fails, point the user at the install guide on the docs site rather than guessing - see "Going deeper" below.
+If this fails, point the user at the [installation guide](https://nvidia-bionemo.github.io/nvMolKit/#installation) rather than guessing.
 
 ## Entry points
 
@@ -202,7 +205,7 @@ autoselect execution settings; an empty `gpuIds` list uses the current device.
 `MCSConfig` supports `to_dict()` / `from_dict()` and can also be persisted with
 `nvmolkit.autotune.save()` / `load()`.
 
-## Recipes
+## Examples
 
 ### Morgan fingerprints + bulk Tanimoto similarity
 
@@ -234,7 +237,6 @@ from nvmolkit.embedMolecules import EmbedMolecules
 
 mols = [AddHs(MolFromSmiles(smi)) for smi in ["C1CCCCC1", "C1CCCCC2CCCCC12", "COO"]]
 params = ETKDGv3()
-params.useRandomCoords = True
 
 EmbedMolecules(mols, params, confsPerMolecule=10, maxIterations=-1)
 
@@ -242,7 +244,7 @@ for mol in mols:
     print(mol.GetNumConformers())
 ```
 
-Inputs are `list[Mol]`, sanitized and with hydrogens added (`AddHs`). Conformers are added in-place. `params.useRandomCoords` must be `True` - nvMolKit's ETKDG only supports random-coord initialization. A handful of niche `EmbedParameters` options are not supported (bounds matrices, custom CPCI, coord maps, separate-fragment embedding); the Features section of the docs site lists the full restrictions.
+Inputs are `list[Mol]`, sanitized and with hydrogens added (`AddHs`). Conformers are added in-place. A handful of niche `EmbedParameters` options are not supported (bounds matrices, custom CPCI, coord maps, separate-fragment embedding); the Features section of the docs site lists the full restrictions.
 
 ### MMFF94 minimization of a batch of conformers
 
@@ -253,7 +255,7 @@ from nvmolkit.embedMolecules import EmbedMolecules
 from nvmolkit.mmffOptimization import MMFFOptimizeMoleculesConfs
 
 mols = [AddHs(MolFromSmiles(smi)) for smi in ["CCO", "CCN", "c1ccccc1"]]
-params = ETKDGv3(); params.useRandomCoords = True
+params = ETKDGv3()
 EmbedMolecules(mols, params, confsPerMolecule=5)
 
 energies = MMFFOptimizeMoleculesConfs(mols, maxIters=500)
@@ -379,4 +381,4 @@ All conformers of each input molecule are minimized in one batch. Constraints at
 
 - Full feature list, API reference, and guides: <https://nvidia-bionemo.github.io/nvMolKit/>
 - What changed in each release: <https://nvidia-bionemo.github.io/nvMolKit/changelog.html>
-- Worked examples (Jupyter notebooks): the `examples/` directory in the GitHub repo
+- Worked examples (Jupyter notebooks): the [examples/ directory](https://github.com/NVIDIA-BioNeMo/nvMolKit/tree/main/examples) in the GitHub repo

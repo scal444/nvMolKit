@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include <GraphMol/ROMol.h>
+#include <GraphMol/RWMol.h>
 #include <GraphMol/SmilesParse/SmilesParse.h>
 #include <gtest/gtest.h>
 
@@ -29,6 +30,22 @@ namespace {
 
 using ::nvMolKit::testing::loadNChemblMolecules;
 using ::nvMolKit::testing::makeMolsView;
+
+std::unique_ptr<RDKit::RWMol> makeMoleculeWithCounts(const unsigned int numAtoms, const unsigned int numBonds) {
+  auto mol = std::make_unique<RDKit::RWMol>();
+  for (unsigned int atomIdx = 0; atomIdx < numAtoms; ++atomIdx) {
+    mol->addAtom(new RDKit::Atom(6), true, true);
+  }
+  unsigned int bondsAdded = 0;
+  for (unsigned int first = 0; first < numAtoms && bondsAdded < numBonds; ++first) {
+    for (unsigned int second = first + 1; second < numAtoms && bondsAdded < numBonds; ++second) {
+      mol->addBond(first, second, RDKit::Bond::BondType::SINGLE);
+      ++bondsAdded;
+    }
+  }
+  EXPECT_EQ(bondsAdded, numBonds);
+  return mol;
+}
 
 const std::array<std::string, 10> rdkitTestSmiles = {
   "C[C@@H]1CCC[C@H](C)[C@H]1C",
@@ -48,6 +65,64 @@ const std::array<std::string, 10> rdkitTestSmiles = {
 
 }  // namespace
 
+TEST(MorganMoleculeClassificationTest, EmptyInputHasEmptyBuckets) {
+  const auto buckets = nvMolKit::detail::classifyMorganMolecules({}, 8);
+  EXPECT_TRUE(buckets.work32.empty());
+  EXPECT_TRUE(buckets.work64.empty());
+  EXPECT_TRUE(buckets.work128.empty());
+  EXPECT_TRUE(buckets.workLarge.empty());
+}
+
+TEST(MorganMoleculeClassificationTest, AtomAndBondBoundariesPreserveSemanticsAndOrder) {
+  std::vector<std::unique_ptr<RDKit::RWMol>> mols;
+  mols.push_back(makeMoleculeWithCounts(0, 0));
+  mols.push_back(makeMoleculeWithCounts(31, 0));
+  mols.push_back(makeMoleculeWithCounts(32, 0));
+  mols.push_back(makeMoleculeWithCounts(9, 32));
+  mols.push_back(makeMoleculeWithCounts(63, 0));
+  mols.push_back(makeMoleculeWithCounts(64, 0));
+  mols.push_back(makeMoleculeWithCounts(12, 64));
+  mols.push_back(makeMoleculeWithCounts(127, 0));
+  mols.push_back(makeMoleculeWithCounts(128, 0));
+  mols.push_back(makeMoleculeWithCounts(17, 128));
+  mols.emplace_back(RDKit::SmilesToMol("[Fe](C)(C)(C)(C)(C)(C)(C)(C)C"));
+  ASSERT_NE(mols.back(), nullptr);
+  ASSERT_GT(mols.back()->getAtomWithIdx(0)->getDegree(), nvMolKit::kMaxBondsPerAtom);
+
+  std::vector<const RDKit::ROMol*> molsView;
+  molsView.reserve(mols.size());
+  for (const auto& mol : mols) {
+    molsView.push_back(mol.get());
+  }
+  const auto buckets = nvMolKit::detail::classifyMorganMolecules(molsView, 64);
+  EXPECT_EQ(buckets.work32, (std::vector<int>{0, 1, 10}));
+  EXPECT_EQ(buckets.work64, (std::vector<int>{2, 3, 4}));
+  EXPECT_EQ(buckets.work128, (std::vector<int>{5, 6, 7}));
+  EXPECT_EQ(buckets.workLarge, (std::vector<int>{8, 9}));
+}
+
+TEST(MorganMoleculeClassificationTest, DeterministicAcrossThreadCountsAndLargeInput) {
+  std::vector<std::unique_ptr<RDKit::RWMol>> representatives;
+  representatives.push_back(makeMoleculeWithCounts(3, 2));
+  representatives.push_back(makeMoleculeWithCounts(32, 0));
+  representatives.push_back(makeMoleculeWithCounts(64, 0));
+  representatives.push_back(makeMoleculeWithCounts(128, 0));
+
+  std::vector<const RDKit::ROMol*> mols;
+  for (size_t molIdx = 0; molIdx < 4096; ++molIdx) {
+    mols.push_back(representatives[molIdx % representatives.size()].get());
+  }
+
+  const auto expected = nvMolKit::detail::classifyMorganMolecules(mols, 1);
+  for (const int numThreads : {2, 5, 32}) {
+    const auto actual = nvMolKit::detail::classifyMorganMolecules(mols, numThreads);
+    EXPECT_EQ(actual.work32, expected.work32) << "threads=" << numThreads;
+    EXPECT_EQ(actual.work64, expected.work64) << "threads=" << numThreads;
+    EXPECT_EQ(actual.work128, expected.work128) << "threads=" << numThreads;
+    EXPECT_EQ(actual.workLarge, expected.workLarge) << "threads=" << numThreads;
+  }
+}
+
 std::string serializeBv(const ExplicitBitVect& bv) {
   std::vector<int> onBits;
   bv.getOnBits(onBits);
@@ -57,6 +132,75 @@ std::string serializeBv(const ExplicitBitVect& bv) {
   }
   serialized += "}";
   return serialized;
+}
+
+void expectDirectInvariantsMatchRDKit(const std::string& smiles,
+                                      bool               keepGraphHydrogens = false,
+                                      size_t             maxAtoms           = 128) {
+  RDKit::SmilesParserParams parseParams;
+  parseParams.removeHs = !keepGraphHydrogens;
+  const std::unique_ptr<RDKit::ROMol> mol(RDKit::SmilesToMol(smiles, parseParams));
+  ASSERT_NE(mol, nullptr) << smiles;
+
+  nvMolKit::MorganInvariantsGenerator generator;
+  generator.ComputeInvariants({mol.get()}, maxAtoms);
+  const auto& actual = generator.GetInvariants();
+
+  RDKit::MorganFingerprint::MorganAtomInvGenerator  atomGenerator(/*includeRingMembership=*/true);
+  RDKit::MorganFingerprint::MorganBondInvGenerator  bondGenerator(/*useBondTypes=*/true, /*useChirality=*/false);
+  const std::unique_ptr<std::vector<std::uint32_t>> expectedAtoms(atomGenerator.getAtomInvariants(*mol));
+  const std::unique_ptr<std::vector<std::uint32_t>> expectedBonds(bondGenerator.getBondInvariants(*mol));
+
+  ASSERT_EQ(expectedAtoms->size(), mol->getNumAtoms());
+  ASSERT_EQ(expectedBonds->size(), mol->getNumBonds());
+  for (size_t atomIdx = 0; atomIdx < mol->getNumAtoms(); ++atomIdx) {
+    EXPECT_EQ(actual.atomInvariants[atomIdx], (*expectedAtoms)[atomIdx]) << "atom " << atomIdx << " in " << smiles;
+  }
+  for (size_t bondIdx = 0; bondIdx < mol->getNumBonds(); ++bondIdx) {
+    EXPECT_EQ(actual.bondInvariants[bondIdx], (*expectedBonds)[bondIdx]) << "bond " << bondIdx << " in " << smiles;
+  }
+  for (const RDKit::Atom* atom : mol->atoms()) {
+    std::set<std::pair<std::int16_t, std::int16_t>> expectedAdjacency;
+    for (const RDKit::Bond* bond : mol->atomBonds(atom)) {
+      expectedAdjacency.emplace(static_cast<std::int16_t>(bond->getIdx()),
+                                static_cast<std::int16_t>(bond->getOtherAtomIdx(atom->getIdx())));
+    }
+
+    std::set<std::pair<std::int16_t, std::int16_t>> actualAdjacency;
+    const size_t                                    adjacencyOffset = atom->getIdx() * nvMolKit::kMaxBondsPerAtom;
+    for (size_t slot = 0; slot < atom->getDegree(); ++slot) {
+      actualAdjacency.emplace(actual.bondAtomIndices[adjacencyOffset + slot],
+                              actual.bondOtherAtomIndices[adjacencyOffset + slot]);
+    }
+    EXPECT_EQ(actualAdjacency, expectedAdjacency) << "atom " << atom->getIdx() << " in " << smiles;
+    if (atom->getDegree() < nvMolKit::kMaxBondsPerAtom) {
+      EXPECT_EQ(actual.bondAtomIndices[adjacencyOffset + atom->getDegree()], -1);
+    }
+  }
+}
+
+TEST(MorganInvariantTest, RingsMatchRDKit) {
+  expectDirectInvariantsMatchRDKit("C1CCCCC1");
+  expectDirectInvariantsMatchRDKit("c1ccccc1");
+}
+
+TEST(MorganInvariantTest, GraphHydrogensMatchRDKit) {
+  expectDirectInvariantsMatchRDKit("[H]C([H])([H])[H]", /*keepGraphHydrogens=*/true);
+}
+
+TEST(MorganInvariantTest, AtomExplicitHydrogenPropertiesMatchRDKit) {
+  expectDirectInvariantsMatchRDKit("[nH]1cccc1");
+  expectDirectInvariantsMatchRDKit("[NH2+]C");
+}
+
+TEST(MorganInvariantTest, IsotopesAndChargesMatchRDKit) {
+  expectDirectInvariantsMatchRDKit("[13CH3][NH3+]");
+  expectDirectInvariantsMatchRDKit("[18F]C(=O)[O-]");
+}
+
+TEST(MorganInvariantTest, DisconnectedAndIsolatedAtomsMatchRDKit) {
+  expectDirectInvariantsMatchRDKit("C.[Cl-].[Na+]");
+  expectDirectInvariantsMatchRDKit("[He]");
 }
 
 class MorganFingerprintTestFixture : public ::testing::TestWithParam<std::tuple<int, int>> {};
@@ -274,6 +418,41 @@ TEST(MorganFingerprintTest, GpuConsistentAcrossDispatchRounds) {
   }
 }
 
+TEST(MorganFingerprintGpuTest, ReusedWorkspaceHandlesGrowingAndShrinkingBatchSizes) {
+  constexpr unsigned int radius = 3;
+  constexpr unsigned int fpSize = 1024;
+  auto [mols, smiles]           = loadNChemblMolecules(100, 128);
+  auto molsView                 = makeMolsView(mols);
+
+  auto refGenerator = std::unique_ptr<RDKit::FingerprintGenerator<std::uint32_t>>(
+    RDKit::MorganFingerprint::getMorganGenerator<
+      std::uint32_t>(radius, false, false, true, false, nullptr, nullptr, fpSize, {1, 2, 4, 8}, false, false));
+  std::vector<std::unique_ptr<ExplicitBitVect>> expected;
+  expected.reserve(mols.size());
+  for (const auto& mol : mols) {
+    expected.emplace_back(refGenerator->getFingerprint(*mol));
+  }
+
+  auto                                generator = nvMolKit::MorganFingerprintGenerator(radius, fpSize);
+  nvMolKit::FingerprintComputeOptions options;
+  options.backend = nvMolKit::FingerprintComputeBackend::GPU;
+  // Exercise initial allocation, batch and worker growth, shrink-without-reallocation,
+  // and exact capacity reuse on the same shared pinned reservoir.
+  for (const auto& [batchSize, numThreads] : std::array<std::pair<int, int>, 4>{
+         {{3, 2}, {41, 7}, {7, 3}, {41, 7}}
+  }) {
+    options.gpuBatchSize  = batchSize;
+    options.numCpuThreads = numThreads;
+    const auto actual     = generator.GetFingerprints(molsView, options);
+    ASSERT_EQ(actual.size(), expected.size()) << "batch size " << batchSize << ", threads " << numThreads;
+    for (size_t molIdx = 0; molIdx < actual.size(); ++molIdx) {
+      ASSERT_NE(actual[molIdx], nullptr);
+      EXPECT_EQ(*actual[molIdx], *expected[molIdx]) << "batch size " << batchSize << ", threads " << numThreads
+                                                    << ", element " << molIdx << " with smiles " << smiles[molIdx];
+    }
+  }
+}
+
 TEST(MorganFingerprintGpuTest, ThrowsRequestingCpuBackendGpuBuffer) {
   const unsigned int                  radius    = 3;
   const unsigned int                  fpSize    = 1024;
@@ -319,6 +498,35 @@ TEST(MorganFingerprintGpuTest, GpuBufferSameResult) {
     for (size_t bitId = 0; bitId < fpSize; bitId++) {
       ASSERT_EQ(refResults[i]->getBit(bitId), gpuResultsHost[i][bitId])
         << "on element " << i << " with smiles " << smiles[i] << ", bit " << bitId;
+    }
+  }
+}
+
+TEST(MorganFingerprintGpuTest, HighDegreeMoleculeUsesCpuFallback) {
+  constexpr unsigned int              radius = 2;
+  constexpr unsigned int              fpSize = 1024;
+  const std::unique_ptr<RDKit::ROMol> regularMol(RDKit::SmilesToMol("CCO"));
+  const std::unique_ptr<RDKit::ROMol> highDegreeMol(RDKit::SmilesToMol("[Fe](C)(C)(C)(C)(C)(C)(C)(C)C"));
+  ASSERT_NE(regularMol, nullptr);
+  ASSERT_NE(highDegreeMol, nullptr);
+  ASSERT_GT(highDegreeMol->getAtomWithIdx(0)->getDegree(), nvMolKit::kMaxBondsPerAtom);
+
+  auto                                generator = nvMolKit::MorganFingerprintGenerator(radius, fpSize);
+  nvMolKit::FingerprintComputeOptions options;
+  options.backend = nvMolKit::FingerprintComputeBackend::GPU;
+
+  const std::vector<const RDKit::ROMol*> mols      = {regularMol.get(), highDegreeMol.get()};
+  auto                                   gpuResult = generator.GetFingerprintsGpuBuffer<fpSize>(mols, nullptr, options);
+  std::vector<nvMolKit::FlatBitVect<fpSize>> actual(gpuResult.size());
+  gpuResult.copyToHost(actual);
+
+  auto refGenerator = std::unique_ptr<RDKit::FingerprintGenerator<std::uint32_t>>(
+    RDKit::MorganFingerprint::getMorganGenerator<
+      std::uint32_t>(radius, false, false, true, false, nullptr, nullptr, fpSize, {1, 2, 4, 8}, false, false));
+  for (size_t molIdx = 0; molIdx < mols.size(); ++molIdx) {
+    const std::unique_ptr<ExplicitBitVect> expected(refGenerator->getFingerprint(*mols[molIdx]));
+    for (size_t bitId = 0; bitId < fpSize; ++bitId) {
+      EXPECT_EQ(actual[molIdx][bitId], expected->getBit(bitId)) << "molecule " << molIdx << ", bit " << bitId;
     }
   }
 }

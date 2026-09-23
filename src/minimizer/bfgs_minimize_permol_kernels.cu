@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,7 +17,7 @@
 
 #include "src/forcefields/dist_geom_kernels_device.cuh"
 #include "src/forcefields/mmff_kernels.h"
-#include "src/forcefields/mmff_kernels_device.cuh"
+#include "src/forcefields/mmff_kernels_device_dispatch.cuh"
 #include "src/minimizer/bfgs_minimize_permol_kernels.h"
 #include "src/utils/cub_helpers.cuh"
 #include "src/utils/device_vector.h"

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,9 +21,14 @@ from typing import Any, Iterable, List, NamedTuple, Optional
 import numpy as np
 import torch
 
+# These imports populate Boost.Python's global converter registry. Keep this
+# bootstrap sequence developer-controlled so future binding dependencies are
+# not silently reordered by the formatter.
+# isort: off
 from nvmolkit import _arrayHelpers  # noqa: F401
 from nvmolkit import _embedMolecules  # type: ignore
 from nvmolkit import _types
+# isort: on
 
 
 class FireOptions:

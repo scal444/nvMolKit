@@ -37,8 +37,6 @@ from bench_utils.timing import (
     add_rdkit_max_seconds_arg,
     throughput_per_s,
     time_it,
-    time_it_bounded,
-    time_it_bounded_result,
 )
 
 __all__ = [
@@ -62,7 +60,5 @@ __all__ = [
     "slice_conformers",
     "throughput_per_s",
     "time_it",
-    "time_it_bounded",
-    "time_it_bounded_result",
     "write_csv_rows",
 ]

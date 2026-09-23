@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,8 +23,8 @@ from rdkit.Chem.AllChem import ETKDGv3
 from rdkit.ForceField import rdForceField as _rdForceField  # noqa: F401
 from rdkit.Geometry import Point3D
 
-from nvmolkit.embedMolecules import EmbedMolecules
 import nvmolkit.mmffOptimization as nvmolkit_mmff
+from nvmolkit.embedMolecules import EmbedMolecules
 from nvmolkit.types import CoordinateOutput, Device3DResult, FireOptions, HardwareOptions
 
 
@@ -133,7 +133,11 @@ def calculate_rdkit_mmff_energies(
     """Calculate MMFF energies using RDKit for all conformers of all molecules.
 
     Args:
-        molecules: List of RDKit molecules with conformers
+        molecules: List of RDKit molecules with conformers.
+        maxIters: Maximum minimization iterations per conformer.
+        property_settings: Optional MMFF property overrides.
+        nonBondedThreshold: Non-bonded interaction cutoff.
+        ignoreInterfragInteractions: Whether to omit interactions between fragments.
 
     Returns:
         list: List of lists containing energies for each molecule's conformers

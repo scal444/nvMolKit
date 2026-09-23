@@ -27,6 +27,8 @@ class TimingResult:
     """Holds timing results from a benchmark run."""
 
     times_ms: list[float] = field(default_factory=list)
+    progress: int | None = None
+    progress_target: int | None = None
 
     @property
     def median_ms(self) -> float:
@@ -50,22 +52,59 @@ class TimingResult:
         """Median time in seconds."""
         return self.median_ms / 1000.0
 
+    @property
+    def truncated(self) -> bool:
+        """Whether a bounded measurement stopped before its progress target."""
+        return self.progress is not None and self.progress_target is not None and self.progress < self.progress_target
 
-def time_it(func: Callable, runs: int = 3, warmups: int = 1, gpu_sync: bool = False) -> TimingResult:
-    """Time a callable with warmup iterations and optional CUDA synchronization.
+
+def time_it(
+    func: Callable,
+    runs: int = 3,
+    warmups: int = 1,
+    gpu_sync: bool = False,
+    *,
+    setup: Callable[[], None] | None = None,
+    max_seconds: float | None = None,
+    progress_getter: Callable[[], int] | None = None,
+    progress_target: int | None = None,
+) -> TimingResult:
+    """Time a callable, optionally enforcing a deadline and tracking progress.
 
     Args:
-        func: Zero-argument callable to benchmark.
+        func: Zero-argument callable to benchmark. When ``max_seconds`` is
+              provided, the callable instead receives the shared
+              :class:`Deadline` as its sole argument.
         runs: Number of timed iterations.
         warmups: Number of untimed warmup iterations.
         gpu_sync: If True, call torch.cuda.synchronize() before and after each
                   timed iteration to ensure GPU work is included in the measurement.
+        setup: Optional preparation called before every warmup and timed
+               iteration, outside the measured interval.
+        max_seconds: Total wall-clock budget shared by all timed iterations.
+                     ``0`` disables expiry while retaining progress tracking.
+        progress_getter: Returns the work completed by the latest iteration.
+        progress_target: Work required for an iteration to be complete.
 
     Returns:
-        A TimingResult with per-iteration times in milliseconds.
+        A :class:`TimingResult` with retained per-iteration timings and, for a
+        bounded measurement, progress from the same retained sample set.
+
+        Complete samples are retained together and a later partial sample is
+        discarded. If the first sample is partial, only its timing and actual
+        progress are returned. This prevents full-run timing statistics from
+        being paired with output or throughput from a different partial run.
     """
     if runs <= 0:
         raise ValueError(f"runs must be positive, got {runs}")
+    if warmups < 0:
+        raise ValueError(f"warmups must be non-negative, got {warmups}")
+
+    bounded = max_seconds is not None
+    if bounded != (progress_getter is not None) or bounded != (progress_target is not None):
+        raise ValueError("max_seconds, progress_getter, and progress_target must be provided together")
+    if progress_target is not None and progress_target < 0:
+        raise ValueError(f"progress_target must be non-negative, got {progress_target}")
 
     if gpu_sync:
         import torch
@@ -76,20 +115,59 @@ def time_it(func: Callable, runs: int = 3, warmups: int = 1, gpu_sync: bool = Fa
         def sync() -> None:
             pass
 
+    warmup_deadline = Deadline(0.0)
     for _ in range(warmups):
-        func()
+        if setup is not None:
+            setup()
+        if bounded:
+            func(warmup_deadline)
+        else:
+            func()
         sync()
 
-    times_ms = []
-    for _ in range(runs):
+    deadline = Deadline(max_seconds) if bounded else None
+    complete_times_ms: list[float] = []
+    partial_time_ms: float | None = None
+    last_progress: int | None = None
+    for run_idx in range(runs):
+        if run_idx > 0 and deadline is not None and deadline.expired():
+            break
+        if setup is not None:
+            setup()
         sync()
         t0 = time.perf_counter()
-        func()
+        if deadline is not None:
+            func(deadline)
+        else:
+            func()
         sync()
         t1 = time.perf_counter()
-        times_ms.append((t1 - t0) * 1000.0)
+        elapsed_ms = (t1 - t0) * 1000.0
 
-    return TimingResult(times_ms=times_ms)
+        if progress_getter is not None and progress_target is not None:
+            last_progress = progress_getter()
+            if not 0 <= last_progress <= progress_target:
+                raise ValueError(f"progress must be between 0 and {progress_target}, got {last_progress}")
+            if last_progress < progress_target:
+                partial_time_ms = elapsed_ms
+                break
+        complete_times_ms.append(elapsed_ms)
+
+    if not bounded:
+        return TimingResult(times_ms=complete_times_ms)
+    if complete_times_ms:
+        return TimingResult(
+            times_ms=complete_times_ms,
+            progress=progress_target,
+            progress_target=progress_target,
+        )
+    if partial_time_ms is None or last_progress is None:
+        raise RuntimeError("bounded timing completed without recording a sample")
+    return TimingResult(
+        times_ms=[partial_time_ms],
+        progress=last_progress,
+        progress_target=progress_target,
+    )
 
 
 class Deadline:
@@ -125,86 +203,6 @@ def throughput_per_s(items: float, elapsed_ms: float) -> float:
     if elapsed_ms <= 0:
         return float("nan")
     return items / (elapsed_ms / 1000.0)
-
-
-def time_it_bounded(
-    run: Callable[[Deadline], None],
-    runs: int,
-    max_seconds: float,
-    progress_getter: Callable[[], int],
-    progress_target: int,
-) -> tuple[float, float, int]:
-    """Repeat ``run`` up to ``runs`` times, stopping early on budget exhaustion.
-
-    A single :class:`Deadline` covering the whole call is constructed from
-    ``max_seconds`` and passed to ``run`` on every invocation; the closure
-    must poll it inside its inner work loop to honour the budget mid-run.
-    After each invocation, ``progress_getter()`` reports how much of the
-    workload was actually completed; a value below ``progress_target`` is
-    treated as a partial run and further iterations are skipped.
-
-    Returns ``(avg_ms, std_ms, measured_progress)``. ``avg`` and ``std`` are
-    computed only over runs that completed end-to-end, with
-    ``measured_progress == progress_target``. If no full run finished, the
-    single partial timing and its progress are returned with ``std=0``.
-    """
-    timing, measured_progress = time_it_bounded_result(
-        run,
-        runs,
-        max_seconds,
-        progress_getter,
-        progress_target,
-    )
-    if not timing.times_ms:
-        return 0.0, 0.0, measured_progress
-    std_ms = statistics.pstdev(timing.times_ms) if len(timing.times_ms) > 1 else 0.0
-    return timing.mean_ms, std_ms, measured_progress
-
-
-def time_it_bounded_result(
-    run: Callable[[Deadline], None],
-    runs: int,
-    max_seconds: float,
-    progress_getter: Callable[[], int],
-    progress_target: int,
-) -> tuple[TimingResult, int]:
-    """Return the actual timing samples retained by :func:`time_it_bounded`.
-
-    Complete samples are retained together and a later partial sample is
-    discarded. If the first sample is partial, that sample and its measured
-    progress are returned. This form is useful when callers need a
-    :class:`TimingResult` without pairing aggregate timing from one run with
-    progress or output captured from another.
-
-    At least one timed invocation is attempted for valid input, even when an
-    active deadline has already expired. Bounded callers need one indivisible
-    unit of work to produce a partial timing suitable for extrapolation.
-    """
-    if runs <= 0:
-        raise ValueError(f"runs must be positive, got {runs}")
-
-    deadline = Deadline(max_seconds)
-    completed_times_ms: list[float] = []
-    partial_time_ms: float | None = None
-    last_progress = 0
-    for run_idx in range(runs):
-        if run_idx > 0 and deadline.expired():
-            break
-        start = time.perf_counter()
-        run(deadline)
-        elapsed_ms = (time.perf_counter() - start) * 1000.0
-        last_progress = progress_getter()
-        if last_progress < progress_target:
-            partial_time_ms = elapsed_ms
-            break
-        completed_times_ms.append(elapsed_ms)
-    if completed_times_ms:
-        # Partial work after one or more complete samples is not included in
-        # these timing statistics, so report the matching full-run progress.
-        return TimingResult(times_ms=completed_times_ms), progress_target
-    if partial_time_ms is None:
-        raise RuntimeError("bounded timing completed without recording a sample")
-    return TimingResult(times_ms=[partial_time_ms]), last_progress
 
 
 def add_rdkit_max_seconds_arg(parser: argparse.ArgumentParser, *, extra_help: str = "") -> None:

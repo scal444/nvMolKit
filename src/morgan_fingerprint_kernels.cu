@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -233,7 +233,7 @@ __global__ void morganFingerprintKernelBatch(const cuda::std::span<std::uint32_t
   __shared__ int           sortOrderings[kBlockSize];                             // kBlockSize ints
 
   __shared__ FlatBitVect<fpSize> localUpdateAccumulator[tilesPerBlock];  // one per tile
-  __shared__ AccumTuple          sharedAccums[kBlockSize];               // one per thread, used for tile sort
+  __shared__ cub::Uninitialized<AccumTuple> sharedAccums[kBlockSize];    // one per thread, used for tile sort
 
   const int tileOffset = tileId * tileSliceSize;
   const int sharedIdx  = tileOffset + atomIdx;
@@ -314,7 +314,7 @@ __global__ void morganFingerprintKernelBatch(const cuda::std::span<std::uint32_t
     }  // endif deadatoms
 
     // Stage per-thread tuple into shared
-    sharedAccums[sharedIdx] = accum[0];
+    sharedAccums[sharedIdx].Alias() = accum[0];
     // Ensure shared staging visible within the tile
     tile.sync();
 
@@ -324,12 +324,12 @@ __global__ void morganFingerprintKernelBatch(const cuda::std::span<std::uint32_t
       // One tile per block; safe to use block-wide sort
       AccumTuple                                      accumSeq[1];
       // Use valid count to push invalid lanes to the end
-      accumSeq[0] = sharedAccums[sharedIdx];
+      accumSeq[0] = sharedAccums[sharedIdx].Alias();
       block.sync();
       BlockMergeSort(temp_storage_shuffle)
         .Sort(accumSeq, AccumTupleLess(), nAtomsInMolecule, outOfBoundsFillerMaxValue);
       block.sync();
-      sharedAccums[sharedIdx] = accumSeq[0];
+      sharedAccums[sharedIdx].Alias() = accumSeq[0];
       block.sync();
     } else if constexpr (maxAtoms == 64) {
       __shared__ typename cub::WarpMergeSort<AccumTuple, 2, 32>::TempStorage warp_temp_64[tilesPerBlock];
@@ -339,13 +339,13 @@ __global__ void morganFingerprintKernelBatch(const cuda::std::span<std::uint32_t
         const int  lane = tile.thread_rank();
         const int  idx0 = tileOffset + lane;
         const int  idx1 = tileOffset + 32 + lane;
-        laneItems[0]    = (lane < nAtomsInMolecule) ? sharedAccums[idx0] : outOfBoundsFillerMaxValue;
-        laneItems[1]    = ((32 + lane) < nAtomsInMolecule) ? sharedAccums[idx1] : outOfBoundsFillerMaxValue;
+        laneItems[0]    = (lane < nAtomsInMolecule) ? sharedAccums[idx0].Alias() : outOfBoundsFillerMaxValue;
+        laneItems[1]    = ((32 + lane) < nAtomsInMolecule) ? sharedAccums[idx1].Alias() : outOfBoundsFillerMaxValue;
         cub::WarpMergeSort<AccumTuple, 2, 32>(warp_temp_64[tileId]).Sort(laneItems, AccumTupleLess());
-        const int outIdx0     = tileOffset + 2 * lane;
-        const int outIdx1     = tileOffset + 2 * lane + 1;
-        sharedAccums[outIdx0] = laneItems[0];
-        sharedAccums[outIdx1] = laneItems[1];
+        const int outIdx0             = tileOffset + 2 * lane;
+        const int outIdx1             = tileOffset + 2 * lane + 1;
+        sharedAccums[outIdx0].Alias() = laneItems[0];
+        sharedAccums[outIdx1].Alias() = laneItems[1];
       }
       tile.sync();
     } else {  // maxAtoms == 32
@@ -354,14 +354,14 @@ __global__ void morganFingerprintKernelBatch(const cuda::std::span<std::uint32_t
       AccumTuple                                                             laneItem[1];
       const int                                                              lane = tile.thread_rank();
       const int                                                              idx0 = tileOffset + lane;
-      laneItem[0] = (lane < nAtomsInMolecule) ? sharedAccums[idx0] : outOfBoundsFillerMaxValue;
+      laneItem[0] = (lane < nAtomsInMolecule) ? sharedAccums[idx0].Alias() : outOfBoundsFillerMaxValue;
       cub::WarpMergeSort<AccumTuple, 1, 32>(warp_temp_32[tileId]).Sort(laneItem, AccumTupleLess());
-      sharedAccums[idx0] = laneItem[0];
+      sharedAccums[idx0].Alias() = laneItem[0];
       tile.sync();
     }
 
     // Load back our tile's sorted tuple
-    accum[0] = sharedAccums[sharedIdx];
+    accum[0] = sharedAccums[sharedIdx].Alias();
 
     // ------------------------------------------------------------
     // Given above target index, check all prev indices for this neighborhood, and add to next layers outputs if not
@@ -438,45 +438,48 @@ void launchMorganFingerprintKernelBatch(const MorganGPUBuffersBatch&            
                                         const int                               maxAtoms,
                                         const int                               nMolecules,
                                         cudaStream_t                            stream) {
-  const int tilesPerBlock = kBlockSize / maxAtoms;
-  const int numBlocks     = (nMolecules + tilesPerBlock - 1) / tilesPerBlock;  // ceil division
+  const int    tilesPerBlock = kBlockSize / maxAtoms;
+  const int    numBlocks     = (nMolecules + tilesPerBlock - 1) / tilesPerBlock;  // ceil division
+  const size_t atomCount     = static_cast<size_t>(maxAtoms) * nMolecules;
+  const size_t bondCount     = atomCount * bondStride;
+  const size_t scratchCount  = atomCount * (maxRadius + 1);
 
   switch (maxAtoms) {
     case 32:
       morganFingerprintKernelBatch<32, fpSize>
-        <<<numBlocks, kBlockSize, 0, stream>>>(toSpan(buffers.atomInvariants),
-                                               toSpan(buffers.bondInvariants),
-                                               toSpan(buffers.bondIndices),
-                                               toSpan(buffers.bondOtherAtomIndices),
-                                               toSpan(buffers.nAtomsPerMol),
-                                               toSpan(buffers.allSeenNeighborhoods32),
+        <<<numBlocks, kBlockSize, 0, stream>>>(toSpan(buffers.atomInvariants).first(atomCount),
+                                               toSpan(buffers.bondInvariants).first(atomCount),
+                                               toSpan(buffers.bondIndices).first(bondCount),
+                                               toSpan(buffers.bondOtherAtomIndices).first(bondCount),
+                                               toSpan(buffers.nAtomsPerMol).first(nMolecules),
+                                               toSpan(buffers.allSeenNeighborhoods32).first(scratchCount),
                                                toSpan(outputAccumulator),
                                                maxRadius,
-                                               toSpan(buffers.outputIndices));
+                                               toSpan(buffers.outputIndices).first(nMolecules));
       break;
     case 64:
       morganFingerprintKernelBatch<64, fpSize>
-        <<<numBlocks, kBlockSize, 0, stream>>>(toSpan(buffers.atomInvariants),
-                                               toSpan(buffers.bondInvariants),
-                                               toSpan(buffers.bondIndices),
-                                               toSpan(buffers.bondOtherAtomIndices),
-                                               toSpan(buffers.nAtomsPerMol),
-                                               toSpan(buffers.allSeenNeighborhoods64),
+        <<<numBlocks, kBlockSize, 0, stream>>>(toSpan(buffers.atomInvariants).first(atomCount),
+                                               toSpan(buffers.bondInvariants).first(atomCount),
+                                               toSpan(buffers.bondIndices).first(bondCount),
+                                               toSpan(buffers.bondOtherAtomIndices).first(bondCount),
+                                               toSpan(buffers.nAtomsPerMol).first(nMolecules),
+                                               toSpan(buffers.allSeenNeighborhoods64).first(scratchCount),
                                                toSpan(outputAccumulator),
                                                maxRadius,
-                                               toSpan(buffers.outputIndices));
+                                               toSpan(buffers.outputIndices).first(nMolecules));
       break;
     case 128:
       morganFingerprintKernelBatch<128, fpSize>
-        <<<numBlocks, kBlockSize, 0, stream>>>(toSpan(buffers.atomInvariants),
-                                               toSpan(buffers.bondInvariants),
-                                               toSpan(buffers.bondIndices),
-                                               toSpan(buffers.bondOtherAtomIndices),
-                                               toSpan(buffers.nAtomsPerMol),
-                                               toSpan(buffers.allSeenNeighborhoods128),
+        <<<numBlocks, kBlockSize, 0, stream>>>(toSpan(buffers.atomInvariants).first(atomCount),
+                                               toSpan(buffers.bondInvariants).first(atomCount),
+                                               toSpan(buffers.bondIndices).first(bondCount),
+                                               toSpan(buffers.bondOtherAtomIndices).first(bondCount),
+                                               toSpan(buffers.nAtomsPerMol).first(nMolecules),
+                                               toSpan(buffers.allSeenNeighborhoods128).first(scratchCount),
                                                toSpan(outputAccumulator),
                                                maxRadius,
-                                               toSpan(buffers.outputIndices));
+                                               toSpan(buffers.outputIndices).first(nMolecules));
       break;
     default:
       throw std::runtime_error("maxAtoms must be 32, 64, or 128");
@@ -486,14 +489,14 @@ void launchMorganFingerprintKernelBatch(const MorganGPUBuffersBatch&            
 
 }  // namespace nvMolKit
 
-#define DEFINE_TEMPLATE(fpSize)                                       \
-  template void nvMolKit::launchMorganFingerprintKernelBatch<fpSize>( \
-    const nvMolKit::MorganGPUBuffersBatch&  buffers,                  \
-    AsyncDeviceVector<FlatBitVect<fpSize>>& outputAccumulator,        \
-    size_t                                  maxRadius,                \
-    int                                     maxAtoms,                 \
-    int                                     nMolecules,               \
-    cudaStream_t                            stream);
+#define DEFINE_TEMPLATE(fpSize)                                         \
+  template void nvMolKit::launchMorganFingerprintKernelBatch<(fpSize)>( \
+    const nvMolKit::MorganGPUBuffersBatch&    buffers,                  \
+    AsyncDeviceVector<FlatBitVect<(fpSize)>>& outputAccumulator,        \
+    size_t                                    maxRadius,                \
+    int                                       maxAtoms,                 \
+    int                                       nMolecules,               \
+    cudaStream_t                              stream);
 DEFINE_TEMPLATE(128)
 DEFINE_TEMPLATE(256)
 DEFINE_TEMPLATE(512)

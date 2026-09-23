@@ -52,7 +52,6 @@ from bench_utils import (
     print_csv_rows,
     throughput_per_s,
     time_it,
-    time_it_bounded_result,
     write_csv_rows,
 )
 from rdkit import Chem
@@ -204,13 +203,17 @@ def bench_rdkit(
         for warmup_mol in warmup_mols:
             rdkit_optimize(warmup_mol)
 
-    timing, measured_count = time_it_bounded_result(
+    timing = time_it(
         run,
         runs=runs,
+        warmups=0,
         max_seconds=max_seconds,
         progress_getter=lambda: processed_count[0],
         progress_target=len(mols),
     )
+    if timing.progress is None:
+        raise RuntimeError("bounded timing did not report progress")
+    measured_count = timing.progress
     measured_results = complete_results[0] if measured_count == len(mols) else last_results[0]
     energies, not_converged = _flatten_rdkit_energies(measured_results)
     if not_converged > 0:
