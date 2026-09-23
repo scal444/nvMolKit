@@ -19,8 +19,9 @@ class ROMol;
 namespace nvMolKit {
 
 /**
- * A persistent, single-GPU collection of target molecules for repeated
- * substructure queries.
+ * A persistent collection of target molecules for repeated substructure
+ * queries. When multiple GPU IDs are configured, resident chunks are sharded
+ * across those devices and query results are merged in insertion order.
  *
  * addMol() stages an owned copy on the CPU. finalize() uploads all pending
  * chunks and atomically publishes them to subsequent queries. Previously
@@ -40,6 +41,13 @@ class SubstructLibrary {
 
   /** Copy a molecule into the pending generation and return its stable ID. */
   unsigned int addMol(const RDKit::ROMol& molecule);
+
+  /**
+   * Copy molecules into the pending generation in parallel and return their
+   * stable IDs.  CPU packing uses preprocessingThreads from the search
+   * configuration (-1 selects all available OpenMP threads).
+   */
+  std::vector<unsigned int> addMols(const std::vector<const RDKit::ROMol*>& molecules);
 
   /** Upload and publish every pending molecule. This is a synchronization barrier. */
   void finalize(cudaStream_t stream = nullptr);

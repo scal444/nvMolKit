@@ -141,6 +141,32 @@ TEST(SubstructLibraryState, PublishesPendingMoleculesAtomicallyAcrossGenerations
   EXPECT_EQ(library.getMatches(*aromaticCarbon), std::vector<MoleculeId>({1U, 2U}));
 }
 
+TEST(SubstructLibraryState, BulkAddPreservesStableIdsAcrossGenerations) {
+  nvMolKit::SubstructSearchConfig config;
+  config.preprocessingThreads = 4;
+  nvMolKit::SubstructLibrary                 library(2, config);
+  std::vector<std::unique_ptr<RDKit::ROMol>> targets;
+  std::vector<const RDKit::ROMol*>           pointers;
+  for (const auto& smiles : {"CC", "O", "CCC", "N", "c1ccccc1"}) {
+    targets.push_back(molFromSmiles(smiles));
+    ASSERT_NE(targets.back(), nullptr);
+    pointers.push_back(targets.back().get());
+  }
+
+  EXPECT_EQ(library.addMols(pointers), std::vector<MoleculeId>({0U, 1U, 2U, 3U, 4U}));
+  EXPECT_EQ(library.pendingSize(), 5U);
+  library.finalize();
+  EXPECT_EQ(library.size(), 5U);
+
+  auto extra = molFromSmiles("CO");
+  ASSERT_NE(extra, nullptr);
+  EXPECT_EQ(library.addMol(*extra), 5U);
+  library.finalize();
+  auto query = queryFromSmarts("[#6]");
+  ASSERT_NE(query, nullptr);
+  EXPECT_EQ(library.getMatches(*query), std::vector<MoleculeId>({0U, 2U, 4U, 5U}));
+}
+
 TEST(SubstructLibraryResults, PreservesInsertionOrderAndAppliesExactLimits) {
   nvMolKit::SubstructLibrary                 library(2);
   std::vector<std::unique_ptr<RDKit::ROMol>> targets;
@@ -239,9 +265,9 @@ TEST(SubstructLibraryConfiguration, SupportsProductionBackendsAndRejectsInvalidC
   vf2Config.algorithm = nvMolKit::SubstructAlgorithm::VF2;
   EXPECT_THROW(nvMolKit::SubstructLibrary(8, vf2Config), std::invalid_argument);
 
-  nvMolKit::SubstructSearchConfig multiGpuConfig;
-  multiGpuConfig.gpuIds = {0, 1};
-  EXPECT_THROW(nvMolKit::SubstructLibrary(8, multiGpuConfig), std::invalid_argument);
+  nvMolKit::SubstructSearchConfig duplicateGpuConfig;
+  duplicateGpuConfig.gpuIds = {0, 0};
+  EXPECT_THROW(nvMolKit::SubstructLibrary(8, duplicateGpuConfig), std::invalid_argument);
 
   nvMolKit::SubstructSearchConfig invalidGpuConfig;
   invalidGpuConfig.gpuIds = {std::numeric_limits<int>::max()};
@@ -263,6 +289,43 @@ TEST(SubstructLibraryConfiguration, SupportsProductionBackendsAndRejectsInvalidC
     library.finalize();
     EXPECT_EQ(library.getMatches(*query), std::vector<MoleculeId>({0U}));
   }
+}
+
+TEST(SubstructLibraryMultiGpu, ShardsTargetsAndMergesEveryOperationInInsertionOrder) {
+  int deviceCount = 0;
+  ASSERT_EQ(cudaGetDeviceCount(&deviceCount), cudaSuccess);
+  if (deviceCount < 2) {
+    GTEST_SKIP() << "Multi-GPU library test requires at least two CUDA devices";
+  }
+
+  nvMolKit::SubstructSearchConfig config;
+  config.gpuIds               = {0, 1};
+  config.workerThreads        = 1;
+  config.preprocessingThreads = 4;
+  nvMolKit::SubstructLibrary                 library(2, config);
+  std::vector<std::unique_ptr<RDKit::ROMol>> targets;
+  std::vector<const RDKit::ROMol*>           pointers;
+  for (const auto& smiles : {"CC", "O", "CCC", "N", "c1ccccc1", "CO", "C=O", "[Si]"}) {
+    targets.push_back(molFromSmiles(smiles));
+    ASSERT_NE(targets.back(), nullptr);
+    pointers.push_back(targets.back().get());
+  }
+  EXPECT_EQ(library.addMols(pointers), std::vector<MoleculeId>({0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U}));
+  library.finalize();
+
+  auto carbon = queryFromSmarts("[#6]");
+  ASSERT_NE(carbon, nullptr);
+  const std::vector<MoleculeId> expected{0U, 2U, 4U, 5U, 6U};
+  EXPECT_EQ(library.getMatches(*carbon), expected);
+  EXPECT_EQ(library.getMatches(*carbon, 3), std::vector<MoleculeId>({0U, 2U, 4U}));
+  EXPECT_EQ(library.countMatches(*carbon), expected.size());
+  EXPECT_TRUE(library.hasMatch(*carbon));
+
+  auto phosphorus = queryFromSmarts("[P]");
+  ASSERT_NE(phosphorus, nullptr);
+  EXPECT_TRUE(library.getMatches(*phosphorus).empty());
+  EXPECT_EQ(library.countMatches(*phosphorus), 0U);
+  EXPECT_FALSE(library.hasMatch(*phosphorus));
 }
 
 TEST(SubstructLibraryConcurrency, AllowsConcurrentQueriesOfACommittedGeneration) {

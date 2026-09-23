@@ -1198,14 +1198,33 @@ void buildQueryTreeForAtom(const RDKit::Atom*      atom,
                            QueryTreeBuilder&       builder,
                            int&                    nextPatternId,
                            const std::vector<int>* childPatternIds = nullptr) {
+  if (!atom->hasQuery()) {
+    AtomDataPacked packed;
+    AtomQuery      flags = AtomQueryAtomicNum;
+    packed.setAtomicNum(atom->getAtomicNum());
+    if (atom->getIsotope() != 0) {
+      flags |= AtomQueryIsotope;
+      packed.setIsotope(atom->getIsotope());
+    }
+    if (atom->getFormalCharge() != 0) {
+      flags |= AtomQueryFormalCharge;
+      packed.setFormalCharge(atom->getFormalCharge());
+    }
+    if (atom->getNumExplicitHs() != 0) {
+      flags |= AtomQueryNumExplicitHs;
+      packed.setNumExplicitHs(atom->getTotalNumHs(true));
+    }
+    if (atom->getNumRadicalElectrons() != 0) {
+      flags |= AtomQueryNumRadicalElectrons;
+      packed.setNumRadicalElectrons(atom->getNumRadicalElectrons());
+    }
+    builder.addLeaf(packed, flags, bondCounts);
+    return;
+  }
+
   // Check for chirality specified on the atom (SMARTS @/@@ notation)
   if (atom->getChiralTag() != RDKit::Atom::ChiralType::CHI_UNSPECIFIED) {
     throw std::runtime_error("SMARTS chirality query (@/@@) is not supported");
-  }
-
-  if (!atom->hasQuery()) {
-    builder.addLeaf(AtomDataPacked{}, AtomQueryNone, bondCounts);
-    return;
   }
 
   const auto* query = atom->getQuery();
@@ -1236,6 +1255,11 @@ namespace {
 
 void populateQueryAtomDataPacked(const RDKit::Atom* atom, AtomDataPacked& packed) {
   if (!atom->hasQuery()) {
+    packed.setAtomicNum(atom->getAtomicNum());
+    packed.setIsotope(atom->getIsotope());
+    packed.setFormalCharge(atom->getFormalCharge());
+    packed.setNumExplicitHs(atom->getTotalNumHs(true));
+    packed.setNumRadicalElectrons(atom->getNumRadicalElectrons());
     return;
   }
 
@@ -1624,6 +1648,7 @@ void addQueryToBatch(const RDKit::ROMol* mol, MoleculesHost& batch, const std::v
     throw std::runtime_error("Query molecule has " + std::to_string(mol->getNumAtoms()) +
                              " atoms, which exceeds the maximum of " + std::to_string(kMaxTargetAtoms));
   }
+
 
   std::vector<int> fragMapping;
   const unsigned   numFrags = RDKit::MolOps::getMolFrags(*mol, fragMapping);
