@@ -987,15 +987,26 @@ __device__ __forceinline__ int cooperativeClosestEntry(const TreeStorage<Compone
                                                        const int                     node,
                                                        const std::uint32_t*          fingerprint,
                                                        CooperativeScratch&           scratch,
-                                                       const int                     excludedEntry = -1) {
+                                                       const int*                    nodeEntries    = nullptr,
+                                                       const int                     numNodeEntries = 0) {
+  // A caller-staged copy of the node's ordered entries replaces the serial
+  // list walk; either source yields the same candidates in the same order.
   if (threadIdx.x == 0) {
     scratch.next      = storage.nodeHeads[node];
     scratch.bestEntry = -1;
     scratch.bestValue = -1.0;
   }
   __syncthreads();
-  while (true) {
-    if (threadIdx.x == 0) {
+  for (int offset = 0;; offset += blockDim.x) {
+    if (nodeEntries != nullptr) {
+      const int chunk = max(0, min(static_cast<int>(blockDim.x), numNodeEntries - offset));
+      if (threadIdx.x < chunk) {
+        scratch.entries[threadIdx.x] = nodeEntries[offset + threadIdx.x];
+      }
+      if (threadIdx.x == 0) {
+        scratch.count = chunk;
+      }
+    } else if (threadIdx.x == 0) {
       int entry     = scratch.next;
       scratch.count = 0;
       while (entry >= 0 && scratch.count < blockDim.x) {
@@ -1009,9 +1020,7 @@ __device__ __forceinline__ int cooperativeClosestEntry(const TreeStorage<Compone
       break;
     }
     if (threadIdx.x < scratch.count) {
-      const int entry = scratch.entries[threadIdx.x];
-      scratch.values[threadIdx.x] =
-        entry == excludedEntry ? -1.0 : entryToFingerprintSimilarity(storage, entry, fingerprint);
+      scratch.values[threadIdx.x] = entryToFingerprintSimilarity(storage, scratch.entries[threadIdx.x], fingerprint);
     }
     cooperativeUpdateBestEntry(scratch);
   }
@@ -1515,7 +1524,20 @@ __global__ void bitBirchLeafOwnersKernel(const int                    count,
     return;
   }
   __shared__ CooperativeScratch scratch;
+  __shared__ int                leafEntries[cooperativeBlockSize];
+  __shared__ int                numLeafEntries;
   const int                     node = keys[first];
+  // Only this owner appends to its leaf, so one list walk stages the ordered
+  // entries for every query. Nodes wider than one block keep walking.
+  const bool stageEntries = branchingFactor < cooperativeBlockSize;
+  if (threadIdx.x == 0 && stageEntries) {
+    int size = 0;
+    for (int entry = storage.nodeHeads[node]; entry >= 0; entry = storage.entryNext[entry]) {
+      leafEntries[size++] = entry;
+    }
+    numLeafEntries = size;
+  }
+  __syncthreads();
   for (int offset = first; offset < count && keys[offset] == node; ++offset) {
     const int molecule = values[offset];
     if (storage.labels[molecule] >= 0) {
@@ -1524,7 +1546,12 @@ __global__ void bitBirchLeafOwnersKernel(const int                    count,
     const auto* fingerprint = queryFingerprint(storage, molecule);
     int         selected    = -1;
     if (storage.nodeHeads[node] >= 0) {
-      selected = cooperativeClosestEntry(storage, node, fingerprint, scratch);
+      selected = cooperativeClosestEntry(storage,
+                                         node,
+                                         fingerprint,
+                                         scratch,
+                                         stageEntries ? leafEntries : nullptr,
+                                         stageEntries ? numLeafEntries : 0);
     }
     bool merge = false;
     if (selected >= 0) {
@@ -1557,6 +1584,9 @@ __global__ void bitBirchLeafOwnersKernel(const int                    count,
       if (threadIdx.x == 0) {
         storage.entryClusterIds[selected] = molecule;
         appendEntry(storage, node, selected);
+        if (stageEntries) {
+          leafEntries[numLeafEntries++] = selected;
+        }
       }
       __syncthreads();
     }
