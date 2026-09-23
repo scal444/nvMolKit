@@ -13,7 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GPU-accelerated clustering from distance matrices, fingerprints, or ordered RDKit molecules."""
+"""GPU-accelerated clustering and diversity selection.
+
+Each algorithm has a matrix form that takes a precomputed distance matrix and a
+``fused_`` form that computes distances from fingerprints or molecules as needed.
+"""
 
 import operator
 from dataclasses import dataclass
@@ -179,6 +183,14 @@ def _prepare_distance_matrix(distance_matrix: ArrayInput, stream: torch.cuda.Str
     return tensor, active_stream
 
 
+def _prepare_fused_input(x, metric: Metric, stream: torch.cuda.Stream | None, name: str):
+    resolved = _resolve_metric(metric)
+    if isinstance(resolved, AAPMetric):
+        raise NotImplementedError(f"{name} does not yet support AAPMetric")
+    (fingerprints,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
+    return resolved, fingerprints.__cuda_array_interface__, active_stream
+
+
 def leader(
     distance_matrix: ArrayInput,
     cutoff: float,
@@ -216,6 +228,46 @@ def leader(
         operator.index(pick_size),
         _index_tuple("first_picks", first_picks),
         active_stream.cuda_stream,
+    )
+    return _resolve_selection_output(result, output)
+
+
+def fused_leader(
+    x,
+    cutoff: float,
+    *,
+    metric: Metric = "tanimoto",
+    pick_size: int = 0,
+    first_picks: Sequence[int] = (),
+    stream: torch.cuda.Stream | None = None,
+    output: OutputMode = OutputMode.DEVICE,
+) -> SelectionDeviceResult | tuple[int, ...]:
+    """Select leaders by sphere exclusion, computing distances as needed.
+
+    Equivalent to :func:`leader` on the matrix of ``1 - similarity`` values,
+    with memory that scales as ``O(N)``.
+
+    Args:
+        x: Packed int32 or uint32 fingerprints of shape ``(N, num_words)``.
+        cutoff: Inclusive exclusion distance in ``[0, 1]``.
+        metric: Similarity metric. :class:`~nvmolkit.similarity.AAPMetric` is not
+            yet supported.
+        pick_size: Maximum number of leaders, or ``0`` for no limit.
+        first_picks: Unique indices selected as leaders, in order, before the
+            input-order pass.
+        stream: CUDA stream to use. If None, uses the current stream.
+        output: Result representation.
+
+    Returns:
+        A :class:`SelectionDeviceResult` for ``OutputMode.DEVICE``, or a tuple
+        of selected indices for ``OutputMode.RDKIT``.
+    """
+    _validate_output(output)
+    resolved, inputs, active_stream = _prepare_fused_input(x, metric, stream, "fused_leader")
+    pick_size = operator.index(pick_size)
+    first_picks = _index_tuple("first_picks", first_picks)
+    result = _clustering.fused_leader(
+        inputs, cutoff, _packed_metric_name(resolved), pick_size, first_picks, active_stream.cuda_stream
     )
     return _resolve_selection_output(result, output)
 

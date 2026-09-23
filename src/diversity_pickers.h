@@ -10,6 +10,7 @@
 #include <cuda/std/span>
 #include <vector>
 
+#include "src/fingerprint_similarity.h"
 #include "src/utils/device_vector.h"
 
 namespace nvMolKit {
@@ -20,7 +21,8 @@ struct PickerResult {
 };
 
 // Distance matrices are square and row-major; element [i, j] is the distance from selected item i to candidate j.
-// Distances are compared in single precision. pickSize == 0 means no limit for Leader.
+// Fingerprints are packed row-major with shape (num items, num words); distance is 1 - similarity. All comparisons
+// use single precision. pickSize == 0 means no limit for Leader.
 
 PickerResult leaderFromDistanceMatrix(cuda::std::span<const float> distanceMatrix,
                                       int                          numItems,
@@ -35,6 +37,15 @@ PickerResult leaderFromDistanceMatrix(cuda::std::span<const double> distanceMatr
                                       int                           pickSize,
                                       const std::vector<int>&       firstPicks = {},
                                       cudaStream_t                  stream     = nullptr);
+
+PickerResult fusedLeaderGpu(cuda::std::span<const std::uint32_t> fingerprints,
+                            int                                  numFingerprints,
+                            int                                  numWords,
+                            double                               cutoff,
+                            FingerprintSimilarityMetric          metric,
+                            int                                  pickSize,
+                            const std::vector<int>&              firstPicks = {},
+                            cudaStream_t                         stream     = nullptr);
 
 }  // namespace nvMolKit
 

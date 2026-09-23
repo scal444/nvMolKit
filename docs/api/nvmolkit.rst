@@ -91,6 +91,7 @@ Clustering
    clustering.butina
    clustering.fused_butina
    clustering.leader
+   clustering.fused_leader
    clustering.aap_dise
 
 .. autosummary::

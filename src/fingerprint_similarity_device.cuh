@@ -63,6 +63,23 @@ __device__ __forceinline__ bool fingerprintSimilarityCanReach(const int   lhsBit
   }
 }
 
+//! Distance 1 - similarity in correctly rounded single precision, unaffected by --use_fast_math, so fused pickers
+//! agree exactly with a float32 distance matrix computed the same way.
+template <FingerprintSimilarityMetric Metric>
+__device__ __forceinline__ float fingerprintDistance(const int intersection,
+                                                     const int lhsBitCount,
+                                                     const int rhsBitCount) {
+  float similarity = 0.0F;
+  if constexpr (Metric == FingerprintSimilarityMetric::Tanimoto) {
+    const int unionCount = lhsBitCount + rhsBitCount - intersection;
+    similarity           = unionCount > 0 ? __fdiv_rn(__int2float_rn(intersection), __int2float_rn(unionCount)) : 1.0F;
+  } else {
+    const float norm = __fsqrt_rn(__fmul_rn(__int2float_rn(lhsBitCount), __int2float_rn(rhsBitCount)));
+    similarity       = norm > 0.0F ? __fdiv_rn(__int2float_rn(intersection), norm) : 0.0F;
+  }
+  return 1.0F - similarity;
+}
+
 template <FingerprintSimilarityMetric Metric>
 __device__ __forceinline__ bool fingerprintSimilarityAtLeast(const int   intersection,
                                                              const int   lhsBitCount,
