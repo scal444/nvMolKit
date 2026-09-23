@@ -24,7 +24,6 @@ from bench_utils import (
     print_csv_rows,
     throughput_per_s,
     time_it,
-    time_it_bounded_result,
     write_csv_rows,
 )
 
@@ -102,11 +101,10 @@ def _bench_bblean(
         holder["tree"] = tree
         completed[0] = 1
 
-    for _ in range(warmups):
-        run()
-    timing, _ = time_it_bounded_result(
+    timing = time_it(
         run,
         runs=runs,
+        warmups=warmups,
         max_seconds=max_seconds,
         progress_getter=lambda: completed[0],
         progress_target=1,
