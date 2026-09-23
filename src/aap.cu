@@ -665,6 +665,19 @@ PickerResult aapLeader(const std::vector<const RDKit::ROMol*>& molecules,
   return detail::leaderPick(provider, static_cast<float>(cutoff), pickSize, firstPicks, nullptr, stream);
 }
 
+PickerResult aapMaxMin(const std::vector<const RDKit::ROMol*>& molecules,
+                       const int                               pickSize,
+                       const AapOptions&                       options,
+                       const std::vector<int>&                 firstPicks,
+                       const int                               seed,
+                       const double                            threshold,
+                       cudaStream_t                            stream) {
+  validateOptions(options);
+  detail::validateMaxMinThreshold(threshold, 1.0);
+  AapDistanceProvider provider(molecules, options, stream);
+  return detail::maxMinPick(provider, pickSize, firstPicks, seed, static_cast<float>(threshold), stream);
+}
+
 ClusteringResult aapDise(const std::vector<const RDKit::ROMol*>& molecules,
                          const double                            cutoff,
                          const AapOptions&                       options,

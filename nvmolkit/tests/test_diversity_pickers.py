@@ -17,9 +17,11 @@ from nvmolkit.clustering import (
     fused_butina,
     fused_dise,
     fused_leader,
+    fused_maxmin,
     leader,
+    maxmin,
 )
-from nvmolkit.similarity import CosineMetric, TanimotoMetric, aap_similarity
+from nvmolkit.similarity import AAPMetric, CosineMetric, TanimotoMetric, aap_similarity
 from nvmolkit.types import AsyncGpuResult
 
 RDKIT = OutputMode.RDKIT
@@ -110,6 +112,36 @@ def test_fused_leader_first_picks_and_pick_size_match_rdkit_on_chembl(chembl_fin
     assert fused_leader(packed, 0.5, pick_size=50, first_picks=first_picks, output=RDKIT) == expected
 
 
+@pytest.mark.parametrize(
+    "pick_size, first_picks, seed",
+    [(200, (), 42), (200, (), 0), (100, (7, 900, 3), -1), (999, (), 5)],
+)
+def test_fused_maxmin_matches_rdkit_on_chembl(chembl_fingerprints, pick_size, first_picks, seed):
+    bit_vectors, packed = chembl_fingerprints
+    expected = tuple(
+        rdSimDivPickers.MaxMinPicker().LazyBitVectorPick(
+            bit_vectors, len(bit_vectors), pick_size, firstPicks=list(first_picks), seed=seed
+        )
+    )
+
+    actual, _ = fused_maxmin(packed, pick_size, first_picks=first_picks, seed=seed, output=RDKIT)
+
+    assert actual == expected
+
+
+@pytest.mark.parametrize("threshold", [0.5, 0.75, 0.875])
+def test_fused_maxmin_threshold_matches_rdkit_on_chembl(chembl_fingerprints, threshold):
+    bit_vectors, packed = chembl_fingerprints
+    expected, expected_last = rdSimDivPickers.MaxMinPicker().LazyBitVectorPickWithThreshold(
+        bit_vectors, len(bit_vectors), len(bit_vectors), threshold, seed=11
+    )
+
+    actual, actual_last = fused_maxmin(packed, len(bit_vectors), seed=11, threshold=threshold, output=RDKIT)
+
+    assert actual == tuple(expected)
+    assert actual_last == pytest.approx(expected_last, rel=1e-6)
+
+
 @pytest.mark.parametrize("metric", ["tanimoto", "cosine"])
 @pytest.mark.parametrize("cutoff", [0.3, 0.55])
 def test_fused_algorithms_match_matrix_forms_on_chembl(chembl_fingerprints, chembl_distances, metric, cutoff):
@@ -117,6 +149,9 @@ def test_fused_algorithms_match_matrix_forms_on_chembl(chembl_fingerprints, chem
     distances = chembl_distances[metric]
 
     assert fused_leader(packed, cutoff, metric=metric, output=RDKIT) == leader(distances, cutoff, output=RDKIT)
+    assert fused_maxmin(packed, 150, metric=metric, seed=3, output=RDKIT) == maxmin(
+        distances, 150, seed=3, output=RDKIT
+    )
     for assignment in ("first", "nearest"):
         assert fused_dise(packed, cutoff, metric=metric, assignment=assignment, output=RDKIT) == dise(
             distances, cutoff, assignment=assignment, output=RDKIT
@@ -128,6 +163,7 @@ def test_float32_and_float64_matrices_agree_on_chembl(chembl_distances):
     widened = distances.astype(np.float64)
 
     assert leader(widened, 0.3, output=RDKIT) == leader(distances, 0.3, output=RDKIT)
+    assert maxmin(widened, 100, seed=2, output=RDKIT) == maxmin(distances, 100, seed=2, output=RDKIT)
     assert dise(widened, 0.3, output=RDKIT) == dise(distances, 0.3, output=RDKIT)
 
 
@@ -166,6 +202,7 @@ def test_fused_forms_match_matrix_forms_for_unusual_widths(float32_distances, nu
     distances = float32_distances(packed, metric)
 
     assert fused_leader(packed, 0.9, metric=metric, output=RDKIT) == leader(distances, 0.9, output=RDKIT)
+    assert fused_maxmin(packed, 40, metric=metric, seed=4, output=RDKIT) == maxmin(distances, 40, seed=4, output=RDKIT)
     assert fused_dise(packed, 0.9, metric=metric, output=RDKIT) == dise(distances, 0.9, output=RDKIT)
 
 
@@ -204,11 +241,11 @@ def test_explicit_stream_matches_default_stream_on_chembl(chembl_fingerprints):
     _, packed = chembl_fingerprints
     stream = torch.cuda.Stream()
 
-    selection = fused_leader(packed, 0.4, stream=stream)
+    selection = fused_maxmin(packed, 64, seed=1, stream=stream)
     clusters = fused_dise(packed, 0.4, stream=stream)
     stream.synchronize()
 
-    assert selection.indices.numpy().tolist() == list(fused_leader(packed, 0.4, output=RDKIT))
+    assert selection.indices.numpy().tolist() == list(fused_maxmin(packed, 64, seed=1, output=RDKIT)[0])
     assert clusters.cluster_ids.numpy().tolist() == fused_dise(packed, 0.4).cluster_ids.numpy().tolist()
 
 
@@ -243,6 +280,21 @@ def test_aap_leader_and_first_assignment_match_rdkit_lazy_picker(aap_molecules):
     result = fused_dise(aap_molecules, cutoff, metric="aap", assignment="first")
     centroids = result.centroids.numpy()
     assert [int(centroids[label]) for label in result.cluster_ids.numpy()] == [expected_leaders[k] for k in labels]
+
+
+def test_aap_maxmin_matches_rdkit_lazy_picker(aap_molecules):
+    distance = _aap_distance(aap_molecules)
+    # RDKit's MaxMinPicker evaluates func(candidate, pick); nvMolKit measures from the pick.
+    expected = tuple(
+        rdSimDivPickers.MaxMinPicker().LazyPick(
+            lambda candidate, pick: distance(pick, candidate), len(aap_molecules), 8, firstPicks=[3]
+        )
+    )
+
+    actual, last_distance = fused_maxmin(aap_molecules, 8, metric=AAPMetric(), first_picks=(3,), output=RDKIT)
+
+    assert actual == expected
+    assert last_distance == pytest.approx(min(distance(pick, actual[-1]) for pick in actual[:-1]))
 
 
 def test_aap_nearest_assignment_picks_the_nearest_centroid(aap_molecules):
@@ -281,6 +333,10 @@ def test_matrix_rows_are_distances_from_the_selected_item():
     )
 
     assert leader(distances, 0.2, output=RDKIT) == (0, 2)
+    # From pick 0, item 2 is farthest by row 0 even though column 0 says otherwise.
+    picks, last_distance = maxmin(distances, 2, first_picks=(0,), output=RDKIT)
+    assert picks == (0, 2)
+    assert last_distance == pytest.approx(0.8)
     assert dise(distances, 0.2, assignment="first", output=RDKIT) == ((0, 1), (2,))
 
 
@@ -291,13 +347,15 @@ def test_forced_picks_are_kept_even_when_they_exclude_each_other():
 
     expected = tuple(rdSimDivPickers.LeaderPicker().LazyPick(distance, 6, 0.2, pickSize=1, firstPicks=[4, 3, 1]))
     assert leader(distances, 0.2, pick_size=1, first_picks=(4, 3, 1), output=RDKIT) == expected == (4, 3, 1)
+    assert maxmin(distances, 2, first_picks=(4, 3, 1), output=RDKIT) == ((4, 3, 1), -1.0)
 
 
-def test_identical_inputs_collapse_to_one_leader():
+def test_identical_inputs_collapse_to_one_leader_and_lowest_index_maxmin():
     fingerprints = np.tile(np.asarray([[0b1011, 0b0110]], dtype=np.uint32), (300, 1))
 
     assert fused_leader(fingerprints, 0.0, output=RDKIT) == (0,)
     assert fused_dise(fingerprints, 0.0, output=RDKIT) == (tuple(range(300)),)
+    assert fused_maxmin(fingerprints, 3, first_picks=(299,), output=RDKIT) == ((299, 0, 1), 0.0)
 
 
 @pytest.mark.parametrize("metric", [TanimotoMetric(), CosineMetric()])
@@ -309,6 +367,9 @@ def test_empty_fingerprints_follow_each_metric_convention(metric, cutoff):
     distances = _fingerprint_distance_matrix(fingerprints, metric_name)
 
     assert fused_leader(fingerprints, cutoff, metric=metric, output=RDKIT) == leader(distances, cutoff, output=RDKIT)
+    assert fused_maxmin(fingerprints, 5, metric=metric, first_picks=(0,), output=RDKIT) == maxmin(
+        distances, 5, first_picks=(0,), output=RDKIT
+    )
     for assignment in ("first", "nearest"):
         assert fused_dise(fingerprints, cutoff, metric=metric, assignment=assignment, output=RDKIT) == dise(
             distances, cutoff, assignment=assignment, output=RDKIT
@@ -319,6 +380,14 @@ def test_leader_removes_itself_without_a_zero_diagonal():
     distances = np.full((3, 3), 0.8)
 
     assert leader(distances, 0.1, output=RDKIT) == (0, 1, 2)
+
+
+def test_maxmin_threshold_can_stop_before_any_addition():
+    distances = np.ones((3, 3))
+    np.fill_diagonal(distances, 0.0)
+
+    assert maxmin(distances, 3, first_picks=(0,), threshold=1.0, output=RDKIT) == ((0,), -1.0)
+    assert maxmin(distances, 2, first_picks=(0,), output=RDKIT) == ((0, 1), 1.0)
 
 
 def test_empty_and_singleton_inputs():
@@ -333,7 +402,10 @@ def test_empty_and_singleton_inputs():
     assert fused_leader([], 0.5, metric="aap", output=RDKIT) == ()
     assert fused_dise([], 0.5, metric="aap", output=RDKIT) == ()
     assert leader(singleton, 0.0, output=RDKIT) == (0,)
+    assert maxmin(singleton, 1, seed=7, output=RDKIT) == ((0,), -1.0)
     assert dise(singleton, 0.0, output=RDKIT) == ((0,),)
+    with pytest.raises(ValueError, match="pick_size"):
+        fused_maxmin(empty_fingerprints, 1)
 
 
 def test_numpy_and_torch_integer_arguments_are_accepted():
@@ -341,34 +413,44 @@ def test_numpy_and_torch_integer_arguments_are_accepted():
     distances = np.abs(points[:, None] - points[None, :])
 
     assert leader(distances, 0.2, pick_size=np.int64(2), first_picks=np.asarray([3]), output=RDKIT) == (3, 0)
+    assert maxmin(distances, np.int32(3), first_picks=torch.tensor([5]), seed=np.int64(1), output=RDKIT)[0] == (
+        5,
+        0,
+        3,
+    )
 
 
 @pytest.mark.parametrize(
     "function, args",
     [
         (fused_leader, (0.5,)),
+        (fused_maxmin, (3,)),
         (fused_dise, (0.5,)),
         (fused_butina, (0.5,)),
     ],
 )
 def test_metric_names_and_instances_are_equivalent(function, args):
     fingerprints = np.asarray([[0b0011], [0b0010], [0b1100], [0b0111]], dtype=np.uint32)
+    extra = {"first_picks": (0,)} if function is fused_maxmin else {}
 
     for name, instance in (("tanimoto", TanimotoMetric()), ("cosine", CosineMetric())):
-        by_name = function(fingerprints, *args, metric=name, output=RDKIT)
-        assert function(fingerprints, *args, metric=instance, output=RDKIT) == by_name
+        by_name = function(fingerprints, *args, metric=name, output=RDKIT, **extra)
+        assert function(fingerprints, *args, metric=instance, output=RDKIT, **extra) == by_name
 
 
 def test_device_outputs_have_documented_types():
     points = np.asarray([0.0, 0.05, 0.25, 0.6, 0.65, 1.0])
     distances = np.abs(points[:, None] - points[None, :])
 
-    selection = leader(distances, 0.2)
+    selection = maxmin(distances, 3, first_picks=(0,))
+    leaders = leader(distances, 0.2)
     clusters = dise(distances, 0.2)
 
     assert isinstance(selection, SelectionDeviceResult)
     assert selection.indices.torch().dtype == torch.int32
-    assert selection.indices.torch().shape == (4,)
+    assert selection.indices.torch().shape == (3,)
+    assert selection.last_distance == pytest.approx(0.4)
+    assert leaders.last_distance is None
     assert isinstance(clusters, ClusterDeviceResult)
     assert clusters.cluster_ids.torch().dtype == torch.int32
     assert clusters.centroids.torch().dtype == torch.int32
@@ -418,6 +500,8 @@ def test_matrix_shape_and_dtype_are_validated(matrix, message):
 def test_first_picks_are_validated(first_picks):
     with pytest.raises(ValueError, match="first_picks"):
         leader(_small_matrix(), 0.2, first_picks=first_picks)
+    with pytest.raises(ValueError, match="first_picks"):
+        maxmin(_small_matrix(), 2, first_picks=first_picks)
 
 
 def test_first_picks_must_be_integers():
@@ -425,10 +509,27 @@ def test_first_picks_must_be_integers():
         leader(_small_matrix(), 0.2, first_picks=(1.5,))
 
 
-@pytest.mark.parametrize("pick_size", [-1, 7])
-def test_pick_size_is_validated(pick_size):
-    with pytest.raises(ValueError, match="pick_size"):
-        leader(_small_matrix(), 0.2, pick_size=pick_size)
+@pytest.mark.parametrize("function, pick_sizes", [(leader, (-1, 7)), (maxmin, (0, -1, 7))])
+def test_pick_size_is_validated(function, pick_sizes):
+    for pick_size in pick_sizes:
+        with pytest.raises(ValueError, match="pick_size"):
+            if function is leader:
+                leader(_small_matrix(), 0.2, pick_size=pick_size)
+            else:
+                maxmin(_small_matrix(), pick_size)
+
+
+@pytest.mark.parametrize("threshold", [-0.1, -1.0, np.nan, np.inf])
+def test_maxmin_threshold_is_validated(threshold):
+    with pytest.raises(ValueError, match="threshold"):
+        maxmin(_small_matrix(), 2, threshold=threshold)
+    with pytest.raises(ValueError, match="threshold"):
+        fused_maxmin(np.asarray([[1], [2]], dtype=np.uint32), 2, threshold=threshold)
+
+
+def test_fused_maxmin_threshold_above_one_is_rejected():
+    with pytest.raises(ValueError, match="threshold"):
+        fused_maxmin(np.asarray([[1], [2]], dtype=np.uint32), 2, threshold=1.1)
 
 
 def test_fingerprint_input_is_validated():

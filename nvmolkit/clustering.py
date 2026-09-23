@@ -72,9 +72,13 @@ class SelectionDeviceResult:
 
     Attributes:
         indices: int32 selected input indices in selection order.
+        last_distance: For MaxMin, the nearest-pick distance of the last item
+            added, or ``-1`` if none was added after ``first_picks``. ``None``
+            for Leader.
     """
 
     indices: AsyncGpuResult
+    last_distance: float | None = None
 
 
 def _validate_output(output: OutputMode) -> None:
@@ -85,6 +89,14 @@ def _validate_output(output: OutputMode) -> None:
 def _validate_assignment(assignment: str) -> None:
     if assignment not in ("first", "nearest"):
         raise ValueError(f"assignment must be one of ['first', 'nearest'], got {assignment!r}")
+
+
+def _validate_maxmin_threshold(threshold: float | None) -> float:
+    if threshold is None:
+        return -1.0
+    if not np.isfinite(threshold) or threshold < 0:
+        raise ValueError(f"threshold must be finite and non-negative, got {threshold}")
+    return float(threshold)
 
 
 def _index_tuple(name: str, values: Sequence[int]) -> tuple[int, ...]:
@@ -148,11 +160,15 @@ def _resolve_butina_output(result, output: OutputMode) -> _RDKitClusters | Clust
     return _cluster_arrays_to_rdkit(cluster_ids.numpy(), centroids.numpy())
 
 
-def _resolve_selection_output(result, output: OutputMode):
-    indices = AsyncGpuResult(result)
+def _resolve_selection_output(result, output: OutputMode, *, maxmin: bool):
+    indices_obj, last_distance = result
+    indices = AsyncGpuResult(indices_obj)
     if output is OutputMode.DEVICE:
-        return SelectionDeviceResult(indices)
-    return tuple(int(index) for index in indices.numpy())
+        return SelectionDeviceResult(indices, float(last_distance) if maxmin else None)
+    host_indices = tuple(int(index) for index in indices.numpy())
+    if maxmin:
+        return host_indices, float(last_distance)
+    return host_indices
 
 
 def _check_distance_matrix(name: str, x: torch.Tensor) -> torch.Tensor:
@@ -221,7 +237,7 @@ def leader(
         _index_tuple("first_picks", first_picks),
         active_stream.cuda_stream,
     )
-    return _resolve_selection_output(result, output)
+    return _resolve_selection_output(result, output, maxmin=False)
 
 
 def fused_leader(
@@ -266,7 +282,111 @@ def fused_leader(
         result = _clustering.fused_leader(
             inputs, cutoff, _packed_metric_name(resolved), pick_size, first_picks, active_stream.cuda_stream
         )
-    return _resolve_selection_output(result, output)
+    return _resolve_selection_output(result, output, maxmin=False)
+
+
+def maxmin(
+    distance_matrix: ArrayInput,
+    pick_size: int,
+    *,
+    first_picks: Sequence[int] = (),
+    seed: int = -1,
+    threshold: float | None = None,
+    stream: torch.cuda.Stream | None = None,
+    output: OutputMode = OutputMode.DEVICE,
+) -> SelectionDeviceResult | tuple[tuple[int, ...], float]:
+    """Select a diverse subset from a distance matrix by greedy MaxMin.
+
+    Each step adds the candidate whose distance to its nearest pick is largest,
+    breaking ties by lowest index, as in RDKit's ``MaxMinPicker``. A given
+    ``seed`` selects the same random first pick as RDKit.
+
+    Args:
+        distance_matrix: Square float32 or float64 matrix of shape ``(N, N)``.
+            Element ``[i, j]`` is the distance from item ``i`` to item ``j``.
+        pick_size: Number of items to select, from 1 through ``N``.
+        first_picks: Unique indices that start the selection, in order. If
+            empty, the first pick is drawn at random.
+        seed: Seed for the random first pick. Negative values use system
+            entropy.
+        threshold: Stop before adding a candidate whose nearest-pick distance
+            is at most this value.
+        stream: CUDA stream to use. If None, uses the current stream.
+        output: Result representation.
+
+    Returns:
+        A :class:`SelectionDeviceResult` for ``OutputMode.DEVICE``, or
+        ``(indices, last_distance)`` for ``OutputMode.RDKIT``.
+    """
+    _validate_output(output)
+    matrix, active_stream = _prepare_distance_matrix(distance_matrix, stream)
+    result = _clustering.maxmin(
+        matrix.__cuda_array_interface__,
+        operator.index(pick_size),
+        _index_tuple("first_picks", first_picks),
+        operator.index(seed),
+        _validate_maxmin_threshold(threshold),
+        active_stream.cuda_stream,
+    )
+    return _resolve_selection_output(result, output, maxmin=True)
+
+
+def fused_maxmin(
+    x,
+    pick_size: int,
+    *,
+    metric: Metric = "tanimoto",
+    first_picks: Sequence[int] = (),
+    seed: int = -1,
+    threshold: float | None = None,
+    stream: torch.cuda.Stream | None = None,
+    output: OutputMode = OutputMode.DEVICE,
+) -> SelectionDeviceResult | tuple[tuple[int, ...], float]:
+    """Select a diverse subset by greedy MaxMin, computing distances as needed.
+
+    Equivalent to :func:`maxmin` on the matrix of ``1 - similarity`` values,
+    with memory that scales as ``O(N)``.
+
+    Args:
+        x: Packed int32 or uint32 fingerprints of shape ``(N, num_words)`` for
+            Tanimoto and cosine, or a sequence of RDKit molecules for AAP.
+        pick_size: Number of items to select, from 1 through ``N``.
+        metric: Similarity metric.
+        first_picks: Unique indices that start the selection, in order. If
+            empty, the first pick is drawn at random.
+        seed: Seed for the random first pick. Negative values use system
+            entropy.
+        threshold: Stop before adding a candidate whose nearest-pick distance
+            is at most this value. Must be in ``[0, 1]``.
+        stream: CUDA stream to use. If None, uses the current stream.
+        output: Result representation.
+
+    Returns:
+        A :class:`SelectionDeviceResult` for ``OutputMode.DEVICE``, or
+        ``(indices, last_distance)`` for ``OutputMode.RDKIT``.
+    """
+    _validate_output(output)
+    resolved, inputs, active_stream = _prepare_fused_input(x, metric, stream)
+    args = (
+        operator.index(pick_size),
+        _index_tuple("first_picks", first_picks),
+        operator.index(seed),
+        _validate_maxmin_threshold(threshold),
+    )
+    if isinstance(resolved, AAPMetric):
+        result = _clustering.aap_maxmin(inputs, *args, *_aap_args(resolved), active_stream.cuda_stream)
+    else:
+        pick_size, first_picks, seed, native_threshold = args
+        result = _clustering.fused_maxmin(
+            inputs,
+            pick_size,
+            _packed_metric_name(resolved),
+            first_picks,
+            seed,
+            native_threshold,
+            active_stream.cuda_stream,
+        )
+    return _resolve_selection_output(result, output, maxmin=True)
 
 
 def dise(

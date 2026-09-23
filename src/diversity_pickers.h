@@ -16,14 +16,19 @@
 
 namespace nvMolKit {
 
-/** Ordered picks. */
+/**
+ * Ordered picks. @c lastDistance is the nearest-pick distance of the last MaxMin addition, or -1 when none was added
+ * after the initial picks.
+ */
 struct PickerResult {
   AsyncDeviceVector<int> indices;
+  float                  lastDistance = -1.0F;
 };
 
 // Distance matrices are square and row-major; element [i, j] is the distance from selected item i to candidate j.
 // Fingerprints are packed row-major with shape (num items, num words); distance is 1 - similarity. All comparisons
-// use single precision. pickSize == 0 means no limit for Leader.
+// use single precision. pickSize == 0 means no limit for Leader. A negative MaxMin seed seeds from system entropy,
+// and a negative threshold disables the MaxMin early stop.
 
 PickerResult leaderFromDistanceMatrix(cuda::std::span<const float> distanceMatrix,
                                       int                          numItems,
@@ -46,6 +51,32 @@ PickerResult fusedLeaderGpu(cuda::std::span<const std::uint32_t> fingerprints,
                             FingerprintSimilarityMetric          metric,
                             int                                  pickSize,
                             const std::vector<int>&              firstPicks = {},
+                            cudaStream_t                         stream     = nullptr);
+
+PickerResult maxMinFromDistanceMatrix(cuda::std::span<const float> distanceMatrix,
+                                      int                          numItems,
+                                      int                          pickSize,
+                                      const std::vector<int>&      firstPicks = {},
+                                      int                          seed       = -1,
+                                      double                       threshold  = -1.0,
+                                      cudaStream_t                 stream     = nullptr);
+
+PickerResult maxMinFromDistanceMatrix(cuda::std::span<const double> distanceMatrix,
+                                      int                           numItems,
+                                      int                           pickSize,
+                                      const std::vector<int>&       firstPicks = {},
+                                      int                           seed       = -1,
+                                      double                        threshold  = -1.0,
+                                      cudaStream_t                  stream     = nullptr);
+
+PickerResult fusedMaxMinGpu(cuda::std::span<const std::uint32_t> fingerprints,
+                            int                                  numFingerprints,
+                            int                                  numWords,
+                            int                                  pickSize,
+                            FingerprintSimilarityMetric          metric,
+                            const std::vector<int>&              firstPicks = {},
+                            int                                  seed       = -1,
+                            double                               threshold  = -1.0,
                             cudaStream_t                         stream     = nullptr);
 
 ClusteringResult diseFromDistanceMatrix(cuda::std::span<const float> distanceMatrix,

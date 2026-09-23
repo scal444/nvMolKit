@@ -92,6 +92,8 @@ Clustering
    clustering.fused_butina
    clustering.leader
    clustering.fused_leader
+   clustering.maxmin
+   clustering.fused_maxmin
    clustering.dise
    clustering.fused_dise
 
