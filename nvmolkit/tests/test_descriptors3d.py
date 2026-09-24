@@ -16,6 +16,7 @@ from nvmolkit.embedMolecules import EmbedMolecules
 from nvmolkit.types import AsyncGpuResult, CoordinateOutput, Device3DResult, PrecisionMode
 
 PRECISIONS = [PrecisionMode.SINGLE, PrecisionMode.FULL]
+SCALAR_PROPERTIES = tuple(prop for prop in Property3D if prop != Property3D.WHIM)
 
 
 def _assert_matches_rdkit(actual, expected, precision=PrecisionMode.SINGLE):
@@ -53,6 +54,12 @@ def _rdkit_property(mol, conf_id, prop, use_atomic_masses):
     }
     if prop == Property3D.SPHEROCITY_INDEX:
         return rdMolDescriptors.CalcSpherocityIndex(mol, confId=conf_id)
+    if prop == Property3D.PBF:
+        reference_mol = Chem.Mol(mol)
+        reference_mol.ClearComputedProps()
+        return rdMolDescriptors.CalcPBF(reference_mol, confId=conf_id)
+    if prop == Property3D.WHIM:
+        return rdMolDescriptors.CalcWHIM(mol, confId=conf_id)
     return calculators[prop](mol, confId=conf_id, useAtomicMasses=use_atomic_masses)
 
 
@@ -97,6 +104,7 @@ def _mol_with_conformers(smiles, coordinate_sets):
     mol = Chem.MolFromSmiles(smiles)
     for coordinates in coordinate_sets:
         conf = Chem.Conformer(mol.GetNumAtoms())
+        conf.Set3D(True)
         for atom_idx, (x, y, z) in enumerate(coordinates):
             conf.SetAtomPosition(atom_idx, Point3D(float(x), float(y), float(z)))
         mol.AddConformer(conf, assignId=True)
@@ -112,6 +120,7 @@ def _reference_device_rows(mols, coordinates, properties, use_atomic_masses=True
         mol = Chem.Mol(mols[mol_idx])
         mol.RemoveAllConformers()
         conf = Chem.Conformer(mol.GetNumAtoms())
+        conf.Set3D(True)
         positions = values[atom_starts[row_idx] : atom_starts[row_idx + 1]]
         for atom_idx, (x, y, z) in enumerate(positions):
             conf.SetAtomPosition(atom_idx, Point3D(float(x), float(y), float(z)))
@@ -125,7 +134,7 @@ def _reference_device_rows(mols, coordinates, properties, use_atomic_masses=True
 def test_shape_properties_match_rdkit_for_mixed_batch_and_selection(use_atomic_masses, precision):
     # Hexadecane (50 atoms with Hs) takes several strides through the per-conformer atom loop.
     mols = [_embed("CCO", 3, 7), _embed("c1ccccc1", 2, 11), Chem.MolFromSmiles("CC"), _embed("C" * 16, 2, 13)]
-    properties = tuple(Property3D)
+    properties = SCALAR_PROPERTIES
 
     result = Calc3DProperties(mols, properties, useAtomicMasses=use_atomic_masses, precision=precision)
     expected = _reference_rows(mols, properties, use_atomic_masses)
@@ -213,7 +222,7 @@ def test_degenerate_geometries_and_empty_inputs_match_rdkit(use_atomic_masses, p
         _mol_with_conformers("CC", [[(1.0, 1.0, 1.0), (1.0, 1.0, 1.0)]]),
         Chem.MolFromSmiles("c1ccccc1"),
     ]
-    properties = tuple(Property3D)
+    properties = SCALAR_PROPERTIES
 
     result = Calc3DProperties(mols, properties, useAtomicMasses=use_atomic_masses, precision=precision)
     expected = _reference_rows(mols, properties, use_atomic_masses)
@@ -246,6 +255,67 @@ def test_spherocity_ignores_atomic_mass_option(precision):
 
 
 @pytest.mark.parametrize("precision", PRECISIONS)
+def test_projection_family_matches_rdkit_and_preserves_vector_shape(precision):
+    mols = [_embed("CCCO", 3, 47), _embed("c1ccncc1", 2, 53)]
+    threshold = 0.01
+    result = Calc3DProperties(
+        mols,
+        (Property3D.PBF, Property3D.WHIM),
+        whimThreshold=threshold,
+        precision=precision,
+    )
+    expected_pbf = np.asarray(
+        [_rdkit_property(mol, conf.GetId(), Property3D.PBF, True) for mol in mols for conf in mol.GetConformers()]
+    )
+    expected_whim = np.asarray(
+        [
+            rdMolDescriptors.CalcWHIM(mol, confId=conf.GetId(), thresh=threshold)
+            for mol in mols
+            for conf in mol.GetConformers()
+        ]
+    )
+
+    assert result[Property3D.PBF].torch().shape == (5,)
+    assert result[Property3D.WHIM].torch().shape == (5, 114)
+    _assert_matches_rdkit(result[Property3D.PBF].numpy(), expected_pbf, precision)
+    np.testing.assert_allclose(result[Property3D.WHIM].numpy(), expected_whim, rtol=0, atol=0.0011, equal_nan=True)
+
+    dense = result.dense()
+    assert dense.values["PBF"].shape == (2, 3)
+    assert dense.values["WHIM"].shape == (2, 3, 114)
+    assert torch.isnan(dense.values["WHIM"][1, 2]).all()
+
+
+def test_projection_family_reuses_device_coordinates_and_ignores_mass_option():
+    mols = [_embed("CCCO", 2, 59)]
+    coordinates = _device_result_from_molecules(mols)
+    properties = (Property3D.PBF, Property3D.WHIM)
+
+    mass_weighted = Calc3DProperties(
+        mols, properties, coordinates=coordinates, useAtomicMasses=True, precision=PrecisionMode.FULL
+    )
+    unit_weighted = Calc3DProperties(
+        mols, properties, coordinates=coordinates, useAtomicMasses=False, precision=PrecisionMode.FULL
+    )
+    for prop in properties:
+        np.testing.assert_array_equal(mass_weighted[prop].numpy(), unit_weighted[prop].numpy())
+
+
+@pytest.mark.parametrize("precision", PRECISIONS)
+def test_whim_degenerate_geometries_match_rdkit(precision):
+    mols = [
+        _mol_with_conformers("[He]", [[(4.0, -3.0, 2.0)]]),
+        _mol_with_conformers("CCC", [[(-2.0, 0.0, 0.0), (0.0, 0.0, 0.0), (3.0, 0.0, 0.0)]]),
+        _mol_with_conformers("CCO", [[(0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (0.5, 1.5, 0.0)]]),
+        _mol_with_conformers("CC", [[(1.0, 1.0, 1.0), (1.0, 1.0, 1.0)]]),
+    ]
+    result = Calc3DProperties(mols, Property3D.WHIM, precision=precision)
+    expected = np.asarray([rdMolDescriptors.CalcWHIM(mol) for mol in mols])
+
+    np.testing.assert_allclose(result[Property3D.WHIM].numpy(), expected, rtol=0, atol=0.0011, equal_nan=True)
+
+
+@pytest.mark.parametrize("precision", PRECISIONS)
 def test_embed_device_output_chains_directly_into_3d_properties(precision):
     mols = [Chem.AddHs(Chem.MolFromSmiles("CCO")), Chem.AddHs(Chem.MolFromSmiles("CCCO"))]
     params = EmbedParameters()
@@ -257,7 +327,7 @@ def test_embed_device_output_chains_directly_into_3d_properties(precision):
         confsPerMolecule=3,
         output=CoordinateOutput.DEVICE,
     )
-    properties = tuple(Property3D)
+    properties = SCALAR_PROPERTIES
 
     result = Calc3DProperties(mols, properties, coordinates=coordinates, precision=precision)
     expected = _reference_device_rows(mols, coordinates, properties)
@@ -285,7 +355,7 @@ def test_device_atom_starts_outside_values_produce_nan(atom_starts, bad_row):
         n_mols=1,
     )
 
-    properties = tuple(Property3D)
+    properties = SCALAR_PROPERTIES
     result = Calc3DProperties(
         mols, properties, coordinates=coordinates, useAtomicMasses=False, precision=PrecisionMode.FULL
     )
@@ -298,6 +368,22 @@ def test_device_atom_starts_outside_values_produce_nan(atom_starts, bad_row):
             expected[1 - bad_row : 2 - bad_row, column],
             PrecisionMode.FULL,
         )
+
+    projection = Calc3DProperties(
+        mols,
+        (Property3D.PBF, Property3D.WHIM),
+        coordinates=coordinates,
+        precision=PrecisionMode.FULL,
+    )
+    assert np.isnan(projection[Property3D.PBF].numpy()[bad_row])
+    assert np.isnan(projection[Property3D.WHIM].numpy()[bad_row]).all()
+    valid_row = 1 - bad_row
+    expected_pbf = _rdkit_property(mols[0], valid_row, Property3D.PBF, True)
+    expected_whim = rdMolDescriptors.CalcWHIM(mols[0], confId=valid_row)
+    np.testing.assert_allclose(projection[Property3D.PBF].numpy()[valid_row], expected_pbf, rtol=2e-10, atol=2e-8)
+    np.testing.assert_allclose(
+        projection[Property3D.WHIM].numpy()[valid_row], expected_whim, rtol=0, atol=0.0011, equal_nan=True
+    )
 
 
 def test_extracted_async_result_keeps_device_inputs_alive_on_explicit_stream():
@@ -324,6 +410,10 @@ def test_property_and_coordinate_contract_errors_are_clear():
         Calc3DProperties(mol, ["PMI1", "PMI1"])
     with pytest.raises(ValueError, match="Unknown 3D property"):
         Calc3DProperties(mol, ["NotAProperty"])
+    with pytest.raises(ValueError, match="WHIM threshold"):
+        Calc3DProperties(mol, ["WHIM"], whimThreshold=-0.1)
+    with pytest.raises(ValueError, match="WHIM threshold"):
+        Calc3DProperties(mol, ["WHIM"], whimThreshold=float("nan"))
 
     with pytest.raises(TypeError, match="Device3DResult"):
         Calc3DProperties(mol, ["PMI1"], coordinates=object())

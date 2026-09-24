@@ -38,6 +38,8 @@ class Property3D(Enum):
     ECCENTRICITY = "Eccentricity"
     ASPHERICITY = "Asphericity"
     SPHEROCITY_INDEX = "SpherocityIndex"
+    PBF = "PBF"
+    WHIM = "WHIM"
 
 
 @dataclass(frozen=True)
@@ -45,8 +47,9 @@ class Dense3DPropertyResult:
     """Dense padded view of a :class:`Device3DPropertyResult`.
 
     Attributes:
-        values: One tensor of shape ``(n_mols, max_confs)`` per property, in request order, with the
-            dtype of the source result. Padded slots hold the ``pad_value`` passed to
+        values: One tensor of shape ``(n_mols, max_confs, *property_shape)`` per property, in request
+            order, with the dtype of the source result. Scalar properties have no trailing dimensions;
+            WHIM has ``property_shape == (114,)``. Padded slots hold the ``pad_value`` passed to
             :meth:`Device3DPropertyResult.dense`.
         conf_mask: bool ``(n_mols, max_confs)``; ``True`` where a real conformer exists.
     """
@@ -59,7 +62,8 @@ class Device3DPropertyResult(Mapping[str, AsyncGpuResult]):
     """Per-conformer 3D properties on the GPU, labeled by molecule and conformer.
 
     Behaves as a read-only mapping from property name to an :class:`~nvmolkit.types.AsyncGpuResult`
-    of shape ``(n_conformers,)``, in request order. Values are float32 for
+    whose first dimension is ``n_conformers``, in request order. Scalar properties have shape
+    ``(n_conformers,)`` and WHIM has shape ``(n_conformers, 114)``. Values are float32 for
     :attr:`~nvmolkit.types.PrecisionMode.SINGLE` and float64 for
     :attr:`~nvmolkit.types.PrecisionMode.FULL`. Keys may be given as names or
     :class:`Property3D` members.
@@ -113,7 +117,7 @@ class Device3DPropertyResult(Mapping[str, AsyncGpuResult]):
         return self.mol_indices.torch().numel()
 
     def dense(self, pad_value: float = float("nan")) -> Dense3DPropertyResult:
-        """Materialize padded ``(n_mols, max_confs)`` tensors for every property.
+        """Materialize padded molecule/conformer tensors for every property.
 
         Molecules with fewer than ``max_confs`` conformers (including none) receive ``pad_value``.
         Reading the index tensors synchronizes implicitly.
@@ -128,7 +132,9 @@ class Device3DPropertyResult(Mapping[str, AsyncGpuResult]):
         values = {}
         for name, result in self._properties.items():
             source = result.torch()
-            dense_values = torch.full((self.n_mols, max_confs), pad_value, dtype=source.dtype, device=device)
+            dense_values = torch.full(
+                (self.n_mols, max_confs, *source.shape[1:]), pad_value, dtype=source.dtype, device=device
+            )
             dense_values[mol_indices, conf_indices] = source
             values[name] = dense_values
         return Dense3DPropertyResult(values=values, conf_mask=conf_mask)
@@ -212,6 +218,7 @@ def Calc3DProperties(
     *,
     coordinates: Device3DResult | None = None,
     useAtomicMasses: bool = True,
+    whimThreshold: float = 0.001,
     precision: PrecisionMode = PrecisionMode.SINGLE,
     stream: torch.cuda.Stream | None = None,
 ) -> Device3DPropertyResult:
@@ -227,13 +234,17 @@ def Calc3DProperties(
             is out of range, whose ``atom_starts`` range falls outside
             ``values``, or whose atom count differs from their molecule's
             produce NaN rather than an error, so no host synchronization is
-            needed.
+            needed. Device coordinate rows are treated as three-dimensional;
+            molecule conformers preserve their RDKit ``is3D`` flag for PBF.
         useAtomicMasses: Match RDKit's mass-weighted default. ``False`` gives
             every atom unit weight. RDKit defines ``SpherocityIndex`` as
-            unweighted, so this option does not affect it.
-        precision: ``PrecisionMode.SINGLE`` (default) computes and returns
-            float32 values; ``PrecisionMode.FULL`` uses float64 throughout and
-            matches RDKit to near double-precision rounding.
+            unweighted; this option also does not affect PBF or WHIM.
+        whimThreshold: Maximum projected-coordinate difference used by WHIM
+            symmetry matching. Matches RDKit's default of ``0.001``.
+        precision: ``PrecisionMode.SINGLE`` (default) returns float32 values;
+            ``PrecisionMode.FULL`` returns float64. WHIM uses float64 internally
+            in both modes because its projected symmetry terms are unstable in
+            float32.
         stream: CUDA stream used for transfers and calculation. Defaults to the
             coordinate device's current stream, or the current CUDA stream.
 
@@ -259,6 +270,7 @@ def Calc3DProperties(
         normalized_mols,
         [prop.value for prop in normalized_properties],
         useAtomicMasses,
+        whimThreshold,
         coordinate_interfaces,
         precision,
         active_stream.cuda_stream,

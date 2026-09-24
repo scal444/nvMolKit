@@ -9,6 +9,7 @@
 #include "src/descriptors3d.h"
 #include "src/descriptors3d_kernel.cuh"
 #include "src/descriptors3d_moments.cuh"
+#include "src/descriptors3d_projection.cuh"
 #include "src/utils/cuda_error_check.h"
 
 namespace nvMolKit {
@@ -35,6 +36,10 @@ std::string_view property3DName(const Property3D property) {
       return "Asphericity";
     case Property3D::SpherocityIndex:
       return "SpherocityIndex";
+    case Property3D::PBF:
+      return "PBF";
+    case Property3D::WHIM:
+      return "WHIM";
   }
   throw std::invalid_argument("Unknown Property3D value " + std::to_string(static_cast<int>(property)));
 }
@@ -60,10 +65,15 @@ using descriptors3d_detail::kGroupSize;
 using descriptors3d_detail::kGroupsPerWarp;
 using descriptors3d_detail::kWarpSize;
 using descriptors3d_detail::kWarpsPerBlock;
+using descriptors3d_detail::launchProjectionProperties;
 using descriptors3d_detail::loadConformer;
 using descriptors3d_detail::MomentState;
 
-constexpr int kNumMomentProperty3D = static_cast<int>(kAllProperty3D.size());
+constexpr int kNumMomentProperty3D = 10;
+
+constexpr bool isMomentProperty(const Property3D property) {
+  return static_cast<int>(property) < kNumMomentProperty3D;
+}
 
 //! Per-conformer work shared between properties. Enumerators are in dependency order.
 enum class SharedStage : int {
@@ -93,6 +103,9 @@ constexpr SharedStageSet directStages(const Property3D property) {
       return stageBit(SharedStage::PrincipalMoments);
     case Property3D::RadiusOfGyration:
       return stageBit(SharedStage::InertiaTensor);
+    case Property3D::PBF:
+    case Property3D::WHIM:
+      return 0;
   }
   return 0;
 }
@@ -240,8 +253,11 @@ void launchMomentProperties(const DeviceCoordView& coordinates,
 template <typename Real>
 Property3DResults<Real> calc3DPropertiesGpu(const DeviceCoordView&         coordinates,
                                             const double*                  atomWeights,
+                                            const double*                  whimAtomWeights,
+                                            const int8_t*                  conformerIs3D,
                                             const int32_t*                 moleculeAtomStarts,
                                             const std::vector<Property3D>& properties,
+                                            const double                   whimThreshold,
                                             const cudaStream_t             stream) {
   if (properties.empty()) {
     throw std::invalid_argument("At least one 3D property must be requested");
@@ -249,21 +265,33 @@ Property3DResults<Real> calc3DPropertiesGpu(const DeviceCoordView&         coord
   if (coordinates.numConformers < 0 || coordinates.nMols < 0) {
     throw std::invalid_argument("Batch dimensions must not be negative");
   }
+  if (!std::isfinite(whimThreshold) || whimThreshold < 0) {
+    throw std::invalid_argument("WHIM threshold must be finite and non-negative");
+  }
 
   Property3DResults<Real> results;
   Property3DWork<Real>    work{};
   bool                    hasSpherocity = false;
+  Real*                   pbfOutput     = nullptr;
+  Real*                   whimOutput    = nullptr;
   for (const Property3D property : properties) {
     // Bounds the work arrays, which hold one slot per known property.
     if (std::find(kAllProperty3D.begin(), kAllProperty3D.end(), property) == kAllProperty3D.end()) {
       throw std::invalid_argument("Unknown Property3D value " + std::to_string(static_cast<int>(property)));
     }
-    auto [it, inserted] = results.try_emplace(property, coordinates.numConformers, stream);
+    const size_t outputSize = static_cast<size_t>(coordinates.numConformers) * property3DWidth(property);
+    auto [it, inserted]     = results.try_emplace(property, outputSize, stream);
     if (!inserted) {
       throw std::invalid_argument("Duplicate 3D property '" + std::string(property3DName(property)) + "'");
     }
-    addMomentProperty(work, property, it->second.data());
-    hasSpherocity |= property == Property3D::SpherocityIndex;
+    if (isMomentProperty(property)) {
+      addMomentProperty(work, property, it->second.data());
+      hasSpherocity |= property == Property3D::SpherocityIndex;
+    } else if (property == Property3D::PBF) {
+      pbfOutput = it->second.data();
+    } else if (property == Property3D::WHIM) {
+      whimOutput = it->second.data();
+    }
   }
 
   if (coordinates.numConformers == 0) {
@@ -273,24 +301,41 @@ Property3DResults<Real> calc3DPropertiesGpu(const DeviceCoordView&         coord
       moleculeAtomStarts == nullptr) {
     throw std::invalid_argument("3D property input buffers must not be null for a non-empty batch");
   }
+  if (whimOutput != nullptr && whimAtomWeights == nullptr) {
+    throw std::invalid_argument("WHIM atom weights must not be null when WHIM is requested");
+  }
 
   const bool    atomWeightsAreUnit      = atomWeights == nullptr;
   const bool    separateSpherocityState = hasSpherocity && properties.size() > 1 && !atomWeightsAreUnit;
   const double* effectiveAtomWeights =
     atomWeightsAreUnit || (hasSpherocity && properties.size() == 1) ? nullptr : atomWeights;
   launchMomentProperties(coordinates, effectiveAtomWeights, moleculeAtomStarts, work, separateSpherocityState, stream);
+  launchProjectionProperties(coordinates,
+                             whimAtomWeights,
+                             conformerIs3D,
+                             moleculeAtomStarts,
+                             pbfOutput,
+                             whimOutput,
+                             whimThreshold,
+                             stream);
   return results;
 }
 
 template Property3DResults<float>  calc3DPropertiesGpu<float>(const DeviceCoordView&,
                                                              const double*,
+                                                             const double*,
+                                                             const int8_t*,
                                                              const int32_t*,
                                                              const std::vector<Property3D>&,
+                                                             double,
                                                              cudaStream_t);
 template Property3DResults<double> calc3DPropertiesGpu<double>(const DeviceCoordView&,
                                                                const double*,
+                                                               const double*,
+                                                               const int8_t*,
                                                                const int32_t*,
                                                                const std::vector<Property3D>&,
+                                                               double,
                                                                cudaStream_t);
 
 }  // namespace nvMolKit

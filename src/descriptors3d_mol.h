@@ -39,18 +39,21 @@ template <typename Real> struct Property3DBatchResult {
  *                        conformer order (or the row order of @p coordinates).
  * @param properties      Non-empty, duplicate-free property selection.
  * @param useAtomicMasses Weight atoms by mass (RDKit's default) instead of unit weights. This does
- *                        not affect SpherocityIndex, which RDKit defines as unweighted.
+ *                        not affect SpherocityIndex, PBF, or WHIM, which RDKit defines independently.
  * @param stream          CUDA stream for all transfers and computation.
  * @param coordinates     Optional device coordinates; `coordinates->nMols` must equal @c mols.size().
+ *                        Device coordinate rows are treated as three-dimensional for PBF.
+ * @param whimThreshold   Maximum projected-coordinate difference used by WHIM symmetry matching.
  * @throws std::invalid_argument on null molecules, an invalid property selection, or a molecule
- *                               count mismatch with @p coordinates.
+ *                               count mismatch with @p coordinates, or if @p whimThreshold is negative.
  */
 template <typename Real>
 Property3DBatchResult<Real> calc3DProperties(const std::vector<const RDKit::ROMol*>& mols,
                                              const std::vector<Property3D>&          properties,
                                              bool                                    useAtomicMasses,
                                              cudaStream_t                            stream,
-                                             const DeviceCoordView*                  coordinates = nullptr);
+                                             const DeviceCoordView*                  coordinates   = nullptr,
+                                             double                                  whimThreshold = 0.001);
 
 }  // namespace nvMolKit
 

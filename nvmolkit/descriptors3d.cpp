@@ -62,15 +62,18 @@ template <typename Real>
 bp::object calc3DPropertiesAs(const std::vector<const RDKit::ROMol*>&  mols,
                               const std::vector<nvMolKit::Property3D>& properties,
                               const bool                               useAtomicMasses,
+                              const double                             whimThreshold,
                               cudaStream_t                             stream,
                               const nvMolKit::DeviceCoordView*         view) {
-  auto result = nvMolKit::calc3DProperties<Real>(mols, properties, useAtomicMasses, stream, view);
+  auto result = nvMolKit::calc3DProperties<Real>(mols, properties, useAtomicMasses, stream, view, whimThreshold);
 
   bp::dict output;
   for (const nvMolKit::Property3D property : properties) {
-    auto& values = result.properties.at(property);
-    output[std::string(nvMolKit::property3DName(property))] =
-      toOwnedPyArray(nvMolKit::makePyArray(values, bp::make_tuple(values.size())));
+    auto&      values = result.properties.at(property);
+    const int  width  = nvMolKit::property3DWidth(property);
+    const auto shape =
+      width == 1 ? bp::make_tuple(values.size()) : bp::make_tuple(values.size() / static_cast<size_t>(width), width);
+    output[std::string(nvMolKit::property3DName(property))] = toOwnedPyArray(nvMolKit::makePyArray(values, shape));
   }
   // Row labels exist only when coordinates came from the molecules; otherwise the caller already
   // holds the labels of its own coordinate batch.
@@ -85,6 +88,7 @@ bp::object calc3DPropertiesAs(const std::vector<const RDKit::ROMol*>&  mols,
 bp::object calc3DProperties(const bp::list&                mols,
                             const bp::list&                propertyNames,
                             const bool                     useAtomicMasses,
+                            const double                   whimThreshold,
                             const bp::object&              coordinates,
                             const nvMolKit::PrecisionMode& precision,
                             const std::uintptr_t           streamPtr) {
@@ -109,9 +113,9 @@ bp::object calc3DProperties(const bp::list&                mols,
   }
   const nvMolKit::DeviceCoordView* viewPtr = view ? &*view : nullptr;
   if (nvMolKit::usesSinglePrecision(precision)) {
-    return calc3DPropertiesAs<float>(molPtrs, properties, useAtomicMasses, *stream, viewPtr);
+    return calc3DPropertiesAs<float>(molPtrs, properties, useAtomicMasses, whimThreshold, *stream, viewPtr);
   }
-  return calc3DPropertiesAs<double>(molPtrs, properties, useAtomicMasses, *stream, viewPtr);
+  return calc3DPropertiesAs<double>(molPtrs, properties, useAtomicMasses, whimThreshold, *stream, viewPtr);
 }
 
 }  // namespace
@@ -122,6 +126,7 @@ BOOST_PYTHON_MODULE(_descriptors3d) {
           (bp::arg("mols"),
            bp::arg("properties"),
            bp::arg("useAtomicMasses"),
+           bp::arg("whimThreshold"),
            bp::arg("coordinates"),
            bp::arg("precision"),
            bp::arg("stream")));

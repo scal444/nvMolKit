@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <GraphMol/Conformer.h>
+#include <GraphMol/Descriptors/PBF.h>
+#include <GraphMol/Descriptors/WHIM.h>
 #include <GraphMol/RWMol.h>
 #include <GraphMol/SmilesParse/SmilesParse.h>
 #include <gtest/gtest.h>
@@ -22,6 +24,19 @@ using nvMolKit::Property3D;
 namespace {
 
 using Point = std::array<double, 3>;
+
+constexpr std::array<Property3D, 10> kMomentProperties = {
+  Property3D::PMI1,
+  Property3D::PMI2,
+  Property3D::PMI3,
+  Property3D::RadiusOfGyration,
+  Property3D::NPR1,
+  Property3D::NPR2,
+  Property3D::InertialShapeFactor,
+  Property3D::Eccentricity,
+  Property3D::Asphericity,
+  Property3D::SpherocityIndex,
+};
 
 std::unique_ptr<RDKit::RWMol> molWithConformers(const char* smiles, const std::vector<std::vector<Point>>& confs) {
   std::unique_ptr<RDKit::RWMol> mol(RDKit::SmilesToMol(smiles));
@@ -83,11 +98,13 @@ TEST(Property3DNames, RoundTripAndRejectUnknown) {
     EXPECT_EQ(nvMolKit::property3DFromName(nvMolKit::property3DName(property)), property);
   }
   EXPECT_EQ(nvMolKit::property3DName(Property3D::RadiusOfGyration), "RadiusOfGyration");
+  EXPECT_EQ(nvMolKit::property3DWidth(Property3D::PBF), 1);
+  EXPECT_EQ(nvMolKit::property3DWidth(Property3D::WHIM), 114);
   EXPECT_THROW(nvMolKit::property3DFromName("PMI4"), std::invalid_argument);
 }
 
 TEST_F(Descriptors3DTest, UnitWeightMomentsMatchClosedForm) {
-  const std::vector<Property3D> properties(nvMolKit::kAllProperty3D.begin(), nvMolKit::kAllProperty3D.end());
+  const std::vector<Property3D> properties(kMomentProperties.begin(), kMomentProperties.end());
   auto results = nvMolKit::calc3DProperties<double>(mols_, properties, /*useAtomicMasses=*/false, nullptr);
   ASSERT_EQ(results.properties.size(), properties.size());
 
@@ -187,6 +204,58 @@ TEST_F(Descriptors3DTest, DeviceCoordinatesMatchMoleculeCoordinates) {
   EXPECT_EQ(fromDevice.confIndices.size(), 0u);
 }
 
+TEST(Descriptors3DProjection, MatchesRdkitPbfAndWhim) {
+  auto                                   mol       = molWithConformers("CCCO",
+                                                                       {
+                                 {{-1.3, 0.2, 0.7}, {-0.2, -0.8, 0.1}, {0.9, 0.4, -0.6},  {1.7, 1.1, 0.9}},
+                                 {{2.0, -1.0, 0.5},  {2.7, 0.3, -0.4}, {3.9, -0.2, 0.8}, {4.6, 1.0, -0.7}},
+  });
+  const std::vector<const RDKit::ROMol*> mols      = {mol.get()};
+  constexpr double                       threshold = 0.01;
+  auto                                   results =
+    nvMolKit::calc3DProperties<double>(mols, {Property3D::PBF, Property3D::WHIM}, true, nullptr, nullptr, threshold);
+
+  const auto pbf  = toHost(results.properties.at(Property3D::PBF));
+  const auto whim = toHost(results.properties.at(Property3D::WHIM));
+  ASSERT_EQ(pbf.size(), 2u);
+  ASSERT_EQ(whim.size(), 2u * nvMolKit::kNumWhimProperties);
+  for (int confIdx = 0; confIdx < 2; ++confIdx) {
+    RDKit::RWMol referenceMol(*mol);
+    referenceMol.clearComputedProps();
+    EXPECT_NEAR(pbf[confIdx], RDKit::Descriptors::PBF(referenceMol, confIdx), 2e-10);
+    std::vector<double> expectedWhim;
+    RDKit::Descriptors::WHIM(*mol, expectedWhim, confIdx, threshold);
+    ASSERT_EQ(expectedWhim.size(), static_cast<size_t>(nvMolKit::kNumWhimProperties));
+    for (int valueIdx = 0; valueIdx < nvMolKit::kNumWhimProperties; ++valueIdx) {
+      EXPECT_NEAR(whim[confIdx * nvMolKit::kNumWhimProperties + valueIdx], expectedWhim[valueIdx], 1.1e-3)
+        << "conformer " << confIdx << ", WHIM value " << valueIdx;
+    }
+  }
+}
+
+TEST(Descriptors3DProjection, PbfMinimumAtomBoundaryAndWhimEmptyShape) {
+  auto                                   threeAtoms = molWithConformers("CCC",
+                                                                        {
+                                        {{0.0, 0.0, 0.0}, {1.0, 0.2, 0.3}, {0.1, 1.0, -0.4}},
+  });
+  const std::vector<const RDKit::ROMol*> mols       = {threeAtoms.get()};
+  auto pbfResults = nvMolKit::calc3DProperties<double>(mols, {Property3D::PBF}, true, nullptr);
+  EXPECT_EQ(toHost(pbfResults.properties.at(Property3D::PBF)), (std::vector<double>{0.0}));
+
+  auto non3D = molWithConformers("CCCC",
+                                 {
+                                   {{0.0, 0.0, 0.0}, {1.0, 0.2, 0.4}, {0.1, 1.3, -0.7}, {1.5, 1.1, 0.8}},
+  });
+  non3D->getConformer().set3D(false);
+  const std::vector<const RDKit::ROMol*> non3DMols = {non3D.get()};
+  auto non3DResults = nvMolKit::calc3DProperties<double>(non3DMols, {Property3D::PBF}, true, nullptr);
+  EXPECT_EQ(toHost(non3DResults.properties.at(Property3D::PBF)), (std::vector<double>{0.0}));
+
+  const std::vector<const RDKit::ROMol*> empty;
+  auto whimResults = nvMolKit::calc3DProperties<double>(empty, {Property3D::WHIM}, true, nullptr);
+  EXPECT_EQ(whimResults.properties.at(Property3D::WHIM).size(), 0u);
+}
+
 TEST_F(Descriptors3DTest, AtomCountMismatchProducesNaN) {
   // Coordinates uploaded for [square, line] but interpreted against [line, square] molecules.
   const std::vector<const RDKit::ROMol*> swapped  = {square_.get(), line_.get()};
@@ -231,7 +300,7 @@ TEST_F(Descriptors3DTest, RejectsUnknownPropertyValue) {
                                               Property3D::PMI2,
                                               Property3D::PMI3,
                                               Property3D::RadiusOfGyration,
-                                              static_cast<Property3D>(10)};
+                                              static_cast<Property3D>(12)};
   EXPECT_THROW(nvMolKit::calc3DProperties<double>(mols_, properties, true, nullptr), std::invalid_argument);
   EXPECT_THROW(nvMolKit::calc3DProperties<float>(mols_, {static_cast<Property3D>(-1)}, true, nullptr),
                std::invalid_argument);
