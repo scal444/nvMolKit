@@ -58,6 +58,15 @@ class SubstructLibrary {
   /** Number of staged molecules not yet visible to queries. */
   [[nodiscard]] std::size_t pendingSize() const;
 
+  /** Maximum number of memory-admitted queries that may execute concurrently. */
+  [[nodiscard]] std::size_t queryConcurrency() const;
+
+  /** Maximum simultaneously executing mini-batches on each GPU. */
+  [[nodiscard]] std::size_t batchesInFlightPerGpu() const;
+
+  /** Conservative device bytes reserved by one query on each GPU. */
+  [[nodiscard]] std::size_t workspaceBytesPerQueryPerGpu() const;
+
   /** Return matching molecule IDs in insertion order. Zero requests no results. */
   [[nodiscard]] std::vector<unsigned int> getMatches(const RDKit::ROMol& query,
                                                      int                 maxResults = -1,

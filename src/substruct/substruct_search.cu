@@ -27,6 +27,7 @@
 #include <set>
 #include <stdexcept>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -67,7 +68,8 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
                                  HasSubstructMatchResults*               boolResults           = nullptr,
                                  std::vector<int>*                       countResults          = nullptr,
                                  const MoleculesHost*                    residentTargetsHost   = nullptr,
-                                 const MoleculesDevice*                  residentTargetsDevice = nullptr);
+                                 const MoleculesDevice*                  residentTargetsDevice = nullptr,
+                                 ResidentSubstructSearchWorkspace*       workspace             = nullptr);
 
 }  // anonymous namespace
 
@@ -86,6 +88,54 @@ struct PreparedMiniBatch {
 };
 
 using PreparedBatchQueue = ThreadSafeQueue<std::unique_ptr<PreparedMiniBatch>>;
+
+struct ResidentSubstructSearchWorkspace {
+  explicit ResidentSubstructSearchWorkspace(int gpuDeviceId) : deviceId(gpuDeviceId) {}
+
+  void ensureExecutors(int count) {
+    while (static_cast<int>(executors.size()) < count) {
+      auto executor = std::make_unique<GpuExecutor>(static_cast<int>(executors.size()), deviceId);
+      executor->initializeForStream();
+      executors.push_back(std::move(executor));
+    }
+  }
+
+  struct TargetMetadata {
+    std::shared_ptr<std::vector<int>> originalIndices;
+    std::shared_ptr<std::vector<int>> atomCounts;
+    int                               maxTargetAtoms  = 0;
+    int                               maxBondsPerAtom = 0;
+  };
+
+  const TargetMetadata& targetMetadata(const MoleculesHost& targetsHost, int numTargets) {
+    const auto found = targetMetadataCache.find(&targetsHost);
+    if (found != targetMetadataCache.end()) {
+      return found->second;
+    }
+
+    TargetMetadata metadata;
+    metadata.originalIndices = std::make_shared<std::vector<int>>(static_cast<size_t>(numTargets));
+    std::iota(metadata.originalIndices->begin(), metadata.originalIndices->end(), 0);
+    metadata.atomCounts = std::make_shared<std::vector<int>>(static_cast<size_t>(numTargets));
+    for (int targetIdx = 0; targetIdx < numTargets; ++targetIdx) {
+      const int atomStart               = targetsHost.batchAtomStarts[targetIdx];
+      const int atomEnd                 = targetsHost.batchAtomStarts[targetIdx + 1];
+      const int atomCount               = atomEnd - atomStart;
+      (*metadata.atomCounts)[targetIdx] = atomCount;
+      metadata.maxTargetAtoms           = std::max(metadata.maxTargetAtoms, atomCount);
+      for (int atomIdx = atomStart; atomIdx < atomEnd; ++atomIdx) {
+        metadata.maxBondsPerAtom =
+          std::max(metadata.maxBondsPerAtom, static_cast<int>(targetsHost.targetAtomBonds[atomIdx].degree));
+      }
+    }
+    return targetMetadataCache.emplace(&targetsHost, std::move(metadata)).first->second;
+  }
+
+  int                                                      deviceId;
+  std::vector<std::unique_ptr<GpuExecutor>>                executors;
+  PinnedHostBufferPool                                     bufferPool;
+  std::unordered_map<const MoleculesHost*, TargetMetadata> targetMetadataCache;
+};
 
 // =============================================================================
 // Pipelined Batch Processing Implementation
@@ -417,19 +467,32 @@ void runGpuCoordinator(int                                 deviceId,
                        HasSubstructMatchResults*           boolResults,
                        std::vector<int>*                   countResults,
                        std::vector<std::exception_ptr>&    exceptions,
-                       std::atomic<bool>&                  pipelineAbort) {
+                       std::atomic<bool>&                  pipelineAbort,
+                       ResidentSubstructSearchWorkspace*   workspace) {
   try {
     ScopedNvtxRange  coordRange("GPU" + std::to_string(deviceId) + " coordinator (pipeline)");
     const WithDevice setDevice(deviceId);
 
     const int numExecutorsThisGpu = numWorkersThisGpu * executorsPerRunner;
 
-    std::vector<std::unique_ptr<GpuExecutor>> executors;
+    std::vector<std::unique_ptr<GpuExecutor>> ownedExecutors;
+    std::vector<GpuExecutor*>                 executors;
     executors.reserve(static_cast<size_t>(numExecutorsThisGpu));
-    for (int i = 0; i < numExecutorsThisGpu; ++i) {
-      auto executor = std::make_unique<GpuExecutor>(startWorkerIdx * executorsPerRunner + i, deviceId);
-      executor->initializeForStream();
-      executors.push_back(std::move(executor));
+    if (workspace != nullptr) {
+      if (workspace->deviceId != deviceId || static_cast<int>(workspace->executors.size()) < numExecutorsThisGpu) {
+        throw std::logic_error("Resident search workspace does not match the coordinator");
+      }
+      for (int i = 0; i < numExecutorsThisGpu; ++i) {
+        executors.push_back(workspace->executors[static_cast<size_t>(i)].get());
+      }
+    } else {
+      ownedExecutors.reserve(static_cast<size_t>(numExecutorsThisGpu));
+      for (int i = 0; i < numExecutorsThisGpu; ++i) {
+        auto executor = std::make_unique<GpuExecutor>(startWorkerIdx * executorsPerRunner + i, deviceId);
+        executor->initializeForStream();
+        executors.push_back(executor.get());
+        ownedExecutors.push_back(std::move(executor));
+      }
     }
 
     std::unique_ptr<MoleculesDevice>              localQueries;
@@ -460,7 +523,7 @@ void runGpuCoordinator(int                                 deviceId,
       std::vector<GpuExecutor*> workerExecutors;
       workerExecutors.reserve(executorsPerRunner);
       for (int s = 0; s < executorsPerRunner; ++s) {
-        workerExecutors.push_back(executors[w * executorsPerRunner + s].get());
+        workerExecutors.push_back(executors[static_cast<size_t>(w * executorsPerRunner + s)]);
       }
 
       auto workerLoop = [&, globalIdx, workerExecutors]() mutable {
@@ -514,7 +577,8 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
                                  HasSubstructMatchResults*               boolResults,
                                  std::vector<int>*                       countResults,
                                  const MoleculesHost*                    residentTargetsHost,
-                                 const MoleculesDevice*                  residentTargetsDevice) {
+                                 const MoleculesDevice*                  residentTargetsDevice,
+                                 ResidentSubstructSearchWorkspace*       workspace) {
   (void)stream;
   const bool      countOnly  = (boolResults != nullptr) || (countResults != nullptr);
   const char*     rangeLabel = boolResults ?
@@ -537,6 +601,9 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
     gpuIds.push_back(currentDevice);
   }
   const int numGpus = static_cast<int>(gpuIds.size());
+  if (workspace != nullptr && (numGpus != 1 || workspace->deviceId != gpuIds.front())) {
+    throw std::invalid_argument("A resident search workspace is bound to exactly one configured GPU");
+  }
 
   // Determine runner counts (per GPU, possibly limited by target count).
   const int runnersPerGpu = std::max(1, config.workerThreads);
@@ -586,7 +653,10 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
     maxMatchIndicesPerMiniBatch = static_cast<size_t>(maxPairsPerBatch) * kMaxTargetAtoms * queryContext.maxQueryAtoms;
   }
 
-  const int    poolSize = std::max(1, effectivePreprocessingThreads) * 2;
+  const int    totalExecutorSlots = numRunners * executorsPerRunner;
+  const int    poolSize           = workspace != nullptr ?
+                                      totalExecutorSlots :
+                                      std::min(std::max(1, effectivePreprocessingThreads) * 2, totalExecutorSlots);
   const size_t perBufferSize =
     computePinnedHostBufferBytes(maxPairsPerBatch, static_cast<int>(maxMatchIndicesPerMiniBatch), maxPatternsPerDepth);
   const size_t totalPinnedBytes = static_cast<size_t>(poolSize) * perBufferSize;
@@ -603,10 +673,85 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
                              "Reduce workerThreads, executorsPerRunner, or batchSize.");
   }
 
-  PinnedHostBufferPool bufferPool;
-  bufferPool.initialize(poolSize, maxPairsPerBatch, static_cast<int>(maxMatchIndicesPerMiniBatch), maxPatternsPerDepth);
+  PinnedHostBufferPool  localBufferPool;
+  PinnedHostBufferPool& bufferPool = workspace != nullptr ? workspace->bufferPool : localBufferPool;
+  bufferPool.prepare(poolSize, maxPairsPerBatch, static_cast<int>(maxMatchIndicesPerMiniBatch), maxPatternsPerDepth);
+  if (workspace != nullptr) {
+    workspace->ensureExecutors(totalExecutorSlots);
+  }
 
   MiniBatchPlanner planner;
+
+  // A resident single-query shard that fits entirely in the reusable executor
+  // ring needs no coordinator, worker, or preprocessing threads. Preparing the
+  // ring on the caller thread removes the dominant serialized-call gaps.
+  const int residentPairCount  = numTargets * numQueries;
+  const int residentBatchCount = (residentPairCount + maxPairsPerBatch - 1) / maxPairsPerBatch;
+  if (workspace != nullptr && residentTargetsHost != nullptr && residentTargetsDevice != nullptr &&
+      residentBatchCount <= totalExecutorSlots) {
+    const auto&        metadata = workspace->targetMetadata(*residentTargetsHost, numTargets);
+    PreparedBatchQueue directQueue;
+    for (int pairOffset = 0; pairOffset < residentPairCount; pairOffset += maxPairsPerBatch) {
+      PinnedHostBuffer* buffer = bufferPool.acquire();
+      if (buffer == nullptr) {
+        throw std::runtime_error("Resident direct path exhausted its pinned-buffer ring");
+      }
+
+      auto batch                       = std::make_unique<PreparedMiniBatch>();
+      batch->pinnedBuffer              = buffer;
+      batch->targetOriginalIndices     = metadata.originalIndices;
+      batch->targetAtomCounts          = metadata.atomCounts;
+      batch->residentTargetsDevice     = residentTargetsDevice;
+      batch->ctx.queryAtomCounts       = queryContext.queryAtomCounts.data();
+      batch->ctx.queryPipelineDepths   = queryContext.queryPipelineDepths.data();
+      batch->ctx.queryMaxDepths        = queryContext.queryMaxDepths.data();
+      batch->ctx.queryHasPatterns      = queryContext.queryHasPatterns.data();
+      batch->ctx.targetAtomCounts      = metadata.atomCounts.get();
+      batch->ctx.targetOriginalIndices = metadata.originalIndices.get();
+      batch->ctx.numTargets            = numTargets;
+      batch->ctx.numQueries            = numQueries;
+      batch->ctx.maxTargetAtoms        = metadata.maxTargetAtoms;
+      batch->ctx.maxQueryAtoms         = queryContext.maxQueryAtoms;
+      batch->ctx.maxBondsPerAtom       = metadata.maxBondsPerAtom;
+      batch->ctx.maxMatches            = config.maxMatches;
+      batch->ctx.countOnly             = countOnly;
+      batch->ctx.templateConfig = selectTemplateConfig(std::max(metadata.maxTargetAtoms, queryContext.maxQueryAtoms),
+                                                       queryContext.maxQueryAtoms,
+                                                       metadata.maxBondsPerAtom);
+      planner.prepareMiniBatch(batch->plan, *buffer, batch->ctx, leafSubpatterns, pairOffset, maxPairsPerBatch);
+      directQueue.push(std::move(batch));
+    }
+    directQueue.close();
+
+    std::vector<GpuExecutor*> directExecutors;
+    directExecutors.reserve(static_cast<size_t>(totalExecutorSlots));
+    for (int index = 0; index < totalExecutorSlots; ++index) {
+      directExecutors.push_back(workspace->executors[static_cast<size_t>(index)].get());
+    }
+    std::mutex         directResultsMutex;
+    std::atomic<bool>  directAbort{false};
+    std::exception_ptr directException;
+    runnerWorkerPipelineUnified(0,
+                                queriesDevice,
+                                recursivePreprocessor,
+                                boolResults ? nullptr : (countResults ? nullptr : &results),
+                                boolResults,
+                                countResults,
+                                directResultsMutex,
+                                algorithm,
+                                gpuIds.front(),
+                                std::move(directExecutors),
+                                directQueue,
+                                bufferPool,
+                                fallbackQueue,
+                                directAbort,
+                                directException);
+    if (directException) {
+      std::rethrow_exception(directException);
+    }
+    cudaCheckError(cudaGetLastError());
+    return;
+  }
 
   PreparedBatchQueue batchQueue;
   std::atomic<int>   nextTargetIdx{0};
@@ -662,7 +807,8 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
                         boolResults,
                         countResults,
                         exceptions,
-                        pipelineAbort);
+                        pipelineAbort,
+                        workspace);
     });
   }
   launchRange.pop();
@@ -696,23 +842,32 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
             throw std::invalid_argument("Resident target host/device data does not match target pointers");
           }
 
-          auto sharedOriginalIndices = std::make_shared<std::vector<int>>(static_cast<size_t>(numTargets));
-          std::iota(sharedOriginalIndices->begin(), sharedOriginalIndices->end(), 0);
-          auto sharedAtomCounts = std::make_shared<std::vector<int>>(static_cast<size_t>(numTargets));
-
-          int maxTargetAtoms  = 0;
-          int maxBondsPerAtom = 0;
-          for (int targetIdx = 0; targetIdx < numTargets; ++targetIdx) {
-            const int atomStart            = residentTargetsHost->batchAtomStarts[targetIdx];
-            const int atomEnd              = residentTargetsHost->batchAtomStarts[targetIdx + 1];
-            const int atomCount            = atomEnd - atomStart;
-            (*sharedAtomCounts)[targetIdx] = atomCount;
-            maxTargetAtoms                 = std::max(maxTargetAtoms, atomCount);
-            for (int atomIdx = atomStart; atomIdx < atomEnd; ++atomIdx) {
-              maxBondsPerAtom =
-                std::max(maxBondsPerAtom, static_cast<int>(residentTargetsHost->targetAtomBonds[atomIdx].degree));
+          ResidentSubstructSearchWorkspace::TargetMetadata        localMetadata;
+          const ResidentSubstructSearchWorkspace::TargetMetadata* metadata = nullptr;
+          if (workspace != nullptr) {
+            metadata = &workspace->targetMetadata(*residentTargetsHost, numTargets);
+          } else {
+            localMetadata.originalIndices = std::make_shared<std::vector<int>>(static_cast<size_t>(numTargets));
+            std::iota(localMetadata.originalIndices->begin(), localMetadata.originalIndices->end(), 0);
+            localMetadata.atomCounts = std::make_shared<std::vector<int>>(static_cast<size_t>(numTargets));
+            for (int targetIdx = 0; targetIdx < numTargets; ++targetIdx) {
+              const int atomStart                    = residentTargetsHost->batchAtomStarts[targetIdx];
+              const int atomEnd                      = residentTargetsHost->batchAtomStarts[targetIdx + 1];
+              const int atomCount                    = atomEnd - atomStart;
+              (*localMetadata.atomCounts)[targetIdx] = atomCount;
+              localMetadata.maxTargetAtoms           = std::max(localMetadata.maxTargetAtoms, atomCount);
+              for (int atomIdx = atomStart; atomIdx < atomEnd; ++atomIdx) {
+                localMetadata.maxBondsPerAtom =
+                  std::max(localMetadata.maxBondsPerAtom,
+                           static_cast<int>(residentTargetsHost->targetAtomBonds[atomIdx].degree));
+              }
             }
+            metadata = &localMetadata;
           }
+          const auto& sharedOriginalIndices = metadata->originalIndices;
+          const auto& sharedAtomCounts      = metadata->atomCounts;
+          const int   maxTargetAtoms        = metadata->maxTargetAtoms;
+          const int   maxBondsPerAtom       = metadata->maxBondsPerAtom;
 
           const int totalPairs = numTargets * numQueries;
           for (int pairOffset = 0; pairOffset < totalPairs; pairOffset += maxPairsPerBatch) {
@@ -988,7 +1143,8 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
                              HasSubstructMatchResults*               boolResults,
                              std::vector<int>*                       countResults,
                              const MoleculesHost*                    residentTargetsHost   = nullptr,
-                             const MoleculesDevice*                  residentTargetsDevice = nullptr) {
+                             const MoleculesDevice*                  residentTargetsDevice = nullptr,
+                             ResidentSubstructSearchWorkspace*       workspace             = nullptr) {
   const int numTargets = static_cast<int>(targets.size());
   const int numQueries = static_cast<int>(queries.size());
 
@@ -1129,7 +1285,8 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
                               boolResults,
                               countResults,
                               residentTargetsHost,
-                              residentTargetsDevice);
+                              residentTargetsDevice,
+                              workspace);
 
   // Process any remaining fallback entries after GPU work completes.
   while (fallbackQueue.tryProcessOne()) {
@@ -1223,7 +1380,8 @@ void hasSubstructMatchResident(const std::vector<const RDKit::ROMol*>& targets,
                                std::vector<uint8_t>&                   results,
                                SubstructAlgorithm                      algorithm,
                                cudaStream_t                            stream,
-                               const SubstructSearchConfig&            config) {
+                               const SubstructSearchConfig&            config,
+                               ResidentSubstructSearchWorkspace*       workspace) {
   std::vector<const RDKit::ROMol*> queries{&query};
   HasSubstructMatchResults         residentResults;
   SubstructSearchResults           unusedResults;
@@ -1240,8 +1398,26 @@ void hasSubstructMatchResident(const std::vector<const RDKit::ROMol*>& targets,
                           &residentResults,
                           nullptr,
                           &targetsHost,
-                          &targetsDevice);
+                          &targetsDevice,
+                          workspace);
   results = std::move(residentResults.hasMatch);
+}
+
+std::shared_ptr<ResidentSubstructSearchWorkspace> makeResidentSubstructSearchWorkspace(int deviceId) {
+  const WithDevice device(deviceId);
+  return std::make_shared<ResidentSubstructSearchWorkspace>(deviceId);
+}
+
+std::size_t estimateResidentSubstructSearchWorkspaceBytes(const SubstructSearchConfig& config) {
+  const std::size_t batchSize  = static_cast<std::size_t>(std::max(1, config.batchSize));
+  const int         workers    = config.workerThreads == -1 ? 4 : std::max(1, config.workerThreads);
+  const int executorsPerRunner = config.executorsPerRunner == -1 ? (workers == 1 ? 3 : 2) : config.executorsPerRunner;
+  const std::size_t executors  = static_cast<std::size_t>(workers) * static_cast<std::size_t>(executorsPerRunner);
+  const std::size_t overflowBuffers = config.algorithm == SubstructAlgorithm::GSI ? 2U : 1U;
+  const std::size_t overflowPerExecutor =
+    batchSize * overflowBuffers * static_cast<std::size_t>(kOverflowEntriesPerBuffer) * sizeof(PartialMatch) * 3U / 2U;
+  const std::size_t auxiliaryPerExecutor = batchSize * 2048U + 8U * 1024U * 1024U;
+  return executors * (overflowPerExecutor + auxiliaryPerExecutor);
 }
 
 }  // namespace nvMolKit

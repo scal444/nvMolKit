@@ -81,5 +81,8 @@ NB_MODULE(_substructLibrary, module) {
     .def("countMatches", &countMatches, "query"_a)
     .def("hasMatch", &hasMatch, "query"_a)
     .def("__len__", &nvMolKit::SubstructLibrary::size)
-    .def_prop_ro("pendingSize", &nvMolKit::SubstructLibrary::pendingSize);
+    .def_prop_ro("pendingSize", &nvMolKit::SubstructLibrary::pendingSize)
+    .def_prop_ro("queryConcurrency", &nvMolKit::SubstructLibrary::queryConcurrency)
+    .def_prop_ro("batchesInFlightPerGpu", &nvMolKit::SubstructLibrary::batchesInFlightPerGpu)
+    .def_prop_ro("workspaceBytesPerQueryPerGpu", &nvMolKit::SubstructLibrary::workspaceBytesPerQueryPerGpu);
 }
