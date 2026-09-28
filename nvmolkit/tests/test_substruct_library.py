@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from concurrent.futures import Future
+
 import pytest
 from rdkit import Chem
 
@@ -16,18 +18,25 @@ def test_finalize_generation_and_result_operations():
 
     query = Chem.MolFromSmarts("[#6]")
     with pytest.raises(RuntimeError, match="finalized"):
-        library.hasMatch(query)
+        library.hasMatch(query).result()
 
     library.finalize()
     assert len(library) == 3
     assert library.pendingSize == 0
-    assert library.getMatches(query) == [0, 1, 2]
-    assert library.getMatches(query, maxResults=2) == [0, 1]
-    assert library.countMatches(query) == 3
-    assert library.hasMatch(Chem.MolFromSmarts("c"))
+    assert library.queryConcurrency >= 1
+    assert library.getMatches(query).result() == [0, 1, 2]
+    assert library.getMatches(query, maxResults=2).result() == [0, 1]
+    assert library.countMatches(query).result() == 3
+    assert library.hasMatch(Chem.MolFromSmarts("c")).result()
+
+    futures = [library.hasMatch(Chem.MolFromSmarts(pattern)) for pattern in ["C", "N", "O"]]
+    assert all(isinstance(future, Future) for future in futures)
+    assert [future.result() for future in futures] == [True, False, True]
+    assert library.batchesInFlightPerGpu >= library.queryConcurrency
+    assert library.workspaceBytesPerQueryPerGpu > 0
 
     assert library.addMol(Chem.MolFromSmiles("N")) == 3
-    assert library.getMatches(query) == [0, 1, 2]
+    assert library.getMatches(query).result() == [0, 1, 2]
     library.finalize()
     assert len(library) == 4
 
@@ -38,7 +47,7 @@ def test_configured_production_backends(algorithm):
     library = SubstructLibrary(config=config)
     library.addMol(Chem.MolFromSmiles("CCOC(=O)C"))
     library.finalize()
-    assert library.getMatches(Chem.MolFromSmarts("C=O")) == [0]
+    assert library.getMatches(Chem.MolFromSmarts("C=O")).result() == [0]
 
 
 def test_invalid_library_configuration():
@@ -63,10 +72,10 @@ def test_multi_gpu_library_merges_shards_in_insertion_order():
     library.finalize()
 
     query = Chem.MolFromSmarts("[#6]")
-    assert library.getMatches(query) == [0, 2, 4, 5, 6]
-    assert library.getMatches(query, maxResults=3) == [0, 2, 4]
-    assert library.countMatches(query) == 5
-    assert library.hasMatch(query)
+    assert library.getMatches(query).result() == [0, 2, 4, 5, 6]
+    assert library.getMatches(query, maxResults=3).result() == [0, 2, 4]
+    assert library.countMatches(query).result() == 5
+    assert library.hasMatch(query).result()
 
 
 @pytest.mark.parametrize("algorithm", ["gsi", "dfs"])
@@ -82,6 +91,6 @@ def test_plain_molecule_query_preserves_atom_constraints(algorithm):
     library.finalize()
 
     query = Chem.MolFromSmiles("CCC(C)CNc1cccc2c1COCC2")
-    assert library.getMatches(query) == [0]
-    assert library.countMatches(query) == 1
-    assert library.hasMatch(query)
+    assert library.getMatches(query).result() == [0]
+    assert library.countMatches(query).result() == 1
+    assert library.hasMatch(query).result()

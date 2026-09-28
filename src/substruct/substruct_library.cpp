@@ -21,6 +21,7 @@
 #include "src/utils/cuda_error_check.h"
 #include "src/utils/device.h"
 #include "src/utils/openmp_helpers.h"
+#include "src/utils/thread_safe_queue.h"
 
 namespace nvMolKit {
 
@@ -60,6 +61,7 @@ class SubstructLibrary::Impl {
   }
 
   ~Impl() noexcept {
+    destroyWorkspaces();
     destroyDeviceChunks(chunks_);
     pendingChunks_.clear();
   }
@@ -217,6 +219,7 @@ class SubstructLibrary::Impl {
     nextDeviceAssignment_ = (nextDeviceAssignment_ + candidates.size()) % deviceIds_.size();
     pendingChunks_.clear();
     published_ = true;
+    configureWorkspaces();
   }
 
   [[nodiscard]] std::size_t size() const {
@@ -227,6 +230,21 @@ class SubstructLibrary::Impl {
   [[nodiscard]] std::size_t pendingSize() const {
     std::shared_lock lock(mutex_);
     return static_cast<std::size_t>(nextId_) - committedSize_;
+  }
+
+  [[nodiscard]] std::size_t queryConcurrency() const {
+    std::shared_lock lock(mutex_);
+    return queryConcurrency_;
+  }
+
+  [[nodiscard]] std::size_t batchesInFlightPerGpu() const {
+    std::shared_lock lock(mutex_);
+    return batchesInFlightPerGpu_;
+  }
+
+  [[nodiscard]] std::size_t workspaceBytesPerQueryPerGpu() const {
+    std::shared_lock lock(mutex_);
+    return workspaceBytesPerQueryPerGpu_;
   }
 
   [[nodiscard]] std::vector<unsigned int> getMatches(const RDKit::ROMol& query,
@@ -281,6 +299,32 @@ class SubstructLibrary::Impl {
     std::unique_ptr<ResidentTargetChunk> chunk;
   };
 
+  struct DeviceWorkspaces {
+    std::vector<std::shared_ptr<ResidentSubstructSearchWorkspace>>      owned;
+    std::unique_ptr<ThreadSafeQueue<ResidentSubstructSearchWorkspace*>> available;
+  };
+
+  class WorkspaceLease {
+   public:
+    explicit WorkspaceLease(DeviceWorkspaces& pool) : pool_(&pool) {
+      const auto workspace = pool.available->pop();
+      if (!workspace.has_value()) {
+        throw std::runtime_error("Substructure library workspace queue is closed");
+      }
+      workspace_ = *workspace;
+    }
+    ~WorkspaceLease() {
+      if (workspace_ != nullptr) {
+        pool_->available->push(workspace_);
+      }
+    }
+    [[nodiscard]] ResidentSubstructSearchWorkspace* get() const { return workspace_; }
+
+   private:
+    DeviceWorkspaces*                 pool_      = nullptr;
+    ResidentSubstructSearchWorkspace* workspace_ = nullptr;
+  };
+
   [[nodiscard]] int constructionThreads() const {
     return config_.preprocessingThreads == -1 ? omp_get_max_threads() : std::max(1, config_.preprocessingThreads);
   }
@@ -311,13 +355,72 @@ class SubstructLibrary::Impl {
   [[nodiscard]] SubstructSearchConfig deviceConfig(std::size_t deviceIndex) const {
     SubstructSearchConfig result = config_;
     result.gpuIds                = {deviceIds_[deviceIndex]};
-    const int totalThreads =
-      config_.preprocessingThreads == -1 ? omp_get_max_threads() : std::max(1, config_.preprocessingThreads);
-    result.preprocessingThreads = std::max(1, totalThreads / static_cast<int>(deviceIds_.size()));
+    if (config_.preprocessingThreads == -1) {
+      // Resident targets and a single query do not benefit from spawning a
+      // machine-wide preprocessing team for every asynchronous request.
+      result.preprocessingThreads = 1;
+    } else {
+      result.preprocessingThreads = std::max(1, config_.preprocessingThreads / static_cast<int>(deviceIds_.size()));
+    }
     if (result.workerThreads == -1) {
-      result.workerThreads = std::min(4, std::max(1, omp_get_max_threads() / static_cast<int>(deviceIds_.size())));
+      result.workerThreads = 1;
     }
     return result;
+  }
+
+  void configureWorkspaces() {
+    destroyWorkspaces();
+    if (deviceIds_.empty()) {
+      queryConcurrency_ = 0;
+      return;
+    }
+
+    constexpr std::size_t    memoryNumerator   = 85;
+    constexpr std::size_t    memoryDenominator = 100;
+    std::size_t              capacity          = std::numeric_limits<std::size_t>::max();
+    std::vector<std::size_t> deviceCapacities(deviceIds_.size());
+    for (std::size_t index = 0; index < deviceIds_.size(); ++index) {
+      const WithDevice device(deviceIds_[index]);
+      std::size_t      freeBytes  = 0;
+      std::size_t      totalBytes = 0;
+      cudaCheckError(cudaMemGetInfo(&freeBytes, &totalBytes));
+      const std::size_t usedBytes      = totalBytes - freeBytes;
+      const std::size_t budgetBytes    = totalBytes * memoryNumerator / memoryDenominator;
+      const std::size_t availableBytes = budgetBytes > usedBytes ? budgetBytes - usedBytes : 0;
+      const std::size_t workspaceBytes = estimateResidentSubstructSearchWorkspaceBytes(deviceConfig(index));
+      if (workspaceBytes == 0 || availableBytes < workspaceBytes) {
+        throw std::runtime_error(
+          "Substructure library cannot admit one query workspace below the 85% GPU-memory cutoff");
+      }
+      deviceCapacities[index]       = availableBytes / workspaceBytes;
+      capacity                      = std::min(capacity, deviceCapacities[index]);
+      workspaceBytesPerQueryPerGpu_ = std::max(workspaceBytesPerQueryPerGpu_, workspaceBytes);
+    }
+
+    const auto config = deviceConfig(0);
+    const int  executorsPerRunner =
+      config.executorsPerRunner == -1 ? (config.workerThreads == 1 ? 3 : 2) : config.executorsPerRunner;
+    const std::size_t executorsPerQuery =
+      static_cast<std::size_t>(config.workerThreads) * static_cast<std::size_t>(executorsPerRunner);
+    const std::size_t threadsPerQuery =
+      deviceIds_.size() * static_cast<std::size_t>(config.preprocessingThreads + config.workerThreads + 2);
+    const std::size_t hostCapacity = std::max<std::size_t>(
+      1,
+      static_cast<std::size_t>(omp_get_max_threads()) / std::max<std::size_t>(1, threadsPerQuery));
+    queryConcurrency_      = std::max<std::size_t>(1, std::min(capacity, hostCapacity));
+    batchesInFlightPerGpu_ = queryConcurrency_ * executorsPerQuery;
+    workspacePools_.resize(deviceIds_.size());
+    for (std::size_t index = 0; index < deviceIds_.size(); ++index) {
+      const WithDevice device(deviceIds_[index]);
+      auto&            pool = workspacePools_[index];
+      pool.available        = std::make_unique<ThreadSafeQueue<ResidentSubstructSearchWorkspace*>>();
+      pool.owned.reserve(queryConcurrency_);
+      for (std::size_t slot = 0; slot < queryConcurrency_; ++slot) {
+        auto workspace = makeResidentSubstructSearchWorkspace(deviceIds_[index]);
+        pool.available->push(workspace.get());
+        pool.owned.push_back(std::move(workspace));
+      }
+    }
   }
 
   [[nodiscard]] std::vector<std::vector<unsigned int>> matchingIdsByDevice(const RDKit::ROMol& query,
@@ -337,11 +440,12 @@ class SubstructLibrary::Impl {
         cudaStream_t     deviceStream = validateStream(stream);
         const auto       localConfig  = deviceConfig(index);
         auto&            deviceResult = results[index];
+        WorkspaceLease   workspace(workspacePools_[index]);
         for (const auto& record : chunks_) {
           if (record.deviceIndex != index) {
             continue;
           }
-          const auto chunkMatches = matchingIds(*record.chunk, query, deviceStream, localConfig);
+          const auto chunkMatches = matchingIds(*record.chunk, query, deviceStream, localConfig, workspace.get());
           for (const MoleculeId id : chunkMatches) {
             deviceResult.push_back(static_cast<unsigned int>(id));
             if (maxResults > 0 && deviceResult.size() == static_cast<std::size_t>(maxResults)) {
@@ -360,10 +464,11 @@ class SubstructLibrary::Impl {
     return results;
   }
 
-  [[nodiscard]] std::vector<MoleculeId> matchingIds(const ResidentTargetChunk&   chunk,
-                                                    const RDKit::ROMol&          query,
-                                                    cudaStream_t                 stream,
-                                                    const SubstructSearchConfig& config) const {
+  [[nodiscard]] std::vector<MoleculeId> matchingIds(const ResidentTargetChunk&        chunk,
+                                                    const RDKit::ROMol&               query,
+                                                    cudaStream_t                      stream,
+                                                    const SubstructSearchConfig&      config,
+                                                    ResidentSubstructSearchWorkspace* workspace) const {
     std::vector<MoleculeId> matches;
     if (chunk.gpuTargetCount() != 0) {
       std::vector<std::uint8_t> gpuMatches;
@@ -374,7 +479,8 @@ class SubstructLibrary::Impl {
                                 gpuMatches,
                                 config.algorithm,
                                 stream,
-                                config);
+                                config,
+                                workspace);
       if (gpuMatches.size() != chunk.packedGlobalIds().size()) {
         throw std::runtime_error("Resident substructure result size does not match its target chunk");
       }
@@ -423,6 +529,24 @@ class SubstructLibrary::Impl {
     chunks.clear();
   }
 
+  void destroyWorkspaces() noexcept {
+    int originalDevice = -1;
+    cudaGetDevice(&originalDevice);
+    for (std::size_t index = 0; index < workspacePools_.size(); ++index) {
+      if (index < deviceIds_.size() && cudaSetDevice(deviceIds_[index]) == cudaSuccess) {
+        workspacePools_[index].available.reset();
+        workspacePools_[index].owned.clear();
+      }
+    }
+    workspacePools_.clear();
+    queryConcurrency_             = 0;
+    batchesInFlightPerGpu_        = 0;
+    workspaceBytesPerQueryPerGpu_ = 0;
+    if (originalDevice >= 0) {
+      cudaSetDevice(originalDevice);
+    }
+  }
+
   const std::size_t                                 chunkSize_;
   SubstructSearchConfig                             config_;
   mutable std::shared_mutex                         mutex_;
@@ -430,10 +554,14 @@ class SubstructLibrary::Impl {
   std::vector<std::unique_ptr<ResidentTargetChunk>> pendingChunks_;
   std::vector<DeviceChunk>                          chunks_;
   std::vector<int>                                  deviceIds_;
-  MoleculeId                                        nextId_               = 0;
-  std::size_t                                       committedSize_        = 0;
-  std::size_t                                       nextDeviceAssignment_ = 0;
-  bool                                              published_            = false;
+  mutable std::vector<DeviceWorkspaces>             workspacePools_;
+  MoleculeId                                        nextId_                       = 0;
+  std::size_t                                       committedSize_                = 0;
+  std::size_t                                       nextDeviceAssignment_         = 0;
+  bool                                              published_                    = false;
+  std::size_t                                       queryConcurrency_             = 0;
+  std::size_t                                       batchesInFlightPerGpu_        = 0;
+  std::size_t                                       workspaceBytesPerQueryPerGpu_ = 0;
 };
 
 SubstructLibrary::SubstructLibrary(std::size_t chunkSize, SubstructSearchConfig config)
@@ -459,6 +587,18 @@ std::size_t SubstructLibrary::size() const {
 
 std::size_t SubstructLibrary::pendingSize() const {
   return impl_->pendingSize();
+}
+
+std::size_t SubstructLibrary::queryConcurrency() const {
+  return impl_->queryConcurrency();
+}
+
+std::size_t SubstructLibrary::batchesInFlightPerGpu() const {
+  return impl_->batchesInFlightPerGpu();
+}
+
+std::size_t SubstructLibrary::workspaceBytesPerQueryPerGpu() const {
+  return impl_->workspaceBytesPerQueryPerGpu();
 }
 
 std::vector<unsigned int> SubstructLibrary::getMatches(const RDKit::ROMol& query,

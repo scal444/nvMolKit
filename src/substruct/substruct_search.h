@@ -18,6 +18,8 @@
 
 #include <cuda_runtime.h>
 
+#include <cstddef>
+#include <memory>
 #include <vector>
 
 #include "src/substruct/substruct_types.h"
@@ -30,6 +32,7 @@ namespace nvMolKit {
 
 struct MoleculesHost;
 class MoleculesDevice;
+struct ResidentSubstructSearchWorkspace;
 
 /**
  * @brief Perform batch substructure matching on GPU.
@@ -99,7 +102,12 @@ void hasSubstructMatchResident(const std::vector<const RDKit::ROMol*>& targets,
                                std::vector<uint8_t>&                   results,
                                SubstructAlgorithm                      algorithm,
                                cudaStream_t                            stream,
-                               const SubstructSearchConfig&            config = SubstructSearchConfig{});
+                               const SubstructSearchConfig&            config    = SubstructSearchConfig{},
+                               ResidentSubstructSearchWorkspace*       workspace = nullptr);
+
+std::shared_ptr<ResidentSubstructSearchWorkspace> makeResidentSubstructSearchWorkspace(int deviceId);
+
+std::size_t estimateResidentSubstructSearchWorkspaceBytes(const SubstructSearchConfig& config);
 
 }  // namespace nvMolKit
 

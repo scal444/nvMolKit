@@ -20,7 +20,7 @@ from __future__ import annotations
 import argparse
 import math
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from bench_utils import (
@@ -48,6 +48,9 @@ class LifecycleMeasurement:
     steady_ms: float
     steady_std_ms: float
     results: list[Any]
+    query_concurrency: int | None = None
+    batches_in_flight_per_gpu: int | None = None
+    workspace_bytes_per_query_per_gpu: int | None = None
 
     @property
     def amortized_ms(self) -> float:
@@ -60,14 +63,41 @@ class LifecycleMeasurement:
         return math.sqrt(self.staging_std_ms**2 + self.finalize_std_ms**2 + self.steady_std_ms**2)
 
 
-def _run_nvmolkit_queries(library: Any, queries: Sequence[Any], operation: str, max_results: int) -> list[Any]:
-    if operation == "has":
-        return [library.hasMatch(query) for query in queries]
-    if operation == "count":
-        return [library.countMatches(query) for query in queries]
-    if operation == "get":
-        return [list(library.getMatches(query, maxResults=max_results)) for query in queries]
-    raise ValueError(f"unsupported operation {operation!r}")
+def _run_nvmolkit_queries(
+    library: Any,
+    queries: Sequence[Any],
+    operation: str,
+    max_results: int,
+    query_mode: str = "serial",
+) -> list[Any]:
+    def resolve(value: Any) -> Any:
+        return value.result() if hasattr(value, "result") else value
+
+    if operation not in {"has", "count", "get"}:
+        raise ValueError(f"unsupported operation {operation!r}")
+
+    if query_mode == "serial":
+        # Preserve the ordinary call-and-wait usage pattern.
+        results = []
+        for query in queries:
+            if operation == "has":
+                value = library.hasMatch(query)
+            elif operation == "count":
+                value = library.countMatches(query)
+            else:
+                value = library.getMatches(query, maxResults=max_results)
+            results.append(resolve(value))
+    elif query_mode == "concurrent":
+        if operation == "has":
+            pending = [library.hasMatch(query) for query in queries]
+        elif operation == "count":
+            pending = [library.countMatches(query) for query in queries]
+        else:
+            pending = [library.getMatches(query, maxResults=max_results) for query in queries]
+        results = [resolve(value) for value in pending]
+    else:
+        raise ValueError(f"unsupported query mode {query_mode!r}")
+    return [list(value) for value in results] if operation == "get" else results
 
 
 def _run_rdkit_queries(
@@ -221,6 +251,7 @@ def benchmark_nvmolkit(
     runs: int,
     warmups: int,
     repetitions: int,
+    query_mode: str = "serial",
 ) -> LifecycleMeasurement:
     import torch
 
@@ -235,17 +266,35 @@ def benchmark_nvmolkit(
         gpuIds=list(gpu_ids),
         algorithm=algorithm,
     )
-    return _benchmark_lifecycle(
+    admission: dict[str, int] = {}
+
+    def finalize_library(library: Any) -> None:
+        library.finalize()
+        admission["query_concurrency"] = getattr(library, "queryConcurrency", 1)
+        admission["batches_in_flight_per_gpu"] = getattr(library, "batchesInFlightPerGpu", 1)
+        admission["workspace_bytes_per_query_per_gpu"] = getattr(library, "workspaceBytesPerQueryPerGpu", 0)
+        print(
+            "PROGRESS admission "
+            f"query_concurrency={admission['query_concurrency']} "
+            f"batches_in_flight_per_gpu={admission['batches_in_flight_per_gpu']} "
+            f"workspace_bytes_per_query_per_gpu={admission['workspace_bytes_per_query_per_gpu']}",
+            flush=True,
+        )
+
+    measurement = _benchmark_lifecycle(
         make_library=lambda: SubstructLibrary(chunkSize=chunk_size, config=config),
         stage_library=lambda library: library.addMols(mols),
-        finalize_library=lambda library: library.finalize(),
-        search_library=lambda library: _run_nvmolkit_queries(library, queries, operation, max_results),
+        finalize_library=finalize_library,
+        search_library=lambda library: _run_nvmolkit_queries(
+            library, queries, operation, max_results, query_mode=query_mode
+        ),
         runs=runs,
         warmups=warmups,
         repetitions=repetitions,
         gpu_finalize=True,
         gpu_search=True,
     )
+    return replace(measurement, **admission) if admission else measurement
 
 
 def _result_row(
@@ -338,6 +387,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--runs", "-r", type=int, default=3)
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--repetitions", type=int, default=1, help="Query sweeps per timed iteration")
+    parser.add_argument(
+        "--query_mode",
+        choices=["serial", "concurrent"],
+        default="serial",
+        help="Wait after each nvMolKit query or resolve an asynchronously submitted sweep",
+    )
     parser.add_argument("--no_validate", dest="validate", action="store_false", default=True)
     parser.add_argument("--output", "-o", help="Optional CSV output path")
     add_backend_selection_args(parser)
@@ -462,6 +517,7 @@ def main() -> None:
                         runs=args.runs,
                         warmups=args.warmups,
                         repetitions=args.repetitions,
+                        query_mode=args.query_mode,
                     )
                     if args.validate:
                         if reference_results is None:
@@ -482,6 +538,12 @@ def main() -> None:
                             prep_threads=args.prep_threads,
                             gpu_ids=",".join(str(gpu_id) for gpu_id in gpu_ids),
                             num_gpus=len(gpu_ids),
+                            query_mode=args.query_mode,
+                            query_concurrency=getattr(measurement, "query_concurrency", None),
+                            batches_in_flight_per_gpu=getattr(measurement, "batches_in_flight_per_gpu", None),
+                            workspace_bytes_per_query_per_gpu=getattr(
+                                measurement, "workspace_bytes_per_query_per_gpu", None
+                            ),
                             max_results=max_results,
                         )
                     )

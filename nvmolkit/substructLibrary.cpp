@@ -98,5 +98,8 @@ BOOST_PYTHON_MODULE(_substructLibrary) {
     .def("countMatches", &countMatches)
     .def("hasMatch", &hasMatch)
     .def("__len__", &nvMolKit::SubstructLibrary::size)
-    .add_property("pendingSize", &nvMolKit::SubstructLibrary::pendingSize);
+    .add_property("pendingSize", &nvMolKit::SubstructLibrary::pendingSize)
+    .add_property("queryConcurrency", &nvMolKit::SubstructLibrary::queryConcurrency)
+    .add_property("batchesInFlightPerGpu", &nvMolKit::SubstructLibrary::batchesInFlightPerGpu)
+    .add_property("workspaceBytesPerQueryPerGpu", &nvMolKit::SubstructLibrary::workspaceBytesPerQueryPerGpu);
 }
