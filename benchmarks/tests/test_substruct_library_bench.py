@@ -78,6 +78,24 @@ def test_rdkit_operations_forward_threads_and_max_results(operation, expected):
         assert kwargs.get("maxResults", 1) == 1
 
 
+def test_rdkit_operations_stop_between_queries_when_deadline_expires():
+    library = _FakeRdkitLibrary()
+    expiry_checks = iter([False, True])
+    deadline = SimpleNamespace(expired=lambda: next(expiry_checks))
+
+    result = benchmark._run_rdkit_queries(
+        library,
+        ["hit", "zz"],
+        "has",
+        max_results=-1,
+        num_threads=112,
+        deadline=deadline,
+    )
+
+    assert result == [True]
+    assert len(library.calls) == 1
+
+
 def test_lifecycle_separates_staging_finalize_and_repeated_search(monkeypatch):
     events = []
     timing_values = iter([[10.0, 14.0], [20.0, 24.0], [30.0, 34.0]])
@@ -194,6 +212,7 @@ def _args(**overrides):
         "gpu_ids": None,
         "gpu_id": 0,
         "rdkit_threads": [-1],
+        "rdkit_max_seconds": 0.0,
         "max_results": -1,
         "runs": 3,
         "warmups": 1,
@@ -216,6 +235,7 @@ def _args(**overrides):
         ({"gpu_id": -1}, "gpu_ids"),
         ({"gpu_ids": [0, 0], "gpu_id": None}, "unique"),
         ({"rdkit_threads": [0]}, "rdkit_threads"),
+        ({"rdkit_max_seconds": -1}, "rdkit_max_seconds"),
         ({"max_results": -2}, "max_results"),
         ({"repetitions": 0}, "repetitions"),
         ({"no_rdkit": True, "no_nvmolkit": True}, "disable both"),
@@ -250,6 +270,8 @@ def test_parser_exposes_backend_sweeps_and_lifecycle_controls():
             "--rdkit_threads",
             "1",
             "8",
+            "--rdkit_max_seconds",
+            "300",
             "--gpu_ids",
             "0",
             "1",
@@ -265,6 +287,7 @@ def test_parser_exposes_backend_sweeps_and_lifecycle_controls():
     assert args.chunk_sizes == [8192, 65536]
     assert args.rdkit_holders == ["mol", "cached-pattern"]
     assert args.rdkit_threads == [1, 8]
+    assert args.rdkit_max_seconds == 300
     assert args.gpu_ids == [0, 1]
     assert args.max_results == 20
     assert args.repetitions == 5
