@@ -279,6 +279,7 @@ def test_parser_exposes_backend_sweeps_and_lifecycle_controls():
             "20",
             "--repetitions",
             "5",
+            "--no_nvmolkit_pattern_fingerprints",
         ]
     )
 
@@ -291,6 +292,7 @@ def test_parser_exposes_backend_sweeps_and_lifecycle_controls():
     assert args.gpu_ids == [0, 1]
     assert args.max_results == 20
     assert args.repetitions == 5
+    assert args.nvmolkit_pattern_fingerprints is False
 
 
 def test_query_smiles_are_molecules_with_stereochemistry_removed(tmp_path):
@@ -348,6 +350,7 @@ def test_nvmolkit_benchmark_constructs_requested_config_and_library(monkeypatch)
         runs=2,
         warmups=1,
         repetitions=5,
+        use_pattern_fingerprints=False,
     )
 
     assert result is expected
@@ -361,7 +364,7 @@ def test_nvmolkit_benchmark_constructs_requested_config_and_library(monkeypatch)
             "algorithm": "dfs",
         }
     ]
-    assert constructed == [{"chunkSize": 8192, "config": ANY}]
+    assert constructed == [{"chunkSize": 8192, "config": ANY, "usePatternFingerprints": False}]
 
 
 def test_main_runs_requested_cross_product_and_validates_each_gpu_result(monkeypatch):

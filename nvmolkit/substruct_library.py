@@ -28,11 +28,19 @@ class SubstructLibrary:
         self,
         chunkSize: int = 65_536,
         config: SubstructSearchConfig | None = None,
+        usePatternFingerprints: bool = True,
     ) -> None:
-        """Create an empty library with the requested chunk size and search configuration."""
+        """Create an empty library.
+
+        ``usePatternFingerprints`` enables RDKit-compatible, substructure-safe
+        screening before exact GPU graph matching. Disable it only for
+        measurement or diagnostics.
+        """
         if config is None:
             config = SubstructSearchConfig()
-        self._native = _NativeSubstructLibrary(int(chunkSize), config._as_native())
+        self._native = _NativeSubstructLibrary(
+            int(chunkSize), config._as_native(), bool(usePatternFingerprints)
+        )
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nvmolkit-substruct")
 
     def __len__(self) -> int:

@@ -16,6 +16,7 @@
 #include "src/substruct/minibatch_planner.h"
 
 #include <algorithm>
+#include <stdexcept>
 
 #include "src/substruct/recursive_preprocessor.h"
 #include "src/substruct/thread_worker_context.h"
@@ -102,6 +103,43 @@ void MiniBatchPlanner::prepareMiniBatch(MiniBatchPlan&             plan,
   plan.totalMatchIndices = buffer.miniBatchPairMatchStarts[numPairsInMiniBatch];
 
   prepareRecursiveMiniBatch(plan, ctx, leafSubpatterns, buffer);
+}
+
+void MiniBatchPlanner::prepareSelectedTargetsMiniBatch(MiniBatchPlan&             plan,
+                                                       PinnedHostBuffer&          buffer,
+                                                       const ThreadWorkerContext& ctx,
+                                                       const LeafSubpatterns&     leafSubpatterns,
+                                                       const std::vector<int>&    selectedTargetIndices,
+                                                       int                        selectionOffset,
+                                                       int                        maxTargetsInMiniBatch) const {
+  if (ctx.numQueries != 1) {
+    throw std::invalid_argument("Selected resident targets require exactly one query");
+  }
+  const int selectionEnd =
+    std::min(selectionOffset + maxTargetsInMiniBatch, static_cast<int>(selectedTargetIndices.size()));
+  const int count          = selectionEnd - selectionOffset;
+  plan.miniBatchPairOffset = selectionOffset;
+  plan.numPairsInMiniBatch = count;
+
+  const bool useMaxMatchesLimit      = ctx.maxMatches > 0;
+  buffer.miniBatchPairMatchStarts[0] = 0;
+  for (int localIndex = 0; localIndex < count; ++localIndex) {
+    const int targetIndex = selectedTargetIndices[static_cast<std::size_t>(selectionOffset + localIndex)];
+    if (targetIndex < 0 || targetIndex >= ctx.numTargets) {
+      throw std::out_of_range("Selected resident target index is outside the target batch");
+    }
+    const int targetAtoms  = (*ctx.targetAtomCounts)[static_cast<std::size_t>(targetIndex)];
+    const int queryAtoms   = ctx.queryAtomCounts[0];
+    const int pairCapacity = useMaxMatchesLimit ? (ctx.maxMatches * queryAtoms) : (targetAtoms * queryAtoms);
+    buffer.miniBatchPairMatchStarts[localIndex + 1] = buffer.miniBatchPairMatchStarts[localIndex] + pairCapacity;
+    buffer.pairIndices[localIndex]                  = targetIndex;
+  }
+  plan.totalMatchIndices = buffer.miniBatchPairMatchStarts[count];
+  precomputePipelineSchedule(plan, ctx, buffer);
+  plan.firstTargetInMiniBatch = count == 0 ? 0 : selectedTargetIndices[static_cast<std::size_t>(selectionOffset)];
+  plan.numTargetsInMiniBatch  = count;
+  plan.patternsAtDepth        = &leafSubpatterns.allQueriesPatternsAtDepth;
+  plan.recursiveMaxDepth      = leafSubpatterns.allQueriesMaxDepth;
 }
 
 }  // namespace nvMolKit

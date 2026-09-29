@@ -299,6 +299,7 @@ def benchmark_nvmolkit(
     warmups: int,
     repetitions: int,
     query_mode: str = "serial",
+    use_pattern_fingerprints: bool = True,
 ) -> LifecycleMeasurement:
     import torch
 
@@ -329,7 +330,11 @@ def benchmark_nvmolkit(
         )
 
     measurement = _benchmark_lifecycle(
-        make_library=lambda: SubstructLibrary(chunkSize=chunk_size, config=config),
+        make_library=lambda: SubstructLibrary(
+            chunkSize=chunk_size,
+            config=config,
+            usePatternFingerprints=use_pattern_fingerprints,
+        ),
         stage_library=lambda library: library.addMols(mols),
         finalize_library=finalize_library,
         search_library=lambda library: _run_nvmolkit_queries(
@@ -450,6 +455,13 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["serial", "concurrent"],
         default="serial",
         help="Wait after each nvMolKit query or resolve an asynchronously submitted sweep",
+    )
+    parser.add_argument(
+        "--no_nvmolkit_pattern_fingerprints",
+        dest="nvmolkit_pattern_fingerprints",
+        action="store_false",
+        default=True,
+        help="Disable safe pattern-fingerprint screening for nvMolKit diagnostics",
     )
     parser.add_argument("--no_validate", dest="validate", action="store_false", default=True)
     parser.add_argument("--output", "-o", help="Optional CSV output path")
@@ -579,6 +591,7 @@ def main() -> None:
                         warmups=args.warmups,
                         repetitions=args.repetitions,
                         query_mode=args.query_mode,
+                        use_pattern_fingerprints=args.nvmolkit_pattern_fingerprints,
                     )
                     if args.validate:
                         if reference_results is None:
@@ -600,6 +613,7 @@ def main() -> None:
                             gpu_ids=",".join(str(gpu_id) for gpu_id in gpu_ids),
                             num_gpus=len(gpu_ids),
                             query_mode=args.query_mode,
+                            pattern_fingerprints=args.nvmolkit_pattern_fingerprints,
                             query_concurrency=getattr(measurement, "query_concurrency", None),
                             batches_in_flight_per_gpu=getattr(measurement, "batches_in_flight_per_gpu", None),
                             workspace_bytes_per_query_per_gpu=getattr(

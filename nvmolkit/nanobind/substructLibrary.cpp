@@ -71,9 +71,10 @@ NB_MODULE(_substructLibrary, module) {
   nb::module_::import_("nvmolkit._substructure");
 
   nb::class_<nvMolKit::SubstructLibrary>(module, "SubstructLibrary")
-    .def(nb::init<std::size_t, nvMolKit::SubstructSearchConfig>(),
-         "chunkSize"_a = 65536,
-         "config"_a    = nvMolKit::SubstructSearchConfig{})
+    .def(nb::init<std::size_t, nvMolKit::SubstructSearchConfig, bool>(),
+         "chunkSize"_a              = 65536,
+         "config"_a                 = nvMolKit::SubstructSearchConfig{},
+         "usePatternFingerprints"_a = true)
     .def("addMol", &addMolecule, "molecule"_a)
     .def("addMols", &addMolecules, "molecules"_a)
     .def("finalize", &finalize)

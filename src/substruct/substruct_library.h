@@ -28,10 +28,15 @@ namespace nvMolKit {
  * finalized chunks remain queryable while more molecules are pending.
  * Queries may execute concurrently; addMol() and finalize() wait for active
  * queries and exclude new queries until the operation completes.
+ *
+ * By default, RDKit pattern fingerprints are retained with each target chunk
+ * and used as a substructure-safe screen before exact graph matching.
  */
 class SubstructLibrary {
  public:
-  explicit SubstructLibrary(std::size_t chunkSize = 65536, SubstructSearchConfig config = SubstructSearchConfig{});
+  explicit SubstructLibrary(std::size_t           chunkSize              = 65536,
+                            SubstructSearchConfig config                 = SubstructSearchConfig{},
+                            bool                  usePatternFingerprints = true);
   ~SubstructLibrary();
 
   SubstructLibrary(const SubstructLibrary&)            = delete;

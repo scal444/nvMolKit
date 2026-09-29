@@ -93,7 +93,9 @@ void hasSubstructMatch(const std::vector<const RDKit::ROMol*>& targets,
  * The target pointers and packed target batches must describe the same molecules
  * in the same order. This entry point is intended for persistent collections;
  * callers retain ownership of all three target representations for the duration
- * of the synchronous call.
+ * of the synchronous call. candidateTargetIndices may select an ordered subset
+ * of resident targets for a one-query, non-recursive search; omitted targets
+ * retain false results.
  */
 void hasSubstructMatchResident(const std::vector<const RDKit::ROMol*>& targets,
                                const MoleculesHost&                    targetsHost,
@@ -102,8 +104,9 @@ void hasSubstructMatchResident(const std::vector<const RDKit::ROMol*>& targets,
                                std::vector<uint8_t>&                   results,
                                SubstructAlgorithm                      algorithm,
                                cudaStream_t                            stream,
-                               const SubstructSearchConfig&            config    = SubstructSearchConfig{},
-                               ResidentSubstructSearchWorkspace*       workspace = nullptr);
+                               const SubstructSearchConfig&            config                 = SubstructSearchConfig{},
+                               ResidentSubstructSearchWorkspace*       workspace              = nullptr,
+                               const std::vector<int>*                 candidateTargetIndices = nullptr);
 
 std::shared_ptr<ResidentSubstructSearchWorkspace> makeResidentSubstructSearchWorkspace(int deviceId);
 

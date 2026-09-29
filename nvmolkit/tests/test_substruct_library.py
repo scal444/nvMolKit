@@ -94,3 +94,35 @@ def test_plain_molecule_query_preserves_atom_constraints(algorithm):
     assert library.getMatches(query).result() == [0]
     assert library.countMatches(query).result() == 1
     assert library.hasMatch(query).result()
+
+
+@pytest.mark.parametrize("use_pattern_fingerprints", [False, True])
+def test_pattern_fingerprint_screening_preserves_exact_results(use_pattern_fingerprints):
+    config = SubstructSearchConfig(workerThreads=1, preprocessingThreads=2)
+    library = SubstructLibrary(
+        chunkSize=3,
+        config=config,
+        usePatternFingerprints=use_pattern_fingerprints,
+    )
+    targets = [
+        Chem.MolFromSmiles(smiles)
+        for smiles in [
+            "CCO",
+            "CC(=O)C",
+            "c1ccccc1",
+            "C1CCCCC1",
+            "C[N+](C)(C)C",
+            "CC(=O)[O-]",
+            "[Na+].[Cl-]",
+            "CCOC(=O)c1ccccc1O",
+        ]
+    ]
+    library.addMols(targets)
+    library.finalize()
+
+    for smarts in ["[#6]", "C=O", "c1ccccc1", "[N+]", "[$([CX3]=[OX1])]", "[Si]"]:
+        query = Chem.MolFromSmarts(smarts)
+        expected = [index for index, target in enumerate(targets) if target.HasSubstructMatch(query)]
+        assert library.getMatches(query).result() == expected
+        assert library.countMatches(query).result() == len(expected)
+        assert library.hasMatch(query).result() == bool(expected)

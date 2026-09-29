@@ -69,7 +69,8 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
                                  std::vector<int>*                       countResults          = nullptr,
                                  const MoleculesHost*                    residentTargetsHost   = nullptr,
                                  const MoleculesDevice*                  residentTargetsDevice = nullptr,
-                                 ResidentSubstructSearchWorkspace*       workspace             = nullptr);
+                                 ResidentSubstructSearchWorkspace*       workspace             = nullptr,
+                                 const std::vector<int>*                 residentTargetIndices = nullptr);
 
 }  // anonymous namespace
 
@@ -578,7 +579,8 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
                                  std::vector<int>*                       countResults,
                                  const MoleculesHost*                    residentTargetsHost,
                                  const MoleculesDevice*                  residentTargetsDevice,
-                                 ResidentSubstructSearchWorkspace*       workspace) {
+                                 ResidentSubstructSearchWorkspace*       workspace,
+                                 const std::vector<int>*                 residentTargetIndices) {
   (void)stream;
   const bool      countOnly  = (boolResults != nullptr) || (countResults != nullptr);
   const char*     rangeLabel = boolResults ?
@@ -586,10 +588,12 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
                                  (countResults ? "runPipelinedCountSubstructMatches" : "runPipelinedSubstructSearch");
   ScopedNvtxRange e2eRange(rangeLabel);
 
-  const int              numTargets      = static_cast<int>(targets.size());
-  const int              numQueries      = queryContext.numQueries;
+  const int numTargets = static_cast<int>(targets.size());
+  const int numQueries = queryContext.numQueries;
+  const int numWorkTargets =
+    residentTargetIndices == nullptr ? numTargets : static_cast<int>(residentTargetIndices->size());
   const LeafSubpatterns& leafSubpatterns = recursivePreprocessor.leafSubpatterns();
-  if (numTargets == 0 || numQueries == 0) {
+  if (numTargets == 0 || numQueries == 0 || numWorkTargets == 0) {
     return;
   }
 
@@ -608,8 +612,8 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
   // Determine runner counts (per GPU, possibly limited by target count).
   const int runnersPerGpu = std::max(1, config.workerThreads);
   int       numRunners    = runnersPerGpu * numGpus;
-  if (numRunners > numTargets) {
-    numRunners = numTargets;
+  if (numRunners > numWorkTargets) {
+    numRunners = numWorkTargets;
   }
   if (numRunners == 0) {
     return;
@@ -685,7 +689,8 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
   // A resident single-query shard that fits entirely in the reusable executor
   // ring needs no coordinator, worker, or preprocessing threads. Preparing the
   // ring on the caller thread removes the dominant serialized-call gaps.
-  const int residentPairCount  = numTargets * numQueries;
+  const int residentPairCount =
+    residentTargetIndices == nullptr ? numTargets * numQueries : static_cast<int>(residentTargetIndices->size());
   const int residentBatchCount = (residentPairCount + maxPairsPerBatch - 1) / maxPairsPerBatch;
   if (workspace != nullptr && residentTargetsHost != nullptr && residentTargetsDevice != nullptr &&
       residentBatchCount <= totalExecutorSlots) {
@@ -718,7 +723,17 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
       batch->ctx.templateConfig = selectTemplateConfig(std::max(metadata.maxTargetAtoms, queryContext.maxQueryAtoms),
                                                        queryContext.maxQueryAtoms,
                                                        metadata.maxBondsPerAtom);
-      planner.prepareMiniBatch(batch->plan, *buffer, batch->ctx, leafSubpatterns, pairOffset, maxPairsPerBatch);
+      if (residentTargetIndices == nullptr) {
+        planner.prepareMiniBatch(batch->plan, *buffer, batch->ctx, leafSubpatterns, pairOffset, maxPairsPerBatch);
+      } else {
+        planner.prepareSelectedTargetsMiniBatch(batch->plan,
+                                                *buffer,
+                                                batch->ctx,
+                                                leafSubpatterns,
+                                                *residentTargetIndices,
+                                                pairOffset,
+                                                maxPairsPerBatch);
+      }
       directQueue.push(std::move(batch));
     }
     directQueue.close();
@@ -869,7 +884,8 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
           const int   maxTargetAtoms        = metadata->maxTargetAtoms;
           const int   maxBondsPerAtom       = metadata->maxBondsPerAtom;
 
-          const int totalPairs = numTargets * numQueries;
+          const int totalPairs = residentTargetIndices == nullptr ? numTargets * numQueries :
+                                                                    static_cast<int>(residentTargetIndices->size());
           for (int pairOffset = 0; pairOffset < totalPairs; pairOffset += maxPairsPerBatch) {
             if (pipelineAbort.load(std::memory_order_acquire)) {
               break;
@@ -903,7 +919,17 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
             batch->ctx.templateConfig =
               selectTemplateConfig(templateTargetAtoms, queryContext.maxQueryAtoms, maxBondsPerAtom);
 
-            planner.prepareMiniBatch(batch->plan, *buffer, batch->ctx, leafSubpatterns, pairOffset, maxPairsPerBatch);
+            if (residentTargetIndices == nullptr) {
+              planner.prepareMiniBatch(batch->plan, *buffer, batch->ctx, leafSubpatterns, pairOffset, maxPairsPerBatch);
+            } else {
+              planner.prepareSelectedTargetsMiniBatch(batch->plan,
+                                                      *buffer,
+                                                      batch->ctx,
+                                                      leafSubpatterns,
+                                                      *residentTargetIndices,
+                                                      pairOffset,
+                                                      maxPairsPerBatch);
+            }
             releaseGuard.release();
             batchQueue.push(std::move(batch));
           }
@@ -1144,7 +1170,8 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
                              std::vector<int>*                       countResults,
                              const MoleculesHost*                    residentTargetsHost   = nullptr,
                              const MoleculesDevice*                  residentTargetsDevice = nullptr,
-                             ResidentSubstructSearchWorkspace*       workspace             = nullptr) {
+                             ResidentSubstructSearchWorkspace*       workspace             = nullptr,
+                             const std::vector<int>*                 residentTargetIndices = nullptr) {
   const int numTargets = static_cast<int>(targets.size());
   const int numQueries = static_cast<int>(queries.size());
 
@@ -1249,6 +1276,16 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
 
   queryContext.maxQueryAtoms = maxQueryAtoms;
 
+  // Recursive-pattern painting currently operates on contiguous resident
+  // target ranges. Preserve correctness by bypassing selected-index screening
+  // for those queries until that path supports indirection.
+  const std::vector<int>* screenedTargetIndices = residentTargetIndices;
+  if (screenedTargetIndices != nullptr && std::any_of(queryContext.queryHasPatterns.begin(),
+                                                      queryContext.queryHasPatterns.end(),
+                                                      [](int8_t value) { return value != 0; })) {
+    screenedTargetIndices = nullptr;
+  }
+
   // Mutex shared between GPU batch accumulation and fallback queue processing
   std::mutex resultsMutex;
 
@@ -1261,8 +1298,14 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
     std::vector<RDKitFallbackEntry> depthFallbackEntries;
     for (int q = 0; q < numQueries; ++q) {
       if (queryContext.queryNeedsFallback[q]) {
-        for (int t = 0; t < numTargets; ++t) {
-          depthFallbackEntries.push_back({t, q});
+        if (screenedTargetIndices == nullptr) {
+          for (int t = 0; t < numTargets; ++t) {
+            depthFallbackEntries.push_back({t, q});
+          }
+        } else {
+          for (const int t : *screenedTargetIndices) {
+            depthFallbackEntries.push_back({t, q});
+          }
         }
       }
     }
@@ -1286,7 +1329,8 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
                               countResults,
                               residentTargetsHost,
                               residentTargetsDevice,
-                              workspace);
+                              workspace,
+                              screenedTargetIndices);
 
   // Process any remaining fallback entries after GPU work completes.
   while (fallbackQueue.tryProcessOne()) {
@@ -1381,7 +1425,8 @@ void hasSubstructMatchResident(const std::vector<const RDKit::ROMol*>& targets,
                                SubstructAlgorithm                      algorithm,
                                cudaStream_t                            stream,
                                const SubstructSearchConfig&            config,
-                               ResidentSubstructSearchWorkspace*       workspace) {
+                               ResidentSubstructSearchWorkspace*       workspace,
+                               const std::vector<int>*                 candidateTargetIndices) {
   std::vector<const RDKit::ROMol*> queries{&query};
   HasSubstructMatchResults         residentResults;
   SubstructSearchResults           unusedResults;
@@ -1399,7 +1444,8 @@ void hasSubstructMatchResident(const std::vector<const RDKit::ROMol*>& targets,
                           nullptr,
                           &targetsHost,
                           &targetsDevice,
-                          workspace);
+                          workspace,
+                          candidateTargetIndices);
   results = std::move(residentResults.hasMatch);
 }
 

@@ -3,6 +3,9 @@
 
 #include "src/substruct/substruct_library.h"
 
+#include <DataStructs/BitOps.h>
+#include <DataStructs/ExplicitBitVect.h>
+#include <GraphMol/Fingerprints/Fingerprints.h>
 #include <GraphMol/ROMol.h>
 #include <GraphMol/Substruct/SubstructMatch.h>
 #include <omp.h>
@@ -40,7 +43,10 @@ bool rdkitHasMatch(const RDKit::ROMol& target, const RDKit::ROMol& query) {
 
 class SubstructLibrary::Impl {
  public:
-  Impl(std::size_t chunkSize, SubstructSearchConfig config) : chunkSize_(chunkSize), config_(std::move(config)) {
+  Impl(std::size_t chunkSize, SubstructSearchConfig config, bool usePatternFingerprints)
+      : chunkSize_(chunkSize),
+        config_(std::move(config)),
+        usePatternFingerprints_(usePatternFingerprints) {
     if (chunkSize_ == 0) {
       throw std::invalid_argument("Substructure library chunk size must be greater than zero");
     }
@@ -57,7 +63,7 @@ class SubstructLibrary::Impl {
       }
     }
     deviceIds_ = config_.gpuIds;
-    builder_   = std::make_unique<TargetChunkBuilder>(0, chunkSize_);
+    builder_   = std::make_unique<TargetChunkBuilder>(0, chunkSize_, usePatternFingerprints_);
   }
 
   ~Impl() noexcept {
@@ -72,7 +78,7 @@ class SubstructLibrary::Impl {
       throw std::overflow_error("Substructure library molecule ID space exhausted");
     }
     if (builder_->full()) {
-      auto nextBuilder = std::make_unique<TargetChunkBuilder>(nextId_, chunkSize_);
+      auto nextBuilder = std::make_unique<TargetChunkBuilder>(nextId_, chunkSize_, usePatternFingerprints_);
       pendingChunks_.reserve(pendingChunks_.size() + 1);
       pendingChunks_.push_back(builder_->seal());
       builder_ = std::move(nextBuilder);
@@ -97,7 +103,7 @@ class SubstructLibrary::Impl {
     // be retried without changing any published generation.
     if (!builder_->empty()) {
       pendingChunks_.push_back(builder_->seal());
-      builder_ = std::make_unique<TargetChunkBuilder>(nextId_, chunkSize_);
+      builder_ = std::make_unique<TargetChunkBuilder>(nextId_, chunkSize_, usePatternFingerprints_);
     }
 
     const std::size_t                                 numChunks = (molecules.size() + chunkSize_ - 1) / chunkSize_;
@@ -108,7 +114,7 @@ class SubstructLibrary::Impl {
       const std::size_t                      end   = std::min(molecules.size(), begin + chunkSize_);
       const std::vector<const RDKit::ROMol*> chunkMolecules(molecules.begin() + static_cast<std::ptrdiff_t>(begin),
                                                             molecules.begin() + static_cast<std::ptrdiff_t>(end));
-      TargetChunkBuilder                     chunkBuilder(nextId_ + begin, end - begin);
+      TargetChunkBuilder                     chunkBuilder(nextId_ + begin, end - begin, usePatternFingerprints_);
       chunkBuilder.addMols(chunkMolecules, numThreads);
       builtChunks[chunkIndex] = chunkBuilder.seal();
     }
@@ -121,7 +127,7 @@ class SubstructLibrary::Impl {
       pendingChunks_.push_back(std::move(chunk));
     }
     nextId_ += molecules.size();
-    builder_ = std::make_unique<TargetChunkBuilder>(nextId_, chunkSize_);
+    builder_ = std::make_unique<TargetChunkBuilder>(nextId_, chunkSize_, usePatternFingerprints_);
     return ids;
   }
 
@@ -140,7 +146,7 @@ class SubstructLibrary::Impl {
     }
 
     if (!builder_->empty()) {
-      auto nextBuilder = std::make_unique<TargetChunkBuilder>(nextId_, chunkSize_);
+      auto nextBuilder = std::make_unique<TargetChunkBuilder>(nextId_, chunkSize_, usePatternFingerprints_);
       pendingChunks_.reserve(pendingChunks_.size() + 1);
       pendingChunks_.push_back(builder_->seal());
       builder_ = std::move(nextBuilder);
@@ -161,7 +167,7 @@ class SubstructLibrary::Impl {
       for (MoleculeId id = pending->firstId(); id < pending->endId(); ++id) {
         chunkMolecules.push_back(&pending->sourceMol(id));
       }
-      TargetChunkBuilder candidateBuilder(pending->firstId(), pending->size());
+      TargetChunkBuilder candidateBuilder(pending->firstId(), pending->size(), usePatternFingerprints_);
       candidateBuilder.addMols(chunkMolecules, numThreads);
       candidates[index] = candidateBuilder.seal();
     }
@@ -429,6 +435,10 @@ class SubstructLibrary::Impl {
     if (deviceIds_.size() > 1 && stream != nullptr) {
       throw std::invalid_argument("A single external CUDA stream cannot be used with a multi-GPU substructure library");
     }
+    std::unique_ptr<ExplicitBitVect> queryFingerprint;
+    if (usePatternFingerprints_) {
+      queryFingerprint.reset(RDKit::PatternFingerprintMol(query));
+    }
     std::vector<std::vector<unsigned int>> results(deviceIds_.size());
     detail::OpenMPExceptionRegistry        exceptionRegistry;
 
@@ -445,7 +455,8 @@ class SubstructLibrary::Impl {
           if (record.deviceIndex != index) {
             continue;
           }
-          const auto chunkMatches = matchingIds(*record.chunk, query, deviceStream, localConfig, workspace.get());
+          const auto chunkMatches =
+            matchingIds(*record.chunk, query, queryFingerprint.get(), deviceStream, localConfig, workspace.get());
           for (const MoleculeId id : chunkMatches) {
             deviceResult.push_back(static_cast<unsigned int>(id));
             if (maxResults > 0 && deviceResult.size() == static_cast<std::size_t>(maxResults)) {
@@ -466,11 +477,24 @@ class SubstructLibrary::Impl {
 
   [[nodiscard]] std::vector<MoleculeId> matchingIds(const ResidentTargetChunk&        chunk,
                                                     const RDKit::ROMol&               query,
+                                                    const ExplicitBitVect*            queryFingerprint,
                                                     cudaStream_t                      stream,
                                                     const SubstructSearchConfig&      config,
                                                     ResidentSubstructSearchWorkspace* workspace) const {
     std::vector<MoleculeId> matches;
     if (chunk.gpuTargetCount() != 0) {
+      std::vector<int>        candidates;
+      const std::vector<int>* candidatePointer = nullptr;
+      if (queryFingerprint != nullptr) {
+        candidates.reserve(chunk.gpuTargetCount());
+        for (std::size_t index = 0; index < chunk.packedGlobalIds().size(); ++index) {
+          const auto* targetFingerprint = chunk.patternFingerprint(chunk.packedGlobalIds()[index]);
+          if (targetFingerprint == nullptr || AllProbeBitsMatch(*queryFingerprint, *targetFingerprint)) {
+            candidates.push_back(static_cast<int>(index));
+          }
+        }
+        candidatePointer = &candidates;
+      }
       std::vector<std::uint8_t> gpuMatches;
       hasSubstructMatchResident(chunk.supportedTargetPtrs(),
                                 chunk.packedHost(),
@@ -480,7 +504,8 @@ class SubstructLibrary::Impl {
                                 config.algorithm,
                                 stream,
                                 config,
-                                workspace);
+                                workspace,
+                                candidatePointer);
       if (gpuMatches.size() != chunk.packedGlobalIds().size()) {
         throw std::runtime_error("Resident substructure result size does not match its target chunk");
       }
@@ -492,7 +517,10 @@ class SubstructLibrary::Impl {
     }
 
     for (const MoleculeId id : chunk.fallbackGlobalIds()) {
-      if (rdkitHasMatch(chunk.sourceMol(id), query)) {
+      const auto* targetFingerprint = chunk.patternFingerprint(id);
+      if ((queryFingerprint == nullptr || targetFingerprint == nullptr ||
+           AllProbeBitsMatch(*queryFingerprint, *targetFingerprint)) &&
+          rdkitHasMatch(chunk.sourceMol(id), query)) {
         matches.push_back(id);
       }
     }
@@ -549,6 +577,7 @@ class SubstructLibrary::Impl {
 
   const std::size_t                                 chunkSize_;
   SubstructSearchConfig                             config_;
+  bool                                              usePatternFingerprints_ = true;
   mutable std::shared_mutex                         mutex_;
   std::unique_ptr<TargetChunkBuilder>               builder_;
   std::vector<std::unique_ptr<ResidentTargetChunk>> pendingChunks_;
@@ -564,8 +593,8 @@ class SubstructLibrary::Impl {
   std::size_t                                       workspaceBytesPerQueryPerGpu_ = 0;
 };
 
-SubstructLibrary::SubstructLibrary(std::size_t chunkSize, SubstructSearchConfig config)
-    : impl_(std::make_unique<Impl>(chunkSize, std::move(config))) {}
+SubstructLibrary::SubstructLibrary(std::size_t chunkSize, SubstructSearchConfig config, bool usePatternFingerprints)
+    : impl_(std::make_unique<Impl>(chunkSize, std::move(config), usePatternFingerprints)) {}
 
 SubstructLibrary::~SubstructLibrary() = default;
 

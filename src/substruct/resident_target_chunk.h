@@ -18,6 +18,7 @@
 namespace RDKit {
 class ROMol;
 }  // namespace RDKit
+class ExplicitBitVect;
 
 namespace nvMolKit {
 
@@ -51,12 +52,13 @@ class ResidentTargetChunk {
   ResidentTargetChunk& operator=(ResidentTargetChunk&&)      = delete;
   ~ResidentTargetChunk();
 
-  ResidentTargetChunk(MoleculeId                                 firstId,
-                      std::vector<std::unique_ptr<RDKit::ROMol>> sourceMolecules,
-                      MoleculesHost                              packedHost,
-                      std::vector<MoleculeId>                    packedGlobalIds,
-                      std::vector<MoleculeId>                    fallbackGlobalIds,
-                      std::vector<std::uint8_t>                  gpuSupported);
+  ResidentTargetChunk(MoleculeId                                    firstId,
+                      std::vector<std::unique_ptr<RDKit::ROMol>>    sourceMolecules,
+                      MoleculesHost                                 packedHost,
+                      std::vector<MoleculeId>                       packedGlobalIds,
+                      std::vector<MoleculeId>                       fallbackGlobalIds,
+                      std::vector<std::uint8_t>                     gpuSupported,
+                      std::vector<std::unique_ptr<ExplicitBitVect>> patternFingerprints);
 
   /** Enqueue all packed target arrays on stream without synchronizing it. */
   void beginUpload(cudaStream_t stream);
@@ -75,8 +77,9 @@ class ResidentTargetChunk {
   [[nodiscard]] std::size_t fallbackCount() const noexcept { return fallbackGlobalIds_.size(); }
   [[nodiscard]] bool        empty() const noexcept { return sourceMolecules_.empty(); }
 
-  [[nodiscard]] const RDKit::ROMol& sourceMol(MoleculeId id) const;
-  [[nodiscard]] bool                isGpuSupported(MoleculeId id) const;
+  [[nodiscard]] const RDKit::ROMol&    sourceMol(MoleculeId id) const;
+  [[nodiscard]] bool                   isGpuSupported(MoleculeId id) const;
+  [[nodiscard]] const ExplicitBitVect* patternFingerprint(MoleculeId id) const;
 
   [[nodiscard]] const MoleculesHost&                    packedHost() const noexcept { return packedHost_; }
   [[nodiscard]] const std::vector<const RDKit::ROMol*>& supportedTargetPtrs() const noexcept {
@@ -98,13 +101,14 @@ class ResidentTargetChunk {
   [[nodiscard]] const MoleculesDevice& deviceStorage() const;
 
  private:
-  MoleculeId                                 firstId_ = 0;
-  std::vector<std::unique_ptr<RDKit::ROMol>> sourceMolecules_;
-  MoleculesHost                              packedHost_;
-  std::vector<const RDKit::ROMol*>           supportedTargetPtrs_;
-  std::vector<MoleculeId>                    packedGlobalIds_;
-  std::vector<MoleculeId>                    fallbackGlobalIds_;
-  std::vector<std::uint8_t>                  gpuSupported_;
+  MoleculeId                                    firstId_ = 0;
+  std::vector<std::unique_ptr<RDKit::ROMol>>    sourceMolecules_;
+  MoleculesHost                                 packedHost_;
+  std::vector<const RDKit::ROMol*>              supportedTargetPtrs_;
+  std::vector<MoleculeId>                       packedGlobalIds_;
+  std::vector<MoleculeId>                       fallbackGlobalIds_;
+  std::vector<std::uint8_t>                     gpuSupported_;
+  std::vector<std::unique_ptr<ExplicitBitVect>> patternFingerprints_;
 
   State                            state_ = State::Sealed;
   std::unique_ptr<MoleculesDevice> packedDevice_;
@@ -116,7 +120,9 @@ class ResidentTargetChunk {
  */
 class TargetChunkBuilder {
  public:
-  explicit TargetChunkBuilder(MoleculeId firstId, std::size_t maxMolecules = std::numeric_limits<std::size_t>::max());
+  explicit TargetChunkBuilder(MoleculeId  firstId,
+                              std::size_t maxMolecules           = std::numeric_limits<std::size_t>::max(),
+                              bool        usePatternFingerprints = true);
   ~TargetChunkBuilder();
 
   TargetChunkBuilder(const TargetChunkBuilder&)            = delete;
@@ -149,15 +155,17 @@ class TargetChunkBuilder {
   [[nodiscard]] bool        sealed() const noexcept { return sealed_; }
 
  private:
-  MoleculeId  firstId_      = 0;
-  std::size_t maxMolecules_ = 0;
-  bool        sealed_       = false;
+  MoleculeId  firstId_                = 0;
+  std::size_t maxMolecules_           = 0;
+  bool        sealed_                 = false;
+  bool        usePatternFingerprints_ = true;
 
-  std::vector<std::unique_ptr<RDKit::ROMol>> sourceMolecules_;
-  MoleculesHost                              packedHost_;
-  std::vector<MoleculeId>                    packedGlobalIds_;
-  std::vector<MoleculeId>                    fallbackGlobalIds_;
-  std::vector<std::uint8_t>                  gpuSupported_;
+  std::vector<std::unique_ptr<RDKit::ROMol>>    sourceMolecules_;
+  MoleculesHost                                 packedHost_;
+  std::vector<MoleculeId>                       packedGlobalIds_;
+  std::vector<MoleculeId>                       fallbackGlobalIds_;
+  std::vector<std::uint8_t>                     gpuSupported_;
+  std::vector<std::unique_ptr<ExplicitBitVect>> patternFingerprints_;
 };
 
 }  // namespace nvMolKit
