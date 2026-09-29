@@ -24,7 +24,9 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from bench_utils import (
+    Deadline,
     add_backend_selection_args,
+    add_rdkit_max_seconds_arg,
     load_pickle,
     load_smarts,
     load_smiles,
@@ -48,6 +50,7 @@ class LifecycleMeasurement:
     steady_ms: float
     steady_std_ms: float
     results: list[Any]
+    completed_queries: int | None = None
     query_concurrency: int | None = None
     batches_in_flight_per_gpu: int | None = None
     workspace_bytes_per_query_per_gpu: int | None = None
@@ -106,6 +109,7 @@ def _run_rdkit_queries(
     operation: str,
     max_results: int,
     num_threads: int,
+    deadline: Deadline | None = None,
 ) -> list[Any]:
     match_options = {
         "recursionPossible": True,
@@ -113,13 +117,20 @@ def _run_rdkit_queries(
         "useQueryQueryMatches": False,
         "numThreads": num_threads,
     }
-    if operation == "has":
-        return [library.HasMatch(query, **match_options) for query in queries]
-    if operation == "count":
-        return [library.CountMatches(query, **match_options) for query in queries]
-    if operation == "get":
-        return [list(library.GetMatches(query, maxResults=max_results, **match_options)) for query in queries]
-    raise ValueError(f"unsupported operation {operation!r}")
+    if operation not in {"has", "count", "get"}:
+        raise ValueError(f"unsupported operation {operation!r}")
+
+    results = []
+    for query in queries:
+        if deadline is not None and deadline.expired():
+            break
+        if operation == "has":
+            results.append(library.HasMatch(query, **match_options))
+        elif operation == "count":
+            results.append(library.CountMatches(query, **match_options))
+        else:
+            results.append(list(library.GetMatches(query, maxResults=max_results, **match_options)))
+    return results
 
 
 def _benchmark_lifecycle(
@@ -204,7 +215,43 @@ def benchmark_rdkit(
     runs: int,
     warmups: int,
     repetitions: int,
+    max_seconds: float = 0.0,
 ) -> LifecycleMeasurement:
+    if max_seconds > 0:
+        library = _make_rdkit_library(holder)
+        staging = time_it(lambda: [library.AddMol(mol) for mol in mols], runs=1, warmups=0)
+        results: list[Any] = []
+
+        def search(deadline: Deadline) -> None:
+            nonlocal results
+            results = _run_rdkit_queries(
+                library,
+                queries,
+                operation,
+                max_results,
+                num_threads,
+                deadline,
+            )
+
+        steady = time_it(
+            search,
+            runs=runs,
+            warmups=warmups,
+            max_seconds=max_seconds,
+            progress_getter=lambda: len(results),
+            progress_target=len(queries),
+        )
+        return LifecycleMeasurement(
+            staging_ms=staging.mean_ms,
+            staging_std_ms=staging.std_ms,
+            finalize_ms=0.0,
+            finalize_std_ms=0.0,
+            steady_ms=steady.mean_ms,
+            steady_std_ms=steady.std_ms,
+            results=results,
+            completed_queries=steady.progress,
+        )
+
     return _benchmark_lifecycle(
         make_library=lambda: _make_rdkit_library(holder),
         stage_library=lambda library: [library.AddMol(mol) for mol in mols],
@@ -307,7 +354,8 @@ def _result_row(
     repetitions: int,
     **configuration: Any,
 ) -> dict[str, Any]:
-    query_work = num_queries * repetitions
+    completed_queries = measurement.completed_queries if measurement.completed_queries is not None else num_queries
+    query_work = completed_queries * repetitions
     pair_work = num_mols * query_work
     if operation == "has":
         positive_queries = sum(bool(result) for result in measurement.results)
@@ -323,9 +371,15 @@ def _result_row(
         "num_queries": num_queries,
         "repetitions": repetitions,
         "positive_queries": positive_queries,
-        "query_hit_rate": positive_queries / num_queries,
+        "completed_queries": completed_queries,
+        "completed_pairs": pair_work,
+        "query_hit_rate": positive_queries / completed_queries if completed_queries else None,
         "result_cardinality": result_cardinality,
-        "result_pair_density": None if result_cardinality is None else result_cardinality / (num_mols * num_queries),
+        "result_pair_density": (
+            None
+            if result_cardinality is None or completed_queries == 0
+            else result_cardinality / (num_mols * completed_queries)
+        ),
         **configuration,
         "staging_ms": measurement.staging_ms,
         "staging_std_ms": measurement.staging_std_ms,
@@ -377,6 +431,10 @@ def _build_parser() -> argparse.ArgumentParser:
     gpu_selection.add_argument("--gpu_id", type=int, help="Deprecated single-GPU spelling")
     parser.add_argument("--rdkit_holders", nargs="+", choices=["mol", "cached-pattern"], default=["mol"])
     parser.add_argument("--rdkit_threads", nargs="+", type=int, default=[-1])
+    add_rdkit_max_seconds_arg(
+        parser,
+        extra_help="The persistent-library comparison checks the deadline between completed queries.",
+    )
     parser.add_argument(
         "--max_results",
         "--maxResults",
@@ -417,6 +475,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("gpu_ids must be unique")
     if any(num_threads == 0 or num_threads < -1 for num_threads in args.rdkit_threads):
         raise ValueError("rdkit_threads entries must be -1 or positive")
+    if args.rdkit_max_seconds < 0:
+        raise ValueError("rdkit_max_seconds must be non-negative")
     if args.max_results < -1:
         raise ValueError("max_results must be -1, 0, or positive")
     if args.runs <= 0:
@@ -475,6 +535,7 @@ def main() -> None:
                         runs=args.runs,
                         warmups=args.warmups,
                         repetitions=args.repetitions,
+                        max_seconds=args.rdkit_max_seconds,
                     )
                     if args.validate:
                         if reference_results is None:
