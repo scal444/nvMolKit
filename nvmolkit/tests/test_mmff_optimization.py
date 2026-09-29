@@ -73,6 +73,11 @@ def mmff_test_mols(num_mols=5):
     return molecules
 
 
+# Single-precision energy sums carry ~1e-5 kcal/mol of absolute rounding, which dominates the relative
+# error when a minimized energy is close to zero.
+SINGLE_ENERGY_ABS_TOL = 1e-3
+
+
 def create_hard_copy_mols(molecules):
     """Create true hard copies of molecules with their conformers.
 
@@ -227,7 +232,7 @@ def test_mmff_optimization_serial_vs_rdkit(mmff_test_mols, precision):
             energy_diff = abs(rdkit_energy - nvmolkit_energy)
             rel_error = energy_diff / abs(rdkit_energy) if abs(rdkit_energy) > 1e-10 else energy_diff
 
-            assert rel_error < 1e-3, (
+            assert rel_error < 1e-3 or (precision == PrecisionMode.SINGLE and energy_diff < SINGLE_ENERGY_ABS_TOL), (
                 f"Molecule {mol_idx}, Conformer {conf_idx}: energy mismatch: "
                 f"RDKit={rdkit_energy:.6f}, nvMolKit={nvmolkit_energy:.6f}, "
                 f"abs_diff={energy_diff:.6f}, rel_error={rel_error:.6f}"
@@ -280,7 +285,7 @@ def test_mmff_optimization_batch_vs_rdkit(mmff_test_mols, gpu_ids, batchesize, b
             energy_diff = abs(rdkit_energy - nvmolkit_energy)
             rel_error = energy_diff / abs(rdkit_energy) if abs(rdkit_energy) > 1e-10 else energy_diff
 
-            assert rel_error < 1e-3, (
+            assert rel_error < 1e-3 or (precision == PrecisionMode.SINGLE and energy_diff < SINGLE_ENERGY_ABS_TOL), (
                 f"Molecule {mol_idx}, Conformer {conf_idx}: energy mismatch: "
                 f"RDKit={rdkit_energy:.6f}, nvMolKit={nvmolkit_energy:.6f}, "
                 f"abs_diff={energy_diff:.6f}, rel_error={rel_error:.6f}"
@@ -326,7 +331,9 @@ def test_mmff_optimization_fire_matches_rdkit(mmff_test_mols, backend, precision
         for conformer_index, (starting_energy, reference_energy, result_energy) in enumerate(
             zip(starting, reference, result)
         ):
-            assert result_energy < starting_energy, (
+            # Test inputs can start within float32 resolution of their minimum.
+            progress_tol = SINGLE_ENERGY_ABS_TOL if precision == PrecisionMode.SINGLE else 0.0
+            assert result_energy < starting_energy + progress_tol, (
                 f"Molecule {molecule_index}, conformer {conformer_index}: "
                 f"FIRE energy {result_energy:.6f} did not improve from {starting_energy:.6f}"
             )
@@ -385,7 +392,7 @@ def test_mmff_optimization_allows_large_molecule_interleaved(precision):
             energy_diff = abs(rdkit_energy - nvmolkit_energy)
             rel_error = energy_diff / abs(rdkit_energy) if abs(rdkit_energy) > 1e-10 else energy_diff
 
-            assert rel_error < 1e-3, (
+            assert rel_error < 1e-3 or (precision == PrecisionMode.SINGLE and energy_diff < SINGLE_ENERGY_ABS_TOL), (
                 f"Molecule {mol_idx}, Conformer {conf_idx}: energy mismatch: "
                 f"RDKit={rdkit_energy:.6f}, nvMolKit={nvmolkit_energy:.6f}, "
                 f"abs_diff={energy_diff:.6f}, rel_error={rel_error:.6f}"
@@ -451,7 +458,7 @@ def test_mmff_optimization_custom_properties_vs_rdkit(mmff_test_mols, precision)
         for conf_idx, (rdkit_energy, nvmolkit_energy) in enumerate(zip(rdkit_mol_energies, nvmolkit_mol_energies)):
             energy_diff = abs(rdkit_energy - nvmolkit_energy)
             rel_error = energy_diff / abs(rdkit_energy) if abs(rdkit_energy) > 1e-10 else energy_diff
-            assert rel_error < 1e-2, (
+            assert rel_error < 1e-2 or (precision == PrecisionMode.SINGLE and energy_diff < SINGLE_ENERGY_ABS_TOL), (
                 f"Molecule {mol_idx}, Conformer {conf_idx}: energy mismatch: "
                 f"RDKit={rdkit_energy:.6f}, nvMolKit={nvmolkit_energy:.6f}, "
                 f"abs_diff={energy_diff:.6f}, rel_error={rel_error:.6f}"
@@ -492,7 +499,7 @@ def test_mmff_optimization_per_molecule_properties_vs_rdkit(mmff_test_mols, prec
         for conf_idx, (rdkit_energy, nvmolkit_energy) in enumerate(zip(rdkit_mol_energies, nvmolkit_mol_energies)):
             energy_diff = abs(rdkit_energy - nvmolkit_energy)
             rel_error = energy_diff / abs(rdkit_energy) if abs(rdkit_energy) > 1e-10 else energy_diff
-            assert rel_error < 1e-2, (
+            assert rel_error < 1e-2 or (precision == PrecisionMode.SINGLE and energy_diff < SINGLE_ENERGY_ABS_TOL), (
                 f"Molecule {mol_idx}, Conformer {conf_idx}: energy mismatch: "
                 f"RDKit={rdkit_energy:.6f}, nvMolKit={nvmolkit_energy:.6f}, "
                 f"abs_diff={energy_diff:.6f}, rel_error={rel_error:.6f}"
@@ -531,7 +538,7 @@ def test_mmff_optimization_per_molecule_thresholds_and_interfrag_vs_rdkit(precis
         for conf_idx, (rdkit_energy, nvmolkit_energy) in enumerate(zip(rdkit_mol_energies, nvmolkit_mol_energies)):
             energy_diff = abs(rdkit_energy - nvmolkit_energy)
             rel_error = energy_diff / abs(rdkit_energy) if abs(rdkit_energy) > 1e-10 else energy_diff
-            assert rel_error < 1e-2, (
+            assert rel_error < 1e-2 or (precision == PrecisionMode.SINGLE and energy_diff < SINGLE_ENERGY_ABS_TOL), (
                 f"Molecule {mol_idx}, Conformer {conf_idx}: energy mismatch: "
                 f"RDKit={rdkit_energy:.6f}, nvMolKit={nvmolkit_energy:.6f}, "
                 f"abs_diff={energy_diff:.6f}, rel_error={rel_error:.6f}"
