@@ -402,12 +402,13 @@ def _result_row(
 
 
 def _validate_results(nvmolkit_results: Sequence[Any], rdkit_results: Sequence[Any], operation: str) -> None:
-    if len(nvmolkit_results) != len(rdkit_results):
-        raise AssertionError(f"result length differs: nvMolKit={len(nvmolkit_results)}, RDKit={len(rdkit_results)}")
-    for query_index, (actual, expected) in enumerate(zip(nvmolkit_results, rdkit_results, strict=True)):
-        if operation == "get":
-            actual = list(actual)
-            expected = list(expected)
+    """Compare per-query results over the queries both runs completed.
+
+    Deadline-bounded RDKit runs stop between queries, so either side may hold only a prefix of the query list.
+    """
+    for query_index, (nvmolkit_result, rdkit_result) in enumerate(zip(nvmolkit_results, rdkit_results)):
+        actual = list(nvmolkit_result) if operation == "get" else nvmolkit_result
+        expected = list(rdkit_result) if operation == "get" else rdkit_result
         if actual != expected:
             raise AssertionError(
                 f"{operation} result differs for query {query_index}: nvMolKit={actual!r}, RDKit={expected!r}"
@@ -550,10 +551,10 @@ def main() -> None:
                         max_seconds=args.rdkit_max_seconds,
                     )
                     if args.validate:
-                        if reference_results is None:
-                            reference_results = measurement.results
-                        else:
+                        if reference_results is not None:
                             _validate_results(measurement.results, reference_results, operation)
+                        if reference_results is None or len(measurement.results) > len(reference_results):
+                            reference_results = measurement.results
                     rows.append(
                         _result_row(
                             backend="rdkit-substruct-library",
@@ -597,6 +598,13 @@ def main() -> None:
                         if reference_results is None:
                             raise RuntimeError("validation requires an RDKit reference result")
                         _validate_results(measurement.results, reference_results, operation)
+                        if len(reference_results) < len(queries):
+                            print(
+                                f"VALIDATION partial operation={operation} algorithm={algorithm} "
+                                f"chunk_size={chunk_size}: compared {len(reference_results)}/{len(queries)} "
+                                "queries completed by RDKit before its deadline",
+                                flush=True,
+                            )
                     rows.append(
                         _result_row(
                             backend="nvmolkit-substruct-library",

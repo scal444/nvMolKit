@@ -183,8 +183,14 @@ def test_validation_checks_all_queries_and_get_order():
 
     with pytest.raises(AssertionError, match="query 1"):
         benchmark._validate_results([[0, 2], [3]], [[0, 2], [4]], "get")
-    with pytest.raises(AssertionError, match="result length"):
-        benchmark._validate_results([True], [True, False], "has")
+
+
+def test_validation_compares_queries_completed_before_rdkit_deadline():
+    benchmark._validate_results([True, False, True], [True, False], "has")
+    benchmark._validate_results([True, False], [], "has")
+
+    with pytest.raises(AssertionError, match="query 1"):
+        benchmark._validate_results([True, True, True], [True, False], "has")
 
 
 def test_reference_uses_all_threads(monkeypatch):
@@ -365,6 +371,55 @@ def test_nvmolkit_benchmark_constructs_requested_config_and_library(monkeypatch)
         }
     ]
     assert constructed == [{"chunkSize": 8192, "config": ANY, "usePatternFingerprints": False}]
+
+
+@pytest.mark.parametrize(
+    ("nvmolkit_results", "mismatch"),
+    [
+        pytest.param([True, False, True], None, id="agrees"),
+        pytest.param([True, True, True], "query 1", id="differs-after-shorter-deadline"),
+    ],
+)
+def test_main_validates_against_longest_deadline_bounded_rdkit_run(monkeypatch, capsys, nvmolkit_results, mismatch):
+    rdkit_measurements = iter(
+        [
+            benchmark.LifecycleMeasurement(1, 0, 0, 0, 3, 0, [True], completed_queries=1),
+            benchmark.LifecycleMeasurement(1, 0, 0, 0, 3, 0, [True, False], completed_queries=2),
+        ]
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "substruct_library_bench.py",
+            "--smiles",
+            "mols.smi",
+            "--smarts",
+            "queries.smarts",
+            "--rdkit_threads",
+            "1",
+            "2",
+            "--rdkit_max_seconds",
+            "5",
+        ],
+    )
+    monkeypatch.setattr(benchmark, "_load_molecules", lambda args: [object(), object()])
+    monkeypatch.setattr(benchmark, "_load_queries", lambda args: [object(), object(), object()])
+    monkeypatch.setattr(benchmark, "benchmark_rdkit", lambda *args, **kwargs: next(rdkit_measurements))
+    monkeypatch.setattr(
+        benchmark,
+        "benchmark_nvmolkit",
+        lambda *args, **kwargs: benchmark.LifecycleMeasurement(1, 0, 2, 0, 3, 0, nvmolkit_results),
+    )
+    monkeypatch.setattr(benchmark, "print_csv_rows", lambda rows: None)
+    monkeypatch.setattr(benchmark, "write_csv_rows", lambda rows, output: None)
+
+    if mismatch is not None:
+        with pytest.raises(AssertionError, match=mismatch):
+            benchmark.main()
+        return
+    benchmark.main()
+    assert "compared 2/3 queries" in capsys.readouterr().out
 
 
 def test_main_runs_requested_cross_product_and_validates_each_gpu_result(monkeypatch):
