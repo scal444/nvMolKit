@@ -93,6 +93,9 @@ using PreparedBatchQueue = ThreadSafeQueue<std::unique_ptr<PreparedMiniBatch>>;
 struct ResidentSubstructSearchWorkspace {
   explicit ResidentSubstructSearchWorkspace(int gpuDeviceId) : deviceId(gpuDeviceId) {}
 
+  /// Pinned query atom counts lent to each search, avoiding a pinned allocation per call.
+  PinnedHostVector<int> queryAtomCounts;
+
   void ensureExecutors(int count) {
     while (static_cast<int>(executors.size()) < count) {
       auto executor = std::make_unique<GpuExecutor>(static_cast<int>(executors.size()), deviceId);
@@ -1247,6 +1250,19 @@ bool getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
 
   const LeafSubpatterns& leafSubpatterns = recursivePreprocessor.leafSubpatterns();
   QueryPreprocessContext queryContext;
+  // Borrow the workspace's pinned buffer for the duration of this search.
+  struct LentQueryAtomCounts {
+    ResidentSubstructSearchWorkspace* workspace;
+    PinnedHostVector<int>&            counts;
+    ~LentQueryAtomCounts() {
+      if (workspace != nullptr) {
+        workspace->queryAtomCounts = std::move(counts);
+      }
+    }
+  } lentQueryAtomCounts{workspace, queryContext.queryAtomCounts};
+  if (workspace != nullptr) {
+    queryContext.queryAtomCounts = std::move(workspace->queryAtomCounts);
+  }
   queryContext.numQueries = numQueries;
   queryContext.queryAtomCounts.resize(numQueries);
   queryContext.queryPipelineDepths.resize(numQueries);
