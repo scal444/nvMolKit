@@ -23,16 +23,29 @@ constexpr int kPatternFingerprintWords = kPatternFingerprintBits / 64;
 
 /**
  * Pack pattern fingerprints word-major: word w of fingerprint i is stored at
- * [w * fingerprints.size() + i], so a thread per target reads coalesced words.
+ * [w * fingerprints.size() + i].
  */
 std::vector<std::uint64_t> packPatternFingerprintsWordMajor(const std::vector<const ExplicitBitVect*>& fingerprints);
 
-//! Query-side screen parameters. Only nonzero query words are tested.
+//! Number of 32-target words in each bit slice of a set of count targets.
+inline std::size_t patternSliceWords(std::size_t count) {
+  return (count + 31) / 32;
+}
+
+/**
+ * Transpose word-major fingerprints of count targets into bit slices: slice b
+ * is a bitmap over targets, stored at [b * patternSliceWords(count)], with
+ * target t at bit t % 32 of word t / 32.
+ */
+std::vector<std::uint32_t> buildPatternBitSlices(const std::vector<std::uint64_t>& wordMajor, std::size_t count);
+
+//! Number of targets carrying each fingerprint bit.
+std::vector<std::uint32_t> patternBitFrequencies(const std::vector<std::uint32_t>& slices, std::size_t count);
+
+//! Query-side screen parameters.
 struct PatternScreenQuery {
-  std::uint64_t words[kPatternFingerprintWords];
-  std::uint8_t  wordIndices[kPatternFingerprintWords];
-  int           numWords = 0;
-  int           numAtoms = 0;
+  std::vector<std::uint16_t> bits;  //!< Query fingerprint bits, tested in this order.
+  int                        numAtoms = 0;
 };
 
 /**
@@ -40,10 +53,13 @@ struct PatternScreenQuery {
  */
 PatternScreenQuery makePatternScreenQuery(const ExplicitBitVect* fingerprint, int numQueryAtoms);
 
+/** Order query bits rarest first so most targets are rejected after a few slices. */
+void orderPatternScreenBits(PatternScreenQuery& query, const std::vector<std::uint32_t>& bitFrequencies);
+
 /**
- * Per-query device and pinned host storage for screening every resident chunk
- * on one GPU. Screening is substructure-safe: a target is rejected only when
- * it has fewer atoms than the query or lacks a query pattern-fingerprint bit.
+ * Per-query device and pinned host storage for screening a resident target
+ * set on one GPU. Screening is substructure-safe: a target is rejected only
+ * when it has fewer atoms than the query or lacks a query pattern-fingerprint bit.
  */
 class PatternScreenWorkspace {
  public:
@@ -54,40 +70,35 @@ class PatternScreenWorkspace {
   PatternScreenWorkspace& operator=(const PatternScreenWorkspace&) = delete;
 
   /**
-   * Start a query over numChunks chunks holding totalTargets targets, at most
-   * maxChunkTargets per chunk: grow buffers as needed and clear chunk counts.
+   * Screen numTargets targets and wait for the result. bitSlices may be null
+   * to screen by atom count only. Afterwards count() and indices() hold the
+   * selected target indices in ascending order.
    */
-  void prepare(std::size_t numChunks, std::size_t totalTargets, std::size_t maxChunkTargets);
+  void screen(const std::uint32_t*      bitSlices,
+              const int*                batchAtomStarts,
+              int                       numTargets,
+              const PatternScreenQuery& query);
 
-  /**
-   * Enqueue the screen of one chunk. Selected packed-target indices, in
-   * ascending order, are written at targetOffset; chunkIndex receives the count.
-   * targetWords may be null to screen by atom count only.
-   */
-  void enqueueChunk(std::size_t               chunkIndex,
-                    std::size_t               targetOffset,
-                    const std::uint64_t*      targetWords,
-                    const int*                batchAtomStarts,
-                    int                       numTargets,
-                    const PatternScreenQuery& query);
-
-  /** Copy results to the host and wait. After this, count() and indices() are valid. */
-  void collect(std::size_t numChunks, const std::vector<std::size_t>& targetOffsets);
-
-  [[nodiscard]] int        count(std::size_t chunkIndex) const { return hostCounts_[chunkIndex]; }
-  [[nodiscard]] const int* indices(std::size_t targetOffset) const { return hostIndices_ + targetOffset; }
+  [[nodiscard]] int        count() const { return *hostCount_; }
+  [[nodiscard]] const int* indices() const { return hostIndices_; }
   [[nodiscard]] int        deviceId() const noexcept { return deviceId_; }
 
  private:
-  int                             deviceId_;
-  ScopedStream                    stream_;
-  AsyncDeviceVector<int>          indices_;
-  AsyncDeviceVector<int>          counts_;
-  AsyncDeviceVector<std::uint8_t> tempStorage_;
-  int*                            hostCounts_      = nullptr;
-  int*                            hostIndices_     = nullptr;
-  std::size_t                     hostCountsSize_  = 0;
-  std::size_t                     hostIndicesSize_ = 0;
+  void reserve(std::size_t numTargets, std::size_t numQueryBits);
+
+  int                              deviceId_;
+  ScopedStream                     stream_;
+  AsyncDeviceVector<int>           indices_;
+  AsyncDeviceVector<int>           count_;
+  AsyncDeviceVector<std::uint32_t> survivors_;
+  AsyncDeviceVector<std::uint16_t> queryBits_;
+  AsyncDeviceVector<std::uint8_t>  tempStorage_;
+  std::size_t                      tempTargets_       = 0;
+  int*                             hostCount_         = nullptr;
+  int*                             hostIndices_       = nullptr;
+  std::uint16_t*                   hostQueryBits_     = nullptr;
+  std::size_t                      hostIndicesSize_   = 0;
+  std::size_t                      hostQueryBitsSize_ = 0;
 };
 
 }  // namespace nvMolKit

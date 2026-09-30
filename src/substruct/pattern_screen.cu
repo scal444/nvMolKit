@@ -13,27 +13,48 @@ namespace nvMolKit {
 
 namespace {
 
-struct PatternScreenPredicate {
-  const std::uint64_t* targetWords;
-  const int*           batchAtomStarts;
-  int                  numTargets;
-  PatternScreenQuery   query;
+constexpr int kScreenBlockSize = 256;
+constexpr int kSlicesPerStep   = 16;
 
-  __device__ __forceinline__ bool operator()(int target) const {
-    if (batchAtomStarts[target + 1] - batchAtomStarts[target] < query.numAtoms) {
-      return false;
-    }
-    if (targetWords == nullptr) {
-      return true;
-    }
-    for (int index = 0; index < query.numWords; ++index) {
-      const std::uint64_t queryWord  = query.words[index];
-      const std::size_t   wordOffset = static_cast<std::size_t>(query.wordIndices[index]) * numTargets;
-      if ((targetWords[wordOffset + target] & queryWord) != queryWord) {
-        return false;
+// One thread per 32-target word: AND the query's bit slices, rarest first,
+// stopping as soon as no target in the word survives.
+__global__ void intersectPatternSlicesKernel(const std::uint32_t* __restrict__ slices,
+                                             std::size_t sliceWords,
+                                             int         numTargets,
+                                             const std::uint16_t* __restrict__ queryBits,
+                                             int numQueryBits,
+                                             std::uint32_t* __restrict__ survivors) {
+  const std::size_t word = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (word >= sliceWords) {
+    return;
+  }
+  const int     remaining = numTargets - static_cast<int>(word * 32);
+  std::uint32_t alive     = remaining >= 32 ? ~std::uint32_t{0} : ((std::uint32_t{1} << remaining) - 1);
+  // Issue several independent slice loads per step: the loop is bound by load
+  // latency, not bandwidth, and the early exit only needs checking per step.
+  for (int index = 0; index < numQueryBits && alive != 0; index += kSlicesPerStep) {
+    std::uint32_t step = ~std::uint32_t{0};
+#pragma unroll
+    for (int offset = 0; offset < kSlicesPerStep; ++offset) {
+      if (index + offset < numQueryBits) {
+        step &= __ldg(&slices[static_cast<std::size_t>(queryBits[index + offset]) * sliceWords + word]);
       }
     }
-    return true;
+    alive &= step;
+  }
+  survivors[word] = alive;
+}
+
+struct SurvivorPredicate {
+  const std::uint32_t* survivors;
+  const int*           batchAtomStarts;
+  int                  numQueryAtoms;
+
+  __device__ __forceinline__ bool operator()(int target) const {
+    if (((survivors[target >> 5] >> (target & 31)) & 1U) == 0) {
+      return false;
+    }
+    return batchAtomStarts[target + 1] - batchAtomStarts[target] >= numQueryAtoms;
   }
 };
 
@@ -45,7 +66,7 @@ std::size_t selectTempBytes(int numTargets, cudaStream_t stream) {
                                        static_cast<int*>(nullptr),
                                        static_cast<int*>(nullptr),
                                        numTargets,
-                                       PatternScreenPredicate{},
+                                       SurvivorPredicate{},
                                        stream));
   return tempBytes;
 }
@@ -54,77 +75,95 @@ std::size_t selectTempBytes(int numTargets, cudaStream_t stream) {
 
 PatternScreenWorkspace::PatternScreenWorkspace(int deviceId) : deviceId_(deviceId), stream_("pattern screen") {
   indices_.setStream(stream_.stream());
-  counts_.setStream(stream_.stream());
+  count_.setStream(stream_.stream());
+  survivors_.setStream(stream_.stream());
+  queryBits_.setStream(stream_.stream());
   tempStorage_.setStream(stream_.stream());
+  count_.resize(1);
+  cudaCheckError(cudaMallocHost(&hostCount_, sizeof(int)));
 }
 
 PatternScreenWorkspace::~PatternScreenWorkspace() noexcept {
-  cudaFreeHost(hostCounts_);
+  cudaFreeHost(hostCount_);
   cudaFreeHost(hostIndices_);
+  cudaFreeHost(hostQueryBits_);
 }
 
-void PatternScreenWorkspace::prepare(std::size_t numChunks, std::size_t totalTargets, std::size_t maxChunkTargets) {
-  if (counts_.size() < numChunks) {
-    counts_.resize(numChunks);
+void PatternScreenWorkspace::reserve(std::size_t numTargets, std::size_t numQueryBits) {
+  if (indices_.size() < numTargets) {
+    indices_.resize(numTargets);
   }
-  if (indices_.size() < totalTargets) {
-    indices_.resize(totalTargets);
+  if (survivors_.size() < patternSliceWords(numTargets)) {
+    survivors_.resize(patternSliceWords(numTargets));
   }
-  const std::size_t tempBytes =
-    selectTempBytes(static_cast<int>(std::max<std::size_t>(1, maxChunkTargets)), stream_.stream());
-  if (tempStorage_.size() < tempBytes) {
-    tempStorage_.resize(tempBytes);
+  if (tempTargets_ < numTargets) {
+    const std::size_t tempBytes = selectTempBytes(static_cast<int>(numTargets), stream_.stream());
+    if (tempStorage_.size() < tempBytes) {
+      tempStorage_.resize(tempBytes);
+    }
+    tempTargets_ = numTargets;
   }
-  // Chunks without packed targets are never screened; they must read as empty.
-  cudaCheckError(cudaMemsetAsync(counts_.data(), 0, numChunks * sizeof(int), stream_.stream()));
-  if (hostCountsSize_ < numChunks) {
-    cudaCheckError(cudaFreeHost(hostCounts_));
-    hostCounts_ = nullptr;
-    cudaCheckError(cudaMallocHost(&hostCounts_, numChunks * sizeof(int)));
-    hostCountsSize_ = numChunks;
+  const std::size_t bitCapacity = std::max<std::size_t>(1, numQueryBits);
+  if (queryBits_.size() < bitCapacity) {
+    queryBits_.resize(kPatternFingerprintBits);
   }
-  if (hostIndicesSize_ < totalTargets) {
+  if (hostQueryBitsSize_ < bitCapacity) {
+    cudaCheckError(cudaFreeHost(hostQueryBits_));
+    hostQueryBits_ = nullptr;
+    cudaCheckError(cudaMallocHost(&hostQueryBits_, kPatternFingerprintBits * sizeof(std::uint16_t)));
+    hostQueryBitsSize_ = kPatternFingerprintBits;
+  }
+  if (hostIndicesSize_ < numTargets) {
     cudaCheckError(cudaFreeHost(hostIndices_));
     hostIndices_ = nullptr;
-    cudaCheckError(cudaMallocHost(&hostIndices_, totalTargets * sizeof(int)));
-    hostIndicesSize_ = totalTargets;
+    cudaCheckError(cudaMallocHost(&hostIndices_, numTargets * sizeof(int)));
+    hostIndicesSize_ = numTargets;
   }
 }
 
-void PatternScreenWorkspace::enqueueChunk(std::size_t               chunkIndex,
-                                          std::size_t               targetOffset,
-                                          const std::uint64_t*      targetWords,
-                                          const int*                batchAtomStarts,
-                                          int                       numTargets,
-                                          const PatternScreenQuery& query) {
+void PatternScreenWorkspace::screen(const std::uint32_t*      bitSlices,
+                                    const int*                batchAtomStarts,
+                                    int                       numTargets,
+                                    const PatternScreenQuery& query) {
+  cudaStream_t      stream       = stream_.stream();
+  const std::size_t numQueryBits = bitSlices == nullptr ? 0 : query.bits.size();
+  reserve(static_cast<std::size_t>(numTargets), numQueryBits);
+
+  if (numQueryBits != 0) {
+    std::copy(query.bits.begin(), query.bits.end(), hostQueryBits_);
+    cudaCheckError(cudaMemcpyAsync(queryBits_.data(),
+                                   hostQueryBits_,
+                                   numQueryBits * sizeof(std::uint16_t),
+                                   cudaMemcpyHostToDevice,
+                                   stream));
+  }
+  const std::size_t sliceWords = patternSliceWords(static_cast<std::size_t>(numTargets));
+  const auto        blocks     = static_cast<unsigned int>((sliceWords + kScreenBlockSize - 1) / kScreenBlockSize);
+  intersectPatternSlicesKernel<<<blocks, kScreenBlockSize, 0, stream>>>(bitSlices,
+                                                                        sliceWords,
+                                                                        numTargets,
+                                                                        queryBits_.data(),
+                                                                        static_cast<int>(numQueryBits),
+                                                                        survivors_.data());
+  cudaCheckError(cudaGetLastError());
+
   std::size_t tempBytes = tempStorage_.size();
   cudaCheckError(cub::DeviceSelect::If(tempStorage_.data(),
                                        tempBytes,
                                        thrust::counting_iterator<int>(0),
-                                       indices_.data() + targetOffset,
-                                       counts_.data() + chunkIndex,
+                                       indices_.data(),
+                                       count_.data(),
                                        numTargets,
-                                       PatternScreenPredicate{targetWords, batchAtomStarts, numTargets, query},
-                                       stream_.stream()));
-}
-
-void PatternScreenWorkspace::collect(std::size_t numChunks, const std::vector<std::size_t>& targetOffsets) {
-  cudaStream_t stream = stream_.stream();
-  cudaCheckError(cudaMemcpyAsync(hostCounts_, counts_.data(), numChunks * sizeof(int), cudaMemcpyDeviceToHost, stream));
+                                       SurvivorPredicate{survivors_.data(), batchAtomStarts, query.numAtoms},
+                                       stream));
+  cudaCheckError(cudaMemcpyAsync(hostCount_, count_.data(), sizeof(int), cudaMemcpyDeviceToHost, stream));
   cudaCheckError(cudaStreamSynchronize(stream));
-  bool anySelected = false;
-  for (std::size_t chunk = 0; chunk < numChunks; ++chunk) {
-    const int selected = hostCounts_[chunk];
-    if (selected > 0) {
-      anySelected = true;
-      cudaCheckError(cudaMemcpyAsync(hostIndices_ + targetOffsets[chunk],
-                                     indices_.data() + targetOffsets[chunk],
-                                     static_cast<std::size_t>(selected) * sizeof(int),
-                                     cudaMemcpyDeviceToHost,
-                                     stream));
-    }
-  }
-  if (anySelected) {
+  if (*hostCount_ > 0) {
+    cudaCheckError(cudaMemcpyAsync(hostIndices_,
+                                   indices_.data(),
+                                   static_cast<std::size_t>(*hostCount_) * sizeof(int),
+                                   cudaMemcpyDeviceToHost,
+                                   stream));
     cudaCheckError(cudaStreamSynchronize(stream));
   }
 }

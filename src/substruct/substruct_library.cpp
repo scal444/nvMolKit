@@ -25,6 +25,7 @@
 #include "src/substruct/substruct_search.h"
 #include "src/utils/cuda_error_check.h"
 #include "src/utils/device.h"
+#include "src/utils/nvtx.h"
 #include "src/utils/openmp_helpers.h"
 #include "src/utils/thread_safe_queue.h"
 
@@ -460,10 +461,12 @@ class SubstructLibrary::Impl {
     }
     std::unique_ptr<ExplicitBitVect>  queryFingerprint;
     std::optional<PatternScreenQuery> screenQuery;
+    ScopedNvtxRange                   fingerprintRange("SubstructLibrary query fingerprint");
     if (usePatternFingerprints_) {
       queryFingerprint.reset(RDKit::PatternFingerprintMol(query));
       screenQuery = makePatternScreenQuery(queryFingerprint.get(), static_cast<int>(query.getNumAtoms()));
     }
+    fingerprintRange.pop();
     std::vector<std::vector<unsigned int>> results(deviceIds_.size());
     detail::OpenMPExceptionRegistry        exceptionRegistry;
 
@@ -508,19 +511,16 @@ class SubstructLibrary::Impl {
       std::vector<int>        selected;
       const std::vector<int>* candidates = nullptr;
       if (screenQuery.has_value()) {
+        ScopedNvtxRange    screenRange("SubstructLibrary GPU screen");
+        PatternScreenQuery deviceQuery = *screenQuery;
+        orderPatternScreenBits(deviceQuery, targets->patternBitFrequencies());
         PatternScreenWorkspace& screen = *workspace.screen;
-        screen.prepare(1, targets->size(), targets->size());
-        screen.enqueueChunk(0,
-                            0,
-                            targets->devicePatternWords(),
-                            targets->deviceView().batchAtomStarts,
-                            numTargets,
-                            *screenQuery);
-        screen.collect(1, {0});
-        selected.assign(screen.indices(0), screen.indices(0) + screen.count(0));
+        screen.screen(targets->devicePatternSlices(), targets->deviceView().batchAtomStarts, numTargets, deviceQuery);
+        selected.assign(screen.indices(), screen.indices() + screen.count());
         candidates = &selected;
       }
       if (candidates == nullptr || !candidates->empty()) {
+        ScopedNvtxRange            matchRange("SubstructLibrary match candidates");
         std::vector<std::uint8_t>& gpuMatches = workspace.gpuMatches;
         hasSubstructMatchResident(targets->targets(),
                                   targets->host(),
@@ -562,6 +562,7 @@ class SubstructLibrary::Impl {
                                         static_cast<MoleculeId>(matches[static_cast<std::size_t>(maxResults) - 1]) :
                                         std::numeric_limits<MoleculeId>::max();
     const std::size_t gpuMatchCount = matches.size();
+    ScopedNvtxRange   fallbackRange("SubstructLibrary RDKit fallback targets");
     for (const auto& record : chunks_) {
       if (record.deviceIndex != deviceIndex) {
         continue;

@@ -200,6 +200,10 @@ DeviceTargetSet::DeviceTargetSet(const DeviceTargetSet*                         
     }
     offset += chunk->gpuTargetCount();
   }
+  if (usePatternFingerprints) {
+    patternSlices_  = buildPatternBitSlices(patternWords_, total);
+    bitFrequencies_ = nvMolKit::patternBitFrequencies(patternSlices_, total);
+  }
 }
 
 DeviceTargetSet::~DeviceTargetSet() = default;
@@ -210,15 +214,17 @@ void DeviceTargetSet::upload(cudaStream_t stream) {
   }
   device_ = std::make_unique<MoleculesDevice>(stream);
   device_->copyFromHost(host_, stream);
-  if (!patternWords_.empty()) {
-    patternWordsDevice_ = AsyncDeviceVector<std::uint64_t>(patternWords_.size(), stream);
-    patternWordsDevice_.copyFromHost(patternWords_);
+  if (!patternSlices_.empty()) {
+    patternSlicesDevice_ = AsyncDeviceVector<std::uint32_t>(patternSlices_.size(), stream);
+    patternSlicesDevice_.copyFromHost(patternSlices_);
   }
   cudaCheckError(cudaStreamSynchronize(stream));
+  // The host slices are rebuilt from patternWords_ when the set is extended.
+  patternSlices_ = std::vector<std::uint32_t>();
   // Device allocations outlive the caller-provided upload stream. Release
   // them on the default stream so their lifetime is not tied to that stream.
   device_->setStream(nullptr);
-  patternWordsDevice_.setStream(nullptr);
+  patternSlicesDevice_.setStream(nullptr);
 }
 
 const MoleculesDevice& DeviceTargetSet::device() const {

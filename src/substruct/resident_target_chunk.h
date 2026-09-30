@@ -116,16 +116,20 @@ class DeviceTargetSet {
   [[nodiscard]] const MoleculesHost&                    host() const noexcept { return host_; }
   [[nodiscard]] const MoleculesDevice&                  device() const;
   [[nodiscard]] TargetMoleculesDeviceView deviceView() const { return device().view<MoleculeType::Target>(); }
-  /** Word-major device fingerprints, or null when fingerprints are disabled. */
-  [[nodiscard]] const std::uint64_t*      devicePatternWords() const noexcept { return patternWordsDevice_.data(); }
+  /** Device pattern-fingerprint bit slices (see buildPatternBitSlices), or null when disabled. */
+  [[nodiscard]] const std::uint32_t*      devicePatternSlices() const noexcept { return patternSlicesDevice_.data(); }
+  /** Number of targets carrying each pattern-fingerprint bit; empty when disabled. */
+  [[nodiscard]] const std::vector<std::uint32_t>& patternBitFrequencies() const noexcept { return bitFrequencies_; }
 
  private:
   MoleculesHost                    host_;
   std::vector<const RDKit::ROMol*> targets_;
   std::vector<MoleculeId>          ids_;
   std::vector<std::uint64_t>       patternWords_;
+  std::vector<std::uint32_t>       patternSlices_;
+  std::vector<std::uint32_t>       bitFrequencies_;
   std::unique_ptr<MoleculesDevice> device_;
-  AsyncDeviceVector<std::uint64_t> patternWordsDevice_;
+  AsyncDeviceVector<std::uint32_t> patternSlicesDevice_;
 };
 
 /**
