@@ -11,6 +11,7 @@
 #include <omp.h>
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstdint>
 #include <limits>
 #include <mutex>
@@ -27,7 +28,6 @@
 #include "src/utils/device.h"
 #include "src/utils/nvtx.h"
 #include "src/utils/openmp_helpers.h"
-#include "src/utils/thread_safe_queue.h"
 
 namespace nvMolKit {
 
@@ -301,25 +301,40 @@ class SubstructLibrary::Impl {
     std::vector<std::uint8_t>                         gpuMatches;
   };
 
+  // Idle workspaces are handed out most recently released first, so a caller
+  // issuing queries one at a time keeps reusing the same warm buffers.
+  class IdleWorkspaces {
+   public:
+    void push(QueryWorkspace* workspace) {
+      {
+        std::lock_guard lock(mutex_);
+        idle_.push_back(workspace);
+      }
+      available_.notify_one();
+    }
+    [[nodiscard]] QueryWorkspace* pop() {
+      std::unique_lock lock(mutex_);
+      available_.wait(lock, [this] { return !idle_.empty(); });
+      QueryWorkspace* workspace = idle_.back();
+      idle_.pop_back();
+      return workspace;
+    }
+
+   private:
+    std::mutex                   mutex_;
+    std::condition_variable      available_;
+    std::vector<QueryWorkspace*> idle_;
+  };
+
   struct DeviceWorkspaces {
-    std::vector<std::unique_ptr<QueryWorkspace>>      owned;
-    std::unique_ptr<ThreadSafeQueue<QueryWorkspace*>> available;
+    std::vector<std::unique_ptr<QueryWorkspace>> owned;
+    std::unique_ptr<IdleWorkspaces>              available;
   };
 
   class WorkspaceLease {
    public:
-    explicit WorkspaceLease(DeviceWorkspaces& pool) : pool_(&pool) {
-      const auto workspace = pool.available->pop();
-      if (!workspace.has_value()) {
-        throw std::runtime_error("Substructure library workspace queue is closed");
-      }
-      workspace_ = *workspace;
-    }
-    ~WorkspaceLease() {
-      if (workspace_ != nullptr) {
-        pool_->available->push(workspace_);
-      }
-    }
+    explicit WorkspaceLease(DeviceWorkspaces& pool) : pool_(&pool), workspace_(pool.available->pop()) {}
+    ~WorkspaceLease() { pool_->available->push(workspace_); }
     WorkspaceLease(const WorkspaceLease&)                          = delete;
     WorkspaceLease&               operator=(const WorkspaceLease&) = delete;
     [[nodiscard]] QueryWorkspace* get() const { return workspace_; }
@@ -422,9 +437,11 @@ class SubstructLibrary::Impl {
       config.executorsPerRunner == -1 ? (config.workerThreads == 1 ? 3 : 2) : config.executorsPerRunner;
     const std::size_t executorsPerQuery =
       static_cast<std::size_t>(config.workerThreads) * static_cast<std::size_t>(executorsPerRunner);
-    const std::size_t threadsPerQuery =
-      deviceIds_.size() * static_cast<std::size_t>(config.preprocessingThreads + config.workerThreads + 2);
-    const std::size_t hostCapacity = std::max<std::size_t>(
+    // Resident searches whose candidates fit the executor ring run entirely on
+    // the calling thread (one per device); only rare, very unselective queries
+    // start the pipeline's preprocessing and coordinator threads.
+    const std::size_t threadsPerQuery = deviceIds_.size();
+    const std::size_t hostCapacity    = std::max<std::size_t>(
       1,
       static_cast<std::size_t>(omp_get_max_threads()) / std::max<std::size_t>(1, threadsPerQuery));
     const std::size_t             concurrency = std::max<std::size_t>(1, std::min(capacity, hostCapacity));
@@ -433,7 +450,7 @@ class SubstructLibrary::Impl {
       for (std::size_t index = 0; index < deviceIds_.size(); ++index) {
         const WithDevice device(deviceIds_[index]);
         auto&            pool = pools[index];
-        pool.available        = std::make_unique<ThreadSafeQueue<QueryWorkspace*>>();
+        pool.available        = std::make_unique<IdleWorkspaces>();
         pool.owned.reserve(concurrency);
         for (std::size_t slot = 0; slot < concurrency; ++slot) {
           auto workspace    = std::make_unique<QueryWorkspace>();
