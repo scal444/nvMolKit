@@ -141,6 +141,45 @@ TEST(SubstructLibraryState, PublishesPendingMoleculesAtomicallyAcrossGenerations
   EXPECT_EQ(library.getMatches(*aromaticCarbon), std::vector<MoleculeId>({1U, 2U}));
 }
 
+TEST(SubstructLibraryState, FailedWorkspaceAdmissionLeavesFinalizeRetryable) {
+  nvMolKit::SubstructLibrary library(2);
+  auto                       benzene        = molFromSmiles("c1ccccc1");
+  auto                       phenol         = molFromSmiles("Oc1ccccc1");
+  auto                       aromaticCarbon = queryFromSmarts("c");
+  ASSERT_NE(benzene, nullptr);
+  ASSERT_NE(phenol, nullptr);
+  ASSERT_NE(aromaticCarbon, nullptr);
+
+  library.addMol(*benzene);
+  library.finalize();
+  library.addMol(*phenol);
+
+  // Occupy device memory past the 85% admission budget so the upload succeeds
+  // but no query workspace can be admitted.
+  std::size_t freeBytes  = 0;
+  std::size_t totalBytes = 0;
+  ASSERT_EQ(cudaMemGetInfo(&freeBytes, &totalBytes), cudaSuccess);
+  if (freeBytes <= totalBytes / 10) {
+    GTEST_SKIP() << "Device already has less than 10% free memory";
+  }
+  void* reserved = nullptr;
+  if (cudaMalloc(&reserved, freeBytes - totalBytes / 10) != cudaSuccess) {
+    GTEST_SKIP() << "Could not reserve device memory to force an admission failure";
+  }
+  EXPECT_THROW(library.finalize(), std::runtime_error);
+  EXPECT_EQ(library.size(), 1U);
+  EXPECT_EQ(library.pendingSize(), 1U);
+  EXPECT_EQ(library.queryConcurrency(), 0U);
+  EXPECT_THROW(static_cast<void>(library.getMatches(*aromaticCarbon)), std::runtime_error);
+  ASSERT_EQ(cudaFree(reserved), cudaSuccess);
+
+  library.finalize();
+  EXPECT_EQ(library.size(), 2U);
+  EXPECT_EQ(library.pendingSize(), 0U);
+  EXPECT_GT(library.queryConcurrency(), 0U);
+  EXPECT_EQ(library.getMatches(*aromaticCarbon), std::vector<MoleculeId>({0U, 1U}));
+}
+
 TEST(SubstructLibraryState, BulkAddPreservesStableIdsAcrossGenerations) {
   nvMolKit::SubstructSearchConfig config;
   config.preprocessingThreads = 4;

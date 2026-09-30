@@ -152,27 +152,11 @@ class SubstructLibrary::Impl {
       builder_ = std::move(nextBuilder);
     }
 
-    // Upload disposable copies so a failed CUDA operation leaves the sealed
-    // CPU generation intact and retryable.
-    std::vector<std::unique_ptr<ResidentTargetChunk>> candidates;
-    std::vector<std::size_t>                          candidateDevices;
-    candidates.reserve(pendingChunks_.size());
-    candidateDevices.resize(pendingChunks_.size());
-    candidates.resize(pendingChunks_.size());
-    const int numThreads = constructionThreads();
+    // Upload the pending chunks in place. Uploads never modify host data, so a
+    // failure resets them to the sealed state and the generation stays retryable.
+    std::vector<std::size_t> pendingDevices(pendingChunks_.size());
     for (std::size_t index = 0; index < pendingChunks_.size(); ++index) {
-      const auto&                      pending = pendingChunks_[index];
-      std::vector<const RDKit::ROMol*> chunkMolecules;
-      chunkMolecules.reserve(pending->size());
-      for (MoleculeId id = pending->firstId(); id < pending->endId(); ++id) {
-        chunkMolecules.push_back(&pending->sourceMol(id));
-      }
-      TargetChunkBuilder candidateBuilder(pending->firstId(), pending->size(), usePatternFingerprints_);
-      candidateBuilder.addMols(chunkMolecules, numThreads);
-      candidates[index] = candidateBuilder.seal();
-    }
-    for (std::size_t index = 0; index < candidates.size(); ++index) {
-      candidateDevices[index] = (nextDeviceAssignment_ + index) % deviceIds_.size();
+      pendingDevices[index] = (nextDeviceAssignment_ + index) % deviceIds_.size();
     }
 
     detail::OpenMPExceptionRegistry uploadExceptions;
@@ -181,9 +165,9 @@ class SubstructLibrary::Impl {
       try {
         const WithDevice device(deviceIds_[static_cast<std::size_t>(deviceIndex)]);
         cudaStream_t     deviceStream = validateStream(stream);
-        for (std::size_t index = 0; index < candidates.size(); ++index) {
-          if (candidateDevices[index] == static_cast<std::size_t>(deviceIndex)) {
-            candidates[index]->beginUpload(deviceStream);
+        for (std::size_t index = 0; index < pendingChunks_.size(); ++index) {
+          if (pendingDevices[index] == static_cast<std::size_t>(deviceIndex)) {
+            pendingChunks_[index]->beginUpload(deviceStream);
           }
         }
       } catch (...) {
@@ -193,7 +177,7 @@ class SubstructLibrary::Impl {
     try {
       uploadExceptions.rethrow();
     } catch (...) {
-      destroyCandidates(candidates, candidateDevices);
+      resetUploads(pendingChunks_, pendingDevices);
       throw;
     }
 
@@ -202,9 +186,9 @@ class SubstructLibrary::Impl {
     for (std::int64_t deviceIndex = 0; deviceIndex < static_cast<std::int64_t>(deviceIds_.size()); ++deviceIndex) {
       try {
         const WithDevice device(deviceIds_[static_cast<std::size_t>(deviceIndex)]);
-        for (std::size_t index = 0; index < candidates.size(); ++index) {
-          if (candidateDevices[index] == static_cast<std::size_t>(deviceIndex)) {
-            candidates[index]->commit();
+        for (std::size_t index = 0; index < pendingChunks_.size(); ++index) {
+          if (pendingDevices[index] == static_cast<std::size_t>(deviceIndex)) {
+            pendingChunks_[index]->commit();
           }
         }
       } catch (...) {
@@ -213,19 +197,23 @@ class SubstructLibrary::Impl {
     }
     try {
       commitExceptions.rethrow();
+      chunks_.reserve(chunks_.size() + pendingChunks_.size());
+      // Workspaces are sized against memory that already holds the new chunks,
+      // so configure them before publishing anything.
+      configureWorkspaces();
     } catch (...) {
-      destroyCandidates(candidates, candidateDevices);
+      resetUploads(pendingChunks_, pendingDevices);
+      restoreWorkspaces();
       throw;
     }
 
-    for (std::size_t index = 0; index < candidates.size(); ++index) {
-      committedSize_ += candidates[index]->size();
-      chunks_.push_back(DeviceChunk{candidateDevices[index], std::move(candidates[index])});
+    for (std::size_t index = 0; index < pendingChunks_.size(); ++index) {
+      committedSize_ += pendingChunks_[index]->size();
+      chunks_.push_back(DeviceChunk{pendingDevices[index], std::move(pendingChunks_[index])});
     }
-    nextDeviceAssignment_ = (nextDeviceAssignment_ + candidates.size()) % deviceIds_.size();
+    nextDeviceAssignment_ = (nextDeviceAssignment_ + pendingChunks_.size()) % deviceIds_.size();
     pendingChunks_.clear();
     published_ = true;
-    configureWorkspaces();
   }
 
   [[nodiscard]] std::size_t size() const {
@@ -356,6 +344,23 @@ class SubstructLibrary::Impl {
     if (!published_) {
       throw std::logic_error("Substructure library must be finalized before querying");
     }
+    if (workspacePools_.empty()) {
+      throw std::runtime_error(
+        "Substructure library has no query workspaces after a failed finalize(); retry finalize()");
+    }
+  }
+
+  // After a failed finalize(), give the previously published generation its
+  // workspaces back. Failure here leaves queries rejected by requirePublished().
+  void restoreWorkspaces() noexcept {
+    if (!published_) {
+      return;
+    }
+    try {
+      configureWorkspaces();
+    } catch (...) {
+      destroyWorkspaces();
+    }
   }
 
   [[nodiscard]] SubstructSearchConfig deviceConfig(std::size_t deviceIndex) const {
@@ -381,26 +386,25 @@ class SubstructLibrary::Impl {
       return;
     }
 
-    constexpr std::size_t    memoryNumerator   = 85;
-    constexpr std::size_t    memoryDenominator = 100;
-    std::size_t              capacity          = std::numeric_limits<std::size_t>::max();
-    std::vector<std::size_t> deviceCapacities(deviceIds_.size());
+    constexpr std::size_t memoryNumerator   = 85;
+    constexpr std::size_t memoryDenominator = 100;
+    std::size_t           capacity          = std::numeric_limits<std::size_t>::max();
+    std::size_t           workspaceBytes    = 0;
     for (std::size_t index = 0; index < deviceIds_.size(); ++index) {
       const WithDevice device(deviceIds_[index]);
       std::size_t      freeBytes  = 0;
       std::size_t      totalBytes = 0;
       cudaCheckError(cudaMemGetInfo(&freeBytes, &totalBytes));
-      const std::size_t usedBytes      = totalBytes - freeBytes;
-      const std::size_t budgetBytes    = totalBytes * memoryNumerator / memoryDenominator;
-      const std::size_t availableBytes = budgetBytes > usedBytes ? budgetBytes - usedBytes : 0;
-      const std::size_t workspaceBytes = estimateResidentSubstructSearchWorkspaceBytes(deviceConfig(index));
-      if (workspaceBytes == 0 || availableBytes < workspaceBytes) {
+      const std::size_t usedBytes            = totalBytes - freeBytes;
+      const std::size_t budgetBytes          = totalBytes * memoryNumerator / memoryDenominator;
+      const std::size_t availableBytes       = budgetBytes > usedBytes ? budgetBytes - usedBytes : 0;
+      const std::size_t deviceWorkspaceBytes = estimateResidentSubstructSearchWorkspaceBytes(deviceConfig(index));
+      if (deviceWorkspaceBytes == 0 || availableBytes < deviceWorkspaceBytes) {
         throw std::runtime_error(
           "Substructure library cannot admit one query workspace below the 85% GPU-memory cutoff");
       }
-      deviceCapacities[index]       = availableBytes / workspaceBytes;
-      capacity                      = std::min(capacity, deviceCapacities[index]);
-      workspaceBytesPerQueryPerGpu_ = std::max(workspaceBytesPerQueryPerGpu_, workspaceBytes);
+      capacity       = std::min(capacity, availableBytes / deviceWorkspaceBytes);
+      workspaceBytes = std::max(workspaceBytes, deviceWorkspaceBytes);
     }
 
     const auto config = deviceConfig(0);
@@ -413,20 +417,28 @@ class SubstructLibrary::Impl {
     const std::size_t hostCapacity = std::max<std::size_t>(
       1,
       static_cast<std::size_t>(omp_get_max_threads()) / std::max<std::size_t>(1, threadsPerQuery));
-    queryConcurrency_      = std::max<std::size_t>(1, std::min(capacity, hostCapacity));
-    batchesInFlightPerGpu_ = queryConcurrency_ * executorsPerQuery;
-    workspacePools_.resize(deviceIds_.size());
-    for (std::size_t index = 0; index < deviceIds_.size(); ++index) {
-      const WithDevice device(deviceIds_[index]);
-      auto&            pool = workspacePools_[index];
-      pool.available        = std::make_unique<ThreadSafeQueue<ResidentSubstructSearchWorkspace*>>();
-      pool.owned.reserve(queryConcurrency_);
-      for (std::size_t slot = 0; slot < queryConcurrency_; ++slot) {
-        auto workspace = makeResidentSubstructSearchWorkspace(deviceIds_[index]);
-        pool.available->push(workspace.get());
-        pool.owned.push_back(std::move(workspace));
+    const std::size_t             concurrency = std::max<std::size_t>(1, std::min(capacity, hostCapacity));
+    std::vector<DeviceWorkspaces> pools(deviceIds_.size());
+    try {
+      for (std::size_t index = 0; index < deviceIds_.size(); ++index) {
+        const WithDevice device(deviceIds_[index]);
+        auto&            pool = pools[index];
+        pool.available        = std::make_unique<ThreadSafeQueue<ResidentSubstructSearchWorkspace*>>();
+        pool.owned.reserve(concurrency);
+        for (std::size_t slot = 0; slot < concurrency; ++slot) {
+          auto workspace = makeResidentSubstructSearchWorkspace(deviceIds_[index]);
+          pool.available->push(workspace.get());
+          pool.owned.push_back(std::move(workspace));
+        }
       }
+    } catch (...) {
+      destroyWorkspacePools(pools);
+      throw;
     }
+    workspacePools_               = std::move(pools);
+    queryConcurrency_             = concurrency;
+    batchesInFlightPerGpu_        = concurrency * executorsPerQuery;
+    workspaceBytesPerQueryPerGpu_ = workspaceBytes;
   }
 
   [[nodiscard]] std::vector<std::vector<unsigned int>> matchingIdsByDevice(const RDKit::ROMol& query,
@@ -528,13 +540,13 @@ class SubstructLibrary::Impl {
     return matches;
   }
 
-  void destroyCandidates(std::vector<std::unique_ptr<ResidentTargetChunk>>& candidates,
-                         const std::vector<std::size_t>&                    candidateDevices) noexcept {
+  void resetUploads(std::vector<std::unique_ptr<ResidentTargetChunk>>& chunks,
+                    const std::vector<std::size_t>&                    chunkDevices) noexcept {
     int originalDevice = -1;
     cudaGetDevice(&originalDevice);
-    for (std::size_t index = 0; index < candidates.size(); ++index) {
-      if (candidates[index] && cudaSetDevice(deviceIds_[candidateDevices[index]]) == cudaSuccess) {
-        candidates[index].reset();
+    for (std::size_t index = 0; index < chunks.size(); ++index) {
+      if (chunks[index] && cudaSetDevice(deviceIds_[chunkDevices[index]]) == cudaSuccess) {
+        chunks[index]->resetUpload();
       }
     }
     if (originalDevice >= 0) {
@@ -557,22 +569,26 @@ class SubstructLibrary::Impl {
     chunks.clear();
   }
 
-  void destroyWorkspaces() noexcept {
+  void destroyWorkspacePools(std::vector<DeviceWorkspaces>& pools) noexcept {
     int originalDevice = -1;
     cudaGetDevice(&originalDevice);
-    for (std::size_t index = 0; index < workspacePools_.size(); ++index) {
+    for (std::size_t index = 0; index < pools.size(); ++index) {
       if (index < deviceIds_.size() && cudaSetDevice(deviceIds_[index]) == cudaSuccess) {
-        workspacePools_[index].available.reset();
-        workspacePools_[index].owned.clear();
+        pools[index].available.reset();
+        pools[index].owned.clear();
       }
     }
-    workspacePools_.clear();
-    queryConcurrency_             = 0;
-    batchesInFlightPerGpu_        = 0;
-    workspaceBytesPerQueryPerGpu_ = 0;
+    pools.clear();
     if (originalDevice >= 0) {
       cudaSetDevice(originalDevice);
     }
+  }
+
+  void destroyWorkspaces() noexcept {
+    destroyWorkspacePools(workspacePools_);
+    queryConcurrency_             = 0;
+    batchesInFlightPerGpu_        = 0;
+    workspaceBytesPerQueryPerGpu_ = 0;
   }
 
   const std::size_t                                 chunkSize_;

@@ -124,6 +124,16 @@ void ResidentTargetChunk::finalize(cudaStream_t stream) {
   commit();
 }
 
+void ResidentTargetChunk::resetUpload() noexcept {
+  if (uploadComplete_ != nullptr) {
+    // Device buffers must not be released while the upload may still read or write them.
+    cudaEventSynchronize(uploadComplete_->event());
+  }
+  packedDevice_.reset();
+  uploadComplete_.reset();
+  state_ = State::Sealed;
+}
+
 const RDKit::ROMol& ResidentTargetChunk::sourceMol(MoleculeId id) const {
   if (id < firstId_ || id >= endId()) {
     throw std::out_of_range("Molecule ID is outside this resident target chunk");

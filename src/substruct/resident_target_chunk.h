@@ -69,6 +69,13 @@ class ResidentTargetChunk {
   /** Convenience barrier equivalent to beginUpload(stream) followed by commit(). */
   void finalize(cudaStream_t stream);
 
+  /**
+   * Wait for any in-flight upload, release device storage, and return to the
+   * sealed state so the upload can be retried. Host data is unaffected. Must
+   * be called with the chunk's upload device current.
+   */
+  void resetUpload() noexcept;
+
   [[nodiscard]] State       state() const noexcept { return state_; }
   [[nodiscard]] MoleculeId  firstId() const noexcept { return firstId_; }
   [[nodiscard]] MoleculeId  endId() const noexcept { return firstId_ + sourceMolecules_.size(); }
