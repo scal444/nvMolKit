@@ -1162,7 +1162,8 @@ void computeEffectiveThreadCounts(const SubstructSearchConfig& config,
 
 namespace {
 
-void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
+// Returns false when residentTargetIndices was ignored and every target was searched.
+bool getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
                              const std::vector<const RDKit::ROMol*>& queries,
                              SubstructSearchResults&                 results,
                              SubstructAlgorithm                      algorithm,
@@ -1185,7 +1186,7 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
 
   if (numTargets == 0 || numQueries == 0) {
     results.resize(numTargets, numQueries);
-    return;
+    return true;
   }
 
   std::vector<int> gpuIds = config.gpuIds;
@@ -1211,8 +1212,14 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
 
   {
     ScopedNvtxRange setupRange("Prepare search context");
-    // Initialize results for all original targets
-    results.resize(numTargets, numQueries);
+    if (boolResults != nullptr || countResults != nullptr) {
+      // Only flags or counts are collected; skip reserving sparse match storage.
+      results.numTargets = numTargets;
+      results.numQueries = numQueries;
+      results.matches.clear();
+    } else {
+      results.resize(numTargets, numQueries);
+    }
   }
 
   ScopedNvtxRange  buildRange2("Build host query data structures");
@@ -1347,6 +1354,7 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
   if (!boolResults && config.uniquify) {
     uniquifyResults(results);
   }
+  return screenedTargetIndices == residentTargetIndices;
 }
 
 }  // anonymous namespace
@@ -1440,20 +1448,38 @@ void hasSubstructMatchResident(const std::vector<const RDKit::ROMol*>& targets,
   SubstructSearchResults           unusedResults;
   SubstructSearchConfig            hasMatchConfig = config;
   hasMatchConfig.maxMatches                       = 1;
-  residentResults.resize(static_cast<int>(targets.size()), 1);
+  if (results.size() == targets.size()) {
+    // Callers reusing an all-zero buffer avoid reallocating and clearing it.
+    residentResults.hasMatch   = std::move(results);
+    residentResults.numTargets = static_cast<int>(targets.size());
+    residentResults.numQueries = 1;
+  } else {
+    residentResults.resize(static_cast<int>(targets.size()), 1);
+  }
 
-  getSubstructMatchesImpl(targets,
-                          queries,
-                          unusedResults,
-                          algorithm,
-                          stream,
-                          hasMatchConfig,
-                          &residentResults,
-                          nullptr,
-                          &targetsHost,
-                          &targetsDevice,
-                          workspace,
-                          candidateTargetIndices);
+  const bool selectionHonored = getSubstructMatchesImpl(targets,
+                                                        queries,
+                                                        unusedResults,
+                                                        algorithm,
+                                                        stream,
+                                                        hasMatchConfig,
+                                                        &residentResults,
+                                                        nullptr,
+                                                        &targetsHost,
+                                                        &targetsDevice,
+                                                        workspace,
+                                                        candidateTargetIndices);
+  if (candidateTargetIndices != nullptr && !selectionHonored) {
+    // The search covered every target; report only the selected ones.
+    std::vector<uint8_t> selected(candidateTargetIndices->size());
+    for (std::size_t index = 0; index < selected.size(); ++index) {
+      selected[index] = residentResults.hasMatch[static_cast<std::size_t>((*candidateTargetIndices)[index])];
+    }
+    std::fill(residentResults.hasMatch.begin(), residentResults.hasMatch.end(), 0);
+    for (std::size_t index = 0; index < selected.size(); ++index) {
+      residentResults.hasMatch[static_cast<std::size_t>((*candidateTargetIndices)[index])] = selected[index];
+    }
+  }
   results = std::move(residentResults.hasMatch);
 }
 

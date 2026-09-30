@@ -257,6 +257,31 @@ TEST(SubstructLibraryResults, MatchesRDKitAcrossRepresentativeQuerySemantics) {
   }
 }
 
+TEST(SubstructLibraryResults, ReusedQueryWorkspacesDoNotCarryMatchesBetweenQueries) {
+  nvMolKit::SubstructLibrary                 library(4);
+  std::vector<std::unique_ptr<RDKit::ROMol>> targets;
+  for (const auto& smiles : {"CCO", "c1ccccc1", "[Na+].[Cl-]", "CCN", "ClCCl", "CC(=O)O"}) {
+    targets.push_back(molFromSmiles(smiles));
+    ASSERT_NE(targets.back(), nullptr);
+    library.addMol(*targets.back());
+  }
+  library.finalize();
+
+  // A recursive query searches every target, a plain one only screened
+  // candidates; alternate them until every query workspace has been reused.
+  auto broadRecursive = queryFromSmarts("[$([#6])]");
+  auto narrowPlain    = queryFromSmarts("[Cl-]");
+  ASSERT_NE(broadRecursive, nullptr);
+  ASSERT_NE(narrowPlain, nullptr);
+  const auto expectedBroad  = rdkitMatchingIds(targets, *broadRecursive);
+  const auto expectedNarrow = rdkitMatchingIds(targets, *narrowPlain);
+  ASSERT_EQ(expectedNarrow, std::vector<MoleculeId>({2U}));
+  for (std::size_t round = 0; round < 2 * library.queryConcurrency() + 1; ++round) {
+    EXPECT_EQ(library.getMatches(*broadRecursive), expectedBroad) << "round " << round;
+    EXPECT_EQ(library.getMatches(*narrowPlain), expectedNarrow) << "round " << round;
+  }
+}
+
 TEST(SubstructLibraryOwnership, DoesNotDependOnInputMoleculeLifetime) {
   nvMolKit::SubstructLibrary library(1);
   {

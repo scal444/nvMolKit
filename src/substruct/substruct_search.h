@@ -95,7 +95,8 @@ void hasSubstructMatch(const std::vector<const RDKit::ROMol*>& targets,
  * callers retain ownership of all three target representations for the duration
  * of the synchronous call. candidateTargetIndices may select an ordered subset
  * of resident targets for a one-query, non-recursive search; omitted targets
- * retain false results.
+ * retain false results. When results already holds targets.size() zeros it is
+ * reused without being cleared; otherwise it is reallocated.
  */
 void hasSubstructMatchResident(const std::vector<const RDKit::ROMol*>& targets,
                                const MoleculesHost&                    targetsHost,

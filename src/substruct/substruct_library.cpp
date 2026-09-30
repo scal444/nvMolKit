@@ -296,6 +296,8 @@ class SubstructLibrary::Impl {
   struct QueryWorkspace {
     std::shared_ptr<ResidentSubstructSearchWorkspace> search;
     std::unique_ptr<PatternScreenWorkspace>           screen;
+    // Per-target match flags, kept all-zero between queries.
+    std::vector<std::uint8_t>                         gpuMatches;
   };
 
   struct DeviceWorkspaces {
@@ -519,7 +521,7 @@ class SubstructLibrary::Impl {
         candidates = &selected;
       }
       if (candidates == nullptr || !candidates->empty()) {
-        std::vector<std::uint8_t> gpuMatches;
+        std::vector<std::uint8_t>& gpuMatches = workspace.gpuMatches;
         hasSubstructMatchResident(targets->targets(),
                                   targets->host(),
                                   targets->device(),
@@ -536,14 +538,17 @@ class SubstructLibrary::Impl {
         const auto& ids = targets->ids();
         if (candidates != nullptr) {
           for (const int target : *candidates) {
-            if (gpuMatches[static_cast<std::size_t>(target)] != 0) {
+            auto& flag = gpuMatches[static_cast<std::size_t>(target)];
+            if (flag != 0) {
               matches.push_back(static_cast<unsigned int>(ids[static_cast<std::size_t>(target)]));
+              flag = 0;
             }
           }
         } else {
           for (std::size_t target = 0; target < gpuMatches.size(); ++target) {
             if (gpuMatches[target] != 0) {
               matches.push_back(static_cast<unsigned int>(ids[target]));
+              gpuMatches[target] = 0;
             }
           }
         }
