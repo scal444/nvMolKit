@@ -9,6 +9,25 @@ from rdkit import Chem
 from nvmolkit.substruct_library import SubstructLibrary
 from nvmolkit.substructure import SubstructSearchConfig
 
+PLAIN_QUERY_TARGETS = [
+    "Cn1ccc2ccccc21",
+    "c1ccc2[nH]ccc2c1",
+    "CN(C)C",
+    "CNC",
+    "CC[O-]",
+    "CCO",
+    "[13CH3]O",
+    "CO",
+    "C[CH2]",
+    "CC",
+    "*C",
+    "[1*]C",
+    "[2*]C",
+]
+# Plain (SMILES) query atoms follow RDKit's Atom::Match: hydrogen counts are ignored, set charges, isotopes, and
+# radicals must match, and dummy isotopes only conflict when both atoms carry one.
+PLAIN_QUERIES = ["c1ccc2[nH]ccc2c1", "[NH2]C", "C[O-]", "[13CH3]O", "C[CH2]", "*C", "[1*]C", "[300CH4]"]
+
 
 def test_finalize_generation_and_result_operations():
     library = SubstructLibrary(chunkSize=2)
@@ -94,6 +113,31 @@ def test_plain_molecule_query_preserves_atom_constraints(algorithm):
     assert library.getMatches(query).result() == [0]
     assert library.countMatches(query).result() == 1
     assert library.hasMatch(query).result()
+
+
+@pytest.mark.parametrize("use_pattern_fingerprints", [False, True])
+@pytest.mark.parametrize("query_smiles", PLAIN_QUERIES)
+def test_plain_molecule_query_atoms_match_like_rdkit(query_smiles, use_pattern_fingerprints):
+    library = SubstructLibrary(chunkSize=4, usePatternFingerprints=use_pattern_fingerprints)
+    targets = [Chem.MolFromSmiles(smiles) for smiles in PLAIN_QUERY_TARGETS]
+    library.addMols(targets)
+    library.finalize()
+
+    query = Chem.MolFromSmiles(query_smiles)
+    expected = [index for index, target in enumerate(targets) if target.HasSubstructMatch(query)]
+    assert library.getMatches(query).result() == expected
+
+
+def test_finalize_routes_unpackable_targets_to_rdkit():
+    library = SubstructLibrary(chunkSize=2)
+    targets = [Chem.MolFromSmiles(smiles) for smiles in ["CCN", "[NH3]->[Cu]", "[300C]CN", "c1ccccc1N"]]
+    library.addMols(targets)
+    library.finalize()
+
+    for smarts in ["[#7]", "[Cu]", "[#6]-[#7]"]:
+        query = Chem.MolFromSmarts(smarts)
+        expected = [index for index, target in enumerate(targets) if target.HasSubstructMatch(query)]
+        assert library.getMatches(query).result() == expected
 
 
 @pytest.mark.parametrize("use_pattern_fingerprints", [False, True])

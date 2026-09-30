@@ -258,6 +258,36 @@ TEST(SubstructLibraryFallback, HandlesTargetsOutsideGpuPackingLimits) {
   EXPECT_EQ(library.getMatches(*ironQuery), std::vector<MoleculeId>({2U}));
 }
 
+TEST(SubstructLibraryFallback, RoutesUnpackableTargetsFromEitherAddPathToRDKit) {
+  std::vector<std::unique_ptr<RDKit::ROMol>> targets;
+  for (const char* smiles : {"CCN", "[NH3]->[Cu]", "[300C]CN", "c1ccccc1N"}) {
+    targets.push_back(molFromSmiles(smiles));
+    ASSERT_NE(targets.back(), nullptr);
+  }
+  std::vector<const RDKit::ROMol*> targetPtrs;
+  for (const auto& target : targets) {
+    targetPtrs.push_back(target.get());
+  }
+
+  nvMolKit::SubstructLibrary bulkLibrary(2);
+  EXPECT_EQ(bulkLibrary.addMols(targetPtrs), std::vector<MoleculeId>({0U, 1U, 2U, 3U}));
+  bulkLibrary.finalize();
+
+  nvMolKit::SubstructLibrary singleLibrary(2);
+  for (const auto* target : targetPtrs) {
+    singleLibrary.addMol(*target);
+  }
+  singleLibrary.finalize();
+
+  for (const char* smarts : {"[#7]", "[Cu]", "[#6]-[#7]", "c"}) {
+    auto query = queryFromSmarts(smarts);
+    ASSERT_NE(query, nullptr);
+    const auto expected = rdkitMatchingIds(targets, *query);
+    EXPECT_EQ(bulkLibrary.getMatches(*query), expected) << smarts;
+    EXPECT_EQ(singleLibrary.getMatches(*query), expected) << smarts;
+  }
+}
+
 TEST(SubstructLibraryConfiguration, SupportsProductionBackendsAndRejectsInvalidConstruction) {
   EXPECT_THROW(nvMolKit::SubstructLibrary(0), std::invalid_argument);
 
