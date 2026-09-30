@@ -96,34 +96,36 @@ def test_rdkit_operations_stop_between_queries_when_deadline_expires():
     assert len(library.calls) == 1
 
 
-def test_lifecycle_separates_staging_finalize_and_repeated_search(monkeypatch):
+def test_library_is_built_once_and_reused_by_each_measured_search(monkeypatch):
     events = []
-    timing_values = iter([[10.0, 14.0], [20.0, 24.0], [30.0, 34.0]])
+    timing_values = iter([[12.0], [22.0], [30.0, 34.0]])
 
-    def fake_time_it(function, *, runs, warmups, gpu_sync=False, setup=None):
+    def fake_time_it(function, *, runs, warmups, gpu_sync=False):
         events.append((runs, warmups, gpu_sync))
-        if setup is not None:
-            setup()
         function()
         return TimingResult(times_ms=next(timing_values))
 
     monkeypatch.setattr(benchmark, "time_it", fake_time_it)
-    serial = iter(range(10))
+    made = []
 
     def make_library():
-        value = {"id": next(serial), "staged": False, "finalized": False}
-        events.append(("make", value["id"]))
-        return value
+        library = {"id": len(made), "staged": False, "finalized": False}
+        made.append(library)
+        return library
 
     def stage_library(library):
         library["staged"] = True
-        events.append(("stage", library["id"]))
 
     def finalize_library(library):
         assert library["staged"]
         library["finalized"] = True
-        events.append(("finalize", library["id"]))
 
+    built = benchmark._build_library(
+        make_library=make_library,
+        stage_library=stage_library,
+        finalize_library=finalize_library,
+        gpu_finalize=True,
+    )
     search_calls = []
 
     def search_library(library):
@@ -131,27 +133,16 @@ def test_lifecycle_separates_staging_finalize_and_repeated_search(monkeypatch):
         search_calls.append(library["id"])
         return [library["id"]]
 
-    result = benchmark._benchmark_lifecycle(
-        make_library=make_library,
-        stage_library=stage_library,
-        finalize_library=finalize_library,
-        search_library=search_library,
-        runs=2,
-        warmups=3,
-        repetitions=4,
-        gpu_finalize=True,
-        gpu_search=True,
-    )
+    result = benchmark._measure_search(built, search_library, runs=2, warmups=3, repetitions=4, gpu_search=True)
 
+    assert len(made) == 1
     assert result.staging_ms == 12.0
     assert result.finalize_ms == 22.0
     assert result.steady_ms == 32.0
     assert result.amortized_ms == 66.0
-    assert result.results == [1]
-    assert search_calls == [1] * 4
-    assert events[:1] == [(2, 0, False)]
-    assert (2, 0, True) in events
-    assert (2, 3, True) in events
+    assert result.results == [0]
+    assert search_calls == [0] * 4
+    assert events == [(1, 0, False), (1, 0, True), (2, 3, True)]
 
 
 def test_result_row_reports_steady_and_amortized_work_rates():
@@ -193,19 +184,53 @@ def test_validation_compares_queries_completed_before_rdkit_deadline():
         benchmark._validate_results([True, True, True], [True, False], "has")
 
 
-def test_reference_uses_all_threads(monkeypatch):
+def test_reference_collects_every_match_with_the_requested_threads(monkeypatch):
     library = _FakeRdkitLibrary()
-    added = []
-    library.AddMol = added.append
+    staged = []
     monkeypatch.setattr(benchmark, "_make_rdkit_library", lambda holder: library)
+    monkeypatch.setattr(
+        benchmark,
+        "_stage_rdkit_library",
+        lambda lib, mols, holder, num_threads: staged.append((list(mols), holder, num_threads)),
+    )
 
-    results = benchmark._rdkit_reference_results(["mol-a", "mol-b"], ["hit"], "get", 4)
+    results = benchmark._rdkit_reference_results(["mol-a", "mol-b"], ["hit"], 16)
 
-    assert added == ["mol-a", "mol-b"]
+    assert staged == [(["mol-a", "mol-b"], "cached-pattern", 16)]
     assert results == [[0, 1, 2]]
     _, _, kwargs = library.calls[0]
-    assert kwargs["numThreads"] == -1
-    assert kwargs["maxResults"] == 4
+    assert kwargs["numThreads"] == 16
+    assert kwargs["maxResults"] == -1
+
+
+def test_reference_derives_every_operation_from_complete_matches():
+    all_matches = [[3, 5, 9], [], [1]]
+
+    assert benchmark._reference_for_operation(all_matches, "has", -1) == [True, False, True]
+    assert benchmark._reference_for_operation(all_matches, "count", -1) == [3, 0, 1]
+    assert benchmark._reference_for_operation(all_matches, "get", -1) == all_matches
+    assert benchmark._reference_for_operation(all_matches, "get", 2) == [[3, 5], [], [1]]
+
+
+def test_reference_cache_is_reused_only_for_identical_inputs(monkeypatch, tmp_path):
+    computed = []
+
+    def fake_reference(mols, queries, num_threads):
+        computed.append(len(queries))
+        return [[index] for index in range(len(queries))]
+
+    monkeypatch.setattr(benchmark, "_rdkit_reference_results", fake_reference)
+    cache = str(tmp_path / "reference.pkl")
+    mols = [Chem.MolFromSmiles("CCO"), Chem.MolFromSmiles("c1ccccc1")]
+    queries = [Chem.MolFromSmarts("CO")]
+
+    assert benchmark.load_or_compute_reference(cache, mols, queries, 4) == [[0]]
+    assert benchmark.load_or_compute_reference(cache, mols, queries, 4) == [[0]]
+    assert computed == [1]
+
+    more_queries = queries + [Chem.MolFromSmarts("c")]
+    assert benchmark.load_or_compute_reference(cache, mols, more_queries, 4) == [[0], [1]]
+    assert computed == [1, 2]
 
 
 def _args(**overrides):
@@ -226,6 +251,8 @@ def _args(**overrides):
         "no_rdkit": False,
         "no_nvmolkit": False,
         "validate": True,
+        "num_queries": 0,
+        "reference_cache": None,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -245,7 +272,9 @@ def _args(**overrides):
         ({"max_results": -2}, "max_results"),
         ({"repetitions": 0}, "repetitions"),
         ({"no_rdkit": True, "no_nvmolkit": True}, "disable both"),
-        ({"no_rdkit": True}, "validation requires both"),
+        ({"num_queries": -1}, "num_queries"),
+        ({"no_rdkit": True}, "requires --reference_cache"),
+        ({"no_nvmolkit": True}, "validating RDKit alone"),
     ],
 )
 def test_argument_validation_rejects_invalid_or_incomparable_runs(overrides, message):
@@ -286,6 +315,13 @@ def test_parser_exposes_backend_sweeps_and_lifecycle_controls():
             "--repetitions",
             "5",
             "--no_nvmolkit_pattern_fingerprints",
+            "--query_modes",
+            "serial",
+            "concurrent",
+            "--num_queries",
+            "7",
+            "--reference_cache",
+            "reference.pkl",
         ]
     )
 
@@ -299,6 +335,9 @@ def test_parser_exposes_backend_sweeps_and_lifecycle_controls():
     assert args.max_results == 20
     assert args.repetitions == 5
     assert args.nvmolkit_pattern_fingerprints is False
+    assert args.query_modes == ["serial", "concurrent"]
+    assert args.num_queries == 7
+    assert args.reference_cache == "reference.pkl"
 
 
 def test_query_smiles_are_molecules_with_stereochemistry_removed(tmp_path):
@@ -312,17 +351,21 @@ def test_query_smiles_are_molecules_with_stereochemistry_removed(tmp_path):
     assert all(atom.GetChiralTag() == Chem.ChiralType.CHI_UNSPECIFIED for atom in queries[0].GetAtoms())
 
 
-def test_nvmolkit_benchmark_constructs_requested_config_and_library(monkeypatch):
+def test_nvmolkit_benchmark_builds_one_library_for_every_operation_and_mode(monkeypatch):
     configured = []
     constructed = []
     selected_devices = []
-    expected = benchmark.LifecycleMeasurement(1, 0, 2, 0, 3, 0, [])
+    searched = []
 
     class FakeConfig:
         def __init__(self, **kwargs):
             configured.append(kwargs)
 
     class FakeLibrary:
+        queryConcurrency = 4
+        batchesInFlightPerGpu = 12
+        workspaceBytesPerQueryPerGpu = 99
+
         def __init__(self, **kwargs):
             constructed.append(kwargs)
 
@@ -334,18 +377,23 @@ def test_nvmolkit_benchmark_constructs_requested_config_and_library(monkeypatch)
     monkeypatch.setitem(sys.modules, "nvmolkit.substruct_library", substruct_library)
     monkeypatch.setattr("torch.cuda.set_device", selected_devices.append)
 
-    def fake_lifecycle(**kwargs):
-        kwargs["make_library"]()
+    def fake_build(**kwargs):
         assert kwargs["gpu_finalize"]
-        assert kwargs["gpu_search"]
-        return expected
+        return benchmark.BuiltLibrary(kwargs["make_library"](), 1.0, 2.0)
 
-    monkeypatch.setattr(benchmark, "_benchmark_lifecycle", fake_lifecycle)
+    def fake_measure(built, search_library, **kwargs):
+        assert kwargs["gpu_search"]
+        searched.append(built.library)
+        return benchmark.LifecycleMeasurement(1, 0, 2, 0, 3, 0, [])
+
+    monkeypatch.setattr(benchmark, "_build_library", fake_build)
+    monkeypatch.setattr(benchmark, "_measure_search", fake_measure)
 
     result = benchmark.benchmark_nvmolkit(
         [object()],
         [object()],
-        operation="get",
+        operations=["has", "get"],
+        query_modes=["serial", "concurrent"],
         algorithm="dfs",
         chunk_size=8192,
         batch_size=512,
@@ -359,7 +407,10 @@ def test_nvmolkit_benchmark_constructs_requested_config_and_library(monkeypatch)
         use_pattern_fingerprints=False,
     )
 
-    assert result is expected
+    assert set(result) == {("has", "serial"), ("has", "concurrent"), ("get", "serial"), ("get", "concurrent")}
+    assert all(measurement.query_concurrency == 4 for measurement in result.values())
+    assert len(constructed) == 1
+    assert len(searched) == 4 and len({id(library) for library in searched}) == 1
     assert selected_devices == [2]
     assert configured == [
         {
@@ -405,11 +456,13 @@ def test_main_validates_against_longest_deadline_bounded_rdkit_run(monkeypatch, 
     )
     monkeypatch.setattr(benchmark, "_load_molecules", lambda args: [object(), object()])
     monkeypatch.setattr(benchmark, "_load_queries", lambda args: [object(), object(), object()])
-    monkeypatch.setattr(benchmark, "benchmark_rdkit", lambda *args, **kwargs: next(rdkit_measurements))
+    monkeypatch.setattr(benchmark, "benchmark_rdkit", lambda *args, **kwargs: {"has": next(rdkit_measurements)})
     monkeypatch.setattr(
         benchmark,
         "benchmark_nvmolkit",
-        lambda *args, **kwargs: benchmark.LifecycleMeasurement(1, 0, 2, 0, 3, 0, nvmolkit_results),
+        lambda *args, **kwargs: {
+            ("has", "serial"): benchmark.LifecycleMeasurement(1, 0, 2, 0, 3, 0, nvmolkit_results)
+        },
     )
     monkeypatch.setattr(benchmark, "print_csv_rows", lambda rows: None)
     monkeypatch.setattr(benchmark, "write_csv_rows", lambda rows, output: None)
@@ -461,12 +514,12 @@ def test_main_runs_requested_cross_product_and_validates_each_gpu_result(monkeyp
     monkeypatch.setattr(
         benchmark,
         "benchmark_rdkit",
-        lambda *args, **kwargs: rdkit_calls.append(kwargs) or measurement,
+        lambda *args, **kwargs: rdkit_calls.append(kwargs) or {"has": measurement},
     )
     monkeypatch.setattr(
         benchmark,
         "benchmark_nvmolkit",
-        lambda *args, **kwargs: nvmolkit_calls.append(kwargs) or measurement,
+        lambda *args, **kwargs: nvmolkit_calls.append(kwargs) or {("has", "serial"): measurement},
     )
     monkeypatch.setattr(
         benchmark,

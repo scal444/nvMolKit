@@ -3,9 +3,13 @@
 
 """Benchmark persistent nvMolKit and RDKit substructure libraries.
 
-The benchmark reports library staging, nvMolKit's explicit ``finalize()``
-upload, repeated query time, and the amortized total. Steady-state throughput
-is expressed as queries and offered target-query pairs per second.
+Each backend configuration stages and finalizes one library, timed once, and
+then measures every requested operation and query mode against it. Steady-state
+throughput is expressed as queries and offered target-query pairs per second.
+
+Results are validated against RDKit. ``--reference_cache`` stores complete
+RDKit matches for a fixed target and query set, so repeated nvMolKit-only runs
+(``--no-rdkit``) stay validated without re-running RDKit.
 
 Examples:
     python substruct_library_bench.py --smiles molecules.smi --smarts queries.smarts
@@ -13,12 +17,18 @@ Examples:
         --operations has get --algorithms gsi dfs --chunk_sizes 8192 65536
     python substruct_library_bench.py --smiles molecules.smi --smarts queries.smarts \
         --rdkit_holders mol cached-pattern --rdkit_threads 1 8
+    python substruct_library_bench.py --pickle targets.pkl --query_smiles queries.smi --num_queries 1000 \
+        --operations has count get --query_modes serial concurrent --no-rdkit --reference_cache ref.pkl
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import math
+import os
+import pickle
+import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
@@ -133,60 +143,56 @@ def _run_rdkit_queries(
     return results
 
 
-def _benchmark_lifecycle(
+@dataclass(frozen=True)
+class BuiltLibrary:
+    """A library staged and finalized once, reused by every measured query sweep."""
+
+    library: Any
+    staging_ms: float
+    finalize_ms: float
+
+
+def _build_library(
     *,
     make_library: Callable[[], Any],
     stage_library: Callable[[Any], None],
     finalize_library: Callable[[Any], None] | None,
+    gpu_finalize: bool,
+) -> BuiltLibrary:
+    library = make_library()
+    staging = time_it(lambda: stage_library(library), runs=1, warmups=0)
+    finalization = None
+    if finalize_library is not None:
+        finalization = time_it(lambda: finalize_library(library), runs=1, warmups=0, gpu_sync=gpu_finalize)
+    return BuiltLibrary(
+        library=library,
+        staging_ms=staging.mean_ms,
+        finalize_ms=0.0 if finalization is None else finalization.mean_ms,
+    )
+
+
+def _measure_search(
+    built: BuiltLibrary,
     search_library: Callable[[Any], list[Any]],
+    *,
     runs: int,
     warmups: int,
     repetitions: int,
-    gpu_finalize: bool,
     gpu_search: bool,
 ) -> LifecycleMeasurement:
-    current_library: Any = None
     results: list[Any] = []
-
-    def reset_library() -> None:
-        nonlocal current_library
-        current_library = make_library()
-
-    def stage() -> None:
-        stage_library(current_library)
-
-    staging = time_it(stage, runs=runs, warmups=0, setup=reset_library)
-
-    if finalize_library is not None:
-
-        def reset_staged_library() -> None:
-            reset_library()
-            stage()
-
-        def finalize() -> None:
-            finalize_library(current_library)
-
-        finalization = time_it(
-            finalize,
-            runs=runs,
-            warmups=0,
-            setup=reset_staged_library,
-            gpu_sync=gpu_finalize,
-        )
-    else:
-        finalization = None
 
     def search() -> None:
         nonlocal results
         for _ in range(repetitions):
-            results = search_library(current_library)
+            results = search_library(built.library)
 
     steady = time_it(search, runs=runs, warmups=warmups, gpu_sync=gpu_search)
     return LifecycleMeasurement(
-        staging_ms=staging.mean_ms,
-        staging_std_ms=staging.std_ms,
-        finalize_ms=0.0 if finalization is None else finalization.mean_ms,
-        finalize_std_ms=0.0 if finalization is None else finalization.std_ms,
+        staging_ms=built.staging_ms,
+        staging_std_ms=0.0,
+        finalize_ms=built.finalize_ms,
+        finalize_std_ms=0.0,
         steady_ms=steady.mean_ms,
         steady_std_ms=steady.std_ms,
         results=results,
@@ -197,18 +203,61 @@ def _make_rdkit_library(holder: str) -> Any:
     if holder == "mol":
         return rdSubstructLibrary.SubstructLibrary(rdSubstructLibrary.MolHolder())
     if holder == "cached-pattern":
-        return rdSubstructLibrary.SubstructLibrary(
-            rdSubstructLibrary.CachedMolHolder(),
-            rdSubstructLibrary.PatternHolder(),
-        )
+        # Pattern fingerprints are added in bulk by _stage_rdkit_library.
+        return rdSubstructLibrary.SubstructLibrary(rdSubstructLibrary.CachedMolHolder())
     raise ValueError(f"unsupported RDKit holder {holder!r}")
+
+
+def _stage_rdkit_library(library: Any, mols: Sequence[Any], holder: str, num_threads: int) -> None:
+    mol_holder = library.GetMolHolder()
+    for mol in mols:
+        mol_holder.AddMol(mol)
+    if holder == "cached-pattern":
+        rdSubstructLibrary.AddPatterns(library, numThreads=num_threads)
+
+
+def _measure_rdkit_with_deadline(
+    built: BuiltLibrary,
+    queries: Sequence[Any],
+    *,
+    operation: str,
+    max_results: int,
+    num_threads: int,
+    runs: int,
+    warmups: int,
+    max_seconds: float,
+) -> LifecycleMeasurement:
+    results: list[Any] = []
+
+    def search(deadline: Deadline) -> None:
+        nonlocal results
+        results = _run_rdkit_queries(built.library, queries, operation, max_results, num_threads, deadline)
+
+    steady = time_it(
+        search,
+        runs=runs,
+        warmups=warmups,
+        max_seconds=max_seconds,
+        progress_getter=lambda: len(results),
+        progress_target=len(queries),
+    )
+    return LifecycleMeasurement(
+        staging_ms=built.staging_ms,
+        staging_std_ms=0.0,
+        finalize_ms=0.0,
+        finalize_std_ms=0.0,
+        steady_ms=steady.mean_ms,
+        steady_std_ms=steady.std_ms,
+        results=results,
+        completed_queries=steady.progress,
+    )
 
 
 def benchmark_rdkit(
     mols: Sequence[Any],
     queries: Sequence[Any],
     *,
-    operation: str,
+    operations: Sequence[str],
     holder: str,
     num_threads: int,
     max_results: int,
@@ -216,78 +265,95 @@ def benchmark_rdkit(
     warmups: int,
     repetitions: int,
     max_seconds: float = 0.0,
-) -> LifecycleMeasurement:
-    if max_seconds > 0:
-        library = _make_rdkit_library(holder)
-        staging = time_it(lambda: [library.AddMol(mol) for mol in mols], runs=1, warmups=0)
-        results: list[Any] = []
-
-        def search(deadline: Deadline) -> None:
-            nonlocal results
-            results = _run_rdkit_queries(
-                library,
-                queries,
-                operation,
-                max_results,
-                num_threads,
-                deadline,
-            )
-
-        steady = time_it(
-            search,
-            runs=runs,
-            warmups=warmups,
-            max_seconds=max_seconds,
-            progress_getter=lambda: len(results),
-            progress_target=len(queries),
-        )
-        return LifecycleMeasurement(
-            staging_ms=staging.mean_ms,
-            staging_std_ms=staging.std_ms,
-            finalize_ms=0.0,
-            finalize_std_ms=0.0,
-            steady_ms=steady.mean_ms,
-            steady_std_ms=steady.std_ms,
-            results=results,
-            completed_queries=steady.progress,
-        )
-
-    return _benchmark_lifecycle(
+) -> dict[str, LifecycleMeasurement]:
+    """Stage one RDKit library and measure every operation against it."""
+    built = _build_library(
         make_library=lambda: _make_rdkit_library(holder),
-        stage_library=lambda library: [library.AddMol(mol) for mol in mols],
+        stage_library=lambda library: _stage_rdkit_library(library, mols, holder, num_threads),
         finalize_library=None,
-        search_library=lambda library: _run_rdkit_queries(
-            library,
-            queries,
-            operation,
-            max_results,
-            num_threads,
-        ),
-        runs=runs,
-        warmups=warmups,
-        repetitions=repetitions,
         gpu_finalize=False,
-        gpu_search=False,
     )
+    measurements: dict[str, LifecycleMeasurement] = {}
+    for operation in operations:
+        if max_seconds > 0:
+            measurements[operation] = _measure_rdkit_with_deadline(
+                built,
+                queries,
+                operation=operation,
+                max_results=max_results,
+                num_threads=num_threads,
+                runs=runs,
+                warmups=warmups,
+                max_seconds=max_seconds,
+            )
+        else:
+            measurements[operation] = _measure_search(
+                built,
+                lambda library, operation=operation: _run_rdkit_queries(
+                    library, queries, operation, max_results, num_threads
+                ),
+                runs=runs,
+                warmups=warmups,
+                repetitions=repetitions,
+                gpu_search=False,
+            )
+    return measurements
 
 
-def _rdkit_reference_results(
-    mols: Sequence[Any],
-    queries: Sequence[Any],
-    operation: str,
-    max_results: int,
-) -> list[Any]:
-    library = _make_rdkit_library("mol")
+def _rdkit_reference_results(mols: Sequence[Any], queries: Sequence[Any], num_threads: int) -> list[list[int]]:
+    """Every matching target index per query, from a pattern-screened RDKit library."""
+    library = _make_rdkit_library("cached-pattern")
+    _stage_rdkit_library(library, mols, "cached-pattern", num_threads)
+    return _run_rdkit_queries(library, queries, "get", -1, num_threads)
+
+
+def _reference_for_operation(all_matches: Sequence[Sequence[int]], operation: str, max_results: int) -> list[Any]:
+    """Derive has/count/get expectations from complete per-query match lists."""
+    if operation == "has":
+        return [bool(matches) for matches in all_matches]
+    if operation == "count":
+        return [len(matches) for matches in all_matches]
+    if max_results > 0:
+        return [list(matches[:max_results]) for matches in all_matches]
+    return [list(matches) for matches in all_matches]
+
+
+def _reference_key(mols: Sequence[Any], queries: Sequence[Any]) -> str:
+    digest = hashlib.sha256()
     for mol in mols:
-        library.AddMol(mol)
-    return _run_rdkit_queries(library, queries, operation, max_results, num_threads=-1)
+        digest.update(mol.ToBinary())
+    digest.update(b"\0queries\0")
+    for query in queries:
+        digest.update(Chem.MolToSmarts(query).encode())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def load_or_compute_reference(
+    path: str, mols: Sequence[Any], queries: Sequence[Any], num_threads: int
+) -> list[list[int]]:
+    """Return cached complete RDKit matches for these targets and queries, computing them on a miss."""
+    key = _reference_key(mols, queries)
+    if os.path.exists(path):
+        with open(path, "rb") as fh:
+            cached = pickle.load(fh)
+        if cached.get("key") == key:
+            print(f"PROGRESS reference loaded from {path}", flush=True)
+            return cached["matches"]
+        print(f"PROGRESS reference cache {path} does not match these inputs; recomputing", flush=True)
+    matches = _rdkit_reference_results(mols, queries, num_threads)
+    with open(path, "wb") as fh:
+        pickle.dump({"key": key, "matches": matches}, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    print(f"PROGRESS reference written to {path}", flush=True)
+    return matches
 
 
 def benchmark_nvmolkit(
     mols: Sequence[Any],
     queries: Sequence[Any],
     *,
-    operation: str,
+    operations: Sequence[str],
+    query_modes: Sequence[str],
     algorithm: str,
     chunk_size: int,
     batch_size: int,
@@ -298,9 +364,9 @@ def benchmark_nvmolkit(
     runs: int,
     warmups: int,
     repetitions: int,
-    query_mode: str = "serial",
     use_pattern_fingerprints: bool = True,
-) -> LifecycleMeasurement:
+) -> dict[tuple[str, str], LifecycleMeasurement]:
+    """Build one nvMolKit library and measure every operation and query mode against it."""
     import torch
 
     from nvmolkit.substruct_library import SubstructLibrary
@@ -314,39 +380,41 @@ def benchmark_nvmolkit(
         gpuIds=list(gpu_ids),
         algorithm=algorithm,
     )
-    admission: dict[str, int] = {}
-
-    def finalize_library(library: Any) -> None:
-        library.finalize()
-        admission["query_concurrency"] = getattr(library, "queryConcurrency", 1)
-        admission["batches_in_flight_per_gpu"] = getattr(library, "batchesInFlightPerGpu", 1)
-        admission["workspace_bytes_per_query_per_gpu"] = getattr(library, "workspaceBytesPerQueryPerGpu", 0)
-        print(
-            "PROGRESS admission "
-            f"query_concurrency={admission['query_concurrency']} "
-            f"batches_in_flight_per_gpu={admission['batches_in_flight_per_gpu']} "
-            f"workspace_bytes_per_query_per_gpu={admission['workspace_bytes_per_query_per_gpu']}",
-            flush=True,
-        )
-
-    measurement = _benchmark_lifecycle(
+    built = _build_library(
         make_library=lambda: SubstructLibrary(
             chunkSize=chunk_size,
             config=config,
             usePatternFingerprints=use_pattern_fingerprints,
         ),
         stage_library=lambda library: library.addMols(mols),
-        finalize_library=finalize_library,
-        search_library=lambda library: _run_nvmolkit_queries(
-            library, queries, operation, max_results, query_mode=query_mode
-        ),
-        runs=runs,
-        warmups=warmups,
-        repetitions=repetitions,
+        finalize_library=lambda library: library.finalize(),
         gpu_finalize=True,
-        gpu_search=True,
     )
-    return replace(measurement, **admission) if admission else measurement
+    admission = {
+        "query_concurrency": getattr(built.library, "queryConcurrency", 1),
+        "batches_in_flight_per_gpu": getattr(built.library, "batchesInFlightPerGpu", 1),
+        "workspace_bytes_per_query_per_gpu": getattr(built.library, "workspaceBytesPerQueryPerGpu", 0),
+    }
+    print(
+        "PROGRESS admission " + " ".join(f"{name}={value}" for name, value in admission.items()),
+        flush=True,
+    )
+
+    measurements: dict[tuple[str, str], LifecycleMeasurement] = {}
+    for operation in operations:
+        for query_mode in query_modes:
+            measurement = _measure_search(
+                built,
+                lambda library, operation=operation, query_mode=query_mode: _run_nvmolkit_queries(
+                    library, queries, operation, max_results, query_mode=query_mode
+                ),
+                runs=runs,
+                warmups=warmups,
+                repetitions=repetitions,
+                gpu_search=True,
+            )
+            measurements[(operation, query_mode)] = replace(measurement, **admission)
+    return measurements
 
 
 def _result_row(
@@ -424,6 +492,9 @@ def _build_parser() -> argparse.ArgumentParser:
     queries.add_argument("--smarts", "-q", help="SMARTS query file")
     queries.add_argument("--query_smiles", help="SMILES molecule-query file; stereochemistry is ignored")
     parser.add_argument("--num_mols", "-n", type=int, default=0, help="Maximum target molecules; 0 means all")
+    parser.add_argument(
+        "--num_queries", type=int, default=0, help="Randomly sample this many queries (seeded); 0 means all"
+    )
     parser.add_argument("--seed", type=int, default=42, help="Molecule sampling seed")
     parser.add_argument("--no_sanitize", dest="sanitize", action="store_false", default=True)
     parser.add_argument("--operations", "--operation", nargs="+", choices=["has", "count", "get"], default=["has"])
@@ -452,10 +523,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--repetitions", type=int, default=1, help="Query sweeps per timed iteration")
     parser.add_argument(
+        "--query_modes",
         "--query_mode",
+        nargs="+",
         choices=["serial", "concurrent"],
-        default="serial",
-        help="Wait after each nvMolKit query or resolve an asynchronously submitted sweep",
+        default=["serial"],
+        help="Wait after each nvMolKit query, or resolve an asynchronously submitted sweep",
     )
     parser.add_argument(
         "--no_nvmolkit_pattern_fingerprints",
@@ -465,6 +538,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Disable safe pattern-fingerprint screening for nvMolKit diagnostics",
     )
     parser.add_argument("--no_validate", dest="validate", action="store_false", default=True)
+    parser.add_argument(
+        "--reference_cache",
+        help="Validate against complete RDKit matches cached at this path, computing them on a miss; "
+        "allows validation without running the RDKit benchmark",
+    )
     parser.add_argument("--output", "-o", help="Optional CSV output path")
     add_backend_selection_args(parser)
     return parser
@@ -500,8 +578,12 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("repetitions must be positive")
     if args.no_rdkit and args.no_nvmolkit:
         raise ValueError("cannot disable both backends")
-    if args.validate and (args.no_rdkit or args.no_nvmolkit):
-        raise ValueError("validation requires both backends; pass --no_validate for a single backend")
+    if args.num_queries < 0:
+        raise ValueError("num_queries must be non-negative")
+    if args.validate and args.no_nvmolkit and not args.reference_cache:
+        raise ValueError("validating RDKit alone requires --reference_cache; pass --no_validate otherwise")
+    if args.validate and args.no_rdkit and not args.reference_cache:
+        raise ValueError("validation without RDKit requires --reference_cache; pass --no_validate otherwise")
 
 
 def _load_molecules(args: argparse.Namespace) -> list[Any]:
@@ -513,8 +595,10 @@ def _load_molecules(args: argparse.Namespace) -> list[Any]:
 def _load_queries(args: argparse.Namespace) -> list[Any]:
     if args.smarts:
         queries, _ = load_smarts(args.smarts)
+        if 0 < args.num_queries < len(queries):
+            queries = random.Random(args.seed).sample(queries, args.num_queries)
         return queries
-    queries = load_smiles(args.query_smiles, 0, args.sanitize, seed=args.seed)
+    queries = load_smiles(args.query_smiles, args.num_queries, args.sanitize, seed=args.seed)
     for query in queries:
         Chem.RemoveStereochemistry(query)
     return queries
@@ -532,29 +616,38 @@ def main() -> None:
     max_results = -1 if args.max_results == 0 else args.max_results
     gpu_ids = args.gpu_ids if args.gpu_ids is not None else [0 if args.gpu_id is None else args.gpu_id]
 
+    references: dict[str, list[Any]] = {}
+    if args.validate and args.reference_cache:
+        all_matches = load_or_compute_reference(args.reference_cache, mols, queries, args.rdkit_threads[0])
+        references = {
+            operation: _reference_for_operation(all_matches, operation, max_results) for operation in args.operations
+        }
+
     rows: list[dict[str, Any]] = []
-    for operation in args.operations:
-        reference_results = None
-        if not args.no_rdkit:
-            for holder in args.rdkit_holders:
-                for num_threads in args.rdkit_threads:
-                    measurement = benchmark_rdkit(
-                        mols,
-                        queries,
-                        operation=operation,
-                        holder=holder,
-                        num_threads=num_threads,
-                        max_results=max_results,
-                        runs=args.runs,
-                        warmups=args.warmups,
-                        repetitions=args.repetitions,
-                        max_seconds=args.rdkit_max_seconds,
-                    )
+    if not args.no_rdkit:
+        for holder in args.rdkit_holders:
+            for num_threads in args.rdkit_threads:
+                measurements = benchmark_rdkit(
+                    mols,
+                    queries,
+                    operations=args.operations,
+                    holder=holder,
+                    num_threads=num_threads,
+                    max_results=max_results,
+                    runs=args.runs,
+                    warmups=args.warmups,
+                    repetitions=args.repetitions,
+                    max_seconds=args.rdkit_max_seconds,
+                )
+                for operation, measurement in measurements.items():
                     if args.validate:
-                        if reference_results is not None:
-                            _validate_results(measurement.results, reference_results, operation)
-                        if reference_results is None or len(measurement.results) > len(reference_results):
-                            reference_results = measurement.results
+                        reference = references.get(operation)
+                        if reference is not None:
+                            _validate_results(measurement.results, reference, operation)
+                        if not args.reference_cache and (
+                            reference is None or len(measurement.results) > len(reference)
+                        ):
+                            references[operation] = measurement.results
                     rows.append(
                         _result_row(
                             backend="rdkit-substruct-library",
@@ -568,40 +661,38 @@ def main() -> None:
                             max_results=max_results,
                         )
                     )
-                    print(
-                        f"PROGRESS completed backend=rdkit operation={operation} "
-                        f"holder={holder} threads={num_threads}",
-                        flush=True,
-                    )
+                print(f"PROGRESS completed backend=rdkit holder={holder} threads={num_threads}", flush=True)
 
-        if not args.no_nvmolkit:
-            for algorithm in args.algorithms:
-                for chunk_size in args.chunk_sizes:
-                    measurement = benchmark_nvmolkit(
-                        mols,
-                        queries,
-                        operation=operation,
-                        algorithm=algorithm,
-                        chunk_size=chunk_size,
-                        batch_size=args.batch_size,
-                        worker_threads=args.workers,
-                        preprocessing_threads=args.prep_threads,
-                        gpu_ids=gpu_ids,
-                        max_results=max_results,
-                        runs=args.runs,
-                        warmups=args.warmups,
-                        repetitions=args.repetitions,
-                        query_mode=args.query_mode,
-                        use_pattern_fingerprints=args.nvmolkit_pattern_fingerprints,
-                    )
+    if not args.no_nvmolkit:
+        for algorithm in args.algorithms:
+            for chunk_size in args.chunk_sizes:
+                measurements = benchmark_nvmolkit(
+                    mols,
+                    queries,
+                    operations=args.operations,
+                    query_modes=args.query_modes,
+                    algorithm=algorithm,
+                    chunk_size=chunk_size,
+                    batch_size=args.batch_size,
+                    worker_threads=args.workers,
+                    preprocessing_threads=args.prep_threads,
+                    gpu_ids=gpu_ids,
+                    max_results=max_results,
+                    runs=args.runs,
+                    warmups=args.warmups,
+                    repetitions=args.repetitions,
+                    use_pattern_fingerprints=args.nvmolkit_pattern_fingerprints,
+                )
+                for (operation, query_mode), measurement in measurements.items():
                     if args.validate:
-                        if reference_results is None:
+                        reference = references.get(operation)
+                        if reference is None:
                             raise RuntimeError("validation requires an RDKit reference result")
-                        _validate_results(measurement.results, reference_results, operation)
-                        if len(reference_results) < len(queries):
+                        _validate_results(measurement.results, reference, operation)
+                        if len(reference) < len(queries):
                             print(
                                 f"VALIDATION partial operation={operation} algorithm={algorithm} "
-                                f"chunk_size={chunk_size}: compared {len(reference_results)}/{len(queries)} "
+                                f"chunk_size={chunk_size}: compared {len(reference)}/{len(queries)} "
                                 "queries completed by RDKit before its deadline",
                                 flush=True,
                             )
@@ -620,21 +711,19 @@ def main() -> None:
                             prep_threads=args.prep_threads,
                             gpu_ids=",".join(str(gpu_id) for gpu_id in gpu_ids),
                             num_gpus=len(gpu_ids),
-                            query_mode=args.query_mode,
+                            query_mode=query_mode,
                             pattern_fingerprints=args.nvmolkit_pattern_fingerprints,
-                            query_concurrency=getattr(measurement, "query_concurrency", None),
-                            batches_in_flight_per_gpu=getattr(measurement, "batches_in_flight_per_gpu", None),
-                            workspace_bytes_per_query_per_gpu=getattr(
-                                measurement, "workspace_bytes_per_query_per_gpu", None
-                            ),
+                            query_concurrency=measurement.query_concurrency,
+                            batches_in_flight_per_gpu=measurement.batches_in_flight_per_gpu,
+                            workspace_bytes_per_query_per_gpu=measurement.workspace_bytes_per_query_per_gpu,
                             max_results=max_results,
                         )
                     )
-                    print(
-                        f"PROGRESS completed backend=nvmolkit operation={operation} "
-                        f"algorithm={algorithm} chunk_size={chunk_size} gpu_ids={gpu_ids}",
-                        flush=True,
-                    )
+                print(
+                    f"PROGRESS completed backend=nvmolkit algorithm={algorithm} chunk_size={chunk_size} "
+                    f"gpu_ids={gpu_ids}",
+                    flush=True,
+                )
 
     print_csv_rows(rows)
     write_csv_rows(rows, args.output)
