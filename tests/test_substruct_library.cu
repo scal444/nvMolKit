@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "src/substruct/substruct_library.h"
+#include "src/substruct/substruct_search.h"
 #include "src/utils/device.h"
 
 namespace {
@@ -282,9 +283,9 @@ TEST(SubstructLibraryResults, ReusedQueryWorkspacesDoNotCarryMatchesBetweenQueri
   }
 }
 
-TEST(SubstructLibraryAdmission, WorkspaceEstimateCoversRecursiveQueries) {
+TEST(SubstructLibraryAdmission, RecursiveQueriesStayWithinTheirAdmittedMemory) {
   // Full batches of targets make every executor grow its recursive-pattern
-  // scratch to the worst case, which query admission must account for.
+  // scratch to the worst case, on top of the base query workspace.
   nvMolKit::SubstructLibrary library;
   auto                       target = molFromSmiles("OCCCCCCO");
   ASSERT_NE(target, nullptr);
@@ -294,6 +295,12 @@ TEST(SubstructLibraryAdmission, WorkspaceEstimateCoversRecursiveQueries) {
   auto recursive = queryFromSmarts("[$(CO)]");
   ASSERT_NE(recursive, nullptr);
 
+  // The library runs each resident search with one worker thread.
+  nvMolKit::SubstructSearchConfig searchConfig;
+  searchConfig.workerThreads = 1;
+  const std::size_t admitted =
+    library.workspaceBytesPerQueryPerGpu() + nvMolKit::estimateResidentRecursiveScratchBytes(searchConfig);
+
   std::size_t freeBefore = 0;
   std::size_t freeAfter  = 0;
   std::size_t total      = 0;
@@ -301,7 +308,8 @@ TEST(SubstructLibraryAdmission, WorkspaceEstimateCoversRecursiveQueries) {
   EXPECT_TRUE(library.hasMatch(*recursive));
   ASSERT_EQ(cudaMemGetInfo(&freeAfter, &total), cudaSuccess);
   const std::size_t used = freeBefore > freeAfter ? freeBefore - freeAfter : 0;
-  EXPECT_LE(used, library.workspaceBytesPerQueryPerGpu());
+  EXPECT_GT(used, library.workspaceBytesPerQueryPerGpu() / 2);
+  EXPECT_LE(used, admitted);
 }
 
 TEST(SubstructLibraryOwnership, DoesNotDependOnInputMoleculeLifetime) {
@@ -442,6 +450,38 @@ TEST(SubstructLibraryMultiGpu, ShardsTargetsAndMergesEveryOperationInInsertionOr
   EXPECT_TRUE(library.getMatches(*phosphorus).empty());
   EXPECT_EQ(library.countMatches(*phosphorus), 0U);
   EXPECT_FALSE(library.hasMatch(*phosphorus));
+}
+
+TEST(SubstructLibraryConcurrency, OversubscribedRecursiveAndPlainQueriesAllComplete) {
+  nvMolKit::SubstructLibrary                 library;
+  std::vector<std::unique_ptr<RDKit::ROMol>> targets;
+  for (const auto& smiles : {"CCO", "c1ccccc1", "CC(=O)O", "N", "OCCN"}) {
+    targets.push_back(molFromSmiles(smiles));
+    ASSERT_NE(targets.back(), nullptr);
+    library.addMol(*targets.back());
+  }
+  library.finalize();
+
+  auto recursive = queryFromSmarts("[$([#6]O)]");
+  auto plain     = queryFromSmarts("N");
+  ASSERT_NE(recursive, nullptr);
+  ASSERT_NE(plain, nullptr);
+  const auto expectedRecursive = rdkitMatchingIds(targets, *recursive);
+  const auto expectedPlain     = rdkitMatchingIds(targets, *plain);
+
+  // More callers than admitted queries, half of them needing recursive scratch.
+  std::vector<std::future<std::vector<MoleculeId>>> recursiveResults;
+  std::vector<std::future<std::vector<MoleculeId>>> plainResults;
+  for (std::size_t caller = 0; caller < 2 * library.queryConcurrency() + 2; ++caller) {
+    recursiveResults.push_back(std::async(std::launch::async, [&] { return library.getMatches(*recursive); }));
+    plainResults.push_back(std::async(std::launch::async, [&] { return library.getMatches(*plain); }));
+  }
+  for (auto& result : recursiveResults) {
+    EXPECT_EQ(result.get(), expectedRecursive);
+  }
+  for (auto& result : plainResults) {
+    EXPECT_EQ(result.get(), expectedPlain);
+  }
 }
 
 TEST(SubstructLibraryConcurrency, AllowsConcurrentQueriesOfACommittedGeneration) {

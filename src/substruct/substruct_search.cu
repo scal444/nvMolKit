@@ -98,6 +98,17 @@ struct ResidentSubstructSearchWorkspace {
   /// Device query storage refilled by each search; its buffers only grow.
   MoleculesDevice       queriesDevice;
 
+  /// Return recursive-pattern scratch to the device once a recursive query finishes.
+  void releaseRecursiveScratch() {
+    for (auto& executor : executors) {
+      auto& scratch = executor->recursiveScratch;
+      scratch.overflow.resize(0);
+      scratch.labelMatrixBuffer.resize(0);
+      scratch.intermediateBits.resize(0);
+      scratch.patternEntries.resize(0);
+    }
+  }
+
   void ensureExecutors(int count) {
     while (static_cast<int>(executors.size()) < count) {
       auto executor = std::make_unique<GpuExecutor>(static_cast<int>(executors.size()), deviceId);
@@ -1311,6 +1322,22 @@ bool getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
 
   queryContext.maxQueryAtoms = maxQueryAtoms;
 
+  // Resident workspaces hold recursive scratch only while a recursive query
+  // runs; query admission budgets it separately from the base workspace.
+  struct RecursiveScratchRelease {
+    ResidentSubstructSearchWorkspace* workspace = nullptr;
+    ~RecursiveScratchRelease() {
+      if (workspace != nullptr) {
+        workspace->releaseRecursiveScratch();
+      }
+    }
+  } recursiveScratchRelease;
+  if (workspace != nullptr && std::any_of(queryContext.queryHasPatterns.begin(),
+                                          queryContext.queryHasPatterns.end(),
+                                          [](int8_t value) { return value != 0; })) {
+    recursiveScratchRelease.workspace = workspace;
+  }
+
   // Recursive-pattern painting currently operates on contiguous resident
   // target ranges. Preserve correctness by bypassing selected-index screening
   // for those queries until that path supports indirection.
@@ -1508,25 +1535,37 @@ std::shared_ptr<ResidentSubstructSearchWorkspace> makeResidentSubstructSearchWor
   return std::make_shared<ResidentSubstructSearchWorkspace>(deviceId);
 }
 
-std::size_t estimateResidentSubstructSearchWorkspaceBytes(const SubstructSearchConfig& config) {
-  const std::size_t batchSize  = static_cast<std::size_t>(std::max(1, config.batchSize));
-  const int         workers    = config.workerThreads == -1 ? 4 : std::max(1, config.workerThreads);
+namespace {
+
+int residentExecutorCount(const SubstructSearchConfig& config) {
+  const int workers            = config.workerThreads == -1 ? 4 : std::max(1, config.workerThreads);
   const int executorsPerRunner = config.executorsPerRunner == -1 ? (workers == 1 ? 3 : 2) : config.executorsPerRunner;
-  const std::size_t executors  = static_cast<std::size_t>(workers) * static_cast<std::size_t>(executorsPerRunner);
+  return workers * executorsPerRunner;
+}
+
+}  // namespace
+
+std::size_t estimateResidentSubstructSearchWorkspaceBytes(const SubstructSearchConfig& config) {
+  const std::size_t batchSize       = static_cast<std::size_t>(std::max(1, config.batchSize));
+  const std::size_t executors       = static_cast<std::size_t>(residentExecutorCount(config));
   const std::size_t overflowBuffers = config.algorithm == SubstructAlgorithm::GSI ? 2U : 1U;
   const std::size_t overflowPerExecutor =
     batchSize * overflowBuffers * static_cast<std::size_t>(kOverflowEntriesPerBuffer) * sizeof(PartialMatch) * 3U / 2U;
   const std::size_t auxiliaryPerExecutor = batchSize * 2048U + 8U * 1024U * 1024U;
+  return executors * (overflowPerExecutor + auxiliaryPerExecutor);
+}
+
+std::size_t estimateResidentRecursiveScratchBytes(const SubstructSearchConfig& config) {
   // Recursive-pattern painting grows per-executor scratch for up to
   // max(batchSize, 1024) blocks, each with two overflow buffers and a label
   // matrix, by 1.5x (see RecursivePatternPreprocessor).
-  const std::size_t paintBlocks          = std::max<std::size_t>(batchSize, 1024U);
-  const std::size_t recursivePerExecutor =
-    paintBlocks *
-    (2U * static_cast<std::size_t>(kOverflowEntriesPerBuffer) * sizeof(PartialMatch) +
-     kLabelMatrixWords * sizeof(std::uint32_t)) *
-    3U / 2U;
-  return executors * (overflowPerExecutor + auxiliaryPerExecutor + recursivePerExecutor);
+  const std::size_t batchSize   = static_cast<std::size_t>(std::max(1, config.batchSize));
+  const std::size_t paintBlocks = std::max<std::size_t>(batchSize, 1024U);
+  const std::size_t perExecutor = paintBlocks *
+                                  (2U * static_cast<std::size_t>(kOverflowEntriesPerBuffer) * sizeof(PartialMatch) +
+                                   kLabelMatrixWords * sizeof(std::uint32_t)) *
+                                  3U / 2U;
+  return static_cast<std::size_t>(residentExecutorCount(config)) * perExecutor;
 }
 
 }  // namespace nvMolKit

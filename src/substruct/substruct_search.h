@@ -113,6 +113,12 @@ std::shared_ptr<ResidentSubstructSearchWorkspace> makeResidentSubstructSearchWor
 
 std::size_t estimateResidentSubstructSearchWorkspaceBytes(const SubstructSearchConfig& config);
 
+/**
+ * Additional device bytes a resident workspace holds while a query with
+ * recursive SMARTS runs. It is released when the search returns.
+ */
+std::size_t estimateResidentRecursiveScratchBytes(const SubstructSearchConfig& config);
+
 }  // namespace nvMolKit
 
 #endif  // NVMOLKIT_SUBSTRUCTURE_SEARCH_H

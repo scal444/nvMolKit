@@ -16,11 +16,13 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <semaphore>
 #include <shared_mutex>
 #include <stdexcept>
 #include <unordered_set>
 #include <utility>
 
+#include "src/substruct/molecules.h"
 #include "src/substruct/pattern_screen.h"
 #include "src/substruct/resident_target_chunk.h"
 #include "src/substruct/substruct_search.h"
@@ -421,10 +423,13 @@ class SubstructLibrary::Impl {
       return;
     }
 
-    constexpr std::size_t memoryNumerator   = 85;
-    constexpr std::size_t memoryDenominator = 100;
-    std::size_t           capacity          = std::numeric_limits<std::size_t>::max();
-    std::size_t           workspaceBytes    = 0;
+    constexpr std::size_t    memoryNumerator   = 85;
+    constexpr std::size_t    memoryDenominator = 100;
+    std::size_t              capacity          = std::numeric_limits<std::size_t>::max();
+    std::size_t              workspaceBytes    = 0;
+    std::vector<std::size_t> availableBytesPerDevice(deviceIds_.size());
+    std::vector<std::size_t> baseBytesPerDevice(deviceIds_.size());
+    std::vector<std::size_t> recursiveBytesPerDevice(deviceIds_.size());
     for (std::size_t index = 0; index < deviceIds_.size(); ++index) {
       const WithDevice device(deviceIds_[index]);
       std::size_t      freeBytes  = 0;
@@ -436,12 +441,19 @@ class SubstructLibrary::Impl {
       const std::size_t deviceWorkspaceBytes =
         estimateResidentSubstructSearchWorkspaceBytes(deviceConfig(index)) +
         (usePatternFingerprints_ ? PatternScreenWorkspace::estimateDeviceBytes(deviceTargets[index]) : 0);
-      if (deviceWorkspaceBytes == 0 || availableBytes < deviceWorkspaceBytes) {
+      // Every admitted query needs a base workspace; queries with recursive
+      // SMARTS additionally hold scratch, admitted separately so plain queries
+      // do not reserve it.
+      const std::size_t recursiveBytes = estimateResidentRecursiveScratchBytes(deviceConfig(index));
+      if (deviceWorkspaceBytes == 0 || availableBytes < deviceWorkspaceBytes + recursiveBytes) {
         throw std::runtime_error(
           "Substructure library cannot admit one query workspace below the 85% GPU-memory cutoff");
       }
-      capacity       = std::min(capacity, availableBytes / deviceWorkspaceBytes);
-      workspaceBytes = std::max(workspaceBytes, deviceWorkspaceBytes);
+      capacity                       = std::min(capacity, (availableBytes - recursiveBytes) / deviceWorkspaceBytes);
+      workspaceBytes                 = std::max(workspaceBytes, deviceWorkspaceBytes);
+      availableBytesPerDevice[index] = availableBytes;
+      baseBytesPerDevice[index]      = deviceWorkspaceBytes;
+      recursiveBytesPerDevice[index] = recursiveBytes;
     }
 
     const auto config = deviceConfig(0);
@@ -456,7 +468,13 @@ class SubstructLibrary::Impl {
     const std::size_t hostCapacity    = std::max<std::size_t>(
       1,
       static_cast<std::size_t>(omp_get_max_threads()) / std::max<std::size_t>(1, threadsPerQuery));
-    const std::size_t             concurrency = std::max<std::size_t>(1, std::min(capacity, hostCapacity));
+    const std::size_t concurrency          = std::max<std::size_t>(1, std::min(capacity, hostCapacity));
+    std::size_t       recursiveConcurrency = concurrency;
+    for (std::size_t index = 0; index < deviceIds_.size(); ++index) {
+      const std::size_t spare = availableBytesPerDevice[index] - concurrency * baseBytesPerDevice[index];
+      recursiveConcurrency    = std::min(recursiveConcurrency, spare / recursiveBytesPerDevice[index]);
+    }
+    recursiveConcurrency = std::max<std::size_t>(1, recursiveConcurrency);
     std::vector<DeviceWorkspaces> pools(deviceIds_.size());
     try {
       for (std::size_t index = 0; index < deviceIds_.size(); ++index) {
@@ -476,8 +494,9 @@ class SubstructLibrary::Impl {
       destroyWorkspacePools(pools);
       throw;
     }
-    workspacePools_               = std::move(pools);
-    queryConcurrency_             = concurrency;
+    workspacePools_   = std::move(pools);
+    recursivePermits_ = std::make_unique<std::counting_semaphore<>>(static_cast<std::ptrdiff_t>(recursiveConcurrency));
+    queryConcurrency_ = concurrency;
     batchesInFlightPerGpu_        = concurrency * executorsPerQuery;
     workspaceBytesPerQueryPerGpu_ = workspaceBytes;
   }
@@ -496,6 +515,21 @@ class SubstructLibrary::Impl {
       screenQuery = makePatternScreenQuery(queryFingerprint.get(), static_cast<int>(query.getNumAtoms()));
     }
     fingerprintRange.pop();
+
+    // Recursive queries hold extra scratch on every device while they run.
+    struct RecursivePermit {
+      std::counting_semaphore<>* permits = nullptr;
+      ~RecursivePermit() {
+        if (permits != nullptr) {
+          permits->release();
+        }
+      }
+    } recursivePermit;
+    if (hasRecursiveSmarts(&query)) {
+      recursivePermits_->acquire();
+      recursivePermit.permits = recursivePermits_.get();
+    }
+
     std::vector<std::vector<unsigned int>> results(deviceIds_.size());
     detail::OpenMPExceptionRegistry        exceptionRegistry;
 
@@ -647,6 +681,7 @@ class SubstructLibrary::Impl {
 
   void destroyWorkspaces() noexcept {
     destroyWorkspacePools(workspacePools_);
+    recursivePermits_.reset();
     queryConcurrency_             = 0;
     batchesInFlightPerGpu_        = 0;
     workspaceBytesPerQueryPerGpu_ = 0;
@@ -662,6 +697,8 @@ class SubstructLibrary::Impl {
   std::vector<std::unique_ptr<DeviceTargetSet>>     deviceSets_;
   std::vector<int>                                  deviceIds_;
   mutable std::vector<DeviceWorkspaces>             workspacePools_;
+  // Queries with recursive SMARTS currently allowed to hold recursive scratch.
+  std::unique_ptr<std::counting_semaphore<>>        recursivePermits_;
   MoleculeId                                        nextId_                       = 0;
   std::size_t                                       committedSize_                = 0;
   std::size_t                                       nextDeviceAssignment_         = 0;
