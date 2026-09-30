@@ -503,15 +503,17 @@ void runGpuCoordinator(int                                 deviceId,
     const RecursivePatternPreprocessor* preprocessorPtr = &recursivePreprocessor;
 
     if (deviceId != currentDevice) {
-      localQueries = std::make_unique<MoleculesDevice>();
+      // Use an explicit stream handle: a null stream means the legacy default stream inside host-compiled
+      // MoleculesDevice but the per-thread default stream here.
+      localQueries = std::make_unique<MoleculesDevice>(cudaStreamPerThread);
       localQueries->copyFromHost(queriesHost);
       localPreprocessor = std::make_unique<RecursivePatternPreprocessor>();
       localPreprocessor->buildPatterns(queriesHost);
-      localPreprocessor->syncToDevice(nullptr);
+      localPreprocessor->syncToDevice(cudaStreamPerThread);
 
       // The workers use independent non-blocking streams, so fully publish the
       // secondary-device queries and patterns before any worker can consume them.
-      cudaCheckError(cudaStreamSynchronize(nullptr));
+      cudaCheckError(cudaStreamSynchronize(cudaStreamPerThread));
 
       queriesPtr      = localQueries.get();
       preprocessorPtr = localPreprocessor.get();
@@ -1172,6 +1174,12 @@ void getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
                              const MoleculesDevice*                  residentTargetsDevice = nullptr,
                              ResidentSubstructSearchWorkspace*       workspace             = nullptr,
                              const std::vector<int>*                 residentTargetIndices = nullptr) {
+  // CUDA sources build with --default-stream=per-thread but C++ sources use the legacy default stream, so a null
+  // stream means a different stream on each side. Resolve it to an explicit handle before handing it to host-compiled
+  // code such as MoleculesDevice, or the synchronization below would not cover the query upload.
+  if (stream == nullptr) {
+    stream = cudaStreamPerThread;
+  }
   const int numTargets = static_cast<int>(targets.size());
   const int numQueries = static_cast<int>(queries.size());
 
