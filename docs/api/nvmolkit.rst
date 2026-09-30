@@ -133,6 +133,7 @@ Substructure Search
 
    substructure.SubstructSearchConfig
    substructure.SubstructMatchResults
+   substruct_library.SubstructLibrary
 
 Conformer RMSD
 --------------
