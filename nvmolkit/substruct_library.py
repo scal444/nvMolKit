@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+import threading
+from collections.abc import Callable, Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Any, TypeVar
 
 from rdkit.Chem import Mol
 
@@ -14,6 +16,8 @@ from nvmolkit._substructLibrary import SubstructLibrary as _NativeSubstructLibra
 from nvmolkit.substructure import SubstructSearchConfig
 
 __all__ = ["SubstructLibrary"]
+
+_T = TypeVar("_T")
 
 
 class SubstructLibrary:
@@ -72,6 +76,7 @@ class SubstructLibrary:
         if config is None:
             config = SubstructSearchConfig()
         self._native = _NativeSubstructLibrary(int(chunkSize), config._as_native(), bool(usePatternFingerprints))
+        self._executorLock = threading.Lock()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nvmolkit-substruct")
 
     def __len__(self) -> int:
@@ -115,12 +120,22 @@ class SubstructLibrary:
         Must be called at least once before querying. Queries raise ``RuntimeError``
         until the library has been finalized.
         """
-        self._executor.shutdown(wait=True)
-        self._native.finalize()
-        self._executor = ThreadPoolExecutor(
-            max_workers=max(1, self.queryConcurrency),
-            thread_name_prefix="nvmolkit-substruct",
-        )
+        with self._executorLock:
+            # Drain queued queries so they see the generation they were submitted against.
+            self._executor.shutdown(wait=True)
+            try:
+                self._native.finalize()
+            finally:
+                # A failed finalize keeps the previous generation queryable, so always
+                # restore an executor sized for whatever the native library now admits.
+                self._executor = ThreadPoolExecutor(
+                    max_workers=max(1, self.queryConcurrency),
+                    thread_name_prefix="nvmolkit-substruct",
+                )
+
+    def _submit(self, function: Callable[..., _T], *args: Any) -> Future[_T]:
+        with self._executorLock:
+            return self._executor.submit(function, *args)
 
     def getMatches(self, query: Mol, maxResults: int = -1) -> Future[list[int]]:
         """Queue a query and return a future with the indices of matching molecules.
@@ -132,15 +147,15 @@ class SubstructLibrary:
         Returns:
             Future resolving to matching indices in ascending order.
         """
-        return self._executor.submit(self._native.getMatches, query, int(maxResults))
+        return self._submit(self._native.getMatches, query, int(maxResults))
 
     def countMatches(self, query: Mol) -> Future[int]:
         """Queue a query and return a future containing its match count."""
-        return self._executor.submit(self._native.countMatches, query)
+        return self._submit(self._native.countMatches, query)
 
     def hasMatch(self, query: Mol) -> Future[bool]:
         """Queue a query and return a future containing whether a match exists."""
-        return self._executor.submit(self._native.hasMatch, query)
+        return self._submit(self._native.hasMatch, query)
 
     def getMatchesSync(self, query: Mol, maxResults: int = -1) -> list[int]:
         """Run one query synchronously."""

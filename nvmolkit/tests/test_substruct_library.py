@@ -60,6 +60,37 @@ def test_finalize_generation_and_result_operations():
     assert len(library) == 4
 
 
+class _FailingFinalizeNative:
+    """Delegate to a native library but fail finalize, as an OOM or admission failure would."""
+
+    def __init__(self, native):
+        self._native = native
+
+    def __getattr__(self, name):
+        return getattr(self._native, name)
+
+    def finalize(self):
+        raise RuntimeError("simulated finalize failure")
+
+
+def test_failed_finalize_keeps_library_queryable():
+    library = SubstructLibrary()
+    library.addMols([Chem.MolFromSmiles("c1ccccc1")])
+    library.finalize()
+    library.addMol(Chem.MolFromSmiles("Oc1ccccc1"))
+
+    native = library._native
+    library._native = _FailingFinalizeNative(native)
+    with pytest.raises(RuntimeError, match="simulated"):
+        library.finalize()
+    library._native = native
+
+    query = Chem.MolFromSmarts("c")
+    assert library.getMatches(query).result() == [0]
+    library.finalize()
+    assert library.getMatches(query).result() == [0, 1]
+
+
 @pytest.mark.parametrize("algorithm", ["gsi", "dfs"])
 def test_configured_production_backends(algorithm):
     config = SubstructSearchConfig(algorithm=algorithm, workerThreads=1, preprocessingThreads=1)
