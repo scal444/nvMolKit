@@ -89,6 +89,15 @@ PatternScreenWorkspace::~PatternScreenWorkspace() noexcept {
   cudaFreeHost(hostQueryBits_);
 }
 
+std::size_t PatternScreenWorkspace::estimateDeviceBytes(std::size_t numTargets) {
+  if (numTargets == 0) {
+    return 0;
+  }
+  return numTargets * sizeof(int) + patternSliceWords(numTargets) * sizeof(std::uint32_t) +
+         kPatternFingerprintBits * sizeof(std::uint16_t) + sizeof(int) +
+         selectTempBytes(static_cast<int>(numTargets), nullptr);
+}
+
 void PatternScreenWorkspace::reserve(std::size_t numTargets, std::size_t numQueryBits) {
   if (indices_.size() < numTargets) {
     indices_.resize(numTargets);

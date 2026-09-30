@@ -282,6 +282,28 @@ TEST(SubstructLibraryResults, ReusedQueryWorkspacesDoNotCarryMatchesBetweenQueri
   }
 }
 
+TEST(SubstructLibraryAdmission, WorkspaceEstimateCoversRecursiveQueries) {
+  // Full batches of targets make every executor grow its recursive-pattern
+  // scratch to the worst case, which query admission must account for.
+  nvMolKit::SubstructLibrary library;
+  auto                       target = molFromSmiles("OCCCCCCO");
+  ASSERT_NE(target, nullptr);
+  const std::vector<const RDKit::ROMol*> targets(4096, target.get());
+  library.addMols(targets);
+  library.finalize();
+  auto recursive = queryFromSmarts("[$(CO)]");
+  ASSERT_NE(recursive, nullptr);
+
+  std::size_t freeBefore = 0;
+  std::size_t freeAfter  = 0;
+  std::size_t total      = 0;
+  ASSERT_EQ(cudaMemGetInfo(&freeBefore, &total), cudaSuccess);
+  EXPECT_TRUE(library.hasMatch(*recursive));
+  ASSERT_EQ(cudaMemGetInfo(&freeAfter, &total), cudaSuccess);
+  const std::size_t used = freeBefore > freeAfter ? freeBefore - freeAfter : 0;
+  EXPECT_LE(used, library.workspaceBytesPerQueryPerGpu());
+}
+
 TEST(SubstructLibraryOwnership, DoesNotDependOnInputMoleculeLifetime) {
   nvMolKit::SubstructLibrary library(1);
   {

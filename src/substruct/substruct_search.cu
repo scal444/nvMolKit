@@ -1517,7 +1517,16 @@ std::size_t estimateResidentSubstructSearchWorkspaceBytes(const SubstructSearchC
   const std::size_t overflowPerExecutor =
     batchSize * overflowBuffers * static_cast<std::size_t>(kOverflowEntriesPerBuffer) * sizeof(PartialMatch) * 3U / 2U;
   const std::size_t auxiliaryPerExecutor = batchSize * 2048U + 8U * 1024U * 1024U;
-  return executors * (overflowPerExecutor + auxiliaryPerExecutor);
+  // Recursive-pattern painting grows per-executor scratch for up to
+  // max(batchSize, 1024) blocks, each with two overflow buffers and a label
+  // matrix, by 1.5x (see RecursivePatternPreprocessor).
+  const std::size_t paintBlocks          = std::max<std::size_t>(batchSize, 1024U);
+  const std::size_t recursivePerExecutor =
+    paintBlocks *
+    (2U * static_cast<std::size_t>(kOverflowEntriesPerBuffer) * sizeof(PartialMatch) +
+     kLabelMatrixWords * sizeof(std::uint32_t)) *
+    3U / 2U;
+  return executors * (overflowPerExecutor + auxiliaryPerExecutor + recursivePerExecutor);
 }
 
 }  // namespace nvMolKit

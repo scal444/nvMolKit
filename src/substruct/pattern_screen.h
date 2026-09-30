@@ -79,6 +79,9 @@ class PatternScreenWorkspace {
               int                       numTargets,
               const PatternScreenQuery& query);
 
+  /** Device bytes one workspace allocates to screen numTargets targets. */
+  [[nodiscard]] static std::size_t estimateDeviceBytes(std::size_t numTargets);
+
   [[nodiscard]] int        count() const { return *hostCount_; }
   [[nodiscard]] const int* indices() const { return hostIndices_; }
   [[nodiscard]] int        deviceId() const noexcept { return deviceId_; }

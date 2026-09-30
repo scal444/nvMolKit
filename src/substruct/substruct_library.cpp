@@ -191,7 +191,12 @@ class SubstructLibrary::Impl {
       chunks_.reserve(chunks_.size() + pendingChunks_.size());
       // Workspaces are sized against memory that already holds the new sets,
       // so configure them before publishing anything.
-      configureWorkspaces();
+      std::vector<std::size_t> deviceTargets(deviceIds_.size(), 0);
+      for (std::size_t index = 0; index < deviceIds_.size(); ++index) {
+        const auto* set      = newSets[index] != nullptr ? newSets[index].get() : deviceSets_[index].get();
+        deviceTargets[index] = set != nullptr ? set->size() : 0;
+      }
+      configureWorkspaces(deviceTargets);
     } catch (...) {
       destroyDeviceSets(newSets);
       restoreWorkspaces();
@@ -382,7 +387,11 @@ class SubstructLibrary::Impl {
       return;
     }
     try {
-      configureWorkspaces();
+      std::vector<std::size_t> deviceTargets(deviceIds_.size(), 0);
+      for (std::size_t index = 0; index < deviceIds_.size(); ++index) {
+        deviceTargets[index] = deviceSets_[index] != nullptr ? deviceSets_[index]->size() : 0;
+      }
+      configureWorkspaces(deviceTargets);
     } catch (...) {
       destroyWorkspaces();
     }
@@ -404,7 +413,8 @@ class SubstructLibrary::Impl {
     return result;
   }
 
-  void configureWorkspaces() {
+  // deviceTargets[i] is the number of resident GPU targets on device i.
+  void configureWorkspaces(const std::vector<std::size_t>& deviceTargets) {
     destroyWorkspaces();
     if (deviceIds_.empty()) {
       queryConcurrency_ = 0;
@@ -420,10 +430,12 @@ class SubstructLibrary::Impl {
       std::size_t      freeBytes  = 0;
       std::size_t      totalBytes = 0;
       cudaCheckError(cudaMemGetInfo(&freeBytes, &totalBytes));
-      const std::size_t usedBytes            = totalBytes - freeBytes;
-      const std::size_t budgetBytes          = totalBytes * memoryNumerator / memoryDenominator;
-      const std::size_t availableBytes       = budgetBytes > usedBytes ? budgetBytes - usedBytes : 0;
-      const std::size_t deviceWorkspaceBytes = estimateResidentSubstructSearchWorkspaceBytes(deviceConfig(index));
+      const std::size_t usedBytes      = totalBytes - freeBytes;
+      const std::size_t budgetBytes    = totalBytes * memoryNumerator / memoryDenominator;
+      const std::size_t availableBytes = budgetBytes > usedBytes ? budgetBytes - usedBytes : 0;
+      const std::size_t deviceWorkspaceBytes =
+        estimateResidentSubstructSearchWorkspaceBytes(deviceConfig(index)) +
+        (usePatternFingerprints_ ? PatternScreenWorkspace::estimateDeviceBytes(deviceTargets[index]) : 0);
       if (deviceWorkspaceBytes == 0 || availableBytes < deviceWorkspaceBytes) {
         throw std::runtime_error(
           "Substructure library cannot admit one query workspace below the 85% GPU-memory cutoff");
