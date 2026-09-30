@@ -8,9 +8,11 @@
 #include <GraphMol/ROMol.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <stdexcept>
 #include <utility>
 
+#include "src/substruct/pattern_screen.h"
 #include "src/substruct/substruct_constants.h"
 #include "src/utils/cuda_error_check.h"
 #include "src/utils/openmp_helpers.h"
@@ -73,66 +75,17 @@ ResidentTargetChunk::ResidentTargetChunk(MoleculeId                             
     }
     supportedTargetPtrs_.push_back(sourceMolecules_[static_cast<std::size_t>(id - firstId_)].get());
   }
+  if (!patternFingerprints_.empty() && !packedGlobalIds_.empty()) {
+    std::vector<const ExplicitBitVect*> packedFingerprints;
+    packedFingerprints.reserve(packedGlobalIds_.size());
+    for (MoleculeId id : packedGlobalIds_) {
+      packedFingerprints.push_back(patternFingerprints_[static_cast<std::size_t>(id - firstId_)].get());
+    }
+    packedPatternWords_ = packPatternFingerprintsWordMajor(packedFingerprints);
+  }
 }
 
 ResidentTargetChunk::~ResidentTargetChunk() = default;
-
-void ResidentTargetChunk::beginUpload(cudaStream_t stream) {
-  if (state_ != State::Sealed) {
-    throw std::logic_error("Resident target chunk upload can only begin from the sealed state");
-  }
-
-  if (packedGlobalIds_.empty()) {
-    state_ = State::Committed;
-    return;
-  }
-
-  state_ = State::Uploading;
-  try {
-    uploadComplete_ = std::make_unique<ScopedCudaEvent>();
-    packedDevice_   = std::make_unique<MoleculesDevice>(stream);
-    packedDevice_->copyFromHost(packedHost_, stream);
-    cudaCheckError(cudaEventRecord(uploadComplete_->event(), stream));
-  } catch (...) {
-    state_ = State::Failed;
-    throw;
-  }
-}
-
-void ResidentTargetChunk::commit() {
-  if (state_ == State::Committed) {
-    return;
-  }
-  if (state_ != State::Uploading) {
-    throw std::logic_error("Resident target chunk commit requires an upload in progress");
-  }
-
-  try {
-    cudaCheckError(cudaEventSynchronize(uploadComplete_->event()));
-    // Device allocations outlive the caller-provided upload stream. Release
-    // them on the default stream so chunk lifetime is not tied to that stream.
-    packedDevice_->setStream(nullptr);
-    state_ = State::Committed;
-  } catch (...) {
-    state_ = State::Failed;
-    throw;
-  }
-}
-
-void ResidentTargetChunk::finalize(cudaStream_t stream) {
-  beginUpload(stream);
-  commit();
-}
-
-void ResidentTargetChunk::resetUpload() noexcept {
-  if (uploadComplete_ != nullptr) {
-    // Device buffers must not be released while the upload may still read or write them.
-    cudaEventSynchronize(uploadComplete_->event());
-  }
-  packedDevice_.reset();
-  uploadComplete_.reset();
-  state_ = State::Sealed;
-}
 
 const RDKit::ROMol& ResidentTargetChunk::sourceMol(MoleculeId id) const {
   if (id < firstId_ || id >= endId()) {
@@ -158,24 +111,121 @@ const ExplicitBitVect* ResidentTargetChunk::patternFingerprint(MoleculeId id) co
   return patternFingerprints_[static_cast<std::size_t>(id - firstId_)].get();
 }
 
-TargetMoleculesDeviceView ResidentTargetChunk::deviceView() const {
-  if (state_ != State::Committed) {
-    throw std::logic_error("Resident target chunk device view requested before commit");
-  }
-  if (packedDevice_ == nullptr) {
-    return TargetMoleculesDeviceView{nullptr, 0, nullptr, nullptr, nullptr};
-  }
-  return packedDevice_->view<MoleculeType::Target>();
+void ResidentTargetChunk::releasePackedData() noexcept {
+  packedHost_         = MoleculesHost();
+  packedPatternWords_ = std::vector<std::uint64_t>();
 }
 
-const MoleculesDevice& ResidentTargetChunk::deviceStorage() const {
-  if (state_ != State::Committed) {
-    throw std::logic_error("Resident target chunk device storage requested before commit");
+namespace {
+
+void appendPackedTargets(MoleculesHost& destination, const MoleculesHost& source) {
+  if (source.numMolecules() == 0) {
+    return;
   }
-  if (packedDevice_ == nullptr) {
-    throw std::logic_error("Resident target chunk has no GPU-supported targets");
+  const int atomOffset = destination.batchAtomStarts.back();
+  destination.atomDataPacked.insert(destination.atomDataPacked.end(),
+                                    source.atomDataPacked.begin(),
+                                    source.atomDataPacked.end());
+  destination.bondTypeCounts.insert(destination.bondTypeCounts.end(),
+                                    source.bondTypeCounts.begin(),
+                                    source.bondTypeCounts.end());
+  destination.targetAtomBonds.insert(destination.targetAtomBonds.end(),
+                                     source.targetAtomBonds.begin(),
+                                     source.targetAtomBonds.end());
+  for (std::size_t molecule = 1; molecule < source.batchAtomStarts.size(); ++molecule) {
+    destination.batchAtomStarts.push_back(atomOffset + source.batchAtomStarts[molecule]);
   }
-  return *packedDevice_;
+}
+
+// Copy a word-major block of count fingerprints into a word-major array of
+// total fingerprints, starting at fingerprint offset.
+void appendPatternWords(std::vector<std::uint64_t>&       destination,
+                        std::size_t                       total,
+                        std::size_t                       offset,
+                        const std::vector<std::uint64_t>& source,
+                        std::size_t                       count) {
+  if (source.size() != count * kPatternFingerprintWords) {
+    throw std::logic_error("Pattern fingerprint block does not match its packed target count");
+  }
+  for (int word = 0; word < kPatternFingerprintWords; ++word) {
+    std::copy_n(source.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(word) * count),
+                count,
+                destination.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(word) * total + offset));
+  }
+}
+
+}  // namespace
+
+DeviceTargetSet::DeviceTargetSet(const DeviceTargetSet*                         base,
+                                 const std::vector<const ResidentTargetChunk*>& chunks,
+                                 bool                                           usePatternFingerprints) {
+  std::size_t total = base == nullptr ? 0 : base->size();
+  std::size_t atoms = base == nullptr ? 0 : base->host_.totalAtoms();
+  for (const auto* chunk : chunks) {
+    total += chunk->gpuTargetCount();
+    atoms += chunk->packedHost().totalAtoms();
+  }
+  host_.batchAtomStarts.reserve(total + 1);
+  host_.atomDataPacked.reserve(atoms);
+  host_.bondTypeCounts.reserve(atoms);
+  host_.targetAtomBonds.reserve(atoms);
+  targets_.reserve(total);
+  ids_.reserve(total);
+  if (usePatternFingerprints) {
+    patternWords_.resize(total * kPatternFingerprintWords);
+  }
+
+  std::size_t offset = 0;
+  if (base != nullptr) {
+    appendPackedTargets(host_, base->host_);
+    targets_ = base->targets_;
+    ids_     = base->ids_;
+    if (usePatternFingerprints) {
+      appendPatternWords(patternWords_, total, 0, base->patternWords_, base->size());
+    }
+    offset = base->size();
+  }
+  for (const auto* chunk : chunks) {
+    if (chunk->gpuTargetCount() == 0) {
+      continue;
+    }
+    if (!ids_.empty() && chunk->packedGlobalIds().front() <= ids_.back()) {
+      throw std::logic_error("Device target sets must be extended in ascending ID order");
+    }
+    appendPackedTargets(host_, chunk->packedHost());
+    targets_.insert(targets_.end(), chunk->supportedTargetPtrs().begin(), chunk->supportedTargetPtrs().end());
+    ids_.insert(ids_.end(), chunk->packedGlobalIds().begin(), chunk->packedGlobalIds().end());
+    if (usePatternFingerprints) {
+      appendPatternWords(patternWords_, total, offset, chunk->packedPatternWords(), chunk->gpuTargetCount());
+    }
+    offset += chunk->gpuTargetCount();
+  }
+}
+
+DeviceTargetSet::~DeviceTargetSet() = default;
+
+void DeviceTargetSet::upload(cudaStream_t stream) {
+  if (ids_.empty()) {
+    return;
+  }
+  device_ = std::make_unique<MoleculesDevice>(stream);
+  device_->copyFromHost(host_, stream);
+  if (!patternWords_.empty()) {
+    patternWordsDevice_ = AsyncDeviceVector<std::uint64_t>(patternWords_.size(), stream);
+    patternWordsDevice_.copyFromHost(patternWords_);
+  }
+  cudaCheckError(cudaStreamSynchronize(stream));
+  // Device allocations outlive the caller-provided upload stream. Release
+  // them on the default stream so their lifetime is not tied to that stream.
+  device_->setStream(nullptr);
+  patternWordsDevice_.setStream(nullptr);
+}
+
+const MoleculesDevice& DeviceTargetSet::device() const {
+  if (device_ == nullptr) {
+    throw std::logic_error("Device target set has no uploaded targets");
+  }
+  return *device_;
 }
 
 TargetChunkBuilder::TargetChunkBuilder(MoleculeId firstId, std::size_t maxMolecules, bool usePatternFingerprints)

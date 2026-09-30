@@ -14,11 +14,13 @@
 #include <cstdint>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <stdexcept>
 #include <unordered_set>
 #include <utility>
 
+#include "src/substruct/pattern_screen.h"
 #include "src/substruct/resident_target_chunk.h"
 #include "src/substruct/substruct_search.h"
 #include "src/utils/cuda_error_check.h"
@@ -68,7 +70,8 @@ class SubstructLibrary::Impl {
 
   ~Impl() noexcept {
     destroyWorkspaces();
-    destroyDeviceChunks(chunks_);
+    destroyDeviceSets(deviceSets_);
+    chunks_.clear();
     pendingChunks_.clear();
   }
 
@@ -134,6 +137,7 @@ class SubstructLibrary::Impl {
   void finalize(cudaStream_t stream) {
     std::unique_lock lock(mutex_);
     resolveDevices();
+    deviceSets_.resize(deviceIds_.size());
     if (deviceIds_.size() > 1 && stream != nullptr) {
       throw std::invalid_argument("A single external CUDA stream cannot be used with a multi-GPU substructure library");
     }
@@ -152,23 +156,30 @@ class SubstructLibrary::Impl {
       builder_ = std::move(nextBuilder);
     }
 
-    // Upload the pending chunks in place. Uploads never modify host data, so a
-    // failure resets them to the sealed state and the generation stays retryable.
     std::vector<std::size_t> pendingDevices(pendingChunks_.size());
     for (std::size_t index = 0; index < pendingChunks_.size(); ++index) {
       pendingDevices[index] = (nextDeviceAssignment_ + index) % deviceIds_.size();
     }
 
-    detail::OpenMPExceptionRegistry uploadExceptions;
+    // Extend each device's resident set with its new chunks. The published
+    // sets stay untouched until everything succeeds, so failures are retryable.
+    std::vector<std::unique_ptr<DeviceTargetSet>> newSets(deviceIds_.size());
+    detail::OpenMPExceptionRegistry               uploadExceptions;
 #pragma omp parallel for num_threads(static_cast<int>(deviceIds_.size())) schedule(static)
     for (std::int64_t deviceIndex = 0; deviceIndex < static_cast<std::int64_t>(deviceIds_.size()); ++deviceIndex) {
       try {
-        const WithDevice device(deviceIds_[static_cast<std::size_t>(deviceIndex)]);
-        cudaStream_t     deviceStream = validateStream(stream);
-        for (std::size_t index = 0; index < pendingChunks_.size(); ++index) {
-          if (pendingDevices[index] == static_cast<std::size_t>(deviceIndex)) {
-            pendingChunks_[index]->beginUpload(deviceStream);
+        const auto                              index = static_cast<std::size_t>(deviceIndex);
+        const WithDevice                        device(deviceIds_[index]);
+        std::vector<const ResidentTargetChunk*> deviceChunks;
+        for (std::size_t chunk = 0; chunk < pendingChunks_.size(); ++chunk) {
+          if (pendingDevices[chunk] == index) {
+            deviceChunks.push_back(pendingChunks_[chunk].get());
           }
+        }
+        if (!deviceChunks.empty()) {
+          newSets[index] =
+            std::make_unique<DeviceTargetSet>(deviceSets_[index].get(), deviceChunks, usePatternFingerprints_);
+          newSets[index]->upload(validateStream(stream));
         }
       } catch (...) {
         uploadExceptions.store(std::current_exception());
@@ -176,39 +187,27 @@ class SubstructLibrary::Impl {
     }
     try {
       uploadExceptions.rethrow();
-    } catch (...) {
-      resetUploads(pendingChunks_, pendingDevices);
-      throw;
-    }
-
-    detail::OpenMPExceptionRegistry commitExceptions;
-#pragma omp parallel for num_threads(static_cast<int>(deviceIds_.size())) schedule(static)
-    for (std::int64_t deviceIndex = 0; deviceIndex < static_cast<std::int64_t>(deviceIds_.size()); ++deviceIndex) {
-      try {
-        const WithDevice device(deviceIds_[static_cast<std::size_t>(deviceIndex)]);
-        for (std::size_t index = 0; index < pendingChunks_.size(); ++index) {
-          if (pendingDevices[index] == static_cast<std::size_t>(deviceIndex)) {
-            pendingChunks_[index]->commit();
-          }
-        }
-      } catch (...) {
-        commitExceptions.store(std::current_exception());
-      }
-    }
-    try {
-      commitExceptions.rethrow();
       chunks_.reserve(chunks_.size() + pendingChunks_.size());
-      // Workspaces are sized against memory that already holds the new chunks,
+      // Workspaces are sized against memory that already holds the new sets,
       // so configure them before publishing anything.
       configureWorkspaces();
     } catch (...) {
-      resetUploads(pendingChunks_, pendingDevices);
+      destroyDeviceSets(newSets);
       restoreWorkspaces();
       throw;
     }
 
+    for (std::size_t index = 0; index < deviceIds_.size(); ++index) {
+      if (newSets[index] != nullptr) {
+        std::vector<std::unique_ptr<DeviceTargetSet>> replaced(deviceIds_.size());
+        replaced[index] = std::move(deviceSets_[index]);
+        destroyDeviceSets(replaced);
+        deviceSets_[index] = std::move(newSets[index]);
+      }
+    }
     for (std::size_t index = 0; index < pendingChunks_.size(); ++index) {
       committedSize_ += pendingChunks_[index]->size();
+      pendingChunks_[index]->releasePackedData();
       chunks_.push_back(DeviceChunk{pendingDevices[index], std::move(pendingChunks_[index])});
     }
     nextDeviceAssignment_ = (nextDeviceAssignment_ + pendingChunks_.size()) % deviceIds_.size();
@@ -293,9 +292,15 @@ class SubstructLibrary::Impl {
     std::unique_ptr<ResidentTargetChunk> chunk;
   };
 
+  // One admitted query's device state: the search pipeline and the GPU screen.
+  struct QueryWorkspace {
+    std::shared_ptr<ResidentSubstructSearchWorkspace> search;
+    std::unique_ptr<PatternScreenWorkspace>           screen;
+  };
+
   struct DeviceWorkspaces {
-    std::vector<std::shared_ptr<ResidentSubstructSearchWorkspace>>      owned;
-    std::unique_ptr<ThreadSafeQueue<ResidentSubstructSearchWorkspace*>> available;
+    std::vector<std::unique_ptr<QueryWorkspace>>      owned;
+    std::unique_ptr<ThreadSafeQueue<QueryWorkspace*>> available;
   };
 
   class WorkspaceLease {
@@ -312,11 +317,13 @@ class SubstructLibrary::Impl {
         pool_->available->push(workspace_);
       }
     }
-    [[nodiscard]] ResidentSubstructSearchWorkspace* get() const { return workspace_; }
+    WorkspaceLease(const WorkspaceLease&)                          = delete;
+    WorkspaceLease&               operator=(const WorkspaceLease&) = delete;
+    [[nodiscard]] QueryWorkspace* get() const { return workspace_; }
 
    private:
-    DeviceWorkspaces*                 pool_      = nullptr;
-    ResidentSubstructSearchWorkspace* workspace_ = nullptr;
+    DeviceWorkspaces* pool_      = nullptr;
+    QueryWorkspace*   workspace_ = nullptr;
   };
 
   [[nodiscard]] int constructionThreads() const {
@@ -423,10 +430,12 @@ class SubstructLibrary::Impl {
       for (std::size_t index = 0; index < deviceIds_.size(); ++index) {
         const WithDevice device(deviceIds_[index]);
         auto&            pool = pools[index];
-        pool.available        = std::make_unique<ThreadSafeQueue<ResidentSubstructSearchWorkspace*>>();
+        pool.available        = std::make_unique<ThreadSafeQueue<QueryWorkspace*>>();
         pool.owned.reserve(concurrency);
         for (std::size_t slot = 0; slot < concurrency; ++slot) {
-          auto workspace = makeResidentSubstructSearchWorkspace(deviceIds_[index]);
+          auto workspace    = std::make_unique<QueryWorkspace>();
+          workspace->search = makeResidentSubstructSearchWorkspace(deviceIds_[index]);
+          workspace->screen = std::make_unique<PatternScreenWorkspace>(deviceIds_[index]);
           pool.available->push(workspace.get());
           pool.owned.push_back(std::move(workspace));
         }
@@ -447,9 +456,11 @@ class SubstructLibrary::Impl {
     if (deviceIds_.size() > 1 && stream != nullptr) {
       throw std::invalid_argument("A single external CUDA stream cannot be used with a multi-GPU substructure library");
     }
-    std::unique_ptr<ExplicitBitVect> queryFingerprint;
+    std::unique_ptr<ExplicitBitVect>  queryFingerprint;
+    std::optional<PatternScreenQuery> screenQuery;
     if (usePatternFingerprints_) {
       queryFingerprint.reset(RDKit::PatternFingerprintMol(query));
+      screenQuery = makePatternScreenQuery(queryFingerprint.get(), static_cast<int>(query.getNumAtoms()));
     }
     std::vector<std::vector<unsigned int>> results(deviceIds_.size());
     detail::OpenMPExceptionRegistry        exceptionRegistry;
@@ -463,22 +474,14 @@ class SubstructLibrary::Impl {
         const auto       localConfig  = deviceConfig(index);
         auto&            deviceResult = results[index];
         WorkspaceLease   workspace(workspacePools_[index]);
-        for (const auto& record : chunks_) {
-          if (record.deviceIndex != index) {
-            continue;
-          }
-          const auto chunkMatches =
-            matchingIds(*record.chunk, query, queryFingerprint.get(), deviceStream, localConfig, workspace.get());
-          for (const MoleculeId id : chunkMatches) {
-            deviceResult.push_back(static_cast<unsigned int>(id));
-            if (maxResults > 0 && deviceResult.size() == static_cast<std::size_t>(maxResults)) {
-              break;
-            }
-          }
-          if (maxResults > 0 && deviceResult.size() == static_cast<std::size_t>(maxResults)) {
-            break;
-          }
-        }
+        deviceResult = deviceMatchingIds(index,
+                                         query,
+                                         queryFingerprint.get(),
+                                         screenQuery,
+                                         deviceStream,
+                                         localConfig,
+                                         *workspace.get(),
+                                         maxResults);
       } catch (...) {
         exceptionRegistry.store(std::current_exception());
       }
@@ -487,86 +490,109 @@ class SubstructLibrary::Impl {
     return results;
   }
 
-  [[nodiscard]] std::vector<MoleculeId> matchingIds(const ResidentTargetChunk&        chunk,
-                                                    const RDKit::ROMol&               query,
-                                                    const ExplicitBitVect*            queryFingerprint,
-                                                    cudaStream_t                      stream,
-                                                    const SubstructSearchConfig&      config,
-                                                    ResidentSubstructSearchWorkspace* workspace) const {
-    std::vector<MoleculeId> matches;
-    if (chunk.gpuTargetCount() != 0) {
-      std::vector<int>        candidates;
-      const std::vector<int>* candidatePointer = nullptr;
-      if (queryFingerprint != nullptr) {
-        candidates.reserve(chunk.gpuTargetCount());
-        for (std::size_t index = 0; index < chunk.packedGlobalIds().size(); ++index) {
-          const auto* targetFingerprint = chunk.patternFingerprint(chunk.packedGlobalIds()[index]);
-          if (targetFingerprint == nullptr || AllProbeBitsMatch(*queryFingerprint, *targetFingerprint)) {
-            candidates.push_back(static_cast<int>(index));
-          }
+  // Matching IDs on one device in ascending order, truncated to maxResults when positive.
+  [[nodiscard]] std::vector<unsigned int> deviceMatchingIds(std::size_t                              deviceIndex,
+                                                            const RDKit::ROMol&                      query,
+                                                            const ExplicitBitVect*                   queryFingerprint,
+                                                            const std::optional<PatternScreenQuery>& screenQuery,
+                                                            cudaStream_t                             stream,
+                                                            const SubstructSearchConfig&             config,
+                                                            QueryWorkspace&                          workspace,
+                                                            int                                      maxResults) const {
+    std::vector<unsigned int> matches;
+    const DeviceTargetSet*    targets = deviceSets_[deviceIndex].get();
+    if (targets != nullptr && targets->size() != 0) {
+      const int               numTargets = static_cast<int>(targets->size());
+      std::vector<int>        selected;
+      const std::vector<int>* candidates = nullptr;
+      if (screenQuery.has_value()) {
+        PatternScreenWorkspace& screen = *workspace.screen;
+        screen.prepare(1, targets->size(), targets->size());
+        screen.enqueueChunk(0,
+                            0,
+                            targets->devicePatternWords(),
+                            targets->deviceView().batchAtomStarts,
+                            numTargets,
+                            *screenQuery);
+        screen.collect(1, {0});
+        selected.assign(screen.indices(0), screen.indices(0) + screen.count(0));
+        candidates = &selected;
+      }
+      if (candidates == nullptr || !candidates->empty()) {
+        std::vector<std::uint8_t> gpuMatches;
+        hasSubstructMatchResident(targets->targets(),
+                                  targets->host(),
+                                  targets->device(),
+                                  query,
+                                  gpuMatches,
+                                  config.algorithm,
+                                  stream,
+                                  config,
+                                  workspace.search.get(),
+                                  candidates);
+        if (gpuMatches.size() != targets->size()) {
+          throw std::runtime_error("Resident substructure result size does not match its target set");
         }
-        candidatePointer = &candidates;
-      }
-      std::vector<std::uint8_t> gpuMatches;
-      hasSubstructMatchResident(chunk.supportedTargetPtrs(),
-                                chunk.packedHost(),
-                                chunk.deviceStorage(),
-                                query,
-                                gpuMatches,
-                                config.algorithm,
-                                stream,
-                                config,
-                                workspace,
-                                candidatePointer);
-      if (gpuMatches.size() != chunk.packedGlobalIds().size()) {
-        throw std::runtime_error("Resident substructure result size does not match its target chunk");
-      }
-      for (std::size_t index = 0; index < gpuMatches.size(); ++index) {
-        if (gpuMatches[index] != 0) {
-          matches.push_back(chunk.packedGlobalIds()[index]);
+        const auto& ids = targets->ids();
+        if (candidates != nullptr) {
+          for (const int target : *candidates) {
+            if (gpuMatches[static_cast<std::size_t>(target)] != 0) {
+              matches.push_back(static_cast<unsigned int>(ids[static_cast<std::size_t>(target)]));
+            }
+          }
+        } else {
+          for (std::size_t target = 0; target < gpuMatches.size(); ++target) {
+            if (gpuMatches[target] != 0) {
+              matches.push_back(static_cast<unsigned int>(ids[target]));
+            }
+          }
         }
       }
     }
 
-    for (const MoleculeId id : chunk.fallbackGlobalIds()) {
-      const auto* targetFingerprint = chunk.patternFingerprint(id);
-      if ((queryFingerprint == nullptr || targetFingerprint == nullptr ||
-           AllProbeBitsMatch(*queryFingerprint, *targetFingerprint)) &&
-          rdkitHasMatch(chunk.sourceMol(id), query)) {
-        matches.push_back(id);
+    // RDKit fallback targets. With a result limit already filled by GPU
+    // matches, only fallback IDs below the limit's last match can change it.
+    const bool        limitFilled   = maxResults > 0 && matches.size() >= static_cast<std::size_t>(maxResults);
+    const auto        fallbackBound = limitFilled ?
+                                        static_cast<MoleculeId>(matches[static_cast<std::size_t>(maxResults) - 1]) :
+                                        std::numeric_limits<MoleculeId>::max();
+    const std::size_t gpuMatchCount = matches.size();
+    for (const auto& record : chunks_) {
+      if (record.deviceIndex != deviceIndex) {
+        continue;
+      }
+      for (const MoleculeId id : record.chunk->fallbackGlobalIds()) {
+        if (id >= fallbackBound) {
+          break;
+        }
+        const auto* targetFingerprint = record.chunk->patternFingerprint(id);
+        if ((queryFingerprint == nullptr || targetFingerprint == nullptr ||
+             AllProbeBitsMatch(*queryFingerprint, *targetFingerprint)) &&
+            rdkitHasMatch(record.chunk->sourceMol(id), query)) {
+          matches.push_back(static_cast<unsigned int>(id));
+        }
       }
     }
-    std::sort(matches.begin(), matches.end());
+    if (matches.size() != gpuMatchCount) {
+      std::inplace_merge(matches.begin(), matches.begin() + static_cast<std::ptrdiff_t>(gpuMatchCount), matches.end());
+    }
+    if (maxResults > 0 && matches.size() > static_cast<std::size_t>(maxResults)) {
+      matches.resize(static_cast<std::size_t>(maxResults));
+    }
     return matches;
   }
 
-  void resetUploads(std::vector<std::unique_ptr<ResidentTargetChunk>>& chunks,
-                    const std::vector<std::size_t>&                    chunkDevices) noexcept {
+  void destroyDeviceSets(std::vector<std::unique_ptr<DeviceTargetSet>>& sets) noexcept {
     int originalDevice = -1;
     cudaGetDevice(&originalDevice);
-    for (std::size_t index = 0; index < chunks.size(); ++index) {
-      if (chunks[index] && cudaSetDevice(deviceIds_[chunkDevices[index]]) == cudaSuccess) {
-        chunks[index]->resetUpload();
+    for (std::size_t index = 0; index < sets.size(); ++index) {
+      if (sets[index] && index < deviceIds_.size() && cudaSetDevice(deviceIds_[index]) == cudaSuccess) {
+        sets[index].reset();
       }
     }
     if (originalDevice >= 0) {
       cudaSetDevice(originalDevice);
     }
-  }
-
-  void destroyDeviceChunks(std::vector<DeviceChunk>& chunks) noexcept {
-    int originalDevice = -1;
-    cudaGetDevice(&originalDevice);
-    for (auto& record : chunks) {
-      if (record.chunk && record.deviceIndex < deviceIds_.size() &&
-          cudaSetDevice(deviceIds_[record.deviceIndex]) == cudaSuccess) {
-        record.chunk.reset();
-      }
-    }
-    if (originalDevice >= 0) {
-      cudaSetDevice(originalDevice);
-    }
-    chunks.clear();
   }
 
   void destroyWorkspacePools(std::vector<DeviceWorkspaces>& pools) noexcept {
@@ -598,6 +624,7 @@ class SubstructLibrary::Impl {
   std::unique_ptr<TargetChunkBuilder>               builder_;
   std::vector<std::unique_ptr<ResidentTargetChunk>> pendingChunks_;
   std::vector<DeviceChunk>                          chunks_;
+  std::vector<std::unique_ptr<DeviceTargetSet>>     deviceSets_;
   std::vector<int>                                  deviceIds_;
   mutable std::vector<DeviceWorkspaces>             workspacePools_;
   MoleculeId                                        nextId_                       = 0;

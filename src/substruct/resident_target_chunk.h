@@ -14,6 +14,7 @@
 
 #include "src/substruct/molecules.h"
 #include "src/utils/device.h"
+#include "src/utils/device_vector.h"
 
 namespace RDKit {
 class ROMol;
@@ -25,27 +26,17 @@ namespace nvMolKit {
 using MoleculeId = std::uint64_t;
 
 /**
- * @brief A sealed target chunk whose GPU-supported molecules can be made resident.
+ * @brief A sealed, host-side target chunk.
  *
  * The chunk owns an RDKit molecule copy for every ID in [firstId(), endId()).
  * GPU-supported molecules are additionally packed in packedHost(), with
  * packedGlobalIds()[i] identifying packed molecule i. Molecules which cannot
  * use the GPU representation remain available through sourceMol() and are
- * listed in fallbackGlobalIds().
- *
- * Source data and ID mappings are immutable after construction. Device upload
- * is a two-step operation: beginUpload() enqueues the copy and commit() waits
- * for it before making deviceView() available to searches.
+ * listed in fallbackGlobalIds(). Chunks are immutable except that their packed
+ * copies may be released once a DeviceTargetSet has absorbed them.
  */
 class ResidentTargetChunk {
  public:
-  enum class State : std::uint8_t {
-    Sealed,
-    Uploading,
-    Committed,
-    Failed,
-  };
-
   ResidentTargetChunk(const ResidentTargetChunk&)            = delete;
   ResidentTargetChunk& operator=(const ResidentTargetChunk&) = delete;
   ResidentTargetChunk(ResidentTargetChunk&&)                 = delete;
@@ -60,23 +51,6 @@ class ResidentTargetChunk {
                       std::vector<std::uint8_t>                     gpuSupported,
                       std::vector<std::unique_ptr<ExplicitBitVect>> patternFingerprints);
 
-  /** Enqueue all packed target arrays on stream without synchronizing it. */
-  void beginUpload(cudaStream_t stream);
-
-  /** Wait for a previously enqueued upload and publish the device view. */
-  void commit();
-
-  /** Convenience barrier equivalent to beginUpload(stream) followed by commit(). */
-  void finalize(cudaStream_t stream);
-
-  /**
-   * Wait for any in-flight upload, release device storage, and return to the
-   * sealed state so the upload can be retried. Host data is unaffected. Must
-   * be called with the chunk's upload device current.
-   */
-  void resetUpload() noexcept;
-
-  [[nodiscard]] State       state() const noexcept { return state_; }
   [[nodiscard]] MoleculeId  firstId() const noexcept { return firstId_; }
   [[nodiscard]] MoleculeId  endId() const noexcept { return firstId_ + sourceMolecules_.size(); }
   [[nodiscard]] std::size_t size() const noexcept { return sourceMolecules_.size(); }
@@ -95,17 +69,11 @@ class ResidentTargetChunk {
   [[nodiscard]] const std::vector<MoleculeId>& packedGlobalIds() const noexcept { return packedGlobalIds_; }
   [[nodiscard]] const std::vector<MoleculeId>& fallbackGlobalIds() const noexcept { return fallbackGlobalIds_; }
 
-  /**
-   * @throws std::logic_error unless commit() completed successfully.
-   */
-  [[nodiscard]] TargetMoleculesDeviceView deviceView() const;
+  /** Word-major pattern fingerprints of the packed targets; empty when fingerprints are disabled. */
+  [[nodiscard]] const std::vector<std::uint64_t>& packedPatternWords() const noexcept { return packedPatternWords_; }
 
-  /**
-   * Return the owning device storage for existing resident-search entry points.
-   * @throws std::logic_error unless commit() completed successfully or when
-   * the chunk contains no GPU-supported targets.
-   */
-  [[nodiscard]] const MoleculesDevice& deviceStorage() const;
+  /** Drop the packed copies after a DeviceTargetSet has absorbed them. */
+  void releasePackedData() noexcept;
 
  private:
   MoleculeId                                    firstId_ = 0;
@@ -116,10 +84,48 @@ class ResidentTargetChunk {
   std::vector<MoleculeId>                       fallbackGlobalIds_;
   std::vector<std::uint8_t>                     gpuSupported_;
   std::vector<std::unique_ptr<ExplicitBitVect>> patternFingerprints_;
+  std::vector<std::uint64_t>                    packedPatternWords_;
+};
 
-  State                            state_ = State::Sealed;
-  std::unique_ptr<MoleculesDevice> packedDevice_;
-  std::unique_ptr<ScopedCudaEvent> uploadComplete_;
+/**
+ * @brief Every GPU-supported target on one device, resident as a single batch.
+ *
+ * Targets are concatenated in ascending ID order, so one screen and one match
+ * launch per query cover the whole device regardless of chunk count.
+ */
+class DeviceTargetSet {
+ public:
+  /**
+   * Concatenate base (may be null) with chunks, whose IDs must all follow the
+   * base's. Nothing is uploaded until upload().
+   */
+  DeviceTargetSet(const DeviceTargetSet*                         base,
+                  const std::vector<const ResidentTargetChunk*>& chunks,
+                  bool                                           usePatternFingerprints);
+  ~DeviceTargetSet();
+
+  DeviceTargetSet(const DeviceTargetSet&)            = delete;
+  DeviceTargetSet& operator=(const DeviceTargetSet&) = delete;
+
+  /** Copy the set to the current device and wait for the copy. */
+  void upload(cudaStream_t stream);
+
+  [[nodiscard]] std::size_t                             size() const noexcept { return ids_.size(); }
+  [[nodiscard]] const std::vector<MoleculeId>&          ids() const noexcept { return ids_; }
+  [[nodiscard]] const std::vector<const RDKit::ROMol*>& targets() const noexcept { return targets_; }
+  [[nodiscard]] const MoleculesHost&                    host() const noexcept { return host_; }
+  [[nodiscard]] const MoleculesDevice&                  device() const;
+  [[nodiscard]] TargetMoleculesDeviceView deviceView() const { return device().view<MoleculeType::Target>(); }
+  /** Word-major device fingerprints, or null when fingerprints are disabled. */
+  [[nodiscard]] const std::uint64_t*      devicePatternWords() const noexcept { return patternWordsDevice_.data(); }
+
+ private:
+  MoleculesHost                    host_;
+  std::vector<const RDKit::ROMol*> targets_;
+  std::vector<MoleculeId>          ids_;
+  std::vector<std::uint64_t>       patternWords_;
+  std::unique_ptr<MoleculesDevice> device_;
+  AsyncDeviceVector<std::uint64_t> patternWordsDevice_;
 };
 
 /**

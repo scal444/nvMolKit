@@ -52,10 +52,16 @@ target_link_libraries(
 target_compile_options(substructure_search
                        PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp>)
 
+add_library(pattern_screen pattern_screen.cpp pattern_screen.cu)
+target_link_libraries(
+  pattern_screen
+  PUBLIC device device_vector cuda_error_check
+  PRIVATE ${RDKit_LIBS})
+
 add_library(resident_target_chunk resident_target_chunk.cpp)
 target_link_libraries(
   resident_target_chunk
-  PUBLIC molecules device
+  PUBLIC molecules device pattern_screen
   PRIVATE ${RDKit_LIBS} OpenMP::OpenMP_CXX openmp_helpers)
 
 add_library(substruct_library substruct_library.cpp)
