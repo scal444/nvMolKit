@@ -95,6 +95,8 @@ struct ResidentSubstructSearchWorkspace {
 
   /// Pinned query atom counts lent to each search, avoiding a pinned allocation per call.
   PinnedHostVector<int> queryAtomCounts;
+  /// Device query storage refilled by each search; its buffers only grow.
+  MoleculesDevice       queriesDevice;
 
   void ensureExecutors(int count) {
     while (static_cast<int>(executors.size()) < count) {
@@ -1230,8 +1232,10 @@ bool getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
   MoleculesHost    queriesHost = buildQueryBatchParallel(queries, emptySortOrder, effectivePreprocessingThreads);
   buildRange2.pop();
 
-  ScopedNvtxRange buildRange3("Build device query data structures");
-  MoleculesDevice queriesDevice(stream);
+  ScopedNvtxRange  buildRange3("Build device query data structures");
+  MoleculesDevice  localQueriesDevice;
+  MoleculesDevice& queriesDevice = workspace != nullptr ? workspace->queriesDevice : localQueriesDevice;
+  queriesDevice.setStream(stream);
   buildRange3.pop();
 
   ScopedNvtxRange buildRange4("Copy queries to device");
