@@ -57,7 +57,7 @@ def parse_tag(tag):
     return mode, int(k), rule, int(delta) / 100, rounds
 
 
-def centroids_from_sums(sums, sizes, device, chunk=65_536):
+def centroids_from_sums(sums, sizes, device, chunk=16_384):
     """int8 (K, 2048) majority centroids on the GPU and packed uint8 (K, 256) on the host."""
     k = len(sizes)
     bits = torch.empty((k, N_BITS), dtype=torch.int8, device=device)
@@ -74,7 +74,7 @@ def centroids_from_sums(sums, sizes, device, chunk=65_536):
     return bits, packed
 
 
-def union_isim(sums, sizes, a, b, device, chunk=16_384):
+def union_isim(sums, sizes, a, b, device, chunk=4096):
     out = np.empty(len(a), dtype=np.float64)
     for c in range(0, len(a), chunk):
         aa, bb = a[c : c + chunk], b[c : c + chunk]
