@@ -21,7 +21,6 @@ source contains more entries than requested.
 """
 
 import csv
-import os
 import pickle
 import random
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -47,6 +46,7 @@ def _process_map_batches(
     *,
     desc: str,
     batch_size: int = _PROCESS_BATCH_SIZE,
+    max_workers: int | None = None,
 ) -> list[Any]:
     """Process values in batches while reporting batches as they complete.
 
@@ -58,12 +58,13 @@ def _process_map_batches(
     """
     if batch_size < 1:
         raise ValueError(f"batch_size must be positive, got {batch_size}")
+    if max_workers is not None and max_workers < 1:
+        raise ValueError("max_workers must be positive or None")
     if not values:
         return []
 
     results: list[Any] = [None] * len(values)
-    prep_limit = os.environ.get("NVMOLKIT_BENCH_PREP_THREADS")
-    with ProcessPoolExecutor(max_workers=None if prep_limit is None else int(prep_limit)) as executor, tqdm(
+    with ProcessPoolExecutor(max_workers=max_workers) as executor, tqdm(
         total=len(values), desc=desc
     ) as progress:
         futures = {}
@@ -110,6 +111,8 @@ def load_pickle(
     max_count: int = 0,
     seed: int | None = None,
     keep_buffer: bool = False,
+    *,
+    max_workers: int | None = None,
 ) -> list[Chem.Mol]:
     """Load molecules from a pickle file containing a list of RDKit binary molecules.
 
@@ -120,6 +123,7 @@ def load_pickle(
             uniform random sample of this size before unpickling.
         seed: Optional seed for the sampling RNG.
         keep_buffer: Return the 10% candidate reserve instead of trimming it.
+        max_workers: Maximum parsing processes; None uses the executor default.
 
     Returns:
         List of parsed RDKit molecules. The list is always shuffled
@@ -139,6 +143,7 @@ def load_pickle(
         _mol_from_binary,
         binary_mols,
         desc="Unpickling molecules",
+        max_workers=max_workers,
     )
     print(f"  Loaded {len(mols)} molecules from {filepath}")
     return mols
@@ -173,6 +178,8 @@ def load_smiles(
     sanitize: bool = True,
     seed: int | None = None,
     keep_buffer: bool = False,
+    *,
+    max_workers: int | None = None,
 ) -> list[Chem.Mol]:
     """Load and parse molecules from a SMILES file.
 
@@ -191,6 +198,7 @@ def load_smiles(
         sanitize: Sanitize molecules while parsing.
         seed: Optional seed for reservoir sampling and shuffling.
         keep_buffer: Return the 10% candidate reserve instead of trimming it.
+        max_workers: Maximum parsing processes; None uses the executor default.
     """
     read_limit = _buffered_count(max_count)
     rng = random.Random(seed)
@@ -200,7 +208,7 @@ def load_smiles(
     mols: list[Chem.Mol] = []
     if smiles_list:
         parse_func = partial(_parse_smiles, sanitize=sanitize)
-        parsed = _process_map_batches(parse_func, smiles_list, desc="Parsing molecules")
+        parsed = _process_map_batches(parse_func, smiles_list, desc="Parsing molecules", max_workers=max_workers)
         parse_failures = 0
         for mol in parsed:
             if mol is None:
@@ -227,12 +235,15 @@ def load_csv(
     sanitize: bool = True,
     seed: int | None = None,
     keep_buffer: bool = False,
+    *,
+    max_workers: int | None = None,
 ) -> list[Chem.Mol]:
     """Load molecules and selected properties from a scored CSV file.
 
     Rows are reservoir-sampled before SMILES parsing, and the returned list is
     always shuffled. Selected CSV values are attached as RDKit string
     properties after worker-process parsing so priority metadata is preserved.
+    ``max_workers`` limits parsing processes; None uses the executor default.
     """
     properties = property_columns or []
     read_limit = _buffered_count(max_count)
@@ -261,7 +272,7 @@ def load_csv(
 
     smiles_list = [row[smiles_column] for row in reservoir]
     parse_func = partial(_parse_smiles, sanitize=sanitize)
-    parsed = _process_map_batches(parse_func, smiles_list, desc="Parsing molecules")
+    parsed = _process_map_batches(parse_func, smiles_list, desc="Parsing molecules", max_workers=max_workers)
     mols: list[Chem.Mol] = []
     parse_failures = 0
     for mol, row in zip(parsed, reservoir, strict=True):

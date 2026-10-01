@@ -71,6 +71,9 @@ def test_process_map_batches_reports_completed_batches_and_preserves_order(monke
             return self._result
 
     class FakeExecutor:
+        def __init__(self, *, max_workers):
+            assert max_workers == 2
+
         def __enter__(self):
             return self
 
@@ -106,7 +109,9 @@ def test_process_map_batches_reports_completed_batches_and_preserves_order(monke
     monkeypatch.setattr(loaders, "as_completed", lambda futures: reversed(list(futures)))
     monkeypatch.setattr(loaders, "tqdm", make_progress)
 
-    results = loaders._process_map_batches(lambda value: value * 2, [0, 1, 2, 3, 4], desc="Working", batch_size=2)
+    results = loaders._process_map_batches(
+        lambda value: value * 2, [0, 1, 2, 3, 4], desc="Working", batch_size=2, max_workers=2
+    )
 
     assert results == [0, 2, 4, 6, 8]
     assert progress_bars[0].total == 5

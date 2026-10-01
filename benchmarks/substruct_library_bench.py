@@ -502,7 +502,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chunk_sizes", "--chunk_size", nargs="+", type=int, default=[65_536])
     parser.add_argument("--batch_size", type=int, default=1024)
     parser.add_argument("--workers", type=int, default=-1)
-    parser.add_argument("--prep_threads", type=int, default=-1)
+    parser.add_argument(
+        "--prep_threads", type=int, default=-1, help="Preprocessing threads and input parsing processes (-1 or 0 = auto)"
+    )
     gpu_selection = parser.add_mutually_exclusive_group()
     gpu_selection.add_argument("--gpu_ids", nargs="+", type=int, help="GPU IDs used by one internally sharded library")
     gpu_selection.add_argument("--gpu_id", type=int, help="Deprecated single-GPU spelling")
@@ -587,9 +589,10 @@ def _validate_args(args: argparse.Namespace) -> None:
 
 
 def _load_molecules(args: argparse.Namespace) -> list[Any]:
+    max_workers = args.prep_threads if args.prep_threads > 0 else None
     if args.pickle:
-        return load_pickle(args.pickle, args.num_mols, seed=args.seed)
-    return load_smiles(args.smiles, args.num_mols, args.sanitize, seed=args.seed)
+        return load_pickle(args.pickle, args.num_mols, seed=args.seed, max_workers=max_workers)
+    return load_smiles(args.smiles, args.num_mols, args.sanitize, seed=args.seed, max_workers=max_workers)
 
 
 def _load_queries(args: argparse.Namespace) -> list[Any]:
@@ -598,7 +601,10 @@ def _load_queries(args: argparse.Namespace) -> list[Any]:
         if 0 < args.num_queries < len(queries):
             queries = random.Random(args.seed).sample(queries, args.num_queries)
         return queries
-    queries = load_smiles(args.query_smiles, args.num_queries, args.sanitize, seed=args.seed)
+    queries = load_smiles(
+        args.query_smiles, args.num_queries, args.sanitize, seed=args.seed,
+        max_workers=args.prep_threads if args.prep_threads > 0 else None,
+    )
     for query in queries:
         Chem.RemoveStereochemistry(query)
     return queries
