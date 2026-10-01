@@ -123,6 +123,14 @@ const MoleculesDevice& DeviceTargetSet::device() const {
   return *device_;
 }
 
+std::size_t DeviceTargetSet::deviceBytes() const noexcept {
+  if (device_ == nullptr) {
+    return 0;
+  }
+  return host_.batchAtomStarts.size() * sizeof(int) + host_.atomDataPacked.size() * sizeof(AtomDataPacked) +
+         host_.bondTypeCounts.size() * sizeof(BondTypeCounts) + host_.targetAtomBonds.size() * sizeof(TargetAtomBonds);
+}
+
 const PersistentDeviceTargets& DeviceTargetSet::persistentTargets() const {
   if (persistentTargets_ == nullptr) {
     throw std::logic_error("Device target set has no uploaded targets");

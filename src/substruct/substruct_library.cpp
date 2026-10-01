@@ -8,9 +8,12 @@
 #include <omp.h>
 
 #include <algorithm>
+#include <condition_variable>
 #include <cstdint>
 #include <limits>
 #include <mutex>
+#include <semaphore>
+#include <shared_mutex>
 #include <stdexcept>
 #include <unordered_set>
 #include <utility>
@@ -172,12 +175,26 @@ class SubstructLibrary::Impl {
         uploadExceptions.store(std::current_exception());
       }
     }
+    bool workspacesReconfigured = false;
     try {
       uploadExceptions.rethrow();
       chunks_.reserve(chunks_.size() + pendingChunks_.size());
-      ensureWorkspaces();
+      // Workspaces are sized against memory that already holds the new sets,
+      // so configure them before publishing anything. The sets they replace
+      // are freed on publish, so their memory counts as available.
+      std::vector<std::size_t> reclaimableBytes(deviceIds_.size(), 0);
+      for (std::size_t index = 0; index < deviceIds_.size(); ++index) {
+        if (newSets[index] != nullptr && deviceSets_[index] != nullptr) {
+          reclaimableBytes[index] = deviceSets_[index]->deviceBytes();
+        }
+      }
+      workspacesReconfigured = true;
+      configureWorkspaces(reclaimableBytes);
     } catch (...) {
       destroyDeviceSets(newSets);
+      if (workspacesReconfigured) {
+        restoreWorkspaces();
+      }
       throw;
     }
 
@@ -206,6 +223,21 @@ class SubstructLibrary::Impl {
   [[nodiscard]] std::size_t pendingSize() const {
     auto lock = readLock();
     return static_cast<std::size_t>(nextId_) - committedSize_;
+  }
+
+  [[nodiscard]] std::size_t queryConcurrency() const {
+    auto lock = readLock();
+    return queryConcurrency_;
+  }
+
+  [[nodiscard]] std::size_t batchesInFlightPerGpu() const {
+    auto lock = readLock();
+    return batchesInFlightPerGpu_;
+  }
+
+  [[nodiscard]] std::size_t workspaceBytesPerQueryPerGpu() const {
+    auto lock = readLock();
+    return workspaceBytesPerQueryPerGpu_;
   }
 
   [[nodiscard]] std::vector<unsigned int> getMatches(const RDKit::ROMol& query,
@@ -260,16 +292,67 @@ class SubstructLibrary::Impl {
     std::unique_ptr<TargetChunk> chunk;
   };
 
-  // Query state on one device, reused by every query.
+  // One admitted query's device state.
   struct QueryWorkspace {
     std::shared_ptr<SubstructSearchWorkspace> search;
     // Per-target match flags, reused across queries to avoid reallocating them.
     std::vector<std::uint8_t>                 gpuMatches;
   };
 
-  // Every call holds the library lock, so queries, additions, and finalize() run one at a time.
-  [[nodiscard]] std::unique_lock<std::mutex> writeLock() const { return std::unique_lock(mutex_); }
-  [[nodiscard]] std::unique_lock<std::mutex> readLock() const { return std::unique_lock(mutex_); }
+  // Idle workspaces are handed out most recently released first, so a caller
+  // issuing queries one at a time keeps reusing the same warm buffers.
+  class IdleWorkspaces {
+   public:
+    void push(QueryWorkspace* workspace) {
+      {
+        std::lock_guard lock(mutex_);
+        idle_.push_back(workspace);
+      }
+      available_.notify_one();
+    }
+    [[nodiscard]] QueryWorkspace* pop() {
+      std::unique_lock lock(mutex_);
+      available_.wait(lock, [this] { return !idle_.empty(); });
+      QueryWorkspace* workspace = idle_.back();
+      idle_.pop_back();
+      return workspace;
+    }
+
+   private:
+    std::mutex                   mutex_;
+    std::condition_variable      available_;
+    std::vector<QueryWorkspace*> idle_;
+  };
+
+  struct DeviceWorkspaces {
+    std::vector<std::unique_ptr<QueryWorkspace>> owned;
+    std::unique_ptr<IdleWorkspaces>              available;
+  };
+
+  class WorkspaceLease {
+   public:
+    explicit WorkspaceLease(DeviceWorkspaces& pool) : pool_(&pool), workspace_(pool.available->pop()) {}
+    ~WorkspaceLease() { pool_->available->push(workspace_); }
+    WorkspaceLease(const WorkspaceLease&)                          = delete;
+    WorkspaceLease&               operator=(const WorkspaceLease&) = delete;
+    [[nodiscard]] QueryWorkspace* get() const { return workspace_; }
+
+   private:
+    DeviceWorkspaces* pool_      = nullptr;
+    QueryWorkspace*   workspace_ = nullptr;
+  };
+
+  // Writers hold writerGate_ while acquiring the exclusive lock and readers pass through it first, so a waiting
+  // writer is not starved by a continuous stream of queries holding shared locks.
+  [[nodiscard]] std::unique_lock<std::shared_mutex> writeLock() {
+    const std::lock_guard gate(writerGate_);
+    return std::unique_lock(mutex_);
+  }
+
+  [[nodiscard]] std::shared_lock<std::shared_mutex> readLock() const {
+    { const std::lock_guard gate(writerGate_); }
+    return std::shared_lock(mutex_);
+  }
 
   // Move the current builder's molecules, if any, to the pending chunks and start a fresh builder at nextId_.
   void sealBuilder() {
@@ -307,6 +390,23 @@ class SubstructLibrary::Impl {
     if (!published_) {
       throw std::logic_error("Substructure library must be finalized before querying");
     }
+    if (workspacePools_.empty()) {
+      throw std::runtime_error(
+        "Substructure library has no query workspaces after a failed finalize(); retry finalize()");
+    }
+  }
+
+  // After a failed finalize(), give the previously published generation its
+  // workspaces back. Failure here leaves queries rejected by requirePublished().
+  void restoreWorkspaces() noexcept {
+    if (!published_) {
+      return;
+    }
+    try {
+      configureWorkspaces(std::vector<std::size_t>(deviceIds_.size(), 0));
+    } catch (...) {
+      destroyWorkspaces();
+    }
   }
 
   [[nodiscard]] SubstructSearchConfig deviceConfig(std::size_t deviceIndex) const {
@@ -325,18 +425,81 @@ class SubstructLibrary::Impl {
     return result;
   }
 
-  // Create one query workspace per device on first use; they live as long as the library.
-  void ensureWorkspaces() {
-    if (workspaces_.size() == deviceIds_.size()) {
+  // reclaimableBytes[i] is device memory on device i that will be freed before any query runs.
+  void configureWorkspaces(const std::vector<std::size_t>& reclaimableBytes) {
+    destroyWorkspaces();
+    if (deviceIds_.empty()) {
+      queryConcurrency_ = 0;
       return;
     }
-    std::vector<std::unique_ptr<QueryWorkspace>> created(deviceIds_.size());
+
+    constexpr std::size_t    memoryNumerator   = 85;
+    constexpr std::size_t    memoryDenominator = 100;
+    std::size_t              capacity          = std::numeric_limits<std::size_t>::max();
+    std::size_t              workspaceBytes    = 0;
+    std::vector<std::size_t> availableBytesPerDevice(deviceIds_.size());
+    std::vector<std::size_t> baseBytesPerDevice(deviceIds_.size());
+    std::vector<std::size_t> recursiveBytesPerDevice(deviceIds_.size());
     for (std::size_t index = 0; index < deviceIds_.size(); ++index) {
       const WithDevice device(deviceIds_[index]);
-      created[index]         = std::make_unique<QueryWorkspace>();
-      created[index]->search = makeSubstructSearchWorkspace(deviceIds_[index]);
+      std::size_t      freeBytes  = 0;
+      std::size_t      totalBytes = 0;
+      cudaCheckError(cudaMemGetInfo(&freeBytes, &totalBytes));
+      const std::size_t usedBytes            = totalBytes - std::min(totalBytes, freeBytes + reclaimableBytes[index]);
+      const std::size_t budgetBytes          = totalBytes * memoryNumerator / memoryDenominator;
+      const std::size_t availableBytes       = budgetBytes > usedBytes ? budgetBytes - usedBytes : 0;
+      const std::size_t deviceWorkspaceBytes = estimateSubstructSearchWorkspaceBytes(deviceConfig(index));
+      // Every admitted query needs a base workspace; queries with recursive
+      // SMARTS additionally hold scratch, admitted separately so plain queries
+      // do not reserve it.
+      const std::size_t recursiveBytes       = estimateRecursiveScratchBytes(deviceConfig(index));
+      if (deviceWorkspaceBytes == 0 || availableBytes < deviceWorkspaceBytes + recursiveBytes) {
+        throw std::runtime_error(
+          "Substructure library cannot admit one query workspace below the 85% GPU-memory cutoff");
+      }
+      capacity                       = std::min(capacity, (availableBytes - recursiveBytes) / deviceWorkspaceBytes);
+      workspaceBytes                 = std::max(workspaceBytes, deviceWorkspaceBytes);
+      availableBytesPerDevice[index] = availableBytes;
+      baseBytesPerDevice[index]      = deviceWorkspaceBytes;
+      recursiveBytesPerDevice[index] = recursiveBytes;
     }
-    workspaces_ = std::move(created);
+
+    const auto        executorsPerQuery = static_cast<std::size_t>(searchWorkspaceExecutorCount(deviceConfig(0)));
+    // Each admitted query drives a search on every device from its own thread.
+    const std::size_t threadsPerQuery   = deviceIds_.size();
+    const std::size_t hostCapacity      = std::max<std::size_t>(
+      1,
+      static_cast<std::size_t>(omp_get_max_threads()) / std::max<std::size_t>(1, threadsPerQuery));
+    const std::size_t concurrency          = std::max<std::size_t>(1, std::min(capacity, hostCapacity));
+    std::size_t       recursiveConcurrency = concurrency;
+    for (std::size_t index = 0; index < deviceIds_.size(); ++index) {
+      const std::size_t spare = availableBytesPerDevice[index] - concurrency * baseBytesPerDevice[index];
+      recursiveConcurrency    = std::min(recursiveConcurrency, spare / recursiveBytesPerDevice[index]);
+    }
+    recursiveConcurrency = std::max<std::size_t>(1, recursiveConcurrency);
+    std::vector<DeviceWorkspaces> pools(deviceIds_.size());
+    try {
+      for (std::size_t index = 0; index < deviceIds_.size(); ++index) {
+        const WithDevice device(deviceIds_[index]);
+        auto&            pool = pools[index];
+        pool.available        = std::make_unique<IdleWorkspaces>();
+        pool.owned.reserve(concurrency);
+        for (std::size_t slot = 0; slot < concurrency; ++slot) {
+          auto workspace    = std::make_unique<QueryWorkspace>();
+          workspace->search = makeSubstructSearchWorkspace(deviceIds_[index]);
+          pool.available->push(workspace.get());
+          pool.owned.push_back(std::move(workspace));
+        }
+      }
+    } catch (...) {
+      destroyWorkspacePools(pools);
+      throw;
+    }
+    workspacePools_   = std::move(pools);
+    recursivePermits_ = std::make_unique<std::counting_semaphore<>>(static_cast<std::ptrdiff_t>(recursiveConcurrency));
+    queryConcurrency_ = concurrency;
+    batchesInFlightPerGpu_        = concurrency * executorsPerQuery;
+    workspaceBytesPerQueryPerGpu_ = workspaceBytes;
   }
 
   [[nodiscard]] std::vector<std::vector<unsigned int>> matchingIdsByDevice(const RDKit::ROMol& query,
@@ -344,6 +507,20 @@ class SubstructLibrary::Impl {
                                                                            int                 maxResults) const {
     if (deviceIds_.size() > 1 && stream != nullptr) {
       throw std::invalid_argument("A single external CUDA stream cannot be used with a multi-GPU substructure library");
+    }
+
+    // Recursive queries hold extra scratch on every device while they run.
+    struct RecursivePermit {
+      std::counting_semaphore<>* permits = nullptr;
+      ~RecursivePermit() {
+        if (permits != nullptr) {
+          permits->release();
+        }
+      }
+    } recursivePermit;
+    if (hasRecursiveSmarts(&query)) {
+      recursivePermits_->acquire();
+      recursivePermit.permits = recursivePermits_.get();
     }
 
     std::vector<std::vector<unsigned int>> results(deviceIds_.size());
@@ -356,7 +533,8 @@ class SubstructLibrary::Impl {
         const WithDevice device(deviceIds_[index]);
         cudaStream_t     deviceStream = validateStream(stream);
         const auto       localConfig  = deviceConfig(index);
-        results[index] = deviceMatchingIds(index, query, deviceStream, localConfig, *workspaces_[index], maxResults);
+        WorkspaceLease   workspace(workspacePools_[index]);
+        results[index] = deviceMatchingIds(index, query, deviceStream, localConfig, *workspace.get(), maxResults);
       } catch (...) {
         exceptionRegistry.store(std::current_exception());
       }
@@ -449,26 +627,43 @@ class SubstructLibrary::Impl {
       [&](std::size_t index) { sets[index].reset(); });
   }
 
-  void destroyWorkspaces() noexcept {
+  void destroyWorkspacePools(std::vector<DeviceWorkspaces>& pools) noexcept {
     releaseOnDevices(
-      workspaces_.size(),
-      [&](std::size_t index) { return workspaces_[index] != nullptr; },
-      [&](std::size_t index) { workspaces_[index].reset(); });
-    workspaces_.clear();
+      pools.size(),
+      [&](std::size_t index) { return pools[index].available != nullptr || !pools[index].owned.empty(); },
+      [&](std::size_t index) {
+        pools[index].available.reset();
+        pools[index].owned.clear();
+      });
+    pools.clear();
   }
 
-  const std::size_t                                    chunkSize_;
-  SubstructSearchConfig                                config_;
-  mutable std::mutex                                   mutex_;
-  std::unique_ptr<TargetChunkBuilder>                  builder_;
-  std::vector<std::unique_ptr<TargetChunk>>            pendingChunks_;
-  std::vector<DeviceChunk>                             chunks_;
-  std::vector<std::unique_ptr<DeviceTargetSet>>        deviceSets_;
-  std::vector<int>                                     deviceIds_;
-  mutable std::vector<std::unique_ptr<QueryWorkspace>> workspaces_;
-  MoleculeId                                           nextId_        = 0;
-  std::size_t                                          committedSize_ = 0;
-  bool                                                 published_     = false;
+  void destroyWorkspaces() noexcept {
+    destroyWorkspacePools(workspacePools_);
+    recursivePermits_.reset();
+    queryConcurrency_             = 0;
+    batchesInFlightPerGpu_        = 0;
+    workspaceBytesPerQueryPerGpu_ = 0;
+  }
+
+  const std::size_t                             chunkSize_;
+  SubstructSearchConfig                         config_;
+  mutable std::shared_mutex                     mutex_;
+  mutable std::mutex                            writerGate_;
+  std::unique_ptr<TargetChunkBuilder>           builder_;
+  std::vector<std::unique_ptr<TargetChunk>>     pendingChunks_;
+  std::vector<DeviceChunk>                      chunks_;
+  std::vector<std::unique_ptr<DeviceTargetSet>> deviceSets_;
+  std::vector<int>                              deviceIds_;
+  mutable std::vector<DeviceWorkspaces>         workspacePools_;
+  // Queries with recursive SMARTS currently allowed to hold recursive scratch.
+  std::unique_ptr<std::counting_semaphore<>>    recursivePermits_;
+  MoleculeId                                    nextId_                       = 0;
+  std::size_t                                   committedSize_                = 0;
+  bool                                          published_                    = false;
+  std::size_t                                   queryConcurrency_             = 0;
+  std::size_t                                   batchesInFlightPerGpu_        = 0;
+  std::size_t                                   workspaceBytesPerQueryPerGpu_ = 0;
 };
 
 SubstructLibrary::SubstructLibrary(std::size_t chunkSize, SubstructSearchConfig config)
@@ -494,6 +689,18 @@ std::size_t SubstructLibrary::size() const {
 
 std::size_t SubstructLibrary::pendingSize() const {
   return impl_->pendingSize();
+}
+
+std::size_t SubstructLibrary::queryConcurrency() const {
+  return impl_->queryConcurrency();
+}
+
+std::size_t SubstructLibrary::batchesInFlightPerGpu() const {
+  return impl_->batchesInFlightPerGpu();
+}
+
+std::size_t SubstructLibrary::workspaceBytesPerQueryPerGpu() const {
+  return impl_->workspaceBytesPerQueryPerGpu();
 }
 
 std::vector<unsigned int> SubstructLibrary::getMatches(const RDKit::ROMol& query,

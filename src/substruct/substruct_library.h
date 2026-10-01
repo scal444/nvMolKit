@@ -26,7 +26,8 @@ namespace nvMolKit {
  * addMol() stages an owned copy on the CPU. finalize() uploads all pending
  * chunks and atomically publishes them to subsequent queries. Previously
  * finalized chunks remain queryable while more molecules are pending.
- * Calls are serialized: queries, addMol(), and finalize() run one at a time.
+ * Queries may execute concurrently; addMol() and finalize() wait for active
+ * queries and exclude new queries until the operation completes.
  */
 class SubstructLibrary {
  public:
@@ -56,6 +57,15 @@ class SubstructLibrary {
 
   /** Number of staged molecules not yet visible to queries. */
   [[nodiscard]] std::size_t pendingSize() const;
+
+  /** Maximum number of memory-admitted queries that may execute concurrently. */
+  [[nodiscard]] std::size_t queryConcurrency() const;
+
+  /** Maximum simultaneously executing mini-batches on each GPU. */
+  [[nodiscard]] std::size_t batchesInFlightPerGpu() const;
+
+  /** Conservative device bytes reserved by one query on each GPU. */
+  [[nodiscard]] std::size_t workspaceBytesPerQueryPerGpu() const;
 
   /** Return matching molecule IDs in insertion order. Zero requests no results. */
   [[nodiscard]] std::vector<unsigned int> getMatches(const RDKit::ROMol& query,

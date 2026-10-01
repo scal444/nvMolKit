@@ -108,6 +108,8 @@ class DeviceTargetSet {
   [[nodiscard]] const std::vector<const RDKit::ROMol*>& targets() const noexcept { return targets_; }
   [[nodiscard]] const MoleculesHost&                    host() const noexcept { return host_; }
   [[nodiscard]] const MoleculesDevice&                  device() const;
+  /** Approximate device bytes held by the uploaded set. */
+  [[nodiscard]] std::size_t                             deviceBytes() const noexcept;
   /** The uploaded targets described for hasSubstructMatch(). */
   [[nodiscard]] const PersistentDeviceTargets&          persistentTargets() const;
 
