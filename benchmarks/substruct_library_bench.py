@@ -602,7 +602,10 @@ def _load_queries(args: argparse.Namespace) -> list[Any]:
             queries = random.Random(args.seed).sample(queries, args.num_queries)
         return queries
     queries = load_smiles(
-        args.query_smiles, args.num_queries, args.sanitize, seed=args.seed,
+        args.query_smiles,
+        args.num_queries,
+        args.sanitize,
+        seed=args.seed,
         max_workers=args.prep_threads if args.prep_threads > 0 else None,
     )
     for query in queries:

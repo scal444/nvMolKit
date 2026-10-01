@@ -64,9 +64,7 @@ def _process_map_batches(
         return []
 
     results: list[Any] = [None] * len(values)
-    with ProcessPoolExecutor(max_workers=max_workers) as executor, tqdm(
-        total=len(values), desc=desc
-    ) as progress:
+    with ProcessPoolExecutor(max_workers=max_workers) as executor, tqdm(total=len(values), desc=desc) as progress:
         futures = {}
         for start in range(0, len(values), batch_size):
             end = min(start + batch_size, len(values))
