@@ -21,6 +21,7 @@ source contains more entries than requested.
 """
 
 import csv
+import os
 import pickle
 import random
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -61,7 +62,10 @@ def _process_map_batches(
         return []
 
     results: list[Any] = [None] * len(values)
-    with ProcessPoolExecutor() as executor, tqdm(total=len(values), desc=desc) as progress:
+    prep_limit = os.environ.get("NVMOLKIT_BENCH_PREP_THREADS")
+    with ProcessPoolExecutor(max_workers=None if prep_limit is None else int(prep_limit)) as executor, tqdm(
+        total=len(values), desc=desc
+    ) as progress:
         futures = {}
         for start in range(0, len(values), batch_size):
             end = min(start + batch_size, len(values))
