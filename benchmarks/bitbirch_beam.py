@@ -195,11 +195,27 @@ class Tree:
 class BeamSearch:
     """Callable for ``refine_step``: best other cluster per molecule by beam search over ``tree``."""
 
-    def __init__(self, tree, beam, device, chunk=None):  # noqa: D107
-        # Keep chunk x beam x branching (candidate matrix) near 33M entries.
-        self.tree, self.beam, self.device = tree, beam, device
-        self.chunk = chunk or max(64, min(8192, 131_072 // beam))
+    def __init__(self, tree, beam, device, chunk=None, summary="molecules"):  # noqa: D107
+        # Keep chunk x beam x widest node (candidate matrix) near 16M entries.
+        self.tree, self.beam, self.device, self.summary = tree, beam, device, summary
+        self.chunk = chunk or max(64, min(8192, 16_777_216 // (beam * tree.max_children)))
         self.n_clusters = tree.n_clusters
+
+    def summaries_from_centroids(self, centroids, sizes):
+        """Like ``summaries`` but each internal entry = majority over its live clusters' centroids (unweighted)."""
+        tree, device = self.tree, self.device
+        alive = torch.from_numpy(sizes > 0).to(device)
+        out = []
+        for level in range(tree.depth - 1):
+            entry = torch.from_numpy(tree.ancestor[level]).to(device)
+            counts = torch.zeros((tree.n_entries[level], N_BITS), dtype=torch.int32, device=device)
+            for c in range(0, len(entry), 65_536):
+                rows = alive[c : c + 65_536]
+                counts.index_add_(0, entry[c : c + 65_536][rows], centroids[c : c + 65_536][rows].to(torch.int32))
+            n = torch.bincount(entry[alive], minlength=tree.n_entries[level])
+            majority = ((counts >= (n // 2 + n % 2).unsqueeze(1)) & (n > 0).unsqueeze(1)).to(torch.int8)
+            out.append((pack_words(majority), popcounts(majority), n > 0))
+        return out
 
     def summaries(self, fingerprints, labels):
         """Packed majority centroids, popcounts and alive masks of every internal level."""
@@ -226,7 +242,10 @@ class BeamSearch:
     def __call__(self, fingerprints, labels, centroids, centroid_pop, sizes):
         """Best other cluster (similarity, id) per molecule; ``centroids`` are int8 cluster centroids."""
         tree, device, beam = self.tree, self.device, self.beam
-        levels = self.summaries(fingerprints, labels)
+        if self.summary == "centroids":
+            levels = self.summaries_from_centroids(centroids, sizes)
+        else:
+            levels = self.summaries(fingerprints, labels)
         leaf_words = pack_words(centroids)
         leaf_alive = torch.from_numpy(sizes > 0).to(device)
         fp_words = torch.from_numpy(np.ascontiguousarray(fingerprints).view(np.int32))
