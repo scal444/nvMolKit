@@ -261,10 +261,13 @@ def best_other_centroid_ivf(
     query_chunk=131_072,
     block=(64, 64, 64),
     index=None,
+    topk=1,
 ):
     """Like ``best_other_centroid`` but each molecule scans only its ``probes`` most similar coarse cells.
 
     ``index``: optional prebuilt ``build_coarse`` result (coarse centers, cell of every centroid).
+    ``topk`` > 1: return (N, topk) arrays of the best hit in each of the ``topk`` best probed cells
+    (an approximate top-k: two near neighbours sharing one cell count once); -1 where fewer exist.
     """
     shifts = torch.arange(8, device=device, dtype=torch.uint8)
     coarse, cell_of = index if index is not None else build_coarse(centroid_bits, centroid_pop, n_cells, device)
@@ -277,8 +280,8 @@ def best_other_centroid_ivf(
     cell_start[1:] = torch.cumsum(torch.bincount(cell_of, minlength=n_cells), 0)
     coarse_h, coarse_p = coarse.half(), coarse.float().sum(1)
     bm, bn, bk = block
-    out_s = np.empty(len(labels), dtype=np.float32)
-    out_i = np.empty(len(labels), dtype=np.int64)
+    out_s = np.empty((len(labels), topk) if topk > 1 else len(labels), dtype=np.float32)
+    out_i = np.empty((len(labels), topk) if topk > 1 else len(labels), dtype=np.int64)
     for begin in range(0, len(labels), query_chunk):
         m = min(query_chunk, len(labels) - begin)
         q = unpack_bits(torch.from_numpy(fingerprints[begin : begin + m]).to(device), shifts)
@@ -325,6 +328,15 @@ def best_other_centroid_ivf(
             num_warps=4,
             num_stages=3,
         )
+        if topk > 1:
+            dense_s = torch.empty_like(pair_s)
+            dense_i = torch.empty_like(pair_i)
+            dense_s[by_cell] = pair_s
+            dense_i[by_cell] = pair_i
+            top = dense_s.view(m, probes).topk(min(topk, probes), dim=1)
+            out_s[begin : begin + m] = top.values.cpu().numpy()
+            out_i[begin : begin + m] = dense_i.view(m, probes).gather(1, top.indices).long().cpu().numpy()
+            continue
         query_long = pair_query.long()
         best = torch.full((m,), -1.0, device=device).scatter_reduce(0, query_long, pair_s, "amax")
         winner = torch.where(pair_s == best[query_long], pair_i, torch.full_like(pair_i, 2147483647))
