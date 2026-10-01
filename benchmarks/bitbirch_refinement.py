@@ -260,10 +260,14 @@ def best_other_centroid_ivf(
     probes=16,
     query_chunk=131_072,
     block=(64, 64, 64),
+    index=None,
 ):
-    """Like ``best_other_centroid`` but each molecule scans only its ``probes`` most similar coarse cells."""
+    """Like ``best_other_centroid`` but each molecule scans only its ``probes`` most similar coarse cells.
+
+    ``index``: optional prebuilt ``build_coarse`` result (coarse centers, cell of every centroid).
+    """
     shifts = torch.arange(8, device=device, dtype=torch.uint8)
-    coarse, cell_of = build_coarse(centroid_bits, centroid_pop, n_cells, device)
+    coarse, cell_of = index if index is not None else build_coarse(centroid_bits, centroid_pop, n_cells, device)
     n_cells = coarse.shape[0]
     order = torch.argsort(cell_of)
     sorted_bits = centroid_bits[order]
