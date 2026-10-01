@@ -18,6 +18,8 @@
 
 #include <cuda_runtime.h>
 
+#include <cstddef>
+#include <memory>
 #include <vector>
 
 #include "src/substruct/substruct_types.h"
@@ -27,6 +29,10 @@ class ROMol;
 }  // namespace RDKit
 
 namespace nvMolKit {
+
+struct MoleculesHost;
+class MoleculesDevice;
+struct ResidentSubstructSearchWorkspace;
 
 /**
  * @brief Perform batch substructure matching on GPU.
@@ -80,6 +86,38 @@ void hasSubstructMatch(const std::vector<const RDKit::ROMol*>& targets,
                        SubstructAlgorithm                      algorithm,
                        cudaStream_t                            stream,
                        const SubstructSearchConfig&            config = SubstructSearchConfig{});
+
+/**
+ * @brief Check one query against targets whose packed representation is already resident on the GPU.
+ *
+ * The target pointers and packed target batches must describe the same molecules
+ * in the same order. This entry point is intended for persistent collections;
+ * callers retain ownership of all three target representations for the duration
+ * of the synchronous call. candidateTargetIndices may select an ordered subset
+ * of resident targets for a one-query, non-recursive search; omitted targets
+ * retain false results. When results already holds targets.size() zeros it is
+ * reused without being cleared; otherwise it is reallocated.
+ */
+void hasSubstructMatchResident(const std::vector<const RDKit::ROMol*>& targets,
+                               const MoleculesHost&                    targetsHost,
+                               const MoleculesDevice&                  targetsDevice,
+                               const RDKit::ROMol&                     query,
+                               std::vector<uint8_t>&                   results,
+                               SubstructAlgorithm                      algorithm,
+                               cudaStream_t                            stream,
+                               const SubstructSearchConfig&            config                 = SubstructSearchConfig{},
+                               ResidentSubstructSearchWorkspace*       workspace              = nullptr,
+                               const std::vector<int>*                 candidateTargetIndices = nullptr);
+
+std::shared_ptr<ResidentSubstructSearchWorkspace> makeResidentSubstructSearchWorkspace(int deviceId);
+
+std::size_t estimateResidentSubstructSearchWorkspaceBytes(const SubstructSearchConfig& config);
+
+/**
+ * Additional device bytes a resident workspace holds while a query with
+ * recursive SMARTS runs. It is released when the search returns.
+ */
+std::size_t estimateResidentRecursiveScratchBytes(const SubstructSearchConfig& config);
 
 }  // namespace nvMolKit
 
