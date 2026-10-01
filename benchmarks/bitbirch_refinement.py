@@ -333,10 +333,10 @@ def best_other_centroid_ivf(
     return out_s, out_i
 
 
-def cluster_stats(fingerprints, labels, device, want_centroids=True, chunk_molecules=50_000):
+def cluster_stats(fingerprints, labels, device, want_centroids=True, chunk_molecules=50_000, n_clusters=0):
     """Sizes, iSIM, and optionally int8 centroids + member-to-own-centroid similarity."""
     shifts = torch.arange(8, device=device, dtype=torch.uint8)
-    sizes = np.bincount(labels)
+    sizes = np.bincount(labels, minlength=n_clusters)
     n_clusters = len(sizes)
     order = np.argsort(labels, kind="stable")
     offsets = np.concatenate([[0], np.cumsum(sizes)])
@@ -353,7 +353,8 @@ def cluster_stats(fingerprints, labels, device, want_centroids=True, chunk_molec
         counts.index_add_(0, local, bits.to(torch.int32))
         isim[first:last] = isim_from_counts(counts, chunk_sizes).cpu().numpy()
         if want_centroids:
-            majority = (counts >= (chunk_sizes // 2 + chunk_sizes % 2).unsqueeze(1)).to(torch.int8)
+            majority = (counts >= (chunk_sizes // 2 + chunk_sizes % 2).unsqueeze(1)) & (chunk_sizes > 0).unsqueeze(1)
+            majority = majority.to(torch.int8)
             centroids[first:last] = majority
             cbits = majority[local]
             inter = (bits & cbits).sum(1, dtype=torch.int32)
@@ -376,7 +377,7 @@ def compact(labels):
 
 def violating(fingerprints, labels, threshold, device, touched):
     """Boolean mask over clusters: touched multi-member clusters with iSIM < threshold."""
-    sizes, isim, _, _ = cluster_stats(fingerprints, labels, device, want_centroids=False)
+    sizes, isim, _, _ = cluster_stats(fingerprints, labels, device, want_centroids=False, n_clusters=len(touched))
     return touched[: len(sizes)] & (sizes >= 2) & (isim < threshold - 1e-12)
 
 
@@ -419,14 +420,23 @@ def topn_step(fingerprints, labels, device, top_n=20):
 
 
 def refine_step(fingerprints, labels, threshold, device, search="exhaustive", ivf=(4096, 16), guarded=True):
-    """One nearest-centroid reassignment iteration. Returns new (compacted) labels and a stats dict."""
+    """One nearest-centroid reassignment iteration. Returns new labels and a stats dict.
+
+    ``search`` is "exhaustive", "ivf", or a callable ``(fingerprints, labels, centroids, centroid_pop, sizes)
+    -> (best_s, best_i)``. With a callable (tree beam search) cluster ids stay stable (emptied clusters
+    keep their id) so a fixed tree topology can refer to them; otherwise labels are compacted.
+    """
     t0 = time.perf_counter()
-    sizes, _, centroids, member_sim = cluster_stats(fingerprints, labels, device)
+    stable = callable(search)
+    n_clusters = int(labels.max()) + 1 if not stable else search.n_clusters
+    sizes, _, centroids, member_sim = cluster_stats(fingerprints, labels, device, n_clusters=n_clusters)
     torch.cuda.empty_cache()
     centroid_pop = popcounts(centroids)
     torch.cuda.synchronize()
     t1 = time.perf_counter()
-    if search == "ivf":
+    if stable:
+        best_s, best_i = search(fingerprints, labels, centroids, centroid_pop, sizes)
+    elif search == "ivf":
         best_s, best_i = best_other_centroid_ivf(
             fingerprints, labels, centroids, centroid_pop, device, n_cells=ivf[0], probes=ivf[1]
         )
@@ -465,7 +475,7 @@ def refine_step(fingerprints, labels, threshold, device, search="exhaustive", iv
         seconds_search=t2 - t1,
         seconds_guard=time.perf_counter() - t2,
     )
-    return compact(new), stats
+    return (new if stable else compact(new)), stats
 
 
 def identical_centroid_groups(fingerprints, labels, device):
