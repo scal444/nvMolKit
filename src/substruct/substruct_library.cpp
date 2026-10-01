@@ -3,6 +3,9 @@
 
 #include "src/substruct/substruct_library.h"
 
+#include <DataStructs/BitOps.h>
+#include <DataStructs/ExplicitBitVect.h>
+#include <GraphMol/Fingerprints/Fingerprints.h>
 #include <GraphMol/ROMol.h>
 #include <GraphMol/Substruct/SubstructMatch.h>
 #include <omp.h>
@@ -12,6 +15,7 @@
 #include <cstdint>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <semaphore>
 #include <shared_mutex>
 #include <stdexcept>
@@ -19,6 +23,7 @@
 #include <utility>
 
 #include "src/substruct/molecules.h"
+#include "src/substruct/pattern_screen.h"
 #include "src/substruct/substruct_search.h"
 #include "src/substruct/target_chunk.h"
 #include "src/utils/cuda_error_check.h"
@@ -43,7 +48,10 @@ bool rdkitHasMatch(const RDKit::ROMol& target, const RDKit::ROMol& query) {
 
 class SubstructLibrary::Impl {
  public:
-  Impl(std::size_t chunkSize, SubstructSearchConfig config) : chunkSize_(chunkSize), config_(std::move(config)) {
+  Impl(std::size_t chunkSize, SubstructSearchConfig config, bool usePatternFingerprints)
+      : chunkSize_(chunkSize),
+        config_(std::move(config)),
+        usePatternFingerprints_(usePatternFingerprints) {
     if (chunkSize_ == 0) {
       throw std::invalid_argument("Substructure library chunk size must be greater than zero");
     }
@@ -60,7 +68,7 @@ class SubstructLibrary::Impl {
       }
     }
     deviceIds_ = config_.gpuIds;
-    builder_   = std::make_unique<TargetChunkBuilder>(0, chunkSize_);
+    builder_   = std::make_unique<TargetChunkBuilder>(0, chunkSize_, usePatternFingerprints_);
   }
 
   ~Impl() noexcept {
@@ -106,7 +114,7 @@ class SubstructLibrary::Impl {
       const std::size_t                      end   = std::min(molecules.size(), begin + chunkSize_);
       const std::vector<const RDKit::ROMol*> chunkMolecules(molecules.begin() + static_cast<std::ptrdiff_t>(begin),
                                                             molecules.begin() + static_cast<std::ptrdiff_t>(end));
-      TargetChunkBuilder                     chunkBuilder(nextId_ + begin, end - begin);
+      TargetChunkBuilder                     chunkBuilder(nextId_ + begin, end - begin, usePatternFingerprints_);
       chunkBuilder.addMols(chunkMolecules, numThreads);
       builtChunks[chunkIndex] = chunkBuilder.seal();
     }
@@ -119,7 +127,7 @@ class SubstructLibrary::Impl {
       pendingChunks_.push_back(std::move(chunk));
     }
     nextId_ += molecules.size();
-    builder_ = std::make_unique<TargetChunkBuilder>(nextId_, chunkSize_);
+    builder_ = std::make_unique<TargetChunkBuilder>(nextId_, chunkSize_, usePatternFingerprints_);
     return ids;
   }
 
@@ -168,7 +176,8 @@ class SubstructLibrary::Impl {
           }
         }
         if (!deviceChunks.empty()) {
-          newSets[index] = std::make_unique<DeviceTargetSet>(deviceSets_[index].get(), deviceChunks);
+          newSets[index] =
+            std::make_unique<DeviceTargetSet>(deviceSets_[index].get(), deviceChunks, usePatternFingerprints_);
           newSets[index]->upload(validateStream(stream));
         }
       } catch (...) {
@@ -182,14 +191,17 @@ class SubstructLibrary::Impl {
       // Workspaces are sized against memory that already holds the new sets,
       // so configure them before publishing anything. The sets they replace
       // are freed on publish, so their memory counts as available.
+      std::vector<std::size_t> deviceTargets(deviceIds_.size(), 0);
       std::vector<std::size_t> reclaimableBytes(deviceIds_.size(), 0);
       for (std::size_t index = 0; index < deviceIds_.size(); ++index) {
+        const auto* set      = newSets[index] != nullptr ? newSets[index].get() : deviceSets_[index].get();
+        deviceTargets[index] = set != nullptr ? set->size() : 0;
         if (newSets[index] != nullptr && deviceSets_[index] != nullptr) {
           reclaimableBytes[index] = deviceSets_[index]->deviceBytes();
         }
       }
       workspacesReconfigured = true;
-      configureWorkspaces(reclaimableBytes);
+      configureWorkspaces(deviceTargets, reclaimableBytes);
     } catch (...) {
       destroyDeviceSets(newSets);
       if (workspacesReconfigured) {
@@ -292,9 +304,10 @@ class SubstructLibrary::Impl {
     std::unique_ptr<TargetChunk> chunk;
   };
 
-  // One admitted query's device state.
+  // One admitted query's device state: the search pipeline and the GPU screen.
   struct QueryWorkspace {
     std::shared_ptr<SubstructSearchWorkspace> search;
+    std::unique_ptr<PatternScreenWorkspace>   screen;
     // Per-target match flags, reused across queries to avoid reallocating them.
     std::vector<std::uint8_t>                 gpuMatches;
   };
@@ -359,7 +372,7 @@ class SubstructLibrary::Impl {
     if (builder_->empty()) {
       return;
     }
-    auto nextBuilder = std::make_unique<TargetChunkBuilder>(nextId_, chunkSize_);
+    auto nextBuilder = std::make_unique<TargetChunkBuilder>(nextId_, chunkSize_, usePatternFingerprints_);
     pendingChunks_.reserve(pendingChunks_.size() + 1);
     pendingChunks_.push_back(builder_->seal());
     builder_ = std::move(nextBuilder);
@@ -403,7 +416,11 @@ class SubstructLibrary::Impl {
       return;
     }
     try {
-      configureWorkspaces(std::vector<std::size_t>(deviceIds_.size(), 0));
+      std::vector<std::size_t> deviceTargets(deviceIds_.size(), 0);
+      for (std::size_t index = 0; index < deviceIds_.size(); ++index) {
+        deviceTargets[index] = deviceSets_[index] != nullptr ? deviceSets_[index]->size() : 0;
+      }
+      configureWorkspaces(deviceTargets, std::vector<std::size_t>(deviceIds_.size(), 0));
     } catch (...) {
       destroyWorkspaces();
     }
@@ -425,8 +442,10 @@ class SubstructLibrary::Impl {
     return result;
   }
 
-  // reclaimableBytes[i] is device memory on device i that will be freed before any query runs.
-  void configureWorkspaces(const std::vector<std::size_t>& reclaimableBytes) {
+  // deviceTargets[i] is the number of persistent GPU targets on device i; reclaimableBytes[i] is device memory on
+  // device i that will be freed before any query runs.
+  void configureWorkspaces(const std::vector<std::size_t>& deviceTargets,
+                           const std::vector<std::size_t>& reclaimableBytes) {
     destroyWorkspaces();
     if (deviceIds_.empty()) {
       queryConcurrency_ = 0;
@@ -445,14 +464,16 @@ class SubstructLibrary::Impl {
       std::size_t      freeBytes  = 0;
       std::size_t      totalBytes = 0;
       cudaCheckError(cudaMemGetInfo(&freeBytes, &totalBytes));
-      const std::size_t usedBytes            = totalBytes - std::min(totalBytes, freeBytes + reclaimableBytes[index]);
-      const std::size_t budgetBytes          = totalBytes * memoryNumerator / memoryDenominator;
-      const std::size_t availableBytes       = budgetBytes > usedBytes ? budgetBytes - usedBytes : 0;
-      const std::size_t deviceWorkspaceBytes = estimateSubstructSearchWorkspaceBytes(deviceConfig(index));
+      const std::size_t usedBytes      = totalBytes - std::min(totalBytes, freeBytes + reclaimableBytes[index]);
+      const std::size_t budgetBytes    = totalBytes * memoryNumerator / memoryDenominator;
+      const std::size_t availableBytes = budgetBytes > usedBytes ? budgetBytes - usedBytes : 0;
+      const std::size_t deviceWorkspaceBytes =
+        estimateSubstructSearchWorkspaceBytes(deviceConfig(index)) +
+        (usePatternFingerprints_ ? PatternScreenWorkspace::estimateDeviceBytes(deviceTargets[index]) : 0);
       // Every admitted query needs a base workspace; queries with recursive
       // SMARTS additionally hold scratch, admitted separately so plain queries
       // do not reserve it.
-      const std::size_t recursiveBytes       = estimateRecursiveScratchBytes(deviceConfig(index));
+      const std::size_t recursiveBytes = estimateRecursiveScratchBytes(deviceConfig(index));
       if (deviceWorkspaceBytes == 0 || availableBytes < deviceWorkspaceBytes + recursiveBytes) {
         throw std::runtime_error(
           "Substructure library cannot admit one query workspace below the 85% GPU-memory cutoff");
@@ -487,6 +508,7 @@ class SubstructLibrary::Impl {
         for (std::size_t slot = 0; slot < concurrency; ++slot) {
           auto workspace    = std::make_unique<QueryWorkspace>();
           workspace->search = makeSubstructSearchWorkspace(deviceIds_[index]);
+          workspace->screen = std::make_unique<PatternScreenWorkspace>(deviceIds_[index]);
           pool.available->push(workspace.get());
           pool.owned.push_back(std::move(workspace));
         }
@@ -508,6 +530,14 @@ class SubstructLibrary::Impl {
     if (deviceIds_.size() > 1 && stream != nullptr) {
       throw std::invalid_argument("A single external CUDA stream cannot be used with a multi-GPU substructure library");
     }
+    std::unique_ptr<ExplicitBitVect>  queryFingerprint;
+    std::optional<PatternScreenQuery> screenQuery;
+    ScopedNvtxRange                   fingerprintRange("SubstructLibrary query fingerprint");
+    if (usePatternFingerprints_) {
+      queryFingerprint.reset(RDKit::PatternFingerprintMol(query));
+      screenQuery = makePatternScreenQuery(queryFingerprint.get(), static_cast<int>(query.getNumAtoms()));
+    }
+    fingerprintRange.pop();
 
     // Recursive queries hold extra scratch on every device while they run.
     struct RecursivePermit {
@@ -534,7 +564,14 @@ class SubstructLibrary::Impl {
         cudaStream_t     deviceStream = validateStream(stream);
         const auto       localConfig  = deviceConfig(index);
         WorkspaceLease   workspace(workspacePools_[index]);
-        results[index] = deviceMatchingIds(index, query, deviceStream, localConfig, *workspace.get(), maxResults);
+        results[index] = deviceMatchingIds(index,
+                                           query,
+                                           queryFingerprint.get(),
+                                           screenQuery,
+                                           deviceStream,
+                                           localConfig,
+                                           *workspace.get(),
+                                           maxResults);
       } catch (...) {
         exceptionRegistry.store(std::current_exception());
       }
@@ -544,31 +581,56 @@ class SubstructLibrary::Impl {
   }
 
   // Matching IDs on one device in ascending order, truncated to maxResults when positive.
-  [[nodiscard]] std::vector<unsigned int> deviceMatchingIds(std::size_t                  deviceIndex,
-                                                            const RDKit::ROMol&          query,
-                                                            cudaStream_t                 stream,
-                                                            const SubstructSearchConfig& config,
-                                                            QueryWorkspace&              workspace,
-                                                            int                          maxResults) const {
+  [[nodiscard]] std::vector<unsigned int> deviceMatchingIds(std::size_t                              deviceIndex,
+                                                            const RDKit::ROMol&                      query,
+                                                            const ExplicitBitVect*                   queryFingerprint,
+                                                            const std::optional<PatternScreenQuery>& screenQuery,
+                                                            cudaStream_t                             stream,
+                                                            const SubstructSearchConfig&             config,
+                                                            QueryWorkspace&                          workspace,
+                                                            int                                      maxResults) const {
     std::vector<unsigned int> matches;
     const DeviceTargetSet*    targets = deviceSets_[deviceIndex].get();
     if (targets != nullptr && targets->size() != 0) {
-      ScopedNvtxRange            matchRange("SubstructLibrary match targets");
-      std::vector<std::uint8_t>& gpuMatches = workspace.gpuMatches;
-      hasSubstructMatch(targets->persistentTargets(),
-                        query,
-                        gpuMatches,
-                        config.algorithm,
-                        stream,
-                        config,
-                        workspace.search.get());
-      if (gpuMatches.size() != targets->size()) {
-        throw std::runtime_error("Persistent-target search result size does not match its target set");
+      const int               numTargets = static_cast<int>(targets->size());
+      std::vector<int>        selected;
+      const std::vector<int>* candidates = nullptr;
+      if (screenQuery.has_value()) {
+        ScopedNvtxRange    screenRange("SubstructLibrary GPU screen");
+        PatternScreenQuery deviceQuery = *screenQuery;
+        orderPatternScreenBits(deviceQuery, targets->patternBitFrequencies());
+        PatternScreenWorkspace& screen = *workspace.screen;
+        screen.screen(targets->devicePatternSlices(), targets->deviceView().batchAtomStarts, numTargets, deviceQuery);
+        selected.assign(screen.indices(), screen.indices() + screen.count());
+        candidates = &selected;
       }
-      const auto& ids = targets->ids();
-      for (std::size_t target = 0; target < gpuMatches.size(); ++target) {
-        if (gpuMatches[target] != 0) {
-          matches.push_back(static_cast<unsigned int>(ids[target]));
+      if (candidates == nullptr || !candidates->empty()) {
+        ScopedNvtxRange            matchRange("SubstructLibrary match candidates");
+        std::vector<std::uint8_t>& gpuMatches = workspace.gpuMatches;
+        hasSubstructMatch(targets->persistentTargets(),
+                          query,
+                          gpuMatches,
+                          config.algorithm,
+                          stream,
+                          config,
+                          workspace.search.get(),
+                          candidates);
+        if (gpuMatches.size() != targets->size()) {
+          throw std::runtime_error("Persistent-target search result size does not match its target set");
+        }
+        const auto& ids = targets->ids();
+        if (candidates != nullptr) {
+          for (const int target : *candidates) {
+            if (gpuMatches[static_cast<std::size_t>(target)] != 0) {
+              matches.push_back(static_cast<unsigned int>(ids[static_cast<std::size_t>(target)]));
+            }
+          }
+        } else {
+          for (std::size_t target = 0; target < gpuMatches.size(); ++target) {
+            if (gpuMatches[target] != 0) {
+              matches.push_back(static_cast<unsigned int>(ids[target]));
+            }
+          }
         }
       }
     }
@@ -589,7 +651,10 @@ class SubstructLibrary::Impl {
         if (id >= fallbackBound) {
           break;
         }
-        if (rdkitHasMatch(record.chunk->sourceMol(id), query)) {
+        const auto* targetFingerprint = record.chunk->patternFingerprint(id);
+        if ((queryFingerprint == nullptr || targetFingerprint == nullptr ||
+             AllProbeBitsMatch(*queryFingerprint, *targetFingerprint)) &&
+            rdkitHasMatch(record.chunk->sourceMol(id), query)) {
           matches.push_back(static_cast<unsigned int>(id));
         }
       }
@@ -648,6 +713,7 @@ class SubstructLibrary::Impl {
 
   const std::size_t                             chunkSize_;
   SubstructSearchConfig                         config_;
+  bool                                          usePatternFingerprints_ = true;
   mutable std::shared_mutex                     mutex_;
   mutable std::mutex                            writerGate_;
   std::unique_ptr<TargetChunkBuilder>           builder_;
@@ -666,8 +732,8 @@ class SubstructLibrary::Impl {
   std::size_t                                   workspaceBytesPerQueryPerGpu_ = 0;
 };
 
-SubstructLibrary::SubstructLibrary(std::size_t chunkSize, SubstructSearchConfig config)
-    : impl_(std::make_unique<Impl>(chunkSize, std::move(config))) {}
+SubstructLibrary::SubstructLibrary(std::size_t chunkSize, SubstructSearchConfig config, bool usePatternFingerprints)
+    : impl_(std::make_unique<Impl>(chunkSize, std::move(config), usePatternFingerprints)) {}
 
 SubstructLibrary::~SubstructLibrary() = default;
 

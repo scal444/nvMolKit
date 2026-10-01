@@ -3,6 +3,8 @@
 
 #include "src/substruct/target_chunk.h"
 
+#include <DataStructs/ExplicitBitVect.h>
+#include <GraphMol/Fingerprints/Fingerprints.h>
 #include <GraphMol/ROMol.h>
 
 #include <algorithm>
@@ -10,6 +12,7 @@
 #include <stdexcept>
 #include <utility>
 
+#include "src/substruct/pattern_screen.h"
 #include "src/substruct/substruct_constants.h"
 #include "src/substruct/substruct_search.h"
 #include "src/utils/cuda_error_check.h"
@@ -17,18 +20,20 @@
 
 namespace nvMolKit {
 
-TargetChunk::TargetChunk(MoleculeId                                 firstId,
-                         std::vector<std::unique_ptr<RDKit::ROMol>> sourceMolecules,
-                         MoleculesHost                              packedHost,
-                         std::vector<MoleculeId>                    packedGlobalIds,
-                         std::vector<MoleculeId>                    fallbackGlobalIds,
-                         std::vector<std::uint8_t>                  gpuSupported)
+TargetChunk::TargetChunk(MoleculeId                                    firstId,
+                         std::vector<std::unique_ptr<RDKit::ROMol>>    sourceMolecules,
+                         MoleculesHost                                 packedHost,
+                         std::vector<MoleculeId>                       packedGlobalIds,
+                         std::vector<MoleculeId>                       fallbackGlobalIds,
+                         std::vector<std::uint8_t>                     gpuSupported,
+                         std::vector<std::unique_ptr<ExplicitBitVect>> patternFingerprints)
     : firstId_(firstId),
       sourceMolecules_(std::move(sourceMolecules)),
       packedHost_(std::move(packedHost)),
       packedGlobalIds_(std::move(packedGlobalIds)),
       fallbackGlobalIds_(std::move(fallbackGlobalIds)),
-      gpuSupported_(std::move(gpuSupported)) {
+      gpuSupported_(std::move(gpuSupported)),
+      patternFingerprints_(std::move(patternFingerprints)) {
   if (sourceMolecules_.size() != gpuSupported_.size()) {
     throw std::logic_error("Target chunk support metadata is inconsistent");
   }
@@ -38,6 +43,9 @@ TargetChunk::TargetChunk(MoleculeId                                 firstId,
   if (packedGlobalIds_.size() + fallbackGlobalIds_.size() != sourceMolecules_.size()) {
     throw std::logic_error("Target chunk molecule classification is incomplete");
   }
+  if (!patternFingerprints_.empty() && patternFingerprints_.size() != sourceMolecules_.size()) {
+    throw std::logic_error("Target chunk pattern-fingerprint metadata is inconsistent");
+  }
 
   supportedTargetPtrs_.reserve(packedGlobalIds_.size());
   for (MoleculeId id : packedGlobalIds_) {
@@ -45,6 +53,14 @@ TargetChunk::TargetChunk(MoleculeId                                 firstId,
       throw std::logic_error("Target chunk packed ID is outside its source range");
     }
     supportedTargetPtrs_.push_back(sourceMolecules_[static_cast<std::size_t>(id - firstId_)].get());
+  }
+  if (!patternFingerprints_.empty() && !packedGlobalIds_.empty()) {
+    std::vector<const ExplicitBitVect*> packedFingerprints;
+    packedFingerprints.reserve(packedGlobalIds_.size());
+    for (MoleculeId id : packedGlobalIds_) {
+      packedFingerprints.push_back(patternFingerprints_[static_cast<std::size_t>(id - firstId_)].get());
+    }
+    packedPatternWords_ = packPatternFingerprintsWordMajor(packedFingerprints);
   }
 }
 
@@ -65,11 +81,40 @@ bool TargetChunk::isGpuSupported(MoleculeId id) const {
   return gpuSupported_[offsetOf(id)] != 0;
 }
 
-void TargetChunk::releasePackedData() noexcept {
-  packedHost_ = MoleculesHost();
+const ExplicitBitVect* TargetChunk::patternFingerprint(MoleculeId id) const {
+  const std::size_t offset = offsetOf(id);
+  return patternFingerprints_.empty() ? nullptr : patternFingerprints_[offset].get();
 }
 
-DeviceTargetSet::DeviceTargetSet(const DeviceTargetSet* base, const std::vector<const TargetChunk*>& chunks) {
+void TargetChunk::releasePackedData() noexcept {
+  packedHost_         = MoleculesHost();
+  packedPatternWords_ = std::vector<std::uint64_t>();
+}
+
+namespace {
+
+// Copy a word-major block of count fingerprints into a word-major array of
+// total fingerprints, starting at fingerprint offset.
+void appendPatternWords(std::vector<std::uint64_t>&       destination,
+                        std::size_t                       total,
+                        std::size_t                       offset,
+                        const std::vector<std::uint64_t>& source,
+                        std::size_t                       count) {
+  if (source.size() != count * kPatternFingerprintWords) {
+    throw std::logic_error("Pattern fingerprint block does not match its packed target count");
+  }
+  for (int word = 0; word < kPatternFingerprintWords; ++word) {
+    std::copy_n(source.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(word) * count),
+                count,
+                destination.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(word) * total + offset));
+  }
+}
+
+}  // namespace
+
+DeviceTargetSet::DeviceTargetSet(const DeviceTargetSet*                 base,
+                                 const std::vector<const TargetChunk*>& chunks,
+                                 bool                                   usePatternFingerprints) {
   std::size_t total = base == nullptr ? 0 : base->size();
   std::size_t atoms = base == nullptr ? 0 : base->host_.totalAtoms();
   for (const auto* chunk : chunks) {
@@ -82,11 +127,17 @@ DeviceTargetSet::DeviceTargetSet(const DeviceTargetSet* base, const std::vector<
   host_.targetAtomBonds.reserve(atoms);
   targets_.reserve(total);
   ids_.reserve(total);
+  if (usePatternFingerprints) {
+    patternWords_.resize(total * kPatternFingerprintWords);
+  }
 
   if (base != nullptr) {
     mergeBatch(host_, base->host_);
     targets_ = base->targets_;
     ids_     = base->ids_;
+    if (usePatternFingerprints) {
+      appendPatternWords(patternWords_, total, 0, base->patternWords_, base->size());
+    }
   }
   for (const auto* chunk : chunks) {
     if (chunk->gpuTargetCount() == 0) {
@@ -95,9 +146,16 @@ DeviceTargetSet::DeviceTargetSet(const DeviceTargetSet* base, const std::vector<
     if (!ids_.empty() && chunk->packedGlobalIds().front() <= ids_.back()) {
       throw std::logic_error("Device target sets must be extended in ascending ID order");
     }
+    if (usePatternFingerprints) {
+      appendPatternWords(patternWords_, total, ids_.size(), chunk->packedPatternWords(), chunk->gpuTargetCount());
+    }
     mergeBatch(host_, chunk->packedHost());
     targets_.insert(targets_.end(), chunk->supportedTargetPtrs().begin(), chunk->supportedTargetPtrs().end());
     ids_.insert(ids_.end(), chunk->packedGlobalIds().begin(), chunk->packedGlobalIds().end());
+  }
+  if (usePatternFingerprints) {
+    patternSlices_  = buildPatternBitSlices(patternWords_, total);
+    bitFrequencies_ = nvMolKit::patternBitFrequencies(patternSlices_, total);
   }
 }
 
@@ -109,10 +167,17 @@ void DeviceTargetSet::upload(cudaStream_t stream) {
   }
   device_ = std::make_unique<MoleculesDevice>(stream);
   device_->copyFromHost(host_, stream);
+  if (!patternSlices_.empty()) {
+    patternSlicesDevice_ = AsyncDeviceVector<std::uint32_t>(patternSlices_.size(), stream);
+    patternSlicesDevice_.copyFromHost(patternSlices_);
+  }
   cudaCheckError(cudaStreamSynchronize(stream));
+  // The host slices are rebuilt from patternWords_ when the set is extended.
+  patternSlices_ = std::vector<std::uint32_t>();
   // Device allocations outlive the caller-provided upload stream. Release
   // them on the default stream so their lifetime is not tied to that stream.
   device_->setStream(nullptr);
+  patternSlicesDevice_.setStream(nullptr);
   persistentTargets_ = makePersistentDeviceTargets(targets_, host_, *device_);
 }
 
@@ -128,7 +193,8 @@ std::size_t DeviceTargetSet::deviceBytes() const noexcept {
     return 0;
   }
   return host_.batchAtomStarts.size() * sizeof(int) + host_.atomDataPacked.size() * sizeof(AtomDataPacked) +
-         host_.bondTypeCounts.size() * sizeof(BondTypeCounts) + host_.targetAtomBonds.size() * sizeof(TargetAtomBonds);
+         host_.bondTypeCounts.size() * sizeof(BondTypeCounts) + host_.targetAtomBonds.size() * sizeof(TargetAtomBonds) +
+         patternSlicesDevice_.size() * sizeof(std::uint32_t);
 }
 
 const PersistentDeviceTargets& DeviceTargetSet::persistentTargets() const {
@@ -140,13 +206,15 @@ const PersistentDeviceTargets& DeviceTargetSet::persistentTargets() const {
 
 namespace {
 
-//! An owned copy of a library molecule and whether the packed target format can represent it.
+//! An owned copy of a library molecule, whether the packed target format can represent it, and its optional
+//! pattern fingerprint.
 struct StagedTarget {
-  std::unique_ptr<RDKit::ROMol> mol;
-  bool                          gpuSupported = false;
+  std::unique_ptr<RDKit::ROMol>    mol;
+  bool                             gpuSupported = false;
+  std::unique_ptr<ExplicitBitVect> patternFingerprint;
 };
 
-StagedTarget stageTarget(const RDKit::ROMol& source) {
+StagedTarget stageTarget(const RDKit::ROMol& source, bool usePatternFingerprints) {
   StagedTarget staged;
   staged.mol = std::make_unique<RDKit::ROMol>(source);
   try {
@@ -155,14 +223,25 @@ StagedTarget stageTarget(const RDKit::ROMol& source) {
     // Representation-limit failures keep the copy and route the target through the RDKit fallback.
     staged.gpuSupported = false;
   }
+  if (usePatternFingerprints) {
+    try {
+      staged.patternFingerprint.reset(RDKit::PatternFingerprintMol(*staged.mol));
+    } catch (const std::exception&) {
+      // The GPU screen needs a fingerprint for every packed target; fallback targets are matched without one.
+      if (staged.gpuSupported) {
+        throw;
+      }
+    }
+  }
   return staged;
 }
 
 }  // namespace
 
-TargetChunkBuilder::TargetChunkBuilder(MoleculeId firstId, std::size_t maxMolecules)
+TargetChunkBuilder::TargetChunkBuilder(MoleculeId firstId, std::size_t maxMolecules, bool usePatternFingerprints)
     : firstId_(firstId),
-      maxMolecules_(maxMolecules) {
+      maxMolecules_(maxMolecules),
+      usePatternFingerprints_(usePatternFingerprints) {
   if (maxMolecules_ == 0) {
     throw std::invalid_argument("Target chunk capacity must be greater than zero");
   }
@@ -170,9 +249,14 @@ TargetChunkBuilder::TargetChunkBuilder(MoleculeId firstId, std::size_t maxMolecu
 
 TargetChunkBuilder::~TargetChunkBuilder() = default;
 
-MoleculeId TargetChunkBuilder::append(std::unique_ptr<RDKit::ROMol> mol, bool gpuSupported) {
+MoleculeId TargetChunkBuilder::append(std::unique_ptr<RDKit::ROMol>    mol,
+                                      bool                             gpuSupported,
+                                      std::unique_ptr<ExplicitBitVect> patternFingerprint) {
   const MoleculeId id = nextId();
   sourceMolecules_.push_back(std::move(mol));
+  if (usePatternFingerprints_) {
+    patternFingerprints_.push_back(std::move(patternFingerprint));
+  }
   gpuSupported_.push_back(static_cast<std::uint8_t>(gpuSupported));
   (gpuSupported ? packedGlobalIds_ : fallbackGlobalIds_).push_back(id);
   return id;
@@ -189,7 +273,7 @@ MoleculeId TargetChunkBuilder::addMol(const RDKit::ROMol& mol) {
     throw std::overflow_error("Target molecule ID space exhausted");
   }
 
-  StagedTarget  staged = stageTarget(mol);
+  StagedTarget  staged = stageTarget(mol, usePatternFingerprints_);
   MoleculesHost packedTarget;
   if (staged.gpuSupported) {
     try {
@@ -201,7 +285,7 @@ MoleculeId TargetChunkBuilder::addMol(const RDKit::ROMol& mol) {
     }
   }
   const bool packed = staged.gpuSupported;
-  const auto id     = append(std::move(staged.mol), packed);
+  const auto id     = append(std::move(staged.mol), packed, std::move(staged.patternFingerprint));
   if (packed) {
     mergeBatch(packedHost_, packedTarget);
   }
@@ -233,7 +317,7 @@ void TargetChunkBuilder::addMols(const std::vector<const RDKit::ROMol*>& molecul
       if (molecule == nullptr) {
         throw std::invalid_argument("Substructure library molecule cannot be null");
       }
-      staged[static_cast<std::size_t>(index)] = stageTarget(*molecule);
+      staged[static_cast<std::size_t>(index)] = stageTarget(*molecule, usePatternFingerprints_);
     } catch (...) {
       exceptionRegistry.store(std::current_exception());
     }
@@ -244,11 +328,14 @@ void TargetChunkBuilder::addMols(const std::vector<const RDKit::ROMol*>& molecul
   supportedMolecules.reserve(molecules.size());
   sourceMolecules_.reserve(molecules.size());
   gpuSupported_.reserve(molecules.size());
+  if (usePatternFingerprints_) {
+    patternFingerprints_.reserve(molecules.size());
+  }
   for (auto& target : staged) {
     if (target.gpuSupported) {
       supportedMolecules.push_back(target.mol.get());
     }
-    append(std::move(target.mol), target.gpuSupported);
+    append(std::move(target.mol), target.gpuSupported, std::move(target.patternFingerprint));
   }
   buildTargetBatchParallelInto(packedHost_, numThreads, supportedMolecules, {});
 }
@@ -262,7 +349,8 @@ std::unique_ptr<TargetChunk> TargetChunkBuilder::seal() {
                                              std::move(packedHost_),
                                              std::move(packedGlobalIds_),
                                              std::move(fallbackGlobalIds_),
-                                             std::move(gpuSupported_));
+                                             std::move(gpuSupported_),
+                                             std::move(patternFingerprints_));
   sealed_    = true;
   return chunk;
 }
