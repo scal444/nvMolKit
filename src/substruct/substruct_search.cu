@@ -733,7 +733,9 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
     maxMatchIndicesPerMiniBatch = static_cast<size_t>(maxPairsPerBatch) * kMaxTargetAtoms * queryContext.maxQueryAtoms;
   }
 
-  const int    poolSize = std::max(1, effectivePreprocessingThreads) * 2;
+  const int    totalExecutorSlots = numRunners * executorsPerRunner;
+  // A workspace's ring holds one buffer per executor so the caller-thread path below never waits for one.
+  const int    poolSize = workspace != nullptr ? totalExecutorSlots : std::max(1, effectivePreprocessingThreads) * 2;
   const size_t perBufferSize =
     computePinnedHostBufferBytes(maxPairsPerBatch, static_cast<int>(maxMatchIndicesPerMiniBatch), maxPatternsPerDepth);
   const size_t totalPinnedBytes = static_cast<size_t>(poolSize) * perBufferSize;
@@ -754,10 +756,81 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
   PinnedHostBufferPool& bufferPool = workspace != nullptr ? workspace->bufferPool : localBufferPool;
   bufferPool.prepare(poolSize, maxPairsPerBatch, static_cast<int>(maxMatchIndicesPerMiniBatch), maxPatternsPerDepth);
   if (workspace != nullptr) {
-    workspace->ensureExecutors(numRunners * executorsPerRunner);
+    workspace->ensureExecutors(totalExecutorSlots);
   }
 
   MiniBatchPlanner planner;
+
+  // Plan one mini-batch of persistent targets, over every target or over the selected ones.
+  const auto preparePersistentMiniBatch = [&](PinnedHostBuffer* buffer, int pairOffset) {
+    const PersistentTargetMetadata& metadata = persistentTargets->metadata;
+    auto                            batch    = makePreparedMiniBatch(buffer,
+                                       metadata.originalIndices,
+                                       metadata.shape,
+                                       numTargets,
+                                       queryContext,
+                                       config,
+                                       countOnly);
+    batch->persistentTargetsDevice           = persistentTargets->device;
+    if (selectedTargetIndices == nullptr) {
+      planner.prepareMiniBatch(batch->plan, *buffer, batch->ctx, leafSubpatterns, pairOffset, maxPairsPerBatch);
+    } else {
+      planner.prepareSelectedTargetsMiniBatch(batch->plan,
+                                              *buffer,
+                                              batch->ctx,
+                                              leafSubpatterns,
+                                              *selectedTargetIndices,
+                                              pairOffset,
+                                              maxPairsPerBatch);
+    }
+    return batch;
+  };
+
+  // A persistent-target single-query shard that fits entirely in the reusable executor
+  // ring needs no coordinator, worker, or preprocessing threads. Preparing the
+  // ring on the caller thread removes the dominant serialized-call gaps.
+  const int persistentPairCount  = selectedTargetIndices == nullptr ? numTargets * numQueries : numWorkTargets;
+  const int persistentBatchCount = (persistentPairCount + maxPairsPerBatch - 1) / maxPairsPerBatch;
+  // The queries and executors live on the current device, so the targets' GPU must be current too.
+  if (workspace != nullptr && persistentTargets != nullptr && persistentBatchCount <= totalExecutorSlots &&
+      gpuIds.front() == currentDevice) {
+    PreparedBatchQueue directQueue;
+    for (int pairOffset = 0; pairOffset < persistentPairCount; pairOffset += maxPairsPerBatch) {
+      // The ring holds totalExecutorSlots >= persistentBatchCount free buffers, so acquire() cannot block here.
+      PinnedHostBuffer* buffer = bufferPool.acquire();
+      directQueue.push(preparePersistentMiniBatch(buffer, pairOffset));
+    }
+    directQueue.close();
+
+    std::vector<GpuExecutor*> directExecutors;
+    directExecutors.reserve(static_cast<size_t>(totalExecutorSlots));
+    for (int index = 0; index < totalExecutorSlots; ++index) {
+      directExecutors.push_back(workspace->executors[static_cast<size_t>(index)].get());
+    }
+    std::mutex         directResultsMutex;
+    std::atomic<bool>  directAbort{false};
+    std::exception_ptr directException;
+    runnerWorkerPipelineUnified(0,
+                                queriesDevice,
+                                recursivePreprocessor,
+                                boolResults ? nullptr : (countResults ? nullptr : &results),
+                                boolResults,
+                                countResults,
+                                directResultsMutex,
+                                algorithm,
+                                gpuIds.front(),
+                                std::move(directExecutors),
+                                directQueue,
+                                bufferPool,
+                                fallbackQueue,
+                                directAbort,
+                                directException);
+    if (directException) {
+      std::rethrow_exception(directException);
+    }
+    cudaCheckError(cudaGetLastError());
+    return;
+  }
 
   PreparedBatchQueue batchQueue;
   std::atomic<int>   nextTargetIdx{0};
@@ -843,8 +916,6 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
           if (t != 0) {
             return;
           }
-          const PersistentTargetMetadata* metadata = &persistentTargets->metadata;
-
           const int totalPairs = selectedTargetIndices == nullptr ? numTargets * numQueries : numWorkTargets;
           for (int pairOffset = 0; pairOffset < totalPairs; pairOffset += maxPairsPerBatch) {
             if (pipelineAbort.load(std::memory_order_acquire)) {
@@ -856,25 +927,7 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
             }
             BufferReleaseGuard releaseGuard{&bufferPool, buffer};
 
-            auto batch                     = makePreparedMiniBatch(buffer,
-                                               metadata->originalIndices,
-                                               metadata->shape,
-                                               numTargets,
-                                               queryContext,
-                                               config,
-                                               countOnly);
-            batch->persistentTargetsDevice = persistentTargets->device;
-            if (selectedTargetIndices == nullptr) {
-              planner.prepareMiniBatch(batch->plan, *buffer, batch->ctx, leafSubpatterns, pairOffset, maxPairsPerBatch);
-            } else {
-              planner.prepareSelectedTargetsMiniBatch(batch->plan,
-                                                      *buffer,
-                                                      batch->ctx,
-                                                      leafSubpatterns,
-                                                      *selectedTargetIndices,
-                                                      pairOffset,
-                                                      maxPairsPerBatch);
-            }
+            auto batch = preparePersistentMiniBatch(buffer, pairOffset);
             releaseGuard.release();
             batchQueue.push(std::move(batch));
           }

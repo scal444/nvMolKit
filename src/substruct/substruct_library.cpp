@@ -486,7 +486,9 @@ class SubstructLibrary::Impl {
     }
 
     const auto        executorsPerQuery = static_cast<std::size_t>(searchWorkspaceExecutorCount(deviceConfig(0)));
-    // Each admitted query drives a search on every device from its own thread.
+    // Persistent-target searches whose candidates fit the executor ring run entirely on
+    // the calling thread (one per device); only rare, very unselective queries
+    // start the pipeline's preprocessing and coordinator threads.
     const std::size_t threadsPerQuery   = deviceIds_.size();
     const std::size_t hostCapacity      = std::max<std::size_t>(
       1,
