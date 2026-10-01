@@ -1,35 +1,33 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prototype post-hoc refinement of BitBIRCH partitions by nearest-centroid reassignment.
+"""Prototype post-hoc refinement of BitBIRCH partitions.
 
-Starting from a BitBIRCH partition (label archives written by
-``bitbirch_order_sensitivity.py --save-labels`` or equivalent), each iteration:
+For every base partition in a label archive (``labels_threshold_<t>.npz``, keys
+``<method>_b<batch>_s<seed>``), writes one archive with these variants:
 
-1. Computes every cluster's majority-bit centroid (ties set the bit, as in
-   ``bitbirch_cluster_quality.py``) and each member's Tanimoto to it.
-2. Finds, for every molecule, the most similar centroid of a *different*
-   cluster with a fused int8 tensor-core Triton kernel (exhaustive N x K).
-3. Proposes moving every molecule whose best other centroid beats its own.
-4. Variants:
+* ``topn``: the published BitBIRCH "cluster reassignment" refinement (López
+  Pérez et al., JCIM 2025): single pass; only members of the 20 most populated
+  clusters move, only among those 20 majority centroids; no threshold guard.
+* ``dedup``: merge clusters whose majority centroids are bit-identical, unless
+  the merged cluster's iSIM would fall below the threshold.
+* ``r1`` / ``r3``: 1 or 3 iterations of guarded nearest-centroid reassignment.
+  Each iteration recomputes majority centroids (ties set the bit), finds every
+  molecule's most similar *other* centroid with a fused int8 tensor-core
+  Triton kernel (exhaustive N x K, or IVF-pruned over a coarse k-means of the
+  centroids), proposes every move that beats the own centroid, then rejects all
+  moves into or out of any multi-member cluster whose iSIM fell below the
+  threshold until none does. The result keeps BitBIRCH's diameter guarantee.
+* ``r3dedup``: ``r3`` followed by ``dedup``.
 
-   * ``lloyd``: apply every proposal (a k-means/Lloyd step, no threshold guard).
-   * ``guarded``: apply proposals, then repeatedly reject every move into or out
-     of any multi-member cluster whose iSIM fell below the threshold. Rejection
-     only removes moves, so it terminates, and the result keeps BitBIRCH's
-     diameter guarantee (every multi-member cluster has iSIM >= threshold).
-   * ``topn``: the published BitBIRCH "cluster reassignment" refinement
-     (López Pérez et al., JCIM 2025): single pass, only members of the 20 most
-     populated clusters move, only among those 20 centroids.
-   * ``guarded-fine``: like ``guarded``, but a violating destination first sheds
-     only its weakest incoming moves (lowest similarity to the destination
-     centroid) in halves before falling back to rejecting everything.
-
-Quality metrics after each iteration come from ``bitbirch_cluster_quality.quality``.
+Per-step statistics (moves, unguarded threshold violations, identical-centroid
+pairs, seconds) go to ``steps_<t>.json`` next to the archive. Finished runs are
+skipped, so the script can be rerun after interruption. Metrics come from
+``bitbirch_cluster_quality.py`` and the paper-index script run on the output.
 """
 
 import argparse
-import csv
+import json
 import re
 import sys
 import time
@@ -41,7 +39,7 @@ import triton
 import triton.language as tl
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from bitbirch_cluster_quality import chunk_bounds, isim_from_counts, quality
+from bitbirch_cluster_quality import chunk_bounds, isim_from_counts
 
 N_BITS = 2048
 
@@ -420,10 +418,8 @@ def topn_step(fingerprints, labels, device, top_n=20):
     return compact(new), stats
 
 
-def refine_step(fingerprints, labels, threshold, variant, device, margin=0.0, search="exhaustive", ivf=(4096, 16)):
-    """One reassignment iteration. Returns new (compacted) labels and a stats dict."""
-    if variant == "topn":
-        return topn_step(fingerprints, labels, device)
+def refine_step(fingerprints, labels, threshold, device, search="exhaustive", ivf=(4096, 16), guarded=True):
+    """One nearest-centroid reassignment iteration. Returns new (compacted) labels and a stats dict."""
     t0 = time.perf_counter()
     sizes, _, centroids, member_sim = cluster_stats(fingerprints, labels, device)
     torch.cuda.empty_cache()
@@ -441,173 +437,147 @@ def refine_step(fingerprints, labels, threshold, variant, device, margin=0.0, se
     del centroids, centroid_pop
     torch.cuda.empty_cache()
 
-    propose = best_s > member_sim + margin
-    movers = np.flatnonzero(propose)
+    movers = np.flatnonzero(best_s > member_sim)
     dest = best_i[movers]
     src = labels[movers]
     stats = {"proposed_moves": len(movers), "guard_rounds": 0, "violations_unguarded": -1}
     accept = np.ones(len(movers), dtype=bool)
-    if variant in ("guarded", "guarded-fine"):
-        n_clusters = len(sizes)
-        # Sub-fraction of incoming moves each violating destination keeps in the fine variant.
-        keep_frac = np.ones(n_clusters)
-        while True:
-            new = labels.copy()
-            new[movers[accept]] = dest[accept]
-            touched = np.zeros(n_clusters, dtype=bool)
-            touched[dest[accept]] = True
-            touched[src[accept]] = True
-            bad = violating(fingerprints, new, threshold, device, touched)
-            if stats["guard_rounds"] == 0:
-                stats["violations_unguarded"] = int(bad.sum())
-            stats["guard_rounds"] += 1
-            if not bad.any():
-                break
-            if variant == "guarded":
-                accept &= ~(bad[dest] | bad[src])
-                continue
-            # Fine: halve incoming moves of violating destinations (keep the most similar);
-            # once a destination is down to zero incoming, reject moves out of it too.
-            for cluster in np.flatnonzero(bad):
-                keep_frac[cluster] = keep_frac[cluster] / 2 if keep_frac[cluster] > 1 / 16 else 0.0
-            incoming_bad = accept & bad[dest]
-            if incoming_bad.any():
-                idx = np.flatnonzero(incoming_bad)
-                d = dest[idx]
-                s = best_s[movers[idx]]
-                order = np.lexsort((-s, d))
-                idx, d = idx[order], d[order]
-                starts = np.flatnonzero(np.r_[True, d[1:] != d[:-1]])
-                counts = np.diff(np.r_[starts, len(d)])
-                rank = np.arange(len(d)) - np.repeat(starts, counts)
-                keep = rank < np.floor(np.repeat(counts, counts) * keep_frac[d])
-                accept[idx[~keep]] = False
-            zero = keep_frac == 0.0
-            accept &= ~(zero[src] | zero[dest])
-            # A violating source that received no incoming moves: reject its outgoing moves.
-            no_incoming = bad & ~np.isin(np.arange(n_clusters), dest[accept])
-            accept &= ~no_incoming[src]
+    n_clusters = len(sizes)
+    while guarded:
+        new = labels.copy()
+        new[movers[accept]] = dest[accept]
+        touched = np.zeros(n_clusters, dtype=bool)
+        touched[dest[accept]] = True
+        touched[src[accept]] = True
+        bad = violating(fingerprints, new, threshold, device, touched)
+        if stats["guard_rounds"] == 0:
+            stats["violations_unguarded"] = int(bad.sum())
+        stats["guard_rounds"] += 1
+        if not bad.any():
+            break
+        # Rejecting every move into or out of a violating cluster only removes moves, so this terminates.
+        accept &= ~(bad[dest] | bad[src])
     new = labels.copy()
     new[movers[accept]] = dest[accept]
-    t3 = time.perf_counter()
     stats.update(
         accepted_moves=int(accept.sum()),
         seconds_centroids=t1 - t0,
         seconds_search=t2 - t1,
-        seconds_guard=t3 - t2,
+        seconds_guard=time.perf_counter() - t2,
     )
     return compact(new), stats
+
+
+def identical_centroid_groups(fingerprints, labels, device):
+    """Clusters whose packed majority centroids are bit-identical: (group id per cluster, pair count)."""
+    _, _, centroids, _ = cluster_stats(fingerprints, labels, device)
+    packed = np.empty((centroids.shape[0], N_BITS // 64), dtype=np.uint64)
+    weights = (1 << torch.arange(8, device=device, dtype=torch.int32)).view(1, 1, 8)
+    for c in range(0, centroids.shape[0], 65_536):
+        block = (centroids[c : c + 65_536].reshape(-1, N_BITS // 8, 8).to(torch.int32) * weights).sum(-1)
+        packed[c : c + 65_536] = block.to(torch.uint8).cpu().numpy().view(np.uint64)
+    del centroids
+    torch.cuda.empty_cache()
+    _, group, counts = np.unique(packed, axis=0, return_inverse=True, return_counts=True)
+    return group.ravel(), int((counts * (counts - 1) // 2).sum())
+
+
+def dedup_step(fingerprints, labels, threshold, device, max_rounds=3):
+    """Merge clusters with bit-identical majority centroids, keeping merged iSIM >= threshold."""
+    t0 = time.perf_counter()
+    stats = {"identical_pairs_before": None, "merged_clusters": 0, "rejected_groups": 0}
+    for _ in range(max_rounds):
+        group, pairs = identical_centroid_groups(fingerprints, labels, device)
+        if stats["identical_pairs_before"] is None:
+            stats["identical_pairs_before"] = pairs
+        if pairs == 0:
+            break
+        # Representative = first cluster of each group; merge only groups with >= 2 clusters.
+        order = np.argsort(group, kind="stable")
+        starts = np.flatnonzero(np.r_[True, group[order][1:] != group[order][:-1]])
+        rep_of_group = order[starts]
+        target = rep_of_group[group]
+        merged = target != np.arange(len(group))
+        new = target[labels]
+        touched = np.zeros(len(group), dtype=bool)
+        touched[target[merged]] = True
+        bad = violating(fingerprints, new, threshold, device, touched)
+        undo = bad[target]  # every cluster whose merged destination would violate stays put
+        target[undo] = np.arange(len(group))[undo]
+        stats["rejected_groups"] += int(bad.sum())
+        accepted = int((target != np.arange(len(group))).sum())
+        stats["merged_clusters"] += accepted
+        if accepted == 0:
+            break
+        labels = compact(target[labels])
+    _, stats["identical_pairs_after"] = identical_centroid_groups(fingerprints, labels, device)
+    stats["seconds"] = time.perf_counter() - t0
+    return labels, stats
+
+
+VARIANTS = ("topn", "dedup", "r1", "r3", "r3dedup")
+
+
+def refine_run(fingerprints, base, threshold, device, search, ivf, iterations=3):
+    """All refinement variants of one base partition: {variant: labels}, {variant: step stats}."""
+    out, log = {}, {}
+    out["topn"], log["topn"] = topn_step(fingerprints, base, device)
+    out["dedup"], log["dedup"] = dedup_step(fingerprints, base, threshold, device)
+    labels, steps = base, []
+    for iteration in range(1, iterations + 1):
+        labels, step = refine_step(fingerprints, labels, threshold, device, search, ivf)
+        steps.append(step)
+        print(f"  iteration {iteration}: {step}", flush=True)
+        if iteration == 1:
+            out["r1"] = labels
+    out["r3"], log["r"] = labels, steps
+    out["r3dedup"], log["r3dedup"] = dedup_step(fingerprints, labels, threshold, device)
+    return out, log
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("fingerprints", help="packed uint8 .npy fingerprints, shape (N, 256)")
-    parser.add_argument("labels", nargs="+", type=Path, help="labels_threshold_<t>.npz archives")
+    parser.add_argument("labels", type=Path, help="labels_threshold_<t>.npz archive")
     parser.add_argument("--runs", nargs="+", default=None, help="archive keys to refine (default all)")
-    parser.add_argument("--variants", nargs="+", default=["lloyd", "guarded"])
-    parser.add_argument("--iterations", type=int, default=3)
-    parser.add_argument("--margin", type=float, default=0.0)
-    parser.add_argument("--search", choices=["exhaustive", "ivf"], default="exhaustive")
+    parser.add_argument("--search", choices=["exhaustive", "ivf"], default="ivf")
     parser.add_argument("--ivf-cells", type=int, default=4096)
     parser.add_argument("--ivf-probes", type=int, default=16)
-    parser.add_argument("--scaffolds")
-    parser.add_argument("--misassignment-sample", type=int, default=20_000)
-    parser.add_argument("--output", type=Path, required=True, help="CSV of per-iteration metrics")
-    parser.add_argument("--save-labels", type=Path, help="directory for refined label npz archives")
+    parser.add_argument("--iterations", type=int, default=3)
+    parser.add_argument("--suffix", default="", help="appended to variant names, e.g. 'x' for exhaustive")
+    parser.add_argument(
+        "--out-dir",
+        type=Path,
+        required=True,
+        help="writes OUT/<run>/labels_threshold_<t>.npz (keys <method>_<variant>_b<batch>_s<seed>) and steps_<t>.json",
+    )
     args = parser.parse_args()
 
     device = torch.device("cuda")
-    fingerprints = np.load(args.fingerprints)
-    scaffolds = np.load(args.scaffolds) if args.scaffolds else None
-    # Completed runs are kept as part files next to the output and skipped on rerun.
-    parts = args.output.with_suffix(".parts")
-    parts.mkdir(parents=True, exist_ok=True)
-    for archive_path in args.labels:
-        threshold = float(re.search(r"labels_threshold_([0-9.]+)\.npz", archive_path.name).group(1))
-        archive = np.load(archive_path)
-        names = [n for n in sorted(archive.files) if args.runs is None or n in args.runs]
-        for name in names:
-            part = parts / f"{threshold}_{name}.csv"
-            if part.exists():
-                continue
-            rows = []
-            method, batch, seed = re.fullmatch(r"(\w+?)_b(\d+)_s(\d+)", name).groups()
-            base = compact(archive[name])
-            fps = fingerprints[: len(base)]
-            scaf = None if scaffolds is None else scaffolds[: len(base)]
-
-            search_name = "exhaustive" if args.search == "exhaustive" else f"ivf{args.ivf_cells}p{args.ivf_probes}"
-
-            def record(variant, iteration, labels, step):
-                metrics = quality(fps, labels, threshold, scaf, args.misassignment_sample, device, 50_000)
-                rows.append(
-                    {
-                        "threshold": threshold,
-                        "method": method,
-                        "batch_size": int(batch),
-                        "seed": int(seed),
-                        "variant": variant if variant in ("none", "topn") else f"{variant}-{search_name}",
-                        "iteration": iteration,
-                        **step,
-                        **metrics,
-                    }
-                )
-                print(
-                    f"t={threshold} {name} {variant} it{iteration}: clusters={metrics['clusters']} "
-                    f"misassigned={metrics['misassigned_fraction']:.4f} isim_w={metrics['isim_size_weighted']:.4f} "
-                    f"below={metrics['isim_below_threshold']} {step}",
-                    flush=True,
-                )
-
-            empty = dict.fromkeys(
-                [
-                    "proposed_moves",
-                    "accepted_moves",
-                    "guard_rounds",
-                    "violations_unguarded",
-                    "seconds_centroids",
-                    "seconds_search",
-                    "seconds_guard",
-                ],
-                0,
-            )
-            record("none", 0, base, empty)
-            for variant in args.variants:
-                labels = base
-                saved = {}
-                for iteration in range(1, args.iterations + 1):
-                    labels, step = refine_step(
-                        fps,
-                        labels,
-                        threshold,
-                        variant,
-                        device,
-                        args.margin,
-                        args.search,
-                        (args.ivf_cells, args.ivf_probes),
-                    )
-                    record(variant, iteration, labels, step)
-                    saved[f"{method}_b{batch}_s{seed}_it{iteration}"] = labels
-                    if step["accepted_moves"] == 0 or variant == "topn":
-                        break
-                if args.save_labels:
-                    args.save_labels.mkdir(parents=True, exist_ok=True)
-                    np.savez_compressed(
-                        args.save_labels
-                        / f"refined_{variant}-{search_name}_{threshold}_{method}_b{batch}_s{seed}.npz",
-                        **saved,
-                    )
-            write(part, rows)
-            combined = [r for path in sorted(parts.glob("*.csv")) for r in csv.DictReader(open(path))]
-            write(args.output, combined)
-
-
-def write(path, rows):
-    fields = list(dict.fromkeys(k for r in rows for k in r))
-    with open(path, "w", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(rows)
+    fingerprints = np.load(args.fingerprints, mmap_mode="r")
+    threshold = float(re.search(r"labels_threshold_([0-9.]+)\.npz", args.labels.name).group(1))
+    archive = np.load(args.labels)
+    for name in [n for n in sorted(archive.files) if args.runs is None or n in args.runs]:
+        target = args.out_dir / f"{name}{args.suffix}" / f"labels_threshold_{threshold}.npz"
+        if target.exists():
+            print(f"{target}: already done", flush=True)
+            continue
+        method, batch, seed = re.fullmatch(r"(\w+?)_b(\d+)_s(\d+)", name).groups()
+        base = compact(archive[name])
+        fps = np.ascontiguousarray(fingerprints[: len(base)])
+        print(f"threshold {threshold} {name}", flush=True)
+        out, log = refine_run(
+            fps, base, threshold, device, args.search, (args.ivf_cells, args.ivf_probes), args.iterations
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with open(target.parent / f"steps_{threshold}.json", "w") as handle:
+            json.dump({"search": args.search, "ivf": [args.ivf_cells, args.ivf_probes], **log}, handle, indent=1)
+        partial = target.with_suffix(".partial.npz")
+        np.savez_compressed(
+            partial, **{f"{method}_{variant}{args.suffix}_b{batch}_s{seed}": labels for variant, labels in out.items()}
+        )
+        partial.rename(target)
+        print(f"wrote {target}", flush=True)
 
 
 if __name__ == "__main__":
