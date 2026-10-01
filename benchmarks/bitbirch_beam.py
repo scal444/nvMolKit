@@ -288,6 +288,7 @@ def get_tree(path, fingerprints, labels, threshold, device):
         np.savez(path.with_suffix(".partial.npz"), **arrays)
         path.with_suffix(".partial.npz").rename(path)
         print(f"tree {path}: depth {arrays['depth']}, build {arrays['seconds_build']:.1f}s", flush=True)
+        torch.cuda.empty_cache()
     return Tree(np.load(path), device)
 
 
@@ -367,9 +368,11 @@ def cmd_recall(args, device):
         print(rows[-1], flush=True)
 
     record("exhaustive", 0, exh_s, exh_i, t_exh)
+    torch.cuda.empty_cache()
     best_other_centroid_ivf(fps[:20_000], labels[:20_000], centroids, pop, device)
     (s, i), t = timed(lambda: best_other_centroid_ivf(fps, labels, centroids, pop, device))
     record("ivf4096p16", 0, s, i, t)
+    torch.cuda.empty_cache()
     for beam in args.beams:
         search = BeamSearch(tree, beam, device)
         (s, i), t = timed(lambda: search(fps, labels, centroids, pop, sizes))
