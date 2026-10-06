@@ -478,7 +478,7 @@ class SubstructLibrary::Impl {
       }
       slots = std::min(slots, (availableBytes[gpu] - recursiveBytes[gpu]) / slotBytes[gpu]);
     }
-    // Each query searches every GPU from its own host thread.
+    // Each query searches every GPU from its own host thread; searches that fit the executors run on that thread.
     const std::size_t hostThreads = static_cast<std::size_t>(omp_get_max_threads()) / deviceIds_.size();
     slots                         = std::max<std::size_t>(1, std::min(slots, hostThreads));
     std::size_t recursiveSlots    = slots;
