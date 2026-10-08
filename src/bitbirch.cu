@@ -598,10 +598,11 @@ __device__ __forceinline__ double routingSimilarity(const int intersection, cons
   return static_cast<double>(intersection) / unionCount;
 }
 
+//! Intersection and union popcounts of an entry centroid and a fingerprint.
 template <typename Component>
-__device__ __forceinline__ double entryToFingerprintSimilarity(const TreeStorage<Component>& storage,
-                                                               const int                     entry,
-                                                               const std::uint32_t*          fingerprint) {
+__device__ __forceinline__ int2 entryFingerprintCounts(const TreeStorage<Component>& storage,
+                                                       const int                     entry,
+                                                       const std::uint32_t*          fingerprint) {
   int         intersection = 0;
   int         unionCount   = 0;
   const auto* centroid     = centroidFingerprint(storage, entry);
@@ -620,13 +621,21 @@ __device__ __forceinline__ double entryToFingerprintSimilarity(const TreeStorage
       unionCount += __popc(centroidWords.z | fingerprintWords.z);
       unionCount += __popc(centroidWords.w | fingerprintWords.w);
     }
-    return routingSimilarity(intersection, unionCount, storage.numBits);
+    return make_int2(intersection, unionCount);
   }
   for (int word = 0; word < storage.numWords; ++word) {
     intersection += __popc(centroid[word] & fingerprint[word]);
     unionCount += __popc(centroid[word] | fingerprint[word]);
   }
-  return routingSimilarity(intersection, unionCount, storage.numBits);
+  return make_int2(intersection, unionCount);
+}
+
+template <typename Component>
+__device__ __forceinline__ double entryToFingerprintSimilarity(const TreeStorage<Component>& storage,
+                                                               const int                     entry,
+                                                               const std::uint32_t*          fingerprint) {
+  const int2 counts = entryFingerprintCounts(storage, entry, fingerprint);
+  return routingSimilarity(counts.x, counts.y, storage.numBits);
 }
 
 template <typename Component>
@@ -979,6 +988,71 @@ __device__ __forceinline__ int cooperativeClosestEntry(const TreeStorage<Compone
   return scratch.bestEntry;
 }
 
+// cooperativeClosestEntry over caller-staged entries without FP64 arithmetic,
+// for at most 4096 bits. routingSimilarity is then a correctly rounded FP32
+// quotient widened exactly to double, so comparing the FP32 values selects the
+// same entry with the same first-in-order tie-break.
+template <typename Component>
+__device__ __forceinline__ int cooperativeClosestStagedEntry(const TreeStorage<Component>& storage,
+                                                             const std::uint32_t*          fingerprint,
+                                                             CooperativeScratch&           scratch,
+                                                             const int*                    nodeEntries,
+                                                             const int                     numNodeEntries) {
+  if (threadIdx.x == 0) {
+    scratch.bestEntry = -1;
+    scratch.bestValue = -1.0;
+  }
+  __syncthreads();
+  const int lane = threadIdx.x % warpSize;
+  const int warp = threadIdx.x / warpSize;
+  for (int offset = 0; offset < numNodeEntries; offset += blockDim.x) {
+    const bool active = offset + static_cast<int>(threadIdx.x) < numNodeEntries;
+    int        entry  = active ? nodeEntries[offset + threadIdx.x] : -1;
+    int        order  = active ? static_cast<int>(threadIdx.x) : INT_MAX;
+    float      value  = -1.0f;
+    if (active) {
+      const int2 counts = entryFingerprintCounts(storage, entry, fingerprint);
+      value             = counts.y == 0 ? 1.0f : __fdiv_rn(static_cast<float>(counts.x), static_cast<float>(counts.y));
+    }
+    for (int shift = warpSize / 2; shift > 0; shift /= 2) {
+      const float otherValue = __shfl_down_sync(0xffffffffU, value, shift);
+      const int   otherOrder = __shfl_down_sync(0xffffffffU, order, shift);
+      const int   otherEntry = __shfl_down_sync(0xffffffffU, entry, shift);
+      if (otherValue > value || (otherValue == value && otherOrder < order)) {
+        value = otherValue;
+        order = otherOrder;
+        entry = otherEntry;
+      }
+    }
+    if (lane == 0) {
+      scratch.otherValues[warp] = value;
+      scratch.orders[warp]      = order;
+      scratch.nodeEntries[warp] = entry;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      const int numWarps  = (blockDim.x + warpSize - 1) / warpSize;
+      double    bestValue = scratch.otherValues[0];
+      long long bestOrder = scratch.orders[0];
+      int       bestEntry = scratch.nodeEntries[0];
+      for (int index = 1; index < numWarps; ++index) {
+        if (scratch.otherValues[index] > bestValue ||
+            (scratch.otherValues[index] == bestValue && scratch.orders[index] < bestOrder)) {
+          bestValue = scratch.otherValues[index];
+          bestOrder = scratch.orders[index];
+          bestEntry = scratch.nodeEntries[index];
+        }
+      }
+      if (bestValue > scratch.bestValue) {
+        scratch.bestValue = bestValue;
+        scratch.bestEntry = bestEntry;
+      }
+    }
+    __syncthreads();
+  }
+  return scratch.bestEntry;
+}
+
 template <typename Component>
 __device__ __forceinline__ bitbirch::ISimTanimotoTerms cooperativeCombinedISimTerms(
   const TreeStorage<Component>& storage,
@@ -1035,6 +1109,59 @@ __device__ __forceinline__ bitbirch::ISimTanimotoTerms cooperativeCombinedISimTe
     }
     __syncthreads();
   }
+  return {scratch.accumulatedValue, scratch.accumulatedOtherValue};
+}
+
+// cooperativeCombinedISimTerms without FP64 arithmetic. While numBits * n^2
+// <= 2^52 for the combined count n, every FP64 product and partial sum there is
+// an integer below 2^53, so its result is exact in any summation order and
+// equals these 64-bit integer totals converted once. Larger clusters fall back.
+template <typename Component>
+__device__ __forceinline__ bitbirch::ISimTanimotoTerms cooperativeCombinedISimTermsExact(
+  const TreeStorage<Component>& storage,
+  const int                     entry,
+  const std::uint32_t*          fingerprint,
+  CooperativeScratch&           scratch) {
+  const auto combinedCount = static_cast<std::uint64_t>(storage.entryCounts[entry]) + 1;
+  if (combinedCount > (1ULL << 26) ||
+      combinedCount * combinedCount > (1ULL << 52) / static_cast<std::uint64_t>(storage.numBits)) {
+    return cooperativeCombinedISimTerms(storage, entry, fingerprint, scratch);
+  }
+  if (threadIdx.x == 0) {
+    const int slot = storage.entrySummarySlots[entry];
+    if (slot >= 0 && storage.summaryPageHits != nullptr) {
+      atomicAdd(storage.summaryPageHits + slot / summaryEntriesPerPage, 1U);
+    }
+  }
+  unsigned long long commonPairs = 0;
+  unsigned long long mismatches  = 0;
+  for (int bit = threadIdx.x; bit < storage.numBits; bit += blockDim.x) {
+    const std::uint32_t word = fingerprint[bit / 32];
+    const auto component     = static_cast<std::uint64_t>(linearSum(storage, entry, bit)) + ((word >> (bit % 32)) & 1U);
+    commonPairs += component * (component - 1) / 2;
+    mismatches += component * (combinedCount - component);
+  }
+  for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+    commonPairs += __shfl_down_sync(0xffffffffU, commonPairs, offset);
+    mismatches += __shfl_down_sync(0xffffffffU, mismatches, offset);
+  }
+  const int numWarps = (blockDim.x + warpSize - 1) / warpSize;
+  if (threadIdx.x % warpSize == 0) {
+    scratch.orders[threadIdx.x / warpSize]            = static_cast<long long>(commonPairs);
+    scratch.orders[numWarps + threadIdx.x / warpSize] = static_cast<long long>(mismatches);
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    long long totalCommonPairs = 0;
+    long long totalMismatches  = 0;
+    for (int warp = 0; warp < numWarps; ++warp) {
+      totalCommonPairs += scratch.orders[warp];
+      totalMismatches += scratch.orders[numWarps + warp];
+    }
+    scratch.accumulatedValue      = static_cast<double>(totalCommonPairs);
+    scratch.accumulatedOtherValue = static_cast<double>(totalMismatches);
+  }
+  __syncthreads();
   return {scratch.accumulatedValue, scratch.accumulatedOtherValue};
 }
 
@@ -1585,7 +1712,9 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
     }
     const auto* fingerprint = queryFingerprint(storage, molecule);
     int         selected    = -1;
-    if (storage.nodeHeads[node] >= 0) {
+    if (storage.nodeHeads[node] >= 0 && stageEntries && storage.numBits <= 4096) {
+      selected = cooperativeClosestStagedEntry(storage, fingerprint, scratch, leafEntries, numLeafEntries);
+    } else if (storage.nodeHeads[node] >= 0) {
       selected = cooperativeClosestEntry(storage,
                                          node,
                                          fingerprint,
@@ -1595,7 +1724,7 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
     }
     bool merge = false;
     if (selected >= 0) {
-      const auto terms = cooperativeCombinedISimTerms(storage, selected, fingerprint, scratch);
+      const auto terms = cooperativeCombinedISimTermsExact(storage, selected, fingerprint, scratch);
       // Publish one decision before any warp can mutate the entry count. Reading
       // that count independently immediately before the update can diverge warps.
       if (threadIdx.x == 0) {
