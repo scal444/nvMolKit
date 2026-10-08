@@ -1112,35 +1112,19 @@ __device__ __forceinline__ bitbirch::ISimTanimotoTerms cooperativeCombinedISimTe
   return {scratch.accumulatedValue, scratch.accumulatedOtherValue};
 }
 
-// cooperativeCombinedISimTerms without FP64 arithmetic. While numBits * n^2
-// <= 2^52 for the combined count n, every FP64 product and partial sum there is
-// an integer below 2^53, so its result is exact in any summation order and
-// equals these 64-bit integer totals converted once. Larger clusters fall back.
-template <typename Component>
-__device__ __forceinline__ bitbirch::ISimTanimotoTerms cooperativeCombinedISimTermsExact(
-  const TreeStorage<Component>& storage,
-  const int                     entry,
-  const std::uint32_t*          fingerprint,
-  CooperativeScratch&           scratch) {
-  const auto combinedCount = static_cast<std::uint64_t>(storage.entryCounts[entry]) + 1;
-  if (combinedCount > (1ULL << 26) ||
-      combinedCount * combinedCount > (1ULL << 52) / static_cast<std::uint64_t>(storage.numBits)) {
-    return cooperativeCombinedISimTerms(storage, entry, fingerprint, scratch);
-  }
-  if (threadIdx.x == 0) {
-    const int slot = storage.entrySummarySlots[entry];
-    if (slot >= 0 && storage.summaryPageHits != nullptr) {
-      atomicAdd(storage.summaryPageHits + slot / summaryEntriesPerPage, 1U);
-    }
-  }
-  unsigned long long commonPairs = 0;
-  unsigned long long mismatches  = 0;
-  for (int bit = threadIdx.x; bit < storage.numBits; bit += blockDim.x) {
-    const std::uint32_t word = fingerprint[bit / 32];
-    const auto component     = static_cast<std::uint64_t>(linearSum(storage, entry, bit)) + ((word >> (bit % 32)) & 1U);
-    commonPairs += component * (component - 1) / 2;
-    mismatches += component * (combinedCount - component);
-  }
+// While numBits * n^2 <= 2^52 for the combined count n, every FP64 product and
+// partial sum of the iSIM terms is an integer below 2^53. FP64 accumulation is
+// then exact in any summation order and equals 64-bit integer totals converted
+// once, so callers may sum integers instead. Larger clusters keep FP64.
+__device__ __forceinline__ bool integerISimTerms(const std::uint64_t combinedCount, const int numBits) {
+  return combinedCount <= (1ULL << 26) &&
+         combinedCount * combinedCount <= (1ULL << 52) / static_cast<std::uint64_t>(numBits);
+}
+
+//! Block-wide sum of per-thread integer iSIM terms, returned as exact doubles.
+__device__ __forceinline__ bitbirch::ISimTanimotoTerms cooperativeIntegerISimTerms(unsigned long long  commonPairs,
+                                                                                    unsigned long long  mismatches,
+                                                                                    CooperativeScratch& scratch) {
   for (int offset = warpSize / 2; offset > 0; offset /= 2) {
     commonPairs += __shfl_down_sync(0xffffffffU, commonPairs, offset);
     mismatches += __shfl_down_sync(0xffffffffU, mismatches, offset);
@@ -1163,6 +1147,34 @@ __device__ __forceinline__ bitbirch::ISimTanimotoTerms cooperativeCombinedISimTe
   }
   __syncthreads();
   return {scratch.accumulatedValue, scratch.accumulatedOtherValue};
+}
+
+//! cooperativeCombinedISimTerms without FP64 arithmetic; see integerISimTerms.
+template <typename Component>
+__device__ __forceinline__ bitbirch::ISimTanimotoTerms cooperativeCombinedISimTermsExact(
+  const TreeStorage<Component>& storage,
+  const int                     entry,
+  const std::uint32_t*          fingerprint,
+  CooperativeScratch&           scratch) {
+  const auto combinedCount = static_cast<std::uint64_t>(storage.entryCounts[entry]) + 1;
+  if (!integerISimTerms(combinedCount, storage.numBits)) {
+    return cooperativeCombinedISimTerms(storage, entry, fingerprint, scratch);
+  }
+  if (threadIdx.x == 0) {
+    const int slot = storage.entrySummarySlots[entry];
+    if (slot >= 0 && storage.summaryPageHits != nullptr) {
+      atomicAdd(storage.summaryPageHits + slot / summaryEntriesPerPage, 1U);
+    }
+  }
+  unsigned long long commonPairs = 0;
+  unsigned long long mismatches  = 0;
+  for (int bit = threadIdx.x; bit < storage.numBits; bit += blockDim.x) {
+    const std::uint32_t word = fingerprint[bit / 32];
+    const auto component     = static_cast<std::uint64_t>(linearSum(storage, entry, bit)) + ((word >> (bit % 32)) & 1U);
+    commonPairs += component * (component - 1) / 2;
+    mismatches += component * (combinedCount - component);
+  }
+  return cooperativeIntegerISimTerms(commonPairs, mismatches, scratch);
 }
 
 template <typename Component>
@@ -1595,21 +1607,55 @@ __global__ void bitBirchGroupsKernel(const int              count,
   const int  end           = scratch.rangeEnd;
   const auto combinedCount = static_cast<std::uint64_t>(storage.entryCounts[entry]) + end - first;
   Component* proposed      = proposalSums + static_cast<std::size_t>(first) * storage.numBits;
-  double     common        = 0;
-  double     mismatches    = 0;
-  for (int bit = threadIdx.x; bit < storage.numBits; bit += blockDim.x) {
-    auto sum = static_cast<std::uint64_t>(linearSum(storage, entry, bit));
-    for (int offset = first; offset < end; ++offset) {
-      const auto word = queryFingerprint(storage, values[offset])[bit / 32];
-      sum += (word >> (bit % 32)) & 1U;
+  const bool integerTerms  = integerISimTerms(combinedCount, storage.numBits);
+
+  double             common            = 0;
+  double             mismatches        = 0;
+  unsigned long long integerCommon     = 0;
+  unsigned long long integerMismatches = 0;
+  // Several bits per thread keep each member's word loads independent. Every
+  // thread still visits its bits in ascending order, as the FP64 fallback needs.
+  for (int base = 0; base < storage.numBits; base += blockDim.x * stagedBitsPerThread) {
+    std::uint64_t sums[stagedBitsPerThread];
+#pragma unroll
+    for (int part = 0; part < stagedBitsPerThread; ++part) {
+      const int bit = base + part * blockDim.x + threadIdx.x;
+      sums[part]    = bit < storage.numBits ? static_cast<std::uint64_t>(linearSum(storage, entry, bit)) : 0;
     }
-    proposed[bit] = static_cast<Component>(sum);
-    bitbirch::ISimTanimotoTerms terms{};
-    bitbirch::accumulateISimTanimotoTerm(terms, sum, combinedCount);
-    common += terms.commonPairs;
-    mismatches += terms.mismatches;
+    for (int offset = first; offset < end; ++offset) {
+      const auto* fingerprint = queryFingerprint(storage, values[offset]);
+#pragma unroll
+      for (int part = 0; part < stagedBitsPerThread; ++part) {
+        const int bit = base + part * blockDim.x + threadIdx.x;
+        if (bit < storage.numBits) {
+          sums[part] += (fingerprint[bit / 32] >> (bit % 32)) & 1U;
+        }
+      }
+    }
+#pragma unroll
+    for (int part = 0; part < stagedBitsPerThread; ++part) {
+      const int bit = base + part * blockDim.x + threadIdx.x;
+      if (bit >= storage.numBits) {
+        continue;
+      }
+      const std::uint64_t sum = sums[part];
+      proposed[bit]           = static_cast<Component>(sum);
+      if (integerTerms) {
+        integerCommon += sum * (sum - 1) / 2;
+        integerMismatches += sum * (combinedCount - sum);
+      } else {
+        bitbirch::ISimTanimotoTerms terms{};
+        bitbirch::accumulateISimTanimotoTerm(terms, sum, combinedCount);
+        common += terms.commonPairs;
+        mismatches += terms.mismatches;
+      }
+    }
   }
-  cooperativeAccumulateISimTerms(common, mismatches, scratch);
+  if (integerTerms) {
+    cooperativeIntegerISimTerms(integerCommon, integerMismatches, scratch);
+  } else {
+    cooperativeAccumulateISimTerms(common, mismatches, scratch);
+  }
   const bool merge =
     bitbirch::isimTanimotoAtLeast({scratch.accumulatedValue, scratch.accumulatedOtherValue}, combinedCount, threshold);
   __syncthreads();
@@ -1634,7 +1680,7 @@ __global__ void bitBirchGroupsKernel(const int              count,
   for (int offset = first; offset < end; ++offset) {
     const int   molecule    = values[offset];
     const auto* fingerprint = queryFingerprint(storage, molecule);
-    const auto  terms       = cooperativeCombinedISimTerms(storage, entry, fingerprint, scratch);
+    const auto  terms       = cooperativeCombinedISimTermsExact(storage, entry, fingerprint, scratch);
     if (threadIdx.x == 0) {
       scratch.decision =
         bitbirch::isimTanimotoAtLeast(terms, static_cast<std::uint64_t>(storage.entryCounts[entry]) + 1, threshold);
