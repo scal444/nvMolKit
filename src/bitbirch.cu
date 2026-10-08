@@ -20,6 +20,7 @@
 #include "src/bitbirch.h"
 #include "src/bitbirch_common.cuh"
 #include "src/utils/cuda_error_check.h"
+#include "src/utils/device.h"
 #include "src/utils/host_vector.h"
 #include "src/utils/nvtx.h"
 
@@ -2032,7 +2033,7 @@ template <typename Component> __global__ void bitBirchFinalizeKernel(const int c
 }
 
 //! Every non-root node has one directory entry, so leaf entries are E - V + 1.
-int liveClusters(const std::vector<int>& control) {
+int liveClusters(const PinnedHostVector<int>& control) {
   return control[EntryCount] - control[NodeCount] + 1;
 }
 
@@ -2063,7 +2064,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
   int                    stagedBegin       = 0;
   int                    stagedCount       = 0;
   const auto             drainStagedLabels = [&]() {
-    // Call only after a stream synchronization that follows the staging copy.
+    // Call only after a stream or event synchronization that follows the staging copy.
     std::copy_n(labelStaging.data(), stagedCount, hostLabels + stagedBegin);
     stagedCount = 0;
   };
@@ -2124,8 +2125,13 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
   AsyncDeviceVector<int>           summaryEntries(2 * static_cast<std::size_t>(batchCapacity), stream);
   AsyncDeviceVector<int>           summaryCount(1, stream);
   AsyncDeviceVector<int>           control(NumEpochControls, stream);
+  // Pinned so the per-round readback is a true async copy that an event can
+  // fence while the next round's scratch resets are already queued behind it.
+  PinnedHostVector<int>            hostControl(NumEpochControls, 0);
+  const ScopedCudaEvent            controlReady;
   cudaCheckError(cudaMemsetAsync(dirtyNodes.data(), 0, tree.nodeCapacity * sizeof(int), stream));
   cudaCheckError(cudaMemsetAsync(deltaSlots.data(), 0xff, tree.nodeCapacity * sizeof(int), stream));
+  cudaCheckError(cudaMemsetAsync(deltaCursor.data(), 0, sizeof(int), stream));
   auto storage = tree.storage();
   bitBirchInitializeKernel<<<1, 1, 0, stream>>>(storage);
   cudaCheckError(cudaGetLastError());
@@ -2141,7 +2147,6 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                                  32,
                                                  stream));
   AsyncDeviceVector<std::byte> sortScratch(sortBytes, stream);
-  std::vector<int>             hostControl(NumEpochControls, 0);
   hostControl[NodeCount] = 1;
   for (int begin = 0; begin < numFingerprints;) {
     ScopedNvtxRange batchRange("BitBIRCH batch", NvtxColor::kGrey);
@@ -2196,8 +2201,9 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
       if (levelCounts.size() < static_cast<std::size_t>(leafDepth) + 1) {
         levelCounts.resize(leafDepth + 1);
         levelNodes.resize(static_cast<std::size_t>(leafDepth + 1) * batchCapacity);
+        // Later rounds reset level counts behind the control readback.
+        cudaCheckError(cudaMemsetAsync(levelCounts.data(), 0, levelCounts.size() * sizeof(int), stream));
       }
-      cudaCheckError(cudaMemsetAsync(levelCounts.data(), 0, levelCounts.size() * sizeof(int), stream));
       if (splitAffinity.size() < static_cast<std::size_t>(tree.entryCapacity)) {
         splitAffinity.resize(tree.entryCapacity);
       }
@@ -2216,7 +2222,6 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
         deltaCounts.resize(deltaCapacity);
         deltaSums.resize(deltaCapacity * numWords * 32);
       }
-      cudaCheckError(cudaMemsetAsync(deltaCursor.data(), 0, sizeof(int), stream));
       storage            = tree.storage();
       storage.labelBegin = labelBegin;
       if (fingerprintsOnHost) {
@@ -2330,8 +2335,16 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
       ScopedNvtxRange controlRange("BitBIRCH control + host sync", NvtxColor::kGrey);
       bitBirchControlKernel<<<1, cooperativeBlockSize, 0, stream>>>(begin, count, control.data(), storage);
       cudaCheckError(cudaGetLastError());
-      control.copyToHost(hostControl);
-      cudaCheckError(cudaStreamSynchronize(stream));
+      cudaCheckError(cudaMemcpyAsync(hostControl.data(),
+                                     control.data(),
+                                     NumEpochControls * sizeof(int),
+                                     cudaMemcpyDeviceToHost,
+                                     stream));
+      cudaCheckError(cudaEventRecord(controlReady.event(), stream));
+      // Reset the next round's per-round scratch while the host waits on control.
+      cudaCheckError(cudaMemsetAsync(levelCounts.data(), 0, levelCounts.size() * sizeof(int), stream));
+      cudaCheckError(cudaMemsetAsync(deltaCursor.data(), 0, sizeof(int), stream));
+      cudaCheckError(cudaEventSynchronize(controlReady.event()));
       if (stagedCount > 0) {
         drainStagedLabels();
       }
