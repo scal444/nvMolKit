@@ -799,6 +799,8 @@ struct CooperativeScratch {
   int       count;        //!< Entries gathered into entries or nodeEntries.
   int       stagedCount;  //!< Entries or delta slots staged for per-bit sums.
   int       stagedTotal;  //!< Member count summed over the staged entries.
+  int       stagedSingletons;  //!< Singleton fingerprint indices staged in entries.
+  int       stagedSummaries;   //!< Summary slots staged in otherEntries.
   int       bestEntry;    //!< Closest entry found by cooperativeClosestEntry.
   int       decision;     //!< Block-uniform yes/no published by thread zero.
   int       lhsSeed;      //!< Split seeds found by cooperativeFindSplitSeeds.
@@ -1327,6 +1329,68 @@ __device__ __forceinline__ bool cooperativeAddFingerprint(TreeStorage<Component>
   return true;
 }
 
+//! Rows whose loads one thread keeps in flight while summing staged rows.
+constexpr int stagedRowsInFlight = 4;
+
+// Adds bit base + part * blockDim.x + threadIdx.x of each packed fingerprint
+// row(index) to sums[part]. Rows are loaded stagedRowsInFlight at a time so
+// their latencies overlap instead of serializing one row per memory round trip.
+template <typename Component, typename RowAt>
+__device__ __forceinline__ void accumulateStagedBits(Component (&sums)[stagedBitsPerThread],
+                                                     const int numRows,
+                                                     const int base,
+                                                     const int numBits,
+                                                     RowAt     rowAt) {
+  for (int first = 0; first < numRows; first += stagedRowsInFlight) {
+    std::uint32_t words[stagedRowsInFlight][stagedBitsPerThread];
+#pragma unroll
+    for (int row = 0; row < stagedRowsInFlight; ++row) {
+      const std::uint32_t* fingerprint = first + row < numRows ? rowAt(first + row) : nullptr;
+#pragma unroll
+      for (int part = 0; part < stagedBitsPerThread; ++part) {
+        const int bit    = base + part * blockDim.x + threadIdx.x;
+        words[row][part] = fingerprint != nullptr && bit < numBits ? fingerprint[bit / 32] : 0U;
+      }
+    }
+#pragma unroll
+    for (int row = 0; row < stagedRowsInFlight; ++row) {
+#pragma unroll
+      for (int part = 0; part < stagedBitsPerThread; ++part) {
+        const int bit = base + part * blockDim.x + threadIdx.x;
+        sums[part] += static_cast<Component>((words[row][part] >> (bit % 32)) & 1U);
+      }
+    }
+  }
+}
+
+//! accumulateStagedBits for rows of per-bit Component sums.
+template <typename Component, typename RowAt>
+__device__ __forceinline__ void accumulateStagedSums(Component (&sums)[stagedBitsPerThread],
+                                                     const int numRows,
+                                                     const int base,
+                                                     const int numBits,
+                                                     RowAt     rowAt) {
+  for (int first = 0; first < numRows; first += stagedRowsInFlight) {
+    Component values[stagedRowsInFlight][stagedBitsPerThread];
+#pragma unroll
+    for (int row = 0; row < stagedRowsInFlight; ++row) {
+      const Component* rowSums = first + row < numRows ? rowAt(first + row) : nullptr;
+#pragma unroll
+      for (int part = 0; part < stagedBitsPerThread; ++part) {
+        const int bit     = base + part * blockDim.x + threadIdx.x;
+        values[row][part] = rowSums != nullptr && bit < numBits ? rowSums[bit] : Component{0};
+      }
+    }
+#pragma unroll
+    for (int row = 0; row < stagedRowsInFlight; ++row) {
+#pragma unroll
+      for (int part = 0; part < stagedBitsPerThread; ++part) {
+        sums[part] += values[row][part];
+      }
+    }
+  }
+}
+
 template <typename Component>
 __device__ __forceinline__ void cooperativeSummarizeNode(TreeStorage<Component>& storage,
                                                          const int               node,
@@ -1336,21 +1400,29 @@ __device__ __forceinline__ void cooperativeSummarizeNode(TreeStorage<Component>&
     return;
   }
   // Stage each entry's storage location from the node directory, one entry
-  // per thread. Every thread then sums its bits from shared memory instead of
-  // re-chasing links. Nodes wider than one block walk the list once.
+  // per thread: singleton fingerprints and summary slots in separate lists.
+  // Every thread then sums its bits from shared memory instead of re-chasing
+  // links. Nodes wider than one block walk the list once.
   const int size = storage.nodeSizes[node];
   if (size <= static_cast<int>(blockDim.x)) {
     if (threadIdx.x == 0) {
-      scratch.stagedTotal = 0;
-      scratch.stagedCount = size;
+      scratch.stagedTotal      = 0;
+      scratch.stagedCount      = size;
+      scratch.stagedSingletons = 0;
+      scratch.stagedSummaries  = 0;
     }
     __syncthreads();
     std::uint32_t count = 0;
     if (threadIdx.x < size) {
-      const int entry                   = nodeDirectory(storage, node)[threadIdx.x];
-      count                             = storage.entryCounts[entry];
-      scratch.entries[threadIdx.x]      = storage.entryFingerprintIndices[entry];
-      scratch.otherEntries[threadIdx.x] = storage.entrySummarySlots[entry];
+      const int entry            = nodeDirectory(storage, node)[threadIdx.x];
+      const int fingerprintIndex = storage.entryFingerprintIndices[entry];
+      count                      = storage.entryCounts[entry];
+      // Sums are integers, so the staged order of either list is irrelevant.
+      if (fingerprintIndex >= 0) {
+        scratch.entries[atomicAdd(&scratch.stagedSingletons, 1)] = fingerprintIndex;
+      } else {
+        scratch.otherEntries[atomicAdd(&scratch.stagedSummaries, 1)] = storage.entrySummarySlots[entry];
+      }
     }
     for (int offset = warpSize / 2; offset > 0; offset /= 2) {
       count += __shfl_down_sync(0xffffffffU, count, offset);
@@ -1374,32 +1446,31 @@ __device__ __forceinline__ void cooperativeSummarizeNode(TreeStorage<Component>&
   __syncthreads();
   const int numEntries = scratch.stagedCount;
   if (numEntries <= cooperativeBlockSize) {
+    const int numSingletons = scratch.stagedSingletons;
+    const int numSummaries  = scratch.stagedSummaries;
+    // singletonWord counts one page hit per singleton read at word zero; keep
+    // that accounting while the rows below are read without it.
+    if (storage.singletonPageHits != nullptr && threadIdx.x == 0) {
+      for (int index = 0; index < numSingletons; ++index) {
+        atomicAdd(storage.singletonPageHits + scratch.entries[index] / summaryEntriesPerPage, 1U);
+      }
+    }
     for (int base = 0; base < storage.numBits; base += blockDim.x * stagedBitsPerThread) {
       Component sums[stagedBitsPerThread] = {};
-      for (int index = 0; index < numEntries; ++index) {
+      accumulateStagedBits(sums, numSingletons, base, storage.numBits, [&](const int index) {
         const int fingerprintIndex = scratch.entries[index];
-        if (fingerprintIndex >= 0) {
-#pragma unroll
-          for (int part = 0; part < stagedBitsPerThread; ++part) {
-            const int bit = base + part * blockDim.x + threadIdx.x;
-            if (bit < storage.numBits) {
-              sums[part] +=
-                static_cast<Component>((singletonWord(storage, fingerprintIndex, bit / 32) >> (bit % 32)) & 1U);
-            }
-          }
-        } else {
-          const int        slot      = scratch.otherEntries[index];
-          const Component* entrySums = storage.linearSumPages[slot / summaryEntriesPerPage] +
-                                       static_cast<std::size_t>(slot % summaryEntriesPerPage) * storage.numBits;
-#pragma unroll
-          for (int part = 0; part < stagedBitsPerThread; ++part) {
-            const int bit = base + part * blockDim.x + threadIdx.x;
-            if (bit < storage.numBits) {
-              sums[part] += entrySums[bit];
-            }
-          }
+        if (storage.singletonFingerprintPages != nullptr) {
+          return static_cast<const std::uint32_t*>(
+            storage.singletonFingerprintPages[fingerprintIndex / summaryEntriesPerPage] +
+            static_cast<std::size_t>(fingerprintIndex % summaryEntriesPerPage) * storage.numWords);
         }
-      }
+        return storage.fingerprints + static_cast<std::size_t>(fingerprintIndex) * storage.numWords;
+      });
+      accumulateStagedSums(sums, numSummaries, base, storage.numBits, [&](const int index) {
+        const int slot = scratch.otherEntries[index];
+        return static_cast<const Component*>(storage.linearSumPages[slot / summaryEntriesPerPage] +
+                                             static_cast<std::size_t>(slot % summaryEntriesPerPage) * storage.numBits);
+      });
 #pragma unroll
       for (int part = 0; part < stagedBitsPerThread; ++part) {
         const int bit = base + part * blockDim.x + threadIdx.x;
@@ -1960,29 +2031,10 @@ __global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
       std::uint32_t addedCount = 0;
       scratch.stagedTotal      = 0;
       if (leaf) {
-        int first = 0;
-        int end   = count;
-        while (first < end) {
-          const int middle = first + (end - first) / 2;
-          if (keys[middle] < node) {
-            first = middle + 1;
-          } else {
-            end = middle;
-          }
-        }
-        // Stage accepted molecules once for the per-bit sums below.
-        scratch.rangeBegin = first;
-        while (end < count && keys[end] == node) {
-          if (labelOf(storage, values[end]) >= 0) {
-            if (addedCount < cooperativeBlockSize) {
-              scratch.entries[addedCount] = values[end];
-            }
-            ++addedCount;
-          }
-          ++end;
-        }
-        scratch.rangeEnd    = end;
-        scratch.stagedCount = static_cast<int>(addedCount);
+        scratch.node        = -1;
+        scratch.rangeBegin  = count;
+        scratch.rangeEnd    = 0;
+        scratch.stagedCount = 0;
       } else if (!stageChildren) {
         // Stage the refreshed children's delta slots for the per-bit sum.
         int dirtyChildren = 0;
@@ -1998,12 +2050,47 @@ __global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
         }
         scratch.stagedCount = dirtyChildren;
       }
-      if (!stageChildren) {
+      if (!leaf && !stageChildren) {
         deltaCounts[scratch.deltaSlot] = addedCount;
       }
     }
   }
   __syncthreads();
+  if (leaf && scratch.success) {
+    // Find this leaf's run in the sorted batch with one sampled pass, then
+    // stage its accepted molecules block-wide. Integer sums make their staged
+    // order irrelevant. Sample stride stays within one block-wide chunk.
+    const int stride = (count + blockDim.x - 1) / blockDim.x;
+    const int sample = threadIdx.x * stride;
+    if (sample < count && keys[sample] < node) {
+      atomicMax(&scratch.node, static_cast<int>(threadIdx.x));
+    }
+    __syncthreads();
+    // scratch.node holds the last sample below node, so the run begins within
+    // stride slots of start.
+    const int start = scratch.node < 0 ? 0 : scratch.node * stride;
+    for (int chunk = start;; chunk += blockDim.x) {
+      const int offset = chunk + threadIdx.x;
+      const int key    = offset < count ? keys[offset] : INT_MAX;
+      if (key == node) {
+        atomicMin(&scratch.rangeBegin, offset);
+        atomicMax(&scratch.rangeEnd, offset + 1);
+        const int molecule = values[offset];
+        if (labelOf(storage, molecule) >= 0) {
+          const int position = atomicAdd(&scratch.stagedCount, 1);
+          if (position < cooperativeBlockSize) {
+            scratch.entries[position] = molecule;
+          }
+        }
+      }
+      if (__syncthreads_or(key > node || chunk + static_cast<int>(blockDim.x) >= count)) {
+        break;
+      }
+    }
+    if (threadIdx.x == 0) {
+      deltaCounts[scratch.deltaSlot] = static_cast<std::uint32_t>(scratch.stagedCount);
+    }
+  }
   if (stageChildren && scratch.success) {
     // Compact dirty children's delta slots in directory order.
     const int     lane      = threadIdx.x % warpSize;
@@ -2051,26 +2138,15 @@ __global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
   if (staged) {
     for (int base = 0; base < storage.numBits; base += blockDim.x * stagedBitsPerThread) {
       Component added[stagedBitsPerThread] = {};
-      for (int index = 0; index < scratch.stagedCount; ++index) {
-        if (leaf) {
-          const auto* fingerprint = queryFingerprint(storage, scratch.entries[index]);
-#pragma unroll
-          for (int part = 0; part < stagedBitsPerThread; ++part) {
-            const int bit = base + part * blockDim.x + threadIdx.x;
-            if (bit < storage.numBits) {
-              added[part] += static_cast<Component>((fingerprint[bit / 32] >> (bit % 32)) & 1U);
-            }
-          }
-        } else {
-          const Component* childSums = deltaSums + static_cast<std::size_t>(scratch.entries[index]) * storage.numBits;
-#pragma unroll
-          for (int part = 0; part < stagedBitsPerThread; ++part) {
-            const int bit = base + part * blockDim.x + threadIdx.x;
-            if (bit < storage.numBits) {
-              added[part] += childSums[bit];
-            }
-          }
-        }
+      if (leaf) {
+        accumulateStagedBits(added, scratch.stagedCount, base, storage.numBits, [&](const int index) {
+          return queryFingerprint(storage, scratch.entries[index]);
+        });
+      } else {
+        accumulateStagedSums(added, scratch.stagedCount, base, storage.numBits, [&](const int index) {
+          return static_cast<const Component*>(deltaSums +
+                                               static_cast<std::size_t>(scratch.entries[index]) * storage.numBits);
+        });
       }
 #pragma unroll
       for (int part = 0; part < stagedBitsPerThread; ++part) {
