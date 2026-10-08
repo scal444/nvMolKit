@@ -872,20 +872,36 @@ __device__ __forceinline__ bool cooperativeMaterializeEntry(TreeStorage<Componen
   if (!scratch.success) {
     return false;
   }
-  for (int bit = threadIdx.x; bit < storage.numBits; bit += blockDim.x) {
-    Component value = 0;
-    if (scratch.materializeFingerprintIndex >= 0) {
-      const std::uint32_t word = singletonWord(storage, scratch.materializeFingerprintIndex, bit / 32);
-      value                    = static_cast<Component>((word >> (bit % 32)) & 1U);
+  // Resolve the new rows once and read each thread's words before storing, so
+  // the stores cannot force the slot and page lookups to repeat per bit.
+  const int  fingerprintIndex = scratch.materializeFingerprintIndex;
+  const int  slot             = scratch.materializeSlot;
+  Component* sums             = storage.linearSumPages[slot / summaryEntriesPerPage] +
+                    static_cast<std::size_t>(slot % summaryEntriesPerPage) * storage.numBits;
+  for (int base = 0; base < storage.numBits; base += blockDim.x * stagedBitsPerThread) {
+    Component values[stagedBitsPerThread];
+#pragma unroll
+    for (int part = 0; part < stagedBitsPerThread; ++part) {
+      const int bit = base + part * blockDim.x + threadIdx.x;
+      values[part]  = Component{0};
+      if (fingerprintIndex >= 0 && bit < storage.numBits) {
+        const std::uint32_t word = singletonWord(storage, fingerprintIndex, bit / 32);
+        values[part]             = static_cast<Component>((word >> (bit % 32)) & 1U);
+      }
     }
-    materializedLinearSum(storage, entry, bit) = value;
+#pragma unroll
+    for (int part = 0; part < stagedBitsPerThread; ++part) {
+      const int bit = base + part * blockDim.x + threadIdx.x;
+      if (bit < storage.numBits) {
+        sums[bit] = values[part];
+      }
+    }
   }
   for (int word = threadIdx.x; word < storage.numWords; word += blockDim.x) {
-    if (scratch.materializeFingerprintIndex >= 0) {
-      const int slot = storage.entrySummarySlots[entry];
+    if (fingerprintIndex >= 0) {
       storage.centroidPages[slot / summaryEntriesPerPage]
                            [static_cast<std::size_t>(slot % summaryEntriesPerPage) * storage.numWords + word] =
-        singletonWord(storage, scratch.materializeFingerprintIndex, word);
+        singletonWord(storage, fingerprintIndex, word);
     }
   }
   __syncthreads();
