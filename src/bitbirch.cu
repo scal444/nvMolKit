@@ -1926,6 +1926,210 @@ __device__ __forceinline__ int allocateConcurrentLeafEntry(TreeStorage<Component
   return entry;
 }
 
+//! Pending queries one leaf owner evaluates together against its staged leaf.
+constexpr int ownerSpeculationWidth = 16;
+//! Fingerprint words staged per speculative query (4096 bits, the FP32 routing limit).
+constexpr int ownerSpeculationWords = 128;
+
+//! Position state for speculative leaf-owner batches.
+enum OwnerPositionState : std::uint8_t {
+  OwnerPositionSummary   = 0,  //!< Unchanged entry with a summary row or count above one.
+  OwnerPositionSingleton = 1,  //!< Unchanged single-member entry: terms follow from its popcounts.
+  OwnerPositionMerged    = 2,  //!< Merged into during this batch: counts refreshed, terms recomputed.
+};
+
+// Shared state of one speculative leaf-owner batch. Each staged query keeps the
+// intersection and union popcounts against every staged position, packed as
+// intersection | union << 16 (at most 4096 bits). Positions merged into during
+// the batch are refreshed right after the merge and new entries copy their
+// query-pair counts, so every serial step reads current counts.
+struct OwnerSpeculation {
+  std::uint32_t      queries[ownerSpeculationWidth][ownerSpeculationWords];  //!< Staged query fingerprints.
+  int                queryBits[ownerSpeculationWidth];                       //!< Set bits per staged query.
+  std::uint32_t      counts[ownerSpeculationWidth][cooperativeBlockSize];
+  std::uint32_t      queryCounts[ownerSpeculationWidth][ownerSpeculationWidth];
+  unsigned long long commonPairs[ownerSpeculationWidth];  //!< Terms against bestPosition, when termsReady.
+  unsigned long long mismatches[ownerSpeculationWidth];
+  int                bestPosition[ownerSpeculationWidth];  //!< Closest staged position before the batch.
+  int                termsReady[ownerSpeculationWidth];
+  std::uint8_t       state[cooperativeBlockSize];
+  float              warpValues[cooperativeBlockSize / 32];
+  int                warpPositions[cooperativeBlockSize / 32];
+  int                selectedPosition;
+};
+
+//! routingSimilarity of packed popcounts as the FP32 quotient (at most 4096 bits).
+__device__ __forceinline__ float packedSimilarity(const std::uint32_t counts) {
+  const std::uint32_t unionCount = counts >> 16;
+  return unionCount == 0 ? 1.0f : __fdiv_rn(static_cast<float>(counts & 0xffffU), static_cast<float>(unionCount));
+}
+
+//! Packed popcounts of one centroid or fingerprint row against another, summed across a warp.
+__device__ __forceinline__ std::uint32_t warpPackedCounts(const std::uint32_t* lhs,
+                                                          const std::uint32_t* rhs,
+                                                          const int            numWords) {
+  int intersection = 0;
+  int unionCount   = 0;
+  for (int word = threadIdx.x % warpSize; word < numWords; word += warpSize) {
+    intersection += __popc(lhs[word] & rhs[word]);
+    unionCount += __popc(lhs[word] | rhs[word]);
+  }
+  for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+    intersection += __shfl_xor_sync(0xffffffffU, intersection, offset);
+    unionCount += __shfl_xor_sync(0xffffffffU, unionCount, offset);
+  }
+  return static_cast<std::uint32_t>(intersection) | static_cast<std::uint32_t>(unionCount) << 16;
+}
+
+// Evaluate a batch of pending queries against the staged leaf in parallel:
+// popcounts against every position and every earlier query, each query's
+// closest position, and exact integer merge-test terms when that position is
+// a summary entry. Requires uncounted page hits (both page-hit arrays null).
+template <typename Component>
+__device__ __forceinline__ void speculateLeafOwnerBatch(const TreeStorage<Component>& storage,
+                                                        const int*                    leafEntries,
+                                                        const int                     numEntries,
+                                                        const int*                    queries,
+                                                        const int                     numQueries,
+                                                        OwnerSpeculation&             speculation) {
+  const int numWords = storage.numWords;
+  for (int item = threadIdx.x; item < numQueries * numWords; item += blockDim.x) {
+    const int query = item / numWords;
+    const int word  = item % numWords;
+    speculation.queries[query][word] = queryFingerprint(storage, queries[query])[word];
+  }
+  __syncthreads();
+  for (int query = threadIdx.x; query < numQueries; query += blockDim.x) {
+    int bits = 0;
+    for (int word = 0; word < numWords; ++word) {
+      bits += __popc(speculation.queries[query][word]);
+    }
+    speculation.queryBits[query] = bits;
+  }
+  __syncthreads();
+  // One thread per position reads its centroid once and counts it against
+  // every staged query from shared memory. Unions follow from the set-bit
+  // counts as |a| + |b| - |a & b|, so only intersections are counted per word.
+  for (int position = threadIdx.x; position < numEntries; position += blockDim.x) {
+    const int entry = leafEntries[position];
+    speculation.state[position] = storage.entryFingerprintIndices[entry] >= 0 && storage.entryCounts[entry] == 1 ?
+                                    OwnerPositionSingleton :
+                                    OwnerPositionSummary;
+    const std::uint32_t* centroid     = centroidFingerprint(storage, entry);
+    int                  centroidBits = 0;
+    // Several centroid words in flight per thread; rows are 16-byte aligned
+    // whenever numWords is a multiple of four. Each thread owns its position's
+    // column, so partial intersections accumulate in place.
+    constexpr int wordsInFlight = 16;
+    for (int base = 0; base < numWords; base += wordsInFlight) {
+      std::uint32_t centroidWords[wordsInFlight];
+      if (numWords % 4 == 0 && base + wordsInFlight <= numWords) {
+#pragma unroll
+        for (int vector = 0; vector < wordsInFlight / 4; ++vector) {
+          const uint4 words             = reinterpret_cast<const uint4*>(centroid + base)[vector];
+          centroidWords[4 * vector]     = words.x;
+          centroidWords[4 * vector + 1] = words.y;
+          centroidWords[4 * vector + 2] = words.z;
+          centroidWords[4 * vector + 3] = words.w;
+        }
+      } else {
+#pragma unroll
+        for (int word = 0; word < wordsInFlight; ++word) {
+          centroidWords[word] = base + word < numWords ? centroid[base + word] : 0U;
+        }
+      }
+#pragma unroll
+      for (int word = 0; word < wordsInFlight; ++word) {
+        centroidBits += __popc(centroidWords[word]);
+      }
+      for (int query = 0; query < numQueries; ++query) {
+        const std::uint32_t* queryWords   = speculation.queries[query] + base;
+        int                  intersection = 0;
+#pragma unroll
+        for (int word = 0; word < wordsInFlight; ++word) {
+          // Words past numWords are zero in centroidWords.
+          intersection += __popc(centroidWords[word] & (base + word < numWords ? queryWords[word] : 0U));
+        }
+        speculation.counts[query][position] =
+          (base == 0 ? 0U : speculation.counts[query][position]) + static_cast<std::uint32_t>(intersection);
+      }
+    }
+    for (int query = 0; query < numQueries; ++query) {
+      const int intersection = static_cast<int>(speculation.counts[query][position]);
+      const int unionCount   = centroidBits + speculation.queryBits[query] - intersection;
+      speculation.counts[query][position] =
+        static_cast<std::uint32_t>(intersection) | static_cast<std::uint32_t>(unionCount) << 16;
+    }
+  }
+  for (int pair = threadIdx.x; pair < numQueries * numQueries; pair += blockDim.x) {
+    const int later   = pair / numQueries;
+    const int earlier = pair % numQueries;
+    if (earlier < later) {
+      int intersection = 0;
+      for (int word = 0; word < numWords; ++word) {
+        intersection += __popc(speculation.queries[later][word] & speculation.queries[earlier][word]);
+      }
+      const int unionCount = speculation.queryBits[later] + speculation.queryBits[earlier] - intersection;
+      speculation.queryCounts[later][earlier] =
+        static_cast<std::uint32_t>(intersection) | static_cast<std::uint32_t>(unionCount) << 16;
+    }
+  }
+  const int lane     = threadIdx.x % warpSize;
+  const int numWarps = blockDim.x / warpSize;
+  __syncthreads();
+  // One warp per query: closest position before the batch, first position on ties.
+  for (int query = threadIdx.x / warpSize; query < numQueries; query += numWarps) {
+    float value    = -1.0f;
+    int   position = INT_MAX;
+    for (int candidate = lane; candidate < numEntries; candidate += warpSize) {
+      const float similarity = packedSimilarity(speculation.counts[query][candidate]);
+      if (similarity > value) {
+        value    = similarity;
+        position = candidate;
+      }
+    }
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+      const float otherValue    = __shfl_xor_sync(0xffffffffU, value, offset);
+      const int   otherPosition = __shfl_xor_sync(0xffffffffU, position, offset);
+      if (otherValue > value || (otherValue == value && otherPosition < position)) {
+        value    = otherValue;
+        position = otherPosition;
+      }
+    }
+    const int  entry         = position == INT_MAX ? -1 : leafEntries[position];
+    const auto combinedCount = entry < 0 ? 0 : static_cast<std::uint64_t>(storage.entryCounts[entry]) + 1;
+    // Singletons get closed-form terms later; summary rows are summed here.
+    const bool summary = entry >= 0 && storage.entryFingerprintIndices[entry] < 0 &&
+                         integerISimTerms(combinedCount, storage.numBits);
+    unsigned long long commonPairs = 0;
+    unsigned long long mismatches  = 0;
+    if (summary) {
+      const int        slot        = storage.entrySummarySlots[entry];
+      const Component* sums        = storage.linearSumPages[slot / summaryEntriesPerPage] +
+                              static_cast<std::size_t>(slot % summaryEntriesPerPage) * storage.numBits;
+      const auto*      fingerprint = speculation.queries[query];
+#pragma unroll 8
+      for (int bit = lane; bit < storage.numBits; bit += warpSize) {
+        const std::uint64_t component =
+          static_cast<std::uint64_t>(sums[bit]) + ((fingerprint[bit / 32] >> (bit % 32)) & 1U);
+        commonPairs += component * (component - 1) / 2;
+        mismatches += component * (combinedCount - component);
+      }
+      for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        commonPairs += __shfl_xor_sync(0xffffffffU, commonPairs, offset);
+        mismatches += __shfl_xor_sync(0xffffffffU, mismatches, offset);
+      }
+    }
+    if (lane == 0) {
+      speculation.bestPosition[query] = position == INT_MAX ? -1 : position;
+      speculation.termsReady[query]   = summary;
+      speculation.commonPairs[query]  = commonPairs;
+      speculation.mismatches[query]   = mismatches;
+    }
+  }
+  __syncthreads();
+}
+
 template <typename Component>
 __global__ void bitBirchLeafOwnersKernel(const int              count,
                                          const int*             keys,
@@ -1950,6 +2154,7 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
   __shared__ int                numLeafEntries;
   __shared__ int                pendingQueries[cooperativeBlockSize];
   __shared__ int                warpPending[cooperativeBlockSize / 32];
+  __shared__ OwnerSpeculation   speculation;
   const int                     node         = keys[first];
   // Only this owner appends to its leaf, so one directory copy stages the
   // ordered entries for every query. Nodes wider than one block keep walking.
@@ -1968,9 +2173,12 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
   // Stage this leaf's still-unlabeled queries in batch order, one block-wide
   // pass per chunk of the sorted run, instead of reading each key, molecule and
   // label serially before its query. Only this owner labels these molecules.
-  const int lane       = threadIdx.x % warpSize;
-  const int warp       = threadIdx.x / warpSize;
-  bool      overflowed = false;
+  const int  lane          = threadIdx.x % warpSize;
+  const int  warp          = threadIdx.x / warpSize;
+  bool       overflowed    = false;
+  // Speculation reads staged rows without counting cache page hits.
+  const bool speculateLeaf = stageEntries && storage.numBits <= 4096 && storage.singletonPageHits == nullptr &&
+                             storage.summaryPageHits == nullptr;
   for (int chunk = first; !overflowed; chunk += blockDim.x) {
     const int  offset  = chunk + threadIdx.x;
     const bool inRun   = offset < count && keys[offset] == node;
@@ -1992,12 +2200,58 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
     }
     __syncthreads();
     for (int index = 0; index < numPending; ++index) {
+      // Batches of several queries first evaluate all of them against the
+      // staged leaf in parallel. The serial pass below then reads current
+      // popcounts from shared memory: positions merged into are refreshed after
+      // each merge and new entries take their query-pair counts, so it selects
+      // the same entries and decides the same merges as searching per query.
+      const int  batchBegin = index - index % ownerSpeculationWidth;
+      const int  batchSize  = min(ownerSpeculationWidth, numPending - batchBegin);
+      const bool speculate  = speculateLeaf && batchSize > 1;
+      if (speculate && index == batchBegin) {
+        speculateLeafOwnerBatch(
+          storage, leafEntries, numLeafEntries, pendingQueries + batchBegin, batchSize, speculation);
+      }
+      const int   query       = index - batchBegin;
       const int   molecule    = pendingQueries[index];
       const auto* fingerprint = queryFingerprint(storage, molecule);
       int         selected    = -1;
       // The staged count tracks the leaf size: only this owner appends to it.
       const bool  occupied    = stageEntries ? numLeafEntries > 0 : storage.nodeHeads[node] >= 0;
-      if (occupied && stageEntries && storage.numBits <= 4096) {
+      if (occupied && speculate) {
+        // Closest current position from shared counts, first position on ties.
+        float value = -1.0f;
+        int   best  = INT_MAX;
+        if (threadIdx.x < numLeafEntries) {
+          value = packedSimilarity(speculation.counts[query][threadIdx.x]);
+          best  = threadIdx.x;
+        }
+        for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+          const float otherValue = __shfl_down_sync(0xffffffffU, value, offset);
+          const int   otherBest  = __shfl_down_sync(0xffffffffU, best, offset);
+          if (otherValue > value || (otherValue == value && otherBest < best)) {
+            value = otherValue;
+            best  = otherBest;
+          }
+        }
+        if (lane == 0) {
+          speculation.warpValues[warp]    = value;
+          speculation.warpPositions[warp] = best;
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+          for (int other = 1; other < static_cast<int>(blockDim.x / warpSize); ++other) {
+            if (speculation.warpValues[other] > value ||
+                (speculation.warpValues[other] == value && speculation.warpPositions[other] < best)) {
+              value = speculation.warpValues[other];
+              best  = speculation.warpPositions[other];
+            }
+          }
+          speculation.selectedPosition = best;
+        }
+        __syncthreads();
+        selected = leafEntries[speculation.selectedPosition];
+      } else if (occupied && stageEntries && storage.numBits <= 4096) {
         selected = cooperativeClosestStagedEntry(storage, fingerprint, scratch, leafEntries, numLeafEntries);
       } else if (occupied) {
         selected = cooperativeClosestEntry(storage,
@@ -2009,7 +2263,22 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
       }
       bool merge = false;
       if (selected >= 0) {
-        const auto terms = cooperativeCombinedISimTermsExact(storage, selected, fingerprint, scratch);
+        bitbirch::ISimTanimotoTerms terms;
+        const int selectedPosition = speculate ? speculation.selectedPosition : -1;
+        const int state            = speculate ? speculation.state[selectedPosition] : OwnerPositionMerged;
+        if (state == OwnerPositionSingleton) {
+          // Count one: each bit sums to two where both are set and one where
+          // exactly one is, so the integer terms are |a & b| and |a ^ b|.
+          const std::uint32_t counts       = speculation.counts[query][selectedPosition];
+          const std::uint32_t intersection = counts & 0xffffU;
+          terms = {static_cast<double>(intersection), static_cast<double>((counts >> 16) - intersection)};
+        } else if (state == OwnerPositionSummary && speculation.termsReady[query] &&
+                   speculation.bestPosition[query] == selectedPosition) {
+          terms = {static_cast<double>(speculation.commonPairs[query]),
+                   static_cast<double>(speculation.mismatches[query])};
+        } else {
+          terms = cooperativeCombinedISimTermsExact(storage, selected, fingerprint, scratch);
+        }
         // Publish one decision before any warp can mutate the entry count. Reading
         // that count independently immediately before the update can diverge warps.
         if (threadIdx.x == 0) {
@@ -2022,6 +2291,20 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
       if (merge) {
         if (!cooperativeAddFingerprint(storage, selected, fingerprint, scratch)) {
           return;
+        }
+        if (speculate) {
+          // Refresh the merged centroid's counts for the batch's later queries.
+          const int mergedPosition = speculation.selectedPosition;
+          for (int later = query + 1 + warp; later < batchSize; later += blockDim.x / warpSize) {
+            const std::uint32_t counts =
+              warpPackedCounts(centroidFingerprint(storage, selected), speculation.queries[later], storage.numWords);
+            if (lane == 0) {
+              speculation.counts[later][mergedPosition] = counts;
+            }
+          }
+          if (threadIdx.x == 0) {
+            speculation.state[mergedPosition] = OwnerPositionMerged;
+          }
         }
       } else {
         if (threadIdx.x == 0) {
@@ -2042,6 +2325,16 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
           }
         }
         __syncthreads();
+        if (speculate) {
+          // The new singleton's centroid is this query's fingerprint.
+          const int newPosition = numLeafEntries - 1;
+          for (int later = query + 1 + threadIdx.x; later < batchSize; later += blockDim.x) {
+            speculation.counts[later][newPosition] = speculation.queryCounts[later][query];
+          }
+          if (threadIdx.x == 0) {
+            speculation.state[newPosition] = OwnerPositionSingleton;
+          }
+        }
       }
       if (threadIdx.x == 0) {
         labelOf(storage, molecule)        = selected;
