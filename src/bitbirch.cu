@@ -294,8 +294,8 @@ template <typename Component> struct TreeStorage {
   // Molecule index held in labels[0]. Host-labeled runs keep only the current
   // batch on the GPU; device-labeled runs keep all labels and use zero.
   int                  labelBegin                = 0;
-  // Contiguous ordered entry copies for internal nodes, which change only in
-  // Repair. Routing reads them instead of walking directory lists.
+  // Contiguous ordered entry copies for every node, kept in list order by each
+  // append and split. Kernels stage entries from them instead of walking lists.
   int*                 nodeDirectories           = nullptr;
   int*                 directoryEntries          = nullptr;
   int*                 directoryCursor           = nullptr;
@@ -315,7 +315,6 @@ template <typename Component> class TreeWorkspace {
                 const std::size_t    summaryCacheBytes)
       : nodeCapacity(nodeCapacity),
         directoryStride(branchingFactor + 1),
-        minimumNodeSize(branchingFactor / 2 + branchingFactor % 2),
         entryCapacity(entryCapacity),
         nodeHeads(nodeCapacity, stream),
         nodeSizes(nodeCapacity, stream),
@@ -406,12 +405,11 @@ template <typename Component> class TreeWorkspace {
     }
   }
 
-  // Every non-root internal node has at least minimumNodeSize children.
-  int directoryCapacity(const int nodes) const noexcept { return nodes / minimumNodeSize + 2; }
+  // Every node, leaf or internal, keeps an ordered directory of its entries.
+  int directoryCapacity(const int nodes) const noexcept { return nodes + 2; }
 
   int                              nodeCapacity;
   int                              directoryStride;
-  int                              minimumNodeSize;
   int                              entryCapacity;
   AsyncDeviceVector<int>           nodeHeads;
   AsyncDeviceVector<int>           nodeSizes;
@@ -519,13 +517,10 @@ __device__ __forceinline__ int allocateNode(TreeStorage<Component>& storage, con
     *storage.status = BitBirchStatus::NodeCapacity;
     return -1;
   }
-  int directory = -1;
-  if (!leaf) {
-    directory = (*storage.directoryCursor)++;
-    if (directory >= storage.maxDirectories) {
-      *storage.status = BitBirchStatus::NodeCapacity;
-      return -1;
-    }
+  const int directory = (*storage.directoryCursor)++;
+  if (directory >= storage.maxDirectories) {
+    *storage.status = BitBirchStatus::NodeCapacity;
+    return -1;
   }
   storage.nodeHeads[node]         = -1;
   storage.nodeTails[node]         = -1;
@@ -758,24 +753,30 @@ __device__ __forceinline__ int splitNodeWithSeeds(TreeStorage<Component>& storag
   storage.nodeHeads[sibling] = rhsSeed;
   storage.nodeTails[sibling] = rhsTail >= 0 ? rhsTail : rhsSeed;
   ++storage.nodeSizes[sibling];
-  if (!storage.nodeLeaves[node]) {
-    int* nodeEntries    = nodeDirectory(storage, node);
-    int* siblingEntries = nodeDirectory(storage, sibling);
-    int  position       = 0;
-    for (int entry = storage.nodeHeads[node]; entry >= 0; entry = storage.entryNext[entry]) {
+  const bool leaf           = storage.nodeLeaves[node] != 0;
+  int*       nodeEntries    = nodeDirectory(storage, node);
+  int*       siblingEntries = nodeDirectory(storage, sibling);
+  int        position       = 0;
+  for (int entry = storage.nodeHeads[node]; entry >= 0; entry = storage.entryNext[entry]) {
+    if (!leaf) {
       storage.nodeParents[storage.entryChildren[entry]] = node;
-      nodeEntries[position++]                           = entry;
     }
-    position = 0;
-    for (int entry = storage.nodeHeads[sibling]; entry >= 0; entry = storage.entryNext[entry]) {
+    nodeEntries[position++] = entry;
+  }
+  position = 0;
+  for (int entry = storage.nodeHeads[sibling]; entry >= 0; entry = storage.entryNext[entry]) {
+    if (!leaf) {
       storage.nodeParents[storage.entryChildren[entry]] = sibling;
-      siblingEntries[position++]                        = entry;
     }
+    siblingEntries[position++] = entry;
   }
   return linkSplitSibling(storage, node, sibling);
 }
 
 constexpr int cooperativeBlockSize = 256;
+// Bits each thread accumulates at once when summing staged entries. Holding
+// them in registers makes the loads for one staged entry independent.
+constexpr int stagedBitsPerThread  = 8;
 
 struct CooperativeScratch {
   int       nodeEntries[cooperativeBlockSize];
@@ -787,6 +788,7 @@ struct CooperativeScratch {
   int       next;         //!< Linked-list cursor while gathering entries.
   int       count;        //!< Entries gathered into entries or nodeEntries.
   int       stagedCount;  //!< Entries or delta slots staged for per-bit sums.
+  int       stagedTotal;  //!< Member count summed over the staged entries.
   int       bestEntry;    //!< Closest entry found by cooperativeClosestEntry.
   int       decision;     //!< Block-uniform yes/no published by thread zero.
   int       lhsSeed;      //!< Split seeds found by cooperativeFindSplitSeeds.
@@ -1106,42 +1108,87 @@ __device__ __forceinline__ void cooperativeSummarizeNode(TreeStorage<Component>&
   if (!cooperativeMaterializeEntry(storage, targetEntry, scratch)) {
     return;
   }
-  // Walk the entry list once and stage each entry's storage location. Every
-  // thread then sums its bits from shared memory instead of re-chasing links.
-  if (threadIdx.x == 0) {
+  // Stage each entry's storage location from the node directory, one entry
+  // per thread. Every thread then sums its bits from shared memory instead of
+  // re-chasing links. Nodes wider than one block walk the list once.
+  const int size = storage.nodeSizes[node];
+  if (size <= static_cast<int>(blockDim.x)) {
+    if (threadIdx.x == 0) {
+      scratch.stagedTotal = 0;
+      scratch.stagedCount = size;
+    }
+    __syncthreads();
+    std::uint32_t count = 0;
+    if (threadIdx.x < size) {
+      const int entry                   = nodeDirectory(storage, node)[threadIdx.x];
+      count                             = storage.entryCounts[entry];
+      scratch.entries[threadIdx.x]      = storage.entryFingerprintIndices[entry];
+      scratch.otherEntries[threadIdx.x] = storage.entrySummarySlots[entry];
+    }
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+      count += __shfl_down_sync(0xffffffffU, count, offset);
+    }
+    if (threadIdx.x % warpSize == 0 && count != 0) {
+      atomicAdd(&scratch.stagedTotal, static_cast<int>(count));
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      storage.entryCounts[targetEntry] = static_cast<std::uint32_t>(scratch.stagedTotal);
+    }
+  } else if (threadIdx.x == 0) {
     std::uint32_t count   = 0;
     int           entries = 0;
     for (int entry = storage.nodeHeads[node]; entry >= 0; entry = storage.entryNext[entry], ++entries) {
       count += storage.entryCounts[entry];
-      if (entries < cooperativeBlockSize) {
-        scratch.entries[entries]      = storage.entryFingerprintIndices[entry];
-        scratch.otherEntries[entries] = storage.entrySummarySlots[entry];
-      }
     }
     storage.entryCounts[targetEntry] = count;
     scratch.stagedCount              = entries;
   }
   __syncthreads();
   const int numEntries = scratch.stagedCount;
-  for (int bit = threadIdx.x; bit < storage.numBits; bit += blockDim.x) {
-    Component sum = 0;
-    if (numEntries <= cooperativeBlockSize) {
+  if (numEntries <= cooperativeBlockSize) {
+    for (int base = 0; base < storage.numBits; base += blockDim.x * stagedBitsPerThread) {
+      Component sums[stagedBitsPerThread] = {};
       for (int index = 0; index < numEntries; ++index) {
         const int fingerprintIndex = scratch.entries[index];
         if (fingerprintIndex >= 0) {
-          sum += static_cast<Component>((singletonWord(storage, fingerprintIndex, bit / 32) >> (bit % 32)) & 1U);
+#pragma unroll
+          for (int part = 0; part < stagedBitsPerThread; ++part) {
+            const int bit = base + part * blockDim.x + threadIdx.x;
+            if (bit < storage.numBits) {
+              sums[part] +=
+                static_cast<Component>((singletonWord(storage, fingerprintIndex, bit / 32) >> (bit % 32)) & 1U);
+            }
+          }
         } else {
-          const int slot = scratch.otherEntries[index];
-          sum += storage.linearSumPages[slot / summaryEntriesPerPage]
-                                       [static_cast<std::size_t>(slot % summaryEntriesPerPage) * storage.numBits + bit];
+          const int        slot      = scratch.otherEntries[index];
+          const Component* entrySums = storage.linearSumPages[slot / summaryEntriesPerPage] +
+                                       static_cast<std::size_t>(slot % summaryEntriesPerPage) * storage.numBits;
+#pragma unroll
+          for (int part = 0; part < stagedBitsPerThread; ++part) {
+            const int bit = base + part * blockDim.x + threadIdx.x;
+            if (bit < storage.numBits) {
+              sums[part] += entrySums[bit];
+            }
+          }
         }
       }
-    } else {
+#pragma unroll
+      for (int part = 0; part < stagedBitsPerThread; ++part) {
+        const int bit = base + part * blockDim.x + threadIdx.x;
+        if (bit < storage.numBits) {
+          materializedLinearSum(storage, targetEntry, bit) = sums[part];
+        }
+      }
+    }
+  } else {
+    for (int bit = threadIdx.x; bit < storage.numBits; bit += blockDim.x) {
+      Component sum = 0;
       for (int entry = storage.nodeHeads[node]; entry >= 0; entry = storage.entryNext[entry]) {
         sum += linearSum(storage, entry, bit);
       }
+      materializedLinearSum(storage, targetEntry, bit) = sum;
     }
-    materializedLinearSum(storage, targetEntry, bit) = sum;
   }
   __syncthreads();
   cooperativeRefreshCentroid(storage, targetEntry);
@@ -1268,6 +1315,7 @@ template <typename Component>
 __device__ __forceinline__ int cooperativeSplitNode(TreeStorage<Component>& storage,
                                                     int                     node,
                                                     const int               branchingFactor,
+                                                    std::int8_t*            splitAffinity,
                                                     CooperativeScratch&     scratch) {
   while (true) {
     // Lane zero otherwise reaches topology writes before a lagging warp has
@@ -1280,11 +1328,20 @@ __device__ __forceinline__ int cooperativeSplitNode(TreeStorage<Component>& stor
     cooperativeFindSplitSeeds(storage, node, scratch, nullptr, nodeDirectory(storage, node));
     const int lhsSeed = scratch.lhsSeed;
     const int rhsSeed = scratch.rhsSeed;
+    // Compare every entry with both seeds in parallel; the ordered, size-capped
+    // assignment in splitNodeWithSeeds then only reads the signs.
+    const int* entries = nodeDirectory(storage, node);
+    for (int position = threadIdx.x; position < storage.nodeSizes[node]; position += blockDim.x) {
+      const int    entry   = entries[position];
+      const double lhs     = entrySimilarity(storage, entry, lhsSeed);
+      const double rhs     = entrySimilarity(storage, entry, rhsSeed);
+      splitAffinity[entry] = static_cast<std::int8_t>((lhs > rhs) - (lhs < rhs));
+    }
     __syncthreads();
     if (threadIdx.x == 0) {
       const int oldParent = storage.nodeParents[node];
       scratch.sibling     = *storage.nodeCursor;  // The next allocation is the sibling node.
-      scratch.node        = splitNodeWithSeeds(storage, node, branchingFactor, lhsSeed, rhsSeed);
+      scratch.node        = splitNodeWithSeeds(storage, node, branchingFactor, lhsSeed, rhsSeed, splitAffinity);
       scratch.success     = scratch.node >= 0;
       scratch.decision    = oldParent < 0;
       if (scratch.success) {
@@ -1368,7 +1425,13 @@ __global__ void bitBirchRouteKernel(const int                    begin,
     keys[offset] = scratch.node;
   }
   if (enableGroups && storage.nodeHeads[scratch.node] >= 0) {
-    const int  selected = cooperativeClosestEntry(storage, scratch.node, fingerprint, scratch);
+    const int  leaf     = scratch.node;
+    const int  selected = cooperativeClosestEntry(storage,
+                                                 leaf,
+                                                 fingerprint,
+                                                 scratch,
+                                                 nodeDirectory(storage, leaf),
+                                                 storage.nodeSizes[leaf]);
     const auto terms    = cooperativeCombinedISimTerms(storage, selected, fingerprint, scratch);
     if (threadIdx.x == 0 && bitbirch::isimTanimotoAtLeast(terms,
                                                           static_cast<std::uint64_t>(storage.entryCounts[selected]) + 1,
@@ -1500,15 +1563,18 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
   __shared__ int                leafEntries[cooperativeBlockSize];
   __shared__ int                numLeafEntries;
   const int                     node         = keys[first];
-  // Only this owner appends to its leaf, so one list walk stages the ordered
-  // entries for every query. Nodes wider than one block keep walking.
+  // Only this owner appends to its leaf, so one directory copy stages the
+  // ordered entries for every query. Nodes wider than one block keep walking.
   const bool                    stageEntries = branchingFactor < cooperativeBlockSize;
-  if (threadIdx.x == 0 && stageEntries) {
-    int size = 0;
-    for (int entry = storage.nodeHeads[node]; entry >= 0; entry = storage.entryNext[entry]) {
-      leafEntries[size++] = entry;
+  if (stageEntries) {
+    const int  size      = storage.nodeSizes[node];
+    const int* directory = nodeDirectory(storage, node);
+    for (int position = threadIdx.x; position < size; position += blockDim.x) {
+      leafEntries[position] = directory[position];
     }
-    numLeafEntries = size;
+    if (threadIdx.x == 0) {
+      numLeafEntries = size;
+    }
   }
   __syncthreads();
   for (int offset = first; offset < count && keys[offset] == node; ++offset) {
@@ -1617,6 +1683,10 @@ __global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
   }
   const int                     node = levelNodes[blockIdx.x];
   __shared__ CooperativeScratch scratch;
+  const bool                    leaf = storage.nodeLeaves[node];
+  // Internal nodes that fit one block stage their dirty children in parallel
+  // from the ordered directory instead of walking the entry list.
+  const bool stageChildren = !leaf && storage.nodeSizes[node] <= static_cast<int>(blockDim.x);
   if (threadIdx.x == 0) {
     scratch.targetEntry = parentEntry(storage, node);
     scratch.deltaSlot   = atomicAdd(deltaCursor, 1);
@@ -1626,7 +1696,8 @@ __global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
     } else {
       deltaSlots[node]         = scratch.deltaSlot;
       std::uint32_t addedCount = 0;
-      if (storage.nodeLeaves[node]) {
+      scratch.stagedTotal      = 0;
+      if (leaf) {
         int first = 0;
         int end   = count;
         while (first < end) {
@@ -1650,7 +1721,7 @@ __global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
         }
         scratch.rangeEnd    = end;
         scratch.stagedCount = static_cast<int>(addedCount);
-      } else {
+      } else if (!stageChildren) {
         // Stage the refreshed children's delta slots for the per-bit sum.
         int dirtyChildren = 0;
         for (int entry = storage.nodeHeads[node]; entry >= 0; entry = storage.entryNext[entry]) {
@@ -1665,7 +1736,41 @@ __global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
         }
         scratch.stagedCount = dirtyChildren;
       }
-      deltaCounts[scratch.deltaSlot] = addedCount;
+      if (!stageChildren) {
+        deltaCounts[scratch.deltaSlot] = addedCount;
+      }
+    }
+  }
+  __syncthreads();
+  if (stageChildren && scratch.success) {
+    // Compact dirty children's delta slots in directory order.
+    const int     lane      = threadIdx.x % warpSize;
+    const int     warp      = threadIdx.x / warpSize;
+    const int     size      = storage.nodeSizes[node];
+    const int     childSlot = threadIdx.x < size ?
+                                deltaSlots[storage.entryChildren[nodeDirectory(storage, node)[threadIdx.x]]] :
+                                -1;
+    const bool    dirty     = childSlot >= 0;
+    const auto    ballot    = __ballot_sync(0xffffffffU, dirty);
+    std::uint32_t added     = dirty ? deltaCounts[childSlot] : 0;
+    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+      added += __shfl_down_sync(0xffffffffU, added, offset);
+    }
+    if (lane == 0) {
+      scratch.otherEntries[warp] = __popc(ballot);
+      atomicAdd(&scratch.stagedTotal, static_cast<int>(added));
+    }
+    __syncthreads();
+    int position = 0;
+    for (int index = 0; index < warp; ++index) {
+      position += scratch.otherEntries[index];
+    }
+    if (dirty) {
+      scratch.entries[position + __popc(ballot & ((1U << lane) - 1U))] = childSlot;
+    }
+    if (threadIdx.x == blockDim.x - 1) {
+      scratch.stagedCount            = position + __popc(ballot);
+      deltaCounts[scratch.deltaSlot] = static_cast<std::uint32_t>(scratch.stagedTotal);
     }
   }
   __syncthreads();
@@ -1680,37 +1785,62 @@ __global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
   // Entry owners already updated leaf payloads. Propagate only this epoch's
   // accepted fingerprints, rather than rereading every old BF in each subtree.
   // One CTA owns each parent entry; no per-bit atomics or shared ancestor writes.
-  const bool leaf   = storage.nodeLeaves[node];
   const bool staged = scratch.stagedCount <= cooperativeBlockSize;
-  for (int bit = threadIdx.x; bit < storage.numBits; bit += blockDim.x) {
-    Component added = 0;
-    if (leaf && staged) {
+  if (staged) {
+    for (int base = 0; base < storage.numBits; base += blockDim.x * stagedBitsPerThread) {
+      Component added[stagedBitsPerThread] = {};
       for (int index = 0; index < scratch.stagedCount; ++index) {
-        const auto word = queryFingerprint(storage, scratch.entries[index])[bit / 32];
-        added += static_cast<Component>((word >> (bit % 32)) & 1U);
-      }
-    } else if (leaf) {
-      for (int offset = scratch.rangeBegin; offset < scratch.rangeEnd; ++offset) {
-        const int molecule = values[offset];
-        if (labelOf(storage, molecule) >= 0) {
-          const auto word = queryFingerprint(storage, molecule)[bit / 32];
-          added += static_cast<Component>((word >> (bit % 32)) & 1U);
+        if (leaf) {
+          const auto* fingerprint = queryFingerprint(storage, scratch.entries[index]);
+#pragma unroll
+          for (int part = 0; part < stagedBitsPerThread; ++part) {
+            const int bit = base + part * blockDim.x + threadIdx.x;
+            if (bit < storage.numBits) {
+              added[part] += static_cast<Component>((fingerprint[bit / 32] >> (bit % 32)) & 1U);
+            }
+          }
+        } else {
+          const Component* childSums = deltaSums + static_cast<std::size_t>(scratch.entries[index]) * storage.numBits;
+#pragma unroll
+          for (int part = 0; part < stagedBitsPerThread; ++part) {
+            const int bit = base + part * blockDim.x + threadIdx.x;
+            if (bit < storage.numBits) {
+              added[part] += childSums[bit];
+            }
+          }
         }
       }
-    } else if (staged) {
-      for (int index = 0; index < scratch.stagedCount; ++index) {
-        added += deltaSums[static_cast<std::size_t>(scratch.entries[index]) * storage.numBits + bit];
-      }
-    } else {
-      for (int entry = storage.nodeHeads[node]; entry >= 0; entry = storage.entryNext[entry]) {
-        const int childSlot = deltaSlots[storage.entryChildren[entry]];
-        if (childSlot >= 0) {
-          added += deltaSums[static_cast<std::size_t>(childSlot) * storage.numBits + bit];
+#pragma unroll
+      for (int part = 0; part < stagedBitsPerThread; ++part) {
+        const int bit = base + part * blockDim.x + threadIdx.x;
+        if (bit < storage.numBits) {
+          deltaSums[static_cast<std::size_t>(slot) * storage.numBits + bit] = added[part];
+          materializedLinearSum(storage, target, bit) += added[part];
         }
       }
     }
-    deltaSums[static_cast<std::size_t>(slot) * storage.numBits + bit] = added;
-    materializedLinearSum(storage, target, bit) += added;
+  } else {
+    for (int bit = threadIdx.x; bit < storage.numBits; bit += blockDim.x) {
+      Component added = 0;
+      if (leaf) {
+        for (int offset = scratch.rangeBegin; offset < scratch.rangeEnd; ++offset) {
+          const int molecule = values[offset];
+          if (labelOf(storage, molecule) >= 0) {
+            const auto word = queryFingerprint(storage, molecule)[bit / 32];
+            added += static_cast<Component>((word >> (bit % 32)) & 1U);
+          }
+        }
+      } else {
+        for (int entry = storage.nodeHeads[node]; entry >= 0; entry = storage.entryNext[entry]) {
+          const int childSlot = deltaSlots[storage.entryChildren[entry]];
+          if (childSlot >= 0) {
+            added += deltaSums[static_cast<std::size_t>(childSlot) * storage.numBits + bit];
+          }
+        }
+      }
+      deltaSums[static_cast<std::size_t>(slot) * storage.numBits + bit] = added;
+      materializedLinearSum(storage, target, bit) += added;
+    }
   }
   __syncthreads();
   cooperativeRefreshCentroid(storage, target);
@@ -1947,7 +2077,7 @@ __global__ void bitBirchRepairKernel(const int              count,
                                      const int*             keys,
                                      const int*             splitLeft,
                                      const int*             splitRight,
-                                     const std::int8_t*     splitAffinity,
+                                     std::int8_t*           splitAffinity,
                                      const int*             splitPlans,
                                      const int*             splitLeftSizes,
                                      const int              branchingFactor,
@@ -2019,9 +2149,16 @@ __global__ void bitBirchRepairKernel(const int              count,
       __syncthreads();
       const int sibling = scratch.sibling;
       if (leftSize >= 0 && sibling >= 0) {
+        int* nodeEntries    = nodeDirectory(storage, node);
+        int* siblingEntries = nodeDirectory(storage, sibling);
         for (int position = threadIdx.x; position < size; position += blockDim.x) {
           const int last                    = position < leftSize ? leftSize - 1 : size - 1;
           storage.entryNext[plan[position]] = position == last ? -1 : plan[position + 1];
+          if (position < leftSize) {
+            nodeEntries[position] = plan[position];
+          } else {
+            siblingEntries[position - leftSize] = plan[position];
+          }
         }
       }
       __syncthreads();
@@ -2064,7 +2201,7 @@ __global__ void bitBirchRepairKernel(const int              count,
         if (threadIdx.x == 0) {
           deferred = 0;
         }
-        cooperativeSplitNode(storage, parent, branchingFactor, scratch);
+        cooperativeSplitNode(storage, parent, branchingFactor, splitAffinity, scratch);
       }
       __syncthreads();
     }
