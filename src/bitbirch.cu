@@ -3328,6 +3328,35 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                                  32,
                                                  stream));
   AsyncDeviceVector<std::byte> sortScratch(sortBytes, stream);
+  // Grow node and entry storage for up to clusterBound live clusters.
+  const auto growTree = [&](const std::int64_t clusterBound) {
+    const auto requiredNodes   = clusterBound / (minimumNodeSize - 1) + 8;
+    const auto requiredEntries = clusterBound + requiredNodes;
+    const int  nodeCapacity =
+      requiredNodes > tree.nodeCapacity ?
+        static_cast<int>(std::min<std::int64_t>(
+          maxNodes, std::max<std::int64_t>(requiredNodes, tree.nodeCapacity * std::int64_t{3} / 2))) :
+        tree.nodeCapacity;
+    const int entryCapacity =
+      requiredEntries > tree.entryCapacity ?
+        static_cast<int>(std::min<std::int64_t>(
+          maxEntries, std::max<std::int64_t>(requiredEntries, tree.entryCapacity * std::int64_t{3} / 2))) :
+        tree.entryCapacity;
+    const auto oldNodeCapacity = tree.nodeCapacity;
+    tree.grow(nodeCapacity, entryCapacity);
+    if (tree.nodeCapacity > oldNodeCapacity) {
+      dirtyNodes.resize(tree.nodeCapacity);
+      deltaSlots.resize(tree.nodeCapacity);
+      cudaCheckError(cudaMemsetAsync(dirtyNodes.data() + oldNodeCapacity,
+                                     0,
+                                     (tree.nodeCapacity - oldNodeCapacity) * sizeof(int),
+                                     stream));
+      cudaCheckError(cudaMemsetAsync(deltaSlots.data() + oldNodeCapacity,
+                                     0xff,
+                                     (tree.nodeCapacity - oldNodeCapacity) * sizeof(int),
+                                     stream));
+    }
+  };
   hostControl[NodeCount] = 1;
   for (int begin = 0; begin < numFingerprints;) {
     ScopedNvtxRange batchRange("BitBIRCH batch", NvtxColor::kGrey);
@@ -3356,33 +3385,8 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
       // At most pending new leaf entries can be created before the next barrier.
       // Apply the same balanced-node bound to live K instead of allocating for
       // the all-singleton N worst case. Stable integer IDs survive buffer growth.
-      const int clusterBound    = liveClusters(hostControl) + pending;
-      const int requiredNodes   = clusterBound / (minimumNodeSize - 1) + 8;
-      const int requiredEntries = clusterBound + requiredNodes;
-      const int nodeCapacity =
-        requiredNodes > tree.nodeCapacity ?
-          static_cast<int>(
-            std::min<std::int64_t>(maxNodes, std::max<std::int64_t>(requiredNodes, tree.nodeCapacity * 3LL / 2))) :
-          tree.nodeCapacity;
-      const int entryCapacity =
-        requiredEntries > tree.entryCapacity ?
-          static_cast<int>(
-            std::min<std::int64_t>(maxEntries, std::max<std::int64_t>(requiredEntries, tree.entryCapacity * 3LL / 2))) :
-          tree.entryCapacity;
-      const auto oldNodeCapacity = tree.nodeCapacity;
-      tree.grow(nodeCapacity, entryCapacity);
-      if (tree.nodeCapacity > oldNodeCapacity) {
-        dirtyNodes.resize(tree.nodeCapacity);
-        deltaSlots.resize(tree.nodeCapacity);
-        cudaCheckError(cudaMemsetAsync(dirtyNodes.data() + oldNodeCapacity,
-                                       0,
-                                       (tree.nodeCapacity - oldNodeCapacity) * sizeof(int),
-                                       stream));
-        cudaCheckError(cudaMemsetAsync(deltaSlots.data() + oldNodeCapacity,
-                                       0xff,
-                                       (tree.nodeCapacity - oldNodeCapacity) * sizeof(int),
-                                       stream));
-      }
+      const std::int64_t clusterBound = liveClusters(hostControl) + pending;
+      growTree(clusterBound);
       const int leafDepth = hostControl[LeafDepth];
       // Level lists, split affinities and refresh deltas are rewritten before
       // they are read in every round, so growth drops their old contents
@@ -3567,6 +3571,15 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
           hostControl.data(), control, NumEpochControls * sizeof(int), cudaMemcpyDeviceToHost, stream));
       }
       cudaCheckError(cudaEventRecord(controlReady.event(), stream));
+      // Grow for the next round while the GPU runs this one, so its exact
+      // checks usually find the storage ready instead of stalling the GPU on
+      // fresh mappings. The next round adds at most one batch of clusters, and
+      // rounds rarely add a page's worth of summaries, so one spare summary
+      // page is kept. Growth copies and pointer tables are stream-ordered after
+      // this round's kernels, which still use the old storage.
+      growTree(clusterBound + batchCapacity);
+      tree.summaryArena.reserve(
+        static_cast<int>(std::min<std::int64_t>(required + summaryEntriesPerPage, std::numeric_limits<int>::max())));
       cudaCheckError(cudaEventSynchronize(controlReady.event()));
       if (stagedCount > 0) {
         drainStagedLabels();
