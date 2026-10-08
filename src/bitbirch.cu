@@ -1392,6 +1392,50 @@ __device__ __forceinline__ void cooperativeInitializeLeafEntry(TreeStorage<Compo
   }
 }
 
+// Stores sumAt(bit) as a materialized entry's linear sums, its majority
+// centroid, and count, matching a per-bit store followed by
+// cooperativeRefreshCentroid. Both rows are resolved once and each thread reads
+// all its new sums before storing; per-bit stores otherwise re-resolve the slot
+// behind writes that may alias it. sumAt may read the old sum of its own bit.
+template <typename Component, typename SumAt>
+__device__ __forceinline__ void cooperativeStoreSums(TreeStorage<Component>& storage,
+                                                     const int               entry,
+                                                     const std::uint64_t     count,
+                                                     SumAt                   sumAt) {
+  const int  slot     = storage.entrySummarySlots[entry];
+  Component* sums     = &materializedLinearSum(storage, entry, 0);
+  auto*      centroid = storage.centroidPages[slot / summaryEntriesPerPage] +
+                   static_cast<std::size_t>(slot % summaryEntriesPerPage) * storage.numWords;
+  for (int base = 0; base < storage.numBits; base += blockDim.x * stagedBitsPerThread) {
+    Component updated[stagedBitsPerThread];
+#pragma unroll
+    for (int part = 0; part < stagedBitsPerThread; ++part) {
+      const int bit = base + part * blockDim.x + threadIdx.x;
+      updated[part] = bit < storage.numBits ? sumAt(bit) : Component{0};
+    }
+#pragma unroll
+    for (int part = 0; part < stagedBitsPerThread; ++part) {
+      // Each warp covers one word: numBits and blockDim.x are multiples of 32.
+      const int           bit  = base + part * blockDim.x + threadIdx.x;
+      const bool          set  = bit < storage.numBits &&
+                       bitbirch::majorityCentroidBit(static_cast<std::uint64_t>(updated[part]), count);
+      const std::uint32_t word = __ballot_sync(0xffffffffU, set);
+      if (bit < storage.numBits) {
+        sums[bit] = updated[part];
+        if (threadIdx.x % warpSize == 0) {
+          centroid[bit / 32] = word;
+        }
+      }
+    }
+  }
+  // Every thread has read the old count before thread zero publishes the new one.
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    storage.entryCounts[entry] = static_cast<std::uint32_t>(count);
+  }
+  __syncthreads();
+}
+
 template <typename Component>
 __device__ __forceinline__ bool cooperativeAddFingerprint(TreeStorage<Component>& storage,
                                                           const int               entry,
@@ -1400,14 +1444,11 @@ __device__ __forceinline__ bool cooperativeAddFingerprint(TreeStorage<Component>
   if (!cooperativeMaterializeEntry(storage, entry, scratch)) {
     return false;
   }
-  if (threadIdx.x == 0) {
-    ++storage.entryCounts[entry];
-  }
-  for (int bit = threadIdx.x; bit < storage.numBits; bit += blockDim.x) {
-    materializedLinearSum(storage, entry, bit) += static_cast<Component>((fingerprint[bit / 32] >> (bit % 32)) & 1U);
-  }
-  __syncthreads();
-  cooperativeRefreshCentroid(storage, entry);
+  const auto  count = static_cast<std::uint64_t>(storage.entryCounts[entry]) + 1;
+  const auto* sums  = &materializedLinearSum(storage, entry, 0);
+  cooperativeStoreSums(storage, entry, count, [&](const int bit) {
+    return sums[bit] + static_cast<Component>((fingerprint[bit / 32] >> (bit % 32)) & 1U);
+  });
   return true;
 }
 
@@ -1907,15 +1948,10 @@ __global__ void bitBirchGroupsKernel(const int              count,
     if (!cooperativeMaterializeEntry(storage, entry, scratch)) {
       return;
     }
-    for (int bit = threadIdx.x; bit < storage.numBits; bit += blockDim.x) {
-      materializedLinearSum(storage, entry, bit) = proposed[bit];
-    }
     if (threadIdx.x == 0) {
-      storage.entryCounts[entry]     = static_cast<std::uint32_t>(combinedCount);
       storage.entryClusterIds[entry] = min(storage.entryClusterIds[entry], values[first]);
     }
-    __syncthreads();
-    cooperativeRefreshCentroid(storage, entry);
+    cooperativeStoreSums(storage, entry, combinedCount, [&](const int bit) { return proposed[bit]; });
     for (int offset = first + threadIdx.x; offset < end; offset += blockDim.x) {
       labelOf(storage, values[offset]) = entry;
     }
