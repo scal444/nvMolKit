@@ -17,7 +17,7 @@
 
 namespace nvMolKit {
 
-//! Per-conformer 3D properties. Names match the corresponding RDKit descriptor names.
+//! Conformer-dependent 3D properties. Names match the corresponding RDKit descriptor names.
 enum class Property3D : int {
   PMI1                = 0,
   PMI2                = 1,
@@ -37,9 +37,10 @@ enum class Property3D : int {
   USR                 = 15,
   USRCAT              = 16,
   GETAWAY             = 17,
+  EEMcharges          = 18,
 };
 
-inline constexpr std::array<Property3D, 18> kAllProperty3D = {
+inline constexpr std::array<Property3D, 19> kAllProperty3D = {
   Property3D::PMI1,
   Property3D::PMI2,
   Property3D::PMI3,
@@ -58,6 +59,7 @@ inline constexpr std::array<Property3D, 18> kAllProperty3D = {
   Property3D::USR,
   Property3D::USRCAT,
   Property3D::GETAWAY,
+  Property3D::EEMcharges,
 };
 
 inline constexpr int kNumWhimProperties       = 114;
@@ -74,7 +76,18 @@ std::string_view property3DName(Property3D property);
 //! Parse a canonical property name. @throws std::invalid_argument for unknown names.
 Property3D property3DFromName(std::string_view name);
 
-//! Number of values emitted per conformer. Scalar properties have width one.
+//! What one output row of a property describes.
+enum class Property3DExtent : int {
+  Conformer,  //!< One row per conformer, in coordinate-row order.
+  Atom,       //!< One row per atom, laid out like the coordinate positions: conformer i's atoms are rows
+              //!< `atomStarts[i] .. atomStarts[i + 1]` of DeviceCoordView.
+};
+
+constexpr Property3DExtent property3DExtent(const Property3D property) {
+  return property == Property3D::EEMcharges ? Property3DExtent::Atom : Property3DExtent::Conformer;
+}
+
+//! Number of values emitted per output row (see property3DExtent()). Scalar properties have width one.
 constexpr int property3DWidth(const Property3D property) {
   switch (property) {
     case Property3D::WHIM:
@@ -104,6 +117,7 @@ enum class Property3DFamily : int {
   Pairwise,    //!< Sums over atom pairs weighted by atom-property pairs: RDF, MORSE and AUTOCORR3D.
   Usr,         //!< Distance moments from four reference points: USR and USRCAT.
   Getaway,     //!< Leverage (molecular influence) matrix descriptors: GETAWAY.
+  Eem,         //!< Electronegativity-equalization partial charges: EEMcharges.
 };
 
 constexpr Property3DFamily property3DFamily(const Property3D property) {
@@ -131,6 +145,8 @@ constexpr Property3DFamily property3DFamily(const Property3D property) {
       return Property3DFamily::Usr;
     case Property3D::GETAWAY:
       return Property3DFamily::Getaway;
+    case Property3D::EEMcharges:
+      return Property3DFamily::Eem;
   }
   return Property3DFamily::Moments;
 }
@@ -155,8 +171,8 @@ struct GetawayOptions {
   unsigned int precision = 2;
 };
 
-//! Per-family options; each family reads only its own member. PBF, RDF, MORSE, AUTOCORR3D, USR and
-//! USRCAT have no options.
+//! Per-family options; each family reads only its own member. PBF, RDF, MORSE, AUTOCORR3D, USR, USRCAT
+//! and EEMcharges have no options.
 struct Property3DOptions {
   MomentOptions  moments;
   WhimOptions    whim;
@@ -199,6 +215,13 @@ struct Property3DDeviceInputs {
   const int32_t* defaultConformerRows  = nullptr;
   //! PBF, GETAWAY: per-conformer RDKit is3D flags (one per coordinate row); null treats every row as 3D.
   const int8_t*  conformerIs3D         = nullptr;
+  //! EEMcharges: per atom, RDKit's EEM electronegativity A and hardness B for the atom's element and highest
+  //! Kekulé bond order. A non-finite A marks an atom RDKit has no parameters for and gives the conformer NaN, as
+  //! do coincident atoms.
+  const double*  eemElectronegativity  = nullptr;
+  const double*  eemHardness           = nullptr;
+  //! EEMcharges: per molecule, the sum of formal charges.
+  const double*  moleculeFormalCharges = nullptr;
   //! WHIM, AUTOCORR3D, GETAWAY: largest molecule atom count in the batch (host value). Sizes WHIM's
   //! per-conformer symmetry-search scratch (rows with more atoms produce NaN) and, with 0 or above 3072 atoms,
   //! leaves AUTOCORR3D and GETAWAY without the shared bond-distance table.
@@ -208,12 +231,17 @@ struct Property3DDeviceInputs {
   int64_t        moleculeAtomPairs     = 0;
 };
 
-//! One row-major device vector of length numConformers * property3DWidth(property) per property.
+//! One row-major device vector per property, of length property3DWidth(property) times the number of output
+//! rows: `coordinates.numConformers` for Property3DExtent::Conformer, `coordinates.numAtoms` for
+//! Property3DExtent::Atom.
 //! @p Real is float (PrecisionMode::SINGLE) or double (PrecisionMode::FULL).
 template <typename Real> using Property3DResults = std::unordered_map<Property3D, AsyncDeviceVector<Real>>;
 
 /**
  * @brief Calculate the requested 3D properties for every conformer in a coordinate batch.
+ *
+ * Per-atom properties (Property3DExtent::Atom) have one row per row of @ref DeviceCoordView::positions;
+ * rows outside every conformer's atom range hold NaN.
  *
  * Each requested family runs as one kernel launch and returns @p Real (float or double), computing in
  * @p Real except for steps where float32 measurably loses accuracy, which are always float64: coordinate
@@ -222,7 +250,8 @@ template <typename Real> using Property3DResults = std::unordered_map<Property3D
  * (descriptors3d_detail::extremeAtom) and GETAWAY's leverages (descriptors3d_detail::computeLeverages).
  * `options.moments` is expressed through `inputs.momentWeights` at this level. Conformers whose molecule
  * index is out of range, whose atom range lies outside `coordinates.numAtoms`, or whose atom count
- * disagrees with the molecule's atom range produce NaN for every requested property.
+ * disagrees with the molecule's atom range produce NaN for every requested property (per-atom properties
+ * write those NaNs only within `coordinates.numAtoms`).
  *
  * @throws std::invalid_argument if @p properties is empty, contains duplicates, or contains a value
  *                               outside kAllProperty3D; if WHIM is requested and

@@ -33,7 +33,7 @@ from bench_utils import (
 from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors
 
-from nvmolkit.descriptors3d import Calc3DProperties, Property3D
+from nvmolkit.descriptors3d import PER_ATOM_PROPERTIES, Calc3DProperties, Property3D
 from nvmolkit.types import AsyncGpuResult, Device3DResult, PrecisionMode
 
 PRECISIONS = {"single": PrecisionMode.SINGLE, "full": PrecisionMode.FULL}
@@ -42,6 +42,8 @@ VALIDATION_TOLERANCES = {PrecisionMode.SINGLE: (2e-6, 1e-3), PrecisionMode.FULL:
 # Absolute tolerances for USR skews (whole molecule, USRCAT atom classes): the cube root of a near-zero third
 # moment turns rounding noise into visible values, in RDKit as well (a two-atom class has an exact skew of 0).
 USR_SKEW_TOLERANCES = {PrecisionMode.SINGLE: (5e-3, 0.1), PrecisionMode.FULL: (1e-4, 1e-3)}
+# Absolute tolerances for EEM charges.
+EEM_TOLERANCES = {PrecisionMode.SINGLE: 2e-6, PrecisionMode.FULL: 1e-9}
 
 PROPERTY_SETS = {
     "single": (Property3D.RADIUS_OF_GYRATION,),
@@ -84,6 +86,8 @@ def _calc_rdkit_property(mol: Chem.Mol, conf_id: int, prop: Property3D) -> float
         return rdMolDescriptors.GetUSR(mol, confId=conf_id)
     if prop == Property3D.USRCAT:
         return rdMolDescriptors.GetUSRCAT(mol, confId=conf_id)
+    if prop == Property3D.EEM_CHARGES:
+        return rdMolDescriptors.CalcEEMcharges(mol, confId=conf_id)
     if prop == Property3D.GETAWAY:
         if len(Chem.GetMolFrags(mol)) > 1:
             # RDKit's GETAWAY does not finish in reasonable time on multi-fragment molecules.
@@ -124,14 +128,15 @@ def _pack_device_coordinates(mols: list[Chem.Mol]) -> Device3DResult:
 
 
 def _calc_rdkit(mols: list[Chem.Mol], properties: tuple[Property3D, ...]) -> dict[Property3D, np.ndarray]:
-    """Calculate reference arrays in molecule/conformer order."""
-    return {
-        prop: np.asarray(
-            [_calc_rdkit_property(mol, conf.GetId(), prop) for mol in mols for conf in mol.GetConformers()],
-            dtype=np.float64,
-        )
-        for prop in properties
-    }
+    """Calculate reference arrays in molecule/conformer order; per-atom properties are concatenated."""
+    reference = {}
+    for prop in properties:
+        rows = [_calc_rdkit_property(mol, conf.GetId(), prop) for mol in mols for conf in mol.GetConformers()]
+        if prop in PER_ATOM_PROPERTIES:
+            reference[prop] = np.concatenate([np.asarray(row, dtype=np.float64) for row in rows])
+        else:
+            reference[prop] = np.asarray(rows, dtype=np.float64)
+    return reference
 
 
 def _validate(
@@ -160,6 +165,11 @@ def _validate(
                 # Rows RDKit could not compute (multi-fragment molecules) are NaN and not compared.
                 computed = ~np.isnan(expected[prop]).all(axis=1)
                 np.testing.assert_allclose(actual[computed], expected[prop][computed], rtol=0, atol=max(atol, 1.1e-3))
+                continue
+            if prop == Property3D.EEM_CHARGES:
+                # Atoms RDKit has no parameters for are NaN in both.
+                eem_atol = EEM_TOLERANCES[precision] if tolerance is None else tolerance
+                np.testing.assert_allclose(actual, expected[prop], rtol=0, atol=eem_atol, equal_nan=True)
                 continue
             if prop not in (Property3D.USR, Property3D.USRCAT):
                 np.testing.assert_allclose(actual, expected[prop], rtol=rtol, atol=atol)

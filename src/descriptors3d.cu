@@ -7,6 +7,7 @@
 #include <string>
 
 #include "src/descriptors3d.h"
+#include "src/descriptors3d_eem.cuh"
 #include "src/descriptors3d_getaway.cuh"
 #include "src/descriptors3d_kernel.cuh"
 #include "src/descriptors3d_moments.cuh"
@@ -56,6 +57,8 @@ std::string_view property3DName(const Property3D property) {
       return "USRCAT";
     case Property3D::GETAWAY:
       return "GETAWAY";
+    case Property3D::EEMcharges:
+      return "EEMcharges";
   }
   throw std::invalid_argument("Unknown Property3D value " + std::to_string(static_cast<int>(property)));
 }
@@ -81,6 +84,7 @@ using descriptors3d_detail::kGroupSize;
 using descriptors3d_detail::kGroupsPerWarp;
 using descriptors3d_detail::kWarpSize;
 using descriptors3d_detail::kWarpsPerBlock;
+using descriptors3d_detail::launchEemCharges;
 using descriptors3d_detail::launchGetawayProperties;
 using descriptors3d_detail::launchPairwiseProperties;
 using descriptors3d_detail::launchProjectionProperties;
@@ -135,6 +139,7 @@ constexpr SharedStageSet directStages(const Property3D property) {
     case Property3D::USR:
     case Property3D::USRCAT:
     case Property3D::GETAWAY:
+    case Property3D::EEMcharges:
       return 0;
   }
   return 0;
@@ -302,12 +307,15 @@ Property3DResults<Real> calc3DPropertiesGpu(const DeviceCoordView&         coord
   Real*                   usrOutput     = nullptr;
   Real*                   usrcatOutput  = nullptr;
   Real*                   getawayOutput = nullptr;
+  Real*                   eemOutput     = nullptr;
   for (const Property3D property : properties) {
     // Bounds the work arrays, which hold one slot per known property.
     if (std::find(kAllProperty3D.begin(), kAllProperty3D.end(), property) == kAllProperty3D.end()) {
       throw std::invalid_argument("Unknown Property3D value " + std::to_string(static_cast<int>(property)));
     }
-    const size_t outputSize = static_cast<size_t>(coordinates.numConformers) * property3DWidth(property);
+    const int64_t outputRows =
+      property3DExtent(property) == Property3DExtent::Atom ? coordinates.numAtoms : coordinates.numConformers;
+    const size_t outputSize = static_cast<size_t>(outputRows) * property3DWidth(property);
     auto [it, inserted]     = results.try_emplace(property, outputSize, stream);
     if (!inserted) {
       throw std::invalid_argument("Duplicate 3D property '" + std::string(property3DName(property)) + "'");
@@ -331,6 +339,9 @@ Property3DResults<Real> calc3DPropertiesGpu(const DeviceCoordView&         coord
       case Property3DFamily::Getaway:
         getawayOutput = it->second.data();
         break;
+      case Property3DFamily::Eem:
+        eemOutput = it->second.data();
+        break;
     }
   }
 
@@ -343,6 +354,7 @@ Property3DResults<Real> calc3DPropertiesGpu(const DeviceCoordView&         coord
   }
 
   if (coordinates.numConformers == 0) {
+    launchEemCharges(coordinates, inputs, eemOutput, stream);
     return results;
   }
   if (coordinates.positions == nullptr || coordinates.atomStarts == nullptr || coordinates.molIndices == nullptr ||
@@ -370,6 +382,10 @@ Property3DResults<Real> calc3DPropertiesGpu(const DeviceCoordView&         coord
   if (pairwiseOutputs.rdf != nullptr && inputs.iStateDragWeights == nullptr) {
     throw std::invalid_argument("I-state drag weights must not be null when RDF is requested");
   }
+  if (eemOutput != nullptr && (inputs.eemElectronegativity == nullptr || inputs.eemHardness == nullptr ||
+                               inputs.moleculeFormalCharges == nullptr)) {
+    throw std::invalid_argument("EEM parameters and formal charges must not be null when EEMcharges is requested");
+  }
 
   const bool    momentWeightsAreUnit    = inputs.momentWeights == nullptr;
   const bool    onlySpherocity          = hasSpherocity && work.numProperties == 1;
@@ -385,6 +401,7 @@ Property3DResults<Real> calc3DPropertiesGpu(const DeviceCoordView&         coord
   launchPairwiseProperties(coordinates, inputs, pairwiseOutputs, bondTable.table, stream);
   launchUsrProperties(coordinates, inputs, usrOutput, usrcatOutput, stream);
   launchGetawayProperties(coordinates, inputs, options.getaway, bondTable.table, getawayOutput, stream);
+  launchEemCharges(coordinates, inputs, eemOutput, stream);
   return results;
 }
 
