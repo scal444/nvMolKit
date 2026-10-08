@@ -2276,13 +2276,15 @@ __global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
 }
 
 //! Most split pair-search slices one overflowing leaf is spread over.
-constexpr int maxSplitSlices = 32;
+constexpr int maxSplitSlices = 64;
 
 //! Inverts cooperativeFindSplitSeeds' row-major upper-triangle pair order.
 __device__ __forceinline__ int2 splitPairFromOrder(const long long order, const int size) {
   const auto rowStart = [size](const long long row) { return row * (2 * size - row - 1) / 2; };
-  const double span = 2.0 * size - 1.0;
-  long long    row  = static_cast<long long>((span - sqrt(span * span - 8.0 * static_cast<double>(order))) / 2.0);
+  // An FP32 estimate; the integer corrections below make the row exact.
+  const float span = 2.0f * size - 1.0f;
+  const float root = sqrtf(fmaxf(0.0f, span * span - 8.0f * static_cast<float>(order)));
+  long long   row  = static_cast<long long>((span - root) / 2.0f);
   row               = max(0LL, min(row, static_cast<long long>(size) - 2));
   while (row > 0 && rowStart(row) > order) {
     --row;
@@ -2306,8 +2308,9 @@ __global__ void bitBirchSplitPairsKernel(const int*                   keys,
                                          const int*                   splitPlans,
                                          unsigned long long*          splitKeys,
                                          const TreeStorage<Component> storage) {
-  __shared__ int                popcounts[cooperativeBlockSize];
-  __shared__ unsigned long long warpBest[cooperativeBlockSize / 32];
+  __shared__ int                  popcounts[cooperativeBlockSize];
+  __shared__ const std::uint32_t* rows[cooperativeBlockSize];
+  __shared__ unsigned long long   warpBest[cooperativeBlockSize / 32];
   extern __shared__ std::uint32_t centroidCache[];
   const int                       numSplits = *splitQueueCount;
   if (numSplits == 0) {
@@ -2321,10 +2324,17 @@ __global__ void bitBirchSplitPairsKernel(const int*                   keys,
       continue;
     }
     const int* plan = splitPlans + static_cast<std::size_t>(index) * cooperativeBlockSize;
+    // Resolve every centroid row at once, then copy words with independent,
+    // coalesced loads instead of one dependent lookup chain per word.
+    if (threadIdx.x < size) {
+      rows[threadIdx.x] = centroidFingerprint(storage, plan[threadIdx.x]);
+    }
+    __syncthreads();
+#pragma unroll 4
     for (int item = threadIdx.x; item < size * storage.numWords; item += blockDim.x) {
       const int entryIndex = item / storage.numWords;
       const int word       = item % storage.numWords;
-      centroidCache[word * (cooperativeBlockSize + 1) + entryIndex] = centroidWord(storage, plan[entryIndex], word);
+      centroidCache[word * (cooperativeBlockSize + 1) + entryIndex] = rows[entryIndex][word];
     }
     __syncthreads();
     if (threadIdx.x < size) {
@@ -2340,19 +2350,27 @@ __global__ void bitBirchSplitPairsKernel(const int*                   keys,
     const long long    begin     = (work % slices) * sliceSize;
     const long long    end       = min(begin + sliceSize, numPairs);
     unsigned long long best      = ULLONG_MAX;
+    int2               pair      = splitPairFromOrder(min(begin + threadIdx.x, numPairs - 1), size);
     for (long long order = begin + threadIdx.x; order < end; order += blockDim.x) {
-      const int2 pair         = splitPairFromOrder(order, size);
-      int        intersection = 0;
+      int intersection = 0;
       for (int word = 0; word < storage.numWords; ++word) {
         intersection += __popc(centroidCache[word * (cooperativeBlockSize + 1) + pair.x] &
                                centroidCache[word * (cooperativeBlockSize + 1) + pair.y]);
       }
-      // |a | b| = |a| + |b| - |a & b|: the same integers cachedCentroidSimilarity counts.
-      const double similarity =
-        routingSimilarity(intersection, popcounts[pair.x] + popcounts[pair.y] - intersection, storage.numBits);
-      const auto key = (static_cast<unsigned long long>(__float_as_uint(static_cast<float>(similarity))) << 32) |
+      // |a | b| = |a| + |b| - |a & b|: the same integers cachedCentroidSimilarity counts,
+      // and the same FP32 quotient routingSimilarity takes for at most 4096 bits.
+      const int   unionCount = popcounts[pair.x] + popcounts[pair.y] - intersection;
+      const float similarity =
+        unionCount == 0 ? 1.0f : __fdiv_rn(static_cast<float>(intersection), static_cast<float>(unionCount));
+      const auto key = (static_cast<unsigned long long>(__float_as_uint(similarity)) << 32) |
                        static_cast<unsigned long long>(order);
       best           = min(best, key);
+      // Step blockDim.x pairs along the row-major upper triangle.
+      pair.y += blockDim.x;
+      while (pair.y >= size && pair.x < size - 2) {
+        ++pair.x;
+        pair.y += pair.x + 1 - size;
+      }
     }
     for (int offset = warpSize / 2; offset > 0; offset /= 2) {
       best = min(best, __shfl_xor_sync(0xffffffffU, best, offset));
@@ -2978,6 +2996,16 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                                                       threshold,
                                                                       storage);
       cudaCheckError(cudaGetLastError());
+      // Keys are node or entry IDs below the current capacity, or INT_MAX. With
+      // 2^bits > capacity, INT_MAX's low bits exceed every ID, so the stable sort
+      // over only those bits yields the same permutation as a full 32-bit sort.
+      const auto keyBits = [](const int capacity) {
+        int bits = 1;
+        while (bits < 32 && (1LL << bits) <= capacity) {
+          ++bits;
+        }
+        return bits;
+      };
       if (enableGroups) {
         cudaCheckError(cub::DeviceRadixSort::SortPairs(sortScratch.data(),
                                                        sortBytes,
@@ -2987,7 +3015,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                                        sortedGroupValues.data(),
                                                        count,
                                                        0,
-                                                       32,
+                                                       keyBits(tree.entryCapacity),
                                                        stream));
         bitBirchGroupsKernel<<<count, cooperativeBlockSize, 0, stream>>>(count,
                                                                          sortedGroupKeys.data(),
@@ -3005,7 +3033,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                                      sortedValues.data(),
                                                      count,
                                                      0,
-                                                     32,
+                                                     keyBits(tree.nodeCapacity),
                                                      stream));
       bitBirchLeafOwnersKernel<<<count, cooperativeBlockSize, 0, stream>>>(count,
                                                                            sortedKeys.data(),
