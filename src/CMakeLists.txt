@@ -130,7 +130,7 @@ add_library(bitbirch bitbirch.cu)
 target_link_libraries(
   bitbirch
   PUBLIC device_vector
-  PRIVATE cuda_error_check nvtx)
+  PRIVATE cuda_error_check device nvtx)
 
 add_library(conformer_rmsd conformer_rmsd.cu)
 target_link_libraries(
