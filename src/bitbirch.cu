@@ -1082,13 +1082,38 @@ constexpr int routeLanesPerEntry = 4;
 // cache lines per warp instruction; groups of four lanes touch eight. The similarities
 // are the same integers, and ties still resolve to the lowest directory position.
 // Value is float when routingSimilarity is an FP32 quotient, so comparisons
-// match exactly without FP64 instructions.
+// match exactly without FP64 instructions. Nodes with more entries than lane
+// groups, up to one block, first resolve every centroid row (and, with
+// followChild, every child) into shared memory in parallel, so a level pays one
+// dependent lookup chain rather than one per position plus a child lookup
+// after the reduction. Smaller nodes take one position per group anyway.
+// With followChild, thread zero sets scratch.node to the selected entry's child.
 template <typename Value, typename Component>
 __device__ __forceinline__ int cooperativeClosestDirectoryEntry(const TreeStorage<Component>& storage,
                                                                 const int*                    nodeEntries,
                                                                 const int                     numNodeEntries,
                                                                 const std::uint32_t*          fingerprint,
-                                                                CooperativeScratch&           scratch) {
+                                                                CooperativeScratch&           scratch,
+                                                                const std::uint32_t**         rows,
+                                                                const bool                    followChild) {
+  const bool staged = numNodeEntries > static_cast<int>(blockDim.x) / routeLanesPerEntry &&
+                      numNodeEntries <= static_cast<int>(blockDim.x);
+  if (staged && threadIdx.x < numNodeEntries) {
+    // centroidFingerprint, with the summary slot read beside the fingerprint
+    // index rather than after it.
+    const int         entry            = nodeEntries[threadIdx.x];
+    const int         fingerprintIndex = storage.entryFingerprintIndices[entry];
+    const int         slot             = storage.entrySummarySlots[entry];
+    const std::size_t slotOffset       = static_cast<std::size_t>(slot % summaryEntriesPerPage) * storage.numWords;
+    rows[threadIdx.x]                  = fingerprintIndex >= 0 ?
+                                           singletonFingerprint(storage, fingerprintIndex) :
+                                           storage.centroidPages[slot / summaryEntriesPerPage] + slotOffset;
+    scratch.entries[threadIdx.x]     = entry;
+    scratch.nodeEntries[threadIdx.x] = followChild ? storage.entryChildren[entry] : -1;
+  }
+  if (staged) {
+    __syncthreads();
+  }
   const int      lane      = threadIdx.x % warpSize;
   const int      warp      = threadIdx.x / warpSize;
   const int      member    = threadIdx.x % routeLanesPerEntry;
@@ -1098,7 +1123,7 @@ __device__ __forceinline__ int cooperativeClosestDirectoryEntry(const TreeStorag
   Value          value     = -1;
   int            order     = INT_MAX;
   for (int position = threadIdx.x / routeLanesPerEntry; position < numNodeEntries; position += numGroups) {
-    const std::uint32_t* centroid     = centroidFingerprint(storage, nodeEntries[position]);
+    const std::uint32_t* centroid     = staged ? rows[position] : centroidFingerprint(storage, nodeEntries[position]);
     int                  intersection = 0;
     int                  unionCount   = 0;
     if (vectorize) {
@@ -1155,7 +1180,10 @@ __device__ __forceinline__ int cooperativeClosestDirectoryEntry(const TreeStorag
       }
     }
     scratch.bestValue = bestValue;
-    scratch.bestEntry = bestOrder == INT_MAX ? -1 : nodeEntries[bestOrder];
+    scratch.bestEntry = bestOrder == INT_MAX ? -1 : staged ? scratch.entries[bestOrder] : nodeEntries[bestOrder];
+    if (followChild && scratch.bestEntry >= 0) {
+      scratch.node = staged ? scratch.nodeEntries[bestOrder] : storage.entryChildren[scratch.bestEntry];
+    }
   }
   __syncthreads();
   return scratch.bestEntry;
@@ -1744,8 +1772,9 @@ __global__ void bitBirchRouteKernel(const int                    begin,
                                     const double                 threshold,
                                     const TreeStorage<Component> storage) {
   // One cooperative block per query; all tree reads precede any leaf writes.
-  __shared__ CooperativeScratch scratch;
-  const int                     offset = blockIdx.x;
+  __shared__ CooperativeScratch   scratch;
+  __shared__ const std::uint32_t* rows[cooperativeBlockSize];
+  const int                       offset = blockIdx.x;
   if (offset >= count) {
     return;
   }
@@ -1761,29 +1790,32 @@ __global__ void bitBirchRouteKernel(const int                    begin,
     return;
   }
   const auto* fingerprint  = queryFingerprint(storage, molecule);
-  const auto  closestEntry = [&](const int node) {
+  // With followChild the search also advances scratch.node to the child.
+  const auto  closestEntry = [&](const int node, const bool followChild) {
     const int* directory = nodeDirectory(storage, node);
     if (directory == nullptr) {
-      return cooperativeClosestEntry(storage, node, fingerprint, scratch);
+      const int selected = cooperativeClosestEntry(storage, node, fingerprint, scratch);
+      if (followChild && threadIdx.x == 0) {
+        scratch.node = storage.entryChildren[selected];
+      }
+      __syncthreads();
+      return selected;
     }
     const int size = storage.nodeSizes[node];
-    return storage.numBits <= 4096 ?
-             cooperativeClosestDirectoryEntry<float>(storage, directory, size, fingerprint, scratch) :
-             cooperativeClosestDirectoryEntry<double>(storage, directory, size, fingerprint, scratch);
+    if (storage.numBits <= 4096) {
+      return cooperativeClosestDirectoryEntry<float>(storage, directory, size, fingerprint, scratch, rows, followChild);
+    }
+    return cooperativeClosestDirectoryEntry<double>(storage, directory, size, fingerprint, scratch, rows, followChild);
   };
   while (!storage.nodeLeaves[scratch.node]) {
-    const int selected = closestEntry(scratch.node);
-    if (threadIdx.x == 0) {
-      scratch.node = storage.entryChildren[selected];
-    }
-    __syncthreads();
+    closestEntry(scratch.node, true);
   }
+  const int leaf = scratch.node;
   if (threadIdx.x == 0) {
-    keys[offset] = scratch.node;
+    keys[offset] = leaf;
   }
-  if (enableGroups && storage.nodeHeads[scratch.node] >= 0) {
-    const int  leaf     = scratch.node;
-    const int  selected = closestEntry(leaf);
+  if (enableGroups && storage.nodeHeads[leaf] >= 0) {
+    const int  selected = closestEntry(leaf, false);
     const auto terms    = cooperativeCombinedISimTermsExact(storage, selected, fingerprint, scratch);
     if (threadIdx.x == 0 && bitbirch::isimTanimotoAtLeast(terms,
                                                           static_cast<std::uint64_t>(storage.entryCounts[selected]) + 1,
@@ -2517,6 +2549,10 @@ __global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
   // One CTA owns each parent entry; no per-bit atomics or shared ancestor writes.
   const bool staged = scratch.stagedCount <= cooperativeBlockSize;
   if (staged) {
+    // Resolve both rows once and read every old sum before any store; stores
+    // through possibly aliasing pointers otherwise serialize each bit's update.
+    Component* targetSums = &materializedLinearSum(storage, target, 0);
+    Component* deltaRow   = deltaSums + static_cast<std::size_t>(slot) * storage.numBits;
     for (int base = 0; base < storage.numBits; base += blockDim.x * stagedBitsPerThread) {
       Component added[stagedBitsPerThread] = {};
       if (leaf) {
@@ -2529,12 +2565,18 @@ __global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
                                                static_cast<std::size_t>(scratch.entries[index]) * storage.numBits);
         });
       }
+      Component previous[stagedBitsPerThread];
+#pragma unroll
+      for (int part = 0; part < stagedBitsPerThread; ++part) {
+        const int bit  = base + part * blockDim.x + threadIdx.x;
+        previous[part] = bit < storage.numBits ? targetSums[bit] : Component{0};
+      }
 #pragma unroll
       for (int part = 0; part < stagedBitsPerThread; ++part) {
         const int bit = base + part * blockDim.x + threadIdx.x;
         if (bit < storage.numBits) {
-          deltaSums[static_cast<std::size_t>(slot) * storage.numBits + bit] = added[part];
-          materializedLinearSum(storage, target, bit) += added[part];
+          deltaRow[bit]   = added[part];
+          targetSums[bit] = previous[part] + added[part];
         }
       }
     }
