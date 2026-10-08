@@ -1053,6 +1053,93 @@ __device__ __forceinline__ int cooperativeClosestStagedEntry(const TreeStorage<C
   return scratch.bestEntry;
 }
 
+//! Lanes that read one centroid together. Four keeps eight entries in flight per warp (measured best of 1-16).
+constexpr int routeLanesPerEntry = 4;
+
+// cooperativeClosestEntry over a node directory, with each centroid read by a
+// lane group instead of a single thread. One-thread-per-entry loads touch 32
+// cache lines per warp instruction; groups of four lanes touch eight. The similarities
+// are the same integers, and ties still resolve to the lowest directory position.
+// Value is float when routingSimilarity is an FP32 quotient, so comparisons
+// match exactly without FP64 instructions.
+template <typename Value, typename Component>
+__device__ __forceinline__ int cooperativeClosestDirectoryEntry(const TreeStorage<Component>& storage,
+                                                                const int*                    nodeEntries,
+                                                                const int                     numNodeEntries,
+                                                                const std::uint32_t*          fingerprint,
+                                                                CooperativeScratch&           scratch) {
+  const int      lane      = threadIdx.x % warpSize;
+  const int      warp      = threadIdx.x / warpSize;
+  const int      member    = threadIdx.x % routeLanesPerEntry;
+  const int      numGroups = blockDim.x / routeLanesPerEntry;
+  const unsigned groupMask = ((1U << routeLanesPerEntry) - 1U) << (lane - member);
+  const bool     vectorize = storage.numWords % 4 == 0;
+  Value          value     = -1;
+  int            order     = INT_MAX;
+  for (int position = threadIdx.x / routeLanesPerEntry; position < numNodeEntries; position += numGroups) {
+    const std::uint32_t* centroid     = centroidFingerprint(storage, nodeEntries[position]);
+    int                  intersection = 0;
+    int                  unionCount   = 0;
+    if (vectorize) {
+      const auto* centroidVectors    = reinterpret_cast<const uint4*>(centroid);
+      const auto* fingerprintVectors = reinterpret_cast<const uint4*>(fingerprint);
+      for (int vector = member; vector < storage.numWords / 4; vector += routeLanesPerEntry) {
+        const uint4 centroidWords    = centroidVectors[vector];
+        const uint4 fingerprintWords = fingerprintVectors[vector];
+        intersection += __popc(centroidWords.x & fingerprintWords.x) + __popc(centroidWords.y & fingerprintWords.y) +
+                        __popc(centroidWords.z & fingerprintWords.z) + __popc(centroidWords.w & fingerprintWords.w);
+        unionCount += __popc(centroidWords.x | fingerprintWords.x) + __popc(centroidWords.y | fingerprintWords.y) +
+                      __popc(centroidWords.z | fingerprintWords.z) + __popc(centroidWords.w | fingerprintWords.w);
+      }
+    } else {
+      for (int word = member; word < storage.numWords; word += routeLanesPerEntry) {
+        intersection += __popc(centroid[word] & fingerprint[word]);
+        unionCount += __popc(centroid[word] | fingerprint[word]);
+      }
+    }
+    for (int offset = routeLanesPerEntry / 2; offset > 0; offset /= 2) {
+      intersection += __shfl_xor_sync(groupMask, intersection, offset, routeLanesPerEntry);
+      unionCount += __shfl_xor_sync(groupMask, unionCount, offset, routeLanesPerEntry);
+    }
+    // Each group visits ascending positions, so a strict comparison keeps the first tie.
+    const Value similarity = sizeof(Value) == sizeof(float) && unionCount != 0 ?
+                               __fdiv_rn(static_cast<float>(intersection), static_cast<float>(unionCount)) :
+                               static_cast<Value>(routingSimilarity(intersection, unionCount, storage.numBits));
+    if (member == 0 && similarity > value) {
+      value = similarity;
+      order = position;
+    }
+  }
+  for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+    const Value otherValue = __shfl_down_sync(0xffffffffU, value, offset);
+    const int   otherOrder = __shfl_down_sync(0xffffffffU, order, offset);
+    if (otherValue > value || (otherValue == value && otherOrder < order)) {
+      value = otherValue;
+      order = otherOrder;
+    }
+  }
+  if (lane == 0) {
+    scratch.otherValues[warp] = value;
+    scratch.orders[warp]      = order;
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    Value bestValue = -1;
+    int   bestOrder = INT_MAX;
+    for (int index = 0; index < (blockDim.x + warpSize - 1) / warpSize; ++index) {
+      const auto candidate = static_cast<Value>(scratch.otherValues[index]);
+      if (candidate > bestValue || (candidate == bestValue && scratch.orders[index] < bestOrder)) {
+        bestValue = candidate;
+        bestOrder = static_cast<int>(scratch.orders[index]);
+      }
+    }
+    scratch.bestValue = bestValue;
+    scratch.bestEntry = bestOrder == INT_MAX ? -1 : nodeEntries[bestOrder];
+  }
+  __syncthreads();
+  return scratch.bestEntry;
+}
+
 template <typename Component>
 __device__ __forceinline__ bitbirch::ISimTanimotoTerms cooperativeCombinedISimTerms(
   const TreeStorage<Component>& storage,
@@ -1547,15 +1634,19 @@ __global__ void bitBirchRouteKernel(const int                    begin,
   if (labelOf(storage, molecule) >= 0) {
     return;
   }
-  const auto* fingerprint = queryFingerprint(storage, molecule);
+  const auto* fingerprint  = queryFingerprint(storage, molecule);
+  const auto  closestEntry = [&](const int node) {
+    const int* directory = nodeDirectory(storage, node);
+    if (directory == nullptr) {
+      return cooperativeClosestEntry(storage, node, fingerprint, scratch);
+    }
+    const int size = storage.nodeSizes[node];
+    return storage.numBits <= 4096 ?
+             cooperativeClosestDirectoryEntry<float>(storage, directory, size, fingerprint, scratch) :
+             cooperativeClosestDirectoryEntry<double>(storage, directory, size, fingerprint, scratch);
+  };
   while (!storage.nodeLeaves[scratch.node]) {
-    const int node     = scratch.node;
-    const int selected = cooperativeClosestEntry(storage,
-                                                 node,
-                                                 fingerprint,
-                                                 scratch,
-                                                 nodeDirectory(storage, node),
-                                                 storage.nodeSizes[node]);
+    const int selected = closestEntry(scratch.node);
     if (threadIdx.x == 0) {
       scratch.node = storage.entryChildren[selected];
     }
@@ -1566,13 +1657,8 @@ __global__ void bitBirchRouteKernel(const int                    begin,
   }
   if (enableGroups && storage.nodeHeads[scratch.node] >= 0) {
     const int  leaf     = scratch.node;
-    const int  selected = cooperativeClosestEntry(storage,
-                                                 leaf,
-                                                 fingerprint,
-                                                 scratch,
-                                                 nodeDirectory(storage, leaf),
-                                                 storage.nodeSizes[leaf]);
-    const auto terms    = cooperativeCombinedISimTerms(storage, selected, fingerprint, scratch);
+    const int  selected = closestEntry(leaf);
+    const auto terms    = cooperativeCombinedISimTermsExact(storage, selected, fingerprint, scratch);
     if (threadIdx.x == 0 && bitbirch::isimTanimotoAtLeast(terms,
                                                           static_cast<std::uint64_t>(storage.entryCounts[selected]) + 1,
                                                           threshold)) {
