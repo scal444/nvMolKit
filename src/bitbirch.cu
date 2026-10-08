@@ -1274,13 +1274,48 @@ __device__ __forceinline__ bitbirch::ISimTanimotoTerms cooperativeCombinedISimTe
       atomicAdd(storage.summaryPageHits + slot / summaryEntriesPerPage, 1U);
     }
   }
+  // Resolve the entry's row once instead of per bit, so each thread's bit
+  // loads are independent. linearSum counted one singleton page hit per call
+  // (word zero, lane zero); keep that count.
+  const int            fingerprintIndex = storage.entryFingerprintIndices[entry];
+  const std::uint32_t* singleton        = nullptr;
+  const Component*     sums             = nullptr;
+  if (fingerprintIndex >= 0) {
+    if (storage.singletonFingerprintPages != nullptr) {
+      if (storage.singletonPageHits != nullptr && threadIdx.x == 0) {
+        atomicAdd(storage.singletonPageHits + fingerprintIndex / summaryEntriesPerPage, 1U);
+      }
+      singleton = storage.singletonFingerprintPages[fingerprintIndex / summaryEntriesPerPage] +
+                  static_cast<std::size_t>(fingerprintIndex % summaryEntriesPerPage) * storage.numWords;
+    } else {
+      singleton = storage.fingerprints + static_cast<std::size_t>(fingerprintIndex) * storage.numWords;
+    }
+  } else {
+    const int slot = storage.entrySummarySlots[entry];
+    sums           = storage.linearSumPages[slot / summaryEntriesPerPage] +
+                     static_cast<std::size_t>(slot % summaryEntriesPerPage) * storage.numBits;
+  }
   unsigned long long commonPairs = 0;
   unsigned long long mismatches  = 0;
-  for (int bit = threadIdx.x; bit < storage.numBits; bit += blockDim.x) {
-    const std::uint32_t word = fingerprint[bit / 32];
-    const auto component     = static_cast<std::uint64_t>(linearSum(storage, entry, bit)) + ((word >> (bit % 32)) & 1U);
-    commonPairs += component * (component - 1) / 2;
-    mismatches += component * (combinedCount - component);
+  for (int base = 0; base < storage.numBits; base += blockDim.x * stagedBitsPerThread) {
+    std::uint64_t components[stagedBitsPerThread];
+#pragma unroll
+    for (int part = 0; part < stagedBitsPerThread; ++part) {
+      const int bit = base + part * blockDim.x + threadIdx.x;
+      if (bit < storage.numBits) {
+        const std::uint64_t entryValue = singleton != nullptr ? (singleton[bit / 32] >> (bit % 32)) & 1U :
+                                                                static_cast<std::uint64_t>(sums[bit]);
+        components[part]               = entryValue + ((fingerprint[bit / 32] >> (bit % 32)) & 1U);
+      } else {
+        components[part] = 0;
+      }
+    }
+#pragma unroll
+    for (int part = 0; part < stagedBitsPerThread; ++part) {
+      const std::uint64_t component = components[part];
+      commonPairs += component * (component - 1) / 2;
+      mismatches += component * (combinedCount - component);
+    }
   }
   return cooperativeIntegerISimTerms(commonPairs, mismatches, scratch);
 }
@@ -1913,6 +1948,8 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
   __shared__ CooperativeScratch scratch;
   __shared__ int                leafEntries[cooperativeBlockSize];
   __shared__ int                numLeafEntries;
+  __shared__ int                pendingQueries[cooperativeBlockSize];
+  __shared__ int                warpPending[cooperativeBlockSize / 32];
   const int                     node         = keys[first];
   // Only this owner appends to its leaf, so one directory copy stages the
   // ordered entries for every query. Nodes wider than one block keep walking.
@@ -1928,71 +1965,102 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
     }
   }
   __syncthreads();
-  for (int offset = first; offset < count && keys[offset] == node; ++offset) {
-    const int molecule = values[offset];
-    if (labelOf(storage, molecule) >= 0) {
-      continue;
+  // Stage this leaf's still-unlabeled queries in batch order, one block-wide
+  // pass per chunk of the sorted run, instead of reading each key, molecule and
+  // label serially before its query. Only this owner labels these molecules.
+  const int lane       = threadIdx.x % warpSize;
+  const int warp       = threadIdx.x / warpSize;
+  bool      overflowed = false;
+  for (int chunk = first; !overflowed; chunk += blockDim.x) {
+    const int  offset  = chunk + threadIdx.x;
+    const bool inRun   = offset < count && keys[offset] == node;
+    const int  query   = inRun ? values[offset] : -1;
+    const bool pending = inRun && labelOf(storage, query) < 0;
+    const auto ballot  = __ballot_sync(0xffffffffU, pending);
+    if (lane == 0) {
+      warpPending[warp] = __popc(ballot);
     }
-    const auto* fingerprint = queryFingerprint(storage, molecule);
-    int         selected    = -1;
-    if (storage.nodeHeads[node] >= 0 && stageEntries && storage.numBits <= 4096) {
-      selected = cooperativeClosestStagedEntry(storage, fingerprint, scratch, leafEntries, numLeafEntries);
-    } else if (storage.nodeHeads[node] >= 0) {
-      selected = cooperativeClosestEntry(storage,
-                                         node,
-                                         fingerprint,
-                                         scratch,
-                                         stageEntries ? leafEntries : nullptr,
-                                         stageEntries ? numLeafEntries : 0);
+    const bool runEnds    = __syncthreads_or(!inRun);
+    int        position   = 0;
+    int        numPending = 0;
+    for (int index = 0; index < static_cast<int>(blockDim.x / warpSize); ++index) {
+      position += index < warp ? warpPending[index] : 0;
+      numPending += warpPending[index];
     }
-    bool merge = false;
-    if (selected >= 0) {
-      const auto terms = cooperativeCombinedISimTermsExact(storage, selected, fingerprint, scratch);
-      // Publish one decision before any warp can mutate the entry count. Reading
-      // that count independently immediately before the update can diverge warps.
-      if (threadIdx.x == 0) {
-        scratch.decision = bitbirch::isimTanimotoAtLeast(terms,
-                                                         static_cast<std::uint64_t>(storage.entryCounts[selected]) + 1,
-                                                         threshold);
-      }
-      __syncthreads();
-      merge = scratch.decision;
-    }
-    if (merge) {
-      if (!cooperativeAddFingerprint(storage, selected, fingerprint, scratch)) {
-        return;
-      }
-    } else {
-      if (threadIdx.x == 0) {
-        scratch.targetEntry = allocateConcurrentLeafEntry(storage);
-        scratch.success     = scratch.targetEntry >= 0;
-      }
-      __syncthreads();
-      if (!scratch.success) {
-        return;
-      }
-      selected = scratch.targetEntry;
-      cooperativeInitializeLeafEntry(storage, selected, molecule);
-      if (threadIdx.x == 0) {
-        storage.entryClusterIds[selected] = molecule;
-        appendEntry(storage, node, selected);
-        if (stageEntries) {
-          leafEntries[numLeafEntries++] = selected;
-        }
-      }
-      __syncthreads();
-    }
-    if (threadIdx.x == 0) {
-      labelOf(storage, molecule)        = selected;
-      // A parked earlier query can reach an entry created later in its batch.
-      // Track the actual earliest member, not the allocation/creation order.
-      storage.entryClusterIds[selected] = min(storage.entryClusterIds[selected], molecule);
+    if (pending) {
+      pendingQueries[position + __popc(ballot & ((1U << lane) - 1U))] = query;
     }
     __syncthreads();
-    if (storage.nodeSizes[node] > branchingFactor) {
-      // Remaining queries stay unassigned and are rerouted after the split.
+    for (int index = 0; index < numPending; ++index) {
+      const int   molecule    = pendingQueries[index];
+      const auto* fingerprint = queryFingerprint(storage, molecule);
+      int         selected    = -1;
+      // The staged count tracks the leaf size: only this owner appends to it.
+      const bool  occupied    = stageEntries ? numLeafEntries > 0 : storage.nodeHeads[node] >= 0;
+      if (occupied && stageEntries && storage.numBits <= 4096) {
+        selected = cooperativeClosestStagedEntry(storage, fingerprint, scratch, leafEntries, numLeafEntries);
+      } else if (occupied) {
+        selected = cooperativeClosestEntry(storage,
+                                           node,
+                                           fingerprint,
+                                           scratch,
+                                           stageEntries ? leafEntries : nullptr,
+                                           stageEntries ? numLeafEntries : 0);
+      }
+      bool merge = false;
+      if (selected >= 0) {
+        const auto terms = cooperativeCombinedISimTermsExact(storage, selected, fingerprint, scratch);
+        // Publish one decision before any warp can mutate the entry count. Reading
+        // that count independently immediately before the update can diverge warps.
+        if (threadIdx.x == 0) {
+          scratch.decision = bitbirch::isimTanimotoAtLeast(
+            terms, static_cast<std::uint64_t>(storage.entryCounts[selected]) + 1, threshold);
+        }
+        __syncthreads();
+        merge = scratch.decision;
+      }
+      if (merge) {
+        if (!cooperativeAddFingerprint(storage, selected, fingerprint, scratch)) {
+          return;
+        }
+      } else {
+        if (threadIdx.x == 0) {
+          scratch.targetEntry = allocateConcurrentLeafEntry(storage);
+          scratch.success     = scratch.targetEntry >= 0;
+        }
+        __syncthreads();
+        if (!scratch.success) {
+          return;
+        }
+        selected = scratch.targetEntry;
+        cooperativeInitializeLeafEntry(storage, selected, molecule);
+        if (threadIdx.x == 0) {
+          storage.entryClusterIds[selected] = molecule;
+          appendEntry(storage, node, selected);
+          if (stageEntries) {
+            leafEntries[numLeafEntries++] = selected;
+          }
+        }
+        __syncthreads();
+      }
+      if (threadIdx.x == 0) {
+        labelOf(storage, molecule)        = selected;
+        // A parked earlier query can reach an entry created later in its batch.
+        // Track the actual earliest member, not the allocation/creation order.
+        storage.entryClusterIds[selected] = min(storage.entryClusterIds[selected], molecule);
+      }
+      __syncthreads();
+      if ((stageEntries ? numLeafEntries : storage.nodeSizes[node]) > branchingFactor) {
+        // Remaining queries stay unassigned and are rerouted after the split.
+        overflowed = true;
+        break;
+      }
+    }
+    if (runEnds) {
       break;
     }
+    // Every warp has read this chunk's warpPending before the next chunk's writes.
+    __syncthreads();
   }
   // An overflowing leaf is split this epoch; hand its ordered entries to the
   // split-seed search through the leaf's plan slot.
