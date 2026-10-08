@@ -840,10 +840,13 @@ struct CooperativeScratch {
   double    accumulatedOtherValue;
 };
 
+// Callers that rewrite every sum and centroid word set overwritten; a new
+// summary of an entry without a singleton fingerprint then skips zero-filling.
 template <typename Component>
 __device__ __forceinline__ bool cooperativeMaterializeEntry(TreeStorage<Component>& storage,
                                                             const int               entry,
-                                                            CooperativeScratch&     scratch) {
+                                                            CooperativeScratch&     scratch,
+                                                            const bool              overwritten = false) {
   // All warps must read the old state before lane zero can publish a new slot.
   // Otherwise a lagging warp can take the already-materialized early return
   // while the allocating warp waits at the barrier below.
@@ -878,7 +881,8 @@ __device__ __forceinline__ bool cooperativeMaterializeEntry(TreeStorage<Componen
   const int  slot             = scratch.materializeSlot;
   Component* sums             = storage.linearSumPages[slot / summaryEntriesPerPage] +
                     static_cast<std::size_t>(slot % summaryEntriesPerPage) * storage.numBits;
-  for (int base = 0; base < storage.numBits; base += blockDim.x * stagedBitsPerThread) {
+  const bool fill = !overwritten || fingerprintIndex >= 0;
+  for (int base = 0; fill && base < storage.numBits; base += blockDim.x * stagedBitsPerThread) {
     Component values[stagedBitsPerThread];
 #pragma unroll
     for (int part = 0; part < stagedBitsPerThread; ++part) {
@@ -1535,7 +1539,7 @@ __device__ __forceinline__ void cooperativeSummarizeNode(TreeStorage<Component>&
                                                          const int               node,
                                                          const int               targetEntry,
                                                          CooperativeScratch&     scratch) {
-  if (!cooperativeMaterializeEntry(storage, targetEntry, scratch)) {
+  if (!cooperativeMaterializeEntry(storage, targetEntry, scratch, true)) {
     return;
   }
   // Stage each entry's storage location from the node directory, one entry
@@ -1594,6 +1598,12 @@ __device__ __forceinline__ void cooperativeSummarizeNode(TreeStorage<Component>&
         atomicAdd(storage.singletonPageHits + scratch.entries[index] / summaryEntriesPerPage, 1U);
       }
     }
+    // The new centroid follows from the sums still in registers, so the
+    // majority pass does not reread them. Bits are word-aligned per warp.
+    const auto     count    = static_cast<std::uint64_t>(storage.entryCounts[targetEntry]);
+    const int      slot     = storage.entrySummarySlots[targetEntry];
+    std::uint32_t* centroid = storage.centroidPages[slot / summaryEntriesPerPage] +
+                              static_cast<std::size_t>(slot % summaryEntriesPerPage) * storage.numWords;
     for (int base = 0; base < storage.numBits; base += blockDim.x * stagedBitsPerThread) {
       Component sums[stagedBitsPerThread] = {};
       accumulateStagedBits(sums, numSingletons, base, storage.numBits, [&](const int index) {
@@ -1616,8 +1626,16 @@ __device__ __forceinline__ void cooperativeSummarizeNode(TreeStorage<Component>&
         if (bit < storage.numBits) {
           materializedLinearSum(storage, targetEntry, bit) = sums[part];
         }
+        const std::uint32_t word = __ballot_sync(
+          0xffffffffU,
+          bit < storage.numBits && bitbirch::majorityCentroidBit(static_cast<std::uint64_t>(sums[part]), count));
+        if (threadIdx.x % warpSize == 0 && bit < storage.numBits) {
+          centroid[bit / 32] = word;
+        }
       }
     }
+    __syncthreads();
+    return;
   } else {
     for (int bit = threadIdx.x; bit < storage.numBits; bit += blockDim.x) {
       Component sum = 0;
