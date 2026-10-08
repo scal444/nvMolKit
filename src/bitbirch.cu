@@ -2144,6 +2144,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
   std::vector<int>             hostControl(NumEpochControls, 0);
   hostControl[NodeCount] = 1;
   for (int begin = 0; begin < numFingerprints;) {
+    ScopedNvtxRange batchRange("BitBIRCH batch", NvtxColor::kGrey);
     const bool enableGroups = begin >= orderedWarmupSize;
     const int  boundary = begin < orderedWarmupSize ? std::min(orderedWarmupSize, numFingerprints) : numFingerprints;
     const int  count    = std::min(batchCapacity, boundary - begin);
@@ -2158,6 +2159,8 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
     cudaCheckError(cudaMemsetAsync(labels + (begin - labelBegin), 0xff, count * sizeof(int), stream));
     int pending = count;
     while (pending > 0) {
+      ScopedNvtxRange roundRange("BitBIRCH insertion round", NvtxColor::kCyan);
+      ScopedNvtxRange workspaceRange("BitBIRCH workspace growth", NvtxColor::kGrey);
       // Every non-root node has exactly one directory entry, so K = E - V + 1.
       // At most pending new leaf entries can be created before the next barrier.
       // Apply the same balanced-node bound to live K instead of allocating for
@@ -2222,6 +2225,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
         storage.singletonPageHits         = ownedFingerprints.pageHits();
         storage.queryBegin                = begin;
       }
+      workspaceRange.pop();
       bitBirchRouteKernel<<<count, cooperativeBlockSize, 0, stream>>>(begin,
                                                                       count,
                                                                       keys.data(),
@@ -2323,6 +2327,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                                                               summaryCount.data(),
                                                                               storage);
       cudaCheckError(cudaGetLastError());
+      ScopedNvtxRange controlRange("BitBIRCH control + host sync", NvtxColor::kGrey);
       bitBirchControlKernel<<<1, cooperativeBlockSize, 0, stream>>>(begin, count, control.data(), storage);
       cudaCheckError(cudaGetLastError());
       control.copyToHost(hostControl);
@@ -2352,6 +2357,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
     tree.summaryArena.rotate();
     ownedFingerprints.rotate();
   }
+  ScopedNvtxRange finalizeRange("BitBIRCH finalize labels", NvtxColor::kGreen);
   if (returnCentroids) {
     const int clusters = liveClusters(hostControl);
     result.centroids.resize(static_cast<std::size_t>(clusters) * numWords);
