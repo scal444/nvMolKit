@@ -44,7 +44,7 @@ boost::python::object wrapButinaResult(nvMolKit::ButinaResult& result, const int
 
 //! Returns (labels, centroids); labels is None when written to a host array, centroids None unless requested.
 boost::python::object wrapBitBirchResult(nvMolKit::BitBirchResult& result,
-                                         const int                 numItems,
+                                         const std::int64_t        numItems,
                                          const bool                hostLabels,
                                          const bool                returnCentroids) {
   boost::python::object labels;
@@ -77,7 +77,8 @@ boost::python::object bitBirch(const boost::python::dict& fingerprints,
   if (len(shape) != 2) {
     throw std::invalid_argument("fingerprints must be a 2D matrix");
   }
-  const int                  count   = boost::python::extract<int>(shape[0]);
+  // Rows may exceed 2^31; labels stay int32 cluster IDs for any row count.
+  const std::int64_t         count   = boost::python::extract<std::int64_t>(shape[0]);
   const int                  words   = boost::python::extract<int>(shape[1]);
   const boost::python::tuple data    = boost::python::extract<boost::python::tuple>(fingerprints["data"]);
   const auto                 pointer = boost::python::extract<std::size_t>(data[0])();

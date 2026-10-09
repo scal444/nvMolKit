@@ -35,7 +35,8 @@ struct BitBirchOptions {
   std::size_t fingerprintCacheBytes = 0;      //!< GPU cache budget for retained singletons; needs fingerprintsOnHost.
   bool        fingerprintsOnHost    = false;  //!< Fingerprints are host memory, streamed to the GPU per batch.
   //! When set, labels go to this host array of numFingerprints ints instead of clusterIds. Only one batch of labels is
-  //! kept on the GPU; each finished batch is staged through a small pinned buffer.
+  //! kept on the GPU; each finished batch is staged through a small pinned buffer. Labels are cluster IDs, which stay
+  //! below 2^31 for any numFingerprints (the tree's entry IDs are int32 and checked), so int32 suffices.
   int*        hostClusterIds        = nullptr;
   bool        returnCentroids       = false;  //!< Also return packed majority centroids in cluster-ID order.
 };
@@ -46,7 +47,7 @@ struct BitBirchOptions {
  * topology mutation without constructing independent trees and merging them.
  */
 BitBirchResult bitBirchGpu(cuda::std::span<const std::uint32_t> fingerprints,
-                           int                                  numFingerprints,
+                           std::int64_t                         numFingerprints,
                            int                                  numWords,
                            double                               threshold,
                            const BitBirchOptions&               options = BitBirchOptions(),

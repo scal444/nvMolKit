@@ -15,6 +15,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "src/bitbirch.h"
@@ -36,6 +37,14 @@ enum class BitBirchStatus : int {
 };
 
 constexpr int summaryEntriesPerPage = 4096;
+//! Tree entry, node and summary IDs are int32. Entries are clusters plus nodes, so the tree holds fewer than this many
+//! clusters; growth throws past it. Cluster IDs, and so labels, therefore stay int32 for any number of rows.
+constexpr int maxTreeEntries        = std::numeric_limits<int>::max() - summaryEntriesPerPage;
+
+//! Member count of a tree entry. An entry near the root holds a share of all rows, so counts are as wide as the
+//! per-bit sums (Component), which the host picks wide enough for the row count.
+template <typename Component>
+using MemberCount = std::conditional_t<(sizeof(Component) > sizeof(std::uint32_t)), std::uint64_t, std::uint32_t>;
 
 //! Epoch state the host reads back after each insertion epoch.
 enum EpochControl : int {
@@ -260,6 +269,9 @@ template <typename Component> class PagedSummaryArena {
 };
 
 template <typename Component> struct TreeStorage {
+  using Count = MemberCount<Component>;
+  // Whole input matrix on the GPU; singleton entries without owned copies read
+  // their row here. Null when singletons are copied into owned pages.
   const std::uint32_t* fingerprints;
   int*                 nodeHeads;
   int*                 nodeSizes;
@@ -269,12 +281,15 @@ template <typename Component> struct TreeStorage {
   int*                 nodeParentEntries;
   int*                 entryNext;
   int*                 entryChildren;
-  std::uint32_t*       entryCounts;
+  Count*               entryCounts;
   int*                 entrySummarySlots;
   int*                 entryFingerprintIndices;
   Component**          linearSumPages;
   std::uint32_t**      centroidPages;
-  int*                 entryClusterIds;
+  // Earliest member row (64-bit: rows may exceed 2^31) until finalization,
+  // then the cluster ID. One value per tree entry, never per row.
+  std::int64_t*        entryClusterIds;
+  // Device-labeled runs: all numFingerprints labels. Host-labeled runs: one batch.
   int*                 labels;
   std::uint32_t*       centroids;
   int*                 root;
@@ -291,10 +306,11 @@ template <typename Component> struct TreeStorage {
   std::uint32_t*       summaryPageHits           = nullptr;
   std::uint32_t**      singletonFingerprintPages = nullptr;
   std::uint32_t*       singletonPageHits         = nullptr;
-  int                  queryBegin                = 0;
-  // Molecule index held in labels[0]. Host-labeled runs keep only the current
-  // batch on the GPU; device-labeled runs keep all labels and use zero.
-  int                  labelBegin                = 0;
+  // Rows of the batch being inserted. Kernels index rows by their int32 offset
+  // in the batch ("local row"); only the batch base is 64-bit.
+  const std::uint32_t* queries                   = nullptr;  //!< Fingerprint of local row zero.
+  int*                 batchLabels               = nullptr;  //!< Label of local row zero.
+  std::int64_t         batchBegin                = 0;        //!< Input row of local row zero.
   // Contiguous ordered entry copies for every node, kept in list order by each
   // append and split. Kernels stage entries from them instead of walking lists.
   int*                 nodeDirectories           = nullptr;
@@ -422,10 +438,10 @@ template <typename Component> class TreeWorkspace {
   AsyncDeviceVector<int>           directoryEntries;
   AsyncDeviceVector<int>           entryNext;
   AsyncDeviceVector<int>           entryChildren;
-  AsyncDeviceVector<std::uint32_t> entryCounts;
+  AsyncDeviceVector<MemberCount<Component>> entryCounts;
   AsyncDeviceVector<int>           entrySummarySlots;
   AsyncDeviceVector<int>           entryFingerprintIndices;
-  AsyncDeviceVector<int>           entryClusterIds;
+  AsyncDeviceVector<std::int64_t>  entryClusterIds;
   AsyncDevicePtr<int>              root;
   AsyncDevicePtr<int>              nodeCursor;
   AsyncDevicePtr<int>              entryCursor;
@@ -448,15 +464,17 @@ __device__ __forceinline__ Component& materializedLinearSum(TreeStorage<Componen
                                [static_cast<std::size_t>(slot % summaryEntriesPerPage) * storage.numBits + bit];
 }
 
+//! Fingerprint of a local row (offset in the current batch).
 template <typename Component>
 __device__ __forceinline__ const std::uint32_t* queryFingerprint(const TreeStorage<Component>& storage,
-                                                                 const int                     molecule) {
-  return storage.fingerprints + static_cast<std::size_t>(molecule - storage.queryBegin) * storage.numWords;
+                                                                 const int                     row) {
+  return storage.queries + static_cast<std::size_t>(row) * storage.numWords;
 }
 
+//! Label of a local row (offset in the current batch).
 template <typename Component>
-__device__ __forceinline__ int& labelOf(const TreeStorage<Component>& storage, const int molecule) {
-  return storage.labels[molecule - storage.labelBegin];
+__device__ __forceinline__ int& labelOf(const TreeStorage<Component>& storage, const int row) {
+  return storage.batchLabels[row];
 }
 
 template <typename Component>
@@ -852,7 +870,7 @@ struct CooperativeScratch {
   int       next;         //!< Linked-list cursor while gathering entries.
   int       count;        //!< Entries gathered into entries or nodeEntries.
   int       stagedCount;  //!< Entries or delta slots staged for per-bit sums.
-  int       stagedTotal;  //!< Member count summed over the staged entries.
+  unsigned long long stagedTotal;  //!< Member count summed over the staged entries.
   int       stagedSingletons;  //!< Singleton fingerprint indices staged in entries.
   int       stagedSummaries;   //!< Summary slots staged in otherEntries.
   int       bestEntry;    //!< Closest entry found by cooperativeClosestEntry.
@@ -1431,13 +1449,16 @@ __device__ __forceinline__ void cooperativeRefreshCentroid(TreeStorage<Component
   __syncthreads();
 }
 
+// Without owned singleton pages the entry keeps the input row of its
+// fingerprint; the host only runs that way when every row fits in int32.
 template <typename Component>
 __device__ __forceinline__ void cooperativeInitializeLeafEntry(TreeStorage<Component>& storage,
                                                                const int               entry,
-                                                               const int               fingerprintIndex) {
+                                                               const int               row) {
   if (threadIdx.x == 0) {
     storage.entryCounts[entry]             = 1;
-    storage.entryFingerprintIndices[entry] = storage.singletonFingerprintPages != nullptr ? entry : fingerprintIndex;
+    storage.entryFingerprintIndices[entry] =
+      storage.singletonFingerprintPages != nullptr ? entry : static_cast<int>(storage.batchBegin + row);
   }
   __syncthreads();
   if (storage.singletonFingerprintPages != nullptr) {
@@ -1445,7 +1466,7 @@ __device__ __forceinline__ void cooperativeInitializeLeafEntry(TreeStorage<Compo
       storage
         .singletonFingerprintPages[entry / summaryEntriesPerPage]
                                   [static_cast<std::size_t>(entry % summaryEntriesPerPage) * storage.numWords + word] =
-        queryFingerprint(storage, fingerprintIndex)[word];
+        queryFingerprint(storage, row)[word];
     }
     __syncthreads();
   }
@@ -1490,7 +1511,7 @@ __device__ __forceinline__ void cooperativeStoreSums(TreeStorage<Component>& sto
   // Every thread has read the old count before thread zero publishes the new one.
   __syncthreads();
   if (threadIdx.x == 0) {
-    storage.entryCounts[entry] = static_cast<std::uint32_t>(count);
+    storage.entryCounts[entry] = static_cast<typename TreeStorage<Component>::Count>(count);
   }
   __syncthreads();
 }
@@ -1598,8 +1619,8 @@ __device__ __forceinline__ void cooperativeSummarizeNode(TreeStorage<Component>&
       scratch.stagedSummaries  = 0;
     }
     __syncthreads();
-    std::uint32_t count     = 0;
-    const int*    directory = nodeDirectory(storage, node);
+    typename TreeStorage<Component>::Count count     = 0;
+    const int*                             directory = nodeDirectory(storage, node);
     for (int position = threadIdx.x; position < size; position += blockDim.x) {
       const int entry            = directory[position];
       const int fingerprintIndex = storage.entryFingerprintIndices[entry];
@@ -1615,15 +1636,15 @@ __device__ __forceinline__ void cooperativeSummarizeNode(TreeStorage<Component>&
       count += __shfl_down_sync(0xffffffffU, count, offset);
     }
     if (threadIdx.x % warpSize == 0 && count != 0) {
-      atomicAdd(&scratch.stagedTotal, static_cast<int>(count));
+      atomicAdd(&scratch.stagedTotal, static_cast<unsigned long long>(count));
     }
     __syncthreads();
     if (threadIdx.x == 0) {
-      storage.entryCounts[targetEntry] = static_cast<std::uint32_t>(scratch.stagedTotal);
+      storage.entryCounts[targetEntry] = static_cast<typename TreeStorage<Component>::Count>(scratch.stagedTotal);
     }
   } else if (threadIdx.x == 0) {
-    std::uint32_t count   = 0;
-    int           entries = 0;
+    typename TreeStorage<Component>::Count count   = 0;
+    int                                    entries = 0;
     for (int entry = storage.nodeHeads[node]; entry >= 0; entry = storage.entryNext[entry], ++entries) {
       count += storage.entryCounts[entry];
     }
@@ -1928,8 +1949,7 @@ template <typename Component> __global__ void bitBirchInitializeKernel(TreeStora
 }
 
 template <typename Component>
-__global__ void bitBirchRouteKernel(const int                    begin,
-                                    const int                    count,
+__global__ void bitBirchRouteKernel(const int                    count,
                                     int*                         keys,
                                     int*                         values,
                                     int*                         groupKeys,
@@ -1948,7 +1968,7 @@ __global__ void bitBirchRouteKernel(const int                    begin,
   if (offset >= count) {
     return;
   }
-  const int molecule = begin + offset;
+  const int molecule = offset;  // Local row.
   if (threadIdx.x == 0) {
     values[offset]    = molecule;
     scratch.node      = *storage.root;
@@ -2080,7 +2100,7 @@ __global__ void bitBirchGroupsKernel(const int              count,
       return;
     }
     if (threadIdx.x == 0) {
-      storage.entryClusterIds[entry] = min(storage.entryClusterIds[entry], values[first]);
+      storage.entryClusterIds[entry] = min(storage.entryClusterIds[entry], storage.batchBegin + values[first]);
     }
     cooperativeStoreSums(storage, entry, combinedCount, [&](const int bit) { return proposed[bit]; });
     for (int offset = first + threadIdx.x; offset < end; offset += blockDim.x) {
@@ -2103,7 +2123,7 @@ __global__ void bitBirchGroupsKernel(const int              count,
       }
       if (threadIdx.x == 0) {
         labelOf(storage, molecule)     = entry;
-        storage.entryClusterIds[entry] = min(storage.entryClusterIds[entry], molecule);
+        storage.entryClusterIds[entry] = min(storage.entryClusterIds[entry], storage.batchBegin + molecule);
       }
       __syncthreads();
     }
@@ -2543,7 +2563,7 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
         selected = scratch.targetEntry;
         cooperativeInitializeLeafEntry(storage, selected, molecule);
         if (threadIdx.x == 0) {
-          storage.entryClusterIds[selected] = molecule;
+          storage.entryClusterIds[selected] = storage.batchBegin + molecule;
           appendEntry(storage, node, selected);
           if (stageEntries) {
             leafEntries[numLeafEntries++] = selected;
@@ -2565,7 +2585,7 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
         labelOf(storage, molecule)        = selected;
         // A parked earlier query can reach an entry created later in its batch.
         // Track the actual earliest member, not the allocation/creation order.
-        storage.entryClusterIds[selected] = min(storage.entryClusterIds[selected], molecule);
+        storage.entryClusterIds[selected] = min(storage.entryClusterIds[selected], storage.batchBegin + molecule);
       }
       __syncthreads();
       if ((stageEntries ? numLeafEntries : storage.nodeSizes[node]) > branchingFactor) {
@@ -2720,7 +2740,7 @@ __global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
       }
       if (lane == 0) {
         scratch.otherEntries[warp] = __popc(ballot);
-        atomicAdd(&scratch.stagedTotal, static_cast<int>(added));
+        atomicAdd(&scratch.stagedTotal, static_cast<unsigned long long>(added));
       }
       __syncthreads();
       int offset = staged;
@@ -3337,8 +3357,7 @@ __global__ void bitBirchSummarizeKernel(const int*             summaryNodes,
 // When the batch is complete it also clears the next batch's labels (nextLabels
 // is null when labels are not resident for the next batch).
 template <typename Component>
-__global__ void bitBirchControlKernel(const int              begin,
-                                      const int              count,
+__global__ void bitBirchControlKernel(const int              count,
                                       int*                   control,
                                       int*                   levelCounts,
                                       const int              numLevels,
@@ -3353,8 +3372,8 @@ __global__ void bitBirchControlKernel(const int              begin,
   }
   __syncthreads();
   int localPending = 0;
-  for (int molecule = begin + threadIdx.x; molecule < begin + count; molecule += blockDim.x) {
-    localPending += labelOf(storage, molecule) < 0;
+  for (int row = threadIdx.x; row < count; row += blockDim.x) {
+    localPending += labelOf(storage, row) < 0;
   }
   atomicAdd(&pending, localPending);
   __syncthreads();
@@ -3385,7 +3404,7 @@ __global__ void bitBirchControlKernel(const int              begin,
 
 template <typename Component>
 __global__ void bitBirchCollectLeavesKernel(const int                    count,
-                                            int*                         firstMembers,
+                                            std::int64_t*                firstMembers,
                                             int*                         leafEntries,
                                             int*                         cursor,
                                             const TreeStorage<Component> storage) {
@@ -3415,10 +3434,12 @@ __global__ void bitBirchClusterMapKernel(const int count, const int* leafEntries
   }
 }
 
-template <typename Component> __global__ void bitBirchFinalizeKernel(const int count, TreeStorage<Component> storage) {
-  const int molecule = blockIdx.x * blockDim.x + threadIdx.x;
-  if (molecule < count) {
-    labelOf(storage, molecule) = storage.entryClusterIds[labelOf(storage, molecule)];
+//! Maps every row's leaf entry to its cluster ID (below 2^31: see maxTreeEntries).
+template <typename Component>
+__global__ void bitBirchFinalizeKernel(const std::int64_t count, TreeStorage<Component> storage) {
+  const auto stride = static_cast<std::int64_t>(gridDim.x) * blockDim.x;
+  for (auto row = static_cast<std::int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; row < count; row += stride) {
+    storage.labels[row] = static_cast<int>(storage.entryClusterIds[storage.labels[row]]);
   }
 }
 
@@ -3429,7 +3450,7 @@ int liveClusters(const PinnedHostVector<int>& control) {
 
 template <typename Component>
 BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerprints,
-                              const int                                  numFingerprints,
+                              const std::int64_t                         numFingerprints,
                               const int                                  numWords,
                               const double                               threshold,
                               const BitBirchOptions&                     options,
@@ -3438,11 +3459,11 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
   const bool             fingerprintsOnHost = options.fingerprintsOnHost;
   int* const             hostLabels         = options.hostClusterIds;
   const bool             returnCentroids    = options.returnCentroids;
-  const int              batchCapacity      = std::min(options.batchSize, numFingerprints);
+  const int              batchCapacity      = static_cast<int>(std::min<std::int64_t>(options.batchSize, numFingerprints));
   const std::size_t      splitCacheBytes    = numWords <= 32 && branchingFactor < cooperativeBlockSize ?
                                                 sizeof(std::uint32_t) * (cooperativeBlockSize + 1) * numWords :
                                                 0;
-  BitBirchResult         result{AsyncDeviceVector<int>(hostLabels != nullptr ? 0 : numFingerprints, stream),
+  BitBirchResult         result{AsyncDeviceVector<int>(hostLabels != nullptr ? 0 : static_cast<std::size_t>(numFingerprints), stream),
                         AsyncDeviceVector<std::uint32_t>(0, stream),
                         0,
                         numWords};
@@ -3451,7 +3472,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
   // batch of entry IDs through a small pinned buffer into the caller's array.
   AsyncDeviceVector<int> batchLabels(hostLabels != nullptr ? batchCapacity : 0, stream);
   PinnedHostVector<int>  labelStaging(hostLabels != nullptr ? batchCapacity : 0);
-  int                    stagedBegin       = 0;
+  std::int64_t           stagedBegin       = 0;
   int                    stagedCount       = 0;
   const auto             drainStagedLabels = [&]() {
     // Call only after a stream or event synchronization that follows the staging copy.
@@ -3462,7 +3483,11 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
   AsyncDeviceVector<std::uint32_t> inputTile(
     fingerprintsOnHost ? static_cast<std::size_t>(batchCapacity) * numWords : 0,
     stream);
-  // Packed singletons retained from host input, independent of the current tile.
+  // Singleton entries keep their fingerprint row as an int32 index. Host input
+  // is only tiled, and inputs with rows past int32 cannot be indexed by row, so
+  // both copy each singleton's fingerprint into pages indexed by its entry ID.
+  const bool ownedSingletons = fingerprintsOnHost || numFingerprints > std::numeric_limits<int>::max();
+  // Packed singletons retained from the input, independent of the current tile.
   PagedEntryStorage<std::uint32_t> ownedFingerprints(
     numWords,
     stream,
@@ -3472,12 +3497,16 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
   // K leaf entries and V nodes, the tree has K + V - 1 total entries, hence
   // (m - 1)*(V - 1) <= K <= N. Padding also covers transient split allocations.
   // For B=254 this needs about N/126 nodes and 1.008*N entries, not 2*N/3*N.
+  // Entry and node IDs are int32: capacities are clamped to maxTreeEntries and
+  // growTree throws if live clusters plus nodes would pass it.
   const int                minimumNodeSize = branchingFactor / 2 + branchingFactor % 2;
-  const int                maxNodes        = numFingerprints / (minimumNodeSize - 1) + 8;
-  const int                maxEntries      = numFingerprints + maxNodes;
+  const int                maxNodes        = static_cast<int>(
+    std::min<std::int64_t>(numFingerprints / (minimumNodeSize - 1) + 8, maxTreeEntries));
+  const int                maxEntries      = static_cast<int>(
+    std::min<std::int64_t>(numFingerprints + maxNodes, maxTreeEntries));
   const int                initialNodes    = std::min(maxNodes, batchCapacity / (minimumNodeSize - 1) + 8);
   const int                initialEntries  = std::min(maxEntries, batchCapacity + initialNodes);
-  TreeWorkspace<Component> tree(fingerprintsOnHost ? inputTile.data() : fingerprints.data(),
+  TreeWorkspace<Component> tree(ownedSingletons ? nullptr : fingerprints.data(),
                                 labels,
                                 initialNodes,
                                 initialEntries,
@@ -3622,9 +3651,10 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
   if (canMapControl) {
     cudaCheckError(cudaHostGetDevicePointer(reinterpret_cast<void**>(&control), hostControl.data(), 0));
   }
-  const auto batchCountAt = [&](const int at) {
-    const int boundary = at < orderedWarmupSize ? std::min(orderedWarmupSize, numFingerprints) : numFingerprints;
-    return std::min(batchCapacity, boundary - at);
+  const auto batchCountAt = [&](const std::int64_t at) {
+    const std::int64_t boundary =
+      at < orderedWarmupSize ? std::min<std::int64_t>(orderedWarmupSize, numFingerprints) : numFingerprints;
+    return static_cast<int>(std::min<std::int64_t>(batchCapacity, boundary - at));
   };
   // Device-resident labels of the next batch were cleared by the last control.
   bool nextLabelsCleared = false;
@@ -3651,6 +3681,9 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
   const auto growTree = [&](const std::int64_t clusterBound) {
     const auto requiredNodes   = clusterBound / (minimumNodeSize - 1) + 8;
     const auto requiredEntries = clusterBound + requiredNodes;
+    if (requiredEntries > maxTreeEntries) {
+      throw std::invalid_argument("BitBIRCH tree exceeds its int32 entry capacity (about 2^31 clusters plus nodes)");
+    }
     const int  nodeCapacity =
       requiredNodes > tree.nodeCapacity ?
         static_cast<int>(std::min<std::int64_t>(
@@ -3677,7 +3710,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
     }
   };
   hostControl[NodeCount] = 1;
-  for (int begin = 0; begin < numFingerprints;) {
+  for (std::int64_t begin = 0; begin < numFingerprints;) {
     ScopedNvtxRange batchRange("BitBIRCH batch", NvtxColor::kGrey);
     const bool enableGroups = begin >= orderedWarmupSize;
     const int  count        = batchCountAt(begin);
@@ -3688,14 +3721,14 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                      cudaMemcpyHostToDevice,
                                      stream));
     }
-    const int labelBegin = hostLabels != nullptr ? begin : 0;
-    if (!nextLabelsCleared) {
-      cudaCheckError(cudaMemsetAsync(labels + (begin - labelBegin), 0xff, count * sizeof(int), stream));
-    }
     // Host-labeled runs reuse one batch buffer, which is staged out after the batch.
-    const int nextBegin  = begin + count;
-    int*      nextLabels = hostLabels == nullptr && nextBegin < numFingerprints ? labels + nextBegin : nullptr;
-    const int nextCount  = nextLabels != nullptr ? batchCountAt(nextBegin) : 0;
+    int* const currentLabels = hostLabels != nullptr ? labels : labels + begin;
+    if (!nextLabelsCleared) {
+      cudaCheckError(cudaMemsetAsync(currentLabels, 0xff, count * sizeof(int), stream));
+    }
+    const std::int64_t nextBegin  = begin + count;
+    int*               nextLabels = hostLabels == nullptr && nextBegin < numFingerprints ? labels + nextBegin : nullptr;
+    const int          nextCount  = nextLabels != nullptr ? batchCountAt(nextBegin) : 0;
     int pending = count;
     while (pending > 0) {
       ScopedNvtxRange roundRange("BitBIRCH insertion round", NvtxColor::kCyan);
@@ -3738,17 +3771,18 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
         deltaCounts.resize(deltaCapacity);
         deltaSums.resize(deltaCapacity * numWords * 32);
       }
-      storage            = tree.storage();
-      storage.labelBegin = labelBegin;
-      if (fingerprintsOnHost) {
+      storage             = tree.storage();
+      storage.queries     = fingerprintsOnHost ? inputTile.data() :
+                                                 fingerprints.data() + static_cast<std::size_t>(begin) * numWords;
+      storage.batchLabels = currentLabels;
+      storage.batchBegin  = begin;
+      if (ownedSingletons) {
         ownedFingerprints.reserve(tree.entryCapacity);
         storage.singletonFingerprintPages = ownedFingerprints.pointers();
         storage.singletonPageHits         = ownedFingerprints.pageHits();
-        storage.queryBegin                = begin;
       }
       workspaceRange.pop();
-      bitBirchRouteKernel<<<count, cooperativeBlockSize, routeShared, stream>>>(begin,
-                                                                      count,
+      bitBirchRouteKernel<<<count, cooperativeBlockSize, routeShared, stream>>>(count,
                                                                       keys.data(),
                                                                       values.data(),
                                                                       groupKeys.data(),
@@ -3882,8 +3916,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                                                                             storage);
       cudaCheckError(cudaGetLastError());
       ScopedNvtxRange controlRange("BitBIRCH control + host sync", NvtxColor::kGrey);
-      bitBirchControlKernel<<<1, cooperativeBlockSize, 0, stream>>>(begin,
-                                                                    count,
+      bitBirchControlKernel<<<1, cooperativeBlockSize, 0, stream>>>(count,
                                                                     control,
                                                                     levelCounts.data(),
                                                                     static_cast<int>(levelCounts.size()),
@@ -3945,10 +3978,15 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
   // first-member scan and its additional device workspace.
   const int              clusters    = liveClusters(hostControl);
   const int              liveEntries = hostControl[EntryCount];
-  AsyncDeviceVector<int> firstMembers(clusters, stream);
-  AsyncDeviceVector<int> leafEntries(clusters, stream);
-  AsyncDeviceVector<int> sortedFirstMembers(clusters, stream);
-  AsyncDeviceVector<int> sortedLeafEntries(clusters, stream);
+  AsyncDeviceVector<std::int64_t> firstMembers(clusters, stream);
+  AsyncDeviceVector<int>          leafEntries(clusters, stream);
+  AsyncDeviceVector<std::int64_t> sortedFirstMembers(clusters, stream);
+  AsyncDeviceVector<int>          sortedLeafEntries(clusters, stream);
+  // First members are distinct nonnegative rows below numFingerprints.
+  int rowBits = 1;
+  while (rowBits < 63 && (std::int64_t{1} << rowBits) < numFingerprints) {
+    ++rowBits;
+  }
   AsyncDeviceVector<int> leafCursor(1, stream);
   cudaCheckError(cudaMemsetAsync(leafCursor.data(), 0, sizeof(int), stream));
   const int entryBlocks = (liveEntries + cooperativeBlockSize - 1) / cooperativeBlockSize;
@@ -3967,7 +4005,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                                  sortedLeafEntries.data(),
                                                  clusters,
                                                  0,
-                                                 32,
+                                                 rowBits,
                                                  stream));
   AsyncDeviceVector<std::byte> clusterSortScratch(clusterSortBytes, stream);
   cudaCheckError(cub::DeviceRadixSort::SortPairs(clusterSortScratch.data(),
@@ -3978,7 +4016,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                                  sortedLeafEntries.data(),
                                                  clusters,
                                                  0,
-                                                 32,
+                                                 rowBits,
                                                  stream));
   const int clusterBlocks = (clusters + cooperativeBlockSize - 1) / cooperativeBlockSize;
   bitBirchClusterMapKernel<<<clusterBlocks, cooperativeBlockSize, 0, stream>>>(clusters,
@@ -3987,20 +4025,21 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
   cudaCheckError(cudaGetLastError());
   int clusterCount = 0;
   if (hostLabels == nullptr) {
-    const int labelBlocks = (numFingerprints + cooperativeBlockSize - 1) / cooperativeBlockSize;
+    const auto labelBlocks = static_cast<int>(std::min<std::int64_t>(
+      (numFingerprints + cooperativeBlockSize - 1) / cooperativeBlockSize, std::numeric_limits<int>::max()));
     bitBirchFinalizeKernel<<<labelBlocks, cooperativeBlockSize, 0, stream>>>(numFingerprints, storage);
     cudaCheckError(cudaGetLastError());
     tree.clusterCount.get(clusterCount);
     cudaCheckError(cudaStreamSynchronize(stream));
   } else {
     // Host labels hold leaf entry IDs; map them to first-member cluster order.
-    std::vector<int> entryClusterIds(liveEntries);
+    std::vector<std::int64_t> entryClusterIds(liveEntries);
     tree.entryClusterIds.copyToHost(entryClusterIds, liveEntries);
     tree.clusterCount.get(clusterCount);
     cudaCheckError(cudaStreamSynchronize(stream));
     drainStagedLabels();
-    for (int molecule = 0; molecule < numFingerprints; ++molecule) {
-      hostLabels[molecule] = entryClusterIds[hostLabels[molecule]];
+    for (std::int64_t row = 0; row < numFingerprints; ++row) {
+      hostLabels[row] = static_cast<int>(entryClusterIds[hostLabels[row]]);
     }
   }
   result.numClusters = clusterCount;
@@ -4010,7 +4049,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
 }  // namespace
 
 BitBirchResult bitBirchGpu(const cuda::std::span<const std::uint32_t> fingerprints,
-                           const int                                  numFingerprints,
+                           const std::int64_t                         numFingerprints,
                            const int                                  numWords,
                            const double                               threshold,
                            const BitBirchOptions&                     options,
@@ -4018,8 +4057,7 @@ BitBirchResult bitBirchGpu(const cuda::std::span<const std::uint32_t> fingerprin
   const ScopedNvtxRange range("BitBIRCH tree construction");
   const int             branchingFactor       = options.branchingFactor;
   const std::size_t     fingerprintCacheBytes = options.fingerprintCacheBytes;
-  if (numFingerprints < 0 || numFingerprints > std::numeric_limits<int>::max() - cooperativeBlockSize ||
-      numWords <= 0 || numWords > std::numeric_limits<int>::max() / 32 ||
+  if (numFingerprints < 0 || numWords <= 0 || numWords > std::numeric_limits<int>::max() / 32 ||
       fingerprints.size() != static_cast<std::size_t>(numFingerprints) * numWords) {
     throw std::invalid_argument("BitBIRCH fingerprints shape or dimensions are invalid");
   }
@@ -4029,11 +4067,6 @@ BitBirchResult bitBirchGpu(const cuda::std::span<const std::uint32_t> fingerprin
         fingerprintCacheBytes < sizeof(std::uint32_t) * static_cast<std::size_t>(summaryEntriesPerPage) * numWords))) {
     throw std::invalid_argument("BitBIRCH clustering options are invalid");
   }
-  const auto minimumNodeSize = branchingFactor / 2 + branchingFactor % 2;
-  const auto maximumEntries  = static_cast<std::int64_t>(numFingerprints) + numFingerprints / (minimumNodeSize - 1) + 8;
-  if (maximumEntries > std::numeric_limits<int>::max() - summaryEntriesPerPage) {
-    throw std::invalid_argument("BitBIRCH metadata exceeds supported index capacity");
-  }
   if (numFingerprints == 0) {
     BitBirchResult result{AsyncDeviceVector<int>(0, stream), AsyncDeviceVector<std::uint32_t>(0, stream), 0, numWords};
     return result;
@@ -4041,7 +4074,12 @@ BitBirchResult bitBirchGpu(const cuda::std::span<const std::uint32_t> fingerprin
   if (numFingerprints <= std::numeric_limits<std::uint16_t>::max()) {
     return launchBitBirch<std::uint16_t>(fingerprints, numFingerprints, numWords, threshold, options, stream);
   }
-  return launchBitBirch<std::uint32_t>(fingerprints, numFingerprints, numWords, threshold, options, stream);
+  // Per-bit sums and entry counts reach the member count of an entry near the
+  // root, which is bounded only by the row count.
+  if (numFingerprints <= std::numeric_limits<std::uint32_t>::max()) {
+    return launchBitBirch<std::uint32_t>(fingerprints, numFingerprints, numWords, threshold, options, stream);
+  }
+  return launchBitBirch<std::uint64_t>(fingerprints, numFingerprints, numWords, threshold, options, stream);
 }
 
 }  // namespace nvMolKit
