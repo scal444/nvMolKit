@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cuda/std/span>
+#include <memory>
 
 #include "src/utils/device_vector.h"
 
@@ -39,6 +40,41 @@ struct BitBirchOptions {
   //! below 2^31 for any numFingerprints (the tree's entry IDs are int32 and checked), so int32 suffices.
   int*        hostClusterIds        = nullptr;
   bool        returnCentroids       = false;  //!< Also return packed majority centroids in cluster-ID order.
+};
+
+class BitBirchTreeImpl;
+
+/**
+ * Persistent BitBIRCH tree that takes its rows in any number of chunks.
+ *
+ * Rows are cut into the same batches as one bitBirchGpu call over all rows
+ * would make, so labels do not depend on the chunking. Chunks may be host or
+ * device memory; each is read only during its insert call. Label destination
+ * (options.hostClusterIds, or a device array) holds maxRows labels.
+ * options.fingerprintsOnHost is ignored: singleton fingerprints are always
+ * copied into the tree's own storage.
+ */
+class BitBirchTree {
+ public:
+  BitBirchTree(int                    numWords,
+               double                 threshold,
+               std::int64_t           maxRows,
+               const BitBirchOptions& options = BitBirchOptions(),
+               cudaStream_t           stream  = nullptr);
+  explicit BitBirchTree(std::unique_ptr<BitBirchTreeImpl> impl);
+  ~BitBirchTree();
+  BitBirchTree(BitBirchTree&&) noexcept;
+  BitBirchTree& operator=(BitBirchTree&&) noexcept;
+
+  //! Appends numRows packed rows as input rows [rows(), rows() + numRows).
+  void           insert(const std::uint32_t* fingerprints, std::int64_t numRows, bool onHost);
+  //! Rows inserted so far.
+  std::int64_t   rows() const noexcept;
+  //! Inserts any held rows, then labels every row; the tree accepts no more rows.
+  BitBirchResult finalize();
+
+ private:
+  std::unique_ptr<BitBirchTreeImpl> impl_;
 };
 
 /**

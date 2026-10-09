@@ -17,6 +17,7 @@
 #include <boost/python/manage_new_object.hpp>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -95,9 +96,80 @@ boost::python::object bitBirch(const boost::python::dict& fingerprints,
   return wrapBitBirchResult(result, count, hostLabelsPtr != 0, returnCentroids);
 }
 
+//! Persistent tree for chunked input. Labels go to a caller host array of maxRows ints.
+class PyBitBirchTree {
+ public:
+  PyBitBirchTree(const int            numWords,
+                 const double         threshold,
+                 const std::int64_t   maxRows,
+                 const int            branchingFactor,
+                 const int            batchSize,
+                 const std::size_t    summaryCacheBytes,
+                 const std::size_t    fingerprintCacheBytes,
+                 const std::uintptr_t hostLabelsPtr,
+                 const bool           returnCentroids,
+                 const std::uintptr_t streamPtr)
+      : numWords_(numWords),
+        returnCentroids_(returnCentroids) {
+    auto stream = nvMolKit::acquireExternalStream(streamPtr);
+    if (!stream) {
+      throw std::invalid_argument("Invalid CUDA stream");
+    }
+    if (hostLabelsPtr == 0) {
+      throw std::invalid_argument("BitBirchTree needs a host label array");
+    }
+    nvMolKit::BitBirchOptions options;
+    options.branchingFactor       = branchingFactor;
+    options.batchSize             = batchSize;
+    options.summaryCacheBytes     = summaryCacheBytes;
+    options.fingerprintCacheBytes = fingerprintCacheBytes;
+    options.hostClusterIds        = reinterpret_cast<int*>(hostLabelsPtr);
+    options.returnCentroids       = returnCentroids;
+    tree_.emplace(numWords, threshold, maxRows, options, *stream);
+  }
+
+  void insert(const boost::python::dict& fingerprints, const bool onHost) {
+    boost::python::tuple shape = boost::python::extract<boost::python::tuple>(fingerprints["shape"]);
+    if (len(shape) != 2 || boost::python::extract<int>(shape[1]) != numWords_) {
+      throw std::invalid_argument("chunk must be a 2D matrix with the tree's word count");
+    }
+    const std::int64_t         count   = boost::python::extract<std::int64_t>(shape[0]);
+    const boost::python::tuple data    = boost::python::extract<boost::python::tuple>(fingerprints["data"]);
+    const auto                 pointer = boost::python::extract<std::size_t>(data[0])();
+    tree_->insert(reinterpret_cast<const std::uint32_t*>(pointer), count, onHost);
+  }
+
+  std::int64_t rows() const { return tree_->rows(); }
+
+  //! Returns (None, centroids or None); labels are in the host array.
+  boost::python::object finalize() {
+    auto result = tree_->finalize();
+    return wrapBitBirchResult(result, tree_->rows(), true, returnCentroids_);
+  }
+
+ private:
+  int                                 numWords_;
+  bool                                returnCentroids_;
+  std::optional<nvMolKit::BitBirchTree> tree_;
+};
+
 }  // namespace
 
 BOOST_PYTHON_MODULE(_clustering) {
+  boost::python::class_<PyBitBirchTree, boost::noncopyable>("BitBirchTree",
+                                                            boost::python::init<int,
+                                                                                double,
+                                                                                std::int64_t,
+                                                                                int,
+                                                                                int,
+                                                                                std::size_t,
+                                                                                std::size_t,
+                                                                                std::uintptr_t,
+                                                                                bool,
+                                                                                std::uintptr_t>())
+    .def("insert", &PyBitBirchTree::insert)
+    .def("rows", &PyBitBirchTree::rows)
+    .def("finalize", &PyBitBirchTree::finalize);
   boost::python::def("bitbirch",
                      bitBirch,
                      (boost::python::arg("fingerprints"),

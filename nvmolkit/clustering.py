@@ -398,3 +398,113 @@ def bitbirch(
             active_stream.cuda_stream,
         )
         return _wrap_bitbirch_result(result, return_centroids, host_labels)
+
+
+class BitBirchTree:
+    """One BitBIRCH tree that takes its fingerprints in chunks.
+
+    ``bitbirch(x, ...)`` with ``host_output=True`` equals inserting the rows of
+    ``x`` in any number of chunks and then calling :meth:`finalize`: rows are cut
+    into the same insertion batches whatever the chunk sizes, so the labels are
+    identical. Each chunk is read only during its :meth:`insert` call, so inputs
+    larger than host memory can be streamed from disk.
+
+    Args:
+        threshold: Minimum combined-cluster iSIM Jaccard--Tanimoto similarity.
+        max_rows: Most rows the tree will take. Sets the label array length and
+                  the width of the per-bit sums (64-bit above 2^32 - 1 rows).
+        branching_factor, batch_size, summary_cache_bytes: As for :func:`bitbirch`.
+        fingerprint_cache_bytes: GPU cache budget for singleton fingerprints,
+                                 which the tree always copies into its own storage.
+        labels: Optional int32 host array of at least ``max_rows`` elements
+                (for example a NumPy memory map) that receives the labels.
+                Allocated if omitted.
+        return_centroids: :meth:`finalize` also returns packed centroids.
+        stream: CUDA stream to use. If None, uses the current stream.
+
+    Labels are int32 cluster IDs for any row count (the tree holds fewer than
+    2^31 clusters); row offsets are tracked as 64-bit integers.
+    """
+
+    def __init__(
+        self,
+        threshold: float,
+        max_rows: int,
+        *,
+        branching_factor: int = 254,
+        batch_size: int = 1024,
+        summary_cache_bytes: int = 0,
+        fingerprint_cache_bytes: int = 0,
+        labels: np.ndarray | None = None,
+        return_centroids: bool = False,
+        stream: torch.cuda.Stream | None = None,
+    ):
+        if not math.isfinite(threshold) or not 0 <= threshold <= 1:
+            raise ValueError("threshold must be finite and in [0, 1]")
+        if branching_factor < 3:
+            raise ValueError(f"branching_factor must be at least 3, got {branching_factor}")
+        if batch_size < 1:
+            raise ValueError(f"batch_size must be positive, got {batch_size}")
+        if summary_cache_bytes < 0 or fingerprint_cache_bytes < 0:
+            raise ValueError("cache sizes must be nonnegative")
+        if max_rows < 1:
+            raise ValueError(f"max_rows must be positive, got {max_rows}")
+        if labels is None:
+            labels = np.empty(max_rows, dtype=np.int32)
+        if labels.dtype != np.int32 or labels.ndim != 1 or len(labels) < max_rows or not labels.flags.c_contiguous \
+                or not labels.flags.writeable:
+            raise ValueError("labels must be a writable contiguous 1D int32 array of at least max_rows elements")
+        self._labels = labels
+        self._options = (threshold, int(max_rows), branching_factor, batch_size, summary_cache_bytes,
+                         fingerprint_cache_bytes, return_centroids)
+        self._stream = _resolve_cuda_stream(stream)
+        self._tree = None
+        self._finalized = False
+
+    @property
+    def rows(self) -> int:
+        """Rows inserted so far."""
+        return 0 if self._tree is None else self._tree.rows()
+
+    def insert(self, x: ArrayInput) -> None:
+        """Append the rows of ``x``, shape ``(n, W)`` packed int32 or uint32.
+
+        NumPy arrays (including memory maps) are read from host memory one batch
+        at a time; other inputs are used on, or moved to, the GPU.
+        """
+        if self._finalized:
+            raise ValueError("BitBirchTree is already finalized")
+        host_input = isinstance(x, np.ndarray)
+        if host_input:
+            if x.ndim != 2 or x.dtype not in (np.int32, np.uint32):
+                raise ValueError("NumPy input must be a packed 2D int32 or uint32 array")
+            if x.shape[1] == 0:
+                raise ValueError("x must contain at least one fingerprint word")
+            x = np.ascontiguousarray(x)
+            interface = x.__array_interface__
+        else:
+            (x,), _ = _prepare_packed_fingerprints(("x", x), stream=self._stream)
+            interface = x.__cuda_array_interface__
+        with torch.cuda.stream(self._stream):
+            if self._tree is None:
+                threshold, max_rows, bf, batch, summary_cache, fp_cache, centroids = self._options
+                self._tree = _clustering.BitBirchTree(
+                    int(x.shape[1]), threshold, max_rows, bf, batch, summary_cache, fp_cache,
+                    self._labels.ctypes.data, centroids, self._stream.cuda_stream,
+                )
+            self._tree.insert(interface, host_input)
+
+    def finalize(self) -> np.ndarray | tuple[np.ndarray, AsyncGpuResult]:
+        """Insert any rows still held for the last batch and label every row.
+
+        Returns the first :attr:`rows` elements of the label array (a view), and
+        the packed centroids if ``return_centroids`` was set.
+        """
+        if self._finalized:
+            raise ValueError("BitBirchTree is already finalized")
+        if self._tree is None:
+            raise ValueError("BitBirchTree has no rows to finalize")
+        self._finalized = True
+        with torch.cuda.stream(self._stream):
+            result = self._tree.finalize()
+        return _wrap_bitbirch_result(result, self._options[-1], self._labels[: self._tree.rows()])
