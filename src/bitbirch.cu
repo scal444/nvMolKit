@@ -807,6 +807,41 @@ constexpr int cooperativeBlockSize = 256;
 // them in registers makes the loads for one staged entry independent.
 constexpr int stagedBitsPerThread  = 8;
 
+// Node entries staged per block ("stage capacity") are not tied to the block
+// width: a node holds at most branchingFactor + 1 entries, and kernels stage
+// them in dynamic shared memory with several positions per thread. The host
+// picks the capacity (cooperativeBlockSize when the branching factor fits one
+// block, as before, or the rounded node size above it) and falls back to the
+// list-walking paths only when that staging cannot fit in shared memory.
+constexpr std::size_t sharedAlignment = 16;
+//! Warp width the host assumes when rounding staged capacities (only alignment, not correctness).
+constexpr int         warpSizeHost    = 32;
+
+__host__ __device__ constexpr std::size_t alignShared(const std::size_t bytes) {
+  return (bytes + sharedAlignment - 1) / sharedAlignment * sharedAlignment;
+}
+
+//! Bytes of count values of T, padded so the next carved array stays aligned.
+template <typename T> __host__ __device__ constexpr std::size_t sharedArrayBytes(const std::size_t count) {
+  return alignShared(count * sizeof(T));
+}
+
+//! Hands out consecutive aligned arrays from a kernel's dynamic shared memory.
+class SharedCarver {
+ public:
+  __device__ explicit SharedCarver(void* base) : cursor_(static_cast<unsigned char*>(base)) {}
+  template <typename T> __device__ T* take(const std::size_t count) {
+    T* result = reinterpret_cast<T*>(cursor_);
+    cursor_ += sharedArrayBytes<T>(count);
+    return result;
+  }
+
+ private:
+  unsigned char* cursor_;
+};
+
+extern __shared__ uint4 dynamicShared[];
+
 struct CooperativeScratch {
   int       nodeEntries[cooperativeBlockSize];
   int       entries[cooperativeBlockSize];
@@ -1534,20 +1569,24 @@ __device__ __forceinline__ void accumulateStagedSums(Component (&sums)[stagedBit
   }
 }
 
+// singletonStage and summaryStage hold stageCapacity entries each.
 template <typename Component>
 __device__ __forceinline__ void cooperativeSummarizeNode(TreeStorage<Component>& storage,
                                                          const int               node,
                                                          const int               targetEntry,
-                                                         CooperativeScratch&     scratch) {
+                                                         CooperativeScratch&     scratch,
+                                                         int*                    singletonStage,
+                                                         int*                    summaryStage,
+                                                         const int               stageCapacity) {
   if (!cooperativeMaterializeEntry(storage, targetEntry, scratch, true)) {
     return;
   }
-  // Stage each entry's storage location from the node directory, one entry
-  // per thread: singleton fingerprints and summary slots in separate lists.
-  // Every thread then sums its bits from shared memory instead of re-chasing
-  // links. Nodes wider than one block walk the list once.
+  // Stage each entry's storage location from the node directory, a few
+  // entries per thread: singleton fingerprints and summary slots in separate
+  // lists. Every thread then sums its bits from shared memory instead of
+  // re-chasing links. Nodes wider than the stage capacity walk the list once.
   const int size = storage.nodeSizes[node];
-  if (size <= static_cast<int>(blockDim.x)) {
+  if (size <= stageCapacity) {
     if (threadIdx.x == 0) {
       scratch.stagedTotal      = 0;
       scratch.stagedCount      = size;
@@ -1555,16 +1594,17 @@ __device__ __forceinline__ void cooperativeSummarizeNode(TreeStorage<Component>&
       scratch.stagedSummaries  = 0;
     }
     __syncthreads();
-    std::uint32_t count = 0;
-    if (threadIdx.x < size) {
-      const int entry            = nodeDirectory(storage, node)[threadIdx.x];
+    std::uint32_t count     = 0;
+    const int*    directory = nodeDirectory(storage, node);
+    for (int position = threadIdx.x; position < size; position += blockDim.x) {
+      const int entry            = directory[position];
       const int fingerprintIndex = storage.entryFingerprintIndices[entry];
-      count                      = storage.entryCounts[entry];
+      count += storage.entryCounts[entry];
       // Sums are integers, so the staged order of either list is irrelevant.
       if (fingerprintIndex >= 0) {
-        scratch.entries[atomicAdd(&scratch.stagedSingletons, 1)] = fingerprintIndex;
+        singletonStage[atomicAdd(&scratch.stagedSingletons, 1)] = fingerprintIndex;
       } else {
-        scratch.otherEntries[atomicAdd(&scratch.stagedSummaries, 1)] = storage.entrySummarySlots[entry];
+        summaryStage[atomicAdd(&scratch.stagedSummaries, 1)] = storage.entrySummarySlots[entry];
       }
     }
     for (int offset = warpSize / 2; offset > 0; offset /= 2) {
@@ -1588,14 +1628,14 @@ __device__ __forceinline__ void cooperativeSummarizeNode(TreeStorage<Component>&
   }
   __syncthreads();
   const int numEntries = scratch.stagedCount;
-  if (numEntries <= cooperativeBlockSize) {
+  if (numEntries <= stageCapacity) {
     const int numSingletons = scratch.stagedSingletons;
     const int numSummaries  = scratch.stagedSummaries;
     // singletonWord counts one page hit per singleton read at word zero; keep
     // that accounting while the rows below are read without it.
     if (storage.singletonPageHits != nullptr && threadIdx.x == 0) {
       for (int index = 0; index < numSingletons; ++index) {
-        atomicAdd(storage.singletonPageHits + scratch.entries[index] / summaryEntriesPerPage, 1U);
+        atomicAdd(storage.singletonPageHits + singletonStage[index] / summaryEntriesPerPage, 1U);
       }
     }
     // The new centroid follows from the sums still in registers, so the
@@ -1607,7 +1647,7 @@ __device__ __forceinline__ void cooperativeSummarizeNode(TreeStorage<Component>&
     for (int base = 0; base < storage.numBits; base += blockDim.x * stagedBitsPerThread) {
       Component sums[stagedBitsPerThread] = {};
       accumulateStagedBits(sums, numSingletons, base, storage.numBits, [&](const int index) {
-        const int fingerprintIndex = scratch.entries[index];
+        const int fingerprintIndex = singletonStage[index];
         if (storage.singletonFingerprintPages != nullptr) {
           return static_cast<const std::uint32_t*>(
             storage.singletonFingerprintPages[fingerprintIndex / summaryEntriesPerPage] +
@@ -1616,7 +1656,7 @@ __device__ __forceinline__ void cooperativeSummarizeNode(TreeStorage<Component>&
         return storage.fingerprints + static_cast<std::size_t>(fingerprintIndex) * storage.numWords;
       });
       accumulateStagedSums(sums, numSummaries, base, storage.numBits, [&](const int index) {
-        const int slot = scratch.otherEntries[index];
+        const int slot = summaryStage[index];
         return static_cast<const Component*>(storage.linearSumPages[slot / summaryEntriesPerPage] +
                                              static_cast<std::size_t>(slot % summaryEntriesPerPage) * storage.numBits);
       });
@@ -1647,6 +1687,23 @@ __device__ __forceinline__ void cooperativeSummarizeNode(TreeStorage<Component>&
   }
   __syncthreads();
   cooperativeRefreshCentroid(storage, targetEntry);
+}
+
+//! Inverts cooperativeFindSplitSeeds' row-major upper-triangle pair order.
+__device__ __forceinline__ int2 splitPairFromOrder(const long long order, const int size) {
+  const auto rowStart = [size](const long long row) { return row * (2 * size - row - 1) / 2; };
+  // An FP32 estimate; the integer corrections below make the row exact.
+  const float span = 2.0f * size - 1.0f;
+  const float root = sqrtf(fmaxf(0.0f, span * span - 8.0f * static_cast<float>(order)));
+  long long   row  = static_cast<long long>((span - root) / 2.0f);
+  row               = max(0LL, min(row, static_cast<long long>(size) - 2));
+  while (row > 0 && rowStart(row) > order) {
+    --row;
+  }
+  while (row + 1 < size - 1 && rowStart(row + 1) <= order) {
+    ++row;
+  }
+  return make_int2(static_cast<int>(row), static_cast<int>(order - rowStart(row) + row + 1));
 }
 
 template <typename Component>
@@ -1727,6 +1784,32 @@ __device__ __forceinline__ void cooperativeFindSplitSeeds(const TreeStorage<Comp
         localRhs       = rhs;
       }
     }
+  } else if (nodeEntries != nullptr) {
+    // Wider than the block but staged in list order: each thread steps through
+    // its pair orders directly instead of walking the whole list triangle, and
+    // reads both centroid rows through resolved pointers. Each thread's orders
+    // ascend, so a strict comparison keeps the first tie as the list walk does.
+    const int       size     = storage.nodeSizes[node];
+    const long long numPairs = static_cast<long long>(size) * (size - 1) / 2;
+    int2            pair     = splitPairFromOrder(min(static_cast<long long>(threadIdx.x), numPairs - 1), size);
+    for (long long pairOrder = threadIdx.x; pairOrder < numPairs; pairOrder += blockDim.x) {
+      const int  lhs    = nodeEntries[pair.x];
+      const int  rhs    = nodeEntries[pair.y];
+      const int2 counts = entryFingerprintCounts(storage, lhs, centroidFingerprint(storage, rhs));
+      // The same integers entrySimilarity counts, so the same quotient.
+      const double similarity = routingSimilarity(counts.x, counts.y, storage.numBits);
+      if (similarity < localBest) {
+        localBest      = similarity;
+        localBestOrder = pairOrder;
+        localLhs       = lhs;
+        localRhs       = rhs;
+      }
+      pair.y += blockDim.x;
+      while (pair.y >= size && pair.x < size - 2) {
+        ++pair.x;
+        pair.y += pair.x + 1 - size;
+      }
+    }
   } else {
     for (int lhs = storage.nodeHeads[node]; lhs >= 0; lhs = storage.entryNext[lhs]) {
       for (int rhs = storage.entryNext[lhs]; rhs >= 0; rhs = storage.entryNext[rhs], ++order) {
@@ -1772,6 +1855,9 @@ __device__ __forceinline__ int cooperativeSplitNode(TreeStorage<Component>& stor
                                                     const int               branchingFactor,
                                                     std::int8_t*            splitAffinity,
                                                     CooperativeScratch&     scratch,
+                                                    int*                    singletonStage,
+                                                    int*                    summaryStage,
+                                                    const int               stageCapacity,
                                                     std::uint32_t*          centroidCache = nullptr) {
   while (true) {
     // Lane zero otherwise reaches topology writes before a lagging warp has
@@ -1814,8 +1900,8 @@ __device__ __forceinline__ int cooperativeSplitNode(TreeStorage<Component>& stor
     const int  leftSummary  = scratch.lhsParentEntry;
     const int  rightSummary = scratch.rhsParentEntry;
     const bool newRoot      = scratch.decision;
-    cooperativeSummarizeNode(storage, node, leftSummary, scratch);
-    cooperativeSummarizeNode(storage, sibling, rightSummary, scratch);
+    cooperativeSummarizeNode(storage, node, leftSummary, scratch, singletonStage, summaryStage, stageCapacity);
+    cooperativeSummarizeNode(storage, sibling, rightSummary, scratch, singletonStage, summaryStage, stageCapacity);
     if (newRoot || *storage.status != BitBirchStatus::Success) {
       return *storage.status == BitBirchStatus::Success ? parent : -1;
     }
@@ -2028,7 +2114,9 @@ __device__ __forceinline__ int allocateConcurrentLeafEntry(TreeStorage<Component
   return entry;
 }
 
-//! Pending queries one leaf owner evaluates together against its staged leaf.
+//! Most pending queries one leaf owner evaluates together against its staged
+//! leaf. The host lowers the width when the per-position counts below would not
+//! fit in shared memory beside a wide leaf; the width never changes results.
 constexpr int ownerSpeculationWidth = 16;
 //! Fingerprint words staged per speculative query (4096 bits, the FP32 routing limit).
 constexpr int ownerSpeculationWords = 128;
@@ -2044,17 +2132,17 @@ enum OwnerPositionState : std::uint8_t {
 // intersection and union popcounts against every staged position, packed as
 // intersection | union << 16 (at most 4096 bits). Positions merged into during
 // the batch are refreshed right after the merge and new entries copy their
-// query-pair counts, so every serial step reads current counts.
+// query-pair counts, so every serial step reads current counts. The counts
+// (query-major, stageCapacity per query) and per-position states live in
+// dynamic shared memory, sized by the stage capacity.
 struct OwnerSpeculation {
   std::uint32_t      queries[ownerSpeculationWidth][ownerSpeculationWords];  //!< Staged query fingerprints.
   int                queryBits[ownerSpeculationWidth];                       //!< Set bits per staged query.
-  std::uint32_t      counts[ownerSpeculationWidth][cooperativeBlockSize];
   std::uint32_t      queryCounts[ownerSpeculationWidth][ownerSpeculationWidth];
   unsigned long long commonPairs[ownerSpeculationWidth];  //!< Terms against bestPosition, when termsReady.
   unsigned long long mismatches[ownerSpeculationWidth];
   int                bestPosition[ownerSpeculationWidth];  //!< Closest staged position before the batch.
   int                termsReady[ownerSpeculationWidth];
-  std::uint8_t       state[cooperativeBlockSize];
   float              warpValues[cooperativeBlockSize / 32];
   int                warpPositions[cooperativeBlockSize / 32];
   int                selectedPosition;
@@ -2093,7 +2181,10 @@ __device__ __forceinline__ void speculateLeafOwnerBatch(const TreeStorage<Compon
                                                         const int                     numEntries,
                                                         const int*                    queries,
                                                         const int                     numQueries,
-                                                        OwnerSpeculation&             speculation) {
+                                                        OwnerSpeculation&             speculation,
+                                                        std::uint32_t*                counts,
+                                                        std::uint8_t*                 state,
+                                                        const int                     countStride) {
   const int numWords = storage.numWords;
   for (int item = threadIdx.x; item < numQueries * numWords; item += blockDim.x) {
     const int query = item / numWords;
@@ -2114,7 +2205,7 @@ __device__ __forceinline__ void speculateLeafOwnerBatch(const TreeStorage<Compon
   // counts as |a| + |b| - |a & b|, so only intersections are counted per word.
   for (int position = threadIdx.x; position < numEntries; position += blockDim.x) {
     const int entry = leafEntries[position];
-    speculation.state[position] = storage.entryFingerprintIndices[entry] >= 0 && storage.entryCounts[entry] == 1 ?
+    state[position] = storage.entryFingerprintIndices[entry] >= 0 && storage.entryCounts[entry] == 1 ?
                                     OwnerPositionSingleton :
                                     OwnerPositionSummary;
     const std::uint32_t* centroid     = centroidFingerprint(storage, entry);
@@ -2152,14 +2243,14 @@ __device__ __forceinline__ void speculateLeafOwnerBatch(const TreeStorage<Compon
           // Words past numWords are zero in centroidWords.
           intersection += __popc(centroidWords[word] & (base + word < numWords ? queryWords[word] : 0U));
         }
-        speculation.counts[query][position] =
-          (base == 0 ? 0U : speculation.counts[query][position]) + static_cast<std::uint32_t>(intersection);
+        counts[query * countStride + position] =
+          (base == 0 ? 0U : counts[query * countStride + position]) + static_cast<std::uint32_t>(intersection);
       }
     }
     for (int query = 0; query < numQueries; ++query) {
-      const int intersection = static_cast<int>(speculation.counts[query][position]);
+      const int intersection = static_cast<int>(counts[query * countStride + position]);
       const int unionCount   = centroidBits + speculation.queryBits[query] - intersection;
-      speculation.counts[query][position] =
+      counts[query * countStride + position] =
         static_cast<std::uint32_t>(intersection) | static_cast<std::uint32_t>(unionCount) << 16;
     }
   }
@@ -2184,7 +2275,7 @@ __device__ __forceinline__ void speculateLeafOwnerBatch(const TreeStorage<Compon
     float value    = -1.0f;
     int   position = INT_MAX;
     for (int candidate = lane; candidate < numEntries; candidate += warpSize) {
-      const float similarity = packedSimilarity(speculation.counts[query][candidate]);
+      const float similarity = packedSimilarity(counts[query * countStride + candidate]);
       if (similarity > value) {
         value    = similarity;
         position = candidate;
@@ -2246,21 +2337,30 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
                                          int*                   splitPlans,
                                          int*                   splitQueue,
                                          int*                   splitQueueCount,
+                                         const int              stageCapacity,
+                                         const int              speculationWidth,
                                          TreeStorage<Component> storage) {
   const int first = blockIdx.x;
   if (first >= count || keys[first] == INT_MAX || (first > 0 && keys[first - 1] == keys[first])) {
     return;
   }
   __shared__ CooperativeScratch scratch;
-  __shared__ int                leafEntries[cooperativeBlockSize];
   __shared__ int                numLeafEntries;
   __shared__ int                pendingQueries[cooperativeBlockSize];
   __shared__ int                warpPending[cooperativeBlockSize / 32];
   __shared__ OwnerSpeculation   speculation;
-  const int                     node         = keys[first];
+  // Dynamic shared memory (leafOwnersSharedBytes): staged leaf entries, then
+  // the speculation counts and position states.
+  SharedCarver                  carver(dynamicShared);
+  int* const                    leafEntries       = carver.take<int>(stageCapacity);
+  std::uint32_t* const          speculationCounts = carver.take<std::uint32_t>(
+    static_cast<std::size_t>(speculationWidth) * stageCapacity);
+  std::uint8_t* const           speculationState  = carver.take<std::uint8_t>(stageCapacity);
+  const int                     node              = keys[first];
   // Only this owner appends to its leaf, so one directory copy stages the
-  // ordered entries for every query. Nodes wider than one block keep walking.
-  const bool                    stageEntries = branchingFactor < cooperativeBlockSize;
+  // ordered entries for every query. Leaves wider than the stage capacity
+  // keep walking.
+  const bool                    stageEntries      = branchingFactor < stageCapacity;
   if (stageEntries) {
     const int  size      = storage.nodeSizes[node];
     const int* directory = nodeDirectory(storage, node);
@@ -2307,12 +2407,19 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
       // popcounts from shared memory: positions merged into are refreshed after
       // each merge and new entries take their query-pair counts, so it selects
       // the same entries and decides the same merges as searching per query.
-      const int  batchBegin = index - index % ownerSpeculationWidth;
-      const int  batchSize  = min(ownerSpeculationWidth, numPending - batchBegin);
+      const int  batchBegin = index - index % speculationWidth;
+      const int  batchSize  = min(speculationWidth, numPending - batchBegin);
       const bool speculate  = speculateLeaf && batchSize > 1;
       if (speculate && index == batchBegin) {
-        speculateLeafOwnerBatch(
-          storage, leafEntries, numLeafEntries, pendingQueries + batchBegin, batchSize, speculation);
+        speculateLeafOwnerBatch(storage,
+                                leafEntries,
+                                numLeafEntries,
+                                pendingQueries + batchBegin,
+                                batchSize,
+                                speculation,
+                                speculationCounts,
+                                speculationState,
+                                stageCapacity);
       }
       const int   query       = index - batchBegin;
       const int   molecule    = pendingQueries[index];
@@ -2322,11 +2429,16 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
       const bool  occupied    = stageEntries ? numLeafEntries > 0 : storage.nodeHeads[node] >= 0;
       if (occupied && speculate) {
         // Closest current position from shared counts, first position on ties.
-        float value = -1.0f;
-        int   best  = INT_MAX;
-        if (threadIdx.x < numLeafEntries) {
-          value = packedSimilarity(speculation.counts[query][threadIdx.x]);
-          best  = threadIdx.x;
+        // Each thread scans its positions in ascending order.
+        float                value     = -1.0f;
+        int                  best      = INT_MAX;
+        const std::uint32_t* queryRow  = speculationCounts + query * stageCapacity;
+        for (int position = threadIdx.x; position < numLeafEntries; position += blockDim.x) {
+          const float similarity = packedSimilarity(queryRow[position]);
+          if (similarity > value) {
+            value = similarity;
+            best  = position;
+          }
         }
         for (int offset = warpSize / 2; offset > 0; offset /= 2) {
           const float otherValue = __shfl_down_sync(0xffffffffU, value, offset);
@@ -2367,11 +2479,11 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
       if (selected >= 0) {
         bitbirch::ISimTanimotoTerms terms;
         const int selectedPosition = speculate ? speculation.selectedPosition : -1;
-        const int state            = speculate ? speculation.state[selectedPosition] : OwnerPositionMerged;
+        const int state            = speculate ? speculationState[selectedPosition] : OwnerPositionMerged;
         if (state == OwnerPositionSingleton) {
           // Count one: each bit sums to two where both are set and one where
           // exactly one is, so the integer terms are |a & b| and |a ^ b|.
-          const std::uint32_t counts       = speculation.counts[query][selectedPosition];
+          const std::uint32_t counts       = speculationCounts[query * stageCapacity + selectedPosition];
           const std::uint32_t intersection = counts & 0xffffU;
           terms = {static_cast<double>(intersection), static_cast<double>((counts >> 16) - intersection)};
         } else if (state == OwnerPositionSummary && speculation.termsReady[query] &&
@@ -2401,11 +2513,11 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
             const std::uint32_t counts =
               warpPackedCounts(centroidFingerprint(storage, selected), speculation.queries[later], storage.numWords);
             if (lane == 0) {
-              speculation.counts[later][mergedPosition] = counts;
+              speculationCounts[later * stageCapacity + mergedPosition] = counts;
             }
           }
           if (threadIdx.x == 0) {
-            speculation.state[mergedPosition] = OwnerPositionMerged;
+            speculationState[mergedPosition] = OwnerPositionMerged;
           }
         }
       } else {
@@ -2431,10 +2543,10 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
           // The new singleton's centroid is this query's fingerprint.
           const int newPosition = numLeafEntries - 1;
           for (int later = query + 1 + threadIdx.x; later < batchSize; later += blockDim.x) {
-            speculation.counts[later][newPosition] = speculation.queryCounts[later][query];
+            speculationCounts[later * stageCapacity + newPosition] = speculation.queryCounts[later][query];
           }
           if (threadIdx.x == 0) {
-            speculation.state[newPosition] = OwnerPositionSingleton;
+            speculationState[newPosition] = OwnerPositionSingleton;
           }
         }
       }
@@ -2461,7 +2573,7 @@ __global__ void bitBirchLeafOwnersKernel(const int              count,
   // split-seed search through the leaf's plan slot.
   if (stageEntries && numLeafEntries > branchingFactor) {
     for (int position = threadIdx.x; position < numLeafEntries; position += blockDim.x) {
-      splitPlans[static_cast<std::size_t>(first) * cooperativeBlockSize + position] = leafEntries[position];
+      splitPlans[static_cast<std::size_t>(first) * stageCapacity + position] = leafEntries[position];
     }
     // Queue order is irrelevant: each leaf's pair search writes only its own slot.
     if (threadIdx.x == 0 && splitQueue != nullptr) {
@@ -2493,16 +2605,19 @@ __global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
                                            const int              deltaCapacity,
                                            Component*             deltaSums,
                                            std::uint32_t*         deltaCounts,
+                                           const int              stageCapacity,
                                            TreeStorage<Component> storage) {
   if (blockIdx.x >= *levelCount) {
     return;
   }
   const int                     node = levelNodes[blockIdx.x];
   __shared__ CooperativeScratch scratch;
-  const bool                    leaf = storage.nodeLeaves[node];
-  // Internal nodes that fit one block stage their dirty children in parallel
-  // from the ordered directory instead of walking the entry list.
-  const bool stageChildren = !leaf && storage.nodeSizes[node] <= static_cast<int>(blockDim.x);
+  // Staged accepted molecules (leaves) or dirty children's delta slots.
+  int* const                    stage = SharedCarver(dynamicShared).take<int>(stageCapacity);
+  const bool                    leaf  = storage.nodeLeaves[node];
+  // Internal nodes within the stage capacity stage their dirty children in
+  // parallel from the ordered directory instead of walking the entry list.
+  const bool stageChildren = !leaf && storage.nodeSizes[node] <= stageCapacity;
   if (threadIdx.x == 0) {
     scratch.targetEntry = parentEntry(storage, node);
     scratch.deltaSlot   = atomicAdd(deltaCursor, 1);
@@ -2525,8 +2640,8 @@ __global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
           const int slot = deltaSlots[storage.entryChildren[entry]];
           if (slot >= 0) {
             addedCount += deltaCounts[slot];
-            if (dirtyChildren < cooperativeBlockSize) {
-              scratch.entries[dirtyChildren] = slot;
+            if (dirtyChildren < stageCapacity) {
+              stage[dirtyChildren] = slot;
             }
             ++dirtyChildren;
           }
@@ -2561,8 +2676,8 @@ __global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
         const int molecule = values[offset];
         if (labelOf(storage, molecule) >= 0) {
           const int position = atomicAdd(&scratch.stagedCount, 1);
-          if (position < cooperativeBlockSize) {
-            scratch.entries[position] = molecule;
+          if (position < stageCapacity) {
+            stage[position] = molecule;
           }
         }
       }
@@ -2575,33 +2690,41 @@ __global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
     }
   }
   if (stageChildren && scratch.success) {
-    // Compact dirty children's delta slots in directory order.
-    const int     lane      = threadIdx.x % warpSize;
-    const int     warp      = threadIdx.x / warpSize;
-    const int     size      = storage.nodeSizes[node];
-    const int     childSlot = threadIdx.x < size ?
-                                deltaSlots[storage.entryChildren[nodeDirectory(storage, node)[threadIdx.x]]] :
-                                -1;
-    const bool    dirty     = childSlot >= 0;
-    const auto    ballot    = __ballot_sync(0xffffffffU, dirty);
-    std::uint32_t added     = dirty ? deltaCounts[childSlot] : 0;
-    for (int offset = warpSize / 2; offset > 0; offset /= 2) {
-      added += __shfl_down_sync(0xffffffffU, added, offset);
+    // Compact dirty children's delta slots in directory order, one block-wide
+    // chunk of positions at a time.
+    const int  lane      = threadIdx.x % warpSize;
+    const int  warp      = threadIdx.x / warpSize;
+    const int  numWarps  = blockDim.x / warpSize;
+    const int  size      = storage.nodeSizes[node];
+    const int* directory = nodeDirectory(storage, node);
+    int        staged    = 0;
+    for (int chunk = 0; chunk < size; chunk += blockDim.x) {
+      const int     position  = chunk + threadIdx.x;
+      const int     childSlot = position < size ? deltaSlots[storage.entryChildren[directory[position]]] : -1;
+      const bool    dirty     = childSlot >= 0;
+      const auto    ballot    = __ballot_sync(0xffffffffU, dirty);
+      std::uint32_t added     = dirty ? deltaCounts[childSlot] : 0;
+      for (int offset = warpSize / 2; offset > 0; offset /= 2) {
+        added += __shfl_down_sync(0xffffffffU, added, offset);
+      }
+      if (lane == 0) {
+        scratch.otherEntries[warp] = __popc(ballot);
+        atomicAdd(&scratch.stagedTotal, static_cast<int>(added));
+      }
+      __syncthreads();
+      int offset = staged;
+      for (int index = 0; index < numWarps; ++index) {
+        offset += index < warp ? scratch.otherEntries[index] : 0;
+        staged += scratch.otherEntries[index];
+      }
+      if (dirty) {
+        stage[offset + __popc(ballot & ((1U << lane) - 1U))] = childSlot;
+      }
+      // Every warp has read this chunk's counts before the next chunk's writes.
+      __syncthreads();
     }
-    if (lane == 0) {
-      scratch.otherEntries[warp] = __popc(ballot);
-      atomicAdd(&scratch.stagedTotal, static_cast<int>(added));
-    }
-    __syncthreads();
-    int position = 0;
-    for (int index = 0; index < warp; ++index) {
-      position += scratch.otherEntries[index];
-    }
-    if (dirty) {
-      scratch.entries[position + __popc(ballot & ((1U << lane) - 1U))] = childSlot;
-    }
-    if (threadIdx.x == blockDim.x - 1) {
-      scratch.stagedCount            = position + __popc(ballot);
+    if (threadIdx.x == 0) {
+      scratch.stagedCount            = staged;
       deltaCounts[scratch.deltaSlot] = static_cast<std::uint32_t>(scratch.stagedTotal);
     }
   }
@@ -2617,7 +2740,7 @@ __global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
   // Entry owners already updated leaf payloads. Propagate only this epoch's
   // accepted fingerprints, rather than rereading every old BF in each subtree.
   // One CTA owns each parent entry; no per-bit atomics or shared ancestor writes.
-  const bool staged = scratch.stagedCount <= cooperativeBlockSize;
+  const bool staged = scratch.stagedCount <= stageCapacity;
   if (staged) {
     // Resolve both rows once and read every old sum before any store; stores
     // through possibly aliasing pointers otherwise serialize each bit's update.
@@ -2627,12 +2750,12 @@ __global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
       Component added[stagedBitsPerThread] = {};
       if (leaf) {
         accumulateStagedBits(added, scratch.stagedCount, base, storage.numBits, [&](const int index) {
-          return queryFingerprint(storage, scratch.entries[index]);
+          return queryFingerprint(storage, stage[index]);
         });
       } else {
         accumulateStagedSums(added, scratch.stagedCount, base, storage.numBits, [&](const int index) {
           return static_cast<const Component*>(deltaSums +
-                                               static_cast<std::size_t>(scratch.entries[index]) * storage.numBits);
+                                               static_cast<std::size_t>(stage[index]) * storage.numBits);
         });
       }
       Component previous[stagedBitsPerThread];
@@ -2682,99 +2805,178 @@ __global__ void bitBirchRefreshLevelKernel(const int*             levelNodes,
 
 //! Most split pair-search slices one overflowing leaf is spread over.
 constexpr int maxSplitSlices = 64;
+//! Entries per tile when a leaf is wider than the pair-search cache: two tiles fill it.
+constexpr int splitPairsTile = cooperativeBlockSize / 2;
 
-//! Inverts cooperativeFindSplitSeeds' row-major upper-triangle pair order.
-__device__ __forceinline__ int2 splitPairFromOrder(const long long order, const int size) {
-  const auto rowStart = [size](const long long row) { return row * (2 * size - row - 1) / 2; };
-  // An FP32 estimate; the integer corrections below make the row exact.
-  const float span = 2.0f * size - 1.0f;
-  const float root = sqrtf(fmaxf(0.0f, span * span - 8.0f * static_cast<float>(order)));
-  long long   row  = static_cast<long long>((span - root) / 2.0f);
-  row               = max(0LL, min(row, static_cast<long long>(size) - 2));
-  while (row > 0 && rowStart(row) > order) {
-    --row;
-  }
-  while (row + 1 < size - 1 && rowStart(row + 1) <= order) {
-    ++row;
-  }
-  return make_int2(static_cast<int>(row), static_cast<int>(order - rowStart(row) + row + 1));
-}
 
 // Exact least-similar pair search for staged overflowing leaves, spread over
-// many blocks. Each block owns a contiguous slice of the pair order and folds
+// many blocks. Each block owns a part of the pair order and folds
 // (similarity, pair order) into one key, so atomicMin keeps the minimum with
-// cooperativeFindSplitSeeds' lowest-order tie-break. Similarities are
-// nonnegative FP32 values, whose bit patterns order like the values.
+// cooperativeFindSplitSeeds' lowest-order tie-break whatever the partition.
+// Similarities are nonnegative FP32 values, whose bit patterns order like the
+// values. Leaves that fit the cache (cooperativeBlockSize centroids) are cut
+// into contiguous slices of the pair order. Wider leaves are cut into tiles of
+// splitPairsTile entries: each block caches one pair of tiles and compares
+// every entry of one with every entry of the other.
 template <typename Component>
 __global__ void bitBirchSplitPairsKernel(const int*                   keys,
                                          const int                    branchingFactor,
                                          const int*                   splitQueue,
                                          const int*                   splitQueueCount,
                                          const int*                   splitPlans,
+                                         const int                    stageCapacity,
                                          unsigned long long*          splitKeys,
                                          const TreeStorage<Component> storage) {
+  constexpr int                   cacheStride = cooperativeBlockSize + 1;
   __shared__ int                  popcounts[cooperativeBlockSize];
   __shared__ const std::uint32_t* rows[cooperativeBlockSize];
   __shared__ unsigned long long   warpBest[cooperativeBlockSize / 32];
-  extern __shared__ std::uint32_t centroidCache[];
-  const int                       numSplits = *splitQueueCount;
+  std::uint32_t* const            centroidCache = reinterpret_cast<std::uint32_t*>(dynamicShared);
+  const int                       numSplits     = *splitQueueCount;
   if (numSplits == 0) {
     return;
   }
-  const int slices = max(1, min(maxSplitSlices, static_cast<int>(gridDim.x) / numSplits));
+  // Every overflowing leaf holds branchingFactor + 1 entries.
+  const bool tiled    = branchingFactor + 1 > cooperativeBlockSize;
+  const int  numTiles = (branchingFactor + 1 + splitPairsTile - 1) / splitPairsTile;
+  const int  slices   = tiled ? numTiles * (numTiles + 1) / 2 :
+                                max(1, min(maxSplitSlices, static_cast<int>(gridDim.x) / numSplits));
   for (int work = blockIdx.x; work < numSplits * slices; work += gridDim.x) {
     const int index = splitQueue[work / slices];
     const int size  = storage.nodeSizes[keys[index]];
     if (size <= branchingFactor) {
       continue;
     }
-    const int* plan = splitPlans + static_cast<std::size_t>(index) * cooperativeBlockSize;
-    // Resolve every centroid row at once, then copy words with independent,
-    // coalesced loads instead of one dependent lookup chain per word.
-    if (threadIdx.x < size) {
-      rows[threadIdx.x] = centroidFingerprint(storage, plan[threadIdx.x]);
-    }
-    __syncthreads();
+    const int*         plan = splitPlans + static_cast<std::size_t>(index) * stageCapacity;
+    unsigned long long best = ULLONG_MAX;
+    if (!tiled) {
+      // Resolve every centroid row at once, then copy words with independent,
+      // coalesced loads instead of one dependent lookup chain per word.
+      if (threadIdx.x < size) {
+        rows[threadIdx.x] = centroidFingerprint(storage, plan[threadIdx.x]);
+      }
+      __syncthreads();
 #pragma unroll 4
-    for (int item = threadIdx.x; item < size * storage.numWords; item += blockDim.x) {
-      const int entryIndex = item / storage.numWords;
-      const int word       = item % storage.numWords;
-      centroidCache[word * (cooperativeBlockSize + 1) + entryIndex] = rows[entryIndex][word];
-    }
-    __syncthreads();
-    if (threadIdx.x < size) {
-      int bits = 0;
-      for (int word = 0; word < storage.numWords; ++word) {
-        bits += __popc(centroidCache[word * (cooperativeBlockSize + 1) + threadIdx.x]);
+      for (int item = threadIdx.x; item < size * storage.numWords; item += blockDim.x) {
+        const int entryIndex = item / storage.numWords;
+        const int word       = item % storage.numWords;
+        centroidCache[word * cacheStride + entryIndex] = rows[entryIndex][word];
       }
-      popcounts[threadIdx.x] = bits;
-    }
-    __syncthreads();
-    const long long    numPairs  = static_cast<long long>(size) * (size - 1) / 2;
-    const long long    sliceSize = (numPairs + slices - 1) / slices;
-    const long long    begin     = (work % slices) * sliceSize;
-    const long long    end       = min(begin + sliceSize, numPairs);
-    unsigned long long best      = ULLONG_MAX;
-    int2               pair      = splitPairFromOrder(min(begin + threadIdx.x, numPairs - 1), size);
-    for (long long order = begin + threadIdx.x; order < end; order += blockDim.x) {
-      int intersection = 0;
-      for (int word = 0; word < storage.numWords; ++word) {
-        intersection += __popc(centroidCache[word * (cooperativeBlockSize + 1) + pair.x] &
-                               centroidCache[word * (cooperativeBlockSize + 1) + pair.y]);
+      __syncthreads();
+      if (threadIdx.x < size) {
+        int bits = 0;
+        for (int word = 0; word < storage.numWords; ++word) {
+          bits += __popc(centroidCache[word * cacheStride + threadIdx.x]);
+        }
+        popcounts[threadIdx.x] = bits;
       }
-      // |a | b| = |a| + |b| - |a & b|: the same integers cachedCentroidSimilarity counts,
-      // and the same FP32 quotient routingSimilarity takes for at most 4096 bits.
-      const int   unionCount = popcounts[pair.x] + popcounts[pair.y] - intersection;
-      const float similarity =
-        unionCount == 0 ? 1.0f : __fdiv_rn(static_cast<float>(intersection), static_cast<float>(unionCount));
-      const auto key = (static_cast<unsigned long long>(__float_as_uint(similarity)) << 32) |
-                       static_cast<unsigned long long>(order);
-      best           = min(best, key);
-      // Step blockDim.x pairs along the row-major upper triangle.
-      pair.y += blockDim.x;
-      while (pair.y >= size && pair.x < size - 2) {
-        ++pair.x;
-        pair.y += pair.x + 1 - size;
+      __syncthreads();
+      const long long numPairs  = static_cast<long long>(size) * (size - 1) / 2;
+      const long long sliceSize = (numPairs + slices - 1) / slices;
+      const long long begin     = (work % slices) * sliceSize;
+      const long long end       = min(begin + sliceSize, numPairs);
+      int2            pair      = splitPairFromOrder(min(begin + threadIdx.x, numPairs - 1), size);
+      for (long long order = begin + threadIdx.x; order < end; order += blockDim.x) {
+        int intersection = 0;
+        for (int word = 0; word < storage.numWords; ++word) {
+          intersection += __popc(centroidCache[word * cacheStride + pair.x] & centroidCache[word * cacheStride + pair.y]);
+        }
+        // |a | b| = |a| + |b| - |a & b|: the same integers cachedCentroidSimilarity counts,
+        // and the same FP32 quotient routingSimilarity takes for at most 4096 bits.
+        const int   unionCount = popcounts[pair.x] + popcounts[pair.y] - intersection;
+        const float similarity =
+          unionCount == 0 ? 1.0f : __fdiv_rn(static_cast<float>(intersection), static_cast<float>(unionCount));
+        const auto key = (static_cast<unsigned long long>(__float_as_uint(similarity)) << 32) |
+                         static_cast<unsigned long long>(order);
+        best           = min(best, key);
+        // Step blockDim.x pairs along the row-major upper triangle.
+        pair.y += blockDim.x;
+        while (pair.y >= size && pair.x < size - 2) {
+          ++pair.x;
+          pair.y += pair.x + 1 - size;
+        }
+      }
+    } else {
+      // Tile pair (lhsTile <= rhsTile) in row-major order over this leaf's tiles.
+      int       lhsTile    = 0;
+      int       remaining  = work % slices;
+      const int leafTiles  = (size + splitPairsTile - 1) / splitPairsTile;
+      while (lhsTile < leafTiles && remaining >= leafTiles - lhsTile) {
+        remaining -= leafTiles - lhsTile;
+        ++lhsTile;
+      }
+      if (lhsTile >= leafTiles) {
+        continue;  // Block-uniform: a narrower leaf than the widest has fewer tiles.
+      }
+      const int  rhsTile  = lhsTile + remaining;
+      const bool diagonal = lhsTile == rhsTile;
+      const int  lhsBegin = lhsTile * splitPairsTile;
+      const int  rhsBegin = rhsTile * splitPairsTile;
+      const int  lhsCount = min(splitPairsTile, size - lhsBegin);
+      const int  rhsCount = min(splitPairsTile, size - rhsBegin);
+      // Cache columns: lhs tile at [0, lhsCount), rhs tile at [splitPairsTile, ...).
+      const int  rhsBase  = diagonal ? 0 : splitPairsTile;
+      if (threadIdx.x < lhsCount) {
+        rows[threadIdx.x] = centroidFingerprint(storage, plan[lhsBegin + threadIdx.x]);
+      } else if (!diagonal && threadIdx.x >= splitPairsTile && threadIdx.x < splitPairsTile + rhsCount) {
+        rows[threadIdx.x] = centroidFingerprint(storage, plan[rhsBegin + threadIdx.x - splitPairsTile]);
+      }
+      __syncthreads();
+      const int loaded = diagonal ? lhsCount : splitPairsTile + rhsCount;
+#pragma unroll 4
+      for (int item = threadIdx.x; item < loaded * storage.numWords; item += blockDim.x) {
+        const int column = item / storage.numWords;
+        const int word   = item % storage.numWords;
+        if (column < lhsCount || column >= splitPairsTile) {
+          centroidCache[word * cacheStride + column] = rows[column][word];
+        }
+      }
+      __syncthreads();
+      if (threadIdx.x < loaded && (threadIdx.x < lhsCount || threadIdx.x >= splitPairsTile)) {
+        int bits = 0;
+        for (int word = 0; word < storage.numWords; ++word) {
+          bits += __popc(centroidCache[word * cacheStride + threadIdx.x]);
+        }
+        popcounts[threadIdx.x] = bits;
+      }
+      __syncthreads();
+      // Diagonal tiles take their own upper triangle; others take every pair.
+      const int numPairs = diagonal ? lhsCount * (lhsCount - 1) / 2 : lhsCount * rhsCount;
+      int2      pair     = make_int2(0, 0);
+      if (numPairs > 0) {
+        pair = diagonal ? splitPairFromOrder(min(static_cast<int>(threadIdx.x), numPairs - 1), lhsCount) :
+                          make_int2(min(static_cast<int>(threadIdx.x), numPairs - 1) / rhsCount,
+                                    min(static_cast<int>(threadIdx.x), numPairs - 1) % rhsCount);
+      }
+      for (int local = threadIdx.x; local < numPairs; local += blockDim.x) {
+        const int lhsColumn    = pair.x;
+        const int rhsColumn    = rhsBase + pair.y;
+        int       intersection = 0;
+        for (int word = 0; word < storage.numWords; ++word) {
+          intersection +=
+            __popc(centroidCache[word * cacheStride + lhsColumn] & centroidCache[word * cacheStride + rhsColumn]);
+        }
+        const int       unionCount = popcounts[lhsColumn] + popcounts[rhsColumn] - intersection;
+        const float     similarity =
+          unionCount == 0 ? 1.0f : __fdiv_rn(static_cast<float>(intersection), static_cast<float>(unionCount));
+        // Global positions and their order in cooperativeFindSplitSeeds' triangle.
+        const long long lhs   = lhsBegin + pair.x;
+        const long long rhs   = (diagonal ? lhsBegin : rhsBegin) + pair.y;
+        const long long order = lhs * (2LL * size - lhs - 1) / 2 + rhs - lhs - 1;
+        const auto      key   = (static_cast<unsigned long long>(__float_as_uint(similarity)) << 32) |
+                         static_cast<unsigned long long>(order);
+        best = min(best, key);
+        if (diagonal) {
+          pair.y += blockDim.x;
+          while (pair.y >= lhsCount && pair.x < lhsCount - 2) {
+            ++pair.x;
+            pair.y += pair.x + 1 - lhsCount;
+          }
+        } else {
+          pair.y += blockDim.x;
+          pair.x += pair.y / rhsCount;
+          pair.y %= rhsCount;
+        }
       }
     }
     for (int offset = warpSize / 2; offset > 0; offset /= 2) {
@@ -2797,6 +2999,12 @@ __global__ void bitBirchSplitPairsKernel(const int*                   keys,
   }
 }
 
+//! Dynamic shared bytes of bitBirchSplitSeedsKernel: optional centroid cache, then staged halves.
+std::size_t splitSeedsSharedBytes(const std::size_t cacheBytes, const bool planned, const int stageCapacity) {
+  return alignShared(cacheBytes) +
+         (planned ? 3 * sharedArrayBytes<int>(stageCapacity) + sharedArrayBytes<std::int8_t>(stageCapacity) : 0);
+}
+
 template <typename Component>
 __global__ void bitBirchSplitSeedsKernel(const int                    count,
                                          const int*                   keys,
@@ -2807,6 +3015,7 @@ __global__ void bitBirchSplitSeedsKernel(const int                    count,
                                          int*                         splitPlans,
                                          int*                         splitLeftSizes,
                                          unsigned long long*          splitKeys,
+                                         const int                    stageCapacity,
                                          const TreeStorage<Component> storage) {
   const int index = blockIdx.x;
   if (index >= count || keys[index] == INT_MAX || (index > 0 && keys[index - 1] == keys[index]) ||
@@ -2816,69 +3025,80 @@ __global__ void bitBirchSplitSeedsKernel(const int                    count,
   // Other leaf splits cannot change this leaf's entries. Its exact seed search
   // can run concurrently; ancestor cascades still search after prior repairs.
   __shared__ CooperativeScratch scratch;
-  __shared__ std::int8_t affinities[cooperativeBlockSize];
-  __shared__ int         seedPositions[2];
-  extern __shared__ std::uint32_t centroidCache[];
-  // The leaf owner staged this leaf's ordered entries in its plan slot.
-  int*                            plan     = splitPlans + static_cast<std::size_t>(index) * cooperativeBlockSize;
+  __shared__ int                seedPositions[2];
+  // The leaf owner staged this leaf's ordered entries in its plan slot when
+  // the leaf fits the stage capacity.
+  const bool                    planned = branchingFactor < stageCapacity;
+  int*                          plan    = splitPlans + static_cast<std::size_t>(index) * stageCapacity;
   // bitBirchSplitPairsKernel already searched this leaf's pairs when it left a key.
-  const unsigned long long        splitKey = splitKeys != nullptr ? splitKeys[index] : ULLONG_MAX;
+  const unsigned long long      splitKey = splitKeys != nullptr ? splitKeys[index] : ULLONG_MAX;
   const bool cacheCentroids = splitKeys == nullptr && storage.numWords <= 32 && branchingFactor < cooperativeBlockSize;
-  if (splitKey != ULLONG_MAX) {
-    const int size = storage.nodeSizes[keys[index]];
-    if (threadIdx.x < size) {
-      scratch.nodeEntries[threadIdx.x] = plan[threadIdx.x];
+  // Dynamic shared memory (splitSeedsSharedBytes): the centroid cache, then
+  // the staged entries, both ordered halves and the seed affinities.
+  SharedCarver   carver(dynamicShared);
+  std::uint32_t* centroidCache =
+    cacheCentroids ? carver.take<std::uint32_t>(static_cast<std::size_t>(cooperativeBlockSize + 1) * storage.numWords) :
+                     nullptr;
+  int*           staged     = planned ? carver.take<int>(stageCapacity) : nullptr;
+  int*           lhsHalf    = planned ? carver.take<int>(stageCapacity) : nullptr;
+  int*           rhsHalf    = planned ? carver.take<int>(stageCapacity) : nullptr;
+  std::int8_t*   affinities = planned ? carver.take<std::int8_t>(stageCapacity) : nullptr;
+  const int      size       = storage.nodeSizes[keys[index]];
+  if (planned) {
+    for (int position = threadIdx.x; position < size; position += blockDim.x) {
+      staged[position] = plan[position];
     }
+    __syncthreads();
+  }
+  if (splitKey != ULLONG_MAX) {
     if (threadIdx.x == 0) {
-      const int2 pair    = splitPairFromOrder(static_cast<long long>(splitKey & 0xffffffffULL), size);
-      scratch.count      = size;
-      scratch.lhsSeed    = plan[pair.x];
-      scratch.rhsSeed    = plan[pair.y];
-      splitKeys[index]   = ULLONG_MAX;
+      const int2 pair  = splitPairFromOrder(static_cast<long long>(splitKey & 0xffffffffULL), size);
+      scratch.lhsSeed  = staged[pair.x];
+      scratch.rhsSeed  = staged[pair.y];
+      splitKeys[index] = ULLONG_MAX;
     }
     __syncthreads();
   } else {
-    cooperativeFindSplitSeeds(storage,
-                              keys[index],
-                              scratch,
-                              cacheCentroids ? centroidCache : nullptr,
-                              branchingFactor < cooperativeBlockSize ? plan : nullptr);
+    cooperativeFindSplitSeeds(storage, keys[index], scratch, centroidCache, staged);
   }
   const int left  = scratch.lhsSeed;
   const int right = scratch.rhsSeed;
-  if (storage.nodeSizes[keys[index]] <= blockDim.x) {
-    if (cacheCentroids && threadIdx.x < scratch.count) {
-      const int entry = scratch.nodeEntries[threadIdx.x];
-      if (entry == left) {
-        seedPositions[0] = threadIdx.x;
-      } else if (entry == right) {
-        seedPositions[1] = threadIdx.x;
+  if (planned) {
+    if (cacheCentroids) {
+      // The cache holds the centroids in staged order (size fits one block).
+      if (threadIdx.x < size) {
+        const int entry = staged[threadIdx.x];
+        if (entry == left) {
+          seedPositions[0] = threadIdx.x;
+        } else if (entry == right) {
+          seedPositions[1] = threadIdx.x;
+        }
       }
+      __syncthreads();
     }
-    __syncthreads();
-    if (threadIdx.x < scratch.count && cacheCentroids) {
-      const double lhs = cachedCentroidSimilarity(storage, centroidCache, threadIdx.x, seedPositions[0]);
-      const double rhs = cachedCentroidSimilarity(storage, centroidCache, threadIdx.x, seedPositions[1]);
-      affinities[threadIdx.x] = static_cast<std::int8_t>((lhs > rhs) - (lhs < rhs));
-    } else if (threadIdx.x < scratch.count) {
-      affinities[threadIdx.x] = seedAffinity(storage,
-                                             scratch.nodeEntries[threadIdx.x],
-                                             centroidFingerprint(storage, left),
-                                             centroidFingerprint(storage, right));
+    const auto* lhsCentroid = centroidFingerprint(storage, left);
+    const auto* rhsCentroid = centroidFingerprint(storage, right);
+    for (int position = threadIdx.x; position < size; position += blockDim.x) {
+      if (cacheCentroids) {
+        const double lhs     = cachedCentroidSimilarity(storage, centroidCache, position, seedPositions[0]);
+        const double rhs     = cachedCentroidSimilarity(storage, centroidCache, position, seedPositions[1]);
+        affinities[position] = static_cast<std::int8_t>((lhs > rhs) - (lhs < rhs));
+      } else {
+        affinities[position] = seedAffinity(storage, staged[position], lhsCentroid, rhsCentroid);
+      }
     }
     __syncthreads();
     // Replay splitNodeWithSeeds' ordered, size-capped assignment on the staged
     // entries. Repair then relinks both halves without walking the leaf list.
     // The ordered halves are built in shared memory and copied out in parallel.
     if (threadIdx.x == 0) {
-      const int size          = scratch.count;
-      const int maxGroup      = (size + 1) / 2;
-      int       lhsAssigned   = 1;
-      int       rhsAssigned   = 1;
-      scratch.entries[0]      = left;
-      scratch.otherEntries[0] = right;
+      const int maxGroup    = (size + 1) / 2;
+      int       lhsAssigned = 1;
+      int       rhsAssigned = 1;
+      lhsHalf[0]            = left;
+      rhsHalf[0]            = right;
       for (int position = 0; position < size; ++position) {
-        const int entry = scratch.nodeEntries[position];
+        const int entry = staged[position];
         if (entry == left || entry == right) {
           continue;
         }
@@ -2889,19 +3109,18 @@ __global__ void bitBirchSplitSeedsKernel(const int                    count,
           assignLeft = true;
         }
         if (assignLeft) {
-          scratch.entries[lhsAssigned++] = entry;
+          lhsHalf[lhsAssigned++] = entry;
         } else {
-          scratch.otherEntries[rhsAssigned++] = entry;
+          rhsHalf[rhsAssigned++] = entry;
         }
       }
       scratch.stagedCount   = lhsAssigned;
       splitLeftSizes[index] = lhsAssigned;
     }
     __syncthreads();
-    if (threadIdx.x < scratch.count) {
-      const int leftSize = scratch.stagedCount;
-      plan[threadIdx.x] =
-        threadIdx.x < leftSize ? scratch.entries[threadIdx.x] : scratch.otherEntries[threadIdx.x - leftSize];
+    const int leftSize = scratch.stagedCount;
+    for (int position = threadIdx.x; position < size; position += blockDim.x) {
+      plan[position] = position < leftSize ? lhsHalf[position] : rhsHalf[position - leftSize];
     }
   } else {
     if (threadIdx.x == 0) {
@@ -2939,11 +3158,18 @@ __global__ void bitBirchRepairKernel(const int              count,
                                      int*                   summaryEntries,
                                      int*                   summaryCount,
                                      const bool             cacheCentroids,
+                                     const int              stageCapacity,
                                      TreeStorage<Component> storage) {
   __shared__ CooperativeScratch scratch;
   __shared__ int                deferred;
-  // Cascading inner-node splits search seeds from shared memory when it fits.
-  extern __shared__ std::uint32_t centroidCache[];
+  // Dynamic shared memory (repairSharedBytes): cascading inner-node splits
+  // search seeds from a centroid cache when it fits, then summary staging.
+  SharedCarver                  carver(dynamicShared);
+  std::uint32_t* const          centroidCache =
+    cacheCentroids ? carver.take<std::uint32_t>(static_cast<std::size_t>(cooperativeBlockSize + 1) * storage.numWords) :
+                     nullptr;
+  int* const                    singletonStage = carver.take<int>(stageCapacity);
+  int* const                    summaryStage   = carver.take<int>(stageCapacity);
   __shared__ int                queuedSplits;
   __shared__ int                warpSplits[cooperativeBlockSize / 32];
   __shared__ int                splitQueue[cooperativeBlockSize];
@@ -2990,7 +3216,7 @@ __global__ void bitBirchRepairKernel(const int              count,
       const int  node     = keys[index];
       const int  size     = storage.nodeSizes[node];
       const int  leftSize = splitLeftSizes[index];
-      const int* plan     = splitPlans + static_cast<std::size_t>(index) * cooperativeBlockSize;
+      const int* plan     = splitPlans + static_cast<std::size_t>(index) * stageCapacity;
       // Leaf topology changes stay ordered, but their two child BFs are only
       // read again by a cascading parent split. Defer them to a parallel pass.
       // Payload refresh already made every ancestor BF current, and a split
@@ -3047,7 +3273,13 @@ __global__ void bitBirchRepairKernel(const int              count,
       if (scratch.success) {
         const int parent = scratch.node;
         for (int pending = 0; pending < deferred; ++pending) {
-          cooperativeSummarizeNode(storage, summaryNodes[pending], summaryEntries[pending], scratch);
+          cooperativeSummarizeNode(storage,
+                                   summaryNodes[pending],
+                                   summaryEntries[pending],
+                                   scratch,
+                                   singletonStage,
+                                   summaryStage,
+                                   stageCapacity);
         }
         __syncthreads();
         if (threadIdx.x == 0) {
@@ -3058,7 +3290,10 @@ __global__ void bitBirchRepairKernel(const int              count,
                              branchingFactor,
                              splitAffinity,
                              scratch,
-                             cacheCentroids ? centroidCache : nullptr);
+                             singletonStage,
+                             summaryStage,
+                             stageCapacity,
+                             centroidCache);
       }
       __syncthreads();
     }
@@ -3073,12 +3308,17 @@ template <typename Component>
 __global__ void bitBirchSummarizeKernel(const int*             summaryNodes,
                                         const int*             summaryEntries,
                                         const int*             summaryCount,
+                                        const int              stageCapacity,
                                         TreeStorage<Component> storage) {
   if (blockIdx.x >= *summaryCount) {
     return;
   }
   __shared__ CooperativeScratch scratch;
-  cooperativeSummarizeNode(storage, summaryNodes[blockIdx.x], summaryEntries[blockIdx.x], scratch);
+  SharedCarver                  carver(dynamicShared);
+  int* const                    singletonStage = carver.take<int>(stageCapacity);
+  int* const                    summaryStage   = carver.take<int>(stageCapacity);
+  cooperativeSummarizeNode(
+    storage, summaryNodes[blockIdx.x], summaryEntries[blockIdx.x], scratch, singletonStage, summaryStage, stageCapacity);
 }
 
 // Publishes the epoch controls straight to mapped host memory and resets the
@@ -3244,49 +3484,93 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
   AsyncDeviceVector<int>         splitLeft(batchCapacity, stream);
   AsyncDeviceVector<int>         splitRight(batchCapacity, stream);
   AsyncDeviceVector<std::int8_t> splitAffinity(tree.entryCapacity, stream);
-  // Ordered halves for each overflowing leaf that fits one cooperative block.
-  AsyncDeviceVector<int>         splitPlans(
-    branchingFactor < cooperativeBlockSize ? static_cast<std::size_t>(batchCapacity) * cooperativeBlockSize : 0,
-    stream);
-  AsyncDeviceVector<int>           splitLeftSizes(batchCapacity, stream);
-  // Staged leaves search split seeds across many blocks when every leaf's
-  // centroids fit in shared memory and similarities are FP32 (see routingSimilarity).
   int device      = 0;
   int sharedOptin = 0;
   int numSMs      = 0;
-  const std::size_t splitPairsCacheBytes = sizeof(std::uint32_t) * (cooperativeBlockSize + 1) * numWords;
   cudaCheckError(cudaGetDevice(&device));
   cudaCheckError(cudaDeviceGetAttribute(&sharedOptin, cudaDevAttrMaxSharedMemoryPerBlockOptin, device));
   cudaCheckError(cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, device));
-  cudaFuncAttributes splitPairsAttributes{};
-  cudaCheckError(cudaFuncGetAttributes(&splitPairsAttributes, bitBirchSplitPairsKernel<Component>));
-  const bool parallelSplitSeeds = branchingFactor < cooperativeBlockSize && numWords * 32 <= 4096 &&
-                                  splitPairsAttributes.sharedSizeBytes + splitPairsCacheBytes <=
-                                    static_cast<std::size_t>(sharedOptin);
-  int        splitPairsBlocks   = 0;
+  const auto staticSharedBytes = [](const auto kernel) {
+    cudaFuncAttributes attributes{};
+    cudaCheckError(cudaFuncGetAttributes(&attributes, kernel));
+    return attributes.sharedSizeBytes;
+  };
+  const auto fitsShared = [&](const std::size_t staticBytes, const std::size_t dynamicBytes) {
+    return staticBytes + dynamicBytes <= static_cast<std::size_t>(sharedOptin);
+  };
+  const auto allowShared = [](const auto kernel, const std::size_t dynamicBytes) {
+    cudaCheckError(
+      cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(dynamicBytes)));
+  };
+  const auto leafOwnersBytes = [](const int capacity, const int width) {
+    return sharedArrayBytes<int>(capacity) +
+           sharedArrayBytes<std::uint32_t>(static_cast<std::size_t>(width) * capacity) +
+           sharedArrayBytes<std::uint8_t>(capacity);
+  };
+  const auto summaryStageBytes = [](const int capacity) { return 2 * sharedArrayBytes<int>(capacity); };
+  const std::size_t leafOwnersStatic = staticSharedBytes(bitBirchLeafOwnersKernel<Component>);
+  const std::size_t splitSeedsStatic = staticSharedBytes(bitBirchSplitSeedsKernel<Component>);
+  const std::size_t repairStatic     = staticSharedBytes(bitBirchRepairKernel<Component>);
+  const std::size_t summarizeStatic  = staticSharedBytes(bitBirchSummarizeKernel<Component>);
+  const std::size_t refreshStatic    = staticSharedBytes(bitBirchRefreshLevelKernel<Component>);
+  // Every node holds at most branchingFactor + 1 entries. Kernels stage that
+  // many in shared memory, several per thread, when it fits (see
+  // SharedCarver); otherwise wider nodes keep the list-walking paths.
+  int stageCapacity = cooperativeBlockSize;
+  const std::int64_t wideCapacity =
+    (static_cast<std::int64_t>(branchingFactor) + 1 + warpSizeHost - 1) / warpSizeHost * warpSizeHost;
+  if (wideCapacity > cooperativeBlockSize && wideCapacity <= std::numeric_limits<int>::max() / ownerSpeculationWidth) {
+    const int wide = static_cast<int>(wideCapacity);
+    if (fitsShared(leafOwnersStatic, leafOwnersBytes(wide, 1)) &&
+        fitsShared(splitSeedsStatic, splitSeedsSharedBytes(splitCacheBytes, true, wide)) &&
+        fitsShared(repairStatic, summaryStageBytes(wide)) && fitsShared(summarizeStatic, summaryStageBytes(wide)) &&
+        fitsShared(refreshStatic, sharedArrayBytes<int>(wide))) {
+      stageCapacity = wide;
+    }
+  }
+  const bool planned          = branchingFactor < stageCapacity;
+  // Speculative leaf-owner batches keep counts for every staged position; a
+  // narrower batch fits beside wider leaves and gives the same results.
+  int        speculationWidth = ownerSpeculationWidth;
+  while (speculationWidth > 1 && !fitsShared(leafOwnersStatic, leafOwnersBytes(stageCapacity, speculationWidth))) {
+    --speculationWidth;
+  }
+  const std::size_t leafOwnersShared = leafOwnersBytes(stageCapacity, speculationWidth);
+  const std::size_t summarizeShared  = summaryStageBytes(stageCapacity);
+  const std::size_t refreshShared    = sharedArrayBytes<int>(stageCapacity);
+  allowShared(bitBirchLeafOwnersKernel<Component>, leafOwnersShared);
+  allowShared(bitBirchSummarizeKernel<Component>, summarizeShared);
+  allowShared(bitBirchRefreshLevelKernel<Component>, refreshShared);
+  // Ordered halves for each overflowing leaf that fits the stage capacity.
+  AsyncDeviceVector<int> splitPlans(planned ? static_cast<std::size_t>(batchCapacity) * stageCapacity : 0, stream);
+  AsyncDeviceVector<int> splitLeftSizes(batchCapacity, stream);
+  // Staged leaves search split seeds across many blocks when the pair-search
+  // cache fits in shared memory and similarities are FP32 (see
+  // routingSimilarity). Pair orders must fit the low 32 bits of each key.
+  const std::size_t splitPairsCacheBytes = sizeof(std::uint32_t) * (cooperativeBlockSize + 1) * numWords;
+  const bool        parallelSplitSeeds =
+    planned && numWords * 32 <= 4096 &&
+    static_cast<std::int64_t>(branchingFactor) * (branchingFactor + 1) / 2 <= std::numeric_limits<std::uint32_t>::max() &&
+    fitsShared(staticSharedBytes(bitBirchSplitPairsKernel<Component>), splitPairsCacheBytes);
+  int splitPairsBlocks = 0;
   if (parallelSplitSeeds) {
-    cudaCheckError(cudaFuncSetAttribute(bitBirchSplitPairsKernel<Component>,
-                                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                        static_cast<int>(splitPairsCacheBytes)));
+    allowShared(bitBirchSplitPairsKernel<Component>, splitPairsCacheBytes);
     cudaCheckError(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&splitPairsBlocks,
                                                                  bitBirchSplitPairsKernel<Component>,
                                                                  cooperativeBlockSize,
                                                                  splitPairsCacheBytes));
     splitPairsBlocks = std::max(1, splitPairsBlocks) * numSMs;
   }
-  // Inner nodes split inside the repair kernel hold at most one block of entries, like staged leaves.
-  cudaFuncAttributes repairAttributes{};
-  cudaCheckError(cudaFuncGetAttributes(&repairAttributes, bitBirchRepairKernel<Component>));
-  const std::size_t repairCacheBytes =
-    branchingFactor < cooperativeBlockSize &&
-        repairAttributes.sharedSizeBytes + splitPairsCacheBytes <= static_cast<std::size_t>(sharedOptin) ?
-      splitPairsCacheBytes :
-      0;
-  if (repairCacheBytes > 0) {
-    cudaCheckError(cudaFuncSetAttribute(bitBirchRepairKernel<Component>,
-                                        cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                        static_cast<int>(repairCacheBytes)));
-  }
+  const std::size_t splitSeedsShared =
+    splitSeedsSharedBytes(parallelSplitSeeds ? 0 : splitCacheBytes, planned, stageCapacity);
+  allowShared(bitBirchSplitSeedsKernel<Component>, splitSeedsShared);
+  // Inner nodes split inside the repair kernel search seeds from a cache when
+  // they fit one block, like staged leaves.
+  const bool repairCache = branchingFactor < cooperativeBlockSize &&
+                           fitsShared(repairStatic, alignShared(splitPairsCacheBytes) + summaryStageBytes(stageCapacity));
+  const std::size_t repairShared =
+    (repairCache ? alignShared(splitPairsCacheBytes) : 0) + summaryStageBytes(stageCapacity);
+  allowShared(bitBirchRepairKernel<Component>, repairShared);
   AsyncDeviceVector<int>                splitQueue(parallelSplitSeeds ? batchCapacity : 0, stream);
   AsyncDeviceVector<int>                splitQueueCount(1, stream);
   AsyncDeviceVector<unsigned long long> splitKeys(parallelSplitSeeds ? batchCapacity : 0, stream);
@@ -3494,7 +3778,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                                      0,
                                                      keyBits(tree.nodeCapacity),
                                                      stream));
-      bitBirchLeafOwnersKernel<<<count, cooperativeBlockSize, 0, stream>>>(count,
+      bitBirchLeafOwnersKernel<<<count, cooperativeBlockSize, leafOwnersShared, stream>>>(count,
                                                                            sortedKeys.data(),
                                                                            sortedValues.data(),
                                                                            threshold,
@@ -3507,11 +3791,13 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                                                            splitPlans.data(),
                                                                            splitQueue.data(),
                                                                            splitQueueCount.data(),
+                                                                           stageCapacity,
+                                                                           speculationWidth,
                                                                            storage);
       cudaCheckError(cudaGetLastError());
       // Each level lists at most one node per routed leaf, so count blocks suffice.
       for (int level = leafDepth; level > 0; --level) {
-        bitBirchRefreshLevelKernel<<<count, cooperativeBlockSize, 0, stream>>>(
+        bitBirchRefreshLevelKernel<<<count, cooperativeBlockSize, refreshShared, stream>>>(
           levelNodes.data() + static_cast<std::size_t>(level) * batchCapacity,
           levelCounts.data() + level,
           count,
@@ -3523,6 +3809,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
           static_cast<int>(deltaCapacity),
           deltaSums.data(),
           deltaCounts.data(),
+          stageCapacity,
           storage);
         cudaCheckError(cudaGetLastError());
       }
@@ -3533,11 +3820,12 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
           splitQueue.data(),
           splitQueueCount.data(),
           splitPlans.data(),
+          stageCapacity,
           splitKeys.data(),
           storage);
         cudaCheckError(cudaGetLastError());
       }
-      bitBirchSplitSeedsKernel<<<count, cooperativeBlockSize, parallelSplitSeeds ? 0 : splitCacheBytes, stream>>>(count,
+      bitBirchSplitSeedsKernel<<<count, cooperativeBlockSize, splitSeedsShared, stream>>>(count,
                                                                                          sortedKeys.data(),
                                                                                          branchingFactor,
                                                                                          splitLeft.data(),
@@ -3546,9 +3834,10 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                                                                          splitPlans.data(),
                                                                                          splitLeftSizes.data(),
                                                                                          splitKeys.data(),
+                                                                                         stageCapacity,
                                                                                          storage);
       cudaCheckError(cudaGetLastError());
-      bitBirchRepairKernel<<<1, cooperativeBlockSize, repairCacheBytes, stream>>>(count,
+      bitBirchRepairKernel<<<1, cooperativeBlockSize, repairShared, stream>>>(count,
                                                                    sortedKeys.data(),
                                                                    splitLeft.data(),
                                                                    splitRight.data(),
@@ -3564,13 +3853,15 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
                                                                    summaryNodes.data(),
                                                                    summaryEntries.data(),
                                                                    summaryCount.data(),
-                                                                   repairCacheBytes > 0,
+                                                                   repairCache,
+                                                                   stageCapacity,
                                                                    storage);
       cudaCheckError(cudaGetLastError());
-      bitBirchSummarizeKernel<<<2 * count, cooperativeBlockSize, 0, stream>>>(summaryNodes.data(),
-                                                                              summaryEntries.data(),
-                                                                              summaryCount.data(),
-                                                                              storage);
+      bitBirchSummarizeKernel<<<2 * count, cooperativeBlockSize, summarizeShared, stream>>>(summaryNodes.data(),
+                                                                                            summaryEntries.data(),
+                                                                                            summaryCount.data(),
+                                                                                            stageCapacity,
+                                                                                            storage);
       cudaCheckError(cudaGetLastError());
       ScopedNvtxRange controlRange("BitBIRCH control + host sync", NvtxColor::kGrey);
       bitBirchControlKernel<<<1, cooperativeBlockSize, 0, stream>>>(begin,

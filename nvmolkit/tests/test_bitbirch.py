@@ -55,6 +55,21 @@ def test_split_fallback_above_cooperative_block_width():
     np.testing.assert_array_equal(centroids.numpy(), expected_centroids)
 
 
+@pytest.mark.parametrize("branching_factor,words", [(256, 64), (300, 32), (600, 64)])
+def test_wide_leaves_staged_and_tiled_split_search_match_reference(branching_factor, words):
+    # Leaves wider than one block: staged entries several per thread, speculative
+    # leaf owners over wide leaves, and the tiled split-pair search.
+    packed = np.random.default_rng(1234 + branching_factor).integers(0, 2**32, size=(4 * branching_factor + 77, words),
+                                                                     dtype=np.uint32)
+    packed[200:260] = packed[:60]
+    expected, expected_centroids = reference(packed, 0.55, branching_factor, 512)
+    labels, centroids = bitbirch(
+        packed, 0.55, branching_factor=branching_factor, batch_size=512, return_centroids=True
+    )
+    np.testing.assert_array_equal(labels.numpy(), expected)
+    np.testing.assert_array_equal(centroids.numpy(), expected_centroids)
+
+
 @pytest.mark.parametrize("branching_factor", [254, 255])
 def test_full_1024bit_split_cache_matches_reference(branching_factor):
     packed = np.random.default_rng(991).integers(0, 2**32, size=(529, 32), dtype=np.uint32)
