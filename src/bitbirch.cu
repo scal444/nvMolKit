@@ -1138,10 +1138,11 @@ constexpr int routeLanesPerEntry = 4;
 // are the same integers, and ties still resolve to the lowest directory position.
 // Value is float when routingSimilarity is an FP32 quotient, so comparisons
 // match exactly without FP64 instructions. Nodes with more entries than lane
-// groups, up to one block, first resolve every centroid row (and, with
+// groups, up to stageCapacity, first resolve every centroid row (and, with
 // followChild, every child) into shared memory in parallel, so a level pays one
 // dependent lookup chain rather than one per position plus a child lookup
 // after the reduction. Smaller nodes take one position per group anyway.
+// rows, stagedEntries and stagedChildren hold stageCapacity values each.
 // With followChild, thread zero sets scratch.node to the selected entry's child.
 template <typename Value, typename Component>
 __device__ __forceinline__ int cooperativeClosestDirectoryEntry(const TreeStorage<Component>& storage,
@@ -1150,21 +1151,24 @@ __device__ __forceinline__ int cooperativeClosestDirectoryEntry(const TreeStorag
                                                                 const std::uint32_t*          fingerprint,
                                                                 CooperativeScratch&           scratch,
                                                                 const std::uint32_t**         rows,
+                                                                int*                          stagedEntries,
+                                                                int*                          stagedChildren,
+                                                                const int                     stageCapacity,
                                                                 const bool                    followChild) {
-  const bool staged = numNodeEntries > static_cast<int>(blockDim.x) / routeLanesPerEntry &&
-                      numNodeEntries <= static_cast<int>(blockDim.x);
-  if (staged && threadIdx.x < numNodeEntries) {
+  const bool staged =
+    numNodeEntries > static_cast<int>(blockDim.x) / routeLanesPerEntry && numNodeEntries <= stageCapacity;
+  for (int position = threadIdx.x; staged && position < numNodeEntries; position += blockDim.x) {
     // centroidFingerprint, with the summary slot read beside the fingerprint
     // index rather than after it.
-    const int         entry            = nodeEntries[threadIdx.x];
+    const int         entry            = nodeEntries[position];
     const int         fingerprintIndex = storage.entryFingerprintIndices[entry];
     const int         slot             = storage.entrySummarySlots[entry];
     const std::size_t slotOffset       = static_cast<std::size_t>(slot % summaryEntriesPerPage) * storage.numWords;
-    rows[threadIdx.x]                  = fingerprintIndex >= 0 ?
+    rows[position]                     = fingerprintIndex >= 0 ?
                                            singletonFingerprint(storage, fingerprintIndex) :
                                            storage.centroidPages[slot / summaryEntriesPerPage] + slotOffset;
-    scratch.entries[threadIdx.x]     = entry;
-    scratch.nodeEntries[threadIdx.x] = followChild ? storage.entryChildren[entry] : -1;
+    stagedEntries[position]            = entry;
+    stagedChildren[position]           = followChild ? storage.entryChildren[entry] : -1;
   }
   if (staged) {
     __syncthreads();
@@ -1235,9 +1239,9 @@ __device__ __forceinline__ int cooperativeClosestDirectoryEntry(const TreeStorag
       }
     }
     scratch.bestValue = bestValue;
-    scratch.bestEntry = bestOrder == INT_MAX ? -1 : staged ? scratch.entries[bestOrder] : nodeEntries[bestOrder];
+    scratch.bestEntry = bestOrder == INT_MAX ? -1 : staged ? stagedEntries[bestOrder] : nodeEntries[bestOrder];
     if (followChild && scratch.bestEntry >= 0) {
-      scratch.node = staged ? scratch.nodeEntries[bestOrder] : storage.entryChildren[scratch.bestEntry];
+      scratch.node = staged ? stagedChildren[bestOrder] : storage.entryChildren[scratch.bestEntry];
     }
   }
   __syncthreads();
@@ -1931,10 +1935,15 @@ __global__ void bitBirchRouteKernel(const int                    begin,
                                     int*                         groupKeys,
                                     const bool                   enableGroups,
                                     const double                 threshold,
+                                    const int                    stageCapacity,
                                     const TreeStorage<Component> storage) {
   // One cooperative block per query; all tree reads precede any leaf writes.
-  __shared__ CooperativeScratch   scratch;
-  __shared__ const std::uint32_t* rows[cooperativeBlockSize];
+  __shared__ CooperativeScratch scratch;
+  // Dynamic shared memory (routeSharedBytes): staged rows, entries and children.
+  SharedCarver                  carver(dynamicShared);
+  const std::uint32_t** const   rows           = carver.take<const std::uint32_t*>(stageCapacity);
+  int* const                    stagedEntries  = carver.take<int>(stageCapacity);
+  int* const                    stagedChildren = carver.take<int>(stageCapacity);
   const int                       offset = blockIdx.x;
   if (offset >= count) {
     return;
@@ -1964,9 +1973,11 @@ __global__ void bitBirchRouteKernel(const int                    begin,
     }
     const int size = storage.nodeSizes[node];
     if (storage.numBits <= 4096) {
-      return cooperativeClosestDirectoryEntry<float>(storage, directory, size, fingerprint, scratch, rows, followChild);
+      return cooperativeClosestDirectoryEntry<float>(
+        storage, directory, size, fingerprint, scratch, rows, stagedEntries, stagedChildren, stageCapacity, followChild);
     }
-    return cooperativeClosestDirectoryEntry<double>(storage, directory, size, fingerprint, scratch, rows, followChild);
+    return cooperativeClosestDirectoryEntry<double>(
+      storage, directory, size, fingerprint, scratch, rows, stagedEntries, stagedChildren, stageCapacity, followChild);
   };
   while (!storage.nodeLeaves[scratch.node]) {
     closestEntry(scratch.node, true);
@@ -3513,6 +3524,10 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
   const std::size_t repairStatic     = staticSharedBytes(bitBirchRepairKernel<Component>);
   const std::size_t summarizeStatic  = staticSharedBytes(bitBirchSummarizeKernel<Component>);
   const std::size_t refreshStatic    = staticSharedBytes(bitBirchRefreshLevelKernel<Component>);
+  const std::size_t routeStatic      = staticSharedBytes(bitBirchRouteKernel<Component>);
+  const auto        routeBytes       = [](const int capacity) {
+    return sharedArrayBytes<const std::uint32_t*>(capacity) + 2 * sharedArrayBytes<int>(capacity);
+  };
   // Every node holds at most branchingFactor + 1 entries. Kernels stage that
   // many in shared memory, several per thread, when it fits (see
   // SharedCarver); otherwise wider nodes keep the list-walking paths.
@@ -3524,7 +3539,7 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
     if (fitsShared(leafOwnersStatic, leafOwnersBytes(wide, 1)) &&
         fitsShared(splitSeedsStatic, splitSeedsSharedBytes(splitCacheBytes, true, wide)) &&
         fitsShared(repairStatic, summaryStageBytes(wide)) && fitsShared(summarizeStatic, summaryStageBytes(wide)) &&
-        fitsShared(refreshStatic, sharedArrayBytes<int>(wide))) {
+        fitsShared(refreshStatic, sharedArrayBytes<int>(wide)) && fitsShared(routeStatic, routeBytes(wide))) {
       stageCapacity = wide;
     }
   }
@@ -3538,6 +3553,8 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
   const std::size_t leafOwnersShared = leafOwnersBytes(stageCapacity, speculationWidth);
   const std::size_t summarizeShared  = summaryStageBytes(stageCapacity);
   const std::size_t refreshShared    = sharedArrayBytes<int>(stageCapacity);
+  const std::size_t routeShared      = routeBytes(stageCapacity);
+  allowShared(bitBirchRouteKernel<Component>, routeShared);
   allowShared(bitBirchLeafOwnersKernel<Component>, leafOwnersShared);
   allowShared(bitBirchSummarizeKernel<Component>, summarizeShared);
   allowShared(bitBirchRefreshLevelKernel<Component>, refreshShared);
@@ -3730,13 +3747,14 @@ BitBirchResult launchBitBirch(const cuda::std::span<const std::uint32_t> fingerp
         storage.queryBegin                = begin;
       }
       workspaceRange.pop();
-      bitBirchRouteKernel<<<count, cooperativeBlockSize, 0, stream>>>(begin,
+      bitBirchRouteKernel<<<count, cooperativeBlockSize, routeShared, stream>>>(begin,
                                                                       count,
                                                                       keys.data(),
                                                                       values.data(),
                                                                       groupKeys.data(),
                                                                       enableGroups,
                                                                       threshold,
+                                                                      stageCapacity,
                                                                       storage);
       cudaCheckError(cudaGetLastError());
       // Keys are node or entry IDs below the current capacity, or INT_MAX. With
