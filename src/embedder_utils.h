@@ -93,6 +93,15 @@ enum class Dimensionality {
 };
 
 /**
+ * @brief Throws ValueErrorException for embedding parameters that nvMolKit does not implement yet
+ *
+ * Unsupported: ETversion other than 1 or 2, all-in-one refinement (useLegacyImplementation=false), and on
+ * RDKit >= 2026.09, embedForceField other than UFF, onlyInitialEmbedding, internal-coordinate initial embedding,
+ * and random-coordinate initial embedding requested without useRandomCoords.
+ */
+void validateSupportedEmbedParameters(const RDKit::DGeomHelpers::EmbedParameters& params);
+
+/**
  * @brief Prepares embedder arguments for the ETKDG algorithm
  *
  * @param mol The molecule to prepare arguments for

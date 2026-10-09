@@ -79,6 +79,10 @@ def EmbedMolecules(
         - Coordinate constraints are not supported (SetCoordMap)
         - embedFragmentsSeparately is not supported. All fragments will be embedded together.
         - Eigenvalue-based initialization supports at most 256 atoms per molecule.
+        - Only ETversion 1 and 2 are supported, so the ETKDGv4 preset raises ValueError.
+        - All-in-one refinement (useLegacyImplementation=False) raises ValueError.
+        - On RDKit 2026.09 and later, embedForceField=MMFF, onlyInitialEmbedding, internal-coordinate initial
+          embedding, and random-coordinate initial embedding without useRandomCoords raise ValueError.
 
     Args:
         molecules: List of RDKit molecules to embed. Molecules should be prepared
