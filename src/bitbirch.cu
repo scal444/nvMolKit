@@ -3739,6 +3739,11 @@ template <typename Component> class TreeBuilder final : public BitBirchTreeImpl 
       const int count = carried;
       carried         = 0;
       runBatch(inputTile.data(), count);
+      // Host labels of this batch are staged; drain them before relabeling.
+      cudaCheckError(cudaStreamSynchronize(stream));
+      if (stagedCount > 0) {
+        drainStagedLabels();
+      }
     }
     if (inserted == 0) {
       cudaCheckError(cudaStreamSynchronize(stream));

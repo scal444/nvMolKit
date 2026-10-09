@@ -8,7 +8,7 @@ import pytest
 import torch
 from _bitbirch_reference import BatchedBitBirch
 
-from nvmolkit.clustering import bitbirch
+from nvmolkit.clustering import BitBirchTree, bitbirch
 
 
 def reference(packed, threshold, branching_factor, batch_size):
@@ -190,3 +190,35 @@ def test_host_output_preserves_labels_and_centroids(device_input):
 def test_invalid_options_rejected(kwargs):
     with pytest.raises(ValueError):
         bitbirch(np.zeros((1, 1), dtype=np.uint32), **kwargs)
+
+
+@pytest.mark.parametrize("device_chunks", [False, True])
+@pytest.mark.parametrize("cuts", [(0, 20000), (0, 1, 15, 16383, 16385, 20000), (0, 4096, 8192, 12000, 20000)])
+def test_chunked_tree_matches_one_call(cuts, device_chunks):
+    rng = np.random.default_rng(91)
+    packed = rng.integers(0, 2**32, size=(20000, 4), dtype=np.uint32) & rng.integers(0, 2**32, size=(20000, 4),
+                                                                                       dtype=np.uint32)
+    packed[10000:12000] = packed[:2000]
+    expected, expected_centroids = bitbirch(packed, 0.5, branching_factor=7, batch_size=64, host_output=True,
+                                            return_centroids=True)
+    labels_out = np.full(25000, -7, dtype=np.int32)
+    tree = BitBirchTree(0.5, 25000, branching_factor=7, batch_size=64, labels=labels_out, return_centroids=True)
+    for begin, end in zip(cuts[:-1], cuts[1:]):
+        chunk = packed[begin:end]
+        tree.insert(torch.from_numpy(chunk.view(np.int32)).cuda() if device_chunks else chunk)
+    assert tree.rows == len(packed)
+    labels, centroids = tree.finalize()
+    np.testing.assert_array_equal(labels, expected)
+    np.testing.assert_array_equal(labels_out[: len(packed)], expected)
+    assert (labels_out[len(packed):] == -7).all()
+    np.testing.assert_array_equal(centroids.numpy(), expected_centroids.numpy())
+    with pytest.raises(ValueError):
+        tree.insert(packed[:1])
+
+
+def test_chunked_tree_rejects_rows_past_capacity():
+    packed = np.zeros((10, 2), dtype=np.uint32)
+    tree = BitBirchTree(0.5, 15, branching_factor=7, batch_size=4)
+    tree.insert(packed)
+    with pytest.raises(ValueError):
+        tree.insert(packed)
