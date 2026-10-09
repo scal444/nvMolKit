@@ -35,6 +35,7 @@
 #include "src/forcefields/dist_geom.h"
 #include "src/forcefields/dist_geom_kernels.h"
 #include "tests/test_utils.h"
+#include "versions.h"
 
 namespace {
 
@@ -94,6 +95,29 @@ void addImproperTorsionTerms(ForceFields::ForceField*             ff,
   }
 }
 
+//! Indices of the experimental torsions that RDKit turns into force-field terms
+std::vector<unsigned int> usedExperimentalTorsions(const ForceFields::CrystalFF::CrystalFFDetails& etkdgDetails,
+                                                   [[maybe_unused]] unsigned int                   numAtoms) {
+  std::vector<unsigned int> used;
+#if RDKIT_ETKDG_2026_09_API
+  // RDKit 2026.09 keeps only the first experimental torsion about each central bond.
+  boost::dynamic_bitset<> doneBonds(numAtoms * numAtoms);
+#endif
+  for (unsigned int t = 0; t < etkdgDetails.expTorsionAtoms.size(); ++t) {
+#if RDKIT_ETKDG_2026_09_API
+    const unsigned int j       = etkdgDetails.expTorsionAtoms[t][1];
+    const unsigned int k       = etkdgDetails.expTorsionAtoms[t][2];
+    const unsigned int bondIdx = j < k ? j * numAtoms + k : k * numAtoms + j;
+    if (doneBonds[bondIdx]) {
+      continue;
+    }
+    doneBonds[bondIdx] = true;
+#endif
+    used.push_back(t);
+  }
+  return used;
+}
+
 //! Add experimental torsion angle contributions to a force field
 /*!
 
@@ -111,7 +135,7 @@ void addExperimentalTorsionTerms(ForceFields::ForceField*                       
                                  unsigned int                                    numAtoms) {
   PRECONDITION(ff, "bad force field");
   auto torsionContribs = std::make_unique<ForceFields::CrystalFF::TorsionAngleContribs>(ff);
-  for (unsigned int t = 0; t < etkdgDetails.expTorsionAtoms.size(); ++t) {
+  for (const unsigned int t : usedExperimentalTorsions(etkdgDetails, numAtoms)) {
     int i = etkdgDetails.expTorsionAtoms[t][0];
     int j = etkdgDetails.expTorsionAtoms[t][1];
     int k = etkdgDetails.expTorsionAtoms[t][2];
@@ -293,7 +317,7 @@ void markAtomPairsForIsolatedLongRange(const ForceFields::CrystalFF::CrystalFFDe
                                        boost::dynamic_bitset<>&                        atomPairs,
                                        boost::dynamic_bitset<>&                        isImproperConstrained) {
   // Mark experimental torsion pairs (end atoms of torsions)
-  for (unsigned int t = 0; t < etkdgDetails.expTorsionAtoms.size(); ++t) {
+  for (const unsigned int t : usedExperimentalTorsions(etkdgDetails, numAtoms)) {
     int i = etkdgDetails.expTorsionAtoms[t][0];
     int l = etkdgDetails.expTorsionAtoms[t][3];
     if (i < l) {

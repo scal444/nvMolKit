@@ -194,12 +194,13 @@ target_link_libraries(
           ff_utils
           ff_kernel_utils
           test_utils
-          embedder_utils)
+          embedder_utils
+          nvmolkit_versions)
 
 add_executable(test_rdkit_bounds_matrix test_rdkit_bounds_matrix.cpp)
 target_link_libraries(
   test_rdkit_bounds_matrix PRIVATE rdkit_bounds_matrix symmetricEigenSolver
-                                   ${RDKit_LIBS})
+                                   ${RDKit_LIBS} nvmolkit_versions)
 
 add_executable(test_triangle_smooth test_triangle_smooth.cu)
 target_link_libraries(
@@ -323,7 +324,7 @@ add_executable(test_etkdg_stereochem_checks test_etkdg_stereochem_checks.cu)
 target_link_libraries(
   test_etkdg_stereochem_checks
   PRIVATE etkdg_stages device_vector ${RDKit_LIBS} test_utils dist_geom
-          rdkit_dist_geom_flattened)
+          rdkit_dist_geom_flattened nvmolkit_versions)
 
 add_executable(test_conformer_checkers test_conformer_checkers.cpp)
 target_link_libraries(test_conformer_checkers PRIVATE ${RDKit_LIBS}
