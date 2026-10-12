@@ -70,6 +70,8 @@ class BitBirchTree {
   void           insert(const std::uint32_t* fingerprints, std::int64_t numRows, bool onHost);
   //! Rows inserted so far.
   std::int64_t   rows() const noexcept;
+  //! Clusters so far (as of the last completed insertion batch).
+  int            clusters() const noexcept;
   //! Inserts any held rows, then labels every row; the tree accepts no more rows.
   BitBirchResult finalize();
 

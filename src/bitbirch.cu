@@ -36,6 +36,7 @@ class BitBirchTreeImpl {
   virtual void           insert(const std::uint32_t* fingerprints, std::int64_t numRows, bool onHost) = 0;
   virtual BitBirchResult finalize()                                                               = 0;
   virtual std::int64_t   rows() const noexcept                                                    = 0;
+  virtual int            clusters() const noexcept                                                = 0;
 };
 
 namespace {
@@ -3686,6 +3687,8 @@ template <typename Component> class TreeBuilder final : public BitBirchTreeImpl 
   TreeBuilder& operator=(const TreeBuilder&) = delete;
 
   std::int64_t rows() const noexcept override { return inserted + carried; }
+  //! Clusters after the last completed batch (held rows of a straddling batch not yet included).
+  int          clusters() const noexcept override { return liveClusters(hostControl); }
 
   void insert(const std::uint32_t* const fingerprints, const std::int64_t numRows, const bool onHost) override {
     if (finalized) {
@@ -4284,6 +4287,10 @@ void BitBirchTree::insert(const std::uint32_t* const fingerprints, const std::in
 
 std::int64_t BitBirchTree::rows() const noexcept {
   return impl_->rows();
+}
+
+int BitBirchTree::clusters() const noexcept {
+  return impl_->clusters();
 }
 
 BitBirchResult BitBirchTree::finalize() {

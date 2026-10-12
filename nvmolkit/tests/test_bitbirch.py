@@ -207,6 +207,7 @@ def test_chunked_tree_matches_one_call(cuts, device_chunks):
         chunk = packed[begin:end]
         tree.insert(torch.from_numpy(chunk.view(np.int32)).cuda() if device_chunks else chunk)
     assert tree.rows == len(packed)
+    assert 0 < tree.clusters <= int(expected.max()) + 1
     labels, centroids = tree.finalize()
     np.testing.assert_array_equal(labels, expected)
     np.testing.assert_array_equal(labels_out[: len(packed)], expected)

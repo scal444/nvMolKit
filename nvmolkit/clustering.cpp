@@ -140,6 +140,7 @@ class PyBitBirchTree {
   }
 
   std::int64_t rows() const { return tree_->rows(); }
+  int          clusters() const { return tree_->clusters(); }
 
   //! Returns (None, centroids or None); labels are in the host array.
   boost::python::object finalize() {
@@ -169,6 +170,7 @@ BOOST_PYTHON_MODULE(_clustering) {
                                                                                 std::uintptr_t>())
     .def("insert", &PyBitBirchTree::insert)
     .def("rows", &PyBitBirchTree::rows)
+    .def("clusters", &PyBitBirchTree::clusters)
     .def("finalize", &PyBitBirchTree::finalize);
   boost::python::def("bitbirch",
                      bitBirch,

@@ -466,6 +466,12 @@ class BitBirchTree:
         """Rows inserted so far."""
         return 0 if self._tree is None else self._tree.rows()
 
+    @property
+    def clusters(self) -> int:
+        """Clusters so far, as of the last completed insertion batch (rows still held for a batch that straddles
+        two inserts are not yet counted)."""
+        return 0 if self._tree is None else self._tree.clusters()
+
     def insert(self, x: ArrayInput) -> None:
         """Append the rows of ``x``, shape ``(n, W)`` packed int32 or uint32.
 
