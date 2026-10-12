@@ -301,7 +301,7 @@ template <typename Component> struct TreeStorage {
   // Earliest member row (64-bit: rows may exceed 2^31) until finalization,
   // then the cluster ID. One value per tree entry, never per row.
   std::int64_t*        entryClusterIds;
-  // Device-labeled runs: all numFingerprints labels. Host-labeled runs: one batch.
+  // Device-labeled runs: labels of every row (maxRows). Host-labeled runs: one batch.
   int*                 labels;
   std::uint32_t*       centroids;
   int*                 root;
@@ -3764,7 +3764,7 @@ template <typename Component> class TreeBuilder final : public BitBirchTreeImpl 
     AsyncDeviceVector<int>          leafEntries(clusters, stream);
     AsyncDeviceVector<std::int64_t> sortedFirstMembers(clusters, stream);
     AsyncDeviceVector<int>          sortedLeafEntries(clusters, stream);
-    // First members are distinct nonnegative rows below inserted.
+    // First members are distinct nonnegative rows below the inserted row count.
     int rowBits = 1;
     while (rowBits < 63 && (std::int64_t{1} << rowBits) < inserted) {
       ++rowBits;
