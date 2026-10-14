@@ -21,6 +21,8 @@ Options:
   --cpus N             CPU-core budget, 1-14 (default: min(14, physical cores))
   --no-rdkit           Run nvMolKit only; disables cross-implementation validation
   --no-nvmolkit        Run RDKit only
+  --aap-csv FILE       Scored CSV (columns smiles, QED) for AAP clustering (default:
+                       ~/data/enamine_aap_100k_qed.csv; AAP is skipped if missing)
   --hw-configs FILE    Scanned nvMolKit execution settings (default:
                        hardware_configs/<gpu>_cpu<budget>.json; see select_scan_configs.py)
   --only GLOBS         Comma-separated benchmark-name globs to run (e.g. 'mcs_*,substruct_*');
@@ -48,6 +50,7 @@ SKIP_RDKIT=0
 SKIP_NVMOLKIT=0
 ONLY_GLOBS=""
 HW_CONFIG_FILE=""
+AAP_CSV="$HOME/data/enamine_aap_100k_qed.csv"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -78,6 +81,11 @@ while [ $# -gt 0 ]; do
     --no-nvmolkit)
       SKIP_NVMOLKIT=1
       shift
+      ;;
+    --aap-csv)
+      [ $# -ge 2 ] || { echo "Error: --aap-csv requires a value" >&2; exit 2; }
+      AAP_CSV="$2"
+      shift 2
       ;;
     --hw-configs)
       [ $# -ge 2 ] || { echo "Error: --hw-configs requires a value" >&2; exit 2; }
@@ -297,6 +305,13 @@ lookup_config() {
 }
 SUBSTRUCT_NUM_MOLS=5000000
 MORGAN_NUM_MOLS=1000000
+# Clustering baselines have no time cap; their RDKit sizes are capped instead. Butina's RDKit backend is
+# single-threaded O(n^2); diversity's LeaderPicker uses the CPU budget (MaxMinPicker is serial).
+BUTINA_RDKIT_MAX_SIZE=20000
+DIVERSITY_RDKIT_MAX_SIZE=100000
+# AAP similarity pairs: large for nvMolKit, small when the (pure-Python) RDKit reference runs.
+# (The RDKit Contrib reference runs ~35 pairs/s single-threaded, so 2k pairs keeps it near a minute per run.)
+if [ "$SKIP_RDKIT" = "1" ]; then AAP_NUM_PAIRS=1000000; else AAP_NUM_PAIRS=2000; fi
 MCS_NUM_MOLS=10000
 MCS_NUM_PAIRS=2800000
 RDKIT_MAX_SECONDS=300
@@ -450,13 +465,14 @@ elif [ "$SKIP_NVMOLKIT" = "1" ]; then
   MORGAN_MODE_FLAGS=(--no-nvmolkit --no_validate)
   DESCRIPTORS3D_MODE_FLAGS=(--no-nvmolkit --no_validate)
   DIVERSITY_MODE_FLAGS=(--no-nvmolkit --no_validate)
-  AAP_MODE_FLAGS=(--no-nvmolkit --no-ligand-clustering-cpu)
+  AAP_MODE_FLAGS=(--no-nvmolkit)
 fi
 
 run_bench butina_clustering "$RESULT_DIR/butina_clustering.csv" \
   python "$SCRIPT_DIR/butina_clustering_bench.py" "$DATASET" \
   --seed "$BENCHMARK_SEED" \
   --nvmolkit-reordering both \
+  --rdkit-max-size "$BUTINA_RDKIT_MAX_SIZE" \
   --output "$RESULT_DIR/butina_clustering.csv" \
   "${BUTINA_MODE_FLAGS[@]}"
 
@@ -475,6 +491,8 @@ run_bench conformer_rmsd "$RESULT_DIR/conformer_rmsd.csv" \
 # identical inputs so their results are directly comparable, each with its own scanned HardwareOptions.
 # Full precision keeps the historical benchmark names; single precision adds a _single suffix.
 PRECISIONS=(full single)
+# RDKit has no precision mode, so an RDKit-only run measures each precision-dependent baseline once.
+if [ "$SKIP_NVMOLKIT" = "1" ]; then PRECISIONS=(full); fi
 precision_suffix() {
   if [ "$1" = "full" ]; then echo ""; else echo "_$1"; fi
 }
@@ -619,6 +637,7 @@ run_bench morgan_fp "$RESULT_DIR/morgan_fp.csv" \
   --seed "$BENCHMARK_SEED" \
   --runs "$TIMING_RUNS" \
   --rdkit_threads "$CPUS" \
+  --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
   --prep_threads "$CPUS" \
   --gpu_id 0 \
   --output "$RESULT_DIR/morgan_fp.csv" \
@@ -633,6 +652,8 @@ for precision in "${PRECISIONS[@]}"; do
     --seed "$BENCHMARK_SEED" \
     --precision "$precision" \
     --prep_threads "$CPUS" \
+    --rdkit_threads "$CPUS" \
+    --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
     --num_mols 1000 10000 100000 \
     --confs_per_mol 10 50 \
     --device_input \
@@ -646,25 +667,41 @@ run_bench diversity_pickers "$RESULT_DIR/diversity_pickers.csv" \
   --seed "$BENCHMARK_SEED" \
   --sizes 10000 100000 1000000 3000000 \
   --pick_sizes 100 1000 10000 \
+  --rdkit_threads "$CPUS" \
+  --rdkit_max_size "$DIVERSITY_RDKIT_MAX_SIZE" \
   --output "$RESULT_DIR/diversity_pickers.csv" \
   "${DIVERSITY_MODE_FLAGS[@]}"
 
 # KNOWN CAVEAT: nvMolKit 0.7.0 builds AAP host descriptors with std::thread::hardware_concurrency() threads and
 # exposes no way to limit them (NVIDIA-BioNeMo/nvMolKit#368), so nvMolKit's side of this benchmark is NOT held to
 # the $CPUS budget. It is deliberately left uncapped rather than pinned; do not compare it as a $CPUS-core result.
-run_bench aap_clustering "$RESULT_DIR/aap_clustering.csv" \
-  python "$SCRIPT_DIR/aap_clustering_bench.py" \
-  --smiles "$DATASET" \
-  --seed "$BENCHMARK_SEED" \
-  --operation all \
-  --output "$RESULT_DIR/aap_clustering.csv" \
-  "${AAP_MODE_FLAGS[@]}"
+# AAP clustering orders molecules by a numeric priority (DISE requires one). Enamine has no assay values,
+# so a 100k random Enamine sample ordered by descending QED stands in; it is not comparable with the
+# assay-based (PubChem AID 686979) AAP figures from the v0.7 pre-release analysis.
+if [ -f "$AAP_CSV" ]; then
+  run_bench aap_clustering "$RESULT_DIR/aap_clustering.csv" \
+    python "$SCRIPT_DIR/aap_clustering_bench.py" \
+    --csv "$AAP_CSV" \
+    --smiles-column smiles \
+    --sort-tag QED \
+    --sort-descending \
+    --sizes 1024 4096 16384 65536 \
+    --num_pairs "$AAP_NUM_PAIRS" \
+    --seed "$BENCHMARK_SEED" \
+    --operation all \
+    --no-ligand-clustering-cpu \
+    --output "$RESULT_DIR/aap_clustering.csv" \
+    "${AAP_MODE_FLAGS[@]}"
+else
+  echo "[aap_clustering] skipped: no AAP CSV at $AAP_CSV (pass --aap-csv)"
+fi
 
 run_bench tfd "$RESULT_DIR/tfd.csv" \
   env OMP_NUM_THREADS="$CPUS" python "$SCRIPT_DIR/tfd_bench.py" \
   --smiles-file "$DATASET" \
   --seed "$BENCHMARK_SEED" \
   --num-mols 100 1000 5000 \
+  --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
   --output "$RESULT_DIR/tfd.csv" \
   "${TFD_MODE_FLAGS[@]}"
 

@@ -141,6 +141,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("--cutoff", type=float, default=None, help="Run only this cutoff value")
     parser.add_argument(
+        "--rdkit-max-size",
+        "--rdkit_max_size",
+        type=int,
+        default=0,
+        help="Largest size run with the (single-threaded, O(n^2)) RDKit backends; 0 = no cap",
+    )
+    parser.add_argument(
         "--nvmolkit-reordering",
         choices=["true", "false", "both"],
         default="true",
@@ -190,6 +197,10 @@ if __name__ == "__main__":
         default_runs = VALID_BENCHMARKS - disabled
         run_plan = [{"size": s, "run": set(default_runs)} for s in DEFAULT_SIZES]
 
+    if args.rdkit_max_size > 0:
+        for entry in run_plan:
+            if entry["size"] > args.rdkit_max_size:
+                entry["run"] = entry["run"] - {"rdkit", "rdkit_lowmem"}
     run_plan = [e for e in run_plan if e["run"]]
     if not run_plan:
         print("Error: no benchmarks to run", file=sys.stderr)
