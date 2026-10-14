@@ -169,10 +169,14 @@ fi
 
 # Expose exactly one GPU. All benchmark CLIs see it as logical GPU 0.
 export CUDA_VISIBLE_DEVICES="$GPU_ID"
-export OMP_NUM_THREADS="$CPUS"
-export MKL_NUM_THREADS="$CPUS"
-export OPENBLAS_NUM_THREADS="$CPUS"
-export NUMEXPR_NUM_THREADS="$CPUS"
+
+# CPU policy. Two separate controls, deliberately not conflated:
+#   * Timed work is held to $CPUS cores through each benchmark's own flags (--rdkit_threads,
+#     --prep_threads, --autotune_cpu_budget). conformer_rmsd and tfd call nvMolKit code whose
+#     OpenMP loops have no thread argument, so only those two get OMP_NUM_THREADS (see below).
+#   * Untimed setup (conformer generation, validation, fingerprinting) is not capped: the
+#     --prep_workers / --conf_gen_workers flags default to every available CPU.
+# No global OMP_NUM_THREADS is exported, because that would also throttle untimed setup.
 
 if [ "$SKIP_NVMOLKIT" = "0" ]; then
   if ! GPU_COUNT="$(python -c 'import torch; print(torch.cuda.device_count())' 2>/dev/null)"; then
@@ -231,6 +235,7 @@ FF_UFF_NUM_MOLS=700
 FF_UFF_BFGS_CAL_SIZE=60
 FF_UFF_FIRE_CAL_SIZE=100
 SUBSTRUCT_NUM_MOLS=1250000
+MORGAN_NUM_MOLS=1000000
 MCS_NUM_MOLS=10000
 MCS_NUM_PAIRS=2800000
 MCS_AUTOTUNE_PAIRS=230000
@@ -278,6 +283,8 @@ fi
   echo "mcs_calibration_pairs: $MCS_AUTOTUNE_PAIRS"
   echo "etkdg_num_mols: $ETKDG_NUM_MOLS"
   echo "substruct_num_mols: $SUBSTRUCT_NUM_MOLS"
+  echo "morgan_num_mols: $MORGAN_NUM_MOLS"
+  echo "cpu_budget_not_enforced_for: aap_clustering (nvMolKit#368, hardware_concurrency threads)"
   echo "mcs_num_mols: $MCS_NUM_MOLS"
   echo "mcs_num_pairs: $MCS_NUM_PAIRS"
   echo "mcs_parameter_sets: ${MCS_ROWS[*]}"
@@ -337,6 +344,10 @@ FF_MODE_FLAGS=()
 MCS_MODE_FLAGS=()
 SUBSTRUCT_MODE_FLAGS=()
 TFD_MODE_FLAGS=(--verify)
+MORGAN_MODE_FLAGS=()
+DESCRIPTORS3D_MODE_FLAGS=()
+DIVERSITY_MODE_FLAGS=()
+AAP_MODE_FLAGS=()
 if [ "$SKIP_RDKIT" = "1" ]; then
   BUTINA_MODE_FLAGS=(--no-rdkit)
   CONFORMER_RMSD_MODE_FLAGS=(--no_rdkit --no_validate)
@@ -346,6 +357,10 @@ if [ "$SKIP_RDKIT" = "1" ]; then
   MCS_MODE_FLAGS=(--no_rdkit --no_validate)
   SUBSTRUCT_MODE_FLAGS=(--no_rdkit --no_validate)
   TFD_MODE_FLAGS=(--skip-rdkit)
+  MORGAN_MODE_FLAGS=(--no-rdkit --no_validate)
+  DESCRIPTORS3D_MODE_FLAGS=(--no-rdkit --no_validate)
+  DIVERSITY_MODE_FLAGS=(--no-rdkit --no_validate)
+  AAP_MODE_FLAGS=(--no-rdkit)
 elif [ "$SKIP_NVMOLKIT" = "1" ]; then
   BUTINA_MODE_FLAGS=(--no-nvmolkit --no-fused)
   CONFORMER_RMSD_MODE_FLAGS=(--no_nvmolkit --no_validate)
@@ -355,6 +370,10 @@ elif [ "$SKIP_NVMOLKIT" = "1" ]; then
   MCS_MODE_FLAGS=(--no_nvmolkit --no_validate)
   SUBSTRUCT_MODE_FLAGS=(--no_nvmolkit --no_validate)
   TFD_MODE_FLAGS=(--skip-nvmolkit)
+  MORGAN_MODE_FLAGS=(--no-nvmolkit --no_validate)
+  DESCRIPTORS3D_MODE_FLAGS=(--no-nvmolkit --no_validate)
+  DIVERSITY_MODE_FLAGS=(--no-nvmolkit --no_validate)
+  AAP_MODE_FLAGS=(--no-nvmolkit --no-ligand-clustering-cpu)
 fi
 
 ETKDG_AUTOTUNE_FLAGS=()
@@ -423,12 +442,11 @@ run_bench butina_clustering "$RESULT_DIR/butina_clustering.csv" \
   "${BUTINA_MODE_FLAGS[@]}"
 
 run_bench conformer_rmsd "$RESULT_DIR/conformer_rmsd.csv" \
-  python "$SCRIPT_DIR/conformer_rmsd_bench.py" \
+  env OMP_NUM_THREADS="$CPUS" python "$SCRIPT_DIR/conformer_rmsd_bench.py" \
   --smiles "$DATASET" \
   --num_mols 8000 \
   --seed "$BENCHMARK_SEED" \
   --confs_per_mol 10 25 50 100 200 \
-  --prep_workers "$CPUS" \
   --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
   --output "$RESULT_DIR/conformer_rmsd.csv" \
   "${CONFORMER_RMSD_MODE_FLAGS[@]}"
@@ -441,28 +459,42 @@ run_bench cross_similarity "$RESULT_DIR/cross_similarity.json" \
   --output "$RESULT_DIR/cross_similarity.json" \
   "${CROSS_SIMILARITY_MODE_FLAGS[@]}"
 
-autotune_save_arg "$AUTOTUNE_DIR/etkdg_hardware.json"
-run_bench etkdg "$RESULT_DIR/etkdg.csv" \
-  python "$SCRIPT_DIR/etkdg_bench.py" \
-  --smiles "$DATASET" \
-  --num_mols "$ETKDG_NUM_MOLS" \
-  --seed "$BENCHMARK_SEED" \
-  --runs "$TIMING_RUNS" \
-  --confs_per_mol "$CONFS_PER_MOL" \
-  --num_gpus 1 \
-  --rdkit_threads "$CPUS" \
-  --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
-  "${ETKDG_AUTOTUNE_FLAGS[@]}" \
-  "${AUTOTUNE_SAVE_FLAGS[@]}" \
-  --output "$RESULT_DIR/etkdg.csv" \
-  "${ETKDG_MODE_FLAGS[@]}"
+# nvMolKit 0.7 adds single precision for ETKDG and the force-field minimizers. Both precisions run on
+# identical inputs so their results are directly comparable; the autotuner is told which precision it
+# is tuning. Full precision keeps the historical benchmark names; single precision adds a _single suffix.
+PRECISIONS=(full single)
+precision_suffix() {
+  if [ "$1" = "full" ]; then echo ""; else echo "_$1"; fi
+}
+
+for precision in "${PRECISIONS[@]}"; do
+  etkdg_name="etkdg$(precision_suffix "$precision")"
+  autotune_save_arg "$AUTOTUNE_DIR/${etkdg_name}_hardware.json"
+  run_bench "$etkdg_name" "$RESULT_DIR/${etkdg_name}.csv" \
+    python "$SCRIPT_DIR/etkdg_bench.py" \
+    --smiles "$DATASET" \
+    --num_mols "$ETKDG_NUM_MOLS" \
+    --seed "$BENCHMARK_SEED" \
+    --runs "$TIMING_RUNS" \
+    --confs_per_mol "$CONFS_PER_MOL" \
+    --num_gpus 1 \
+    --prep_threads "$CPUS" \
+    --precision "$precision" \
+    --rdkit_threads "$CPUS" \
+    --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
+    "${ETKDG_AUTOTUNE_FLAGS[@]}" \
+    "${AUTOTUNE_SAVE_FLAGS[@]}" \
+    --output "$RESULT_DIR/${etkdg_name}.csv" \
+    "${ETKDG_MODE_FLAGS[@]}"
+done
 
 FF_ROWS=("mmff:BFGS" "mmff:FIRE" "uff:BFGS" "uff:FIRE")
+for precision in "${PRECISIONS[@]}"; do
 for row in "${FF_ROWS[@]}"; do
   ff="${row%%:*}"
   minimizer_kind="${row##*:}"
   minimizer_stem="${minimizer_kind,,}"
-  bench_name="ff_optimize_${ff}_${minimizer_stem}"
+  bench_name="ff_optimize_${ff}_${minimizer_stem}$(precision_suffix "$precision")"
   num_mols_var="FF_${ff^^}_NUM_MOLS"
   cal_size_var="FF_${ff^^}_${minimizer_kind}_CAL_SIZE"
   ff_num_mols="${!num_mols_var}"
@@ -489,13 +521,17 @@ for row in "${FF_ROWS[@]}"; do
     --ff "$ff" \
     --minimizer_kind "$minimizer_kind" \
     --max_iters "$FF_MAX_ITERS" \
+    --no_validate \
     --num_gpus 1 \
+    --prep_threads "$CPUS" \
+    --precision "$precision" \
     --rdkit_threads "$CPUS" \
     --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
     "${FF_AUTOTUNE_FLAGS[@]}" \
     "${AUTOTUNE_SAVE_FLAGS[@]}" \
     --output "$RESULT_DIR/${bench_name}.csv" \
     "${FF_MODE_FLAGS[@]}"
+done
 done
 
 for row in "${MCS_ROWS[@]}"; do
@@ -516,6 +552,7 @@ for row in "${MCS_ROWS[@]}"; do
     --seed "$BENCHMARK_SEED" \
     --runs "$TIMING_RUNS" \
     --num_gpus 1 \
+    --prep_threads "$CPUS" \
     --rdkit_threads "$CPUS" \
     --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
     "${MCS_PARAMETER_FLAGS[@]}" \
@@ -562,6 +599,7 @@ for algorithm in gsi dfs; do
       --mode "$mode" \
       --algorithm "$algorithm" \
       --num_gpus 1 \
+      --prep_threads "$CPUS" \
       --rdkit_threads "$CPUS" \
       --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
       "${SUBSTRUCT_AUTOTUNE_FLAGS[@]}" \
@@ -570,12 +608,55 @@ for algorithm in gsi dfs; do
   done
 done
 
+run_bench morgan_fp "$RESULT_DIR/morgan_fp.csv" \
+  python "$SCRIPT_DIR/morgan_fp_bench.py" \
+  --smiles "$DATASET" \
+  --num_mols "$MORGAN_NUM_MOLS" \
+  --seed "$BENCHMARK_SEED" \
+  --runs "$TIMING_RUNS" \
+  --rdkit_threads "$CPUS" \
+  --prep_threads "$CPUS" \
+  --gpu_id 0 \
+  --output "$RESULT_DIR/morgan_fp.csv" \
+  "${MORGAN_MODE_FLAGS[@]}"
+
+# 3D descriptors: --prep_threads is the CPU budget inside the timed call; embedding prep uses all cores.
+for precision in "${PRECISIONS[@]}"; do
+  descriptors_name="descriptors3d$(precision_suffix "$precision")"
+  run_bench "$descriptors_name" "$RESULT_DIR/${descriptors_name}.csv" \
+    python "$SCRIPT_DIR/descriptors3d_bench.py" \
+    --smiles "$DATASET" \
+    --seed "$BENCHMARK_SEED" \
+    --precision "$precision" \
+    --prep_threads "$CPUS" \
+    --device_input \
+    --output "$RESULT_DIR/${descriptors_name}.csv" \
+    "${DESCRIPTORS3D_MODE_FLAGS[@]}"
+done
+
+run_bench diversity_pickers "$RESULT_DIR/diversity_pickers.csv" \
+  python "$SCRIPT_DIR/diversity_pickers_bench.py" \
+  --smiles "$DATASET" \
+  --seed "$BENCHMARK_SEED" \
+  --output "$RESULT_DIR/diversity_pickers.csv" \
+  "${DIVERSITY_MODE_FLAGS[@]}"
+
+# KNOWN CAVEAT: nvMolKit 0.7.0 builds AAP host descriptors with std::thread::hardware_concurrency() threads and
+# exposes no way to limit them (NVIDIA-BioNeMo/nvMolKit#368), so nvMolKit's side of this benchmark is NOT held to
+# the $CPUS budget. It is deliberately left uncapped rather than pinned; do not compare it as a $CPUS-core result.
+run_bench aap_clustering "$RESULT_DIR/aap_clustering.csv" \
+  python "$SCRIPT_DIR/aap_clustering_bench.py" \
+  --smiles "$DATASET" \
+  --seed "$BENCHMARK_SEED" \
+  --operation all \
+  --output "$RESULT_DIR/aap_clustering.csv" \
+  "${AAP_MODE_FLAGS[@]}"
+
 run_bench tfd "$RESULT_DIR/tfd.csv" \
-  python "$SCRIPT_DIR/tfd_bench.py" \
+  env OMP_NUM_THREADS="$CPUS" python "$SCRIPT_DIR/tfd_bench.py" \
   --smiles-file "$DATASET" \
   --seed "$BENCHMARK_SEED" \
   --num-mols 100 1000 5000 \
-  --prep-workers "$CPUS" \
   --output "$RESULT_DIR/tfd.csv" \
   "${TFD_MODE_FLAGS[@]}"
 

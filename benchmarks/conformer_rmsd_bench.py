@@ -49,7 +49,7 @@ def prepare_mols(
     num_workers: int,
 ) -> list[Chem.Mol]:
     """Embed one base conformer per mol, then perturb to ``confs_per_mol``."""
-    workers = num_workers if num_workers > 0 else max(1, available_cpu_count() // 2)
+    workers = num_workers if num_workers > 0 else available_cpu_count()
     return embed_and_jitter(
         raw_mols,
         confs_per_mol=confs_per_mol,
@@ -273,7 +273,10 @@ def main():
         help="Conformers-per-molecule sweep points (each >=2)",
     )
     parser.add_argument(
-        "--prep_workers", type=int, default=0, help="Workers for the embed-and-perturb prep step (0 = half of CPUs)"
+        "--prep_workers",
+        type=int,
+        default=0,
+        help="Workers for the untimed embed-and-perturb prep step (0 = all available CPUs)",
     )
     add_rdkit_max_seconds_arg(
         parser,

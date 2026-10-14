@@ -34,7 +34,7 @@ from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors
 
 from nvmolkit.descriptors3d import Calc3DProperties, Property3D
-from nvmolkit.types import AsyncGpuResult, Device3DResult, PrecisionMode
+from nvmolkit.types import AsyncGpuResult, Device3DResult, HardwareOptions, PrecisionMode
 
 PRECISIONS = {"single": PrecisionMode.SINGLE, "full": PrecisionMode.FULL}
 # Default (relative, absolute) tolerances against RDKit at each precision's rounding level.
@@ -192,6 +192,7 @@ def run(
     warmups: int,
     seed: int,
     prep_workers: int,
+    prep_threads: int,
     validate_count: int,
     validate_tolerance: float | None,
     device_input: bool,
@@ -220,9 +221,10 @@ def run(
         raise ValueError(f"--exclude removes every property from: {', '.join(emptied)}")
 
     max_mols = max(num_mols_list)
+    hardware_options = HardwareOptions(preprocessingThreads=prep_threads)
     max_conformers = max(conformers_per_mol_list)
     raw_mols = load_smiles(smiles_path, max_count=max_mols, sanitize=True, seed=seed)
-    workers = prep_workers if prep_workers > 0 else max(1, available_cpu_count() // 2)
+    workers = prep_workers if prep_workers > 0 else available_cpu_count()
     prepared = embed_and_jitter(
         raw_mols,
         confs_per_mol=max_conformers,
@@ -262,6 +264,7 @@ def run(
                     "avg_atoms": avg_atoms,
                     "property_set": property_set_name + "".join(f"-{name}" for name in excluded),
                     "precision": str(precision),
+                    "prep_threads": prep_threads,
                     "num_properties": len(properties),
                 }
 
@@ -282,7 +285,7 @@ def run(
                 if not no_nvmolkit:
                     nvmolkit_timing = time_it(
                         lambda mols=mols, properties=properties: Calc3DProperties(
-                            mols, properties, precision=precision
+                            mols, properties, precision=precision, hardwareOptions=hardware_options
                         ),
                         runs=runs,
                         warmups=warmups,
@@ -294,7 +297,11 @@ def run(
                     if coordinates is not None:
                         device_timing = time_it(
                             lambda mols=mols, properties=properties, coordinates=coordinates: Calc3DProperties(
-                                mols, properties, coordinates=coordinates, precision=precision
+                                mols,
+                                properties,
+                                coordinates=coordinates,
+                                precision=precision,
+                                hardwareOptions=hardware_options,
                             ),
                             runs=runs,
                             warmups=warmups,
@@ -323,7 +330,18 @@ def main() -> None:
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--warmups", type=int, default=2)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--prep_workers", type=int, default=0, help="Preparation workers (0 = half of available CPUs)")
+    parser.add_argument(
+        "--prep_workers",
+        type=int,
+        default=0,
+        help="Workers for the untimed embed-and-perturb prep (0 = all available CPUs)",
+    )
+    parser.add_argument(
+        "--prep_threads",
+        type=int,
+        default=-1,
+        help="nvMolKit CPU preprocessing threads inside the timed Calc3DProperties call (-1 = library default)",
+    )
     parser.add_argument("--validate_count", type=int, default=8)
     parser.add_argument(
         "--validate_tolerance",
@@ -357,6 +375,7 @@ def main() -> None:
         warmups=args.warmups,
         seed=args.seed,
         prep_workers=args.prep_workers,
+        prep_threads=args.prep_threads,
         validate_count=0 if args.no_validate else args.validate_count,
         validate_tolerance=args.validate_tolerance,
         precision=PRECISIONS[args.precision],

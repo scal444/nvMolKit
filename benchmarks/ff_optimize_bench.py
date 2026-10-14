@@ -54,6 +54,12 @@ from bench_utils import (
     time_it,
     write_csv_rows,
 )
+from bench_utils.autotune_support import (
+    FF_SEARCH_SPACE_OVERRIDES,
+    add_precision_arg,
+    autotune_at_precision,
+    precision_mode,
+)
 from rdkit import Chem
 from rdkit.Chem import AllChem
 
@@ -117,6 +123,7 @@ def bench_nvmolkit(
     hardware_options,
     runs: int,
     warmup: bool,
+    precision: str = "full",
 ) -> tuple[float, float, list[float]]:
     """Benchmark nvmolkit MMFF/UFF optimization; return ``(mean_ms, std_ms, energies)``."""
     if ff == "mmff":
@@ -136,6 +143,7 @@ def bench_nvmolkit(
             maxIters=max_iters,
             hardwareOptions=hardware_options,
             minimizerKind=minimizer_kind,
+            precision=precision_mode(precision),
         )
 
     if warmup:
@@ -146,6 +154,7 @@ def bench_nvmolkit(
                 maxIters=max_iters,
                 hardwareOptions=hardware_options,
                 minimizerKind=minimizer_kind,
+                precision=precision_mode(precision),
             )
         torch.cuda.synchronize()
 
@@ -295,9 +304,14 @@ def main() -> None:
         "--batches_per_gpu", type=int, default=-1, help="nvmolkit concurrent batches per GPU (-1 = library default)"
     )
     parser.add_argument(
-        "--prep_threads", type=int, default=-1, help="nvmolkit preprocessing threads (-1 = library default)"
+        "--prep_threads",
+        type=int,
+        default=-1,
+        help="nvmolkit CPU preprocessing threads in the timed region; also applied on top of an autotuned or "
+        "loaded config, which does not tune this knob (-1 = library default, all cores)",
     )
     parser.add_argument("--num_gpus", type=int, default=1, help="Number of GPUs to use (default: 1)")
+    add_precision_arg(parser)
 
     parser.add_argument(
         "--autotune",
@@ -339,10 +353,7 @@ def main() -> None:
         "--autotune_cpu_budget",
         type=int,
         default=None,
-        help=(
-            "CPU-core budget used to bound the autotune search space. "
-            "Default: detected physical core count"
-        ),
+        help=("CPU-core budget used to bound the autotune search space. Default: detected physical core count"),
     )
     parser.add_argument(
         "--autotune_calibration_size",
@@ -404,6 +415,7 @@ def main() -> None:
     print(f"  Input: {input_file} ({input_type})")
     print(f"  Force field: {args.ff.upper()}")
     print(f"  nvmolkit minimizer: {args.minimizer_kind}")
+    print(f"  nvmolkit precision: {args.precision}")
     print(f"  Max molecules: {args.num_mols if args.num_mols > 0 else 'all'}")
     print(f"  Conformers per mol: {args.confs_per_mol}")
     print(f"  Max FF iterations: {args.max_iters}")
@@ -510,12 +522,21 @@ def main() -> None:
                 "target_seconds_per_trial": args.autotune_time_budget,
                 "calibration_set": explicit_calibration,
                 "seed": args.autotune_seed,
+                "cpu_budget": args.autotune_cpu_budget,
+                "search_space_overrides": FF_SEARCH_SPACE_OVERRIDES,
                 "verbose": True,
             }
+            # The tuner times trials at full precision unless told otherwise; tune at the benchmarked precision.
             if args.ff == "mmff":
-                tune_result = nv_autotune.tune_mmff_optimize(mols, **tune_kwargs)
+                with autotune_at_precision(
+                    "nvmolkit.autotune.tune_mmff_optimize", "MMFFOptimizeMoleculesConfs", args.precision
+                ):
+                    tune_result = nv_autotune.tune_mmff_optimize(mols, **tune_kwargs)
             else:
-                tune_result = nv_autotune.tune_uff_optimize(mols, **tune_kwargs)
+                with autotune_at_precision(
+                    "nvmolkit.autotune.tune_uff_optimize", "UFFOptimizeMoleculesConfs", args.precision
+                ):
+                    tune_result = nv_autotune.tune_uff_optimize(mols, **tune_kwargs)
             hardware_options = tune_result.best_config
             config_source = "autotuned"
             print(
@@ -533,10 +554,22 @@ def main() -> None:
                 args.batch_size, args.batches_per_gpu, args.prep_threads, args.num_gpus
             )
 
+        # The force-field tuner searches batchSize/batchesPerGpu only, so a tuned or loaded config leaves
+        # preprocessingThreads at the library default (every core). Apply the requested CPU budget to it.
+        if args.prep_threads > 0 and config_source in ("autotuned", "loaded"):
+            hardware_options.preprocessingThreads = args.prep_threads
+
         torch.cuda.cudart().cudaProfilerStart()
         print(f"\nRunning nvmolkit {args.ff.upper()} {args.minimizer_kind} optimize benchmark...")
         nv_avg, nv_std, nv_energies = bench_nvmolkit(
-            mols, args.ff, args.minimizer_kind, args.max_iters, hardware_options, args.runs, args.warmup
+            mols,
+            args.ff,
+            args.minimizer_kind,
+            args.max_iters,
+            hardware_options,
+            args.runs,
+            args.warmup,
+            args.precision,
         )
         print(f"  nvmolkit:        {nv_avg:10.2f} ms (+/- {nv_std:.2f} ms)")
         results["nvmolkit"] = (nv_avg, nv_std, nv_energies)
@@ -626,6 +659,7 @@ def main() -> None:
                 "method": name,
                 "ff": args.ff,
                 "minimizer_kind": args.minimizer_kind if is_nv else "N/A",
+                "precision": args.precision if is_nv else "N/A",
                 "input_file": input_file,
                 "input_type": input_type,
                 "num_mols": len(mols),

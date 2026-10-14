@@ -29,6 +29,9 @@ JITTER_CENTER = 1.3
 JITTER_SPREAD = 0.6
 
 
+EMBED_TIMEOUT_SECONDS = 120
+
+
 def available_cpu_count() -> int:
     """Return CPUs available to this process across supported Python versions."""
     process_cpu_count = getattr(os, "process_cpu_count", None)
@@ -174,6 +177,8 @@ def _embed_one(args_tuple: tuple[int, bytes], seed: int, add_hs: bool, min_atoms
     params = rdDistGeom.ETKDGv3()
     params.useRandomCoords = True
     params.randomSeed = seed + idx
+    # Untimed setup: a molecule that cannot embed in this long is dropped rather than stalling the run.
+    params.timeout = EMBED_TIMEOUT_SECONDS
     try:
         conf_id = rdDistGeom.EmbedMolecule(mol, params=params)
     except Exception:

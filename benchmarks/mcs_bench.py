@@ -44,6 +44,7 @@ from bench_utils import (
 from bench_utils import (
     time_it as _time_it,
 )
+from bench_utils.autotune_support import MCS_SEARCH_SPACE_OVERRIDES
 from rdkit import Chem
 from rdkit.Chem import rdFMCS
 
@@ -538,6 +539,7 @@ def main() -> None:
                         n_trials=args.autotune_trials,
                         target_seconds_per_trial=args.autotune_time_budget,
                         cpu_budget=args.autotune_cpu_budget,
+                        search_space_overrides=MCS_SEARCH_SPACE_OVERRIDES,
                         seed=args.autotune_seed,
                         verbose=True,
                     )
