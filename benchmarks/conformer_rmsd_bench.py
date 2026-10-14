@@ -157,6 +157,7 @@ def run(
     no_rdkit: bool,
     no_nvmolkit: bool,
     output: str | None,
+    gpu_runs: int = 5,
 ) -> None:
     if no_rdkit and no_nvmolkit:
         raise ValueError("cannot disable both RDKit and nvMolKit")
@@ -232,7 +233,7 @@ def run(
         gpu_pairs_per_s: float | None = None
         if not no_nvmolkit:
             print("  nvMolKit GPU (batched):")
-            result = time_it(lambda mols=mols: bench_gpu_batch(mols), runs=5, warmups=2, gpu_sync=True)
+            result = time_it(lambda mols=mols: bench_gpu_batch(mols), runs=gpu_runs, warmups=2, gpu_sync=True)
             gpu_time_s = result.median_s
             gpu_std_s = result.std_ms / 1000.0
             gpu_pairs_per_s = total_pairs / gpu_time_s
@@ -293,6 +294,13 @@ def main():
     )
     parser.add_argument("--no_validate", action="store_true", help="Skip the GPU-vs-RDKit correctness check")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--gpu_runs",
+        type=int,
+        default=5,
+        help="Timed nvMolKit repetitions per point; the median is reported. Calls are sub-second, so use "
+        "more for stable numbers (default: 5)",
+    )
     parser.add_argument("--output", type=str, default=None, help="Optional CSV output path")
     add_backend_selection_args(parser)
     args = parser.parse_args()
@@ -312,6 +320,7 @@ def main():
         no_rdkit=args.no_rdkit,
         no_nvmolkit=args.no_nvmolkit,
         output=args.output,
+        gpu_runs=args.gpu_runs,
     )
 
     print("\nDone.")

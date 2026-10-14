@@ -20,10 +20,11 @@ Options:
   --gpu-id ID          Physical GPU to expose (default: 0)
   --cpus N             CPU-core budget, 1-14 (default: min(14, physical cores))
   --no-rdkit           Run nvMolKit only; disables cross-implementation validation
-  --no-nvmolkit        Run RDKit only; disables autotuning
-  --no-autotune        Use benchmark defaults instead of autotuning nvMolKit
-  --autotune-trials N  Optuna trials per tuned benchmark (default: 20)
-  --autotune-seconds N Target seconds per autotune trial (default: 10)
+  --no-nvmolkit        Run RDKit only
+  --hw-configs FILE    Scanned nvMolKit execution settings (default:
+                       hardware_configs/<gpu>_cpu<budget>.json; see select_scan_configs.py)
+  --only GLOBS         Comma-separated benchmark-name globs to run (e.g. 'mcs_*,substruct_*');
+                       other benchmarks are skipped and left out of summary.tsv
   -h, --help           Show this help
 
 The suite runs Butina clustering, conformer RMSD, ETKDG and MMFF BFGS/FIRE (full
@@ -45,9 +46,8 @@ GPU_ID=0
 REQUESTED_CPUS=""
 SKIP_RDKIT=0
 SKIP_NVMOLKIT=0
-AUTOTUNE_ENABLED=1
-AUTOTUNE_TRIALS=20
-AUTOTUNE_TIME_BUDGET=10
+ONLY_GLOBS=""
+HW_CONFIG_FILE=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -79,18 +79,14 @@ while [ $# -gt 0 ]; do
       SKIP_NVMOLKIT=1
       shift
       ;;
-    --no-autotune)
-      AUTOTUNE_ENABLED=0
-      shift
-      ;;
-    --autotune-trials)
-      [ $# -ge 2 ] || { echo "Error: --autotune-trials requires a value" >&2; exit 2; }
-      AUTOTUNE_TRIALS="$2"
+    --hw-configs)
+      [ $# -ge 2 ] || { echo "Error: --hw-configs requires a value" >&2; exit 2; }
+      HW_CONFIG_FILE="$2"
       shift 2
       ;;
-    --autotune-seconds)
-      [ $# -ge 2 ] || { echo "Error: --autotune-seconds requires a value" >&2; exit 2; }
-      AUTOTUNE_TIME_BUDGET="$2"
+    --only)
+      [ $# -ge 2 ] || { echo "Error: --only requires a value" >&2; exit 2; }
+      ONLY_GLOBS="$2"
       shift 2
       ;;
     -h|--help)
@@ -129,17 +125,6 @@ if [ "$SKIP_RDKIT" = "1" ] && [ "$SKIP_NVMOLKIT" = "1" ]; then
   echo "Error: --no-rdkit and --no-nvmolkit are mutually exclusive" >&2
   exit 2
 fi
-if ! [[ "$AUTOTUNE_TRIALS" =~ ^[1-9][0-9]*$ ]]; then
-  echo "Error: --autotune-trials must be a positive integer" >&2
-  exit 2
-fi
-if ! [[ "$AUTOTUNE_TIME_BUDGET" =~ ^[1-9][0-9]*$ ]]; then
-  echo "Error: --autotune-seconds must be a positive integer" >&2
-  exit 2
-fi
-if [ "$SKIP_NVMOLKIT" = "1" ]; then
-  AUTOTUNE_ENABLED=0
-fi
 
 PHYSICAL_CORES="$(lscpu -p=Core,Socket 2>/dev/null | awk -F, '!/^#/ {print $1 "," $2}' | sort -u | wc -l)"
 if [ -z "$PHYSICAL_CORES" ] || [ "$PHYSICAL_CORES" -lt 1 ]; then
@@ -173,7 +158,7 @@ export CUDA_VISIBLE_DEVICES="$GPU_ID"
 
 # CPU policy. Two separate controls, deliberately not conflated:
 #   * Timed work is held to $CPUS cores through each benchmark's own flags (--rdkit_threads,
-#     --prep_threads, --autotune_cpu_budget). conformer_rmsd and tfd call nvMolKit code whose
+#     --prep_threads, --workers, scanned HardwareOptions). conformer_rmsd and tfd call nvMolKit code whose
 #     OpenMP loops have no thread argument, so only those two get OMP_NUM_THREADS (see below).
 #   * Untimed setup (conformer generation, validation, fingerprinting) is not capped: the
 #     --prep_workers / --conf_gen_workers flags default to every available CPU.
@@ -199,10 +184,6 @@ for module in nvtx numpy pandas rdkit torch tqdm; do
     exit 1
   fi
 done
-if [ "$AUTOTUNE_ENABLED" = "1" ] && ! python -c 'import optuna' 2>/dev/null; then
-  echo "Error: autotuning requires optuna; install it or pass --no-autotune" >&2
-  exit 1
-fi
 
 if ! mkdir -p "$OUTPUT_DIR"; then
   echo "Error: could not create output directory: $OUTPUT_DIR" >&2
@@ -214,9 +195,8 @@ if ! OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"; then
 fi
 LOG_DIR="$OUTPUT_DIR/logs"
 RESULT_DIR="$OUTPUT_DIR/results"
-AUTOTUNE_DIR="$OUTPUT_DIR/autotune"
 SYSINFO_DIR="$OUTPUT_DIR/sysinfo"
-if ! mkdir -p "$LOG_DIR" "$RESULT_DIR" "$AUTOTUNE_DIR" "$SYSINFO_DIR"; then
+if ! mkdir -p "$LOG_DIR" "$RESULT_DIR" "$SYSINFO_DIR"; then
   echo "Error: could not create benchmark output subdirectories" >&2
   exit 1
 fi
@@ -235,35 +215,109 @@ BENCHMARK_SEED=42
 TIMING_RUNS=3
 ETKDG_NUM_MOLS=1311
 FF_MMFF_NUM_MOLS=2622
-declare -A HW_CONFIG=(
-  [etkdg:full]="512:4"
-  [etkdg:single]="1024:8"
-  [mmff_bfgs:full]="512:6"
-  [mmff_bfgs:single]="16384:6"
-  [mmff_fire:full]="256:10"
-  [mmff_fire:single]="512:12"
-)
-SUBSTRUCT_NUM_MOLS=1250000
+# Settings are loaded from a JSON file written by select_scan_configs.py, keyed by GPU and CPU budget so
+# that configurations scanned on one machine are never applied to different hardware.
+# Formats: HW_CONFIG batchSize:batchesPerGpu; MCS_CONFIG batchSize:workers:preprocessingThreads:executors;
+# SUBSTRUCT_CONFIG batchSize:workers:preprocessingThreads.
+declare -A HW_CONFIG=()
+validate_concurrent_budget() {
+  local name="$1" workers="$2" prep="$3"
+  if [ $(( workers + prep )) -gt "$CPUS" ]; then
+    echo "Error: $name uses workers=$workers + preprocessing=$prep > CPU budget $CPUS" >&2
+    exit 2
+  fi
+}
+# MCS and substructure search run GPU-worker and preprocessing threads concurrently, so the scans
+# (scan_search_options.py) hold workers + preprocessing threads to the CPU budget.
+# MCS format: batchSize:workers:preprocessingThreads:executorsPerRunner.
+declare -A MCS_CONFIG=()
+# Substructure format: batchSize:workers:preprocessingThreads, keyed by SMARTS stem and algorithm.
+declare -A SUBSTRUCT_CONFIG=()
+
+if [ -z "$HW_CONFIG_FILE" ] && [ "$SKIP_NVMOLKIT" = "0" ]; then
+  GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader -i "$GPU_ID" 2>/dev/null | head -1)"
+  GPU_SLUG="$(python -c 'import re, sys; print(re.sub(r"[^a-z0-9]+", "_", sys.argv[1].lower().replace("nvidia", "")).strip("_"))' "$GPU_NAME")"
+  HW_CONFIG_FILE="$SCRIPT_DIR/hardware_configs/${GPU_SLUG}_cpu${CPUS}.json"
+fi
+if [ -n "$HW_CONFIG_FILE" ]; then
+  if [ ! -f "$HW_CONFIG_FILE" ]; then
+    echo "Error: no scanned settings at $HW_CONFIG_FILE" >&2
+    echo "       Run scan_hardware_options.py and scan_search_options.py on this machine with this CPU" >&2
+    echo "       budget, then select_scan_configs.py, or pass --hw-configs." >&2
+    exit 1
+  fi
+  if ! HW_CONFIG_ASSIGNMENTS="$(python - "$HW_CONFIG_FILE" <<'PY'
+import json
+import shlex
+import sys
+
+document = json.load(open(sys.argv[1]))
+for key, entry in document["configs"].items():
+    kind, _, name = key.partition(":")
+    c = entry["config"]
+    if kind == "mcs":
+        value = f"{c['batchSize']}:{c['workers']}:{c['preprocessingThreads']}:{c['executors']}"
+        print(f"MCS_CONFIG[{shlex.quote(name)}]={value}")
+    elif kind == "substruct":
+        value = f"{c['batchSize']}:{c['workers']}:{c['preprocessingThreads']}"
+        print(f"SUBSTRUCT_CONFIG[{shlex.quote(name)}]={value}")
+    else:
+        print(f"HW_CONFIG[{shlex.quote(key)}]={c['batchSize']}:{c['batchesPerGpu']}")
+print(f"HW_CONFIG_CPU_BUDGET={int(document['cpu_budget'])}")
+print(f"HW_CONFIG_GPU={shlex.quote(document['gpu'])}")
+PY
+)"; then
+    echo "Error: could not read $HW_CONFIG_FILE" >&2
+    exit 1
+  fi
+  eval "$HW_CONFIG_ASSIGNMENTS"
+  if [ "$HW_CONFIG_CPU_BUDGET" != "$CPUS" ]; then
+    echo "Error: $HW_CONFIG_FILE was scanned with a $HW_CONFIG_CPU_BUDGET-core budget, not $CPUS" >&2
+    exit 2
+  fi
+  if [ "$SKIP_NVMOLKIT" = "0" ] && [ -n "${GPU_NAME:-}" ] && [ "$HW_CONFIG_GPU" != "$GPU_NAME" ]; then
+    echo "Error: $HW_CONFIG_FILE was scanned on '$HW_CONFIG_GPU', but GPU $GPU_ID is '$GPU_NAME'" >&2
+    exit 2
+  fi
+fi
+
+# Look up a scanned setting into HW_VALUE. RDKit-only runs ignore nvMolKit settings, so they fall back
+# to library defaults; nvMolKit runs fail rather than benchmark an unscanned configuration.
+lookup_config() {
+  local -n table="$1"
+  local key="$2" default="$3"
+  if [ -n "${table[$key]:-}" ]; then
+    HW_VALUE="${table[$key]}"
+  elif [ "$SKIP_NVMOLKIT" = "1" ]; then
+    HW_VALUE="$default"
+  else
+    echo "Error: no scanned $1 entry for '$key' in $HW_CONFIG_FILE" >&2
+    exit 2
+  fi
+}
+SUBSTRUCT_NUM_MOLS=5000000
 MORGAN_NUM_MOLS=1000000
 MCS_NUM_MOLS=10000
 MCS_NUM_PAIRS=2800000
-MCS_AUTOTUNE_PAIRS=230000
 RDKIT_MAX_SECONDS=300
 FF_MAX_ITERS=200
 
 # MCS parameter rows: (benchmark name, atom compare, bond compare, ring-only).
 # Strict means element/order matching, without the additional comparison
 # variants exposed by mcs_bench.py.
+# The fifth field is the timed pair count. Lax comparisons are ~10x slower per pair on one GPU (about
+# 2.4k and 3.8k pairs/s on GB300 versus 30-60k for strict rows), so they time fewer pairs to keep each run
+# near a minute rather than 12-20 minutes.
 MCS_ROWS=(
-  "mcs_lax_lax:any:any:0"
-  "mcs_lax_strict:any:order:0"
-  "mcs_strict_lax:elements:any:0"
-  "mcs_strict_strict:elements:order:0"
-  "mcs_strict_strict_ring:elements:order:1"
+  "mcs_lax_lax:any:any:0:200000"
+  "mcs_lax_strict:any:order:0:300000"
+  "mcs_strict_lax:elements:any:0:$MCS_NUM_PAIRS"
+  "mcs_strict_strict:elements:order:0:$MCS_NUM_PAIRS"
+  "mcs_strict_strict_ring:elements:order:1:$MCS_NUM_PAIRS"
 )
 
 DATASET_LINES="$(wc -l < "$DATASET")"
-if [ "$AUTOTUNE_ENABLED" = "1" ] && [ "$DATASET_LINES" -lt "$SUBSTRUCT_NUM_MOLS" ]; then
+if [ "$DATASET_LINES" -lt "$SUBSTRUCT_NUM_MOLS" ]; then
   echo "Error: dataset has $DATASET_LINES lines; publication runs require at least" >&2
   echo "       $SUBSTRUCT_NUM_MOLS molecules for the fixed substructure workload." >&2
   exit 1
@@ -281,14 +335,12 @@ fi
   echo "cpu_budget: $CPUS"
   echo "gpu_id_physical: $GPU_ID"
   echo "num_gpus_visible: $GPU_COUNT"
-  echo "autotune_enabled: $AUTOTUNE_ENABLED"
-  echo "autotune_trials: $AUTOTUNE_TRIALS"
-  echo "autotune_seconds_per_trial: $AUTOTUNE_TIME_BUDGET"
   echo "benchmark_seed: $BENCHMARK_SEED"
   echo "timing_runs: $TIMING_RUNS"
   echo "ff_mmff_num_mols: $FF_MMFF_NUM_MOLS"
   for key in "${!HW_CONFIG[@]}"; do echo "hw_config_${key/:/_}: ${HW_CONFIG[$key]}"; done
-  echo "mcs_calibration_pairs: $MCS_AUTOTUNE_PAIRS"
+  for key in "${!MCS_CONFIG[@]}"; do echo "mcs_config_${key}: ${MCS_CONFIG[$key]}"; done
+  for key in "${!SUBSTRUCT_CONFIG[@]}"; do echo "substruct_config_${key/:/_}: ${SUBSTRUCT_CONFIG[$key]}"; done
   echo "etkdg_num_mols: $ETKDG_NUM_MOLS"
   echo "substruct_num_mols: $SUBSTRUCT_NUM_MOLS"
   echo "morgan_num_mols: $MORGAN_NUM_MOLS"
@@ -296,6 +348,8 @@ fi
   echo "mcs_num_mols: $MCS_NUM_MOLS"
   echo "mcs_num_pairs: $MCS_NUM_PAIRS"
   echo "mcs_parameter_sets: ${MCS_ROWS[*]}"
+  echo "only: ${ONLY_GLOBS:-all}"
+  echo "hw_config_file: ${HW_CONFIG_FILE:-none}"
   echo "skip_rdkit: $SKIP_RDKIT"
   echo "skip_nvmolkit: $SKIP_NVMOLKIT"
   echo "git_commit: $(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
@@ -313,10 +367,25 @@ SUMMARY="$OUTPUT_DIR/summary.tsv"
 printf "benchmark\tstatus\texit_code\tduration_s\tlog\tresult\n" > "$SUMMARY"
 FAILURES=0
 
+selected() {
+  local name="$1" glob
+  [ -z "$ONLY_GLOBS" ] && return 0
+  local IFS=,
+  for glob in $ONLY_GLOBS; do
+    # shellcheck disable=SC2053
+    [[ "$name" == $glob ]] && return 0
+  done
+  return 1
+}
+
 run_bench() {
   local name="$1"
   local result_path="$2"
   shift 2
+  if ! selected "$name"; then
+    echo "[$name] skipped (--only $ONLY_GLOBS)"
+    return 0
+  fi
   local log_path="$LOG_DIR/${name}.log"
   local start_s end_s duration code status
 
@@ -381,56 +450,6 @@ elif [ "$SKIP_NVMOLKIT" = "1" ]; then
   AAP_MODE_FLAGS=(--no-nvmolkit --no-ligand-clustering-cpu)
 fi
 
-MCS_AUTOTUNE_FLAGS=()
-if [ "$AUTOTUNE_ENABLED" = "1" ]; then
-  MCS_AUTOTUNE_FLAGS=(
-    --autotune
-    --autotune_trials "$AUTOTUNE_TRIALS"
-    --autotune_time_budget "$AUTOTUNE_TIME_BUDGET"
-    --autotune_cpu_budget "$CPUS"
-    --autotune_calibration_size "$MCS_AUTOTUNE_PAIRS"
-  )
-fi
-
-substruct_calibration_size() {
-  case "$1:$2" in
-    gsi:rdkit_fragment_descriptors_supported) echo 1250000 ;;
-    gsi:wehi_pains_supported) echo 475000 ;;
-    gsi:BMS_2006_filter_supported) echo 1050000 ;;
-    gsi:rdkit_tautomer_transforms_supported) echo 1250000 ;;
-    gsi:rdkit_torsionPreferences_v2_supported) echo 258000 ;;
-    dfs:rdkit_fragment_descriptors_supported) echo 1250000 ;;
-    dfs:wehi_pains_supported) echo 1000000 ;;
-    dfs:BMS_2006_filter_supported) echo 1250000 ;;
-    dfs:rdkit_tautomer_transforms_supported) echo 1250000 ;;
-    dfs:rdkit_torsionPreferences_v2_supported) echo 270000 ;;
-  esac
-}
-
-substruct_timing_runs() {
-  case "$1:$2" in
-    gsi:rdkit_fragment_descriptors_supported) echo 3 ;;
-    gsi:wehi_pains_supported) echo 3 ;;
-    gsi:BMS_2006_filter_supported) echo 3 ;;
-    gsi:rdkit_tautomer_transforms_supported) echo 3 ;;
-    gsi:rdkit_torsionPreferences_v2_supported) echo 3 ;;
-    dfs:rdkit_fragment_descriptors_supported) echo 3 ;;
-    dfs:wehi_pains_supported) echo 3 ;;
-    dfs:BMS_2006_filter_supported) echo 3 ;;
-    dfs:rdkit_tautomer_transforms_supported) echo 3 ;;
-    dfs:rdkit_torsionPreferences_v2_supported) echo 3 ;;
-  esac
-}
-
-autotune_save_arg() {
-  local path="$1"
-  if [ "$AUTOTUNE_ENABLED" = "1" ]; then
-    AUTOTUNE_SAVE_FLAGS=(--autotune_save "$path")
-  else
-    AUTOTUNE_SAVE_FLAGS=()
-  fi
-}
-
 run_bench butina_clustering "$RESULT_DIR/butina_clustering.csv" \
   python "$SCRIPT_DIR/butina_clustering_bench.py" "$DATASET" \
   --seed "$BENCHMARK_SEED" \
@@ -444,6 +463,7 @@ run_bench conformer_rmsd "$RESULT_DIR/conformer_rmsd.csv" \
   --num_mols 8000 \
   --seed "$BENCHMARK_SEED" \
   --confs_per_mol 10 25 50 100 200 \
+  --gpu_runs 20 \
   --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
   --output "$RESULT_DIR/conformer_rmsd.csv" \
   "${CONFORMER_RMSD_MODE_FLAGS[@]}"
@@ -458,7 +478,9 @@ precision_suffix() {
 
 for precision in "${PRECISIONS[@]}"; do
   etkdg_name="etkdg$(precision_suffix "$precision")"
-  IFS=: read -r hw_batch hw_bpg <<< "${HW_CONFIG[etkdg:$precision]}"
+  selected "$etkdg_name" || { echo "[$etkdg_name] skipped (--only $ONLY_GLOBS)"; continue; }
+  lookup_config HW_CONFIG "etkdg:$precision" "-1:-1"
+  IFS=: read -r hw_batch hw_bpg <<< "$HW_VALUE"
   run_bench "$etkdg_name" "$RESULT_DIR/${etkdg_name}.csv" \
     python "$SCRIPT_DIR/etkdg_bench.py" \
     --smiles "$DATASET" \
@@ -487,7 +509,9 @@ for row in "${FF_ROWS[@]}"; do
   minimizer_kind="${row##*:}"
   minimizer_stem="${minimizer_kind,,}"
   bench_name="ff_optimize_${ff}_${minimizer_stem}$(precision_suffix "$precision")"
-  IFS=: read -r hw_batch hw_bpg <<< "${HW_CONFIG[${ff}_${minimizer_stem}:$precision]}"
+  selected "$bench_name" || { echo "[$bench_name] skipped (--only $ONLY_GLOBS)"; continue; }
+  lookup_config HW_CONFIG "${ff}_${minimizer_stem}:$precision" "-1:-1"
+  IFS=: read -r hw_batch hw_bpg <<< "$HW_VALUE"
   if [ "$hw_bpg" -gt "$CPUS" ]; then
     echo "Error: ${bench_name} batches_per_gpu=$hw_bpg exceeds the CPU budget of $CPUS" >&2
     exit 2
@@ -515,7 +539,7 @@ done
 done
 
 for row in "${MCS_ROWS[@]}"; do
-  IFS=: read -r mcs_name atom_compare bond_compare ring_only <<< "$row"
+  IFS=: read -r mcs_name atom_compare bond_compare ring_only mcs_pairs <<< "$row"
   MCS_PARAMETER_FLAGS=(
     --atom_compare "$atom_compare"
     --bond_compare "$bond_compare"
@@ -523,67 +547,63 @@ for row in "${MCS_ROWS[@]}"; do
   if [ "$ring_only" = "1" ]; then
     MCS_PARAMETER_FLAGS+=(--ring_matches_ring_only)
   fi
-  autotune_save_arg "$AUTOTUNE_DIR/${mcs_name}_config.json"
+  selected "$mcs_name" || { echo "[$mcs_name] skipped (--only $ONLY_GLOBS)"; continue; }
+  lookup_config MCS_CONFIG "$mcs_name" "0:-1:-1:-1"
+  IFS=: read -r hw_batch hw_workers hw_prep hw_exec <<< "$HW_VALUE"
+  validate_concurrent_budget "$mcs_name" "$hw_workers" "$hw_prep"
   run_bench "$mcs_name" "$RESULT_DIR/${mcs_name}.csv" \
     python "$SCRIPT_DIR/mcs_bench.py" \
     --smiles "$DATASET" \
     --num_mols "$MCS_NUM_MOLS" \
-    --num_pairs "$MCS_NUM_PAIRS" \
+    --num_pairs "$mcs_pairs" \
     --seed "$BENCHMARK_SEED" \
     --runs "$TIMING_RUNS" \
     --num_gpus 1 \
-    --prep_threads "$CPUS" \
+    --batch_size "$hw_batch" \
+    --workers "$hw_workers" \
+    --prep_threads "$hw_prep" \
+    --executors_per_runner "$hw_exec" \
     --rdkit_threads "$CPUS" \
     --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
     "${MCS_PARAMETER_FLAGS[@]}" \
-    "${MCS_AUTOTUNE_FLAGS[@]}" \
-    "${AUTOTUNE_SAVE_FLAGS[@]}" \
     --output "$RESULT_DIR/${mcs_name}.csv" \
     "${MCS_MODE_FLAGS[@]}"
 done
 
+# SMARTS file : search mode : timed molecules. Workloads are sized for >=~10 s per timed run at the scanned
+# GB300 throughput; the torsion set (~365 patterns, all matches) uses fewer molecules to stay near 30 s.
 SUBSTRUCT_ROWS=(
-  "rdkit_fragment_descriptors_supported.txt:countSubstructMatches"
-  "wehi_pains_supported.txt:hasSubstructMatch"
-  "BMS_2006_filter_supported.txt:hasSubstructMatch"
-  "rdkit_tautomer_transforms_supported.txt:getSubstructMatches"
-  "rdkit_torsionPreferences_v2_supported.txt:getSubstructMatches"
+  "rdkit_fragment_descriptors_supported.txt:countSubstructMatches:$SUBSTRUCT_NUM_MOLS"
+  "wehi_pains_supported.txt:hasSubstructMatch:$SUBSTRUCT_NUM_MOLS"
+  "BMS_2006_filter_supported.txt:hasSubstructMatch:$SUBSTRUCT_NUM_MOLS"
+  "rdkit_tautomer_transforms_supported.txt:getSubstructMatches:$SUBSTRUCT_NUM_MOLS"
+  "rdkit_torsionPreferences_v2_supported.txt:getSubstructMatches:1250000"
 )
 for algorithm in gsi dfs; do
   for row in "${SUBSTRUCT_ROWS[@]}"; do
-    smarts_file="${row%%:*}"
-    mode="${row##*:}"
+    IFS=: read -r smarts_file mode substruct_mols <<< "$row"
     smarts_stem="${smarts_file%.txt}"
     bench_name="substruct_${smarts_stem}_${algorithm}"
-    cal_size="$(substruct_calibration_size "$algorithm" "$smarts_stem")"
-    runs="$(substruct_timing_runs "$algorithm" "$smarts_stem")"
-    SUBSTRUCT_AUTOTUNE_FLAGS=()
-    if [ "$AUTOTUNE_ENABLED" = "1" ]; then
-      SUBSTRUCT_AUTOTUNE_FLAGS=(
-        --autotune
-        --autotune_trials "$AUTOTUNE_TRIALS"
-        --autotune_time_budget "$AUTOTUNE_TIME_BUDGET"
-        --autotune_cpu_budget "$CPUS"
-        --autotune_calibration_size "$cal_size"
-      )
-    fi
-    autotune_save_arg "$AUTOTUNE_DIR/${bench_name}_config.json"
+    selected "$bench_name" || { echo "[$bench_name] skipped (--only $ONLY_GLOBS)"; continue; }
+    lookup_config SUBSTRUCT_CONFIG "$smarts_stem:$algorithm" "1024:-1:-1"
+    IFS=: read -r hw_batch hw_workers hw_prep <<< "$HW_VALUE"
+    validate_concurrent_budget "$bench_name" "$hw_workers" "$hw_prep"
     run_bench "$bench_name" "$LOG_DIR/${bench_name}.log" \
       python "$SCRIPT_DIR/substruct_bench.py" \
       --smiles "$DATASET" \
-      --num_mols "$SUBSTRUCT_NUM_MOLS" \
+      --num_mols "$substruct_mols" \
       --seed "$BENCHMARK_SEED" \
-      --runs "$runs" \
+      --runs "$TIMING_RUNS" \
       --sanitize \
       --smarts "$SMARTS_DIR/$smarts_file" \
       --mode "$mode" \
       --algorithm "$algorithm" \
       --num_gpus 1 \
-      --prep_threads "$CPUS" \
+      --batch_size "$hw_batch" \
+      --workers "$hw_workers" \
+      --prep_threads "$hw_prep" \
       --rdkit_threads "$CPUS" \
       --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
-      "${SUBSTRUCT_AUTOTUNE_FLAGS[@]}" \
-      "${AUTOTUNE_SAVE_FLAGS[@]}" \
       "${SUBSTRUCT_MODE_FLAGS[@]}"
   done
 done
