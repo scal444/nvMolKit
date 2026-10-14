@@ -26,11 +26,12 @@ Options:
   --autotune-seconds N Target seconds per autotune trial (default: 10)
   -h, --help           Show this help
 
-The suite runs the non-size-scan benchmarks from run_all_benchmarks.sh:
-Butina clustering, conformer RMSD, cross similarity, ETKDG, all MMFF/UFF x
-BFGS/FIRE combinations, the MCS atom/bond comparison matrix plus ring support,
-both GSI and DFS for every supported
-substructure set, and TFD.
+The suite runs Butina clustering, conformer RMSD, ETKDG and MMFF BFGS/FIRE (full
+and single precision, with scanned HardwareOptions), the MCS atom/bond
+comparison matrix plus ring support, GSI and DFS substructure search for every
+supported SMARTS set, Morgan fingerprints, 3D descriptors (both precisions),
+diversity pickers, AAP clustering, and TFD. Autotuning applies to MCS and
+substructure search only.
 EOF
 }
 
@@ -192,7 +193,7 @@ else
   GPU_COUNT="not_checked"
 fi
 
-for module in nvtx numpy pandas pyperf rdkit torch tqdm; do
+for module in nvtx numpy pandas rdkit torch tqdm; do
   if ! python -c "import $module" 2>/dev/null; then
     echo "Error: required Python package '$module' is not importable" >&2
     exit 1
@@ -220,20 +221,28 @@ if ! mkdir -p "$LOG_DIR" "$RESULT_DIR" "$AUTOTUNE_DIR" "$SYSINFO_DIR"; then
   exit 1
 fi
 
-# Fixed single-GPU production workloads derived from the B300/H200 one-GPU
-# runs. Every workload uses three samples. BFGS and FIRE deliberately share the exact same per-force-field input
-# sample so their throughput and wall times are directly comparable.
+# Fixed single-GPU production workloads. Every workload uses three samples. BFGS and FIRE deliberately share
+# the exact same input sample so their throughput and wall times are directly comparable.
+#
+# ETKDG and MMFF are not autotuned. Their HardwareOptions come from a grid scan on this machine
+# (scan_hardware_options.py; GB300, 14-core budget, 2026-10-14): batch 256-16384 x batches per GPU 2-14,
+# each point timed on the workloads below, which are sized to several complete fills of the largest
+# configuration scanned. Optuna autotuning was replaced because its small fixed calibration sets could not
+# fill the pipeline for large configurations and so were biased toward small batches.
+# Format: batchSize:batchesPerGpu. Re-scan before running on different hardware.
 CONFS_PER_MOL=200
 BENCHMARK_SEED=42
 TIMING_RUNS=3
-ETKDG_NUM_MOLS=810
-ETKDG_CAL_SIZE=72
-FF_MMFF_NUM_MOLS=1400
-FF_MMFF_BFGS_CAL_SIZE=115
-FF_MMFF_FIRE_CAL_SIZE=230
-FF_UFF_NUM_MOLS=700
-FF_UFF_BFGS_CAL_SIZE=60
-FF_UFF_FIRE_CAL_SIZE=100
+ETKDG_NUM_MOLS=1311
+FF_MMFF_NUM_MOLS=2622
+declare -A HW_CONFIG=(
+  [etkdg:full]="512:4"
+  [etkdg:single]="1024:8"
+  [mmff_bfgs:full]="512:6"
+  [mmff_bfgs:single]="16384:6"
+  [mmff_fire:full]="256:10"
+  [mmff_fire:single]="512:12"
+)
 SUBSTRUCT_NUM_MOLS=1250000
 MORGAN_NUM_MOLS=1000000
 MCS_NUM_MOLS=10000
@@ -277,9 +286,8 @@ fi
   echo "autotune_seconds_per_trial: $AUTOTUNE_TIME_BUDGET"
   echo "benchmark_seed: $BENCHMARK_SEED"
   echo "timing_runs: $TIMING_RUNS"
-  echo "etkdg_calibration_mols: $ETKDG_CAL_SIZE"
   echo "ff_mmff_num_mols: $FF_MMFF_NUM_MOLS"
-  echo "ff_uff_num_mols: $FF_UFF_NUM_MOLS"
+  for key in "${!HW_CONFIG[@]}"; do echo "hw_config_${key/:/_}: ${HW_CONFIG[$key]}"; done
   echo "mcs_calibration_pairs: $MCS_AUTOTUNE_PAIRS"
   echo "etkdg_num_mols: $ETKDG_NUM_MOLS"
   echo "substruct_num_mols: $SUBSTRUCT_NUM_MOLS"
@@ -338,7 +346,6 @@ run_bench() {
 
 BUTINA_MODE_FLAGS=()
 CONFORMER_RMSD_MODE_FLAGS=()
-CROSS_SIMILARITY_MODE_FLAGS=()
 ETKDG_MODE_FLAGS=()
 FF_MODE_FLAGS=()
 MCS_MODE_FLAGS=()
@@ -351,7 +358,6 @@ AAP_MODE_FLAGS=()
 if [ "$SKIP_RDKIT" = "1" ]; then
   BUTINA_MODE_FLAGS=(--no-rdkit)
   CONFORMER_RMSD_MODE_FLAGS=(--no_rdkit --no_validate)
-  CROSS_SIMILARITY_MODE_FLAGS=(--no-rdkit)
   ETKDG_MODE_FLAGS=(--no_rdkit --no_validate)
   FF_MODE_FLAGS=(--no_rdkit --no_validate)
   MCS_MODE_FLAGS=(--no_rdkit --no_validate)
@@ -364,7 +370,6 @@ if [ "$SKIP_RDKIT" = "1" ]; then
 elif [ "$SKIP_NVMOLKIT" = "1" ]; then
   BUTINA_MODE_FLAGS=(--no-nvmolkit --no-fused)
   CONFORMER_RMSD_MODE_FLAGS=(--no_nvmolkit --no_validate)
-  CROSS_SIMILARITY_MODE_FLAGS=(--no-nvmolkit)
   ETKDG_MODE_FLAGS=(--no_nvmolkit --no_validate)
   FF_MODE_FLAGS=(--no_nvmolkit --no_validate)
   MCS_MODE_FLAGS=(--no_nvmolkit --no_validate)
@@ -376,16 +381,8 @@ elif [ "$SKIP_NVMOLKIT" = "1" ]; then
   AAP_MODE_FLAGS=(--no-nvmolkit --no-ligand-clustering-cpu)
 fi
 
-ETKDG_AUTOTUNE_FLAGS=()
 MCS_AUTOTUNE_FLAGS=()
 if [ "$AUTOTUNE_ENABLED" = "1" ]; then
-  ETKDG_AUTOTUNE_FLAGS=(
-    --autotune
-    --autotune_trials "$AUTOTUNE_TRIALS"
-    --autotune_time_budget "$AUTOTUNE_TIME_BUDGET"
-    --autotune_cpu_budget "$CPUS"
-    --autotune_calibration_size "$ETKDG_CAL_SIZE"
-  )
   MCS_AUTOTUNE_FLAGS=(
     --autotune
     --autotune_trials "$AUTOTUNE_TRIALS"
@@ -451,17 +448,9 @@ run_bench conformer_rmsd "$RESULT_DIR/conformer_rmsd.csv" \
   --output "$RESULT_DIR/conformer_rmsd.csv" \
   "${CONFORMER_RMSD_MODE_FLAGS[@]}"
 
-run_bench cross_similarity "$RESULT_DIR/cross_similarity.json" \
-  python "$SCRIPT_DIR/cross_similarity_bench.py" \
-  --input "$DATASET" \
-  --seed "$BENCHMARK_SEED" \
-  --cosine \
-  --output "$RESULT_DIR/cross_similarity.json" \
-  "${CROSS_SIMILARITY_MODE_FLAGS[@]}"
-
 # nvMolKit 0.7 adds single precision for ETKDG and the force-field minimizers. Both precisions run on
-# identical inputs so their results are directly comparable; the autotuner is told which precision it
-# is tuning. Full precision keeps the historical benchmark names; single precision adds a _single suffix.
+# identical inputs so their results are directly comparable, each with its own scanned HardwareOptions.
+# Full precision keeps the historical benchmark names; single precision adds a _single suffix.
 PRECISIONS=(full single)
 precision_suffix() {
   if [ "$1" = "full" ]; then echo ""; else echo "_$1"; fi
@@ -469,7 +458,7 @@ precision_suffix() {
 
 for precision in "${PRECISIONS[@]}"; do
   etkdg_name="etkdg$(precision_suffix "$precision")"
-  autotune_save_arg "$AUTOTUNE_DIR/${etkdg_name}_hardware.json"
+  IFS=: read -r hw_batch hw_bpg <<< "${HW_CONFIG[etkdg:$precision]}"
   run_bench "$etkdg_name" "$RESULT_DIR/${etkdg_name}.csv" \
     python "$SCRIPT_DIR/etkdg_bench.py" \
     --smiles "$DATASET" \
@@ -478,57 +467,48 @@ for precision in "${PRECISIONS[@]}"; do
     --runs "$TIMING_RUNS" \
     --confs_per_mol "$CONFS_PER_MOL" \
     --num_gpus 1 \
+    --batch_size "$hw_batch" \
+    --batches_per_gpu "$hw_bpg" \
     --prep_threads "$CPUS" \
     --precision "$precision" \
     --rdkit_threads "$CPUS" \
     --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
-    "${ETKDG_AUTOTUNE_FLAGS[@]}" \
-    "${AUTOTUNE_SAVE_FLAGS[@]}" \
     --output "$RESULT_DIR/${etkdg_name}.csv" \
     "${ETKDG_MODE_FLAGS[@]}"
 done
 
-FF_ROWS=("mmff:BFGS" "mmff:FIRE" "uff:BFGS" "uff:FIRE")
+# MMFF minimizers use one CPU thread per batch in flight (batchesPerGpu x GPUs) for both per-batch setup
+# and GPU dispatch; HardwareOptions.preprocessingThreads is not used. The CPU budget is therefore the
+# scanned batches_per_gpu, which is at most $CPUS. UFF is out of scope for this release's figures.
+FF_ROWS=("mmff:BFGS" "mmff:FIRE")
 for precision in "${PRECISIONS[@]}"; do
 for row in "${FF_ROWS[@]}"; do
   ff="${row%%:*}"
   minimizer_kind="${row##*:}"
   minimizer_stem="${minimizer_kind,,}"
   bench_name="ff_optimize_${ff}_${minimizer_stem}$(precision_suffix "$precision")"
-  num_mols_var="FF_${ff^^}_NUM_MOLS"
-  cal_size_var="FF_${ff^^}_${minimizer_kind}_CAL_SIZE"
-  ff_num_mols="${!num_mols_var}"
-  ff_cal_size="${!cal_size_var}"
-  ff_runs="$TIMING_RUNS"
-  FF_AUTOTUNE_FLAGS=()
-  if [ "$AUTOTUNE_ENABLED" = "1" ]; then
-    FF_AUTOTUNE_FLAGS=(
-      --autotune
-      --autotune_trials "$AUTOTUNE_TRIALS"
-      --autotune_time_budget "$AUTOTUNE_TIME_BUDGET"
-      --autotune_cpu_budget "$CPUS"
-      --autotune_calibration_size "$ff_cal_size"
-    )
+  IFS=: read -r hw_batch hw_bpg <<< "${HW_CONFIG[${ff}_${minimizer_stem}:$precision]}"
+  if [ "$hw_bpg" -gt "$CPUS" ]; then
+    echo "Error: ${bench_name} batches_per_gpu=$hw_bpg exceeds the CPU budget of $CPUS" >&2
+    exit 2
   fi
-  autotune_save_arg "$AUTOTUNE_DIR/${bench_name}_hardware.json"
   run_bench "$bench_name" "$RESULT_DIR/${bench_name}.csv" \
     python "$SCRIPT_DIR/ff_optimize_bench.py" \
     --smiles "$DATASET" \
-    --num_mols "$ff_num_mols" \
+    --num_mols "$FF_MMFF_NUM_MOLS" \
     --seed "$BENCHMARK_SEED" \
-    --runs "$ff_runs" \
+    --runs "$TIMING_RUNS" \
     --confs_per_mol "$CONFS_PER_MOL" \
     --ff "$ff" \
     --minimizer_kind "$minimizer_kind" \
     --max_iters "$FF_MAX_ITERS" \
     --no_validate \
     --num_gpus 1 \
-    --prep_threads "$CPUS" \
+    --batch_size "$hw_batch" \
+    --batches_per_gpu "$hw_bpg" \
     --precision "$precision" \
     --rdkit_threads "$CPUS" \
     --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
-    "${FF_AUTOTUNE_FLAGS[@]}" \
-    "${AUTOTUNE_SAVE_FLAGS[@]}" \
     --output "$RESULT_DIR/${bench_name}.csv" \
     "${FF_MODE_FLAGS[@]}"
 done

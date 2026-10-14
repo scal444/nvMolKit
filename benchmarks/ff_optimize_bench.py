@@ -307,8 +307,8 @@ def main() -> None:
         "--prep_threads",
         type=int,
         default=-1,
-        help="nvmolkit CPU preprocessing threads in the timed region; also applied on top of an autotuned or "
-        "loaded config, which does not tune this knob (-1 = library default, all cores)",
+        help="Ignored by the MMFF/UFF minimizers, which use one CPU thread per batch in flight; the CPU budget is "
+        "--batches_per_gpu x GPUs (kept for CLI compatibility)",
     )
     parser.add_argument("--num_gpus", type=int, default=1, help="Number of GPUs to use (default: 1)")
     add_precision_arg(parser)
@@ -553,11 +553,6 @@ def main() -> None:
             hardware_options = _build_hardware_options(
                 args.batch_size, args.batches_per_gpu, args.prep_threads, args.num_gpus
             )
-
-        # The force-field tuner searches batchSize/batchesPerGpu only, so a tuned or loaded config leaves
-        # preprocessingThreads at the library default (every core). Apply the requested CPU budget to it.
-        if args.prep_threads > 0 and config_source in ("autotuned", "loaded"):
-            hardware_options.preprocessingThreads = args.prep_threads
 
         torch.cuda.cudart().cudaProfilerStart()
         print(f"\nRunning nvmolkit {args.ff.upper()} {args.minimizer_kind} optimize benchmark...")

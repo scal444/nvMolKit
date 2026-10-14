@@ -321,7 +321,7 @@ if __name__ == "__main__":
 
                             nvmol_res = butina_nvmol(
                                 dist_mat, cutoff, neighborlist_max_size=max_nl, reordering=nvmol_reordering
-                            ).torch()
+                            ).cluster_ids.torch()
                             torch.cuda.synchronize()
                             nvmol_clusts = [
                                 tuple(torch.argwhere(nvmol_res == i).flatten().tolist())
