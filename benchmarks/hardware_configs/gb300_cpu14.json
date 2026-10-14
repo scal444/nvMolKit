@@ -76,7 +76,37 @@
         "items": 800000
       },
       "source": "v0.7.0_gb300_mcs_scan_v2_20261014.csv",
-      "points_scanned": 28
+      "points_scanned": 39
+    },
+    "mcs:mcs_strict_strict": {
+      "config": {
+        "batchSize": 8192,
+        "workers": 4,
+        "preprocessingThreads": 10,
+        "executors": 2
+      },
+      "throughput": 49116.5,
+      "unit": "pairs/s",
+      "workload": {
+        "items": 800000
+      },
+      "source": "v0.7.0_gb300_mcs_scan_v2_20261014.csv",
+      "points_scanned": 41
+    },
+    "mcs:mcs_strict_strict_ring": {
+      "config": {
+        "batchSize": 8192,
+        "workers": 6,
+        "preprocessingThreads": 8,
+        "executors": 2
+      },
+      "throughput": 110087.2,
+      "unit": "pairs/s",
+      "workload": {
+        "items": 1500000
+      },
+      "source": "v0.7.0_gb300_mcs_scan_v2_20261014.csv",
+      "points_scanned": 40
     },
     "mmff_bfgs:full": {
       "config": {
@@ -150,17 +180,17 @@
     },
     "substruct:BMS_2006_filter_supported:gsi": {
       "config": {
-        "batchSize": 32768,
-        "workers": 1,
-        "preprocessingThreads": 13
+        "batchSize": 8192,
+        "workers": 6,
+        "preprocessingThreads": 8
       },
-      "throughput": 47872432.8,
+      "throughput": 48819653.2,
       "unit": "pairs/s",
       "workload": {
         "items": 197500000
       },
       "source": "v0.7.0_gb300_search_scan_v2_20261014.csv",
-      "points_scanned": 19
+      "points_scanned": 24
     },
     "substruct:rdkit_fragment_descriptors_supported:dfs": {
       "config": {
@@ -174,7 +204,7 @@
         "items": 106250000
       },
       "source": "v0.7.0_gb300_search_scan_v2_20261014.csv",
-      "points_scanned": 12
+      "points_scanned": 13
     },
     "substruct:rdkit_fragment_descriptors_supported:gsi": {
       "config": {
@@ -188,7 +218,7 @@
         "items": 106250000
       },
       "source": "v0.7.0_gb300_search_scan_v2_20261014.csv",
-      "points_scanned": 16
+      "points_scanned": 17
     },
     "substruct:rdkit_tautomer_transforms_supported:dfs": {
       "config": {
@@ -230,7 +260,7 @@
         "items": 456250000
       },
       "source": "v0.7.0_gb300_search_scan_v2_20261014.csv",
-      "points_scanned": 21
+      "points_scanned": 23
     },
     "substruct:rdkit_torsionPreferences_v2_supported:gsi": {
       "config": {
@@ -244,21 +274,21 @@
         "items": 456250000
       },
       "source": "v0.7.0_gb300_search_scan_v2_20261014.csv",
-      "points_scanned": 22
+      "points_scanned": 24
     },
     "substruct:wehi_pains_supported:dfs": {
       "config": {
-        "batchSize": 32768,
+        "batchSize": 65536,
         "workers": 1,
         "preprocessingThreads": 13
       },
-      "throughput": 122195672.4,
+      "throughput": 123825544.7,
       "unit": "pairs/s",
       "workload": {
         "items": 600000000
       },
       "source": "v0.7.0_gb300_search_scan_v2_20261014.csv",
-      "points_scanned": 8
+      "points_scanned": 9
     },
     "substruct:wehi_pains_supported:gsi": {
       "config": {

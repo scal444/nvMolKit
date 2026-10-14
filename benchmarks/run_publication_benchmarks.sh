@@ -306,11 +306,12 @@ FF_MAX_ITERS=200
 # Strict means element/order matching, without the additional comparison
 # variants exposed by mcs_bench.py.
 # The fifth field is the timed pair count. Lax comparisons are ~10x slower per pair on one GPU (about
-# 2.4k and 3.8k pairs/s on GB300 versus 30-60k for strict rows), so they time fewer pairs to keep each run
-# near a minute rather than 12-20 minutes.
+# 4-6k pairs/s on GB300 versus 45-100k for strict rows), so they time fewer pairs to keep each run near a
+# minute. Lax rows use the same 200k-pair sample their settings were scanned on: their throughput depends
+# strongly on which pairs are drawn (a 300k sample measured 33% slower than the 200k scan).
 MCS_ROWS=(
   "mcs_lax_lax:any:any:0:200000"
-  "mcs_lax_strict:any:order:0:300000"
+  "mcs_lax_strict:any:order:0:200000"
   "mcs_strict_lax:elements:any:0:$MCS_NUM_PAIRS"
   "mcs_strict_strict:elements:order:0:$MCS_NUM_PAIRS"
   "mcs_strict_strict_ring:elements:order:1:$MCS_NUM_PAIRS"
@@ -369,9 +370,11 @@ FAILURES=0
 
 selected() {
   local name="$1" glob
+  local -a globs
   [ -z "$ONLY_GLOBS" ] && return 0
-  local IFS=,
-  for glob in $ONLY_GLOBS; do
+  # Split without pathname expansion: an unquoted 'mcs_*' would otherwise match files such as mcs_bench.py.
+  IFS=, read -ra globs <<< "$ONLY_GLOBS"
+  for glob in "${globs[@]}"; do
     # shellcheck disable=SC2053
     [[ "$name" == $glob ]] && return 0
   done
@@ -588,7 +591,7 @@ for algorithm in gsi dfs; do
     lookup_config SUBSTRUCT_CONFIG "$smarts_stem:$algorithm" "1024:-1:-1"
     IFS=: read -r hw_batch hw_workers hw_prep <<< "$HW_VALUE"
     validate_concurrent_budget "$bench_name" "$hw_workers" "$hw_prep"
-    run_bench "$bench_name" "$LOG_DIR/${bench_name}.log" \
+    run_bench "$bench_name" "$RESULT_DIR/${bench_name}.csv" \
       python "$SCRIPT_DIR/substruct_bench.py" \
       --smiles "$DATASET" \
       --num_mols "$substruct_mols" \
@@ -604,6 +607,7 @@ for algorithm in gsi dfs; do
       --prep_threads "$hw_prep" \
       --rdkit_threads "$CPUS" \
       --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
+      --output "$RESULT_DIR/${bench_name}.csv" \
       "${SUBSTRUCT_MODE_FLAGS[@]}"
   done
 done
@@ -629,6 +633,8 @@ for precision in "${PRECISIONS[@]}"; do
     --seed "$BENCHMARK_SEED" \
     --precision "$precision" \
     --prep_threads "$CPUS" \
+    --num_mols 1000 10000 100000 \
+    --confs_per_mol 10 50 \
     --device_input \
     --output "$RESULT_DIR/${descriptors_name}.csv" \
     "${DESCRIPTORS3D_MODE_FLAGS[@]}"
@@ -638,6 +644,8 @@ run_bench diversity_pickers "$RESULT_DIR/diversity_pickers.csv" \
   python "$SCRIPT_DIR/diversity_pickers_bench.py" \
   --smiles "$DATASET" \
   --seed "$BENCHMARK_SEED" \
+  --sizes 10000 100000 1000000 3000000 \
+  --pick_sizes 100 1000 10000 \
   --output "$RESULT_DIR/diversity_pickers.csv" \
   "${DIVERSITY_MODE_FLAGS[@]}"
 
