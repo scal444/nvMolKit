@@ -14,12 +14,10 @@ from mcs_bench import (
     sample_pairs,
 )
 
-
 def _args(**overrides):
     values = {
         "num_pairs": 17,
         "batch_size": 0,
-        "block_size": 128,
         "workers": -1,
         "prep_threads": -1,
         "executors_per_runner": -1,
@@ -37,31 +35,31 @@ def _args(**overrides):
 
 def test_partial_config_row_inherits_cli_defaults_and_parses_booleans():
     config = _normalize_config_row(
-        {"block_size": 256, "match_formal_charge": "yes"},
+        {"executors_per_runner": 3, "match_formal_charge": "yes"},
         _args(workers=3),
     )
 
     assert config["num_pairs"] == 17
     assert config["workers"] == 3
-    assert config["block_size"] == 256
+    assert config["executors_per_runner"] == 3
     assert config["match_formal_charge"]
 
 
 def test_config_dataframe_supports_multiple_rows(tmp_path):
     path = tmp_path / "mcs.csv"
-    pd.DataFrame([{"num_pairs": 10, "block_size": 64}, {"num_pairs": 20, "block_size": 512}]).to_csv(
+    pd.DataFrame([{"num_pairs": 10, "batch_size": 128}, {"num_pairs": 20, "batch_size": 512}]).to_csv(
         path,
         index=False,
     )
 
     rows = _load_config_dataframe(str(path))
 
-    assert [(row["num_pairs"], row["block_size"]) for row in rows] == [(10, 64), (20, 512)]
+    assert [(row["num_pairs"], row["batch_size"]) for row in rows] == [(10, 128), (20, 512)]
 
 
-def test_config_validation_rejects_invalid_gpu_settings():
-    with pytest.raises(ValueError, match="block_size"):
-        _normalize_config_row({"block_size": 32}, _args())
+def test_config_validation_rejects_invalid_execution_settings():
+    with pytest.raises(ValueError, match="executors_per_runner"):
+        _normalize_config_row({"executors_per_runner": 9}, _args())
     with pytest.raises(ValueError, match="num_gpus"):
         _normalize_config_row({"num_gpus": 0}, _args())
 
@@ -118,6 +116,8 @@ def test_parser_matches_substructure_autotune_conventions():
             "7",
             "--autotune_time_budget",
             "2.5",
+            "--autotune_cpu_budget",
+            "6",
             "--autotune_calibration_size",
             "20",
             "--autotune_seed",
@@ -129,5 +129,6 @@ def test_parser_matches_substructure_autotune_conventions():
     assert args.autotune_save == "mcs.json"
     assert args.autotune_trials == 7
     assert args.autotune_time_budget == 2.5
+    assert args.autotune_cpu_budget == 6
     assert args.autotune_calibration_size == 20
     assert args.autotune_seed == 9
