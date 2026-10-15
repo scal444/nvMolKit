@@ -9,16 +9,14 @@
 # present, so results from different machines use identical knobs. run_publication_benchmarks.sh does the
 # work; this script pins its settings and CPU budget.
 #
-# Statistics come from within each benchmark: every one times its workload several times in one process
-# (3 runs; 5 for 3D descriptors, 20 for conformer RMSD) after parsing and setup, and records the mean and
-# standard deviation. Extra passes relaunch everything, setup included, and only add launch-to-launch
-# variance, so one pass of each side is the normal run.
+# Repeats are a benchmark parameter: --runs N times each workload N times in one process, after parsing
+# and warmup, and each result row records the mean and standard deviation.
 #
-# nvMolKit and RDKit run as separate passes so each side measures the same workload every time
-# (several workload sizes differ when RDKit runs alongside). Each pass writes a complete run directory:
-#   OUTPUT_DIR/nvmolkit/rep_01 ... rep_NN
-#   OUTPUT_DIR/rdkit/rep_01 ...    rep_MM
-# and OUTPUT_DIR/summary.tsv lists every benchmark of every pass.
+# nvMolKit and RDKit run separately so each side measures the same workload on every machine (several
+# workload sizes differ when RDKit runs alongside):
+#   OUTPUT_DIR/nvmolkit   nvMolKit results
+#   OUTPUT_DIR/rdkit      RDKit baselines (several hours; skip with --no-rdkit)
+# and OUTPUT_DIR/summary.tsv lists every benchmark of both.
 
 set -uo pipefail
 
@@ -28,12 +26,12 @@ Usage: $0 --dataset FILE --output-dir DIR [options]
 
 Required:
   --dataset FILE        SMILES/CXSMILES dataset used by every benchmark
-  --output-dir DIR      Parent directory for all passes
+  --output-dir DIR      Parent directory for the nvMolKit and RDKit results
 
 Options:
-  --repeats N           nvMolKit passes (default: 1; 0 skips nvMolKit). Each benchmark already repeats its
-                        timed runs within a pass; more passes only measure launch-to-launch variance.
-  --rdkit-repeats M     RDKit passes (default: 1; 0 skips RDKit). One RDKit pass takes several hours.
+  --runs N              Timed runs per benchmark (default: 3)
+  --no-rdkit            Skip the RDKit baselines
+  --no-nvmolkit         Skip nvMolKit
   --gpu-id ID           Physical GPU to expose (default: 0)
   --hw-configs FILE     Fixed settings (default: hardware_configs/gb300_cpu14.json)
   --aap-csv FILE        Scored CSV for AAP clustering (passed through)
@@ -51,24 +49,30 @@ CPUS=14
 
 DATASET=""
 OUTPUT_DIR=""
-REPEATS=1
-RDKIT_REPEATS=1
+RUN_RDKIT=1
+RUN_NVMOLKIT=1
 HW_CONFIG_FILE="$SCRIPT_DIR/hardware_configs/gb300_cpu14.json"
 PASSTHROUGH=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --dataset|--output-dir|--repeats|--rdkit-repeats|--gpu-id|--hw-configs|--aap-csv|--only)
+    --dataset|--output-dir|--runs|--gpu-id|--hw-configs|--aap-csv|--only)
       [ $# -ge 2 ] || { echo "Error: $1 requires a value" >&2; exit 2; }
       case "$1" in
         --dataset) DATASET="$2" ;;
         --output-dir) OUTPUT_DIR="$2" ;;
-        --repeats) REPEATS="$2" ;;
-        --rdkit-repeats) RDKIT_REPEATS="$2" ;;
         --hw-configs) HW_CONFIG_FILE="$2" ;;
         *) PASSTHROUGH+=("$1" "$2") ;;
       esac
       shift 2
+      ;;
+    --no-rdkit)
+      RUN_RDKIT=0
+      shift
+      ;;
+    --no-nvmolkit)
+      RUN_NVMOLKIT=0
+      shift
       ;;
     -h|--help)
       usage
@@ -87,14 +91,8 @@ if [ -z "$DATASET" ] || [ -z "$OUTPUT_DIR" ]; then
   usage
   exit 2
 fi
-for value in "$REPEATS" "$RDKIT_REPEATS"; do
-  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
-    echo "Error: --repeats and --rdkit-repeats must be non-negative integers" >&2
-    exit 2
-  fi
-done
-if [ "$REPEATS" -eq 0 ] && [ "$RDKIT_REPEATS" -eq 0 ]; then
-  echo "Error: nothing to run (--repeats 0 and --rdkit-repeats 0)" >&2
+if [ "$RUN_RDKIT" = "0" ] && [ "$RUN_NVMOLKIT" = "0" ]; then
+  echo "Error: --no-rdkit and --no-nvmolkit are mutually exclusive" >&2
   exit 2
 fi
 if [ ! -f "$HW_CONFIG_FILE" ]; then
@@ -106,51 +104,42 @@ mkdir -p "$OUTPUT_DIR" || { echo "Error: could not create $OUTPUT_DIR" >&2; exit
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 
 SUMMARY="$OUTPUT_DIR/summary.tsv"
-printf "pass\trep\tbenchmark\tstatus\texit_code\tduration_s\tlog\tresult\n" > "$SUMMARY"
-FAILED_PASSES=0
+printf "side\tbenchmark\tstatus\texit_code\tduration_s\tlog\tresult\n" > "$SUMMARY"
+FAILED=0
 
-# run_pass SIDE REP MODE_FLAG: one complete suite run into OUTPUT_DIR/SIDE/rep_NN.
-run_pass() {
-  local side="$1" rep="$2" mode_flag="$3"
-  local rep_dir
-  rep_dir="$OUTPUT_DIR/$side/$(printf 'rep_%02d' "$rep")"
+# run_side SIDE MODE_FLAG: one complete suite run into OUTPUT_DIR/SIDE.
+run_side() {
+  local side="$1" mode_flag="$2"
   echo "##########################################"
-  echo "[$(date -Iseconds)] $side pass $rep -> $rep_dir"
+  echo "[$(date -Iseconds)] $side -> $OUTPUT_DIR/$side"
   echo "##########################################"
   # The runner always receives an explicit settings file, so it applies it regardless of the GPU model.
   bash "$RUNNER" \
     --dataset "$DATASET" \
-    --output-dir "$rep_dir" \
+    --output-dir "$OUTPUT_DIR/$side" \
     --cpus "$CPUS" \
     --hw-configs "$HW_CONFIG_FILE" \
     "$mode_flag" \
     "${PASSTHROUGH[@]}"
   local code=$?
-  if [ "$code" -ne 0 ]; then
-    FAILED_PASSES=$(( FAILED_PASSES + 1 ))
-  fi
-  # Exit code 2 is an argument or budget error raised before any benchmark ran.
+  [ "$code" -ne 0 ] && FAILED=1
+  # Exit code 2 is an argument or budget error; the other side would hit it too.
   if [ "$code" -eq 2 ]; then
-    echo "Error: $side pass $rep was rejected by the runner; stopping" >&2
+    echo "Error: the $side run was rejected by the runner; stopping" >&2
     exit 2
   fi
-  if [ -f "$rep_dir/summary.tsv" ]; then
-    awk -F'\t' -v OFS='\t' -v side="$side" -v rep="$rep" 'NR > 1 { print side, rep, $0 }' \
-      "$rep_dir/summary.tsv" >> "$SUMMARY"
+  if [ -f "$OUTPUT_DIR/$side/summary.tsv" ]; then
+    awk -F'\t' -v OFS='\t' -v side="$side" 'NR > 1 { print side, $0 }' "$OUTPUT_DIR/$side/summary.tsv" >> "$SUMMARY"
   fi
 }
 
-for (( rep = 1; rep <= REPEATS; rep++ )); do
-  run_pass nvmolkit "$rep" --no-rdkit
-done
-for (( rep = 1; rep <= RDKIT_REPEATS; rep++ )); do
-  run_pass rdkit "$rep" --no-nvmolkit
-done
+[ "$RUN_NVMOLKIT" = "1" ] && run_side nvmolkit --no-rdkit
+[ "$RUN_RDKIT" = "1" ] && run_side rdkit --no-nvmolkit
 
 echo
-echo "All passes complete. Output: $OUTPUT_DIR"
+echo "Benchmarks complete. Output: $OUTPUT_DIR"
 column -t -s $'\t' "$SUMMARY" 2>/dev/null || cat "$SUMMARY"
-if [ "$FAILED_PASSES" -ne 0 ]; then
-  echo "Error: $FAILED_PASSES pass(es) had failures; see $SUMMARY" >&2
+if [ "$FAILED" -ne 0 ]; then
+  echo "Error: some benchmarks failed; see $SUMMARY" >&2
   exit 1
 fi

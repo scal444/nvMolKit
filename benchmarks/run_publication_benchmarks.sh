@@ -25,6 +25,8 @@ Options:
                        ~/data/enamine_aap_100k_qed.csv; AAP is skipped if missing)
   --hw-configs FILE    Scanned nvMolKit execution settings (default:
                        hardware_configs/<gpu>_cpu<budget>.json; see select_scan_configs.py)
+  --runs N             Timed runs per benchmark, after parsing and warmup (default: 3). Every
+                       benchmark repeats its timed work N times in one process and records mean/std.
   --only GLOBS         Comma-separated benchmark-name globs to run (e.g. 'mcs_*,substruct_*');
                        other benchmarks are skipped and left out of summary.tsv
   -h, --help           Show this help
@@ -51,6 +53,7 @@ SKIP_NVMOLKIT=0
 ONLY_GLOBS=""
 HW_CONFIG_FILE=""
 AAP_CSV="$HOME/data/enamine_aap_100k_qed.csv"
+TIMING_RUNS=3
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -92,6 +95,11 @@ while [ $# -gt 0 ]; do
       HW_CONFIG_FILE="$2"
       shift 2
       ;;
+    --runs)
+      [ $# -ge 2 ] || { echo "Error: --runs requires a value" >&2; exit 2; }
+      TIMING_RUNS="$2"
+      shift 2
+      ;;
     --only)
       [ $# -ge 2 ] || { echo "Error: --only requires a value" >&2; exit 2; }
       ONLY_GLOBS="$2"
@@ -125,6 +133,10 @@ if ! DATASET_DIR="$(cd "$(dirname "$DATASET")" && pwd)"; then
   exit 1
 fi
 DATASET="$DATASET_DIR/$(basename "$DATASET")"
+if ! [[ "$TIMING_RUNS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Error: --runs must be a positive integer" >&2
+  exit 2
+fi
 if ! [[ "$GPU_ID" =~ ^[0-9]+$ ]]; then
   echo "Error: --gpu-id must be a non-negative integer" >&2
   exit 2
@@ -209,8 +221,8 @@ if ! mkdir -p "$LOG_DIR" "$RESULT_DIR" "$SYSINFO_DIR"; then
   exit 1
 fi
 
-# Fixed single-GPU production workloads. Every workload uses three samples. BFGS and FIRE deliberately share
-# the exact same input sample so their throughput and wall times are directly comparable.
+# Fixed single-GPU production workloads. Every benchmark times its workload $TIMING_RUNS times (--runs).
+# BFGS and FIRE deliberately share the exact same input sample so their throughput and wall times are directly comparable.
 #
 # ETKDG and MMFF are not autotuned. Their HardwareOptions come from a grid scan on this machine
 # (scan_hardware_options.py; GB300, 14-core budget, 2026-10-14): batch 256-16384 x batches per GPU 2-14,
@@ -220,7 +232,6 @@ fi
 # Format: batchSize:batchesPerGpu. Re-scan before running on different hardware.
 CONFS_PER_MOL=200
 BENCHMARK_SEED=42
-TIMING_RUNS=3
 ETKDG_NUM_MOLS=1311
 FF_MMFF_NUM_MOLS=2622
 # Settings are loaded from a JSON file written by select_scan_configs.py, keyed by GPU and CPU budget so
@@ -479,6 +490,7 @@ run_bench butina_clustering "$RESULT_DIR/butina_clustering.csv" \
   python "$SCRIPT_DIR/butina_clustering_bench.py" "$DATASET" \
   --seed "$BENCHMARK_SEED" \
   --nvmolkit-reordering both \
+  --runs "$TIMING_RUNS" \
   --rdkit-max-size "$BUTINA_RDKIT_MAX_SIZE" \
   --output "$RESULT_DIR/butina_clustering.csv" \
   "${BUTINA_MODE_FLAGS[@]}"
@@ -489,7 +501,7 @@ run_bench conformer_rmsd "$RESULT_DIR/conformer_rmsd.csv" \
   --num_mols 8000 \
   --seed "$BENCHMARK_SEED" \
   --confs_per_mol 10 25 50 100 200 \
-  --gpu_runs 20 \
+  --gpu_runs "$TIMING_RUNS" \
   --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
   --output "$RESULT_DIR/conformer_rmsd.csv" \
   "${CONFORMER_RMSD_MODE_FLAGS[@]}"
@@ -663,6 +675,7 @@ for precision in "${PRECISIONS[@]}"; do
     --smiles "$DATASET" \
     --seed "$BENCHMARK_SEED" \
     --precision "$precision" \
+    --runs "$TIMING_RUNS" \
     --prep_threads "$CPUS" \
     --rdkit_threads "$CPUS" \
     --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
@@ -679,6 +692,7 @@ run_bench diversity_pickers "$RESULT_DIR/diversity_pickers.csv" \
   --seed "$BENCHMARK_SEED" \
   --sizes 10000 100000 1000000 3000000 \
   --pick_sizes "${DIVERSITY_PICK_SIZES[@]}" \
+  --runs "$TIMING_RUNS" \
   --rdkit_threads "$CPUS" \
   --rdkit_max_size "$DIVERSITY_RDKIT_MAX_SIZE" \
   --output "$RESULT_DIR/diversity_pickers.csv" \
@@ -701,6 +715,7 @@ if [ -f "$AAP_CSV" ]; then
     --sort-descending \
     --sizes 128 512 1024 4096 16384 65536 \
     --num_pairs "$AAP_NUM_PAIRS" \
+    --runs "$TIMING_RUNS" \
     --seed "$BENCHMARK_SEED" \
     --operation all \
     --no-ligand-clustering-cpu \
@@ -715,6 +730,7 @@ run_bench tfd "$RESULT_DIR/tfd.csv" \
   --smiles-file "$DATASET" \
   --seed "$BENCHMARK_SEED" \
   --num-mols 100 1000 5000 \
+  --runs "$TIMING_RUNS" \
   --rdkit_max_seconds "$RDKIT_MAX_SECONDS" \
   --output "$RESULT_DIR/tfd.csv" \
   "${TFD_MODE_FLAGS[@]}"
