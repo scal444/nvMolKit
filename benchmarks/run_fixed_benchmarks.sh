@@ -2,14 +2,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Run the publication suite with fixed nvMolKit execution settings on any machine, repeated for statistics.
+# Run the publication suite with fixed nvMolKit execution settings on any machine.
 #
 # Every batch size, batches-per-GPU, worker, preprocessing-thread and executor count comes from one
 # settings file (default: hardware_configs/gb300_cpu14.json, the GB300 14-core scan), whatever GPU is
 # present, so results from different machines use identical knobs. run_publication_benchmarks.sh does the
-# work; this script pins its settings and CPU budget and repeats it.
+# work; this script pins its settings and CPU budget.
 #
-# nvMolKit and RDKit run as separate passes so each repeat of one side measures the same workload
+# Statistics come from within each benchmark: every one times its workload several times in one process
+# (3 runs; 5 for 3D descriptors, 20 for conformer RMSD) after parsing and setup, and records the mean and
+# standard deviation. Extra passes relaunch everything, setup included, and only add launch-to-launch
+# variance, so one pass of each side is the normal run.
+#
+# nvMolKit and RDKit run as separate passes so each side measures the same workload every time
 # (several workload sizes differ when RDKit runs alongside). Each pass writes a complete run directory:
 #   OUTPUT_DIR/nvmolkit/rep_01 ... rep_NN
 #   OUTPUT_DIR/rdkit/rep_01 ...    rep_MM
@@ -26,7 +31,8 @@ Required:
   --output-dir DIR      Parent directory for all passes
 
 Options:
-  --repeats N           nvMolKit passes (default: 1; 0 skips nvMolKit)
+  --repeats N           nvMolKit passes (default: 1; 0 skips nvMolKit). Each benchmark already repeats its
+                        timed runs within a pass; more passes only measure launch-to-launch variance.
   --rdkit-repeats M     RDKit passes (default: 1; 0 skips RDKit). One RDKit pass takes several hours.
   --gpu-id ID           Physical GPU to expose (default: 0)
   --hw-configs FILE     Fixed settings (default: hardware_configs/gb300_cpu14.json)
