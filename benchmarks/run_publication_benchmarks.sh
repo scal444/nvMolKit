@@ -306,9 +306,10 @@ lookup_config() {
 SUBSTRUCT_NUM_MOLS=5000000
 MORGAN_NUM_MOLS=1000000
 # Clustering baselines have no time cap; their RDKit sizes are capped instead. Butina's RDKit backend is
-# single-threaded O(n^2); diversity's LeaderPicker uses the CPU budget (MaxMinPicker is serial).
+# single-threaded O(n^2); diversity's LeaderPicker uses the CPU budget (MaxMinPicker is serial). The diversity
+# cap applies to every picker, and RDKit DISE did not finish 100k molecules (GB300, 14 cores), so it is 10k.
 BUTINA_RDKIT_MAX_SIZE=20000
-DIVERSITY_RDKIT_MAX_SIZE=100000
+DIVERSITY_RDKIT_MAX_SIZE=10000
 # RDKit's MaxMinPicker needs pick_size < pool size, and the smallest pool is 10k molecules.
 if [ "$SKIP_RDKIT" = "1" ]; then DIVERSITY_PICK_SIZES=(100 1000 10000); else DIVERSITY_PICK_SIZES=(100 1000 5000); fi
 # AAP similarity pairs: large for nvMolKit, small when the (pure-Python) RDKit reference runs.
@@ -369,6 +370,9 @@ fi
   echo "mcs_parameter_sets: ${MCS_ROWS[*]}"
   echo "only: ${ONLY_GLOBS:-all}"
   echo "hw_config_file: ${HW_CONFIG_FILE:-none}"
+  echo "hw_config_scanned_on: ${HW_CONFIG_GPU:-none}"
+  echo "hw_config_sha256: $( [ -n "$HW_CONFIG_FILE" ] && sha256sum "$HW_CONFIG_FILE" | cut -d' ' -f1 || echo none)"
+  echo "gpu_name: $(nvidia-smi --query-gpu=name --format=csv,noheader -i "$GPU_ID" 2>/dev/null | head -1)"
   echo "skip_rdkit: $SKIP_RDKIT"
   echo "skip_nvmolkit: $SKIP_NVMOLKIT"
   echo "git_commit: $(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
