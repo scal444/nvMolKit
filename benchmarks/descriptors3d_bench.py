@@ -15,7 +15,7 @@ Example:
 
 import argparse
 import math
-from multiprocessing import Pool
+import multiprocessing
 from pathlib import Path
 
 import numpy as np
@@ -220,7 +220,8 @@ def _time_rdkit(
     total = sum(mol.GetNumConformers() for mol in mols)
     done = [0]
     initargs = ([mol.ToBinary() for mol in mols], [prop.value for prop in properties])
-    with Pool(threads, initializer=_rdkit_worker_init, initargs=initargs) as pool:
+    # spawn, not fork: the parent already runs CUDA/torch threads, and a forked child can inherit a held lock.
+    with multiprocessing.get_context("spawn").Pool(threads, initializer=_rdkit_worker_init, initargs=initargs) as pool:
 
         def run(deadline: Deadline | None = None) -> None:
             done[0] = 0

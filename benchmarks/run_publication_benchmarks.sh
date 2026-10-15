@@ -311,7 +311,8 @@ BUTINA_RDKIT_MAX_SIZE=20000
 DIVERSITY_RDKIT_MAX_SIZE=100000
 # AAP similarity pairs: large for nvMolKit, small when the (pure-Python) RDKit reference runs.
 # (The RDKit Contrib reference runs ~35 pairs/s single-threaded, so 2k pairs keeps it near a minute per run.)
-if [ "$SKIP_RDKIT" = "1" ]; then AAP_NUM_PAIRS=1000000; else AAP_NUM_PAIRS=2000; fi
+# nvMolKit pair similarity is host-bound per pair, so 10k pairs (not millions) keeps it to seconds.
+if [ "$SKIP_RDKIT" = "1" ]; then AAP_NUM_PAIRS=10000; else AAP_NUM_PAIRS=2000; fi
 MCS_NUM_MOLS=10000
 MCS_NUM_PAIRS=2800000
 RDKIT_MAX_SECONDS=300
@@ -524,6 +525,8 @@ done
 # and GPU dispatch; HardwareOptions.preprocessingThreads is not used. The CPU budget is therefore the
 # scanned batches_per_gpu, which is at most $CPUS. UFF is out of scope for this release's figures.
 FF_ROWS=("mmff:BFGS" "mmff:FIRE")
+# RDKit only has BFGS, so an RDKit-only run measures the MMFF baseline once.
+if [ "$SKIP_NVMOLKIT" = "1" ]; then FF_ROWS=("mmff:BFGS"); fi
 for precision in "${PRECISIONS[@]}"; do
 for row in "${FF_ROWS[@]}"; do
   ff="${row%%:*}"

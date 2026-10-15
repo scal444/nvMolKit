@@ -70,6 +70,7 @@ from bench_utils import (
     load_smiles,
     print_csv_rows,
     process_map_bounded,
+    ready_spawn_pool,
     write_csv_rows,
 )
 from bench_utils import (
@@ -92,9 +93,7 @@ def _auto_preprocessing_threads(worker_threads: int, num_gpus: int, physical_cor
     """Use CPU threads not already reserved for per-GPU workers."""
     physical_cores = max(1, available_physical_cpu_count() if physical_cores is None else physical_cores)
     num_gpus = max(1, num_gpus)
-    effective_workers = (
-        min(4, max(1, physical_cores // num_gpus)) if worker_threads == -1 else max(1, worker_threads)
-    )
+    effective_workers = min(4, max(1, physical_cores // num_gpus)) if worker_threads == -1 else max(1, worker_threads)
     return max(1, physical_cores - num_gpus * effective_workers)
 
 
@@ -194,6 +193,9 @@ def bench_rdkit_substruct(
             (start, mol_binaries[start : start + batch_size]) for start in range(0, len(mol_binaries), batch_size)
         ]
 
+        # Workers are started (and the module re-imported) before timing; only matching is measured.
+        pool = ready_spawn_pool(threads, _rdkit_worker_init, (query_binaries, max_matches))
+
         @nvtx.annotate("substruct_run_mp", color="yellow")
         def run(deadline: Deadline):
             nonlocal complete_results_data, results_data, pairs_done_this_run
@@ -202,8 +204,7 @@ def bench_rdkit_substruct(
                 batches,
                 max_workers=threads,
                 deadline=deadline,
-                initializer=_rdkit_worker_init,
-                initargs=(query_binaries, max_matches),
+                pool=pool,
             )
             completed = dict(mapped.results)
             pairs_done_this_run = sum(len(rows) * num_queries for rows in completed.values())
@@ -231,14 +232,19 @@ def bench_rdkit_substruct(
             if pairs_done_this_run == pairs_total:
                 complete_results_data = results_data
 
-    timing = _time_it(
-        run,
-        runs=runs,
-        warmups=0,
-        max_seconds=max_seconds,
-        progress_getter=lambda: pairs_done_this_run,
-        progress_target=pairs_total,
-    )
+    try:
+        timing = _time_it(
+            run,
+            runs=runs,
+            warmups=0,
+            max_seconds=max_seconds,
+            progress_getter=lambda: pairs_done_this_run,
+            progress_target=pairs_total,
+        )
+    finally:
+        if threads > 1:
+            pool.terminate()
+            pool.join()
     if timing.progress is None:
         raise RuntimeError("bounded timing did not report progress")
     last_pairs = timing.progress
@@ -409,10 +415,7 @@ def main():
         "--autotune_cpu_budget",
         type=int,
         default=None,
-        help=(
-            "CPU-core budget used to bound the autotune search space. "
-            "Default: detected physical core count"
-        ),
+        help=("CPU-core budget used to bound the autotune search space. Default: detected physical core count"),
     )
     parser.add_argument(
         "--autotune_calibration_size",
