@@ -455,44 +455,6 @@ template <typename Real, int kBinLanes = 8> struct MorsePass {
   static_assert(kFloat || kSineOffset + kSines + 1 <= kRecordValues);
 };
 
-//! Coefficients of the CUDA math library's double exp(): log2(e), ln 2 split in two, then its polynomial for
-//! e^r on |r| <= ln 2 / 2 (degree 11), highest power first; its last two coefficients, 1 and 1, are immediates.
-__constant__ double kExpLog2E    = 0x1.71547652b82fep+0;
-__constant__ double kExpLn2High  = 0x1.62e42fefa39efp-1;
-__constant__ double kExpLn2Low   = 0x1.abc9e3b39803fp-56;
-__constant__ double kExpPoly[10] = {0x1.ade1569ce2bdfp-26,
-                                    0x1.28af3fca213eap-22,
-                                    0x1.71dee62401315p-19,
-                                    0x1.a01997c89eb71p-16,
-                                    0x1.a01a014761f65p-13,
-                                    0x1.6c16c1852b7afp-10,
-                                    0x1.1111111122322p-7,
-                                    0x1.55555555502a1p-5,
-                                    0x1.5555555555511p-3,
-                                    0x1.000000000000bp-1};
-
-/**
- * @brief exp(@p x) for -700 < x < 700: the CUDA math library's double exp() without its out-of-range path, so the
- *        same operations and the same result. The coefficients are constant-bank operands rather than immediates the
- *        compiler moves through uniform registers on every call.
- */
-__device__ __forceinline__ double expInRange(const double x) {
-  constexpr double kRoundShift = 6755399441055744.0;  // 1.5 * 2^52: the integer part lands in the low word.
-  const double     shifted     = fma(x, kExpLog2E, kRoundShift);
-  const double     n           = shifted - kRoundShift;
-  double           r           = fma(n, -kExpLn2High, x);
-  r                            = fma(n, -kExpLn2Low, r);
-  double p                     = fma(r, kExpPoly[0], kExpPoly[1]);
-#pragma unroll
-  for (int power = 2; power < 10; ++power) {
-    p = fma(r, p, kExpPoly[power]);
-  }
-  p = fma(r, p, 1.0);
-  p = fma(r, p, 1.0);
-  // Times 2^n: n added to the exponent field.
-  return __hiloint2double(__double2hiint(p) + (__double2loint(shifted) << 20), __double2loint(p));
-}
-
 //! exp(-25 (2 b + 1)) for b = 0..3: RdfPass's double window steps.
 __constant__ double kRdfStepFactors[4] = {1.3887943864964021e-11,
                                           2.6786369618080778e-33,
@@ -597,10 +559,9 @@ template <typename Real, int kBinLanes = 8> struct RdfPass {
       // exp(-100 (d + 0.5 (b + 1))^2) = exp(-100 (d + 0.5 b)^2) exp(-100 d) exp(-25 (2 b + 1)) from the window's first
       // offset d in (-1, -0.5]: two double exp() for the four terms, each step a few ulp. A window clamped past the
       // last radius has no bins and stays zero (exp(-100 d) would overflow).
-      // Binned windows keep offset in (-1, -0.5], so both exponents are within expInRange()'s range.
       const bool   binned = start < kNumRdfRadii;
-      const double growth = binned ? expInRange(-100.0 * offset) : 0.0;
-      double       term   = binned ? expInRange(-100.0 * offset * offset) : 0.0;
+      const double growth = binned ? exp(-100.0 * offset) : 0.0;
+      double       term   = binned ? exp(-100.0 * offset * offset) : 0.0;
 #pragma unroll
       for (int bin = 0; bin < kWindow; ++bin) {
         record[kTermOffset + bin] = term;
@@ -1636,7 +1597,7 @@ __device__ __forceinline__ void stageConformerSolo(const ConformerAtoms& atoms,
 
 //! Stores output value @p index of the properties in @p kSet (output order) from its finished @p sum, rounded like
 //! RDKit, or NaN for an invalid conformer.
-template <typename Real, unsigned kSet, typename OutputReal>
+template <typename Real, unsigned kSet>
 __device__ __forceinline__ void storeFinished(const int      index,
                                               const Real     sum,
                                               const bool     valid,
@@ -1644,23 +1605,22 @@ __device__ __forceinline__ void storeFinished(const int      index,
                                               const int      numAtoms,
                                               const double*  morseZeroBin,
                                               const unsigned autocorrNaN,
-                                              OutputReal*    rdfOutput,
-                                              OutputReal*    morseOutput,
-                                              OutputReal*    autocorrOutput) {
-  using Widths             = PairwiseWidths<kSet>;
-  const OutputReal invalid = static_cast<OutputReal>(nan(""));
+                                              Real*          rdfOutput,
+                                              Real*          morseOutput,
+                                              Real*          autocorrOutput) {
+  using Widths       = PairwiseWidths<kSet>;
+  const Real invalid = static_cast<Real>(nan(""));
   if (index < Widths::kRdf) {
     rdfOutput[static_cast<size_t>(conformerIdx) * kNumRdfProperties + index] =
-      valid ? static_cast<OutputReal>(roundThousandths(sum)) : invalid;
+      valid ? static_cast<Real>(roundThousandths(sum)) : invalid;
   } else if (index < Widths::kRdf + Widths::kMorse) {
-    const int  local      = index - Widths::kRdf;
-    const int  channel    = local / kNumMorseScatterings;
-    const int  scattering = local % kNumMorseScatterings;
-    OutputReal value      = invalid;
+    const int local      = index - Widths::kRdf;
+    const int channel    = local / kNumMorseScatterings;
+    const int scattering = local % kNumMorseScatterings;
+    Real      value      = invalid;
     if (valid) {
-      value = scattering == 0 ?
-                static_cast<OutputReal>(static_cast<Real>(roundThousandths(morseZeroBin[channel]))) :
-                static_cast<OutputReal>(roundThousandths(sum * (Real(1) / static_cast<Real>(scattering))));
+      value = scattering == 0 ? static_cast<Real>(roundThousandths(morseZeroBin[channel])) :
+                                static_cast<Real>(roundThousandths(sum * (Real(1) / static_cast<Real>(scattering))));
     }
     morseOutput[static_cast<size_t>(conformerIdx) * kNumMorseProperties + local] = value;
   } else {
@@ -1670,7 +1630,7 @@ __device__ __forceinline__ void storeFinished(const int      index,
     // One atom gives 0 / 0 = NaN, as in RDKit; a channel with a NaN weight reports 0, as RDKit does.
     const double total        = ((autocorrNaN >> channel) & 1u) != 0 ? 0.0 : 2.0 * static_cast<double>(sum);
     autocorrOutput[static_cast<size_t>(conformerIdx) * kNumAutocorr3DProperties + local] =
-      valid ? static_cast<OutputReal>(static_cast<Real>(roundThousandths(total / orderedPairs))) : invalid;
+      valid ? static_cast<Real>(roundThousandths(total / orderedPairs)) : invalid;
   }
 }
 
@@ -1680,7 +1640,7 @@ __device__ __forceinline__ void storeFinished(const int      index,
  * the last slice to arrive combines them. The combining block writes each finished value, rounded like RDKit, or NaN
  * for an invalid conformer.
  */
-template <typename Real, unsigned kSet, typename OutputReal>
+template <typename Real, unsigned kSet>
 __device__ __forceinline__ void finishPairwise(const int      conformerIdx,
                                                const int      slice,
                                                const int      slices,
@@ -1691,9 +1651,9 @@ __device__ __forceinline__ void finishPairwise(const int      conformerIdx,
                                                const Real*    warpSums,
                                                Real*          sliceSums,
                                                int32_t*       tickets,
-                                               OutputReal*    rdfOutput,
-                                               OutputReal*    morseOutput,
-                                               OutputReal*    autocorrOutput) {
+                                               Real*          rdfOutput,
+                                               Real*          morseOutput,
+                                               Real*          autocorrOutput) {
   using Widths           = PairwiseWidths<kSet>;
   constexpr int kStride  = PairwiseSharedLayout<Real, kSet>::kSumStride;
   // The block's sum of output value @p index: its compact row, or its warps' rows in warp order.
@@ -1994,7 +1954,7 @@ __device__ __forceinline__ void runPairwisePasses(PairwiseConformer<Real>       
  *        in the warp's quarter of the shared rows (and its bond distances in the warp's quarter of the shared lags),
  *        runs every pass over all its pairs into the warp's sums row, and writes its finished values.
  */
-template <typename Real, unsigned kSet, typename OutputReal>
+template <typename Real, unsigned kSet>
 __device__ __forceinline__ void pairwiseSolo(const DeviceCoordView&        coordinates,
                                              const Property3DDeviceInputs& inputs,
                                              const BondDistanceTable&      bondTable,
@@ -2004,9 +1964,9 @@ __device__ __forceinline__ void pairwiseSolo(const DeviceCoordView&        coord
                                              Real*                         warpSums,
                                              Real*                         records,
                                              Real*                         sharedRows,
-                                             OutputReal*                   rdfOutput,
-                                             OutputReal*                   morseOutput,
-                                             OutputReal*                   autocorrOutput) {
+                                             Real*                         rdfOutput,
+                                             Real*                         morseOutput,
+                                             Real*                         autocorrOutput) {
   using Layout                      = PairwiseSharedLayout<Real, kSet>;
   using Widths                      = PairwiseWidths<kSet>;
   constexpr bool       kAutocorr    = (kSet & kPairwiseAutocorr3D) != 0;
@@ -2114,16 +2074,16 @@ __device__ __forceinline__ void pairwiseSolo(const DeviceCoordView&        coord
  * The block first stages one row per atom (coordinates centered in float64, then the channel weights), so the pair
  * passes read only @p Real values; each property then takes one pass over the slice's pairs (runPairwisePass()).
  */
-template <typename Real, unsigned kSet, typename OutputReal>
+template <typename Real, unsigned kSet>
 __global__ void __launch_bounds__(kPairwiseThreads, (pairwiseMinBlocks<Real, kSet>()))
   pairwise3DKernel(const DeviceCoordView        coordinates,
                    const Property3DDeviceInputs inputs,
                    const BondDistanceTable      bondTable,
                    const PairwiseScratch<Real>  scratch,
                    const int                    slices,
-                   OutputReal* __restrict__ rdfOutput,
-                   OutputReal* __restrict__ morseOutput,
-                   OutputReal* __restrict__ autocorrOutput) {
+                   Real* __restrict__ rdfOutput,
+                   Real* __restrict__ morseOutput,
+                   Real* __restrict__ autocorrOutput) {
   using Layout = PairwiseSharedLayout<Real, kSet>;
   extern __shared__ __align__(16) unsigned char pairwiseShared[];
   PairwiseStats&                                stats = *reinterpret_cast<PairwiseStats*>(pairwiseShared);
@@ -2256,12 +2216,11 @@ __global__ void __launch_bounds__(kPairwiseThreads, (pairwiseMinBlocks<Real, kSe
                              autocorrOutput);
 }
 
-//! Output rows of the pairwise properties; null for properties that were not requested. @p OutputReal may be wider
-//! than @p Real, in which case each finished value is widened as it is stored.
-template <typename Real, typename OutputReal = Real> struct PairwiseOutputs {
-  OutputReal* rdf        = nullptr;
-  OutputReal* morse      = nullptr;
-  OutputReal* autocorr3D = nullptr;
+//! Output rows of the pairwise properties; null for properties that were not requested.
+template <typename Real> struct PairwiseOutputs {
+  Real* rdf        = nullptr;
+  Real* morse      = nullptr;
+  Real* autocorr3D = nullptr;
 };
 
 /**
@@ -2287,15 +2246,15 @@ int pairwiseSlices(const DeviceCoordView& coordinates, const int maxAtoms, const
   return static_cast<int>(std::min<double>(std::max(slices, 1.0), kPairwiseMaxSlices<Real>));
 }
 
-template <typename Real, unsigned kSet, typename OutputReal>
-void launchPairwiseSet(const DeviceCoordView&                   coordinates,
-                       const Property3DDeviceInputs&            inputs,
-                       const PairwiseScratch<Real>&             scratch,
-                       const int                                slices,
-                       const BondDistanceTable&                 bondTable,
-                       const PairwiseOutputs<Real, OutputReal>& outputs,
-                       const cudaStream_t                       stream) {
-  auto* const  kernel      = pairwise3DKernel<Real, kSet, OutputReal>;
+template <typename Real, unsigned kSet>
+void launchPairwiseSet(const DeviceCoordView&        coordinates,
+                       const Property3DDeviceInputs& inputs,
+                       const PairwiseScratch<Real>&  scratch,
+                       const int                     slices,
+                       const BondDistanceTable&      bondTable,
+                       const PairwiseOutputs<Real>&  outputs,
+                       const cudaStream_t            stream) {
+  auto* const  kernel      = pairwise3DKernel<Real, kSet>;
   const size_t sharedBytes = PairwiseSharedLayout<Real, kSet>::bytes(scratch.sharedAtoms);
   // Set per launch: the attribute is per device, and the layout depends on the batch's largest molecule.
   cudaCheckError(
@@ -2324,12 +2283,12 @@ void launchPairwiseSet(const DeviceCoordView&                   coordinates,
 }
 
 //! Launches the pairwise kernel when RDF, MORSE or AUTOCORR3D is requested; one launch serves all of them.
-template <typename Real, typename OutputReal>
-void launchPairwiseProperties(const DeviceCoordView&                   coordinates,
-                              const Property3DDeviceInputs&            inputs,
-                              const PairwiseOutputs<Real, OutputReal>& outputs,
-                              const BondDistanceTable&                 bondTable,
-                              const cudaStream_t                       stream) {
+template <typename Real>
+void launchPairwiseProperties(const DeviceCoordView&        coordinates,
+                              const Property3DDeviceInputs& inputs,
+                              const PairwiseOutputs<Real>&  outputs,
+                              const BondDistanceTable&      bondTable,
+                              const cudaStream_t            stream) {
   const unsigned set = (outputs.rdf != nullptr ? kPairwiseRdf : 0u) | (outputs.morse != nullptr ? kPairwiseMorse : 0u) |
                        (outputs.autocorr3D != nullptr ? kPairwiseAutocorr3D : 0u);
   if (coordinates.numConformers == 0 || set == 0) {
