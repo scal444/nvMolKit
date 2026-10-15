@@ -309,6 +309,8 @@ MORGAN_NUM_MOLS=1000000
 # single-threaded O(n^2); diversity's LeaderPicker uses the CPU budget (MaxMinPicker is serial).
 BUTINA_RDKIT_MAX_SIZE=20000
 DIVERSITY_RDKIT_MAX_SIZE=100000
+# RDKit's MaxMinPicker needs pick_size < pool size, and the smallest pool is 10k molecules.
+if [ "$SKIP_RDKIT" = "1" ]; then DIVERSITY_PICK_SIZES=(100 1000 10000); else DIVERSITY_PICK_SIZES=(100 1000 5000); fi
 # AAP similarity pairs: large for nvMolKit, small when the (pure-Python) RDKit reference runs.
 # (The RDKit Contrib reference runs ~35 pairs/s single-threaded, so 2k pairs keeps it near a minute per run.)
 # nvMolKit pair similarity is host-bound per pair, so 10k pairs (not millions) keeps it to seconds.
@@ -603,7 +605,10 @@ SUBSTRUCT_ROWS=(
   "rdkit_tautomer_transforms_supported.txt:getSubstructMatches:$SUBSTRUCT_NUM_MOLS"
   "rdkit_torsionPreferences_v2_supported.txt:getSubstructMatches:1250000"
 )
-for algorithm in gsi dfs; do
+# RDKit has no GSI/DFS choice, so an RDKit-only run measures each SMARTS-set baseline once (as "gsi").
+SUBSTRUCT_ALGORITHMS=(gsi dfs)
+if [ "$SKIP_NVMOLKIT" = "1" ]; then SUBSTRUCT_ALGORITHMS=(gsi); fi
+for algorithm in "${SUBSTRUCT_ALGORITHMS[@]}"; do
   for row in "${SUBSTRUCT_ROWS[@]}"; do
     IFS=: read -r smarts_file mode substruct_mols <<< "$row"
     smarts_stem="${smarts_file%.txt}"
@@ -669,7 +674,7 @@ run_bench diversity_pickers "$RESULT_DIR/diversity_pickers.csv" \
   --smiles "$DATASET" \
   --seed "$BENCHMARK_SEED" \
   --sizes 10000 100000 1000000 3000000 \
-  --pick_sizes 100 1000 10000 \
+  --pick_sizes "${DIVERSITY_PICK_SIZES[@]}" \
   --rdkit_threads "$CPUS" \
   --rdkit_max_size "$DIVERSITY_RDKIT_MAX_SIZE" \
   --output "$RESULT_DIR/diversity_pickers.csv" \
@@ -680,7 +685,9 @@ run_bench diversity_pickers "$RESULT_DIR/diversity_pickers.csv" \
 # the $CPUS budget. It is deliberately left uncapped rather than pinned; do not compare it as a $CPUS-core result.
 # AAP clustering orders molecules by a numeric priority (DISE requires one). Enamine has no assay values,
 # so a 100k random Enamine sample ordered by descending QED stands in; it is not comparable with the
-# assay-based (PubChem AID 686979) AAP figures from the v0.7 pre-release analysis.
+# assay-based (PubChem AID 686979) AAP figures from the v0.7 pre-release analysis. The full RDKit
+# AAP+DISE workflow only runs up to --rdkit-workflow-max-size (512), so sizes start at 128 and 512 to give
+# CPU/GPU comparison points.
 if [ -f "$AAP_CSV" ]; then
   run_bench aap_clustering "$RESULT_DIR/aap_clustering.csv" \
     python "$SCRIPT_DIR/aap_clustering_bench.py" \
@@ -688,7 +695,7 @@ if [ -f "$AAP_CSV" ]; then
     --smiles-column smiles \
     --sort-tag QED \
     --sort-descending \
-    --sizes 1024 4096 16384 65536 \
+    --sizes 128 512 1024 4096 16384 65536 \
     --num_pairs "$AAP_NUM_PAIRS" \
     --seed "$BENCHMARK_SEED" \
     --operation all \
