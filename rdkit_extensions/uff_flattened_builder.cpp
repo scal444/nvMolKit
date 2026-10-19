@@ -348,6 +348,8 @@ void addNonbonded(const ROMol& mol,
   }
 
   const Conformer& conf = mol.getConformer(confId);
+  // Terms are emitted ordered by idx1 (i-major). The block-per-molecule gradient kernel folds runs of consecutive
+  // terms that share idx1 before its atomic updates, so keep this order when changing the loop.
   for (unsigned int i = 0; i < mol.getNumAtoms(); ++i) {
     if (!params[i]) {
       continue;

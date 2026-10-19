@@ -28,6 +28,7 @@
 #include <GraphMol/SmilesParse/SmilesParse.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <memory>
@@ -147,6 +148,14 @@ TEST_F(UFFGpuTestFixture, FlattenedBuilderPopulatesAllTerms) {
   EXPECT_EQ(contribs_.torsionTerms.idx1.size(), contribs_.torsionTerms.cosTerm.size());
   EXPECT_EQ(contribs_.inversionTerms.idx1.size(), contribs_.inversionTerms.C2.size());
   EXPECT_EQ(contribs_.vdwTerms.idx1.size(), contribs_.vdwTerms.threshold.size());
+}
+
+TEST_F(UFFGpuTestFixture, VdwTermsOrderedByFirstAtom) {
+  // The block-per-molecule gradient folds consecutive van der Waals terms that share idx1, which only pays off when
+  // the builder keeps them ordered by idx1.
+  const auto& idx1 = contribs_.vdwTerms.idx1;
+  ASSERT_GT(idx1.size(), 1);
+  EXPECT_TRUE(std::is_sorted(idx1.begin(), idx1.end()));
 }
 
 TEST_P(UFFPrecisionTestFixture, CombinedEnergyMatchesRDKit) {

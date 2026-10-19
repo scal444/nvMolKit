@@ -570,6 +570,80 @@ __device__ __forceinline__ void uffVdwGrad(const auto* pos,
   atomicAdd(&grad[3 * idx2 + 2], -gz);
 }
 
+//! Gradient of one van der Waals term on idx1 (idx2 receives the negation), left in registers for the caller to
+//! accumulate. Returns false when the pair is beyond the threshold and contributes nothing. The arithmetic matches
+//! uffVdwGrad.
+__device__ __forceinline__ bool uffVdwGradTerm(const auto* pos,
+                                               const int   idx1,
+                                               const int   idx2,
+                                               const real  x_ij,
+                                               const real  wellDepth,
+                                               const real  threshold,
+                                               real&       gx,
+                                               real&       gy,
+                                               real&       gz) {
+  const real dist = NVMOLKIT_SQRT(distanceSquared(pos, idx1, idx2));
+  if (dist > threshold) {
+    return false;
+  }
+  if (dist <= real{0.0}) {
+    gx = real{100.0};
+    gy = real{100.0};
+    gz = real{100.0};
+    return true;
+  }
+
+  const real r         = x_ij / dist;
+  const real r7        = r * cubeValue(squareValue(r));
+  const real r13       = r7 * squareValue(squareValue(r)) * squareValue(r);
+  const real preFactor = real{12.0} * wellDepth / x_ij * (r7 - r13);
+
+  const real dx = pos[3 * idx1 + 0] - pos[3 * idx2 + 0];
+  const real dy = pos[3 * idx1 + 1] - pos[3 * idx2 + 1];
+  const real dz = pos[3 * idx1 + 2] - pos[3 * idx2 + 2];
+  gx            = preFactor * dx / dist;
+  gy            = preFactor * dy / dist;
+  gz            = preFactor * dz / dist;
+  return true;
+}
+
+__device__ __forceinline__ void addAtomGrad(auto* grad, const int atom, const real gx, const real gy, const real gz) {
+  atomicAdd(&grad[3 * atom + 0], gx);
+  atomicAdd(&grad[3 * atom + 1], gy);
+  atomicAdd(&grad[3 * atom + 2], gz);
+}
+
+//! Lanes per fold group. Runs of equal keys are also split at group boundaries, so the fold takes log2(kFoldWidth)
+//! shuffle rounds and a run spanning several groups issues one reduction per group. A double-precision shuffle round
+//! costs twice a single-precision one, so the double-precision fold stops at 8-lane groups.
+constexpr int kFoldWidth = std::is_same_v<real, double> ? 8 : 32;
+
+//! Sums (x, y, z) over each run of consecutive lanes holding the same key within a kFoldWidth-lane group; the first
+//! lane of each run (isHead) receives the run total. Must be called by all 32 lanes of the warp.
+__device__ __forceinline__ void warpSegmentedSum(const int key, real& x, real& y, real& z, bool& isHead) {
+  constexpr unsigned kFullMask = 0xffffffffu;
+  const int          lane      = threadIdx.x & 31;
+  const int          prevKey   = __shfl_up_sync(kFullMask, key, 1);
+  isHead                       = (lane & (kFoldWidth - 1)) == 0 || prevKey != key;
+  const unsigned heads         = __ballot_sync(kFullMask, isHead);
+  if (heads == kFullMask) {
+    return;
+  }
+  const unsigned headsAbove = heads & (0xfffffffeu << lane);
+  const int      segEnd     = headsAbove != 0 ? __ffs(headsAbove) - 2 : 31;
+#pragma unroll
+  for (int d = 1; d < kFoldWidth; d <<= 1) {
+    const real ox = __shfl_down_sync(kFullMask, x, d);
+    const real oy = __shfl_down_sync(kFullMask, y, d);
+    const real oz = __shfl_down_sync(kFullMask, z, d);
+    if (lane + d <= segEnd) {
+      x += ox;
+      y += oy;
+      z += oz;
+    }
+  }
+}
+
 }  // namespace detail
 using namespace detail;
 
@@ -775,17 +849,63 @@ __device__ __inline__ void molGrad(const Terms&                   terms,
                      grad);
   }
 
+  // Van der Waals terms dominate the term count and the builder emits them ordered by idx1, so consecutive terms
+  // usually share their first atom. Each warp step covers 32 consecutive terms; runs of equal idx1 are folded with a
+  // segmented shuffle sum so one lane per run issues the idx1 reduction. The whole warp iterates together (the
+  // shuffles need every lane), and each lane loads its next term before computing the current one.
+  static_assert(stride % 32 == 0, "the van der Waals fold needs whole warps");
   const int vdwStart = systemIndices.vdwTermStarts[molIdx];
   const int vdwEnd   = systemIndices.vdwTermStarts[molIdx + 1];
+  const int lane     = tid & 31;
+  int       i        = vdwStart + tid;
+  int       nA1      = 0;
+  int       nA2      = 0;
+  real      nXij     = real{0.0};
+  real      nDepth   = real{0.0};
+  real      nThr     = real{0.0};
+  if (i < vdwEnd) {
+    nA1    = terms.vdwTerms.idx1[i];
+    nA2    = terms.vdwTerms.idx2[i];
+    nXij   = terms.vdwTerms.x_ij[i];
+    nDepth = terms.vdwTerms.wellDepth[i];
+    nThr   = terms.vdwTerms.threshold[i];
+  }
 #pragma unroll 1
-  for (int i = vdwStart + tid; i < vdwEnd; i += stride) {
-    uffVdwGrad(molCoords,
-               terms.vdwTerms.idx1[i] - atomStart,
-               terms.vdwTerms.idx2[i] - atomStart,
-               terms.vdwTerms.x_ij[i],
-               terms.vdwTerms.wellDepth[i],
-               terms.vdwTerms.threshold[i],
-               grad);
+  for (int base = vdwStart + tid - lane; base < vdwEnd; base += stride) {
+    const int  a1     = nA1 - atomStart;
+    const int  a2     = nA2 - atomStart;
+    const real xij    = nXij;
+    const real depth  = nDepth;
+    const real thresh = nThr;
+    const bool valid  = i < vdwEnd;
+    i += stride;
+    if constexpr (std::is_same_v<real, double>) {
+      // Lanes past the end reload the last record instead of branching around the load, which keeps the
+      // latency-bound double-precision loop free of a divergent prefetch.
+      const int pi = i < vdwEnd ? i : vdwEnd - 1;
+      nA1          = terms.vdwTerms.idx1[pi];
+      nA2          = terms.vdwTerms.idx2[pi];
+      nXij         = terms.vdwTerms.x_ij[pi];
+      nDepth       = terms.vdwTerms.wellDepth[pi];
+      nThr         = terms.vdwTerms.threshold[pi];
+    } else if (i < vdwEnd) {
+      nA1    = terms.vdwTerms.idx1[i];
+      nA2    = terms.vdwTerms.idx2[i];
+      nXij   = terms.vdwTerms.x_ij[i];
+      nDepth = terms.vdwTerms.wellDepth[i];
+      nThr   = terms.vdwTerms.threshold[i];
+    }
+    real gx = real{0.0};
+    real gy = real{0.0};
+    real gz = real{0.0};
+    if (valid && uffVdwGradTerm(molCoords, a1, a2, xij, depth, thresh, gx, gy, gz)) {
+      addAtomGrad(grad, a2, -gx, -gy, -gz);
+    }
+    bool head;
+    warpSegmentedSum(valid ? a1 : -1, gx, gy, gz, head);
+    if (valid && head) {
+      addAtomGrad(grad, a1, gx, gy, gz);
+    }
   }
 
   if constexpr (HasConstraints) {
