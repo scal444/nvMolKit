@@ -111,22 +111,6 @@ cudaError_t launchFourthDimGradientKernel(int            numFD,
                                           cudaStream_t   stream          = 0);
 
 // Experimental torsion angle contribution kernels
-cudaError_t launchTorsionAngleEnergyKernel(int            numTorsion,
-                                           const int*     idx1,
-                                           const int*     idx2,
-                                           const int*     idx3,
-                                           const int*     idx4,
-                                           const double*  forceConstant,
-                                           const int*     signs,
-                                           const double*  pos,
-                                           double*        energyBuffer,
-                                           const int*     energyBufferStarts,
-                                           const int*     atomIdxToBatchIdx,
-                                           const int*     torsionTermStarts,
-                                           const int*     atomStarts,
-                                           const uint8_t* activeThisStage = nullptr,
-                                           cudaStream_t   stream          = 0);
-
 cudaError_t launchTorsionAngleGradientKernel(int            numTorsion,
                                              const int*     idx1,
                                              const int*     idx2,
@@ -181,21 +165,6 @@ cudaError_t launchInversionGradientKernel(int            numInversion,
                                           cudaStream_t   stream          = 0);
 
 // Distance constraint contribution kernels
-cudaError_t launchDistanceConstraintEnergyKernel(int            numDist,
-                                                 const int*     idx1,
-                                                 const int*     idx2,
-                                                 const double*  minLen,
-                                                 const double*  maxLen,
-                                                 const double*  forceConstant,
-                                                 const double*  pos,
-                                                 double*        energyBuffer,
-                                                 const int*     energyBufferStarts,
-                                                 const int*     atomIdxToBatchIdx,
-                                                 const int*     distTermStarts,
-                                                 const int*     atomStarts,
-                                                 const uint8_t* activeThisStage = nullptr,
-                                                 cudaStream_t   stream          = 0);
-
 cudaError_t launchDistanceConstraintGradientKernel(int            numDist,
                                                    const int*     idx1,
                                                    const int*     idx2,
@@ -428,6 +397,89 @@ cudaError_t launchPlanarEnergyKernelETK(int                                     
                                         float*                                      energies,
                                         const uint8_t*                              activeThisStage = nullptr,
                                         cudaStream_t                                stream          = 0);
+
+//! Fused block-per-molecule evaluation: one launch computes every term family of each molecule and updates the
+//! output in place. Term and index pointer structs are passed by value as kernel parameters.
+//!
+//! Double precision follows the term-parallel computeEnergy/computeGradients contract: active systems
+//! (activeThisStage == 1) add their sum to energies[mol] or to their grad slice; inactive systems are left untouched.
+//! Single precision follows the launchBlockPerMol* contract: inactive systems (activeThisStage == 0) get energy 0 and
+//! keep their gradient; active systems overwrite their energy, overwrite their DG gradient slice and add to their ETK
+//! gradient slice.
+cudaError_t launchFusedEnergyKernel(int                                 numMols,
+                                    const EnergyForceContribsDevicePtr& terms,
+                                    const BatchedIndicesDevicePtr&      systemIndices,
+                                    const double*                       coords,
+                                    double*                             energies,
+                                    int                                 dimension,
+                                    double                              chiralWeight,
+                                    double                              fourthDimWeight,
+                                    const uint8_t*                      activeThisStage = nullptr,
+                                    cudaStream_t                        stream          = 0);
+cudaError_t launchFusedGradKernel(int                                 numMols,
+                                  const EnergyForceContribsDevicePtr& terms,
+                                  const BatchedIndicesDevicePtr&      systemIndices,
+                                  const double*                       coords,
+                                  double*                             grad,
+                                  int                                 dimension,
+                                  double                              chiralWeight,
+                                  double                              fourthDimWeight,
+                                  const uint8_t*                      activeThisStage = nullptr,
+                                  cudaStream_t                        stream          = 0);
+cudaError_t launchFusedEnergyKernel(int                                       numMols,
+                                    const EnergyForceContribsDevicePtrSingle& terms,
+                                    const BatchedIndicesDevicePtr&            systemIndices,
+                                    const float*                              coords,
+                                    float*                                    energies,
+                                    int                                       dimension,
+                                    float                                     chiralWeight,
+                                    float                                     fourthDimWeight,
+                                    const uint8_t*                            activeThisStage = nullptr,
+                                    cudaStream_t                              stream          = 0);
+cudaError_t launchFusedGradKernel(int                                       numMols,
+                                  const EnergyForceContribsDevicePtrSingle& terms,
+                                  const BatchedIndicesDevicePtr&            systemIndices,
+                                  const float*                              coords,
+                                  float*                                    grad,
+                                  int                                       dimension,
+                                  float                                     chiralWeight,
+                                  float                                     fourthDimWeight,
+                                  const uint8_t*                            activeThisStage = nullptr,
+                                  cudaStream_t                              stream          = 0);
+
+//! ETK term-family bits for the fused ETK energy termMask.
+constexpr int kETKTorsionBit  = 1;
+constexpr int kETKImproperBit = 2;
+constexpr int kETKDist12Bit   = 4;
+constexpr int kETKDist13Bit   = 8;
+constexpr int kETKAngle13Bit  = 16;
+constexpr int kETKLongDistBit = 32;
+constexpr int kETKAllTermsMask =
+  kETKTorsionBit | kETKImproperBit | kETKDist12Bit | kETKDist13Bit | kETKAngle13Bit | kETKLongDistBit;
+
+cudaError_t launchFusedEnergyKernelETK(int                                   numMols,
+                                       const Energy3DForceContribsDevicePtr& terms,
+                                       const BatchedIndices3DDevicePtr&      systemIndices,
+                                       const double*                         coords,
+                                       double*                               energies,
+                                       int                                   termMask        = kETKAllTermsMask,
+                                       const uint8_t*                        activeThisStage = nullptr,
+                                       cudaStream_t                          stream          = 0);
+cudaError_t launchFusedEnergyKernelETK(int                                         numMols,
+                                       const Energy3DForceContribsDevicePtrSingle& terms,
+                                       const BatchedIndices3DDevicePtr&            systemIndices,
+                                       const float*                                coords,
+                                       float*                                      energies,
+                                       int                                         termMask        = kETKAllTermsMask,
+                                       const uint8_t*                              activeThisStage = nullptr,
+                                       cudaStream_t                                stream          = 0);
+cudaError_t launchFusedGradKernelETK(int                                         numMols,
+                                     const Energy3DForceContribsDevicePtrSingle& terms,
+                                     const BatchedIndices3DDevicePtr&            systemIndices,
+                                     const float*                                coords,
+                                     float*                                      grad,
+                                     const uint8_t*                              activeThisStage = nullptr,
+                                     cudaStream_t                                stream          = 0);
 }  // namespace DistGeom
 }  // namespace nvMolKit
 

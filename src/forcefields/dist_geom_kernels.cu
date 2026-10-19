@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include <cub/cub.cuh>
+#include <type_traits>
 
 #include "src/forcefields/dist_geom_kernels.h"
 #include "src/forcefields/dist_geom_kernels_device_dispatch.cuh"
@@ -201,43 +202,6 @@ __global__ void fourthDimGradientKernel(const int      numFD,
   }
 }
 
-__global__ void TorsionAngleEnergyKernel(const int      numTorsion,
-                                         const int*     idx1s,
-                                         const int*     idx2s,
-                                         const int*     idx3s,
-                                         const int*     idx4s,
-                                         const double*  forceConstants,
-                                         const int*     signs,
-                                         const double*  pos,
-                                         double*        energyBuffer,
-                                         const int*     energyBufferStarts,
-                                         const int*     atomIdxToBatchIdx,
-                                         const int*     torsionTermStarts,
-                                         const int*     atomStarts,
-                                         const uint8_t* activeThisStage) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < numTorsion) {
-    const int idx1     = idx1s[idx];
-    const int batchIdx = atomIdxToBatchIdx[idx1];
-
-    // Check if activeThisStage is nullptr or if this molecule/conformer is active in this stage
-    if (activeThisStage == nullptr || activeThisStage[batchIdx] == 1) {
-      const int idx2 = idx2s[idx];
-      const int idx3 = idx3s[idx];
-      const int idx4 = idx4s[idx];
-
-      const double* fc = &forceConstants[idx * 6];
-      const int*    s  = &signs[idx * 6];
-
-      const double energy = torsionAngleEnergy(pos, idx1, idx2, idx3, idx4, fc, s);
-
-      // Accumulate energy in the appropriate buffer
-      const int outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, torsionTermStarts);
-      energyBuffer[outputIdx] += energy;
-    }
-  }
-}
-
 __global__ void TorsionAngleGradientKernel(const int      numTorsion,
                                            const int*     idx1s,
                                            const int*     idx2s,
@@ -334,38 +298,6 @@ __global__ void InversionGradientKernel(const int      numInversion,
                     C2[idx],
                     forceConstants[idx],
                     grad);
-    }
-  }
-}
-
-__global__ void DistanceConstraintEnergyKernel(const int      numDist,
-                                               const int*     idx1s,
-                                               const int*     idx2s,
-                                               const double*  minLen,
-                                               const double*  maxLen,
-                                               const double*  forceConstants,
-                                               const double*  pos,
-                                               double*        energyBuffer,
-                                               const int*     energyBufferStarts,
-                                               const int*     atomIdxToBatchIdx,
-                                               const int*     distTermStarts,
-                                               const int*     atomStarts,
-                                               const uint8_t* activeThisStage) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < numDist) {
-    const int idx1     = idx1s[idx];
-    const int batchIdx = atomIdxToBatchIdx[idx1];
-
-    // Check if activeThisStage is nullptr or if this molecule/conformer is active in this stage
-    if (activeThisStage == nullptr || activeThisStage[batchIdx] == 1) {
-      const int    idx2          = idx2s[idx];
-      const double forceConstant = forceConstants[idx];
-
-      const double energy = distanceConstraintEnergy(pos, idx1, idx2, minLen[idx], maxLen[idx], forceConstant);
-
-      // Accumulate energy in the appropriate buffer
-      const int outputIdx = getEnergyAccumulatorIndex(idx, batchIdx, energyBufferStarts, distTermStarts);
-      energyBuffer[outputIdx] += energy;
     }
   }
 }
@@ -740,43 +672,6 @@ cudaError_t launchFourthDimGradientKernel(const int      numFD,
   return cudaGetLastError();
 }
 
-cudaError_t launchTorsionAngleEnergyKernel(const int      numTorsion,
-                                           const int*     idx1,
-                                           const int*     idx2,
-                                           const int*     idx3,
-                                           const int*     idx4,
-                                           const double*  forceConstant,
-                                           const int*     signs,
-                                           const double*  pos,
-                                           double*        energyBuffer,
-                                           const int*     energyBufferStarts,
-                                           const int*     atomIdxToBatchIdx,
-                                           const int*     torsionTermStarts,
-                                           const int*     atomStarts,
-                                           const uint8_t* activeThisStage,
-                                           cudaStream_t   stream) {
-  if (numTorsion == 0) {
-    return cudaSuccess;
-  }
-  constexpr int blockSize = 256;
-  const int     numBlocks = (numTorsion + blockSize - 1) / blockSize;
-  TorsionAngleEnergyKernel<<<numBlocks, blockSize, 0, stream>>>(numTorsion,
-                                                                idx1,
-                                                                idx2,
-                                                                idx3,
-                                                                idx4,
-                                                                forceConstant,
-                                                                signs,
-                                                                pos,
-                                                                energyBuffer,
-                                                                energyBufferStarts,
-                                                                atomIdxToBatchIdx,
-                                                                torsionTermStarts,
-                                                                atomStarts,
-                                                                activeThisStage);
-  return cudaGetLastError();
-}
-
 cudaError_t launchTorsionAngleGradientKernel(const int      numTorsion,
                                              const int*     idx1,
                                              const int*     idx2,
@@ -893,41 +788,6 @@ cudaError_t launchInversionGradientKernel(const int      numInversion,
                                                                atomIdxToBatchIdx,
                                                                atomStarts,
                                                                activeThisStage);
-  return cudaGetLastError();
-}
-
-cudaError_t launchDistanceConstraintEnergyKernel(const int      numDist,
-                                                 const int*     idx1,
-                                                 const int*     idx2,
-                                                 const double*  minLen,
-                                                 const double*  maxLen,
-                                                 const double*  forceConstants,
-                                                 const double*  pos,
-                                                 double*        energyBuffer,
-                                                 const int*     energyBufferStarts,
-                                                 const int*     atomIdxToBatchIdx,
-                                                 const int*     distTermStarts,
-                                                 const int*     atomStarts,
-                                                 const uint8_t* activeThisStage,
-                                                 cudaStream_t   stream) {
-  if (numDist == 0) {
-    return cudaSuccess;
-  }
-  constexpr int blockSize = 256;
-  const int     numBlocks = (numDist + blockSize - 1) / blockSize;
-  DistanceConstraintEnergyKernel<<<numBlocks, blockSize, 0, stream>>>(numDist,
-                                                                      idx1,
-                                                                      idx2,
-                                                                      minLen,
-                                                                      maxLen,
-                                                                      forceConstants,
-                                                                      pos,
-                                                                      energyBuffer,
-                                                                      energyBufferStarts,
-                                                                      atomIdxToBatchIdx,
-                                                                      distTermStarts,
-                                                                      atomStarts,
-                                                                      activeThisStage);
   return cudaGetLastError();
 }
 
@@ -1551,6 +1411,406 @@ cudaError_t launchPlanarEnergyKernelETK(int                                     
   planarEnergyKernelETK<float>
     <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devIndices.data(), coords, energies, activeThisStage);
   return cudaGetLastError();
+}
+
+// ----------------------------------------------------------------------------------------------
+// Fused single-launch forcefield evaluation.
+// One block per molecule computes every selected term family and updates the molecule's output in place, so a call
+// is one kernel: no scratch memset, per-family launches or separate reduction, and the term/index pointer structs
+// travel as kernel parameters instead of per-call device copies. Molecules too large for the shared coordinate tile
+// read coordinates from global memory. The per-molecule driver lives in dist_geom_kernels_device.cuh (fusedMolecule)
+// and is instantiated per precision.
+// ----------------------------------------------------------------------------------------------
+namespace {
+// 128 threads (one 4-term bulk chunk each per pass); the per-kernel register cap comes from FusedOccupancy.
+constexpr int kFusedBlockSize      = 128;
+constexpr int kFusedMinBlocksPerSM = 7;
+//! Most 128-thread blocks an SM holds: Turing caps an SM at 1024 threads, later parts at 1536 or 2048.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+constexpr int kFusedMaxBlocksPerSM = 8;
+#else
+constexpr int kFusedMaxBlocksPerSM = 12;
+#endif
+constexpr int kFusedSmemAtoms = 128;
+
+template <typename real> struct FusedPrecision;
+template <> struct FusedPrecision<float> {
+  template <int dimension, bool vecPos = false> using DG = fp32::DGFamily<dimension, vecPos>;
+  using ETK                                              = fp32::ETKFamily;
+  template <class Family, bool isGrad, bool isSingle, bool overwriteGrad>
+  static __device__ __forceinline__ void run(const Family&  fam,
+                                             const int*     atomStarts,
+                                             const uint8_t* active,
+                                             const float*   coords,
+                                             float*         out,
+                                             float*         sPos,
+                                             float*         sBulk,
+                                             float*         sRed,
+                                             int            tileVals) {
+    fp32::fusedMolecule<Family, isGrad, isSingle, overwriteGrad>(fam,
+                                                                 atomStarts,
+                                                                 active,
+                                                                 coords,
+                                                                 out,
+                                                                 sPos,
+                                                                 sBulk,
+                                                                 sRed,
+                                                                 tileVals);
+  }
+};
+template <> struct FusedPrecision<double> {
+  template <int dimension, bool vecPos = false> using DG = fp64::DGFamily<dimension, vecPos>;
+  using ETK                                              = fp64::ETKFamily;
+  template <class Family, bool isGrad, bool isSingle, bool overwriteGrad>
+  static __device__ __forceinline__ void run(const Family&  fam,
+                                             const int*     atomStarts,
+                                             const uint8_t* active,
+                                             const double*  coords,
+                                             double*        out,
+                                             double*        sPos,
+                                             double*        sBulk,
+                                             double*        sRed,
+                                             int            tileVals) {
+    fp64::fusedMolecule<Family, isGrad, isSingle, overwriteGrad>(fam,
+                                                                 atomStarts,
+                                                                 active,
+                                                                 coords,
+                                                                 out,
+                                                                 sPos,
+                                                                 sBulk,
+                                                                 sRed,
+                                                                 tileVals);
+  }
+};
+
+//! Residency target per kernel. The fused kernels are latency bound (dependent ranges -> terms -> coordinates round
+//! trips per molecule), so more resident molecules win even at the cost of some L1-cached spills:
+//!   - single-precision energies: 12 blocks for large DG, 10 for ETK, and a spill-free 7 for small DG3 batches;
+//!   - single-precision gradients: 8 blocks, raised to 10 for large DG batches;
+//!   - double precision keeps seven: fewer blocks (no spills) and more blocks (heavier spills) both measured slower.
+template <typename real, class Family, bool isGrad, bool large> struct FusedOccupancy {
+  static constexpr bool kDouble         = std::is_same<real, double>::value;
+  static constexpr bool kETK            = Family::kNumRanges == 12;
+  static constexpr bool kSmallDG3Energy = !kDouble && !isGrad && !large && !kETK && Family::kDimension == 3;
+  static constexpr int  kSingleTarget   = isGrad ? (large && !kETK ? 10 : 8) : (kSmallDG3Energy ? 7 : (kETK ? 10 : 12));
+  static constexpr int  kTarget         = kDouble ? kFusedMinBlocksPerSM : kSingleTarget;
+  static constexpr int  kMinBlocks      = kTarget < kFusedMaxBlocksPerSM ? kTarget : kFusedMaxBlocksPerSM;
+  //! Gradients (and ETK's double-precision energy) stage coordinates in the shared tile; the other energies read them
+  //! straight from global memory (L1-cached), skipping the staging barrier, which measured faster.
+  static constexpr bool kUseTile        = isGrad || (kDouble && kETK);
+};
+
+template <typename real, class Family, bool isGrad, bool isSingle, bool overwriteGrad, bool large>
+__global__ void __launch_bounds__(kFusedBlockSize, (FusedOccupancy<real, Family, isGrad, large>::kMinBlocks))
+  fusedFFKernel(const Family fam,
+                const int* __restrict__ atomStarts,
+                const real* __restrict__ coords,
+                real* __restrict__ out,
+                const uint8_t* __restrict__ active) {
+  constexpr bool kUseTile  = FusedOccupancy<real, Family, isGrad, large>::kUseTile;
+  constexpr int  kTileVals = kFusedSmemAtoms * Family::kDimension;
+  constexpr int  kBulkVals =
+    Family::Bulk::kTileStride != Family::kDimension ? kFusedSmemAtoms * Family::Bulk::kTileStride : 1;
+  // Kernels that read coordinates from global memory allocate no tile (a larger L1 share).
+  __shared__ __align__(16) real sPos[kUseTile ? kTileVals : 1];
+  __shared__ real               sBulk[kUseTile ? kBulkVals : 1];
+  __shared__ real               sRed[kFusedBlockSize / 32];
+  FusedPrecision<real>::template run<Family, isGrad, isSingle, overwriteGrad>(fam,
+                                                                              atomStarts,
+                                                                              active,
+                                                                              coords,
+                                                                              out,
+                                                                              sPos,
+                                                                              sBulk,
+                                                                              sRed,
+                                                                              kUseTile ? kTileVals : 0);
+}
+
+bool aligned16(const void* p) {
+  return (reinterpret_cast<uintptr_t>(p) & 15u) == 0;
+}
+
+template <typename real, bool isGrad, bool isSingle, bool overwriteGrad, bool large, class Family>
+cudaError_t launchFusedImpl(const int      numMols,
+                            const int      blockSize,
+                            const Family&  fam,
+                            const int*     atomStarts,
+                            const real*    coords,
+                            real*          out,
+                            const uint8_t* active,
+                            cudaStream_t   stream) {
+  fusedFFKernel<real, Family, isGrad, isSingle, overwriteGrad, large>
+    <<<numMols, blockSize, 0, stream>>>(fam, atomStarts, coords, out, active);
+  return cudaGetLastError();
+}
+
+//! Large single-precision batches use the higher-residency kernel variants.
+constexpr int kFusedLargeBatch = 4096;
+
+template <typename real, bool isGrad, bool vecPos, int dimension>
+cudaError_t launchFusedDGFamily(const int                                  numMols,
+                                const int                                  blockSize,
+                                const EnergyForceContribsDevicePtrT<real>& terms,
+                                const BatchedIndicesDevicePtr&             indices,
+                                const real*                                coords,
+                                real*                                      out,
+                                const real                                 chiralWeight,
+                                const real                                 fourthDimWeight,
+                                const bool                                 aligned,
+                                const uint8_t*                             active,
+                                cudaStream_t                               stream) {
+  constexpr bool                                                      isSingle      = std::is_same<real, float>::value;
+  // SINGLE overwrites the DG gradient (launchBlockPerMolGradKernel contract); FULL accumulates.
+  constexpr bool                                                      overwriteGrad = isSingle;
+  const typename FusedPrecision<real>::template DG<dimension, vecPos> fam{terms,
+                                                                          indices,
+                                                                          chiralWeight,
+                                                                          fourthDimWeight,
+                                                                          aligned};
+  if constexpr (isSingle) {
+    if (numMols >= kFusedLargeBatch) {
+      return launchFusedImpl<real, isGrad, isSingle, overwriteGrad, true>(numMols,
+                                                                          blockSize,
+                                                                          fam,
+                                                                          indices.atomStarts,
+                                                                          coords,
+                                                                          out,
+                                                                          active,
+                                                                          stream);
+    }
+  }
+  return launchFusedImpl<real, isGrad, isSingle, overwriteGrad, false>(numMols,
+                                                                       blockSize,
+                                                                       fam,
+                                                                       indices.atomStarts,
+                                                                       coords,
+                                                                       out,
+                                                                       active,
+                                                                       stream);
+}
+
+template <typename real, bool isGrad>
+cudaError_t launchFusedDGImpl(const int                                  numMols,
+                              const EnergyForceContribsDevicePtrT<real>& terms,
+                              const BatchedIndicesDevicePtr&             indices,
+                              const real*                                coords,
+                              real*                                      out,
+                              const int                                  dimension,
+                              const real                                 chiralWeight,
+                              const real                                 fourthDimWeight,
+                              const uint8_t*                             active,
+                              cudaStream_t                               stream) {
+  if (numMols <= 0) {
+    return cudaSuccess;
+  }
+  const auto& d = terms.distTerms;
+  const bool  aligned =
+    aligned16(d.idx1) && aligned16(d.idx2) && aligned16(d.lb2) && aligned16(d.ub2) && aligned16(d.weight);
+  // Large FULL energy batches: two-warp CTAs (finer per-molecule scheduling at the same per-thread residency).
+  const int threads =
+    (!std::is_same<real, float>::value && !isGrad && numMols >= kFusedLargeBatch) ? 64 : kFusedBlockSize;
+  if (dimension == 3) {
+    return launchFusedDGFamily<real, isGrad, false, 3>(numMols,
+                                                       threads,
+                                                       terms,
+                                                       indices,
+                                                       coords,
+                                                       out,
+                                                       chiralWeight,
+                                                       fourthDimWeight,
+                                                       aligned,
+                                                       active,
+                                                       stream);
+  }
+  if (dimension == 4) {
+    if constexpr (!isGrad) {
+      if (aligned16(coords)) {
+        // DG4 energies read coordinates from global memory: gather each atom with 16-byte loads.
+        return launchFusedDGFamily<real, isGrad, true, 4>(numMols,
+                                                          threads,
+                                                          terms,
+                                                          indices,
+                                                          coords,
+                                                          out,
+                                                          chiralWeight,
+                                                          fourthDimWeight,
+                                                          aligned,
+                                                          active,
+                                                          stream);
+      }
+    }
+    return launchFusedDGFamily<real, isGrad, false, 4>(numMols,
+                                                       threads,
+                                                       terms,
+                                                       indices,
+                                                       coords,
+                                                       out,
+                                                       chiralWeight,
+                                                       fourthDimWeight,
+                                                       aligned,
+                                                       active,
+                                                       stream);
+  }
+  return cudaErrorInvalidValue;
+}
+
+template <typename real, bool isGrad>
+cudaError_t launchFusedETKImpl(const int                                    numMols,
+                               const Energy3DForceContribsDevicePtrT<real>& terms,
+                               const BatchedIndices3DDevicePtr&             indices,
+                               const real*                                  coords,
+                               real*                                        out,
+                               const int                                    termMask,
+                               const uint8_t*                               active,
+                               cudaStream_t                                 stream) {
+  if (numMols <= 0) {
+    return cudaSuccess;
+  }
+  constexpr bool isSingle = std::is_same<real, float>::value;
+  const auto&    d        = terms.longRangeDistTerms;
+  const bool     aligned =
+    aligned16(d.idx1) && aligned16(d.idx2) && aligned16(d.minLen) && aligned16(d.maxLen) && aligned16(d.forceConstant);
+  // Large SINGLE gradients: two-warp CTAs (same per-thread residency, finer per-molecule scheduling).
+  const int threads = (isSingle && isGrad && numMols >= kFusedLargeBatch) ? 64 : kFusedBlockSize;
+  const typename FusedPrecision<real>::ETK fam{terms, indices, termMask, aligned};
+  return launchFusedImpl<real, isGrad, isSingle, false, false>(numMols,
+                                                               threads,
+                                                               fam,
+                                                               indices.atomStarts,
+                                                               coords,
+                                                               out,
+                                                               active,
+                                                               stream);
+}
+}  // namespace
+
+cudaError_t launchFusedEnergyKernel(const int                           numMols,
+                                    const EnergyForceContribsDevicePtr& terms,
+                                    const BatchedIndicesDevicePtr&      systemIndices,
+                                    const double*                       coords,
+                                    double*                             energies,
+                                    const int                           dimension,
+                                    const double                        chiralWeight,
+                                    const double                        fourthDimWeight,
+                                    const uint8_t*                      activeThisStage,
+                                    cudaStream_t                        stream) {
+  return launchFusedDGImpl<double, false>(numMols,
+                                          terms,
+                                          systemIndices,
+                                          coords,
+                                          energies,
+                                          dimension,
+                                          chiralWeight,
+                                          fourthDimWeight,
+                                          activeThisStage,
+                                          stream);
+}
+
+cudaError_t launchFusedGradKernel(const int                           numMols,
+                                  const EnergyForceContribsDevicePtr& terms,
+                                  const BatchedIndicesDevicePtr&      systemIndices,
+                                  const double*                       coords,
+                                  double*                             grad,
+                                  const int                           dimension,
+                                  const double                        chiralWeight,
+                                  const double                        fourthDimWeight,
+                                  const uint8_t*                      activeThisStage,
+                                  cudaStream_t                        stream) {
+  return launchFusedDGImpl<double, true>(numMols,
+                                         terms,
+                                         systemIndices,
+                                         coords,
+                                         grad,
+                                         dimension,
+                                         chiralWeight,
+                                         fourthDimWeight,
+                                         activeThisStage,
+                                         stream);
+}
+
+cudaError_t launchFusedEnergyKernel(const int                                 numMols,
+                                    const EnergyForceContribsDevicePtrSingle& terms,
+                                    const BatchedIndicesDevicePtr&            systemIndices,
+                                    const float*                              coords,
+                                    float*                                    energies,
+                                    const int                                 dimension,
+                                    const float                               chiralWeight,
+                                    const float                               fourthDimWeight,
+                                    const uint8_t*                            activeThisStage,
+                                    cudaStream_t                              stream) {
+  return launchFusedDGImpl<float, false>(numMols,
+                                         terms,
+                                         systemIndices,
+                                         coords,
+                                         energies,
+                                         dimension,
+                                         chiralWeight,
+                                         fourthDimWeight,
+                                         activeThisStage,
+                                         stream);
+}
+
+cudaError_t launchFusedGradKernel(const int                                 numMols,
+                                  const EnergyForceContribsDevicePtrSingle& terms,
+                                  const BatchedIndicesDevicePtr&            systemIndices,
+                                  const float*                              coords,
+                                  float*                                    grad,
+                                  const int                                 dimension,
+                                  const float                               chiralWeight,
+                                  const float                               fourthDimWeight,
+                                  const uint8_t*                            activeThisStage,
+                                  cudaStream_t                              stream) {
+  return launchFusedDGImpl<float, true>(numMols,
+                                        terms,
+                                        systemIndices,
+                                        coords,
+                                        grad,
+                                        dimension,
+                                        chiralWeight,
+                                        fourthDimWeight,
+                                        activeThisStage,
+                                        stream);
+}
+
+cudaError_t launchFusedEnergyKernelETK(const int                             numMols,
+                                       const Energy3DForceContribsDevicePtr& terms,
+                                       const BatchedIndices3DDevicePtr&      systemIndices,
+                                       const double*                         coords,
+                                       double*                               energies,
+                                       const int                             termMask,
+                                       const uint8_t*                        activeThisStage,
+                                       cudaStream_t                          stream) {
+  return launchFusedETKImpl<double,
+                            false>(numMols, terms, systemIndices, coords, energies, termMask, activeThisStage, stream);
+}
+
+cudaError_t launchFusedEnergyKernelETK(const int                                   numMols,
+                                       const Energy3DForceContribsDevicePtrSingle& terms,
+                                       const BatchedIndices3DDevicePtr&            systemIndices,
+                                       const float*                                coords,
+                                       float*                                      energies,
+                                       const int                                   termMask,
+                                       const uint8_t*                              activeThisStage,
+                                       cudaStream_t                                stream) {
+  return launchFusedETKImpl<float,
+                            false>(numMols, terms, systemIndices, coords, energies, termMask, activeThisStage, stream);
+}
+
+cudaError_t launchFusedGradKernelETK(const int                                   numMols,
+                                     const Energy3DForceContribsDevicePtrSingle& terms,
+                                     const BatchedIndices3DDevicePtr&            systemIndices,
+                                     const float*                                coords,
+                                     float*                                      grad,
+                                     const uint8_t*                              activeThisStage,
+                                     cudaStream_t                                stream) {
+  return launchFusedETKImpl<float, true>(numMols,
+                                         terms,
+                                         systemIndices,
+                                         coords,
+                                         grad,
+                                         kETKAllTermsMask,
+                                         activeThisStage,
+                                         stream);
 }
 }  // namespace DistGeom
 }  // namespace nvMolKit

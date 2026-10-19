@@ -37,6 +37,29 @@ void uploadWithPrecisionConversion(AsyncDeviceVector<ParameterScalar>& destinati
   }
 }
 
+//! Term families evaluated for an ETKTerm selection; PLAIN drops improper torsions.
+int etkTermMask(const ETKTerm term) {
+  switch (term) {
+    case ETKTerm::ALL:
+      return kETKAllTermsMask;
+    case ETKTerm::EXPERIMANTAL_TORSION:
+      return kETKTorsionBit;
+    case ETKTerm::IMPPROPER_TORSION:
+      return kETKImproperBit;
+    case ETKTerm::DISTANCE_12:
+      return kETKDist12Bit;
+    case ETKTerm::DISTANCE_13:
+      return kETKDist13Bit;
+    case ETKTerm::ANGLE_13:
+      return kETKAngle13Bit;
+    case ETKTerm::LONGDISTANCE:
+      return kETKLongDistBit;
+    case ETKTerm::PLAIN:
+      return kETKAllTermsMask & ~kETKImproperBit;
+  }
+  return 0;
+}
+
 }  // namespace
 
 void addMoleculeToContext(int                  dimension,
@@ -825,73 +848,18 @@ cudaError_t computeEnergy(BatchedMolecularDeviceBuffers& molSystemDevice,
                           const uint8_t*                 activeSystemMask,
                           const double*                  positions,
                           cudaStream_t                   stream) {
-  assert(molSystemDevice.energyBuffer.size() > 0);
   assert(energyOuts != nullptr);
-  molSystemDevice.energyBuffer.zero();
-
-  const double* posData  = positions ? positions : ctxPositions;
-  const auto&   contribs = molSystemDevice.contribs;
-
-  cudaError_t err = cudaSuccess;
-  if (contribs.distTerms.idx1.size() > 0) {
-    err = launchDistViolationEnergyKernel(contribs.distTerms.idx1.size(),
-                                          contribs.distTerms.idx1.data(),
-                                          contribs.distTerms.idx2.data(),
-                                          contribs.distTerms.lb2.data(),
-                                          contribs.distTerms.ub2.data(),
-                                          contribs.distTerms.weight.data(),
-                                          posData,
-                                          molSystemDevice.energyBuffer.data(),
-                                          molSystemDevice.indices.energyBufferStarts.data(),
-                                          molSystemDevice.indices.atomIdxToBatchIdx.data(),
-                                          molSystemDevice.indices.distTermStarts.data(),
-                                          ctxAtomStarts,
-                                          molSystemDevice.dimension,
-                                          activeSystemMask,
-                                          stream);
-  }
-  if (err == cudaSuccess && contribs.chiralTerms.idx1.size() > 0) {
-    err = launchChiralViolationEnergyKernel(contribs.chiralTerms.idx1.size(),
-                                            contribs.chiralTerms.idx1.data(),
-                                            contribs.chiralTerms.idx2.data(),
-                                            contribs.chiralTerms.idx3.data(),
-                                            contribs.chiralTerms.idx4.data(),
-                                            contribs.chiralTerms.volLower.data(),
-                                            contribs.chiralTerms.volUpper.data(),
-                                            chiralWeight,
-                                            posData,
-                                            molSystemDevice.energyBuffer.data(),
-                                            molSystemDevice.indices.energyBufferStarts.data(),
-                                            molSystemDevice.indices.atomIdxToBatchIdx.data(),
-                                            molSystemDevice.indices.chiralTermStarts.data(),
-                                            ctxAtomStarts,
-                                            molSystemDevice.dimension,
-                                            activeSystemMask,
-                                            stream);
-  }
-  if (err == cudaSuccess && contribs.fourthTerms.idx.size() > 0) {
-    err = launchFourthDimEnergyKernel(contribs.fourthTerms.idx.size(),
-                                      contribs.fourthTerms.idx.data(),
-                                      fourthDimWeight,
-                                      posData,
-                                      molSystemDevice.energyBuffer.data(),
-                                      molSystemDevice.indices.energyBufferStarts.data(),
-                                      molSystemDevice.indices.atomIdxToBatchIdx.data(),
-                                      molSystemDevice.indices.fourthTermStarts.data(),
-                                      ctxAtomStarts,
-                                      molSystemDevice.dimension,
-                                      activeSystemMask,
-                                      stream);
-  }
-  if (err == cudaSuccess) {
-    return launchReduceEnergiesKernel(molSystemDevice.indices.energyBufferBlockIdxToBatchIdx.size(),
-                                      molSystemDevice.energyBuffer.data(),
-                                      molSystemDevice.indices.energyBufferBlockIdxToBatchIdx.data(),
-                                      energyOuts,
-                                      activeSystemMask,
-                                      stream);
-  }
-  return err;
+  const int numMols = static_cast<int>(molSystemDevice.indices.distTermStarts.size()) - 1;
+  return launchFusedEnergyKernel(numMols,
+                                 toEnergyForceContribsDevicePtr(molSystemDevice),
+                                 toBatchedIndicesDevicePtr(molSystemDevice, ctxAtomStarts),
+                                 positions ? positions : ctxPositions,
+                                 energyOuts,
+                                 molSystemDevice.dimension,
+                                 chiralWeight,
+                                 fourthDimWeight,
+                                 activeSystemMask,
+                                 stream);
 }
 
 // TODO: More sophisticated error handling for energy and gradient.
@@ -922,54 +890,17 @@ cudaError_t computeGradients(BatchedMolecularDeviceBuffers& molSystemDevice,
                              const double                   fourthDimWeight,
                              const uint8_t*                 activeSystemMask,
                              cudaStream_t                   stream) {
-  const auto& contribs = molSystemDevice.contribs;
-
-  cudaError_t err = cudaSuccess;
-  if (contribs.distTerms.idx1.size() > 0) {
-    err = launchDistViolationGradientKernel(contribs.distTerms.idx1.size(),
-                                            contribs.distTerms.idx1.data(),
-                                            contribs.distTerms.idx2.data(),
-                                            contribs.distTerms.lb2.data(),
-                                            contribs.distTerms.ub2.data(),
-                                            contribs.distTerms.weight.data(),
-                                            ctxPositions,
-                                            grad,
-                                            molSystemDevice.indices.atomIdxToBatchIdx.data(),
-                                            ctxAtomStarts,
-                                            molSystemDevice.dimension,
-                                            activeSystemMask,
-                                            stream);
-  }
-  if (err == cudaSuccess && contribs.chiralTerms.idx1.size() > 0) {
-    err = launchChiralViolationGradientKernel(contribs.chiralTerms.idx1.size(),
-                                              contribs.chiralTerms.idx1.data(),
-                                              contribs.chiralTerms.idx2.data(),
-                                              contribs.chiralTerms.idx3.data(),
-                                              contribs.chiralTerms.idx4.data(),
-                                              contribs.chiralTerms.volLower.data(),
-                                              contribs.chiralTerms.volUpper.data(),
-                                              chiralWeight,
-                                              ctxPositions,
-                                              grad,
-                                              molSystemDevice.indices.atomIdxToBatchIdx.data(),
-                                              ctxAtomStarts,
-                                              molSystemDevice.dimension,
-                                              activeSystemMask,
-                                              stream);
-  }
-  if (err == cudaSuccess && contribs.fourthTerms.idx.size() > 0) {
-    err = launchFourthDimGradientKernel(contribs.fourthTerms.idx.size(),
-                                        contribs.fourthTerms.idx.data(),
-                                        fourthDimWeight,
-                                        ctxPositions,
-                                        grad,
-                                        molSystemDevice.indices.atomIdxToBatchIdx.data(),
-                                        ctxAtomStarts,
-                                        molSystemDevice.dimension,
-                                        activeSystemMask,
-                                        stream);
-  }
-  return err;
+  const int numMols = static_cast<int>(molSystemDevice.indices.distTermStarts.size()) - 1;
+  return launchFusedGradKernel(numMols,
+                               toEnergyForceContribsDevicePtr(molSystemDevice),
+                               toBatchedIndicesDevicePtr(molSystemDevice, ctxAtomStarts),
+                               ctxPositions,
+                               grad,
+                               molSystemDevice.dimension,
+                               chiralWeight,
+                               fourthDimWeight,
+                               activeSystemMask,
+                               stream);
 }
 
 cudaError_t computeGradients(BatchedMolecularDeviceBuffers&             molSystemDevice,
@@ -997,145 +928,16 @@ cudaError_t computeEnergyETK(BatchedMolecular3DDeviceBuffers& molSystemDevice,
                              const double*                    positions,
                              const ETKTerm                    term,
                              cudaStream_t                     stream) {
-  assert(molSystemDevice.energyBuffer.size() > 0);
   assert(energyOuts != nullptr);
-  molSystemDevice.energyBuffer.zero();
-
-  const double* posData  = positions ? positions : ctxPositions;
-  const auto&   contribs = molSystemDevice.contribs;
-
-  cudaError_t err = cudaSuccess;
-
-  // Experimental torsion terms
-  if ((term == ETKTerm::ALL || term == ETKTerm::PLAIN || term == ETKTerm::EXPERIMANTAL_TORSION) &&
-      contribs.experimentalTorsionTerms.idx1.size() > 0) {
-    err = launchTorsionAngleEnergyKernel(contribs.experimentalTorsionTerms.idx1.size(),
-                                         contribs.experimentalTorsionTerms.idx1.data(),
-                                         contribs.experimentalTorsionTerms.idx2.data(),
-                                         contribs.experimentalTorsionTerms.idx3.data(),
-                                         contribs.experimentalTorsionTerms.idx4.data(),
-                                         contribs.experimentalTorsionTerms.forceConstants.data(),
-                                         contribs.experimentalTorsionTerms.signs.data(),
-                                         posData,
-                                         molSystemDevice.energyBuffer.data(),
-                                         molSystemDevice.indices.energyBufferStarts.data(),
-                                         molSystemDevice.indices.atomIdxToBatchIdx.data(),
-                                         molSystemDevice.indices.experimentalTorsionTermStarts.data(),
-                                         ctxAtomStarts,
-                                         activeSystemMask,
-                                         stream);
-  }
-
-  // Improper torsion terms
-  if (err == cudaSuccess && (term == ETKTerm::ALL || term == ETKTerm::IMPPROPER_TORSION) &&
-      contribs.improperTorsionTerms.idx1.size() > 0) {
-    err = launchInversionEnergyKernel(contribs.improperTorsionTerms.idx1.size(),
-                                      contribs.improperTorsionTerms.idx1.data(),
-                                      contribs.improperTorsionTerms.idx2.data(),
-                                      contribs.improperTorsionTerms.idx3.data(),
-                                      contribs.improperTorsionTerms.idx4.data(),
-                                      contribs.improperTorsionTerms.at2AtomicNum.data(),
-                                      contribs.improperTorsionTerms.isCBoundToO.data(),
-                                      contribs.improperTorsionTerms.C0.data(),
-                                      contribs.improperTorsionTerms.C1.data(),
-                                      contribs.improperTorsionTerms.C2.data(),
-                                      contribs.improperTorsionTerms.forceConstant.data(),
-                                      posData,
-                                      molSystemDevice.energyBuffer.data(),
-                                      molSystemDevice.indices.energyBufferStarts.data(),
-                                      molSystemDevice.indices.atomIdxToBatchIdx.data(),
-                                      molSystemDevice.indices.improperTorsionTermStarts.data(),
-                                      ctxAtomStarts,
-                                      activeSystemMask,
-                                      stream);
-  }
-
-  // 1-2 distance terms
-  if (err == cudaSuccess && (term == ETKTerm::ALL || term == ETKTerm::PLAIN || term == ETKTerm::DISTANCE_12) &&
-      contribs.dist12Terms.idx1.size() > 0) {
-    err = launchDistanceConstraintEnergyKernel(contribs.dist12Terms.idx1.size(),
-                                               contribs.dist12Terms.idx1.data(),
-                                               contribs.dist12Terms.idx2.data(),
-                                               contribs.dist12Terms.minLen.data(),
-                                               contribs.dist12Terms.maxLen.data(),
-                                               contribs.dist12Terms.forceConstant.data(),
-                                               posData,
-                                               molSystemDevice.energyBuffer.data(),
-                                               molSystemDevice.indices.energyBufferStarts.data(),
-                                               molSystemDevice.indices.atomIdxToBatchIdx.data(),
-                                               molSystemDevice.indices.dist12TermStarts.data(),
-                                               ctxAtomStarts,
-                                               activeSystemMask,
-                                               stream);
-  }
-
-  // 1-3 distance terms
-  if (err == cudaSuccess && (term == ETKTerm::ALL || term == ETKTerm::PLAIN || term == ETKTerm::DISTANCE_13) &&
-      contribs.dist13Terms.idx1.size() > 0) {
-    err = launchDistanceConstraintEnergyKernel(contribs.dist13Terms.idx1.size(),
-                                               contribs.dist13Terms.idx1.data(),
-                                               contribs.dist13Terms.idx2.data(),
-                                               contribs.dist13Terms.minLen.data(),
-                                               contribs.dist13Terms.maxLen.data(),
-                                               contribs.dist13Terms.forceConstant.data(),
-                                               posData,
-                                               molSystemDevice.energyBuffer.data(),
-                                               molSystemDevice.indices.energyBufferStarts.data(),
-                                               molSystemDevice.indices.atomIdxToBatchIdx.data(),
-                                               molSystemDevice.indices.dist13TermStarts.data(),
-                                               ctxAtomStarts,
-                                               activeSystemMask,
-                                               stream);
-  }
-
-  // 1-3 angle terms
-  if (err == cudaSuccess && (term == ETKTerm::ALL || term == ETKTerm::PLAIN || term == ETKTerm::ANGLE_13) &&
-      contribs.angle13Terms.idx1.size() > 0) {
-    err = launchAngleConstraintEnergyKernel(contribs.angle13Terms.idx1.size(),
-                                            contribs.angle13Terms.idx1.data(),
-                                            contribs.angle13Terms.idx2.data(),
-                                            contribs.angle13Terms.idx3.data(),
-                                            contribs.angle13Terms.minAngle.data(),
-                                            contribs.angle13Terms.maxAngle.data(),
-                                            posData,
-                                            molSystemDevice.energyBuffer.data(),
-                                            molSystemDevice.indices.energyBufferStarts.data(),
-                                            molSystemDevice.indices.atomIdxToBatchIdx.data(),
-                                            molSystemDevice.indices.angle13TermStarts.data(),
-                                            ctxAtomStarts,
-                                            activeSystemMask,
-                                            defaultAngleForceConstant,
-                                            stream);
-  }
-
-  // Long range distance terms
-  if (err == cudaSuccess && (term == ETKTerm::ALL || term == ETKTerm::PLAIN || term == ETKTerm::LONGDISTANCE) &&
-      contribs.longRangeDistTerms.idx1.size() > 0) {
-    err = launchDistanceConstraintEnergyKernel(contribs.longRangeDistTerms.idx1.size(),
-                                               contribs.longRangeDistTerms.idx1.data(),
-                                               contribs.longRangeDistTerms.idx2.data(),
-                                               contribs.longRangeDistTerms.minLen.data(),
-                                               contribs.longRangeDistTerms.maxLen.data(),
-                                               contribs.longRangeDistTerms.forceConstant.data(),
-                                               posData,
-                                               molSystemDevice.energyBuffer.data(),
-                                               molSystemDevice.indices.energyBufferStarts.data(),
-                                               molSystemDevice.indices.atomIdxToBatchIdx.data(),
-                                               molSystemDevice.indices.longRangeDistTermStarts.data(),
-                                               ctxAtomStarts,
-                                               activeSystemMask,
-                                               stream);
-  }
-
-  if (err == cudaSuccess) {
-    return launchReduceEnergiesKernel(molSystemDevice.indices.energyBufferBlockIdxToBatchIdx.size(),
-                                      molSystemDevice.energyBuffer.data(),
-                                      molSystemDevice.indices.energyBufferBlockIdxToBatchIdx.data(),
-                                      energyOuts,
-                                      activeSystemMask,
-                                      stream);
-  }
-  return err;
+  const int numMols = static_cast<int>(molSystemDevice.indices.experimentalTorsionTermStarts.size()) - 1;
+  return launchFusedEnergyKernelETK(numMols,
+                                    toEnergy3DForceContribsDevicePtr(molSystemDevice),
+                                    toBatchedIndices3DDevicePtr(molSystemDevice, ctxAtomStarts),
+                                    positions ? positions : ctxPositions,
+                                    energyOuts,
+                                    etkTermMask(term),
+                                    activeSystemMask,
+                                    stream);
 }
 
 cudaError_t computeEnergyETK(BatchedMolecular3DDeviceBuffers&           molSystemDevice,

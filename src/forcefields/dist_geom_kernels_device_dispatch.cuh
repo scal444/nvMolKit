@@ -5,6 +5,9 @@
 
 #include <cooperative_groups.h>
 
+#include <cstdint>
+#include <type_traits>
+
 #include "src/forcefields/dist_geom_kernels.h"
 #include "src/forcefields/kernel_utils.cuh"
 

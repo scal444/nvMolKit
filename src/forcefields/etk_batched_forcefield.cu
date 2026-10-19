@@ -156,14 +156,14 @@ cudaError_t ETKBatchedForcefield::computeEnergy(float*         energyOuts,
     return cudaErrorInvalidValue;
   }
   const auto& buffers = std::get<DistGeom::BatchedMolecular3DDeviceBuffersSingle>(systemDevice_);
-  return DistGeom::launchBlockPerMolEnergyKernelETK(
-    numMolecules(),
-    DistGeom::toEnergy3DForceContribsDevicePtr(buffers),
-    DistGeom::toBatchedIndices3DDevicePtr(buffers, atomStartsDevice_.data()),
-    positions,
-    energyOuts,
-    activeSystemMask,
-    stream);
+  return DistGeom::launchFusedEnergyKernelETK(numMolecules(),
+                                              DistGeom::toEnergy3DForceContribsDevicePtr(buffers),
+                                              DistGeom::toBatchedIndices3DDevicePtr(buffers, atomStartsDevice_.data()),
+                                              positions,
+                                              energyOuts,
+                                              DistGeom::kETKAllTermsMask,
+                                              activeSystemMask,
+                                              stream);
 }
 
 cudaError_t ETKBatchedForcefield::computeGradients(float*         grad,
@@ -174,14 +174,13 @@ cudaError_t ETKBatchedForcefield::computeGradients(float*         grad,
     return cudaErrorInvalidValue;
   }
   const auto& buffers = std::get<DistGeom::BatchedMolecular3DDeviceBuffersSingle>(systemDevice_);
-  return DistGeom::launchBlockPerMolGradKernelETK(
-    numMolecules(),
-    DistGeom::toEnergy3DForceContribsDevicePtr(buffers),
-    DistGeom::toBatchedIndices3DDevicePtr(buffers, atomStartsDevice_.data()),
-    positions,
-    grad,
-    activeSystemMask,
-    stream);
+  return DistGeom::launchFusedGradKernelETK(numMolecules(),
+                                            DistGeom::toEnergy3DForceContribsDevicePtr(buffers),
+                                            DistGeom::toBatchedIndices3DDevicePtr(buffers, atomStartsDevice_.data()),
+                                            positions,
+                                            grad,
+                                            activeSystemMask,
+                                            stream);
 }
 
 }  // namespace nvMolKit

@@ -19,17 +19,12 @@
 // DG terms
 // --------------
 
-template <int dimension>
-static __device__ __forceinline__ DG_REAL distViolationEnergy(const DG_REAL* pos,
-                                                              const int      idx1,
-                                                              const int      idx2,
-                                                              const DG_REAL  lb2,
-                                                              const DG_REAL  ub2,
-                                                              const DG_REAL  weight) {
-  const int     posIdx1   = idx1 * dimension;
-  const int     posIdx2   = idx2 * dimension;
-  const DG_REAL distance2 = distanceSquaredPosIdx<dimension>(pos, posIdx1, posIdx2);
-  DG_REAL       val       = DG_REAL(0.0);
+//! Distance-violation energy from the squared distance.
+static __device__ __forceinline__ DG_REAL distViolationEnergyD2(const DG_REAL distance2,
+                                                                const DG_REAL lb2,
+                                                                const DG_REAL ub2,
+                                                                const DG_REAL weight) {
+  DG_REAL val = DG_REAL(0.0);
   if (distance2 > ub2) {
     val = (distance2 / ub2) - DG_REAL(1.0);
   } else if (distance2 < lb2) {
@@ -41,16 +36,31 @@ static __device__ __forceinline__ DG_REAL distViolationEnergy(const DG_REAL* pos
   return DG_REAL(0.0);
 }
 
-template <int dimension>
-static __device__ __forceinline__ void distViolationGrad(const DG_REAL* pos,
-                                                         const int      idx1,
-                                                         const int      idx2,
-                                                         const DG_REAL  lb2,
-                                                         const DG_REAL  ub2,
-                                                         const DG_REAL  weight,
-                                                         DG_REAL*       grad) {
-  const int   posIdx1   = idx1 * dimension;
-  const int   posIdx2   = idx2 * dimension;
+template <int dimension, int posStride = dimension>
+static __device__ __forceinline__ DG_REAL distViolationEnergy(const DG_REAL* pos,
+                                                              const int      idx1,
+                                                              const int      idx2,
+                                                              const DG_REAL  lb2,
+                                                              const DG_REAL  ub2,
+                                                              const DG_REAL  weight) {
+  const int     posIdx1   = idx1 * posStride;
+  const int     posIdx2   = idx2 * posStride;
+  const DG_REAL distance2 = distanceSquaredPosIdx<dimension>(pos, posIdx1, posIdx2);
+  return distViolationEnergyD2(distance2, lb2, ub2, weight);
+}
+
+//! Per-term gradient of a DG distance violation: returns false for a satisfied term, otherwise writes the atom-1
+//! contribution d (atom 2 receives -d). The factors are single-precision in every mode.
+template <int dimension, int posStride = dimension>
+static __device__ __forceinline__ bool distViolationGradTerm(const DG_REAL* pos,
+                                                             const int      idx1,
+                                                             const int      idx2,
+                                                             const DG_REAL  lb2,
+                                                             const DG_REAL  ub2,
+                                                             const DG_REAL  weight,
+                                                             float*         d) {
+  const int   posIdx1   = idx1 * posStride;
+  const int   posIdx2   = idx2 * posStride;
   const float distance2 = distanceSquaredPosIdx<dimension>(pos, posIdx1, posIdx2);
   float       preFactor = 0.0f;
   if (distance2 > ub2) {
@@ -59,23 +69,33 @@ static __device__ __forceinline__ void distViolationGrad(const DG_REAL* pos,
     const float l2d2 = distance2 + lb2;
     preFactor        = 8.f * lb2 * (1.f - 2.0f * lb2 / l2d2) / (l2d2 * l2d2);
   } else {
+    return false;
+  }
+  d[0] = weight * preFactor * (pos[posIdx1 + 0] - pos[posIdx2 + 0]);
+  d[1] = weight * preFactor * (pos[posIdx1 + 1] - pos[posIdx2 + 1]);
+  d[2] = weight * preFactor * (pos[posIdx1 + 2] - pos[posIdx2 + 2]);
+  if constexpr (dimension == 4) {
+    d[3] = weight * preFactor * (pos[posIdx1 + 3] - pos[posIdx2 + 3]);
+  }
+  return true;
+}
+
+template <int dimension>
+static __device__ __forceinline__ void distViolationGrad(const DG_REAL* pos,
+                                                         const int      idx1,
+                                                         const int      idx2,
+                                                         const DG_REAL  lb2,
+                                                         const DG_REAL  ub2,
+                                                         const DG_REAL  weight,
+                                                         DG_REAL*       grad) {
+  float d[4];
+  if (!distViolationGradTerm<dimension>(pos, idx1, idx2, lb2, ub2, weight, d)) {
     return;
   }
-  const float dGradx = weight * preFactor * (pos[posIdx1 + 0] - pos[posIdx2 + 0]);
-  const float dGrady = weight * preFactor * (pos[posIdx1 + 1] - pos[posIdx2 + 1]);
-  const float dGradz = weight * preFactor * (pos[posIdx1 + 2] - pos[posIdx2 + 2]);
-
-  atomicAdd(&grad[posIdx1 + 0], dGradx);
-  atomicAdd(&grad[posIdx1 + 1], dGrady);
-  atomicAdd(&grad[posIdx1 + 2], dGradz);
-  atomicAdd(&grad[posIdx2 + 0], -dGradx);
-  atomicAdd(&grad[posIdx2 + 1], -dGrady);
-  atomicAdd(&grad[posIdx2 + 2], -dGradz);
-
-  if constexpr (dimension == 4) {
-    const float dGradw = weight * preFactor * (pos[posIdx1 + 3] - pos[posIdx2 + 3]);
-    atomicAdd(&grad[posIdx1 + 3], dGradw);
-    atomicAdd(&grad[posIdx2 + 3], -dGradw);
+#pragma unroll
+  for (int c = 0; c < dimension; ++c) {
+    atomicAdd(&grad[idx1 * dimension + c], d[c]);
+    atomicAdd(&grad[idx2 * dimension + c], -d[c]);
   }
 }
 
@@ -357,14 +377,15 @@ static __device__ __forceinline__ DG_REAL inversionEnergy(const DG_REAL* pos,
   return forceConstant * (C0 + C1 * sinY + C2 * cos2W);
 }
 
+template <int posStride = 4>
 static __device__ __forceinline__ DG_REAL distanceConstraintEnergy(const DG_REAL* pos,
                                                                    const int      idx1,
                                                                    const int      idx2,
                                                                    const DG_REAL  minLen,
                                                                    const DG_REAL  maxLen,
                                                                    const DG_REAL  forceConstant) {
-  const int     posIdx1   = idx1 * 4;
-  const int     posIdx2   = idx2 * 4;
+  const int     posIdx1   = idx1 * posStride;
+  const int     posIdx2   = idx2 * posStride;
   const DG_REAL distance2 = distanceSquaredPosIdx(pos, posIdx1, posIdx2, 3);
 
   const DG_REAL minLen2 = minLen * minLen;
@@ -688,6 +709,38 @@ static __device__ __forceinline__ void inversionGrad(const DG_REAL* pos,
   atomicAdd(&grad[posIdx4 + 2], dE_dW * tg4z);
 }
 
+//! Per-term gradient of a flat-bottom distance restraint: returns false inside the bounds, otherwise writes the
+//! atom-1 xyz contribution d (atom 2 receives -d).
+template <int posStride = 4>
+static __device__ __forceinline__ bool distanceConstraintGradTerm(const DG_REAL* pos,
+                                                                  const int      idx1,
+                                                                  const int      idx2,
+                                                                  const DG_REAL  minLen,
+                                                                  const DG_REAL  maxLen,
+                                                                  const DG_REAL  forceConstant,
+                                                                  DG_REAL*       d) {
+  const DG_REAL minLen2 = minLen * minLen;
+  const DG_REAL maxLen2 = maxLen * maxLen;
+  const int     posIdx1 = idx1 * posStride;
+  const int     posIdx2 = idx2 * posStride;
+
+  // Calculate squared distance
+  const DG_REAL distance2 = distanceSquaredPosIdx(pos, posIdx1, posIdx2, 3);
+
+  // Check if distance is outside bounds and calculate preFactor
+  // Both violated bounds share one sqrt/division site (same operations as separate branches).
+  const bool lower = distance2 < minLen2;
+  if (!lower && !(distance2 > maxLen2)) {
+    return false;  // Distance within bounds, no gradient contribution
+  }
+  const DG_REAL distance  = DG_SQRT(distance2);
+  const DG_REAL preFactor = forceConstant * (distance - (lower ? minLen : maxLen)) / DG_FMAX(DG_REAL(1.0e-8), distance);
+  for (int i = 0; i < 3; i++) {
+    d[i] = preFactor * (pos[posIdx1 + i] - pos[posIdx2 + i]);
+  }
+  return true;
+}
+
 static __device__ __forceinline__ void distanceConstraintGrad(const DG_REAL* pos,
                                                               const int      idx1,
                                                               const int      idx2,
@@ -695,31 +748,13 @@ static __device__ __forceinline__ void distanceConstraintGrad(const DG_REAL* pos
                                                               const DG_REAL  maxLen,
                                                               const DG_REAL  forceConstant,
                                                               DG_REAL*       grad) {
-  const DG_REAL minLen2 = minLen * minLen;
-  const DG_REAL maxLen2 = maxLen * maxLen;
-  const int     posIdx1 = idx1 * 4;
-  const int     posIdx2 = idx2 * 4;
-
-  // Calculate squared distance
-  const DG_REAL distance2 = distanceSquaredPosIdx(pos, posIdx1, posIdx2, 3);
-
-  // Check if distance is outside bounds and calculate preFactor
-  DG_REAL preFactor;
-  if (distance2 < minLen2) {
-    const DG_REAL distance = DG_SQRT(distance2);
-    preFactor              = forceConstant * (distance - minLen) / DG_FMAX(DG_REAL(1.0e-8), distance);
-  } else if (distance2 > maxLen2) {
-    const DG_REAL distance = DG_SQRT(distance2);
-    preFactor              = forceConstant * (distance - maxLen) / DG_FMAX(DG_REAL(1.0e-8), distance);
-  } else {
-    return;  // Distance within bounds, no gradient contribution
+  DG_REAL d[3];
+  if (!distanceConstraintGradTerm(pos, idx1, idx2, minLen, maxLen, forceConstant, d)) {
+    return;
   }
-
-  // Calculate and accumulate gradients for each component
   for (int i = 0; i < 3; i++) {
-    const DG_REAL dGrad = preFactor * (pos[posIdx1 + i] - pos[posIdx2 + i]);
-    atomicAdd(&grad[posIdx1 + i], dGrad);
-    atomicAdd(&grad[posIdx2 + i], -dGrad);
+    atomicAdd(&grad[idx1 * 4 + i], d[i]);
+    atomicAdd(&grad[idx2 * 4 + i], -d[i]);
   }
 }
 
@@ -1334,6 +1369,760 @@ static __device__ __inline__ void molGradETK(const Energy3DForceContribsDevicePt
                                dlr_maxLen[termIdx],
                                dlr_forceConstant[termIdx],
                                grad);
+      }
+    }
+  }
+}
+// ----------------------
+// Fused block-per-molecule evaluation
+// ----------------------
+// One thread block owns one molecule. Atom indices are made molecule-local so pos/grad can be a shared-memory tile
+// or the molecule's slice of global memory. Per-term arithmetic is the shared term functions above, so every
+// precision keeps its native arithmetic (including the single-precision islands of FULL).
+//
+// Work is split into a bulk pairwise family (DG distance violations, ETK long-range distance restraints), streamed
+// as chunks of 4 consecutive terms per thread with 16-byte loads, and a merged "small" range covering every other
+// family (one term per thread per pass). The first chunk/item of each thread is loaded before the coordinate tile
+// is ready, so a molecule normally costs one dependent round trip for its term data.
+
+static __device__ __forceinline__ void loadChunk4(const int* __restrict__ p,
+                                                  const int  c,
+                                                  const int  lo,
+                                                  const int  hi,
+                                                  const bool vec,
+                                                  int (&v)[4]) {
+  if (vec) {
+    const int4 t = __ldg(reinterpret_cast<const int4*>(p + c));
+    v[0]         = t.x;
+    v[1]         = t.y;
+    v[2]         = t.z;
+    v[3]         = t.w;
+  } else {
+#pragma unroll
+    for (int k = 0; k < 4; ++k) {
+      const int i = c + k;
+      v[k]        = (i >= lo && i < hi) ? __ldg(p + i) : 0;
+    }
+  }
+}
+
+static __device__ __forceinline__ void loadChunk4(const float* __restrict__ p,
+                                                  const int  c,
+                                                  const int  lo,
+                                                  const int  hi,
+                                                  const bool vec,
+                                                  float (&v)[4]) {
+  if (vec) {
+    const float4 t = __ldg(reinterpret_cast<const float4*>(p + c));
+    v[0]           = t.x;
+    v[1]           = t.y;
+    v[2]           = t.z;
+    v[3]           = t.w;
+  } else {
+#pragma unroll
+    for (int k = 0; k < 4; ++k) {
+      const int i = c + k;
+      v[k]        = (i >= lo && i < hi) ? __ldg(p + i) : 0.0f;
+    }
+  }
+}
+
+static __device__ __forceinline__ void loadChunk4(const double* __restrict__ p,
+                                                  const int  c,
+                                                  const int  lo,
+                                                  const int  hi,
+                                                  const bool vec,
+                                                  double (&v)[4]) {
+  if (vec) {
+    const double2 t0 = __ldg(reinterpret_cast<const double2*>(p + c));
+    const double2 t1 = __ldg(reinterpret_cast<const double2*>(p + c) + 1);
+    v[0]             = t0.x;
+    v[1]             = t0.y;
+    v[2]             = t1.x;
+    v[3]             = t1.y;
+  } else {
+#pragma unroll
+    for (int k = 0; k < 4; ++k) {
+      const int i = c + k;
+      v[k]        = (i >= lo && i < hi) ? __ldg(p + i) : 0.0;
+    }
+  }
+}
+
+//! Bulk DG family: distance violations. Params are (lb2, ub2, weight); gradient factors are single precision.
+//! kTileStride is the per-atom stride of the bulk coordinate tile. Double precision uses an odd number of values, so
+//! the random atom gathers of a warp spread over every shared-memory bank (a 4-double stride maps all atoms onto a
+//! quarter of them); single precision keeps the natural layout, whose 4-float atoms load as one 16-byte vector.
+static constexpr bool kOddBulkTile = sizeof(DG_REAL) == 8;
+template <int dimension> struct DGBulkTerm {
+  static constexpr int kStride     = dimension;
+  static constexpr int kComps      = dimension;
+  static constexpr int kTileStride = (kOddBulkTile && dimension == 4) ? 5 : dimension;
+  using Contrib                    = float;
+  template <int posStride>
+  static __device__ __forceinline__ DG_REAL
+  energy(const DG_REAL* pos, int a, int b, DG_REAL p0, DG_REAL p1, DG_REAL p2) {
+    return distViolationEnergy<dimension, posStride>(pos, a, b, p0, p1, p2);
+  }
+  template <int posStride>
+  static __device__ __forceinline__ bool
+  grad(const DG_REAL* pos, int a, int b, DG_REAL p0, DG_REAL p1, DG_REAL p2, Contrib* d) {
+    return distViolationGradTerm<dimension, posStride>(pos, a, b, p0, p1, p2, d);
+  }
+};
+
+//! Coordinates of atom idx in 4-value slots with 16-byte loads (pos must be 16-byte aligned).
+static __device__ __forceinline__ void loadAtom4(const DG_REAL* pos, const int idx, DG_REAL (&v)[4]) {
+  const DG_REAL* p = pos + idx * 4;
+  if constexpr (sizeof(DG_REAL) == 4) {
+    const float4 t = *reinterpret_cast<const float4*>(p);
+    v[0]           = t.x;
+    v[1]           = t.y;
+    v[2]           = t.z;
+    v[3]           = t.w;
+  } else {
+    const double2 t = *reinterpret_cast<const double2*>(p);
+    const double2 u = *reinterpret_cast<const double2*>(p + 2);
+    v[0]            = t.x;
+    v[1]            = t.y;
+    v[2]            = u.x;
+    v[3]            = u.y;
+  }
+}
+
+//! DGBulkTerm whose energy gathers both atoms from the natural 4-value layout with 16-byte loads (16-byte aligned
+//! coordinates): fewer L1 gathers for DG4 energies, which read coordinates straight from global memory. Other
+//! strides and the gradient are unchanged.
+template <int dimension> struct DGBulkTermVec : DGBulkTerm<dimension> {
+  static_assert(dimension == 4, "vector coordinate loads need 4-value slots");
+  template <int posStride>
+  static __device__ __forceinline__ DG_REAL
+  energy(const DG_REAL* pos, int a, int b, DG_REAL p0, DG_REAL p1, DG_REAL p2) {
+    if constexpr (posStride == 4) {
+      DG_REAL u[4];
+      DG_REAL w[4];
+      loadAtom4(pos, a, u);
+      loadAtom4(pos, b, w);
+      const DG_REAL dx = u[0] - w[0];
+      const DG_REAL dy = u[1] - w[1];
+      const DG_REAL dz = u[2] - w[2];
+      const DG_REAL dw = u[3] - w[3];
+      DG_REAL       d2 = dx * dx + dy * dy + dz * dz;  // summation order of distanceSquaredPosIdx
+      d2 += dw * dw;
+      return distViolationEnergyD2(d2, p0, p1, p2);
+    } else {
+      return DGBulkTerm<dimension>::template energy<posStride>(pos, a, b, p0, p1, p2);
+    }
+  }
+};
+
+//! Bulk ETK family: flat-bottom distance restraints on xyz. Params are (minLen, maxLen, forceConstant).
+struct ETKBulkTerm {
+  static constexpr int kStride     = 4;
+  static constexpr int kComps      = 3;
+  static constexpr int kTileStride = kOddBulkTile ? 3 : 4;  //!< double: xyz only
+  using Contrib                    = DG_REAL;
+  template <int posStride>
+  static __device__ __forceinline__ DG_REAL
+  energy(const DG_REAL* pos, int a, int b, DG_REAL p0, DG_REAL p1, DG_REAL p2) {
+    return distanceConstraintEnergy<posStride>(pos, a, b, p0, p1, p2);
+  }
+  template <int posStride>
+  static __device__ __forceinline__ bool
+  grad(const DG_REAL* pos, int a, int b, DG_REAL p0, DG_REAL p1, DG_REAL p2, Contrib* d) {
+    return distanceConstraintGradTerm<posStride>(pos, a, b, p0, p1, p2, d);
+  }
+};
+
+//! Adds one atom's bulk-term contribution.
+template <class Term> static __device__ __forceinline__ void bulkGradAdd(DG_REAL* g, const DG_REAL (&v)[Term::kComps]) {
+#pragma unroll
+  for (int k = 0; k < Term::kComps; ++k) {
+    atomicAdd(g + k, v[k]);
+  }
+}
+
+struct BulkPairArrays {
+  const int*     idx1;
+  const int*     idx2;
+  const DG_REAL* p0;
+  const DG_REAL* p1;
+  const DG_REAL* p2;
+};
+
+//! Four consecutive bulk terms owned by one thread. Chunks start at multiples of 4 so full chunks are 16B aligned.
+struct BulkChunk {
+  int     i1[4];
+  int     i2[4];
+  DG_REAL p0[4];
+  DG_REAL p1[4];
+  DG_REAL p2[4];
+
+  __device__ __forceinline__ void load(const BulkPairArrays& a,
+                                       const int             c,
+                                       const int             lo,
+                                       const int             hi,
+                                       const bool            aligned) {
+    const bool vec = aligned && c >= lo && c + 4 <= hi;
+    loadChunk4(a.idx1, c, lo, hi, vec, i1);
+    loadChunk4(a.idx2, c, lo, hi, vec, i2);
+    loadChunk4(a.p0, c, lo, hi, vec, p0);
+    loadChunk4(a.p1, c, lo, hi, vec, p1);
+    loadChunk4(a.p2, c, lo, hi, vec, p2);
+  }
+
+  template <class Term, int posStride>
+  __device__ __forceinline__ DG_REAL
+  energy(const DG_REAL* pos, const int c, const int lo, const int hi, const int atomStart) const {
+    DG_REAL e = DG_REAL(0.0);
+#pragma unroll
+    for (int k = 0; k < 4; ++k) {
+      // Out-of-range slots evaluate atom 0 against itself (zero parameters) and are discarded, so the four terms
+      // stay branch-free and independent.
+      const int     t       = c + k;
+      const bool    inRange = t >= lo && t < hi;
+      const DG_REAL et      = Term::template energy<posStride>(pos,
+                                                          inRange ? i1[k] - atomStart : 0,
+                                                          inRange ? i2[k] - atomStart : 0,
+                                                          p0[k],
+                                                          p1[k],
+                                                          p2[k]);
+      e += inRange ? et : DG_REAL(0.0);
+    }
+    return e;
+  }
+
+  //! Atom-2 contributions are added per term; atom-1 contributions are summed while consecutive terms share atom 1
+  //! (distance lists are grouped by their first atom) and flushed once per run.
+  template <class Term, int posStride>
+  __device__ __forceinline__ void grad(const DG_REAL* pos,
+                                       DG_REAL*       g,
+                                       const int      c,
+                                       const int      lo,
+                                       const int      hi,
+                                       const int      atomStart) const {
+    int     runAtom = -1;
+    DG_REAL run[Term::kComps];
+#pragma unroll
+    for (int k = 0; k < 4; ++k) {
+      const int t = c + k;
+      if (t < lo || t >= hi) {
+        continue;
+      }
+      typename Term::Contrib d[Term::kComps];
+      const int              a = i1[k] - atomStart;
+      const int              b = i2[k] - atomStart;
+      if (!Term::template grad<posStride>(pos, a, b, p0[k], p1[k], p2[k], d)) {
+        continue;
+      }
+      if (a != runAtom) {
+        if (runAtom >= 0) {
+          bulkGradAdd<Term>(&g[runAtom * Term::kStride], run);
+        }
+        runAtom = a;
+#pragma unroll
+        for (int q = 0; q < Term::kComps; ++q) {
+          run[q] = DG_REAL(0.0);
+        }
+      }
+      DG_REAL other[Term::kComps];
+#pragma unroll
+      for (int q = 0; q < Term::kComps; ++q) {
+        run[q] += static_cast<DG_REAL>(d[q]);
+        other[q] = -d[q];
+      }
+      bulkGradAdd<Term>(&g[b * Term::kStride], other);
+    }
+    if (runAtom >= 0) {
+      bulkGradAdd<Term>(&g[runAtom * Term::kStride], run);
+    }
+  }
+};
+
+//! One non-bulk term: up to four atoms, six real parameters and six integer signs.
+struct SmallItem {
+  int     kind;
+  int     a[4];
+  DG_REAL p[6];
+  int     s[6];
+};
+
+// DG small kinds
+constexpr int kDGSmallChiral = 0;
+constexpr int kDGSmallFourth = 1;
+
+//! DG non-bulk range: chiral terms followed by fourth-dimension terms. r = [chiral0, chiral1, fourth0, fourth1].
+static __device__ __forceinline__ int dgSmallCount(const int* r) {
+  return (r[1] - r[0]) + (r[3] - r[2]);
+}
+
+static __device__ __forceinline__ void dgSmallLoad(const EnergyForceContribsDevicePtr& terms,
+                                                   const int*                          r,
+                                                   const int                           v,
+                                                   const int                           atomStart,
+                                                   SmallItem&                          it) {
+  const int nChiral = r[1] - r[0];
+  if (v < nChiral) {
+    const int   i = r[0] + v;
+    const auto& c = terms.chiralTerms;
+    it.kind       = kDGSmallChiral;
+    it.a[0]       = c.idx1[i] - atomStart;
+    it.a[1]       = c.idx2[i] - atomStart;
+    it.a[2]       = c.idx3[i] - atomStart;
+    it.a[3]       = c.idx4[i] - atomStart;
+    it.p[0]       = c.volLower[i];
+    it.p[1]       = c.volUpper[i];
+  } else {
+    it.kind = kDGSmallFourth;
+    it.a[0] = terms.fourthTerms.idx[r[2] + v - nChiral] - atomStart;
+  }
+}
+
+template <int dimension>
+static __device__ __forceinline__ DG_REAL
+dgSmallEnergy(const SmallItem& it, const DG_REAL* pos, const DG_REAL chiralWeight, const DG_REAL fourthDimWeight) {
+  if (it.kind == kDGSmallChiral) {
+    return chiralViolationEnergy<dimension>(pos, it.a[0], it.a[1], it.a[2], it.a[3], it.p[0], it.p[1], chiralWeight);
+  }
+  return fourthDimEnergy<dimension>(pos, it.a[0], fourthDimWeight);
+}
+
+template <int dimension>
+static __device__ __forceinline__ void dgSmallGrad(const SmallItem& it,
+                                                   const DG_REAL*   pos,
+                                                   DG_REAL*         grad,
+                                                   const DG_REAL    chiralWeight,
+                                                   const DG_REAL    fourthDimWeight) {
+  if (it.kind == kDGSmallChiral) {
+    chiralViolationGrad<dimension>(pos, it.a[0], it.a[1], it.a[2], it.a[3], it.p[0], it.p[1], chiralWeight, grad);
+  } else {
+    fourthDimGrad<dimension>(pos, it.a[0], fourthDimWeight, grad);
+  }
+}
+
+// ETK small kinds, in range order
+constexpr int kETKSmallTorsion  = 0;
+constexpr int kETKSmallImproper = 1;
+constexpr int kETKSmallDist12   = 2;
+constexpr int kETKSmallDist13   = 3;
+constexpr int kETKSmallAngle13  = 4;
+
+//! ETK non-bulk range: torsion, improper, 1-2, 1-3 distance and 1-3 angle terms back to back.
+//! r = [torsion0, torsion1, improper0, improper1, d12_0, d12_1, d13_0, d13_1, angle0, angle1] (empty when masked).
+static __device__ __forceinline__ int etkSmallCount(const int* r) {
+  return (r[1] - r[0]) + (r[3] - r[2]) + (r[5] - r[4]) + (r[7] - r[6]) + (r[9] - r[8]);
+}
+
+static __device__ __forceinline__ void etkSmallLoad(const Energy3DForceContribsDevicePtr& terms,
+                                                    const int*                            r,
+                                                    int                                   v,
+                                                    const int                             atomStart,
+                                                    SmallItem&                            it) {
+  const int n0 = r[1] - r[0];
+  const int n1 = r[3] - r[2];
+  const int n2 = r[5] - r[4];
+  const int n3 = r[7] - r[6];
+  int       kind;
+  int       i;
+  if (v < n0) {
+    kind = kETKSmallTorsion;
+    i    = r[0] + v;
+  } else if ((v -= n0) < n1) {
+    kind = kETKSmallImproper;
+    i    = r[2] + v;
+  } else if ((v -= n1) < n2) {
+    kind = kETKSmallDist12;
+    i    = r[4] + v;
+  } else if ((v -= n2) < n3) {
+    kind = kETKSmallDist13;
+    i    = r[6] + v;
+  } else {
+    kind = kETKSmallAngle13;
+    i    = r[8] + v - n3;
+  }
+  it.kind = kind;
+  switch (kind) {
+    case kETKSmallTorsion: {
+      const auto& t = terms.experimentalTorsionTerms;
+      it.a[0]       = t.idx1[i] - atomStart;
+      it.a[1]       = t.idx2[i] - atomStart;
+      it.a[2]       = t.idx3[i] - atomStart;
+      it.a[3]       = t.idx4[i] - atomStart;
+#pragma unroll
+      for (int q = 0; q < 6; ++q) {
+        it.p[q] = t.forceConstants[i * 6 + q];
+        it.s[q] = t.signs[i * 6 + q];
+      }
+      break;
+    }
+    case kETKSmallImproper: {
+      const auto& t = terms.improperTorsionTerms;
+      it.a[0]       = t.idx1[i] - atomStart;
+      it.a[1]       = t.idx2[i] - atomStart;
+      it.a[2]       = t.idx3[i] - atomStart;
+      it.a[3]       = t.idx4[i] - atomStart;
+      it.p[0]       = t.C0[i];
+      it.p[1]       = t.C1[i];
+      it.p[2]       = t.C2[i];
+      it.p[3]       = t.forceConstant[i];
+      break;
+    }
+    case kETKSmallDist12:
+    case kETKSmallDist13: {
+      const auto& t = kind == kETKSmallDist12 ? terms.dist12Terms : terms.dist13Terms;
+      it.a[0]       = t.idx1[i] - atomStart;
+      it.a[1]       = t.idx2[i] - atomStart;
+      it.p[0]       = t.minLen[i];
+      it.p[1]       = t.maxLen[i];
+      it.p[2]       = t.forceConstant[i];
+      break;
+    }
+    default: {
+      const auto& t = terms.angle13Terms;
+      it.a[0]       = t.idx1[i] - atomStart;
+      it.a[1]       = t.idx2[i] - atomStart;
+      it.a[2]       = t.idx3[i] - atomStart;
+      it.p[0]       = t.minAngle[i];
+      it.p[1]       = t.maxAngle[i];
+      break;
+    }
+  }
+}
+
+static __device__ __forceinline__ DG_REAL etkSmallEnergy(const SmallItem& it, const DG_REAL* pos) {
+  switch (it.kind) {
+    case kETKSmallTorsion:
+      return torsionAngleEnergy(pos, it.a[0], it.a[1], it.a[2], it.a[3], it.p, it.s);
+    case kETKSmallImproper:
+      return inversionEnergy(pos, it.a[0], it.a[1], it.a[2], it.a[3], it.p[0], it.p[1], it.p[2], it.p[3]);
+    case kETKSmallDist12:
+    case kETKSmallDist13:
+      return distanceConstraintEnergy(pos, it.a[0], it.a[1], it.p[0], it.p[1], it.p[2]);
+    default:
+      return angleConstraintEnergy(pos, it.a[0], it.a[1], it.a[2], it.p[0], it.p[1], DG_REAL(1.0));
+  }
+}
+
+static __device__ __forceinline__ void etkSmallGrad(const SmallItem& it, const DG_REAL* pos, DG_REAL* grad) {
+  switch (it.kind) {
+    case kETKSmallTorsion:
+      torsionAngleGrad(pos, it.a[0], it.a[1], it.a[2], it.a[3], it.p, it.s, grad);
+      break;
+    case kETKSmallImproper:
+      inversionGrad(pos, it.a[0], it.a[1], it.a[2], it.a[3], it.p[0], it.p[1], it.p[2], it.p[3], grad);
+      break;
+    case kETKSmallDist12:
+    case kETKSmallDist13:
+      distanceConstraintGrad(pos, it.a[0], it.a[1], it.p[0], it.p[1], it.p[2], grad);
+      break;
+    default:
+      angleConstraintGrad(pos, it.a[0], it.a[1], it.a[2], it.p[0], it.p[1], DG_REAL(1.0), grad);
+      break;
+  }
+}
+
+//! DG family for the fused driver. Ranges: [dist0, dist1, chiral0, chiral1, fourth0, fourth1].
+//! vecPos: bulk energies gather natural-layout coordinates with 16-byte loads (dimension 4, aligned coordinates).
+template <int dimension, bool vecPos = false> struct DGFamily {
+  EnergyForceContribsDevicePtr terms;
+  BatchedIndicesDevicePtr      indices;
+  DG_REAL                      chiralWeight;
+  DG_REAL                      fourthDimWeight;
+  bool                         aligned;  //!< bulk arrays are 16-byte aligned
+
+  using Bulk = typename std::conditional<vecPos, DGBulkTermVec<dimension>, DGBulkTerm<dimension>>::type;
+  static constexpr int kNumRanges = 6;
+  static constexpr int kDimension = dimension;
+
+  __device__ __forceinline__ void loadRanges(const int m, int* r) const {
+    r[0] = indices.distTermStarts[m];
+    r[1] = indices.distTermStarts[m + 1];
+    r[2] = indices.chiralTermStarts[m];
+    r[3] = indices.chiralTermStarts[m + 1];
+    r[4] = indices.fourthTermStarts[m];
+    r[5] = indices.fourthTermStarts[m + 1];
+  }
+  __device__ __forceinline__ BulkPairArrays bulkArrays() const {
+    const auto& d = terms.distTerms;
+    return {d.idx1, d.idx2, d.lb2, d.ub2, d.weight};
+  }
+  __device__ __forceinline__ int  smallCount(const int* r) const { return dgSmallCount(r + 2); }
+  __device__ __forceinline__ void smallLoad(const int* r, const int v, const int atomStart, SmallItem& it) const {
+    dgSmallLoad(terms, r + 2, v, atomStart, it);
+  }
+  __device__ __forceinline__ DG_REAL smallEnergy(const SmallItem& it, const DG_REAL* pos) const {
+    return dgSmallEnergy<dimension>(it, pos, chiralWeight, fourthDimWeight);
+  }
+  __device__ __forceinline__ void smallGrad(const SmallItem& it, const DG_REAL* pos, DG_REAL* grad) const {
+    dgSmallGrad<dimension>(it, pos, grad, chiralWeight, fourthDimWeight);
+  }
+};
+
+//! ETK family for the fused driver (4D storage). Ranges: [longRange0, longRange1, then the small range layout of
+//! etkSmallLoad]. Families outside termMask get empty ranges.
+struct ETKFamily {
+  Energy3DForceContribsDevicePtr terms;
+  BatchedIndices3DDevicePtr      indices;
+  int                            termMask;
+  bool                           aligned;  //!< bulk arrays are 16-byte aligned
+
+  using Bulk                      = ETKBulkTerm;
+  static constexpr int kNumRanges = 12;
+  static constexpr int kDimension = 4;
+
+  __device__ __forceinline__ void loadRanges(const int m, int* r) const {
+    const int* starts[6] = {indices.longRangeDistTermStarts,
+                            indices.experimentalTorsionTermStarts,
+                            indices.improperTorsionTermStarts,
+                            indices.dist12TermStarts,
+                            indices.dist13TermStarts,
+                            indices.angle13TermStarts};
+    const int  bits[6] =
+      {kETKLongDistBit, kETKTorsionBit, kETKImproperBit, kETKDist12Bit, kETKDist13Bit, kETKAngle13Bit};
+#pragma unroll
+    for (int f = 0; f < 6; ++f) {
+      if (termMask & bits[f]) {
+        r[2 * f]     = starts[f][m];
+        r[2 * f + 1] = starts[f][m + 1];
+      } else {
+        r[2 * f]     = 0;
+        r[2 * f + 1] = 0;
+      }
+    }
+  }
+  __device__ __forceinline__ BulkPairArrays bulkArrays() const {
+    const auto& d = terms.longRangeDistTerms;
+    return {d.idx1, d.idx2, d.minLen, d.maxLen, d.forceConstant};
+  }
+  __device__ __forceinline__ int  smallCount(const int* r) const { return etkSmallCount(r + 2); }
+  __device__ __forceinline__ void smallLoad(const int* r, const int v, const int atomStart, SmallItem& it) const {
+    etkSmallLoad(terms, r + 2, v, atomStart, it);
+  }
+  __device__ __forceinline__ DG_REAL smallEnergy(const SmallItem& it, const DG_REAL* pos) const {
+    return etkSmallEnergy(it, pos);
+  }
+  __device__ __forceinline__ void smallGrad(const SmallItem& it, const DG_REAL* pos, DG_REAL* grad) const {
+    etkSmallGrad(it, pos, grad);
+  }
+};
+
+//! Per-thread work of one molecule: the prefetched first chunk/item, then any further passes.
+//! pos (natural stride) feeds the small terms; bulkPos (stride bulkPosStride) feeds the bulk terms.
+template <class Family, bool isGrad, int bulkPosStride>
+static __device__ __forceinline__ DG_REAL fusedEvaluate(const Family&    fam,
+                                                        const int*       r,
+                                                        const BulkChunk& chunk,
+                                                        const SmallItem& item,
+                                                        const int        nSmall,
+                                                        const int        atomStart,
+                                                        const DG_REAL*   pos,
+                                                        const DG_REAL*   bulkPos,
+                                                        DG_REAL*         grad) {
+  using Bulk         = typename Family::Bulk;
+  const int tid      = threadIdx.x;
+  const int nthreads = blockDim.x;
+  const int lo       = r[0];
+  const int hi       = r[1];
+  const int c0       = (lo & ~3) + 4 * tid;
+  const int bulkStep = 4 * nthreads;
+  DG_REAL   energy   = DG_REAL(0.0);
+  // Bulk chunk first so its registers are dead before the (register-heavy) small-term math.
+  if (c0 < hi) {
+    if constexpr (isGrad) {
+      chunk.template grad<Bulk, bulkPosStride>(bulkPos, grad, c0, lo, hi, atomStart);
+    } else {
+      energy += chunk.template energy<Bulk, bulkPosStride>(bulkPos, c0, lo, hi, atomStart);
+    }
+  }
+  if (tid < nSmall) {
+    if constexpr (isGrad) {
+      fam.smallGrad(item, pos, grad);
+    } else {
+      energy += fam.smallEnergy(item, pos);
+    }
+  }
+  // Further passes (large molecules): load the next chunk and item together so they share one round trip.
+  const BulkPairArrays bulk = fam.bulkArrays();
+  int                  c    = c0 + bulkStep;
+  int                  v    = tid + nthreads;
+  while (c < hi || v < nSmall) {
+    BulkChunk nextChunk;
+    SmallItem nextItem;
+    if (c < hi) {
+      nextChunk.load(bulk, c, lo, hi, fam.aligned);
+    }
+    if (v < nSmall) {
+      fam.smallLoad(r, v, atomStart, nextItem);
+    }
+    if (c < hi) {
+      if constexpr (isGrad) {
+        nextChunk.template grad<Bulk, bulkPosStride>(bulkPos, grad, c, lo, hi, atomStart);
+      } else {
+        energy += nextChunk.template energy<Bulk, bulkPosStride>(bulkPos, c, lo, hi, atomStart);
+      }
+    }
+    if (v < nSmall) {
+      if constexpr (isGrad) {
+        fam.smallGrad(nextItem, pos, grad);
+      } else {
+        energy += fam.smallEnergy(nextItem, pos);
+      }
+    }
+    c += bulkStep;
+    v += nthreads;
+  }
+  return energy;
+}
+
+template <typename T> static __device__ __forceinline__ T fusedWarpSum(T v) {
+#pragma unroll
+  for (int o = 16; o > 0; o >>= 1) {
+    v += __shfl_xor_sync(0xffffffffu, v, o);
+  }
+  return v;
+}
+
+//! Block-wide sum; the result is valid in thread 0.
+static __device__ __forceinline__ DG_REAL fusedBlockSum(DG_REAL v, DG_REAL* scratch) {
+  v              = fusedWarpSum(v);
+  const int lane = threadIdx.x & 31;
+  const int warp = threadIdx.x >> 5;
+  if (lane == 0) {
+    scratch[warp] = v;
+  }
+  __syncthreads();
+  DG_REAL total = DG_REAL(0.0);
+  if (warp == 0) {
+    total = lane < static_cast<int>(blockDim.x >> 5) ? scratch[lane] : DG_REAL(0.0);
+    total = fusedWarpSum(total);
+  }
+  return total;
+}
+
+//! Evaluates molecule blockIdx.x and updates its output in place (see launchFusedEnergyKernel for the contract).
+//!   energy: active -> sum (isSingle) or out + sum; inactive -> 0 (isSingle) or unchanged.
+//!   gradient: active -> sum (overwriteGrad) or out + sum; inactive -> unchanged.
+//! sPos holds tileVals values; larger molecules read coordinates from global memory. Gradients always accumulate in
+//! the molecule's slice of global memory.
+template <class Family, bool isGrad, bool isSingle, bool overwriteGrad>
+static __device__ __forceinline__ void fusedMolecule(const Family& fam,
+                                                     const int* __restrict__ atomStarts,
+                                                     const uint8_t* __restrict__ active,
+                                                     const DG_REAL* __restrict__ coords,
+                                                     DG_REAL* __restrict__ out,
+                                                     DG_REAL*  sPos,
+                                                     DG_REAL*  sBulk,
+                                                     DG_REAL*  sRed,
+                                                     const int tileVals) {
+  constexpr int dimension  = Family::kDimension;
+  using Bulk               = typename Family::Bulk;
+  //! Bulk terms read a separate tile when their conflict-light stride differs from the natural layout.
+  constexpr bool kBulkTile = Bulk::kTileStride != dimension;
+  const int      molIdx    = blockIdx.x;
+  const int      tid       = threadIdx.x;
+  const int      nthreads  = blockDim.x;
+
+  // Round trip 1: everything addressed by the molecule index alone.
+  const int  atomStart = atomStarts[molIdx];
+  const int  atomEnd   = atomStarts[molIdx + 1];
+  const bool isActive  = active == nullptr || (isSingle ? active[molIdx] != 0 : active[molIdx] == 1);
+  int        r[Family::kNumRanges];
+  fam.loadRanges(molIdx, r);
+  DG_REAL priorEnergy = DG_REAL(0.0);
+  if constexpr (!isGrad && !isSingle) {
+    priorEnergy = out[molIdx];
+  }
+  const int numVals = (atomEnd - atomStart) * dimension;
+  const int offset  = atomStart * dimension;
+
+  if (!isActive) {
+    if constexpr (!isGrad && isSingle) {
+      if (tid == 0) {
+        out[molIdx] = DG_REAL(0.0);
+      }
+    }
+    return;
+  }
+
+  // Round trip 2: coordinates plus the first bulk chunk and small item of every thread.
+  const int lo = r[0];
+  const int hi = r[1];
+  const int c0 = (lo & ~3) + 4 * tid;
+  BulkChunk chunk;
+  if (c0 < hi) {
+    chunk.load(fam.bulkArrays(), c0, lo, hi, fam.aligned);
+  }
+  const int nSmall = fam.smallCount(r);
+  SmallItem item;
+  if (tid < nSmall) {
+    fam.smallLoad(r, tid, atomStart, item);
+  }
+
+  if (numVals <= tileVals) {
+    // Coordinates come from the shared tile. Gradients accumulate directly in this molecule's output slice with
+    // global atomics; when overwriting, the slice is zeroed first and the barrier orders those stores
+    // before every reduction of the block.
+    for (int i = tid; i < numVals; i += nthreads) {
+      const DG_REAL v = coords[offset + i];
+      sPos[i]         = v;
+      if constexpr (kBulkTile) {
+        const int atom = i / dimension;
+        const int comp = i - atom * dimension;
+        if (comp < Bulk::kComps) {
+          sBulk[atom * Bulk::kTileStride + comp] = v;
+        }
+      }
+      if constexpr (isGrad && overwriteGrad) {
+        out[offset + i] = DG_REAL(0.0);
+      }
+    }
+    __syncthreads();
+    const DG_REAL energy = fusedEvaluate<Family, isGrad, Bulk::kTileStride>(fam,
+                                                                            r,
+                                                                            chunk,
+                                                                            item,
+                                                                            nSmall,
+                                                                            atomStart,
+                                                                            sPos,
+                                                                            kBulkTile ? sBulk : sPos,
+                                                                            isGrad ? out + offset : nullptr);
+    if constexpr (!isGrad) {
+      const DG_REAL total = fusedBlockSum(energy, sRed);
+      if (tid == 0) {
+        out[molIdx] = priorEnergy + total;
+      }
+    }
+  } else {
+    // Molecule larger than the shared tile: coordinates from global memory as well.
+    if constexpr (isGrad) {
+      if constexpr (overwriteGrad) {
+        for (int i = tid; i < numVals; i += nthreads) {
+          out[offset + i] = DG_REAL(0.0);
+        }
+        __syncthreads();
+      }
+      fusedEvaluate<Family, isGrad, Bulk::kStride>(fam,
+                                                   r,
+                                                   chunk,
+                                                   item,
+                                                   nSmall,
+                                                   atomStart,
+                                                   coords + offset,
+                                                   coords + offset,
+                                                   out + offset);
+    } else {
+      const DG_REAL energy = fusedEvaluate<Family, isGrad, Bulk::kStride>(fam,
+                                                                          r,
+                                                                          chunk,
+                                                                          item,
+                                                                          nSmall,
+                                                                          atomStart,
+                                                                          coords + offset,
+                                                                          coords + offset,
+                                                                          nullptr);
+      const DG_REAL total  = fusedBlockSum(energy, sRed);
+      if (tid == 0) {
+        out[molIdx] = priorEnergy + total;
       }
     }
   }
