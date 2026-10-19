@@ -326,7 +326,9 @@ def test_mmff_optimization_fire_matches_rdkit(mmff_test_mols, backend, precision
         for conformer_index, (starting_energy, reference_energy, result_energy) in enumerate(
             zip(starting, reference, result)
         ):
-            assert result_energy < starting_energy, (
+            # Float energies can't resolve improvements below their rounding error, so SINGLE allows float resolution.
+            allowance = 1e-6 * abs(starting_energy) if precision == PrecisionMode.SINGLE else 0.0
+            assert result_energy < starting_energy + allowance, (
                 f"Molecule {molecule_index}, conformer {conformer_index}: "
                 f"FIRE energy {result_energy:.6f} did not improve from {starting_energy:.6f}"
             )
