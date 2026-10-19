@@ -13,8 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <cub/cub.cuh>
-
 #include "src/forcefields/kernel_utils.cuh"
 #include "src/forcefields/mmff_kernels.h"
 #include "src/forcefields/mmff_kernels_device_dispatch.cuh"
@@ -1063,84 +1061,295 @@ cudaError_t launchReduceEnergiesKernel(const int      numBlocks,
   return cudaGetLastError();
 }
 
-constexpr int blockSizePerMol = 128;
+//! Molecules with at most this many atoms keep their coordinates in shared memory; larger molecules read them
+//! directly from global memory. For molecules that fit, SINGLE gradients accumulate in per-warp planar (x, y and z
+//! arrays) shared buffers that are summed in warp order, and FULL gradients accumulate with global reductions into the
+//! molecule's output range, planar and reordered to interleaved at the end. Larger molecules accumulate interleaved
+//! with global reductions in both precisions.
+constexpr int maxSharedAtomsPerMol = 256;
+constexpr int numMolRangeFields    = 12;
 
-template <bool HasConstraints, typename real, typename reduceT, typename Terms, typename storageT>
-__global__ void combinedEnergiesKernel(const __grid_constant__ Terms                   terms,
-                                       const __grid_constant__ BatchedIndicesDevicePtr systemIndices,
-                                       const storageT*                                 coords,
-                                       storageT*                                       energies,
-                                       const uint8_t*                                  activeSystemMask) {
-  const int molIdx = blockIdx.x;
-  const int tid    = threadIdx.x;
+//! Copies a molecule's interleaved xyz coordinates (numValues values) into the shared tile as x, y and z arrays of
+//! maxSharedAtomsPerMol values each (the layout of PlanarCoords).
+template <int BlockSize, typename T>
+static __device__ __forceinline__ void stagePlanarCoords(const T* molCoords, const int numValues, T* sharedCoords) {
+  for (int i = threadIdx.x; i < numValues; i += BlockSize) {
+    const int atom                                             = i / 3;
+    sharedCoords[(i - 3 * atom) * maxSharedAtomsPerMol + atom] = molCoords[i];
+  }
+}
 
-  if (activeSystemMask != nullptr && activeSystemMask[molIdx] == 0) {
+//! Start offsets of field f of the batched indices: atoms, then bond, angle, stretch-bend, out-of-plane, torsion, vdW
+//! and electrostatic terms, then distance, position, angle and torsion constraints.
+static __device__ __forceinline__ const int* molRangeField(const BatchedIndicesDevicePtr& indices, const int f) {
+  switch (f) {
+    case 0:
+      return indices.atomStarts;
+    case 1:
+      return indices.bondTermStarts;
+    case 2:
+      return indices.angleTermStarts;
+    case 3:
+      return indices.bendTermStarts;
+    case 4:
+      return indices.oopTermStarts;
+    case 5:
+      return indices.torsionTermStarts;
+    case 6:
+      return indices.vdwTermStarts;
+    case 7:
+      return indices.eleTermStarts;
+    case 8:
+      return indices.distanceConstraintTermStarts;
+    case 9:
+      return indices.positionConstraintTermStarts;
+    case 10:
+      return indices.angleConstraintTermStarts;
+    default:
+      return indices.torsionConstraintTermStarts;
+  }
+}
+
+//! Cooperatively caches every per-molecule [start, end) range (ranges[2 f], ranges[2 f + 1] for field f of
+//! molRangeField) so the hot term loops read shared memory instead of issuing the same uniform global loads from each
+//! warp. Returns whether the molecule is active.
+template <bool HasConstraints>
+static __device__ __forceinline__ bool loadMolRanges(const BatchedIndicesDevicePtr& systemIndices,
+                                                     const uint8_t*                 activeSystemMask,
+                                                     const int                      molIdx,
+                                                     int*                           ranges) {
+  constexpr int numLoads = 2 * (HasConstraints ? numMolRangeFields : numMolRangeFields - 4);
+  const int     tid      = threadIdx.x;
+  const bool    active   = activeSystemMask == nullptr || activeSystemMask[molIdx] != 0;
+  if (tid < numLoads) {
+    ranges[tid] = molRangeField(systemIndices, tid >> 1)[molIdx + (tid & 1)];
+  }
+  __syncthreads();
+  return active;
+}
+
+//! Resident warps per SM that ptxas is asked to allow (through the minimum blocks of __launch_bounds__), or 0 to leave
+//! the register allocation to ptxas. The constrained FULL gradient otherwise grows to a register count that costs a
+//! resident block. The unconstrained FULL energy is held to 48 registers so that its wide blocks fit five per SM; the
+//! narrow SINGLE gradient trades a few L1-resident spills for 12 blocks per SM. The SINGLE energy is held at full
+//! occupancy (32 registers).
+template <typename real, bool Gradient, bool HasConstraints, int BlockSize>
+__host__ __device__ constexpr int targetWarpsPerSM() {
+  if constexpr (std::is_same_v<real, double>) {
+    return Gradient ? 32 : (HasConstraints ? 0 : 40);
+  } else {
+    return Gradient ? (!HasConstraints && BlockSize <= 128 ? 48 : 0) : 64;
+  }
+}
+
+//! Resident threads and blocks per SM of the architecture being compiled (CUDA occupancy tables). The warp targets
+//! above are sm_100 occupancies; ptxas rejects a minimum block count the SM cannot hold, so architectures with fewer
+//! resident threads or blocks per SM get the largest minimum they can hold. The host pass uses sm_100's limits.
+__host__ __device__ constexpr int maxThreadsPerSMForArch() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+  return 1024;
+#elif defined(__CUDA_ARCH__) && (__CUDA_ARCH__ == 860 || __CUDA_ARCH__ == 870 || __CUDA_ARCH__ == 890 || \
+                                 __CUDA_ARCH__ == 1010 || __CUDA_ARCH__ == 1100 || __CUDA_ARCH__ >= 1200)
+  return 1536;
+#else
+  return 2048;
+#endif
+}
+
+__host__ __device__ constexpr int maxBlocksPerSMForArch() {
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 800 || __CUDA_ARCH__ == 860 || __CUDA_ARCH__ == 870)
+  return 16;
+#elif defined(__CUDA_ARCH__) && \
+  (__CUDA_ARCH__ == 890 || __CUDA_ARCH__ == 1010 || __CUDA_ARCH__ == 1100 || __CUDA_ARCH__ >= 1200)
+  return 24;
+#else
+  return 32;
+#endif
+}
+
+template <typename real, bool Gradient, bool HasConstraints, int BlockSize>
+__host__ __device__ constexpr int minBlocksPerSM() {
+  const int target     = targetWarpsPerSM<real, Gradient, HasConstraints, BlockSize>() * kWarpSize / BlockSize;
+  const int threadsCap = maxThreadsPerSMForArch() / BlockSize;
+  const int blocksCap  = maxBlocksPerSMForArch();
+  const int capped     = target < threadsCap ? target : threadsCap;
+  return capped < blocksCap ? capped : blocksCap;
+}
+
+template <int BlockSize, bool HasConstraints, typename real, typename reduceT, typename Terms, typename storageT>
+__global__ void __launch_bounds__(BlockSize, (minBlocksPerSM<real, false, HasConstraints, BlockSize>()))
+  combinedEnergiesKernel(const __grid_constant__ Terms                   terms,
+                         const __grid_constant__ BatchedIndicesDevicePtr systemIndices,
+                         const storageT*                                 coords,
+                         storageT*                                       energies,
+                         const uint8_t*                                  activeSystemMask) {
+  constexpr int numWarps = BlockSize / kWarpSize;
+  const int     molIdx   = blockIdx.x;
+  const int     tid      = threadIdx.x;
+
+  __shared__ int ranges[2 * numMolRangeFields];
+  if (!loadMolRanges<HasConstraints>(systemIndices, activeSystemMask, molIdx, ranges)) {
     if (tid == 0)
       energies[molIdx] = 0.0;
     return;
   }
 
-  using BlockReduce = cub::BlockReduce<reduceT, blockSizePerMol>;
-  __shared__ typename BlockReduce::TempStorage tempStorage;
+  __shared__ storageT sharedCoords[3 * maxSharedAtomsPerMol];
+  __shared__ reduceT  warpEnergies[numWarps];
 
-  const int       atomStart = systemIndices.atomStarts[molIdx];
+  const int       atomStart = ranges[0];
+  const int       numValues = 3 * (ranges[1] - atomStart);
   const storageT* molCoords = coords + atomStart * 3;
   real            threadEnergy;
-  if constexpr (std::is_same_v<real, float>)
-    threadEnergy = fp32::molEnergy<blockSizePerMol, HasConstraints>(terms, systemIndices, molCoords, molIdx, tid);
-  else
-    threadEnergy = fp64::molEnergy<blockSizePerMol, HasConstraints>(terms, systemIndices, molCoords, molIdx, tid);
-  const reduceT blockEnergy = BlockReduce(tempStorage).Sum(static_cast<reduceT>(threadEnergy));
+  if (numValues <= 3 * maxSharedAtomsPerMol) {
+    stagePlanarCoords<BlockSize>(molCoords, numValues, sharedCoords);
+    __syncthreads();
+    if constexpr (std::is_same_v<real, float>)
+      threadEnergy = fp32::molEnergyBlock<BlockSize, HasConstraints>(
+        terms,
+        ranges,
+        fp32::PlanarCoords<storageT, maxSharedAtomsPerMol>{sharedCoords});
+    else
+      threadEnergy = fp64::molEnergyBlock<BlockSize, HasConstraints>(
+        terms,
+        ranges,
+        fp64::PlanarCoords<storageT, maxSharedAtomsPerMol>{sharedCoords});
+  } else {
+    if constexpr (std::is_same_v<real, float>)
+      threadEnergy = fp32::molEnergyBlock<BlockSize, HasConstraints>(terms, ranges, molCoords);
+    else
+      threadEnergy = fp64::molEnergyBlock<BlockSize, HasConstraints>(terms, ranges, molCoords);
+  }
 
+  reduceT energy = static_cast<reduceT>(threadEnergy);
+#pragma unroll
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    energy += __shfl_down_sync(0xffffffffu, energy, offset);
+  }
+  if (tid % kWarpSize == 0) {
+    warpEnergies[tid / kWarpSize] = energy;
+  }
+  __syncthreads();
   if (tid == 0) {
+    reduceT blockEnergy = warpEnergies[0];
+#pragma unroll
+    for (int w = 1; w < numWarps; ++w) {
+      blockEnergy += warpEnergies[w];
+    }
     energies[molIdx] = blockEnergy;
   }
 }
 
-template <bool HasConstraints, typename real, typename Terms, typename storageT>
-__global__ void combinedGradKernel(const __grid_constant__ Terms                   terms,
-                                   const __grid_constant__ BatchedIndicesDevicePtr systemIndices,
-                                   const storageT*                                 coords,
-                                   storageT*                                       grad,
-                                   const uint8_t*                                  activeSystemMask) {
+template <int BlockSize, bool HasConstraints, typename real, typename Terms, typename storageT>
+__global__ void __launch_bounds__(BlockSize, (minBlocksPerSM<real, true, HasConstraints, BlockSize>()))
+  combinedGradKernel(const __grid_constant__ Terms                   terms,
+                     const __grid_constant__ BatchedIndicesDevicePtr systemIndices,
+                     const storageT*                                 coords,
+                     storageT*                                       grad,
+                     const uint8_t*                                  activeSystemMask) {
   const int molIdx = blockIdx.x;
   const int tid    = threadIdx.x;
 
-  const int atomStart = systemIndices.atomStarts[molIdx];
-  const int atomEnd   = systemIndices.atomStarts[molIdx + 1];
-  const int numAtoms  = atomEnd - atomStart;
+  __shared__ int ranges[2 * numMolRangeFields];
+  const bool     active    = loadMolRanges<HasConstraints>(systemIndices, activeSystemMask, molIdx, ranges);
+  const int      atomStart = ranges[0];
+  const int      numValues = 3 * (ranges[1] - atomStart);
+  storageT*      molGrad   = grad + atomStart * 3;
 
-  if (activeSystemMask != nullptr && activeSystemMask[molIdx] == 0) {
-    for (int i = tid; i < numAtoms * 3; i += blockSizePerMol)
-      grad[atomStart * 3 + i] = 0.0;
+  if (!active) {
+    for (int i = tid; i < numValues; i += BlockSize)
+      molGrad[i] = 0.0;
     return;
   }
 
-  constexpr int       maxAtomSize = 256;
-  __shared__ storageT accumGrad[maxAtomSize * 3];
-
-  const bool useSharedMem = numAtoms <= maxAtomSize;
-  storageT*  molGradBase  = useSharedMem ? accumGrad : grad + atomStart * 3;
-
-  for (int i = tid; i < numAtoms * 3; i += blockSizePerMol) {
-    molGradBase[i] = 0.0;
-  }
-  __syncthreads();
-
   const storageT* molCoords = coords + atomStart * 3;
-  if constexpr (std::is_same_v<real, float>)
-    fp32::molGrad<blockSizePerMol, HasConstraints>(terms, systemIndices, molCoords, molGradBase, molIdx, tid);
-  else
-    fp64::molGrad<blockSizePerMol, HasConstraints>(terms, systemIndices, molCoords, molGradBase, molIdx, tid);
-  __syncthreads();
-
-  if (useSharedMem) {
-    storageT* globalGrad = grad + (atomStart * 3);
-    for (int i = tid; i < numAtoms * 3; i += blockSizePerMol) {
-      globalGrad[i] = molGradBase[i];
+  if (numValues <= 3 * maxSharedAtomsPerMol) {
+    __shared__ storageT sharedCoords[3 * maxSharedAtomsPerMol];
+    const int           numAtoms = numValues / 3;
+    if constexpr (std::is_same_v<real, float>) {
+      // Each warp accumulates into its own planar buffer (x, y and z arrays of maxSharedAtomsPerMol values), and the
+      // buffers are summed in warp order. Every warp evaluates a fixed sequence of term chunks, so each gradient value
+      // is the same float sum in the same order on every launch; atomics shared between warps would add the
+      // contributions in whatever order the warps reach them, and SINGLE results would vary between launches.
+      constexpr int numWarps     = BlockSize / kWarpSize;
+      constexpr int warpGradSize = 3 * maxSharedAtomsPerMol;
+      __shared__ __align__(16) storageT warpGrads[numWarps * warpGradSize];
+      stagePlanarCoords<BlockSize>(molCoords, numValues, sharedCoords);
+      for (int i = tid; i < numWarps * warpGradSize / 4; i += BlockSize) {
+        reinterpret_cast<float4*>(warpGrads)[i] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+      }
+      __syncthreads();
+      fp32::molGradBlock<BlockSize, HasConstraints>(
+        terms,
+        ranges,
+        fp32::PlanarCoords<storageT, maxSharedAtomsPerMol>{sharedCoords},
+        fp32::PlanarAtomicGradSink<storageT>{warpGrads + (tid / kWarpSize) * warpGradSize, maxSharedAtomsPerMol});
+      __syncthreads();
+      for (int atom = tid; atom < numAtoms; atom += BlockSize) {
+#pragma unroll
+        for (int c = 0; c < 3; ++c) {
+          storageT sum = warpGrads[c * maxSharedAtomsPerMol + atom];
+#pragma unroll
+          for (int w = 1; w < numWarps; ++w) {
+            sum += warpGrads[w * warpGradSize + c * maxSharedAtomsPerMol + atom];
+          }
+          molGrad[3 * atom + c] = sum;
+        }
+      }
+    } else {
+      // The molecule's output range doubles as a planar accumulator (x, y and z arrays of numAtoms values each).
+      stagePlanarCoords<BlockSize>(molCoords, numValues, sharedCoords);
+      for (int i = tid; i < numValues; i += BlockSize) {
+        molGrad[i] = 0.0;
+      }
+      __syncthreads();
+      fp64::molGradBlock<BlockSize, HasConstraints>(terms,
+                                                    ranges,
+                                                    fp64::PlanarCoords<storageT, maxSharedAtomsPerMol>{sharedCoords},
+                                                    fp64::PlanarAtomicGradSink<storageT>{molGrad, numAtoms});
+      // Reorder the planar sums into the interleaved output in place: every value is read (from L2, where the
+      // reductions were performed) before any is overwritten.
+      constexpr int maxAtomsPerThread = (maxSharedAtomsPerMol + BlockSize - 1) / BlockSize;
+      storageT      sums[maxAtomsPerThread][3];
+      __syncthreads();
+#pragma unroll
+      for (int k = 0; k < maxAtomsPerThread; ++k) {
+        const int atom = tid + k * BlockSize;
+        if (atom < numAtoms) {
+#pragma unroll
+          for (int c = 0; c < 3; ++c) {
+            sums[k][c] = __ldcg(&molGrad[c * numAtoms + atom]);
+          }
+        }
+      }
+      __syncthreads();
+#pragma unroll
+      for (int k = 0; k < maxAtomsPerThread; ++k) {
+        const int atom = tid + k * BlockSize;
+        if (atom < numAtoms) {
+#pragma unroll
+          for (int c = 0; c < 3; ++c) {
+            molGrad[3 * atom + c] = sums[k][c];
+          }
+        }
+      }
     }
+  } else {
+    for (int i = tid; i < numValues; i += BlockSize) {
+      molGrad[i] = 0.0;
+    }
+    __syncthreads();
+    if constexpr (std::is_same_v<real, float>)
+      fp32::molGradBlock<BlockSize, HasConstraints>(terms, ranges, molCoords, fp32::AtomicGradSink<storageT>{molGrad});
+    else
+      fp64::molGradBlock<BlockSize, HasConstraints>(terms, ranges, molCoords, fp64::AtomicGradSink<storageT>{molGrad});
   }
 }
+
+//! Threads per molecule. The batched backend's molecules (65 atoms and up) are bound by the latency of each warp's
+//! chain of term chunks, not by throughput: a single wave of narrow blocks leaves the SMs idle behind their largest
+//! molecules, while wide blocks shorten every molecule and leave the block scheduler several waves to balance.
+constexpr int blockSizePerMol = 256;
 
 template <typename real, typename reduceT, typename Terms, typename storageT>
 cudaError_t launchBlockPerMolEnergyKernelImpl(int                            numMols,
@@ -1151,13 +1360,16 @@ cudaError_t launchBlockPerMolEnergyKernelImpl(int                            num
                                               bool                           hasConstraints,
                                               cudaStream_t                   stream,
                                               const uint8_t*                 activeSystemMask) {
-#define NVMOLKIT_LAUNCH_MMFF_ENERGY(HasConstraints, real, reduceT) \
-  combinedEnergiesKernel<HasConstraints, real, reduceT>            \
+  if (numMols <= 0) {
+    return cudaSuccess;
+  }
+#define NVMOLKIT_LAUNCH_MMFF_ENERGY(HasConstraints)                                       \
+  combinedEnergiesKernel<blockSizePerMol, HasConstraints, real, reduceT, Terms, storageT> \
     <<<numMols, blockSizePerMol, 0, stream>>>(terms, sytemIndices, coords, energies, activeSystemMask)
   if (hasConstraints)
-    NVMOLKIT_LAUNCH_MMFF_ENERGY(true, real, reduceT);
+    NVMOLKIT_LAUNCH_MMFF_ENERGY(true);
   else
-    NVMOLKIT_LAUNCH_MMFF_ENERGY(false, real, reduceT);
+    NVMOLKIT_LAUNCH_MMFF_ENERGY(false);
 #undef NVMOLKIT_LAUNCH_MMFF_ENERGY
   return cudaGetLastError();
 }
@@ -1171,11 +1383,14 @@ cudaError_t launchBlockPerMolGradKernelImpl(int                            numMo
                                             bool                           hasConstraints,
                                             cudaStream_t                   stream,
                                             const uint8_t*                 activeSystemMask) {
+  if (numMols <= 0) {
+    return cudaSuccess;
+  }
   if (hasConstraints)
-    combinedGradKernel<true, real>
+    combinedGradKernel<blockSizePerMol, true, real, Terms, storageT>
       <<<numMols, blockSizePerMol, 0, stream>>>(terms, sytemIndices, coords, grad, activeSystemMask);
   else
-    combinedGradKernel<false, real>
+    combinedGradKernel<blockSizePerMol, false, real, Terms, storageT>
       <<<numMols, blockSizePerMol, 0, stream>>>(terms, sytemIndices, coords, grad, activeSystemMask);
   return cudaGetLastError();
 }

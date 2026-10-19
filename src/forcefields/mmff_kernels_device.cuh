@@ -17,26 +17,98 @@
 
 using namespace nvMolKit::FFKernelUtils;
 
+//! A molecule's coordinates staged in shared memory as x, y and z arrays of Stride values each, so that a warp reading
+//! the coordinates of consecutive atoms touches consecutive banks (interleaved xyz spreads 32 atoms over 96 words).
+//! Device code reads coordinates through coordOf, which takes this or an interleaved xyz pointer.
+template <typename T, int Stride> struct PlanarCoords {
+  T* p;
+};
+
+template <typename T> static __device__ __forceinline__ T coordOf(const T* pos, const int idx, const int c) {
+  return pos[3 * idx + c];
+}
+
+template <typename T, int Stride>
+static __device__ __forceinline__ T coordOf(const PlanarCoords<T, Stride>& pos, const int idx, const int c) {
+  return pos.p[c * Stride + idx];
+}
+
+//! distanceSquared and distanceSquaredWithComponents of kernel_utils.cuh (same arithmetic) through coordOf.
+static __device__ __forceinline__ real coordDistanceSquared(const auto& pos, const int idx1, const int idx2) {
+  const real dx = coordOf(pos, idx1, 0) - coordOf(pos, idx2, 0);
+  const real dy = coordOf(pos, idx1, 1) - coordOf(pos, idx2, 1);
+  const real dz = coordOf(pos, idx1, 2) - coordOf(pos, idx2, 2);
+  return dx * dx + dy * dy + dz * dz;
+}
+
+static __device__ __forceinline__ real
+coordDistanceSquaredWithComponents(const auto& pos, const int idx1, const int idx2, real& dx, real& dy, real& dz) {
+  dx = coordOf(pos, idx1, 0) - coordOf(pos, idx2, 0);
+  dy = coordOf(pos, idx1, 1) - coordOf(pos, idx2, 1);
+  dz = coordOf(pos, idx1, 2) - coordOf(pos, idx2, 2);
+  return dx * dx + dy * dy + dz * dz;
+}
+
 constexpr real degreeToRadian = static_cast<real>(M_PI) / real{180.0};
 constexpr real radianToDegree = real{180.0} / static_cast<real>(M_PI);
 
+//! Gradient sink that atomically adds one atom's (x, y, z) contribution to a flat xyz gradient buffer.
+template <typename T> struct AtomicGradSink {
+  T*                              grad;
+  __device__ __forceinline__ void operator()(const int idx, const real x, const real y, const real z) const {
+    atomicAdd(&grad[3 * idx + 0], x);
+    atomicAdd(&grad[3 * idx + 1], y);
+    atomicAdd(&grad[3 * idx + 2], z);
+  }
+  //! Adds one component (0, 1 or 2 for x, y or z) of an atom's contribution.
+  __device__ __forceinline__ void component(const int idx, const int c, const real v) const {
+    atomicAdd(&grad[3 * idx + c], v);
+  }
+};
+
+template <typename T> static __device__ __forceinline__ AtomicGradSink<T> atomicGradSink(T* grad) {
+  return AtomicGradSink<T>{grad};
+}
+
+//! Gradient sink that atomically adds into a planar gradient buffer holding the x, y and z components of the
+//! molecule's atoms in three consecutive arrays of stride atoms. In global memory, a warp's scattered updates of one
+//! component then fall into a third of the cache lines that the interleaved layout spreads them over; in shared memory,
+//! consecutive atoms fall into consecutive banks.
+template <typename T> struct PlanarAtomicGradSink {
+  T*                              grad;
+  int                             stride;
+  __device__ __forceinline__ void operator()(const int idx, const real x, const real y, const real z) const {
+    atomicAdd(&grad[idx], x);
+    atomicAdd(&grad[stride + idx], y);
+    atomicAdd(&grad[2 * stride + idx], z);
+  }
+  __device__ __forceinline__ void component(const int idx, const int c, const real v) const {
+    atomicAdd(&grad[c * stride + idx], v);
+  }
+};
+
 namespace rdkit_ports {
 
-static __device__ __forceinline__ void
-oopGrad(const auto* pos, const int idx1, const int idx2, const int idx3, const int idx4, const real koop, auto* grad) {
+static __device__ __forceinline__ void oopGradTo(const auto& pos,
+                                                 const int   idx1,
+                                                 const int   idx2,
+                                                 const int   idx3,
+                                                 const int   idx4,
+                                                 const real  koop,
+                                                 const auto& sink) {
   constexpr real prefactor = real{143.9325} * degreeToRadian;
 
-  real dJIx = pos[3 * idx1 + 0] - pos[3 * idx2 + 0];
-  real dJIy = pos[3 * idx1 + 1] - pos[3 * idx2 + 1];
-  real dJIz = pos[3 * idx1 + 2] - pos[3 * idx2 + 2];
+  real dJIx = coordOf(pos, idx1, 0) - coordOf(pos, idx2, 0);
+  real dJIy = coordOf(pos, idx1, 1) - coordOf(pos, idx2, 1);
+  real dJIz = coordOf(pos, idx1, 2) - coordOf(pos, idx2, 2);
 
-  real dJKx = pos[3 * idx3 + 0] - pos[3 * idx2 + 0];
-  real dJKy = pos[3 * idx3 + 1] - pos[3 * idx2 + 1];
-  real dJKz = pos[3 * idx3 + 2] - pos[3 * idx2 + 2];
+  real dJKx = coordOf(pos, idx3, 0) - coordOf(pos, idx2, 0);
+  real dJKy = coordOf(pos, idx3, 1) - coordOf(pos, idx2, 1);
+  real dJKz = coordOf(pos, idx3, 2) - coordOf(pos, idx2, 2);
 
-  real dJLx = pos[3 * idx4 + 0] - pos[3 * idx2 + 0];
-  real dJLy = pos[3 * idx4 + 1] - pos[3 * idx2 + 1];
-  real dJLz = pos[3 * idx4 + 2] - pos[3 * idx2 + 2];
+  real dJLx = coordOf(pos, idx4, 0) - coordOf(pos, idx2, 0);
+  real dJLy = coordOf(pos, idx4, 1) - coordOf(pos, idx2, 1);
+  real dJLz = coordOf(pos, idx4, 2) - coordOf(pos, idx2, 2);
 
   const real invdJI = NVMOLKIT_RSQRT(dJIx * dJIx + dJIy * dJIy + dJIz * dJIz);
   const real invdJK = NVMOLKIT_RSQRT(dJKx * dJKx + dJKy * dJKy + dJKz * dJKz);
@@ -86,43 +158,43 @@ oopGrad(const auto* pos, const int idx1, const int idx2, const int idx3, const i
                  (t3y * term1 - dJLy * sinChi * invCosChi) * invdJL,
                  (t3z * term1 - dJLz * sinChi * invCosChi) * invdJL};
 
-  atomicAdd(&grad[3 * idx1 + 0], dE_dChi * tg1[0]);
-  atomicAdd(&grad[3 * idx1 + 1], dE_dChi * tg1[1]);
-  atomicAdd(&grad[3 * idx1 + 2], dE_dChi * tg1[2]);
-  atomicAdd(&grad[3 * idx2 + 0], -dE_dChi * (tg1[0] + tg3[0] + tg4[0]));
-  atomicAdd(&grad[3 * idx2 + 1], -dE_dChi * (tg1[1] + tg3[1] + tg4[1]));
-  atomicAdd(&grad[3 * idx2 + 2], -dE_dChi * (tg1[2] + tg3[2] + tg4[2]));
-  atomicAdd(&grad[3 * idx3 + 0], dE_dChi * tg3[0]);
-  atomicAdd(&grad[3 * idx3 + 1], dE_dChi * tg3[1]);
-  atomicAdd(&grad[3 * idx3 + 2], dE_dChi * tg3[2]);
-  atomicAdd(&grad[3 * idx4 + 0], dE_dChi * tg4[0]);
-  atomicAdd(&grad[3 * idx4 + 1], dE_dChi * tg4[1]);
-  atomicAdd(&grad[3 * idx4 + 2], dE_dChi * tg4[2]);
+  sink(idx1, dE_dChi * tg1[0], dE_dChi * tg1[1], dE_dChi * tg1[2]);
+  sink(idx2,
+       -dE_dChi * (tg1[0] + tg3[0] + tg4[0]),
+       -dE_dChi * (tg1[1] + tg3[1] + tg4[1]),
+       -dE_dChi * (tg1[2] + tg3[2] + tg4[2]));
+  sink(idx3, dE_dChi * tg3[0], dE_dChi * tg3[1], dE_dChi * tg3[2]);
+  sink(idx4, dE_dChi * tg4[0], dE_dChi * tg4[1], dE_dChi * tg4[2]);
 }
 
-static __device__ __forceinline__ void torsionGrad(const auto* pos,
-                                                   const int   idx1,
-                                                   const int   idx2,
-                                                   const int   idx3,
-                                                   const int   idx4,
-                                                   const real  V1,
-                                                   const real  V2,
-                                                   const real  V3,
-                                                   auto*       grad) {
+static __device__ __forceinline__ void
+oopGrad(const auto& pos, const int idx1, const int idx2, const int idx3, const int idx4, const real koop, auto* grad) {
+  oopGradTo(pos, idx1, idx2, idx3, idx4, koop, atomicGradSink(grad));
+}
+
+static __device__ __forceinline__ void torsionGradTo(const auto& pos,
+                                                     const int   idx1,
+                                                     const int   idx2,
+                                                     const int   idx3,
+                                                     const int   idx4,
+                                                     const real  V1,
+                                                     const real  V2,
+                                                     const real  V3,
+                                                     const auto& sink) {
   // P1 - P2
-  const real dx1 = pos[3 * idx1 + 0] - pos[3 * idx2 + 0];
-  const real dy1 = pos[3 * idx1 + 1] - pos[3 * idx2 + 1];
-  const real dz1 = pos[3 * idx1 + 2] - pos[3 * idx2 + 2];
+  const real dx1 = coordOf(pos, idx1, 0) - coordOf(pos, idx2, 0);
+  const real dy1 = coordOf(pos, idx1, 1) - coordOf(pos, idx2, 1);
+  const real dz1 = coordOf(pos, idx1, 2) - coordOf(pos, idx2, 2);
 
   // P3 - P2
-  const real dx2 = pos[3 * idx3 + 0] - pos[3 * idx2 + 0];
-  const real dy2 = pos[3 * idx3 + 1] - pos[3 * idx2 + 1];
-  const real dz2 = pos[3 * idx3 + 2] - pos[3 * idx2 + 2];
+  const real dx2 = coordOf(pos, idx3, 0) - coordOf(pos, idx2, 0);
+  const real dy2 = coordOf(pos, idx3, 1) - coordOf(pos, idx2, 1);
+  const real dz2 = coordOf(pos, idx3, 2) - coordOf(pos, idx2, 2);
 
   // P4 - P3
-  const real dx4 = pos[3 * idx4 + 0] - pos[3 * idx3 + 0];
-  const real dy4 = pos[3 * idx4 + 1] - pos[3 * idx3 + 1];
-  const real dz4 = pos[3 * idx4 + 2] - pos[3 * idx3 + 2];
+  const real dx4 = coordOf(pos, idx4, 0) - coordOf(pos, idx3, 0);
+  const real dy4 = coordOf(pos, idx4, 1) - coordOf(pos, idx3, 1);
+  const real dz4 = coordOf(pos, idx4, 2) - coordOf(pos, idx3, 2);
 
   real cross1x, cross1y, cross1z;
   crossProduct(dx1, dy1, dz1, dx2, dy2, dz2, cross1x, cross1y, cross1z);
@@ -155,46 +227,59 @@ static __device__ __forceinline__ void torsionGrad(const auto* pos,
   real dCos_dT1 = invNorm1 * (cross2y - cosPhi * cross1y);
   real dCos_dT2 = invNorm1 * (cross2z - cosPhi * cross1z);
 
-  atomicAdd(&grad[3 * idx1 + 0], sinTerm * (dCos_dT2 * dy2 - dCos_dT1 * dz2));
-  atomicAdd(&grad[3 * idx1 + 1], sinTerm * (dCos_dT0 * dz2 - dCos_dT2 * dx2));
-  atomicAdd(&grad[3 * idx1 + 2], sinTerm * (dCos_dT1 * dx2 - dCos_dT0 * dy2));
+  sink(idx1,
+       sinTerm * (dCos_dT2 * dy2 - dCos_dT1 * dz2),
+       sinTerm * (dCos_dT0 * dz2 - dCos_dT2 * dx2),
+       sinTerm * (dCos_dT1 * dx2 - dCos_dT0 * dy2));
 
   // idx3 and idx4 gradients - reuse variables dCos_dT0-2 for dCos_dT3-5
   const real dCos_dT3 = invNorm2 * (cross1x - cosPhi * cross2x);
   const real dCos_dT4 = invNorm2 * (cross1y - cosPhi * cross2y);
   const real dCos_dT5 = invNorm2 * (cross1z - cosPhi * cross2z);
 
-  atomicAdd(&grad[3 * idx2 + 0],
-            sinTerm * (dCos_dT1 * (dz2 - dz1) + dCos_dT2 * (dy1 - dy2) + dCos_dT4 * (-dz4) + dCos_dT5 * (dy4)));
-  atomicAdd(&grad[3 * idx2 + 1],
-            sinTerm * (dCos_dT0 * (dz1 - dz2) + dCos_dT2 * (dx2 - dx1) + dCos_dT3 * (dz4) + dCos_dT5 * (-dx4)));
-  atomicAdd(&grad[3 * idx2 + 2],
-            sinTerm * (dCos_dT0 * (dy2 - dy1) + dCos_dT1 * (dx1 - dx2) + dCos_dT3 * (-dy4) + dCos_dT4 * (dx4)));
+  sink(idx2,
+       sinTerm * (dCos_dT1 * (dz2 - dz1) + dCos_dT2 * (dy1 - dy2) + dCos_dT4 * (-dz4) + dCos_dT5 * (dy4)),
+       sinTerm * (dCos_dT0 * (dz1 - dz2) + dCos_dT2 * (dx2 - dx1) + dCos_dT3 * (dz4) + dCos_dT5 * (-dx4)),
+       sinTerm * (dCos_dT0 * (dy2 - dy1) + dCos_dT1 * (dx1 - dx2) + dCos_dT3 * (-dy4) + dCos_dT4 * (dx4)));
 
-  atomicAdd(&grad[3 * idx3 + 0],
-            sinTerm * (dCos_dT1 * (dz1) + dCos_dT2 * (-dy1) + dCos_dT4 * (dz4 + dz2) + dCos_dT5 * (-dy4 - dy2)));
-  atomicAdd(&grad[3 * idx3 + 1],
-            sinTerm * (dCos_dT0 * (-dz1) + dCos_dT2 * (dx1) + dCos_dT3 * (-dz4 - dz2) + dCos_dT5 * (dx4 + dx2)));
-  atomicAdd(&grad[3 * idx3 + 2],
-            sinTerm * (dCos_dT0 * (dy1) + dCos_dT1 * (-dx1) + dCos_dT3 * (dy4 + dy2) + dCos_dT4 * (-dx4 - dx2)));
+  sink(idx3,
+       sinTerm * (dCos_dT1 * (dz1) + dCos_dT2 * (-dy1) + dCos_dT4 * (dz4 + dz2) + dCos_dT5 * (-dy4 - dy2)),
+       sinTerm * (dCos_dT0 * (-dz1) + dCos_dT2 * (dx1) + dCos_dT3 * (-dz4 - dz2) + dCos_dT5 * (dx4 + dx2)),
+       sinTerm * (dCos_dT0 * (dy1) + dCos_dT1 * (-dx1) + dCos_dT3 * (dy4 + dy2) + dCos_dT4 * (-dx4 - dx2)));
 
-  atomicAdd(&grad[3 * idx4 + 0], sinTerm * (dCos_dT4 * (-dz2) - dCos_dT5 * (-dy2)));
-  atomicAdd(&grad[3 * idx4 + 1], sinTerm * (dCos_dT5 * (-dx2) - dCos_dT3 * (-dz2)));
-  atomicAdd(&grad[3 * idx4 + 2], sinTerm * (dCos_dT3 * (-dy2) - dCos_dT4 * (-dx2)));
+  sink(idx4,
+       sinTerm * (dCos_dT4 * (-dz2) - dCos_dT5 * (-dy2)),
+       sinTerm * (dCos_dT5 * (-dx2) - dCos_dT3 * (-dz2)),
+       sinTerm * (dCos_dT3 * (-dy2) - dCos_dT4 * (-dx2)));
 }
-static __device__ __forceinline__ void vDWGrad(const auto* pos,
-                                               const int   idx1,
-                                               const int   idx2,
-                                               const real  R_ij_star,
-                                               const real  wellDepth,
-                                               auto*       grad) {
+
+static __device__ __forceinline__ void torsionGrad(const auto& pos,
+                                                   const int   idx1,
+                                                   const int   idx2,
+                                                   const int   idx3,
+                                                   const int   idx4,
+                                                   const real  V1,
+                                                   const real  V2,
+                                                   const real  V3,
+                                                   auto*       grad) {
+  torsionGradTo(pos, idx1, idx2, idx3, idx4, V1, V2, V3, atomicGradSink(grad));
+}
+//! Gradient of one vdW pair with respect to idx1; the idx2 gradient is its negation.
+static __device__ __forceinline__ void vdwGradVec(const auto& pos,
+                                                  const int   idx1,
+                                                  const int   idx2,
+                                                  const real  R_ij_star,
+                                                  const real  wellDepth,
+                                                  real&       term1x,
+                                                  real&       term1y,
+                                                  real&       term1z) {
   constexpr real vdw1   = real{1.07};
   constexpr real vdw1m1 = vdw1 - real{1.0};
   constexpr real vdw2   = real{1.12};
   constexpr real vdw2m1 = vdw2 - real{1.0};
   constexpr real vdw2t7 = vdw2 * real{7.0};
 
-  const real invDistance = NVMOLKIT_RSQRT(distanceSquared(pos, idx1, idx2));
+  const real invDistance = NVMOLKIT_RSQRT(coordDistanceSquared(pos, idx1, idx2));
   const real distance    = 1.0f / invDistance;
 
   const real invRIJStar = 1.0f / R_ij_star;
@@ -211,16 +296,25 @@ static __device__ __forceinline__ void vDWGrad(const auto* pos,
   const real dE_dr     = wellDepth * invRIJStar * t7 *
                      (-vdw2t7 * q6 * invQ7Term * invQ7Term + ((-vdw2t7 * invQ7Term + real{14.0}) / (q + vdw1m1)));
 
-  real term1x, term1y, term1z;
   if (distance <= real{0.0}) {
     term1x = R_ij_star * 0.01f;
     term1y = R_ij_star * 0.01f;
     term1z = R_ij_star * 0.01f;
   } else {
-    term1x = dE_dr * (pos[3 * idx1 + 0] - pos[3 * idx2 + 0]) * invDistance;
-    term1y = dE_dr * (pos[3 * idx1 + 1] - pos[3 * idx2 + 1]) * invDistance;
-    term1z = dE_dr * (pos[3 * idx1 + 2] - pos[3 * idx2 + 2]) * invDistance;
+    term1x = dE_dr * (coordOf(pos, idx1, 0) - coordOf(pos, idx2, 0)) * invDistance;
+    term1y = dE_dr * (coordOf(pos, idx1, 1) - coordOf(pos, idx2, 1)) * invDistance;
+    term1z = dE_dr * (coordOf(pos, idx1, 2) - coordOf(pos, idx2, 2)) * invDistance;
   }
+}
+
+static __device__ __forceinline__ void vDWGrad(const auto& pos,
+                                               const int   idx1,
+                                               const int   idx2,
+                                               const real  R_ij_star,
+                                               const real  wellDepth,
+                                               auto*       grad) {
+  real term1x, term1y, term1z;
+  vdwGradVec(pos, idx1, idx2, R_ij_star, wellDepth, term1x, term1y, term1z);
 
   atomicAdd(&grad[3 * idx1 + 0], term1x);
   atomicAdd(&grad[3 * idx1 + 1], term1y);
@@ -234,12 +328,12 @@ static __device__ __forceinline__ void vDWGrad(const auto* pos,
 }  // namespace rdkit_ports
 
 static __device__ __forceinline__ real
-bondStretchEnergy(const auto* pos, const int idx1, const int idx2, const real r0, const real kb) {
+bondStretchEnergy(const auto& pos, const int idx1, const int idx2, const real r0, const real kb) {
   constexpr real prefactor           = real{143.9325} / real{2.0};
   constexpr real csFactorDist        = -real{2.0};
   constexpr real csFactorDistSquared = real{7.0} / real{12.0} * csFactorDist * csFactorDist;
 
-  const real distSquared = distanceSquared(pos, idx1, idx2);
+  const real distSquared = coordDistanceSquared(pos, idx1, idx2);
   const real distance    = NVMOLKIT_SQRT(static_cast<real>(distSquared));
 
   const real deltaR  = distance - r0;
@@ -247,19 +341,19 @@ bondStretchEnergy(const auto* pos, const int idx1, const int idx2, const real r0
   return prefactor * kb * deltaR2 * (real{1.0} + csFactorDist * deltaR + csFactorDistSquared * deltaR2);
 }
 
-static __device__ __forceinline__ void bondStretchGrad(const auto* pos,
-                                                       const int   idx1,
-                                                       const int   idx2,
-                                                       const real  r0,
-                                                       const real  kb,
-                                                       auto*       grad) {
+static __device__ __forceinline__ void bondStretchGradTo(const auto& pos,
+                                                         const int   idx1,
+                                                         const int   idx2,
+                                                         const real  r0,
+                                                         const real  kb,
+                                                         const auto& sink) {
   constexpr real c1                          = real{143.9325};
   constexpr real cs                          = -real{2.0};
   constexpr real csFactorTimesSecondConstant = cs * real{1.5};
   constexpr real lastFactor                  = real{2.0} * real{7.0} / real{12.0} * cs * cs;
 
   real       dx, dy, dz;
-  const real distanceSquared = distanceSquaredWithComponents(pos, idx1, idx2, dx, dy, dz);
+  const real distanceSquared = coordDistanceSquaredWithComponents(pos, idx1, idx2, dx, dy, dz);
   const real invDist         = NVMOLKIT_RSQRT(distanceSquared);
   const real distance        = real{1.0} / invDist;
   const real deltaR          = distance - r0;
@@ -278,16 +372,21 @@ static __device__ __forceinline__ void bondStretchGrad(const auto* pos,
     dE_dz = kb * real{0.01};
   }
 
-  atomicAdd(&grad[3 * idx1 + 0], dE_dx);
-  atomicAdd(&grad[3 * idx1 + 1], dE_dy);
-  atomicAdd(&grad[3 * idx1 + 2], dE_dz);
+  sink(idx1, dE_dx, dE_dy, dE_dz);
 
-  atomicAdd(&grad[3 * idx2 + 0], -dE_dx);
-  atomicAdd(&grad[3 * idx2 + 1], -dE_dy);
-  atomicAdd(&grad[3 * idx2 + 2], -dE_dz);
+  sink(idx2, -dE_dx, -dE_dy, -dE_dz);
 }
 
-static __device__ __forceinline__ real angleBendEnergy(const auto* pos,
+static __device__ __forceinline__ void bondStretchGrad(const auto& pos,
+                                                       const int   idx1,
+                                                       const int   idx2,
+                                                       const real  r0,
+                                                       const real  kb,
+                                                       auto*       grad) {
+  bondStretchGradTo(pos, idx1, idx2, r0, kb, atomicGradSink(grad));
+}
+
+static __device__ __forceinline__ real angleBendEnergy(const auto& pos,
                                                        const int   idx1,
                                                        const int   idx2,
                                                        const int   idx3,
@@ -298,8 +397,8 @@ static __device__ __forceinline__ real angleBendEnergy(const auto* pos,
   constexpr real cb        = -real{0.4} * degreeToRadian;
 
   real       dx1, dy1, dz1, dx2, dy2, dz2;
-  const real dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
-  const real dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
+  const real dist1Squared = coordDistanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
+  const real dist2Squared = coordDistanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
   const real dist1        = NVMOLKIT_RSQRT(dist1Squared);
   const real dist2        = NVMOLKIT_RSQRT(dist2Squared);
 
@@ -316,19 +415,19 @@ static __device__ __forceinline__ real angleBendEnergy(const auto* pos,
   return prefactor * ka * deltaTheta2 * (real{1.0} + cb * deltaTheta);
 }
 
-static __device__ __forceinline__ void angleBendGrad(const int   idx1,
-                                                     const int   idx2,
-                                                     const int   idx3,
-                                                     const real  theta0,
-                                                     const real  ka,
-                                                     const bool  isLinear,
-                                                     const auto* pos,
-                                                     auto*       grad) {
+static __device__ __forceinline__ void angleBendGradTo(const int   idx1,
+                                                       const int   idx2,
+                                                       const int   idx3,
+                                                       const real  theta0,
+                                                       const real  ka,
+                                                       const bool  isLinear,
+                                                       const auto& pos,
+                                                       const auto& sink) {
   constexpr real c1       = real{143.9325} * degreeToRadian;
   constexpr real cbFactor = -real{0.006981317} * real{1.5};
   real           dx1, dy1, dz1, dx2, dy2, dz2;
-  const real     dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
-  const real     dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
+  const real     dist1Squared = coordDistanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
+  const real     dist2Squared = coordDistanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
   const real     invDist1     = NVMOLKIT_RSQRT(dist1Squared);
   const real     invDist2     = NVMOLKIT_RSQRT(dist2Squared);
 
@@ -368,20 +467,28 @@ static __device__ __forceinline__ void angleBendGrad(const int   idx1,
 
   const real constantFactor = de_dDeltaTheta * invNegSinTheta;
 
-  atomicAdd(&grad[3 * idx1 + 0], constantFactor * intermediate1);
-  atomicAdd(&grad[3 * idx1 + 1], constantFactor * intermediate2);
-  atomicAdd(&grad[3 * idx1 + 2], constantFactor * intermediate3);
+  sink(idx1, constantFactor * intermediate1, constantFactor * intermediate2, constantFactor * intermediate3);
 
-  atomicAdd(&grad[3 * idx2 + 0], constantFactor * (-intermediate1 - intermediate4));
-  atomicAdd(&grad[3 * idx2 + 1], constantFactor * (-intermediate2 - intermediate5));
-  atomicAdd(&grad[3 * idx2 + 2], constantFactor * (-intermediate3 - intermediate6));
+  sink(idx2,
+       constantFactor * (-intermediate1 - intermediate4),
+       constantFactor * (-intermediate2 - intermediate5),
+       constantFactor * (-intermediate3 - intermediate6));
 
-  atomicAdd(&grad[3 * idx3 + 0], constantFactor * intermediate4);
-  atomicAdd(&grad[3 * idx3 + 1], constantFactor * intermediate5);
-  atomicAdd(&grad[3 * idx3 + 2], constantFactor * intermediate6);
+  sink(idx3, constantFactor * intermediate4, constantFactor * intermediate5, constantFactor * intermediate6);
 }
 
-static __device__ __forceinline__ real bendStretchEnergy(const auto* pos,
+static __device__ __forceinline__ void angleBendGrad(const int   idx1,
+                                                     const int   idx2,
+                                                     const int   idx3,
+                                                     const real  theta0,
+                                                     const real  ka,
+                                                     const bool  isLinear,
+                                                     const auto& pos,
+                                                     auto*       grad) {
+  angleBendGradTo(idx1, idx2, idx3, theta0, ka, isLinear, pos, atomicGradSink(grad));
+}
+
+static __device__ __forceinline__ real bendStretchEnergy(const auto& pos,
                                                          const int   idx1,
                                                          const int   idx2,
                                                          const int   idx3,
@@ -393,8 +500,8 @@ static __device__ __forceinline__ real bendStretchEnergy(const auto* pos,
   constexpr real prefactor = real{2.51210};
 
   real       dx1, dy1, dz1, dx2, dy2, dz2;
-  const real dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
-  const real dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
+  const real dist1Squared = coordDistanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
+  const real dist2Squared = coordDistanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
   const real dist1        = NVMOLKIT_SQRT(dist1Squared);
   const real dist2        = NVMOLKIT_SQRT(dist2Squared);
 
@@ -409,21 +516,21 @@ static __device__ __forceinline__ real bendStretchEnergy(const auto* pos,
   return prefactor * deltaTheta * (deltaR1 * forceConst1 + deltaR2 * forceConst2);
 }
 
-static __device__ __forceinline__ void bendStretchGrad(const auto* pos,
-                                                       const int   idx1,
-                                                       const int   idx2,
-                                                       const int   idx3,
-                                                       const real  theta0,
-                                                       const real  restLen1,
-                                                       const real  restLen2,
-                                                       const real  forceConst1,
-                                                       const real  forceConst2,
-                                                       auto*       grad) {
+static __device__ __forceinline__ void bendStretchGradTo(const auto& pos,
+                                                         const int   idx1,
+                                                         const int   idx2,
+                                                         const int   idx3,
+                                                         const real  theta0,
+                                                         const real  restLen1,
+                                                         const real  restLen2,
+                                                         const real  forceConst1,
+                                                         const real  forceConst2,
+                                                         const auto& sink) {
   constexpr real prefactor = real{143.9325} * static_cast<real>(M_PI) / real{180.0};
 
   real       dx1, dy1, dz1, dx2, dy2, dz2;
-  const real dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
-  const real dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
+  const real dist1Squared = coordDistanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
+  const real dist2Squared = coordDistanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
   const real dist1        = NVMOLKIT_SQRT(dist1Squared);
   const real dist2        = NVMOLKIT_SQRT(dist2Squared);
   const real invDist1     = real{1.0} / dist1;
@@ -472,27 +579,34 @@ static __device__ __forceinline__ void bendStretchGrad(const auto* pos,
   const real grady3 = prefactor * (deltaTheta * scaledDy2 * forceConst2 - intermediate5 * bondEnergyTimesInvSinTheta);
   const real gradz3 = prefactor * (deltaTheta * scaledDz2 * forceConst2 - intermediate6 * bondEnergyTimesInvSinTheta);
 
-  atomicAdd(&grad[3 * idx1 + 0], gradx1);
-  atomicAdd(&grad[3 * idx1 + 1], grady1);
-  atomicAdd(&grad[3 * idx1 + 2], gradz1);
+  sink(idx1, gradx1, grady1, gradz1);
 
-  atomicAdd(&grad[3 * idx3 + 0], gradx3);
-  atomicAdd(&grad[3 * idx3 + 1], grady3);
-  atomicAdd(&grad[3 * idx3 + 2], gradz3);
+  sink(idx3, gradx3, grady3, gradz3);
 
-  atomicAdd(&grad[3 * idx2 + 0], gradx2);
-  atomicAdd(&grad[3 * idx2 + 1], grady2);
-  atomicAdd(&grad[3 * idx2 + 2], gradz2);
+  sink(idx2, gradx2, grady2, gradz2);
+}
+
+static __device__ __forceinline__ void bendStretchGrad(const auto& pos,
+                                                       const int   idx1,
+                                                       const int   idx2,
+                                                       const int   idx3,
+                                                       const real  theta0,
+                                                       const real  restLen1,
+                                                       const real  restLen2,
+                                                       const real  forceConst1,
+                                                       const real  forceConst2,
+                                                       auto*       grad) {
+  bendStretchGradTo(pos, idx1, idx2, idx3, theta0, restLen1, restLen2, forceConst1, forceConst2, atomicGradSink(grad));
 }
 
 static __device__ __forceinline__ real
-oopBendEnergy(const auto* pos, const int idx1, const int idx2, const int idx3, const int idx4, const real koop) {
+oopBendEnergy(const auto& pos, const int idx1, const int idx2, const int idx3, const int idx4, const real koop) {
   constexpr real prefactor = real{0.5} * real{143.9325} * degreeToRadian * degreeToRadian;
 
   real       dxji, dyji, dzji, dxjk, dyjk, dzjk, dxjl, dyjl, dzjl;
-  const real distSquaredJI = distanceSquaredWithComponents(pos, idx1, idx2, dxji, dyji, dzji);
-  const real distSquaredJK = distanceSquaredWithComponents(pos, idx3, idx2, dxjk, dyjk, dzjk);
-  const real distSquaredJL = distanceSquaredWithComponents(pos, idx4, idx2, dxjl, dyjl, dzjl);
+  const real distSquaredJI = coordDistanceSquaredWithComponents(pos, idx1, idx2, dxji, dyji, dzji);
+  const real distSquaredJK = coordDistanceSquaredWithComponents(pos, idx3, idx2, dxjk, dyjk, dzjk);
+  const real distSquaredJL = coordDistanceSquaredWithComponents(pos, idx4, idx2, dxjl, dyjl, dzjl);
 
   const real invDistJI = NVMOLKIT_RSQRT(distSquaredJI);
   const real invDistJK = NVMOLKIT_RSQRT(distSquaredJK);
@@ -524,7 +638,7 @@ oopBendEnergy(const auto* pos, const int idx1, const int idx2, const int idx3, c
   return prefactor * koop * chi * chi;
 }
 
-static __device__ __forceinline__ real torsionEnergy(const auto* pos,
+static __device__ __forceinline__ real torsionEnergy(const auto& pos,
                                                      const int   idx1,
                                                      const int   idx2,
                                                      const int   idx3,
@@ -532,17 +646,17 @@ static __device__ __forceinline__ real torsionEnergy(const auto* pos,
                                                      const real  V1,
                                                      const real  V2,
                                                      const real  V3) {
-  const real dxIJ = pos[3 * idx1 + 0] - pos[3 * idx2 + 0];
-  const real dyIJ = pos[3 * idx1 + 1] - pos[3 * idx2 + 1];
-  const real dzIJ = pos[3 * idx1 + 2] - pos[3 * idx2 + 2];
+  const real dxIJ = coordOf(pos, idx1, 0) - coordOf(pos, idx2, 0);
+  const real dyIJ = coordOf(pos, idx1, 1) - coordOf(pos, idx2, 1);
+  const real dzIJ = coordOf(pos, idx1, 2) - coordOf(pos, idx2, 2);
 
-  const real dxKJ = pos[3 * idx3 + 0] - pos[3 * idx2 + 0];
-  const real dyKJ = pos[3 * idx3 + 1] - pos[3 * idx2 + 1];
-  const real dzKJ = pos[3 * idx3 + 2] - pos[3 * idx2 + 2];
+  const real dxKJ = coordOf(pos, idx3, 0) - coordOf(pos, idx2, 0);
+  const real dyKJ = coordOf(pos, idx3, 1) - coordOf(pos, idx2, 1);
+  const real dzKJ = coordOf(pos, idx3, 2) - coordOf(pos, idx2, 2);
 
-  const real dxLK = pos[3 * idx4 + 0] - pos[3 * idx3 + 0];
-  const real dyLK = pos[3 * idx4 + 1] - pos[3 * idx3 + 1];
-  const real dzLK = pos[3 * idx4 + 2] - pos[3 * idx3 + 2];
+  const real dxLK = coordOf(pos, idx4, 0) - coordOf(pos, idx3, 0);
+  const real dyLK = coordOf(pos, idx4, 1) - coordOf(pos, idx3, 1);
+  const real dzLK = coordOf(pos, idx4, 2) - coordOf(pos, idx3, 2);
 
   const real crossIJKJx = dyIJ * dzKJ - dzIJ * dyKJ;
   const real crossIJKJy = dzIJ * dxKJ - dxIJ * dzKJ;
@@ -566,13 +680,13 @@ static __device__ __forceinline__ real torsionEnergy(const auto* pos,
 }
 
 static __device__ __forceinline__ real
-vdwEnergy(const auto* pos, const int idx1, const int idx2, const real R_ij_star, const real wellDepth) {
+vdwEnergy(const auto& pos, const int idx1, const int idx2, const real R_ij_star, const real wellDepth) {
   real R_ij_star2 = R_ij_star * R_ij_star;
   real R_ij_star7 = R_ij_star2 * R_ij_star2 * R_ij_star2 * R_ij_star;
 
   const real epsilon = wellDepth;
 
-  const real distSquared = distanceSquared(pos, idx1, idx2);
+  const real distSquared = coordDistanceSquared(pos, idx1, idx2);
   const real dist        = NVMOLKIT_SQRT(distSquared);
   const real dist7       = distSquared * distSquared * distSquared * dist;
 
@@ -585,7 +699,7 @@ vdwEnergy(const auto* pos, const int idx1, const int idx2, const real R_ij_star,
   return epsilon * term1_7th * (term2Fraction - real{2.0});
 }
 
-static __device__ __forceinline__ real eleEnergy(const auto* pos,
+static __device__ __forceinline__ real eleEnergy(const auto& pos,
                                                  const int   idx1,
                                                  const int   idx2,
                                                  const real  chargeTerm,
@@ -593,7 +707,7 @@ static __device__ __forceinline__ real eleEnergy(const auto* pos,
                                                  const bool  is1_4) {
   constexpr real prefactor         = real{332.0716};
   constexpr real bufferingConstant = real{0.05};
-  const real     distSquared       = distanceSquared(pos, idx1, idx2);
+  const real     distSquared       = coordDistanceSquared(pos, idx1, idx2);
   real           distTerm          = NVMOLKIT_SQRT(distSquared) + bufferingConstant;
   if (dielModel == 2) {
     distTerm *= distTerm;
@@ -605,17 +719,20 @@ static __device__ __forceinline__ real eleEnergy(const auto* pos,
   return energy;
 }
 
-static __device__ __forceinline__ void eleGrad(const auto* pos,
-                                               const int   idx1,
-                                               const int   idx2,
-                                               const real  chargeTerm,
-                                               const int   dielModel,
-                                               const bool  is1_4,
-                                               auto*       grad) {
+//! Gradient of one electrostatic pair with respect to idx1; the idx2 gradient is its negation.
+static __device__ __forceinline__ void eleGradVec(const auto& pos,
+                                                  const int   idx1,
+                                                  const int   idx2,
+                                                  const real  chargeTerm,
+                                                  const int   dielModel,
+                                                  const bool  is1_4,
+                                                  real&       dE_dx,
+                                                  real&       dE_dy,
+                                                  real&       dE_dz) {
   constexpr real prefactor         = real{332.0716};
   constexpr real bufferingConstant = real{0.05};
 
-  const real distSquared = distanceSquared(pos, idx1, idx2);
+  const real distSquared = coordDistanceSquared(pos, idx1, idx2);
   const real invDistance = NVMOLKIT_RSQRT(distSquared);
   const real distance    = real{1.0} / invDistance;
   const real rBuf        = distance + bufferingConstant;
@@ -633,9 +750,20 @@ static __device__ __forceinline__ void eleGrad(const auto* pos,
     dE_dr *= real{0.75};
   }
 
-  const real dE_dx = dE_dr * (pos[3 * idx1 + 0] - pos[3 * idx2 + 0]) * invDistance;
-  const real dE_dy = dE_dr * (pos[3 * idx1 + 1] - pos[3 * idx2 + 1]) * invDistance;
-  const real dE_dz = dE_dr * (pos[3 * idx1 + 2] - pos[3 * idx2 + 2]) * invDistance;
+  dE_dx = dE_dr * (coordOf(pos, idx1, 0) - coordOf(pos, idx2, 0)) * invDistance;
+  dE_dy = dE_dr * (coordOf(pos, idx1, 1) - coordOf(pos, idx2, 1)) * invDistance;
+  dE_dz = dE_dr * (coordOf(pos, idx1, 2) - coordOf(pos, idx2, 2)) * invDistance;
+}
+
+static __device__ __forceinline__ void eleGrad(const auto& pos,
+                                               const int   idx1,
+                                               const int   idx2,
+                                               const real  chargeTerm,
+                                               const int   dielModel,
+                                               const bool  is1_4,
+                                               auto*       grad) {
+  real dE_dx, dE_dy, dE_dz;
+  eleGradVec(pos, idx1, idx2, chargeTerm, dielModel, is1_4, dE_dx, dE_dy, dE_dz);
 
   atomicAdd(&grad[3 * idx1 + 0], dE_dx);
   atomicAdd(&grad[3 * idx1 + 1], dE_dy);
@@ -656,13 +784,13 @@ static __device__ __forceinline__ real normalizeAngleDeg(real angleDeg) {
   return angleDeg;
 }
 
-static __device__ __forceinline__ real distanceConstraintEnergy(const auto* pos,
+static __device__ __forceinline__ real distanceConstraintEnergy(const auto& pos,
                                                                 const int   idx1,
                                                                 const int   idx2,
                                                                 const real  minLen,
                                                                 const real  maxLen,
                                                                 const real  forceConstant) {
-  const real distance2Val = distanceSquared(pos, idx1, idx2);
+  const real distance2Val = coordDistanceSquared(pos, idx1, idx2);
   real       difference   = real{0.0};
   if (distance2Val < minLen * minLen) {
     difference = minLen - NVMOLKIT_SQRT(distance2Val);
@@ -674,14 +802,14 @@ static __device__ __forceinline__ real distanceConstraintEnergy(const auto* pos,
   return real{0.5} * forceConstant * difference * difference;
 }
 
-static __device__ __forceinline__ void distanceConstraintGrad(const auto* pos,
-                                                              const int   idx1,
-                                                              const int   idx2,
-                                                              const real  minLen,
-                                                              const real  maxLen,
-                                                              const real  forceConstant,
-                                                              auto*       grad) {
-  const real distance2Val = distanceSquared(pos, idx1, idx2);
+static __device__ __forceinline__ void distanceConstraintGradTo(const auto& pos,
+                                                                const int   idx1,
+                                                                const int   idx2,
+                                                                const real  minLen,
+                                                                const real  maxLen,
+                                                                const real  forceConstant,
+                                                                const auto& sink) {
+  const real distance2Val = coordDistanceSquared(pos, idx1, idx2);
   real       preFactor    = real{0.0};
   real       distance     = real{0.0};
   if (distance2Val < minLen * minLen) {
@@ -695,29 +823,58 @@ static __device__ __forceinline__ void distanceConstraintGrad(const auto* pos,
   }
   preFactor *= forceConstant;
   preFactor /= NVMOLKIT_FMAX(real{1.0e-8}, distance);
-  for (int i = 0; i < 3; ++i) {
-    const real dGrad = preFactor * (pos[3 * idx1 + i] - pos[3 * idx2 + i]);
-    atomicAdd(&grad[3 * idx1 + i], dGrad);
-    atomicAdd(&grad[3 * idx2 + i], -dGrad);
-  }
+  const real dGradX = preFactor * (coordOf(pos, idx1, 0) - coordOf(pos, idx2, 0));
+  const real dGradY = preFactor * (coordOf(pos, idx1, 1) - coordOf(pos, idx2, 1));
+  const real dGradZ = preFactor * (coordOf(pos, idx1, 2) - coordOf(pos, idx2, 2));
+  sink(idx1, dGradX, dGradY, dGradZ);
+  sink(idx2, -dGradX, -dGradY, -dGradZ);
 }
 
-static __device__ __forceinline__ real positionConstraintEnergy(const auto* pos,
+static __device__ __forceinline__ void distanceConstraintGrad(const auto& pos,
+                                                              const int   idx1,
+                                                              const int   idx2,
+                                                              const real  minLen,
+                                                              const real  maxLen,
+                                                              const real  forceConstant,
+                                                              auto*       grad) {
+  distanceConstraintGradTo(pos, idx1, idx2, minLen, maxLen, forceConstant, atomicGradSink(grad));
+}
+
+static __device__ __forceinline__ real positionConstraintEnergy(const auto& pos,
                                                                 const int   idx,
                                                                 const real  refX,
                                                                 const real  refY,
                                                                 const real  refZ,
                                                                 const real  maxDispl,
                                                                 const real  forceConstant) {
-  const real dx       = pos[3 * idx + 0] - refX;
-  const real dy       = pos[3 * idx + 1] - refY;
-  const real dz       = pos[3 * idx + 2] - refZ;
+  const real dx       = coordOf(pos, idx, 0) - refX;
+  const real dy       = coordOf(pos, idx, 1) - refY;
+  const real dz       = coordOf(pos, idx, 2) - refZ;
   const real dist     = NVMOLKIT_SQRT(dx * dx + dy * dy + dz * dz);
   const real distTerm = NVMOLKIT_FMAX(dist - maxDispl, real{0.0});
   return real{0.5} * forceConstant * distTerm * distTerm;
 }
 
-static __device__ __forceinline__ void positionConstraintGrad(const auto* pos,
+static __device__ __forceinline__ void positionConstraintGradTo(const auto& pos,
+                                                                const int   idx,
+                                                                const real  refX,
+                                                                const real  refY,
+                                                                const real  refZ,
+                                                                const real  maxDispl,
+                                                                const real  forceConstant,
+                                                                const auto& sink) {
+  const real dx   = coordOf(pos, idx, 0) - refX;
+  const real dy   = coordOf(pos, idx, 1) - refY;
+  const real dz   = coordOf(pos, idx, 2) - refZ;
+  const real dist = NVMOLKIT_SQRT(dx * dx + dy * dy + dz * dz);
+  if (dist <= maxDispl) {
+    return;
+  }
+  const real preFactor = (dist - maxDispl) * forceConstant / NVMOLKIT_FMAX(dist, real{1.0e-8});
+  sink(idx, preFactor * dx, preFactor * dy, preFactor * dz);
+}
+
+static __device__ __forceinline__ void positionConstraintGrad(const auto& pos,
                                                               const int   idx,
                                                               const real  refX,
                                                               const real  refY,
@@ -725,17 +882,7 @@ static __device__ __forceinline__ void positionConstraintGrad(const auto* pos,
                                                               const real  maxDispl,
                                                               const real  forceConstant,
                                                               auto*       grad) {
-  const real dx   = pos[3 * idx + 0] - refX;
-  const real dy   = pos[3 * idx + 1] - refY;
-  const real dz   = pos[3 * idx + 2] - refZ;
-  const real dist = NVMOLKIT_SQRT(dx * dx + dy * dy + dz * dz);
-  if (dist <= maxDispl) {
-    return;
-  }
-  const real preFactor = (dist - maxDispl) * forceConstant / NVMOLKIT_FMAX(dist, real{1.0e-8});
-  atomicAdd(&grad[3 * idx + 0], preFactor * dx);
-  atomicAdd(&grad[3 * idx + 1], preFactor * dy);
-  atomicAdd(&grad[3 * idx + 2], preFactor * dz);
+  positionConstraintGradTo(pos, idx, refX, refY, refZ, maxDispl, forceConstant, atomicGradSink(grad));
 }
 
 static __device__ __forceinline__ real computeAngleConstraintTerm(const real angle,
@@ -750,22 +897,22 @@ static __device__ __forceinline__ real computeAngleConstraintTerm(const real ang
   return angleTerm;
 }
 
-static __device__ __forceinline__ real angleConstraintEnergy(const auto* pos,
+static __device__ __forceinline__ real angleConstraintEnergy(const auto& pos,
                                                              const int   idx1,
                                                              const int   idx2,
                                                              const int   idx3,
                                                              const real  minAngleDeg,
                                                              const real  maxAngleDeg,
                                                              const real  forceConstant) {
-  const real p1x = pos[3 * idx1 + 0];
-  const real p1y = pos[3 * idx1 + 1];
-  const real p1z = pos[3 * idx1 + 2];
-  const real p2x = pos[3 * idx2 + 0];
-  const real p2y = pos[3 * idx2 + 1];
-  const real p2z = pos[3 * idx2 + 2];
-  const real p3x = pos[3 * idx3 + 0];
-  const real p3y = pos[3 * idx3 + 1];
-  const real p3z = pos[3 * idx3 + 2];
+  const real p1x = coordOf(pos, idx1, 0);
+  const real p1y = coordOf(pos, idx1, 1);
+  const real p1z = coordOf(pos, idx1, 2);
+  const real p2x = coordOf(pos, idx2, 0);
+  const real p2y = coordOf(pos, idx2, 1);
+  const real p2z = coordOf(pos, idx2, 2);
+  const real p3x = coordOf(pos, idx3, 0);
+  const real p3y = coordOf(pos, idx3, 1);
+  const real p3z = coordOf(pos, idx3, 2);
 
   const real r1x        = p1x - p2x;
   const real r1y        = p1y - p2y;
@@ -782,23 +929,23 @@ static __device__ __forceinline__ real angleConstraintEnergy(const auto* pos,
   return forceConstant * angleTerm * angleTerm;
 }
 
-static __device__ __forceinline__ void angleConstraintGrad(const auto* pos,
-                                                           const int   idx1,
-                                                           const int   idx2,
-                                                           const int   idx3,
-                                                           const real  minAngleDeg,
-                                                           const real  maxAngleDeg,
-                                                           const real  forceConstant,
-                                                           auto*       grad) {
-  const real p1x = pos[3 * idx1 + 0];
-  const real p1y = pos[3 * idx1 + 1];
-  const real p1z = pos[3 * idx1 + 2];
-  const real p2x = pos[3 * idx2 + 0];
-  const real p2y = pos[3 * idx2 + 1];
-  const real p2z = pos[3 * idx2 + 2];
-  const real p3x = pos[3 * idx3 + 0];
-  const real p3y = pos[3 * idx3 + 1];
-  const real p3z = pos[3 * idx3 + 2];
+static __device__ __forceinline__ void angleConstraintGradTo(const auto& pos,
+                                                             const int   idx1,
+                                                             const int   idx2,
+                                                             const int   idx3,
+                                                             const real  minAngleDeg,
+                                                             const real  maxAngleDeg,
+                                                             const real  forceConstant,
+                                                             const auto& sink) {
+  const real p1x = coordOf(pos, idx1, 0);
+  const real p1y = coordOf(pos, idx1, 1);
+  const real p1z = coordOf(pos, idx1, 2);
+  const real p2x = coordOf(pos, idx2, 0);
+  const real p2y = coordOf(pos, idx2, 1);
+  const real p2z = coordOf(pos, idx2, 2);
+  const real p3x = coordOf(pos, idx3, 0);
+  const real p3y = coordOf(pos, idx3, 1);
+  const real p3z = coordOf(pos, idx3, 2);
 
   const real r1x        = p1x - p2x;
   const real r1y        = p1y - p2y;
@@ -844,15 +991,20 @@ static __device__ __forceinline__ void angleConstraintGrad(const auto* pos,
   const real dedp1y = -dedp0y - dedp2y;
   const real dedp1z = -dedp0z - dedp2z;
 
-  atomicAdd(&grad[3 * idx1 + 0], dedp0x);
-  atomicAdd(&grad[3 * idx1 + 1], dedp0y);
-  atomicAdd(&grad[3 * idx1 + 2], dedp0z);
-  atomicAdd(&grad[3 * idx2 + 0], dedp1x);
-  atomicAdd(&grad[3 * idx2 + 1], dedp1y);
-  atomicAdd(&grad[3 * idx2 + 2], dedp1z);
-  atomicAdd(&grad[3 * idx3 + 0], dedp2x);
-  atomicAdd(&grad[3 * idx3 + 1], dedp2y);
-  atomicAdd(&grad[3 * idx3 + 2], dedp2z);
+  sink(idx1, dedp0x, dedp0y, dedp0z);
+  sink(idx2, dedp1x, dedp1y, dedp1z);
+  sink(idx3, dedp2x, dedp2y, dedp2z);
+}
+
+static __device__ __forceinline__ void angleConstraintGrad(const auto& pos,
+                                                           const int   idx1,
+                                                           const int   idx2,
+                                                           const int   idx3,
+                                                           const real  minAngleDeg,
+                                                           const real  maxAngleDeg,
+                                                           const real  forceConstant,
+                                                           auto*       grad) {
+  angleConstraintGradTo(pos, idx1, idx2, idx3, minAngleDeg, maxAngleDeg, forceConstant, atomicGradSink(grad));
 }
 
 static __device__ __forceinline__ real computeDihedralConstraintTerm(real       dihedral,
@@ -873,7 +1025,7 @@ static __device__ __forceinline__ real computeDihedralConstraintTerm(real       
   return normalizeAngleDeg(dihedral - dihedralTarget);
 }
 
-static __device__ __forceinline__ real computeSignedDihedral(const auto* pos,
+static __device__ __forceinline__ real computeSignedDihedral(const auto& pos,
                                                              const int   idx1,
                                                              const int   idx2,
                                                              const int   idx3,
@@ -894,18 +1046,18 @@ static __device__ __forceinline__ real computeSignedDihedral(const auto* pos,
   if (d == nullptr) {
     d = localD;
   }
-  r[0][0] = pos[3 * idx1 + 0] - pos[3 * idx2 + 0];
-  r[0][1] = pos[3 * idx1 + 1] - pos[3 * idx2 + 1];
-  r[0][2] = pos[3 * idx1 + 2] - pos[3 * idx2 + 2];
-  r[1][0] = pos[3 * idx3 + 0] - pos[3 * idx2 + 0];
-  r[1][1] = pos[3 * idx3 + 1] - pos[3 * idx2 + 1];
-  r[1][2] = pos[3 * idx3 + 2] - pos[3 * idx2 + 2];
+  r[0][0] = coordOf(pos, idx1, 0) - coordOf(pos, idx2, 0);
+  r[0][1] = coordOf(pos, idx1, 1) - coordOf(pos, idx2, 1);
+  r[0][2] = coordOf(pos, idx1, 2) - coordOf(pos, idx2, 2);
+  r[1][0] = coordOf(pos, idx3, 0) - coordOf(pos, idx2, 0);
+  r[1][1] = coordOf(pos, idx3, 1) - coordOf(pos, idx2, 1);
+  r[1][2] = coordOf(pos, idx3, 2) - coordOf(pos, idx2, 2);
   r[2][0] = -r[1][0];
   r[2][1] = -r[1][1];
   r[2][2] = -r[1][2];
-  r[3][0] = pos[3 * idx4 + 0] - pos[3 * idx3 + 0];
-  r[3][1] = pos[3 * idx4 + 1] - pos[3 * idx3 + 1];
-  r[3][2] = pos[3 * idx4 + 2] - pos[3 * idx3 + 2];
+  r[3][0] = coordOf(pos, idx4, 0) - coordOf(pos, idx3, 0);
+  r[3][1] = coordOf(pos, idx4, 1) - coordOf(pos, idx3, 1);
+  r[3][2] = coordOf(pos, idx4, 2) - coordOf(pos, idx3, 2);
 
   crossProduct(r[0][0], r[0][1], r[0][2], r[1][0], r[1][1], r[1][2], t[0][0], t[0][1], t[0][2]);
   d[0] = NVMOLKIT_FMAX(NVMOLKIT_SQRT(t[0][0] * t[0][0] + t[0][1] * t[0][1] + t[0][2] * t[0][2]), real{1.0e-5});
@@ -927,7 +1079,7 @@ static __device__ __forceinline__ real computeSignedDihedral(const auto* pos,
   return -NVMOLKIT_ATAN2((mX * t[1][0] + mY * t[1][1] + mZ * t[1][2]) / mLength, cosPhi);
 }
 
-static __device__ __forceinline__ real torsionConstraintEnergy(const auto* pos,
+static __device__ __forceinline__ real torsionConstraintEnergy(const auto& pos,
                                                                const int   idx1,
                                                                const int   idx2,
                                                                const int   idx3,
@@ -940,15 +1092,15 @@ static __device__ __forceinline__ real torsionConstraintEnergy(const auto* pos,
   return forceConstant * dihedralTerm * dihedralTerm;
 }
 
-static __device__ __forceinline__ void torsionConstraintGrad(const auto* pos,
-                                                             const int   idx1,
-                                                             const int   idx2,
-                                                             const int   idx3,
-                                                             const int   idx4,
-                                                             const real  minDihedralDeg,
-                                                             const real  maxDihedralDeg,
-                                                             const real  forceConstant,
-                                                             auto*       grad) {
+static __device__ __forceinline__ void torsionConstraintGradTo(const auto& pos,
+                                                               const int   idx1,
+                                                               const int   idx2,
+                                                               const int   idx3,
+                                                               const int   idx4,
+                                                               const real  minDihedralDeg,
+                                                               const real  maxDihedralDeg,
+                                                               const real  forceConstant,
+                                                               const auto& sink) {
   real       r[4][3];
   real       t[2][3];
   real       d[2];
@@ -959,7 +1111,7 @@ static __device__ __forceinline__ void torsionConstraintGrad(const auto* pos,
   }
   const real dE_dPhi = real{2.0} * radianToDegree * forceConstant * dihedralTerm;
 
-  const real d23       = NVMOLKIT_SQRT(distanceSquared(pos, idx2, idx3));
+  const real d23       = NVMOLKIT_SQRT(coordDistanceSquared(pos, idx2, idx3));
   const real prefactor = dE_dPhi / NVMOLKIT_FMAX(d23, real{1.0e-8});
 
   real tt0[3], tt1[3];
@@ -978,12 +1130,12 @@ static __device__ __forceinline__ void torsionConstraintGrad(const auto* pos,
                          tmp1[1] / tt1LenSq * prefactor,
                          tmp1[2] / tt1LenSq * prefactor};
 
-  const real r31[3] = {static_cast<real>(pos[3 * idx3 + 0]) - static_cast<real>(pos[3 * idx1 + 0]),
-                       static_cast<real>(pos[3 * idx3 + 1]) - static_cast<real>(pos[3 * idx1 + 1]),
-                       static_cast<real>(pos[3 * idx3 + 2]) - static_cast<real>(pos[3 * idx1 + 2])};
-  const real r42[3] = {static_cast<real>(pos[3 * idx4 + 0]) - static_cast<real>(pos[3 * idx2 + 0]),
-                       static_cast<real>(pos[3 * idx4 + 1]) - static_cast<real>(pos[3 * idx2 + 1]),
-                       static_cast<real>(pos[3 * idx4 + 2]) - static_cast<real>(pos[3 * idx2 + 2])};
+  const real r31[3] = {static_cast<real>(coordOf(pos, idx3, 0)) - static_cast<real>(coordOf(pos, idx1, 0)),
+                       static_cast<real>(coordOf(pos, idx3, 1)) - static_cast<real>(coordOf(pos, idx1, 1)),
+                       static_cast<real>(coordOf(pos, idx3, 2)) - static_cast<real>(coordOf(pos, idx1, 2))};
+  const real r42[3] = {static_cast<real>(coordOf(pos, idx4, 0)) - static_cast<real>(coordOf(pos, idx2, 0)),
+                       static_cast<real>(coordOf(pos, idx4, 1)) - static_cast<real>(coordOf(pos, idx2, 1)),
+                       static_cast<real>(coordOf(pos, idx4, 2)) - static_cast<real>(coordOf(pos, idx2, 2))};
 
   real dedp0[3], dedp1[3], dedp2[3], dedp3[3];
   crossProduct(r[2][0], r[2][1], r[2][2], dedt0[0], dedt0[1], dedt0[2], dedp0[0], dedp0[1], dedp0[2]);
@@ -1004,18 +1156,30 @@ static __device__ __forceinline__ void torsionConstraintGrad(const auto* pos,
 
   crossProduct(r[2][0], r[2][1], r[2][2], dedt1[0], dedt1[1], dedt1[2], dedp3[0], dedp3[1], dedp3[2]);
 
-  atomicAdd(&grad[3 * idx1 + 0], dedp0[0]);
-  atomicAdd(&grad[3 * idx1 + 1], dedp0[1]);
-  atomicAdd(&grad[3 * idx1 + 2], dedp0[2]);
-  atomicAdd(&grad[3 * idx2 + 0], dedp1[0]);
-  atomicAdd(&grad[3 * idx2 + 1], dedp1[1]);
-  atomicAdd(&grad[3 * idx2 + 2], dedp1[2]);
-  atomicAdd(&grad[3 * idx3 + 0], dedp2[0]);
-  atomicAdd(&grad[3 * idx3 + 1], dedp2[1]);
-  atomicAdd(&grad[3 * idx3 + 2], dedp2[2]);
-  atomicAdd(&grad[3 * idx4 + 0], dedp3[0]);
-  atomicAdd(&grad[3 * idx4 + 1], dedp3[1]);
-  atomicAdd(&grad[3 * idx4 + 2], dedp3[2]);
+  sink(idx1, dedp0[0], dedp0[1], dedp0[2]);
+  sink(idx2, dedp1[0], dedp1[1], dedp1[2]);
+  sink(idx3, dedp2[0], dedp2[1], dedp2[2]);
+  sink(idx4, dedp3[0], dedp3[1], dedp3[2]);
+}
+
+static __device__ __forceinline__ void torsionConstraintGrad(const auto& pos,
+                                                             const int   idx1,
+                                                             const int   idx2,
+                                                             const int   idx3,
+                                                             const int   idx4,
+                                                             const real  minDihedralDeg,
+                                                             const real  maxDihedralDeg,
+                                                             const real  forceConstant,
+                                                             auto*       grad) {
+  torsionConstraintGradTo(pos,
+                          idx1,
+                          idx2,
+                          idx3,
+                          idx4,
+                          minDihedralDeg,
+                          maxDihedralDeg,
+                          forceConstant,
+                          atomicGradSink(grad));
 }
 
 template <int stride, bool HasConstraints, typename Terms>
@@ -1341,6 +1505,648 @@ static __device__ __inline__ void molGrad(const Terms&                   terms,
                             maxDihedralDegs[i],
                             tcForceConstants[i],
                             grad);
+    }
+  }
+}
+
+// -----------------------------------------------------------------------------------------------------------------
+// Block-cooperative evaluation used by the block-per-molecule energy and gradient kernels.
+//
+// Each term range is cut into warp-sized chunks that are dealt round-robin to the block's warps. Energy keeps lanes
+// contiguous for coalesced term loads; the gradient path may transpose bonded chunks to reduce atomic contention.
+// -----------------------------------------------------------------------------------------------------------------
+
+constexpr int      kWarpSize     = 32;
+constexpr unsigned kFullWarpMask = 0xffffffffu;
+
+//! Calls body(offset, valid) for this warp's chunks of one term type holding count terms. Chunks are numbered
+//! continuously across term types (chunkBase counts the chunks of the preceding types, and is advanced past this type)
+//! and dealt round-robin to the warps of the block. With Transposed, lane l of chunk c takes term c + l * numChunks
+//! instead of 32 * c + l, which spreads runs of consecutive terms sharing an atom over different chunks and so lowers
+//! atomic contention. All lanes of a warp run the same iterations.
+template <int NumWarps, bool Transposed, typename Body>
+static __device__ __forceinline__ void forEachTermChunk(int& chunkBase, const int count, Body&& body) {
+  const int numChunks = (count + kWarpSize - 1) / kWarpSize;
+  const int warp      = threadIdx.x / kWarpSize;
+  const int lane      = threadIdx.x % kWarpSize;
+#pragma unroll 1
+  for (int c = (warp - chunkBase % NumWarps + NumWarps) % NumWarps; c < numChunks; c += NumWarps) {
+    const int offset = Transposed ? c + lane * numChunks : c * kWarpSize + lane;
+    body(offset, offset < count);
+  }
+  chunkBase += numChunks;
+}
+
+//! forEachTermChunk with contiguous lanes, split into load(offset) -> data and compute(data, valid) so the next
+//! chunk's term data is fetched while the current chunk is evaluated. Offsets passed to load are clamped into range.
+template <int NumWarps, typename Load, typename Compute>
+static __device__ __forceinline__ void forEachTermChunkPrefetched(int&      chunkBase,
+                                                                  const int count,
+                                                                  Load&&    load,
+                                                                  Compute&& compute) {
+  const int numChunks = (count + kWarpSize - 1) / kWarpSize;
+  const int warp      = threadIdx.x / kWarpSize;
+  const int lane      = threadIdx.x % kWarpSize;
+  int       c         = (warp - chunkBase % NumWarps + NumWarps) % NumWarps;
+  chunkBase += numChunks;
+  if (c >= numChunks) {
+    return;
+  }
+  auto data = load(min(c * kWarpSize + lane, count - 1));
+#pragma unroll 1
+  while (true) {
+    const int  next     = c + NumWarps;
+    const bool hasNext  = next < numChunks;
+    auto       nextData = data;
+    if (hasNext) {
+      nextData = load(min(next * kWarpSize + lane, count - 1));
+    }
+    compute(data, c * kWarpSize + lane < count);
+    if (!hasNext) {
+      break;
+    }
+    data = nextData;
+    c    = next;
+  }
+}
+
+//! forEachTermChunkPrefetched unrolled into two halves that alternate the roles of the two data buffers, so the
+//! prefetched data is never copied between registers. Used by the energy pair loops; the gradient pair loops keep the
+//! rolled form, whose smaller body schedules better around their shuffles and atomics.
+template <int NumWarps, typename Load, typename Compute>
+static __device__ __forceinline__ void forEachTermChunkPrefetchedPingPong(int&      chunkBase,
+                                                                          const int count,
+                                                                          Load&&    load,
+                                                                          Compute&& compute) {
+  const int numChunks = (count + kWarpSize - 1) / kWarpSize;
+  const int warp      = threadIdx.x / kWarpSize;
+  const int lane      = threadIdx.x % kWarpSize;
+  int       c         = (warp - chunkBase % NumWarps + NumWarps) % NumWarps;
+  chunkBase += numChunks;
+  if (c >= numChunks) {
+    return;
+  }
+  auto dataA = load(min(c * kWarpSize + lane, count - 1));
+  auto dataB = dataA;
+#pragma unroll 1
+  while (true) {
+    // Offsets are clamped into the range, so the loads past the last chunk are safe and need no branch.
+    int next = c + NumWarps;
+    dataB    = load(min(next * kWarpSize + lane, count - 1));
+    compute(dataA, c * kWarpSize + lane < count);
+    if (next >= numChunks) {
+      break;
+    }
+    c     = next;
+    next  = c + NumWarps;
+    dataA = load(min(next * kWarpSize + lane, count - 1));
+    compute(dataB, c * kWarpSize + lane < count);
+    if (next >= numChunks) {
+      break;
+    }
+    c = next;
+  }
+}
+
+//! Inclusive sums of (x, y, z) over runs of consecutive lanes holding the same key. Must be called by all 32 lanes.
+//! Returns true on the last lane of each run, which then holds the total of its run.
+template <bool EarlyExit>
+static __device__ __forceinline__ bool warpSegmentedSum3(const int key, real& x, real& y, real& z) {
+  const int      lane     = threadIdx.x % kWarpSize;
+  const int      prevKey  = __shfl_up_sync(kFullWarpMask, key, 1);
+  const unsigned heads    = __ballot_sync(kFullWarpMask, lane == 0 || prevKey != key);
+  // First lane of this lane's run: the highest run head at or below this lane.
+  const int      runStart = kWarpSize - 1 - __clz(heads & (kFullWarpMask >> (kWarpSize - 1 - lane)));
+#pragma unroll
+  for (int delta = 1; delta < kWarpSize; delta <<= 1) {
+    if constexpr (EarlyExit) {
+      // Stop once no lane's run reaches back delta lanes.
+      if (!__any_sync(kFullWarpMask, lane - delta >= runStart)) {
+        break;
+      }
+    }
+    const real ox = __shfl_up_sync(kFullWarpMask, x, delta);
+    const real oy = __shfl_up_sync(kFullWarpMask, y, delta);
+    const real oz = __shfl_up_sync(kFullWarpMask, z, delta);
+    // Adds the shuffled partial sums only within the run, through a 0/1 weight instead of selects on every word.
+    const real w  = lane - delta >= runStart ? real{1.0} : real{0.0};
+    x             = fma(w, ox, x);
+    y             = fma(w, oy, y);
+    z             = fma(w, oz, z);
+  }
+  return lane == kWarpSize - 1 || ((heads >> lane) & 2u) != 0;
+}
+
+//! Adds a pair gradient (+g on idx1, -g on idx2) for pair terms whose idx1 is sorted within the term list. Lanes
+//! sharing idx1 are combined first so that only one lane per atom updates idx1. Must be called by all 32 lanes.
+template <bool EarlyExit>
+static __device__ __forceinline__ void accumulateSortedKeyGrad(const bool  valid,
+                                                               const int   idx1,
+                                                               real        gx,
+                                                               real        gy,
+                                                               real        gz,
+                                                               const auto& sink) {
+  const int      lane       = threadIdx.x % kWarpSize;
+  const int      key        = valid ? idx1 : -1 - lane;
+  const int      prevKey    = __shfl_up_sync(kFullWarpMask, key, 1);
+  const unsigned heads      = __ballot_sync(kFullWarpMask, lane == 0 || prevKey != key);
+  const unsigned validMask  = __ballot_sync(kFullWarpMask, valid);
+  const unsigned laterHeads = heads & ~1u;
+  if (validMask == kFullWarpMask && (laterHeads & (laterHeads - 1u)) == 0) {
+    // A full chunk with at most two runs, lanes [0, split) and [split, 32), as in most chunks of the long sorted vdW
+    // runs. Both runs' (x, y, z) totals are reduced at once by a butterfly that halves the values each lane carries at
+    // every step (8 shuffled values instead of the 15 of the segmented scan), after which lane l holds component
+    // (l >> 2) & 3 (3 is padding) of run (l >> 4) & 1 and one reduction per (run, component) lane adds it.
+    const int  split   = laterHeads != 0u ? __ffs(laterHeads) - 1 : kWarpSize;
+    const bool upper16 = (lane & 16) != 0;
+    // Lanes l and l ^ 16: the lower half keeps run A's values and the upper half run B's.
+    const real keep    = upper16 == (lane >= split) ? real{1.0} : real{0.0};
+    real       kx      = keep * gx;
+    real       ky      = keep * gy;
+    real       kz      = keep * gz;
+    kx += __shfl_xor_sync(kFullWarpMask, gx - kx, 16);
+    ky += __shfl_xor_sync(kFullWarpMask, gy - ky, 16);
+    kz += __shfl_xor_sync(kFullWarpMask, gz - kz, 16);
+    // Lanes l and l ^ 8: the lower half keeps (x, y) and the upper half (z, padding).
+    const bool upper8 = (lane & 8) != 0;
+    real       k0     = upper8 ? kz : kx;
+    real       k1     = upper8 ? real{0.0} : ky;
+    k0 += __shfl_xor_sync(kFullWarpMask, upper8 ? kx : kz, 8);
+    k1 += __shfl_xor_sync(kFullWarpMask, upper8 ? ky : real{0.0}, 8);
+    // Lanes l and l ^ 4: one value per lane from here on.
+    const bool upper4 = (lane & 4) != 0;
+    real       v      = upper4 ? k1 : k0;
+    v += __shfl_xor_sync(kFullWarpMask, upper4 ? k0 : k1, 4);
+    v += __shfl_xor_sync(kFullWarpMask, v, 2);
+    v += __shfl_xor_sync(kFullWarpMask, v, 1);
+    const int  atom   = __shfl_sync(kFullWarpMask, idx1, upper16 ? (split & (kWarpSize - 1)) : 0);
+    const bool hasRun = !upper16 || split < kWarpSize;
+    if constexpr (requires { sink.component(0, 0, v); }) {
+      const int c = (lane >> 2) & 3;
+      if ((lane & 3) == 0 && c < 3 && hasRun) {
+        sink.component(atom, c, v);
+      }
+    } else {
+      const int  runLane = lane & 16;
+      const real x       = __shfl_sync(kFullWarpMask, v, runLane);
+      const real y       = __shfl_sync(kFullWarpMask, v, runLane + 4);
+      const real z       = __shfl_sync(kFullWarpMask, v, runLane + 8);
+      if ((lane & 15) == 0 && hasRun) {
+        sink(atom, x, y, z);
+      }
+    }
+    return;
+  }
+  if (warpSegmentedSum3<EarlyExit>(key, gx, gy, gz) && valid) {
+    sink(idx1, gx, gy, gz);
+  }
+}
+
+template <bool EarlyExit>
+static __device__ __forceinline__ void accumulateSortedPairGrad(const bool  valid,
+                                                                const int   idx1,
+                                                                const int   idx2,
+                                                                real        gx,
+                                                                real        gy,
+                                                                real        gz,
+                                                                const auto& sink) {
+  if (valid) {
+    sink(idx2, -gx, -gy, -gz);
+  }
+  accumulateSortedKeyGrad<EarlyExit>(valid, idx1, gx, gy, gz, sink);
+}
+
+//! Raw per-term inputs of the pair terms, loaded one chunk ahead of their evaluation. Nothing may consume the loaded
+//! values until the chunk is evaluated, otherwise the warp would wait for the loads right away.
+struct VdwTermData {
+  int  idx1;
+  int  idx2;
+  real R_ij_star;
+  real wellDepth;
+};
+
+struct EleTermData {
+  int          idx1;
+  int          idx2;
+  real         chargeTerm;
+  std::uint8_t dielModel;
+  std::uint8_t is1_4;
+};
+
+template <typename Terms> static __device__ __forceinline__ VdwTermData loadVdwTerm(const Terms& terms, const int i) {
+  const auto& t = terms.vdwTerms;
+  return VdwTermData{t.idx1[i], t.idx2[i], t.R_ij_star[i], t.wellDepth[i]};
+}
+
+template <typename Terms> static __device__ __forceinline__ EleTermData loadEleTerm(const Terms& terms, const int i) {
+  const auto& t = terms.eleTerms;
+  return EleTermData{t.idx1[i], t.idx2[i], t.chargeTerm[i], t.dielModel[i], t.is1_4[i]};
+}
+
+//! Per-thread share of one molecule's energy, evaluated cooperatively by a block of BlockSize threads.
+template <int BlockSize, bool HasConstraints, typename Terms>
+static __device__ __forceinline__ real molEnergyBlock(const Terms& terms, const int* ranges, const auto molCoords) {
+  constexpr int NumWarps  = BlockSize / kWarpSize;
+  const int     atomStart = ranges[0];
+  real          energy    = real{0.0};
+  int           chunkBase = 0;
+
+  {
+    const auto& t     = terms.bondTerms;
+    const int   start = ranges[2];
+    const int   count = ranges[3] - start;
+    forEachTermChunk<NumWarps, false>(chunkBase, count, [&](const int k, const bool valid) {
+      if (valid) {
+        const int i = start + k;
+        energy += bondStretchEnergy(molCoords, t.idx1[i] - atomStart, t.idx2[i] - atomStart, t.r0[i], t.kb[i]);
+      }
+    });
+  }
+  {
+    const auto& t     = terms.angleTerms;
+    const int   start = ranges[4];
+    const int   count = ranges[5] - start;
+    forEachTermChunk<NumWarps, false>(chunkBase, count, [&](const int k, const bool valid) {
+      if (valid) {
+        const int i = start + k;
+        energy += angleBendEnergy(molCoords,
+                                  t.idx1[i] - atomStart,
+                                  t.idx2[i] - atomStart,
+                                  t.idx3[i] - atomStart,
+                                  t.theta0[i],
+                                  t.ka[i],
+                                  static_cast<bool>(t.isLinear[i]));
+      }
+    });
+  }
+  {
+    const auto& t     = terms.bendTerms;
+    const int   start = ranges[6];
+    const int   count = ranges[7] - start;
+    forEachTermChunk<NumWarps, false>(chunkBase, count, [&](const int k, const bool valid) {
+      if (valid) {
+        const int i = start + k;
+        energy += bendStretchEnergy(molCoords,
+                                    t.idx1[i] - atomStart,
+                                    t.idx2[i] - atomStart,
+                                    t.idx3[i] - atomStart,
+                                    t.theta0[i],
+                                    t.restLen1[i],
+                                    t.restLen2[i],
+                                    t.forceConst1[i],
+                                    t.forceConst2[i]);
+      }
+    });
+  }
+  {
+    const auto& t     = terms.oopTerms;
+    const int   start = ranges[8];
+    const int   count = ranges[9] - start;
+    forEachTermChunk<NumWarps, false>(chunkBase, count, [&](const int k, const bool valid) {
+      if (valid) {
+        const int i = start + k;
+        energy += oopBendEnergy(molCoords,
+                                t.idx1[i] - atomStart,
+                                t.idx2[i] - atomStart,
+                                t.idx3[i] - atomStart,
+                                t.idx4[i] - atomStart,
+                                t.koop[i]);
+      }
+    });
+  }
+  {
+    const auto& t     = terms.torsionTerms;
+    const int   start = ranges[10];
+    const int   count = ranges[11] - start;
+    forEachTermChunk<NumWarps, false>(chunkBase, count, [&](const int k, const bool valid) {
+      if (valid) {
+        const int i = start + k;
+        energy += torsionEnergy(molCoords,
+                                t.idx1[i] - atomStart,
+                                t.idx2[i] - atomStart,
+                                t.idx3[i] - atomStart,
+                                t.idx4[i] - atomStart,
+                                t.V1[i],
+                                t.V2[i],
+                                t.V3[i]);
+      }
+    });
+  }
+  {
+    const int start = ranges[12];
+    const int count = ranges[13] - start;
+    forEachTermChunkPrefetchedPingPong<NumWarps>(
+      chunkBase,
+      count,
+      [&](const int k) { return loadVdwTerm(terms, start + k); },
+      [&](const VdwTermData& d, const bool valid) {
+        // Lanes past the range evaluate the (clamped) last term and discard it, without a branch.
+        const real e = vdwEnergy(molCoords, d.idx1 - atomStart, d.idx2 - atomStart, d.R_ij_star, d.wellDepth);
+        energy += valid ? e : real{0.0};
+      });
+  }
+  {
+    const int start = ranges[14];
+    const int count = ranges[15] - start;
+    forEachTermChunkPrefetchedPingPong<NumWarps>(
+      chunkBase,
+      count,
+      [&](const int k) { return loadEleTerm(terms, start + k); },
+      [&](const EleTermData& d, const bool valid) {
+        const real e = eleEnergy(molCoords,
+                                 d.idx1 - atomStart,
+                                 d.idx2 - atomStart,
+                                 d.chargeTerm,
+                                 static_cast<int>(d.dielModel),
+                                 d.is1_4 > 0);
+        energy += valid ? e : real{0.0};
+      });
+  }
+
+  if constexpr (HasConstraints) {
+    {
+      const auto& t     = terms.distanceConstraintTerms;
+      const int   start = ranges[16];
+      const int   count = ranges[17] - start;
+      forEachTermChunk<NumWarps, false>(chunkBase, count, [&](const int k, const bool valid) {
+        if (valid) {
+          const int i = start + k;
+          energy += distanceConstraintEnergy(molCoords,
+                                             t.idx1[i] - atomStart,
+                                             t.idx2[i] - atomStart,
+                                             t.minLen[i],
+                                             t.maxLen[i],
+                                             t.forceConstant[i]);
+        }
+      });
+    }
+    {
+      const auto& t     = terms.positionConstraintTerms;
+      const int   start = ranges[18];
+      const int   count = ranges[19] - start;
+      forEachTermChunk<NumWarps, false>(chunkBase, count, [&](const int k, const bool valid) {
+        if (valid) {
+          const int i = start + k;
+          energy += positionConstraintEnergy(molCoords,
+                                             t.idx[i] - atomStart,
+                                             t.refX[i],
+                                             t.refY[i],
+                                             t.refZ[i],
+                                             t.maxDispl[i],
+                                             t.forceConstant[i]);
+        }
+      });
+    }
+    {
+      const auto& t     = terms.angleConstraintTerms;
+      const int   start = ranges[20];
+      const int   count = ranges[21] - start;
+      forEachTermChunk<NumWarps, false>(chunkBase, count, [&](const int k, const bool valid) {
+        if (valid) {
+          const int i = start + k;
+          energy += angleConstraintEnergy(molCoords,
+                                          t.idx1[i] - atomStart,
+                                          t.idx2[i] - atomStart,
+                                          t.idx3[i] - atomStart,
+                                          t.minAngleDeg[i],
+                                          t.maxAngleDeg[i],
+                                          t.forceConstant[i]);
+        }
+      });
+    }
+    {
+      const auto& t     = terms.torsionConstraintTerms;
+      const int   start = ranges[22];
+      const int   count = ranges[23] - start;
+      forEachTermChunk<NumWarps, false>(chunkBase, count, [&](const int k, const bool valid) {
+        if (valid) {
+          const int i = start + k;
+          energy += torsionConstraintEnergy(molCoords,
+                                            t.idx1[i] - atomStart,
+                                            t.idx2[i] - atomStart,
+                                            t.idx3[i] - atomStart,
+                                            t.idx4[i] - atomStart,
+                                            t.minDihedralDeg[i],
+                                            t.maxDihedralDeg[i],
+                                            t.forceConstant[i]);
+        }
+      });
+    }
+  }
+  return energy;
+}
+
+//! Accumulates one molecule's gradient through sink (which adds into a buffer zeroed by the caller), evaluated
+//! cooperatively by a block of BlockSize threads.
+template <int BlockSize, bool HasConstraints, typename Terms, typename Sink>
+static __device__ __forceinline__ void molGradBlock(const Terms& terms,
+                                                    const int*   ranges,
+                                                    const auto   molCoords,
+                                                    const Sink&  sink) {
+  constexpr int NumWarps  = BlockSize / kWarpSize;
+  const int     atomStart = ranges[0];
+  int           chunkBase = 0;
+
+  {
+    const auto& t     = terms.bondTerms;
+    const int   start = ranges[2];
+    const int   count = ranges[3] - start;
+    forEachTermChunk<NumWarps, true>(chunkBase, count, [&](const int k, const bool valid) {
+      if (valid) {
+        const int i = start + k;
+        bondStretchGradTo(molCoords, t.idx1[i] - atomStart, t.idx2[i] - atomStart, t.r0[i], t.kb[i], sink);
+      }
+    });
+  }
+  {
+    const auto& t     = terms.angleTerms;
+    const int   start = ranges[4];
+    const int   count = ranges[5] - start;
+    forEachTermChunk<NumWarps, true>(chunkBase, count, [&](const int k, const bool valid) {
+      if (valid) {
+        const int i = start + k;
+        angleBendGradTo(t.idx1[i] - atomStart,
+                        t.idx2[i] - atomStart,
+                        t.idx3[i] - atomStart,
+                        t.theta0[i],
+                        t.ka[i],
+                        static_cast<bool>(t.isLinear[i]),
+                        molCoords,
+                        sink);
+      }
+    });
+  }
+  {
+    const auto& t     = terms.bendTerms;
+    const int   start = ranges[6];
+    const int   count = ranges[7] - start;
+    forEachTermChunk<NumWarps, true>(chunkBase, count, [&](const int k, const bool valid) {
+      if (valid) {
+        const int i = start + k;
+        bendStretchGradTo(molCoords,
+                          t.idx1[i] - atomStart,
+                          t.idx2[i] - atomStart,
+                          t.idx3[i] - atomStart,
+                          t.theta0[i],
+                          t.restLen1[i],
+                          t.restLen2[i],
+                          t.forceConst1[i],
+                          t.forceConst2[i],
+                          sink);
+      }
+    });
+  }
+  {
+    const auto& t     = terms.oopTerms;
+    const int   start = ranges[8];
+    const int   count = ranges[9] - start;
+    forEachTermChunk<NumWarps, true>(chunkBase, count, [&](const int k, const bool valid) {
+      if (valid) {
+        const int i = start + k;
+        rdkit_ports::oopGradTo(molCoords,
+                               t.idx1[i] - atomStart,
+                               t.idx2[i] - atomStart,
+                               t.idx3[i] - atomStart,
+                               t.idx4[i] - atomStart,
+                               t.koop[i],
+                               sink);
+      }
+    });
+  }
+  {
+    const auto& t     = terms.torsionTerms;
+    const int   start = ranges[10];
+    const int   count = ranges[11] - start;
+    forEachTermChunk<NumWarps, true>(chunkBase, count, [&](const int k, const bool valid) {
+      if (valid) {
+        const int i = start + k;
+        rdkit_ports::torsionGradTo(molCoords,
+                                   t.idx1[i] - atomStart,
+                                   t.idx2[i] - atomStart,
+                                   t.idx3[i] - atomStart,
+                                   t.idx4[i] - atomStart,
+                                   t.V1[i],
+                                   t.V2[i],
+                                   t.V3[i],
+                                   sink);
+      }
+    });
+  }
+  {
+    const int start = ranges[12];
+    const int count = ranges[13] - start;
+    forEachTermChunkPrefetched<NumWarps>(
+      chunkBase,
+      count,
+      [&](const int k) { return loadVdwTerm(terms, start + k); },
+      [&](const VdwTermData& d, const bool valid) {
+        const int localIdx1 = d.idx1 - atomStart;
+        const int localIdx2 = d.idx2 - atomStart;
+        real      gx = real{0.0}, gy = real{0.0}, gz = real{0.0};
+        if (valid) {
+          rdkit_ports::vdwGradVec(molCoords, localIdx1, localIdx2, d.R_ij_star, d.wellDepth, gx, gy, gz);
+        }
+        accumulateSortedPairGrad<false>(valid, localIdx1, localIdx2, gx, gy, gz, sink);
+      });
+  }
+  {
+    const int start = ranges[14];
+    const int count = ranges[15] - start;
+    forEachTermChunkPrefetched<NumWarps>(
+      chunkBase,
+      count,
+      [&](const int k) { return loadEleTerm(terms, start + k); },
+      [&](const EleTermData& d, const bool valid) {
+        const int localIdx1 = d.idx1 - atomStart;
+        const int localIdx2 = d.idx2 - atomStart;
+        real      gx = real{0.0}, gy = real{0.0}, gz = real{0.0};
+        if (valid) {
+          eleGradVec(molCoords,
+                     localIdx1,
+                     localIdx2,
+                     d.chargeTerm,
+                     static_cast<int>(d.dielModel),
+                     d.is1_4 > 0,
+                     gx,
+                     gy,
+                     gz);
+        }
+        accumulateSortedPairGrad<true>(valid, localIdx1, localIdx2, gx, gy, gz, sink);
+      });
+  }
+
+  if constexpr (HasConstraints) {
+    {
+      const auto& t     = terms.distanceConstraintTerms;
+      const int   start = ranges[16];
+      const int   count = ranges[17] - start;
+      forEachTermChunk<NumWarps, true>(chunkBase, count, [&](const int k, const bool valid) {
+        if (valid) {
+          const int i = start + k;
+          distanceConstraintGradTo(molCoords,
+                                   t.idx1[i] - atomStart,
+                                   t.idx2[i] - atomStart,
+                                   t.minLen[i],
+                                   t.maxLen[i],
+                                   t.forceConstant[i],
+                                   sink);
+        }
+      });
+    }
+    {
+      const auto& t     = terms.positionConstraintTerms;
+      const int   start = ranges[18];
+      const int   count = ranges[19] - start;
+      forEachTermChunk<NumWarps, true>(chunkBase, count, [&](const int k, const bool valid) {
+        if (valid) {
+          const int i = start + k;
+          positionConstraintGradTo(molCoords,
+                                   t.idx[i] - atomStart,
+                                   t.refX[i],
+                                   t.refY[i],
+                                   t.refZ[i],
+                                   t.maxDispl[i],
+                                   t.forceConstant[i],
+                                   sink);
+        }
+      });
+    }
+    {
+      const auto& t     = terms.angleConstraintTerms;
+      const int   start = ranges[20];
+      const int   count = ranges[21] - start;
+      forEachTermChunk<NumWarps, true>(chunkBase, count, [&](const int k, const bool valid) {
+        if (valid) {
+          const int i = start + k;
+          angleConstraintGradTo(molCoords,
+                                t.idx1[i] - atomStart,
+                                t.idx2[i] - atomStart,
+                                t.idx3[i] - atomStart,
+                                t.minAngleDeg[i],
+                                t.maxAngleDeg[i],
+                                t.forceConstant[i],
+                                sink);
+        }
+      });
+    }
+    {
+      const auto& t     = terms.torsionConstraintTerms;
+      const int   start = ranges[22];
+      const int   count = ranges[23] - start;
+      forEachTermChunk<NumWarps, true>(chunkBase, count, [&](const int k, const bool valid) {
+        if (valid) {
+          const int i = start + k;
+          torsionConstraintGradTo(molCoords,
+                                  t.idx1[i] - atomStart,
+                                  t.idx2[i] - atomStart,
+                                  t.idx3[i] - atomStart,
+                                  t.idx4[i] - atomStart,
+                                  t.minDihedralDeg[i],
+                                  t.maxDihedralDeg[i],
+                                  t.forceConstant[i],
+                                  sink);
+        }
+      });
     }
   }
 }
