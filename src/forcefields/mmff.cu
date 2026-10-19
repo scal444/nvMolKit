@@ -14,6 +14,7 @@
 // limitations under the License.
 
 #include <cassert>
+#include <stdexcept>
 #include <type_traits>
 #include <vector>
 
@@ -456,6 +457,19 @@ void addMoleculeToBatch(const EnergyForceContribsHost& contribs,
     contribHolder.bondTerms.idx2.push_back(contribs.bondTerms.idx2[i] + previousLastAtomIndex);
     contribHolder.bondTerms.r0.push_back(contribs.bondTerms.r0[i]);
     contribHolder.bondTerms.kb.push_back(contribs.bondTerms.kb[i]);
+  }
+  // The block-per-molecule kernels evaluate an angle and its stretch-bend together when a molecule has as many
+  // stretch-bend as angle terms. The builder emits both lists from the same walk over each central atom's neighbor
+  // pairs, skipping only linear centers for stretch-bends, so equal counts mean the same angles in the same order.
+  if (contribs.angleTerms.idx1.size() == contribs.bendTerms.idx1.size()) {
+    for (size_t i = 0; i < contribs.angleTerms.idx1.size(); i++) {
+      if (contribs.angleTerms.idx1[i] != contribs.bendTerms.idx1[i] ||
+          contribs.angleTerms.idx2[i] != contribs.bendTerms.idx2[i] ||
+          contribs.angleTerms.idx3[i] != contribs.bendTerms.idx3[i]) {
+        throw std::invalid_argument(
+          "MMFF angle and stretch-bend term lists of equal length must list the same angles in the same order");
+      }
+    }
   }
   // Angle terms
   for (size_t i = 0; i < contribs.angleTerms.idx1.size(); i++) {

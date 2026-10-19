@@ -638,6 +638,87 @@ oopBendEnergy(const auto& pos, const int idx1, const int idx2, const int idx3, c
   return prefactor * koop * chi * chi;
 }
 
+//! Angle bend and stretch-bend energies of an angle that appears in both term lists, sharing the term loads and the
+//! bond vectors. Each energy is computed with the arithmetic of angleBendEnergy and bendStretchEnergy, so the fused
+//! evaluation returns the same energies as the separate one.
+static __device__ __forceinline__ void angleAndBendEnergy(const auto& pos,
+                                                          const int   idx1,
+                                                          const int   idx2,
+                                                          const int   idx3,
+                                                          const real  angleTheta0,
+                                                          const real  ka,
+                                                          const bool  isLinear,
+                                                          const real  bendTheta0,
+                                                          const real  restLen1,
+                                                          const real  restLen2,
+                                                          const real  forceConst1,
+                                                          const real  forceConst2,
+                                                          real&       angleEnergy,
+                                                          real&       bendEnergy) {
+  constexpr real anglePrefactor = real{0.5} * real{143.9325} * degreeToRadian * degreeToRadian;
+  constexpr real cb             = -real{0.4} * degreeToRadian;
+  constexpr real bendPrefactor  = real{2.51210};
+
+  real       dx1, dy1, dz1, dx2, dy2, dz2;
+  const real dist1Squared = coordDistanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
+  const real dist2Squared = coordDistanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
+  const real dot          = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
+
+  // Angle bend (angleBendEnergy).
+  const real invDist1      = NVMOLKIT_RSQRT(dist1Squared);
+  const real invDist2      = NVMOLKIT_RSQRT(dist2Squared);
+  const real angleCosTheta = clamp(dot * (invDist1 * invDist2), real{-1.0}, real{1.0});
+  const real angleTheta    = radianToDegree * NVMOLKIT_ACOS(angleCosTheta);
+  const real angleDelta    = angleTheta - angleTheta0;
+  const real angleDelta2   = angleDelta * angleDelta;
+  if (isLinear) {
+    constexpr real linearPrefactor = real{143.9325};
+    angleEnergy                    = linearPrefactor * ka * (real{1.0} + angleCosTheta);
+  } else {
+    angleEnergy = anglePrefactor * ka * angleDelta2 * (real{1.0} + cb * angleDelta);
+  }
+
+  // Stretch-bend (bendStretchEnergy).
+  const real dist1        = NVMOLKIT_SQRT(dist1Squared);
+  const real dist2        = NVMOLKIT_SQRT(dist2Squared);
+  const real bendCosTheta = clamp(dot / (dist1 * dist2), real{-1.0}, real{1.0});
+  const real bendTheta    = 180 / static_cast<real>(M_PI) * NVMOLKIT_ACOS(bendCosTheta);
+  const real bendDelta    = bendTheta - bendTheta0;
+  const real deltaR1      = dist1 - restLen1;
+  const real deltaR2      = dist2 - restLen2;
+  bendEnergy              = bendPrefactor * bendDelta * (deltaR1 * forceConst1 + deltaR2 * forceConst2);
+}
+
+//! Angle bend and stretch-bend gradients of an angle that appears in both term lists. Both contributions are computed
+//! with the arithmetic of angleBendGradTo and bendStretchGradTo, which share the term's coordinate loads once inlined,
+//! and summed per atom in registers, so each atom receives one sink call instead of two.
+static __device__ __forceinline__ void angleAndBendGradTo(const auto& pos,
+                                                          const int   idx1,
+                                                          const int   idx2,
+                                                          const int   idx3,
+                                                          const real  angleTheta0,
+                                                          const real  ka,
+                                                          const bool  isLinear,
+                                                          const real  bendTheta0,
+                                                          const real  restLen1,
+                                                          const real  restLen2,
+                                                          const real  forceConst1,
+                                                          const real  forceConst2,
+                                                          const auto& sink) {
+  real       g[3][3] = {};
+  const auto collect = [&](const int idx, const real x, const real y, const real z) {
+    const int k = idx == idx1 ? 0 : (idx == idx2 ? 1 : 2);
+    g[k][0] += x;
+    g[k][1] += y;
+    g[k][2] += z;
+  };
+  angleBendGradTo(idx1, idx2, idx3, angleTheta0, ka, isLinear, pos, collect);
+  bendStretchGradTo(pos, idx1, idx2, idx3, bendTheta0, restLen1, restLen2, forceConst1, forceConst2, collect);
+  sink(idx1, g[0][0], g[0][1], g[0][2]);
+  sink(idx3, g[2][0], g[2][1], g[2][2]);
+  sink(idx2, g[1][0], g[1][1], g[1][2]);
+}
+
 static __device__ __forceinline__ real torsionEnergy(const auto& pos,
                                                      const int   idx1,
                                                      const int   idx2,
@@ -1762,41 +1843,77 @@ static __device__ __forceinline__ real molEnergyBlock(const Terms& terms, const 
       }
     });
   }
-  {
-    const auto& t     = terms.angleTerms;
-    const int   start = ranges[4];
-    const int   count = ranges[5] - start;
+  if (ranges[5] - ranges[4] == ranges[7] - ranges[6]) {
+    // Equal-length angle and stretch-bend lists describe the same angles in the same order (checked when the batch is
+    // built), so both terms share the angle indices.
+    const auto& ta     = terms.angleTerms;
+    const auto& tb     = terms.bendTerms;
+    const int   aStart = ranges[4];
+    const int   bStart = ranges[6];
+    const int   count  = ranges[5] - aStart;
     forEachTermChunk<NumWarps, false>(chunkBase, count, [&](const int k, const bool valid) {
       if (valid) {
-        const int i = start + k;
-        energy += angleBendEnergy(molCoords,
-                                  t.idx1[i] - atomStart,
-                                  t.idx2[i] - atomStart,
-                                  t.idx3[i] - atomStart,
-                                  t.theta0[i],
-                                  t.ka[i],
-                                  static_cast<bool>(t.isLinear[i]));
+        const int ia = aStart + k;
+        const int ib = bStart + k;
+        const int a1 = ta.idx1[ia] - atomStart;
+        const int a2 = ta.idx2[ia] - atomStart;
+        const int a3 = ta.idx3[ia] - atomStart;
+        real      angleEnergy, bendEnergy;
+        angleAndBendEnergy(molCoords,
+                           a1,
+                           a2,
+                           a3,
+                           ta.theta0[ia],
+                           ta.ka[ia],
+                           static_cast<bool>(ta.isLinear[ia]),
+                           tb.theta0[ib],
+                           tb.restLen1[ib],
+                           tb.restLen2[ib],
+                           tb.forceConst1[ib],
+                           tb.forceConst2[ib],
+                           angleEnergy,
+                           bendEnergy);
+        energy += angleEnergy;
+        energy += bendEnergy;
       }
     });
-  }
-  {
-    const auto& t     = terms.bendTerms;
-    const int   start = ranges[6];
-    const int   count = ranges[7] - start;
-    forEachTermChunk<NumWarps, false>(chunkBase, count, [&](const int k, const bool valid) {
-      if (valid) {
-        const int i = start + k;
-        energy += bendStretchEnergy(molCoords,
+  } else {
+    {
+      const auto& t     = terms.angleTerms;
+      const int   start = ranges[4];
+      const int   count = ranges[5] - start;
+      forEachTermChunk<NumWarps, false>(chunkBase, count, [&](const int k, const bool valid) {
+        if (valid) {
+          const int i = start + k;
+          energy += angleBendEnergy(molCoords,
                                     t.idx1[i] - atomStart,
                                     t.idx2[i] - atomStart,
                                     t.idx3[i] - atomStart,
                                     t.theta0[i],
-                                    t.restLen1[i],
-                                    t.restLen2[i],
-                                    t.forceConst1[i],
-                                    t.forceConst2[i]);
-      }
-    });
+                                    t.ka[i],
+                                    static_cast<bool>(t.isLinear[i]));
+        }
+      });
+    }
+    {
+      const auto& t     = terms.bendTerms;
+      const int   start = ranges[6];
+      const int   count = ranges[7] - start;
+      forEachTermChunk<NumWarps, false>(chunkBase, count, [&](const int k, const bool valid) {
+        if (valid) {
+          const int i = start + k;
+          energy += bendStretchEnergy(molCoords,
+                                      t.idx1[i] - atomStart,
+                                      t.idx2[i] - atomStart,
+                                      t.idx3[i] - atomStart,
+                                      t.theta0[i],
+                                      t.restLen1[i],
+                                      t.restLen2[i],
+                                      t.forceConst1[i],
+                                      t.forceConst2[i]);
+        }
+      });
+    }
   }
   {
     const auto& t     = terms.oopTerms;
@@ -1958,43 +2075,75 @@ static __device__ __forceinline__ void molGradBlock(const Terms& terms,
       }
     });
   }
-  {
-    const auto& t     = terms.angleTerms;
-    const int   start = ranges[4];
-    const int   count = ranges[5] - start;
+  if (ranges[5] - ranges[4] == ranges[7] - ranges[6]) {
+    // Equal-length angle and stretch-bend lists describe the same angles in the same order (checked when the batch is
+    // built), so both terms share the angle indices.
+    const auto& ta     = terms.angleTerms;
+    const auto& tb     = terms.bendTerms;
+    const int   aStart = ranges[4];
+    const int   bStart = ranges[6];
+    const int   count  = ranges[5] - aStart;
     forEachTermChunk<NumWarps, true>(chunkBase, count, [&](const int k, const bool valid) {
       if (valid) {
-        const int i = start + k;
-        angleBendGradTo(t.idx1[i] - atomStart,
-                        t.idx2[i] - atomStart,
-                        t.idx3[i] - atomStart,
-                        t.theta0[i],
-                        t.ka[i],
-                        static_cast<bool>(t.isLinear[i]),
-                        molCoords,
-                        sink);
+        const int ia = aStart + k;
+        const int ib = bStart + k;
+        const int a1 = ta.idx1[ia] - atomStart;
+        const int a2 = ta.idx2[ia] - atomStart;
+        const int a3 = ta.idx3[ia] - atomStart;
+        angleAndBendGradTo(molCoords,
+                           a1,
+                           a2,
+                           a3,
+                           ta.theta0[ia],
+                           ta.ka[ia],
+                           static_cast<bool>(ta.isLinear[ia]),
+                           tb.theta0[ib],
+                           tb.restLen1[ib],
+                           tb.restLen2[ib],
+                           tb.forceConst1[ib],
+                           tb.forceConst2[ib],
+                           sink);
       }
     });
-  }
-  {
-    const auto& t     = terms.bendTerms;
-    const int   start = ranges[6];
-    const int   count = ranges[7] - start;
-    forEachTermChunk<NumWarps, true>(chunkBase, count, [&](const int k, const bool valid) {
-      if (valid) {
-        const int i = start + k;
-        bendStretchGradTo(molCoords,
-                          t.idx1[i] - atomStart,
+  } else {
+    {
+      const auto& t     = terms.angleTerms;
+      const int   start = ranges[4];
+      const int   count = ranges[5] - start;
+      forEachTermChunk<NumWarps, true>(chunkBase, count, [&](const int k, const bool valid) {
+        if (valid) {
+          const int i = start + k;
+          angleBendGradTo(t.idx1[i] - atomStart,
                           t.idx2[i] - atomStart,
                           t.idx3[i] - atomStart,
                           t.theta0[i],
-                          t.restLen1[i],
-                          t.restLen2[i],
-                          t.forceConst1[i],
-                          t.forceConst2[i],
+                          t.ka[i],
+                          static_cast<bool>(t.isLinear[i]),
+                          molCoords,
                           sink);
-      }
-    });
+        }
+      });
+    }
+    {
+      const auto& t     = terms.bendTerms;
+      const int   start = ranges[6];
+      const int   count = ranges[7] - start;
+      forEachTermChunk<NumWarps, true>(chunkBase, count, [&](const int k, const bool valid) {
+        if (valid) {
+          const int i = start + k;
+          bendStretchGradTo(molCoords,
+                            t.idx1[i] - atomStart,
+                            t.idx2[i] - atomStart,
+                            t.idx3[i] - atomStart,
+                            t.theta0[i],
+                            t.restLen1[i],
+                            t.restLen2[i],
+                            t.forceConst1[i],
+                            t.forceConst2[i],
+                            sink);
+        }
+      });
+    }
   }
   {
     const auto& t     = terms.oopTerms;
