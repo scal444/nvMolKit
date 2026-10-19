@@ -173,7 +173,8 @@ target_link_libraries(
 add_executable(test_gaussian_torsions test_gaussian_torsions.cu)
 target_link_libraries(
   test_gaussian_torsions
-  PRIVATE etkdg_stages gaussian_torsion_batched_forcefield
+  PRIVATE etkdg_stages
+          gaussian_torsion_batched_forcefield
           dg_batched_forcefield
           rdkit_dist_geom_flattened
           device
