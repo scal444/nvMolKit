@@ -28,6 +28,7 @@
 #include <GraphMol/SmilesParse/SmilesParse.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <memory>
@@ -626,3 +627,66 @@ INSTANTIATE_TEST_SUITE_P(PrecisionModes,
                          [](const ::testing::TestParamInfo<nvMolKit::PrecisionMode>& info) {
                            return info.param == nvMolKit::PrecisionMode::SINGLE ? "Single" : "Full";
                          });
+
+class UFFMixedSizeBatchTest : public ::testing::TestWithParam<nvMolKit::PrecisionMode> {};
+
+// One batch mixing molecules below and above 256 atoms, so the block-per-molecule kernels take both their
+// shared-memory and global-memory paths in the same launch.
+TEST_P(UFFMixedSizeBatchTest, BlockPerMolMatchesRDKit) {
+  const std::vector<std::string>             smilesList = {"CCO", std::string(90, 'C'), "c1ccccc1C(=O)NCC(F)(F)F"};
+  std::vector<std::unique_ptr<RDKit::ROMol>> mols;
+  BatchedMolecularSystemHost                 host;
+  for (const auto& smiles : smilesList) {
+    auto mol = std::unique_ptr<RDKit::ROMol>(RDKit::SmilesToMol(smiles));
+    ASSERT_NE(mol, nullptr);
+    auto                                 withHs = std::unique_ptr<RDKit::ROMol>(RDKit::MolOps::addHs(*mol));
+    RDKit::DGeomHelpers::EmbedParameters params = RDKit::DGeomHelpers::ETKDGv3;
+    params.randomSeed                           = 42;
+    params.useRandomCoords                      = true;
+    ASSERT_GE(RDKit::DGeomHelpers::EmbedMolecule(*withHs, params), 0) << smiles;
+    addMoleculeToBatch(constructForcefieldContribs(*withHs), positionsFromMol(*withHs), host);
+    mols.push_back(std::move(withHs));
+  }
+  ASSERT_GT(mols[1]->getNumAtoms(), 256u);
+
+  AsyncDeviceVector<double> positionsDevice;
+  positionsDevice.setFromVector(host.positions);
+  nvMolKit::UFFBatchedForcefield forcefield(host, {}, nullptr, GetParam());
+  AsyncDeviceVector<double>      energyOuts;
+  energyOuts.resize(mols.size());
+  energyOuts.zero();
+  CHECK_CUDA_RETURN(forcefield.computeEnergy(energyOuts.data(), positionsDevice.data()));
+  AsyncDeviceVector<double> gradDevice;
+  gradDevice.resize(positionsDevice.size());
+  gradDevice.zero();
+  CHECK_CUDA_RETURN(forcefield.computeGradients(gradDevice.data(), positionsDevice.data()));
+  std::vector<double> gotEnergies(mols.size(), 0.0);
+  std::vector<double> gotGrad(positionsDevice.size(), 0.0);
+  energyOuts.copyToHost(gotEnergies);
+  gradDevice.copyToHost(gotGrad);
+  cudaDeviceSynchronize();
+
+  const bool single     = GetParam() == nvMolKit::PrecisionMode::SINGLE;
+  size_t     coordStart = 0;
+  for (size_t m = 0; m < mols.size(); ++m) {
+    auto                referenceFF = buildReferenceForceField(*mols[m]);
+    std::vector<double> positions   = positionsFromMol(*mols[m]);
+    std::vector<double> wantGrad(positions.size(), 0.0);
+    referenceFF->calcGrad(positions.data(), wantGrad.data());
+    const double wantEnergy = referenceFF->calcEnergy(positions.data());
+    EXPECT_NEAR(gotEnergies[m], wantEnergy, (single ? 1.0e-4 : 1.0e-8) * std::max(1.0, std::abs(wantEnergy)))
+      << "molecule " << m;
+    double maxGrad = 1.0;
+    for (const double g : wantGrad) {
+      maxGrad = std::max(maxGrad, std::abs(g));
+    }
+    const std::vector<double> molGrad(gotGrad.begin() + coordStart, gotGrad.begin() + coordStart + positions.size());
+    EXPECT_THAT(molGrad, ::testing::Pointwise(::testing::DoubleNear((single ? 1.0e-3 : 1.0e-8) * maxGrad), wantGrad))
+      << "molecule " << m;
+    coordStart += positions.size();
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(PrecisionModes,
+                         UFFMixedSizeBatchTest,
+                         ::testing::Values(nvMolKit::PrecisionMode::FULL, nvMolKit::PrecisionMode::SINGLE));
