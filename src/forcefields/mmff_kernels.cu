@@ -1066,11 +1066,11 @@ cudaError_t launchReduceEnergiesKernel(const int      numBlocks,
 constexpr int blockSizePerMol = 128;
 
 template <bool HasConstraints, typename real, typename reduceT, typename Terms, typename storageT>
-__global__ void combinedEnergiesKernel(const Terms*                   terms,
-                                       const BatchedIndicesDevicePtr* systemIndices,
-                                       const storageT*                coords,
-                                       storageT*                      energies,
-                                       const uint8_t*                 activeSystemMask) {
+__global__ void combinedEnergiesKernel(const __grid_constant__ Terms                   terms,
+                                       const __grid_constant__ BatchedIndicesDevicePtr systemIndices,
+                                       const storageT*                                 coords,
+                                       storageT*                                       energies,
+                                       const uint8_t*                                  activeSystemMask) {
   const int molIdx = blockIdx.x;
   const int tid    = threadIdx.x;
 
@@ -1083,13 +1083,13 @@ __global__ void combinedEnergiesKernel(const Terms*                   terms,
   using BlockReduce = cub::BlockReduce<reduceT, blockSizePerMol>;
   __shared__ typename BlockReduce::TempStorage tempStorage;
 
-  const int       atomStart = systemIndices->atomStarts[molIdx];
+  const int       atomStart = systemIndices.atomStarts[molIdx];
   const storageT* molCoords = coords + atomStart * 3;
   real            threadEnergy;
   if constexpr (std::is_same_v<real, float>)
-    threadEnergy = fp32::molEnergy<blockSizePerMol, HasConstraints>(*terms, *systemIndices, molCoords, molIdx, tid);
+    threadEnergy = fp32::molEnergy<blockSizePerMol, HasConstraints>(terms, systemIndices, molCoords, molIdx, tid);
   else
-    threadEnergy = fp64::molEnergy<blockSizePerMol, HasConstraints>(*terms, *systemIndices, molCoords, molIdx, tid);
+    threadEnergy = fp64::molEnergy<blockSizePerMol, HasConstraints>(terms, systemIndices, molCoords, molIdx, tid);
   const reduceT blockEnergy = BlockReduce(tempStorage).Sum(static_cast<reduceT>(threadEnergy));
 
   if (tid == 0) {
@@ -1098,16 +1098,16 @@ __global__ void combinedEnergiesKernel(const Terms*                   terms,
 }
 
 template <bool HasConstraints, typename real, typename Terms, typename storageT>
-__global__ void combinedGradKernel(const Terms*                   terms,
-                                   const BatchedIndicesDevicePtr* systemIndices,
-                                   const storageT*                coords,
-                                   storageT*                      grad,
-                                   const uint8_t*                 activeSystemMask) {
+__global__ void combinedGradKernel(const __grid_constant__ Terms                   terms,
+                                   const __grid_constant__ BatchedIndicesDevicePtr systemIndices,
+                                   const storageT*                                 coords,
+                                   storageT*                                       grad,
+                                   const uint8_t*                                  activeSystemMask) {
   const int molIdx = blockIdx.x;
   const int tid    = threadIdx.x;
 
-  const int atomStart = systemIndices->atomStarts[molIdx];
-  const int atomEnd   = systemIndices->atomStarts[molIdx + 1];
+  const int atomStart = systemIndices.atomStarts[molIdx];
+  const int atomEnd   = systemIndices.atomStarts[molIdx + 1];
   const int numAtoms  = atomEnd - atomStart;
 
   if (activeSystemMask != nullptr && activeSystemMask[molIdx] == 0) {
@@ -1129,9 +1129,9 @@ __global__ void combinedGradKernel(const Terms*                   terms,
 
   const storageT* molCoords = coords + atomStart * 3;
   if constexpr (std::is_same_v<real, float>)
-    fp32::molGrad<blockSizePerMol, HasConstraints>(*terms, *systemIndices, molCoords, molGradBase, molIdx, tid);
+    fp32::molGrad<blockSizePerMol, HasConstraints>(terms, systemIndices, molCoords, molGradBase, molIdx, tid);
   else
-    fp64::molGrad<blockSizePerMol, HasConstraints>(*terms, *systemIndices, molCoords, molGradBase, molIdx, tid);
+    fp64::molGrad<blockSizePerMol, HasConstraints>(terms, systemIndices, molCoords, molGradBase, molIdx, tid);
   __syncthreads();
 
   if (useSharedMem) {
@@ -1151,11 +1151,9 @@ cudaError_t launchBlockPerMolEnergyKernelImpl(int                            num
                                               bool                           hasConstraints,
                                               cudaStream_t                   stream,
                                               const uint8_t*                 activeSystemMask) {
-  const AsyncDevicePtr<Terms>                   devTerms(terms, stream);
-  const AsyncDevicePtr<BatchedIndicesDevicePtr> devSysIdx(sytemIndices, stream);
 #define NVMOLKIT_LAUNCH_MMFF_ENERGY(HasConstraints, real, reduceT) \
   combinedEnergiesKernel<HasConstraints, real, reduceT>            \
-    <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devSysIdx.data(), coords, energies, activeSystemMask)
+    <<<numMols, blockSizePerMol, 0, stream>>>(terms, sytemIndices, coords, energies, activeSystemMask)
   if (hasConstraints)
     NVMOLKIT_LAUNCH_MMFF_ENERGY(true, real, reduceT);
   else
@@ -1173,14 +1171,12 @@ cudaError_t launchBlockPerMolGradKernelImpl(int                            numMo
                                             bool                           hasConstraints,
                                             cudaStream_t                   stream,
                                             const uint8_t*                 activeSystemMask) {
-  const AsyncDevicePtr<Terms>                   devTerms(terms, stream);
-  const AsyncDevicePtr<BatchedIndicesDevicePtr> devSysIdx(sytemIndices, stream);
   if (hasConstraints)
     combinedGradKernel<true, real>
-      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devSysIdx.data(), coords, grad, activeSystemMask);
+      <<<numMols, blockSizePerMol, 0, stream>>>(terms, sytemIndices, coords, grad, activeSystemMask);
   else
     combinedGradKernel<false, real>
-      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devSysIdx.data(), coords, grad, activeSystemMask);
+      <<<numMols, blockSizePerMol, 0, stream>>>(terms, sytemIndices, coords, grad, activeSystemMask);
   return cudaGetLastError();
 }
 
