@@ -907,11 +907,17 @@ __device__ __forceinline__ int searchWhimAxes(const int32_t*          scores,
 }
 
 //! Warps per block of the WHIM kernel, which computes one conformer per block, for grids of several waves.
-constexpr int kWhimWarps     = 4;
+constexpr int                     kWhimWarps     = 4;
 //! Blocks per SM the register budget of that kernel allows (shared memory permitting).
-constexpr int kWhimMinBlocks = 8;
+constexpr int                     kWhimMinBlocks = 8;
+//! Warps per block of the WHIM kernel for a grid that fits one resident wave: a warp per projection slot (WHIM's
+//! channels, then PBF's), so those phases run concurrently; four blocks per SM keep its register budget.
+__host__ __device__ constexpr int whimWaveWarps(const bool computePbf) {
+  return kNumWhimChannels + (computePbf ? 1 : 0);
+}
+constexpr int kWhimWaveMinBlocks = 4;
 //! PCA slots of the WHIM kernel: WHIM's channels, then PBF's own PCA when it computes in another precision.
-constexpr int kWhimPcaSlots  = kNumWhimChannels + 1;
+constexpr int kWhimPcaSlots      = kNumWhimChannels + 1;
 static_assert(kWhimPcaSlots <= kWarpSize && kNumWhimAxes <= kWarpSize, "per-lane PCA slots and WHIM axes");
 
 //! Per-block values of the WHIM kernel.
@@ -1001,15 +1007,16 @@ __device__ __forceinline__ ConformerRange loadConformerRange(const DeviceCoordVi
  * produce NaN.
  */
 template <int kWarps, typename Real, bool kComputePbf, bool kGlobalScratch>
-__global__ void __launch_bounds__(kWarps* kWarpSize, kWhimMinBlocks) whimKernel(const DeviceCoordView coordinates,
-                                                                                const Property3DDeviceInputs inputs,
-                                                                                const int conformerBegin,
-                                                                                Real* __restrict__ pbfOutput,
-                                                                                Real* __restrict__ whimOutput,
-                                                                                char* __restrict__ globalScratch,
-                                                                                const int               whimMaxAtoms,
-                                                                                const WhimScratchLayout layout,
-                                                                                const WhimThreshold     threshold) {
+__global__ void __launch_bounds__(kWarps* kWarpSize, kWarps == kWhimWarps ? kWhimMinBlocks : kWhimWaveMinBlocks)
+  whimKernel(const DeviceCoordView        coordinates,
+             const Property3DDeviceInputs inputs,
+             const int                    conformerBegin,
+             Real* __restrict__ pbfOutput,
+             Real* __restrict__ whimOutput,
+             char* __restrict__ globalScratch,
+             const int               whimMaxAtoms,
+             const WhimScratchLayout layout,
+             const WhimThreshold     threshold) {
   extern __shared__ double dynamicScratch[];
   __shared__ WhimBlockShared<kWarps> shared;
   constexpr int                      kWhimThreads = kWarps * kWarpSize;
@@ -1294,6 +1301,720 @@ __global__ void __launch_bounds__(kWarps* kWarpSize, kWhimMinBlocks) whimKernel(
   }
 }
 
+/*
+ * Batched WHIM: one block of kBatchWarps warps computes kConformers conformers, so that the work no single
+ * conformer fills a warp with is packed across conformers. Atom-parallel phases use groups of
+ * kBatchGroupLanes lanes per (conformer, slot) task; the eigensolves and the per-axis output terms take a lane
+ * each; the symmetry searches are spread over the warps one (conformer, channel, axis) item at a time.
+ */
+
+//! Warps per block of the batched WHIM kernel.
+constexpr int kBatchWarps      = 4;
+constexpr int kBatchThreads    = kBatchWarps * kWarpSize;
+//! Lanes of a covariance or projection task, and tasks per warp.
+constexpr int kBatchGroupLanes = 8;
+constexpr int kBatchGroups     = kWarpSize / kBatchGroupLanes;
+//! Covariance slots per conformer: WHIM's channels, then PBF's own PCA when it computes in another precision.
+constexpr int kBatchSlots      = 8;
+static_assert(kWhimPcaSlots <= kBatchSlots && kBatchSlots == 2 * kBatchGroups, "two covariance passes per conformer");
+//! Atoms per conformer row of the batched kernel's int32 fallback search, which reuses a warp's bitmap.
+constexpr int kBatchMaxAtoms = kWhimBitmapWords;
+
+//! Per-block values of the batched WHIM kernel, per conformer of the batch.
+template <int kConformers> struct WhimBatchShared {
+  union {
+    double covarianceSums[kConformers][kBatchSlots][8];  //!< Total weight, xx, xy, xz, yy, yz, zz per slot.
+    struct {
+      double gammas[kConformers][kNumWhimChannels][3];
+      double kurtoses[kConformers][kNumWhimChannels][3];
+    } axisTerms;  //!< After the eigensolves.
+  };
+  double   eigen[kConformers][kNumWhimChannels][12];  //!< Row-major eigenvectors, then the eigenvalues.
+  double   pbfAxis[kConformers][3];                   //!< PBF's plane normal, when PBF has its own PCA.
+  double   fourthMoments[kConformers][kNumWhimAxes];
+  double   centroids[kConformers][3];
+  int64_t  atomStart[kConformers];  //!< First coordinate row.
+  double   logInverseAtoms[kConformers];
+  uint32_t maxMagnitudes[kConformers][kNumWhimAxes];
+  int      symmetricCounts[kConformers][kNumWhimAxes];
+  int      numAtoms[kConformers];  //!< Zero for a conformer that is out of range or invalid.
+  int      moleculeAtomStart[kConformers];
+  int      is3D[kConformers];
+};
+
+/**
+ * @brief Dynamic shared memory of the batched WHIM kernel for rows of up to `stride` atoms: each warp's value
+ *        bitmap, then each warp's int16 rounded projections of its groups' current tasks (one array per group
+ *        and principal axis).
+ */
+struct WhimBatchLayout {
+  int stride;
+
+  __host__ __device__ static WhimBatchLayout make(const int maxAtoms) {
+    const int atoms = maxAtoms > 1 ? maxAtoms : 1;
+    return WhimBatchLayout{(atoms + 7) / 8 * 8};  // Keeps every array 16-byte aligned.
+  }
+  __host__ __device__ size_t warpScoreInts16() const { return static_cast<size_t>(kBatchGroups) * 3 * stride; }
+  __host__ __device__ size_t bytes() const {
+    return static_cast<size_t>(kBatchWarps) *
+           (kWhimBitmapWords * sizeof(uint32_t) + warpScoreInts16() * sizeof(int16_t));
+  }
+};
+
+/**
+ * @brief Collective over aligned groups of kBatchGroupLanes lanes. Sums each of a lane's 8 @p values over its
+ *        group, halving the values each lane carries at every exchange; returns the total of value `lane & 7`.
+ */
+template <typename T> __device__ __forceinline__ T groupTransposedSum8(const T (&values)[8], const int lane) {
+  T half[4];
+#pragma unroll
+  for (int k = 0; k < 4; ++k) {
+    const bool upper = (lane & 4) != 0;
+    const T    send  = upper ? values[k] : values[k + 4];
+    const T    keep  = upper ? values[k + 4] : values[k];
+    half[k]          = keep + __shfl_xor_sync(0xffffffffu, send, 4);
+  }
+  T quarter[2];
+#pragma unroll
+  for (int k = 0; k < 2; ++k) {
+    const bool upper = (lane & 2) != 0;
+    const T    send  = upper ? half[k] : half[k + 2];
+    const T    keep  = upper ? half[k + 2] : half[k];
+    quarter[k]       = keep + __shfl_xor_sync(0xffffffffu, send, 2);
+  }
+  const bool upper = (lane & 1) != 0;
+  return (upper ? quarter[1] : quarter[0]) + __shfl_xor_sync(0xffffffffu, upper ? quarter[0] : quarter[1], 1);
+}
+
+//! groupTransposedSum8() for 4 @p values: returns the group total of value `(lane >> 1) & 3`.
+template <typename T> __device__ __forceinline__ T groupTransposedSum4(const T (&values)[4], const int lane) {
+  T half[2];
+#pragma unroll
+  for (int k = 0; k < 2; ++k) {
+    const bool upper = (lane & 4) != 0;
+    const T    send  = upper ? values[k] : values[k + 2];
+    const T    keep  = upper ? values[k + 2] : values[k];
+    half[k]          = keep + __shfl_xor_sync(0xffffffffu, send, 4);
+  }
+  const bool upper = (lane & 2) != 0;
+  T          value = (upper ? half[1] : half[0]) + __shfl_xor_sync(0xffffffffu, upper ? half[0] : half[1], 2);
+  return value + __shfl_xor_sync(0xffffffffu, value, 1);
+}
+
+//! Group-collective sum over aligned groups of kBatchGroupLanes lanes, returned to every lane of the group.
+template <typename T> __device__ __forceinline__ T groupButterflySum(T value) {
+  value += __shfl_xor_sync(0xffffffffu, value, 4);
+  value += __shfl_xor_sync(0xffffffffu, value, 2);
+  value += __shfl_xor_sync(0xffffffffu, value, 1);
+  return value;
+}
+
+//! WHIM's projection of centered atom (@p x, @p y, @p z) on the principal axis (@p axisX, @p axisY, @p axisZ).
+__device__ __forceinline__ WhimReal whimScore(const WhimReal x,
+                                              const WhimReal y,
+                                              const WhimReal z,
+                                              const WhimReal axisX,
+                                              const WhimReal axisY,
+                                              const WhimReal axisZ) {
+  return x * axisX + y * axisY + z * axisZ;
+}
+
+__device__ __forceinline__ int32_t whimRounded(const WhimReal score) {
+  return static_cast<int32_t>(round(score * WhimReal(1000)));
+}
+
+//! The batched kernel's window test of value @p own: whether an atom with it is symmetric.
+__device__ __forceinline__ bool whimBatchSymmetric(const int32_t           own,
+                                                   const bool              active,
+                                                   const WhimBitmapParams& params,
+                                                   const uint32_t*         bitmap) {
+  const int       magnitude = own < 0 ? -own : own;
+  const int       start     = params.windowBase - own;
+  const uint32_t* words     = bitmap + (start >> 5);
+  const uint32_t  window    = __funnelshift_r(words[0], words[1], start & 31);
+  bool            found     = magnitude <= params.centeredLimit || (window & params.definiteMask) != 0;
+  if (active && !found && (window & params.boundaryMask) != 0) {
+    const double ownUnits = thousandthsToUnits(own);
+    found = ((window & 1u) != 0 && fabs(ownUnits + thousandthsToUnits(-own - params.boundary)) <= params.value) ||
+            (((window >> (2 * params.radius)) & 1u) != 0 &&
+             fabs(ownUnits + thousandthsToUnits(-own + params.boundary)) <= params.value);
+  }
+  return active && found;
+}
+
+/**
+ * @brief countWhimSymmetricBatchLoop() for rows of at most @p kChunks warp widths of atoms, each lane's values held
+ *        in registers through the set, search and clear passes. Lanes past the last atom set and clear bit 0,
+ *        in padding.
+ */
+template <int kChunks>
+__device__ __forceinline__ int countWhimSymmetricBatchChunks(const int16_t*          values,
+                                                             const int               numAtoms,
+                                                             const int               lane,
+                                                             const WhimBitmapParams& params,
+                                                             uint32_t*               bitmap) {
+  int32_t own[kChunks];
+  int     bit[kChunks];
+#pragma unroll
+  for (int k = 0; k < kChunks; ++k) {
+    const int atomIdx = lane + k * kWarpSize;
+    own[k]            = atomIdx < numAtoms ? values[atomIdx] : 0;
+    bit[k]            = atomIdx < numAtoms ? own[k] + kWhimBitmapOffset : 0;
+  }
+#pragma unroll
+  for (int k = 0; k < kChunks; ++k) {
+    atomicOr(&bitmap[bit[k] >> 5], 1u << (bit[k] & 31));
+  }
+  __syncwarp();
+  int symmetric = 0;
+#pragma unroll
+  for (int k = 0; k < kChunks; ++k) {
+    const bool active = lane + k * kWarpSize < numAtoms;
+    symmetric += __popc(__ballot_sync(0xffffffffu, whimBatchSymmetric(own[k], active, params, bitmap)));
+  }
+  __syncwarp();
+#pragma unroll
+  for (int k = 0; k < kChunks; ++k) {
+    bitmap[bit[k] >> 5] = 0;
+  }
+  __syncwarp();
+  return symmetric;
+}
+
+/**
+ * @brief Warp-collective symmetric atom count of one (channel, axis) pair from its rounded projections
+ *        @p values (|v| < kWhimBitmapRange) via @p bitmap (all zero on entry and on return), for rows of more
+ *        than countWhimSymmetricBatchChunks()'s atoms.
+ *
+ * whimBitmapSymmetric() for thresholds whose centered test covers every atom whose own bit lies in its window
+ * (see whimBatchSupported()), so the window bits and RDKit's float64 boundary test decide every other atom.
+ */
+__device__ __forceinline__ int countWhimSymmetricBatchLoop(const int16_t*          values,
+                                                           const int               numAtoms,
+                                                           const int               lane,
+                                                           const WhimBitmapParams& params,
+                                                           uint32_t*               bitmap) {
+  int symmetric = 0;
+#pragma unroll 1
+  for (int atomIdx = lane; atomIdx < numAtoms; atomIdx += kWarpSize) {
+    const int bit = values[atomIdx] + kWhimBitmapOffset;
+    atomicOr(&bitmap[bit >> 5], 1u << (bit & 31));
+  }
+  __syncwarp();
+#pragma unroll 1
+  for (int base = 0; base < numAtoms; base += kWarpSize) {
+    const int     atomIdx = base + lane;
+    const bool    active  = atomIdx < numAtoms;
+    const int32_t own     = active ? values[atomIdx] : 0;
+    symmetric += __popc(__ballot_sync(0xffffffffu, whimBatchSymmetric(own, active, params, bitmap)));
+  }
+  __syncwarp();
+#pragma unroll 1
+  for (int atomIdx = lane; atomIdx < numAtoms; atomIdx += kWarpSize) {
+    bitmap[(values[atomIdx] + kWhimBitmapOffset) >> 5] = 0;
+  }
+  __syncwarp();
+  return symmetric;
+}
+
+/**
+ * @brief Warp-collective symmetric atom count of principal axis (@p axisX, @p axisY, @p axisZ) of a conformer
+ *        whose rounded projections exceed the bitmap: recomputed in int32 into @p values (at least @p numAtoms
+ *        words, zero on entry and on return) and compared pairwise as countWhimSymmetric() does for exhaustive
+ *        thresholds. Out of line: no conformer of a typical batch takes it.
+ */
+__device__ __noinline__ int countWhimSymmetricPairwise(const double*       positions,
+                                                       const double        centroidX,
+                                                       const double        centroidY,
+                                                       const double        centroidZ,
+                                                       const WhimReal      axisX,
+                                                       const WhimReal      axisY,
+                                                       const WhimReal      axisZ,
+                                                       const int           numAtoms,
+                                                       const int           lane,
+                                                       const WhimThreshold threshold,
+                                                       int32_t*            values) {
+#pragma unroll 1
+  for (int atomIdx = lane; atomIdx < numAtoms; atomIdx += kWarpSize) {
+    WhimReal x;
+    WhimReal y;
+    WhimReal z;
+    centeredPosition(positions, atomIdx, centroidX, centroidY, centroidZ, x, y, z);
+    values[atomIdx] = whimRounded(whimScore(x, y, z, axisX, axisY, axisZ));
+  }
+  __syncwarp();
+  int symmetric = 0;
+#pragma unroll 1
+  for (int atomIdx = lane; atomIdx < numAtoms; atomIdx += kWarpSize) {
+    const int32_t own   = values[atomIdx];
+    bool          found = threshold.centered(own);
+#pragma unroll 1
+    for (int otherIdx = 0; otherIdx < numAtoms && !found; ++otherIdx) {
+      found = otherIdx != atomIdx && threshold.mirrored(own, values[otherIdx]);
+    }
+    symmetric += found ? 1 : 0;
+  }
+  const int total = groupAllReduceSum<kWarpSize>(symmetric);
+  __syncwarp();
+#pragma unroll 1
+  for (int atomIdx = lane; atomIdx < numAtoms; atomIdx += kWarpSize) {
+    values[atomIdx] = 0;
+  }
+  __syncwarp();
+  return total;
+}
+
+/**
+ * @brief Warp-collective symmetric atom counts of the three principal axes of one (conformer, channel) of the
+ *        batched WHIM kernel whose rounded projections all fit the bitmap, written by lane 0 to @p counts:
+ *        countWhimSymmetricBatchChunks() for rows of at most @p kChunks warp widths of atoms on the int16 scores
+ *        @p values (an array of @p stride per axis).
+ */
+template <int kChunks>
+__device__ __forceinline__ void countWhimChannelBatch(const int16_t*          values,
+                                                      const int               stride,
+                                                      const int               numAtoms,
+                                                      const int               lane,
+                                                      const WhimBitmapParams& params,
+                                                      uint32_t*               bitmap,
+                                                      int*                    counts) {
+#pragma unroll 1
+  for (int axis = 0; axis < 3; ++axis) {
+    const int total = countWhimSymmetricBatchChunks<kChunks>(values + axis * stride, numAtoms, lane, params, bitmap);
+    if (lane == 0) {
+      counts[axis] = total;
+    }
+  }
+}
+
+/**
+ * @brief Whether the batched WHIM kernel handles @p threshold: its window fits the bitmap search, and every atom
+ *        whose own bit can lie in its window is centered (see countWhimSymmetricBatchLoop()).
+ */
+inline bool whimBatchSupported(const WhimThreshold& threshold) {
+  if (!threshold.windowFits || threshold.exhaustive) {
+    return false;
+  }
+  const int64_t centeredLimit = threshold.boundaryCentered ? threshold.boundary : threshold.centeredLimit;
+  return threshold.windowRadius / 2 <= centeredLimit;
+}
+
+/**
+ * @brief PBF and WHIM of conformers `kConformers * blockIdx.x ...`, a batch per block (see WhimBatchShared).
+ *
+ * Phases, each ending in a block barrier: (0) one warp per conformer centers the coordinates in float64;
+ * (1) groups of kBatchGroupLanes lanes sum the covariance of each (conformer, slot); (2) a lane per
+ * (conformer, slot) diagonalizes; (3) groups project and round each (conformer, channel), PBF included;
+ * (4) warps take the (conformer, channel, axis) symmetry searches in turn; (5) a lane per output term writes
+ * the WHIM rows. Rows longer than @p whimMaxAtoms are invalid, and invalid rows produce NaN.
+ */
+template <int kConformers, typename Real, bool kComputePbf>
+__global__ void __launch_bounds__(kBatchThreads, 8) whimBatchKernel(const DeviceCoordView        coordinates,
+                                                                    const Property3DDeviceInputs inputs,
+                                                                    Real* __restrict__ pbfOutput,
+                                                                    Real* __restrict__ whimOutput,
+                                                                    const int             whimMaxAtoms,
+                                                                    const WhimBatchLayout layout,
+                                                                    const WhimThreshold   threshold) {
+  extern __shared__ double dynamicScratch[];
+  __shared__ WhimBatchShared<kConformers> shared;
+  constexpr bool                          kSeparatePbf   = kComputePbf;
+  const int                               tid            = static_cast<int>(threadIdx.x);
+  const int                               lane           = tid % kWarpSize;
+  const int                               warp           = tid / kWarpSize;
+  const int                               group          = lane / kBatchGroupLanes;
+  const int                               laneInGroup    = lane % kBatchGroupLanes;
+  const int                               stride         = layout.stride;
+  const int                               firstConformer = static_cast<int>(blockIdx.x) * kConformers;
+  uint32_t* const bitmap = reinterpret_cast<uint32_t*>(dynamicScratch) + warp * kWhimBitmapWords;
+  int16_t* const  warpScores =
+    reinterpret_cast<int16_t*>(reinterpret_cast<uint32_t*>(dynamicScratch) + kBatchWarps * kWhimBitmapWords) +
+    warp * layout.warpScoreInts16();
+  const double* const positions = coordinates.positions;
+  static_assert(kWhimBitmapWords % 4 == 0, "16-byte aligned bitmaps");
+  const int totalAtoms = inputs.moleculeAtomStarts[coordinates.nMols];
+
+// Phase 0: one warp per conformer validates it and centers its coordinates; every warp clears its bitmap.
+#pragma unroll 1
+  for (int i = lane; i < kWhimBitmapWords / 4; i += kWarpSize) {
+    reinterpret_cast<uint4*>(bitmap)[i] = make_uint4(0, 0, 0, 0);
+  }
+#pragma unroll 1
+  for (int i = tid; i < kConformers * kNumWhimAxes; i += kBatchThreads) {
+    (&shared.maxMagnitudes[0][0])[i] = 0;
+  }
+#pragma unroll 1
+  for (int c = warp; c < kConformers; c += kBatchWarps) {
+    const int conformerIdx = firstConformer + c;
+    if (conformerIdx >= coordinates.numConformers) {
+      if (lane == 0) {
+        shared.numAtoms[c] = 0;
+      }
+      continue;
+    }
+    const ConformerRange range         = loadConformerRange(coordinates, conformerIdx);
+    const int            numAtoms      = range.numAtoms;
+    int                  moleculeStart = 0;
+    int                  moleculeAtoms = -1;
+    if (range.positions != nullptr) {
+      moleculeStart = inputs.moleculeAtomStarts[range.moleculeIdx];
+      moleculeAtoms = inputs.moleculeAtomStarts[range.moleculeIdx + 1] - moleculeStart;
+    }
+    if (moleculeAtoms != numAtoms || numAtoms > whimMaxAtoms) {  // Invalid; uniform across the warp.
+      Real* const row = whimOutput + static_cast<size_t>(conformerIdx) * kNumWhimProperties;
+#pragma unroll 1
+      for (int valueIdx = lane; valueIdx < kNumWhimProperties; valueIdx += kWarpSize) {
+        storeOutput<Real>(row + valueIdx, nan(""));
+      }
+      if (kComputePbf && lane == 0) {
+        storeOutput<Real>(pbfOutput + conformerIdx, nan(""));
+      }
+      if (lane == 0) {
+        shared.numAtoms[c] = 0;
+      }
+      continue;
+    }
+    double sumX = 0;
+    double sumY = 0;
+    double sumZ = 0;
+#pragma unroll 1
+    for (int atomIdx = lane; atomIdx < numAtoms; atomIdx += kWarpSize) {
+      sumX += range.positions[atomIdx * 3 + 0];
+      sumY += range.positions[atomIdx * 3 + 1];
+      sumZ += range.positions[atomIdx * 3 + 2];
+    }
+    const double partials[4]  = {sumX, sumY, sumZ, 0.0};
+    const double total        = warpTransposedSum4(partials, lane);
+    const double inverseAtoms = 1.0 / static_cast<double>(numAtoms);
+    const double centroidX    = __shfl_sync(0xffffffffu, total, 0) * inverseAtoms;
+    const double centroidY    = __shfl_sync(0xffffffffu, total, 8) * inverseAtoms;
+    const double centroidZ    = __shfl_sync(0xffffffffu, total, 16) * inverseAtoms;
+    if (lane == 0) {
+      shared.centroids[c][0]      = centroidX;
+      shared.centroids[c][1]      = centroidY;
+      shared.centroids[c][2]      = centroidZ;
+      shared.atomStart[c]         = (range.positions - positions) / 3;
+      shared.numAtoms[c]          = numAtoms;
+      shared.moleculeAtomStart[c] = moleculeStart;
+      shared.is3D[c] = !kComputePbf || inputs.conformerIs3D == nullptr || inputs.conformerIs3D[conformerIdx] != 0;
+    }
+  }
+  __syncthreads();
+
+// Phase 1: covariance sums, a group per (conformer, slot); a warp takes four slots of one conformer per pass.
+#pragma unroll 1
+  for (int half = warp; half < 2 * kConformers; half += kBatchWarps) {
+    const int     c            = half >> 1;
+    const int     slot         = (half & 1) * kBatchGroups + group;
+    const int     numAtoms     = shared.numAtoms[c];
+    const double* rowPositions = positions + 3 * shared.atomStart[c];
+    const double  centroidX    = shared.centroids[c][0];
+    const double  centroidY    = shared.centroids[c][1];
+    const double  centroidZ    = shared.centroids[c][2];
+    WhimReal      sums[8]      = {0, 0, 0, 0, 0, 0, 0, 0};
+    // With its own PCA, PBF's float sums ride along the unweighted channel's (the first group of an even half):
+    // the same atoms per lane and the same centered values narrowed to Real, so the same sums as a loop of their own.
+    Real          pbfSums[8]   = {0, 0, 0, 0, 0, 0, 0, 0};
+    if (slot < kNumWhimChannels) {
+      // A unit weight leaves every product exact, so the unweighted channel takes the weighted path.
+      const double* weights = inputs.atomPropertyWeights + shared.moleculeAtomStart[c] +
+                              static_cast<size_t>(slot > 0 ? slot - 1 : 0) * totalAtoms;
+#pragma unroll 1
+      for (int atomIdx = laneInGroup; atomIdx < numAtoms; atomIdx += kBatchGroupLanes) {
+        const WhimReal weight = slot > 0 ? weights[atomIdx] : WhimReal(1);
+        WhimReal       x;
+        WhimReal       y;
+        WhimReal       z;
+        centeredPosition(rowPositions, atomIdx, centroidX, centroidY, centroidZ, x, y, z);
+        sums[0] += weight;
+        sums[1] += weight * x * x;
+        sums[2] += weight * x * y;
+        sums[3] += weight * x * z;
+        sums[4] += weight * y * y;
+        sums[5] += weight * y * z;
+        sums[6] += weight * z * z;
+        if constexpr (kSeparatePbf) {
+          if (slot == 0) {
+            const Real pbfX = static_cast<Real>(x);
+            const Real pbfY = static_cast<Real>(y);
+            const Real pbfZ = static_cast<Real>(z);
+            pbfSums[0] += Real(1);
+            pbfSums[1] += pbfX * pbfX;
+            pbfSums[2] += pbfX * pbfY;
+            pbfSums[3] += pbfX * pbfZ;
+            pbfSums[4] += pbfY * pbfY;
+            pbfSums[5] += pbfY * pbfZ;
+            pbfSums[6] += pbfZ * pbfZ;
+          }
+        }
+      }
+    }
+    const WhimReal sum = groupTransposedSum8(sums, lane);
+    if (slot < kNumWhimChannels && laneInGroup < 7) {
+      shared.covarianceSums[c][slot][laneInGroup] = sum;
+    }
+    if constexpr (kSeparatePbf) {
+      if ((half & 1) == 0) {  // Uniform across the warp.
+        const Real pbfSum = groupTransposedSum8(pbfSums, lane);
+        if (slot == 0 && laneInGroup < 7) {
+          shared.covarianceSums[c][kNumWhimChannels][laneInGroup] = pbfSum;
+        }
+      }
+    }
+  }
+  __syncthreads();
+
+  // Phase 2: a lane per (conformer, channel) eigensystem; the next warp PBF's own eigensystems, then the
+  // logarithms the symmetry terms share.
+  constexpr int kEigenWarps = (kConformers * kNumWhimChannels + kWarpSize - 1) / kWarpSize;
+  constexpr int kPbfWarp    = kEigenWarps;
+  constexpr int kLogWarp    = kEigenWarps + (kSeparatePbf ? 1 : 0);
+  static_assert(kLogWarp < kBatchWarps && kConformers <= kWarpSize, "phase 2 fits the block");
+  if (tid < kConformers * kNumWhimChannels) {
+    const int c       = tid / kNumWhimChannels;
+    const int channel = tid % kNumWhimChannels;
+    if (shared.numAtoms[c] > 0) {
+      WhimReal sums[7];
+      for (int i = 0; i < 7; ++i) {
+        sums[i] = shared.covarianceSums[c][channel][i];
+      }
+      WhimReal covariance[6];
+      normalizeCovariance(sums, channel == 0, shared.numAtoms[c], covariance);
+      ProjectionState<WhimReal> state;
+      diagonalizeProjection(covariance, state);
+      for (int i = 0; i < 9; ++i) {
+        shared.eigen[c][channel][i] = state.eigenvectors[i];
+      }
+      for (int i = 0; i < 3; ++i) {
+        shared.eigen[c][channel][9 + i] = state.eigenvalues[i];
+      }
+    }
+  } else if (kSeparatePbf && warp == kPbfWarp && lane < kConformers) {
+    if (shared.numAtoms[lane] > 0) {
+      Real sums[7];
+      for (int i = 0; i < 7; ++i) {
+        sums[i] = static_cast<Real>(shared.covarianceSums[lane][kNumWhimChannels][i]);
+      }
+      Real covariance[6];
+      normalizeCovariance(sums, true, shared.numAtoms[lane], covariance);
+      ProjectionState<Real> state;
+      diagonalizeProjection(covariance, state);
+      shared.pbfAxis[lane][0] = state.eigenvectors[2];
+      shared.pbfAxis[lane][1] = state.eigenvectors[5];
+      shared.pbfAxis[lane][2] = state.eigenvectors[8];
+    }
+  } else if (warp == kLogWarp && lane < kConformers) {
+    if (shared.numAtoms[lane] > 0) {
+      shared.logInverseAtoms[lane] = log(WhimReal(1) / static_cast<WhimReal>(shared.numAtoms[lane]));
+    }
+  }
+  __syncthreads();
+
+  // Phase 3: projections and symmetry searches. Each pass, a group per (conformer, channel) task and, with its
+  // own PCA, PBF's projects into the warp's score buffer (rounded scores, their fourth-power sums and largest
+  // magnitudes), then the warp searches its tasks' (channel,
+  // axis) pairs in turn. Projections too large for the bitmap are recomputed in int32 and compared pairwise.
+  // Tasks are the (conformer, channel) pairs, then with its own PCA each conformer's PBF projection; they are
+  // dealt round-robin over the warps, so that every warp gets the same number of searches (within one channel) and
+  // a mix of the batch's conformers, and each pass a warp's groups take its next four.
+  constexpr int          kProjectionTasks = kNumWhimChannels + (kSeparatePbf ? 1 : 0);
+  constexpr int          kWhimTasks       = kConformers * kNumWhimChannels;
+  constexpr int          kTasksPerPass    = kBatchWarps * kBatchGroups;
+  const WhimBitmapParams params           = WhimBitmapParams::make(threshold);
+#pragma unroll 1
+  for (int pass = 0; pass * kTasksPerPass < kConformers * kProjectionTasks; ++pass) {
+    const int     task         = (pass * kBatchGroups + group) * kBatchWarps + warp;
+    const bool    whimTask     = task < kWhimTasks;
+    const int     c            = whimTask ? task / kNumWhimChannels : task - kWhimTasks;
+    const int     channel      = whimTask ? task % kNumWhimChannels : kNumWhimChannels;
+    const int     numAtoms     = task < kConformers * kProjectionTasks ? shared.numAtoms[c] : 0;
+    const double* rowPositions = positions;
+    double        centroidX    = 0;
+    double        centroidY    = 0;
+    double        centroidZ    = 0;
+    if (numAtoms > 0) {
+      rowPositions = positions + 3 * shared.atomStart[c];
+      centroidX    = shared.centroids[c][0];
+      centroidY    = shared.centroids[c][1];
+      centroidZ    = shared.centroids[c][2];
+    }
+    WhimReal moments[4] = {0, 0, 0, 0};
+    Real     pbfSum     = 0;
+    if (channel < kNumWhimChannels) {
+      WhimReal axes[9];
+      if (numAtoms > 0) {
+        for (int i = 0; i < 9; ++i) {
+          axes[i] = shared.eigen[c][channel][i];
+        }
+      }
+      int16_t* const channelScores = warpScores + group * 3 * stride;
+      uint32_t       magnitudes[3] = {0, 0, 0};
+#pragma unroll 1
+      for (int atomIdx = laneInGroup; atomIdx < numAtoms; atomIdx += kBatchGroupLanes) {
+        WhimReal x;
+        WhimReal y;
+        WhimReal z;
+        centeredPosition(rowPositions, atomIdx, centroidX, centroidY, centroidZ, x, y, z);
+#pragma unroll
+        for (int axis = 0; axis < 3; ++axis) {
+          const WhimReal score = whimScore(x, y, z, axes[axis], axes[3 + axis], axes[6 + axis]);
+          moments[axis] += score * score * score * score;
+          const int32_t  rounded   = whimRounded(score);
+          const uint32_t magnitude = whimMagnitude(rounded);
+          channelScores[axis * stride + atomIdx] =
+            static_cast<int16_t>(magnitude < static_cast<uint32_t>(kWhimBitmapRange) ? rounded : 0);
+          magnitudes[axis] = magnitude > magnitudes[axis] ? magnitude : magnitudes[axis];
+        }
+      }
+      if (numAtoms > 0) {
+        for (int axis = 0; axis < 3; ++axis) {
+          atomicMax(&shared.maxMagnitudes[c][3 * channel + axis], magnitudes[axis]);
+        }
+      }
+    } else if constexpr (kSeparatePbf) {
+      // Mean absolute distance from the plane of best fit, as computePbf().
+      Real axisX = 0;
+      Real axisY = 0;
+      Real axisZ = 0;
+      if (numAtoms > 0) {
+        axisX = static_cast<Real>(shared.pbfAxis[c][0]);
+        axisY = static_cast<Real>(shared.pbfAxis[c][1]);
+        axisZ = static_cast<Real>(shared.pbfAxis[c][2]);
+      }
+#pragma unroll 1
+      for (int atomIdx = laneInGroup; atomIdx < numAtoms; atomIdx += kBatchGroupLanes) {
+        Real x;
+        Real y;
+        Real z;
+        centeredPosition(rowPositions, atomIdx, centroidX, centroidY, centroidZ, x, y, z);
+        pbfSum += fabs(x * axisX + y * axisY + z * axisZ);
+      }
+    }
+    const WhimReal moment    = groupTransposedSum4(moments, lane);
+    const int      momentIdx = (laneInGroup >> 1) & 3;
+    if (channel < kNumWhimChannels && numAtoms > 0 && (laneInGroup & 1) == 0 && momentIdx < 3) {
+      shared.fourthMoments[c][3 * channel + momentIdx] = moment;
+    }
+    if constexpr (kComputePbf) {
+      const Real pbfTotal = groupButterflySum(pbfSum);
+      const bool pbfTask  = channel == kNumWhimChannels;
+      if (pbfTask && numAtoms > 0 && laneInGroup == 0) {
+        const Real pbf = pbfTotal / static_cast<Real>(numAtoms);
+        storeOutput<Real>(pbfOutput + firstConformer + c, numAtoms < 4 || !shared.is3D[c] ? Real(0) : pbf);
+      }
+    }
+    __syncwarp();
+    // The warp searches its WHIM tasks' axes, choosing the bitmap search's variant once per task.
+#pragma unroll 1
+    for (int warpTask = 0; warpTask < kBatchGroups; ++warpTask) {
+      const int searchTask = (pass * kBatchGroups + warpTask) * kBatchWarps + warp;
+      if (searchTask >= kWhimTasks) {
+        break;  // The PBF tasks follow every WHIM task.
+      }
+      const int searchConformer = searchTask / kNumWhimChannels;
+      const int searchChannel   = searchTask % kNumWhimChannels;
+      const int searchAtoms     = shared.numAtoms[searchConformer];
+      if (searchAtoms == 0) {
+        continue;
+      }
+      const int16_t* const  values  = warpScores + warpTask * 3 * stride;
+      int* const            counts  = &shared.symmetricCounts[searchConformer][3 * searchChannel];
+      const uint32_t* const maxima  = &shared.maxMagnitudes[searchConformer][3 * searchChannel];
+      const uint32_t        largest = maxima[0] > maxima[1] ? (maxima[0] > maxima[2] ? maxima[0] : maxima[2]) :
+                                                              (maxima[1] > maxima[2] ? maxima[1] : maxima[2]);
+      if (largest < static_cast<uint32_t>(kWhimBitmapRange) && searchAtoms <= 4 * kWarpSize) {
+        if (searchAtoms <= 2 * kWarpSize) {
+          if (searchAtoms <= kWarpSize) {
+            countWhimChannelBatch<1>(values, stride, searchAtoms, lane, params, bitmap, counts);
+          } else {
+            countWhimChannelBatch<2>(values, stride, searchAtoms, lane, params, bitmap, counts);
+          }
+        } else if (searchAtoms <= 3 * kWarpSize) {
+          countWhimChannelBatch<3>(values, stride, searchAtoms, lane, params, bitmap, counts);
+        } else {
+          countWhimChannelBatch<4>(values, stride, searchAtoms, lane, params, bitmap, counts);
+        }
+        continue;
+      }
+      // Longer rows, or projections too large for the bitmap: recomputed in int32 and compared pairwise.
+#pragma unroll 1
+      for (int axis = 0; axis < 3; ++axis) {
+        int total;
+        if (maxima[axis] < static_cast<uint32_t>(kWhimBitmapRange)) {
+          total = countWhimSymmetricBatchLoop(values + axis * stride, searchAtoms, lane, params, bitmap);
+        } else {
+          const double* const axes = shared.eigen[searchConformer][searchChannel];
+          total                    = countWhimSymmetricPairwise(positions + 3 * shared.atomStart[searchConformer],
+                                             shared.centroids[searchConformer][0],
+                                             shared.centroids[searchConformer][1],
+                                             shared.centroids[searchConformer][2],
+                                             axes[axis],
+                                             axes[3 + axis],
+                                             axes[6 + axis],
+                                             searchAtoms,
+                                             lane,
+                                             threshold,
+                                             reinterpret_cast<int32_t*>(bitmap));
+        }
+        if (lane == 0) {
+          counts[axis] = total;
+        }
+      }
+    }
+    __syncwarp();  // The buffer is searched before the next pass overwrites it.
+  }
+  __syncthreads();
+
+  // Phase 5: a lane per (conformer, channel, axis) writes its terms; the last warp the channels' eigenvalue
+  // terms meanwhile. Then a lane per (conformer, channel) writes the means.
+  constexpr int kEigenvalueTermBase = (kConformers * kNumWhimAxes + kWarpSize - 1) / kWarpSize * kWarpSize;
+  static_assert(kEigenvalueTermBase + kConformers * kNumWhimChannels <= kBatchThreads, "phase 5 fits the block");
+  if (tid < kConformers * kNumWhimAxes) {
+    const int c        = tid / kNumWhimAxes;
+    const int pair     = tid % kNumWhimAxes;
+    const int numAtoms = shared.numAtoms[c];
+    if (numAtoms > 0) {
+      const int channel = pair / 3;
+      const int axis    = pair % 3;
+      WhimReal  gamma;
+      WhimReal  kurtosis;
+      writeWhimAxisTerms<Real>(pair,
+                               shared.eigen[c][channel][9 + axis],
+                               shared.fourthMoments[c][pair],
+                               shared.symmetricCounts[c][pair],
+                               numAtoms,
+                               shared.logInverseAtoms[c],
+                               whimOutput + static_cast<size_t>(firstConformer + c) * kNumWhimProperties,
+                               gamma,
+                               kurtosis);
+      shared.axisTerms.gammas[c][channel][axis]   = gamma;
+      shared.axisTerms.kurtoses[c][channel][axis] = kurtosis;
+    }
+  } else if (tid >= kEigenvalueTermBase && tid < kEigenvalueTermBase + kConformers * kNumWhimChannels) {
+    const int c       = (tid - kEigenvalueTermBase) / kNumWhimChannels;
+    const int channel = (tid - kEigenvalueTermBase) % kNumWhimChannels;
+    if (shared.numAtoms[c] > 0) {
+      const WhimReal eigenvalues[3] = {shared.eigen[c][channel][9],
+                                       shared.eigen[c][channel][10],
+                                       shared.eigen[c][channel][11]};
+      writeWhimEigenvalueTerms<Real>(channel,
+                                     eigenvalues,
+                                     whimOutput + static_cast<size_t>(firstConformer + c) * kNumWhimProperties);
+    }
+  }
+  __syncthreads();
+  if (tid < kConformers * kNumWhimChannels) {
+    const int c       = tid / kNumWhimChannels;
+    const int channel = tid % kNumWhimChannels;
+    if (shared.numAtoms[c] > 0) {
+      writeWhimMeans<Real>(channel,
+                           shared.axisTerms.gammas[c][channel],
+                           shared.axisTerms.kurtoses[c][channel],
+                           whimOutput + static_cast<size_t>(firstConformer + c) * kNumWhimProperties);
+    }
+  }
+}
+
 /**
  * @brief PBF of conformers [0, numConformers); one group of lanes per conformer, an unweighted PCA in @p Real.
  */
@@ -1348,6 +2069,35 @@ bool configureWhimSharedScratch(Kernel* const kernel,
   return true;
 }
 
+//! Launches whimBatchKernel() with @p kConformers per block when its shared memory fits the device; returns
+//! whether it did.
+template <int kConformers, typename Real, bool kComputePbf>
+bool launchWhimBatch(const DeviceCoordView&        coordinates,
+                     const Property3DDeviceInputs& inputs,
+                     const WhimThreshold&          threshold,
+                     Real*                         pbfOutput,
+                     Real*                         whimOutput,
+                     const int                     maxAtoms,
+                     const int                     device,
+                     const cudaStream_t            stream) {
+  const WhimBatchLayout layout = WhimBatchLayout::make(maxAtoms);
+  auto* const           kernel = whimBatchKernel<kConformers, Real, kComputePbf>;
+  const size_t          bytes  = layout.bytes();
+  if (!configureWhimSharedScratch(kernel, bytes, sizeof(WhimBatchShared<kConformers>), device)) {
+    return false;
+  }
+  const int blocks = (coordinates.numConformers + kConformers - 1) / kConformers;
+  kernel<<<blocks, kBatchThreads, bytes, stream>>>(coordinates,
+                                                   inputs,
+                                                   pbfOutput,
+                                                   whimOutput,
+                                                   maxAtoms,
+                                                   layout,
+                                                   threshold);
+  cudaCheckError(cudaGetLastError());
+  return true;
+}
+
 template <typename Real, bool kComputePbf>
 void launchWhim(const DeviceCoordView&        coordinates,
                 const Property3DDeviceInputs& inputs,
@@ -1361,10 +2111,90 @@ void launchWhim(const DeviceCoordView&        coordinates,
   int                     device        = 0;
   cudaCheckError(cudaGetDevice(&device));
 
+  // A grid that the current device holds in one wave of wide blocks takes a warp per projection slot.
+  constexpr int kWaveWarps       = whimWaveWarps(kComputePbf);
+  auto* const   waveKernel       = whimKernel<kWaveWarps, Real, kComputePbf, false>;
+  const size_t  waveScratchBytes = layout.bytes(kWaveWarps);
+  if (configureWhimSharedScratch(waveKernel, waveScratchBytes, sizeof(WhimBlockShared<kWaveWarps>), device)) {
+    int numSMs       = 0;
+    int activeBlocks = 0;
+    cudaCheckError(cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, device));
+    cudaCheckError(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&activeBlocks,
+                                                                 waveKernel,
+                                                                 kWaveWarps * kWarpSize,
+                                                                 waveScratchBytes));
+    if (static_cast<int64_t>(numConformers) <= static_cast<int64_t>(numSMs) * activeBlocks) {
+      waveKernel<<<numConformers, kWaveWarps * kWarpSize, waveScratchBytes, stream>>>(coordinates,
+                                                                                      inputs,
+                                                                                      0,
+                                                                                      pbfOutput,
+                                                                                      whimOutput,
+                                                                                      nullptr,
+                                                                                      maxAtoms,
+                                                                                      layout,
+                                                                                      threshold);
+      cudaCheckError(cudaGetLastError());
+      return;
+    }
+  }
+
   const size_t scratchBytes = layout.bytes(kWhimWarps);
   auto* const  sharedKernel = whimKernel<kWhimWarps, Real, kComputePbf, false>;
   const bool   sharedFits =
     configureWhimSharedScratch(sharedKernel, scratchBytes, sizeof(WhimBlockShared<kWhimWarps>), device);
+
+  // Grids filling at least half a resident wave of four-conformer batched blocks pack four conformers into
+  // each; grids that a block per conformer would take more than one wave for, but two-conformer batched
+  // blocks take in one, pack two (half the batched block's passes, so about half its latency).
+  if (whimBatchSupported(threshold) && maxAtoms <= kBatchMaxAtoms) {
+    constexpr int kBatchConformers = 4;
+    auto* const   batchKernel      = whimBatchKernel<kBatchConformers, Real, kComputePbf>;
+    const size_t  batchBytes       = WhimBatchLayout::make(maxAtoms).bytes();
+    int           numSMs           = 0;
+    int           batchBlocks      = 0;
+    cudaCheckError(cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, device));
+    if (configureWhimSharedScratch(batchKernel, batchBytes, sizeof(WhimBatchShared<kBatchConformers>), device)) {
+      cudaCheckError(
+        cudaOccupancyMaxActiveBlocksPerMultiprocessor(&batchBlocks, batchKernel, kBatchThreads, batchBytes));
+    }
+    if (2 * static_cast<int64_t>(numConformers) > static_cast<int64_t>(numSMs) * batchBlocks * kBatchConformers &&
+        launchWhimBatch<kBatchConformers, Real, kComputePbf>(coordinates,
+                                                             inputs,
+                                                             threshold,
+                                                             pbfOutput,
+                                                             whimOutput,
+                                                             maxAtoms,
+                                                             device,
+                                                             stream)) {
+      return;
+    }
+    constexpr int kPairConformers = 2;
+    auto* const   pairKernel      = whimBatchKernel<kPairConformers, Real, kComputePbf>;
+    int           sharedBlocks    = 0;
+    int           pairBlocks      = 0;
+    if (sharedFits) {
+      cudaCheckError(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&sharedBlocks,
+                                                                   sharedKernel,
+                                                                   kWhimWarps * kWarpSize,
+                                                                   scratchBytes));
+    }
+    if (configureWhimSharedScratch(pairKernel, batchBytes, sizeof(WhimBatchShared<kPairConformers>), device)) {
+      cudaCheckError(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&pairBlocks, pairKernel, kBatchThreads, batchBytes));
+    }
+    if (static_cast<int64_t>(numConformers) > static_cast<int64_t>(numSMs) * sharedBlocks &&
+        static_cast<int64_t>(numConformers) <= static_cast<int64_t>(numSMs) * pairBlocks * kPairConformers &&
+        launchWhimBatch<kPairConformers, Real, kComputePbf>(coordinates,
+                                                            inputs,
+                                                            threshold,
+                                                            pbfOutput,
+                                                            whimOutput,
+                                                            maxAtoms,
+                                                            device,
+                                                            stream)) {
+      return;
+    }
+  }
+
   if (sharedFits) {
     sharedKernel<<<numConformers, kWhimWarps * kWarpSize, scratchBytes, stream>>>(coordinates,
                                                                                   inputs,
