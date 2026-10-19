@@ -118,7 +118,8 @@ class ScopedCudaEvent {
  */
 std::optional<cudaStream_t> acquireExternalStream(std::uintptr_t streamPtr);
 
-//! Returns the amount of free memory on the current device.
+//! Returns the memory available for new allocations on the current device: free device memory plus memory that the
+//! current memory pool has reserved but is not using.
 size_t getDeviceFreeMemory();
 
 //! Rounds a number up to the nearest multiple of two.

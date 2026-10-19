@@ -29,6 +29,7 @@
 #include "src/substruct/substruct_search.h"
 #include "src/utils/cuda_error_check.h"
 #include "src/utils/device.h"
+#include "src/utils/mempool.h"
 #include "src/utils/nvtx.h"
 #include "src/utils/openmp_helpers.h"
 
@@ -502,6 +503,7 @@ class SubstructLibrary::Impl {
       std::size_t      freeBytes  = 0;
       std::size_t      totalBytes = 0;
       cudaCheckError(cudaMemGetInfo(&freeBytes, &totalBytes));
+      freeBytes += getMemPoolIdleBytes();
       const std::size_t usedBytes   = totalBytes - std::min(totalBytes, freeBytes + freedBytes[gpu]);
       const std::size_t budgetBytes = totalBytes * memoryPercent / 100;
       availableBytes[gpu]           = budgetBytes > usedBytes ? budgetBytes - usedBytes : 0;

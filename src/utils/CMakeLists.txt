@@ -20,9 +20,12 @@ target_compile_options(exceptions PRIVATE "-fPIC")
 add_library(cuda_error_check INTERFACE)
 target_link_libraries(cuda_error_check INTERFACE exceptions CUDA::cudart)
 
+add_library(mempool mempool.cpp)
+target_link_libraries(mempool PRIVATE CUDA::cudart)
+
 add_library(device_vector INTERFACE)
 target_link_libraries(device_vector INTERFACE CUDA::cudart cuda_error_check
-                                              cccl_interface)
+                                              cccl_interface mempool)
 
 add_library(device_convert device_convert.cu)
 target_link_libraries(device_convert PUBLIC CUDA::cudart)
@@ -34,7 +37,7 @@ add_library(pinned_host_allocator pinned_host_allocator.cpp)
 target_link_libraries(pinned_host_allocator PUBLIC host_vector)
 
 add_library(device device.cpp)
-target_link_libraries(device PRIVATE CUDA::cudart cuda_error_check)
+target_link_libraries(device PRIVATE CUDA::cudart cuda_error_check mempool)
 
 add_library(rdkit_utils INTERFACE)
 

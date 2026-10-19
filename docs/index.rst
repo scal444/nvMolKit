@@ -261,6 +261,22 @@ An example:
     options.batchesPerGpu = 4
     EmbedMolecules(mols, ..., hardwareOptions=options)
 
+
+GPU memory pool
+---------------
+
+nvMolKit allocates GPU working memory from each device's default CUDA memory pool. By default, CUDA returns freed pool
+memory to the driver at every synchronization, so each call pays to reallocate it. On first use of a device, nvMolKit
+sets the default pool's release threshold to 256 MiB: up to that much freed memory stays reserved for reuse by later
+calls, which saves 0.3 to 0.8 ms of host time per call on small inputs. Memory above the threshold is still returned
+at synchronization.
+
+* Set ``NVMOLKIT_MEMPOOL_RELEASE_THRESHOLD`` to a byte count to use a different threshold, or to ``0`` to leave the
+  pool untouched.
+* A threshold that is already non-zero, set by your code or another library, is kept.
+* Only the CUDA default pool is changed. PyTorch's default caching allocator and CuPy's default memory pool manage
+  their own memory and are unaffected.
+
  
  
 .. toctree::

@@ -52,6 +52,9 @@ add_executable(test_device_vector test_device_vector.cpp)
 target_link_libraries(test_device_vector PRIVATE device_vector cuda_error_check
                                                  CUDA::cudart)
 
+add_executable(test_mempool test_mempool.cpp)
+target_link_libraries(test_mempool PRIVATE device_vector mempool CUDA::cudart)
+
 add_executable(test_flat_bit_vect test_flat_bit_vect.cpp)
 target_link_libraries(test_flat_bit_vect PRIVATE flatBitVect)
 target_include_directories(test_flat_bit_vect SYSTEM
@@ -463,6 +466,7 @@ set(TEST_LIST
     test_device
     test_device_timings
     test_device_vector
+    test_mempool
     test_distgeom_kernels
     test_etkdg
     test_etkdg_device_output

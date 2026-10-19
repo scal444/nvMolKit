@@ -18,6 +18,7 @@
 #include <cuda_runtime.h>
 
 #include "src/utils/cuda_error_check.h"
+#include "src/utils/mempool.h"
 #include "src/utils/nvtx.h"
 
 namespace nvMolKit {
@@ -99,7 +100,7 @@ size_t getDeviceFreeMemory() {
   size_t free  = 0;
   size_t total = 0;
   cudaCheckError(cudaMemGetInfo(&free, &total));
-  return free;
+  return free + getMemPoolIdleBytes();
 }
 
 ScopedStream::ScopedStream(const char* name) {

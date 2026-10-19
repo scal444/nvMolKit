@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "src/utils/cuda_error_check.h"
+#include "src/utils/mempool.h"
 
 namespace nvMolKit {
 
@@ -35,6 +36,7 @@ template <typename T> class AsyncDeviceVector {
   explicit AsyncDeviceVector() = default;
   explicit AsyncDeviceVector(size_t size, cudaStream_t stream = 0) : size_(size), stream_(stream) {
     if (size > 0) {
+      ensureDefaultMemPoolConfigured();
       cudaCheckError(cudaMallocAsync(&data_, size * sizeof(T), stream_));
     }
   }
@@ -97,6 +99,7 @@ template <typename T> class AsyncDeviceVector {
     }
 
     T* newData;
+    ensureDefaultMemPoolConfigured();
     cudaCheckError(cudaMallocAsync(&newData, newSize * sizeof(T), stream_));
     if (size_ > 0) {
       cudaCheckError(
@@ -218,8 +221,12 @@ template <typename T> class AsyncDeviceVector {
 // TODO stream option
 template <typename T> class AsyncDevicePtr {
  public:
-  AsyncDevicePtr() : stream_(nullptr) { cudaCheckError(cudaMallocAsync(&data_, sizeof(T), nullptr)); };
+  AsyncDevicePtr() : stream_(nullptr) {
+    ensureDefaultMemPoolConfigured();
+    cudaCheckError(cudaMallocAsync(&data_, sizeof(T), nullptr));
+  };
   explicit AsyncDevicePtr(const T& data, const cudaStream_t stream = nullptr) : stream_(stream) {
+    ensureDefaultMemPoolConfigured();
     cudaCheckError(cudaMallocAsync(&data_, sizeof(T), stream_));
     cudaCheckError(cudaMemcpyAsync(data_, &data, sizeof(T), cudaMemcpyHostToDevice, stream_));
   }
