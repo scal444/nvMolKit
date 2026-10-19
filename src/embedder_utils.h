@@ -95,9 +95,9 @@ enum class Dimensionality {
 /**
  * @brief Throws ValueErrorException for embedding parameters that nvMolKit does not implement yet
  *
- * Unsupported: ETversion other than 1 or 2, and on
- * RDKit >= 2026.09, embedForceField other than UFF, onlyInitialEmbedding, internal-coordinate initial embedding,
- * and random-coordinate initial embedding requested without useRandomCoords.
+ * Supports ETversion 1 and 2, and ETversion 4 on RDKit >= 2026.09.
+ * On RDKit >= 2026.09, unsupported options are embedForceField other than UFF, onlyInitialEmbedding,
+ * internal-coordinate initial embedding, and random-coordinate initial embedding requested without useRandomCoords.
  */
 void validateSupportedEmbedParameters(const RDKit::DGeomHelpers::EmbedParameters& params);
 

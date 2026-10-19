@@ -20,6 +20,7 @@
 
 #include "src/etkdg_impl.h"
 #include "src/forcefields/dist_geom.h"
+#include "src/forcefields/gaussian_torsion_batched_forcefield.h"
 #include "src/minimizer/bfgs_minimize.h"
 
 using ::nvMolKit::detail::EmbedArgs;
@@ -45,6 +46,7 @@ template <typename real> class ETKMinimizationStageT final : public ETKDGStage {
   std::string name() const override { return "ETK 3D Minimization"; }
 
  private:
+  DistGeom::GaussianTorsionContribsHost gaussianContribs_;
   //! Re-sets the bounds for distance constraints based on the current positions.
   void setReferenceValues(const ETKDGContext& ctx, const DistGeom::Energy3DForceContribsDeviceT<real>& contribs);
 

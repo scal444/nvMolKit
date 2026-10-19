@@ -8,6 +8,7 @@
 
 #include "src/etkdg_impl.h"
 #include "src/forcefields/aio_etkdg_batched_forcefield.h"
+#include "src/forcefields/gaussian_torsion_batched_forcefield.h"
 #include "src/minimizer/bfgs_minimize.h"
 
 namespace nvMolKit::detail {
@@ -27,6 +28,7 @@ template <typename Real> class ETKDGAllInOneMinimizationStageT final : public ET
   std::string name() const override { return "All-in-one ETKDG Minimization"; }
 
  private:
+  DistGeom::GaussianTorsionContribsHost            gaussianContribs_;
   std::vector<DistGeom::AllInOneForceContribsHost> systemContribs_;
   DistGeom::BatchedMolecularSystemHost             dgSystemHost_;
   BatchedForcefieldMetadata                        metadata_;

@@ -108,6 +108,7 @@ target_link_libraries(
           ${RDKit_LIBS}
           dg_batched_forcefield
           aio_etkdg_batched_forcefield
+          gaussian_torsion_batched_forcefield
           etk_batched_forcefield
           ff_kernel_utils
           dist_geom

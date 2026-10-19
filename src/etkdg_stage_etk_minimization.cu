@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <stdexcept>
 #include <type_traits>
 #include <unordered_map>
 
@@ -117,6 +118,13 @@ ETKMinimizationStageT<real>::ETKMinimizationStageT(
     : embedParam_(embedParam),
       minimizer_(minimizer),
       stream_(stream) {
+  if (embedParam.ETversion == 4) {
+    std::vector<const ForceFields::CrystalFF::CrystalFFDetails*> details;
+    for (const auto& arguments : eargs) {
+      details.push_back(&arguments.etkdgDetails);
+    }
+    gaussianContribs_ = DistGeom::constructGaussianTorsionContribs(details, ctx.systemHost.atomStarts);
+  }
   grad_.setStream(stream);
   energyOuts_.setStream(stream);
 
@@ -209,6 +217,9 @@ void ETKMinimizationStageT<real>::setReferenceValues(const ETKDGContext&        
 
 template <typename real> void ETKMinimizationStageT<real>::execute(ETKDGContext& ctx) {
   const auto effectiveBackend = minimizer_.resolveBackend(ctx.systemHost.atomStarts);
+  if (!gaussianContribs_.idx1.empty() && effectiveBackend != BfgsBackend::BATCHED) {
+    throw std::invalid_argument("Gaussian torsion minimization requires the batched backend");
+  }
 
   // 1. Update reference positions for start of loop.
   constexpr int maxIters = 300;  // Taken from hard-coded RDKit value.
@@ -228,14 +239,20 @@ template <typename real> void ETKMinimizationStageT<real>::execute(ETKDGContext&
       }
     }();
     setReferenceValues(ctx, contribs);
-    const int* numImpropers = contribs.improperTorsionTerms.numImpropers.data();
+    const int*                                        numImpropers = contribs.improperTorsionTerms.numImpropers.data();
+    std::unique_ptr<GaussianTorsionBatchedForcefield> gaussian;
+    BatchedForcefield*                                activeForcefield = &forcefield;
+    if (!gaussianContribs_.idx1.empty()) {
+      gaussian         = std::make_unique<GaussianTorsionBatchedForcefield>(forcefield, gaussianContribs_, stream_);
+      activeForcefield = gaussian.get();
+    }
     grad_.resize(ctx.systemHost.positions.size());
     grad_.zero();
     energyOuts_.resize(ctx.systemHost.atomStarts.size() - 1);
     energyOuts_.zero();
     minimizer_.minimize(maxIters,
                         embedParam_.optimizerForceTol,
-                        forcefield,
+                        *activeForcefield,
                         ctx.systemDevice.positions,
                         grad_,
                         energyOuts_,

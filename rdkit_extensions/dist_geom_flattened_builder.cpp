@@ -5,10 +5,12 @@
 #include <GraphMol/ForceFieldHelpers/CrystalFF/TorsionPreferences.h>
 #include <RDGeneral/Invariant.h>
 
+#include <algorithm>
 #include <boost/dynamic_bitset.hpp>
 #include <cmath>
 #include <map>
 #include <sstream>
+#include <stdexcept>
 
 #include "rdkit_extensions/torsion_compat.h"
 #include "versions.h"
@@ -164,6 +166,13 @@ void addExperimentalTorsionTerms(nvMolKit::DistGeom::Energy3DForceContribsHost& 
     } else {
       atomPairs[atomIdx4 * numAtoms + atomIdx1] = true;
     }
+
+#if RDKIT_ETKDG_2026_09_API
+    // Gaussian lookup terms are packed separately from the cosine contribution arrays.
+    if (std::holds_alternative<ForceFields::CrystalFF::GaussianExp_T>(etkdgDetails.expTorsionAngles[torsionIdx])) {
+      continue;
+    }
+#endif
 
     // Add the torsion contribution
     contribs.experimentalTorsionTerms.idx1.push_back(atomIdx1);
@@ -505,6 +514,74 @@ nvMolKit::DistGeom::EnergyForceContribsHost constructForceFieldContribs(
   addFourthDimContribs(contribs, dim, numAtoms, weightFourthDim);
 
   return contribs;
+}
+
+GaussianTorsionContribsHost constructGaussianTorsionContribs(
+  const std::vector<const ::ForceFields::CrystalFF::CrystalFFDetails*>& details,
+  const std::vector<int>&                                               atomStarts) {
+  if (atomStarts.size() != details.size() + 1) {
+    throw std::invalid_argument("Gaussian torsion systems must match atom offsets");
+  }
+  GaussianTorsionContribsHost result;
+#if RDKIT_ETKDG_2026_09_API
+  std::map<std::pair<std::vector<double>, std::vector<double>>, int> tableOffsets;
+  for (std::size_t system = 0; system < details.size(); ++system) {
+    if (details[system] == nullptr || atomStarts[system] < 0 || atomStarts[system + 1] < atomStarts[system]) {
+      throw std::invalid_argument("Invalid Gaussian torsion system");
+    }
+    const auto& source = *details[system];
+    if (source.expTorsionAtoms.size() != source.expTorsionAngles.size() ||
+        source.expTorsionAtoms.size() != source.torsionIdx.size()) {
+      throw std::invalid_argument("Inconsistent Gaussian torsion metadata");
+    }
+    const int               atomCount = atomStarts[system + 1] - atomStarts[system];
+    boost::dynamic_bitset<> doneBonds(atomCount * atomCount);
+    for (std::size_t term = 0; term < source.expTorsionAtoms.size(); ++term) {
+      const auto* parameters = std::get_if<ForceFields::CrystalFF::GaussianExp_T>(&source.expTorsionAngles[term]);
+      if (parameters == nullptr) {
+        continue;
+      }
+      const auto& atoms = source.expTorsionAtoms[term];
+      if (atoms.size() != 4 ||
+          std::any_of(atoms.begin(), atoms.end(), [atomCount](int atom) { return atom < 0 || atom >= atomCount; })) {
+        throw std::invalid_argument("Invalid Gaussian torsion atom indices");
+      }
+      const int bond = std::min(atoms[1], atoms[2]) * atomCount + std::max(atoms[1], atoms[2]);
+      if (doneBonds[bond]) {
+        continue;
+      }
+      doneBonds[bond]  = true;
+      const auto table = source.torsionIdx[term];
+      if (table >= source.phiToEnergy.size() || table >= source.phiToGrad.size() ||
+          source.phiToEnergy[table].size() < 2 || source.phiToEnergy[table].size() != source.phiToGrad[table].size()) {
+        throw std::invalid_argument("Invalid Gaussian torsion lookup table");
+      }
+      auto key                     = std::make_pair(source.phiToEnergy[table], source.phiToGrad[table]);
+      const auto [entry, inserted] = tableOffsets.try_emplace(std::move(key), static_cast<int>(result.energies.size()));
+      if (inserted) {
+        result.energies.insert(result.energies.end(),
+                               source.phiToEnergy[table].begin(),
+                               source.phiToEnergy[table].end());
+        result.derivatives.insert(result.derivatives.end(),
+                                  source.phiToGrad[table].begin(),
+                                  source.phiToGrad[table].end());
+      }
+      result.idx1.push_back(atomStarts[system] + atoms[0]);
+      result.idx2.push_back(atomStarts[system] + atoms[1]);
+      result.idx3.push_back(atomStarts[system] + atoms[2]);
+      result.idx4.push_back(atomStarts[system] + atoms[3]);
+      result.systemIdx.push_back(system);
+      result.tableStarts.push_back(entry->second);
+      result.tableSizes.push_back(source.phiToEnergy[table].size());
+      result.scaling.push_back(std::get<3>(*parameters));
+    }
+  }
+#else
+  if (!details.empty()) {
+    throw std::invalid_argument("Gaussian torsions require RDKit 2026.09 or later");
+  }
+#endif
+  return result;
 }
 
 nvMolKit::DistGeom::AllInOneForceContribsHost constructAllInOneForceFieldContribs(

@@ -680,93 +680,114 @@ TEST(AllInOneETKDGForcefield, BothPhasesMatchRdkitWithInactiveSystemsAndFourthCo
   std::mt19937                           generator(1729);
   std::uniform_real_distribution<double> coordinate(-1.5, 1.5);
   for (const std::string smiles : {"CC(=O)NC", "c1ccccc1", "CC#N", "C[C@H](O)F"}) {
-    for (bool useBasicKnowledge : {false, true}) {
-      SCOPED_TRACE(smiles + " basicKnowledge=" + std::to_string(useBasicKnowledge));
-      std::unique_ptr<RDKit::RWMol> molecule(RDKit::SmilesToMol(smiles));
-      ASSERT_NE(molecule, nullptr);
-      RDKit::MolOps::addHs(*molecule);
-      auto parameters                    = RDKit::DGeomHelpers::ETKDGv3;
-      parameters.useLegacyImplementation = false;
-      parameters.useBasicKnowledge       = useBasicKnowledge;
-      parameters.boundsMatForceScaling   = 0.75;
-      nvMolKit::detail::EmbedArgs arguments;
-      arguments.dim = 4;
-      ASSERT_TRUE(nvMolKit::DGeomHelpers::prepareEmbedderArgs(*molecule, parameters, arguments));
-      const int atomCount            = molecule->getNumAtoms();
-      auto*     topology             = RDKit::MolOps::getDistanceMat(*molecule);
-      arguments.etkdgDetails.distMat = topology;
-      std::vector<std::unique_ptr<RDGeom::PointND>> pointOwners;
-      RDGeom::PointPtrVect                          points;
-      std::vector<double>                           positions;
-      for (int atom = 0; atom < atomCount; ++atom) {
-        auto point = std::make_unique<RDGeom::PointND>(4);
-        for (int dimension = 0; dimension < 4; ++dimension) {
-          (*point)[dimension] = coordinate(generator) * (dimension == 3 ? 0.2 : 1.0);
-          positions.push_back((*point)[dimension]);
+    std::vector<int> versions{2};
+#if RDKIT_ETKDG_2026_09_API
+    versions.push_back(4);
+#endif
+    for (const int version : versions) {
+      SCOPED_TRACE(version);
+      for (bool useBasicKnowledge : {false, true}) {
+        SCOPED_TRACE(smiles + " basicKnowledge=" + std::to_string(useBasicKnowledge));
+        std::unique_ptr<RDKit::RWMol> molecule(RDKit::SmilesToMol(smiles));
+        ASSERT_NE(molecule, nullptr);
+        RDKit::MolOps::addHs(*molecule);
+        auto parameters                    = RDKit::DGeomHelpers::ETKDGv3;
+        parameters.useLegacyImplementation = false;
+        parameters.useBasicKnowledge       = useBasicKnowledge;
+        parameters.ETversion               = version;
+        parameters.boundsMatForceScaling   = 0.75;
+        nvMolKit::detail::EmbedArgs arguments;
+        arguments.dim = 4;
+        ASSERT_TRUE(nvMolKit::DGeomHelpers::prepareEmbedderArgs(*molecule, parameters, arguments));
+        const int atomCount            = molecule->getNumAtoms();
+        auto*     topology             = RDKit::MolOps::getDistanceMat(*molecule);
+        arguments.etkdgDetails.distMat = topology;
+        std::vector<std::unique_ptr<RDGeom::PointND>> pointOwners;
+        RDGeom::PointPtrVect                          points;
+        std::vector<double>                           positions;
+        for (int atom = 0; atom < atomCount; ++atom) {
+          auto point = std::make_unique<RDGeom::PointND>(4);
+          for (int dimension = 0; dimension < 4; ++dimension) {
+            (*point)[dimension] = coordinate(generator) * (dimension == 3 ? 0.2 : 1.0);
+            positions.push_back((*point)[dimension]);
+          }
+          points.push_back(point.get());
+          pointOwners.push_back(std::move(point));
         }
-        points.push_back(point.get());
-        pointOwners.push_back(std::move(point));
-      }
-      auto                       contributions = nvMolKit::DistGeom::constructAllInOneForceFieldContribs(4,
-                                                                                   *arguments.mmat,
-                                                                                   arguments.chiralCenters,
-                                                                                   arguments.etkdgDetails,
-                                                                                   topology,
-                                                                                   true,
-                                                                                   useBasicKnowledge);
-      std::vector<int>           atomStarts{0, atomCount, 2 * atomCount};
-      BatchedMolecularSystemHost distanceSystem;
-      preallocateEstimatedBatch(contributions.distanceGeometry, distanceSystem, 2);
-      for (int system = 0; system < 2; ++system) {
-        addMoleculeToMolecularSystem(contributions.distanceGeometry,
-                                     atomCount,
-                                     4,
-                                     atomStarts,
-                                     distanceSystem,
-                                     nullptr,
-                                     system,
-                                     0);
-      }
-      nvMolKit::AllInOneETKDGBatchedForcefield actual(distanceSystem, {contributions, contributions}, atomStarts);
-      std::unique_ptr<ForceFields::ForceField> reference(
-        ::DistGeom::constructAllInOneForceField(*arguments.mmat,
-                                                points,
-                                                arguments.etkdgDetails,
-                                                &arguments.chiralCenters));
-      reference->initialize();
-      std::vector<double> batchedPositions = positions;
-      batchedPositions.insert(batchedPositions.end(), positions.begin(), positions.end());
-      AsyncDeviceVector<double>  devicePositions, deviceGradients, deviceEnergies;
-      AsyncDeviceVector<uint8_t> active;
-      devicePositions.setFromVector(batchedPositions);
-      deviceGradients.resize(batchedPositions.size());
-      deviceEnergies.resize(2);
-      active.setFromVector({0, 1});
-      for (bool torsionsEnabled : {false, true}) {
-        SCOPED_TRACE("torsionsEnabled=" + std::to_string(torsionsEnabled));
-        actual.setTorsionTermsEnabled(torsionsEnabled);
-        if (torsionsEnabled) {
-          ::DistGeom::addTorsionTerms(reference.get(), arguments.etkdgDetails, useBasicKnowledge, true);
+        auto                       contributions = nvMolKit::DistGeom::constructAllInOneForceFieldContribs(4,
+                                                                                     *arguments.mmat,
+                                                                                     arguments.chiralCenters,
+                                                                                     arguments.etkdgDetails,
+                                                                                     topology,
+                                                                                     true,
+                                                                                     useBasicKnowledge);
+        std::vector<int>           atomStarts{0, atomCount, 2 * atomCount};
+        BatchedMolecularSystemHost distanceSystem;
+        preallocateEstimatedBatch(contributions.distanceGeometry, distanceSystem, 2);
+        for (int system = 0; system < 2; ++system) {
+          addMoleculeToMolecularSystem(contributions.distanceGeometry,
+                                       atomCount,
+                                       4,
+                                       atomStarts,
+                                       distanceSystem,
+                                       nullptr,
+                                       system,
+                                       0);
         }
-        deviceEnergies.zero();
-        deviceGradients.zero();
-        CHECK_CUDA_RETURN(actual.computeEnergy(deviceEnergies.data(), devicePositions.data(), active.data()));
-        CHECK_CUDA_RETURN(actual.computeGradients(deviceGradients.data(), devicePositions.data(), active.data()));
-        std::vector<double> energies(2), gradients(batchedPositions.size());
-        deviceEnergies.copyToHost(energies);
-        deviceGradients.copyToHost(gradients);
-        CHECK_CUDA_RETURN(cudaDeviceSynchronize());
-        const double        expectedEnergy = reference->calcEnergy(positions.data());
-        std::vector<double> expectedGradient(positions.size(), 0.0);
-        reference->calcGrad(positions.data(), expectedGradient.data());
-        EXPECT_DOUBLE_EQ(energies[0], 0.0);
-        EXPECT_NEAR(energies[1], expectedEnergy, 2e-5 * std::max(1.0, std::abs(expectedEnergy)));
-        for (std::size_t index = 0; index < positions.size(); ++index) {
-          EXPECT_DOUBLE_EQ(gradients[index], 0.0);
-          EXPECT_NEAR(gradients[positions.size() + index],
-                      expectedGradient[index],
-                      2e-5 * std::max(1.0, std::abs(expectedGradient[index])))
-            << "coordinate=" << index;
+        nvMolKit::AllInOneETKDGBatchedForcefield actual(distanceSystem, {contributions, contributions}, atomStarts);
+        std::unique_ptr<nvMolKit::GaussianTorsionBatchedForcefield> gaussian;
+        nvMolKit::BatchedForcefield*                                activeForcefield = &actual;
+        if (version == 4) {
+          const auto torsions =
+            constructGaussianTorsionContribs({&arguments.etkdgDetails, &arguments.etkdgDetails}, atomStarts);
+          gaussian         = std::make_unique<nvMolKit::GaussianTorsionBatchedForcefield>(actual, torsions);
+          activeForcefield = gaussian.get();
+        }
+        std::unique_ptr<ForceFields::ForceField> reference(
+          ::DistGeom::constructAllInOneForceField(*arguments.mmat,
+                                                  points,
+                                                  arguments.etkdgDetails,
+                                                  &arguments.chiralCenters));
+        reference->initialize();
+        std::vector<double> batchedPositions = positions;
+        batchedPositions.insert(batchedPositions.end(), positions.begin(), positions.end());
+        AsyncDeviceVector<double>  devicePositions, deviceGradients, deviceEnergies;
+        AsyncDeviceVector<uint8_t> active;
+        devicePositions.setFromVector(batchedPositions);
+        deviceGradients.resize(batchedPositions.size());
+        deviceEnergies.resize(2);
+        active.setFromVector({0, 1});
+        for (bool torsionsEnabled : {false, true}) {
+          SCOPED_TRACE("torsionsEnabled=" + std::to_string(torsionsEnabled));
+          actual.setTorsionTermsEnabled(torsionsEnabled);
+          if (gaussian) {
+            gaussian->setEnabled(torsionsEnabled);
+          }
+          if (torsionsEnabled) {
+            ::DistGeom::addTorsionTerms(reference.get(), arguments.etkdgDetails, useBasicKnowledge, true);
+          }
+          deviceEnergies.zero();
+          deviceGradients.zero();
+          CHECK_CUDA_RETURN(
+            activeForcefield->computeEnergy(deviceEnergies.data(), devicePositions.data(), active.data()));
+          CHECK_CUDA_RETURN(
+            activeForcefield->computeGradients(deviceGradients.data(), devicePositions.data(), active.data()));
+          std::vector<double> energies(2), gradients(batchedPositions.size());
+          deviceEnergies.copyToHost(energies);
+          deviceGradients.copyToHost(gradients);
+          CHECK_CUDA_RETURN(cudaDeviceSynchronize());
+          const double        expectedEnergy = reference->calcEnergy(positions.data());
+          std::vector<double> expectedGradient(positions.size(), 0.0);
+          reference->calcGrad(positions.data(), expectedGradient.data());
+          EXPECT_DOUBLE_EQ(energies[0], 0.0);
+          EXPECT_NEAR(energies[1], expectedEnergy, 2e-5 * std::max(1.0, std::abs(expectedEnergy)));
+          for (std::size_t index = 0; index < positions.size(); ++index) {
+            EXPECT_DOUBLE_EQ(gradients[index], 0.0);
+            EXPECT_NEAR(gradients[positions.size() + index],
+                        expectedGradient[index],
+                        2e-5 * std::max(1.0, std::abs(expectedGradient[index])))
+              << "coordinate=" << index;
+          }
         }
       }
     }

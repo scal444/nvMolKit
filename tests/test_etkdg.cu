@@ -1005,6 +1005,14 @@ TEST(AllInOneETKDG, RejectsExplicitPerMoleculeBackend) {
 #endif
 
 TEST(ETKDGParameters, SupportedModesAndUnsupportedOptions) {
+  auto versionFour      = RDKit::DGeomHelpers::ETKDGv3;
+  versionFour.ETversion = 4;
+#if RDKIT_ETKDG_2026_09_API
+  EXPECT_NO_THROW(nvMolKit::DGeomHelpers::validateSupportedEmbedParameters(versionFour));
+#else
+  EXPECT_THROW(nvMolKit::DGeomHelpers::validateSupportedEmbedParameters(versionFour), ValueErrorException);
+#endif
+
   for (const int version : {1, 2}) {
     auto parameters      = RDKit::DGeomHelpers::ETKDGv3;
     parameters.ETversion = version;
@@ -1014,7 +1022,7 @@ TEST(ETKDGParameters, SupportedModesAndUnsupportedOptions) {
     EXPECT_NO_THROW(nvMolKit::DGeomHelpers::validateSupportedEmbedParameters(parameters));
 #endif
   }
-  for (const int version : {-1, 0, 3, 4}) {
+  for (const int version : {-1, 0, 3, 5}) {
     auto parameters      = RDKit::DGeomHelpers::ETKDGv3;
     parameters.ETversion = version;
     EXPECT_THROW(nvMolKit::DGeomHelpers::validateSupportedEmbedParameters(parameters), ValueErrorException);
@@ -1036,3 +1044,23 @@ TEST(ETKDGParameters, SupportedModesAndUnsupportedOptions) {
   EXPECT_NO_THROW(nvMolKit::DGeomHelpers::validateSupportedEmbedParameters(parameters));
 #endif
 }
+
+#if RDKIT_ETKDG_2026_09_API
+TEST(GaussianETKDG, RejectsExplicitPerMoleculeBackend) {
+  std::unique_ptr<RDKit::RWMol> molecule(RDKit::SmilesToMol("CCCC"));
+  ASSERT_NE(molecule, nullptr);
+  for (bool legacy : {false, true}) {
+    auto parameters                    = RDKit::DGeomHelpers::ETKDGv4;
+    parameters.useLegacyImplementation = legacy;
+    EXPECT_THROW(nvMolKit::embedMolecules({molecule.get()},
+                                          parameters,
+                                          1,
+                                          20,
+                                          false,
+                                          nullptr,
+                                          nvMolKit::BatchHardwareOptions{},
+                                          nvMolKit::BfgsBackend::PER_MOLECULE),
+                 std::invalid_argument);
+  }
+}
+#endif

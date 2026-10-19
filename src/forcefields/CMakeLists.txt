@@ -68,6 +68,13 @@ target_link_libraries(
   PUBLIC batched_forcefield dist_geom
   PRIVATE device_vector)
 
+add_library(gaussian_torsion_batched_forcefield
+            gaussian_torsion_batched_forcefield.cu)
+target_link_libraries(
+  gaussian_torsion_batched_forcefield
+  PUBLIC batched_forcefield
+  PRIVATE device_vector dist_geom)
+
 add_library(aio_etkdg_batched_forcefield aio_etkdg_batched_forcefield.cu)
 target_link_libraries(
   aio_etkdg_batched_forcefield

@@ -8,6 +8,7 @@
 #include <map>
 
 #include "src/forcefields/dist_geom.h"
+#include "src/forcefields/gaussian_torsion_batched_forcefield.h"
 #include "versions.h"
 namespace nvMolKit {
 namespace DistGeom {
@@ -45,6 +46,11 @@ nvMolKit::DistGeom::Energy3DForceContribsHost construct3DForceFieldContribs(
   const std::vector<double>&                        positions,
   int                                               dim,
   bool                                              useBasicKnowledge = true);
+
+//! Packs Gaussian torsions, retaining the first torsion about each central bond and sharing identical tables.
+GaussianTorsionContribsHost constructGaussianTorsionContribs(
+  const std::vector<const ::ForceFields::CrystalFF::CrystalFFDetails*>& details,
+  const std::vector<int>&                                               atomStarts);
 
 //! Builds the host contribution bundle for RDKit's all-in-one ETKDG force field.
 //!

@@ -144,10 +144,11 @@ std::optional<DeviceCoordResult> embedMolecules(const std::vector<RDKit::ROMol*>
 #else
   constexpr bool useAllInOneETKDG = false;
 #endif
-  if (useAllInOneETKDG && backend == BfgsBackend::PER_MOLECULE) {
-    throw std::invalid_argument("All-in-one ETKDG supports BATCHED and HYBRID backends");
+  const bool requiresBatched = useAllInOneETKDG || paramsCopy.ETversion == 4;
+  if (requiresBatched && backend == BfgsBackend::PER_MOLECULE) {
+    throw std::invalid_argument("All-in-one and Gaussian ETKDG support BATCHED and HYBRID backends");
   }
-  const auto minimizerBackend = useAllInOneETKDG ? BfgsBackend::BATCHED : backend;
+  const auto minimizerBackend = requiresBatched ? BfgsBackend::BATCHED : backend;
 
   ScopedNvtxRange coordsRange("Init ETKDG");
 

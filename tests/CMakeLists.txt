@@ -170,6 +170,17 @@ target_link_libraries(
           ff_kernel_utils
           test_utils)
 
+add_executable(test_gaussian_torsions test_gaussian_torsions.cu)
+target_link_libraries(
+  test_gaussian_torsions
+  PRIVATE etkdg_stages gaussian_torsion_batched_forcefield
+          dg_batched_forcefield
+          rdkit_dist_geom_flattened
+          device
+          test_utils
+          nvmolkit_versions
+          ${RDKit_LIBS})
+
 add_executable(test_distgeom test_distgeom.cu)
 target_link_libraries(
   test_distgeom
@@ -177,6 +188,7 @@ target_link_libraries(
           rdkit_dist_geom_flattened
           batched_forcefield
           aio_etkdg_batched_forcefield
+          gaussian_torsion_batched_forcefield
           dg_batched_forcefield
           dist_geom
           device_vector
@@ -472,6 +484,7 @@ set(TEST_LIST
     test_device_timings
     test_device_vector
     test_distgeom_kernels
+    test_gaussian_torsions
     test_etkdg
     test_etkdg_device_output
     test_ff_device_output

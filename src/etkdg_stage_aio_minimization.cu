@@ -117,6 +117,13 @@ ETKDGAllInOneMinimizationStageT<Real>::ETKDGAllInOneMinimizationStageT(
   if (mols.size() != eargs.size()) {
     throw std::invalid_argument("Number of molecules and embed args must be the same");
   }
+  if (embedParams.ETversion == 4) {
+    std::vector<const ForceFields::CrystalFF::CrystalFFDetails*> details;
+    for (const auto& arguments : eargs) {
+      details.push_back(&arguments.etkdgDetails);
+    }
+    gaussianContribs_ = DistGeom::constructGaussianTorsionContribs(details, ctx.systemHost.atomStarts);
+  }
   gradients_.setStream(stream);
   energies_.setStream(stream);
   systemContribs_.reserve(mols.size());
@@ -152,28 +159,38 @@ template <typename Real> void ETKDGAllInOneMinimizationStageT<Real>::execute(ETK
   if (ctx.nTotalSystems == 0) {
     return;
   }
-  AllInOneETKDGBatchedForcefield forcefield(dgSystemHost_,
+  AllInOneETKDGBatchedForcefield                    forcefield(dgSystemHost_,
                                             systemContribs_,
                                             ctx.systemHost.atomStarts,
                                             metadata_,
                                             stream_);
+  std::unique_ptr<GaussianTorsionBatchedForcefield> gaussian;
+  BatchedForcefield*                                activeForcefield = &forcefield;
+  if (!gaussianContribs_.idx1.empty()) {
+    gaussian = std::make_unique<GaussianTorsionBatchedForcefield>(forcefield, gaussianContribs_, stream_);
+    gaussian->setEnabled(false);
+    activeForcefield = gaussian.get();
+  }
   gradients_.resize(ctx.systemDevice.positions.size());
   energies_.resize(ctx.systemHost.atomStarts.size() - 1);
 
   forcefield.setTorsionTermsEnabled(false);
   minimizer_.minimize(firstPhaseIterations_,
                       optimizerForceTol_,
-                      forcefield,
+                      *activeForcefield,
                       ctx.systemDevice.positions,
                       gradients_,
                       energies_,
                       ctx.activeThisStage.data());
 
   forcefield.setTorsionTermsEnabled(true);
+  if (gaussian) {
+    gaussian->setEnabled(true);
+  }
   for (int cycle = 0; cycle < 8; ++cycle) {
     const bool needsMore = minimizer_.minimize(100,
                                                optimizerForceTol_,
-                                               forcefield,
+                                               *activeForcefield,
                                                ctx.systemDevice.positions,
                                                gradients_,
                                                energies_,
@@ -184,8 +201,10 @@ template <typename Real> void ETKDGAllInOneMinimizationStageT<Real>::execute(ETK
   }
 
   energies_.zero();
-  cudaCheckError(
-    forcefield.computeEnergy(energies_.data(), ctx.systemDevice.positions.data(), ctx.activeThisStage.data(), stream_));
+  cudaCheckError(activeForcefield->computeEnergy(energies_.data(),
+                                                 ctx.systemDevice.positions.data(),
+                                                 ctx.activeThisStage.data(),
+                                                 stream_));
   const int numSystems = energies_.size();
   checkAllInOneEnergyKernel<<<(numSystems + kBlockSize - 1) / kBlockSize, kBlockSize, 0, stream_>>>(
     numSystems,
