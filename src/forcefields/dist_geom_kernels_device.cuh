@@ -61,22 +61,16 @@ static __device__ __forceinline__ void distViolationGrad(const DG_REAL* pos,
   } else {
     return;
   }
-  const float dGradx = weight * preFactor * (pos[posIdx1 + 0] - pos[posIdx2 + 0]);
-  const float dGrady = weight * preFactor * (pos[posIdx1 + 1] - pos[posIdx2 + 1]);
-  const float dGradz = weight * preFactor * (pos[posIdx1 + 2] - pos[posIdx2 + 2]);
-
-  atomicAdd(&grad[posIdx1 + 0], dGradx);
-  atomicAdd(&grad[posIdx1 + 1], dGrady);
-  atomicAdd(&grad[posIdx1 + 2], dGradz);
-  atomicAdd(&grad[posIdx2 + 0], -dGradx);
-  atomicAdd(&grad[posIdx2 + 1], -dGrady);
-  atomicAdd(&grad[posIdx2 + 2], -dGradz);
-
-  if constexpr (dimension == 4) {
-    const float dGradw = weight * preFactor * (pos[posIdx1 + 3] - pos[posIdx2 + 3]);
-    atomicAdd(&grad[posIdx1 + 3], dGradw);
-    atomicAdd(&grad[posIdx2 + 3], -dGradw);
+  DG_REAL g1[dimension];
+  DG_REAL g2[dimension];
+#pragma unroll
+  for (int c = 0; c < dimension; ++c) {
+    const float dGrad = weight * preFactor * (pos[posIdx1 + c] - pos[posIdx2 + c]);
+    g1[c]             = dGrad;
+    g2[c]             = -dGrad;
   }
+  gradAtomicAdd(&grad[posIdx1], g1);
+  gradAtomicAdd(&grad[posIdx2], g2);
 }
 
 template <typename T>
@@ -164,17 +158,20 @@ static __device__ __forceinline__ void chiralViolationGrad(const DG_REAL* pos,
       preFactor = weight * (vol - ub);
     }
 
-    atomicAdd(&grad[posIdx1 + 0], preFactor * (v2y * v3z - v2z * v3y));
-    atomicAdd(&grad[posIdx1 + 1], preFactor * (v2z * v3x - v2x * v3z));
-    atomicAdd(&grad[posIdx1 + 2], preFactor * (v2x * v3y - v2y * v3x));
+    gradAtomicAdd3<DG_REAL>(&grad[posIdx1],
+                            preFactor * (v2y * v3z - v2z * v3y),
+                            preFactor * (v2z * v3x - v2x * v3z),
+                            preFactor * (v2x * v3y - v2y * v3x));
 
-    atomicAdd(&grad[posIdx2 + 0], preFactor * (v3y * v1z - v3z * v1y));
-    atomicAdd(&grad[posIdx2 + 1], preFactor * (v3z * v1x - v3x * v1z));
-    atomicAdd(&grad[posIdx2 + 2], preFactor * (v3x * v1y - v3y * v1x));
+    gradAtomicAdd3<DG_REAL>(&grad[posIdx2],
+                            preFactor * (v3y * v1z - v3z * v1y),
+                            preFactor * (v3z * v1x - v3x * v1z),
+                            preFactor * (v3x * v1y - v3y * v1x));
 
-    atomicAdd(&grad[posIdx3 + 0], preFactor * (v2z * v1y - v2y * v1z));
-    atomicAdd(&grad[posIdx3 + 1], preFactor * (v2x * v1z - v2z * v1x));
-    atomicAdd(&grad[posIdx3 + 2], preFactor * (v2y * v1x - v2x * v1y));
+    gradAtomicAdd3<DG_REAL>(&grad[posIdx3],
+                            preFactor * (v2z * v1y - v2y * v1z),
+                            preFactor * (v2x * v1z - v2z * v1x),
+                            preFactor * (v2y * v1x - v2x * v1y));
 
     float x1 = pos[posIdx1 + 0];
     float y1 = pos[posIdx1 + 1];
@@ -185,9 +182,10 @@ static __device__ __forceinline__ void chiralViolationGrad(const DG_REAL* pos,
     float x3 = pos[posIdx3 + 0];
     float y3 = pos[posIdx3 + 1];
     float z3 = pos[posIdx3 + 2];
-    atomicAdd(&grad[posIdx4 + 0], preFactor * (z1 * (y2 - y3) + z2 * (y3 - y1) + z3 * (y1 - y2)));
-    atomicAdd(&grad[posIdx4 + 1], preFactor * (x1 * (z2 - z3) + x2 * (z3 - z1) + x3 * (z1 - z2)));
-    atomicAdd(&grad[posIdx4 + 2], preFactor * (y1 * (x2 - x3) + y2 * (x3 - x1) + y3 * (x1 - x2)));
+    gradAtomicAdd3<DG_REAL>(&grad[posIdx4],
+                            preFactor * (z1 * (y2 - y3) + z2 * (y3 - y1) + z3 * (y1 - y2)),
+                            preFactor * (x1 * (z2 - z3) + x2 * (z3 - z1) + x3 * (z1 - z2)),
+                            preFactor * (y1 * (x2 - x3) + y2 * (x3 - x1) + y3 * (x1 - x2)));
   }
 }
 
@@ -543,18 +541,10 @@ static __device__ __forceinline__ void torsionAngleGrad(const DG_REAL*       pos
     sinTerm * (dCos_dT0x * r1y + dCos_dT0y * (-r1x) + dCos_dT1x * (r4y - r3y) + dCos_dT1y * (r3x - r4x));
 
   // Add gradients using atomic operations
-  atomicAdd(&grad[posIdx1 + 0], g1x);
-  atomicAdd(&grad[posIdx1 + 1], g1y);
-  atomicAdd(&grad[posIdx1 + 2], g1z);
-  atomicAdd(&grad[posIdx2 + 0], g2x);
-  atomicAdd(&grad[posIdx2 + 1], g2y);
-  atomicAdd(&grad[posIdx2 + 2], g2z);
-  atomicAdd(&grad[posIdx3 + 0], g3x);
-  atomicAdd(&grad[posIdx3 + 1], g3y);
-  atomicAdd(&grad[posIdx3 + 2], g3z);
-  atomicAdd(&grad[posIdx4 + 0], g4x);
-  atomicAdd(&grad[posIdx4 + 1], g4y);
-  atomicAdd(&grad[posIdx4 + 2], g4z);
+  etkGradAtomicAdd3<DG_REAL>(&grad[posIdx1], g1x, g1y, g1z);
+  etkGradAtomicAdd3<DG_REAL>(&grad[posIdx2], g2x, g2y, g2z);
+  etkGradAtomicAdd3<DG_REAL>(&grad[posIdx3], g3x, g3y, g3z);
+  etkGradAtomicAdd3<DG_REAL>(&grad[posIdx4], g4x, g4y, g4z);
 }
 
 static __device__ __forceinline__ void inversionGrad(const DG_REAL* pos,
@@ -671,21 +661,16 @@ static __device__ __forceinline__ void inversionGrad(const DG_REAL* pos,
   const DG_REAL tg4z = (t3z * inverseTerm1 - rJLz * cosY_over_sinY) * invdJL;
 
   // Add gradients using atomic operations
-  atomicAdd(&grad[posIdx1 + 0], dE_dW * tg1x);
-  atomicAdd(&grad[posIdx1 + 1], dE_dW * tg1y);
-  atomicAdd(&grad[posIdx1 + 2], dE_dW * tg1z);
+  etkGradAtomicAdd3<DG_REAL>(&grad[posIdx1], dE_dW * tg1x, dE_dW * tg1y, dE_dW * tg1z);
 
-  atomicAdd(&grad[posIdx2 + 0], -dE_dW * (tg1x + tg3x + tg4x));
-  atomicAdd(&grad[posIdx2 + 1], -dE_dW * (tg1y + tg3y + tg4y));
-  atomicAdd(&grad[posIdx2 + 2], -dE_dW * (tg1z + tg3z + tg4z));
+  etkGradAtomicAdd3<DG_REAL>(&grad[posIdx2],
+                             -dE_dW * (tg1x + tg3x + tg4x),
+                             -dE_dW * (tg1y + tg3y + tg4y),
+                             -dE_dW * (tg1z + tg3z + tg4z));
 
-  atomicAdd(&grad[posIdx3 + 0], dE_dW * tg3x);
-  atomicAdd(&grad[posIdx3 + 1], dE_dW * tg3y);
-  atomicAdd(&grad[posIdx3 + 2], dE_dW * tg3z);
+  etkGradAtomicAdd3<DG_REAL>(&grad[posIdx3], dE_dW * tg3x, dE_dW * tg3y, dE_dW * tg3z);
 
-  atomicAdd(&grad[posIdx4 + 0], dE_dW * tg4x);
-  atomicAdd(&grad[posIdx4 + 1], dE_dW * tg4y);
-  atomicAdd(&grad[posIdx4 + 2], dE_dW * tg4z);
+  etkGradAtomicAdd3<DG_REAL>(&grad[posIdx4], dE_dW * tg4x, dE_dW * tg4y, dE_dW * tg4z);
 }
 
 static __device__ __forceinline__ void distanceConstraintGrad(const DG_REAL* pos,
@@ -716,11 +701,12 @@ static __device__ __forceinline__ void distanceConstraintGrad(const DG_REAL* pos
   }
 
   // Calculate and accumulate gradients for each component
+  DG_REAL d[3];
   for (int i = 0; i < 3; i++) {
-    const DG_REAL dGrad = preFactor * (pos[posIdx1 + i] - pos[posIdx2 + i]);
-    atomicAdd(&grad[posIdx1 + i], dGrad);
-    atomicAdd(&grad[posIdx2 + i], -dGrad);
+    d[i] = preFactor * (pos[posIdx1 + i] - pos[posIdx2 + i]);
   }
+  etkGradAtomicAdd3<DG_REAL>(&grad[posIdx1], d[0], d[1], d[2]);
+  etkGradAtomicAdd3<DG_REAL>(&grad[posIdx2], -d[0], -d[1], -d[2]);
 }
 
 // Angle constraint gradient
@@ -801,17 +787,9 @@ static __device__ __forceinline__ void angleConstraintGrad(const DG_REAL* pos,
   const DG_REAL dedp2z = -(dedp1z + dedp3z);
 
   // Accumulate gradients using atomic operations
-  atomicAdd(&grad[posIdx1 + 0], dedp1x);
-  atomicAdd(&grad[posIdx1 + 1], dedp1y);
-  atomicAdd(&grad[posIdx1 + 2], dedp1z);
-
-  atomicAdd(&grad[posIdx2 + 0], dedp2x);
-  atomicAdd(&grad[posIdx2 + 1], dedp2y);
-  atomicAdd(&grad[posIdx2 + 2], dedp2z);
-
-  atomicAdd(&grad[posIdx3 + 0], dedp3x);
-  atomicAdd(&grad[posIdx3 + 1], dedp3y);
-  atomicAdd(&grad[posIdx3 + 2], dedp3z);
+  etkGradAtomicAdd3<DG_REAL>(&grad[posIdx1], dedp1x, dedp1y, dedp1z);
+  etkGradAtomicAdd3<DG_REAL>(&grad[posIdx2], dedp2x, dedp2y, dedp2z);
+  etkGradAtomicAdd3<DG_REAL>(&grad[posIdx3], dedp3x, dedp3y, dedp3z);
 }
 
 template <int dimension>
