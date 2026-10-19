@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <type_traits>
 
 #include "src/descriptors3d.h"
 #include "src/descriptors3d_kernel.cuh"
@@ -137,17 +138,142 @@ __device__ __forceinline__ void computeProjectionCovariance(const ConformerAtoms
   covariance[5] = groupAllReduceSum(zz) * inverseWeight;
 }
 
-//! Eigensystem of @p covariance into @p state: eigenvalue magnitudes in descending order with their axes.
+//! `rsqrt.approx.ftz.f64`: 1 / sqrt(@p x) from the upper word of @p x, about 23 bits (sm_20 and later).
+__device__ __forceinline__ double rsqrtApproxF64(const double x) {
+  double y;
+  asm("rsqrt.approx.ftz.f64 %0, %1;" : "=d"(y) : "d"(x));
+  return y;
+}
+
+//! 1 / sqrt(@p x) for normal @p x within projectionRsqrtRange(): rsqrtApproxF64() refined by the one third-order
+//! step the CUDA math library's rsqrt() takes on its fast path, without that function's out-of-range branch.
+__device__ __forceinline__ double projectionRsqrt(const double x) {
+  const double y0 = rsqrtApproxF64(x);
+  const double e  = fma(-x, y0 * y0, 1.0);
+  return fma(y0 * e, fma(0.375, e, 0.5), y0);
+}
+
+//! Inputs projectionRsqrt() takes: far from subnormals and overflow, so every intermediate stays normal.
+__device__ __forceinline__ bool projectionRsqrtRange(const double x) {
+  return x >= 0x1p-1000 && x <= 0x1p+1000;
+}
+
+/**
+ * @brief Jacobi rotation annihilating @p apq of a symmetric 3x3 matrix (@p arp, @p arq: the remaining index's
+ *        entries), rotating columns @p p and @p q of the row-major @p eigenvectors with it.
+ *
+ * The same rotation as symmetricEigensystemJacobi3x3()'s (the smaller angle, t = tan in [-1, 1]), from its
+ * half-angle relations rather than theta = (aqq - app) / 2 apq: with d = aqq - app, u = sgn(d) 2 apq and
+ * r = sqrt(d^2 + u^2), 1 + t^2 = 2 r / (|d| + r), so one square root and one reciprocal square root give
+ * c = (|d| + r) / sqrt(2 r (|d| + r)), s = u / sqrt(2 r (|d| + r)) and t = s 2 r / sqrt(2 r (|d| + r)), where
+ * the theta form needs three divisions and two square roots in sequence. Accuracy is unchanged: c^2 + s^2 = 1
+ * to rounding, so the iteration stays backward stable in @p Real.
+ */
 template <typename Real>
-__device__ __forceinline__ void diagonalizeProjection(const Real (&covariance)[6], ProjectionState<Real>& state) {
-  symmetricEigensystemJacobi3x3(covariance[0],
-                                covariance[1],
-                                covariance[2],
-                                covariance[3],
-                                covariance[4],
-                                covariance[5],
-                                state.eigenvalues,
-                                state.eigenvectors);
+__device__ __forceinline__ void projectionJacobiRotate(Real&       app,
+                                                       Real&       aqq,
+                                                       Real&       apq,
+                                                       Real&       arp,
+                                                       Real&       arq,
+                                                       Real* const eigenvectors,
+                                                       const int   p,
+                                                       const int   q) {
+  if (apq == Real(0)) {
+    return;
+  }
+  const Real d = aqq - app;
+  const Real u = copysign(Real(2), d) * apq;
+  if constexpr (std::is_same_v<Real, double>) {
+    // The same rotation from two reciprocal square roots and no square root: y = 1 / r, then with
+    // h = (|d| + r) / 2 r = (1 + |d| y) / 2 in [1/2, 1] and w = 1 / sqrt(h), c = h w, s = u y w / 2 and t = s w.
+    // Each root is one refined approximation (projectionRsqrt()), so the rotation's dependent chain is about two
+    // thirds of sqrt() followed by rsqrt(); c^2 + s^2 = 1 to rounding as before.
+    const double x = fma(d, d, u * u);
+    if (projectionRsqrtRange(x)) {
+      const double y         = projectionRsqrt(x);
+      const double h         = fma(0.5 * fabs(d), y, 0.5);
+      const double halfUy    = 0.5 * u * y;
+      const double w         = projectionRsqrt(h);
+      const double c         = h * w;
+      const double s         = halfUy * w;
+      const double tTimesApq = s * w * apq;
+      app -= tTimesApq;
+      aqq += tTimesApq;
+      apq             = 0.0;
+      const double rp = arp;
+      const double rq = arq;
+      arp             = c * rp - s * rq;
+      arq             = s * rp + c * rq;
+#pragma unroll
+      for (int row = 0; row < 3; ++row) {
+        const double vp           = eigenvectors[row * 3 + p];
+        const double vq           = eigenvectors[row * 3 + q];
+        eigenvectors[row * 3 + p] = c * vp - s * vq;
+        eigenvectors[row * 3 + q] = s * vp + c * vq;
+      }
+      return;
+    }
+  }
+  const Real r       = sqrt(d * d + u * u);
+  const Real sum     = fabs(d) + r;
+  const Real inverse = rsqrt(Real(2) * r * sum);
+  if (!(inverse < cuda::std::numeric_limits<Real>::infinity())) {
+    return;  // d^2 + u^2 underflowed: apq is negligible.
+  }
+  const Real c         = sum * inverse;
+  const Real s         = u * inverse;
+  const Real tTimesApq = s * (Real(2) * r * inverse) * apq;
+  app -= tTimesApq;
+  aqq += tTimesApq;
+  apq           = Real(0);
+  const Real rp = arp;
+  const Real rq = arq;
+  arp           = c * rp - s * rq;
+  arq           = s * rp + c * rq;
+#pragma unroll
+  for (int row = 0; row < 3; ++row) {
+    const Real vp             = eigenvectors[row * 3 + p];
+    const Real vq             = eigenvectors[row * 3 + q];
+    eigenvectors[row * 3 + p] = c * vp - s * vq;
+    eigenvectors[row * 3 + q] = s * vp + c * vq;
+  }
+}
+
+//! Cyclic Jacobi eigensystem of a symmetric 3x3 matrix, as symmetricEigensystemJacobi3x3() (same sweeps and
+//! stopping rule) with projectionJacobiRotate(): unsorted @p eigenvalues, column i of @p eigenvectors paired
+//! with eigenvalues[i].
+template <typename Real>
+__device__ __forceinline__ void projectionEigensystem3x3(Real a00,
+                                                         Real a01,
+                                                         Real a02,
+                                                         Real a11,
+                                                         Real a12,
+                                                         Real a22,
+                                                         Real (&eigenvalues)[3],
+                                                         Real (&eigenvectors)[9]) {
+#pragma unroll
+  for (int i = 0; i < 9; ++i) {
+    eigenvectors[i] = (i % 4 == 0) ? Real(1) : Real(0);
+  }
+  constexpr int  kMaxSweeps = 16;
+  constexpr Real kEpsilon   = cuda::std::numeric_limits<Real>::epsilon();
+  for (int sweep = 0; sweep < kMaxSweeps; ++sweep) {
+    const Real offDiagonal = a01 * a01 + a02 * a02 + a12 * a12;
+    const Real diagonal    = a00 * a00 + a11 * a11 + a22 * a22;
+    if (!(offDiagonal > kEpsilon * kEpsilon * diagonal)) {
+      break;
+    }
+    projectionJacobiRotate(a00, a11, a01, a02, a12, eigenvectors, 0, 1);  // r = 2
+    projectionJacobiRotate(a00, a22, a02, a01, a12, eigenvectors, 0, 2);  // r = 1
+    projectionJacobiRotate(a11, a22, a12, a01, a02, eigenvectors, 1, 2);  // r = 0
+  }
+  eigenvalues[0] = a00;
+  eigenvalues[1] = a11;
+  eigenvalues[2] = a22;
+}
+
+//! Replaces @p state's eigenvalues by their magnitudes and sorts them in descending order with their axes.
+template <typename Real> __device__ __forceinline__ void sortProjectionEigenpairs(ProjectionState<Real>& state) {
   for (int axis = 0; axis < 3; ++axis) {
     state.eigenvalues[axis] = fabs(state.eigenvalues[axis]);
   }
@@ -160,6 +286,36 @@ __device__ __forceinline__ void diagonalizeProjection(const Real (&covariance)[6
   if (state.eigenvalues[2] > state.eigenvalues[1]) {
     swapEigenpairs(state, 1, 2);
   }
+}
+
+//! Eigensystem of @p covariance into @p state: eigenvalue magnitudes in descending order with their axes.
+//! computeProjectionPca() uses it, so other descriptors that share that PCA (GETAWAY's planarity test) keep
+//! symmetricEigensystemJacobi3x3()'s results.
+template <typename Real>
+__device__ __forceinline__ void diagonalizeProjection(const Real (&covariance)[6], ProjectionState<Real>& state) {
+  symmetricEigensystemJacobi3x3(covariance[0],
+                                covariance[1],
+                                covariance[2],
+                                covariance[3],
+                                covariance[4],
+                                covariance[5],
+                                state.eigenvalues,
+                                state.eigenvectors);
+  sortProjectionEigenpairs(state);
+}
+
+//! diagonalizeProjection() with projectionEigensystem3x3()'s shorter rotation, for the WHIM and PBF kernels.
+template <typename Real>
+__device__ __forceinline__ void diagonalizeProjectionFast(const Real (&covariance)[6], ProjectionState<Real>& state) {
+  projectionEigensystem3x3(covariance[0],
+                           covariance[1],
+                           covariance[2],
+                           covariance[3],
+                           covariance[4],
+                           covariance[5],
+                           state.eigenvalues,
+                           state.eigenvectors);
+  sortProjectionEigenpairs(state);
 }
 
 //! Group-collective. computeProjectionCovariance() followed by diagonalizeProjection(); every lane
@@ -521,7 +677,7 @@ __device__ __forceinline__ void computeWhim(const ConformerAtoms&         atoms,
       }
     }
   }
-  diagonalizeProjection(ownCovariance, state);
+  diagonalizeProjectionFast(ownCovariance, state);
   __syncwarp(groupMask);  // Channel eigensolvers can finish after different numbers of sweeps.
 
   WhimChannelSums ownSums{};
@@ -580,7 +736,9 @@ __global__ void projection3DKernel(const DeviceCoordView        coordinates,
   if (pbfOutput != nullptr) {
     ProjectionState<OutputReal> pbfState;
     computeProjectionCentroid(atoms, laneInGroup, pbfState);
-    computeProjectionPca(atoms, nullptr, laneInGroup, pbfState);
+    OutputReal covariance[6];
+    computeProjectionCovariance(atoms, nullptr, laneInGroup, pbfState, covariance);
+    diagonalizeProjectionFast(covariance, pbfState);
     const OutputReal pbf = computePbf(atoms, laneInGroup, pbfState);
     if (inRange && laneInGroup == 0) {
       const bool is3D         = inputs.conformerIs3D == nullptr || inputs.conformerIs3D[conformerIdx] != 0;
