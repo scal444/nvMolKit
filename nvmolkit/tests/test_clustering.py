@@ -545,3 +545,109 @@ def test_fused_butina_rdkit_and_device_outputs_agree():
     assert rdkit_result == fused_butina_clusters(x, cutoff=0.4)
     assert [cluster[0] for cluster in rdkit_result] == device_result.centroids.numpy().tolist()
     assert device_result.cluster_sizes.torch().tolist() == [len(cluster) for cluster in rdkit_result]
+
+
+@pytest.fixture
+def requires_cuml():
+    pytest.importorskip("cuml")
+
+
+def _planted_fingerprints(
+    num_clusters, members_per_cluster, *, num_words=64, prototype_bits=60, flipped_bits=4, seed=0
+):
+    """Packed fingerprints drawn around random prototypes, each member differing from its prototype in a few bits."""
+    from nvmolkit.fingerprints import pack_fingerprint
+
+    generator = torch.Generator().manual_seed(seed)
+    num_bits = num_words * 32
+    prototypes = torch.zeros((num_clusters, num_bits), dtype=torch.bool)
+    for cluster in range(num_clusters):
+        prototypes[cluster, torch.randperm(num_bits, generator=generator)[:prototype_bits]] = True
+    truth = torch.arange(num_clusters).repeat_interleave(members_per_cluster)
+    bits = prototypes[truth].clone()
+    for row in range(bits.shape[0]):
+        flips = torch.randperm(num_bits, generator=generator)[:flipped_bits]
+        bits[row, flips] = ~bits[row, flips]
+    order = torch.randperm(bits.shape[0], generator=generator)
+    return pack_fingerprint(bits[order]).cuda(), truth[order].numpy(), prototypes
+
+
+def _assert_same_partition(labels, truth):
+    pairs = set(zip(labels.tolist(), truth.tolist()))
+    assert len(pairs) == len(set(truth.tolist())) == len(set(labels.tolist()))
+
+
+@pytest.mark.parametrize("metric", ["euclidean", "cosine"])
+@pytest.mark.parametrize("fit_size", [None, 200])
+def test_kmeans_recovers_planted_clusters(requires_cuml, metric, fit_size):
+    fingerprints, truth, _ = _planted_fingerprints(8, 50)
+    result = clustering.kmeans(
+        fingerprints, 8, metric=metric, n_init=5, fit_size=fit_size, batch_size=64, random_state=3
+    )
+
+    labels = result.labels.numpy()
+    assert result.labels.torch().dtype == torch.int32
+    assert labels.shape == (400,)
+    assert result.centers.torch().shape == (8, 2048)
+    assert result.centers.torch().dtype == torch.float32
+    assert result.cluster_sizes.torch().dtype == torch.int64
+    np.testing.assert_array_equal(result.cluster_sizes.numpy(), np.bincount(labels, minlength=8))
+    assert result.n_iter >= 1
+    _assert_same_partition(labels, truth)
+
+
+@pytest.mark.parametrize("metric", ["euclidean", "cosine"])
+def test_kmeans_array_init_keeps_center_order(requires_cuml, metric):
+    fingerprints, truth, prototypes = _planted_fingerprints(5, 20)
+    result = clustering.kmeans(fingerprints, 5, metric=metric, init=prototypes.float())
+    np.testing.assert_array_equal(result.labels.numpy(), truth)
+
+
+def test_kmeans_centers_are_member_bit_means(requires_cuml):
+    from nvmolkit.fingerprints import unpack_fingerprint
+
+    fingerprints, _, _ = _planted_fingerprints(4, 25)
+    result = clustering.kmeans(fingerprints, 4, n_init=5, random_state=1)
+    bits = unpack_fingerprint(fingerprints).float()
+    labels = result.labels.torch().long()
+    expected = torch.zeros((4, bits.shape[1]), device="cuda").index_add_(0, labels, bits)
+    expected /= result.cluster_sizes.torch().unsqueeze(1).float()
+    torch.testing.assert_close(result.centers.torch(), expected)
+
+
+def test_kmeans_is_reproducible_with_random_state(requires_cuml):
+    fingerprints, _, _ = _planted_fingerprints(6, 30, flipped_bits=40)
+    first = clustering.kmeans(fingerprints, 6, fit_size=120, batch_size=50, random_state=11)
+    second = clustering.kmeans(fingerprints, 6, fit_size=120, batch_size=50, random_state=11)
+    np.testing.assert_array_equal(first.labels.numpy(), second.labels.numpy())
+    torch.testing.assert_close(first.centers.torch(), second.centers.torch(), rtol=0, atol=0)
+
+
+def test_kmeans_accepts_host_int32_input(requires_cuml):
+    fingerprints, truth, _ = _planted_fingerprints(3, 10)
+    result = clustering.kmeans(fingerprints.view(torch.int32).cpu().numpy(), 3, n_init=5, random_state=0)
+    _assert_same_partition(result.labels.numpy(), truth)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"n_clusters": 0}, "n_clusters must be positive"),
+        ({"n_clusters": 11}, "must not exceed the number of fingerprints"),
+        ({"n_clusters": 2, "metric": "tanimoto"}, "metric must be one of"),
+        ({"n_clusters": 4, "fit_size": 3}, "fit_size must be at least n_clusters"),
+        ({"n_clusters": 2, "batch_size": 0}, "batch_size must be positive"),
+        ({"n_clusters": 2, "init": "bogus"}, "init must be"),
+        ({"n_clusters": 2, "init": torch.zeros((3, 2048))}, "init must have shape"),
+    ],
+)
+def test_kmeans_rejects_invalid_arguments(requires_cuml, kwargs, message):
+    fingerprints, _, _ = _planted_fingerprints(2, 5)
+    with pytest.raises(ValueError, match=message):
+        clustering.kmeans(fingerprints, **kwargs)
+
+
+def test_kmeans_without_cuml_raises_install_hint(monkeypatch):
+    monkeypatch.setattr(clustering, "is_cuml_available", lambda: False)
+    with pytest.raises(ImportError, match="cuml-cu12"):
+        clustering.kmeans(torch.zeros((4, 2), dtype=torch.int32), 2)

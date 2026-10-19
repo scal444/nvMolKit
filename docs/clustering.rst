@@ -3,8 +3,8 @@
 Clustering and diversity selection
 ==================================
 
-:mod:`nvmolkit.clustering` provides Butina and directed sphere exclusion (DISE) clustering, and
-:mod:`nvmolkit.pickers` provides Leader and MaxMin selection.
+:mod:`nvmolkit.clustering` provides Butina and directed sphere exclusion (DISE) clustering,
+k-means clustering through cuML, and :mod:`nvmolkit.pickers` provides Leader and MaxMin selection.
 
 Matrix and fused forms
 ----------------------
@@ -84,6 +84,29 @@ example, ``AAPMetric(max_path_length=8)``.
     leaders = fused_leader(fingerprints, 0.6, metric="tanimoto", output=OutputMode.RDKIT)
     picks, last_distance = fused_maxmin(fingerprints, 3, metric="tanimoto", seed=23, output=OutputMode.RDKIT)
     aap_leaders = fused_leader(molecules, 0.8, metric=AAPMetric(max_path_length=8), output=OutputMode.RDKIT)
+
+k-means
+-------
+
+:func:`~nvmolkit.clustering.kmeans` clusters packed fingerprints with cuML's
+``KMeans``, which requires the optional ``cuml`` package
+(``pip install nvMolKit[kmeans]``). Fingerprints are unpacked to float32 bit
+vectors, so k-means uses Euclidean distance on bits, or with
+``metric="cosine"``, on L2-normalized bits. cuML does not support Tanimoto
+distance.
+
+Unpacked fingerprints take 4 bytes per bit. For large inputs, ``fit_size``
+fits the centers on a random subsample and then labels every fingerprint
+against those centers in batches:
+
+.. code-block:: python
+
+    from nvmolkit.clustering import kmeans
+
+    result = kmeans(fingerprints, n_clusters=1000, fit_size=256_000, random_state=0)
+    labels = result.labels.torch()
+
+k-means always returns a :class:`~nvmolkit.clustering.KMeansResult` on the GPU.
 
 Output modes
 ------------

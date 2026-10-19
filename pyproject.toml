@@ -84,6 +84,9 @@ docs = [
 autotune = [
     "optuna",
 ]
+kmeans = [
+    "cuml-cu12",
+]
 
 # cibuildwheel orchestration for the pip wheel pipeline. The CI workflow sets
 # RDKIT_VERSION to a value present in admin/distribute/rdkit_build_matrix.yaml.
