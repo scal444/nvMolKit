@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+#include <cuda_runtime.h>
 #include <GraphMol/Conformer.h>
 #include <GraphMol/Descriptors/AUTOCORR3D.h>
 #include <GraphMol/Descriptors/GETAWAY.h>
@@ -13,6 +14,7 @@
 #include <GraphMol/SmilesParse/SmilesParse.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -21,6 +23,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "src/conformer/conformer_coord_upload.h"
@@ -307,6 +310,207 @@ TEST(Descriptors3DProjection, WhimChannelBroadcastMatchesRdkitAcrossMixedGeometr
     }
     const auto repeated = nvMolKit::calc3DProperties<double>(mols, {Property3D::WHIM}, options, stream.stream());
     EXPECT_EQ(toHost(repeated.properties.at(Property3D::WHIM)), actual);
+  }
+}
+
+namespace {
+
+//! A chain of @p repeats copies of "CCOCCN", so that WHIM's atom-property channels differ.
+std::string chainSmiles(const int repeats) {
+  std::string smiles;
+  for (int i = 0; i < repeats; ++i) {
+    smiles += "CCOCCN";
+  }
+  return smiles;
+}
+
+//! Atoms in a cube of half-width @p halfWidth: every projection on a unit axis stays within halfWidth * sqrt(3).
+std::vector<Point> cubeCoordinates(std::mt19937& rng, const unsigned numAtoms, const double halfWidth) {
+  std::uniform_real_distribution<double> coordinate(-halfWidth, halfWidth);
+  std::vector<Point>                     points;
+  for (unsigned atomIdx = 0; atomIdx < numAtoms; ++atomIdx) {
+    const double x = coordinate(rng);
+    const double y = coordinate(rng);
+    points.push_back({x, y, coordinate(rng)});
+  }
+  return points;
+}
+
+//! A random walk of 1.5 A steps, whose extent grows with the square root of the atom count.
+std::vector<Point> randomWalkCoordinates(std::mt19937& rng, const unsigned numAtoms) {
+  std::normal_distribution<double> direction(0.0, 1.0);
+  std::vector<Point>               points;
+  Point                            position = {0.0, 0.0, 0.0};
+  for (unsigned atomIdx = 0; atomIdx < numAtoms; ++atomIdx) {
+    Point        step  = {direction(rng), direction(rng), direction(rng)};
+    const double scale = 1.5 / std::sqrt(step[0] * step[0] + step[1] * step[1] + step[2] * step[2]);
+    for (int axis = 0; axis < 3; ++axis) {
+      position[axis] += step[axis] * scale;
+    }
+    points.push_back(position);
+  }
+  return points;
+}
+
+/**
+ * @brief A molecule with two distinct conformers: a compact one whose projections stay within 8 A of the
+ *        centroid, and an extended random walk whose projections exceed that once the chain is long.
+ */
+struct ProjectionMolecule {
+  std::string                     smiles;
+  std::vector<std::vector<Point>> conformers;
+};
+
+ProjectionMolecule projectionMolecule(std::mt19937& rng, const char* smiles) {
+  std::unique_ptr<RDKit::RWMol> shape(RDKit::SmilesToMol(smiles));
+  const unsigned                numAtoms = shape->getNumAtoms();
+  return ProjectionMolecule{
+    smiles,
+    {cubeCoordinates(rng, numAtoms, 4.5), randomWalkCoordinates(rng, numAtoms)}
+  };
+}
+
+int multiprocessorCount() {
+  int device = 0;
+  int count  = 0;
+  EXPECT_EQ(cudaGetDevice(&device), cudaSuccess);
+  EXPECT_EQ(cudaDeviceGetAttribute(&count, cudaDevAttrMultiProcessorCount, device), cudaSuccess);
+  return count > 0 ? count : 1;
+}
+
+//! Index of the first value farther than @p absolute + @p relative * |expected| from @p expected, or -1.
+template <typename T>
+int64_t firstMismatch(const std::vector<T>&      actual,
+                      const std::vector<double>& expected,
+                      const double               absolute,
+                      const double               relative) {
+  if (actual.size() != expected.size()) {
+    return 0;
+  }
+  for (size_t i = 0; i < expected.size(); ++i) {
+    const double value = static_cast<double>(actual[i]);
+    if (isNanBits(value) || std::fabs(value - expected[i]) > absolute + relative * std::fabs(expected[i])) {
+      return static_cast<int64_t>(i);
+    }
+  }
+  return -1;
+}
+
+/**
+ * @brief Computes PBF and WHIM of @p molecules, each given @p copies conformers cycling through its distinct
+ *        ones, in both precisions, and compares every row with RDKit's value for its distinct conformer.
+ */
+void expectProjectionMatchesRdkit(const std::vector<ProjectionMolecule>& molecules,
+                                  const int                              copies,
+                                  const double                           threshold) {
+  SCOPED_TRACE("threshold " + std::to_string(threshold) + ", conformers per molecule " + std::to_string(copies));
+  std::vector<std::unique_ptr<RDKit::RWMol>> owned;
+  std::vector<const RDKit::ROMol*>           mols;
+  std::vector<double>                        expectedPbf;
+  std::vector<double>                        expectedWhim;
+  for (const auto& molecule : molecules) {
+    const auto          reference = molWithConformers(molecule.smiles.c_str(), molecule.conformers);
+    std::vector<double> distinctPbf;
+    std::vector<double> distinctWhim;
+    for (unsigned confIdx = 0; confIdx < reference->getNumConformers(); ++confIdx) {
+      RDKit::RWMol pbfMol(*reference);
+      pbfMol.clearComputedProps();
+      distinctPbf.push_back(RDKit::Descriptors::PBF(pbfMol, static_cast<int>(confIdx)));
+      std::vector<double> row;
+      RDKit::Descriptors::WHIM(*reference, row, static_cast<int>(confIdx), threshold);
+      ASSERT_EQ(row.size(), static_cast<size_t>(nvMolKit::kNumWhimProperties));
+      distinctWhim.insert(distinctWhim.end(), row.begin(), row.end());
+    }
+    std::vector<std::vector<Point>> batchConformers;
+    for (int copy = 0; copy < copies; ++copy) {
+      const size_t distinct = static_cast<size_t>(copy) % molecule.conformers.size();
+      batchConformers.push_back(molecule.conformers[distinct]);
+      expectedPbf.push_back(distinctPbf[distinct]);
+      expectedWhim.insert(expectedWhim.end(),
+                          distinctWhim.begin() + distinct * nvMolKit::kNumWhimProperties,
+                          distinctWhim.begin() + (distinct + 1) * nvMolKit::kNumWhimProperties);
+    }
+    owned.push_back(molWithConformers(molecule.smiles.c_str(), batchConformers));
+    mols.push_back(owned.back().get());
+  }
+
+  nvMolKit::Property3DOptions options;
+  options.whim.threshold = threshold;
+  const auto results = nvMolKit::calc3DProperties<double>(mols, {Property3D::PBF, Property3D::WHIM}, options, nullptr);
+  const auto pbf     = toHost(results.properties.at(Property3D::PBF));
+  const auto whim    = toHost(results.properties.at(Property3D::WHIM));
+  const auto floatResults =
+    nvMolKit::calc3DProperties<float>(mols, {Property3D::PBF, Property3D::WHIM}, options, nullptr);
+  const auto floatPbf  = toHost(floatResults.properties.at(Property3D::PBF));
+  const auto floatWhim = toHost(floatResults.properties.at(Property3D::WHIM));
+  // Each property alone takes its own launch: WHIM without PBF, and PBF's dedicated kernel.
+  const auto whimAlone = toHost(
+    nvMolKit::calc3DProperties<double>(mols, {Property3D::WHIM}, options, nullptr).properties.at(Property3D::WHIM));
+  const auto pbfAlone = toHost(
+    nvMolKit::calc3DProperties<double>(mols, {Property3D::PBF}, options, nullptr).properties.at(Property3D::PBF));
+  const auto floatPbfAlone =
+    toHost(nvMolKit::calc3DProperties<float>(mols, {Property3D::PBF}, options, nullptr).properties.at(Property3D::PBF));
+  // WHIM: one rounding unit of RDKit's thousandths, plus float32 storage; PBF: float64 summation order, or
+  // float32 resolution.
+  const std::array<std::pair<const char*, int64_t>, 7> mismatches = {
+    {
+     {"PBF", firstMismatch(pbf, expectedPbf, 2e-8, 2e-10)},
+     {"WHIM", firstMismatch(whim, expectedWhim, 1.1e-3, 0.0)},
+     {"float PBF", firstMismatch(floatPbf, expectedPbf, 1e-6, 1e-5)},
+     {"float WHIM", firstMismatch(floatWhim, expectedWhim, 1.1e-3, 1e-6)},
+     {"WHIM alone", firstMismatch(whimAlone, expectedWhim, 1.1e-3, 0.0)},
+     {"PBF alone", firstMismatch(pbfAlone, expectedPbf, 2e-8, 2e-10)},
+     {"float PBF alone", firstMismatch(floatPbfAlone, expectedPbf, 1e-6, 1e-5)},
+     }
+  };
+  for (const auto& [name, index] : mismatches) {
+    EXPECT_EQ(index, -1) << name << " differs from RDKit at value " << index;
+  }
+}
+
+}  // namespace
+
+TEST(Descriptors3DProjection, LargeMoleculesMatchRdkitAcrossBatchSizes) {
+  // Rows of 4, 132, 300 and 516 atoms, compact and extended conformers, and batch sizes from a fraction of one
+  // wave of the device to many waves, at RDKit's default threshold and a wider one.
+  std::mt19937                          rng(512);
+  const std::vector<ProjectionMolecule> molecules = {
+    projectionMolecule(rng, "CCCO"),
+    projectionMolecule(rng, chainSmiles(22).c_str()),
+    projectionMolecule(rng, chainSmiles(50).c_str()),
+    projectionMolecule(rng, chainSmiles(86).c_str()),
+  };
+  const int numSMs = multiprocessorCount();
+  for (const double threshold : {0.001, 0.05}) {
+    for (const int copiesPerSM : {1, 2, 3, 5, 8, 12, 20, 32}) {
+      expectProjectionMatchesRdkit(molecules, copiesPerSM * numSMs / 4 + 1, threshold);
+    }
+  }
+}
+
+TEST(Descriptors3DProjection, SymmetryThresholdsMatchRdkitForLargeMolecules) {
+  // Zero, on and just past 15 thousandths, wide, and so wide that every pair is mirrored.
+  std::mt19937                          rng(613);
+  const std::vector<ProjectionMolecule> molecules = {
+    projectionMolecule(rng, "CCOC(=O)NCCSCCCl"),
+    projectionMolecule(rng, chainSmiles(25).c_str()),
+  };
+  const int numSMs = multiprocessorCount();
+  for (const double threshold : {0.0, 0.01, 0.015, 0.016, 1.0, 1e12}) {
+    for (const int copies : {2, 4 * numSMs}) {
+      expectProjectionMatchesRdkit(molecules, copies, threshold);
+    }
+  }
+}
+
+TEST(Descriptors3DProjection, MoleculesBeyondBatchedAndSharedScratchMatchRdkit) {
+  // Rows whose symmetry search scratch exceeds what a block can hold in shared memory on current devices.
+  std::mt19937 rng(700);
+  for (const int repeats : {100, 200}) {
+    const std::vector<ProjectionMolecule> molecules = {projectionMolecule(rng, chainSmiles(repeats).c_str())};
+    for (const double threshold : {0.001, 0.05}) {
+      expectProjectionMatchesRdkit(molecules, 3, threshold);
+    }
   }
 }
 

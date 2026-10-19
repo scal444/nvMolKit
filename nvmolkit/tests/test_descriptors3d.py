@@ -380,6 +380,61 @@ def test_whim_matches_rdkit_for_large_molecules(precision):
     _assert_matches_rdkit(result[Property3D.PBF].numpy(), expected_pbf, precision)
 
 
+def _projection_conformers(rng, num_atoms):
+    """A compact conformer whose projections stay within 8 A of the centroid, and an extended random walk."""
+    compact = rng.uniform(-4.5, 4.5, size=(num_atoms, 3))
+    steps = rng.normal(size=(num_atoms, 3))
+    walk = np.cumsum(1.5 * steps / np.linalg.norm(steps, axis=1, keepdims=True), axis=0)
+    return [compact, walk]
+
+
+@pytest.mark.parametrize("precision", PRECISIONS)
+@pytest.mark.parametrize("threshold", [0.001, 0.05])
+@pytest.mark.parametrize("copies_per_sm", [1, 8, 32])
+def test_projection_family_matches_rdkit_for_large_batches_of_large_molecules(precision, threshold, copies_per_sm):
+    # Rows of 12, 150 and 516 atoms; batch sizes scale with the device, from a fraction of one wave to many.
+    rng = np.random.default_rng(11)
+    num_sms = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+    copies = copies_per_sm * num_sms // 3 + 1
+    mols = []
+    expected_pbf = []
+    expected_whim = []
+    for smiles in ("CCOC(=O)NCCSCCCl", "CCOCCN" * 25, "CCOCCN" * 86):
+        distinct = _mol_with_conformers(smiles, _projection_conformers(rng, Chem.MolFromSmiles(smiles).GetNumAtoms()))
+        pbf_rows = [_rdkit_property(distinct, conf_id, Property3D.PBF, True) for conf_id in range(2)]
+        whim_rows = [rdMolDescriptors.CalcWHIM(distinct, confId=conf_id, thresh=threshold) for conf_id in range(2)]
+        coordinates = [distinct.GetConformer(copy % 2).GetPositions() for copy in range(copies)]
+        mols.append(_mol_with_conformers(smiles, coordinates))
+        expected_pbf.extend(pbf_rows[copy % 2] for copy in range(copies))
+        expected_whim.extend(whim_rows[copy % 2] for copy in range(copies))
+
+    options = Property3DOptions(whim=WhimOptions(threshold=threshold))
+    result = Calc3DProperties(mols, (Property3D.PBF, Property3D.WHIM), options=options, precision=precision)
+    pbf_alone = Calc3DProperties(mols, Property3D.PBF, options=options, precision=precision)
+
+    _assert_rounded_matches_rdkit(result[Property3D.WHIM].numpy(), np.asarray(expected_whim), precision)
+    _assert_matches_rdkit(result[Property3D.PBF].numpy(), np.asarray(expected_pbf), precision)
+    _assert_matches_rdkit(pbf_alone[Property3D.PBF].numpy(), np.asarray(expected_pbf), precision)
+
+
+@pytest.mark.parametrize("precision", PRECISIONS)
+@pytest.mark.parametrize("threshold", [0.0, 0.016, 1.0])
+def test_whim_matches_rdkit_beyond_shared_memory_and_for_wide_thresholds(precision, threshold):
+    # 1200 atoms: symmetry search scratch beyond what a block can hold in shared memory on current devices.
+    rng = np.random.default_rng(13)
+    smiles = "CCOCCN" * 200
+    mol = _mol_with_conformers(smiles, _projection_conformers(rng, 1200))
+    options = Property3DOptions(whim=WhimOptions(threshold=threshold))
+    result = Calc3DProperties([mol], (Property3D.PBF, Property3D.WHIM), options=options, precision=precision)
+
+    expected_whim = np.asarray(
+        [rdMolDescriptors.CalcWHIM(mol, confId=conf_id, thresh=threshold) for conf_id in range(2)]
+    )
+    expected_pbf = np.asarray([_rdkit_property(mol, conf_id, Property3D.PBF, True) for conf_id in range(2)])
+    _assert_rounded_matches_rdkit(result[Property3D.WHIM].numpy(), expected_whim, precision)
+    _assert_matches_rdkit(result[Property3D.PBF].numpy(), expected_pbf, precision)
+
+
 def test_projection_family_reuses_device_coordinates_and_ignores_mass_option():
     mols = [_embed("CCCO", 2, 59)]
     coordinates = _device_result_from_molecules(mols)
