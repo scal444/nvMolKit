@@ -238,14 +238,20 @@ __global__ void vdwGradKernel(const int     numVdws,
   }
 }
 
-constexpr int blockSizePerMol = 128;
+//! Threads per molecule block, chosen from host-side sizes only. Narrow blocks keep more small molecules resident
+//! and shorten the per-block prologue; wide blocks shorten the per-molecule critical path when molecules carry many
+//! terms.
+int chooseBlockSize(const int numMols, const long long numTerms) {
+  return numTerms < 256LL * numMols ? 64 : 128;
+}
 
-template <bool HasConstraints, typename real, typename reduceT, typename Terms, typename storageT>
-__global__ void combinedEnergiesKernel(const Terms*                                  terms,
-                                       const nvMolKit::UFF::BatchedIndicesDevicePtr* systemIndices,
-                                       const storageT*                               coords,
-                                       storageT*                                     energies,
-                                       const uint8_t*                                activeSystemMask) {
+template <int blockSizePerMol, bool HasConstraints, typename real, typename reduceT, typename Terms, typename storageT>
+__global__ void __launch_bounds__(blockSizePerMol)
+  combinedEnergiesKernel(const Terms*                                  terms,
+                         const nvMolKit::UFF::BatchedIndicesDevicePtr* systemIndices,
+                         const storageT*                               coords,
+                         storageT*                                     energies,
+                         const uint8_t*                                activeSystemMask) {
   const int molIdx = blockIdx.x;
   const int tid    = threadIdx.x;
 
@@ -274,12 +280,13 @@ __global__ void combinedEnergiesKernel(const Terms*                             
   }
 }
 
-template <bool HasConstraints, typename real, typename Terms, typename storageT>
-__global__ void combinedGradKernel(const Terms*                                  terms,
-                                   const nvMolKit::UFF::BatchedIndicesDevicePtr* systemIndices,
-                                   const storageT*                               coords,
-                                   storageT*                                     grad,
-                                   const uint8_t*                                activeSystemMask) {
+template <int blockSizePerMol, bool HasConstraints, typename real, typename Terms, typename storageT>
+__global__ void __launch_bounds__(blockSizePerMol)
+  combinedGradKernel(const Terms*                                  terms,
+                     const nvMolKit::UFF::BatchedIndicesDevicePtr* systemIndices,
+                     const storageT*                               coords,
+                     storageT*                                     grad,
+                     const uint8_t*                                activeSystemMask) {
   const int molIdx = blockIdx.x;
   const int tid    = threadIdx.x;
 
@@ -610,17 +617,25 @@ cudaError_t launchBlockPerMolEnergyKernelImpl(int                            num
                                               const storageT*                coords,
                                               storageT*                      energies,
                                               bool                           hasConstraints,
+                                              long long                      numTerms,
                                               cudaStream_t                   stream,
                                               const uint8_t*                 activeSystemMask) {
   const AsyncDevicePtr<Terms>                   devTerms(terms, stream);
   const AsyncDevicePtr<BatchedIndicesDevicePtr> devSysIdx(systemIndices, stream);
-#define NVMOLKIT_LAUNCH_UFF_ENERGY(HasConstraints, real, reduceT) \
-  combinedEnergiesKernel<HasConstraints, real, reduceT>           \
-    <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devSysIdx.data(), coords, energies, activeSystemMask)
-  if (hasConstraints)
-    NVMOLKIT_LAUNCH_UFF_ENERGY(true, real, reduceT);
-  else
-    NVMOLKIT_LAUNCH_UFF_ENERGY(false, real, reduceT);
+#define NVMOLKIT_LAUNCH_UFF_ENERGY(blockSize, HasConstraints)      \
+  combinedEnergiesKernel<blockSize, HasConstraints, real, reduceT> \
+    <<<numMols, blockSize, 0, stream>>>(devTerms.data(), devSysIdx.data(), coords, energies, activeSystemMask)
+  if (chooseBlockSize(numMols, numTerms) == 64) {
+    if (hasConstraints)
+      NVMOLKIT_LAUNCH_UFF_ENERGY(64, true);
+    else
+      NVMOLKIT_LAUNCH_UFF_ENERGY(64, false);
+  } else {
+    if (hasConstraints)
+      NVMOLKIT_LAUNCH_UFF_ENERGY(128, true);
+    else
+      NVMOLKIT_LAUNCH_UFF_ENERGY(128, false);
+  }
 #undef NVMOLKIT_LAUNCH_UFF_ENERGY
   return cudaGetLastError();
 }
@@ -632,16 +647,26 @@ cudaError_t launchBlockPerMolGradKernelImpl(int                            numMo
                                             const storageT*                coords,
                                             storageT*                      grad,
                                             bool                           hasConstraints,
+                                            long long                      numTerms,
                                             cudaStream_t                   stream,
                                             const uint8_t*                 activeSystemMask) {
   const AsyncDevicePtr<Terms>                   devTerms(terms, stream);
   const AsyncDevicePtr<BatchedIndicesDevicePtr> devSysIdx(systemIndices, stream);
-  if (hasConstraints)
-    combinedGradKernel<true, real>
-      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devSysIdx.data(), coords, grad, activeSystemMask);
-  else
-    combinedGradKernel<false, real>
-      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devSysIdx.data(), coords, grad, activeSystemMask);
+#define NVMOLKIT_LAUNCH_UFF_GRAD(blockSize, HasConstraints) \
+  combinedGradKernel<blockSize, HasConstraints, real>       \
+    <<<numMols, blockSize, 0, stream>>>(devTerms.data(), devSysIdx.data(), coords, grad, activeSystemMask)
+  if (chooseBlockSize(numMols, numTerms) == 64) {
+    if (hasConstraints)
+      NVMOLKIT_LAUNCH_UFF_GRAD(64, true);
+    else
+      NVMOLKIT_LAUNCH_UFF_GRAD(64, false);
+  } else {
+    if (hasConstraints)
+      NVMOLKIT_LAUNCH_UFF_GRAD(128, true);
+    else
+      NVMOLKIT_LAUNCH_UFF_GRAD(128, false);
+  }
+#undef NVMOLKIT_LAUNCH_UFF_GRAD
   return cudaGetLastError();
 }
 
@@ -652,6 +677,7 @@ cudaError_t launchBlockPerMolGradKernelImpl(int                            numMo
                                             const storageT*                coords,         \
                                             storageT*                      energies,       \
                                             bool                           hasConstraints, \
+                                            long long                      numTerms,       \
                                             cudaStream_t                   stream,         \
                                             const uint8_t*                 activeSystemMask) {             \
     return launchBlockPerMolEnergyKernelImpl<real, reduceT>(numMols,                       \
@@ -660,6 +686,7 @@ cudaError_t launchBlockPerMolGradKernelImpl(int                            numMo
                                                             coords,                        \
                                                             energies,                      \
                                                             hasConstraints,                \
+                                                            numTerms,                      \
                                                             stream,                        \
                                                             activeSystemMask);             \
   }
@@ -671,6 +698,7 @@ cudaError_t launchBlockPerMolGradKernelImpl(int                            numMo
                                           const storageT*                coords,         \
                                           storageT*                      grad,           \
                                           bool                           hasConstraints, \
+                                          long long                      numTerms,       \
                                           cudaStream_t                   stream,         \
                                           const uint8_t*                 activeSystemMask) {             \
     return launchBlockPerMolGradKernelImpl<real>(numMols,                                \
@@ -679,6 +707,7 @@ cudaError_t launchBlockPerMolGradKernelImpl(int                            numMo
                                                  coords,                                 \
                                                  grad,                                   \
                                                  hasConstraints,                         \
+                                                 numTerms,                               \
                                                  stream,                                 \
                                                  activeSystemMask);                      \
   }

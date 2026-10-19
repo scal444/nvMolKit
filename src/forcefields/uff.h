@@ -295,6 +295,11 @@ BatchedIndicesDevicePtr toBatchedIndicesDevicePtr(const BatchedMolecularDeviceBu
 bool batchHasConstraints(const EnergyForceContribsDevice& contribs);
 bool batchHasConstraints(const EnergyForceContribsDeviceSingle& contribs);
 
+//! Total number of terms of all types, including constraints, in the batch. Passed to the block-per-molecule
+//! launchers, which size their blocks from the average number of terms per molecule.
+long long batchTermCount(const EnergyForceContribsDevice& contribs);
+long long batchTermCount(const EnergyForceContribsDeviceSingle& contribs);
+
 }  // namespace UFF
 }  // namespace nvMolKit
 

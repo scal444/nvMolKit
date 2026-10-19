@@ -32,6 +32,7 @@ cudaError_t launchEnergy(Buffers&        buffers,
                                             positions,
                                             energies,
                                             UFF::batchHasConstraints(buffers.contribs),
+                                            UFF::batchTermCount(buffers.contribs),
                                             stream,
                                             activeSystemMask);
 }
@@ -49,6 +50,7 @@ cudaError_t launchGrad(Buffers&        buffers,
                                           positions,
                                           gradients,
                                           UFF::batchHasConstraints(buffers.contribs),
+                                          UFF::batchTermCount(buffers.contribs),
                                           stream,
                                           activeSystemMask);
 }

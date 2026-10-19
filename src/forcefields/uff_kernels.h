@@ -235,12 +235,15 @@ struct BatchedIndicesDevicePtr {
   int* torsionConstraintTermStarts  = nullptr;
 };
 
+//! Block-per-molecule energy and gradient launchers. numTerms is the total number of terms (all types, including
+//! constraints) in the batch; together with numMols it selects the threads per molecule block.
 cudaError_t launchBlockPerMolEnergyKernel(int                                 numMols,
                                           const EnergyForceContribsDevicePtr& terms,
                                           const BatchedIndicesDevicePtr&      sytemIndices,
                                           const double*                       coords,
                                           double*                             energies,
                                           bool                                hasConstraints,
+                                          long long                           numTerms,
                                           cudaStream_t                        stream           = nullptr,
                                           const uint8_t*                      activeSystemMask = nullptr);
 
@@ -250,6 +253,7 @@ cudaError_t launchBlockPerMolGradKernel(int                                 numM
                                         const double*                       coords,
                                         double*                             grad,
                                         bool                                hasConstraints,
+                                        long long                           numTerms,
                                         cudaStream_t                        stream           = nullptr,
                                         const uint8_t*                      activeSystemMask = nullptr);
 
@@ -259,6 +263,7 @@ cudaError_t launchBlockPerMolEnergyKernel(int                                   
                                           const float*                              coords,
                                           float*                                    energies,
                                           bool                                      hasConstraints,
+                                          long long                                 numTerms,
                                           cudaStream_t                              stream           = nullptr,
                                           const uint8_t*                            activeSystemMask = nullptr);
 
@@ -268,6 +273,7 @@ cudaError_t launchBlockPerMolGradKernel(int                                     
                                         const float*                              coords,
                                         float*                                    grad,
                                         bool                                      hasConstraints,
+                                        long long                                 numTerms,
                                         cudaStream_t                              stream           = nullptr,
                                         const uint8_t*                            activeSystemMask = nullptr);
 

@@ -816,6 +816,7 @@ cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDev
                                        coords != nullptr ? coords : molSystemDevice.positions.data(),
                                        molSystemDevice.energyOuts.data(),
                                        batchHasConstraints(molSystemDevice.contribs),
+                                       batchTermCount(molSystemDevice.contribs),
                                        stream);
 }
 
@@ -830,6 +831,7 @@ cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffersSingle& molSys
                                        coords != nullptr ? coords : molSystemDevice.positions.data(),
                                        energyOuts,
                                        batchHasConstraints(molSystemDevice.contribs),
+                                       batchTermCount(molSystemDevice.contribs),
                                        stream,
                                        activeSystemMask);
 }
@@ -841,6 +843,7 @@ cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDevic
                                      molSystemDevice.positions.data(),
                                      molSystemDevice.grad.data(),
                                      batchHasConstraints(molSystemDevice.contribs),
+                                     batchTermCount(molSystemDevice.contribs),
                                      stream);
 }
 
@@ -855,6 +858,7 @@ cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffersSingle& molSyste
                                      coords != nullptr ? coords : molSystemDevice.positions.data(),
                                      grad != nullptr ? grad : molSystemDevice.grad.data(),
                                      batchHasConstraints(molSystemDevice.contribs),
+                                     batchTermCount(molSystemDevice.contribs),
                                      stream,
                                      activeSystemMask);
 }
@@ -884,6 +888,23 @@ bool batchHasConstraints(const EnergyForceContribsDevice& contribs) {
 bool batchHasConstraints(const EnergyForceContribsDeviceSingle& contribs) {
   return contribs.distanceConstraintTerms.idx1.size() > 0 || contribs.positionConstraintTerms.idx.size() > 0 ||
          contribs.angleConstraintTerms.idx1.size() > 0 || contribs.torsionConstraintTerms.idx1.size() > 0;
+}
+
+namespace {
+template <typename Contribs> long long termCount(const Contribs& c) {
+  return static_cast<long long>(c.bondTerms.idx1.size()) + c.angleTerms.idx1.size() + c.torsionTerms.idx1.size() +
+         c.inversionTerms.idx1.size() + c.vdwTerms.idx1.size() + c.distanceConstraintTerms.idx1.size() +
+         c.positionConstraintTerms.idx.size() + c.angleConstraintTerms.idx1.size() +
+         c.torsionConstraintTerms.idx1.size();
+}
+}  // namespace
+
+long long batchTermCount(const EnergyForceContribsDevice& contribs) {
+  return termCount(contribs);
+}
+
+long long batchTermCount(const EnergyForceContribsDeviceSingle& contribs) {
+  return termCount(contribs);
 }
 
 }  // namespace UFF
