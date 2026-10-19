@@ -570,6 +570,200 @@ __device__ __forceinline__ void uffVdwGrad(const auto* pos,
   atomicAdd(&grad[3 * idx2 + 2], -gz);
 }
 
+// Bonded (non van der Waals) terms of a molecule are processed as one flattened list: bonds, angles,
+// torsions, inversions, then the four constraint types. A block covers the whole list in one strided pass
+// instead of one pass per term type, and each thread loads its next record before computing the current one.
+enum BondedTermType : int {
+  kBondTerm = 0,
+  kAngleTerm,
+  kTorsionTerm,
+  kInversionTerm,
+  kDistanceConstraintTerm,
+  kPositionConstraintTerm,
+  kAngleConstraintTerm,
+  kTorsionConstraintTerm,
+};
+
+//! Indices and parameters of one bonded term, loaded ahead of its arithmetic.
+struct BondedTermRecord {
+  int     type;
+  int     a, b, c, d;
+  real    p0, p1, p2, p3, p4;
+  uint8_t order;
+};
+
+template <bool HasConstraints> struct BondedLayout {
+  static constexpr int           kTypes = HasConstraints ? 8 : 4;
+  int                            start[kTypes];  //!< First (global) term index of each type.
+  int                            end[kTypes];    //!< Flattened end offset of each type.
+  __device__ __forceinline__ int total() const { return end[kTypes - 1]; }
+};
+
+template <bool HasConstraints>
+__device__ __forceinline__ BondedLayout<HasConstraints> loadBondedLayout(const BatchedIndicesDevicePtr& s,
+                                                                         const int                      molIdx) {
+  const int*                   starts[8] = {s.bondTermStarts,
+                                            s.angleTermStarts,
+                                            s.torsionTermStarts,
+                                            s.inversionTermStarts,
+                                            s.distanceConstraintTermStarts,
+                                            s.positionConstraintTermStarts,
+                                            s.angleConstraintTermStarts,
+                                            s.torsionConstraintTermStarts};
+  BondedLayout<HasConstraints> layout;
+  int                          offset = 0;
+#pragma unroll
+  for (int t = 0; t < BondedLayout<HasConstraints>::kTypes; ++t) {
+    layout.start[t] = starts[t][molIdx];
+    offset += starts[t][molIdx + 1] - layout.start[t];
+    layout.end[t] = offset;
+  }
+  return layout;
+}
+
+//! Loads the record of flattened slot f (f < layout.total()).
+template <bool HasConstraints, bool ForGrad, typename Terms>
+__device__ __forceinline__ void loadBondedRecord(const Terms&                        terms,
+                                                 const BondedLayout<HasConstraints>& layout,
+                                                 const int                           f,
+                                                 const int                           atomStart,
+                                                 BondedTermRecord&                   r) {
+  int type = 0;
+  int base = 0;
+  int i    = layout.start[0];
+#pragma unroll
+  for (int t = 1; t < BondedLayout<HasConstraints>::kTypes; ++t) {
+    if (f >= layout.end[t - 1]) {
+      type = t;
+      base = layout.end[t - 1];
+      i    = layout.start[t];
+    }
+  }
+  i += f - base;
+  r.type = type;
+  if (type == kBondTerm) {
+    r.a  = terms.bondTerms.idx1[i] - atomStart;
+    r.b  = terms.bondTerms.idx2[i] - atomStart;
+    r.p0 = terms.bondTerms.restLen[i];
+    r.p1 = terms.bondTerms.forceConstant[i];
+  } else if (type == kAngleTerm) {
+    r.a     = terms.angleTerms.idx1[i] - atomStart;
+    r.b     = terms.angleTerms.idx2[i] - atomStart;
+    r.c     = terms.angleTerms.idx3[i] - atomStart;
+    r.p0    = terms.angleTerms.theta0[i];
+    r.p1    = terms.angleTerms.forceConstant[i];
+    r.order = terms.angleTerms.order[i];
+    if constexpr (!ForGrad) {
+      r.p2 = terms.angleTerms.C0[i];
+    }
+    r.p3 = terms.angleTerms.C1[i];
+    r.p4 = terms.angleTerms.C2[i];
+  } else if (type == kTorsionTerm) {
+    r.a     = terms.torsionTerms.idx1[i] - atomStart;
+    r.b     = terms.torsionTerms.idx2[i] - atomStart;
+    r.c     = terms.torsionTerms.idx3[i] - atomStart;
+    r.d     = terms.torsionTerms.idx4[i] - atomStart;
+    r.p0    = terms.torsionTerms.forceConstant[i];
+    r.p1    = terms.torsionTerms.cosTerm[i];
+    r.order = terms.torsionTerms.order[i];
+  } else if (type == kInversionTerm) {
+    r.a  = terms.inversionTerms.idx1[i] - atomStart;
+    r.b  = terms.inversionTerms.idx2[i] - atomStart;
+    r.c  = terms.inversionTerms.idx3[i] - atomStart;
+    r.d  = terms.inversionTerms.idx4[i] - atomStart;
+    r.p0 = terms.inversionTerms.forceConstant[i];
+    if constexpr (!ForGrad) {
+      r.p1 = terms.inversionTerms.C0[i];
+    }
+    r.p2 = terms.inversionTerms.C1[i];
+    r.p3 = terms.inversionTerms.C2[i];
+  } else if constexpr (HasConstraints) {
+    if (type == kDistanceConstraintTerm) {
+      r.a  = terms.distanceConstraintTerms.idx1[i] - atomStart;
+      r.b  = terms.distanceConstraintTerms.idx2[i] - atomStart;
+      r.p0 = terms.distanceConstraintTerms.minLen[i];
+      r.p1 = terms.distanceConstraintTerms.maxLen[i];
+      r.p2 = terms.distanceConstraintTerms.forceConstant[i];
+    } else if (type == kPositionConstraintTerm) {
+      r.a  = terms.positionConstraintTerms.idx[i] - atomStart;
+      r.p0 = terms.positionConstraintTerms.refX[i];
+      r.p1 = terms.positionConstraintTerms.refY[i];
+      r.p2 = terms.positionConstraintTerms.refZ[i];
+      r.p3 = terms.positionConstraintTerms.maxDispl[i];
+      r.p4 = terms.positionConstraintTerms.forceConstant[i];
+    } else if (type == kAngleConstraintTerm) {
+      r.a  = terms.angleConstraintTerms.idx1[i] - atomStart;
+      r.b  = terms.angleConstraintTerms.idx2[i] - atomStart;
+      r.c  = terms.angleConstraintTerms.idx3[i] - atomStart;
+      r.p0 = terms.angleConstraintTerms.minAngleDeg[i];
+      r.p1 = terms.angleConstraintTerms.maxAngleDeg[i];
+      r.p2 = terms.angleConstraintTerms.forceConstant[i];
+    } else {
+      r.a  = terms.torsionConstraintTerms.idx1[i] - atomStart;
+      r.b  = terms.torsionConstraintTerms.idx2[i] - atomStart;
+      r.c  = terms.torsionConstraintTerms.idx3[i] - atomStart;
+      r.d  = terms.torsionConstraintTerms.idx4[i] - atomStart;
+      r.p0 = terms.torsionConstraintTerms.minDihedralDeg[i];
+      r.p1 = terms.torsionConstraintTerms.maxDihedralDeg[i];
+      r.p2 = terms.torsionConstraintTerms.forceConstant[i];
+    }
+  }
+}
+
+template <bool HasConstraints>
+__device__ __forceinline__ real bondedTermEnergy(const auto* pos, const BondedTermRecord& r) {
+  if (r.type == kBondTerm) {
+    return uffBondStretchEnergy(pos, r.a, r.b, r.p0, r.p1);
+  }
+  if (r.type == kAngleTerm) {
+    return uffAngleBendEnergy(pos, r.a, r.b, r.c, r.p0, r.p1, r.order, r.p2, r.p3, r.p4);
+  }
+  if (r.type == kTorsionTerm) {
+    return uffTorsionEnergy(pos, r.a, r.b, r.c, r.d, r.p0, r.order, r.p1);
+  }
+  if (r.type == kInversionTerm) {
+    return uffInversionEnergy(pos, r.a, r.b, r.c, r.d, r.p0, r.p1, r.p2, r.p3);
+  }
+  if constexpr (HasConstraints) {
+    if (r.type == kDistanceConstraintTerm) {
+      return distanceConstraintEnergy(pos, r.a, r.b, r.p0, r.p1, r.p2);
+    }
+    if (r.type == kPositionConstraintTerm) {
+      return positionConstraintEnergy(pos, r.a, r.p0, r.p1, r.p2, r.p3, r.p4);
+    }
+    if (r.type == kAngleConstraintTerm) {
+      return angleConstraintEnergy(pos, r.a, r.b, r.c, r.p0, r.p1, r.p2);
+    }
+    if (r.type == kTorsionConstraintTerm) {
+      return torsionConstraintEnergy(pos, r.a, r.b, r.c, r.d, r.p0, r.p1, r.p2);
+    }
+  }
+  return real{0.0};
+}
+
+template <bool HasConstraints>
+__device__ __forceinline__ void bondedTermGrad(const auto* pos, const BondedTermRecord& r, auto* grad) {
+  if (r.type == kBondTerm) {
+    uffBondStretchGrad(pos, r.a, r.b, r.p0, r.p1, grad);
+  } else if (r.type == kAngleTerm) {
+    uffAngleBendGrad(pos, r.a, r.b, r.c, r.p0, r.p1, r.order, r.p2, r.p3, r.p4, grad);
+  } else if (r.type == kTorsionTerm) {
+    uffTorsionGrad(pos, r.a, r.b, r.c, r.d, r.p0, r.order, r.p1, grad);
+  } else if (r.type == kInversionTerm) {
+    uffInversionGrad(pos, r.a, r.b, r.c, r.d, r.p0, r.p2, r.p3, grad);
+  } else if constexpr (HasConstraints) {
+    if (r.type == kDistanceConstraintTerm) {
+      distanceConstraintGrad(pos, r.a, r.b, r.p0, r.p1, r.p2, grad);
+    } else if (r.type == kPositionConstraintTerm) {
+      positionConstraintGrad(pos, r.a, r.p0, r.p1, r.p2, r.p3, r.p4, grad);
+    } else if (r.type == kAngleConstraintTerm) {
+      angleConstraintGrad(pos, r.a, r.b, r.c, r.p0, r.p1, r.p2, grad);
+    } else if (r.type == kTorsionConstraintTerm) {
+      torsionConstraintGrad(pos, r.a, r.b, r.c, r.d, r.p0, r.p1, r.p2, grad);
+    }
+  }
+}
+
 }  // namespace detail
 using namespace detail;
 
@@ -582,60 +776,19 @@ __device__ __inline__ real molEnergy(const Terms&                   terms,
   const int atomStart = systemIndices.atomStarts[molIdx];
   real      energy    = real{0.0};
 
-  const int bondStart = systemIndices.bondTermStarts[molIdx];
-  const int bondEnd   = systemIndices.bondTermStarts[molIdx + 1];
+  const auto layout    = loadBondedLayout<HasConstraints>(systemIndices, molIdx);
+  const int  numBonded = layout.total();
+  if (tid < numBonded) {
+    BondedTermRecord next;
+    loadBondedRecord<HasConstraints, false>(terms, layout, tid, atomStart, next);
 #pragma unroll 1
-  for (int i = bondStart + tid; i < bondEnd; i += stride) {
-    energy += uffBondStretchEnergy(molCoords,
-                                   terms.bondTerms.idx1[i] - atomStart,
-                                   terms.bondTerms.idx2[i] - atomStart,
-                                   terms.bondTerms.restLen[i],
-                                   terms.bondTerms.forceConstant[i]);
-  }
-
-  const int angleStart = systemIndices.angleTermStarts[molIdx];
-  const int angleEnd   = systemIndices.angleTermStarts[molIdx + 1];
-#pragma unroll 1
-  for (int i = angleStart + tid; i < angleEnd; i += stride) {
-    energy += uffAngleBendEnergy(molCoords,
-                                 terms.angleTerms.idx1[i] - atomStart,
-                                 terms.angleTerms.idx2[i] - atomStart,
-                                 terms.angleTerms.idx3[i] - atomStart,
-                                 terms.angleTerms.theta0[i],
-                                 terms.angleTerms.forceConstant[i],
-                                 terms.angleTerms.order[i],
-                                 terms.angleTerms.C0[i],
-                                 terms.angleTerms.C1[i],
-                                 terms.angleTerms.C2[i]);
-  }
-
-  const int torsionStart = systemIndices.torsionTermStarts[molIdx];
-  const int torsionEnd   = systemIndices.torsionTermStarts[molIdx + 1];
-#pragma unroll 1
-  for (int i = torsionStart + tid; i < torsionEnd; i += stride) {
-    energy += uffTorsionEnergy(molCoords,
-                               terms.torsionTerms.idx1[i] - atomStart,
-                               terms.torsionTerms.idx2[i] - atomStart,
-                               terms.torsionTerms.idx3[i] - atomStart,
-                               terms.torsionTerms.idx4[i] - atomStart,
-                               terms.torsionTerms.forceConstant[i],
-                               terms.torsionTerms.order[i],
-                               terms.torsionTerms.cosTerm[i]);
-  }
-
-  const int inversionStart = systemIndices.inversionTermStarts[molIdx];
-  const int inversionEnd   = systemIndices.inversionTermStarts[molIdx + 1];
-#pragma unroll 1
-  for (int i = inversionStart + tid; i < inversionEnd; i += stride) {
-    energy += uffInversionEnergy(molCoords,
-                                 terms.inversionTerms.idx1[i] - atomStart,
-                                 terms.inversionTerms.idx2[i] - atomStart,
-                                 terms.inversionTerms.idx3[i] - atomStart,
-                                 terms.inversionTerms.idx4[i] - atomStart,
-                                 terms.inversionTerms.forceConstant[i],
-                                 terms.inversionTerms.C0[i],
-                                 terms.inversionTerms.C1[i],
-                                 terms.inversionTerms.C2[i]);
+    for (int f = tid; f < numBonded; f += stride) {
+      const BondedTermRecord current = next;
+      if (f + stride < numBonded) {
+        loadBondedRecord<HasConstraints, false>(terms, layout, f + stride, atomStart, next);
+      }
+      energy += bondedTermEnergy<HasConstraints>(molCoords, current);
+    }
   }
 
   const int vdwStart = systemIndices.vdwTermStarts[molIdx];
@@ -650,60 +803,6 @@ __device__ __inline__ real molEnergy(const Terms&                   terms,
                            terms.vdwTerms.threshold[i]);
   }
 
-  if constexpr (HasConstraints) {
-    const int dcStart = systemIndices.distanceConstraintTermStarts[molIdx];
-    const int dcEnd   = systemIndices.distanceConstraintTermStarts[molIdx + 1];
-#pragma unroll 1
-    for (int i = dcStart + tid; i < dcEnd; i += stride) {
-      energy += distanceConstraintEnergy(molCoords,
-                                         terms.distanceConstraintTerms.idx1[i] - atomStart,
-                                         terms.distanceConstraintTerms.idx2[i] - atomStart,
-                                         terms.distanceConstraintTerms.minLen[i],
-                                         terms.distanceConstraintTerms.maxLen[i],
-                                         terms.distanceConstraintTerms.forceConstant[i]);
-    }
-
-    const int pcStart = systemIndices.positionConstraintTermStarts[molIdx];
-    const int pcEnd   = systemIndices.positionConstraintTermStarts[molIdx + 1];
-#pragma unroll 1
-    for (int i = pcStart + tid; i < pcEnd; i += stride) {
-      energy += positionConstraintEnergy(molCoords,
-                                         terms.positionConstraintTerms.idx[i] - atomStart,
-                                         terms.positionConstraintTerms.refX[i],
-                                         terms.positionConstraintTerms.refY[i],
-                                         terms.positionConstraintTerms.refZ[i],
-                                         terms.positionConstraintTerms.maxDispl[i],
-                                         terms.positionConstraintTerms.forceConstant[i]);
-    }
-
-    const int acStart = systemIndices.angleConstraintTermStarts[molIdx];
-    const int acEnd   = systemIndices.angleConstraintTermStarts[molIdx + 1];
-#pragma unroll 1
-    for (int i = acStart + tid; i < acEnd; i += stride) {
-      energy += angleConstraintEnergy(molCoords,
-                                      terms.angleConstraintTerms.idx1[i] - atomStart,
-                                      terms.angleConstraintTerms.idx2[i] - atomStart,
-                                      terms.angleConstraintTerms.idx3[i] - atomStart,
-                                      terms.angleConstraintTerms.minAngleDeg[i],
-                                      terms.angleConstraintTerms.maxAngleDeg[i],
-                                      terms.angleConstraintTerms.forceConstant[i]);
-    }
-
-    const int tcStart = systemIndices.torsionConstraintTermStarts[molIdx];
-    const int tcEnd   = systemIndices.torsionConstraintTermStarts[molIdx + 1];
-#pragma unroll 1
-    for (int i = tcStart + tid; i < tcEnd; i += stride) {
-      energy += torsionConstraintEnergy(molCoords,
-                                        terms.torsionConstraintTerms.idx1[i] - atomStart,
-                                        terms.torsionConstraintTerms.idx2[i] - atomStart,
-                                        terms.torsionConstraintTerms.idx3[i] - atomStart,
-                                        terms.torsionConstraintTerms.idx4[i] - atomStart,
-                                        terms.torsionConstraintTerms.minDihedralDeg[i],
-                                        terms.torsionConstraintTerms.maxDihedralDeg[i],
-                                        terms.torsionConstraintTerms.forceConstant[i]);
-    }
-  }
-
   return energy;
 }
 
@@ -716,63 +815,19 @@ __device__ __inline__ void molGrad(const Terms&                   terms,
                                    const int                      tid) {
   const int atomStart = systemIndices.atomStarts[molIdx];
 
-  const int bondStart = systemIndices.bondTermStarts[molIdx];
-  const int bondEnd   = systemIndices.bondTermStarts[molIdx + 1];
+  const auto layout    = loadBondedLayout<HasConstraints>(systemIndices, molIdx);
+  const int  numBonded = layout.total();
+  if (tid < numBonded) {
+    BondedTermRecord next;
+    loadBondedRecord<HasConstraints, true>(terms, layout, tid, atomStart, next);
 #pragma unroll 1
-  for (int i = bondStart + tid; i < bondEnd; i += stride) {
-    uffBondStretchGrad(molCoords,
-                       terms.bondTerms.idx1[i] - atomStart,
-                       terms.bondTerms.idx2[i] - atomStart,
-                       terms.bondTerms.restLen[i],
-                       terms.bondTerms.forceConstant[i],
-                       grad);
-  }
-
-  const int angleStart = systemIndices.angleTermStarts[molIdx];
-  const int angleEnd   = systemIndices.angleTermStarts[molIdx + 1];
-#pragma unroll 1
-  for (int i = angleStart + tid; i < angleEnd; i += stride) {
-    uffAngleBendGrad(molCoords,
-                     terms.angleTerms.idx1[i] - atomStart,
-                     terms.angleTerms.idx2[i] - atomStart,
-                     terms.angleTerms.idx3[i] - atomStart,
-                     terms.angleTerms.theta0[i],
-                     terms.angleTerms.forceConstant[i],
-                     terms.angleTerms.order[i],
-                     terms.angleTerms.C0[i],
-                     terms.angleTerms.C1[i],
-                     terms.angleTerms.C2[i],
-                     grad);
-  }
-
-  const int torsionStart = systemIndices.torsionTermStarts[molIdx];
-  const int torsionEnd   = systemIndices.torsionTermStarts[molIdx + 1];
-#pragma unroll 1
-  for (int i = torsionStart + tid; i < torsionEnd; i += stride) {
-    uffTorsionGrad(molCoords,
-                   terms.torsionTerms.idx1[i] - atomStart,
-                   terms.torsionTerms.idx2[i] - atomStart,
-                   terms.torsionTerms.idx3[i] - atomStart,
-                   terms.torsionTerms.idx4[i] - atomStart,
-                   terms.torsionTerms.forceConstant[i],
-                   terms.torsionTerms.order[i],
-                   terms.torsionTerms.cosTerm[i],
-                   grad);
-  }
-
-  const int inversionStart = systemIndices.inversionTermStarts[molIdx];
-  const int inversionEnd   = systemIndices.inversionTermStarts[molIdx + 1];
-#pragma unroll 1
-  for (int i = inversionStart + tid; i < inversionEnd; i += stride) {
-    uffInversionGrad(molCoords,
-                     terms.inversionTerms.idx1[i] - atomStart,
-                     terms.inversionTerms.idx2[i] - atomStart,
-                     terms.inversionTerms.idx3[i] - atomStart,
-                     terms.inversionTerms.idx4[i] - atomStart,
-                     terms.inversionTerms.forceConstant[i],
-                     terms.inversionTerms.C1[i],
-                     terms.inversionTerms.C2[i],
-                     grad);
+    for (int f = tid; f < numBonded; f += stride) {
+      const BondedTermRecord current = next;
+      if (f + stride < numBonded) {
+        loadBondedRecord<HasConstraints, true>(terms, layout, f + stride, atomStart, next);
+      }
+      bondedTermGrad<HasConstraints>(molCoords, current, grad);
+    }
   }
 
   const int vdwStart = systemIndices.vdwTermStarts[molIdx];
@@ -786,63 +841,5 @@ __device__ __inline__ void molGrad(const Terms&                   terms,
                terms.vdwTerms.wellDepth[i],
                terms.vdwTerms.threshold[i],
                grad);
-  }
-
-  if constexpr (HasConstraints) {
-    const int dcStart = systemIndices.distanceConstraintTermStarts[molIdx];
-    const int dcEnd   = systemIndices.distanceConstraintTermStarts[molIdx + 1];
-#pragma unroll 1
-    for (int i = dcStart + tid; i < dcEnd; i += stride) {
-      distanceConstraintGrad(molCoords,
-                             terms.distanceConstraintTerms.idx1[i] - atomStart,
-                             terms.distanceConstraintTerms.idx2[i] - atomStart,
-                             terms.distanceConstraintTerms.minLen[i],
-                             terms.distanceConstraintTerms.maxLen[i],
-                             terms.distanceConstraintTerms.forceConstant[i],
-                             grad);
-    }
-
-    const int pcStart = systemIndices.positionConstraintTermStarts[molIdx];
-    const int pcEnd   = systemIndices.positionConstraintTermStarts[molIdx + 1];
-#pragma unroll 1
-    for (int i = pcStart + tid; i < pcEnd; i += stride) {
-      positionConstraintGrad(molCoords,
-                             terms.positionConstraintTerms.idx[i] - atomStart,
-                             terms.positionConstraintTerms.refX[i],
-                             terms.positionConstraintTerms.refY[i],
-                             terms.positionConstraintTerms.refZ[i],
-                             terms.positionConstraintTerms.maxDispl[i],
-                             terms.positionConstraintTerms.forceConstant[i],
-                             grad);
-    }
-
-    const int acStart = systemIndices.angleConstraintTermStarts[molIdx];
-    const int acEnd   = systemIndices.angleConstraintTermStarts[molIdx + 1];
-#pragma unroll 1
-    for (int i = acStart + tid; i < acEnd; i += stride) {
-      angleConstraintGrad(molCoords,
-                          terms.angleConstraintTerms.idx1[i] - atomStart,
-                          terms.angleConstraintTerms.idx2[i] - atomStart,
-                          terms.angleConstraintTerms.idx3[i] - atomStart,
-                          terms.angleConstraintTerms.minAngleDeg[i],
-                          terms.angleConstraintTerms.maxAngleDeg[i],
-                          terms.angleConstraintTerms.forceConstant[i],
-                          grad);
-    }
-
-    const int tcStart = systemIndices.torsionConstraintTermStarts[molIdx];
-    const int tcEnd   = systemIndices.torsionConstraintTermStarts[molIdx + 1];
-#pragma unroll 1
-    for (int i = tcStart + tid; i < tcEnd; i += stride) {
-      torsionConstraintGrad(molCoords,
-                            terms.torsionConstraintTerms.idx1[i] - atomStart,
-                            terms.torsionConstraintTerms.idx2[i] - atomStart,
-                            terms.torsionConstraintTerms.idx3[i] - atomStart,
-                            terms.torsionConstraintTerms.idx4[i] - atomStart,
-                            terms.torsionConstraintTerms.minDihedralDeg[i],
-                            terms.torsionConstraintTerms.maxDihedralDeg[i],
-                            terms.torsionConstraintTerms.forceConstant[i],
-                            grad);
-    }
   }
 }
