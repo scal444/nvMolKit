@@ -20,6 +20,69 @@ using namespace nvMolKit::FFKernelUtils;
 constexpr real degreeToRadian = static_cast<real>(M_PI) / real{180.0};
 constexpr real radianToDegree = real{180.0} / static_cast<real>(M_PI);
 
+//! Reciprocal, square root and reciprocal square root for the term functions. FULL refines the hardware
+//! approximations (rcp.approx.ftz.f64, rsqrt.approx.ftz.f64) with the Newton steps of the IEEE fast paths but leaves
+//! out their special-case branches, which split the hot term loops into separately scheduled regions. SINGLE keeps the
+//! fast-math operations.
+//!
+//! pairRcp and pairRsqrt require a positive normal argument: the pair-term denominators are bounded away from zero and
+//! their squared distances are positive normal numbers for any two distinct atoms.
+static __device__ __forceinline__ real pairRcp(const real x) {
+  if constexpr (std::is_same_v<real, double>) {
+    // The operand is copied to a double so that the float instantiation of this function still type-checks.
+    const double xd = x;
+    double       r;
+    asm("rcp.approx.ftz.f64 %0, %1;" : "=d"(r) : "d"(xd));
+    const double e = fma(-xd, r, 1.0);
+    r              = fma(fma(e, e, e), r, r);
+    return fma(r, fma(-xd, r, 1.0), r);
+  } else {
+    return real{1.0} / x;
+  }
+}
+
+static __device__ __forceinline__ real pairRsqrt(const real x) {
+  if constexpr (std::is_same_v<real, double>) {
+    const double xd = x;
+    double       y;
+    asm("rsqrt.approx.ftz.f64 %0, %1;" : "=d"(y) : "d"(xd));
+    const double e = fma(-xd, y * y, 1.0);
+    return fma(y * e, fma(e, 0.375, 0.5), y);
+  } else {
+    return NVMOLKIT_RSQRT(x);
+  }
+}
+
+//! Reciprocal square root for any argument. For positive normal finite arguments FULL uses the arithmetic of the IEEE
+//! fast path; every other argument takes the hardware approximation instead of a special-case branch, which keeps
+//! 0 -> +inf, +inf -> 0 and negative or NaN -> NaN.
+static __device__ __forceinline__ real fastRsqrt(const real x) {
+  if constexpr (std::is_same_v<real, double>) {
+    const double xd = x;
+    double       y;
+    asm("rsqrt.approx.ftz.f64 %0, %1;" : "=d"(y) : "d"(xd));
+    const double e      = fma(-xd, y * y, 1.0);
+    const double r      = fma(y * e, fma(e, 0.375, 0.5), y);
+    const bool   normal = static_cast<unsigned>(__double2hiint(xd) - 0x00100000) < 0x7fe00000u;
+    return normal ? r : y;
+  } else {
+    return NVMOLKIT_RSQRT(x);
+  }
+}
+
+//! Square root of a squared distance; zero (and anything below the normal range) maps to zero.
+static __device__ __forceinline__ real pairSqrt(const real x) {
+  if constexpr (std::is_same_v<real, double>) {
+    const double xd = x;
+    const double y  = pairRsqrt(x);
+    const double s  = xd * y;
+    const double r  = fma(-s, s, xd);
+    return xd >= 0x1p-1022 ? fma(r, 0.5 * y, s) : 0.0;
+  } else {
+    return NVMOLKIT_SQRT(x);
+  }
+}
+
 namespace rdkit_ports {
 
 static __device__ __forceinline__ void
@@ -38,9 +101,9 @@ oopGrad(const auto* pos, const int idx1, const int idx2, const int idx3, const i
   real dJLy = pos[3 * idx4 + 1] - pos[3 * idx2 + 1];
   real dJLz = pos[3 * idx4 + 2] - pos[3 * idx2 + 2];
 
-  const real invdJI = NVMOLKIT_RSQRT(dJIx * dJIx + dJIy * dJIy + dJIz * dJIz);
-  const real invdJK = NVMOLKIT_RSQRT(dJKx * dJKx + dJKy * dJKy + dJKz * dJKz);
-  const real invdJL = NVMOLKIT_RSQRT(dJLx * dJLx + dJLy * dJLy + dJLz * dJLz);
+  const real invdJI = fastRsqrt(dJIx * dJIx + dJIy * dJIy + dJIz * dJIz);
+  const real invdJK = fastRsqrt(dJKx * dJKx + dJKy * dJKy + dJKz * dJKz);
+  const real invdJL = fastRsqrt(dJLx * dJLx + dJLy * dJLy + dJLz * dJLz);
 
   dJIx *= invdJI;
   dJIy *= invdJI;
@@ -54,19 +117,18 @@ oopGrad(const auto* pos, const int idx1, const int idx2, const int idx3, const i
 
   real normalJIKx, normalJIKy, normalJIKz;
   crossProduct(-dJIx, -dJIy, -dJIz, dJKx, dJKy, dJKz, normalJIKx, normalJIKy, normalJIKz);
-  const real invNormLength =
-    NVMOLKIT_RSQRT(normalJIKx * normalJIKx + normalJIKy * normalJIKy + normalJIKz * normalJIKz);
+  const real invNormLength = fastRsqrt(normalJIKx * normalJIKx + normalJIKy * normalJIKy + normalJIKz * normalJIKz);
   normalJIKx *= invNormLength;
   normalJIKy *= invNormLength;
   normalJIKz *= invNormLength;
 
   const real sinChi    = clamp(dotProduct(dJLx, dJLy, dJLz, normalJIKx, normalJIKy, normalJIKz), real{-1.0}, real{1.0});
   const real cosChiSq  = real{1.0} - sinChi * sinChi;
-  const real invCosChi = cosChiSq > 0 ? NVMOLKIT_RSQRT(cosChiSq) : real{1.0e8};
+  const real invCosChi = cosChiSq > 0 ? fastRsqrt(cosChiSq) : real{1.0e8};
   const real chi       = radianToDegree * NVMOLKIT_ASIN(sinChi);
   const real cosTheta  = clamp(dotProduct(dJIx, dJIy, dJIz, dJKx, dJKy, dJKz), real{-1.0}, real{1.0});
 
-  real invSinTheta = NVMOLKIT_RSQRT(NVMOLKIT_FMAX(real{1.0} - cosTheta * cosTheta, real{1.0e-8}));
+  real invSinTheta = fastRsqrt(NVMOLKIT_FMAX(real{1.0} - cosTheta * cosTheta, real{1.0e-8}));
 
   real dE_dChi = prefactor * koop * chi;
   real t1x, t1y, t1z, t2x, t2y, t2z, t3x, t3y, t3z;
@@ -127,7 +189,7 @@ static __device__ __forceinline__ void torsionGrad(const auto* pos,
   real cross1x, cross1y, cross1z;
   crossProduct(dx1, dy1, dz1, dx2, dy2, dz2, cross1x, cross1y, cross1z);
   const real invNorm1 =
-    NVMOLKIT_FMIN(NVMOLKIT_RSQRT(cross1x * cross1x + cross1y * cross1y + cross1z * cross1z), real{1.0e5});
+    NVMOLKIT_FMIN(fastRsqrt(cross1x * cross1x + cross1y * cross1y + cross1z * cross1z), real{1.0e5});
   cross1x *= invNorm1;
   cross1y *= invNorm1;
   cross1z *= invNorm1;
@@ -136,7 +198,7 @@ static __device__ __forceinline__ void torsionGrad(const auto* pos,
   // Use -dx2, -dy2, -dz2 directly instead of storing dx3, dy3, dz3
   crossProduct(-dx2, -dy2, -dz2, dx4, dy4, dz4, cross2x, cross2y, cross2z);
   const real invNorm2 =
-    NVMOLKIT_FMIN(NVMOLKIT_RSQRT(cross2x * cross2x + cross2y * cross2y + cross2z * cross2z), real{1.0e5});
+    NVMOLKIT_FMIN(fastRsqrt(cross2x * cross2x + cross2y * cross2y + cross2z * cross2z), real{1.0e5});
   cross2x *= invNorm2;
   cross2y *= invNorm2;
   cross2z *= invNorm2;
@@ -194,25 +256,28 @@ static __device__ __forceinline__ void vDWGrad(const auto* pos,
   constexpr real vdw2m1 = vdw2 - real{1.0};
   constexpr real vdw2t7 = vdw2 * real{7.0};
 
-  const real invDistance = NVMOLKIT_RSQRT(distanceSquared(pos, idx1, idx2));
-  const real distance    = 1.0f / invDistance;
+  const real distSquared = distanceSquared(pos, idx1, idx2);
+  const real invDistance = pairRsqrt(distSquared);
+  const real distance    = distSquared * invDistance;
 
-  const real invRIJStar = 1.0f / R_ij_star;
-
-  const real q         = distance * invRIJStar;
-  const real q2        = q * q;
-  const real q6        = q2 * q2 * q2;
-  const real q7        = q6 * q;
-  const real q7pvdw2m1 = q7 + vdw2m1;
-  const real invQ7Term = 1.0f / q7pvdw2m1;
-  const real t         = vdw1 / (q + vdw1 - real{1.0});
-  const real t2        = t * t;
-  const real t7        = t2 * t2 * t2 * t;
-  const real dE_dr     = wellDepth * invRIJStar * t7 *
-                     (-vdw2t7 * q6 * invQ7Term * invQ7Term + ((-vdw2t7 * invQ7Term + real{14.0}) / (q + vdw1m1)));
+  // With q = r / R*, the buffered terms 1 / (q + vdw1m1) = R* / A and 1 / (q^7 + vdw2m1) = R*^7 / B, where
+  // A = r + vdw1m1 * R* and B = r^7 + vdw2m1 * R*^7, so a single reciprocal of A * B serves both.
+  const real R2     = R_ij_star * R_ij_star;
+  const real R7     = R2 * R2 * R2 * R_ij_star;
+  const real dist6  = distSquared * distSquared * distSquared;
+  const real denomA = distance + vdw1m1 * R_ij_star;
+  const real denomB = dist6 * distance + vdw2m1 * R7;
+  const real invAB  = pairRcp(denomA * denomB);
+  const real invA   = denomB * invAB;
+  const real invB   = denomA * invAB;
+  const real t      = vdw1 * R_ij_star * invA;
+  const real t2     = t * t;
+  const real t7     = t2 * t2 * t2 * t;
+  const real R7invB = R7 * invB;
+  const real dE_dr  = wellDepth * t7 * (-vdw2t7 * dist6 * R7invB * invB + (real{14.0} - vdw2t7 * R7invB) * invA);
 
   real term1x, term1y, term1z;
-  if (distance <= real{0.0}) {
+  if (distSquared <= real{0.0}) {
     term1x = R_ij_star * 0.01f;
     term1y = R_ij_star * 0.01f;
     term1z = R_ij_star * 0.01f;
@@ -260,15 +325,15 @@ static __device__ __forceinline__ void bondStretchGrad(const auto* pos,
 
   real       dx, dy, dz;
   const real distanceSquared = distanceSquaredWithComponents(pos, idx1, idx2, dx, dy, dz);
-  const real invDist         = NVMOLKIT_RSQRT(distanceSquared);
-  const real distance        = real{1.0} / invDist;
+  const real invDist         = fastRsqrt(distanceSquared);
+  const real distance        = distanceSquared * invDist;
   const real deltaR          = distance - r0;
 
   const real de_dr =
     c1 * kb * deltaR * (real{1.0} + csFactorTimesSecondConstant * deltaR + lastFactor * deltaR * deltaR);
 
   real dE_dx, dE_dy, dE_dz;
-  if (distance > real{0.0}) {
+  if (distanceSquared > real{0.0}) {
     dE_dx = de_dr * dx * invDist;
     dE_dy = de_dr * dy * invDist;
     dE_dz = de_dr * dz * invDist;
@@ -300,8 +365,8 @@ static __device__ __forceinline__ real angleBendEnergy(const auto* pos,
   real       dx1, dy1, dz1, dx2, dy2, dz2;
   const real dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
   const real dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
-  const real dist1        = NVMOLKIT_RSQRT(dist1Squared);
-  const real dist2        = NVMOLKIT_RSQRT(dist2Squared);
+  const real dist1        = fastRsqrt(dist1Squared);
+  const real dist2        = fastRsqrt(dist2Squared);
 
   const real dot         = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
   const real cosTheta    = clamp(dot * (dist1 * dist2), real{-1.0}, real{1.0});
@@ -329,8 +394,8 @@ static __device__ __forceinline__ void angleBendGrad(const int   idx1,
   real           dx1, dy1, dz1, dx2, dy2, dz2;
   const real     dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
   const real     dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
-  const real     invDist1     = NVMOLKIT_RSQRT(dist1Squared);
-  const real     invDist2     = NVMOLKIT_RSQRT(dist2Squared);
+  const real     invDist1     = fastRsqrt(dist1Squared);
+  const real     invDist2     = fastRsqrt(dist2Squared);
 
   const real dot        = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
   const real cosTheta   = clamp(dot * invDist1 * invDist2, -real{1.0}, real{1.0});
@@ -339,7 +404,7 @@ static __device__ __forceinline__ void angleBendGrad(const int   idx1,
     return;
   }
 
-  const real invNegSinTheta = -NVMOLKIT_RSQRT(sinThetaSq);
+  const real invNegSinTheta = -fastRsqrt(sinThetaSq);
   const real theta          = radianToDegree * NVMOLKIT_ACOS(cosTheta);
   const real deltaTheta     = theta - theta0;
 
@@ -395,12 +460,22 @@ static __device__ __forceinline__ real bendStretchEnergy(const auto* pos,
   real       dx1, dy1, dz1, dx2, dy2, dz2;
   const real dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
   const real dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
-  const real dist1        = NVMOLKIT_SQRT(dist1Squared);
-  const real dist2        = NVMOLKIT_SQRT(dist2Squared);
-
-  const real dot      = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
-  const real cosTheta = clamp(dot / (dist1 * dist2), real{-1.0}, real{1.0});
-  const real theta    = 180 / static_cast<real>(M_PI) * NVMOLKIT_ACOS(cosTheta);
+  const real dot          = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
+  real       dist1, dist2, cosTheta;
+  if constexpr (std::is_same_v<real, double>) {
+    const real invDist1 = fastRsqrt(dist1Squared);
+    const real invDist2 = fastRsqrt(dist2Squared);
+    dist1               = dist1Squared * invDist1;
+    dist2               = dist2Squared * invDist2;
+    cosTheta            = clamp(dot * (invDist1 * invDist2), real{-1.0}, real{1.0});
+  } else {
+    // SINGLE keeps sqrt and division: the approximate rsqrtf moves the cosine of (nearly) collinear bonds off +-1,
+    // where acos is ill-conditioned.
+    dist1    = NVMOLKIT_SQRT(dist1Squared);
+    dist2    = NVMOLKIT_SQRT(dist2Squared);
+    cosTheta = clamp(dot / (dist1 * dist2), real{-1.0}, real{1.0});
+  }
+  const real theta = 180 / static_cast<real>(M_PI) * NVMOLKIT_ACOS(cosTheta);
 
   const real deltaTheta = theta - theta0;
   const real deltaR1    = dist1 - restLen1;
@@ -424,13 +499,22 @@ static __device__ __forceinline__ void bendStretchGrad(const auto* pos,
   real       dx1, dy1, dz1, dx2, dy2, dz2;
   const real dist1Squared = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
   const real dist2Squared = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
-  const real dist1        = NVMOLKIT_SQRT(dist1Squared);
-  const real dist2        = NVMOLKIT_SQRT(dist2Squared);
-  const real invDist1     = real{1.0} / dist1;
-  const real invDist2     = real{1.0} / dist2;
-  const real dot          = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
-  const real cosTheta     = clamp(dot * invDist1 * invDist2, real{-1.0}, real{1.0});
-  const real invSinTheta  = NVMOLKIT_FMIN(NVMOLKIT_RSQRT(real{1.0} - cosTheta * cosTheta), real{1.0e8});
+  real       dist1, dist2, invDist1, invDist2;
+  if constexpr (std::is_same_v<real, double>) {
+    invDist1 = fastRsqrt(dist1Squared);
+    invDist2 = fastRsqrt(dist2Squared);
+    dist1    = dist1Squared * invDist1;
+    dist2    = dist2Squared * invDist2;
+  } else {
+    // SINGLE keeps sqrt and division (see bendStretchEnergy).
+    dist1    = NVMOLKIT_SQRT(dist1Squared);
+    dist2    = NVMOLKIT_SQRT(dist2Squared);
+    invDist1 = real{1.0} / dist1;
+    invDist2 = real{1.0} / dist2;
+  }
+  const real dot         = dx1 * dx2 + dy1 * dy2 + dz1 * dz2;
+  const real cosTheta    = clamp(dot * invDist1 * invDist2, real{-1.0}, real{1.0});
+  const real invSinTheta = NVMOLKIT_FMIN(fastRsqrt(real{1.0} - cosTheta * cosTheta), real{1.0e8});
 
   constexpr real bondFactor = real{180.0} / static_cast<real>(M_PI);
   const real     theta      = bondFactor * NVMOLKIT_ACOS(cosTheta);
@@ -494,9 +578,9 @@ oopBendEnergy(const auto* pos, const int idx1, const int idx2, const int idx3, c
   const real distSquaredJK = distanceSquaredWithComponents(pos, idx3, idx2, dxjk, dyjk, dzjk);
   const real distSquaredJL = distanceSquaredWithComponents(pos, idx4, idx2, dxjl, dyjl, dzjl);
 
-  const real invDistJI = NVMOLKIT_RSQRT(distSquaredJI);
-  const real invDistJK = NVMOLKIT_RSQRT(distSquaredJK);
-  const real invDistJL = NVMOLKIT_RSQRT(distSquaredJL);
+  const real invDistJI = fastRsqrt(distSquaredJI);
+  const real invDistJK = fastRsqrt(distSquaredJK);
+  const real invDistJL = fastRsqrt(distSquaredJL);
 
   const real scaledDxJI = dxji * invDistJI;
   const real scaledDyJI = dyji * invDistJI;
@@ -512,7 +596,7 @@ oopBendEnergy(const auto* pos, const int idx1, const int idx2, const int idx3, c
 
   real crossX, crossY, crossZ;
   crossProduct(scaledDxJI, scaledDyJI, scaledDzJI, scaledDxJK, scaledDyJK, scaledDzJK, crossX, crossY, crossZ);
-  const real invDistCross = NVMOLKIT_RSQRT(crossX * crossX + crossY * crossY + crossZ * crossZ);
+  const real invDistCross = fastRsqrt(crossX * crossX + crossY * crossY + crossZ * crossZ);
 
   const real scaledCrossX = crossX * invDistCross;
   const real scaledCrossY = crossY * invDistCross;
@@ -552,10 +636,8 @@ static __device__ __forceinline__ real torsionEnergy(const auto* pos,
   const real crossJKLKy = -dzKJ * dxLK + dxKJ * dzLK;
   const real crossJKLKz = -dxKJ * dyLK + dyKJ * dxLK;
 
-  const real invCross1Norm =
-    NVMOLKIT_RSQRT(crossIJKJx * crossIJKJx + crossIJKJy * crossIJKJy + crossIJKJz * crossIJKJz);
-  const real invCross2Norm =
-    NVMOLKIT_RSQRT(crossJKLKx * crossJKLKx + crossJKLKy * crossJKLKy + crossJKLKz * crossJKLKz);
+  const real invCross1Norm = fastRsqrt(crossIJKJx * crossIJKJx + crossIJKJy * crossIJKJy + crossIJKJz * crossIJKJz);
+  const real invCross2Norm = fastRsqrt(crossJKLKx * crossJKLKx + crossJKLKy * crossJKLKy + crossJKLKz * crossJKLKz);
 
   const real dotProduct = crossIJKJx * crossJKLKx + crossIJKJy * crossJKLKy + crossIJKJz * crossJKLKz;
   const real cosPhi     = dotProduct * invCross1Norm * invCross2Norm;
@@ -573,14 +655,18 @@ vdwEnergy(const auto* pos, const int idx1, const int idx2, const real R_ij_star,
   const real epsilon = wellDepth;
 
   const real distSquared = distanceSquared(pos, idx1, idx2);
-  const real dist        = NVMOLKIT_SQRT(distSquared);
+  const real dist        = pairSqrt(distSquared);
   const real dist7       = distSquared * distSquared * distSquared * dist;
 
-  const real term1        = real{1.07} * R_ij_star / (dist + real{0.07} * R_ij_star);
+  // Both buffered denominators share one reciprocal.
+  const real denom1       = dist + real{0.07} * R_ij_star;
+  const real denom2       = dist7 + real{0.12} * R_ij_star7;
+  const real invBoth      = pairRcp(denom1 * denom2);
+  const real term1        = real{1.07} * R_ij_star * denom2 * invBoth;
   const real term1Squared = term1 * term1;
   const real term1_7th    = term1Squared * term1Squared * term1Squared * term1;
 
-  const real term2Fraction = real{1.12} * R_ij_star7 / (dist7 + real{0.12} * R_ij_star7);
+  const real term2Fraction = real{1.12} * R_ij_star7 * denom1 * invBoth;
 
   return epsilon * term1_7th * (term2Fraction - real{2.0});
 }
@@ -594,11 +680,11 @@ static __device__ __forceinline__ real eleEnergy(const auto* pos,
   constexpr real prefactor         = real{332.0716};
   constexpr real bufferingConstant = real{0.05};
   const real     distSquared       = distanceSquared(pos, idx1, idx2);
-  real           distTerm          = NVMOLKIT_SQRT(distSquared) + bufferingConstant;
+  real           distTerm          = pairSqrt(distSquared) + bufferingConstant;
   if (dielModel == 2) {
     distTerm *= distTerm;
   }
-  real energy = prefactor * chargeTerm / (distTerm);
+  real energy = prefactor * chargeTerm * pairRcp(distTerm);
   if (is1_4) {
     energy *= real{0.75};
   }
@@ -616,26 +702,23 @@ static __device__ __forceinline__ void eleGrad(const auto* pos,
   constexpr real bufferingConstant = real{0.05};
 
   const real distSquared = distanceSquared(pos, idx1, idx2);
-  const real invDistance = NVMOLKIT_RSQRT(distSquared);
-  const real distance    = real{1.0} / invDistance;
-  const real rBuf        = distance + bufferingConstant;
-  real       numerator   = -prefactor * chargeTerm;
+  const real invDistance = pairRsqrt(distSquared);
+  // 1 / (r + b) = (1 / r) / (1 + b / r), which needs no separate reciprocal of r.
+  const real invRBuf     = invDistance * pairRcp(real{1.0} + bufferingConstant * invDistance);
+  // dE/dr divided by r, so that the components follow from the coordinate differences directly.
   // E_1 = q / (r+b)         -> dE/dr = -q / (r+b)^2
   // E_2 = q / (r+b)^2       -> dE/dr = -2q / (r+b)^3
-  real       denominator = rBuf * rBuf;
+  real       scale       = -prefactor * chargeTerm * invRBuf * invRBuf * invDistance;
   if (dielModel == 2) {
-    numerator *= 2;
-    denominator *= rBuf;
+    scale *= real{2.0} * invRBuf;
   }
-
-  real dE_dr = numerator / denominator;
   if (is1_4) {
-    dE_dr *= real{0.75};
+    scale *= real{0.75};
   }
 
-  const real dE_dx = dE_dr * (pos[3 * idx1 + 0] - pos[3 * idx2 + 0]) * invDistance;
-  const real dE_dy = dE_dr * (pos[3 * idx1 + 1] - pos[3 * idx2 + 1]) * invDistance;
-  const real dE_dz = dE_dr * (pos[3 * idx1 + 2] - pos[3 * idx2 + 2]) * invDistance;
+  const real dE_dx = scale * (pos[3 * idx1 + 0] - pos[3 * idx2 + 0]);
+  const real dE_dy = scale * (pos[3 * idx1 + 1] - pos[3 * idx2 + 1]);
+  const real dE_dz = scale * (pos[3 * idx1 + 2] - pos[3 * idx2 + 2]);
 
   atomicAdd(&grad[3 * idx1 + 0], dE_dx);
   atomicAdd(&grad[3 * idx1 + 1], dE_dy);
