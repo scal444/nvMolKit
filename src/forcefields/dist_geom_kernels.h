@@ -209,6 +209,21 @@ cudaError_t launchDistanceConstraintGradientKernel(int            numDist,
                                                    const uint8_t* activeThisStage = nullptr,
                                                    cudaStream_t   stream          = 0);
 
+//! launchDistanceConstraintGradientKernel with two consecutive terms per thread, loaded as int2/double2 pairs. Falls
+//! back to the one-term-per-thread kernel when the term arrays are not aligned for those loads.
+cudaError_t launchDistanceConstraintGradientPairKernel(int            numDist,
+                                                       const int*     idx1,
+                                                       const int*     idx2,
+                                                       const double*  minLen,
+                                                       const double*  maxLen,
+                                                       const double*  forceConstant,
+                                                       const double*  pos,
+                                                       double*        grad,
+                                                       const int*     atomIdxToBatchIdx,
+                                                       const int*     atomStarts,
+                                                       const uint8_t* activeThisStage = nullptr,
+                                                       cudaStream_t   stream          = 0);
+
 // Angle constraint contribution kernels
 constexpr double defaultAngleForceConstant = 1.0;
 cudaError_t      launchAngleConstraintEnergyKernel(int            numAngle,

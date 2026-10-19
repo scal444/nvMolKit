@@ -688,13 +688,15 @@ static __device__ __forceinline__ void inversionGrad(const DG_REAL* pos,
   atomicAdd(&grad[posIdx4 + 2], dE_dW * tg4z);
 }
 
-static __device__ __forceinline__ void distanceConstraintGrad(const DG_REAL* pos,
-                                                              const int      idx1,
-                                                              const int      idx2,
-                                                              const DG_REAL  minLen,
-                                                              const DG_REAL  maxLen,
-                                                              const DG_REAL  forceConstant,
-                                                              DG_REAL*       grad) {
+//! Per-term gradient of a flat-bottom distance restraint: returns false inside the bounds, otherwise writes the
+//! atom-1 xyz contribution d (atom 2 receives -d).
+static __device__ __forceinline__ bool distanceConstraintGradTerm(const DG_REAL* pos,
+                                                                  const int      idx1,
+                                                                  const int      idx2,
+                                                                  const DG_REAL  minLen,
+                                                                  const DG_REAL  maxLen,
+                                                                  const DG_REAL  forceConstant,
+                                                                  DG_REAL*       d) {
   const DG_REAL minLen2 = minLen * minLen;
   const DG_REAL maxLen2 = maxLen * maxLen;
   const int     posIdx1 = idx1 * 4;
@@ -712,14 +714,29 @@ static __device__ __forceinline__ void distanceConstraintGrad(const DG_REAL* pos
     const DG_REAL distance = DG_SQRT(distance2);
     preFactor              = forceConstant * (distance - maxLen) / DG_FMAX(DG_REAL(1.0e-8), distance);
   } else {
-    return;  // Distance within bounds, no gradient contribution
+    return false;  // Distance within bounds, no gradient contribution
   }
 
-  // Calculate and accumulate gradients for each component
   for (int i = 0; i < 3; i++) {
-    const DG_REAL dGrad = preFactor * (pos[posIdx1 + i] - pos[posIdx2 + i]);
-    atomicAdd(&grad[posIdx1 + i], dGrad);
-    atomicAdd(&grad[posIdx2 + i], -dGrad);
+    d[i] = preFactor * (pos[posIdx1 + i] - pos[posIdx2 + i]);
+  }
+  return true;
+}
+
+static __device__ __forceinline__ void distanceConstraintGrad(const DG_REAL* pos,
+                                                              const int      idx1,
+                                                              const int      idx2,
+                                                              const DG_REAL  minLen,
+                                                              const DG_REAL  maxLen,
+                                                              const DG_REAL  forceConstant,
+                                                              DG_REAL*       grad) {
+  DG_REAL d[3];
+  if (!distanceConstraintGradTerm(pos, idx1, idx2, minLen, maxLen, forceConstant, d)) {
+    return;
+  }
+  for (int i = 0; i < 3; i++) {
+    atomicAdd(&grad[idx1 * 4 + i], d[i]);
+    atomicAdd(&grad[idx2 * 4 + i], -d[i]);
   }
 }
 

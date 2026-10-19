@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <cstdint>
 #include <cub/cub.cuh>
 
 #include "src/forcefields/dist_geom_kernels.h"
@@ -389,6 +390,91 @@ __global__ void DistanceConstraintGradientKernel(const int      numDist,
     // Check if activeThisStage is nullptr or if this molecule/conformer is active in this stage
     if (activeThisStage == nullptr || activeThisStage[batchIdx] == 1) {
       distanceConstraintGrad(pos, idx1, idx2s[idx], minLen[idx], maxLen[idx], forceConstants[idx], grad);
+    }
+  }
+}
+
+//! Atomically adds one atom's xyz gradient contribution.
+__device__ __forceinline__ void addAtomGrad3(double* grad, const double x, const double y, const double z) {
+  atomicAdd(grad + 0, x);
+  atomicAdd(grad + 1, y);
+  atomicAdd(grad + 2, z);
+}
+
+//! Two adjacent distance restraints per thread. ETK distance lists are grouped by their first atom, so the common
+//! case combines the two atom-1 updates into one set of atomics. The packed SoA loads also halve the number of
+//! threads and load instructions. Requires int2/double2-aligned term arrays (checked by the launcher).
+__global__ void __launch_bounds__(64, 8) DistanceConstraintGradientPairKernel(const int      numDist,
+                                                                              const int*     idx1s,
+                                                                              const int*     idx2s,
+                                                                              const double*  minLen,
+                                                                              const double*  maxLen,
+                                                                              const double*  forceConstants,
+                                                                              const double*  pos,
+                                                                              double*        grad,
+                                                                              const int*     atomIdxToBatchIdx,
+                                                                              const uint8_t* activeThisStage) {
+  const int pairIdx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int idx     = pairIdx * 2;
+  if (idx >= numDist) {
+    return;
+  }
+
+  int        i1[2];
+  int        i2[2];
+  double     lo[2];
+  double     hi[2];
+  double     fc[2];
+  const bool fullPair = idx + 1 < numDist;
+  if (fullPair) {
+    const int2    a = reinterpret_cast<const int2*>(idx1s)[pairIdx];
+    const int2    b = reinterpret_cast<const int2*>(idx2s)[pairIdx];
+    const double2 l = reinterpret_cast<const double2*>(minLen)[pairIdx];
+    const double2 h = reinterpret_cast<const double2*>(maxLen)[pairIdx];
+    const double2 f = reinterpret_cast<const double2*>(forceConstants)[pairIdx];
+    i1[0]           = a.x;
+    i1[1]           = a.y;
+    i2[0]           = b.x;
+    i2[1]           = b.y;
+    lo[0]           = l.x;
+    lo[1]           = l.y;
+    hi[0]           = h.x;
+    hi[1]           = h.y;
+    fc[0]           = f.x;
+    fc[1]           = f.y;
+  } else {
+    i1[0] = idx1s[idx];
+    i2[0] = idx2s[idx];
+    lo[0] = minLen[idx];
+    hi[0] = maxLen[idx];
+    fc[0] = forceConstants[idx];
+  }
+
+  double d[2][3];
+  bool   contributes[2] = {false, false};
+#pragma unroll
+  for (int k = 0; k < 2; ++k) {
+    if (k == 1 && !fullPair) {
+      continue;
+    }
+    // The term is evaluated before the activity test so its coordinate loads overlap the atom -> system ->
+    // active lookups; inactive systems still receive no update.
+    const int  batchIdx = atomIdxToBatchIdx[i1[k]];
+    const bool term     = fp64::distanceConstraintGradTerm(pos, i1[k], i2[k], lo[k], hi[k], fc[k], d[k]);
+    contributes[k]      = term && (activeThisStage == nullptr || activeThisStage[batchIdx] == 1);
+    if (contributes[k]) {
+      addAtomGrad3(&grad[i2[k] * 4], -d[k][0], -d[k][1], -d[k][2]);
+    }
+  }
+
+  if (contributes[0] && contributes[1] && i1[0] == i1[1]) {
+    addAtomGrad3(&grad[i1[0] * 4], d[0][0] + d[1][0], d[0][1] + d[1][1], d[0][2] + d[1][2]);
+  } else {
+    if (contributes[0]) {
+      addAtomGrad3(&grad[i1[0] * 4], d[0][0], d[0][1], d[0][2]);
+    }
+    if (contributes[1]) {
+      addAtomGrad3(&grad[i1[1] * 4], d[1][0], d[1][1], d[1][2]);
     }
   }
 }
@@ -959,6 +1045,55 @@ cudaError_t launchDistanceConstraintGradientKernel(const int      numDist,
                                                                         atomIdxToBatchIdx,
                                                                         atomStarts,
                                                                         activeThisStage);
+  return cudaGetLastError();
+}
+
+cudaError_t launchDistanceConstraintGradientPairKernel(const int      numDist,
+                                                       const int*     idx1s,
+                                                       const int*     idx2s,
+                                                       const double*  minLen,
+                                                       const double*  maxLen,
+                                                       const double*  forceConstants,
+                                                       const double*  pos,
+                                                       double*        grad,
+                                                       const int*     atomIdxToBatchIdx,
+                                                       const int*     atomStarts,
+                                                       const uint8_t* activeThisStage,
+                                                       cudaStream_t   stream) {
+  if (numDist == 0) {
+    return cudaSuccess;
+  }
+  const auto alignedTo = [](const void* p, const uintptr_t alignment) {
+    return reinterpret_cast<uintptr_t>(p) % alignment == 0;
+  };
+  if (!alignedTo(idx1s, alignof(int2)) || !alignedTo(idx2s, alignof(int2)) || !alignedTo(minLen, alignof(double2)) ||
+      !alignedTo(maxLen, alignof(double2)) || !alignedTo(forceConstants, alignof(double2))) {
+    return launchDistanceConstraintGradientKernel(numDist,
+                                                  idx1s,
+                                                  idx2s,
+                                                  minLen,
+                                                  maxLen,
+                                                  forceConstants,
+                                                  pos,
+                                                  grad,
+                                                  atomIdxToBatchIdx,
+                                                  atomStarts,
+                                                  activeThisStage,
+                                                  stream);
+  }
+  constexpr int blockSize = 64;
+  const int     numPairs  = (numDist + 1) / 2;
+  const int     numBlocks = (numPairs + blockSize - 1) / blockSize;
+  DistanceConstraintGradientPairKernel<<<numBlocks, blockSize, 0, stream>>>(numDist,
+                                                                            idx1s,
+                                                                            idx2s,
+                                                                            minLen,
+                                                                            maxLen,
+                                                                            forceConstants,
+                                                                            pos,
+                                                                            grad,
+                                                                            atomIdxToBatchIdx,
+                                                                            activeThisStage);
   return cudaGetLastError();
 }
 

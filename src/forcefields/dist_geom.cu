@@ -1209,35 +1209,35 @@ cudaError_t computeGradientsETK(BatchedMolecular3DDeviceBuffers& molSystemDevice
   // 1-2 distance terms
   if (err == cudaSuccess && (term == ETKTerm::ALL || term == ETKTerm::PLAIN || term == ETKTerm::DISTANCE_12) &&
       contribs.dist12Terms.idx1.size() > 0) {
-    err = launchDistanceConstraintGradientKernel(contribs.dist12Terms.idx1.size(),
-                                                 contribs.dist12Terms.idx1.data(),
-                                                 contribs.dist12Terms.idx2.data(),
-                                                 contribs.dist12Terms.minLen.data(),
-                                                 contribs.dist12Terms.maxLen.data(),
-                                                 contribs.dist12Terms.forceConstant.data(),
-                                                 ctxPositions,
-                                                 grad,
-                                                 molSystemDevice.indices.atomIdxToBatchIdx.data(),
-                                                 ctxAtomStarts,
-                                                 activeSystemMask,
-                                                 stream);
+    err = launchDistanceConstraintGradientPairKernel(contribs.dist12Terms.idx1.size(),
+                                                     contribs.dist12Terms.idx1.data(),
+                                                     contribs.dist12Terms.idx2.data(),
+                                                     contribs.dist12Terms.minLen.data(),
+                                                     contribs.dist12Terms.maxLen.data(),
+                                                     contribs.dist12Terms.forceConstant.data(),
+                                                     ctxPositions,
+                                                     grad,
+                                                     molSystemDevice.indices.atomIdxToBatchIdx.data(),
+                                                     ctxAtomStarts,
+                                                     activeSystemMask,
+                                                     stream);
   }
 
   // 1-3 distance terms
   if (err == cudaSuccess && (term == ETKTerm::ALL || term == ETKTerm::PLAIN || term == ETKTerm::DISTANCE_13) &&
       contribs.dist13Terms.idx1.size() > 0) {
-    err = launchDistanceConstraintGradientKernel(contribs.dist13Terms.idx1.size(),
-                                                 contribs.dist13Terms.idx1.data(),
-                                                 contribs.dist13Terms.idx2.data(),
-                                                 contribs.dist13Terms.minLen.data(),
-                                                 contribs.dist13Terms.maxLen.data(),
-                                                 contribs.dist13Terms.forceConstant.data(),
-                                                 ctxPositions,
-                                                 grad,
-                                                 molSystemDevice.indices.atomIdxToBatchIdx.data(),
-                                                 ctxAtomStarts,
-                                                 activeSystemMask,
-                                                 stream);
+    err = launchDistanceConstraintGradientPairKernel(contribs.dist13Terms.idx1.size(),
+                                                     contribs.dist13Terms.idx1.data(),
+                                                     contribs.dist13Terms.idx2.data(),
+                                                     contribs.dist13Terms.minLen.data(),
+                                                     contribs.dist13Terms.maxLen.data(),
+                                                     contribs.dist13Terms.forceConstant.data(),
+                                                     ctxPositions,
+                                                     grad,
+                                                     molSystemDevice.indices.atomIdxToBatchIdx.data(),
+                                                     ctxAtomStarts,
+                                                     activeSystemMask,
+                                                     stream);
   }
 
   // 1-3 angle terms
