@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,9 +26,8 @@ namespace nvMolKit {
 //! A byte count sets the threshold, and 0 leaves the pool untouched.
 inline constexpr const char* kMemPoolReleaseThresholdEnvVar = "NVMOLKIT_MEMPOOL_RELEASE_THRESHOLD";
 
-//! Release threshold applied when the environment variable is unset. Up to this many bytes of freed stream-ordered
-//! memory stay reserved in the pool across synchronizations instead of returning to the driver, so repeated small
-//! calls do not pay to regrow the pool. Bounded so that idle reservations stay small next to other users of the GPU.
+//! Release threshold applied when the environment variable is unset. Freed stream-ordered memory can stay reserved
+//! in the pool across synchronizations for reuse. CUDA attempts to release reservations above this threshold.
 inline constexpr std::uint64_t kDefaultMemPoolReleaseThreshold = std::uint64_t{256} << 20;
 
 //! Parses the environment variable value. Returns the threshold to apply, or nullopt to leave the pool untouched.

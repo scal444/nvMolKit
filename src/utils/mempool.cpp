@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -46,7 +46,7 @@ std::optional<std::uint64_t> parseMemPoolReleaseThreshold(const char* value) {
   errno                           = 0;
   // NOLINTNEXTLINE(google-runtime-int)
   const unsigned long long parsed = std::strtoull(value, &end, 10);
-  if (errno != 0 || *end != '\0' || *value == '-') {
+  if (errno != 0 || *end != '\0' || *value < '0' || *value > '9') {
     std::fprintf(stderr,
                  "nvMolKit: ignoring invalid %s value '%s'; the CUDA memory pool is left unchanged\n",
                  kMemPoolReleaseThresholdEnvVar,

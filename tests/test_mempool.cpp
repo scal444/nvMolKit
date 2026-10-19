@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -20,6 +20,8 @@
 #include <cstdlib>
 #include <optional>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "src/utils/device_vector.h"
 #include "src/utils/mempool.h"
@@ -103,6 +105,11 @@ TEST(MemPoolThresholdParse, InvalidLeavesPoolUntouched) {
   EXPECT_EQ(parseMemPoolReleaseThreshold("abc"), std::nullopt);
   EXPECT_EQ(parseMemPoolReleaseThreshold("12MB"), std::nullopt);
   EXPECT_EQ(parseMemPoolReleaseThreshold("-1"), std::nullopt);
+  EXPECT_EQ(parseMemPoolReleaseThreshold(" -1"), std::nullopt);
+  EXPECT_EQ(parseMemPoolReleaseThreshold("\t-1"), std::nullopt);
+  EXPECT_EQ(parseMemPoolReleaseThreshold("+1"), std::nullopt);
+  EXPECT_EQ(parseMemPoolReleaseThreshold(" 1"), std::nullopt);
+  EXPECT_EQ(parseMemPoolReleaseThreshold("1 "), std::nullopt);
   EXPECT_EQ(parseMemPoolReleaseThreshold("99999999999999999999999"), std::nullopt);
 }
 
@@ -113,7 +120,13 @@ TEST_F(MemPoolTest, FirstAllocationSetsThreshold) {
   if (original_ != 0) {
     GTEST_SKIP() << "Default pool was already configured in this process";
   }
-  AsyncDeviceVector<int> vec(16);
+  std::vector<std::thread> workers;
+  for (int index = 0; index < 8; ++index) {
+    workers.emplace_back([] { AsyncDeviceVector<int> values(16); });
+  }
+  for (auto& worker : workers) {
+    worker.join();
+  }
   EXPECT_EQ(releaseThreshold(pool_), kDefaultMemPoolReleaseThreshold);
 }
 
@@ -150,5 +163,9 @@ TEST_F(MemPoolTest, FreedMemoryIsRetainedAndCountedIdle) {
   constexpr std::size_t bytes = std::size_t{8} << 20;
   { AsyncDeviceVector<char> vec(bytes); }
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-  EXPECT_GE(getMemPoolIdleBytes(), bytes);
+  const std::size_t idleBytes = getMemPoolIdleBytes();
+  ASSERT_GE(idleBytes, bytes);
+  AsyncDeviceVector<char> reused(bytes);
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  EXPECT_LE(getMemPoolIdleBytes(), idleBytes - bytes);
 }
