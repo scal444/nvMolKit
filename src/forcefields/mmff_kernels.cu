@@ -13,6 +13,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <array>
+#include <atomic>
+
 #include "src/forcefields/kernel_utils.cuh"
 #include "src/forcefields/mmff_kernels.h"
 #include "src/forcefields/mmff_kernels_device_dispatch.cuh"
@@ -1348,8 +1351,54 @@ __global__ void __launch_bounds__(BlockSize, (minBlocksPerSM<real, true, HasCons
 
 //! Threads per molecule. The batched backend's molecules (65 atoms and up) are bound by the latency of each warp's
 //! chain of term chunks, not by throughput: a single wave of narrow blocks leaves the SMs idle behind their largest
-//! molecules, while wide blocks shorten every molecule and leave the block scheduler several waves to balance.
-constexpr int blockSizePerMol = 256;
+//! molecules, while wide blocks shorten every molecule and leave the block scheduler several waves to balance. Once a
+//! launch has enough waves of wide blocks to balance anyway, narrow blocks do the same work with less per-block
+//! overhead (fewer partly filled chunks, fewer warps reducing each molecule's gradient), which pays off in FULL.
+constexpr int wideBlockSizePerMol     = 256;
+constexpr int narrowBlockSizePerMol   = 128;
+//! Waves of resident wide blocks from which FULL launches switch to narrow blocks.
+constexpr int minWavesForNarrowBlocks = 4;
+constexpr int maxCachedDevices        = 64;
+
+//! Blocks of kernel at blockSize threads that the current device holds at once (resident blocks per SM times SMs), or
+//! 0 if the device cannot be queried. Cached per device.
+template <auto kernel> static int residentBlocks(const int blockSize) {
+  static std::array<std::atomic<int>, maxCachedDevices> cache{};
+  int                                                   device = 0;
+  if (cudaGetDevice(&device) != cudaSuccess) {
+    cudaGetLastError();
+    return 0;
+  }
+  const bool cacheable = device >= 0 && device < maxCachedDevices;
+  if (cacheable) {
+    if (const int cached = cache[device].load(std::memory_order_relaxed); cached > 0) {
+      return cached;
+    }
+  }
+  int blocksPerSM = 0;
+  int numSMs      = 0;
+  if (cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel, blockSize, 0) != cudaSuccess ||
+      cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, device) != cudaSuccess) {
+    cudaGetLastError();
+    return 0;
+  }
+  const int resident = blocksPerSM * numSMs;
+  if (cacheable) {
+    cache[device].store(resident, std::memory_order_relaxed);
+  }
+  return resident;
+}
+
+//! Whether a FULL launch of numMols molecules takes narrow blocks: when the wide kernel would run at least
+//! minWavesForNarrowBlocks waves. SINGLE launches always take wide blocks.
+template <typename real, auto wideKernel> static bool useNarrowBlocks(const int numMols) {
+  if constexpr (std::is_same_v<real, double>) {
+    const int resident = residentBlocks<wideKernel>(wideBlockSizePerMol);
+    return resident > 0 && numMols >= minWavesForNarrowBlocks * resident;
+  } else {
+    return false;
+  }
+}
 
 template <typename real, typename reduceT, typename Terms, typename storageT>
 cudaError_t launchBlockPerMolEnergyKernelImpl(int                            numMols,
@@ -1363,13 +1412,21 @@ cudaError_t launchBlockPerMolEnergyKernelImpl(int                            num
   if (numMols <= 0) {
     return cudaSuccess;
   }
-#define NVMOLKIT_LAUNCH_MMFF_ENERGY(HasConstraints)                                       \
-  combinedEnergiesKernel<blockSizePerMol, HasConstraints, real, reduceT, Terms, storageT> \
-    <<<numMols, blockSizePerMol, 0, stream>>>(terms, sytemIndices, coords, energies, activeSystemMask)
+#define NVMOLKIT_LAUNCH_MMFF_ENERGY(HasConstraints)                                                                    \
+  {                                                                                                                    \
+    constexpr auto wide = combinedEnergiesKernel<wideBlockSizePerMol, HasConstraints, real, reduceT, Terms, storageT>; \
+    constexpr auto narrow =                                                                                            \
+      combinedEnergiesKernel<narrowBlockSizePerMol, HasConstraints, real, reduceT, Terms, storageT>;                   \
+    if (useNarrowBlocks<real, wide>(numMols)) {                                                                        \
+      narrow<<<numMols, narrowBlockSizePerMol, 0, stream>>>(terms, sytemIndices, coords, energies, activeSystemMask);  \
+    } else {                                                                                                           \
+      wide<<<numMols, wideBlockSizePerMol, 0, stream>>>(terms, sytemIndices, coords, energies, activeSystemMask);      \
+    }                                                                                                                  \
+  }
   if (hasConstraints)
-    NVMOLKIT_LAUNCH_MMFF_ENERGY(true);
+    NVMOLKIT_LAUNCH_MMFF_ENERGY(true)
   else
-    NVMOLKIT_LAUNCH_MMFF_ENERGY(false);
+    NVMOLKIT_LAUNCH_MMFF_ENERGY(false)
 #undef NVMOLKIT_LAUNCH_MMFF_ENERGY
   return cudaGetLastError();
 }
@@ -1386,12 +1443,21 @@ cudaError_t launchBlockPerMolGradKernelImpl(int                            numMo
   if (numMols <= 0) {
     return cudaSuccess;
   }
+#define NVMOLKIT_LAUNCH_MMFF_GRAD(HasConstraints)                                                                 \
+  {                                                                                                               \
+    constexpr auto wide   = combinedGradKernel<wideBlockSizePerMol, HasConstraints, real, Terms, storageT>;       \
+    constexpr auto narrow = combinedGradKernel<narrowBlockSizePerMol, HasConstraints, real, Terms, storageT>;     \
+    if (useNarrowBlocks<real, wide>(numMols)) {                                                                   \
+      narrow<<<numMols, narrowBlockSizePerMol, 0, stream>>>(terms, sytemIndices, coords, grad, activeSystemMask); \
+    } else {                                                                                                      \
+      wide<<<numMols, wideBlockSizePerMol, 0, stream>>>(terms, sytemIndices, coords, grad, activeSystemMask);     \
+    }                                                                                                             \
+  }
   if (hasConstraints)
-    combinedGradKernel<blockSizePerMol, true, real, Terms, storageT>
-      <<<numMols, blockSizePerMol, 0, stream>>>(terms, sytemIndices, coords, grad, activeSystemMask);
+    NVMOLKIT_LAUNCH_MMFF_GRAD(true)
   else
-    combinedGradKernel<blockSizePerMol, false, real, Terms, storageT>
-      <<<numMols, blockSizePerMol, 0, stream>>>(terms, sytemIndices, coords, grad, activeSystemMask);
+    NVMOLKIT_LAUNCH_MMFF_GRAD(false)
+#undef NVMOLKIT_LAUNCH_MMFF_GRAD
   return cudaGetLastError();
 }
 
