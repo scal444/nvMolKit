@@ -184,7 +184,7 @@ __device__ __forceinline__ Real computePbf(const ConformerAtoms&        atoms,
  * One Newton correction of the product with the rounded reciprocal. Exhaustively verified bit-identical
  * to IEEE division for every int32 @p a.
  */
-__device__ __forceinline__ double thousandthsToUnits(const int32_t a) {
+__host__ __device__ __forceinline__ double thousandthsToUnits(const int32_t a) {
   constexpr double kInverseThousand = 1.0 / 1000.0;
   const double     numerator        = static_cast<double>(a);
   const double     quotient         = numerator * kInverseThousand;
@@ -211,13 +211,21 @@ __device__ __forceinline__ double roundWhimThousandths(const double value) {
  * default threshold, so many pair sums land exactly on it, and RDKit's result there depends on how
  * `k / 1000.0` is represented in float64. Evaluating those cases in float32 flips them.
  */
+//! Widest bitmap search window radius: the 2 r + 1 window bits fit one word.
+constexpr int kWhimMaxWindowRadius = 15;
+
 struct WhimThreshold {
-  double   value;           //!< Threshold in the projection's units.
-  int64_t  mirroredLimit;   //!< Largest off-boundary |a + b| (thousandths) that counts as mirrored.
-  int64_t  centeredLimit;   //!< Largest off-boundary |a| (thousandths) that counts as centered.
-  int64_t  boundary;        //!< Magnitude decided by RDKit's float64 expression, or -1 if none.
-  uint32_t candidateLimit;  //!< mayMirror() bound: every |a + b| that mirrored() can accept.
-  bool     exhaustive;      //!< candidateLimit would overflow the filter, so every pair is a candidate.
+  double   value;             //!< Threshold in the projection's units.
+  int64_t  mirroredLimit;     //!< Largest off-boundary |a + b| (thousandths) that counts as mirrored.
+  int64_t  centeredLimit;     //!< Largest off-boundary |a| (thousandths) that counts as centered.
+  int64_t  boundary;          //!< Magnitude decided by RDKit's float64 expression, or -1 if none.
+  uint32_t candidateLimit;    //!< mayMirror() bound: every |a + b| that mirrored() can accept.
+  bool     exhaustive;        //!< candidateLimit would overflow the filter, so every pair is a candidate.
+  int      bucketShift;       //!< Smallest s with 2^s > 2 * candidateLimit: buckets `a >> s` of the symmetry search.
+  int      windowRadius;      //!< Bitmap search window: mirror images +- windowRadius, the boundary included.
+  uint32_t definiteMask;      //!< Window bits (bit k is mirror - windowRadius + k) mirrored() accepts outright.
+  bool     windowFits;        //!< The bitmap search applies: not exhaustive, windowRadius <= kWhimMaxWindowRadius.
+  bool     boundaryCentered;  //!< centered() of a magnitude on the boundary, which depends on the magnitude alone.
 
   __host__ __device__ static WhimThreshold make(const double value) {
     // Rounded int32 projections sum to below 2^32 in magnitude; any larger threshold accepts them all.
@@ -230,12 +238,33 @@ struct WhimThreshold {
     const int64_t     boundary           = onGrid ? static_cast<int64_t>(nearest) : -1;
     const int64_t     candidate          = boundary > floorLimit ? boundary : floorLimit;
     constexpr int64_t kMaxCandidateLimit = int64_t{1} << 30;
+    const int64_t     candidateLimit     = candidate < kMaxCandidateLimit ? candidate : kMaxCandidateLimit;
+    int               bucketShift        = 0;
+    while ((int64_t{1} << bucketShift) <= 2 * candidateLimit) {
+      ++bucketShift;
+    }
+    // mirrored() accepts |a + b| <= definite outright; on the grid that is boundary - 1, and the window adds
+    // the two boundary values.
+    const int64_t definite     = boundary == floorLimit ? floorLimit - 1 : floorLimit;
+    const int64_t radius       = boundary >= 0 ? boundary : definite;
+    const bool    windowFits   = candidate <= kMaxCandidateLimit && radius >= 0 && radius <= kWhimMaxWindowRadius;
+    uint32_t      definiteMask = 0;
+    if (windowFits) {
+      definiteMask =
+        boundary >= 0 ? (radius > 0 ? ((1u << (2 * radius - 1)) - 1u) << 1 : 0u) : (1u << (2 * radius + 1)) - 1u;
+    }
     return WhimThreshold{value,
                          floorLimit,
                          onGrid ? static_cast<int64_t>(nearest) - 1 : floorLimit,
                          boundary,
-                         static_cast<uint32_t>(candidate < kMaxCandidateLimit ? candidate : kMaxCandidateLimit),
-                         candidate > kMaxCandidateLimit};
+                         static_cast<uint32_t>(candidateLimit),
+                         candidate > kMaxCandidateLimit,
+                         bucketShift,
+                         static_cast<int>(windowFits ? radius : 0),
+                         definiteMask,
+                         windowFits,
+                         boundary >= 0 && boundary < (int64_t{1} << 31) &&
+                           fabs(thousandthsToUnits(static_cast<int32_t>(boundary))) < value};
   }
 
   /**
@@ -380,6 +409,24 @@ __device__ __forceinline__ void writeWhimMeans(const int channel,
   }
 }
 
+//! Maximum over the warp, returned to every lane.
+__device__ __forceinline__ uint32_t warpMax(uint32_t value) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  return __reduce_max_sync(0xffffffffu, value);
+#else
+  for (int offset = kWarpSize / 2; offset > 0; offset >>= 1) {
+    const uint32_t other = __shfl_xor_sync(0xffffffffu, value, offset);
+    value                = other > value ? other : value;
+  }
+  return value;
+#endif
+}
+
+//! Magnitude of a rounded projection, exact for every int32.
+__device__ __forceinline__ uint32_t whimMagnitude(const int32_t value) {
+  return value < 0 ? 0u - static_cast<uint32_t>(value) : static_cast<uint32_t>(value);
+}
+
 /**
  * @brief Warp-collective. Sums each of a lane's 8 @p values over the warp, halving the values each lane
  *        carries at every exchange. Returns the total of value `(lane >> 2) & 7`.
@@ -500,26 +547,363 @@ __device__ __forceinline__ void normalizeCovariance(const Real (&sums)[7],
   }
 }
 
+//! Hash slots of the symmetry search for @p numAtoms atoms: a power of two of at least twice the atoms.
+__host__ __device__ inline int whimHashSlots(const int numAtoms) {
+  int slots = kWarpSize;
+  while (slots < 2 * numAtoms) {
+    slots *= 2;
+  }
+  return slots;
+}
+
 /**
- * @brief Warp-collective. Number of atoms whose rounded projection @p values (one axis of one channel) is
- *        centered, or mirrored by another atom within the threshold, comparing every pair as RDKit does.
- *        Returns the warp total.
+ * @brief Warp-collective. Per lane, the number of its atoms (lane, lane + 32, ...) whose rounded projection
+ *        @p values (one axis of one channel) is centered, or mirrored by another atom within the threshold.
+ *
+ * Matches RDKit's pairwise comparison without visiting every pair: atoms are hashed by bucket
+ * `value >> bucketShift` into @p head (@p hashSlots chains threaded through @p next), and each atom walks only
+ * the (at most two) buckets that can hold a value within candidateLimit of its mirror image, where the exact
+ * comparison decides. Exhaustive thresholds compare every pair.
  */
 __device__ __forceinline__ int countWhimSymmetric(const int32_t*       values,
                                                   const int            numAtoms,
                                                   const int            lane,
-                                                  const WhimThreshold& threshold) {
+                                                  const WhimThreshold& threshold,
+                                                  const int            hashSlots,
+                                                  int32_t*             head,
+                                                  int32_t*             next) {
   int symmetric = 0;
+  if (threshold.exhaustive) {
+    for (int atomIdx = lane; atomIdx < numAtoms; atomIdx += kWarpSize) {
+      const int32_t own   = values[atomIdx];
+      bool          found = threshold.centered(own);
+      for (int otherIdx = 0; otherIdx < numAtoms && !found; ++otherIdx) {
+        found = otherIdx != atomIdx && threshold.mirrored(own, values[otherIdx]);
+      }
+      symmetric += found ? 1 : 0;
+    }
+    return symmetric;
+  }
+  const int     mask  = hashSlots - 1;
+  const int     shift = threshold.bucketShift;
+  const int64_t limit = threshold.candidateLimit;
+  for (int slot = lane; slot < hashSlots; slot += kWarpSize) {
+    head[slot] = -1;
+  }
+  __syncwarp();
+  for (int atomIdx = lane; atomIdx < numAtoms; atomIdx += kWarpSize) {
+    const int bucket = static_cast<int>((static_cast<int64_t>(values[atomIdx]) >> shift) & mask);
+    next[atomIdx]    = atomicExch(&head[bucket], atomIdx);
+  }
+  __syncwarp();
   for (int atomIdx = lane; atomIdx < numAtoms; atomIdx += kWarpSize) {
     const int32_t own   = values[atomIdx];
     bool          found = threshold.centered(own);
-    for (int otherIdx = 0; otherIdx < numAtoms && !found; ++otherIdx) {
-      const int32_t other = values[otherIdx];
-      found               = otherIdx != atomIdx && threshold.mayMirror(own, other) && threshold.mirrored(own, other);
+    if (!found) {
+      const int64_t mirror = -static_cast<int64_t>(own);
+      const int64_t last   = (mirror + limit) >> shift;
+      for (int64_t bucket = (mirror - limit) >> shift; bucket <= last && !found; ++bucket) {
+        for (int otherIdx = head[bucket & mask]; otherIdx >= 0 && !found; otherIdx = next[otherIdx]) {
+          const int32_t other = values[otherIdx];
+          const int64_t sum   = static_cast<int64_t>(own) + other;
+          found               = otherIdx != atomIdx && sum >= -limit && sum <= limit && threshold.mirrored(own, other);
+        }
+      }
     }
     symmetric += found ? 1 : 0;
   }
-  return groupAllReduceSum<kWarpSize>(symmetric);
+  __syncwarp();  // Every lane is done with the chains before the next search resets them.
+  return symmetric;
+}
+
+//! Words of each warp's value bitmap in WHIM's symmetry search: a rounded projection v with
+//! |v| < kWhimBitmapRange owns bit v + kWhimBitmapOffset, between kWhimBitmapPadWords zero words on each side
+//! so that every search window lies inside the bitmap.
+constexpr int kWhimBitmapPadWords = 2;
+constexpr int kWhimBitmapRange    = 8192;
+constexpr int kWhimBitmapWords    = 2 * kWhimBitmapRange / kWarpSize + 2 * kWhimBitmapPadWords;
+constexpr int kWhimBitmapOffset   = kWhimBitmapRange + kWhimBitmapPadWords * kWarpSize;
+static_assert(kWhimMaxWindowRadius < kWhimBitmapPadWords * kWarpSize, "windows stay inside the bitmap");
+
+/**
+ * @brief The case of whimBitmapSymmetric() too rare for the inline path, out of line so it stays short: an atom
+ *        whose own bit lies in its window, compared with every other atom as countWhimSymmetric() does for
+ *        exhaustive thresholds. Only a zero threshold reaches it with an atom not already centered.
+ */
+__device__ __noinline__ bool whimSymmetricRare(const int32_t  own,
+                                               const int      radius,
+                                               const int      boundary,
+                                               const int64_t  mirroredLimit,
+                                               const double   value,
+                                               const int32_t* values,
+                                               const int      numAtoms,
+                                               const int      atomIdx) {
+  const int magnitude = own < 0 ? -own : own;
+  if (magnitude == boundary && WhimThreshold::centeredOnBoundary(own, value)) {
+    return true;
+  }
+  if (2 * magnitude > radius) {
+    return false;  // The window bits decide; see whimBitmapSymmetric().
+  }
+  for (int otherIdx = 0; otherIdx < numAtoms; ++otherIdx) {
+    const int32_t other = values[otherIdx];
+    const int64_t sum   = llabs(static_cast<int64_t>(own) + static_cast<int64_t>(other));
+    if (otherIdx != atomIdx &&
+        (sum == boundary ? WhimThreshold::mirroredOnBoundary(own, other, value) : sum <= mirroredLimit)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+//! WhimThreshold's bitmap-search constants, held in registers through the symmetry searches.
+struct WhimBitmapParams {
+  int      windowBase;  //!< Bit of the window's lowest value for own value 0: mirror images sit at windowBase - own.
+  int      radius;
+  int      boundary;
+  int      centeredLimit;
+  uint32_t definiteMask;
+  uint32_t boundaryMask;
+  int64_t  mirroredLimit;
+  double   value;
+  //! Every value whose own bit lies in its window (|v| <= radius / 2) is centered, so that case never decides.
+  bool     selfCentered;
+
+  __device__ static WhimBitmapParams make(const WhimThreshold& threshold) {
+    const int boundary = static_cast<int>(threshold.boundary);
+    const int radius   = threshold.windowRadius;
+    const int centeredLimit =
+      static_cast<int>(threshold.boundaryCentered ? threshold.boundary : threshold.centeredLimit);
+    return WhimBitmapParams{kWhimBitmapOffset - radius,
+                            radius,
+                            boundary,
+                            centeredLimit,
+                            threshold.definiteMask,
+                            boundary >= 0 ? (1u | (1u << (2 * radius))) : 0u,
+                            threshold.mirroredLimit,
+                            threshold.value,
+                            centeredLimit >= radius / 2};
+  }
+};
+
+/**
+ * @brief Whether rounded projection @p own of atom @p atomIdx is centered, or mirrored by another atom, given
+ *        @p bitmap holding every atom's value (see countWhimSymmetricBitmap()). False for an inactive lane.
+ *
+ * One funnel shift reads the window around the mirror image -own: a definite bit means mirrored, and a
+ * boundary bit takes RDKit's float64 mirrored test inline (symmetric pairs land on the boundary often). RDKit's
+ * centered test on the boundary magnitude is one value per threshold, folded into centeredLimit (see
+ * WhimThreshold::boundaryCentered), and an own bit inside the window goes to whimSymmetricRare(). With
+ * @p kSelfCentered (WhimBitmapParams::selfCentered) such a value is centered, so that case is compiled out.
+ */
+template <bool kSelfCentered>
+__device__ __forceinline__ bool whimBitmapSymmetric(const int32_t           own,
+                                                    const bool              active,
+                                                    const int               atomIdx,
+                                                    const WhimBitmapParams& params,
+                                                    const uint32_t*         bitmap,
+                                                    const int32_t*          values,
+                                                    const int               numAtoms) {
+  const int       magnitude    = own < 0 ? -own : own;
+  const int       start        = params.windowBase - own;
+  const uint32_t* words        = bitmap + (start >> 5);
+  const uint32_t  window       = __funnelshift_r(words[0], words[1], start & 31);
+  const bool      selfInWindow = !kSelfCentered && 2 * magnitude <= params.radius;
+  bool            found = magnitude <= params.centeredLimit || (!selfInWindow && (window & params.definiteMask) != 0);
+  if (active && !found) {
+    if (!selfInWindow && (window & params.boundaryMask) != 0) {
+      const double ownUnits = thousandthsToUnits(own);
+      found = ((window & 1u) != 0 && fabs(ownUnits + thousandthsToUnits(-own - params.boundary)) <= params.value) ||
+              (((window >> (2 * params.radius)) & 1u) != 0 &&
+               fabs(ownUnits + thousandthsToUnits(-own + params.boundary)) <= params.value);
+    }
+    if (!found && selfInWindow) {
+      found = whimSymmetricRare(own,
+                                params.radius,
+                                params.boundary,
+                                params.mirroredLimit,
+                                params.value,
+                                values,
+                                numAtoms,
+                                atomIdx);
+    }
+  }
+  return active && found;
+}
+
+/**
+ * @brief Warp-collective countWhimSymmetric() for rounded projections of magnitude below kWhimBitmapRange and
+ *        thresholds whose window fits (WhimThreshold::windowFits), for at most @p kChunks * 32 atoms, which the
+ *        lanes keep in registers. Returns the warp total.
+ *
+ * Every value sets its bit in @p bitmap (all zero on entry and on return), then each atom reads the window
+ * around its mirror image (whimBitmapSymmetric()). Lanes past the last atom set and clear bit 0, in padding
+ * that no window reaches, so every lane runs the same instructions.
+ */
+template <int kChunks, bool kSelfCentered>
+__device__ __forceinline__ int countWhimSymmetricBitmap(const int32_t*          values,
+                                                        const int               numAtoms,
+                                                        const int               lane,
+                                                        const WhimBitmapParams& params,
+                                                        uint32_t*               bitmap) {
+  static_assert(kWhimBitmapOffset - kWhimBitmapRange - kWhimMaxWindowRadius >= kWarpSize, "bit 0 is unread");
+  int32_t own[kChunks];
+  int     bit[kChunks];
+#pragma unroll
+  for (int k = 0; k < kChunks; ++k) {
+    const bool active = lane + k * kWarpSize < numAtoms;
+    own[k]            = active ? values[lane + k * kWarpSize] : 0;
+    bit[k]            = active ? own[k] + kWhimBitmapOffset : 0;
+    atomicOr(&bitmap[bit[k] >> 5], 1u << (bit[k] & 31));
+  }
+  __syncwarp();
+  int symmetric = 0;
+#pragma unroll
+  for (int k = 0; k < kChunks; ++k) {
+    const int  atomIdx = lane + k * kWarpSize;
+    const bool found =
+      whimBitmapSymmetric<kSelfCentered>(own[k], atomIdx < numAtoms, atomIdx, params, bitmap, values, numAtoms);
+    symmetric += __popc(__ballot_sync(0xffffffffu, found));
+  }
+  __syncwarp();
+#pragma unroll
+  for (int k = 0; k < kChunks; ++k) {
+    bitmap[bit[k] >> 5] = 0;
+  }
+  __syncwarp();
+  return symmetric;
+}
+
+//! countWhimSymmetricBitmap() for any number of atoms, rereading the values.
+template <bool kSelfCentered>
+__device__ __forceinline__ int countWhimSymmetricBitmapLoop(const int32_t*          values,
+                                                            const int               numAtoms,
+                                                            const int               lane,
+                                                            const WhimBitmapParams& params,
+                                                            uint32_t*               bitmap) {
+  for (int atomIdx = lane; atomIdx < numAtoms; atomIdx += kWarpSize) {
+    const int bit = values[atomIdx] + kWhimBitmapOffset;
+    atomicOr(&bitmap[bit >> 5], 1u << (bit & 31));
+  }
+  __syncwarp();
+  int symmetric = 0;
+  for (int base = 0; base < numAtoms; base += kWarpSize) {
+    const int     atomIdx = base + lane;
+    const bool    active  = atomIdx < numAtoms;
+    const int32_t own     = active ? values[atomIdx] : 0;
+    symmetric +=
+      __popc(__ballot_sync(0xffffffffu,
+                           whimBitmapSymmetric<kSelfCentered>(own, active, atomIdx, params, bitmap, values, numAtoms)));
+  }
+  __syncwarp();
+  for (int atomIdx = lane; atomIdx < numAtoms; atomIdx += kWarpSize) {
+    bitmap[(values[atomIdx] + kWhimBitmapOffset) >> 5] = 0;
+  }
+  __syncwarp();
+  return symmetric;
+}
+
+/**
+ * @brief Warp-collective. Symmetric atom counts of the (channel, axis) pairs `warp`, `warp + kWarps`, ...: the
+ *        warp's k-th pair's count is returned to lane k. @p kChunks selects countWhimSymmetricBitmap()'s
+ *        variant (0: the loop) for pairs whose bit of @p bitmapItems is set; the others take the hash chains,
+ *        whose region is zeroed again after.
+ */
+template <int kChunks, int kWarps, bool kSelfCentered>
+__device__ __forceinline__ int searchWarpWhimAxes(const int32_t*          scores,
+                                                  const int               stride,
+                                                  const int               numAtoms,
+                                                  const int               warp,
+                                                  const int               lane,
+                                                  const uint32_t          bitmapItems,
+                                                  const WhimBitmapParams& params,
+                                                  const WhimThreshold&    threshold,
+                                                  int32_t*                search) {
+  int ownCount = 0;
+  for (int item = warp, k = 0; item < kNumWhimAxes; item += kWarps, ++k) {
+    const int32_t* const values = scores + item * stride;
+    int                  total;
+    if (((bitmapItems >> item) & 1u) != 0) {
+      if constexpr (kChunks > 0) {
+        total = countWhimSymmetricBitmap<kChunks, kSelfCentered>(values,
+                                                                 numAtoms,
+                                                                 lane,
+                                                                 params,
+                                                                 reinterpret_cast<uint32_t*>(search));
+      } else {
+        total = countWhimSymmetricBitmapLoop<kSelfCentered>(values,
+                                                            numAtoms,
+                                                            lane,
+                                                            params,
+                                                            reinterpret_cast<uint32_t*>(search));
+      }
+    } else {
+      const int hashSlots = whimHashSlots(numAtoms);
+      total               = groupAllReduceSum<kWarpSize>(
+        countWhimSymmetric(values, numAtoms, lane, threshold, hashSlots, search, search + hashSlots));
+      for (int i = lane; i < hashSlots + numAtoms; i += kWarpSize) {
+        search[i] = 0;
+      }
+      __syncwarp();
+    }
+    ownCount = lane == k ? total : ownCount;
+  }
+  return ownCount;
+}
+
+//! searchWarpWhimAxes() with the register-resident bitmap variant that fits @p numAtoms, uniform across the block.
+template <int kWarps, bool kSelfCentered>
+__device__ __forceinline__ int searchWhimAxes(const int32_t*          scores,
+                                              const int               stride,
+                                              const int               numAtoms,
+                                              const int               warp,
+                                              const int               lane,
+                                              const uint32_t          bitmapItems,
+                                              const WhimBitmapParams& params,
+                                              const WhimThreshold&    threshold,
+                                              int32_t*                search) {
+  if (numAtoms <= kWarpSize) {
+    return searchWarpWhimAxes<1, kWarps, kSelfCentered>(scores,
+                                                        stride,
+                                                        numAtoms,
+                                                        warp,
+                                                        lane,
+                                                        bitmapItems,
+                                                        params,
+                                                        threshold,
+                                                        search);
+  }
+  if (numAtoms <= 2 * kWarpSize) {
+    return searchWarpWhimAxes<2, kWarps, kSelfCentered>(scores,
+                                                        stride,
+                                                        numAtoms,
+                                                        warp,
+                                                        lane,
+                                                        bitmapItems,
+                                                        params,
+                                                        threshold,
+                                                        search);
+  }
+  if (numAtoms <= 4 * kWarpSize) {
+    return searchWarpWhimAxes<4, kWarps, kSelfCentered>(scores,
+                                                        stride,
+                                                        numAtoms,
+                                                        warp,
+                                                        lane,
+                                                        bitmapItems,
+                                                        params,
+                                                        threshold,
+                                                        search);
+  }
+  return searchWarpWhimAxes<0, kWarps, kSelfCentered>(scores,
+                                                      stride,
+                                                      numAtoms,
+                                                      warp,
+                                                      lane,
+                                                      bitmapItems,
+                                                      params,
+                                                      threshold,
+                                                      search);
 }
 
 //! Warps per block of the WHIM kernel, which computes one conformer per block, for grids of several waves.
@@ -541,27 +925,37 @@ template <int kWarps> struct WhimBlockShared {
       double kurtoses[kNumWhimChannels][3];
     } axisTerms;  //!< After the symmetry search.
   };
-  double eigenvalues[kWhimPcaSlots][3];
-  double eigenvectors[kWhimPcaSlots][9];
-  double fourthMoments[kNumWhimChannels][3];
-  int    symmetricCounts[kNumWhimAxes];  //!< Symmetric atoms of each (channel, axis) pair.
+  double   eigenvalues[kWhimPcaSlots][3];
+  double   eigenvectors[kWhimPcaSlots][9];
+  double   fourthMoments[kNumWhimChannels][3];
+  uint32_t maxMagnitudes[kNumWhimChannels];  //!< Largest rounded projection magnitude of each channel.
+  int      symmetricCounts[kNumWhimAxes];    //!< Symmetric atoms of each (channel, axis) pair.
 };
 
 /**
  * @brief Per-conformer scratch layout of the WHIM kernel for rows of up to `stride` atoms, in elements from
  *        its start: float64 centered coordinates (x, y, z arrays) and atom-property weights (one array per
- *        channel), then int32 rounded projections (one array per channel and axis).
+ *        channel), then int32 rounded projections (one array per channel and axis) and each warp's symmetry
+ *        search region of `searchInts`: the value bitmap (kWhimBitmapWords), or the hash heads
+ *        (whimHashSlots(stride)) followed by the chain links (stride).
  */
 struct WhimScratchLayout {
   int stride;
+  int searchInts;
 
   __host__ __device__ static WhimScratchLayout make(const int maxAtoms) {
-    const int atoms = maxAtoms > 1 ? maxAtoms : 1;
-    return WhimScratchLayout{(atoms + 3) / 4 * 4};  // Keeps every array 16-byte aligned.
+    const int atoms  = maxAtoms > 1 ? maxAtoms : 1;
+    const int stride = (atoms + 3) / 4 * 4;  // Keeps every array 16-byte aligned.
+    const int hash   = whimHashSlots(stride) + stride;
+    return WhimScratchLayout{stride, hash > kWhimBitmapWords ? hash : kWhimBitmapWords};
   }
   __host__ __device__ size_t doubles() const { return static_cast<size_t>(3 + kNumAtomPropertyChannels) * stride; }
-  __host__ __device__ size_t ints() const { return static_cast<size_t>(kNumWhimAxes) * stride; }
-  __host__ __device__ size_t bytes() const { return doubles() * sizeof(double) + ints() * sizeof(int32_t); }
+  __host__ __device__ size_t ints(const int warps) const {
+    return static_cast<size_t>(kNumWhimAxes) * stride + static_cast<size_t>(warps) * searchInts;
+  }
+  __host__ __device__ size_t bytes(const int warps) const {
+    return doubles() * sizeof(double) + ints(warps) * sizeof(int32_t);
+  }
 };
 
 /**
@@ -662,14 +1056,19 @@ __global__ void __launch_bounds__(kWarps* kWarpSize, kWhimMinBlocks) whimKernel(
 
   double* scratch;
   if constexpr (kGlobalScratch) {
-    scratch = reinterpret_cast<double*>(globalScratch + static_cast<size_t>(blockIdx.x) * layout.bytes());
+    scratch = reinterpret_cast<double*>(globalScratch + static_cast<size_t>(blockIdx.x) * layout.bytes(kWarps));
   } else {
     scratch = dynamicScratch;
   }
   double* const  centered    = scratch;
   double* const  weights     = scratch + 3 * stride;
   int32_t* const scores      = reinterpret_cast<int32_t*>(scratch + layout.doubles());
+  int32_t* const search      = scores + kNumWhimAxes * stride + warp * layout.searchInts;
   const double*  atomWeights = inputs.atomPropertyWeights + moleculeAtomStart;
+  // The symmetry search expects a zero region; searchInts is a multiple of 4 and the region 16-byte aligned.
+  for (int i = lane; i < layout.searchInts / 4; i += kWarpSize) {
+    reinterpret_cast<int4*>(search)[i] = make_int4(0, 0, 0, 0);
+  }
 
   // Unweighted centroid in float64, shared by every PCA slot; the weights load meanwhile.
   double ownWeights[kNumAtomPropertyChannels];
@@ -797,6 +1196,7 @@ __global__ void __launch_bounds__(kWarps* kWarpSize, kWhimMinBlocks) whimKernel(
       }
       int32_t* const channelScores    = scores + 3 * slot * stride;
       WhimReal       fourthMoments[4] = {0, 0, 0, 0};
+      uint32_t       maxMagnitude     = 0;
       for (int atomIdx = lane; atomIdx < numAtoms; atomIdx += kWarpSize) {
         const WhimReal x = centered[atomIdx];
         const WhimReal y = centered[stride + atomIdx];
@@ -806,11 +1206,17 @@ __global__ void __launch_bounds__(kWarps* kWarpSize, kWhimMinBlocks) whimKernel(
           fourthMoments[axis] += score * score * score * score;
           const int32_t rounded                  = static_cast<int32_t>(round(score * WhimReal(1000)));
           channelScores[axis * stride + atomIdx] = rounded;
+          const uint32_t magnitude               = whimMagnitude(rounded);
+          maxMagnitude                           = magnitude > maxMagnitude ? magnitude : maxMagnitude;
         }
       }
       const WhimReal moment = warpTransposedSum4(fourthMoments, lane);
       if ((lane & 7) == 0 && (lane >> 3) < 3) {
         shared.fourthMoments[slot][lane >> 3] = moment;
+      }
+      maxMagnitude = warpMax(maxMagnitude);
+      if (lane == 0) {
+        shared.maxMagnitudes[slot] = maxMagnitude;
       }
     } else {
       // Mean absolute distance from the plane of best fit, as computePbf().
@@ -832,11 +1238,27 @@ __global__ void __launch_bounds__(kWarps* kWarpSize, kWhimMinBlocks) whimKernel(
   }
   __syncthreads();
 
-  // Symmetry search, one (channel, axis) pair per warp at a time.
-  for (int item = warp; item < kNumWhimAxes; item += kWarps) {
-    const int total = countWhimSymmetric(scores + item * stride, numAtoms, lane, threshold);
-    if (lane == 0) {
-      shared.symmetricCounts[item] = total;
+  // Symmetry search, one (channel, axis) pair per warp at a time: the bitmap search when the channel's
+  // projections and the threshold window fit it, else the hash chains. The atom count, uniform across the
+  // block, picks the variant once.
+  {
+    const WhimBitmapParams bitmapParams = WhimBitmapParams::make(threshold);
+    uint32_t               bitmapItems  = 0;
+    if (threshold.windowFits) {
+      for (int channel = 0; channel < kNumWhimChannels; ++channel) {
+        bitmapItems |=
+          shared.maxMagnitudes[channel] < static_cast<uint32_t>(kWhimBitmapRange) ? 7u << (3 * channel) : 0u;
+      }
+    }
+    // The threshold, uniform across the grid, decides whether the self-in-window case can arise.
+    const int ownCount =
+      bitmapParams.selfCentered ?
+        searchWhimAxes<kWarps,
+                       true>(scores, stride, numAtoms, warp, lane, bitmapItems, bitmapParams, threshold, search) :
+        searchWhimAxes<kWarps,
+                       false>(scores, stride, numAtoms, warp, lane, bitmapItems, bitmapParams, threshold, search);
+    if (warp + lane * kWarps < kNumWhimAxes) {
+      shared.symmetricCounts[warp + lane * kWarps] = ownCount;
     }
   }
   // The last warp, which has no more pairs than the first, writes the eigenvalue-only channel terms meanwhile.
@@ -939,7 +1361,7 @@ void launchWhim(const DeviceCoordView&        coordinates,
   int                     device        = 0;
   cudaCheckError(cudaGetDevice(&device));
 
-  const size_t scratchBytes = layout.bytes();
+  const size_t scratchBytes = layout.bytes(kWhimWarps);
   auto* const  sharedKernel = whimKernel<kWhimWarps, Real, kComputePbf, false>;
   const bool   sharedFits =
     configureWhimSharedScratch(sharedKernel, scratchBytes, sizeof(WhimBlockShared<kWhimWarps>), device);
