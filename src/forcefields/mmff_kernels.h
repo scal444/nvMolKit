@@ -448,6 +448,9 @@ struct BatchedIndicesDevicePtr {
   int* torsionConstraintTermStarts  = nullptr;
 };
 
+//! Block-per-molecule MMFF energy and gradient launchers. molOrder is optional device scratch of numMols ints: with
+//! it, the launch starts the molecules with the most pair terms first, which keeps a large molecule from starting in
+//! the last wave. Launches sharing one buffer must be ordered on the same stream.
 cudaError_t launchBlockPerMolEnergyKernel(int                                 numMols,
                                           const EnergyForceContribsDevicePtr& terms,
                                           const BatchedIndicesDevicePtr&      sytemIndices,
@@ -455,7 +458,8 @@ cudaError_t launchBlockPerMolEnergyKernel(int                                 nu
                                           double*                             energies,
                                           bool                                hasConstraints,
                                           cudaStream_t                        stream           = nullptr,
-                                          const uint8_t*                      activeSystemMask = nullptr);
+                                          const uint8_t*                      activeSystemMask = nullptr,
+                                          int*                                molOrder         = nullptr);
 
 cudaError_t launchBlockPerMolGradKernel(int                                 numMols,
                                         const EnergyForceContribsDevicePtr& terms,
@@ -464,7 +468,8 @@ cudaError_t launchBlockPerMolGradKernel(int                                 numM
                                         double*                             grad,
                                         bool                                hasConstraints,
                                         cudaStream_t                        stream           = nullptr,
-                                        const uint8_t*                      activeSystemMask = nullptr);
+                                        const uint8_t*                      activeSystemMask = nullptr,
+                                        int*                                molOrder         = nullptr);
 
 cudaError_t launchBlockPerMolEnergyKernel(int                                       numMols,
                                           const EnergyForceContribsDevicePtrSingle& terms,
@@ -473,7 +478,8 @@ cudaError_t launchBlockPerMolEnergyKernel(int                                   
                                           float*                                    energies,
                                           bool                                      hasConstraints,
                                           cudaStream_t                              stream           = nullptr,
-                                          const uint8_t*                            activeSystemMask = nullptr);
+                                          const uint8_t*                            activeSystemMask = nullptr,
+                                          int*                                      molOrder         = nullptr);
 
 cudaError_t launchBlockPerMolGradKernel(int                                       numMols,
                                         const EnergyForceContribsDevicePtrSingle& terms,
@@ -482,7 +488,8 @@ cudaError_t launchBlockPerMolGradKernel(int                                     
                                         float*                                    grad,
                                         bool                                      hasConstraints,
                                         cudaStream_t                              stream           = nullptr,
-                                        const uint8_t*                            activeSystemMask = nullptr);
+                                        const uint8_t*                            activeSystemMask = nullptr,
+                                        int*                                      molOrder         = nullptr);
 
 }  // namespace MMFF
 }  // namespace nvMolKit

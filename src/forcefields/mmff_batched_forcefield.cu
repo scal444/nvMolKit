@@ -34,7 +34,8 @@ cudaError_t launchEnergy(Buffers&        buffers,
                                              energies,
                                              MMFF::batchHasConstraints(buffers.contribs),
                                              stream,
-                                             activeSystemMask);
+                                             activeSystemMask,
+                                             buffers.molOrder.data());
 }
 
 template <typename Buffers, typename storageT>
@@ -51,7 +52,8 @@ cudaError_t launchGrad(Buffers&        buffers,
                                            gradients,
                                            MMFF::batchHasConstraints(buffers.contribs),
                                            stream,
-                                           activeSystemMask);
+                                           activeSystemMask,
+                                           buffers.molOrder.data());
 }
 }  // namespace
 

@@ -158,6 +158,7 @@ void setStreamsImpl(BatchedMolecularDeviceBuffersT<ParameterScalar, CoordinateSc
   molSystemDevice.grad.setStream(stream);
   molSystemDevice.energyOuts.setStream(stream);
   molSystemDevice.energyBuffer.setStream(stream);
+  molSystemDevice.molOrder.setStream(stream);
 
   auto& deviceContribs = molSystemDevice.contribs;
   // Bond terms
@@ -358,6 +359,7 @@ void sendContribsAndIndicesToDeviceImpl(
 
   // Indices
   molSystemDevice.indices.atomStarts.setFromVector(molSystemHost.indices.atomStarts);
+  molSystemDevice.molOrder.resize(molSystemHost.indices.atomStarts.size() - 1);
   molSystemDevice.indices.energyBufferStarts.setFromVector(molSystemHost.indices.energyBufferStarts);
   molSystemDevice.indices.atomIdxToBatchIdx.setFromVector(molSystemHost.indices.atomIdxToBatchIdx);
   molSystemDevice.indices.energyBufferBlockIdxToBatchIdx.setFromVector(
@@ -949,7 +951,9 @@ cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDev
                                        coords != nullptr ? coords : molSystemDevice.positions.data(),
                                        molSystemDevice.energyOuts.data(),
                                        hasConstraints,
-                                       stream);
+                                       stream,
+                                       nullptr,
+                                       molSystemDevice.molOrder.data());
 }
 
 cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffersSingle& molSystemDevice,
@@ -964,7 +968,8 @@ cudaError_t computeEnergyBlockPerMol(BatchedMolecularDeviceBuffersSingle& molSys
                                        energyOuts,
                                        batchHasConstraints(molSystemDevice.contribs),
                                        stream,
-                                       activeSystemMask);
+                                       activeSystemMask,
+                                       molSystemDevice.molOrder.data());
 }
 
 cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDevice, cudaStream_t stream) {
@@ -977,7 +982,9 @@ cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffers& molSystemDevic
                                      molSystemDevice.positions.data(),
                                      molSystemDevice.grad.data(),
                                      hasConstraints,
-                                     stream);
+                                     stream,
+                                     nullptr,
+                                     molSystemDevice.molOrder.data());
 }
 
 cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffersSingle& molSystemDevice,
@@ -992,7 +999,8 @@ cudaError_t computeGradBlockPerMol(BatchedMolecularDeviceBuffersSingle& molSyste
                                      grad != nullptr ? grad : molSystemDevice.grad.data(),
                                      batchHasConstraints(molSystemDevice.contribs),
                                      stream,
-                                     activeSystemMask);
+                                     activeSystemMask,
+                                     molSystemDevice.molOrder.data());
 }
 
 EnergyForceContribsDevicePtr toEnergyForceContribsDevicePtr(const BatchedMolecularDeviceBuffers& molSystemDevice) {

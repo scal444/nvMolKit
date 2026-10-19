@@ -370,6 +370,8 @@ struct BatchedMolecularDeviceBuffersT {
   nvMolKit::AsyncDeviceVector<double>                        energyBuffer;
   //! Size n_molecules
   nvMolKit::AsyncDeviceVector<CoordinateScalar>              energyOuts;
+  //! Size n_molecules. Scratch molecule order of the block-per-molecule kernels.
+  nvMolKit::AsyncDeviceVector<int>                           molOrder;
 };
 
 using BatchedMolecularDeviceBuffers       = BatchedMolecularDeviceBuffersT<double, double, float>;

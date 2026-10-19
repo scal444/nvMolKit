@@ -13,6 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <array>
+#include <atomic>
 #include <cub/cub.cuh>
 
 #include "src/forcefields/kernel_utils.cuh"
@@ -1065,13 +1067,35 @@ cudaError_t launchReduceEnergiesKernel(const int      numBlocks,
 
 constexpr int blockSizePerMol = 128;
 
+//! Programmatic dependent launch (sm_90+): the block-per-molecule kernels may be launched while the ordering kernel
+//! still runs, and wait for its molecule order here. Without a programmatic launch (or before sm_90) this is a no-op.
+static __device__ __forceinline__ void waitForMolOrder() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+#endif
+}
+
+//! Molecule of this block. Blocks before firstOrdered (the first wave of the launch) take the molecule of their own
+//! index and start without waiting for the ordering kernel; the later blocks take the remaining molecules, largest
+//! first, from molOrder (or keep the batch order without one).
+static __device__ __forceinline__ int blockMolecule(const int* molOrder, const int firstOrdered) {
+  const int block = static_cast<int>(blockIdx.x);
+  if (molOrder == nullptr || block < firstOrdered) {
+    return block;
+  }
+  waitForMolOrder();
+  return molOrder[block - firstOrdered];
+}
+
 template <bool HasConstraints, typename real, typename reduceT, typename Terms, typename storageT>
 __global__ void combinedEnergiesKernel(const Terms*                   terms,
                                        const BatchedIndicesDevicePtr* systemIndices,
                                        const storageT*                coords,
                                        storageT*                      energies,
-                                       const uint8_t*                 activeSystemMask) {
-  const int molIdx = blockIdx.x;
+                                       const uint8_t*                 activeSystemMask,
+                                       const int*                     molOrder,
+                                       const int                      firstOrdered) {
+  const int molIdx = blockMolecule(molOrder, firstOrdered);
   const int tid    = threadIdx.x;
 
   if (activeSystemMask != nullptr && activeSystemMask[molIdx] == 0) {
@@ -1102,8 +1126,10 @@ __global__ void combinedGradKernel(const Terms*                   terms,
                                    const BatchedIndicesDevicePtr* systemIndices,
                                    const storageT*                coords,
                                    storageT*                      grad,
-                                   const uint8_t*                 activeSystemMask) {
-  const int molIdx = blockIdx.x;
+                                   const uint8_t*                 activeSystemMask,
+                                   const int*                     molOrder,
+                                   const int                      firstOrdered) {
+  const int molIdx = blockMolecule(molOrder, firstOrdered);
   const int tid    = threadIdx.x;
 
   const int atomStart = systemIndices->atomStarts[molIdx];
@@ -1142,6 +1168,238 @@ __global__ void combinedGradKernel(const Terms*                   terms,
   }
 }
 
+//! Molecule ordering by decreasing work. A batch's molecules differ in size several times over and every block is bound
+//! by the latency of its own molecule, so a large molecule that starts in the last wave sets the kernel's run time. A
+//! counting sort over the pair-term count (most of each molecule's work) lets the blocks start the largest molecules
+//! first. The sort is a single block, so it is skipped for batches too small to need it or too large for it to stay
+//! cheap.
+constexpr int orderBlockSize = 1024;
+constexpr int orderNumBins   = 1024;
+constexpr int orderBinShift  = 4;  //!< log2 of the pair terms per bin.
+constexpr int minOrderedMols = 256;
+constexpr int maxOrderedMols = 1 << 15;
+
+//! Molecules per thread whose bins and in-bin ranks the sort keeps in registers between its passes (batches of up to
+//! orderMolsPerThread * orderBlockSize molecules); larger batches recompute the bins in the scatter pass.
+constexpr int orderMolsPerThread = 8;
+
+//! Bin of a molecule, 0 for the most work. Inactive molecules only zero their outputs and go last. All loads are issued
+//! together, without a branch on the mask, so the sort waits for a single memory round trip per molecule.
+static __device__ __forceinline__ int orderBinOf(const int      molIdx,
+                                                 const int*     vdwTermStarts,
+                                                 const int*     eleTermStarts,
+                                                 const uint8_t* activeSystemMask) {
+  const bool inactive = activeSystemMask != nullptr && activeSystemMask[molIdx] == 0;
+  const int  pairs =
+    (vdwTermStarts[molIdx + 1] - vdwTermStarts[molIdx]) + (eleTermStarts[molIdx + 1] - eleTermStarts[molIdx]);
+  const int bin = pairs >> orderBinShift;
+  return inactive ? orderNumBins - 1 : orderNumBins - 1 - (bin < orderNumBins - 1 ? bin : orderNumBins - 1);
+}
+
+//! Writes molecules [firstMol, numMols) to molOrder[0, numMols - firstMol), largest first (stable within a bin).
+__global__ void __launch_bounds__(orderBlockSize) orderMolsByWorkKernel(const int      numMols,
+                                                                        const int      firstMol,
+                                                                        const int*     vdwTermStarts,
+                                                                        const int*     eleTermStarts,
+                                                                        const uint8_t* activeSystemMask,
+                                                                        int*           molOrder) {
+  static_assert(orderNumBins == orderBlockSize);
+  constexpr int  kOrderWarp = 32;
+  constexpr int  numWarps   = orderBlockSize / kOrderWarp;
+  __shared__ int binStarts[orderNumBins];
+  __shared__ int warpTotals[numWarps];
+  const int      tid    = threadIdx.x;
+  const int      lane   = tid % kOrderWarp;
+  const int      warp   = tid / kOrderWarp;
+  const int      count  = numMols - firstMol;
+  const bool     cached = count <= orderMolsPerThread * orderBlockSize;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  // Lets the dependent block-per-molecule kernel launch now; its blocks wait for this grid to complete before they read
+  // the order.
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
+  // The bins of this thread's molecules are loaded before the barrier that publishes the zeroed counts.
+  int bins[orderMolsPerThread];
+  int ranks[orderMolsPerThread];
+  if (cached) {
+#pragma unroll
+    for (int k = 0; k < orderMolsPerThread; ++k) {
+      const int m = firstMol + tid + k * orderBlockSize;
+      bins[k]     = m < numMols ? orderBinOf(m, vdwTermStarts, eleTermStarts, activeSystemMask) : -1;
+    }
+  }
+  binStarts[tid] = 0;
+  __syncthreads();
+  if (cached) {
+#pragma unroll
+    for (int k = 0; k < orderMolsPerThread; ++k) {
+      if (bins[k] >= 0) {
+        ranks[k] = atomicAdd(&binStarts[bins[k]], 1);
+      }
+    }
+  } else {
+    for (int m = firstMol + tid; m < numMols; m += orderBlockSize) {
+      atomicAdd(&binStarts[orderBinOf(m, vdwTermStarts, eleTermStarts, activeSystemMask)], 1);
+    }
+  }
+  __syncthreads();
+  // Exclusive scan of the bin counts.
+  const int binCount  = binStarts[tid];
+  int       inclusive = binCount;
+#pragma unroll
+  for (int delta = 1; delta < kOrderWarp; delta <<= 1) {
+    const int other = __shfl_up_sync(0xffffffffu, inclusive, delta);
+    inclusive += lane >= delta ? other : 0;
+  }
+  if (lane == kOrderWarp - 1) {
+    warpTotals[warp] = inclusive;
+  }
+  __syncthreads();
+  if (warp == 0) {
+    int total = lane < numWarps ? warpTotals[lane] : 0;
+#pragma unroll
+    for (int delta = 1; delta < kOrderWarp; delta <<= 1) {
+      const int other = __shfl_up_sync(0xffffffffu, total, delta);
+      total += lane >= delta ? other : 0;
+    }
+    if (lane < numWarps) {
+      warpTotals[lane] = total;
+    }
+  }
+  __syncthreads();
+  binStarts[tid] = inclusive - binCount + (warp > 0 ? warpTotals[warp - 1] : 0);
+  __syncthreads();
+  if (cached) {
+#pragma unroll
+    for (int k = 0; k < orderMolsPerThread; ++k) {
+      if (bins[k] >= 0) {
+        molOrder[binStarts[bins[k]] + ranks[k]] = firstMol + tid + k * orderBlockSize;
+      }
+    }
+  } else {
+    // Without cached ranks the order within a bin follows the atomics, which only affects the order of molecules of
+    // the same size class.
+    for (int m = firstMol + tid; m < numMols; m += orderBlockSize) {
+      molOrder[atomicAdd(&binStarts[orderBinOf(m, vdwTermStarts, eleTermStarts, activeSystemMask)], 1)] = m;
+    }
+  }
+}
+
+//! Fills molOrder with molecules [firstMol, numMols) largest first and returns it, or returns nullptr when the blocks
+//! keep the batch order.
+static const int* orderMolsByWork(const int                      numMols,
+                                  const int                      firstMol,
+                                  const BatchedIndicesDevicePtr& systemIndices,
+                                  const uint8_t*                 activeSystemMask,
+                                  int*                           molOrder,
+                                  cudaStream_t                   stream) {
+  if (molOrder == nullptr || firstMol >= numMols || numMols < minOrderedMols || numMols - firstMol > maxOrderedMols) {
+    return nullptr;
+  }
+  orderMolsByWorkKernel<<<1, orderBlockSize, 0, stream>>>(numMols,
+                                                          firstMol,
+                                                          systemIndices.vdwTermStarts,
+                                                          systemIndices.eleTermStarts,
+                                                          activeSystemMask,
+                                                          molOrder);
+  return molOrder;
+}
+
+constexpr int maxCachedDevices = 64;
+
+//! Device properties the ordered launches need, queried once per device.
+struct OrderLaunchDeviceInfo {
+  int computeMajor = 0;
+  int numSMs       = 0;
+};
+
+static OrderLaunchDeviceInfo orderLaunchDeviceInfo(const int device) {
+  static std::array<std::atomic<int>, maxCachedDevices> majors{};
+  static std::array<std::atomic<int>, maxCachedDevices> sms{};
+  const bool                                            cacheable = device >= 0 && device < maxCachedDevices;
+  if (cacheable && sms[device].load(std::memory_order_relaxed) > 0) {
+    return {majors[device].load(std::memory_order_relaxed), sms[device].load(std::memory_order_relaxed)};
+  }
+  OrderLaunchDeviceInfo info;
+  if (cudaDeviceGetAttribute(&info.computeMajor, cudaDevAttrComputeCapabilityMajor, device) != cudaSuccess ||
+      cudaDeviceGetAttribute(&info.numSMs, cudaDevAttrMultiProcessorCount, device) != cudaSuccess) {
+    cudaGetLastError();
+    return {};
+  }
+  if (cacheable) {
+    majors[device].store(info.computeMajor, std::memory_order_relaxed);
+    sms[device].store(info.numSMs, std::memory_order_relaxed);
+  }
+  return info;
+}
+
+//! Resident blocks per SM of kernel at blockSizePerMol threads, cached per device (0 if the query fails).
+template <auto kernel> static int residentBlocksPerSM(const int device) {
+  static std::array<std::atomic<int>, maxCachedDevices> cache{};
+  const bool                                            cacheable = device >= 0 && device < maxCachedDevices;
+  if (cacheable) {
+    if (const int cached = cache[device].load(std::memory_order_relaxed); cached > 0) {
+      return cached;
+    }
+  }
+  int blocksPerSM = 0;
+  if (cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSM, kernel, blockSizePerMol, 0) != cudaSuccess) {
+    cudaGetLastError();
+    return 0;
+  }
+  if (cacheable) {
+    cache[device].store(blocksPerSM, std::memory_order_relaxed);
+  }
+  return blocksPerSM;
+}
+
+//! Waves of resident blocks from which a launch lets its first wave skip the molecule order.
+constexpr int minWavesUnorderedFirst = 3;
+
+//! Launches a block-per-molecule kernel over numMols molecules with the ordering parameters (molOrder, firstOrdered)
+//! appended. In launches of at least minWavesUnorderedFirst waves, the molecules the launch holds resident at once (its
+//! first wave) keep the batch order, so those blocks start right away; the ordering kernel sorts the remaining
+//! molecules largest first while the first wave runs, and the blocks that start later take them in that order. Smaller
+//! launches order every molecule. On compute capability 9.0+ the kernel is a programmatic dependent launch, which may
+//! start while the ordering kernel runs (blocks wait for the order in waitForMolOrder) and hides the launch latency
+//! between the two. Without an order buffer every block keeps the batch order.
+template <auto kernel, typename... Args>
+static cudaError_t launchBlockPerMolOrdered(const int                      numMols,
+                                            const BatchedIndicesDevicePtr& systemIndices,
+                                            const uint8_t*                 activeSystemMask,
+                                            int*                           molOrder,
+                                            cudaStream_t                   stream,
+                                            Args... args) {
+  int                   firstOrdered = 0;
+  OrderLaunchDeviceInfo info;
+  if (molOrder != nullptr && numMols >= minOrderedMols) {
+    int device = 0;
+    if (cudaGetDevice(&device) != cudaSuccess) {
+      cudaGetLastError();
+    } else {
+      info = orderLaunchDeviceInfo(device);
+    }
+    const int residentBlocks = residentBlocksPerSM<kernel>(device) * info.numSMs;
+    firstOrdered             = numMols >= minWavesUnorderedFirst * residentBlocks ? residentBlocks : 0;
+  }
+  const int* blockMols = orderMolsByWork(numMols, firstOrdered, systemIndices, activeSystemMask, molOrder, stream);
+  if (blockMols == nullptr || info.computeMajor < 9) {
+    kernel<<<numMols, blockSizePerMol, 0, stream>>>(args..., blockMols, firstOrdered);
+    return cudaGetLastError();
+  }
+  cudaLaunchConfig_t config = {};
+  config.gridDim            = dim3(numMols);
+  config.blockDim           = dim3(blockSizePerMol);
+  config.dynamicSmemBytes   = 0;
+  config.stream             = stream;
+  cudaLaunchAttribute attribute;
+  attribute.id                                         = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attribute.val.programmaticStreamSerializationAllowed = 1;
+  config.attrs                                         = &attribute;
+  config.numAttrs                                      = 1;
+  return cudaLaunchKernelEx(&config, kernel, args..., blockMols, firstOrdered);
+}
+
 template <typename real, typename reduceT, typename Terms, typename storageT>
 cudaError_t launchBlockPerMolEnergyKernelImpl(int                            numMols,
                                               const Terms&                   terms,
@@ -1150,18 +1408,34 @@ cudaError_t launchBlockPerMolEnergyKernelImpl(int                            num
                                               storageT*                      energies,
                                               bool                           hasConstraints,
                                               cudaStream_t                   stream,
-                                              const uint8_t*                 activeSystemMask) {
+                                              const uint8_t*                 activeSystemMask,
+                                              int*                           molOrder) {
+  if (numMols <= 0) {
+    return cudaSuccess;
+  }
   const AsyncDevicePtr<Terms>                   devTerms(terms, stream);
   const AsyncDevicePtr<BatchedIndicesDevicePtr> devSysIdx(sytemIndices, stream);
-#define NVMOLKIT_LAUNCH_MMFF_ENERGY(HasConstraints, real, reduceT) \
-  combinedEnergiesKernel<HasConstraints, real, reduceT>            \
-    <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devSysIdx.data(), coords, energies, activeSystemMask)
   if (hasConstraints)
-    NVMOLKIT_LAUNCH_MMFF_ENERGY(true, real, reduceT);
-  else
-    NVMOLKIT_LAUNCH_MMFF_ENERGY(false, real, reduceT);
-#undef NVMOLKIT_LAUNCH_MMFF_ENERGY
-  return cudaGetLastError();
+    return launchBlockPerMolOrdered<combinedEnergiesKernel<true, real, reduceT, Terms, storageT>>(numMols,
+                                                                                                  sytemIndices,
+                                                                                                  activeSystemMask,
+                                                                                                  molOrder,
+                                                                                                  stream,
+                                                                                                  devTerms.data(),
+                                                                                                  devSysIdx.data(),
+                                                                                                  coords,
+                                                                                                  energies,
+                                                                                                  activeSystemMask);
+  return launchBlockPerMolOrdered<combinedEnergiesKernel<false, real, reduceT, Terms, storageT>>(numMols,
+                                                                                                 sytemIndices,
+                                                                                                 activeSystemMask,
+                                                                                                 molOrder,
+                                                                                                 stream,
+                                                                                                 devTerms.data(),
+                                                                                                 devSysIdx.data(),
+                                                                                                 coords,
+                                                                                                 energies,
+                                                                                                 activeSystemMask);
 }
 
 template <typename real, typename Terms, typename storageT>
@@ -1172,54 +1446,76 @@ cudaError_t launchBlockPerMolGradKernelImpl(int                            numMo
                                             storageT*                      grad,
                                             bool                           hasConstraints,
                                             cudaStream_t                   stream,
-                                            const uint8_t*                 activeSystemMask) {
+                                            const uint8_t*                 activeSystemMask,
+                                            int*                           molOrder) {
+  if (numMols <= 0) {
+    return cudaSuccess;
+  }
   const AsyncDevicePtr<Terms>                   devTerms(terms, stream);
   const AsyncDevicePtr<BatchedIndicesDevicePtr> devSysIdx(sytemIndices, stream);
   if (hasConstraints)
-    combinedGradKernel<true, real>
-      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devSysIdx.data(), coords, grad, activeSystemMask);
-  else
-    combinedGradKernel<false, real>
-      <<<numMols, blockSizePerMol, 0, stream>>>(devTerms.data(), devSysIdx.data(), coords, grad, activeSystemMask);
-  return cudaGetLastError();
+    return launchBlockPerMolOrdered<combinedGradKernel<true, real, Terms, storageT>>(numMols,
+                                                                                     sytemIndices,
+                                                                                     activeSystemMask,
+                                                                                     molOrder,
+                                                                                     stream,
+                                                                                     devTerms.data(),
+                                                                                     devSysIdx.data(),
+                                                                                     coords,
+                                                                                     grad,
+                                                                                     activeSystemMask);
+  return launchBlockPerMolOrdered<combinedGradKernel<false, real, Terms, storageT>>(numMols,
+                                                                                    sytemIndices,
+                                                                                    activeSystemMask,
+                                                                                    molOrder,
+                                                                                    stream,
+                                                                                    devTerms.data(),
+                                                                                    devSysIdx.data(),
+                                                                                    coords,
+                                                                                    grad,
+                                                                                    activeSystemMask);
 }
 
-#define NVMOLKIT_DEFINE_MMFF_ENERGY_LAUNCHER(real, reduceT, TermsType, storageT)           \
-  cudaError_t launchBlockPerMolEnergyKernel(int                            numMols,        \
-                                            const TermsType&               terms,          \
-                                            const BatchedIndicesDevicePtr& indices,        \
-                                            const storageT*                coords,         \
-                                            storageT*                      energies,       \
-                                            bool                           hasConstraints, \
-                                            cudaStream_t                   stream,         \
-                                            const uint8_t*                 activeSystemMask) {             \
-    return launchBlockPerMolEnergyKernelImpl<real, reduceT>(numMols,                       \
-                                                            terms,                         \
-                                                            indices,                       \
-                                                            coords,                        \
-                                                            energies,                      \
-                                                            hasConstraints,                \
-                                                            stream,                        \
-                                                            activeSystemMask);             \
+#define NVMOLKIT_DEFINE_MMFF_ENERGY_LAUNCHER(real, reduceT, TermsType, storageT)             \
+  cudaError_t launchBlockPerMolEnergyKernel(int                            numMols,          \
+                                            const TermsType&               terms,            \
+                                            const BatchedIndicesDevicePtr& indices,          \
+                                            const storageT*                coords,           \
+                                            storageT*                      energies,         \
+                                            bool                           hasConstraints,   \
+                                            cudaStream_t                   stream,           \
+                                            const uint8_t*                 activeSystemMask, \
+                                            int*                           molOrder) {                                 \
+    return launchBlockPerMolEnergyKernelImpl<real, reduceT>(numMols,                         \
+                                                            terms,                           \
+                                                            indices,                         \
+                                                            coords,                          \
+                                                            energies,                        \
+                                                            hasConstraints,                  \
+                                                            stream,                          \
+                                                            activeSystemMask,                \
+                                                            molOrder);                       \
   }
 
-#define NVMOLKIT_DEFINE_MMFF_GRAD_LAUNCHER(real, TermsType, storageT)                    \
-  cudaError_t launchBlockPerMolGradKernel(int                            numMols,        \
-                                          const TermsType&               terms,          \
-                                          const BatchedIndicesDevicePtr& indices,        \
-                                          const storageT*                coords,         \
-                                          storageT*                      grad,           \
-                                          bool                           hasConstraints, \
-                                          cudaStream_t                   stream,         \
-                                          const uint8_t*                 activeSystemMask) {             \
-    return launchBlockPerMolGradKernelImpl<real>(numMols,                                \
-                                                 terms,                                  \
-                                                 indices,                                \
-                                                 coords,                                 \
-                                                 grad,                                   \
-                                                 hasConstraints,                         \
-                                                 stream,                                 \
-                                                 activeSystemMask);                      \
+#define NVMOLKIT_DEFINE_MMFF_GRAD_LAUNCHER(real, TermsType, storageT)                      \
+  cudaError_t launchBlockPerMolGradKernel(int                            numMols,          \
+                                          const TermsType&               terms,            \
+                                          const BatchedIndicesDevicePtr& indices,          \
+                                          const storageT*                coords,           \
+                                          storageT*                      grad,             \
+                                          bool                           hasConstraints,   \
+                                          cudaStream_t                   stream,           \
+                                          const uint8_t*                 activeSystemMask, \
+                                          int*                           molOrder) {                                 \
+    return launchBlockPerMolGradKernelImpl<real>(numMols,                                  \
+                                                 terms,                                    \
+                                                 indices,                                  \
+                                                 coords,                                   \
+                                                 grad,                                     \
+                                                 hasConstraints,                           \
+                                                 stream,                                   \
+                                                 activeSystemMask,                         \
+                                                 molOrder);                                \
   }
 
 NVMOLKIT_DEFINE_MMFF_ENERGY_LAUNCHER(double, double, EnergyForceContribsDevicePtr, double)
