@@ -655,6 +655,87 @@ def test_getaway_non_finite_coordinates_give_nan_information_indices(precision):
     _assert_rounded_matches_rdkit(values[2:], _rdkit_getaway_rows(mols[2:]), precision)
 
 
+def _jittered_helix(num_atoms, rng):
+    """A chain on a helix: ~1.5 A between bonded atoms, ~3.8 A between turns, jittered so no leverages tie."""
+    angles = 0.5 * np.arange(num_atoms)
+    coordinates = np.stack([3.0 * np.cos(angles), 3.0 * np.sin(angles), 0.3 * np.arange(num_atoms)], axis=1)
+    return coordinates + rng.normal(scale=0.05, size=coordinates.shape)
+
+
+@pytest.fixture(scope="module")
+def getaway_size_mix():
+    # Molecule sizes from 9 to 400 atoms; the largest exceeds any device's shared memory if a conformer were held
+    # there. RDKit needs about a second for it.
+    rng = np.random.default_rng(29)
+    mols = [
+        _embed("CCO", 2, 107),
+        _embed("CC(C)Cc1ccc(cc1)C(C)C(=O)O", 2, 109),
+        _mol_with_conformers("C" * 132, [_jittered_helix(132, rng)]),
+        _mol_with_conformers("C" * 400, [_jittered_helix(400, rng)]),
+    ]
+    return mols, _rdkit_getaway_rows(mols)
+
+
+@pytest.mark.parametrize("precision", PRECISIONS)
+def test_getaway_molecule_sizes_match_rdkit(getaway_size_mix, precision):
+    mols, expected = getaway_size_mix
+    result = Calc3DProperties(mols, Property3D.GETAWAY, precision=precision)
+    _assert_rounded_matches_rdkit(result[Property3D.GETAWAY].numpy(), expected, precision)
+
+
+@pytest.mark.parametrize("precision", PRECISIONS)
+def test_getaway_without_bond_distance_table_matches_rdkit(getaway_size_mix, precision):
+    # A conformer-less molecule past the bond-distance table's atom limit leaves the whole batch without the table,
+    # so every conformer searches its bond distances per row.
+    mols, expected = getaway_size_mix
+    batch = [*mols, Chem.MolFromSmiles("C" * 3100)]
+    result = Calc3DProperties(batch, Property3D.GETAWAY, precision=precision)
+    _assert_rounded_matches_rdkit(result[Property3D.GETAWAY].numpy(), expected, precision)
+
+
+@pytest.mark.parametrize("precision", PRECISIONS)
+def test_getaway_one_conformer_per_molecule_matches_rdkit(precision):
+    # With hydrogens: 9, 11, 24, 27, 33, 50 and 65 atoms.
+    smiles = [
+        "CCO",
+        "c1ccncc1",
+        "CN1C=NC2=C1C(=O)N(C(=O)N2C)C",
+        "CCCCCCCCO",
+        "CC(C)Cc1ccc(cc1)C(C)C(=O)O",
+        "OC(=O)CCCCCCCCCCCCCCC",
+        "C" * 21,
+    ]
+    mols = [_embed(smi, 1, 113 + idx) for idx, smi in enumerate(smiles)]
+    assert [mol.GetNumConformers() for mol in mols] == [1] * len(mols)
+    result = Calc3DProperties(mols, Property3D.GETAWAY, precision=precision)
+    _assert_rounded_matches_rdkit(result[Property3D.GETAWAY].numpy(), _rdkit_getaway_rows(mols), precision)
+
+
+@pytest.mark.parametrize("precision", PRECISIONS)
+@pytest.mark.parametrize("with_table", [True, False])
+def test_getaway_invalid_conformer_rows_are_nan(precision, with_table):
+    # Two copies of one 33-atom conformer; rows start one conformer late, so the second row runs past the values.
+    base = _embed("CC(C)Cc1ccc(cc1)C(C)C(=O)O", 1, 127)
+    mol = Chem.Mol(base)
+    mol.AddConformer(Chem.Conformer(base.GetConformer()), assignId=True)
+    mols = [mol] if with_table else [mol, Chem.MolFromSmiles("C" * 3100)]
+    valid = _device_result_from_molecules(mols)
+    coordinates = Device3DResult(
+        values=valid.values,
+        atom_starts=AsyncGpuResult(torch.tensor([33, 66, 99], dtype=torch.int32, device="cuda"), valid.gpu_id),
+        mol_indices=valid.mol_indices,
+        conf_indices=valid.conf_indices,
+        gpu_id=valid.gpu_id,
+        n_mols=len(mols),
+    )
+    values = Calc3DProperties(mols, Property3D.GETAWAY, coordinates=coordinates, precision=precision)[
+        Property3D.GETAWAY
+    ].numpy()
+    assert values.shape == (2, 273)
+    assert np.isnan(values[1]).all()
+    _assert_rounded_matches_rdkit(values[:1], _rdkit_getaway_rows([base]), precision)
+
+
 @pytest.mark.parametrize("precision_digits", [0, 2.5])
 def test_getaway_precision_ignored_when_not_requested(precision_digits):
     options = Property3DOptions(getaway=GetawayOptions(precision=precision_digits))
