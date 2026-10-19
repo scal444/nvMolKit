@@ -133,6 +133,7 @@ Conformer RMSD
 
    conformerRmsd.GetConformerRMSMatrix
    conformerRmsd.GetConformerRMSMatrixBatch
+   conformerRmsd.GetAlignmentTransformBatch
 
 Torsion Fingerprint Deviation (TFD)
 -----------------------------------

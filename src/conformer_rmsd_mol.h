@@ -18,11 +18,31 @@
 
 #include <GraphMol/GraphMol.h>
 
+#include <utility>
 #include <vector>
 
 #include "src/conformer_rmsd.h"
 
 namespace nvMolKit {
+
+/** @brief Device-owned RMSDs and row-major homogeneous 4x4 transforms. */
+struct AlignmentTransformResult {
+  AsyncDeviceVector<double> rmsds;
+  AsyncDeviceVector<double> transforms;
+};
+
+/** @brief Fit one selected conformer per probe to a reference using explicit
+ * (probe atom, reference atom) pairs. Maps must be nonempty and one-to-one.
+ * -1 selects the first conformer; other IDs are RDKit conformer IDs.
+ * Inputs are never modified. Only proper rotations and equal weights are used.
+ * Invalid maps, nonfinite mapped positions, and invalid conformers throw.
+ */
+AlignmentTransformResult alignmentTransformBatchMol(const std::vector<const RDKit::ROMol*>&              probes,
+                                                    const RDKit::ROMol&                                  reference,
+                                                    const std::vector<std::vector<std::pair<int, int>>>& atomMaps,
+                                                    const std::vector<int>& probeConformerIds,
+                                                    int                     referenceConformerId = -1,
+                                                    cudaStream_t            stream               = nullptr);
 
 /**
  * @brief Compute the pairwise RMSD matrix for all conformers of a molecule.

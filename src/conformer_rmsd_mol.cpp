@@ -17,14 +17,100 @@
 
 #include <GraphMol/Conformer.h>
 
+#include <bit>
 #include <climits>
+#include <cstdint>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 
 #include "src/utils/host_vector.h"
 
 namespace nvMolKit {
+namespace {
+
+bool isFiniteCoordinate(const double value) {
+  // Bit classification remains valid when the host compiler enables fast math.
+  return (std::bit_cast<uint64_t>(value) & 0x7ff0000000000000ULL) != 0x7ff0000000000000ULL;
+}
+
+}  // namespace
+
+AlignmentTransformResult alignmentTransformBatchMol(const std::vector<const RDKit::ROMol*>&              probes,
+                                                    const RDKit::ROMol&                                  reference,
+                                                    const std::vector<std::vector<std::pair<int, int>>>& atomMaps,
+                                                    const std::vector<int>& probeConformerIds,
+                                                    const int               referenceConformerId,
+                                                    cudaStream_t            stream) {
+  if (probes.size() != atomMaps.size() || probes.size() != probeConformerIds.size())
+    throw std::invalid_argument("Expected one atom map and conformer ID per probe");
+  if (probes.size() > INT_MAX)
+    throw std::overflow_error("Alignment batch exceeds kernel grid limit");
+  if (referenceConformerId < -1)
+    throw std::invalid_argument("Reference conformer ID must be -1 or nonnegative");
+  const auto& referenceConformer = reference.getConformer(referenceConformerId);
+  size_t      coordinateCount    = 0;
+  for (const auto& atomMap : atomMaps) {
+    if (atomMap.empty())
+      throw std::invalid_argument("Atom maps must be nonempty");
+    if (atomMap.size() > INT_MAX / 3 ||
+        atomMap.size() > (std::numeric_limits<size_t>::max() / sizeof(double) - coordinateCount) / 3)
+      throw std::overflow_error("Atom map exceeds coordinate indexing limit");
+    coordinateCount += 3 * atomMap.size();
+  }
+  PinnedHostVector<double> moving(coordinateCount);
+  PinnedHostVector<double> fixed(coordinateCount);
+  size_t                   coordinate = 0;
+  std::vector<size_t>      offsets{0};
+  for (size_t item = 0; item < probes.size(); ++item) {
+    if (!probes[item])
+      throw std::invalid_argument("Null probe molecule at index " + std::to_string(item));
+    const auto& atomMap = atomMaps[item];
+    if (probeConformerIds[item] < -1)
+      throw std::invalid_argument("Probe conformer ID must be -1 or nonnegative");
+    const auto&             probeConformer = probes[item]->getConformer(probeConformerIds[item]);
+    std::unordered_set<int> probeAtoms;
+    std::unordered_set<int> referenceAtoms;
+    for (const auto& [probeAtom, referenceAtom] : atomMap) {
+      if (probeAtom < 0 || referenceAtom < 0 || static_cast<unsigned int>(probeAtom) >= probes[item]->getNumAtoms() ||
+          static_cast<unsigned int>(referenceAtom) >= reference.getNumAtoms())
+        throw std::invalid_argument("Atom map index out of range");
+      if (!probeAtoms.insert(probeAtom).second || !referenceAtoms.insert(referenceAtom).second)
+        throw std::invalid_argument("Atom maps must be one-to-one");
+      const auto& probePosition     = probeConformer.getAtomPos(probeAtom);
+      const auto& referencePosition = referenceConformer.getAtomPos(referenceAtom);
+      for (int axis = 0; axis < 3; ++axis) {
+        if (!isFiniteCoordinate(probePosition[axis]) || !isFiniteCoordinate(referencePosition[axis]))
+          throw std::invalid_argument("Mapped coordinates must be finite");
+        moving[coordinate] = probePosition[axis];
+        fixed[coordinate]  = referencePosition[axis];
+        ++coordinate;
+      }
+    }
+    offsets.push_back(coordinate / 3);
+  }
+  AlignmentTransformResult result{AsyncDeviceVector<double>(probes.size(), stream),
+                                  AsyncDeviceVector<double>(16 * probes.size(), stream)};
+  if (probes.empty())
+    return result;
+  AsyncDeviceVector<double> deviceMoving(moving.size(), stream);
+  AsyncDeviceVector<double> deviceFixed(fixed.size(), stream);
+  AsyncDeviceVector<size_t> deviceOffsets(offsets.size(), stream);
+  deviceMoving.copyFromHost(moving.data(), moving.size());
+  deviceFixed.copyFromHost(fixed.data(), fixed.size());
+  deviceOffsets.copyFromHost(offsets);
+  // Host packing buffers must remain alive through their asynchronous uploads.
+  cudaCheckError(cudaStreamSynchronize(stream));
+  alignmentTransformBatchGpu(toSpan(deviceMoving),
+                             toSpan(deviceFixed),
+                             toSpan(deviceOffsets),
+                             toSpan(result.rmsds),
+                             toSpan(result.transforms),
+                             probes.size(),
+                             stream);
+  return result;
+}
 
 AsyncDeviceVector<double> conformerRmsdMatrixMol(const RDKit::ROMol& mol,
                                                  const bool          prealigned,

@@ -36,6 +36,41 @@ boost::python::object toOwnedPyArray(nvMolKit::PyArray* array) {
 
 BOOST_PYTHON_MODULE(_conformerRmsd) {
   boost::python::def(
+    "GetAlignmentTransformBatch",
+    +[](const boost::python::list& probes,
+        const RDKit::ROMol&        reference,
+        const boost::python::list& atomMaps,
+        const boost::python::list& conformerIds,
+        const int                  referenceConformerId,
+        const std::uintptr_t       streamPtr) {
+      auto stream = nvMolKit::acquireExternalStream(streamPtr);
+      if (!stream)
+        throw std::invalid_argument("Invalid CUDA stream");
+      const int count = boost::python::len(probes);
+      if (boost::python::len(atomMaps) != count || boost::python::len(conformerIds) != count)
+        throw std::invalid_argument("Expected one atom map and conformer ID per probe");
+      std::vector<const RDKit::ROMol*>              molecules;
+      std::vector<std::vector<std::pair<int, int>>> maps(count);
+      std::vector<int>                              ids;
+      for (int item = 0; item < count; ++item) {
+        molecules.push_back(boost::python::extract<const RDKit::ROMol*>(probes[item]));
+        ids.push_back(boost::python::extract<int>(conformerIds[item]));
+        const boost::python::object atomMap = atomMaps[item];
+        for (int atom = 0; atom < boost::python::len(atomMap); ++atom) {
+          const boost::python::object pair = atomMap[atom];
+          if (boost::python::len(pair) != 2)
+            throw std::invalid_argument("Atom map entries must be pairs");
+          maps[item].emplace_back(boost::python::extract<int>(pair[0]), boost::python::extract<int>(pair[1]));
+        }
+      }
+      auto result =
+        nvMolKit::alignmentTransformBatchMol(molecules, reference, maps, ids, referenceConformerId, *stream);
+      return boost::python::make_tuple(
+        toOwnedPyArray(nvMolKit::makePyArray(result.rmsds, boost::python::make_tuple(count))),
+        toOwnedPyArray(nvMolKit::makePyArray(result.transforms, boost::python::make_tuple(count, 4, 4))));
+    });
+
+  boost::python::def(
     "GetConformerRMSMatrixBatch",
     +[](boost::python::list& mols, const bool prealigned, const bool alignToFirstConformer, std::uintptr_t streamPtr)
       -> boost::python::object {

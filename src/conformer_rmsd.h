@@ -20,6 +20,19 @@
 
 namespace nvMolKit {
 
+/** @brief Fit packed, equally weighted coordinate pairs; offsets count atoms.
+ * Each nonempty segment produces one RMSD and one row-major homogeneous 4x4
+ * transform mapping moving coordinates to fixed coordinates. Buffers and
+ * strictly increasing offsets are validated by alignmentTransformBatchMol.
+ */
+void alignmentTransformBatchGpu(cuda::std::span<const double> moving,
+                                cuda::std::span<const double> fixed,
+                                cuda::std::span<const size_t> offsets,
+                                cuda::std::span<double>       rmsds,
+                                cuda::std::span<double>       transforms,
+                                int                           count,
+                                cudaStream_t                  stream);
+
 /**
  * @brief Align every conformer to conformer 0 on the GPU.
  *

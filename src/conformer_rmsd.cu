@@ -431,6 +431,78 @@ __device__ __forceinline__ void alignConformerToFirst(const double* __restrict__
   }
 }
 
+__global__ void alignmentTransformBatchKernel(const double* moving,
+                                              const double* fixed,
+                                              const size_t* offsets,
+                                              double*       rmsds,
+                                              double*       transforms) {
+  const int    item  = blockIdx.x;
+  const size_t begin = offsets[item];
+  const int    count = static_cast<int>(offsets[item + 1] - begin);
+  moving += 3 * begin;
+  fixed += 3 * begin;
+  __shared__ RmsdWarpReduce::TempStorage warpReduceTemp[kRmsdWarps];
+  __shared__ double                      warpBuf[kRmsdWarps * 9];
+  __shared__ RigidAlignmentMoments       moments;
+  __shared__ double                      quaternionMatrix[16];
+  __shared__ double                      eigenvectors[16];
+  __shared__ double                      rotation[9];
+  accumulateRigidAlignmentMoments<false>(moving, fixed, count, warpReduceTemp, warpBuf, &moments);
+  if (threadIdx.x == 0) {
+    computeOptimalRotation(moments, quaternionMatrix, eigenvectors, rotation);
+    double* transform = transforms + 16 * item;
+    for (int row = 0; row < 3; ++row) {
+      for (int col = 0; col < 3; ++col)
+        transform[4 * row + col] = rotation[3 * row + col];
+      const double center    = row == 0 ? moments.fixedCenterX : row == 1 ? moments.fixedCenterY : moments.fixedCenterZ;
+      transform[4 * row + 3] = center - rotation[3 * row] * moments.movingCenterX -
+                               rotation[3 * row + 1] * moments.movingCenterY -
+                               rotation[3 * row + 2] * moments.movingCenterZ;
+    }
+    transform[12] = transform[13] = transform[14] = 0.0;
+    transform[15]                                 = 1.0;
+  }
+  __syncthreads();
+  double squaredError = 0.0;
+  for (int atom = threadIdx.x; atom < count; atom += kRmsdBlockSize) {
+    const double x  = moving[3 * atom] - moments.movingCenterX;
+    const double y  = moving[3 * atom + 1] - moments.movingCenterY;
+    const double z  = moving[3 * atom + 2] - moments.movingCenterZ;
+    const double dx = rotation[0] * x + rotation[1] * y + rotation[2] * z + moments.fixedCenterX - fixed[3 * atom];
+    const double dy = rotation[3] * x + rotation[4] * y + rotation[5] * z + moments.fixedCenterY - fixed[3 * atom + 1];
+    const double dz = rotation[6] * x + rotation[7] * y + rotation[8] * z + moments.fixedCenterZ - fixed[3 * atom + 2];
+    squaredError += dx * dx + dy * dy + dz * dz;
+  }
+  const int warp = threadIdx.x / 32;
+  squaredError   = RmsdWarpReduce(warpReduceTemp[warp]).Sum(squaredError);
+  if (threadIdx.x % 32 == 0)
+    warpBuf[warp] = squaredError;
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    double total = 0.0;
+    for (int index = 0; index < kRmsdWarps; ++index)
+      total += warpBuf[index];
+    rmsds[item] = sqrt(total / count);
+  }
+}
+
+void alignmentTransformBatchGpu(cuda::std::span<const double> moving,
+                                cuda::std::span<const double> fixed,
+                                cuda::std::span<const size_t> offsets,
+                                cuda::std::span<double>       rmsds,
+                                cuda::std::span<double>       transforms,
+                                const int                     count,
+                                cudaStream_t                  stream) {
+  if (count == 0)
+    return;
+  alignmentTransformBatchKernel<<<count, kRmsdBlockSize, 0, stream>>>(moving.data(),
+                                                                      fixed.data(),
+                                                                      offsets.data(),
+                                                                      rmsds.data(),
+                                                                      transforms.data());
+  cudaCheckError(cudaGetLastError());
+}
+
 __device__ __forceinline__ double computeOptimalRmsd(const RigidAlignmentMoments& moments, const double invN) {
   // G = H^T H (3x3 symmetric positive semi-definite).
   const double g00 = moments.h00 * moments.h00 + moments.h10 * moments.h10 + moments.h20 * moments.h20;

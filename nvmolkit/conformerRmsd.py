@@ -25,7 +25,7 @@ from nvmolkit.types import AsyncGpuResult
 if TYPE_CHECKING:
     from rdkit.Chem import Mol
 
-__all__ = ["GetConformerRMSMatrix", "GetConformerRMSMatrixBatch"]
+__all__ = ["GetConformerRMSMatrix", "GetConformerRMSMatrixBatch", "GetAlignmentTransformBatch"]
 
 
 _VALID_OUTPUT_FORMATS = frozenset({"condensed", "square"})
@@ -245,3 +245,51 @@ def GetConformerRMSMatrixBatch(
         with torch.cuda.stream(execution_stream):
             return [_condensed_to_square(result, mol.GetNumConformers()) for result, mol in zip(results, mols)]
     return results
+
+
+def GetAlignmentTransformBatch(
+    probes: list["Mol"],
+    reference: "Mol",
+    atom_maps: list[list[tuple[int, int]]],
+    probe_conf_ids: list[int] | None = None,
+    ref_conf_id: int = -1,
+    stream: torch.cuda.Stream | None = None,
+) -> tuple[AsyncGpuResult, AsyncGpuResult]:
+    """Fit selected probe conformers to a reference using explicit atom maps.
+
+    Returns device-owned float64 RMSDs of shape ``(len(probes),)`` and
+    homogeneous transforms of shape ``(len(probes), 4, 4)`` in input order.
+    A transform maps a probe position ``p`` to ``R @ p + t``, with ``R`` in
+    ``[:3, :3]`` and ``t`` in ``[:3, 3]``. Input molecules are never modified.
+
+    Each nonempty, one-to-one map contains ``(probe_atom, reference_atom)``
+    pairs. Only mapped atoms participate in the equally weighted fit. The
+    rotation is proper (determinant +1); reflections and automatic atom
+    matching are unsupported. Degenerate fits have a deterministic optimal
+    transform, whose rotation need not be unique.
+
+    ``probe_conf_ids`` selects one conformer per probe; its default selects
+    the first conformer of every probe. ``-1`` selects the first conformer;
+    other values are RDKit conformer IDs. Repeat a molecule with different
+    IDs to align several of its conformers. ``ref_conf_id`` selects the one
+    reference conformer used for the whole batch.
+
+    ``stream`` defaults to the current PyTorch CUDA stream. Coordinate upload
+    completes before returning; the fit and result production are asynchronous.
+    Invalid maps, nonfinite mapped positions, and missing conformers raise.
+    An empty batch returns empty arrays but still requires a reference conformer.
+    """
+    probes = list(probes)
+    if reference is None or any(mol is None for mol in probes):
+        raise ValueError("Reference and probe molecules must not be None")
+    if stream is not None and not isinstance(stream, torch.cuda.Stream):
+        raise TypeError("stream must be a torch.cuda.Stream or None")
+    maps = [list(atom_map) for atom_map in atom_maps]
+    ids = [-1] * len(probes) if probe_conf_ids is None else list(probe_conf_ids)
+    if len(maps) != len(probes) or len(ids) != len(probes):
+        raise ValueError("Expected one atom map and conformer ID per probe")
+    execution_stream = stream if stream is not None else torch.cuda.current_stream()
+    rmsds, transforms = _conformerRmsd.GetAlignmentTransformBatch(
+        probes, reference, maps, ids, ref_conf_id, execution_stream.cuda_stream
+    )
+    return AsyncGpuResult(rmsds), AsyncGpuResult(transforms)
