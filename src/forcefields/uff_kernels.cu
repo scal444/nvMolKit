@@ -240,6 +240,22 @@ __global__ void vdwGradKernel(const int     numVdws,
 
 constexpr int blockSizePerMol = 128;
 
+//! Molecules with at most this many atoms have their coordinates copied to shared memory before their energy terms
+//! are evaluated; larger molecules read them from global memory.
+constexpr int maxSharedAtomsPerMol = 256;
+
+template <bool HasConstraints, typename real, typename Terms, typename storageT>
+__device__ __forceinline__ real molEnergyForPrecision(const Terms&                                  terms,
+                                                      const nvMolKit::UFF::BatchedIndicesDevicePtr& systemIndices,
+                                                      const storageT*                               pos,
+                                                      const int                                     molIdx,
+                                                      const int                                     tid) {
+  if constexpr (std::is_same_v<real, float>)
+    return nvMolKit::UFF::fp32::molEnergy<blockSizePerMol, HasConstraints>(terms, systemIndices, pos, molIdx, tid);
+  else
+    return nvMolKit::UFF::fp64::molEnergy<blockSizePerMol, HasConstraints>(terms, systemIndices, pos, molIdx, tid);
+}
+
 template <bool HasConstraints, typename real, typename reduceT, typename Terms, typename storageT>
 __global__ void combinedEnergiesKernel(const Terms*                                  terms,
                                        const nvMolKit::UFF::BatchedIndicesDevicePtr* systemIndices,
@@ -255,15 +271,36 @@ __global__ void combinedEnergiesKernel(const Terms*                             
     return;
   }
 
-  const int       atomStart = systemIndices->atomStarts[molIdx];
-  const storageT* molCoords = coords + atomStart * 3;
-  real            threadEnergy;
-  if constexpr (std::is_same_v<real, float>)
+  __shared__ storageT sharedPos[maxSharedAtomsPerMol * 3];
+  const int           atomStart = systemIndices->atomStarts[molIdx];
+  const int           numAtoms  = systemIndices->atomStarts[molIdx + 1] - atomStart;
+  const storageT*     molCoords = coords + atomStart * 3;
+  const bool          useShared = numAtoms <= maxSharedAtomsPerMol;
+  if (useShared) {
+    for (int k = tid; k < 3 * numAtoms; k += blockSizePerMol) {
+      sharedPos[k] = molCoords[k];
+    }
+  }
+  __syncthreads();
+
+  // Without constraints the shared and global cases are separate call sites, so the inlined term loops for the
+  // staged case use shared-memory loads instead of generic ones. The constrained kernel keeps one generic copy, whose
+  // larger code would not pay for the duplication.
+  real threadEnergy;
+  if constexpr (!HasConstraints) {
+    if (useShared) {
+      threadEnergy = molEnergyForPrecision<HasConstraints, real>(*terms, *systemIndices, sharedPos, molIdx, tid);
+    } else {
+      threadEnergy = molEnergyForPrecision<HasConstraints, real>(*terms, *systemIndices, molCoords, molIdx, tid);
+    }
+  } else {
     threadEnergy =
-      nvMolKit::UFF::fp32::molEnergy<blockSizePerMol, HasConstraints>(*terms, *systemIndices, molCoords, molIdx, tid);
-  else
-    threadEnergy =
-      nvMolKit::UFF::fp64::molEnergy<blockSizePerMol, HasConstraints>(*terms, *systemIndices, molCoords, molIdx, tid);
+      molEnergyForPrecision<HasConstraints, real>(*terms,
+                                                  *systemIndices,
+                                                  useShared ? static_cast<const storageT*>(sharedPos) : molCoords,
+                                                  molIdx,
+                                                  tid);
+  }
 
   using BlockReduce = cub::BlockReduce<reduceT, blockSizePerMol>;
   __shared__ typename BlockReduce::TempStorage tempStorage;
