@@ -18,7 +18,7 @@ fingerprints). Requirement: use cuML for k-means, or show where it can't be used
 - `docs/clustering.rst`: k-means section.
 - `nvmolkit/tests/test_clustering.py`: 17 k-means tests. They skip without cuML, except the
   install-hint test.
-- `benchmarks/kmeans/`: `prep_landrum.py`, `bench_kmeans.py`, `run_gpu.sh`, this file.
+- `benchmarks/kmeans/`: `prep_landrum.py`, `prep_enamine.py`, `bench_kmeans.py`, `run_gpu.sh`, this file.
 
 Status: all 17 k-means tests pass on an RTX 1000 Ada (sm_89, 6 GB) with cuML 26.10 and torch
 2.8.0+cu128. The full clustering suite and the C++ tests were not run.
@@ -55,16 +55,39 @@ Build the extension as usual. Set `CMAKE_CUDA_ARCHITECTURES` to the target GPU: 
   - Copy `~/data/clustering/chembl34/ecfp4_2048.npy` from the dev box, or regenerate with
     `~/data/clustering/scripts/prepare_fingerprints.py` (see `~/data/clustering/chembl34/README.md`).
   - Set `CHEMBL34_FP` to its path.
+- **Enamine REAL 10M** (our most common benchmark set).
+  - Copy `~/data/enamine_real_10M.cxsmiles` (1.9 GB) from the dev box.
+  - Run `python benchmarks/kmeans/prep_enamine.py enamine_real_10M.cxsmiles $KMEANS_DATA/enamine10m --workers <cores>`.
+  - This writes Morgan r2 1024-bit fingerprints (`morgan2_1024.npy`, same packed layout as ChEMBL34),
+    plus row-aligned `ids.txt` and `failures.tsv`. It parses on CPU only; the 100k file took seconds
+    with 8 workers.
+  - Set `ENAMINE_FP` to the `.npy` path (default `$KMEANS_DATA/enamine10m/morgan2_1024.npy`).
 
 ## Running
 
 ```bash
-export KMEANS_DATA=... KMEANS_OUT=... CHEMBL34_FP=...
-benchmarks/kmeans/run_gpu.sh tests       # seconds
-benchmarks/kmeans/run_gpu.sh landrum     # ~1 min
-benchmarks/kmeans/run_gpu.sh chembl      # k=7, 1000 on 2.4M; ~2 min on sm_89
-benchmarks/kmeans/run_gpu.sh chembl10k   # k=10,000 with k-means||, random, k-means++
+export KMEANS_DATA=... KMEANS_OUT=... CHEMBL34_FP=... ENAMINE_FP=...
+benchmarks/kmeans/run_gpu.sh tests     # seconds
+benchmarks/kmeans/run_gpu.sh landrum   # ~1 min; labelled, k = 35, 100, 184, 500
+benchmarks/kmeans/run_gpu.sh chembl    # 2.4M, all rows fitted; k = 7 and 57,000
+benchmarks/kmeans/run_gpu.sh enamine   # 10M, all rows fitted; k = 7, then k = 250,000 (cosine, random init, 20 iters)
 ```
+
+Cluster counts come from the literature:
+- k=7 is the NVIDIA RAPIDS ChEMBL demo.
+- About 42 molecules per cluster is Walters' FAISS run: k=50,000 on 2.1M. This gives k=57,000 for
+  ChEMBL34 and 250,000 for Enamine 10M.
+- The Landrum k values are 35 (number of targets), 184 (CLASSIX-T's cluster count), and 100 and 500
+  around them.
+
+The Enamine k=250,000 run is about 5 PFLOP per Lloyd pass in float32. That is why it uses 20
+iterations (FAISS's default, Walters' setting), random init and cosine only. k-means|| would need
+millions of candidates, and k-means++ would take 250,000 sequential steps.
+
+Expected memory, all rows fitted:
+- ChEMBL34: about 20 GB of unpacked fit features. At k=57,000, the k-means|| init adds up to about
+  7.5 GB of candidate centers plus a `4096 x candidates` scoring tile (up to about 15 GB).
+- Enamine 10M at 1024 bits: about 41 GB of fit features.
 
 `bench_kmeans.py` writes one JSON line per (k, metric). Fields:
 
@@ -74,7 +97,8 @@ benchmarks/kmeans/run_gpu.sh chembl10k   # k=10,000 with k-means||, random, k-me
 - `tanimoto_agreement`: fraction of rows whose cuML label is also their highest continuous-Tanimoto
   center.
 - `mean_tanimoto_to_center`, and the same after Tanimoto reassignment (`_reassign`).
-- `silhouette_tanimoto` on 10k sampled rows, with and without reassignment.
+- `silhouette_tanimoto`: exact Tanimoto silhouette averaged over 2,000 uniformly sampled rows. Each
+  sampled row's mean distance to every cluster uses all N rows. With and without reassignment.
 - `ari` / `ari_reassign` when labels are given.
 
 ## Results so far (RTX 1000 Ada, 6 GB)
@@ -103,6 +127,15 @@ ChEMBL34, 2.4M rows, `fit_size=256000`:
 | 10000 | k-means++ | euclidean / cosine | 586 / 591 | 0.800 / 0.831 | 0.517 (0.523) / 0.530 (0.535) |
 | 10000 | random | cosine | 69 | 0.832 | 0.521 (0.526) |
 
+These runs fit on a 256k subsample, which is only about 26 rows per cluster at k=10,000. The new
+steps fit on all rows instead.
+
+**Do not use the ChEMBL silhouettes from these runs.** The old estimator computed silhouette inside
+a 10,000-row sample, so at k ≥ 1,000 most sampled rows were alone in their cluster and scored 0. The
+current estimator scores every sampled row against all N rows. It matches sklearn's exact silhouette
+when the sample is the full set (checked at k=35 and k=1,500 on 3,000 Landrum rows). The Landrum
+silhouettes (k ≤ 500 against a 10,000-row sample) are fine.
+
 Raw JSON lines are in `~/experiments/kmeans/results/` on the dev box.
 
 ## Findings: cuML as-is
@@ -121,9 +154,9 @@ Raw JSON lines are in `~/experiments/kmeans/results/` on the dev box.
    - It scores all points against all candidates (about 2k per round, up to 8 rounds). cuVS's
      `batch_centroids` would tile this, but cuML does not expose it.
    - At k=10,000 the tile was 1.31 GB on top of 2.1 GB of fit features, and that OOMed on 6 GB.
+     The memory grows with k × fingerprint bits, so the k=57,000 ChEMBL run measures it on the big GPU.
    - `k-means++` avoids the OOM but is sequential: about 520 of its 590 s.
    - `random` is 8.5x faster with slightly worse cohesion.
-   - On a large GPU the default may just fit. Measure with `chembl10k`.
 4. **No MiniBatchKMeans** in cuML or cuVS. `fit_size` covers the use case.
 5. **Integration.**
    - cuML runs on its own `cudaStreamPerThread`. The wrapper synchronizes the caller's stream first.
@@ -140,5 +173,4 @@ Raw JSON lines are in `~/experiments/kmeans/results/` on the dev box.
   avoids sequential k-means++. Quality vs k-means++ is unmeasured.
 - Optional Tanimoto reassignment pass after cuML. Low gain so far; leave out unless
   Tanimoto-consistent labels are required.
-- Not yet measured: Enamine 10M, multi-GPU (`cuml.dask`), and an FAISS baseline (`niter=20`, random
-  init).
+- Not yet measured: multi-GPU (`cuml.dask`), and a FAISS baseline (`niter=20`, random init).

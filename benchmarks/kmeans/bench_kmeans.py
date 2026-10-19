@@ -21,7 +21,8 @@ For each metric, reports fit/label time, and:
     is from a Tanimoto assignment with the same centers.
   - mean_tanimoto_to_center: mean continuous Tanimoto of each molecule to its assigned center,
     for the cuML labels and for the Tanimoto-reassigned labels ("reassign").
-  - silhouette (Tanimoto distance, sampled rows) and ARI vs labels when --labels is given.
+  - silhouette (Tanimoto distance) of a uniform row sample, each sampled row scored against all N rows,
+    and ARI vs labels when --labels is given.
 
 Input: .npy of uint8 rows packed with numpy.packbits(bitorder="little") (as ~/data/clustering/*),
 or uint32/int32 rows already in nvMolKit's layout.
@@ -37,6 +38,7 @@ import torch
 
 from nvmolkit.clustering import kmeans
 from nvmolkit.fingerprints import unpack_fingerprint
+from nvmolkit.similarity import crossTanimotoSimilarity
 
 
 def load_packed(path, limit, seed):
@@ -82,20 +84,36 @@ def tanimoto_to_assigned(packed, centers, labels, batch_size):
     return torch.cat(out)
 
 
-def tanimoto_silhouette(packed, labels, sample, seed):
-    from sklearn.metrics import silhouette_score
+def tanimoto_silhouettes(packed, label_sets, k, sample, seed, batch_size):
+    """Mean silhouette (Tanimoto distance) of a uniform row sample, scored against all N rows.
 
+    Each sampled row's mean distance to every cluster uses every member, so the estimate stays valid when
+    k is close to or above the sample size. Singletons score 0. One similarity pass serves every label set.
+    """
     rng = np.random.default_rng(seed)
-    rows = torch.from_numpy(rng.choice(packed.shape[0], min(sample, packed.shape[0]), replace=False)).cuda()
-    bits = unpack_fingerprint(packed[rows]).float()
-    inter = bits @ bits.T
-    counts = bits.sum(1)
-    dist = 1 - inter / (counts[:, None] + counts[None, :] - inter).clamp_min(1e-12)
-    dist.fill_diagonal_(0)
-    lab = labels[rows].cpu().numpy()
-    if len(np.unique(lab)) < 2:
-        return float("nan")
-    return float(silhouette_score(dist.cpu().numpy(), lab, metric="precomputed"))
+    rows = torch.from_numpy(np.sort(rng.choice(packed.shape[0], min(sample, packed.shape[0]), replace=False)))
+    rows = rows.to(packed.device)
+    queries = packed[rows]
+    sums = [torch.zeros((rows.numel(), k), dtype=torch.float32, device=packed.device) for _ in label_sets]
+    for start in range(0, packed.shape[0], batch_size):
+        distance = 1 - crossTanimotoSimilarity(queries, packed[start : start + batch_size]).torch().float()
+        for total, labels in zip(sums, label_sets):
+            total.index_add_(1, labels[start : start + batch_size].long(), distance)
+    scores = []
+    for total, labels in zip(sums, label_sets):
+        counts = torch.bincount(labels.long(), minlength=k).float()
+        own = labels[rows].long()
+        index = torch.arange(rows.numel(), device=packed.device)
+        own_count = counts[own]
+        within = total[index, own] / (own_count - 1).clamp_min(1)
+        between = total / counts.clamp_min(1)
+        between[:, counts == 0] = float("inf")
+        between[index, own] = float("inf")
+        nearest = between.min(1).values
+        silhouette = (nearest - within) / torch.maximum(nearest, within).clamp_min(1e-12)
+        silhouette[own_count <= 1] = 0
+        scores.append(float(silhouette.mean()))
+    return scores
 
 
 def main():
@@ -110,7 +128,7 @@ def main():
     parser.add_argument("--max-iter", type=int, default=300)
     parser.add_argument("--batch-size", type=int, default=65536)
     parser.add_argument("--labels", type=Path, help=".npy of int labels row-aligned with the full input")
-    parser.add_argument("--silhouette-sample", type=int, default=10000)
+    parser.add_argument("--silhouette-sample", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path, required=True, help="JSON lines output")
     args = parser.parse_args()
@@ -163,9 +181,10 @@ def main():
                 "tanimoto_agreement": float((best == labels.long()).float().mean()),
                 "mean_tanimoto_to_center": float(assigned_sim.mean()),
                 "mean_tanimoto_to_center_reassign": float(best_sim.mean()),
-                "silhouette_tanimoto": tanimoto_silhouette(packed, labels, args.silhouette_sample, args.seed),
-                "silhouette_tanimoto_reassign": tanimoto_silhouette(packed, best, args.silhouette_sample, args.seed),
             }
+            record["silhouette_tanimoto"], record["silhouette_tanimoto_reassign"] = tanimoto_silhouettes(
+                packed, (labels, best), k, args.silhouette_sample, args.seed, args.batch_size
+            )
             if truth is not None:
                 from sklearn.metrics import adjusted_rand_score
 
