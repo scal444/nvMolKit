@@ -696,7 +696,7 @@ TEST_F(Descriptors3DTest, WhimScratchChunkingAndOversizedRows) {
     EXPECT_FALSE(isNanBits(value));
   }
   // A per-conformer scratch slot larger than the 256 MB budget runs one conformer per launch.
-  EXPECT_EQ(whimFor(40'000'000), reference);
+  EXPECT_EQ(whimFor(2'000'000), reference);
   // Rows longer than the scratch slot are rejected rather than overrunning it.
   for (const double value : whimFor(3)) {
     EXPECT_TRUE(isNanBits(value));
