@@ -613,6 +613,246 @@ __global__ void projection3DKernel(const DeviceCoordView        coordinates,
   }
 }
 
+//! Stores @p value narrowed to the output precision @p Real.
+template <typename Real> __device__ __forceinline__ void storeOutput(Real* destination, const double value) {
+  *destination = static_cast<Real>(value);
+}
+
+/**
+ * @brief In-bounds coordinate range of a conformer, as loadConformer() resolves it before checking the
+ *        molecule's atom count: null positions and zero atoms when the conformer index, molecule index or
+ *        atom range is out of bounds. Reading it first lets the coordinates load alongside that check.
+ */
+struct ConformerRange {
+  const double* positions   = nullptr;
+  int           moleculeIdx = 0;
+  int           numAtoms    = 0;
+};
+
+__device__ __forceinline__ ConformerRange loadConformerRange(const DeviceCoordView& coordinates,
+                                                             const int              conformerIdx) {
+  ConformerRange range;
+  if (conformerIdx >= coordinates.numConformers) {
+    return range;
+  }
+  const int     moleculeIdx = coordinates.molIndices[conformerIdx];
+  const int64_t atomStart   = coordinates.atomStarts[conformerIdx];
+  const int64_t atomStop    = coordinates.atomStarts[conformerIdx + 1];
+  if (moleculeIdx < 0 || moleculeIdx >= coordinates.nMols || atomStart < 0 || atomStop <= atomStart ||
+      atomStop > coordinates.numAtoms) {
+    return range;
+  }
+  range.positions   = coordinates.positions + static_cast<size_t>(atomStart) * 3;
+  range.moleculeIdx = moleculeIdx;
+  range.numAtoms    = static_cast<int>(atomStop - atomStart);
+  return range;
+}
+
+//! Threads the PBF kernel keeps resident per SM (its __launch_bounds__), which caps it at 128 registers.
+constexpr int                     kPbfResidentThreads = 512;
+//! Threads per block of the PBF kernel for @p lanes lanes per conformer: blocks of four warp-wide groups spread a
+//! small batch over the SMs, and narrower groups pack 16 or 32 conformers per block.
+__host__ __device__ constexpr int pbfThreads(const int lanes) {
+  return lanes >= 32 ? 128 : 256;
+}
+//! Atoms per lane the PBF kernel loads into registers at once (lane, lane + kLanes, ...), so that molecules of up
+//! to 128 atoms load in one pass; further atoms are read one at a time.
+__host__ __device__ constexpr int pbfSlots(const int lanes) {
+  return lanes >= 16 ? 128 / lanes : 15;
+}
+
+/**
+ * @brief PBF alone, one aligned group of @p kLanes lanes per conformer: the mean absolute distance of the
+ *        atoms from the plane of best fit of an unweighted PCA in @p Real, centered in float64 (see
+ *        computePbf()).
+ *
+ * Each group sums its conformer's covariance into shared memory, a lane of the block's first warp diagonalizes
+ * each group's covariance (one eigensolve per conformer rather than one per lane, so the block's eigensolves
+ * cost one warp's instructions), and the group sums its distances from the smallest principal axis.
+ */
+template <typename Real, int kLanes>
+__global__ void __launch_bounds__(pbfThreads(kLanes), kPbfResidentThreads / pbfThreads(kLanes))
+  pbfKernel(const DeviceCoordView coordinates, const Property3DDeviceInputs inputs, Real* __restrict__ pbfOutput) {
+  constexpr int kThreads  = pbfThreads(kLanes);
+  constexpr int kGroups   = kThreads / kLanes;
+  constexpr int kPbfSlots = pbfSlots(kLanes);
+  static_assert(kGroups <= kWarpSize, "a lane of the first warp per group");
+  //! Per group: the covariance (xx, xy, xz, yy, yz, zz), then the smallest principal axis over its first three.
+  __shared__ Real sharedPca[6][kGroups];
+  const int       lane         = static_cast<int>(threadIdx.x) % kLanes;
+  const int       group        = static_cast<int>(threadIdx.x) / kLanes;
+  const int       conformerIdx = static_cast<int>(blockIdx.x) * kGroups + group;
+  const bool      inRange      = conformerIdx < coordinates.numConformers;
+
+  // The coordinate range, then the molecule's atom range alongside the coordinates (see loadConformer()).
+  const ConformerRange range = loadConformerRange(coordinates, conformerIdx);
+  const bool           is3D  = !inRange || inputs.conformerIs3D == nullptr || inputs.conformerIs3D[conformerIdx] != 0;
+  const int            numAtoms      = range.numAtoms;
+  int                  moleculeAtoms = -1;
+  if (range.positions != nullptr) {
+    moleculeAtoms = inputs.moleculeAtomStarts[range.moleculeIdx + 1] - inputs.moleculeAtomStarts[range.moleculeIdx];
+  }
+  double positionX[kPbfSlots];
+  double positionY[kPbfSlots];
+  double positionZ[kPbfSlots];
+#pragma unroll
+  for (int slot = 0; slot < kPbfSlots; ++slot) {
+    const int atomIdx = lane + slot * kLanes;
+    positionX[slot]   = atomIdx < numAtoms ? range.positions[atomIdx * 3 + 0] : 0.0;
+    positionY[slot]   = atomIdx < numAtoms ? range.positions[atomIdx * 3 + 1] : 0.0;
+    positionZ[slot]   = atomIdx < numAtoms ? range.positions[atomIdx * 3 + 2] : 0.0;
+  }
+  // Conformers producing NaN or 0 skip the PCA (their group solves a zero matrix) but stay for the block barriers.
+  const bool valid  = range.positions != nullptr && moleculeAtoms == numAtoms;
+  const bool active = valid && numAtoms >= 4 && is3D;
+  if (!active && inRange && lane == 0) {
+    storeOutput<Real>(pbfOutput + conformerIdx, valid ? 0.0 : nan(""));
+  }
+
+  // The centered coordinates stay in registers while they fit (48 registers); beyond that they are reread (from
+  // cache, in one pass for the register slots' atoms) and centered again, to the same values.
+  constexpr bool kKeepCentered = kPbfSlots * 3 * sizeof(Real) <= 48 * sizeof(float);
+  Real           x[kKeepCentered ? kPbfSlots : 1];
+  Real           y[kKeepCentered ? kPbfSlots : 1];
+  Real           z[kKeepCentered ? kPbfSlots : 1];
+  double         centroidX = 0;
+  double         centroidY = 0;
+  double         centroidZ = 0;
+  if (active) {
+#pragma unroll
+    for (int slot = 0; slot < kPbfSlots; ++slot) {
+      centroidX += positionX[slot];
+      centroidY += positionY[slot];
+      centroidZ += positionZ[slot];
+    }
+    for (int atomIdx = lane + kPbfSlots * kLanes; atomIdx < numAtoms; atomIdx += kLanes) {
+      centroidX += range.positions[atomIdx * 3 + 0];
+      centroidY += range.positions[atomIdx * 3 + 1];
+      centroidZ += range.positions[atomIdx * 3 + 2];
+    }
+    const double inverseAtoms = 1.0 / static_cast<double>(numAtoms);
+    centroidX                 = groupAllReduceSum<kLanes>(centroidX) * inverseAtoms;
+    centroidY                 = groupAllReduceSum<kLanes>(centroidY) * inverseAtoms;
+    centroidZ                 = groupAllReduceSum<kLanes>(centroidZ) * inverseAtoms;
+    Real xx                   = 0;
+    Real xy                   = 0;
+    Real xz                   = 0;
+    Real yy                   = 0;
+    Real yz                   = 0;
+    Real zz                   = 0;
+#pragma unroll
+    for (int slot = 0; slot < kPbfSlots; ++slot) {
+      // Atoms past the end center to garbage that is masked out of every sum.
+      const bool present = lane + slot * kLanes < numAtoms;
+      const Real cx      = present ? static_cast<Real>(positionX[slot] - centroidX) : Real(0);
+      const Real cy      = present ? static_cast<Real>(positionY[slot] - centroidY) : Real(0);
+      const Real cz      = present ? static_cast<Real>(positionZ[slot] - centroidZ) : Real(0);
+      if constexpr (kKeepCentered) {
+        x[slot] = cx;
+        y[slot] = cy;
+        z[slot] = cz;
+      }
+      xx += cx * cx;
+      xy += cx * cy;
+      xz += cx * cz;
+      yy += cy * cy;
+      yz += cy * cz;
+      zz += cz * cz;
+    }
+    for (int atomIdx = lane + kPbfSlots * kLanes; atomIdx < numAtoms; atomIdx += kLanes) {
+      Real tailX;
+      Real tailY;
+      Real tailZ;
+      centeredPosition(range.positions, atomIdx, centroidX, centroidY, centroidZ, tailX, tailY, tailZ);
+      xx += tailX * tailX;
+      xy += tailX * tailY;
+      xz += tailX * tailZ;
+      yy += tailY * tailY;
+      yz += tailY * tailZ;
+      zz += tailZ * tailZ;
+    }
+    const Real inverseWeight = Real(1) / static_cast<Real>(numAtoms);
+    xx                       = groupAllReduceSum<kLanes>(xx) * inverseWeight;
+    xy                       = groupAllReduceSum<kLanes>(xy) * inverseWeight;
+    xz                       = groupAllReduceSum<kLanes>(xz) * inverseWeight;
+    yy                       = groupAllReduceSum<kLanes>(yy) * inverseWeight;
+    yz                       = groupAllReduceSum<kLanes>(yz) * inverseWeight;
+    zz                       = groupAllReduceSum<kLanes>(zz) * inverseWeight;
+    if (lane == 0) {
+      sharedPca[0][group] = xx;
+      sharedPca[1][group] = xy;
+      sharedPca[2][group] = xz;
+      sharedPca[3][group] = yy;
+      sharedPca[4][group] = yz;
+      sharedPca[5][group] = zz;
+    }
+  } else if (lane == 0) {
+    for (int i = 0; i < 6; ++i) {
+      sharedPca[i][group] = Real(0);
+    }
+  }
+  __syncthreads();
+  if (threadIdx.x < kGroups) {
+    const int             solved        = static_cast<int>(threadIdx.x);
+    const Real            covariance[6] = {sharedPca[0][solved],
+                                           sharedPca[1][solved],
+                                           sharedPca[2][solved],
+                                           sharedPca[3][solved],
+                                           sharedPca[4][solved],
+                                           sharedPca[5][solved]};
+    ProjectionState<Real> state;
+    diagonalizeProjection(covariance, state);
+    sharedPca[0][solved] = state.eigenvectors[2];
+    sharedPca[1][solved] = state.eigenvectors[5];
+    sharedPca[2][solved] = state.eigenvectors[8];
+  }
+  __syncthreads();
+  if (!active) {
+    return;  // Uniform across the group.
+  }
+  const Real axisX       = sharedPca[0][group];
+  const Real axisY       = sharedPca[1][group];
+  const Real axisZ       = sharedPca[2][group];
+  Real       distanceSum = 0;
+#pragma unroll
+  for (int slot = 0; slot < kPbfSlots; ++slot) {
+    const int atomIdx = lane + slot * kLanes;
+    if constexpr (kKeepCentered) {
+      const Real distance = fabs(x[slot] * axisX + y[slot] * axisY + z[slot] * axisZ);
+      distanceSum += atomIdx < numAtoms ? distance : Real(0);
+    } else if (atomIdx < numAtoms) {
+      Real cx;
+      Real cy;
+      Real cz;
+      centeredPosition(range.positions, atomIdx, centroidX, centroidY, centroidZ, cx, cy, cz);
+      distanceSum += fabs(cx * axisX + cy * axisY + cz * axisZ);
+    }
+  }
+  for (int atomIdx = lane + kPbfSlots * kLanes; atomIdx < numAtoms; atomIdx += kLanes) {
+    Real tailX;
+    Real tailY;
+    Real tailZ;
+    centeredPosition(range.positions, atomIdx, centroidX, centroidY, centroidZ, tailX, tailY, tailZ);
+    distanceSum += fabs(tailX * axisX + tailY * axisY + tailZ * axisZ);
+  }
+  const Real pbf = groupAllReduceSum<kLanes>(distanceSum) / static_cast<Real>(numAtoms);
+  if (lane == 0) {
+    storeOutput<Real>(pbfOutput + conformerIdx, pbf);
+  }
+}
+
+template <typename Real, int kLanes>
+void launchPbf(const DeviceCoordView&        coordinates,
+               const Property3DDeviceInputs& inputs,
+               Real*                         pbfOutput,
+               const cudaStream_t            stream) {
+  constexpr int kThreads  = pbfThreads(kLanes);
+  constexpr int kGroups   = kThreads / kLanes;
+  const int     numBlocks = (coordinates.numConformers + kGroups - 1) / kGroups;
+  pbfKernel<Real, kLanes><<<numBlocks, kThreads, 0, stream>>>(coordinates, inputs, pbfOutput);
+  cudaCheckError(cudaGetLastError());
+}
+
 //! Upper bound on the WHIM symmetry-search scratch; larger batches run in conformer chunks.
 constexpr size_t kWhimScratchBudgetBytes = size_t{256} << 20;
 
@@ -632,17 +872,20 @@ void launchProjectionProperties(const DeviceCoordView&        coordinates,
     return;
   }
   if (whimOutput == nullptr) {
-    const int numBlocks = (numConformers + kConformersPerBlock - 1) / kConformersPerBlock;
-    projection3DKernel<Real, false><<<numBlocks, kBlockSize, 0, stream>>>(coordinates,
-                                                                          inputs,
-                                                                          0,
-                                                                          numConformers,
-                                                                          pbfOutput,
-                                                                          nullptr,
-                                                                          nullptr,
-                                                                          0,
-                                                                          WhimThreshold::make(whim.threshold));
-    cudaCheckError(cudaGetLastError());
+    // A warp per conformer while that fills the SMs' resident threads; larger batches pack two or four
+    // conformers per warp so they still run in one wave.
+    int device = 0;
+    int numSMs = 1;
+    cudaCheckError(cudaGetDevice(&device));
+    cudaCheckError(cudaDeviceGetAttribute(&numSMs, cudaDevAttrMultiProcessorCount, device));
+    const int64_t residentThreads = static_cast<int64_t>(numSMs) * kPbfResidentThreads;
+    if (static_cast<int64_t>(numConformers) * kWarpSize <= residentThreads) {
+      launchPbf<Real, kWarpSize>(coordinates, inputs, pbfOutput, stream);
+    } else if (static_cast<int64_t>(numConformers) * (kWarpSize / 2) <= residentThreads) {
+      launchPbf<Real, kWarpSize / 2>(coordinates, inputs, pbfOutput, stream);
+    } else {
+      launchPbf<Real, kWarpSize / 4>(coordinates, inputs, pbfOutput, stream);
+    }
     return;
   }
 
