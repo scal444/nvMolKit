@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <utility>
 
 #include "src/descriptors3d.h"
 #include "src/descriptors3d_kernel.cuh"
@@ -523,6 +524,59 @@ __device__ __forceinline__ void multiplyByInfluenceMatrix(const Real* rows,
   __syncwarp();
 }
 
+// ---- Overlapping the size-routed launches ---------------------------------------------------------------------
+//
+// The fast-path kernels write disjoint output rows and only read what the prepass produced, so on devices that
+// support programmatic dependent launch (compute capability 9.0+) each may start while its predecessor runs. Each
+// kernel allows its dependent to launch as soon as it starts. The large-CTA launch (right behind the prepass) and
+// the warp launch wait for their prerequisite grids before reading the prepass's work lists; the small-CTA launch
+// follows them, so it starts only after every block ahead of it has passed such a wait (or, without a large-CTA
+// launch, after the prepass has completed). Kernels that do not wait up front have their first
+// block wait before exiting, so a kernel never completes before the ones launched ahead of it while its other
+// blocks free their slots as soon as they are done. Older devices serialize the launches as usual and the
+// instructions below compile away.
+
+__device__ __forceinline__ void getawayAllowDependentLaunch() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
+}
+
+//! Waits for the grids this launch depends on. One CTA per kernel calls it before exiting, so the kernel completes
+//! only after its predecessors while every other CTA exits (and frees its slot) as soon as its work is done.
+__device__ __forceinline__ void getawayWaitPrerequisites() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+#endif
+}
+
+/**
+ * @brief Launches @p kernel on @p stream; with @p overlapPrevious (only set on devices of compute capability 9.0+)
+ *        the launch may begin before the previous kernel in the stream completes.
+ */
+template <typename... Params, typename... Args>
+void getawayLaunch(void (*kernel)(Params...),
+                   const int          blocks,
+                   const int          threads,
+                   const size_t       sharedBytes,
+                   const cudaStream_t stream,
+                   const bool         overlapPrevious,
+                   Args&&... args) {
+  cudaLaunchConfig_t config = {};
+  config.gridDim            = dim3(static_cast<unsigned>(blocks));
+  config.blockDim           = dim3(static_cast<unsigned>(threads));
+  config.dynamicSmemBytes   = sharedBytes;
+  config.stream             = stream;
+  cudaLaunchAttribute attribute[1];
+  if (overlapPrevious) {
+    attribute[0].id                                         = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attribute[0].val.programmaticStreamSerializationAllowed = 1;
+    config.attrs                                            = attribute;
+    config.numAttrs                                         = 1;
+  }
+  cudaCheckError(cudaLaunchKernelEx(&config, kernel, std::forward<Args>(args)...));
+}
+
 // ---- Fast path: one CTA per conformer ------------------------------------------------------------------------
 //
 // The CTA keeps the conformer's atom rows (structure of arrays) and R = sqrt(h_j h_k) / r_jk in shared memory.
@@ -728,10 +782,11 @@ __global__ void __launch_bounds__(kGetawayPrepassBlock)
   __shared__ int     counts[kNumGetawayLags][kGetawayListThreads];
   __shared__ int     lagOffsets[kNumGetawayLags + 1];
   __shared__ uint8_t stagedLags[kGetawayPrepassStaged];
-  const int          moleculeIdx = blockIdx.x;
-  const int          tid         = static_cast<int>(threadIdx.x);
-  const int          lane        = tid % kWarpSize;
-  const int          warp        = tid / kWarpSize;
+  getawayAllowDependentLaunch();
+  const int moleculeIdx = blockIdx.x;
+  const int tid         = static_cast<int>(threadIdx.x);
+  const int lane        = tid % kWarpSize;
+  const int warp        = tid / kWarpSize;
   if (moleculeIdx >= coordinates.nMols) {
     // Routing blocks: one conformer per thread, appended to its bucket's list (warp-aggregated).
     const int      conformerIdx = (moleculeIdx - coordinates.nMols) * kGetawayPrepassBlock + tid;
@@ -1488,10 +1543,17 @@ __global__ void __launch_bounds__(kThreads, getawayFastMinBlocks<kThreads>())
                     const BondDistanceTable      bondTable,
                     const GetawayWorkLists       lists,
                     const int                    bucket,
+                    const bool                   behindPrepass,
                     const uint32_t* __restrict__ lagPairs,
                     const int32_t* __restrict__ lagStarts,
                     const double* __restrict__ dimensions,
                     Real* __restrict__ output) {
+  if (behindPrepass) {
+    // Launched right behind the prepass (overlapping it where supported): its work lists must be complete before
+    // they are read here or by the later fast-path launches, which may start once every CTA here has.
+    getawayWaitPrerequisites();
+  }
+  getawayAllowDependentLaunch();
   int sizeClass = 0;
   int skipped   = 0;  // entries of the classes before sizeClass
   for (int next = static_cast<int>(blockIdx.x); sizeClass < kGetawaySizeClasses;) {
@@ -1515,6 +1577,9 @@ __global__ void __launch_bounds__(kThreads, getawayFastMinBlocks<kThreads>())
                                          dimensions,
                                          output);
     next += static_cast<int>(gridDim.x);
+  }
+  if (blockIdx.x == 0) {
+    getawayWaitPrerequisites();
   }
 }
 
@@ -1956,9 +2021,13 @@ __global__ void __launch_bounds__(kGetawayWarpCtaWarps* kWarpSize)
                     const double* __restrict__ dimensions,
                     Real* __restrict__ output) {
   __shared__ GetawayWarpShared<Real> sharedWarps[kGetawayWarpCtaWarps];
-  const int                          count = lists.counts[kGetawayWarpBucket];
-  const int*               entries         = lists.conformers + static_cast<size_t>(kGetawayWarpBucket) * lists.stride;
-  GetawayWarpShared<Real>& shared          = sharedWarps[threadIdx.x / kWarpSize];
+  getawayAllowDependentLaunch();
+  // The work lists come from the prepass; waiting here keeps them complete when this launch overlaps its
+  // predecessor, whichever kernel that is.
+  getawayWaitPrerequisites();
+  const int                count   = lists.counts[kGetawayWarpBucket];
+  const int*               entries = lists.conformers + static_cast<size_t>(kGetawayWarpBucket) * lists.stride;
+  GetawayWarpShared<Real>& shared  = sharedWarps[threadIdx.x / kWarpSize];
   for (int position = static_cast<int>(blockIdx.x * kGetawayWarpCtaWarps + threadIdx.x / kWarpSize); position < count;
        position += static_cast<int>(gridDim.x) * kGetawayWarpCtaWarps) {
     getawayWarpConformer<Real>(entries[position],
@@ -2346,16 +2415,22 @@ void launchGetawayProperties(const DeviceCoordView&        coordinates,
                                                                                            lagStarts,
                                                                                            dimensions);
     cudaCheckError(cudaGetLastError());
-    // Largest molecules first, with only as many CTAs as can be resident at once, so every CTA starts immediately:
-    // the warp path next, then the small-CTA path. Those two run one CTA (warp) per listed conformer, the listed
-    // ones first, so CTAs past the list end exit at once.
+    // Largest molecules first, with only as many CTAs as can be resident at once, so every CTA starts immediately
+    // and the later launches overlap it on devices that support it (see getawayLaunch()): the warp path next,
+    // whose CTAs fit beside the large ones, then the small-CTA path. Those two run one CTA (warp) per listed
+    // conformer, the listed ones first, so CTAs past the list end exit at once.
     int device = 0;
     cudaCheckError(cudaGetDevice(&device));
+    int major = 0;
+    cudaCheckError(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device));
     int multiprocessors = 0;
     cudaCheckError(cudaDeviceGetAttribute(&multiprocessors, cudaDevAttrMultiProcessorCount, device));
-    const int precision = static_cast<int>(options.precision);
+    const bool canOverlap = major >= 9;
+    bool       overlap    = false;
+    const int  precision  = static_cast<int>(options.precision);
     if (largeCapacity > smallCapacity) {
-      // As many CTAs as can be resident, each walking the class lists with a static stride.
+      // As many CTAs as can be resident, each walking the class lists with a static stride; they wait for the
+      // prepass themselves (see getawayFastKernel()), so they may launch behind it.
       const auto   kernel      = getawayFastKernel<Real, kGetawayFastBlockSize>;
       const size_t sharedBytes = getawayFastLayout<Real>(largeCapacity, kGetawayFastBlockSize / kWarpSize).total;
       cudaCheckError(
@@ -2369,32 +2444,44 @@ void launchGetawayProperties(const DeviceCoordView&        coordinates,
       const int64_t resident = static_cast<int64_t>(perMultiprocessor > 0 ? perMultiprocessor : 1) *
                                (multiprocessors > 0 ? multiprocessors : 1);
       const int blocks = static_cast<int>(resident < numConformers ? resident : numConformers);
-      kernel<<<blocks, kGetawayFastBlockSize, sharedBytes, stream>>>(coordinates,
-                                                                     inputs,
-                                                                     precision,
-                                                                     largeCapacity,
-                                                                     bondTable,
-                                                                     lists,
-                                                                     kGetawayLargeBucket,
-                                                                     static_cast<const uint32_t*>(lagPairs),
-                                                                     static_cast<const int32_t*>(lagStarts),
-                                                                     static_cast<const double*>(dimensions),
-                                                                     output);
-      cudaCheckError(cudaGetLastError());
+      getawayLaunch(kernel,
+                    blocks,
+                    kGetawayFastBlockSize,
+                    sharedBytes,
+                    stream,
+                    canOverlap,
+                    coordinates,
+                    inputs,
+                    precision,
+                    largeCapacity,
+                    bondTable,
+                    lists,
+                    kGetawayLargeBucket,
+                    canOverlap,
+                    static_cast<const uint32_t*>(lagPairs),
+                    static_cast<const int32_t*>(lagStarts),
+                    static_cast<const double*>(dimensions),
+                    output);
+      overlap = canOverlap;
     }
     if (warpPath) {
       const int warpBlocks = (numConformers + kGetawayWarpCtaWarps - 1) / kGetawayWarpCtaWarps;
-      getawayWarpKernel<Real>
-        <<<warpBlocks, kGetawayWarpCtaWarps * kWarpSize, 0, stream>>>(coordinates,
-                                                                      inputs,
-                                                                      precision,
-                                                                      bondTable,
-                                                                      lists,
-                                                                      static_cast<const uint32_t*>(lagPairs),
-                                                                      static_cast<const int32_t*>(lagStarts),
-                                                                      static_cast<const double*>(dimensions),
-                                                                      output);
-      cudaCheckError(cudaGetLastError());
+      getawayLaunch(getawayWarpKernel<Real>,
+                    warpBlocks,
+                    kGetawayWarpCtaWarps * kWarpSize,
+                    0,
+                    stream,
+                    overlap,
+                    coordinates,
+                    inputs,
+                    precision,
+                    bondTable,
+                    lists,
+                    static_cast<const uint32_t*>(lagPairs),
+                    static_cast<const int32_t*>(lagStarts),
+                    static_cast<const double*>(dimensions),
+                    output);
+      overlap = canOverlap;
     }
     if (smallCapacity > kGetawayWarpMaxAtoms) {
       const auto   kernel      = getawayFastKernel<Real, kGetawaySmallBlockSize>;
@@ -2404,18 +2491,24 @@ void launchGetawayProperties(const DeviceCoordView&        coordinates,
       cudaCheckError(cudaFuncSetAttribute(kernel,
                                           cudaFuncAttributePreferredSharedMemoryCarveout,
                                           static_cast<int>(cudaSharedmemCarveoutMaxShared)));
-      kernel<<<numConformers, kGetawaySmallBlockSize, sharedBytes, stream>>>(coordinates,
-                                                                             inputs,
-                                                                             precision,
-                                                                             smallCapacity,
-                                                                             bondTable,
-                                                                             lists,
-                                                                             kGetawaySmallBucket,
-                                                                             static_cast<const uint32_t*>(lagPairs),
-                                                                             static_cast<const int32_t*>(lagStarts),
-                                                                             static_cast<const double*>(dimensions),
-                                                                             output);
-      cudaCheckError(cudaGetLastError());
+      getawayLaunch(kernel,
+                    numConformers,
+                    kGetawaySmallBlockSize,
+                    sharedBytes,
+                    stream,
+                    overlap,
+                    coordinates,
+                    inputs,
+                    precision,
+                    smallCapacity,
+                    bondTable,
+                    lists,
+                    kGetawaySmallBucket,
+                    false,
+                    static_cast<const uint32_t*>(lagPairs),
+                    static_cast<const int32_t*>(lagStarts),
+                    static_cast<const double*>(dimensions),
+                    output);
     }
   }
   if (fastCoversAll) {
