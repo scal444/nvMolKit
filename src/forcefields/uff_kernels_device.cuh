@@ -21,6 +21,23 @@ namespace detail {
 constexpr real kUffAngleCorrectionThreshold = real{0.8660};
 constexpr real kUffZeroTol                  = real{1.0e-16};
 
+//! One molecule's gradient slice: component c of atom i lives at base[c * planeStride + i * atomStride]. The planar
+//! layout (planeStride = numAtoms, atomStride = 1) is used while terms accumulate, so a warp's reductions on
+//! neighbouring atoms share memory sectors; (1, 3) is the interleaved output layout.
+struct GradSlice {
+  real* base;
+  int   planeStride;
+  int   atomStride;
+};
+
+__device__ __forceinline__ void gradAdd(const GradSlice& g, const int atom, const int c, const real v) {
+  atomicAdd(&g.base[c * g.planeStride + atom * g.atomStride], v);
+}
+
+__device__ __forceinline__ void gradAdd(real* const& g, const int atom, const int c, const real v) {
+  atomicAdd(&g[3 * atom + c], v);
+}
+
 __device__ __forceinline__ real squareValue(const real x) {
   return x * x;
 }
@@ -41,7 +58,7 @@ __device__ __forceinline__ void uffBondStretchGrad(const auto* pos,
                                                    const int   idx2,
                                                    const real  restLen,
                                                    const real  forceConstant,
-                                                   auto*       grad) {
+                                                   const auto& grad) {
   real       dx, dy, dz;
   const real distSq = distanceSquaredWithComponents(pos, idx1, idx2, dx, dy, dz);
   const real dist   = NVMOLKIT_SQRT(distSq);
@@ -57,12 +74,12 @@ __device__ __forceinline__ void uffBondStretchGrad(const auto* pos,
     gz                 = pref * dz * invDist;
   }
 
-  atomicAdd(&grad[3 * idx1 + 0], gx);
-  atomicAdd(&grad[3 * idx1 + 1], gy);
-  atomicAdd(&grad[3 * idx1 + 2], gz);
-  atomicAdd(&grad[3 * idx2 + 0], -gx);
-  atomicAdd(&grad[3 * idx2 + 1], -gy);
-  atomicAdd(&grad[3 * idx2 + 2], -gz);
+  gradAdd(grad, idx1, 0, gx);
+  gradAdd(grad, idx1, 1, gy);
+  gradAdd(grad, idx1, 2, gz);
+  gradAdd(grad, idx2, 0, -gx);
+  gradAdd(grad, idx2, 1, -gy);
+  gradAdd(grad, idx2, 2, -gz);
 }
 
 __device__ __forceinline__ real uffAngleEnergyTerm(const real    cosTheta,
@@ -171,7 +188,7 @@ __device__ __forceinline__ void uffAngleBendGrad(const auto*   pos,
                                                  const real    C0,
                                                  const real    C1,
                                                  const real    C2,
-                                                 auto*         grad) {
+                                                 const auto&   grad) {
   real       dx1, dy1, dz1, dx2, dy2, dz2;
   const real dist1Sq = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
   const real dist2Sq = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
@@ -212,17 +229,17 @@ __device__ __forceinline__ void uffAngleBendGrad(const auto*   pos,
   const real i5 = invDist2 * (ndy1 - cosTheta * ndy2);
   const real i6 = invDist2 * (ndz1 - cosTheta * ndz2);
 
-  atomicAdd(&grad[3 * idx1 + 0], common * i1);
-  atomicAdd(&grad[3 * idx1 + 1], common * i2);
-  atomicAdd(&grad[3 * idx1 + 2], common * i3);
+  gradAdd(grad, idx1, 0, common * i1);
+  gradAdd(grad, idx1, 1, common * i2);
+  gradAdd(grad, idx1, 2, common * i3);
 
-  atomicAdd(&grad[3 * idx2 + 0], common * (-i1 - i4));
-  atomicAdd(&grad[3 * idx2 + 1], common * (-i2 - i5));
-  atomicAdd(&grad[3 * idx2 + 2], common * (-i3 - i6));
+  gradAdd(grad, idx2, 0, common * (-i1 - i4));
+  gradAdd(grad, idx2, 1, common * (-i2 - i5));
+  gradAdd(grad, idx2, 2, common * (-i3 - i6));
 
-  atomicAdd(&grad[3 * idx3 + 0], common * i4);
-  atomicAdd(&grad[3 * idx3 + 1], common * i5);
-  atomicAdd(&grad[3 * idx3 + 2], common * i6);
+  gradAdd(grad, idx3, 0, common * i4);
+  gradAdd(grad, idx3, 1, common * i5);
+  gradAdd(grad, idx3, 2, common * i6);
 }
 
 __device__ __forceinline__ real
@@ -311,7 +328,7 @@ __device__ __forceinline__ void uffTorsionGrad(const auto*   pos,
                                                const real    forceConstant,
                                                const uint8_t order,
                                                const real    cosTerm,
-                                               auto*         grad) {
+                                               const auto&   grad) {
   const real r0x = pos[3 * idx1 + 0] - pos[3 * idx2 + 0];
   const real r0y = pos[3 * idx1 + 1] - pos[3 * idx2 + 1];
   const real r0z = pos[3 * idx1 + 2] - pos[3 * idx2 + 2];
@@ -356,27 +373,39 @@ __device__ __forceinline__ void uffTorsionGrad(const auto*   pos,
   const real dCos_dT4 = (t0y - cosPhi * t1y) / d1;
   const real dCos_dT5 = (t0z - cosPhi * t1z) / d1;
 
-  atomicAdd(&grad[3 * idx1 + 0], sinTerm * (dCos_dT2 * r1y - dCos_dT1 * r1z));
-  atomicAdd(&grad[3 * idx1 + 1], sinTerm * (dCos_dT0 * r1z - dCos_dT2 * r1x));
-  atomicAdd(&grad[3 * idx1 + 2], sinTerm * (dCos_dT1 * r1x - dCos_dT0 * r1y));
+  gradAdd(grad, idx1, 0, sinTerm * (dCos_dT2 * r1y - dCos_dT1 * r1z));
+  gradAdd(grad, idx1, 1, sinTerm * (dCos_dT0 * r1z - dCos_dT2 * r1x));
+  gradAdd(grad, idx1, 2, sinTerm * (dCos_dT1 * r1x - dCos_dT0 * r1y));
 
-  atomicAdd(&grad[3 * idx2 + 0],
-            sinTerm * (dCos_dT1 * (r1z - r0z) + dCos_dT2 * (r0y - r1y) + dCos_dT4 * (-r3z) + dCos_dT5 * (r3y)));
-  atomicAdd(&grad[3 * idx2 + 1],
-            sinTerm * (dCos_dT0 * (r0z - r1z) + dCos_dT2 * (r1x - r0x) + dCos_dT3 * (r3z) + dCos_dT5 * (-r3x)));
-  atomicAdd(&grad[3 * idx2 + 2],
-            sinTerm * (dCos_dT0 * (r1y - r0y) + dCos_dT1 * (r0x - r1x) + dCos_dT3 * (-r3y) + dCos_dT4 * (r3x)));
+  gradAdd(grad,
+          idx2,
+          0,
+          sinTerm * (dCos_dT1 * (r1z - r0z) + dCos_dT2 * (r0y - r1y) + dCos_dT4 * (-r3z) + dCos_dT5 * (r3y)));
+  gradAdd(grad,
+          idx2,
+          1,
+          sinTerm * (dCos_dT0 * (r0z - r1z) + dCos_dT2 * (r1x - r0x) + dCos_dT3 * (r3z) + dCos_dT5 * (-r3x)));
+  gradAdd(grad,
+          idx2,
+          2,
+          sinTerm * (dCos_dT0 * (r1y - r0y) + dCos_dT1 * (r0x - r1x) + dCos_dT3 * (-r3y) + dCos_dT4 * (r3x)));
 
-  atomicAdd(&grad[3 * idx3 + 0],
-            sinTerm * (dCos_dT1 * r0z + dCos_dT2 * (-r0y) + dCos_dT4 * (r3z - r2z) + dCos_dT5 * (r2y - r3y)));
-  atomicAdd(&grad[3 * idx3 + 1],
-            sinTerm * (dCos_dT0 * (-r0z) + dCos_dT2 * r0x + dCos_dT3 * (r2z - r3z) + dCos_dT5 * (r3x - r2x)));
-  atomicAdd(&grad[3 * idx3 + 2],
-            sinTerm * (dCos_dT0 * r0y + dCos_dT1 * (-r0x) + dCos_dT3 * (r3y - r2y) + dCos_dT4 * (r2x - r3x)));
+  gradAdd(grad,
+          idx3,
+          0,
+          sinTerm * (dCos_dT1 * r0z + dCos_dT2 * (-r0y) + dCos_dT4 * (r3z - r2z) + dCos_dT5 * (r2y - r3y)));
+  gradAdd(grad,
+          idx3,
+          1,
+          sinTerm * (dCos_dT0 * (-r0z) + dCos_dT2 * r0x + dCos_dT3 * (r2z - r3z) + dCos_dT5 * (r3x - r2x)));
+  gradAdd(grad,
+          idx3,
+          2,
+          sinTerm * (dCos_dT0 * r0y + dCos_dT1 * (-r0x) + dCos_dT3 * (r3y - r2y) + dCos_dT4 * (r2x - r3x)));
 
-  atomicAdd(&grad[3 * idx4 + 0], sinTerm * (dCos_dT4 * r2z - dCos_dT5 * r2y));
-  atomicAdd(&grad[3 * idx4 + 1], sinTerm * (dCos_dT5 * r2x - dCos_dT3 * r2z));
-  atomicAdd(&grad[3 * idx4 + 2], sinTerm * (dCos_dT3 * r2y - dCos_dT4 * r2x));
+  gradAdd(grad, idx4, 0, sinTerm * (dCos_dT4 * r2z - dCos_dT5 * r2y));
+  gradAdd(grad, idx4, 1, sinTerm * (dCos_dT5 * r2x - dCos_dT3 * r2z));
+  gradAdd(grad, idx4, 2, sinTerm * (dCos_dT3 * r2y - dCos_dT4 * r2x));
 }
 
 __device__ __forceinline__ real
@@ -435,7 +464,7 @@ __device__ __forceinline__ void uffInversionGrad(const auto* pos,
                                                  const real  forceConstant,
                                                  const real  C1,
                                                  const real  C2,
-                                                 auto*       grad) {
+                                                 const auto& grad) {
   real rJIx = pos[3 * idx1 + 0] - pos[3 * idx2 + 0];
   real rJIy = pos[3 * idx1 + 1] - pos[3 * idx2 + 1];
   real rJIz = pos[3 * idx1 + 2] - pos[3 * idx2 + 2];
@@ -499,18 +528,18 @@ __device__ __forceinline__ void uffInversionGrad(const auto* pos,
   const real tg4y = (t3y / term1 - rJLy * cosY / sinY) / dJL;
   const real tg4z = (t3z / term1 - rJLz * cosY / sinY) / dJL;
 
-  atomicAdd(&grad[3 * idx1 + 0], dE_dW * tg1x);
-  atomicAdd(&grad[3 * idx1 + 1], dE_dW * tg1y);
-  atomicAdd(&grad[3 * idx1 + 2], dE_dW * tg1z);
-  atomicAdd(&grad[3 * idx2 + 0], -dE_dW * (tg1x + tg3x + tg4x));
-  atomicAdd(&grad[3 * idx2 + 1], -dE_dW * (tg1y + tg3y + tg4y));
-  atomicAdd(&grad[3 * idx2 + 2], -dE_dW * (tg1z + tg3z + tg4z));
-  atomicAdd(&grad[3 * idx3 + 0], dE_dW * tg3x);
-  atomicAdd(&grad[3 * idx3 + 1], dE_dW * tg3y);
-  atomicAdd(&grad[3 * idx3 + 2], dE_dW * tg3z);
-  atomicAdd(&grad[3 * idx4 + 0], dE_dW * tg4x);
-  atomicAdd(&grad[3 * idx4 + 1], dE_dW * tg4y);
-  atomicAdd(&grad[3 * idx4 + 2], dE_dW * tg4z);
+  gradAdd(grad, idx1, 0, dE_dW * tg1x);
+  gradAdd(grad, idx1, 1, dE_dW * tg1y);
+  gradAdd(grad, idx1, 2, dE_dW * tg1z);
+  gradAdd(grad, idx2, 0, -dE_dW * (tg1x + tg3x + tg4x));
+  gradAdd(grad, idx2, 1, -dE_dW * (tg1y + tg3y + tg4y));
+  gradAdd(grad, idx2, 2, -dE_dW * (tg1z + tg3z + tg4z));
+  gradAdd(grad, idx3, 0, dE_dW * tg3x);
+  gradAdd(grad, idx3, 1, dE_dW * tg3y);
+  gradAdd(grad, idx3, 2, dE_dW * tg3z);
+  gradAdd(grad, idx4, 0, dE_dW * tg4x);
+  gradAdd(grad, idx4, 1, dE_dW * tg4y);
+  gradAdd(grad, idx4, 2, dE_dW * tg4z);
 }
 
 __device__ __forceinline__ real uffVdwEnergy(const auto* pos,
@@ -535,18 +564,18 @@ __device__ __forceinline__ void uffVdwGrad(const auto* pos,
                                            const real  x_ij,
                                            const real  wellDepth,
                                            const real  threshold,
-                                           auto*       grad) {
+                                           const auto& grad) {
   const real dist = NVMOLKIT_SQRT(distanceSquared(pos, idx1, idx2));
   if (dist > threshold) {
     return;
   }
   if (dist <= real{0.0}) {
-    atomicAdd(&grad[3 * idx1 + 0], real{100.0});
-    atomicAdd(&grad[3 * idx1 + 1], real{100.0});
-    atomicAdd(&grad[3 * idx1 + 2], real{100.0});
-    atomicAdd(&grad[3 * idx2 + 0], -real{100.0});
-    atomicAdd(&grad[3 * idx2 + 1], -real{100.0});
-    atomicAdd(&grad[3 * idx2 + 2], -real{100.0});
+    gradAdd(grad, idx1, 0, real{100.0});
+    gradAdd(grad, idx1, 1, real{100.0});
+    gradAdd(grad, idx1, 2, real{100.0});
+    gradAdd(grad, idx2, 0, -real{100.0});
+    gradAdd(grad, idx2, 1, -real{100.0});
+    gradAdd(grad, idx2, 2, -real{100.0});
     return;
   }
 
@@ -562,12 +591,12 @@ __device__ __forceinline__ void uffVdwGrad(const auto* pos,
   const real gy = preFactor * dy / dist;
   const real gz = preFactor * dz / dist;
 
-  atomicAdd(&grad[3 * idx1 + 0], gx);
-  atomicAdd(&grad[3 * idx1 + 1], gy);
-  atomicAdd(&grad[3 * idx1 + 2], gz);
-  atomicAdd(&grad[3 * idx2 + 0], -gx);
-  atomicAdd(&grad[3 * idx2 + 1], -gy);
-  atomicAdd(&grad[3 * idx2 + 2], -gz);
+  gradAdd(grad, idx1, 0, gx);
+  gradAdd(grad, idx1, 1, gy);
+  gradAdd(grad, idx1, 2, gz);
+  gradAdd(grad, idx2, 0, -gx);
+  gradAdd(grad, idx2, 1, -gy);
+  gradAdd(grad, idx2, 2, -gz);
 }
 
 }  // namespace detail
@@ -707,11 +736,13 @@ __device__ __inline__ real molEnergy(const Terms&                   terms,
   return energy;
 }
 
+//! UFF terms of one molecule, reduced into grad: a real* in the interleaved layout or a GradSlice. Constraint terms
+//! are added separately by molConstraintGrad.
 template <int stride, bool HasConstraints, typename Terms>
 __device__ __inline__ void molGrad(const Terms&                   terms,
                                    const BatchedIndicesDevicePtr& systemIndices,
                                    const auto*                    molCoords,
-                                   auto*                          grad,
+                                   const auto&                    grad,
                                    const int                      molIdx,
                                    const int                      tid) {
   const int atomStart = systemIndices.atomStarts[molIdx];
@@ -787,62 +818,130 @@ __device__ __inline__ void molGrad(const Terms&                   terms,
                terms.vdwTerms.threshold[i],
                grad);
   }
+}
+
+//! Constraint terms of one molecule, reduced into grad in the interleaved layout.
+template <int stride, typename Terms>
+__device__ __inline__ void molConstraintGrad(const Terms&                   terms,
+                                             const BatchedIndicesDevicePtr& systemIndices,
+                                             const auto*                    molCoords,
+                                             real*                          grad,
+                                             const int                      molIdx,
+                                             const int                      tid) {
+  const int atomStart = systemIndices.atomStarts[molIdx];
+
+  const int dcStart = systemIndices.distanceConstraintTermStarts[molIdx];
+  const int dcEnd   = systemIndices.distanceConstraintTermStarts[molIdx + 1];
+#pragma unroll 1
+  for (int i = dcStart + tid; i < dcEnd; i += stride) {
+    distanceConstraintGrad(molCoords,
+                           terms.distanceConstraintTerms.idx1[i] - atomStart,
+                           terms.distanceConstraintTerms.idx2[i] - atomStart,
+                           terms.distanceConstraintTerms.minLen[i],
+                           terms.distanceConstraintTerms.maxLen[i],
+                           terms.distanceConstraintTerms.forceConstant[i],
+                           grad);
+  }
+
+  const int pcStart = systemIndices.positionConstraintTermStarts[molIdx];
+  const int pcEnd   = systemIndices.positionConstraintTermStarts[molIdx + 1];
+#pragma unroll 1
+  for (int i = pcStart + tid; i < pcEnd; i += stride) {
+    positionConstraintGrad(molCoords,
+                           terms.positionConstraintTerms.idx[i] - atomStart,
+                           terms.positionConstraintTerms.refX[i],
+                           terms.positionConstraintTerms.refY[i],
+                           terms.positionConstraintTerms.refZ[i],
+                           terms.positionConstraintTerms.maxDispl[i],
+                           terms.positionConstraintTerms.forceConstant[i],
+                           grad);
+  }
+
+  const int acStart = systemIndices.angleConstraintTermStarts[molIdx];
+  const int acEnd   = systemIndices.angleConstraintTermStarts[molIdx + 1];
+#pragma unroll 1
+  for (int i = acStart + tid; i < acEnd; i += stride) {
+    angleConstraintGrad(molCoords,
+                        terms.angleConstraintTerms.idx1[i] - atomStart,
+                        terms.angleConstraintTerms.idx2[i] - atomStart,
+                        terms.angleConstraintTerms.idx3[i] - atomStart,
+                        terms.angleConstraintTerms.minAngleDeg[i],
+                        terms.angleConstraintTerms.maxAngleDeg[i],
+                        terms.angleConstraintTerms.forceConstant[i],
+                        grad);
+  }
+
+  const int tcStart = systemIndices.torsionConstraintTermStarts[molIdx];
+  const int tcEnd   = systemIndices.torsionConstraintTermStarts[molIdx + 1];
+#pragma unroll 1
+  for (int i = tcStart + tid; i < tcEnd; i += stride) {
+    torsionConstraintGrad(molCoords,
+                          terms.torsionConstraintTerms.idx1[i] - atomStart,
+                          terms.torsionConstraintTerms.idx2[i] - atomStart,
+                          terms.torsionConstraintTerms.idx3[i] - atomStart,
+                          terms.torsionConstraintTerms.idx4[i] - atomStart,
+                          terms.torsionConstraintTerms.minDihedralDeg[i],
+                          terms.torsionConstraintTerms.maxDihedralDeg[i],
+                          terms.torsionConstraintTerms.forceConstant[i],
+                          grad);
+  }
+}
+
+//! Gradient of one molecule written to gradOut (the batch's interleaved output); every thread of the block must call
+//! this. The molecule's output slice is zeroed and the terms reduce into it with global atomics, which complete in L2,
+//! so shared memory is free to hold the coordinates instead. A molecule whose coordinates fit in sharedPos
+//! (maxSharedAtoms atoms) reads them from there and accumulates in the planar layout, which is transposed to the
+//! interleaved layout through sharedPos at the end. Larger molecules read global coordinates and accumulate
+//! interleaved. Constraint terms are applied last, to the interleaved layout.
+template <int stride, bool HasConstraints, typename Terms>
+__device__ __inline__ void molGradBlock(const Terms&                   terms,
+                                        const BatchedIndicesDevicePtr& systemIndices,
+                                        const real*                    coords,
+                                        real*                          sharedPos,
+                                        const int                      maxSharedAtoms,
+                                        real*                          gradOut,
+                                        const int                      molIdx,
+                                        const int                      tid) {
+  const int   atomStart = systemIndices.atomStarts[molIdx];
+  const int   numAtoms  = systemIndices.atomStarts[molIdx + 1] - atomStart;
+  const real* molCoords = coords + 3 * atomStart;
+  real*       grad      = gradOut + 3 * atomStart;
+  const bool  planar    = numAtoms <= maxSharedAtoms;
+
+  for (int k = tid; k < 3 * numAtoms; k += stride) {
+    grad[k] = real{0.0};
+    if (planar) {
+      sharedPos[k] = molCoords[k];
+    }
+  }
+  // Orders the zeroing before any reduction into the slice and publishes the staged coordinates.
+  __syncthreads();
+
+  if (planar) {
+    molGrad<stride, HasConstraints>(terms,
+                                    systemIndices,
+                                    static_cast<const real*>(sharedPos),
+                                    GradSlice{grad, numAtoms, 1},
+                                    molIdx,
+                                    tid);
+    __syncthreads();
+    // The reductions were performed in L2, so the planar values are read past L1.
+    for (int k = tid; k < 3 * numAtoms; k += stride) {
+      sharedPos[k] = __ldcg(&grad[k]);
+    }
+    __syncthreads();
+    for (int k = tid; k < 3 * numAtoms; k += stride) {
+      const int atom = k / 3;
+      grad[k]        = sharedPos[(k - 3 * atom) * numAtoms + atom];
+    }
+  } else {
+    molGrad<stride, HasConstraints>(terms, systemIndices, molCoords, grad, molIdx, tid);
+  }
 
   if constexpr (HasConstraints) {
-    const int dcStart = systemIndices.distanceConstraintTermStarts[molIdx];
-    const int dcEnd   = systemIndices.distanceConstraintTermStarts[molIdx + 1];
-#pragma unroll 1
-    for (int i = dcStart + tid; i < dcEnd; i += stride) {
-      distanceConstraintGrad(molCoords,
-                             terms.distanceConstraintTerms.idx1[i] - atomStart,
-                             terms.distanceConstraintTerms.idx2[i] - atomStart,
-                             terms.distanceConstraintTerms.minLen[i],
-                             terms.distanceConstraintTerms.maxLen[i],
-                             terms.distanceConstraintTerms.forceConstant[i],
-                             grad);
-    }
-
-    const int pcStart = systemIndices.positionConstraintTermStarts[molIdx];
-    const int pcEnd   = systemIndices.positionConstraintTermStarts[molIdx + 1];
-#pragma unroll 1
-    for (int i = pcStart + tid; i < pcEnd; i += stride) {
-      positionConstraintGrad(molCoords,
-                             terms.positionConstraintTerms.idx[i] - atomStart,
-                             terms.positionConstraintTerms.refX[i],
-                             terms.positionConstraintTerms.refY[i],
-                             terms.positionConstraintTerms.refZ[i],
-                             terms.positionConstraintTerms.maxDispl[i],
-                             terms.positionConstraintTerms.forceConstant[i],
-                             grad);
-    }
-
-    const int acStart = systemIndices.angleConstraintTermStarts[molIdx];
-    const int acEnd   = systemIndices.angleConstraintTermStarts[molIdx + 1];
-#pragma unroll 1
-    for (int i = acStart + tid; i < acEnd; i += stride) {
-      angleConstraintGrad(molCoords,
-                          terms.angleConstraintTerms.idx1[i] - atomStart,
-                          terms.angleConstraintTerms.idx2[i] - atomStart,
-                          terms.angleConstraintTerms.idx3[i] - atomStart,
-                          terms.angleConstraintTerms.minAngleDeg[i],
-                          terms.angleConstraintTerms.maxAngleDeg[i],
-                          terms.angleConstraintTerms.forceConstant[i],
-                          grad);
-    }
-
-    const int tcStart = systemIndices.torsionConstraintTermStarts[molIdx];
-    const int tcEnd   = systemIndices.torsionConstraintTermStarts[molIdx + 1];
-#pragma unroll 1
-    for (int i = tcStart + tid; i < tcEnd; i += stride) {
-      torsionConstraintGrad(molCoords,
-                            terms.torsionConstraintTerms.idx1[i] - atomStart,
-                            terms.torsionConstraintTerms.idx2[i] - atomStart,
-                            terms.torsionConstraintTerms.idx3[i] - atomStart,
-                            terms.torsionConstraintTerms.idx4[i] - atomStart,
-                            terms.torsionConstraintTerms.minDihedralDeg[i],
-                            terms.torsionConstraintTerms.maxDihedralDeg[i],
-                            terms.torsionConstraintTerms.forceConstant[i],
-                            grad);
-    }
+    // Orders the interleaved stores above before the constraint reductions. The constraint terms read the global
+    // coordinates, since the transpose overwrote the staged copy.
+    __syncthreads();
+    molConstraintGrad<stride>(terms, systemIndices, molCoords, grad, molIdx, tid);
   }
 }

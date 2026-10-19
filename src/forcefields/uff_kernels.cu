@@ -240,6 +240,10 @@ __global__ void vdwGradKernel(const int     numVdws,
 
 constexpr int blockSizePerMol = 128;
 
+//! Molecules with at most this many atoms stage their coordinates in shared memory for the gradient; larger
+//! molecules read them from global memory.
+constexpr int maxSharedAtomsPerMol = 256;
+
 template <bool HasConstraints, typename real, typename reduceT, typename Terms, typename storageT>
 __global__ void combinedEnergiesKernel(const Terms*                                  terms,
                                        const nvMolKit::UFF::BatchedIndicesDevicePtr* systemIndices,
@@ -293,40 +297,25 @@ __global__ void combinedGradKernel(const Terms*                                 
     return;
   }
 
-  constexpr int       maxAtomSize = 256;
-  __shared__ storageT accumGrad[maxAtomSize * 3];
-
-  const bool useSharedMem = numAtoms <= maxAtomSize;
-  storageT*  molGradBase  = useSharedMem ? accumGrad : grad + atomStart * 3;
-
-  for (int i = tid; i < numAtoms * 3; i += blockSizePerMol) {
-    molGradBase[i] = 0.0;
-  }
-  __syncthreads();
-
-  const storageT* molCoords = coords + atomStart * 3;
+  __shared__ storageT sharedPos[maxSharedAtomsPerMol * 3];
   if constexpr (std::is_same_v<real, float>)
-    nvMolKit::UFF::fp32::molGrad<blockSizePerMol, HasConstraints>(*terms,
-                                                                  *systemIndices,
-                                                                  molCoords,
-                                                                  molGradBase,
-                                                                  molIdx,
-                                                                  tid);
+    nvMolKit::UFF::fp32::molGradBlock<blockSizePerMol, HasConstraints>(*terms,
+                                                                       *systemIndices,
+                                                                       coords,
+                                                                       sharedPos,
+                                                                       maxSharedAtomsPerMol,
+                                                                       grad,
+                                                                       molIdx,
+                                                                       tid);
   else
-    nvMolKit::UFF::fp64::molGrad<blockSizePerMol, HasConstraints>(*terms,
-                                                                  *systemIndices,
-                                                                  molCoords,
-                                                                  molGradBase,
-                                                                  molIdx,
-                                                                  tid);
-  __syncthreads();
-
-  if (useSharedMem) {
-    storageT* globalGrad = grad + atomStart * 3;
-    for (int i = tid; i < numAtoms * 3; i += blockSizePerMol) {
-      globalGrad[i] = molGradBase[i];
-    }
-  }
+    nvMolKit::UFF::fp64::molGradBlock<blockSizePerMol, HasConstraints>(*terms,
+                                                                       *systemIndices,
+                                                                       coords,
+                                                                       sharedPos,
+                                                                       maxSharedAtomsPerMol,
+                                                                       grad,
+                                                                       molIdx,
+                                                                       tid);
 }
 
 }  // namespace
