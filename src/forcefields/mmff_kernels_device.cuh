@@ -1824,6 +1824,133 @@ template <typename Terms> static __device__ __forceinline__ EleTermData loadEleT
   return EleTermData{t.idx1[i], t.idx2[i], t.chargeTerm[i], t.dielModel[i], t.is1_4[i]};
 }
 
+//! Terms per lane of the FULL energy pair loops (forEachPairChunkVec); 1 keeps the one-term loops that prefetch the
+//! next chunk in registers. The FULL energy is bound by the latency of its double-precision arithmetic: V consecutive
+//! terms per lane give V independent chains and put V times the term data in flight per (vector) load. Narrow blocks
+//! take four terms per lane; wide blocks, whose warps own fewer chunks of a molecule, take two so that the coarser
+//! chunks still spread evenly over the warps. The SINGLE energy (held to 32 registers) and the gradients (at their
+//! register limits) lose more to the prefetch they would give up and keep one term per lane.
+constexpr bool                         realIsDouble           = sizeof(real) == 8;
+template <int BlockSize> constexpr int pairEnergyTermsPerLane = realIsDouble ? (BlockSize <= 128 ? 4 : 2) : 1;
+
+template <typename T, int V> struct alignas(sizeof(T) * V) TermVec {
+  T v[V];
+};
+
+//! Whether p can be read with TermVec<T, V> loads at every multiple of V.
+template <int V, typename T> static __device__ __forceinline__ bool termVecAligned(const T* p) {
+  return reinterpret_cast<uintptr_t>(p) % (sizeof(T) * V) == 0;
+}
+
+//! out[j] = p[base + j] for j < V: one vector load when whole, else element-wise with the indices clamped to [lo, hi].
+template <int V, typename T>
+static __device__ __forceinline__ void loadTermVec(const T*   p,
+                                                   const int  base,
+                                                   const bool whole,
+                                                   const int  lo,
+                                                   const int  hi,
+                                                   T (&out)[V]) {
+  if (whole) {
+    const TermVec<T, V> vec = *reinterpret_cast<const TermVec<T, V>*>(p + base);
+#pragma unroll
+    for (int j = 0; j < V; ++j) {
+      out[j] = vec.v[j];
+    }
+  } else {
+#pragma unroll
+    for (int j = 0; j < V; ++j) {
+      out[j] = p[min(max(base + j, lo), hi)];
+    }
+  }
+}
+
+//! Calls compute(load(base, whole), base) for this warp's chunks of the pair terms [start, start + count). A chunk
+//! holds 32 * V terms starting at a multiple of V, lane l taking the V terms from base = chunk start + V * l; terms
+//! below start or from start + count on are loaded but must be skipped by compute. whole tells load that the lane's
+//! terms can be read with one aligned vector load per array (aligned arrays, and the vector ends inside the range);
+//! otherwise load reads element-wise with indices clamped into the range. Chunks are dealt round-robin to the warps
+//! continuing from chunkBase as in forEachTermChunk.
+template <int NumWarps, int V, typename Load, typename Compute>
+static __device__ __forceinline__ void forEachPairChunkVec(int&       chunkBase,
+                                                           const int  start,
+                                                           const int  count,
+                                                           const bool aligned,
+                                                           Load&&     load,
+                                                           Compute&&  compute) {
+  const int end       = start + count;
+  const int first     = start - start % V;
+  const int numChunks = count > 0 ? (end - first + kWarpSize * V - 1) / (kWarpSize * V) : 0;
+  const int warp      = threadIdx.x / kWarpSize;
+  const int lane      = threadIdx.x % kWarpSize;
+  int       c         = (warp - chunkBase % NumWarps + NumWarps) % NumWarps;
+  chunkBase += numChunks;
+  const auto baseOf  = [&](const int chunk) { return first + (chunk * kWarpSize + lane) * V; };
+  const auto wholeAt = [&](const int base) { return aligned && base + V <= end; };
+#pragma unroll 1
+  for (; c < numChunks; c += NumWarps) {
+    const int base = baseOf(c);
+    compute(load(base, wholeAt(base)), base);
+  }
+}
+
+template <int V> struct VdwTermVecData {
+  int  idx1[V];
+  int  idx2[V];
+  real R_ij_star[V];
+  real wellDepth[V];
+};
+
+template <int V> struct EleTermVecData {
+  int          idx1[V];
+  int          idx2[V];
+  real         chargeTerm[V];
+  std::uint8_t dielModel[V];
+  std::uint8_t is1_4[V];
+};
+
+template <int V, typename Terms> static __device__ __forceinline__ bool vdwTermsVecAligned(const Terms& terms) {
+  const auto& t = terms.vdwTerms;
+  return termVecAligned<V>(t.idx1) && termVecAligned<V>(t.idx2) && termVecAligned<V>(t.R_ij_star) &&
+         termVecAligned<V>(t.wellDepth);
+}
+
+template <int V, typename Terms> static __device__ __forceinline__ bool eleTermsVecAligned(const Terms& terms) {
+  const auto& t = terms.eleTerms;
+  return termVecAligned<V>(t.idx1) && termVecAligned<V>(t.idx2) && termVecAligned<V>(t.chargeTerm) &&
+         termVecAligned<V>(t.dielModel) && termVecAligned<V>(t.is1_4);
+}
+
+template <int V, typename Terms>
+static __device__ __forceinline__ VdwTermVecData<V> loadVdwTermVec(const Terms& terms,
+                                                                   const int    base,
+                                                                   const bool   whole,
+                                                                   const int    lo,
+                                                                   const int    hi) {
+  const auto&       t = terms.vdwTerms;
+  VdwTermVecData<V> d;
+  loadTermVec<V>(t.idx1, base, whole, lo, hi, d.idx1);
+  loadTermVec<V>(t.idx2, base, whole, lo, hi, d.idx2);
+  loadTermVec<V>(t.R_ij_star, base, whole, lo, hi, d.R_ij_star);
+  loadTermVec<V>(t.wellDepth, base, whole, lo, hi, d.wellDepth);
+  return d;
+}
+
+template <int V, typename Terms>
+static __device__ __forceinline__ EleTermVecData<V> loadEleTermVec(const Terms& terms,
+                                                                   const int    base,
+                                                                   const bool   whole,
+                                                                   const int    lo,
+                                                                   const int    hi) {
+  const auto&       t = terms.eleTerms;
+  EleTermVecData<V> d;
+  loadTermVec<V>(t.idx1, base, whole, lo, hi, d.idx1);
+  loadTermVec<V>(t.idx2, base, whole, lo, hi, d.idx2);
+  loadTermVec<V>(t.chargeTerm, base, whole, lo, hi, d.chargeTerm);
+  loadTermVec<V>(t.dielModel, base, whole, lo, hi, d.dielModel);
+  loadTermVec<V>(t.is1_4, base, whole, lo, hi, d.is1_4);
+  return d;
+}
+
 //! Per-thread share of one molecule's energy, evaluated cooperatively by a block of BlockSize threads.
 template <int BlockSize, bool HasConstraints, typename Terms>
 static __device__ __forceinline__ real molEnergyBlock(const Terms& terms, const int* ranges, const auto molCoords) {
@@ -1952,32 +2079,76 @@ static __device__ __forceinline__ real molEnergyBlock(const Terms& terms, const 
   {
     const int start = ranges[12];
     const int count = ranges[13] - start;
-    forEachTermChunkPrefetchedPingPong<NumWarps>(
-      chunkBase,
-      count,
-      [&](const int k) { return loadVdwTerm(terms, start + k); },
-      [&](const VdwTermData& d, const bool valid) {
-        // Lanes past the range evaluate the (clamped) last term and discard it, without a branch.
-        const real e = vdwEnergy(molCoords, d.idx1 - atomStart, d.idx2 - atomStart, d.R_ij_star, d.wellDepth);
-        energy += valid ? e : real{0.0};
-      });
+    if constexpr (pairEnergyTermsPerLane<BlockSize> > 1) {
+      constexpr int V   = pairEnergyTermsPerLane<BlockSize>;
+      const int     end = start + count;
+      forEachPairChunkVec<NumWarps, V>(
+        chunkBase,
+        start,
+        count,
+        vdwTermsVecAligned<V>(terms),
+        [&](const int base, const bool whole) { return loadVdwTermVec<V>(terms, base, whole, start, end - 1); },
+        [&](const VdwTermVecData<V>& d, const int base) {
+#pragma unroll
+          for (int j = 0; j < V; ++j) {
+            if (base + j >= start && base + j < end) {
+              energy +=
+                vdwEnergy(molCoords, d.idx1[j] - atomStart, d.idx2[j] - atomStart, d.R_ij_star[j], d.wellDepth[j]);
+            }
+          }
+        });
+    } else {
+      forEachTermChunkPrefetchedPingPong<NumWarps>(
+        chunkBase,
+        count,
+        [&](const int k) { return loadVdwTerm(terms, start + k); },
+        [&](const VdwTermData& d, const bool valid) {
+          // Lanes past the range evaluate the (clamped) last term and discard it, without a branch.
+          const real e = vdwEnergy(molCoords, d.idx1 - atomStart, d.idx2 - atomStart, d.R_ij_star, d.wellDepth);
+          energy += valid ? e : real{0.0};
+        });
+    }
   }
   {
     const int start = ranges[14];
     const int count = ranges[15] - start;
-    forEachTermChunkPrefetchedPingPong<NumWarps>(
-      chunkBase,
-      count,
-      [&](const int k) { return loadEleTerm(terms, start + k); },
-      [&](const EleTermData& d, const bool valid) {
-        const real e = eleEnergy(molCoords,
-                                 d.idx1 - atomStart,
-                                 d.idx2 - atomStart,
-                                 d.chargeTerm,
-                                 static_cast<int>(d.dielModel),
-                                 d.is1_4 > 0);
-        energy += valid ? e : real{0.0};
-      });
+    if constexpr (pairEnergyTermsPerLane<BlockSize> > 1) {
+      constexpr int V   = pairEnergyTermsPerLane<BlockSize>;
+      const int     end = start + count;
+      forEachPairChunkVec<NumWarps, V>(
+        chunkBase,
+        start,
+        count,
+        eleTermsVecAligned<V>(terms),
+        [&](const int base, const bool whole) { return loadEleTermVec<V>(terms, base, whole, start, end - 1); },
+        [&](const EleTermVecData<V>& d, const int base) {
+#pragma unroll
+          for (int j = 0; j < V; ++j) {
+            if (base + j >= start && base + j < end) {
+              energy += eleEnergy(molCoords,
+                                  d.idx1[j] - atomStart,
+                                  d.idx2[j] - atomStart,
+                                  d.chargeTerm[j],
+                                  static_cast<int>(d.dielModel[j]),
+                                  d.is1_4[j] > 0);
+            }
+          }
+        });
+    } else {
+      forEachTermChunkPrefetchedPingPong<NumWarps>(
+        chunkBase,
+        count,
+        [&](const int k) { return loadEleTerm(terms, start + k); },
+        [&](const EleTermData& d, const bool valid) {
+          const real e = eleEnergy(molCoords,
+                                   d.idx1 - atomStart,
+                                   d.idx2 - atomStart,
+                                   d.chargeTerm,
+                                   static_cast<int>(d.dielModel),
+                                   d.is1_4 > 0);
+          energy += valid ? e : real{0.0};
+        });
+    }
   }
 
   if constexpr (HasConstraints) {
