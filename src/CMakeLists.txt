@@ -139,3 +139,9 @@ target_link_libraries(
   PRIVATE ${RDKit_LIBS})
 
 add_subdirectory(tfd)
+
+add_library(coulomb_fields coulomb_fields.cu coulomb_fields_mol.cpp)
+target_link_libraries(
+  coulomb_fields
+  PUBLIC device_vector
+  PRIVATE ${RDKit_LIBS} cuda_error_check)

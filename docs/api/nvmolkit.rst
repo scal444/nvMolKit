@@ -177,3 +177,12 @@ Hardware Autotuning (optional ``optuna`` extra)
    :template: class_template.rst
 
    autotune.TuneResult
+
+Molecular Interaction Fields
+----------------------------
+
+.. autosummary::
+   :toctree: generated/
+   :template: function_template.rst
+
+   interactionFields.CalcCoulombFields

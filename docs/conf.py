@@ -91,6 +91,7 @@ for _module_name in (
     "_batchedForcefield",
     "_clustering",
     "_conformerRmsd",
+    "_interactionFields",
     "_DataStructs",
     "_embedMolecules",
     "_Fingerprints",

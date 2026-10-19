@@ -135,3 +135,12 @@ target_link_libraries(_TFD PRIVATE ${RDKit_LIBS} tfd_gpu CUDA::cudart)
 target_include_directories(_TFD PUBLIC ${Boost_INCLUDE_DIRS}
                                        ${Python_INCLUDE_DIRS})
 installpythontarget(_TFD ./)
+
+add_library(_interactionFields MODULE interactionFields.cpp)
+target_link_libraries(
+  _interactionFields PUBLIC ${Boost_LIBRARIES} ${PYTHON_LIBRARIES}
+                            device_vector coulomb_fields device)
+target_link_libraries(_interactionFields PRIVATE ${RDKit_LIBS})
+target_include_directories(_interactionFields PUBLIC ${Boost_INCLUDE_DIRS}
+                                                     ${Python_INCLUDE_DIRS})
+installpythontarget(_interactionFields ./)
