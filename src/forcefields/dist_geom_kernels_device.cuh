@@ -19,6 +19,27 @@
 // DG terms
 // --------------
 
+//! a / b for positive, finite, normal operands. Double precision runs the reciprocal-seed + Newton + residual
+//! sequence of the library division without its out-of-range slow-path branch (same quotient for such operands).
+//! Single precision keeps plain division.
+static __device__ __forceinline__ DG_REAL dgPosDiv(const DG_REAL a, const DG_REAL b) {
+  if constexpr (sizeof(DG_REAL) == 8) {
+    const double bd = b;  // (this body is also compiled, unused, for the single-precision instantiation)
+    const double ad = a;
+    double       r;
+    asm("rcp.approx.ftz.f64 %0, %1;" : "=d"(r) : "d"(bd));
+    double e       = fma(-bd, r, 1.0);
+    e              = fma(e, e, e);
+    r              = fma(r, e, r);
+    e              = fma(-bd, r, 1.0);
+    r              = fma(r, e, r);
+    const double q = ad * r;
+    return fma(r, fma(-bd, q, ad), q);
+  } else {
+    return a / b;
+  }
+}
+
 template <int dimension>
 static __device__ __forceinline__ DG_REAL distViolationEnergy(const DG_REAL* pos,
                                                               const int      idx1,
@@ -29,16 +50,14 @@ static __device__ __forceinline__ DG_REAL distViolationEnergy(const DG_REAL* pos
   const int     posIdx1   = idx1 * dimension;
   const int     posIdx2   = idx2 * dimension;
   const DG_REAL distance2 = distanceSquaredPosIdx<dimension>(pos, posIdx1, posIdx2);
-  DG_REAL       val       = DG_REAL(0.0);
-  if (distance2 > ub2) {
-    val = (distance2 / ub2) - DG_REAL(1.0);
-  } else if (distance2 < lb2) {
-    val = ((2 * lb2) / (lb2 + distance2)) - DG_REAL(1.0);
-  }
-  if (val > DG_REAL(0.0)) {
-    return weight * val * val;
-  }
-  return DG_REAL(0.0);
+  // Branch-free: one division whose operands are selected by the violated bound (the satisfied case divides by a
+  // dummy 1 and is discarded).
+  const bool    upper     = distance2 > ub2;
+  const bool    lower     = distance2 < lb2;
+  const DG_REAL num       = upper ? distance2 : 2 * lb2;
+  const DG_REAL den       = upper ? ub2 : (lower ? lb2 + distance2 : DG_REAL(1.0));
+  const DG_REAL val       = dgPosDiv(num, den) - DG_REAL(1.0);
+  return ((upper || lower) && val > DG_REAL(0.0)) ? weight * val * val : DG_REAL(0.0);
 }
 
 template <int dimension>
@@ -53,13 +72,29 @@ static __device__ __forceinline__ void distViolationGrad(const DG_REAL* pos,
   const int   posIdx2   = idx2 * dimension;
   const float distance2 = distanceSquaredPosIdx<dimension>(pos, posIdx1, posIdx2);
   float       preFactor = 0.0f;
-  if (distance2 > ub2) {
-    preFactor = 4.f * ((distance2 / ub2) - 1.0f) / ub2;
-  } else if (distance2 < lb2) {
-    const float l2d2 = distance2 + lb2;
-    preFactor        = 8.f * lb2 * (1.f - 2.0f * lb2 / l2d2) / (l2d2 * l2d2);
+  if constexpr (sizeof(DG_REAL) == 8) {
+    // Double-precision factor with a single division:
+    //   upper: 4 (d2/ub2 - 1) / ub2            = 4 (d2 - ub2) / ub2^2
+    //   lower: 8 lb2 (1 - 2 lb2/l2d2) / l2d2^2 = 8 lb2 (l2d2 - 2 lb2) / (l2d2 * l2d2^2)
+    // (l2d2, its square and the resulting factor stay single precision.)
+    const bool upper = distance2 > ub2;
+    const bool lower = distance2 < lb2;
+    if (!upper && !lower) {
+      return;
+    }
+    const float   l2d2 = distance2 + lb2;
+    const DG_REAL num  = upper ? 4 * (distance2 - ub2) : 8 * lb2 * (l2d2 - 2 * lb2);
+    const DG_REAL den  = upper ? ub2 * ub2 : l2d2 * static_cast<DG_REAL>(l2d2 * l2d2);
+    preFactor          = dgPosDiv(num, den);
   } else {
-    return;
+    if (distance2 > ub2) {
+      preFactor = 4.f * ((distance2 / ub2) - 1.0f) / ub2;
+    } else if (distance2 < lb2) {
+      const float l2d2 = distance2 + lb2;
+      preFactor        = 8.f * lb2 * (1.f - 2.0f * lb2 / l2d2) / (l2d2 * l2d2);
+    } else {
+      return;
+    }
   }
   const float dGradx = weight * preFactor * (pos[posIdx1 + 0] - pos[posIdx2 + 0]);
   const float dGrady = weight * preFactor * (pos[posIdx1 + 1] - pos[posIdx2 + 1]);
