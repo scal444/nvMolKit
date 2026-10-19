@@ -60,6 +60,22 @@ int etkTermMask(const ETKTerm term) {
   return 0;
 }
 
+//! FULL ETK gradients take the fused kernels on sm_100+ (measured faster there) and the term-parallel kernels
+//! elsewhere. Queried per call: one process may drive GPUs of different architectures.
+cudaError_t useFusedETKGradient(bool& useFused) {
+  int         device = 0;
+  cudaError_t err    = cudaGetDevice(&device);
+  if (err != cudaSuccess) {
+    return err;
+  }
+  int major = 0;
+  err       = cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
+  useFused  = err == cudaSuccess && major >= 10;
+  return err;
+}
+
+//! Batches from this size use the long-range-only fused kernel plus term-parallel kernels on the fused path.
+constexpr int kFusedETKGradientMaxBatch = 4096;
 }  // namespace
 
 void addMoleculeToContext(int                  dimension,
@@ -966,7 +982,38 @@ cudaError_t computeGradientsETK(BatchedMolecular3DDeviceBuffers& molSystemDevice
                                 cudaStream_t                     stream) {
   const auto& contribs = molSystemDevice.contribs;
 
-  cudaError_t err = cudaSuccess;
+  bool        fusedPath = false;
+  cudaError_t err       = useFusedETKGradient(fusedPath);
+  if (err != cudaSuccess) {
+    return err;
+  }
+  bool longRangeDone = false;
+  if (fusedPath) {
+    const int  numMols = static_cast<int>(molSystemDevice.indices.experimentalTorsionTermStarts.size()) - 1;
+    const auto terms   = toEnergy3DForceContribsDevicePtr(molSystemDevice);
+    const auto indices = toBatchedIndices3DDevicePtr(molSystemDevice, ctxAtomStarts);
+    if (numMols < kFusedETKGradientMaxBatch) {
+      return launchFusedGradKernelETK(numMols,
+                                      terms,
+                                      indices,
+                                      ctxPositions,
+                                      grad,
+                                      etkTermMask(term),
+                                      activeSystemMask,
+                                      stream);
+    }
+    // Large batches: a lean block-per-molecule kernel for the long-range restraints, term-parallel kernels for the
+    // other families.
+    err           = launchFusedLongRangeGradKernelETK(numMols,
+                                            terms,
+                                            indices,
+                                            ctxPositions,
+                                            grad,
+                                            etkTermMask(term),
+                                            activeSystemMask,
+                                            stream);
+    longRangeDone = true;
+  }
 
   // Experimental torsion terms
   if ((term == ETKTerm::ALL || term == ETKTerm::PLAIN || term == ETKTerm::EXPERIMANTAL_TORSION) &&
@@ -1061,7 +1108,8 @@ cudaError_t computeGradientsETK(BatchedMolecular3DDeviceBuffers& molSystemDevice
   }
 
   // Long range distance terms
-  if (err == cudaSuccess && (term == ETKTerm::ALL || term == ETKTerm::PLAIN || term == ETKTerm::LONGDISTANCE) &&
+  if (err == cudaSuccess && !longRangeDone &&
+      (term == ETKTerm::ALL || term == ETKTerm::PLAIN || term == ETKTerm::LONGDISTANCE) &&
       contribs.longRangeDistTerms.idx1.size() > 0) {
     err = launchDistanceConstraintGradientKernel(contribs.longRangeDistTerms.idx1.size(),
                                                  contribs.longRangeDistTerms.idx1.data(),

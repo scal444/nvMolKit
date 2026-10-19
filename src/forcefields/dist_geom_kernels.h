@@ -473,6 +473,16 @@ cudaError_t launchFusedEnergyKernelETK(int                                      
                                        int                                         termMask        = kETKAllTermsMask,
                                        const uint8_t*                              activeThisStage = nullptr,
                                        cudaStream_t                                stream          = 0);
+//! Fused ETK gradient. The double-precision kernel is selected only on sm_100+ (see DistGeom::computeGradientsETK);
+//! elsewhere the term-parallel kernels are faster.
+cudaError_t launchFusedGradKernelETK(int                                   numMols,
+                                     const Energy3DForceContribsDevicePtr& terms,
+                                     const BatchedIndices3DDevicePtr&      systemIndices,
+                                     const double*                         coords,
+                                     double*                               grad,
+                                     int                                   termMask        = kETKAllTermsMask,
+                                     const uint8_t*                        activeThisStage = nullptr,
+                                     cudaStream_t                          stream          = 0);
 cudaError_t launchFusedGradKernelETK(int                                         numMols,
                                      const Energy3DForceContribsDevicePtrSingle& terms,
                                      const BatchedIndices3DDevicePtr&            systemIndices,
@@ -480,6 +490,17 @@ cudaError_t launchFusedGradKernelETK(int                                        
                                      float*                                      grad,
                                      const uint8_t*                              activeThisStage = nullptr,
                                      cudaStream_t                                stream          = 0);
+//! FULL ETK gradient of the long-range distance restraints only (when selected by termMask), block per molecule:
+//! adds to the grad slice of active systems. Pairs with the term-parallel kernels for the other families on large
+//! batches.
+cudaError_t launchFusedLongRangeGradKernelETK(int                                   numMols,
+                                              const Energy3DForceContribsDevicePtr& terms,
+                                              const BatchedIndices3DDevicePtr&      systemIndices,
+                                              const double*                         coords,
+                                              double*                               grad,
+                                              int                                   termMask        = kETKAllTermsMask,
+                                              const uint8_t*                        activeThisStage = nullptr,
+                                              cudaStream_t                          stream          = 0);
 }  // namespace DistGeom
 }  // namespace nvMolKit
 

@@ -1433,6 +1433,13 @@ static __device__ __forceinline__ void loadChunk4(const double* __restrict__ p,
                                                   const int  hi,
                                                   const bool vec,
                                                   double (&v)[4]) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000 && defined(NVMOLKIT_DG_HAS_256B_LOAD)
+  // sm_100+: one 32-byte load per chunk (full sectors per instruction) when the chunk is 32-byte aligned.
+  if (vec && (reinterpret_cast<uintptr_t>(p + c) & 31u) == 0) {
+    asm("ld.global.nc.v4.f64 {%0, %1, %2, %3}, [%4];" : "=d"(v[0]), "=d"(v[1]), "=d"(v[2]), "=d"(v[3]) : "l"(p + c));
+    return;
+  }
+#endif
   if (vec) {
     const double2 t0 = __ldg(reinterpret_cast<const double2*>(p + c));
     const double2 t1 = __ldg(reinterpret_cast<const double2*>(p + c) + 1);
@@ -1831,8 +1838,9 @@ template <int dimension, bool vecPos = false> struct DGFamily {
   bool                         aligned;  //!< bulk arrays are 16-byte aligned
 
   using Bulk = typename std::conditional<vecPos, DGBulkTermVec<dimension>, DGBulkTerm<dimension>>::type;
-  static constexpr int kNumRanges = 6;
-  static constexpr int kDimension = dimension;
+  static constexpr bool kBulkOnly  = false;
+  static constexpr int  kNumRanges = 6;
+  static constexpr int  kDimension = dimension;
 
   __device__ __forceinline__ void loadRanges(const int m, int* r) const {
     r[0] = indices.distTermStarts[m];
@@ -1859,18 +1867,31 @@ template <int dimension, bool vecPos = false> struct DGFamily {
 };
 
 //! ETK family for the fused driver (4D storage). Ranges: [longRange0, longRange1, then the small range layout of
-//! etkSmallLoad]. Families outside termMask get empty ranges.
-struct ETKFamily {
+//! etkSmallLoad]. Families outside termMask get empty ranges. bulkOnly compiles the long-range restraints alone (no
+//! small-term code or registers); the caller evaluates the other families separately.
+template <bool bulkOnly = false> struct ETKFamilyT {
   Energy3DForceContribsDevicePtr terms;
   BatchedIndices3DDevicePtr      indices;
   int                            termMask;
   bool                           aligned;  //!< bulk arrays are 16-byte aligned
 
-  using Bulk                      = ETKBulkTerm;
-  static constexpr int kNumRanges = 12;
-  static constexpr int kDimension = 4;
+  using Bulk                       = ETKBulkTerm;
+  static constexpr bool kBulkOnly  = bulkOnly;
+  static constexpr int  kNumRanges = 12;
+  static constexpr int  kDimension = 4;
 
   __device__ __forceinline__ void loadRanges(const int m, int* r) const {
+    if constexpr (bulkOnly) {
+#pragma unroll
+      for (int f = 0; f < kNumRanges; ++f) {
+        r[f] = 0;
+      }
+      if (termMask & kETKLongDistBit) {
+        r[0] = indices.longRangeDistTermStarts[m];
+        r[1] = indices.longRangeDistTermStarts[m + 1];
+      }
+      return;
+    }
     const int* starts[6] = {indices.longRangeDistTermStarts,
                             indices.experimentalTorsionTermStarts,
                             indices.improperTorsionTermStarts,
@@ -1894,17 +1915,26 @@ struct ETKFamily {
     const auto& d = terms.longRangeDistTerms;
     return {d.idx1, d.idx2, d.minLen, d.maxLen, d.forceConstant};
   }
-  __device__ __forceinline__ int  smallCount(const int* r) const { return etkSmallCount(r + 2); }
+  __device__ __forceinline__ int  smallCount(const int* r) const { return bulkOnly ? 0 : etkSmallCount(r + 2); }
   __device__ __forceinline__ void smallLoad(const int* r, const int v, const int atomStart, SmallItem& it) const {
-    etkSmallLoad(terms, r + 2, v, atomStart, it);
+    if constexpr (!bulkOnly) {
+      etkSmallLoad(terms, r + 2, v, atomStart, it);
+    }
   }
   __device__ __forceinline__ DG_REAL smallEnergy(const SmallItem& it, const DG_REAL* pos) const {
-    return etkSmallEnergy(it, pos);
+    if constexpr (!bulkOnly) {
+      return etkSmallEnergy(it, pos);
+    }
+    return DG_REAL(0.0);
   }
   __device__ __forceinline__ void smallGrad(const SmallItem& it, const DG_REAL* pos, DG_REAL* grad) const {
-    etkSmallGrad(it, pos, grad);
+    if constexpr (!bulkOnly) {
+      etkSmallGrad(it, pos, grad);
+    }
   }
 };
+using ETKFamily     = ETKFamilyT<false>;
+using ETKBulkFamily = ETKFamilyT<true>;
 
 //! Per-thread work of one molecule: the prefetched first chunk/item, then any further passes.
 //! pos (natural stride) feeds the small terms; bulkPos (stride bulkPosStride) feeds the bulk terms.

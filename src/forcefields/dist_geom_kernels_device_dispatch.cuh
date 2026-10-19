@@ -20,6 +20,12 @@ using namespace nvMolKit::FFKernelUtils;
 namespace nvMolKit {
 namespace DistGeom {
 
+//! 256-bit global loads (ld.global.v4.f64: PTX ISA 8.8, CUDA 12.9+) for sm_100+ double-precision term chunks.
+#if defined(__CUDACC_VER_MAJOR__) && \
+  (__CUDACC_VER_MAJOR__ > 12 || (__CUDACC_VER_MAJOR__ == 12 && __CUDACC_VER_MINOR__ >= 9))
+#define NVMOLKIT_DG_HAS_256B_LOAD 1
+#endif
+
 namespace fp64 {
 using EnergyForceContribsDevicePtr   = DistGeom::EnergyForceContribsDevicePtr;
 using Energy3DForceContribsDevicePtr = DistGeom::Energy3DForceContribsDevicePtr;

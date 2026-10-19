@@ -1437,6 +1437,7 @@ template <typename real> struct FusedPrecision;
 template <> struct FusedPrecision<float> {
   template <int dimension, bool vecPos = false> using DG = fp32::DGFamily<dimension, vecPos>;
   using ETK                                              = fp32::ETKFamily;
+  using ETKBulk                                          = fp32::ETKBulkFamily;
   template <class Family, bool isGrad, bool isSingle, bool overwriteGrad>
   static __device__ __forceinline__ void run(const Family&  fam,
                                              const int*     atomStarts,
@@ -1461,6 +1462,7 @@ template <> struct FusedPrecision<float> {
 template <> struct FusedPrecision<double> {
   template <int dimension, bool vecPos = false> using DG = fp64::DGFamily<dimension, vecPos>;
   using ETK                                              = fp64::ETKFamily;
+  using ETKBulk                                          = fp64::ETKBulkFamily;
   template <class Family, bool isGrad, bool isSingle, bool overwriteGrad>
   static __device__ __forceinline__ void run(const Family&  fam,
                                              const int*     atomStarts,
@@ -1487,13 +1489,16 @@ template <> struct FusedPrecision<double> {
 //! trips per molecule), so more resident molecules win even at the cost of some L1-cached spills:
 //!   - single-precision energies: 12 blocks for large DG, 10 for ETK, and a spill-free 7 for small DG3 batches;
 //!   - single-precision gradients: 8 blocks, raised to 10 for large DG batches;
-//!   - double precision keeps seven: fewer blocks (no spills) and more blocks (heavier spills) both measured slower.
+//!   - double precision keeps seven: fewer blocks (no spills) and more blocks (heavier spills) both measured slower,
+//!     except ETK's double-precision gradient (torsion/inversion math on double accumulators), which runs at five.
+//!     That kernel is only selected on sm_100+ (see computeGradientsETK), where these targets were measured.
 template <typename real, class Family, bool isGrad, bool large> struct FusedOccupancy {
   static constexpr bool kDouble         = std::is_same<real, double>::value;
   static constexpr bool kETK            = Family::kNumRanges == 12;
+  static constexpr bool kWideETK        = kDouble && isGrad && kETK && !Family::kBulkOnly;
   static constexpr bool kSmallDG3Energy = !kDouble && !isGrad && !large && !kETK && Family::kDimension == 3;
   static constexpr int  kSingleTarget   = isGrad ? (large && !kETK ? 10 : 8) : (kSmallDG3Energy ? 7 : (kETK ? 10 : 12));
-  static constexpr int  kTarget         = kDouble ? kFusedMinBlocksPerSM : kSingleTarget;
+  static constexpr int  kTarget         = kWideETK ? 5 : (kDouble ? kFusedMinBlocksPerSM : kSingleTarget);
   static constexpr int  kMinBlocks      = kTarget < kFusedMaxBlocksPerSM ? kTarget : kFusedMaxBlocksPerSM;
   //! Gradients (and ETK's double-precision energy) stage coordinates in the shared tile; the other energies read them
   //! straight from global memory (L1-cached), skipping the staging barrier, which measured faster.
@@ -1684,6 +1689,31 @@ cudaError_t launchFusedETKImpl(const int                                    numM
 }
 }  // namespace
 
+cudaError_t launchFusedLongRangeGradKernelETK(const int                             numMols,
+                                              const Energy3DForceContribsDevicePtr& terms,
+                                              const BatchedIndices3DDevicePtr&      systemIndices,
+                                              const double*                         coords,
+                                              double*                               grad,
+                                              const int                             termMask,
+                                              const uint8_t*                        activeThisStage,
+                                              cudaStream_t                          stream) {
+  if (numMols <= 0) {
+    return cudaSuccess;
+  }
+  const auto& d = terms.longRangeDistTerms;
+  const bool  aligned =
+    aligned16(d.idx1) && aligned16(d.idx2) && aligned16(d.minLen) && aligned16(d.maxLen) && aligned16(d.forceConstant);
+  const FusedPrecision<double>::ETKBulk fam{terms, systemIndices, termMask & kETKLongDistBit, aligned};
+  return launchFusedImpl<double, true, false, false, false>(numMols,
+                                                            kFusedBlockSize,
+                                                            fam,
+                                                            systemIndices.atomStarts,
+                                                            coords,
+                                                            grad,
+                                                            activeThisStage,
+                                                            stream);
+}
+
 cudaError_t launchFusedEnergyKernel(const int                           numMols,
                                     const EnergyForceContribsDevicePtr& terms,
                                     const BatchedIndicesDevicePtr&      systemIndices,
@@ -1794,6 +1824,18 @@ cudaError_t launchFusedEnergyKernelETK(const int                                
                                        cudaStream_t                                stream) {
   return launchFusedETKImpl<float,
                             false>(numMols, terms, systemIndices, coords, energies, termMask, activeThisStage, stream);
+}
+
+cudaError_t launchFusedGradKernelETK(const int                             numMols,
+                                     const Energy3DForceContribsDevicePtr& terms,
+                                     const BatchedIndices3DDevicePtr&      systemIndices,
+                                     const double*                         coords,
+                                     double*                               grad,
+                                     const int                             termMask,
+                                     const uint8_t*                        activeThisStage,
+                                     cudaStream_t                          stream) {
+  return launchFusedETKImpl<double,
+                            true>(numMols, terms, systemIndices, coords, grad, termMask, activeThisStage, stream);
 }
 
 cudaError_t launchFusedGradKernelETK(const int                                   numMols,
