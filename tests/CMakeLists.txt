@@ -223,6 +223,7 @@ add_executable(test_etkdg test_etkdg.cu test_etkdg_minimize.cu)
 target_link_libraries(
   test_etkdg
   PRIVATE etkdg_impl
+          nvmolkit_versions
           device_vector
           test_utils
           ${RDKit_LIBS}

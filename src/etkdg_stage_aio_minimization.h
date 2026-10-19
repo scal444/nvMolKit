@@ -14,13 +14,14 @@ namespace nvMolKit::detail {
 
 //! RDKit's all-in-one ETKDG minimization: DG first, then ET and K terms on the
 //! same forcefield, followed by the unified minimization energy check.
-class ETKDGAllInOneMinimizationStage final : public ETKDGStage {
+template <typename Real> class ETKDGAllInOneMinimizationStageT final : public ETKDGStage {
  public:
-  ETKDGAllInOneMinimizationStage(const std::vector<const RDKit::ROMol*>&     mols,
-                                 const std::vector<EmbedArgs>&               eargs,
-                                 const RDKit::DGeomHelpers::EmbedParameters& embedParams,
-                                 const ETKDGContext&                         ctx,
-                                 cudaStream_t                                stream = nullptr);
+  ETKDGAllInOneMinimizationStageT(const std::vector<const RDKit::ROMol*>&     mols,
+                                  const std::vector<EmbedArgs>&               eargs,
+                                  const RDKit::DGeomHelpers::EmbedParameters& embedParams,
+                                  const ETKDGContext&                         ctx,
+                                  BfgsBatchMinimizerT<Real>&                  minimizer,
+                                  cudaStream_t                                stream = nullptr);
 
   void        execute(ETKDGContext& ctx) override;
   std::string name() const override { return "All-in-one ETKDG Minimization"; }
@@ -29,13 +30,17 @@ class ETKDGAllInOneMinimizationStage final : public ETKDGStage {
   std::vector<DistGeom::AllInOneForceContribsHost> systemContribs_;
   DistGeom::BatchedMolecularSystemHost             dgSystemHost_;
   BatchedForcefieldMetadata                        metadata_;
-  BfgsBatchMinimizer                               minimizer_;
+  BfgsBatchMinimizerT<Real>&                       minimizer_;
   AsyncDeviceVector<double>                        gradients_;
   AsyncDeviceVector<double>                        energies_;
   double                                           optimizerForceTol_;
   int                                              firstPhaseIterations_ = 1;
   cudaStream_t                                     stream_               = nullptr;
 };
+
+using ETKDGAllInOneMinimizationStage = ETKDGAllInOneMinimizationStageT<double>;
+extern template class ETKDGAllInOneMinimizationStageT<double>;
+extern template class ETKDGAllInOneMinimizationStageT<float>;
 
 //! RDKit AIO post-minimization validation for linear-angle and improper K terms.
 class ETKDGKTermCheckStage final : public ETKDGStage {

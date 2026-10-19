@@ -141,7 +141,13 @@ std::optional<DeviceCoordResult> embedMolecules(const std::vector<RDKit::ROMol*>
   }
 #if RDKIT_AIO_ETKDG_API
   const bool useAllInOneETKDG = !paramsCopy.useLegacyImplementation;
+#else
+  constexpr bool useAllInOneETKDG = false;
 #endif
+  if (useAllInOneETKDG && backend == BfgsBackend::PER_MOLECULE) {
+    throw std::invalid_argument("All-in-one ETKDG supports BATCHED and HYBRID backends");
+  }
+  const auto minimizerBackend = useAllInOneETKDG ? BfgsBackend::BATCHED : backend;
 
   ScopedNvtxRange coordsRange("Init ETKDG");
 
@@ -288,13 +294,13 @@ std::optional<DeviceCoordResult> embedMolecules(const std::vector<RDKit::ROMol*>
                                                                DebugLevel::NONE,
                                                                true,  // scaleGrads
                                                                streamPtr,
-                                                               backend);
+                                                               minimizerBackend);
       } else {
         minimizer = std::make_unique<BfgsBatchMinimizer>(4,  // dataDim for ETKDG (4D distance geometry)
                                                          DebugLevel::NONE,
                                                          true,  // scaleGrads
                                                          streamPtr,
-                                                         backend);
+                                                         minimizerBackend);
       }
       std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::EnergyForceContribsHost>   dgCache;
       std::unordered_map<const RDKit::ROMol*, nvMolKit::DistGeom::Energy3DForceContribsHost> etkCache;
@@ -366,14 +372,19 @@ std::optional<DeviceCoordResult> embedMolecules(const std::vector<RDKit::ROMol*>
         }
 
         detail::ETKDGFirstChiralCenterCheckStage* chiralStagePtr = nullptr;
-        // Select RDKit's legacy sequential refinement or its all-in-one forcefield.
 #if RDKIT_AIO_ETKDG_API
         if (useAllInOneETKDG) {
-          stages.push_back(std::make_unique<detail::ETKDGAllInOneMinimizationStage>(constMolPtrs,
-                                                                                    batchEargs,
-                                                                                    paramsCopy,
-                                                                                    *context,
-                                                                                    streamPtr));
+          std::visit(
+            [&](auto& typedMinimizer) {
+              using Real = typename std::decay_t<decltype(*typedMinimizer)>::Scalar;
+              stages.push_back(std::make_unique<detail::ETKDGAllInOneMinimizationStageT<Real>>(constMolPtrs,
+                                                                                               batchEargs,
+                                                                                               paramsCopy,
+                                                                                               *context,
+                                                                                               *typedMinimizer,
+                                                                                               streamPtr));
+            },
+            minimizer);
           if (paramsCopy.useBasicKnowledge) {
             stages.push_back(std::make_unique<detail::ETKDGKTermCheckStage>(batchEargs, *context, streamPtr));
           }

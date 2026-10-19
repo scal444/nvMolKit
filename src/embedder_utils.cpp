@@ -694,11 +694,6 @@ void validateSupportedEmbedParameters(const RDKit::DGeomHelpers::EmbedParameters
       "Only version 1 and 2 of the experimental "
       "torsion-angle preferences (ETversion) supported");
   }
-#if RDKIT_AIO_ETKDG_API
-  if (!params.useLegacyImplementation) {
-    throw ValueErrorException("All-in-one ETKDG refinement (useLegacyImplementation=False) is not supported");
-  }
-#endif
 #if RDKIT_ETKDG_2026_09_API
   using RDKit::DGeomHelpers::InitialEmbeddingMode;
   if (params.embedForceField != RDKit::DGeomHelpers::EmbedFF::UFF) {

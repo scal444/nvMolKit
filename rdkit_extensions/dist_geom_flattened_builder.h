@@ -8,10 +8,14 @@
 #include <map>
 
 #include "src/forcefields/dist_geom.h"
+#include "versions.h"
 namespace nvMolKit {
 namespace DistGeom {
 
-//! Force constants from RDKit's ETKDGForceConsts::AIO::Cosine bundle.
+//! Force constants for cosine all-in-one ETKDG refinement.
+#if RDKIT_AIO_ETKDG_API
+inline constexpr auto kAllInOneForceConstants = ::ForceFields::CrystalFF::ETKDGForceConsts::AIO::Cosine;
+#else
 struct AllInOneForceConstants {
   double distance      = 2.15;
   double fourthDim     = 2.15;
@@ -23,6 +27,7 @@ struct AllInOneForceConstants {
 };
 
 inline constexpr AllInOneForceConstants kAllInOneForceConstants{};
+#endif
 
 nvMolKit::DistGeom::EnergyForceContribsHost constructForceFieldContribs(
   const int                              dim,

@@ -26,6 +26,8 @@
 #include <filesystem>
 #include <fstream>
 
+#include "rdkit_extensions/dist_geom_flattened_builder.h"
+#include "rdkit_extensions/torsion_compat.h"
 #include "src/embedder_utils.h"
 #include "src/etkdg_impl.h"
 #include "src/etkdg_stage_aio_minimization.h"
@@ -35,6 +37,7 @@
 #include "src/forcefields/dist_geom.h"
 #include "src/utils/host_vector.h"
 #include "tests/test_utils.h"
+#include "versions.h"
 
 using namespace ::nvMolKit::detail;
 
@@ -692,21 +695,25 @@ TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, AllInOneSmallBatchStatisticsAgai
   // stage from the same initial coordinates without requiring the public flag.
   for (auto& earg : eargs_) {
     for (auto& torsion : earg.etkdgDetails.expTorsionAngles) {
-      auto&      forceConstants = torsion.second;
+#if RDKIT_ETKDG_2026_09_API
+      auto& forceConstants = std::get<nvMolKit::detail::CosineTorsionParameters>(torsion).second;
+#else
+      auto& forceConstants = torsion.second;
+#endif
       const bool isKRingTorsion =
         forceConstants.size() > 1 && forceConstants[1] == 100.0 &&
         static_cast<std::size_t>(std::count(forceConstants.begin(), forceConstants.end(), 0.0)) + 1 ==
           forceConstants.size();
       if (isKRingTorsion) {
-        forceConstants[1] = 2.15;
+        forceConstants[1] = nvMolKit::DistGeom::kAllInOneForceConstants.kTermTorsion;
       } else {
         for (auto& forceConstant : forceConstants) {
-          forceConstant *= 0.1;
+          forceConstant *= nvMolKit::DistGeom::kAllInOneForceConstants.etTermScaling;
         }
       }
     }
   }
-  ETKDGAllInOneMinimizationStage allInOne(mols_, eargs_, embedParam_, allInOneContext);
+  ETKDGAllInOneMinimizationStage allInOne(mols_, eargs_, embedParam_, allInOneContext, legacyMinimizer);
 
   legacyFirst->execute(legacyContext);
   legacyFourth.execute(legacyContext);
@@ -838,21 +845,25 @@ TEST(AllInOneETKDG, BulkStatisticsAgainstLegacyFromIdenticalCoordinates) {
 
   for (auto& earg : eargs) {
     for (auto& torsion : earg.etkdgDetails.expTorsionAngles) {
-      auto&      forceConstants = torsion.second;
+#if RDKIT_ETKDG_2026_09_API
+      auto& forceConstants = std::get<nvMolKit::detail::CosineTorsionParameters>(torsion).second;
+#else
+      auto& forceConstants = torsion.second;
+#endif
       const bool isKRingTorsion =
         forceConstants.size() > 1 && forceConstants[1] == 100.0 &&
         static_cast<std::size_t>(std::count(forceConstants.begin(), forceConstants.end(), 0.0)) + 1 ==
           forceConstants.size();
       if (isKRingTorsion) {
-        forceConstants[1] = 2.15;
+        forceConstants[1] = nvMolKit::DistGeom::kAllInOneForceConstants.kTermTorsion;
       } else {
         for (auto& forceConstant : forceConstants) {
-          forceConstant *= 0.1;
+          forceConstant *= nvMolKit::DistGeom::kAllInOneForceConstants.etTermScaling;
         }
       }
     }
   }
-  ETKDGAllInOneMinimizationStage aio(mols, eargs, params, aioContext);
+  ETKDGAllInOneMinimizationStage aio(mols, eargs, params, aioContext, legacyMinimizer);
   legacyFirst->execute(legacyContext);
   legacyFourth.execute(legacyContext);
   legacyETK.execute(legacyContext);
@@ -903,6 +914,7 @@ TEST(AllInOneETKDG, BulkStatisticsAgainstLegacyFromIdenticalCoordinates) {
       aioAccepted.push_back(aioViolations[i]);
     }
   }
+  ASSERT_FALSE(aioAccepted.empty());
   std::cout << "AIO bulk comparison: molecules=" << mols.size() << " legacy_failures=" << legacyFailureCount
             << " aio_failures=" << aioFailureCount << " legacy_bounds_p50=" << percentile(legacyViolations, 0.50)
             << " aio_bounds_p50=" << percentile(aioViolations, 0.50)

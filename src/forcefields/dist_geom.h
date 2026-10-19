@@ -131,9 +131,8 @@ struct Energy3DForceContribsHost {
 
 //! Harmonic out-of-plane terms used by RDKit's all-in-one ETKDG refinement.
 //!
-//! Each improper center contributes three permutations. Unlike the legacy
-//! CrystalFF inversion term, the AIO potential is 0.5 * k * chi^2, where chi
-//! is the out-of-plane angle in degrees.
+//! Each improper center contributes three permutations of 0.5 * k * chi^2,
+//! where chi is the out-of-plane angle in degrees.
 struct AIOPlanarityContribTerms {
   std::vector<int>    idx1;
   std::vector<int>    idx2;
@@ -156,7 +155,7 @@ struct AIOAngleContribTerms {
 //!
 //! The distance-geometry and angle terms are active during both minimization
 //! phases. Experimental torsions and planarity terms are appended for the
-//! second phase, matching RDKit's minimizeAllInOne() ordering.
+//! second phase.
 struct AllInOneForceContribsHost {
   EnergyForceContribsHost        distanceGeometry;
   DistanceConstraintContribTerms harmonicDistanceTerms;

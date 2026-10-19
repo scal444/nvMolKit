@@ -5,7 +5,7 @@
 #include <numbers>
 
 #include "src/forcefields/aio_etkdg_batched_forcefield.h"
-#include "src/forcefields/dist_geom_kernels_device.cuh"
+#include "src/forcefields/dist_geom_kernels_device_dispatch.cuh"
 
 namespace nvMolKit {
 namespace {
@@ -189,12 +189,12 @@ __global__ void harmonicEnergyKernel(const int      numTerms,
                                      double*        energyOuts) {
   const int termIdx = blockIdx.x * blockDim.x + threadIdx.x;
   if (termIdx < numTerms && systemIsActive(systemIdx[termIdx], activeSystemMask)) {
-    const double energy = DistGeom::distanceConstraintEnergy(positions,
-                                                             idx1[termIdx],
-                                                             idx2[termIdx],
-                                                             minLen[termIdx],
-                                                             maxLen[termIdx],
-                                                             forceConstant[termIdx]);
+    const double distance =
+      sqrt(FFKernelUtils::distanceSquaredPosIdx(positions, idx1[termIdx] * 4, idx2[termIdx] * 4, 4));
+    const double displacement = distance < minLen[termIdx] ?
+                                  distance - minLen[termIdx] :
+                                  (distance > maxLen[termIdx] ? distance - maxLen[termIdx] : 0.0);
+    const double energy       = 0.5 * forceConstant[termIdx] * displacement * displacement;
     atomicAdd(&energyOuts[systemIdx[termIdx]], energy);
   }
 }
@@ -211,13 +211,19 @@ __global__ void harmonicGradientKernel(const int      numTerms,
                                        double*        gradient) {
   const int termIdx = blockIdx.x * blockDim.x + threadIdx.x;
   if (termIdx < numTerms && systemIsActive(systemIdx[termIdx], activeSystemMask)) {
-    DistGeom::distanceConstraintGrad(positions,
-                                     idx1[termIdx],
-                                     idx2[termIdx],
-                                     minLen[termIdx],
-                                     maxLen[termIdx],
-                                     forceConstant[termIdx],
-                                     gradient);
+    const int    firstPosition  = idx1[termIdx] * 4;
+    const int    secondPosition = idx2[termIdx] * 4;
+    const double distance     = sqrt(FFKernelUtils::distanceSquaredPosIdx(positions, firstPosition, secondPosition, 4));
+    const double displacement = distance < minLen[termIdx] ?
+                                  distance - minLen[termIdx] :
+                                  (distance > maxLen[termIdx] ? distance - maxLen[termIdx] : 0.0);
+    const double scale        = forceConstant[termIdx] * displacement / fmax(distance, 1e-8);
+    // RDKit's harmonic constraints use 4D distances but update only the xyz gradient.
+    for (int coordinate = 0; coordinate < 3; ++coordinate) {
+      const double value = scale * (positions[firstPosition + coordinate] - positions[secondPosition + coordinate]);
+      atomicAdd(&gradient[firstPosition + coordinate], value);
+      atomicAdd(&gradient[secondPosition + coordinate], -value);
+    }
   }
 }
 
@@ -374,6 +380,9 @@ AllInOneETKDGBatchedForcefield::AllInOneETKDGBatchedForcefield(
   const cudaStream_t                                      stream)
     : BatchedForcefield(ForceFieldType::AIO_ETKDG, 4, atomStartsHost, nullptr, metadata),
       dgForcefield_(dgSystemHost, atomStartsHost, 1.0, 2.15, metadata, stream) {
+  if (systemContribs.size() + 1 != atomStartsHost.size()) {
+    throw std::invalid_argument("All-in-one contributions must match the number of systems");
+  }
   std::vector<int>    harmonicIdx1;
   std::vector<int>    harmonicIdx2;
   std::vector<double> harmonicMinLen;
@@ -470,6 +479,7 @@ AllInOneETKDGBatchedForcefield::AllInOneETKDGBatchedForcefield(
   setStreamAndUpload(planarityIdx4_, planarityIdx4, stream);
   setStreamAndUpload(planarityForceConstant_, planarityForceConstant, stream);
   setStreamAndUpload(planaritySystemIdx_, planaritySystemIdx, stream);
+  cudaCheckError(cudaStreamSynchronize(stream));
 }
 
 cudaError_t AllInOneETKDGBatchedForcefield::computeEnergy(double*            energyOuts,

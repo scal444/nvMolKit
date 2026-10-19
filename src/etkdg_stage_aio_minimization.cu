@@ -5,7 +5,7 @@
 
 #include "rdkit_extensions/dist_geom_flattened_builder.h"
 #include "src/etkdg_stage_aio_minimization.h"
-#include "src/forcefields/dist_geom_kernels_device.cuh"
+#include "src/forcefields/dist_geom_kernels_device_dispatch.cuh"
 #include "src/utils/cuda_error_check.h"
 
 namespace nvMolKit::detail {
@@ -23,7 +23,7 @@ __global__ void checkAllInOneEnergyKernel(const int      numSystems,
     return;
   }
   const int numAtoms = atomStarts[systemIdx + 1] - atomStarts[systemIdx];
-  if (energies[systemIdx] / static_cast<double>(numAtoms) >= 0.1) {
+  if (numAtoms == 0 || !isfinite(energies[systemIdx]) || energies[systemIdx] / static_cast<double>(numAtoms) >= 0.1) {
     failedSystems[systemIdx] = 1;
   }
 }
@@ -103,12 +103,15 @@ __global__ void checkKTotalEnergyKernel(const int      numSystems,
 
 }  // namespace
 
-ETKDGAllInOneMinimizationStage::ETKDGAllInOneMinimizationStage(const std::vector<const RDKit::ROMol*>&     mols,
-                                                               const std::vector<EmbedArgs>&               eargs,
-                                                               const RDKit::DGeomHelpers::EmbedParameters& embedParams,
-                                                               const ETKDGContext&                         ctx,
-                                                               const cudaStream_t                          stream)
-    : minimizer_(4, DebugLevel::NONE, true, stream, BfgsBackend::BATCHED),
+template <typename Real>
+ETKDGAllInOneMinimizationStageT<Real>::ETKDGAllInOneMinimizationStageT(
+  const std::vector<const RDKit::ROMol*>&     mols,
+  const std::vector<EmbedArgs>&               eargs,
+  const RDKit::DGeomHelpers::EmbedParameters& embedParams,
+  const ETKDGContext&                         ctx,
+  BfgsBatchMinimizerT<Real>&                  minimizer,
+  const cudaStream_t                          stream)
+    : minimizer_(minimizer),
       optimizerForceTol_(embedParams.optimizerForceTol),
       stream_(stream) {
   if (mols.size() != eargs.size()) {
@@ -145,7 +148,10 @@ ETKDGAllInOneMinimizationStage::ETKDGAllInOneMinimizationStage(const std::vector
   }
 }
 
-void ETKDGAllInOneMinimizationStage::execute(ETKDGContext& ctx) {
+template <typename Real> void ETKDGAllInOneMinimizationStageT<Real>::execute(ETKDGContext& ctx) {
+  if (ctx.nTotalSystems == 0) {
+    return;
+  }
   AllInOneETKDGBatchedForcefield forcefield(dgSystemHost_,
                                             systemContribs_,
                                             ctx.systemHost.atomStarts,
@@ -189,6 +195,9 @@ void ETKDGAllInOneMinimizationStage::execute(ETKDGContext& ctx) {
     ctx.failedThisStage.data());
   cudaCheckError(cudaGetLastError());
 }
+
+template class ETKDGAllInOneMinimizationStageT<double>;
+template class ETKDGAllInOneMinimizationStageT<float>;
 
 ETKDGKTermCheckStage::ETKDGKTermCheckStage(const std::vector<EmbedArgs>& eargs,
                                            const ETKDGContext&           ctx,

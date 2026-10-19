@@ -360,8 +360,7 @@ TEST_F(FlattenedBuilderTestFixture, TestAllInOneETKDGContributionBundle) {
     {0, 1, 2, 3}
   };
   eargs.etkdgDetails.expTorsionAngles = {
-    {{1, -1, 1, 1, 1, 1}, {0.2, 0.3, 0.0, 0.0, 0.0, 0.0}}
-  };
+    std::make_pair(std::vector<int>{1, -1, 1, 1, 1, 1}, std::vector<double>{0.2, 0.3, 0.0, 0.0, 0.0, 0.0})};
   eargs.etkdgDetails.angles = {
     {0, 1, 2, 1}
   };
