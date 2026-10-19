@@ -147,6 +147,9 @@ Substructure Search
    substructure.SubstructSearchConfig
    substructure.SubstructMatchResults
    substruct_library.SubstructLibrary
+   filter_catalog.FilterCatalog
+   filter_catalog.FilterCatalogEntry
+   filter_catalog.FilterCatalogPreset
 
 Conformer RMSD
 --------------

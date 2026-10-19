@@ -165,3 +165,22 @@ def test_add_preset_to_custom_catalog():
     catalog = FilterCatalog()
     assert catalog.addPreset(FilterCatalogPreset.PAINS_A) > 0
     assert catalog.pendingSize > 0
+
+
+@pytest.mark.parametrize("algorithm", ["gsi", "dfs"])
+def test_first_match_with_recursive_queries_and_many_matching_pairs(algorithm):
+    config = SubstructSearchConfig(algorithm=algorithm, workerThreads=2, preprocessingThreads=2, batchSize=64)
+    catalog = FilterCatalog(config=config)
+    patterns = ["[$([C]-[O])]", "[$([N]-[C])]", "O", "N", "[#6]"] * 16
+    for pattern in patterns:
+        catalog.addSmarts(pattern)
+    catalog.finalize()
+    targets = _molecules(["CCO", "CN", "O", "N", "C", "S", ""] * 12)
+    queries = [Chem.MolFromSmarts(pattern) for pattern in patterns]
+    expected = [
+        [index for index, query in enumerate(queries) if molecule.HasSubstructMatch(query)] for molecule in targets
+    ]
+    assert catalog.getMatches(targets) == expected
+    for _ in range(3):
+        assert catalog.getFirstMatch(targets) == [ids[0] if ids else None for ids in expected]
+        assert catalog.hasMatch(targets) == [bool(ids) for ids in expected]

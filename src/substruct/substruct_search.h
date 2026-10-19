@@ -182,7 +182,7 @@ std::size_t estimateRecursiveScratchBytes(const SubstructSearchConfig& config);
 /**
  * Return one flag per target by finding the lowest matching query ID.
  *
- * Active GPU mini-batches can skip later query IDs after a hit. Work already
+ * GSI mini-batches can skip later query IDs after a hit; DFS evaluates every pair. Work already
  * assigned to other mini-batches or executors still completes.
  */
 void hasAnySubstructMatch(const std::vector<const RDKit::ROMol*>& targets,

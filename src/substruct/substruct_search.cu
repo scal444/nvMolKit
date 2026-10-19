@@ -891,7 +891,7 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
                                                       pairOffset,
                                                       maxPairsPerBatch);
             }
-            batch->ctx.firstMatchMode = firstMatchMode;
+            batch->ctx.firstMatchMode = firstMatchMode && algorithm == SubstructAlgorithm::GSI;
             releaseGuard.release();
             batchQueue.push(std::move(batch));
           }
@@ -970,15 +970,15 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
             }
             BufferReleaseGuard innerReleaseGuard{&bufferPool, buffer};
 
-            auto batch         = makePreparedMiniBatch(buffer,
+            auto batch                = makePreparedMiniBatch(buffer,
                                                sharedOriginalIndices,
                                                shape,
                                                numBatchTargets,
                                                queryContext,
                                                config,
                                                countOnly);
-            batch->targetsHost = sharedTargetsHost;
-            batch->ctx.firstMatchMode = firstMatchMode;
+            batch->targetsHost        = sharedTargetsHost;
+            batch->ctx.firstMatchMode = firstMatchMode && algorithm == SubstructAlgorithm::GSI;
             planner.prepareMiniBatch(batch->plan, *buffer, batch->ctx, leafSubpatterns, pairOffset, maxPairsPerBatch);
 
             innerReleaseGuard.release();
@@ -1093,6 +1093,7 @@ void computeEffectiveThreadCounts(const SubstructSearchConfig& config,
 }
 
 struct PreparedSubstructQueries::Impl {
+  ScopedStream                               queryStream;
   std::vector<std::unique_ptr<RDKit::ROMol>> ownedQueries;
   std::vector<const RDKit::ROMol*>           queryPtrs;
   MoleculesHost                              host;
@@ -1102,7 +1103,9 @@ struct PreparedSubstructQueries::Impl {
   int                                        deviceId = 0;
 
   Impl(const std::vector<const RDKit::ROMol*>& queries, cudaStream_t stream, const SubstructSearchConfig& config)
-      : device(stream) {
+      : device(queryStream.stream()) {
+    cudaCheckError(cudaStreamSynchronize(stream));
+    stream = queryStream.stream();
     ownedQueries.reserve(queries.size());
     queryPtrs.reserve(queries.size());
     for (const RDKit::ROMol* query : queries) {
@@ -1164,7 +1167,7 @@ struct PreparedSubstructQueries::Impl {
 PreparedSubstructQueries::PreparedSubstructQueries(const std::vector<const RDKit::ROMol*>& queries,
                                                    cudaStream_t                            stream,
                                                    const SubstructSearchConfig&            config)
-    : impl_(std::make_unique<Impl>(queries, stream, config)) {}
+    : impl_(std::make_unique<Impl>(queries, stream == nullptr ? cudaStreamPerThread : stream, config)) {}
 
 PreparedSubstructQueries::~PreparedSubstructQueries() {
   if (!impl_) {
@@ -1263,91 +1266,91 @@ bool getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
     }
   }
 
-  MoleculesHost localQueriesHost;
-  MoleculesDevice localQueriesDevice;
+  MoleculesHost    localQueriesHost;
+  MoleculesDevice  localQueriesDevice;
   MoleculesDevice& uploadQueriesDevice = workspace != nullptr ? workspace->queriesDevice : localQueriesDevice;
   RecursivePatternPreprocessor localRecursivePreprocessor;
-  QueryPreprocessContext localQueryContext;
+  QueryPreprocessContext       localQueryContext;
   // Borrow the workspace's pinned buffer for the duration of this search.
   struct LentQueryAtomCounts {
     SubstructSearchWorkspace* workspace;
     PinnedHostVector<int>&    counts;
     ~LentQueryAtomCounts() {
-      if (workspace != nullptr && preparedQueries == nullptr) {
+      if (workspace != nullptr) {
         workspace->queryAtomCounts = std::move(counts);
       }
     }
-  } lentQueryAtomCounts{workspace, localQueryContext.queryAtomCounts};
+  } lentQueryAtomCounts{preparedQueries == nullptr ? workspace : nullptr, localQueryContext.queryAtomCounts};
   if (workspace != nullptr && preparedQueries == nullptr) {
     localQueryContext.queryAtomCounts = std::move(workspace->queryAtomCounts);
   }
   if (preparedQueries == nullptr) {
-  ScopedNvtxRange  buildRange2("Build host query data structures");
-  std::vector<int> emptySortOrder;
-  localQueriesHost = buildQueryBatchParallel(queries, emptySortOrder, effectivePreprocessingThreads);
-  buildRange2.pop();
+    ScopedNvtxRange  buildRange2("Build host query data structures");
+    std::vector<int> emptySortOrder;
+    localQueriesHost = buildQueryBatchParallel(queries, emptySortOrder, effectivePreprocessingThreads);
+    buildRange2.pop();
 
-  ScopedNvtxRange  buildRange3("Build device query data structures");
-  uploadQueriesDevice.setStream(stream);
-  buildRange3.pop();
+    ScopedNvtxRange buildRange3("Build device query data structures");
+    uploadQueriesDevice.setStream(stream);
+    buildRange3.pop();
 
-  ScopedNvtxRange buildRange4("Copy queries to device");
-  uploadQueriesDevice.copyFromHost(localQueriesHost);
-  buildRange4.pop();
+    ScopedNvtxRange buildRange4("Copy queries to device");
+    uploadQueriesDevice.copyFromHost(localQueriesHost);
+    buildRange4.pop();
 
-  ScopedNvtxRange              leafRange("Build LeafSubpatterns");
-  localRecursivePreprocessor.buildPatterns(localQueriesHost);
-  localRecursivePreprocessor.syncToDevice(stream);
-  leafRange.pop();
+    ScopedNvtxRange leafRange("Build LeafSubpatterns");
+    localRecursivePreprocessor.buildPatterns(localQueriesHost);
+    localRecursivePreprocessor.syncToDevice(stream);
+    leafRange.pop();
 
-  // Ensure queries and patterns are fully copied before workers start using them.
-  // Workers use different streams, so we need an explicit sync here.
-  cudaCheckError(cudaStreamSynchronize(stream));
+    // Ensure queries and patterns are fully copied before workers start using them.
+    // Workers use different streams, so we need an explicit sync here.
+    cudaCheckError(cudaStreamSynchronize(stream));
 
-  const LeafSubpatterns& leafSubpatterns = localRecursivePreprocessor.leafSubpatterns();
-  localQueryContext.numQueries = numQueries;
-  localQueryContext.queryAtomCounts.resize(numQueries);
-  localQueryContext.queryPipelineDepths.resize(numQueries);
-  localQueryContext.queryMaxDepths.resize(numQueries);
-  localQueryContext.queryHasPatterns.resize(numQueries);
-  localQueryContext.queryNeedsFallback.resize(numQueries, 0);
+    const LeafSubpatterns& leafSubpatterns = localRecursivePreprocessor.leafSubpatterns();
+    localQueryContext.numQueries           = numQueries;
+    localQueryContext.queryAtomCounts.resize(numQueries);
+    localQueryContext.queryPipelineDepths.resize(numQueries);
+    localQueryContext.queryMaxDepths.resize(numQueries);
+    localQueryContext.queryHasPatterns.resize(numQueries);
+    localQueryContext.queryNeedsFallback.resize(numQueries, 0);
 
-  const int precomputedSize      = static_cast<int>(leafSubpatterns.perQueryPatterns.size());
-  const int perQueryMaxDepthSize = static_cast<int>(leafSubpatterns.perQueryMaxDepth.size());
+    const int precomputedSize      = static_cast<int>(leafSubpatterns.perQueryPatterns.size());
+    const int perQueryMaxDepthSize = static_cast<int>(leafSubpatterns.perQueryMaxDepth.size());
 
-  int maxQueryAtoms = 0;
+    int maxQueryAtoms = 0;
 
 #pragma omp parallel num_threads(effectivePreprocessingThreads) reduction(max : maxQueryAtoms)
-  {
+    {
 #pragma omp for nowait
-    for (int q = 0; q < numQueries; ++q) {
-      const int atomStart             = localQueriesHost.batchAtomStarts[q];
-      const int atomEnd               = localQueriesHost.batchAtomStarts[q + 1];
-      const int atomCount             = atomEnd - atomStart;
-      localQueryContext.queryAtomCounts[q] = atomCount;
+      for (int q = 0; q < numQueries; ++q) {
+        const int atomStart                  = localQueriesHost.batchAtomStarts[q];
+        const int atomEnd                    = localQueriesHost.batchAtomStarts[q + 1];
+        const int atomCount                  = atomEnd - atomStart;
+        localQueryContext.queryAtomCounts[q] = atomCount;
 
-      const int maxDepth = (q < perQueryMaxDepthSize) ? leafSubpatterns.perQueryMaxDepth[q] : 0;
+        const int maxDepth = (q < perQueryMaxDepthSize) ? leafSubpatterns.perQueryMaxDepth[q] : 0;
 
-      if (maxDepth >= kMaxSmartsNestingDepth) {
-        localQueryContext.queryNeedsFallback[q]  = 1;
-        localQueryContext.queryPipelineDepths[q] = 0;
-        localQueryContext.queryMaxDepths[q]      = 0;
-        localQueryContext.queryHasPatterns[q]    = 0;
-      } else {
-        const int depth                     = getQueryPipelineDepth(localQueriesHost, q);
-        localQueryContext.queryPipelineDepths[q] = depth;
-        localQueryContext.queryMaxDepths[q]      = maxDepth;
+        if (maxDepth >= kMaxSmartsNestingDepth) {
+          localQueryContext.queryNeedsFallback[q]  = 1;
+          localQueryContext.queryPipelineDepths[q] = 0;
+          localQueryContext.queryMaxDepths[q]      = 0;
+          localQueryContext.queryHasPatterns[q]    = 0;
+        } else {
+          const int depth                          = getQueryPipelineDepth(localQueriesHost, q);
+          localQueryContext.queryPipelineDepths[q] = depth;
+          localQueryContext.queryMaxDepths[q]      = maxDepth;
 
-        const bool hasPatterns =
-          (q < precomputedSize) && (maxDepth > 0 || !leafSubpatterns.perQueryPatterns[q][0].empty());
-        localQueryContext.queryHasPatterns[q] = hasPatterns ? 1 : 0;
+          const bool hasPatterns =
+            (q < precomputedSize) && (maxDepth > 0 || !leafSubpatterns.perQueryPatterns[q][0].empty());
+          localQueryContext.queryHasPatterns[q] = hasPatterns ? 1 : 0;
+        }
+
+        maxQueryAtoms = std::max(maxQueryAtoms, atomCount);
       }
-
-      maxQueryAtoms = std::max(maxQueryAtoms, atomCount);
     }
-  }
 
-  localQueryContext.maxQueryAtoms = maxQueryAtoms;
+    localQueryContext.maxQueryAtoms = maxQueryAtoms;
 
   } else {
     int currentDevice = 0;
@@ -1357,9 +1360,11 @@ bool getSubstructMatchesImpl(const std::vector<const RDKit::ROMol*>& targets,
     }
   }
   const MoleculesDevice& queriesDevice = preparedQueries != nullptr ? preparedQueries->device : uploadQueriesDevice;
-  const MoleculesHost& queriesHost = preparedQueries != nullptr ? preparedQueries->host : localQueriesHost;
-  const RecursivePatternPreprocessor& recursivePreprocessor = preparedQueries != nullptr ? preparedQueries->recursivePreprocessor : localRecursivePreprocessor;
-  const QueryPreprocessContext& queryContext = preparedQueries != nullptr ? preparedQueries->context : localQueryContext;
+  const MoleculesHost&   queriesHost   = preparedQueries != nullptr ? preparedQueries->host : localQueriesHost;
+  const RecursivePatternPreprocessor& recursivePreprocessor =
+    preparedQueries != nullptr ? preparedQueries->recursivePreprocessor : localRecursivePreprocessor;
+  const QueryPreprocessContext& queryContext =
+    preparedQueries != nullptr ? preparedQueries->context : localQueryContext;
 
   // Search workspaces hold recursive scratch only while a recursive query
   // runs; query admission budgets it separately from the base workspace.

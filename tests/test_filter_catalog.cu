@@ -16,6 +16,7 @@
 
 #include "src/substruct/filter_catalog.h"
 #include "src/substruct/rdkit_filter_catalog_data.h"
+#include "src/substruct/substruct_search.h"
 
 namespace {
 
@@ -237,6 +238,40 @@ TEST(FilterCatalog, FinalizesAndQueriesOnExternalStream) {
   }
 
   ASSERT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+}
+
+TEST(FilterCatalog, PreparedQueriesOutliveInputsAndConstructionStream) {
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  cudaMemPool_t pool   = nullptr;
+  int           device = 0;
+  ASSERT_EQ(cudaGetDevice(&device), cudaSuccess);
+  ASSERT_EQ(cudaDeviceGetMemPool(&pool, device), cudaSuccess);
+  std::uint64_t usedBefore = 0;
+  ASSERT_EQ(cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &usedBefore), cudaSuccess);
+  cudaStream_t stream = nullptr;
+  ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), cudaSuccess);
+  std::unique_ptr<nvMolKit::PreparedSubstructQueries> prepared;
+  {
+    std::unique_ptr<RDKit::ROMol> query(RDKit::SmartsToMol("[$([C]-[O])]"));
+    prepared =
+      std::make_unique<nvMolKit::PreparedSubstructQueries>(std::vector<const RDKit::ROMol*>{query.get()}, stream);
+  }
+  ASSERT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+  auto                            alcohol = smiles("CCO");
+  auto                            amine   = smiles("CCN");
+  nvMolKit::SubstructSearchConfig config;
+  config.workerThreads        = 1;
+  config.preprocessingThreads = 1;
+  for (const auto algorithm : {nvMolKit::SubstructAlgorithm::GSI, nvMolKit::SubstructAlgorithm::DFS}) {
+    std::vector<int> result;
+    nvMolKit::getFirstSubstructMatch({alcohol.get(), amine.get()}, *prepared, result, algorithm, nullptr, config);
+    EXPECT_EQ(result, std::vector<int>({0, -1}));
+  }
+  prepared.reset();
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  std::uint64_t usedAfter = 0;
+  ASSERT_EQ(cudaMemPoolGetAttribute(pool, cudaMemPoolAttrUsedMemCurrent, &usedAfter), cudaSuccess);
+  EXPECT_EQ(usedAfter, usedBefore);
 }
 
 TEST(FilterCatalog, FailedFinalizePreservesPublishedGeneration) {

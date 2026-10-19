@@ -73,6 +73,17 @@ class FilterCatalog:
     Query definitions remain on the CPU until :meth:`finalize` publishes them
     to the GPU. Query methods preserve target order. Match IDs refer to entries
     in insertion order and can be resolved with :meth:`getEntry`.
+
+    The catalog uses one GPU with the GSI or DFS backend. Queries requiring
+    multiple distinct occurrences and queries unsupported on the GPU use RDKit
+    on the CPU. Matching ignores chirality. Queries return completed host lists.
+
+    Example::
+
+        catalog = FilterCatalog(FilterCatalogPreset.BRENK)
+        catalog.addSmarts("[N+](=O)[O-]", "nitro")
+        catalog.finalize()
+        matches = catalog.getMatches(molecules)
     """
 
     def __init__(

@@ -63,7 +63,7 @@ void launchLabelMatrixKernel(SubstructTemplateConfig   config,
                              const uint32_t*           recursiveMatchBits,
                              int                       maxTargetAtoms,
                              const int*                batchLocalIndices,
-                             const int*                targetWinners,
+                             int*                      targetWinners,
                              cudaStream_t              stream);
 
 /**

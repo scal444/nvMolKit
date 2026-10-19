@@ -70,19 +70,6 @@ class FilterCatalog::Impl {
     }
   }
 
-  ~Impl() noexcept {
-    int  originalDevice = -1;
-    bool restoreDevice  = false;
-    if (preparedQueries_ != nullptr && cudaGetDevice(&originalDevice) == cudaSuccess &&
-        cudaSetDevice(deviceId_) == cudaSuccess) {
-      restoreDevice = true;
-    }
-    preparedQueries_.reset();
-    if (restoreDevice) {
-      cudaSetDevice(originalDevice);
-    }
-  }
-
   std::size_t addPreset(FilterCatalogPreset preset) {
     std::unique_lock lock(mutex_);
     const auto       mask = static_cast<std::uint32_t>(preset);

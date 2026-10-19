@@ -220,7 +220,7 @@ __global__ void labelMatrixKernelT(TargetMoleculesDeviceView targets,
                                    const uint32_t*           recursiveMatchBits,
                                    int                       maxTargetAtoms,
                                    const int*                batchLocalIndices,
-                                   const int*                targetWinners) {
+                                   int*                      targetWinners) {
   constexpr std::size_t kLabelMatrixBitsT = MaxTargetAtoms * MaxQueryAtoms;
   using LabelMatrixStorageT               = FlatBitVect<kLabelMatrixBitsT>;
 
@@ -234,7 +234,12 @@ __global__ void labelMatrixKernelT(TargetMoleculesDeviceView targets,
     return;
   }
   if constexpr (TrackFirstMatch) {
-    if (targetWinners[targetIdx] <= queryIdx) {
+    __shared__ bool skipPair;
+    if (threadIdx.x == 0) {
+      skipPair = atomicAdd(&targetWinners[targetIdx], 0) <= queryIdx;
+    }
+    __syncthreads();
+    if (skipPair) {
       return;
     }
   }
@@ -356,10 +361,15 @@ __global__ void substructMatchKernelT(TargetMoleculesDeviceView                 
     return;
   }
   if constexpr (TrackFirstMatch) {
-    if (results.targetWinners[targetIdx] <= queryIdx) {
-      if (threadIdx.x == 0) {
+    __shared__ bool skipPair;
+    if (threadIdx.x == 0) {
+      skipPair = atomicAdd(&results.targetWinners[targetIdx], 0) <= queryIdx;
+      if (skipPair) {
         results.matchCounts[miniBatchIdx] = 0;
       }
+    }
+    __syncthreads();
+    if (skipPair) {
       return;
     }
   }
@@ -678,7 +688,7 @@ __global__ void substructPaintKernelT(TargetMoleculesDeviceView     targets,
  * @tparam MaxQueryAtoms Maximum query atoms for label matrix and mask sizing
  * @tparam Mode Count (count-only) or Store (full mappings)
  */
-template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms, dfs::DfsOutputMode Mode, bool TrackFirstMatch = false>
+template <std::size_t MaxTargetAtoms, std::size_t MaxQueryAtoms, dfs::DfsOutputMode Mode>
 __global__
 __launch_bounds__(dfs::kBlockSize, dfs::minBlocksPerSM<MaxTargetAtoms, MaxQueryAtoms>()) void substructDfsMatchKernelT(
   TargetMoleculesDeviceView                       targets,
@@ -705,14 +715,6 @@ __launch_bounds__(dfs::kBlockSize, dfs::minBlocksPerSM<MaxTargetAtoms, MaxQueryA
   if (targetIdx >= targets.numMolecules || queryIdx >= queries.numMolecules) {
     return;
   }
-  if constexpr (TrackFirstMatch) {
-    if (results.targetWinners[targetIdx] <= queryIdx) {
-      if (lane == 0) {
-        results.matchCounts[miniBatchIdx] = 0;
-      }
-      return;
-    }
-  }
 
   const TargetMoleculeView target = getMolecule(targets, targetIdx);
   const QueryMoleculeView  query  = getMolecule(queries, queryIdx);
@@ -737,12 +739,6 @@ __launch_bounds__(dfs::kBlockSize, dfs::minBlocksPerSM<MaxTargetAtoms, MaxQueryA
                                                           lane,
                                                           miniBatchIdx,
                                                           out);
-  __syncwarp();
-  if constexpr (TrackFirstMatch) {
-    if (lane == 0 && results.matchCounts[miniBatchIdx] > 0) {
-      atomicMin(&results.targetWinners[targetIdx], queryIdx);
-    }
-  }
 }
 
 /**
@@ -953,7 +949,7 @@ INSTANTIATE_SUBSTRUCT_DFS_KERNELS(128, 64)
                                                                  const uint32_t*,           \
                                                                  int,                       \
                                                                  const int*,                \
-                                                                 const int*);               \
+                                                                 int*);                     \
   template __global__ void labelMatrixPaintKernelT<MaxT, MaxQ>(TargetMoleculesDeviceView,   \
                                                                QueryMoleculesDeviceView,    \
                                                                const BatchedPatternEntry*,  \
@@ -1077,7 +1073,7 @@ void launchLabelMatrixKernelForConfig(TargetMoleculesDeviceView targets,
                                       const uint32_t*           recursiveMatchBits,
                                       int                       maxTargetAtoms,
                                       const int*                batchLocalIndices,
-                                      const int*                targetWinners,
+                                      int*                      targetWinners,
                                       cudaStream_t              stream) {
   constexpr int kBlockSize = getBlockSizeForConfig<MaxTargetAtoms>();
   if (targetWinners != nullptr) {
@@ -1115,7 +1111,7 @@ void launchLabelMatrixKernel(SubstructTemplateConfig   config,
                              const uint32_t*           recursiveMatchBits,
                              int                       maxTargetAtoms,
                              const int*                batchLocalIndices,
-                             const int*                targetWinners,
+                             int*                      targetWinners,
                              cudaStream_t              stream) {
   DISPATCH_BY_TQ_CONFIG(config,
                         launchLabelMatrixKernelForConfig,
@@ -1377,7 +1373,7 @@ void launchMatchKernelForConfigT(SubstructAlgorithm            algorithm,
     case SubstructAlgorithm::DFS: {
       const int dfsBlocks = (numPairs + dfs::kWarpsPerBlock - 1) / dfs::kWarpsPerBlock;
       if (miniBatchResults.countOnly()) {
-        substructDfsMatchKernelT<MaxTargetAtoms, MaxQueryAtoms, dfs::DfsOutputMode::Count, TrackFirstMatch>
+        substructDfsMatchKernelT<MaxTargetAtoms, MaxQueryAtoms, dfs::DfsOutputMode::Count>
           <<<dfsBlocks, dfs::kBlockSize, 0, stream>>>(targets,
                                                       queries,
                                                       results,
@@ -1386,7 +1382,7 @@ void launchMatchKernelForConfigT(SubstructAlgorithm            algorithm,
                                                       numQueries,
                                                       batchLocalIndices);
       } else {
-        substructDfsMatchKernelT<MaxTargetAtoms, MaxQueryAtoms, dfs::DfsOutputMode::Store, TrackFirstMatch>
+        substructDfsMatchKernelT<MaxTargetAtoms, MaxQueryAtoms, dfs::DfsOutputMode::Store>
           <<<dfsBlocks, dfs::kBlockSize, 0, stream>>>(targets,
                                                       queries,
                                                       results,
