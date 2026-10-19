@@ -354,8 +354,7 @@ TEST_F(FlattenedBuilderTestFixture, TestAllInOneETKDGContributionBundle) {
                                                        nvMolKit::DGeomHelpers::Dimensionality::DIM_4D);
   ASSERT_NE(field, nullptr);
 
-  // Pin the supplemental terms so this test is independent of the torsion
-  // preference tables shipped by the installed RDKit version.
+  // Supplemental terms are fixed independently of RDKit's torsion preference tables.
   eargs.etkdgDetails.expTorsionAtoms = {
     {0, 1, 2, 3}
   };

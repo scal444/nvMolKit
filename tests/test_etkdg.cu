@@ -691,6 +691,7 @@ void testConformerEnergyComparison(const std::vector<RDKit::ROMol*>&    mols,
   }
   params.useRandomCoords = true;
   params.basinThresh     = 1e8;
+  params.randomSeed      = 42;
   // Generate conformers using RDKit for copied molecules
   for (size_t i = 0; i < molCopyPtrs.size(); ++i) {
     auto*                       molCopy = molCopyPtrs[i];

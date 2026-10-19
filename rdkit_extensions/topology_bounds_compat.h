@@ -14,7 +14,7 @@
 
 namespace nvMolKit::detail {
 
-//! Set topology bounds the way RDKit's embedder does for the RDKit version being built against.
+//! Set topology bounds for the installed RDKit API.
 //! When etkdgDetails is given, the bonds and angles used by the ETKDG force fields are collected, and on
 //! RDKit >= 2026.09 so are the 1-4 path configurations that RDKit turns into forced amide/ester torsions.
 inline void setEmbedderTopolBounds(const RDKit::ROMol&                         mol,
@@ -24,7 +24,7 @@ inline void setEmbedderTopolBounds(const RDKit::ROMol&                         m
                                    const bool                                  scaleVDW,
                                    const bool                                  set15bounds) {
 #if RDKIT_ETKDG_2026_09_API
-  // nvMolKit rejects embedForceField=MMFF, so UFF matches RDKit for every accepted parameter set.
+  // Only UFF topology bounds are supported.
   if (etkdgDetails != nullptr) {
     RDKit::DGeomHelpers::setTopolBounds(mol,
                                         mmat,

@@ -22,6 +22,7 @@
 #include <GraphMol/SmilesParse/SmilesParse.h>
 #include <GraphMol/SmilesParse/SmilesWrite.h>
 #include <gtest/gtest.h>
+#include <RDGeneral/utils.h>
 
 #include <filesystem>
 #include <fstream>
@@ -34,6 +35,7 @@
 #include "src/etkdg_stage_coordgen.h"
 #include "src/etkdg_stage_distgeom_minimize.h"
 #include "src/etkdg_stage_etk_minimization.h"
+#include "src/etkdg_stage_stereochem_checks.h"
 #include "src/forcefields/dist_geom.h"
 #include "src/utils/host_vector.h"
 #include "tests/test_utils.h"
@@ -690,9 +692,7 @@ TEST_P(ETKDGMinimizeMultiMolDiverseTestFixture, AllInOneSmallBatchStatisticsAgai
   DistGeomMinimizeWrapperStage legacyFourth(*legacyFirst, 0.2, 1.0, 200, false, "Fourth Dimension Minimization");
   ETKMinimizationStage         legacyETK(mols_, eargs_, embedParam_, legacyContext, legacyMinimizer);
 
-  // RDKit <=2025 generates the sequential constants. Normalize the prepared
-  // torsion details to the AIO constants so this directly exercises the new
-  // stage from the same initial coordinates without requiring the public flag.
+  // The all-in-one contribution builder requires AIO-scaled torsion details.
   for (auto& earg : eargs_) {
     for (auto& torsion : earg.etkdgDetails.expTorsionAngles) {
 #if RDKIT_ETKDG_2026_09_API
@@ -813,8 +813,12 @@ TEST(AllInOneETKDG, BulkStatisticsAgainstLegacyFromIdenticalCoordinates) {
   params.randomSeed      = 42;
   ETKDGContext           initialContext;
   std::vector<EmbedArgs> eargs;
+  // The reference setup helper draws from RDKit's global RNG.
+  const auto             randomState = RDKit::getRandomGenerator();
+  RDKit::getRandomGenerator(params.randomSeed);
   initTestComponentsCommon(mols, molOwners, initialContext, eargs, params);
-  auto makeContext = [&]() {
+  RDKit::getRandomGenerator() = randomState;
+  auto makeContext            = [&]() {
     ETKDGContext result;
     result.nTotalSystems = initialContext.nTotalSystems;
     result.systemHost    = initialContext.systemHost;
@@ -868,6 +872,12 @@ TEST(AllInOneETKDG, BulkStatisticsAgainstLegacyFromIdenticalCoordinates) {
   legacyFourth.execute(legacyContext);
   legacyETK.execute(legacyContext);
   aio.execute(aioContext);
+  ETKDGKTermCheckStage knowledgeCheck(eargs, aioContext);
+  knowledgeCheck.execute(aioContext);
+  ETKDGClashCheckStage clashCheck(aioContext, eargs);
+  clashCheck.execute(aioContext);
+  ETKDGDoubleBondGeometryCheckStage geometryCheck(aioContext, eargs, 4, nullptr, 3e-3, true);
+  geometryCheck.execute(aioContext);
 
   std::vector<double>  legacyPositions(legacyContext.systemDevice.positions.size());
   std::vector<double>  aioPositions(aioContext.systemDevice.positions.size());
