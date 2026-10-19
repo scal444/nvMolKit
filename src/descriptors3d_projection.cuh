@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <type_traits>
 
 #include "src/descriptors3d.h"
 #include "src/descriptors3d_kernel.cuh"
@@ -998,8 +999,8 @@ __device__ __forceinline__ ConformerRange loadConformerRange(const DeviceCoordVi
  * @brief PBF and WHIM of conformer `conformerBegin + blockIdx.x`, one block per conformer.
  *
  * The block centers the coordinates in float64 into the scratch, then each warp sums the covariance of its
- * PCA slots: WHIM's unweighted and atom-property channels in WhimReal and, when PBF is requested, PBF's
- * unweighted PCA in @p Real.
+ * PCA slots: WHIM's unweighted and atom-property channels in WhimReal and, when PBF is requested in another
+ * precision, PBF's unweighted PCA in @p Real (in float64 PBF shares WHIM's identical unweighted channel).
  * One lane per slot diagonalizes. Warps then project and round each channel's coordinates, PBF is written,
  * and the warps share the symmetry searches of the (channel, axis) pairs. Finally the first warp writes the
  * WHIM row. The scratch (see WhimScratchLayout) is shared memory, or with @p kGlobalScratch a block per
@@ -1021,7 +1022,7 @@ __global__ void __launch_bounds__(kWarps* kWarpSize, kWarps == kWhimWarps ? kWhi
   __shared__ WhimBlockShared<kWarps> shared;
   constexpr int                      kWhimThreads = kWarps * kWarpSize;
   static_assert(kWarps >= 3, "the eigensolve phase uses three warps");
-  constexpr bool kSeparatePbf = kComputePbf;
+  constexpr bool kSeparatePbf = kComputePbf && !std::is_same_v<Real, WhimReal>;
   constexpr int  kPcaSlots    = kNumWhimChannels + (kSeparatePbf ? 1 : 0);
   //! Slot whose eigenvectors PBF projects on.
   constexpr int  kPbfSlot     = kSeparatePbf ? kNumWhimChannels : 0;
@@ -1618,7 +1619,7 @@ __global__ void __launch_bounds__(kBatchThreads, 8) whimBatchKernel(const Device
                                                                     const WhimThreshold   threshold) {
   extern __shared__ double dynamicScratch[];
   __shared__ WhimBatchShared<kConformers> shared;
-  constexpr bool                          kSeparatePbf   = kComputePbf;
+  constexpr bool                          kSeparatePbf   = kComputePbf && !std::is_same_v<Real, WhimReal>;
   const int                               tid            = static_cast<int>(threadIdx.x);
   const int                               lane           = tid % kWarpSize;
   const int                               warp           = tid / kWarpSize;
@@ -1812,7 +1813,7 @@ __global__ void __launch_bounds__(kBatchThreads, 8) whimBatchKernel(const Device
 
   // Phase 3: projections and symmetry searches. Each pass, a group per (conformer, channel) task and, with its
   // own PCA, PBF's projects into the warp's score buffer (rounded scores, their fourth-power sums and largest
-  // magnitudes), then the warp searches its tasks' (channel,
+  // magnitudes; in float64 PBF shares channel 0's projections), then the warp searches its tasks' (channel,
   // axis) pairs in turn. Projections too large for the bitmap are recomputed in int32 and compared pairwise.
   // Tasks are the (conformer, channel) pairs, then with its own PCA each conformer's PBF projection; they are
   // dealt round-robin over the warps, so that every warp gets the same number of searches (within one channel) and
@@ -1864,6 +1865,11 @@ __global__ void __launch_bounds__(kBatchThreads, 8) whimBatchKernel(const Device
           channelScores[axis * stride + atomIdx] =
             static_cast<int16_t>(magnitude < static_cast<uint32_t>(kWhimBitmapRange) ? rounded : 0);
           magnitudes[axis] = magnitude > magnitudes[axis] ? magnitude : magnitudes[axis];
+          if constexpr (kComputePbf && !kSeparatePbf) {
+            if (axis == 2) {
+              pbfSum += fabs(score);
+            }
+          }
         }
       }
       if (numAtoms > 0) {
@@ -1897,7 +1903,7 @@ __global__ void __launch_bounds__(kBatchThreads, 8) whimBatchKernel(const Device
     }
     if constexpr (kComputePbf) {
       const Real pbfTotal = groupButterflySum(pbfSum);
-      const bool pbfTask  = channel == kNumWhimChannels;
+      const bool pbfTask  = kSeparatePbf ? channel == kNumWhimChannels : channel == 0;
       if (pbfTask && numAtoms > 0 && laneInGroup == 0) {
         const Real pbf = pbfTotal / static_cast<Real>(numAtoms);
         storeOutput<Real>(pbfOutput + firstConformer + c, numAtoms < 4 || !shared.is3D[c] ? Real(0) : pbf);
