@@ -29,9 +29,73 @@ __device__ __forceinline__ real cubeValue(const real x) {
   return x * x * x;
 }
 
+//! Smallest squared length treated as nonzero before a reciprocal: keeps the double-precision estimates away from
+//! subnormal inputs, which they flush to zero; zero in single precision, matching the original > 0 tests.
+constexpr real kPositiveFloor = static_cast<real>(sizeof(real) == 8 ? 1.0e-300 : 0.0);
+
+// Reciprocals and square roots of values the callers have already checked to be positive. In double precision
+// the hardware estimate (about 20 bits) is refined with Newton-Raphson steps carried out in double arithmetic, so
+// the result keeps full double accuracy without the IEEE division and square-root slow-path calls, whose call
+// sequences cost registers and scheduling freedom. Single precision keeps its fast-math division and square root.
+
+//! 1/x for finite x > 0.
+__device__ __forceinline__ real recipPositive(const real x) {
+  if constexpr (sizeof(real) == 8) {
+    double r;
+    asm("rcp.approx.ftz.f64 %0, %1;" : "=d"(r) : "d"(static_cast<double>(x)));
+    double e = fma(-x, r, 1.0);
+    e        = fma(e, e, e);
+    r        = fma(r, e, r);
+    e        = fma(-x, r, 1.0);
+    return fma(r, e, r);
+  } else {
+    return real{1.0} / x;
+  }
+}
+
+//! 1/sqrt(x) for finite x > 0.
+__device__ __forceinline__ real rsqrtPositive(const real x) {
+  if constexpr (sizeof(real) == 8) {
+    double y;
+    asm("rsqrt.approx.ftz.f64 %0, %1;" : "=d"(y) : "d"(static_cast<double>(x)));
+    const double halfX = 0.5 * x;
+    double       e     = fma(-halfX * y, y, 0.5);
+    y                  = fma(y, e, y);
+    e                  = fma(-halfX * y, y, 0.5);
+    return fma(y, e, y);
+  } else {
+    return real{1.0} / NVMOLKIT_SQRT(x);
+  }
+}
+
+//! sqrt(x) for finite x >= 0.
+__device__ __forceinline__ real sqrtNonNegative(const real x) {
+  if constexpr (sizeof(real) == 8) {
+    return x > kPositiveFloor ? x * rsqrtPositive(x) : real{0.0};
+  } else {
+    return NVMOLKIT_SQRT(x);
+  }
+}
+
+//! 1/order for the small integer multiplicities of the angle and torsion terms.
+__device__ __forceinline__ real recipOrder(const int order) {
+  switch (order) {
+    case 1:
+      return real{1.0};
+    case 2:
+      return real{0.5};
+    case 3:
+      return real{1.0} / real{3.0};
+    case 4:
+      return real{0.25};
+    default:
+      return real{1.0} / static_cast<real>(order);
+  }
+}
+
 __device__ __forceinline__ real
 uffBondStretchEnergy(const auto* pos, const int idx1, const int idx2, const real restLen, const real forceConstant) {
-  const real dist = NVMOLKIT_SQRT(distanceSquared(pos, idx1, idx2));
+  const real dist = sqrtNonNegative(distanceSquared(pos, idx1, idx2));
   const real diff = dist - restLen;
   return real{0.5} * forceConstant * diff * diff;
 }
@@ -44,14 +108,13 @@ __device__ __forceinline__ void uffBondStretchGrad(const auto* pos,
                                                    auto*       grad) {
   real       dx, dy, dz;
   const real distSq = distanceSquaredWithComponents(pos, idx1, idx2, dx, dy, dz);
-  const real dist   = NVMOLKIT_SQRT(distSq);
-  const real pref   = forceConstant * (dist - restLen);
 
   real gx = forceConstant * real{0.01};
   real gy = gx;
   real gz = gx;
-  if (dist > real{0.0}) {
-    const real invDist = real{1.0} / dist;
+  if (distSq > kPositiveFloor) {
+    const real invDist = rsqrtPositive(distSq);
+    const real pref    = forceConstant * (distSq * invDist - restLen);
     gx                 = pref * dx * invDist;
     gy                 = pref * dy * invDist;
     gz                 = pref * dz * invDist;
@@ -95,7 +158,8 @@ __device__ __forceinline__ real uffAngleEnergyTerm(const real    cosTheta,
       result = real{0.0};
       break;
   }
-  return (real{1.0} - result) / static_cast<real>(order * order);
+  const real invOrder = recipOrder(order);
+  return (real{1.0} - result) * (invOrder * invOrder);
 }
 
 __device__ __forceinline__ real uffAngleThetaDeriv(const real    cosTheta,
@@ -126,7 +190,7 @@ __device__ __forceinline__ real uffAngleThetaDeriv(const real    cosTheta,
     default:
       return real{0.0};
   }
-  return result * forceConstant / static_cast<real>(order);
+  return result * forceConstant * recipOrder(order);
 }
 
 __device__ __forceinline__ real uffAngleBendEnergy(const auto*   pos,
@@ -142,13 +206,11 @@ __device__ __forceinline__ real uffAngleBendEnergy(const auto*   pos,
   real       dx1, dy1, dz1, dx2, dy2, dz2;
   const real dist1Sq = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
   const real dist2Sq = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
-  const real dist1   = NVMOLKIT_SQRT(dist1Sq);
-  const real dist2   = NVMOLKIT_SQRT(dist2Sq);
-  if (dist1 <= real{0.0} || dist2 <= real{0.0}) {
+  if (dist1Sq <= kPositiveFloor || dist2Sq <= kPositiveFloor) {
     return real{0.0};
   }
 
-  real cosTheta = (dx1 * dx2 + dy1 * dy2 + dz1 * dz2) / (dist1 * dist2);
+  real cosTheta = (dx1 * dx2 + dy1 * dy2 + dz1 * dz2) * (rsqrtPositive(dist1Sq) * rsqrtPositive(dist2Sq));
   clipToOne(cosTheta);
   const real sinThetaSq = real{1.0} - cosTheta * cosTheta;
   real       energy     = forceConstant * uffAngleEnergyTerm(cosTheta, sinThetaSq, order, C0, C1, C2);
@@ -175,21 +237,19 @@ __device__ __forceinline__ void uffAngleBendGrad(const auto*   pos,
   real       dx1, dy1, dz1, dx2, dy2, dz2;
   const real dist1Sq = distanceSquaredWithComponents(pos, idx1, idx2, dx1, dy1, dz1);
   const real dist2Sq = distanceSquaredWithComponents(pos, idx3, idx2, dx2, dy2, dz2);
-  if (dist1Sq <= real{0.0} || dist2Sq <= real{0.0}) {
+  if (dist1Sq <= kPositiveFloor || dist2Sq <= kPositiveFloor) {
     return;
   }
 
-  const real dist1    = NVMOLKIT_SQRT(dist1Sq);
-  const real dist2    = NVMOLKIT_SQRT(dist2Sq);
-  const real invDist1 = real{1.0} / dist1;
-  const real invDist2 = real{1.0} / dist2;
+  const real invDist1 = rsqrtPositive(dist1Sq);
+  const real invDist2 = rsqrtPositive(dist2Sq);
   real       cosTheta = (dx1 * dx2 + dy1 * dy2 + dz1 * dz2) * invDist1 * invDist2;
   clipToOne(cosTheta);
   const real sinThetaSq = real{1.0} - cosTheta * cosTheta;
   if (NVMOLKIT_IS_ZERO(sinThetaSq)) {
     return;
   }
-  const real sinTheta  = NVMOLKIT_FMAX(NVMOLKIT_SQRT(sinThetaSq), real{1.0e-8});
+  const real sinTheta  = NVMOLKIT_FMAX(sqrtNonNegative(sinThetaSq), real{1.0e-8});
   real       dE_dTheta = uffAngleThetaDeriv(cosTheta, sinTheta, order, forceConstant, C1, C2);
   if (order > 0 && order < 5 && cosTheta > kUffAngleCorrectionThreshold) {
     const real theta = NVMOLKIT_ACOS(cosTheta);
@@ -203,7 +263,7 @@ __device__ __forceinline__ void uffAngleBendGrad(const auto*   pos,
   const real ndy2 = dy2 * invDist2;
   const real ndz2 = dz2 * invDist2;
 
-  const real common = dE_dTheta / (-sinTheta);
+  const real common = -dE_dTheta * recipPositive(sinTheta);
 
   const real i1 = invDist1 * (ndx2 - cosTheta * ndx1);
   const real i2 = invDist1 * (ndy2 - cosTheta * ndy1);
@@ -243,12 +303,13 @@ uffCalculateCosTorsion(const auto* pos, const int idx1, const int idx2, const in
   real t1x, t1y, t1z, t2x, t2y, t2z;
   crossProduct(r1x, r1y, r1z, r2x, r2y, r2z, t1x, t1y, t1z);
   crossProduct(r3x, r3y, r3z, r4x, r4y, r4z, t2x, t2y, t2z);
-  const real d1 = NVMOLKIT_SQRT(t1x * t1x + t1y * t1y + t1z * t1z);
-  const real d2 = NVMOLKIT_SQRT(t2x * t2x + t2y * t2y + t2z * t2z);
-  if (NVMOLKIT_IS_ZERO(d1) || NVMOLKIT_IS_ZERO(d2)) {
+  // |t| < 1e-10 is the zero test on the norms, applied to their squares.
+  const real d1Sq = t1x * t1x + t1y * t1y + t1z * t1z;
+  const real d2Sq = t2x * t2x + t2y * t2y + t2z * t2z;
+  if (d1Sq < real{1.0e-20} || d2Sq < real{1.0e-20}) {
     return real{0.0};
   }
-  real cosPhi = (t1x * t2x + t1y * t2y + t1z * t2z) / (d1 * d2);
+  real cosPhi = (t1x * t2x + t1y * t2y + t1z * t2z) * (rsqrtPositive(d1Sq) * rsqrtPositive(d2Sq));
   clipToOne(cosPhi);
   return cosPhi;
 }
@@ -329,6 +390,8 @@ __device__ __forceinline__ void uffTorsionGrad(const auto*   pos,
   crossProduct(r0x, r0y, r0z, r1x, r1y, r1z, t0x, t0y, t0z);
   crossProduct(r2x, r2y, r2z, r3x, r3y, r3z, t1x, t1y, t1z);
 
+  // The normalization stays bit-identical to the reference arithmetic: for a planar dihedral it yields
+  // cos(phi) = +-1 exactly, which selects the zero-contribution branch below; a one-ulp difference would not.
   const real d0 = NVMOLKIT_SQRT(t0x * t0x + t0y * t0y + t0z * t0z);
   const real d1 = NVMOLKIT_SQRT(t1x * t1x + t1y * t1y + t1z * t1z);
   if (NVMOLKIT_IS_ZERO(d0) || NVMOLKIT_IS_ZERO(d1)) {
@@ -340,21 +403,23 @@ __device__ __forceinline__ void uffTorsionGrad(const auto*   pos,
   t1x /= d1;
   t1y /= d1;
   t1z /= d1;
+  const real invD0 = recipPositive(d0);
+  const real invD1 = recipPositive(d1);
 
   real cosPhi = t0x * t1x + t0y * t1y + t0z * t1z;
   clipToOne(cosPhi);
   const real sinPhiSq = real{1.0} - cosPhi * cosPhi;
-  const real sinPhi   = sinPhiSq > real{0.0} ? NVMOLKIT_SQRT(sinPhiSq) : real{0.0};
+  const real sinPhi   = sinPhiSq > real{0.0} ? sqrtNonNegative(sinPhiSq) : real{0.0};
   const real dE_dPhi  = uffTorsionThetaDeriv(cosPhi, sinPhi, forceConstant, order, cosTerm);
-  const real sinTerm  = dE_dPhi * (NVMOLKIT_IS_ZERO(sinPhi) ? (real{1.0} / NVMOLKIT_FMAX(fabs(cosPhi), real{1.0e-8})) :
-                                                              (real{1.0} / sinPhi));
+  const real sinTerm =
+    dE_dPhi * recipPositive(NVMOLKIT_IS_ZERO(sinPhi) ? NVMOLKIT_FMAX(fabs(cosPhi), real{1.0e-8}) : sinPhi);
 
-  const real dCos_dT0 = (t1x - cosPhi * t0x) / d0;
-  const real dCos_dT1 = (t1y - cosPhi * t0y) / d0;
-  const real dCos_dT2 = (t1z - cosPhi * t0z) / d0;
-  const real dCos_dT3 = (t0x - cosPhi * t1x) / d1;
-  const real dCos_dT4 = (t0y - cosPhi * t1y) / d1;
-  const real dCos_dT5 = (t0z - cosPhi * t1z) / d1;
+  const real dCos_dT0 = (t1x - cosPhi * t0x) * invD0;
+  const real dCos_dT1 = (t1y - cosPhi * t0y) * invD0;
+  const real dCos_dT2 = (t1z - cosPhi * t0z) * invD0;
+  const real dCos_dT3 = (t0x - cosPhi * t1x) * invD1;
+  const real dCos_dT4 = (t0y - cosPhi * t1y) * invD1;
+  const real dCos_dT5 = (t0z - cosPhi * t1z) * invD1;
 
   atomicAdd(&grad[3 * idx1 + 0], sinTerm * (dCos_dT2 * r1y - dCos_dT1 * r1z));
   atomicAdd(&grad[3 * idx1 + 1], sinTerm * (dCos_dT0 * r1z - dCos_dT2 * r1x));
@@ -400,15 +465,15 @@ uffCalculateCosY(const auto* pos, const int idx1, const int idx2, const int idx3
 
   real nx, ny, nz;
   crossProduct(rJIx, rJIy, rJIz, rJKx, rJKy, rJKz, nx, ny, nz);
-  const real normScale = NVMOLKIT_SQRT(l2JI) * NVMOLKIT_SQRT(l2JK);
-  nx /= normScale;
-  ny /= normScale;
-  nz /= normScale;
+  const real invNormScale = rsqrtPositive(l2JI) * rsqrtPositive(l2JK);
+  nx *= invNormScale;
+  ny *= invNormScale;
+  nz *= invNormScale;
   const real l2n = nx * nx + ny * ny + nz * nz;
   if (l2n < kUffZeroTol) {
     return real{0.0};
   }
-  return (nx * rJLx + ny * rJLy + nz * rJLz) / (NVMOLKIT_SQRT(l2JL) * NVMOLKIT_SQRT(l2n));
+  return (nx * rJLx + ny * rJLy + nz * rJLz) * (rsqrtPositive(l2JL) * rsqrtPositive(l2n));
 }
 
 __device__ __forceinline__ real uffInversionEnergy(const auto* pos,
@@ -422,7 +487,7 @@ __device__ __forceinline__ real uffInversionEnergy(const auto* pos,
                                                    const real  C2) {
   const real cosY   = uffCalculateCosY(pos, idx1, idx2, idx3, idx4);
   const real sinYSq = real{1.0} - cosY * cosY;
-  const real sinY   = sinYSq > real{0.0} ? NVMOLKIT_SQRT(sinYSq) : real{0.0};
+  const real sinY   = sinYSq > real{0.0} ? sqrtNonNegative(sinYSq) : real{0.0};
   const real cos2W  = real{2.0} * sinY * sinY - real{1.0};
   return forceConstant * (C0 + C1 * sinY + C2 * cos2W);
 }
@@ -446,58 +511,65 @@ __device__ __forceinline__ void uffInversionGrad(const auto* pos,
   real rJLy = pos[3 * idx4 + 1] - pos[3 * idx2 + 1];
   real rJLz = pos[3 * idx4 + 2] - pos[3 * idx2 + 2];
 
-  real dJI = NVMOLKIT_SQRT(rJIx * rJIx + rJIy * rJIy + rJIz * rJIz);
-  real dJK = NVMOLKIT_SQRT(rJKx * rJKx + rJKy * rJKy + rJKz * rJKz);
-  real dJL = NVMOLKIT_SQRT(rJLx * rJLx + rJLy * rJLy + rJLz * rJLz);
-  if (NVMOLKIT_IS_ZERO(dJI) || NVMOLKIT_IS_ZERO(dJK) || NVMOLKIT_IS_ZERO(dJL)) {
+  const real l2JI = rJIx * rJIx + rJIy * rJIy + rJIz * rJIz;
+  const real l2JK = rJKx * rJKx + rJKy * rJKy + rJKz * rJKz;
+  const real l2JL = rJLx * rJLx + rJLy * rJLy + rJLz * rJLz;
+  // |r| < 1e-10 is the zero test on the lengths, applied to their squares.
+  if (l2JI < real{1.0e-20} || l2JK < real{1.0e-20} || l2JL < real{1.0e-20}) {
     return;
   }
-  rJIx /= dJI;
-  rJIy /= dJI;
-  rJIz /= dJI;
-  rJKx /= dJK;
-  rJKy /= dJK;
-  rJKz /= dJK;
-  rJLx /= dJL;
-  rJLy /= dJL;
-  rJLz /= dJL;
+  const real invJI = rsqrtPositive(l2JI);
+  const real invJK = rsqrtPositive(l2JK);
+  const real invJL = rsqrtPositive(l2JL);
+  rJIx *= invJI;
+  rJIy *= invJI;
+  rJIz *= invJI;
+  rJKx *= invJK;
+  rJKy *= invJK;
+  rJKz *= invJK;
+  rJLx *= invJL;
+  rJLy *= invJL;
+  rJLz *= invJL;
 
   real nx, ny, nz;
   crossProduct(-rJIx, -rJIy, -rJIz, rJKx, rJKy, rJKz, nx, ny, nz);
-  const real nNorm = NVMOLKIT_SQRT(nx * nx + ny * ny + nz * nz);
-  if (nNorm <= real{0.0}) {
+  const real nNormSq = nx * nx + ny * ny + nz * nz;
+  if (nNormSq <= kPositiveFloor) {
     return;
   }
-  nx /= nNorm;
-  ny /= nNorm;
-  nz /= nNorm;
+  const real invNNorm = rsqrtPositive(nNormSq);
+  nx *= invNNorm;
+  ny *= invNNorm;
+  nz *= invNNorm;
 
   real cosY = nx * rJLx + ny * rJLy + nz * rJLz;
   clipToOne(cosY);
   const real sinYSq   = real{1.0} - cosY * cosY;
-  const real sinY     = NVMOLKIT_FMAX(NVMOLKIT_SQRT(sinYSq), real{1.0e-8});
+  const real sinY     = NVMOLKIT_FMAX(sqrtNonNegative(sinYSq), real{1.0e-8});
   real       cosTheta = rJIx * rJKx + rJIy * rJKy + rJIz * rJKz;
   clipToOne(cosTheta);
   const real sinThetaSq = real{1.0} - cosTheta * cosTheta;
-  const real sinTheta   = NVMOLKIT_FMAX(NVMOLKIT_SQRT(sinThetaSq), real{1.0e-8});
+  const real sinTheta   = NVMOLKIT_FMAX(sqrtNonNegative(sinThetaSq), real{1.0e-8});
 
   const real dE_dW = -forceConstant * (C1 * cosY - real{4.0} * C2 * cosY * sinY);
   real       t1x, t1y, t1z, t2x, t2y, t2z, t3x, t3y, t3z;
   crossProduct(rJLx, rJLy, rJLz, rJKx, rJKy, rJKz, t1x, t1y, t1z);
   crossProduct(rJIx, rJIy, rJIz, rJLx, rJLy, rJLz, t2x, t2y, t2z);
   crossProduct(rJKx, rJKy, rJKz, rJIx, rJIy, rJIz, t3x, t3y, t3z);
-  const real term1 = sinY * sinTheta;
-  const real term2 = cosY / (sinY * sinThetaSq);
+  const real invSinY     = recipPositive(sinY);
+  const real invTerm1    = invSinY * recipPositive(sinTheta);
+  const real term2       = cosY * invSinY / sinThetaSq;
+  const real cosYInvSinY = cosY * invSinY;
 
-  const real tg1x = (t1x / term1 - (rJIx - rJKx * cosTheta) * term2) / dJI;
-  const real tg1y = (t1y / term1 - (rJIy - rJKy * cosTheta) * term2) / dJI;
-  const real tg1z = (t1z / term1 - (rJIz - rJKz * cosTheta) * term2) / dJI;
-  const real tg3x = (t2x / term1 - (rJKx - rJIx * cosTheta) * term2) / dJK;
-  const real tg3y = (t2y / term1 - (rJKy - rJIy * cosTheta) * term2) / dJK;
-  const real tg3z = (t2z / term1 - (rJKz - rJIz * cosTheta) * term2) / dJK;
-  const real tg4x = (t3x / term1 - rJLx * cosY / sinY) / dJL;
-  const real tg4y = (t3y / term1 - rJLy * cosY / sinY) / dJL;
-  const real tg4z = (t3z / term1 - rJLz * cosY / sinY) / dJL;
+  const real tg1x = (t1x * invTerm1 - (rJIx - rJKx * cosTheta) * term2) * invJI;
+  const real tg1y = (t1y * invTerm1 - (rJIy - rJKy * cosTheta) * term2) * invJI;
+  const real tg1z = (t1z * invTerm1 - (rJIz - rJKz * cosTheta) * term2) * invJI;
+  const real tg3x = (t2x * invTerm1 - (rJKx - rJIx * cosTheta) * term2) * invJK;
+  const real tg3y = (t2y * invTerm1 - (rJKy - rJIy * cosTheta) * term2) * invJK;
+  const real tg3z = (t2z * invTerm1 - (rJKz - rJIz * cosTheta) * term2) * invJK;
+  const real tg4x = (t3x * invTerm1 - rJLx * cosYInvSinY) * invJL;
+  const real tg4y = (t3y * invTerm1 - rJLy * cosYInvSinY) * invJL;
+  const real tg4z = (t3z * invTerm1 - rJLz * cosYInvSinY) * invJL;
 
   atomicAdd(&grad[3 * idx1 + 0], dE_dW * tg1x);
   atomicAdd(&grad[3 * idx1 + 1], dE_dW * tg1y);
@@ -519,14 +591,13 @@ __device__ __forceinline__ real uffVdwEnergy(const auto* pos,
                                              const real  x_ij,
                                              const real  wellDepth,
                                              const real  threshold) {
-  const real dist = NVMOLKIT_SQRT(distanceSquared(pos, idx1, idx2));
-  if (dist > threshold || dist <= real{0.0}) {
+  // (x_ij / r)^6 from the squared distance: no square root and a single reciprocal.
+  const real distSq = distanceSquared(pos, idx1, idx2);
+  if (threshold < real{0.0} || distSq > threshold * threshold || distSq <= kPositiveFloor) {
     return real{0.0};
   }
-  const real r   = x_ij / dist;
-  const real r6  = cubeValue(squareValue(r));
-  const real r12 = r6 * r6;
-  return wellDepth * (r12 - real{2.0} * r6);
+  const real r6 = cubeValue(squareValue(x_ij) * recipPositive(distSq));
+  return wellDepth * (r6 * r6 - real{2.0} * r6);
 }
 
 __device__ __forceinline__ void uffVdwGrad(const auto* pos,
@@ -536,11 +607,12 @@ __device__ __forceinline__ void uffVdwGrad(const auto* pos,
                                            const real  wellDepth,
                                            const real  threshold,
                                            auto*       grad) {
-  const real dist = NVMOLKIT_SQRT(distanceSquared(pos, idx1, idx2));
-  if (dist > threshold) {
+  real       dx, dy, dz;
+  const real distSq = distanceSquaredWithComponents(pos, idx1, idx2, dx, dy, dz);
+  if (threshold < real{0.0} || distSq > threshold * threshold) {
     return;
   }
-  if (dist <= real{0.0}) {
+  if (distSq <= kPositiveFloor) {
     atomicAdd(&grad[3 * idx1 + 0], real{100.0});
     atomicAdd(&grad[3 * idx1 + 1], real{100.0});
     atomicAdd(&grad[3 * idx1 + 2], real{100.0});
@@ -550,17 +622,13 @@ __device__ __forceinline__ void uffVdwGrad(const auto* pos,
     return;
   }
 
-  const real r         = x_ij / dist;
-  const real r7        = r * cubeValue(squareValue(r));
-  const real r13       = r7 * squareValue(squareValue(r)) * squareValue(r);
-  const real preFactor = real{12.0} * wellDepth / x_ij * (r7 - r13);
-
-  const real dx = pos[3 * idx1 + 0] - pos[3 * idx2 + 0];
-  const real dy = pos[3 * idx1 + 1] - pos[3 * idx2 + 1];
-  const real dz = pos[3 * idx1 + 2] - pos[3 * idx2 + 2];
-  const real gx = preFactor * dx / dist;
-  const real gy = preFactor * dy / dist;
-  const real gz = preFactor * dz / dist;
+  // 12 * wellDepth / x_ij * ((x_ij/r)^7 - (x_ij/r)^13) / r, written in terms of 1/r^2 so that no square root is needed.
+  const real invDistSq = recipPositive(distSq);
+  const real r6        = cubeValue(squareValue(x_ij) * invDistSq);
+  const real scale     = real{12.0} * wellDepth * invDistSq * (r6 - r6 * r6);
+  const real gx        = scale * dx;
+  const real gy        = scale * dy;
+  const real gz        = scale * dz;
 
   atomicAdd(&grad[3 * idx1 + 0], gx);
   atomicAdd(&grad[3 * idx1 + 1], gy);
