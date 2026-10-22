@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <type_traits>
 
 #include "src/descriptors3d.h"
 #include "src/descriptors3d_kernel.cuh"
@@ -194,6 +195,20 @@ __device__ __forceinline__ Real computePbf(const ConformerAtoms&        atoms,
   Real distanceSum = 0;
   for (int atomIdx = laneInGroup; atomIdx < atoms.numAtoms; atomIdx += kGroupSize) {
     distanceSum += fabs(projectionScore(atoms, atomIdx, state, 2));
+  }
+  return groupAllReduceSum(distanceSum) / static_cast<Real>(atoms.numAtoms > 0 ? atoms.numAtoms : 1);
+}
+
+//! computePbf() along the third column of the row-major @p axes, from @p centered coordinates.
+template <typename Real>
+__device__ __forceinline__ Real
+computePbf(const ConformerAtoms& atoms, const int laneInGroup, const Real (&axes)[9], const Real* centered) {
+  Real distanceSum = 0;
+  for (int atomIdx = laneInGroup; atomIdx < atoms.numAtoms; atomIdx += kGroupSize) {
+    const Real x = centered[atomIdx * 3 + 0];
+    const Real y = centered[atomIdx * 3 + 1];
+    const Real z = centered[atomIdx * 3 + 2];
+    distanceSum += fabs(x * axes[2] + y * axes[5] + z * axes[8]);
   }
   return groupAllReduceSum(distanceSum) / static_cast<Real>(atoms.numAtoms > 0 ? atoms.numAtoms : 1);
 }
@@ -522,18 +537,22 @@ __device__ __forceinline__ void writeWhimChannel(const int                      
  * diagonalizes its own channel, so the group solves the channels concurrently rather than each lane
  * repeating all of them. Channel by channel, the owning lane broadcasts its principal axes for the
  * group-wide projection pass, and finally each lane writes its channel's values when @p writeRow.
+ *
+ * With @p measurePlane, returns PBF along the unweighted channel's axes (its PCA is PBF's in float64);
+ * otherwise zero.
  */
 template <typename OutputReal>
-__device__ __forceinline__ void computeWhim(const ConformerAtoms&         atoms,
-                                            const Property3DDeviceInputs& inputs,
-                                            const int                     moleculeIdx,
-                                            const int                     totalAtoms,
-                                            const int                     laneInGroup,
-                                            const unsigned                groupMask,
-                                            const WhimThreshold&          threshold,
-                                            const bool                    writeRow,
-                                            OutputReal*                   row,
-                                            const WhimScratch&            scratch) {
+__device__ __forceinline__ WhimReal computeWhim(const ConformerAtoms&         atoms,
+                                                const Property3DDeviceInputs& inputs,
+                                                const int                     moleculeIdx,
+                                                const int                     totalAtoms,
+                                                const int                     laneInGroup,
+                                                const unsigned                groupMask,
+                                                const WhimThreshold&          threshold,
+                                                const bool                    writeRow,
+                                                OutputReal*                   row,
+                                                const WhimScratch&            scratch,
+                                                const bool                    measurePlane) {
   ProjectionState<WhimReal> state;
   computeProjectionCentroid(atoms, laneInGroup, state);
   for (int atomIdx = laneInGroup; atomIdx < atoms.numAtoms; atomIdx += kGroupSize) {
@@ -564,10 +583,14 @@ __device__ __forceinline__ void computeWhim(const ConformerAtoms&         atoms,
   __syncwarp(groupMask);  // Channel eigensolvers can finish after different numbers of sweeps.
 
   WhimChannelSums ownSums{};
+  WhimReal        planeDistance = 0;
   for (int channel = 0; channel < kNumWhimChannels; ++channel) {
     WhimReal axes[9];
     for (int i = 0; i < 9; ++i) {
       axes[i] = __shfl_sync(groupMask, state.eigenvectors[i], channel, kGroupSize);
+    }
+    if (channel == 0 && measurePlane) {
+      planeDistance = computePbf(atoms, laneInGroup, axes, scratch.centered);
     }
     const WhimChannelSums sums = accumulateWhimChannel(atoms, laneInGroup, groupMask, axes, threshold, scratch);
     if (laneInGroup == channel) {
@@ -577,16 +600,18 @@ __device__ __forceinline__ void computeWhim(const ConformerAtoms&         atoms,
   if (writeRow && laneInGroup < kNumWhimChannels) {
     writeWhimChannel(laneInGroup, state, ownSums, atoms.numAtoms, row);
   }
+  return planeDistance;
 }
 
 /**
  * @brief PBF and WHIM for conformers [@p conformerBegin, @p conformerEnd); one group of lanes per conformer.
  *
- * PBF uses an unweighted PCA in @p OutputReal. WHIM runs its own PCA in WhimReal for the unweighted channel
- * and each atom-property channel, whose weights are stored channel-major in `inputs.atomPropertyWeights`
- * (`kNumAtomPropertyChannels` blocks of one value per molecule atom), and uses @p whimScratch: one
- * WhimScratch block of whimScratchStride(@p whimMaxAtoms) atoms per conformer of the range. Rows longer
- * than @p whimMaxAtoms are treated as invalid. Outputs are @p OutputReal.
+ * PBF uses an unweighted PCA in @p OutputReal, taken from WHIM's unweighted channel when both run in
+ * float64. WHIM runs its own PCA in WhimReal for the unweighted channel and each atom-property channel,
+ * whose weights are stored channel-major in `inputs.atomPropertyWeights` (`kNumAtomPropertyChannels`
+ * blocks of one value per molecule atom), and uses @p whimScratch: one WhimScratch block of
+ * whimScratchStride(@p whimMaxAtoms) atoms per conformer of the range. Rows longer than @p whimMaxAtoms are
+ * treated as invalid. Outputs are @p OutputReal.
  */
 template <typename OutputReal, bool kComputeWhim>
 __global__ void projection3DKernel(const DeviceCoordView        coordinates,
@@ -614,36 +639,44 @@ __global__ void projection3DKernel(const DeviceCoordView        coordinates,
     }
   }
 
-  if (pbfOutput != nullptr) {
-    ProjectionState<OutputReal> pbfState;
-    computeProjectionCentroid(atoms, laneInGroup, pbfState);
-    OutputReal covariance[6];
-    computeProjectionCovariance(atoms, nullptr, laneInGroup, pbfState, covariance);
-    diagonalizePbfInBlock(covariance, laneInGroup, pbfState);
-    const OutputReal pbf = computePbf(atoms, laneInGroup, pbfState);
+  // In float64, PBF's PCA is WHIM's unweighted channel; WHIM measures the plane distances along its axes.
+  constexpr bool kPbfFromWhim = kComputeWhim && std::is_same_v<OutputReal, WhimReal>;
+  const auto     writePbf     = [&](const OutputReal pbf) {
     if (inRange && laneInGroup == 0) {
       const bool is3D         = inputs.conformerIs3D == nullptr || inputs.conformerIs3D[conformerIdx] != 0;
       pbfOutput[conformerIdx] = !atoms.valid                ? static_cast<OutputReal>(nan("")) :
                                 atoms.numAtoms < 4 || !is3D ? OutputReal(0) :
                                                               pbf;
     }
+  };
+  if (pbfOutput != nullptr && !kPbfFromWhim) {
+    ProjectionState<OutputReal> pbfState;
+    computeProjectionCentroid(atoms, laneInGroup, pbfState);
+    OutputReal covariance[6];
+    computeProjectionCovariance(atoms, nullptr, laneInGroup, pbfState, covariance);
+    diagonalizePbfInBlock(covariance, laneInGroup, pbfState);
+    writePbf(computePbf(atoms, laneInGroup, pbfState));
   }
 
   if constexpr (kComputeWhim) {
     const unsigned    groupMask = 0xffu << (lane - laneInGroup);
     const WhimScratch scratch =
       whimScratchFor(whimScratch, inRange ? conformerIdx - conformerBegin : 0, whimScratchStride(whimMaxAtoms));
-    OutputReal* row = inRange ? whimOutput + static_cast<size_t>(conformerIdx) * kNumWhimProperties : nullptr;
-    computeWhim(atoms,
-                inputs,
-                atoms.valid ? coordinates.molIndices[conformerIdx] : 0,
-                inputs.moleculeAtomStarts[coordinates.nMols],
-                laneInGroup,
-                groupMask,
-                whimThreshold,
-                inRange && atoms.valid,
-                row,
-                scratch);
+    OutputReal*    row = inRange ? whimOutput + static_cast<size_t>(conformerIdx) * kNumWhimProperties : nullptr;
+    const WhimReal planeDistance = computeWhim(atoms,
+                                               inputs,
+                                               atoms.valid ? coordinates.molIndices[conformerIdx] : 0,
+                                               inputs.moleculeAtomStarts[coordinates.nMols],
+                                               laneInGroup,
+                                               groupMask,
+                                               whimThreshold,
+                                               inRange && atoms.valid,
+                                               row,
+                                               scratch,
+                                               kPbfFromWhim && pbfOutput != nullptr);
+    if (kPbfFromWhim && pbfOutput != nullptr) {
+      writePbf(static_cast<OutputReal>(planeDistance));
+    }
     if (inRange && !atoms.valid) {
       for (int valueIdx = laneInGroup; valueIdx < kNumWhimProperties; valueIdx += kGroupSize) {
         row[valueIdx] = static_cast<OutputReal>(nan(""));
