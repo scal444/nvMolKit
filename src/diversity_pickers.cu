@@ -12,6 +12,7 @@
 #include <numeric>
 #include <random>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 #include "src/diversity_picker_algorithms.cuh"
@@ -292,17 +293,21 @@ __global__ void fingerprintHitTableDistancesKernel(const std::uint32_t* fingerpr
     if (!live) {
       continue;
     }
-    const SlicedCounts sliced = hitTableCounts(table, positions, numItems, numWords, candidate, rowCount);
-    for (int t = 0; t < tileLength; ++t) {
+    const SlicedCounts sliced  = hitTableCounts(table, positions, numItems, numWords, candidate, rowCount);
+    auto               visited = static_cast<std::uint32_t>(tileCounts[33]);
+    if constexpr (std::is_same_v<Op, LeaderHitsOp> || std::is_same_v<Op, NearestOp>) {
+      // Both ops only act on sources within their cutoff, so sources whose intersection cannot reach it are skipped.
+      visited &= countsAtLeast(sliced, minimumIntersection<Metric>(rowCount, tileCounts[32], 1.0F - op.cutoff));
+    }
+    for (; visited != 0U; visited &= visited - 1U) {
+      const int t      = __ffs(static_cast<int>(visited)) - 1;
       const int source = tileSources[t];
-      if (source >= 0) {
-        const int intersection =
-          hitTableIntersection(sliced, t, fingerprints + static_cast<std::size_t>(source) * numWords, row, numWords);
-        op.visit(state,
-                 base + t,
-                 source == candidate,
-                 fingerprintDistance<Metric>(intersection, tileCounts[t], rowCount));
-      }
+      const int intersection =
+        hitTableIntersection(sliced, t, fingerprints + static_cast<std::size_t>(source) * numWords, row, numWords);
+      op.visit(state,
+               base + t,
+               source == candidate,
+               fingerprintDistance<Metric>(intersection, tileCounts[t], rowCount));
     }
   }
   if (live) {

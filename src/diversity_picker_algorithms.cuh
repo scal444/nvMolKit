@@ -109,10 +109,12 @@ struct MinDistanceOp {
   }
 };
 
-//! Assigns each non-centroid to its nearest centroid; ties keep the earlier centroid.
+//! Assigns each non-centroid to its nearest centroid; ties keep the earlier centroid. Every non-centroid is within
+//! @c cutoff of the centroid that excluded it, so a provider may skip centroids beyond the cutoff.
 struct NearestOp {
   const std::uint8_t* isCentroid;
   int*                labels;
+  float               cutoff;
 
   struct State {
     float distance;
@@ -339,7 +341,7 @@ ClusteringResult diseCluster(Provider&    provider,
     launchMarkIndices(leaders.indices.data(), numCentroids, isCentroid.data(), stream);
     provider.accumulateDistances(leaders.indices.data(),
                                  numCentroids,
-                                 NearestOp{isCentroid.data(), labels.data()},
+                                 NearestOp{isCentroid.data(), labels.data(), cutoff},
                                  stream);
   }
 
