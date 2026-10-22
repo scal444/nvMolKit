@@ -219,7 +219,7 @@ template <typename Real> using Property3DResults = std::unordered_map<Property3D
  * @p Real except for steps where float32 measurably loses accuracy, which are always float64: coordinate
  * centering (descriptors3d_detail::centeredPosition), WHIM's PCA (descriptors3d_detail::WhimReal),
  * MORSE's zero-scattering bin (descriptors3d_detail::computeMorseZeroBin), USR's reference-atom selection
- * (descriptors3d_detail::extremeAtom) and GETAWAY's leverages (descriptors3d_detail::computeLeverages).
+ * (descriptors3d_detail::extremeAtom) and GETAWAY's leverages (descriptors3d_detail::getawayConformer).
  * `options.moments` is expressed through `inputs.momentWeights` at this level. Conformers whose molecule
  * index is out of range, whose atom range lies outside `coordinates.numAtoms`, or whose atom count
  * disagrees with the molecule's atom range produce NaN for every requested property.
