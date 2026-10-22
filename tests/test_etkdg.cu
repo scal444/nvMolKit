@@ -18,6 +18,7 @@
 #include <GraphMol/FileParsers/MolWriters.h>
 #include <GraphMol/SmilesParse/SmilesParse.h>
 #include <gtest/gtest.h>
+#include <RDGeneral/Exceptions.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -35,6 +36,7 @@
 #include "src/utils/device.h"
 #include "src/utils/host_vector.h"
 #include "tests/test_utils.h"
+#include "versions.h"
 
 using ::nvMolKit::detail::ETKDGContext;
 using ::nvMolKit::detail::ETKDGDriver;
@@ -689,6 +691,7 @@ void testConformerEnergyComparison(const std::vector<RDKit::ROMol*>&    mols,
   }
   params.useRandomCoords = true;
   params.basinThresh     = 1e8;
+  params.randomSeed      = 42;
   // Generate conformers using RDKit for copied molecules
   for (size_t i = 0; i < molCopyPtrs.size(); ++i) {
     auto*                       molCopy = molCopyPtrs[i];
@@ -982,3 +985,54 @@ INSTANTIATE_TEST_SUITE_P(BfgsBackends,
                          [](const ::testing::TestParamInfo<nvMolKit::BfgsBackend>& info) {
                            return (info.param == nvMolKit::BfgsBackend::BATCHED) ? "Batched" : "PerMolecule";
                          });
+
+#if RDKIT_AIO_ETKDG_API
+TEST(AllInOneETKDG, RejectsExplicitPerMoleculeBackend) {
+  std::unique_ptr<RDKit::RWMol> molecule(RDKit::SmilesToMol("CCO"));
+  ASSERT_NE(molecule, nullptr);
+  auto parameters                    = RDKit::DGeomHelpers::ETKDGv3;
+  parameters.useLegacyImplementation = false;
+  EXPECT_THROW(nvMolKit::embedMolecules({molecule.get()},
+                                        parameters,
+                                        1,
+                                        20,
+                                        false,
+                                        nullptr,
+                                        nvMolKit::BatchHardwareOptions{},
+                                        nvMolKit::BfgsBackend::PER_MOLECULE),
+               std::invalid_argument);
+}
+#endif
+
+TEST(ETKDGParameters, SupportedModesAndUnsupportedOptions) {
+  for (const int version : {1, 2}) {
+    auto parameters      = RDKit::DGeomHelpers::ETKDGv3;
+    parameters.ETversion = version;
+    EXPECT_NO_THROW(nvMolKit::DGeomHelpers::validateSupportedEmbedParameters(parameters));
+#if RDKIT_AIO_ETKDG_API
+    parameters.useLegacyImplementation = false;
+    EXPECT_NO_THROW(nvMolKit::DGeomHelpers::validateSupportedEmbedParameters(parameters));
+#endif
+  }
+  for (const int version : {-1, 0, 3, 4}) {
+    auto parameters      = RDKit::DGeomHelpers::ETKDGv3;
+    parameters.ETversion = version;
+    EXPECT_THROW(nvMolKit::DGeomHelpers::validateSupportedEmbedParameters(parameters), ValueErrorException);
+  }
+#if RDKIT_ETKDG_2026_09_API
+  auto parameters            = RDKit::DGeomHelpers::ETKDGv3;
+  parameters.embedForceField = RDKit::DGeomHelpers::EmbedFF::MMFF;
+  EXPECT_THROW(nvMolKit::DGeomHelpers::validateSupportedEmbedParameters(parameters), ValueErrorException);
+  parameters                      = RDKit::DGeomHelpers::ETKDGv3;
+  parameters.onlyInitialEmbedding = true;
+  EXPECT_THROW(nvMolKit::DGeomHelpers::validateSupportedEmbedParameters(parameters), ValueErrorException);
+  parameters                      = RDKit::DGeomHelpers::ETKDGv3;
+  parameters.initialEmbeddingMode = RDKit::DGeomHelpers::InitialEmbeddingMode::INTERNAL_COORDINATE_EMBEDDING;
+  EXPECT_THROW(nvMolKit::DGeomHelpers::validateSupportedEmbedParameters(parameters), ValueErrorException);
+  parameters                      = RDKit::DGeomHelpers::ETKDGv3;
+  parameters.initialEmbeddingMode = RDKit::DGeomHelpers::InitialEmbeddingMode::RANDOM_COORDINATE_EMBEDDING;
+  EXPECT_THROW(nvMolKit::DGeomHelpers::validateSupportedEmbedParameters(parameters), ValueErrorException);
+  parameters.useRandomCoords = true;
+  EXPECT_NO_THROW(nvMolKit::DGeomHelpers::validateSupportedEmbedParameters(parameters));
+#endif
+}

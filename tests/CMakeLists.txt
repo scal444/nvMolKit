@@ -234,6 +234,7 @@ add_executable(test_etkdg test_etkdg.cu test_etkdg_minimize.cu)
 target_link_libraries(
   test_etkdg
   PRIVATE etkdg_impl
+          nvmolkit_versions
           device_vector
           test_utils
           ${RDKit_LIBS}
@@ -335,8 +336,13 @@ target_link_libraries(
 add_executable(test_etkdg_stereochem_checks test_etkdg_stereochem_checks.cu)
 target_link_libraries(
   test_etkdg_stereochem_checks
-  PRIVATE etkdg_stages device_vector ${RDKit_LIBS} test_utils dist_geom
-          rdkit_dist_geom_flattened nvmolkit_versions)
+  PRIVATE etkdg_stages
+          device_vector
+          ${RDKit_LIBS}
+          test_utils
+          dist_geom
+          rdkit_dist_geom_flattened
+          nvmolkit_versions)
 
 add_executable(test_conformer_checkers test_conformer_checkers.cpp)
 target_link_libraries(test_conformer_checkers PRIVATE ${RDKit_LIBS}
