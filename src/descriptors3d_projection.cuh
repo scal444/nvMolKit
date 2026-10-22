@@ -199,6 +199,45 @@ __device__ __forceinline__ Real computePbf(const ConformerAtoms&        atoms,
 }
 
 /**
+ * @brief Block-collective. The smallest principal axis of each group's @p covariance into @p state's third
+ *        eigenvector column, for computePbf().
+ *
+ * One lane of the block's first warp diagonalizes each group's covariance, so the block's eigensolves take one
+ * warp's instructions instead of every lane solving its group's copy. Results are those of diagonalizeProjection().
+ */
+template <typename Real>
+__device__ __forceinline__ void diagonalizePbfInBlock(const Real (&covariance)[6],
+                                                      const int              laneInGroup,
+                                                      ProjectionState<Real>& state) {
+  __shared__ Real sharedPca[6][kConformersPerBlock];
+  const int       group = static_cast<int>(threadIdx.x) / kGroupSize;
+  if (laneInGroup == 0) {
+    for (int i = 0; i < 6; ++i) {
+      sharedPca[i][group] = covariance[i];
+    }
+  }
+  __syncthreads();
+  if (threadIdx.x < kConformersPerBlock) {
+    const int             solved              = static_cast<int>(threadIdx.x);
+    const Real            solvedCovariance[6] = {sharedPca[0][solved],
+                                                 sharedPca[1][solved],
+                                                 sharedPca[2][solved],
+                                                 sharedPca[3][solved],
+                                                 sharedPca[4][solved],
+                                                 sharedPca[5][solved]};
+    ProjectionState<Real> solvedState;
+    diagonalizeProjection(solvedCovariance, solvedState);
+    for (int row = 0; row < 3; ++row) {
+      sharedPca[row][solved] = solvedState.eigenvectors[row * 3 + 2];
+    }
+  }
+  __syncthreads();
+  for (int row = 0; row < 3; ++row) {
+    state.eigenvectors[row * 3 + 2] = sharedPca[row][group];
+  }
+}
+
+/**
  * @brief `a / 1000.0`, correctly rounded, without a general float64 division.
  *
  * One Newton correction of the product with the rounded reciprocal. Exhaustively verified bit-identical
@@ -563,11 +602,9 @@ __global__ void projection3DKernel(const DeviceCoordView        coordinates,
   const int laneInGroup = lane % kGroupSize;
   const int warpStart =
     conformerBegin + (blockIdx.x * kWarpsPerBlock + static_cast<int>(threadIdx.x) / kWarpSize) * kGroupsPerWarp;
-  const int conformerIdx = warpStart + lane / kGroupSize;
-  if (warpStart >= conformerEnd) {
-    return;  // Uniform across the warp; partially filled warps keep every lane for the shuffles.
-  }
-  const bool inRange = conformerIdx < conformerEnd;
+  const int  conformerIdx = warpStart + lane / kGroupSize;
+  // Lanes past the end keep no atoms but stay for the shuffles and PBF's block barriers.
+  const bool inRange      = conformerIdx < conformerEnd;
 
   ConformerAtoms atoms =
     loadConformer(coordinates, nullptr, inputs.moleculeAtomStarts, inRange ? conformerIdx : coordinates.numConformers);
@@ -580,7 +617,9 @@ __global__ void projection3DKernel(const DeviceCoordView        coordinates,
   if (pbfOutput != nullptr) {
     ProjectionState<OutputReal> pbfState;
     computeProjectionCentroid(atoms, laneInGroup, pbfState);
-    computeProjectionPca(atoms, nullptr, laneInGroup, pbfState);
+    OutputReal covariance[6];
+    computeProjectionCovariance(atoms, nullptr, laneInGroup, pbfState, covariance);
+    diagonalizePbfInBlock(covariance, laneInGroup, pbfState);
     const OutputReal pbf = computePbf(atoms, laneInGroup, pbfState);
     if (inRange && laneInGroup == 0) {
       const bool is3D         = inputs.conformerIs3D == nullptr || inputs.conformerIs3D[conformerIdx] != 0;
