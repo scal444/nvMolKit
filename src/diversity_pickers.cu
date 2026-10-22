@@ -16,6 +16,7 @@
 
 #include "src/diversity_picker_algorithms.cuh"
 #include "src/diversity_pickers.h"
+#include "src/fingerprint_hit_table.cuh"
 #include "src/fingerprint_similarity_device.cuh"
 #include "src/utils/cuda_error_check.h"
 
@@ -23,10 +24,8 @@ namespace nvMolKit {
 namespace detail {
 namespace {
 
-//! Sources per shared-memory tile in the multi-source fingerprint kernel.
-constexpr int kSourceTile    = 32;
-//! Largest fingerprint, in 32-bit words, that the tiled kernel stages in shared memory.
-constexpr int kMaxTiledWords = 256;
+//! Sources per shared hit table in the multi-source fingerprint kernel.
+constexpr int kSourceTile = 32;
 
 __global__ void gatherLeaderWindowKernel(const LeaderState state, const int numItems, const int windowSize) {
   using BlockScan = cub::BlockScan<int, kPickerBlockSize>;
@@ -253,28 +252,29 @@ __global__ void fingerprintDistancesKernel(const std::uint32_t* fingerprints,
   op.finish(candidate, state);
 }
 
-//! One thread per candidate against tiles of kSourceTile sources staged in shared memory, reading each candidate
-//! word once per tile.
-template <FingerprintSimilarityMetric Metric, bool Vectorized, typename Op>
-__global__ void fingerprintTiledDistancesKernel(const std::uint32_t* fingerprints,
-                                                const int*           bitCounts,
-                                                const int            numItems,
-                                                const int            numWords,
-                                                const int*           sources,
-                                                const int            numSources,
-                                                const Op             op) {
-  extern __shared__ uint4 tileStorage[];
-  auto*                   tile = reinterpret_cast<std::uint32_t*>(tileStorage);
-  __shared__ int          tileSources[kSourceTile];
-  __shared__ int          tileCounts[kSourceTile];
+//! One thread per candidate against tiles of kSourceTile sources staged as shared hit tables (see
+//! fingerprint_hit_table.cuh): a sparse candidate costs a few operations per set bit rather than a population count per
+//! word and source, and its intersections are exact.
+template <FingerprintSimilarityMetric Metric, typename Op>
+__global__ void fingerprintHitTableDistancesKernel(const std::uint32_t* fingerprints,
+                                                   const int*           bitCounts,
+                                                   const std::uint16_t* positions,
+                                                   const int            numItems,
+                                                   const int            numWords,
+                                                   const int*           sources,
+                                                   const int            numSources,
+                                                   const Op             op) {
+  extern __shared__ std::uint32_t table[];
+  __shared__ int                  tileSources[kSourceTile];
 
   const int  candidate = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
   const bool live      = candidate < numItems && !op.skip(candidate);
   if (__syncthreads_or(live) == 0) {
     return;
   }
-  const std::uint32_t* row      = fingerprints + static_cast<std::size_t>(live ? candidate : 0) * numWords;
-  const int            rowCount = live ? bitCounts[candidate] : 0;
+  const std::uint32_t* row        = fingerprints + static_cast<std::size_t>(live ? candidate : 0) * numWords;
+  const int            rowCount   = live ? bitCounts[candidate] : 0;
+  const int*           tileCounts = reinterpret_cast<const int*>(table + numWords * 32 + 1);
   typename Op::State   state{};
   if (live) {
     state = op.start(candidate);
@@ -284,50 +284,24 @@ __global__ void fingerprintTiledDistancesKernel(const std::uint32_t* fingerprint
     const int tileLength = min(kSourceTile, numSources - base);
     __syncthreads();
     if (threadIdx.x < kSourceTile) {
-      const int  source        = static_cast<int>(threadIdx.x) < tileLength ? sources[base + threadIdx.x] : -1;
-      const bool valid         = validSource(source, numItems);
-      tileSources[threadIdx.x] = valid ? source : -1;
-      tileCounts[threadIdx.x]  = valid ? bitCounts[source] : 0;
+      const int source         = static_cast<int>(threadIdx.x) < tileLength ? sources[base + threadIdx.x] : -1;
+      tileSources[threadIdx.x] = validSource(source, numItems) ? source : -1;
     }
     __syncthreads();
-    for (int index = static_cast<int>(threadIdx.x); index < tileLength * numWords; index += kPickerBlockSize) {
-      const int source = tileSources[index / numWords];
-      tile[index] = source >= 0 ? fingerprints[static_cast<std::size_t>(source) * numWords + index % numWords] : 0U;
-    }
-    __syncthreads();
+    stageHitTable(table, fingerprints, bitCounts, positions, numItems, numWords, tileSources, tileLength);
     if (!live) {
       continue;
     }
-
-    int intersections[kSourceTile] = {};
-    if constexpr (Vectorized) {
-      const auto* row4   = reinterpret_cast<const uint4*>(row);
-      const auto* tile4  = reinterpret_cast<const uint4*>(tile);
-      const int   words4 = numWords / 4;
-      for (int word = 0; word < words4; ++word) {
-        const uint4 a = row4[word];
-#pragma unroll
-        for (int t = 0; t < kSourceTile; ++t) {
-          const uint4 b = tile4[t * words4 + word];
-          intersections[t] += __popc(a.x & b.x) + __popc(a.y & b.y) + __popc(a.z & b.z) + __popc(a.w & b.w);
-        }
-      }
-    } else {
-      for (int word = 0; word < numWords; ++word) {
-        const std::uint32_t a = row[word];
-#pragma unroll
-        for (int t = 0; t < kSourceTile; ++t) {
-          intersections[t] += __popc(a & tile[t * numWords + word]);
-        }
-      }
-    }
-#pragma unroll
-    for (int t = 0; t < kSourceTile; ++t) {
-      if (t < tileLength && tileSources[t] >= 0) {
+    const SlicedCounts sliced = hitTableCounts(table, positions, numItems, numWords, candidate, rowCount);
+    for (int t = 0; t < tileLength; ++t) {
+      const int source = tileSources[t];
+      if (source >= 0) {
+        const int intersection =
+          hitTableIntersection(sliced, t, fingerprints + static_cast<std::size_t>(source) * numWords, row, numWords);
         op.visit(state,
                  base + t,
-                 tileSources[t] == candidate,
-                 fingerprintDistance<Metric>(intersections[t], tileCounts[t], rowCount));
+                 source == candidate,
+                 fingerprintDistance<Metric>(intersection, tileCounts[t], rowCount));
       }
     }
   }
@@ -373,12 +347,22 @@ template <FingerprintSimilarityMetric Metric> class FingerprintDistanceProvider 
         numItems_(numItems),
         numWords_(numWords),
         vectorized_(numWords % 4 == 0 && reinterpret_cast<std::uintptr_t>(fingerprints.data()) % alignof(uint4) == 0),
-        bitCounts_(numItems, stream) {
+        hitTables_(hitTableSupported(numWords)),
+        bitCounts_(numItems, stream),
+        positions_(hitTables_ ? static_cast<std::size_t>(numItems) * kPositionCapacity : 0, stream) {
     if (numItems > 0) {
       fingerprintBitCountsKernel<<<pickerGridSize(numItems), kPickerBlockSize, 0, stream>>>(fingerprints_.data(),
                                                                                             bitCounts_.data(),
                                                                                             numItems_,
                                                                                             numWords_);
+      cudaCheckError(cudaGetLastError());
+    }
+    if (numItems > 0 && hitTables_) {
+      const int blocks = static_cast<int>(std::min<long long>(65535, (32LL * numItems + 255) / 256));
+      fingerprintPositionsKernel<<<blocks, 256, 0, stream>>>(fingerprints_.data(),
+                                                             positions_.data(),
+                                                             numItems_,
+                                                             numWords_);
       cudaCheckError(cudaGetLastError());
     }
   }
@@ -402,16 +386,16 @@ template <FingerprintSimilarityMetric Metric> class FingerprintDistanceProvider 
   template <bool Vectorized, typename Op>
   void launch(const int* sources, const int numSources, const Op& op, cudaStream_t stream) const {
     const int grid = pickerGridSize(numItems_);
-    if (numSources > 1 && numWords_ <= kMaxTiledWords) {
-      const auto sharedBytes = static_cast<std::size_t>(kSourceTile) * numWords_ * sizeof(std::uint32_t);
-      fingerprintTiledDistancesKernel<Metric, Vectorized>
-        <<<grid, kPickerBlockSize, sharedBytes, stream>>>(fingerprints_.data(),
-                                                          bitCounts_.data(),
-                                                          numItems_,
-                                                          numWords_,
-                                                          sources,
-                                                          numSources,
-                                                          op);
+    if (numSources > 1 && hitTables_) {
+      fingerprintHitTableDistancesKernel<Metric>
+        <<<grid, kPickerBlockSize, hitTableBytes(numWords_), stream>>>(fingerprints_.data(),
+                                                                       bitCounts_.data(),
+                                                                       positions_.data(),
+                                                                       numItems_,
+                                                                       numWords_,
+                                                                       sources,
+                                                                       numSources,
+                                                                       op);
     } else {
       fingerprintDistancesKernel<Metric, Vectorized><<<grid, kPickerBlockSize, 0, stream>>>(fingerprints_.data(),
                                                                                             bitCounts_.data(),
@@ -428,7 +412,10 @@ template <FingerprintSimilarityMetric Metric> class FingerprintDistanceProvider 
   int                                  numItems_;
   int                                  numWords_;
   bool                                 vectorized_;
+  //! Whether multi-source passes run on hit tables, from per-fingerprint set-bit position lists.
+  bool                                 hitTables_;
   AsyncDeviceVector<int>               bitCounts_;
+  AsyncDeviceVector<std::uint16_t>     positions_;
 };
 
 template <typename Scalar>

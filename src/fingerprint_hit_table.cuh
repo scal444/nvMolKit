@@ -234,9 +234,57 @@ __device__ inline void stageHitTable(std::uint32_t*       table,
 }
 
 /**
+ * Bit-sliced intersections of @p candidate with the staged sources. A candidate whose positions are not listed gets
+ * every valid source marked as overflowed, so its intersections are counted by word.
+ */
+__device__ inline SlicedCounts hitTableCounts(const std::uint32_t* table,
+                                              const std::uint16_t* positions,
+                                              const int            numItems,
+                                              const int            numWords,
+                                              const int            candidate,
+                                              const int            candidateCount) {
+  SlicedCounts sliced;
+  if (candidateCount > kPositionCapacity) {
+    sliced.overflow = static_cast<std::uint32_t>(reinterpret_cast<const int*>(table + numWords * 32 + 1)[33]);
+    return sliced;
+  }
+  const auto* list   = reinterpret_cast<const uint4*>(positions) + candidate;
+  const int   groups = (candidateCount + 7) / 8;
+  for (int group = 0; group < groups; ++group) {
+    const uint4         packed   = list[static_cast<std::size_t>(group) * numItems];
+    const std::uint32_t masks[8] = {table[packed.x & 0xFFFFU],
+                                    table[packed.x >> 16],
+                                    table[packed.y & 0xFFFFU],
+                                    table[packed.y >> 16],
+                                    table[packed.z & 0xFFFFU],
+                                    table[packed.z >> 16],
+                                    table[packed.w & 0xFFFFU],
+                                    table[packed.w >> 16]};
+    addMasks(sliced, masks);
+  }
+  return sliced;
+}
+
+//! Exact intersection of the candidate row with staged source @p ordinal, counted by word if it overflowed.
+__device__ __forceinline__ int hitTableIntersection(const SlicedCounts&  sliced,
+                                                    const int            ordinal,
+                                                    const std::uint32_t* source,
+                                                    const std::uint32_t* row,
+                                                    const int            numWords) {
+  if ((sliced.overflow >> ordinal & 1U) == 0U) {
+    return countOf(sliced, ordinal);
+  }
+  int common = 0;
+  for (int word = 0; word < numWords; ++word) {
+    common += __popc(source[word] & row[word]);
+  }
+  return common;
+}
+
+/**
  * Mask of the staged sources within @p similarity of @p candidate under @p Metric, with the same test as
- * fingerprintSimilarityCanReach and fingerprintSimilarityAtLeast. Candidates whose positions are not listed are
- * tested by word.
+ * fingerprintSimilarityCanReach and fingerprintSimilarityAtLeast. Only sources whose sliced count reaches
+ * minimumIntersection are tested.
  */
 template <FingerprintSimilarityMetric Metric>
 __device__ inline std::uint32_t hitTableMask(const std::uint32_t* table,
@@ -248,43 +296,19 @@ __device__ inline std::uint32_t hitTableMask(const std::uint32_t* table,
                                              const int            candidate,
                                              const int            candidateCount,
                                              const float          similarity) {
-  const int*    counts = reinterpret_cast<const int*>(table + numWords * 32 + 1);
-  const auto    valid  = static_cast<std::uint32_t>(counts[33]);
-  SlicedCounts  sliced;
-  std::uint32_t flagged;
-  if (candidateCount <= kPositionCapacity) {
-    const auto* list   = reinterpret_cast<const uint4*>(positions) + candidate;
-    const int   groups = (candidateCount + 7) / 8;
-    for (int group = 0; group < groups; ++group) {
-      const uint4         packed   = list[static_cast<std::size_t>(group) * numItems];
-      const std::uint32_t masks[8] = {table[packed.x & 0xFFFFU],
-                                      table[packed.x >> 16],
-                                      table[packed.y & 0xFFFFU],
-                                      table[packed.y >> 16],
-                                      table[packed.z & 0xFFFFU],
-                                      table[packed.z >> 16],
-                                      table[packed.w & 0xFFFFU],
-                                      table[packed.w >> 16]};
-      addMasks(sliced, masks);
-    }
-    flagged = countsAtLeast(sliced, minimumIntersection<Metric>(candidateCount, counts[32], similarity)) & valid;
-  } else {
-    sliced.overflow = valid;
-    flagged         = valid;
-  }
+  const int*         counts = reinterpret_cast<const int*>(table + numWords * 32 + 1);
+  const SlicedCounts sliced = hitTableCounts(table, positions, numItems, numWords, candidate, candidateCount);
+  std::uint32_t flagged = countsAtLeast(sliced, minimumIntersection<Metric>(candidateCount, counts[32], similarity)) &
+                          static_cast<std::uint32_t>(counts[33]);
   const std::uint32_t* row  = fingerprints + static_cast<std::size_t>(candidate) * numWords;
   std::uint32_t        hits = 0U;
   for (; flagged != 0U; flagged &= flagged - 1U) {
     const int ordinal = __ffs(static_cast<int>(flagged)) - 1;
-    int       common  = 0;
-    if ((sliced.overflow >> ordinal & 1U) != 0U) {
-      const std::uint32_t* source = fingerprints + static_cast<std::size_t>(sources[ordinal]) * numWords;
-      for (int word = 0; word < numWords; ++word) {
-        common += __popc(source[word] & row[word]);
-      }
-    } else {
-      common = countOf(sliced, ordinal);
-    }
+    const int common  = hitTableIntersection(sliced,
+                                            ordinal,
+                                            fingerprints + static_cast<std::size_t>(sources[ordinal]) * numWords,
+                                            row,
+                                            numWords);
     if (fingerprintSimilarityCanReach<Metric>(counts[ordinal], candidateCount, similarity) &&
         fingerprintSimilarityAtLeast<Metric>(common, counts[ordinal], candidateCount, similarity)) {
       hits |= 1U << ordinal;

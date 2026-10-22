@@ -413,7 +413,7 @@ def test_selected_device_can_differ_from_current_device(function, metric, stream
 @pytest.mark.parametrize("num_words", [3, 260])
 @pytest.mark.parametrize("metric", ["tanimoto", "cosine"])
 def test_fused_forms_match_matrix_forms_for_unusual_widths(float32_distances, num_words, metric):
-    # 3 words cannot use vector loads; 260 words exceed the shared-memory source tile.
+    # 3 words cannot use vector loads; 260 words set more bits than a position list holds.
     rng = np.random.default_rng(num_words)
     bits = rng.random((300, num_words * 32)) < 0.03
     bits[:40] = bits[40:80] | (rng.random((40, num_words * 32)) < 0.01)
