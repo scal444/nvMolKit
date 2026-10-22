@@ -1116,14 +1116,23 @@ __global__ void combinedGradKernel(const Terms*                   terms,
     return;
   }
 
-  constexpr int       maxAtomSize = 256;
-  __shared__ storageT accumGrad[maxAtomSize * 3];
+  // SINGLE gives each warp its own shared accumulator and sums them in warp order: every thread evaluates a fixed
+  // sequence of terms, so each float sum is formed in the same order on every launch and SINGLE gradients are
+  // reproducible. FULL accumulates with global reductions into the output: shared-memory double atomics are
+  // compare-and-swap loops.
+  constexpr int       maxAtomSize     = 256;
+  constexpr bool      isSingle        = std::is_same_v<real, float>;
+  constexpr int       numAccumulators = blockSizePerMol / 32;
+  __shared__ storageT accumGrad[isSingle ? numAccumulators * maxAtomSize * 3 : 1];
 
-  const bool useSharedMem = numAtoms <= maxAtomSize;
-  storageT*  molGradBase  = useSharedMem ? accumGrad : grad + atomStart * 3;
+  const int  numValues    = numAtoms * 3;
+  const bool useSharedMem = isSingle && numAtoms <= maxAtomSize;
+  storageT*  molGradBase  = useSharedMem ? accumGrad + (tid / 32) * numValues : grad + atomStart * 3;
+  storageT*  zeroBase     = useSharedMem ? accumGrad : molGradBase;
+  const int  numZeros     = useSharedMem ? numAccumulators * numValues : numValues;
 
-  for (int i = tid; i < numAtoms * 3; i += blockSizePerMol) {
-    molGradBase[i] = 0.0;
+  for (int i = tid; i < numZeros; i += blockSizePerMol) {
+    zeroBase[i] = 0.0;
   }
   __syncthreads();
 
@@ -1136,8 +1145,12 @@ __global__ void combinedGradKernel(const Terms*                   terms,
 
   if (useSharedMem) {
     storageT* globalGrad = grad + (atomStart * 3);
-    for (int i = tid; i < numAtoms * 3; i += blockSizePerMol) {
-      globalGrad[i] = molGradBase[i];
+    for (int i = tid; i < numValues; i += blockSizePerMol) {
+      storageT sum = accumGrad[i];
+      for (int w = 1; w < numAccumulators; ++w) {
+        sum += accumGrad[w * numValues + i];
+      }
+      globalGrad[i] = sum;
     }
   }
 }
