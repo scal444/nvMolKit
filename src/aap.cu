@@ -453,25 +453,62 @@ template <bool Rows> __device__ void normalizeLines(float* transport, const int 
   }
 }
 
-//! Shared-memory buffers of a pair block: two squares of maxAtoms lines, @c stride floats apart, and warp partials.
+//! Threads per line of the scaling-form Sinkhorn updates, so one pass covers a square of kMaxAtoms lines.
+constexpr int   kLineThreads       = kThreads / kMaxAtoms;
+//! Largest 1 / temperature for the scaling form: the kernel exp((S - 1) / T) and the scalings then stay well inside
+//! single-precision range. Colder temperatures normalize in the log domain.
+constexpr float kMaxScalingInverse = 40.0F;
+
+//! Sets each row (or column) scaling of the plan diag(rowScale) K diag(columnScale) so that the line sums to one.
+template <bool Rows>
+__device__ void scaleLines(const float* kernel,
+                           const int    squareSize,
+                           const int    stride,
+                           const float* other,
+                           float*       scale) {
+  const int line = static_cast<int>(threadIdx.x) / kLineThreads;
+  const int part = static_cast<int>(threadIdx.x) % kLineThreads;
+  float     sum  = 0.0F;
+  if (line < squareSize) {
+    for (int offset = part; offset < squareSize; offset += kLineThreads) {
+      sum += (Rows ? kernel[line * stride + offset] : kernel[offset * stride + line]) * other[offset];
+    }
+  }
+  for (int width = kLineThreads / 2; width > 0; width /= 2) {
+    sum += __shfl_xor_sync(0xffffffffU, sum, width);
+  }
+  if (part == 0 && line < squareSize) {
+    scale[line] = 1.0F / sum;
+  }
+}
+
+//! Shared-memory buffers of a pair block: two squares of maxAtoms lines, @c stride floats apart, the Sinkhorn row and
+//! column scalings, and warp partials.
 struct PairBuffers {
   float* affinity;
   float* transport;
+  float* rowScale;
+  float* columnScale;
   float* partials;
   int    stride;
 };
 
 //! Block-wide AAP similarity of one ordered pair. Every thread must call this; the result is valid in all threads.
+//! With @p scaling, the transport plan is kept as diag(rowScale) K diag(columnScale) with K = exp((S - 1) / T), which
+//! is the log-domain row and column normalization of S / T without an exponential per entry and iteration.
 __device__ float aapPairSimilarity(const AapDeviceView& view,
                                    const int            source,
                                    const int            candidate,
                                    const float          temperature,
                                    const int            iterations,
+                                   const bool           scaling,
                                    const PairBuffers&   buffers) {
-  float* const affinity  = buffers.affinity;
-  float* const transport = buffers.transport;
-  float* const partials  = buffers.partials;
-  const int    stride    = buffers.stride;
+  float* const affinity    = buffers.affinity;
+  float* const transport   = buffers.transport;
+  float* const rowScale    = buffers.rowScale;
+  float* const columnScale = buffers.columnScale;
+  float* const partials    = buffers.partials;
+  const int    stride      = buffers.stride;
 
   const int leftStart      = static_cast<int>(view.moleculeAtomOffsets[source]);
   const int rightStart     = static_cast<int>(view.moleculeAtomOffsets[candidate]);
@@ -509,22 +546,33 @@ __device__ float aapPairSimilarity(const AapDeviceView& view,
       score = static_cast<float>(overlap + 1) / static_cast<float>(2 * largestPathCount - overlap + 1);
     }
     affinity[row * stride + column]  = score;
-    transport[row * stride + column] = score / temperature;
+    transport[row * stride + column] = scaling ? expf((score - 1.0F) / temperature) : score / temperature;
+  }
+  if (scaling && static_cast<int>(threadIdx.x) < squareSize) {
+    columnScale[threadIdx.x] = 1.0F;
   }
   __syncthreads();
 
   for (int iteration = 0; iteration < iterations; ++iteration) {
-    normalizeLines<true>(transport, squareSize, stride);
-    __syncthreads();
-    normalizeLines<false>(transport, squareSize, stride);
+    if (scaling) {
+      scaleLines<true>(transport, squareSize, stride, columnScale, rowScale);
+      __syncthreads();
+      scaleLines<false>(transport, squareSize, stride, rowScale, columnScale);
+    } else {
+      normalizeLines<true>(transport, squareSize, stride);
+      __syncthreads();
+      normalizeLines<false>(transport, squareSize, stride);
+    }
     __syncthreads();
   }
 
   float matched = 0.0F;
   for (int linear = static_cast<int>(threadIdx.x); linear < leftCount * candidateAtoms; linear += kThreads) {
-    const int row    = linear / candidateAtoms;
-    const int column = linear % candidateAtoms;
-    matched += expf(transport[row * stride + column]) * affinity[row * stride + column];
+    const int   row    = linear / candidateAtoms;
+    const int   column = linear % candidateAtoms;
+    const float plan   = scaling ? rowScale[row] * transport[row * stride + column] * columnScale[column] :
+                                   expf(transport[row * stride + column]);
+    matched += plan * affinity[row * stride + column];
   }
   matched = warpSum(matched);
   if (threadIdx.x % 32 == 0) {
@@ -551,11 +599,15 @@ __global__ void aapDistanceKernel(const AapDeviceView view,
                                   const int           iterations,
                                   const int           maxAtoms,
                                   const Op            op) {
-  // Two squares sized for the call's largest molecule, padded by one column to spread lines across banks.
+  // Two squares sized for the call's largest molecule, padded by one column to spread lines across banks, then the
+  // Sinkhorn scalings.
   extern __shared__ float squares[];
   __shared__ float        partials[kThreads / 32];
-  const int               stride = maxAtoms + 1;
-  const PairBuffers       buffers{squares, squares + maxAtoms * stride, partials, stride};
+  const int               stride    = maxAtoms + 1;
+  float* const            transport = squares + maxAtoms * stride;
+  float* const            rowScale  = transport + maxAtoms * stride;
+  const PairBuffers       buffers{squares, transport, rowScale, rowScale + maxAtoms, partials, stride};
+  const bool              scaling = 1.0F / temperature <= kMaxScalingInverse;
 
   const int count = *candidateCount;
   for (int position = static_cast<int>(blockIdx.x); position < count; position += static_cast<int>(gridDim.x)) {
@@ -570,7 +622,7 @@ __global__ void aapDistanceKernel(const AapDeviceView view,
       const float distance =
         view.groups[candidate] == view.groups[source] ?
           0.0F :
-          1.0F - aapPairSimilarity(view, source, candidate, temperature, iterations, buffers);
+          1.0F - aapPairSimilarity(view, source, candidate, temperature, iterations, scaling, buffers);
       if (threadIdx.x == 0) {
         op.visit(state, ordinal, source == candidate, distance);
       }
@@ -596,7 +648,8 @@ class AapDistanceProvider {
     for (std::size_t molecule = 0; molecule + 1 < offsets.size(); ++molecule) {
       maxAtoms_ = std::max(maxAtoms_, static_cast<int>(offsets[molecule + 1] - offsets[molecule]));
     }
-    sharedBytes_ = 2 * static_cast<std::size_t>(maxAtoms_) * (maxAtoms_ + 1) * sizeof(float);
+    // Affinity and transport squares, then the row and column scalings.
+    sharedBytes_ = 2 * static_cast<std::size_t>(maxAtoms_) * (maxAtoms_ + 2) * sizeof(float);
 
     int device = 0;
     cudaCheckError(cudaGetDevice(&device));
