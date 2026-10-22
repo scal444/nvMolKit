@@ -34,6 +34,13 @@ enum PairwiseSet : unsigned {
   kPairwiseAutocorr3D = 4u,
 };
 
+//! Double sums use the m8n8k4 float64 MMA, which needs sm_80; older devices accumulate them like float sums.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
+constexpr bool kDoubleMma = false;
+#else
+constexpr bool kDoubleMma = true;
+#endif
+
 //! Per-atom scratch row written once per conformer: centered x, y, z, the atom-property channels (the last one
 //! MORSE's I-state), RDF's I-state, then AUTOCORR3D's covalent radius and padding to whole 16-byte vectors, all as the
 //! compute type.
@@ -169,33 +176,58 @@ __device__ __forceinline__ PairGeometry<Real, kValues> pairGeometry(const Real* 
   return pair;
 }
 
+//! Records one double m8n8k4 MMA step takes: its four K columns are four atom pairs.
+constexpr int kMmaPairs = 4;
+
+/**
+ * @brief acc += A B for one float64 m8n8k4 MMA tile: lane l supplies A(l / 4, l % 4) = @p a and B(l % 4, l / 4) = @p b,
+ *        and holds D(l / 4, 2 (l % 4) + i) in acc[i].
+ */
+__device__ __forceinline__ void mmaAccumulate(double (&acc)[2], const double a, const double b) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  asm volatile("mma.sync.aligned.m8n8k4.row.col.f64.f64.f64.f64 {%0, %1}, {%2}, {%3}, {%0, %1};"
+               : "+d"(acc[0]), "+d"(acc[1])
+               : "d"(a), "d"(b));
+#else
+  __trap();  // Not reached: kDoubleMma is false here.
+#endif
+}
+
 /**
  * @brief MORSE bins 1-31: bin s adds w_j * w_k * sin(s r) / (s r) per channel. Records hold the weight products over
  *        r; the 1 / s factor is applied to the finished sums. Bin 0 is computed from the weights in float64, see
  *        stageConformer().
  *
- * Records carry r; the kLanes lanes of a record own scattering values l, l + kLanes, ... and each takes sin(s r) for
- * its own.
+ * Float records carry r; the kLanes lanes of a record own scattering values l, l + kLanes, ... and each takes
+ * sin(s r) for its own. Double records carry sin(l r) for l = 0..8 and 2 cos(8 r), from one double sincos by the
+ * three-term recurrence; double sums are m8n8k4 MMA fragments (channels x pairs times pairs x scattering values), lane
+ * l continuing sin(l' r), l' = l / 4, of its pair l % 4 with sin((l' + 8) r) = 2 cos(8 r) sin(l' r) - sin((l' - 8) r).
+ * In double the recurrence stays within a few ulp of sin(s r) over these few steps.
  */
 template <typename Real> struct MorsePass {
   static constexpr bool kFloat          = std::is_same_v<Real, float>;
+  static constexpr bool kMma            = !kFloat && kDoubleMma;
   static constexpr int  kLanes          = kGroupSize;
   static constexpr int  kSlots          = kNumMorseScatterings / kLanes;
-  static constexpr int  kRecordsPerStep = kWarpSize / kLanes;
+  static constexpr int  kRecordsPerStep = kMma ? kMmaPairs : kWarpSize / kLanes;
   static constexpr int  kRowLoad        = kFloat ? 12 : 10;
-  //! Q0..Q6, r.
-  static constexpr int  kRecordValues   = 8;
+  static constexpr int  kSines          = 8;
+  //! Float: Q0..Q6, r. Double: Q0..Q6, 2 cos(8 r), sin(l r) for l = 0..8.
+  static constexpr int  kRecordValues   = !kMma ? 8 : 18;
   //! Keeps the records a warp reads at once on distinct banks.
-  static constexpr int  kRecordStride   = 12;
+  static constexpr int  kRecordStride   = !kMma ? 12 : 20;
   //! Values a null record zeroes: all a consumer reads.
   static constexpr int  kNullValues     = kRecordStride;
   //! Every pair contributes, so batches keep a record per lane and overlap the next batch's records with the sums.
   static constexpr bool kPipelined      = true;
+  static constexpr bool kSorted         = false;
   static constexpr int  kWidth          = kNumMorseProperties;
   static constexpr int  kBins           = kNumMorseScatterings;
-  using Accumulators                    = Real[kSlots][kNumPairwiseChannels];
+  using Accumulators =
+    std::conditional_t<kMma, double[kNumMorseScatterings / 8][2], Real[kSlots][kNumPairwiseChannels]>;
+  static_assert(kFloat || kSlots * 8 == kNumMorseScatterings);
 
-  //! Scattering value of slot @p slot of lane @p laneInGroup.
+  //! Float: scattering value of slot @p slot of lane @p laneInGroup.
   __device__ __forceinline__ static int binOf(const int laneInGroup, const int slot) {
     return laneInGroup + kLanes * slot;
   }
@@ -212,7 +244,24 @@ template <typename Real> struct MorsePass {
     for (int channel = 1; channel < kNumPairwiseChannels; ++channel) {
       record[channel] = pair.first[kRowWeights + channel - 1] * pair.second[kRowWeights + channel - 1] * inverseR;
     }
-    record[kNumPairwiseChannels] = r;
+    if constexpr (!kMma) {
+      record[kNumPairwiseChannels] = r;
+    } else {
+      // sin(l r) by the three-term recurrence sin((l + 1) r) = 2 cos(r) sin(l r) - sin((l - 1) r) from one double
+      // sincos, and 2 cos(8 r) = 2 - 4 sin^2(4 r).
+      double sine;
+      double cosine;
+      sincos(r, &sine, &cosine);
+      const double twiceCosine = 2.0 * cosine;
+      record[kSineOffset]      = 0.0;
+      record[kSineOffset + 1]  = sine;
+#pragma unroll
+      for (int l = 2; l <= kSines; ++l) {
+        record[kSineOffset + l] = fma(twiceCosine, record[kSineOffset + l - 1], -record[kSineOffset + l - 2]);
+      }
+      const double sineHalf        = record[kSineOffset + kSines / 2];
+      record[kNumPairwiseChannels] = fma(-4.0 * sineHalf, sineHalf, 2.0);
+    }
     return true;
   }
 
@@ -234,27 +283,52 @@ template <typename Real> struct MorsePass {
 
   //! One step: the kRecordsPerStep records from @p records.
   __device__ __forceinline__ static void consume(const Real* records, const int lane, Accumulators& acc) {
-    const Real* record      = records + (lane / kLanes) * kRecordStride;
-    const int   laneInGroup = lane % kLanes;
-    Real        head[kNumPairwiseChannels + 1];
-    loadValues<kNumPairwiseChannels + 1>(record, head);
-    Real products[kNumPairwiseChannels];
+    if constexpr (!kMma) {
+      const Real* record      = records + (lane / kLanes) * kRecordStride;
+      const int   laneInGroup = lane % kLanes;
+      Real        head[kNumPairwiseChannels + 1];
+      loadValues<kNumPairwiseChannels + 1>(record, head);
+      Real products[kNumPairwiseChannels];
 #pragma unroll
-    for (int channel = 0; channel < kNumPairwiseChannels; ++channel) {
-      products[channel] = head[channel];
-    }
-    // Each slot's sin(s r) on its own: independent special-function results keep the dependency chains short.
-    Real sines[kSlots];
+      for (int channel = 0; channel < kNumPairwiseChannels; ++channel) {
+        products[channel] = head[channel];
+      }
+      // Each slot's sin(s r) on its own: independent special-function results keep the dependency chains short.
+      Real sines[kSlots];
 #pragma unroll
-    for (int slot = 0; slot < kSlots; ++slot) {
-      if constexpr (kFloat) {
-        sines[slot] = sinf(static_cast<float>(binOf(laneInGroup, slot)) * head[kNumPairwiseChannels]);
-      } else {
-        sines[slot] = sin(static_cast<double>(binOf(laneInGroup, slot)) * head[kNumPairwiseChannels]);
+      for (int slot = 0; slot < kSlots; ++slot) {
+        if constexpr (kFloat) {
+          sines[slot] = sinf(static_cast<float>(binOf(laneInGroup, slot)) * head[kNumPairwiseChannels]);
+        } else {
+          sines[slot] = sin(static_cast<double>(binOf(laneInGroup, slot)) * head[kNumPairwiseChannels]);
+        }
+      }
+      accumulateOuterProduct(acc, products, sines);
+    } else {
+      const double* record      = records + (lane % kMmaPairs) * kRecordStride;
+      const int     row         = lane / kMmaPairs;
+      const double  product     = record[min(row, kNumPairwiseChannels - 1)];
+      const double  twiceCosine = record[kNumPairwiseChannels];
+      double        sines[kSlots];
+      sines[0] = record[kSineOffset + row];
+      // sin((l - 8) r) = -sin((8 - l) r).
+      sines[1] = fma(twiceCosine, sines[0], record[kSineOffset + kSines - row]);
+#pragma unroll
+      for (int slot = 2; slot < kSlots; ++slot) {
+        sines[slot] = fma(twiceCosine, sines[slot - 1], -sines[slot - 2]);
+      }
+      // A's row 7 is padding.
+      const double a = row < kNumPairwiseChannels ? product : 0.0;
+#pragma unroll
+      for (int slot = 0; slot < kSlots; ++slot) {
+        mmaAccumulate(acc[slot], a, sines[slot]);
       }
     }
-    accumulateOuterProduct(acc, products, sines);
   }
+
+ private:
+  static constexpr int kSineOffset = kNumPairwiseChannels + 1;
+  static_assert(!kMma || kSineOffset + kSines + 1 <= kRecordValues);
 };
 
 //! exp(-25 (2 b + 1)) for b = 0..3: RdfPass's double window steps.
@@ -269,33 +343,51 @@ __constant__ double kRdfStepFactors[4] = {1.3887943864964021e-11,
  *
  * The exponent reaches -100 (float's flush to zero starts near -87) within one radius step of 0.5 A on either side of
  * the radii bracketing r, so a record carries the terms of the four bins floor(2 (r - 1)) - 1 .. + 2 only: every other
- * bin's term is zero in float and below exp(-100) in double. Records spread the window over a zeroed term per bin
- * and lane l of a record's kLanes lanes owns the kSlots consecutive bins from kSlots l.
+ * bin's term is zero in float and below exp(-100) in double. Float records spread the window over a zeroed term per
+ * bin and lane l of a record's kLanes lanes owns the kSlots consecutive bins from kSlots l.
+ *
+ * Double sums are m8n8k4 MMAs (channels x pairs times pairs x bins) over kRdfTiles eight-bin tiles that overlap by
+ * four bins: tile t covers bins 4 t .. 4 t + 7, so every window fits the tile of its start clamped to [0, 26], divided
+ * by four. A batch's records are stored sorted by tile (kSorted), and each MMA step takes four records of one tile:
+ * each pair costs about a quarter MMA instead of one per tile its step's pairs reach. Records place the window's terms
+ * at their tile positions, zeros elsewhere; double records are stored transposed (see storeTransposed()).
  */
+constexpr int kRdfTiles    = 7;
+constexpr int kRdfTileBins = 8;
+//! Class of a pair that reaches no bin.
+constexpr int kRdfNoTile   = kRdfTiles;
+
 template <typename Real> struct RdfPass {
   static constexpr bool kFloat          = std::is_same_v<Real, float>;
+  static constexpr bool kMma            = !kFloat && kDoubleMma;
+  //! Double batches store records sorted by tile; see runPairwisePass().
+  static constexpr bool kSorted         = kMma;
   static constexpr int  kLanes          = kGroupSize;
   static constexpr int  kSlots          = kNumMorseScatterings / kLanes;
-  static constexpr int  kRecordsPerStep = kWarpSize / kLanes;
+  static constexpr int  kRecordsPerStep = kMma ? kMmaPairs : kWarpSize / kLanes;
   static constexpr int  kWindow         = 4;
   static constexpr int  kRowLoad        = kFloat ? 12 : 10;
   //! Products of channels 0-6 (channel 0's is 1, the last is RDF's I-state), window start (int), then the terms.
   static constexpr int  kStartOffset    = kNumPairwiseChannels;
   static constexpr int  kTermOffset     = 8;
-  static constexpr int  kTerms          = kNumMorseScatterings;
+  static constexpr int  kTerms          = !kMma ? kNumMorseScatterings : kRdfTileBins;
   static constexpr int  kRecordValues   = kTermOffset + kWindow;
-  //! Keeps the records a warp reads at once on distinct banks.
-  static constexpr int  kRecordStride   = kTermOffset + kTerms + 4;
-  //! Values a null record zeroes; terms stay zeroed between records.
-  static constexpr int  kNullValues     = kTermOffset;
+  //! Float: keeps the records a warp reads at once on distinct banks. Double: values per transposed slot, the products
+  //! (row 7 of A zero) then the tile's terms.
+  static constexpr int  kRecordStride   = !kMma ? kTermOffset + kTerms + 4 : kTermOffset + kRdfTileBins;
+  //! Sorted batches read up to kRecordsPerStep - 1 slots past their last record.
+  static constexpr int  kRecordSlots    = kSorted ? kWarpSize + kRecordsPerStep : kWarpSize;
+  //! Values a null record zeroes; float terms stay zeroed between records.
+  static constexpr int  kNullValues     = !kMma ? kTermOffset : kRecordStride;
   //! Every pair contributes, so batches keep a record per lane and overlap the next batch's records with the sums.
-  static constexpr bool kPipelined      = true;
+  static constexpr bool kPipelined      = !kSorted;
   static constexpr int  kWidth          = kNumRdfProperties;
   static constexpr int  kBins           = kNumRdfRadii;
-  using Accumulators                    = Real[kSlots][kNumPairwiseChannels];
+  using Accumulators = std::conditional_t<kMma, double[kRdfTiles][2], Real[kSlots][kNumPairwiseChannels]>;
   static_assert(kRowIStateDrag < kRowLoad);
+  static_assert(kRdfTileBins * (kRdfTiles + 1) / 2 >= kNumRdfRadii);
 
-  //! Bin of slot @p slot of lane @p laneInGroup.
+  //! Float: bin of slot @p slot of lane @p laneInGroup.
   __device__ __forceinline__ static int binOf(const int laneInGroup, const int slot) {
     return laneInGroup * kSlots + slot;
   }
@@ -303,6 +395,12 @@ template <typename Real> struct RdfPass {
   //! Window start of a record.
   __device__ __forceinline__ static int startOf(const Real (&record)[kRecordValues]) {
     return realAsInt(record[kStartOffset]);
+  }
+
+  //! Tile of a contributing record's window, or kRdfNoTile when its window reaches no bin.
+  __device__ __forceinline__ static int tileOf(const Real (&record)[kRecordValues]) {
+    const int start = startOf(record);
+    return start < kNumRdfRadii ? min(max(start, 0), kNumRdfRadii - kWindow) / 4 : kRdfNoTile;
   }
 
   __device__ __forceinline__ static bool compute(const PairwiseConformer<Real>& conformer,
@@ -349,33 +447,68 @@ template <typename Real> struct RdfPass {
     return true;
   }
 
-  //! Records keep their terms zeroed between uses (see prepare() and release()), so a record writes only the window's
-  //! four terms at their bins.
+  //! Float records keep their terms zeroed between uses (see prepare() and release()), so a record writes only the
+  //! window's four terms at their bins.
   __device__ __forceinline__ static void store(Real* target, const Real (&record)[kRecordValues]) {
-    const int start = startOf(record);
-    storeValues<kTermOffset>(target, record);
+    if constexpr (!kMma) {
+      const int start = startOf(record);
+      storeValues<kTermOffset>(target, record);
 #pragma unroll
-    for (int bin = 0; bin < kWindow; ++bin) {
-      if (static_cast<unsigned>(start + bin) < static_cast<unsigned>(kTerms)) {
-        target[kTermOffset + start + bin] = record[kTermOffset + bin];
+      for (int bin = 0; bin < kWindow; ++bin) {
+        if (static_cast<unsigned>(start + bin) < static_cast<unsigned>(kTerms)) {
+          target[kTermOffset + start + bin] = record[kTermOffset + bin];
+        }
       }
     }
   }
 
-  //! Zeros the records' terms before the pass's first record.
+  /**
+   * @brief Double: stores a record at sorted slot @p slot, transposed (value v of slot s at v * kRecordSlots + s): the
+   *        channel products (row 7 of A zero) and the tile's eight terms, the window's at their positions and zeros
+   *        elsewhere. The lanes' slots are a permutation, so each value's stores fill one contiguous row, and a step's
+   *        reads (four consecutive slots of eight rows) take few shared-memory wavefronts.
+   */
+  __device__ __forceinline__ static void storeTransposed(Real*     records,
+                                                         const int slot,
+                                                         const Real (&record)[kRecordValues]) {
+    if constexpr (kMma) {
+      Real* const column = records + slot;
+#pragma unroll
+      for (int channel = 0; channel < kNumPairwiseChannels; ++channel) {
+        column[channel * kRecordSlots] = record[channel];
+      }
+      column[kNumPairwiseChannels * kRecordSlots] = Real(0);
+#pragma unroll
+      for (int position = 0; position < kRdfTileBins; ++position) {
+        column[(kTermOffset + position) * kRecordSlots] = Real(0);
+      }
+      // Window position of bin start + bin in its tile; positions outside the tile (bins below 0 or past 31) drop.
+      const int first = startOf(record) - 4 * tileOf(record);
+#pragma unroll
+      for (int bin = 0; bin < kWindow; ++bin) {
+        if (static_cast<unsigned>(first + bin) < static_cast<unsigned>(kRdfTileBins)) {
+          column[(kTermOffset + first + bin) * kRecordSlots] = record[kTermOffset + bin];
+        }
+      }
+    }
+  }
+
+  //! Zeros the records before the pass's first record: float terms, and every double slot a step may read.
   __device__ __forceinline__ static void prepare(Real* records, const int lane) {
-    for (int value = lane * kVector<Real>; value < kWarpSize * kRecordStride; value += kWarpSize * kVector<Real>) {
+    for (int value = lane * kVector<Real>; value < kRecordSlots * kRecordStride; value += kWarpSize * kVector<Real>) {
       storeZeros<kVector<Real>>(records + value);
     }
   }
 
   //! Clears the terms store() wrote once every lane has consumed the record.
   __device__ __forceinline__ static void release(Real* target, const Real (&record)[kRecordValues]) {
-    const int start = startOf(record);
+    if constexpr (!kMma) {
+      const int start = startOf(record);
 #pragma unroll
-    for (int bin = 0; bin < kWindow; ++bin) {
-      if (static_cast<unsigned>(start + bin) < static_cast<unsigned>(kTerms)) {
-        target[kTermOffset + start + bin] = Real(0);
+      for (int bin = 0; bin < kWindow; ++bin) {
+        if (static_cast<unsigned>(start + bin) < static_cast<unsigned>(kTerms)) {
+          target[kTermOffset + start + bin] = Real(0);
+        }
       }
     }
   }
@@ -391,20 +524,42 @@ template <typename Real> struct RdfPass {
     }
   }
 
-  //! One step: the kRecordsPerStep records from @p records.
+  //! Float: one step, the kRecordsPerStep records from @p records.
   __device__ __forceinline__ static void consume(const Real* records, const int lane, Accumulators& acc) {
-    const Real* record      = records + (lane / kLanes) * kRecordStride;
-    const int   laneInGroup = lane % kLanes;
-    Real        head[kTermOffset];
-    loadValues<kTermOffset>(record, head);
-    Real products[kNumPairwiseChannels];
+    if constexpr (!kMma) {
+      const Real* record      = records + (lane / kLanes) * kRecordStride;
+      const int   laneInGroup = lane % kLanes;
+      Real        head[kTermOffset];
+      loadValues<kTermOffset>(record, head);
+      Real products[kNumPairwiseChannels];
 #pragma unroll
-    for (int channel = 0; channel < kNumPairwiseChannels; ++channel) {
-      products[channel] = head[channel];
+      for (int channel = 0; channel < kNumPairwiseChannels; ++channel) {
+        products[channel] = head[channel];
+      }
+      Real terms[kSlots];
+      loadValues<kSlots>(record + kTermOffset + binOf(laneInGroup, 0), terms);
+      accumulateOuterProduct(acc, products, terms);
     }
-    Real terms[kSlots];
-    loadValues<kSlots>(record + kTermOffset + binOf(laneInGroup, 0), terms);
-    accumulateOuterProduct(acc, products, terms);
+  }
+
+  /**
+   * @brief Double: one MMA step of tile @p tile, the records from slot @p first; slots from @p end on belong to the
+   *        next tile and contribute zero.
+   */
+  __device__ __forceinline__ static void consumeTile(const Real* records,
+                                                     const int   first,
+                                                     const int   end,
+                                                     const int   lane,
+                                                     double (&acc)[2]) {
+    if constexpr (kMma) {
+      const int     slot   = first + lane % kMmaPairs;
+      const double* column = records + slot;
+      const int     row    = lane / kMmaPairs;
+      const bool    valid  = slot < end;
+      const double  a      = valid ? column[row * kRecordSlots] : 0.0;
+      const double  b      = valid ? column[(kTermOffset + row) * kRecordSlots] : 0.0;
+      mmaAccumulate(acc, a, b);
+    }
   }
 };
 
@@ -412,13 +567,16 @@ template <typename Real> struct RdfPass {
  * @brief AUTOCORR3D lags: lag l (1-10) adds w_j * w_k * r over pairs whose bond-count distance is l, for the MORSE
  *        channels plus covalent radius.
  *
- * Batches are compacted to the pairs within kNumAutocorrLags bonds. Lane l of a record's kLanes lanes owns lags l + 1
- * and l + 1 + kLanes for every channel, so each record updates one lane's sums.
+ * Batches are compacted to the pairs within kNumAutocorrLags bonds. Float lane l of a record's kLanes lanes owns lags
+ * l + 1 and l + 1 + kLanes for every channel, so each record updates one lane's sums. Double sums are m8n8k4 MMAs:
+ * channels x pairs times pairs x lags, B holding r in the pair's lag column; the second tile (lags 9-10) runs only
+ * when a pair of the step needs it.
  */
 template <typename Real> struct AutocorrPass {
   static constexpr bool kFloat          = std::is_same_v<Real, float>;
+  static constexpr bool kMma            = !kFloat && kDoubleMma;
   static constexpr int  kLanes          = kGroupSize;
-  static constexpr int  kRecordsPerStep = kWarpSize / kLanes;
+  static constexpr int  kRecordsPerStep = kMma ? kMmaPairs : kWarpSize / kLanes;
   static constexpr int  kRowLoad        = 12;
   //! Products of channels 0-7, r, lag (int), padding.
   static constexpr int  kRecordValues   = kFloat ? 12 : 10;
@@ -426,9 +584,10 @@ template <typename Real> struct AutocorrPass {
   static constexpr int  kRecordStride   = 12;
   static constexpr int  kNullValues     = kRecordStride;
   static constexpr bool kPipelined      = false;
+  static constexpr bool kSorted         = false;
   static constexpr int  kWidth          = kNumAutocorr3DProperties;
   static constexpr int  kLagSlots       = (kNumAutocorrLags + kLanes - 1) / kLanes;
-  using Accumulators                    = Real[kLagSlots][kNumAutocorrChannels];
+  using Accumulators = std::conditional_t<kMma, double[kLagSlots][2], Real[kLagSlots][kNumAutocorrChannels]>;
   static_assert(kLagSlots == 2 && kNumAutocorrChannels == 8);
 
   __device__ __forceinline__ static bool compute(const PairwiseConformer<Real>& conformer,
@@ -470,17 +629,30 @@ template <typename Real> struct AutocorrPass {
   __device__ __forceinline__ static void release(Real*, const Real (&)[kRecordValues]) {}
   //! Warp-collective step: the kRecordsPerStep records from @p records. Null records (lag 0) update nothing.
   __device__ __forceinline__ static void consume(const Real* records, const int lane, Accumulators& acc) {
-    const Real* record      = records + (lane / kLanes) * kRecordStride;
-    const int   laneInGroup = lane % kLanes;
-    Real        products[kNumAutocorrChannels];
-    loadValues<kNumAutocorrChannels>(record, products);
-    Real tail[kVector<Real>];
-    loadValues<kVector<Real>>(record + kNumAutocorrChannels, tail);
-    const int offset = realAsInt(tail[1]) - 1 - laneInGroup;
-    accumulateLag(acc, products, tail[0], offset);
-    if (__any_sync(0xffffffffu, offset == kLanes)) {
-      if (offset == kLanes) {
-        accumulateChannels(acc[1], products, tail[0]);
+    if constexpr (kMma) {
+      const double* record = records + (lane % kMmaPairs) * kRecordStride;
+      const int     row    = lane / kMmaPairs;
+      double        tail[kVector<double>];
+      loadValues<kVector<double>>(record + kNumAutocorrChannels, tail);
+      const int    lag     = realAsInt(tail[1]);
+      const double product = record[row];
+      mmaAccumulate(acc[0], product, lag - 1 == row ? tail[0] : 0.0);
+      if (__any_sync(0xffffffffu, lag > kLanes)) {
+        mmaAccumulate(acc[1], product, lag - 1 - kLanes == row ? tail[0] : 0.0);
+      }
+    } else {
+      const Real* record      = records + (lane / kLanes) * kRecordStride;
+      const int   laneInGroup = lane % kLanes;
+      Real        products[kNumAutocorrChannels];
+      loadValues<kNumAutocorrChannels>(record, products);
+      Real tail[kVector<Real>];
+      loadValues<kVector<Real>>(record + kNumAutocorrChannels, tail);
+      const int offset = realAsInt(tail[1]) - 1 - laneInGroup;
+      accumulateLag(acc, products, tail[0], offset);
+      if (__any_sync(0xffffffffu, offset == kLanes)) {
+        if (offset == kLanes) {
+          accumulateChannels(acc[1], products, tail[0]);
+        }
       }
     }
   }
@@ -516,7 +688,7 @@ __host__ __device__ constexpr int maxValues(const int a, const int b) {
 template <typename Real, unsigned kSet> __host__ __device__ constexpr int recordRegion() {
   int values = 0;
   if constexpr ((kSet & kPairwiseRdf) != 0) {
-    values = maxValues(values, kWarpSize * RdfPass<Real>::kRecordStride);
+    values = maxValues(values, RdfPass<Real>::kRecordSlots * RdfPass<Real>::kRecordStride);
   }
   if constexpr ((kSet & kPairwiseMorse) != 0) {
     values = maxValues(values, kWarpSize * MorsePass<Real>::kRecordStride);
@@ -581,6 +753,102 @@ __device__ __forceinline__ void writeWarpBins(const typename Pass::Accumulators&
 #pragma unroll
     for (int channel = 0; channel < kNumPairwiseChannels; ++channel) {
       store(channel * Pass::kBins + bin, sums[channel]);
+    }
+  }
+}
+
+//! Writes one warp's MMA fragments, laid out like the property's output row (channel-major), to @p store(index, sum).
+template <typename Pass, typename Store>
+__device__ __forceinline__ void writeMmaBins(const typename Pass::Accumulators& acc, const int lane, Store&& store) {
+  const int channel = lane / kMmaPairs;
+#pragma unroll
+  for (int tile = 0; tile < kNumMorseScatterings / 8; ++tile) {
+#pragma unroll
+    for (int column = 0; column < 2; ++column) {
+      const int bin = 8 * tile + 2 * (lane % kMmaPairs) + column;
+      if (channel < kNumPairwiseChannels && bin < Pass::kBins) {
+        store(channel * Pass::kBins + bin, acc[tile][column]);
+      }
+    }
+  }
+}
+
+//! Writes one warp's RDF tile fragments (lane l: channel l / 4, tile positions 2 (l % 4) + i), laid out like the output
+//! row (channel-major), to @p store(index, sum). Bin 4 t + p (p < 4) adds tile t - 1's position p + 4, held two lanes
+//! up.
+template <typename Store>
+__device__ __forceinline__ void writeRdfTiles(const double (&acc)[kRdfTiles][2], const int lane, Store&& store) {
+  const int  channel  = lane / kMmaPairs;
+  const int  quad     = lane % kMmaPairs;
+  const bool written  = channel < kNumPairwiseChannels;
+  double     carry[2] = {0.0, 0.0};
+#pragma unroll
+  for (int tile = 0; tile < kRdfTiles; ++tile) {
+#pragma unroll
+    for (int column = 0; column < 2; ++column) {
+      const double upper = __shfl_down_sync(0xffffffffu, acc[tile][column], 2);
+      if (quad < 2 && written) {
+        store(channel * kNumRdfRadii + 4 * tile + 2 * quad + column, acc[tile][column] + carry[column]);
+      }
+      carry[column] = upper;
+    }
+  }
+  // Bins 28 and 29: positions 4 and 5 of the last tile.
+  if (quad == 0 && written) {
+    store(channel * kNumRdfRadii + 4 * kRdfTiles, carry[0]);
+    store(channel * kNumRdfRadii + 4 * kRdfTiles + 1, carry[1]);
+  }
+}
+
+//! A batch's tile classes (kRdfNoTile for none) as three ballots, one per bit of the class.
+struct TileBallots {
+  unsigned bits[3];
+
+  //! Lanes of class @p tile.
+  __device__ __forceinline__ unsigned lanesOf(const int tile) const {
+    return ((tile & 1) != 0 ? bits[0] : ~bits[0]) & ((tile & 2) != 0 ? bits[1] : ~bits[1]) &
+           ((tile & 4) != 0 ? bits[2] : ~bits[2]);
+  }
+};
+static_assert(kRdfNoTile < 8);
+
+//! Warp-collective. Stores this lane's record (of tile @p tile, or none for kRdfNoTile) at its slot in the batch's
+//! records sorted by tile, lanes in order within a tile, and returns the batch's classes in @p ballots.
+template <typename Pass, typename Real>
+__device__ __forceinline__ void storeSorted(Real* records,
+                                            const Real (&record)[Pass::kRecordValues],
+                                            const int    tile,
+                                            const int    lane,
+                                            TileBallots& ballots) {
+  // Lanes of a lower class, from the most significant bit down, then lower lanes of the same class.
+  unsigned same  = 0xffffffffu;
+  unsigned lower = 0u;
+#pragma unroll
+  for (int bit = 2; bit >= 0; --bit) {
+    const bool     set  = ((tile >> bit) & 1) != 0;
+    const unsigned mask = __ballot_sync(0xffffffffu, set);
+    ballots.bits[bit]   = mask;
+    lower |= set ? same & ~mask : 0u;
+    same &= set ? mask : ~mask;
+  }
+  if (tile < kRdfTiles) {
+    Pass::storeTransposed(records, __popc(lower | (same & ((1u << lane) - 1u))), record);
+  }
+}
+
+//! Writes one warp's AUTOCORR3D MMA fragments (lane l: channel l / 4, lags 2 (l % 4) + i + 1 of each tile), laid out
+//! like the output row (channel-major), to @p store(index, sum).
+template <typename Store>
+__device__ __forceinline__ void writeMmaLags(const double (&acc)[2][2], const int lane, Store&& store) {
+  const int channel = lane / kMmaPairs;
+#pragma unroll
+  for (int tile = 0; tile < 2; ++tile) {
+#pragma unroll
+    for (int column = 0; column < 2; ++column) {
+      const int lag = 8 * tile + 2 * (lane % kMmaPairs) + column;
+      if (lag < kNumAutocorrLags) {
+        store(channel * kNumAutocorrLags + lag, acc[tile][column]);
+      }
     }
   }
 }
@@ -667,7 +935,33 @@ __device__ __forceinline__ void runPairwisePass(const PairwiseConformer<Real>& c
   PairCursor cursor;
   cursor.k = 1;
   cursor.advance(lane, conformer.numAtoms);
-  if constexpr (Pass::kPipelined) {
+  if constexpr (Pass::kSorted) {
+    // Batches sorted by tile: each step takes kRecordsPerStep records of one tile into that tile's sums.
+    Real        record[Pass::kRecordValues];
+    TileBallots tileBallots;
+    const bool  contributes = computePair<Pass>(conformer, cursor, record);
+    storeSorted<Pass>(records, record, contributes ? Pass::tileOf(record) : kRdfNoTile, lane, tileBallots);
+    __syncwarp();
+    for (int batch = 0; batch < numBatches; ++batch) {
+      PairCursor nextCursor = cursor;
+      nextCursor.advance(kWarpSize, conformer.numAtoms);
+      Real       next[Pass::kRecordValues];
+      const bool nextContributes = computePair<Pass>(conformer, nextCursor, next);
+      int        first           = 0;
+#pragma unroll
+      for (int tile = 0; tile < kRdfTiles; ++tile) {
+        const int end = first + __popc(tileBallots.lanesOf(tile));
+        for (int slot = first; slot < end; slot += kRecordsPerStep) {
+          Pass::consumeTile(records, slot, end, lane, acc[tile]);
+        }
+        first = end;
+      }
+      __syncwarp();
+      storeSorted<Pass>(records, next, nextContributes ? Pass::tileOf(next) : kRdfNoTile, lane, tileBallots);
+      __syncwarp();
+      cursor = nextCursor;
+    }
+  } else if constexpr (Pass::kPipelined) {
     Real* const own = records + lane * Pass::kRecordStride;
     Real        record[Pass::kRecordValues];
     bool        contributes = computePair<Pass>(conformer, cursor, record);
@@ -724,8 +1018,14 @@ __device__ __forceinline__ void runPairwisePass(const PairwiseConformer<Real>& c
     }
   }
 
-  if constexpr (std::is_same_v<Pass, AutocorrPass<Real>>) {
+  if constexpr (std::is_same_v<Pass, AutocorrPass<Real>> && Pass::kMma) {
+    writeMmaLags(acc, lane, store);
+  } else if constexpr (std::is_same_v<Pass, AutocorrPass<Real>>) {
     writeWarpLags(acc, lane, store);
+  } else if constexpr (Pass::kSorted) {
+    writeRdfTiles(acc, lane, store);
+  } else if constexpr (Pass::kMma) {
+    writeMmaBins<Pass>(acc, lane, store);
   } else {
     writeWarpBins<Pass>(acc, lane, store);
   }
