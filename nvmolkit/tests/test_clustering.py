@@ -388,6 +388,38 @@ def test_fused_butina_basic_correctness(n, metric, num_words):
     check_butina_correctness(hit_mat, clusters)
 
 
+def generate_sparse_clustered_fingerprints(n, num_words, num_clusters=12, seed=7):
+    """Sparse fingerprints around cluster centers, with some empty rows and some rows denser than a position list."""
+    rng = np.random.default_rng(seed)
+    num_bits = num_words * 32
+    centers = [rng.choice(num_bits, size=min(30, num_bits), replace=False) for _ in range(num_clusters)]
+    bits = np.zeros((n, num_bits), dtype=np.uint8)
+    for row in range(n):
+        if row % 23 == 5:
+            continue
+        if row % 17 == 3:
+            bits[row, rng.choice(num_bits, size=min(160, num_bits), replace=False)] = 1
+            continue
+        bits[row, centers[row % num_clusters]] = 1
+        bits[row, rng.choice(num_bits, size=3, replace=False)] ^= 1
+    packed = np.packbits(bits, axis=1, bitorder="little").view(np.int32)
+    return torch.from_numpy(packed.copy()).cuda()
+
+
+@pytest.mark.parametrize("metric", ["tanimoto", "cosine"])
+@pytest.mark.parametrize("num_words", [3, 33, 400])
+def test_fused_butina_sparse_fingerprints(metric, num_words):
+    n = 301
+    x = generate_sparse_clustered_fingerprints(n, num_words)
+    cutoff = 0.4
+    clusters = fused_butina_clusters(x, cutoff=cutoff, metric=metric)
+
+    check_fused_butina_basic(clusters, n)
+    sim = compute_pairwise_similarity_cpu(x.cpu().numpy(), metric=metric)
+    hit_mat = torch.tensor(sim >= (1.0 - cutoff), dtype=torch.bool).cuda()
+    check_butina_correctness(hit_mat, clusters)
+
+
 def test_fused_butina_single_item():
     x = torch.randint(-(2**31 - 1), 2**31 - 1, (1, 32), dtype=torch.int32).cuda()
     clusters = fused_butina_clusters(x, cutoff=0.5)

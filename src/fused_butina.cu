@@ -13,6 +13,7 @@
 
 #include "src/butina.h"
 #include "src/butina_common.cuh"
+#include "src/fingerprint_hit_table.cuh"
 #include "src/fingerprint_similarity_device.cuh"
 #include "src/utils/conditional_loop_graph.cuh"
 #include "src/utils/cub_helpers.cuh"
@@ -33,6 +34,8 @@ constexpr int kInitialWordChunkSize   = 32;
 constexpr int kInitialRowsPerWarp     = kInitialTileSize / (kInitialBlockSize / 32);
 constexpr int kMaxGridDimensionY      = 65535;
 constexpr int kIterationBlockSize     = 128;
+//! Candidates per block of the sparse initial neighbor count, sharing one staged source tile.
+constexpr int kSparseCountChunk       = 1024;
 
 template <FingerprintSimilarityMetric Metric>
 __device__ __forceinline__ bool fingerprintsWithinThreshold(const std::uint32_t* lhs,
@@ -238,6 +241,61 @@ __global__ void initialNeighborCountKernel(const cuda::std::span<const std::uint
   }
 }
 
+// Initial neighbor counts on shared hit tables (see fingerprint_hit_table.cuh). Block (x, y) stages the 32 sources of
+// tile y and tests every candidate of chunk x from the tile start on against them, so each unordered pair is tested
+// once, by its later item, and counted for both items. Each item's self pair is counted once, from its own tile.
+template <FingerprintSimilarityMetric Metric>
+__global__ void sparseNeighborCountKernel(const std::uint32_t* fingerprints,
+                                          const int*           bitCounts,
+                                          const std::uint16_t* positions,
+                                          const int            n,
+                                          const int            numWords,
+                                          const float          threshold,
+                                          int*                 neighborCounts,
+                                          const int            tileOffset) {
+  extern __shared__ std::uint32_t table[];
+  __shared__ int                  sources[32];
+  __shared__ int                  sourceHits[32];
+
+  const int tileStart  = (tileOffset + static_cast<int>(blockIdx.y)) * 32;
+  const int chunkStart = static_cast<int>(blockIdx.x) * kSparseCountChunk;
+  const int chunkEnd   = min(chunkStart + kSparseCountChunk, n);
+  if (chunkEnd <= tileStart) {
+    return;
+  }
+  if (threadIdx.x < 32) {
+    const int source        = tileStart + static_cast<int>(threadIdx.x);
+    sources[threadIdx.x]    = source < n ? source : -1;
+    sourceHits[threadIdx.x] = 0;
+  }
+  __syncthreads();
+  detail::stageHitTable(table, fingerprints, bitCounts, positions, n, numWords, sources, 32);
+
+  for (int candidate = max(chunkStart, tileStart) + static_cast<int>(threadIdx.x); candidate < chunkEnd;
+       candidate += static_cast<int>(blockDim.x)) {
+    const int     count = bitCounts[candidate];
+    std::uint32_t hits =
+      detail::hitTableMask<Metric>(table, fingerprints, positions, n, numWords, sources, candidate, count, threshold);
+    int self = 0;
+    if (candidate < tileStart + 32) {
+      // Within its own tile a candidate pairs only with earlier sources, and counts itself here.
+      const int ordinal = candidate - tileStart;
+      self              = static_cast<int>(hits >> ordinal & 1U);
+      hits &= (1U << ordinal) - 1U;
+    }
+    if (hits != 0U || self != 0) {
+      atomicAdd(neighborCounts + candidate, __popc(hits) + self);
+      for (std::uint32_t rest = hits; rest != 0U; rest &= rest - 1U) {
+        atomicAdd(sourceHits + __ffs(static_cast<int>(rest)) - 1, 1);
+      }
+    }
+  }
+  __syncthreads();
+  if (threadIdx.x < 32 && sourceHits[threadIdx.x] != 0) {
+    atomicAdd(neighborCounts + tileStart + threadIdx.x, sourceHits[threadIdx.x]);
+  }
+}
+
 // Select the initial centroid from the neighbor counts.
 __global__ void initialArgMaxKernel(const cuda::std::span<const int> neighborCounts, int* maxValue, int* maxIndex) {
   std::uint64_t candidate = 0;
@@ -413,6 +471,60 @@ __global__ void appendSingletonsKernel(const cuda::std::span<int> clusterIds,
   *clusterCount = cluster;
 }
 
+// Dense initial neighbor counts for fingerprints too wide for a shared hit table. Bit counts are sorted so that
+// initialNeighborCountKernel can skip impossible tiles and pairs.
+template <FingerprintSimilarityMetric Metric>
+void denseInitialNeighborCounts(const cuda::std::span<const std::uint32_t> fingerprints,
+                                const cuda::std::span<const int>           bitCountsSpan,
+                                const cuda::std::span<const int>           originalIndicesSpan,
+                                const cuda::std::span<int>                 neighborCountsSpan,
+                                const int                                  numWords,
+                                const float                                threshold,
+                                cudaStream_t                               stream) {
+  const int              n = static_cast<int>(neighborCountsSpan.size());
+  AsyncDeviceVector<int> sortedBitCounts(n, stream);
+  AsyncDeviceVector<int> sortedIndices(n, stream);
+  const auto             sortedBitCountsSpan = toSpan(sortedBitCounts);
+  const auto             sortedIndicesSpan   = toSpan(sortedIndices);
+  std::size_t            sortStorageBytes    = 0;
+  cudaCheckError(cub::DeviceRadixSort::SortPairs(nullptr,
+                                                 sortStorageBytes,
+                                                 bitCountsSpan.data(),
+                                                 sortedBitCountsSpan.data(),
+                                                 originalIndicesSpan.data(),
+                                                 sortedIndicesSpan.data(),
+                                                 n,
+                                                 0,
+                                                 sizeof(int) * 8,
+                                                 stream));
+  AsyncDeviceVector<std::uint8_t> sortStorage(sortStorageBytes, stream);
+  cudaCheckError(cub::DeviceRadixSort::SortPairs(sortStorage.data(),
+                                                 sortStorageBytes,
+                                                 bitCountsSpan.data(),
+                                                 sortedBitCountsSpan.data(),
+                                                 originalIndicesSpan.data(),
+                                                 sortedIndicesSpan.data(),
+                                                 n,
+                                                 0,
+                                                 sizeof(int) * 8,
+                                                 stream));
+  const int numInitialTiles    = (n + kInitialTileSize - 1) / kInitialTileSize;
+  const int numInitialRowTiles = (numInitialTiles + 1) / 2;
+  for (int rowTileOffset = 0; rowTileOffset < numInitialRowTiles; rowTileOffset += kMaxGridDimensionY) {
+    const int numRowsInBatch = std::min(kMaxGridDimensionY, numInitialRowTiles - rowTileOffset);
+    initialNeighborCountKernel<Metric>
+      <<<dim3(numInitialTiles + 1, numRowsInBatch), kInitialBlockSize, 0, stream>>>(fingerprints,
+                                                                                    bitCountsSpan,
+                                                                                    sortedBitCountsSpan,
+                                                                                    sortedIndicesSpan,
+                                                                                    neighborCountsSpan,
+                                                                                    numWords,
+                                                                                    threshold,
+                                                                                    rowTileOffset);
+    cudaCheckError(cudaGetLastError());
+  }
+}
+
 // Reordering fused Butina pipeline:
 //
 // 1) Compute each fingerprint popcount and its initial neighbor count. Similarities are consumed immediately; no
@@ -438,9 +550,7 @@ ButinaResult fusedButinaGpuImpl(cuda::std::span<const std::uint32_t> fingerprint
   // All (non scalar) buffers are O(N). Fingerprints remain in caller-owned storage and no pairwise matrix is allocated.
   const int              numIterationBlocks = (n + kIterationBlockSize - 1) / kIterationBlockSize;
   AsyncDeviceVector<int> bitCounts(n, stream);
-  AsyncDeviceVector<int> sortedBitCounts(n, stream);
   AsyncDeviceVector<int> originalIndices(n, stream);
-  AsyncDeviceVector<int> sortedIndices(n, stream);
   AsyncDeviceVector<int> neighborCounts(n, stream);
   AsyncDeviceVector<int> clusterMembers(n, stream);
   ButinaResult result{AsyncDeviceVector<int>(n, stream), AsyncDeviceVector<int>(returnCentroids ? n : 0, stream), 0};
@@ -452,9 +562,7 @@ ButinaResult fusedButinaGpuImpl(cuda::std::span<const std::uint32_t> fingerprint
   AsyncDevicePtr<int>              maxIndex(-1, stream);
 
   const auto bitCountsSpan       = toSpan(bitCounts);
-  const auto sortedBitCountsSpan = toSpan(sortedBitCounts);
   const auto originalIndicesSpan = toSpan(originalIndices);
-  const auto sortedIndicesSpan   = toSpan(sortedIndices);
   const auto neighborCountsSpan  = toSpan(neighborCounts);
   const auto clusterMembersSpan  = toSpan(clusterMembers);
   const auto clusterIdsSpan      = toSpan(result.clusterIds);
@@ -471,44 +579,40 @@ ButinaResult fusedButinaGpuImpl(cuda::std::span<const std::uint32_t> fingerprint
     numWords);
   cudaCheckError(cudaGetLastError());
 
-  // Sort bit counts and indices to skip impossible tiles/unnecessary work in the downstream kernels
-  std::size_t sortStorageBytes = 0;
-  cudaCheckError(cub::DeviceRadixSort::SortPairs(nullptr,
-                                                 sortStorageBytes,
-                                                 bitCountsSpan.data(),
-                                                 sortedBitCountsSpan.data(),
-                                                 originalIndicesSpan.data(),
-                                                 sortedIndicesSpan.data(),
-                                                 n,
-                                                 0,
-                                                 sizeof(int) * 8,
-                                                 stream));
-  AsyncDeviceVector<std::uint8_t> sortStorage(sortStorageBytes, stream);
-  cudaCheckError(cub::DeviceRadixSort::SortPairs(sortStorage.data(),
-                                                 sortStorageBytes,
-                                                 bitCountsSpan.data(),
-                                                 sortedBitCountsSpan.data(),
-                                                 originalIndicesSpan.data(),
-                                                 sortedIndicesSpan.data(),
-                                                 n,
-                                                 0,
-                                                 sizeof(int) * 8,
-                                                 stream));
   cudaCheckError(cudaMemsetAsync(neighborCountsSpan.data(), 0, neighborCountsSpan.size_bytes(), stream));
-  const int numInitialTiles    = (n + kInitialTileSize - 1) / kInitialTileSize;
-  const int numInitialRowTiles = (numInitialTiles + 1) / 2;
-  for (int rowTileOffset = 0; rowTileOffset < numInitialRowTiles; rowTileOffset += kMaxGridDimensionY) {
-    const int numRowsInBatch = std::min(kMaxGridDimensionY, numInitialRowTiles - rowTileOffset);
-    initialNeighborCountKernel<Metric>
-      <<<dim3(numInitialTiles + 1, numRowsInBatch), kInitialBlockSize, 0, stream>>>(fingerprints,
-                                                                                    bitCountsSpan,
-                                                                                    sortedBitCountsSpan,
-                                                                                    sortedIndicesSpan,
-                                                                                    neighborCountsSpan,
-                                                                                    numWords,
-                                                                                    threshold,
-                                                                                    rowTileOffset);
+  if (detail::hitTableSupported(numWords)) {
+    // Sparse counts: list every fingerprint's set bits, then test candidates against staged tiles of 32 sources.
+    AsyncDeviceVector<std::uint16_t> positions(static_cast<std::size_t>(n) * detail::kPositionCapacity, stream);
+    const int positionBlocks = static_cast<int>(std::min<long long>(65535, (32LL * n + 255) / 256));
+    detail::fingerprintPositionsKernel<<<positionBlocks, 256, 0, stream>>>(fingerprints.data(),
+                                                                           positions.data(),
+                                                                           n,
+                                                                           numWords);
     cudaCheckError(cudaGetLastError());
+    const int numChunks = (n + kSparseCountChunk - 1) / kSparseCountChunk;
+    const int numTiles  = (n + 31) / 32;
+    for (int tileOffset = 0; tileOffset < numTiles; tileOffset += kMaxGridDimensionY) {
+      const int numRowsInBatch = std::min(kMaxGridDimensionY, numTiles - tileOffset);
+      sparseNeighborCountKernel<Metric>
+        <<<dim3(numChunks, numRowsInBatch), kInitialBlockSize, detail::hitTableBytes(numWords), stream>>>(
+          fingerprints.data(),
+          bitCounts.data(),
+          positions.data(),
+          n,
+          numWords,
+          threshold,
+          neighborCounts.data(),
+          tileOffset);
+      cudaCheckError(cudaGetLastError());
+    }
+  } else {
+    denseInitialNeighborCounts<Metric>(fingerprints,
+                                       bitCountsSpan,
+                                       originalIndicesSpan,
+                                       neighborCountsSpan,
+                                       numWords,
+                                       threshold,
+                                       stream);
   }
   initialArgMaxKernel<<<1, kInitialArgMaxBlockSize, 0, stream>>>(neighborCountsSpan, maxValue.data(), maxIndex.data());
   cudaCheckError(cudaGetLastError());
