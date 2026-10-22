@@ -30,7 +30,6 @@ namespace {
 
 // TODO: Support molecules with more than 64 atoms.
 constexpr int           kMaxAtoms        = 64;
-constexpr int           kSharedStride    = kMaxAtoms + 1;
 constexpr int           kThreads         = 256;
 constexpr std::uint64_t kFnvOffset       = 1469598103934665603ULL;
 constexpr std::uint64_t kFnvPrime        = 1099511628211ULL;
@@ -431,12 +430,12 @@ __device__ __forceinline__ float warpSum(float value) {
 }
 
 //! Subtracts the log-sum-exp of each row (or column) of the square transport plan, one warp per line.
-template <bool Rows> __device__ void normalizeLines(float* transport, const int squareSize) {
+template <bool Rows> __device__ void normalizeLines(float* transport, const int squareSize, const int stride) {
   constexpr int kWarps = kThreads / 32;
   const int     lane   = static_cast<int>(threadIdx.x) % 32;
   for (int line = static_cast<int>(threadIdx.x) / 32; line < squareSize; line += kWarps) {
     const auto at = [&](const int offset) -> float& {
-      return Rows ? transport[line * kSharedStride + offset] : transport[offset * kSharedStride + line];
+      return Rows ? transport[line * stride + offset] : transport[offset * stride + line];
     };
     float maximum = -INFINITY;
     for (int offset = lane; offset < squareSize; offset += 32) {
@@ -454,15 +453,26 @@ template <bool Rows> __device__ void normalizeLines(float* transport, const int 
   }
 }
 
+//! Shared-memory buffers of a pair block: two squares of maxAtoms lines, @c stride floats apart, and warp partials.
+struct PairBuffers {
+  float* affinity;
+  float* transport;
+  float* partials;
+  int    stride;
+};
+
 //! Block-wide AAP similarity of one ordered pair. Every thread must call this; the result is valid in all threads.
 __device__ float aapPairSimilarity(const AapDeviceView& view,
                                    const int            source,
                                    const int            candidate,
                                    const float          temperature,
                                    const int            iterations,
-                                   float*               affinity,
-                                   float*               transport,
-                                   float*               partials) {
+                                   const PairBuffers&   buffers) {
+  float* const affinity  = buffers.affinity;
+  float* const transport = buffers.transport;
+  float* const partials  = buffers.partials;
+  const int    stride    = buffers.stride;
+
   const int leftStart      = static_cast<int>(view.moleculeAtomOffsets[source]);
   const int rightStart     = static_cast<int>(view.moleculeAtomOffsets[candidate]);
   const int leftCount      = static_cast<int>(view.moleculeAtomOffsets[source + 1]) - leftStart;
@@ -498,15 +508,15 @@ __device__ float aapPairSimilarity(const AapDeviceView& view,
         max(view.atomPathLengths[leftStart + row], view.atomPathLengths[rightStart + column]);
       score = static_cast<float>(overlap + 1) / static_cast<float>(2 * largestPathCount - overlap + 1);
     }
-    affinity[row * kSharedStride + column]  = score;
-    transport[row * kSharedStride + column] = score / temperature;
+    affinity[row * stride + column]  = score;
+    transport[row * stride + column] = score / temperature;
   }
   __syncthreads();
 
   for (int iteration = 0; iteration < iterations; ++iteration) {
-    normalizeLines<true>(transport, squareSize);
+    normalizeLines<true>(transport, squareSize, stride);
     __syncthreads();
-    normalizeLines<false>(transport, squareSize);
+    normalizeLines<false>(transport, squareSize, stride);
     __syncthreads();
   }
 
@@ -514,7 +524,7 @@ __device__ float aapPairSimilarity(const AapDeviceView& view,
   for (int linear = static_cast<int>(threadIdx.x); linear < leftCount * candidateAtoms; linear += kThreads) {
     const int row    = linear / candidateAtoms;
     const int column = linear % candidateAtoms;
-    matched += expf(transport[row * kSharedStride + column]) * affinity[row * kSharedStride + column];
+    matched += expf(transport[row * stride + column]) * affinity[row * stride + column];
   }
   matched = warpSum(matched);
   if (threadIdx.x % 32 == 0) {
@@ -539,10 +549,13 @@ __global__ void aapDistanceKernel(const AapDeviceView view,
                                   const int           numItems,
                                   const float         temperature,
                                   const int           iterations,
+                                  const int           maxAtoms,
                                   const Op            op) {
-  __shared__ float affinity[kMaxAtoms * kSharedStride];
-  __shared__ float transport[kMaxAtoms * kSharedStride];
-  __shared__ float partials[kThreads / 32];
+  // Two squares sized for the call's largest molecule, padded by one column to spread lines across banks.
+  extern __shared__ float squares[];
+  __shared__ float        partials[kThreads / 32];
+  const int               stride = maxAtoms + 1;
+  const PairBuffers       buffers{squares, squares + maxAtoms * stride, partials, stride};
 
   const int count = *candidateCount;
   for (int position = static_cast<int>(blockIdx.x); position < count; position += static_cast<int>(gridDim.x)) {
@@ -554,10 +567,9 @@ __global__ void aapDistanceKernel(const AapDeviceView view,
         continue;
       }
       // Identical descriptors score exactly 1 regardless of Sinkhorn convergence.
-      const float distance =
-        view.groups[candidate] == view.groups[source] ?
-          0.0F :
-          1.0F - aapPairSimilarity(view, source, candidate, temperature, iterations, affinity, transport, partials);
+      const float distance = view.groups[candidate] == view.groups[source] ?
+                               0.0F :
+                               1.0F - aapPairSimilarity(view, source, candidate, temperature, iterations, buffers);
       if (threadIdx.x == 0) {
         op.visit(state, ordinal, source == candidate, distance);
       }
@@ -579,11 +591,15 @@ class AapDistanceProvider {
         candidates_(numItems_, stream),
         candidateCount_(0, stream) {
     groups_.copyFromHost(descriptorGroups(hostDescriptors_));
+    const auto& offsets = hostDescriptors_.moleculeAtomOffsets;
+    for (std::size_t molecule = 0; molecule + 1 < offsets.size(); ++molecule) {
+      maxAtoms_ = std::max(maxAtoms_, static_cast<int>(offsets[molecule + 1] - offsets[molecule]));
+    }
+    sharedBytes_ = 2 * static_cast<std::size_t>(maxAtoms_) * (maxAtoms_ + 1) * sizeof(float);
+
     int device = 0;
-    int numSms = 0;
     cudaCheckError(cudaGetDevice(&device));
-    cudaCheckError(cudaDeviceGetAttribute(&numSms, cudaDevAttrMultiProcessorCount, device));
-    gridSize_ = std::max(1, std::min(numItems_, numSms * kBlocksPerSm));
+    cudaCheckError(cudaDeviceGetAttribute(&numSms_, cudaDevAttrMultiProcessorCount, device));
   }
 
   int size() const { return numItems_; }
@@ -609,21 +625,26 @@ class AapDistanceProvider {
                              descriptors_.binIds.data(),
                              descriptors_.binCounts.data(),
                              groups_.data()};
-    aapDistanceKernel<<<gridSize_, kThreads, 0, stream>>>(view,
-                                                          candidates_.data(),
-                                                          candidateCount_.data(),
-                                                          sources,
-                                                          numSources,
-                                                          numItems_,
-                                                          options_.sinkhornTemperature,
-                                                          options_.sinkhornIterations,
-                                                          op);
+
+    // Smaller molecules need less shared memory, so more pair blocks fit on each multiprocessor.
+    int blocksPerSm = 0;
+    cudaCheckError(
+      cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocksPerSm, aapDistanceKernel<Op>, kThreads, sharedBytes_));
+    const int gridSize = std::max(1, std::min(numItems_, numSms_ * blocksPerSm));
+    aapDistanceKernel<<<gridSize, kThreads, sharedBytes_, stream>>>(view,
+                                                                    candidates_.data(),
+                                                                    candidateCount_.data(),
+                                                                    sources,
+                                                                    numSources,
+                                                                    numItems_,
+                                                                    options_.sinkhornTemperature,
+                                                                    options_.sinkhornIterations,
+                                                                    maxAtoms_,
+                                                                    op);
     cudaCheckError(cudaGetLastError());
   }
 
  private:
-  static constexpr int kBlocksPerSm = 4;
-
   AapOptions             options_;
   int                    numItems_;
   AapHostDescriptors     hostDescriptors_;
@@ -631,7 +652,9 @@ class AapDistanceProvider {
   AsyncDeviceVector<int> groups_;
   AsyncDeviceVector<int> candidates_;
   AsyncDevicePtr<int>    candidateCount_;
-  int                    gridSize_ = 1;
+  int                    maxAtoms_    = 0;
+  std::size_t            sharedBytes_ = 0;
+  int                    numSms_      = 0;
 };
 
 //! Stores one candidate's similarity to the source.
