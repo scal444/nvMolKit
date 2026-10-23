@@ -1116,10 +1116,12 @@ __global__ void combinedGradKernel(const Terms*                   terms,
     return;
   }
 
+  // FULL accumulates with global reductions into the output: shared-memory double atomics are compare-and-swap loops.
   constexpr int       maxAtomSize = 256;
-  __shared__ storageT accumGrad[maxAtomSize * 3];
+  constexpr bool      isSingle    = std::is_same_v<real, float>;
+  __shared__ storageT accumGrad[isSingle ? maxAtomSize * 3 : 1];
 
-  const bool useSharedMem = numAtoms <= maxAtomSize;
+  const bool useSharedMem = isSingle && numAtoms <= maxAtomSize;
   storageT*  molGradBase  = useSharedMem ? accumGrad : grad + atomStart * 3;
 
   for (int i = tid; i < numAtoms * 3; i += blockSizePerMol) {
