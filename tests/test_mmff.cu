@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <random>
@@ -1034,6 +1035,26 @@ TEST_F(MMffGpuTestFixture, SinglePrecisionInterfaceKeepsEnergyAndGradientNative)
   const auto   expectedGradient = getCombinedGradientViaForcefield(systemHost, nvMolKit::PrecisionMode::FULL);
   EXPECT_NEAR(energy.front(), expectedEnergy, 2.0e-3);
   EXPECT_THAT(gradient, ::testing::Pointwise(::testing::FloatNear(2.0e-2), expectedGradient));
+}
+
+TEST_F(MMffGpuTestFixture, SinglePrecisionGradientIsReproducible) {
+  nvMolKit::MMFFBatchedForcefield    forcefield(systemHost, {}, nullptr, nvMolKit::PrecisionMode::SINGLE);
+  std::vector<float>                 positions(systemHost.positions.begin(), systemHost.positions.end());
+  nvMolKit::AsyncDeviceVector<float> positionsDevice;
+  nvMolKit::AsyncDeviceVector<float> gradientDevice;
+  positionsDevice.setFromVector(positions);
+  gradientDevice.resize(positions.size());
+
+  std::vector<float> first(positions.size());
+  std::vector<float> gradient(positions.size());
+  for (int launch = 0; launch < 20; ++launch) {
+    CHECK_CUDA_RETURN(forcefield.computeGradients(gradientDevice.data(), positionsDevice.data()));
+    gradientDevice.copyToHost(launch == 0 ? first : gradient);
+    CHECK_CUDA_RETURN(cudaDeviceSynchronize());
+    if (launch > 0) {
+      ASSERT_EQ(std::memcmp(first.data(), gradient.data(), first.size() * sizeof(float)), 0) << "launch " << launch;
+    }
+  }
 }
 
 TEST_F(MMffGpuTestFixture, FullPrecisionInstanceRejectsSinglePrecisionInterface) {
