@@ -657,6 +657,7 @@ def test_bitbirch_rejects_zero_word_fingerprints():
 # k-means
 # ----------------------------------------------------------------------------------------------------------------------
 
+_KMEANS_KERNELS = ("auto", "mma", "umma")
 _KMEANS_METRICS = ("cosine", "tanimoto")
 
 
@@ -709,18 +710,26 @@ def _reference_scores(fingerprints, centers, metric):
     return score, distance
 
 
-def _kmeans_assign(fingerprints, centers, metric):
-    labels, distances = _clustering.kmeans_assign(
-        fingerprints.view(torch.uint32).__cuda_array_interface__,
-        centers.contiguous().__cuda_array_interface__,
-        centers.shape[0],
-        metric,
-        torch.cuda.current_stream().cuda_stream,
-    )
+def _kmeans_assign(fingerprints, centers, metric, kernel):
+    stream = torch.cuda.current_stream()
+    try:
+        labels, distances = _clustering.kmeans_assign(
+            fingerprints.view(torch.uint32).__cuda_array_interface__,
+            centers.contiguous().__cuda_array_interface__,
+            centers.shape[0],
+            metric,
+            kernel,
+            stream.cuda_stream,
+        )
+    except ValueError as error:
+        if kernel != "auto" and ("tcgen05" in str(error) or "mma.sync" in str(error)):
+            pytest.skip(f"{kernel} kernel not supported on this GPU or build")
+        raise
     return torch.as_tensor(labels, device="cuda").long(), torch.as_tensor(distances, device="cuda").double()
 
 
-def _kmeans_fit(fingerprints, centers, metric, *, max_iter=300, tol=1e-4, seed=0):
+def _kmeans_fit(fingerprints, centers, metric, kernel, *, max_iter=300, tol=1e-4, seed=0):
+    _kmeans_assign(fingerprints[:1], centers[:1], metric, kernel)  # skips unsupported kernels
     labels, fitted, sizes, inertia, n_iter, reseeded = _clustering.kmeans_fit(
         fingerprints.view(torch.uint32).__cuda_array_interface__,
         centers.contiguous().__cuda_array_interface__,
@@ -730,14 +739,15 @@ def _kmeans_fit(fingerprints, centers, metric, *, max_iter=300, tol=1e-4, seed=0
         max_iter,
         tol,
         seed,
+        kernel,
         torch.cuda.current_stream().cuda_stream,
     )
     as_tensor = lambda array: torch.as_tensor(array, device="cuda")  # noqa: E731
     return as_tensor(labels), as_tensor(fitted), as_tensor(sizes), inertia, n_iter, reseeded
 
 
-def _assert_assignment_matches_reference(fingerprints, centers, metric):
-    labels, distances = _kmeans_assign(fingerprints, centers, metric)
+def _assert_assignment_matches_reference(fingerprints, centers, metric, kernel):
+    labels, distances = _kmeans_assign(fingerprints, centers, metric, kernel)
     score, reference_distance = _reference_scores(fingerprints, centers, metric)
     best = score.max(1).values
     chosen = score.gather(1, labels[:, None])[:, 0]
@@ -748,21 +758,23 @@ def _assert_assignment_matches_reference(fingerprints, centers, metric):
     torch.testing.assert_close(distances, expected, rtol=1e-5, atol=1e-4)
 
 
+@pytest.mark.parametrize("kernel", _KMEANS_KERNELS)
 @pytest.mark.parametrize("metric", _KMEANS_METRICS)
 @pytest.mark.parametrize(
     ("num_rows", "num_words", "num_clusters"),
-    # 219 and 300 words leave room for only three and two pipeline stages on a 227 KiB-shared-memory GPU.
+    # 219 and 300 words leave room for only three and two mma.sync pipeline stages on a 227 KiB-shared-memory GPU.
     [(700, 32, 1), (513, 5, 37), (300, 33, 300), (1000, 64, 257), (400, 67, 200), (300, 219, 70), (300, 300, 300)],
 )
-def test_kmeans_assignment_matches_reference(metric, num_rows, num_words, num_clusters):
+def test_kmeans_assignment_matches_reference(kernel, metric, num_rows, num_words, num_clusters):
     fingerprints = _random_packed(num_rows, num_words, 0.05, seed=num_rows)
     generator = torch.Generator(device="cuda").manual_seed(1)
     centers = torch.rand((num_clusters, num_words * 32), device="cuda", generator=generator) ** 3
-    _assert_assignment_matches_reference(fingerprints, centers, metric)
+    _assert_assignment_matches_reference(fingerprints, centers, metric, kernel)
 
 
+@pytest.mark.parametrize("kernel", _KMEANS_KERNELS)
 @pytest.mark.parametrize("metric", _KMEANS_METRICS)
-def test_kmeans_assignment_matches_reference_for_group_mean_centers(metric):
+def test_kmeans_assignment_matches_reference_for_group_mean_centers(kernel, metric):
     # Sparse 1024-bit rows (about 50 bits set, like ECFP) against centers that are bit means of random groups, as after
     # a k-means update, plus a few centers equal to rows.
     fingerprints = _random_packed(4000, 32, 0.05, seed=12)
@@ -771,18 +783,19 @@ def test_kmeans_assignment_matches_reference_for_group_mean_centers(metric):
     centers = torch.zeros((150, bits.shape[1]), device="cuda").index_add_(0, groups, bits)
     centers /= torch.bincount(groups, minlength=150).clamp_min(1).unsqueeze(1).float()
     centers[:10] = bits[torch.arange(10, 4000, 400, device="cuda")]
-    _assert_assignment_matches_reference(fingerprints, centers, metric)
+    _assert_assignment_matches_reference(fingerprints, centers, metric, kernel)
 
 
+@pytest.mark.parametrize("kernel", _KMEANS_KERNELS)
 @pytest.mark.parametrize("metric", _KMEANS_METRICS)
-def test_kmeans_one_iteration_matches_reference(metric):
+def test_kmeans_one_iteration_matches_reference(kernel, metric):
     fingerprints = _random_packed(600, 7, 0.08, seed=5)
     initial = unpack_fingerprint(fingerprints.view(torch.int32)[torch.arange(0, 600, 30, device="cuda") + 7]).float()
     if metric == "cosine":
         initial = initial / initial.norm(dim=1, keepdim=True)
-    labels, centers, sizes, inertia, n_iter, _ = _kmeans_fit(fingerprints, initial, metric, max_iter=1)
+    labels, centers, sizes, inertia, n_iter, _ = _kmeans_fit(fingerprints, initial, metric, kernel, max_iter=1)
 
-    first_labels, _ = _kmeans_assign(fingerprints, initial, metric)
+    first_labels, _ = _kmeans_assign(fingerprints, initial, metric, kernel)
     bits = unpack_fingerprint(fingerprints).double()
     if metric == "cosine":
         count = bits.sum(1, keepdim=True)
@@ -792,19 +805,22 @@ def test_kmeans_one_iteration_matches_reference(metric):
     expected = torch.where(counts[:, None] > 0, sums / counts.clamp_min(1)[:, None], initial.double())
     torch.testing.assert_close(centers.double(), expected, rtol=1e-6, atol=1e-6)
 
-    final_labels, distances = _kmeans_assign(fingerprints, centers, metric)
+    final_labels, distances = _kmeans_assign(fingerprints, centers, metric, kernel)
     np.testing.assert_array_equal(labels.cpu().numpy(), final_labels.cpu().numpy())
     np.testing.assert_array_equal(sizes.cpu().numpy(), np.bincount(final_labels.cpu().numpy(), minlength=20))
     assert inertia == pytest.approx(float(distances.sum()), rel=1e-9)
     assert n_iter == 1
 
 
-def test_kmeans_fit_is_deterministic():
+@pytest.mark.parametrize("kernel", _KMEANS_KERNELS)
+def test_kmeans_kernels_agree_and_are_deterministic(kernel):
     fingerprints = _random_packed(2000, 32, 0.05, seed=9)
     initial = unpack_fingerprint(fingerprints.view(torch.int32)[torch.arange(0, 2000, 50, device="cuda")]).float()
-    runs = [_kmeans_fit(fingerprints, initial, "tanimoto") for _ in range(2)]
+    runs = [_kmeans_fit(fingerprints, initial, "tanimoto", name) for name in (kernel, kernel, "mma")]
     np.testing.assert_array_equal(runs[0][0].cpu().numpy(), runs[1][0].cpu().numpy())
     torch.testing.assert_close(runs[0][1], runs[1][1], rtol=0, atol=0)
+    # Different kernels sum in different orders; labels may differ only at float32 ties.
+    assert float((runs[0][0] == runs[2][0]).float().mean()) > 0.99
 
 
 @pytest.mark.parametrize("metric", _KMEANS_METRICS)
@@ -840,7 +856,7 @@ def test_kmeans_reseeds_empty_clusters():
     # Duplicate initial centers: all but the first copy lose every member and must be moved.
     fingerprints, truth, prototypes = _planted_fingerprints(4, 25)
     initial = prototypes[[0, 0, 0, 1]].float().cuda()
-    labels, _, sizes, _, _, reseeded = _kmeans_fit(fingerprints, initial, "tanimoto")
+    labels, _, sizes, _, _, reseeded = _kmeans_fit(fingerprints, initial, "tanimoto", "auto")
     assert reseeded >= 2
     assert int((sizes == 0).sum()) == 0
     _assert_same_partition(labels.cpu().numpy(), truth)

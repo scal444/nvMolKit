@@ -522,6 +522,7 @@ def _batched_kmeanspp_centers(fps: torch.Tensor, n_clusters: int, metric: str, s
             centers.__cuda_array_interface__,
             centers.shape[0],
             metric,
+            "auto",
             stream.cuda_stream,
         )
         d = torch.as_tensor(distances, device=device).to(torch.float64).clamp_min_(0.0)
@@ -564,7 +565,8 @@ def kmeans(
     for a given ``random_state``. A cluster that loses all its members is moved
     onto one of the rows farthest from their centers.
 
-    Requires a GPU of compute capability 8.0 or newer.
+    Requires a GPU of compute capability 8.0 or newer. Blackwell data-center
+    GPUs (sm_100, sm_103) use a faster tcgen05 kernel.
 
     Args:
         x: Packed int32 or uint32 fingerprints of shape ``(N, num_words)``. Can
@@ -646,6 +648,7 @@ def kmeans(
                 max_iter,
                 tol,
                 seed,
+                "auto",
                 active_stream.cuda_stream,
             )
             del run_centers
@@ -661,6 +664,7 @@ def kmeans(
                 centers.__cuda_array_interface__,
                 n_clusters,
                 metric,
+                "auto",
                 active_stream.cuda_stream,
             )
             labels = torch.as_tensor(labels, device=x.device)

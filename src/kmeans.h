@@ -32,15 +32,27 @@ enum class KMeansInit {
   MaxMin,  //!< Fused MaxMin picks (Tanimoto distance, or cosine distance for the cosine metric).
 };
 
+/**
+ * Assignment kernel. Both run an fp16 GEMM whose bit operand is expanded on chip, accumulate in fp32 and keep a running
+ * argmax, never storing rows x centers. Mma uses mma.sync (sm_80 and newer); Umma uses Blackwell tcgen05 with the
+ * accumulators in tensor memory (sm_100 / sm_103). Auto picks Umma when the device and build support it.
+ */
+enum class KMeansAssignKernel {
+  Auto,
+  Mma,
+  Umma,
+};
+
 struct KMeansOptions {
-  int           numClusters = 8;
-  KMeansMetric  metric      = KMeansMetric::Tanimoto;
-  int           maxIter     = 300;
+  int                numClusters = 8;
+  KMeansMetric       metric      = KMeansMetric::Tanimoto;
+  int                maxIter     = 300;
   //! Stop when the relative decrease of the objective, (previous - current) / current, is at most tol, or when no
   //! label changes. tol == 0 runs exactly maxIter iterations.
-  double        tol         = 1e-4;
+  double             tol         = 1e-4;
   //! Seed for empty-cluster reseeding ties and the initialization.
-  std::uint64_t seed        = 0;
+  std::uint64_t      seed        = 0;
+  KMeansAssignKernel kernel      = KMeansAssignKernel::Auto;
 };
 
 struct KMeansFitResult {
@@ -111,6 +123,7 @@ void kmeansAssignGpu(cuda::std::span<const std::uint32_t> fingerprints,
                      const float*                         centers,
                      int                                  numClusters,
                      KMeansMetric                         metric,
+                     KMeansAssignKernel                   kernel,
                      int*                                 labels,
                      float*                               distances,
                      cudaStream_t                         stream = nullptr);

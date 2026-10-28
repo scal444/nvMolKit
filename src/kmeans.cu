@@ -35,6 +35,14 @@ int gridFor(const std::size_t count, const int blockSize = kBlockSize) {
   return static_cast<int>((count + blockSize - 1) / blockSize);
 }
 
+int deviceSmCount() {
+  int device = 0;
+  int count  = 0;
+  cudaCheckError(cudaGetDevice(&device));
+  cudaCheckError(cudaDeviceGetAttribute(&count, cudaDevAttrMultiProcessorCount, device));
+  return count;
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Row statistics and center preparation
 // ---------------------------------------------------------------------------------------------------------------------
@@ -73,6 +81,31 @@ __global__ void packMmaCentersKernel(const float* centers,
   const int   center = static_cast<int>(index / paddedBits);
   const int   bit    = static_cast<int>(index % paddedBits);
   const float value =
+    center < numCenters && bit < numBits ? centers[static_cast<std::size_t>(center) * numBits + bit] : 0.0F;
+  packed[index] = __float2half_rn(value);
+}
+
+//! Packs float centers into the tcgen05 stage images: per (tile, 64-bit stage), 256 centers x 128 bytes, K-major with
+//! the 128-byte swizzle (16-byte chunk c of center n stored at chunk c ^ (n % 8)).
+__global__ void packUmmaCentersKernel(const float* centers,
+                                      __half*      packed,
+                                      const int    numCenters,
+                                      const int    numBits,
+                                      const int    stagesPerTile,
+                                      const int    numTiles) {
+  const std::size_t index        = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  constexpr int     kStageHalves = kUmmaBlockCenters * 64;
+  if (index >= static_cast<std::size_t>(numTiles) * stagesPerTile * kStageHalves) {
+    return;
+  }
+  const std::size_t step   = index / kStageHalves;
+  const int         offset = static_cast<int>(index % kStageHalves) * 2;
+  const int         n      = offset / 128;
+  const int         chunk  = ((offset % 128) / 16) ^ (n & 7);
+  const int         k      = chunk * 8 + (offset % 16) / 2;
+  const int         center = static_cast<int>(step / stagesPerTile) * kUmmaBlockCenters + n;
+  const int         bit    = static_cast<int>(step % stagesPerTile) * 64 + k;
+  const float       value =
     center < numCenters && bit < numBits ? centers[static_cast<std::size_t>(center) * numBits + bit] : 0.0F;
   packed[index] = __float2half_rn(value);
 }
@@ -145,6 +178,56 @@ __global__ void accumulateGlobalKernel(const std::uint32_t* fingerprints,
       const int bit = __ffs(static_cast<int>(bits)) - 1;
       bits &= bits - 1U;
       atomicAdd(&clusterSums[word * 32 + bit], increment);
+    }
+  }
+}
+
+//! Shared-memory privatized sums for small numClusters * numBits; each block flushes its partial sums once.
+template <bool Weighted>
+__global__ void accumulateSharedKernel(const std::uint32_t* fingerprints,
+                                       const int*           rowCounts,
+                                       const int*           labels,
+                                       const int            numRows,
+                                       const int            numWords,
+                                       const int            numClusters,
+                                       SumType<Weighted>*   sums,
+                                       unsigned int*        sizes) {
+  extern __shared__ unsigned long long sharedStorage[];
+  auto*                                localSums  = reinterpret_cast<SumType<Weighted>*>(sharedStorage);
+  const int                            numBits    = numWords * 32;
+  const int                            numEntries = numClusters * numBits;
+  auto*                                localSizes = reinterpret_cast<unsigned int*>(localSums + numEntries);
+  for (int index = static_cast<int>(threadIdx.x); index < numEntries; index += blockDim.x) {
+    localSums[index] = 0;
+  }
+  for (int index = static_cast<int>(threadIdx.x); index < numClusters; index += blockDim.x) {
+    localSizes[index] = 0;
+  }
+  __syncthreads();
+  for (std::size_t row = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; row < numRows;
+       row += static_cast<std::size_t>(gridDim.x) * blockDim.x) {
+    const int  label     = labels[row];
+    const auto increment = rowIncrement<Weighted>(rowCounts[row]);
+    atomicAdd(&localSizes[label], 1U);
+    auto* clusterSums = localSums + label * numBits;
+    for (int word = 0; word < numWords; ++word) {
+      std::uint32_t bits = fingerprints[row * numWords + word];
+      while (bits != 0U) {
+        const int bit = __ffs(static_cast<int>(bits)) - 1;
+        bits &= bits - 1U;
+        atomicAdd(&clusterSums[word * 32 + bit], increment);
+      }
+    }
+  }
+  __syncthreads();
+  for (int index = static_cast<int>(threadIdx.x); index < numEntries; index += blockDim.x) {
+    if (localSums[index] != 0) {
+      atomicAdd(&sums[index], localSums[index]);
+    }
+  }
+  for (int index = static_cast<int>(threadIdx.x); index < numClusters; index += blockDim.x) {
+    if (localSizes[index] != 0) {
+      atomicAdd(&sizes[index], localSizes[index]);
     }
   }
 }
@@ -296,16 +379,26 @@ void validateClusterCount(const int numClusters, const int numRows) {
 // Assignment
 // ---------------------------------------------------------------------------------------------------------------------
 
-//! Device copies of the centers in the layout the assignment kernel reads.
+//! Device copies of the centers in the layout an assignment kernel reads.
 class PreparedCenters {
  public:
-  PreparedCenters(const int numClusters, const int numWords, cudaStream_t stream)
+  PreparedCenters(const int numClusters, const int numWords, const KMeansAssignKernel kernel, cudaStream_t stream)
       : numClusters_(numClusters),
         numBits_(numWords * 32),
-        paddedCenters_((numClusters + kMmaBlockCenters - 1) / kMmaBlockCenters * kMmaBlockCenters),
-        paddedBits_((numBits_ + kMmaStageBits - 1) / kMmaStageBits * kMmaStageBits),
-        packed_(static_cast<std::size_t>(paddedCenters_) * paddedBits_, stream),
-        norms_(numClusters, stream) {}
+        kernel_(kernel),
+        norms_((numClusters + kUmmaBlockCenters - 1) / kUmmaBlockCenters * kUmmaBlockCenters, stream) {
+    norms_.zero();
+    if (kernel_ == KMeansAssignKernel::Umma) {
+      paddedBits_ = (numBits_ + 63) / 64 * 64;
+      numChunks_  = (numClusters + kUmmaBlockCenters - 1) / kUmmaBlockCenters;
+      packed_ =
+        AsyncDeviceVector<__half>(static_cast<std::size_t>(numChunks_) * kUmmaBlockCenters * paddedBits_, stream);
+    } else {
+      paddedCenters_ = (numClusters + kMmaBlockCenters - 1) / kMmaBlockCenters * kMmaBlockCenters;
+      paddedBits_    = (numBits_ + kMmaStageBits - 1) / kMmaStageBits * kMmaStageBits;
+      packed_        = AsyncDeviceVector<__half>(static_cast<std::size_t>(paddedCenters_) * paddedBits_, stream);
+    }
+  }
 
   void update(const float* centers, cudaStream_t stream) {
     centerNormsKernel<<<gridFor(static_cast<std::size_t>(numClusters_) * 32), kBlockSize, 0, stream>>>(centers,
@@ -313,12 +406,21 @@ class PreparedCenters {
                                                                                                        numClusters_,
                                                                                                        numBits_);
     cudaCheckError(cudaGetLastError());
-    packMmaCentersKernel<<<gridFor(packed_.size()), kBlockSize, 0, stream>>>(centers,
-                                                                             packed_.data(),
-                                                                             numClusters_,
-                                                                             numBits_,
-                                                                             paddedCenters_,
-                                                                             paddedBits_);
+    if (kernel_ == KMeansAssignKernel::Umma) {
+      packUmmaCentersKernel<<<gridFor(packed_.size()), kBlockSize, 0, stream>>>(centers,
+                                                                                packed_.data(),
+                                                                                numClusters_,
+                                                                                numBits_,
+                                                                                paddedBits_ / 64,
+                                                                                numChunks_);
+    } else {
+      packMmaCentersKernel<<<gridFor(packed_.size()), kBlockSize, 0, stream>>>(centers,
+                                                                               packed_.data(),
+                                                                               numClusters_,
+                                                                               numBits_,
+                                                                               paddedCenters_,
+                                                                               paddedBits_);
+    }
     cudaCheckError(cudaGetLastError());
   }
 
@@ -329,23 +431,30 @@ class PreparedCenters {
  private:
   int                       numClusters_;
   int                       numBits_;
-  int                       paddedCenters_;
-  int                       paddedBits_;
+  KMeansAssignKernel        kernel_;
+  int                       numChunks_     = 0;
+  int                       paddedCenters_ = 0;
+  int                       paddedBits_    = 0;
   AsyncDeviceVector<__half> packed_;
   AsyncDeviceVector<float>  norms_;
 };
 
+KMeansAssignKernel resolveKernel(const KMeansAssignKernel kernel, const int numWords) {
+  return kernel == KMeansAssignKernel::Auto ? chooseAssignKernel(numWords) : kernel;
+}
+
 template <KMeansMetric Metric>
-void launchAssign(const std::uint32_t*   fingerprints,
-                  const int*             rowCounts,
-                  const int              numRows,
-                  const int              numWords,
-                  const PreparedCenters& centers,
-                  const int              numClusters,
-                  int*                   labels,
-                  float*                 distances,
-                  int*                   changed,
-                  cudaStream_t           stream) {
+void launchAssign(const std::uint32_t*     fingerprints,
+                  const int*               rowCounts,
+                  const int                numRows,
+                  const int                numWords,
+                  const PreparedCenters&   centers,
+                  const int                numClusters,
+                  const KMeansAssignKernel kernel,
+                  int*                     labels,
+                  float*                   distances,
+                  int*                     changed,
+                  cudaStream_t             stream) {
   const AssignArgs args{fingerprints,
                         rowCounts,
                         numRows,
@@ -356,20 +465,25 @@ void launchAssign(const std::uint32_t*   fingerprints,
                         labels,
                         distances,
                         changed};
-  launchMmaAssign<Metric>(args, centers.paddedBits(), stream);
+  if (kernel == KMeansAssignKernel::Umma) {
+    launchUmmaAssign<Metric>(args, centers.paddedBits(), stream);
+  } else {
+    launchMmaAssign<Metric>(args, centers.paddedBits(), stream);
+  }
 }
 
-void assign(const KMeansMetric     metric,
-            const std::uint32_t*   fingerprints,
-            const int*             rowCounts,
-            const int              numRows,
-            const int              numWords,
-            const PreparedCenters& centers,
-            const int              numClusters,
-            int*                   labels,
-            float*                 distances,
-            int*                   changed,
-            cudaStream_t           stream) {
+void assign(const KMeansMetric       metric,
+            const std::uint32_t*     fingerprints,
+            const int*               rowCounts,
+            const int                numRows,
+            const int                numWords,
+            const PreparedCenters&   centers,
+            const int                numClusters,
+            const KMeansAssignKernel kernel,
+            int*                     labels,
+            float*                   distances,
+            int*                     changed,
+            cudaStream_t             stream) {
   switch (metric) {
     case KMeansMetric::Cosine:
       launchAssign<KMeansMetric::Cosine>(fingerprints,
@@ -378,6 +492,7 @@ void assign(const KMeansMetric     metric,
                                          numWords,
                                          centers,
                                          numClusters,
+                                         kernel,
                                          labels,
                                          distances,
                                          changed,
@@ -390,6 +505,7 @@ void assign(const KMeansMetric     metric,
                                            numWords,
                                            centers,
                                            numClusters,
+                                           kernel,
                                            labels,
                                            distances,
                                            changed,
@@ -416,12 +532,13 @@ class LloydState {
         numWords_(numWords),
         numBits_(numWords * 32),
         options_(options),
+        kernel_(resolveKernel(options.kernel, numWords)),
         stream_(stream),
         rowCounts_(numRows, stream),
         labels_(numRows, stream),
         distances_(numRows, stream),
         centers_(std::move(centers)),
-        prepared_(options.numClusters, numWords, stream),
+        prepared_(options.numClusters, numWords, kernel_, stream),
         sizes_(options.numClusters, stream),
         inertia_(0.0, stream),
         changed_(0, stream) {
@@ -456,6 +573,7 @@ class LloydState {
            numWords_,
            prepared_,
            options_.numClusters,
+           kernel_,
            labels_.data(),
            distances_.data(),
            changed_.data(),
@@ -509,13 +627,29 @@ class LloydState {
     auto* sums = Weighted ? reinterpret_cast<Sum*>(sums_.data()) : reinterpret_cast<Sum*>(centers_.data());
     cudaCheckError(cudaMemsetAsync(sums, 0, centers_.size() * sizeof(Sum), stream_));
     sizes_.zero();
-    accumulateGlobalKernel<Weighted><<<gridFor(numRows_), kBlockSize, 0, stream_>>>(fingerprints_,
-                                                                                    rowCounts_.data(),
-                                                                                    labels_.data(),
-                                                                                    numRows_,
-                                                                                    numWords_,
-                                                                                    sums,
-                                                                                    sizes_.data());
+    const std::size_t sharedBytes =
+      static_cast<std::size_t>(options_.numClusters) * numBits_ * sizeof(Sum) + options_.numClusters * sizeof(int);
+    if (sharedBytes <= kMaxPrivatizedBytes) {
+      auto kernel = accumulateSharedKernel<Weighted>;
+      cudaCheckError(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kMaxPrivatizedBytes));
+      const int blocks = std::min(gridFor(numRows_), deviceSmCount());
+      kernel<<<blocks, kBlockSize, sharedBytes, stream_>>>(fingerprints_,
+                                                           rowCounts_.data(),
+                                                           labels_.data(),
+                                                           numRows_,
+                                                           numWords_,
+                                                           options_.numClusters,
+                                                           sums,
+                                                           sizes_.data());
+    } else {
+      accumulateGlobalKernel<Weighted><<<gridFor(numRows_), kBlockSize, 0, stream_>>>(fingerprints_,
+                                                                                      rowCounts_.data(),
+                                                                                      labels_.data(),
+                                                                                      numRows_,
+                                                                                      numWords_,
+                                                                                      sums,
+                                                                                      sizes_.data());
+    }
     cudaCheckError(cudaGetLastError());
     finalizeCentersKernel<Weighted><<<gridFor(centers_.size()), kBlockSize, 0, stream_>>>(sums,
                                                                                           sizes_.data(),
@@ -619,6 +753,7 @@ class LloydState {
   int                             numWords_;
   int                             numBits_;
   KMeansOptions                   options_;
+  KMeansAssignKernel              kernel_;
   cudaStream_t                    stream_;
   AsyncDeviceVector<int>          rowCounts_;
   AsyncDeviceVector<int>          labels_;
@@ -760,6 +895,7 @@ void kmeansAssignGpu(const cuda::std::span<const std::uint32_t> fingerprints,
                      const float*                               centers,
                      const int                                  numClusters,
                      const KMeansMetric                         metric,
+                     const KMeansAssignKernel                   kernel,
                      int*                                       labels,
                      float*                                     distances,
                      cudaStream_t                               stream) {
@@ -767,9 +903,10 @@ void kmeansAssignGpu(const cuda::std::span<const std::uint32_t> fingerprints,
   if (numClusters < 1) {
     throw std::invalid_argument("n_clusters must be positive");
   }
+  const auto              resolved = detail::resolveKernel(kernel, numWords);
   AsyncDeviceVector<int>  rowCounts(numFingerprints, stream);
   AsyncDevicePtr<int>     changed(0, stream);
-  detail::PreparedCenters prepared(numClusters, numWords, stream);
+  detail::PreparedCenters prepared(numClusters, numWords, resolved, stream);
   detail::launchFingerprintBitCounts(fingerprints.data(), rowCounts.data(), numFingerprints, numWords, stream);
   prepared.update(centers, stream);
   cudaCheckError(cudaMemsetAsync(labels, 0xFF, sizeof(int) * numFingerprints, stream));
@@ -780,6 +917,7 @@ void kmeansAssignGpu(const cuda::std::span<const std::uint32_t> fingerprints,
                  numWords,
                  prepared,
                  numClusters,
+                 resolved,
                  labels,
                  distances,
                  changed.data(),

@@ -159,7 +159,39 @@ target_link_libraries(
 target_include_directories(diversity_pickers SYSTEM
                            PRIVATE ${Boost_INCLUDE_DIRS})
 
-add_library(kmeans kmeans.cu kmeans_mma.cu)
+# The k-means tcgen05 kernel needs architecture-specific sm_100a / sm_103a code.
+# It is built for whichever of sm_100 / sm_103 the build targets; without
+# either, it compiles to a stub and the mma.sync kernel runs instead.
+set(_kmeans_umma_archs "")
+foreach(cc IN ITEMS 100 103)
+  set(_kmeans_umma_${cc} 0)
+  if(CMAKE_CUDA_ARCHITECTURES STREQUAL "native")
+    if(_native_cc STREQUAL "${cc}")
+      set(_kmeans_umma_${cc} 1)
+    endif()
+  else()
+    string(REPLACE ";" " " _kmeans_arch_str "${CMAKE_CUDA_ARCHITECTURES}")
+    if(_kmeans_arch_str MATCHES "(^| )${cc}[af]?(-real|-virtual)?( |$)")
+      set(_kmeans_umma_${cc} 1)
+    endif()
+  endif()
+  if(_kmeans_umma_${cc})
+    list(APPEND _kmeans_umma_archs "${cc}a")
+  endif()
+endforeach()
+add_library(kmeans_umma OBJECT kmeans_umma.cu)
+set_target_properties(kmeans_umma PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(_kmeans_umma_archs)
+  set_property(TARGET kmeans_umma PROPERTY CUDA_ARCHITECTURES
+                                           ${_kmeans_umma_archs})
+endif()
+target_compile_definitions(
+  kmeans_umma PRIVATE NVMOLKIT_KMEANS_UMMA_SM100=${_kmeans_umma_100}
+                      NVMOLKIT_KMEANS_UMMA_SM103=${_kmeans_umma_103})
+target_link_libraries(kmeans_umma PRIVATE device_vector cuda_error_check
+                                          cccl_interface)
+
+add_library(kmeans kmeans.cu kmeans_mma.cu $<TARGET_OBJECTS:kmeans_umma>)
 target_link_libraries(
   kmeans
   PUBLIC device_vector

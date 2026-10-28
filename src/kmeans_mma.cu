@@ -376,6 +376,18 @@ bool mmaSupported(const int paddedBits) {
   return mmaStages(paddedBits) > 0;
 }
 
+KMeansAssignKernel chooseAssignKernel(const int numWords) {
+  // tcgen05 was 1.4-5x faster than mma.sync on GB300 at every k measured (benchmarks in the PR description).
+  if (ummaSupported((numWords * 32 + 63) / 64 * 64)) {
+    return KMeansAssignKernel::Umma;
+  }
+  if (mmaSupported((numWords * 32 + kMmaStageBits - 1) / kMmaStageBits * kMmaStageBits)) {
+    return KMeansAssignKernel::Mma;
+  }
+  throw std::invalid_argument(
+    "k-means needs a GPU of compute capability 8.0 or newer with enough shared memory for the fingerprint width");
+}
+
 template <KMeansMetric Metric> void launchMmaAssign(const AssignArgs& args, const int paddedBits, cudaStream_t stream) {
   if (args.numRows == 0) {
     return;

@@ -18,6 +18,12 @@ namespace nvMolKit::detail {
 constexpr int kMmaBlockCenters = 256;
 constexpr int kMmaStageBits    = 64;
 
+//! Centers per tcgen05 tile (the MMA N dimension).
+constexpr int kUmmaBlockCenters = 192;
+
+//! Largest shared-memory privatized sum buffer for the update step.
+constexpr std::size_t kMaxPrivatizedBytes = 160 * 1024;
+
 struct AssignArgs {
   const std::uint32_t* fingerprints;
   const int*           rowCounts;
@@ -74,10 +80,19 @@ __device__ __forceinline__ bool storeAssignment(const AssignArgs&        args,
   return previous != index;
 }
 
+//! Picks tcgen05 when ummaSupported, else mma.sync. Throws when the device or the fingerprint width fits neither.
+KMeansAssignKernel chooseAssignKernel(int numWords);
+
 //! True when the current device runs the mma.sync kernel (sm_80 or newer) with fingerprints of paddedBits bits.
 bool mmaSupported(int paddedBits);
 
 template <KMeansMetric Metric> void launchMmaAssign(const AssignArgs& args, int paddedBits, cudaStream_t stream);
+
+//! True on sm_100 / sm_103 devices when this build has tcgen05 code for the device and the fingerprints fit the
+//! kernel's shared memory.
+bool ummaSupported(int paddedBits);
+
+template <KMeansMetric Metric> void launchUmmaAssign(const AssignArgs& args, int paddedBits, cudaStream_t stream);
 
 }  // namespace nvMolKit::detail
 
