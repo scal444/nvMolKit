@@ -3,8 +3,8 @@
 Clustering and diversity selection
 ==================================
 
-:mod:`nvmolkit.clustering` provides Butina and directed sphere exclusion (DISE) clustering, and
-:mod:`nvmolkit.pickers` provides Leader and MaxMin selection.
+:mod:`nvmolkit.clustering` provides Butina, directed sphere exclusion (DISE) and k-means
+clustering, and :mod:`nvmolkit.pickers` provides Leader and MaxMin selection.
 
 Matrix and fused forms
 ----------------------
@@ -84,6 +84,31 @@ example, ``AAPMetric(max_path_length=8)``.
     leaders = fused_leader(fingerprints, 0.6, metric="tanimoto", output=OutputMode.RDKIT)
     picks, last_distance = fused_maxmin(fingerprints, 3, metric="tanimoto", seed=23, output=OutputMode.RDKIT)
     aap_leaders = fused_leader(molecules, 0.8, metric=AAPMetric(max_path_length=8), output=OutputMode.RDKIT)
+
+k-means
+-------
+
+:func:`~nvmolkit.clustering.kmeans` partitions packed fingerprints into a
+chosen number of clusters with Lloyd's algorithm. It works on the packed bits
+and never stores a fingerprints x centers matrix, so memory grows with the
+input plus the centers. The default ``metric="tanimoto"`` assigns each
+fingerprint to the center with the highest continuous Tanimoto similarity;
+``"cosine"`` uses squared Euclidean distance on L2-normalized bits.
+
+The default ``init="k-means++"`` seeds centers by D² sampling, drawn in 64
+batches, which costs about one assignment pass instead of one scan of the data
+per center.
+
+.. code-block:: python
+
+    from nvmolkit.clustering import kmeans
+
+    result = kmeans(fingerprints, n_clusters=1000, random_state=0)
+    labels = result.labels.torch()
+    centers = result.centers.torch()  # (1000, 2048) float32 bit means
+
+k-means returns a :class:`~nvmolkit.clustering.KMeansResult` on the GPU and
+needs a GPU of compute capability 8.0 or newer.
 
 Output modes
 ------------
