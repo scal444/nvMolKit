@@ -22,6 +22,7 @@
 
 #include <cuda_fp16.h>
 
+#include <cuda/ptx>
 #include <stdexcept>
 
 #include "src/kmeans_kernels.cuh"
@@ -48,8 +49,12 @@ constexpr int kUmmaAColumn     = 2 * kUmmaCenters;
 constexpr int kUmmaAStageCols  = kUmmaStageBits / 2;
 static_assert(kUmmaAColumn + 4 * kUmmaAStageCols <= kUmmaTmemColumns, "tensor memory budget");
 
-#if defined(__CUDA_ARCH__) && (defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL) || \
-                               defined(__CUDA_ARCH_SPECIFIC__) || defined(__CUDA_ARCH_FAMILY_SPECIFIC__))
+//! The kernel uses the cuda::ptx tcgen05 wrappers, which CCCL provides from 2.8.0; with an older CCCL it is a stub.
+constexpr bool kHasTcgen05Wrappers = CCCL_VERSION >= 2008000;
+
+#if defined(__CUDA_ARCH__) && CCCL_VERSION >= 2008000 &&                                                            \
+  (defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL) || defined(__CUDA_ARCH_SPECIFIC__) || \
+   defined(__CUDA_ARCH_FAMILY_SPECIFIC__))
 #define NVMOLKIT_KMEANS_UMMA 1
 #endif
 
@@ -60,18 +65,24 @@ __device__ __forceinline__ unsigned sharedAddress(const void* pointer) {
 }
 
 __device__ __forceinline__ void mbarrierInit(std::uint64_t* barrier, const unsigned count) {
-  asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;\n" ::"r"(sharedAddress(barrier)), "r"(count));
+  cuda::ptx::mbarrier_init(barrier, count);
 }
 
 __device__ __forceinline__ void mbarrierArrive(std::uint64_t* barrier) {
-  asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];\n" ::"r"(sharedAddress(barrier)) : "memory");
+  (void)cuda::ptx::mbarrier_arrive(barrier);
 }
 
 __device__ __forceinline__ void mbarrierArriveExpectTx(std::uint64_t* barrier, const unsigned bytes) {
-  asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" ::"r"(sharedAddress(barrier)), "r"(bytes)
-               : "memory");
+  (void)cuda::ptx::mbarrier_arrive_expect_tx(cuda::ptx::sem_release,
+                                             cuda::ptx::scope_cta,
+                                             cuda::ptx::space_shared,
+                                             barrier,
+                                             bytes);
 }
 
+//! Spins until the barrier phase with the given parity completes. The retry loop stays inside one asm block: a C++
+//! loop around cuda::ptx::mbarrier_try_wait_parity stops the compiler from unrolling the pipeline loops that call
+//! this, which cost 17% of an assignment pass on GB300 (Enamine 1M x 1024 bits, k = 250k).
 __device__ __forceinline__ void mbarrierWait(std::uint64_t* barrier, const unsigned parity) {
   asm volatile(
     "{\n"
@@ -88,20 +99,15 @@ __device__ __forceinline__ void bulkCopy(void*          shared,
                                          const void*    global,
                                          const unsigned bytes,
                                          std::uint64_t* barrier) {
-  asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];\n" ::"r"(
-                 sharedAddress(shared)),
-               "l"(global),
-               "r"(bytes),
-               "r"(sharedAddress(barrier))
-               : "memory");
+  cuda::ptx::cp_async_bulk(cuda::ptx::space_cluster, cuda::ptx::space_global, shared, global, bytes, barrier);
 }
 
 __device__ __forceinline__ void tmemFenceAfter() {
-  asm volatile("tcgen05.fence::after_thread_sync;\n" ::: "memory");
+  cuda::ptx::tcgen05_fence_after_thread_sync();
 }
 
 __device__ __forceinline__ void tmemFenceBefore() {
-  asm volatile("tcgen05.fence::before_thread_sync;\n" ::: "memory");
+  cuda::ptx::tcgen05_fence_before_thread_sync();
 }
 
 //! Shared-memory matrix descriptor: K-major, 128-byte swizzle, 8-row core groups 1024 bytes apart.
@@ -115,7 +121,7 @@ __device__ __forceinline__ std::uint64_t smemDescriptor(const unsigned address) 
   return descriptor;
 }
 
-//! kind::f16 instruction descriptor: fp16 A and B (K-major), fp32 accumulator, M=128, N=256.
+//! kind::f16 instruction descriptor: fp16 A and B (K-major), fp32 accumulator, M=128, N=192.
 constexpr unsigned kInstructionDescriptor = (1U << 4) |               // D format F32
                                             (0U << 7) | (0U << 10) |  // A, B format F16
                                             (static_cast<unsigned>(kUmmaCenters >> 3) << 17) |
@@ -126,65 +132,26 @@ __device__ __forceinline__ void umma(const unsigned      tmem,
                                      const unsigned      a,
                                      const std::uint64_t b,
                                      const unsigned      accumulate) {
-  asm volatile(
-    "{\n"
-    ".reg .pred p;\n"
-    "setp.ne.b32 p, %4, 0;\n"
-    "tcgen05.mma.cta_group::1.kind::f16 [%0], [%1], %2, %3, p;\n"
-    "}\n" ::"r"(tmem),
-    "r"(a),
-    "l"(b),
-    "r"(kInstructionDescriptor),
-    "r"(accumulate));
+  cuda::ptx::tcgen05_mma_tmem_a(cuda::ptx::kind_f16,
+                                cuda::ptx::cta_group_1,
+                                tmem,
+                                a,
+                                b,
+                                kInstructionDescriptor,
+                                accumulate != 0U);
 }
 
 __device__ __forceinline__ void ummaCommit(std::uint64_t* barrier) {
-  asm volatile(
-    "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%0];\n" ::"r"(sharedAddress(barrier))
-    : "memory");
+  cuda::ptx::tcgen05_commit(cuda::ptx::cta_group_1, barrier);
 }
 
 //! Issues a 32-column tensor-memory load; the registers are valid only after tmemWaitLoad on the same array.
 __device__ __forceinline__ void tmemLoadAsync(unsigned (&r)[32], const unsigned address) {
-  asm volatile(
-    "tcgen05.ld.sync.aligned.32x32b.x32.b32 {%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, "
-    "%16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31}, [%32];\n"
-    : "=r"(r[0]),
-      "=r"(r[1]),
-      "=r"(r[2]),
-      "=r"(r[3]),
-      "=r"(r[4]),
-      "=r"(r[5]),
-      "=r"(r[6]),
-      "=r"(r[7]),
-      "=r"(r[8]),
-      "=r"(r[9]),
-      "=r"(r[10]),
-      "=r"(r[11]),
-      "=r"(r[12]),
-      "=r"(r[13]),
-      "=r"(r[14]),
-      "=r"(r[15]),
-      "=r"(r[16]),
-      "=r"(r[17]),
-      "=r"(r[18]),
-      "=r"(r[19]),
-      "=r"(r[20]),
-      "=r"(r[21]),
-      "=r"(r[22]),
-      "=r"(r[23]),
-      "=r"(r[24]),
-      "=r"(r[25]),
-      "=r"(r[26]),
-      "=r"(r[27]),
-      "=r"(r[28]),
-      "=r"(r[29]),
-      "=r"(r[30]),
-      "=r"(r[31])
-    : "r"(address));
+  cuda::ptx::tcgen05_ld_32x32b(r, address);
 }
 
-//! Waits for outstanding tensor-memory loads. The registers pass through the asm so no use is scheduled before it.
+//! Waits for outstanding tensor-memory loads. The registers pass through the asm so no use is scheduled before it,
+//! which cuda::ptx::tcgen05_wait_ld (a memory clobber only) does not guarantee.
 __device__ __forceinline__ void tmemWaitLoad(unsigned (&r)[32]) {
   asm volatile("tcgen05.wait::ld.sync.aligned;\n"
                : "+r"(r[0]),
@@ -230,43 +197,8 @@ __device__ __forceinline__ unsigned bitsToHalf2(const unsigned x) {
 
 //! Stores 32 consecutive 32-bit columns of this thread's tensor-memory lane and waits for completion.
 __device__ __forceinline__ void tmemStore32(const unsigned address, const unsigned (&r)[32]) {
-  asm volatile(
-    "tcgen05.st.sync.aligned.32x32b.x32.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, "
-    "%16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31, %32};\n" ::"r"(address),
-    "r"(r[0]),
-    "r"(r[1]),
-    "r"(r[2]),
-    "r"(r[3]),
-    "r"(r[4]),
-    "r"(r[5]),
-    "r"(r[6]),
-    "r"(r[7]),
-    "r"(r[8]),
-    "r"(r[9]),
-    "r"(r[10]),
-    "r"(r[11]),
-    "r"(r[12]),
-    "r"(r[13]),
-    "r"(r[14]),
-    "r"(r[15]),
-    "r"(r[16]),
-    "r"(r[17]),
-    "r"(r[18]),
-    "r"(r[19]),
-    "r"(r[20]),
-    "r"(r[21]),
-    "r"(r[22]),
-    "r"(r[23]),
-    "r"(r[24]),
-    "r"(r[25]),
-    "r"(r[26]),
-    "r"(r[27]),
-    "r"(r[28]),
-    "r"(r[29]),
-    "r"(r[30]),
-    "r"(r[31])
-    : "memory");
-  asm volatile("tcgen05.wait::st.sync.aligned;\n" ::: "memory");
+  cuda::ptx::tcgen05_st_32x32b(address, r);
+  cuda::ptx::tcgen05_wait_st();
 }
 
 #endif  // NVMOLKIT_KMEANS_UMMA
@@ -312,12 +244,11 @@ __global__ void __launch_bounds__(kUmmaThreads, 1) ummaAssignKernel(const Assign
       mbarrierInit(&accEmpty[b], kUmmaEpilogueWarps);
     }
     changedCount = 0;
-    asm volatile("fence.mbarrier_init.release.cluster;\n" ::: "memory");
+    cuda::ptx::fence_mbarrier_init(cuda::ptx::sem_release, cuda::ptx::scope_cluster);
   }
   if (warp == 1) {
-    asm volatile("tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%0], %1;\n" ::"r"(sharedAddress(&tmemBase)),
-                 "r"(kUmmaTmemColumns));
-    asm volatile("tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned;\n");
+    cuda::ptx::tcgen05_alloc(cuda::ptx::cta_group_1, &tmemBase, kUmmaTmemColumns);
+    cuda::ptx::tcgen05_relinquish_alloc_permit(cuda::ptx::cta_group_1);
   }
   tmemFenceBefore();
   __syncthreads();
@@ -487,6 +418,7 @@ __global__ void __launch_bounds__(kUmmaThreads, 1) ummaAssignKernel(const Assign
       halfScores[row]  = score;
       halfIndices[row] = index;
     }
+    // Named barrier over the epilogue warps only; cuda::ptx has no bar.sync wrapper.
     asm volatile("bar.sync 1, %0;\n" ::"n"(kUmmaEpilogueWarps * 32));
     if (half == 0 && globalRow < args.numRows) {
       const float otherScore = halfScores[row];
@@ -505,7 +437,7 @@ __global__ void __launch_bounds__(kUmmaThreads, 1) ummaAssignKernel(const Assign
   __syncthreads();
   tmemFenceAfter();
   if (warp == 1) {
-    asm volatile("tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;\n" ::"r"(tmem), "r"(kUmmaTmemColumns));
+    cuda::ptx::tcgen05_dealloc(cuda::ptx::cta_group_1, tmem, kUmmaTmemColumns);
   }
   if (threadIdx.x == 0 && changedCount > 0) {
     atomicAdd(args.changed, changedCount);
@@ -541,8 +473,8 @@ bool ummaSupported(const int paddedBits) {
   cudaCheckError(cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device));
   cudaCheckError(cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device));
   // The kernel is architecture-specific: it only runs on a device whose exact sm_100a / sm_103a code was built.
-  const bool built = (major == 10 && minor == 0 && NVMOLKIT_KMEANS_UMMA_SM100) ||
-                     (major == 10 && minor == 3 && NVMOLKIT_KMEANS_UMMA_SM103);
+  const bool built = kHasTcgen05Wrappers && ((major == 10 && minor == 0 && NVMOLKIT_KMEANS_UMMA_SM100) ||
+                                             (major == 10 && minor == 3 && NVMOLKIT_KMEANS_UMMA_SM103));
   return built && ummaStages(paddedBits) > 0;
 }
 
