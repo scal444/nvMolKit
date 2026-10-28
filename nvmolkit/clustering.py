@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GPU-accelerated Butina, directed sphere exclusion (DISE), and BitBIRCH clustering.
+"""GPU-accelerated Butina, directed sphere exclusion (DISE), BitBIRCH, and k-means clustering.
 
 Butina and DISE accept precomputed distance matrices or compute distances as
-needed through their ``fused_`` functions. BitBIRCH clusters packed binary
-fingerprints directly.
+needed through their ``fused_`` functions. BitBIRCH and k-means cluster packed
+binary fingerprints directly.
 """
 
 import math
@@ -31,6 +31,7 @@ import torch
 from nvmolkit import _clustering
 from nvmolkit._distance_inputs import _aap_args, _packed_metric_name, _prepare_distance_matrix, _prepare_fused_input
 from nvmolkit._fingerprint_inputs import _prepare_packed_fingerprints
+from nvmolkit.fingerprints import unpack_fingerprint
 from nvmolkit.similarity import AAPMetric, Metric, _resolve_metric
 from nvmolkit.types import ArrayInput, AsyncGpuResult, _as_cuda_tensor, _resolve_cuda_stream
 
@@ -450,3 +451,220 @@ def bitbirch(
             active_stream.cuda_stream,
         )
         return (AsyncGpuResult(labels), AsyncGpuResult(centroids)) if return_centroids else AsyncGpuResult(labels)
+
+
+@dataclass(frozen=True)
+class KMeansResult:
+    """Device-resident k-means result.
+
+    Attributes:
+        labels: int32 cluster ID of each input, shape ``(N,)``.
+        centers: float32 cluster centers in unpacked bit space, shape
+            ``(n_clusters, num_words * 32)``. Column ``j`` is bit ``j % 32`` of
+            word ``j // 32``, as in :func:`~nvmolkit.fingerprints.unpack_fingerprint`.
+            Centers are member bit means; for ``metric="cosine"``, means of
+            L2-normalized rows.
+        cluster_sizes: int64 member count of each cluster, shape
+            ``(n_clusters,)``.
+        inertia: Objective of the fitted rows: summed Tanimoto distance
+            ``1 - T`` for ``metric="tanimoto"``, or summed squared Euclidean
+            distance between L2-normalized rows and centers for
+            ``metric="cosine"``. Covers only the sampled rows when
+            ``fit_size`` is smaller than ``N``.
+        n_iter: Number of center updates.
+    """
+
+    labels: AsyncGpuResult
+    centers: AsyncGpuResult
+    cluster_sizes: AsyncGpuResult
+    inertia: float
+    n_iter: int
+
+
+_KMEANS_METRICS = ("tanimoto", "cosine")
+_KMEANS_INITS = ("k-means++", "random", "maxmin")
+#: Sampling rounds of batched k-means++.
+_BATCHED_KMEANSPP_ROUNDS = 64
+
+
+def _centers_from_rows(fps: torch.Tensor, rows: torch.Tensor, metric: str) -> torch.Tensor:
+    """float32 centers from packed rows, L2-normalized for cosine (as ``kmeansCentersFromRows``)."""
+    centers = unpack_fingerprint(fps.view(torch.int32)[rows]).to(torch.float32)
+    if metric == "cosine":
+        centers.div_(centers.sum(dim=1, keepdim=True).sqrt_().clamp_min_(1.0))
+    return centers
+
+
+def _batched_kmeanspp_centers(fps: torch.Tensor, n_clusters: int, metric: str, seed: int, stream) -> torch.Tensor:
+    """Batched D^2 seeding: k-means++ that draws ``ceil((k - 1) / rounds)`` centers per round.
+
+    The first center is a uniform row. Each round draws a batch of distinct rows without replacement with
+    probability proportional to D^2 (Efraimidis-Spirakis keys ``log(u) / D^2``), then lowers every row's D with one
+    assignment pass against only the new batch. D^2 is ``2 - 2cos`` for cosine and ``(1 - T)^2`` for Tanimoto. Total
+    work is about one assignment pass over all k centers, against ``k`` full scans for exact k-means++; with
+    ``k <= rounds + 1`` it is exact k-means++.
+    """
+    num_rows = fps.shape[0]
+    device = fps.device
+    generator = torch.Generator(device=device)
+    generator.manual_seed(seed & 0x7FFFFFFFFFFFFFFF)
+    chosen = torch.zeros(num_rows, dtype=torch.bool, device=device)
+    picks = [torch.randint(num_rows, (1,), generator=generator, device=device)]
+    chosen[picks[0]] = True
+    weight = torch.full((num_rows,), float("inf"), dtype=torch.float64, device=device)
+    remaining = n_clusters - 1
+    rounds = max(1, min(_BATCHED_KMEANSPP_ROUNDS, remaining))
+    batch_rows = picks[0]
+    for r in range(rounds if remaining else 0):
+        centers = _centers_from_rows(fps, batch_rows, metric)
+        _, distances = _clustering.kmeans_assign(
+            fps.__cuda_array_interface__,
+            centers.__cuda_array_interface__,
+            centers.shape[0],
+            metric,
+            stream.cuda_stream,
+        )
+        d = torch.as_tensor(distances, device=device).to(torch.float64).clamp_min_(0.0)
+        if metric == "tanimoto":
+            d = d * d
+        torch.minimum(weight, d, out=weight)
+        count = min(remaining, -(-remaining // (rounds - r)))
+        u = torch.rand(num_rows, dtype=torch.float64, generator=generator, device=device).clamp_min_(1e-300)
+        # Rows with zero weight (duplicates of chosen rows) rank after every positive weight, uniformly at random.
+        keys = torch.where(weight > 0, u.log() / weight, -1e300 * (2.0 - u))
+        keys.masked_fill_(chosen, float("-inf"))
+        batch_rows = torch.topk(keys, count, sorted=False).indices
+        chosen[batch_rows] = True
+        picks.append(batch_rows)
+        remaining -= count
+    return _centers_from_rows(fps, torch.cat(picks), metric)
+
+
+def kmeans(
+    x: ArrayInput,
+    n_clusters: int,
+    *,
+    metric: Literal["tanimoto", "cosine"] = "tanimoto",
+    init: Literal["k-means++", "random", "maxmin"] | ArrayInput = "k-means++",
+    n_init: int = 1,
+    max_iter: int = 300,
+    tol: float = 1e-4,
+    fit_size: int | None = None,
+    random_state: int | None = None,
+    stream: torch.cuda.Stream | None = None,
+) -> KMeansResult:
+    """Cluster packed fingerprints with k-means (Lloyd's algorithm).
+
+    Works on the packed bits: each assignment pass scores every row against
+    every center on tensor cores (fp16 center copies, fp32 accumulation) and
+    keeps a running argmax, so neither unpacked rows nor a rows x centers
+    matrix is stored. Memory beyond the input is about 12 bytes per row plus
+    6 bytes (14 for cosine) per center bit. Centers are (weighted, for cosine)
+    bit means accumulated with integer atomics, so results are deterministic
+    for a given ``random_state``. A cluster that loses all its members is moved
+    onto one of the rows farthest from their centers.
+
+    Requires a GPU of compute capability 8.0 or newer.
+
+    Args:
+        x: Packed int32 or uint32 fingerprints of shape ``(N, num_words)``. Can
+            be an AsyncGpuResult, torch.Tensor, or numpy.ndarray. CPU tensors
+            and NumPy arrays are copied to CUDA.
+        n_clusters: Number of clusters, between 1 and the number of fitted rows.
+        metric: ``"tanimoto"`` assigns each row to the center with the highest
+            continuous Tanimoto ``x.c / (|x| + |c|^2 - x.c)``. ``"cosine"``
+            minimizes squared Euclidean distance on L2-normalized bits.
+        init: ``"k-means++"`` (D^2 sampling, drawn in 64 batches so it costs
+            about one assignment pass instead of one scan per center),
+            ``"random"`` (distinct uniform rows), ``"maxmin"`` (MaxMin
+            diversity picks), or initial centers of shape
+            ``(n_clusters, num_words * 32)`` in unpacked bit space
+            (L2-normalized for ``metric="cosine"``).
+        n_init: Number of initializations; the run with the lowest inertia is
+            kept. Ignored when ``init`` is an array of centers.
+        max_iter: Maximum number of center updates per initialization.
+        tol: Stop when no label changes or when the relative decrease of the
+            inertia is at most ``tol``. ``tol=0`` runs exactly ``max_iter``
+            updates.
+        fit_size: Fit the centers on this many randomly sampled rows, then
+            label all rows against them. ``None`` fits on all rows.
+        random_state: Seed for the fit subsample and the initialization.
+        stream: CUDA stream to use. If None, uses the current stream.
+
+    Returns:
+        A :class:`KMeansResult`.
+    """
+    if metric not in _KMEANS_METRICS:
+        raise ValueError(f"metric must be one of {list(_KMEANS_METRICS)}, got {metric!r}")
+    if n_clusters < 1:
+        raise ValueError(f"n_clusters must be positive, got {n_clusters}")
+    if n_init < 1:
+        raise ValueError(f"n_init must be positive, got {n_init}")
+    if max_iter < 0 or tol < 0:
+        raise ValueError("max_iter and tol must be non-negative")
+    if fit_size is not None and fit_size < n_clusters:
+        raise ValueError(f"fit_size must be at least n_clusters ({n_clusters}), got {fit_size}")
+    (x,), active_stream = _prepare_packed_fingerprints(("x", x), stream=stream)
+    num_rows = x.shape[0]
+    num_bits = x.shape[1] * 32
+    if n_clusters > num_rows:
+        raise ValueError(f"n_clusters ({n_clusters}) must not exceed the number of fingerprints ({num_rows})")
+    base_seed = int(np.random.SeedSequence(random_state).generate_state(1, np.uint64)[0])
+
+    with torch.cuda.stream(active_stream):
+        fit = x
+        if fit_size is not None and fit_size < num_rows:
+            generator = torch.Generator(device=x.device)
+            generator.manual_seed(base_seed & 0x7FFFFFFFFFFFFFFF)
+            rows = torch.randperm(num_rows, generator=generator, device=x.device)[:fit_size]
+            fit = x.view(torch.int32)[rows].view(torch.uint32).contiguous()
+
+        given_centers = None
+        if not isinstance(init, str):
+            given_centers = _as_cuda_tensor("init", init, stream=active_stream).to(torch.float32).contiguous()
+            if given_centers.shape != (n_clusters, num_bits):
+                raise ValueError(f"init must have shape {(n_clusters, num_bits)}, got {tuple(given_centers.shape)}")
+            if metric == "cosine":
+                norms = given_centers.norm(dim=1, keepdim=True).clamp_min(torch.finfo(torch.float32).tiny)
+                given_centers = given_centers / norms
+            n_init = 1
+        elif init not in _KMEANS_INITS:
+            raise ValueError(f"init must be one of {list(_KMEANS_INITS)} or an array, got {init!r}")
+
+        best = None
+        for run in range(n_init):
+            seed = (base_seed + 0x9E3779B97F4A7C15 * run) & 0xFFFFFFFFFFFFFFFF
+            run_centers = given_centers
+            if isinstance(init, str) and init == "k-means++":
+                run_centers = _batched_kmeanspp_centers(fit, n_clusters, metric, seed, active_stream)
+            labels, centers, sizes, inertia, n_iter, _ = _clustering.kmeans_fit(
+                fit.__cuda_array_interface__,
+                None if run_centers is None else run_centers.__cuda_array_interface__,
+                init if run_centers is None else "random",
+                n_clusters,
+                metric,
+                max_iter,
+                tol,
+                seed,
+                active_stream.cuda_stream,
+            )
+            del run_centers
+            if best is None or inertia < best[3]:
+                best = (labels, centers, sizes, inertia, n_iter)
+        labels, centers, sizes, inertia, n_iter = best
+        labels = torch.as_tensor(labels, device=x.device)
+        centers = torch.as_tensor(centers, device=x.device)
+        sizes = torch.as_tensor(sizes, device=x.device)
+        if fit is not x:
+            labels, _ = _clustering.kmeans_assign(
+                x.__cuda_array_interface__,
+                centers.__cuda_array_interface__,
+                n_clusters,
+                metric,
+                active_stream.cuda_stream,
+            )
+            labels = torch.as_tensor(labels, device=x.device)
+            sizes = torch.bincount(labels.to(torch.int64), minlength=n_clusters)
+        return KMeansResult(
+            AsyncGpuResult(labels), AsyncGpuResult(centers), AsyncGpuResult(sizes), float(inertia), int(n_iter)
+        )
