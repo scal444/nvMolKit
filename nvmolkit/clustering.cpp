@@ -209,6 +209,19 @@ nvMolKit::KMeansInit parseKMeansInit(const std::string& init) {
   throw std::invalid_argument("init must be one of ['random', 'maxmin']");
 }
 
+nvMolKit::KMeansAssignKernel parseKMeansKernel(const std::string& kernel) {
+  if (kernel == "auto") {
+    return nvMolKit::KMeansAssignKernel::Auto;
+  }
+  if (kernel == "mma") {
+    return nvMolKit::KMeansAssignKernel::Mma;
+  }
+  if (kernel == "umma") {
+    return nvMolKit::KMeansAssignKernel::Umma;
+  }
+  throw std::invalid_argument("kernel must be one of ['auto', 'mma', 'umma']");
+}
+
 //! Device pointer of a float32 (numClusters, numBits) center matrix.
 const float* parseCenters(const boost::python::dict& centers, const int numClusters, const int numBits) {
   boost::python::tuple shape = boost::python::extract<boost::python::tuple>(centers["shape"]);
@@ -616,6 +629,7 @@ BOOST_PYTHON_MODULE(_clustering) {
         const int                    maxIter,
         const double                 tol,
         const std::uint64_t          seed,
+        const std::string&           kernel,
         const std::uintptr_t         streamPtr) {
       const auto              stream = requireStream(streamPtr);
       const auto              input  = parseFingerprints(fingerprints);
@@ -624,6 +638,7 @@ BOOST_PYTHON_MODULE(_clustering) {
       options.metric      = parseKMeansMetric(metric);
       options.maxIter     = maxIter;
       options.tol         = tol;
+      options.kernel      = parseKMeansKernel(kernel);
       nvMolKit::AsyncDeviceVector<float> initial;
       if (centers.is_none()) {
         // Initialize here so the fit adopts the initial centers instead of copying them (k x bits x 4 bytes).
@@ -665,6 +680,7 @@ BOOST_PYTHON_MODULE(_clustering) {
      boost::python::arg("max_iter"),
      boost::python::arg("tol"),
      boost::python::arg("seed"),
+     boost::python::arg("kernel"),
      boost::python::arg("stream")));
 
   boost::python::def(
@@ -673,6 +689,7 @@ BOOST_PYTHON_MODULE(_clustering) {
         const boost::python::dict& centers,
         const int                  numClusters,
         const std::string&         metric,
+        const std::string&         kernel,
         const std::uintptr_t       streamPtr) {
       const auto                         stream = requireStream(streamPtr);
       const auto                         input  = parseFingerprints(fingerprints);
@@ -684,6 +701,7 @@ BOOST_PYTHON_MODULE(_clustering) {
                                 parseCenters(centers, numClusters, input.numWords * 32),
                                 numClusters,
                                 parseKMeansMetric(metric),
+                                parseKMeansKernel(kernel),
                                 labels.data(),
                                 distances.data(),
                                 stream);
@@ -694,5 +712,6 @@ BOOST_PYTHON_MODULE(_clustering) {
      boost::python::arg("centers"),
      boost::python::arg("n_clusters"),
      boost::python::arg("metric"),
+     boost::python::arg("kernel"),
      boost::python::arg("stream")));
 }

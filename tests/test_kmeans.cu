@@ -11,6 +11,7 @@
 #include <numeric>
 #include <random>
 #include <set>
+#include <string>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -22,6 +23,7 @@
 namespace {
 
 using nvMolKit::AsyncDeviceVector;
+using nvMolKit::KMeansAssignKernel;
 using nvMolKit::KMeansMetric;
 
 template <typename T> AsyncDeviceVector<T> upload(const std::vector<T>& host, cudaStream_t stream) {
@@ -113,6 +115,7 @@ std::vector<int> assignAndCheck(const std::vector<std::uint32_t>& packed,
                                 const int                         words,
                                 const int                         clusters,
                                 const KMeansMetric                metric,
+                                const KMeansAssignKernel          kernel,
                                 cudaStream_t                      stream) {
   auto                     devicePacked  = upload(packed, stream);
   auto                     deviceCenters = upload(centers, stream);
@@ -124,6 +127,7 @@ std::vector<int> assignAndCheck(const std::vector<std::uint32_t>& packed,
                             deviceCenters.data(),
                             clusters,
                             metric,
+                            kernel,
                             labels.data(),
                             distances.data(),
                             stream);
@@ -162,12 +166,24 @@ void plantRow(std::vector<float>&               centers,
   }
 }
 
-class KMeansAssignTest : public ::testing::TestWithParam<std::tuple<KMeansMetric, int, int, int>> {};
+//! Why kernel cannot run on this GPU and build, or an empty string when it can.
+std::string unsupportedReason(const KMeansAssignKernel kernel) {
+  if (kernel == KMeansAssignKernel::Umma && !nvMolKit::detail::ummaSupported(64)) {
+    return "tcgen05 kernel needs an sm_100 / sm_103 GPU and a build that targets it";
+  }
+  if (kernel != KMeansAssignKernel::Umma && !nvMolKit::detail::mmaSupported(64)) {
+    return "k-means needs an sm_80 or newer GPU";
+  }
+  return "";
+}
+
+class KMeansAssignTest : public ::testing::TestWithParam<std::tuple<KMeansMetric, KMeansAssignKernel, int, int, int>> {
+};
 
 TEST_P(KMeansAssignTest, MatchesReference) {
-  const auto [metric, rows, words, clusters] = GetParam();
-  if (!nvMolKit::detail::mmaSupported(64)) {
-    GTEST_SKIP() << "k-means needs an sm_80 or newer GPU";
+  const auto [metric, kernel, rows, words, clusters] = GetParam();
+  if (const auto reason = unsupportedReason(kernel); !reason.empty()) {
+    GTEST_SKIP() << reason;
   }
   const nvMolKit::ScopedStream streamOwner;
   const auto                   stream = streamOwner.stream();
@@ -209,20 +225,22 @@ TEST_P(KMeansAssignTest, MatchesReference) {
   for (const auto& [row, center] : planted) {
     plantRow(centers, packed, words, center, row, metric);
   }
-  const auto labels = assignAndCheck(packed, centers, rows, words, clusters, metric, stream);
+  const auto labels = assignAndCheck(packed, centers, rows, words, clusters, metric, kernel, stream);
   for (const auto& [row, center] : planted) {
     EXPECT_EQ(labels[row], center) << "row " << row;
   }
 }
 
-INSTANTIATE_TEST_SUITE_P(KMeans,
-                         KMeansAssignTest,
-                         ::testing::Combine(::testing::Values(KMeansMetric::Cosine, KMeansMetric::Tanimoto),
-                                            ::testing::Values(130),
-                                            ::testing::Values(1, 9, 32, 67),
-                                            ::testing::Values(1, 5, 130, 257, 513)));
+INSTANTIATE_TEST_SUITE_P(
+  KMeans,
+  KMeansAssignTest,
+  ::testing::Combine(::testing::Values(KMeansMetric::Cosine, KMeansMetric::Tanimoto),
+                     ::testing::Values(KMeansAssignKernel::Auto, KMeansAssignKernel::Mma, KMeansAssignKernel::Umma),
+                     ::testing::Values(130),
+                     ::testing::Values(1, 9, 32, 67),
+                     ::testing::Values(1, 5, 130, 257, 513)));
 
-class KMeansAssignTieTest : public ::testing::TestWithParam<KMeansMetric> {};
+class KMeansAssignTieTest : public ::testing::TestWithParam<std::tuple<KMeansMetric, KMeansAssignKernel>> {};
 
 // Center i is a copy of distinct center (i % 64) / 4, and distinct center 0 is all zeros. Each distinct center so
 // appears at offsets that are resolved by every stage of the kernel's argmax: +1 (same thread), +2 (another lane of the
@@ -230,9 +248,9 @@ class KMeansAssignTieTest : public ::testing::TestWithParam<KMeansMetric> {};
 // row must take the lowest copy, an index below 64 that is a multiple of 4; the two empty rows score best against the
 // zero center (Tanimoto 1 by convention, cosine 0 against negative scores) and must take center 0.
 TEST_P(KMeansAssignTieTest, LowestIndexWinsTies) {
-  const KMeansMetric metric = GetParam();
-  if (!nvMolKit::detail::mmaSupported(64)) {
-    GTEST_SKIP() << "k-means needs an sm_80 or newer GPU";
+  const auto [metric, kernel] = GetParam();
+  if (const auto reason = unsupportedReason(kernel); !reason.empty()) {
+    GTEST_SKIP() << reason;
   }
   const nvMolKit::ScopedStream streamOwner;
   const auto                   stream   = streamOwner.stream();
@@ -257,7 +275,7 @@ TEST_P(KMeansAssignTieTest, LowestIndexWinsTies) {
               centers.begin() + static_cast<std::ptrdiff_t>(center) * bits);
   }
 
-  const auto labels = assignAndCheck(packed, centers, rows, words, clusters, metric, stream);
+  const auto labels = assignAndCheck(packed, centers, rows, words, clusters, metric, kernel, stream);
   EXPECT_EQ(labels[0], 0);
   EXPECT_EQ(labels[1], 0);
   for (int row = 0; row < rows; ++row) {
@@ -266,12 +284,16 @@ TEST_P(KMeansAssignTieTest, LowestIndexWinsTies) {
   }
 }
 
-INSTANTIATE_TEST_SUITE_P(KMeans, KMeansAssignTieTest, ::testing::Values(KMeansMetric::Cosine, KMeansMetric::Tanimoto));
+INSTANTIATE_TEST_SUITE_P(
+  KMeans,
+  KMeansAssignTieTest,
+  ::testing::Combine(::testing::Values(KMeansMetric::Cosine, KMeansMetric::Tanimoto),
+                     ::testing::Values(KMeansAssignKernel::Auto, KMeansAssignKernel::Mma, KMeansAssignKernel::Umma)));
 
 // A build without sm_80+ code for this device (for example CMAKE_CUDA_ARCHITECTURES=75 on an sm_80+ GPU) has only the
 // kernel stub; assignment must report that instead of launching it.
 TEST(KMeansAssign, ThrowsWithoutUsableKernel) {
-  if (nvMolKit::detail::mmaSupported(64)) {
+  if (nvMolKit::detail::mmaSupported(64) || nvMolKit::detail::ummaSupported(64)) {
     GTEST_SKIP() << "this build has a usable k-means kernel for this GPU";
   }
   const nvMolKit::ScopedStream streamOwner;
@@ -286,6 +308,7 @@ TEST(KMeansAssign, ThrowsWithoutUsableKernel) {
                                          centers.data(),
                                          2,
                                          KMeansMetric::Tanimoto,
+                                         KMeansAssignKernel::Auto,
                                          labels.data(),
                                          distances.data(),
                                          stream),
@@ -306,6 +329,7 @@ TEST(KMeansAssign, RejectsInvalidArguments) {
                                          centers.data(),
                                          2,
                                          KMeansMetric::Tanimoto,
+                                         KMeansAssignKernel::Auto,
                                          labels.data(),
                                          distances.data(),
                                          stream),
@@ -316,6 +340,7 @@ TEST(KMeansAssign, RejectsInvalidArguments) {
                                          centers.data(),
                                          0,
                                          KMeansMetric::Tanimoto,
+                                         KMeansAssignKernel::Auto,
                                          labels.data(),
                                          distances.data(),
                                          stream),
