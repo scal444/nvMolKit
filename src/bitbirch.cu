@@ -587,27 +587,56 @@ __device__ int2 pairFromOrder(const std::uint32_t order, const int size) {
   return make_int2(lhs, lhs + 1 + static_cast<int>(remaining));
 }
 
+//! Entries of a splitting node that splitPlansKernel keeps in shared memory; wider nodes use global scratch.
+constexpr int kSplitSharedEntries = 4096;
+
+//! Shared copies of a splitting node's entries and their sides, for up to capacity entries.
+struct SplitScratch {
+  int*         entries;
+  std::int8_t* sides;
+  int          capacity;
+};
+
+//! Lays a SplitScratch over bytes of shared memory.
+__device__ __forceinline__ SplitScratch splitScratchOver(unsigned char* bytes, const std::size_t numBytes) {
+  const int capacity = static_cast<int>(numBytes / (sizeof(int) + sizeof(std::int8_t)));
+  return {reinterpret_cast<int*>(bytes), reinterpret_cast<std::int8_t*>(bytes + sizeof(int) * capacity), capacity};
+}
+
 // Splits size entries around the seeds at lhsSeed and rhsSeed: each other entry,
 // in order, joins the seed it is more similar to (the smaller half on ties),
 // while neither half exceeds (size + 1) / 2. Writes the left half, then the
-// right half, to plan and returns the left size. sides holds size bytes.
-__device__ int partitionEntries(const Tree&  tree,
-                                const int*   entries,
-                                const int    size,
-                                const int    lhsSeed,
-                                const int    rhsSeed,
-                                int*         plan,
-                                std::int8_t* sides,
-                                Scratch&     scratch) {
+// right half, to plan and returns the left size. sides holds size bytes; it and
+// the entries are read from split instead when they fit.
+__device__ int partitionEntries(const Tree&         tree,
+                                const int*          entries,
+                                const int           size,
+                                const int           lhsSeed,
+                                const int           rhsSeed,
+                                int*                plan,
+                                std::int8_t*        sides,
+                                const SplitScratch& split,
+                                Scratch&            scratch) {
+  const bool cached = size <= split.capacity;
+  if (cached) {
+    sides = split.sides;
+  }
   const std::uint32_t* lhsCentroid = centroidOf(tree, entries[lhsSeed]);
   const std::uint32_t* rhsCentroid = centroidOf(tree, entries[rhsSeed]);
   for (int position = threadIdx.x; position < size; position += kBlockSize) {
-    const std::uint32_t* centroid = centroidOf(tree, entries[position]);
+    const int entry = entries[position];
+    if (cached) {
+      split.entries[position] = entry;
+    }
+    const std::uint32_t* centroid = centroidOf(tree, entry);
     const int2           lhs      = popcounts(centroid, lhsCentroid, tree.numWords);
     const int2           rhs      = popcounts(centroid, rhsCentroid, tree.numWords);
     const float          lhsValue = similarity(lhs.x, lhs.y);
     const float          rhsValue = similarity(rhs.x, rhs.y);
     sides[position]               = static_cast<std::int8_t>((lhsValue > rhsValue) - (lhsValue < rhsValue));
+  }
+  if (cached) {
+    entries = split.entries;
   }
   __syncthreads();
   if (threadIdx.x == 0) {
@@ -1287,6 +1316,9 @@ __global__ void splitPlansKernel(const Tree          tree,
                                  int*                leftSizes,
                                  std::int8_t*        sides) {
   __shared__ Scratch scratch;
+  __shared__ int     cachedEntries[kSplitSharedEntries];
+  __shared__ std::int8_t cachedSides[kSplitSharedEntries];
+  SplitScratch           split{cachedEntries, cachedSides, kSplitSharedEntries};
   if (static_cast<int>(blockIdx.x) >= *splitCount) {
     return;
   }
@@ -1300,6 +1332,7 @@ __global__ void splitPlansKernel(const Tree          tree,
                                     seeds.y,
                                     plans + static_cast<std::size_t>(index) * tree.stride,
                                     sides + static_cast<std::size_t>(blockIdx.x) * tree.stride,
+                                    split,
                                     scratch);
   if (threadIdx.x == 0) {
     leftSizes[index] = left;
@@ -1310,18 +1343,19 @@ __global__ void splitPlansKernel(const Tree          tree,
 // Applies the split of the overflowing leaf at index of the sorted batch, and
 // any parent splits it cascades into. The leaf halves' summaries are deferred.
 template <int TileSize>
-__device__ __forceinline__ void splitLeaf(const Tree&    tree,
-                                          const int      index,
-                                          const int*     keys,
-                                          const int*     plans,
-                                          const int*     leftSizes,
-                                          int*           innerPlan,
-                                          std::int8_t*   sides,
-                                          int*           deferredNodes,
-                                          int*           deferredEntries,
-                                          int&           deferred,
-                                          unsigned char* shared,
-                                          Scratch&       scratch) {
+__device__ __forceinline__ void splitLeaf(const Tree&         tree,
+                                          const int           index,
+                                          const int*          keys,
+                                          const int*          plans,
+                                          const int*          leftSizes,
+                                          int*                innerPlan,
+                                          std::int8_t*        sides,
+                                          int*                deferredNodes,
+                                          int*                deferredEntries,
+                                          int&                deferred,
+                                          unsigned char*      shared,
+                                          const SplitScratch& split,
+                                          Scratch&            scratch) {
   int        node     = keys[index];
   const int* plan     = plans + static_cast<std::size_t>(index) * tree.stride;
   int        leftSize = leftSizes[index];
@@ -1364,8 +1398,9 @@ __device__ __forceinline__ void splitLeaf(const Tree&    tree,
       best             = min(best, tilePairsMin<TileSize>(tree, entries, size, tiles.x, tiles.y, shared));
     }
     const int2 seeds = pairFromOrder(static_cast<std::uint32_t>(blockMin(best, scratch)), size);
-    leftSize         = partitionEntries(tree, entries, size, seeds.x, seeds.y, innerPlan, sides, scratch);
-    plan             = innerPlan;
+    leftSize         = partitionEntries(tree, entries, size, seeds.x, seeds.y, innerPlan, sides, split, scratch);
+    __syncthreads();  // The split scratch over the pair cache has been read before the next pair search.
+    plan = innerPlan;
   }
 }
 
@@ -1383,11 +1418,14 @@ __global__ void repairKernel(const Tree   tree,
                              std::int8_t* sides,
                              int*         deferredNodes,
                              int*         deferredEntries,
-                             int*         numDeferred) {
+                             int*         numDeferred,
+                             const int    pairCacheBytes) {
   extern __shared__ uint4 dynamicShared[];
   __shared__ Scratch      scratch;
   __shared__ int          queue[kBlockSize];
   __shared__ int          warpOffsets[kNumWarps + 1];
+  // The pair cache is idle while an overflowing parent's entries are partitioned.
+  const SplitScratch      split    = splitScratchOver(reinterpret_cast<unsigned char*>(dynamicShared), pairCacheBytes);
   int                     deferred = 0;
   for (int base = 0; base < count; base += kBlockSize) {
     // A leaf changes size only through its own split, so the chunk's overflowing
@@ -1425,6 +1463,7 @@ __global__ void repairKernel(const Tree   tree,
                           deferredEntries,
                           deferred,
                           reinterpret_cast<unsigned char*>(dynamicShared),
+                          split,
                           scratch);
     }
   }
@@ -1800,7 +1839,8 @@ class TreeBuilder {
                                                                     sides_.data(),
                                                                     deferredNodes_.data(),
                                                                     deferredEntries_.data(),
-                                                                    numDeferred_.data());
+                                                                    numDeferred_.data(),
+                                                                    static_cast<int>(pairShared_));
     cudaCheckError(cudaGetLastError());
   }
 
