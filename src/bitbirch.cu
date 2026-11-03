@@ -90,16 +90,27 @@ struct Tree {
   int                  maxSlots;
 };
 
-using IntegerReduce = cub::BlockReduce<unsigned long long, kBlockSize>;
-using TermsReduce   = cub::BlockReduce<bitbirch::ISimTanimotoTerms, kBlockSize>;
+//! iSIM Jaccard--Tanimoto terms as exact 64-bit integers; see passesThreshold for when they apply.
+struct IntegerTerms {
+  unsigned long long commonPairs = 0;
+  unsigned long long mismatches  = 0;
+};
+
+//! Largest member count whose integer iSIM terms cannot overflow: 4096 bits of count^2 / 4 each stay below 2^62.
+constexpr std::uint64_t kMaxIntegerTermsCount = std::uint64_t{1} << 26;
+
+using IntegerReduce  = cub::BlockReduce<unsigned long long, kBlockSize>;
+using TermsReduce    = cub::BlockReduce<bitbirch::ISimTanimotoTerms, kBlockSize>;
+using IntTermsReduce = cub::BlockReduce<IntegerTerms, kBlockSize>;
 
 //! Per-block scratch for reductions and broadcasts.
 struct Scratch {
   const std::uint32_t* rows[kBlockSize];  //!< Row pointers resolved for one chunk of addRows.
   bool                 rowIsSums[kBlockSize];
   union {
-    IntegerReduce::TempStorage integers;
-    TermsReduce::TempStorage   terms;
+    IntegerReduce::TempStorage  integers;
+    TermsReduce::TempStorage    terms;
+    IntTermsReduce::TempStorage intTerms;
   } reduce;
   unsigned long long reduced;  //!< Result of the last blockReduce.
   int                broadcast[3];
@@ -289,28 +300,52 @@ __device__ void storeEntry(const Tree&         tree,
 }
 
 // Whether a cluster with these per-bit sums and count members passes the iSIM
-// threshold. Every iSIM term is an integer, so FP64 sums are exact while they
-// stay below 2^53, and the fixed reduction order keeps larger sums deterministic.
+// threshold. Every iSIM term is an integer. Up to kMaxIntegerTermsCount members
+// they are summed exactly in 64-bit integers, which is also exactly what the
+// FP64 sums give while they stay below 2^53; larger clusters take the FP64 path,
+// whose fixed reduction order keeps the sums deterministic.
 __device__ bool passesThreshold(const Tree&         tree,
                                 const Bits&         bits,
                                 const std::uint64_t count,
                                 const double        threshold,
                                 Scratch&            scratch) {
-  bitbirch::ISimTanimotoTerms terms{};
-#pragma unroll
-  for (int part = 0; part < kBitParts; ++part) {
-    if (part * kBlockSize + static_cast<int>(threadIdx.x) < tree.numBits) {
-      bitbirch::accumulateISimTanimotoTerm(terms, bits.parts[part], count);
-    }
-  }
   __syncthreads();  // Earlier users of the reduction storage are done.
-  const auto total =
-    TermsReduce(scratch.reduce.terms)
-      .Reduce(terms, [](const bitbirch::ISimTanimotoTerms& lhs, const bitbirch::ISimTanimotoTerms& rhs) {
-        return bitbirch::ISimTanimotoTerms{lhs.commonPairs + rhs.commonPairs, lhs.mismatches + rhs.mismatches};
+  if (count <= kMaxIntegerTermsCount) {
+    IntegerTerms terms{};
+#pragma unroll
+    for (int part = 0; part < kBitParts; ++part) {
+      if (part * kBlockSize + static_cast<int>(threadIdx.x) < tree.numBits) {
+        const unsigned long long componentCount = bits.parts[part];
+        terms.commonPairs += componentCount * (componentCount - 1) / 2;
+        terms.mismatches += componentCount * (count - componentCount);
+      }
+    }
+    const auto total =
+      IntTermsReduce(scratch.reduce.intTerms).Reduce(terms, [](const IntegerTerms& lhs, const IntegerTerms& rhs) {
+        return IntegerTerms{lhs.commonPairs + rhs.commonPairs, lhs.mismatches + rhs.mismatches};
       });
-  if (threadIdx.x == 0) {
-    scratch.broadcast[1] = bitbirch::isimTanimotoAtLeast(total, count, threshold);
+    if (threadIdx.x == 0) {
+      scratch.broadcast[1] =
+        bitbirch::isimTanimotoAtLeast({static_cast<double>(total.commonPairs), static_cast<double>(total.mismatches)},
+                                      count,
+                                      threshold);
+    }
+  } else {
+    bitbirch::ISimTanimotoTerms terms{};
+#pragma unroll
+    for (int part = 0; part < kBitParts; ++part) {
+      if (part * kBlockSize + static_cast<int>(threadIdx.x) < tree.numBits) {
+        bitbirch::accumulateISimTanimotoTerm(terms, bits.parts[part], count);
+      }
+    }
+    const auto total =
+      TermsReduce(scratch.reduce.terms)
+        .Reduce(terms, [](const bitbirch::ISimTanimotoTerms& lhs, const bitbirch::ISimTanimotoTerms& rhs) {
+          return bitbirch::ISimTanimotoTerms{lhs.commonPairs + rhs.commonPairs, lhs.mismatches + rhs.mismatches};
+        });
+    if (threadIdx.x == 0) {
+      scratch.broadcast[1] = bitbirch::isimTanimotoAtLeast(total, count, threshold);
+    }
   }
   __syncthreads();
   return scratch.broadcast[1] != 0;
