@@ -803,6 +803,8 @@ constexpr int         kOwnerBatch         = 16;
 constexpr std::size_t kOwnerScratchBytes  = std::size_t{128} << 20;
 //! Leaf positions whose entry metadata a leaf owner keeps in shared memory; later positions read the tree.
 constexpr int         kOwnerMetaPositions = 2048;
+//! Leaf positions each thread of a leaf owner counts at once.
+constexpr int         kOwnerPositions     = 2;
 
 //! Intersection and union popcounts packed in one word; both are at most 4096.
 __device__ __forceinline__ std::uint32_t packCounts(const int intersection, const int unionCount) {
@@ -939,40 +941,90 @@ __device__ bool insertRows(const Tree&    tree,
     }
   }
   int size = tree.nodeSize[node];
-  // One thread per position reads its centroid once for every row.
-  for (int position = threadIdx.x; position < size; position += kBlockSize) {
-    const std::uint32_t* centroid = centroidOfReference(tree, readPosition(tree, entries, batch, position).ref);
-    int                  intersections[kOwnerBatch] = {};
-    int                  centroidBits               = 0;
-    const auto           countWord                  = [&](const std::uint32_t value, const int word) {
-      centroidBits += __popc(value);
+  // Each thread counts kOwnerPositions positions at once against every row:
+  // a query word read from shared memory serves all of them.
+  for (int base = 0; base < size; base += kOwnerPositions * kBlockSize) {
+    const std::uint32_t* centroids[kOwnerPositions];
+    bool                 vectors = numWords % 4 == 0;
+#pragma unroll
+    for (int slot = 0; slot < kOwnerPositions; ++slot) {
+      const int position = base + slot * kBlockSize + static_cast<int>(threadIdx.x);
+      centroids[slot] =
+        position < size ? centroidOfReference(tree, readPosition(tree, entries, batch, position).ref) : nullptr;
+      vectors = vectors && (centroids[slot] == nullptr || isVectorAligned(centroids[slot]));
+    }
+    int        intersections[kOwnerPositions][kOwnerBatch] = {};
+    int        centroidBits[kOwnerPositions]               = {};
+    const auto countWords = [&](const std::uint32_t(&words)[kOwnerPositions], const int word) {
 #pragma unroll
       for (int query = 0; query < kOwnerBatch; ++query) {
         if (query < width) {
-          intersections[query] += __popc(value & batch.queries[query][word]);
+          const std::uint32_t queryWord = batch.queries[query][word];
+#pragma unroll
+          for (int slot = 0; slot < kOwnerPositions; ++slot) {
+            intersections[slot][query] += __popc(words[slot] & queryWord);
+          }
         }
       }
+#pragma unroll
+      for (int slot = 0; slot < kOwnerPositions; ++slot) {
+        centroidBits[slot] += __popc(words[slot]);
+      }
     };
-    if (numWords % 4 == 0 && isVectorAligned(centroid)) {
-      // 16-byte loads, as many in flight as possible: only this thread reads the row.
-#pragma unroll 16
+    if (vectors) {
+      // 16-byte loads of every position in flight together: only this thread reads these rows.
+#pragma unroll 4
       for (int vector = 0; vector < numWords / 4; ++vector) {
-        const uint4 value = reinterpret_cast<const uint4*>(centroid)[vector];
-        countWord(value.x, 4 * vector);
-        countWord(value.y, 4 * vector + 1);
-        countWord(value.z, 4 * vector + 2);
-        countWord(value.w, 4 * vector + 3);
+        uint4 values[kOwnerPositions];
+#pragma unroll
+        for (int slot = 0; slot < kOwnerPositions; ++slot) {
+          values[slot] = centroids[slot] != nullptr ? reinterpret_cast<const uint4*>(centroids[slot])[vector] :
+                                                      make_uint4(0, 0, 0, 0);
+        }
+        std::uint32_t words[kOwnerPositions];
+#pragma unroll
+        for (int slot = 0; slot < kOwnerPositions; ++slot) {
+          words[slot] = values[slot].x;
+        }
+        countWords(words, 4 * vector);
+#pragma unroll
+        for (int slot = 0; slot < kOwnerPositions; ++slot) {
+          words[slot] = values[slot].y;
+        }
+        countWords(words, 4 * vector + 1);
+#pragma unroll
+        for (int slot = 0; slot < kOwnerPositions; ++slot) {
+          words[slot] = values[slot].z;
+        }
+        countWords(words, 4 * vector + 2);
+#pragma unroll
+        for (int slot = 0; slot < kOwnerPositions; ++slot) {
+          words[slot] = values[slot].w;
+        }
+        countWords(words, 4 * vector + 3);
       }
     } else {
       for (int word = 0; word < numWords; ++word) {
-        countWord(centroid[word], word);
+        std::uint32_t words[kOwnerPositions];
+#pragma unroll
+        for (int slot = 0; slot < kOwnerPositions; ++slot) {
+          words[slot] = centroids[slot] != nullptr ? centroids[slot][word] : 0U;
+        }
+        countWords(words, word);
       }
     }
 #pragma unroll
-    for (int query = 0; query < kOwnerBatch; ++query) {
-      if (query < width) {
-        counts[query * tree.stride + position] =
-          packCounts(intersections[query], centroidBits + batch.queryBits[query] - intersections[query]);
+    for (int slot = 0; slot < kOwnerPositions; ++slot) {
+      const int position = base + slot * kBlockSize + static_cast<int>(threadIdx.x);
+      if (position < size) {
+#pragma unroll
+        for (int query = 0; query < kOwnerBatch; ++query) {
+          if (query < width) {
+            counts[query * tree.stride + position] =
+              packCounts(intersections[slot][query],
+                         centroidBits[slot] + batch.queryBits[query] - intersections[slot][query]);
+          }
+        }
       }
     }
   }
