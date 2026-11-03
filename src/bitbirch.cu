@@ -636,12 +636,9 @@ __global__ void initializeKernel(Tree tree) {
 // One block per batch row: descend the tree snapshot to a leaf. Groups also
 // test the leaf's closest entry, so rows that would each merge into the same
 // entry can be merged together.
-__global__ void routeKernel(const Tree   tree,
-                            const bool   groups,
-                            const double threshold,
-                            int*         leafKeys,
-                            int*         groupKeys,
-                            int*         values) {
+// Four resident blocks per SM: the leaf scan is latency bound, so occupancy matters more than registers.
+__global__ void __launch_bounds__(kBlockSize, 4)
+  routeKernel(const Tree tree, const bool groups, const double threshold, int* leafKeys, int* groupKeys, int* values) {
   __shared__ Scratch scratch;
   const int          offset = blockIdx.x;
   const int          row    = tree.batchBegin + offset;
