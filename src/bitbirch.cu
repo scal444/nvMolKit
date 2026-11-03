@@ -94,6 +94,7 @@ struct Tree {
   int*                 entrySlot;
   int*                 entryRow;
   int*                 entryFirst;  //!< Earliest member row; the cluster ID after finalization.
+  int*                 entryStamp;  //!< Round in which grouped rows last merged into the entry.
   std::uint32_t*       sums;
   std::uint32_t*       centroids;
   int*                 root;
@@ -572,13 +573,24 @@ __device__ int blockArgMax(const float value, const int index, Scratch& scratch)
   return best == 0 ? -1 : static_cast<int>(0xffffffffU - static_cast<std::uint32_t>(best));
 }
 
+//! Intersection and union popcounts packed in one word; both are at most 4096.
+__device__ __forceinline__ std::uint32_t packCounts(const int intersection, const int unionCount) {
+  return static_cast<std::uint32_t>(intersection) | static_cast<std::uint32_t>(unionCount) << 16;
+}
+
+__device__ __forceinline__ float packedSimilarity(const std::uint32_t counts) {
+  return similarity(static_cast<int>(counts & 0xffffU), static_cast<int>(counts >> 16));
+}
+
 // Position of the entry most similar to query, the first one on ties, or -1 for
 // an empty list. Groups of kLanesPerEntry lanes read one centroid together.
+// When counts is given, every position's packed counts are written to it.
 __device__ int closestEntry(const Tree&          tree,
                             const int*           entries,
                             const int            numEntries,
                             const std::uint32_t* query,
-                            Scratch&             scratch) {
+                            Scratch&             scratch,
+                            std::uint32_t*       countsRow = nullptr) {
   const int      lane      = threadIdx.x % 32;
   const int      member    = threadIdx.x % kLanesPerEntry;
   const unsigned groupMask = ((1U << kLanesPerEntry) - 1U) << (lane - member);
@@ -589,6 +601,9 @@ __device__ int closestEntry(const Tree&          tree,
     for (int offset = kLanesPerEntry / 2; offset > 0; offset /= 2) {
       counts.x += __shfl_xor_sync(groupMask, counts.x, offset, kLanesPerEntry);
       counts.y += __shfl_xor_sync(groupMask, counts.y, offset, kLanesPerEntry);
+    }
+    if (countsRow != nullptr && member == 0) {
+      countsRow[position] = packCounts(counts.x, counts.y);
     }
     // Each group visits ascending positions, so a strict comparison keeps the first tie.
     const float value = similarity(counts.x, counts.y);
@@ -906,12 +921,18 @@ __global__ void initializeKernel(Tree tree) {
   *tree.root        = allocateNode(tree, true, -1);
 }
 
-// One block per batch row: descend the tree snapshot to a leaf. Groups also
-// test the leaf's closest entry, so rows that would each merge into the same
-// entry can be merged together.
+// One block per batch row: descend the tree snapshot to a leaf, and count the
+// row against every entry of the leaf into its counts row (stride words), for
+// the leaf owners. Groups also test the leaf's closest entry, so rows that
+// would each merge into the same entry can be merged together.
 // Four resident blocks per SM: the leaf scan is latency bound, so occupancy matters more than registers.
-__global__ void __launch_bounds__(kBlockSize, 4)
-  routeKernel(const Tree tree, const bool groups, const double threshold, int* leafKeys, int* groupKeys, int* values) {
+__global__ void __launch_bounds__(kBlockSize, 4) routeKernel(const Tree     tree,
+                                                             const bool     groups,
+                                                             const double   threshold,
+                                                             int*           leafKeys,
+                                                             int*           groupKeys,
+                                                             int*           values,
+                                                             std::uint32_t* counts) {
   __shared__ Scratch scratch;
   const int          offset = blockIdx.x;
   const int          row    = tree.batchBegin + offset;
@@ -932,12 +953,21 @@ __global__ void __launch_bounds__(kBlockSize, 4)
   if (threadIdx.x == 0) {
     leafKeys[offset] = node;
   }
-  if (!groups || tree.nodeSize[node] == 0) {
+  if (tree.nodeSize[node] == 0) {
     return;
   }
-  const int* entries = entriesOf(tree, node);
-  const int  entry   = entries[closestEntry(tree, entries, tree.nodeSize[node], query, scratch)];
-  Bits       bits;
+  const int* entries  = entriesOf(tree, node);
+  const int  position = closestEntry(tree,
+                                    entries,
+                                    tree.nodeSize[node],
+                                    query,
+                                    scratch,
+                                    counts + static_cast<std::size_t>(offset) * tree.stride);
+  if (!groups) {
+    return;
+  }
+  const int entry = entries[position];
+  Bits      bits;
   addEntry(bits, tree, entry);
   addRow(bits, tree, query);
   if (passesThreshold(tree, bits, tree.entryCount[entry] + 1ULL, threshold, scratch) && threadIdx.x == 0) {
@@ -946,12 +976,14 @@ __global__ void __launch_bounds__(kBlockSize, 4)
 }
 
 // One block per run of rows sorted by the entry they each passed: merge the
-// whole run if the combined cluster passes, otherwise each row in order.
+// whole run if the combined cluster passes, otherwise each row in order. A
+// merged entry is stamped with the round, so leaf owners recount it.
 __global__ void groupsKernel(const Tree   tree,
                              const int    count,
                              const int*   keys,
                              const int*   values,
-                             const double threshold) {
+                             const double threshold,
+                             const int    stamp) {
   __shared__ Scratch scratch;
   const int          first = blockIdx.x;
   const int          entry = keys[first];
@@ -975,6 +1007,7 @@ __global__ void groupsKernel(const Tree   tree,
     }
     if (threadIdx.x == 0) {
       tree.entryFirst[entry] = min(tree.entryFirst[entry], tree.batchBegin + values[first]);
+      tree.entryStamp[entry] = stamp;
     }
     return;
   }
@@ -989,36 +1022,32 @@ __global__ void groupsKernel(const Tree   tree,
       if (threadIdx.x == 0) {
         tree.labels[row]       = entry;
         tree.entryFirst[entry] = min(tree.entryFirst[entry], row);
+        tree.entryStamp[entry] = stamp;
       }
     }
   }
 }
 
-//! Most pending rows a leaf owner compares with its leaf in one pass.
-constexpr int         kOwnerBatch         = 16;
-//! Device bytes for full-width leaf-owner counts; owners past them count one row at a time.
-constexpr std::size_t kOwnerScratchBytes  = std::size_t{128} << 20;
+//! Rows a leaf scan or leaf owner counts against a leaf in one pass.
+constexpr int kOwnerBatch         = 16;
 //! Leaf positions whose entry metadata a leaf owner keeps in shared memory; later positions read the tree.
-constexpr int         kOwnerMetaPositions = 2048;
-//! Leaf positions each thread of a leaf owner counts at once.
-constexpr int         kOwnerPositions     = 2;
-
-//! Intersection and union popcounts packed in one word; both are at most 4096.
-__device__ __forceinline__ std::uint32_t packCounts(const int intersection, const int unionCount) {
-  return static_cast<std::uint32_t>(intersection) | static_cast<std::uint32_t>(unionCount) << 16;
-}
-
-__device__ __forceinline__ float packedSimilarity(const std::uint32_t counts) {
-  return similarity(static_cast<int>(counts & 0xffffU), static_cast<int>(counts >> 16));
-}
+constexpr int kOwnerMetaPositions = 2048;
+//! Leaf positions each thread counts at once.
+constexpr int kOwnerPositions     = 2;
+//! Changed leaf positions a leaf owner lists for recounting before it recounts every position.
+constexpr int kOwnerChanged       = 1024;
 
 //! Rows of one leaf-owner batch, staged with their popcounts, plus the leaf's entry metadata.
 struct OwnerBatch {
   std::uint32_t      queries[kOwnerBatch][kBitBirchMaxWords];
   int                queryBits[kOwnerBatch];
+  int                offsets[kOwnerBatch];                  //!< Each row's offset in the batch: its counts row.
   std::uint32_t      queryPairs[kOwnerBatch][kOwnerBatch];  //!< Packed counts of rows [later][earlier].
   int                pending[kBlockSize];
   int                warpOffsets[kNumWarps + 1];
+  int                changed[kOwnerChanged];  //!< Positions whose counts the leaf scan did not see.
+  int                numChanged;
+  int                recountAll;  //!< Set once more positions changed than changed can list.
   // Entry metadata by leaf position: entry ID, member count, and the row of a
   // single-member entry or the bitwise complement of a summary slot.
   int                entry[kOwnerMetaPositions];
@@ -1027,9 +1056,17 @@ struct OwnerBatch {
   std::uint32_t      centroid[kBitBirchMaxWords];  //!< Centroid of the entry a row just merged into.
   unsigned long long warpKeys[2][kNumWarps];       //!< Closest-entry partials, alternating between rows.
   int                failed;                       //!< Whether the last row hit a capacity limit.
-  int                ownerIndex;                   //!< This owner's rank among the round's owners.
   int                reserved;                     //!< First of the entry IDs reserved for this batch of rows.
 };
+
+//! Notes that a position's entry changed after the leaf scan, for later batches of rows.
+__device__ __forceinline__ void markChanged(OwnerBatch& batch, const int position) {
+  if (batch.numChanged < kOwnerChanged) {
+    batch.changed[batch.numChanged++] = position;
+  } else {
+    batch.recountAll = 1;
+  }
+}
 
 struct PositionInfo {
   int           entry;
@@ -1073,82 +1110,29 @@ __device__ __forceinline__ void addReference(Bits& bits, const Tree& tree, const
   }
 }
 
-// Inserts width pending rows into the leaf in order, as if each searched the
-// leaf alone. One pass first counts every row against every leaf position into
-// counts (row-major, stride per row); a merge then recounts the merged position
-// for the later rows, and a new entry takes their counts against its row.
-// Returns whether the leaf overflowed or a capacity limit was hit, leaving the
-// remaining rows pending. The leaf's metadata in batch is kept current.
-__device__ bool insertRows(const Tree&    tree,
-                           const int      node,
-                           int*           entries,
-                           const int*     rows,
-                           const int      width,
-                           std::uint32_t* counts,
-                           const double   threshold,
-                           OwnerBatch&    batch,
-                           Scratch&       scratch) {
+// Counts width staged queries against numPositions leaf positions, two per
+// thread at once so a query word read from shared memory serves both, and
+// writes the packed counts to each row's counts row. positionAt(index) maps a
+// work index to a position; refOf(position) gives the entry's row or ~slot.
+template <typename PositionAt, typename RefOf>
+__device__ void countPositions(const Tree&       tree,
+                               const OwnerBatch& staged,
+                               const int         width,
+                               const int         numPositions,
+                               PositionAt        positionAt,
+                               RefOf             refOf,
+                               std::uint32_t*    counts) {
   const int numWords = tree.numWords;
-  const int lane     = threadIdx.x % 32;
-  const int warp     = threadIdx.x / 32;
-  for (int item = threadIdx.x; item < width * numWords; item += kBlockSize) {
-    batch.queries[item / numWords][item % numWords] = rowOf(tree, rows[item / numWords])[item % numWords];
-  }
-  if (threadIdx.x == 0) {
-    // Entry IDs for every row of this batch are reserved up front; a row that
-    // merges leaves its ID a hole. Other blocks may fail while this one runs,
-    // so one read of the status decides for every thread.
-    const int reserved = atomicAdd(tree.entryCursor, width);
-    batch.reserved     = reserved;
-    batch.failed       = *tree.status != kSuccess || reserved + width > tree.maxEntries;
-    if (reserved + width > tree.maxEntries) {
-      *tree.status = kCapacity;
-    }
-  }
-  __syncthreads();
-  if (batch.failed) {
-    return true;
-  }
-  if (static_cast<int>(threadIdx.x) < width) {
-    const int entry        = batch.reserved + static_cast<int>(threadIdx.x);
-    tree.entryChild[entry] = kHoleEntry;
-    tree.entryCount[entry] = 0;
-    tree.entrySlot[entry]  = -1;
-    tree.entryRow[entry]   = -1;
-    tree.entryFirst[entry] = INT_MAX;
-  }
-  for (int query = threadIdx.x; query < width; query += kBlockSize) {
-    int bits = 0;
-    for (int word = 0; word < numWords; ++word) {
-      bits += __popc(batch.queries[query][word]);
-    }
-    batch.queryBits[query] = bits;
-  }
-  __syncthreads();
-  for (int pair = threadIdx.x; pair < width * width; pair += kBlockSize) {
-    const int later   = pair / width;
-    const int earlier = pair % width;
-    if (earlier < later) {
-      int intersection = 0;
-      for (int word = 0; word < numWords; ++word) {
-        intersection += __popc(batch.queries[later][word] & batch.queries[earlier][word]);
-      }
-      batch.queryPairs[later][earlier] =
-        packCounts(intersection, batch.queryBits[later] + batch.queryBits[earlier] - intersection);
-    }
-  }
-  int size = tree.nodeSize[node];
-  // Each thread counts kOwnerPositions positions at once against every row:
-  // a query word read from shared memory serves all of them.
-  for (int base = 0; base < size; base += kOwnerPositions * kBlockSize) {
+  for (int base = 0; base < numPositions; base += kOwnerPositions * kBlockSize) {
     const std::uint32_t* centroids[kOwnerPositions];
+    int                  positions[kOwnerPositions];
     bool                 vectors = numWords % 4 == 0;
 #pragma unroll
     for (int slot = 0; slot < kOwnerPositions; ++slot) {
-      const int position = base + slot * kBlockSize + static_cast<int>(threadIdx.x);
-      centroids[slot] =
-        position < size ? centroidOfReference(tree, readPosition(tree, entries, batch, position).ref) : nullptr;
-      vectors = vectors && (centroids[slot] == nullptr || isVectorAligned(centroids[slot]));
+      const int index = base + slot * kBlockSize + static_cast<int>(threadIdx.x);
+      positions[slot] = index < numPositions ? positionAt(index) : -1;
+      centroids[slot] = positions[slot] >= 0 ? centroidOfReference(tree, refOf(positions[slot])) : nullptr;
+      vectors         = vectors && (centroids[slot] == nullptr || isVectorAligned(centroids[slot]));
     }
     int        intersections[kOwnerPositions][kOwnerBatch] = {};
     int        centroidBits[kOwnerPositions]               = {};
@@ -1156,7 +1140,7 @@ __device__ bool insertRows(const Tree&    tree,
 #pragma unroll
       for (int query = 0; query < kOwnerBatch; ++query) {
         if (query < width) {
-          const std::uint32_t queryWord = batch.queries[query][word];
+          const std::uint32_t queryWord = staged.queries[query][word];
 #pragma unroll
           for (int slot = 0; slot < kOwnerPositions; ++slot) {
             intersections[slot][query] += __popc(words[slot] & queryWord);
@@ -1212,28 +1196,127 @@ __device__ bool insertRows(const Tree&    tree,
     }
 #pragma unroll
     for (int slot = 0; slot < kOwnerPositions; ++slot) {
-      const int position = base + slot * kBlockSize + static_cast<int>(threadIdx.x);
-      if (position < size) {
+      if (positions[slot] >= 0) {
 #pragma unroll
         for (int query = 0; query < kOwnerBatch; ++query) {
           if (query < width) {
-            counts[query * tree.stride + position] =
+            counts[static_cast<std::size_t>(staged.offsets[query]) * tree.stride + positions[slot]] =
               packCounts(intersections[slot][query],
-                         centroidBits[slot] + batch.queryBits[query] - intersections[slot][query]);
+                         centroidBits[slot] + staged.queryBits[query] - intersections[slot][query]);
           }
         }
       }
     }
   }
+}
+
+//! Stages width rows (batch offsets at offsets[]) with their popcounts; ends without a barrier.
+__device__ void stageQueries(const Tree& tree, OwnerBatch& staged, const int width, const int* offsets) {
+  const int numWords = tree.numWords;
+  if (static_cast<int>(threadIdx.x) < width) {
+    staged.offsets[threadIdx.x] = offsets[threadIdx.x];
+  }
+  __syncthreads();
+  for (int item = threadIdx.x; item < width * numWords; item += kBlockSize) {
+    staged.queries[item / numWords][item % numWords] =
+      rowOf(tree, tree.batchBegin + staged.offsets[item / numWords])[item % numWords];
+  }
+  __syncthreads();
+  for (int query = threadIdx.x; query < width; query += kBlockSize) {
+    int bits = 0;
+    for (int word = 0; word < numWords; ++word) {
+      bits += __popc(staged.queries[query][word]);
+    }
+    staged.queryBits[query] = bits;
+  }
+}
+
+// Inserts width pending rows (batch offsets) into the leaf in order, as if
+// each searched the leaf alone. The leaf scan counted every row against the
+// leaf snapshot into the rows' counts rows (stride words each); positions that
+// changed since are recounted first. A merge then recounts the merged position
+// for the later rows, and a new entry takes their counts against its row.
+// Returns whether the leaf overflowed or a capacity limit was hit, leaving the
+// remaining rows pending. The leaf's metadata in batch is kept current.
+__device__ bool insertRows(const Tree&    tree,
+                           const int      node,
+                           int*           entries,
+                           const int*     offsets,
+                           const int      width,
+                           std::uint32_t* counts,
+                           const double   threshold,
+                           OwnerBatch&    batch,
+                           Scratch&       scratch) {
+  const int numWords = tree.numWords;
+  const int lane     = threadIdx.x % 32;
+  const int warp     = threadIdx.x / 32;
+  stageQueries(tree, batch, width, offsets);
+  if (threadIdx.x == 0) {
+    // Entry IDs for every row of this batch are reserved up front; a row that
+    // merges leaves its ID a hole. Other blocks may fail while this one runs,
+    // so one read of the status decides for every thread.
+    const int reserved = atomicAdd(tree.entryCursor, width);
+    batch.reserved     = reserved;
+    batch.failed       = *tree.status != kSuccess || reserved + width > tree.maxEntries;
+    if (reserved + width > tree.maxEntries) {
+      *tree.status = kCapacity;
+    }
+  }
+  __syncthreads();
+  if (batch.failed) {
+    return true;
+  }
+  if (static_cast<int>(threadIdx.x) < width) {
+    const int entry        = batch.reserved + static_cast<int>(threadIdx.x);
+    tree.entryChild[entry] = kHoleEntry;
+    tree.entryCount[entry] = 0;
+    tree.entrySlot[entry]  = -1;
+    tree.entryRow[entry]   = -1;
+    tree.entryFirst[entry] = INT_MAX;
+  }
+  for (int pair = threadIdx.x; pair < width * width; pair += kBlockSize) {
+    const int later   = pair / width;
+    const int earlier = pair % width;
+    if (earlier < later) {
+      int intersection = 0;
+      for (int word = 0; word < numWords; ++word) {
+        intersection += __popc(batch.queries[later][word] & batch.queries[earlier][word]);
+      }
+      batch.queryPairs[later][earlier] =
+        packCounts(intersection, batch.queryBits[later] + batch.queryBits[earlier] - intersection);
+    }
+  }
+  int size = tree.nodeSize[node];
+  // Counts the leaf scan did not see: positions changed since, or every position once too many changed.
+  if (batch.recountAll) {
+    countPositions(
+      tree,
+      batch,
+      width,
+      size,
+      [](const int index) { return index; },
+      [&](const int position) { return readPosition(tree, entries, batch, position).ref; },
+      counts);
+  } else {
+    countPositions(
+      tree,
+      batch,
+      width,
+      batch.numChanged,
+      [&](const int index) { return batch.changed[index]; },
+      [&](const int position) { return readPosition(tree, entries, batch, position).ref; },
+      counts);
+  }
   __syncthreads();
   for (int query = 0; query < width; ++query) {
-    const int          row = rows[query];
+    const int          row       = tree.batchBegin + batch.offsets[query];
+    std::uint32_t*     countsRow = counts + static_cast<std::size_t>(batch.offsets[query]) * tree.stride;
     // Closest position: the greatest key (similarity bits << 32 | inverted position),
     // so the lowest position wins ties; zero means the leaf is empty. Nonnegative
     // FP32 bit patterns order like their values.
-    unsigned long long key = 0;
+    unsigned long long key       = 0;
     for (int position = threadIdx.x; position < size; position += kBlockSize) {
-      const float value = packedSimilarity(counts[query * tree.stride + position]);
+      const float value = packedSimilarity(countsRow[position]);
       key               = max(key,
                 static_cast<unsigned long long>(__float_as_uint(value)) << 32 |
                   (0xffffffffU - static_cast<std::uint32_t>(position)));
@@ -1262,7 +1345,7 @@ __device__ bool insertRows(const Tree&    tree,
       const bool          singleton   = info.ref >= 0;
       const std::uint32_t mergedCount = info.count + 1;
       if (singleton) {
-        const std::uint32_t pair   = counts[query * tree.stride + position];
+        const std::uint32_t pair   = countsRow[position];
         const double        shared = pair & 0xffffU;
         merged                     = bitbirch::isimTanimotoAtLeast({shared, (pair >> 16) - shared}, 2, threshold);
       }
@@ -1280,6 +1363,7 @@ __device__ bool insertRows(const Tree&    tree,
         if (threadIdx.x == 0) {
           batch.failed = slot < 0;
           writePosition(batch, position, {entry, mergedCount, ~slot});
+          markChanged(batch, position);
         }
         // One warp per later row recounts the merged centroid.
         for (int later = query + 1 + warp; later < width; later += kNumWarps) {
@@ -1295,7 +1379,7 @@ __device__ bool insertRows(const Tree&    tree,
             centroidBits += __shfl_xor_sync(0xffffffffU, centroidBits, offset);
           }
           if (lane == 0) {
-            counts[later * tree.stride + position] =
+            counts[static_cast<std::size_t>(batch.offsets[later]) * tree.stride + position] =
               packCounts(intersection, centroidBits + batch.queryBits[later] - intersection);
           }
         }
@@ -1316,10 +1400,11 @@ __device__ bool insertRows(const Tree&    tree,
         entries[size]          = entry;
         tree.nodeSize[node]    = size + 1;
         writePosition(batch, size, {entry, 1, row});
+        markChanged(batch, size);
       }
       // The new entry's centroid is this row.
       for (int later = query + 1 + static_cast<int>(threadIdx.x); later < width; later += kBlockSize) {
-        counts[later * tree.stride + size] = batch.queryPairs[later][query];
+        counts[static_cast<std::size_t>(batch.offsets[later]) * tree.stride + size] = batch.queryPairs[later][query];
       }
       ++size;
     }
@@ -1333,25 +1418,23 @@ __device__ bool insertRows(const Tree&    tree,
 
 // One block per run of rows sorted by leaf: the leaf's only writer. Pending
 // rows, in order, merge into their closest entry or start a new one, until the
-// leaf overflows; later rows are routed again after the split. The first
-// wideOwners owners to start count kOwnerBatch rows at a time in their own
-// region of countScratch; later owners count one row at a time in a region
-// indexed by their run, past the wide regions.
+// leaf overflows; later rows are routed again after the split. counts holds one
+// row of stride words per batch offset, filled by the leaf scan; entries that
+// grouped rows merged into this round (stamped) are recounted first.
 __global__ void leafOwnersKernel(const Tree     tree,
                                  const int      count,
                                  const int*     keys,
                                  const int*     values,
                                  const double   threshold,
                                  const int      depth,
+                                 const int      stamp,
                                  int*           dirty,
                                  int*           levelNodes,
                                  int*           levelCounts,
                                  const int      levelStride,
                                  int*           splitQueue,
                                  int*           splitCount,
-                                 std::uint32_t* countScratch,
-                                 int*           ownerCursor,
-                                 const int      wideOwners) {
+                                 std::uint32_t* counts) {
   __shared__ Scratch    scratch;
   __shared__ OwnerBatch batch;
   const int             first = blockIdx.x;
@@ -1362,26 +1445,37 @@ __global__ void leafOwnersKernel(const Tree     tree,
   int* entries    = entriesOf(tree, node);
   bool overflowed = false;
   if (threadIdx.x == 0) {
-    batch.ownerIndex = atomicAdd(ownerCursor, 1);
-  }
-  // Stage the leaf's entry metadata; insertRows keeps it current.
-  for (int position = threadIdx.x; position < min(tree.nodeSize[node], kOwnerMetaPositions); position += kBlockSize) {
-    const int entry       = entries[position];
-    batch.entry[position] = entry;
-    batch.count[position] = tree.entryCount[entry];
-    batch.ref[position]   = referenceOf(tree, entry);
+    batch.numChanged = 0;
+    batch.recountAll = 0;
   }
   __syncthreads();
-  const bool     wide   = batch.ownerIndex < wideOwners;
-  const int      width  = wide ? kOwnerBatch : 1;
-  std::uint32_t* counts = wide ?
-                            countScratch + static_cast<std::size_t>(batch.ownerIndex) * kOwnerBatch * tree.stride :
-                            countScratch + (static_cast<std::size_t>(wideOwners) * kOwnerBatch + first) * tree.stride;
+  // Stage the leaf's entry metadata (insertRows keeps it current) and list the entries grouped rows changed.
+  const int size = tree.nodeSize[node];
+  for (int position = threadIdx.x; position < size; position += kBlockSize) {
+    const int entry = entries[position];
+    if (position < kOwnerMetaPositions) {
+      batch.entry[position] = entry;
+      batch.count[position] = tree.entryCount[entry];
+      batch.ref[position]   = referenceOf(tree, entry);
+    }
+    if (tree.entryStamp[entry] == stamp) {
+      const int index = atomicAdd(&batch.numChanged, 1);
+      if (index < kOwnerChanged) {
+        batch.changed[index] = position;
+      } else {
+        batch.recountAll = 1;
+      }
+    }
+  }
+  __syncthreads();
+  if (threadIdx.x == 0 && batch.numChanged > kOwnerChanged) {
+    batch.numChanged = kOwnerChanged;
+  }
   for (int chunk = first; !overflowed && chunk < count && keys[chunk] == node; chunk += kBlockSize) {
     // List this chunk's pending rows of the run in order.
     const int      index   = chunk + static_cast<int>(threadIdx.x);
-    const int      row     = index < count && keys[index] == node ? tree.batchBegin + values[index] : -1;
-    const bool     pending = row >= 0 && tree.labels[row] < 0;
+    const int      offset  = index < count && keys[index] == node ? values[index] : -1;
+    const bool     pending = offset >= 0 && tree.labels[tree.batchBegin + offset] < 0;
     const unsigned ballot  = __ballot_sync(0xffffffffU, pending);
     __syncthreads();
     if (threadIdx.x % 32 == 0) {
@@ -1396,16 +1490,16 @@ __global__ void leafOwnersKernel(const Tree     tree,
     }
     __syncthreads();
     if (pending) {
-      batch.pending[batch.warpOffsets[threadIdx.x / 32] + __popc(ballot & ((1U << (threadIdx.x % 32)) - 1U))] = row;
+      batch.pending[batch.warpOffsets[threadIdx.x / 32] + __popc(ballot & ((1U << (threadIdx.x % 32)) - 1U))] = offset;
     }
     __syncthreads();
     const int numPending = batch.warpOffsets[kNumWarps];
-    for (int begin = 0; begin < numPending && !overflowed; begin += width) {
+    for (int begin = 0; begin < numPending && !overflowed; begin += kOwnerBatch) {
       overflowed = insertRows(tree,
                               node,
                               entries,
                               batch.pending + begin,
-                              min(width, numPending - begin),
+                              min(kOwnerBatch, numPending - begin),
                               counts,
                               threshold,
                               batch,
@@ -1714,8 +1808,7 @@ __global__ void controlKernel(const Tree tree,
                               const int  levelStride,
                               int*       deltaSlots,
                               int*       deltaCursor,
-                              int*       splitCount,
-                              int*       ownerCursor) {
+                              int*       splitCount) {
   __shared__ int pending;
   if (threadIdx.x == 0) {
     pending = 0;
@@ -1743,7 +1836,6 @@ __global__ void controlKernel(const Tree tree,
     }
     *deltaCursor      = 0;
     *splitCount       = 0;
-    *ownerCursor      = 0;
     control[kPending] = pending;
     control[kNodes]   = *tree.nodeCursor;
     control[kEntries] = *tree.entryCursor;
@@ -1873,11 +1965,11 @@ class TreeBuilder {
                          &sortedValues_,    &groupKeys_,   &sortedGroupKeys_, &sortedGroupValues_,
                          &dirty_,           &levelNodes_,  &levelCounts_,     &deltaSlots_,
                          &deltaCursor_,     &splitQueue_,  &splitCount_,      &plans_,
-                         &ownerCursor_,     &leftSizes_,   &innerPlan_,       &deferredNodes_,
+                         &entryStamp_,      &leftSizes_,   &innerPlan_,       &deferredNodes_,
                          &deferredEntries_, &numDeferred_, &cursors_}) {
       vector->setStream(stream);
     }
-    for (auto* vector : {&entryCount_, &sums_, &centroids_, &deltaSums_, &deltaCounts_, &ownerCounts_}) {
+    for (auto* vector : {&entryCount_, &sums_, &centroids_, &deltaSums_, &deltaCounts_, &counts_}) {
       vector->setStream(stream);
     }
     nodeLeaf_.setStream(stream);
@@ -1910,15 +2002,11 @@ class TreeBuilder {
     plans_.resize(static_cast<std::size_t>(batchCapacity_) * stride_);
     sides_.resize(static_cast<std::size_t>(batchCapacity_) * stride_);
     innerPlan_.resize(stride_);
-    // Full-width leaf-owner count regions within the budget (every owner gets one when a batch holds few rows),
-    // then one single-row region per possible run.
-    const std::size_t wideBytes = sizeof(std::uint32_t) * static_cast<std::size_t>(kOwnerBatch) * stride_;
-    wideOwners_ =
-      static_cast<int>(std::min<std::size_t>(batchCapacity_, std::max<std::size_t>(1, kOwnerScratchBytes / wideBytes)));
-    ownerCounts_.resize((static_cast<std::size_t>(wideOwners_) * kOwnerBatch + batchCapacity_) * stride_);
+    // One row of packed counts per batch offset: every leaf position, plus one for an overflowing append.
+    counts_.resize(static_cast<std::size_t>(batchCapacity_) * stride_);
     pairKeys_.resize(batchCapacity_);
     cudaCheckError(cudaMemsetAsync(pairKeys_.data(), 0xff, sizeof(unsigned long long) * batchCapacity_, stream));
-    for (auto* vector : {&deltaCursor_, &splitCount_, &numDeferred_, &ownerCursor_}) {
+    for (auto* vector : {&deltaCursor_, &splitCount_, &numDeferred_}) {
       vector->resize(1);
       cudaCheckError(cudaMemsetAsync(vector->data(), 0, sizeof(int), stream));
     }
@@ -1995,6 +2083,12 @@ class TreeBuilder {
     for (auto* vector : {&entryChild_, &entrySlot_, &entryRow_, &entryFirst_}) {
       growTo(*vector, entries);
     }
+    const auto oldEntries = entryStamp_.size();
+    growTo(entryStamp_, entries);
+    if (entryStamp_.size() > oldEntries) {
+      cudaCheckError(
+        cudaMemsetAsync(entryStamp_.data() + oldEntries, 0, sizeof(int) * (entryStamp_.size() - oldEntries), stream_));
+    }
     growTo(entryCount_, entries);
     growTo(sums_, static_cast<std::size_t>(slots) * numWords_ * 32);
     growTo(centroids_, static_cast<std::size_t>(slots) * numWords_);
@@ -2016,6 +2110,7 @@ class TreeBuilder {
     tree_.entrySlot       = entrySlot_.data();
     tree_.entryRow        = entryRow_.data();
     tree_.entryFirst      = entryFirst_.data();
+    tree_.entryStamp      = entryStamp_.data();
     tree_.sums            = sums_.data();
     tree_.centroids       = centroids_.data();
     tree_.root            = cursors_.data();
@@ -2092,12 +2187,14 @@ class TreeBuilder {
       reserveScratch(deltaCounts_, deltaCapacity);
       reserveScratch(deltaSums_, deltaCapacity * numWords_ * 32);
 
+      ++stamp_;
       routeKernel<<<count, kBlockSize, 0, stream_>>>(tree_,
                                                      groups,
                                                      threshold_,
                                                      keys_.data(),
                                                      groupKeys_.data(),
-                                                     values_.data());
+                                                     values_.data(),
+                                                     counts_.data());
       cudaCheckError(cudaGetLastError());
       if (groups) {
         sortPairs(groupKeys_.data(),
@@ -2110,7 +2207,8 @@ class TreeBuilder {
                                                         count,
                                                         sortedGroupKeys_.data(),
                                                         sortedGroupValues_.data(),
-                                                        threshold_);
+                                                        threshold_,
+                                                        stamp_);
         cudaCheckError(cudaGetLastError());
       }
       sortPairs(keys_.data(), sortedKeys_.data(), values_.data(), sortedValues_.data(), count, keyBits(tree_.maxNodes));
@@ -2120,15 +2218,14 @@ class TreeBuilder {
                                                           sortedValues_.data(),
                                                           threshold_,
                                                           depth,
+                                                          stamp_,
                                                           dirty_.data(),
                                                           levelNodes_.data(),
                                                           levelCounts_.data(),
                                                           batchCapacity_,
                                                           splitQueue_.data(),
                                                           splitCount_.data(),
-                                                          ownerCounts_.data(),
-                                                          ownerCursor_.data(),
-                                                          wideOwners_);
+                                                          counts_.data());
       cudaCheckError(cudaGetLastError());
       for (int level = depth; level > 0; --level) {
         refreshKernel<<<count, kBlockSize, 0, stream_>>>(
@@ -2167,8 +2264,7 @@ class TreeBuilder {
                                                    batchCapacity_,
                                                    deltaSlots_.data(),
                                                    deltaCursor_.data(),
-                                                   splitCount_.data(),
-                                                   ownerCursor_.data());
+                                                   splitCount_.data());
       cudaCheckError(cudaGetLastError());
       waitForControls();
       if (hostControl_[kStatus] != kSuccess) {
@@ -2268,19 +2364,19 @@ class TreeBuilder {
   const int                        stride_;
   const int                        minNodeSize_;
   int                              numSMs_        = 0;
-  int                              wideOwners_    = 1;
+  int                              stamp_         = 0;
   int                              splitTileSize_ = 64;
   std::size_t                      pairShared_    = 0;
   Tree                             tree_{};
   AsyncDeviceVector<int>           nodeSize_, nodeParent_, nodeParentEntry_, nodeEntries_;
   AsyncDeviceVector<std::uint8_t>  nodeLeaf_;
   AsyncDeviceVector<int>           entryChild_, entrySlot_, entryRow_, entryFirst_;
-  AsyncDeviceVector<std::uint32_t> entryCount_, sums_, centroids_, ownerCounts_;
+  AsyncDeviceVector<std::uint32_t> entryCount_, sums_, centroids_, counts_;
   AsyncDeviceVector<int>           labels_;
   AsyncDeviceVector<int> keys_, sortedKeys_, values_, sortedValues_, groupKeys_, sortedGroupKeys_, sortedGroupValues_;
   AsyncDeviceVector<int> dirty_, levelNodes_, levelCounts_, deltaSlots_, deltaCursor_;
   AsyncDeviceVector<std::uint32_t>      deltaSums_, deltaCounts_;
-  AsyncDeviceVector<int>                splitQueue_, splitCount_, ownerCursor_, plans_, leftSizes_, innerPlan_;
+  AsyncDeviceVector<int>                splitQueue_, splitCount_, entryStamp_, plans_, leftSizes_, innerPlan_;
   AsyncDeviceVector<std::int8_t>        sides_;
   AsyncDeviceVector<unsigned long long> pairKeys_;
   AsyncDeviceVector<int>                deferredNodes_, deferredEntries_, numDeferred_, cursors_;
