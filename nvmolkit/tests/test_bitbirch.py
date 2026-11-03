@@ -28,7 +28,7 @@ def assert_matches_reference(packed, threshold, branching_factor, batch_size):
     np.testing.assert_array_equal(centroids.numpy(), expected_centroids)
 
 
-@pytest.mark.parametrize("branching_factor,batch_size,words", [(3, 7, 1), (7, 32, 3), (254, 32, 32)])
+@pytest.mark.parametrize("branching_factor,batch_size,words", [(3, 7, 1), (7, 32, 3), (254, 32, 32), (7, 16, 20), (31, 64, 41)])
 @pytest.mark.parametrize("threshold", [0.0, 0.3, 0.7, 1.0])
 def test_matches_independent_reference(branching_factor, batch_size, words, threshold):
     packed = np.random.default_rng(740 + words).integers(0, 2**32, size=(97, words), dtype=np.uint32)

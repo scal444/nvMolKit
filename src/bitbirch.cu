@@ -28,14 +28,16 @@ namespace {
 
 constexpr int kBlockSize          = 256;
 constexpr int kNumWarps           = kBlockSize / 32;
-//! Bits each thread owns: thread t owns bits t, t + kBlockSize, ... up to kBitBirchMaxWords * 32.
+//! Most bits each thread owns; see Tree::bitsPerThread.
 constexpr int kBitParts           = kBitBirchMaxWords * 32 / kBlockSize;
+//! Packed rows addRows loads together (one word per thread each) before summing them.
+constexpr int kRowsInFlight       = 16;
+//! Per-bit sums rows addRows loads together (up to kBitParts words per thread each).
+constexpr int kSumsInFlight       = 4;
 //! Lanes that read one centroid together in the closest-entry search.
 constexpr int kLanesPerEntry      = 4;
 //! Rows inserted in batches that never merge groups, so the young tree grows in input order.
 constexpr int kOrderedWarmup      = 16384;
-//! Rows addRows sums together, with their loads in flight at once.
-constexpr int kRowsInFlight       = 4;
 //! Split pair orders are the low 32 bits of a 64-bit key, so a node holds fewer than 2^16 entries.
 constexpr int kMaxBranchingFactor = 65534;
 
@@ -70,6 +72,12 @@ struct Tree {
   int                  branchingFactor;
   int                  stride;
   int                  batchBegin;  //!< Input row of the batch being inserted.
+  // Thread t owns bits [t * bitsPerThread, (t + 1) * bitsPerThread) below numBits,
+  // bitsPerThread = ceil(numBits / kBlockSize). When it divides 32 (packedThreads),
+  // a thread's bits lie in one word of a packed row and its sums are 16-byte
+  // aligned when it is a multiple of 4.
+  int                  bitsPerThread;
+  bool                 packedThreads;
   int*                 nodeSize;
   int*                 nodeParent;
   int*                 nodeParentEntry;
@@ -97,8 +105,11 @@ using TermsReduce   = cub::BlockReduce<bitbirch::ISimTanimotoTerms, kBlockSize>;
 
 //! Per-block scratch for reductions and broadcasts.
 struct Scratch {
-  const std::uint32_t* rows[kBlockSize];  //!< Row pointers resolved for one chunk of addRows.
-  bool                 rowIsSums[kBlockSize];
+  const std::uint32_t* rows[kBlockSize];      //!< Packed rows resolved for one chunk of addRows.
+  const std::uint32_t* sumsRows[kBlockSize];  //!< Per-bit sums rows resolved for one chunk of addRows.
+  int                  numRows;
+  int                  numSumsRows;
+  std::uint32_t        centroidWords[kBitBirchMaxWords];  //!< Centroid assembly when threads' bits span words.
   union {
     IntegerReduce::TempStorage integers;
     TermsReduce::TempStorage   terms;
@@ -107,10 +118,18 @@ struct Scratch {
   int                broadcast[3];
 };
 
-//! Per-bit sums owned by one thread; see kBitParts.
+//! Per-bit sums owned by one thread; part p is bit threadIdx.x * bitsPerThread + p.
 struct Bits {
   std::uint32_t parts[kBitParts] = {};
 };
+
+__device__ __forceinline__ int firstBit(const Tree& tree) {
+  return static_cast<int>(threadIdx.x) * tree.bitsPerThread;
+}
+
+__device__ __forceinline__ bool liveBit(const Tree& tree, const int part) {
+  return part < tree.bitsPerThread && firstBit(tree) + part < tree.numBits;
+}
 
 __device__ __forceinline__ int* entriesOf(const Tree& tree, const int node) {
   return tree.nodeEntries + static_cast<std::size_t>(node) * tree.stride;
@@ -164,22 +183,151 @@ __device__ __forceinline__ int2 popcounts(const std::uint32_t* lhs,
   return make_int2(intersection, unionCount);
 }
 
-__device__ __forceinline__ void addRow(Bits& bits, const Tree& tree, const std::uint32_t* row) {
+//! The packed-row word holding this thread's bits (packedThreads only); zero past the row.
+__device__ __forceinline__ std::uint32_t rowWord(const Tree& tree, const std::uint32_t* row) {
+  const int first = firstBit(tree);
+  return first < tree.numBits ? row[first / 32] : 0U;
+}
+
+//! Adds this thread's bits of a packed-row word (packedThreads only).
+__device__ __forceinline__ void addRowWord(Bits& bits, const Tree& tree, const std::uint32_t word) {
+  const int shift = firstBit(tree) % 32;
 #pragma unroll
   for (int part = 0; part < kBitParts; ++part) {
-    const int bit = part * kBlockSize + threadIdx.x;
-    if (bit < tree.numBits) {
+    if (part < tree.bitsPerThread) {
+      bits.parts[part] += (word >> (shift + part)) & 1U;
+    }
+  }
+}
+
+__device__ __forceinline__ void addRow(Bits& bits, const Tree& tree, const std::uint32_t* row) {
+  if (tree.packedThreads) {
+    addRowWord(bits, tree, rowWord(tree, row));
+    return;
+  }
+  const int first = firstBit(tree);
+#pragma unroll
+  for (int part = 0; part < kBitParts; ++part) {
+    if (liveBit(tree, part)) {
+      const int bit = first + part;
       bits.parts[part] += (row[bit / 32] >> (bit % 32)) & 1U;
     }
   }
 }
 
-__device__ __forceinline__ void addSums(Bits& bits, const Tree& tree, const std::uint32_t* sums) {
+//! Loads this thread's words of a per-bit sums row, zeros past it; 16-byte loads when they are aligned.
+__device__ __forceinline__ void loadSums(const Tree&          tree,
+                                         const std::uint32_t* sums,
+                                         std::uint32_t (&words)[kBitParts]) {
+  const int first = firstBit(tree);
+  if (tree.packedThreads && tree.bitsPerThread % 4 == 0) {
+    // Sums rows start 16-byte aligned, and so does every thread's run of them.
+    const auto* vectors = reinterpret_cast<const uint4*>(sums + first);
+    const bool  live    = first < tree.numBits;
+#pragma unroll
+    for (int vector = 0; vector < kBitParts / 4; ++vector) {
+      const uint4 value     = live && vector < tree.bitsPerThread / 4 ? vectors[vector] : make_uint4(0, 0, 0, 0);
+      words[4 * vector]     = value.x;
+      words[4 * vector + 1] = value.y;
+      words[4 * vector + 2] = value.z;
+      words[4 * vector + 3] = value.w;
+    }
+    return;
+  }
 #pragma unroll
   for (int part = 0; part < kBitParts; ++part) {
-    const int bit = part * kBlockSize + threadIdx.x;
-    if (bit < tree.numBits) {
-      bits.parts[part] += sums[bit];
+    words[part] = liveBit(tree, part) ? sums[first + part] : 0U;
+  }
+}
+
+__device__ __forceinline__ void addWords(Bits& bits, const std::uint32_t (&words)[kBitParts]) {
+#pragma unroll
+  for (int part = 0; part < kBitParts; ++part) {
+    bits.parts[part] += words[part];
+  }
+}
+
+__device__ __forceinline__ void addSums(Bits& bits, const Tree& tree, const std::uint32_t* sums) {
+  std::uint32_t words[kBitParts];
+  loadSums(tree, sums, words);
+  addWords(bits, words);
+}
+
+//! Stores this thread's bits as a per-bit sums row; 16-byte stores when they are aligned.
+__device__ __forceinline__ void storeSums(const Tree& tree, std::uint32_t* sums, const Bits& bits) {
+  const int first = firstBit(tree);
+  if (tree.packedThreads && tree.bitsPerThread % 4 == 0) {
+    if (first < tree.numBits) {
+      auto* vectors = reinterpret_cast<uint4*>(sums + first);
+#pragma unroll
+      for (int vector = 0; vector < kBitParts / 4; ++vector) {
+        if (vector < tree.bitsPerThread / 4) {
+          vectors[vector] = make_uint4(bits.parts[4 * vector],
+                                       bits.parts[4 * vector + 1],
+                                       bits.parts[4 * vector + 2],
+                                       bits.parts[4 * vector + 3]);
+        }
+      }
+    }
+    return;
+  }
+#pragma unroll
+  for (int part = 0; part < kBitParts; ++part) {
+    if (liveBit(tree, part)) {
+      sums[first + part] = bits.parts[part];
+    }
+  }
+}
+
+// Writes the packed majority centroid of bits over count members to centroid
+// and, when given, mirror. Every thread of the block calls it.
+__device__ __forceinline__ void storeCentroid(const Tree&         tree,
+                                              const Bits&         bits,
+                                              const std::uint32_t count,
+                                              std::uint32_t*      centroid,
+                                              std::uint32_t*      mirror,
+                                              Scratch&            scratch) {
+  const int first = firstBit(tree);
+  if (tree.packedThreads) {
+    // Each word's bits belong to 32 / bitsPerThread consecutive lanes, which OR their chunks together.
+    std::uint32_t chunk = 0;
+#pragma unroll
+    for (int part = 0; part < kBitParts; ++part) {
+      if (part < tree.bitsPerThread && bitbirch::majorityCentroidBit(bits.parts[part], count)) {
+        chunk |= 1U << part;
+      }
+    }
+    const bool    live  = first < tree.numBits;
+    const int     lanes = 32 / tree.bitsPerThread;
+    std::uint32_t word  = live ? chunk << (first % 32) : 0U;
+    for (int offset = lanes / 2; offset > 0; offset /= 2) {
+      word |= __shfl_xor_sync(0xffffffffU, word, offset);
+    }
+    if (live && static_cast<int>(threadIdx.x) % lanes == 0) {
+      centroid[first / 32] = word;
+      if (mirror != nullptr) {
+        mirror[first / 32] = word;
+      }
+    }
+    return;
+  }
+  __syncthreads();  // Earlier readers of the assembly words are done.
+  for (int word = threadIdx.x; word < tree.numWords; word += kBlockSize) {
+    scratch.centroidWords[word] = 0;
+  }
+  __syncthreads();
+#pragma unroll
+  for (int part = 0; part < kBitParts; ++part) {
+    if (liveBit(tree, part) && bitbirch::majorityCentroidBit(bits.parts[part], count)) {
+      const int bit = first + part;
+      atomicOr(scratch.centroidWords + bit / 32, 1U << (bit % 32));
+    }
+  }
+  __syncthreads();
+  for (int word = threadIdx.x; word < tree.numWords; word += kBlockSize) {
+    centroid[word] = scratch.centroidWords[word];
+    if (mirror != nullptr) {
+      mirror[word] = scratch.centroidWords[word];
     }
   }
 }
@@ -196,53 +344,63 @@ __device__ __forceinline__ void addEntry(Bits& bits, const Tree& tree, const int
 // Adds numItems rows to bits. resolve(index, isSums) returns item index's packed
 // row, or its per-bit sums row with isSums set, or nullptr to skip it. A chunk of
 // pointers is resolved in parallel first, so the loads that sum the rows do not
-// wait on each other's lookups.
+// wait on each other's lookups, and several rows are loaded together before
+// they are summed. Integer sums do not depend on the order.
 template <typename Resolve>
 __device__ void addRows(Bits& bits, const Tree& tree, const int numItems, Scratch& scratch, Resolve resolve) {
   for (int chunk = 0; chunk < numItems; chunk += kBlockSize) {
     const int size = min(kBlockSize, numItems - chunk);
     __syncthreads();  // The previous chunk has been summed.
-    if (static_cast<int>(threadIdx.x) < size) {
-      bool isSums                    = false;
-      scratch.rows[threadIdx.x]      = resolve(chunk + static_cast<int>(threadIdx.x), isSums);
-      scratch.rowIsSums[threadIdx.x] = isSums;
+    if (threadIdx.x == 0) {
+      scratch.numRows     = 0;
+      scratch.numSumsRows = 0;
     }
     __syncthreads();
-    // Several rows at a time, their loads issued together before any is summed.
-    int index = 0;
-    for (; index + kRowsInFlight <= size; index += kRowsInFlight) {
-      std::uint32_t values[kRowsInFlight][kBitParts];
-#pragma unroll
-      for (int item = 0; item < kRowsInFlight; ++item) {
-        const std::uint32_t* row    = scratch.rows[index + item];
-        const bool           isSums = scratch.rowIsSums[index + item];
-#pragma unroll
-        for (int part = 0; part < kBitParts; ++part) {
-          const int bit      = part * kBlockSize + threadIdx.x;
-          values[item][part] = 0;
-          if (row != nullptr && bit < tree.numBits) {
-            const std::uint32_t loaded = isSums ? row[bit] : row[bit / 32];
-            values[item][part]         = isSums ? loaded : (loaded >> (bit % 32)) & 1U;
-          }
-        }
-      }
-#pragma unroll
-      for (int item = 0; item < kRowsInFlight; ++item) {
-#pragma unroll
-        for (int part = 0; part < kBitParts; ++part) {
-          bits.parts[part] += values[item][part];
+    if (static_cast<int>(threadIdx.x) < size) {
+      bool                 isSums = false;
+      const std::uint32_t* row    = resolve(chunk + static_cast<int>(threadIdx.x), isSums);
+      if (row != nullptr) {
+        if (isSums) {
+          scratch.sumsRows[atomicAdd(&scratch.numSumsRows, 1)] = row;
+        } else {
+          scratch.rows[atomicAdd(&scratch.numRows, 1)] = row;
         }
       }
     }
-    for (; index < size; ++index) {
-      if (scratch.rows[index] == nullptr) {
-        continue;
+    __syncthreads();
+    const int numRows     = scratch.numRows;
+    const int numSumsRows = scratch.numSumsRows;
+    int       index       = 0;
+    if (tree.packedThreads) {
+      for (; index + kRowsInFlight <= numRows; index += kRowsInFlight) {
+        std::uint32_t words[kRowsInFlight];
+#pragma unroll
+        for (int item = 0; item < kRowsInFlight; ++item) {
+          words[item] = rowWord(tree, scratch.rows[index + item]);
+        }
+#pragma unroll
+        for (int item = 0; item < kRowsInFlight; ++item) {
+          addRowWord(bits, tree, words[item]);
+        }
       }
-      if (scratch.rowIsSums[index]) {
-        addSums(bits, tree, scratch.rows[index]);
-      } else {
-        addRow(bits, tree, scratch.rows[index]);
+    }
+    for (; index < numRows; ++index) {
+      addRow(bits, tree, scratch.rows[index]);
+    }
+    index = 0;
+    for (; index + kSumsInFlight <= numSumsRows; index += kSumsInFlight) {
+      std::uint32_t words[kSumsInFlight][kBitParts];
+#pragma unroll
+      for (int item = 0; item < kSumsInFlight; ++item) {
+        loadSums(tree, scratch.sumsRows[index + item], words[item]);
       }
+#pragma unroll
+      for (int item = 0; item < kSumsInFlight; ++item) {
+        addWords(bits, words[item]);
+      }
+    }
+    for (; index < numSumsRows; ++index) {
+      addSums(bits, tree, scratch.sumsRows[index]);
     }
   }
 }
@@ -292,22 +450,8 @@ __device__ void storeEntry(const Tree&         tree,
   if (slot < 0) {
     return;
   }
-  std::uint32_t* sums     = tree.sums + static_cast<std::size_t>(slot) * tree.numBits;
-  std::uint32_t* centroid = tree.centroids + static_cast<std::size_t>(slot) * tree.numWords;
-#pragma unroll
-  for (int part = 0; part < kBitParts; ++part) {
-    // numBits and kBlockSize are multiples of 32, so each warp covers one whole word.
-    const int           bit  = part * kBlockSize + threadIdx.x;
-    const bool          live = bit < tree.numBits;
-    const std::uint32_t word =
-      __ballot_sync(0xffffffffU, live && bitbirch::majorityCentroidBit(bits.parts[part], count));
-    if (live) {
-      sums[bit] = bits.parts[part];
-      if (threadIdx.x % 32 == 0) {
-        centroid[bit / 32] = word;
-      }
-    }
-  }
+  storeSums(tree, tree.sums + static_cast<std::size_t>(slot) * tree.numBits, bits);
+  storeCentroid(tree, bits, count, tree.centroids + static_cast<std::size_t>(slot) * tree.numWords, nullptr, scratch);
   if (threadIdx.x == 0) {
     tree.entrySlot[entry]  = slot;
     tree.entryRow[entry]   = -1;
@@ -327,7 +471,7 @@ __device__ bool passesThreshold(const Tree&         tree,
   bitbirch::ISimTanimotoTerms terms{};
 #pragma unroll
   for (int part = 0; part < kBitParts; ++part) {
-    if (part * kBlockSize + static_cast<int>(threadIdx.x) < tree.numBits) {
+    if (liveBit(tree, part)) {
       bitbirch::accumulateISimTanimotoTerm(terms, bits.parts[part], count);
     }
   }
@@ -1083,15 +1227,8 @@ __global__ void refreshKernel(const Tree     tree,
       return deltaSums + static_cast<std::size_t>(childSlot) * tree.numBits;
     });
   }
-  added                   = blockSum(added, scratch);
-  std::uint32_t* deltaRow = deltaSums + static_cast<std::size_t>(slot) * tree.numBits;
-#pragma unroll
-  for (int part = 0; part < kBitParts; ++part) {
-    const int bit = part * kBlockSize + threadIdx.x;
-    if (bit < tree.numBits) {
-      deltaRow[bit] = delta.parts[part];
-    }
-  }
+  added = blockSum(added, scratch);
+  storeSums(tree, deltaSums + static_cast<std::size_t>(slot) * tree.numBits, delta);
   if (threadIdx.x == 0) {
     deltaCounts[slot] = static_cast<std::uint32_t>(added);
     dirty[node]       = 0;
@@ -1471,6 +1608,8 @@ class TreeBuilder {
     tree_.fingerprints    = fingerprints;
     tree_.numWords        = numWords;
     tree_.numBits         = numWords * 32;
+    tree_.bitsPerThread   = (tree_.numBits + kBlockSize - 1) / kBlockSize;
+    tree_.packedThreads   = 32 % tree_.bitsPerThread == 0;
     tree_.branchingFactor = options.branchingFactor;
     tree_.stride          = stride_;
 
