@@ -250,17 +250,19 @@ __device__ unsigned long long blockMin(const unsigned long long value, Scratch& 
   return blockReduce(value, cubMin(), scratch);
 }
 
-// Stores bits as the entry's sums, majority centroid and member count, giving a
-// single-member entry its summary slot. Every thread of the block calls it after
-// it has finished reading the entry.
-__device__ void storeEntry(const Tree&         tree,
-                           const int           entry,
-                           const Bits&         bits,
-                           const std::uint32_t count,
-                           Scratch&            scratch) {
+// Stores bits as the entry's sums, majority centroid and member count. slot is
+// the entry's summary slot, or -1 to give a single-member entry one. mirror,
+// when given, receives the centroid words as well. Every thread of the block
+// calls it after it has finished reading the entry.
+__device__ void storeEntryInSlot(const Tree&         tree,
+                                 const int           entry,
+                                 const Bits&         bits,
+                                 const std::uint32_t count,
+                                 Scratch&            scratch,
+                                 int                 slot,
+                                 std::uint32_t*      mirror) {
   __syncthreads();
   if (threadIdx.x == 0) {
-    int slot = tree.entrySlot[entry];
     if (slot < 0) {
       slot = atomicAdd(tree.slotCursor, 1);
       if (slot >= tree.maxSlots) {
@@ -271,7 +273,7 @@ __device__ void storeEntry(const Tree&         tree,
     scratch.broadcast[0] = slot;
   }
   __syncthreads();
-  const int slot = scratch.broadcast[0];
+  slot = scratch.broadcast[0];
   if (slot < 0) {
     return;
   }
@@ -288,6 +290,9 @@ __device__ void storeEntry(const Tree&         tree,
       sums[bit] = bits.parts[part];
       if (threadIdx.x % 32 == 0) {
         centroid[bit / 32] = word;
+        if (mirror != nullptr) {
+          mirror[bit / 32] = word;
+        }
       }
     }
   }
@@ -297,6 +302,15 @@ __device__ void storeEntry(const Tree&         tree,
     tree.entryCount[entry] = count;
   }
   __syncthreads();
+}
+
+//! storeEntryInSlot with the entry's current slot looked up.
+__device__ void storeEntry(const Tree&         tree,
+                           const int           entry,
+                           const Bits&         bits,
+                           const std::uint32_t count,
+                           Scratch&            scratch) {
+  storeEntryInSlot(tree, entry, bits, count, scratch, tree.entrySlot[entry], nullptr);
 }
 
 // Whether a cluster with these per-bit sums and count members passes the iSIM
@@ -760,9 +774,11 @@ __global__ void groupsKernel(const Tree   tree,
 }
 
 //! Most pending rows a leaf owner compares with its leaf in one pass.
-constexpr int         kOwnerBatch        = 16;
+constexpr int         kOwnerBatch         = 16;
 //! Device bytes for leaf-owner counts; wider batches give way to narrower ones past it.
-constexpr std::size_t kOwnerScratchBytes = std::size_t{128} << 20;
+constexpr std::size_t kOwnerScratchBytes  = std::size_t{128} << 20;
+//! Leaf positions whose entry metadata a leaf owner keeps in shared memory; later positions read the tree.
+constexpr int         kOwnerMetaPositions = 2048;
 
 //! Intersection and union popcounts packed in one word; both are at most 4096.
 __device__ __forceinline__ std::uint32_t packCounts(const int intersection, const int unionCount) {
@@ -773,20 +789,71 @@ __device__ __forceinline__ float packedSimilarity(const std::uint32_t counts) {
   return similarity(static_cast<int>(counts & 0xffffU), static_cast<int>(counts >> 16));
 }
 
-//! Rows of one leaf-owner batch, staged with their popcounts.
+//! Rows of one leaf-owner batch, staged with their popcounts, plus the leaf's entry metadata.
 struct OwnerBatch {
-  std::uint32_t queries[kOwnerBatch][kBitBirchMaxWords];
-  int           queryBits[kOwnerBatch];
-  std::uint32_t queryPairs[kOwnerBatch][kOwnerBatch];  //!< Packed counts of rows [later][earlier].
-  int           pending[kBlockSize];
-  int           warpOffsets[kNumWarps + 1];
+  std::uint32_t      queries[kOwnerBatch][kBitBirchMaxWords];
+  int                queryBits[kOwnerBatch];
+  std::uint32_t      queryPairs[kOwnerBatch][kOwnerBatch];  //!< Packed counts of rows [later][earlier].
+  int                pending[kBlockSize];
+  int                warpOffsets[kNumWarps + 1];
+  // Entry metadata by leaf position: entry ID, member count, and the row of a
+  // single-member entry or the bitwise complement of a summary slot.
+  int                entry[kOwnerMetaPositions];
+  std::uint32_t      count[kOwnerMetaPositions];
+  int                ref[kOwnerMetaPositions];
+  std::uint32_t      centroid[kBitBirchMaxWords];  //!< Centroid of the entry a row just merged into.
+  unsigned long long warpKeys[2][kNumWarps];       //!< Closest-entry partials, alternating between rows.
+  int                failed;                       //!< Whether the last row hit a capacity limit.
 };
+
+struct PositionInfo {
+  int           entry;
+  std::uint32_t count;
+  int           ref;
+};
+
+__device__ __forceinline__ int referenceOf(const Tree& tree, const int entry) {
+  const int row = tree.entryRow[entry];
+  return row >= 0 ? row : ~tree.entrySlot[entry];
+}
+
+__device__ __forceinline__ PositionInfo readPosition(const Tree&       tree,
+                                                     const int*        entries,
+                                                     const OwnerBatch& batch,
+                                                     const int         position) {
+  if (position < kOwnerMetaPositions) {
+    return {batch.entry[position], batch.count[position], batch.ref[position]};
+  }
+  const int entry = entries[position];
+  return {entry, tree.entryCount[entry], referenceOf(tree, entry)};
+}
+
+__device__ __forceinline__ void writePosition(OwnerBatch& batch, const int position, const PositionInfo info) {
+  if (position < kOwnerMetaPositions) {
+    batch.entry[position] = info.entry;
+    batch.count[position] = info.count;
+    batch.ref[position]   = info.ref;
+  }
+}
+
+__device__ __forceinline__ const std::uint32_t* centroidOfReference(const Tree& tree, const int ref) {
+  return ref >= 0 ? rowOf(tree, ref) : tree.centroids + static_cast<std::size_t>(~ref) * tree.numWords;
+}
+
+__device__ __forceinline__ void addReference(Bits& bits, const Tree& tree, const int ref) {
+  if (ref >= 0) {
+    addRow(bits, tree, rowOf(tree, ref));
+  } else {
+    addSums(bits, tree, tree.sums + static_cast<std::size_t>(~ref) * tree.numBits);
+  }
+}
 
 // Inserts width pending rows into the leaf in order, as if each searched the
 // leaf alone. One pass first counts every row against every leaf position into
 // counts (row-major, stride per row); a merge then recounts the merged position
 // for the later rows, and a new entry takes their counts against its row.
-// Returns whether the leaf overflowed, leaving the remaining rows pending.
+// Returns whether the leaf overflowed or a capacity limit was hit, leaving the
+// remaining rows pending. The leaf's metadata in batch is kept current.
 __device__ bool insertRows(const Tree&    tree,
                            const int      node,
                            int*           entries,
@@ -797,10 +864,19 @@ __device__ bool insertRows(const Tree&    tree,
                            OwnerBatch&    batch,
                            Scratch&       scratch) {
   const int numWords = tree.numWords;
+  const int lane     = threadIdx.x % 32;
+  const int warp     = threadIdx.x / 32;
   for (int item = threadIdx.x; item < width * numWords; item += kBlockSize) {
     batch.queries[item / numWords][item % numWords] = rowOf(tree, rows[item / numWords])[item % numWords];
   }
+  if (threadIdx.x == 0) {
+    // Other blocks may fail while this one runs, so one read decides for every thread.
+    batch.failed = *tree.status != kSuccess;
+  }
   __syncthreads();
+  if (batch.failed) {
+    return true;
+  }
   for (int query = threadIdx.x; query < width; query += kBlockSize) {
     int bits = 0;
     for (int word = 0; word < numWords; ++word) {
@@ -824,7 +900,7 @@ __device__ bool insertRows(const Tree&    tree,
   int size = tree.nodeSize[node];
   // One thread per position reads its centroid once for every row.
   for (int position = threadIdx.x; position < size; position += kBlockSize) {
-    const std::uint32_t* centroid                   = centroidOf(tree, entries[position]);
+    const std::uint32_t* centroid = centroidOfReference(tree, readPosition(tree, entries, batch, position).ref);
     int                  intersections[kOwnerBatch] = {};
     int                  centroidBits               = 0;
     const auto           countWord                  = [&](const std::uint32_t value, const int word) {
@@ -861,25 +937,40 @@ __device__ bool insertRows(const Tree&    tree,
   }
   __syncthreads();
   for (int query = 0; query < width; ++query) {
-    const int row    = rows[query];
-    int       entry  = -1;
-    bool      merged = false;
-    if (size > 0) {
-      float best      = -1.0f;
-      int   bestIndex = INT_MAX;
-      for (int position = threadIdx.x; position < size; position += kBlockSize) {
-        const float value = packedSimilarity(counts[query * tree.stride + position]);
-        if (value > best) {
-          best      = value;
-          bestIndex = position;
-        }
-      }
-      const int position              = blockArgMax(best, bestIndex, scratch);
-      entry                           = entries[position];
+    const int          row = rows[query];
+    // Closest position: the greatest key (similarity bits << 32 | inverted position),
+    // so the lowest position wins ties; zero means the leaf is empty. Nonnegative
+    // FP32 bit patterns order like their values.
+    unsigned long long key = 0;
+    for (int position = threadIdx.x; position < size; position += kBlockSize) {
+      const float value = packedSimilarity(counts[query * tree.stride + position]);
+      key               = max(key,
+                static_cast<unsigned long long>(__float_as_uint(value)) << 32 |
+                  (0xffffffffU - static_cast<std::uint32_t>(position)));
+    }
+#pragma unroll
+    for (int offset = 16; offset > 0; offset /= 2) {
+      key = max(key, __shfl_xor_sync(0xffffffffU, key, offset));
+    }
+    if (lane == 0) {
+      batch.warpKeys[query % 2][warp] = key;
+    }
+    __syncthreads();
+    unsigned long long best = 0;
+#pragma unroll
+    for (int other = 0; other < kNumWarps; ++other) {
+      best = max(best, batch.warpKeys[query % 2][other]);
+    }
+    int  entry  = -1;
+    bool merged = false;
+    if (best != 0) {
+      const int          position     = static_cast<int>(0xffffffffU - static_cast<std::uint32_t>(best));
+      const PositionInfo info         = readPosition(tree, entries, batch, position);
+      entry                           = info.entry;
       // A single-member entry and the row sum to 2 on shared bits and 1 on the
       // others, so the merged iSIM terms are exactly |a & b| and |a | b| - |a & b|.
-      const bool          singleton   = tree.entryRow[entry] >= 0;
-      const std::uint32_t mergedCount = tree.entryCount[entry] + 1;
+      const bool          singleton   = info.ref >= 0;
+      const std::uint32_t mergedCount = info.count + 1;
       if (singleton) {
         const std::uint32_t pair   = counts[query * tree.stride + position];
         const double        shared = pair & 0xffffU;
@@ -887,45 +978,56 @@ __device__ bool insertRows(const Tree&    tree,
       }
       Bits bits;
       if (!singleton || merged) {
-        addEntry(bits, tree, entry);
+        addReference(bits, tree, info.ref);
         addRow(bits, tree, batch.queries[query]);
       }
       if (!singleton) {
         merged = passesThreshold(tree, bits, mergedCount, threshold, scratch);
       }
       if (merged) {
-        storeEntry(tree, entry, bits, mergedCount, scratch);
+        storeEntryInSlot(tree, entry, bits, mergedCount, scratch, singleton ? -1 : ~info.ref, batch.centroid);
+        const int slot = scratch.broadcast[0];
+        if (threadIdx.x == 0) {
+          batch.failed = slot < 0;
+          writePosition(batch, position, {entry, mergedCount, ~slot});
+        }
         // One warp per later row recounts the merged centroid.
-        const std::uint32_t* centroid = centroidOf(tree, entry);
-        for (int later = query + 1 + static_cast<int>(threadIdx.x / 32); later < width; later += kNumWarps) {
+        for (int later = query + 1 + warp; later < width; later += kNumWarps) {
           int intersection = 0;
           int centroidBits = 0;
-          for (int word = threadIdx.x % 32; word < numWords; word += 32) {
-            intersection += __popc(centroid[word] & batch.queries[later][word]);
-            centroidBits += __popc(centroid[word]);
+          for (int word = lane; word < numWords; word += 32) {
+            intersection += __popc(batch.centroid[word] & batch.queries[later][word]);
+            centroidBits += __popc(batch.centroid[word]);
           }
+#pragma unroll
           for (int offset = 16; offset > 0; offset /= 2) {
             intersection += __shfl_xor_sync(0xffffffffU, intersection, offset);
             centroidBits += __shfl_xor_sync(0xffffffffU, centroidBits, offset);
           }
-          if (threadIdx.x % 32 == 0) {
+          if (lane == 0) {
             counts[later * tree.stride + position] =
               packCounts(intersection, centroidBits + batch.queryBits[later] - intersection);
           }
         }
+        if (threadIdx.x == 0) {
+          tree.labels[row]       = entry;
+          tree.entryFirst[entry] = min(tree.entryFirst[entry], row);
+        }
       }
     }
-    // Only thread zero allocates, so the new entry stays in its own register: a
-    // shared broadcast here could overwrite the merge decision before every warp
-    // has read it.
     if (!merged) {
+      // Only thread zero allocates; the others learn of a failure after the barrier.
       if (threadIdx.x == 0) {
-        entry = allocateEntry(tree);
+        entry        = allocateEntry(tree);
+        batch.failed = entry < 0;
         if (entry >= 0) {
           tree.entryRow[entry]   = row;
           tree.entryCount[entry] = 1;
+          tree.entryFirst[entry] = row;
+          tree.labels[row]       = entry;
           entries[size]          = entry;
           tree.nodeSize[node]    = size + 1;
+          writePosition(batch, size, {entry, 1, row});
         }
       }
       // The new entry's centroid is this row.
@@ -934,16 +1036,8 @@ __device__ bool insertRows(const Tree&    tree,
       }
       ++size;
     }
-    if (threadIdx.x == 0) {
-      if (entry >= 0) {
-        tree.labels[row]       = entry;
-        tree.entryFirst[entry] = min(tree.entryFirst[entry], row);
-      }
-      // Other blocks may fail while this one runs, so one read decides for every thread.
-      scratch.broadcast[2] = *tree.status;
-    }
-    __syncthreads();
-    if (size > tree.branchingFactor || scratch.broadcast[2] != kSuccess) {
+    __syncthreads();  // The row's metadata, counts and size are visible to the next row.
+    if (batch.failed || size > tree.branchingFactor) {
       return true;
     }
   }
@@ -978,6 +1072,13 @@ __global__ void leafOwnersKernel(const Tree     tree,
   int*           entries    = entriesOf(tree, node);
   std::uint32_t* counts     = countScratch + static_cast<std::size_t>(first) * width * tree.stride;
   bool           overflowed = false;
+  // Stage the leaf's entry metadata; insertRows keeps it current.
+  for (int position = threadIdx.x; position < min(tree.nodeSize[node], kOwnerMetaPositions); position += kBlockSize) {
+    const int entry       = entries[position];
+    batch.entry[position] = entry;
+    batch.count[position] = tree.entryCount[entry];
+    batch.ref[position]   = referenceOf(tree, entry);
+  }
   for (int chunk = first; !overflowed && chunk < count && keys[chunk] == node; chunk += kBlockSize) {
     // List this chunk's pending rows of the run in order.
     const int      index   = chunk + static_cast<int>(threadIdx.x);
