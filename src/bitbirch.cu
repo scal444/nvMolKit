@@ -45,6 +45,10 @@ enum Status : int {
   kInvalidTree
 };
 
+//! entryChild of a leaf entry (a cluster), and of an entry ID a leaf owner reserved but did not use.
+constexpr int kLeafEntry = -1;
+constexpr int kHoleEntry = -2;
+
 //! Values the host reads back after each insertion round.
 enum Control : int {
   kPending,
@@ -116,6 +120,7 @@ struct Scratch {
   } reduce;
   unsigned long long reduced;  //!< Result of the last blockReduce.
   int                broadcast[3];
+  unsigned long long termPartials[2][kNumWarps][2];  //!< Per-warp iSIM terms, alternating between calls.
 };
 
 //! Per-bit sums owned by one thread; see kBitParts.
@@ -281,15 +286,19 @@ __device__ unsigned long long blockMin(const unsigned long long value, Scratch& 
 // Stores bits as the entry's sums, majority centroid and member count. slot is
 // the entry's summary slot, or -1 to give a single-member entry one. mirror,
 // when given, receives the centroid words as well. Every thread of the block
-// calls it after it has finished reading the entry.
+// calls it after it has finished reading the entry; a caller that has passed a
+// barrier since the last use of the scratch broadcast may skip the leading one.
 __device__ void storeEntryInSlot(const Tree&         tree,
                                  const int           entry,
                                  const Bits&         bits,
                                  const std::uint32_t count,
                                  Scratch&            scratch,
                                  int                 slot,
-                                 std::uint32_t*      mirror) {
-  __syncthreads();
+                                 std::uint32_t*      mirror,
+                                 const bool          leadingBarrier = true) {
+  if (leadingBarrier) {
+    __syncthreads();
+  }
   if (threadIdx.x == 0) {
     if (slot < 0) {
       slot = atomicAdd(tree.slotCursor, 1);
@@ -346,12 +355,15 @@ __device__ void storeEntry(const Tree&         tree,
 // they are summed exactly in 64-bit integers, which is also exactly what the
 // FP64 sums give while they stay below 2^53; larger clusters take the FP64 path,
 // whose fixed reduction order keeps the sums deterministic.
+// parity selects one of two partial-sum buffers: consecutive calls without a
+// barrier between them must alternate it, so a fast warp cannot overwrite the
+// partials a slower warp is still summing.
 __device__ bool passesThreshold(const Tree&         tree,
                                 const Bits&         bits,
                                 const std::uint64_t count,
                                 const double        threshold,
-                                Scratch&            scratch) {
-  __syncthreads();  // Earlier users of the reduction storage are done.
+                                Scratch&            scratch,
+                                const int           parity = 0) {
   if (count <= kMaxIntegerTermsCount) {
     IntegerTerms terms{};
 #pragma unroll
@@ -362,17 +374,29 @@ __device__ bool passesThreshold(const Tree&         tree,
         terms.mismatches += componentCount * (count - componentCount);
       }
     }
-    const auto total =
-      IntTermsReduce(scratch.reduce.intTerms).Reduce(terms, [](const IntegerTerms& lhs, const IntegerTerms& rhs) {
-        return IntegerTerms{lhs.commonPairs + rhs.commonPairs, lhs.mismatches + rhs.mismatches};
-      });
-    if (threadIdx.x == 0) {
-      scratch.broadcast[1] =
-        bitbirch::isimTanimotoAtLeast({static_cast<double>(total.commonPairs), static_cast<double>(total.mismatches)},
-                                      count,
-                                      threshold);
+#pragma unroll
+    for (int offset = 16; offset > 0; offset /= 2) {
+      terms.commonPairs += __shfl_xor_sync(0xffffffffU, terms.commonPairs, offset);
+      terms.mismatches += __shfl_xor_sync(0xffffffffU, terms.mismatches, offset);
     }
+    if (threadIdx.x % 32 == 0) {
+      scratch.termPartials[parity][threadIdx.x / 32][0] = terms.commonPairs;
+      scratch.termPartials[parity][threadIdx.x / 32][1] = terms.mismatches;
+    }
+    __syncthreads();
+    // Every thread sums the same eight partials in the same order and decides alike.
+    IntegerTerms total{};
+#pragma unroll
+    for (int other = 0; other < kNumWarps; ++other) {
+      total.commonPairs += scratch.termPartials[parity][other][0];
+      total.mismatches += scratch.termPartials[parity][other][1];
+    }
+    return bitbirch::isimTanimotoAtLeast(
+      {static_cast<double>(total.commonPairs), static_cast<double>(total.mismatches)},
+      count,
+      threshold);
   } else {
+    __syncthreads();  // Earlier users of the reduction storage are done.
     bitbirch::ISimTanimotoTerms terms{};
 #pragma unroll
     for (int part = 0; part < kBitParts; ++part) {
@@ -804,7 +828,7 @@ __global__ void groupsKernel(const Tree   tree,
     return rowOf(tree, tree.batchBegin + values[first + index]);
   });
   const std::uint32_t combined = tree.entryCount[entry] + (end - first);
-  if (passesThreshold(tree, bits, combined, threshold, scratch)) {
+  if (passesThreshold(tree, bits, combined, threshold, scratch, 0)) {
     storeEntry(tree, entry, bits, combined, scratch);
     for (int index = first + threadIdx.x; index < end; index += kBlockSize) {
       tree.labels[tree.batchBegin + values[index]] = entry;
@@ -820,7 +844,7 @@ __global__ void groupsKernel(const Tree   tree,
     addEntry(single, tree, entry);
     addRow(single, tree, rowOf(tree, row));
     const std::uint32_t merged = tree.entryCount[entry] + 1;
-    if (passesThreshold(tree, single, merged, threshold, scratch)) {
+    if (passesThreshold(tree, single, merged, threshold, scratch, (index - first + 1) % 2)) {
       storeEntry(tree, entry, single, merged, scratch);
       if (threadIdx.x == 0) {
         tree.labels[row]       = entry;
@@ -862,6 +886,7 @@ struct OwnerBatch {
   unsigned long long warpKeys[2][kNumWarps];       //!< Closest-entry partials, alternating between rows.
   int                failed;                       //!< Whether the last row hit a capacity limit.
   int                ownerIndex;                   //!< This owner's rank among the round's owners.
+  int                reserved;                     //!< First of the entry IDs reserved for this batch of rows.
 };
 
 struct PositionInfo {
@@ -928,12 +953,27 @@ __device__ bool insertRows(const Tree&    tree,
     batch.queries[item / numWords][item % numWords] = rowOf(tree, rows[item / numWords])[item % numWords];
   }
   if (threadIdx.x == 0) {
-    // Other blocks may fail while this one runs, so one read decides for every thread.
-    batch.failed = *tree.status != kSuccess;
+    // Entry IDs for every row of this batch are reserved up front; a row that
+    // merges leaves its ID a hole. Other blocks may fail while this one runs,
+    // so one read of the status decides for every thread.
+    const int reserved = atomicAdd(tree.entryCursor, width);
+    batch.reserved     = reserved;
+    batch.failed       = *tree.status != kSuccess || reserved + width > tree.maxEntries;
+    if (reserved + width > tree.maxEntries) {
+      *tree.status = kCapacity;
+    }
   }
   __syncthreads();
   if (batch.failed) {
     return true;
+  }
+  if (static_cast<int>(threadIdx.x) < width) {
+    const int entry        = batch.reserved + static_cast<int>(threadIdx.x);
+    tree.entryChild[entry] = kHoleEntry;
+    tree.entryCount[entry] = 0;
+    tree.entrySlot[entry]  = -1;
+    tree.entryRow[entry]   = -1;
+    tree.entryFirst[entry] = INT_MAX;
   }
   for (int query = threadIdx.x; query < width; query += kBlockSize) {
     int bits = 0;
@@ -1040,10 +1080,10 @@ __device__ bool insertRows(const Tree&    tree,
         addRow(bits, tree, batch.queries[query]);
       }
       if (!singleton) {
-        merged = passesThreshold(tree, bits, mergedCount, threshold, scratch);
+        merged = passesThreshold(tree, bits, mergedCount, threshold, scratch, query % 2);
       }
       if (merged) {
-        storeEntryInSlot(tree, entry, bits, mergedCount, scratch, singleton ? -1 : ~info.ref, batch.centroid);
+        storeEntryInSlot(tree, entry, bits, mergedCount, scratch, singleton ? -1 : ~info.ref, batch.centroid, false);
         const int slot = scratch.broadcast[0];
         if (threadIdx.x == 0) {
           batch.failed = slot < 0;
@@ -1068,25 +1108,22 @@ __device__ bool insertRows(const Tree&    tree,
           }
         }
         if (threadIdx.x == 0) {
-          tree.labels[row]       = entry;
-          tree.entryFirst[entry] = min(tree.entryFirst[entry], row);
+          tree.labels[row] = entry;
+          atomicMin(tree.entryFirst + entry, row);
         }
       }
     }
     if (!merged) {
-      // Only thread zero allocates; the others learn of a failure after the barrier.
       if (threadIdx.x == 0) {
-        entry        = allocateEntry(tree);
-        batch.failed = entry < 0;
-        if (entry >= 0) {
-          tree.entryRow[entry]   = row;
-          tree.entryCount[entry] = 1;
-          tree.entryFirst[entry] = row;
-          tree.labels[row]       = entry;
-          entries[size]          = entry;
-          tree.nodeSize[node]    = size + 1;
-          writePosition(batch, size, {entry, 1, row});
-        }
+        entry                  = batch.reserved + query;
+        tree.entryChild[entry] = kLeafEntry;
+        tree.entryRow[entry]   = row;
+        tree.entryCount[entry] = 1;
+        tree.entryFirst[entry] = row;
+        tree.labels[row]       = entry;
+        entries[size]          = entry;
+        tree.nodeSize[node]    = size + 1;
+        writePosition(batch, size, {entry, 1, row});
       }
       // The new entry's centroid is this row.
       for (int later = query + 1 + static_cast<int>(threadIdx.x); later < width; later += kBlockSize) {
@@ -1534,7 +1571,7 @@ __global__ void collectLeavesKernel(const Tree tree,
                                     int*       leafEntries,
                                     int*       cursor) {
   const int entry = blockIdx.x * blockDim.x + threadIdx.x;
-  if (entry < numEntries && tree.entryChild[entry] < 0) {
+  if (entry < numEntries && tree.entryChild[entry] == kLeafEntry) {
     const int slot    = atomicAdd(cursor, 1);
     firstRows[slot]   = tree.entryFirst[entry];
     leafEntries[slot] = entry;
@@ -1739,6 +1776,7 @@ class TreeBuilder {
   }
 
  private:
+  //! Upper bound on the clusters so far: leaf owners' unused reserved entry IDs are counted too.
   int clusters() const { return hostControl_[kEntries] - hostControl_[kNodes] + 1; }
 
   // Grows the tree for up to clusterBound clusters and one more round's summaries.
@@ -1956,12 +1994,12 @@ class TreeBuilder {
 
   BitBirchResult finalize() {
     const ScopedNvtxRange  range("BitBIRCH finalize");
-    const int              numClusters = clusters();
-    const int              numEntries  = hostControl_[kEntries];
-    AsyncDeviceVector<int> firstRows(numClusters, stream_);
-    AsyncDeviceVector<int> leafEntries(numClusters, stream_);
-    AsyncDeviceVector<int> sortedFirstRows(numClusters, stream_);
-    AsyncDeviceVector<int> sortedLeafEntries(numClusters, stream_);
+    const int              clusterBound = clusters();
+    const int              numEntries   = hostControl_[kEntries];
+    AsyncDeviceVector<int> firstRows(clusterBound, stream_);
+    AsyncDeviceVector<int> leafEntries(clusterBound, stream_);
+    AsyncDeviceVector<int> sortedFirstRows(clusterBound, stream_);
+    AsyncDeviceVector<int> sortedLeafEntries(clusterBound, stream_);
     AsyncDeviceVector<int> cursor(1, stream_);
     cudaCheckError(cudaMemsetAsync(cursor.data(), 0, sizeof(int), stream_));
     collectLeavesKernel<<<(numEntries + kBlockSize - 1) / kBlockSize, kBlockSize, 0, stream_>>>(tree_,
@@ -1970,6 +2008,9 @@ class TreeBuilder {
                                                                                                 leafEntries.data(),
                                                                                                 cursor.data());
     cudaCheckError(cudaGetLastError());
+    int numClusters = 0;
+    cudaCheckError(cudaMemcpyAsync(&numClusters, cursor.data(), sizeof(int), cudaMemcpyDeviceToHost, stream_));
+    cudaCheckError(cudaStreamSynchronize(stream_));
     // First rows are distinct, so sorting by them numbers clusters by earliest member.
     std::size_t bytes = 0;
     cudaCheckError(cub::DeviceRadixSort::SortPairs(nullptr,
