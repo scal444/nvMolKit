@@ -102,6 +102,7 @@ struct Tree {
   int*                 entryCursor;
   int*                 slotCursor;
   int*                 status;
+  int*                 roundPending;  //!< Rows of the last round's batch left pending, for a speculative route.
   int                  maxNodes;
   int                  maxEntries;
   int                  maxSlots;
@@ -914,11 +915,12 @@ __device__ int splitNode(const Tree& tree, const int node, const int* plan, cons
 }
 
 __global__ void initializeKernel(Tree tree) {
-  *tree.nodeCursor  = 0;
-  *tree.entryCursor = 0;
-  *tree.slotCursor  = 0;
-  *tree.status      = kSuccess;
-  *tree.root        = allocateNode(tree, true, -1);
+  *tree.nodeCursor   = 0;
+  *tree.entryCursor  = 0;
+  *tree.slotCursor   = 0;
+  *tree.status       = kSuccess;
+  *tree.roundPending = 0;
+  *tree.root         = allocateNode(tree, true, -1);
 }
 
 // One block per batch row: descend the tree snapshot to a leaf, and count the
@@ -926,8 +928,11 @@ __global__ void initializeKernel(Tree tree) {
 // the leaf owners. Groups also test the leaf's closest entry, so rows that
 // would each merge into the same entry can be merged together.
 // Four resident blocks per SM: the leaf scan is latency bound, so occupancy matters more than registers.
+// A speculative launch routes the next batch before the host knows whether the
+// previous round finished its own batch; it does nothing if rows were left pending.
 __global__ void __launch_bounds__(kBlockSize, 4) routeKernel(const Tree     tree,
                                                              const bool     groups,
+                                                             const bool     speculative,
                                                              const double   threshold,
                                                              int*           leafKeys,
                                                              int*           groupKeys,
@@ -941,7 +946,7 @@ __global__ void __launch_bounds__(kBlockSize, 4) routeKernel(const Tree     tree
     leafKeys[offset]  = INT_MAX;
     groupKeys[offset] = INT_MAX;
   }
-  if (tree.labels[row] >= 0) {
+  if ((speculative && *tree.roundPending > 0) || tree.labels[row] >= 0) {
     return;
   }
   const std::uint32_t* query = rowOf(tree, row);
@@ -1834,14 +1839,15 @@ __global__ void controlKernel(const Tree tree,
     for (int node = 0; tree.nodeParent[node] >= 0; node = tree.nodeParent[node]) {
       ++depth;
     }
-    *deltaCursor      = 0;
-    *splitCount       = 0;
-    control[kPending] = pending;
-    control[kNodes]   = *tree.nodeCursor;
-    control[kEntries] = *tree.entryCursor;
-    control[kSlots]   = *tree.slotCursor;
-    control[kStatus]  = *tree.status;
-    control[kDepth]   = depth;
+    *deltaCursor       = 0;
+    *splitCount        = 0;
+    *tree.roundPending = pending;
+    control[kPending]  = pending;
+    control[kNodes]    = *tree.nodeCursor;
+    control[kEntries]  = *tree.entryCursor;
+    control[kSlots]    = *tree.slotCursor;
+    control[kStatus]   = *tree.status;
+    control[kDepth]    = depth;
     __threadfence_system();
     *reinterpret_cast<volatile int*>(control + kSequence) = sequence;
   }
@@ -2010,8 +2016,8 @@ class TreeBuilder {
       vector->resize(1);
       cudaCheckError(cudaMemsetAsync(vector->data(), 0, sizeof(int), stream));
     }
-    // root, nodeCursor, entryCursor, slotCursor, status.
-    cursors_.resize(5);
+    // root, nodeCursor, entryCursor, slotCursor, status, roundPending.
+    cursors_.resize(6);
     hostControl_ = PinnedHostVector<int>(kNumControls, 0);
 
     int device = 0;
@@ -2037,35 +2043,75 @@ class TreeBuilder {
                                                    stream));
     sortScratch_.resize(sortBytes);
 
-    grow(batchCapacity_);
+    grow(batchCapacity_, 0);
     bindTree();
     initializeKernel<<<1, 1, 0, stream>>>(tree_);
     cudaCheckError(cudaGetLastError());
     hostControl_[kNodes] = 1;
   }
 
+  // Inserts every batch, round by round. The route kernel of the next batch
+  // is enqueued behind each round before the host reads the round's result,
+  // so the GPU does not idle while the host turns the round around; it does
+  // nothing on the device if rows of the current batch were left pending, in
+  // which case the batch is routed again. Rounds stay in order, so results are
+  // those of serial insertion.
   BitBirchResult run() {
-    for (int begin = 0; begin < numRows_;) {
-      // Warm-up batches end at kOrderedWarmup so the first batch with groups starts there.
-      const int boundary = begin < kOrderedWarmup ? std::min(kOrderedWarmup, numRows_) : numRows_;
-      const int count    = std::min(batchCapacity_, boundary - begin);
-      insertBatch(begin, count);
-      begin += count;
+    int  begin        = 0;
+    int  count        = batchCount(0);
+    int  pendingBound = count;
+    bool routed       = false;
+    while (true) {
+      enqueueRound(begin, count, pendingBound, routed);
+      const int  nextBegin = begin + count;
+      const bool hasNext   = nextBegin < numRows_;
+      if (hasNext) {
+        speculativeRoute(nextBegin, batchCount(nextBegin), pendingBound);
+      }
+      waitForControls();
+      if (hostControl_[kStatus] != kSuccess) {
+        throw std::runtime_error("BitBIRCH tree failure (status " + std::to_string(hostControl_[kStatus]) + ")");
+      }
+      if (hostControl_[kPending] >= pendingBound) {
+        throw std::runtime_error("BitBIRCH insertion failed to make progress");
+      }
+      if (hostControl_[kPending] > 0) {
+        // The speculative route, if any, did nothing. Route this batch's pending rows again.
+        pendingBound = hostControl_[kPending];
+        routed       = false;
+        continue;
+      }
+      if (!hasNext) {
+        break;
+      }
+      begin        = nextBegin;
+      count        = batchCount(begin);
+      pendingBound = count;
+      routed       = true;
     }
     return finalize();
+  }
+
+ private:
+  //! Rows of the batch starting at begin: warm-up batches end at kOrderedWarmup, so the first batch with groups starts
+  //! there.
+  int batchCount(const int begin) const {
+    const int boundary = begin < kOrderedWarmup ? std::min(kOrderedWarmup, numRows_) : numRows_;
+    return std::min(batchCapacity_, boundary - begin);
   }
 
  private:
   //! Upper bound on the clusters so far: leaf owners' unused reserved entry IDs are counted too.
   int clusters() const { return hostControl_[kEntries] - hostControl_[kNodes] + 1; }
 
-  // Grows the tree for up to clusterBound clusters and one more round's summaries.
-  void grow(const std::int64_t clusterBound) {
+  // Grows the tree for up to clusterBound clusters at depth up to depthBound,
+  // with one more round's summaries. Resizing is stream ordered, so kernels
+  // already enqueued keep their buffers until they finish.
+  void grow(const std::int64_t clusterBound, const int depthBound) {
     const std::int64_t nodes   = std::min<std::int64_t>(clusterBound / std::max(1, minNodeSize_ - 1) + 8,
                                                       numRows_ / std::max(1, minNodeSize_ - 1) + 8);
     const std::int64_t entries = clusterBound + nodes;
-    const std::int64_t slots =
-      hostControl_[kSlots] + (clusterBound - clusters()) * (2LL * hostControl_[kDepth] + 5) + 4;
+    const std::int64_t slots   = hostControl_[kSlots] + (clusterBound - clusters()) * (2LL * depthBound + 5) + 4;
     if (entries > std::numeric_limits<int>::max() || slots > std::numeric_limits<int>::max()) {
       throw std::invalid_argument("BitBIRCH tree exceeds its int32 index capacity");
     }
@@ -2118,6 +2164,7 @@ class TreeBuilder {
     tree_.entryCursor     = cursors_.data() + 2;
     tree_.slotCursor      = cursors_.data() + 3;
     tree_.status          = cursors_.data() + 4;
+    tree_.roundPending    = cursors_.data() + 5;
   }
 
   void sortPairs(const int* keys,
@@ -2169,13 +2216,33 @@ class TreeBuilder {
     cudaCheckError(cudaGetLastError());
   }
 
-  void insertBatch(const int begin, const int count) {
-    const ScopedNvtxRange batchRange("BitBIRCH batch");
+  //! Routes the batch [begin, begin + count) behind the running round, which may still turn pendingBound rows into
+  //! entries.
+  void speculativeRoute(const int begin, const int count, const int pendingBound) {
+    grow(static_cast<std::int64_t>(clusters()) + pendingBound + count, hostControl_[kDepth] + 1);
+    tree_.batchBegin = begin;
+    routeKernel<<<count, kBlockSize, 0, stream_>>>(tree_,
+                                                   begin >= kOrderedWarmup,
+                                                   true,
+                                                   threshold_,
+                                                   keys_.data(),
+                                                   groupKeys_.data(),
+                                                   values_.data(),
+                                                   counts_.data());
+    cudaCheckError(cudaGetLastError());
+  }
+
+  // Enqueues one round for the batch [begin, begin + count), of which at most
+  // pendingBound rows are pending; its route kernel is skipped when it was
+  // already enqueued speculatively. Returns without waiting.
+  void enqueueRound(const int begin, const int count, const int pendingBound, const bool routed) {
+    const ScopedNvtxRange roundRange("BitBIRCH round");
     const bool            groups = begin >= kOrderedWarmup;
+    const int             depth  = hostControl_[kDepth];
     tree_.batchBegin             = begin;
-    for (int pending = count; pending > 0;) {
-      const int depth = hostControl_[kDepth];
-      grow(static_cast<std::int64_t>(clusters()) + pending);
+    {
+      const int pending = pendingBound;
+      grow(static_cast<std::int64_t>(clusters()) + pending, depth);
       // Each level lists at most one node per routed leaf; each node takes one delta per round.
       reserveScratch(levelNodes_, static_cast<std::size_t>(depth + 1) * batchCapacity_);
       if (levelCounts_.size() < static_cast<std::size_t>(depth) + 1) {
@@ -2188,14 +2255,17 @@ class TreeBuilder {
       reserveScratch(deltaSums_, deltaCapacity * numWords_ * 32);
 
       ++stamp_;
-      routeKernel<<<count, kBlockSize, 0, stream_>>>(tree_,
-                                                     groups,
-                                                     threshold_,
-                                                     keys_.data(),
-                                                     groupKeys_.data(),
-                                                     values_.data(),
-                                                     counts_.data());
-      cudaCheckError(cudaGetLastError());
+      if (!routed) {
+        routeKernel<<<count, kBlockSize, 0, stream_>>>(tree_,
+                                                       groups,
+                                                       false,
+                                                       threshold_,
+                                                       keys_.data(),
+                                                       groupKeys_.data(),
+                                                       values_.data(),
+                                                       counts_.data());
+        cudaCheckError(cudaGetLastError());
+      }
       if (groups) {
         sortPairs(groupKeys_.data(),
                   sortedGroupKeys_.data(),
@@ -2266,14 +2336,6 @@ class TreeBuilder {
                                                    deltaCursor_.data(),
                                                    splitCount_.data());
       cudaCheckError(cudaGetLastError());
-      waitForControls();
-      if (hostControl_[kStatus] != kSuccess) {
-        throw std::runtime_error("BitBIRCH tree failure (status " + std::to_string(hostControl_[kStatus]) + ")");
-      }
-      if (hostControl_[kPending] >= pending) {
-        throw std::runtime_error("BitBIRCH insertion failed to make progress");
-      }
-      pending = hostControl_[kPending];
     }
   }
 
