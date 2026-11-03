@@ -31,7 +31,7 @@ constexpr int kNumWarps           = kBlockSize / 32;
 //! Bits each thread owns: thread t owns bits t, t + kBlockSize, ... up to kBitBirchMaxWords * 32.
 constexpr int kBitParts           = kBitBirchMaxWords * 32 / kBlockSize;
 //! Lanes that read one centroid together in the closest-entry search.
-constexpr int kLanesPerEntry      = 4;
+constexpr int kLanesPerEntry      = 2;
 //! Rows inserted in batches that never merge groups, so the young tree grows in input order.
 constexpr int kOrderedWarmup      = 16384;
 //! Split pair orders are the low 32 bits of a 64-bit key, so a node holds fewer than 2^16 entries.
