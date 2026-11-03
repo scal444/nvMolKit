@@ -36,7 +36,7 @@ constexpr int kRowsInFlight       = 16;
 //! Per-bit sums rows addRows loads together (up to kBitParts words per thread each).
 constexpr int kSumsInFlight       = 4;
 //! Lanes that read one centroid together in the closest-entry search.
-constexpr int kLanesPerEntry      = 4;
+constexpr int kLanesPerEntry      = 2;
 //! Rows inserted in batches that never merge groups, so the young tree grows in input order.
 constexpr int kOrderedWarmup      = 16384;
 //! Split pair orders are the low 32 bits of a 64-bit key, so a node holds fewer than 2^16 entries.
