@@ -775,7 +775,7 @@ __global__ void groupsKernel(const Tree   tree,
 
 //! Most pending rows a leaf owner compares with its leaf in one pass.
 constexpr int         kOwnerBatch         = 16;
-//! Device bytes for leaf-owner counts; wider batches give way to narrower ones past it.
+//! Device bytes for full-width leaf-owner counts; owners past them count one row at a time.
 constexpr std::size_t kOwnerScratchBytes  = std::size_t{128} << 20;
 //! Leaf positions whose entry metadata a leaf owner keeps in shared memory; later positions read the tree.
 constexpr int         kOwnerMetaPositions = 2048;
@@ -804,6 +804,7 @@ struct OwnerBatch {
   std::uint32_t      centroid[kBitBirchMaxWords];  //!< Centroid of the entry a row just merged into.
   unsigned long long warpKeys[2][kNumWarps];       //!< Closest-entry partials, alternating between rows.
   int                failed;                       //!< Whether the last row hit a capacity limit.
+  int                ownerIndex;                   //!< This owner's rank among the round's owners.
 };
 
 struct PositionInfo {
@@ -913,8 +914,8 @@ __device__ bool insertRows(const Tree&    tree,
       }
     };
     if (numWords % 4 == 0 && isVectorAligned(centroid)) {
-      // 16-byte loads, several in flight: only this thread reads the row.
-#pragma unroll 4
+      // 16-byte loads, as many in flight as possible: only this thread reads the row.
+#pragma unroll 16
       for (int vector = 0; vector < numWords / 4; ++vector) {
         const uint4 value = reinterpret_cast<const uint4*>(centroid)[vector];
         countWord(value.x, 4 * vector);
@@ -1046,8 +1047,10 @@ __device__ bool insertRows(const Tree&    tree,
 
 // One block per run of rows sorted by leaf: the leaf's only writer. Pending
 // rows, in order, merge into their closest entry or start a new one, until the
-// leaf overflows; later rows are routed again after the split. counts holds
-// width * (branchingFactor + 1) words per run.
+// leaf overflows; later rows are routed again after the split. The first
+// wideOwners owners to start count kOwnerBatch rows at a time in their own
+// region of countScratch; later owners count one row at a time in a region
+// indexed by their run, past the wide regions.
 __global__ void leafOwnersKernel(const Tree     tree,
                                  const int      count,
                                  const int*     keys,
@@ -1061,7 +1064,8 @@ __global__ void leafOwnersKernel(const Tree     tree,
                                  int*           splitQueue,
                                  int*           splitCount,
                                  std::uint32_t* countScratch,
-                                 const int      width) {
+                                 int*           ownerCursor,
+                                 const int      wideOwners) {
   __shared__ Scratch    scratch;
   __shared__ OwnerBatch batch;
   const int             first = blockIdx.x;
@@ -1069,9 +1073,11 @@ __global__ void leafOwnersKernel(const Tree     tree,
   if (node == INT_MAX || (first > 0 && keys[first - 1] == node)) {
     return;
   }
-  int*           entries    = entriesOf(tree, node);
-  std::uint32_t* counts     = countScratch + static_cast<std::size_t>(first) * width * tree.stride;
-  bool           overflowed = false;
+  int* entries    = entriesOf(tree, node);
+  bool overflowed = false;
+  if (threadIdx.x == 0) {
+    batch.ownerIndex = atomicAdd(ownerCursor, 1);
+  }
   // Stage the leaf's entry metadata; insertRows keeps it current.
   for (int position = threadIdx.x; position < min(tree.nodeSize[node], kOwnerMetaPositions); position += kBlockSize) {
     const int entry       = entries[position];
@@ -1079,6 +1085,12 @@ __global__ void leafOwnersKernel(const Tree     tree,
     batch.count[position] = tree.entryCount[entry];
     batch.ref[position]   = referenceOf(tree, entry);
   }
+  __syncthreads();
+  const bool     wide   = batch.ownerIndex < wideOwners;
+  const int      width  = wide ? kOwnerBatch : 1;
+  std::uint32_t* counts = wide ?
+                            countScratch + static_cast<std::size_t>(batch.ownerIndex) * kOwnerBatch * tree.stride :
+                            countScratch + (static_cast<std::size_t>(wideOwners) * kOwnerBatch + first) * tree.stride;
   for (int chunk = first; !overflowed && chunk < count && keys[chunk] == node; chunk += kBlockSize) {
     // List this chunk's pending rows of the run in order.
     const int      index   = chunk + static_cast<int>(threadIdx.x);
@@ -1410,7 +1422,8 @@ __global__ void controlKernel(const Tree tree,
                               const int  levelStride,
                               int*       deltaSlots,
                               int*       deltaCursor,
-                              int*       splitCount) {
+                              int*       splitCount,
+                              int*       ownerCursor) {
   __shared__ int pending;
   if (threadIdx.x == 0) {
     pending = 0;
@@ -1444,6 +1457,7 @@ __global__ void controlKernel(const Tree tree,
     control[kDepth]   = depth;
     *deltaCursor      = 0;
     *splitCount       = 0;
+    *ownerCursor      = 0;
   }
 }
 
@@ -1559,14 +1573,13 @@ class TreeBuilder {
         stride_(options.branchingFactor + 1),
         // Balanced splits leave every non-root node at least half full.
         minNodeSize_((options.branchingFactor + 1) / 2) {
-    for (auto* vector : {&nodeSize_,     &nodeParent_, &nodeParentEntry_, &nodeEntries_,
-                         &entryChild_,   &entrySlot_,  &entryRow_,        &entryFirst_,
-                         &labels_,       &keys_,       &sortedKeys_,      &values_,
-                         &sortedValues_, &groupKeys_,  &sortedGroupKeys_, &sortedGroupValues_,
-                         &dirty_,        &levelNodes_, &levelCounts_,     &deltaSlots_,
-                         &deltaCursor_,  &splitQueue_, &splitCount_,      &plans_,
-                         &leftSizes_,    &innerPlan_,  &deferredNodes_,   &deferredEntries_,
-                         &numDeferred_,  &cursors_,    &control_}) {
+    for (auto* vector : {&nodeSize_,          &nodeParent_, &nodeParentEntry_, &nodeEntries_,     &entryChild_,
+                         &entrySlot_,         &entryRow_,   &entryFirst_,      &labels_,          &keys_,
+                         &sortedKeys_,        &values_,     &sortedValues_,    &groupKeys_,       &sortedGroupKeys_,
+                         &sortedGroupValues_, &dirty_,      &levelNodes_,      &levelCounts_,     &deltaSlots_,
+                         &deltaCursor_,       &splitQueue_, &splitCount_,      &plans_,           &ownerCursor_,
+                         &leftSizes_,         &innerPlan_,  &deferredNodes_,   &deferredEntries_, &numDeferred_,
+                         &cursors_,           &control_}) {
       vector->setStream(stream);
     }
     for (auto* vector : {&entryCount_, &sums_, &centroids_, &deltaSums_, &deltaCounts_, &ownerCounts_}) {
@@ -1600,13 +1613,15 @@ class TreeBuilder {
     plans_.resize(static_cast<std::size_t>(batchCapacity_) * stride_);
     sides_.resize(static_cast<std::size_t>(batchCapacity_) * stride_);
     innerPlan_.resize(stride_);
-    // Leaf owners batch as many rows as the count scratch budget allows, at least one.
-    const std::size_t runBytes = sizeof(std::uint32_t) * static_cast<std::size_t>(batchCapacity_) * stride_;
-    ownerWidth_ = static_cast<int>(std::clamp<std::size_t>(kOwnerScratchBytes / runBytes, 1, kOwnerBatch));
-    ownerCounts_.resize(static_cast<std::size_t>(ownerWidth_) * batchCapacity_ * stride_);
+    // Full-width leaf-owner count regions within the budget (every owner gets one when a batch holds few rows),
+    // then one single-row region per possible run.
+    const std::size_t wideBytes = sizeof(std::uint32_t) * static_cast<std::size_t>(kOwnerBatch) * stride_;
+    wideOwners_ =
+      static_cast<int>(std::min<std::size_t>(batchCapacity_, std::max<std::size_t>(1, kOwnerScratchBytes / wideBytes)));
+    ownerCounts_.resize((static_cast<std::size_t>(wideOwners_) * kOwnerBatch + batchCapacity_) * stride_);
     pairKeys_.resize(batchCapacity_);
     cudaCheckError(cudaMemsetAsync(pairKeys_.data(), 0xff, sizeof(unsigned long long) * batchCapacity_, stream));
-    for (auto* vector : {&deltaCursor_, &splitCount_, &numDeferred_}) {
+    for (auto* vector : {&deltaCursor_, &splitCount_, &numDeferred_, &ownerCursor_}) {
       vector->resize(1);
       cudaCheckError(cudaMemsetAsync(vector->data(), 0, sizeof(int), stream));
     }
@@ -1814,7 +1829,8 @@ class TreeBuilder {
                                                           splitQueue_.data(),
                                                           splitCount_.data(),
                                                           ownerCounts_.data(),
-                                                          ownerWidth_);
+                                                          ownerCursor_.data(),
+                                                          wideOwners_);
       cudaCheckError(cudaGetLastError());
       for (int level = depth; level > 0; --level) {
         refreshKernel<<<count, kBlockSize, 0, stream_>>>(
@@ -1851,7 +1867,8 @@ class TreeBuilder {
                                                    batchCapacity_,
                                                    deltaSlots_.data(),
                                                    deltaCursor_.data(),
-                                                   splitCount_.data());
+                                                   splitCount_.data(),
+                                                   ownerCursor_.data());
       cudaCheckError(cudaGetLastError());
       cudaCheckError(cudaMemcpyAsync(hostControl_.data(),
                                      control_.data(),
@@ -1936,7 +1953,7 @@ class TreeBuilder {
   const int                        stride_;
   const int                        minNodeSize_;
   int                              numSMs_        = 0;
-  int                              ownerWidth_    = 1;
+  int                              wideOwners_    = 1;
   int                              splitTileSize_ = 64;
   std::size_t                      pairShared_    = 0;
   Tree                             tree_{};
@@ -1948,7 +1965,7 @@ class TreeBuilder {
   AsyncDeviceVector<int> keys_, sortedKeys_, values_, sortedValues_, groupKeys_, sortedGroupKeys_, sortedGroupValues_;
   AsyncDeviceVector<int> dirty_, levelNodes_, levelCounts_, deltaSlots_, deltaCursor_;
   AsyncDeviceVector<std::uint32_t>      deltaSums_, deltaCounts_;
-  AsyncDeviceVector<int>                splitQueue_, splitCount_, plans_, leftSizes_, innerPlan_;
+  AsyncDeviceVector<int>                splitQueue_, splitCount_, ownerCursor_, plans_, leftSizes_, innerPlan_;
   AsyncDeviceVector<std::int8_t>        sides_;
   AsyncDeviceVector<unsigned long long> pairKeys_;
   AsyncDeviceVector<int>                deferredNodes_, deferredEntries_, numDeferred_, cursors_, control_;
