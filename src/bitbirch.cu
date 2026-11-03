@@ -4,6 +4,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <atomic>
 #include <climits>
 #include <cmath>
 #include <cstddef>
@@ -49,7 +50,7 @@ enum Status : int {
 constexpr int kLeafEntry = -1;
 constexpr int kHoleEntry = -2;
 
-//! Values the host reads back after each insertion round.
+//! Values the host reads after each insertion round, written to pinned host memory; kSequence comes last.
 enum Control : int {
   kPending,
   kNodes,
@@ -57,6 +58,7 @@ enum Control : int {
   kSlots,
   kStatus,
   kDepth,
+  kSequence,
   kNumControls
 };
 
@@ -1565,9 +1567,12 @@ __global__ void summarizeKernel(const Tree tree, const int* nodes, const int* en
   }
 }
 
-// Publishes the round's controls and resets per-round scratch for the next one.
+// Publishes the round's controls to the host and resets per-round scratch for
+// the next one. control is pinned host memory: the sequence number is written
+// after a system fence, so the host sees the other values once it reads it.
 __global__ void controlKernel(const Tree tree,
                               const int  count,
+                              const int  sequence,
                               int*       control,
                               int*       levelNodes,
                               int*       levelCounts,
@@ -1602,15 +1607,17 @@ __global__ void controlKernel(const Tree tree,
     for (int node = 0; tree.nodeParent[node] >= 0; node = tree.nodeParent[node]) {
       ++depth;
     }
+    *deltaCursor      = 0;
+    *splitCount       = 0;
+    *ownerCursor      = 0;
     control[kPending] = pending;
     control[kNodes]   = *tree.nodeCursor;
     control[kEntries] = *tree.entryCursor;
     control[kSlots]   = *tree.slotCursor;
     control[kStatus]  = *tree.status;
     control[kDepth]   = depth;
-    *deltaCursor      = 0;
-    *splitCount       = 0;
-    *ownerCursor      = 0;
+    __threadfence_system();
+    *reinterpret_cast<volatile int*>(control + kSequence) = sequence;
   }
 }
 
@@ -1726,13 +1733,14 @@ class TreeBuilder {
         stride_(options.branchingFactor + 1),
         // Balanced splits leave every non-root node at least half full.
         minNodeSize_((options.branchingFactor + 1) / 2) {
-    for (auto* vector : {&nodeSize_,          &nodeParent_, &nodeParentEntry_, &nodeEntries_,     &entryChild_,
-                         &entrySlot_,         &entryRow_,   &entryFirst_,      &labels_,          &keys_,
-                         &sortedKeys_,        &values_,     &sortedValues_,    &groupKeys_,       &sortedGroupKeys_,
-                         &sortedGroupValues_, &dirty_,      &levelNodes_,      &levelCounts_,     &deltaSlots_,
-                         &deltaCursor_,       &splitQueue_, &splitCount_,      &plans_,           &ownerCursor_,
-                         &leftSizes_,         &innerPlan_,  &deferredNodes_,   &deferredEntries_, &numDeferred_,
-                         &cursors_,           &control_}) {
+    for (auto* vector : {&nodeSize_,        &nodeParent_,  &nodeParentEntry_, &nodeEntries_,
+                         &entryChild_,      &entrySlot_,   &entryRow_,        &entryFirst_,
+                         &labels_,          &keys_,        &sortedKeys_,      &values_,
+                         &sortedValues_,    &groupKeys_,   &sortedGroupKeys_, &sortedGroupValues_,
+                         &dirty_,           &levelNodes_,  &levelCounts_,     &deltaSlots_,
+                         &deltaCursor_,     &splitQueue_,  &splitCount_,      &plans_,
+                         &ownerCursor_,     &leftSizes_,   &innerPlan_,       &deferredNodes_,
+                         &deferredEntries_, &numDeferred_, &cursors_}) {
       vector->setStream(stream);
     }
     for (auto* vector : {&entryCount_, &sums_, &centroids_, &deltaSums_, &deltaCounts_, &ownerCounts_}) {
@@ -1780,7 +1788,6 @@ class TreeBuilder {
     }
     // root, nodeCursor, entryCursor, slotCursor, status.
     cursors_.resize(5);
-    control_.resize(kNumControls);
     hostControl_ = PinnedHostVector<int>(kNumControls, 0);
 
     int device = 0;
@@ -2013,9 +2020,11 @@ class TreeBuilder {
                                                              deferredEntries_.data(),
                                                              numDeferred_.data());
       cudaCheckError(cudaGetLastError());
+      ++sequence_;
       controlKernel<<<1, kBlockSize, 0, stream_>>>(tree_,
                                                    count,
-                                                   control_.data(),
+                                                   sequence_,
+                                                   hostControl_.data(),
                                                    levelNodes_.data(),
                                                    levelCounts_.data(),
                                                    static_cast<int>(levelCounts_.size()),
@@ -2025,12 +2034,7 @@ class TreeBuilder {
                                                    splitCount_.data(),
                                                    ownerCursor_.data());
       cudaCheckError(cudaGetLastError());
-      cudaCheckError(cudaMemcpyAsync(hostControl_.data(),
-                                     control_.data(),
-                                     sizeof(int) * kNumControls,
-                                     cudaMemcpyDeviceToHost,
-                                     stream_));
-      cudaCheckError(cudaStreamSynchronize(stream_));
+      waitForControls();
       if (hostControl_[kStatus] != kSuccess) {
         throw std::runtime_error("BitBIRCH tree failure (status " + std::to_string(hostControl_[kStatus]) + ")");
       }
@@ -2039,6 +2043,23 @@ class TreeBuilder {
       }
       pending = hostControl_[kPending];
     }
+  }
+
+  // Waits for the round's control kernel by polling the sequence number it
+  // writes to pinned memory, which returns sooner than a stream synchronize.
+  // Now and then the stream is checked instead, which also surfaces device
+  // errors; once the stream has drained, the sequence must be there.
+  void waitForControls() {
+    const volatile int* sequence = hostControl_.data() + kSequence;
+    for (std::uint32_t spins = 0; *sequence != sequence_; ++spins) {
+      if (spins % 4096 == 4095 && cudaStreamQuery(stream_) != cudaErrorNotReady) {
+        cudaCheckError(cudaStreamSynchronize(stream_));
+        if (*sequence != sequence_) {
+          throw std::runtime_error("BitBIRCH control kernel did not publish its round");
+        }
+      }
+    }
+    std::atomic_thread_fence(std::memory_order_acquire);
   }
 
   BitBirchResult finalize() {
@@ -2126,7 +2147,8 @@ class TreeBuilder {
   AsyncDeviceVector<int>                splitQueue_, splitCount_, ownerCursor_, plans_, leftSizes_, innerPlan_;
   AsyncDeviceVector<std::int8_t>        sides_;
   AsyncDeviceVector<unsigned long long> pairKeys_;
-  AsyncDeviceVector<int>                deferredNodes_, deferredEntries_, numDeferred_, cursors_, control_;
+  AsyncDeviceVector<int>                deferredNodes_, deferredEntries_, numDeferred_, cursors_;
+  int                                   sequence_ = 0;
   AsyncDeviceVector<std::byte>          sortScratch_;
   PinnedHostVector<int>                 hostControl_;
 };
