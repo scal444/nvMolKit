@@ -81,6 +81,13 @@ def test_grouped_merges_after_warmup_match_reference():
     assert_matches_reference(packed, 0.5, 50, 1000)
 
 
+def test_leaf_with_more_rows_than_the_owner_lists_matches_reference():
+    # 1300 distinct rows land in one leaf per batch: past 1024 changed positions the owner recounts them all,
+    # and the leaf outgrows the 2048 positions whose metadata it keeps in shared memory before it splits.
+    packed = np.random.default_rng(23).integers(0, 2**32, size=(2600, 1), dtype=np.uint32)
+    assert_matches_reference(packed, 1.0, 2048, 1300)
+
+
 def test_split_wider_than_one_block_matches_reference():
     packed = np.random.default_rng(82).integers(0, 2**32, size=(529, 1), dtype=np.uint32)
     assert_matches_reference(packed, 1.0, 257, 512)
