@@ -34,6 +34,8 @@ constexpr int kBitParts           = kBitBirchMaxWords * 32 / kBlockSize;
 constexpr int kLanesPerEntry      = 4;
 //! Rows inserted in batches that never merge groups, so the young tree grows in input order.
 constexpr int kOrderedWarmup      = 16384;
+//! Rows addRows sums together, with their loads in flight at once.
+constexpr int kRowsInFlight       = 4;
 //! Split pair orders are the low 32 bits of a 64-bit key, so a node holds fewer than 2^16 entries.
 constexpr int kMaxBranchingFactor = 65534;
 
@@ -217,7 +219,33 @@ __device__ void addRows(Bits& bits, const Tree& tree, const int numItems, Scratc
       scratch.rowIsSums[threadIdx.x] = isSums;
     }
     __syncthreads();
-    for (int index = 0; index < size; ++index) {
+    // Several rows at a time, their loads issued together before any is summed.
+    int index = 0;
+    for (; index + kRowsInFlight <= size; index += kRowsInFlight) {
+      std::uint32_t values[kRowsInFlight][kBitParts];
+#pragma unroll
+      for (int item = 0; item < kRowsInFlight; ++item) {
+        const std::uint32_t* row    = scratch.rows[index + item];
+        const bool           isSums = scratch.rowIsSums[index + item];
+#pragma unroll
+        for (int part = 0; part < kBitParts; ++part) {
+          const int bit      = part * kBlockSize + threadIdx.x;
+          values[item][part] = 0;
+          if (row != nullptr && bit < tree.numBits) {
+            const std::uint32_t loaded = isSums ? row[bit] : row[bit / 32];
+            values[item][part]         = isSums ? loaded : (loaded >> (bit % 32)) & 1U;
+          }
+        }
+      }
+#pragma unroll
+      for (int item = 0; item < kRowsInFlight; ++item) {
+#pragma unroll
+        for (int part = 0; part < kBitParts; ++part) {
+          bits.parts[part] += values[item][part];
+        }
+      }
+    }
+    for (; index < size; ++index) {
       if (scratch.rows[index] == nullptr) {
         continue;
       }
