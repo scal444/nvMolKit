@@ -18,6 +18,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cuda/std/bit>
 
 namespace nvMolKit {
 
@@ -50,8 +51,9 @@ template <> struct TargetMask<32> {
   /// Branch-free conditional set: @p value must be 0 or 1.
   __device__ __forceinline__ void setIf(int bit, uint64_t value) { bits |= static_cast<uint32_t>(value) << bit; }
   __device__ __forceinline__ void setWord32(int, uint32_t value) { bits |= value; }
-  __device__ __forceinline__ int  popcount() const { return __popc(bits); }
-  /// Lowest set atom index; undefined if empty.
+  __device__ __forceinline__ int  popcount() const { return cuda::std::popcount(bits); }
+  /// Lowest set atom index; undefined if empty. __ffs rather than cuda::std::countr_zero: CCCL lowers countr_zero to
+  /// a bit reverse plus leading-zero count, which adds instructions to the DFS inner loop.
   __device__ __forceinline__ int  lowest() const { return __ffs(static_cast<int>(bits)) - 1; }
   __device__ __forceinline__ void clearLowest() { bits &= bits - 1; }
   __device__ __forceinline__ void andEq(const TargetMask& other) { bits &= other.bits; }
@@ -72,8 +74,8 @@ template <> struct TargetMask<64> {
   __device__ __forceinline__ void setWord32(int word, uint32_t value) {
     lo |= static_cast<uint64_t>(value) << (32 * word);
   }
-  __device__ __forceinline__ int  popcount() const { return __popcll(lo); }
-  /// Lowest set atom index; undefined if empty.
+  __device__ __forceinline__ int  popcount() const { return cuda::std::popcount(lo); }
+  /// Lowest set atom index; undefined if empty. __ffsll for the same reason as TargetMask<32>::lowest().
   __device__ __forceinline__ int  lowest() const { return __ffsll(static_cast<long long>(lo)) - 1; }
   __device__ __forceinline__ void clearLowest() { lo &= lo - 1; }
   __device__ __forceinline__ void andEq(const TargetMask& other) { lo &= other.lo; }
@@ -116,8 +118,8 @@ template <> struct TargetMask<128> {
       hi |= static_cast<uint64_t>(value) << (32 * (word - 2));
     }
   }
-  __device__ __forceinline__ int popcount() const { return __popcll(lo) + __popcll(hi); }
-  /// Lowest set atom index; undefined if empty.
+  __device__ __forceinline__ int popcount() const { return cuda::std::popcount(lo) + cuda::std::popcount(hi); }
+  /// Lowest set atom index; undefined if empty. __ffsll for the same reason as TargetMask<32>::lowest().
   __device__ __forceinline__ int lowest() const {
     return lo != 0 ? __ffsll(static_cast<long long>(lo)) - 1 : __ffsll(static_cast<long long>(hi)) + 63;
   }

@@ -4,6 +4,8 @@
 #ifndef FMCS_CUDA_FMCS_KERNEL_CUH
 #define FMCS_CUDA_FMCS_KERNEL_CUH
 
+#include <cuda/std/bit>
+
 #include "src/mcs/fmcs_cuda/fmcs_search_support.cuh"
 
 namespace mcs {
@@ -406,12 +408,7 @@ __global__ __launch_bounds__(FmcsKernelConfig<maxAtoms>::blockThreads) void fmcs
     for (int wordIdx = 0; wordIdx < kAtomWords; ++wordIdx) {
       AtomWord remaining = S.best.seed.atoms[wordIdx];
       while (remaining != 0) {
-        int bitPosInWord;
-        if constexpr (sizeof(AtomWord) == 4) {
-          bitPosInWord = __ffs(static_cast<unsigned int>(remaining)) - 1;
-        } else {
-          bitPosInWord = __ffsll(static_cast<unsigned long long>(remaining)) - 1;
-        }
+        const int bitPosInWord = cuda::std::countr_zero(remaining);
         const int queryAtomIdx = wordIdx * kAtomBitsPerWord + bitPosInWord;
         remaining &= remaining - 1;
         dst.mappingA[outIdx] = static_cast<std::uint8_t>(queryAtomIdx);
@@ -427,12 +424,7 @@ __global__ __launch_bounds__(FmcsKernelConfig<maxAtoms>::blockThreads) void fmcs
     for (int wordIdx = 0; wordIdx < kBondWords; ++wordIdx) {
       BondWord remaining = S.best.seed.bonds[wordIdx];
       while (remaining != 0) {
-        int bitPosInWord;
-        if constexpr (sizeof(BondWord) == 4) {
-          bitPosInWord = __ffs(static_cast<unsigned int>(remaining)) - 1;
-        } else {
-          bitPosInWord = __ffsll(static_cast<unsigned long long>(remaining)) - 1;
-        }
+        const int bitPosInWord = cuda::std::countr_zero(remaining);
         const int queryBondIdx = wordIdx * kBondBitsPerWord + bitPosInWord;
         remaining &= remaining - 1;
         dst.bondMapA[outIdx] = static_cast<std::uint8_t>(queryBondIdx);

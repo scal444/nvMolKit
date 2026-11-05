@@ -16,6 +16,7 @@
 #ifndef NVMOLKIT_DEVICE_H
 #define NVMOLKIT_DEVICE_H
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -126,16 +127,9 @@ constexpr std::uint32_t roundUpToNearestMultipleOfTwo(std::uint32_t num) {
   return (num + 1) & ~1U;
 }
 
-//! Rounds a number up to the nearest power of two.
+//! Rounds a number up to the nearest power of two. @p num must not exceed 2^31.
 constexpr std::uint32_t roundUpToNearestPowerOfTwo(std::uint32_t num) {
-  if (num == 0) {
-    return 1;
-  }
-  --num;
-  for (std::uint32_t i = 1; i < sizeof(num) * 8; i *= 2) {
-    num |= num >> i;
-  }
-  return num + 1;
+  return std::bit_ceil(num);
 }
 
 }  // namespace nvMolKit

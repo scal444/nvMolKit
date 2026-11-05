@@ -26,6 +26,7 @@
 #define DEVICE_ONLY_MEMBER
 #endif  // __CUDACC__
 
+#include <bit>
 #include <cassert>
 #include <cstdint>
 #include <cstring>
@@ -252,9 +253,9 @@ template <std::size_t NBits> class FlatBitVect {
       if (i == kStorageCount - 1) {
         const std::size_t   nBitsInLastStorage = kNBits % kStorageBits;
         const std::uint32_t mask               = nBitsInLastStorage == 0 ? 0xFFFFFFFF : (1 << nBitsInLastStorage) - 1;
-        count += __builtin_popcount(bits_[i] & mask);
+        count += std::popcount(bits_[i] & mask);
       } else {
-        count += __builtin_popcount(bits_[i]);
+        count += std::popcount(bits_[i]);
       }
     }
     return count;

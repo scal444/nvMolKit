@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cub/block/block_scan.cuh>
+#include <cuda/std/bit>
 #include <limits>
 #include <numeric>
 #include <random>
@@ -118,7 +119,7 @@ __global__ void applyLeaderWindowKernel(const LeaderState state, const int numIt
   }
   state.active[candidate] = 0;
   if (state.labels != nullptr) {
-    state.labels[candidate] = state.windowOrdinals[__ffs(static_cast<int>(excludedBy)) - 1];
+    state.labels[candidate] = state.windowOrdinals[cuda::std::countr_zero(excludedBy)];
   }
 }
 
