@@ -21,6 +21,7 @@
 #include <array>
 #include <atomic>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -735,7 +736,7 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
 
   const int    poolSize = std::max(1, effectivePreprocessingThreads) * 2;
   const size_t perBufferSize =
-    computePinnedHostBufferBytes(maxPairsPerBatch, static_cast<int>(maxMatchIndicesPerMiniBatch), maxPatternsPerDepth);
+    computePinnedHostBufferBytes(maxPairsPerBatch, maxMatchIndicesPerMiniBatch, maxPatternsPerDepth);
   const size_t totalPinnedBytes = static_cast<size_t>(poolSize) * perBufferSize;
 
   const long   pages      = sysconf(_SC_PHYS_PAGES);
@@ -749,10 +750,16 @@ void runPipelinedSubstructSearch(const std::vector<const RDKit::ROMol*>& targets
                              " MB). "
                              "Reduce workerThreads, executorsPerRunner, or batchSize.");
   }
+  // Per-pair match offsets within a mini-batch are 32-bit.
+  if (maxMatchIndicesPerMiniBatch > static_cast<size_t>(std::numeric_limits<int>::max())) {
+    throw std::runtime_error("Substructure search would require " + std::to_string(maxMatchIndicesPerMiniBatch) +
+                             " match index slots per mini-batch, exceeding the maximum of " +
+                             std::to_string(std::numeric_limits<int>::max()) + ". Reduce batchSize or maxMatches.");
+  }
 
   PinnedHostBufferPool  localBufferPool;
   PinnedHostBufferPool& bufferPool = workspace != nullptr ? workspace->bufferPool : localBufferPool;
-  bufferPool.prepare(poolSize, maxPairsPerBatch, static_cast<int>(maxMatchIndicesPerMiniBatch), maxPatternsPerDepth);
+  bufferPool.prepare(poolSize, maxPairsPerBatch, maxMatchIndicesPerMiniBatch, maxPatternsPerDepth);
   if (workspace != nullptr) {
     workspace->ensureExecutors(numRunners * executorsPerRunner);
   }

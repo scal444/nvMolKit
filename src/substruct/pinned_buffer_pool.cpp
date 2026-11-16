@@ -53,7 +53,7 @@ size_t computeConsolidatedBufferBytes(int maxBatchSize) {
   return offset;
 }
 
-size_t computePinnedHostBufferBytes(int maxBatchSize, int maxMatchIndicesEstimate, int maxPatternsPerDepth) {
+size_t computePinnedHostBufferBytes(int maxBatchSize, size_t maxMatchIndicesEstimate, int maxPatternsPerDepth) {
   size_t offset = computeConsolidatedBufferBytes(maxBatchSize);
 
   auto addBlock = [&](const size_t bytes) {
@@ -62,7 +62,7 @@ size_t computePinnedHostBufferBytes(int maxBatchSize, int maxMatchIndicesEstimat
   };
 
   // Variable-width buffers - copied separately
-  addBlock(sizeof(int16_t) * static_cast<size_t>(maxMatchIndicesEstimate));  // matchIndices
+  addBlock(sizeof(int16_t) * maxMatchIndicesEstimate);  // matchIndices
 
   for (int i = 0; i < 2; ++i) {
     addBlock(sizeof(BatchedPatternEntry) * static_cast<size_t>(maxPatternsPerDepth));  // patternsAtDepthHost
@@ -71,10 +71,10 @@ size_t computePinnedHostBufferBytes(int maxBatchSize, int maxMatchIndicesEstimat
   return offset;
 }
 
-void PinnedHostBufferPool::initialize(int poolSize,
-                                      int maxBatchSize,
-                                      int maxMatchIndicesEstimate,
-                                      int maxPatternsPerDepth) {
+void PinnedHostBufferPool::initialize(int    poolSize,
+                                      int    maxBatchSize,
+                                      size_t maxMatchIndicesEstimate,
+                                      int    maxPatternsPerDepth) {
   buffers_.clear();
   available_               = std::make_unique<ThreadSafeQueue<PinnedHostBuffer*>>();
   maxBatchSize_            = maxBatchSize;
@@ -89,10 +89,10 @@ void PinnedHostBufferPool::initialize(int poolSize,
   }
 }
 
-void PinnedHostBufferPool::prepare(int poolSize,
-                                   int maxBatchSize,
-                                   int maxMatchIndicesEstimate,
-                                   int maxPatternsPerDepth) {
+void PinnedHostBufferPool::prepare(int    poolSize,
+                                   int    maxBatchSize,
+                                   size_t maxMatchIndicesEstimate,
+                                   int    maxPatternsPerDepth) {
   if (static_cast<int>(buffers_.size()) < poolSize || maxBatchSize_ < maxBatchSize ||
       maxMatchIndicesEstimate_ < maxMatchIndicesEstimate || maxPatternsPerDepth_ < maxPatternsPerDepth) {
     initialize(std::max(poolSize, static_cast<int>(buffers_.size())),
@@ -123,9 +123,9 @@ void PinnedHostBufferPool::shutdown() {
   available_->close();
 }
 
-std::unique_ptr<PinnedHostBuffer> PinnedHostBufferPool::createBuffer(int maxBatchSize,
-                                                                     int maxMatchIndicesEstimate,
-                                                                     int maxPatternsPerDepth) {
+std::unique_ptr<PinnedHostBuffer> PinnedHostBufferPool::createBuffer(int    maxBatchSize,
+                                                                     size_t maxMatchIndicesEstimate,
+                                                                     int    maxPatternsPerDepth) {
   const size_t bufferBytes = computePinnedHostBufferBytes(maxBatchSize, maxMatchIndicesEstimate, maxPatternsPerDepth);
   PinnedHostAllocator allocator(bufferBytes);
   auto                buffer = std::make_unique<PinnedHostBuffer>();
@@ -149,7 +149,7 @@ std::unique_ptr<PinnedHostBuffer> PinnedHostBufferPool::createBuffer(int maxBatc
 
   // Allocate variable-width buffers (copied separately)
   if (maxMatchIndicesEstimate > 0) {
-    buffer->matchIndices = allocator.allocate<int16_t>(static_cast<size_t>(maxMatchIndicesEstimate));
+    buffer->matchIndices = allocator.allocate<int16_t>(maxMatchIndicesEstimate);
   }
 
   for (int i = 0; i < 2; ++i) {

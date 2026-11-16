@@ -1406,3 +1406,15 @@ def test_query_over_atom_limit_is_rejected(oversized):
 
     with pytest.raises(RuntimeError, match="exceeds the maximum of 64"):
         countSubstructMatches(targets, [largest, Chem.MolFromSmarts(oversized)])
+
+
+def test_match_buffer_request_beyond_limits_fails_cleanly():
+    """A maxMatches too large for the match buffers is refused up front and later searches still work."""
+    targets = [Chem.MolFromSmiles("C" * 50) for _ in range(4)]
+    query = Chem.MolFromSmiles("C" * 42)
+
+    with pytest.raises(RuntimeError, match=r"Reduce .*batchSize"):
+        getSubstructMatches(targets, [query], SubstructSearchConfig(maxMatches=100_000))
+
+    results = getSubstructMatches(targets, [query], SubstructSearchConfig(maxMatches=5))
+    assert [len(results.get_pair(i, 0)) for i in range(len(targets))] == [5] * 4

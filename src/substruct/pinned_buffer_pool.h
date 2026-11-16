@@ -37,7 +37,7 @@ size_t computeConsolidatedBufferBytes(int maxBatchSize);
 /**
  * @brief Compute total bytes required for a pinned host buffer (consolidated + variable).
  */
-size_t computePinnedHostBufferBytes(int maxBatchSize, int maxMatchIndicesEstimate, int maxPatternsPerDepth);
+size_t computePinnedHostBufferBytes(int maxBatchSize, size_t maxMatchIndicesEstimate, int maxPatternsPerDepth);
 
 /**
  * @brief Metadata for the consolidated fixed-width region of a PinnedHostBuffer.
@@ -74,22 +74,22 @@ struct PinnedHostBuffer {
  */
 class PinnedHostBufferPool {
  public:
-  void initialize(int poolSize, int maxBatchSize, int maxMatchIndicesEstimate, int maxPatternsPerDepth);
-  void prepare(int poolSize, int maxBatchSize, int maxMatchIndicesEstimate, int maxPatternsPerDepth);
+  void initialize(int poolSize, int maxBatchSize, size_t maxMatchIndicesEstimate, int maxPatternsPerDepth);
+  void prepare(int poolSize, int maxBatchSize, size_t maxMatchIndicesEstimate, int maxPatternsPerDepth);
 
   PinnedHostBuffer* acquire();
   void              release(PinnedHostBuffer* buffer);
   void              shutdown();
 
  private:
-  static std::unique_ptr<PinnedHostBuffer> createBuffer(int maxBatchSize,
-                                                        int maxMatchIndicesEstimate,
-                                                        int maxPatternsPerDepth);
+  static std::unique_ptr<PinnedHostBuffer> createBuffer(int    maxBatchSize,
+                                                        size_t maxMatchIndicesEstimate,
+                                                        int    maxPatternsPerDepth);
 
   std::vector<std::unique_ptr<PinnedHostBuffer>>      buffers_;
   std::unique_ptr<ThreadSafeQueue<PinnedHostBuffer*>> available_;
   int                                                 maxBatchSize_            = 0;
-  int                                                 maxMatchIndicesEstimate_ = 0;
+  size_t                                              maxMatchIndicesEstimate_ = 0;
   int                                                 maxPatternsPerDepth_     = 0;
 };
 
