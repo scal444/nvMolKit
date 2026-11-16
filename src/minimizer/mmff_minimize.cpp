@@ -116,15 +116,7 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfs(std::vector<RDKit::ROMol*>&       
     throw std::invalid_argument("Expected one PerMolConstraints entry per molecule");
   }
   if (deviceInput != nullptr) {
-    const bool anyConstraint =
-      std::any_of(constraints.begin(), constraints.end(), [](const auto& perMol) { return !perMol.empty(); });
-    if (anyConstraint) {
-      throw std::invalid_argument(
-        "Device input coordinates not supported with custom constraints. "
-        "Use the RDKit Mol + Conformer path to apply constraints "
-        "(call MMFFMinimizeMoleculesConfs without deviceInput; the constraints anchor positions are "
-        "read from each mol's RDKit conformer at force-field construction time).");
-    }
+    ForceFieldConstraints::requireReferencePositionsForDeviceInput(constraints);
   }
 
   const bool deviceOutput = output == CoordinateOutput::DEVICE;
@@ -428,7 +420,8 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(
   const FireBackend                                            backend,
   const CoordinateOutput                                       output,
   int                                                          targetGpu,
-  PrecisionMode                                                precision) {
+  PrecisionMode                                                precision,
+  const DeviceCoordResult*                                     deviceInput) {
   ScopedNvtxRange fullRange("FIRE MMFF Minimize Molecules Confs");
 
   std::vector<MMFFProperties> properties = propertiesIn;
@@ -439,6 +432,9 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(
   }
   if (!constraints.empty() && constraints.size() != mols.size()) {
     throw std::invalid_argument("Expected one PerMolConstraints entry per molecule");
+  }
+  if (deviceInput != nullptr) {
+    ForceFieldConstraints::requireReferencePositionsForDeviceInput(constraints);
   }
 
   const bool deviceOutput = output == CoordinateOutput::DEVICE;
@@ -462,6 +458,12 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(
   for (size_t i = 0; i < mols.size(); ++i) {
     moleculeConverged[i].resize(moleculeEnergies[i].size(), 0);
   }
+
+  detail::DeviceInputIndex deviceInputIndex;
+  if (deviceInput != nullptr) {
+    deviceInputIndex = detail::buildDeviceInputIndex(*deviceInput, allConformers);
+  }
+  const bool useDeviceInput = deviceInput != nullptr;
 
   const size_t totalConformers    = allConformers.size();
   const size_t effectiveBatchSize = (ctx.batchSize == 0) ? totalConformers : ctx.batchSize;
@@ -501,6 +503,9 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(
                                                                                               threadBuffers,       \
                                                                                               deviceCollectors,    \
                                                                                               deviceOutput,        \
+                                                                                              useDeviceInput,      \
+                                                                                              deviceInput,         \
+                                                                                              deviceInputIndex,    \
                                                                                               backend,             \
                                                                                               precision,           \
                                                                                               sharedMolProperties, \
@@ -523,6 +528,17 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(
       std::vector<double>                  massesPerAtom;
       std::vector<uint32_t>                conformerAtomStarts;
       uint32_t                             currentAtomOffset = 0;
+
+      std::vector<int> batchSrcIndices;
+      std::vector<int> batchAtomCounts;
+      if (useDeviceInput) {
+        batchSrcIndices.reserve(batchConformers.size());
+        batchAtomCounts.reserve(batchConformers.size());
+        for (size_t k = 0; k < batchConformers.size(); ++k) {
+          batchSrcIndices.push_back(deviceInputIndex.conformerIndexBy[batchStart + k]);
+          batchAtomCounts.push_back(static_cast<int>(batchConformers[k].mol->getNumAtoms()));
+        }
+      }
 
       for (const auto& confInfo : batchConformers) {
         auto*          mol      = confInfo.mol;
@@ -584,6 +600,15 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(
           energyOutsDevice.setStream(streamPtr);
           positionsDevice.resize(systemHost.positions.size());
           positionsDevice.copyFromHost(buffers.initialPositions.data(), systemHost.positions.size());
+          if (useDeviceInput) {
+            detail::broadcastDeviceInputBatch(*deviceInput,
+                                              deviceInputIndex,
+                                              batchSrcIndices,
+                                              batchAtomCounts,
+                                              executingGpu,
+                                              streamPtr,
+                                              positionsDevice);
+          }
           gradDevice.resize(systemHost.positions.size());
           gradDevice.zero();
           energyOutsDevice.resize(batchConformers.size());
@@ -608,6 +633,15 @@ MMFFMinimizeResult MMFFMinimizeMoleculesConfsFire(
           energyOutsDevice.setStream(streamPtr);
           positionsDevice.resize(systemHost.positions.size());
           positionsDevice.copyFromHost(buffers.initialPositions.data(), systemHost.positions.size());
+          if (useDeviceInput) {
+            detail::broadcastDeviceInputBatch(*deviceInput,
+                                              deviceInputIndex,
+                                              batchSrcIndices,
+                                              batchAtomCounts,
+                                              executingGpu,
+                                              streamPtr,
+                                              positionsDevice);
+          }
 
           typename std::decay_t<decltype(fireMinimizer)>::MMFFDeviceBuffers device;
           nvMolKit::MMFF::setStreams(device, streamPtr);

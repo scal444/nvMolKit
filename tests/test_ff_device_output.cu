@@ -302,6 +302,103 @@ TEST(MMFFDeviceInput, ConstraintsRejected) {
                std::invalid_argument);
 }
 
+TEST(MMFFDeviceInput, FireContinuesFromDeviceInput) {
+  for (const auto backend : {nvMolKit::FireBackend::BATCHED, nvMolKit::FireBackend::PER_MOLECULE}) {
+    auto hostMol   = embeddedMol("CCCCO", 17);
+    auto deviceMol = embeddedMol("CCCCO", 17);
+    ASSERT_NE(hostMol, nullptr);
+    ASSERT_NE(deviceMol, nullptr);
+    std::vector<RDKit::ROMol*>                  hostMols   = {hostMol.get()};
+    std::vector<RDKit::ROMol*>                  deviceMols = {deviceMol.get()};
+    const std::vector<nvMolKit::MMFFProperties> props(1);
+    const nvMolKit::FireOptions                 fireOptions;
+
+    // Two 15-step runs through the RDKit conformers, against the same two runs chained on the device.
+    nvMolKit::MMFF::MMFFMinimizeMoleculesConfsFire(hostMols,
+                                                   15,
+                                                   fireOptions,
+                                                   props,
+                                                   {},
+                                                   singleThreadOptions(),
+                                                   backend);
+    const auto host   = nvMolKit::MMFF::MMFFMinimizeMoleculesConfsFire(hostMols,
+                                                                     15,
+                                                                     fireOptions,
+                                                                     props,
+                                                                       {},
+                                                                     singleThreadOptions(),
+                                                                     backend);
+    auto       first  = nvMolKit::MMFF::MMFFMinimizeMoleculesConfsFire(deviceMols,
+                                                                15,
+                                                                fireOptions,
+                                                                props,
+                                                                       {},
+                                                                singleThreadOptions(),
+                                                                backend,
+                                                                nvMolKit::CoordinateOutput::DEVICE,
+                                                                /*targetGpu=*/0);
+    auto       second = nvMolKit::MMFF::MMFFMinimizeMoleculesConfsFire(deviceMols,
+                                                                 15,
+                                                                 fireOptions,
+                                                                 props,
+                                                                       {},
+                                                                 singleThreadOptions(),
+                                                                 backend,
+                                                                 nvMolKit::CoordinateOutput::DEVICE,
+                                                                 /*targetGpu=*/0,
+                                                                 nvMolKit::PrecisionMode::FULL,
+                                                                 /*deviceInput=*/&(*first.device));
+
+    const auto firstEnergies  = downloadDeviceVector(first.device->energies);
+    const auto secondEnergies = downloadDeviceVector(second.device->energies);
+    ASSERT_EQ(secondEnergies.size(), 1u);
+    EXPECT_LT(secondEnergies[0], firstEnergies[0] - 1e-3);
+    EXPECT_NEAR(secondEnergies[0], host.energies[0][0], 1e-6);
+  }
+}
+
+TEST(UFFDeviceInput, FireContinuesFromDeviceInput) {
+  auto hostMol   = embeddedMol("CCCCO", 17);
+  auto deviceMol = embeddedMol("CCCCO", 17);
+  ASSERT_NE(hostMol, nullptr);
+  ASSERT_NE(deviceMol, nullptr);
+  std::vector<RDKit::ROMol*>  hostMols   = {hostMol.get()};
+  std::vector<RDKit::ROMol*>  deviceMols = {deviceMol.get()};
+  const std::vector<double>   vdw(1, 100.0);
+  const std::vector<bool>     ignore(1, false);
+  const nvMolKit::FireOptions fireOptions;
+
+  nvMolKit::UFF::UFFMinimizeMoleculesConfsFire(hostMols, 15, fireOptions, vdw, ignore, {}, singleThreadOptions());
+  const auto host =
+    nvMolKit::UFF::UFFMinimizeMoleculesConfsFire(hostMols, 15, fireOptions, vdw, ignore, {}, singleThreadOptions());
+  auto first  = nvMolKit::UFF::UFFMinimizeMoleculesConfsFire(deviceMols,
+                                                            15,
+                                                            fireOptions,
+                                                            vdw,
+                                                            ignore,
+                                                             {},
+                                                            singleThreadOptions(),
+                                                            nvMolKit::CoordinateOutput::DEVICE,
+                                                            /*targetGpu=*/0);
+  auto second = nvMolKit::UFF::UFFMinimizeMoleculesConfsFire(deviceMols,
+                                                             15,
+                                                             fireOptions,
+                                                             vdw,
+                                                             ignore,
+                                                             {},
+                                                             singleThreadOptions(),
+                                                             nvMolKit::CoordinateOutput::DEVICE,
+                                                             /*targetGpu=*/0,
+                                                             nvMolKit::PrecisionMode::FULL,
+                                                             /*deviceInput=*/&(*first.device));
+
+  const auto firstEnergies  = downloadDeviceVector(first.device->energies);
+  const auto secondEnergies = downloadDeviceVector(second.device->energies);
+  ASSERT_EQ(secondEnergies.size(), 1u);
+  EXPECT_LT(secondEnergies[0], firstEnergies[0] - 1e-3);
+  EXPECT_NEAR(secondEnergies[0], host.energies[0][0], 1e-6);
+}
+
 TEST(UFFDeviceOutput, EthanolMatchesShape) {
   auto ethanol = embeddedMol("CCO", 99);
   ASSERT_NE(ethanol, nullptr);

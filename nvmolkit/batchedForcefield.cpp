@@ -15,6 +15,7 @@
 
 #include <GraphMol/Conformer.h>
 
+#include <algorithm>
 #include <boost/python.hpp>
 #include <cstdint>
 #include <memory>
@@ -150,15 +151,78 @@ bp::list computeBatchedGradients(nvMolKit::BatchedForcefield&         forcefield
 // Anchor position and relative constraints to the coordinates at construction, as RDKit does when a constraint is
 // added, so repeated minimize() calls do not re-anchor them to the moved coordinates.
 void setConstraintReferences(const std::vector<RDKit::ROMol*>&                                mols,
+                             const std::vector<std::vector<double>>&                          positions,
                              std::vector<nvMolKit::ForceFieldConstraints::PerMolConstraints>& constraints) {
+  auto conformer = positions.begin();
   for (size_t molIdx = 0; molIdx < mols.size(); ++molIdx) {
-    if (constraints[molIdx].empty()) {
-      continue;
+    const auto molEnd = conformer + mols[molIdx]->getNumConformers();
+    if (!constraints[molIdx].empty()) {
+      constraints[molIdx].referencePositions.assign(conformer, molEnd);
     }
-    for (auto confIter = mols[molIdx]->beginConformers(); confIter != mols[molIdx]->endConformers(); ++confIter) {
-      nvMolKit::confPosToVect(**confIter, constraints[molIdx].referencePositions.emplace_back());
+    conformer = molEnd;
+  }
+}
+
+// Coordinates of every conformer, molecule by molecule.
+std::vector<std::vector<double>> conformerPositions(const std::vector<RDKit::ROMol*>& mols) {
+  std::vector<std::vector<double>> positions;
+  for (auto* mol : mols) {
+    for (auto confIter = mol->beginConformers(); confIter != mol->endConformers(); ++confIter) {
+      nvMolKit::confPosToVect(**confIter, positions.emplace_back());
     }
   }
+  return positions;
+}
+
+// Overwrite conformer coordinates with a wrapper's device positions. Returns false, leaving them unchanged, if the
+// device buffer does not hold the same number of coordinates.
+bool replaceWithDevicePositions(nvMolKit::AsyncDeviceVector<double>& positionsDevice,
+                                std::vector<std::vector<double>>&    positions) {
+  size_t total = 0;
+  for (const auto& conformer : positions) {
+    total += conformer.size();
+  }
+  if (positionsDevice.size() != total) {
+    return false;
+  }
+  const auto flat = copyDeviceVector(positionsDevice);
+  auto       next = flat.begin();
+  for (auto& conformer : positions) {
+    std::copy_n(next, conformer.size(), conformer.begin());
+    next += conformer.size();
+  }
+  return true;
+}
+
+// The wrapper's device positions in the layout the minimizers take as starting coordinates.
+nvMolKit::DeviceCoordResult makeDeviceInput(const nvMolKit::AsyncDeviceVector<double>& positionsDevice,
+                                            const std::vector<int>&                    atomStarts,
+                                            const std::vector<int>&                    numConformersPerMol,
+                                            const int                                  gpuId) {
+  std::vector<int32_t> molIndices;
+  std::vector<int32_t> confIndices;
+  for (size_t molIdx = 0; molIdx < numConformersPerMol.size(); ++molIdx) {
+    for (int confIdx = 0; confIdx < numConformersPerMol[molIdx]; ++confIdx) {
+      molIndices.push_back(static_cast<int32_t>(molIdx));
+      confIndices.push_back(confIdx);
+    }
+  }
+
+  nvMolKit::DeviceCoordResult input;
+  input.gpuId = gpuId;
+  input.nMols = static_cast<int>(numConformersPerMol.size());
+  input.positions.resize(positionsDevice.size());
+  throwIfCudaError(cudaMemcpyAsync(input.positions.data(),
+                                   positionsDevice.data(),
+                                   positionsDevice.size() * sizeof(double),
+                                   cudaMemcpyDeviceToDevice,
+                                   input.positions.stream()),
+                   "makeDeviceInput/positions");
+  input.atomStarts.setFromVector(atomStarts);
+  input.molIndices.setFromVector(molIndices);
+  input.confIndices.setFromVector(confIndices);
+  throwIfCudaError(cudaStreamSynchronize(input.positions.stream()), "makeDeviceInput/sync");
+  return input;
 }
 
 MinimizerKind parseMinimizerKind(const std::string& name) {
@@ -280,7 +344,8 @@ class NativeMMFFBatchedForcefield {
                               const bp::list&                       angleConstraints,
                               const bp::list&                       torsionConstraints,
                               const nvMolKit::BatchHardwareOptions& hwOpts,
-                              const nvMolKit::PrecisionMode&        precision)
+                              const nvMolKit::PrecisionMode&        precision,
+                              const bp::object&                     previous)
       : hwOpts_(hwOpts),
         precision_(precision) {
     throwIfCudaError(cudaGetDevice(&gpuId_), "MMFF wrapper/cudaGetDevice");
@@ -289,9 +354,19 @@ class NativeMMFFBatchedForcefield {
     properties_       = nvMolKit::extractMMFFPropertiesList(properties, numMols);
     constraints_ =
       extractAllConstraints(distanceConstraints, positionConstraints, angleConstraints, torsionConstraints, numMols);
-    setConstraintReferences(mols_, constraints_);
 
-    buildForcefield();
+    // A rebuilt wrapper keeps the positions a DEVICE-mode minimize left on the device, which the RDKit conformers
+    // do not have.
+    auto positions = conformerPositions(mols_);
+    if (!previous.is_none()) {
+      auto& rebuilt = bp::extract<NativeMMFFBatchedForcefield&>(previous)();
+      if (rebuilt.positionsAheadOfConformers_) {
+        positionsAheadOfConformers_ = replaceWithDevicePositions(rebuilt.positionsDevice_, positions);
+      }
+    }
+    setConstraintReferences(mols_, positions, constraints_);
+
+    buildForcefield(positions);
   }
 
   bp::list computeEnergy() {
@@ -331,6 +406,7 @@ class NativeMMFFBatchedForcefield {
                                                                precision_);
 
     uploadConformerPositions(mols_, positionsDevice_);
+    positionsAheadOfConformers_ = false;
 
     return bp::make_tuple(nestedToList(result.energies, [](double v) { return v; }),
                           nestedToList(result.converged, [](int8_t v) { return v != 0; }));
@@ -352,6 +428,7 @@ class NativeMMFFBatchedForcefield {
         "API for cross-GPU consolidation, or construct the wrapper on the desired GPU.");
     }
     const auto kind   = parseMinimizerKind(minimizerKind);
+    const auto start  = makeDeviceInput(positionsDevice_, forcefield_->atomStartsHost(), numConformersPerMol_, gpuId_);
     auto       result = kind == MinimizerKind::FIRE ?
                           nvMolKit::MMFF::MMFFMinimizeMoleculesConfsFire(mols_,
                                                                    maxIters,
@@ -362,7 +439,8 @@ class NativeMMFFBatchedForcefield {
                                                                    nvMolKit::FireBackend::BATCHED,
                                                                    nvMolKit::CoordinateOutput::DEVICE,
                                                                    gpuId_,
-                                                                   precision_) :
+                                                                   precision_,
+                                                                   &start) :
                           nvMolKit::MMFF::MMFFMinimizeMoleculesConfs(mols_,
                                                                maxIters,
                                                                gradTol,
@@ -372,7 +450,7 @@ class NativeMMFFBatchedForcefield {
                                                                nvMolKit::BfgsBackend::HYBRID,
                                                                nvMolKit::CoordinateOutput::DEVICE,
                                                                gpuId_,
-                                                               nullptr,
+                                                               &start,
                                                                precision_);
     if (!result.device.has_value()) {
       throw std::runtime_error("MMFFMinimizeMoleculesConfs(DEVICE) returned no device result");
@@ -390,27 +468,27 @@ class NativeMMFFBatchedForcefield {
                                      positionsDevice_.stream()),
                      "MMFF minimizeDevice/positions refresh");
     throwIfCudaError(cudaStreamSynchronize(positionsDevice_.stream()), "MMFF minimizeDevice/positions refresh sync");
+    positionsAheadOfConformers_ = true;
     return nvMolKit::buildOwningDevice3DResult(dev);
   }
 
   int gpuId() const { return gpuId_; }
 
  private:
-  void buildForcefield() {
+  void buildForcefield(const std::vector<std::vector<double>>& startPositions) {
     const int                                  numMols = static_cast<int>(mols_.size());
     nvMolKit::MMFF::BatchedMolecularSystemHost systemHost;
     nvMolKit::BatchedForcefieldMetadata        metadata;
     numConformersPerMol_.resize(numMols);
 
+    size_t conformer = 0;
     for (int molIdx = 0; molIdx < numMols; ++molIdx) {
       auto* mol          = mols_[molIdx];
       auto  baseContribs = nvMolKit::MMFF::constructForcefieldContribs(*mol, properties_[molIdx]);
 
       int confIdx = 0;
       for (auto confIter = mol->beginConformers(); confIter != mol->endConformers(); ++confIter, ++confIdx) {
-        auto&               conf = **confIter;
-        std::vector<double> positions;
-        nvMolKit::confPosToVect(conf, positions);
+        const auto& positions = startPositions[conformer++];
 
         auto contribs = baseContribs;
         constraints_[molIdx].applyTo(contribs, positions, confIdx);
@@ -437,7 +515,8 @@ class NativeMMFFBatchedForcefield {
   nvMolKit::AsyncDeviceVector<double>              gradDevice_;
   nvMolKit::AsyncDeviceVector<double>              energyOutsDevice_;
   std::vector<int>                                 numConformersPerMol_;
-  int                                              gpuId_ = 0;
+  int                                              gpuId_                      = 0;
+  bool                                             positionsAheadOfConformers_ = false;
 };
 
 class NativeUFFBatchedForcefield {
@@ -450,7 +529,8 @@ class NativeUFFBatchedForcefield {
                              const bp::list&                       angleConstraints,
                              const bp::list&                       torsionConstraints,
                              const nvMolKit::BatchHardwareOptions& hwOpts,
-                             const nvMolKit::PrecisionMode&        precision)
+                             const nvMolKit::PrecisionMode&        precision,
+                             const bp::object&                     previous)
       : hwOpts_(hwOpts),
         precision_(precision) {
     throwIfCudaError(cudaGetDevice(&gpuId_), "UFF wrapper/cudaGetDevice");
@@ -461,9 +541,19 @@ class NativeUFFBatchedForcefield {
       nvMolKit::extractBoolList(ignoreInterfragInteractions, numMols, "ignoreInterfragInteractions");
     constraints_ =
       extractAllConstraints(distanceConstraints, positionConstraints, angleConstraints, torsionConstraints, numMols);
-    setConstraintReferences(mols_, constraints_);
 
-    buildForcefield();
+    // A rebuilt wrapper keeps the positions a DEVICE-mode minimize left on the device, which the RDKit conformers
+    // do not have.
+    auto positions = conformerPositions(mols_);
+    if (!previous.is_none()) {
+      auto& rebuilt = bp::extract<NativeUFFBatchedForcefield&>(previous)();
+      if (rebuilt.positionsAheadOfConformers_) {
+        positionsAheadOfConformers_ = replaceWithDevicePositions(rebuilt.positionsDevice_, positions);
+      }
+    }
+    setConstraintReferences(mols_, positions, constraints_);
+
+    buildForcefield(positions);
   }
 
   bp::list computeEnergy() {
@@ -503,6 +593,7 @@ class NativeUFFBatchedForcefield {
                                                              precision_);
 
     uploadConformerPositions(mols_, positionsDevice_);
+    positionsAheadOfConformers_ = false;
 
     return bp::make_tuple(nestedToList(result.energies, [](double v) { return v; }),
                           nestedToList(result.converged, [](int8_t v) { return v != 0; }));
@@ -524,6 +615,7 @@ class NativeUFFBatchedForcefield {
         "API for cross-GPU consolidation, or construct the wrapper on the desired GPU.");
     }
     const auto kind   = parseMinimizerKind(minimizerKind);
+    const auto start  = makeDeviceInput(positionsDevice_, forcefield_->atomStartsHost(), numConformersPerMol_, gpuId_);
     auto       result = kind == MinimizerKind::FIRE ?
                           nvMolKit::UFF::UFFMinimizeMoleculesConfsFire(mols_,
                                                                  maxIters,
@@ -534,7 +626,8 @@ class NativeUFFBatchedForcefield {
                                                                  hwOpts_,
                                                                  nvMolKit::CoordinateOutput::DEVICE,
                                                                  gpuId_,
-                                                                 precision_) :
+                                                                 precision_,
+                                                                 &start) :
                           nvMolKit::UFF::UFFMinimizeMoleculesConfs(mols_,
                                                              maxIters,
                                                              gradTol,
@@ -544,7 +637,7 @@ class NativeUFFBatchedForcefield {
                                                              hwOpts_,
                                                              nvMolKit::CoordinateOutput::DEVICE,
                                                              gpuId_,
-                                                             nullptr,
+                                                             &start,
                                                              precision_);
     if (!result.device.has_value()) {
       throw std::runtime_error("UFFMinimizeMoleculesConfs(DEVICE) returned no device result");
@@ -560,25 +653,26 @@ class NativeUFFBatchedForcefield {
                                      positionsDevice_.stream()),
                      "UFF minimizeDevice/positions refresh");
     throwIfCudaError(cudaStreamSynchronize(positionsDevice_.stream()), "UFF minimizeDevice/positions refresh sync");
+    positionsAheadOfConformers_ = true;
     return nvMolKit::buildOwningDevice3DResult(dev);
   }
 
   int gpuId() const { return gpuId_; }
 
  private:
-  void buildForcefield() {
+  void buildForcefield(const std::vector<std::vector<double>>& startPositions) {
     const int                                 numMols = static_cast<int>(mols_.size());
     nvMolKit::UFF::BatchedMolecularSystemHost systemHost;
     nvMolKit::BatchedForcefieldMetadata       metadata;
     numConformersPerMol_.resize(numMols);
 
+    size_t conformer = 0;
     for (int molIdx = 0; molIdx < numMols; ++molIdx) {
       auto* mol     = mols_[molIdx];
       int   confIdx = 0;
       for (auto confIter = mol->beginConformers(); confIter != mol->endConformers(); ++confIter, ++confIdx) {
-        auto&               conf = **confIter;
-        std::vector<double> positions;
-        nvMolKit::confPosToVect(conf, positions);
+        auto&       conf      = **confIter;
+        const auto& positions = startPositions[conformer++];
 
         auto contribs = nvMolKit::UFF::constructForcefieldContribs(*mol,
                                                                    vdwThresholds_[molIdx],
@@ -609,7 +703,8 @@ class NativeUFFBatchedForcefield {
   nvMolKit::AsyncDeviceVector<double>             gradDevice_;
   nvMolKit::AsyncDeviceVector<double>             energyOutsDevice_;
   std::vector<int>                                numConformersPerMol_;
-  int                                             gpuId_ = 0;
+  int                                             gpuId_                      = 0;
+  bool                                            positionsAheadOfConformers_ = false;
 };
 
 BOOST_PYTHON_MODULE(_batchedForcefield) {
@@ -640,7 +735,8 @@ BOOST_PYTHON_MODULE(_batchedForcefield) {
                                                                        const bp::list&,
                                                                        const bp::list&,
                                                                        const nvMolKit::BatchHardwareOptions&,
-                                                                       const nvMolKit::PrecisionMode&>())
+                                                                       const nvMolKit::PrecisionMode&,
+                                                                       const bp::object&>())
     .def("computeEnergy", &NativeMMFFBatchedForcefield::computeEnergy)
     .def("computeGradients", &NativeMMFFBatchedForcefield::computeGradients)
     .def("minimize", &NativeMMFFBatchedForcefield::minimize)
@@ -656,7 +752,8 @@ BOOST_PYTHON_MODULE(_batchedForcefield) {
                                                                       const bp::list&,
                                                                       const bp::list&,
                                                                       const nvMolKit::BatchHardwareOptions&,
-                                                                      const nvMolKit::PrecisionMode&>())
+                                                                      const nvMolKit::PrecisionMode&,
+                                                                      const bp::object&>())
     .def("computeEnergy", &NativeUFFBatchedForcefield::computeEnergy)
     .def("computeGradients", &NativeUFFBatchedForcefield::computeGradients)
     .def("minimize", &NativeUFFBatchedForcefield::minimize)

@@ -380,7 +380,7 @@ class _BatchedForcefieldBase:
             self._torsion_constraints,
         )
 
-    def _build_native(self):
+    def _build_native(self, previous):
         raise NotImplementedError
 
     def _build(self) -> None:
@@ -389,7 +389,7 @@ class _BatchedForcefieldBase:
             self._native_ff = None
             self._dirty = False
             return
-        self._native_ff = self._build_native()
+        self._native_ff = self._build_native(self._native_ff)
         self._dirty = False
 
     def _ensure_built(self) -> None:
@@ -542,7 +542,7 @@ class MMFFBatchedForcefield(_BatchedForcefieldBase):
             ignore_interfrag_interactions=bool(ignore_interfrag_interactions),
         )
 
-    def _build_native(self):
+    def _build_native(self, previous):
         native_properties = [
             self._copy_mmff_properties(mol, props, threshold, ignore)
             for mol, props, threshold, ignore in zip(
@@ -562,6 +562,7 @@ class MMFFBatchedForcefield(_BatchedForcefieldBase):
             tor,
             self._hardware_options._as_native(),
             self._precision,
+            previous,
         )
 
     @overload
@@ -600,7 +601,10 @@ class MMFFBatchedForcefield(_BatchedForcefieldBase):
         into the RDKit conformers in-place. In ``DEVICE`` mode, optimized
         coordinates and energies stay on the GPU, the wrapper's persistent
         on-device positions buffer is updated in-place (no host roundtrip),
-        and a :class:`Device3DResult` is returned.
+        and a :class:`Device3DResult` is returned. A later ``DEVICE`` mode
+        call continues from those positions, also after constraints are
+        added. The RDKit conformers are not updated in ``DEVICE`` mode, so a
+        ``RDKIT_CONFORMERS`` mode call starts from the conformers again.
 
         Args:
             maxIters: Maximum number of minimizer iterations.
@@ -688,7 +692,7 @@ class UFFBatchedForcefield(_BatchedForcefieldBase):
         """Return the force-field element at ``idx``."""
         return super().__getitem__(idx)
 
-    def _build_native(self):
+    def _build_native(self, previous):
         dist, pos, ang, tor = self._serialized_constraints()
         return _batchedForcefield.NativeUFFBatchedForcefield(
             self._molecules,
@@ -700,6 +704,7 @@ class UFFBatchedForcefield(_BatchedForcefieldBase):
             tor,
             self._hardware_options._as_native(),
             self._precision,
+            previous,
         )
 
     @overload
@@ -738,7 +743,10 @@ class UFFBatchedForcefield(_BatchedForcefieldBase):
         into the RDKit conformers in-place. In ``DEVICE`` mode, optimized
         coordinates and energies stay on the GPU, the wrapper's persistent
         on-device positions buffer is updated in-place (no host roundtrip),
-        and a :class:`Device3DResult` is returned.
+        and a :class:`Device3DResult` is returned. A later ``DEVICE`` mode
+        call continues from those positions, also after constraints are
+        added. The RDKit conformers are not updated in ``DEVICE`` mode, so a
+        ``RDKIT_CONFORMERS`` mode call starts from the conformers again.
 
         Args:
             maxIters: Maximum number of minimizer iterations.

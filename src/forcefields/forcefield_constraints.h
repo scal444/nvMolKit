@@ -16,6 +16,7 @@
 #ifndef NVMOLKIT_FORCEFIELD_CONSTRAINTS_H
 #define NVMOLKIT_FORCEFIELD_CONSTRAINTS_H
 
+#include <algorithm>
 #include <cstddef>
 #include <stdexcept>
 #include <string>
@@ -128,6 +129,18 @@ struct PerMolConstraints {
     }
   }
 };
+
+//! Throws if constraints would be anchored to coordinates other than the device input the minimization starts from.
+inline void requireReferencePositionsForDeviceInput(const std::vector<PerMolConstraints>& constraints) {
+  const bool anchoredToConformers = std::any_of(constraints.begin(), constraints.end(), [](const auto& perMol) {
+    return !perMol.empty() && perMol.referencePositions.empty();
+  });
+  if (anchoredToConformers) {
+    throw std::invalid_argument(
+      "Device input coordinates are not supported with constraints that have no reference positions: "
+      "their anchors would be read from each mol's RDKit conformer rather than from the device input.");
+  }
+}
 
 }  // namespace nvMolKit::ForceFieldConstraints
 

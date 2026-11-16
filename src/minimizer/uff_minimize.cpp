@@ -56,15 +56,7 @@ UFFMinimizeResult UFFMinimizeMoleculesConfs(std::vector<RDKit::ROMol*>& mols,
     throw std::invalid_argument("Expected one PerMolConstraints entry per molecule");
   }
   if (deviceInput != nullptr) {
-    const bool anyConstraint =
-      std::any_of(constraints.begin(), constraints.end(), [](const auto& perMol) { return !perMol.empty(); });
-    if (anyConstraint) {
-      throw std::invalid_argument(
-        "Device input coordinates not supported with custom constraints. "
-        "Use the RDKit Mol + Conformer path to apply constraints "
-        "(call UFFMinimizeMoleculesConfs without deviceInput; the constraints anchor positions are "
-        "read from each mol's RDKit conformer at force-field construction time).");
-    }
+    ForceFieldConstraints::requireReferencePositionsForDeviceInput(constraints);
   }
 
   const bool deviceOutput = output == CoordinateOutput::DEVICE;
@@ -297,7 +289,8 @@ UFFMinimizeResult UFFMinimizeMoleculesConfsFire(
   const BatchHardwareOptions&                                  perfOptions,
   const CoordinateOutput                                       output,
   int                                                          targetGpu,
-  PrecisionMode                                                precision) {
+  PrecisionMode                                                precision,
+  const DeviceCoordResult*                                     deviceInput) {
   ScopedNvtxRange fullRange("FIRE UFF Minimize Molecules Confs");
 
   if (vdwThresholds.size() != mols.size()) {
@@ -308,6 +301,9 @@ UFFMinimizeResult UFFMinimizeMoleculesConfsFire(
   }
   if (!constraints.empty() && constraints.size() != mols.size()) {
     throw std::invalid_argument("Expected one PerMolConstraints entry per molecule");
+  }
+  if (deviceInput != nullptr) {
+    ForceFieldConstraints::requireReferencePositionsForDeviceInput(constraints);
   }
 
   const bool deviceOutput = output == CoordinateOutput::DEVICE;
@@ -331,6 +327,12 @@ UFFMinimizeResult UFFMinimizeMoleculesConfsFire(
   for (size_t i = 0; i < mols.size(); ++i) {
     moleculeConverged[i].resize(moleculeEnergies[i].size(), 0);
   }
+
+  detail::DeviceInputIndex deviceInputIndex;
+  if (deviceInput != nullptr) {
+    deviceInputIndex = detail::buildDeviceInputIndex(*deviceInput, allConformers);
+  }
+  const bool useDeviceInput = deviceInput != nullptr;
 
   const size_t totalConformers    = allConformers.size();
   const size_t effectiveBatchSize = ctx.batchSize == 0 ? totalConformers : ctx.batchSize;
@@ -370,6 +372,9 @@ UFFMinimizeResult UFFMinimizeMoleculesConfsFire(
            threadBuffers,                                                            \
            deviceCollectors,                                                         \
            deviceOutput,                                                             \
+           useDeviceInput,                                                           \
+           deviceInput,                                                              \
+           deviceInputIndex,                                                         \
            precision,                                                                \
            exceptionHandler)
   for (size_t batchStart = 0; batchStart < totalConformers; batchStart += effectiveBatchSize) {
@@ -382,6 +387,17 @@ UFFMinimizeResult UFFMinimizeMoleculesConfsFire(
       const size_t                         batchEnd = std::min(batchStart + effectiveBatchSize, totalConformers);
       std::vector<nvMolKit::ConformerInfo> batchConformers(allConformers.begin() + batchStart,
                                                            allConformers.begin() + batchEnd);
+
+      std::vector<int> batchSrcIndices;
+      std::vector<int> batchAtomCounts;
+      if (useDeviceInput) {
+        batchSrcIndices.reserve(batchConformers.size());
+        batchAtomCounts.reserve(batchConformers.size());
+        for (size_t k = 0; k < batchConformers.size(); ++k) {
+          batchSrcIndices.push_back(deviceInputIndex.conformerIndexBy[batchStart + k]);
+          batchAtomCounts.push_back(static_cast<int>(batchConformers[k].mol->getNumAtoms()));
+        }
+      }
 
       cudaStream_t streamPtr = ctx.streamPool[threadId].stream();
 
@@ -424,6 +440,15 @@ UFFMinimizeResult UFFMinimizeMoleculesConfsFire(
       energyOutsDevice.setStream(streamPtr);
       positionsDevice.resize(systemHost.positions.size());
       positionsDevice.copyFromHost(buffers.initialPositions.data(), systemHost.positions.size());
+      if (useDeviceInput) {
+        detail::broadcastDeviceInputBatch(*deviceInput,
+                                          deviceInputIndex,
+                                          batchSrcIndices,
+                                          batchAtomCounts,
+                                          ctx.devicesPerThread[threadId],
+                                          streamPtr,
+                                          positionsDevice);
+      }
       gradDevice.resize(systemHost.positions.size());
       gradDevice.zero();
       energyOutsDevice.resize(batchConformers.size());

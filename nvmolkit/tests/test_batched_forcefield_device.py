@@ -93,6 +93,48 @@ def test_minimize_device_energies_match_host(ff_cls, two_mols):
 
 
 @pytest.mark.parametrize("ff_cls", [MMFFBatchedForcefield, UFFBatchedForcefield])
+@pytest.mark.parametrize("minimizer_kind", ["BFGS", "FIRE"])
+@pytest.mark.parametrize("constrained", [False, True])
+def test_minimize_device_continues_from_previous_call(ff_cls, minimizer_kind, constrained, two_mols):
+    """Repeated short DEVICE-mode calls progress like repeated RDKIT_CONFORMERS-mode calls."""
+    ff_host = ff_cls([Chem.Mol(m) for m in two_mols])
+    ff_device = ff_cls([Chem.Mol(m) for m in two_mols])
+    if constrained:
+        for ff in (ff_host, ff_device):
+            ff[0].add_position_constraint(0, 0.05, 50.0)
+            ff[1].add_distance_constraint(0, 3, True, 0.1, 0.2, 20.0)
+
+    energies_first = None
+    for _ in range(3):
+        energies_host, _ = ff_host.minimize(maxIters=10, minimizerKind=minimizer_kind)
+        result = ff_device.minimize(maxIters=10, output=CoordinateOutput.DEVICE, minimizerKind=minimizer_kind)
+        if energies_first is None:
+            energies_first = _flatten(energies_host)
+    torch.cuda.synchronize()
+
+    assert _flatten(energies_host) != pytest.approx(energies_first, abs=1e-3)
+    assert result.energies.torch().tolist() == pytest.approx(_flatten(energies_host), abs=1e-6)
+    assert _flatten(ff_device.compute_energy()) == pytest.approx(_flatten(energies_host), abs=1e-6)
+
+
+@pytest.mark.parametrize("ff_cls", [MMFFBatchedForcefield, UFFBatchedForcefield])
+def test_constraint_added_after_device_minimize_keeps_positions(ff_cls, two_mols):
+    """A constraint added after a DEVICE-mode minimize is anchored at, and continues from, the minimized positions."""
+    ff_host = ff_cls([Chem.Mol(m) for m in two_mols])
+    ff_device = ff_cls([Chem.Mol(m) for m in two_mols])
+    ff_host.minimize(maxIters=10)
+    minimized = ff_device.minimize(maxIters=10, output=CoordinateOutput.DEVICE).energies.torch().tolist()
+
+    for ff in (ff_host, ff_device):
+        ff[1].add_distance_constraint(0, 3, True, 0.0, 0.0, 20.0)
+    assert _flatten(ff_device.compute_energy()) == pytest.approx(minimized, abs=1e-6)
+
+    energies_host, _ = ff_host.minimize(maxIters=10)
+    result = ff_device.minimize(maxIters=10, output=CoordinateOutput.DEVICE)
+    assert result.energies.torch().tolist() == pytest.approx(_flatten(energies_host), abs=1e-6)
+
+
+@pytest.mark.parametrize("ff_cls", [MMFFBatchedForcefield, UFFBatchedForcefield])
 def test_minimize_fire_options_grad_tol_takes_precedence(ff_cls, two_mols):
     options = FireOptions()
     options.gradTol = 1e10

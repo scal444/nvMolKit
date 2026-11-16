@@ -71,11 +71,10 @@ struct UFFMinimizeResult {
 //! \param vdwThresholds Per-molecule VDW cutoff distances.
 //! \param ignoreInterfragInteractions Per-molecule interfragment interaction flags.
 //! \param constraints Per-molecule constraint specifications (empty = no constraints).
-//!                    Constraints read anchor positions from each mol's RDKit conformer at
-//!                    force-field construction time, so they are incompatible with @p deviceInput
-//!                    (whose positions never reach the host before contribs are built). To apply
-//!                    constraints, use the RDKit Mol + Conformer path (omit @p deviceInput) so
-//!                    anchor positions match the optimizer's starting coordinates.
+//!                    Constraints without reference positions read their anchors from each mol's
+//!                    RDKit conformer, so they are incompatible with @p deviceInput (whose positions
+//!                    never reach the host before contribs are built). With @p deviceInput, give the
+//!                    constraints reference positions.
 //! \param perfOptions Hardware and batching configuration.
 //! \param output Whether to write coordinates back into RDKit conformers (default) or return
 //!               them on-device as a DeviceCoordResult.
@@ -114,6 +113,7 @@ UFFMinimizeResult UFFMinimizeMoleculesConfs(
 //!               them on-device as a DeviceCoordResult.
 //! \param targetGpu In DEVICE mode, the GPU to consolidate the result onto. -1 selects the first
 //!                  configured execution GPU (or device 0).
+//! \param deviceInput Optional on-device starting coordinates, as for @ref UFFMinimizeMoleculesConfs.
 //! \return Final energies and convergence flags in RDKIT_CONFORMERS mode, or a device-resident
 //!         result in DEVICE mode. A convergence flag is false when @p maxIters is reached first.
 UFFMinimizeResult UFFMinimizeMoleculesConfsFire(
@@ -126,7 +126,8 @@ UFFMinimizeResult UFFMinimizeMoleculesConfsFire(
   const BatchHardwareOptions&                                  perfOptions = {},
   CoordinateOutput                                             output      = CoordinateOutput::RDKIT_CONFORMERS,
   int                                                          targetGpu   = -1,
-  PrecisionMode                                                precision   = PrecisionMode::FULL);
+  PrecisionMode                                                precision   = PrecisionMode::FULL,
+  const DeviceCoordResult*                                     deviceInput = nullptr);
 
 }  // namespace nvMolKit::UFF
 
