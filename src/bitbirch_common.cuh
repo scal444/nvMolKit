@@ -46,15 +46,12 @@ __host__ __device__ __forceinline__ double isimTanimoto(const ISimTanimotoTerms 
   return denominator > 0.0 ? terms.commonPairs / denominator : 1.0;
 }
 
-//! Compare iSIM against a threshold without performing the final division.
+//! Compare iSIM against a threshold. Dividing first keeps a value equal to the threshold accepted; the product
+//! threshold * denominator can round above the numerator.
 __host__ __device__ __forceinline__ bool isimTanimotoAtLeast(const ISimTanimotoTerms terms,
                                                              const std::uint64_t     count,
                                                              const double            threshold) {
-  if (count <= 1) {
-    return threshold <= 1.0;
-  }
-  const double denominator = terms.commonPairs + terms.mismatches;
-  return denominator > 0.0 ? terms.commonPairs >= threshold * denominator : threshold <= 1.0;
+  return isimTanimoto(terms, count) >= threshold;
 }
 
 }  // namespace nvMolKit::bitbirch

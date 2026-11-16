@@ -107,6 +107,24 @@ def test_concurrent_leaf_allocation_is_schedule_independent():
         np.testing.assert_array_equal(labels, expected)
 
 
+@pytest.mark.parametrize(
+    "rows",
+    [
+        # Pair with 55 shared of 100 set bits: merged iSIM is 55/100.
+        [range(78), range(23, 100)],
+        # Two identical rows joined by a third: merged iSIM is 110/200.
+        [range(40), range(40), [*range(35), *range(40, 80)]],
+    ],
+)
+def test_merge_at_exact_threshold_matches_reference(rows):
+    bits = np.zeros((len(rows), 128), dtype=np.uint32)
+    for row, on_bits in zip(bits, rows):
+        row[list(on_bits)] = 1
+    packed = (bits.reshape(len(rows), 4, 32) << np.arange(32, dtype=np.uint32)).sum(axis=2, dtype=np.uint32)
+    assert_matches_reference(packed, 0.55, branching_factor=50, batch_size=32)
+    np.testing.assert_array_equal(bitbirch(packed, 0.55).numpy(), np.zeros(len(rows), dtype=np.int32))
+
+
 def test_empty_zeros_and_duplicates():
     labels, centroids = bitbirch(np.zeros((0, 2), dtype=np.uint32), 0.5, return_centroids=True)
     assert labels.numpy().shape == (0,)

@@ -76,6 +76,13 @@ TEST(BitBirchPrimitives, HostEdgeCaseConventionsAreExplicit) {
   EXPECT_LT(nvMolKit::bitbirch::isimTanimoto(large, count), 1.0);
 }
 
+TEST(BitBirchPrimitives, ThresholdAcceptsEqualSimilarity) {
+  // 0.55 * 100 and 0.55 * 200 round above 55 and 110.
+  EXPECT_TRUE(nvMolKit::bitbirch::isimTanimotoAtLeast({55.0, 45.0}, 2, 0.55));
+  EXPECT_TRUE(nvMolKit::bitbirch::isimTanimotoAtLeast({110.0, 90.0}, 3, 0.55));
+  EXPECT_FALSE(nvMolKit::bitbirch::isimTanimotoAtLeast({54.0, 46.0}, 2, 0.55));
+}
+
 nvMolKit::BitBirchOptions treeOptions(const int branchingFactor, const int batchSize, const bool centroids = false) {
   nvMolKit::BitBirchOptions options;
   options.branchingFactor = branchingFactor;
