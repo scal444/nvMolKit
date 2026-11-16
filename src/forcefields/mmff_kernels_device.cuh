@@ -552,13 +552,15 @@ static __device__ __forceinline__ real torsionEnergy(const auto* pos,
   const real crossJKLKy = -dzKJ * dxLK + dxKJ * dzLK;
   const real crossJKLKz = -dxKJ * dyLK + dyKJ * dxLK;
 
-  const real invCross1Norm =
-    NVMOLKIT_RSQRT(crossIJKJx * crossIJKJx + crossIJKJy * crossIJKJy + crossIJKJz * crossIJKJz);
-  const real invCross2Norm =
-    NVMOLKIT_RSQRT(crossJKLKx * crossJKLKx + crossJKLKy * crossJKLKy + crossJKLKz * crossJKLKz);
+  // RDKit takes cos(phi) = 0 when either cross product is shorter than 1e-10.
+  constexpr real zeroNormSq   = real{1.0e-20};
+  const real     cross1NormSq = crossIJKJx * crossIJKJx + crossIJKJy * crossIJKJy + crossIJKJz * crossIJKJz;
+  const real     cross2NormSq = crossJKLKx * crossJKLKx + crossJKLKy * crossJKLKy + crossJKLKz * crossJKLKz;
 
   const real dotProduct = crossIJKJx * crossJKLKx + crossIJKJy * crossJKLKy + crossIJKJz * crossJKLKz;
-  const real cosPhi     = dotProduct * invCross1Norm * invCross2Norm;
+  const real cosPhi     = (cross1NormSq < zeroNormSq || cross2NormSq < zeroNormSq) ?
+                            real{0.0} :
+                            dotProduct * NVMOLKIT_RSQRT(cross1NormSq) * NVMOLKIT_RSQRT(cross2NormSq);
   // cos(2 phi) = 2c^2 - 1; cos(3 phi) = 4c^3 - 3c, where c = cos(phi).
   const real clampedCos = clamp(cosPhi, real{-1.0}, real{1.0});
   const real cos2Phi    = real{2.0} * clampedCos * clampedCos - real{1.0};
@@ -635,9 +637,16 @@ static __device__ __forceinline__ void eleGrad(const auto* pos,
     dE_dr *= real{0.75};
   }
 
-  const real dE_dx = dE_dr * (pos[3 * idx1 + 0] - pos[3 * idx2 + 0]) * invDistance;
-  const real dE_dy = dE_dr * (pos[3 * idx1 + 1] - pos[3 * idx2 + 1]) * invDistance;
-  const real dE_dz = dE_dr * (pos[3 * idx1 + 2] - pos[3 * idx2 + 2]) * invDistance;
+  real dE_dx, dE_dy, dE_dz;
+  if (distance <= real{0.0}) {
+    dE_dx = real{0.02};
+    dE_dy = real{0.02};
+    dE_dz = real{0.02};
+  } else {
+    dE_dx = dE_dr * (pos[3 * idx1 + 0] - pos[3 * idx2 + 0]) * invDistance;
+    dE_dy = dE_dr * (pos[3 * idx1 + 1] - pos[3 * idx2 + 1]) * invDistance;
+    dE_dz = dE_dr * (pos[3 * idx1 + 2] - pos[3 * idx2 + 2]) * invDistance;
+  }
 
   atomicAdd(&grad[3 * idx1 + 0], dE_dx);
   atomicAdd(&grad[3 * idx1 + 1], dE_dy);

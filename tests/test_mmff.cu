@@ -1332,6 +1332,80 @@ INSTANTIATE_TEST_SUITE_P(PrecisionModes,
                            return info.param == nvMolKit::PrecisionMode::SINGLE ? "Single" : "Full";
                          });
 
+class MMffGpuDegenerateGeometry : public ::testing::TestWithParam<nvMolKit::PrecisionMode> {
+ protected:
+  double energyTolerance() const { return GetParam() == nvMolKit::PrecisionMode::SINGLE ? 2.0e-3 : FUNCTION_E_TOL; }
+  double gradientTolerance() const { return GetParam() == nvMolKit::PrecisionMode::SINGLE ? 2.0e-2 : GRAD_TOL; }
+};
+
+TEST_P(MMffGpuDegenerateGeometry, CoincidentChargedAtoms) {
+  auto mol = std::unique_ptr<RDKit::RWMol>(RDKit::SmilesToMol("[Na+].[Cl-]"));
+  ASSERT_NE(mol, nullptr);
+  mol->addConformer(new RDKit::Conformer(mol->getNumAtoms()));
+
+  constexpr double nonBondedThresh             = 100.0;
+  constexpr bool   ignoreInterfragInteractions = false;
+  auto             mmffMolProperties           = std::make_unique<RDKit::MMFF::MMFFMolProperties>(*mol);
+  ASSERT_TRUE(mmffMolProperties->isValid());
+  auto referenceForceField = std::make_unique<ForceFields::ForceField>();
+  nvMolKit::setFFPosFromConf(*mol, referenceForceField.get());
+  referenceForceField->initialize();
+  RDKit::MMFF::Tools::addEle(*mol,
+                             -1,
+                             mmffMolProperties.get(),
+                             referenceForceField.get(),
+                             RDKit::MMFF::Tools::buildNeighborMatrix(*mol),
+                             nonBondedThresh,
+                             ignoreInterfragInteractions);
+  ASSERT_EQ(referenceForceField->contribs().size(), 1);
+
+  std::vector<double> positions;
+  nvMolKit::confPosToVect(*mol, positions);
+  BatchedMolecularSystemHost systemHost;
+  addMoleculeToBatch(constructForcefieldContribs(*mol, nonBondedThresh, -1, ignoreInterfragInteractions),
+                     positions,
+                     systemHost);
+
+  const double wantEnergy = referenceForceField->calcEnergy(positions.data());
+  const double gotEnergy  = getEnergyTermViaForcefield(systemHost, FFTerm::Elec, GetParam());
+  EXPECT_NEAR(gotEnergy, wantEnergy, std::abs(wantEnergy) * 1.0e-5);
+
+  std::vector<double> wantGradients(positions.size(), 0.0);
+  referenceForceField->calcGrad(positions.data(), wantGradients.data());
+  const std::vector<double> gotGrad = getGradientTermViaForcefield(systemHost, FFTerm::Elec, GetParam());
+  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::DoubleNear(gradientTolerance()), wantGradients));
+}
+
+TEST_P(MMffGpuDegenerateGeometry, CollinearTorsion) {
+  auto mol = std::unique_ptr<RDKit::RWMol>(RDKit::SmilesToMol("CCCC"));
+  ASSERT_NE(mol, nullptr);
+  auto* conformer = new RDKit::Conformer(mol->getNumAtoms());
+  for (unsigned int i = 0; i < mol->getNumAtoms(); ++i) {
+    conformer->setAtomPos(i, RDGeom::Point3D(1.5 * i, 0.0, 0.0));
+  }
+  mol->addConformer(conformer);
+
+  std::vector<double> positions;
+  nvMolKit::confPosToVect(*mol, positions);
+  BatchedMolecularSystemHost systemHost;
+  addMoleculeToBatch(constructForcefieldContribs(*mol), positions, systemHost);
+
+  const double wantEnergy = getReferenceEnergyTerm(mol.get(), FFTerm::Torsion);
+  const double gotEnergy  = getEnergyTermViaForcefield(systemHost, FFTerm::Torsion, GetParam());
+  EXPECT_NEAR(gotEnergy, wantEnergy, energyTolerance());
+
+  const std::vector<double> wantGradients = getReferenceGradientTerm(mol.get(), FFTerm::Torsion);
+  const std::vector<double> gotGrad       = getGradientTermViaForcefield(systemHost, FFTerm::Torsion, GetParam());
+  EXPECT_THAT(gotGrad, ::testing::Pointwise(::testing::DoubleNear(gradientTolerance()), wantGradients));
+}
+
+INSTANTIATE_TEST_SUITE_P(PrecisionModes,
+                         MMffGpuDegenerateGeometry,
+                         ::testing::Values(nvMolKit::PrecisionMode::FULL, nvMolKit::PrecisionMode::SINGLE),
+                         [](const ::testing::TestParamInfo<nvMolKit::PrecisionMode>& info) {
+                           return info.param == nvMolKit::PrecisionMode::SINGLE ? "Single" : "Full";
+                         });
+
 class MMFFValidationSuiteFixture : public ::testing::Test {
  public:
   MMFFValidationSuiteFixture() { testDataFolderPath_ = getTestDataFolderPath(); }
