@@ -365,6 +365,39 @@ TEST(DeviceConformerPruning, PrunesInConformerIndexOrderNotBufferOrder) {
   EXPECT_EQ(downloadDeviceVector(result.confIndices), (std::vector<int32_t>{0, 1}));
 }
 
+TEST(DeviceConformerPruning, KeepsLinearConformersThatDifferByMoreThanThreshold) {
+  auto mol = std::unique_ptr<RDKit::RWMol>(RDKit::SmilesToMol("O=C=O"));
+  ASSERT_NE(mol, nullptr);
+
+  // Bond lengths 1.16 and 1.16 against 1.2 and 1.1 along another axis: the aligned RMSD is 0.0249.
+  const std::vector<double> positions = {
+    0.0,
+    0.0,
+    0.0,
+    1.16,
+    0.0,
+    0.0,
+    2.32,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.72,
+    0.96,
+    0.0,
+    1.38,
+    1.84,
+    0.0,
+  };
+  auto                       input  = makeDeviceResult(positions, {0, 0}, 1);
+  auto                       params = pruningParams(0.023);
+  std::vector<RDKit::ROMol*> mols   = {mol.get()};
+
+  const auto result = detail::pruneDeviceConformers(std::move(input), mols, params);
+  EXPECT_EQ(downloadDeviceVector(result.positions), positions);
+}
+
 TEST(DeviceConformerPruning, UsesSymmetryAtomMappings) {
   auto mol = std::unique_ptr<RDKit::RWMol>(RDKit::SmilesToMol("CC(C)C"));
   ASSERT_NE(mol, nullptr);

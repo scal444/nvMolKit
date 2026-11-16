@@ -29,17 +29,10 @@ namespace nvMolKit {
 // Device helpers
 // ---------------------------------------------------------------------------
 
-/// Compute determinant of a 3x3 matrix stored as scalar elements.
-__device__ __forceinline__ double det3x3(const double h00,
-                                         const double h01,
-                                         const double h02,
-                                         const double h10,
-                                         const double h11,
-                                         const double h12,
-                                         const double h20,
-                                         const double h21,
-                                         const double h22) {
-  return h00 * (h11 * h22 - h12 * h21) - h01 * (h10 * h22 - h12 * h20) + h02 * (h10 * h21 - h11 * h20);
+/// a * d - b * c, accurate to rounding even when the two products nearly cancel.
+__device__ __forceinline__ double minor2x2(const double a, const double b, const double c, const double d) {
+  const double bc = b * c;
+  return fma(a, d, -bc) + fma(-b, c, bc);
 }
 
 // This can be extended later to support arbitrary dimensions, but currently supports only 3D due to its specialized
@@ -54,19 +47,35 @@ __device__ __forceinline__ double alignedRmsd(const double Sp, const double Sq, 
   const double g12 = H[1] * H[2] + H[4] * H[5] + H[7] * H[8];
   const double g22 = H[2] * H[2] + H[5] * H[5] + H[8] * H[8];
 
-  // Eigenvalues of G = squared singular values of H
+  // Only the largest eigenvalue of G, the squared largest singular value s0 of H, is used. The square roots of
+  // the smaller ones lose half their digits when H is rank deficient (planar or linear point sets).
   double ev0, ev1, ev2;
   symmetricEigenvalues3x3(g00, g01, g02, g11, g12, g22, ev0, ev1, ev2);
-
-  // Singular values (clamp negatives from numerical noise)
-  const double s0 = sqrt(fmax(ev0, 0.0));
-  const double s1 = sqrt(fmax(ev1, 0.0));
-  double       s2 = sqrt(fmax(ev2, 0.0));
-
-  // Handle reflection: if det(H) < 0, negate the smallest singular value
-  if (det3x3(H[0], H[1], H[2], H[3], H[4], H[5], H[6], H[7], H[8]) < 0.0) {
-    s2 = -s2;
+  if (!(ev0 > 0.0)) {
+    return sqrt(fmax((Sp + Sq) * invN, 0.0));
   }
+
+  // The other two singular values follow from det(H) = s0 s1 s2, whose sign also accounts for reflections, and
+  // from the squared norm of the cofactor matrix, s0^2 s1^2 + s0^2 s2^2 + s1^2 s2^2.
+  const double c00 = minor2x2(H[4], H[5], H[7], H[8]);
+  const double c01 = minor2x2(H[3], H[5], H[6], H[8]);
+  const double c02 = minor2x2(H[3], H[4], H[6], H[7]);
+  const double c10 = minor2x2(H[1], H[2], H[7], H[8]);
+  const double c11 = minor2x2(H[0], H[2], H[6], H[8]);
+  const double c12 = minor2x2(H[0], H[1], H[6], H[7]);
+  const double c20 = minor2x2(H[1], H[2], H[4], H[5]);
+  const double c21 = minor2x2(H[0], H[2], H[3], H[5]);
+  const double c22 = minor2x2(H[0], H[1], H[3], H[4]);
+  const double det = H[0] * c00 - H[1] * c01 + H[2] * c02;
+  const double cofactorNormSq =
+    c00 * c00 + c01 * c01 + c02 * c02 + c10 * c10 + c11 * c11 + c12 * c12 + c20 * c20 + c21 * c21 + c22 * c22;
+
+  const double invEv0  = 1.0 / ev0;
+  const double s1s2Sq  = det * det * invEv0;                  // s1^2 s2^2
+  const double s1s2Sum = (cofactorNormSq - s1s2Sq) * invEv0;  // s1^2 + s2^2
+  const double s0      = sqrt(ev0);
+  const double s1      = sqrt(0.5 * (s1s2Sum + sqrt(fmax(s1s2Sum * s1s2Sum - 4.0 * s1s2Sq, 0.0))));
+  const double s2      = s1 > 0.0 ? det / (s0 * s1) : 0.0;
 
   // RMSD^2 = (Sp + Sq - 2*(s0 + s1 + s2)) / N
   return sqrt(fmax((Sp + Sq - 2.0 * (s0 + s1 + s2)) * invN, 0.0));
@@ -381,32 +390,16 @@ __device__ __forceinline__ void alignConformerToFirst(const double* __restrict__
 }
 
 __device__ __forceinline__ double computeOptimalRmsd(const RigidAlignmentMoments& moments, const double invN) {
-  // G = H^T H (3x3 symmetric positive semi-definite).
-  const double g00 = moments.h00 * moments.h00 + moments.h10 * moments.h10 + moments.h20 * moments.h20;
-  const double g01 = moments.h00 * moments.h01 + moments.h10 * moments.h11 + moments.h20 * moments.h21;
-  const double g02 = moments.h00 * moments.h02 + moments.h10 * moments.h12 + moments.h20 * moments.h22;
-  const double g11 = moments.h01 * moments.h01 + moments.h11 * moments.h11 + moments.h21 * moments.h21;
-  const double g12 = moments.h01 * moments.h02 + moments.h11 * moments.h12 + moments.h21 * moments.h22;
-  const double g22 = moments.h02 * moments.h02 + moments.h12 * moments.h12 + moments.h22 * moments.h22;
-
-  double ev0, ev1, ev2;
-  symmetricEigenvalues3x3(g00, g01, g02, g11, g12, g22, ev0, ev1, ev2);
-  const double s0 = sqrt(fmax(ev0, 0.0));
-  const double s1 = sqrt(fmax(ev1, 0.0));
-  double       s2 = sqrt(fmax(ev2, 0.0));
-  if (det3x3(moments.h00,
-             moments.h01,
-             moments.h02,
-             moments.h10,
-             moments.h11,
-             moments.h12,
-             moments.h20,
-             moments.h21,
-             moments.h22) < 0.0)
-    s2 = -s2;
-
-  const double rmsdSq = fmax((moments.movingSquaredNorm + moments.fixedSquaredNorm - 2.0 * (s0 + s1 + s2)) * invN, 0.0);
-  return sqrt(rmsdSq);
+  const double H[9] = {moments.h00,
+                       moments.h01,
+                       moments.h02,
+                       moments.h10,
+                       moments.h11,
+                       moments.h12,
+                       moments.h20,
+                       moments.h21,
+                       moments.h22};
+  return alignedRmsd(moments.movingSquaredNorm, moments.fixedSquaredNorm, H, invN);
 }
 
 __device__ __forceinline__ void computePairRmsd(const double* __restrict__ coordI,

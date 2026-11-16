@@ -218,6 +218,30 @@ def test_rmsd_rigid_molecule():
     assert np.all(gpu_rms < 0.5), f"Rigid molecule should have small RMSD, got max={gpu_rms.max():.4f}"
 
 
+@pytest.mark.parametrize(
+    "smiles,coordinates",
+    [
+        ("c1ccccc1", [[1.39 * np.cos(k * np.pi / 3), 1.39 * np.sin(k * np.pi / 3), 0.0] for k in range(6)]),
+        ("O=C=O", [[-1.16, 0.0, 0.0], [0.0, 0.0, 0.0], [1.16, 0.0, 0.0]]),
+    ],
+)
+def test_rmsd_planar_and_linear_molecules_match_numpy_kabsch(smiles, coordinates):
+    """Two identical and two slightly stretched copies of a planar and of a linear molecule, each rotated."""
+    rng = np.random.default_rng(0)
+    mol = Chem.MolFromSmiles(smiles)
+    for stretch in (1.0, 1.0, 1.01, 0.98):
+        orientation = np.linalg.qr(rng.normal(size=(3, 3)))[0]
+        positions = (np.array(coordinates) * [stretch, 1.0, 1.0]) @ orientation.T
+        conformer = Chem.Conformer(mol.GetNumAtoms())
+        for atom, position in enumerate(positions):
+            conformer.SetAtomPosition(atom, position.tolist())
+        mol.AddConformer(conformer, assignId=True)
+
+    gpu_rms = GetConformerRMSMatrix(mol).numpy()
+
+    np.testing.assert_allclose(gpu_rms, _numpy_rmsd_matrix(mol), atol=1e-6)
+
+
 def test_rmsd_explicit_stream():
     """Test execution on an explicit CUDA stream."""
     mol = _embed_mol("CCCCCC", num_confs=10)
