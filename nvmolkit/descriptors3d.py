@@ -529,16 +529,16 @@ def Calc3DProperties(
     gpu_id = active_stream.device.index
     properties_by_name = {}
     for name, raw in raw_results.items():
-        result = AsyncGpuResult(raw, gpu_id=gpu_id)
+        result = AsyncGpuResult(raw, gpu_id=gpu_id, stream=active_stream)
         if coordinates is not None:
             # The kernel reads caller-owned device coordinates asynchronously on active_stream.
             result._input_owners = (coordinates,)
         properties_by_name[name] = result
 
     if coordinates is None:
-        mol_indices = AsyncGpuResult(raw_mol_indices, gpu_id=gpu_id)
-        conf_indices = AsyncGpuResult(raw_conf_indices, gpu_id=gpu_id)
-        atom_starts = AsyncGpuResult(raw_atom_starts, gpu_id=gpu_id)
+        mol_indices = AsyncGpuResult(raw_mol_indices, gpu_id=gpu_id, stream=active_stream)
+        conf_indices = AsyncGpuResult(raw_conf_indices, gpu_id=gpu_id, stream=active_stream)
+        atom_starts = AsyncGpuResult(raw_atom_starts, gpu_id=gpu_id, stream=active_stream)
     else:
         mol_indices = coordinates.mol_indices
         conf_indices = coordinates.conf_indices

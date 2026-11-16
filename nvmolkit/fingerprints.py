@@ -115,4 +115,6 @@ class MorganFingerprintGenerator:
             Each row is a fingerprint for the corresponding molecule.
         """
         active_stream = _resolve_cuda_stream(stream)
-        return AsyncGpuResult(self._internal.GetFingerprintsDevice(mols, num_threads, active_stream.cuda_stream))
+        return AsyncGpuResult(
+            self._internal.GetFingerprintsDevice(mols, num_threads, active_stream.cuda_stream), stream=active_stream
+        )

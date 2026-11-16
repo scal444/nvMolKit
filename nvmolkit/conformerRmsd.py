@@ -155,7 +155,8 @@ def GetConformerRMSMatrix(
     execution_stream = stream if stream is not None else torch.cuda.current_stream()
     stream_ptr = execution_stream.cuda_stream
     result = AsyncGpuResult(
-        _conformerRmsd.GetConformerRMSMatrix(mol, prealigned, alignment_mode == "first-conformer", stream_ptr)
+        _conformerRmsd.GetConformerRMSMatrix(mol, prealigned, alignment_mode == "first-conformer", stream_ptr),
+        stream=execution_stream,
     )
     if output_format == "square":
         with torch.cuda.stream(execution_stream):
@@ -240,7 +241,7 @@ def GetConformerRMSMatrixBatch(
     execution_stream = stream if stream is not None else torch.cuda.current_stream()
     stream_ptr = execution_stream.cuda_stream
     raw = _conformerRmsd.GetConformerRMSMatrixBatch(mols, prealigned, alignment_mode == "first-conformer", stream_ptr)
-    results = [AsyncGpuResult(r) for r in raw]
+    results = [AsyncGpuResult(r, stream=execution_stream) for r in raw]
     if output_format == "square":
         with torch.cuda.stream(execution_stream):
             return [_condensed_to_square(result, mol.GetNumConformers()) for result, mol in zip(results, mols)]

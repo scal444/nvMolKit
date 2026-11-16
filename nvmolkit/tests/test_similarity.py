@@ -403,6 +403,30 @@ def test_similarity_on_explicit_stream(similarity, bulk_similarity, size_limited
     torch.testing.assert_close(nvmolkit_sims, ref_sims)
 
 
+def test_similarity_waits_for_fingerprints_from_another_stream(size_limited_mols):
+    """Fingerprints still queued on a busy stream are consumed correctly on other streams."""
+    generator = MorganFingerprintGenerator(radius=3, fpSize=1024)
+    library = generator.GetFingerprints(size_limited_mols)
+    producer, consumer = torch.cuda.Stream(), torch.cuda.Stream()
+    filler = torch.randn(3000, 3000, device="cuda")
+
+    # Different queries each round, so memory reused from the previous round cannot stand in for the result.
+    for start in (0, 20, 40):
+        queries = size_limited_mols[start : start + 20]
+        expected = crossTanimotoSimilarity(generator.GetFingerprints(queries), library).numpy()
+
+        with torch.cuda.stream(producer):
+            queued = filler
+            for _ in range(15):
+                queued = queued @ filler
+            fingerprints = generator.GetFingerprints(queries, stream=producer)
+        on_other_stream = crossTanimotoSimilarity(fingerprints, library, stream=consumer)
+        on_current_stream = crossTanimotoSimilarity(fingerprints, library)
+
+        np.testing.assert_array_equal(on_other_stream.numpy(), expected)
+        np.testing.assert_array_equal(on_current_stream.numpy(), expected)
+
+
 @pytest.mark.parametrize("similarity", (crossTanimotoSimilarity, crossCosineSimilarity))
 def test_similarity_invalid_stream_type(similarity):
     fps = torch.zeros((1, 8), dtype=torch.uint32, device="cuda")

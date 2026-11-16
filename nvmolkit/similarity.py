@@ -409,4 +409,7 @@ class FingerprintSearchIndex:
                 )
 
         gpu_id = self._device.index
-        return AsyncGpuResult(scores, gpu_id=gpu_id), AsyncGpuResult(indices, gpu_id=gpu_id)
+        return (
+            AsyncGpuResult(scores, gpu_id=gpu_id, stream=active_stream),
+            AsyncGpuResult(indices, gpu_id=gpu_id, stream=active_stream),
+        )

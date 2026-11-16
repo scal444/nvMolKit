@@ -312,20 +312,24 @@ class AsyncGpuResult:
 
     Populates the ``__cuda_array_interface__`` attribute which can be consumed by other libraries. Note that
     this result is async, and the data cannot be accessed without a sync, such as ``torch.cuda.synchronize()``.
+    nvMolKit functions that take this result as input wait for it on their own stream.
     """
 
-    def __init__(self, obj, gpu_id: int | None = None):
+    def __init__(self, obj, gpu_id: int | None = None, stream: torch.cuda.Stream | None = None):
         """Internal construction of the AsyncGpuResult object.
 
         Args:
             obj: An object exposing ``__cuda_array_interface__``.
             gpu_id: Optional GPU device id where the underlying buffer lives. If omitted, torch
                 infers the device from the CUDA pointer attributes (typically the current device).
+            stream: The stream the data is being produced on. If omitted, the current stream of
+                the buffer's device.
         """
         if not hasattr(obj, "__cuda_array_interface__"):
             raise TypeError(f"Object {obj} does not have a __cuda_array_interface__ attribute")
         device = "cuda" if gpu_id is None else f"cuda:{int(gpu_id)}"
         self.arr = torch.as_tensor(obj, device=device)
+        self._stream = stream if stream is not None else torch.cuda.current_stream(self.arr.device)
 
     @property
     def __cuda_array_interface__(self):
@@ -384,7 +388,8 @@ def _as_cuda_tensor(
 ) -> torch.Tensor:
     """Return *value* as a CUDA tensor ordered on *stream*.
 
-    ``AsyncGpuResult`` and CUDA tensors are zero-copy. CPU tensors and NumPy
+    ``AsyncGpuResult`` and CUDA tensors are zero-copy. An ``AsyncGpuResult``
+    produced on another stream is waited for on *stream*. CPU tensors and NumPy
     arrays are copied to the stream device. API-specific dtype, shape, and
     layout checks live in the public wrappers that know their native contracts.
     """
@@ -406,6 +411,8 @@ def _as_cuda_tensor(
         return tensor.to(device=target_device, non_blocking=True)
     if tensor.device != target_device:
         raise ValueError(f"{name} is on {tensor.device}, but stream is on {target_device}")
+    if isinstance(value, AsyncGpuResult) and value._stream != stream:
+        stream.wait_stream(value._stream)
     return tensor
 
 
