@@ -89,6 +89,43 @@ std::vector<int> calculateMaxIterations(const std::vector<RDKit::ROMol*>& mols, 
   }
   return result;
 }
+
+//! Throws if any molecule cannot be embedded, naming the input indices of all such molecules. Null pointers are left
+//! to the caller.
+void checkMoleculesCanBeEmbedded(const std::vector<RDKit::ROMol*>& mols, const bool eigenvalueCoordGen) {
+  std::string emptyIndices;
+  std::string unsanitizedIndices;
+  std::string oversizedIndices;
+  const auto  append = [](std::string& indices, const size_t idx) {
+    indices += (indices.empty() ? "" : ", ") + std::to_string(idx);
+  };
+  for (size_t i = 0; i < mols.size(); ++i) {
+    const auto* mol = mols[i];
+    if (mol == nullptr) {
+      continue;
+    }
+    if (mol->getNumAtoms() == 0) {
+      append(emptyIndices, i);
+    } else if (mol->needsUpdatePropertyCache()) {
+      append(unsanitizedIndices, i);
+    } else if (eigenvalueCoordGen && mol->getNumAtoms() > 256) {
+      append(oversizedIndices, i);
+    }
+  }
+
+  std::string message;
+  const auto  addPart = [&message](const std::string& problem, const std::string& indices) {
+    if (!indices.empty()) {
+      message += (message.empty() ? "" : "; ") + problem + " at indices [" + indices + "]";
+    }
+  };
+  addPart("Molecules with no atoms", emptyIndices);
+  addPart("Molecules without computed valences (not sanitized)", unsanitizedIndices);
+  addPart("Eigenvalue coordinate generation supports at most 256 atoms per molecule, exceeded", oversizedIndices);
+  if (!message.empty()) {
+    throw std::invalid_argument(message);
+  }
+}
 }  // anonymous namespace
 
 // TODO: The useRDKitCoordGen parameter will be removed once ETKDGCoordGenStage is optimized, after which we will
@@ -108,15 +145,13 @@ std::optional<DeviceCoordResult> embedMolecules(const std::vector<RDKit::ROMol*>
   const bool            deviceOutput = output == CoordinateOutput::DEVICE;
   auto                  paramsCopy   = DGeomHelpers::normalizeEmbedParameters(params);
   DGeomHelpers::validateSupportedEmbedParameters(paramsCopy);
+  checkMoleculesCanBeEmbedded(mols, !paramsCopy.useRandomCoords);
 
   // Validate inputs
   for (size_t i = 0; i < mols.size(); ++i) {
     const auto* mol = mols[i];
     if (mol == nullptr) {
       throw std::invalid_argument("Invalid molecule pointer at index " + std::to_string(i));
-    }
-    if (!paramsCopy.useRandomCoords && mol->getNumAtoms() > 256) {
-      throw std::invalid_argument("Eigenvalue coordinate generation supports at most 256 atoms per molecule");
     }
   }
 

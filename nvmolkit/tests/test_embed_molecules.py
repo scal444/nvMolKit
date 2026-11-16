@@ -398,6 +398,23 @@ def test_embed_molecules_invalid_input():
         embed.EmbedMolecules([None], params)
 
 
+def test_embed_molecules_reports_indices_of_invalid_molecules():
+    """Molecules that cannot be embedded are named by input index and nothing is embedded."""
+    valid = Chem.AddHs(Chem.MolFromSmiles("CCO"))
+    empty = Chem.Mol()
+    unsanitized = Chem.MolFromSmiles("CCO", sanitize=False)
+    oversized = Chem.AddHs(Chem.MolFromSmiles("C" * 100))
+
+    with pytest.raises(ValueError) as exc_info:
+        embed.EmbedMolecules([valid, empty, unsanitized, oversized], rdDistGeom.ETKDGv3())
+
+    message = str(exc_info.value)
+    assert "no atoms at indices [1]" in message
+    assert "not sanitized) at indices [2]" in message
+    assert "at most 256 atoms per molecule, exceeded at indices [3]" in message
+    assert valid.GetNumConformers() == 0
+
+
 @pytest.mark.parametrize("rand_neg_eig", [False, True])
 def test_embed_molecules_eigenvalue_initialization(rand_neg_eig):
     """Embed mixed-size, chiral, and ring molecules from eigenvalue coordinates."""
