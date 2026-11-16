@@ -877,7 +877,6 @@ void FireBatchMinimizerT<real>::minimizeBatched(const int                     nu
     grad.zero();
     evalGrad();
     launchPostKick(gradTol, atomStarts, positions, grad, lastKnownNumUnfinished_);
-    compactActiveAsync();
 
     const bool poll = debugMode_ || ((iter + 1) % convergencePollInterval_ == 0) || (iter + 1 == numIters);
     if (poll) {
@@ -899,9 +898,11 @@ void FireBatchMinimizerT<real>::minimizeBatched(const int                     nu
                                                         fireOptions_.stuckEnergyRelTol,
                                                         fireOptions_.stuckStreakLength);
           cudaCheckError(cudaGetLastError());
-          compactActiveAsync();
         }
       }
+      // Compact only together with the count read-back, so the active list always has as many entries as the
+      // kernels launch blocks; systems that converge in between are skipped by their status.
+      compactActiveAsync();
       lastKnownNumUnfinished_ = readbackNumUnfinished();
     }
 

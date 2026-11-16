@@ -1038,6 +1038,62 @@ TYPED_TEST(FireMinimizerPrecisionTest, StaggeredConvergenceCount) {
   EXPECT_GE(uniqueConvIters.size(), 2u) << "Test should produce at least two distinct convergence iterations";
 }
 
+TYPED_TEST(FireMinimizerPrecisionTest, RunningSystemUnaffectedByEarlierConvergence) {
+  // Stiff single-atom systems converge early and at different iterations; the soft system stays active.
+  constexpr int       kNumFast   = 12;
+  constexpr int       kSlowAtoms = 64;
+  constexpr int       kNumIters  = 600;
+  std::vector<int>    atomCounts(kNumFast, 1);
+  std::vector<double> kPerSys;
+  for (int sysIdx = 0; sysIdx < kNumFast; ++sysIdx) {
+    kPerSys.push_back(40.0 + 15.0 * sysIdx);
+  }
+  atomCounts.push_back(kSlowAtoms);
+  kPerSys.push_back(0.05);
+  std::vector<double> startingPositions((kNumFast + kSlowAtoms) * kDim, 0.0);
+  for (int atomIdx = 0; atomIdx < kNumFast + kSlowAtoms; ++atomIdx) {
+    startingPositions[atomIdx * kDim + 0] = 1.0 + 0.01 * atomIdx;
+  }
+  const std::vector<double> targets(atomCounts.size() * kDim, 0.0);
+  const std::vector<double> slowStart(startingPositions.begin() + kNumFast * kDim, startingPositions.end());
+  HarmonicSystems           batch(atomCounts, kPerSys, startingPositions, targets);
+  HarmonicSystems           alone({kSlowAtoms}, {kPerSys.back()}, slowStart, std::vector<double>(kDim, 0.0));
+
+  nvMolKit::FireOptions options;
+  options.stuckDetectionEnabled = false;
+  options.dtInit                = 0.001;
+  options.dMax                  = 0.0;
+  options.gradTol               = 1e-3;
+
+  std::vector<uint8_t> batchStatuses;
+  for (HarmonicSystems* systems : {&batch, &alone}) {
+    nvMolKit::FireBatchMinimizerT<TypeParam> minimizer(kDim, options);
+    minimizer.minimize(
+      kNumIters,
+      options.gradTol,
+      systems->atomStartsHost(),
+      systems->atomStartsDevice(),
+      systems->positionsDevice(),
+      systems->gradDevice(),
+      systems->energyOutsDevice(),
+      systems->energyBufferDevice(),
+      [](const double*) {},
+      systems->gradFunctor());
+    if (systems == &batch) {
+      batchStatuses = minimizer.snapshotInternalState().statuses;
+    }
+  }
+  ASSERT_EQ(std::count(batchStatuses.begin(), batchStatuses.end(), 0), kNumFast);
+  ASSERT_EQ(batchStatuses.back(), 1);
+
+  const auto slowInBatch = batch.systemPositions(batch.readbackPositions(), kNumFast);
+  const auto slowAlone   = alone.readbackPositions();
+  ASSERT_EQ(slowInBatch.size(), slowAlone.size());
+  for (size_t i = 0; i < slowAlone.size(); ++i) {
+    EXPECT_NEAR(slowInBatch[i], slowAlone[i], TestFixture::stateTolerance()) << "coord " << i;
+  }
+}
+
 TEST(FireMinimizer, HybridBackendSelectionAndPerMolInitialization) {
   nvMolKit::FireOptions        options;
   nvMolKit::FireBatchMinimizer minimizer(kDim,
