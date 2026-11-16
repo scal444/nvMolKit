@@ -24,6 +24,7 @@
 #include <Numerics/EigenSolvers/PowerEigenSolver.h>
 #include <Numerics/SymmMatrix.h>
 
+#include <limits>
 #include <random>
 
 #include "rdkit_extensions/bounds_matrix.h"
@@ -337,6 +338,45 @@ TEST(InitialCoordinateGeneratorTest, ReusedBoundsMatchFreshBounds) {
     EXPECT_DOUBLE_EQ(reusedHost[idx], freshHost[idx]);
   }
 }
+
+class InitialCoordinateGeneratorSeedTest : public ::testing::TestWithParam<int> {};
+
+TEST_P(InitialCoordinateGeneratorSeedTest, AttemptsUseDistinctStreams) {
+  std::unique_ptr<RDKit::ROMol> mol(RDKit::SmilesToMol("CCCCO"));
+  ASSERT_NE(mol, nullptr);
+  const std::vector<const RDKit::ROMol*> mols = {mol.get(), mol.get()};
+
+  auto params       = RDKit::DGeomHelpers::ETKDGv3;
+  params.randomSeed = GetParam();
+  std::vector<ForceFields::CrystalFF::CrystalFFDetails> details(mols.size());
+
+  constexpr int          coordinateDim = 3;
+  const int              numAtoms      = static_cast<int>(mol->getNumAtoms());
+  const std::vector<int> atomStarts    = {0, numAtoms, 2 * numAtoms};
+  AsyncDeviceVector<int> dAtomStarts(atomStarts.size());
+  dAtomStarts.copyFromHost(atomStarts);
+  AsyncDeviceVector<double> dPositions(static_cast<size_t>(atomStarts.back()) * coordinateDim);
+
+  nvMolKit::detail::InitialCoordinateGenerator generator;
+  generator.computeBoundsMatrices(mols, params, details, {0, 1});
+  generator.computeInitialCoordinates(dPositions.data(), dAtomStarts.data(), coordinateDim);
+
+  std::vector<uint8_t> passed(mols.size());
+  std::vector<double>  positions(dPositions.size());
+  cudaCheckError(cudaMemcpy(passed.data(), generator.getPassFail(), passed.size(), cudaMemcpyDeviceToHost));
+  dPositions.copyToHost(positions);
+  cudaCheckError(cudaDeviceSynchronize());
+
+  ASSERT_THAT(passed, ::testing::Each(1));
+  const auto                secondStart = positions.begin() + numAtoms * coordinateDim;
+  const std::vector<double> first(positions.begin(), secondStart);
+  const std::vector<double> second(secondStart, positions.end());
+  EXPECT_NE(first, second);
+}
+
+INSTANTIATE_TEST_SUITE_P(SeedsThatReduceToZero,
+                         InitialCoordinateGeneratorSeedTest,
+                         ::testing::Values(0, std::numeric_limits<int>::max()));
 
 class SymmetricEigenSolverSyntheticTestFixture : public ::testing::TestWithParam<std::tuple<int, int>> {};
 

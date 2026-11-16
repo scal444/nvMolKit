@@ -20,6 +20,7 @@
 #include <Numerics/SymmMatrix.h>
 #include <RDGeneral/utils.h>
 
+#include <cstdint>
 #include <random>
 #include <vector>
 
@@ -41,6 +42,14 @@ __global__ void combineActiveAndValidKernel(const int      numSystems,
   if (systemIdx < numSystems) {
     eigensolverActive[systemIdx] = validDistanceMatrices[systemIdx] && (active == nullptr || active[systemIdx]);
   }
+}
+
+//! Seed of the random stream for one attempt. RDKit::rng_type reduces a seed modulo its modulus and replaces 0 with 1,
+//! so base + attempt is folded onto the nonzero states to keep the streams of different attempts distinct.
+unsigned int attemptSeed(const unsigned int baseSeed, const int attemptId) {
+  constexpr std::uint64_t numStates = RDKit::rng_type::modulus - 1;
+  const std::uint64_t     sum       = static_cast<std::uint64_t>(baseSeed) + static_cast<std::uint64_t>(attemptId);
+  return static_cast<unsigned int>((sum + numStates - 1) % numStates + 1);
 }
 
 std::vector<double> packedNMatrices(const std::vector<RDNumeric::SymmMatrix<double>>& matrices, int& maxDimension) {
@@ -264,7 +273,7 @@ class InitialCoordinateGenerator::Impl {
       }
     } else {
       for (int i = 0; i < batchSize; ++i) {
-        RDKit::rng_type           generator(baseSeed_ + static_cast<unsigned int>(attemptIds_[i]));
+        RDKit::rng_type           generator(attemptSeed(baseSeed_, attemptIds_[i]));
         RDKit::double_source_type rng(generator, distribution);
         sampleDistanceMatrix(i, rng);
       }
