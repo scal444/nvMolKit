@@ -853,14 +853,16 @@ __launch_bounds__(BLOCK_SIZE) __global__ void bfgsMinimizeKernel(const int      
       __syncthreads();
     }
 
-    // Update positions with final line search result and compute direction
+    // Update positions with final line search result and compute direction. A line search that ran out of step size
+    // or iterations keeps the starting point, as in RDKit.
+    const bool lineSearchFailed = !lineSearchConverged || lambda < lambdaMin;
     for (int i = tid; i < numTerms; i += blockDim.x) {
-      localPos[i] = scratchPos[i];
+      localPos[i] = lineSearchFailed ? oldPos[i] : scratchPos[i];
     }
     __syncthreads();
 
     // Set direction (compute xi = new - old)
-    setDirection(numTerms, scratchPos, oldPos, localDir, dGrad, localGrad, converged, tempStorage);
+    setDirection(numTerms, localPos, oldPos, localDir, dGrad, localGrad, converged, tempStorage);
     if (converged) {
       break;
     }

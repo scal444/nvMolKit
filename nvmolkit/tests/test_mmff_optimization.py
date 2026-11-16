@@ -357,6 +357,17 @@ def test_mmff_optimization_invalid_input():
     assert exc_info.value.args[1] == {"none": [0], "no_params": []}
 
 
+@pytest.mark.parametrize("backend", ["BATCHED", "PER_MOL", "HYBRID"])
+def test_mmff_optimization_non_finite_energy_keeps_coordinates(backend, precision):
+    """A conformer whose energy is not finite comes back unchanged, as RDKit leaves it."""
+    mol = Chem.AddHs(Chem.MolFromSmiles("CCO"))
+    mol.AddConformer(Chem.Conformer(mol.GetNumAtoms()))  # every atom at the origin
+
+    nvmolkit_mmff.MMFFOptimizeMoleculesConfs([mol], backend=backend, precision=precision)
+
+    assert (mol.GetConformer().GetPositions() == 0.0).all()
+
+
 def test_mmff_optimization_allows_large_molecule_interleaved(precision):
     """Ensure a large (>256 atoms) molecule in batch is accepted and optimized."""
     small1 = Chem.AddHs(Chem.MolFromSmiles("CCCCCC"), explicitOnly=False)
