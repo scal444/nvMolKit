@@ -412,16 +412,7 @@ void launchTierAsync(std::span<const DevicePerPairInput> hostPairInputs,
   }
   auto* dQueue = reinterpret_cast<QueuedT*>(bufs.queueStorage.data());
 
-  unsigned long long timeoutClocks = 0;
-  if (params.timeoutMs > 0.0f) {
-    int device = 0;
-    checkCuda(cudaGetDevice(&device), "cudaGetDevice (timeout)");
-    int clockRateKHz = 0;
-    checkCuda(cudaDeviceGetAttribute(&clockRateKHz, cudaDevAttrClockRate, device),
-              "cudaDeviceGetAttribute (clock rate)");
-    timeoutClocks = static_cast<unsigned long long>(
-      std::max(1.0, static_cast<double>(params.timeoutMs) * static_cast<double>(clockRateKHz)));
-  }
+  const auto timeoutNs = static_cast<unsigned long long>(static_cast<double>(params.timeoutMs) * 1.0e6);
 
   // One block per pair; block size and shared-state footprint are fixed by
   // the tier (FmcsKernelConfig).  The block state exceeds the default 48 KB
@@ -440,7 +431,7 @@ void launchTierAsync(std::span<const DevicePerPairInput> hostPairInputs,
                                                 dQueue,
                                                 kFmcsQueueCapacity,
                                                 numPairs,
-                                                timeoutClocks);
+                                                timeoutNs);
   checkCuda(cudaGetLastError(), "fmcsKernel launch");
 }
 

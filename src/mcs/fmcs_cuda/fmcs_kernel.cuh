@@ -21,6 +21,13 @@ namespace fmcs {
 //   block's atomic LIFO worklist; all pair-invariant data is block-shared
 //   (loadPairSharedCooperative) and the per-seed exact check runs on the
 //   shared subgraph DFS core (fmcs_match.cuh).
+//! Wall-clock time in nanoseconds. clock64() counts SM clock cycles, whose rate varies with the device's clock.
+__device__ __forceinline__ unsigned long long globalTimerNs() {
+  unsigned long long ns;
+  asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(ns));
+  return ns;
+}
+
 template <int maxAtoms, int maxBonds>
 __global__ __launch_bounds__(FmcsKernelConfig<maxAtoms>::blockThreads) void fmcsKernel(
   const DevicePerPairInput* __restrict__ pairs,
@@ -28,7 +35,7 @@ __global__ __launch_bounds__(FmcsKernelConfig<maxAtoms>::blockThreads) void fmcs
   QueuedSeed<maxAtoms, maxBonds, maxAtoms, maxBonds>* __restrict__ queueStorageAll,
   int                queueCapacity,
   int                numPairs,
-  unsigned long long timeoutClocks) {
+  unsigned long long timeoutNs) {
   using SharedT              = FmcsPairShared<maxAtoms, maxBonds>;
   using QueuedT              = typename SharedT::QueuedT;
   using AtomMask             = typename SharedT::AtomMask;
@@ -66,7 +73,7 @@ __global__ __launch_bounds__(FmcsKernelConfig<maxAtoms>::blockThreads) void fmcs
   targetView.numBonds      = pair.targetNumBonds;
 
   if (tid == 0) {
-    S.startClock = clock64();
+    S.startTimeNs = globalTimerNs();
     S.queue.init(queueStorageAll + static_cast<size_t>(pairIdx) * queueCapacity, queueCapacity);
   }
   loadPairSharedCooperative(S, queryView, targetView, pair.tables, tid, blockThreads);
@@ -175,7 +182,7 @@ __global__ __launch_bounds__(FmcsKernelConfig<maxAtoms>::blockThreads) void fmcs
   // checkIfMatchAndAppend-style substructure validation.
   while (true) {
     if (tid == 0) {
-      if (timeoutClocks > 0 && clock64() - S.startClock > timeoutClocks)
+      if (timeoutNs > 0 && globalTimerNs() - S.startTimeNs > timeoutNs)
         S.timedOut = true;
       S.phase2Done = S.overflowed || S.timedOut || S.queue.empty();
     }

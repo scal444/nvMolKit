@@ -24,6 +24,7 @@ currently unsupported RDKit fMCS features.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -339,7 +340,7 @@ def findMCS(
             supported and raises.
         require_gpu: Raise instead of using per-pair RDKit fallback for native
             GPU size, degree, or queue-capacity limits.
-        timeout_seconds: Per-pair timeout in seconds. GPU results canceled by
+        timeout_seconds: Per-pair timeout in seconds, rounded up to a whole second. GPU results canceled by
             timeout return the best partial MCS found so far; RDKit fallback
             receives the same timeout.
         config: Optional :class:`MCSConfig` with GPU execution settings. Cannot
@@ -429,7 +430,7 @@ def findMCS(
             "maximize_bonds": bool(maximize_bonds),
             "connected_only": bool(connected_only),
             "require_gpu": bool(require_gpu),
-            "timeout_seconds": int(timeout_seconds),
+            "timeout_seconds": math.ceil(timeout_seconds),
             "batch_size": int(batch_size),
             "worker_threads": int(worker_threads),
             "preprocessing_threads": int(preprocessing_threads),

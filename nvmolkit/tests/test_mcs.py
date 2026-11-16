@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import gc
+import time
 
 import numpy as np
 import pytest
@@ -486,6 +487,28 @@ def test_timeout_is_isolated_per_pair_and_partial_result_converts_cleanly():
     assert result[1].canceled
     assert result[1].num_atoms > 0
     assert result[1].num_bonds > 0
+
+
+def test_timeout_does_not_fire_before_the_requested_time():
+    hard_a = (
+        "C[C@H](NC(=O)[C@H](CCCNC(=N)N)NC(=O)[C@H](CCC(N)=O)NC(=O)[C@@H]1CCCN1C(=O)[C@@H](N)[C@@H](C)O)"
+        "C(=O)N[C@@H](CCCNC(=N)N)C(=O)N[C@@H](CCCNC(=N)N)C(=O)N[C@@H](CCCNC(=N)N)C(=O)N[C@@H](CCCCN)"
+        "C(=O)N[C@@H](CCCCN)C(=O)N[C@@H](CCCNC(=N)N)C(=O)N[C@@H](Cc1ccccc1)C(=O)O"
+    )
+    hard_b = (
+        "CSCC[C@H](NC(=O)[C@H](CC(C)C)NC(=O)CNC(=O)[C@H](Cc1ccccc1)NC(=O)[C@@H](Cc1ccccc1)NC(=O)"
+        "[C@@H](CCC(N)=O)NC(=O)[C@@H](CCC(N)=O)NC(=O)[C@@H]1CCCN1C(=O)[C@@H](CCCCN)NC(=O)[C@H]1CCCN1C(=O)"
+        "[C@H](N)CCCN=C(N)N)C(N)=O"
+    )
+    mols = _mols([hard_a, hard_b])
+
+    for timeout_seconds, budget in ((2, 2.0), (0.5, 1.0)):
+        start = time.perf_counter()
+        result = findMCS(mols, mode="pairs", pairs=[(0, 1)], timeout_seconds=timeout_seconds, require_gpu=True)
+        elapsed = time.perf_counter() - start
+
+        assert result[0].canceled
+        assert elapsed >= 0.9 * budget
 
 
 def test_rdkit_fallback_is_transparent_and_require_gpu_rejects_it():

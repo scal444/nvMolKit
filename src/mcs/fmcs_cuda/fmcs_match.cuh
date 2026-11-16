@@ -265,7 +265,7 @@ template <int maxAtoms, int maxBonds> struct FmcsPairShared {
   bool               overflowed;
   bool               timedOut;
   bool               phase2Done;
-  unsigned long long startClock;
+  unsigned long long startTimeNs;
   int                qNA, qNB, tNA, tNB, numClasses, phase1Count;
 };
 
