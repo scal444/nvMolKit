@@ -16,6 +16,8 @@
 #ifndef NVMOLKIT_FORCEFIELD_CONSTRAINTS_H
 #define NVMOLKIT_FORCEFIELD_CONSTRAINTS_H
 
+#include <cstddef>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -100,10 +102,18 @@ struct PerMolConstraints {
   std::vector<PositionConstraintSpec> position;
   std::vector<AngleConstraintSpec>    angle;
   std::vector<TorsionConstraintSpec>  torsion;
+  //! Optional per-conformer coordinates that position and relative constraints are anchored to. When empty, they are
+  //! anchored to the positions passed to applyTo.
+  std::vector<std::vector<double>>    referencePositions;
 
   bool empty() const { return distance.empty() && position.empty() && angle.empty() && torsion.empty(); }
 
-  template <typename Contribs> void applyTo(Contribs& contribs, const std::vector<double>& positions) const {
+  template <typename Contribs>
+  void applyTo(Contribs& contribs, const std::vector<double>& currentPositions, const size_t confIdx) const {
+    if (!referencePositions.empty() && confIdx >= referencePositions.size()) {
+      throw std::invalid_argument("No constraint reference positions for conformer " + std::to_string(confIdx));
+    }
+    const auto& positions = referencePositions.empty() ? currentPositions : referencePositions[confIdx];
     for (const auto& s : distance) {
       appendDistanceConstraint(contribs, positions, s);
     }

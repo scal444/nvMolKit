@@ -1052,3 +1052,39 @@ def test_uff_batched_minimize_multi_gpu_matches_single_gpu(precision):
         single_converged,
         _MINIMIZE_RUNS_TOLERANCE[precision],
     )
+
+
+@pytest.mark.parametrize("forcefield_type", ["MMFF", "UFF"])
+def test_batched_forcefield_constraint_anchors_hold_across_minimize_calls(forcefield_type):
+    mol = perturb_conformers(make_embedded_mol("CCCCO"), amplitude=0.5)
+    start = mol.GetConformer().GetPositions()
+
+    rd_mol = Chem.Mol(mol)
+    if forcefield_type == "MMFF":
+        rd_ff = make_rdkit_mmff_forcefield(rd_mol)
+        rd_ff.MMFFAddPositionConstraint(0, 0.0, 100.0)
+        rd_ff.MMFFAddDistanceConstraint(1, 4, True, 0.0, 0.0, 100.0)
+        ff_mol = Chem.Mol(mol)
+        ff = MMFFBatchedForcefield([ff_mol])
+    else:
+        rd_ff = make_rdkit_uff_forcefield(rd_mol)
+        rd_ff.UFFAddPositionConstraint(0, 0.0, 100.0)
+        rd_ff.UFFAddDistanceConstraint(1, 4, True, 0.0, 0.0, 100.0)
+        ff_mol = Chem.Mol(mol)
+        ff = UFFBatchedForcefield([ff_mol])
+    ff[0].add_position_constraint(0, 0.0, 100.0)
+    ff[0].add_distance_constraint(1, 4, True, 0.0, 0.0, 100.0)
+    rd_ff.Initialize()
+
+    for _ in range(20):
+        rd_ff.Minimize(maxIts=10)
+        energies, _ = ff.minimize(maxIters=10)
+
+    got = ff_mol.GetConformer().GetPositions()
+    want = rd_mol.GetConformer().GetPositions()
+    assert math.dist(got[0], start[0]) == pytest.approx(math.dist(want[0], start[0]), abs=0.02)
+    assert math.dist(got[1], got[4]) == pytest.approx(math.dist(want[1], want[4]), abs=0.02)
+
+    want_energy = rd_ff.CalcEnergy(got.reshape(-1).tolist())
+    assert energies[0][0] == pytest.approx(want_energy, rel=1e-4, abs=1e-4)
+    assert ff.compute_energy()[0][0] == pytest.approx(want_energy, rel=1e-4, abs=1e-4)

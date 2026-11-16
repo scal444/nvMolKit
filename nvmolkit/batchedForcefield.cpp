@@ -147,6 +147,20 @@ bp::list computeBatchedGradients(nvMolKit::BatchedForcefield&         forcefield
   return reshapeGradientsToNested(perSystem, numConformersPerMol);
 }
 
+// Anchor position and relative constraints to the coordinates at construction, as RDKit does when a constraint is
+// added, so repeated minimize() calls do not re-anchor them to the moved coordinates.
+void setConstraintReferences(const std::vector<RDKit::ROMol*>&                                mols,
+                             std::vector<nvMolKit::ForceFieldConstraints::PerMolConstraints>& constraints) {
+  for (size_t molIdx = 0; molIdx < mols.size(); ++molIdx) {
+    if (constraints[molIdx].empty()) {
+      continue;
+    }
+    for (auto confIter = mols[molIdx]->beginConformers(); confIter != mols[molIdx]->endConformers(); ++confIter) {
+      nvMolKit::confPosToVect(**confIter, constraints[molIdx].referencePositions.emplace_back());
+    }
+  }
+}
+
 MinimizerKind parseMinimizerKind(const std::string& name) {
   if (name == "BFGS" || name == "bfgs") {
     return MinimizerKind::BFGS;
@@ -252,7 +266,7 @@ static std::vector<FC::PerMolConstraints> extractAllConstraints(const bp::list& 
 
   std::vector<FC::PerMolConstraints> result(numMols);
   for (int i = 0; i < numMols; ++i) {
-    result[i] = {distLists[i], posLists[i], angleLists[i], torsionLists[i]};
+    result[i] = {distLists[i], posLists[i], angleLists[i], torsionLists[i], {}};
   }
   return result;
 }
@@ -275,6 +289,7 @@ class NativeMMFFBatchedForcefield {
     properties_       = nvMolKit::extractMMFFPropertiesList(properties, numMols);
     constraints_ =
       extractAllConstraints(distanceConstraints, positionConstraints, angleConstraints, torsionConstraints, numMols);
+    setConstraintReferences(mols_, constraints_);
 
     buildForcefield();
   }
@@ -398,7 +413,7 @@ class NativeMMFFBatchedForcefield {
         nvMolKit::confPosToVect(conf, positions);
 
         auto contribs = baseContribs;
-        constraints_[molIdx].applyTo(contribs, positions);
+        constraints_[molIdx].applyTo(contribs, positions, confIdx);
 
         nvMolKit::MMFF::addMoleculeToBatch(contribs, positions, systemHost, &metadata, molIdx, confIdx);
       }
@@ -446,6 +461,7 @@ class NativeUFFBatchedForcefield {
       nvMolKit::extractBoolList(ignoreInterfragInteractions, numMols, "ignoreInterfragInteractions");
     constraints_ =
       extractAllConstraints(distanceConstraints, positionConstraints, angleConstraints, torsionConstraints, numMols);
+    setConstraintReferences(mols_, constraints_);
 
     buildForcefield();
   }
@@ -568,7 +584,7 @@ class NativeUFFBatchedForcefield {
                                                                    vdwThresholds_[molIdx],
                                                                    conf.getId(),
                                                                    ignoreInterfragInteractions_[molIdx]);
-        constraints_[molIdx].applyTo(contribs, positions);
+        constraints_[molIdx].applyTo(contribs, positions, confIdx);
 
         nvMolKit::UFF::addMoleculeToBatch(contribs, positions, systemHost, metadata, molIdx, confIdx);
       }
